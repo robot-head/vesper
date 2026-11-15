@@ -1,0 +1,6 @@
+fn main() {
+    {
+        let hidden = 1;
+    };
+    hidden;
+}

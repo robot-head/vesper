@@ -1,0 +1,13 @@
+copy enum C {
+    A,
+    B
+}
+fn effectful() eff [Fail[i64]] {}
+fn pure() {}
+fn good(c: C) eff [Fail[i64]] {
+    let h = match c {
+        C::A => effectful,
+        C::B => pure,
+    };
+    h();
+}

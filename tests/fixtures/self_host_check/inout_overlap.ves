@@ -1,0 +1,5 @@
+fn pair(inout a: i64, in b: i64) {}
+fn main() {
+    let a = 1;
+    pair(inout a, in a);
+}

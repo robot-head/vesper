@@ -19,10 +19,10 @@
 //! across 16 lanes.
 
 use crate::events::{
-    EventError, ParamRamp, ParamTable, RtParamEvent, decode_events, process_with_events,
+    EventError, ParamTable, RampTile, RtParamEvent, decode_events, process_with_events,
 };
 use crate::lease::{RtBufferLease, RtOutputPort};
-use crate::simd::{LaneOut, PanLanes, SimdUnavailable, SvfLanes, svf_tick};
+use crate::simd::{LaneOut, PanLanes, SimdUnavailable, SvfLanes, ramp_tick, svf_tick};
 use crate::spsc::{MailboxReceiver, RtRetirementSink, SwapOutcome};
 
 /// Voices per tile.
@@ -80,16 +80,16 @@ pub struct VoicePatchBank {
     pub voices: [VoicePatch; LANES],
 }
 
-/// The voice bank: tile state plus per-sample parameter ramps.
+/// The voice bank: tile state plus SoA 16-lane parameter-ramp tiles.
 ///
-/// Rendering advances the ramps (scalar), then all 16 filter lanes with the
-/// selected [`SvfLanes`] path, then sums the panned voices in voice order.
-/// Every path is bit-identical to [`SvfBank::render_reference`].
+/// Rendering advances the three parameter-ramp tiles and all 16 filter lanes
+/// with the selected [`SvfLanes`] path, then sums the panned voices in voice
+/// order. Every path is bit-identical to [`SvfBank::render_reference`].
 #[derive(Clone, Debug)]
 pub struct SvfBank {
     /// Filter state.
     pub tile: SvfVoiceTile,
-    ramps: [[ParamRamp; 3]; LANES],
+    ramps: [RampTile; 3],
     lanes: SvfLanes,
     pan: PanLanes,
     scratch: LaneOut,
@@ -136,7 +136,7 @@ impl SvfBank {
                 gain: [patch.gain; LANES],
                 patch_id: [patch.patch_id; LANES],
             },
-            ramps: [[ParamRamp::new(0.0); 3]; LANES],
+            ramps: [RampTile::splat(0.0); 3],
             lanes,
             pan,
             scratch: LaneOut::ZERO,
@@ -150,9 +150,9 @@ impl SvfBank {
     /// Load a patch bank (jumps every parameter; filter state is kept).
     pub fn apply_patch(&mut self, bank: &VoicePatchBank) {
         for (v, p) in bank.voices.iter().enumerate() {
-            self.ramps[v][param::GAIN as usize] = ParamRamp::new(p.gain);
-            self.ramps[v][param::G as usize] = ParamRamp::new(p.g);
-            self.ramps[v][param::K as usize] = ParamRamp::new(p.k);
+            self.ramps[param::GAIN as usize].set_lane(v, p.gain, 0);
+            self.ramps[param::G as usize].set_lane(v, p.g, 0);
+            self.ramps[param::K as usize].set_lane(v, p.k, 0);
             self.tile.gain[v] = p.gain;
             self.tile.g_coeff[v] = p.g;
             self.tile.k_damping[v] = p.k;
@@ -177,11 +177,12 @@ impl SvfBank {
         end: usize,
     ) {
         for i in start..end {
-            for v in 0..LANES {
-                self.tile.gain[v] = self.ramps[v][param::GAIN as usize].next_value();
-                self.tile.g_coeff[v] = self.ramps[v][param::G as usize].next_value();
-                self.tile.k_damping[v] = self.ramps[v][param::K as usize].next_value();
-            }
+            ramp_tick(self.lanes, &mut self.ramps[param::GAIN as usize]);
+            ramp_tick(self.lanes, &mut self.ramps[param::G as usize]);
+            ramp_tick(self.lanes, &mut self.ramps[param::K as usize]);
+            self.tile.gain = self.ramps[param::GAIN as usize].current;
+            self.tile.g_coeff = self.ramps[param::G as usize].current;
+            self.tile.k_damping = self.ramps[param::K as usize].current;
             svf_tick(
                 self.lanes,
                 &mut self.tile,
@@ -209,9 +210,9 @@ impl SvfBank {
             let mut l = 0.0f32;
             let mut r = 0.0f32;
             for v in 0..LANES {
-                let gain = self.ramps[v][param::GAIN as usize].next_value();
-                let g = self.ramps[v][param::G as usize].next_value();
-                let k = self.ramps[v][param::K as usize].next_value();
+                let gain = self.ramps[param::GAIN as usize].advance_lane_scalar(v);
+                let g = self.ramps[param::G as usize].advance_lane_scalar(v);
+                let k = self.ramps[param::K as usize].advance_lane_scalar(v);
                 t.gain[v] = gain;
                 t.g_coeff[v] = g;
                 t.k_damping[v] = k;
@@ -235,10 +236,20 @@ impl SvfBank {
 }
 
 impl ParamTable for SvfBank {
-    fn ramp(&mut self, node_id: u16, param_id: u32) -> Option<&mut ParamRamp> {
-        self.ramps
-            .get_mut(usize::from(node_id))?
-            .get_mut(usize::try_from(param_id).ok()?)
+    fn has_ramp(&mut self, node_id: u16, param_id: u32) -> bool {
+        usize::from(node_id) < LANES && usize::try_from(param_id).is_ok_and(|p| p < 3)
+    }
+
+    fn set_ramp(&mut self, node_id: u16, param_id: u32, target: f32, ramp_samples: u32) -> bool {
+        let lane = usize::from(node_id);
+        let Ok(param) = usize::try_from(param_id) else {
+            return false;
+        };
+        if lane >= LANES || param >= 3 {
+            return false;
+        }
+        self.ramps[param].set_lane(lane, target, ramp_samples);
+        true
     }
 }
 

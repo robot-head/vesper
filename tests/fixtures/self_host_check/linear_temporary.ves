@@ -1,0 +1,5 @@
+linear struct Ticket {}
+fn view(in ticket: Ticket) {}
+fn main() {
+    view(in Ticket {});
+}
