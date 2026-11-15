@@ -950,6 +950,7 @@ mod tests {
                         named: true,
                     }],
                     is_enum: false,
+                    tile_width: None,
                     span: 0..1,
                 },
             );

@@ -36,6 +36,9 @@ mod regions;
 /// ABI v2 fiber entries that park through `vesper-fiber-abi`.
 #[path = "native_session.rs"]
 pub mod session;
+/// AoSoA `tiled(N) struct` and `TiledSeq[T]` native lowering (§12.5).
+#[path = "tiled/native.rs"]
+mod tiled;
 /// Windows x64 COFF objects with unwind tables, and the MSVC link driver.
 #[path = "native_windows.rs"]
 pub mod windows;
@@ -54,8 +57,9 @@ fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
         }
         Type::Tuple(ts) if ts.is_empty() => Ok(types::I64),
         Type::Infer | Type::Function { .. } => Ok(types::I64),
-        // Region box and watermark handles are one word (§15).
+        // Region box, watermark, and TiledSeq handles are one word (§12.5, §15).
         Type::Named(n, _) if crate::regions::is_handle_name(n) => Ok(types::I64),
+        t if crate::tiled::is_seq_type(t) => Ok(types::I64),
         _ => Err(format!(
             "native backend does not yet lower aggregate type {t}"
         )),
@@ -1111,6 +1115,7 @@ fn jit_run_entry(
     if entry_effects == EntryEffects::TraceHost {
         builder.symbols(crate::trace_effects::native_runtime::symbols());
     }
+    builder.symbols(crate::tiled::native_runtime::symbols());
     let mut m = JITModule::new(builder);
     let (ids, _) = compile_entry(
         &mut m,
@@ -1168,6 +1173,7 @@ fn jit_run_entry(
         }
     };
     crate::regions::native_runtime::finish().map_err(|e| format!("native region fault: {e}"))?;
+    crate::tiled::native_runtime::finish().map_err(|e| format!("native tiled fault: {e}"))?;
     Ok(value)
 }
 pub fn object(world: &World, entry: &str) -> Result<(Vec<u8>, String), String> {
@@ -2536,6 +2542,21 @@ impl<M: Module> Codegen<'_, '_, M> {
                             .collect::<Result<Vec<_>, String>>()?;
                         self.vector_op(op, &operands)?
                     }
+                    Op::Tiled {
+                        op,
+                        args,
+                        capability,
+                    } => {
+                        let operands = args
+                            .iter()
+                            .map(|a| {
+                                values.get(&a.value).copied().ok_or_else(|| {
+                                    format!("undefined native IR value %{}", a.value)
+                                })
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        self.tiled_op(op, &operands, capability.as_deref())?
+                    }
                     Op::Closure { expr, aliases, .. } | Op::Handle { expr, aliases, .. } => {
                         let old_vars = self.vars.clone();
                         let old_types = self.local_types.clone();
@@ -3448,6 +3469,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                 args,
                 types: instance,
             } => {
+                if let Some(result) = self.tiled_ast_call(callee, instance, args, e) {
+                    return result;
+                }
                 if let ExprKind::Name(n) = &callee.kind {
                     if let Some(var) = self.vars.get(n) {
                         let tag = self.use_var(*var);
