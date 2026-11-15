@@ -5,7 +5,7 @@
 use std::{
     collections::BTreeSet,
     fs::{File, OpenOptions},
-    io,
+    io::{self, Write as _},
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -13,17 +13,36 @@ use vesper_pulse::driver::{CompletionDriver, DriverKind, Operation, Request, is_
 use vesper_pulse::scheduler::{Event, Nursery, Resume, Scheduler, Step};
 use vesper_pulse::select::{self, AnyDriver, Preference, SelectError};
 
+// Write directly to stderr: libtest's per-test capture may never be printed
+// when Bazel terminates a test that is blocked inside a driver.
+fn diagnostic(message: std::fmt::Arguments<'_>) {
+    let thread = std::thread::current();
+    let _ = writeln!(
+        io::stderr().lock(),
+        "pulse-driver-test [{}]: {message}",
+        thread.name().unwrap_or("unnamed")
+    );
+}
+
 /// Every compiled driver that starts here. A denied io_uring is reported and
 /// skipped; any other host driver failing to start fails the test.
 fn drivers<T>() -> Vec<AnyDriver<T>> {
     let mut out = vec![];
     for &kind in select::host_order() {
+        diagnostic(format_args!("{kind}: startup begin"));
         match AnyDriver::start(kind, 32) {
-            Ok(d) => out.push(d),
+            Ok(d) => {
+                diagnostic(format_args!("{kind}: startup complete"));
+                out.push(d);
+            }
             Err(SelectError::Unavailable(s)) if kind == DriverKind::IoUring => {
+                diagnostic(format_args!("{kind}: startup unavailable: {}", s.error));
                 eprintln!("skipping io_uring on this host: {}", s.error);
             }
-            Err(e) => panic!("{kind} failed to start: {e}"),
+            Err(e) => {
+                diagnostic(format_args!("{kind}: startup failed: {e}"));
+                panic!("{kind} failed to start: {e}");
+            }
         }
     }
     assert!(!out.is_empty(), "no driver started");
@@ -270,32 +289,207 @@ impl Resume for Child {
     }
 }
 
+/// Observe the real driver boundary before the scheduler discards request IDs.
+/// This cannot observe internal cancellation acknowledgements or raw CQEs.
+struct NurseryDriver {
+    inner: Option<AnyDriver<Child>>,
+    polls: u64,
+    harvested: usize,
+}
+
+impl NurseryDriver {
+    fn new(driver: AnyDriver<Child>) -> Self {
+        Self {
+            inner: Some(driver),
+            polls: 0,
+            harvested: 0,
+        }
+    }
+
+    fn driver(&self) -> &AnyDriver<Child> {
+        self.inner.as_ref().unwrap()
+    }
+
+    fn pending(&self) -> usize {
+        CompletionDriver::pending(self.driver())
+    }
+}
+
+impl vesper_pulse::scheduler::Driver<Child> for NurseryDriver {
+    fn submit(&mut self, request: Request<Child>) -> Result<(), (io::Error, Request<Child>)> {
+        let kind = self.driver().kind();
+        diagnostic(format_args!(
+            "{kind}: submit begin operation={:?} pending={}",
+            request.operation,
+            CompletionDriver::pending(self.driver())
+        ));
+        let result = CompletionDriver::submit(self.inner.as_mut().unwrap(), request);
+        match &result {
+            Ok(id) => diagnostic(format_args!(
+                "{kind}: submit complete id={} pending={}",
+                id.get(),
+                CompletionDriver::pending(self.driver())
+            )),
+            Err((error, _)) => diagnostic(format_args!(
+                "{kind}: submit failed: {error}; raw_os_error={:?} pending={}",
+                error.raw_os_error(),
+                CompletionDriver::pending(self.driver())
+            )),
+        }
+        result.map(|_| ())
+    }
+
+    fn poll(
+        &mut self,
+        wait: bool,
+    ) -> Result<
+        Vec<vesper_pulse::scheduler::Finished<Child>>,
+        vesper_pulse::scheduler::PollError<Child>,
+    > {
+        self.polls = self.polls.saturating_add(1);
+        // Bound output even if a supposedly blocking poll repeatedly returns
+        // empty batches. Keep early calls and logarithmically spaced samples.
+        let trace = self.polls <= 32 || self.polls.is_power_of_two();
+        let kind = self.driver().kind();
+        if trace {
+            diagnostic(format_args!(
+                "{kind}: poll {} begin wait={wait} pending={}",
+                self.polls,
+                CompletionDriver::pending(self.driver())
+            ));
+        }
+        let result = CompletionDriver::poll(self.inner.as_mut().unwrap(), wait);
+        let completed = match &result {
+            Ok(completed) => completed,
+            Err(error) => {
+                diagnostic(format_args!(
+                    "{kind}: poll {} failed: {}; raw_os_error={:?} pending={}",
+                    self.polls,
+                    error.error,
+                    error.error.raw_os_error(),
+                    CompletionDriver::pending(self.driver())
+                ));
+                &error.completed
+            }
+        };
+        self.harvested = self.harvested.saturating_add(completed.len());
+        for completion in completed {
+            diagnostic(format_args!(
+                "{kind}: completion id={} result={:?} raw_os_error={:?}",
+                completion.id.get(),
+                completion.result,
+                completion
+                    .result
+                    .as_ref()
+                    .err()
+                    .and_then(io::Error::raw_os_error)
+            ));
+        }
+        if trace {
+            diagnostic(format_args!(
+                "{kind}: poll {} complete wait={wait} pending={} harvested={}",
+                self.polls,
+                CompletionDriver::pending(self.driver()),
+                self.harvested
+            ));
+        }
+        let finished = |events: Vec<vesper_pulse::driver::Completion<Child>>| {
+            events
+                .into_iter()
+                .map(|event| vesper_pulse::scheduler::Finished {
+                    request: event.request,
+                    result: event.result,
+                })
+                .collect()
+        };
+        result
+            .map(finished)
+            .map_err(|error| vesper_pulse::scheduler::PollError {
+                error: error.error,
+                completed: finished(error.completed),
+            })
+    }
+
+    fn pending(&self) -> usize {
+        CompletionDriver::pending(self.driver())
+    }
+
+    fn cancel_all(&mut self) -> io::Result<()> {
+        let kind = self.driver().kind();
+        diagnostic(format_args!(
+            "{kind}: cancel_all begin pending={}",
+            CompletionDriver::pending(self.driver())
+        ));
+        let result = CompletionDriver::cancel_all(self.inner.as_mut().unwrap());
+        diagnostic(format_args!(
+            "{kind}: cancel_all complete result={result:?} pending={} polls={} harvested={}",
+            CompletionDriver::pending(self.driver()),
+            self.polls,
+            self.harvested
+        ));
+        result
+    }
+}
+
+impl Drop for NurseryDriver {
+    fn drop(&mut self) {
+        let kind = self.driver().kind();
+        diagnostic(format_args!(
+            "{kind}: driver drop begin pending={} polls={} harvested={}",
+            CompletionDriver::pending(self.driver()),
+            self.polls,
+            self.harvested
+        ));
+        drop(self.inner.take());
+        diagnostic(format_args!("{kind}: driver drop complete"));
+    }
+}
+
 #[test]
 fn nursery_cancellation_drains_every_in_flight_request() {
     for driver in drivers() {
         let kind = driver.kind();
         let mut writers = vec![];
-        let mut nursery = Nursery::new(driver);
+        diagnostic(format_args!(
+            "{kind}: nursery begin; poll traces sample after call32"
+        ));
+        let mut nursery = Nursery::new(NurseryDriver::new(driver));
         for _ in 0..4 {
             let (r, w) = stream();
             writers.push(w);
             nursery.spawn(Child::Start(r));
         }
-        for _ in 0..4 {
+        for tick in 0..4 {
+            diagnostic(format_args!("{kind}: tick {tick} begin"));
             nursery.scheduler().tick(false).unwrap();
+            diagnostic(format_args!("{kind}: tick {tick} complete"));
         }
         let (r, w) = stream();
         writers.push(w);
         nursery.spawn(Child::Start(r)); // still queued when cancelled
         assert_eq!(nursery.scheduler().driver().pending(), 4, "{kind}");
+        diagnostic(format_args!(
+            "{kind}: nursery cancel begin; writers={}",
+            writers.len()
+        ));
         nursery.cancel().unwrap();
+        diagnostic(format_args!("{kind}: nursery cancel complete; join begin"));
         let mut done = nursery.join().unwrap();
+        diagnostic(format_args!(
+            "{kind}: join complete; completions={}",
+            done.len()
+        ));
         done.sort();
         let mut expected = vec![b"cancelled".to_vec(); 4];
         expected.push(b"never started".to_vec());
         expected.sort();
         assert_eq!(done, expected, "{kind}");
+        diagnostic(format_args!(
+            "{kind}: writer drop begin; writers={}",
+            writers.len()
+        ));
         drop(writers);
+        diagnostic(format_args!("{kind}: writer drop complete"));
         eprintln!("{kind}: nursery cancellation drained 4 in-flight + 1 queued");
     }
 }
