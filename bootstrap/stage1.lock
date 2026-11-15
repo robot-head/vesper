@@ -1,0 +1,126 @@
+schema = "vesper.bootstrap.stage1/1"
+target = "x86_64-unknown-linux-gnu"
+parent_seed_lock = "blake3:85c8883f8ca2f1ad5ec4767aa1491206abe577603978284ff3f596a30539a4ae"
+seed_binary = "blake3:32f8afe940132ba35e32c96d648129b9e21ca0455a87a93285288ba5fe50e352"
+frontend_sources = "blake3:fb9e6c6ec09fa3d1684c09a9ec7bc1f90ab43fb9a117bc43be7ed3751aa615de"
+
+[[programs]]
+name = "ackermann"
+kind = "cst-digest"
+source = "blake3:dac83b3435fbb1cccf154db8aecf7b3bbbd800331fd5db3003d0a6e033124f4e"
+cranelift_artifact = "blake3:ddc06b91b92fecf5df9f55dc004fb3b6a808d89b8da46b7b749c368165664432"
+result = 1485434365019303214
+
+[programs.verified]
+status = "unavailable"
+reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+
+[[programs]]
+name = "collatz"
+kind = "cst-digest"
+source = "blake3:62981b71200ee6a5eab092bf71d2007e9128794a93dfa1a83b16db5121d6a458"
+cranelift_artifact = "blake3:14bbe2bbfa469a84b567ec1b998542790f0ab0a57dbcd865de7b7b304a1c1cb8"
+result = 2373264641022808506
+
+[programs.verified]
+status = "unavailable"
+reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+
+[[programs]]
+name = "divide_by_zero"
+kind = "cst-digest"
+source = "blake3:8a2b53c0ba4a3ab9bec8c127e23de41b2e9d6e17e512f36bc40436e64d2069a0"
+cranelift_artifact = "blake3:35ef8c63aefd165681e0f71374ca4aba32e023986ba88205346101b194d155ec"
+result = 654848876726359854
+
+[programs.verified]
+status = "unavailable"
+reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+
+[[programs]]
+name = "factorial_overflow"
+kind = "cst-digest"
+source = "blake3:f89d764978afcf1092fb65916e5c72bef56e1f10e046f5c45161e2dd0938028a"
+cranelift_artifact = "blake3:ffaa4114e6ac74384e82cda5c61c6f96adfcdc759f2d99361181b2bbddbb0d14"
+result = 1011879377799080863
+
+[programs.verified]
+status = "unavailable"
+reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+
+[[programs]]
+name = "fib"
+kind = "cst-digest"
+source = "blake3:f892bff7011bc5e6937264f8d3670cb46f4eea9b831823d12991e0c4eb7054e5"
+cranelift_artifact = "blake3:af6463bc291db872163485f5be83271f0e05d46725de8758c801351195ef42ce"
+result = 6050003413031704367
+
+[programs.verified]
+status = "unavailable"
+reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+
+[[programs]]
+name = "gcd"
+kind = "cst-digest"
+source = "blake3:53d3e1aefde22ada3c42116b7bc00a7c556f9de1bf7ae215b2a1b0c6527b4b4d"
+cranelift_artifact = "blake3:f3627e4750e5e876ec2830b9cb16ce4bb840b9676af8bb12d263a886137c2cf3"
+result = 4951861024179010883
+
+[programs.verified]
+status = "unavailable"
+reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+
+[[programs]]
+name = "lets_negative"
+kind = "cst-digest"
+source = "blake3:f3781aa58b679d5df7c8b2679698df6a6a906bd07b7fa88c18ce08acd399f42e"
+cranelift_artifact = "blake3:cf863d9cbb5a3ad4eb963229cc1e333bd2951f15d3dcc4075c0381d37ad50ab4"
+result = 8264158072176226959
+
+[programs.verified]
+status = "unavailable"
+reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+
+[[programs]]
+name = "lexer-byte-classes"
+kind = "lexer-byte-classes"
+source = "blake3:db43478aeebaa325c96e4355fbd2822728997bc7bd34d7464f8cf05a9593ec5d"
+cranelift_artifact = "blake3:cb705e2da67d9bd32d21569a6155ad8fa4ac89ae92ca8e3586bb800edca32b21"
+result = 7856525685952484840
+
+[programs.verified]
+status = "built"
+artifact = "blake3:aa38dedae2f8918687b9fe638485ca08fdcf23e6da11906daa353baad54f5419"
+
+[[programs]]
+name = "max3"
+kind = "cst-digest"
+source = "blake3:4600160492e4f0fc7a0f8e7821e2051c729ae37f633669cb4c6d865a9d668584"
+cranelift_artifact = "blake3:c4acab6ae23f65032cc6a163fc4b57add20c8770af195b8db5c04c4ffc206870"
+result = 7416355136139759522
+
+[programs.verified]
+status = "unavailable"
+reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+
+[[programs]]
+name = "pow_mod"
+kind = "cst-digest"
+source = "blake3:15633b83ad11de9b6260ca1390f2cc13b54c2dba938bcaee8d5da5db6640dbeb"
+cranelift_artifact = "blake3:24816d5bfdb0b2a7814d3cc85b73343f2727631aeefd291e4e27560d8c643f20"
+result = 7168756620995499439
+
+[programs.verified]
+status = "unavailable"
+reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+
+[[programs]]
+name = "sum_squares"
+kind = "cst-digest"
+source = "blake3:fdf3e5a495c583a020554f6521ee0f7c4b0e6c9efc508b1ab7f07a7862865ce1"
+cranelift_artifact = "blake3:daff3c68d019398e82cb43828f9bf8848a9fd1a1d256d27c1762175c2b4228f5"
+result = 4102976720223137155
+
+[programs.verified]
+status = "unavailable"
+reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
