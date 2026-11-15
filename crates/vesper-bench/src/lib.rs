@@ -14,11 +14,13 @@
 mod arithmetic;
 pub mod causal;
 mod execution;
+mod hodges_lehmann;
 pub mod layout;
 mod statistics;
 pub mod wire;
 pub use arithmetic::*;
 pub use execution::*;
+pub use hodges_lehmann::*;
 pub use statistics::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
