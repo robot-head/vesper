@@ -7,36 +7,85 @@ fn c_max(a: i64, b: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOve
     }
 }
 fn c_mode(ty: CType, depth: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    c_kind_walk(ty, 0, 0, depth).mode
+}
+// Kinds are joins of reachable nominal floors and function modes. A visited
+// declaration contributes zero on subsequent visits because join is idempotent.
+// Carry the visited set across siblings to avoid exponential work on ADT DAGs.
+fn c_decl_index(wanted: i64, at: i64, index: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_token(at).start == wanted {
+        index
+    } else if index >= 16 || c_kind(at) == 70 {
+        c_limit(at)
+    } else {
+        c_decl_index(wanted, c_decl(at).end, index + 1)
+    }
+}
+fn c_kind_walk(ty: CType, seen: i64, active: i64, depth: i64)
+    -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if depth > 24 {
-        c_unsupported(9, ty.at)
+        let unsupported = c_unsupported(9, ty.at);
+        CKind {
+            mode: 0,
+            seen: seen
+        }
     } else if ty.tag == 3 {
         let at = c_find(c_token(ty.at), 0, 0);
-        if at < 0 {
+        let valid = if at < 0 {
             c_error(101, ty.at, c_next(ty.at))
         } else {
+            0
+        };
+        let bit = c_power(c_decl_index(at, 0, 0));
+        let valid = if c_div(active, bit) % 2 == 1 {
+            c_unsupported(9, ty.at)
+        } else {
+            0
+        };
+        if c_div(seen, bit) % 2 == 1 {
+            CKind {
+                mode: 0,
+                seen: seen
+            }
+        } else {
             let d = c_decl(at);
-            if d.kind == 8 {
-                c_max(d.mode, c_field_modes(c_next(d.body), true, depth + 1))
+            let result = if d.kind == 8 {
+                c_kind_fields(c_next(d.body), true, seen + bit, active + bit, depth + 1)
             } else {
-                c_max(d.mode, c_variant_modes(c_next(d.body), depth + 1))
+                c_kind_variants(c_next(d.body), seen + bit, active + bit, depth + 1)
+            };
+            CKind {
+                mode: c_max(d.mode, result.mode),
+                seen: result.seen
             }
         }
     } else if ty.tag == 4 {
-        if c_kind(c_next(ty.at)) == 4 {
+        let mode = if c_kind(c_next(ty.at)) == 4 {
             0
         } else if c_kind(c_next(ty.at)) == 44 {
             c_kind(c_next(c_next(ty.at))) - 14
         } else {
             1
+        };
+        CKind {
+            mode: mode,
+            seen: seen
         }
     } else {
-        0
+        CKind {
+            mode: 0,
+            seen: seen
+        }
     }
 }
-fn c_field_modes(at: i64, named: bool, depth: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+fn c_kind_fields(at: i64, named: bool, seen: i64, active: i64, depth: i64)
+    -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 35 || c_kind(at) == 33 {
-        0
+        CKind {
+            mode: 0,
+            seen: seen
+        }
     } else {
         let ty = c_type(
             if named {
@@ -46,20 +95,49 @@ fn c_field_modes(at: i64, named: bool, depth: i64)
             },
             0
         );
-        let mode = c_mode(ty.ty, depth + 1);
+        let head = c_kind_walk(ty.ty, seen, active, depth);
         let next = if c_kind(ty.next) == 45 {
             c_next(c_next(ty.next))
         } else {
             ty.next
         };
-        c_max(
-            mode,
-            if c_kind(next) == 38 {
-                c_field_modes(c_next(next), named, depth)
-            } else {
-                0
+        let tail = if c_kind(next) == 38 {
+            c_kind_fields(c_next(next), named, head.seen, active, depth)
+        } else {
+            CKind {
+                mode: 0,
+                seen: head.seen
             }
-        )
+        };
+        CKind {
+            mode: c_max(head.mode, tail.mode),
+            seen: tail.seen
+        }
+    }
+}
+fn c_kind_variants(at: i64, seen: i64, active: i64, depth: i64)
+    -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 35 {
+        CKind {
+            mode: 0,
+            seen: seen
+        }
+    } else {
+        let next = c_next(at);
+        let k = c_kind(next);
+        let head = if k == 32 || k == 34 {
+            c_kind_fields(c_next(next), k == 34, seen, active, depth)
+        } else {
+            CKind {
+                mode: 0,
+                seen: seen
+            }
+        };
+        let tail = c_kind_variants(c_variant_next(at), head.seen, active, depth);
+        CKind {
+            mode: c_max(head.mode, tail.mode),
+            seen: tail.seen
+        }
     }
 }
 fn c_variant_next(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
@@ -74,21 +152,6 @@ fn c_variant_next(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithO
         c_next(next)
     } else {
         next
-    }
-}
-fn c_variant_modes(at: i64, depth: i64)
-    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
-    if c_kind(at) == 35 {
-        0
-    } else {
-        let next = c_next(at);
-        let k = c_kind(next);
-        let m = if k == 32 || k == 34 {
-            c_field_modes(c_next(next), k == 34, depth)
-        } else {
-            0
-        };
-        c_max(m, c_variant_modes(c_variant_next(at), depth))
     }
 }
 fn c_validate_fields(at: i64, named: bool, d: CDecl)

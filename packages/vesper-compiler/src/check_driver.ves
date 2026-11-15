@@ -141,13 +141,6 @@ fn c_check() -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
 fn c_encode(code: i64, start: i64, end: i64) -> i64 eff [Fail[ArithOverflow]] {
     -1 - (code * 4294967296 + start * 65536 + end)
 }
-fn c_encode_error(error: CheckError) -> i64 eff [Fail[ArithOverflow]] {
-    match error {
-        CheckError::Semantic(code, start, end) => c_encode(code, start, end),
-        CheckError::Unsupported(rule, start, end) => c_encode(9000 + rule, start, end),
-        CheckError::Limit(at) => c_encode(9900, at, at),
-    }
-}
 fn check_main() -> i64 {
     handle Fail[ArithOverflow] in {
         handle Fail[Diag] in {
@@ -164,7 +157,7 @@ fn check_main() -> i64 {
             raise(error, resume) => match error {
                 Diag::Lex(at) => c_encode(9801, at, at),
                 Diag::Expected(k, at) => c_encode(9802, at, at),
-                Diag::Unsupported(rule, at) => c_encode(9000 + rule, at, at),
+                Diag::Unsupported(rule, at) => c_encode(9700 + rule, at, at),
                 Diag::Invalid(at) => c_encode(9804, at, at),
                 Diag::Limit(at) => c_encode(9900, at, at),
             },

@@ -27,8 +27,13 @@ fn c_expr(at: i64, env: CEnv, usage: i64, row: i64, loans: CEnv, depth: i64, res
             c_assign(at, env, row, loans, depth + 1)
         } else {
             c_compare(
-                c_postfix(
-                    c_primary(at, env, usage, row, loans, depth + 1, restricted),
+                c_order(
+                    c_postfix(
+                        c_primary(at, env, usage, row, loans, depth + 1, restricted),
+                        row,
+                        loans,
+                        depth + 1
+                    ),
                     row,
                     loans,
                     depth + 1
@@ -124,7 +129,12 @@ fn c_literal_primary(
             -1
         )
     } else if t.kind == 67 {
-        let value = c_primary(t.end, env, 2, row, loans, depth + 1, restricted);
+        let value = c_postfix(
+            c_primary(t.end, env, 2, row, loans, depth + 1, restricted),
+            row,
+            loans,
+            depth + 1
+        );
         let valid = c_expect_type(
             CType {
                 tag: 1,
@@ -277,9 +287,14 @@ fn c_nominal_primary(
 fn c_compare(left: CExpr, row: i64, loans: CEnv, depth: i64)
     -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let op = c_kind(left.next);
-    if op >= 59 && op <= 64 {
-        let right = c_postfix(
-            c_primary(c_next(left.next), left.env, 2, row, loans, depth + 1, false),
+    if op == 59 || op == 60 {
+        let right = c_order(
+            c_postfix(
+                c_primary(c_next(left.next), left.env, 2, row, loans, depth + 1, false),
+                row,
+                loans,
+                depth + 1
+            ),
             row,
             loans,
             depth + 1
@@ -290,12 +305,43 @@ fn c_compare(left: CExpr, row: i64, loans: CEnv, depth: i64)
         } else {
             0
         };
+        c_compare(
+            c_result(
+                CType {
+                    tag: 1,
+                    at: 0
+                },
+                right.next,
+                right.env,
+                left.start,
+                right.end,
+                -1
+            ),
+            row,
+            loans,
+            depth
+        )
+    } else {
+        left
+    }
+}
+fn c_order(left: CExpr, row: i64, loans: CEnv, depth: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let op = c_kind(left.next);
+    if op >= 61 && op <= 64 {
+        let right = c_postfix(
+            c_primary(c_next(left.next), left.env, 2, row, loans, depth + 1, false),
+            row,
+            loans,
+            depth + 1
+        );
+        let valid = c_expect_type(left.ty, right.ty, left.start, right.end);
         let valid = if op >= 61 && left.ty.tag != 2 {
             c_error(200, left.start, right.end)
         } else {
             0
         };
-        c_compare(
+        c_order(
             c_result(
                 CType {
                     tag: 1,

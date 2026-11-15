@@ -2,6 +2,10 @@
 // The parser on main emits a digest. This adapter reads its significant tokens;
 // it does not consult the seed AST, resolver, type table or diagnostics.
 // CType: 0 Unit, 1 bool, 2 i64, 3 nominal, 4 function signature.
+copy struct CKind {
+    mode: i64,
+    seen: i64
+}
 copy struct CType {
     tag: i64,
     at: i64

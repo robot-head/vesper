@@ -277,6 +277,7 @@ fn c_valid_type(ty: CType, start: i64, end: i64, depth: i64)
     } else if ty.tag == 4 {
         let sig = c_signature(ty.at, false, depth + 1);
         let params = c_valid_params(sig.params, false, start, end, depth + 1);
+        let row = c_valid_row(sig.effects, start, end);
         c_valid_type(sig.result, start, end, depth + 1)
     } else {
         0

@@ -210,6 +210,7 @@ fn expected_code(name: &str) -> Option<&'static str> {
         "duplicate_variants" => Some("E0100"),
         "effect_missing" => Some("E0401"),
         "field_mode" => Some("E0105"),
+        "field_mode_dag" => Some("E0105"),
         "function_linear_drop" => Some("E0302"),
         "function_linear_twice" => Some("E0303"),
         "function_mode_floor" => Some("E0105"),
@@ -235,7 +236,9 @@ fn expected_code(name: &str) -> Option<&'static str> {
         "shared_mutation" => Some("E0307"),
         "unknown_name" => Some("E0201"),
         "unknown_type" => Some("E0101"),
+        "unknown_function_effect_type" => Some("E0101"),
         "wrong_type" => Some("E0200"),
+        "comparison_order_type" => Some("E0200"),
         _ => None,
     }
 }
@@ -363,7 +366,7 @@ fn repository_differential() {
                 std::thread::Builder::new()
                     .stack_size(64 << 20)
                     .spawn(move || {
-                        let mut counts = [0; 3];
+                        let mut counts = [0; 6];
                         let mut mismatches = vec![];
                         loop {
                             let i = cursor.fetch_add(1, Ordering::Relaxed);
@@ -379,7 +382,11 @@ fn repository_differential() {
                                         path.display()
                                     ));
                                 }
-                                counts[usize::from(actual.is_some())] += 1;
+                                let category = usize::from(actual.is_some());
+                                counts[category] += 1;
+                                if !path.to_string_lossy().contains("self_host_check") {
+                                    counts[3 + category] += 1;
+                                }
                             } else {
                                 counts[2] += 1
                             }
@@ -390,7 +397,7 @@ fn repository_differential() {
             );
         }
         let (counts, mismatches) = workers.into_iter().map(|w| w.join().unwrap()).fold(
-            ([0; 3], vec![]),
+            ([0; 6], vec![]),
             |(a, mut errors), (b, more)| {
                 errors.extend(more);
                 (std::array::from_fn(|i| a[i] + b[i]), errors)
@@ -408,6 +415,10 @@ fn repository_differential() {
             counts[0] >= 5 && counts[1] >= 10,
             "subset unexpectedly shrank"
         );
+        assert!(
+            counts[3] >= 5 && counts[4] >= 5,
+            "independent repository coverage shrank: {counts:?}"
+        );
     });
 }
 #[test]
@@ -420,6 +431,7 @@ fn unsupported_and_limits() {
             "fn f(x: i64) -> i64 { x + 1 }",
             "copy enum Inner {A, B} copy enum Outer {Wrap(Inner)} fn f(x: Outer) {match x {Outer::Wrap(Inner::A) => (),}}",
             "fn f() -> i64 {-9223372036854775809}",
+            "copy struct Recursive {next: Recursive} fn f(x: Recursive) {}",
             "fn f() { handle Fail[i64] in { 1 } with {return v => v, raise(e, r) => 0,} }",
         ] {
             let actual = evaluate(&world(&checker, source));
@@ -440,6 +452,12 @@ fn unsupported_and_limits() {
                 .map(|i| format!("let x{i} = 0;"))
                 .collect::<String>()
         );
+        assert_eq!(evaluate(&world(&checker, &source)).unwrap().code, "E9900");
+        let source = format!("fn f() {{{}}}", "0;".repeat(260));
+        assert_eq!(evaluate(&world(&checker, &source)).unwrap().code, "E9900");
+        let source = (0..17)
+            .map(|i| format!("fn f{i}() {{}} "))
+            .collect::<String>();
         assert_eq!(evaluate(&world(&checker, &source)).unwrap().code, "E9900");
     });
 }

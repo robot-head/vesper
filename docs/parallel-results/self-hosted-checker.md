@@ -2,8 +2,9 @@
 
 Issue #581. Base `eb97e086f5486abea4db38acf930477b52661a72`, a descendant
 of the required `37f7b8b`. Branch `codex/issue-581-self-hosted-checker`.
-No dependencies, shared compiler edits, root patch, unsafe code, or changes to
-other lanes' files.
+Synced with main `d204923a47675a95fbc74750a0cf054ebed3975e` before delivery.
+No new dependencies, shared compiler edits, root patch, unsafe code, or changes
+to other lanes' files.
 
 ## Delivered slice
 
@@ -26,6 +27,7 @@ encoded as `-1 - (code * 2^32 + start * 2^16 + end)`:
 
 - Semantic codes are the seed's decimal diagnostic suffix (`302` = `E0302`).
 - `9001`–`9009` identify unsupported rules, documented in `ast_core.ves`.
+- `9701`–`9708` identify the existing parser's unsupported constructs.
 - `9801`, `9802`, `9804` preserve lexer/parser rejection categories.
 - `9900` is a resource limit or internal checked-arithmetic failure.
 
@@ -40,7 +42,9 @@ Supported:
   checks, contravariant parameter/covariant result compatibility, effect-row
   inclusion and function-mode strengthening.
 - `copy ⊑ affine ⊑ linear`, nominal floors and transitive component joins;
-  `k_i ⊑ m_i` for every annotated field. After that premise is validated,
+  `k_i ⊑ m_i` for every annotated field. A visited declaration set bounds
+  traversal of shared ADT graphs; active cycles are explicitly unsupported.
+  After that premise is validated,
   `k_i ⊓ m_i = k_i`, so field kind joins retain the component kind.
 - `in`, `inout`, `sink` on whole bindings; mutation of copy places; persistent
   argument loans including accesses inside later arguments; shared/shared
@@ -71,8 +75,8 @@ traits/models/impls, non-unit tuples, other scalar types, strings, arithmetic,
 closures, lexical handlers/state/continuations, `?`, projections/partial moves,
 regions, capability labels, open rows, and recursive modal kinds. Constructor
 and pattern field order must follow the declaration; reordering is explicitly
-unsupported. Literal/wildcard match patterns are outside the constructor-match
-slice. There is no elaboration or code-generation output.
+unsupported. Literal/wildcard match patterns and refutable nested payload patterns are outside
+the constructor-match slice. There is no elaboration or code-generation output.
 
 Bounds are 32,767 source bytes, 512 significant tokens, 16 top-level
 declarations, 16 simultaneously recorded bindings (shadow history included),
@@ -89,8 +93,44 @@ metatheoretic soundness, or bootstrap/DDC claim follows from these tests.
 
 ## Validation
 
-Pending final source-bound runs; exact commands, corpus counts, results and
-any inherited workspace failures are recorded here before delivery.
+On the integrated main baseline above:
+
+- `cargo test --locked -p vesper --test self_host_check -- --nocapture`:
+  **4 passed**, 0 failed, 176.37 seconds. The 58 acceptance fixtures pin
+  semantic successes/failures and exact diagnostic spans. Additional inline
+  cases reject unsupported syntax, malformed input, recursive kinds, and
+  binding/token/declaration limits. Three programs run on the Cranelift JIT;
+  their outcomes also match ordinary full-unit compilation and the evaluator.
+- The differential test visited **417 repository sources**: **24 accepted**,
+  **48 rejected**, **345 explicitly unsupported or over budget**. All 72
+  supported outcomes match the seed, including first error code and exact
+  byte span. No disagreement allowlist. Independent repository fixtures have
+  positive/negative coverage thresholds in addition to the new lane fixtures.
+- `cargo +1.100.0 fmt --all -- --check`: passed.
+- `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings`:
+  passed. Cargo additionally reports inherited unused-dependency manifest
+  warnings (outside the Rust/Clippy warning gate).
+- `vesper fmt --check` on the seven new compiler files and fixture directory:
+  passed, 65 files unchanged.
+- `python3 tools/bazel/sync_build_files.py --check` and `git diff --check`:
+  passed; no BUILD change needed.
+- `cargo test --workspace --locked`: attempted on the original base and again
+  after the main sync. Both stop at the existing
+  `genuine_three_model_replay_and_independent_refusal_matrix` in
+  `tests/lean4lean42_acceptance.rs`: `VESPER_LEAN4LEAN42_ROOT` must name a
+  genuinely prepared candidate. This host has none. The target reports
+  15 passed/1 failed; its policy was not bypassed or changed. This is not a
+  passing full-workspace result.
+- Bazel is not installed on this host; hosted CI remains the integration gate.
+
+Focused runs use Rust 1.99.1, debug builds without debug information or
+incremental compilation, `CARGO_BUILD_JOBS=2`, and an isolated target directory.
+The evaluator disables optimization and has a 100-million-step fuel ceiling.
+The corpus uses four workers on this 5-CPU/18-GB host. The timing above is one
+acceptance run, not a performance benchmark. The harness checks the Vesper
+compiler once, then combines its unchanged checked AST with separately checked,
+disjoint-span byte-provider functions; native tests cross-check that assembly
+against checking the whole concatenated unit.
 
 The corpus test walks every available repository `.ves` file in `bootstrap`,
 `crates`, `examples`, `packages`, `src`, and `tests/fixtures`; under Bazel it
