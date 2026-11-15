@@ -74,14 +74,25 @@ impl EffectRow {
     }
 
     /// Sequentially composes two effect rows (`epsilon_1 o epsilon_2`).
-    pub fn compose(&self, other: &Self) -> Self {
+    ///
+    /// Rejects composing rows with distinct open tail variables so obligations
+    /// carried by either row variable cannot be silently dropped.
+    pub fn compose(&self, other: &Self) -> Result<Self, PcgError> {
+        let tail_var = match (self.tail_var, other.tail_var) {
+            (None, None) => None,
+            (Some(v), None) | (None, Some(v)) => Some(v),
+            (Some(lhs), Some(rhs)) if lhs == rhs => Some(lhs),
+            (Some(lhs), Some(rhs)) => {
+                return Err(PcgError::DistinctOpenRowTails { lhs, rhs });
+            }
+        };
         let mut instances = Vec::with_capacity(self.instances.len() + other.instances.len());
         instances.extend(self.instances.iter().cloned());
         instances.extend(other.instances.iter().cloned());
-        Self {
+        Ok(Self {
             instances,
-            tail_var: self.tail_var.or(other.tail_var),
-        }
+            tail_var,
+        })
     }
 }
 
@@ -140,6 +151,10 @@ pub enum PcgError {
         live_linear: LocalId,
         required_max: Mode,
         actual: Mode,
+    },
+    DistinctOpenRowTails {
+        lhs: u32,
+        rhs: u32,
     },
     CapacityExceeded {
         max: usize,
@@ -407,8 +422,9 @@ mod tests {
             Mode::Linear
         );
 
-        let storage_and_fail =
-            storage_only.compose(&EffectRow::from_instances(vec![fail_effect()]));
+        let storage_and_fail = storage_only
+            .compose(&EffectRow::from_instances(vec![fail_effect()]))
+            .unwrap();
         assert_eq!(
             storage_and_fail.resumption_guarantee(Mode::Linear),
             Mode::Affine
@@ -541,5 +557,46 @@ mod tests {
         );
         linear_state.consume_sink(out_buf).unwrap();
         assert_eq!(linear_state.check_return_exhaustion(), Ok(()));
+    }
+
+    #[test]
+    fn compose_preserves_matching_open_tails_and_rejects_distinct_open_tails() {
+        let open_one = EffectRow {
+            instances: vec![storage_effect()],
+            tail_var: Some(1),
+        };
+        let open_one_again = EffectRow {
+            instances: vec![fail_effect()],
+            tail_var: Some(1),
+        };
+        let open_two = EffectRow {
+            instances: vec![storage_effect()],
+            tail_var: Some(2),
+        };
+        let closed = EffectRow::from_instances(vec![fail_effect()]);
+
+        // One open tail + closed preserves the open tail in either order.
+        let lhs_open = open_one.compose(&closed).unwrap();
+        assert_eq!(lhs_open.tail_var, Some(1));
+        assert_eq!(lhs_open.instances.len(), 2);
+
+        let rhs_open = closed.compose(&open_two).unwrap();
+        assert_eq!(rhs_open.tail_var, Some(2));
+        assert_eq!(rhs_open.instances.len(), 2);
+
+        // Matching open tail variables compose cleanly.
+        let same_tail = open_one.compose(&open_one_again).unwrap();
+        assert_eq!(same_tail.tail_var, Some(1));
+        assert_eq!(same_tail.instances.len(), 2);
+
+        // Distinct open tail variables must be rejected instead of dropping `Some(2)`.
+        assert_eq!(
+            open_one.compose(&open_two),
+            Err(PcgError::DistinctOpenRowTails { lhs: 1, rhs: 2 })
+        );
+        assert_eq!(
+            open_two.compose(&open_one),
+            Err(PcgError::DistinctOpenRowTails { lhs: 2, rhs: 1 })
+        );
     }
 }
