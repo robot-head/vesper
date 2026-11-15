@@ -226,6 +226,88 @@ fn define_fault<M: Module>(m: &mut M, im: &Imports) -> Result<(), String> {
     })
 }
 
+fn checked_mul_or_fault<M: Module>(
+    b: &mut FunctionBuilder,
+    m: &mut M,
+    im: &Imports,
+    lhs: ir::Value,
+    rhs: ir::Value,
+    fault: Fault,
+) -> ir::Value {
+    let rhs_nonzero = b.ins().icmp_imm(IntCC::NotEqual, rhs, 0);
+    let check_blk = b.create_block();
+    let ok_blk = b.create_block();
+    b.ins().brif(rhs_nonzero, check_blk, &[], ok_blk, &[]);
+    b.switch_to_block(check_blk);
+    let max_u64 = b.ins().iconst(types::I64, -1_i64);
+    let limit = b.ins().udiv(max_u64, rhs);
+    let overflow = b.ins().icmp(IntCC::UnsignedGreaterThan, lhs, limit);
+    let fail_blk = b.create_block();
+    b.ins().brif(overflow, fail_blk, &[], ok_blk, &[]);
+    b.switch_to_block(fail_blk);
+    trigger_fault(b, m, im, fault);
+    b.switch_to_block(ok_blk);
+    b.ins().imul(lhs, rhs)
+}
+
+fn checked_add_imm_or_fault<M: Module>(
+    b: &mut FunctionBuilder,
+    m: &mut M,
+    im: &Imports,
+    lhs: ir::Value,
+    imm: u64,
+    fault: Fault,
+) -> ir::Value {
+    let max_allowed = (u64::MAX - imm) as i64;
+    let overflow = b
+        .ins()
+        .icmp_imm(IntCC::UnsignedGreaterThan, lhs, max_allowed);
+    let fail_blk = b.create_block();
+    let ok_blk = b.create_block();
+    b.ins().brif(overflow, fail_blk, &[], ok_blk, &[]);
+    b.switch_to_block(fail_blk);
+    trigger_fault(b, m, im, fault);
+    b.switch_to_block(ok_blk);
+    b.ins().iadd_imm(lhs, imm as i64)
+}
+
+fn checked_shl3_or_fault<M: Module>(
+    b: &mut FunctionBuilder,
+    m: &mut M,
+    im: &Imports,
+    val: ir::Value,
+    fault: Fault,
+) -> ir::Value {
+    let limit = (u64::MAX >> 3) as i64;
+    let overflow = b.ins().icmp_imm(IntCC::UnsignedGreaterThan, val, limit);
+    let fail_blk = b.create_block();
+    let ok_blk = b.create_block();
+    b.ins().brif(overflow, fail_blk, &[], ok_blk, &[]);
+    b.switch_to_block(fail_blk);
+    trigger_fault(b, m, im, fault);
+    b.switch_to_block(ok_blk);
+    b.ins().ishl_imm(val, 3)
+}
+
+fn safe_div_ceil(b: &mut FunctionBuilder, n: ir::Value, w: ir::Value) -> ir::Value {
+    let is_zero = b.ins().icmp_imm(IntCC::Equal, n, 0);
+    let zero_blk = b.create_block();
+    let nz_blk = b.create_block();
+    let done_blk = b.create_block();
+    b.append_block_param(done_blk, types::I64);
+    b.ins().brif(is_zero, zero_blk, &[], nz_blk, &[]);
+    b.switch_to_block(zero_blk);
+    let z = b.ins().iconst(types::I64, 0);
+    b.ins().jump(done_blk, &[ir::BlockArg::Value(z)]);
+    b.switch_to_block(nz_blk);
+    let n_m1 = b.ins().iadd_imm(n, -1);
+    let q = b.ins().udiv(n_m1, w);
+    let res = b.ins().iadd_imm(q, 1);
+    b.ins().jump(done_blk, &[ir::BlockArg::Value(res)]);
+    b.switch_to_block(done_blk);
+    b.block_params(done_blk)[0]
+}
+
 fn define_charge_region<M: Module>(m: &mut M, im: &Imports) -> Result<(), String> {
     compile(m, im.charge_region, 2, false, |b, m, args| {
         let seq = args[0];
@@ -237,7 +319,7 @@ fn define_charge_region<M: Module>(m: &mut M, im: &Imports) -> Result<(), String
         b.ins().brif(no_reg, done, &[], active, &[]);
         b.switch_to_block(active);
         let row_charge = b.ins().load(types::I64, MemFlags::new(), seq, ROW_CHARGE);
-        let target = b.ins().imul(rows, row_charge);
+        let target = checked_mul_or_fault(b, m, im, rows, row_charge, Fault::Memory);
         let charged = b.ins().load(types::I64, MemFlags::new(), seq, CHARGED);
         let need = b.ins().icmp(IntCC::UnsignedGreaterThan, target, charged);
         let do_alloc = b.create_block();
@@ -267,15 +349,20 @@ fn define_ensure_tiles<M: Module>(m: &mut M, im: &Imports) -> Result<(), String>
         let one = b.ins().iconst(types::I64, 1);
         let cap_nonzero = b.ins().icmp_imm(IntCC::NotEqual, cap, 0);
         let base_cap = b.ins().select(cap_nonzero, cap, one);
-        let doubled = b.ins().ishl_imm(base_cap, 1);
+        let half_max = b.ins().iconst(types::I64, (u64::MAX >> 1) as i64);
+        let can_double = b
+            .ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, base_cap, half_max);
+        let shifted = b.ins().ishl_imm(base_cap, 1);
+        let doubled = b.ins().select(can_double, shifted, needed);
         let use_doubled = b
             .ins()
             .icmp(IntCC::UnsignedGreaterThanOrEqual, doubled, needed);
         let new_tiles = b.ins().select(use_doubled, doubled, needed);
 
         let stride = b.ins().load(types::I64, MemFlags::new(), seq, STRIDE);
-        let new_hot_bytes = b.ins().imul(new_tiles, stride);
-        let alloc_bytes = b.ins().iadd_imm(new_hot_bytes, 63);
+        let new_hot_bytes = checked_mul_or_fault(b, m, im, new_tiles, stride, Fault::Memory);
+        let alloc_bytes = checked_add_imm_or_fault(b, m, im, new_hot_bytes, 63, Fault::Memory);
         let new_raw = call_fn(b, m, im.malloc, &[alloc_bytes])[0];
         check_non_null(b, m, im, new_raw, Fault::Memory);
         let zero = b.ins().iconst(types::I64, 0);
@@ -313,9 +400,9 @@ fn define_ensure_tiles<M: Module>(m: &mut M, im: &Imports) -> Result<(), String>
         let old_rows = b.ins().imul(cap, w);
         let old_cold_bytes = b.ins().imul(old_rows, cold_w);
         let old_cold_bytes = b.ins().ishl_imm(old_cold_bytes, 3);
-        let new_rows = b.ins().imul(new_tiles, w);
-        let new_cold_bytes = b.ins().imul(new_rows, cold_w);
-        let new_cold_bytes = b.ins().ishl_imm(new_cold_bytes, 3);
+        let new_rows = checked_mul_or_fault(b, m, im, new_tiles, w, Fault::Memory);
+        let new_cold_words = checked_mul_or_fault(b, m, im, new_rows, cold_w, Fault::Memory);
+        let new_cold_bytes = checked_shl3_or_fault(b, m, im, new_cold_words, Fault::Memory);
         let old_cold = b.ins().load(types::I64, MemFlags::new(), seq, COLD_PTR);
         let new_cold = call_fn(b, m, im.realloc, &[old_cold, new_cold_bytes])[0];
         check_non_null(b, m, im, new_cold, Fault::Memory);
@@ -382,8 +469,7 @@ fn define_new<M: Module>(m: &mut M, im: &Imports) -> Result<(), String> {
         b.ins().brif(has_cap, init_cap, &[], done, &[]);
         b.switch_to_block(init_cap);
         call_fn(b, m, im.charge_region, &[seq, cap]);
-        let cap_num = b.ins().iadd(cap, w_minus_1);
-        let tiles = b.ins().udiv(cap_num, w);
+        let tiles = safe_div_ceil(b, cap, w);
         call_fn(b, m, im.ensure_tiles, &[seq, tiles]);
         b.ins().jump(done, &[]);
         b.switch_to_block(done);
@@ -420,9 +506,7 @@ fn define_tile_count<M: Module>(m: &mut M, im: &Imports) -> Result<(), String> {
         check_non_null(b, m, im, seq, Fault::Invalid);
         let len = b.ins().load(types::I64, MemFlags::new(), seq, LEN);
         let w = b.ins().load(types::I64, MemFlags::new(), seq, W);
-        let w_m1 = b.ins().iadd_imm(w, -1);
-        let num = b.ins().iadd(len, w_m1);
-        let tiles = b.ins().udiv(num, w);
+        let tiles = safe_div_ceil(b, len, w);
         b.ins().return_(&[tiles]);
         Ok(())
     })
@@ -439,12 +523,18 @@ fn define_push_begin<M: Module>(m: &mut M, im: &Imports) -> Result<(), String> {
         let seq = args[0];
         check_non_null(b, m, im, seq, Fault::Invalid);
         let row = b.ins().load(types::I64, MemFlags::new(), seq, LEN);
+        let max_u64 = b.ins().iconst(types::I64, -1_i64);
+        let at_max = b.ins().icmp(IntCC::Equal, row, max_u64);
+        let ok_len = b.create_block();
+        let fail_len = b.create_block();
+        b.ins().brif(at_max, fail_len, &[], ok_len, &[]);
+        b.switch_to_block(fail_len);
+        trigger_fault(b, m, im, Fault::Memory);
+        b.switch_to_block(ok_len);
         let next_len = b.ins().iadd_imm(row, 1);
         call_fn(b, m, im.charge_region, &[seq, next_len]);
         let w = b.ins().load(types::I64, MemFlags::new(), seq, W);
-        let w_m1 = b.ins().iadd_imm(w, -1);
-        let num = b.ins().iadd(next_len, w_m1);
-        let tiles = b.ins().udiv(num, w);
+        let tiles = safe_div_ceil(b, next_len, w);
         call_fn(b, m, im.ensure_tiles, &[seq, tiles]);
         b.ins().store(MemFlags::new(), next_len, seq, LEN);
         b.ins().return_(&[row]);
@@ -631,9 +721,7 @@ fn define_tile_col_ptr<M: Module>(m: &mut M, im: &Imports) -> Result<(), String>
         check_non_null(b, m, im, seq, Fault::Invalid);
         let len = b.ins().load(types::I64, MemFlags::new(), seq, LEN);
         let w = b.ins().load(types::I64, MemFlags::new(), seq, W);
-        let w_m1 = b.ins().iadd_imm(w, -1);
-        let num = b.ins().iadd(len, w_m1);
-        let tile_count = b.ins().udiv(num, w);
+        let tile_count = safe_div_ceil(b, len, w);
         let ok_b = b.create_block();
         let fail_b = b.create_block();
         let valid = b.ins().icmp(IntCC::UnsignedLessThan, tile_idx, tile_count);

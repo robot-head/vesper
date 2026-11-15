@@ -103,12 +103,23 @@ pub fn is_valid_width(width: u32) -> bool {
 }
 
 pub fn is_seq_type(ty: &Type) -> bool {
-    matches!(ty, Type::Named(n, a) if n == TILED_SEQ_TYPE && a.len() == 1)
+    matches!(ty, Type::Named(n, a) if n == TILED_SEQ_TYPE && matches!(a.len(), 1 | 2))
 }
 
 pub fn seq_elem(ty: &Type) -> Option<&Type> {
     match ty {
-        Type::Named(n, args) if n == TILED_SEQ_TYPE && args.len() == 1 => Some(&args[0]),
+        Type::Named(n, args) if n == TILED_SEQ_TYPE && matches!(args.len(), 1 | 2) => {
+            Some(&args[0])
+        }
+        _ => None,
+    }
+}
+
+pub fn seq_region_label(ty: &Type) -> Option<&str> {
+    match ty {
+        Type::Named(n, args) if n == TILED_SEQ_TYPE && args.len() == 2 => {
+            crate::regions::row_label(&args[1])
+        }
         _ => None,
     }
 }

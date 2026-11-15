@@ -638,26 +638,38 @@ impl Checker<'_> {
         {
             self.diagnostics.extend(errors);
             // The capability argument is checked by `validate_type` itself.
-            if let Type::Named(_, args) = t {
-                for a in args.iter().skip(1) {
-                    self.valid_type(a, g, span.clone());
+            if let Type::Named(n, args) = t {
+                if n == crate::tiled::TILED_SEQ_TYPE {
+                    if let Some(elem) = args.first() {
+                        self.valid_type(elem, g, span.clone());
+                        self.check_tiled_record_type(elem, span);
+                    }
+                } else {
+                    for a in args.iter().skip(1) {
+                        self.valid_type(a, g, span.clone());
+                    }
                 }
             }
             return;
         }
         match t {
             Type::Named(n, args) if n == crate::tiled::TILED_SEQ_TYPE => {
-                if args.len() != 1 {
+                if !matches!(args.len(), 1 | 2) {
                     self.error(
                         "E0101",
-                        format!("{n} expects 1 type argument, found {}", args.len()),
+                        format!("{n} expects 1 or 2 type arguments, found {}", args.len()),
                         span.clone(),
                     );
                 }
-                for a in args {
-                    self.valid_type(a, g, span.clone());
+                if args.len() == 2 {
+                    self.error(
+                        "E0797",
+                        format!("{n}[T, r] requires a region capability in scope"),
+                        span.clone(),
+                    );
                 }
                 if let Some(elem) = args.first() {
+                    self.valid_type(elem, g, span.clone());
                     self.check_tiled_record_type(elem, span);
                 }
             }

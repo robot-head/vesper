@@ -321,18 +321,18 @@ tiled(8) copy struct Entry {
     cold meta: Pair,
 }
 
-fn bump_key(inout s.{key}: TiledSeq[Entry], idx: u64, delta: u64) {
+fn bump_key(inout s.{key}: TiledSeq[Entry, arena], idx: u64, delta: u64) eff [arena: Region] {
     let cur = s.col_get[key](idx);
     s.col_set[key](idx, wrapping_add(cur, delta));
 }
 
-fn read_hits(in s.{hits}: TiledSeq[Entry], idx: u64) -> u64 {
+fn read_hits(in s.{hits}: TiledSeq[Entry, arena], idx: u64) -> u64 eff [arena: Region] {
     wrapping_add(widen_u64(s.col_get[hits](idx)), wrapping_add(s.len(), s.tile_count()))
 }
 
 fn main() -> u64 {
     region arena(4096) {
-        let s: TiledSeq[Entry] = TiledSeq::with_region[Entry](arena, 12);
+        let s: TiledSeq[Entry, arena] = TiledSeq::with_region[Entry](arena, 12);
         s.push(Entry { key: 10, hits: 3, meta: Pair { a: 100, b: 200 } });
         s.push(Entry { key: 20, hits: 4, meta: Pair { a: 300, b: 400 } });
         bump_key(inout s, 1, 7);
@@ -684,4 +684,109 @@ fn rejects_invalid_tiled_declarations_uses_and_borrows() {
         "E0301",
         "overlapping arguments 's.x' and 's.x'",
     );
+    // E0304: projected receiver cannot call whole-row get()
+    rejected(
+        "tiled(8) copy struct P { hot x: u64, hot y: u64 } fn f(in s.{x}: TiledSeq[P]) -> P { s.get(0) }",
+        "E0304",
+        "outside the parameter's declared projections",
+    );
+    // E1403: explicit or inferred load_tile_vec requires available ISA capability
+    rejected(
+        "tiled(8) copy struct P { hot x: u32 } fn f(in s: TiledSeq[P]) -> Vec[u32, 8] { s.load_tile_vec[Avx2, x](0) }",
+        "E1403",
+        "eff [Isa[Avx2]]",
+    );
+    rejected(
+        "tiled(8) copy struct P { hot x: u32 } fn f(in s: TiledSeq[P]) -> Vec[u32, 8] { s.load_tile_vec[x](0) }",
+        "E1403",
+        "eff [Isa[Avx2]]",
+    );
+    // E1504: built-in primitive element types are rejected
+    rejected(
+        "fn f() -> u64 { let s = TiledSeq::new[u64](); s.len() }",
+        "E1504",
+        "tiled(N) struct",
+    );
+    rejected(
+        "fn f() -> u64 { let s = TiledSeq::new[bool](); s.len() }",
+        "E1504",
+        "tiled(N) struct",
+    );
+    // E0791 / E0403: region-backed TiledSeq cannot escape its region scope
+    rejected(
+        "tiled(8) copy struct P { hot x: u64 } fn main() -> u64 { let s = region r { TiledSeq::with_region[P](r, 1) }; s.len() }",
+        "E0791",
+        "escapes its block",
+    );
+    rejected(
+        "tiled(8) copy struct P { hot x: u64 } fn take(sink s: TiledSeq[P]) -> TiledSeq[P] { s } fn main() -> u64 { region r { let s = TiledSeq::with_region[P](r, 1); let _ = take(sink s); 0 } }",
+        "E0403",
+        "captured lexical capability",
+    );
+    // E0792: cross-region TiledSeq mismatch
+    rejected(
+        "tiled(8) copy struct P { hot x: u64 } fn main() -> u64 { region a { let s = TiledSeq::with_region[P](a, 1); region b { let t: TiledSeq[P, b] = s; t.len() } } }",
+        "E0792",
+        "belongs to the region that allocated it",
+    );
+}
+
+#[test]
+fn runtime_faults_and_overflows_are_reported_safely() {
+    let oob_tile_src = r#"
+tiled(16) copy struct ByteBatch {
+    hot bytes: u8,
+}
+fn read0(in s: TiledSeq[ByteBatch]) -> u8 eff [Isa[Baseline128]] {
+    let v: Vec[u8, 16] = s.load_tile_vec[Baseline128, bytes](0);
+    Vec::reduce_add(v)
+}
+fn main() -> u64 {
+    let s: TiledSeq[ByteBatch] = TiledSeq::new[ByteBatch]();
+    if Isa::supported[Baseline128]() { widen_u64(read0(in s)) } else { 0 }
+}
+"#;
+    let c = accepted(oob_tile_src);
+    let eval_err = Runtime::new(&c.world).run("main", vec![]).unwrap_err();
+    assert!(eval_err.contains("out of bounds"), "{eval_err}");
+    let jit_err = native::jit(&c.world, "main").unwrap_err();
+    assert!(jit_err.contains("out of bounds"), "{jit_err}");
+    if cfg!(unix)
+        && Command::new("cc")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    {
+        let (status, stderr) = executable("oob_tile_vec", oob_tile_src);
+        assert_eq!(status, Some(71), "AOT stderr={stderr}");
+        assert!(stderr.contains("out of bounds"), "{stderr}");
+    }
+
+    // Overflowing capacity in with_capacity: 2305843009213693952 * 64 wraps to 0 on 64-bit.
+    let overflow_src = r#"
+tiled(8) copy struct P {
+    hot x: u64,
+}
+fn main() -> u64 {
+    let s: TiledSeq[P] = TiledSeq::with_capacity[P](2305843009213693952);
+    s.push(P { x: 1 });
+    s.len()
+}
+"#;
+    let oc = accepted(overflow_src);
+    let ojit_err = native::jit(&oc.world, "main").unwrap_err();
+    assert!(
+        ojit_err.contains("overflow") || ojit_err.contains("memory"),
+        "{ojit_err}"
+    );
+    if cfg!(unix)
+        && Command::new("cc")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+    {
+        let (status, stderr) = executable("overflow_cap", overflow_src);
+        assert_eq!(status, Some(71), "AOT stderr={stderr}");
+        assert!(stderr.contains("out of memory"), "{stderr}");
+    }
 }

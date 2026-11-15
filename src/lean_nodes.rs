@@ -78,6 +78,8 @@ fn typed(value: &Type, monad: Option<&Term>) -> Result<Term, String> {
             };
             let ordered = if name == "Result" && arguments.len() == 2 {
                 vec![&arguments[1], &arguments[0]]
+            } else if name == "TiledSeq" && !arguments.is_empty() {
+                vec![&arguments[0]]
             } else {
                 arguments.iter().collect()
             };

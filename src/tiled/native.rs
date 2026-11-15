@@ -339,6 +339,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let col_ptr = self
                     .tiled_runtime_call("vesper_tiled_tile_col_ptr", &[seq, tile_idx, col_off])?;
                 let result = self.alloc(shape.bytes());
+                let valid = self
+                    .b
+                    .ins()
+                    .icmp_imm(ir::condcodes::IntCC::NotEqual, col_ptr, 0);
+                let ok_blk = self.b.create_block();
+                let zero_blk = self.b.create_block();
+                let done_blk = self.b.create_block();
+                self.b.ins().brif(valid, ok_blk, &[], zero_blk, &[]);
+                self.b.switch_to_block(ok_blk);
                 for c in 0..shape.chunks() {
                     let chunk = self
                         .b
@@ -346,6 +355,16 @@ impl<M: Module> Codegen<'_, '_, M> {
                         .load(types::I8X16, little(), col_ptr, (c * 16) as i32);
                     self.b.ins().store(little(), chunk, result, (c * 16) as i32);
                 }
+                self.b.ins().jump(done_blk, &[]);
+                self.b.switch_to_block(zero_blk);
+                let zero_v = self.b.ins().iconst(types::I64, 0);
+                for w in 0..(shape.bytes() / 8) {
+                    self.b
+                        .ins()
+                        .store(MemFlags::new(), zero_v, result, (w * 8) as i32);
+                }
+                self.b.ins().jump(done_blk, &[]);
+                self.b.switch_to_block(done_blk);
                 Ok(result)
             }
         }

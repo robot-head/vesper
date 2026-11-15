@@ -43,6 +43,7 @@ impl Checker<'_> {
             }
             "with_region" => {
                 self.arity(name, args, 2, span.clone());
+                let mut cap_label = None;
                 if let Some(a) = args.first() {
                     if a.explicit && a.pass != Pass::In {
                         self.error(
@@ -58,6 +59,7 @@ impl Checker<'_> {
                         _ => None,
                     };
                     if let Some(effect) = cap {
+                        cap_label = effect.label.clone();
                         self.require_effect(&effect, env, span.clone());
                     } else {
                         self.error(
@@ -72,7 +74,11 @@ impl Checker<'_> {
                     self.expect_type(&Type::named("u64"), &cap_ty, a.expr.span.clone());
                 }
                 let elem = self.resolve_tiled_elem(types, expected, &span);
-                Some(Type::Named(TILED_SEQ_TYPE.into(), vec![elem]))
+                let mut type_args = vec![elem];
+                if let Some(cap) = cap_label {
+                    type_args.push(crate::regions::region_row(&cap));
+                }
+                Some(Type::Named(TILED_SEQ_TYPE.into(), type_args))
             }
             "len" | "tile_count" | "push" | "get" | "set" | "col_get" | "col_set"
             | "load_tile_vec" => {
@@ -190,7 +196,14 @@ impl Checker<'_> {
         if self.generics.iter().any(|g| g.name == *name) && args.is_empty() {
             return None;
         }
-        let adt = self.world.adts.get(name)?;
+        let Some(adt) = self.world.adts.get(name) else {
+            self.error(
+                "E1504",
+                format!("TiledSeq[T] requires a 'tiled(N) struct' element type, found '{elem}'"),
+                span,
+            );
+            return None;
+        };
         if let Some(w) = adt.tile_width {
             Some(w)
         } else {
@@ -209,6 +222,7 @@ impl Checker<'_> {
         env: &mut Env,
         usage: Usage,
         projected_col: Option<&str>,
+        allow_metadata_projection: bool,
     ) {
         if let Some(p) = Place::from_expr(base) {
             if let Some(col) = projected_col {
@@ -223,7 +237,8 @@ impl Checker<'_> {
             }
             // Read-only metadata (`len`, `tile_count`) is allowed on any
             // projected `TiledSeq` parameter without reading column payloads.
-            if matches!(usage, Usage::Borrow(Pass::In))
+            if allow_metadata_projection
+                && matches!(usage, Usage::Borrow(Pass::In))
                 && let Some(b) = env.bindings.get(&p.root)
                 && !b.projections.is_empty()
             {
@@ -280,7 +295,7 @@ impl Checker<'_> {
                         self.expr(&a.expr, env, Usage::Own);
                     }
                 }
-                self.borrow_tiled_receiver(base, env, Usage::Borrow(Pass::In), None);
+                self.borrow_tiled_receiver(base, env, Usage::Borrow(Pass::In), None, true);
                 Some(Type::named("u64"))
             }
             "push" => {
@@ -291,7 +306,7 @@ impl Checker<'_> {
                         span.clone(),
                     );
                 }
-                self.borrow_tiled_receiver(base, env, Usage::Borrow(Pass::Inout), None);
+                self.borrow_tiled_receiver(base, env, Usage::Borrow(Pass::Inout), None, false);
                 if args.len() != 1 {
                     self.error(
                         "E0207",
@@ -315,7 +330,7 @@ impl Checker<'_> {
                         span.clone(),
                     );
                 }
-                self.borrow_tiled_receiver(base, env, Usage::Borrow(Pass::In), None);
+                self.borrow_tiled_receiver(base, env, Usage::Borrow(Pass::In), None, false);
                 if self.mode(&elem_ty) != Mode::Copy && elem_ty != Type::Infer {
                     self.error(
                         "E1507",
@@ -349,7 +364,7 @@ impl Checker<'_> {
                         span.clone(),
                     );
                 }
-                self.borrow_tiled_receiver(base, env, Usage::Borrow(Pass::Inout), None);
+                self.borrow_tiled_receiver(base, env, Usage::Borrow(Pass::Inout), None, false);
                 if args.len() != 2 {
                     self.error(
                         "E0207",
@@ -385,7 +400,7 @@ impl Checker<'_> {
                 } else {
                     Usage::Borrow(Pass::In)
                 };
-                self.borrow_tiled_receiver(base, env, usage, col_name.as_deref());
+                self.borrow_tiled_receiver(base, env, usage, col_name.as_deref(), false);
                 let field_ty = match (&adt, &col_name) {
                     (Some(a), Some(c)) => a
                         .variants
@@ -476,7 +491,13 @@ impl Checker<'_> {
                         (None, None)
                     }
                 };
-                self.borrow_tiled_receiver(base, env, Usage::Borrow(Pass::In), col_name.as_deref());
+                self.borrow_tiled_receiver(
+                    base,
+                    env,
+                    Usage::Borrow(Pass::In),
+                    col_name.as_deref(),
+                    false,
+                );
                 if args.len() != 1 {
                     self.error(
                         "E0207",
@@ -560,7 +581,7 @@ impl Checker<'_> {
                     format!("unknown method '{method}' on TiledSeq"),
                     span,
                 );
-                self.borrow_tiled_receiver(base, env, Usage::Borrow(Pass::In), None);
+                self.borrow_tiled_receiver(base, env, Usage::Borrow(Pass::In), None, false);
                 for a in args {
                     self.expr(&a.expr, env, Usage::Own);
                 }
