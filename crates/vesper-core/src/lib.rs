@@ -5,5 +5,6 @@
 //! remain in the vesper facade until their mutual dependencies are separated.
 pub mod ast;
 pub mod lifo;
+pub mod mode_cross;
 pub mod mode_vec;
 pub mod numeric;
