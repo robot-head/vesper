@@ -65,6 +65,27 @@ def ingestEvent (org : UInt64) (req : HttpRequestView)
         [.rejectOversized org req.payload.length])
     [.rejectUnauthorized org]
 
+private theorem trace_ingest_none
+    (authOracle : UInt64 → Option OrgWriteGrant)
+    (org : UInt64) (req : HttpRequestView)
+    (shard : WorkerShardProj) (cfg : PrismConfig)
+    (h : authOracle org = none) :
+    TraceOf (runWithAuth authOracle (ingestEvent org req shard cfg)) =
+      [.rejectUnauthorized org] := by
+  simp only [TraceOf, runWithAuth, ingestEvent, h]
+
+private theorem trace_ingest_some
+    (authOracle : UInt64 → Option OrgWriteGrant)
+    (org : UInt64) (req : HttpRequestView)
+    (shard : WorkerShardProj) (cfg : PrismConfig)
+    {g : OrgWriteGrant} (h : authOracle org = some g) :
+    TraceOf (runWithAuth authOracle (ingestEvent org req shard cfg)) =
+      if req.payload.length ≤ cfg.maxPayloadBytes then
+        [.appendEvent g req.topic req.payload]
+      else
+        [.rejectOversized org req.payload.length] := by
+  simp only [TraceOf, runWithAuth, ingestEvent, h]
+
 /-- §33.5 global authorization policy: no `appendEvent` ever executes for an `org`
 without a matching `OrgWriteGrant` issued by `authOracle`. -/
 theorem ingest_event_never_writes_unauthorized_org
@@ -74,23 +95,24 @@ theorem ingest_event_never_writes_unauthorized_org
     (shard : WorkerShardProj) (cfg : PrismConfig) :
     ∀ op ∈ TraceOf (runWithAuth authOracle (ingestEvent org req shard cfg)),
       ∀ g topic bytes, op = TenantDbOp.appendEvent g topic bytes → g.orgId = org := by
-  unfold TraceOf runWithAuth ingestEvent
+  intro op hop g topic bytes heq
   cases hauth : authOracle org with
   | none =>
-      intro op hop g topic bytes heq
+      rw [trace_ingest_none authOracle org req shard cfg hauth] at hop
       simp only [List.mem_singleton] at hop
-      subst hop
+      rcases hop with rfl
       cases heq
   | some g' =>
-      intro op hop g topic bytes heq
-      dsimp only at hop
-      split at hop
-      · simp only [List.mem_singleton] at hop
-        subst hop
+      rw [trace_ingest_some authOracle org req shard cfg hauth] at hop
+      by_cases hlen : req.payload.length ≤ cfg.maxPayloadBytes
+      · rw [if_pos hlen] at hop
+        simp only [List.mem_singleton] at hop
+        rcases hop with rfl
         cases heq
-        exact h_sound org g' hauth
-      · simp only [List.mem_singleton] at hop
-        subst hop
+        exact h_sound org _ hauth
+      · rw [if_neg hlen] at hop
+        simp only [List.mem_singleton] at hop
+        rcases hop with rfl
         cases heq
 
 /-- Every emitted `appendEvent` payload length obeys `cfg.maxPayloadBytes`. -/
@@ -102,24 +124,24 @@ theorem ingest_event_payload_bounded
       ∀ g topic bytes,
         op = TenantDbOp.appendEvent g topic bytes →
         bytes.length ≤ cfg.maxPayloadBytes := by
-  unfold TraceOf runWithAuth ingestEvent
+  intro op hop g topic bytes heq
   cases hauth : authOracle org with
   | none =>
-      intro op hop g topic bytes heq
+      rw [trace_ingest_none authOracle org req shard cfg hauth] at hop
       simp only [List.mem_singleton] at hop
-      subst hop
+      rcases hop with rfl
       cases heq
   | some g' =>
-      intro op hop g topic bytes heq
-      dsimp only at hop
-      split at hop
-      · rename_i hlen
+      rw [trace_ingest_some authOracle org req shard cfg hauth] at hop
+      by_cases hlen : req.payload.length ≤ cfg.maxPayloadBytes
+      · rw [if_pos hlen] at hop
         simp only [List.mem_singleton] at hop
-        subst hop
+        rcases hop with rfl
         cases heq
         exact hlen
-      · simp only [List.mem_singleton] at hop
-        subst hop
+      · rw [if_neg hlen] at hop
+        simp only [List.mem_singleton] at hop
+        rcases hop with rfl
         cases heq
 
 end Vesper.PrismAuthSafety
