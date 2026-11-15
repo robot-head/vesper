@@ -8,9 +8,12 @@
 
 namespace Vesper.SimdJsonRoundtrip
 
+/-- Inline string bounded by UTF-8 encoded byte length (`≤ 32` bytes),
+    matching `InlineStr32::new` and the 32-byte decoder scratch buffer in
+    `crates/vesper-serde/src/tiles.rs`. -/
 structure InlineStr32 where
-  chars  : List Char
-  len_le : chars.length ≤ 32
+  text    : String
+  byte_le : text.utf8ByteSize ≤ 32
   deriving DecidableEq, Repr
 
 /-- §29.5 `TelemetryPoint` AoSoA record with exact host bit-width invariants. -/
@@ -52,7 +55,7 @@ inductive JsonKey where
 
 inductive JsonVal where
   | int (v : Int)
-  | str (chars : List Char)
+  | str (s : String)
   | bool (b : Bool)
   | null
   deriving DecidableEq, Repr
@@ -70,7 +73,7 @@ def encodeTelemetryPoint (pt : TelemetryPoint) : JsonObject :=
   , (.latencyUs,  .int (Int.ofNat pt.latencyUs))
   , (.statusCode, .int (Int.ofNat pt.statusCode))
   , (.flags,      .int (Int.ofNat pt.flags))
-  , (.traceIdHex, .str pt.traceIdHex.chars)
+  , (.traceIdHex, .str pt.traceIdHex.text)
   ]
 
 def decodeTelemetryPoint (obj : JsonObject) : Except TileError TelemetryPoint :=
@@ -92,8 +95,8 @@ def decodeTelemetryPoint (obj : JsonObject) : Except TileError TelemetryPoint :=
                         if h_fl : fl < 2 ^ 16 then
                           match findField .traceIdHex obj with
                           | none => .error (.missingField .traceIdHex)
-                          | some (.str cs) =>
-                              if h_cs : cs.length ≤ 32 then
+                          | some (.str s) =>
+                              if h_s : s.utf8ByteSize ≤ 32 then
                                 .ok {
                                   tsUnixMs   := ts
                                   ts_min     := h_ts.1
@@ -104,7 +107,7 @@ def decodeTelemetryPoint (obj : JsonObject) : Except TileError TelemetryPoint :=
                                   status_lt  := h_st
                                   flags      := fl
                                   flags_lt   := h_fl
-                                  traceIdHex := ⟨cs, h_cs⟩
+                                  traceIdHex := ⟨s, h_s⟩
                                 }
                               else .error (.fieldRange .traceIdHex)
                           | some _ => .error (.fieldType .traceIdHex)
@@ -141,7 +144,7 @@ private theorem findField_encode_flags (pt : TelemetryPoint) :
 
 private theorem findField_encode_trace (pt : TelemetryPoint) :
     findField .traceIdHex (encodeTelemetryPoint pt) =
-      some (.str pt.traceIdHex.chars) := by
+      some (.str pt.traceIdHex.text) := by
   simp [findField, encodeTelemetryPoint]
 
 /-- §29.5 `TelemetryPoint` JSON encode/decode roundtrip theorem. -/
@@ -162,15 +165,14 @@ theorem telemetry_point_json_roundtrip (pt : TelemetryPoint) :
   rw [dite_eq_left pt.flags_lt]
   rw [findField_encode_trace]
   dsimp only
-  rw [dite_eq_left pt.traceIdHex.len_le]
+  rw [dite_eq_left pt.traceIdHex.byte_le]
 
 /-- Leading unknown JSON keys are skipped cleanly during field decoding. -/
 theorem findField_other_prefix (k : JsonKey) (id : Nat) (v : JsonVal) (obj : JsonObject)
     (h_known : k ≠ .other id) :
     findField k ((.other id, v) :: obj) = findField k obj := by
   have h_neq : JsonKey.other id ≠ k := fun h_eq => h_known h_eq.symm
-  unfold findField
-  exact ite_eq_right h_neq
+  simp [findField, h_neq]
 
 theorem telemetry_point_decode_ignores_unknown_fields
     (id : Nat) (v : JsonVal) (pt : TelemetryPoint) :
@@ -190,11 +192,43 @@ theorem telemetry_point_decode_ignores_unknown_fields
   rw [dite_eq_left pt.flags_lt]
   rw [findField_other_prefix .traceIdHex id v _ (by intro h; cases h), findField_encode_trace]
   dsimp only
-  rw [dite_eq_left pt.traceIdHex.len_le]
+  rw [dite_eq_left pt.traceIdHex.byte_le]
 
 /-- Empty JSON object fails closed on missing `ts_unix_ms`. -/
 theorem telemetry_point_empty_rejected :
     decodeTelemetryPoint [] = .error (.missingField .tsUnixMs) := rfl
+
+/-- 17 copies of `'é'` have 17 Unicode scalar values (`≤ 32`) but 34 UTF-8 bytes
+    (`> 32`), so `decodeTelemetryPoint` fails closed with `fieldRange .traceIdHex`. -/
+def seventeenEAcute : String := String.ofList (List.replicate 17 'é')
+
+theorem seventeenEAcute_chars_le_bytes_gt :
+    seventeenEAcute.length = 17 ∧ seventeenEAcute.utf8ByteSize = 34 := by
+  decide
+
+theorem telemetry_point_multibyte_utf8_over_32_bytes_rejected :
+    decodeTelemetryPoint
+      [ (.tsUnixMs,   .int 1700000000000)
+      , (.latencyUs,  .int 42)
+      , (.statusCode, .int 200)
+      , (.flags,      .int 0)
+      , (.traceIdHex, .str seventeenEAcute)
+      ] = .error (.fieldRange .traceIdHex) := rfl
+
+/-- 16 copies of `'é'` occupy exactly 32 UTF-8 bytes and are accepted. -/
+def sixteenEAcute : String := String.ofList (List.replicate 16 'é')
+
+theorem telemetry_point_multibyte_utf8_32_bytes_accepted :
+    (decodeTelemetryPoint
+      [ (.tsUnixMs,   .int 1700000000000)
+      , (.latencyUs,  .int 42)
+      , (.statusCode, .int 200)
+      , (.flags,      .int 0)
+      , (.traceIdHex, .str sixteenEAcute)
+      ]).isOk = true := rfl
+
+#eval seventeenEAcute.length
+#eval seventeenEAcute.utf8ByteSize
 
 end JsonSpec
 
@@ -203,3 +237,5 @@ end Vesper.SimdJsonRoundtrip
 #print axioms Vesper.SimdJsonRoundtrip.JsonSpec.telemetry_point_json_roundtrip
 #print axioms Vesper.SimdJsonRoundtrip.JsonSpec.telemetry_point_decode_ignores_unknown_fields
 #print axioms Vesper.SimdJsonRoundtrip.JsonSpec.telemetry_point_empty_rejected
+#print axioms Vesper.SimdJsonRoundtrip.JsonSpec.telemetry_point_multibyte_utf8_over_32_bytes_rejected
+#print axioms Vesper.SimdJsonRoundtrip.JsonSpec.telemetry_point_multibyte_utf8_32_bytes_accepted
