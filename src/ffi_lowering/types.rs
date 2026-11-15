@@ -120,6 +120,7 @@ fn struct_adt(layout: &WireLayout) -> Result<Adt, String> {
             name: f.name().to_owned(),
             ty,
             modality: Mode::Linear,
+            temperature: None,
         });
     }
     Ok(Adt {
@@ -132,6 +133,7 @@ fn struct_adt(layout: &WireLayout) -> Result<Adt, String> {
             named: true,
         }],
         is_enum: false,
+        tile_width: None,
         span: 0..0,
     })
 }
@@ -190,6 +192,7 @@ impl Generated {
                         })
                         .collect(),
                     is_enum: true,
+                    tile_width: None,
                     span: 0..0,
                 };
                 match g.enums.get(e.name()) {
@@ -386,10 +389,12 @@ impl Generated {
                         name: "raw".into(),
                         ty: Type::named("u64"),
                         modality: Mode::Linear,
+                        temperature: None,
                     }],
                     named: true,
                 }],
                 is_enum: false,
+                tile_width: None,
                 span: 0..0,
             }));
         }

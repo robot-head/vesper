@@ -36,6 +36,13 @@ fn handle_index(value: &Value, ty: &str, region: u64) -> Result<u64, String> {
 }
 
 impl Runtime<'_> {
+    pub(super) fn region_capacity_for(&self, id: u64) -> Option<usize> {
+        self.stack.iter().rev().find_map(|f| match f {
+            Frame::Handler(h) if h.id == id => crate::regions::block_capacity(&h.effect, &h.ret),
+            _ => None,
+        })
+    }
+
     /// Performs `r.op(args)` on the region block whose capability is `target`.
     pub(super) fn region_perform(
         &mut self,
@@ -46,15 +53,7 @@ impl Runtime<'_> {
         let id = target.ok_or("region capability is not active")?;
         if !self.regions.is_open(id) {
             let capacity = self
-                .stack
-                .iter()
-                .rev()
-                .find_map(|f| match f {
-                    Frame::Handler(h) if h.id == id => {
-                        crate::regions::block_capacity(&h.effect, &h.ret)
-                    }
-                    _ => None,
-                })
+                .region_capacity_for(id)
                 .ok_or("region capability is no longer active")?;
             self.regions.open(id, capacity).map_err(|e| e.to_string())?;
         }

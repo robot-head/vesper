@@ -45,7 +45,7 @@
 //! software model of the protocol, not an encrypted-memory implementation.
 
 use crate::error::TeeError;
-use crate::gpa::IntervalSet;
+use crate::gpa::{IntervalSet, PAGE_4K};
 use crate::linear::{Ledger, Obligation};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -183,9 +183,26 @@ impl HostMappingTable {
         Ok(HostMmapReply { addr, len })
     }
 
-    /// Record an unmap the guest itself requested.
-    pub fn unmap(&mut self, m: HostMmapReply) {
-        self.mapped.remove(m.addr / 4096, (m.addr + m.len) / 4096);
+    /// Record a successful unmap the guest itself requested. This method does
+    /// not perform the unmap or verify that the host actually completed it.
+    /// A page-aligned partial removal is allowed only when its whole range is
+    /// currently tracked; invalid requests leave all tracked ranges intact.
+    pub fn unmap(&mut self, m: HostMmapReply) -> Result<(), TeeError> {
+        let HostMmapReply { addr, len } = m;
+        let invalid = TeeError::HostMmapInvalid { addr, len };
+        if len == 0 || !addr.is_multiple_of(PAGE_4K) || !len.is_multiple_of(PAGE_4K) {
+            return Err(invalid);
+        }
+        let end = addr.checked_add(len).ok_or(invalid.clone())?;
+        if addr < self.window_start || end > self.window_end {
+            return Err(invalid);
+        }
+        let (start_page, end_page) = (addr / PAGE_4K, end / PAGE_4K);
+        if !self.mapped.covers(start_page, end_page) {
+            return Err(TeeError::HostMmapUntracked { addr, len });
+        }
+        self.mapped.remove(start_page, end_page);
+        Ok(())
     }
 }
 

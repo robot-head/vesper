@@ -26,8 +26,9 @@ const HELP: &str = "Usage:
 
 Renders a code card. The file may start with an @shot(title = '..', theme = '..',
 dpi = N) directive and may carry Twoslash-style callouts: a `//  ^?` line under
-a token shows its inferred type and mode, and `//^!` attaches a note. Both are
-read by the renderer from the text; they are not compiled.
+a token shows its inferred type and mode or an unambiguous checker diagnostic,
+and `//^!` attaches a note. Both are read by the renderer from the text; they
+are not compiled.
 
 --verify checks and runs the example in the doctest sandbox first and refuses
 to render one that fails. Outputs are cached in the content-addressed store
@@ -176,14 +177,46 @@ fn checker_hover<'a>(
     display: &'a str,
     table: &'a [HoverEntry],
 ) -> impl FnMut(&str, usize, usize) -> Option<String> + 'a {
-    let checked = vesper::tooling::frontend::check_source(display, Default::default()).ok();
+    let analysis = vesper::tooling::frontend::check_source(display, Default::default());
     let index = vesper_span::LineIndex::new(display.into(), Default::default()).ok();
     move |_token, start, end| {
         // Tier 1's hover table first (it covers binding sites), then Lens hover.
         if let Some(h) = table.iter().find(|h| h.span == (start..end)) {
             return Some(h.text.to_string());
         }
-        let (checked, index) = (checked.as_ref()?, index.as_ref()?);
+        let checked = match &analysis {
+            Ok(checked) => checked,
+            Err(vesper::tooling::frontend::AnalysisFailure::Semantic { diagnostics }) => {
+                // The primary span must start on this token; merely enclosing
+                // it (for example, a whole-block diagnostic) is not evidence
+                // that the diagnostic belongs to this query. Equal-sized
+                // matches remain ambiguous, so do not guess.
+                let matches = diagnostics.iter().filter(|d| {
+                    start <= d.span.start && d.span.start < end && d.span.start < d.span.end
+                });
+                let minimum = matches.clone().map(|d| d.span.len()).min()?;
+                let mut most_specific = matches.filter(|d| d.span.len() == minimum);
+                let diagnostic = most_specific.next()?;
+                if most_specific.next().is_some() {
+                    return None;
+                }
+                let mut text = format!("{}: {}", diagnostic.code, diagnostic.message);
+                for label in &diagnostic.related {
+                    text.push_str("; related: ");
+                    text.push_str(&label.message);
+                }
+                // The renderer has its own character bound. Normalize control
+                // characters and bound the summary without splitting UTF-8.
+                return Some(
+                    text.chars()
+                        .take(600)
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .collect(),
+                );
+            }
+            Err(_) => return None,
+        };
+        let index = index.as_ref()?;
         let at = index.position(start).ok()?;
         let to = index.position(end).ok()?;
         let value =

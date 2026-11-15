@@ -1,0 +1,7 @@
+linear struct Ticket {}
+fn effectful() eff [Fail[i64]] {}
+fn bad(sink ticket: Ticket) eff [Fail[i64]] {
+    effectful();
+    let Ticket {}
+    = ticket;
+}

@@ -8,6 +8,8 @@ mod regions;
 pub mod resource_trace;
 #[cfg(test)]
 mod resource_trace_acceptance;
+#[path = "tiled/eval.rs"]
+mod tiled;
 use resource_trace::{
     ResourceConsume, ResourceIdentity, ResourceTraceCompletion, ResourceTraceConfig,
     ResourceTraceEngine, ResourceTraceError, ResourceTraceFailure, ResourceTraceObserver,
@@ -90,6 +92,7 @@ pub enum Value {
     Closure(Rc<Closure>),
     Bound(Rc<BoundCallable>),
     Continuation(Rc<RefCell<Option<Continuation>>>),
+    TiledSeq(Rc<RefCell<tiled::TiledSeqState>>),
 }
 #[derive(Clone)]
 pub struct Closure {
@@ -167,6 +170,10 @@ impl fmt::Display for Value {
             Self::EffectOp { effect, op, .. } => write!(f, "<{effect}::{op}>"),
             Self::Closure(_) => write!(f, "<closure>"),
             Self::Continuation(_) => write!(f, "<one-shot continuation>"),
+            Self::TiledSeq(seq) => {
+                let state = seq.borrow();
+                write!(f, "<TiledSeq[{}] len={}>", state.adt, state.rows.len())
+            }
         }
     }
 }
@@ -1071,6 +1078,13 @@ impl<'a> Runtime<'a> {
                 &op,
                 &args.into_iter().map(get).collect::<Result<Vec<_>, _>>()?,
             )?,
+            Op::Tiled { op, args, .. } => {
+                let values = args
+                    .into_iter()
+                    .map(|a| get(a.value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.tiled_op(&op, values, &state.env)?
+            }
             Op::Data(name, fields) => {
                 let (a, v) = self
                     .world

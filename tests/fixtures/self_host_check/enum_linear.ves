@@ -1,0 +1,10 @@
+linear enum Ticket {
+    Empty,
+    Full(i64)
+}
+fn f(sink ticket: Ticket) -> i64 {
+    match ticket {
+        Ticket::Empty => 0,
+        Ticket::Full(id) => id,
+    }
+}

@@ -1,0 +1,7 @@
+copy enum Only {
+    Value(i64)
+}
+fn main() -> i64 {
+    let Only::Value(x) = Only::Value(1);
+    x
+}
