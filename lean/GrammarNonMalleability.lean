@@ -54,7 +54,7 @@ def encodeCanonicalLeb (n : Nat) : List Nat :=
   if n < 128 then [n]
   else (n % 128 + 128) :: encodeCanonicalLeb (n / 128)
 termination_by n
-decreasing_by exact Nat.div_lt_self (by omega) (by decide)
+decreasing_by simp_wf; exact Nat.div_lt_self (by omega) (by decide)
 
 theorem stepDecode_eq_some {b : Nat} {r : Option Nat} {v : Nat}
     (h : stepDecode b r = some v) :
@@ -71,7 +71,12 @@ theorem stepDecode_eq_some {b : Nat} {r : Option Nat} {v : Nat}
 
 theorem decodeCanonicalLeb_ge_128 {b0 b1 : Nat} {rest : List Nat} {v : Nat}
     (h : decodeCanonicalLeb (b0 :: b1 :: rest) = some v) : 128 ≤ v := by
-  obtain ⟨_, _, _, _, _, hv⟩ := stepDecode_eq_some h
+  obtain ⟨hi, _, _, _, hne, hv⟩ := stepDecode_eq_some h
+  have h1 : 1 ≤ hi := Nat.pos_of_ne_zero hne
+  have h2 : 128 ≤ 128 * hi := by
+    calc
+      128 = 128 * 1 := by omega
+      _ ≤ 128 * hi := Nat.mul_le_mul_left 128 h1
   omega
 
 /-- Any two accepted canonical LEB128 byte lists decoding to the same value are identical. -/
@@ -84,32 +89,46 @@ theorem canonical_leb128_injective :
   | _, [], _, _, h2 => by simp [decodeCanonicalLeb] at h2
   | [x], [y], v, h1, h2 => by
       simp only [decodeCanonicalLeb] at h1 h2
-      split at h1 <;> try contradiction
-      split at h2 <;> try contradiction
-      injection h1 with hx
-      injection h2 with hy
-      subst hx; subst hy; rfl
+      by_cases hx_lt : x < 128
+      · rw [if_pos hx_lt] at h1
+        by_cases hy_lt : y < 128
+        · rw [if_pos hy_lt] at h2
+          injection h1 with hx
+          injection h2 with hy
+          subst hx; subst hy; rfl
+        · rw [if_neg hy_lt] at h2
+          contradiction
+      · rw [if_neg hx_lt] at h1
+        contradiction
   | [x], y0 :: y1 :: ys, v, h1, h2 => by
       have hy := decodeCanonicalLeb_ge_128 h2
       simp only [decodeCanonicalLeb] at h1
-      split at h1 <;> try contradiction
-      injection h1 with hx
-      omega
+      by_cases hx_lt : x < 128
+      · rw [if_pos hx_lt] at h1
+        injection h1 with hx
+        omega
+      · rw [if_neg hx_lt] at h1
+        contradiction
   | x0 :: x1 :: xs, [y], v, h1, h2 => by
       have hx := decodeCanonicalLeb_ge_128 h1
       simp only [decodeCanonicalLeb] at h2
-      split at h2 <;> try contradiction
-      injection h2 with hy
-      omega
+      by_cases hy_lt : y < 128
+      · rw [if_pos hy_lt] at h2
+        injection h2 with hy
+        omega
+      · rw [if_neg hy_lt] at h2
+        contradiction
   | x0 :: x1 :: xs, y0 :: y1 :: ys, v, h1, h2 => by
-      obtain ⟨hx_hi, hdec1, _, _, _, hv1⟩ := stepDecode_eq_some h1
-      obtain ⟨hy_hi, hdec2, _, _, _, hv2⟩ := stepDecode_eq_some h2
+      obtain ⟨hx_hi, hdec1, hx_lo, hx_u8, _, hv1⟩ := stepDecode_eq_some h1
+      obtain ⟨hy_hi, hdec2, hy_lo, hy_u8, _, hv2⟩ := stepDecode_eq_some h2
       have hpair : x0 = y0 ∧ hx_hi = hy_hi := by omega
-      obtain ⟨rfl, rfl⟩ := hpair
-      have htail := canonical_leb128_injective (x1 :: xs) (y1 :: ys) hx_hi hdec1 hdec2
-      rw [htail]
+      have hdec2' : decodeCanonicalLeb (y1 :: ys) = some hx_hi := by
+        rw [hpair.2]
+        exact hdec2
+      have htail := canonical_leb128_injective (x1 :: xs) (y1 :: ys) hx_hi hdec1 hdec2'
+      rw [hpair.1, htail]
 
-/-- Boundary non-malleability vector checks discharged by `decide`. -/
+/-- Boundary non-malleability vector checks discharged by simplification. -/
 theorem canonical_leb128_boundary_vectors :
     decodeCanonicalLeb [] = none ∧
     decodeCanonicalLeb [0x80] = none ∧
@@ -120,6 +139,7 @@ theorem canonical_leb128_boundary_vectors :
     decodeCanonicalLeb (encodeCanonicalLeb 127) = some 127 ∧
     decodeCanonicalLeb (encodeCanonicalLeb 128) = some 128 ∧
     decodeCanonicalLeb (encodeCanonicalLeb 16384) = some 16384 := by
-  decide
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩ <;>
+    simp [encodeCanonicalLeb, decodeCanonicalLeb, stepDecode]
 
 end Vesper.GrammarNonMalleability
