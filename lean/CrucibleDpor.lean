@@ -237,13 +237,13 @@ theorem exploreAt_complete
       exact not_canStart_of_disabled hcomm hw hnone hcp
     · rename_i s' hsome
       by_cases ha : a ∈ sl
-      · rw [if_pos ha]
+      · rw [ite_eq_left ha]
         apply ih sl hsl
         apply hrest
         intro hpa
         subst hpa
         exact hsl p ha hcp
-      · rw [if_neg ha]
+      · rw [ite_eq_right ha]
         by_cases hc : CanStart indep w a
         · obtain ⟨w', hw'⟩ := hc
           obtain ⟨s'', h1, hrun⟩ := run_cons (run_equiv hcomm hw' hw)
@@ -299,7 +299,7 @@ theorem explore_complete
         rw [List.all_eq_false]
         exact ⟨a, hacts s s1 a h1, by simp [h1]⟩
       unfold explore
-      rw [if_neg (by simp [hnm])]
+      rw [ite_eq_right (by simp [hnm])]
       exact exploreAt_complete hcomm m ihm hw ht hlen acts sl hsl
         ⟨a, hacts s s1 a h1, rest, Equiv.refl _⟩
 

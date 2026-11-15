@@ -2,7 +2,7 @@
 use super::{Error, ErrorKind};
 use std::io::{self, Write};
 
-const MARKER: &[u8] = b"lean4lean42-transport-marker";
+const MARKER: &[u8] = b"logos42-transport-marker";
 
 fn failure(error: io::Error) -> Error {
     Error::new(ErrorKind::Io, format!("fault peer IO: {error}"))
@@ -39,7 +39,7 @@ pub fn run(mode: &str) -> Result<(), Error> {
         }
         "wrong_token" => frame(
             &mut io::stdout().lock(),
-            br#"[1,0,"11111111111111111111111111111111",3,2,"4.24.0","vesper.lean4lean42/2"]"#,
+            br#"[1,0,"11111111111111111111111111111111",3,2,"4.35.0","vesper.logos42/2"]"#,
         )
         .map_err(failure),
         "stall" => park(),

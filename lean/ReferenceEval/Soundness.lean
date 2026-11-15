@@ -298,7 +298,7 @@ theorem binatom_ok {cx : Cx} {op : BinOp} {k : IntK} {a b : Expr} (hop : op.logi
       obtain ⟨pl, s2, hl, h3⟩ := bind_ok h1
       obtain ⟨oa, hn2⟩ := atom_ok ha hl
       obtain ⟨l', ta, lf⟩ := pl
-      simp only [hop, Bool.false_eq_true, if_false] at h3
+      simp only [hop, Bool.false_eq_true, ite_false] at h3
       obtain ⟨pr, s3, hr, h4⟩ := bind_ok h3
       obtain ⟨ob, hn3⟩ := atom_ok hb hr
       obtain ⟨r', tb, rf⟩ := pr

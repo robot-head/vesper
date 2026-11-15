@@ -25,7 +25,7 @@ use std::{
 };
 
 const CAPTURE: usize = 65536;
-const READY: &str = "4.24.0";
+const READY: &str = "4.35.0";
 const SEED: u64 = 0;
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -195,8 +195,8 @@ impl Toolchain {
         let version = execute(Command::new(&lean).arg("--version"), 10);
         version.success();
         assert!(
-            String::from_utf8_lossy(&version.stdout).contains("version 4.24.0,"),
-            "actual Lean4.24.0 required; missing/wrong default tools never skip"
+            String::from_utf8_lossy(&version.stdout).contains("version 4.35.0,"),
+            "actual Lean4.35.0 required; missing/wrong default tools never skip"
         );
         Self { lean, prefix }
     }
@@ -366,7 +366,7 @@ fn report_counts(report: &RunReport, jobs: u8, binary: &Path) {
     assert_eq!(report.diagnostic_counts, [3, 2, 5, 2, 1, 1, 1]);
     assert_eq!(report.first_failed_case, None);
     assert!(report.elapsed_ms > 0);
-    assert!(report.tools.lean_version.contains("4.24.0"));
+    assert!(report.tools.lean_version.contains("4.35.0"));
     assert_eq!(report.tools.os, std::env::consts::OS);
     assert_eq!(report.tools.arch, std::env::consts::ARCH);
     assert_eq!(report.worker_blake3, hash_file(binary));

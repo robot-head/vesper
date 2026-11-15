@@ -1,7 +1,7 @@
 import Std
 
 /-!
-Handwritten exact-integer model, checked by Lean 4.24. This is not an extractor
+Handwritten exact-integer model, checked by Lean 4.35. This is not an extractor
 or a proof of Rust implementation, bounded arithmetic, compiler or persistence.
 The bilinear identity applies pointwise to join contributions; finite support,
 row semantics and transactional machine execution are validated by Rust tests.

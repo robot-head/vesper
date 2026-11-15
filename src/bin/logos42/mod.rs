@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod artifact;
+pub mod cli;
 pub mod fault_peer;
 pub mod process;
 pub mod protocol;
@@ -15,22 +16,60 @@ use std::{
 };
 
 pub type Digest = [u8; 32];
-pub const PROFILE: &str = "vesper.lean4lean42/2";
-pub const LEAN_COMMIT: &str = "797c613eb9b6d4ec95db23e3e00af9ac6657f24b";
-pub const UPSTREAM: &str = "4faf51403bc4cb35cf6666d91fc9c938ae46d3aa";
-pub const BATTERIES: &str = "8da40b72fece29b7d3fe3d768bac4c8910ce9bee";
-pub const PINS: &str = include_str!("../../../tools/lean4lean42/pins.json");
-pub const SOURCE_MANIFEST: &str = include_str!("../../../tools/lean4lean42/source-manifest.json");
+pub const PROFILE: &str = "vesper.logos42/2";
+pub const LEAN_COMMIT: &str = "eb6cafb7290e8bd5f2937522d8d804f58f02bafc";
+pub const UPSTREAM: &str = "8ce95bd31f92a75670cc6e003c48a664b795e433";
+pub const EXPORTER: &str = "df81913eee5519d5a88ae5b0fd701b5298cc29ab";
+pub const PINS: &str = include_str!("../../../tools/logos42/pins.json");
+pub const SOURCE_MANIFEST: &str = include_str!("../../../tools/logos42/source-manifest.json");
 pub const RESOURCE_SOURCE_MANIFEST: &str =
-    include_str!("../../../tools/lean4lean42/resource-source-manifest.json");
-pub const KNOWN_FIXES: &str = include_str!("../../../tools/lean4lean42/known-fixes.json");
-pub const PATCHES: [&[u8]; 3] = [
-    include_bytes!("../../../tools/lean4lean42/patches/toolchain.patch"),
-    include_bytes!("../../../tools/lean4lean42/patches/kernel.patch"),
-    include_bytes!("../../../tools/lean4lean42/patches/replay.patch"),
+    include_str!("../../../tools/logos42/resource-source-manifest.json");
+pub const KNOWN_FIXES: &str = include_str!("../../../tools/logos42/known-fixes.json");
+pub const PATCHES: [&[u8]; 1] = [include_bytes!(
+    "../../../tools/logos42/patches/lean435-primitives.patch"
+)];
+pub const ADAPTER_SOURCES: [(&str, &[u8]); 10] = [
+    (
+        "Cargo.toml",
+        include_bytes!("../../../tools/logos42/Cargo.toml"),
+    ),
+    (
+        "Cargo.lock",
+        include_bytes!("../../../tools/logos42/Cargo.lock"),
+    ),
+    (
+        "bridge/Cargo.toml",
+        include_bytes!("../../../tools/logos42/bridge/Cargo.toml"),
+    ),
+    (
+        "bridge/src/main.rs",
+        include_bytes!("../../../tools/logos42/bridge/src/main.rs"),
+    ),
+    (
+        "Main.lean",
+        include_bytes!("../../../tools/logos42/Main.lean"),
+    ),
+    (
+        "lakefile.toml",
+        include_bytes!("../../../tools/logos42/lakefile.toml"),
+    ),
+    (
+        "lake-manifest.json",
+        include_bytes!("../../../tools/logos42/lake-manifest.json"),
+    ),
+    (
+        "lean-toolchain",
+        include_bytes!("../../../tools/logos42/lean-toolchain"),
+    ),
+    (
+        "LogosControls.lean",
+        include_bytes!("../../../tools/logos42/LogosControls.lean"),
+    ),
+    (
+        "controls/cases.json",
+        include_bytes!("../../../tools/logos42/controls/cases.json"),
+    ),
 ];
-pub const CONTROLS_SOURCE: &[u8] =
-    include_bytes!("../../../tools/lean4lean42/controls/VesperControls.lean");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -104,7 +143,7 @@ impl Limits {
         name_bytes: 32 * 1024 * 1024,
         inventory_bytes: 128 * 1024 * 1024,
         artifact_bytes: 4 * 1024 * 1024 * 1024,
-        artifact_files: 8192,
+        artifact_files: 16384,
         report_bytes: 1024 * 1024,
         compiler_runtime_files: 256,
         compiler_runtime_bytes: 4 * 1024 * 1024 * 1024,
@@ -149,9 +188,10 @@ impl Default for Limits {
             stderr_bytes: 64 * 1024,
             declarations: 262144,
             name_bytes: 16 * 1024 * 1024,
-            inventory_bytes: 80 * 1024 * 1024,
+            // Lean 4.35 controls import over 210,000 declarations.
+            inventory_bytes: 128 * 1024 * 1024,
             artifact_bytes: 2 * 1024 * 1024 * 1024,
-            artifact_files: 8192,
+            artifact_files: 16384,
             report_bytes: 256 * 1024,
             compiler_runtime_files: 128,
             compiler_runtime_bytes: 2 * 1024 * 1024 * 1024,
@@ -241,6 +281,7 @@ pub struct CompilerRuntimeFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlKind {
+    RawExport,
     RawDeclaration,
     CheckerExpr,
     Condition,
@@ -353,10 +394,11 @@ impl TargetReport {
 pub struct ToolInfo {
     pub profile: String,
     pub upstream_commit: String,
-    pub batteries_commit: String,
+    pub exporter_commit: String,
     pub lean_release: String,
     pub lean_commit: String,
     pub checker_blake3: Digest,
+    pub kernel_blake3: Digest,
     pub compiler_blake3: Digest,
     pub compiler_runtime_manifest_blake3: Digest,
     pub receipt_blake3: Digest,
@@ -393,7 +435,7 @@ pub struct Report {
 impl Report {
     pub fn new(limits: Limits) -> Self {
         Self {
-            schema: 2,
+            schema: 3,
             status: Status::Failed,
             scope: Scope::EligibleFreshClosure,
             limits,
@@ -442,16 +484,18 @@ pub struct Pins {
     pub schema: u16,
     pub profile: String,
     pub upstream_commit: String,
-    pub batteries_commit: String,
+    pub exporter_commit: String,
     pub lean_release: String,
     pub lean_commit: String,
     pub patches: Vec<PatchPin>,
-    pub controls_overlay: Vec<OverlayPin>,
+    pub source_overlays: Vec<OverlayPin>,
     pub known_fixes_blake3: Digest,
     pub source_manifest_blake3: Digest,
     pub resource_bundle_blake3: Digest,
     pub build_argv: Vec<String>,
+    pub cargo_build_argv: Vec<String>,
     pub checker_relative_path: String,
+    pub kernel_relative_path: String,
 }
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -465,8 +509,10 @@ pub struct SetupInputs {
     pub schema: u16,
     pub lean: String,
     pub lake: String,
+    pub cargo: String,
     pub git: String,
     pub build_argv: Vec<String>,
+    pub cargo_build_argv: Vec<String>,
     pub build_exit: i32,
     pub build_stdout: String,
     pub build_stderr: String,
@@ -477,7 +523,7 @@ pub struct Receipt {
     pub schema: u16,
     pub profile: String,
     pub upstream_commit: String,
-    pub batteries_commit: String,
+    pub exporter_commit: String,
     pub lean_release: String,
     pub lean_commit: String,
     pub pins_blake3: Digest,
@@ -492,9 +538,14 @@ pub struct Receipt {
     pub compiler_runtime_manifest: Vec<CompilerRuntimeFile>,
     pub compiler_runtime_manifest_blake3: Digest,
     pub checker_relative_path: String,
+    pub kernel_relative_path: String,
     pub checker_blake3: Digest,
+    pub kernel_blake3: Digest,
     pub driver_blake3: Digest,
+    pub cargo_path: String,
+    pub cargo_blake3: Digest,
     pub build_argv: Vec<String>,
+    pub cargo_build_argv: Vec<String>,
     pub build_exit: i32,
     pub build_stdout_blake3: Digest,
     pub build_stderr_blake3: Digest,

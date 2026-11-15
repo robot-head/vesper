@@ -44,16 +44,16 @@ partial def lex (cs : List Char) (acc : Array Tok) : Except String (Array Tok) :
       lex (cs.drop digits.length) (acc.push (.num n))
     else if isIdentStart c then
       let word := cs.takeWhile isIdentChar
-      lex (cs.drop word.length) (acc.push (.ident (String.mk word)))
+      lex (cs.drop word.length) (acc.push (.ident (String.ofList word)))
     else
       match rest with
       | d :: rest' =>
-        let two := String.mk [c, d]
+        let two := String.ofList [c, d]
         if symbols2.contains two then lex rest' (acc.push (.sym two))
-        else if symbols1.contains c then lex rest (acc.push (.sym (String.mk [c])))
+        else if symbols1.contains c then lex rest (acc.push (.sym (String.ofList [c])))
         else .error s!"unexpected character {c}"
       | [] =>
-        if symbols1.contains c then lex rest (acc.push (.sym (String.mk [c])))
+        if symbols1.contains c then lex rest (acc.push (.sym (String.ofList [c])))
         else .error s!"unexpected character {c}"
 
 inductive BinOp where

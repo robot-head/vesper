@@ -297,7 +297,7 @@ theorem at_set_same : ∀ {p : Path} {v : Val} (w : Val), ValidP v p → (v.set 
 
 theorem undef_at : ∀ (p : Path), Val.undef.at p = .undef
   | [] => rfl
-  | _ :: _ => rfl
+  | b :: _ => by cases b <;> rfl
 
 theorem at_set_disj : ∀ {p q : Path} (v w : Val), ¬ Ovl p q → (v.set p w).at q = v.at q
   | [], q, _, _, h => absurd (Or.inl trivial) h

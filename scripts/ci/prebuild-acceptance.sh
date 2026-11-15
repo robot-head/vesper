@@ -14,7 +14,7 @@ rm -f "$file"
 # shellcheck disable=SC2086 # BAZEL_FLAGS is a list of options.
 examples="$("$BAZEL" query $BAZEL_FLAGS "filter(':example/', //crates/...)" 2>/dev/null)"
 # shellcheck disable=SC2086 # One label per word.
-if ! bazel_prebuild "$file" //:bin/vesper //:bin/lean4lean42 $examples; then
+if ! bazel_prebuild "$file" //:bin/vesper //:bin/logos42 $examples; then
   echo "warning: prebuilding acceptance executables failed; each script will build its own" >&2
   rm -f "$file"
   exit 0

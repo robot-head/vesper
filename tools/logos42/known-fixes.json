@@ -1,0 +1,327 @@
+{
+  "schema": 1,
+  "role": "review_evidence_not_success_receipt",
+  "upstream_base": "8ce95bd31f92a75670cc6e003c48a664b795e433",
+  "exporter_commit": "df81913eee5519d5a88ae5b0fd701b5298cc29ab",
+  "lean_toolchain": "leanprover/lean4:v4.35.0",
+  "controls": [
+    {
+      "id": "arena.closure-level-subst",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.constlevels",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.large-elim-param",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.level-imax-leq",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.level-imax-normalization",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.loose-bvar-value",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.nat-rec-k-lie",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.nat-rec-rules",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.nested-name-capture",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.orphan-rec",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.pi-closure-context",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.rec-missing-ih",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.unit-rec-rule",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.proof-param-ok",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.extra-rec",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.inductive-undeclared-universe",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.level-index-out-of-order",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.orphan-ctor",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "arena.sparse-name-index",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_export"
+    },
+    {
+      "id": "vesper.closed-theorem",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_export"
+    },
+    {
+      "id": "vesper.loose-bvar-theorem",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "vesper.loose-bvar-definition",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "vesper.loose-bvar-opaque",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "vesper.mismatched-theorem-body",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "vesper.duplicate-declaration",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "vesper.unknown-constant",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "vesper.ill-typed-application",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "vesper.invalid-projection",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-ctor-as-axiom",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-ctor-declared-first",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-ctor-named-by-a-constructor",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-ind-as-axiom",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-ind-before-ctor",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-ind-named-by-an-inductive",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-lift-as-axiom",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-lift-named-in-a-mutual-block",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-type-as-axiom",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-type-as-definition",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-names-without-a-quotient",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.quotient-package",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.axiom-quot-mk",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    },
+    {
+      "id": "upstream.forged-quot-type",
+      "source": "tools/logos42/controls/cases.json",
+      "expected_accept": false,
+      "expected_reason": "rejected",
+      "kind": "raw_export"
+    }
+  ],
+  "fixes": [
+    {
+      "id": "lean435-primitive-reflection",
+      "disposition": "Regenerate the checked primitive reference terms with Lean 4.35's structure-based Decidable, and use its decide projection. Primitive recognizers and declaration checking remain enabled; no trusted-prefix or parse-only path is exposed.",
+      "patch": "tools/logos42/patches/lean435-primitives.patch"
+    }
+  ],
+  "source_sha256": {
+    "tools/logos42/Cargo.toml": "7b50ce18ea2bc5a35eab0143dc082776861724dda32794431c360d610755d0ff",
+    "tools/logos42/Cargo.lock": "0e701fca2c243fee57e899c801871cbc6d87693eac44026f59858ad08d0ca75d",
+    "tools/logos42/bridge/Cargo.toml": "520bcfe8bdbf4a549356b7812d2e9dc331091af453dc3da33ddc88b5f954fd72",
+    "tools/logos42/bridge/src/main.rs": "2788bbd1fd61508c20a8d1e5dfdc6beb096baaefc2ef34111bc3121d8e35761d",
+    "tools/logos42/Main.lean": "bb77cfe2d7f513bd5a25d5c10a6f154e33ed9c99e819932740bd205256a15666",
+    "tools/logos42/lakefile.toml": "767ba354fdd98440edffea0866d8f6aae32182d4f8a785491a5501684831b73a",
+    "tools/logos42/lake-manifest.json": "4a3407821822db97df35f6d693513712a08fa79d28727d4069ce48043d2bf981",
+    "tools/logos42/lean-toolchain": "ca5f1f601d34c49079e38d7e7041eb0f2a9c227fbc1df0f404820069a052330c",
+    "tools/logos42/LogosControls.lean": "4aede3a3cf9b954c12237412eee47ec3cbe22ce9e5862760d5507df2a8d39f33",
+    "tools/logos42/controls/cases.json": "1f36c6e75d319ad33b8b8a81fc95880969e88ab1c6dcf8f9a51bcf3a2b440978"
+  },
+  "executions": [],
+  "unexecuted": [
+    "whole-checker formal verification",
+    "exporter/compiler refinement proof"
+  ]
+}

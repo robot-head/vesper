@@ -52,7 +52,7 @@ class Harness:
         report = load(self.verify(path, "--format", "--json", "--lean", self.lean, "--timeout", "300").stdout)
         assert report["schema"] == "vesper.format-proof/1" and report["status"] == "kernel_checked" and report["scope"] == "formatter_document_model"
         assert report["input_bytes"] == len(source) and report["output_bytes"] > 0 and report["document_nodes"] > 0
-        assert "4.24.0" in report["lean_version"]
+        assert "4.35.0" in report["lean_version"]
         for field in ["source_blake3", "output_blake3"]:
             assert re.fullmatch("[0-9a-f]{64}", report[field])
         audit = report["audit"]
@@ -97,7 +97,7 @@ class Harness:
 def run(binary, lean, model, work):
     h = Harness(binary, lean, model, work)
     version = h.execute([lean, "--version"]).stdout
-    assert b"version 4.24.0," in version
+    assert b"version 4.35.0," in version
     source = (FIXTURES / "commented.ves").read_bytes()
     path, first = h.checked(source)
     assert first["comment_tokens"] == 3

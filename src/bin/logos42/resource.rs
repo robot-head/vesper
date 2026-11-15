@@ -7,7 +7,7 @@ pub const MODULE: &str = "ResourceModel42Kernel";
 pub const ORIGINAL: &str = "ResourceModel42.Acceptance";
 pub const MARKER: &[u8] = b"VESPER_RESOURCE_KERNEL_SNAPSHOT_V1:";
 const MIB: usize = 1024 * 1024;
-const BUNDLE: &[u8] = include_bytes!("../../../tools/lean4lean42/resource-source-manifest.json");
+const BUNDLE: &[u8] = include_bytes!("../../../tools/logos42/resource-source-manifest.json");
 pub(super) const TOOL: &[u8] =
     include_bytes!("../../../tools/resource-model42/KernelSnapshot.lean");
 pub(super) const HISTORICAL: &[u8] =
@@ -93,7 +93,7 @@ struct Bundle {
 pub fn verify_bundle() -> Result<Digest, Error> {
     let bundle: Bundle = artifact::bounded_json(BUNDLE, MIB)?;
     if bundle.schema != 1
-        || bundle.domain != "vesper.lean4lean42.resource-source-bundle/1"
+        || bundle.domain != "vesper.logos42.resource-source-bundle/1"
         || bundle.source_commit != "ad7208b825513d1e6095fcb80c9621d000f570e2"
         || bundle.specification_sha256
             != "8df79941a11ca2d777d8d5c5e7f4db26ef1a57f06babe2e71f3951a1f676883d"
@@ -915,7 +915,7 @@ pub(super) fn bind(
         producer_report: file("producer-report.json")?,
         projection: file("projection/ResourceModel42Kernel.olean")?,
         original_manifest_blake3: artifact::manifest_hash(
-            b"vesper.lean4lean42.resource-original-objects/1\0",
+            b"vesper.logos42.resource-original-objects/1\0",
             &originals,
         ),
         retained_constants: p.retained_constants,

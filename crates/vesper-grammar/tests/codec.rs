@@ -593,3 +593,107 @@ fn directional_budgets_do_not_promote_decode_or_measurement_to_encode_approval()
     assert_eq!(encoded_len(&grammar, &value, limits).unwrap(), 101);
     preserved(&grammar, &value, limits, ErrorKind::WorkLimit);
 }
+
+#[test]
+fn u24_child_frames_have_exact_nested_boundaries_and_golden_bytes() {
+    let rules = [
+        Rule::U24Frame(1),
+        Rule::Sequence(vec![2, 3]),
+        Rule::Byte(b'A'),
+        Rule::U24Frame(4),
+        Rule::Literal(b"xy".to_vec()),
+    ];
+    let g = grammar(&rules);
+    assert_eq!(g.nullable(0), Some(false));
+    for byte in 0..=255 {
+        assert_eq!(g.first_contains(0, byte), Some(true));
+    }
+    let value = Value::Frame(Box::new(Value::Sequence(vec![
+        Value::Unit,
+        Value::Frame(Box::new(Value::Unit)),
+    ])));
+    let golden = b"\0\0\x06A\0\0\x02xy";
+    assert_eq!(bytes(&g, &value), golden);
+    assert_eq!(
+        decode_exact(&g, golden, CodecLimits::default()).unwrap(),
+        value
+    );
+    let captures = g.parse_exact(golden).unwrap();
+    assert_eq!(captures[0].payload, Some(3..9));
+    assert_eq!(captures[3].payload, Some(7..9));
+    for end in 0..golden.len() {
+        assert!(decode_exact(&g, &golden[..end], CodecLimits::default()).is_err());
+        assert!(g.parse_exact(&golden[..end]).is_err());
+    }
+    // The outer payload includes an extra byte that no child consumes.
+    let extra = b"\0\0\x07A\0\0\x02xy!";
+    assert_eq!(
+        decode_exact(&g, extra, CodecLimits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::TrailingBytes
+    );
+    assert_eq!(
+        g.parse_exact(extra).unwrap_err().kind,
+        ErrorKind::TrailingBytes
+    );
+    // The inner child cannot borrow the final byte outside its own frame.
+    let short_inner = b"\0\0\x06A\0\0\x01xy";
+    assert_eq!(
+        decode_exact(&g, short_inner, CodecLimits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::UnexpectedEof
+    );
+    assert_eq!(
+        g.parse_exact(short_inner).unwrap_err().kind,
+        ErrorKind::UnexpectedEof
+    );
+    preserved(
+        &g,
+        &value,
+        CodecLimits {
+            max_output_bytes: 8,
+            ..CodecLimits::default()
+        },
+        ErrorKind::OutputLimit,
+    );
+}
+
+#[test]
+fn u24_rule_obeys_grammar_validation_and_frame_limit() {
+    assert_eq!(
+        Grammar::validate(&[Rule::U24Frame(1)], 0, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Rule
+    );
+    assert_eq!(
+        Grammar::validate(&[Rule::U24Frame(0)], 0, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::RecursiveRule
+    );
+    let rules = [Rule::U24Frame(1), Rule::Literal(b"abc".to_vec())];
+    let g = Grammar::validate(
+        &rules,
+        0,
+        Limits {
+            max_frame_bytes: 2,
+            ..Limits::default()
+        },
+    )
+    .unwrap();
+    let value = Value::Frame(Box::new(Value::Unit));
+    assert_eq!(
+        decode_exact(&g, b"\0\0\x03abc", CodecLimits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::PayloadLimit
+    );
+    assert_eq!(
+        g.parse_exact(b"\0\0\x03abc").unwrap_err().kind,
+        ErrorKind::PayloadLimit
+    );
+    preserved(&g, &value, CodecLimits::default(), ErrorKind::PayloadLimit);
+}

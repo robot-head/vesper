@@ -1393,7 +1393,8 @@ def main (args : List String) : IO UInt32 := do
       let input ← IO.FS.readFile path
       let out ← IO.getStdout
       for line in input.splitOn "\n" do
-        if !line.trim.isEmpty then out.putStrLn (verdict line.trim)
+        let line := line.trimAscii.toString
+        if !line.isEmpty then out.putStrLn (verdict line)
       return 0
   | _ =>
       IO.eprintln "usage: lean --run ReferenceEval.lean PROGRAMS"

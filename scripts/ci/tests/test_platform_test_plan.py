@@ -64,7 +64,7 @@ class PolicyTests(unittest.TestCase):
         for path in [
             "src/audit_commands.rs", "src/replay_commands.rs",
             "crates/vesper-lean-syntax/src/lib.rs", "crates/vesper-fmt/src/lib.rs",
-            "src/kernel_snapshot.rs", "src/bin/lean4lean42/process.rs",
+            "src/kernel_snapshot.rs", "src/bin/logos42/process.rs",
             "src/lsp/proof_lens.rs", "src/optimize/witness_lean.rs",
             "src/format_commands.rs", "src/stylus_safety.rs",
         ]:
