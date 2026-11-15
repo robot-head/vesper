@@ -213,7 +213,7 @@ fn binary(p: P, min: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow
     let lhs = if k == 55 || k == 67 {
         binary(bump(q), 12)
     } else {
-        leave(postfix(primary(enter(q)), q.cur), q)
+        leave(postfix(primary(enter(q)), syntax_callee(q)), q)
     };
     leave(binary_rest(lhs, min), p)
 }
@@ -450,5 +450,40 @@ fn field_patterns(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]]
         } else {
             r
         }
+    }
+}
+
+// The seed erases grouping parentheses around a single expression. A bare
+// bound callee therefore stays a value in `(xs)[row]` and `((xs))[row]`.
+fn syntax_callee(p: P) -> Tok eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if p.cur.kind == 4 || p.cur.kind == 22 {
+        p.cur
+    } else if p.cur.kind == 32 {
+        syntax_grouped_name(syntax_sig(p.index + 1), 1)
+    } else {
+        tok(70, 0, 0)
+    }
+}
+fn syntax_grouped_name(index: i64, depth: i64)
+    -> Tok eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let t = syntax_tok(index);
+    if depth >= max_depth() {
+        fail_tok(Diag::Limit(t.start))
+    } else if t.kind == 32 {
+        syntax_grouped_name(syntax_sig(index + 1), depth + 1)
+    } else if t.kind == 4 || t.kind == 22 {
+        syntax_grouped_close(syntax_sig(index + 1), depth, t)
+    } else {
+        tok(70, 0, 0)
+    }
+}
+fn syntax_grouped_close(index: i64, depth: i64, name: Tok)
+    -> Tok eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if depth == 0 {
+        name
+    } else if syntax_tok(index).kind == 33 {
+        syntax_grouped_close(syntax_sig(index + 1), depth - 1, name)
+    } else {
+        tok(70, 0, 0)
     }
 }

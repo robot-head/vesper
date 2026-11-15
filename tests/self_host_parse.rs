@@ -106,6 +106,7 @@ fn traits_models_projections_unicode_and_row_shadowing() {
             "impl @scope/codec::Codec for Item { type Out = Item; fn go(in self) -> Item { self } }",
             "fn f[e: eff](xs: (i64, i64), i: i64) -> i64 { xs[i] }",
             "fn f[e: eff]() { handle E state foo = foo[e]() in {} with { return x => x, op(y, k) => k(y), } }",
+            "fn grouped[e: eff](xs: (i64, i64), e: i64) { (xs)[e]; (((xs)))[e]; (xs,)[e](); (helper)[e](); }",
             "fn f[e: eff](e: i64, xs: (i64, i64)) -> i64 { let get = |values: (i64, i64)| values[e]; match Some(xs) { Some(values) => values[e], None => 0, } }",
             "fn f[e: eff](xs: (i64, i64)) { let e = 0; xs[e]; helper[e](); { let xs = 1; helper[e](); } }",
             "fn f() -> String { \"\\u0000\\u0041\\u00e9\\uD834\\uDD1E\" }",

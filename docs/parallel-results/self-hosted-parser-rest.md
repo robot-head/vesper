@@ -4,7 +4,8 @@ Wave nine lane 3, issue #580. Taken over from the unused Claude claim by Codex.
 Base: `05bc1a54841b2cc256b6379fce07d82c782f2d98`, a descendant of the required
 `37f7b8bcfa4cd409177856c8fe5deeaa7f2a88ff`. Branch:
 `codex/issue-580-self-hosted-parser`. No overlapping parser PR was open at
-preflight. No subagents were used.
+preflight. No subagents were used. Integrated accepted main
+`d204923a47675a95fbc74750a0cf054ebed3975e` before final checks.
 
 ## Implemented
 
@@ -63,17 +64,19 @@ Stage 1 lock, native parser, or end-to-end compiler proof claim is made.
 ## Checks
 
 Environment: Linux, AMD EPYC 9V74 host, five visible CPUs, four corpus workers,
-debug Rust test profile, isolated `/workspace/target-issue580`. Build settings:
+Rust 1.100 debug test profile, isolated `/workspace/target-issue580`. Build settings:
 `CARGO_BUILD_JOBS=2`, `CARGO_PROFILE_DEV_DEBUG=0`,
 `CARGO_PROFILE_TEST_DEBUG=0`, `CARGO_INCREMENTAL=0`.
 
-- `cargo test --locked --test self_host_front_end --test self_host_parse -- --nocapture`:
-  final expanded-corpus run recorded below before delivery.
+- `cargo +1.100.0 test --locked --test self_host_front_end --test self_host_parse -- --nocapture`:
+  passed after main integration: **369/369 token streams**, **305 complete
+  CSTs**, **64 matching rejections**, **101 JIT lexer runs**. The corpus target
+  took **458.66 s**, within its existing 900 s Bazel timeout; the five focused
+  tests took 24.34 s. The final grouped-callee follow-up also passes all five
+  focused tests (34.86 s), including `(xs)[e]`, nested grouping and tuple versus
+  name disambiguation.
 - `cargo test --locked --test self_host_parse -- --nocapture`: five tests pass;
-  the expanded recovery, prefix, region adapter and bounds suite took 26.32 s.
-- The earlier 329-source run passed 329 token streams, 265 complete CSTs,
-  64 rejected inputs and 87 JIT lexer runs in 398.98 s. The expanded scan adds
-  crate, bootstrap and editor inputs and includes every final parser source.
+  recovery, prefix, region adapter, byte layout and bounds cases are covered.
 - `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings`:
   passed (Cargo emits an existing unused manifest-dependency warning for
   `vesper-pact`; the Clippy command exits successfully).
@@ -93,7 +96,7 @@ debug Rust test profile, isolated `/workspace/target-issue580`. Build settings:
 
 Commit `a1e1ebc` adds four `BUILD.bazel` `extra_test_data` file groups for the
 crate `.ves` fixtures included by the expanded corpus. The existing doc crate
-input was already present. No Cargo manifest or lockfile change. The patch
+input was already present. No Cargo manifest or lockfile change by this lane. The patch
 preserves the independently held resource-oracle timeout hunk and all existing
 Bazel reservations, timeouts and platform policies.
 
