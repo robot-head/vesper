@@ -15,10 +15,12 @@ mod arithmetic;
 pub mod causal;
 mod execution;
 pub mod layout;
+mod paired_difference;
 mod statistics;
 pub mod wire;
 pub use arithmetic::*;
 pub use execution::*;
+pub use paired_difference::*;
 pub use statistics::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
