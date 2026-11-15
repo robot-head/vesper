@@ -202,3 +202,214 @@ impl SlabRead<'_> {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug)]
+struct DelaySlotMeta {
+    offset: usize,
+    delay: usize,
+    cap: usize,
+    stride: usize,
+    head: usize,
+}
+
+/// One 64-byte-aligned allocation packing all block delay lines of a
+/// [`crate::pdc::CompiledGraph`].
+///
+/// Each line `i` starts at a 64-byte cache-line boundary with capacity
+/// `delay_i + block` samples and stride `ceil((delay_i + block) / 16) * 16`
+/// samples, so consecutive lines never share a cache line and steady-state
+/// block reads/writes allocate nothing.
+#[derive(Debug)]
+pub struct DelaySlab {
+    data: Vec<f32>,
+    base: usize,
+    slots: Vec<DelaySlotMeta>,
+    block: usize,
+    total_stride: usize,
+}
+
+impl DelaySlab {
+    /// Allocate one zeroed slab holding a delay line for each delay length in
+    /// `delays`, each sized for blocks of `block` samples. Allocates once.
+    pub fn new(delays: &[u32], block: usize) -> Result<Self, SlabError> {
+        let too_large = SlabError::TooLarge {
+            buffers: delays.len(),
+            block,
+        };
+        if block == 0 {
+            return Err(too_large);
+        }
+        if delays.is_empty() {
+            return Ok(DelaySlab {
+                data: Vec::new(),
+                base: 0,
+                slots: Vec::new(),
+                block,
+                total_stride: 0,
+            });
+        }
+        let mut slots = Vec::with_capacity(delays.len());
+        let mut total_stride = 0usize;
+        for &d in delays {
+            let delay = d as usize;
+            let cap = delay.checked_add(block).ok_or(too_large)?;
+            let stride =
+                cap.checked_add(TILE_SAMPLES - 1).ok_or(too_large)? / TILE_SAMPLES * TILE_SAMPLES;
+            slots.push(DelaySlotMeta {
+                offset: total_stride,
+                delay,
+                cap,
+                stride,
+                head: 0,
+            });
+            total_stride = total_stride.checked_add(stride).ok_or(too_large)?;
+        }
+        let len = total_stride
+            .checked_add(TILE_SAMPLES - 1)
+            .ok_or(too_large)?;
+        len.checked_mul(std::mem::size_of::<f32>())
+            .filter(|&b| b <= isize::MAX as usize)
+            .ok_or(too_large)?;
+        let data = vec![0.0f32; len];
+        let base = data.as_ptr().align_offset(TILE_BYTES);
+        if base >= TILE_SAMPLES {
+            return Err(SlabError::Unalignable);
+        }
+        Ok(DelaySlab {
+            data,
+            base,
+            slots,
+            block,
+            total_stride,
+        })
+    }
+
+    /// Number of packed delay lines.
+    pub fn lines(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Block length each line is sized for.
+    pub fn block(&self) -> usize {
+        self.block
+    }
+
+    /// Total bytes of the packed delay-line working set (`total_stride * 4`).
+    pub fn working_set_bytes(&self) -> usize {
+        self.total_stride * std::mem::size_of::<f32>()
+    }
+
+    /// Whether the packed delay working set fits in `bytes`.
+    pub fn fits(&self, bytes: usize) -> bool {
+        self.working_set_bytes() <= bytes
+    }
+
+    /// Delay length (in samples) of `line`.
+    pub fn line_delay(&self, line: usize) -> Option<usize> {
+        self.slots.get(line).map(|s| s.delay)
+    }
+
+    /// Padded sample stride of `line` (always a multiple of [`TILE_SAMPLES`]).
+    pub fn line_stride(&self, line: usize) -> Option<usize> {
+        self.slots.get(line).map(|s| s.stride)
+    }
+
+    /// Byte addresses of every delay line start, for layout verification.
+    pub fn line_addresses(&self) -> impl Iterator<Item = usize> + '_ {
+        self.slots
+            .iter()
+            .map(|s| self.data[self.base + s.offset..].as_ptr() as usize)
+    }
+
+    /// Write `input` samples into `line` at its current head.
+    pub fn write(&mut self, line: usize, input: &[f32]) {
+        let Some(&slot) = self.slots.get(line) else {
+            return;
+        };
+        let ring = &mut self.data[self.base + slot.offset..self.base + slot.offset + slot.cap];
+        if input.len() <= slot.cap {
+            let first = input.len().min(slot.cap - slot.head);
+            ring[slot.head..slot.head + first].copy_from_slice(&input[..first]);
+            if first < input.len() {
+                ring[..input.len() - first].copy_from_slice(&input[first..]);
+            }
+        } else {
+            for (k, &x) in input.iter().enumerate() {
+                ring[(slot.head + k) % slot.cap] = x;
+            }
+        }
+    }
+
+    /// Read delayed samples from `line` into `out`.
+    pub fn read(&self, line: usize, out: &mut [f32]) {
+        let Some(&slot) = self.slots.get(line) else {
+            return;
+        };
+        let ring = &self.data[self.base + slot.offset..self.base + slot.offset + slot.cap];
+        let start = if slot.head >= slot.delay {
+            slot.head - slot.delay
+        } else if slot.delay <= slot.cap {
+            slot.head + slot.cap - slot.delay
+        } else {
+            (slot.head + slot.cap - (slot.delay % slot.cap)) % slot.cap
+        };
+        let n = out.len();
+        if n <= slot.cap {
+            let first = n.min(slot.cap - start);
+            out[..first].copy_from_slice(&ring[start..start + first]);
+            if first < n {
+                out[first..].copy_from_slice(&ring[..n - first]);
+            }
+        } else {
+            for (k, y) in out.iter_mut().enumerate() {
+                *y = ring[(start + k) % slot.cap];
+            }
+        }
+    }
+
+    /// Advance every delay line's ring head by `block` samples.
+    pub fn advance_all(&mut self, block: usize) {
+        for slot in &mut self.slots {
+            let next = slot.head + block;
+            slot.head = if next < slot.cap {
+                next
+            } else {
+                next % slot.cap
+            };
+        }
+    }
+}
+
+impl Clone for DelaySlab {
+    /// Allocate a fresh 64-byte-aligned backing buffer and copy each line's state.
+    fn clone(&self) -> Self {
+        if self.slots.is_empty() {
+            return DelaySlab {
+                data: Vec::new(),
+                base: 0,
+                slots: Vec::new(),
+                block: self.block,
+                total_stride: 0,
+            };
+        }
+        let len = self.total_stride + TILE_SAMPLES - 1;
+        let mut data = vec![0.0f32; len];
+        let base = data.as_ptr().align_offset(TILE_BYTES);
+        assert!(
+            base < TILE_SAMPLES,
+            "cloned delay slab cannot be aligned to 64 bytes"
+        );
+        for slot in &self.slots {
+            let src = self.base + slot.offset;
+            let dst = base + slot.offset;
+            data[dst..dst + slot.cap].copy_from_slice(&self.data[src..src + slot.cap]);
+        }
+        DelaySlab {
+            data,
+            base,
+            slots: self.slots.clone(),
+            block: self.block,
+            total_stride: self.total_stride,
+        }
+    }
+}

@@ -345,6 +345,7 @@ fn definite_length_minimal_tags_unknowns_and_boundary_lengths() {
         &[0x1f, 0x1f, 0][..],
         &[0x80, 0],
         &[0xa0, 0],
+        &[0x13, 1, b'a'],
         &[0x17, 0],
         &[0x18, 0],
     ] {

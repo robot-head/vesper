@@ -12,10 +12,11 @@ implementation, secret constant-time parser or formal proof.
 
 - `protobuf` implements `vesper.protobuf.explicit-presence/1`: borrowed strings
   and bytes, acyclic typed schemas, explicit singular presence/defaults, ordered
-  fields and one nonempty packed segment per repeated numeric field. Unknowns
-  and alternate representations are rejected. Signed `int32` and `int64` use
-  two's-complement varints, including ten-byte negative values. Standard protobuf
-  itself has no universal canonical encoding; maps, oneofs, extensions and float types remain
+  fields and one nonempty packed segment per repeated numeric field, including
+  signed and unsigned fixed-width scalars. Unknowns and alternate representations
+  are rejected. Signed `int32` and `int64` use two's-complement varints, including
+  ten-byte negative values. Standard protobuf itself has no universal canonical
+  encoding; maps, oneofs, extensions and float types remain
   unsupported.
 - `der` validates minimal supported universal primitive encodings, UTF8String, IA5String, PrintableString,
   and sequences.
@@ -34,6 +35,10 @@ borrows do not imply allocation-free metadata. See `protobuf`, `der` and `ipc`
 examples for executable usage.
 
 ## Canonical framing and remainder ownership
+
+The `u24` frame functions encode and parse a three-byte big-endian payload
+length followed by opaque bytes, with the same bounded, transactional and
+explicit-remainder conventions. They provide framing only, not TLS parsing.
 
 `framing::decode_canonical_u64_leb128` parses a prefix using at most ten bytes.
 It rejects overlong encodings and all >u64 representations, including tenth-byte

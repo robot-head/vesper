@@ -37,6 +37,11 @@ pub struct SourceReport {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ConfigProvenance {
     Default,
+    Discovered {
+        path: String,
+        bytes: usize,
+        blake3: String,
+    },
     Explicit {
         path: String,
         bytes: usize,
