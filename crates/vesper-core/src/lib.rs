@@ -7,3 +7,4 @@ pub mod ast;
 pub mod lifo;
 pub mod mode_vec;
 pub mod numeric;
+pub mod resource_grade;
