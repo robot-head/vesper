@@ -141,3 +141,10 @@ Coverage of at least 95% requires independent, equiprobable signs conditional
 on the centered nonzero magnitudes and zero pattern at the true location. The
 API does not establish those assumptions or measurement provenance, and it does
 not alter the existing regression gate.
+
+`gate_signed_rank_confidence` compares the complete confidence set against a
+maximum candidate-minus-baseline difference in the same units. It passes only
+if every retained location is at or below the threshold and reports a regression
+only if every retained location is strictly above it. Empty or nonseparating
+sets are inconclusive; open, closed, and unbounded endpoints retain their exact
+meaning. The gate preserves the set and inherits its stated assumptions.
