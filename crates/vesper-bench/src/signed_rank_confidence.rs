@@ -4,6 +4,7 @@
 //! equiprobable signs conditional on the centered nonzero magnitudes and zero
 //! pattern. This API does not establish those assumptions or measurement
 //! provenance, and is separate from the benchmark regression gate.
+use crate::Decision;
 use std::fmt;
 
 /// The inversion visits at most 1057 open intervals and breakpoint atoms.
@@ -35,6 +36,66 @@ pub struct SignedRankConfidenceSegment {
     pub lower_inclusive: bool,
     pub upper_times_two: Option<i128>,
     pub upper_inclusive: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignedRankGateInconclusive {
+    EmptyConfidenceSet,
+    ThresholdNotSeparated,
+}
+
+/// The complete confidence set is retained as evidence for every decision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SignedRankConfidenceGate {
+    pub decision: Decision,
+    pub reason: Option<SignedRankGateInconclusive>,
+    pub segments: Vec<SignedRankConfidenceSegment>,
+}
+
+/// Classify a candidate-minus-baseline difference against a maximum allowed
+/// difference in the same units. Pass requires every retained location to be
+/// at or below the threshold; regression requires every retained location to
+/// be strictly above it. Empty and nonseparating sets are inconclusive.
+/// This inherits the confidence set's assumptions and does not establish
+/// measurement provenance or change the existing ratio gate.
+pub fn gate_signed_rank_confidence(
+    differences: &[i64],
+    max_difference: i64,
+) -> Result<SignedRankConfidenceGate, SignedRankConfidenceError> {
+    let segments = signed_rank_confidence_set(differences)?;
+    let (decision, reason) = classify(&segments, max_difference);
+    Ok(SignedRankConfidenceGate {
+        decision,
+        reason,
+        segments,
+    })
+}
+
+// `signed_rank_confidence_set` returns ordered disjoint nonempty segments.
+fn classify(
+    segments: &[SignedRankConfidenceSegment],
+    max_difference: i64,
+) -> (Decision, Option<SignedRankGateInconclusive>) {
+    let (Some(first), Some(last)) = (segments.first(), segments.last()) else {
+        return (
+            Decision::Inconclusive,
+            Some(SignedRankGateInconclusive::EmptyConfidenceSet),
+        );
+    };
+    let threshold = 2 * i128::from(max_difference);
+    if last.upper_times_two.is_some_and(|upper| upper <= threshold) {
+        (Decision::Pass, None)
+    } else if first
+        .lower_times_two
+        .is_some_and(|lower| lower > threshold || (lower == threshold && !first.lower_inclusive))
+    {
+        (Decision::Regression, None)
+    } else {
+        (
+            Decision::Inconclusive,
+            Some(SignedRankGateInconclusive::ThresholdNotSeparated),
+        )
+    }
 }
 
 /// Exact non-rejection set for a two-sided 5% Wilcoxon signed-rank test,
@@ -177,4 +238,62 @@ fn accepts(differences: &[i64], location_times_four: i128) -> bool {
     // 2*tail / total > 1/20, equivalently 40*tail > total. With at most
     // 32 nonzero observations, both the subset counts and 40*tail fit u64.
     40 * tail > total
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    fn segment(
+        lower: Option<i128>,
+        lower_inclusive: bool,
+        upper: Option<i128>,
+        upper_inclusive: bool,
+    ) -> SignedRankConfidenceSegment {
+        SignedRankConfidenceSegment {
+            lower_times_two: lower,
+            lower_inclusive,
+            upper_times_two: upper,
+            upper_inclusive,
+        }
+    }
+
+    #[test]
+    fn threshold_classification_respects_open_closed_disconnected_and_empty_sets() {
+        assert_eq!(
+            classify(&[], 0),
+            (
+                Decision::Inconclusive,
+                Some(SignedRankGateInconclusive::EmptyConfidenceSet)
+            )
+        );
+        let right_open = [segment(Some(0), false, Some(2), true)];
+        assert_eq!(classify(&right_open, 0), (Decision::Regression, None));
+        let right_closed = [segment(Some(0), true, Some(2), true)];
+        assert_eq!(
+            classify(&right_closed, 0),
+            (
+                Decision::Inconclusive,
+                Some(SignedRankGateInconclusive::ThresholdNotSeparated)
+            )
+        );
+        let left_open = [segment(None, false, Some(0), false)];
+        assert_eq!(classify(&left_open, 0), (Decision::Pass, None));
+        let disconnected = [
+            segment(Some(-4), true, Some(-2), true),
+            segment(Some(2), true, Some(4), true),
+        ];
+        assert_eq!(
+            classify(&disconnected, 0),
+            (
+                Decision::Inconclusive,
+                Some(SignedRankGateInconclusive::ThresholdNotSeparated)
+            )
+        );
+        let unbounded_right = [segment(Some(2), true, None, false)];
+        assert_eq!(classify(&unbounded_right, 0), (Decision::Regression, None));
+        let all = [segment(None, false, None, false)];
+        assert_eq!(classify(&all, i64::MIN).0, Decision::Inconclusive);
+        assert_eq!(classify(&all, i64::MAX).0, Decision::Inconclusive);
+    }
 }

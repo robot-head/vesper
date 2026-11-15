@@ -230,7 +230,13 @@ pub fn compile_wire_input(text: &str) -> Result<Vec<WireLayout>, String> {
     Ok(layouts)
 }
 
-fn span(offset: usize, width: usize, endian: u8, sym: u32) -> Result<WireFieldSpan, String> {
+fn span_with_hot(
+    offset: usize,
+    width: usize,
+    endian: u8,
+    sym: u32,
+    is_hot_tile_col: u8,
+) -> Result<WireFieldSpan, String> {
     let byte_offset = u32::try_from(offset).map_err(|_| "layout offset overflow")?;
     Ok(WireFieldSpan {
         byte_offset,
@@ -238,10 +244,13 @@ fn span(offset: usize, width: usize, endian: u8, sym: u32) -> Result<WireFieldSp
         cache_line_idx: u16::try_from(byte_offset / CACHE_LINE_BYTES)
             .map_err(|_| "cache line index overflow")?,
         endian_tag: endian,
-        // No tiled(N) AoSoA source layout exists yet; nothing is a hot column.
-        is_hot_tile_col: 0,
+        is_hot_tile_col,
         field_sym_id: sym,
     })
+}
+
+fn span(offset: usize, width: usize, endian: u8, sym: u32) -> Result<WireFieldSpan, String> {
+    span_with_hot(offset, width, endian, sym, 0)
 }
 
 fn flatten(
@@ -293,6 +302,107 @@ pub fn wire_diagram(layout: &WireLayout, symbols: &mut Symbols) -> Result<Layout
     })
 }
 
+fn round_up_cache_line(bytes: usize) -> Result<usize, String> {
+    let line = usize::try_from(CACHE_LINE_BYTES).map_err(|_| "cache line size overflow")?;
+    bytes
+        .checked_add(line - 1)
+        .map(|v| (v / line) * line)
+        .ok_or_else(|| "tiled column alignment overflow".into())
+}
+
+fn hot_scalar_bytes(ty: &vesper_core::ast::Type) -> Option<usize> {
+    match ty {
+        vesper_core::ast::Type::Named(name, args) if args.is_empty() => match name.as_str() {
+            "u8" | "i8" | "bool" => Some(1),
+            "u16" | "i16" => Some(2),
+            "u32" | "i32" | "f32" => Some(4),
+            "u64" | "i64" | "f64" | "usize" | "isize" => Some(8),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn tiled_diagrams(
+    ty: &TypeDoc,
+    tile_width: u32,
+    variants: &[crate::NativeVariant],
+    symbols: &mut Symbols,
+) -> Result<(LayoutDiagram, Option<LayoutDiagram>), String> {
+    let name = &ty.declaration.name;
+    let decl_fields = ty
+        .declaration
+        .variants
+        .first()
+        .map(|v| v.fields.as_slice())
+        .unwrap_or(&[]);
+    let layout_fields = variants.first().map(|v| v.fields.as_slice()).unwrap_or(&[]);
+    let mut hot_spans = Vec::new();
+    let mut tile_offset = 0usize;
+    let mut cold_spans = Vec::new();
+    let mut cold_offset = 0usize;
+
+    for decl in decl_fields {
+        let layout_field = layout_fields
+            .iter()
+            .find(|f| f.name == decl.name)
+            .ok_or_else(|| format!("{name}: missing layout for tiled field '{}'", decl.name))?;
+        let elem_bytes = usize::try_from(layout_field.bytes).map_err(|_| "field width overflow")?;
+        let sym = symbols.intern(&decl.name)?;
+        if decl.temperature != Some(vesper_core::ast::FieldTemperature::Cold) {
+            let packed_bytes = hot_scalar_bytes(&decl.ty).unwrap_or(elem_bytes);
+            let unpadded = packed_bytes
+                .checked_mul(usize::try_from(tile_width).map_err(|_| "tile width overflow")?)
+                .ok_or("tiled column size overflow")?;
+            let aligned = round_up_cache_line(unpadded)?;
+            hot_spans.push(span_with_hot(tile_offset, unpadded, ENDIAN_NATIVE, sym, 1)?);
+            tile_offset = tile_offset
+                .checked_add(aligned)
+                .ok_or("tiled stride overflow")?;
+        } else {
+            let words = elem_bytes.div_ceil(8).max(1);
+            let slab_bytes = words * 8;
+            cold_spans.push(span(cold_offset, slab_bytes, ENDIAN_NATIVE, sym)?);
+            cold_offset = cold_offset
+                .checked_add(slab_bytes)
+                .ok_or("cold slab overflow")?;
+        }
+    }
+
+    if hot_spans.is_empty() {
+        return Ok((
+            LayoutDiagram {
+                name: name.clone(),
+                source: LayoutSource::Native,
+                bytes: u32::try_from(cold_offset).map_err(|_| "layout size overflow")?,
+                alignment: 8,
+                spans: cold_spans,
+            },
+            None,
+        ));
+    }
+
+    let hot = LayoutDiagram {
+        name: name.clone(),
+        source: LayoutSource::Native,
+        bytes: u32::try_from(tile_offset).map_err(|_| "layout size overflow")?,
+        alignment: CACHE_LINE_BYTES,
+        spans: hot_spans,
+    };
+    let cold = if cold_spans.is_empty() {
+        None
+    } else {
+        Some(LayoutDiagram {
+            name: format!("{name}.cold"),
+            source: LayoutSource::Native,
+            bytes: u32::try_from(cold_offset).map_err(|_| "layout size overflow")?,
+            alignment: 8,
+            spans: cold_spans,
+        })
+    };
+    Ok((hot, cold))
+}
+
 /// Spans of a checked source struct's native layout. Enums (tag plus
 /// overlapping variants) and unavailable layouts return the reason instead.
 pub fn native_diagram(ty: &TypeDoc, symbols: &mut Symbols) -> Result<LayoutDiagram, String> {
@@ -308,6 +418,9 @@ pub fn native_diagram(ty: &TypeDoc, symbols: &mut Symbols) -> Result<LayoutDiagr
             variants,
             ..
         } => {
+            if let Some(tile_width) = ty.declaration.tile_width {
+                return tiled_diagrams(ty, tile_width, variants, symbols).map(|(hot, _)| hot);
+            }
             let mut spans = Vec::new();
             for field in variants.iter().flat_map(|v| &v.fields) {
                 let offset = usize::try_from(field.offset).map_err(|_| "negative field offset")?;
@@ -377,9 +490,24 @@ pub fn visuals(
     }
     for ty in types {
         if ty.declaration.mode == crate::Mode::Linear || !ty.declaration.is_enum {
-            match native_diagram(ty, &mut v.symbols) {
-                Ok(d) => v.layouts.push(d),
-                Err(reason) => v.unsupported_layouts.push(reason),
+            if let Some(tile_width) = ty.declaration.tile_width
+                && !ty.declaration.is_enum
+                && let NativeLayout::Available { variants, .. } = &ty.layout
+            {
+                match tiled_diagrams(ty, tile_width, variants, &mut v.symbols) {
+                    Ok((hot, cold)) => {
+                        v.layouts.push(hot);
+                        if let Some(cold) = cold {
+                            v.layouts.push(cold);
+                        }
+                    }
+                    Err(reason) => v.unsupported_layouts.push(reason),
+                }
+            } else {
+                match native_diagram(ty, &mut v.symbols) {
+                    Ok(d) => v.layouts.push(d),
+                    Err(reason) => v.unsupported_layouts.push(reason),
+                }
             }
         }
     }
