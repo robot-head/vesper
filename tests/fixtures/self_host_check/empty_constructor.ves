@@ -1,0 +1,4 @@
+copy struct Empty {}
+fn main() -> Empty {
+    Empty
+}

@@ -190,3 +190,16 @@ fn nominal_row_arguments_fail_closed() {
         export("copy struct Container[r: eff] {} fn inspect[r: eff](x: Container[r]) {}");
     assert_unknown(&interface);
 }
+
+#[test]
+fn explicit_public_function_has_the_existing_public_interface() {
+    let explicit = export("pub fn id(x: i64) -> i64 { x }");
+    let implicit = export("fn id(x: i64) -> i64 { x }");
+    assert_eq!(explicit, implicit);
+    assert_eq!(
+        function(&explicit, "id").result,
+        Type::Primitive {
+            name: api::Primitive::I64
+        }
+    );
+}
