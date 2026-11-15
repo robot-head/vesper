@@ -22,6 +22,7 @@ mod identity;
 mod plan;
 mod recording;
 mod session;
+mod sim_aura;
 mod view;
 
 pub use identity::{SlotId, SubscriptionId, UiThread, WidgetId, WrongThread};
@@ -33,5 +34,9 @@ pub use session::{
     Backend, CloseAction, CloseDecision, CloseError, CloseFailure, CloseOutcome, CloseRequestError,
     CommitError, CommitFailure, CommitReport, InitError, InitFailure, PrepareError, PrepareFailure,
     PreparedUpdate, Session, ShutdownError, ShutdownFailure,
+};
+pub use sim_aura::{
+    AuditTarget, AuraSlotTable, NativeUiBackend, NodeOp, SimAura, SimAuraError, SimulatedEvent,
+    SlotValue, WcagReport, WcagViolation, audit_view_tree, encode_view_tree, layout_flags,
 };
 pub use view::{Event, HandlerKey, Key, Kind, Limits, Node, Property, Value, ViewError, ViewTree};

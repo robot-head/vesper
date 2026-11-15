@@ -1,0 +1,2 @@
+linear struct Ticket {}
+fn bad(sink ticket: Ticket) {}

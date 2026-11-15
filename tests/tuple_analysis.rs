@@ -260,6 +260,7 @@ fn malformed_nominal_contexts_never_clone_wide_expected_types_in_checker() {
     for source in [
         "copy enum Capsule[T]{Empty} fn f(){let x=Capsule::Extra::Empty;(x,x)}",
         "fn f(){let x=Option::Extra::None;(x,x)}",
+        "copy enum Capsule{Empty} fn f(in x:Capsule){let Capsule::Extra::Empty=x;}",
     ] {
         let parsed = parser::parse(source);
         assert!(parsed.diagnostics.is_empty());

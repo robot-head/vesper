@@ -31,6 +31,8 @@
 //! refused as [`RefusalReason::AliasingPointers`]. In C-ABI functions,
 //! `&T`/`&mut T` of an integer or struct lift to `nocapture in|inout`
 //! single pointers (Rust references are non-null and never alias a `&mut`).
+//! Static references, including through aliases, and references whose named
+//! lifetimes have explicit bounds are conservatively refused as `nocapture`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -467,6 +469,44 @@ struct Analyzer {
 }
 
 impl Analyzer {
+    /// Resolve the outer reference through the same non-generic alias forms
+    /// supported by `rty`. Bounded lifetimes are conservatively treated as
+    /// potentially static, including chains of lifetime bounds.
+    fn reference_may_be_retained(
+        &self,
+        ty: &Type,
+        bounded: &BTreeSet<String>,
+        depth: usize,
+    ) -> bool {
+        if depth > 32 {
+            // `rty` independently refuses excessive alias depth.
+            return true;
+        }
+        match ty {
+            Type::Paren(p) => self.reference_may_be_retained(&p.elem, bounded, depth + 1),
+            Type::Group(g) => self.reference_may_be_retained(&g.elem, bounded, depth + 1),
+            Type::Reference(r) => r
+                .lifetime
+                .as_ref()
+                .is_some_and(|l| l.ident == "static" || bounded.contains(&l.ident.to_string())),
+            Type::Path(p) if p.qself.is_none() => {
+                let local = p.path.segments.len() == 1
+                    || p.path.segments.first().is_some_and(|s| {
+                        s.ident == "crate" || s.ident == "self" || s.ident == "super"
+                    });
+                local
+                    && p.path.segments.last().is_some_and(|segment| {
+                        self.aliases
+                            .get(&segment.ident.to_string())
+                            .is_some_and(|alias| {
+                                self.reference_may_be_retained(alias, bounded, depth + 1)
+                            })
+                    })
+            }
+            _ => false,
+        }
+    }
+
     fn rty(&self, ty: &Type, self_ty: Option<&str>, depth: usize) -> Result<RTy, Why> {
         if depth > 32 {
             return Err((
@@ -906,7 +946,7 @@ struct RawParam {
     name: String,
     ty: RTy,
     receiver: bool,
-    /// A `&'static` borrow: the callee may keep it, so it is not `nocapture`.
+    /// A borrow the callee may retain, so it cannot be declared `nocapture`.
     static_ref: bool,
 }
 
@@ -954,6 +994,12 @@ impl Analyzer {
                 "parameter budget exceeded".into(),
             )));
         }
+        let bounded_lifetimes: BTreeSet<String> = sig
+            .generics
+            .lifetimes()
+            .filter(|lifetime| !lifetime.bounds.is_empty())
+            .map(|lifetime| lifetime.lifetime.ident.to_string())
+            .collect();
         let notes = annotations(attrs, &item)?;
         let mut raw = vec![];
         for input in &sig.inputs {
@@ -983,7 +1029,9 @@ impl Analyzer {
                         .reference
                         .as_ref()
                         .and_then(|(_, l)| l.as_ref())
-                        .is_some_and(|l| l.ident == "static");
+                        .is_some_and(|l| {
+                            l.ident == "static" || bounded_lifetimes.contains(&l.ident.to_string())
+                        });
                     raw.push(RawParam {
                         name: "self".into(),
                         ty,
@@ -1007,11 +1055,7 @@ impl Analyzer {
                     let ty = self
                         .rty(&t.ty, self_ty, 0)
                         .map_err(|(r, d)| refuse((r, format!("parameter `{}`: {d}", pi.ident))))?;
-                    let static_ref = matches!(
-                        &*t.ty,
-                        syn::Type::Reference(r)
-                            if r.lifetime.as_ref().is_some_and(|l| l.ident == "static")
-                    );
+                    let static_ref = self.reference_may_be_retained(&t.ty, &bounded_lifetimes, 0);
                     raw.push(RawParam {
                         name: pi.ident.to_string(),
                         ty,
@@ -1234,7 +1278,7 @@ impl Analyzer {
                             (
                                 RefusalReason::PointerParameter,
                                 format!(
-                                    "`{}`: a `&'static` borrow may be kept by the callee, so it is not a `nocapture` pointer",
+                                    "`{}`: a static or lifetime-bounded borrow may be kept by the callee, so it is not a `nocapture` pointer",
                                     p.name
                                 ),
                             ),

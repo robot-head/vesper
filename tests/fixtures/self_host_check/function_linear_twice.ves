@@ -1,0 +1,4 @@
+fn bad(sink f: fn @linear ()) {
+    f();
+    f();
+}

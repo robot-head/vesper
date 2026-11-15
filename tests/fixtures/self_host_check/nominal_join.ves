@@ -1,0 +1,9 @@
+linear struct Ticket {}
+copy struct Wrapper {
+    ticket: Ticket
+}
+fn main() {
+    let wrapper = Wrapper {
+        ticket: Ticket {}
+    };
+}

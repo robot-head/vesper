@@ -1,0 +1,7 @@
+struct Token {}
+fn take(sink token: Token) {}
+fn main() {
+    let token = Token {};
+    take(sink token);
+    take(sink token);
+}
