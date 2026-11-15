@@ -109,12 +109,12 @@ theorem minimizeEntry_current_noEmpty (acc : NormLevel) (p : List Name)
   unfold minimizeEntry at hget
   dsimp only at hget
   split at hget
-  · rw [map_get_erase, if_pos rfl] at hget
+  · rw [map_get_erase, ite_eq_left rfl] at hget
     contradiction
   next he =>
-    rw [map_get_insert, if_pos rfl] at hget
+    rw [map_get_insert, ite_eq_left rfl] at hget
     cases hget
-    exact eq_false_of_ne_true he
+    exact Bool.eq_false_of_ne_true he
 
 /-- Every possibly empty current row has a key still awaiting a source visit.
 No distinctness, original-row lookup, sorting, WF, or nonempty input is needed. -/

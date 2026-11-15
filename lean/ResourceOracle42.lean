@@ -309,7 +309,7 @@ private def execute (r : Request) : String × Array Json × Nat :=
 private def bounds : Array Json :=
   #[4194304,262144,8,1000000,131072,2048,65,256,9999999999,20,4096,67108864].map jn
 private def ready : Json := ja #[jn 1,.str "ready",.str "vesper.resource-model42/1",
-  .str "4.24.0",.str "797c613eb9b6d4ec95db23e3e00af9ac6657f24b",ja bounds]
+  .str "4.35.0",.str "eb6cafb7290e8bd5f2937522d8d804f58f02bafc",ja bounds]
 private def decodeBytes (bytes : ByteArray) : Except String Request := do
   lexical bytes
   let text ← match String.fromUTF8? bytes with

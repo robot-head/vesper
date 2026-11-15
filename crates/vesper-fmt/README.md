@@ -144,7 +144,7 @@ central structured AST, including list literals and a typed noncomputable
 document definition. Source payloads remain escaped strings.
 
 The CLI compiles the bundled total logical model and witness with real Lean
-4.24.0 in private staging, then reuses the existing kernel-replay auditor with an
+4.35.0 in private staging, then reuses the existing kernel-replay auditor with an
 empty axiom policy. No accepted report or `--emit-lean` witness is published
 before that replay succeeds. The report scope is `formatter_document_model`;
 verification never writes the source and ordinary fmt/LSP/check do not start Lean.

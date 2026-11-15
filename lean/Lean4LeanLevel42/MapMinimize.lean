@@ -84,7 +84,7 @@ theorem minimize_fold_context (ρ : Valuation) (acc : NormLevel)
             (mapValue ρ (acc.erase p)) (hw p original hget)
           omega
       · have hother : (acc.erase p).get? q = some n := by
-          rw [map_get_erase, if_neg he]
+          rw [map_get_erase, ite_eq_right he]
           exact hrow
         have hb := nodeValue_le_mapValue (ρ := ρ) hother
         have hvar := node_subsume_vars_union ρ p q residual n

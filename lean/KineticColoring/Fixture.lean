@@ -50,7 +50,7 @@ def runCase : List Nat → Option String
 partial def loop (stdin : IO.FS.Stream) (stdout : IO.FS.Stream) : IO Unit := do
   let line ← stdin.getLine
   if line.isEmpty then return
-  let fields := (line.trimRight.splitOn " ").filter (· ≠ "") |>.map String.toNat?
+  let fields := (line.trimAsciiEnd.toString.splitOn " ").filter (· ≠ "") |>.map String.toNat?
   let out :=
     if fields.all Option.isSome then
       (runCase (fields.filterMap id)).getD "error"

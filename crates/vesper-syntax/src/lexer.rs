@@ -150,6 +150,10 @@ pub enum TokenKind {
     Dollar,
     #[token("~")]
     Tilde,
+    #[token("|=")]
+    PipeEq,
+    #[token("&=")]
+    AmpEq,
 }
 fn block_comment(lex: &mut logos::Lexer<TokenKind>) -> bool {
     let rest = lex.remainder();

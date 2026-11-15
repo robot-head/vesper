@@ -1,6 +1,6 @@
 //! Genuine three-model external replay plus independently authored refusal cases.
 //! Synthetic protocol fixtures and transport markers are never replay evidence.
-#[path = "../src/bin/lean4lean42/mod.rs"]
+#[path = "../src/bin/logos42/mod.rs"]
 pub mod driver;
 
 use driver::protocol::{ExpectedControl, Inventory, Machine};
@@ -64,7 +64,7 @@ impl Directory {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
-            "vesper-lean4lean42-acceptance-{}-{}",
+            "vesper-logos42-acceptance-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -79,7 +79,7 @@ impl Drop for Directory {
 }
 
 fn binary() -> PathBuf {
-    let given = PathBuf::from(env!("CARGO_BIN_EXE_lean4lean42"));
+    let given = PathBuf::from(env!("CARGO_BIN_EXE_logos42"));
     let path = if given.components().count() > 1 || given.is_absolute() {
         given
     } else {
@@ -92,7 +92,7 @@ fn binary() -> PathBuf {
                 paths
             })
             .find(|path| path.is_file())
-            .expect("actual Cargo lean4lean42 binary")
+            .expect("actual Cargo logos42 binary")
     };
     path.canonicalize().expect("canonical actual binary")
 }
@@ -116,13 +116,13 @@ fn digest(value: &Value) -> [u8; 32] {
 }
 fn controls() -> Vec<ExpectedControl> {
     let manifest: Value =
-        serde_json::from_slice(include_bytes!("../tools/lean4lean42/known-fixes.json")).unwrap();
+        serde_json::from_slice(include_bytes!("../tools/logos42/known-fixes.json")).unwrap();
     let controls: Vec<ExpectedControl> =
         serde_json::from_value(manifest["controls"].clone()).unwrap();
     assert_eq!(
         controls.len(),
-        94,
-        "published registry includes five shared metadata conditions"
+        42,
+        "published raw-export control registry is fixed"
     );
     controls
 }
@@ -194,7 +194,7 @@ fn execute(command: &mut Command, seconds: u64) -> Captured {
         output.text()
     );
     eprintln!(
-        "lean4lean42 acceptance subprocess {:.2}s: {command:?}",
+        "logos42 acceptance subprocess {:.2}s: {command:?}",
         started.elapsed().as_secs_f64()
     );
     output
@@ -207,13 +207,14 @@ fn control_hash(records: &Value) -> [u8; 32] {
     }
     let records = records.as_array().unwrap();
     let mut hash = blake3::Hasher::new();
-    hash.update(b"vesper.lean4lean42.controls\0");
+    hash.update(b"vesper.logos42.controls\0");
     hash.update(&1u16.to_le_bytes());
     hash.update(&(records.len() as u32).to_le_bytes());
     for (index, record) in records.iter().enumerate() {
         hash.update(&(index as u32).to_le_bytes());
         text(&mut hash, record["id"].as_str().unwrap());
         hash.update(&[match record["kind"].as_str().unwrap() {
+            "raw_export" => 3,
             "raw_declaration" => 0,
             "checker_expr" => 1,
             "condition" => 2,
@@ -233,7 +234,6 @@ fn validate_controls(report: &Value, expected: &[ExpectedControl]) {
     let actual = report["controls"].as_array().unwrap();
     assert_eq!(actual.len(), expected.len());
     let mut ids = BTreeSet::new();
-    let mut kinds = [0usize; 3];
     let mut refused = 0;
     for (actual, expected) in actual.iter().zip(expected) {
         assert!(ids.insert(actual["id"].as_str().unwrap()));
@@ -243,48 +243,34 @@ fn validate_controls(report: &Value, expected: &[ExpectedControl]) {
         assert_eq!(actual["expected_reason"], expected.expected_reason);
         assert_eq!(actual["actual_reason"], expected.expected_reason);
         assert_eq!(actual["matched"], true);
-        let kind = match actual["kind"].as_str().unwrap() {
-            "raw_declaration" => 0,
-            "checker_expr" => 1,
-            "condition" => 2,
-            _ => panic!("kind"),
-        };
-        kinds[kind] += 1;
+        assert_eq!(actual["kind"], "raw_export");
         if !expected.expected_accept {
             refused += 1;
         }
         assert_eq!(serde_json::to_value(expected.kind).unwrap(), actual["kind"]);
     }
-    assert_eq!(kinds, [52, 15, 27]);
-    assert_eq!(refused, 37);
-    for (reason, count, accepted) in [
-        ("metadata_equal", 2, true),
-        ("constructor_metadata_mismatch", 1, false),
-        ("recursor_metadata_mismatch", 2, false),
+    assert_eq!(refused, 36);
+    for id in [
+        "arena.closure-level-subst",
+        "arena.loose-bvar-value",
+        "arena.constlevels",
+        "arena.nat-rec-k-lie",
+        "arena.rec-missing-ih",
+        "arena.nested-name-capture",
+        "vesper.loose-bvar-theorem",
+        "vesper.loose-bvar-definition",
+        "vesper.loose-bvar-opaque",
+        "vesper.mismatched-theorem-body",
+        "vesper.duplicate-declaration",
+        "upstream.axiom-quot-mk",
+        "upstream.forged-quot-type",
     ] {
-        let matching: Vec<_> = actual
+        let record = actual
             .iter()
-            .filter(|record| record["expected_reason"] == reason)
-            .collect();
-        assert_eq!(matching.len(), count);
-        for record in matching {
-            assert_eq!(record["kind"], "condition");
-            assert_eq!(record["actual_accept"], accepted);
-        }
-    }
-    for kind in ["theorem", "definition", "opaque"] {
-        for (free, reason) in [("fvar", "declaration_fvar"), ("mvar", "declaration_mvar")] {
-            let id = format!("closure.{free}.{kind}");
-            let record = actual.iter().find(|record| record["id"] == id).unwrap();
-            assert_eq!(record["kind"], "raw_declaration");
-            assert_eq!(record["actual_accept"], false);
-            assert_eq!(record["actual_reason"], reason);
-        }
-        let id = format!("closure.closed.{kind}");
-        assert_eq!(
-            actual.iter().find(|record| record["id"] == id).unwrap()["actual_accept"],
-            true
-        );
+            .find(|r| r["id"] == id)
+            .expect("mandatory rejection control");
+        assert_eq!(record["actual_accept"], false);
+        assert_eq!(record["actual_reason"], "rejected");
     }
     assert_eq!(
         digest(&report["controls_blake3"]),
@@ -311,7 +297,7 @@ fn genuine_positive(
     );
     assert!(output.status.success(), "{}", output.text());
     let report = output.json();
-    assert_eq!(report["schema"], 2);
+    assert_eq!(report["schema"], 3);
     assert_eq!(report["status"], "complete");
     assert_eq!(report["scope"], "eligible_fresh_closure");
     assert_eq!(report["axiom_audit"], "not_run");
@@ -321,18 +307,19 @@ fn genuine_positive(
     }
     assert!(report["process_spawns"].as_u64().unwrap() >= 7);
     let tools = &report["tools"];
-    assert_eq!(tools["profile"], "vesper.lean4lean42/2");
+    assert_eq!(tools["profile"], "vesper.logos42/2");
     assert_eq!(tools["lean_release"], receipt["lean_release"]);
-    assert_eq!(receipt["lean_release"], "leanprover/lean4:v4.24.0");
+    assert_eq!(receipt["lean_release"], "leanprover/lean4:v4.35.0");
     assert_eq!(
         tools["lean_commit"],
-        "797c613eb9b6d4ec95db23e3e00af9ac6657f24b"
+        "eb6cafb7290e8bd5f2937522d8d804f58f02bafc"
     );
     assert_eq!(tools["os"], std::env::consts::OS);
     assert_eq!(tools["arch"], std::env::consts::ARCH);
     assert_eq!(digest(&tools["receipt_blake3"]), before);
     for field in [
         "checker_blake3",
+        "kernel_blake3",
         "compiler_blake3",
         "compiler_runtime_manifest_blake3",
         "source_manifest_blake3",
@@ -348,16 +335,16 @@ fn genuine_positive(
     }
     assert_eq!(
         digest(&tools["pins_blake3"]),
-        *blake3::hash(include_bytes!("../tools/lean4lean42/pins.json")).as_bytes()
+        *blake3::hash(include_bytes!("../tools/logos42/pins.json")).as_bytes()
     );
     assert_eq!(
         digest(&tools["known_fixes_blake3"]),
-        *blake3::hash(include_bytes!("../tools/lean4lean42/known-fixes.json")).as_bytes()
+        *blake3::hash(include_bytes!("../tools/logos42/known-fixes.json")).as_bytes()
     );
     assert_eq!(
         digest(&tools["resource_bundle_blake3"]),
         *blake3::hash(include_bytes!(
-            "../tools/lean4lean42/resource-source-manifest.json"
+            "../tools/logos42/resource-source-manifest.json"
         ))
         .as_bytes()
     );
@@ -491,7 +478,7 @@ fn genuine_positive(
     let encoded =
         serde_json::to_string(&report).expect("serialize the actual successful CLI report");
     assert!(encoded.len() <= Limits::default().report_bytes);
-    println!("LEAN4LEAN42_REPORT {encoded}");
+    println!("LOGOS42_REPORT {encoded}");
     report
 }
 
@@ -545,14 +532,11 @@ fn inspect_artifacts(parent: &Path, report: &Value) {
     }
     let association = &report["targets"][2]["resource"];
     let bundle: Value = serde_json::from_slice(include_bytes!(
-        "../tools/lean4lean42/resource-source-manifest.json"
+        "../tools/logos42/resource-source-manifest.json"
     ))
     .unwrap();
     assert_eq!(bundle["schema"], 1);
-    assert_eq!(
-        bundle["domain"],
-        "vesper.lean4lean42.resource-source-bundle/1"
-    );
+    assert_eq!(bundle["domain"], "vesper.logos42.resource-source-bundle/1");
     for source in bundle["files"].as_array().unwrap() {
         let source_path = source["path"].as_str().unwrap();
         let retained = if let Some(relative) = source_path.strip_prefix("lean/") {
@@ -730,7 +714,7 @@ fn refresh_header(frames: &mut [Value]) {
     frames[0][6] = json!(bytes);
 }
 fn hello(mode: u8, target: u8) -> Value {
-    json!([1, 0, TOKEN, mode, target, "4.24.0", "vesper.lean4lean42/2"])
+    json!([1, 0, TOKEN, mode, target, "4.35.0", "vesper.logos42/2"])
 }
 fn terminal(mode: u8, target: u8, counters: [u64; 14]) -> Value {
     let mut values = vec![json!(1), json!(9), json!(TOKEN), json!(mode), json!(target)];
@@ -1088,14 +1072,17 @@ fn resource_route_and_skip_refusals(limits: &Limits, controls: &[ExpectedControl
         }
     }
     for (mode, target) in [(0, 3), (1, 3), (3, 2)] {
-        let fixture = NegativeInventory::build(3, limits);
-        let expected = (mode == 1).then_some(&fixture.inventory);
-        let mut machine = Machine::new(mode, target, TOKEN, limits, controls, expected).unwrap();
-        let mut old = hello(mode, target);
-        old[6] = json!("vesper.lean4lean42/1");
-        let error = feed(&mut machine, &old).unwrap_err();
-        assert_eq!(error.kind, ErrorKind::Protocol);
-        rejected(machine, error);
+        for profile in ["vesper.lean4lean42/3", "vesper.logos42/1"] {
+            let fixture = NegativeInventory::build(3, limits);
+            let expected = (mode == 1).then_some(&fixture.inventory);
+            let mut machine =
+                Machine::new(mode, target, TOKEN, limits, controls, expected).unwrap();
+            let mut old = hello(mode, target);
+            old[6] = json!(profile);
+            let error = feed(&mut machine, &old).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Protocol);
+            rejected(machine, error);
+        }
     }
     let fixture = NegativeInventory::build(3, limits);
     for skip in [1, 2, 3] {
@@ -1151,18 +1138,13 @@ fn control_and_shape_refusals(limits: &Limits, expected: &[ExpectedControl]) {
         rejected(machine, error);
     }
     for payload in [
-        br#"[2,0,"00000000000000000000000000000000",3,2,"4.24.0","vesper.lean4lean42/2"]"#
+        br#"[2,0,"00000000000000000000000000000000",3,2,"4.35.0","vesper.logos42/2"]"#.as_slice(),
+        br#"[1,0,"00000000000000000000000000000001",3,2,"4.35.0","vesper.logos42/2"]"#.as_slice(),
+        br#"[1,0,"00000000000000000000000000000000",3.0,2,"4.35.0","vesper.logos42/2"]"#.as_slice(),
+        br#"[1,0,"00000000000000000000000000000000",3e0,2,"4.35.0","vesper.logos42/2"]"#.as_slice(),
+        br#"[1,0,"00000000000000000000000000000000",3,true,"4.35.0","vesper.logos42/2"]"#
             .as_slice(),
-        br#"[1,0,"00000000000000000000000000000001",3,2,"4.24.0","vesper.lean4lean42/2"]"#
-            .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3.0,2,"4.24.0","vesper.lean4lean42/2"]"#
-            .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3e0,2,"4.24.0","vesper.lean4lean42/2"]"#
-            .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3,true,"4.24.0","vesper.lean4lean42/2"]"#
-            .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3,2,"4.24.0","vesper.lean4lean42/2",0]"#
-            .as_slice(),
+        br#"[1,0,"00000000000000000000000000000000",3,2,"4.35.0","vesper.logos42/2",0]"#.as_slice(),
         b"{}".as_slice(),
         b"[".as_slice(),
     ] {
@@ -1355,12 +1337,16 @@ fn binding_refusals(root: &Path, receipt: &Value) {
             entry["path"]
                 .as_str()
                 .unwrap()
-                .ends_with("VesperControls.olean")
+                .ends_with("LogosControls.olean")
         })
         .unwrap()["path"]
         .as_str()
         .unwrap();
-    for relative in [source, output] {
+    for relative in [
+        source,
+        output,
+        receipt["kernel_relative_path"].as_str().unwrap(),
+    ] {
         replace_from(&root.join(relative), &copy.0.join(relative), b"\n");
         let failure = driver::run(&configuration(&copy.0, receipt))
             .expect_err("changed exact source/control artifact cannot be bound");
@@ -1392,7 +1378,7 @@ fn binding_refusals(root: &Path, receipt: &Value) {
         no_replay(&failure);
         fs::remove_file(path).unwrap();
     }
-    for which in 0..6 {
+    for which in 0..10 {
         let mut altered = receipt.clone();
         match which {
             0 => altered["unrecognized_acceptance_field"] = json!(true),
@@ -1414,6 +1400,13 @@ fn binding_refusals(root: &Path, receipt: &Value) {
                     json!(altered["resource_bundle_blake3"][0].as_u64().unwrap() ^ 1)
             }
             5 => altered["schema"] = json!(1),
+            6 => altered["profile"] = json!("vesper.lean4lean42/3"),
+            7 => {
+                altered["kernel_blake3"][0] =
+                    json!(altered["kernel_blake3"][0].as_u64().unwrap() ^ 1)
+            }
+            8 => altered["cargo_build_argv"][2] = json!("--frozen"),
+            9 => altered["profile"] = json!("vesper.logos42/1"),
             _ => unreachable!(),
         }
         replace_json(&copy.0.join("setup-receipt.json"), &altered);
@@ -1702,8 +1695,8 @@ fn resource_binding_and_inventory_refusals(root: &Path, receipt: &Value, positiv
 fn genuine_three_model_replay_and_independent_refusal_matrix() {
     let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
     let started = Instant::now();
-    let root=std::env::var_os("VESPER_LEAN4LEAN42_ROOT").map(PathBuf::from)
-        .expect("VESPER_LEAN4LEAN42_ROOT must name the genuinely prepared candidate; missing is HARDFAIL, never skip");
+    let root=std::env::var_os("VESPER_LOGOS42_ROOT").map(PathBuf::from)
+        .expect("VESPER_LOGOS42_ROOT must name the genuinely prepared candidate; missing is HARDFAIL, never skip");
     let root = root
         .canonicalize()
         .expect("actual prepared candidate directory");
@@ -1724,7 +1717,7 @@ fn genuine_three_model_replay_and_independent_refusal_matrix() {
     resource_binding_and_inventory_refusals(&root, &receipt, &positive);
     binding_refusals(&root, &receipt);
     eprintln!(
-        "lean4lean42 complete serial acceptance wall time {:.2}s",
+        "logos42 complete serial acceptance wall time {:.2}s",
         started.elapsed().as_secs_f64()
     );
 }

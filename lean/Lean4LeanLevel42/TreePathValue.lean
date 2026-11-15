@@ -84,7 +84,7 @@ theorem tree_entries_lookup_of_mem {a : Name} {u : Tree} {xs : List (Name × Tre
         subst m
         have hf := hm a (List.mem_map.mpr ⟨(a, u), hrest, rfl⟩)
         simp [name_cmp_refl] at hf
-      rw [treeEntriesLookup_cons, if_neg hne]
+      rw [treeEntriesLookup_cons, ite_eq_right hne]
       exact ih ht hrest
 
 theorem tree_children_sorted_root (t : Tree) (hs : TreeChildrenSorted t) :
@@ -445,7 +445,7 @@ theorem tree_modify_payload_upper_gated (ρ : Valuation) (prior route : List Nam
   | nil =>
     change treePathGate ρ prior (levelValue ρ (treeWithPayload n t).reify) ≤ b
     apply tree_reify_gate_le
-    · simpa only [List.append_nil] using hpayload
+    · simpa only [List.append_nil, treeWithPayload] using hpayload
     · intro a u hu
       exact Nat.le_trans (treePathGate_mono ρ prior (tree_reify_child_bound ρ t hu)) hold
   | cons a route ih =>

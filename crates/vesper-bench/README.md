@@ -48,6 +48,13 @@ continuous differences symmetric about their population location. The API
 does not establish those assumptions or convert benchmark measurements into
 differences. It is separate from the ratio-based regression gate below.
 
+`mann_whitney_ranks(first, second)` separately computes exact Mann–Whitney U
+rank counts for two bounded `u64` samples. Counts are doubled to represent tied
+pairs without rounding. It returns no p-value, confidence interval or gate
+decision. Independent-sample inference requires appropriate independence and
+distribution assumptions; ABBA epoch measurements are paired and do not
+automatically satisfy those assumptions.
+
 ## Optional population-median confidence gate
 
 `analyze_pairs(samples, max_regression_bp)` targets the population median of the

@@ -155,8 +155,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      # No external Lean4Lean checker here: its only user,
-      # //:test/lean4lean42_acceptance, runs on Linux only (BUILD.bazel).
+      # No external Logos checker here: its only user,
+      # //:test/logos42_acceptance, runs on Linux only (BUILD.bazel).
       # `short` lists every test with its time, to keep the slow ones visible.
       - name: Run selected platform tests
         run: >-
@@ -277,7 +277,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      # No external Lean4Lean checker: tests/lean4lean42_acceptance.rs, its
+      # No external Logos checker: tests/logos42_acceptance.rs, its
       # only user, is ignored on Windows and runs on Linux.
       - run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - name: Run selected platform tests

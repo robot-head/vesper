@@ -234,7 +234,7 @@ fn strict_response_decoder_rejects_wrong_sequence_shape_and_lexical_extensions()
 
 #[test]
 fn ready_and_terminal_checks_require_exact_profile_and_totals() {
-    protocol::ready(br#"[1,"ready",1,"4.24.0","vesper.arith.checked/1",63,8,3,3,4096]"#).unwrap();
+    protocol::ready(br#"[1,"ready",1,"4.35.0","vesper.arith.checked/1",63,8,3,3,4096]"#).unwrap();
     assert!(
         protocol::ready(br#"[1,"ready",1,"4.25.0","vesper.arith.checked/1",63,8,3,3,4096]"#)
             .is_err()

@@ -62,7 +62,7 @@ theorem checkInputValue_hasType {fuel : Nat} {ty : Ty} {value : RuntimeValue}
           | ok result =>
             cases result
             have second : checkInputValue fuel right b = .ok () := by
-              simpa [checkInputValue, first, Except.bind] using checked
+              simpa [checkInputValue, first, bind, Except.bind] using checked
             exact .pair (.val (runtimeValue_isVal a)) (.val (runtimeValue_isVal b))
               (MetatheoryFull.split_left_all _) (MetatheoryFull.splitR_empty_left _)
               (ih wa first) (ih wb second) ma mb (MetatheoryFull.Mode.le_refl _)
@@ -95,7 +95,7 @@ theorem checkInputList_typed {limits : Limits} {index : Nat}
         | ok result =>
           cases result
           have tail : checkInputList limits (index+1) (rest.map TypeInfo.ty) values = .ok () := by
-            simpa [checkInputList, copy, first, Except.bind] using checked
+            simpa [checkInputList, copy, first, bind, Except.bind] using checked
           exact .cons (fun Sig => checkInputValue_hasType info.wf first Sig) (ih tail)
       · simp [checkInputList, copy] at checked; cases checked
 
