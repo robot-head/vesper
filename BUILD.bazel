@@ -190,3 +190,9 @@ filegroup(
     srcs = glob(["lean/**"]),
     visibility = ["//visibility:public"],
 )
+
+filegroup(
+    name = "website",
+    srcs = glob(["website/**"]),
+    visibility = ["//visibility:public"],
+)
