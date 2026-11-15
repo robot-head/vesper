@@ -54,6 +54,7 @@ use crate::check::Checked;
 use std::borrow::Cow;
 
 pub mod host;
+pub mod native_runtime;
 mod rules;
 mod telemetry;
 

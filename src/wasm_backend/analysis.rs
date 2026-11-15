@@ -216,6 +216,12 @@ pub(crate) fn plan(
     stack_switching: bool,
     max_functions: usize,
 ) -> Result<Plan, WasmError> {
+    let host = super::host::capabilities(world, entry)?;
+    let min_arity = if host.contains(&super::host::HostCapability::Trace) {
+        3
+    } else {
+        1
+    };
     let mut p = Plan {
         max_arity: world
             .effects
@@ -223,8 +229,8 @@ pub(crate) fn plan(
             .flat_map(|e| e.ops.iter().map(|o| o.params.len()))
             .max()
             .unwrap_or(0)
-            .max(1),
-        host: super::host::capabilities(world, entry)?,
+            .max(min_arity),
+        host,
         ..Plan::default()
     };
     for c in &p.host {
