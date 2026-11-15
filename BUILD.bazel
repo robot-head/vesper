@@ -21,9 +21,15 @@ vesper_crate(
     ],
     extra_compile_data = ["//crates/vesper-doc:files"],
     extra_test_data = [
+        # Keep the self-hosted checker corpus complete across Bazel packages.
+        "//bootstrap:files",
         "//crates/vesper-doc:files",
         "//crates/vesper-grammar:files",
+        "//crates/vesper-lint:files",
         "//crates/vesper-loom-trust:files",
+        "//crates/vesper-nexus:files",
+        "//crates/vesper-pact-bridge:files",
+        "//crates/vesper-sim-session:files",
     ],
     # One Lean -M4096 stage plus estimated wrapper/runtime overhead; see #537.
     test_tags = {
@@ -134,6 +140,8 @@ vesper_crate(
         # Runs the Vesper-source front end on every repository source; about
         # 2.5 min on a 4-core Linux host, over 300 s on the macOS runner.
         "test/self_host_front_end": "long",
+        # The Vesper-source checker corpus and JIT checks exceed 300 s on macOS.
+        "test/self_host_check": "long",
     },
 )
 # Narrow slices of the root package for members that read them.
