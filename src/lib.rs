@@ -15,6 +15,7 @@ pub mod check;
 pub mod database;
 pub mod doctest;
 pub mod ebpf_backend;
+pub mod ffi_lowering;
 pub mod forge_frontend;
 pub mod interface;
 #[cfg(target_os = "linux")]
@@ -37,6 +38,7 @@ pub mod runtime;
 pub mod stack_bound;
 pub mod tensor_types;
 pub mod tooling;
+pub mod trace_effects;
 pub mod vector;
 pub mod verified_codegen;
 pub mod wasm_backend;

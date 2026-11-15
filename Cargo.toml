@@ -72,6 +72,7 @@ members = [
     "crates/vesper-gpu-compute",
     "crates/vesper-ignis-vulkan",
     "crates/vesper-codegen-verified",
+    "crates/vesper-fusion",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -145,6 +146,7 @@ default-members = [
     "crates/vesper-gpu-compute",
     "crates/vesper-ignis-vulkan",
     "crates/vesper-codegen-verified",
+    "crates/vesper-fusion",
     "experiments/native-pulse",
 ]
 
@@ -261,6 +263,11 @@ wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 [target.'cfg(unix)'.dependencies]
 getrandom = "0.4"
 libc = "0.2"
+
+# Wave-seven lane 24 (#347): locates the Visual Studio link.exe and its LIB
+# paths for `vesper build` on Windows (already locked through cc).
+[target.'cfg(windows)'.dependencies]
+find-msvc-tools = "=0.1.15"
 
 [profile.release]
 lto = "thin"

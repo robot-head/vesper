@@ -1,0 +1,120 @@
+name: Release candidate validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact 40-character commit SHA with successful Linux CI
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  statuses: read
+
+# This workflow validates and attests a candidate; it does not publish releases.
+# Any future publisher must depend on the ready job and use its exact SHA.
+jobs:
+  linux:
+    name: Require exact-candidate Linux CI
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.linux.outputs.sha }}
+    steps:
+      - id: linux
+        uses: actions/github-script@v7
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        with:
+          script: |
+            const sha = process.env.CANDIDATE_SHA;
+            if (!/^[0-9a-f]{40}$/.test(sha || '')) {
+              throw new Error('candidate_sha must be an exact lowercase 40-character commit SHA');
+            }
+            const commit = await github.rest.repos.getCommit({
+              ...context.repo, ref: sha,
+            });
+            if (commit.data.sha !== sha) {
+              throw new Error('GitHub did not resolve the exact candidate SHA');
+            }
+            const statuses = await github.paginate(
+              github.rest.repos.listCommitStatusesForRef,
+              { ...context.repo, ref: sha, per_page: 100 },
+            );
+            const latest = new Map();
+            for (const status of statuses) {
+              if (!latest.has(status.context) || latest.get(status.context).id < status.id) {
+                latest.set(status.context, status);
+              }
+            }
+            for (const name of ['Test all targets', 'Native and acceptance scripts']) {
+              if (latest.get(name)?.state !== 'success') {
+                throw new Error(`Exact-candidate Linux check is not successful: ${name}`);
+              }
+            }
+            core.setOutput('sha', sha);
+
+  platforms:
+    name: Full supported native platforms
+    needs: linux
+    uses: ./.github/workflows/platforms.yml
+    with:
+      profile: full
+      checkout_ref: ${{ needs.linux.outputs.sha }}
+    secrets: inherit
+
+  ready:
+    name: Release candidate ready
+    needs: [linux, platforms]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify complete candidate and recheck Linux
+        uses: actions/github-script@v7
+        env:
+          CANDIDATE_SHA: ${{ needs.linux.outputs.sha }}
+          CHECKED_SHA: ${{ needs.platforms.outputs.checked_sha }}
+          CHECKED_PROFILE: ${{ needs.platforms.outputs.validation_profile }}
+        with:
+          script: |
+            const sha = process.env.CANDIDATE_SHA;
+            if (!/^[0-9a-f]{40}$/.test(sha || '') ||
+                process.env.CHECKED_SHA !== sha ||
+                process.env.CHECKED_PROFILE !== 'full') {
+              throw new Error('Both full platform jobs must validate the exact candidate');
+            }
+            const statuses = await github.paginate(
+              github.rest.repos.listCommitStatusesForRef,
+              { ...context.repo, ref: sha, per_page: 100 },
+            );
+            const latest = new Map();
+            for (const status of statuses) {
+              if (!latest.has(status.context) || latest.get(status.context).id < status.id) {
+                latest.set(status.context, status);
+              }
+            }
+            const linux = [];
+            for (const name of ['Test all targets', 'Native and acceptance scripts']) {
+              const status = latest.get(name);
+              if (status?.state !== 'success') {
+                throw new Error(`Exact-candidate Linux check is no longer successful: ${name}`);
+              }
+              linux.push({ context: name, id: status.id, state: status.state,
+                           target_url: status.target_url });
+            }
+            const fs = require('fs');
+            const path = require('path');
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'release-validation.json'),
+              JSON.stringify({
+                schema_version: 1, candidate_sha: sha, profile: 'full',
+                supported_platforms: ['macOS AArch64', 'Windows x86_64 MSVC'],
+                linux, workflow_run_id: context.runId,
+              }, null, 2) + '\n');
+            await core.summary.addHeading('Release candidate validated')
+              .addRaw(`Full supported platform validation passed for \`${sha}\`.\n`)
+              .addRaw('This workflow does not publish releases or restrict manual GitHub publishing.')
+              .write();
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-validation-${{ needs.linux.outputs.sha }}
+          path: ${{ runner.temp }}/release-validation.json
+          if-no-files-found: error

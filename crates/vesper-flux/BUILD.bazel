@@ -6,5 +6,10 @@ vesper_crate(
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
     # Fault injection at every scheduler step of several protocols.
-    test_timeouts = {"test/recovery": "long"},
+    # tests/kafka.rs needs a broker (VESPER_KAFKA_HOME); without one it
+    # skips, and .github/workflows/flux-kafka.yml runs it against Kafka.
+    test_timeouts = {
+        "test/live_rescale": "long",
+        "test/recovery": "long",
+    },
 )

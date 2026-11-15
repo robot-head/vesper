@@ -1,0 +1,12 @@
+// expect: E0751
+fn main() -> u64 eff [Trace] {
+    let ctx = Trace::current_ctx();
+    let forged = ActiveSpan {
+        ctx: ctx,
+        parent_span_id: 0,
+        start_mono_ns: 0,
+        schema_id: 0
+    };
+    Trace::emit_ok(forged, 0);
+    0
+}

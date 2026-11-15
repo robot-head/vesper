@@ -1,0 +1,14 @@
+// expect: E0309
+fn work(n: u64) -> u64 eff [Trace] {
+    let span = Trace::start_span(1, "work");
+    if n == 0 {
+        0
+    } else {
+        Trace::emit_ok(span, n);
+        n
+    }
+}
+
+fn main() -> u64 eff [Trace] {
+    work(3)
+}

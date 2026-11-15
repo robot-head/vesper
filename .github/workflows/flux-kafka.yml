@@ -1,0 +1,78 @@
+name: Flux Kafka interop
+
+# Interop tests of crates/vesper-flux against a real broker: Apache Kafka
+# 4.3.2 in KRaft mode (single node, combined broker and controller), from
+# the Apache release archive with its SHA-512 checked. Bazel and the other
+# platform jobs build the crate and run tests/kafka.rs without a broker,
+# where every broker test skips; here VESPER_KAFKA_REQUIRE=1 makes a missing
+# broker a failure. Each test starts its own broker on free local ports and
+# the crash tests SIGKILL and restart it. No performance is measured here.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/vesper-flux/**'
+      - 'crates/vesper-quarry/**'
+      - 'crates/vesper-loom-cas/**'
+      - 'crates/vesper-simpulse/**'
+      - '.github/workflows/flux-kafka.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'crates/vesper-flux/**'
+      - 'crates/vesper-quarry/**'
+      - 'crates/vesper-loom-cas/**'
+      - 'crates/vesper-simpulse/**'
+      - '.github/workflows/flux-kafka.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flux-kafka-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+  KAFKA_VERSION: 4.3.2
+  KAFKA_SCALA: '2.13'
+  KAFKA_SHA512: c2063485f90312bba795052df3e49b8eea337adf97f1111b946c60771c7a2f088055d2ccc7221d72fe30bd6a3f7a58348f14e14240eaddfe60446ea1c033618b
+
+jobs:
+  kafka:
+    name: Apache Kafka (KRaft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VESPER_KAFKA_REQUIRE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Download Apache Kafka
+        run: |
+          name="kafka_${KAFKA_SCALA}-${KAFKA_VERSION}"
+          curl -sSfL -o kafka.tgz "https://archive.apache.org/dist/kafka/${KAFKA_VERSION}/${name}.tgz"
+          echo "${KAFKA_SHA512}  kafka.tgz" | sha512sum -c -
+          tar xzf kafka.tgz -C "$RUNNER_TEMP"
+          echo "VESPER_KAFKA_HOME=$RUNNER_TEMP/${name}" >> "$GITHUB_ENV"
+      - name: Show the broker version
+        run: |
+          java -version
+          "$VESPER_KAFKA_HOME/bin/kafka-server-start.sh" --version
+      - name: Interop tests against the broker
+        run: cargo test --locked --release -p vesper-flux --test kafka -- --nocapture --test-threads=2
+      - name: Unit tests of the Kafka module
+        run: cargo test --locked --release -p vesper-flux --lib kafka

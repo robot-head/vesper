@@ -1,0 +1,12 @@
+[package]
+name = "vesper-fusion"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Vesper Stage 4 host fusion engine (design §28, §32, §7): egglog operator fusion for Tensor graphs and Resonance DSP chains"
+publish = false
+
+[dependencies]
+egglog = { version = "=3.0.0", default-features = false }
+vesper-tensor = { path = "../vesper-tensor" }
+vesper-resonance = { path = "../vesper-resonance" }

@@ -1,0 +1,8 @@
+// expect: E0750
+fn main() -> u64 eff [Trace] {
+    let n: u64 = 1;
+    let pair = (Trace::start_span(0, "a"), n);
+    let (s, m) = pair;
+    Trace::emit_ok(s, m);
+    0
+}

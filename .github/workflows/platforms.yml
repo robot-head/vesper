@@ -1,8 +1,10 @@
 name: Platforms
 # Linux CI runs on BuildBuddy Workflows (buildbuddy.yaml). BuildBuddy's hosted
 # workflows are Linux-only, so the macOS and Windows lanes stay on GitHub
-# runners. Every build and test runs through Bazel (docs/bazel.md), using
-# BuildBuddy's remote cache when the BUILDBUDDY_API_KEY secret is set.
+# runners. macOS uses Bazel (docs/bazel.md) with BuildBuddy's remote cache;
+# Windows uses Cargo for its native toolchain and tests.
+# PR and merge-queue checks use the fast profile, escalating affected suites.
+# Nightly, manual full and release-candidate calls retain full supported coverage.
 # Run on pushes to main, on pull requests, and on merge queue groups. A push
 # trigger on every branch would start a second, duplicate run for each commit
 # pushed to a PR branch. The merge queue only advances once the required
@@ -13,20 +15,78 @@ on:
     branches: [main]
   pull_request:
   merge_group:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Test profile (full includes every supported platform suite)
+        type: choice
+        options: [full, pr]
+        default: full
+      checkout_ref:
+        description: Optional commit or ref to validate (resolved to an immutable SHA)
+        type: string
+        default: ''
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        default: full
+      checkout_ref:
+        type: string
+        required: true
+    outputs:
+      checked_sha:
+        description: Exact tested SHA, only emitted after both platforms succeed
+        value: ${{ jobs.complete.outputs.checked_sha }}
+      validation_profile:
+        description: Successful validation profile
+        value: ${{ jobs.complete.outputs.validation_profile }}
 
-# PR runs share one group per PR (refs/pull/N/merge), so a newer push cancels
-# the older run. Pushes to main share one group without cancelling: the run in
-# progress finishes, and a newer push replaces any run still waiting. A burst
-# of merges therefore tests the first and the last commit instead of holding
-# one scarce macOS runner per merge (they are the CI bottleneck), and every
-# commit on main is still covered by the PR run that merged it. Merge queue
-# groups keep their own group keyed by run id, because a queued group must
-# report its required checks; the queue cancels groups it drops by itself.
+permissions:
+  contents: read
+
+# Newer PR/main runs replace obsolete validation; nightly and release calls
+# have independent run-id groups so they cannot cancel an exact-SHA candidate.
 concurrency:
   group: platforms-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'push' }}
 
 jobs:
+  plan:
+    name: Plan platform coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      profile: ${{ steps.plan.outputs.profile }}
+      groups: ${{ steps.plan.outputs.groups }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.checkout_ref || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install workflow test dependency
+        run: python -m pip install PyYAML==6.0.2
+      - name: Check CI policy and workflow regressions
+        run: python -m unittest discover -s scripts/ci/tests -p 'test_platform*.py'
+      - id: plan
+        env:
+          REQUESTED_PROFILE: ${{ inputs.profile || (github.event_name == 'schedule' && 'full') || 'pr' }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          python scripts/ci/platform_test_plan.py --profile "$REQUESTED_PROFILE" \
+            --base "$BASE_SHA" --head "$(git rev-parse HEAD)" \
+            --github-output "$GITHUB_OUTPUT" --output "$RUNNER_TEMP/platform-plan.json"
+      - name: Preserve platform plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: platform-plan-${{ github.run_id }}
+          path: ${{ runner.temp }}/platform-plan.json
   # Per-platform lanes build and test every workspace member on the host OS.
   # Platform-specific code is gated with cfg in the crates themselves (for
   # example, Pulse's io_uring driver is Linux-only), so these lanes check that
@@ -34,7 +94,9 @@ jobs:
   # replays run on Linux (BuildBuddy) only; see "Linux-only suites" in
   # docs/ci-platforms.md.
   platform:
-    name: ${{ matrix.name }}
+    needs: plan
+    if: ${{ always() && !cancelled() }}
+    name: ${{ matrix.name }}${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -42,13 +104,32 @@ jobs:
           - name: macOS (AArch64)
             os: macos-latest
     runs-on: ${{ matrix.os }}
+    # A healthy run takes 17-25 min. Without a limit, a hung test holds the
+    # scarce macOS runner for GitHub's 6 h default (#616).
+    timeout-minutes: 75
+    env:
+      TEST_PROFILE: ${{ needs.plan.outputs.profile }}
+      TEST_GROUPS: ${{ needs.plan.outputs.groups }}
+      EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
+      CARGO_BUILD_JOBS: 1
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
     defaults:
       run:
         shell: bash
     steps:
       # Keep sources byte-identical to Linux so snapshot and span tests agree.
+      - name: Require successful profile planning
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+        run: test "$PLAN_RESULT" = success
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Verify exact checkout
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       - uses: ./.github/actions/bazel
         with:
           buildbuddy-api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
@@ -77,7 +158,11 @@ jobs:
       # No external Lean4Lean checker here: its only user,
       # //:test/lean4lean42_acceptance, runs on Linux only (BUILD.bazel).
       # `short` lists every test with its time, to keep the slow ones visible.
-      - run: bazel test --test_summary=short //...
+      - name: Run selected platform tests
+        run: >-
+          python scripts/ci/test-platform-profile.py --backend bazel
+          --profile "$TEST_PROFILE" --groups "$TEST_GROUPS"
+          --jobs 2 --test-threads 2 --summary "$RUNNER_TEMP/platform-tests.json"
       - run: scripts/ci/check-lean-models.sh
       # One Bazel invocation for every executable the scripts below run,
       # instead of a build and a cquery (~20 s here) per executable.
@@ -86,8 +171,8 @@ jobs:
           scripts/ci/prebuild-acceptance.sh "$RUNNER_TEMP/bazel-executables"
           echo "VESPER_BAZEL_EXECUTABLES=$RUNNER_TEMP/bazel-executables" >> "$GITHUB_ENV"
       # On Apple silicon the host is real AArch64 hardware, so native code
-      # runs here rather than under QEMU. The native executable driver does
-      # not yet support linking with MSVC.
+      # runs here rather than under QEMU. Windows runs the same script in its
+      # Cargo job below.
       - name: Validate host native executables
         if: runner.os != 'Windows'
         run: scripts/test-native-host.sh
@@ -106,14 +191,56 @@ jobs:
           scripts/test-source-macro-parameters.sh
           scripts/test-source-macro-tuples.sh
           scripts/test-doc-links.sh
+      # The PR's distinct feature configuration stays in SourceMacros; full
+      # nightly/release validation also checks it at the exact candidate SHA.
+      - uses: dtolnay/rust-toolchain@stable
+        if: needs.plan.outputs.profile == 'full'
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        if: needs.plan.outputs.profile == 'full'
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' && inputs.checkout_ref == '' }}
+      - name: Execute actual formatting and stdio acceptance
+        run: |
+          . scripts/bazel-lib.sh
+          export VESPER_STYLUS_BINARY="$(bazel_executable //:bin/vesper)"
+          scripts/test-stylus.sh
+      - name: Test distinct pure-host feature configuration
+        if: needs.plan.outputs.profile == 'full'
+        run: |
+          cargo tree --locked -p vesper --edges normal --prefix none |
+            python -c 'import sys; names={line.split()[0] for line in sys.stdin if line.strip()}; assert not names.intersection({"wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"})'
+          cargo test --locked -p vesper-forge -p vesper-syntax --no-default-features --all-targets
+          cargo test --locked -p vesper --lib --test forge_authority \
+            --test forge_lower --test forge_cli --test lsp_cli --test recovery_cli
+          cargo clippy --locked --all-targets --no-default-features \
+            -p vesper -p vesper-forge -p vesper-syntax -p vesper-core \
+            -p vesper-span -p vesper-diagnostics -- -D warnings
+      - name: Preserve platform coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-platform-tests-${{ needs.plan.outputs.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/platform-tests.json
+          if-no-files-found: warn
 
   # Cargo, not Bazel: the hermetic toolchain links MSVC binaries through
   # clang-cl, whose argument syntax rustc's MSVC linker flavor does not speak
   # (rules_rs 0.2.4, llvm 0.8.26). See docs/bazel.md.
   windows:
-    name: Windows (x86_64 MSVC)
+    needs: plan
+    if: ${{ always() && !cancelled() }}
+    name: Windows (x86_64 MSVC)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
     runs-on: windows-latest
+    # A healthy run takes about 70 min, `cargo test` about 60 of them. The
+    # limits make a hung or pathologically slow test fail the required check
+    # within two hours instead of holding the runner for 6 h (#616).
+    timeout-minutes: 130
     env:
+      TEST_PROFILE: ${{ needs.plan.outputs.profile }}
+      TEST_GROUPS: ${{ needs.plan.outputs.groups }}
+      EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -121,8 +248,16 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Require successful profile planning
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+        run: test "$PLAN_RESULT" = success
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Verify exact checkout
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -130,7 +265,7 @@ jobs:
       # minutes, and PR caches pushed main's out of the 10 GB repository limit.
       - uses: Swatinem/rust-cache@v2
         with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' && inputs.checkout_ref == '' }}
       - name: Install Lean toolchain manager
         shell: pwsh
         run: |
@@ -145,11 +280,39 @@ jobs:
       # No external Lean4Lean checker: tests/lean4lean42_acceptance.rs, its
       # only user, is ignored on Windows and runs on Linux.
       - run: cargo clippy --workspace --locked --all-targets -- -D warnings
-      - run: cargo test --workspace --locked
+      - name: Run selected platform tests
+        run: >-
+          python scripts/ci/test-platform-profile.py --backend cargo
+          --profile "$TEST_PROFILE" --groups "$TEST_GROUPS"
+          --jobs 2 --test-threads 2 --summary "$RUNNER_TEMP/platform-tests.json"
+        timeout-minutes: 100
         env:
           VESPER_LEAN: lean
       - run: scripts/ci/check-lean-models.sh
+      # The examples (and expected exit codes) that scripts/test-native-host.sh
+      # runs natively on Linux and macOS, built by the Cargo binary as
+      # x86_64-pc-windows-msvc COFF objects with unwind tables and linked by
+      # the Visual Studio link.exe (#347). `vesper build -o` writes exactly
+      # the path it is given, so the executables are named *.exe here.
+      - name: Validate host native executables
+        run: |
+          cases=$(sed -n 's/^for case in \(.*\); do$/\1/p' scripts/test-native-host.sh)
+          test -n "$cases"
+          artifacts=$(mktemp -d)
+          for case in $cases; do
+              source=${case%:*}
+              expected=${case#*:}
+              target/debug/vesper.exe build "examples/$source.ves" -o "$artifacts/$source.exe"
+              actual=0
+              "$artifacts/$source.exe" || actual=$?
+              if [ "$actual" != "$expected" ]; then
+                  printf '%s: expected %s, got %s\n' "$source" "$expected" "$actual" >&2
+                  exit 1
+              fi
+              printf '%s: host exit %s\n' "$source" "$actual"
+          done
       - name: Run proof acceptance against the actual Cargo executable
+        if: needs.plan.outputs.profile == 'full' || contains(fromJSON(needs.plan.outputs.groups), 'proof')
         run: >-
           python scripts/check-format-proof.py --binary target/debug/vesper.exe
           --lean "$(elan which lean)"
@@ -161,3 +324,52 @@ jobs:
         run: python scripts/check-source-macro-tuples.py --binary target/debug/vesper.exe
       - name: Run intra-doc link acceptance against the actual Cargo executable
         run: python scripts/check-doc-links.py --binary target/debug/vesper.exe
+      - name: Execute actual formatting and stdio acceptance
+        run: scripts/test-stylus.sh
+        env:
+          VESPER_STYLUS_BINARY: target/debug/vesper.exe
+      - name: Execute actual source macro acceptance
+        run: scripts/test-source-macros.sh
+        env:
+          VESPER_SOURCE_MACROS_BINARY: target/debug/vesper.exe
+      - name: Test distinct pure-host feature configuration
+        if: needs.plan.outputs.profile == 'full'
+        run: |
+          cargo tree --locked -p vesper --edges normal --prefix none |
+            python -c 'import sys; names={line.split()[0] for line in sys.stdin if line.strip()}; assert not names.intersection({"wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"})'
+          cargo test --locked -p vesper-forge -p vesper-syntax --no-default-features --all-targets
+          cargo test --locked -p vesper --lib --test forge_authority \
+            --test forge_lower --test forge_cli --test lsp_cli --test recovery_cli
+          cargo clippy --locked --all-targets --no-default-features \
+            -p vesper -p vesper-forge -p vesper-syntax -p vesper-core \
+            -p vesper-span -p vesper-diagnostics -- -D warnings
+      - name: Preserve platform coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-platform-tests-${{ needs.plan.outputs.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/platform-tests.json
+          if-no-files-found: warn
+
+  complete:
+    name: Platform validation complete
+    needs: [plan, platform, windows]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-latest
+    outputs:
+      checked_sha: ${{ steps.ready.outputs.checked_sha }}
+      validation_profile: ${{ steps.ready.outputs.validation_profile }}
+    steps:
+      - id: ready
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          MAC_RESULT: ${{ needs.platform.result }}
+          WINDOWS_RESULT: ${{ needs.windows.result }}
+          CHECKED_SHA: ${{ needs.plan.outputs.sha }}
+          PROFILE: ${{ needs.plan.outputs.profile }}
+        run: |
+          test "$PLAN_RESULT" = success
+          test "$MAC_RESULT" = success
+          test "$WINDOWS_RESULT" = success
+          echo "checked_sha=$CHECKED_SHA" >> "$GITHUB_OUTPUT"
+          echo "validation_profile=$PROFILE" >> "$GITHUB_OUTPUT"

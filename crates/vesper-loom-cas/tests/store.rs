@@ -1299,3 +1299,56 @@ fn concurrent_repair_of_a_corrupt_object_quarantines_once() {
         );
     }
 }
+
+#[test]
+fn unsynced_store_shares_the_layout_and_verification_of_a_durable_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("store");
+    let fast = Store::open_unsynced(&root).unwrap();
+    assert!(!fast.is_durable());
+    let a = fast.put_blob(Domain::Artifact, b"simulated crash").unwrap();
+    assert!(a.newly_stored);
+    let tree = fast.put_tree(&Tree::new(Domain::Source)).unwrap();
+    // A durable handle on the same root reads and deduplicates the objects.
+    let durable = Store::open(&root).unwrap();
+    assert!(durable.is_durable());
+    assert_eq!(durable.read_blob(&a.id).unwrap(), b"simulated crash");
+    assert!(durable.contains(&tree.id).unwrap());
+    assert!(
+        !durable
+            .put_blob(Domain::Artifact, b"simulated crash")
+            .unwrap()
+            .newly_stored
+    );
+    // Corruption is still caught on read and repaired on the next put.
+    corrupt_byte(&fast.object_path(&a.id), 0);
+    assert!(fast.read_blob(&a.id).is_err());
+    let again = fast.put_blob(Domain::Artifact, b"simulated crash").unwrap();
+    assert!(again.newly_stored);
+    assert_eq!(fast.read_blob(&a.id).unwrap(), b"simulated crash");
+    assert_eq!(tmp_entries(&fast), 0);
+}
+
+#[test]
+fn put_blob_of_a_stored_object_writes_no_staging_file() {
+    let (_dir, store) = store();
+    let first = store.put_blob(Domain::Artifact, b"same bytes").unwrap();
+    let path = store.object_path(&first.id);
+    let before = fs::metadata(&path).unwrap().modified().unwrap();
+    for _ in 0..3 {
+        let again = store.put_blob(Domain::Artifact, b"same bytes").unwrap();
+        assert_eq!((again.id, again.newly_stored), (first.id, false));
+    }
+    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
+    assert_eq!(tmp_entries(&store), 0);
+    // A truncated occupant is not taken as a duplicate.
+    make_writable(&path);
+    fs::write(&path, b"same").unwrap();
+    assert!(
+        store
+            .put_blob(Domain::Artifact, b"same bytes")
+            .unwrap()
+            .newly_stored
+    );
+    assert_eq!(store.read_blob(&first.id).unwrap(), b"same bytes");
+}

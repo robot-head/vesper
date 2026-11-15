@@ -1,0 +1,21 @@
+// expect: E0756
+copy struct Order {
+    id: u64,
+    total: u64,
+}
+
+impl Telemetrable for Order {
+    fn telemetry_attr(in self) -> TelemetryAttr {
+        TelemetryAttr::Count(self.id)
+    }
+}
+
+model ByTotal: Telemetrable for Order {
+    fn telemetry_attr(in self) -> TelemetryAttr {
+        TelemetryAttr::Count(self.total)
+    }
+}
+
+fn main() -> u64 {
+    0
+}

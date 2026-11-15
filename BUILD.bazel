@@ -27,17 +27,18 @@ vesper_crate(
     ],
     # One Lean -M4096 stage plus estimated wrapper/runtime overhead; see #537.
     test_tags = {
-        label: ["resources:memory:5120", "resources:cpu:1"]
-        for label in [
-            "test/lean4lean_comparison42",
-            "test/lean4lean_construction42",
-            "test/lean4lean_foundations42",
-            "test/lean4lean_map42",
-            "test/lean4lean_normalization42",
-            "test/lean4lean_normalize42",
-            "test/lean4lean_order42",
-            "test/lean4lean_shape42",
-        ]
+        "test/lean4lean_foundations42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_construction42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_order42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_map42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_normalize42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_normalization42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_comparison42": ["resources:memory:5120", "resources:cpu:1"],
+        # Serial Lean -j1/-M4096 stages plus estimated wrapper overhead (#615).
+        "test/resource_oracle42": ["resources:memory:5120", "resources:cpu:1"],
+        # Four actual corpus workers; memory is an estimate, not an RSS cap.
+        "test/self_host_front_end": ["resources:memory:5120", "resources:cpu:4"],
+        "test/lean4lean_shape42": ["resources:memory:5120", "resources:cpu:1"],
     },
     # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
     # "Linux-only suites" in docs/ci-platforms.md.

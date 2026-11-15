@@ -1,0 +1,55 @@
+name: Website
+
+on:
+  push:
+    branches: [main]
+    paths: ['website/**', 'docs/manuscript/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves']
+  pull_request:
+    paths: ['website/**', 'docs/manuscript/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: website-${{ github.event_name == 'pull_request' && github.ref || 'pages' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Website checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: typst-community/setup-typst@00ad6338f0b34724ea002136bfb701a6c18585b0 # v5.3.2
+        with:
+          typst-version: '0.15.1'
+      - name: Typeset the language manuscript
+        run: typst compile --ignore-system-fonts --root .. ../docs/manuscript/main.typ vesper-specification.pdf
+      - run: npm run build
+      - run: npm run check
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: website/dist
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

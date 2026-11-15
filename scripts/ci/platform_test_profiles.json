@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "shared_paths": [
+    "Cargo.toml",
+    "Cargo.lock",
+    "MODULE.bazel",
+    "MODULE.bazel.lock",
+    ".bazel*",
+    "rust-toolchain*",
+    "lean-toolchain",
+    ".github/**",
+    "scripts/ci/**",
+    "tools/bazel/**",
+    "BUILD.bazel"
+  ],
+  "groups": {
+    "proof": {
+      "paths": [
+        "lean/**",
+        "tools/lean4lean*/**",
+        "tools/resource-model42/**",
+        "tools/oracle42/**",
+        "crates/vesper-lean-syntax/**",
+        "crates/vesper-fmt/**",
+        "src/lean*",
+        "src/lean/**",
+        "src/audit*",
+        "src/replay*",
+        "src/kernel*",
+        "src/bin/lean4lean42*",
+        "src/lsp/proof_*",
+        "src/optimize/witness_lean.rs",
+        "src/format*",
+        "src/stylus*",
+        "src/proof*",
+        "src/proof/**",
+        "src/snapshot*",
+        "src/snapshot/**",
+        "tests/common/lean4lean_proof_packet.rs",
+        "scripts/check-format-proof.py",
+        "scripts/test-format-proof.sh"
+      ]
+    },
+    "flux_faults": {
+      "paths": [
+        "crates/vesper-flux/**",
+        "crates/vesper-loom-cas/**",
+        "crates/vesper-quarry/**",
+        "crates/vesper-pulse/**",
+        "crates/vesper-simpulse/**",
+        "crates/vesper-serde/**",
+        "crates/vesper-core/**"
+      ]
+    },
+    "frontend_corpus": {
+      "paths": [
+        "*.ves",
+        "packages/vesper-compiler/**",
+        "crates/vesper-syntax/**",
+        "crates/vesper-span/**",
+        "crates/vesper-core/**",
+        "src/lex*",
+        "src/parse*",
+        "src/parse/**",
+        "src/ast*",
+        "src/check*",
+        "src/check/**",
+        "src/eval*",
+        "src/runtime*",
+        "src/world*",
+        "src/resolve*",
+        "src/mono*",
+        "src/layout*",
+        "src/type*",
+        "src/ir*",
+        "src/native*",
+        "src/native/**",
+        "src/*_lowering/**",
+        "src/*_lowering.rs"
+      ]
+    }
+  },
+  "deferred_targets": [
+    {
+      "package": "vesper",
+      "target": "lean4lean_foundations42",
+      "bazel": "//:test/lean4lean_foundations42",
+      "group": "proof",
+      "source": "tests/lean4lean_foundations42.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper",
+      "target": "lean4lean_construction42",
+      "bazel": "//:test/lean4lean_construction42",
+      "group": "proof",
+      "source": "tests/lean4lean_construction42.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper",
+      "target": "lean4lean_order42",
+      "bazel": "//:test/lean4lean_order42",
+      "group": "proof",
+      "source": "tests/lean4lean_order42.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper",
+      "target": "lean4lean_map42",
+      "bazel": "//:test/lean4lean_map42",
+      "group": "proof",
+      "source": "tests/lean4lean_map42.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper",
+      "target": "lean4lean_normalize42",
+      "bazel": "//:test/lean4lean_normalize42",
+      "group": "proof",
+      "source": "tests/lean4lean_normalize42.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper",
+      "target": "lean4lean_normalization42",
+      "bazel": "//:test/lean4lean_normalization42",
+      "group": "proof",
+      "source": "tests/lean4lean_normalization42.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper",
+      "target": "lean4lean_comparison42",
+      "bazel": "//:test/lean4lean_comparison42",
+      "group": "proof",
+      "source": "tests/lean4lean_comparison42.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper",
+      "target": "resource_model42",
+      "bazel": "//:test/resource_model42",
+      "group": "proof",
+      "source": "tests/resource_model42.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper",
+      "target": "proof_audit_cli",
+      "bazel": "//:test/proof_audit_cli",
+      "group": "proof",
+      "source": "tests/proof_audit_cli.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper",
+      "target": "format_proof_cli",
+      "bazel": "//:test/format_proof_cli",
+      "group": "proof",
+      "source": "tests/format_proof_cli.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper",
+      "target": "oracle42_acceptance",
+      "bazel": "//:test/oracle42_acceptance",
+      "group": "proof",
+      "source": "tests/oracle42_acceptance.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper",
+      "target": "replay42_kernel",
+      "bazel": "//:test/replay42_kernel",
+      "group": "proof",
+      "source": "tests/replay42_kernel.rs",
+      "skip_tests": null
+    },
+    {
+      "package": "vesper-flux",
+      "target": "live_rescale",
+      "bazel": "//crates/vesper-flux:test/live_rescale",
+      "group": "flux_faults",
+      "source": "crates/vesper-flux/tests/live_rescale.rs",
+      "skip_tests": [
+        "whole_cluster_crash_at_every_step_of_a_live_rescale",
+        "worker_crash_at_every_step_of_a_live_rescale",
+        "coordinator_failover_at_every_step_of_a_live_rescale"
+      ]
+    },
+    {
+      "package": "vesper-flux",
+      "target": "recovery",
+      "bazel": "//crates/vesper-flux:test/recovery",
+      "group": "flux_faults",
+      "source": "crates/vesper-flux/tests/recovery.rs",
+      "skip_tests": [
+        "whole_cluster_crash_at_every_step_and_every_phase",
+        "single_worker_crash_at_every_step_and_every_phase",
+        "coordinator_failover_at_every_step_and_every_phase"
+      ]
+    },
+    {
+      "package": "vesper",
+      "target": "self_host_front_end",
+      "bazel": "//:test/self_host_front_end",
+      "group": "frontend_corpus",
+      "source": "tests/self_host_front_end.rs",
+      "skip_tests": [
+        "differential_over_repository_sources"
+      ]
+    }
+  ]
+}

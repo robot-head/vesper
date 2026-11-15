@@ -1,0 +1,60 @@
+// expect: E0754
+fn inner() -> u64 eff [Trace] {
+    let s = Trace::start_span(1, "inner");
+    Trace::emit_ok(s, 1);
+    1
+}
+
+// The nested handler answers with a fresh root: the block's spans are cut
+// off from the caller's trace.
+fn detached() -> u64 eff [Trace] {
+    handle Trace in {
+        inner()
+    } with {
+        return v => v,
+        current_ctx(resume) => resume(
+            SpanContext {
+                trace_id_hi: 1,
+                trace_id_lo: 1,
+                span_id: 0,
+                flags: 0
+            }
+        ),
+        start_span(schema, name, resume) => resume(
+            ActiveSpan {
+                ctx: SpanContext {
+                    trace_id_hi: 1,
+                    trace_id_lo: 1,
+                    span_id: 9,
+                    flags: 0
+                },
+                parent_span_id: 0,
+                start_mono_ns: 0,
+                schema_id: schema
+            }
+        ),
+        start_child(p, schema, name, resume) => resume(Trace::start_child(p, schema, name)),
+        emit_ok(span, attr, resume) => {
+            let ActiveSpan {
+                ctx,
+                parent_span_id,
+                start_mono_ns,
+                schema_id
+            }
+            = span;
+            resume(())
+        },
+        emit_err(span, code, msg, resume) => {
+            Trace::emit_err(span, code, msg);
+            resume(())
+        },
+        emit_attr(span, attr, resume) => {
+            Trace::emit_attr(span, attr);
+            resume(())
+        },
+    }
+}
+
+fn main() -> u64 eff [Trace] {
+    detached()
+}

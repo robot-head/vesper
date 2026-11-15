@@ -1,4 +1,5 @@
 use super::*;
+use crate::events::{EventEncoding, HardwareEvent, resolve_host_event};
 use std::{
     io, mem,
     os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
@@ -373,6 +374,454 @@ impl Drop for PerfGroup {
             let _ = control(&self.leader, DISABLE);
         }
         // OwnedFd fields close both FDs, including on errors.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extended events (§41.1): L1D/LLC/branch/ref-cycles/SIMD/TMA where exposed.
+// ---------------------------------------------------------------------------
+
+const EXTRA_READ_FORMAT: u64 = 1 | 2 | 4 | 8; // enabled, running, ID, GROUP
+
+fn open_encoded(encoding: &EventEncoding, leader: Option<RawFd>) -> Result<OwnedFd, Unavailable> {
+    let attr = Attr {
+        event_type: encoding.event_type,
+        size: mem::size_of::<Attr>() as u32,
+        config: encoding.config,
+        read_format: EXTRA_READ_FORMAT,
+        // exclude_kernel, exclude_hv; a leader starts disabled. Not pinned:
+        // these events must not evict the cycles/instructions group, and a
+        // multiplexed event is reported per window instead.
+        flags: (1 << 5) | (1 << 6) | if leader.is_none() { 1 } else { 0 },
+        // bp_addr is the config1 union member in perf_event_attr v0.
+        bp_addr: encoding.config1,
+        ..Attr::default()
+    };
+    // SAFETY: as open_event: initialized v0 attr alive for the call, current
+    // task on any CPU, owned live leader FD, PERF_FLAG_FD_CLOEXEC.
+    let fd = unsafe {
+        libc::syscall(
+            libc::SYS_perf_event_open,
+            &attr as *const Attr,
+            0,
+            -1,
+            leader.unwrap_or(-1),
+            8u64,
+        )
+    };
+    if fd < 0 {
+        let mut error = os_error("perf_event_open (extended event)");
+        if matches!(
+            error.os_error,
+            Some(libc::ENOENT | libc::ENODEV | libc::EOPNOTSUPP)
+        ) {
+            error.reason = UnavailableReason::NoHardwarePmu;
+        }
+        return Err(error);
+    }
+    // SAFETY: successful syscall returned a fresh, uniquely owned FD.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GroupCounts {
+    pub(crate) enabled: u64,
+    pub(crate) running: u64,
+    /// Values in the order of the `ids` passed to [`decode_group`].
+    pub(crate) values: Vec<u64>,
+}
+/// Decodes a `PERF_FORMAT_GROUP | ID | TOTAL_TIME_*` read of `ids.len()` events.
+pub(crate) fn decode_group(bytes: &[u8], ids: &[u64]) -> Result<GroupCounts, Unavailable> {
+    let invalid = |what| Unavailable::new(UnavailableReason::InvalidMetadata, what);
+    if ids.is_empty() || bytes.len() != 8 * (3 + 2 * ids.len()) {
+        return Err(Unavailable::new(
+            UnavailableReason::InvalidRead,
+            "extended group read length",
+        ));
+    }
+    let words: Vec<u64> = bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|b| u64::from_le_bytes(*b))
+        .collect();
+    if words[0] != ids.len() as u64 || words[2] > words[1] {
+        return Err(invalid("extended group metadata"));
+    }
+    let mut values = vec![None; ids.len()];
+    for [value, id] in words[3..].as_chunks::<2>().0 {
+        let slot = ids
+            .iter()
+            .position(|known| known == id)
+            .ok_or_else(|| invalid("extended group event IDs"))?;
+        if values[slot].replace(*value).is_some() {
+            return Err(invalid("duplicate extended event ID"));
+        }
+    }
+    Ok(GroupCounts {
+        enabled: words[1],
+        running: words[2],
+        values: values
+            .into_iter()
+            .map(|v| v.expect("every id seen"))
+            .collect(),
+    })
+}
+/// Per-event deltas of one window; every event fully scheduled or reported.
+pub(crate) fn group_delta(
+    before: &GroupCounts,
+    after: &GroupCounts,
+) -> Result<Vec<u64>, Unavailable> {
+    let sub = |a: u64, b: u64| {
+        a.checked_sub(b).ok_or(Unavailable::new(
+            UnavailableReason::CounterRegression,
+            "extended event delta",
+        ))
+    };
+    let enabled = sub(after.enabled, before.enabled)?;
+    let running = sub(after.running, before.running)?;
+    if enabled == 0 || enabled != running {
+        return Err(Unavailable::new(
+            UnavailableReason::NotFullyScheduled,
+            "extended event enabled/running",
+        ));
+    }
+    if before.values.len() != after.values.len() {
+        return Err(Unavailable::new(
+            UnavailableReason::InvalidMetadata,
+            "extended group size",
+        ));
+    }
+    before
+        .values
+        .iter()
+        .zip(&after.values)
+        .map(|(b, a)| sub(*a, *b))
+        .collect()
+}
+
+struct EventGroup {
+    leader: OwnedFd,
+    _members: Vec<OwnedFd>,
+    events: Vec<HardwareEvent>,
+    ids: Vec<u64>,
+    sources: Vec<String>,
+}
+impl EventGroup {
+    fn open(encodings: &[EventEncoding]) -> Result<Self, Unavailable> {
+        let leader = open_encoded(&encodings[0], None)?;
+        let mut members = Vec::new();
+        for encoding in &encodings[1..] {
+            members.push(open_encoded(encoding, Some(leader.as_raw_fd()))?);
+        }
+        let mut ids = vec![event_id(&leader)?];
+        for member in &members {
+            ids.push(event_id(member)?);
+        }
+        let group = Self {
+            leader,
+            _members: members,
+            events: encodings.iter().map(|e| e.event).collect(),
+            ids,
+            sources: encodings.iter().map(|e| e.source.clone()).collect(),
+        };
+        group.read()?;
+        Ok(group)
+    }
+    fn read(&self) -> Result<GroupCounts, Unavailable> {
+        let mut bytes = [0u8; 8 * (3 + 2 * 8)];
+        let want = 8 * (3 + 2 * self.ids.len());
+        // SAFETY: writable initialized buffer of the given length; live FD.
+        let read = unsafe {
+            libc::read(
+                self.leader.as_raw_fd(),
+                bytes.as_mut_ptr().cast(),
+                want.min(bytes.len()),
+            )
+        };
+        if read < 0 {
+            return Err(os_error("extended group read"));
+        }
+        decode_group(&bytes[..read as usize], &self.ids)
+    }
+}
+
+/// Optional extended events for the current thread. Events the host cannot
+/// count are reported per window as [`Unavailable`]; opening never fails
+/// because one event is missing. TMA slots and backend-bound slots share a
+/// group with slots leading, as Intel requires. Not Send/Sync.
+pub struct PerfEventSet {
+    groups: Vec<EventGroup>,
+    unavailable: Vec<(HardwareEvent, Unavailable)>,
+    origin: u64,
+    generation: u64,
+    active: Option<u64>,
+    process: libc::pid_t,
+    thread: libc::pid_t,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+/// Counts at the start of one window, per group.
+pub struct EventSetToken {
+    origin: u64,
+    generation: u64,
+    counts: Vec<Result<GroupCounts, Unavailable>>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+impl PerfEventSet {
+    pub fn open(events: &[HardwareEvent]) -> Result<Self, Unavailable> {
+        Self::open_with(events, resolve_host_event)
+    }
+    pub(crate) fn open_with(
+        events: &[HardwareEvent],
+        mut resolve: impl FnMut(HardwareEvent) -> Result<EventEncoding, Unavailable>,
+    ) -> Result<Self, Unavailable> {
+        let mut requested: Vec<HardwareEvent> = events.to_vec();
+        requested.sort();
+        requested.dedup();
+        if requested.is_empty() {
+            return Err(Unavailable::new(UnavailableReason::NoEvents, "event set"));
+        }
+        let mut unavailable = Vec::new();
+        let mut encodings = Vec::new();
+        for event in requested {
+            match resolve(event) {
+                Ok(e) => encodings.push(e),
+                Err(e) => unavailable.push((event, e)),
+            }
+        }
+        let (tma, single): (Vec<_>, Vec<_>) = encodings.into_iter().partition(|e| {
+            matches!(
+                e.event,
+                HardwareEvent::TmaSlots | HardwareEvent::TmaBackendBoundSlots
+            )
+        });
+        let mut plans: Vec<Vec<EventEncoding>> = single.into_iter().map(|e| vec![e]).collect();
+        if !tma.is_empty() {
+            // HardwareEvent order puts TmaSlots first: the group leader.
+            plans.push(tma);
+        }
+        let mut groups = Vec::new();
+        for plan in plans {
+            match EventGroup::open(&plan) {
+                Ok(group) => groups.push(group),
+                Err(e) => unavailable.extend(plan.iter().map(|p| (p.event, e.clone()))),
+            }
+        }
+        let (process, thread) = identity();
+        Ok(Self {
+            groups,
+            unavailable,
+            origin: next_origin()?,
+            generation: 0,
+            active: None,
+            process,
+            thread,
+            _thread_bound: PhantomData,
+        })
+    }
+    /// `(event, source)` of every event that opened.
+    pub fn opened(&self) -> Vec<(HardwareEvent, String)> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.events.iter().copied().zip(g.sources.iter().cloned()))
+            .collect()
+    }
+    /// Events that could not be opened, with why.
+    pub fn unavailable(&self) -> &[(HardwareEvent, Unavailable)] {
+        &self.unavailable
+    }
+    fn check_owner(&self) -> Result<(), Unavailable> {
+        if identity() != (self.process, self.thread) {
+            return Err(Unavailable::new(
+                UnavailableReason::WrongProcessOrThread,
+                "owning process/thread",
+            ));
+        }
+        Ok(())
+    }
+}
+impl WindowObserver for PerfEventSet {
+    type Token = EventSetToken;
+    type Observation = EventDelta;
+    type Error = Unavailable;
+    fn before_window(&mut self, _: Invocation, _: usize) -> Result<EventSetToken, Unavailable> {
+        self.check_owner()?;
+        if self.active.is_some() {
+            return Err(Unavailable::new(
+                UnavailableReason::InvalidState,
+                "extended before_window",
+            ));
+        }
+        let generation = self.generation.checked_add(1).ok_or_else(|| {
+            Unavailable::new(UnavailableReason::Exhausted, "extended window generation")
+        })?;
+        let mut counts = Vec::with_capacity(self.groups.len());
+        for group in &self.groups {
+            counts.push(
+                group
+                    .read()
+                    .and_then(|c| control(&group.leader, ENABLE).map(|()| c)),
+            );
+        }
+        self.generation = generation;
+        self.active = Some(generation);
+        Ok(EventSetToken {
+            origin: self.origin,
+            generation,
+            counts,
+            _thread_bound: PhantomData,
+        })
+    }
+    fn after_window(
+        &mut self,
+        token: EventSetToken,
+        _: WindowCompletion,
+    ) -> Result<EventDelta, Unavailable> {
+        self.check_owner()?;
+        // A token from another set (or an earlier window) never touches
+        // these counters: same origin, current generation, same shape.
+        if token.origin != self.origin
+            || self.active != Some(token.generation)
+            || token.counts.len() != self.groups.len()
+        {
+            return Err(Unavailable::new(
+                UnavailableReason::ForeignOrStaleToken,
+                "extended after_window",
+            ));
+        }
+        let mut values = Vec::new();
+        for (group, before) in self.groups.iter().zip(token.counts) {
+            let result = before.and_then(|before| {
+                control(&group.leader, DISABLE)?;
+                group_delta(&before, &group.read()?)
+            });
+            match result {
+                Ok(deltas) => {
+                    values.extend(group.events.iter().copied().zip(deltas.into_iter().map(Ok)))
+                }
+                Err(e) => values.extend(group.events.iter().map(|ev| (*ev, Err(e.clone())))),
+            }
+        }
+        // Best effort: never leave a group counting after a failed window.
+        for group in &self.groups {
+            let _ = control(&group.leader, DISABLE);
+        }
+        self.active = None;
+        values.extend(self.unavailable.iter().cloned().map(|(e, u)| (e, Err(u))));
+        values.sort_by_key(|(e, _)| *e);
+        Ok(EventDelta { values })
+    }
+}
+impl Drop for PerfEventSet {
+    fn drop(&mut self) {
+        if identity() == (self.process, self.thread) {
+            for group in &self.groups {
+                let _ = control(&group.leader, DISABLE);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod extended_tests {
+    use super::*;
+    fn words(w: &[u64]) -> Vec<u8> {
+        w.iter().flat_map(|x| x.to_le_bytes()).collect()
+    }
+    #[test]
+    fn group_reads_decode_in_id_order_and_reject_malformed_metadata() {
+        let c = decode_group(&words(&[2, 10, 10, 7, 22, 5, 11]), &[11, 22]).unwrap();
+        assert_eq!(c.values, [5, 7]);
+        assert!(decode_group(&words(&[2, 10, 10, 7, 22, 5, 11]), &[11]).is_err());
+        assert!(decode_group(&words(&[1, 10, 11, 7, 22]), &[22]).is_err());
+        assert!(decode_group(&words(&[2, 10, 10, 7, 22, 5, 22]), &[11, 22]).is_err());
+        assert!(decode_group(&words(&[1, 10, 10, 7, 9]), &[22]).is_err());
+        assert!(decode_group(&[], &[1]).is_err());
+    }
+    #[test]
+    fn deltas_require_full_scheduling_and_allow_zero_counts() {
+        let at = |enabled, running, v: &[u64]| GroupCounts {
+            enabled,
+            running,
+            values: v.to_vec(),
+        };
+        assert_eq!(
+            group_delta(&at(5, 5, &[1, 2]), &at(9, 9, &[1, 10])).unwrap(),
+            [0, 8]
+        );
+        assert_eq!(
+            group_delta(&at(5, 5, &[1]), &at(9, 8, &[2]))
+                .unwrap_err()
+                .reason,
+            UnavailableReason::NotFullyScheduled
+        );
+        assert_eq!(
+            group_delta(&at(5, 5, &[3]), &at(9, 9, &[2]))
+                .unwrap_err()
+                .reason,
+            UnavailableReason::CounterRegression
+        );
+        assert!(group_delta(&at(5, 5, &[3]), &at(5, 5, &[3])).is_err());
+    }
+    #[test]
+    fn unresolvable_events_are_reported_not_fatal() {
+        let set = PerfEventSet::open_with(
+            &[HardwareEvent::SimdOperations, HardwareEvent::SimdOperations],
+            |e| {
+                Err(Unavailable::new(
+                    UnavailableReason::EventNotExposed,
+                    e.name(),
+                ))
+            },
+        )
+        .unwrap();
+        assert!(set.opened().is_empty());
+        assert_eq!(set.unavailable().len(), 1);
+        assert!(PerfEventSet::open_with(&[], resolve_host_event).is_err());
+    }
+    #[test]
+    fn tokens_are_bound_to_their_set_and_window() {
+        let none = |e: HardwareEvent| {
+            Err(Unavailable::new(
+                UnavailableReason::EventNotExposed,
+                e.name(),
+            ))
+        };
+        let mut a = PerfEventSet::open_with(&[HardwareEvent::SimdOperations], none).unwrap();
+        let mut b = PerfEventSet::open_with(&[HardwareEvent::SimdOperations], none).unwrap();
+        let invocation = Invocation {
+            arm: vesper_bench::Arm::Baseline,
+            epoch: 0,
+            window: 0,
+            operation: 0,
+            warmup: false,
+            layout_offset_bytes: 0,
+        };
+        let completion = WindowCompletion {
+            invocation,
+            planned_operations: 1,
+            attempted_operations: 1,
+            successful_operations: 1,
+            body: vesper_bench::BodyStatus::Completed,
+            clock: vesper_bench::ClockStatus::Measured(1),
+        };
+        let from_a = a.before_window(invocation, 1).unwrap();
+        let _from_b = b.before_window(invocation, 1).unwrap();
+        assert_eq!(
+            b.after_window(from_a, completion.clone())
+                .unwrap_err()
+                .reason,
+            UnavailableReason::ForeignOrStaleToken
+        );
+        let stale = a.before_window(invocation, 1);
+        assert!(stale.is_err(), "a is still active");
+        let mut c = PerfEventSet::open_with(&[HardwareEvent::SimdOperations], none).unwrap();
+        let first = c.before_window(invocation, 1).unwrap();
+        let delta = c.after_window(first, completion.clone()).unwrap();
+        assert!(matches!(
+            delta.get(HardwareEvent::SimdOperations),
+            Some(Err(_))
+        ));
     }
 }
 

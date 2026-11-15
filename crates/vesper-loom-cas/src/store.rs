@@ -121,6 +121,9 @@ pub struct Store {
     tmp: PathBuf,
     quarantine: PathBuf,
     locks: PathBuf,
+    /// Whether writes are flushed to stable storage before they are
+    /// published. Only [`Store::open_unsynced`] clears it.
+    durable: bool,
 }
 
 /// Removes a staging path on drop unless disarmed.
@@ -160,7 +163,32 @@ enum Existing {
 impl Store {
     /// Open (creating if necessary) a store at `root`.
     pub fn open(root: impl AsRef<Path>) -> Result<Store> {
-        let root = root.as_ref();
+        Self::open_with(root.as_ref(), true)
+    }
+
+    /// Open a store whose writes are never flushed to stable storage: no
+    /// `fsync` of staged files, no directory syncs. Publication is still
+    /// atomic (staging plus no-replace rename) and every read still verifies
+    /// digests, so the store is exactly as safe as [`Store::open`] against
+    /// process crashes and concurrent writers, but not against power loss or
+    /// an operating-system crash.
+    ///
+    /// This is for deterministic crash simulation, where faults are injected
+    /// inside the process and the page cache always survives. Flushing every
+    /// object there only measures the disk: a Flux kill-at-every-step sweep
+    /// issues tens of thousands of flushes, which take most of an hour on a
+    /// Windows CI runner. Never use it for a store that must survive a
+    /// machine crash.
+    pub fn open_unsynced(root: impl AsRef<Path>) -> Result<Store> {
+        Self::open_with(root.as_ref(), false)
+    }
+
+    /// Whether this handle flushes writes to stable storage.
+    pub fn is_durable(&self) -> bool {
+        self.durable
+    }
+
+    fn open_with(root: &Path, durable: bool) -> Result<Store> {
         fs::create_dir_all(root).map_err(|e| CasError::io("create store root", root, e))?;
         let root = root
             .canonicalize()
@@ -172,6 +200,7 @@ impl Store {
             quarantine: root.join("quarantine"),
             locks: root.join("locks"),
             root,
+            durable,
         };
         for dir in [
             store.root.join("objects"),
@@ -254,6 +283,22 @@ impl Store {
 
     /// Store `bytes` as a blob.
     pub fn put_blob(&self, domain: Domain, bytes: &[u8]) -> Result<Ingested> {
+        // The whole input is in memory, so hash it first: an identical object
+        // that is already stored (and verifies) needs no staging file, flush
+        // or rename. Anything else takes the ordinary path, which re-checks
+        // the occupied entry and repairs it if it is invalid.
+        let mut hasher = ObjectHasher::new(domain, ObjectKind::Blob);
+        hasher.update(bytes);
+        let id = hasher.finish();
+        let size = bytes.len() as u64;
+        let dest = self.object_path(&id);
+        if let Existing::Valid = self.check_existing_object(&id, &dest, size)? {
+            return Ok(Ingested {
+                id,
+                size,
+                newly_stored: false,
+            });
+        }
         self.put_reader(domain, ObjectKind::Blob, bytes, None)
     }
 
@@ -382,7 +427,7 @@ impl Store {
     fn stage_bytes(&self, bytes: &[u8]) -> Result<StagedFile> {
         let (staged, mut file) = self.new_staging_file()?;
         file.write_all(bytes)
-            .and_then(|()| file.sync_all())
+            .and_then(|()| self.sync_file(&file))
             .map_err(|e| CasError::io("write staging file", &staged.path, e))?;
         Ok(staged)
     }
@@ -429,7 +474,7 @@ impl Store {
                 actual: id,
             });
         }
-        file.sync_all()
+        self.sync_file(&file)
             .and_then(|()| fsutil::make_readonly(&file))
             .map_err(|e| CasError::io("flush staging file", &staged.path, e))?;
         drop(file);
@@ -451,7 +496,8 @@ impl Store {
             {
                 Publish::Published => {
                     staged.armed = false;
-                    fsutil::sync_dir(parent).map_err(|e| CasError::io("sync shard", parent, e))?;
+                    self.sync_dir(parent)
+                        .map_err(|e| CasError::io("sync shard", parent, e))?;
                     return Ok(true);
                 }
                 Publish::Exists => match self.check_existing_object(id, &dest, size)? {
@@ -469,6 +515,22 @@ impl Store {
             }
         }
         Err(CasError::PublishContention(*id))
+    }
+
+    fn sync_file(&self, file: &fs::File) -> io::Result<()> {
+        if self.durable {
+            file.sync_all()
+        } else {
+            Ok(())
+        }
+    }
+
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        if self.durable {
+            fsutil::sync_dir(dir)
+        } else {
+            Ok(())
+        }
     }
 
     fn check_existing_object(&self, id: &ObjectId, path: &Path, size: u64) -> Result<Existing> {
@@ -762,7 +824,8 @@ impl Store {
             {
                 Publish::Published => {
                     staged.armed = false;
-                    fsutil::sync_dir(parent).map_err(|e| CasError::io("sync shard", parent, e))?;
+                    self.sync_dir(parent)
+                        .map_err(|e| CasError::io("sync shard", parent, e))?;
                     return Ok(DerivationOutcome {
                         key,
                         output,
@@ -917,7 +980,8 @@ impl Store {
         {
             Publish::Published => {
                 guard.armed = false;
-                fsutil::sync_dir(&parent).map_err(|e| CasError::io("sync", &parent, e))?;
+                self.sync_dir(&parent)
+                    .map_err(|e| CasError::io("sync", &parent, e))?;
                 Ok(report)
             }
             Publish::Exists => Err(CasError::DestinationExists(dest.to_owned())),

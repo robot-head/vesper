@@ -52,7 +52,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: source-macros-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  group: source-macros-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -94,6 +94,8 @@ jobs:
           python -c 'import sys; names={line.split()[0] for line in sys.stdin if line.strip()}; assert not names.intersection({"wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"})'
       - name: Test real pure host quotations and actual source parser
         run: cargo test --locked -p vesper-forge -p vesper-syntax --no-default-features --all-targets
+      # Selecting the root package alone preserves its pure-host dependency
+      # graph; workspace feature unification also enables Forge transports.
       - name: Test compiler authority, resolved lowering and actual CLI/stdio
         run: >-
           cargo test --locked -p vesper --lib --test forge_authority

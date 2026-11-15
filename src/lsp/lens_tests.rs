@@ -586,7 +586,49 @@ fn closure_sink_parameters_and_function_value_calls_follow_checker_modes() {
 #[cfg(unix)]
 mod fake_lean {
     use super::*;
-    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::{Path, PathBuf},
+        process::Command,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    fn directory(name: &str) -> PathBuf {
+        for _ in 0..128 {
+            let id = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "vesper-lens-fake-{name}-{}-{id}",
+                std::process::id()
+            ));
+            match fs::create_dir(&dir) {
+                Ok(()) => return dir,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create fake toolchain directory: {error}"),
+            }
+        }
+        panic!("fake toolchain directory candidates exhausted");
+    }
+
+    fn write_executable(path: &Path, text: &str) {
+        // Other test threads spawn processes concurrently. A fork can retain
+        // a writable descriptor even after this thread closes it, until the
+        // child execs or exits. Keep executable writers out of this process.
+        let output = Command::new("/bin/sh")
+            .args(["-c", "printf '%s' \"$2\" > \"$1\"", "fake-lean-writer"])
+            .arg(path)
+            .arg(text)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "write fake executable: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
 
     pub(super) struct Toolchain {
         pub dir: PathBuf,
@@ -604,9 +646,10 @@ mod fake_lean {
         /// `compile` is the shell body run for a compile invocation; `$DIR`
         /// is the toolchain directory.
         pub(super) fn with_compile(name: &str, compile: &str, accept: bool) -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("vesper-lens-fake-{name}-{}", std::process::id()));
-            let _ = fs::remove_dir_all(&dir);
+            let toolchain = Self {
+                dir: directory(name),
+            };
+            let dir = &toolchain.dir;
             fs::create_dir_all(dir.join("bin")).unwrap();
             let compile = compile.replace("$DIR", &dir.display().to_string());
             let lean = format!(
@@ -625,10 +668,9 @@ mod fake_lean {
                 dir = dir.display()
             );
             for (path, text) in [(dir.join("bin/lean"), lean), (dir.join("auditor"), auditor)] {
-                fs::write(&path, text).unwrap();
-                fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+                write_executable(&path, &text);
             }
-            Self { dir }
+            toolchain
         }
         pub(super) fn config(&self) -> LensConfig {
             LensConfig {
@@ -644,6 +686,89 @@ mod fake_lean {
     impl Drop for Toolchain {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn same_named_toolchains_own_distinct_executables_and_cleanup() {
+        let accepting = Toolchain::new("same-name", false, true);
+        let rejecting = Toolchain::new("same-name", false, false);
+        assert_ne!(accepting.dir, rejecting.dir);
+        let original = fs::read(accepting.dir.join("bin/lean")).unwrap();
+        for (toolchain, accepted) in [(&accepting, true), (&rejecting, false)] {
+            let lean = toolchain.dir.join("bin/lean");
+            let prefix = Command::new(&lean).arg("--print-prefix").output().unwrap();
+            assert!(prefix.status.success());
+            assert_eq!(
+                String::from_utf8(prefix.stdout).unwrap().trim(),
+                toolchain.dir.display().to_string()
+            );
+            let version = Command::new(&lean).arg("--version").output().unwrap();
+            assert!(version.status.success());
+            assert_eq!(version.stdout, b"Lean (version 4.24.0, fake)\n");
+            let audit = Command::new(toolchain.dir.join("auditor"))
+                .args(["--theorem", "fixture_obligation"])
+                .output()
+                .unwrap();
+            assert!(audit.status.success());
+            let audit: Value = serde_json::from_slice(&audit.stdout).unwrap();
+            assert_eq!(audit["accepted"], accepted);
+            assert_eq!(audit["kernel_replayed"], true);
+            assert_eq!(audit["theorems"][0]["name"], "fixture_obligation");
+            assert_eq!(
+                audit["theorems"][0]["axioms"],
+                if accepted {
+                    json!([])
+                } else {
+                    json!(["sorryAx"])
+                }
+            );
+        }
+        let rejected_dir = rejecting.dir.clone();
+        drop(rejecting);
+        assert!(!rejected_dir.exists());
+        assert_eq!(fs::read(accepting.dir.join("bin/lean")).unwrap(), original);
+
+        #[cfg(target_os = "linux")]
+        {
+            let lean = accepting.dir.join("bin/lean");
+            // The deliberate writable owner is also isolated from concurrent
+            // test-thread forks, so the negative control cannot recreate the
+            // inherited-descriptor race after its writer finishes.
+            let mut writer = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "exec 3>\"$1\"; printf '%s' \"$2\" >&3; printf ready; read -r release",
+                    "fake-lean-held-writer",
+                ])
+                .arg(&lean)
+                .arg(String::from_utf8(original).unwrap())
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut ready = [0; 5];
+            writer
+                .stdout
+                .take()
+                .unwrap()
+                .read_exact(&mut ready)
+                .unwrap();
+            let blocked = Command::new(&lean).arg("--version").output();
+            writer
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"release\n")
+                .unwrap();
+            let status = writer.wait().unwrap();
+            assert!(status.success());
+            assert_eq!(&ready, b"ready");
+            let error = blocked.unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(26), "{error}");
+            let version = Command::new(&lean).arg("--version").output().unwrap();
+            assert!(version.status.success());
+            assert_eq!(version.stdout, b"Lean (version 4.24.0, fake)\n");
         }
     }
 }

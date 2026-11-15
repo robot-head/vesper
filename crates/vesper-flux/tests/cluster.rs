@@ -108,7 +108,11 @@ fn config(workers: usize, seed: u64) -> ClusterConfig {
 }
 fn store() -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path().join("cas")).unwrap();
+    // Faults are simulated inside the process, so the page cache always
+    // survives them: flushing to disk would only measure the disk (it made
+    // this suite take most of an hour on Windows CI). durable.rs and
+    // sources_sinks.rs keep exercising the flushed store.
+    let store = Store::open_unsynced(dir.path().join("cas")).unwrap();
     (dir, store)
 }
 fn check(run: &ClusterRun, expected: &[ZSet], what: &str) {

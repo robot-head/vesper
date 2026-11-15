@@ -20,6 +20,9 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cell::RefCell, rc::Rc};
 
+/// Foreign calls of imported `.vsys` libraries (§13, `crate::ffi_lowering`).
+#[path = "ffi_lowering/native.rs"]
+mod ffi;
 /// Lane 27: bare-metal RISC-V and AArch64 images with no runtime.
 #[path = "native_freestanding.rs"]
 pub mod freestanding;
@@ -33,6 +36,9 @@ mod regions;
 /// ABI v2 fiber entries that park through `vesper-fiber-abi`.
 #[path = "native_session.rs"]
 pub mod session;
+/// Windows x64 COFF objects with unwind tables, and the MSVC link driver.
+#[path = "native_windows.rs"]
+pub mod windows;
 
 fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
     match t {
@@ -277,11 +283,13 @@ fn specialized_function(world: &World, f: &Function) -> bool {
 /// the body, not its calling convention, so such a function is compiled once
 /// like a pure function instead of being inlined into its callers. That is
 /// what lets the Stage-5 verifiers (lane 24) check its code on its own.
+/// Foreign-library effects (`Ffi[Lib]`, §13) count too: their operations
+/// lower to direct native calls and need no handler evidence.
 fn capability_only(f: &Function) -> bool {
-    f.effects
-        .instances
-        .iter()
-        .all(|e| crate::capability_effects::is_capability_effect(&e.name))
+    f.effects.instances.iter().all(|e| {
+        crate::capability_effects::is_capability_effect(&e.name)
+            || crate::ffi_lowering::is_foreign_effect(&e.name)
+    })
 }
 /// Whether the program needs Cranelift's NaN canonicalisation: any
 /// `eff [DetFloat]` function promises bit-identical floats on x86-64 and
@@ -326,7 +334,8 @@ fn fail_only(world: &World, f: &Function) -> bool {
         && f.effects.instances.iter().any(|e| e.name == "Fail")
         && f.effects.instances.iter().all(|e| {
             (e.name == "Fail" && e.label.is_none() && e.args.len() == 1)
-                || (crate::capability_effects::is_capability_effect(&e.name)
+                || ((crate::capability_effects::is_capability_effect(&e.name)
+                    || crate::ffi_lowering::is_foreign_effect(&e.name))
                     && e.label.is_none()
                     && e.args.is_empty())
         })
@@ -483,7 +492,36 @@ fn compile<M: Module>(
     options: CodegenOptions,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     compile_entry(
-        m, world, entry, optimize, observer, instrument, options, false,
+        m,
+        world,
+        entry,
+        optimize,
+        observer,
+        instrument,
+        options,
+        false,
+        DefinitionLinkage::Object,
+    )
+}
+fn compile_jit(
+    m: &mut JITModule,
+    world: &World,
+    entry: &str,
+    optimize: bool,
+    observer: Option<&mut dyn FnMut(EmittedFunction)>,
+    instrument: Option<Instrument<'_>>,
+    options: CodegenOptions,
+) -> Result<(BTreeMap<String, FuncId>, String), String> {
+    compile_entry(
+        m,
+        world,
+        entry,
+        optimize,
+        observer,
+        instrument,
+        options,
+        false,
+        DefinitionLinkage::Jit,
     )
 }
 /// [`compile`]; with `fail_entry`, an entry whose only effects are `Fail`
@@ -500,9 +538,16 @@ fn compile_entry<M: Module>(
     instrument: Option<Instrument<'_>>,
     options: CodegenOptions,
     fail_entry: bool,
+    linkage: DefinitionLinkage,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
-    if (!entry_fn.effects.instances.is_empty() || entry_fn.effects.tail.is_some())
+    // Foreign capabilities are granted by the package's `.vsys` import.
+    if (entry_fn
+        .effects
+        .instances
+        .iter()
+        .any(|e| !crate::ffi_lowering::is_foreign_effect(&e.name))
+        || entry_fn.effects.tail.is_some())
         && !(fail_entry && fail_only(world, entry_fn))
     {
         return Err("native entry must handle all effects".into());
@@ -520,9 +565,9 @@ fn compile_entry<M: Module>(
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;
     }
-    let ids = declare_instances(m, world, entry, &instances)?;
+    let ids = declare_instances(m, world, entry, &instances, linkage)?;
     let clif = define_instances_observed(
-        m, world, &instances, &ids, &program, observer, instrument, options,
+        m, world, &instances, &ids, &program, observer, instrument, options, linkage,
     )?;
     let mut abi = Vec::new();
     for (key, (name, vars)) in &instances {
@@ -594,13 +639,47 @@ impl EmittedFunction {
         source_offset(&self.function, inst)
     }
 }
-/// Declare every monomorphized ordinary function. `entry` is exported under
-/// its source name when it is itself an ordinary instance.
+#[derive(Clone, Copy)]
+enum DefinitionLinkage {
+    Object,
+    Jit,
+}
+impl DefinitionLinkage {
+    /// JIT code, generated helper bodies and data need not share an allocation.
+    /// Apply after instrumentation and before observers or machine-code lowering.
+    fn normalize_references(self, function: &mut ir::Function) {
+        if matches!(self, Self::Object) {
+            return;
+        }
+        for target in function.dfg.ext_funcs.values_mut() {
+            target.colocated = false;
+        }
+        for global in function.global_values.values_mut() {
+            if let ir::GlobalValueData::Symbol { colocated, .. } = global {
+                *colocated = false;
+            }
+        }
+    }
+    fn function(self, entry: bool) -> Linkage {
+        match self {
+            Self::Object if entry => Linkage::Export,
+            Self::Object => Linkage::Local,
+            // JIT allocations need not be within a signed 32-bit displacement
+            // of one another. A final linkage makes Cranelift assume they are
+            // colocated; Preemptible is definable without that assumption.
+            // JITModule resolves our defined functions to their compiled ptrs.
+            Self::Jit => Linkage::Preemptible,
+        }
+    }
+}
+/// Declare every monomorphized ordinary function. Object entries are exported
+/// under their source name; JIT definitions use distance-independent calls.
 fn declare_instances<M: Module>(
     m: &mut M,
     world: &World,
     entry: &str,
     instances: &InstanceMap,
+    linkage: DefinitionLinkage,
 ) -> Result<BTreeMap<String, FuncId>, String> {
     let mut ids = BTreeMap::new();
     for (i, (key, (name, vars))) in instances.iter().enumerate() {
@@ -613,11 +692,7 @@ fn declare_instances<M: Module>(
         let id = m
             .declare_function(
                 &symbol,
-                if key == entry {
-                    Linkage::Export
-                } else {
-                    Linkage::Local
-                },
+                linkage.function(key == entry),
                 &signature(m, world, &f)?,
             )
             .map_err(|e| e.to_string())?;
@@ -632,6 +707,7 @@ fn define_instances<M: Module>(
     instances: &InstanceMap,
     ids: &BTreeMap<String, FuncId>,
     program: &crate::ir::Program,
+    linkage: DefinitionLinkage,
 ) -> Result<String, String> {
     define_instances_observed(
         m,
@@ -642,6 +718,7 @@ fn define_instances<M: Module>(
         None,
         None,
         CodegenOptions::default(),
+        linkage,
     )
 }
 #[allow(clippy::too_many_arguments)]
@@ -654,6 +731,7 @@ fn define_instances_observed<M: Module>(
     mut observer: Option<&mut dyn FnMut(EmittedFunction)>,
     mut instrument: Option<Instrument<'_>>,
     options: CodegenOptions,
+    linkage: DefinitionLinkage,
 ) -> Result<String, String> {
     let mut clif = String::new();
     let denorm = crate::capability_effects::const_denorm_spans(world);
@@ -778,6 +856,7 @@ fn define_instances_observed<M: Module>(
         if let Some(rewrite) = instrument.as_mut() {
             rewrite(key, &mut ctx.func)?;
         }
+        linkage.normalize_references(&mut ctx.func);
         clif.push_str(&format!("; {key}\n{}\n", ctx.func.display()));
         if let Some(observe) = observer.as_mut() {
             let id = ids[key];
@@ -850,7 +929,7 @@ pub fn jit_with_options(
     builder.symbol("fmod", native_float_remainder as *const u8);
     builder.symbols(crate::regions::native_runtime::symbols());
     let mut m = JITModule::new(builder);
-    let (ids, _) = compile(
+    let (ids, _) = compile_jit(
         &mut m,
         world,
         entry,
@@ -999,6 +1078,7 @@ pub fn object_for_isa(
         None,
         CodegenOptions::default(),
         true,
+        DefinitionLinkage::Object,
     )?;
     let bytes = m.finish().emit().map_err(|e| e.to_string())?;
     Ok((bytes, clif))
@@ -1037,6 +1117,9 @@ pub fn object_with_codegen_options(
     options: CodegenOptions,
 ) -> Result<(Vec<u8>, String), String> {
     let isa = object_isa_for(world, target)?;
+    if windows::is_windows(isa.triple()) {
+        return windows::object(world, entry, isa, optimize, observer, instrument, options);
+    }
     let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
     let mut m = ObjectModule::new(builder);
@@ -1102,7 +1185,7 @@ impl InstrumentedJit {
             _single_thread: std::marker::PhantomData,
         };
         let m = owned.module.as_mut().expect("owned JIT module");
-        let (ids, _) = compile(
+        let (ids, _) = compile_jit(
             m,
             world,
             entry,
@@ -3939,6 +4022,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         if effect == crate::regions::REGION_EFFECT && crate::regions::active(self.world) {
             return self.region_perform(label, op, args);
         }
+        if crate::ffi_lowering::is_foreign_effect(effect) {
+            return self.foreign_perform(effect, op, args);
+        }
         let signature = self
             .world
             .effects
@@ -4152,3 +4238,439 @@ extern "C" fn native_float_remainder(a: f64, b: f64) -> f64 {
 
 #[path = "native_batch.rs"]
 pub mod batch;
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod far_call_tests {
+    use super::*;
+    use cranelift_codegen::{Context, binemit::Reloc, control::ControlPlane, isa::OwnedTargetIsa};
+    use cranelift_jit::{BranchProtection, JITMemoryProvider};
+    use cranelift_module::{ModuleError, ModuleResult};
+    use std::{io, panic::AssertUnwindSafe};
+
+    const GAP: usize = 1 << 32;
+
+    /// Own one virtual reservation, with only its first and last pages backed.
+    /// The two functions cannot accidentally land within an x86 rel32 span.
+    struct FarPages {
+        base: *mut u8,
+        page: usize,
+        used: usize,
+        reverse: bool,
+        data: bool,
+    }
+
+    // SAFETY: this uniquely owned reservation moves with its JIT module. No
+    // pointers escape the test, and the module is never accessed concurrently.
+    unsafe impl Send for FarPages {}
+
+    impl FarPages {
+        fn new(reverse: bool) -> Self {
+            // SAFETY: sysconf does not access Rust memory.
+            let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap();
+            assert!(page.is_power_of_two());
+            // This is virtual address space, not four GiB of committed memory.
+            // SAFETY: a fresh anonymous reservation; no existing mapping is replaced.
+            let base = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    GAP + page,
+                    libc::PROT_NONE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(base, libc::MAP_FAILED, "{}", io::Error::last_os_error());
+            Self {
+                base: base.cast(),
+                page,
+                used: 0,
+                reverse,
+                data: false,
+            }
+        }
+
+        fn address(&self, slot: usize) -> *mut u8 {
+            assert!(slot < 2);
+            // SAFETY: both pages lie in the single reservation this provider owns.
+            unsafe { self.base.add((slot ^ usize::from(self.reverse)) * GAP) }
+        }
+
+        unsafe fn release(&mut self) {
+            if !self.base.is_null() {
+                // SAFETY: freeing exactly our reservation after every call returned.
+                assert_eq!(
+                    unsafe { libc::munmap(self.base.cast(), GAP + self.page) },
+                    0
+                );
+                self.base = std::ptr::null_mut();
+            }
+        }
+    }
+
+    impl Drop for FarPages {
+        fn drop(&mut self) {
+            // SAFETY: test-owned code pointers never outlive the JIT module/provider.
+            unsafe { self.release() };
+        }
+    }
+
+    impl JITMemoryProvider for FarPages {
+        fn allocate_readexec(&mut self, size: usize, align: u64) -> io::Result<*mut u8> {
+            if self.used == (if self.data { 1 } else { 2 })
+                || size > self.page
+                || align > self.page as u64
+            {
+                return Err(io::Error::other(
+                    "far-call fixture needs two tiny functions",
+                ));
+            }
+            let at = self.address(self.used);
+            // SAFETY: committing only the owned page selected for this function.
+            if unsafe { libc::mprotect(at.cast(), self.page, libc::PROT_READ | libc::PROT_WRITE) }
+                != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            self.used += 1;
+            Ok(at)
+        }
+
+        fn allocate_readwrite(&mut self, _: usize, _: u64) -> io::Result<*mut u8> {
+            Err(io::Error::other("far-call fixture has no writable data"))
+        }
+
+        fn allocate_readonly(&mut self, size: usize, align: u64) -> io::Result<*mut u8> {
+            assert_eq!(self.used, 0);
+            assert!(!self.data && size <= self.page && align <= self.page as u64);
+            let at = self.address(1);
+            // SAFETY: committing the opposite owned page, before any code allocation.
+            if unsafe { libc::mprotect(at.cast(), self.page, libc::PROT_READ | libc::PROT_WRITE) }
+                != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            self.data = true;
+            Ok(at)
+        }
+
+        unsafe fn free_memory(&mut self) {
+            // SAFETY: the caller guarantees that no retrieved code pointers remain live.
+            unsafe { self.release() };
+        }
+
+        fn finalize(&mut self, protection: BranchProtection) -> ModuleResult<()> {
+            assert_eq!(protection, BranchProtection::None);
+            assert_eq!(self.used + usize::from(self.data), 2);
+            for slot in 0..2 {
+                // SAFETY: both pages are owned code allocations; x86 instruction
+                // caches are coherent. No call occurs before this finalization.
+                if unsafe {
+                    libc::mprotect(
+                        self.address(slot).cast(),
+                        self.page,
+                        if self.data && slot == 1 {
+                            libc::PROT_READ
+                        } else {
+                            libc::PROT_READ | libc::PROT_EXEC
+                        },
+                    )
+                } != 0
+                {
+                    return Err(ModuleError::Allocation {
+                        message: "protect far-call fixture",
+                        err: io::Error::last_os_error(),
+                    });
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn world() -> World {
+        let parsed = crate::parser::parse(
+            "fn aaa_target(x: i64) -> i64 { wrapping_add(x, 1) } \
+             fn main() -> i64 { aaa_target(41) }",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = crate::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        checked.world
+    }
+
+    fn module(reverse: bool) -> (JITModule, OwnedTargetIsa) {
+        let mut flags = settings::builder();
+        flags.set("is_pic", "false").unwrap();
+        flags.set("use_colocated_libcalls", "false").unwrap();
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(flags))
+            .unwrap();
+        let mut builder =
+            JITBuilder::with_isa(isa.clone(), cranelift_module::default_libcall_names());
+        builder.memory_provider(Box::new(FarPages::new(reverse)));
+        (JITModule::new(builder), isa)
+    }
+
+    fn relocations(isa: &OwnedTargetIsa, function: EmittedFunction, out: &mut Vec<Reloc>) {
+        if function.source != "main" {
+            return;
+        }
+        // Inspect machine relocations from the actual production-lowered function,
+        // using the same ISA as the JIT module, rather than a handwritten CLIF call.
+        let mut context = Context::for_function(function.function);
+        context
+            .compile(isa.as_ref(), &mut ControlPlane::default())
+            .unwrap();
+        out.extend(
+            context
+                .compiled_code()
+                .unwrap()
+                .buffer
+                .relocs()
+                .iter()
+                .map(|relocation| relocation.kind),
+        );
+    }
+
+    #[test]
+    fn near_calls_fail_and_jit_far_calls_execute_across_four_gib() {
+        let world = world();
+        for reverse in [false, true] {
+            let (mut old, isa) = module(reverse);
+            let mut near = Vec::new();
+            // The unchanged object policy is exactly the old JIT's final-linkage
+            // behavior: Export/Local make direct calls assume colocation.
+            let (ids, _) = compile(
+                &mut old,
+                &world,
+                "main",
+                false,
+                Some(&mut |function| relocations(&isa, function, &mut near)),
+                None,
+                CodegenOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                old.declarations().get_function_decl(ids["main"]).linkage,
+                Linkage::Export
+            );
+            assert_eq!(
+                old.declarations()
+                    .get_function_decl(ids["aaa_target"])
+                    .linkage,
+                Linkage::Local
+            );
+            assert!(near.contains(&Reloc::X86CallPCRel4), "{near:?}");
+            let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                old.finalize_definitions()
+                    .map_err(|error| error.to_string())
+            }))
+            .expect_err("near relocation must fail across the forced four-GiB gap");
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("");
+            assert!(message.contains("TryFromIntError"), "{message}");
+            eprintln!("old near relocations {near:?}, reverse={reverse}: {message}");
+            drop(old);
+
+            let (mut fixed, isa) = module(reverse);
+            let mut far = Vec::new();
+            let (ids, _) = compile_jit(
+                &mut fixed,
+                &world,
+                "main",
+                false,
+                Some(&mut |function| relocations(&isa, function, &mut far)),
+                None,
+                CodegenOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                fixed.declarations().get_function_decl(ids["main"]).linkage,
+                Linkage::Preemptible
+            );
+            assert_eq!(
+                fixed
+                    .declarations()
+                    .get_function_decl(ids["aaa_target"])
+                    .linkage,
+                Linkage::Preemptible
+            );
+            assert!(far.contains(&Reloc::Abs8), "{far:?}");
+            assert!(!far.contains(&Reloc::X86CallPCRel4), "{far:?}");
+            fixed.finalize_definitions().unwrap();
+            let entry = fixed.get_finalized_function(ids["main"]);
+            let target = fixed.get_finalized_function(ids["aaa_target"]);
+            assert_eq!((entry as usize).abs_diff(target as usize), GAP);
+            assert_eq!((target as usize) > (entry as usize), reverse);
+            // SAFETY: actual production compilation checked fn() -> i64; the module
+            // owns both finalized executable pages until after this call returns.
+            let call: unsafe extern "C" fn() -> i64 = unsafe { std::mem::transmute(entry) };
+            // SAFETY: the signature and code lifetime are established above.
+            assert_eq!(unsafe { call() }, 42);
+            eprintln!(
+                "fixed far relocations {far:?}: target={target:p}, entry={entry:p}, result=42"
+            );
+            // SAFETY: the only code call returned, and no function pointer escapes.
+            unsafe { fixed.free_memory() };
+        }
+    }
+
+    /// Generated Local helpers and Export data keep their declarations; only
+    /// the JIT IR references must stop assuming nearby allocations.
+    #[test]
+    fn generated_local_helpers_and_data_execute_across_four_gib() {
+        for reverse in [false, true] {
+            for data in [false, true] {
+                for normalize in [false, true] {
+                    let (mut m, isa) = module(reverse);
+                    let mut sig = m.make_signature();
+                    sig.returns.push(AbiParam::new(types::I64));
+                    let helper = if data {
+                        None
+                    } else {
+                        let id = m
+                            .declare_function("foreign_leaf", Linkage::Local, &sig)
+                            .unwrap();
+                        let mut ctx = m.make_context();
+                        ctx.func.signature = sig.clone();
+                        let mut fb = FunctionBuilderContext::new();
+                        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
+                        let block = b.create_block();
+                        b.switch_to_block(block);
+                        let value = b.ins().iconst(types::I64, 42);
+                        b.ins().return_(&[value]);
+                        b.seal_all_blocks();
+                        b.finalize();
+                        m.define_function(id, &mut ctx).unwrap();
+                        Some(id)
+                    };
+                    let datum = if data {
+                        let id = m
+                            .declare_data("mask_data", Linkage::Export, false, false)
+                            .unwrap();
+                        let mut description = cranelift_module::DataDescription::new();
+                        description.define(42i64.to_le_bytes().to_vec().into_boxed_slice());
+                        description.set_align(8);
+                        m.define_data(id, &description).unwrap();
+                        Some(id)
+                    } else {
+                        None
+                    };
+                    let entry = m.declare_function("caller", Linkage::Local, &sig).unwrap();
+                    let mut ctx = m.make_context();
+                    ctx.func.signature = sig;
+                    let mut fb = FunctionBuilderContext::new();
+                    let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
+                    let block = b.create_block();
+                    b.switch_to_block(block);
+                    let value = if let Some(id) = datum {
+                        let symbol = m.declare_data_in_func(id, b.func);
+                        let address = b.ins().symbol_value(types::I64, symbol);
+                        b.ins().load(types::I64, ir::MemFlags::new(), address, 0)
+                    } else {
+                        let target = m.declare_func_in_func(helper.unwrap(), b.func);
+                        let call = b.ins().call(target, &[]);
+                        b.inst_results(call)[0]
+                    };
+                    b.ins().return_(&[value]);
+                    b.seal_all_blocks();
+                    b.finalize();
+                    let before = ctx.func.to_string();
+                    let mode = if normalize {
+                        DefinitionLinkage::Jit
+                    } else {
+                        DefinitionLinkage::Object
+                    };
+                    mode.normalize_references(&mut ctx.func);
+                    if !normalize {
+                        assert_eq!(before, ctx.func.to_string());
+                    }
+                    let mut inspect = Context::for_function(ctx.func.clone());
+                    inspect
+                        .compile(isa.as_ref(), &mut ControlPlane::default())
+                        .unwrap();
+                    let relocs: Vec<_> = inspect
+                        .compiled_code()
+                        .unwrap()
+                        .buffer
+                        .relocs()
+                        .iter()
+                        .map(|r| r.kind)
+                        .collect();
+                    if normalize {
+                        assert!(relocs.contains(&Reloc::Abs8), "{relocs:?}");
+                        assert!(
+                            !relocs.contains(&Reloc::X86PCRel4)
+                                && !relocs.contains(&Reloc::X86CallPCRel4),
+                            "{relocs:?}"
+                        );
+                    } else {
+                        assert!(
+                            relocs.contains(&Reloc::X86PCRel4)
+                                || relocs.contains(&Reloc::X86CallPCRel4),
+                            "{relocs:?}"
+                        );
+                    }
+                    m.define_function(entry, &mut ctx).unwrap();
+                    if normalize {
+                        m.finalize_definitions().unwrap();
+                        // SAFETY: the test constructed fn() -> i64 and owns all code/data until it returns.
+                        let call: unsafe extern "C" fn() -> i64 =
+                            unsafe { std::mem::transmute(m.get_finalized_function(entry)) };
+                        // SAFETY: checked signature and finalized live mappings above.
+                        assert_eq!(unsafe { call() }, 42);
+                        eprintln!(
+                            "normalized local/data reference reverse={reverse} data={data}: {relocs:?}, result=42"
+                        );
+                        // SAFETY: the call returned, and no pointer escapes.
+                        unsafe { m.free_memory() };
+                    } else {
+                        let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            m.finalize_definitions().map_err(|e| e.to_string())
+                        }));
+                        assert!(
+                            panic.is_err(),
+                            "near reference must overflow reverse={reverse} data={data}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_instrumented_batch_and_session_jits_call_their_helpers() {
+        let world = world();
+        for optimize in [false, true] {
+            assert_eq!(
+                jit_with_options(&world, "main", optimize)
+                    .unwrap()
+                    .to_string(),
+                "42"
+            );
+        }
+        let mut unchanged = |_: &str, _: &mut ir::Function| Ok(());
+        // SAFETY: the no-op hook inserts no memory accesses or addresses.
+        let mut instrumented =
+            unsafe { InstrumentedJit::compile(&world, "main", &mut unchanged).unwrap() };
+        assert_eq!(instrumented.run(), 42);
+        let mut batch =
+            batch::NativeBatch::compile(&world, &["main"], batch::BatchLimits::default()).unwrap();
+        assert_eq!(batch.run("main").unwrap().to_string(), "42");
+        assert_eq!(batch.stats().defined_functions, 2);
+        for optimize in [false, true] {
+            let session =
+                session::NativeSession::compile_with_options(&world, "main", &[], optimize)
+                    .unwrap();
+            let exit = session.fiber().unwrap().start().exited().unwrap();
+            assert!(matches!(
+                session.decode_exit(&world, &exit).unwrap(),
+                session::SessionResult::Returned(crate::runtime::Value::Int(42))
+            ));
+        }
+    }
+}

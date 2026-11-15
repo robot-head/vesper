@@ -157,8 +157,21 @@ impl NativeBatch {
         };
         let module = owned.module.as_mut().expect("owned JIT module");
         // Union declared and defined ONCE; shared helpers occur only once.
-        let ids = declare_instances(module, world, entries[0], &instances)?;
-        define_instances(module, world, &instances, &ids, &program)?;
+        let ids = declare_instances(
+            module,
+            world,
+            entries[0],
+            &instances,
+            DefinitionLinkage::Jit,
+        )?;
+        define_instances(
+            module,
+            world,
+            &instances,
+            &ids,
+            &program,
+            DefinitionLinkage::Jit,
+        )?;
         module.finalize_definitions().map_err(|e| e.to_string())?;
         let mut compiled = BTreeMap::new();
         for name in entries {
