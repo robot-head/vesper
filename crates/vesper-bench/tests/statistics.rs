@@ -229,3 +229,56 @@ fn deterministic_offsets_only_and_unavailable_metrics_never_pass() {
         assert_eq!(gate.unavailable.requirement, requirement);
     }
 }
+
+#[test]
+fn mann_whitney_known_rank_vectors_and_ties() {
+    let ranks = mann_whitney_ranks(&[1, 3, 5], &[2, 4, 6]).unwrap();
+    assert_eq!((ranks.first_count, ranks.second_count), (3, 3));
+    assert_eq!(
+        (ranks.twice_u_first, ranks.twice_u_second, ranks.tied_pairs),
+        (6, 12, 0)
+    );
+    let ties = mann_whitney_ranks(&[1, 2, 2], &[2, 2, 3]).unwrap();
+    assert_eq!(
+        (ties.twice_u_first, ties.twice_u_second, ties.tied_pairs),
+        (4, 14, 4)
+    );
+    let all_equal = mann_whitney_ranks(&[7; 3], &[7; 4]).unwrap();
+    assert_eq!(
+        (
+            all_equal.twice_u_first,
+            all_equal.twice_u_second,
+            all_equal.tied_pairs
+        ),
+        (12, 12, 12)
+    );
+}
+
+#[test]
+fn mann_whitney_reversal_permutation_bounds_and_extremes() {
+    let first = [u64::MAX, 0, 5, 5];
+    let second = [u64::MAX, 5, 1];
+    let forward = mann_whitney_ranks(&first, &second).unwrap();
+    let reverse = mann_whitney_ranks(&second, &first).unwrap();
+    assert_eq!(forward.twice_u_first, reverse.twice_u_second);
+    assert_eq!(forward.twice_u_second, reverse.twice_u_first);
+    assert_eq!(forward.tied_pairs, reverse.tied_pairs);
+    assert_eq!(forward.twice_u_first + forward.twice_u_second, 24);
+    assert_eq!(
+        mann_whitney_ranks(&[5, 0, 5, u64::MAX], &second).unwrap(),
+        forward
+    );
+    let max = mann_whitney_ranks(&[u64::MAX; MAX_EPOCHS], &[0; MAX_EPOCHS]).unwrap();
+    assert_eq!(max.twice_u_first, 8192);
+    assert_eq!(max.twice_u_second, 0);
+    assert_eq!(mann_whitney_ranks(&[], &[1]), Err(Error::EmptyEvidence));
+    assert_eq!(mann_whitney_ranks(&[1], &[]), Err(Error::EmptyEvidence));
+    assert_eq!(
+        mann_whitney_ranks(&[0; MAX_EPOCHS + 1], &[0]),
+        Err(Error::Limit("rank sample size"))
+    );
+    assert_eq!(
+        mann_whitney_ranks(&[0], &[0; MAX_EPOCHS + 1]),
+        Err(Error::Limit("rank sample size"))
+    );
+}

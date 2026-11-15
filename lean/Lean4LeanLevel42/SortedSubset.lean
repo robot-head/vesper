@@ -23,7 +23,7 @@ theorem subset_sublist {p q : List Name}
       | eq =>
         have hab : a = b := name_cmp_eq a b hc
         subst a
-        exact (ih (by simpa [Normalize.subset, hc] using h)).cons₂ b
+        exact (ih (by simpa [Normalize.subset, hc] using h)).cons_cons b
       | gt =>
         exact (ih (by simpa [Normalize.subset, hc] using h)).cons b
 

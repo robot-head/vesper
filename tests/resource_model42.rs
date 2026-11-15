@@ -537,8 +537,8 @@ impl Fixture {
         let version = execute(Command::new(&lean).arg("--version"), 10, started);
         version.success();
         assert!(
-            String::from_utf8_lossy(&version.stdout).contains("version 4.24.0,"),
-            "required real Lean4.24: {}",
+            String::from_utf8_lossy(&version.stdout).contains("version 4.35.0,"),
+            "required real Lean4.35: {}",
             version.diagnostic()
         );
         static NEXT: AtomicU64 = AtomicU64::new(0);

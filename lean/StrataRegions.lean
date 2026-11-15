@@ -212,7 +212,7 @@ theorem sub_push (st : Store) : Sub st (st ++ [[]]) := by
 theorem lookup_take {st : Store} {n r a : Nat} (hr : r < n) :
     lookup (st.take n) r a = lookup st r a := by
   unfold lookup
-  rw [List.getElem?_take, if_pos hr]
+  rw [List.getElem?_take, ite_eq_left hr]
 
 /-- A value typed by a type over labels below `n` keeps its type when the
 regions from `n` up are freed. -/

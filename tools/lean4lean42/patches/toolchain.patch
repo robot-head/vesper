@@ -1,5 +1,5 @@
 diff --git a/lake-manifest.json b/lake-manifest.json
-index ad39250..092d1a5 100644
+index ad39250..045caaa 100644
 --- a/lake-manifest.json
 +++ b/lake-manifest.json
 @@ -5,10 +5,10 @@
@@ -7,16 +7,16 @@ index ad39250..092d1a5 100644
     "subDir": null,
     "scope": "",
 -   "rev": "d117e2c28cba42e974bc22568ac999492a34e812",
-+   "rev": "8da40b72fece29b7d3fe3d768bac4c8910ce9bee",
++   "rev": "66e469188fe07963e5cf666c7d4433f45b8131c5",
     "name": "batteries",
     "manifestFile": "lake-manifest.json",
 -   "inputRev": "v4.23.0",
-+   "inputRev": "8da40b72fece29b7d3fe3d768bac4c8910ce9bee",
++   "inputRev": "66e469188fe07963e5cf666c7d4433f45b8131c5",
     "inherited": false,
     "configFile": "lakefile.toml"}],
   "name": "lean4lean",
 diff --git a/lakefile.toml b/lakefile.toml
-index 8bbd508..18f379b 100644
+index 8bbd508..f6fa8f4 100644
 --- a/lakefile.toml
 +++ b/lakefile.toml
 @@ -4,7 +4,7 @@ defaultTargets = ["Lean4Lean", "lean4lean", "Lean4Lean.Theory", "Lean4Lean.Verif
@@ -24,14 +24,14 @@ index 8bbd508..18f379b 100644
  name = "batteries"
  git = "https://github.com/leanprover-community/batteries"
 -rev = "v4.23.0"
-+rev = "8da40b72fece29b7d3fe3d768bac4c8910ce9bee"
++rev = "66e469188fe07963e5cf666c7d4433f45b8131c5"
 
  [[lean_lib]]
  name = "Lean4Lean"
 diff --git a/lean-toolchain b/lean-toolchain
-index 7f254a9..c00a535 100644
+index 7f254a9..a6aff06 100644
 --- a/lean-toolchain
 +++ b/lean-toolchain
 @@ -1 +1 @@
 -leanprover/lean4:v4.23.0
-+leanprover/lean4:v4.24.0
++leanprover/lean4:v4.35.0

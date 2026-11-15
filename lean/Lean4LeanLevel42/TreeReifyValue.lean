@@ -42,7 +42,7 @@ theorem reify_mkChild_value (ρ : Valuation) (a : Name) (t : Tree) (r : Option L
       max (reifyChildValue ρ (a, t)) (reifyOptionValue ρ r) := by
   cases he : t.reify <;>
     simp [Tree.reify.mkChild, he, reifyOptionValue, reifyChildValue,
-      reify_mkMax_value, levelValue, Nat.imax]
+      reify_mkMax_value, levelValue, Nat.imax] <;> try rfl
   by_cases hz : ρ a = 0 <;> simp [hz]
 
 theorem reify_children_fold_value (ρ : Valuation) (cs : List (Name × Tree))

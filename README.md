@@ -36,6 +36,10 @@ and individual test targets. Lean checks use the version in
 [lean-toolchain](lean-toolchain); CI setup is described in
 [platform validation](docs/ci-platforms.md).
 
+The fixed-model external checker is [Logos](tools/logos42/README.md), pinned
+alongside Lean 4.35.0. Its acceptance suite binds fresh model artifacts to the
+checker and its actual rejection controls.
+
 ## Validate changes
 
 ```sh

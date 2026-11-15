@@ -198,8 +198,8 @@ impl Fixture {
         let version = execute(Command::new(&lean).arg("--version"), 10);
         version.success();
         assert!(
-            String::from_utf8_lossy(&version.stdout).contains("version 4.24.0,"),
-            "Lean4.24.0 is mandatory: {}",
+            String::from_utf8_lossy(&version.stdout).contains("version 4.35.0,"),
+            "Lean4.35.0 is mandatory: {}",
             version.diagnostic()
         );
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -302,7 +302,7 @@ impl Fixture {
             report["lean_version"]
                 .as_str()
                 .unwrap()
-                .contains("version 4.24.0,")
+                .contains("version 4.35.0,")
         );
         assert!(report["checked_constants"].as_u64().unwrap() > 0);
         let actual: BTreeSet<_> = report["theorems"]

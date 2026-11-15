@@ -1335,7 +1335,7 @@ fn answer() -> i64 {
         );
     }
 
-    /// Both renderings compile under real Lean 4.24.0 with the expected
+    /// Both renderings compile under real Lean 4.35.0 with the expected
     /// outcome. Runs when `VESPER_LEAN` is set; skipped otherwise.
     #[test]
     fn renderings_check_under_real_lean() {

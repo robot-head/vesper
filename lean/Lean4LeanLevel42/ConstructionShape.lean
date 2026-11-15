@@ -207,7 +207,7 @@ theorem normalizeAux_needs_sorted_path :
       | none => some { const := 2 }
       | some n => some { n with const := max 2 n.const })).get?
         [.num .anonymous 1, .num .anonymous 0] = _
-    rw [map_get_alter, if_pos rfl, map_get_empty]
+    rw [map_get_alter, ite_eq_left rfl, map_get_empty]
   exact hb (hs [.num .anonymous 1, .num .anonymous 0] { const := 2 } hg)
 
 /-- The actual map modify merges an offset without disturbing strict names. -/
@@ -230,7 +230,7 @@ theorem map_addVar_varsSorted_merge_witness :
       exact addVar_numeric_sorted_merge.1
     · contradiction
   refine ⟨hs, ?_, map_addVar_varsSorted _ _ _ _ hs⟩
-  rw [NormLevel.addVar, map_get_modify, if_pos rfl, map_get_insert, if_pos rfl]
+  rw [NormLevel.addVar, map_get_modify, ite_eq_left rfl, map_get_insert, ite_eq_left rfl]
   rfl
 
 end Vesper.Lean4LeanLevel42

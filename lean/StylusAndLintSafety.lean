@@ -39,7 +39,8 @@ inductive Piece where
 @[simp] noncomputable def commentsOf : List Piece -> List String
   | [] => []
   | .comment value :: rest => value :: commentsOf rest
-  | _ :: rest => commentsOf rest
+  | .text _ :: rest => commentsOf rest
+  | .line _ :: rest => commentsOf rest
 
 @[simp] theorem commentsOf_append (left right : List Piece) :
     commentsOf (left ++ right) = commentsOf left ++ commentsOf right := by
@@ -68,16 +69,25 @@ theorem docComments_concat (children : List Doc) :
   | cons head tail ih =>
       exact congrArg (fun xs : List String => docComments head ++ xs) ih
 
--- Use primitive scalar-list operations: Lean's optimized String.contains,
--- startsWith and splitOn use propext internally in this toolchain. These
--- equivalent model helpers keep the theorem's dependency set empty.
-noncomputable def containsScalar (value : String) (wanted : Char) : Bool :=
-  value.toList.any (fun ch => ch == wanted)
+-- Read UTF-8 bytes directly: String.toList/length use choice in this toolchain.
+-- A valid UTF-8 scalar begins at an ASCII byte or a non-continuation lead byte.
+-- These model helpers retain the empty-axiom dependency set.
+noncomputable def scalarStart (byte : UInt8) : Bool :=
+  byte.toNat < 128 || byte.toNat >= 192
+
+noncomputable def scalarLength (value : String) : Nat :=
+  value.toByteArray.data.toList.foldl (fun count byte =>
+    if scalarStart byte then count + 1 else count) 0
+
+noncomputable def containsAscii (value : String) (wanted : Nat) : Bool :=
+  value.toByteArray.data.toList.any (fun byte => byte.toNat == wanted)
 
 noncomputable def isLineComment (value : String) : Bool :=
-  match value.toList with
-  | '/' :: '/' :: _ => true
-  | _ => false
+  match value.toByteArray.data.toList with
+  | [] => false
+  | first :: rest => match rest with
+      | [] => false
+      | second :: _ => first.toNat == 47 && second.toNat == 47
 
 -- Mirrors the cached flat-width algebra. Newlines/CR and line comments cannot
 -- have finite flat width. Nat abstracts successful checked machine arithmetic.
@@ -86,10 +96,10 @@ noncomputable def flatWidth : Doc -> Option Nat
   | .softLineOrSpace => some 1
   | .hardLine => none
   | .text value =>
-      if containsScalar value '\n' || containsScalar value '\r' then none else some value.length
+      if containsAscii value 10 || containsAscii value 13 then none else some (scalarLength value)
   | .comment value =>
-      if containsScalar value '\n' || containsScalar value '\r' || isLineComment value
-      then none else some value.length
+      if containsAscii value 10 || containsAscii value 13 || isLineComment value
+      then none else some (scalarLength value)
   | .nest _ inner | .group inner => flatWidth inner
   | .append left right => do
       let l <- flatWidth left
@@ -108,7 +118,8 @@ structure Layout where
   nextGroup : Nat
 
 noncomputable def advanceColumn (column : Nat) (value : String) : Nat :=
-  value.toList.foldl (fun col ch => if ch == '\n' then 0 else col + 1) column
+  value.toByteArray.data.toList.foldl (fun col byte =>
+    if byte.toNat == 10 then 0 else if scalarStart byte then col + 1 else col) column
 
 noncomputable def layoutWith (choose : GroupChoice) (width indent column next : Nat)
     (mode : Mode) : Doc -> Layout

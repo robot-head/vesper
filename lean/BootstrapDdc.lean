@@ -87,20 +87,20 @@ theorem gate_accepts_only_fixed_point (hash : B → D) (lock : Lock D) (ev : Evi
       lock.quorum ≤ distinctOperators ev.operators := by
   unfold gate at h
   by_cases h1 : lock.stage2 ≠ lock.stage3 ∨ lock.stage3 ≠ lock.pathB
-  · rw [if_pos h1] at h; cases h
-  · rw [if_neg h1] at h
+  · rw [ite_eq_left h1] at h; cases h
+  · rw [ite_eq_right h1] at h
     by_cases h2 : hash ev.stage2 ≠ hash ev.stage3
-    · rw [if_pos h2] at h; cases h
-    · rw [if_neg h2] at h
+    · rw [ite_eq_left h2] at h; cases h
+    · rw [ite_eq_right h2] at h
       by_cases h3 : hash ev.stage3 ≠ hash ev.pathB
-      · rw [if_pos h3] at h; cases h
-      · rw [if_neg h3] at h
+      · rw [ite_eq_left h3] at h; cases h
+      · rw [ite_eq_right h3] at h
         by_cases h4 : hash ev.stage3 ≠ lock.stage3
-        · rw [if_pos h4] at h; cases h
-        · rw [if_neg h4] at h
+        · rw [ite_eq_left h4] at h; cases h
+        · rw [ite_eq_right h4] at h
           by_cases h5 : distinctOperators ev.operators < lock.quorum
-          · rw [if_pos h5] at h; cases h
-          · rw [if_neg h5] at h
+          · rw [ite_eq_left h5] at h; cases h
+          · rw [ite_eq_right h5] at h
             cases h
             have e1 : lock.stage2 = lock.stage3 := Decidable.byContradiction (fun n => h1 (Or.inl n))
             have e2 : lock.stage3 = lock.pathB := Decidable.byContradiction (fun n => h1 (Or.inr n))
@@ -122,7 +122,7 @@ theorem gate_rejects_stage_divergence (hash : B → D) (lock : Lock D) (ev : Evi
     intro h; cases h with
     | inl h => exact h hl.1
     | inr h => exact h hl.2
-  simp only [this, hd, if_false, if_true, ne_eq, not_false_eq_true]
+  simp only [this, hd, ite_false, ite_true, ne_eq, not_false_eq_true]
 
 /-- Path A agreeing with itself but not with Path B is the DDC error. -/
 theorem gate_rejects_ddc_mismatch (hash : B → D) (lock : Lock D) (ev : Evidence B)
@@ -135,7 +135,7 @@ theorem gate_rejects_ddc_mismatch (hash : B → D) (lock : Lock D) (ev : Evidenc
     intro h; cases h with
     | inl h => exact h hl.1
     | inr h => exact h hl.2
-  simp only [this, ha, hb, if_false, if_true, ne_eq, not_true_eq_false, not_false_eq_true]
+  simp only [this, ha, hb, ite_false, ite_true, ne_eq, not_true_eq_false, not_false_eq_true]
 
 /-- Too few distinct operators never pass, so a missing signature fails. -/
 theorem gate_rejects_missing_signature (hash : B → D) (lock : Lock D) (ev : Evidence B) (d : D)

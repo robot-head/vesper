@@ -656,7 +656,7 @@ pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
             binders,
             result: destination.clone(),
             body: Term::Record { fields },
-            kind: DefinitionKind::Def,
+            kind: DefinitionKind::Abbrev,
         }));
         let mut binders = vec![
             implicit("S", type0()),

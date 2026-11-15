@@ -38,7 +38,9 @@
         "src/snapshot/**",
         "tests/common/lean4lean_proof_packet.rs",
         "scripts/check-format-proof.py",
-        "scripts/test-format-proof.sh"
+        "scripts/test-format-proof.sh",
+        "tools/logos42/**",
+        "src/bin/logos42*"
       ]
     },
     "flux_faults": {

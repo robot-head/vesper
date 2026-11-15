@@ -392,7 +392,10 @@ theorem reclaimFrom_gen (t : Nat) :
   | nil => intro T n _; exact ⟨GenLe.refl T, rfl⟩
   | cons s rest ih =>
     intro T n hrest
-    have h0 : T.slots[i]? = some s := by simpa using hrest 0 (by simp)
+    have h0 : T.slots[i]? = some s := by
+      have h := hrest 0 (by simp)
+      rw [Nat.add_zero] at h
+      exact h
     simp only [reclaimFrom]
     split
     · -- released slot i; later slots are untouched by the set at i
@@ -509,7 +512,7 @@ theorem dropOwn_ok_stales {T T' : Table} {t v : Nat} {h : Handle}
   obtain ⟨s, hs, -, hg, -, -, rfl⟩ := dropOwn_ok_sound hd
   have hlt : h.idx < T.slots.length := (List.getElem?_eq_some_iff.mp hs).1
   unfold release genAt
-  rw [if_pos (by omega)]
+  rw [ite_eq_left (by omega)]
   simp [List.getElem?_set_self hlt]
   omega
 

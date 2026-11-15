@@ -379,15 +379,15 @@ theorem owned_leaderAppend (ballots : Nat → Ballots) (s : Sys) (t c : Nat)
     intro x _ ⟨c', hl, hi, htake⟩
     refine ⟨c', hl, ?_⟩
     by_cases hc : u = t ∧ c' = c
-    · rw [if_pos hc]
+    · rw [ite_eq_left hc]
       obtain ⟨hu, hcc⟩ := hc
       subst hu; subst hcc
       have hle := ghost_len_le hpre
       refine ⟨by simp; omega, ?_⟩
       rw [htake, ghost_take hpre hi, take_succ_of_lt (by omega)]
-    · rw [if_neg hc]; exact ⟨hi, htake⟩
+    · rw [ite_eq_right hc]; exact ⟨hi, htake⟩
   by_cases hjc : j = c
-  · rw [if_pos hjc] at hj ⊢
+  · rw [ite_eq_left hjc] at hj ⊢
     by_cases hi : i < (s.logs c).length
     · rw [List.getElem?_append_left hi] at hj
       rw [take_succ_of_lt hi]
@@ -402,7 +402,7 @@ theorem owned_leaderAppend (ballots : Nat → Ballots) (s : Sys) (t c : Nat)
       simp at hj
       subst hj
       exact ⟨c, hlead, by simp, by simp⟩
-  · rw [if_neg hjc] at hj ⊢
+  · rw [ite_eq_right hjc] at hj ⊢
     exact old _ hj (ho j i u hj)
 
 theorem matching_leaderAppend (ballots : Nat → Ballots) (s : Sys) (t c : Nat)
@@ -422,10 +422,10 @@ theorem matching_leaderAppend (ballots : Nat → Ballots) (s : Sys) (t c : Nat)
   intro a b
   simp only [setLog]
   by_cases ha : a = c <;> by_cases hb : b = c
-  · rw [if_pos ha, if_pos hb]; exact matching_refl _
-  · rw [if_pos ha, if_neg hb]; exact step b
-  · rw [if_neg ha, if_pos hb]; exact matching_symm (step a)
-  · rw [if_neg ha, if_neg hb]; exact hm a b
+  · rw [ite_eq_left ha, ite_eq_left hb]; exact matching_refl _
+  · rw [ite_eq_left ha, ite_eq_right hb]; exact step b
+  · rw [ite_eq_right ha, ite_eq_left hb]; exact matching_symm (step a)
+  · rw [ite_eq_right ha, ite_eq_right hb]; exact hm a b
 
 theorem prefix_entry {l : Log} {m i t : Nat} (h : (l.take m)[i]? = some t) :
     i < m ∧ l[i]? = some t := by
@@ -452,13 +452,13 @@ theorem owned_followerAppend (ballots : Nat → Ballots) (s : Sys) (f l prev k :
   intro j i u hj
   simp only [setLog] at hj ⊢
   by_cases hjf : j = f
-  · rw [if_pos hjf] at hj ⊢
+  · rw [ite_eq_left hjf] at hj ⊢
     subst hf'
     obtain ⟨hik, hl⟩ := prefix_entry hj
     obtain ⟨c, hlead, hi, htake⟩ := ho l i u hl
     refine ⟨c, hlead, hi, ?_⟩
     rw [List.take_take, Nat.min_eq_left (by omega), htake]
-  · rw [if_neg hjf] at hj ⊢
+  · rw [ite_eq_right hjf] at hj ⊢
     exact ho j i u hj
 
 theorem matching_followerAppend (s : Sys) (f l prev k : Nat) (f' : Log)
@@ -469,10 +469,10 @@ theorem matching_followerAppend (s : Sys) (f l prev k : Nat) (f' : Log)
   intro a b
   simp only [setLog]
   by_cases ha : a = f <;> by_cases hb : b = f
-  · rw [if_pos ha, if_pos hb]; exact matching_refl _
-  · rw [if_pos ha, if_neg hb]; exact step b
-  · rw [if_neg ha, if_pos hb]; exact matching_symm (step a)
-  · rw [if_neg ha, if_neg hb]; exact hm a b
+  · rw [ite_eq_left ha, ite_eq_left hb]; exact matching_refl _
+  · rw [ite_eq_left ha, ite_eq_right hb]; exact step b
+  · rw [ite_eq_right ha, ite_eq_left hb]; exact matching_symm (step a)
+  · rw [ite_eq_right ha, ite_eq_right hb]; exact hm a b
 
 theorem system_invariant (ballots : Nat → Ballots) (s : Sys) (h : Reach ballots s) :
     AllMatching s ∧ Owned ballots s := by
