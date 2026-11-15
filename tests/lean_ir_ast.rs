@@ -115,3 +115,16 @@ fn main() -> bool {
 "#,
     );
 }
+
+#[test]
+fn nullary_cfg_block_with_large_multiplier_compiles_under_lean() {
+    agrees(
+        r#"
+fn step(x: i64) -> i64 { wrapping_add(x, 1) }
+fn main() -> i64 {
+    let a = step(6);
+    wrapping_add(wrapping_mul(a, 100000000), step(41))
+}
+"#,
+    );
+}
