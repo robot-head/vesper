@@ -23,6 +23,11 @@ vesper_crate(
         "//crates/vesper-doc:files",
         "//crates/vesper-grammar:files",
         "//crates/vesper-loom-trust:files",
+        # The self-hosted parser compares every repository .ves source.
+        "//crates/vesper-lint:files",
+        "//crates/vesper-nexus:files",
+        "//crates/vesper-pact-bridge:files",
+        "//crates/vesper-sim-session:files",
     ],
     # One Lean -M4096 stage plus estimated wrapper/runtime overhead; see #537.
     test_tags = {
