@@ -1,0 +1,296 @@
+// Diagnostics use the seed codes, UTF-8 byte spans and seed message text.
+// Template 1 is `expected {TokenKind}, found {TokenKind}`. Other templates
+// are static strings; syntax_message_byte renders both in Vesper, so a
+// consumer needs no Rust message table.
+fn syntax_diag(message: i64, start: i64, end: i64, a: i64, b: i64, legacy: i64)
+    -> Unit eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let count = syntax_cell(2);
+    if count >= 128 {
+        let ignored = fail_i(Diag::Limit(start));
+        ()
+    } else {
+        let base = 1000000 + count * 6;
+        syntax_put(
+            base,
+            if message == 23 {
+                1
+            } else {
+                2
+            }
+        );
+        syntax_put(base + 1, message);
+        syntax_put(base + 2, start);
+        syntax_put(base + 3, end);
+        syntax_put(base + 4, a);
+        syntax_put(base + 5, b);
+        syntax_put(2, count + 1);
+        if count == 0 {
+            syntax_put(6, legacy);
+        } else {
+            ()
+        }
+    }
+}
+fn syntax_issue(p: P, message: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    syntax_diag(
+        message,
+        p.cur.start,
+        p.cur.end,
+        0,
+        0,
+        if message == 10 || message == 11 || message == 12 || message == 13 || message == 9 {
+            4
+        } else {
+            2
+        }
+    );
+    p
+}
+fn syntax_expected(p: P, expected: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    syntax_diag(1, p.cur.start, p.cur.end, expected, p.cur.kind, 2);
+    p
+}
+fn syntax_message_len(message: i64, a: i64, b: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if message == 1 {
+        17 + syntax_static_len(100 + a) + syntax_static_len(100 + b)
+    } else {
+        syntax_static_len(message)
+    }
+}
+fn syntax_message_byte(message: i64, a: i64, b: i64, i: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if message != 1 {
+        syntax_static_byte(message, i)
+    } else {
+        let name_end = 9 + syntax_static_len(100 + a);
+        if i < 9 {
+            syntax_static_byte(200, i)
+        } else if i < name_end {
+            syntax_static_byte(100 + a, i - 9)
+        } else if i < name_end + 8 {
+            syntax_static_byte(201, i - name_end)
+        } else {
+            syntax_static_byte(100 + b, i - name_end - 8)
+        }
+    }
+}
+fn syntax_static_len(message: i64) -> i64 {
+    match message {
+        2 => 19,
+        3 => 32,
+        4 => 33,
+        5 => 20,
+        6 => 22,
+        7 => 19,
+        8 => 16,
+        9 => 37,
+        10 => 33,
+        11 => 21,
+        12 => 48,
+        13 => 44,
+        14 => 31,
+        15 => 39,
+        16 => 37,
+        17 => 38,
+        18 => 34,
+        19 => 43,
+        20 => 59,
+        21 => 73,
+        22 => 39,
+        23 => 37,
+        24 => 30,
+        200 => 9,
+        201 => 8,
+        100 => 10,
+        101 => 7,
+        102 => 12,
+        103 => 5,
+        104 => 5,
+        105 => 5,
+        106 => 3,
+        107 => 6,
+        108 => 6,
+        109 => 4,
+        110 => 6,
+        111 => 4,
+        112 => 2,
+        113 => 3,
+        114 => 4,
+        115 => 6,
+        116 => 6,
+        117 => 3,
+        118 => 3,
+        119 => 2,
+        120 => 5,
+        121 => 4,
+        122 => 6,
+        123 => 6,
+        124 => 5,
+        125 => 4,
+        126 => 6,
+        127 => 5,
+        128 => 2,
+        129 => 4,
+        130 => 4,
+        131 => 5,
+        132 => 6,
+        133 => 6,
+        134 => 6,
+        135 => 6,
+        136 => 8,
+        137 => 8,
+        138 => 5,
+        139 => 4,
+        140 => 5,
+        141 => 10,
+        142 => 3,
+        143 => 8,
+        144 => 2,
+        145 => 4,
+        146 => 5,
+        147 => 8,
+        148 => 2,
+        149 => 6,
+        150 => 6,
+        151 => 7,
+        152 => 9,
+        153 => 7,
+        154 => 4,
+        155 => 5,
+        156 => 4,
+        157 => 5,
+        158 => 7,
+        159 => 4,
+        160 => 2,
+        161 => 2,
+        162 => 2,
+        163 => 2,
+        164 => 2,
+        165 => 3,
+        166 => 2,
+        167 => 4,
+        168 => 4,
+        169 => 5,
+        170 => 3,
+        171 => 6,
+        25 => 23,
+        26 => 37,
+        27 => 37,
+        28 => 34,
+        _ => 0,
+    }
+}
+fn syntax_static_byte(message: i64, i: i64) -> i64 {
+    if i < 0 || i >= syntax_static_len(message) {
+        -1
+    } else {
+        handle Fail[RuntimeError] in {
+            match message {
+                2 => syntax_text_2(i),
+                3 => syntax_text_3(i),
+                4 => syntax_text_4(i),
+                5 => syntax_text_5(i),
+                6 => syntax_text_6(i),
+                7 => syntax_text_7(i),
+                8 => syntax_text_8(i),
+                9 => syntax_text_9(i),
+                10 => syntax_text_10(i),
+                11 => syntax_text_11(i),
+                12 => syntax_text_12(i),
+                13 => syntax_text_13(i),
+                14 => syntax_text_14(i),
+                15 => syntax_text_15(i),
+                16 => syntax_text_16(i),
+                17 => syntax_text_17(i),
+                18 => syntax_text_18(i),
+                19 => syntax_text_19(i),
+                20 => syntax_text_20(i),
+                21 => syntax_text_21(i),
+                22 => syntax_text_22(i),
+                23 => syntax_text_23(i),
+                24 => syntax_text_24(i),
+                200 => syntax_text_200(i),
+                201 => syntax_text_201(i),
+                100 => syntax_text_100(i),
+                101 => syntax_text_101(i),
+                102 => syntax_text_102(i),
+                103 => syntax_text_103(i),
+                104 => syntax_text_104(i),
+                105 => syntax_text_105(i),
+                106 => syntax_text_106(i),
+                107 => syntax_text_107(i),
+                108 => syntax_text_108(i),
+                109 => syntax_text_109(i),
+                110 => syntax_text_110(i),
+                111 => syntax_text_111(i),
+                112 => syntax_text_112(i),
+                113 => syntax_text_113(i),
+                114 => syntax_text_114(i),
+                115 => syntax_text_115(i),
+                116 => syntax_text_116(i),
+                117 => syntax_text_117(i),
+                118 => syntax_text_118(i),
+                119 => syntax_text_119(i),
+                120 => syntax_text_120(i),
+                121 => syntax_text_121(i),
+                122 => syntax_text_122(i),
+                123 => syntax_text_123(i),
+                124 => syntax_text_124(i),
+                125 => syntax_text_125(i),
+                126 => syntax_text_126(i),
+                127 => syntax_text_127(i),
+                128 => syntax_text_128(i),
+                129 => syntax_text_129(i),
+                130 => syntax_text_130(i),
+                131 => syntax_text_131(i),
+                132 => syntax_text_132(i),
+                133 => syntax_text_133(i),
+                134 => syntax_text_134(i),
+                135 => syntax_text_135(i),
+                136 => syntax_text_136(i),
+                137 => syntax_text_137(i),
+                138 => syntax_text_138(i),
+                139 => syntax_text_139(i),
+                140 => syntax_text_140(i),
+                141 => syntax_text_141(i),
+                142 => syntax_text_142(i),
+                143 => syntax_text_143(i),
+                144 => syntax_text_144(i),
+                145 => syntax_text_145(i),
+                146 => syntax_text_146(i),
+                147 => syntax_text_147(i),
+                148 => syntax_text_148(i),
+                149 => syntax_text_149(i),
+                150 => syntax_text_150(i),
+                151 => syntax_text_151(i),
+                152 => syntax_text_152(i),
+                153 => syntax_text_153(i),
+                154 => syntax_text_154(i),
+                155 => syntax_text_155(i),
+                156 => syntax_text_156(i),
+                157 => syntax_text_157(i),
+                158 => syntax_text_158(i),
+                159 => syntax_text_159(i),
+                160 => syntax_text_160(i),
+                161 => syntax_text_161(i),
+                162 => syntax_text_162(i),
+                163 => syntax_text_163(i),
+                164 => syntax_text_164(i),
+                165 => syntax_text_165(i),
+                166 => syntax_text_166(i),
+                167 => syntax_text_167(i),
+                168 => syntax_text_168(i),
+                169 => syntax_text_169(i),
+                170 => syntax_text_170(i),
+                171 => syntax_text_171(i),
+                25 => syntax_text_25(i),
+                26 => syntax_text_26(i),
+                27 => syntax_text_27(i),
+                28 => syntax_text_28(i),
+                _ => -1,
+            }
+        } with {
+            return value => value,
+            raise(error, resume) => -1,
+        }
+    }
+}

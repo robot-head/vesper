@@ -1,0 +1,284 @@
+// Item declarations, traits, models, impls and their local scopes.
+// Items.
+fn at_trait_or_model(p: P, n: i64) -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    at_word(p, n, 0x7472616974) || at_word(p, n, 0x6d6f64656c)
+}
+
+fn item(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let start = nth(p, 0).start;
+    if at_word(p, 0, 0x757365) && at_word(p, 1, 0x6d6f64656c) {
+        use_model(p)
+    } else {
+        let p = if at_word(p, 0, 0x707562) && at_trait_or_model(p, 1) {
+            bump(p)
+        } else {
+            p
+        };
+        if at_word(p, 0, 0x7472616974) {
+            trait_item(p)
+        } else if at_word(p, 0, 0x6d6f64656c) {
+            model_item(p)
+        } else {
+            // `wire struct` (§13.2, §28.2): a padding-free copy struct.
+            let q = if at_word(p, 0, 0x77697265) && nth(p, 1).kind == 8 {
+                bump(p)
+            } else {
+                mode(p)
+            };
+            let k = kind(q);
+            if k == 8 {
+                fields(generics(upper(bump(q)), false))
+            } else if k == 9 {
+                let r = expect(generics(upper(bump(q)), false), 34);
+                expect(variants(r), 35)
+            } else if k == 10 {
+                let r = expect(generics(upper(bump(q)), false), 34);
+                expect(functions(r, true), 35)
+            } else if k == 12 {
+                function(q, false)
+            } else if k == 11 {
+                impl_item(q)
+            } else {
+                q
+            }
+        }
+    }
+}
+
+fn variants(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 35) {
+        p
+    } else {
+        let q = upper(p);
+        let r = if at(q, 34) {
+            fields(q)
+        } else {
+            let l = eat(q, 32);
+            if ate(q, l) {
+                expect(ty_list(l), 33)
+            } else {
+                q
+            }
+        };
+        let s = eat(r, 38);
+        if ate(r, s) {
+            variants(s)
+        } else {
+            s
+        }
+    }
+}
+
+fn functions(p: P, op: bool) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if at(p, 12) {
+        functions(function(p, op), op)
+    } else {
+        p
+    }
+}
+
+fn impl_item(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = generics(bump(p), true);
+    if at(q, 44) {
+        let r = conformance(expect_word(trait_ref(q), 0x666f72));
+        syntax_heads(with_flags(r, r.nostruct, p.rows, false), p.row_head, p.value_head)
+    } else {
+        let r = ty(q);
+        if at_word(r, 0, 0x666f72) {
+            let s = bump(r);
+            let s = if q.cur.kind == 12 || q.cur.kind == 32 {
+                syntax_issue(s, 28)
+            } else {
+                s
+            };
+            let s = conformance(s);
+            syntax_heads(with_flags(s, s.nostruct, p.rows, false), p.row_head, p.value_head)
+        } else if r.bounds {
+            let s = syntax_bounds(r, 21, 0);
+            let s = expect(functions(expect(s, 34), false), 35);
+            syntax_heads(with_flags(s, s.nostruct, p.rows, false), p.row_head, p.value_head)
+        } else {
+            let s = expect(functions(expect(r, 34), false), 35);
+            syntax_heads(with_flags(s, s.nostruct, p.rows, false), p.row_head, p.value_head)
+        }
+    }
+}
+
+fn use_model(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    expect(upper(bump(bump(p))), 39)
+}
+
+fn trait_item(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = generics(upper(bump(p)), true);
+    let q = syntax_bounds(q, 20, 0);
+    let q = expect(associated(expect(q, 34), true), 35);
+    syntax_heads(with_flags(q, q.nostruct, p.rows, false), p.row_head, p.value_head)
+}
+
+fn model_item(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = expect(generics(upper(bump(p)), true), 40);
+    let q = trait_ref(q);
+    let q = if at_word(q, 0, 0x666f72) {
+        bump(q)
+    } else {
+        syntax_issue(q, 17)
+    };
+    let q = conformance(q);
+    syntax_heads(with_flags(q, q.nostruct, p.rows, false), p.row_head, p.value_head)
+}
+
+fn conformance(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = ty(p);
+    let q = if at_word(q, 0, 0x7768657265) {
+        where_clauses(bump(q))
+    } else {
+        q
+    };
+    expect(associated(expect(q, 34), false), 35)
+}
+
+fn associated(p: P, declaration: bool) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 35) {
+        p
+    } else {
+        let q = if at_word(p, 0, 0x74797065) {
+            let q = upper(bump(p));
+            let q = if declaration {
+                let c = eat(q, 40);
+                if ate(q, c) {
+                    required_mode(expect(c, 17))
+                } else {
+                    q
+                }
+            } else {
+                ty(expect(q, 48))
+            };
+            expect(q, 39)
+        } else if at(p, 12) {
+            function(p, declaration)
+        } else {
+            bump(
+                syntax_issue(
+                    p,
+                    if declaration {
+                        18
+                    } else {
+                        19
+                    }
+                )
+            )
+        };
+        associated(q, declaration)
+    }
+}
+
+fn function(p: P, op: bool) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let g = generics(lower(expect(p, 12)), true);
+    let q = expect(params(expect(with_flags(g, g.nostruct, g.rows, false), 32), 33), 33);
+    let q = if at(q, 46) {
+        ty(bump(q))
+    } else {
+        q
+    };
+    let q = effects(q);
+    let q = if at_word(q, 0, 0x7768657265) {
+        where_clauses(bump(q))
+    } else {
+        q
+    };
+    let r = if op {
+        expect(q, 39)
+    } else {
+        block(q)
+    };
+    syntax_heads(with_flags(r, r.nostruct, p.rows, r.bounds), p.row_head, p.value_head)
+}
+
+fn where_clauses(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = trait_ref(expect(ty(p), 40));
+    let r = eat(q, 38);
+    if !ate(q, r) || at(r, 34) || at(r, 39) {
+        r
+    } else {
+        where_clauses(r)
+    }
+}
+
+fn params(p: P, end: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, end) {
+        p
+    } else {
+        let passed = pass(p);
+        let q = lower(syntax_bind(passed, false));
+        let d = eat(q, 42);
+        let q = if ate(q, d) {
+            place_tree(d)
+        } else {
+            q
+        };
+        let c = eat(q, 40);
+        let q = if ate(q, c) {
+            ty(c)
+        } else {
+            q
+        };
+        let r = eat(q, 38);
+        if ate(q, r) {
+            params(r, end)
+        } else {
+            r
+        }
+    }
+}
+
+fn place_tree(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    leave(place_inner(enter(p)), p)
+}
+
+fn place_inner(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = eat(p, 34);
+    if ate(p, q) {
+        expect(place_list(q), 35)
+    } else {
+        let r = lower(p);
+        let d = eat(r, 42);
+        if ate(r, d) {
+            place_tree(d)
+        } else {
+            r
+        }
+    }
+}
+
+fn place_list(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 35) {
+        p
+    } else {
+        let q = place_tree(p);
+        let r = eat(q, 38);
+        if ate(q, r) {
+            place_list(r)
+        } else {
+            r
+        }
+    }
+}
+
+fn syntax_bounds(p: P, message: i64, i: i64)
+    -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if i >= syntax_cell(7) {
+        p
+    } else {
+        syntax_diag(message, syntax_cell(997000 + i * 2), syntax_cell(997001 + i * 2), 0, 0, 2);
+        syntax_bounds(p, message, i + 1)
+    }
+}
+
+fn field_mode(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = mode(p);
+    if ate(p, q) {
+        q
+    } else {
+        syntax_issue(q, 25)
+    }
+}

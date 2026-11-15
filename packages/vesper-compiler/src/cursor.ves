@@ -92,32 +92,19 @@ fn next_sig(i: i64) -> Tok eff [Fail[Diag], Fail[ArithOverflow]] {
     }
 }
 
-fn nth(p: P, n: i64) -> Tok eff [Fail[Diag], Fail[ArithOverflow]] {
-    if n == 0 || p.cur.kind == 70 {
-        p.cur
-    } else {
-        nth_from(p.cur.end, n - 1)
-    }
+fn nth(p: P, n: i64) -> Tok eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    syntax_nth(p.index, n)
 }
 
-fn nth_from(i: i64, n: i64) -> Tok eff [Fail[Diag], Fail[ArithOverflow]] {
-    let t = next_sig(i);
-    if n == 0 || t.kind == 70 {
-        t
-    } else {
-        nth_from(t.end, n - 1)
-    }
-}
-
-fn kind(p: P) -> i64 {
+fn kind(p: P) -> i64 eff [SyntaxMemory] {
     p.cur.kind
 }
 
-fn at(p: P, k: i64) -> bool eff [Fail[Diag], Fail[ArithOverflow]] {
+fn at(p: P, k: i64) -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     kind(p) == k
 }
 
-fn at_end(p: P, k: i64) -> bool eff [Fail[Diag], Fail[ArithOverflow]] {
+fn at_end(p: P, k: i64) -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let c = kind(p);
     c == k || c == 70
 }
@@ -126,24 +113,29 @@ fn text_is(t: Tok, packed: i64) -> bool eff [Fail[ArithOverflow]] {
     t.kind == 4 && word(t.start, t.end) == packed
 }
 
-fn at_word(p: P, n: i64, packed: i64) -> bool eff [Fail[Diag], Fail[ArithOverflow]] {
+fn at_word(p: P, n: i64, packed: i64) -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     text_is(nth(p, n), packed)
 }
 
 // Consumes the current token (and the trivia before it).
-fn advance(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn advance(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    syntax_attach(p.token_pos, p.index + 1);
     P {
         pos: p.cur.end,
-        cur: next_sig(p.cur.end),
+        cur: syntax_tok(syntax_sig(p.index + 1)),
         h: p.h,
         nostruct: p.nostruct,
         rows: p.rows,
         bounds: p.bounds,
-        depth: p.depth
+        depth: p.depth,
+        index: syntax_sig(p.index + 1),
+        token_pos: p.index + 1,
+        row_head: p.row_head,
+        value_head: p.value_head
     }
 }
 
-fn bump(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn bump(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if p.cur.kind == 70 {
         fail_p(Diag::Expected(70, p.cur.start))
     } else {
@@ -151,7 +143,7 @@ fn bump(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     }
 }
 
-fn eat(p: P, k: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn eat(p: P, k: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if at(p, k) {
         bump(p)
     } else {
@@ -159,19 +151,20 @@ fn eat(p: P, k: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     }
 }
 
-fn ate(p: P, q: P) -> bool {
+fn ate(p: P, q: P) -> bool eff [SyntaxMemory] {
     q.pos != p.pos
 }
 
-fn expect(p: P, k: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn expect(p: P, k: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if p.cur.kind == k {
         advance(p)
     } else {
-        fail_p(Diag::Expected(k, p.cur.start))
+        syntax_expected(p, k)
     }
 }
 
-fn open(p: P, node: i64) -> P eff [Fail[ArithOverflow]] {
+fn open(p: P, node: i64) -> P eff [SyntaxMemory, Fail[ArithOverflow], Fail[Diag]] {
+    syntax_open(node, p.pos);
     P {
         pos: p.pos,
         cur: p.cur,
@@ -179,16 +172,19 @@ fn open(p: P, node: i64) -> P eff [Fail[ArithOverflow]] {
         nostruct: p.nostruct,
         rows: p.rows,
         bounds: p.bounds,
-        depth: p.depth
+        depth: p.depth,
+        index: p.index,
+        token_pos: p.token_pos,
+        row_head: p.row_head,
+        value_head: p.value_head
     }
 }
 
 // Descent depth mirrors the seed's guarded `enter()` calls (expr, binary
 // and each binary operator, postfix and each postfix operator, primary,
 // block, if, type, type arguments, pattern, place tree), so an input the
-// seed rejects at its 128-level limit is rejected here too; the bound is a
-// little lower than the seed's to stay on the rejecting side.
-fn enter(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+// seed rejects at its 128-level descent limit is rejected here too.
+fn enter(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if p.depth >= max_depth() {
         fail_p(Diag::Limit(p.pos))
     } else {
@@ -199,13 +195,17 @@ fn enter(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
             nostruct: p.nostruct,
             rows: p.rows,
             bounds: p.bounds,
-            depth: p.depth + 1
+            depth: p.depth + 1,
+            index: p.index,
+            token_pos: p.token_pos,
+            row_head: p.row_head,
+            value_head: p.value_head
         }
     }
 }
 
 // Restores the depth of `outer` after a guarded descent.
-fn leave(p: P, outer: P) -> P {
+fn leave(p: P, outer: P) -> P eff [SyntaxMemory] {
     P {
         pos: p.pos,
         cur: p.cur,
@@ -213,11 +213,16 @@ fn leave(p: P, outer: P) -> P {
         nostruct: p.nostruct,
         rows: p.rows,
         bounds: p.bounds,
-        depth: outer.depth
+        depth: outer.depth,
+        index: p.index,
+        token_pos: p.token_pos,
+        row_head: p.row_head,
+        value_head: p.value_head
     }
 }
 
-fn close(p: P) -> P eff [Fail[ArithOverflow]] {
+fn close(p: P) -> P eff [SyntaxMemory, Fail[ArithOverflow], Fail[Diag]] {
+    syntax_close(p.pos);
     P {
         pos: p.pos,
         cur: p.cur,
@@ -225,11 +230,15 @@ fn close(p: P) -> P eff [Fail[ArithOverflow]] {
         nostruct: p.nostruct,
         rows: p.rows,
         bounds: p.bounds,
-        depth: p.depth
+        depth: p.depth,
+        index: p.index,
+        token_pos: p.token_pos,
+        row_head: p.row_head,
+        value_head: p.value_head
     }
 }
 
-fn with_flags(p: P, nostruct: bool, rows: bool, bounds: bool) -> P {
+fn with_flags(p: P, nostruct: bool, rows: bool, bounds: bool) -> P eff [SyntaxMemory] {
     P {
         pos: p.pos,
         cur: p.cur,
@@ -237,33 +246,46 @@ fn with_flags(p: P, nostruct: bool, rows: bool, bounds: bool) -> P {
         nostruct: nostruct,
         rows: rows,
         bounds: bounds,
-        depth: p.depth
+        depth: p.depth,
+        index: p.index,
+        token_pos: p.token_pos,
+        row_head: p.row_head,
+        value_head: p.value_head
     }
 }
 
-fn ident(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn ident(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let k = kind(p);
     if k == 4 || k == 3 || k == 22 {
         bump(p)
     } else {
-        fail_p(Diag::Expected(4, nth(p, 0).start))
+        let q = syntax_issue(p, 2);
+        if at(q, 70) {
+            q
+        } else {
+            bump(q)
+        }
     }
 }
 
-fn lower(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
-    let k = kind(p);
-    if k == 4 || k == 22 {
-        bump(p)
+fn lower(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = if kind(p) == 4 || kind(p) == 22 {
+        p
     } else {
-        fail_p(Diag::Expected(4, nth(p, 0).start))
-    }
+        syntax_issue(p, 3)
+    };
+    ident(q)
+}
+fn upper(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = if at(p, 3) {
+        p
+    } else {
+        syntax_issue(p, 4)
+    };
+    ident(q)
 }
 
-fn upper(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
-    expect(p, 3)
-}
-
-fn mode(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn mode(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let k = kind(p);
     if k == 14 || k == 15 || k == 16 {
         bump(p)
@@ -272,16 +294,16 @@ fn mode(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     }
 }
 
-fn required_mode(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn required_mode(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = mode(p);
     if ate(p, q) {
         q
     } else {
-        fail_p(Diag::Expected(16, nth(p, 0).start))
+        syntax_issue(p, 5)
     }
 }
 
-fn pass(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn pass(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let k = kind(p);
     if k == 19 || k == 20 || k == 21 {
         bump(p)
@@ -435,6 +457,35 @@ fn json_escape(d: i64) -> bool {
     }
 }
 
+fn unicode_unit(i: i64, end: i64, n: i64, value: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if n == 0 {
+        value
+    } else {
+        let c = source_byte(i);
+        if i >= end || !is_hex(c) || c == 95 {
+            -1
+        } else {
+            unicode_unit(i + 1, end, n - 1, value * 16 + hex_digit(c))
+        }
+    }
+}
+
+fn check_unicode(start: i64, i: i64, end: i64) -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
+    let unit = unicode_unit(i, end, 4, 0);
+    if unit < 0 || unit >= 56320 && unit <= 57343 {
+        fail_i(Diag::Invalid(start))
+    } else if unit >= 55296 && unit <= 56319 {
+        let low = unicode_unit(i + 6, end, 4, 0);
+        if source_byte(i + 4) == 92 && source_byte(i + 5) == 117 && low >= 56320 && low <= 57343 {
+            check_escapes(start, i + 10, end)
+        } else {
+            fail_i(Diag::Invalid(start))
+        }
+    } else {
+        check_escapes(start, i + 4, end)
+    }
+}
+
 fn check_escapes(start: i64, i: i64, end: i64) -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
     if i >= end {
         0
@@ -445,7 +496,7 @@ fn check_escapes(start: i64, i: i64, end: i64) -> i64 eff [Fail[Diag], Fail[Arit
         } else if c == 92 {
             let d = source_byte(i + 1);
             if d == 117 {
-                fail_i(Diag::Unsupported(7, start))
+                check_unicode(start, i + 2, end)
             } else if json_escape(d) {
                 check_escapes(start, i + 2, end)
             } else {
@@ -457,18 +508,29 @@ fn check_escapes(start: i64, i: i64, end: i64) -> i64 eff [Fail[Diag], Fail[Arit
     }
 }
 
-fn at_literal(p: P) -> bool eff [Fail[Diag], Fail[ArithOverflow]] {
+fn at_literal(p: P) -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let k = kind(p);
     k == 5 || k == 6 || k == 7 || k == 30 || k == 31
 }
 
-fn literal(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
-    let t = nth(p, 0);
-    if t.kind == 6 && int_over(t) {
-        fail_p(Diag::Invalid(t.start))
-    } else if t.kind == 7 && check_escapes(t.start, t.start + 1, t.end - 1) != 0 {
-        fail_p(Diag::Invalid(t.start))
+fn literal(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let t = p.cur;
+    let invalid_string = if t.kind == 7 {
+        handle Fail[Diag] in {
+            check_escapes(t.start, t.start + 1, t.end - 1) != 0
+        } with {
+            return value => value,
+            raise(error, resume) => true,
+        }
     } else {
-        bump(p)
+        false
+    };
+    let q = bump(p);
+    if t.kind == 6 && int_over(t) {
+        syntax_issue(q, 10)
+    } else if invalid_string {
+        syntax_issue(q, 11)
+    } else {
+        q
     }
 }

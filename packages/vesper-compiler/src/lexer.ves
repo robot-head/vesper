@@ -1,14 +1,10 @@
 // @vesper-lang/compiler, part 1 of 5 (self-hosting Stage 1, design §42.3):
 // a lexer and a recursive-descent parser for the core subset, in Vesper.
 //
-// Vesper has no strings with byte access, no arrays and no growable buffers
-// yet, so the source is a pure function `source_byte(i)` (-1 past the end)
-// and `source_len()`, supplied by a separate generated module. Tokens are
-// produced on demand from a byte cursor; the parser keeps no token buffer.
-// The flat CST is emitted as a preorder event stream (open kind and start
-// offset, close and end offset) folded into a 63-bit digest, because the
-// language has no byte buffer to hold it. Unsupported syntax raises
-// `Fail[Diag]`; the parser never returns a tree for it.
+// Source bytes arrive through source_byte(i) and source_len(). The lexer
+// fills a token buffer once. The parser emits indexed nodes, token ownership
+// and diagnostics through the local linear SyntaxMemory interface. See
+// syntax_layout.md for the byte layout and consumer entry points.
 copy struct Tok {
     kind: i64,
     start: i64,
@@ -29,7 +25,11 @@ copy struct P {
     nostruct: bool,
     rows: bool,
     bounds: bool,
-    depth: i64
+    depth: i64,
+    index: i64,
+    token_pos: i64,
+    row_head: i64,
+    value_head: i64
 }
 
 copy enum Diag {
@@ -51,11 +51,9 @@ copy enum Diag {
 // 65 && 66 || 67 ! 68 | 69 Error 70 Eof 71 $.
 // CST node kinds are the seed's batch SyntaxKinds: 200 MODULE, 201 ITEM,
 // 202 EXPR, 203 PATTERN, 204 TYPE.
-// Diag::Unsupported codes: 1 trait, 2 model, 3 use model, 4 trait impl,
-// 5 associated-type projection, 6 call or index after a row generic is in
-// scope, 7 \u escape, 8 package trait reference.
+// Diag::Unsupported is reserved for future explicit unsupported productions.
 fn max_depth() -> i64 {
-    120
+    128
 }
 
 fn max_tokens() -> i64 {

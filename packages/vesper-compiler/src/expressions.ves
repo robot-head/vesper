@@ -1,14 +1,15 @@
 // @vesper-lang/compiler, part 4 of 5: blocks, expressions and patterns.
 // Blocks and statements.
-fn block(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
-    leave(expect(statements(expect(enter(p), 34)), 35), p)
+fn block(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = leave(expect(statements(expect(enter(p), 34)), 35), p);
+    syntax_heads(q, p.row_head, p.value_head)
 }
 
-fn statements(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn statements(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if at_end(p, 35) {
         p
     } else if at_word(p, 0, 0x757365) && at_word(p, 1, 0x6d6f64656c) {
-        fail_p(Diag::Unsupported(3, nth(p, 0).start))
+        statements(use_model(p))
     } else {
         let l = eat(p, 13);
         if ate(p, l) {
@@ -19,7 +20,10 @@ fn statements(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
             } else {
                 q
             };
-            statements(expect(expr(expect(q, 48)), 39))
+            let values = q.value_head;
+            let q = syntax_heads(q, q.row_head, p.value_head);
+            let q = expect(expr(expect(q, 48)), 39);
+            statements(syntax_heads(q, q.row_head, values))
         } else {
             let q = expr(p);
             let s = eat(q, 39);
@@ -33,11 +37,11 @@ fn statements(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 }
 
 // Expressions.
-fn expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn expr(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     leave(close(expr_inner(open(enter(p), 202))), p)
 }
 
-fn expr_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn expr_inner(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let k = kind(p);
     if k == 23 {
         handle_expr(p)
@@ -55,21 +59,21 @@ fn expr_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 }
 
 // `region` is contextual: only `region <name> {` or `region <name>(`.
-fn at_region(p: P) -> bool eff [Fail[Diag], Fail[ArithOverflow]] {
+fn at_region(p: P) -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let next = nth(p, 2).kind;
     at_word(p, 0, 0x726567696f6e) && nth(p, 1).kind == 4 && (next == 34 || next == 32)
 }
 
-fn restricted(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn restricted(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = expr(with_flags(p, true, p.rows, p.bounds));
     with_flags(q, p.nostruct, q.rows, q.bounds)
 }
 
-fn if_expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn if_expr(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     leave(if_inner(enter(p)), p)
 }
 
-fn if_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn if_inner(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = block(restricted(expect(p, 28)));
     let e = eat(q, 29);
     if ate(q, e) {
@@ -83,28 +87,29 @@ fn if_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     }
 }
 
-fn match_expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn match_expr(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = expect(restricted(expect(p, 27)), 34);
     expect(arms(q), 35)
 }
 
-fn arms(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn arms(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if at_end(p, 35) {
         p
     } else {
         let q = expr(expect(pattern(p), 47));
+        let q = syntax_heads(q, q.row_head, p.value_head);
         let r = eat(q, 38);
         if ate(q, r) {
             arms(r)
         } else if at(q, 35) {
             q
         } else {
-            fail_p(Diag::Expected(38, nth(q, 0).start))
+            syntax_issue(q, 14)
         }
     }
 }
 
-fn closure(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn closure(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let o = eat(p, 66);
     let q = if ate(p, o) {
         o
@@ -123,10 +128,11 @@ fn closure(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else {
         q
     };
-    expr(effects(q))
+    let q = expr(effects(q));
+    syntax_heads(q, q.row_head, p.value_head)
 }
 
-fn handle_expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn handle_expr(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = expect(p, 23);
     let q = if at(q, 4) {
         expect(lower(q), 40)
@@ -142,34 +148,38 @@ fn handle_expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     };
     let q = expect(expect(block(expect(q, 19)), 25), 34);
     let q = expr(expect(pattern(expect(q, 26)), 47));
+    let q = syntax_heads(q, q.row_head, p.value_head);
     expect(clauses(eat(q, 38)), 35)
 }
 
-fn clauses(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn clauses(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if at_end(p, 35) {
         p
     } else {
         let q = expect(lower(p), 32);
         let q = expect(expect(pattern_list(q, 33), 33), 47);
-        clauses(eat(expr(q), 38))
+        let q = eat(expr(q), 38);
+        clauses(syntax_heads(q, q.row_head, p.value_head))
     }
 }
 
-fn region_expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn region_expr(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = lower(bump(p));
     let l = eat(q, 32);
     if ate(q, l) {
-        let t = nth(l, 0);
-        if t.kind == 6 {
+        let t = l.cur;
+        let q = if t.kind == 6 {
+            let q = literal(l);
             let v = int_small(t);
             if int_over(t) || v == 0 || v > 1073741824 {
-                fail_p(Diag::Invalid(t.start))
+                syntax_issue(q, 12)
             } else {
-                block(expect(bump(l), 33))
+                q
             }
         } else {
-            fail_p(Diag::Invalid(t.start))
-        }
+            syntax_issue(l, 13)
+        };
+        block(expect(q, 33))
     } else {
         block(q)
     }
@@ -195,18 +205,18 @@ fn precedence(k: i64) -> i64 {
     }
 }
 
-fn binary(p: P, min: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn binary(p: P, min: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = enter(p);
     let k = kind(q);
     let lhs = if k == 55 || k == 67 {
         binary(bump(q), 12)
     } else {
-        leave(postfix(primary(enter(q))), q)
+        leave(postfix(primary(enter(q)), q.cur), q)
     };
     leave(binary_rest(lhs, min), p)
 }
 
-fn binary_rest(p: P, min: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn binary_rest(p: P, min: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let prec = precedence(kind(p));
     if prec == 0 || prec < min {
         p
@@ -222,10 +232,10 @@ fn binary_rest(p: P, min: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 }
 
 // The operator loop of a postfix expression; each operator deepens it.
-fn postfix(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn postfix(p: P, head: Tok) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let k = kind(p);
     if k == 32 || k == 36 || k == 42 || k == 43 {
-        postfix_op(enter(p), k)
+        postfix_op(enter(p), k, head)
     } else {
         p
     }
@@ -242,30 +252,30 @@ fn starts_type_args(t: Tok) -> bool eff [Fail[ArithOverflow]] {
     }
 }
 
-fn postfix_op(p: P, k: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn postfix_op(p: P, k: i64, head: Tok) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if k == 32 {
-        postfix(expect(args(bump(p)), 33))
+        postfix(expect(args(bump(p)), 33), tok(70, 0, 0))
     } else if k == 36 {
         let one = nth(p, 1);
         let named_row = one.kind == 4 && nth(p, 2).kind == 40;
-        let generic = named_row || starts_type_args(one);
+        let bound = (head.kind == 4 || head.kind == 22) && syntax_contains(p.value_head, head);
+        let scoped_row = syntax_contains(p.row_head, one) && !bound;
+        let generic = named_row || scoped_row || starts_type_args(one);
         if generic {
-            postfix(expect(args(expect(type_args(p), 32)), 33))
-        } else if p.rows && one.kind == 4 {
-            fail_p(Diag::Unsupported(6, one.start))
+            postfix(expect(args(expect(type_args(p), 32)), 33), tok(70, 0, 0))
         } else {
-            postfix(expect(expr(bump(p)), 37))
+            postfix(expect(expr(bump(p)), 37), tok(70, 0, 0))
         }
     } else if k == 42 {
-        postfix(lower(bump(p)))
+        postfix(lower(bump(p)), tok(70, 0, 0))
     } else if k == 43 {
-        postfix(bump(p))
+        postfix(bump(p), tok(70, 0, 0))
     } else {
         p
     }
 }
 
-fn args(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn args(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if at_end(p, 33) {
         p
     } else {
@@ -279,11 +289,11 @@ fn args(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     }
 }
 
-fn primary(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn primary(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     leave(primary_inner(enter(p)), p)
 }
 
-fn primary_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn primary_inner(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let k = kind(p);
     if at_literal(p) {
         literal(p)
@@ -307,11 +317,16 @@ fn primary_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else if k == 34 {
         block(p)
     } else {
-        fail_p(Diag::Expected(202, nth(p, 0).start))
+        let q = syntax_issue(p, 7);
+        if at(q, 70) {
+            q
+        } else {
+            bump(q)
+        }
     }
 }
 
-fn field_values(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn field_values(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if at_end(p, 35) {
         p
     } else {
@@ -331,7 +346,7 @@ fn field_values(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     }
 }
 
-fn tuple_values(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn tuple_values(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if at_end(p, 33) {
         p
     } else {
@@ -346,24 +361,31 @@ fn tuple_values(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 }
 
 // Patterns.
-fn pattern(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn pattern(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     leave(close(pattern_inner(open(enter(p), 203))), p)
 }
 
-fn pattern_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn pattern_inner(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let n = eat(p, 55);
     let negative = ate(p, n);
+    let n = if negative && !at_literal(n) {
+        syntax_issue(n, 9)
+    } else {
+        n
+    };
     let k = kind(n);
     if at_literal(n) {
         if negative && k != 5 && k != 6 {
-            fail_p(Diag::Invalid(nth(n, 0).start))
+            syntax_issue(literal(n), 9)
         } else {
             literal(n)
         }
-    } else if negative {
-        fail_p(Diag::Invalid(nth(n, 0).start))
     } else if k == 4 {
-        bump(n)
+        if at_word(n, 0, 0x5f) {
+            bump(n)
+        } else {
+            bump(syntax_bind(n, false))
+        }
     } else if k == 3 {
         let q = upper(n);
         let c = eat(q, 41);
@@ -386,11 +408,16 @@ fn pattern_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else if k == 32 {
         expect(pattern_list(bump(n), 33), 33)
     } else {
-        fail_p(Diag::Expected(203, nth(n, 0).start))
+        let q = syntax_issue(n, 8);
+        if at(q, 70) {
+            q
+        } else {
+            bump(q)
+        }
     }
 }
 
-fn pattern_list(p: P, end: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn pattern_list(p: P, end: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if at_end(p, end) {
         p
     } else {
@@ -404,7 +431,7 @@ fn pattern_list(p: P, end: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     }
 }
 
-fn field_patterns(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn field_patterns(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if at_end(p, 35) {
         p
     } else {
@@ -413,7 +440,7 @@ fn field_patterns(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
         let q = if ate(q, c) {
             pattern(c)
         } else {
-            q
+            syntax_heads(q, q.row_head, syntax_name(p.cur, q.value_head))
         };
         let r = eat(q, 38);
         if ate(q, r) {
