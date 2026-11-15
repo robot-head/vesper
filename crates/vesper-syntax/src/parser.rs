@@ -597,6 +597,10 @@ impl Parser<'_> {
         let mut out = vec![];
         self.expect(K::LBrace);
         while !self.at(K::RBrace) && !self.at(K::Eof) {
+            // `pub` is contextual: `pub: T` remains a field named `pub`.
+            if self.at_word(0, "pub") && self.nth(1) == K::Lower && self.nth(2) == K::Colon {
+                self.bump();
+            }
             let name = self.lower();
             self.expect(K::Colon);
             let ty = self.ty();

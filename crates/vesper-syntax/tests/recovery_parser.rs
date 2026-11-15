@@ -374,3 +374,31 @@ fn malformed_public_adt_retains_following_declarations() {
     assert_eq!(recovered.declarations()[1].status, DS::Complete);
     assert_eq!(recovered.declarations()[2].status, DS::Complete);
 }
+
+#[test]
+fn public_fields_and_a_field_named_pub_are_lossless() {
+    let source = "pub struct Record { pub visible: u64, pub: u64 }\npub enum Message { Data { pub value: u64, pub: u64 } }";
+    let parsed = parser::parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    assert_eq!(parsed.syntax().text().to_string(), source);
+    let vesper_syntax::ast::Item::Adt(record) = &parsed.module.items[0] else {
+        panic!()
+    };
+    assert_eq!(record.variants[0].fields[0].name, "visible");
+    assert_eq!(record.variants[0].fields[1].name, "pub");
+    let vesper_syntax::ast::Item::Adt(message) = &parsed.module.items[1] else {
+        panic!()
+    };
+    assert_eq!(message.variants[0].fields[0].name, "value");
+    assert_eq!(message.variants[0].fields[1].name, "pub");
+    let recovered = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(recovered.syntax().text().to_string(), source);
+    assert!(
+        recovered
+            .declarations()
+            .iter()
+            .all(|d| d.status == DS::Complete)
+    );
+    let rebuilt = parser::parse_complete_items(&recovered, &[0, 1], Limits::default()).unwrap();
+    assert_eq!(rebuilt, parsed.module);
+}
