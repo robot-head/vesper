@@ -150,6 +150,10 @@ pub enum TokenKind {
     Dollar,
     #[token("~")]
     Tilde,
+    #[token("|=")]
+    PipeEq,
+    #[token("&=")]
+    AmpEq,
     #[token("..")]
     DotDot,
     #[token("..=")]

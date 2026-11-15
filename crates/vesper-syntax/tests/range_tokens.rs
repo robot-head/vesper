@@ -42,6 +42,6 @@ fn range_punctuation_is_lossless_and_uses_longest_match() {
             .collect::<String>(),
         source
     );
-    assert_eq!(K::DotDot as u16, K::Tilde as u16 + 1);
+    assert_eq!(K::DotDot as u16, K::AmpEq as u16 + 1);
     assert_eq!(K::DotDotEq as u16, K::DotDot as u16 + 1);
 }
