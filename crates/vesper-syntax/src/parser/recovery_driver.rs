@@ -91,12 +91,25 @@ fn word(source: &str, tokens: &[Token], i: usize, text: &str) -> bool {
 }
 fn prefix(source: &str, tokens: &[Token], at: usize) -> Option<(DK, Option<Span>)> {
     let mut i = at;
+    if word(source, tokens, i, "tiled") && token_kind(tokens, next(tokens, i + 1)) == K::LParen {
+        i = next(tokens, i + 1) + 1;
+        while i < tokens.len() - 1 && token_kind(tokens, i) != K::RParen {
+            i += 1;
+        }
+        if token_kind(tokens, i) != K::RParen {
+            return None;
+        }
+        i = next(tokens, i + 1);
+    }
     if matches!(token_kind(tokens, i), K::Copy | K::Affine | K::Linear) {
         i = next(tokens, i + 1);
     }
     if word(source, tokens, i, "pub") {
         i = next(tokens, i + 1);
-        if !word(source, tokens, i, "trait") && !word(source, tokens, i, "model") {
+        if token_kind(tokens, i) != K::Fn
+            && !word(source, tokens, i, "trait")
+            && !word(source, tokens, i, "model")
+        {
             return None;
         }
     }
@@ -199,6 +212,15 @@ fn extent(
     work: &mut Work,
 ) -> Result<Extent, Error> {
     let mut head = start;
+    if word(source, tokens, head, "tiled")
+        && token_kind(tokens, next(tokens, head + 1)) == K::LParen
+    {
+        head = next(tokens, head + 1) + 1;
+        while head < tokens.len() - 1 && token_kind(tokens, head) != K::RParen {
+            head += 1;
+        }
+        head = next(tokens, head + 1);
+    }
     if matches!(token_kind(tokens, head), K::Copy | K::Affine | K::Linear) {
         head = next(tokens, head + 1);
     }

@@ -1,0 +1,457 @@
+// Monomorphic ADT constructors and destructuring. Field reordering is
+// explicitly outside adapter v1; it must never be silently misinterpreted.
+copy struct CCtor {
+    adt: CDecl,
+    variant: Tok,
+    fields: i64,
+    named: bool
+}
+fn c_find_variant(name: Tok, at: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 35 {
+        -1
+    } else if c_name(name, c_token(at)) {
+        c_token(at).start
+    } else {
+        c_find_variant(name, c_variant_next(at))
+    }
+}
+fn c_ctor_find(owner: Tok, variant: Tok, qualified: bool, at: i64)
+    -> CCtor eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 70 {
+        let error = c_error(
+            201,
+            owner.start,
+            if qualified {
+                variant.end
+            } else {
+                owner.end
+            }
+        );
+        CCtor {
+            adt: c_decl(0),
+            variant: variant,
+            fields: -1,
+            named: false
+        }
+    } else {
+        let d = c_decl(at);
+        let found = if d.kind == 8 && !qualified && c_name(d.name, owner) {
+            d.name.start
+        } else if d.kind == 9 && (!qualified || c_name(d.name, owner)) {
+            c_find_variant(variant, c_next(d.body))
+        } else {
+            -1
+        };
+        if found < 0 {
+            c_ctor_find(owner, variant, qualified, d.end)
+        } else {
+            let valid = if !qualified && c_ctor_later(owner, variant, d.end) {
+                c_unsupported(8, owner.start)
+            } else {
+                0
+            };
+            let fields = if d.kind == 8 {
+                d.body
+            } else {
+                c_next(found)
+            };
+            let k = c_kind(fields);
+            CCtor {
+                adt: d,
+                variant: c_token(found),
+                fields: if k == 32 || k == 34 {
+                    fields
+                } else {
+                    -1
+                },
+                named: k == 34
+            }
+        }
+    }
+}
+fn c_field_next(at: i64, named: bool)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let ty = c_type(
+        if named {
+            c_take(c_next(at), 40)
+        } else {
+            at
+        },
+        0
+    );
+    let next = if c_kind(ty.next) == 45 {
+        c_next(c_next(ty.next))
+    } else {
+        ty.next
+    };
+    if c_kind(next) == 38 {
+        c_next(next)
+    } else {
+        next
+    }
+}
+fn c_init(
+    at: i64,
+    field: i64,
+    named: bool,
+    env: CEnv,
+    row: i64,
+    loans: CEnv,
+    depth: i64,
+    start: i64,
+    end: i64
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let done = c_kind(at) == 35 || c_kind(at) == 33;
+    let fields_done = field < 0 || c_kind(field) == 35 || c_kind(field) == 33;
+    if done || fields_done {
+        let valid = if done != fields_done {
+            c_error(204, start, end)
+        } else {
+            0
+        };
+        c_result(
+            CType {
+                tag: 0,
+                at: 0
+            },
+            if done {
+                c_next(at)
+            } else {
+                at
+            },
+            env,
+            start,
+            end,
+            -1
+        )
+    } else {
+        let ty = c_type(
+            if named {
+                c_take(c_next(field), 40)
+            } else {
+                field
+            },
+            0
+        );
+        let value = if named {
+            let valid = if !c_name(c_token(at), c_token(field)) {
+                c_unsupported(8, at)
+            } else {
+                0
+            };
+            if c_kind(c_next(at)) == 40 {
+                c_next(c_next(at))
+            } else {
+                at
+            }
+        } else {
+            at
+        };
+        let result = c_expr(value, env, 2, row, loans, depth + 1, false);
+        let valid = c_expect_type(ty.ty, result.ty, result.start, result.end);
+        let next = if c_kind(result.next) == 38 {
+            c_next(result.next)
+        } else {
+            result.next
+        };
+        c_init(next, c_field_next(field, named), named, result.env, row, loans, depth, start, end)
+    }
+}
+fn c_pattern_end(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let t = c_token(at);
+    let next = if c_kind(t.end) == 41 {
+        c_next(c_next(t.end))
+    } else {
+        t.end
+    };
+    if c_kind(next) == 32 || c_kind(next) == 34 {
+        c_group(next, 0)
+    } else {
+        next
+    }
+}
+fn c_bind_pattern(at: i64, ty: CType, env: CEnv, depth: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if depth > 32 {
+        let limit = c_limit(at);
+        c_result(ty, at, env, at, at, -1)
+    } else {
+        let t = c_token(at);
+        if t.kind == 4 {
+            c_result(ty, t.end, c_bind_name(env, t, ty, 2), t.start, t.end, -1)
+        } else if t.kind == 3 {
+            let qualified = c_kind(t.end) == 41;
+            let variant = if qualified {
+                c_token(c_next(t.end))
+            } else {
+                t
+            };
+            let ctor = c_ctor_find(t, variant, qualified, 0);
+            let end = c_pattern_end(at);
+            let valid = if !c_payload_irrefutable(at, ctor, depth + 1) {
+                c_unsupported(5, at)
+            } else {
+                0
+            };
+            let ctor_ty = CType {
+                tag: 3,
+                at: ctor.adt.name.start
+            };
+            let valid = if !c_same(ty, ctor_ty, 0) {
+                c_error(211, t.start, end)
+            } else {
+                0
+            };
+            let args = if qualified {
+                variant.end
+            } else {
+                t.end
+            };
+            if ctor.fields < 0 {
+                c_result(ty, args, env, t.start, args, -1)
+            } else {
+                let valid = if c_kind(args) != c_kind(ctor.fields) {
+                    c_error(211, t.start, end)
+                } else {
+                    0
+                };
+                let result = c_pattern_fields(
+                    c_next(args),
+                    c_next(ctor.fields),
+                    ctor.named,
+                    env,
+                    depth + 1
+                );
+                c_result(ty, result.next, result.env, t.start, end, -1)
+            }
+        } else {
+            let unsupported = c_unsupported(5, at);
+            c_result(ty, at, env, at, at, -1)
+        }
+    }
+}
+fn c_pattern_fields(at: i64, field: i64, named: bool, env: CEnv, depth: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 35 || c_kind(at) == 33 {
+        let valid = if c_kind(field) != 35 && c_kind(field) != 33 {
+            c_unsupported(5, at)
+        } else {
+            0
+        };
+        c_result(
+            CType {
+                tag: 0,
+                at: 0
+            },
+            c_next(at),
+            env,
+            at,
+            c_next(at),
+            -1
+        )
+    } else if c_kind(field) == 35 || c_kind(field) == 33 {
+        let unsupported = c_unsupported(5, at);
+        c_result(
+            CType {
+                tag: 0,
+                at: 0
+            },
+            at,
+            env,
+            at,
+            at,
+            -1
+        )
+    } else {
+        let ty = c_type(
+            if named {
+                c_take(c_next(field), 40)
+            } else {
+                field
+            },
+            0
+        );
+        let pat = if named {
+            let valid = if !c_name(c_token(at), c_token(field)) {
+                c_unsupported(5, at)
+            } else {
+                0
+            };
+            if c_kind(c_next(at)) == 40 {
+                c_next(c_next(at))
+            } else {
+                at
+            }
+        } else {
+            at
+        };
+        let result = c_bind_pattern(pat, ty.ty, env, depth + 1);
+        let next = if c_kind(result.next) == 38 {
+            c_next(result.next)
+        } else {
+            result.next
+        };
+        c_pattern_fields(next, c_field_next(field, named), named, result.env, depth)
+    }
+}
+// Coverage is checked before arm bodies, matching the seed's diagnostic order.
+fn c_arm_has(variant: Tok, at: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 35 {
+        false
+    } else {
+        let t = c_token(at);
+        let v = if c_kind(t.end) == 41 {
+            c_token(c_next(t.end))
+        } else {
+            t
+        };
+        if t.kind != 3 {
+            let unsupported = c_unsupported(5, at);
+            false
+        } else if c_name(v, variant) {
+            true
+        } else {
+            let body = c_take(c_pattern_end(at), 47);
+            let next = c_syntax_expr_end(body, 0);
+            c_arm_has(
+                variant,
+                if c_kind(next) == 38 {
+                    c_next(next)
+                } else {
+                    next
+                }
+            )
+        }
+    }
+}
+fn c_coverage(variant: i64, arms: i64, start: i64, end: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(variant) == 35 {
+        0
+    } else {
+        let valid = if !c_arm_has(c_token(variant), arms) {
+            c_error(212, start, end)
+        } else {
+            0
+        };
+        c_coverage(c_variant_next(variant), arms, start, end)
+    }
+}
+// A read-only expression boundary scan, used only for coverage. The semantic
+// parser below determines support and checks every body, including dead arms.
+fn c_syntax_expr_end(at: i64, depth: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if depth > 64 {
+        c_limit(at)
+    } else {
+        let k = c_kind(at);
+        if k == 38 || k == 35 || k == 70 {
+            at
+        } else {
+            c_syntax_expr_end(c_group(at, depth), depth)
+        }
+    }
+}
+
+fn c_irrefutable(at: i64, ty: CType, depth: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if depth > 32 {
+        let limit = c_limit(at);
+        false
+    } else if c_kind(at) == 4 {
+        true
+    } else if c_kind(at) == 3 {
+        let t = c_token(at);
+        let qualified = c_kind(t.end) == 41;
+        let v = if qualified {
+            c_token(c_next(t.end))
+        } else {
+            t
+        };
+        let ctor = c_ctor_find(t, v, qualified, 0);
+        let ctor_ty = CType {
+            tag: 3,
+            at: ctor.adt.name.start
+        };
+        let single = ctor.adt.kind == 8 || c_kind(c_variant_next(c_next(ctor.adt.body))) == 35;
+        single && c_same(ty, ctor_ty, 0) && c_payload_irrefutable(at, ctor, depth + 1)
+    } else {
+        let unsupported = c_unsupported(5, at);
+        false
+    }
+}
+fn c_payload_irrefutable(at: i64, ctor: CCtor, depth: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if ctor.fields < 0 {
+        true
+    } else {
+        let t = c_token(at);
+        let args = if c_kind(t.end) == 41 {
+            c_next(c_next(t.end))
+        } else {
+            t.end
+        };
+        if c_kind(args) != c_kind(ctor.fields) {
+            false
+        } else {
+            c_irrefutable_fields(c_next(args), c_next(ctor.fields), ctor.named, depth + 1)
+        }
+    }
+}
+fn c_irrefutable_fields(at: i64, field: i64, named: bool, depth: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let done = c_kind(at) == 35 || c_kind(at) == 33;
+    let fields_done = c_kind(field) == 35 || c_kind(field) == 33;
+    if done || fields_done {
+        done && fields_done
+    } else {
+        let ty = c_type(
+            if named {
+                c_take(c_next(field), 40)
+            } else {
+                field
+            },
+            0
+        );
+        let pat = if named {
+            let valid = if !c_name(c_token(at), c_token(field)) {
+                c_unsupported(5, at)
+            } else {
+                0
+            };
+            if c_kind(c_next(at)) == 40 {
+                c_next(c_next(at))
+            } else {
+                at
+            }
+        } else {
+            at
+        };
+        let next = c_pattern_end(pat);
+        c_irrefutable(pat, ty.ty, depth + 1)
+            && c_irrefutable_fields(
+            if c_kind(next) == 38 {
+                c_next(next)
+            } else {
+                next
+            },
+            c_field_next(field, named),
+            named,
+            depth
+        )
+    }
+}
+
+fn c_ctor_later(owner: Tok, variant: Tok, at: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 70 {
+        false
+    } else {
+        let d = c_decl(at);
+        let matches = (d.kind == 8 && c_name(d.name, owner))
+            || (d.kind == 9 && c_find_variant(variant, c_next(d.body)) >= 0);
+        matches || c_ctor_later(owner, variant, d.end)
+    }
+}
