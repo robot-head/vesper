@@ -175,7 +175,7 @@ theorem res_mono {ε1 ε : Row} (h : ∀ l, l ∈ ε1 → l ∈ ε) : RMode.Le (
   by_cases h1 : ε1.any (fun l => qOf Sig l == .affine) = true
   · obtain ⟨l, hl, hq⟩ := List.any_eq_true.mp h1
     have : ε.any (fun l => qOf Sig l == .affine) = true := List.any_eq_true.mpr ⟨l, h l hl, hq⟩
-    rw [if_pos this, if_pos h1]; exact RMode.le_refl _
+    rw [ite_eq_left this, ite_eq_left h1]; exact RMode.le_refl _
   · simp only [h1]; split <;> simp [RMode.Le, Mode.Le]
 
 end Sig
@@ -881,23 +881,23 @@ theorem subst_ty {Γ R e τ m ε} (h : HasType Sig Γ R e τ m ε) :
     simp only [subst]
     by_cases hik : i = k
     · subst hik
-      rw [if_pos rfl]
+      rw [ite_eq_left rfl]
       obtain ⟨hv, ⟨hn, _⟩ | ⟨σ, mx', hsome, hvt, _⟩⟩ := hok
       · rw [hn] at hi; cases hi
       · rw [hsome] at hi; cases hi
         refine val_ty hvt ?_ hR (splitR_comm hs) hk
         intro j t m' hj'; rw [del_eq] at hj'
         exact hj _ t m' (by split <;> omega) hj'
-    · rw [if_neg hik]
+    · rw [ite_eq_right hik]
       have hdR : DiscardR R' := discardR_join hs hR
         (substOK_discard hok (fun t m h => hj k t m (Ne.symm hik) h))
       split
       · refine .var (mx := mx) ?_ ?_ hdR hk
-        · rw [del_eq, if_neg (by omega), Nat.sub_add_cancel (by omega)]; exact hi
+        · rw [del_eq, ite_eq_right (by omega), Nat.sub_add_cancel (by omega)]; exact hi
         · intro j t m' hne hj'; rw [del_eq] at hj'
           exact hj _ t m' (by split <;> omega) hj'
       · refine .var (mx := mx) ?_ ?_ hdR hk
-        · rw [del_eq, if_pos (by omega)]; exact hi
+        · rw [del_eq, ite_eq_left (by omega)]; exact hi
         · intro j t m' hne hj'; rw [del_eq] at hj'
           exact hj _ t m' (by split <;> omega) hj'
   | unitV hΓ hR =>
@@ -1546,7 +1546,7 @@ theorem split_remove {L R1 R2 Q : RCtx} {r : Nat} {X : Ent} (hs : SplitR L R1 R2
   intro x; have := hs x; have := h x
   simp only [SRE, RCtx.single, RCtx.set] at *; by_cases hx : x = r
   · subst hx; simp_all
-  · simp only [hx, if_false] at *; grind
+  · simp only [hx, ite_false] at *; grind
 
 /-- Resource bookkeeping of a resume step. -/
 theorem resume_splits {R1 Rk1 R2' R3 R4 Rk Rdk Rbody Rwv Rwd Rsv Rsd : RCtx} {r : Nat} {X : Ent}
@@ -1634,7 +1634,7 @@ theorem head_pres {e L n a e' L' n'} (hh : Head Sig e L n a e' L' n') :
       refine ⟨R1.set n (some .hdl), .hdlV n discard_empty ?_ hd hm, ?_, ?_⟩
       · intro r; have := hs r; unfold SRE RCtx.set RCtx.single at *; grind
       · intro r; have := hs r; unfold SRE RCtx.set at *; grind
-      · intro r hr; unfold RCtx.set; rw [if_neg (by omega)]; exact hf r (by omega)
+      · intro r hr; unfold RCtx.set; rw [ite_eq_right (by omega)]; exact hf r (by omega)
   | @consume r _ _ hL =>
     intro R1 R2 τ m ε h hs hf
     cases h with
@@ -1732,7 +1732,7 @@ theorem head_pres {e L n a e' L' n'} (hh : Head Sig e L n a e' L' n') :
         refine ⟨R1.set n (some (.kont (Sig l).q)),
           weakenRow (weakenR e3 (discardR_join hsplit4 hsd hvd) hsplit3) hc', ?_, ?_⟩
         · intro r; have := hs r; unfold SRE RCtx.set at *; have := hf r; grind
-        · intro r hr; unfold RCtx.set; rw [if_neg (by omega)]; exact hf r (by omega)
+        · intro r hr; unfold RCtx.set; rw [ite_eq_right (by omega)]; exact hf r (by omega)
   | @resume r body w s q _ _ hL hw hsv =>
     intro R1 R2 τ m ε h hs hf
     cases h with
@@ -2055,7 +2055,7 @@ theorem head_next {e L n a e' L' n'} (hh : Head Sig e L n a e' L' n') : n ≤ n'
 theorem head_fresh {e L n a e' L' n'} (hh : Head Sig e L n a e' L' n') (hf : Fresh L n) : Fresh L' n' := by
   cases hh <;> first
     | exact hf
-    | (intro x hx; unfold RCtx.set; rw [if_neg (by omega)]; exact hf x (by omega))
+    | (intro x hx; unfold RCtx.set; rw [ite_eq_right (by omega)]; exact hf x (by omega))
     | (intro x hx; unfold RCtx.set; split
        · rfl
        · exact hf x hx)
@@ -2064,7 +2064,7 @@ theorem head_dead {e L n a e' L' n'} (hh : Head Sig e L n a e' L' n') {r : Nat}
     (hr : r < n) (hl : L r = none) : L' r = none := by
   cases hh <;> first
     | exact hl
-    | (unfold RCtx.set; rw [if_neg (by omega)]; exact hl)
+    | (unfold RCtx.set; rw [ite_eq_right (by omega)]; exact hl)
     | (unfold RCtx.set; split
        · rfl
        · exact hl)
@@ -2082,8 +2082,8 @@ theorem head_keep {e L n a e' L' n'} (hh : Head Sig e L n a e' L' n') (hf : Fres
   cases hh <;> simp [isRel] at ha
   all_goals first
     | exact hl
-    | (unfold RCtx.set; rw [if_neg (by omega)]; exact hl)
-    | (unfold RCtx.set; rw [if_neg (fun h => ha h.symm)]; exact hl)
+    | (unfold RCtx.set; rw [ite_eq_right (by omega)]; exact hl)
+    | (unfold RCtx.set; rw [ite_eq_right (fun h => ha h.symm)]; exact hl)
 
 theorem head_alloc {e L n a e' L' n'} (hh : Head Sig e L n a e' L' n') {r : Nat} {q : RMode}
     (ha : a = .mint r ∨ a = .capture r q) :
