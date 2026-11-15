@@ -21,6 +21,10 @@ vesper_crate(
     # One Lean -M4096 stage plus estimated wrapper/runtime overhead; see #537.
     test_tags = {
         "test/lean4lean_foundations42": ["resources:memory:5120", "resources:cpu:1"],
+        # Serial Lean -j1/-M4096 stages plus estimated wrapper overhead (#615).
+        "test/resource_oracle42": ["resources:memory:5120", "resources:cpu:1"],
+        # Four actual corpus workers; memory is an estimate, not an RSS cap.
+        "test/self_host_front_end": ["resources:memory:5120", "resources:cpu:4"],
     },
     # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
     # "Linux-only suites" in docs/ci-platforms.md.
