@@ -1,0 +1,52 @@
+// span: main [request] ok count=2
+// span:   job [background] ok count=7
+// span:     inner [storage_append] ok count=1
+// span:   explicit [background] ok
+fn inner() -> u64 eff [Trace] {
+    let s = Trace::start_span(1, "inner");
+    Trace::emit_ok(s, 1);
+    1
+}
+
+// Runs `inner` under an explicit parent context: every span the block
+// starts is a child of `parent`, and finishing is forwarded outward.
+fn with_parent(sink parent: SpanContext) -> u64 eff [Trace] {
+    handle Trace in {
+        inner()
+    } with {
+        return v => v,
+        current_ctx(resume) => resume(parent),
+        start_span(schema, name, resume) => resume(Trace::start_child(parent, schema, name)),
+        start_child(p, schema, name, resume) => resume(Trace::start_child(p, schema, name)),
+        emit_ok(span, attr, resume) => {
+            Trace::emit_ok(span, attr);
+            resume(())
+        },
+        emit_err(span, code, msg, resume) => {
+            Trace::emit_err(span, code, msg);
+            resume(())
+        },
+        emit_attr(span, attr, resume) => {
+            Trace::emit_attr(span, attr);
+            resume(())
+        },
+    }
+}
+
+fn explicit(sink ctx: SpanContext) -> u64 eff [Trace] {
+    let s = Trace::start_child(ctx, 2, "explicit");
+    Trace::emit_attr(s, TelemetryAttr::NoAttr);
+    0
+}
+
+fn main() -> u64 eff [Trace] {
+    let root = Trace::start_span(0, "main");
+    let job = Trace::start_span(2, "job");
+    let parent = job.ctx;
+    let a = with_parent(parent);
+    Trace::emit_ok(job, 7);
+    let ctx = Trace::current_ctx();
+    let b = explicit(ctx);
+    Trace::emit_ok(root, 2);
+    wrapping_add(a, b)
+}

@@ -1,0 +1,21 @@
+// span: main [request] ok count=4
+// span:   work [storage_append] ok count=3
+// span:   work [storage_append] err(storage) "zero"
+fn work(n: u64) -> u64 eff [Trace] {
+    let span = Trace::start_span(1, "work");
+    if n == 0 {
+        Trace::emit_err(span, 1, "zero");
+        0
+    } else {
+        Trace::emit_ok(span, n);
+        wrapping_add(n, 1)
+    }
+}
+
+fn main() -> u64 eff [Trace] {
+    let root = Trace::start_span(0, "main");
+    let x = work(3);
+    let y = work(0);
+    Trace::emit_ok(root, wrapping_add(x, y));
+    wrapping_add(x, y)
+}

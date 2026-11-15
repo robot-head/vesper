@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en" data-vesper-theme="dusk" data-type="software" data-radius="sharp" data-ground="sky" data-buttons="pill" data-motion>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="page-type" content="software">
+  <meta name="site-kind" content="software">
+  <title>Vesper — a systems language for explicit control</title>
+  <meta name="description" content="A zero-GC systems programming language with linear resources, lexical effects, lifetime-free projections, native code and a direct path to Lean 4 proofs.">
+  <meta name="theme-color" content="#0B0E17">
+  <link rel="canonical" href="https://vesper-lang.org/">
+  <meta property="og:title" content="Vesper — a systems language for explicit control">
+  <meta property="og:description" content="Linear resources. Lexical effects. Native code and Lean 4 proofs. A language designed to make systems software easier to reason about.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://vesper-lang.org/">
+  <meta property="og:image" content="https://vesper-lang.org/share.jpg">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&amp;family=Inter:wght@400;500;600&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/system.css">
+  <link rel="stylesheet" href="assets/ui/base.css">
+  <link rel="stylesheet" href="assets/ui/cards.css">
+  <link rel="stylesheet" href="assets/motion/motion.css">
+  <link rel="stylesheet" href="assets/layout/layout.css">
+  <link rel="stylesheet" href="assets/moments/pinned-chapters/moment.css">
+  <link rel="stylesheet" href="site.css">
+  <script>document.documentElement.classList.add('m-enter');setTimeout(()=>document.documentElement.classList.add('m-enter-done'),700)</script>
+  <script>document.documentElement.classList.add('mo-js');setTimeout(()=>document.documentElement.classList.add('mo-safe'),2500)</script>
+  <link rel="modulepreload" href="assets/moments/moments.js">
+  <link rel="modulepreload" href="assets/moments/lib.js">
+  <link rel="modulepreload" href="assets/moments/pinned-chapters/moment.js">
+</head>
+<body>
+<!-- software; Appendix B Dusk/Dawn; Space Grotesk / Inter / JetBrains Mono; collage; nav-centre; footer-dark; close-word; pill; canonical Disjoint Field-Tree Prism; pinned-chapters. Official brand colors and typography supersede the generic dealer. -->
+<header class="nav nav--centre">
+  <div class="wrap nav__bar">
+    <a class="skip-link" href="#top">Skip to content</a>
+    <a class="nav__logo" href="#top" aria-label="Vesper home"><span class="brand-symbol" aria-hidden="true"><img data-brand-mark src="brand/vesper-mark-dusk.svg" width="32" height="32" alt=""></span><span class="brand-name">vesper</span></a>
+    <nav class="nav__links" aria-label="Main navigation">
+      <div class="nav__item"><a class="nav__link" href="#language">Language</a></div>
+      <div class="nav__item"><a class="nav__link" href="#compiler">Compiler</a></div>
+      <div class="nav__item"><a class="nav__link" href="#ecosystem">Ecosystem</a></div>
+      <div class="nav__item"><a class="nav__link" href="#learn">Learn</a></div>
+    </nav>
+    <div class="nav__actions"><a class="btn btn--primary" href="https://github.com/robot-head/vesper/blob/main/docs/specification.txt">Read the design</a></div>
+    <label class="theme-toggle"><input id="theme-toggle" type="checkbox" role="switch" aria-label="Dawn theme"><span aria-hidden="true">◐</span></label>
+    <button class="nav__toggle" type="button" aria-expanded="false" aria-label="Open navigation"><svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true"><path d="M2 5h14M2 13h14" stroke="currentColor" stroke-width="1.6"/></svg></button>
+  </div>
+</header>
+<main id="top">
+  <section class="hero hero--collage" data-enter aria-labelledby="hero-h">
+    <div class="wrap"><div class="hero-text grid hero__grid">
+      <div class="hero__text span-6">
+        <h1 id="hero-h">Zero-GC systems programming.</h1>
+        <p class="hero__lead">Without lifetime annotations, async coloring or Pin. Vesper combines true linearity, disjoint field projections and one-shot lexical effects.</p>
+        <div class="btn-row"><a class="btn btn--primary" href="https://github.com/robot-head/vesper/blob/main/docs/specification.txt">Read the design</a><a class="btn btn--secondary" href="#language">Explore the language</a></div>
+        <p class="hero__fact"><span>Native code.</span> <span>Lean 4 proofs.</span></p>
+      </div>
+      <div class="hero__art span-6 start-7 prism-stage" data-visual role="group" aria-label="Vesper's Disjoint Field-Tree Prism and its three language contracts">
+        <div class="prism-display"><img class="hero-prism" data-brand-mark src="brand/vesper-mark-dusk.svg" width="256" height="256" alt="Vesper: one root chevron above three disjoint amber, cyan and iris blades"></div>
+        <div class="hero-contracts ui ui-code" role="group" aria-label="Vesper resource, mutation and effect syntax">
+          <div class="source-ground" data-fx="painterly-landscape" data-fx-params='{"grain":0}' data-fx-seed="17" aria-hidden="true"></div>
+          <div class="contract-row"><span class="contract-index" aria-hidden="true">01</span><code><span class="tok-linear">linear</span> WriteTxn</code><span class="contract-rule">Consume exactly once</span></div>
+          <div class="contract-row"><span class="contract-index" aria-hidden="true">02</span><code><span class="tok-place">inout</span> broker.index</code><span class="contract-rule">Mutate disjoint fields</span></div>
+          <div class="contract-row"><span class="contract-index" aria-hidden="true">03</span><code><span class="tok-effect">eff</span> [<span class="tok-effect">Storage</span>]</code><span class="contract-rule">Declare capabilities</span></div>
+        </div>
+      </div>
+    </div></div>
+  </section>
+
+  <section class="section" id="language" aria-labelledby="language-h">
+    <div class="wrap">
+      <div class="grid section-head">
+        <h2 class="span-5" id="language-h">Ownership you can read.</h2>
+        <p class="span-6 start-7">A transaction must finish. A borrow names its fields. A function declares its effects. These rules live in the language.</p>
+      </div>
+      <div class="app ui ui-source fill source-tour" data-visual role="region" aria-label="Interactive Vesper source tour">
+        <div class="app__pane app__pane--list">
+          <div class="source-directory"><img class="directory-mark" data-brand-mark src="brand/vesper-mark-dusk.svg" width="32" height="32" alt=""><span>The language in code</span></div>
+          <div class="source-tabs" role="tablist" aria-label="Vesper source files" aria-orientation="vertical">
+            <button id="tab-linear" role="tab" aria-label="Linear resources, transaction.ves" aria-selected="true" aria-controls="panel-linear" type="button"><span class="file-icon" aria-hidden="true">{ }</span><span>transaction.ves<small>Consume a resource exactly once</small></span><span class="tab-index">01</span></button>
+            <button id="tab-projections" role="tab" aria-label="Places, projections.ves" aria-selected="false" aria-controls="panel-projections" tabindex="-1" type="button"><span class="file-icon" aria-hidden="true">{ }</span><span>projections.ves<small>Mutate disjoint fields</small></span><span class="tab-index">02</span></button>
+            <button id="tab-effects" role="tab" aria-label="Effects, checked_math.ves" aria-selected="false" aria-controls="panel-effects" tabindex="-1" type="button"><span class="file-icon" aria-hidden="true">{ }</span><span>checked_math.ves<small>Handle failure where it belongs</small></span><span class="tab-index">03</span></button>
+          </div>
+          <div class="source-principle"><span class="t-label">The resource contract</span><p><code>linear</code> means exactly once.<br>Every path must consume the value.</p><div class="obligation-flow"><span>Create</span><span aria-hidden="true">→</span><span>Use</span><span aria-hidden="true">→</span><span>Consume</span></div></div>
+        </div>
+        <div class="app__pane app__pane--open">
+          <div id="panel-linear" role="tabpanel" aria-labelledby="tab-linear" tabindex="0">
+            <div class="window-bar"><span>transaction.ves</span><button class="copy-source" data-copy="code-linear" type="button">Copy source</button></div>
+            <pre id="code-linear" tabindex="0" aria-label="Scrollable Vesper source"><code class="ui ui-code"><!-- source:transaction.ves --></code></pre>
+            <a class="source-download" href="examples/transaction.ves" download>Download source <span aria-hidden="true">↗</span></a>
+          </div>
+          <div id="panel-projections" role="tabpanel" aria-labelledby="tab-projections" tabindex="0" hidden>
+            <div class="window-bar"><span>projections.ves</span><button class="copy-source" data-copy="code-projections" type="button">Copy source</button></div>
+            <pre id="code-projections" tabindex="0" aria-label="Scrollable Vesper source"><code class="ui ui-code"><!-- source:projections.ves --></code></pre>
+            <a class="source-download" href="examples/projections.ves" download>Download source <span aria-hidden="true">↗</span></a>
+          </div>
+          <div id="panel-effects" role="tabpanel" aria-labelledby="tab-effects" tabindex="0" hidden>
+            <div class="window-bar"><span>checked_math.ves</span><button class="copy-source" data-copy="code-effects" type="button">Copy source</button></div>
+            <pre id="code-effects" tabindex="0" aria-label="Scrollable Vesper source"><code class="ui ui-code"><!-- source:checked_math.ves --></code></pre>
+            <a class="source-download" href="examples/checked_math.ves" download>Download source <span aria-hidden="true">↗</span></a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="compiler" style="--h:2" data-moment="pinned-chapters" aria-labelledby="compiler-h">
+    <div class="wrap mo-pc__grid">
+      <div class="mo-pc__text">
+        <h2 id="compiler-h">Native code and Lean proofs.</h2>
+        <ol class="mo-pc__steps">
+          <li class="mo-pc__step">
+            <h3>Check the resource contract</h3>
+            <p>Modes, effect rows and place capabilities establish who owns each value and which fields a function can change.</p>
+            <figure class="mo-pc__visual"><div class="pipeline-panel"><span class="pipeline-kicker">Front end</span><div class="pipeline-node"><span>01</span><strong>Lossless syntax</strong><code>.ves → CST → HIR</code></div><div class="pipeline-connector" aria-hidden="true"></div><div class="pipeline-node"><span>02</span><strong>Ownership and effects</strong><code>copy ⊑ affine ⊑ linear</code></div><div class="pipeline-connector" aria-hidden="true"></div><div class="pipeline-node is-accent"><span>03</span><strong>Place capability graph</strong><code>broker.index ⊥ broker.config</code></div></div></figure>
+          </li>
+          <li class="mo-pc__step">
+            <h3>Optimize with effect evidence</h3>
+            <p>Effect-aware equality saturation uses the program’s ownership and disjointness information to guide rewrites.</p>
+            <figure class="mo-pc__visual"><div class="pipeline-panel"><span class="pipeline-kicker">Optimization</span><div class="pipeline-node"><span>04</span><strong>Typed Place IR</strong><code>Explicit state and effect tokens</code></div><div class="pipeline-connector" aria-hidden="true"></div><div class="pipeline-node is-accent"><span>↔</span><strong>Equality saturation</strong><code>egglog · rewrite witnesses</code></div><div class="pipeline-connector" aria-hidden="true"></div><div class="pipeline-node"><span>↓</span><strong>Evidence-preserving lowering</strong><code>Resource and aliasing constraints</code></div></div></figure>
+          </li>
+          <li class="mo-pc__step">
+            <h3>Choose native execution or verification</h3>
+            <p>Compile through Cranelift or the verified backend. Extract state-passing Lean 4 definitions for functional correctness proofs.</p>
+            <figure class="mo-pc__visual"><div class="pipeline-panel"><span class="pipeline-kicker">Backends</span><div class="pipeline-node"><span>05</span><strong>One checked program</strong><code>Optimized Place IR</code></div><div class="pipeline-branch" aria-hidden="true">↙<span>↘</span></div><div class="backend-pair"><div><span class="backend-symbol" aria-hidden="true">λ</span><strong>Native</strong><code>Cranelift /<br>verified codegen</code></div><div><span class="backend-symbol" aria-hidden="true">∀</span><strong>Lean 4</strong><code>Definitions /<br>proof certificates</code></div></div></div></figure>
+          </li>
+        </ol>
+      </div>
+      <div class="mo-pc__visuals frame"></div>
+    </div>
+  </section>
+
+  <section class="section" id="learn" aria-labelledby="learn-h">
+    <div class="wrap">
+      <div class="grid section-head"><h2 class="span-5" id="learn-h">Familiar code.<br>Explicit contracts.</h2><div class="span-6 start-7 learn-intro"><p>Map the language you know to Vesper’s ownership and effect model.</p><div class="learn-tabs" role="tablist" aria-label="Compare language models"><button id="tab-rust" type="button" role="tab" aria-selected="true" aria-controls="panel-rust">From Rust</button><button id="tab-c" type="button" role="tab" aria-selected="false" aria-controls="panel-c" tabindex="-1">From C / C++ / Zig</button></div></div></div>
+      <div class="learning-comparisons fill" data-visual>
+        <div id="panel-rust" role="tabpanel" aria-labelledby="tab-rust" tabindex="0">
+          <article class="comparison"><h3>Lifetimes → field projections</h3><div class="comparison-pair ui ui-code"><div><span class="comparison-label">Rust</span><pre><code>fn append&lt;'a&gt;(
+  idx: &amp;'a mut Index,
+  metrics: &amp;'a mut Metrics,
+  config: &amp;'a Config
+)</code></pre></div><div><span class="comparison-label">Vesper</span><pre><code>fn append(
+  <span class="tok-place">inout</span> broker.{index, metrics}: Broker,
+  <span class="tok-effect">in</span> broker.{config}: Broker
+)</code></pre></div></div></article>
+          <article class="comparison"><h3>Async traits → lexical effects</h3><div class="comparison-pair ui ui-code"><div><span class="comparison-label">Rust</span><pre><code>trait AsyncIterator {
+  fn poll_next(
+    self: Pin&lt;&amp;mut Self&gt;,
+    cx: &amp;mut Context
+  ) -&gt; Poll&lt;Option&lt;Self::Item&gt;&gt;;
+}</code></pre></div><div><span class="comparison-label">Vesper</span><pre><code>trait Source[<span class="tok-effect">r</span>: <span class="tok-effect">eff</span> = []] {
+  type Item: mod <span class="tok-linear">linear</span>;
+  fn next(<span class="tok-place">inout</span> self)
+    -&gt; Option[<span class="tok-type">Self::Item</span>] <span class="tok-effect">eff</span> [<span class="tok-effect">r</span>];
+}</code></pre></div></div></article>
+        </div>
+        <div id="panel-c" role="tabpanel" aria-labelledby="tab-c" tabindex="0" hidden>
+          <article class="comparison"><h3>Packed records → wire views</h3><div class="comparison-pair ui ui-code"><div><span class="comparison-label">C</span><pre><code>struct __attribute__((packed)) Hdr {
+  int64_t base_offset;
+  uint32_t crc;
+};</code></pre></div><div><span class="comparison-label">Vesper</span><pre><code>wire struct Hdr {
+  base_offset: <span class="tok-proof">i64be</span>,
+  crc: <span class="tok-proof">u32be</span>
+}</code></pre></div></div></article>
+          <article class="comparison"><h3>Implicit allocation → scoped regions</h3><div class="comparison-pair ui ui-code"><div><span class="comparison-label">C++</span><pre><code>std::vector&lt;Record&gt; temporary;
+// Uses the global allocator.</code></pre></div><div><span class="comparison-label">Vesper</span><pre><code>Region::scoped(256.kib(),
+  |cap scratch| <span class="tok-effect">eff</span> [<span class="tok-effect">scratch: Region</span>] {
+    // Region capability stays in scope.
+  }
+)</code></pre></div></div></article>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="ecosystem" aria-labelledby="ecosystem-h">
+    <div class="wrap">
+      <div class="grid section-head"><h2 class="span-5" id="ecosystem-h">A language for whole systems.</h2><p class="span-6 start-7">The same ownership and capability model extends from network buffers and database pages to native interfaces, GPU work and your build.</p></div>
+      <div class="grid ecosystem-grid fill">
+        <a class="card span-6" href="https://github.com/robot-head/vesper/tree/main/crates/vesper-warp"><div class="domain-code ui ui-code" role="group" aria-label="Vesper ecosystem code"><code><span class="tok-linear">linear</span> UmemFrame</code><span class="domain-path">Receive → Process → Recycle</span></div><div class="domain-body"><h3>Web and networking <span aria-hidden="true">↗</span></h3><p>Prism and Warp pair protocol handling with linear buffer ownership.</p></div></a>
+        <a class="card span-6" href="https://github.com/robot-head/vesper/tree/main/crates/vesper-tensor"><div class="domain-code ui ui-code" role="group" aria-label="Vesper ecosystem code"><code>Tensor[r, DType, <span class="tok-place">Shape</span>]</code><span class="domain-path">Quarry / Tensor / Flux</span></div><div class="domain-body"><h3>Data and compute <span aria-hidden="true">↗</span></h3><p>Typed queries, shape-checked tensors and incremental stream processing.</p></div></a>
+        <a class="card span-6" href="https://github.com/robot-head/vesper/tree/main/crates/vesper-aura"><div class="domain-code ui ui-code" role="group" aria-label="Vesper ecosystem code"><code><span class="tok-effect">eff</span> [<span class="tok-type">UiThread</span>]</code><span class="domain-path">Aura / Ignis / Kinetic</span></div><div class="domain-body"><h3>Native applications <span aria-hidden="true">↗</span></h3><p>Native interfaces, graphics and deterministic physics share explicit capabilities.</p></div></a>
+        <a class="card span-6" href="https://github.com/robot-head/vesper/tree/main/crates/vesper-loom-calculus"><div class="domain-code ui ui-code" role="group" aria-label="Vesper ecosystem code"><code>capability_ceiling = []</code><span class="domain-path">Loom / Lens / Stylus / Codex</span></div><div class="domain-body"><h3>Tooling and supply chain <span aria-hidden="true">↗</span></h3><p>One CLI brings sandboxed builds, capability budgets, tooling and verification together.</p></div></a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section g2m ground-dawn" id="guide" aria-labelledby="guide-h">
+    <div class="wrap grid guide-grid">
+      <div class="span-6 guide-text">
+        <div class="section-head"><h2 id="guide-h">Start with the source.</h2><p>Build the compiler, check a program, then run it. The repository holds the language, its tools, examples and formal foundations.</p></div>
+        <div class="modes-reference">
+          <dl class="mode-list"><div><dt><code>copy</code></dt><dd>Use a value more than once.</dd></div><div><dt><code>affine</code></dt><dd>Use it at most once, with scope-exit cleanup.</dd></div><div><dt><code>linear</code></dt><dd>Consume it exactly once on every control-flow path.</dd></div></dl>
+          <p class="guide-note">The design carries these contracts through effects, concurrency and verification.</p>
+          <a class="link" href="https://github.com/robot-head/vesper/tree/main/examples">Read the programs</a>
+        </div>
+      </div>
+      <div class="span-6 code-window ui ui-terminal setup-window" role="region" aria-label="Shell commands to build Vesper and run a program">
+          <div class="window-bar"><span>Build and run</span><button class="copy-source" data-copy="setup-code" type="button">Copy source</button></div>
+          <pre id="setup-code"><code><span class="tok-comment"># Requires the Rust toolchain</span>
+git clone https://github.com/robot-head/vesper.git
+cd vesper
+cargo build --release -p vesper
+
+<span class="tok-comment"># Check types, effects and ownership</span>
+./target/release/vesper check \
+  examples/transaction.ves
+
+<span class="tok-comment"># Execute with the reference evaluator</span>
+./target/release/vesper run \
+  examples/transaction.ves
+
+<span class="tok-comment"># Inspect IR and extract Lean definitions</span>
+./target/release/vesper emit \
+  examples/transaction.ves --emit ir
+./target/release/vesper emit \
+  examples/transaction.ves --emit lean</code></pre>
+          <a class="source-download" href="https://github.com/robot-head/vesper">View the repository <span aria-hidden="true">↗</span></a>
+        </div>
+    </div>
+  </section>
+</main>
+<footer class="footer footer--dark ground-inverse closing" id="contact" aria-labelledby="close-h">
+  <div class="wrap">
+    <div class="closing__cta close--word">
+      <div class="grid"><div class="span-6"><h2 id="close-h">The Vesper language design.</h2><p>From ownership rules to a complete systems toolchain.</p></div><div class="span-6 close-action"><a class="btn btn--primary" href="https://github.com/robot-head/vesper/blob/main/docs/specification.txt">Read the design</a></div></div>
+      <div class="closing__signature" aria-hidden="true"><svg class="closing-wordmark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 140" width="520" height="140" fill="none">
+        <g transform="translate(12,12) scale(0.453125)">
+          <polygon points="30,34 87,34 128,75 169,34 226,34 206,74 128,113 50,74" fill="var(--vc-fg-primary)"/>
+          <polygon points="59.33,92.67 101,113.5 101,176" fill="var(--vc-linear)"/>
+          <polygon points="128,127 143,119.5 143,200 128,230 113,200 113,119.5" fill="var(--vc-inout)"/>
+          <polygon points="196.67,92.67 155,113.5 155,176" fill="var(--vc-effect)"/>
+        </g>
+        <text x="148" y="95" fill="var(--vc-fg-primary)" font-family="Space Grotesk, Inter, system-ui, sans-serif" font-size="84" font-weight="700" letter-spacing="-3">vesper</text>
+      </svg></div>
+    </div>
+    <div class="closing__links">
+      <div class="footer-bottom"><a class="footer__mark" href="#top"><span class="brand-symbol" aria-hidden="true"><img data-brand-mark src="brand/vesper-mark-dusk.svg" width="32" height="32" alt=""></span><span class="brand-name">vesper</span></a><nav class="footer-nav" aria-label="Project links"><a href="https://github.com/robot-head/vesper">GitHub</a><a href="https://github.com/robot-head/vesper/tree/main/examples">Programs</a><a href="https://github.com/robot-head/vesper/blob/main/README.md#license">License</a></nav></div>
+      <div class="footer__legal"><span>© 2026 Vesper</span><span>Zero-GC systems programming.</span></div>
+      <div id="copy-status" class="sr-only" role="status" aria-live="polite"></div>
+    </div>
+  </div>
+</footer>
+<script type="module" src="assets/system.js"></script>
+<script type="module" src="assets/motion/motion.js"></script>
+<script type="module" src="assets/layout/layout.js"></script>
+<script type="module" src="site.js"></script>
+</body>
+</html>

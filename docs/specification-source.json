@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
-  "numbered_section_count": 42,
+  "numbered_section_count": 43,
   "document_url": "https://docs.google.com/document/d/1zO7boUVwNTHRA-1ZNL4bDYi68OjQZBCimLWkETH6bso/edit",
   "title": "Vesper Language Design & Formal Specification",
-  "document_revision": "AHj4eMSb9JoNMOKZJ6wCp3fBbv7MFBZf76WoYONerEUzZ35_RI-G55cPRJqH1EIJVtIveO4t_2eQMcRO78JADiHSJhj25XSuxRM5WN7j24A",
-  "modified_time_utc": "2026-11-13T04:46:25.948Z",
-  "snapshot_sha256": "8df79941a11ca2d777d8d5c5e7f4db26ef1a57f06babe2e71f3951a1f676883d",
+  "document_revision": "drive-revision-71",
+  "modified_time_utc": "2026-11-14T22:25:28.726Z",
+  "snapshot_sha256": "399b8273dbce8b4feffdc83b98f3121e40347a5e4fdc3c07143120ca60958d5b",
   "snapshot_transform": "Indexed document paragraph text, LF joined, HTML entities decoded once. Document section order preserved.",
   "sections": {
     "1": {
@@ -175,6 +175,10 @@
     "42": {
       "title": "42. Verified and Verifying Bootstrap Architecture: In-Logic Self-Hosting, Equational E-Graph Witnesses, Direct Verified Codegen, and Diverse Double-Compiling (Stage 0 to Stage 3)",
       "sha256": "fbd5cd3bd45c29d79b545955fce5b89db67df52ca4842eab04c7779e09ad7e64"
+    },
+    "43": {
+      "title": "43. Vesper Chroma: Semantic Substructural Syntax Highlighting, Perceptually Uniform OKLCH Palettes, Hermetic SVG and Retina Screenshot Cards, and Zero-JS/WASM Website Rendering (vesper highlight and vesper shot)",
+      "sha256": "09eef411e089ad0943d7f0425336adbc93053c554803e372c5161ce122fdcf4c"
     }
   },
   "document_heading_order": [
@@ -221,6 +225,7 @@
     "39. Vesper Stylus and Lint: Lossless Rowan CST Formatting, Substructural and Effect-Row Static Analysis, and MIF-Verified Autofixes (vesper fmt and vesper lint)",
     "40. Vesper Codex: Hermetic Living API Documentation, Substructural Mode/Effect/FieldTree Footprints, Single-JIT-Module Doctests, and Linked Lean 4 Proof Certificates (vesper doc and vesper test --doc)",
     "41. Vesper Metronome: User-Space Hardware PMU Microbenchmarking, Paired Interleaved A/B Regression Gates, Stabilizer Layout Randomization, and Fiber Causal Profiling (vesper bench)",
+    "43. Vesper Chroma: Semantic Substructural Syntax Highlighting, Perceptually Uniform OKLCH Palettes, Hermetic SVG and Retina Screenshot Cards, and Zero-JS/WASM Website Rendering (vesper highlight and vesper shot)",
     "Appendix A. Mechanized Lean 4 Metatheory of lambda_Vesper and Place Capability Graphs (VesperMetatheory.lean)"
   ],
   "appendices": {
@@ -228,5 +233,6 @@
       "title": "Appendix A. Mechanized Lean 4 Metatheory of lambda_Vesper and Place Capability Graphs (VesperMetatheory.lean)",
       "sha256": "180fa0a761eccfc1862a9b3445f1669513f8623697b821a5366fc4f05a2dfd84"
     }
-  }
+  },
+  "snapshot_note": "Drive revision 71 (2026-11-14 22:25 UTC) added section 43 before Appendix A; it is inserted here. That revision's exports no longer contain the section 35 text that preceded the title; section 35 is kept as recorded from the 2026-11-13 revision until the owner restores or confirms it. See docs/rfcs/wave-nine-review.md."
 }

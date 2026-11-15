@@ -1,0 +1,8 @@
+sys library Sandbox (
+    target = "x86_64-unknown-linux-gnu", abi = "sysv64",
+    link = "static", name = "vesper_sandbox", artifact = "blake3:@DIGEST@"
+) {
+    fn sandbox_poke(address: u64, value: u64) -> ForeignVal[Unit];
+    fn sandbox_add(a: u64, b: u64) -> ForeignVal[u64];
+    fn sandbox_sum(nocapture in values: CSlice[u64]) -> ForeignVal[u64];
+}

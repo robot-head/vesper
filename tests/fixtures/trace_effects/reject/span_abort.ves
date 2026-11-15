@@ -1,0 +1,24 @@
+// expect: E0402
+fn may(n: u64) -> u64 eff [Fail[u32]] {
+    if n == 0 {
+        Fail::raise(7)
+    } else {
+        n
+    }
+}
+
+fn work(n: u64) -> u64 eff [Trace, Fail[u32]] {
+    let span = Trace::start_span(1, "work");
+    let v = may(n);
+    Trace::emit_ok(span, v);
+    v
+}
+
+fn main() -> u64 eff [Trace] {
+    handle Fail[u32] in {
+        work(3)
+    } with {
+        return v => v,
+        raise(e, resume) => 0,
+    }
+}
