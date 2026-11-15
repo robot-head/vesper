@@ -1,0 +1,26 @@
+// Sparse directory level 1. Missing pages read as zero.
+fn syntax_read_1(
+    page: SyntaxSlots[RegionBox[r, Option[SyntaxSlots[RegionBox[r, i64]]]]],
+    index: i64
+) -> i64 eff [r: Region] {
+    match r.get(syntax_slot(page, index / 16)) {
+        Option::None => 0,
+        Option::Some(next) => syntax_read_0(next, index % 16),
+    }
+}
+fn syntax_write_1(
+    page: SyntaxSlots[RegionBox[r, Option[SyntaxSlots[RegionBox[r, i64]]]]],
+    index: i64,
+    value: i64
+) -> Unit eff [r: Region] {
+    let slot = syntax_slot(page, index / 16);
+    let next = match r.get(slot) {
+        Option::Some(existing) => existing,
+        Option::None => {
+            let fresh: SyntaxSlots[RegionBox[r, i64]] = syntax_words();
+            r.set(slot, Option::Some(fresh));
+            fresh
+        },
+    };
+    syntax_write_0(next, index % 16, value)
+}

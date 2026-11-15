@@ -1,276 +1,40 @@
-//! Self-hosting Stage 1 (design §42.3): the Vesper-source lexer and parser in
-//! `packages/vesper-compiler` run on the Stage 0 compiler (the reference
-//! evaluator and the Cranelift JIT) over the repository's own `.ves` sources,
-//! and their token streams and CST shapes are compared with `vesper-syntax`,
-//! the Rust seed.
-//!
-//! The Vesper program cannot return a buffer, so each phase folds its output
-//! into a 63-bit digest that this test recomputes from the seed's tokens and
-//! rowan CST: tokens as (kind, start, end), all trivia and the EOF sentinel
-//! included; the CST as preorder events (open: kind and start offset; close:
-//! end offset). Errors come back as `-1 - (code << 32 | offset)`.
-use std::path::{Path, PathBuf};
-use vesper::parser::{self as seed, SyntaxNode};
-use vesper::{check, lexer, native, parser, runtime::Runtime, runtime::Value};
-
-/// The package sources, in compilation order (see its Loom.toml).
-const FRONT_END: [&str; 5] = [
-    "packages/vesper-compiler/src/lexer.ves",
-    "packages/vesper-compiler/src/cursor.ves",
-    "packages/vesper-compiler/src/types_items.ves",
-    "packages/vesper-compiler/src/expressions.ves",
-    "packages/vesper-compiler/src/driver.ves",
-];
-const CODE_LEX: i64 = 1;
-const CODE_EXPECTED: i64 = 2;
-const CODE_OVERFLOW: i64 = 3;
-const CODE_INVALID: i64 = 4;
-const CODE_LIMIT: i64 = 5;
-const CODE_UNSUPPORTED: i64 = 16;
-
-fn root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn mix(h: i64, x: i64) -> i64 {
-    let m = h.wrapping_add(x).wrapping_mul(0x100000001b3);
-    m.wrapping_add(m / 2147483648)
-}
-
-fn digest(h: i64) -> i64 {
-    if h < 0 { (-1i64).wrapping_sub(h) } else { h }
-}
-
-const OFFSET_BASIS: i64 = 0xcbf29ce484222325_u64 as i64;
-
-/// The seed's token-stream digest, or None when the seed reports a lexical
-/// diagnostic or limit (the Vesper lexer must then fail).
-fn seed_tokens(source: &str) -> Option<i64> {
-    let lexed = lexer::lex_with_limits(source, lexer::LexLimits::default()).ok()?;
-    if !lexed.diagnostics.is_empty() || lexed.limit.is_some() {
-        return None;
-    }
-    let mut h = OFFSET_BASIS;
-    for token in &lexed.tokens {
-        h = mix(h, token.kind as u16 as i64);
-        h = mix(h, token.span.start as i64);
-        h = mix(h, token.span.end as i64);
-    }
-    Some(digest(mix(h, lexed.tokens.len() as i64)))
-}
-
-fn cst_events(node: &SyntaxNode, h: &mut i64) {
-    let range = node.text_range();
-    *h = mix(*h, node.kind().0 as i64 + 1000);
-    *h = mix(*h, u32::from(range.start()) as i64);
-    for child in node.children() {
-        cst_events(&child, h);
-    }
-    *h = mix(*h, 3000);
-    *h = mix(*h, u32::from(range.end()) as i64);
-}
-
-/// The seed's CST digest, or None when the seed reports any diagnostic.
-fn seed_cst(source: &str) -> Option<i64> {
-    let parsed = seed::parse_with_limits(source, seed::ParseLimits::default()).ok()?;
-    if !parsed.diagnostics.is_empty() {
-        return None;
-    }
-    let mut h = OFFSET_BASIS;
-    cst_events(&parsed.syntax(), &mut h);
-    Some(digest(h))
-}
-
-/// The source as Vesper code. Leaves hold 64 bytes in a tuple indexed
-/// dynamically; internal functions dispatch over at most 8 children. A single
-/// comparison tree over every byte would be correct too, but the native
-/// backend's CLIF grows quadratically with the nesting of one function's
-/// `if` blocks (4.3 million CLIF lines for 593 leaves), so the tree is split
-/// into small functions.
-fn source_module(bytes: &[u8]) -> String {
-    const LEAF: usize = 64;
-    const FAN: usize = 8;
-    const EFFECTS: &str = "eff [Fail[RuntimeError], Fail[ArithOverflow]]";
-    let mut out = String::from("\n");
-    let mut nodes: Vec<(String, usize)> = vec![];
-    for (k, chunk) in bytes.chunks(LEAF).enumerate() {
-        let start = k * LEAF;
-        let mut values: Vec<String> = chunk.iter().map(u8::to_string).collect();
-        values.resize(LEAF, "0".into());
-        let name = format!("source_leaf_{k}");
-        out.push_str(&format!(
-            "fn {name}(i: i64) -> i64 {EFFECTS} {{ ({})[i - {start}] }}\n",
-            values.join(",")
-        ));
-        nodes.push((name, start));
-    }
-    fn tree(group: &[(String, usize)], out: &mut String) {
-        if group.len() == 1 {
-            out.push_str(&format!("{}(i)", group[0].0));
-            return;
-        }
-        let mid = group.len() / 2;
-        out.push_str(&format!("if i < {} {{ ", group[mid].1));
-        tree(&group[..mid], out);
-        out.push_str(" } else { ");
-        tree(&group[mid..], out);
-        out.push_str(" }");
-    }
-    let mut level = 0;
-    while nodes.len() > 1 {
-        level += 1;
-        let mut next = vec![];
-        for (g, group) in nodes.chunks(FAN).enumerate() {
-            let name = format!("source_node_{level}_{g}");
-            let mut body = String::new();
-            tree(group, &mut body);
-            out.push_str(&format!(
-                "fn {name}(i: i64) -> i64 {EFFECTS} {{ {body} }}\n"
-            ));
-            next.push((name, group[0].1));
-        }
-        nodes = next;
-    }
-    let n = bytes.len();
-    let top = nodes
-        .first()
-        .map_or_else(|| "-1".to_owned(), |(name, _)| format!("{name}(i)"));
-    out.push_str(&format!(
-        "fn source_len() -> i64 {{ {n} }}\n\
-         fn source_byte(i: i64) -> i64 {{ if i < 0 || i >= {n} {{ -1 }} else {{ \
-         handle Fail[ArithOverflow] in {{ handle Fail[RuntimeError] in {{ {top} }} with {{ \
-         return v => v, raise(e, r) => -1, }} }} with {{ return v => v, raise(e, r) => -1, }} }} }}\n"
-    ));
-    out
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Outcome {
-    Digest(i64),
-    Error { code: i64, at: i64 },
-}
-
-fn decode(value: &Value) -> Outcome {
-    let Value::Int(v) = value else {
-        panic!("entry returned {value:?}");
-    };
-    if *v >= 0 {
-        Outcome::Digest(*v)
-    } else {
-        let e = -1 - *v;
-        Outcome::Error {
-            code: e >> 32,
-            at: e & 0xffff_ffff,
-        }
-    }
-}
-
-struct Program {
-    world: check::World,
-}
-
-fn program(front_end: &str, bytes: &[u8]) -> Program {
-    let text = format!("{front_end}{}", source_module(bytes));
-    let limits = parser::ParseLimits {
-        max_source_bytes: lexer::HARD_SOURCE_BYTES,
-        max_tokens: lexer::HARD_TOKENS,
-        ..Default::default()
-    };
-    let parsed = parser::parse_with_limits(&text, limits).expect("program limits");
-    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    let checked = check::check(&parsed.module);
-    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
-    Program {
-        world: checked.world,
-    }
-}
-
-fn evaluate(program: &Program, entry: &str) -> Outcome {
-    let mut runtime = Runtime::new(&program.world);
-    runtime.fuel = u64::MAX / 2;
-    runtime.optimize = false;
-    decode(&runtime.run(entry, vec![]).expect(entry))
-}
-
-fn jit(program: &Program, entry: &str) -> Outcome {
-    decode(&native::jit_with_options(&program.world, entry, false).expect(entry))
-}
-
-/// Every `.ves` source of the root package (examples, test fixtures and
-/// this package), sorted.
-fn fixtures() -> Vec<PathBuf> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, out);
-            } else if path.extension().is_some_and(|e| e == "ves") {
-                out.push(path);
-            }
-        }
-    }
-    let mut out = vec![];
-    for dir in ["examples", "tests/fixtures", "packages"] {
-        walk(&root().join(dir), &mut out);
-    }
-    out.sort();
-    out
-}
-
-fn read_front_end() -> String {
-    FRONT_END
-        .iter()
-        .map(|f| std::fs::read_to_string(root().join(f)).expect("front end source"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn on_big_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    std::thread::Builder::new()
-        .stack_size(512 << 20)
-        .spawn(f)
-        .unwrap()
-        .join()
-        .unwrap()
-}
+//! Corpus and compatibility acceptance for the self-hosted front end.
+#[path = "fixtures/self_host/driver.rs"]
+mod support;
+use support::*;
 
 #[derive(Default, Debug)]
 struct Tally {
     tokens_matched: usize,
     tokens_rejected: usize,
     cst_matched: usize,
-    cst_unsupported: usize,
     cst_rejected: usize,
     native: usize,
 }
 
-/// Sources above this size run on the JIT only: the evaluator needs about
-/// 40 s (debug) for each of the front end's own 10 KB files, which put the
-/// test over Bazel's 300 s timeout on macOS.
+/// Large sources use the JIT for lexing. Every source uses the evaluator
+/// and bounded memory adapter for parsing and exact record comparison.
 const EVALUATOR_MAX_BYTES: usize = 6 * 1024;
 
-/// Compares one source with the seed: on the evaluator (and also the JIT
-/// when `native`), or on the JIT alone when the source is large.
+/// Compare every stored record; sample the lexer on the JIT as well.
 fn compare(front_end: &str, name: &str, source: &str, native: bool, tally: &mut Tally) {
     let trace = std::env::var_os("SELF_HOST_TRACE").is_some();
     let started = std::time::Instant::now();
     let program = program(front_end, source.as_bytes());
     let checked = started.elapsed();
-    let (lexed, parsed) = if source.len() > EVALUATOR_MAX_BYTES {
+    let (parsed, cells) = transport(&program);
+    let parsed = decode(&parsed);
+    assert_flat(source, &cells);
+    let lexed = if source.len() > EVALUATOR_MAX_BYTES {
         tally.native += 1;
-        (jit(&program, "lex_main"), jit(&program, "parse_main"))
+        jit(&program, "lex_main")
     } else {
         let lexed = evaluate(&program, "lex_main");
-        let parsed = evaluate(&program, "parse_main");
         if native {
             assert_eq!(jit(&program, "lex_main"), lexed, "{name}: JIT lexer");
-            assert_eq!(jit(&program, "parse_main"), parsed, "{name}: JIT parser");
             tally.native += 1;
         }
-        (lexed, parsed)
+        lexed
     };
     if trace {
         eprintln!(
@@ -298,13 +62,28 @@ fn compare(front_end: &str, name: &str, source: &str, native: bool, tally: &mut 
             tally.cst_matched += 1;
         }
         (Some(_), Outcome::Error { code, at }) => {
-            assert!(
-                code >= CODE_UNSUPPORTED || code == CODE_LIMIT,
+            panic!(
                 "{name}: seed parses cleanly but the Vesper parser failed with code {code} at {at}"
             );
-            tally.cst_unsupported += 1;
         }
         (None, Outcome::Error { code, .. }) => {
+            let diagnostics = vesper::parser::parse(source).diagnostics;
+            let diagnostic_code = match code {
+                1 => "E0001",
+                5 => "E0003",
+                _ => "E0002",
+            };
+            if code == CODE_LIMIT {
+                assert!(
+                    diagnostics.iter().any(|d| d.code == diagnostic_code),
+                    "{name}: {diagnostics:?}"
+                );
+            } else {
+                assert_eq!(
+                    diagnostics[0].code, diagnostic_code,
+                    "{name}: diagnostic code"
+                );
+            }
             assert_ne!(
                 code, CODE_OVERFLOW,
                 "{name}: arithmetic overflow in the parser"
@@ -317,9 +96,9 @@ fn compare(front_end: &str, name: &str, source: &str, native: bool, tally: &mut 
     }
 }
 
-/// Every repository source, the front end's own five files included (the
-/// compiler parses itself), on four worker threads; the JIT runs on every
-/// sixteenth source and on every source above `EVALUATOR_MAX_BYTES`.
+/// Every repository source, including crate, bootstrap and editor fixtures
+/// and all parser sources, on four workers. The lexer also runs on the JIT
+/// for every fourth source and every source above EVALUATOR_MAX_BYTES.
 #[test]
 fn differential_over_repository_sources() {
     let front_end = std::sync::Arc::new(read_front_end());
@@ -340,7 +119,7 @@ fn differential_over_repository_sources() {
                     for (i, path) in files.iter().enumerate().skip(w).step_by(WORKERS) {
                         let source = std::fs::read_to_string(path).unwrap();
                         let name = path.strip_prefix(root()).unwrap().display().to_string();
-                        compare(&front_end, &name, &source, i % 16 == 0, &mut tally);
+                        compare(&front_end, &name, &source, i % 4 == 0, &mut tally);
                     }
                     tally
                 })
@@ -353,15 +132,14 @@ fn differential_over_repository_sources() {
         tally.tokens_matched += t.tokens_matched;
         tally.tokens_rejected += t.tokens_rejected;
         tally.cst_matched += t.cst_matched;
-        tally.cst_unsupported += t.cst_unsupported;
         tally.cst_rejected += t.cst_rejected;
         tally.native += t.native;
     }
     eprintln!("{} sources: {tally:?}", files.len());
-    assert!(files.len() >= 100, "{}", files.len());
+    assert!(files.len() >= 363, "{}", files.len());
     assert!(tally.tokens_matched >= 100, "{tally:?}");
     assert!(tally.cst_matched >= 50, "{tally:?}");
-    assert!(tally.native >= 8, "{tally:?}");
+    assert!(tally.native >= 50, "{tally:?}");
 }
 
 /// What the Vesper front end must report for a hand-written input.
@@ -374,15 +152,12 @@ enum Expect {
     ParseError(i64),
     /// The seed rejects the tokens: the lexer must fail at this offset.
     LexError(i64),
-    /// The seed accepts it; the Vesper parser rejects it as unsupported
-    /// with this construct code (tokens must still match).
-    Unsupported(i64),
 }
 
 fn check_case(front_end: &str, source: &str, expect: Expect) {
     let program = program(front_end, source.as_bytes());
     let lexed = evaluate(&program, "lex_main");
-    let parsed = evaluate(&program, "parse_main");
+    let parsed = evaluate(&program, "parse_tree_main");
     let tokens = seed_tokens(source);
     let cst = seed_cst(source);
     match expect {
@@ -402,14 +177,6 @@ fn check_case(front_end: &str, source: &str, expect: Expect) {
             assert!(tokens.is_none(), "the seed lexes {source}");
             assert_eq!(lexed, Outcome::Error { code: CODE_LEX, at }, "{source}");
             assert_eq!(parsed, Outcome::Error { code: CODE_LEX, at }, "{source}");
-        }
-        Expect::Unsupported(what) => {
-            assert_eq!(lexed, Outcome::Digest(tokens.expect(source)), "{source}");
-            assert!(cst.is_some(), "the seed rejects {source}");
-            assert!(
-                matches!(parsed, Outcome::Error { code, .. } if code == CODE_UNSUPPORTED + what),
-                "{source}: {parsed:?}"
-            );
         }
     }
 }
@@ -530,21 +297,21 @@ fn edge_cases_and_typed_errors() {
             // Syntax outside the supported subset.
             (
                 "trait Score {\n    fn score(in self) -> i64;\n}",
-                Expect::Unsupported(1),
+                Expect::Seed,
             ),
             (
                 "struct P {\n    x: i64\n}\nmodel ByX: Score for P {\n    fn score(in self) -> i64 {\n        self.x\n    }\n}",
-                Expect::Unsupported(2),
+                Expect::Seed,
             ),
             (
                 "struct P {\n    x: i64\n}\nimpl Score for P {\n    fn score(in self) -> i64 {\n        self.x\n    }\n}",
-                Expect::Unsupported(4),
+                Expect::Seed,
             ),
-            ("fn f() -> String { \"\\u0041\" }", Expect::Unsupported(7)),
-            ("fn f[T](x: T) -> T::Out { x }", Expect::Unsupported(5)),
+            ("fn f() -> String { \"\\u0041\" }", Expect::Seed),
+            ("fn f[T](x: T) -> T::Out { x }", Expect::Seed),
             (
                 "fn f[e: eff](x: (i64, i64), i: i64) -> i64 eff [Fail[RuntimeError] | e] { x[i] }",
-                Expect::Unsupported(6),
+                Expect::Seed,
             ),
         ];
         for (source, expect) in cases {

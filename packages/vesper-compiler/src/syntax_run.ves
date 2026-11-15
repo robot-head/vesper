@@ -1,0 +1,42 @@
+// The parser sees a flat indexed buffer. Its local memory effect and
+// region are discharged here; neither is ambient authority.
+fn syntax_run[T: mod copy](
+    sink consume: fn() -> T eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]]
+) -> T eff [Fail[Diag], Fail[ArithOverflow]] {
+    region r(268435456) {
+        let root: SyntaxSlots[
+            RegionBox[
+                r,
+                Option[
+                    SyntaxSlots[
+                        RegionBox[
+                            r,
+                            Option[
+                                SyntaxSlots[
+                                    RegionBox[
+                                        r,
+                                        Option[
+                                            SyntaxSlots[
+                                                RegionBox[r, Option[SyntaxSlots[RegionBox[r, i64]]]]
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        ] = syntax_directory();
+        handle SyntaxMemory in {
+            consume()
+        } with {
+            return value => value,
+            read(i, resume) => resume(syntax_read_4(root, i)),
+            write(i, value, resume) => {
+                syntax_write_4(root, i, value);
+                resume(())
+            },
+        }
+    }
+}
