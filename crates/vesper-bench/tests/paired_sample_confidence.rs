@@ -75,3 +75,79 @@ fn maximal_denominator_and_pair_count_are_bounded() {
         Err(PairedSampleConfidenceError::TooManySamples)
     );
 }
+
+#[test]
+fn paired_sample_gate_compares_fractional_endpoints_without_rounding() {
+    use vesper_bench::{Decision, PairedSampleGateInconclusive, gate_paired_sample_confidence};
+    let half = [pair(100, 101, 2); 6];
+    let passing = gate_paired_sample_confidence(&half, 1).unwrap();
+    assert_eq!(passing.decision, Decision::Pass);
+    assert_eq!(passing.reason, None);
+    assert_eq!(
+        passing.confidence,
+        paired_samples_confidence_set(&half).unwrap()
+    );
+    assert_eq!(
+        gate_paired_sample_confidence(&half, 0).unwrap().decision,
+        Decision::Regression
+    );
+    let integer = [pair(100, 102, 2); 6];
+    assert_eq!(
+        gate_paired_sample_confidence(&integer, 1).unwrap().decision,
+        Decision::Pass
+    );
+    let samples = [1u64, 2, 4, 8, 16, 32].map(|delta| pair(100, 100 + delta, 3));
+    assert_eq!(
+        gate_paired_sample_confidence(&samples, 0).unwrap().decision,
+        Decision::Regression
+    );
+    let overlap = gate_paired_sample_confidence(&samples, 10).unwrap();
+    assert_eq!(overlap.decision, Decision::Inconclusive);
+    assert_eq!(
+        overlap.reason,
+        Some(PairedSampleGateInconclusive::ThresholdNotSeparated)
+    );
+    assert_eq!(
+        gate_paired_sample_confidence(&samples, 11)
+            .unwrap()
+            .decision,
+        Decision::Pass
+    );
+}
+
+#[test]
+fn paired_sample_gate_handles_extreme_products_and_propagates_errors() {
+    use vesper_bench::{Decision, PairedSampleGateInconclusive, gate_paired_sample_confidence};
+    let tiny = [pair(100, 101, u64::MAX); 6];
+    assert_eq!(
+        gate_paired_sample_confidence(&tiny, i64::MAX)
+            .unwrap()
+            .decision,
+        Decision::Pass
+    );
+    assert_eq!(
+        gate_paired_sample_confidence(&tiny, i64::MIN)
+            .unwrap()
+            .decision,
+        Decision::Regression
+    );
+    assert_eq!(
+        gate_paired_sample_confidence(&tiny, 0).unwrap().decision,
+        Decision::Regression
+    );
+    let unbounded = gate_paired_sample_confidence(&tiny[..1], i64::MAX).unwrap();
+    assert_eq!(unbounded.decision, Decision::Inconclusive);
+    assert_eq!(
+        unbounded.reason,
+        Some(PairedSampleGateInconclusive::ThresholdNotSeparated)
+    );
+    let mismatch = [pair(100, 101, 2), pair(100, 101, 3)];
+    assert_eq!(
+        gate_paired_sample_confidence(&mismatch, 0),
+        Err(PairedSampleConfidenceError::OperationsMismatch { index: 1 })
+    );
+    assert_eq!(
+        gate_paired_sample_confidence(&[], 0),
+        Err(PairedSampleConfidenceError::EmptyEvidence)
+    );
+}
