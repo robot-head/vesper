@@ -152,3 +152,20 @@ fn aarch64_object() {
     assert_eq!(u16::from_le_bytes([object[18], object[19]]), 183);
     fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn version_banner() {
+    for flag in ["--version", "-V"] {
+        let o = cli().arg(flag).output().unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let out = String::from_utf8(o.stdout).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 4, "expected 4 banner lines, got:\n{out}");
+        assert!(lines[0].contains(&format!("vesper {}", env!("CARGO_PKG_VERSION"))));
+        assert!(lines[0].trim_start().starts_with(r"\\    //"));
+        assert!(lines[1].contains("target: "));
+        assert!(lines[1].contains("(cranelift + lean4)"));
+        assert!(lines[2].contains("modes: copy <= affine <= linear | 0 sorryAx"));
+        assert_eq!(lines[3], r"     \/");
+    }
+}

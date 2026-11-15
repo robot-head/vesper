@@ -157,11 +157,18 @@ pub struct Generic {
     pub bound: Mode,
     pub row: bool,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FieldTemperature {
+    Hot,
+    Cold,
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Field {
     pub name: String,
     pub ty: Type,
     pub modality: Mode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<FieldTemperature>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Variant {
@@ -176,6 +183,8 @@ pub struct Adt {
     pub generics: Vec<Generic>,
     pub variants: Vec<Variant>,
     pub is_enum: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tile_width: Option<u32>,
     pub span: Span,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
