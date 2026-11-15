@@ -53,8 +53,8 @@ fn evaluate(source: &str) {
     };
     assert!(version.status.success());
     assert!(
-        String::from_utf8_lossy(&version.stdout).contains("4.24.0"),
-        "expected the pinned Lean 4.24.0 toolchain"
+        String::from_utf8_lossy(&version.stdout).contains("4.35.0"),
+        "expected the pinned Lean 4.35.0 toolchain"
     );
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(

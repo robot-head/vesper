@@ -22,12 +22,17 @@ actions:
     steps:
       - run: "python3 tools/bazel/sync_build_files.py --check"
       - run: "scripts/ci/install-lean.sh"
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+          scripts/ci/install-logos-rust.sh
       # Builds everything and runs every test, including the per-package
       # `clippy` (warnings are errors) and `rustfmt` checks.
       - run: |
           export VESPER_LEAN="$(cat .ci-lean-path)"
-          export VESPER_LEAN4LEAN42_ROOT="$(mktemp -d /tmp/vesper-lean4lean42-ci.XXXXXX)/checker"
-          BAZEL_FLAGS="--config=ci --config=rbe_build" scripts/ci/prepare-lean4lean42.sh "$VESPER_LEAN4LEAN42_ROOT"
+          export VESPER_CARGO="$(cat .ci-logos-cargo-path)"
+          export VESPER_LOGOS42_ROOT="$(mktemp -d /tmp/vesper-logos42-ci.XXXXXX)/checker"
+          BAZEL_FLAGS="--config=ci --config=rbe_build" scripts/ci/prepare-logos42.sh "$VESPER_LOGOS42_ROOT"
           bazel test --config=ci --config=rbe_build --local_test_jobs=2 //...
       - run: "scripts/ci/check-lean-models.sh"
 

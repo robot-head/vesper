@@ -73,7 +73,7 @@ def runProg (prog : List (List Op)) : String :=
 partial def loop (stdin : IO.FS.Stream) : IO Unit := do
   let line ← stdin.getLine
   if line.isEmpty then return
-  match parseProg line.trimRight with
+  match parseProg line.trimAsciiEnd.toString with
   | some prog => IO.println (runProg prog)
   | none => IO.println "parse-error"
   loop stdin

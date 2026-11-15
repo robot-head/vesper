@@ -1148,7 +1148,7 @@ theorem at_inst (θ : Nat → Row) (p : Path) : ∀ t : Ty, (t.inst θ).at p = (
     intro t
     cases t with
     | pair md t1 m1 t2 m2 => cases b <;> simp only [Ty.inst, Ty.at, ih]
-    | _ => rfl
+    | _ => cases b <;> rfl
 
 theorem mem_inst_of {θ : Nat → Row} {ε : Row} {l : Label} (h : l ∈ ε) (hl : ∀ n, l ≠ .rvar n) :
     l ∈ Row.inst θ ε := by

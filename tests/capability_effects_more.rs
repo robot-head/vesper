@@ -500,7 +500,7 @@ fn lean_model_checks_without_axioms_or_sorry() {
         assert!(text.contains(theorem), "{theorem}");
     }
     let Ok(lean) = std::env::var("VESPER_LEAN") else {
-        eprintln!("Lean check skipped: set VESPER_LEAN to the pinned Lean 4.24.0 binary");
+        eprintln!("Lean check skipped: set VESPER_LEAN to the pinned Lean 4.35.0 binary");
         return;
     };
     let out = Command::new(lean).arg(&path).output().unwrap();

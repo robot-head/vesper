@@ -56,7 +56,7 @@ def literalValue (k : Kind) (n : Int) (h : Fits k n) : Value k :=
   ⟨BitVec.ofInt k.width n⟩
 
 -- Work directly over Nat here. Some Std signed-bound helpers, and omega
--- applied to an unsplit conjunction, introduce Classical.choice in Lean 4.24.
+-- applied to an unsplit conjunction, introduce Classical.choice in Lean 4.35.
 private theorem signedNatBounds (n : Nat) (h : n < 18446744073709551616) :
     -9223372036854775808 ≤
       (if 2 * n < 18446744073709551616 then (n : Int) else (n : Int) - 18446744073709551616) ∧

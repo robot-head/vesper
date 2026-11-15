@@ -1,4 +1,4 @@
--- Appendix A model from the refreshed §41 design, repaired for Lean 4.24.
+-- Appendix A model from the refreshed §41 design, repaired for Lean 4.35.
 -- This is the source's small one-binding calculus, not the production compiler.
 -- tLet forces an empty residual frame; the final theorem counts resources.
 -- Definitions/statements and the approved compKind ≤ overrideMode premise stay intact.

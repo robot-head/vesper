@@ -121,7 +121,7 @@ paths on every OS (process spawning, file system, paths) keep running there.
 
 | Suite | Why it is platform-neutral | macOS | Windows |
 | --- | --- | --- | --- |
-| `//:test/lean4lean42_acceptance` | Lean kernel replay of both model import closures through the external checker (~15 min on macOS) | Skipped (`BUILD.bazel`) | Ignored (`cfg_attr`) |
+| `//:test/logos42_acceptance` | Logos rechecking of all three model import closures | Skipped (`BUILD.bazel`) | Ignored (`cfg_attr`) |
 | `//:test/proof_audit_cli` | Six serial kernel replays of Lean's Std (>15 min on macOS) | Skipped (`BUILD.bazel`) | Runs |
 | `scripts/test-format-proof.sh` | Serial Lean witness replay (~3.5 min on macOS) | Not run | Runs against the Cargo binary |
 | `//:test/replay42_kernel`, `//:test/format_proof_cli`, `//:test/oracle42_acceptance` | Serial Lean kernel replays (390 s, 276 s and 135 s on macOS) | Skipped (`BUILD.bazel`) | Run: their `cfg(windows)` process and path code needs Windows |
@@ -137,7 +137,7 @@ measured; the others share its platform-neutral replay design. Their internal
 [the scheduling evidence](rfcs/lean4lean-proof-packets-ci-scheduling.md).
 
 Because nothing else uses it, the macOS and Windows lanes also no longer
-prepare the pinned external Lean4Lean checker (`VESPER_LEAN4LEAN42_ROOT`),
+prepare the pinned external Logos checker (`VESPER_LOGOS42_ROOT`),
 which took about 6 minutes on macOS. Add a suite here only when it is long,
 its result cannot differ by OS, and Linux CI runs it. Keep platform-sensitive
 tests (fibers, MPK, ABI, codegen, file system, networking) on every lane.

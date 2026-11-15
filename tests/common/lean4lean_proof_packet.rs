@@ -627,7 +627,7 @@ fn provenance(sources: &BTreeMap<String, FixedSource>) -> Value {
         p["upstream_commit"],
         "4faf51403bc4cb35cf6666d91fc9c938ae46d3aa"
     );
-    assert_eq!(p["lean_commit"], "797c613eb9b6d4ec95db23e3e00af9ac6657f24b");
+    assert_eq!(p["lean_commit"], "eb6cafb7290e8bd5f2937522d8d804f58f02bafc");
     let upstream: Value =
         serde_json::from_slice(&read("tools/lean4lean42/source-manifest.json")).unwrap();
     let entries = p["files"].as_array().unwrap();
@@ -948,9 +948,9 @@ impl Fixture {
         let version = execute(Command::new(&lean).arg("--version"), 10, started);
         version.success();
         assert!(
-            String::from_utf8_lossy(&version.stdout).contains("version 4.24.0,")
-                && String::from_utf8_lossy(&version.stdout).contains("commit 797c613eb9b6"),
-            "required real Lean4.24: {}",
+            String::from_utf8_lossy(&version.stdout).contains("version 4.35.0,")
+                && String::from_utf8_lossy(&version.stdout).contains("commit eb6cafb7290e"),
+            "required real Lean4.35: {}",
             version.diagnostic()
         );
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -1048,7 +1048,9 @@ impl Fixture {
         windows_environment(&mut command);
         let captured = execute(
             command
-                .args(["-j1", "-M4096", "--run"])
+                // Lean 4.35 snapshots retain independently loaded original,
+                // trusted and projected environments for the full Lean import.
+                .args(["-j1", "-M8192", "--run"])
                 .arg(&tool)
                 .arg(&request_path),
             300,

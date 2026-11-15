@@ -311,9 +311,13 @@ Every domain framework in Tier 4 is co-designed around Vesper's substructural mo
 ### Prerequisites
 
 * **Rust Toolchain:** Rust `1.85+` (`cargo`, `rustup`) for building the 46-crate host workspace.
-* **Lean 4 Toolchain (Optional, for `vesper verify` & Metatheory):** [`elan`](https://github.com/leanprover/elan) (`leanprover/lean4:v4.16.0+`).
+* **Lean 4 Toolchain (Optional, for `vesper verify` & Metatheory):** [`elan`](https://github.com/leanprover/elan) (`leanprover/lean4:v4.35.0`).
 
 ### Verifying the Core Metatheory & Building the Host Workspace
+
+The fixed-model external checker is [Logos](tools/logos42/README.md), using the
+pinned Lean 4.35.0 toolchain. Its setup and acceptance suite bind fresh model
+artifacts to the pinned checker and its actual rejection controls.
 
 ```bash
 # 1. Clone the repository

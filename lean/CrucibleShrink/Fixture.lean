@@ -12,7 +12,7 @@ def parseList (s : String) : Option (List Nat) :=
 partial def loop (stdin : IO.FS.Stream) : IO Unit := do
   let line ← stdin.getLine
   if line.isEmpty then return
-  let line := line.trimRight
+  let line := line.trimAsciiEnd.toString
   match line.splitOn ";" with
   | [a, b] =>
     match parseList a, parseList b with

@@ -104,7 +104,7 @@ def TypeInfo.inspect (l : Limits) : Nat → (t : Ty) → Except TypeError {i : T
   | fuel + 1, t => do
     if l.typeNodes = 0 then throw .nodes
     if l.typeDepth = 0 then throw .depth
-    match t with
+    match (dependent := true) t with
     | .unit => pure ⟨⟨.unit,1,1,rfl,rfl,.unit⟩,rfl⟩
     | .nat => pure ⟨⟨.nat,1,1,rfl,rfl,.nat⟩,rfl⟩
     | .ticket => pure ⟨⟨.ticket,1,1,rfl,rfl,.ticket⟩,rfl⟩

@@ -5,7 +5,7 @@ import struct
 import sys
 import time
 
-READY = b'[1,"ready","vesper.resource-model42/1","4.24.0","797c613eb9b6d4ec95db23e3e00af9ac6657f24b",[4194304,262144,8,1000000,131072,2048,65,256,9999999999,20,4096,67108864]]'
+READY = b'[1,"ready","vesper.resource-model42/1","4.35.0","eb6cafb7290e8bd5f2937522d8d804f58f02bafc",[4194304,262144,8,1000000,131072,2048,65,256,9999999999,20,4096,67108864]]'
 
 
 def frame(output, payload):
@@ -36,7 +36,7 @@ def main():
     kind = sys.argv[1]
     output = sys.stdout.buffer
     if kind == "wrong_ready":
-        frame(output, b'[1,"ready","wrong","4.24.0","797c613eb9b6d4ec95db23e3e00af9ac6657f24b",[4194304,262144,8,1000000,131072,2048,65,256,9999999999,20,4096,67108864]]')
+        frame(output, b'[1,"ready","wrong","4.35.0","eb6cafb7290e8bd5f2937522d8d804f58f02bafc",[4194304,262144,8,1000000,131072,2048,65,256,9999999999,20,4096,67108864]]')
         return
     if kind == "stdout_noise":
         output.write(b"noise")

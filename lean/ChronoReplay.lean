@@ -41,6 +41,8 @@ the same properties at run time, and `tests/lean_model.rs` compares
 `lean/ChronoReplay/Fixture.lean`.
 -/
 
+set_option backward.split false
+
 namespace Vesper.ChronoReplay
 
 def modelId : String := "vesper.chrono.replay-model/1"

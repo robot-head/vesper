@@ -51,18 +51,36 @@ index e7f4981..2007794 100644
    let mut env' := env
    for v in vs do
 diff --git a/Lean4Lean/Environment/Basic.lean b/Lean4Lean/Environment/Basic.lean
-index 9d12e85..5a1c3d0 100644
+index 9d12e85..f8afe3c 100644
 --- a/Lean4Lean/Environment/Basic.lean
 +++ b/Lean4Lean/Environment/Basic.lean
+@@ -38,7 +38,7 @@ def primitives : NameSet := .ofList [
+   ``Nat.gcd, ``Nat.mod, ``Nat.div, ``Nat.beq, ``Nat.ble,
+   ``Nat.bitwise, ``Nat.land, ``Nat.lor, ``Nat.xor,
+   ``Nat.shiftLeft, ``Nat.shiftRight,
+-  ``String, ``String.mk]
++  ``String.ofList, ``Char.ofNat]
+
+ /--
+ Returns true iff `constName` is a non-recursive inductive datatype that has only one constructor and no indices.
 @@ -58,7 +58,7 @@ def checkName (env : Environment) (n : Name)
      if primitives.contains n then
        throw <| .other s!"unexpected use of primitive name {n}"
 
 -open private subsumesInfo Kernel.Environment.mk moduleNames moduleNameMap parts toEffectiveImport
-+open private subsumesInfo Kernel.Environment.mk moduleNames moduleNameMap parts toEffectiveImport mainModule?
++open private subsumesInfo Kernel.Environment.mk EnvironmentHeader.mk moduleNames moduleNameMap parts toEffectiveImport mainModule?
    from Lean.Environment
 
  def empty (mainModule : Name) (trustLevel : UInt32 := 0) : Environment :=
+@@ -69,7 +69,7 @@ def empty (mainModule : Name) (trustLevel : UInt32 := 0) : Environment :=
+     (const2ModIdx := {})
+     (extensions := #[])
+     (irBaseExts := #[])
+-    (header := { mainModule, trustLevel })
++    (header := EnvironmentHeader.mk trustLevel mainModule false #[] #[] #[] {} #[] #[])
+
+ def throwAlreadyImported (s : ImportState) (const2ModIdx : Std.HashMap Name ModuleIdx)
+     (modIdx : Nat) (cname : Name) : Except Exception α := do
 @@ -82,7 +82,7 @@ def finalizeImport (s : ImportState) (imports : Array Import) (mainModule : Name
      (trustLevel : UInt32 := 0) : Except Exception Environment := do
    let modules := (moduleNames s).filterMap ((moduleNameMap s)[·]?)
@@ -72,6 +90,56 @@ index 9d12e85..5a1c3d0 100644
        throw <| .other s!"missing data file for module {mod.module}"
      return data
    let numPrivateConsts := moduleData.foldl (init := 0) fun numPrivateConsts data => Id.run do
+@@ -97,14 +97,18 @@ def finalizeImport (s : ImportState) (imports : Array Import) (mainModule : Name
+         privateConstantMap := constantMap'
+         if let some cinfoPrev := cinfoPrev? then
+           -- Recall that the map has not been modified when `cinfoPrev? = some _`.
+-          if subsumesInfo cinfo cinfoPrev then
++          if subsumesInfo privateConstantMap cinfo cinfoPrev then
+             privateConstantMap := privateConstantMap.insert cname cinfo
+-          else if !subsumesInfo cinfoPrev cinfo then
++          else if !subsumesInfo privateConstantMap cinfoPrev cinfo then
+             throwAlreadyImported s const2ModIdx modIdx cname
+       const2ModIdx := const2ModIdx.insertIfNew cname modIdx
+     for cname in data.extraConstNames do
+       const2ModIdx := const2ModIdx.insertIfNew cname modIdx
+
++  let effectiveModules := modules.map toEffectiveImport
++  let mut moduleName2Idx := {}
++  for h : idx in [0:effectiveModules.size] do
++    moduleName2Idx := moduleName2Idx.insert effectiveModules[idx].module idx
+   return Kernel.Environment.mk
+     (constants := SMap.fromHashMap privateConstantMap false)
+     (quotInit := !imports.isEmpty) -- We assume `Init.Prelude` initializes quotient module
+@@ -112,8 +116,10 @@ def finalizeImport (s : ImportState) (imports : Array Import) (mainModule : Name
+     (const2ModIdx := const2ModIdx)
+     (extensions := #[])
+     (irBaseExts := #[])
+-    (header := {
+-      trustLevel, imports, moduleData, mainModule, isModule := false
+-      regions := modules.flatMap (parts · |>.map (·.2))
+-      modules := modules.map toEffectiveImport
+-    })
++    (header := EnvironmentHeader.mk
++      (trustLevel := trustLevel) (imports := imports) (moduleData := moduleData)
++      (mainModule := mainModule) (isModule := false)
++      (regions := modules.flatMap (parts · |>.map (·.2)))
++      (modules := effectiveModules)
++      (moduleName2Idx := moduleName2Idx)
++      (importAllModules := effectiveModules.filter (·.importAll)))
+diff --git a/Lean4Lean/Expr.lean b/Lean4Lean/Expr.lean
+index 79ddd1e..a101fc2 100644
+--- a/Lean4Lean/Expr.lean
++++ b/Lean4Lean/Expr.lean
+@@ -84,7 +84,7 @@ def strLitToConstructor (s : String) : Expr :=
+   let char := .const ``Char []
+   let listNil := .app (.const ``List.nil [.zero]) char
+   let listCons := .app (.const ``List.cons [.zero]) char
+-  let stringMk := .const ``String.mk []
++  let stringMk := .const ``String.ofList []
+   let charOfNat := .const ``Char.ofNat []
+   .app stringMk <| s.foldr (init := listNil) fun c e =>
+     .app (.app listCons <| .app charOfNat (.lit (.natVal c.toNat))) e
 diff --git a/Lean4Lean/Inductive/Add.lean b/Lean4Lean/Inductive/Add.lean
 index 9dc49e8..98005c9 100644
 --- a/Lean4Lean/Inductive/Add.lean
@@ -185,7 +253,7 @@ index 9dc49e8..98005c9 100644
 +      (lparams := lparams) do
 +    res.aux2nested.forM fun _ e => do _ ← TypeChecker.checkType e
 diff --git a/Lean4Lean/Inductive/Reduce.lean b/Lean4Lean/Inductive/Reduce.lean
-index 6e3d75d..c1bbd55 100644
+index 6e3d75d..6aca63c 100644
 --- a/Lean4Lean/Inductive/Reduce.lean
 +++ b/Lean4Lean/Inductive/Reduce.lean
 @@ -48,7 +48,8 @@ def toCtorWhenStruct (inductName : Name) (e : Expr) : m Expr := do
@@ -198,6 +266,16 @@ index 6e3d75d..c1bbd55 100644
    return expandEtaStruct env eType e
 
  def getRecRuleFor (rval : RecursorVal) (major : Expr) : Option RecursorRule := do
+@@ -67,7 +68,8 @@ def inductiveReduceRec [Monad m] (env : Environment) (e : Expr)
+   if info.k then
+     major ← toCtorWhenK env whnf inferType isDefEq info major
+   match ← whnf major with
+-  | .lit l => major := l.toConstructor
++  | .lit (.natVal n) => major := .natLitToConstructor n
++  | .lit (.strVal s) => major ← whnf (.strLitToConstructor s)
+   | e => major ← toCtorWhenStruct env whnf inferType info.getMajorInduct e
+   let some rule := getRecRuleFor info major | return none
+   let majorArgs := major.getAppArgs
 diff --git a/Lean4Lean/Level.lean b/Lean4Lean/Level.lean
 index dd12bc3..4a36717 100644
 --- a/Lean4Lean/Level.lean
@@ -532,10 +610,21 @@ index dd12bc3..4a36717 100644
 +-- /-- info: max 1 (imax (max (v + 1) (imax (u + 1) u)) v) -/
 +-- #guard_msgs in normalize imax u v + 1
 diff --git a/Lean4Lean/Primitive.lean b/Lean4Lean/Primitive.lean
-index 5e532f7..b3137e3 100644
+index 5e532f7..00deded 100644
 --- a/Lean4Lean/Primitive.lean
 +++ b/Lean4Lean/Primitive.lean
-@@ -28,19 +28,23 @@ structure Reflection where
+@@ -10,8 +10,8 @@ deriving instance ToExpr for LevelMVarId
+ deriving instance ToExpr for Level
+ deriving instance ToExpr for MVarId
+ deriving instance ToExpr for BinderInfo
+-deriving instance ToExpr for String.Pos
+-deriving instance ToExpr for Substring
++deriving instance ToExpr for String.Pos.Raw
++deriving instance ToExpr for Substring.Raw
+ deriving instance ToExpr for SourceInfo
+ deriving instance ToExpr for Syntax
+ deriving instance ToExpr for DataValue
+@@ -28,19 +28,25 @@ structure Reflection where
    toDec : Expr
 
  def Reflection.defn₁ : Reflection where
@@ -550,26 +639,29 @@ index 5e532f7..b3137e3 100644
 +  ofFalse := q(fun p (H : ∀ {q : Prop}, ((false = true → p) → (¬false = true → ¬p) → q) → q) =>
 +    H fun _ h => h Bool.noConfusion)
 +  toDec := q(fun p b (H : ∀ {q : Prop}, ((b = true → p) → (¬b = true → ¬p) → q) → q) =>
-+    if h : b = true then isTrue (H fun h' _ => h' h) else isFalse (H fun _ h' => h' h))
++    Decidable.intro b (b.casesOn (motive := fun b' => b = b' → b'.Reflects p)
++      (fun h => H fun _ hn => hn (fun ht => Bool.noConfusion (Eq.rec (motive := fun b' _ => b' = true) ht h)))
++      (fun h => H fun hp _ => hp h) rfl))
 
  def Reflection.defn₂ : Reflection where
 -  type := q(fun p b => (b = true → p) ∧ (b = false → ¬p))
 -  ofTrue := q(fun p (H : (true = true → p) ∧ (true = false → ¬p)) => H.1 rfl)
 -  ofFalse := q(fun p (H : (false = true → p) ∧ (false = false → ¬p)) => H.2 rfl)
 -  toDec := q(fun p b (H : (b = true → p) ∧ (b = false → ¬p)) =>
+-    b.casesOn (motive := fun b' => b = b' → Decidable p)
+-      (fun h => isFalse (H.2 h)) (fun h => isTrue (H.1 h)) rfl)
 +  type := q(fun p b => ∀ {q : Prop}, ((b = true → p) → (b = false → ¬p) → q) → q)
 +  ofTrue := q(fun p (H : ∀ {q : Prop}, ((true = true → p) → (true = false → ¬p) → q) → q) =>
 +    H fun h _ => h rfl)
 +  ofFalse := q(fun p (H : ∀ {q : Prop}, ((false = true → p) → (false = false → ¬p) → q) → q) =>
 +    H fun _ h => h rfl)
 +  toDec := q(fun p b (H : ∀ {q : Prop}, ((b = true → p) → (b = false → ¬p) → q) → q) =>
-     b.casesOn (motive := fun b' => b = b' → Decidable p)
--      (fun h => isFalse (H.2 h)) (fun h => isTrue (H.1 h)) rfl)
-+      (fun h => isFalse (H fun _ h' => h' h)) (fun h => isTrue (H fun h' _ => h' h)) rfl)
++    Decidable.intro b (b.casesOn (motive := fun b' => b = b' → b'.Reflects p)
++      (fun h => H fun _ hn => hn h) (fun h => H fun hp _ => hp h) rfl))
 
  def Reflection.check (r : Reflection) (fail : ∀ {α}, M α) : M Unit := do
    unless ← isDefEq (← checkType r.type) q(Prop → Bool → Prop) do fail
-@@ -60,8 +64,8 @@ def Condition.natLE : Condition where
+@@ -60,8 +66,8 @@ def Condition.natLE : Condition where
    impl := .reflectNatNat
      (asBool := q(Nat.ble))
      (reflect := .defn₁)
@@ -580,7 +672,7 @@ index 5e532f7..b3137e3 100644
 
  def Condition.natEq : Condition where
    prop := q(@Eq Nat)
-@@ -69,7 +73,8 @@ def Condition.natEq : Condition where
+@@ -69,7 +75,8 @@ def Condition.natEq : Condition where
    impl := .reflectNatNat
      (asBool := q(Nat.beq))
      (reflect := .defn₂)
@@ -590,7 +682,7 @@ index 5e532f7..b3137e3 100644
 
  def Condition.bool : Condition where
    prop := q(fun x : Bool => x = true)
-@@ -117,19 +122,18 @@ def Condition.check (cond : Condition) (fail : ∀ {α}, M α)
+@@ -117,19 +124,18 @@ def Condition.check (cond : Condition) (fail : ∀ {α}, M α)
    _ ← checkType cond.dec
    match cond.impl with
    | .reflectNatNat asBool reflect proof =>
@@ -616,14 +708,238 @@ index 5e532f7..b3137e3 100644
      let b := .bvar 0
      if ite then
        let natITE := .lam0 q(Bool) <|
-@@ -169,6 +173,7 @@ def unfoldWellFounded (e : Expr) (fvs : Array Expr) (eq_def : Expr) (fail : ∀
+@@ -148,7 +154,7 @@ protected def Condition.dite (cond : Condition) (args: Array Expr) (t e : Expr)
+     (.lam0 (mkApp q(Not) (mkAppN cond.prop args)) e)
+
+ protected def Condition.decide (cond : Condition) (args : Array Expr) : Expr :=
+-  cond.ite q(Bool) args q(true) q(false)
++  mkApp2 q(@Decidable.decide) (mkAppN cond.prop args) (mkAppN cond.dec args)
+
+ def unfoldWellFounded (e : Expr) (fvs : Array Expr) (eq_def : Expr) (fail : ∀ {α}, M α) : M Expr := do
+   let .app (.app _ lhs) rhs := eq_def.getForallBody.instantiateRev fvs | fail
+@@ -168,7 +174,116 @@ def unfoldWellFounded (e : Expr) (fvs : Array Expr) (eq_def : Expr) (fail : ∀
+   unless ← isDefEq (e1.app wfn') rhs do fail
    return (← getLCtx).mkLambda fvs rhs
 
++def lambdaTelescope (e : Expr) (k : Array Expr → Expr → M α) : M α := loop #[] e where
++  loop fvars
++  | .lam x dom body bi =>
++    let d := dom.instantiateRev fvars
++    withLocalDecl x d bi fun fv => do
++      let fvars := fvars.push fv
++      loop fvars body
++  | e => k fvars (e.instantiateRev fvars)
++
++structure Probe where
++  /-- The packed argument, abstracted over the recursion variables. -/
++  pack : Expr
++  /-- The `ih` binder's type as a *function* `A → Sort _`: the domain of `F`'s codomain, read
++  off `F`'s type once and for all. A function rather than an open term so that using it at an
++  argument is an application, with no binder for a probe's context to be lifted over. -/
++  dom : Expr
++  /-- The fixpoint functional, asserted not to mention the recursion variables. -/
++  F : Expr
++
++def Probe.probe (P : Probe) (subst : Array Expr) (fail : ∀ {α}, M α)
++    (mkRhs : Expr → Expr) : M Unit := do
++  let a := (mkAppN P.pack subst)
++  withLocalDecl `ih (mkApp P.dom a) .default fun ih => do
++  let rhs := mkRhs ih
++  _ ← checkType rhs
++  unless ← isDefEq (mkApp2 P.F a ih) rhs do fail
++
++/-- Certify that `e` is the compiled form of a well-founded recursion, and hand the equation body
++to `k`.
++
++The body is passed with recursive calls pointing at the *induction hypothesis variable* `ih`
++rather than at `e`. That is what makes the caller's probes universally quantified in the
++recursive-call target: consuming a unit of fuel replaces the recursive call by `Nat.fix.go` at
++the lower fuel, which is not definitionally the fixpoint, so probes stated in terms of `e` would
++only be usable for the outermost unfolding.
++
++`ih` takes a proof that the measure decreases, which the caller supplies as part of the
++right-hand side it returns. It is not trusted: the `checkType` in `probe` rejects the definition
++if it does not have the type `ih` demands.
++
++Returns the probe function and the packing function `fun fvs => a₀`, which the caller needs to
++name the arguments of a recursive call.
++
++`meas` is a closed lambda -- `fun m _ : Nat => m` for `Nat.gcd` -- rather than an expression in
++the caller's context: its telescope supplies the arity and the argument types, so the recognizer
++opens its own scope for the destructuring and nothing found there escapes except the closed
++`pack`/`dom` abstractions and `F`, which is checked closed. Probes then run in whatever context
++the *caller* is in when it calls them, so different probes can bind different variables -- they
++correspond to the variables of a pattern, not to the arguments of the function. -/
++def unfoldNatWellFounded (e meas : Expr) (fail : ∀ {α}, M α) : M Probe := do
++  let succ := mkApp q(Nat.succ)
++  lambdaTelescope meas fun fvs meas => do
++  _ ← checkType (mkAppN e fvs)
++  let e1 ← (TypeChecker.Inner.whnfCore (mkAppN e fvs)).run -- get _unary
++  let some e1 := TypeChecker.Inner.unfoldDefinition (← getEnv) e1 | fail -- get fix
++  (← (TypeChecker.Inner.whnfCore e1).run).withApp fun fix args => do
++  let .const ``WellFounded.Nat.fix [_, _] := fix | fail
++  let #[α,motive,f,F,a₀] := args | fail
++  let fixFn := mkAppN fix #[α,motive,f,F]
++  let ty ← inferType a₀
++  withLocalDecl `a ty .default fun a => do
++    unless ← isDefEq (← checkType (.app f a)) q(Nat) do fail
++    -- prove |- f a₀ ≡ meas
++    unless ← isDefEq (.app f a₀) meas do fail
++    -- prove |- fix α motive f F a ≡ go α motive f F (eager (succ (f a))) a [proof]
++    let some e1 := TypeChecker.Inner.unfoldDefinition (← getEnv) (.app fixFn a) | fail -- get fix.go
++    let e1 ← (TypeChecker.Inner.whnfCore e1).run
++    e1.withApp fun fixGo args => do
++    let #[α',motive',f',F',fuel,a',pf] := args | fail
++    unless (α, motive, f, F, a) == (α', motive', f', F', a') do fail
++    let .app eager n := fuel | fail
++    unless ← isProp (← inferType pf) do fail
++    unless ← isDefEq n (succ (.app f a)) do fail
++    -- prove |- eager n = if beq n n = true then n else n
++    unless (← getEnv).contains ``Nat.beq do fail
++    withLocalDecl `x q(Nat) .default fun x => do
++      unless ← isDefEq (mkApp eager x)
++        (Condition.bool.ite q(Nat) #[mkApp2 (.const ``Nat.beq []) x x] x x) do fail
++    -- prove |- go α motive f F (succ t) x hfuel ≡ F x fun y hy => go α motive f F t y [proof]
++    let some go' := TypeChecker.Inner.unfoldDefinition (← getEnv) fixGo | fail -- get fix
++    lambdaTelescope go' fun fvs go' => do
++    let #[_,_,_,F,t] := fvs | fail
++    let .app natRec t' := go' | fail
++    unless !natRec.containsFVar t.fvarId! && t == t' do fail
++    _ ← checkType (succ t)
++    let gor ← (TypeChecker.Inner.whnfCore (.app natRec (succ t))).run
++    lambdaTelescope gor fun fvs gor => do
++    let #[x,_] := fvs | fail
++    let .app Fx ih := gor | fail
++    unless .app F x == Fx do fail
++    lambdaTelescope ih fun fvs ih => do
++    let #[y,_] := fvs | fail
++    let .app ih _ := ih | fail
++    unless ih == .app (.app natRec t) y do fail
++  -- ensure `F` does not depend on the `fvs`
++  let lctx ← getLCtx
++  let F := F.abstract fvs
++  if F.hasLooseBVars then fail
++  -- `F : (a : ty) → Dom a → motive a`, so the `ih` binder's type is `Dom` at the packed argument.
++  let .forallE _ A cod _ ← whnf (← inferType F) | fail
++  unless ← isDefEq ty A do fail
++  let dom ← withLocalDecl `a A .default fun a => do
++    let .forallE _ dom _ _ ← whnf (cod.instantiate1 a) | fail
++    return .lam `a A (dom.abstract #[a]) .default
++  return { F, dom, pack := lctx.mkLambda fvs a₀ }
++
++open private Nat.gcd._unary._proof_1 in Nat.gcd._unary in
++open private Nat.bitwise._unary._proof_1 in Nat.bitwise._unary in
  def checkPrimitiveDef (v : DefinitionVal) : M Bool := do
 +  unless v.safety == .safe do return false
    let fail {α} : M α := throw <| .other s!"invalid form for primitive def {v.name}"
    let tru := q(true)
    let fal := q(false)
+@@ -275,16 +390,17 @@ def checkPrimitiveDef (v : DefinitionVal) : M Bool := do
+     _ ← checkType e
+     unless ← isDefEq (go y hy (succ fuel) x h) e do fail
+   | ``Nat.gcd =>
+-    unless env.contains ``Nat.mod && v.levelParams.isEmpty do fail
+-    -- gcd : Nat → Nat → Nat
++    unless env.contains ``Nat.mod && env.contains ``Bool && v.levelParams.isEmpty do fail
+     unless ← isDefEq v.type q(Nat → Nat → Nat) do fail
++    Condition.bool.check fail (ite := true)
++    let P ← unfoldNatWellFounded v.value q(fun m _n : Nat => m) fail
+     withLocalDecl `n q(Nat) .default fun n => do
++    P.probe #[zero, n] fail fun _ => n
+     withLocalDecl `m q(Nat) .default fun m => do
+-    let gcd' ← unfoldWellFounded v.value #[n, m] q(type_of% Nat.gcd.eq_def) fail
+-    let gcd' := mkApp2 gcd'
+-    let gcd := mkApp2 v.value
+-    unless ← isDefEq (gcd' zero m) m do fail
+-    unless ← isDefEq (gcd' (succ n) m) (gcd (mod m (succ n)) (succ n)) do fail
++    P.probe #[succ m, n] fail fun ih =>
++      mkApp2 ih (mkApp2 P.pack (mod n (succ m)) (succ m))
++        (mkApp2 q(fun m n : Nat =>
++          Nat.gcd._unary._proof_1 m.succ n (Nat.ne_of_beq_eq_false (Eq.refl false))) m n)
+   | ``Nat.beq =>
+     unless env.contains ``Nat && env.contains ``Bool && v.levelParams.isEmpty do fail
+     -- beq : Nat → Nat → Bool
+@@ -305,26 +421,23 @@ def checkPrimitiveDef (v : DefinitionVal) : M Bool := do
+     unless ← defeq2 (ble (succ y) (succ x)) (ble y x) do fail
+   | ``Nat.bitwise =>
+     unless env.contains ``Nat && env.contains ``Bool && v.levelParams.isEmpty do fail
+-    -- bitwise : Nat → Nat → Nat
+     unless ← isDefEq v.type q((Bool → Bool → Bool) → Nat → Nat → Nat) do fail
++    let c := Condition.natEq; c.check fail (ite := true) (dite := true)
++    let bc := Condition.bool; bc.check fail (ite := true)
+     withLocalDecl `f q(Bool → Bool → Bool) .default fun f => do
++    let P ← unfoldNatWellFounded (v.value.app f) q(fun m _n : Nat => m) fail
+     withLocalDecl `n q(Nat) .default fun n => do
+     withLocalDecl `m q(Nat) .default fun m => do
+-    let bitwise' ← unfoldWellFounded v.value #[f, n, m] q(type_of% Nat.bitwise.eq_def) fail
+-    let bitwise := mkApp3 v.value
+-    let c := Condition.natEq; c.check fail (ite := true)
+-    let bc := Condition.bool; bc.check fail (ite := true)
+-    let e :=
+-      c.ite q(Nat) #[n, zero] (bc.ite q(Nat) #[mkApp2 f q(false) q(true)] m zero) <|
++    P.probe #[n, m] fail fun ih =>
++      c.dite #[n, zero] (bc.ite q(Nat) #[mkApp2 f q(false) q(true)] m zero) <|
+       c.ite q(Nat) #[m, zero] (bc.ite q(Nat) #[mkApp2 f q(true) q(false)] n zero) <|
+       let n' := div n two
+       let m' := div m two
+       let b₁ := c.decide #[mod n two, one]
+       let b₂ := c.decide #[mod m two, one]
+-      let r := bitwise f n' m'
++      let r := mkApp2 ih (mkApp2 P.pack n' m')
++        (mkApp3 q(Nat.bitwise._unary._proof_1) n m (.bvar 0))
+       bc.ite q(Nat) #[mkApp2 f b₁ b₂] (add (add r r) one) (add r r)
+-    _ ← checkType e
+-    unless ← isDefEq (mkApp3 bitwise' f n m) e do fail
+   | ``Nat.land =>
+     unless env.contains ``Nat.bitwise && env.contains ``and && v.levelParams.isEmpty do fail
+     -- land : Nat → Nat → Nat
+@@ -365,6 +478,17 @@ def checkPrimitiveDef (v : DefinitionVal) : M Bool := do
+     let shr := mkApp2 v.value
+     unless ← defeq1 (shr x zero) x do fail
+     unless ← defeq2 (shr x (succ y)) (div (shr x y) two) do fail
++  | ``Char.ofNat =>
++    unless env.contains ``Nat && v.levelParams.isEmpty do fail
++    _ ← ensureType q(Char)
++    unless ← isDefEq v.type q(Nat → Char) do fail
++  | ``String.ofList =>
++    unless v.levelParams.isEmpty do fail
++    _ ← ensureType q(List Char)
++    _ ← ensureType q(Char)
++    unless ← isDefEq (← checkType q(List.nil (α := Char))) q(List Char) do fail
++    unless ← isDefEq (← checkType q(List.cons (α := Char))) q(Char → List Char → List Char) do fail
++    unless ← isDefEq v.type q(List Char → String) do fail
+   | _ => return false
+   return true
+
+@@ -383,28 +507,5 @@ def checkPrimitiveInductive (env : Environment) (lparams : List Name) (nparams :
+       ⟨``Nat.zero, .const ``Nat []⟩,
+       ⟨``Nat.succ, .forallE _ (.const ``Nat []) (.const ``Nat []) _⟩
+     ] := type.ctors | fail
+-  | ``String =>
+-    let [⟨``String.mk,
+-      .forallE _ (.app (.const ``List [.zero]) (.const ``Char [])) (.const ``String []) _
+-    ⟩] := type.ctors | fail
+-    M.run env (safety := .safe) (lctx := {}) (lparams := []) do
+-      -- We need the following definitions for `strLitToConstructor` to work:
+-      -- Nat : Type (this is primitive so checking for existence suffices)
+-      unless env.contains ``Nat do fail
+-      -- Char : Type
+-      _ ← ensureType q(Char)
+-      -- List Char : Type
+-      let listchar := q(List Char)
+-      _ ← ensureType listchar
+-      -- @List.nil.{0} Char : List Char
+-      let listNil := q(List.nil (α := Char))
+-      unless ← isDefEq (← checkType listNil) q(List Char) do fail
+-      -- @List.cons.{0} Char : Char → List Char → List Char
+-      let listCons := q(List.cons (α := Char))
+-      unless ← isDefEq (← checkType listCons) q(Char → List Char → List Char) do fail
+-      -- String.mk : List Char → String (already checked)
+-      -- @Char.ofNat : Nat → Char
+-      let charOfNat := q(Char.ofNat)
+-      unless ← isDefEq (← checkType charOfNat) q(Nat → Char) do fail
+   | _ => return false
+   return true
 diff --git a/Lean4Lean/Quot.lean b/Lean4Lean/Quot.lean
 index d0b7d5f..87670e0 100644
 --- a/Lean4Lean/Quot.lean
@@ -640,10 +956,19 @@ index d0b7d5f..87670e0 100644
    let u := .param `u
    withLocalDecl `α (.sort u) .implicit fun α => do
 diff --git a/Lean4Lean/TypeChecker.lean b/Lean4Lean/TypeChecker.lean
-index 1522f17..92d2d0b 100644
+index 1522f17..54c42f2 100644
 --- a/Lean4Lean/TypeChecker.lean
 +++ b/Lean4Lean/TypeChecker.lean
-@@ -185,8 +185,11 @@ def inferLet (e : Expr) (inferOnly : Bool) : RecM Expr := loop #[] e where
+@@ -26,6 +26,8 @@ structure TypeChecker.Context where
+   lctx : LocalContext := {}
+   safety : DefinitionSafety := .safe
+   eagerReduce := false
++  -- Current Lean string/UTF-8 proofs exceed the former depth of 1000.
++  recDepth : Nat := 50000
+   lparams : List Name := []
+
+ namespace TypeChecker
+@@ -185,8 +187,11 @@ def inferLet (e : Expr) (inferOnly : Bool) : RecM Expr := loop #[] e where
      let r := r.cheapBetaReduce
      return (← getLCtx).mkForall fvars r
 
@@ -657,7 +982,7 @@ index 1522f17..92d2d0b 100644
 
  def inferProj (typeName : Name) (idx : Nat) (struct structType : Expr) : RecM Expr := do
    let e := Expr.proj typeName idx struct
-@@ -204,16 +207,16 @@ def inferProj (typeName : Name) (idx : Nat) (struct structType : Expr) : RecM Ex
+@@ -204,16 +209,16 @@ def inferProj (typeName : Name) (idx : Nat) (struct structType : Expr) : RecM Ex
    for i in [:I_val.numParams] do
      let .forallE _ _ b _ ← whnf r | fail
      r := b.instantiate1 args[i]!
@@ -677,7 +1002,43 @@ index 1522f17..92d2d0b 100644
    return dom
 
  def inferType' (e : Expr) (inferOnly : Bool) : RecM Expr := do
-@@ -392,7 +395,6 @@ def reduceBinNatPred (f : Nat → Nat → Bool) (a b : Expr) : RecM (Option Expr
+@@ -280,16 +285,20 @@ def whnfFVar (e : Expr) (cheapRec cheapProj : Bool) : RecM Expr := do
+     return ← whnfCore v cheapRec cheapProj
+   return e
+
+-def reduceProj (idx : Nat) (struct : Expr) (cheapRec cheapProj : Bool) : RecM (Option Expr) := do
+-  let mut c ← (if cheapProj then whnfCore struct cheapRec cheapProj else whnf struct)
++def reduceProjCore (idx : Nat) (struct : Expr) : RecM (Option Expr) := do
++  let mut c := struct
+   if let .lit (.strVal s) := c then
+-    c := .strLitToConstructor s
++    c ← whnf (.strLitToConstructor s)
+   c.withApp fun mk args => do
+   let .const mkC _ := mk | return none
+   let env ← getEnv
+   let .ctorInfo mkInfo ← env.get mkC | return none
+   return args[mkInfo.numParams + idx]?
+
++def reduceProj (idx : Nat) (struct : Expr) (cheapRec cheapProj : Bool) : RecM (Option Expr) := do
++  let reduced ← if cheapProj then whnfCore struct cheapRec cheapProj else whnf struct
++  reduceProjCore idx reduced
++
+ def isLetFVar (lctx : LocalContext) (fvar : FVarId) : Bool :=
+   lctx.find? fvar matches some (.ldecl ..)
+
+@@ -365,9 +374,9 @@ def unfoldDefinition (env : Environment) (e : Expr) : Option Expr := do
+
+ def reduceNative (_env : Environment) (e : Expr) : Except Exception (Option Expr) := do
+   let .app f (.const c _) := e | return none
+-  if f == .const ``reduceBool [] then
++  if f == .const `Lean.reduceBool [] then
+     throw <| .other s!"lean4lean does not support 'reduceBool {c}' reduction"
+-  else if f == .const ``reduceNat [] then
++  else if f == .const `Lean.reduceNat [] then
+     throw <| .other s!"lean4lean does not support 'reduceNat {c}' reduction"
+   return none
+
+@@ -392,7 +401,6 @@ def reduceBinNatPred (f : Nat → Nat → Bool) (a b : Expr) : RecM (Option Expr
    return toExpr <| f v1 v2
 
  def reduceNat (e : Expr) : RecM (Option Expr) := do
@@ -685,3 +1046,53 @@ index 1522f17..92d2d0b 100644
    let nargs := e.getAppNumArgs
    if nargs == 1 then
      let f := e.appFn!
+@@ -630,10 +638,28 @@ def lazyDeltaReduction (tn sn : Expr) : RecM ReductionStatus := loop tn sn 1000
+     | .continue tn sn => loop tn sn fuel
+     | r => return r
+
++/-- Compare selected fields after lazy unfolding, as the current native kernel
++  does. The enclosing structures need not themselves be definitionally equal. -/
++def lazyDeltaProjReduction (t s : Expr) (idx : Nat) : RecM Bool := do
++  let finish t s := do
++    if let some tf ← reduceProjCore idx t then
++      if let some sf ← reduceProjCore idx s then
++        return ← isDefEqCore tf sf
++    isDefEqCore t s
++  let rec loop t s : Nat → RecM Bool
++    | 0 => throw .deterministicTimeout
++    | fuel + 1 => do
++      match ← lazyDeltaReductionStep t s with
++      | .continue t s => loop t s fuel
++      | .bool true => return true
++      | .bool false => finish t s
++      | .unknown t s => finish t s
++  loop t s 1000
++
+ def tryStringLitExpansionCore (t s : Expr) : RecM LBool := do
+   let .lit (.strVal st) := t | return .undef
+-  let .app sf _ := s | return .undef
+-  unless sf == .const ``String.mk [] do return .undef
++  unless s.getAppFn.isConstOf ``String.ofList ||
++      s.getAppFn.isConstOf ``String.ofByteArray do return .undef
+   toLBoolM <| isDefEqCore (.strLitToConstructor st) s
+
+ def tryStringLitExpansion (t s : Expr) : RecM LBool := do
+@@ -677,7 +703,7 @@ def isDefEqCore' (t s : Expr) : RecM Bool := do
+     if tf == sf && Level.isEquivList tl sl then return true
+   | .fvar tv, .fvar sv => if tv == sv then return true
+   | .proj _ ti te, .proj _ si se =>
+-    if ti == si then if ← isDefEq te se then return true
++    if ti == si then if ← lazyDeltaProjReduction te se ti then return true
+   | _, _ => pure ()
+
+   let tnn ← whnfCore tn
+@@ -709,7 +735,8 @@ def Methods.withFuel : Nat → Methods
+       whnf := fun e => whnf' e (withFuel n)
+       inferType := fun e i => inferType' e i (withFuel n) }
+
+-def RecM.run (x : RecM α) : M α := x (Methods.withFuel 1000)
++def RecM.run (x : RecM α) : M α := do
++  x (Methods.withFuel (← readThe Context).recDepth)
+
+ def RecM.runTermElab (x : RecM α) (safety := DefinitionSafety.safe) : Elab.Term.TermElabM α :=
+   x.run.runTermElab safety

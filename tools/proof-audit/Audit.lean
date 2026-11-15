@@ -87,6 +87,15 @@ def sameInfo (left right : ConstantInfo) : Bool :=
       | _, _ => false
   | _, _ => false
 
+/-- Toolchain modules may realize the same theorem with different proof bodies.
+Package shadowing is rejected from raw module entries before this comparison;
+only trusted theorem headers may vary in their proof, and replay uses the
+independently imported base. Package declarations retain exact comparisons. -/
+def sameTrustedInfo (left right : ConstantInfo) : Bool :=
+  match left, right with
+  | .thmInfo a, .thmInfo b => a.toConstantVal == b.toConstantVal && a.all == b.all
+  | _, _ => sameInfo left right
+
 def modulePath (name : Name) : IO System.FilePath := do
   unless validName name.toString do fail s!"unsupported imported module name: {name}"
   IO.FS.realPath (← findOLean name)
@@ -153,7 +162,7 @@ def isTodo (name : Name) : M Bool := do
   return false
 
 def addChecked (declaration : Declaration) : M Unit := do
-  match (← get).env.addDeclCore 0 declaration none with
+  match (← get).env.addDeclCore 0 0 declaration none with
   | .ok env => modify fun state => { state with env }
   | .error error =>
     throw <| IO.userError <| (← error.toMessageData {} |>.toString)
@@ -280,9 +289,17 @@ def audit (request : Request) : IO Json := do
 
   -- Replay only package declarations. Toolchain imports are an explicit trust
   -- base, loaded independently with the artifact root absent from the search path.
-  trustedModules := trustedModules.insert `Lean |>.insert `Std |>.insert `Lean.Replay
+  -- Import the package's direct toolchain dependencies. Promoting every
+  -- transitive module to a direct import duplicates private realizations and
+  -- wastes memory in Lean 4.35; the normal loader supplies the full closure.
+  let mut trustedImports : NameSet := {}
+  for name in imported.header.moduleNames, data in imported.header.moduleData do
+    if targetModules.contains name then
+      for dependency in data.imports do
+        if trustedModules.contains dependency.module then
+          trustedImports := trustedImports.insert dependency.module
   searchPathRef.set [library]
-  let base ← load trustedModules.toArray
+  let base ← load trustedImports.toArray
   for name in base.header.moduleNames do
     unless within library (← modulePath name) do
       fail s!"trusted import resolved outside the toolchain: {name}"
@@ -298,7 +315,7 @@ def audit (request : Request) : IO Json := do
   let mut additions : Std.HashMap Name ConstantInfo := {}
   for (name, info) in imported.constants.toList do
     if let some trusted := base.find? name then
-      unless sameInfo trusted info do
+      unless sameTrustedInfo trusted info do
         fail s!"trusted declaration changed in imported environment: {name}"
     else
       if info.isUnsafe || info.isPartial then

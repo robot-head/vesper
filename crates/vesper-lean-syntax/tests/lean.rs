@@ -65,14 +65,14 @@ fn lean(module: Module) -> Option<String> {
             if std::env::var_os("VESPER_LEAN").is_none()
                 && error.kind() == std::io::ErrorKind::NotFound =>
         {
-            eprintln!("Lean test skipped: {error}; set VESPER_LEAN to pinned Lean 4.24.0");
+            eprintln!("Lean test skipped: {error}; set VESPER_LEAN to pinned Lean 4.35.0");
             return None;
         }
         Err(error) => panic!("configured Lean failed: {error}"),
     };
     assert!(version.status.success());
     assert!(
-        String::from_utf8_lossy(&version.stdout).contains("version 4.24.0"),
+        String::from_utf8_lossy(&version.stdout).contains("version 4.35.0"),
         "use the pinned toolchain"
     );
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -214,7 +214,13 @@ fn strings_and_chars_roundtrip_control_unicode_quotes_and_injection_text() {
         "List.map",
         vec![r("Char.toNat"), app("String.toList", vec![literal.clone()])],
     );
-    let mut declarations = vec![check_eq(actual, expected)];
+    let mut declarations = vec![
+        Declaration::SetOption {
+            option: LeanOption::MaxRecDepth,
+            value: OptionValue::Nat(4096),
+        },
+        check_eq(actual, expected),
+    ];
     for c in [
         '\0', '\u{8}', '\u{c}', '\n', '\r', '\t', '\'', '\\', 'λ', '😀',
     ] {
@@ -703,7 +709,7 @@ fn cps_monad_effect_class_and_lifting_instances_execute() {
             "Effect_Fail",
             vec![r("E"), app("HandlerCPS", vec![r("S"), r("O"), r("m")])],
         ),
-        kind: DefinitionKind::Def,
+        kind: DefinitionKind::Abbrev,
         body: Term::Record {
             fields: vec![(
                 id("raise"),
@@ -962,12 +968,13 @@ fn signed_patterns_records_empty_dictionaries_and_fixed_options_compile() {
         ),
         Declaration::Type(empty),
     ];
-    declarations.push(def(
-        "dictionary",
-        vec![],
-        r("NoOps"),
-        Term::Record { fields: vec![] },
-    ));
+    declarations.push(Declaration::Definition(Definition {
+        name: name("dictionary"),
+        binders: vec![],
+        result: r("NoOps"),
+        body: Term::Record { fields: vec![] },
+        kind: DefinitionKind::Abbrev,
+    }));
     declarations.push(Declaration::Eval(Term::Ascribe {
         value: Box::new(app(
             "Id.run",
