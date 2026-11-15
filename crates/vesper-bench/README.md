@@ -139,3 +139,9 @@ Its null interpretation requires independent, equiprobable signs conditional
 on the observed nonzero magnitudes and zero pattern. The API does not establish
 these assumptions or measurement provenance; it does not compute a confidence
 interval or operate the existing regression gate.
+
+`signed_rank_exact_paired_samples` accepts the existing `PairedSample` totals
+directly and ranks candidate-minus-baseline differences per operation as exact
+rational values. Equivalent fractions tie without rounding. It uses the same
+zero convention and statistical assumptions; callers must establish common
+units and provenance.
