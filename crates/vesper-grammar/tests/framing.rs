@@ -508,3 +508,152 @@ fn capnp_struct_pointer_matches_small_word_index_oracle() {
         }
     }
 }
+
+#[test]
+fn capnp_local_primitive_lists_borrow_logical_bytes_and_check_padding() {
+    use vesper_grammar::capnp::{self, ListKind, PointerError};
+    fn raw(offset: i32, size: u64, count: u32) -> u64 {
+        1 | (u64::from((offset as u32) & 0x3fff_ffff) << 2)
+            | (size << 32)
+            | (u64::from(count) << 35)
+    }
+    let kinds = [
+        ListKind::Void,
+        ListKind::Bit,
+        ListKind::Byte,
+        ListKind::TwoBytes,
+        ListKind::FourBytes,
+        ListKind::EightBytes,
+        ListKind::Pointer,
+    ];
+    for (code, (kind, bits)) in kinds
+        .into_iter()
+        .zip([0u64, 1, 8, 16, 32, 64, 64])
+        .enumerate()
+    {
+        let mut segment = [0xa5; 80];
+        segment[..8].copy_from_slice(&raw(0, code as u64, 9).to_le_bytes());
+        let view = capnp::local_list_pointer(&segment, 0).unwrap().unwrap();
+        assert_eq!(view.kind, kind);
+        assert_eq!(view.element_count, 9);
+        let logical = (9 * bits).div_ceil(8) as usize;
+        assert_eq!(view.data, &segment[8..8 + logical]);
+        assert_eq!(view.data.as_ptr(), segment[8..].as_ptr());
+    }
+    let mut segment = [0u8; 16];
+    segment[..8].copy_from_slice(&raw(0, 2, 9).to_le_bytes());
+    assert_eq!(
+        capnp::local_list_pointer(&segment, 0),
+        Err(PointerError::TargetOutOfBounds)
+    );
+    // The payload starts before the pointer at word two.
+    let mut backward = [0u8; 24];
+    backward[..8].copy_from_slice(b"backward");
+    backward[16..].copy_from_slice(&raw(-3, 2, 8).to_le_bytes());
+    assert_eq!(
+        capnp::local_list_pointer(&backward, 2)
+            .unwrap()
+            .unwrap()
+            .data,
+        b"backward"
+    );
+    let mut framed = vec![0, 0, 0, 0, 3, 0, 0, 0];
+    framed.extend_from_slice(&backward);
+    // Root word is the first segment word, not the later list pointer.
+    assert_eq!(
+        capnp::parse_exact(&framed, capnp::Limits::default())
+            .unwrap()
+            .root_list(),
+        Err(PointerError::UnsupportedKind(2))
+    );
+    let mut root = vec![0, 0, 0, 0, 2, 0, 0, 0];
+    root.extend_from_slice(&raw(0, 2, 3).to_le_bytes());
+    root.extend_from_slice(b"abc\0\0\0\0\0");
+    let view = capnp::parse_exact(&root, capnp::Limits::default())
+        .unwrap()
+        .root_list()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (view.kind, view.element_count, view.data),
+        (ListKind::Byte, 3, &b"abc"[..])
+    );
+}
+
+#[test]
+fn capnp_local_list_rejects_unhandled_kinds_and_invalid_ranges() {
+    use vesper_grammar::capnp::{self, ListKind, PointerError};
+    fn raw(offset: i32, size: u64, count: u32) -> u64 {
+        1 | (u64::from((offset as u32) & 0x3fff_ffff) << 2)
+            | (size << 32)
+            | (u64::from(count) << 35)
+    }
+    assert_eq!(capnp::local_list_pointer(&[0; 8], 0), Ok(None));
+    let empty = raw(0, 2, 0).to_le_bytes();
+    let view = capnp::local_list_pointer(&empty, 0).unwrap().unwrap();
+    assert_eq!(
+        (view.kind, view.element_count, view.data),
+        (ListKind::Byte, 0, &b""[..])
+    );
+    assert_eq!(
+        capnp::local_list_pointer(&raw(0, 7, 0).to_le_bytes(), 0),
+        Err(PointerError::UnsupportedCompositeList)
+    );
+    for kind in [2u8, 3] {
+        assert_eq!(
+            capnp::local_list_pointer(&u64::from(kind).to_le_bytes(), 0),
+            Err(PointerError::UnsupportedKind(kind))
+        );
+    }
+    assert_eq!(
+        capnp::local_list_pointer(&raw(-3, 2, 1).to_le_bytes(), 0),
+        Err(PointerError::TargetOutOfBounds)
+    );
+    assert_eq!(
+        capnp::local_list_pointer(&[0; 7], 0),
+        Err(PointerError::MisalignedSegment)
+    );
+    let huge = capnp::local_list_pointer(&raw(0, 5, 0x1fff_ffff).to_le_bytes(), 0).unwrap_err();
+    assert!(matches!(
+        huge,
+        PointerError::TargetOutOfBounds | PointerError::Overflow
+    ));
+    let huge_void = raw(0, 0, 0x1fff_ffff).to_le_bytes();
+    let view = capnp::local_list_pointer(&huge_void, 0).unwrap().unwrap();
+    assert_eq!(
+        (view.kind, view.element_count, view.data),
+        (ListKind::Void, 0x1fff_ffff, &b""[..])
+    );
+}
+
+#[test]
+fn capnp_primitive_list_lengths_match_small_word_oracle() {
+    use vesper_grammar::capnp::{self, PointerError};
+    for at in 0..8usize {
+        for offset in -10i32..=10 {
+            for size in 0..=6u64 {
+                for count in 0..=17u32 {
+                    let raw = 1
+                        | (u64::from((offset as u32) & 0x3fff_ffff) << 2)
+                        | (size << 32)
+                        | (u64::from(count) << 35);
+                    let mut segment = [0x5a; 64];
+                    segment[at * 8..at * 8 + 8].copy_from_slice(&raw.to_le_bytes());
+                    let bits = [0u64, 1, 8, 16, 32, 64, 64][size as usize] * u64::from(count);
+                    let logical = bits.div_ceil(8) as usize;
+                    let words = bits.div_ceil(64) as i64;
+                    let target = at as i64 + 1 + i64::from(offset);
+                    let actual = capnp::local_list_pointer(&segment, at);
+                    if target < 0 || target + words > 8 {
+                        assert_eq!(actual, Err(PointerError::TargetOutOfBounds));
+                    } else {
+                        let view = actual.unwrap().unwrap();
+                        let start = target as usize * 8;
+                        assert_eq!(view.element_count, count);
+                        assert_eq!(view.data, &segment[start..start + logical]);
+                    }
+                }
+            }
+        }
+    }
+}
