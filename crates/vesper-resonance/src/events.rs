@@ -177,10 +177,116 @@ impl ParamRamp {
     }
 }
 
+/// Lanes per SIMD parameter-ramp tile (matches the 16-voice SVF tile).
+pub const RAMP_LANES: usize = 16;
+
+/// Sixteen independent linear parameter ramps packed in structure-of-arrays
+/// layout (64-byte aligned, one cache line per vector field) so SIMD paths can
+/// step all 16 lanes in parallel, bit-identical to [`ParamRamp::next_value`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C, align(64))]
+pub struct RampTile {
+    /// Current value of each lane.
+    pub current: [f32; RAMP_LANES],
+    /// Target value of each lane.
+    pub target: [f32; RAMP_LANES],
+    /// Per-sample linear step of each lane.
+    pub step: [f32; RAMP_LANES],
+    /// Remaining samples in each lane's active ramp.
+    pub remaining: [u32; RAMP_LANES],
+}
+
+impl RampTile {
+    /// Sixteen resting ramps at `value`.
+    pub const fn splat(value: f32) -> Self {
+        RampTile {
+            current: [value; RAMP_LANES],
+            target: [value; RAMP_LANES],
+            step: [0.0; RAMP_LANES],
+            remaining: [0; RAMP_LANES],
+        }
+    }
+
+    /// Configure `lane` to ramp from its current value to `target` over
+    /// `ramp_samples` (`0` jumps immediately), matching [`ParamRamp::set`].
+    pub fn set_lane(&mut self, lane: usize, target: f32, ramp_samples: u32) {
+        self.target[lane] = target;
+        if ramp_samples == 0 {
+            self.current[lane] = target;
+            self.step[lane] = 0.0;
+            self.remaining[lane] = 0;
+        } else {
+            self.step[lane] = (target - self.current[lane]) / ramp_samples as f32;
+            self.remaining[lane] = ramp_samples;
+        }
+    }
+
+    /// Snapshot `lane` as a scalar [`ParamRamp`].
+    pub fn lane(&self, lane: usize) -> ParamRamp {
+        ParamRamp {
+            current: self.current[lane],
+            target: self.target[lane],
+            step: self.step[lane],
+            remaining: self.remaining[lane],
+        }
+    }
+
+    /// Overwrite `lane` from a scalar [`ParamRamp`].
+    pub fn set_lane_ramp(&mut self, lane: usize, ramp: ParamRamp) {
+        self.current[lane] = ramp.current;
+        self.target[lane] = ramp.target;
+        self.step[lane] = ramp.step;
+        self.remaining[lane] = ramp.remaining;
+    }
+
+    /// Advance one `lane` by one sample in scalar form, matching
+    /// [`ParamRamp::next_value`].
+    #[inline]
+    pub fn advance_lane_scalar(&mut self, lane: usize) -> f32 {
+        let rem = self.remaining[lane];
+        if rem > 0 {
+            let next_rem = rem - 1;
+            self.remaining[lane] = next_rem;
+            self.current[lane] = if next_rem == 0 {
+                self.target[lane]
+            } else {
+                self.current[lane] + self.step[lane]
+            };
+        }
+        self.current[lane]
+    }
+
+    /// Advance all 16 lanes by one sample in scalar form.
+    pub fn scalar_next(&mut self) {
+        for lane in 0..RAMP_LANES {
+            self.advance_lane_scalar(lane);
+        }
+    }
+}
+
 /// Parameter lookup for event application.
 pub trait ParamTable {
-    /// The ramp addressed by an event, or `None` if it does not exist.
-    fn ramp(&mut self, node_id: u16, param_id: u32) -> Option<&mut ParamRamp>;
+    /// The scalar ramp addressed by an event, or `None` if addressed via SoA
+    /// methods ([`ParamTable::has_ramp`] / [`ParamTable::set_ramp`]) or missing.
+    fn ramp(&mut self, _node_id: u16, _param_id: u32) -> Option<&mut ParamRamp> {
+        None
+    }
+
+    /// Whether `(node_id, param_id)` addresses a valid parameter ramp.
+    fn has_ramp(&mut self, node_id: u16, param_id: u32) -> bool {
+        self.ramp(node_id, param_id).is_some()
+    }
+
+    /// Start a ramp for `(node_id, param_id)` when it exists. Returns `false`
+    /// when unknown.
+    fn set_ramp(&mut self, node_id: u16, param_id: u32, target: f32, ramp_samples: u32) -> bool {
+        if let Some(r) = self.ramp(node_id, param_id) {
+            r.set(target, ramp_samples);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Validate `events` for a block of `block` samples against `params`.
@@ -204,7 +310,7 @@ pub fn validate_events<P: ParamTable>(
             return Err(EventError::NonFiniteTarget);
         }
         prev = ev.sample_offset;
-        if params.ramp(ev.node_id, ev.param_id).is_none() {
+        if !params.has_ramp(ev.node_id, ev.param_id) {
             return Err(EventError::UnknownParam {
                 node_id: ev.node_id,
                 param_id: ev.param_id,
@@ -235,9 +341,7 @@ where
     while cursor < block {
         while k < events.len() && usize::from(events[k].sample_offset) == cursor {
             let ev = events[k];
-            if let Some(r) = params.ramp(ev.node_id, ev.param_id) {
-                r.set(ev.target, ev.ramp_samples);
-            }
+            let _ = params.set_ramp(ev.node_id, ev.param_id, ev.target, ev.ramp_samples);
             k += 1;
         }
         let end = events

@@ -1,0 +1,17 @@
+linear struct Ticket {
+    id: i64
+}
+fn consume(sink ticket: Ticket) -> i64 {
+    let Ticket {
+        id
+    }
+    = ticket;
+    id
+}
+fn main() -> i64 {
+    consume(
+        sink Ticket {
+            id: 7
+        }
+    )
+}

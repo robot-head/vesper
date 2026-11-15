@@ -3,7 +3,7 @@
 use vesper_resonance::pdc::{
     CompiledGraph, DspProcessor, Input, Inputs, MixGain, NodeId, NodeSpec,
 };
-use vesper_resonance::slab::{SlabError, TILE_BYTES, TILE_SAMPLES, TiledSlab};
+use vesper_resonance::slab::{DelaySlab, SlabError, TILE_BYTES, TILE_SAMPLES, TiledSlab};
 
 #[test]
 fn every_buffer_starts_on_its_own_cache_line() {
@@ -131,4 +131,139 @@ fn clones_are_realigned_and_hold_the_same_samples() {
             assert_eq!(c.buffer(i).unwrap(), slab.buffer(i).unwrap());
         }
     }
+}
+
+#[test]
+fn every_delay_line_starts_on_its_own_cache_line_in_one_allocation() {
+    let delays = [0u32, 1, 7, 16, 37, 64, 129];
+    for block in [1usize, 7, 16, 64] {
+        let slab = DelaySlab::new(&delays, block).unwrap();
+        assert_eq!(slab.lines(), delays.len());
+        assert_eq!(slab.block(), block);
+        let addrs: Vec<usize> = slab.line_addresses().collect();
+        assert_eq!(addrs.len(), delays.len());
+        let mut expected_total_stride = 0usize;
+        for (i, (&addr, &delay)) in addrs.iter().zip(&delays).enumerate() {
+            assert_eq!(addr % TILE_BYTES, 0, "line {i} misaligned");
+            assert_eq!(slab.line_delay(i), Some(delay as usize));
+            let stride = slab.line_stride(i).unwrap();
+            assert_eq!(stride % TILE_SAMPLES, 0);
+            assert!(stride >= delay as usize + block);
+            expected_total_stride += stride;
+            if i + 1 < addrs.len() {
+                assert_eq!(addrs[i + 1] - addr, stride * 4);
+            }
+        }
+        assert_eq!(slab.working_set_bytes(), expected_total_stride * 4);
+    }
+}
+
+#[test]
+fn delay_slab_read_write_wraps_and_clones_cleanly() {
+    let delays = [0u32, 3, 16, 75];
+    let block = 17usize;
+    let mut slab = DelaySlab::new(&delays, block).unwrap();
+    let mut out = vec![0.0f32; block];
+    let mut clone_opt: Option<DelaySlab> = None;
+
+    for blk in 0..12usize {
+        if blk == 5 {
+            clone_opt = Some(slab.clone());
+        }
+        let input: Vec<f32> = (0..block).map(|k| (blk * block + k + 1) as f32).collect();
+        for (line_idx, &delay) in delays.iter().enumerate() {
+            slab.write(line_idx, &input);
+            slab.read(line_idx, &mut out);
+            for (k, &actual) in out.iter().enumerate() {
+                let t = blk * block + k;
+                let expected = if t >= delay as usize {
+                    (t - delay as usize + 1) as f32
+                } else {
+                    0.0
+                };
+                assert_eq!(actual, expected, "line {line_idx} delay {delay} sample {t}");
+            }
+        }
+        slab.advance_all(block);
+    }
+
+    let mut cloned = clone_opt.unwrap();
+    assert!(cloned.line_addresses().all(|a| a % TILE_BYTES == 0));
+    let next_input: Vec<f32> = (0..block).map(|k| (5 * block + k + 1) as f32).collect();
+    for (line_idx, &delay) in delays.iter().enumerate() {
+        cloned.write(line_idx, &next_input);
+        cloned.read(line_idx, &mut out);
+        for (k, &actual) in out.iter().enumerate() {
+            let t = 5 * block + k;
+            let expected = if t >= delay as usize {
+                (t - delay as usize + 1) as f32
+            } else {
+                0.0
+            };
+            assert_eq!(actual, expected, "cloned line {line_idx} sample {t}");
+        }
+    }
+}
+
+#[test]
+fn oversized_and_invalid_delay_slabs_are_typed_errors() {
+    assert!(matches!(
+        DelaySlab::new(&[10], 0),
+        Err(SlabError::TooLarge {
+            buffers: 1,
+            block: 0
+        })
+    ));
+    assert!(matches!(
+        DelaySlab::new(&[100], usize::MAX),
+        Err(SlabError::TooLarge { .. })
+    ));
+    assert!(matches!(
+        DelaySlab::new(&[100], (isize::MAX as usize / 4) + 1),
+        Err(SlabError::TooLarge { .. })
+    ));
+    let empty = DelaySlab::new(&[], 64).unwrap();
+    assert_eq!(empty.lines(), 0);
+    assert_eq!(empty.working_set_bytes(), 0);
+    assert!(empty.fits(0));
+}
+
+#[test]
+fn compiled_graph_delay_lines_pack_into_delay_slab() {
+    let block = 32;
+    let nodes = vec![
+        NodeSpec {
+            id: NodeId(0),
+            latency: 0,
+            inputs: vec![],
+        },
+        NodeSpec {
+            id: NodeId(1),
+            latency: 19,
+            inputs: vec![Input::Forward(NodeId(0))],
+        },
+        NodeSpec {
+            id: NodeId(2),
+            latency: 0,
+            inputs: vec![
+                Input::Forward(NodeId(0)),
+                Input::Forward(NodeId(1)),
+                Input::Feedback {
+                    from: NodeId(2),
+                    delay: 48,
+                },
+            ],
+        },
+    ];
+    let procs: Vec<Box<dyn DspProcessor>> = vec![
+        Box::new(Tone(1.0)),
+        Box::new(MixGain(1.0)),
+        Box::new(MixGain(0.5)),
+    ];
+    let g = CompiledGraph::new(&nodes, procs, block).unwrap();
+    let dslab = g.delay_slab();
+    assert_eq!(dslab.lines(), 2);
+    assert_eq!(dslab.block(), block);
+    assert!(dslab.line_addresses().all(|a| a % TILE_BYTES == 0));
+    assert!(dslab.fits(32 * 1024));
 }

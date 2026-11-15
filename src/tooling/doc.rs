@@ -426,10 +426,58 @@ pub fn document_with_analysis(
     source: &str,
     limits: Limits,
 ) -> Result<(Document, Analysis), String> {
+    let (document, analysis, _) = document_with_analysis_and_wcsd(source, limits, None)?;
+    Ok((document, analysis))
+}
+
+/// [`document_with_analysis`], plus optional Cranelift WCSD stack bounds for
+/// every documented closed-row `eff [Realtime]` function when `wcsd_target` is
+/// `Some(target)`.
+pub fn document_with_analysis_and_wcsd(
+    source: &str,
+    limits: Limits,
+    wcsd_target: Option<Option<&str>>,
+) -> Result<
+    (
+        Document,
+        Analysis,
+        BTreeMap<String, vesper_doc::capabilities::WcsdStackBound>,
+    ),
+    String,
+> {
+    if let Some(target) = wcsd_target {
+        crate::native_verifiers::validate_wcsd_target(target)?;
+    }
     let (parsed, checked) = check_source(source, limits)?;
     let document = build_document(source, &parsed.module, &checked.world, limits)?;
     let analysis = analysis(&parsed.module, &checked.world, source, &document)?;
-    Ok((document, analysis))
+    let mut wcsd = BTreeMap::new();
+    if let Some(target) = wcsd_target {
+        let is_realtime = |f: &FunctionDoc| {
+            f.effects.tail.is_none() && f.effects.instances.iter().any(|e| e.name == "Realtime")
+        };
+        for f in &document.functions {
+            if is_realtime(f) {
+                let bound = crate::native_verifiers::measure_realtime_wcsd(
+                    &checked.world,
+                    &f.name,
+                    target,
+                )?;
+                wcsd.insert(f.name.clone(), bound);
+            }
+        }
+        for m in &analysis.impl_methods {
+            if is_realtime(&m.function) {
+                let bound = crate::native_verifiers::measure_realtime_wcsd(
+                    &checked.world,
+                    &m.function.name,
+                    target,
+                )?;
+                wcsd.insert(m.path(), bound);
+            }
+        }
+    }
+    Ok((document, analysis, wcsd))
 }
 
 fn check_source(source: &str, limits: Limits) -> Result<(parser::Parse, check::Checked), String> {
@@ -492,7 +540,7 @@ fn build_document(
     let limitations = vec![
         "Checked source metadata; proof badges come only from supplied proof-audit reports, otherwise unverified".into(),
         "Search matches generic functions by instantiation; row binders, open rows, unresolved and function-typed contracts are excluded".into(),
-        "Struct layouts describe the native eight-byte ABI; wire layouts come only from compiled Bridge declarations; no tiled layouts".into(),
+        "Struct layouts describe the native ABI (including tiled(N) AoSoA hot/cold slabs); wire layouts come only from compiled Bridge declarations".into(),
         "A terminal path is not an all-path ownership or termination proof".into(),
         "Local intra-doc links cover documented source declarations; package, generic, Self and trait-method links are unsupported".into(),
         "No doctest, JIT, WASM or semver-diff execution; .olean certificates are linked only from an explicit Loom store and prove content identity, not provenance".into(),

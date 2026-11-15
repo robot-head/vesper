@@ -798,6 +798,26 @@ impl IsaWalker<'_> {
                                 self.vector_width(shape, available, n, e.span.clone());
                             }
                         }
+                    } else if n == "TiledSeq::load_tile_vec" {
+                        let explicit_profile = match types.as_slice() {
+                            [_, Type::Named(p, pa), _] | [Type::Named(p, pa), _]
+                                if pa.is_empty() =>
+                            {
+                                Profile::from_name(p)
+                            }
+                            _ => None,
+                        };
+                        if let Some(p) = explicit_profile {
+                            self.require(
+                                p,
+                                available,
+                                format!("calling 'load_tile_vec[{}, ...]'", p.name()),
+                                e.span.clone(),
+                            );
+                        }
+                        if let Some((_, shape)) = shape_of(&self.ty(e)) {
+                            self.vector_width(shape, available, "load_tile_vec", e.span.clone());
+                        }
                     } else if let Some(f) = self.world.functions.get(n) {
                         for q in row_profiles(&f.effects) {
                             self.require(q, available, format!("calling '{n}'"), e.span.clone());
@@ -811,15 +831,38 @@ impl IsaWalker<'_> {
                     // An inherent method `receiver.method(..)` resolves
                     // through the receiver's type, like the checker does.
                     if let ExprKind::Field(base, method) = &callee.kind {
-                        let name = format!("{}::{method}", self.ty(base).name());
-                        if let Some(f) = self.world.functions.get(&name) {
-                            for q in row_profiles(&f.effects) {
+                        if method == "load_tile_vec" && crate::tiled::is_seq_type(&self.ty(base)) {
+                            let explicit_profile = match types.as_slice() {
+                                [Type::Named(p, pa), _] if pa.is_empty() => Profile::from_name(p),
+                                _ => None,
+                            };
+                            if let Some(p) = explicit_profile {
                                 self.require(
-                                    q,
+                                    p,
                                     available,
-                                    format!("calling '{name}'"),
+                                    format!("calling 'load_tile_vec[{}, ...]'", p.name()),
                                     e.span.clone(),
                                 );
+                            }
+                            if let Some((_, shape)) = shape_of(&self.ty(e)) {
+                                self.vector_width(
+                                    shape,
+                                    available,
+                                    "load_tile_vec",
+                                    e.span.clone(),
+                                );
+                            }
+                        } else {
+                            let name = format!("{}::{method}", self.ty(base).name());
+                            if let Some(f) = self.world.functions.get(&name) {
+                                for q in row_profiles(&f.effects) {
+                                    self.require(
+                                        q,
+                                        available,
+                                        format!("calling '{name}'"),
+                                        e.span.clone(),
+                                    );
+                                }
                             }
                         }
                     }

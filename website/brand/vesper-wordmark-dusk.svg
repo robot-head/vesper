@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 140" width="520" height="140" fill="none">
+  <g transform="translate(12, 12) scale(0.453125)">
+    <polygon points="30,34 87,34 128,75 169,34 226,34 206,74 128,113 50,74" fill="#E2E8F5"/>
+    <polygon points="59.33,92.67 101,113.5 101,176" fill="#FFB454"/>
+    <polygon points="128,127 143,119.5 143,200 128,230 113,200 113,119.5" fill="#5CCFE6"/>
+    <polygon points="196.67,92.67 155,113.5 155,176" fill="#D2A6FF"/>
+  </g>
+  <text x="148" y="95" fill="#E2E8F5" font-family="'Space Grotesk', 'Inter', system-ui, sans-serif" font-size="84" font-weight="700" letter-spacing="-3">vesper</text>
+</svg>

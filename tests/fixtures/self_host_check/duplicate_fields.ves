@@ -1,0 +1,4 @@
+copy struct Pair {
+    x: i64,
+    x: i64
+}
