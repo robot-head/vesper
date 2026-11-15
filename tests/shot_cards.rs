@@ -458,3 +458,47 @@ fn cli_rejects_bad_arguments_and_directives() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn query_pins_report_only_unambiguous_actual_checker_diagnostics() {
+    let dir = temp_dir("diagnostic-query");
+    let source = dir.join("diagnostic.vsp");
+    let output = dir.join("diagnostic.svg");
+    std::fs::write(&source, "linear struct Tx {}\nfn bad(sink tx: Tx) eff [Fail[i64]] {\n    Fail::raise(1);\n  //^? author fallback\n    let Tx {} = tx;\n}\n").unwrap();
+    let report = shot_json(&source, &output, &["--no-cache"]);
+    assert_eq!(report["callouts"], 1);
+    let svg = std::fs::read_to_string(&output).unwrap();
+    assert!(svg.contains("E0402:"), "{svg}");
+    assert!(svg.contains("live linear binding introduced here"), "{svg}");
+    assert!(!svg.contains("author fallback"), "{svg}");
+
+    // `--verify` still refuses to render an invalid program.
+    let verify_out = dir.join("verify.svg");
+    let result = vesper(&[
+        source.as_os_str(),
+        "-o".as_ref(),
+        verify_out.as_os_str(),
+        "--verify".as_ref(),
+        "--no-cache".as_ref(),
+    ]);
+    assert!(!result.status.success());
+    assert!(!verify_out.exists());
+
+    // Two linear obligations yield two diagnostics on the same call; the
+    // query uses its author's fallback instead of picking one arbitrarily.
+    std::fs::write(&source, "linear struct Tx {}\nfn bad(sink tx: Tx, sink ty: Tx) eff [Fail[i64]] {\n    Fail::raise(1);\n  //^? ambiguous fallback\n    let Tx {} = tx;\n    let Tx {} = ty;\n}\n").unwrap();
+    shot_json(&source, &output, &["--no-cache"]);
+    let svg = std::fs::read_to_string(&output).unwrap();
+    assert!(svg.contains("ambiguous fallback"), "{svg}");
+    assert!(!svg.contains("E0402:"), "{svg}");
+
+    // A broad enclosing block diagnostic must not be attributed to an
+    // unrelated token. Author text still goes through SVG escaping.
+    std::fs::write(&source, "linear struct Tx {}\nfn bad(sink tx: Tx) eff [Fail[i64]] {\n    let z = 1;\n  //^? fallback <tag> & text\n    Fail::raise(z);\n    let Tx {} = tx;\n}\n").unwrap();
+    shot_json(&source, &output, &["--no-cache"]);
+    let svg = std::fs::read_to_string(&output).unwrap();
+    assert!(svg.contains("fallback &lt;tag&gt; &amp; text"), "{svg}");
+    assert!(!svg.contains("E0402:"), "{svg}");
+    assert!(!svg.contains("E0302:"), "{svg}");
+    std::fs::remove_dir_all(dir).unwrap();
+}
