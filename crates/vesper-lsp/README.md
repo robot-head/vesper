@@ -96,15 +96,14 @@ bounded by document count and per-index caps. Vec/String capacities use fallible
 reserve; bounded Arc allocation follows standard Rust allocator behavior.
 
 Run `cargo test -p vesper-lsp`, `cargo clippy -p vesper-lsp --all-targets -- -D warnings`
-and `cargo run -p vesper-lsp --example protocol_documents` after workspace
-registration. The example self-checks real framing and a surrogate-pair edit.
+and `cargo run -p vesper-lsp --example protocol_documents`. The example self-checks real framing and a surrogate-pair edit.
 This host core adds no language-level linearity/Region guarantee, asynchronous
-cancellation, timeout, compiler feature or latency/RSS claim. The §21 daemon,
+cancellation, timeout, compiler feature or latency/RSS claim. The [manuscript §17](../../docs/manuscript/README.md) daemon,
 Salsa/PCG/completion/proof and server-routing work is outside this crate's scope.
 
 ## Lens presentation primitives
 
-`lens` holds the root-free parts of Vesper Lens (§21). `rank_methods` orders
+`lens` holds the root-free parts of Vesper Lens (§17). `rank_methods` orders
 caller-supplied member candidates: `sink self` methods first when the receiver
 is a live linear obligation, then ordinary methods, then methods whose
 abortable (non-linear) effect would carry a live linear value across a

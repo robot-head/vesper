@@ -1,5 +1,9 @@
 # Source tooling implementation contracts
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Baseline: published main `ba0fadedf91be3bfd059362dd4fe14cc2f2dc51a`
 ([PR #61](https://github.com/robot-head/vesper/pull/61)). The recorded design is
 sections 1–41 plus Appendix A. The coordinator checked open issues/PRs and posted

@@ -1,5 +1,9 @@
 # Reference resource observation provider (#317)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Frozen against main `1d63dd0e84fa77e651fc0f9c66cc7df65c8c5dd4` and the
 42-section specification snapshot
 `8df79941a11ca2d777d8d5c5e7f4db26ef1a57f06babe2e71f3951a1f676883d`.

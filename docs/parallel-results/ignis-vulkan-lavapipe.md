@@ -1,5 +1,9 @@
 # Ignis: a Vulkan 1.3 backend run on Mesa lavapipe (wave seven, lane 32)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #356. Base: `283c811` (descendant of the required baseline `c025b9a`).
 Branch: `claude/project-thread-genkht`. Design section: §19 (§19.9 Vulkan
 lowering). Software stand-in chosen by the owner on 2026-11-14: Mesa lavapipe

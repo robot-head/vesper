@@ -1,5 +1,9 @@
 # Issue #81: pure checked-source tooling for editor consumers
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented from `593bbc311a1c0693aa08732b40cec813e2cda436` on
 `editor41/tooling` after reading issue #81, `docs/rfcs/editor41-contracts.md`,
 refreshed specification §21 and current source adapters. This is a bounded

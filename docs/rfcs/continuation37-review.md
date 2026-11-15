@@ -1,5 +1,9 @@
 # Review of sections 38–41 and Appendix A
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 A fresh native Google Docs read returned revision
 `AHj4eMRg35hVwN07Ww4ah8QktN80KS_xgnyZypmazCIeUl-0B2N9N-ucp4P_nKYdwQMnGLpzGw3DjIaQE3liPaE18kxN9vW5Y-9PERTVdhw`,
 modified `2026-11-12T09:18:30.204Z`. The full snapshot has 41 numbered

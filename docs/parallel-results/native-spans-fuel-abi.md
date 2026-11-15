@@ -1,5 +1,9 @@
 # Native spans, fuel and the capability-passing ABI (wave seven, lane 23)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #346 (§7 Stage 5, §29). Branch `claude/project-thread-dq8122`, based
 on `main` at `283c811` (a descendant of the required baseline `c025b9a`).
 

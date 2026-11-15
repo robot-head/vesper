@@ -1,5 +1,9 @@
 # Foundation packet resource backport (#537)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 At parent `d7663dcfbf71dcef1f5e969b6e49ebd7c5432081`, this branch has
 one fixed proof packet, `test/lean4lean_foundations42`. Its existing
 `test_tags` interface now requests `resources:memory:5120` and

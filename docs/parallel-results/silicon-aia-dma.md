@@ -1,5 +1,9 @@
 # Silicon AIA, PLIC edges, dma-ranges and the JH7100 cache flush (wave eight, lane 26)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim issue: #475. Base: `origin/main` at `1094e64`. Paths edited:
 `crates/vesper-silicon/**` and this report. `lean/SiliconFrames.lean` is
 unchanged. No root patch and no new dependencies.

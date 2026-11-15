@@ -8,8 +8,7 @@
 //!   locks, blocking syscalls, async, I/O, unwinding, ...), an unknown or
 //!   unresolved indirect callee, a loop the policy does not bound, recursion,
 //!   or a worst-case stack depth over its budget. It is a reachability
-//!   analysis over declared effects, not a callee-name allowlist
-//!   (`docs/rfcs/expansion-37-review.md`).
+//!   analysis over declared effects, not a callee-name allowlist.
 //! * [`clif`]: builds the same [`confine::CallGraph`] from real Cranelift
 //!   `ir::Function`s (calls, indirect calls, loops, stack slots) plus a
 //!   symbol-effect table, so integration can run the verifier on emitted code.

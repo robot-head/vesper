@@ -1,7 +1,11 @@
 # Section status at the start of wave eight
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Planning summary, 2026-11-14, against the design snapshot in
-[specification.txt](../specification.txt) (Google Doc revision modified
+the pre-manuscript design (Google Doc revision modified
 2026-11-13 04:46 UTC). It updates [wave-seven-review.md](wave-seven-review.md)
 from the "Remaining gaps" sections of the merged wave-seven reports in
 `docs/parallel-results/` and a section-by-section completion estimate (about

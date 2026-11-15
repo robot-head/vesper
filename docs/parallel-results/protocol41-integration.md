@@ -1,5 +1,9 @@
 # Canonical protocols, PMU windows and lint policy (#77)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 This batch follows main `965b600408d148b01559624914097477da6691ca` (PR #71).
 The coordinator checked the current issue board and actual file lists of every
 open external Warp PR before claiming #72–#77. External Warp #36–#45 remains

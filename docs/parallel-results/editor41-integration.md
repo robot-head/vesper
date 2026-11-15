@@ -1,5 +1,9 @@
 # Bounded editor integration (#79–#85)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 This batch implements a bounded synchronous editor slice of specification §21,
 using the production parser/checker over unsaved in-memory text. The live document
 metadata was rechecked at integration: 2026-11-12T09:18:30.204Z, matching the recorded

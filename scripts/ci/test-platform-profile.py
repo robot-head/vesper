@@ -394,6 +394,11 @@ def write_job_summary(summary):
 
 
 def main(argv=None):
+    # Windows redirected consoles can default to cp1252. A failed Lean test
+    # may print Unicode theorem/source text; preserve its original failure.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=["cargo", "bazel"], required=True)
     parser.add_argument("--profile", choices=["pr", "full"], required=True)

@@ -1,5 +1,9 @@
 # Kinetic joints, CCD, sleeping, articulated and soft bodies, rigid contact gradients (wave eight, lane 23)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #472. Prompt: `docs/agent-prompts/wave-eight/23-kinetic-joints-ccd.md`.
 Base: `origin/main` at 1094e649c95e4d81eef4e705d13882ab1339542d (a descendant of
 the required ea1ed29). Branch: `claude/project-thread-g8cswf`. Codex's PR #434

@@ -1,5 +1,9 @@
 # Completed handoff integration
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 All seven feature handoffs and the additional platform-CI branch are integrated into `main`. Each library is registered in root `members` and `default-members`; the native experiment is also a workspace member. Temporary nested lockfiles/workspaces were removed. The root `default-run = "vesper"` preserves plain `cargo run` now that the workspace has a second executable. The sandbox fixture guest remains a separate wasm workspace with committed binaries and its own lockfile.
 
 ## Review fixes
@@ -25,7 +29,7 @@ Windows CAS conditional code and tests also passed `cargo check -p vesper-loom-c
 
 ## Next integration work
 
-These delivered libraries do not complete the full expanded specification. The remaining boundaries are described in [implementation coverage](../implementation.md) and the [contract audit](../rfcs/parallel-contracts.md). The next useful independent work packages are:
+These delivered libraries do not complete the full expanded specification. The remaining boundaries are described in [implementation workflows](../README.md) and the [contract audit](../rfcs/parallel-contracts.md). The next useful independent work packages are:
 
 1. Migrate checked integer arithmetic atomically across checker, evaluator, optimizers, native and Lean backends, preserving the approved field-mode premise.
 2. Define source-to-native suspension metadata and lower a source linear effect through the pinned-stack ABI; preserve original-I/O-completion ownership during cancellation.

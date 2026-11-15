@@ -1,5 +1,9 @@
 # Arithmetic oracle runner #275: coordinator validation
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 The implementation follows frozen contract `cae1bc5b50ebe7cd448fd9a18ff87f9f4c1ec6c2`
 and the subsequently published carrier and launcher/evaluator amendments.
 Owned source checkpoints are `95dc143` (shared DTOs), `c7be985` (bounded framing

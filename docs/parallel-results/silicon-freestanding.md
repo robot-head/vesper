@@ -1,5 +1,9 @@
 # Wave seven, lane 27: freestanding RISC-V and AArch64 images (§26, §7)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: issue #350. Branch `claude/project-thread-trt7k5`, based on
 `283c8115d2203232d0e9b473cc4bb0312c3a8509` (origin/main at start, a
 descendant of the required baseline `c025b9a`).

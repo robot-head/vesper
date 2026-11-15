@@ -1,5 +1,9 @@
 # Strict bounded DER profile (#73)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented claimed [issue #73](https://github.com/robot-head/vesper/issues/73)
 on `protocol41/der`, from `9eeaecf`. Read the issue,
 `docs/rfcs/protocol41-contracts.md`, complete §38 and current Grammar APIs.

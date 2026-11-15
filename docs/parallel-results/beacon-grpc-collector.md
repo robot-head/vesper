@@ -1,5 +1,9 @@
 # Beacon: tonic gRPC transport and OpenTelemetry Collector interop (wave seven, lane 1)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim #324. Branch `claude/project-thread-ey6nt5`, based on main at
 `283c8115d2203232d0e9b473cc4bb0312c3a8509`. Paths: `crates/vesper-beacon/**`,
 `crates/vesper-beacon-arrow/**`, this report, and a root patch (Cargo.lock

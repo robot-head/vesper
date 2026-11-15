@@ -1,11 +1,19 @@
 # Execute source effects through SimPulse
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../../manuscript/README.md) is the sole specification; use the
+> [section map](../../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Suggested branch: next/source-simulation.
 
 ~~~text
+Specification authority: docs/manuscript/content.typ is the sole specification.
+Earlier section numbers below use the legacy numbering; locate their manuscript
+chapters with docs/section-map.md before implementing requirements.
+
 You are implementing one bounded milestone in https://github.com/robot-head/vesper.
 
-Start from a fresh fetch of origin/main in a NEW cloud checkout or dedicated git worktree. Minimum baseline: 0e6caf9 (all first-round handoffs integrated). Record the actual base SHA. Do not share a checkout or branch with another agent. Read docs/specification.txt, docs/implementation.md, docs/parallel-work.md, docs/parallel-results/handoff-integration.md, and docs/rfcs/parallel-contracts.md before editing.
+Start from a fresh fetch of origin/main in a NEW cloud checkout or dedicated git worktree. Minimum baseline: 0e6caf9 (all first-round handoffs integrated). Record the actual base SHA. Do not share a checkout or branch with another agent. Read docs/manuscript/content.typ, docs/README.md, docs/parallel-results/handoff-integration.md, and docs/rfcs/parallel-contracts.md before editing.
 
 Delivery rules:
 - Implement working behavior, with meaningful positive and negative tests. Deliver code, not only an RFC, scaffolding or an adapter proposal.

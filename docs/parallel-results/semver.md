@@ -1,5 +1,9 @@
 # SemVer compatibility library checkpoint
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 `crates/vesper-semver` implements a conservative, compiler-independent compatibility engine for design §9. Its serializable `Interface` DTO has separate schema and language-semantics versions, positional generic binders, stable nominal/capability identities, exported declaration contracts, and resolved external type kinds. Inputs must be trusted, resolved compiler exports; the crate is not a second source typechecker.
 
 `compare(old, new)` returns a `Report` classified as Patch, Minor, Major, or Unknown. `is_compatible()` certifies only Patch/Minor reports with no pending adapters. Issues have a declaration/type path, formal rule name, reason, and a human-readable caller witness. Unknown schemas/types/binders or unsupported features fail closed even when both snapshots are identical. Serde rejects unknown fields and duplicate export, field, operation, or variant identities.

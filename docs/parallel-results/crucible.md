@@ -1,5 +1,9 @@
 # Wave five lane 5: Vesper Crucible (§29, excluding §29.3)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Design coverage: §29.1 items 1–3, §29.2 (ChoiceTape property suites and
 concolic SimPulse fuzzing), §29.4 theorem 1 (`choice_tape_shrink_terminates`),
 §29.5 shrinker. §29.3 / §29.5 lifter (`vesper migrate`) is lane 11. Issue #125.

@@ -5,7 +5,7 @@
 //! re-checks the digest before handing the bytes out, so a corrupted build
 //! input is a typed error, never a silently different root.
 //!
-//! Provenance (also in `docs/parallel-results/aegis-vendor-collateral.md`):
+//! Certificate provenance:
 //! the vendor endpoints (`certificates.trustedservices.intel.com`,
 //! `kdsintf.amd.com`) are not reachable from the build sandbox, so every
 //! certificate here was taken from two independent published copies whose

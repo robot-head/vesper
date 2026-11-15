@@ -1,5 +1,9 @@
 # Source tooling integration (#69)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 This batch integrates the separately claimed #63–#70 lanes against published
 main `ba0fadedf91be3bfd059362dd4fe14cc2f2dc51a`. The issue board and actual Warp
 PR paths were checked before assigning work. Ownership, dependency boundaries

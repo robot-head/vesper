@@ -23,7 +23,7 @@ pub unsafe trait ChunkBacking {
 
 /// Chunks from the Rust global allocator. This is the host runtime's
 /// provisioning path, not the design's VirtualArena `mmap(MAP_NORESERVE)`
-/// reservation; see `docs/parallel-results/strata-regions.md`.
+/// reservation.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemBacking;
 

@@ -155,8 +155,7 @@ impl From<ParseError> for AttestError {
     }
 }
 
-/// Relying-party policy rejections (design §33.5, plus the corrections
-/// recorded in `docs/parallel-results/aegis.md`).
+/// Relying-party attestation policy rejections.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AegisVerifyError {
     DisallowedTeeArchitecture(TeeArch),

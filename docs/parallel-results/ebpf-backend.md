@@ -1,7 +1,11 @@
 # Wave seven lane 26: compiler eBPF target (XDP and tc from Vesper source)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #349. Base: `origin/main` 283c811 (descendant of the required
-baseline c025b9a). Spec sections §27 and §7 of `docs/specification.txt`.
+baseline c025b9a). Spec sections §27 and §7 of the pre-manuscript design.
 
 ## What was built
 

@@ -1,5 +1,9 @@
 # Wave six lane 18: eBPF program types, tail calls, BTF CO-RE and verifier precision
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Design coverage: §27.1 items 1 and 4 (`@btf_core`), §27.5 (pre-flight
 verifier) for more program types. Claim issue #260.
 

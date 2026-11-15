@@ -36,8 +36,7 @@ impl Isa {
     pub const ALL: [Isa; 5] = [Isa::Scalar, Isa::Sse42, Isa::Avx2, Isa::Avx512, Isa::Neon];
 
     /// The preferred path this CPU supports, detected at run time. AVX2 is
-    /// preferred over AVX-512: on the only AVX-512 host measured (see
-    /// docs/parallel-results/serde-json-rest.md) the AVX-512 path was
+    /// preferred over AVX-512: on the AVX-512 host measured, that path was
     /// slower, so it is opt-in through [`IndexedJson::parse_with_isa`] and
     /// [`SimdParser::with_isa`](crate::SimdParser::with_isa).
     ///

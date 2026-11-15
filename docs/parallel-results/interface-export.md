@@ -1,5 +1,9 @@
 # Checked source-interface export checkpoint
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 `vesper::interface::export(&World, package)` converts a successfully checked module into the experimental `vesper_semver::Interface` DTO. The caller must reject parser/checker diagnostics before invoking it. Package names follow Loom's `@org/name` or `std/name` grammar. Definitions use `package::type::Name`, `package::effect::Name`, and `package::fn::name` identities; method names retain the checked `Type::method` suffix. Separate kind components preserve the language's type/effect namespaces.
 
 The current language has no source visibility, so every source declaration, including helper functions, is exported. Compiler-provided Option, Result, RuntimeError and Fail declarations use reserved `std/core` identities and retain their full type/operation contracts. Primitive types map explicitly. Named fields and positional enum payloads remain public, enums remain exhaustive, and effects remain open to user handlers. Generic type and row binders become positional; row binders conservatively admit affine resumption. Functions retain passing modes and projection paths. Unnamed outgoing effects use stable qualified effect identities plus normalized type arguments, sorted independently of source row order. Source spans, parameter/local names, bodies, and inferred `$cap`, `$fncap` or latent identities are excluded.

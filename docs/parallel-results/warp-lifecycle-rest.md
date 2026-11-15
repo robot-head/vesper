@@ -1,5 +1,9 @@
 # Wave seven lane 7: the rest of the Warp connection lifecycle
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue #330. Base: `main` at `283c8115d2203232d0e9b473cc4bb0312c3a8509`
 (a descendant of the required `c025b9a`). Code:
 `crates/vesper-warp/src/{endpoint,lifecycle,handshake,cc}.rs` and an

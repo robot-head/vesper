@@ -1,5 +1,9 @@
 # #79 bounded shared editor spans
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Owned slice: new `crates/vesper-span/**` and this report on `editor41/span`,
 base `593bbc311a1c0693aa08732b40cec813e2cda436`. Read issue #79, the editor41
 contracts and current specification §21. Existing compiler diagnostics and all

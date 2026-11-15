@@ -1,5 +1,9 @@
 # Wave seven lane 33: GPU compute for Tensor and Kinetic on Vulkan (lavapipe)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: [#357](https://github.com/robot-head/vesper/issues/357). Design: §28
 (Tensor), §36 (Kinetic). Base: `283c8115d2203232d0e9b473cc4bb0312c3a8509`
 (origin/main at start, a descendant of the required `c025b9a`).

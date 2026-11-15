@@ -1,5 +1,9 @@
 # Wave seven lane 20: Tensor formats, containers, BPE, sampling, batching and SIMD (§28)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: [#343](https://github.com/robot-head/vesper/issues/343). Base:
 `283c8115` on `main` (a descendant of the required `c025b9a`). Edits are
 confined to `crates/vesper-tensor/**`, the new `lean/TensorKv.lean` and this

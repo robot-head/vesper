@@ -1,6 +1,6 @@
 # Source interfaces and release-version policy
 
-`compare(old, new)` conservatively classifies the supported source-interface fragment as patch, minor, major or unknown. Its compatibility result remains independent of package version numbers. See the report under `docs/parallel-results/semver.md` for the interface fragment and its limits.
+`compare(old, new)` conservatively classifies the supported source-interface fragment as patch, minor, major or unknown. Its compatibility result remains independent of package version numbers. See [package workflows](../../docs/package-workflows.md) for the interface fragment and its limits.
 
 `check_release(old, new, old_version, new_version)` computes that comparison itself and checks the proposed version change. It returns a versioned `ReleaseReport`, or a typed `ReleaseVersionError` identifying an invalid old/new version.
 

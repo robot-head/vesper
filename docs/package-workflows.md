@@ -1,6 +1,6 @@
 # Interface comparison and offline package resolution
 
-These commands connect the checked compiler and the first Loom libraries. The seven external workstreams in `parallel-work.md` retain their assigned paths.
+These commands connect the checked compiler and the Loom libraries. The [manuscript](manuscript/README.md) defines the language and platform requirements.
 
 ## Checked source interfaces
 
@@ -14,7 +14,7 @@ The example strengthens `Receipt` from linear to copy and classifies as a compat
 
 Export runs after parsing/checking and before optimization. Its deterministic JSON includes declared public contracts, not source spans, bodies or parameter/local names. All current source declarations are public because visibility syntax is not implemented. Builtins retain reserved `std/core` identities. `--package` supplies an identity namespace, not authenticated namespace ownership.
 
-The `.vhir` suffix here denotes an experimental schema/semantics-versioned source-contract DTO, not a binary ABI, MIF hash, artifact-cache key, proof certificate, or finalized interchange format. Named/latent capability scopes, effectful arrows, captured generic arrows and named enum payloads remain explicit Unsupported contracts; even identical unsupported exports cannot certify compatibility. See `parallel-results/interface-export.md` for the full boundary.
+The `.vhir` suffix here denotes an experimental schema/semantics-versioned source-contract DTO, not a binary ABI, MIF hash, artifact-cache key, proof certificate, or finalized interchange format. Named/latent capability scopes, effectful arrows, captured generic arrows and named enum payloads remain explicit Unsupported contracts; even identical unsupported exports cannot certify compatibility.
 
 ### Release-version policy
 

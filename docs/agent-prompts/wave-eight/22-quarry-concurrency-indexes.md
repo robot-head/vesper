@@ -1,11 +1,19 @@
 # Quarry: latch coupling, leaf merge, secondary indexes, serializable isolation and streaming joins
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../../manuscript/README.md) is the sole specification; use the
+> [section map](../../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Suggested branch: `wave8/quarry-concurrency-indexes`. Claim issue: #471.
 
 ~~~text
+Specification authority: docs/manuscript/content.typ is the sole specification.
+Earlier section numbers below use the legacy numbering; locate their manuscript
+chapters with docs/section-map.md before implementing requirements.
+
 You are implementing one substantial milestone of the Vesper design (§24) in https://github.com/robot-head/vesper.
 
-Start from a fresh origin/main in a NEW cloud checkout or dedicated git worktree. Require baseline ea1ed2964c2583b5dc2da8e0fd7651daa39b00e2 or a descendant; record the actual SHA. Development happens on `main`; open your PR against `main`. Read AGENTS.md if present, docs/parallel-work.md, docs/implementation.md, docs/bazel.md, docs/rfcs/wave-eight-contracts.md, docs/agent-prompts/wave-eight/README.md, docs/parallel-results/quarry-btree-mvcc.md, and the whole of §24 in docs/specification.txt (the snapshot matches the Google Doc revision modified 2026-11-13 04:46 UTC) before editing.
+Start from a fresh origin/main in a NEW cloud checkout or dedicated git worktree. Require baseline ea1ed2964c2583b5dc2da8e0fd7651daa39b00e2 or a descendant; record the actual SHA. Development happens on `main`; open your PR against `main`. Read AGENTS.md if present, docs/README.md, docs/bazel.md, docs/rfcs/wave-eight-contracts.md, docs/agent-prompts/README.md, docs/parallel-results/quarry-btree-mvcc.md, and the whole of §24 in docs/manuscript/content.typ before editing.
 
 When to start: now. If a PR this lane waits on is still open, check its state first; if it has not merged, work only on the parts that do not depend on it and merge origin/main once it lands.
 

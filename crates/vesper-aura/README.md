@@ -2,7 +2,7 @@
 
 This dependency-free host library implements a bounded keyed view runtime and
 an executable recording backend. It is an initial library milestone for design
-§18.2, not a Vesper compiler feature or a native UI toolkit.
+[manuscript §37.2](../../docs/manuscript/README.md), not a Vesper compiler feature or a native UI toolkit.
 
 `examples/recorded_counter.rs` mounts a tree, dispatches a registered event to
 its trusted handler identity, applies one fine-grained slot change, and consumes

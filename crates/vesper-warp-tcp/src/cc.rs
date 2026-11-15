@@ -1,5 +1,4 @@
-//! Congestion-control boundary shared with the QUIC and BBRv3 lanes
-//! (docs/rfcs/wave-four-contracts.md, "Shared vocabulary").
+//! Congestion-control boundary shared with QUIC and BBRv3.
 //!
 //! TCP has no packet numbers; this crate assigns every transmission a fresh,
 //! strictly increasing `pn` (a transmission id), so a retransmission of the

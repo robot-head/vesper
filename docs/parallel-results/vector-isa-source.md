@@ -1,5 +1,9 @@
 # Wave seven, lane 28: source vectors and `eff [Isa[P]]` (§14)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #351. Branch `claude/project-thread-yq3tj6`, based on `main` at
 `283c811` (a descendant of the required baseline `c025b9a`). Root package and
 one additive syntax hunk; no new dependencies, no root manifest change.

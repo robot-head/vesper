@@ -1,5 +1,9 @@
 # Causal compiler diagnostics (#87–#93)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 This batch implements actual causal multi-span diagnostics from specification
 §21.4. The live document metadata was rechecked and still matches the recorded
 41-section/Appendix A revision, modified 2026-11-12T09:18:30.204Z. The full design

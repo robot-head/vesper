@@ -1,11 +1,19 @@
 # Pulse in executables: a linkable fiber and driver runtime library, and session executables on Linux, macOS and Windows
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../../manuscript/README.md) is the sole specification; use the
+> [section map](../../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Suggested branch: `wave9/pulse-session-executables`. Claim issue: #585.
 
 ~~~text
+Specification authority: docs/manuscript/content.typ is the sole specification.
+Earlier section numbers below use the legacy numbering; locate their manuscript
+chapters with docs/section-map.md before implementing requirements.
+
 You are implementing one substantial milestone of the Vesper design (§12, §7) in https://github.com/robot-head/vesper.
 
-Start from a fresh origin/main in a NEW cloud checkout or dedicated git worktree. Require baseline 37f7b8bcfa4cd409177856c8fe5deeaa7f2a88ff or a descendant; record the actual SHA. Development happens on `main`; open your PR against `main`. Read AGENTS.md if present, docs/parallel-work.md, docs/implementation.md, docs/bazel.md, docs/rfcs/wave-nine-contracts.md, docs/agent-prompts/wave-nine/README.md, crates/vesper-fiber-abi, crates/vesper-pulse (read-only; lanes 21 and 22 own them), and the whole of §12, §7 in docs/specification.txt (the snapshot matches the Google Doc revision modified 2026-11-14 22:25 UTC, which added §43) before editing.
+Start from a fresh origin/main in a NEW cloud checkout or dedicated git worktree. Require baseline 37f7b8bcfa4cd409177856c8fe5deeaa7f2a88ff or a descendant; record the actual SHA. Development happens on `main`; open your PR against `main`. Read AGENTS.md if present, docs/README.md, docs/bazel.md, docs/rfcs/wave-nine-contracts.md, docs/agent-prompts/wave-nine/README.md, crates/vesper-fiber-abi, crates/vesper-pulse (read-only; lanes 21 and 22 own them), and the whole of §12, §7 in docs/manuscript/content.typ before editing.
 
 When to start: now; the src/native_session.rs hunk merges after Codex's PR for #576 (which holds src/native.rs, src/native_batch.rs and src/native_session.rs). This lane adds a workspace member: merge one at a time with lane 1. If a PR this lane waits on is still open, check its state first; if it has not merged, work only on the parts that do not depend on it and merge origin/main once it lands.
 

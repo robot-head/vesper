@@ -1,5 +1,9 @@
 # #85 actual editor stdio acceptance
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Owned slice on `editor41/stdio`, fresh base `bbd19af`: only
 `tests/lsp_cli.rs`, `scripts/test-editor.sh`, `scripts/check-editor.py`,
 `.github/workflows/editor.yml`, and this report. The dispatcher and session

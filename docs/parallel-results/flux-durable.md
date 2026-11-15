@@ -1,5 +1,9 @@
 # Flux: durable distributed checkpoints and recovery (wave six, lane 11, #253)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Design §34 (items 4 and 5 of §34.1). Base `07322e3` (descendant of the required
 `cda092f`). Edited only `crates/vesper-flux/**`, `lean/FluxDbsp.lean` and this
 report. Read-only dependencies on `vesper-loom-cas` and `vesper-simpulse` are

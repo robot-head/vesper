@@ -1,5 +1,9 @@
 # Shared native batch and checked documentation tests (#67)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Read issue #67, `docs/rfcs/tooling41-contracts.md`, the complete §40 design and
 the existing native compiler/checker/IR interfaces. Implemented new
 `src/native_batch.rs`, `src/doctest.rs`, `src/doctest_commands.rs`, matching new

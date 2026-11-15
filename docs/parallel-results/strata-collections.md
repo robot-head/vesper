@@ -1,5 +1,9 @@
 # Strata collections (design §15.3 and §15.5)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 ## Wave eight lane 7 (claim #456)
 
 Branch `claude/project-thread-gg7d7m` (the suggested `wave8/strata-collections` was not used; the session is bound to this branch). Base: `origin/main` at `1094e649c95e4d81eef4e705d13882ab1339542d`, a descendant of the required `ea1ed29`. Owned paths: `crates/vesper-alloc/**`, `lean/StrataCollections.lean` and this file. The only root change is `Cargo.lock` (vesper-alloc now lists `libc`, which is already a workspace dependency and already in the lockfile); it is in its own commit.

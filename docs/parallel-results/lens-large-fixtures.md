@@ -1,5 +1,9 @@
 # Lens: the 10 KB fixtures, a Send writer, Loom ceilings in completion (§21)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Wave-eight lane 16, claim issue #465. Base `1094e64` (main after #477, a
 descendant of the required `ea1ed29`). Branch `claude/project-thread-t1o23r`.
 

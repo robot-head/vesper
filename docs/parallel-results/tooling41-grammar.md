@@ -1,5 +1,9 @@
 # §38 executable Grammar host foundation — issue #63
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: <https://github.com/robot-head/vesper/issues/63>. Branch `tooling41/grammar`,
 base `a1a8d938dd8103803219a05c8364cb7a198be8d9`, dedicated new worktree
 `/workspace/vesper-worktrees/tooling41-grammar`.

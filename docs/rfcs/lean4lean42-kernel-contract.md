@@ -1,5 +1,9 @@
 # Frozen kernel-port slice for external model replay (#297)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 This contract authorizes only the kernel-port and raw-declaration-control
 slice after its child issue is created and this revision is pushed. The
 machine protocol, Rust runner and setup receipt remain proposed in the

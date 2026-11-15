@@ -1,5 +1,9 @@
 # Independent executable arithmetic oracle acceptance (#274)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 This lane follows frozen contract
 `cae1bc5b50ebe7cd448fd9a18ff87f9f4c1ec6c2` and published bounded-carrier
 amendment `27d531e`. Exclusive files are

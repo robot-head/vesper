@@ -1,5 +1,9 @@
 # Quarry B+Tree, MVCC and vectorized joins (§24)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Wave-seven lane 11 ([prompt](../agent-prompts/wave-seven/11-quarry-btree-mvcc.md)),
 claim issue [#334](https://github.com/robot-head/vesper/issues/334). Base:
 `origin/main` at `283c811`. Branch: `claude/project-thread-4sbjsb`. The PR is in

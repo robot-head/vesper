@@ -1,5 +1,10 @@
 # Vesper language manuscript
 
+This directory is the sole source of truth for the Vesper language and platform
+specification. Edit `content.typ` and `main.typ` here; the published PDF is a
+generated artifact. External documents in `source-manifest.json` record provenance,
+not an alternative specification to maintain.
+
 The published manuscript is [vesper-lang.org/vesper-specification.pdf](https://vesper-lang.org/vesper-specification.pdf). It presents the complete end-state Vesper specification organized into Parts I–VIII (Chapters 1–41 and Appendices A and B). The website's three **Read the design** actions open this PDF.
 
 ## Editable sources
@@ -34,4 +39,4 @@ Optional publication QA requires Python and PyMuPDF:
 python docs/manuscript/verify.py --typst /path/to/typst
 ```
 
-The verification covers document structure (Parts I–VIII, Chapters 1–41, and Appendices A–B), source-code preservation, font embedding, and page geometry. The compiler-facing `docs/specification.txt` snapshot and its revision inventory remain unchanged.
+The verification covers document structure (Parts I–VIII, Chapters 1–41, and Appendices A–B), source-code preservation, font embedding, and page geometry. Implementation workflows are documented in [the documentation index](../README.md).

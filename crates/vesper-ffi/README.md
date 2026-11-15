@@ -1,6 +1,6 @@
 # Vesper Bridge wire layouts and sys-specs
 
-This crate implements the byte-oriented layout/view milestone from design §13.2. It is independent of the compiler frontend so layout and memory-access contracts can be reviewed before adding `wire struct` syntax or CLIF lowering.
+This crate implements the byte-oriented layout/view milestone from [manuscript §15.2](../../docs/manuscript/README.md). It is independent of the compiler frontend so layout and memory-access contracts can be reviewed before adding `wire struct` syntax or CLIF lowering.
 
 `Registry::new` accepts nominal `Declaration`/`Field` descriptors. `Registry::compile` rejects unsupported fields, invalid integer widths, duplicate names, missing/recursive struct definitions, implicit internal or tail padding, size overflow, and excessive descriptor depth/expansion. Successful `WireLayout` metadata has private fields and exposes checked offsets, sizes and alignment through read-only accessors.
 
@@ -22,7 +22,7 @@ Supported scalars are signed/unsigned 8-, 16-, 32- and 64-bit integers, plus fix
 
 The separate [`sys` module](SYS-SPECS.md) now parses bounded `.vsys` contracts, records explicit C target/convention/link descriptors, checks canonical artifact identity and raw foreign-return refinements, and prepares owner-preserving numerical call arguments. Single-element `nocapture in|out|inout` pointer parameters may point to one integer or to a `wire struct` declared in the `.vsys` file; those declarations compile through `Registry`, so a pointee has zero implicit padding and total bit validity.
 
-## Isolation domains (§13.4)
+## Isolation domains (§15.4)
 
 `isolation::IsolationDomain` allocates a protection key (`pkey_alloc`), maps page-aligned anonymous regions tagged with it (`pkey_mprotect`), and `with_revoked(Revoke::Write | Revoke::Access, f)` runs `f` with the current thread's rights to those regions removed: `WRPKRU` on x86_64 Linux (Intel/AMD PKU) and `MSR POR_EL0` on AArch64 Linux (Arm POE, `HWCAP2_POE`). The previous register value is restored on every exit, including unwinding panics. Region bytes are only copied through raw pointers (`read`/`write`), never exposed as Rust references. `isolation::contain` runs work in a forked child with a `SIGSEGV`/`SIGBUS` handler so a protection-key fault (`SEGV_PKUERR`) is reported as `ChildExit::Fault` with its address instead of killing the caller. Without PKU/POE (or on other targets) every constructor returns `Unavailable` with the reason. This is a same-address-space tripwire for stray writes, not a security boundary against code that can rewrite PKRU/POR_EL0 itself, and it does not pivot stacks or separate a foreign heap.
 

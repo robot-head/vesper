@@ -2,8 +2,8 @@
 
 Compiled into the crate by `src/roots.rs`, which records each certificate's
 canonical vendor URL and SHA-256 and re-checks the digest on use. Each file
-was taken from two independent published copies with identical bytes (see
-the module documentation and `docs/parallel-results/aegis-vendor-collateral.md`).
+was taken from two independent published copies with identical bytes; see
+the [module documentation](../src/roots.rs) for provenance.
 
 | File | Certificate | SHA-256 (DER) |
 | --- | --- | --- |

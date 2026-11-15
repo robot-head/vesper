@@ -1,5 +1,9 @@
 # Resource endpoint test envelope
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue #574 classifies the complete `test/resource_oracle42` Bazel target as `long` (900 seconds). Its previous medium-size default was 300 seconds. Every existing test and platform selection is retained.
 
 The macOS job [132622570502](https://github.com/robot-head/vesper/actions/runs/43652086425/job/132622570502) at PR #423 head `31e3812dcc594108c9bfbe190f73f0242b5892d9` reported `TIMEOUT in 300.3s`. Seventeen of eighteen Rust tests had printed successful completion. The retirement-reserve test was unfinished when Bazel killed the target. The captured output contains no Rust panic, protocol failure, or individual harness deadline error.

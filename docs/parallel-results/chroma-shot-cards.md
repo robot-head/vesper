@@ -1,5 +1,9 @@
 # Wave nine lane 2: Vesper Chroma `vesper shot` code cards (§43)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #579. Branch: `claude/project-thread-248b49`. Base: lane 1's PR #613 head `3194955` (on main `c9f9677`, descendant of the required baseline `37f7b8b`); this PR merges after #613.
 
 ## What was built

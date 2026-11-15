@@ -1,5 +1,9 @@
 # Strata region allocator core (design §15)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Lane: Strata region allocator. Initial core merged as PR #1 (`c09c014`); review follow-up on branch `claude/project-thread-d6page`, based on `origin/work` at `72493b8`.
 Owned paths: `crates/vesper-alloc/**` and this file. No root workspace, lockfile, CLI, CI, syntax, checker, IR, or codegen file is changed.
 

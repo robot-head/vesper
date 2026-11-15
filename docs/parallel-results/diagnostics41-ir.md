@@ -1,5 +1,9 @@
 # Actual IR diagnostic causes (#89)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Added optional related source evidence and invariant help to existing E0410
 Place-IR ownership errors. The original primary codes, message strings, spans,
 error conditions and deduplication order remain unchanged. E0411 state-token

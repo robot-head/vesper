@@ -1,5 +1,9 @@
 # §40 checked API documentation and structural search (#66)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented [issue #66](https://github.com/robot-head/vesper/issues/66) in the
 fresh `tooling41/doc` worktree from `a1a8d938dd8103803219a05c8364cb7a198be8d9`.
 Read the issue, `docs/rfcs/tooling41-contracts.md` and the complete refreshed §40.

@@ -1,7 +1,7 @@
 # Beacon bounded host foundation
 
 Dependency-free `no_std`, safe Rust. This is an independently executable host
-library for specification §22; it does not integrate compiler effects, Pulse,
+library for [manuscript §31](../../docs/manuscript/README.md); it does not integrate compiler effects, Pulse,
 Prism, fibers, the evidence vector, Forge schemas, or OTLP/Arrow transport.
 
 `parse_traceparent_55` accepts exactly the v00 field value, with lowercase hex,

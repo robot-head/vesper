@@ -1,5 +1,9 @@
 # Guarded Salsa analysis and checked signatures — issue #82
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Branch `editor41/database`, base `593bbc311a1c0693aa08732b40cec813e2cda436`.
 Owned production change: `src/database.rs` only. Uses the separate #81
 `tooling::frontend` API; its module/lib registration is not part of this commit.

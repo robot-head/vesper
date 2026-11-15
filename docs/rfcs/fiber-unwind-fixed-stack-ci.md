@@ -1,5 +1,9 @@
 # Fixed-stack allocation in the unwind image fixture
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue #572 records the same failure on PR #412 at `52bd8baac08971819e1363914392090d10322324` and PR #526 at `68ee2a4f5c96d464153d10c11fa44ca8d847d8eb`: `an_encoded_image_unwinds_like_the_live_fiber_and_limits_hold` unwraps `spawn_deep_with` at `unwind.rs:47` and receives OS 17 / `AlreadyExists`. The supplied #412 full-suite log reports 802 executed tests, 801 passed and this one failure. This is a fixed-address stack allocation error. The logs do not identify the mapping that claimed the address or the exact interleaving.
 
 `FiberStack::free_fixed_base` maps and releases a probe; its result is not a reservation. The production API explicitly allows another allocation to take that range before fixed spawning. Linux uses `MAP_FIXED_NOREPLACE`; macOS rejects placement at another address; Windows refuses an occupied reservation. The fixture must handle that documented collision instead of assuming the probe remains available.

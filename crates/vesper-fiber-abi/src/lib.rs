@@ -25,8 +25,8 @@
 //!   the MMU (`mprotect` faults, Windows write watches) for checkpointable
 //!   memory written through raw pointers.
 //!
-//! See `docs/rfcs/native-pulse-abi.md` for the ownership, lifetime and
-//! relocation contracts and for what this prototype does not establish.
+//! The [`abi`], [`evidence`], and [`prototype`] modules document the
+//! implemented layouts, ownership boundaries, and prototype limitations.
 pub mod abi;
 pub mod clif;
 pub mod data;

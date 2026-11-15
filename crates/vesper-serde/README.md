@@ -1,6 +1,6 @@
 # vesper-serde
 
-Bounded Rust host JSON and binary codec slices from design §20. It has no
+Bounded Rust host JSON and binary codec slices from [manuscript §29](../../docs/manuscript/README.md). It has no
 runtime dependencies. `unsafe` is denied except in one gated module of
 `std::arch` stage 1 kernels (see "Two-stage SIMD parsing" below). It does not
 provide source macros, source Region typing, the `eff [Isa[P]]` source effect,
@@ -73,7 +73,7 @@ Run the self-checking example with:
 cargo run -p vesper-serde --example bounded_json
 ```
 
-## Two-stage SIMD parsing (§20.3, §20.5)
+## Two-stage SIMD parsing (§29.3, §29.5)
 
 Stage 1 (`simd::StructuralIndex::build`) reads 64-byte blocks and produces the
 `u32` positions of every operator, opening and closing quote and scalar start
@@ -111,7 +111,7 @@ documents, so steady-state parsing of no larger documents makes no allocation.
 when available, sharing one stage 1 buffer across records);
 `NdjsonBatch::parse_with(.., Engine::Scalar)` keeps the recursive-descent path.
 Batch statistics and `event_columns` projections are identical either way.
-`tiles::TelemetryIngestor` decodes the §20.5 `TelemetryPoint` schema from
+`tiles::TelemetryIngestor` decodes the §29.5 `TelemetryPoint` schema from
 NDJSON into 16-wide AoSoA tiles (64-byte-aligned hot columns, separate cold
 trace ids), transactionally and, once warm, without heap allocation; schema
 keys are matched as two 64-bit words (`tiles::SwarKey`).
@@ -131,9 +131,7 @@ assert!(Isa::Scalar.is_available());
 ```
 
 `examples/simd_throughput.rs` measures stage 1, full parsing and tile
-ingestion per path; see `docs/parallel-results/serde-simd-json.md` for numbers
-measured on one machine (and `serde-json-rest.md` for the AVX-512 path and
-float decoding). `lean/SimdJsonEscape.lean` proves, with `bv_decide`, that a
+ingestion per path on the current machine. `lean/SimdJsonEscape.lean` proves, with `bv_decide`, that a
 Lean model of the branchless escape kernel satisfies the scalar reference's
 recurrence for all 64-bit masks. `lean/SimdJsonQuotes.lean` proves that the
 carry-less multiply by all ones equals the prefix-XOR cascade and the per-bit
@@ -188,7 +186,7 @@ source derives/Region typing, DetFloat arithmetic/backend verification or a
 throughput, allocation-free whole-process, RSS or proof guarantee.
 
 
-## Binary codecs (§20.4)
+## Binary codecs (§29.4)
 
 `streamvbyte` implements the original raw, non-delta **1/2/3/4-byte** StreamVByte
 u32 layout. The caller supplies the count out-of-band. All `ceil(count/4)`

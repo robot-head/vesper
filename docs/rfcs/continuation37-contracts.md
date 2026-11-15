@@ -1,8 +1,12 @@
 # Claimed continuation of the expanded foundations
 
-The live [design](../specification.txt) now contains sections 1–41 and Appendix A.
-Its [source inventory](../specification-source.json) records the revision and
-section/appendix digests. New requirements and scaffold limits are reviewed in
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
+The pre-manuscript design used for this work contained sections 1–41 and Appendix A.
+Its revision metadata and section/appendix digests remain in Git history.
+Requirements and scaffold limits for that work are reviewed in
 [the continuation review](continuation37-review.md).
 
 GitHub issues are the current ownership board. Before claiming these tasks, the

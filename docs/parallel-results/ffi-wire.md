@@ -1,5 +1,9 @@
 # Bridge wire-layout milestone
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Branch: `parallel/ffi-wire`, based on `c5328d0`.
 
 Implemented `crates/vesper-ffi` as a standalone, dependency-free Rust library. Public APIs cover declaration/layout validation, nested field metadata, safe immutable/mutable zero-copy wire views, header/payload splitting, endian-aware integer access, range checking, zero initialization, canonical padding validation and padding-insensitive semantic comparison.

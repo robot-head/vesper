@@ -1,5 +1,9 @@
 # Source tensor types (wave eight, lane 10)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Design §28.2: symbolic shape-typed tensors, quantized wire-struct blocks and a
 linear `KvPageLease`. Claim issue #459. Base `1094e64` (plan PR #477), merged
 with `main` at `83872e5` (PR #379).

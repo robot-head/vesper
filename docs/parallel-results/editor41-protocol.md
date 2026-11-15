@@ -1,5 +1,9 @@
 # Editor §21 protocol/document core — issue #80
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented on `editor41/protocol` from contract
 `593bbc311a1c0693aa08732b40cec813e2cda436`; exclusive source is the new
 `crates/vesper-lsp/**`. Read issue #80, `docs/rfcs/editor41-contracts.md`, and all

@@ -1,11 +1,18 @@
 # eBPF: more program types, tail calls, BTF CO-RE and verifier precision
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../../manuscript/README.md) is the sole specification; use the
+> [section map](../../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Suggested branch: `wave6/ebpf-depth`. Claim issue: #260.
 
 ~~~text
+Specification authority: docs/manuscript/content.typ is the sole specification.
+Resolve earlier section numbers with docs/section-map.md before implementing requirements.
+
 You are implementing one substantial milestone of the Vesper design (§27) in https://github.com/robot-head/vesper.
 
-Start from a fresh origin/main in a NEW cloud checkout or dedicated git worktree. Require baseline cda092f2f6427e23c566d7e63259000d3d6c699f or a descendant; record the actual SHA. Development happens on `main`; open your PR against `main`. Read AGENTS.md if present, docs/parallel-work.md, docs/implementation.md, docs/bazel.md, docs/rfcs/wave-six-contracts.md, docs/agent-prompts/wave-six/README.md, the earlier report(s) for your area under docs/parallel-results/, and the whole of §27 in docs/specification.txt (the snapshot matches the Google Doc revision modified 2026-11-13 04:46 UTC) before editing.
+Start from a fresh origin/main in a NEW cloud checkout or dedicated git worktree. Require baseline cda092f2f6427e23c566d7e63259000d3d6c699f or a descendant; record the actual SHA. Development happens on `main`; open your PR against `main`. Read AGENTS.md if present, docs/README.md, docs/bazel.md, docs/rfcs/wave-six-contracts.md, docs/agent-prompts/README.md, the earlier report(s) for your area under docs/parallel-results/, and the whole of §27 in docs/manuscript/content.typ before editing.
 
 Claim: this work is claimed by GitHub issue #260. Before you start, check the open issues and PRs in robot-head/vesper for overlapping work by other agents; if something overlaps, stop and report instead of duplicating it. Link #260 from your PR ("Closes #260").
 

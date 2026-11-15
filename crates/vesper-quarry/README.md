@@ -5,14 +5,14 @@ checking, relational optimization, reference row execution, vectorized
 execution (single-table plans and hash/nested-loop joins, with AoSoA tile
 output), recoverable slotted-page/pin slices, a durable write-ahead-logged
 record store, and a transactional B+Tree table store with MVCC snapshot
-isolation (`store::Store`) of specification §24. Its only dependency is
+isolation (`store::Store`) of [manuscript §35](../../docs/manuscript/README.md). Its only dependency is
 `vesper-simd` (for the selection-mask counting kernel). It is **not** a source
 `@sql` macro, WASI component, or compiler integration: source `@sql` remains a
 Forge-macro step, and nothing here is reachable from Vesper source yet. The
 older `durable::Db` holds opaque records; `store::Store` holds typed SQL tables
 and runs `PreparedQuery` plans over committed snapshots.
 
-Run the self-checking example from the repository after workspace registration:
+Run the self-checking example from the repository root:
 
 ```sh
 cargo run -p vesper-quarry --example quarry
@@ -173,7 +173,7 @@ Lean proof is provided by this host slice. The vectorized executor and the
 durable store are described below.
 
 
-## Slotted pages and recoverable buffer-pool pins (§24.2)
+## Slotted pages and recoverable buffer-pool pins (§35.2)
 
 The independent `page` and `pool` modules add actual in-memory page operations.
 They do not connect SQL rows to a disk format. Run the self-checking lifecycle:
@@ -419,7 +419,7 @@ order (left-major, then unmatched right rows). Pair and output budgets
 vectors are reused across batches.
 
 `PreparedQuery::execute_tiled` writes the result into a reusable
-`tiles::TileSet` (§24.3 `tiled(16)`): 16-row tiles, each fixed-width column a
+`tiles::TileSet` (§35.3 `tiled(16)`): 16-row tiles, each fixed-width column a
 contiguous `[u64; 16]` lane array (i64/f64 bit patterns, booleans 0/1), text
 and bytes as `(offset, len)` lanes into one arena, and a 16-bit null mask per
 column. Re-executing into a warmed set of the same shape allocates no tiles
@@ -500,7 +500,7 @@ are enumerated too.
 set) proves, about small models only: redo by page LSN from any WAL-consistent
 disk yields the full history and is idempotent; recovery ignores a torn
 trailing group; undo of losers under strict record locks restores the winners'
-state, and is the identity under no-steal; and the §24.4 pin conservation for
+state, and is the identity under no-steal; and the §35.4 pin conservation for
 a reference pool scan on its Ok and Err paths. It is not a proof about the
 Rust code.
 
