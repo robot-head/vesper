@@ -8,7 +8,7 @@ use std::{
 /// Re-exported for the documentation tests that include this adapter.
 #[allow(unused_imports)]
 pub use vesper::tooling::doc::document_source;
-use vesper::tooling::doc::{certs, document_with_analysis, sources};
+use vesper::tooling::doc::{certs, document_with_analysis_and_wcsd, sources};
 use vesper_doc::{
     Document, Limits,
     badges::{self, Badge, CertificateLink},
@@ -20,7 +20,7 @@ use vesper_doc::{
     package,
     visual::{self, PageExtras, Visuals},
 };
-pub const HELP: &str = "Usage: vesper doc FILE [--json] [-o OUTPUT | --bundle DIR] [--query QUERY.json] [--search TEXT]\n                [--wire LAYOUTS.json] [--proof-audit REPORT.json ...] [--olean-store DIR|default [--olean-root DIR]]\n       vesper doc PACKAGE_DIR (--json | --bundle DIR) [--search TEXT] [--proof-audit REPORT.json ...] [--olean-store ...]\n       vesper doc store-olean --proof-audit REPORT.json --root LEAN_BUILD_DIR --store DIR|default [--json]\n\nCheck source and generate deterministic local API documentation.\nDefault: escaped static HTML on stdout. --json: typed JSON metadata and search results.\n-o creates a new local output file; existing files are preserved. --bundle creates a new directory holding index.html,\nsearch.html (a self-contained signature search page), search-index.json and linked .olean certificates.\n--query reads a full structural JSON query (no wildcard/generic inference). --search takes a text query, e.g.\n'inout Tx.{total}, u64 -> ()', 'sink linear Tx -> u64 eff []' or a name; `_` matches any type and omitted passes,\nmodes and eff [...] are unconstrained (needs --json; the search page runs the same matcher).\nSource is limited to 128 KiB and bounded tokens/nesting/items/types; query to 32 KiB; output to 2 MiB.\nLocal intra-doc references such as [Type::method] resolve against documented checked declarations; unknown, ambiguous or unsupported references fail generation.\nGenerated private Pact helpers are excluded. Struct byte rulers describe the native eight-byte ABI, not wire formats.\nFieldTree heatmaps show each parameter's checked footprint (inout write, in read, sink consume, free siblings); a may-use\nanalysis of each body marks declared leaves it never reaches and infers the effects it may perform. Mode-crossing tables\ngive the [K-Adt] mode of each generic type per parameter mode; capability badges (Pure, Zero-Alloc, Uncancellable\nLinear I/O, Abortable Checkpoint, Constant-Time, Hard-Realtime, Deterministic Float) come from checked effect rows.\nA PACKAGE_DIR documents every .ves file of the package (Loom.toml discovery as for path-less lint) with one page per\nfile, an overview with package capabilities against the manifest's capability_ceiling, and ONE package-wide search\nindex over file-qualified functions and impl/model methods; generic functions match by instantiation.\n--wire compiles vesper-wire-layouts JSON declarations with the Bridge layout checker (explicit endianness, no implicit\npadding) into 16-byte field-span records and SVG cache-line rulers. Linear typestate graphs are rendered as SVG.\n--proof-audit (repeatable, up to 16) reads `vesper proof-audit --json` reports. An item is proved/audited only when\nevery @proof(Name) anchor in its docs names a theorem in an accepted kernel-replayed audit; otherwise unverified.\n--olean-store links each audited .olean from a Loom content-addressed store (`default` is ~/.vesper/store), bound to\nthe exact audit report and rehashed on read; store-olean records them there, or add --olean-root LEAN_BUILD_DIR to\npublish them from the proof-audit output in the same run (the bytes must match the audited size and BLAKE3). A link is content identity, not provenance.\nBadges describe Lean theorems about models, not the Rust or Vesper implementation. No network, JIT or doctest execution.\n";
+pub const HELP: &str = "Usage: vesper doc FILE [--json] [-o OUTPUT | --bundle DIR] [--query QUERY.json] [--search TEXT]\n                [--wire LAYOUTS.json] [--wcsd-stack [--target TRIPLE]] [--proof-audit REPORT.json ...] [--olean-store DIR|default [--olean-root DIR]]\n       vesper doc PACKAGE_DIR (--json | --bundle DIR) [--search TEXT] [--wcsd-stack [--target TRIPLE]] [--proof-audit REPORT.json ...] [--olean-store ...]\n       vesper doc store-olean --proof-audit REPORT.json --root LEAN_BUILD_DIR --store DIR|default [--json]\n\nCheck source and generate deterministic local API documentation.\nDefault: escaped static HTML on stdout. --json: typed JSON metadata and search results.\n-o creates a new local output file; existing files are preserved. --bundle creates a new directory holding index.html,\nsearch.html (a self-contained signature search page), search-index.json and linked .olean certificates.\n--query reads a full structural JSON query (no wildcard/generic inference). --search takes a text query, e.g.\n'inout Tx.{total}, u64 -> ()', 'sink linear Tx -> u64 eff []' or a name; `_` matches any type and omitted passes,\nmodes and eff [...] are unconstrained (needs --json; the search page runs the same matcher).\nSource is limited to 128 KiB and bounded tokens/nesting/items/types; query to 32 KiB; output to 2 MiB.\nLocal intra-doc references such as [Type::method] resolve against documented checked declarations; unknown, ambiguous or unsupported references fail generation.\nGenerated private Pact helpers are excluded. Struct byte rulers describe the native eight-byte ABI, not wire formats.\nFieldTree heatmaps show each parameter's checked footprint (inout write, in read, sink consume, free siblings); a may-use\nanalysis of each body marks declared leaves it never reaches and infers the effects it may perform. Mode-crossing tables\ngive the [K-Adt] mode of each generic type per parameter mode; capability badges (Pure, Zero-Alloc, Uncancellable\nLinear I/O, Abortable Checkpoint, Constant-Time, Hard-Realtime, Deterministic Float) come from checked effect rows.\nWith --wcsd-stack (and optional --target TRIPLE, e.g. x86_64-unknown-linux-gnu or aarch64-unknown-linux-gnu),\nevery closed-row `eff [Realtime]` function is compiled standalone to Cranelift machine code, its emitted prologues are\ndecoded, and its exact worst-case stack depth (WCSD) in bytes and worst call path (or unavailability reason) are\nattached to the Hard-Realtime capability badge.\nA PACKAGE_DIR documents every .ves file of the package (Loom.toml discovery as for path-less lint) with one page per\nfile, an overview with package capabilities against the manifest's capability_ceiling, and ONE package-wide search\nindex over file-qualified functions and impl/model methods; generic functions match by instantiation.\n--wire compiles vesper-wire-layouts JSON declarations with the Bridge layout checker (explicit endianness, no implicit\npadding) into 16-byte field-span records and SVG cache-line rulers. Linear typestate graphs are rendered as SVG.\n--proof-audit (repeatable, up to 16) reads `vesper proof-audit --json` reports. An item is proved/audited only when\nevery @proof(Name) anchor in its docs names a theorem in an accepted kernel-replayed audit; otherwise unverified.\n--olean-store links each audited .olean from a Loom content-addressed store (`default` is ~/.vesper/store), bound to\nthe exact audit report and rehashed on read; store-olean records them there, or add --olean-root LEAN_BUILD_DIR to\npublish them from the proof-audit output in the same run (the bytes must match the audited size and BLAKE3). A link is content identity, not provenance.\nBadges describe Lean theorems about models, not the Rust or Vesper implementation. No network, JIT or doctest execution.\n";
 
 fn read_file(path: &str, limit: usize) -> Result<String, String> {
     if !fs::symlink_metadata(path)
@@ -151,6 +151,8 @@ struct Options {
     olean_root: Option<String>,
     audits: Vec<String>,
     json: bool,
+    wcsd_stack: bool,
+    target: Option<String>,
 }
 fn options(args: Vec<String>) -> Result<Option<Options>, String> {
     let mut input = None;
@@ -163,6 +165,8 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
     let mut olean_root = None;
     let mut audits = Vec::new();
     let mut json = false;
+    let mut wcsd_stack = false;
+    let mut target = None;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         let once = |slot: &Option<String>| {
@@ -178,6 +182,11 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
                 return Ok(None);
             }
             "--json" => json = true,
+            "--wcsd-stack" => wcsd_stack = true,
+            "--target" => {
+                once(&target)?;
+                target = Some(value(&mut args, "--target", "a target triple")?);
+            }
             "-o" => {
                 once(&output)?;
                 output = Some(value(&mut args, "-o", "a new output path")?);
@@ -238,6 +247,9 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
         }
     }
     let input = input.ok_or("doc requires a source file or package directory; see doc --help")?;
+    if target.is_some() && !wcsd_stack {
+        return Err("--target requires --wcsd-stack".into());
+    }
     if output.is_some() && bundle.is_some() {
         return Err("-o and --bundle are exclusive".into());
     }
@@ -266,6 +278,8 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
         olean_root,
         audits,
         json,
+        wcsd_stack,
+        target,
     }))
 }
 type ParsedAudits = Vec<(Vec<u8>, badges::ProofAudit)>;
@@ -329,8 +343,9 @@ fn file_parts(
     audits: &ParsedAudits,
     certificates: &[CertificateLink],
     limits: Limits,
+    wcsd_target: Option<Option<&str>>,
 ) -> Result<FileParts, String> {
-    let (document, analysis) = document_with_analysis(source, limits)?;
+    let (document, analysis, wcsd) = document_with_analysis_and_wcsd(source, limits, wcsd_target)?;
     let visuals = visual::visuals(&document.types, &document.graph, &document.functions, wire)?;
     let just_audits: Vec<_> = audits.iter().map(|(_, a)| a.clone()).collect();
     let mut badges = badges::badges(&document, &just_audits)?;
@@ -351,6 +366,9 @@ fn file_parts(
             i
         }));
     capabilities.items.sort_by(|a, b| a.item.cmp(&b.item));
+    if wcsd_target.is_some() {
+        capabilities::attach_wcsd(&mut capabilities, &wcsd);
+    }
     Ok(FileParts {
         document,
         visuals,
@@ -397,7 +415,8 @@ fn generate(args: Vec<String>) -> Result<Option<Rendered>, String> {
         None => Vec::new(),
     };
     let (parsed, certificates, mut extra) = audits_and_certificates(&opts, opts.bundle.is_some())?;
-    let parts = file_parts(&source, &wire, &parsed, &certificates, limits)?;
+    let wcsd_target = opts.wcsd_stack.then_some(opts.target.as_deref());
+    let parts = file_parts(&source, &wire, &parsed, &certificates, limits, wcsd_target)?;
     let search = if let Some(path) = &opts.query {
         let text = read_file(path, 32 * 1024)?;
         let query = vesper_doc::parse_query_json(&text, limits)
@@ -510,6 +529,7 @@ fn generate_package(opts: Options) -> Result<Rendered, String> {
         return Err("package has no .ves sources".into());
     }
     let (parsed, certificates, mut extra) = audits_and_certificates(&opts, opts.bundle.is_some())?;
+    let wcsd_target = opts.wcsd_stack.then_some(opts.target.as_deref());
     let mut files = Vec::new();
     let mut total = 0usize;
     for path in &package.files {
@@ -520,7 +540,7 @@ fn generate_package(opts: Options) -> Result<Rendered, String> {
             .checked_add(source.len())
             .filter(|n| *n <= 16 * limits.max_source_bytes)
             .ok_or("package source byte budget exceeded")?;
-        let parts = file_parts(&source, &[], &parsed, &certificates, limits)
+        let parts = file_parts(&source, &[], &parsed, &certificates, limits, wcsd_target)
             .map_err(|e| format!("{name}: {e}"))?;
         files.push((name.clone(), url_path(&format!("files/{name}.html")), parts));
     }
