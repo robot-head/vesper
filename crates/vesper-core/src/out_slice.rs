@@ -60,11 +60,11 @@ impl OutSlice {
                 max: self.limits.max_intervals,
             });
         }
-        // One scan plus at most one element move per existing interval.
+        // One scan, at most one move during growth, and one during insertion.
         if self
             .initialized
             .len()
-            .checked_mul(2)
+            .checked_mul(3)
             .is_none_or(|n| n > self.limits.max_work)
         {
             return Err(Error::WorkLimit {
@@ -118,7 +118,7 @@ mod tests {
             6,
             Limits {
                 max_intervals: 4,
-                max_work: 8,
+                max_work: 12,
             },
         );
         state.initialize(4..6).unwrap();
@@ -157,7 +157,7 @@ mod tests {
     fn all_small_write_sequences_match_element_oracle() {
         let limits = Limits {
             max_intervals: 3,
-            max_work: 6,
+            max_work: 9,
         };
         for len in 0..=4u64 {
             let ranges: Vec<_> = (0..=len)
