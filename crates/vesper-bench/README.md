@@ -141,3 +141,11 @@ Coverage of at least 95% requires independent, equiprobable signs conditional
 on the centered nonzero magnitudes and zero pattern at the true location. The
 API does not establish those assumptions or measurement provenance, and it does
 not alter the existing regression gate.
+
+`paired_samples_confidence_set` builds that set directly from up to 32
+`PairedSample`s with the same operations-per-arm count. It inverts exact total
+differences and retains the common count: divide each finite returned endpoint
+by `endpoint_denominator()` to obtain the per-operation location. Different
+operation counts and total differences outside `i64` are rejected, not rounded.
+The caller must establish common measurement units, provenance, and the same
+conditional-sign assumptions.

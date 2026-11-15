@@ -4,6 +4,7 @@
 //! equiprobable signs conditional on the centered nonzero magnitudes and zero
 //! pattern. This API does not establish those assumptions or measurement
 //! provenance, and is separate from the benchmark regression gate.
+use crate::PairedSample;
 use std::fmt;
 
 /// The inversion visits at most 1057 open intervals and breakpoint atoms.
@@ -35,6 +36,75 @@ pub struct SignedRankConfidenceSegment {
     pub lower_inclusive: bool,
     pub upper_times_two: Option<i128>,
     pub upper_inclusive: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairedSampleConfidenceError {
+    EmptyEvidence,
+    TooManySamples,
+    OperationsMismatch { index: usize },
+    DifferenceOutOfRange { index: usize },
+    Inversion(SignedRankConfidenceError),
+}
+impl fmt::Display for PairedSampleConfidenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "paired sample confidence: {self:?}")
+    }
+}
+impl std::error::Error for PairedSampleConfidenceError {}
+
+/// Confidence-set endpoints are stored in twice-total-difference units.
+/// Divide each finite endpoint by `2 * operations_per_arm` to obtain the exact
+/// per-operation location; neither component is rounded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairedSampleConfidenceSet {
+    operations_per_arm: u64,
+    segments: Vec<SignedRankConfidenceSegment>,
+}
+impl PairedSampleConfidenceSet {
+    pub fn operations_per_arm(&self) -> u64 {
+        self.operations_per_arm
+    }
+    pub fn segments(&self) -> &[SignedRankConfidenceSegment] {
+        &self.segments
+    }
+    pub fn endpoint_denominator(&self) -> u128 {
+        2 * u128::from(self.operations_per_arm)
+    }
+}
+
+/// Build an exact per-operation confidence set from paired totals with the same
+/// operation count. The common positive denominator preserves all signed-rank
+/// orderings, ties and fractional endpoints. A difference outside i64 or a
+/// differing operation count is rejected; no samples are silently discarded.
+/// Callers must establish common units, measurement provenance, and the
+/// conditional-sign assumptions of [`signed_rank_confidence_set`]. This does
+/// not change the existing ratio gate.
+pub fn paired_samples_confidence_set(
+    samples: &[PairedSample],
+) -> Result<PairedSampleConfidenceSet, PairedSampleConfidenceError> {
+    if samples.is_empty() {
+        return Err(PairedSampleConfidenceError::EmptyEvidence);
+    }
+    if samples.len() > MAX_SIGNED_RANK_CONFIDENCE_PAIRS {
+        return Err(PairedSampleConfidenceError::TooManySamples);
+    }
+    let operations = samples[0].operations_per_arm();
+    let mut differences = [0i64; MAX_SIGNED_RANK_CONFIDENCE_PAIRS];
+    for (index, sample) in samples.iter().enumerate() {
+        if sample.operations_per_arm() != operations {
+            return Err(PairedSampleConfidenceError::OperationsMismatch { index });
+        }
+        let delta = i128::from(sample.candidate_total()) - i128::from(sample.baseline_total());
+        differences[index] = i64::try_from(delta)
+            .map_err(|_| PairedSampleConfidenceError::DifferenceOutOfRange { index })?;
+    }
+    let segments = signed_rank_confidence_set(&differences[..samples.len()])
+        .map_err(PairedSampleConfidenceError::Inversion)?;
+    Ok(PairedSampleConfidenceSet {
+        operations_per_arm: operations,
+        segments,
+    })
 }
 
 /// Exact non-rejection set for a two-sided 5% Wilcoxon signed-rank test,
