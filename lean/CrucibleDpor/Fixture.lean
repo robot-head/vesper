@@ -48,8 +48,8 @@ def actsI (prog : List (List Op)) : List (Nat × Nat) :=
 
 def parseOp (s : String) : Option Op :=
   match s.toList with
-  | 'r' :: rest => (String.mk rest).toNat?.map .r
-  | 'w' :: rest => (String.mk rest).toNat?.map .w
+  | 'r' :: rest => (String.ofList rest).toNat?.map .r
+  | 'w' :: rest => (String.ofList rest).toNat?.map .w
   | _ => none
 
 def parseProg (line : String) : Option (List (List Op)) :=
@@ -73,7 +73,7 @@ def runProg (prog : List (List Op)) : String :=
 partial def loop (stdin : IO.FS.Stream) : IO Unit := do
   let line ← stdin.getLine
   if line.isEmpty then return
-  match parseProg line.trimRight with
+  match parseProg line.trimAsciiEnd.toString with
   | some prog => IO.println (runProg prog)
   | none => IO.println "parse-error"
   loop stdin

@@ -177,16 +177,16 @@ theorem lookupLs_dual (l : Nat) : ∀ ys : Ls, lookupLs l (dualBs ys) = (lookupL
   | .cons l' k r => by
     simp only [dualBs, lookupLs]
     by_cases h : l' = l
-    · simp only [if_pos h, Option.map_some]
-    · simp only [if_neg h]; exact lookupLs_dual l r
+    · simp only [ite_eq_left h, Option.map_some]
+    · simp only [ite_eq_right h]; exact lookupLs_dual l r
 
 theorem eraseLs_dual (l : Nat) : ∀ ys : Ls, eraseLs l (dualBs ys) = dualBs (eraseLs l ys)
   | .nil => by simp only [dualBs, eraseLs]
   | .cons l' k r => by
     simp only [dualBs, eraseLs]
     by_cases h : l' = l
-    · simp only [if_pos h]; exact eraseLs_dual l r
-    · simp only [if_neg h, dualBs, eraseLs_dual l r]
+    · simp only [ite_eq_left h]; exact eraseLs_dual l r
+    · simp only [ite_eq_right h, dualBs, eraseLs_dual l r]
 
 theorem hasLabel_dual (l : Nat) : ∀ xs : Ls, hasLabel l (dualBs xs) = hasLabel l xs
   | .nil => by simp only [dualBs, hasLabel]
@@ -198,8 +198,8 @@ theorem diffLs_dual (xs : Ls) : ∀ ys : Ls,
   | .cons l k r => by
     simp only [dualBs, diffLs, hasLabel_dual]
     by_cases h : hasLabel l xs = true
-    · simp only [if_pos h]; exact diffLs_dual xs r
-    · simp only [if_neg h, dualBs, diffLs_dual xs r]
+    · simp only [ite_eq_left h]; exact diffLs_dual xs r
+    · simp only [ite_eq_right h, dualBs, diffLs_dual xs r]
 
 theorem appendLs_dual : ∀ xs ys : Ls,
     appendLs (dualBs xs) (dualBs ys) = dualBs (appendLs xs ys)
@@ -393,9 +393,9 @@ theorem merge_dual : ∀ x y : L, merge (dual x) (dual y) = (merge x y).map dual
       conv => lhs; rw [merge]
       conv => rhs; rw [merge]
       by_cases h : x = x'
-      · rw [if_pos h, if_pos h, merge_dual b b']
+      · rw [ite_eq_left h, ite_eq_left h, merge_dual b b']
         cases merge b b' <;> rfl
-      · rw [if_neg h, if_neg h]; rfl
+      · rw [ite_eq_right h, ite_eq_right h]; rfl
     | send _ _ => rfl
     | recv _ _ => rfl
     | sel _ => rfl
@@ -470,12 +470,12 @@ theorem loopView_dual (x : Nat) (t : L) : dual (loopView x t) = loopView x (dual
   unfold loopView
   by_cases h : t = .var x
   · have h' : dual t = .var x := (dual_eq_var t x).mpr h
-    rw [if_pos h, if_pos h']; rfl
+    rw [ite_eq_left h, ite_eq_left h']; rfl
   · have h' : ¬ dual t = .var x := fun e => h ((dual_eq_var t x).mp e)
-    rw [if_neg h, if_neg h', mentions_dual]
+    rw [ite_eq_right h, ite_eq_right h', mentions_dual]
     by_cases m : mentions x t = true
-    · rw [if_pos m, if_pos m]; rfl
-    · rw [if_neg m, if_neg m]
+    · rw [ite_eq_left m, ite_eq_left m]; rfl
+    · rw [ite_eq_right m, ite_eq_right m]
 
 mutual
 /-- Role `a`'s view of its interactions with role `b`. -/
@@ -538,22 +538,22 @@ theorem proj_dual (a b : Nat) (hab : a ≠ b) :
     rw [proj_dual a b hab k]
     by_cases h1 : p = a ∧ q = b
     · have h2 : ¬(p = b ∧ q = a) := fun h2 => hab (h1.1.symm.trans h2.1)
-      simp only [if_neg h2, if_pos h1, map_send_dual]
+      simp only [ite_eq_right h2, ite_eq_left h1, map_send_dual]
     · by_cases h2 : p = b ∧ q = a
-      · simp only [if_neg h1, if_pos h2, map_recv_dual]
-      · simp only [if_neg h1, if_neg h2]
+      · simp only [ite_eq_right h1, ite_eq_left h2, map_recv_dual]
+      · simp only [ite_eq_right h1, ite_eq_right h2]
   | .choice p q bs => by
     conv => lhs; rw [proj]
     conv => rhs; rw [proj]
     rw [projBs_dual a b hab bs, mergeAll_dual a b hab bs]
     by_cases h1 : p = a ∧ q = b
     · have h2 : ¬(p = b ∧ q = a) := fun h2 => hab (h1.1.symm.trans h2.1)
-      simp only [if_neg h2, if_pos h1]
+      simp only [ite_eq_right h2, ite_eq_left h1]
       cases projBs a b bs <;> rfl
     · by_cases h2 : p = b ∧ q = a
-      · simp only [if_neg h1, if_pos h2]
+      · simp only [ite_eq_right h1, ite_eq_left h2]
         cases projBs a b bs <;> rfl
-      · simp only [if_neg h1, if_neg h2]
+      · simp only [ite_eq_right h1, ite_eq_right h2]
   | .act _ _ k => by
     conv => lhs; rw [proj]
     conv => rhs; rw [proj]
@@ -563,8 +563,8 @@ theorem proj_dual (a b : Nat) (hab : a ≠ b) :
     conv => rhs; rw [proj]
     rw [Nat.min_comm b a, Nat.max_comm b a, proj_dual a b hab g]
     by_cases c : touches (min a b) (max a b) g = false ∧ closedIn [x] g = true
-    · rw [if_pos c, if_pos c]; rfl
-    · rw [if_neg c, if_neg c]
+    · rw [ite_eq_left c, ite_eq_left c]; rfl
+    · rw [ite_eq_right c, ite_eq_right c]
       cases proj a b g with
       | none => rfl
       | some t => simp only [Option.map_some, loopView_dual]

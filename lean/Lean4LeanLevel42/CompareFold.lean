@@ -74,7 +74,8 @@ theorem compareFold_none_bound (ρ : Valuation) (p : List Name)
       exact Nat.le_trans (compareStep_none_bound ρ p row.1 n row.2 hwr hs) hbr
     | some r =>
       have ht : rows.foldlM (fun r row => compareStep p r row.1 row.2) r = none := by
-        simpa only [List.foldlM_cons, hs, Option.bind_some] using h
+        rw [List.foldlM_cons, hs] at h
+        exact h
       have hres := ih r hwt hbt ht
       have hu := compareStep_some_union ρ p row.1 n row.2 r hwr hs
       omega

@@ -145,9 +145,9 @@ theorem decode_window {expected p nbits : Nat}
   have hr := reconstruct_window_lit expected p (2 ^ nbits) hwin hlo hhi hp
   have ht : p % 2 ^ nbits < 2 ^ nbits := Nat.mod_lt _ (Nat.two_pow_pos nbits)
   unfold decode
-  rw [if_pos ⟨hv, ht, hexp⟩]
+  rw [ite_eq_left ⟨hv, ht, hexp⟩]
   simp only
-  rw [hr, if_pos hp]
+  rw [hr, ite_eq_left hp]
 
 theorem rfc_example : decodeLargest (some 0xa82f30ea) 0x9b32 16 = some 0xa82f9b32 := by
   decide

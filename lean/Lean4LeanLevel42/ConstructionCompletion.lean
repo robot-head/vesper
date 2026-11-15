@@ -163,9 +163,9 @@ theorem normalizeAux_completion (l : Level) (p : List Name) (k : Nat) (acc : Nor
       | none =>
         dsimp only
         by_cases hk : k = 0
-        · simp only [if_pos hk]
+        · simp only [ite_eq_left hk]
           exact normalizeAux_completion u p k acc h hp
-        · simp only [if_neg hk]
+        · simp only [ite_eq_right hk]
           have hs := map_addVar_varSupport acc v k p
           have hu := normalizeAux_completion u p k _ (map_addVar_completion acc v k p h)
             (completes_support acc _ hs [] p hp)
@@ -183,9 +183,9 @@ theorem normalizeAux_completion (l : Level) (p : List Name) (k : Nat) (acc : Nor
       exact ⟨hn.1, varSupport_trans acc _ _ hc (map_addNode_varSupport _ v k p')⟩
     | none =>
       by_cases hk : k = 0
-      · simp only [if_pos hk]
+      · simp only [ite_eq_left hk]
         exact ⟨h, varSupport_refl acc⟩
-      · simp only [if_neg hk]
+      · simp only [ite_eq_right hk]
         exact ⟨map_addVar_completion acc v k p h, map_addVar_varSupport acc v k p⟩
   | mvar _ =>
     rw [Normalize.normalizeAux]

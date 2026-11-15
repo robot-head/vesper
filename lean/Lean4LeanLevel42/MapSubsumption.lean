@@ -52,7 +52,7 @@ theorem minimizeEntry_get_other (acc : NormLevel) (p q : List Name)
     (minimizeEntry acc p original).get? q = acc.get? q := by
   unfold minimizeEntry
   dsimp only
-  split <;> simp only [map_get_erase, map_get_insert, if_neg (Ne.symm hne)]
+  split <;> simp only [map_get_erase, map_get_insert, ite_eq_right (Ne.symm hne)]
 
 /-- Every remaining source row still denotes its original node at its current key.
 Distinct keys make the just-visited key irrelevant to this invariant. -/

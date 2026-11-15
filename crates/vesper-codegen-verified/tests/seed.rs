@@ -69,7 +69,7 @@ fn lock() -> SeedLock {
         ddc_semantic: DdcSemantic {
             path_a_results: d(b"r"),
             path_b_results: d(b"r"),
-            path_b_lean: "Lean 4.24.0".into(),
+            path_b_lean: "Lean 4.35.0".into(),
             path_b_c_compiler: "gcc 13.3.0".into(),
             results_agree: true,
         },

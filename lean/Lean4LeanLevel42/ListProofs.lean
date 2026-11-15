@@ -83,9 +83,9 @@ theorem subsumeVars_union (ρ : Valuation) (a b : List VarNode) :
         have hn : x.var = y.var := name_cmp_eq x.var y.var hc
         by_cases ho : x.offset ≤ y.offset
         · have hv : ρ x.var + x.offset ≤ ρ y.var + y.offset := by rw [hn]; omega
-          simp only [Normalize.subsumeVars, hc, if_pos ho, varsValue_cons]
+          simp only [Normalize.subsumeVars, hc, ite_eq_left ho, varsValue_cons]
           omega
-        · simp only [Normalize.subsumeVars, hc, if_neg ho, varsValue_cons]
+        · simp only [Normalize.subsumeVars, hc, ite_eq_right ho, varsValue_cons]
           omega
       | gt =>
         have ih := subsumeVars_union ρ (x :: xs) ys

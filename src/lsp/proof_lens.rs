@@ -4,7 +4,7 @@
 //! Two obligations exist per function.
 //!
 //! *Extraction* (`lean_extraction_axiom_free`): the module extracted from the
-//! checked source compiles under Lean 4.24.0, and the theorem
+//! checked source compiles under Lean 4.35.0, and the theorem
 //! `VesperLens.obligation_<n> : @f = @f` replays through the kernel with an
 //! empty transitive axiom closure. That establishes that Lean accepts the
 //! extracted definition and that its kernel-visible closure uses no axioms.
@@ -240,8 +240,8 @@ fn run_stages(job: &Job, cancel: &CancelToken, outcome: &mut Outcome) -> StageRe
         return Ok(false);
     };
     let version = String::from_utf8_lossy(&version).trim().to_owned();
-    if !version.contains("version 4.24.0,") {
-        return Err(("toolchain", "proof lenses require Lean 4.24.0".into()));
+    if !version.contains("version 4.35.0,") {
+        return Err(("toolchain", "proof lenses require Lean 4.35.0".into()));
     }
     let lean = Lean {
         prefix,

@@ -155,6 +155,10 @@ impl World {
         (w, errors)
     }
     pub fn constructor(&self, name: &str) -> Option<(&Adt, &Variant)> {
+        // The checker has no namespace resolution for multi-component paths.
+        if name.matches("::").count() > 1 {
+            return None;
+        }
         let short = name.rsplit("::").next().unwrap_or(name);
         self.adts.values().find_map(|a| {
             a.variants

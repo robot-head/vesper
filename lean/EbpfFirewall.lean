@@ -182,7 +182,7 @@ theorem reads_within_checked_bounds (p : List UInt8) :
 
 theorem short_packets_pass (thr : Nat) (c : Counts) (p : List UInt8)
     (h : p.length < headerLen) : filter thr c p = (.pass, c) := by
-  have : fields p = none := by unfold fields; rw [dif_neg (by omega)]
+  have : fields p = none := by unfold fields; rw [dite_eq_right (by omega)]
   unfold filter
   rw [this]
 
@@ -232,10 +232,10 @@ theorem drop_iff_spec (thr : Nat) (c : Counts) (p : List UInt8) :
         unfold synOnly at hs
         refine ⟨he, hp, ?_, ?_, ht⟩ <;>
           cases h1 : synSet f.flags <;> cases h2 : ackSet f.flags <;> simp_all
-      · rw [if_neg hc] at hd
+      · rw [ite_eq_right hc] at hd
         cases hd
     · rintro ⟨he, hp, hs, ha, ht⟩
-      rw [if_pos]
+      rw [ite_eq_left]
       exact ⟨he, hp, by unfold synOnly; rw [hs, ha]; rfl, ht⟩
 
 /-- §27.4: established traffic (ACK set) is never dropped, wherever IPv4
@@ -245,7 +245,7 @@ theorem syn_mitigator_never_drops_ack_packets (thr : Nat) (c : Counts) (p : List
     (filter thr c p).1 = .pass := by
   rw [filter_action, hf]
   simp only
-  rw [if_neg]
+  rw [ite_eq_right]
   unfold dropCond synOnly
   simp [hack]
 
@@ -446,15 +446,15 @@ theorem agree_upd {e : Pkt} {a : Nat → AVal} {r : Nat → Nat} (h : Agree e a 
   intro i
   simp only [upd]
   by_cases hi : i = d
-  · rw [if_pos hi, if_pos hi]; exact hx
-  · rw [if_neg hi, if_neg hi]; exact h i
+  · rw [ite_eq_left hi, ite_eq_left hi]; exact hx
+  · rw [ite_eq_right hi, ite_eq_right hi]; exact h i
 
 theorem upd_self (r : Nat → Nat) (p : Nat) : upd r p (r p) = r := by
   funext j
   simp only [upd]
   by_cases hj : j = p
-  · rw [if_pos hj, hj]
-  · rw [if_neg hj]
+  · rw [ite_eq_left hj, hj]
+  · rw [ite_eq_right hj]
 
 theorem step_sound (e : Pkt) (a a' : Nat → AVal) (r : Nat → Nat) (i : Insn)
     (h : Agree e a r) (hs : astep a i = some a') :
@@ -527,9 +527,9 @@ theorem step_sound (e : Pkt) (a a' : Nat → AVal) (r : Nat → Nat) (i : Insn)
     rename_i o v g
     simp only [conc] at hq
     by_cases hc : r p + n > r q
-    · left; simp only [cstep]; rw [if_pos hc]
+    · left; simp only [cstep]; rw [ite_eq_left hc]
     · right
-      refine ⟨r, by simp only [cstep]; rw [if_neg hc], ?_⟩
+      refine ⟨r, by simp only [cstep]; rw [ite_eq_right hc], ?_⟩
       have := agree_upd h p (av := .pkt o v (max g (o + n))) (x := r p) ?_
       · rwa [upd_self] at this
       · obtain ⟨c, hcv, hx, hg⟩ := hp
@@ -542,11 +542,11 @@ theorem step_sound (e : Pkt) (a a' : Nat → AVal) (r : Nat → Nat) (i : Insn)
     | pkt o v g =>
       rw [has] at hs hs'
       by_cases hk : o + k + 1 ≤ g
-      · simp only [hk, if_true, Option.some.injEq] at hs; subst hs
+      · simp only [hk, ite_true, Option.some.injEq] at hs; subst hs
         obtain ⟨c, _, hx, hg⟩ := hs'
         have hin : e.data ≤ r s + k ∧ r s + k < e.dend := by
           rcases hg with hg | hg <;> omega
-        refine Or.inr ⟨_, by simp only [cstep]; rw [if_pos hin], agree_upd h d (e.byte _)⟩
+        refine Or.inr ⟨_, by simp only [cstep]; rw [ite_eq_left hin], agree_upd h d (e.byte _)⟩
       · simp [hk] at hs
     | unknown => rw [has] at hs; simp at hs
     | scalar => rw [has] at hs; simp at hs

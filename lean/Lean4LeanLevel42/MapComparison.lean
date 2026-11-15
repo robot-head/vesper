@@ -63,7 +63,7 @@ theorem comparison_insert_existing_toList (s : NormLevel) (p : List Name) (n : N
   by_cases he : p = q
   · subst q
     simp only [ite_true, hget]
-  · rw [if_neg he]
+  · rw [ite_eq_right he]
 
 theorem norm_le_eq_toList_compare (left right : NormLevel) :
     left.le right = left.toList.all (fun row =>
@@ -159,7 +159,7 @@ theorem geq_split_dominators :
             { var := [⟨.num .anonymous 0, 0⟩] }).insert [] { const := 2 }).toList =
           [([], { const := 2 }), ([.num .anonymous 0], { var := [⟨.num .anonymous 0, 0⟩] })] := by
         rw [comparison_insert_existing_toList _ _ _ (by
-            rw [map_get_insert, if_neg (by simp), map_get_insert]; rfl),
+            rw [map_get_insert, ite_eq_right (by simp), map_get_insert]; rfl),
           comparison_pair_toList]
       have hsecond :
           ((((({} : NormLevel).insert [] { const := 2 }).insert [.num .anonymous 0]
@@ -167,7 +167,7 @@ theorem geq_split_dominators :
               [.num .anonymous 0] { var := [⟨.num .anonymous 0, 0⟩] }).toList =
           [([], { const := 2 }), ([.num .anonymous 0], { var := [⟨.num .anonymous 0, 0⟩] })] := by
         rw [comparison_insert_existing_toList _ _ _ (by
-            rw [map_get_insert, if_neg (by simp), map_get_insert]; rfl), hfirst]
+            rw [map_get_insert, ite_eq_right (by simp), map_get_insert]; rfl), hfirst]
       simp only [Normalize.normalize, Normalize.normalizeAux, orderedInsert]
       change (NormLevel.subsumption ((({} : NormLevel).insert [] { const := 2 }).insert
         [.num .anonymous 0] { var := [⟨.num .anonymous 0, 0⟩] })).toList = _

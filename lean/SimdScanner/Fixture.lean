@@ -36,7 +36,7 @@ def parseHex : List Char → Option (List Byte)
 partial def loop (stdin : IO.FS.Stream) (stdout : IO.FS.Stream) : IO Unit := do
   let line ← stdin.getLine
   if line.isEmpty then return
-  let fields := line.trimRight.splitOn " "
+  let fields := line.trimAsciiEnd.toString.splitOn " "
   -- An empty slice is sent as `base delim` with no third field.
   let fields := if fields.length == 2 then fields ++ [""] else fields
   match fields with

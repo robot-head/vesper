@@ -251,7 +251,7 @@ fn configured_lean_elaborates_real_ast_witnesses_and_rejects_corruption() {
     assert!(
         String::from_utf8(version.stdout)
             .unwrap()
-            .contains("version 4.24.0,")
+            .contains("version 4.35.0,")
     );
     let scratch = Scratch::new();
     fs::write(

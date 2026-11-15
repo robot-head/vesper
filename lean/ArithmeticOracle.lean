@@ -367,7 +367,7 @@ private def processBytes (id : Nat) (bytes : ByteArray) : Json :=
       | .ok j => processRequest id j
 
 private def ready : Json := Json.arr #[jn 1, Json.str "ready", jn 1,
-  Json.str "4.24.0", Json.str "vesper.arith.checked/1", jn 63, jn 8, jn 3, jn 3, jn 4096]
+  Json.str "4.35.0", Json.str "vesper.arith.checked/1", jn 63, jn 8, jn 3, jn 3, jn 4096]
 private def fatalResponse (category : String) : Json :=
   Json.arr #[jn 1, Json.str "fatal", Json.str category]
 
