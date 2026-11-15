@@ -28,7 +28,7 @@
 //! ([`PdcError::FeedbackShorterThanBlock`]); shorter feedback needs
 //! per-sample evaluation, which this slice does not provide.
 
-use crate::slab::{SlabError, SlabRead, TiledSlab};
+use crate::slab::{DelaySlab, SlabError, SlabRead, TiledSlab};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -487,13 +487,14 @@ impl Inputs<'_> {
     }
 }
 
-/// A compiled graph with preallocated buffers, ready to run blocks. Every
-/// block buffer lives in one [`TiledSlab`].
+/// A compiled graph with preallocated buffers and delay lines, ready to run
+/// blocks. Every block buffer lives in one [`TiledSlab`] and every delay line
+/// lives in one [`DelaySlab`].
 pub struct CompiledGraph {
     schedule: Schedule,
     processors: Vec<Box<dyn DspProcessor>>,
     buffers: TiledSlab,
-    lines: Vec<DelayLine>,
+    lines: DelaySlab,
     block: usize,
 }
 
@@ -529,11 +530,13 @@ impl CompiledGraph {
                 }
             }
         }
-        let lines = schedule
-            .lines
-            .iter()
-            .map(|l| DelayLine::new(l.delay, block))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut line_delays = Vec::with_capacity(schedule.lines.len());
+        for l in &schedule.lines {
+            if l.delay > MAX_DELAY_SAMPLES {
+                return Err(PdcError::DelayTooLong(l.delay));
+            }
+            line_delays.push(l.delay);
+        }
         for op in &schedule.ops {
             let aliased = op.inputs.iter().any(|i| {
                 i.read_buffer() == op.output
@@ -544,6 +547,7 @@ impl CompiledGraph {
             }
         }
         let buffers = TiledSlab::new(schedule.buffer_count, block).map_err(PdcError::Slab)?;
+        let lines = DelaySlab::new(&line_delays, block).map_err(PdcError::Slab)?;
         Ok(CompiledGraph {
             schedule,
             processors,
@@ -568,6 +572,11 @@ impl CompiledGraph {
         &self.buffers
     }
 
+    /// The delay-line slab (layout and working-set size).
+    pub fn delay_slab(&self) -> &DelaySlab {
+        &self.lines
+    }
+
     /// Run one block. Does not allocate.
     pub fn process_block(&mut self) {
         for op in &self.schedule.ops {
@@ -579,15 +588,15 @@ impl CompiledGraph {
                         ..
                     } => {
                         if let Some(src) = self.buffers.buffer(buffer) {
-                            self.lines[line].write(src);
+                            self.lines.write(line, src);
                         }
                         if let Some(dst) = self.buffers.buffer_mut(scratch) {
-                            self.lines[line].read(dst);
+                            self.lines.read(line, dst);
                         }
                     }
                     InputSource::Feedback { line, buffer, .. } => {
                         if let Some(dst) = self.buffers.buffer_mut(buffer) {
-                            self.lines[line].read(dst);
+                            self.lines.read(line, dst);
                         }
                     }
                     InputSource::Forward { line: None, .. } => {}
@@ -601,13 +610,11 @@ impl CompiledGraph {
                 };
                 self.processors[op.spec_index].process(&inputs, out);
                 for &line in &op.feeds {
-                    self.lines[line].write(out);
+                    self.lines.write(line, out);
                 }
             }
         }
-        for line in &mut self.lines {
-            line.advance(self.block);
-        }
+        self.lines.advance_all(self.block);
     }
 
     /// Output block of `node` from the last [`process_block`](Self::process_block).

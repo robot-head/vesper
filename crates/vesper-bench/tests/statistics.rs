@@ -282,3 +282,86 @@ fn mann_whitney_reversal_permutation_bounds_and_extremes() {
         Err(Error::Limit("rank sample size"))
     );
 }
+
+#[test]
+fn exact_mann_whitney_matches_independent_enumeration() {
+    // Enumerate every assignment of ordered distinct ranks to the first arm.
+    for n in 1..=4usize {
+        for m in 1..=4usize {
+            let size = n + m;
+            let mut cases = Vec::new();
+            let mut histogram = vec![0u128; n * m + 1];
+            for mask in 0u32..(1u32 << size) {
+                if mask.count_ones() as usize != n {
+                    continue;
+                }
+                let first: Vec<u64> = (0..size)
+                    .filter(|i| mask & (1 << i) != 0)
+                    .map(|i| i as u64)
+                    .collect();
+                let second: Vec<u64> = (0..size)
+                    .filter(|i| mask & (1 << i) == 0)
+                    .map(|i| i as u64)
+                    .collect();
+                let u = first
+                    .iter()
+                    .flat_map(|x| second.iter().map(move |y| usize::from(x > y)))
+                    .sum::<usize>();
+                histogram[u] += 1;
+                cases.push((first, second, u));
+            }
+            let total: u128 = histogram.iter().sum();
+            for (first, second, u) in cases {
+                let tail: u128 = histogram[..=u.min(n * m - u)].iter().sum();
+                let result = mann_whitney_exact(&first, &second).unwrap();
+                assert_eq!(result.u_first, u as u64);
+                assert_eq!(
+                    (result.numerator, result.denominator),
+                    ((2 * tail).min(total), total)
+                );
+                let reverse = mann_whitney_exact(&second, &first).unwrap();
+                assert_eq!(
+                    (reverse.numerator, reverse.denominator),
+                    (result.numerator, result.denominator)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn exact_mann_whitney_refuses_all_ties_and_bounds_work() {
+    assert_eq!(mann_whitney_exact(&[], &[1]), Err(Error::EmptyEvidence));
+    assert_eq!(mann_whitney_exact(&[1], &[]), Err(Error::EmptyEvidence));
+    assert_eq!(
+        mann_whitney_exact(&[1, 1], &[2]),
+        Err(Error::TiedObservations)
+    );
+    assert_eq!(
+        mann_whitney_exact(&[1], &[2, 2]),
+        Err(Error::TiedObservations)
+    );
+    assert_eq!(
+        mann_whitney_exact(&[1, 2], &[2, 3]),
+        Err(Error::TiedObservations)
+    );
+    assert_eq!(
+        mann_whitney_exact(&[0; 33], &[1]),
+        Err(Error::Limit("exact rank sample size"))
+    );
+    assert_eq!(
+        mann_whitney_exact(&[0], &[1; 33]),
+        Err(Error::Limit("exact rank sample size"))
+    );
+    let first: Vec<u64> = (0..32).collect();
+    let second: Vec<u64> = (32..64).collect();
+    let result = mann_whitney_exact(&first, &second).unwrap();
+    assert_eq!(result.u_first, 0);
+    assert_eq!(result.numerator, 2);
+    assert_eq!(result.denominator, 1_832_624_140_942_590_534);
+    let extremes = mann_whitney_exact(&[u64::MAX], &[0]).unwrap();
+    assert_eq!(
+        (extremes.u_first, extremes.numerator, extremes.denominator),
+        (1, 2, 2)
+    );
+}
