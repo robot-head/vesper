@@ -15,10 +15,12 @@ mod arithmetic;
 pub mod causal;
 mod execution;
 pub mod layout;
+mod signed_rank_confidence;
 mod statistics;
 pub mod wire;
 pub use arithmetic::*;
 pub use execution::*;
+pub use signed_rank_confidence::*;
 pub use statistics::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
