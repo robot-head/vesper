@@ -1,7 +1,7 @@
 //! §11 extraction breadth: structs, enums and `match`, recursion and bounded
 //! loops (total fuel companions), `Fail` and state effects, and user contracts.
 //! Each fixture is extracted, then compiled together with its proof script by
-//! Lean 4.24.0 when `VESPER_LEAN` (or `lean` on PATH) is available. Every
+//! Lean 4.35.0 when `VESPER_LEAN` (or `lean` on PATH) is available. Every
 //! theorem's axiom closure is printed and must not contain `sorryAx` or
 //! `Lean.ofReduceBool`.
 use std::{

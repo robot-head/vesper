@@ -201,7 +201,7 @@ pub(crate) fn ready(bytes: &[u8]) -> Result<(), HarnessError> {
         1,
         "ready",
         1,
-        "4.24.0",
+        "4.35.0",
         "vesper.arith.checked/1",
         63,
         8,

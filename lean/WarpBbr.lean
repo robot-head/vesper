@@ -164,7 +164,7 @@ theorem pacingDelay_rounding (bytes rate : Nat) (hr : 0 < rate)
   have hle := ceilDiv_le (bytes * nanosPerSec) rate hr
   have hmin : min (ceilDiv (bytes * nanosPerSec) rate) U64MAX =
       ceilDiv (bytes * nanosPerSec) rate := Nat.min_eq_left (by omega)
-  simp only [pacingDelay, hne, if_false, hmin]
+  simp only [pacingDelay, hne, ite_false, hmin]
   exact ceilDiv_bounds _ _ hr
 
 theorem pacingDelay_zero_rate (bytes : Nat) : pacingDelay bytes 0 = U64MAX := by
@@ -220,7 +220,7 @@ theorem sendTrace_bound (maxPkt : Nat) (s : Flight) (e : Ev)
   cases e with
   | send b =>
     simp only [isAcceptedSend] at hacc
-    simp only [stepFlight, hacc, and_self, if_true]
+    simp only [stepFlight, hacc, and_self, ite_true]
     exact send_respects_cwnd _ _ _ _ hacc.1 hacc.2
   | release _ => exact absurd hacc id
   | setCwnd _ => exact absurd hacc id

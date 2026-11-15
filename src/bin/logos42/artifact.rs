@@ -227,14 +227,16 @@ struct Inputs {
 }
 fn inputs() -> Result<Inputs, Error> {
     let pins: Pins = bounded_json(PINS.as_bytes(), 4 * MIB)?;
-    if pins.schema != 2
+    if pins.schema != 3
         || pins.profile != PROFILE
         || pins.upstream_commit != UPSTREAM
-        || pins.batteries_commit != BATTERIES
-        || pins.lean_release != "leanprover/lean4:v4.24.0"
+        || pins.exporter_commit != EXPORTER
+        || pins.lean_release != "leanprover/lean4:v4.35.0"
         || pins.lean_commit != LEAN_COMMIT
-        || pins.build_argv != ["{lake}", "build", "lean4lean"]
-        || pins.checker_relative_path != ".lake/build/bin/lean4lean"
+        || pins.build_argv != ["{lake}", "build", "logos42"]
+        || pins.checker_relative_path != ".lake/build/bin/logos42"
+        || pins.kernel_relative_path != ".lake/build/rust/release/logos-kernel"
+        || pins.cargo_build_argv != CARGO_RECIPE
     {
         return Err(Error::new(
             ErrorKind::UnsupportedCandidate,
@@ -244,35 +246,31 @@ fn inputs() -> Result<Inputs, Error> {
     if resource::verify_bundle()? != pins.resource_bundle_blake3 {
         return Err(identity("embedded resource bundle association"));
     }
-    let paths = [
-        "tools/lean4lean42/patches/toolchain.patch",
-        "tools/lean4lean42/patches/kernel.patch",
-        "tools/lean4lean42/patches/replay.patch",
-    ];
-    if pins.patches.len() != 3
-        || pins
-            .patches
-            .iter()
-            .zip(paths)
-            .zip(PATCHES)
-            .any(|((p, path), bytes)| p.path != path || p.blake3 != digest(bytes))
+    if pins.patches.len() != 1
+        || pins.patches[0].path != "tools/logos42/patches/lean435-primitives.patch"
+        || pins.patches[0].blake3 != digest(PATCHES[0])
     {
-        return Err(identity("embedded patch association"));
+        return Err(identity("embedded primitive port association"));
     }
-    if pins.controls_overlay.len() != 1
-        || pins.controls_overlay[0].source != "tools/lean4lean42/controls/VesperControls.lean"
-        || pins.controls_overlay[0].destination != "Lean4Lean/VesperControls.lean"
-        || pins.controls_overlay[0].blake3 != digest(CONTROLS_SOURCE)
+    if pins.source_overlays.len() != ADAPTER_SOURCES.len()
+        || pins
+            .source_overlays
+            .iter()
+            .zip(ADAPTER_SOURCES)
+            .any(|(p, (path, bytes))| {
+                p.source != format!("tools/logos42/{path}")
+                    || p.destination != path
+                    || p.blake3 != digest(bytes)
+            })
         || pins.known_fixes_blake3 != digest(KNOWN_FIXES.as_bytes())
     {
-        return Err(identity("embedded controls association"));
+        return Err(identity("embedded adapter source association"));
     }
     let sources: SourceManifest = bounded_json(SOURCE_MANIFEST.as_bytes(), 4 * MIB)?;
     if sources.schema != 1
         || sources.files.is_empty()
         || sources.files.len() > 8192
-        || manifest_hash(b"vesper.lean4lean42.sources\0", &sources.files)
-            != pins.source_manifest_blake3
+        || manifest_hash(b"vesper.logos42.sources\0", &sources.files) != pins.source_manifest_blake3
     {
         return Err(identity("embedded source manifest association"));
     }
@@ -298,7 +296,7 @@ fn inputs() -> Result<Inputs, Error> {
         "role",
         "upstream_base",
         "lean_toolchain",
-        "batteries_commit",
+        "exporter_commit",
         "controls",
         "fixes",
         "source_sha256",
@@ -310,8 +308,8 @@ fn inputs() -> Result<Inputs, Error> {
         || v["schema"] != 1
         || v["role"] != "review_evidence_not_success_receipt"
         || v["upstream_base"] != UPSTREAM
-        || v["lean_toolchain"] != "leanprover/lean4:v4.24.0"
-        || v["batteries_commit"] != BATTERIES
+        || v["lean_toolchain"] != "leanprover/lean4:v4.35.0"
+        || v["exporter_commit"] != EXPORTER
     {
         return Err(identity("known-fixes profile"));
     }
@@ -348,7 +346,8 @@ fn inputs() -> Result<Inputs, Error> {
     }
     let mut seen = BTreeSet::new();
     for c in &controls {
-        if c.source != "tools/lean4lean42/controls/VesperControls.lean"
+        if c.kind != ControlKind::RawExport
+            || c.source != "tools/logos42/controls/cases.json"
             || c.id.is_empty()
             || c.id.len() > 128
             || c.expected_reason.is_empty()
@@ -384,7 +383,7 @@ fn source_skip(path: &str) -> bool {
     {
         return true;
     }
-    [".lake/build", ".lake/packages/batteries/.lake/build"]
+    [".lake/build"]
         .iter()
         .any(|p| path == *p || path.strip_prefix(p).is_some_and(|s| s.starts_with('/')))
 }
@@ -492,9 +491,7 @@ fn build_outputs(root: &Path, limits: &Limits, end: Instant) -> Result<Vec<FileD
         end,
         false,
     );
-    for p in [".lake/build", ".lake/packages/batteries/.lake/build"] {
-        scan.walk(&root.join(p), 0)?
-    }
+    scan.walk(&root.join(".lake/build"), 0)?;
     Ok(scan.finish())
 }
 pub fn read_receipt(root: &Path) -> Result<Receipt, Error> {
@@ -658,7 +655,7 @@ fn runtime_files(
 }
 fn runtime_hash(files: &[CompilerRuntimeFile]) -> Digest {
     let mut h = blake3::Hasher::new();
-    h.update(b"vesper.lean4lean42.compiler_runtime\0");
+    h.update(b"vesper.logos42.compiler_runtime\0");
     h.update(&1u16.to_le_bytes());
     h.update(&(files.len() as u32).to_le_bytes());
     for f in files {
@@ -734,10 +731,41 @@ fn same_invocation(left: &Path, right: &Path) -> Result<bool, Error> {
         && left.parent() == right.parent()
         && fs::canonicalize(left)? == fs::canonicalize(right)?)
 }
+const CARGO_RECIPE: [&str; 11] = [
+    "{cargo}",
+    "build",
+    "-p",
+    "vesper-logos-kernel",
+    "--locked",
+    "--release",
+    "--bin",
+    "logos-kernel",
+    "--target-dir",
+    ".lake/build/rust",
+    "--offline",
+];
+fn cargo_recipe(argv: &[String], cargo: &Path) -> Result<bool, Error> {
+    Ok(argv.len() == CARGO_RECIPE.len()
+        && argv[1..] == CARGO_RECIPE[1..]
+        && same_invocation(Path::new(&argv[0]), cargo)?)
+}
+fn executable_digest(path: &Path, end: Instant) -> Result<Digest, Error> {
+    let path = fs::canonicalize(path)?;
+    let root = path.parent().ok_or_else(|| identity("executable parent"))?;
+    Ok(file_digest(root, &path, 256 * MIB as u64, end)?.blake3)
+}
+fn kernel_digest(root: &Path, pins: &Pins, end: Instant) -> Result<Digest, Error> {
+    let path = if cfg!(windows) {
+        root.join(&pins.kernel_relative_path).with_extension("exe")
+    } else {
+        root.join(&pins.kernel_relative_path)
+    };
+    Ok(file_digest(root, &path, 256 * MIB as u64, end)?.blake3)
+}
 fn build_recipe(argv: &[String], lake: &Path) -> Result<bool, Error> {
     Ok(argv.len() == 3
         && argv[1] == "build"
-        && argv[2] == "lean4lean"
+        && argv[2] == "logos42"
         && same_invocation(Path::new(&argv[0]), lake)?)
 }
 fn command(
@@ -850,8 +878,8 @@ fn compiler(
 ) -> Result<(PathBuf, PathBuf), Error> {
     let launcher = resolve_invocation(launcher)?;
     let v = probe(&launcher, "--version", cwd, limits, report.as_deref_mut())?;
-    if !v.contains("version 4.24.0") || !v.contains(&LEAN_COMMIT[..12]) {
-        return Err(identity("required Lean4.24 compiler commit"));
+    if !v.contains("version 4.35.0") || !v.contains(&LEAN_COMMIT[..12]) {
+        return Err(identity("required Lean4.35 compiler commit"));
     }
     let root = fs::canonicalize(probe(
         &launcher,
@@ -882,7 +910,7 @@ fn compiler(
     let lv = probe(&lake, "--version", cwd, limits, report)?;
     if lv
         != format!(
-            "Lake version 5.0.0-src+{} (Lean version 4.24.0)",
+            "Lake version 5.0.0-src+{} (Lean version 4.35.0)",
             &LEAN_COMMIT[..7]
         )
     {
@@ -903,7 +931,7 @@ fn fresh_token() -> Result<String, Error> {
         }
     }
     let mut h = blake3::Hasher::new();
-    h.update(b"vesper.lean4lean42.session\0");
+    h.update(b"vesper.logos42.session\0");
     h.update(&std::process::id().to_le_bytes());
     h.update(&n.to_le_bytes());
     h.update(
@@ -929,7 +957,7 @@ impl Workspace {
             .unwrap_or_else(std::env::temp_dir);
         fs::create_dir_all(&parent)?;
         for _ in 0..16 {
-            let path = parent.join(format!("vesper-lean4lean42-{}", fresh_token()?));
+            let path = parent.join(format!("vesper-logos42-{}", fresh_token()?));
             match fs::create_dir(&path) {
                 Ok(()) => {
                     return Ok(Self {
@@ -963,7 +991,6 @@ fn roots(root: &Path, models: &Path, sysroot: &Path, controls: bool) -> Vec<Path
     let mut v = vec![models.to_owned(), sysroot.join("lib/lean")];
     if controls {
         v.push(root.join(".lake/build/lib/lean"));
-        v.push(root.join(".lake/packages/batteries/.lake/build/lib/lean"));
     }
     v
 }
@@ -1059,7 +1086,7 @@ fn import_envelope(
 ) -> Result<ImportEnvelope, Error> {
     let end = until(limits.inventory_timeout_ms);
     let mut h = blake3::Hasher::new();
-    h.update(b"vesper.lean4lean42.imports\0");
+    h.update(b"vesper.logos42.imports\0");
     h.update(&1u16.to_le_bytes());
     h.update(&[inv.target]);
     h.update(&(inv.modules.len() as u32).to_le_bytes());
@@ -1086,10 +1113,8 @@ fn import_envelope(
             models.to_owned()
         } else if ["Init", "Std", "Lean", "Lake"].contains(&first) {
             sysroot.join("lib/lean")
-        } else if controls && first == "Lean4Lean" {
+        } else if controls && first == "LogosControls" {
             root.join(".lake/build/lib/lean")
-        } else if controls && first == "Batteries" {
-            root.join(".lake/packages/batteries/.lake/build/lib/lean")
         } else {
             return Err(identity("unexpected module routing root"));
         };
@@ -1168,10 +1193,10 @@ fn validate_receipt(
     i: &Inputs,
     limits: &Limits,
 ) -> Result<(PathBuf, PathBuf), Error> {
-    if r.schema != 2
+    if r.schema != 3
         || r.profile != i.pins.profile
         || r.upstream_commit != UPSTREAM
-        || r.batteries_commit != BATTERIES
+        || r.exporter_commit != EXPORTER
         || r.lean_release != i.pins.lean_release
         || r.lean_commit != LEAN_COMMIT
         || r.resource_bundle_blake3 != i.pins.resource_bundle_blake3
@@ -1181,6 +1206,7 @@ fn validate_receipt(
         || r.source_manifest != i.sources.files
         || r.source_manifest_blake3 != i.pins.source_manifest_blake3
         || r.checker_relative_path != i.pins.checker_relative_path
+        || r.kernel_relative_path != i.pins.kernel_relative_path
         || r.build_exit != 0
     {
         return Err(identity("receipt does not match embedded candidate"));
@@ -1195,7 +1221,9 @@ fn validate_receipt(
     let lake = sysroot
         .join("bin")
         .join(if cfg!(windows) { "lake.exe" } else { "lake" });
-    if !same_invocation(Path::new(&r.compiler_path), &lean)? || !build_recipe(&r.build_argv, &lake)?
+    if !same_invocation(Path::new(&r.compiler_path), &lean)?
+        || !build_recipe(&r.build_argv, &lake)?
+        || !cargo_recipe(&r.cargo_build_argv, Path::new(&r.cargo_path))?
     {
         return Err(identity("receipt actual compiler/build recipe"));
     }
@@ -1203,6 +1231,8 @@ fn validate_receipt(
     compare_sources(root, i, end)?;
     if checker_digest(root, &i.pins, end)? != r.checker_blake3
         || compiler_digest(&lean, &sysroot, end)? != r.compiler_blake3
+        || kernel_digest(root, &i.pins, end)? != r.kernel_blake3
+        || executable_digest(Path::new(&r.cargo_path), end)? != r.cargo_blake3
     {
         return Err(identity("compiler/checker bytes changed"));
     }
@@ -1214,7 +1244,7 @@ fn validate_receipt(
     }
     let outputs = build_outputs(root, limits, end)?;
     if outputs != r.build_output_manifest
-        || manifest_hash(b"vesper.lean4lean42.build_outputs\0", &outputs)
+        || manifest_hash(b"vesper.logos42.build_outputs\0", &outputs)
             != r.build_output_manifest_blake3
     {
         return Err(identity("generated build envelope changed"));
@@ -1241,13 +1271,15 @@ pub fn seal(root: &Path) -> Result<Receipt, Error> {
     compare_sources(&root, &i, until(limits.inventory_timeout_ms))?;
     let setup: SetupInputs =
         bounded_json(&read_bytes(&root.join("setup-inputs.json"), 16384)?, 16384)?;
-    if setup.schema != 1
+    if setup.schema != 2
         || setup.build_exit != 0
         || setup.build_stdout != "build.stdout"
         || setup.build_stderr != "build.stderr"
         || !Path::new(&setup.lean).is_absolute()
         || !Path::new(&setup.lake).is_absolute()
         || !Path::new(&setup.git).is_absolute()
+        || !Path::new(&setup.cargo).is_absolute()
+        || !cargo_recipe(&setup.cargo_build_argv, Path::new(&setup.cargo))?
         || setup.build_argv.len() > 32
         || setup.build_argv.iter().map(String::len).sum::<usize>() > 8192
     {
@@ -1268,6 +1300,8 @@ pub fn seal(root: &Path) -> Result<Receipt, Error> {
     let outputs = build_outputs(&root, &limits, end)?;
     let initial_compiler = compiler_digest(&lean, &sysroot, end)?;
     let initial_checker = checker_digest(&root, &i.pins, end)?;
+    let initial_kernel = kernel_digest(&root, &i.pins, end)?;
+    let cargo_blake3 = executable_digest(Path::new(&setup.cargo), end)?;
     let models = Workspace::new(None)?;
     let context = MachineContext {
         root: &root,
@@ -1293,10 +1327,10 @@ pub fn seal(root: &Path) -> Result<Receipt, Error> {
         return Err(identity("control baseline changed during controls"));
     }
     let receipt = Receipt {
-        schema: 2,
+        schema: 3,
         profile: i.pins.profile.clone(),
         upstream_commit: UPSTREAM.into(),
-        batteries_commit: BATTERIES.into(),
+        exporter_commit: EXPORTER.into(),
         lean_release: i.pins.lean_release.clone(),
         lean_commit: LEAN_COMMIT.into(),
         resource_bundle_blake3: i.pins.resource_bundle_blake3,
@@ -1312,6 +1346,11 @@ pub fn seal(root: &Path) -> Result<Receipt, Error> {
         compiler_runtime_manifest: runtime,
         checker_relative_path: i.pins.checker_relative_path.clone(),
         checker_blake3: initial_checker,
+        kernel_relative_path: i.pins.kernel_relative_path.clone(),
+        kernel_blake3: initial_kernel,
+        cargo_path: setup.cargo,
+        cargo_blake3,
+        cargo_build_argv: setup.cargo_build_argv,
         driver_blake3: digest_driver()?,
         build_argv: setup.build_argv,
         build_exit: 0,
@@ -1323,10 +1362,7 @@ pub fn seal(root: &Path) -> Result<Receipt, Error> {
         controls: controls.controls,
         control_inventory_blake3: baseline.blake3,
         control_import_manifest_blake3: imports.hash,
-        build_output_manifest_blake3: manifest_hash(
-            b"vesper.lean4lean42.build_outputs\0",
-            &outputs,
-        ),
+        build_output_manifest_blake3: manifest_hash(b"vesper.logos42.build_outputs\0", &outputs),
         build_output_manifest: outputs,
     };
     validate_receipt(&root, &receipt, &i, &limits)?;
@@ -1594,10 +1630,11 @@ pub fn execute(
         report.tools = Some(ToolInfo {
             profile: r.profile.clone(),
             upstream_commit: r.upstream_commit.clone(),
-            batteries_commit: r.batteries_commit.clone(),
+            exporter_commit: r.exporter_commit.clone(),
             lean_release: r.lean_release.clone(),
             lean_commit: r.lean_commit.clone(),
             checker_blake3: r.checker_blake3,
+            kernel_blake3: r.kernel_blake3,
             compiler_blake3: r.compiler_blake3,
             compiler_runtime_manifest_blake3: r.compiler_runtime_manifest_blake3,
             resource_bundle_blake3: r.resource_bundle_blake3,

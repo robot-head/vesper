@@ -1,7 +1,7 @@
 import Lean4Lean.Environment
 
 /-!
-Fixed raw Declaration/Expr controls for Vesper's reviewed Lean 4.24 port.
+Fixed raw Declaration/Expr controls for Vesper's reviewed Lean 4.35 port.
 Adapted from upstream Lean4Lean tests at the commits listed in known-fixes.json.
 Upstream is Apache-2.0; the base LICENSE remains part of the pinned source.
 No invalid case is delegated to native elaboration: every verdict below calls
@@ -310,14 +310,14 @@ open Lean Lean4Lean TypeChecker
 
 -- Copy already imported genuine constants, excluding the candidate name.
 -- The unverified candidate is never inserted before its actual checks.
-open private Lean.Kernel.Environment.mk from Lean.Environment in
+open private Lean.Kernel.Environment.mk Lean.EnvironmentHeader.mk from Lean.Environment in
 private def without (env : Kernel.Environment) (name : Name) : Kernel.Environment :=
   let constants := env.constants.toList.foldl (init := ({} : Std.HashMap Name ConstantInfo))
     fun m (n, ci) => if n == name then m else m.insert n ci
   Lean.Kernel.Environment.mk
     (constants := SMap.fromHashMap constants false) (quotInit := env.quotInit)
     (diagnostics := {}) (const2ModIdx := {}) (extensions := #[]) (irBaseExts := #[])
-    (header := { mainModule := `RawControlBaseline })
+    (header := Lean.EnvironmentHeader.mk 0 `RawControlBaseline false #[] #[] #[] {} #[] #[])
 
 private def twoNatZero : Expr :=
   .lam `x (.const ``Nat []) (.lam `y (.const ``Nat []) (mkRawNatLit 0) .default) .default
@@ -519,7 +519,9 @@ private def edges (env : Kernel.Environment) : ControlM Unit := do
     TypeChecker.M.run env (x := checkType (deepNat 16))
   assertTrue "fuel.shallow-type" (shallow.isConstOf ``Nat)
   expectError "fuel.deep-refusal" "deep_recursion" <|
-    TypeChecker.M.run env (x := whnf (deepNat 1200))
+    TypeChecker.M.run env (x := withReader
+      (fun context : TypeChecker.Context => {context with recDepth := 1000})
+      (whnf (deepNat 1200)))
 
 private def metadata (env : Kernel.Environment) : ControlM Unit := do
   let fresh ← match Lean4Lean.addDecl env treeDecl with

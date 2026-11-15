@@ -302,7 +302,7 @@ theorem firstDemandMismatch_none_equal {mode : Mode} {context : Context}
       · have hdiff : left.headD false ≠ right.headD false := by simpa [demand_zero] using heq
         change (if head.ty.kind = mode ∧ left.headD false ≠ right.headD false
           then some base else firstDemandMismatch mode rest left.tail right.tail (base+1)) = none at h
-        rw [if_pos ⟨hk,hdiff⟩] at h
+        rw [ite_eq_left ⟨hk,hdiff⟩] at h
         contradiction
     | succ i =>
       have ht : firstDemandMismatch mode rest left.tail right.tail (base+1) = none := by

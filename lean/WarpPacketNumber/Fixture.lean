@@ -17,7 +17,7 @@ open Vesper.WarpPacketNumber
 partial def loop (stdin : IO.FS.Stream) (stdout : IO.FS.Stream) : IO Unit := do
   let line ← stdin.getLine
   if line.isEmpty then return
-  match line.trimRight.splitOn " " with
+  match line.trimAsciiEnd.toString.splitOn " " with
   | [largest, t, n] =>
     let largest? : Option (Option Nat) :=
       if largest == "-" then some none else largest.toNat?.map some

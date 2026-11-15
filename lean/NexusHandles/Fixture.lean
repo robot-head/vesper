@@ -47,7 +47,7 @@ def stepLine (T : Table) (line : String) : Table × String :=
 partial def loop (stdin : IO.FS.Stream) (stdout : IO.FS.Stream) (T : Table) : IO Unit := do
   let line ← stdin.getLine
   if line.isEmpty then return
-  let (T', out) := stepLine T line.trimRight
+  let (T', out) := stepLine T line.trimAsciiEnd.toString
   stdout.putStrLn out
   loop stdin stdout T'
 

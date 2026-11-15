@@ -1,8 +1,8 @@
 diff --git a/Main.lean b/Main.lean
-index e23b981..684952b 100644
+index e23b981..8b4d1be 100644
 --- a/Main.lean
 +++ b/Main.lean
-@@ -2,365 +2,661 @@
+@@ -2,365 +2,668 @@
  Copyright (c) 2023 Scott Morrison. All rights reserved.
  Released under Apache 2.0 license as described in the file LICENSE.
  Authors: Scott Morrison
@@ -80,79 +80,6 @@ index e23b981..684952b 100644
 -  if r.contains name then
 -    modify fun s => { s with remaining := s.remaining.erase name, pending := s.pending.insert name }
 -    return true
--  else
--    return false
--
--def Lean.Kernel.Exception.mapEnvM [Monad m]
--    (ex : Exception) (f : Environment → m Environment) : m Exception := do
--  match ex with
--  | unknownConstant env c => return .unknownConstant (← f env) c
--  | alreadyDeclared env c => return .alreadyDeclared (← f env) c
--  | declTypeMismatch env d t => return .declTypeMismatch env d t
--  | declHasMVars env c e => return declHasMVars (← f env) c e
--  | declHasFVars env c e => return declHasFVars (← f env) c e
--  | funExpected env lctx e => return funExpected (← f env) lctx e
--  | typeExpected env lctx e => return typeExpected (← f env) lctx e
--  | letTypeMismatch  env lctx n t1 t2 => return letTypeMismatch (← f env) lctx n t1 t2
--  | exprTypeMismatch env lctx e t => return exprTypeMismatch (← f env) lctx e t
--  | appTypeMismatch  env lctx e fn arg => return appTypeMismatch (← f env) lctx e fn arg
--  | invalidProj env lctx e => return invalidProj (← f env) lctx e
--  | thmTypeIsNotProp env c t => return thmTypeIsNotProp (← f env) c t
--  | other _
--  | deterministicTimeout
--  | excessiveMemory
--  | deepRecursion
--  | interrupted => return ex
--
--/-- Use the current `Environment` to throw a `Kernel.Exception`. -/
--def throwKernelException (ex : Exception) : M α := do
--  let options := pp.match.set (pp.rawOnError.set {} true) false
--  -- Note: because the environment we are using has no extension state,
--  -- we cannot safely use it with lean functions like the pretty printer.
--  -- Here we instead create a fresh environment, which is good enough to get
--  -- basic pretty printing working.
--  let env ← mkEmptyEnvironment
--  let ex ← ex.mapEnvM fun _ => return env.toKernelEnv
--  Prod.fst <$> (Lean.Core.CoreM.toIO · { fileName := "", options, fileMap := default } { env }) do
--    Lean.throwKernelException ex
--
--def Lean.Declaration.name : Declaration → String
--  | .axiomDecl d => s!"axiomDecl {d.name}"
--  | .defnDecl d => s!"defnDecl {d.name}"
--  | .thmDecl d => s!"thmDecl {d.name}"
--  | .opaqueDecl d => s!"opaqueDecl {d.name}"
--  | .quotDecl => s!"quotDecl"
--  | .mutualDefnDecl d => s!"mutualDefnDecl {d.map (·.name)}"
--  | .inductDecl _ _ d _ => s!"inductDecl {d.map (·.name)}"
--
--/-- Add a declaration, possibly throwing a `KernelException`. -/
--def addDecl (d : Declaration) : M Unit := do
--  if (← read).verbose then
--    println! "adding {d.name}"
--  let t1 ← IO.monoMsNow
--  match Lean4Lean.addDecl (← get).env d true with
--  | .ok env =>
--    let t2 ← IO.monoMsNow
--    if t2 - t1 > 1000 then
--      if (← read).compare then
--        let t3 ← match (← get).env.addDecl {} d with
--        | .ok _ => IO.monoMsNow
--        | .error ex => _root_.throwKernelException ex
--        if (t2 - t1) > 2 * (t3 - t2) then
--          println!
--            "{(← get).env.header.mainModule}:{d.name}: lean took {t3 - t2}, lean4lean took {t2 - t1}"
--        else
--          println! "{(← get).env.header.mainModule}:{d.name}: lean4lean took {t2 - t1}"
--      else
--        println! "{(← get).env.header.mainModule}:{d.name}: lean4lean took {t2 - t1}"
--    modify fun s => { s with env, numAdded := s.numAdded + 1 }
--  | .error ex =>
--    throwKernelException ex
--
--deriving instance BEq for ConstantVal
--deriving instance BEq for ConstructorVal
--deriving instance BEq for RecursorRule
--deriving instance BEq for RecursorVal
 +open Lean4Lean
 +
 +structure Failure where
@@ -386,7 +313,79 @@ index e23b981..684952b 100644
 +      let e := entries[i]!
 +      if modules[e.moduleId]!.name == targetName target then
 +        required := required.push i
-+  else
+   else
+-    return false
+-
+-def Lean.Kernel.Exception.mapEnvM [Monad m]
+-    (ex : Exception) (f : Environment → m Environment) : m Exception := do
+-  match ex with
+-  | unknownConstant env c => return .unknownConstant (← f env) c
+-  | alreadyDeclared env c => return .alreadyDeclared (← f env) c
+-  | declTypeMismatch env d t => return .declTypeMismatch env d t
+-  | declHasMVars env c e => return declHasMVars (← f env) c e
+-  | declHasFVars env c e => return declHasFVars (← f env) c e
+-  | funExpected env lctx e => return funExpected (← f env) lctx e
+-  | typeExpected env lctx e => return typeExpected (← f env) lctx e
+-  | letTypeMismatch  env lctx n t1 t2 => return letTypeMismatch (← f env) lctx n t1 t2
+-  | exprTypeMismatch env lctx e t => return exprTypeMismatch (← f env) lctx e t
+-  | appTypeMismatch  env lctx e fn arg => return appTypeMismatch (← f env) lctx e fn arg
+-  | invalidProj env lctx e => return invalidProj (← f env) lctx e
+-  | thmTypeIsNotProp env c t => return thmTypeIsNotProp (← f env) c t
+-  | other _
+-  | deterministicTimeout
+-  | excessiveMemory
+-  | deepRecursion
+-  | interrupted => return ex
+-
+-/-- Use the current `Environment` to throw a `Kernel.Exception`. -/
+-def throwKernelException (ex : Exception) : M α := do
+-  let options := pp.match.set (pp.rawOnError.set {} true) false
+-  -- Note: because the environment we are using has no extension state,
+-  -- we cannot safely use it with lean functions like the pretty printer.
+-  -- Here we instead create a fresh environment, which is good enough to get
+-  -- basic pretty printing working.
+-  let env ← mkEmptyEnvironment
+-  let ex ← ex.mapEnvM fun _ => return env.toKernelEnv
+-  Prod.fst <$> (Lean.Core.CoreM.toIO · { fileName := "", options, fileMap := default } { env }) do
+-    Lean.throwKernelException ex
+-
+-def Lean.Declaration.name : Declaration → String
+-  | .axiomDecl d => s!"axiomDecl {d.name}"
+-  | .defnDecl d => s!"defnDecl {d.name}"
+-  | .thmDecl d => s!"thmDecl {d.name}"
+-  | .opaqueDecl d => s!"opaqueDecl {d.name}"
+-  | .quotDecl => s!"quotDecl"
+-  | .mutualDefnDecl d => s!"mutualDefnDecl {d.map (·.name)}"
+-  | .inductDecl _ _ d _ => s!"inductDecl {d.map (·.name)}"
+-
+-/-- Add a declaration, possibly throwing a `KernelException`. -/
+-def addDecl (d : Declaration) : M Unit := do
+-  if (← read).verbose then
+-    println! "adding {d.name}"
+-  let t1 ← IO.monoMsNow
+-  match Lean4Lean.addDecl (← get).env d true with
+-  | .ok env =>
+-    let t2 ← IO.monoMsNow
+-    if t2 - t1 > 1000 then
+-      if (← read).compare then
+-        let t3 ← match (← get).env.addDecl {} d with
+-        | .ok _ => IO.monoMsNow
+-        | .error ex => _root_.throwKernelException ex
+-        if (t2 - t1) > 2 * (t3 - t2) then
+-          println!
+-            "{(← get).env.header.mainModule}:{d.name}: lean took {t3 - t2}, lean4lean took {t2 - t1}"
+-        else
+-          println! "{(← get).env.header.mainModule}:{d.name}: lean4lean took {t2 - t1}"
+-      else
+-        println! "{(← get).env.header.mainModule}:{d.name}: lean4lean took {t2 - t1}"
+-    modify fun s => { s with env, numAdded := s.numAdded + 1 }
+-  | .error ex =>
+-    throwKernelException ex
+-
+-deriving instance BEq for ConstantVal
+-deriving instance BEq for ConstructorVal
+-deriving instance BEq for RecursorRule
+-deriving instance BEq for RecursorVal
 +    let roots := if target == 2 then #[controlRoot]
 +      else if target == 0 then witnessRoots else witnessRoots ++ arithmeticRoots
 +    for root in roots do
@@ -511,7 +510,9 @@ index e23b981..684952b 100644
 +
 +private def checkedAddition (decl : Declaration) : ReplayM Unit := do
 +  match Lean4Lean.addDecl (← get).env decl true with
-+  | .error error => fail "checker" (checkerDetail error)
++  | .error error =>
++    let message ← error.toMessageData {} |>.toString
++    fail "checker" s!"{checkerDetail error} in {decl.getNames}: {message}"
 +  | .ok env => modify fun s => {s with env}
 +
 +-- Collect only exact names; each AST's underlying fold uses Lean's shared-node
@@ -530,6 +531,11 @@ index e23b981..684952b 100644
 +    | .ctorInfo info => names := addName info.name names
 +    | .recInfo info => for name in info.all do names := addName name names
 +    | _ => pure ()
++  -- Literal expansion now calls String.ofList, which need not occur as a
++  -- stored constant reference in the declaration containing the literal.
++  let hasStringLiteral (e : Expr) := (e.find? fun node => node matches .lit (.strVal _)).isSome
++  if hasStringLiteral ci.type || (ci.value? (allowOpaque := true)).any hasStringLiteral then
++    names := addName ``String.ofList names
 +  match names with
 +  | .error e => throw e
 +  | .ok set => pure (set.toArray.qsort (· < ·))
@@ -973,9 +979,9 @@ index e23b981..684952b 100644
 +    catch _ => pure (.error ⟨"import", "native target import failed"⟩)
 +
 +private unsafe def machine (out : Output) (args : Arguments) : MachineM Unit := do
-+  if Lean.versionString != "4.24.0" then fail "internal" "unsupported Lean version"
++  if Lean.versionString != "4.35.0" then fail "internal" "unsupported Lean version"
 +  send out (frame 0 #[.str args.token, jn args.mode, jn args.target,
-+    .str "4.24.0", .str "vesper.lean4lean42/2"])
++    .str "4.35.0", .str "vesper.lean4lean42/3"])
 +  let input ← IO.getStdin
 +  let unexpected ← input.read 1
 +  if !unexpected.isEmpty then fail "io" "machine mode accepts no stdin language"

@@ -287,7 +287,7 @@ fn bundle_ships_a_self_contained_search_page_with_the_same_matcher() {
 
 fn audit_for(module: &str, olean: &[u8]) -> String {
     format!(
-        r#"{{"schema_version":1,"status":"audited","accepted":true,"kernel_replayed":true,"cache_eligible":false,"module":"{module}","lean_version":"Lean (version 4.24.0)","lean_binary_blake3":"00","auditor_blake3":"01","artifact_inventory_blake3":"02","checked_constants":3,"allowed_axioms":[],"forbidden_axioms":[],"theorems":[{{"name":"Codex.Broker.commit_slot","axioms":[],"type_repr":"True"}}],"artifact_files":[{{"path":"{module}.olean","bytes":{},"blake3":"{}"}}],"imports":[]}}"#,
+        r#"{{"schema_version":1,"status":"audited","accepted":true,"kernel_replayed":true,"cache_eligible":false,"module":"{module}","lean_version":"Lean (version 4.35.0)","lean_binary_blake3":"00","auditor_blake3":"01","artifact_inventory_blake3":"02","checked_constants":3,"allowed_axioms":[],"forbidden_axioms":[],"theorems":[{{"name":"Codex.Broker.commit_slot","axioms":[],"type_repr":"True"}}],"artifact_files":[{{"path":"{module}.olean","bytes":{},"blake3":"{}"}}],"imports":[]}}"#,
         olean.len(),
         blake3::hash(olean).to_hex()
     )

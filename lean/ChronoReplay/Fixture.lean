@@ -56,7 +56,7 @@ def lineOut (line : String) : String :=
 partial def loop (stdin : IO.FS.Stream) (stdout : IO.FS.Stream) : IO Unit := do
   let line ← stdin.getLine
   if line.isEmpty then return
-  stdout.putStrLn (lineOut line.trimRight)
+  stdout.putStrLn (lineOut line.trimAsciiEnd.toString)
   loop stdin stdout
 
 end Vesper.ChronoReplay.Fixture
