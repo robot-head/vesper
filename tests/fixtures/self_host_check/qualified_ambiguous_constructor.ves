@@ -1,0 +1,9 @@
+copy enum Z {
+    Tag
+}
+copy enum A {
+    Tag
+}
+fn f() -> Z {
+    Z::Tag
+}

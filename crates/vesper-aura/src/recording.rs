@@ -98,6 +98,15 @@ pub struct RecordingBackend {
     _local: PhantomData<Rc<()>>,
 }
 impl RecordingBackend {
+    pub(crate) fn stage_clone(&self) -> Self {
+        Self {
+            thread: self.thread,
+            limits: self.limits.clone(),
+            snapshot: self.snapshot.clone(),
+            reject: self.reject,
+            _local: PhantomData,
+        }
+    }
     pub fn new(thread: &UiThread, limits: Limits) -> Self {
         Self {
             thread: thread.id(),

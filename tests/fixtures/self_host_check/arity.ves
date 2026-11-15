@@ -1,0 +1,4 @@
+fn target(x: i64) {}
+fn main() {
+    target();
+}

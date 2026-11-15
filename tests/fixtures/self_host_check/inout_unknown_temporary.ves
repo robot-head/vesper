@@ -1,0 +1,4 @@
+fn target(inout x: i64) {}
+fn main() {
+    target(inout missing());
+}
