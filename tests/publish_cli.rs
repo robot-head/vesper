@@ -276,7 +276,7 @@ fn publish_enforces_capability_ceiling_and_canonical_ffi_names() {
     assert_eq!(report["error"]["kind"], "capability_violation");
 
     for src in [
-        "effect Ffi[L] { fn call() -> i64; }\nfn foreign() -> i64 eff [Ffi[LibA]] { 1 }\n",
+        "effect Ffi[L] { fn call() -> i64; }\nstruct LibA {}\nfn foreign() -> i64 eff [Ffi[LibA]] { 1 }\n",
         "effect UnsafeFfi { fn call() -> i64; }\nfn unsafe_foreign() -> i64 eff [UnsafeFfi] { 1 }\n",
     ] {
         f.write_str("ffi.ves", src);
