@@ -54,6 +54,15 @@ fn main() {
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }
+fn format_version_banner() -> String {
+    format!(
+        "  \\\\    //   vesper {} (stage3-ddc)\n   \\\\  //    target: {}-{} (cranelift + lean4)\n    \\\\||/    modes: copy <= affine <= linear | 0 sorryAx\n     \\/\n",
+        env!("CARGO_PKG_VERSION"),
+        env::consts::ARCH,
+        env::consts::OS,
+    )
+}
+
 fn cli() -> Result<(), String> {
     let mut args = env::args().skip(1).peekable();
     let Some(command) = args.next() else {
@@ -65,7 +74,7 @@ fn cli() -> Result<(), String> {
         return Ok(());
     }
     if command == "--version" || command == "-V" {
-        println!("vesper {}", env!("CARGO_PKG_VERSION"));
+        print!("{}", format_version_banner());
         return Ok(());
     }
     if command == "resolve" {
