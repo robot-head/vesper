@@ -134,11 +134,25 @@ impl RefineType {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LowerBound {
+    NegInf,
+    Finite(i128),
+    AboveMax,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum UpperBound {
+    BelowMin,
+    Finite(i128),
+    PosInf,
+}
+
 /// Extracted integer interval domain for `[Sub-Refine]` bounded entailment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct IntDomain {
-    lo: Option<i128>,
-    hi: Option<i128>,
+    lo: LowerBound,
+    hi: UpperBound,
     /// Optional non-equality constraint `var != k`.
     neq: Option<i128>,
     /// Bitmask `(mask, expected)` equalities implied by `(var & mask) == expected`.
@@ -149,8 +163,8 @@ struct IntDomain {
 impl IntDomain {
     fn unconstrained() -> Self {
         Self {
-            lo: None,
-            hi: None,
+            lo: LowerBound::NegInf,
+            hi: UpperBound::PosInf,
             neq: None,
             mask_known: 0,
             mask_value: 0,
@@ -160,67 +174,61 @@ impl IntDomain {
     fn apply_cmp(&mut self, op: RelOp, value: i128) -> bool {
         match op {
             RelOp::Eq => {
-                self.apply_lo(value);
-                self.apply_hi(value);
+                self.apply_lo(LowerBound::Finite(value));
+                self.apply_hi(UpperBound::Finite(value));
             }
             RelOp::Ne => {
-                if self.lo == Some(value) && self.hi == Some(value) {
+                if self.lo == LowerBound::Finite(value) && self.hi == UpperBound::Finite(value) {
                     return false;
                 }
                 self.neq = Some(value);
             }
-            RelOp::Lt => {
-                let Some(hi) = value.checked_sub(1) else {
-                    return false;
-                };
-                self.apply_hi(hi);
-            }
-            RelOp::Le => self.apply_hi(value),
-            RelOp::Gt => {
-                let Some(lo) = value.checked_add(1) else {
-                    return false;
-                };
-                self.apply_lo(lo);
-            }
-            RelOp::Ge => self.apply_lo(value),
+            RelOp::Lt => match value.checked_sub(1) {
+                Some(hi) => self.apply_hi(UpperBound::Finite(hi)),
+                None => self.apply_hi(UpperBound::BelowMin),
+            },
+            RelOp::Le => self.apply_hi(UpperBound::Finite(value)),
+            RelOp::Gt => match value.checked_add(1) {
+                Some(lo) => self.apply_lo(LowerBound::Finite(lo)),
+                None => self.apply_lo(LowerBound::AboveMax),
+            },
+            RelOp::Ge => self.apply_lo(LowerBound::Finite(value)),
         }
         !self.is_unsat()
     }
 
     fn apply_range(&mut self, lo: i128, hi: i128) -> bool {
-        self.apply_lo(lo);
-        self.apply_hi(hi);
+        self.apply_lo(LowerBound::Finite(lo));
+        self.apply_hi(UpperBound::Finite(hi));
         !self.is_unsat()
     }
 
     fn apply_mask(&mut self, mask: u128, expected: u128) -> bool {
-        let masked_expected = expected & mask;
+        if (expected & mask) != expected {
+            return false;
+        }
         let overlap = self.mask_known & mask;
-        if (self.mask_value & overlap) != (masked_expected & overlap) {
+        if (self.mask_value & overlap) != (expected & overlap) {
             return false;
         }
         self.mask_known |= mask;
-        self.mask_value |= masked_expected;
-        true
+        self.mask_value |= expected;
+        !self.is_unsat()
     }
 
-    fn apply_lo(&mut self, lo: i128) {
-        self.lo = Some(match self.lo {
-            Some(prev) => prev.max(lo),
-            None => lo,
-        });
+    fn apply_lo(&mut self, lo: LowerBound) {
+        self.lo = self.lo.max(lo);
     }
 
-    fn apply_hi(&mut self, hi: i128) {
-        self.hi = Some(match self.hi {
-            Some(prev) => prev.min(hi),
-            None => hi,
-        });
+    fn apply_hi(&mut self, hi: UpperBound) {
+        self.hi = self.hi.min(hi);
     }
 
     fn is_unsat(&self) -> bool {
         match (self.lo, self.hi) {
-            (Some(lo), Some(hi)) => {
+            (LowerBound::NegInf, _) | (_, UpperBound::PosInf) => false,
+            (LowerBound::AboveMax, _) | (_, UpperBound::BelowMin) => true,
+            (LowerBound::Finite(lo), UpperBound::Finite(hi)) => {
                 if lo > hi {
                     return true;
                 }
@@ -235,46 +243,105 @@ impl IntDomain {
                 }
                 false
             }
-            _ => false,
         }
     }
 
     fn entails_cmp(&self, op: RelOp, value: i128) -> bool {
         match op {
-            RelOp::Eq => self.lo == Some(value) && self.hi == Some(value),
+            RelOp::Eq => {
+                self.lo == LowerBound::Finite(value) && self.hi == UpperBound::Finite(value)
+            }
             RelOp::Ne => {
-                self.lo.is_some_and(|lo| lo > value)
-                    || self.hi.is_some_and(|hi| hi < value)
+                matches!(self.lo, LowerBound::AboveMax)
+                    || matches!(self.lo, LowerBound::Finite(lo) if lo > value)
+                    || matches!(self.hi, UpperBound::BelowMin)
+                    || matches!(self.hi, UpperBound::Finite(hi) if hi < value)
                     || self.neq == Some(value)
             }
-            RelOp::Lt => self.hi.is_some_and(|hi| hi < value),
-            RelOp::Le => self.hi.is_some_and(|hi| hi <= value),
-            RelOp::Gt => self.lo.is_some_and(|lo| lo > value),
-            RelOp::Ge => self.lo.is_some_and(|lo| lo >= value),
+            RelOp::Lt => {
+                matches!(self.hi, UpperBound::BelowMin)
+                    || matches!(self.hi, UpperBound::Finite(hi) if hi < value)
+            }
+            RelOp::Le => {
+                matches!(self.hi, UpperBound::BelowMin)
+                    || matches!(self.hi, UpperBound::Finite(hi) if hi <= value)
+            }
+            RelOp::Gt => {
+                matches!(self.lo, LowerBound::AboveMax)
+                    || matches!(self.lo, LowerBound::Finite(lo) if lo > value)
+            }
+            RelOp::Ge => {
+                matches!(self.lo, LowerBound::AboveMax)
+                    || matches!(self.lo, LowerBound::Finite(lo) if lo >= value)
+            }
         }
     }
 
     fn entails_mask(&self, mask: u128, expected: u128) -> bool {
-        let target = expected & mask;
-        if let (Some(lo), Some(hi)) = (self.lo, self.hi)
+        if (expected & mask) != expected {
+            return false;
+        }
+        if let (LowerBound::Finite(lo), UpperBound::Finite(hi)) = (self.lo, self.hi)
             && lo == hi
             && lo >= 0
         {
-            return ((lo as u128) & mask) == target;
+            return ((lo as u128) & mask) == expected;
         }
-        (self.mask_known & mask) == mask && (self.mask_value & mask) == target
+        (self.mask_known & mask) == mask && (self.mask_value & mask) == expected
     }
 }
 
-fn normalize_atom(atom: &RefineAtom, binder: &str) -> RefineAtom {
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum NormVar {
+    Binder,
+    Free(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum NormAtom {
+    IntCmp {
+        var: NormVar,
+        op: RelOp,
+        value: i128,
+    },
+    IntRange {
+        var: NormVar,
+        lo: i128,
+        hi: i128,
+    },
+    BitMaskEq {
+        var: NormVar,
+        mask: u128,
+        expected: u128,
+    },
+    MeasureCmp {
+        measure: String,
+        op: RelOp,
+        value: i128,
+    },
+    Horn {
+        pred: String,
+        subject: NormVar,
+    },
+}
+
+fn normalize_var(name: &str, binder: Option<&str>) -> NormVar {
+    if binder == Some(name) {
+        NormVar::Binder
+    } else {
+        NormVar::Free(name.to_owned())
+    }
+}
+
+fn normalize_atom(atom: &RefineAtom, binder: Option<&str>) -> NormAtom {
     match atom {
-        RefineAtom::IntCmp { var, op, value } if var == binder => RefineAtom::IntCmp {
-            var: "__v".into(),
+        RefineAtom::IntCmp { var, op, value } => NormAtom::IntCmp {
+            var: normalize_var(var, binder),
             op: *op,
             value: *value,
         },
-        RefineAtom::IntRange { var, lo, hi } if var == binder => RefineAtom::IntRange {
-            var: "__v".into(),
+        RefineAtom::IntRange { var, lo, hi } => NormAtom::IntRange {
+            var: normalize_var(var, binder),
             lo: *lo,
             hi: *hi,
         },
@@ -282,16 +349,109 @@ fn normalize_atom(atom: &RefineAtom, binder: &str) -> RefineAtom {
             var,
             mask,
             expected,
-        } if var == binder => RefineAtom::BitMaskEq {
-            var: "__v".into(),
+        } => NormAtom::BitMaskEq {
+            var: normalize_var(var, binder),
             mask: *mask,
             expected: *expected,
         },
-        RefineAtom::Horn { pred, subject } if subject == binder => RefineAtom::Horn {
-            pred: pred.clone(),
-            subject: "__v".into(),
+        RefineAtom::MeasureCmp { measure, op, value } => NormAtom::MeasureCmp {
+            measure: measure.clone(),
+            op: *op,
+            value: *value,
         },
-        other => other.clone(),
+        RefineAtom::Horn { pred, subject } => NormAtom::Horn {
+            pred: pred.clone(),
+            subject: normalize_var(subject, binder),
+        },
+    }
+}
+
+#[derive(Default)]
+struct EntailState {
+    domains: BTreeMap<NormVar, IntDomain>,
+    measures: BTreeMap<String, IntDomain>,
+    assumed_atoms: Vec<NormAtom>,
+    unsat: bool,
+}
+
+impl EntailState {
+    fn add_atom(&mut self, norm: NormAtom) {
+        match &norm {
+            NormAtom::IntCmp { var, op, value } => {
+                let d = self
+                    .domains
+                    .entry(var.clone())
+                    .or_insert_with(IntDomain::unconstrained);
+                if !d.apply_cmp(*op, *value) {
+                    self.unsat = true;
+                }
+            }
+            NormAtom::IntRange { var, lo, hi } => {
+                let d = self
+                    .domains
+                    .entry(var.clone())
+                    .or_insert_with(IntDomain::unconstrained);
+                if !d.apply_range(*lo, *hi) {
+                    self.unsat = true;
+                }
+            }
+            NormAtom::BitMaskEq {
+                var,
+                mask,
+                expected,
+            } => {
+                let d = self
+                    .domains
+                    .entry(var.clone())
+                    .or_insert_with(IntDomain::unconstrained);
+                if !d.apply_mask(*mask, *expected) {
+                    self.unsat = true;
+                }
+            }
+            NormAtom::MeasureCmp { measure, op, value } => {
+                let d = self
+                    .measures
+                    .entry(measure.clone())
+                    .or_insert_with(IntDomain::unconstrained);
+                if !d.apply_cmp(*op, *value) {
+                    self.unsat = true;
+                }
+            }
+            NormAtom::Horn { .. } => {}
+        }
+        self.assumed_atoms.push(norm);
+    }
+
+    fn entails(&self, norm: &NormAtom) -> bool {
+        if self.unsat {
+            return true;
+        }
+        if self.assumed_atoms.contains(norm) {
+            return true;
+        }
+        match norm {
+            NormAtom::IntCmp { var, op, value } => self
+                .domains
+                .get(var)
+                .is_some_and(|d| d.entails_cmp(*op, *value)),
+            NormAtom::IntRange { var, lo, hi } => self
+                .domains
+                .get(var)
+                .is_some_and(|d| d.entails_cmp(RelOp::Ge, *lo) && d.entails_cmp(RelOp::Le, *hi)),
+            NormAtom::BitMaskEq {
+                var,
+                mask,
+                expected,
+            } => self
+                .domains
+                .get(var)
+                .is_some_and(|d| d.entails_mask(*mask, *expected)),
+            NormAtom::MeasureCmp { measure, op, value } => self
+                .measures
+                .get(measure)
+                .is_some_and(|d| d.entails_cmp(*op, *value)),
+            NormAtom::Horn { .. } => false,
+        }
     }
 }
 
@@ -302,89 +462,40 @@ fn normalize_atom(atom: &RefineAtom, binder: &str) -> RefineAtom {
 /// Inconsistent assumptions (ex falso) discharge any target clause, and
 /// `MeasureCmp` / `IntCmp` / `IntRange` / `BitMaskEq` are solved in interval +
 /// bitwise-mask abstract domains.
+///
+/// `Immutable` target clauses may only be discharged using `Immutable`
+/// assumptions, whereas `Mutable` target clauses may use all assumptions.
 pub fn is_refine_subtype(phi: &[RefineClause], lhs: &RefineType, rhs: &RefineType) -> bool {
     if lhs.base != rhs.base || !lhs.mode.leq(rhs.mode) {
         return false;
     }
 
-    let mut domains: BTreeMap<String, IntDomain> = BTreeMap::new();
-    let mut measures: BTreeMap<String, IntDomain> = BTreeMap::new();
-    let mut assumed_atoms: Vec<RefineAtom> = Vec::new();
-    let mut unsat = false;
+    let mut all_state = EntailState::default();
+    let mut imm_state = EntailState::default();
 
-    for clause in phi.iter().chain(lhs.clauses.iter()) {
-        let norm = normalize_atom(&clause.atom, &lhs.binder);
-        match &norm {
-            RefineAtom::IntCmp { var, op, value } => {
-                let d = domains
-                    .entry(var.clone())
-                    .or_insert_with(IntDomain::unconstrained);
-                if !d.apply_cmp(*op, *value) {
-                    unsat = true;
-                }
-            }
-            RefineAtom::IntRange { var, lo, hi } => {
-                let d = domains
-                    .entry(var.clone())
-                    .or_insert_with(IntDomain::unconstrained);
-                if !d.apply_range(*lo, *hi) {
-                    unsat = true;
-                }
-            }
-            RefineAtom::BitMaskEq {
-                var,
-                mask,
-                expected,
-            } => {
-                let d = domains
-                    .entry(var.clone())
-                    .or_insert_with(IntDomain::unconstrained);
-                if !d.apply_mask(*mask, *expected) {
-                    unsat = true;
-                }
-            }
-            RefineAtom::MeasureCmp { measure, op, value } => {
-                let d = measures
-                    .entry(measure.clone())
-                    .or_insert_with(IntDomain::unconstrained);
-                if !d.apply_cmp(*op, *value) {
-                    unsat = true;
-                }
-            }
-            RefineAtom::Horn { .. } => {}
+    for (clause, binder) in phi
+        .iter()
+        .map(|c| (c, None))
+        .chain(lhs.clauses.iter().map(|c| (c, Some(lhs.binder.as_str()))))
+    {
+        let norm = normalize_atom(&clause.atom, binder);
+        if clause.stability == Stability::Immutable {
+            imm_state.add_atom(norm.clone());
         }
-        assumed_atoms.push(norm);
+        all_state.add_atom(norm);
     }
 
-    if unsat {
+    if all_state.unsat {
         return true;
     }
 
     for target in &rhs.clauses {
-        let norm = normalize_atom(&target.atom, &rhs.binder);
-        if assumed_atoms.contains(&norm) {
-            continue;
-        }
-        let entailed = match &norm {
-            RefineAtom::IntCmp { var, op, value } => {
-                domains.get(var).is_some_and(|d| d.entails_cmp(*op, *value))
-            }
-            RefineAtom::IntRange { var, lo, hi } => domains
-                .get(var)
-                .is_some_and(|d| d.entails_cmp(RelOp::Ge, *lo) && d.entails_cmp(RelOp::Le, *hi)),
-            RefineAtom::BitMaskEq {
-                var,
-                mask,
-                expected,
-            } => domains
-                .get(var)
-                .is_some_and(|d| d.entails_mask(*mask, *expected)),
-            RefineAtom::MeasureCmp { measure, op, value } => measures
-                .get(measure)
-                .is_some_and(|d| d.entails_cmp(*op, *value)),
-            RefineAtom::Horn { .. } => false,
+        let norm = normalize_atom(&target.atom, Some(rhs.binder.as_str()));
+        let state = match target.stability {
+            Stability::Immutable => &imm_state,
+            Stability::Mutable => &all_state,
         };
-        if !entailed {
+        if !state.entails(&norm) {
             return false;
         }
     }
