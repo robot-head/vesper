@@ -3,7 +3,7 @@
 //!
 //! Supported: primitive BOOLEAN, arbitrary minimal signed two's-complement
 //! INTEGER bytes, BIT STRING (preserving bit length), OCTET STRING, UTF8String,
-//! IA5String, NULL, OID,
+//! IA5String, PrintableString, NULL, OID,
 //! SEQUENCE, and explicitly schema-typed SET OF. [`Schema::Any`] never infers
 //! SET OF from tag 17; ASN.1 SET is unsupported. All non-universal tags and
 //! unimplemented universal strings/times/types return an explicit unsupported
@@ -102,6 +102,7 @@ pub enum ErrorKind {
     ObjectIdentifier,
     Utf8String,
     Ia5String,
+    PrintableString,
     Null,
     SetOrder,
     SchemaMismatch,
@@ -175,6 +176,7 @@ pub enum Schema<'s> {
     ObjectIdentifier,
     Utf8String,
     Ia5String,
+    PrintableString,
     Sequence(&'s [Schema<'s>]),
     SequenceOf(&'s Schema<'s>),
     SetOf(&'s Schema<'s>),
@@ -224,6 +226,7 @@ pub enum Kind {
     ObjectIdentifier,
     Utf8String,
     Ia5String,
+    PrintableString,
     Sequence,
     SetOf,
 }
@@ -238,6 +241,7 @@ impl Kind {
             Self::ObjectIdentifier => 6,
             Self::Utf8String => 12,
             Self::Ia5String => 22,
+            Self::PrintableString => 19,
             Self::Sequence => 0x30,
             Self::SetOf => 0x31,
         }
@@ -254,6 +258,7 @@ fn matches_schema(kind: Kind, schema: &Schema<'_>) -> bool {
             | (Kind::ObjectIdentifier, Schema::ObjectIdentifier)
             | (Kind::Utf8String, Schema::Utf8String)
             | (Kind::Ia5String, Schema::Ia5String)
+            | (Kind::PrintableString, Schema::PrintableString)
             | (Kind::Sequence, Schema::Sequence(_) | Schema::SequenceOf(_))
             | (Kind::SetOf, Schema::SetOf(_))
     ) || matches!(schema, Schema::Any) && kind != Kind::SetOf
@@ -350,6 +355,10 @@ impl<'d, 'a> Node<'d, 'a> {
     pub fn ia5_string(self) -> Option<&'a str> {
         (self.kind() == Kind::Ia5String)
             .then(|| core::str::from_utf8(self.content()).expect("validated IA5String"))
+    }
+    pub fn printable_string(self) -> Option<&'a str> {
+        (self.kind() == Kind::PrintableString)
+            .then(|| core::str::from_utf8(self.content()).expect("validated PrintableString"))
     }
     pub fn oid_bytes(self) -> Option<&'a [u8]> {
         (self.kind() == Kind::ObjectIdentifier).then(|| self.content())
@@ -464,6 +473,7 @@ fn header(
         5 => Kind::Null,
         6 => Kind::ObjectIdentifier,
         12 => Kind::Utf8String,
+        19 => Kind::PrintableString,
         22 => Kind::Ia5String,
         16 => Kind::Sequence,
         17 => Kind::SetOf,
@@ -500,6 +510,9 @@ fn primitive(kind: Kind, content: &[u8], offset: usize, meter: &mut Meter) -> Re
         Kind::OctetString => false,
         Kind::Utf8String => core::str::from_utf8(content).is_err(),
         Kind::Ia5String => !content.is_ascii(),
+        Kind::PrintableString => !content
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || b" '()+,-./:=?".contains(b)),
         Kind::ObjectIdentifier => {
             if content.is_empty() {
                 true
@@ -535,6 +548,7 @@ fn primitive(kind: Kind, content: &[u8], offset: usize, meter: &mut Meter) -> Re
                 Kind::ObjectIdentifier => ErrorKind::ObjectIdentifier,
                 Kind::Utf8String => ErrorKind::Utf8String,
                 Kind::Ia5String => ErrorKind::Ia5String,
+                Kind::PrintableString => ErrorKind::PrintableString,
                 Kind::Null => ErrorKind::Null,
                 _ => ErrorKind::SchemaMismatch,
             },
@@ -685,6 +699,7 @@ pub enum Value<'a> {
     ObjectIdentifier(&'a [u8]),
     Utf8String(&'a str),
     Ia5String(&'a str),
+    PrintableString(&'a str),
     Sequence(&'a [Value<'a>]),
     SetOf(&'a [Value<'a>]),
 }
@@ -699,6 +714,7 @@ impl Value<'_> {
             Self::ObjectIdentifier(_) => Kind::ObjectIdentifier,
             Self::Utf8String(_) => Kind::Utf8String,
             Self::Ia5String(_) => Kind::Ia5String,
+            Self::PrintableString(_) => Kind::PrintableString,
             Self::Sequence(_) => Kind::Sequence,
             Self::SetOf(_) => Kind::SetOf,
         }
@@ -745,7 +761,7 @@ fn measure(
             primitive(kind, bytes, 0, meter)?;
             bytes.len()
         }
-        Value::Utf8String(text) | Value::Ia5String(text) => {
+        Value::Utf8String(text) | Value::Ia5String(text) | Value::PrintableString(text) => {
             primitive(kind, text.as_bytes(), 0, meter)?;
             text.len()
         }
@@ -863,7 +879,9 @@ fn build(value: &Value<'_>) -> Result<Vec<u8>> {
     let content = match value {
         Value::Boolean(_) => 1,
         Value::Integer(b) | Value::ObjectIdentifier(b) | Value::OctetString(b) => b.len(),
-        Value::Utf8String(text) | Value::Ia5String(text) => text.len(),
+        Value::Utf8String(text) | Value::Ia5String(text) | Value::PrintableString(text) => {
+            text.len()
+        }
         Value::Null => 0,
         Value::BitString { bytes, .. } => add(bytes.len(), 1)?,
         _ => children.iter().try_fold(0, |n, c| add(n, c.len()))?,
@@ -875,7 +893,9 @@ fn build(value: &Value<'_>) -> Result<Vec<u8>> {
         Value::Integer(b) | Value::ObjectIdentifier(b) | Value::OctetString(b) => {
             out.extend_from_slice(b)
         }
-        Value::Utf8String(text) | Value::Ia5String(text) => out.extend_from_slice(text.as_bytes()),
+        Value::Utf8String(text) | Value::Ia5String(text) | Value::PrintableString(text) => {
+            out.extend_from_slice(text.as_bytes())
+        }
         Value::Null => {}
         Value::BitString { unused_bits, bytes } => {
             out.push(*unused_bits);
