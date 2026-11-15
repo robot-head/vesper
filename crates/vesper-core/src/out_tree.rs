@@ -88,9 +88,13 @@ pub enum OutInitTree {
     /// Nothing in this subtree has been initialized yet.
     #[default]
     Uninit,
-    /// Some subset of direct child fields has been initialized.
+    /// This subtree may have been initialized on at least one branch, so
+    /// re-writing any overlapping path is rejected, but it is not guaranteed
+    /// initialized on all branches.
+    MaybeInit,
+    /// Some subset of direct child fields has been initialized or maybe-initialized.
     Fields(BTreeMap<FieldId, OutInitTree>),
-    /// 100% of this subtree has been initialized.
+    /// 100% of this subtree has been initialized on all branches.
     Whole,
 }
 
@@ -102,7 +106,7 @@ impl OutInitTree {
     /// Counts tree nodes cleanly under `limits`.
     pub fn node_count(&self) -> usize {
         match self {
-            Self::Uninit | Self::Whole => 1,
+            Self::Uninit | Self::MaybeInit | Self::Whole => 1,
             Self::Fields(map) => 1 + map.values().map(Self::node_count).sum::<usize>(),
         }
     }
@@ -112,7 +116,7 @@ impl OutInitTree {
     pub fn is_complete(&self, schema: &FieldSchema) -> bool {
         match (self, schema) {
             (Self::Whole, _) => true,
-            (Self::Uninit, _) => false,
+            (Self::Uninit | Self::MaybeInit, _) => false,
             (Self::Fields(_), FieldSchema::Leaf { .. }) => false,
             (Self::Fields(inits), FieldSchema::Struct(fields)) => {
                 !fields.is_empty()
@@ -156,7 +160,7 @@ impl OutInitTree {
                 max: limits.max_depth,
             });
         }
-        if matches!(self, Self::Whole) {
+        if matches!(self, Self::Whole | Self::MaybeInit) {
             return Err(Error::AlreadyInitialized);
         }
         let Some((&first, rest)) = path.split_first() else {
@@ -165,7 +169,7 @@ impl OutInitTree {
                     *self = Self::Whole;
                     Ok(())
                 }
-                Self::Fields(_) | Self::Whole => Err(Error::AlreadyInitialized),
+                Self::Fields(_) | Self::Whole | Self::MaybeInit => Err(Error::AlreadyInitialized),
             };
         };
 
@@ -205,6 +209,12 @@ impl OutInitTree {
                     .all(|id| matches!(normalized.get(id), Some(Self::Whole)))
             {
                 *self = Self::Whole;
+            } else if fields.len() == normalized.len()
+                && fields
+                    .keys()
+                    .all(|id| matches!(normalized.get(id), Some(Self::MaybeInit)))
+            {
+                *self = Self::MaybeInit;
             } else {
                 *self = Self::Fields(normalized);
             }
@@ -217,16 +227,16 @@ impl OutInitTree {
     pub fn check_unwind_safety(&self, schema: &FieldSchema) -> Result<(), Error> {
         match (self, schema) {
             (Self::Uninit, _) => Ok(()),
-            (Self::Whole, FieldSchema::Leaf { mode }) => {
+            (Self::Whole | Self::MaybeInit, FieldSchema::Leaf { mode }) => {
                 if *mode == Mode::Linear {
                     Err(Error::UnwindWithLiveLinearField { field: FieldId(0) })
                 } else {
                     Ok(())
                 }
             }
-            (Self::Whole, FieldSchema::Struct(fields)) => {
+            (Self::Whole | Self::MaybeInit, FieldSchema::Struct(fields)) => {
                 for (&id, sub_schema) in fields {
-                    Self::Whole.check_leaf_linear(id, sub_schema)?;
+                    self.check_leaf_linear(id, sub_schema)?;
                 }
                 Ok(())
             }
@@ -260,9 +270,9 @@ impl OutInitTree {
                 Err(Error::UnwindWithLiveLinearField { field: id })
             }
             (_, FieldSchema::Leaf { .. }) => Ok(()),
-            (Self::Whole, FieldSchema::Struct(fields)) => {
+            (Self::Whole | Self::MaybeInit, FieldSchema::Struct(fields)) => {
                 for (&child_id, sub_schema) in fields {
-                    Self::Whole.check_leaf_linear(child_id, sub_schema)?;
+                    self.check_leaf_linear(child_id, sub_schema)?;
                 }
                 Ok(())
             }
@@ -277,29 +287,61 @@ impl OutInitTree {
         }
     }
 
-    /// Computes conservative branch-join initialization (`self ∩ other`) while
-    /// rejecting branches that initialize a `Mode::Linear` sub-field on only
-    /// one side (`Theorem 2` / `[T-Match]` consistency).
+    /// Computes conservative branch-join initialization (`self ∩ other` for
+    /// completion, `self ∪ other` for overlap tracking) while rejecting branches
+    /// that initialize a `Mode::Linear` sub-field on only one side
+    /// (`Theorem 2` / `[T-Match]` consistency).
     pub fn join(&self, other: &Self, schema: &FieldSchema) -> Result<Self, Error> {
-        let mut out = self.join_inner(other, schema)?;
+        let mut out = self.join_inner(other, schema, FieldId(0))?;
         out.normalize(schema);
         Ok(out)
     }
 
-    fn join_inner(&self, other: &Self, schema: &FieldSchema) -> Result<Self, Error> {
+    fn join_inner(
+        &self,
+        other: &Self,
+        schema: &FieldSchema,
+        field_hint: FieldId,
+    ) -> Result<Self, Error> {
         match (self, other, schema) {
             (Self::Whole, Self::Whole, _) => Ok(Self::Whole),
             (Self::Uninit, Self::Uninit, _) => Ok(Self::Uninit),
-            (Self::Uninit, other_side, _) | (other_side, Self::Uninit, _) => {
-                other_side.check_no_linear_fields(schema)?;
-                Ok(Self::Uninit)
+            (Self::MaybeInit, Self::MaybeInit, _) => {
+                self.check_no_linear_fields(schema, field_hint)?;
+                Ok(Self::MaybeInit)
+            }
+            (Self::Uninit | Self::MaybeInit, Self::Whole, _)
+            | (Self::Whole, Self::Uninit | Self::MaybeInit, _) => {
+                Self::Whole.check_no_linear_fields(schema, field_hint)?;
+                Ok(Self::MaybeInit)
+            }
+            (Self::Uninit, Self::MaybeInit, _) | (Self::MaybeInit, Self::Uninit, _) => {
+                Self::MaybeInit.check_no_linear_fields(schema, field_hint)?;
+                Ok(Self::MaybeInit)
+            }
+            (Self::MaybeInit, Self::Fields(_), FieldSchema::Struct(_))
+            | (Self::Fields(_), Self::MaybeInit, FieldSchema::Struct(_)) => {
+                Self::MaybeInit.check_no_linear_fields(schema, field_hint)?;
+                Ok(Self::MaybeInit)
+            }
+            (Self::Uninit, Self::Fields(map), FieldSchema::Struct(fields))
+            | (Self::Fields(map), Self::Uninit, FieldSchema::Struct(fields)) => {
+                let mut joined = BTreeMap::new();
+                for (&id, sub_schema) in fields {
+                    let sub_rhs = map.get(&id).cloned().unwrap_or(Self::Uninit);
+                    let res = Self::Uninit.join_inner(&sub_rhs, sub_schema, id)?;
+                    if !matches!(res, Self::Uninit) {
+                        joined.insert(id, res);
+                    }
+                }
+                Ok(Self::Fields(joined))
             }
             (Self::Whole, Self::Fields(map), FieldSchema::Struct(fields))
             | (Self::Fields(map), Self::Whole, FieldSchema::Struct(fields)) => {
                 let mut joined = BTreeMap::new();
                 for (&id, sub_schema) in fields {
                     let sub_rhs = map.get(&id).cloned().unwrap_or(Self::Uninit);
-                    let res = Self::Whole.join_inner(&sub_rhs, sub_schema)?;
+                    let res = Self::Whole.join_inner(&sub_rhs, sub_schema, id)?;
                     if !matches!(res, Self::Uninit) {
                         joined.insert(id, res);
                     }
@@ -311,31 +353,45 @@ impl OutInitTree {
                 for (&id, sub_schema) in fields {
                     let l = lhs.get(&id).cloned().unwrap_or(Self::Uninit);
                     let r = rhs.get(&id).cloned().unwrap_or(Self::Uninit);
-                    let res = l.join_inner(&r, sub_schema)?;
+                    let res = l.join_inner(&r, sub_schema, id)?;
                     if !matches!(res, Self::Uninit) {
                         joined.insert(id, res);
                     }
                 }
                 Ok(Self::Fields(joined))
             }
-            (Self::Fields(_), _, FieldSchema::Leaf { .. })
-            | (_, Self::Fields(_), FieldSchema::Leaf { .. }) => Ok(Self::Uninit),
+            (Self::Fields(map), other_side, FieldSchema::Leaf { mode })
+            | (other_side, Self::Fields(map), FieldSchema::Leaf { mode }) => {
+                if *mode == Mode::Linear && (!map.is_empty() || !matches!(other_side, Self::Uninit))
+                {
+                    return Err(Error::InconsistentLinearInitAtJoin { field: field_hint });
+                }
+                if map.is_empty() && matches!(other_side, Self::Uninit) {
+                    Ok(Self::Uninit)
+                } else {
+                    Ok(Self::MaybeInit)
+                }
+            }
         }
     }
 
-    fn check_no_linear_fields(&self, schema: &FieldSchema) -> Result<(), Error> {
+    fn check_no_linear_fields(
+        &self,
+        schema: &FieldSchema,
+        field_hint: FieldId,
+    ) -> Result<(), Error> {
         match (self, schema) {
             (Self::Uninit, _) => Ok(()),
             (_, FieldSchema::Leaf { mode }) => {
                 if *mode == Mode::Linear {
-                    Err(Error::InconsistentLinearInitAtJoin { field: FieldId(0) })
+                    Err(Error::InconsistentLinearInitAtJoin { field: field_hint })
                 } else {
                     Ok(())
                 }
             }
-            (Self::Whole, FieldSchema::Struct(fields)) => {
+            (Self::Whole | Self::MaybeInit, FieldSchema::Struct(fields)) => {
                 for (&id, sub_schema) in fields {
-                    if Self::Whole.has_linear_leaf(sub_schema) {
+                    if self.has_linear_leaf(sub_schema) {
                         return Err(Error::InconsistentLinearInitAtJoin { field: id });
                     }
                 }
@@ -358,8 +414,8 @@ impl OutInitTree {
         match (self, schema) {
             (Self::Uninit, _) => false,
             (_, FieldSchema::Leaf { mode }) => *mode == Mode::Linear,
-            (Self::Whole, FieldSchema::Struct(fields)) => {
-                fields.values().any(|s| Self::Whole.has_linear_leaf(s))
+            (Self::Whole | Self::MaybeInit, FieldSchema::Struct(fields)) => {
+                fields.values().any(|s| self.has_linear_leaf(s))
             }
             (Self::Fields(map), FieldSchema::Struct(fields)) => map
                 .iter()
@@ -434,11 +490,27 @@ mod tests {
         rhs.initialize_path(&[FieldId(1), FieldId(1)], &schema, limits)
             .unwrap();
 
-        let joined = lhs.join(&rhs, &schema).unwrap();
+        let mut joined = lhs.join(&rhs, &schema).unwrap();
         assert!(!joined.is_complete(&schema));
         assert_eq!(
             joined,
-            OutInitTree::Fields(BTreeMap::from([(FieldId(0), OutInitTree::Whole)]))
+            OutInitTree::Fields(BTreeMap::from([
+                (FieldId(0), OutInitTree::Whole),
+                (FieldId(1), OutInitTree::MaybeInit),
+            ]))
+        );
+        // Possible writes on either branch must prevent subsequent overlapping writes.
+        assert_eq!(
+            joined.initialize_path(&[FieldId(1), FieldId(0)], &schema, limits),
+            Err(Error::AlreadyInitialized)
+        );
+        assert_eq!(
+            joined.initialize_path(&[FieldId(1), FieldId(1)], &schema, limits),
+            Err(Error::AlreadyInitialized)
+        );
+        assert_eq!(
+            joined.initialize_path(&[], &schema, limits),
+            Err(Error::AlreadyInitialized)
         );
 
         // One-sided initialization of a Linear leaf cannot silently drop on join or unwind.
@@ -485,6 +557,96 @@ mod tests {
         assert_eq!(
             tree.initialize_path(&[FieldId(1), FieldId(0)], &schema, tight),
             Err(Error::DepthLimit { max: 1 })
+        );
+    }
+
+    #[test]
+    fn one_sided_branch_init_preserves_possible_init_for_overlap_checks() {
+        let limits = Limits::default();
+
+        // Leaf Affine/Copy: Whole + Uninit becomes MaybeInit, not complete, rejects re-init.
+        for mode in [Mode::Copy, Mode::Affine] {
+            let leaf = FieldSchema::Leaf { mode };
+            for (a, b) in [
+                (OutInitTree::Whole, OutInitTree::Uninit),
+                (OutInitTree::Uninit, OutInitTree::Whole),
+            ] {
+                let mut joined = a.join(&b, &leaf).unwrap();
+                assert_eq!(joined, OutInitTree::MaybeInit);
+                assert!(!joined.is_complete(&leaf));
+                assert_eq!(joined.check_unwind_safety(&leaf), Ok(()));
+                assert_eq!(
+                    joined.initialize_path(&[], &leaf, limits),
+                    Err(Error::AlreadyInitialized)
+                );
+            }
+        }
+
+        // Partial struct: branch A initializes field 0, branch B initializes nothing.
+        // After join, field 0 rejects re-init, root rejects re-init, untouched field 1 succeeds,
+        // and completion remains false.
+        let schema = broker_schema();
+        let mut lhs = OutInitTree::new();
+        lhs.initialize_path(&[FieldId(0)], &schema, limits).unwrap();
+        let rhs = OutInitTree::new();
+        let mut joined = lhs.join(&rhs, &schema).unwrap();
+        assert!(!joined.is_complete(&schema));
+        assert_eq!(
+            joined.initialize_path(&[FieldId(0)], &schema, limits),
+            Err(Error::AlreadyInitialized)
+        );
+        assert_eq!(
+            joined.initialize_path(&[], &schema, limits),
+            Err(Error::AlreadyInitialized)
+        );
+        // Untouched sibling [1, 0] and [1, 1] can still be initialized.
+        joined
+            .initialize_path(&[FieldId(1), FieldId(0)], &schema, limits)
+            .unwrap();
+        joined
+            .initialize_path(&[FieldId(1), FieldId(1)], &schema, limits)
+            .unwrap();
+        assert!(!joined.is_complete(&schema));
+
+        // Joining partial post-join state with a fully initialized branch keeps field 1 Whole
+        // while preserving MaybeInit on field 0.
+        let joined_with_whole = joined.join(&OutInitTree::Whole, &schema).unwrap();
+        assert_eq!(
+            joined_with_whole,
+            OutInitTree::Fields(BTreeMap::from([
+                (FieldId(0), OutInitTree::MaybeInit),
+                (FieldId(1), OutInitTree::Whole),
+            ]))
+        );
+        assert!(!joined_with_whole.is_complete(&schema));
+
+        // Whole + Uninit on a struct produces MaybeInit and rejects sub-field writes.
+        let mut whole_join_uninit = OutInitTree::Whole
+            .join(&OutInitTree::Uninit, &schema)
+            .unwrap();
+        assert_eq!(whole_join_uninit, OutInitTree::MaybeInit);
+        assert!(!whole_join_uninit.is_complete(&schema));
+        assert_eq!(
+            whole_join_uninit.initialize_path(&[FieldId(0)], &schema, limits),
+            Err(Error::AlreadyInitialized)
+        );
+        assert_eq!(
+            whole_join_uninit.initialize_path(&[], &schema, limits),
+            Err(Error::AlreadyInitialized)
+        );
+
+        // Linear fields cannot tolerate MaybeInit across join or unwind.
+        let linear_schema = FieldSchema::Struct(BTreeMap::from([
+            (FieldId(0), FieldSchema::Leaf { mode: Mode::Copy }),
+            (FieldId(1), FieldSchema::Leaf { mode: Mode::Linear }),
+        ]));
+        assert_eq!(
+            OutInitTree::MaybeInit.join(&OutInitTree::Uninit, &linear_schema),
+            Err(Error::InconsistentLinearInitAtJoin { field: FieldId(1) })
+        );
+        assert_eq!(
+            OutInitTree::MaybeInit.check_unwind_safety(&linear_schema),
+            Err(Error::UnwindWithLiveLinearField { field: FieldId(1) })
         );
     }
 }
