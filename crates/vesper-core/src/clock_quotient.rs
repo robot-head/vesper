@@ -124,11 +124,13 @@ pub struct SignalEdge {
     pub guard: Option<ClockId>,
 }
 
-/// Audits `guarded_fix[k]` productivity (§5.4): every cycle in the dependency
-/// graph must traverse at least one `Later[k, T]` delay edge (`guard: Some(_)`).
-/// Purely combinational cycles (`guard: None`) are rejected as
+/// Audits `guarded_fix[clock]` productivity (§5.4): every cycle in the dependency
+/// graph must traverse at least one `Later[clock, T]` delay edge (`guard: Some(clock)`).
+/// Purely combinational cycles (`guard: None`) and cycles guarded only by a
+/// different clock (`guard: Some(j)` with `j != clock`) are rejected as
 /// `UnguardedAlgebraicLoop`.
 pub fn verify_guarded_recursion(
+    clock: ClockId,
     nodes: &[NodeId],
     edges: &[SignalEdge],
     limits: Limits,
@@ -153,9 +155,10 @@ pub fn verify_guarded_recursion(
         if !node_set.contains(&edge.to) {
             return Err(ClockQuotientError::UnknownNode { node: edge.to });
         }
-        // Only unguarded zero-delay edges (`guard: None`) can participate in an
-        // instantaneous algebraic loop.
-        if edge.guard.is_none() {
+        // Only edges guarded by a delay on the bound recursion clock `clock`
+        // break instantaneous algebraic loops; unguarded (`None`) and cross-clock
+        // (`Some(j)` where `j != clock`) edges still participate in cycle checks.
+        if edge.guard != Some(clock) {
             adj.entry(edge.from).or_default().push(edge.to);
         }
     }
@@ -289,7 +292,35 @@ mod tests {
             },
         ];
         assert_eq!(
-            verify_guarded_recursion(&nodes, &guarded_cycle, Limits::default()),
+            verify_guarded_recursion(k0, &nodes, &guarded_cycle, Limits::default()),
+            Ok(())
+        );
+
+        // A cycle delayed only on a different clock `k1` cannot guard `guarded_fix[k0]`.
+        let cross_clock_cycle = [
+            SignalEdge {
+                from: NodeId(1),
+                to: NodeId(2),
+                guard: None,
+            },
+            SignalEdge {
+                from: NodeId(2),
+                to: NodeId(3),
+                guard: None,
+            },
+            SignalEdge {
+                from: NodeId(3),
+                to: NodeId(1),
+                guard: Some(k1),
+            },
+        ];
+        assert_eq!(
+            verify_guarded_recursion(k0, &nodes, &cross_clock_cycle, Limits::default()),
+            Err(ClockQuotientError::UnguardedAlgebraicLoop { node: NodeId(1) })
+        );
+        // The same graph is productive under `guarded_fix[k1]`.
+        assert_eq!(
+            verify_guarded_recursion(k1, &nodes, &cross_clock_cycle, Limits::default()),
             Ok(())
         );
 
@@ -312,7 +343,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            verify_guarded_recursion(&nodes, &unguarded_cycle, Limits::default()),
+            verify_guarded_recursion(k0, &nodes, &unguarded_cycle, Limits::default()),
             Err(ClockQuotientError::UnguardedAlgebraicLoop { node: NodeId(1) })
         );
     }
