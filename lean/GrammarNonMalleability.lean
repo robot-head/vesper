@@ -90,33 +90,33 @@ theorem canonical_leb128_injective :
   | [x], [y], v, h1, h2 => by
       simp only [decodeCanonicalLeb] at h1 h2
       by_cases hx_lt : x < 128
-      · rw [if_pos hx_lt] at h1
+      · rw [ite_eq_left hx_lt] at h1
         by_cases hy_lt : y < 128
-        · rw [if_pos hy_lt] at h2
+        · rw [ite_eq_left hy_lt] at h2
           injection h1 with hx
           injection h2 with hy
           subst hx; subst hy; rfl
-        · rw [if_neg hy_lt] at h2
+        · rw [ite_eq_right hy_lt] at h2
           contradiction
-      · rw [if_neg hx_lt] at h1
+      · rw [ite_eq_right hx_lt] at h1
         contradiction
   | [x], y0 :: y1 :: ys, v, h1, h2 => by
       have hy := decodeCanonicalLeb_ge_128 h2
       simp only [decodeCanonicalLeb] at h1
       by_cases hx_lt : x < 128
-      · rw [if_pos hx_lt] at h1
+      · rw [ite_eq_left hx_lt] at h1
         injection h1 with hx
         omega
-      · rw [if_neg hx_lt] at h1
+      · rw [ite_eq_right hx_lt] at h1
         contradiction
   | x0 :: x1 :: xs, [y], v, h1, h2 => by
       have hx := decodeCanonicalLeb_ge_128 h1
       simp only [decodeCanonicalLeb] at h2
       by_cases hy_lt : y < 128
-      · rw [if_pos hy_lt] at h2
+      · rw [ite_eq_left hy_lt] at h2
         injection h2 with hy
         omega
-      · rw [if_neg hy_lt] at h2
+      · rw [ite_eq_right hy_lt] at h2
         contradiction
   | x0 :: x1 :: xs, y0 :: y1 :: ys, v, h1, h2 => by
       obtain ⟨hx_hi, hdec1, hx_lo, hx_u8, _, hv1⟩ := stepDecode_eq_some h1
