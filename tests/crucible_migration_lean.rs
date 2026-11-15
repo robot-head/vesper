@@ -23,10 +23,16 @@ fn model_has_no_escape_hatches() {
     }
     for theorem in [
         "choice_tape_shrink_terminates",
+        "I64be.ofInt_toNative",
+        "I32be.ofInt_toNative",
+        "I16be.ofInt_toNative",
         "wire_header_length_61",
         "vesperParseBatchHeader_short_fails",
         "migrated_batch_header_matches_spec",
         "migrated_batch_header_stats_exact",
+        "all_ff_bytes_decode_negative_one",
+        "allOnesHeader_signed_and_crc_unsigned",
+        "wire_rs_negative_base_offset_roundtrip",
     ] {
         assert!(
             text.contains(&format!("theorem {theorem}")),

@@ -35,29 +35,97 @@ structure Word64 where
   lt  : val < 2 ^ 64
   deriving DecidableEq, Repr
 
-@[simp] def Word64.toNative (w : Word64) : Nat := w.val
 @[simp] def Word32.toNative (w : Word32) : Nat := w.val
+@[simp] def Word16.toNative (w : Word16) : Nat := w.val
+@[simp] def Word8.toNative (w : Word8) : Nat := w.val
 
-/-- Canonical 61-byte Kafka RecordBatch v2 wire header (§21.3–§21.4). -/
+/-- Signed big-endian 64-bit, 32-bit, and 16-bit wire integers (`i64be`, `i32be`, `i16be`). -/
+structure I64be where
+  raw : Nat
+  lt  : raw < 2 ^ 64
+  deriving DecidableEq, Repr
+
+structure I32be where
+  raw : Nat
+  lt  : raw < 2 ^ 32
+  deriving DecidableEq, Repr
+
+structure I16be where
+  raw : Nat
+  lt  : raw < 2 ^ 16
+  deriving DecidableEq, Repr
+
+@[simp] def decodeI64 (raw : Nat) : Int :=
+  if raw < 2 ^ 63 then Int.ofNat raw else Int.ofNat raw - (2 ^ 64 : Int)
+
+@[simp] def decodeI32 (raw : Nat) : Int :=
+  if raw < 2 ^ 31 then Int.ofNat raw else Int.ofNat raw - (2 ^ 32 : Int)
+
+@[simp] def decodeI16 (raw : Nat) : Int :=
+  if raw < 2 ^ 15 then Int.ofNat raw else Int.ofNat raw - (2 ^ 16 : Int)
+
+@[simp] def I64be.toNative (w : I64be) : Int := decodeI64 w.raw
+@[simp] def I32be.toNative (w : I32be) : Int := decodeI32 w.raw
+@[simp] def I16be.toNative (w : I16be) : Int := decodeI16 w.raw
+
+def I64be.ofInt (x : Int) (h_min : -(2 ^ 63 : Int) ≤ x) (h_max : x < (2 ^ 63 : Int)) : I64be :=
+  if hx : 0 ≤ x then
+    ⟨x.toNat, by omega⟩
+  else
+    ⟨2 ^ 64 - (-x).toNat, by omega⟩
+
+def I32be.ofInt (x : Int) (h_min : -(2 ^ 31 : Int) ≤ x) (h_max : x < (2 ^ 31 : Int)) : I32be :=
+  if hx : 0 ≤ x then
+    ⟨x.toNat, by omega⟩
+  else
+    ⟨2 ^ 32 - (-x).toNat, by omega⟩
+
+def I16be.ofInt (x : Int) (h_min : -(2 ^ 15 : Int) ≤ x) (h_max : x < (2 ^ 15 : Int)) : I16be :=
+  if hx : 0 ≤ x then
+    ⟨x.toNat, by omega⟩
+  else
+    ⟨2 ^ 16 - (-x).toNat, by omega⟩
+
+theorem I64be.ofInt_toNative (x : Int)
+    (h_min : -(2 ^ 63 : Int) ≤ x) (h_max : x < (2 ^ 63 : Int)) :
+    (I64be.ofInt x h_min h_max).toNative = x := by
+  unfold I64be.toNative decodeI64 I64be.ofInt
+  split <;> dsimp only <;> split <;> simp only [Int.ofNat_eq_natCast] <;> omega
+
+theorem I32be.ofInt_toNative (x : Int)
+    (h_min : -(2 ^ 31 : Int) ≤ x) (h_max : x < (2 ^ 31 : Int)) :
+    (I32be.ofInt x h_min h_max).toNative = x := by
+  unfold I32be.toNative decodeI32 I32be.ofInt
+  split <;> dsimp only <;> split <;> simp only [Int.ofNat_eq_natCast] <;> omega
+
+theorem I16be.ofInt_toNative (x : Int)
+    (h_min : -(2 ^ 15 : Int) ≤ x) (h_max : x < (2 ^ 15 : Int)) :
+    (I16be.ofInt x h_min h_max).toNative = x := by
+  unfold I16be.toNative decodeI16 I16be.ofInt
+  split <;> dsimp only <;> split <;> simp only [Int.ofNat_eq_natCast] <;> omega
+
+/-- Canonical 61-byte Kafka RecordBatch v2 wire header (§15.2, §21.3–§21.4):
+    signed big-endian fields use `I64be`/`I32be`/`I16be`, while `magic`,
+    `crc`, and `attributes` remain unsigned. -/
 structure KafkaBatchWireHeader where
-  baseOffset           : Word64
-  batchLength          : Word32
-  partitionLeaderEpoch : Word32
+  baseOffset           : I64be
+  batchLength          : I32be
+  partitionLeaderEpoch : I32be
   magic                : Word8
   crc                  : Word32
   attributes           : Word16
-  lastOffsetDelta      : Word32
-  baseTimestamp        : Word64
-  maxTimestamp         : Word64
-  producerId           : Word64
-  producerEpoch        : Word16
-  baseSequence         : Word32
-  recordsCount         : Word32
+  lastOffsetDelta      : I32be
+  baseTimestamp        : I64be
+  maxTimestamp         : I64be
+  producerId           : I64be
+  producerEpoch        : I16be
+  baseSequence         : I32be
+  recordsCount         : I32be
   deriving DecidableEq, Repr
 
 structure DecoderStats where
   lastCrc     : Nat
-  recordCount : Nat
+  recordCount : Int
   deriving DecidableEq, Repr
 
 inductive ParseError where
@@ -140,38 +208,46 @@ theorem parseBe2_encodeWord16 (x : Word16) (rest : List Nat) :
     parseBe2 (encodeBe2 x.val ++ rest) = some (x.val, rest) :=
   parseBe2_encodeBe2 x.val rest x.lt
 
+theorem parseBe2_encodeI16 (x : I16be) (rest : List Nat) :
+    parseBe2 (encodeBe2 x.raw ++ rest) = some (x.raw, rest) :=
+  parseBe2_encodeBe2 x.raw rest x.lt
+
 theorem parseBe4_encodeWord32 (x : Word32) (rest : List Nat) :
     parseBe4 (encodeBe4 x.val ++ rest) = some (x.val, rest) :=
   parseBe4_encodeBe4 x.val rest x.lt
 
-theorem parseBe4_encodeWord32_nil (x : Word32) :
-    parseBe4 (encodeBe4 x.val) = some (x.val, []) := by
-  simpa using parseBe4_encodeBe4 x.val [] x.lt
+theorem parseBe4_encodeI32 (x : I32be) (rest : List Nat) :
+    parseBe4 (encodeBe4 x.raw ++ rest) = some (x.raw, rest) :=
+  parseBe4_encodeBe4 x.raw rest x.lt
 
-theorem parseBe8_encodeWord64 (x : Word64) (rest : List Nat) :
-    parseBe8 (encodeBe8 x.val ++ rest) = some (x.val, rest) :=
-  parseBe8_encodeBe8 x.val rest x.lt
+theorem parseBe4_encodeI32_nil (x : I32be) :
+    parseBe4 (encodeBe4 x.raw) = some (x.raw, []) := by
+  simpa using parseBe4_encodeBe4 x.raw [] x.lt
+
+theorem parseBe8_encodeI64 (x : I64be) (rest : List Nat) :
+    parseBe8 (encodeBe8 x.raw ++ rest) = some (x.raw, rest) :=
+  parseBe8_encodeBe8 x.raw rest x.lt
 
 def Wire.toBytes (hdr : KafkaBatchWireHeader) : List Nat :=
-  encodeBe8 hdr.baseOffset.val ++
-  encodeBe4 hdr.batchLength.val ++
-  encodeBe4 hdr.partitionLeaderEpoch.val ++
+  encodeBe8 hdr.baseOffset.raw ++
+  encodeBe4 hdr.batchLength.raw ++
+  encodeBe4 hdr.partitionLeaderEpoch.raw ++
   encodeBe1 hdr.magic.val ++
   encodeBe4 hdr.crc.val ++
   encodeBe2 hdr.attributes.val ++
-  encodeBe4 hdr.lastOffsetDelta.val ++
-  encodeBe8 hdr.baseTimestamp.val ++
-  encodeBe8 hdr.maxTimestamp.val ++
-  encodeBe8 hdr.producerId.val ++
-  encodeBe2 hdr.producerEpoch.val ++
-  encodeBe4 hdr.baseSequence.val ++
-  encodeBe4 hdr.recordsCount.val
+  encodeBe4 hdr.lastOffsetDelta.raw ++
+  encodeBe8 hdr.baseTimestamp.raw ++
+  encodeBe8 hdr.maxTimestamp.raw ++
+  encodeBe8 hdr.producerId.raw ++
+  encodeBe2 hdr.producerEpoch.raw ++
+  encodeBe4 hdr.baseSequence.raw ++
+  encodeBe4 hdr.recordsCount.raw
 
-def parseHeaderBody (bytes : List Nat) (st : DecoderStats) :
-    Option (Nat × DecoderStats) :=
+def parseHeaderBody (bytes : List Nat) (_st : DecoderStats) :
+    Option (Int × DecoderStats) :=
   match parseBe8 bytes with
   | none => none
-  | some (baseOffset, r1) =>
+  | some (baseOffsetRaw, r1) =>
   match parseBe4 r1 with
   | none => none
   | some (_, r2) =>
@@ -207,11 +283,12 @@ def parseHeaderBody (bytes : List Nat) (st : DecoderStats) :
   | some (_, r12) =>
   match parseBe4 r12 with
   | none => none
-  | some (recordsCount, _) =>
-      some (baseOffset, { lastCrc := crc, recordCount := recordsCount })
+  | some (recordsCountRaw, _) =>
+      some (decodeI64 baseOffsetRaw,
+            { lastCrc := crc, recordCount := decodeI32 recordsCountRaw })
 
 def vesperParseBatchHeader (bytes : List Nat) (st : DecoderStats) :
-    Except ParseError (Nat × DecoderStats) :=
+    Except ParseError (Int × DecoderStats) :=
   if bytes.length < 61 then
     .error .short
   else
@@ -232,14 +309,20 @@ theorem vesperParseBatchHeader_short_fails
 theorem parseHeaderBody_toBytes
     (hdr : KafkaBatchWireHeader) (st : DecoderStats) :
     parseHeaderBody (Wire.toBytes hdr) st =
-      some (hdr.baseOffset.val, { lastCrc := hdr.crc.val, recordCount := hdr.recordsCount.val }) := by
+      some (hdr.baseOffset.toNative,
+            { lastCrc := hdr.crc.toNative, recordCount := hdr.recordsCount.toNative }) := by
   unfold parseHeaderBody Wire.toBytes
   simp only [List.append_assoc,
-    parseBe8_encodeWord64,
+    parseBe8_encodeI64,
+    parseBe4_encodeI32,
     parseBe4_encodeWord32,
     parseBe1_encodeWord8,
     parseBe2_encodeWord16,
-    parseBe4_encodeWord32_nil]
+    parseBe2_encodeI16,
+    parseBe4_encodeI32_nil,
+    I64be.toNative,
+    Word32.toNative,
+    I32be.toNative]
 
 /-- §21.4 Total functional equivalence across all 61-byte `KafkaBatchWireHeader`s. -/
 theorem migrated_batch_header_matches_spec
@@ -252,7 +335,7 @@ theorem migrated_batch_header_matches_spec
   simp only [vesperParseBatchHeader, ite_eq_right hlen, parseHeaderBody_toBytes]
   rfl
 
-/-- Exact CRC and record-count extraction onto `DecoderStats`. -/
+/-- Exact unsigned CRC and signed `baseOffset`/`recordsCount` extraction onto `DecoderStats`. -/
 theorem migrated_batch_header_stats_exact
     (hdr : KafkaBatchWireHeader) (st : DecoderStats) :
     vesperParseBatchHeader (Wire.toBytes hdr) st =
@@ -262,12 +345,74 @@ theorem migrated_batch_header_stats_exact
     rw [wire_header_length_61 hdr]
     omega
   simp only [vesperParseBatchHeader, ite_eq_right hlen, parseHeaderBody_toBytes]
+
+/-- All-`0xff` bytes decode to `-1` for `i64be` `baseOffset` and `i32be` `recordsCount`,
+    while `u32be` `crc` stays unsigned (`0xffffffff` or any 32-bit pattern). -/
+def allOnesHeader : KafkaBatchWireHeader :=
+  { baseOffset           := ⟨2 ^ 64 - 1, by decide⟩
+  , batchLength          := ⟨0, by decide⟩
+  , partitionLeaderEpoch := ⟨0, by decide⟩
+  , magic                := ⟨2, by decide⟩
+  , crc                  := ⟨0xffffffff, by decide⟩
+  , attributes           := ⟨0, by decide⟩
+  , lastOffsetDelta      := ⟨0, by decide⟩
+  , baseTimestamp        := ⟨0, by decide⟩
+  , maxTimestamp         := ⟨0, by decide⟩
+  , producerId           := ⟨0, by decide⟩
+  , producerEpoch        := ⟨0, by decide⟩
+  , baseSequence         := ⟨0, by decide⟩
+  , recordsCount         := ⟨2 ^ 32 - 1, by decide⟩
+  }
+
+theorem all_ff_bytes_decode_negative_one :
+    let rawBytes :=
+      [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff] ++
+      List.replicate 9 0 ++
+      [0x12, 0x34, 0x56, 0x78] ++
+      List.replicate 36 0 ++
+      [0xff, 0xff, 0xff, 0xff]
+    vesperParseBatchHeader rawBytes { lastCrc := 0, recordCount := 0 } =
+      .ok (-1, { lastCrc := 0x12345678, recordCount := -1 }) := rfl
+
+theorem allOnesHeader_signed_and_crc_unsigned :
+    vesperParseBatchHeader (Wire.toBytes allOnesHeader) { lastCrc := 0, recordCount := 0 } =
+      .ok (-1, { lastCrc := 0xffffffff, recordCount := -1 }) := by
+  rw [migrated_batch_header_stats_exact]
+  rfl
+
+/-- Matches `crates/vesper-ffi/tests/wire.rs` (`base_offset = -123_456`, `crc = 0x12345678`). -/
+def wireTestNegHeader : KafkaBatchWireHeader :=
+  { baseOffset           := I64be.ofInt (-123456) (by decide) (by decide)
+  , batchLength          := ⟨0, by decide⟩
+  , partitionLeaderEpoch := ⟨0, by decide⟩
+  , magic                := ⟨2, by decide⟩
+  , crc                  := ⟨0x12345678, by decide⟩
+  , attributes           := ⟨0, by decide⟩
+  , lastOffsetDelta      := ⟨0, by decide⟩
+  , baseTimestamp        := ⟨0, by decide⟩
+  , maxTimestamp         := ⟨0, by decide⟩
+  , producerId           := ⟨0, by decide⟩
+  , producerEpoch        := I16be.ofInt (-32768) (by decide) (by decide)
+  , baseSequence         := ⟨0, by decide⟩
+  , recordsCount         := I32be.ofInt (-42) (by decide) (by decide)
+  }
+
+theorem wire_rs_negative_base_offset_roundtrip :
+    vesperParseBatchHeader (Wire.toBytes wireTestNegHeader) { lastCrc := 0, recordCount := 0 } =
+      .ok (-123456, { lastCrc := 0x12345678, recordCount := -42 }) := by
+  rw [migrated_batch_header_stats_exact]
   rfl
 
 end Vesper.CrucibleMigrationSafety
 
 #print axioms Vesper.CrucibleMigrationSafety.choice_tape_shrink_terminates
+#print axioms Vesper.CrucibleMigrationSafety.I64be.ofInt_toNative
+#print axioms Vesper.CrucibleMigrationSafety.I32be.ofInt_toNative
+#print axioms Vesper.CrucibleMigrationSafety.I16be.ofInt_toNative
 #print axioms Vesper.CrucibleMigrationSafety.wire_header_length_61
 #print axioms Vesper.CrucibleMigrationSafety.vesperParseBatchHeader_short_fails
 #print axioms Vesper.CrucibleMigrationSafety.migrated_batch_header_matches_spec
 #print axioms Vesper.CrucibleMigrationSafety.migrated_batch_header_stats_exact
+#print axioms Vesper.CrucibleMigrationSafety.all_ff_bytes_decode_negative_one
+#print axioms Vesper.CrucibleMigrationSafety.allOnesHeader_signed_and_crc_unsigned
+#print axioms Vesper.CrucibleMigrationSafety.wire_rs_negative_base_offset_roundtrip
