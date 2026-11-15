@@ -54,11 +54,65 @@ impl NodeOp {
             Kind::Input => 3,
         }
     }
+
+    pub const fn slot_count(kind: Kind) -> u32 {
+        match kind {
+            Kind::Container => 3,
+            Kind::Text | Kind::Button => 4,
+            Kind::Input => 5,
+        }
+    }
+
+    pub const fn property_offset(kind: Kind, property: Property) -> Option<u32> {
+        match (kind, property) {
+            (Kind::Container, Property::Enabled) => Some(0),
+            (Kind::Container, Property::Visible) => Some(1),
+            (Kind::Container, Property::Width) => Some(2),
+            (Kind::Text | Kind::Button, Property::Text) => Some(0),
+            (Kind::Text | Kind::Button, Property::Enabled) => Some(1),
+            (Kind::Text | Kind::Button, Property::Visible) => Some(2),
+            (Kind::Text | Kind::Button, Property::Width) => Some(3),
+            (Kind::Input, Property::Text) => Some(0),
+            (Kind::Input, Property::Value) => Some(1),
+            (Kind::Input, Property::Enabled) => Some(2),
+            (Kind::Input, Property::Visible) => Some(3),
+            (Kind::Input, Property::Width) => Some(4),
+            _ => None,
+        }
+    }
+
+    pub fn property_slot(&self, kind: Kind, property: Property) -> Option<u32> {
+        Self::property_offset(kind, property).and_then(|off| self.prop_slot_base.checked_add(off))
+    }
+}
+
+const CONTAINER_PROPS: &[Property] = &[Property::Enabled, Property::Visible, Property::Width];
+const TEXT_BUTTON_PROPS: &[Property] = &[
+    Property::Text,
+    Property::Enabled,
+    Property::Visible,
+    Property::Width,
+];
+const INPUT_PROPS: &[Property] = &[
+    Property::Text,
+    Property::Value,
+    Property::Enabled,
+    Property::Visible,
+    Property::Width,
+];
+
+const fn kind_properties(kind: Kind) -> &'static [Property] {
+    match kind {
+        Kind::Container => CONTAINER_PROPS,
+        Kind::Text | Kind::Button => TEXT_BUTTON_PROPS,
+        Kind::Input => INPUT_PROPS,
+    }
 }
 
 /// Typed reactive property slot stored inside [`AuraSlotTable`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SlotValue {
+    Unset,
     Int(i64),
     Bool(bool),
     Text(String),
@@ -78,6 +132,7 @@ impl From<&Value> for SlotValue {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuraSlotTable {
     pub values: Vec<SlotValue>,
+    pub properties: Vec<Property>,
     pub dirty_slots: Vec<u32>,
 }
 
@@ -85,8 +140,21 @@ impl AuraSlotTable {
     pub fn with_values(values: Vec<SlotValue>) -> Self {
         Self {
             values,
+            properties: Vec::new(),
             dirty_slots: Vec::new(),
         }
+    }
+
+    pub fn with_slots(values: Vec<SlotValue>, properties: Vec<Property>) -> Self {
+        Self {
+            values,
+            properties,
+            dirty_slots: Vec::new(),
+        }
+    }
+
+    pub fn property(&self, slot_id: u32) -> Option<Property> {
+        self.properties.get(slot_id as usize).copied()
     }
 
     /// Updates a reactive slot and queues a dirty entry if and only if the value
@@ -119,20 +187,28 @@ pub fn encode_view_tree(
     let validated = view::validate(tree, limits)?;
     let mut ops = Vec::with_capacity(validated.order.len());
     let mut values = Vec::new();
+    let mut properties = Vec::new();
     for key in validated.order {
         let node = validated.nodes[&key];
         let prop_slot_base = u32::try_from(values.len()).map_err(|_| ViewError::Budget("slots"))?;
-        for val in node.properties.values() {
-            values.push(SlotValue::from(val));
+        for prop in kind_properties(node.kind) {
+            properties.push(*prop);
+            values.push(
+                node.properties
+                    .get(prop)
+                    .map(SlotValue::from)
+                    .unwrap_or(SlotValue::Unset),
+            );
         }
         let child_count =
             u16::try_from(node.children.len()).map_err(|_| ViewError::Budget("children"))?;
-        let event_action_id = node
-            .subscriptions
-            .values()
-            .next()
-            .and_then(|h| u32::try_from(h.0).ok())
-            .unwrap_or(0);
+        let mut event_action_id = 0u32;
+        for (i, handler) in node.subscriptions.values().enumerate() {
+            let id = u32::try_from(handler.0).map_err(|_| ViewError::Budget("handler"))?;
+            if i == 0 {
+                event_action_id = id;
+            }
+        }
         ops.push(NodeOp {
             kind_tag: NodeOp::kind_tag_of(node.kind),
             child_count,
@@ -141,7 +217,7 @@ pub fn encode_view_tree(
             layout_flags: node_flags(node),
         });
     }
-    Ok((ops, AuraSlotTable::with_values(values)))
+    Ok((ops, AuraSlotTable::with_slots(values, properties)))
 }
 
 fn node_flags(node: &Node) -> u32 {
@@ -213,12 +289,20 @@ pub fn audit_view_tree(tree: &ViewTree, limits: &Limits) -> Result<WcagReport, V
         interactive_controls: 0,
         violations: Vec::new(),
     };
+    let mut visible_map = BTreeMap::new();
     for key in validated.order {
         let node = validated.nodes[&key];
-        let visible = !matches!(
-            node.properties.get(&Property::Visible),
-            Some(Value::Bool(false))
-        );
+        let parent_visible = validated
+            .parents
+            .get(&key)
+            .and_then(|p| visible_map.get(p).copied())
+            .unwrap_or(true);
+        let visible = parent_visible
+            && !matches!(
+                node.properties.get(&Property::Visible),
+                Some(Value::Bool(false))
+            );
+        visible_map.insert(key, visible);
         if matches!(node.kind, Kind::Button | Kind::Input) {
             report.interactive_controls += 1;
             let has_label = matches!(
@@ -347,10 +431,10 @@ impl SimAura {
             let Some(widget) = snap.widgets.get(&id) else {
                 continue;
             };
-            if matches!(widget.kind, Kind::Button | Kind::Input)
-                && is_visible(snap, widget)
-                && is_enabled(snap, widget)
-            {
+            if !is_visible(snap, widget) || !is_enabled(snap, widget) {
+                continue;
+            }
+            if matches!(widget.kind, Kind::Button | Kind::Input) {
                 out.push(id);
             }
             for &child in widget.children.iter().rev() {
@@ -500,14 +584,13 @@ fn audit_snapshot(snap: &RecordingSnapshot) -> WcagReport {
         interactive_controls: 0,
         violations: Vec::new(),
     };
-    let ordered = collect_preorder(snap);
-    for id in ordered {
+    let ordered = collect_preorder_with_visibility(snap);
+    for (id, visible) in ordered {
         let Some(widget) = snap.widgets.get(&id) else {
             continue;
         };
         if matches!(widget.kind, Kind::Button | Kind::Input) {
             report.interactive_controls += 1;
-            let visible = is_visible(snap, widget);
             let has_label = matches!(
                 widget.properties.get(&Property::Text).and_then(|slot| snap.slots.get(slot)),
                 Some(Value::Text(s)) if !s.trim().is_empty()
@@ -533,31 +616,36 @@ fn audit_snapshot(snap: &RecordingSnapshot) -> WcagReport {
     report
 }
 
-fn collect_preorder(snap: &RecordingSnapshot) -> Vec<WidgetId> {
+fn collect_preorder_with_visibility(snap: &RecordingSnapshot) -> Vec<(WidgetId, bool)> {
     let Some(root) = snap.root else {
         return Vec::new();
     };
     let mut out = Vec::with_capacity(snap.widgets.len());
-    let mut stack = vec![root];
+    let mut stack = vec![(root, true)];
     let mut seen = BTreeSet::new();
-    while let Some(id) = stack.pop() {
+    while let Some((id, parent_visible)) = stack.pop() {
         if !seen.insert(id) {
             continue;
         }
-        out.push(id);
+        let visible = parent_visible
+            && snap
+                .widgets
+                .get(&id)
+                .is_none_or(|widget| is_visible(snap, widget));
+        out.push((id, visible));
         if let Some(widget) = snap.widgets.get(&id) {
             for &child in widget.children.iter().rev() {
-                stack.push(child);
+                stack.push((child, visible));
             }
         }
     }
     // Include any widgets even if detached in malformed snapshots so audit is total.
-    let extra: BTreeMap<WidgetId, ()> = snap
+    let extra: BTreeMap<WidgetId, bool> = snap
         .widgets
-        .keys()
-        .filter(|id| !seen.contains(id))
-        .map(|&id| (id, ()))
+        .iter()
+        .filter(|(id, _)| !seen.contains(id))
+        .map(|(&id, widget)| (id, is_visible(snap, widget)))
         .collect();
-    out.extend(extra.into_keys());
+    out.extend(extra);
     out
 }
