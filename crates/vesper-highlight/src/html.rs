@@ -2,11 +2,13 @@
 //! the `vesper-chroma.css` custom properties.
 //!
 //! Source text appears in document order, HTML-escaped and otherwise
-//! unchanged, with carriage returns represented by character references so
-//! HTML input newline normalization does not turn them into line feeds. Line
-//! numbers are `vc-gutter` elements marked `user-select: none` and
-//! `aria-hidden`. Clipboard newline conventions depend on the browser and OS.
-//! Hover rows become `title` attributes (not copied with a selection).
+//! unchanged, with carriage returns represented by character references
+//! (`&#13;`) inside `.vc-cr` spans so HTML input newline normalization does
+//! not turn them into line feeds while CSS collapses their glyph advance and
+//! supplies a segment break (`\A`) for lone CRs. Line numbers are `vc-gutter`
+//! elements marked `user-select: none` and `aria-hidden`. Clipboard newline
+//! conventions depend on the browser and OS. Hover rows become `title`
+//! attributes (not copied with a selection).
 use crate::{Highlight, css::class_name};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +44,19 @@ pub fn escape_into(text: &str, out: &mut String) {
         last = i + 1;
     }
     out.push_str(&text[last..]);
+}
+
+fn write_segment(segment: &str, terminator: Option<u8>, is_crlf: bool, out: &mut String) {
+    if terminator == Some(b'\r') {
+        escape_into(&segment[..segment.len() - 1], out);
+        if is_crlf {
+            out.push_str("<span class=\"vc-cr\">&#13;</span>");
+        } else {
+            out.push_str("<span class=\"vc-cr vc-cr-br\">&#13;</span>");
+        }
+    } else {
+        escape_into(segment, out);
+    }
 }
 
 /// Renders a `<pre class="vc">` block. `src` must be the text `h` was
@@ -109,18 +124,20 @@ pub fn render(src: &str, h: &Highlight, opts: &HtmlOptions) -> String {
             };
             rest = &rest[segment.len()..];
             offset += segment.len();
+            // A CRLF is one terminator even when the two bytes belong to
+            // different highlight spans. Defer its gutter until after LF, and
+            // only emit a visual line break for a lone CR.
+            let is_crlf = terminator == Some(b'\r') && src.as_bytes().get(offset) == Some(&b'\n');
             if let Some(open) = &open {
                 out.push_str(open);
-                escape_into(segment, &mut out);
+                write_segment(segment, terminator, is_crlf, &mut out);
                 out.push_str("</span>");
             } else {
-                escape_into(segment, &mut out);
+                write_segment(segment, terminator, is_crlf, &mut out);
             }
-            // A CRLF is one terminator even when the two bytes belong to
-            // different highlight spans. Defer its gutter until after LF.
             let line_end = match terminator {
                 Some(b'\n') => true,
-                Some(b'\r') => src.as_bytes().get(offset) != Some(&b'\n'),
+                Some(b'\r') => !is_crlf,
                 _ => false,
             };
             if line_end {
