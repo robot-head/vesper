@@ -343,3 +343,38 @@ fn public_functions_parse_losslessly_and_recover_after_damage() {
     assert_eq!(recovered.declarations()[1].status, DS::Recovered);
     assert_eq!(recovered.declarations()[2].status, DS::Complete);
 }
+
+#[test]
+fn public_methods_parse_in_inherent_impls_and_conformances() {
+    let source = "copy struct Boxed { value: u64 }\nimpl Boxed { pub /* visible */ fn get(in self)->u64 { self.value } fn plain(in self)->u64 { self.value } }\ntrait Read { fn read(in self)->u64; }\nimpl Read for Boxed { pub fn read(in self)->u64 { self.value } }\nmodel Local: Read for Boxed { pub fn read(in self)->u64 { self.value } }";
+    let parsed = parser::parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    assert_eq!(parsed.syntax().text().to_string(), source);
+    let vesper_syntax::ast::Item::Impl { methods, .. } = &parsed.module.items[1] else {
+        panic!()
+    };
+    assert!(source[methods[0].span.clone()].starts_with("pub /* visible */ fn get"));
+    assert!(source[methods[1].span.clone()].starts_with("fn plain"));
+    for index in [3, 4] {
+        let vesper_syntax::ast::Item::Conformance(conformance) = &parsed.module.items[index] else {
+            panic!()
+        };
+        assert!(source[conformance.methods[0].span.clone()].starts_with("pub fn read"));
+    }
+    let recovered = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(recovered.syntax().text().to_string(), source);
+    assert!(
+        recovered
+            .declarations()
+            .iter()
+            .all(|d| d.status == DS::Complete)
+    );
+    // Inherent impl ASTs intentionally have no item span and cannot yet be
+    // reparsed through this sealed API, even when their recovery is complete.
+    let reparsed =
+        parser::parse_complete_items(&recovered, &[0, 2, 3, 4], Limits::default()).unwrap();
+    assert_eq!(
+        reparsed.items,
+        [0, 2, 3, 4].map(|i| parsed.module.items[i].clone())
+    );
+}

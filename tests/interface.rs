@@ -203,3 +203,19 @@ fn explicit_public_function_has_the_existing_public_interface() {
         }
     );
 }
+
+#[test]
+fn explicit_public_method_has_the_existing_public_interface() {
+    let explicit = export(
+        "copy struct Boxed { value: u64 } impl Boxed { pub fn get(in self) -> u64 { self.value } }",
+    );
+    let implicit = export(
+        "copy struct Boxed { value: u64 } impl Boxed { fn get(in self) -> u64 { self.value } }",
+    );
+    assert_eq!(explicit, implicit);
+    assert!(
+        explicit
+            .exports
+            .contains_key("@example/library::fn::Boxed::get")
+    );
+}

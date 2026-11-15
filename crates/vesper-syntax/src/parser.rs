@@ -796,8 +796,8 @@ impl Parser<'_> {
                 }
                 self.expect(K::LBrace);
                 let mut methods = vec![];
-                while self.at(K::Fn) {
-                    methods.push(self.function(false));
+                while self.at(K::Fn) || (self.at_word(0, "pub") && self.nth(1) == K::Fn) {
+                    methods.push(self.method());
                 }
                 self.expect(K::RBrace);
                 self.row_names = old_rows;
@@ -849,6 +849,18 @@ impl Parser<'_> {
             effects,
             span: start..self.start(),
         }
+    }
+    fn method(&mut self) -> Function {
+        let start = self.start();
+        let public = self.at_word(0, "pub") && self.nth(1) == K::Fn;
+        if public {
+            self.bump();
+        }
+        let mut function = self.function(false);
+        if public {
+            function.span.start = start;
+        }
+        function
     }
     fn function(&mut self, op: bool) -> Function {
         let diagnostics_before = self.diagnostics.len();
@@ -1248,8 +1260,8 @@ impl Parser<'_> {
                     ty,
                     span: start..self.end(),
                 });
-            } else if self.at(K::Fn) {
-                methods.push(self.function(false));
+            } else if self.at(K::Fn) || (self.at_word(0, "pub") && self.nth(1) == K::Fn) {
+                methods.push(self.method());
             } else {
                 self.error("expected 'type' or 'fn' in an impl or model");
             }
