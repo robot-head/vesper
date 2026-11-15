@@ -145,3 +145,93 @@ fn t_var_rejects_ghost_in_runtime_and_unfilled_out_slot() {
         Err(ModeJudgmentError::ResidualNotDiscardable { name: "dst".into() })
     );
 }
+
+#[test]
+fn nested_adt_substitution_respects_parameter_scopes_and_preserves_linearity() {
+    let mut delta = KindEnv::default();
+    delta.bind_var("Txn", usage_mode(Usage::Linear));
+
+    // Wrapper[T] { value: T, pending: Option[Txn] }, where Option also declares param T.
+    let wrapper_u64 = KindType::Adt {
+        name: "Wrapper".into(),
+        decl_mode: ModeVec::BOTTOM,
+        params: vec!["T".into()],
+        fields: vec![
+            AdtFieldKind {
+                name: "value".into(),
+                ty: KindType::Var("T".into()),
+                override_mode: ModeVec::TOP,
+            },
+            AdtFieldKind {
+                name: "pending".into(),
+                ty: make_option(KindType::Var("Txn".into())),
+                override_mode: ModeVec::TOP,
+            },
+        ],
+        type_args: vec![KindType::Prim(PrimKind::U64)],
+    };
+
+    assert_eq!(
+        infer_modal_kind(&delta, &wrapper_u64),
+        Ok(usage_mode(Usage::Linear))
+    );
+    assert_eq!(
+        mode_cross(&delta, &wrapper_u64, usage_mode(Usage::Copy)),
+        Err(ModeJudgmentError::ModeOrderViolation {
+            actual: usage_mode(Usage::Linear),
+            required: usage_mode(Usage::Copy),
+        })
+    );
+
+    // Outer[U] { inner: PairBox[T] { outer: U, inner: T } } instantiated with U = T
+    // (where T in Delta is linear) and PairBox instantiated with u64 must avoid capturing U -> T.
+    delta.bind_var("T", usage_mode(Usage::Linear));
+    let pair_box = KindType::Adt {
+        name: "PairBox".into(),
+        decl_mode: ModeVec::BOTTOM,
+        params: vec!["T".into()],
+        fields: vec![
+            AdtFieldKind {
+                name: "outer".into(),
+                ty: KindType::Var("U".into()),
+                override_mode: ModeVec::TOP,
+            },
+            AdtFieldKind {
+                name: "inner".into(),
+                ty: KindType::Var("T".into()),
+                override_mode: ModeVec::TOP,
+            },
+        ],
+        type_args: vec![KindType::Prim(PrimKind::U64)],
+    };
+    let outer_of_t = KindType::Adt {
+        name: "Outer".into(),
+        decl_mode: ModeVec::BOTTOM,
+        params: vec!["U".into()],
+        fields: vec![AdtFieldKind {
+            name: "inner".into(),
+            ty: pair_box,
+            override_mode: ModeVec::TOP,
+        }],
+        type_args: vec![KindType::Var("T".into())],
+    };
+    assert_eq!(
+        infer_modal_kind(&delta, &outer_of_t),
+        Ok(usage_mode(Usage::Linear))
+    );
+}
+
+#[test]
+fn t_var_rejects_uninitialized_out_slot_as_target() {
+    let gamma_only_dst = vec![VarContextEntry {
+        name: "dst".into(),
+        presence: Presence::Runtime,
+        mode: usage_mode(Usage::Copy),
+        ownership: PlaceOwnership::OutSlot,
+        initialized: false,
+    }];
+    assert_eq!(
+        check_var_use(&gamma_only_dst, Presence::Runtime, "dst"),
+        Err(ModeJudgmentError::UninitializedVar { name: "dst".into() })
+    );
+}

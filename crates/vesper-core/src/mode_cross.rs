@@ -10,7 +10,7 @@
 //! - `[T-Var]`: variable lookup enforcing context presence `rho_ctx <= rho`
 //!   and discardability (`discard(Gamma)`) of residual bindings.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -84,6 +84,33 @@ pub enum KindType {
 }
 
 impl KindType {
+    fn free_vars_into(&self, out: &mut BTreeSet<String>) {
+        match self {
+            Self::Prim(_) | Self::Fn { .. } => {}
+            Self::Var(name) => {
+                out.insert(name.clone());
+            }
+            Self::Adt {
+                params,
+                fields,
+                type_args,
+                ..
+            } => {
+                for arg in type_args {
+                    arg.free_vars_into(out);
+                }
+                let mut inner = BTreeSet::new();
+                for field in fields {
+                    field.ty.free_vars_into(&mut inner);
+                }
+                for p in params {
+                    inner.remove(p);
+                }
+                out.extend(inner);
+            }
+        }
+    }
+
     /// Instantiate generic parameter `params` with `args` for `[K-Adt]`.
     pub fn substitute(&self, subst: &BTreeMap<String, KindType>) -> Self {
         match self {
@@ -98,20 +125,76 @@ impl KindType {
                 params,
                 fields,
                 type_args,
-            } => Self::Adt {
-                name: name.clone(),
-                decl_mode: *decl_mode,
-                params: params.clone(),
-                fields: fields
+            } => {
+                let new_type_args = type_args.iter().map(|a| a.substitute(subst)).collect();
+                let mut field_subst: BTreeMap<String, KindType> = subst
                     .iter()
-                    .map(|f| AdtFieldKind {
-                        name: f.name.clone(),
-                        ty: f.ty.substitute(subst),
-                        override_mode: f.override_mode,
-                    })
-                    .collect(),
-                type_args: type_args.iter().map(|a| a.substitute(subst)).collect(),
-            },
+                    .filter(|(k, _)| !params.iter().any(|p| p == *k))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+
+                if field_subst.is_empty() {
+                    return Self::Adt {
+                        name: name.clone(),
+                        decl_mode: *decl_mode,
+                        params: params.clone(),
+                        fields: fields.clone(),
+                        type_args: new_type_args,
+                    };
+                }
+
+                let mut field_free = BTreeSet::new();
+                for field in fields {
+                    field.ty.free_vars_into(&mut field_free);
+                }
+                let mut replacement_free = BTreeSet::new();
+                for (k, v) in &field_subst {
+                    if field_free.contains(k) {
+                        v.free_vars_into(&mut replacement_free);
+                    }
+                }
+
+                let mut new_params = params.clone();
+                let mut alpha_rename: BTreeMap<String, KindType> = BTreeMap::new();
+                let mut used_names: BTreeSet<String> = field_free;
+                used_names.extend(replacement_free.iter().cloned());
+                used_names.extend(params.iter().cloned());
+
+                for param in &mut new_params {
+                    if replacement_free.contains(param.as_str()) {
+                        let mut idx = 0usize;
+                        let fresh = loop {
+                            let cand = format!("{param}__alpha{idx}");
+                            if !used_names.contains(&cand) {
+                                break cand;
+                            }
+                            idx += 1;
+                        };
+                        used_names.insert(fresh.clone());
+                        alpha_rename.insert(param.clone(), Self::Var(fresh.clone()));
+                        *param = fresh;
+                    }
+                }
+
+                for (old, new_var) in alpha_rename {
+                    field_subst.insert(old, new_var);
+                }
+
+                Self::Adt {
+                    name: name.clone(),
+                    decl_mode: *decl_mode,
+                    params: new_params,
+                    fields: fields
+                        .iter()
+                        .map(|f| AdtFieldKind {
+                            name: f.name.clone(),
+                            ty: f.ty.substitute(&field_subst),
+                            override_mode: f.override_mode,
+                        })
+                        .collect(),
+                    type_args: new_type_args,
+                }
+            }
             Self::Fn { fn_mode } => Self::Fn { fn_mode: *fn_mode },
         }
     }
@@ -165,6 +248,10 @@ pub enum ModeJudgmentError {
         name: String,
         ctx_presence: Presence,
         binding_presence: Presence,
+    },
+    /// `[T-Var]`: binding is uninitialized (e.g., an unwritten `OutSlot`).
+    UninitializedVar {
+        name: String,
     },
     /// `[T-Var]`: residual `Gamma` contains a non-discardable obligation.
     ResidualNotDiscardable {
@@ -285,6 +372,11 @@ pub fn check_var_use(
                     name: entry.name.clone(),
                     ctx_presence,
                     binding_presence: entry.presence,
+                });
+            }
+            if !entry.initialized {
+                return Err(ModeJudgmentError::UninitializedVar {
+                    name: entry.name.clone(),
                 });
             }
             found = Some((entry.presence, entry.mode));
