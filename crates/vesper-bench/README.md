@@ -41,6 +41,13 @@ decision. Independent-sample inference requires appropriate independence and
 distribution assumptions; ABBA epoch measurements are paired and do not
 automatically satisfy those assumptions.
 
+`mann_whitney_exact(first, second)` computes the exact untied permutation
+probability for two nonempty samples of at most 32 observations each. It rejects
+repeated values anywhere in the combined samples. The returned fraction uses
+twice the smaller inclusive tail, capped at one; it is not rounded. Its null
+interpretation requires exchangeable observations, and it is not a paired ABBA
+test or a confidence interval. It does not participate in the regression gate.
+
 ## Optional population-median confidence gate
 
 `analyze_pairs(samples, max_regression_bp)` targets the population median of the
