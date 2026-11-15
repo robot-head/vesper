@@ -15,7 +15,7 @@
     reused (stale handles never alias a live slot);
   * a key issued by a later insertion differs from every stale key;
   * two keys that both read a value from the same slot are equal.
-  Core Lean 4.24 only; no Mathlib, no `sorry`, no new axioms.
+  Core Lean 4.35 only; no Mathlib, no `sorry`, no new axioms.
 -/
 namespace Vesper.StrataCollections
 

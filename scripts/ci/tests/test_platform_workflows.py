@@ -38,8 +38,22 @@ class PlatformWorkflowTests(unittest.TestCase):
             checkout = next(s for s in job["steps"] if s.get("uses") == "actions/checkout@v4")
             self.assertEqual(checkout["with"]["ref"], "${{ needs.plan.outputs.sha }}")
             self.assertTrue(any(s.get("name") == "Verify exact checkout" for s in job["steps"]))
-        self.assertEqual(mac["timeout-minutes"], "75")
-        self.assertEqual(windows["timeout-minutes"], "130")
+        self.assertEqual(mac["timeout-minutes"], "60")
+        self.assertEqual(windows["timeout-minutes"], "60")
+        for job in (mac, windows):
+            commands = "\n".join(s.get("run", "") for s in job["steps"])
+            self.assertNotIn("--workspace", commands)
+            self.assertNotIn("clippy", commands)
+            self.assertNotIn("check-lean-models", commands)
+            self.assertIn("scripts/ci/test-native-executables.sh", commands)
+        mac_commands = "\n".join(s.get("run", "") for s in mac["steps"])
+        windows_commands = "\n".join(s.get("run", "") for s in windows["steps"])
+        self.assertIn("--test platform", mac_commands)
+        self.assertIn("--test windows_platform", windows_commands)
+        self.assertIn("--test windows", windows_commands)
+        for commands in (mac_commands, windows_commands):
+            self.assertIn("--test drivers", commands)
+            self.assertIn("--test pool", commands)
 
     def test_plan_failure_fails_required_jobs(self):
         for result in ("failure", "cancelled", "skipped", ""):
@@ -64,7 +78,7 @@ class PlatformWorkflowTests(unittest.TestCase):
     def test_dedup_retains_distinct_features_and_moves_stdio_checks(self):
         source = workflow("source-macros.yml")
         matrix = source["jobs"]["native-tier1-source"]["strategy"]["matrix"]["os"]
-        self.assertEqual(set(matrix), {"ubuntu-latest", "windows-latest", "macos-latest"})
+        self.assertEqual(set(matrix), {"ubuntu-latest"})
         source_steps = source["jobs"]["native-tier1-source"]["steps"]
         commands = "\n".join(s.get("run", "") for s in source_steps)
         self.assertIn("--no-default-features", commands)
@@ -73,17 +87,6 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertIn("structured-component-foundation", source["jobs"])
         self.assertEqual(workflow("stylus.yml")["jobs"]["native-stylus"]["strategy"]["matrix"]["os"],
                          ["ubuntu-latest"])
-        for name in ("platform", "windows"):
-            commands = "\n".join(s.get("run", "") for s in self.platforms["jobs"][name]["steps"])
-            self.assertIn("scripts/test-stylus.sh", commands)
-            full_features = next(s for s in self.platforms["jobs"][name]["steps"]
-                                 if s.get("name") == "Test distinct pure-host feature configuration")
-            self.assertEqual(full_features["if"], "needs.plan.outputs.profile == 'full'")
-            self.assertIn("--no-default-features --all-targets", full_features["run"])
-            self.assertIn("--test forge_authority", full_features["run"])
-        windows = "\n".join(s.get("run", "") for s in self.platforms["jobs"]["windows"]["steps"])
-        self.assertIn("scripts/test-source-macros.sh", windows)
-        self.assertIn("VESPER_SOURCE_MACROS_BINARY", str(self.platforms["jobs"]["windows"]["steps"]))
 
     def test_release_is_read_only_full_validation_before_ready(self):
         self.assertEqual(set(self.release["on"]), {"workflow_dispatch"})

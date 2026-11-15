@@ -429,65 +429,60 @@ impl Session {
         let faults = Arc::clone(&session.faults);
         let exit = Arc::clone(&session.exit);
         let shutdown_until = Arc::clone(&session.shutdown_until);
-        session.watcher = Some(
-            thread::Builder::new()
-                .name("lean4lean42-watch".into())
-                .spawn(move || {
-                    loop {
-                        let mut child = lock(&child);
-                        match child.try_wait() {
-                            Ok(Some(status)) => {
-                                let at = Instant::now();
-                                if at > until {
-                                    fault(
-                                        &faults,
-                                        error(ErrorKind::Timeout, "child exit deadline"),
-                                    );
-                                }
-                                if lock(&shutdown_until).is_some_and(|limit| at > limit) {
-                                    fault(
-                                        &faults,
-                                        error(ErrorKind::Timeout, "child shutdown deadline"),
-                                    );
-                                }
-                                *lock(&exit) = Some(Exit {
-                                    status: Some(status),
-                                    at,
-                                });
-                                break;
+        session.watcher = Some(thread::Builder::new().name("logos42-watch".into()).spawn(
+            move || {
+                loop {
+                    let mut child = lock(&child);
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            let at = Instant::now();
+                            if at > until {
+                                fault(&faults, error(ErrorKind::Timeout, "child exit deadline"));
                             }
-                            Ok(None) => {}
-                            Err(e) => fault(&faults, e.into()),
-                        }
-                        if Instant::now() >= until {
-                            fault(&faults, error(ErrorKind::Timeout, "child process deadline"));
-                        }
-                        if lock(&shutdown_until).is_some_and(|limit| Instant::now() >= limit) {
-                            fault(
-                                &faults,
-                                error(ErrorKind::Timeout, "child shutdown deadline"),
-                            );
-                        }
-                        if cancel.load(Ordering::Acquire) || lock(&faults).is_some() {
-                            let _ = child.kill();
-                            let status = match child.wait() {
-                                Ok(status) => Some(status),
-                                Err(e) => {
-                                    fault(&faults, e.into());
-                                    None
-                                }
-                            };
+                            if lock(&shutdown_until).is_some_and(|limit| at > limit) {
+                                fault(
+                                    &faults,
+                                    error(ErrorKind::Timeout, "child shutdown deadline"),
+                                );
+                            }
                             *lock(&exit) = Some(Exit {
-                                status,
-                                at: Instant::now(),
+                                status: Some(status),
+                                at,
                             });
                             break;
                         }
-                        drop(child);
-                        thread::sleep(Duration::from_millis(2));
+                        Ok(None) => {}
+                        Err(e) => fault(&faults, e.into()),
                     }
-                })?,
-        );
+                    if Instant::now() >= until {
+                        fault(&faults, error(ErrorKind::Timeout, "child process deadline"));
+                    }
+                    if lock(&shutdown_until).is_some_and(|limit| Instant::now() >= limit) {
+                        fault(
+                            &faults,
+                            error(ErrorKind::Timeout, "child shutdown deadline"),
+                        );
+                    }
+                    if cancel.load(Ordering::Acquire) || lock(&faults).is_some() {
+                        let _ = child.kill();
+                        let status = match child.wait() {
+                            Ok(status) => Some(status),
+                            Err(e) => {
+                                fault(&faults, e.into());
+                                None
+                            }
+                        };
+                        *lock(&exit) = Some(Exit {
+                            status,
+                            at: Instant::now(),
+                        });
+                        break;
+                    }
+                    drop(child);
+                    thread::sleep(Duration::from_millis(2));
+                }
+            },
+        )?);
         let queue = Arc::clone(&session.queue);
         let faults = Arc::clone(&session.faults);
         let mut out = Metered {
@@ -497,87 +492,83 @@ impl Session {
             cap: limits.stdout_bytes,
         };
         let frame_cap = limits.frame_bytes;
-        session.reader = Some(
-            thread::Builder::new()
-                .name("lean4lean42-stdout".into())
-                .spawn(move || {
-                    loop {
-                        let result = match mode {
-                            Output::Framed => read_frame(&mut out, frame_cap),
-                            Output::Raw => {
-                                let mut buffer = [0u8; CHUNK];
-                                match out.read(&mut buffer[..CHUNK.min(frame_cap)]) {
-                                    Ok(0) => Ok(None),
-                                    Ok(n) => {
-                                        let mut bytes = Vec::new();
-                                        match bytes.try_reserve_exact(n) {
-                                            Ok(()) => {
-                                                bytes.extend_from_slice(&buffer[..n]);
-                                                Ok(Some(bytes))
-                                            }
-                                            Err(_) => Err(error(
-                                                ErrorKind::Allocation,
-                                                "stdout chunk allocation",
-                                            )),
+        session.reader = Some(thread::Builder::new().name("logos42-stdout".into()).spawn(
+            move || {
+                loop {
+                    let result = match mode {
+                        Output::Framed => read_frame(&mut out, frame_cap),
+                        Output::Raw => {
+                            let mut buffer = [0u8; CHUNK];
+                            match out.read(&mut buffer[..CHUNK.min(frame_cap)]) {
+                                Ok(0) => Ok(None),
+                                Ok(n) => {
+                                    let mut bytes = Vec::new();
+                                    match bytes.try_reserve_exact(n) {
+                                        Ok(()) => {
+                                            bytes.extend_from_slice(&buffer[..n]);
+                                            Ok(Some(bytes))
                                         }
+                                        Err(_) => Err(error(
+                                            ErrorKind::Allocation,
+                                            "stdout chunk allocation",
+                                        )),
                                     }
-                                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
-                                        continue;
-                                    }
-                                    Err(e) => Err(e.into()),
                                 }
+                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+                                    continue;
+                                }
+                                Err(e) => Err(e.into()),
                             }
-                        };
-                        let at = Instant::now();
-                        let terminal = !matches!(&result, Ok(Some(_)));
-                        let event = match result {
-                            Ok(Some(bytes)) => Event::Data(at, bytes),
-                            Ok(None) => Event::Eof(at),
-                            Err(e) => {
-                                fault(&faults, e.clone());
-                                Event::Failed(at, e)
-                            }
-                        };
-                        if !queue.send(event) || terminal {
-                            break;
                         }
+                    };
+                    let at = Instant::now();
+                    let terminal = !matches!(&result, Ok(Some(_)));
+                    let event = match result {
+                        Ok(Some(bytes)) => Event::Data(at, bytes),
+                        Ok(None) => Event::Eof(at),
+                        Err(e) => {
+                            fault(&faults, e.clone());
+                            Event::Failed(at, e)
+                        }
+                    };
+                    if !queue.send(event) || terminal {
+                        break;
                     }
-                })?,
-        );
+                }
+            },
+        )?);
         let state = Arc::clone(&session.stderr);
         let faults = Arc::clone(&session.faults);
         let stderr_cap = limits.stderr_bytes;
-        session.drainer = Some(
-            thread::Builder::new()
-                .name("lean4lean42-stderr".into())
-                .spawn(move || {
-                    let mut buffer = [0u8; CHUNK];
-                    loop {
-                        match err.read(&mut buffer) {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                let mut state = lock(&state);
-                                if let Err(e) = state.record(&buffer[..n]) {
-                                    fault(&faults, e);
-                                }
-                                let keep = n.min(stderr_cap.saturating_sub(state.retained.len()));
-                                state.retained.extend_from_slice(&buffer[..keep]);
-                                if keep != n {
-                                    fault(
-                                        &faults,
-                                        error(ErrorKind::OutputLimit, "child stderr byte cap"),
-                                    );
-                                }
+        session.drainer = Some(thread::Builder::new().name("logos42-stderr".into()).spawn(
+            move || {
+                let mut buffer = [0u8; CHUNK];
+                loop {
+                    match err.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let mut state = lock(&state);
+                            if let Err(e) = state.record(&buffer[..n]) {
+                                fault(&faults, e);
                             }
-                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                            Err(e) => {
-                                fault(&faults, e.into());
-                                break;
+                            let keep = n.min(stderr_cap.saturating_sub(state.retained.len()));
+                            state.retained.extend_from_slice(&buffer[..keep]);
+                            if keep != n {
+                                fault(
+                                    &faults,
+                                    error(ErrorKind::OutputLimit, "child stderr byte cap"),
+                                );
                             }
                         }
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(e) => {
+                            fault(&faults, e.into());
+                            break;
+                        }
                     }
-                })?,
-        );
+                }
+            },
+        )?);
         Ok(session)
     }
 
@@ -820,7 +811,7 @@ pub fn capture_observed(
 #[cfg(test)]
 pub mod testing {
     use super::*;
-    const MARKER: &[u8] = b"lean4lean42-transport-marker";
+    const MARKER: &[u8] = b"logos42-transport-marker";
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum ProbeKind {
         Malformed,

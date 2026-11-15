@@ -55,7 +55,8 @@ theorem admissible_erase (s : NormLevel) (acc order : List Name) (a : Name)
   | cons b rest ih =>
     by_cases he : b = a
     · subst b
-      simpa only [List.erase_cons_head] using h.2
+      rw [List.erase_cons_head]
+      exact h.2
     · rw [List.erase_cons_tail (by simpa only [beq_iff_eq] using he)]
       change EdgeCovered s (a :: acc) b ∧ Admissible s (b :: a :: acc) (rest.erase a)
       refine ⟨edgeCovered_acc_mono s b acc (a :: acc)

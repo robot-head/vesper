@@ -6,7 +6,7 @@
 //! Repeated numeric scalars have exactly one nonempty packed segment. Other
 //! repeated fields have contiguous ordered unpacked occurrences. Empty repeated
 //! values are represented by absence. Schemas are flat, sorted and acyclic.
-//! No maps, groups, int32/int64, enums, floats, oneofs, extensions, source macros,
+//! No maps, groups, enums, floats, oneofs, extensions, source macros,
 //! Regions, SIMD, constant-time or proof claims are supplied.
 //!
 //! PROFILE is selected out-of-band with a fixed validated schema; it is not a
@@ -60,6 +60,8 @@ pub const MAX_WIRE_BYTES: usize = i32::MAX as usize;
 pub enum Kind {
     U32,
     U64,
+    Int32,
+    Int64,
     Sint32,
     Sint64,
     Bool,
@@ -107,6 +109,8 @@ pub struct FieldValue<'a> {
 pub enum Value<'a> {
     U32(u32),
     U64(u64),
+    Int32(i32),
+    Int64(i64),
     Sint32(i32),
     Sint64(i64),
     Bool(bool),
@@ -611,6 +615,14 @@ impl<'a> Parser<'_, '_, 'a> {
                 Value::U32(u32::try_from(n).map_err(|_| Error::at(ErrorKind::Overflow, at))?)
             }
             Kind::U64 => Value::U64(n),
+            Kind::Int32 => {
+                let value = n as i32;
+                if value as i64 as u64 != n {
+                    return Err(Error::at(ErrorKind::NonCanonical, at));
+                }
+                Value::Int32(value)
+            }
+            Kind::Int64 => Value::Int64(n as i64),
             Kind::Sint32 => {
                 let n = u32::try_from(n).map_err(|_| Error::at(ErrorKind::Overflow, at))?;
                 Value::Sint32(((n >> 1) as i32) ^ -((n & 1) as i32))
@@ -629,6 +641,8 @@ fn scalar_size(kind: Kind, value: &Value<'_>) -> Result<usize> {
     Ok(match (kind, value) {
         (Kind::U32, Value::U32(n)) => var_len(u64::from(*n)),
         (Kind::U64, Value::U64(n)) => var_len(*n),
+        (Kind::Int32, Value::Int32(n)) => var_len(*n as i64 as u64),
+        (Kind::Int64, Value::Int64(n)) => var_len(*n as u64),
         (Kind::Sint32, Value::Sint32(n)) => var_len(zig32(*n)),
         (Kind::Sint64, Value::Sint64(n)) => var_len(zig64(*n)),
         (Kind::Bool, Value::Bool(_)) => 1,
@@ -872,6 +886,8 @@ impl Writer<'_, '_, '_> {
         match value {
             Value::U32(n) => self.var(u64::from(*n)),
             Value::U64(n) => self.var(*n),
+            Value::Int32(n) => self.var(*n as i64 as u64),
+            Value::Int64(n) => self.var(*n as u64),
             Value::Sint32(n) => self.var(zig32(*n)),
             Value::Sint64(n) => self.var(zig64(*n)),
             Value::Bool(b) => self.var(u64::from(*b)),

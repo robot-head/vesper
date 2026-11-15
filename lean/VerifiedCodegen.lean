@@ -37,6 +37,8 @@ against the evaluator and Cranelift, not by this file. The theorems are about
 these models only.
 -/
 
+set_option backward.split false
+
 namespace Vesper.VerifiedCodegen
 
 /-! ## Words -/
@@ -474,6 +476,7 @@ theorem rel_st (l : Loc) (v w : Int) (r : Reg → Int) (hw : w = enc v) :
   intro l'
   by_cases hl : l' = l <;> simp [upd, hl, hw, hR l']
 
+set_option backward.isDefEq.respectTransparency false in
 set_option maxHeartbeats 4000000 in
 theorem sim_arith (op : ArithOp) (k : Kind) (d a b : Nat) (ht : Typed (.arith op k d a b) s) :
     Sim (lirStep (.arith op k d a b) s) (run (select (.arith op k d a b)) m) := by

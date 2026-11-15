@@ -179,8 +179,8 @@ fn pinned_lean(started: Instant) -> (PathBuf, String) {
     version.success();
     let version = String::from_utf8(version.stdout).unwrap().trim().to_owned();
     assert!(
-        version.contains("version 4.24.0,"),
-        "requires Lean 4.24.0: {version}"
+        version.contains("version 4.35.0,"),
+        "requires Lean 4.35.0: {version}"
     );
     (lean, version)
 }
@@ -302,7 +302,7 @@ fn distinct_private_kernel_names_survive_real_replay_together() {
                 .current_dir(&root)
                 .env("LEAN_PATH", &root)
                 .env("LEAN_NUM_THREADS", "1")
-                .args(["-j1", "-M1024", "-o"])
+                .args(["-j1", "-M4096", "-o"])
                 .arg(format!("{module}.olean"))
                 .arg(format!("{module}.lean")),
             Duration::from_secs(60),
@@ -320,7 +320,7 @@ fn distinct_private_kernel_names_survive_real_replay_together() {
             .current_dir(&probe)
             .env("LEAN_PATH", &root)
             .env("LEAN_NUM_THREADS", "1")
-            .args(["-j1", "-M1024", "--run", "PrivateReplayMetadata.lean"]),
+            .args(["-j1", "-M4096", "--run", "PrivateReplayMetadata.lean"]),
         Duration::from_secs(60),
         started,
     );

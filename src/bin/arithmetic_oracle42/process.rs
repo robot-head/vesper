@@ -457,9 +457,9 @@ fn version(bytes: &[u8]) -> Result<String, HarnessError> {
     if s.len() > 1024
         || !s
             .split_whitespace()
-            .any(|part| part.trim_matches([',', '(', ')']) == "4.24.0")
+            .any(|part| part.trim_matches([',', '(', ')']) == "4.35.0")
     {
-        return Err(err(FailureKind::ToolVersion, "Lean 4.24.0 required"));
+        return Err(err(FailureKind::ToolVersion, "Lean 4.35.0 required"));
     }
     Ok(s.to_owned())
 }

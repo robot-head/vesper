@@ -82,7 +82,7 @@ requires a new explicit node/printer implementation; it cannot be smuggled throu
 a raw fragment. This first milestone does not implement a Lean server protocol,
 kernel replay, proof certificates, or compiler-correctness proofs.
 
-Tests invoke the pinned Lean 4.24.0 (`VESPER_LEAN` or `lean` on PATH). An explicitly
+Tests invoke the pinned Lean 4.35.0 (`VESPER_LEAN` or `lean` on PATH). An explicitly
 configured missing/wrong toolchain fails tests; absent default Lean prints a skip.
 They compile and execute pure expressions, ADTs/records, generic/named calls,
 instance binders, mutual partial CFGs, recursive inductives, HandlerCPS/Effect_Fail

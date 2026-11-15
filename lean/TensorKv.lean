@@ -253,7 +253,7 @@ theorem step_wf (p : Pool) (op : Op) (hw : WF p) : WF (step p op).1 := by
       by_cases hm : s.tokens % pageTokens = 0
       · by_cases hz : p.free = 0
         · simpa [step, hf, hm, hz] using hw
-        · simp only [step, hf, hm, hz, if_true, if_false]
+        · simp only [step, hf, hm, hz, ite_true, ite_false]
           intro x hx
           rcases mem_replace hx with h | h
           · subst h
@@ -261,7 +261,7 @@ theorem step_wf (p : Pool) (op : Op) (hw : WF p) : WF (step p op).1 := by
             show s.pages + 1 = pagesFor (s.tokens + 1)
             rw [pagesFor_succ_page _ hm', hs]
           · exact hw x h
-      · simp only [step, hf, hm, if_false]
+      · simp only [step, hf, hm, ite_false]
         intro x hx
         rcases mem_replace hx with h | h
         · subst h
@@ -274,7 +274,7 @@ theorem step_wf (p : Pool) (op : Op) (hw : WF p) : WF (step p op).1 := by
     | none => simpa [step, hf] using hw
     | some s =>
       by_cases hk : keep ≤ s.tokens ∧ pagesFor keep ≤ s.pages
-      · simp only [step, hf, hk, and_self, if_true]
+      · simp only [step, hf, hk, and_self, ite_true]
         intro x hx
         rcases mem_replace hx with h | h
         · subst h; rfl

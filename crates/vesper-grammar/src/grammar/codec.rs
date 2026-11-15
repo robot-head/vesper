@@ -212,8 +212,19 @@ impl<'a> Reader<'_, '_, 'a> {
                 Ok(Value::Unit)
             }
             Rule::Uleb128 => Ok(Value::Number(self.number()?)),
-            Rule::Blob | Rule::Frame(_) => {
-                let len = self.number()?;
+            Rule::Blob | Rule::Frame(_) | Rule::U24Frame(_) => {
+                let len = if matches!(self.grammar.rules[id], Rule::U24Frame(_)) {
+                    let (value, bytes) =
+                        super::decode_u24(&self.input[self.pos..self.end], &mut self.budget.work)
+                            .map_err(|mut e| {
+                            e.offset += self.pos;
+                            e
+                        })?;
+                    self.pos += bytes;
+                    value
+                } else {
+                    self.number()?
+                };
                 let len =
                     usize::try_from(len).map_err(|_| Error::new(ErrorKind::Overflow, self.pos))?;
                 bound(
@@ -226,7 +237,7 @@ impl<'a> Reader<'_, '_, 'a> {
                 if end > self.end {
                     return Err(Error::new(ErrorKind::UnexpectedEof, self.end));
                 }
-                if let Rule::Frame(child) = &self.grammar.rules[id] {
+                if let Rule::Frame(child) | Rule::U24Frame(child) = &self.grammar.rules[id] {
                     self.budget.boxed(depth)?;
                     let previous_end = self.end;
                     self.end = end;
@@ -286,6 +297,7 @@ impl<'a> Reader<'_, '_, 'a> {
 enum Write<'a> {
     Byte(u8),
     Number(u64, usize),
+    U24(u32),
     Bytes(&'a [u8]),
 }
 struct Plan<'a> {
@@ -396,6 +408,25 @@ impl<'p> Planner<'p, '_> {
                 self.plan.writes[prefix] = Write::Number(payload, len);
                 Ok(())
             }
+            (Rule::U24Frame(child), Value::Frame(value)) => {
+                self.plan.budget.children(1, depth)?;
+                let prefix = self.plan.push(Write::U24(0))?;
+                self.length(3)?;
+                let start = self.plan.len;
+                self.node(*child, value, depth + 1)?;
+                let payload = self.plan.len - start;
+                bound(
+                    payload,
+                    self.grammar.limits.max_frame_bytes,
+                    ErrorKind::PayloadLimit,
+                )?;
+                if payload > 0x00ff_ffff {
+                    return Err(Error::new(ErrorKind::Overflow, 0));
+                }
+                self.plan.budget.work(3)?;
+                self.plan.writes[prefix] = Write::U24(payload as u32);
+                Ok(())
+            }
             (Rule::Sequence(children), Value::Sequence(values)) => {
                 if children.len() != values.len() {
                     return Err(Error::new(ErrorKind::Mismatch, 0));
@@ -504,6 +535,14 @@ pub fn encode_into(
                     *byte = (number as u8 & 127) | if number >= 128 { 128 } else { 0 };
                     number >>= 7;
                 }
+                offset = end;
+            }
+            Write::U24(number) => {
+                let end = add(offset, 3)?;
+                let out = scratch
+                    .get_mut(offset..end)
+                    .ok_or(Error::new(ErrorKind::Rule, 0))?;
+                out.copy_from_slice(&number.to_be_bytes()[1..]);
                 offset = end;
             }
             Write::Bytes(bytes) => {

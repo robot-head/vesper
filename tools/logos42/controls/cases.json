@@ -1,0 +1,254 @@
+[
+  {
+    "id": "arena.closure-level-subst",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "closure-level-subst.ndjson"
+  },
+  {
+    "id": "arena.constlevels",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "constlevels.ndjson"
+  },
+  {
+    "id": "arena.large-elim-param",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "large-elim-param.ndjson"
+  },
+  {
+    "id": "arena.level-imax-leq",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "level-imax-leq.ndjson"
+  },
+  {
+    "id": "arena.level-imax-normalization",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "level-imax-normalization.ndjson"
+  },
+  {
+    "id": "arena.loose-bvar-value",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "loose-bvar-value.ndjson"
+  },
+  {
+    "id": "arena.nat-rec-k-lie",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "nat-rec-k-lie.ndjson"
+  },
+  {
+    "id": "arena.nat-rec-rules",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "nat-rec-rules.ndjson"
+  },
+  {
+    "id": "arena.nested-name-capture",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "nested-name-capture.ndjson"
+  },
+  {
+    "id": "arena.orphan-rec",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "orphan-rec.ndjson"
+  },
+  {
+    "id": "arena.pi-closure-context",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "pi-closure-context.ndjson"
+  },
+  {
+    "id": "arena.rec-missing-ih",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "rec-missing-ih.ndjson"
+  },
+  {
+    "id": "arena.unit-rec-rule",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "unit-rec-rule.ndjson"
+  },
+  {
+    "id": "arena.proof-param-ok",
+    "expected_accept": true,
+    "expected_reason": "accepted",
+    "input": "proof-param-ok.ndjson"
+  },
+  {
+    "id": "arena.extra-rec",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "extra-rec.ndjson"
+  },
+  {
+    "id": "arena.inductive-undeclared-universe",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "inductive-undeclared-universe.ndjson"
+  },
+  {
+    "id": "arena.level-index-out-of-order",
+    "expected_accept": true,
+    "expected_reason": "accepted",
+    "input": "level-index-out-of-order.ndjson"
+  },
+  {
+    "id": "arena.orphan-ctor",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "orphan-ctor.ndjson"
+  },
+  {
+    "id": "arena.sparse-name-index",
+    "expected_accept": true,
+    "expected_reason": "accepted",
+    "input": "sparse-name-index.ndjson"
+  },
+  {
+    "id": "vesper.closed-theorem",
+    "expected_accept": true,
+    "expected_reason": "accepted",
+    "input": "closed-theorem.ndjson"
+  },
+  {
+    "id": "vesper.loose-bvar-theorem",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "loose-bvar-theorem.ndjson"
+  },
+  {
+    "id": "vesper.loose-bvar-definition",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "loose-bvar-definition.ndjson"
+  },
+  {
+    "id": "vesper.loose-bvar-opaque",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "loose-bvar-opaque.ndjson"
+  },
+  {
+    "id": "vesper.mismatched-theorem-body",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "mismatched-theorem-body.ndjson"
+  },
+  {
+    "id": "vesper.duplicate-declaration",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "duplicate-declaration.ndjson"
+  },
+  {
+    "id": "vesper.unknown-constant",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "unknown-constant.ndjson"
+  },
+  {
+    "id": "vesper.ill-typed-application",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "ill-typed-application.ndjson"
+  },
+  {
+    "id": "vesper.invalid-projection",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "invalid-projection.ndjson"
+  },
+  {
+    "id": "upstream.quotient-ctor-as-axiom",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-quotient-ctor-as-axiom.ndjson"
+  },
+  {
+    "id": "upstream.quotient-ctor-declared-first",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-quotient-ctor-declared-first.ndjson"
+  },
+  {
+    "id": "upstream.quotient-ctor-named-by-a-constructor",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-quotient-ctor-named-by-a-constructor.ndjson"
+  },
+  {
+    "id": "upstream.quotient-ind-as-axiom",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-quotient-ind-as-axiom.ndjson"
+  },
+  {
+    "id": "upstream.quotient-ind-before-ctor",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-quotient-ind-before-ctor.ndjson"
+  },
+  {
+    "id": "upstream.quotient-ind-named-by-an-inductive",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-quotient-ind-named-by-an-inductive.ndjson"
+  },
+  {
+    "id": "upstream.quotient-lift-as-axiom",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-quotient-lift-as-axiom.ndjson"
+  },
+  {
+    "id": "upstream.quotient-lift-named-in-a-mutual-block",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-quotient-lift-named-in-a-mutual-block.ndjson"
+  },
+  {
+    "id": "upstream.quotient-type-as-axiom",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-quotient-type-as-axiom.ndjson"
+  },
+  {
+    "id": "upstream.quotient-type-as-definition",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-quotient-type-as-definition.ndjson"
+  },
+  {
+    "id": "upstream.quotient-names-without-a-quotient",
+    "expected_accept": true,
+    "expected_reason": "accepted",
+    "input": "upstream-quotient-names-without-a-quotient.ndjson"
+  },
+  {
+    "id": "upstream.quotient-package",
+    "expected_accept": true,
+    "expected_reason": "accepted",
+    "input": "upstream-quotient-package.ndjson"
+  },
+  {
+    "id": "upstream.axiom-quot-mk",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-axiom-quot-mk.ndjson"
+  },
+  {
+    "id": "upstream.forged-quot-type",
+    "expected_accept": false,
+    "expected_reason": "rejected",
+    "input": "upstream-forged-quot-type.ndjson"
+  }
+]

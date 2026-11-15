@@ -50,9 +50,9 @@ impl Fixture {
             }
         };
         if !version.status.success()
-            || !String::from_utf8_lossy(&version.stdout).contains("version 4.24.0,")
+            || !String::from_utf8_lossy(&version.stdout).contains("version 4.35.0,")
         {
-            eprintln!("skipping real Lean artifact audit: Lean 4.24.0 is unavailable");
+            eprintln!("skipping real Lean artifact audit: Lean 4.35.0 is unavailable");
             return None;
         }
         static NEXT: AtomicU64 = AtomicU64::new(0);

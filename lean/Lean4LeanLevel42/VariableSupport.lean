@@ -27,13 +27,13 @@ theorem subsumeVars_var_support (xs ys : List VarNode) (v : VarNode) (hv : v ∈
       | eq =>
         have hn := name_cmp_eq x.var y.var hc
         by_cases ho : x.offset ≤ y.offset
-        · simp only [Normalize.subsumeVars, hc, if_pos ho]
+        · simp only [Normalize.subsumeVars, hc, ite_eq_left ho]
           rcases List.mem_cons.mp hv with rfl | hv
           · exact Or.inr ⟨y, List.mem_cons_self, hn.symm, ho⟩
           · rcases subsumeVars_var_support xs ys v hv with hk | ⟨w, hw, he, hb⟩
             · exact Or.inl hk
             · exact Or.inr ⟨w, List.mem_cons_of_mem y hw, he, hb⟩
-        · simp only [Normalize.subsumeVars, hc, if_neg ho]
+        · simp only [Normalize.subsumeVars, hc, ite_eq_right ho]
           rcases List.mem_cons.mp hv with rfl | hv
           · exact Or.inl (by simp)
           · rcases subsumeVars_var_support xs ys v hv with hk | ⟨w, hw, he, hb⟩
@@ -95,7 +95,7 @@ theorem minimize_fold_var_support (acc : NormLevel) (p : List Name)
       · rcases hd with ⟨hsub, w, hw, hname, hbound⟩
         right
         refine ⟨row.1, row.2, w, ?_, hw, hname, hbound, hsub⟩
-        rw [map_get_erase, if_neg he]
+        rw [map_get_erase, ite_eq_right he]
         exact hrows row (by simp)
 
 theorem minimize_vars_erased_support (acc : NormLevel) (p : List Name)
@@ -132,7 +132,7 @@ theorem minimizeEntry_varSupport (acc : NormLevel) (p : List Name) (original : N
       dsimp only
       rw [hne]
       simp only [Bool.false_eq_true, ↓reduceIte]
-      rw [map_get_insert, if_pos rfl]
+      rw [map_get_insert, ite_eq_left rfl]
     · rcases hd with ⟨q, m, ⟨b, j⟩, hq, hw, hname, _, hsub⟩
       have hb : b = a := hname
       subst b

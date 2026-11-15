@@ -2,8 +2,8 @@
   "schema": 1,
   "role": "review_evidence_not_success_receipt",
   "upstream_base": "4faf51403bc4cb35cf6666d91fc9c938ae46d3aa",
-  "lean_toolchain": "leanprover/lean4:v4.24.0",
-  "batteries_commit": "8da40b72fece29b7d3fe3d768bac4c8910ce9bee",
+  "lean_toolchain": "leanprover/lean4:v4.35.0",
+  "batteries_commit": "66e469188fe07963e5cf666c7d4433f45b8131c5",
   "controls": [
     {
       "id": "closure.fvar.theorem",
@@ -687,7 +687,7 @@
       ],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -702,7 +702,7 @@
       "control_ids": [],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -723,7 +723,7 @@
       ],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -744,7 +744,7 @@
       ],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -769,7 +769,7 @@
       ],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -797,7 +797,7 @@
       ],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -817,7 +817,7 @@
       ],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -845,7 +845,7 @@
       ],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -881,7 +881,7 @@
         "Upstream whole-implementation verification remains incomplete; old proof libraries are unported/unbuilt."
       ],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -914,7 +914,7 @@
         "Bounded semantic grid is runtime evidence, not a proof of global normalization soundness/completeness; old Verify.Level is not ported."
       ],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -932,7 +932,7 @@
       ],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -954,7 +954,7 @@
       ],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -982,8 +982,7 @@
         "The separate Main replay path must call these same helpers at actual postponed comparisons and be exercised in assembled replay. No complete eliminator proof is claimed."
       ],
       "execution_refs": [
-        "focused-runtime-controls",
-        "shared-metadata-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -1013,7 +1012,7 @@
       ],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
       ]
     },
     {
@@ -1021,8 +1020,10 @@
       "upstream_commits": [
         "8865b155abbf68d3a827fb3568bf6839780163c2"
       ],
-      "disposition": "retain existing fixed1000 Methods fuel; shallow typing accepted and deep normalization refused, without newer configurable fuel API",
-      "changed_files": [],
+      "disposition": "Retain bounded Methods fuel, configurable through the checker context: default 50000 for Lean 4.35 standard-library normalization; the deep-refusal control explicitly selects 1000 and refuses normalization past that limit.",
+      "changed_files": [
+        "Lean4Lean/TypeChecker.lean"
+      ],
       "control_ids": [
         "fuel.shallow-positive",
         "fuel.shallow-type",
@@ -1030,49 +1031,80 @@
       ],
       "remaining_obligations": [],
       "execution_refs": [
-        "focused-runtime-controls"
+        "lean435-runtime-controls"
+      ]
+    },
+    {
+      "id": "lean435-compatibility",
+      "upstream_commits": [
+        "67f63b0c818920dfaed2ad07ccff187a6a8fe1e3"
+      ],
+      "disposition": "Adapt environment headers, structure-based Decidable reflection, checked Nat.fix recursion probes, raw string-position quotations and decision projections. Backport upstream checked recursion probes and lazy projection comparison. Recognize validated Char.ofNat/String.ofList primitives, expand string literals through the new representation before recursor/projection reduction, and include String.ofList in literal replay dependencies.",
+      "changed_files": [
+        "Lean4Lean/Environment/Basic.lean",
+        "Lean4Lean/Expr.lean",
+        "Lean4Lean/Inductive/Reduce.lean",
+        "Lean4Lean/Primitive.lean",
+        "Lean4Lean/TypeChecker.lean",
+        "Main.lean"
+      ],
+      "control_ids": [
+        "primitive.genuine.Nat.add",
+        "primitive.changed-equation.Nat.add",
+        "primitive.genuine.Nat.mod",
+        "primitive.changed-equation.Nat.mod",
+        "primitive.genuine.Nat.div",
+        "primitive.changed-equation.Nat.div",
+        "primitive.genuine.Nat.gcd",
+        "primitive.changed-equation.Nat.gcd",
+        "primitive.genuine.Nat.bitwise",
+        "primitive.changed-equation.Nat.bitwise",
+        "primitive.partial.recognizer-call",
+        "primitive.partial.not-recognized",
+        "primitive.partial.not-admitted",
+        "primitive.malformed-type",
+        "primitive.malformed-body",
+        "primitive.malformed-reflection-evidence"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "lean435-runtime-controls"
       ]
     }
   ],
   "source_sha256": {
-    "tools/lean4lean42/patches/kernel.patch": "f244667d85e91656feb91ab0e4d36238efdad0aaebbf901a5e2ed342336cc388",
-    "tools/lean4lean42/patches/toolchain.patch": "720457143a4b66be681fce1b0a1386188ca0be1aa04a185b9150dc6022691f50",
-    "tools/lean4lean42/controls/VesperControls.lean": "0fba2d74c324bbdbf0e4fd1f4cefb9c01a74ba2272b77dcf8e923a81eec0851b",
+    "tools/lean4lean42/patches/kernel.patch": "ae46559b0cdf42b320911193676ee83d96c7b3340f30801e92a8035429742af3",
+    "tools/lean4lean42/patches/toolchain.patch": "819938374b31bf5320987d630f755c27ce3db4aa8eca09a7e7279a4bed673b97",
+    "tools/lean4lean42/controls/VesperControls.lean": "ac355c72c41e29f67499361fa7f0bd54acd918db597b98ff37eadc2506ee9e0e",
     "tools/lean4lean42/controls/Check.lean": "f7196163385d161f1a4e392a9b9b760196d76f6bc260415ade3068a582c38789"
   },
   "executions": [
     {
-      "id": "focused-runtime-controls",
-      "command": "/home/agent/.local/share/vesper-lean/bin/lake env lean --run /workspace/vesper-worktrees/lean4lean42-kernel/tools/lean4lean42/controls/Check.lean",
-      "cwd": "/tmp/vesper-lean4lean42-kernel-worker",
-      "exit_code": 0,
-      "control_count": 89,
-      "log_path": "/tmp/lean4lean42-runtime-controls.log",
-      "log_sha256": "bb342145ea56d42043555565f0e9371b8afdaafccd475f12c78168c7b5c7d574",
-      "build_command": "/home/agent/.local/share/vesper-lean/bin/lake build Lean4Lean.VesperControls",
-      "build_exit_code": 0,
-      "build_log_path": "/tmp/lean4lean42-control-build.log",
-      "build_log_sha256": "fe6fd28d52441ccaa2c7963445cf5b69d19e2eb5145f59038d6f708b7b86caef",
-      "controls_source_sha256": "3a197b3fa68e105a9b5fc20e2776aac0b37baec0c7ad25d0f443f6235cf3b05d"
-    },
-    {
-      "id": "shared-metadata-runtime-controls",
-      "command": "LEAN_NUM_THREADS=1 /home/agent/.local/share/vesper-lean/bin/lake env lean --run /workspace/vesper-worktrees/lean4lean42-replay/tools/lean4lean42/controls/Check.lean",
-      "cwd": "/tmp/vesper-lean4lean42-replay-worker",
+      "id": "lean435-runtime-controls",
+      "command": "LEAN_NUM_THREADS=1 lake env lean --run /workspace/vesper/tools/lean4lean42/controls/Check.lean",
+      "cwd": "/tmp/vesper-lean-upgrade-checker",
       "exit_code": 0,
       "control_count": 94,
-      "log_path": "/tmp/lean4lean42-metadata-controls.log",
-      "log_sha256": "522f5da96c1bd6229bc94cc2063e95d09067e8f59ff6049a9f6bafe1ade0d80d",
-      "controls_source_sha256": "0fba2d74c324bbdbf0e4fd1f4cefb9c01a74ba2272b77dcf8e923a81eec0851b",
-      "build_command": "LEAN_NUM_THREADS=1 /home/agent/.local/share/vesper-lean/bin/lake build Lean4Lean.VesperControls",
+      "log_path": "/tmp/vesper-lean-upgrade-checker-controls-final.log",
+      "log_sha256": "5068123b21d0a3632098e03613a8578da87339db28e245577ee77f324cf1da6b",
+      "build_command": "LEAN_NUM_THREADS=1 lake build lean4lean Lean4Lean.VesperControls",
       "build_exit_code": 0,
-      "build_log_path": "/tmp/lean4lean42-metadata-control-build.log",
-      "build_log_sha256": "c529cc554e8f55dc9977da1164666746f50d3c5c93ace7a2dd8d9e602ad1a6a5"
+      "build_log_path": "/tmp/vesper-lean-upgrade-checker-build-final.log",
+      "build_log_sha256": "ff916238ad465853bf532aff35f8339bcc5f957a2806cdecb1d593be8adbbb2e",
+      "controls_source_sha256": "ac355c72c41e29f67499361fa7f0bd54acd918db597b98ff37eadc2506ee9e0e"
+    },
+    {
+      "id": "lean435-full-acceptance",
+      "command": "VESPER_LEAN=/home/agent/.elan/toolchains/leanprover--lean4---v4.35.0/bin/lean VESPER_LEAN4LEAN42_ROOT=/tmp/vesper-lean-upgrade-final-checker cargo test --locked -p vesper --test lean4lean42_acceptance -- --test-threads=1",
+      "cwd": "/workspace/vesper",
+      "exit_code": 0,
+      "passed_tests": 16,
+      "log_path": "/tmp/vesper-lean-upgrade-acceptance-final.log",
+      "log_sha256": "1c0f1d06bf1be5cbad7d4ec193286f97a3627e090cf9c690a705af170460f886",
+      "scope": "Fresh RewriteWitness, ArithmeticOracle and ResourceModel42 closure replay, plus the independent protocol, binding, artifact and inventory refusal matrix. Axiom and implementation-proof audits remain separately reported."
     }
   ],
   "unexecuted": [
-    "complete assembled RewriteWitness fresh replay",
-    "complete assembled ArithmeticOracle fresh replay",
     "assembled replay constructor/recursor metadata-mutation rejection controls",
     "upstream Theory/Verify proof builds and transitive proof-root audits",
     "full checker/translator/compiler refinement"

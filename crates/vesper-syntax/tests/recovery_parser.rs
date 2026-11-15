@@ -3,6 +3,45 @@ use vesper_syntax::{
     recovery::{DeclarationStatus as DS, Limits, SiteKind},
 };
 #[test]
+fn compound_bitwise_assignments_are_lossless_single_tokens() {
+    use vesper_syntax::lexer::{TokenKind, lex};
+
+    let source = "// λ\nfn f(){x|=y; x&=y; x||y; x&&y; x|y; x=y;}";
+    let (tokens, diagnostics) = lex(source);
+    assert!(diagnostics.is_empty());
+    let operators: Vec<_> = tokens
+        .iter()
+        .filter_map(|token| {
+            let text = &source[token.span.clone()];
+            matches!(text, "|=" | "&=" | "||" | "&&" | "|" | "=").then_some((text, token.kind))
+        })
+        .collect();
+    assert_eq!(
+        operators,
+        vec![
+            ("|=", TokenKind::PipeEq),
+            ("&=", TokenKind::AmpEq),
+            ("||", TokenKind::Or),
+            ("&&", TokenKind::And),
+            ("|", TokenKind::Pipe),
+            ("=", TokenKind::Eq),
+        ]
+    );
+    let recovered = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(recovered.syntax().text().to_string(), source);
+    for kind in [TokenKind::PipeEq, TokenKind::AmpEq] {
+        assert_eq!(
+            recovered
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|token| token.kind().0 == kind as u16)
+                .count(),
+            1
+        );
+    }
+}
+#[test]
 fn real_source_siblings_and_missing_member_are_preserved() {
     let source = "// 🦀\nfn broken(){let tx=1;tx.}\nfn sibling()->u64{42}\n";
     let recovered = parser::parse_recovery(source, Limits::default()).unwrap();

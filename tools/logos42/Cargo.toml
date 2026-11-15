@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["bridge", "vendor/logos/crates/logicaffeine_kernel", "vendor/logos/crates/logicaffeine_base"]
+[workspace.package]
+version = "0.11.0"
+edition = "2021"
+authors = ["Tristen Harr <tristen@datacenter.dev>"]
+repository = "https://github.com/Brahmastra-Labs/logicaffeine"
+homepage = "https://logicaffeine.com"
+keywords = ["logic"]
+categories = ["mathematics"]
+rust-version = "1.88"
+[workspace.dependencies]
+logicaffeine-base = { path = "vendor/logos/crates/logicaffeine_base", version = "0.11.0" }
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
