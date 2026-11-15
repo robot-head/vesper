@@ -10,13 +10,15 @@ def rank : Mode → Nat
   | .copy => 0 | .affine => 1 | .linear => 2
 
 def join : Mode → Mode → Mode
-  | .linear, _ | _, .linear => .linear
-  | .affine, _ | _, .affine => .affine
   | .copy, .copy => .copy
+  | .copy, .affine | .affine, .copy | .affine, .affine => .affine
+  | .copy, .linear | .affine, .linear | .linear, .copy
+  | .linear, .affine | .linear, .linear => .linear
 
 def meet : Mode → Mode → Mode
-  | .copy, _ | _, .copy => .copy
-  | .affine, _ | _, .affine => .affine
+  | .copy, .copy | .copy, .affine | .copy, .linear
+  | .affine, .copy | .linear, .copy => .copy
+  | .affine, .affine | .affine, .linear | .linear, .affine => .affine
   | .linear, .linear => .linear
 
 def allowed : Mode → Nat → Prop

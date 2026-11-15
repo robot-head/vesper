@@ -1,0 +1,13 @@
+name = "vesperLogos42"
+defaultTargets = ["logos42"]
+
+[[lean_lib]]
+name = "Export"
+
+[[lean_lib]]
+name = "LogosControls"
+
+[[lean_exe]]
+name = "logos42"
+root = "Main"
+supportInterpreter = true

@@ -270,7 +270,7 @@ pub struct SessionResult {
 
 pub fn controls_hash(controls: &[ControlRecord]) -> Digest {
     let mut hash = blake3::Hasher::new();
-    hash.update(b"vesper.lean4lean42.controls\0");
+    hash.update(b"vesper.logos42.controls\0");
     hash.update(&1u16.to_le_bytes());
     hash.update(&(controls.len() as u32).to_le_bytes());
     for (i, c) in controls.iter().enumerate() {
@@ -278,6 +278,7 @@ pub fn controls_hash(controls: &[ControlRecord]) -> Digest {
         hash_text(&mut hash, &c.id);
         hash.update(&[
             match c.kind {
+                ControlKind::RawExport => 3,
                 ControlKind::RawDeclaration => 0,
                 ControlKind::CheckerExpr => 1,
                 ControlKind::Condition => 2,
@@ -525,7 +526,7 @@ fn target_module(target: u8) -> Result<&'static [&'static str], Error> {
     Ok(match target {
         0 => &["RewriteWitness"],
         1 => &["ArithmeticOracle"],
-        2 => &["Lean4Lean", "VesperControls"],
+        2 => &["LogosControls"],
         3 => &["ResourceModel42Kernel"],
         _ => return Err(invalid("unknown target")),
     })
@@ -602,7 +603,7 @@ fn root_ids(inventory: &Inventory, budget: &mut Budget) -> Result<Vec<u32>, Erro
         let c = inventory
             .constants
             .iter()
-            .find(|c| c.name.is(&["Vesper", "Lean4Lean42Controls", "runControls"]))
+            .find(|c| c.name.is(&["Vesper", "Logos42Controls", "runControls"]))
             .ok_or_else(|| coverage_error("missing control baseline root"))?;
         if c.skip != 0 || c.form != 1 || !inventory.modules[c.module_id as usize].name.is(module) {
             return Err(coverage_error("control baseline root binding"));
@@ -783,7 +784,7 @@ fn totals_zero(modules: u64) -> InventoryTotals {
 }
 fn inventory_hasher(target: u8, modules: u64, constants: u64) -> blake3::Hasher {
     let mut h = blake3::Hasher::new();
-    h.update(b"vesper.lean4lean42.inventory\0");
+    h.update(b"vesper.logos42.inventory\0");
     h.update(&1u16.to_le_bytes());
     h.update(&[target]);
     h.update(&modules.to_le_bytes());
@@ -881,7 +882,7 @@ impl<'a> Machine<'a> {
                 || !c.id.bytes().all(|b| (32..=126).contains(&b))
                 || c.expected_reason.len() > 128
                 || !c.expected_reason.bytes().all(|b| (32..=126).contains(&b))
-                || c.source != "tools/lean4lean42/controls/VesperControls.lean"
+                || c.source != "tools/logos42/controls/cases.json"
                 || controls[..i].iter().any(|prior| prior.id == c.id)
             {
                 return Err(Error::new(ErrorKind::Controls, "control registry schema"));
@@ -1015,7 +1016,7 @@ impl<'a> Machine<'a> {
                 if string(&a[2], 32)? != self.token
                     || uint(&a[3])? != u64::from(self.mode)
                     || uint(&a[4])? != u64::from(self.target)
-                    || string(&a[5], 32)? != "4.24.0"
+                    || string(&a[5], 32)? != "4.35.0"
                     || string(&a[6], 64)? != PROFILE
                 {
                     return Err(invalid("hello binding"));
@@ -1281,7 +1282,7 @@ impl<'a> Machine<'a> {
             c.remaining = self.actual.eligibility[0];
             self.coverage = Some(c);
             let mut h = blake3::Hasher::new();
-            h.update(b"vesper.lean4lean42.coverage\0");
+            h.update(b"vesper.logos42.coverage\0");
             h.update(&1u16.to_le_bytes());
             h.update(&[self.target]);
             self.coverage_hash = Some(h);
@@ -1619,7 +1620,7 @@ mod tests {
     const TOKEN: &str = "00000000000000000000000000000000";
     fn hello(mode: u8) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!([
-            1, 0, TOKEN, mode, 2, "4.24.0", PROFILE
+            1, 0, TOKEN, mode, 2, "4.35.0", PROFILE
         ]))
         .unwrap()
     }
@@ -1627,7 +1628,7 @@ mod tests {
     #[test]
     fn lexical_controls_are_rejected_before_json_normalization() {
         for tag in ["-0", "+0", "0.0", "0e0", "false", "null"] {
-            let packet = format!("[1,{tag},\"{TOKEN}\",3,2,\"4.24.0\",\"{PROFILE}\"]");
+            let packet = format!("[1,{tag},\"{TOKEN}\",3,2,\"4.35.0\",\"{PROFILE}\"]");
             let limits = Limits::default();
             let mut machine = Machine::new(3, 2, TOKEN, &limits, &[], None).unwrap();
             assert!(machine.feed(packet.as_bytes()).is_err(), "{tag}");
@@ -1705,7 +1706,7 @@ mod tests {
         };
         let mut registry = vec![ExpectedControl {
             id: "id".into(),
-            source: "tools/lean4lean42/controls/VesperControls.lean".into(),
+            source: "tools/logos42/controls/cases.json".into(),
             kind: ControlKind::Condition,
             expected_accept: false,
             expected_reason: "reject".into(),
@@ -1727,7 +1728,7 @@ mod tests {
     fn matched_flag_does_not_authorize_wrong_control_result() {
         let registry = [ExpectedControl {
             id: "negative".into(),
-            source: "tools/lean4lean42/controls/VesperControls.lean".into(),
+            source: "tools/logos42/controls/cases.json".into(),
             kind: ControlKind::CheckerExpr,
             expected_accept: false,
             expected_reason: "rejected".into(),
@@ -1828,7 +1829,7 @@ mod tests {
 
     fn resource_prefix(inventory: &Inventory) -> Vec<Value> {
         let mut frames = vec![
-            serde_json::json!([1, 0, TOKEN, 1, 3, "4.24.0", PROFILE]),
+            serde_json::json!([1, 0, TOKEN, 1, 3, "4.35.0", PROFILE]),
             serde_json::json!([
                 1,
                 1,

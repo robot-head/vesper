@@ -136,50 +136,50 @@ theorem proj_dual (a b : Nat) (hab : a ≠ b) :
     have ih := proj_dual a b hab k
     simp only [proj] at h ⊢
     by_cases h1 : p = a ∧ q = b
-    · rw [if_pos h1] at h
+    · rw [ite_eq_left h1] at h
       have h2 : ¬(p = b ∧ q = a) := fun h2 => hab (h1.1.symm.trans h2.1)
-      rw [if_neg h2, if_pos h1]
+      rw [ite_eq_right h2, ite_eq_left h1]
       cases hk : proj a b k with
       | none => rw [hk] at h; simp at h
       | some t =>
         rw [hk] at h; simp only [Option.map_some, Option.some.injEq] at h
         subst h; rw [ih t hk]; rfl
-    · rw [if_neg h1] at h
+    · rw [ite_eq_right h1] at h
       by_cases h2 : p = b ∧ q = a
-      · rw [if_pos h2] at h; rw [if_pos h2]
+      · rw [ite_eq_left h2] at h; rw [ite_eq_left h2]
         cases hk : proj a b k with
         | none => rw [hk] at h; simp at h
         | some t =>
           rw [hk] at h; simp only [Option.map_some, Option.some.injEq] at h
           subst h; rw [ih t hk]; rfl
-      · rw [if_neg h2] at h
+      · rw [ite_eq_right h2] at h
         have h1' : ¬(p = b ∧ q = a) := h2
         have h2' : ¬(p = a ∧ q = b) := h1
-        rw [if_neg h1', if_neg h2']
+        rw [ite_eq_right h1', ite_eq_right h2']
         exact ih s h
   | .choice p q bs, s, h => by
     simp only [proj] at h ⊢
     by_cases h1 : p = a ∧ q = b
-    · rw [if_pos h1] at h
+    · rw [ite_eq_left h1] at h
       have h2 : ¬(p = b ∧ q = a) := fun h2 => hab (h1.1.symm.trans h2.1)
-      rw [if_neg h2, if_pos h1]
+      rw [ite_eq_right h2, ite_eq_left h1]
       cases hk : projBs a b bs with
       | none => rw [hk] at h; simp at h
       | some t =>
         rw [hk] at h; simp only [Option.map_some, Option.some.injEq] at h
         subst h; rw [projBs_dual a b hab bs t hk]; rfl
-    · rw [if_neg h1] at h
+    · rw [ite_eq_right h1] at h
       by_cases h2 : p = b ∧ q = a
-      · rw [if_pos h2] at h; rw [if_pos h2]
+      · rw [ite_eq_left h2] at h; rw [ite_eq_left h2]
         cases hk : projBs a b bs with
         | none => rw [hk] at h; simp at h
         | some t =>
           rw [hk] at h; simp only [Option.map_some, Option.some.injEq] at h
           subst h; rw [projBs_dual a b hab bs t hk]; rfl
-      · rw [if_neg h2] at h
+      · rw [ite_eq_right h2] at h
         have h1' : ¬(p = b ∧ q = a) := h2
         have h2' : ¬(p = a ∧ q = b) := h1
-        rw [if_neg h1', if_neg h2']
+        rw [ite_eq_right h1', ite_eq_right h2']
         exact mergeAll_dual a b hab bs s h
   | .act _ _ k, s, h => by
     simp only [proj] at h ⊢
@@ -224,11 +224,11 @@ theorem mergeAll_dual (a b : Nat) (hab : a ≠ b) :
         rw [proj_dual a b hab g x hg, mergeAll_dual a b hab (.cons l' g' r') y hr]
         simp only
         by_cases hxy : x = y
-        · rw [if_pos hxy] at h
+        · rw [ite_eq_left hxy] at h
           simp only [Option.some.injEq] at h
           subst h; subst hxy
           simp
-        · rw [if_neg hxy] at h; simp at h
+        · rw [ite_eq_right hxy] at h; simp at h
 end
 
 theorem proj_defined_symm (a b : Nat) (hab : a ≠ b) (g : G) :

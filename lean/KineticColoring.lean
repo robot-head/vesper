@@ -178,7 +178,7 @@ theorem foldl_step_fst :
 
 theorem colorAll_constraints (cs : List Constraint) :
     (colorAll cs).map Prod.fst = cs := by
-  simpa using foldl_step_fst cs []
+  simpa [colorAll] using foldl_step_fst cs []
 
 /-- Index form: positions `i < j` with equal colours have disjoint bodies. -/
 theorem same_color_constraints_disjoint_bodies (cs : List Constraint)
@@ -265,7 +265,7 @@ theorem foldl_stepSet_fst :
 
 theorem colorAllSets_constraints (cs : List SetConstraint) :
     (colorAllSets cs).map Prod.fst = cs := by
-  simpa using foldl_stepSet_fst cs []
+  simpa [colorAllSets] using foldl_stepSet_fst cs []
 
 /-- Index form for batches of any arity. -/
 theorem same_color_sets_disjoint_bodies (cs : List SetConstraint)

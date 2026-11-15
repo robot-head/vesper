@@ -311,6 +311,7 @@ impl Exporter<'_> {
                     effect: name,
                     arguments,
                     resumption: resumption(decl.linear),
+                    ceiling: None,
                 },
             );
         }

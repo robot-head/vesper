@@ -652,7 +652,7 @@ mod fake_lean {
             fs::create_dir_all(dir.join("bin")).unwrap();
             let compile = compile.replace("$DIR", &dir.display().to_string());
             let lean = format!(
-                "#!/bin/sh\ncase \"$1\" in\n--print-prefix) echo '{}' ;;\n--version) echo 'Lean (version 4.24.0, fake)' ;;\n*) {compile} ;;\nesac\n",
+                "#!/bin/sh\ncase \"$1\" in\n--print-prefix) echo '{}' ;;\n--version) echo 'Lean (version 4.35.0, fake)' ;;\n*) {compile} ;;\nesac\n",
                 dir.display()
             );
             // Echo one theorem record per `--theorem`, with no axioms when
@@ -704,7 +704,7 @@ mod fake_lean {
             );
             let version = Command::new(&lean).arg("--version").output().unwrap();
             assert!(version.status.success());
-            assert_eq!(version.stdout, b"Lean (version 4.24.0, fake)\n");
+            assert_eq!(version.stdout, b"Lean (version 4.35.0, fake)\n");
             let audit = Command::new(toolchain.dir.join("auditor"))
                 .args(["--theorem", "fixture_obligation"])
                 .output()
@@ -767,7 +767,7 @@ mod fake_lean {
             assert_eq!(error.raw_os_error(), Some(26), "{error}");
             let version = Command::new(&lean).arg("--version").output().unwrap();
             assert!(version.status.success());
-            assert_eq!(version.stdout, b"Lean (version 4.24.0, fake)\n");
+            assert_eq!(version.stdout, b"Lean (version 4.35.0, fake)\n");
         }
     }
 }
@@ -1028,7 +1028,7 @@ fn proof_lens_cancellation_stops_the_whole_process_tree() {
     client.close();
 }
 
-/// Real Lean 4.24.0 and the real `vesper proof-audit`. Needs `VESPER_LEAN`
+/// Real Lean 4.35.0 and the real `vesper proof-audit`. Needs `VESPER_LEAN`
 /// and `VESPER_LENS_AUDITOR` (a built `vesper` binary); otherwise skipped.
 #[test]
 fn proof_lens_with_real_lean_and_auditor() {
@@ -1626,7 +1626,7 @@ fn an_edit_cancels_the_running_background_job() {
     client.close();
 }
 
-/// Real Lean 4.24.0: semantic theorems proved by omega and replayed by the
+/// Real Lean 4.35.0: semantic theorems proved by omega and replayed by the
 /// kernel, a bv_decide counterexample, and `.olean` reuse across servers.
 #[test]
 fn semantic_proof_lenses_with_real_lean() {

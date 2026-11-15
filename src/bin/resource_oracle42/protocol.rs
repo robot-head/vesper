@@ -17,8 +17,8 @@ pub const MAX_DEPTH: usize = 256;
 pub const MAX_NESTING: usize = 8;
 pub const MAX_TOKENS: usize = 1_000_000;
 pub const PROTOCOL_ID: &str = "vesper.resource-model42/1";
-pub const LEAN_VERSION: &str = "4.24.0";
-pub const LEAN_COMMIT: &str = "797c613eb9b6d4ec95db23e3e00af9ac6657f24b";
+pub const LEAN_VERSION: &str = "4.35.0";
+pub const LEAN_COMMIT: &str = "eb6cafb7290e8bd5f2937522d8d804f58f02bafc";
 pub const BOUNDS: [u64; 12] = [
     REQUEST_CAP as u64,
     RESPONSE_CAP as u64,

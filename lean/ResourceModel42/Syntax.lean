@@ -104,7 +104,7 @@ def TypeInfo.inspect (l : Limits) : Nat → (t : Ty) → Except TypeError {i : T
   | fuel + 1, t => do
     if l.typeNodes = 0 then throw .nodes
     if l.typeDepth = 0 then throw .depth
-    match t with
+    match (dependent := true) t with
     | .unit => pure ⟨⟨.unit,1,1,rfl,rfl,.unit⟩,rfl⟩
     | .nat => pure ⟨⟨.nat,1,1,rfl,rfl,.nat⟩,rfl⟩
     | .ticket => pure ⟨⟨.ticket,1,1,rfl,rfl,.ticket⟩,rfl⟩
@@ -259,8 +259,11 @@ structure ValidatedProgram where
   validation_ok : validateRaw limits raw = .ok data
 def ValidatedProgram.inputInfo (p : ValidatedProgram) : Array TypeInfo := p.data.inputInfo
 def ValidatedProgram.stats (p : ValidatedProgram) : SourceStats := p.data.stats
+-- These proof accessors remain definitions: the kernel snapshot binds declaration kinds.
+set_option linter.defProp false in
 def ValidatedProgram.inputInfo_types (p : ValidatedProgram) :
     p.inputInfo.toList.map TypeInfo.ty = p.raw.inputTypes.toList := p.data.inputInfo_types
+set_option linter.defProp false in
 def ValidatedProgram.inputs_copy (p : ValidatedProgram) :
     ∀ i ∈ p.inputInfo.toList, i.ty.kind = .copy := p.data.inputs_copy
 def validate (raw : RawProgram) (l : Limits := {}) : Except ValidationError ValidatedProgram :=

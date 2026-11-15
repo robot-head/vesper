@@ -1764,7 +1764,7 @@ impl Parser<'_> {
         self.record_expr(result)
     }
     fn binary_inner(&mut self, min: u8) -> Expr {
-        let mut lhs = if matches!(self.kind(), K::Minus | K::Bang) {
+        let mut lhs = if matches!(self.kind(), K::Minus | K::Bang | K::Tilde) {
             let start = self.start();
             let op = self.bump();
             let v = self.binary(12);
@@ -1995,7 +1995,7 @@ impl Parser<'_> {
                 K::Lower | K::SelfKw => ExprKind::Name(self.bump()),
                 K::Upper => {
                     let mut name = self.bump();
-                    if self.eat(K::ColonColon) {
+                    while self.eat(K::ColonColon) {
                         name.push_str("::");
                         name.push_str(&self.ident());
                     }

@@ -15,7 +15,7 @@ const MODEL: &str = include_str!("../lean/StylusAndLintSafety.lean");
 const SCHEMA: &str = "vesper.format-proof/1";
 const MAX_INPUT: usize = 128 * 1024;
 const MAX_JSON: usize = 2 * 1024 * 1024;
-const HELP: &str = "Usage: vesper verify SOURCE --format [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n\nKernel-check a formatter document-algebra comment-conservation model with Lean 4.24.0.\nThe witness projects the actual formatter Doc and preserves the input file.\nThis scope does not certify program semantics or refinement of the Rust renderer.\nSource must be supported ordinary or fixed Expr macro syntax; recovery proofs are unavailable.\n--emit-lean prints the AST-generated witness only after compilation and empty-axiom kernel replay.\n--timeout bounds each Lean process (1 to 300 seconds; default 30).\nThe selected Lean toolchain and artifact parser remain trusted.\n";
+const HELP: &str = "Usage: vesper verify SOURCE --format [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n\nKernel-check a formatter document-algebra comment-conservation model with Lean 4.35.0.\nThe witness projects the actual formatter Doc and preserves the input file.\nThis scope does not certify program semantics or refinement of the Rust renderer.\nSource must be supported ordinary or fixed Expr macro syntax; recovery proofs are unavailable.\n--emit-lean prints the AST-generated witness only after compilation and empty-axiom kernel replay.\n--timeout bounds each Lean process (1 to 300 seconds; default 30).\nThe selected Lean toolchain and artifact parser remain trusted.\n";
 
 #[derive(Debug)]
 struct Failure {

@@ -41,7 +41,7 @@ def runLine (line : String) : String :=
 partial def loop (stdin : IO.FS.Stream) (stdout : IO.FS.Stream) : IO Unit := do
   let line ← stdin.getLine
   if line.isEmpty then return
-  stdout.putStrLn (runLine (line.trimRight))
+  stdout.putStrLn (runLine (line.trimAsciiEnd.toString))
   loop stdin stdout
 
 def main : IO Unit := do

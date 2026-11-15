@@ -87,6 +87,11 @@ pub enum Type {
     Primitive {
         name: Primitive,
     },
+    /// The inclusive subset of i64 values between these constant bounds.
+    I64Range {
+        min: i64,
+        max: i64,
+    },
     Parameter {
         index: usize,
     },
@@ -163,6 +168,10 @@ pub struct Capability {
     pub effect: String,
     pub arguments: Vec<Type>,
     pub resumption: Resumption,
+    /// Constant resource ceiling, when supplied by a resolved interface.
+    /// None denotes an ungraded capability, not a zero ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling: Option<u64>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -501,6 +510,11 @@ impl Checker<'_> {
         }
         match t {
             Type::Primitive { .. } => (),
+            Type::I64Range { min, max } => {
+                if min > max {
+                    self.unsupported(path, "invalid i64 refinement range");
+                }
+            }
             Type::Parameter { index } => {
                 if !matches!(generics.get(*index), Some(Generic::Type { .. })) {
                     self.unsupported(path, "unbound or non-type generic parameter");
@@ -675,6 +689,27 @@ impl Checker<'_> {
                 "A caller grants exactly the old capability ceiling.",
             );
         }
+        for new in &b.effects.capabilities {
+            if let Some(old) = a.effects.capabilities.iter().find(|old| {
+                old.identity == new.identity
+                    && old.effect == new.effect
+                    && old.arguments == new.arguments
+            }) {
+                match (old.ceiling, new.ceiling) {
+                    (Some(old), Some(new)) if new > old => self.breaking(
+                        path,
+                        "SV-Grade",
+                        "resource ceiling increased",
+                        "Call under the old resource ceiling.",
+                    ),
+                    (None, Some(_)) | (Some(_), None) => self.unsupported(
+                        path,
+                        "cannot compare a graded capability with an ungraded capability",
+                    ),
+                    _ => {}
+                }
+            }
+        }
         if resumption(&b.effects, &b.generics) < resumption(&a.effects, &a.generics) {
             self.breaking(
                 path,
@@ -697,6 +732,21 @@ impl Checker<'_> {
                 _,
             ) => true,
             (Type::Unsupported { .. }, _) | (_, Type::Unsupported { .. }) => false,
+            (Type::I64Range { min: a, max: b }, Type::I64Range { min: c, max: d }) => {
+                c <= a && b <= d
+            }
+            (
+                Type::I64Range { .. },
+                Type::Primitive {
+                    name: Primitive::I64,
+                },
+            ) => true,
+            (
+                Type::Primitive {
+                    name: Primitive::I64,
+                },
+                Type::I64Range { min, max },
+            ) => *min == i64::MIN && *max == i64::MAX,
             (Type::Function { signature: a }, Type::Function { signature: b }) => {
                 let before = (self.issues.len(), self.adapters.len());
                 // A value of a must be usable at b, so a is the candidate.
@@ -873,7 +923,7 @@ fn type_mode_at(
         Type::Primitive {
             name: Primitive::String,
         } => Some(Mode::Affine),
-        Type::Primitive { .. } => Some(Mode::Copy),
+        Type::Primitive { .. } | Type::I64Range { .. } => Some(Mode::Copy),
         Type::Parameter { index } => match generics.get(*index)? {
             Generic::Type { bound } => Some(*bound),
             _ => None,

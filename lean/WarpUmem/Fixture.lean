@@ -56,7 +56,7 @@ def stepLine (c : Census) (line : String) : Census × String :=
 partial def loop (stdin : IO.FS.Stream) (stdout : IO.FS.Stream) (c : Census) : IO Unit := do
   let line ← stdin.getLine
   if line.isEmpty then return
-  let (c', out) := stepLine c line.trimRight
+  let (c', out) := stepLine c line.trimAsciiEnd.toString
   stdout.putStrLn out
   loop stdin stdout c'
 

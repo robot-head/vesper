@@ -1,6 +1,53 @@
 use crate::Error;
 use std::cmp::Ordering;
 pub const MAX_EPOCHS: usize = 64;
+/// Exact Mann–Whitney rank counts, multiplied by two so ties remain integral.
+/// `twice_u_first` counts pairs where the first observation exceeds the second;
+/// `twice_u_second` counts the reverse. Each tie contributes one to both.
+/// These descriptive counts do not supply a p-value or confidence interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MannWhitneyRanks {
+    pub first_count: usize,
+    pub second_count: usize,
+    pub twice_u_first: u64,
+    pub twice_u_second: u64,
+    pub tied_pairs: u64,
+}
+
+/// Compute rank counts for two nonempty samples, each bounded by `MAX_EPOCHS`.
+/// This performs at most 4096 comparisons and does not allocate. A subsequent
+/// independent-sample inference would need assumptions about independence and
+/// distributions; in particular, these ranks do not make paired ABBA epochs
+/// independent, and this function does not participate in the regression gate.
+pub fn mann_whitney_ranks(first: &[u64], second: &[u64]) -> Result<MannWhitneyRanks, Error> {
+    if first.is_empty() || second.is_empty() {
+        return Err(Error::EmptyEvidence);
+    }
+    if first.len() > MAX_EPOCHS || second.len() > MAX_EPOCHS {
+        return Err(Error::Limit("rank sample size"));
+    }
+    let mut result = MannWhitneyRanks {
+        first_count: first.len(),
+        second_count: second.len(),
+        twice_u_first: 0,
+        twice_u_second: 0,
+        tied_pairs: 0,
+    };
+    for &x in first {
+        for &y in second {
+            match x.cmp(&y) {
+                Ordering::Greater => result.twice_u_first += 2,
+                Ordering::Less => result.twice_u_second += 2,
+                Ordering::Equal => {
+                    result.twice_u_first += 1;
+                    result.twice_u_second += 1;
+                    result.tied_pairs += 1;
+                }
+            }
+        }
+    }
+    Ok(result)
+}
 /// Positive elapsed totals, with equal operation counts for the two arms.
 /// This may also represent synthetic statistical test data, not measured cycles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

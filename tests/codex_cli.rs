@@ -375,7 +375,7 @@ fn rendered_doc_snapshot_has_badges_wire_rulers_and_typestate_graph() {
 }
 
 /// End to end with real `vesper proof-audit` output. Runs when VESPER_LEAN
-/// names Lean 4.24.0 (CI sets it); Linux only, since kernel replay of the
+/// names Lean 4.35.0 (CI sets it); Linux only, since kernel replay of the
 /// prelude is slow on shared macOS and Windows runners.
 #[cfg(target_os = "linux")]
 #[test]
@@ -396,8 +396,8 @@ fn badges_from_a_real_kernel_replayed_proof_audit() {
         .filter(|p| p.is_file())
         .map_or(lean, |p| p.display().to_string());
     let version = Command::new(&lean).arg("--version").output().unwrap();
-    if !String::from_utf8_lossy(&version.stdout).contains("version 4.24.0,") {
-        eprintln!("skipping real proof-audit badge test: Lean 4.24.0 unavailable");
+    if !String::from_utf8_lossy(&version.stdout).contains("version 4.35.0,") {
+        eprintln!("skipping real proof-audit badge test: Lean 4.35.0 unavailable");
         return;
     }
     let model = "namespace Codex.Ledger\n\nstructure Tx where\n  id : Nat\n  total : Nat\n\ndef commit (tx : Tx) : Nat := tx.total\n\ntheorem commit_total (id total : Nat) : commit { id := id, total := total } = total := rfl\n\ntheorem decided (p : Prop) : p ∨ ¬p := Classical.em p\n\nend Codex.Ledger\n";

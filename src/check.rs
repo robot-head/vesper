@@ -155,6 +155,10 @@ impl World {
         (w, errors)
     }
     pub fn constructor(&self, name: &str) -> Option<(&Adt, &Variant)> {
+        // The checker has no namespace resolution for multi-component paths.
+        if name.matches("::").count() > 1 {
+            return None;
+        }
         let short = name.rsplit("::").next().unwrap_or(name);
         self.adts.values().find_map(|a| {
             a.variants
@@ -1283,7 +1287,10 @@ impl Checker<'_> {
             ExprKind::Unary(op, v) => {
                 let t = self.expr_expected(v, env, Usage::Own, expected);
                 let t = crate::numeric::default_type(&t);
-                if op == "!" {
+                if op == "~" {
+                    self.error("E0200", "prefix '~' is not supported yet", e.span.clone());
+                    t
+                } else if op == "!" {
                     self.expect_type(&Type::named("bool"), &t, e.span.clone());
                     Type::named("bool")
                 } else {
