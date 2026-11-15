@@ -130,7 +130,7 @@ delay accrued while a thread was blocked.
 ## Tied paired signed-rank confidence sets
 
 `signed_rank_confidence_set` inverts the exact two-sided 5% Wilcoxon
-signed-rank test for up to 16 caller-provided integer paired differences. It
+signed-rank test for up to 32 caller-provided integer paired differences. It
 visits every distinct Walsh breakpoint and the intervals between them, discards
 centered zeros, and uses doubled midranks for tied absolute differences. Its
 ordered segments can be disconnected, open, closed, singleton, or unbounded;

@@ -6,8 +6,8 @@
 //! provenance, and is separate from the benchmark regression gate.
 use std::fmt;
 
-/// The inversion visits at most 273 open intervals and breakpoint atoms.
-pub const MAX_SIGNED_RANK_CONFIDENCE_PAIRS: usize = 16;
+/// The inversion visits at most 1057 open intervals and breakpoint atoms.
+pub const MAX_SIGNED_RANK_CONFIDENCE_PAIRS: usize = 32;
 const MAX_BREAKPOINTS: usize =
     MAX_SIGNED_RANK_CONFIDENCE_PAIRS * (MAX_SIGNED_RANK_CONFIDENCE_PAIRS + 1) / 2;
 const MAX_RANK_SUM: usize =
@@ -174,6 +174,7 @@ fn accepts(differences: &[i64], location_times_four: i128) -> bool {
     let tail_limit = positive_rank.min(total_rank - positive_rank);
     let tail: u64 = distribution[..=tail_limit].iter().sum();
     let total = 1u64 << n;
-    // 2*tail / total > 1/20, equivalently 40*tail > total.
+    // 2*tail / total > 1/20, equivalently 40*tail > total. With at most
+    // 32 nonzero observations, both the subset counts and 40*tail fit u64.
     40 * tail > total
 }
