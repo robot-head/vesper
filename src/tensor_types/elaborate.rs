@@ -159,12 +159,14 @@ impl Lower<'_> {
                             name: f.name.clone(),
                             ty: self.ty(&f.ty),
                             modality: f.modality,
+                            temperature: f.temperature,
                         })
                         .collect(),
                     named: v.named,
                 })
                 .collect(),
             is_enum: a.is_enum,
+            tile_width: a.tile_width,
             span: a.span.clone(),
         }
     }

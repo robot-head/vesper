@@ -1,0 +1,12 @@
+copy enum C {
+    A,
+    B
+}
+fn a(x: fn @copy ()) {}
+fn b(x: fn @affine ()) {}
+fn f(c: C) {
+    let h = match c {
+        C::A => b,
+        C::B => a,
+    };
+}
