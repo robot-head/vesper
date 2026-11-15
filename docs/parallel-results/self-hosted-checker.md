@@ -2,10 +2,11 @@
 
 Issue #581. Base `eb97e086f5486abea4db38acf930477b52661a72`, a descendant
 of the required `37f7b8b`. Branch `codex/issue-581-self-hosted-checker`.
-Synced with main `d76067cb885d74d561dccc8007861052327025c9` after review.
+Synced with main `7c3bbfbd7e5328cf43a7bfab8c70c7e739819360` after CI review.
 No new dependencies, shared compiler edits, or unsafe code. The isolated root
-BUILD patch declares the complete corpus and the checker test's measured
-runtime; implementation files stay within this lane.
+BUILD patch sets the checker test's measured runtime. Main now supplies the
+complete cross-package corpus declarations; implementation files stay within
+this lane.
 
 ## Delivered slice
 
@@ -62,13 +63,15 @@ Supported:
 
 ## Parser adapter and explicit boundaries
 
-At implementation time #580 remained open with no merged tree API. The current
-parser on main produces a digest, not an addressable tree. The checker therefore
+At implementation time #580 remained open with no merged tree API. The
+compatibility parser produced a digest, not an addressable tree. The checker
 uses a token adapter in its own new files, sharing the existing self-hosted
 lexer and significant-token cursor. Semantic success and semantic diagnostics
 are validated by that existing self-hosted parser. Unsupported inputs return
 immediately rather than constructing a purported checked program. The adapter
-can be replaced when lane 3's tree interface merges; no unmerged code is used.
+can be replaced by lane 3's structured interface, which has since merged in
+`7c3bbfbd`. This CI refresh retains the compatible parser entry point; no
+unmerged code is used.
 
 This is a bounded core checker, not a complete Stage 1 compiler or a checker for
 all syntax accepted by the parser. Unsupported syntax/rules include generics,
@@ -240,9 +243,23 @@ Validation after merging main:
   **5,257 passed, zero failed, eight ignored** at baseline `1df87348`.
   That baseline result is separate from the merged-head checks above.
 
-The same macOS log reports the independent retired-README benchmark-help
-regression. Issue #632 and PR #633 own that repair; this lane does not duplicate
-their changes. Fresh hosted checks remain the final integration gate.
+### Refresh after the shared fixes merged
+
+At `ae6793ce`, hosted Native/acceptance passed and the complete checker target
+passed on macOS in **384.7 seconds**. The only macOS test failure, also seen on
+Windows, was the retired-README benchmark-help assertion. PR #633 has now
+merged, so this branch incorporates that repair through current main rather
+than duplicating it. The BUILD merge conflict was duplicate corpus declarations:
+main's complete list is preserved, along with this lane's 900-second timeout.
+The remaining BUILD difference against main is exactly that two-line timeout
+entry.
+
+On the refreshed tree, all three benchmark-help tests, strict full-workspace
+Clippy, workspace Rustfmt, BUILD synchronization and whitespace checks pass.
+Pinned Bazel queries confirm all **464 tracked `.ves` sources** are declared
+and the checker still has the `long` timeout. The checker and both parser test
+targets are rerun against the combined corpus. Fresh hosted checks remain the
+final integration gate.
 
 ## Missing language features, ranked
 
