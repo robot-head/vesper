@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 mod arithmetic;
 pub mod causal;
+pub mod contract;
 mod execution;
 pub mod layout;
 mod statistics;
