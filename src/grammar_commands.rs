@@ -404,7 +404,7 @@ fn protobuf_summary(input: &[u8], schema_bytes: &[u8]) -> Result<Json, String> {
 fn der_preview(node: der::Node<'_, '_>, preview: &mut Preview) -> Json {
     use der::Kind as K;
     preview.truncated |= match node.kind() {
-        K::Integer | K::OctetString | K::ObjectIdentifier | K::Utf8String => {
+        K::Integer | K::OctetString | K::ObjectIdentifier | K::Utf8String | K::Ia5String => {
             node.content().len() > 32
         }
         K::BitString => node.content().len() > 33,
@@ -419,7 +419,9 @@ fn der_preview(node: der::Node<'_, '_>, preview: &mut Preview) -> Json {
             .bit_string()
             .map(|(unused, bytes)| json!({"unused_bits":unused,"payload":bytes_preview(bytes)}))
             .unwrap_or(Json::Null),
-        K::OctetString | K::ObjectIdentifier | K::Utf8String => bytes_preview(node.content()),
+        K::OctetString | K::ObjectIdentifier | K::Utf8String | K::Ia5String => {
+            bytes_preview(node.content())
+        }
         K::Null => Json::Null,
         K::Sequence | K::SetOf => {
             let count = node.children().count();

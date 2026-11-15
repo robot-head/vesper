@@ -92,6 +92,50 @@ fn utf8_string_is_strict_borrowed_and_transactional() {
     );
 }
 #[test]
+fn ia5_string_requires_ascii_and_preserves_output_on_failure() {
+    let wire = b"\x16\x05a@b.c";
+    let doc = parse_exact(wire, &Schema::Ia5String, Limits::default()).unwrap();
+    assert_eq!(doc.root().ia5_string(), Some("a@b.c"));
+    assert_eq!(
+        doc.root().ia5_string().unwrap().as_ptr(),
+        wire[2..].as_ptr()
+    );
+    assert_eq!(encode(&Value::Ia5String("a@b.c"), &Schema::Any), wire);
+    identity(wire, &Schema::Ia5String);
+    identity(b"\x16\x00", &Schema::Any);
+    assert_eq!(
+        parse_exact(b"\x16\x02\xc3\xa9", &Schema::Any, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Ia5String
+    );
+    assert_eq!(
+        parse_exact(b"\x36\x00", &Schema::Any, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Constructed
+    );
+    assert_eq!(
+        parse_exact(wire, &Schema::Utf8String, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::SchemaMismatch
+    );
+    let mut out = [0xa5; 32];
+    assert_eq!(
+        encode_into(
+            &Value::Ia5String("é"),
+            &Schema::Ia5String,
+            &mut out,
+            Limits::default()
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::Ia5String
+    );
+    assert_eq!(out, [0xa5; 32]);
+}
+#[test]
 fn independent_x690_primitives_and_rfc3279_algorithm_identifier() {
     // X.690 DER primitive canonical forms, and RFC3279§2.3.1 rsaEncryption
     // AlgorithmIdentifier (OID1.2.840.113549.1.1.1 plus required NULL).
@@ -809,7 +853,7 @@ fn exhaustive_small_length_forms_and_all_tag_octets() {
     for tag in 0..=255u8 {
         let bytes = [tag, 0];
         let accepted = parse_exact(&bytes, &Schema::Any, Limits::default()).is_ok();
-        assert_eq!(accepted, matches!(tag, 4 | 5 | 12 | 0x30), "{tag:02x}");
+        assert_eq!(accepted, matches!(tag, 4 | 5 | 12 | 22 | 0x30), "{tag:02x}");
     }
 }
 #[test]
