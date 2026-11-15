@@ -66,6 +66,8 @@ pub struct SolutionMetrics {
     pub duplicate_majors: u64,
     pub total_staleness_secs: u64,
     pub total_trust_cost: u64,
+    #[serde(default)]
+    pub unknown_metadata_candidates: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +78,15 @@ pub struct OptimizedResolution {
     pub metrics: SolutionMetrics,
     pub evaluated_solutions: usize,
     pub objective_order: Vec<OptimizeObjective>,
+}
+
+fn objective_requires_metadata(obj: OptimizeObjective) -> bool {
+    matches!(
+        obj,
+        OptimizeObjective::ZeroCve
+            | OptimizeObjective::MinStaleness
+            | OptimizeObjective::MinTrustCost
+    )
 }
 
 fn active_objectives(request: &OptimizeRequest) -> Result<Vec<OptimizeObjective>, ResolveError> {
@@ -111,12 +122,27 @@ fn active_objectives(request: &OptimizeRequest) -> Result<Vec<OptimizeObjective>
     ])
 }
 
+fn unsupported_dependency_policy(manifest: &Manifest) -> Option<ResolveDiagnostic> {
+    let policy = &manifest.resolver.as_ref()?.policy;
+    (!policy.optimize.is_empty()).then(|| {
+        diagnostic(
+            "unsupported_policy",
+            Some(&manifest.package.name),
+            "resolver.policy",
+            format!(
+                "optimizer cannot enforce dependency-level optimization policy for version {}",
+                manifest.package.version
+            ),
+        )
+    })
+}
+
 fn candidate_satisfies_trust_policy(
-    root: &Manifest,
+    owner: &Manifest,
     candidate: &Manifest,
     metadata: &BTreeMap<(PackageName, Version), CandidateMetadata>,
 ) -> Result<(), ResolveDiagnostic> {
-    let Some(resolver) = &root.resolver else {
+    let Some(resolver) = &owner.resolver else {
         return Ok(());
     };
     let policy = &resolver.policy;
@@ -156,6 +182,51 @@ fn candidate_satisfies_trust_policy(
     Ok(())
 }
 
+fn active_dependencies(
+    manifest: &Manifest,
+    active_features: Option<&BTreeSet<String>>,
+) -> BTreeSet<PackageName> {
+    let mut deps = manifest
+        .dependencies
+        .iter()
+        .filter(|(_, d)| !d.optional)
+        .map(|(n, _)| n.clone())
+        .collect::<BTreeSet<_>>();
+    if let Some(features) = active_features {
+        for feat in features.iter().filter_map(|f| manifest.features.get(f)) {
+            deps.extend(feat.deps.iter().cloned());
+        }
+    }
+    deps
+}
+
+fn reachable_targets(
+    owner: &PackageName,
+    assigned: &BTreeMap<PackageName, &Manifest>,
+    closure: &crate::Closure,
+) -> BTreeSet<PackageName> {
+    let mut visited = BTreeSet::new();
+    let Some(owner_manifest) = assigned.get(owner) else {
+        return visited;
+    };
+    let mut queue = active_dependencies(owner_manifest, closure.features.get(owner))
+        .into_iter()
+        .collect::<std::collections::VecDeque<_>>();
+    while let Some(dep_name) = queue.pop_front() {
+        if &dep_name == owner || !visited.insert(dep_name.clone()) {
+            continue;
+        }
+        if let Some(dep_manifest) = assigned.get(&dep_name) {
+            for next in active_dependencies(dep_manifest, closure.features.get(&dep_name)) {
+                if !visited.contains(&next) {
+                    queue.push_back(next);
+                }
+            }
+        }
+    }
+    visited
+}
+
 pub fn compute_metrics(
     sol: &Solution,
     root: &PackageName,
@@ -164,49 +235,51 @@ pub fn compute_metrics(
     let mut total_cves = 0u64;
     let mut total_staleness_secs = 0u64;
     let mut total_trust_cost = 0u64;
+    let mut unknown_metadata_candidates = 0u64;
     let mut distinct_caps = BTreeSet::<String>::new();
-    let mut short_name_majors = BTreeMap::<&str, BTreeSet<u64>>::new();
+    let mut package_majors = BTreeMap::<&PackageName, BTreeSet<u64>>::new();
+
+    let validation = validate_solution(sol);
+    if let Some(graph) = &validation.graph {
+        for (name, node) in &graph.packages {
+            if name != root {
+                distinct_caps.extend(node.required_capabilities.iter().cloned());
+            }
+        }
+    } else {
+        for selected in &sol.packages {
+            let name = &selected.manifest.package.name;
+            if name != root {
+                distinct_caps.extend(selected.manifest.package.capability_ceiling.iter().cloned());
+                for feat in &selected.features {
+                    if let Some(def) = selected.manifest.features.get(feat) {
+                        distinct_caps.extend(def.enables_effects.iter().cloned());
+                    }
+                }
+            }
+        }
+    }
 
     for selected in &sol.packages {
         let name = &selected.manifest.package.name;
         let version = &selected.manifest.package.version;
-        let short = name
-            .as_str()
-            .split_once('/')
-            .map_or(name.as_str(), |(_, pkg)| pkg);
-        short_name_majors
-            .entry(short)
+        package_majors
+            .entry(name)
             .or_default()
             .insert(version.major);
 
         if name != root {
-            for cap in &selected.manifest.package.capability_ceiling {
-                distinct_caps.insert(cap.clone());
+            if let Some(meta) = metadata.get(&(name.clone(), version.clone())) {
+                total_cves = total_cves.saturating_add(meta.cve_count);
+                total_staleness_secs = total_staleness_secs.saturating_add(meta.staleness_secs);
+                total_trust_cost = total_trust_cost.saturating_add(meta.trust_cost);
+            } else {
+                unknown_metadata_candidates = unknown_metadata_candidates.saturating_add(1);
             }
-            for feat in &selected.features {
-                if let Some(def) = selected.manifest.features.get(feat) {
-                    for cap in &def.enables_effects {
-                        distinct_caps.insert(cap.clone());
-                    }
-                }
-            }
-            for dep in selected.manifest.dependencies.values() {
-                if !dep.optional {
-                    for cap in &dep.effects {
-                        distinct_caps.insert(cap.clone());
-                    }
-                }
-            }
-        }
-
-        if let Some(meta) = metadata.get(&(name.clone(), version.clone())) {
-            total_cves = total_cves.saturating_add(meta.cve_count);
-            total_staleness_secs = total_staleness_secs.saturating_add(meta.staleness_secs);
-            total_trust_cost = total_trust_cost.saturating_add(meta.trust_cost);
         }
     }
 
-    let duplicate_majors = short_name_majors
+    let duplicate_majors = package_majors
         .values()
         .filter(|majors| majors.len() > 1)
         .map(|majors| (majors.len() - 1) as u64)
@@ -218,18 +291,28 @@ pub fn compute_metrics(
         duplicate_majors,
         total_staleness_secs,
         total_trust_cost,
+        unknown_metadata_candidates,
     }
 }
 
-fn score_key(metrics: &SolutionMetrics, order: &[OptimizeObjective]) -> Vec<u64> {
+type ScoreKey = Vec<(u64, u64)>;
+type BestCandidate = (ScoreKey, Solution, SolutionMetrics);
+
+fn score_key(metrics: &SolutionMetrics, order: &[OptimizeObjective]) -> ScoreKey {
     order
         .iter()
         .map(|obj| match obj {
-            OptimizeObjective::ZeroCve => metrics.total_cves,
-            OptimizeObjective::MinCapabilitySurface => metrics.capability_surface,
-            OptimizeObjective::MinDupMajors => metrics.duplicate_majors,
-            OptimizeObjective::MinStaleness => metrics.total_staleness_secs,
-            OptimizeObjective::MinTrustCost => metrics.total_trust_cost,
+            OptimizeObjective::ZeroCve => (metrics.unknown_metadata_candidates, metrics.total_cves),
+            OptimizeObjective::MinCapabilitySurface => (0, metrics.capability_surface),
+            OptimizeObjective::MinDupMajors => (0, metrics.duplicate_majors),
+            OptimizeObjective::MinStaleness => (
+                metrics.unknown_metadata_candidates,
+                metrics.total_staleness_secs,
+            ),
+            OptimizeObjective::MinTrustCost => (
+                metrics.unknown_metadata_candidates,
+                metrics.total_trust_cost,
+            ),
         })
         .collect()
 }
@@ -249,12 +332,14 @@ pub fn resolve_optimized(request: &OptimizeRequest) -> Result<OptimizedResolutio
         ));
     }
     let objectives = active_objectives(request)?;
+    let requires_metadata = objectives.iter().copied().any(objective_requires_metadata);
     let inputs = inputs(&request.resolve)?;
     let root = &request.resolve.root.package.name;
     let mut pending = vec![BTreeMap::from([(root.clone(), &request.resolve.root)])];
     let mut decisions = 0usize;
     let mut conflicts = BTreeSet::new();
-    let mut best: Option<(Vec<u64>, Solution, SolutionMetrics)> = None;
+    let mut unsupported = false;
+    let mut best: Option<BestCandidate> = None;
     let mut evaluated_solutions = 0usize;
 
     while let Some(assigned) = pending.pop() {
@@ -283,6 +368,17 @@ pub fn resolve_optimized(request: &OptimizeRequest) -> Result<OptimizedResolutio
             decisions += 1;
         }
 
+        let blocked = assigned
+            .iter()
+            .filter(|(name, _)| *name != root)
+            .filter_map(|(_, m)| unsupported_dependency_policy(m))
+            .collect::<Vec<_>>();
+        if !blocked.is_empty() {
+            unsupported = true;
+            conflicts.extend(blocked);
+            continue;
+        }
+
         let closure = match closure(&request.resolve, &assigned) {
             Ok(c) => c,
             Err(errors) => {
@@ -290,6 +386,28 @@ pub fn resolve_optimized(request: &OptimizeRequest) -> Result<OptimizedResolutio
                 continue;
             }
         };
+
+        let mut policy_conflicts = vec![];
+        for (owner_name, owner_manifest) in &assigned {
+            if owner_manifest.resolver.is_none() {
+                continue;
+            }
+            for target_name in reachable_targets(owner_name, &assigned, &closure) {
+                if let Some(target_manifest) = assigned.get(&target_name)
+                    && let Err(diag) = candidate_satisfies_trust_policy(
+                        owner_manifest,
+                        target_manifest,
+                        &request.metadata,
+                    )
+                {
+                    policy_conflicts.push(diag);
+                }
+            }
+        }
+        if !policy_conflicts.is_empty() {
+            conflicts.extend(policy_conflicts);
+            continue;
+        }
 
         let mut branch_conflicts = vec![];
         for (name, requirements) in &closure.requirements {
@@ -359,13 +477,48 @@ pub fn resolve_optimized(request: &OptimizeRequest) -> Result<OptimizedResolutio
                     ),
                 ));
             }
+            let governing_owners = assigned
+                .iter()
+                .filter(|(_, m)| m.resolver.is_some())
+                .filter(|(owner_name, _)| {
+                    reachable_targets(owner_name, &assigned, &closure).contains(name)
+                })
+                .map(|(_, m)| *m)
+                .collect::<Vec<_>>();
+
             for manifest in candidates.into_iter().rev() {
-                if let Err(diag) = candidate_satisfies_trust_policy(
-                    &request.resolve.root,
-                    manifest,
-                    &request.metadata,
-                ) {
+                if let Some(diag) = unsupported_dependency_policy(manifest) {
+                    unsupported = true;
                     conflicts.insert(diag);
+                    continue;
+                }
+                if requires_metadata
+                    && !request.metadata.contains_key(&(
+                        manifest.package.name.clone(),
+                        manifest.package.version.clone(),
+                    ))
+                {
+                    conflicts.insert(diagnostic(
+                        "missing_candidate_metadata",
+                        Some(&manifest.package.name),
+                        manifest.package.name.as_str(),
+                        format!(
+                            "version {} lacks required candidate metadata for active optimization objectives",
+                            manifest.package.version
+                        ),
+                    ));
+                    continue;
+                }
+                let mut trust_failed = false;
+                for owner in &governing_owners {
+                    if let Err(diag) =
+                        candidate_satisfies_trust_policy(owner, manifest, &request.metadata)
+                    {
+                        conflicts.insert(diag);
+                        trust_failed = true;
+                    }
+                }
+                if trust_failed {
                     continue;
                 }
                 let mut next = assigned.clone();
@@ -438,7 +591,11 @@ pub fn resolve_optimized(request: &OptimizeRequest) -> Result<OptimizedResolutio
         })
     } else {
         Err(error(
-            crate::ErrorKind::Unsatisfiable,
+            if unsupported {
+                crate::ErrorKind::UnsupportedPolicy
+            } else {
+                crate::ErrorKind::Unsatisfiable
+            },
             decisions,
             conflicts.into_iter().collect(),
         ))
