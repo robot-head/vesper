@@ -129,8 +129,8 @@ fn c_if(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
             -1
         )
     };
-    let valid = c_expect_type(a.ty, b.ty, start, b.end);
-    c_result(a.ty, b.next, c_join(cond.env, a.env, b.env, 0, start, b.end), start, b.end, -1)
+    let result_ty = c_join_type(a.ty, b.ty, start, b.end);
+    c_result(result_ty, b.next, c_join(cond.env, a.env, b.env, 0, start, b.end), start, b.end, -1)
 }
 fn c_match(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
     -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
@@ -189,10 +189,10 @@ fn c_match_arms(
         let binding = c_bind_pattern(at, ty, original, depth + 1);
         let value = c_expr(c_take(binding.next, 47), binding.env, 2, row, loans, depth + 1, false);
         let valid = c_exhaust(value.env, original.count, value.env.count, value.start, value.end);
-        let valid = if result_ty.tag >= 0 {
-            c_expect_type(result_ty, value.ty, value.start, value.end)
+        let common_ty = if result_ty.tag < 0 {
+            value.ty
         } else {
-            0
+            c_join_type(result_ty, value.ty, value.start, value.end)
         };
         let trimmed = c_truncate(value.env, original.count);
         let joined = if result_ty.tag < 0 {
@@ -205,6 +205,6 @@ fn c_match_arms(
         } else {
             value.next
         };
-        c_match_arms(next, ty, original, joined, value.ty, row, loans, depth, start, end)
+        c_match_arms(next, ty, original, joined, common_ty, row, loans, depth, start, end)
     }
 }

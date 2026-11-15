@@ -29,7 +29,15 @@ fn c_expr(at: i64, env: CEnv, usage: i64, row: i64, loans: CEnv, depth: i64, res
             c_compare(
                 c_order(
                     c_postfix(
-                        c_primary(at, env, usage, row, loans, depth + 1, restricted),
+                        c_primary(
+                            at,
+                            env,
+                            c_callee_usage(at, usage),
+                            row,
+                            loans,
+                            depth + 1,
+                            restricted
+                        ),
                         row,
                         loans,
                         depth + 1
@@ -489,6 +497,11 @@ fn c_args(at: i64, param: i64, named: bool, env: CEnv, row: i64, loans: CEnv, de
         } else {
             0
         };
+        let valid = if c_type_has_effects(value.ty, 0) {
+            c_unsupported(7, value.start)
+        } else {
+            0
+        };
         let valid = c_expect_type(p.ty, value.ty, value.start, value.end);
         let valid = if p.pass != 2 && value.place < 0 && c_mode(value.ty, 0) == 2 {
             c_error(302, value.start, value.end)
@@ -597,5 +610,18 @@ fn c_place_shape(at: i64, end: i64)
         c_place_shape(t.end, c_argument_end(t.end, 0))
     } else {
         false
+    }
+}
+
+// Calling a function owns the callee, independently of the result's usage.
+fn c_callee_usage(at: i64, usage: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let t = c_token(at);
+    if t.kind == 4 && c_kind(t.end) == 32 {
+        2
+    } else if t.kind == 32 && c_kind(c_group(at, 0)) == 32 {
+        2
+    } else {
+        usage
     }
 }

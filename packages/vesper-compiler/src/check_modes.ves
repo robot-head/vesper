@@ -228,6 +228,7 @@ fn c_validate_decls(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[Arit
         0
     } else {
         let d = c_decl(at);
+        let reserved = c_reserved_decl(d);
         let duplicate = c_find(
             d.name,
             if d.kind == 8 || d.kind == 9 {
@@ -393,7 +394,7 @@ fn c_require_row(needed: i64, allowed: i64, env: CEnv, loans: CEnv, start: i64, 
         0
     } else {
         let ty = c_type(c_take(c_next(needed), 36), 0);
-        let valid = if !c_row_has(allowed, ty.ty) {
+        let valid = if !c_row_satisfies(allowed, ty.ty) {
             c_error(
                 if allowed >= 0 && c_kind(allowed) != 37 {
                     400
@@ -453,5 +454,60 @@ fn c_abort_loans(loans: CEnv, i: i64, start: i64, end: i64)
         c_error(402, start, end)
     } else {
         c_abort_loans(loans, i + 1, start, end)
+    }
+}
+
+fn c_literal_name(t: Tok, length: i64, first: i64, second: i64, third: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    t
+        .end
+        - t
+        .start
+        == length
+        && word(
+        t.start,
+        if length > 6 {
+            t.start + 6
+        } else {
+            t.end
+        }
+    )
+        == first
+        && (
+        length
+            <= 6
+            || word(
+            t.start + 6,
+            if length > 12 {
+                t.start + 12
+            } else {
+                t.end
+            }
+        )
+            == second
+    )
+        && (length <= 12 || word(t.start + 12, t.end) == third)
+}
+fn c_reserved_decl(d: CDecl) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let n = d.name;
+    let reserved = if d.kind == 8 || d.kind == 9 {
+        c_literal_name(n, 4, 1433299316, 0, 0)
+            || c_literal_name(n, 5, 336709707122, 0, 0)
+            || c_literal_name(n, 6, 91759600823911, 0, 0)
+            || c_literal_name(n, 6, 87344407998318, 0, 0)
+            || c_literal_name(n, 6, 90595682249844, 0, 0)
+            || c_literal_name(n, 12, 90664317774189, 111348947251058, 0)
+            || c_literal_name(n, 13, 71959651313743, 130178083089519, 119)
+    } else if d.kind == 12 {
+        c_literal_name(n, 12, 131333144735849, 121390260905060, 0)
+            || c_literal_name(n, 12, 131333144735849, 121390262089058, 0)
+            || c_literal_name(n, 12, 131333144735849, 121390261695852, 0)
+    } else {
+        false
+    };
+    if reserved {
+        c_error(100, d.start, d.end)
+    } else {
+        0
     }
 }

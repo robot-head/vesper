@@ -46,6 +46,11 @@ fn c_ctor_find(owner: Tok, variant: Tok, qualified: bool, at: i64)
         if found < 0 {
             c_ctor_find(owner, variant, qualified, d.end)
         } else {
+            let valid = if !qualified && c_ctor_later(owner, variant, d.end) {
+                c_unsupported(8, owner.start)
+            } else {
+                0
+            };
             let fields = if d.kind == 8 {
                 d.body
             } else {
@@ -436,5 +441,17 @@ fn c_irrefutable_fields(at: i64, field: i64, named: bool, depth: i64)
             named,
             depth
         )
+    }
+}
+
+fn c_ctor_later(owner: Tok, variant: Tok, at: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 70 {
+        false
+    } else {
+        let d = c_decl(at);
+        let matches = (d.kind == 8 && c_name(d.name, owner))
+            || (d.kind == 9 && c_find_variant(variant, c_next(d.body)) >= 0);
+        matches || c_ctor_later(owner, variant, d.end)
     }
 }

@@ -198,6 +198,23 @@ fn source_module(bytes: &[u8]) -> String {
 
 fn expected_code(name: &str) -> Option<&'static str> {
     match name {
+        "fail_function_mode_last" => Some("E0400"),
+        "fail_function_scalar_last" => Some("E0400"),
+
+        "callee_affine_in_arg" => Some("E0303"),
+        "match_function_row" => Some("E0401"),
+        "match_function_row_reverse" => Some("E0401"),
+        "if_function_row" => Some("E0401"),
+        "fail_function_mode" => Some("E0400"),
+        "reserved_unit" => Some("E0100"),
+        "reserved_option" => Some("E0100"),
+        "reserved_result" => Some("E0100"),
+        "reserved_runtime_error" => Some("E0100"),
+        "reserved_arith_overflow" => Some("E0100"),
+        "reserved_string" => Some("E0100"),
+        "reserved_never" => Some("E0100"),
+        "reserved_intrinsic" => Some("E0100"),
+
         "abort_frame" => Some("E0402"),
         "affine_twice" => Some("E0303"),
         "arity" => Some("E0207"),
@@ -301,7 +318,13 @@ fn acceptance() {
 fn native_agrees() {
     on_stack(|| {
         let checker = checker();
-        for name in ["linear_drop", "scopes", "branch_success"] {
+        for name in [
+            "linear_drop",
+            "scopes",
+            "branch_success",
+            "callee_affine_in_arg",
+            "match_function_row",
+        ] {
             let source = std::fs::read_to_string(
                 root().join(format!("tests/fixtures/self_host_check/{name}.ves")),
             )
@@ -438,6 +461,27 @@ fn unsupported_and_limits() {
             assert!(
                 !supported(&actual),
                 "unsupported program silently checked: {source}: {actual:?}"
+            );
+        }
+        for (name, code, seed_code) in [
+            ("implicit_capability", "E9007", "E0403"),
+            ("ambiguous_constructor", "E9008", "E0200"),
+            ("incomparable_function_rows", "E9002", "E0401"),
+            ("function_param_join", "E9002", "E0200"),
+        ] {
+            let source = std::fs::read_to_string(root().join(format!(
+                "tests/fixtures/self_host_check/unsupported/{name}.ves"
+            )))
+            .unwrap();
+            assert_eq!(
+                evaluate(&world(&checker, &source)).unwrap().code,
+                code,
+                "{name}"
+            );
+            assert_eq!(
+                oracle(&source).unwrap().code,
+                seed_code,
+                "{name}: seed control"
             );
         }
         for source in ["fn f() {", "fn f() { let x = ; }"] {

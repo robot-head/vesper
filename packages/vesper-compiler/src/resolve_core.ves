@@ -309,7 +309,9 @@ fn c_same(a: CType, b: CType, depth: i64)
     } else if a.tag == 4 {
         let sa = c_signature(a.at, c_kind(c_next(a.at)) == 4, depth + 1);
         let sb = c_signature(b.at, c_kind(c_next(b.at)) == 4, depth + 1);
-        c_same(sa.result, sb.result, depth + 1)
+        c_mode(a, 0)
+            == c_mode(b, 0)
+            && c_same(sa.result, sb.result, depth + 1)
             && c_same_params(
             sa.params,
             sb.params,
@@ -365,7 +367,7 @@ fn c_row_has(row: i64, ty: CType) -> bool eff [Fail[CheckError], Fail[Diag], Fai
         false
     } else {
         let t = c_type(c_take(c_next(row), 36), 0);
-        if c_same(t.ty, ty, 0) {
+        if c_compatible(t.ty, ty, 0) {
             true
         } else {
             let next = c_take(t.next, 37);
@@ -440,5 +442,100 @@ fn c_compatible_params(e: i64, a: i64, en: bool, an: bool, depth: i64)
             an,
             depth
         )
+    }
+}
+
+// Use an existing common supertype only when it represents the join exactly.
+// Incomparable function rows need a synthesized type arena, not a source handle.
+fn c_join_type(a: CType, b: CType, start: i64, end: i64)
+    -> CType eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_same(a, b, 0) {
+        a
+    } else if a.tag == 4 && b.tag == 4 {
+        let valid = if !c_join_shape(a, b, 0) {
+            c_unsupported(2, start)
+        } else {
+            0
+        };
+        if c_compatible(a, b, 0) {
+            a
+        } else if c_compatible(b, a, 0) {
+            b
+        } else {
+            let unsupported = c_unsupported(2, start);
+            a
+        }
+    } else {
+        let valid = c_expect_type(a, b, start, end);
+        a
+    }
+}
+fn c_type_has_effects(ty: CType, depth: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if depth > 32 {
+        let limit = c_limit(ty.at);
+        false
+    } else if ty.tag != 4 {
+        false
+    } else {
+        let named = c_kind(c_next(ty.at)) == 4;
+        let sig = c_signature(ty.at, named, depth + 1);
+        (sig.effects >= 0 && c_kind(sig.effects) != 37)
+            || c_type_has_effects(sig.result, depth + 1)
+            || c_params_have_effects(sig.params, named, depth + 1)
+    }
+}
+fn c_params_have_effects(at: i64, named: bool, depth: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 33 {
+        false
+    } else {
+        let param = c_param(at, named, depth);
+        c_type_has_effects(param.ty, depth + 1)
+            || (
+            if c_kind(param.next) == 38 {
+                c_params_have_effects(c_next(param.next), named, depth)
+            } else {
+                false
+            }
+        )
+    }
+}
+
+// Function payloads have no concrete instance key in the seed. An unlabelled
+// request therefore selects the last Fail capability before compatibility.
+fn c_row_satisfies(row: i64, ty: CType)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if row < 0 || c_kind(row) == 37 {
+        false
+    } else if ty.tag != 4 {
+        c_row_has(row, ty)
+    } else {
+        let payload = c_type(c_take(c_next(row), 36), 0);
+        let next = c_take(payload.next, 37);
+        if c_kind(next) == 38 && c_kind(c_next(next)) != 37 {
+            c_row_satisfies(c_next(next), ty)
+        } else {
+            c_compatible(payload.ty, ty, 0)
+        }
+    }
+}
+
+// The seed retains the first arrow's parameter types at each result layer.
+// Subtyping alone cannot choose a different contravariant parameter shape.
+fn c_join_shape(a: CType, b: CType, depth: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if depth > 32 {
+        let limit = c_limit(a.at);
+        false
+    } else if a.tag == 4 && b.tag == 4 {
+        let an = c_kind(c_next(a.at)) == 4;
+        let bn = c_kind(c_next(b.at)) == 4;
+        let sa = c_signature(a.at, an, depth + 1);
+        let sb = c_signature(b.at, bn, depth + 1);
+        c_same_params(sa.params, sb.params, an, bn, depth + 1)
+            && c_join_shape(sa.result, sb.result, depth + 1)
+    } else {
+        c_same(a, b, depth)
     }
 }

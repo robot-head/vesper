@@ -49,7 +49,7 @@ fn c_validate_adts(last: Tok) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[Ari
         c_validate_adts(d.name)
     }
 }
-fn c_bind_params(at: i64, env: CEnv)
+fn c_bind_params(at: i64, env: CEnv, row: i64)
     -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     if c_kind(at) == 33 {
         env
@@ -57,6 +57,13 @@ fn c_bind_params(at: i64, env: CEnv)
         let p = c_param(at, true, 0);
         let start = c_token(at).start;
         let valid = c_valid_type(p.ty, start, p.next, 0);
+        // Binding an effectful arrow under an ambient Fail capability needs
+        // lexical capability identities, which adapter v1 does not represent.
+        let valid = if row >= 0 && c_kind(row) != 37 && c_type_has_effects(p.ty, 0) {
+            c_unsupported(7, start)
+        } else {
+            0
+        };
         let valid = if c_lookup(env, p.name, env.count) >= 0 {
             c_error(100, start, p.next)
         } else {
@@ -76,7 +83,8 @@ fn c_bind_params(at: i64, env: CEnv)
                     ty: p.ty,
                     pass: p.pass
                 }
-            )
+            ),
+            row
         )
     }
 }
@@ -98,7 +106,7 @@ fn c_valid_row(row: i64, start: i64, end: i64)
 fn c_function(d: CDecl) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
     let sig = c_signature(c_fn_at(d.start), true, 0);
     let valid = c_valid_type(sig.result, d.start, d.end, 0);
-    let env = c_bind_params(sig.params, c_empty());
+    let env = c_bind_params(sig.params, c_empty(), sig.effects);
     let valid = c_valid_row(sig.effects, d.start, d.end);
     let body = c_block(sig.body, env, sig.effects, c_empty(), 0);
     let valid = c_expect_type(sig.result, body.ty, body.value_start, body.value_end);
