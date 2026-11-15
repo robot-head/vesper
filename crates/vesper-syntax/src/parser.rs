@@ -623,7 +623,11 @@ impl Parser<'_> {
             return None;
         }
         let public = self.at_word(0, "pub")
-            && (self.at_word(1, "trait") || self.at_word(1, "model") || self.nth(1) == K::Fn);
+            && (self.at_word(1, "trait")
+                || self.at_word(1, "model")
+                || matches!(self.nth(1), K::Fn | K::Struct | K::Enum | K::Effect)
+                || (matches!(self.nth(1), K::Copy | K::Affine | K::Linear)
+                    && matches!(self.nth(2), K::Struct | K::Enum | K::Effect)));
         if public {
             self.bump();
         }

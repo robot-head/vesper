@@ -96,8 +96,16 @@ fn prefix(source: &str, tokens: &[Token], at: usize) -> Option<(DK, Option<Span>
     }
     if word(source, tokens, i, "pub") {
         i = next(tokens, i + 1);
-        if token_kind(tokens, i) != K::Fn
-            && !word(source, tokens, i, "trait")
+        if matches!(token_kind(tokens, i), K::Copy | K::Affine | K::Linear) {
+            i = next(tokens, i + 1);
+            if !matches!(token_kind(tokens, i), K::Struct | K::Enum | K::Effect) {
+                return None;
+            }
+        }
+        if !matches!(
+            token_kind(tokens, i),
+            K::Fn | K::Struct | K::Enum | K::Effect
+        ) && !word(source, tokens, i, "trait")
             && !word(source, tokens, i, "model")
         {
             return None;
@@ -207,6 +215,9 @@ fn extent(
     }
     if word(source, tokens, head, "pub") {
         head = next(tokens, head + 1);
+        if matches!(token_kind(tokens, head), K::Copy | K::Affine | K::Linear) {
+            head = next(tokens, head + 1);
+        }
     }
     let mut i = if kind == DK::Other { start } else { head + 1 };
     let mut stack = Vec::new();

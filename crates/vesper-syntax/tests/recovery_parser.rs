@@ -343,3 +343,34 @@ fn public_functions_parse_losslessly_and_recover_after_damage() {
     assert_eq!(recovered.declarations()[1].status, DS::Recovered);
     assert_eq!(recovered.declarations()[2].status, DS::Complete);
 }
+
+#[test]
+fn public_adts_and_effects_parse_and_recover_with_usage_modes() {
+    let source = "pub struct Pair { left: u64, right: u64 }\npub linear enum Resultish { Good(u64), Bad }\npub linear effect Storage { fn read()->u64; }\nfn tail(){}";
+    let batch = parser::parse(source);
+    assert!(batch.diagnostics.is_empty(), "{:?}", batch.diagnostics);
+    assert_eq!(batch.syntax().text().to_string(), source);
+    let recovered = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(recovered.syntax().text().to_string(), source);
+    assert_eq!(recovered.declarations().len(), 4);
+    for declaration in recovered.declarations() {
+        assert_eq!(declaration.status, DS::Complete);
+    }
+    let module =
+        parser::parse_complete_items(&recovered, &[0, 1, 2, 3], Limits::default()).unwrap();
+    assert_eq!(module, batch.module);
+    assert!(source[recovered.declarations()[0].span.clone()].starts_with("pub struct"));
+    assert!(source[recovered.declarations()[1].span.clone()].starts_with("pub linear enum"));
+    assert!(source[recovered.declarations()[2].span.clone()].starts_with("pub linear effect"));
+}
+
+#[test]
+fn malformed_public_adt_retains_following_declarations() {
+    let source = "pub struct Broken { value: }\npub enum Good { Value }\nfn tail(){}";
+    let recovered = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(recovered.syntax().text().to_string(), source);
+    assert_eq!(recovered.declarations().len(), 3);
+    assert_ne!(recovered.declarations()[0].status, DS::Complete);
+    assert_eq!(recovered.declarations()[1].status, DS::Complete);
+    assert_eq!(recovered.declarations()[2].status, DS::Complete);
+}
