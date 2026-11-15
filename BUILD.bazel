@@ -25,6 +25,7 @@ vesper_crate(
         "//crates/vesper-grammar:files",
         "//crates/vesper-loom-trust:files",
         # The self-hosted parser compares every repository .ves source.
+        "//bootstrap:files",
         "//crates/vesper-lint:files",
         "//crates/vesper-nexus:files",
         "//crates/vesper-pact-bridge:files",
