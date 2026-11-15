@@ -1,8 +1,8 @@
 //! Lean extraction through structured syntax. Mutable parameters become explicit
 //! returned state; unhandled effects become monadic evidence, not axioms.
 use crate::lean_nodes::{
-    arith_term, effectful_arrow, global, ident, in_range, literal, source_name, source_ref, ty,
-    ty_monad,
+    arith_term, effectful_arrow, global, ident, in_range, literal, source_name, source_ref,
+    tiled_op_term, ty, ty_monad,
 };
 use crate::{ast::*, check::World};
 use std::{
@@ -541,7 +541,11 @@ pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
                             })
                         })
                         .collect::<Result<Vec<_>, String>>()?,
-                    deriving: vec![],
+                    deriving: if a.tile_width.is_some() {
+                        vec![source_name("Inhabited")?]
+                    } else {
+                        vec![]
+                    },
                 }
             });
         }
@@ -2676,6 +2680,64 @@ impl Generator<'_> {
         args: &[Arg],
         out: &mut Statements,
     ) -> Result<Term, String> {
+        if let Some((name, receiver)) = match &callee.kind {
+            ExprKind::Name(n) if !self.scope.contains_key(n) => Some((n.as_str(), None)),
+            ExprKind::Field(base, method)
+                if self
+                    .type_of(base)
+                    .as_ref()
+                    .is_some_and(crate::tiled::is_seq_type) =>
+            {
+                Some((method.as_str(), Some(base.as_ref())))
+            }
+            _ => None,
+        } && let Some((tiled_op, _)) = crate::tiled::resolve_ir_call(
+            self.world,
+            &self.world.types,
+            &BTreeMap::new(),
+            name,
+            receiver,
+            match &e.kind {
+                ExprKind::Call { types, .. } => types,
+                _ => &[],
+            },
+            args,
+            e,
+        ) {
+            let mut exprs = Vec::new();
+            let seq_expr = receiver.or_else(|| {
+                if !matches!(
+                    tiled_op,
+                    crate::tiled::TiledOp::New { .. }
+                        | crate::tiled::TiledOp::WithCapacity { .. }
+                        | crate::tiled::TiledOp::WithRegion { .. }
+                ) {
+                    args.first().map(|a| &a.expr)
+                } else {
+                    None
+                }
+            });
+            if let Some(recv) = receiver {
+                exprs.push(recv);
+            }
+            let skip_first = matches!(tiled_op, crate::tiled::TiledOp::WithRegion { .. });
+            for (idx, a) in args.iter().enumerate() {
+                if skip_first && idx == 0 {
+                    continue;
+                }
+                exprs.push(&a.expr);
+            }
+            let terms = self.operands(&exprs, out)?;
+            let (mutates, term) = tiled_op_term(&tiled_op, &terms)?;
+            if mutates {
+                let place = seq_expr
+                    .and_then(crate::check::Place::from_expr)
+                    .ok_or("mutable TiledSeq argument requires a place")?;
+                self.assign(&place, term, out)?;
+                return Ok(unit());
+            }
+            return Ok(term);
+        }
         if let ExprKind::Field(base, method) = &callee.kind
             && let ExprKind::Name(local) = &base.kind
             && let Some(l) = self.scope.get(local)

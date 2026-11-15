@@ -45,6 +45,7 @@
 mod d3d12;
 mod graph;
 pub mod lifecycle;
+pub mod multi_backend;
 mod plan;
 pub mod recording;
 
