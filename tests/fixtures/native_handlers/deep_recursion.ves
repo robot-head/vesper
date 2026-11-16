@@ -1,0 +1,26 @@
+// Many operations from a deep recursion on one fiber.
+linear effect Tick {
+    fn tick(sink n: i64) -> i64;
+}
+
+fn walk(sink n: i64) -> i64 eff [Fail[ArithOverflow], Tick] {
+    if n == 0 {
+        0
+    } else {
+        Tick::tick(n) + walk(n - 1)
+    }
+}
+
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        handle Tick state seen = 0 in {
+            walk(2000)
+        } with {
+            return (value, seen) => value + seen,
+            tick(n, seen, resume) => resume(n % 3, wrapping_add(seen, 1)),
+        }
+    } with {
+        return value => value,
+        raise(overflow, resume) => -1,
+    }
+}
