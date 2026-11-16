@@ -639,20 +639,40 @@ impl Parser<'_> {
         self.expect(K::RBrace);
         out
     }
+    fn fip_attr(&mut self) -> bool {
+        if self.at(K::At) && self.at_word(1, "fip") {
+            self.bump();
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
     fn item(&mut self) -> Option<Item> {
         let start = self.start();
         if self.at_word(0, "use") && self.at_word(1, "model") {
             self.use_model(0..self.source.len());
             return None;
         }
+        let mut fip = self.fip_attr();
         let public = self.at_word(0, "pub")
             && (self.at_word(1, "trait")
                 || self.at_word(1, "model")
                 || matches!(self.nth(1), K::Fn | K::Struct | K::Enum | K::Effect)
                 || (matches!(self.nth(1), K::Copy | K::Affine | K::Linear)
-                    && matches!(self.nth(2), K::Struct | K::Enum | K::Effect)));
+                    && matches!(self.nth(2), K::Struct | K::Enum | K::Effect))
+                || (!fip
+                    && self.nth(1) == K::At
+                    && self.at_word(2, "fip")
+                    && self.nth(3) == K::Fn));
         if public {
             self.bump();
+        }
+        if !fip {
+            fip = self.fip_attr();
+        }
+        if fip && !self.at(K::Fn) {
+            self.error("@fip may only annotate a fn declaration");
         }
         if self.at_word(0, "trait") {
             return Some(Item::Trait(self.trait_decl(start, public)));
@@ -765,7 +785,7 @@ impl Parser<'_> {
                 self.expect(K::LBrace);
                 let mut ops = vec![];
                 while self.at(K::Fn) {
-                    ops.push(self.function(true));
+                    ops.push(self.function(true, false));
                 }
                 self.expect(K::RBrace);
                 Some(Item::Effect(EffectDecl {
@@ -777,8 +797,8 @@ impl Parser<'_> {
                 }))
             }
             K::Fn => {
-                let mut function = self.function(false);
-                if public {
+                let mut function = self.function(false, fip);
+                if public || fip {
                     function.span.start = start;
                 }
                 Some(Item::Function(Box::new(function)))
@@ -847,7 +867,7 @@ impl Parser<'_> {
                 }
                 self.expect(K::LBrace);
                 let mut methods = vec![];
-                while self.at(K::Fn) || (self.at_word(0, "pub") && self.nth(1) == K::Fn) {
+                while self.at_method() {
                     methods.push(self.method());
                 }
                 self.expect(K::RBrace);
@@ -901,19 +921,33 @@ impl Parser<'_> {
             span: start..self.start(),
         }
     }
+    fn at_method(&self) -> bool {
+        self.at(K::Fn)
+            || (self.at_word(0, "pub")
+                && (self.nth(1) == K::Fn || (self.nth(1) == K::At && self.at_word(2, "fip"))))
+            || (self.at(K::At) && self.at_word(1, "fip"))
+    }
     fn method(&mut self) -> Function {
         let start = self.start();
-        let public = self.at_word(0, "pub") && self.nth(1) == K::Fn;
+        let mut fip = self.fip_attr();
+        let public = self.at_word(0, "pub")
+            && (self.nth(1) == K::Fn || (!fip && self.nth(1) == K::At && self.at_word(2, "fip")));
         if public {
             self.bump();
         }
-        let mut function = self.function(false);
-        if public {
+        if !fip {
+            fip = self.fip_attr();
+        }
+        if fip && !self.at(K::Fn) {
+            self.error("@fip may only annotate a fn declaration");
+        }
+        let mut function = self.function(false, fip);
+        if public || fip {
             function.span.start = start;
         }
         function
     }
-    fn function(&mut self, op: bool) -> Function {
+    fn function(&mut self, op: bool, fip: bool) -> Function {
         let diagnostics_before = self.diagnostics.len();
         let old_rows = self.row_names.clone();
         let old_values = self.bound_values.clone();
@@ -948,6 +982,7 @@ impl Parser<'_> {
         self.bound_values = old_values;
         Function {
             name,
+            fip,
             generics,
             params,
             result,
@@ -1228,7 +1263,7 @@ impl Parser<'_> {
                     span: start..self.end(),
                 });
             } else if self.at(K::Fn) {
-                methods.push(self.function(true));
+                methods.push(self.function(true, false));
             } else {
                 self.error("expected 'type' or 'fn' in a trait");
             }
@@ -1311,7 +1346,7 @@ impl Parser<'_> {
                     ty,
                     span: start..self.end(),
                 });
-            } else if self.at(K::Fn) || (self.at_word(0, "pub") && self.nth(1) == K::Fn) {
+            } else if self.at_method() {
                 methods.push(self.method());
             } else {
                 self.error("expected 'type' or 'fn' in an impl or model");
@@ -1653,14 +1688,16 @@ impl Parser<'_> {
         self.expect(K::LBrace);
         let mut arms = vec![];
         while !self.at(K::RBrace) && !self.at(K::Eof) {
+            let before = self.pos;
             let pat = self.pattern();
             self.expect(K::FatArrow);
             let outer_values = self.bound_values.clone();
             pattern_bindings(&pat, &mut self.bound_values);
             let body = self.expr();
+            let block_body = matches!(body.kind, ExprKind::Block { .. });
             self.bound_values = outer_values;
             arms.push((pat, body));
-            if !self.eat(K::Comma) && !self.at(K::RBrace) {
+            if !self.eat(K::Comma) && !self.at(K::RBrace) && !(block_body && self.pos > before) {
                 self.error("expected ',' between match arms");
                 break;
             }

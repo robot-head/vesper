@@ -133,7 +133,7 @@ fn uses_defs(world: &World, op: &Op) -> (BTreeSet<Local>, BTreeSet<Local>) {
                 }
             }
         }
-        Op::Tiled { args, .. } => {
+        Op::Tiled { args, .. } | Op::Fip { args, .. } => {
             uses.extend(args.iter().map(|a| Local::Value(a.value)));
             for arg in args.iter().filter(|a| a.pass == Pass::Inout) {
                 if let Some(p) = &arg.place {
@@ -310,6 +310,7 @@ fn extract_closures(world: &World, f: &FunctionIr) -> Result<Option<Vec<Declarat
             let name = format!("$lambda_{}_{}", f.name, i.dest);
             let function = Function {
                 name: name.clone(),
+                fip: false,
                 params: captured,
                 result: *result.clone(),
                 effects: effects.clone(),
@@ -340,6 +341,8 @@ fn extract_closures(world: &World, f: &FunctionIr) -> Result<Option<Vec<Declarat
             f,
             live: liveness(world, f),
             closures,
+            fip_active: crate::fip::active(world),
+            rec_structs: nodes::recursive_structs(world),
         }
         .emit()?,
     );
@@ -390,8 +393,13 @@ struct Emitter<'a> {
     f: &'a FunctionIr,
     live: Vec<BTreeSet<Local>>,
     closures: BTreeMap<ValueId, Lifted>,
+    fip_active: bool,
+    rec_structs: BTreeSet<String>,
 }
 impl Emitter<'_> {
+    fn ty(&self, t: &Type) -> Result<Term, String> {
+        nodes::ty_with_fip(t, self.fip_active)
+    }
     fn block_name(&self, b: usize) -> Result<syntax::Name, String> {
         nodes::source_name(&format!("$block_{}_{}", self.f.name, b))
     }
@@ -423,13 +431,13 @@ impl Emitter<'_> {
             .collect()
     }
     fn result_type(&self) -> Result<Term, String> {
-        let mut types = vec![nodes::ty(&self.f.result)?];
+        let mut types = vec![self.ty(&self.f.result)?];
         types.extend(
             self.f
                 .params
                 .iter()
                 .filter(|p| p.pass == Pass::Inout)
-                .map(|p| nodes::ty(&p.ty))
+                .map(|p| self.ty(&p.ty))
                 .collect::<Result<Vec<_>, _>>()?,
         );
         Ok(if types.len() == 1 {
@@ -464,7 +472,7 @@ impl Emitter<'_> {
             for local in &self.live[b] {
                 binders.push(Binder::explicit(
                     nodes::ident(&local.raw_name())?,
-                    nodes::ty(local.ty(self.f))?,
+                    self.ty(local.ty(self.f))?,
                 ));
             }
             let mut statements = vec![];
@@ -555,7 +563,7 @@ impl Emitter<'_> {
         }
         let mut binders = self.type_params()?;
         for p in &self.f.params {
-            binders.push(Binder::explicit(nodes::ident(&p.name)?, nodes::ty(&p.ty)?));
+            binders.push(Binder::explicit(nodes::ident(&p.name)?, self.ty(&p.ty)?));
         }
         out.push(Declaration::Definition(Definition {
             name: nodes::source_name(&self.f.name)?,
@@ -583,6 +591,12 @@ impl Emitter<'_> {
         }
     }
     fn pattern(&self, p: &Pattern) -> Result<syntax::Pattern, String> {
+        if crate::fip::is_box_pattern(self.world, p) {
+            let PatternKind::Constructor { fields, .. } = &p.kind else {
+                unreachable!();
+            };
+            return self.pattern(&fields[0].1);
+        }
         Ok(match &p.kind {
             PatternKind::Bind(n) => syntax::Pattern::Bind(nodes::ident(n)?),
             PatternKind::Wild => syntax::Pattern::Wildcard,
@@ -629,7 +643,7 @@ impl Emitter<'_> {
         let rhs = match &i.op {
             Op::Constant(l) => Term::Ascribe {
                 value: Box::new(nodes::literal(l)),
-                ty: Box::new(nodes::ty(&i.ty)?),
+                ty: Box::new(self.ty(&i.ty)?),
             },
             Op::Unit => Term::Tuple(vec![]),
             Op::Read { root, path, .. } => {
@@ -679,7 +693,7 @@ impl Emitter<'_> {
                         .map(|(index, (_, ty))| {
                             Ok(Binder::explicit(
                                 nodes::ident(&format!("$arg{index}"))?,
-                                nodes::ty(ty)?,
+                                self.ty(ty)?,
                             ))
                         })
                         .collect::<Result<Vec<_>, String>>()?
@@ -731,7 +745,13 @@ impl Emitter<'_> {
                         out.push(let_value(
                             syntax::Pattern::Bind(nodes::ident(&place.root)?),
                             None,
-                            nodes::update_place(place, nodes::source_ref(&new)?)?,
+                            nodes::update_place_typed(
+                                self.world,
+                                place,
+                                nodes::source_ref(&new)?,
+                                self.f.locals.get(&place.root),
+                                &self.rec_structs,
+                            )?,
                         ));
                     }
                     return Ok(());
@@ -829,7 +849,13 @@ impl Emitter<'_> {
                 out.push(let_value(
                     syntax::Pattern::Bind(nodes::ident(&place.root)?),
                     None,
-                    nodes::update_place(&place, new)?,
+                    nodes::update_place_typed(
+                        self.world,
+                        &place,
+                        new,
+                        self.f.locals.get(&place.root),
+                        &self.rec_structs,
+                    )?,
                 ));
                 Term::Tuple(vec![])
             }
@@ -844,7 +870,7 @@ impl Emitter<'_> {
                         vars.and_then(|v| v.get(&g.name)).map(|ty| {
                             Ok(syntax::Argument::Named {
                                 name: nodes::ident(&g.name)?,
-                                value: nodes::ty(ty)?,
+                                value: self.ty(ty)?,
                             })
                         })
                     })
@@ -889,7 +915,13 @@ impl Emitter<'_> {
                             out.push(let_value(
                                 syntax::Pattern::Bind(nodes::ident(&projected.root)?),
                                 None,
-                                nodes::update_place(&projected, new)?,
+                                nodes::update_place_typed(
+                                    self.world,
+                                    &projected,
+                                    new,
+                                    self.f.locals.get(&projected.root),
+                                    &self.rec_structs,
+                                )?,
                             ));
                         }
                     }
@@ -911,18 +943,30 @@ impl Emitter<'_> {
                     out.push(let_value(
                         syntax::Pattern::Bind(nodes::ident(&place.root)?),
                         None,
-                        nodes::update_place(place, term)?,
+                        nodes::update_place_typed(
+                            self.world,
+                            place,
+                            term,
+                            self.f.locals.get(&place.root),
+                            &self.rec_structs,
+                        )?,
                     ));
                     Term::Tuple(vec![])
                 } else {
                     term
                 }
             }
+            Op::Fip { args, .. } => {
+                let [arg] = args.as_slice() else {
+                    return Err("Box op expects 1 argument".into());
+                };
+                value(arg.value)?
+            }
             _ => return Err("unsupported operation in Lean CFG extraction".into()),
         };
         out.push(let_value(
             syntax::Pattern::Bind(nodes::ident(&Local::Value(i.dest).raw_name())?),
-            Some(nodes::ty(&i.ty)?),
+            Some(self.ty(&i.ty)?),
             rhs,
         ));
         Ok(())
