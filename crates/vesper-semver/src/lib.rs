@@ -92,6 +92,11 @@ pub enum Type {
         min: i64,
         max: i64,
     },
+    /// The inclusive subset of u64 values between these constant bounds.
+    U64Range {
+        min: u64,
+        max: u64,
+    },
     Parameter {
         index: usize,
     },
@@ -515,6 +520,11 @@ impl Checker<'_> {
                     self.unsupported(path, "invalid i64 refinement range");
                 }
             }
+            Type::U64Range { min, max } => {
+                if min > max {
+                    self.unsupported(path, "invalid u64 refinement range");
+                }
+            }
             Type::Parameter { index } => {
                 if !matches!(generics.get(*index), Some(Generic::Type { .. })) {
                     self.unsupported(path, "unbound or non-type generic parameter");
@@ -653,7 +663,14 @@ impl Checker<'_> {
                 self.subtype(&old.ty, &new.ty, &p, depth + 1)
             };
             if !subtype {
-                self.breaking(&p,"SV-Fn","parameter type is incompatible","Pass a value admitted by the old parameter type; mutable places cannot change stored type.");
+                let witness = if old.pass == new.pass && old.pass != Pass::Inout {
+                    u64_counterexample(&old.ty, &new.ty).map(|value| {
+                        format!("Pass {value}: u64; the old parameter admits this value but the new parameter rejects it.")
+                    })
+                } else {
+                    None
+                };
+                self.breaking(&p,"SV-Fn","parameter type is incompatible",witness.as_deref().unwrap_or("Pass a value admitted by the old parameter type; mutable places cannot change stored type."));
             }
         }
         if b.result_mode > a.result_mode {
@@ -665,11 +682,16 @@ impl Checker<'_> {
             );
         }
         if !self.subtype(&b.result, &a.result, &format!("{path}.result"), depth + 1) {
+            let witness = u64_counterexample(&b.result, &a.result).map(|value| {
+                format!("The new result admits {value}: u64, which the old result type rejects.")
+            });
             self.breaking(
                 path,
                 "SV-Fn",
                 "return type is incompatible",
-                "Use the returned value at the old result type.",
+                witness
+                    .as_deref()
+                    .unwrap_or("Use the returned value at the old result type."),
             );
         }
         let subset = b.effects.capabilities.iter().all(|n| {
@@ -747,6 +769,21 @@ impl Checker<'_> {
                 },
                 Type::I64Range { min, max },
             ) => *min == i64::MIN && *max == i64::MAX,
+            (Type::U64Range { min: a, max: b }, Type::U64Range { min: c, max: d }) => {
+                c <= a && b <= d
+            }
+            (
+                Type::U64Range { .. },
+                Type::Primitive {
+                    name: Primitive::U64,
+                },
+            ) => true,
+            (
+                Type::Primitive {
+                    name: Primitive::U64,
+                },
+                Type::U64Range { min, max },
+            ) => *min == 0 && *max == u64::MAX,
             (Type::Function { signature: a }, Type::Function { signature: b }) => {
                 let before = (self.issues.len(), self.adapters.len());
                 // A value of a must be usable at b, so a is the candidate.
@@ -890,6 +927,27 @@ impl Checker<'_> {
         }
     }
 }
+/// A value in `sub` but outside `sup`, for validated direct u64 intervals.
+fn u64_counterexample(sub: &Type, sup: &Type) -> Option<u64> {
+    fn bounds(ty: &Type) -> Option<(u64, u64)> {
+        match ty {
+            Type::Primitive {
+                name: Primitive::U64,
+            } => Some((0, u64::MAX)),
+            Type::U64Range { min, max } if min <= max => Some((*min, *max)),
+            _ => None,
+        }
+    }
+    let (sub_min, sub_max) = bounds(sub)?;
+    let (sup_min, sup_max) = bounds(sup)?;
+    if sub_min < sup_min {
+        Some(sub_min)
+    } else if sub_max > sup_max {
+        Some(sub_max)
+    } else {
+        None
+    }
+}
 fn resumption(effects: &Effects, generics: &[Generic]) -> Resumption {
     effects
         .capabilities
@@ -923,7 +981,7 @@ fn type_mode_at(
         Type::Primitive {
             name: Primitive::String,
         } => Some(Mode::Affine),
-        Type::Primitive { .. } | Type::I64Range { .. } => Some(Mode::Copy),
+        Type::Primitive { .. } | Type::I64Range { .. } | Type::U64Range { .. } => Some(Mode::Copy),
         Type::Parameter { index } => match generics.get(*index)? {
             Generic::Type { bound } => Some(*bound),
             _ => None,

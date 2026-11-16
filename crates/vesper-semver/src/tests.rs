@@ -634,3 +634,149 @@ fn mutable_parameters_keep_invariant_refinements() {
     assert!(!check(old.clone(), new.clone()).is_compatible());
     assert!(!check(new, old).is_compatible());
 }
+
+fn u64_range(min: u64, max: u64) -> Type {
+    Type::U64Range { min, max }
+}
+
+#[test]
+fn u64_refinement_variance_uses_inclusive_set_containment() {
+    let ranges = [
+        (0, 10),
+        (1, 9),
+        (5, 15),
+        (0, u64::MAX),
+        (u64::MAX, u64::MAX),
+    ];
+    for (old_min, old_max) in ranges {
+        for (new_min, new_max) in ranges {
+            let mut old = function();
+            let mut new = old.clone();
+            old.parameters[0].ty = u64_range(old_min, old_max);
+            new.parameters[0].ty = u64_range(new_min, new_max);
+            assert_eq!(
+                check(old, new).is_compatible(),
+                new_min <= old_min && old_max <= new_max
+            );
+            let mut old = function();
+            let mut new = old.clone();
+            old.result = u64_range(old_min, old_max);
+            new.result = u64_range(new_min, new_max);
+            assert_eq!(
+                check(old, new).is_compatible(),
+                old_min <= new_min && new_max <= old_max
+            );
+        }
+    }
+}
+
+#[test]
+fn u64_refinements_validate_roundtrip_and_full_domain() {
+    let unsigned = Type::Primitive {
+        name: Primitive::U64,
+    };
+    let mut old = function();
+    old.result = unsigned;
+    let mut new = old.clone();
+    new.result = u64_range(0, u64::MAX);
+    assert!(check(old.clone(), new.clone()).is_compatible());
+    assert!(check(new.clone(), old.clone()).is_compatible());
+    new.result = u64_range(1, u64::MAX);
+    assert!(check(old.clone(), new.clone()).is_compatible());
+    assert!(!check(new.clone(), old.clone()).is_compatible());
+    old.result = int();
+    assert!(!check(old, new.clone()).is_compatible());
+    let original = interface(new);
+    let encoded = serde_json::to_string(&original).unwrap();
+    let decoded: Interface = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, original);
+    assert_eq!(
+        compare(&original, &decoded).classification,
+        Classification::Patch
+    );
+    let mut invalid = function();
+    invalid.result = u64_range(u64::MAX, 0);
+    assert_eq!(
+        check(invalid.clone(), invalid).classification,
+        Classification::Unknown
+    );
+}
+
+#[test]
+fn u64_mutable_refinements_remain_invariant() {
+    let mut old = function();
+    old.parameters[0].pass = Pass::Inout;
+    old.parameters[0].ty = u64_range(0, 10);
+    let mut new = old.clone();
+    new.parameters[0].ty = u64_range(0, 20);
+    assert!(!check(old.clone(), new.clone()).is_compatible());
+    assert!(!check(new, old).is_compatible());
+}
+
+#[test]
+fn unsigned_range_witnesses_include_rejected_values_at_both_extremes() {
+    let full = Type::Primitive {
+        name: Primitive::U64,
+    };
+    for (sub, sup, value) in [
+        (u64_range(0, 10), u64_range(1, 10), 0),
+        (u64_range(0, 10), u64_range(0, 9), 10),
+        (full.clone(), u64_range(1, u64::MAX), 0),
+        (full, u64_range(0, u64::MAX - 1), u64::MAX),
+    ] {
+        let mut old = function();
+        let mut new = old.clone();
+        old.parameters[0].ty = sub.clone();
+        new.parameters[0].ty = sup.clone();
+        let report = check(old, new);
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.message == "parameter type is incompatible")
+            .unwrap();
+        assert!(
+            issue.caller_witness.contains(&format!("Pass {value}: u64")),
+            "{issue:?}"
+        );
+        let mut old = function();
+        let mut new = old.clone();
+        old.result = sup;
+        new.result = sub;
+        let report = check(old, new);
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.message == "return type is incompatible")
+            .unwrap();
+        assert!(
+            issue
+                .caller_witness
+                .contains(&format!("admits {value}: u64")),
+            "{issue:?}"
+        );
+    }
+}
+
+#[test]
+fn unsigned_range_witness_keeps_invariant_and_invalid_fallbacks() {
+    let mut old = function();
+    old.parameters[0].pass = Pass::Inout;
+    old.parameters[0].ty = u64_range(0, 10);
+    let mut new = old.clone();
+    new.parameters[0].ty = u64_range(0, 20);
+    let report = check(old, new);
+    let issue = report
+        .issues
+        .iter()
+        .find(|i| i.message == "parameter type is incompatible")
+        .unwrap();
+    assert!(issue.caller_witness.contains("mutable places"));
+    assert_eq!(
+        u64_counterexample(&u64_range(1, 0), &u64_range(0, 10)),
+        None
+    );
+    assert_eq!(
+        u64_counterexample(&u64_range(1, 9), &u64_range(0, 10)),
+        None
+    );
+}

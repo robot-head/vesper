@@ -216,6 +216,12 @@ pub(crate) fn plan(
     stack_switching: bool,
     max_functions: usize,
 ) -> Result<Plan, WasmError> {
+    let host = super::host::capabilities(world, entry)?;
+    let min_arity = if host.contains(&super::host::HostCapability::Trace) {
+        3
+    } else {
+        1
+    };
     let mut p = Plan {
         max_arity: world
             .effects
@@ -223,8 +229,8 @@ pub(crate) fn plan(
             .flat_map(|e| e.ops.iter().map(|o| o.params.len()))
             .max()
             .unwrap_or(0)
-            .max(1),
-        host: super::host::capabilities(world, entry)?,
+            .max(min_arity),
+        host,
         ..Plan::default()
     };
     for c in &p.host {
@@ -773,7 +779,7 @@ pub(crate) fn operands(op: &Op) -> Vec<ValueId> {
         Op::Tuple(vs) | Op::Vector { args: vs, .. } => vs.clone(),
         Op::Data(_, fs) => fs.iter().map(|(_, v)| *v).collect(),
         Op::Project(v, _) | Op::Try(v) => vec![*v],
-        Op::Call { args, .. } => args.iter().map(|a| a.value).collect(),
+        Op::Call { args, .. } | Op::Tiled { args, .. } => args.iter().map(|a| a.value).collect(),
         Op::Indirect { callee, args } => {
             let mut v = vec![*callee];
             v.extend(args.iter().map(|a| a.value));

@@ -8,6 +8,10 @@ contravariant input and covariant result comparisons; `inout` and other
 invariant positions remain invariant. Reversed bounds produce an unknown
 comparison. Source interface export does not yet emit these refinements, and
 this fragment does not decide general predicates or synthesize SMT witnesses.
+The analogous `{"kind":"u64_range","min":0,"max":10}` represents an
+inclusive `u64` interval; its full domain is 0 through `u64::MAX`. Incompatible
+direct unsigned parameter or result intervals include a distinguishing value
+in the human-readable witness, not a checked caller program.
 
 Resolved interface DTOs may attach a constant `ceiling` to an effect capability.
 For the same capability, lowering the ceiling is compatible and raising it is

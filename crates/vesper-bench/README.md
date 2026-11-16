@@ -34,12 +34,47 @@ measured epoch, body-call count including warmups, and whole-run elapsed time.
 equal operation counts per arm. Zero totals/operations fail. Warmups are not
 included in statistical evidence.
 
+## Paired Hodges–Lehmann estimate
+
+`hodges_lehmann_paired` accepts up to 32 caller-provided signed integer paired
+differences. It returns the median Walsh average scaled by four, plus a
+two-sided signed-rank interval with bounds scaled by two and exact nominal
+coverage when a finite interval of at least 95% is available. Smaller samples
+can return an estimate without an interval. Zeros, tied absolute differences,
+and tied Walsh averages are rejected conservatively.
+
+The interval's interpretation requires independent, identically distributed
+continuous differences symmetric about their population location. The API
+does not establish those assumptions or convert benchmark measurements into
+differences. It is separate from the ratio-based regression gate below.
+
+`gate_paired_difference` compares those unrounded interval bounds against a
+maximum candidate-minus-baseline difference in the same units. It passes only
+when the upper bound is at or below the threshold, reports a regression only
+when the lower bound is above it, and otherwise returns an inconclusive result.
+It retains the estimate and interval and uses the same assumptions and input
+restrictions; it does not establish measurement provenance or operate the
+existing ratio gate.
+
 `mann_whitney_ranks(first, second)` separately computes exact Mann–Whitney U
 rank counts for two bounded `u64` samples. Counts are doubled to represent tied
 pairs without rounding. It returns no p-value, confidence interval or gate
 decision. Independent-sample inference requires appropriate independence and
 distribution assumptions; ABBA epoch measurements are paired and do not
 automatically satisfy those assumptions.
+
+`mann_whitney_exact(first, second)` computes the exact untied permutation
+probability for two nonempty samples of at most 32 observations each. It rejects
+repeated values anywhere in the combined samples. The returned fraction uses
+twice the smaller inclusive tail, capped at one; it is not rounded. Its null
+interpretation requires exchangeable observations, and it is not a paired ABBA
+test or a confidence interval. It does not participate in the regression gate.
+
+`mann_whitney_exact_with_ties(first, second)` also supports repeated values,
+using pooled midranks and counting all physical label assignments. It calculates
+both inclusive tails separately before doubling the smaller one, because ties
+can produce an asymmetric permutation distribution. It uses the same sample
+limits and exchangeability assumption and likewise does not operate the gate.
 
 ## Optional population-median confidence gate
 
@@ -126,3 +161,35 @@ inserted delay from elapsed time and reports the predicted end-to-end speedup
 in basis points per region. Unlike Coz, regions are explicit calls rather than
 sampled lines, delay accrues when a region ends, and there is no credit for
 delay accrued while a thread was blocked.
+
+## Tied paired signed-rank confidence sets
+
+`signed_rank_confidence_set` inverts the exact two-sided 5% Wilcoxon
+signed-rank test for up to 16 caller-provided integer paired differences. It
+visits every distinct Walsh breakpoint and the intervals between them, discards
+centered zeros, and uses doubled midranks for tied absolute differences. Its
+ordered segments can be disconnected, open, closed, singleton, or unbounded;
+finite endpoints are stored as twice the location without rounding. A candidate
+with all centered differences zero is not rejected.
+
+Coverage of at least 95% requires independent, equiprobable signs conditional
+on the centered nonzero magnitudes and zero pattern at the true location. The
+API does not establish those assumptions or measurement provenance, and it does
+not alter the existing regression gate.
+
+`gate_signed_rank_confidence` compares the complete confidence set against a
+maximum candidate-minus-baseline difference in the same units. It passes only
+if every retained location is at or below the threshold and reports a regression
+only if every retained location is strictly above it. Empty or nonseparating
+sets are inconclusive; open, closed, and unbounded endpoints retain their exact
+meaning. The gate preserves the set and inherits its stated assumptions.
+
+## Tied Walsh point estimates
+
+`walsh_pseudomedian` returns the Hodges–Lehmann point estimate for up to 32
+caller-provided integer paired differences, retaining zeros and tied Walsh
+averages with their full multiplicity. The result is scaled by four so even
+medians and half-unit Walsh averages are exact. It uses bounded stack storage
+and returns an explicit error for empty or oversized input. It does not return a
+confidence interval or regression decision and does not establish measurement
+provenance.

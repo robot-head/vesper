@@ -13,13 +13,22 @@
 #![forbid(unsafe_code)]
 mod arithmetic;
 pub mod causal;
+pub mod contract;
+pub mod contract_gate;
 mod execution;
+mod hodges_lehmann;
 pub mod layout;
+mod signed_rank_confidence;
 mod statistics;
+mod walsh;
 pub mod wire;
 pub use arithmetic::*;
 pub use execution::*;
+pub use signed_rank_confidence::*;
+
+pub use hodges_lehmann::*;
 pub use statistics::*;
+pub use walsh::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -34,6 +43,7 @@ pub enum Error {
     InvalidThreshold,
     InvalidCounterWidth,
     CounterValueOutOfRange,
+    TiedObservations,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

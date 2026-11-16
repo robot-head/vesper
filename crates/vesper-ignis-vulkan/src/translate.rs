@@ -485,4 +485,104 @@ mod tests {
             S2::NONE
         );
     }
+
+    #[test]
+    fn sync_and_access_tables_match_lean_model_constants() {
+        // Verifies exact raw `VkPipelineStageFlags2` / `VkAccessFlags2` values modeled in
+        // `lean/IgnisTriBackendEquiv.lean`.
+        assert_eq!(stages(Sync::ALL).unwrap().as_raw(), 0x10000);
+        assert_eq!(
+            stages(Sync::VERTEX_SHADING).unwrap().as_raw(),
+            0x20_0000_0008
+        );
+        assert!(
+            stages(Sync::VERTEX_SHADING)
+                .unwrap()
+                .contains(S2::VERTEX_ATTRIBUTE_INPUT | S2::VERTEX_SHADER)
+        );
+        assert_eq!(stages(Sync::PIXEL_SHADING).unwrap().as_raw(), 0x80);
+        assert_eq!(stages(Sync::DEPTH_STENCIL).unwrap().as_raw(), 0x300);
+        assert_eq!(stages(Sync::RENDER_TARGET).unwrap().as_raw(), 0x400);
+        assert_eq!(stages(Sync::COMPUTE_SHADING).unwrap().as_raw(), 0x800);
+        assert_eq!(stages(Sync::COPY).unwrap().as_raw(), 0x9_0000_0000);
+        assert_eq!(stages(Sync::ALL_SHADING).unwrap().as_raw(), 0x60_0000_0880);
+        assert!(
+            stages(Sync::ALL_SHADING)
+                .unwrap()
+                .contains(S2::VERTEX_ATTRIBUTE_INPUT)
+        );
+
+        assert_eq!(
+            accesses(Access::NO_ACCESS, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x0
+        );
+        assert_eq!(
+            accesses(Access::VERTEX_BUFFER, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x4
+        );
+        assert_eq!(
+            accesses(Access::CONSTANT_BUFFER, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x8
+        );
+        assert_eq!(
+            accesses(Access::INDEX_BUFFER, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x2
+        );
+        assert_eq!(
+            accesses(Access::RENDER_TARGET, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x180
+        );
+        assert_eq!(
+            accesses(Access::UNORDERED_ACCESS, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x6_0000_0000
+        );
+        assert_eq!(
+            accesses(Access::DEPTH_STENCIL_WRITE, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x600
+        );
+        assert_eq!(
+            accesses(Access::DEPTH_STENCIL_READ, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x200
+        );
+        assert_eq!(
+            accesses(Access::SHADER_RESOURCE, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x3_0000_0000
+        );
+        assert_eq!(
+            accesses(Access::INDIRECT_ARGUMENT, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x1
+        );
+        assert_eq!(
+            accesses(Access::COPY_DEST, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x1000
+        );
+        assert_eq!(
+            accesses(Access::COPY_SOURCE, S2::ALL_COMMANDS)
+                .unwrap()
+                .as_raw(),
+            0x800
+        );
+    }
 }

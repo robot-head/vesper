@@ -48,6 +48,192 @@ pub fn mann_whitney_ranks(first: &[u64], second: &[u64]) -> Result<MannWhitneyRa
     }
     Ok(result)
 }
+
+/// Exact two-sided permutation probability as an unreduced fraction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExactMannWhitney {
+    pub u_first: u64,
+    pub numerator: u128,
+    pub denominator: u128,
+}
+
+/// Exact no-ties Mann–Whitney permutation probability, with a two-sided
+/// probability defined as twice the smaller inclusive tail, capped at one.
+/// Each sample has at most 32 observations. Any repeated observation, including
+/// repetitions within one sample, is rejected: this distribution is untied.
+/// Inference assumes observations are exchangeable under the null hypothesis;
+/// paired ABBA epochs do not automatically meet that assumption. This function
+/// does not run the paired regression gate or produce a confidence interval.
+pub fn mann_whitney_exact(first: &[u64], second: &[u64]) -> Result<ExactMannWhitney, Error> {
+    if first.is_empty() || second.is_empty() {
+        return Err(Error::EmptyEvidence);
+    }
+    if first.len() > 32 || second.len() > 32 {
+        return Err(Error::Limit("exact rank sample size"));
+    }
+    let (n, m) = (first.len(), second.len());
+    let mut observations = [0u64; 64];
+    observations[..n].copy_from_slice(first);
+    observations[n..n + m].copy_from_slice(second);
+    observations[..n + m].sort_unstable();
+    if observations[..n + m]
+        .windows(2)
+        .any(|pair| pair[0] == pair[1])
+    {
+        return Err(Error::TiedObservations);
+    }
+
+    let ranks = mann_whitney_ranks(first, second)?;
+    let observed =
+        usize::try_from(ranks.twice_u_first / 2).map_err(|_| Error::ArithmeticOverflow)?;
+    let max_u = n * m;
+    let width = max_u + 1;
+    let cells = (m + 1) * width;
+    let mut previous = Vec::new();
+    previous
+        .try_reserve_exact(cells)
+        .map_err(|_| Error::AllocationFailed)?;
+    previous.resize(cells, 0u128);
+    let mut current = Vec::new();
+    current
+        .try_reserve_exact(cells)
+        .map_err(|_| Error::AllocationFailed)?;
+    current.resize(cells, 0u128);
+    // For zero first-sample observations, each second-sample prefix has U=0.
+    for j in 0..=m {
+        previous[j * width] = 1;
+    }
+    for i in 1..=n {
+        current.fill(0);
+        current[0] = 1;
+        for j in 1..=m {
+            for u in 0..=i * j {
+                let from_second = current[(j - 1) * width + u];
+                let from_first = if u >= j {
+                    previous[j * width + u - j]
+                } else {
+                    0
+                };
+                current[j * width + u] = from_second
+                    .checked_add(from_first)
+                    .ok_or(Error::ArithmeticOverflow)?;
+            }
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    let distribution = &previous[m * width..(m + 1) * width];
+    let mut denominator = 0u128;
+    let mut tail = 0u128;
+    let tail_limit = observed.min(max_u - observed);
+    for (u, &count) in distribution.iter().enumerate() {
+        denominator = denominator
+            .checked_add(count)
+            .ok_or(Error::ArithmeticOverflow)?;
+        if u <= tail_limit {
+            tail = tail.checked_add(count).ok_or(Error::ArithmeticOverflow)?;
+        }
+    }
+    let numerator = tail
+        .checked_mul(2)
+        .ok_or(Error::ArithmeticOverflow)?
+        .min(denominator);
+    Ok(ExactMannWhitney {
+        u_first: observed as u64,
+        numerator,
+        denominator,
+    })
+}
+
+/// Exact two-sided permutation probability using doubled pooled midranks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExactTiedMannWhitney {
+    pub twice_u_first: u64,
+    pub numerator: u128,
+    pub denominator: u128,
+}
+
+/// Compute the exact conditional permutation probability, including tied
+/// observations. Each of the at most 64 pooled observations is treated as a
+/// distinguishable assignment even when values tie. Ties receive pooled
+/// midranks, represented doubled. Both inclusive tails are counted separately;
+/// the two-sided probability is twice the smaller tail, capped at one.
+///
+/// Each sample is limited to 32 observations; the bounded dynamic program uses
+/// fallible scratch allocation. This inference assumes exchangeability under
+/// the null. It is not a paired ABBA test, confidence interval or gate.
+pub fn mann_whitney_exact_with_ties(
+    first: &[u64],
+    second: &[u64],
+) -> Result<ExactTiedMannWhitney, Error> {
+    if first.is_empty() || second.is_empty() {
+        return Err(Error::EmptyEvidence);
+    }
+    if first.len() > 32 || second.len() > 32 {
+        return Err(Error::Limit("exact rank sample size"));
+    }
+    let (n, m) = (first.len(), second.len());
+    let total_count = n + m;
+    let mut pooled = [0u64; 64];
+    pooled[..n].copy_from_slice(first);
+    pooled[n..total_count].copy_from_slice(second);
+    pooled[..total_count].sort_unstable();
+
+    let width = 2 * n * total_count + 1;
+    let cells = (n + 1) * width;
+    let mut counts = Vec::new();
+    counts
+        .try_reserve_exact(cells)
+        .map_err(|_| Error::AllocationFailed)?;
+    counts.resize(cells, 0u128);
+    counts[0] = 1;
+    let mut processed = 0;
+    let mut start = 0;
+    while start < total_count {
+        let mut end = start + 1;
+        while end < total_count && pooled[end] == pooled[start] {
+            end += 1;
+        }
+        // Ranks are 1-based; `end` is also the last 1-based rank.
+        let doubled_rank = start + 1 + end;
+        for _ in start..end {
+            processed += 1;
+            for selected in (1..=n.min(processed)).rev() {
+                for sum in doubled_rank..width {
+                    let add = counts[(selected - 1) * width + sum - doubled_rank];
+                    let cell = &mut counts[selected * width + sum];
+                    *cell = cell.checked_add(add).ok_or(Error::ArithmeticOverflow)?;
+                }
+            }
+        }
+        start = end;
+    }
+    let twice_u_first = mann_whitney_ranks(first, second)?.twice_u_first;
+    let observed =
+        usize::try_from(twice_u_first).map_err(|_| Error::ArithmeticOverflow)? + n * (n + 1);
+    let distribution = &counts[n * width..(n + 1) * width];
+    let (mut lower, mut upper, mut denominator) = (0u128, 0u128, 0u128);
+    for (sum, &count) in distribution.iter().enumerate() {
+        denominator = denominator
+            .checked_add(count)
+            .ok_or(Error::ArithmeticOverflow)?;
+        if sum <= observed {
+            lower = lower.checked_add(count).ok_or(Error::ArithmeticOverflow)?;
+        }
+        if sum >= observed {
+            upper = upper.checked_add(count).ok_or(Error::ArithmeticOverflow)?;
+        }
+    }
+    let numerator = lower
+        .min(upper)
+        .checked_mul(2)
+        .ok_or(Error::ArithmeticOverflow)?
+        .min(denominator);
+    Ok(ExactTiedMannWhitney {
+        twice_u_first,
+        numerator,
+        denominator,
+    })
+}
 /// Positive elapsed totals, with equal operation counts for the two arms.
 /// This may also represent synthetic statistical test data, not measured cycles.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

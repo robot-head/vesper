@@ -27,6 +27,157 @@ fn bad(bytes: &[u8]) {
     );
 }
 #[test]
+fn utf8_string_is_strict_borrowed_and_transactional() {
+    let wire = b"\x0c\x06h\xc3\xa9\xf0\x9f\x8c"; // truncated four-byte character
+    assert_eq!(
+        parse_exact(wire, &Schema::Utf8String, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Utf8String
+    );
+    let wire = b"\x0c\x07h\xc3\xa9\xf0\x9f\x8c\x8d";
+    let doc = parse_exact(wire, &Schema::Utf8String, Limits::default()).unwrap();
+    assert_eq!(doc.root().utf8_string(), Some("hé🌍"));
+    assert_eq!(
+        doc.root().utf8_string().unwrap().as_ptr(),
+        wire[2..].as_ptr()
+    );
+    assert_eq!(encode(&Value::Utf8String("hé🌍"), &Schema::Any), wire);
+    identity(wire, &Schema::Utf8String);
+    identity(b"\x0c\x00", &Schema::Any);
+    for bytes in [
+        &b"\x0c\x02\xc0\x80"[..],
+        &b"\x0c\x03\xed\xa0\x80"[..],
+        &b"\x0c\x01\xff"[..],
+    ] {
+        assert_eq!(
+            parse_exact(bytes, &Schema::Any, Limits::default())
+                .unwrap_err()
+                .kind,
+            ErrorKind::Utf8String
+        );
+    }
+    assert_eq!(
+        parse_exact(b"\x2c\x00", &Schema::Any, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Constructed
+    );
+    assert_eq!(
+        parse_exact(wire, &Schema::OctetString, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::SchemaMismatch
+    );
+    let mut output = [0xa5; 3];
+    assert_eq!(
+        encode_into(
+            &Value::Utf8String("hello"),
+            &Schema::Utf8String,
+            &mut output,
+            Limits::default()
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::OutputTooSmall
+    );
+    assert_eq!(output, [0xa5; 3]);
+    let limits = Limits {
+        max_value_bytes: 1,
+        ..Limits::default()
+    };
+    assert_eq!(
+        parse_exact(wire, &Schema::Any, limits).unwrap_err().kind,
+        ErrorKind::ValueLimit
+    );
+}
+#[test]
+fn ia5_string_requires_ascii_and_preserves_output_on_failure() {
+    let wire = b"\x16\x05a@b.c";
+    let doc = parse_exact(wire, &Schema::Ia5String, Limits::default()).unwrap();
+    assert_eq!(doc.root().ia5_string(), Some("a@b.c"));
+    assert_eq!(
+        doc.root().ia5_string().unwrap().as_ptr(),
+        wire[2..].as_ptr()
+    );
+    assert_eq!(encode(&Value::Ia5String("a@b.c"), &Schema::Any), wire);
+    identity(wire, &Schema::Ia5String);
+    identity(b"\x16\x00", &Schema::Any);
+    assert_eq!(
+        parse_exact(b"\x16\x02\xc3\xa9", &Schema::Any, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Ia5String
+    );
+    assert_eq!(
+        parse_exact(b"\x36\x00", &Schema::Any, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Constructed
+    );
+    assert_eq!(
+        parse_exact(wire, &Schema::Utf8String, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::SchemaMismatch
+    );
+    let mut out = [0xa5; 32];
+    assert_eq!(
+        encode_into(
+            &Value::Ia5String("é"),
+            &Schema::Ia5String,
+            &mut out,
+            Limits::default()
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::Ia5String
+    );
+    assert_eq!(out, [0xa5; 32]);
+}
+#[test]
+fn printable_string_enforces_the_asn1_alphabet() {
+    let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 '()+,-./:=?";
+    let bytes = encode(&Value::PrintableString(alphabet), &Schema::PrintableString);
+    let doc = parse_exact(&bytes, &Schema::PrintableString, Limits::default()).unwrap();
+    assert_eq!(doc.root().printable_string(), Some(alphabet));
+    assert_eq!(
+        doc.root().printable_string().unwrap().as_ptr(),
+        bytes[2..].as_ptr()
+    );
+    identity(&bytes, &Schema::Any);
+    for b in 0..=255u8 {
+        let wire = [19, 1, b];
+        let result = parse_exact(&wire, &Schema::PrintableString, Limits::default());
+        assert_eq!(result.is_ok(), alphabet.as_bytes().contains(&b), "byte {b}");
+    }
+    assert_eq!(
+        parse_exact(b"\x33\x00", &Schema::Any, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Constructed
+    );
+    assert_eq!(
+        parse_exact(&bytes, &Schema::Ia5String, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::SchemaMismatch
+    );
+    let mut out = [0xa5; 16];
+    assert_eq!(
+        encode_into(
+            &Value::PrintableString("@"),
+            &Schema::PrintableString,
+            &mut out,
+            Limits::default()
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::PrintableString
+    );
+    assert_eq!(out, [0xa5; 16]);
+}
+#[test]
 fn independent_x690_primitives_and_rfc3279_algorithm_identifier() {
     // X.690 DER primitive canonical forms, and RFC3279§2.3.1 rsaEncryption
     // AlgorithmIdentifier (OID1.2.840.113549.1.1.1 plus required NULL).
@@ -194,8 +345,6 @@ fn definite_length_minimal_tags_unknowns_and_boundary_lengths() {
         &[0x1f, 0x1f, 0][..],
         &[0x80, 0],
         &[0xa0, 0],
-        &[0x0c, 1, b'a'],
-        &[0x13, 1, b'a'],
         &[0x17, 0],
         &[0x18, 0],
     ] {
@@ -745,7 +894,11 @@ fn exhaustive_small_length_forms_and_all_tag_octets() {
     for tag in 0..=255u8 {
         let bytes = [tag, 0];
         let accepted = parse_exact(&bytes, &Schema::Any, Limits::default()).is_ok();
-        assert_eq!(accepted, matches!(tag, 4 | 5 | 0x30), "{tag:02x}");
+        assert_eq!(
+            accepted,
+            matches!(tag, 4 | 5 | 12 | 19 | 22 | 0x30),
+            "{tag:02x}"
+        );
     }
 }
 #[test]

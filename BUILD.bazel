@@ -80,6 +80,11 @@ vesper_crate(
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
+        # Same serial Std kernel-replay pattern as proof_audit_cli and format_proof_cli.
+        "test/verify_extract_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
         "test/oracle42_acceptance": select({
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
@@ -167,6 +172,7 @@ vesper_crate(
     # while allowing the complete target 900 seconds on slower macOS runners.
     test_timeouts = {
         "test/format_proof_cli": "long",
+        "test/verify_extract_cli": "long",
         # Fresh replay covers both complete model import closures.
         "test/logos42_acceptance": "eternal",
         "test/oracle42_acceptance": "long",
@@ -176,6 +182,8 @@ vesper_crate(
         # Runs the Vesper-source front end on every repository source; about
         # 2.5 min on a 4-core Linux host, over 300 s on the macOS runner.
         "test/self_host_front_end": "long",
+        # The Vesper-source checker corpus and JIT checks exceed 300 s on macOS.
+        "test/self_host_check": "long",
     },
 )
 # Narrow slices of the root package for members that read them.
@@ -188,5 +196,11 @@ filegroup(
 filegroup(
     name = "lean",
     srcs = glob(["lean/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "website",
+    srcs = glob(["website/**"]),
     visibility = ["//visibility:public"],
 )

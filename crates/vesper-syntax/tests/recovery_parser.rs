@@ -3,6 +3,26 @@ use vesper_syntax::{
     recovery::{DeclarationStatus as DS, Limits, SiteKind},
 };
 #[test]
+fn public_fields_preserve_tiled_temperature() {
+    let source = "tiled(8) struct Particle { pub hot x: u64, pub cold y: u64, pub: u64 }";
+    let parsed = parser::parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    assert_eq!(parsed.syntax().text().to_string(), source);
+    let vesper_syntax::ast::Item::Adt(adt) = &parsed.module.items[0] else {
+        panic!()
+    };
+    let fields = &adt.variants[0].fields;
+    assert_eq!(
+        fields[0].temperature,
+        Some(vesper_syntax::ast::FieldTemperature::Hot)
+    );
+    assert_eq!(
+        fields[1].temperature,
+        Some(vesper_syntax::ast::FieldTemperature::Cold)
+    );
+    assert_eq!(fields[2].name, "pub");
+}
+#[test]
 fn compound_bitwise_assignments_are_lossless_single_tokens() {
     use vesper_syntax::lexer::{TokenKind, lex};
 
@@ -97,13 +117,17 @@ fn statement_anchors_continue_after_missing_member_without_exposing_partial_ast(
     assert!(parser::parse_complete_items(&r, &[0], Limits::default()).is_err());
 }
 #[test]
-fn unsupported_pub_function_prefix_stays_an_explicit_opaque_context() {
-    let r = parser::parse_recovery("pub fn f(){} fn g(){}", Limits::default()).unwrap();
-    assert_eq!(r.declarations()[0].status, DS::Opaque);
+fn public_function_is_a_complete_recoverable_declaration() {
+    let source = "pub fn f(){} fn g(){}";
+    let r = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(r.syntax().text().to_string(), source);
+    assert_eq!(r.declarations()[0].status, DS::Complete);
     assert_eq!(
         r.declarations()[0].kind,
-        vesper_syntax::recovery::DeclarationKind::Other
+        vesper_syntax::recovery::DeclarationKind::Function
     );
+    assert_eq!(&source[r.declarations()[0].span.clone()], "pub fn f(){}");
+    assert!(parser::parse_complete_items(&r, &[0], Limits::default()).is_ok());
 }
 #[test]
 fn mode_prefixed_types_and_unambiguous_function_siblings_have_valid_inventory() {
@@ -316,4 +340,85 @@ fn every_original_prefix_of_contextual_sources_remains_lossless() {
             assert_eq!(r.syntax().text().to_string(), prefix);
         }
     }
+}
+
+#[test]
+fn public_functions_parse_losslessly_and_recover_after_damage() {
+    let source =
+        "pub /* visibility */ fn first(x: u64)->u64 { x }\npub fn broken(){tx.}\nfn last(){1}";
+    let batch = parser::parse("pub /* visibility */ fn first(x: u64)->u64 { x }");
+    assert!(batch.diagnostics.is_empty(), "{:?}", batch.diagnostics);
+    let vesper_syntax::ast::Item::Function(f) = &batch.module.items[0] else {
+        panic!()
+    };
+    assert_eq!(f.span.start, 0);
+    assert_eq!(
+        batch.syntax().text().to_string(),
+        "pub /* visibility */ fn first(x: u64)->u64 { x }"
+    );
+    let recovered = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(recovered.syntax().text().to_string(), source);
+    assert_eq!(recovered.declarations().len(), 3);
+    assert_eq!(recovered.declarations()[0].status, DS::Complete);
+    assert_eq!(recovered.declarations()[1].status, DS::Recovered);
+    assert_eq!(recovered.declarations()[2].status, DS::Complete);
+}
+
+#[test]
+fn public_adts_and_effects_parse_and_recover_with_usage_modes() {
+    let source = "pub struct Pair { left: u64, right: u64 }\npub linear enum Resultish { Good(u64), Bad }\npub linear effect Storage { fn read()->u64; }\nfn tail(){}";
+    let batch = parser::parse(source);
+    assert!(batch.diagnostics.is_empty(), "{:?}", batch.diagnostics);
+    assert_eq!(batch.syntax().text().to_string(), source);
+    let recovered = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(recovered.syntax().text().to_string(), source);
+    assert_eq!(recovered.declarations().len(), 4);
+    for declaration in recovered.declarations() {
+        assert_eq!(declaration.status, DS::Complete);
+    }
+    let module =
+        parser::parse_complete_items(&recovered, &[0, 1, 2, 3], Limits::default()).unwrap();
+    assert_eq!(module, batch.module);
+    assert!(source[recovered.declarations()[0].span.clone()].starts_with("pub struct"));
+    assert!(source[recovered.declarations()[1].span.clone()].starts_with("pub linear enum"));
+    assert!(source[recovered.declarations()[2].span.clone()].starts_with("pub linear effect"));
+}
+
+#[test]
+fn malformed_public_adt_retains_following_declarations() {
+    let source = "pub struct Broken { value: }\npub enum Good { Value }\nfn tail(){}";
+    let recovered = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(recovered.syntax().text().to_string(), source);
+    assert_eq!(recovered.declarations().len(), 3);
+    assert_ne!(recovered.declarations()[0].status, DS::Complete);
+    assert_eq!(recovered.declarations()[1].status, DS::Complete);
+    assert_eq!(recovered.declarations()[2].status, DS::Complete);
+}
+
+#[test]
+fn public_fields_and_a_field_named_pub_are_lossless() {
+    let source = "pub struct Record { pub visible: u64, pub: u64 }\npub enum Message { Data { pub value: u64, pub: u64 } }";
+    let parsed = parser::parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    assert_eq!(parsed.syntax().text().to_string(), source);
+    let vesper_syntax::ast::Item::Adt(record) = &parsed.module.items[0] else {
+        panic!()
+    };
+    assert_eq!(record.variants[0].fields[0].name, "visible");
+    assert_eq!(record.variants[0].fields[1].name, "pub");
+    let vesper_syntax::ast::Item::Adt(message) = &parsed.module.items[1] else {
+        panic!()
+    };
+    assert_eq!(message.variants[0].fields[0].name, "value");
+    assert_eq!(message.variants[0].fields[1].name, "pub");
+    let recovered = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(recovered.syntax().text().to_string(), source);
+    assert!(
+        recovered
+            .declarations()
+            .iter()
+            .all(|d| d.status == DS::Complete)
+    );
+    let rebuilt = parser::parse_complete_items(&recovered, &[0, 1], Limits::default()).unwrap();
+    assert_eq!(rebuilt, parsed.module);
 }

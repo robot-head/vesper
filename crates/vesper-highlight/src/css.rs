@@ -76,7 +76,7 @@ pub fn stylesheet() -> String {
     vars(&dawn, &mut s);
     s.push_str("}}");
     s.push_str(concat!(
-        ".vc{background:var(--vc-bg-card);color:var(--vc-fg-primary)}",
+        ".vc{white-space:pre;background:var(--vc-bg-card);color:var(--vc-fg-primary)}",
         ".vc-k{color:var(--vc-keyword)}",
         ".vc-m,.vc-s,.vc-l{color:var(--vc-linear)}",
         ".vc-io,.vc-fm{color:var(--vc-inout)}",
@@ -86,6 +86,8 @@ pub fn stylesheet() -> String {
         ".vc-c,.vc-gutter{color:var(--vc-comment)}",
         ".vc-lin-live{text-decoration:underline wavy var(--vc-linear) 1.5px;text-underline-offset:4px}",
         ".vc-gutter,.vc-twoslash-pin{user-select:none}",
+        ".vc-cr{font-size:0;line-height:0}",
+        ".vc-cr-br::after{content:\"\\A\"}",
     ));
     s
 }

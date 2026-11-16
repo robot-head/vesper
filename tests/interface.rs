@@ -190,3 +190,34 @@ fn nominal_row_arguments_fail_closed() {
         export("copy struct Container[r: eff] {} fn inspect[r: eff](x: Container[r]) {}");
     assert_unknown(&interface);
 }
+
+#[test]
+fn explicit_public_function_has_the_existing_public_interface() {
+    let explicit = export("pub fn id(x: i64) -> i64 { x }");
+    let implicit = export("fn id(x: i64) -> i64 { x }");
+    assert_eq!(explicit, implicit);
+    assert_eq!(
+        function(&explicit, "id").result,
+        Type::Primitive {
+            name: api::Primitive::I64
+        }
+    );
+}
+
+#[test]
+fn explicitly_public_adts_and_effects_keep_existing_interfaces() {
+    let explicit = export(
+        "pub copy struct Pair { a: u64 } pub linear enum Choice { A(u64), B } pub linear effect Store { fn read()->u64; }",
+    );
+    let implicit = export(
+        "copy struct Pair { a: u64 } linear enum Choice { A(u64), B } linear effect Store { fn read()->u64; }",
+    );
+    assert_eq!(explicit, implicit);
+}
+
+#[test]
+fn explicitly_public_fields_keep_existing_public_interface() {
+    let explicit = export("pub copy struct Pair { pub value: u64, pub: u64 }");
+    let implicit = export("copy struct Pair { value: u64, pub: u64 }");
+    assert_eq!(explicit, implicit);
+}

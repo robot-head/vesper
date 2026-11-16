@@ -597,6 +597,24 @@ impl Parser<'_> {
         let mut out = vec![];
         self.expect(K::LBrace);
         while !self.at(K::RBrace) && !self.at(K::Eof) {
+            // `pub` is contextual: `pub: T` remains a field named `pub`.
+            if self.at_word(0, "pub")
+                && ((self.nth(1) == K::Lower && self.nth(2) == K::Colon)
+                    || ((self.at_word(1, "hot") || self.at_word(1, "cold"))
+                        && self.nth(2) == K::Lower
+                        && self.nth(3) == K::Colon))
+            {
+                self.bump();
+            }
+            let temperature = if self.at_word(0, "hot") && self.nth(1) == K::Lower {
+                self.bump();
+                Some(FieldTemperature::Hot)
+            } else if self.at_word(0, "cold") && self.nth(1) == K::Lower {
+                self.bump();
+                Some(FieldTemperature::Cold)
+            } else {
+                None
+            };
             let name = self.lower();
             self.expect(K::Colon);
             let ty = self.ty();
@@ -608,7 +626,12 @@ impl Parser<'_> {
             } else {
                 Mode::Linear
             };
-            out.push(Field { name, ty, modality });
+            out.push(Field {
+                name,
+                ty,
+                modality,
+                temperature,
+            });
             if !self.eat(K::Comma) {
                 break;
             }
@@ -622,8 +645,12 @@ impl Parser<'_> {
             self.use_model(0..self.source.len());
             return None;
         }
-        let public =
-            self.at_word(0, "pub") && (self.at_word(1, "trait") || self.at_word(1, "model"));
+        let public = self.at_word(0, "pub")
+            && (self.at_word(1, "trait")
+                || self.at_word(1, "model")
+                || matches!(self.nth(1), K::Fn | K::Struct | K::Enum | K::Effect)
+                || (matches!(self.nth(1), K::Copy | K::Affine | K::Linear)
+                    && matches!(self.nth(2), K::Struct | K::Enum | K::Effect)));
         if public {
             self.bump();
         }
@@ -633,6 +660,24 @@ impl Parser<'_> {
         if self.at_word(0, "model") {
             return Some(Item::Conformance(self.model_decl(start, public)));
         }
+        let tile_width = if self.at_word(0, "tiled") && self.nth(1) == K::LParen {
+            self.bump();
+            self.expect(K::LParen);
+            let width = if self.at(K::Int) {
+                let digits = self.bump();
+                digits.parse::<u32>().unwrap_or_else(|_| {
+                    self.error("tile width overflows u32");
+                    0
+                })
+            } else {
+                self.error("expected integer tile width (8, 16, 32, or 64)");
+                0
+            };
+            self.expect(K::RParen);
+            Some(width)
+        } else {
+            None
+        };
         // `wire struct` (§13.2, §28.2): a padding-free byte layout. It is a
         // copy struct in the AST; `vesper::tensor_types` checks its layout.
         let mode = if self.at_word(0, "wire") && self.nth(1) == K::Struct {
@@ -641,6 +686,9 @@ impl Parser<'_> {
         } else {
             self.mode().unwrap_or_default()
         };
+        if tile_width.is_some() && !self.at(K::Struct) {
+            self.error("tiled(N) may only annotate a struct declaration");
+        }
         match self.kind() {
             K::Struct => {
                 self.bump();
@@ -657,6 +705,7 @@ impl Parser<'_> {
                         named: true,
                     }],
                     is_enum: false,
+                    tile_width,
                     span: start..self.end(),
                 }))
             }
@@ -678,6 +727,7 @@ impl Parser<'_> {
                                 name: fields.len().to_string(),
                                 ty: self.ty(),
                                 modality: Mode::Linear,
+                                temperature: None,
                             });
                             if !self.eat(K::Comma) {
                                 break;
@@ -704,6 +754,7 @@ impl Parser<'_> {
                     generics,
                     variants,
                     is_enum: true,
+                    tile_width: None,
                     span: start..self.end(),
                 }))
             }
@@ -725,7 +776,13 @@ impl Parser<'_> {
                     span: start..self.end(),
                 }))
             }
-            K::Fn => Some(Item::Function(Box::new(self.function(false)))),
+            K::Fn => {
+                let mut function = self.function(false);
+                if public {
+                    function.span.start = start;
+                }
+                Some(Item::Function(Box::new(function)))
+            }
             K::Impl => {
                 self.bump();
                 let generics = self.generics();
@@ -1858,6 +1915,18 @@ impl Parser<'_> {
                 }
                 K::LBracket => {
                     let named_row = self.nth(1) == K::Lower && self.nth(2) == K::Colon;
+                    let tiled_col_arg = match &e.kind {
+                        ExprKind::Field(_, m) => {
+                            matches!(m.as_str(), "load_tile_vec" | "col_get" | "col_set")
+                        }
+                        ExprKind::Name(n) => matches!(
+                            n.as_str(),
+                            "TiledSeq::load_tile_vec" | "TiledSeq::col_get" | "TiledSeq::col_set"
+                        ),
+                        _ => false,
+                    } && self.nth(1) == K::Lower
+                        && self.nth(2) == K::RBracket
+                        && self.nth(3) == K::LParen;
                     let scoped_row = {
                         let i = self.index(1);
                         let text = &self.source[self.tokens[i].span.clone()];
@@ -1866,6 +1935,7 @@ impl Parser<'_> {
                     };
                     // `Tensor::reshape[[M, N]](x)`: no index expression starts with `[`.
                     let generic = named_row
+                        || tiled_col_arg
                         || scoped_row
                         || self.nth(1) == K::Upper
                         || self.nth(1) == K::LBracket
@@ -2131,7 +2201,7 @@ impl Parser<'_> {
                 }
                 K::Upper => {
                     let mut name = self.upper();
-                    if self.eat(K::ColonColon) {
+                    while self.eat(K::ColonColon) {
                         name.push_str("::");
                         name.push_str(&self.upper());
                     }
