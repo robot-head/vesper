@@ -403,6 +403,7 @@ compile_inputs_test(
     forbidden = [
         "README.md",
         "docs/bazel.md",
+        "examples/native-pulse/ticket_tally.ves",
         "tests/self_host_front_end.rs",
         "MODULE.bazel.lock",
         ".ci-logos-cargo-path",
@@ -430,6 +431,7 @@ test_suite(
     name = "bazel_ci_tests",
     tests = [
         ":compiler_inputs_test",
+        ":example_inputs_test",
         ":frontend_environment_test",
         ":frontend_runfiles_test",
         ":integration_inputs_test",
@@ -468,4 +470,14 @@ runfiles_test(
         "examples/counter.ves",
     ],
     target_under_test = "//:test/self_host_front_end",
+)
+
+compile_inputs_test(
+    name = "example_inputs_test",
+    forbidden = [
+        "docs/bazel.md",
+        "MODULE.bazel.lock",
+    ],
+    required = ["examples/native-pulse/ticket_tally.ves"],
+    target_under_test = "//:example/native-pulse",
 )

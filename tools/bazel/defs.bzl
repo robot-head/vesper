@@ -368,7 +368,12 @@ def vesper_crate(
             **common
         )
 
-    example_files = compile_files if compile_data != None else native.glob(["**"], exclude = _NEVER) + extra_compile_data
+    # Examples may embed fixtures beside nested main.rs entrypoints. Explicit
+    # library compile_data must not hide those example-owned files.
+    if compile_data != None:
+        example_files = compile_files + [f for f in native.glob(["examples/**"], exclude = _NEVER, allow_empty = True) if f not in compile_files]
+    else:
+        example_files = native.glob(["**"], exclude = _NEVER) + extra_compile_data
     example_srcs = native.glob(["examples/**/*.rs"], allow_empty = True)
     for e in examples:
         if not _enabled(e, crate_data):
