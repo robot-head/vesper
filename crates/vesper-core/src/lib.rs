@@ -4,8 +4,8 @@
 //! no checker, lowering, backend, or runtime. The checked World and CFG analyses
 //! remain in the vesper facade until their mutual dependencies are separated.
 pub mod ast;
-pub mod guarded_graph;
 pub mod field_tree;
+pub mod guarded_graph;
 pub mod lifo;
 pub mod modal_kind;
 pub mod mode_vec;
