@@ -1144,3 +1144,57 @@ fn vacuous_false_postcondition_needs_an_impossible_input_witness() {
     args.extend(["--contract-witness", "vacuous=vacuous_input"]);
     reject_json(f.verify(&args), Some("compile"));
 }
+
+#[test]
+fn generic_contract_admission_requires_a_universal_proof_and_type_witness() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(lean) = lean() else { return };
+    let source = "fn choose[T](x: T, flag: bool) -> bool { flag }\nfn ensures_choose[U](x: U, flag: bool, result: bool) -> bool { result == flag }\nfn main() -> u64 { 0 }\n";
+    let f = Fixture::new(source.as_bytes());
+    let proofs = f.root.join("generic.lean");
+    let witness =
+        "theorem choose_input : Vesper.«choose$admissible» := ⟨UInt64, 5, true, trivial⟩\n";
+    fs::write(&proofs, format!("theorem choose_ok : Vesper.«choose$contract» := by intro T x flag; simp [Vesper.ensures_choose, Vesper.choose]\n{witness}")).unwrap();
+    let args = [
+        "--extract",
+        "--proofs",
+        proofs.to_str().unwrap(),
+        "--contract-proof",
+        "choose=choose_ok",
+        "--contract-witness",
+        "choose=choose_input",
+        "--allow-axiom",
+        "propext",
+        "--allow-axiom",
+        "Classical.choice",
+        "--allow-axiom",
+        "Quot.sound",
+        "--lean",
+        lean.to_str().unwrap(),
+        "--timeout",
+        "300",
+        "--json",
+    ];
+    let accepted = f.verify(&args);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stdout)
+    );
+    let report: Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(
+        report["checked_contracts"],
+        serde_json::json!({"choose": "choose_ok"})
+    );
+    assert_eq!(
+        report["checked_preconditions"],
+        serde_json::json!({"choose": "choose_input"})
+    );
+
+    let wrong = Fixture::new(source.replace("{ flag }", "{ false }").as_bytes());
+    reject_json(wrong.verify(&args), Some("compile"));
+
+    // A valid theorem for UInt64 does not prove the contract for every type.
+    fs::write(&proofs, format!("theorem choose_ok : ∀ (x : UInt64) (flag : Bool), Vesper.ensures_choose x flag (Vesper.choose x flag) = true := by intro x flag; simp [Vesper.ensures_choose, Vesper.choose]\n{witness}")).unwrap();
+    reject_json(f.verify(&args), Some("compile"));
+}

@@ -1,0 +1,75 @@
+struct Tagged[T] {
+    payload: T,
+    tag: u64,
+}
+
+fn tag[T](value: Tagged[T]) -> u64 {
+    value.tag
+}
+fn requires_tag[A](before: Tagged[A]) -> bool {
+    before.tag < 100
+}
+fn ensures_tag[B](before: Tagged[B], result: u64) -> bool {
+    result == before.tag
+}
+
+fn package[T](sink payload: T, stamp: u64) -> Tagged[T] {
+    Tagged {
+        payload: payload,
+        tag: stamp
+    }
+}
+fn ensures_package[U](payload: U, stamp: u64, result: Tagged[U]) -> bool {
+    result.tag == stamp
+}
+
+fn copy_flag[T: mod copy](value: T, flag: bool) -> bool {
+    flag
+}
+fn ensures_copy_flag[U: mod copy](value: U, flag: bool, result: bool) -> bool {
+    result == flag
+}
+
+fn second[T, U](first: T, value: U, flag: bool) -> bool {
+    flag
+}
+fn ensures_second[A, B](first: A, value: B, flag: bool, result: bool) -> bool {
+    result == flag
+}
+
+fn phantom[T](flag: bool) -> bool {
+    flag
+}
+fn ensures_phantom[U](flag: bool, result: bool) -> bool {
+    result == flag
+}
+
+fn checked_tag[T](value: Tagged[T]) -> u64 eff [Fail[ArithOverflow]] {
+    value.tag + 1
+}
+fn requires_checked_tag[A](before: Tagged[A]) -> bool {
+    before.tag < 100
+}
+fn ensures_checked_tag[B](before: Tagged[B], result: u64) -> bool {
+    result == wrapping_add(before.tag, 1)
+}
+
+fn countdown[T](token: T, n: u64) -> u64 {
+    if n == 0 {
+        0
+    } else {
+        countdown(token, wrapping_sub(n, 1))
+    }
+}
+fn ensures_countdown[U](token: U, n: u64, result: u64) -> bool {
+    result == 0
+}
+
+fn main() -> u64 {
+    tag(
+        Tagged {
+            payload: true,
+            tag: 42
+        }
+    )
+}

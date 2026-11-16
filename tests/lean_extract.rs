@@ -219,6 +219,65 @@ fn contracts_are_lean_propositions() {
     );
 }
 
+#[test]
+fn generic_contracts_quantify_types_and_instantiate_renamed_predicates() {
+    let (source, proofs) = fixture!("generic_contracts");
+    let report = lean::extract_report(&world(source)).unwrap();
+    assert_eq!(
+        report.contracts,
+        [
+            "checked_tag",
+            "copy_flag",
+            "countdown",
+            "package",
+            "phantom",
+            "second",
+            "tag"
+        ]
+    );
+    proves(
+        source,
+        proofs,
+        &[
+            ("tag", Totality::Total),
+            ("package", Totality::Total),
+            ("copy_flag", Totality::Total),
+            ("second", Totality::Total),
+            ("phantom", Totality::Total),
+            ("checked_tag", Totality::Total),
+            ("countdown", Totality::Fuel),
+        ],
+        "42",
+    );
+}
+
+#[test]
+fn generic_contracts_reject_incompatible_predicate_parameters() {
+    for post in [
+        "fn ensures_f(x: u64, result: bool) -> bool { true }",
+        "fn ensures_f[A, B](x: A, result: bool) -> bool { true }",
+        "fn ensures_f[A: mod copy](x: A, result: bool) -> bool { true }",
+        "fn ensures_f[A](x: u64, result: bool) -> bool { true }",
+    ] {
+        assert!(matches!(
+            contract_error(&format!("fn f[T](x: T) -> bool {{ true }} {post} fn main() -> u64 {{ 0 }}")),
+            ContractError::Signature { function, .. } if function == "f"
+        ));
+    }
+    assert!(matches!(
+        contract_error("fn f[T](x: T) -> bool { true } fn requires_f(x: u64) -> bool { true } fn ensures_f[U](x: U, result: bool) -> bool { true } fn main() -> u64 { 0 }"),
+        ContractError::Signature { function, .. } if function == "f"
+    ));
+    assert!(matches!(
+        contract_error("fn f[T, U](x: T, y: U) -> bool { true } fn ensures_f[A, B](x: B, y: A, result: bool) -> bool { true } fn main() -> u64 { 0 }"),
+        ContractError::Signature { function, .. } if function == "f"
+    ));
+    assert!(matches!(
+        contract_error("fn f[e: eff](x: u64) -> bool eff [e] { true } fn ensures_f(x: u64, result: bool) -> bool { true } fn main() -> u64 { 0 }"),
+        ContractError::Unsupported { function, .. } if function == "f"
+    ));
+}
+
 fn contract_error(source: &str) -> ContractError {
     match lean::extract_report(&world(source)) {
         Err(ExtractError::Contract(e)) => e,

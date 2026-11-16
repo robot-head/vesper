@@ -1054,8 +1054,8 @@ fn contract(
     for predicate in requires.into_iter().chain([ensures]) {
         let reason = if effectful_function(predicate) {
             Some("it must have no effects")
-        } else if !predicate.generics.is_empty() {
-            Some("it must not be generic")
+        } else if predicate.generics.iter().any(|g| g.row) {
+            Some("it must not have row parameters")
         } else if predicate.result != Type::Named("bool".into(), vec![]) {
             Some("it must return bool")
         } else if predicate.params.iter().any(|p| p.pass == Pass::Inout) {
@@ -1072,9 +1072,9 @@ fn contract(
             });
         }
     }
-    if !f.generics.is_empty() {
+    if f.generics.iter().any(|g| g.row) {
         return Err(unsupported(
-            "generic functions have no contract proposition",
+            "row-polymorphic functions have no contract proposition",
         ));
     }
     if f.params.iter().any(|p| p.pass == Pass::Inout) {
@@ -1084,8 +1084,33 @@ fn contract(
     }
     let types = f.params.iter().map(|p| &p.ty).collect::<Vec<_>>();
     let signature = |predicate: &Function, expected: Vec<&Type>| {
-        let actual = predicate.params.iter().map(|p| &p.ty).collect::<Vec<_>>();
-        if actual == expected {
+        if predicate.generics.len() != f.generics.len()
+            || predicate
+                .generics
+                .iter()
+                .zip(&f.generics)
+                .any(|(p, g)| p.bound != g.bound)
+        {
+            return Err(ContractError::Signature {
+                function: function.clone(),
+                reason: format!(
+                    "'{}' must have the function's type parameters and mode bounds in order",
+                    predicate.name
+                ),
+            });
+        }
+        let variables = predicate
+            .generics
+            .iter()
+            .zip(&f.generics)
+            .map(|(p, g)| (p.name.clone(), Type::named(&g.name)))
+            .collect();
+        let actual = predicate
+            .params
+            .iter()
+            .map(|p| substitute(&p.ty, &variables))
+            .collect::<Vec<_>>();
+        if actual.iter().eq(expected.iter().copied()) {
             Ok(())
         } else {
             Err(ContractError::Signature {
@@ -1131,7 +1156,12 @@ fn contract(
         }
         None => return Err(unsupported("unknown function")),
     };
-    let mut binders = vec![];
+    let mut binders = f
+        .generics
+        .iter()
+        .map(|g| Ok(explicit(ident(&g.name)?, type0())))
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(internal)?;
     let mut args = vec![];
     for p in &f.params {
         let name = ident(&format!("{}$arg", p.name)).map_err(internal)?;
@@ -1147,6 +1177,12 @@ fn contract(
         (Some(e), true) => Some(app(global(&["ExceptT"]), [e.clone(), global(&["Option"])])),
     };
     let mut call_args = vec![];
+    for g in &f.generics {
+        call_args.push(Argument::Named {
+            name: ident(&g.name).map_err(internal)?,
+            value: source_ref(&g.name).map_err(internal)?,
+        });
+    }
     if let Some(model) = &model {
         call_args.push(Argument::Named {
             name: fixed("m"),
@@ -1171,9 +1207,25 @@ fn contract(
     let holds = |predicate: &Function, extra: Option<Term>| -> Result<Term, ContractError> {
         let mut values = args.clone();
         values.extend(extra);
+        let mut arguments = predicate
+            .generics
+            .iter()
+            .zip(&f.generics)
+            .map(|(p, g)| {
+                Ok(Argument::Named {
+                    name: ident(&p.name)?,
+                    value: source_ref(&g.name)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()
+            .map_err(internal)?;
+        arguments.extend(values.into_iter().map(Argument::Positional));
         Ok(Term::binary(
             BinaryOp::Eq,
-            app(source_ref(&predicate.name).map_err(internal)?, values),
+            Term::App {
+                function: Box::new(source_ref(&predicate.name).map_err(internal)?),
+                arguments,
+            },
             Term::Bool(true),
         ))
     };
