@@ -221,7 +221,7 @@ fn measure(root: &Path, work: &Path, target: &str, seed: &[u8]) -> Result<Stage1
                             .map_err(|e| e.to_string())?;
                         }
                     }
-                    verified::Container::MachOObject => {
+                    verified::Container::MachOObject | verified::Container::CoffObject => {
                         return Err("verified Words protocol needs an executable container".into());
                     }
                 }
