@@ -312,6 +312,7 @@ impl Exporter<'_> {
                     arguments,
                     resumption: resumption(decl.linear),
                     ceiling: None,
+                    grade_relation: api::GradeRelation::UpperBound,
                 },
             );
         }

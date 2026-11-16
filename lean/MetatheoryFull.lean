@@ -103,12 +103,12 @@ inductive Ty : Type where
   /-- a one-shot continuation `(arg) -[row]@q-> ans @ am` -/
   | kont (arg : Ty) (ans : Ty) (am : Mode) (row : Row) (q : RMode)
 
-/-- [K-Prim], [K-Adt] (`m_decl ⊔ ⊔_i (k_i ⊓ m_i)`) and [K-Fn]. -/
+/-- [K-Prim], [K-Adt] (`m_decl ⊔ ⊔_i m_i`, with omitted floors elaborated to `k_i`) and [K-Fn]. -/
 def Ty.kind : Ty → Mode
   | .unit => .copy
   | .nat => .copy
   | .hdl => .linear
-  | .pair md t1 m1 t2 m2 => Mode.join md (Mode.join (Mode.meet t1.kind m1) (Mode.meet t2.kind m2))
+  | .pair md _ m1 _ m2 => Mode.join md (Mode.join m1 m2)
   | .kont _ _ _ _ q => q.toMode
 
 /-- Field-tree paths: `false` selects the first field, `true` the second. -/
@@ -132,6 +132,14 @@ structure EffSig where
   q : RMode
   arg : Ty
   res : Ty
+
+/-- An explicit linear floor on a scalar must survive kind computation. -/
+theorem scalar_linear_floor_kind :
+    (Ty.pair .copy .nat .linear .unit .copy).kind = .linear := by decide
+
+/-- Omitted scalar floors elaborate to copy, so ordinary records stay copy. -/
+theorem scalar_default_floor_kind :
+    (Ty.pair .copy .nat .copy .unit .copy).kind = .copy := by decide
 
 section Sig
 variable (Sig : Nat → EffSig)
@@ -600,10 +608,9 @@ theorem vt_rleM {R v τ} (h : VT Sig R v τ) : RLeM R τ.kind := by
       · rw [hx] at h2; cases h2
   | @pair R R1 R2 a b md t1 m1 t2 m2 hs _ _ hk1 hk2 ih1 ih2 =>
     simp only [Ty.kind]
-    rw [Mode.meet_of_le hk1, Mode.meet_of_le hk2]
     apply rleM_split hs
-    · exact rleM_mono ih1 (Mode.le_trans (Mode.le_join_left _ _) (Mode.le_join_right _ _))
-    · exact rleM_mono ih2 (Mode.le_trans (Mode.le_join_right _ _) (Mode.le_join_right _ _))
+    · exact rleM_mono ih1 (Mode.le_trans hk1 (Mode.le_trans (Mode.le_join_left _ _) (Mode.le_join_right _ _)))
+    · exact rleM_mono ih2 (Mode.le_trans hk2 (Mode.le_trans (Mode.le_join_right _ _) (Mode.le_join_right _ _)))
 
 /-- Any value typing splits into its exact resources and discarded ones. -/
 theorem val_inv {Γ R v τ m ε} (h : HasType Sig Γ R v τ m ε) (hv : IsVal v) :
@@ -623,6 +630,14 @@ theorem val_inv {Γ R v τ m ε} (h : HasType Sig Γ R v τ m ε) (hv : IsVal v)
       obtain ⟨hA, hB, hC⟩ := split4 hsr hs1 hs2
       exact ⟨_, _, hA, discardR_join hC hd1 hd2, .pair hB hvt1 hvt2 hk1 hk2, hk⟩
   | _ => cases hv
+
+/-- No scalar wrapper value with a linear field floor can be typed copy. -/
+theorem scalar_linear_wrapper_not_copy (Sig : Nat → EffSig) (R : RCtx) (ε : Row) :
+    ¬ HasType Sig Ctx.empty R (.pair (.natV 7) .unitV)
+      (Ty.pair .copy .nat .linear .unit .copy) .copy ε := by
+  intro h
+  obtain ⟨_, _, _, _, _, hk⟩ := val_inv h (.pair (.natV 7) .unitV)
+  exact absurd hk (by decide)
 
 theorem val_ty {Rv v τ} (h : VT Sig Rv v τ) :
     ∀ {Γ R Rd m ε}, Discard Γ → DiscardR Rd → SplitR R Rv Rd → Mode.Le τ.kind m →
@@ -2490,3 +2505,7 @@ end Vesper.MetatheoryFull
 
 #print axioms Vesper.MetatheoryFull.oversized_literal_sub_eval
 #print axioms Vesper.MetatheoryFull.oversized_literal_sub_not_pure
+
+#print axioms Vesper.MetatheoryFull.scalar_linear_floor_kind
+#print axioms Vesper.MetatheoryFull.scalar_default_floor_kind
+#print axioms Vesper.MetatheoryFull.scalar_linear_wrapper_not_copy

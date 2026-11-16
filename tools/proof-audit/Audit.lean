@@ -21,6 +21,7 @@ structure Request where
   toolchainPrefix : System.FilePath
   moduleName : Name
   theorems : Array Name
+  expectedTypes : Array (Name × Name)
 
 def fail {α : Type} (message : String) : IO α :=
   throw <| IO.userError message
@@ -58,10 +59,29 @@ def parseRequest (json : Json) : IO Request := do
   for name in theorems do
     if seen.contains name then fail s!"duplicate theorem: {name}"
     seen := seen.insert name
+  let expectedSources ← if (json.getObjVal? "expected_types").isOk then
+    IO.ofExcept <| json.getObjValAs? (Array (String × String)) "expected_types"
+    else pure #[]
+  unless expectedSources.size ≤ theorems.size do fail "too many expected theorem types"
+  let mut expectedTypes := #[]
+  let mut expectedSeen : NameSet := {}
+  for (theoremSource, typeSource) in expectedSources do
+    let theoremName ← parseName theoremSource
+    unless seen.contains theoremName do fail "expected type has no requested theorem"
+    if expectedSeen.contains theoremName then fail "duplicate expected theorem type"
+    expectedSeen := expectedSeen.insert theoremName
+    -- Only compiler-generated source contract constants are supported here.
+    match typeSource.splitOn "$" with
+    | [stem, suffix] =>
+      unless suffix == "contract" || suffix == "admissible" do fail "invalid contract type name"
+      unless validName stem && stem.startsWith "Vesper." do fail "invalid contract type name"
+    | _ => fail "invalid contract type name"
+    let typeName := (typeSource.splitOn ".").foldl Name.str .anonymous
+    expectedTypes := expectedTypes.push (theoremName, typeName)
   return {
     root := ← IO.FS.realPath root
     toolchainPrefix := ← IO.FS.realPath prefixSource
-    moduleName, theorems
+    moduleName, theorems, expectedTypes
   }
 
 def within (directory path : System.FilePath) : Bool :=
@@ -332,6 +352,17 @@ def audit (request : Request) : IO Json := do
       fail s!"kernel replay omitted declaration: {name}"
     unless sameInfo expected checked do
       fail s!"kernel replay changed declaration: {name}"
+
+  for (name, expectedType) in request.expectedTypes do
+    let some (.thmInfo theoremInfo) := replayed.toKernelEnv.find? name |
+      fail s!"missing contract binding theorem: {name}"
+    match theoremInfo.type with
+    | .const actualType [] =>
+      unless actualType == expectedType do fail s!"wrong contract type for {name}"
+    | _ => fail s!"contract binding {name} has extra hypotheses or a nonconstant type"
+    let some (.defnInfo contractInfo) := replayed.toKernelEnv.find? expectedType |
+      fail s!"missing contract proposition: {expectedType}"
+    unless contractInfo.type == .sort .zero do fail "contract constant is not a proposition"
 
   let mut theoremReports : Array Json := #[]
   for name in request.theorems do

@@ -201,6 +201,8 @@ fn help_documents_extract_mode_and_options() {
         "--extract",
         "--proofs",
         "--theorem",
+        "--contract-proof",
+        "--contract-witness",
         "--allow-axiom",
         "--olean-store",
         "--emit-lean",
@@ -240,9 +242,37 @@ fn extract_rejects_invalid_flags_and_forbidden_axiom_policies() {
         &["--extract", "--timeout", "0", "--json"],
         &["--extract", "--timeout", "301", "--json"],
         &["--extract", "--theorem", "bad name", "--json"],
+        &["--format", "--contract-proof", "clamp=Proof.ok", "--json"],
+        &[
+            "--format",
+            "--contract-witness",
+            "clamp=Proof.input",
+            "--json",
+        ],
+        &["--extract", "--contract-proof", "clamp", "--json"],
+        &[
+            "--extract",
+            "--contract-proof",
+            "clamp=bad;command",
+            "--json",
+        ],
+        &[
+            "--extract",
+            "--contract-proof",
+            "clamp=Proof.ok",
+            "--contract-proof",
+            "clamp=Proof.other",
+            "--json",
+        ],
         &["--extract", "--allow-axiom", "sorryAx", "--json"],
         &["--extract", "--allow-axiom", "Lean.ofReduceBool", "--json"],
         &["--extract", "--allow-axiom", "Lean.trustCompiler", "--json"],
+        &[
+            "--extract",
+            "--allow-axiom",
+            "Example.native._native.native_decide.ax_1_1",
+            "--json",
+        ],
         &["--extract", "--olean-store", "", "--json"],
         &["--extract", "--unknown-flag", "--json"],
     ];
@@ -728,4 +758,389 @@ fn extract_rejects_private_theorem_in_default_discovery() {
         ]),
         Some("proofs"),
     );
+}
+
+#[test]
+fn extract_rejects_valid_unrelated_artifact_under_current_source_cache_key() {
+    use vesper_loom_cas::{DerivationInputs, Domain, Store};
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(lean) = lean() else { return };
+    let f = Fixture::new(PURE_VES.as_bytes());
+    let parsed = vesper::parser::parse(PURE_VES);
+    let checked = vesper::check::check(&parsed.module);
+    let extracted = vesper::lean::extract_report(&checked.world)
+        .unwrap()
+        .module
+        .render()
+        .unwrap();
+    let bundle = format!(
+        "{extracted}\nnamespace VesperVerify\ntheorem model_verified : True := trivial\nend VesperVerify\n"
+    );
+    let version = run(Command::new(&lean).arg("--version"));
+    assert!(version.status.success());
+    let version = String::from_utf8(version.stdout).unwrap().trim().to_owned();
+    let store_dir = f.root.join("poisoned-cache");
+    let store = Store::open(&store_dir).unwrap();
+    let source = store.put_blob(Domain::Source, bundle.as_bytes()).unwrap();
+    let inputs = DerivationInputs::new(Domain::Artifact, "vesper-verify-extract", "1")
+        .with_input("lean_bundle", source.id)
+        .with_option(
+            "source_blake3",
+            blake3::hash(PURE_VES.as_bytes()).to_hex().to_string(),
+        )
+        .with_option(
+            "lean_model_blake3",
+            blake3::hash(extracted.as_bytes()).to_hex().to_string(),
+        )
+        .with_option("proofs_blake3", "")
+        .with_option("lean_version", version)
+        .with_option("theorems", "VesperVerify.model_verified")
+        .with_option("allowed_axioms", "");
+    // This is a real, valid theorem with the expected name. It has no relation
+    // to the current Vesper source; CAS integrity and kernel replay both pass.
+    fs::write(
+        f.root.join("VesperExtract.lean"),
+        "namespace VesperVerify\ntheorem model_verified : True := trivial\nend VesperVerify\n",
+    )
+    .unwrap();
+    let compiled = run(Command::new(&lean).current_dir(&f.root).args([
+        "-o",
+        "VesperExtract.olean",
+        "VesperExtract.lean",
+    ]));
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stdout)
+    );
+    let bytes = fs::read(f.root.join("VesperExtract.olean")).unwrap();
+    let artifact = store.put_blob(Domain::Artifact, &bytes).unwrap();
+    store.publish_derivation(&inputs, artifact.id).unwrap();
+    let output = f.verify(&[
+        "--extract",
+        "--olean-store",
+        store_dir.to_str().unwrap(),
+        "--json",
+        "--lean",
+        lean.to_str().unwrap(),
+        "--timeout",
+        "300",
+    ]);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["message"]
+            .as_str()
+            .unwrap()
+            .contains("does not match a fresh compilation"),
+        "{report}"
+    );
+    reject_json(output, Some("store"));
+}
+
+const CONTRACT_ANSWER: &str = "fn answer() -> u64 { 7 }\nfn ensures_answer(r: u64) -> bool { r == 7 }\nfn main() -> u64 { answer() }\n";
+
+#[test]
+fn contract_proof_bindings_require_complete_and_known_contracts_before_lean() {
+    let f = Fixture::new(CONTRACT_ANSWER.as_bytes());
+    reject_json(
+        f.verify(&[
+            "--extract",
+            "--contract-proof",
+            "missing=Proof.ok",
+            "--lean",
+            "missing-lean",
+            "--json",
+        ]),
+        Some("contracts"),
+    );
+    let two = format!(
+        "{CONTRACT_ANSWER}fn second() -> u64 {{ 3 }}\nfn ensures_second(r: u64) -> bool {{ r == 3 }}\n"
+    );
+    let f = Fixture::new(two.as_bytes());
+    let output = f.verify(&[
+        "--extract",
+        "--contract-proof",
+        "answer=Proof.ok",
+        "--lean",
+        "missing-lean",
+        "--json",
+    ]);
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        report["message"]
+            .as_str()
+            .unwrap()
+            .contains("missing proof binding for contract 'second'")
+    );
+    reject_json(output, Some("contracts"));
+}
+
+#[test]
+fn contract_proof_binding_rejects_unrelated_theorem_and_replays_exact_contract() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(lean) = lean() else { return };
+    let f = Fixture::new(CONTRACT_ANSWER.as_bytes());
+    let proofs = f.root.join("answer.lean");
+    fs::write(&proofs, "theorem answer_ok : True := trivial\ntheorem answer_input : Vesper.«answer$admissible» := trivial\n").unwrap();
+    let args = [
+        "--extract",
+        "--proofs",
+        proofs.to_str().unwrap(),
+        "--contract-proof",
+        "answer=answer_ok",
+        "--contract-witness",
+        "answer=answer_input",
+        "--allow-axiom",
+        "propext",
+        "--allow-axiom",
+        "Classical.choice",
+        "--allow-axiom",
+        "Quot.sound",
+        "--lean",
+        lean.to_str().unwrap(),
+        "--timeout",
+        "300",
+        "--json",
+    ];
+    // Ordinary audit of this theorem succeeds; it is not the requested contract.
+    let denied = f.verify(&args);
+    reject_json(denied, Some("compile"));
+    fs::write(
+        &proofs,
+        "theorem answer_ok : Vesper.«answer$contract» := by rfl\ntheorem answer_input : Vesper.«answer$admissible» := trivial\n",
+    )
+    .unwrap();
+    let accepted = f.verify(&args);
+    assert!(
+        accepted.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&accepted.stdout),
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let report: Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(
+        report["checked_contracts"],
+        serde_json::json!({"answer": "answer_ok"})
+    );
+    let binding = report["audit"]["theorems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "VesperVerify.contract_0")
+        .unwrap();
+    let axioms = binding["axioms"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|name| name.as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        axioms,
+        std::collections::BTreeSet::from(["Classical.choice", "Quot.sound", "propext"])
+    );
+    assert_eq!(binding["type_repr"], "Vesper.answer$contract");
+    assert_eq!(
+        report["checked_preconditions"],
+        serde_json::json!({"answer": "answer_input"})
+    );
+    assert!(
+        report["audit"]["theorems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "VesperVerify.precondition_0"
+                && t["type_repr"] == "Vesper.answer$admissible")
+    );
+
+    // Lean can implicitly abstract a section instance into the generated
+    // binding. Merely elaborating that binding would admit a hidden premise.
+    fs::write(&proofs, "class HiddenAssumption : Prop where bad : False\nvariable [HiddenAssumption]\ntheorem answer_ok [HiddenAssumption] : Vesper.«answer$contract» := False.elim HiddenAssumption.bad\ntheorem answer_input : Vesper.«answer$admissible» := trivial\n").unwrap();
+    let conditional = f.verify(&args);
+    let report: Value = serde_json::from_slice(&conditional.stdout).unwrap();
+    assert!(
+        report["message"]
+            .as_str()
+            .unwrap()
+            .contains("extra hypotheses"),
+        "{report}"
+    );
+    reject_json(conditional, Some("kernel"));
+
+    fs::write(
+        &proofs,
+        "theorem answer_ok : Vesper.«answer$contract» := by rfl\ntheorem answer_input : Vesper.«answer$admissible» := trivial\n",
+    )
+    .unwrap();
+    // Changing the extracted implementation invalidates its old proof.
+    let wrong = Fixture::new(CONTRACT_ANSWER.replace("{ 7 }", "{ 8 }").as_bytes());
+    reject_json(wrong.verify(&args), Some("compile"));
+}
+
+#[test]
+fn explicit_contracts_require_precondition_witnesses() {
+    let f = Fixture::new(CONTRACT_ANSWER.as_bytes());
+    for args in [
+        vec![
+            "--extract",
+            "--contract-proof",
+            "answer=Proof.ok",
+            "--lean",
+            "missing-lean",
+            "--json",
+        ],
+        vec![
+            "--extract",
+            "--contract-witness",
+            "answer=Proof.input",
+            "--lean",
+            "missing-lean",
+            "--json",
+        ],
+        vec![
+            "--extract",
+            "--contract-proof",
+            "answer=Proof.ok",
+            "--contract-witness",
+            "missing=Proof.input",
+            "--lean",
+            "missing-lean",
+            "--json",
+        ],
+    ] {
+        reject_json(f.verify(&args), Some("contracts"));
+    }
+    for args in [
+        vec![
+            "--extract",
+            "--contract-proof",
+            "answer=Proof.ok",
+            "--contract-witness",
+            "answer=Proof.input",
+            "--allow-axiom",
+            "Bad",
+            "--json",
+        ],
+        vec!["--extract", "--contract-witness", "answer", "--json"],
+        vec![
+            "--extract",
+            "--contract-witness",
+            "answer=Proof.input",
+            "--contract-witness",
+            "answer=Proof.other",
+            "--json",
+        ],
+    ] {
+        reject_json(f.verify(&args), Some("config"));
+    }
+}
+
+#[test]
+fn precondition_witness_rejects_vacuity_and_hidden_hypotheses() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(lean) = lean() else { return };
+    let source = "fn echo(x: u64, y: u64) -> u64 { x }\nfn requires_echo(x: u64, y: u64) -> bool { x == 7 && y == 9 }\nfn ensures_echo(x: u64, y: u64, r: u64) -> bool { r == x }\nfn main() -> u64 { 0 }\n";
+    let f = Fixture::new(source.as_bytes());
+    let proofs = f.root.join("witness.lean");
+    let proof = "theorem echo_ok : Vesper.«echo$contract» := by intro x y _; simp [Vesper.ensures_echo, Vesper.echo]\n";
+    let witness = "theorem echo_input : Vesper.«echo$admissible» := by exact ⟨7, 9, rfl⟩\n";
+    fs::write(&proofs, format!("{proof}{witness}")).unwrap();
+    let args = [
+        "--extract",
+        "--proofs",
+        proofs.to_str().unwrap(),
+        "--contract-proof",
+        "echo=echo_ok",
+        "--contract-witness",
+        "echo=echo_input",
+        "--allow-axiom",
+        "propext",
+        "--allow-axiom",
+        "Classical.choice",
+        "--allow-axiom",
+        "Quot.sound",
+        "--lean",
+        lean.to_str().unwrap(),
+        "--timeout",
+        "300",
+        "--json",
+    ];
+    let accepted = f.verify(&args);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stdout)
+    );
+    let report: Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(
+        report["checked_preconditions"],
+        serde_json::json!({"echo": "echo_input"})
+    );
+
+    // The old witness fails after the precondition becomes contradictory,
+    // even though the same partial-correctness proof still holds.
+    let impossible = Fixture::new(source.replace("x == 7 && y == 9", "false").as_bytes());
+    reject_json(impossible.verify(&args), Some("compile"));
+
+    // A satisfiability proof cannot borrow an unfulfilled section assumption.
+    fs::write(&proofs, format!("{proof}class HiddenInput : Prop where witness : Vesper.«echo$admissible»\nvariable [HiddenInput]\ntheorem echo_input [HiddenInput] : Vesper.«echo$admissible» := HiddenInput.witness\n")).unwrap();
+    let denied = f.verify(&args);
+    let report: Value = serde_json::from_slice(&denied.stdout).unwrap();
+    assert!(
+        report["message"]
+            .as_str()
+            .unwrap()
+            .contains("extra hypotheses"),
+        "{report}"
+    );
+    reject_json(denied, Some("kernel"));
+
+    // Unrelated True has no authority to establish admissible inputs.
+    fs::write(
+        &proofs,
+        format!("{proof}theorem echo_input : True := trivial\n"),
+    )
+    .unwrap();
+    reject_json(f.verify(&args), Some("compile"));
+}
+
+#[test]
+fn vacuous_false_postcondition_needs_an_impossible_input_witness() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(lean) = lean() else { return };
+    let f = Fixture::new(b"fn vacuous() -> u64 { 0 }\nfn requires_vacuous() -> bool { false }\nfn ensures_vacuous(r: u64) -> bool { false }\nfn main() -> u64 { 0 }\n");
+    let proofs = f.root.join("vacuous.lean");
+    fs::write(
+        &proofs,
+        "theorem vacuous_ok : Vesper.«vacuous$contract» := by intro impossible; cases impossible\n",
+    )
+    .unwrap();
+    let mut args = vec![
+        "--extract",
+        "--proofs",
+        proofs.to_str().unwrap(),
+        "--allow-axiom",
+        "propext",
+        "--allow-axiom",
+        "Classical.choice",
+        "--allow-axiom",
+        "Quot.sound",
+        "--lean",
+        lean.to_str().unwrap(),
+        "--timeout",
+        "300",
+        "--json",
+    ];
+    let partial = f.verify(&args);
+    assert!(
+        partial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&partial.stdout)
+    );
+    let report: Value = serde_json::from_slice(&partial.stdout).unwrap();
+    assert_eq!(report["checked_contracts"], serde_json::json!({}));
+    args.extend(["--contract-proof", "vacuous=vacuous_ok"]);
+    reject_json(f.verify(&args), Some("contracts"));
+    fs::write(&proofs, "theorem vacuous_ok : Vesper.«vacuous$contract» := by intro impossible; cases impossible\ntheorem vacuous_input : True := trivial\n").unwrap();
+    args.extend(["--contract-witness", "vacuous=vacuous_input"]);
+    reject_json(f.verify(&args), Some("compile"));
 }

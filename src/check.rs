@@ -238,7 +238,8 @@ impl World {
                         .collect();
                     let mut m = a.mode;
                     for f in a.variants.iter().flat_map(|v| &v.fields) {
-                        m = m.join(visit(w, &f.ty, &component_bounds, seen).meet(f.modality));
+                        let intrinsic = visit(w, &f.ty, &component_bounds, seen);
+                        m = m.join(f.modality.unwrap_or(intrinsic));
                     }
                     seen.remove(&key);
                     m
@@ -595,14 +596,16 @@ impl Checker<'_> {
                         self.error("E0100", "duplicate field", a.span.clone());
                     }
                     self.valid_type(&f.ty, &a.generics, a.span.clone());
-                    if self.mode(&f.ty) > f.modality {
+                    if let Some(modality) = f.modality
+                        && self.mode(&f.ty) > modality
+                    {
                         self.error(
                             "E0105",
                             format!(
                                 "field '{}' cannot relax {:?} ownership to {:?}",
                                 f.name,
                                 self.mode(&f.ty),
-                                f.modality
+                                modality
                             ),
                             a.span.clone(),
                         );

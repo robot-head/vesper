@@ -252,14 +252,24 @@ fn publish_semver_rejects_breaking_change_without_major_bump_and_keeps_cas_clean
 }
 
 #[test]
-fn publish_rejects_sorry_axiom_allow_flag() {
+fn publish_rejects_proof_and_compiler_escape_axiom_flags() {
     let f = Fixture::new();
     f.write_str("Loom.toml", &manifest_toml("@test/package", "0.1.0"));
     f.write_str("lib.ves", "fn id(x: i64) -> i64 {\n    x\n}\n");
-    let out = f.run(&["lib.ves", "--initial", "--allow-axiom", "sorryAx"]);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("sorryAx"), "stderr was: {stderr}");
+    for axiom in [
+        "sorryAx",
+        "Lean.ofReduceBool",
+        "Lean.trustCompiler",
+        "Example.native._native.native_decide.ax_1_1",
+    ] {
+        let out = f.run(&["lib.ves", "--initial", "--allow-axiom", axiom]);
+        assert!(!out.status.success());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&format!("{axiom} cannot be allowed")),
+            "stderr was: {stderr}"
+        );
+    }
 }
 
 #[test]

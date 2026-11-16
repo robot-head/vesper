@@ -239,6 +239,35 @@ impl Wrap {
 }
 
 #[test]
+fn builtin_box_inherits_payload_obligations() {
+    use vesper::ast::{Mode, Type};
+    let c = accepted(
+        "linear struct Token {} fn scalar(sink b: Box[i64]) {} fn token(sink b: Box[Token]) -> Box[Token] { b }",
+    );
+    let bounds = std::collections::BTreeMap::new();
+    assert_eq!(c.world.adts["Box"].variants[0].fields[0].modality, None);
+    assert_eq!(
+        c.world.mode(
+            &Type::Named("Box".into(), vec![Type::named("i64")]),
+            &bounds
+        ),
+        Mode::Affine
+    );
+    assert_eq!(
+        c.world.mode(
+            &Type::Named("Box".into(), vec![Type::Named("Token".into(), vec![])]),
+            &bounds
+        ),
+        Mode::Linear
+    );
+    rejected(
+        "linear struct Token {} fn drop_token(sink b: Box[Token]) {}",
+        "E0302",
+        "b",
+    );
+}
+
+#[test]
 fn static_verifier_diagnostics_e0800_to_e0809_and_user_box_compat() {
     // E0800: `Box(...)` value literal rejected when built-in prelude is active.
     rejected(

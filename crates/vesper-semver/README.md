@@ -16,9 +16,12 @@ direct unsigned parameter or result intervals include a distinguishing value
 in the human-readable witness, not a checked caller program.
 
 Resolved interface DTOs may attach a constant `ceiling` to an effect capability.
-For the same capability, lowering the ceiling is compatible and raising it is
-breaking. Comparing a ceiling to an absent ceiling is unknown. Source export
-does not yet produce ceilings; symbolic grades and SMT comparisons are unsupported.
+By default this is an upper bound: lowering it is compatible and raising it is
+breaking. Comparing a bound to an absent bound is unknown. Setting
+`"grade_relation":"exact"` makes the value invariant: lowering, raising,
+removing the capability, or replacing equality with an upper bound is breaking.
+An exact grade with no value is malformed and yields unknown. Source export
+does not yet produce grades; symbolic grades and SMT comparisons are unsupported.
 
 `check_release(old, new, old_version, new_version)` computes that comparison itself and checks the proposed version change. It returns a versioned `ReleaseReport`, or a typed `ReleaseVersionError` identifying an invalid old/new version.
 

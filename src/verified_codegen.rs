@@ -1,5 +1,5 @@
-//! A direct, proof-carrying code generator for the scalar core (design §42.1
-//! pillar 3b, §7): checked Place IR to x86-64 and AArch64 machine code with
+//! A direct code generator with Lean models for scalar instruction selection
+//! and control flow (design §42.1 pillar 3b, §7): checked Place IR to machine code with
 //! no Cranelift in the path.
 //!
 //! The pipeline has three explicit stages:
@@ -16,6 +16,16 @@
 //!    proves that each data row preserves the modelled state relation
 //!    (forward simulation). [`table_listing`] prints the table in the text
 //!    format the Lean file prints, so the tests check the two agree.
+//!    `lean/CodegenComposition.lean` composes this simulation across finite
+//!    straight-line row streams, including aborts, under semantic operand
+//!    preconditions for every reachable row. It does not verify Rust lowering
+//!    or establish those preconditions for compiler output. `CodegenControlFlow`
+//!    additionally checks abstract branches, jumps, halts and loop divergence
+//!    under an explicit program invariant and label resolver. Physical control
+//!    addresses and calling conventions remain outside those proofs.
+//!    `CodegenValidation` and `CodegenFlowValidation` provide executable Lean
+//!    validators that establish the operand conditions and invariant for
+//!    accepted model programs. They are not integrated into Rust lowering.
 //! 3. **Encoding** (`x86_64.rs`, `aarch64.rs`) of each abstract instruction
 //!    to fixed bytes, and a container (`container.rs`): a static Linux ELF
 //!    executable, or a Mach-O AArch64 object for the system linker.

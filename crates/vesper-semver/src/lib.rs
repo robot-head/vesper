@@ -173,10 +173,26 @@ pub struct Capability {
     pub effect: String,
     pub arguments: Vec<Type>,
     pub resumption: Resumption,
-    /// Constant resource ceiling, when supplied by a resolved interface.
+    /// Constant resource grade, when supplied by a resolved interface.
     /// None denotes an ungraded capability, not a zero ceiling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ceiling: Option<u64>,
+    /// Upper bounds are covariant; exact observations (such as timing) are invariant.
+    #[serde(default, skip_serializing_if = "GradeRelation::is_upper_bound")]
+    pub grade_relation: GradeRelation,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GradeRelation {
+    #[default]
+    UpperBound,
+    Exact,
+}
+impl GradeRelation {
+    fn is_upper_bound(&self) -> bool {
+        *self == Self::UpperBound
+    }
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -476,6 +492,9 @@ impl Checker<'_> {
         }
         let mut identities = BTreeSet::new();
         for c in &f.effects.capabilities {
+            if c.grade_relation == GradeRelation::Exact && c.ceiling.is_none() {
+                self.unsupported(path, "an exact grade requires a constant value");
+            }
             if c.identity.is_empty() || c.effect.is_empty() || !identities.insert(&c.identity) {
                 self.unsupported(path, "capability identities must be nonempty and unique");
             }
@@ -722,12 +741,48 @@ impl Checker<'_> {
                 "A caller grants exactly the old capability ceiling.",
             );
         }
+        for old in &a.effects.capabilities {
+            if old.grade_relation == GradeRelation::Exact
+                && !b.effects.capabilities.iter().any(|new| {
+                    old.identity == new.identity
+                        && old.effect == new.effect
+                        && old.arguments == new.arguments
+                })
+            {
+                self.breaking(
+                    path,
+                    "SV-Grade",
+                    "exact graded capability removed",
+                    "A caller relies on the old exact cost, not just an upper bound.",
+                );
+            }
+        }
         for new in &b.effects.capabilities {
             if let Some(old) = a.effects.capabilities.iter().find(|old| {
                 old.identity == new.identity
                     && old.effect == new.effect
                     && old.arguments == new.arguments
             }) {
+                if old.grade_relation != new.grade_relation {
+                    self.breaking(
+                        path,
+                        "SV-Grade",
+                        "grade relation changed",
+                        "An equality contract cannot be replaced by an upper-bound contract.",
+                    );
+                    continue;
+                }
+                if old.grade_relation == GradeRelation::Exact {
+                    if old.ceiling != new.ceiling {
+                        self.breaking(
+                            path,
+                            "SV-Grade",
+                            "exact resource grade changed",
+                            "A caller relies on equality with the old published cost.",
+                        );
+                    }
+                    continue;
+                }
                 match (old.ceiling, new.ceiling) {
                     (Some(old), Some(new)) if new > old => self.breaking(
                         path,

@@ -840,7 +840,7 @@ pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
     declarations.extend(
         contracts
             .into_iter()
-            .map(|(_, d)| Declaration::Definition(d)),
+            .flat_map(|(_, definitions)| definitions.into_iter().map(Declaration::Definition)),
     );
     let module = Module {
         imports: vec![ModuleName::new("Std").map_err(|e| e.to_string())?],
@@ -1014,11 +1014,12 @@ fn order_definitions(definitions: Vec<(String, Definition)>, recursive: Definiti
 }
 
 /// `requires_f(params) -> bool` and `ensures_f(params, result) -> bool` become
-/// `f$contract : Prop`, a partial-correctness statement over the total form.
+/// `f$contract : Prop`, a partial-correctness statement over the total form,
+/// and `f$admissible : Prop`, an existential witness of permitted inputs.
 fn contracts(
     world: &World,
     totality: &BTreeMap<String, Totality>,
-) -> Result<Vec<(String, Definition)>, ContractError> {
+) -> Result<Vec<(String, [Definition; 2])>, ContractError> {
     let mut out = vec![];
     let fip_active = crate::fip::active(world);
     for f in world.functions.values() {
@@ -1039,7 +1040,7 @@ fn contract(
     f: &Function,
     requires: Option<&Function>,
     ensures: &Function,
-) -> Result<Definition, ContractError> {
+) -> Result<[Definition; 2], ContractError> {
     let ty = |t: &Type| ty_with_fip(t, fip_active);
     let function = f.name.clone();
     let unsupported = |reason: &str| ContractError::Unsupported {
@@ -1205,8 +1206,20 @@ fn contract(
             )),
         }
     };
+    // Keep satisfiability separate from the implication: an impossible
+    // precondition proves every partial-correctness contract vacuously.
+    let precondition = match requires {
+        Some(r) => holds(r, None)?,
+        None => global(&["True"]),
+    };
+    let admissible = binders
+        .iter()
+        .rev()
+        .fold(precondition.clone(), |body, binder| {
+            app(global(&["Exists"]), [lambda(vec![binder.clone()], body)])
+        });
     let body = match requires {
-        Some(r) => Term::Arrow(Box::new(holds(r, None)?), Box::new(post)),
+        Some(_) => Term::Arrow(Box::new(precondition), Box::new(post)),
         None => post,
     };
     let body = if binders.is_empty() {
@@ -1217,13 +1230,22 @@ fn contract(
             body: Box::new(body),
         }
     };
-    Ok(Definition {
-        name: source_name(&format!("{}$contract", f.name)).map_err(internal)?,
-        binders: vec![],
-        result: Term::Sort(Sort::Prop),
-        body,
-        kind: DefinitionKind::Def,
-    })
+    Ok([
+        Definition {
+            name: source_name(&format!("{}$contract", f.name)).map_err(internal)?,
+            binders: vec![],
+            result: Term::Sort(Sort::Prop),
+            body,
+            kind: DefinitionKind::Def,
+        },
+        Definition {
+            name: source_name(&format!("{}$admissible", f.name)).map_err(internal)?,
+            binders: vec![],
+            result: Term::Sort(Sort::Prop),
+            body: admissible,
+            kind: DefinitionKind::Def,
+        },
+    ])
 }
 
 fn function_requirements(f: &Function) -> Vec<Effect> {

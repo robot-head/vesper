@@ -41,7 +41,7 @@ Options:
   --olean-root <dir>           Local Lean artifact directory (.olean/.ir) for kernel replay
   --olean-module <Module>      Qualified Lean module name (required with --olean-root)
   --theorem <Qualified.name>   Theorem name to kernel-audit (repeatable, required with --olean-root)
-  --allow-axiom <Name>         Additional Lean axiom allowed besides empty default (never sorryAx)
+  --allow-axiom <Name>         Additional Lean axiom allowed besides empty default (never sorryAx or compiler-trust escapes)
   --lean <path>                Lean launcher path for kernel replay (or VESPER_LEAN)
   --timeout <seconds>          Lean kernel-replay timeout (1..=300 seconds)
   --expected <identity.json>   Expected build identity JSON for builder quorum gate
@@ -234,8 +234,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             }
             "--allow-axiom" => {
                 let v = it.next().ok_or("--allow-axiom requires an axiom name")?;
-                if v == "sorryAx" {
-                    return Err("sorryAx cannot be allowed by publish proof policy".into());
+                if crate::proof_commands::forbidden_axiom(&v) {
+                    return Err(format!("{v} cannot be allowed by publish proof policy"));
                 }
                 opts.allowed_axioms.push(v);
             }

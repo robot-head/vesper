@@ -60,8 +60,8 @@ pub enum PrimKind {
 pub struct AdtFieldKind {
     pub name: String,
     pub ty: KindType,
-    /// Explicit `@@ m_i` field override; defaults to `ModeVec::TOP` when omitted.
-    pub override_mode: ModeVec,
+    /// Explicit `@@ m_i` floor; omission inherits the instantiated field kind.
+    pub override_mode: Option<ModeVec>,
 }
 
 /// Type expression for modal kind computation (`Delta |- tau : mod m_0`).
@@ -219,6 +219,15 @@ impl KindEnv {
 /// Errors returned by modal kinding, `[T-Cross]`, `[T-SubMode]`, and `[T-Var]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModeJudgmentError {
+    /// Owned ordered obligations must use the separate LIFO stack context.
+    OrderedBindingRequiresStack {
+        name: String,
+    },
+    /// Containers cannot hide or reorder a stack obligation.
+    OrderedField {
+        adt: String,
+        field: String,
+    },
     UnboundKindVar {
         name: String,
     },
@@ -290,15 +299,22 @@ pub fn infer_modal_kind(delta: &KindEnv, ty: &KindType) -> Result<ModeVec, ModeJ
             for field in fields {
                 let instantiated = field.ty.substitute(&subst);
                 let comp_kind = infer_modal_kind(delta, &instantiated)?;
-                if !comp_kind.leq(field.override_mode) {
+                let effective = field.override_mode.unwrap_or(comp_kind);
+                if !comp_kind.leq(effective) {
                     return Err(ModeJudgmentError::FieldModalityViolation {
                         adt: name.clone(),
                         field: field.name.clone(),
                         component_kind: comp_kind,
-                        override_mode: field.override_mode,
+                        override_mode: effective,
                     });
                 }
-                acc = acc.join(comp_kind.meet(field.override_mode));
+                if effective.order() == Order::Lifo {
+                    return Err(ModeJudgmentError::OrderedField {
+                        adt: name.clone(),
+                        field: field.name.clone(),
+                    });
+                }
+                acc = acc.join(effective);
             }
             Ok(acc)
         }
@@ -349,11 +365,27 @@ impl VarContextEntry {
     /// Whether this entry satisfies `discard(Gamma)` (§4.1).
     pub fn is_discardable(&self) -> bool {
         self.initialized
-            && self.mode.usage() <= Usage::Affine
-            && !matches!(
-                self.ownership,
-                PlaceOwnership::MutBorrow | PlaceOwnership::OutSlot
-            )
+            && match self.ownership {
+                // Releasing a shared view does not discharge its owner's resource.
+                PlaceOwnership::SharedBorrow => true,
+                PlaceOwnership::Own => {
+                    self.mode.usage() <= Usage::Affine && self.mode.order() == Order::Unordered
+                }
+                PlaceOwnership::MutBorrow | PlaceOwnership::OutSlot => false,
+            }
+    }
+
+    /// Contraction concerns the permission, not merely the payload's usage.
+    /// Ordered owners and exclusive/uninitialized slots can never be copied.
+    pub fn is_contractible(&self) -> bool {
+        self.initialized
+            && match self.ownership {
+                PlaceOwnership::SharedBorrow => true,
+                PlaceOwnership::Own => {
+                    self.mode.usage() == Usage::Copy && self.mode.order() == Order::Unordered
+                }
+                PlaceOwnership::MutBorrow | PlaceOwnership::OutSlot => false,
+            }
     }
 }
 
@@ -364,6 +396,15 @@ pub fn check_var_use(
     ctx_presence: Presence,
     target: &str,
 ) -> Result<(Presence, ModeVec), ModeJudgmentError> {
+    // Validate the context before selecting a variable. A caller cannot evade
+    // ordered release simply by placing an owned LIFO binding in Gamma.
+    for entry in gamma {
+        if entry.ownership == PlaceOwnership::Own && entry.mode.order() == Order::Lifo {
+            return Err(ModeJudgmentError::OrderedBindingRequiresStack {
+                name: entry.name.clone(),
+            });
+        }
+    }
     let mut found = None;
     for entry in gamma {
         if entry.name == target && found.is_none() {
@@ -414,7 +455,7 @@ mod tests {
             fields: vec![AdtFieldKind {
                 name: "some_payload".into(),
                 ty: KindType::Var("T".into()),
-                override_mode: ModeVec::TOP,
+                override_mode: None,
             }],
             type_args: vec![arg],
         }
@@ -442,7 +483,7 @@ mod tests {
             fields: vec![AdtFieldKind {
                 name: "ticket".into(),
                 ty: KindType::Var("Txn".into()),
-                override_mode: usage_mode(Usage::Copy),
+                override_mode: Some(usage_mode(Usage::Copy)),
             }],
             type_args: vec![],
         };

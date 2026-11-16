@@ -12,7 +12,10 @@ use std::path::PathBuf;
 const NAMESPACE: &str = "Vesper.MetatheoryFull";
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
 /// The headline results; the report lists all of them.
-const KEY_THEOREMS: [&str; 17] = [
+const KEY_THEOREMS: [&str; 20] = [
+    "scalar_linear_floor_kind",
+    "scalar_default_floor_kind",
+    "scalar_linear_wrapper_not_copy",
     "subst_ty",
     "plug_inv",
     "head_pres",

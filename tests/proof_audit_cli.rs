@@ -381,3 +381,58 @@ fn invalid_names_options_and_missing_artifacts_fail_before_any_certificate() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("at most 128"));
 }
+
+#[test]
+fn compiler_escape_axioms_cannot_be_whitelisted() {
+    for axiom in [
+        "sorryAx",
+        "Lean.ofReduceBool",
+        "Lean.trustCompiler",
+        "Example.native._native.native_decide.ax_1_1",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_vesper"))
+            .args([
+                "proof-audit",
+                "Model",
+                "--root",
+                ".",
+                "--theorem",
+                "Example.ok",
+                "--allow-axiom",
+                axiom,
+            ])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("{axiom} cannot be allowed")),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
+fn native_decide_dependency_is_rejected_after_kernel_replay() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(f) = Fixture::new() else { return };
+    f.compile("Model", "import Lean\ntheorem Example.native : (List.range 20).length = 20 := by native_decide\ntheorem Example.indirect : (List.range 20).length = 20 := Example.native\n");
+    let output = f.audit("Model", "Example.indirect", &[]);
+    assert!(!output.status.success());
+    let denied = report(&output);
+    assert_eq!(denied["kernel_replayed"], true);
+    let forbidden = denied["forbidden_axioms"].as_array().unwrap();
+    let native_axiom = forbidden
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|name| name.split('.').any(|part| part == "_native"))
+        .expect("native_decide must expose its generated compiler axiom");
+    let whitelisted = f.audit(
+        "Model",
+        "Example.indirect",
+        &["--allow-axiom", native_axiom],
+    );
+    assert!(!whitelisted.status.success());
+    assert!(String::from_utf8_lossy(&whitelisted.stderr).contains("cannot be allowed"));
+}

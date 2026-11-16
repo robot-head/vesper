@@ -121,7 +121,7 @@ pub fn prelude() -> Vec<Item> {
             fields: vec![Field {
                 name: "0".into(),
                 ty: Type::Named("T".into(), vec![]),
-                modality: Mode::Linear,
+                modality: None,
                 temperature: None,
             }],
             named: false,

@@ -5,11 +5,11 @@
 
 use crate::mode_vec::ModeVec;
 
-/// A field's intrinsic kind and its optional explicit modality cap.
+/// A field's intrinsic kind and its optional explicit modality floor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FieldKind {
     pub intrinsic: ModeVec,
-    /// An omitted override has the lattice top as its cap.
+    /// An omitted override inherits the intrinsic kind. The field name is retained for API compatibility.
     pub cap: Option<ModeVec>,
 }
 
@@ -24,12 +24,13 @@ pub struct InvalidFieldKind {
 
 /// Compute the kind of an instantiated ADT, rejecting the first invalid cap.
 ///
-/// This implements `declared ∨ ⋁ (intrinsic ∧ cap)` with omitted caps
-/// treated as top, after requiring each `intrinsic ≤ cap`.
+/// This implements `declared ∨ ⋁ effective`, where an explicit annotation is
+/// the effective floor and omission inherits the intrinsic kind. Explicit
+/// annotations must satisfy `intrinsic ≤ cap`.
 pub fn adt_kind(declared: ModeVec, fields: &[FieldKind]) -> Result<ModeVec, InvalidFieldKind> {
     let mut result = declared;
     for (field_index, field) in fields.iter().enumerate() {
-        let cap = field.cap.unwrap_or(ModeVec::TOP);
+        let cap = field.cap.unwrap_or(field.intrinsic);
         if !field.intrinsic.leq(cap) {
             return Err(InvalidFieldKind {
                 field_index,
@@ -37,7 +38,7 @@ pub fn adt_kind(declared: ModeVec, fields: &[FieldKind]) -> Result<ModeVec, Inva
                 cap,
             });
         }
-        result = result.join(field.intrinsic.meet(cap));
+        result = result.join(cap);
     }
     Ok(result)
 }
@@ -68,6 +69,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn explicit_linear_scalar_field_cannot_be_copied() {
+        let linear = ModeVec::new(
+            Usage::Linear,
+            Portability::Portable,
+            Contention::Uncontended,
+            Order::Unordered,
+        );
+        assert_eq!(
+            adt_kind(
+                ModeVec::BOTTOM,
+                &[FieldKind {
+                    intrinsic: ModeVec::BOTTOM,
+                    cap: Some(linear),
+                }]
+            ),
+            Ok(linear)
+        );
     }
 
     #[test]
@@ -127,7 +148,7 @@ mod tests {
                     }
                 ]
             ),
-            Ok(pinned.join(linear))
+            Ok(ModeVec::TOP)
         );
     }
 }
