@@ -74,6 +74,7 @@ pub use machine::{
     table_listing, table_rows,
 };
 pub use riscv64::encoding_listing as rv64_encoding_listing;
+pub use x86_64::encoding_listing as x64_encoding_listing;
 
 /// The value of `vesper build --codegen` that selects this backend.
 pub const CODEGEN: &str = "verified";
