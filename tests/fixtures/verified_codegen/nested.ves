@@ -1,0 +1,15 @@
+// Finite nesting of one generic enum is not recursion.
+fn depth(o: Option[Option[i64]]) -> i64 {
+    match o {
+        Some(Some(n)) => n,
+        Some(None) => 3,
+        None => 4,
+    }
+}
+
+fn main() -> (Option[Option[i64]], Option[Option[u8]], i64, i64, i64) {
+    let inner: Option[i64] = None;
+    let small: Option[u8] = None;
+    let outer: Option[Option[i64]] = None;
+    (Some(Some(1)), Some(small), depth(Some(Some(9))), depth(Some(inner)), depth(outer))
+}

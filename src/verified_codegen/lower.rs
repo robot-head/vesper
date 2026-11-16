@@ -168,14 +168,19 @@ fn flatten(
                 // A tag word, then a union payload as wide as the widest
                 // variant. Payload words are untyped (`u64`): each variant
                 // reads them at its own field kinds.
-                if active.iter().any(|a| a == n) {
+                // Recursion is the same instantiation reached inside itself;
+                // finite nesting through arguments (`Option[Option[i64]]`)
+                // is not recursion. Polymorphic recursion hits the depth
+                // limit instead.
+                let key = ty.to_string();
+                if active.contains(&key) {
                     return Err(VerifiedError::unsupported(
                         Unsupported::Enum,
                         function,
                         format!("recursive enum {ty} (no heap in this backend)"),
                     ));
                 }
-                active.push(n.clone());
+                active.push(key);
                 let mut widest = 0;
                 for v in &adt.variants {
                     let mut words = vec![];
