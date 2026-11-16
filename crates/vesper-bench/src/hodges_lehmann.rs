@@ -5,6 +5,7 @@
 //! neither verifies these assumptions nor treats ABBA measurements as proof
 //! of them. It does not alter the existing ratio-based regression gate.
 
+use crate::Decision;
 use std::fmt;
 
 /// Maximum number of paired differences accepted by this calculation.
@@ -45,6 +46,54 @@ pub struct HodgesLehmannEstimate {
     pub estimate_times_four: i128,
     /// None when no finite >=95% interval exists for this sample size.
     pub interval: Option<SignedRankInterval>,
+}
+
+/// Why an interval-based paired-difference gate cannot decide.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairedDifferenceInconclusive {
+    InsufficientPairs,
+    IntervalCrossesThreshold,
+}
+
+/// The gate preserves its statistical evidence even when inconclusive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PairedDifferenceGate {
+    pub decision: Decision,
+    pub reason: Option<PairedDifferenceInconclusive>,
+    pub estimate: HodgesLehmannEstimate,
+}
+
+/// Compare the exact paired-difference interval with a maximum allowed
+/// difference, in the same units as `differences`. A candidate-minus-baseline
+/// difference above the threshold represents a regression. A missing interval
+/// or one crossing the threshold is inconclusive. The caller must establish
+/// the estimator's documented sampling assumptions and units; this is not the
+/// existing ratio gate and does not perform or authenticate measurements.
+pub fn gate_paired_difference(
+    differences: &[i64],
+    max_difference: i64,
+) -> Result<PairedDifferenceGate, HodgesLehmannError> {
+    let estimate = hodges_lehmann_paired(differences)?;
+    let threshold_times_two = i128::from(max_difference) * 2;
+    let (decision, reason) = match estimate.interval {
+        None => (
+            Decision::Inconclusive,
+            Some(PairedDifferenceInconclusive::InsufficientPairs),
+        ),
+        Some(interval) if interval.upper_times_two <= threshold_times_two => (Decision::Pass, None),
+        Some(interval) if interval.lower_times_two > threshold_times_two => {
+            (Decision::Regression, None)
+        }
+        Some(_) => (
+            Decision::Inconclusive,
+            Some(PairedDifferenceInconclusive::IntervalCrossesThreshold),
+        ),
+    };
+    Ok(PairedDifferenceGate {
+        decision,
+        reason,
+        estimate,
+    })
 }
 
 /// Estimate the location of a paired-difference distribution and its exact
