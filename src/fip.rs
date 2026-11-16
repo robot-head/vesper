@@ -63,6 +63,25 @@ pub enum CallSlot {
     },
 }
 
+/// Selected `ReuseSlot` pointer merged across incoming CFG edges at `join_block`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FipJoinSlot {
+    pub dest_slot: (ValueId, usize),
+    pub incoming: Vec<(usize, ValueId, usize)>,
+}
+
+/// Ownership-driven `Box[T]` reclamation emitted for non-`@fip` functions.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum FipDrop {
+    Value(ValueId, Type),
+    Place(Place, Type),
+    OtherFields {
+        value: ValueId,
+        ty: Type,
+        keep: String,
+    },
+}
+
 /// Whether the module needs the built-in `Box[T]` prelude: it uses `@fip` or
 /// `Box` without declaring its own `struct Box` / `enum Box`.
 pub fn needs_prelude(module: &Module) -> bool {
@@ -615,9 +634,166 @@ fn remaining_box_paths(world: &World, ty: &Type, moved: &[Vec<String>]) -> Vec<V
     out
 }
 
+fn pattern_has_box_pattern(world: &World, p: &Pattern) -> bool {
+    if is_box_pattern(world, p) {
+        return true;
+    }
+    match &p.kind {
+        PatternKind::Tuple(ps) => ps.iter().any(|sub| pattern_has_box_pattern(world, sub)),
+        PatternKind::Constructor { fields, .. } => fields
+            .iter()
+            .any(|(_, sub)| pattern_has_box_pattern(world, sub)),
+        PatternKind::Wild | PatternKind::Bind(_) | PatternKind::Literal(_) => false,
+    }
+}
+
+fn unsafe_non_fip_functions(world: &World, caller_slot_fns: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut unsafe_fns = BTreeSet::new();
+    let mut call_edges: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for f in world.functions.values() {
+        if f.fip {
+            continue;
+        }
+        let mut is_unsafe = f
+            .effects
+            .instances
+            .iter()
+            .any(|eff| eff.name == ALLOC_EFFECT)
+            || type_contains_box(world, &f.result)
+            || f.params
+                .iter()
+                .any(|p| p.pass == Pass::Sink && type_contains_box(world, &p.ty))
+            || f.body.is_none();
+
+        let mut callees = Vec::new();
+        if !is_unsafe && let Some(body) = &f.body {
+            crate::regions::visit_expr(body, &mut |e| {
+                if is_unsafe {
+                    return;
+                }
+                let e_ty = world
+                    .types
+                    .get(&(e.span.start, e.span.end))
+                    .cloned()
+                    .unwrap_or(Type::Infer);
+                match &e.kind {
+                    ExprKind::Block { statements, .. } => {
+                        for stmt in statements {
+                            if let Statement::Let { pat, .. } = stmt
+                                && pattern_has_box_pattern(world, pat)
+                            {
+                                is_unsafe = true;
+                                return;
+                            }
+                        }
+                    }
+                    ExprKind::Match { arms, .. } => {
+                        for (pat, _) in arms {
+                            if pattern_has_box_pattern(world, pat) {
+                                is_unsafe = true;
+                                return;
+                            }
+                        }
+                    }
+                    ExprKind::Handle {
+                        effect,
+                        state,
+                        ret,
+                        ops,
+                        ..
+                    } => {
+                        if effect.name == ALLOC_EFFECT
+                            || state
+                                .as_ref()
+                                .is_some_and(|(p, _)| pattern_has_box_pattern(world, p))
+                            || ret.pats.iter().any(|p| pattern_has_box_pattern(world, p))
+                            || ops
+                                .iter()
+                                .any(|c| c.pats.iter().any(|p| pattern_has_box_pattern(world, p)))
+                        {
+                            is_unsafe = true;
+                        }
+                    }
+                    ExprKind::Call { callee, .. } => {
+                        if let ExprKind::Name(name) = &callee.kind {
+                            if name == BOX_NEW
+                                || name == BOX_NEW_IN_CALLER
+                                || caller_slot_fns.contains(name)
+                            {
+                                is_unsafe = true;
+                                return;
+                            }
+                            if let Some(Type::Function { .. }) =
+                                world.types.get(&(callee.span.start, callee.span.end))
+                            {
+                                is_unsafe = true;
+                                return;
+                            }
+                            if let Some(callee_fn) = world.functions.get(name) {
+                                if !callee_fn.fip {
+                                    callees.push(name.clone());
+                                }
+                            } else if name.contains("::") && type_contains_box(world, &e_ty) {
+                                is_unsafe = true;
+                            }
+                        } else if let ExprKind::Field(base, method) = &callee.kind {
+                            let base_ty = world
+                                .types
+                                .get(&(base.span.start, base.span.end))
+                                .cloned()
+                                .unwrap_or(Type::Infer);
+                            let method_name = format!("{}::{method}", base_ty.name());
+                            if caller_slot_fns.contains(&method_name) {
+                                is_unsafe = true;
+                                return;
+                            }
+                            if let Some(callee_fn) = world.functions.get(&method_name) {
+                                if !callee_fn.fip {
+                                    callees.push(method_name);
+                                }
+                            } else {
+                                is_unsafe = true;
+                            }
+                        } else {
+                            is_unsafe = true;
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }
+
+        if is_unsafe {
+            unsafe_fns.insert(f.name.clone());
+        } else if !callees.is_empty() {
+            call_edges.insert(f.name.clone(), callees);
+        }
+    }
+
+    loop {
+        let mut changed = false;
+        for (caller, callees) in &call_edges {
+            if unsafe_fns.contains(caller) {
+                continue;
+            }
+            if callees.iter().any(|callee| unsafe_fns.contains(callee)) {
+                unsafe_fns.insert(caller.clone());
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    unsafe_fns
+}
+
 struct FipChecker<'a> {
     world: &'a World,
     caller_slot_fns: BTreeSet<String>,
+    unsafe_non_fip: BTreeSet<String>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -1116,7 +1292,8 @@ impl<'a> FipChecker<'a> {
                             && (type_contains_box(self.world, &callee_fn.result)
                                 || callee_fn.params.iter().any(|p| {
                                     p.pass == Pass::Sink && type_contains_box(self.world, &p.ty)
-                                }))
+                                })
+                                || self.unsafe_non_fip.contains(name))
                         {
                             self.diagnostics.push(Diagnostic::new(
                                 "E0801",
@@ -1194,7 +1371,8 @@ impl<'a> FipChecker<'a> {
                             && (type_contains_box(self.world, &callee_fn.result)
                                 || callee_fn.params.iter().any(|p| {
                                     p.pass == Pass::Sink && type_contains_box(self.world, &p.ty)
-                                }))
+                                })
+                                || self.unsafe_non_fip.contains(&method_name))
                         {
                             self.diagnostics.push(Diagnostic::new(
                                 "E0801",
@@ -1289,9 +1467,12 @@ impl<'a> FipChecker<'a> {
 /// Static verification of `@fip` functions, `Box::new` reuse pairing,
 /// `Box::new_in_caller`, and forbidden `Alloc` effects.
 pub fn check_world(world: &World) -> Vec<Diagnostic> {
+    let caller_slot_fns = caller_slot_functions(world);
+    let unsafe_non_fip = unsafe_non_fip_functions(world, &caller_slot_fns);
     let mut checker = FipChecker {
         world,
-        caller_slot_fns: caller_slot_functions(world),
+        caller_slot_fns,
+        unsafe_non_fip,
         diagnostics: vec![],
     };
     for f in world.functions.values() {
@@ -1302,4 +1483,596 @@ pub fn check_world(world: &World) -> Vec<Diagnostic> {
         }
     }
     checker.diagnostics
+}
+
+#[derive(Clone, Debug)]
+struct DropSlotState {
+    ty: Type,
+    pass: Pass,
+    moved: Vec<Vec<String>>,
+}
+
+fn path_is_covered(path: &[String], moved: &[Vec<String>]) -> bool {
+    moved.iter().any(|m| path.starts_with(m))
+}
+
+fn bind_drop_slots(
+    world: &World,
+    pat: &Pattern,
+    ty: &Type,
+    slots: &mut BTreeMap<String, DropSlotState>,
+) {
+    match &pat.kind {
+        PatternKind::Bind(name) => {
+            slots.insert(
+                name.clone(),
+                DropSlotState {
+                    ty: ty.clone(),
+                    pass: Pass::Sink,
+                    moved: vec![],
+                },
+            );
+        }
+        PatternKind::Tuple(ps) => {
+            if let Type::Tuple(ts) = ty {
+                for (p, t) in ps.iter().zip(ts) {
+                    bind_drop_slots(world, p, t, slots);
+                }
+            }
+        }
+        PatternKind::Constructor { name, fields, .. } => {
+            if is_box_pattern(world, pat) {
+                let inner = box_inner(world, ty).cloned().unwrap_or(Type::Infer);
+                bind_drop_slots(world, &fields[0].1, &inner, slots);
+                return;
+            }
+            if let Some((a, v)) = world.constructor(name) {
+                let vars: BTreeMap<String, Type> = match ty {
+                    Type::Named(_, args) => a
+                        .generics
+                        .iter()
+                        .zip(args)
+                        .map(|(g, t)| (g.name.clone(), t.clone()))
+                        .collect(),
+                    _ => BTreeMap::new(),
+                };
+                for (fnm, sub) in fields {
+                    if let Some(f) = v.fields.iter().find(|f| &f.name == fnm) {
+                        bind_drop_slots(world, sub, &substitute(&f.ty, &vars), slots);
+                    }
+                }
+            }
+        }
+        PatternKind::Wild | PatternKind::Literal(_) => {}
+    }
+}
+
+fn op_reads_value(op: &crate::ir::Op, target: ValueId) -> bool {
+    use crate::ir::Op;
+    match op {
+        Op::Bind { value, .. }
+        | Op::Write { value, .. }
+        | Op::Unary(_, value)
+        | Op::Project(value, _)
+        | Op::Try(value) => *value == target,
+        Op::Binary(_, a, b) | Op::Index(a, b) => *a == target || *b == target,
+        Op::Tuple(vs) | Op::Vector { args: vs, .. } => vs.contains(&target),
+        Op::Data(_, fs) => fs.iter().any(|(_, v)| *v == target),
+        Op::Handle {
+            state_value: Some(value),
+            ..
+        } => *value == target,
+        Op::Call { args, .. } | Op::Tiled { args, .. } | Op::Fip { args, .. } => {
+            args.iter().any(|a| a.value == target)
+        }
+        Op::Indirect { callee, args } => {
+            *callee == target || args.iter().any(|a| a.value == target)
+        }
+        Op::Constant(_) | Op::Unit | Op::Read { .. } | Op::Closure { .. } | Op::Handle { .. } => {
+            false
+        }
+    }
+}
+
+fn value_used_after_in_block(block: &crate::ir::Block, after_inst: usize, target: ValueId) -> bool {
+    use crate::ir::Terminator;
+    if block
+        .instructions
+        .iter()
+        .skip(after_inst + 1)
+        .any(|inst| op_reads_value(&inst.op, target))
+    {
+        return true;
+    }
+    match &block.terminator {
+        Terminator::Return(v) => *v == target,
+        Terminator::Jump { args, .. } => args.contains(&target),
+        Terminator::Branch { condition, .. } => *condition == target,
+        Terminator::Match { value, .. } => *value == target,
+        Terminator::Unreachable => false,
+    }
+}
+
+fn resolve_place_type(world: &World, root_ty: &Type, path: &[String]) -> Option<Type> {
+    if path.is_empty() {
+        Some(root_ty.clone())
+    } else {
+        world.field(root_ty, path)
+    }
+}
+
+/// Inserts ownership-driven `Box[T]` drop metadata (`box_drops_*`) on every
+/// non-`@fip` function in `program` so unpacked, overwritten, discarded, and
+/// out-of-scope affine `Box[T]` allocations are freed without waiting for process
+/// exit (or JIT teardown).
+pub fn elaborate_non_fip_drops(world: &World, program: &mut crate::ir::Program) {
+    use crate::ir::{Op, Terminator};
+    if !active(world) {
+        return;
+    }
+    for f in program.functions.values_mut() {
+        if world.functions.get(&f.name).is_some_and(|src| src.fip) {
+            continue;
+        }
+        f.box_drops_before_inst.clear();
+        f.box_drops_after_inst.clear();
+        f.box_drops_before_term.clear();
+
+        let n_blocks = f.blocks.len();
+        if n_blocks == 0 {
+            continue;
+        }
+        let mut preds = vec![vec![]; n_blocks];
+        let mut succs = vec![vec![]; n_blocks];
+        let mut indegree = vec![0usize; n_blocks];
+        for (id, b) in f.blocks.iter().enumerate() {
+            let targets = match &b.terminator {
+                Terminator::Jump { block, .. } => vec![*block],
+                Terminator::Branch { yes, no, .. } => vec![*yes, *no],
+                Terminator::Match { arms, .. } => arms.iter().map(|(_, t)| *t).collect(),
+                Terminator::Return(_) | Terminator::Unreachable => vec![],
+            };
+            for t in targets {
+                if !succs[id].contains(&t) {
+                    succs[id].push(t);
+                    preds[t].push(id);
+                    indegree[t] += 1;
+                }
+            }
+        }
+        let mut reachable = vec![false; n_blocks];
+        let mut stack = vec![0usize];
+        while let Some(b) = stack.pop() {
+            if reachable[b] {
+                continue;
+            }
+            reachable[b] = true;
+            for &s in &succs[b] {
+                stack.push(s);
+            }
+        }
+        let mut order = Vec::with_capacity(n_blocks);
+        let mut queue = std::collections::VecDeque::new();
+        for (b, &deg) in indegree.iter().enumerate() {
+            if deg == 0 {
+                queue.push_back(b);
+            }
+        }
+        while let Some(b) = queue.pop_front() {
+            order.push(b);
+            for &s in &succs[b] {
+                indegree[s] -= 1;
+                if indegree[s] == 0 {
+                    queue.push_back(s);
+                }
+            }
+        }
+        if order.len() != n_blocks {
+            continue;
+        }
+
+        let mut exit_slots: Vec<BTreeMap<String, DropSlotState>> = vec![BTreeMap::new(); n_blocks];
+        let mut diverged = vec![false; n_blocks];
+
+        for &b in &order {
+            if !reachable[b] {
+                continue;
+            }
+            let r_preds: Vec<usize> = preds[b]
+                .iter()
+                .copied()
+                .filter(|&p| reachable[p] && !diverged[p])
+                .collect();
+
+            let mut slots: BTreeMap<String, DropSlotState> = if b == 0 && r_preds.is_empty() {
+                f.params
+                    .iter()
+                    .map(|p| {
+                        (
+                            p.name.clone(),
+                            DropSlotState {
+                                ty: p.ty.clone(),
+                                pass: p.pass,
+                                moved: vec![],
+                            },
+                        )
+                    })
+                    .collect()
+            } else {
+                let non_never: Vec<usize> = r_preds
+                    .iter()
+                    .copied()
+                    .filter(|&p| {
+                        !matches!(
+                            &f.blocks[p].terminator,
+                            Terminator::Jump { block, args }
+                                if *block == b
+                                    && args.iter().any(|id| {
+                                        f.values.get(id).is_some_and(|t| t.name() == "Never")
+                                    })
+                        )
+                    })
+                    .collect();
+                let active_preds = if non_never.is_empty() {
+                    &r_preds
+                } else {
+                    &non_never
+                };
+
+                if active_preds.is_empty() {
+                    BTreeMap::new()
+                } else if active_preds.len() == 1 {
+                    exit_slots[active_preds[0]].clone()
+                } else {
+                    // Build union of moved paths for every slot present in all active predecessors.
+                    let first = &exit_slots[active_preds[0]];
+                    let mut common = BTreeMap::new();
+                    for (name, first_slot) in first {
+                        if active_preds[1..]
+                            .iter()
+                            .all(|&p| exit_slots[p].contains_key(name))
+                        {
+                            let mut union_moved = Vec::new();
+                            for &p in active_preds {
+                                for m in &exit_slots[p][name].moved {
+                                    if !union_moved.contains(m) {
+                                        union_moved.push(m.clone());
+                                    }
+                                }
+                            }
+                            common.insert(
+                                name.clone(),
+                                DropSlotState {
+                                    ty: first_slot.ty.clone(),
+                                    pass: first_slot.pass,
+                                    moved: union_moved,
+                                },
+                            );
+                        }
+                    }
+                    // On each active predecessor edge, drop slots local to that predecessor
+                    // or unmoved paths that another branch moved.
+                    for &p in active_preds {
+                        let edge_drops = f.box_drops_before_term.entry(p).or_default();
+                        for (name, p_slot) in &exit_slots[p] {
+                            if p_slot.pass != Pass::Sink
+                                || f.external_captures.contains(name)
+                                || !type_contains_box(world, &p_slot.ty)
+                            {
+                                continue;
+                            }
+                            let rem = remaining_box_paths(world, &p_slot.ty, &p_slot.moved);
+                            if let Some(joined) = common.get(name) {
+                                for path in rem {
+                                    if path_is_covered(&path, &joined.moved)
+                                        && let Some(drop_ty) =
+                                            resolve_place_type(world, &p_slot.ty, &path)
+                                        && type_contains_box(world, &drop_ty)
+                                    {
+                                        edge_drops.push(FipDrop::Place(
+                                            Place {
+                                                root: name.clone(),
+                                                path,
+                                            },
+                                            drop_ty,
+                                        ));
+                                    }
+                                }
+                            } else {
+                                for path in rem {
+                                    if let Some(drop_ty) =
+                                        resolve_place_type(world, &p_slot.ty, &path)
+                                        && type_contains_box(world, &drop_ty)
+                                    {
+                                        edge_drops.push(FipDrop::Place(
+                                            Place {
+                                                root: name.clone(),
+                                                path,
+                                            },
+                                            drop_ty,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    common
+                }
+            };
+
+            let mut owned_values: BTreeMap<ValueId, Type> = BTreeMap::new();
+            for &param_id in &f.blocks[b].params {
+                if let Some(ty) = f.values.get(&param_id)
+                    && type_contains_box(world, ty)
+                {
+                    owned_values.insert(param_id, ty.clone());
+                }
+            }
+
+            let block_diverges;
+            {
+                let blk = &f.blocks[b];
+                let mut block_div = false;
+                for (inst_idx, inst) in blk.instructions.iter().enumerate() {
+                    if inst.ty.name() == "Never" {
+                        block_div = true;
+                        break;
+                    }
+                    match &inst.op {
+                        Op::Read {
+                            root,
+                            path,
+                            pass,
+                            projections,
+                        } => {
+                            if *pass == Pass::Sink {
+                                if let Some(slot) = slots.get_mut(root) {
+                                    if projections.is_empty() {
+                                        if !slot.moved.contains(path) {
+                                            slot.moved.push(path.clone());
+                                        }
+                                    } else {
+                                        for proj in projections {
+                                            let mut full = path.clone();
+                                            full.extend(proj.clone());
+                                            if !slot.moved.contains(&full) {
+                                                slot.moved.push(full);
+                                            }
+                                        }
+                                    }
+                                }
+                                if type_contains_box(world, &inst.ty) {
+                                    owned_values.insert(inst.dest, inst.ty.clone());
+                                }
+                            }
+                        }
+                        Op::Bind { pattern, value } => {
+                            owned_values.remove(value);
+                            let val_ty = f.values.get(value).cloned().unwrap_or(Type::Infer);
+                            bind_drop_slots(world, pattern, &val_ty, &mut slots);
+                        }
+                        Op::Write { place, value, .. } => {
+                            owned_values.remove(value);
+                            let mut parts = place.split('.');
+                            let root = parts.next().unwrap_or("");
+                            let path: Vec<String> = parts.map(str::to_owned).collect();
+                            if let Some(slot) = slots.get_mut(root) {
+                                if type_contains_box(world, &slot.ty)
+                                    && let Some(sub_ty) = resolve_place_type(world, &slot.ty, &path)
+                                    && type_contains_box(world, &sub_ty)
+                                {
+                                    let sub_moved: Vec<Vec<String>> = slot
+                                        .moved
+                                        .iter()
+                                        .filter_map(|m| {
+                                            if path.starts_with(m) {
+                                                Some(vec![])
+                                            } else if m.starts_with(&path) {
+                                                Some(m[path.len()..].to_vec())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect();
+                                    let before = f.box_drops_before_inst.entry(b).or_default();
+                                    for rem_sub in remaining_box_paths(world, &sub_ty, &sub_moved) {
+                                        let mut full_path = path.clone();
+                                        full_path.extend(rem_sub);
+                                        if let Some(drop_ty) =
+                                            resolve_place_type(world, &slot.ty, &full_path)
+                                            && type_contains_box(world, &drop_ty)
+                                        {
+                                            before.push((
+                                                inst_idx,
+                                                FipDrop::Place(
+                                                    Place {
+                                                        root: root.to_owned(),
+                                                        path: full_path,
+                                                    },
+                                                    drop_ty,
+                                                ),
+                                            ));
+                                        }
+                                    }
+                                }
+                                slot.moved.retain(|m| !m.starts_with(&path));
+                            }
+                        }
+                        Op::Tuple(vs) => {
+                            for v in vs {
+                                owned_values.remove(v);
+                            }
+                            if type_contains_box(world, &inst.ty) {
+                                owned_values.insert(inst.dest, inst.ty.clone());
+                            }
+                        }
+                        Op::Data(_, fs) => {
+                            for (_, v) in fs {
+                                owned_values.remove(v);
+                            }
+                            if type_contains_box(world, &inst.ty) {
+                                owned_values.insert(inst.dest, inst.ty.clone());
+                            }
+                        }
+                        Op::Project(base, field) => {
+                            if let Some(base_ty) = owned_values.remove(base)
+                                && type_contains_box(world, &base_ty)
+                            {
+                                f.box_drops_after_inst.entry(b).or_default().push((
+                                    inst_idx,
+                                    FipDrop::OtherFields {
+                                        value: *base,
+                                        ty: base_ty,
+                                        keep: field.clone(),
+                                    },
+                                ));
+                            }
+                            if type_contains_box(world, &inst.ty) {
+                                owned_values.insert(inst.dest, inst.ty.clone());
+                            }
+                        }
+                        Op::Call { args, .. } | Op::Tiled { args, .. } | Op::Fip { args, .. } => {
+                            for a in args {
+                                if a.pass == Pass::Sink {
+                                    owned_values.remove(&a.value);
+                                }
+                            }
+                            if type_contains_box(world, &inst.ty) {
+                                owned_values.insert(inst.dest, inst.ty.clone());
+                            }
+                        }
+                        Op::Indirect { callee, args } => {
+                            owned_values.remove(callee);
+                            for a in args {
+                                if a.pass == Pass::Sink {
+                                    owned_values.remove(&a.value);
+                                }
+                            }
+                            if type_contains_box(world, &inst.ty) {
+                                owned_values.insert(inst.dest, inst.ty.clone());
+                            }
+                        }
+                        Op::Try(v) => {
+                            owned_values.remove(v);
+                            if type_contains_box(world, &inst.ty) {
+                                owned_values.insert(inst.dest, inst.ty.clone());
+                            }
+                        }
+                        Op::Closure { moves, .. } | Op::Handle { moves, .. } => {
+                            for p in moves {
+                                if let Some(slot) = slots.get_mut(&p.root)
+                                    && !slot.moved.contains(&p.path)
+                                {
+                                    slot.moved.push(p.path.clone());
+                                }
+                            }
+                            if let Op::Handle {
+                                state_value: Some(sv),
+                                ..
+                            } = &inst.op
+                            {
+                                owned_values.remove(sv);
+                            }
+                            if type_contains_box(world, &inst.ty) {
+                                owned_values.insert(inst.dest, inst.ty.clone());
+                            }
+                        }
+                        Op::Constant(_)
+                        | Op::Unit
+                        | Op::Unary(..)
+                        | Op::Binary(..)
+                        | Op::Index(..)
+                        | Op::Vector { .. } => {
+                            if type_contains_box(world, &inst.ty) {
+                                owned_values.insert(inst.dest, inst.ty.clone());
+                            }
+                        }
+                    }
+
+                    let dead_temps: Vec<ValueId> = owned_values
+                        .keys()
+                        .copied()
+                        .filter(|&v| !value_used_after_in_block(blk, inst_idx, v))
+                        .collect();
+                    for v in dead_temps {
+                        if let Some(v_ty) = owned_values.remove(&v) {
+                            f.box_drops_after_inst
+                                .entry(b)
+                                .or_default()
+                                .push((inst_idx, FipDrop::Value(v, v_ty)));
+                        }
+                    }
+                }
+
+                if !block_div {
+                    match &blk.terminator {
+                        Terminator::Return(v) => {
+                            owned_values.remove(v);
+                            let drops = f.box_drops_before_term.entry(b).or_default();
+                            for (val_id, val_ty) in owned_values {
+                                drops.push(FipDrop::Value(val_id, val_ty));
+                            }
+                            for (name, slot) in &slots {
+                                if slot.pass != Pass::Sink
+                                    || f.external_captures.contains(name)
+                                    || !type_contains_box(world, &slot.ty)
+                                {
+                                    continue;
+                                }
+                                for path in remaining_box_paths(world, &slot.ty, &slot.moved) {
+                                    if let Some(drop_ty) =
+                                        resolve_place_type(world, &slot.ty, &path)
+                                        && type_contains_box(world, &drop_ty)
+                                    {
+                                        drops.push(FipDrop::Place(
+                                            Place {
+                                                root: name.clone(),
+                                                path,
+                                            },
+                                            drop_ty,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        Terminator::Jump { args, .. } => {
+                            for a in args {
+                                owned_values.remove(a);
+                            }
+                            if !owned_values.is_empty() {
+                                let drops = f.box_drops_before_term.entry(b).or_default();
+                                for (val_id, val_ty) in owned_values {
+                                    drops.push(FipDrop::Value(val_id, val_ty));
+                                }
+                            }
+                        }
+                        Terminator::Branch { .. } => {
+                            if !owned_values.is_empty() {
+                                let drops = f.box_drops_before_term.entry(b).or_default();
+                                for (val_id, val_ty) in owned_values {
+                                    drops.push(FipDrop::Value(val_id, val_ty));
+                                }
+                            }
+                        }
+                        Terminator::Match { value, .. } => {
+                            owned_values.remove(value);
+                            if !owned_values.is_empty() {
+                                let drops = f.box_drops_before_term.entry(b).or_default();
+                                for (val_id, val_ty) in owned_values {
+                                    drops.push(FipDrop::Value(val_id, val_ty));
+                                }
+                            }
+                        }
+                        Terminator::Unreachable => {
+                            block_div = true;
+                        }
+                    }
+                }
+                block_diverges = block_div;
+            }
+
+            diverged[b] = block_diverges;
+            exit_slots[b] = slots;
+        }
+    }
 }

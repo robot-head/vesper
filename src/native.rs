@@ -628,7 +628,10 @@ fn compile_entry<M: Module>(
     let mut program = crate::ir::lower_world(world);
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;
+    } else {
+        crate::ir_opt::fip_reuse_pass(world, &mut program)?;
     }
+    crate::fip::elaborate_non_fip_drops(world, &mut program);
     let (ids, trace_entry_id) =
         declare_instances_with_trace(m, world, entry, &instances, linkage, trace_ok)?;
     let trace_entry = trace_entry_id.map(|id| (entry, id));
@@ -929,6 +932,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 caller_slot,
                 reuse_slots: BTreeMap::new(),
                 current_call_slot: None,
+                in_fip_fn: f.fip,
                 trace_fail,
                 trace_entry: trace_entry.map(|(e, id)| (e.to_owned(), id)),
                 session: None,
@@ -1098,6 +1102,15 @@ pub fn jit_traced_with_options(
 ) -> Result<crate::runtime::Value, String> {
     jit_run_entry(world, entry, optimize, EntryEffects::TraceHost)
 }
+pub(crate) fn register_jit_runtime_symbols(builder: &mut JITBuilder, trace_host: bool) {
+    builder.symbol("fmod", native_float_remainder as *const u8);
+    builder.symbols(crate::regions::native_runtime::symbols());
+    if trace_host {
+        builder.symbols(crate::trace_effects::native_runtime::symbols());
+    }
+    builder.symbols(crate::tiled::native_runtime::symbols());
+    builder.symbols(crate::fip::native_runtime::symbols());
+}
 fn jit_run_entry(
     world: &World,
     entry: &str,
@@ -1123,13 +1136,7 @@ fn jit_run_entry(
         .finish(settings::Flags::new(flags))
         .map_err(|e| e.to_string())?;
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-    builder.symbol("fmod", native_float_remainder as *const u8);
-    builder.symbols(crate::regions::native_runtime::symbols());
-    if entry_effects == EntryEffects::TraceHost {
-        builder.symbols(crate::trace_effects::native_runtime::symbols());
-    }
-    builder.symbols(crate::tiled::native_runtime::symbols());
-    builder.symbols(crate::fip::native_runtime::symbols());
+    register_jit_runtime_symbols(&mut builder, entry_effects == EntryEffects::TraceHost);
     let mut m = JITModule::new(builder);
     let (ids, _) = compile_entry(
         &mut m,
@@ -1454,7 +1461,7 @@ impl InstrumentedJit {
             .finish(settings::Flags::new(flags))
             .map_err(|e| e.to_string())?;
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-        builder.symbol("fmod", native_float_remainder as *const u8);
+        register_jit_runtime_symbols(&mut builder, false);
         let mut owned = Self {
             module: Some(JITModule::new(builder)),
             code: std::ptr::null(),
@@ -1590,6 +1597,8 @@ struct Codegen<'a, 'b, M: Module> {
     reuse_slots: BTreeMap<(crate::ir::ValueId, usize), Variable>,
     /// Selected caller-slot source for the active `Op::Call`, if optimized by Stage 4.
     current_call_slot: Option<crate::fip::CallSlot>,
+    /// True while emitting code for an `@fip` function (prevents emitting non-FIP drops/frees).
+    in_fip_fn: bool,
     trace_fail: Option<ir::Value>,
     trace_entry: Option<(String, FuncId)>,
     /// Present only while compiling a suspending session entry: external
@@ -2166,7 +2175,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             .get(name)
             .ok_or("native closure body lacks shared IR")?
             .clone();
-        self.ir_graph(&graph, None, Some(join))?;
+        let fip_scope = std::mem::replace(&mut self.in_fip_fn, false);
+        let graph_res = self.ir_graph(&graph, None, Some(join));
+        self.in_fip_fn = fip_scope;
+        graph_res?;
         self.b.switch_to_block(join);
         let result = self.b.block_params(join)[0];
         for (variable, ptr, ty) in restores {
@@ -2223,7 +2235,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             let PatternKind::Constructor { fields, .. } = &p.kind else {
                 unreachable!();
             };
-            return self.bind_ir(bind_dest, slot_index, true, &fields[0].1, inner_val, &inner);
+            self.bind_ir(bind_dest, slot_index, true, &fields[0].1, inner_val, &inner)?;
+            if !self.in_fip_fn {
+                self.fip_box_free(value)?;
+            }
+            return Ok(());
         }
         match &p.kind {
             PatternKind::Bind(n) => {
@@ -2270,9 +2286,26 @@ impl<M: Module> Codegen<'_, '_, M> {
                     let v = self.load(ptr, &f.ty)?;
                     self.bind_ir(bind_dest, slot_index, inside_box, p, v, &f.ty)?;
                 }
+                if !self.in_fip_fn {
+                    for f in fs {
+                        if !fields.iter().any(|(n, _)| n == &f.name)
+                            && crate::fip::type_contains_box(self.world, &f.ty)
+                        {
+                            let ptr = self.offset(value, f.offset);
+                            let v = self.load(ptr, &f.ty)?;
+                            self.drop_box_value(v, &f.ty)?;
+                        }
+                    }
+                }
                 Ok(())
             }
-            _ => Ok(()),
+            PatternKind::Wild => {
+                if !self.in_fip_fn && crate::fip::type_contains_box(self.world, ty) {
+                    self.drop_box_value(value, ty)?;
+                }
+                Ok(())
+            }
+            PatternKind::Literal(_) => Ok(()),
         }
     }
     fn ir_function(
@@ -2389,6 +2422,16 @@ impl<M: Module> Codegen<'_, '_, M> {
                 parameters.insert(*id, value);
             }
         }
+        let ptr_ty = self.m.target_config().pointer_type();
+        let mut join_slot_params: BTreeMap<usize, Vec<_>> = BTreeMap::new();
+        for (&block_idx, joins) in &f.fip_join_slots {
+            let mut entries = Vec::with_capacity(joins.len());
+            for join in joins {
+                let param = self.b.append_block_param(blocks[block_idx], ptr_ty);
+                entries.push((join.dest_slot, param));
+            }
+            join_slot_params.insert(block_idx, entries);
+        }
         let mut graph = petgraph::graphmap::DiGraphMap::<usize, ()>::new();
         for id in 0..f.blocks.len() {
             graph.add_node(id);
@@ -2415,9 +2458,27 @@ impl<M: Module> Codegen<'_, '_, M> {
             for id in &block.params {
                 self.def_var(registers[id], parameters[id]);
             }
-            for inst in &block.instructions {
+            if let Some(entries) = join_slot_params.get(&i) {
+                for &(dest_slot, param) in entries {
+                    let var = self.b.declare_var(ptr_ty);
+                    self.def_var(var, param);
+                    self.reuse_slots.insert(dest_slot, var);
+                }
+            }
+            let before_inst_drops = f.box_drops_before_inst.get(&i);
+            let after_inst_drops = f.box_drops_after_inst.get(&i);
+            for (inst_idx, inst) in block.instructions.iter().enumerate() {
                 for (id, register) in &registers {
                     values.insert(*id, self.use_var(*register));
+                }
+                if !self.in_fip_fn
+                    && let Some(drops) = before_inst_drops
+                {
+                    for (d_idx, drop) in drops {
+                        if *d_idx == inst_idx {
+                            self.emit_fip_drop(drop, &values, inst.span.clone())?;
+                        }
+                    }
                 }
                 if inst.span.end != 0 {
                     self.set_location(inst.span.start);
@@ -2696,9 +2757,26 @@ impl<M: Module> Codegen<'_, '_, M> {
                 };
                 values.insert(inst.dest, value);
                 self.def_var(registers[&inst.dest], value);
+                if !self.in_fip_fn
+                    && inst.ty.name() != "Never"
+                    && let Some(drops) = after_inst_drops
+                {
+                    for (d_idx, drop) in drops {
+                        if *d_idx == inst_idx {
+                            self.emit_fip_drop(drop, &values, inst.span.clone())?;
+                        }
+                    }
+                }
             }
             for (id, register) in &registers {
                 values.insert(*id, self.use_var(*register));
+            }
+            if !self.in_fip_fn
+                && let Some(drops) = f.box_drops_before_term.get(&i)
+            {
+                for drop in drops {
+                    self.emit_fip_drop(drop, &values, Span::default())?;
+                }
             }
             match &block.terminator {
                 Terminator::Return(id) => {
@@ -2735,13 +2813,55 @@ impl<M: Module> Codegen<'_, '_, M> {
                             values[id]
                         });
                     }
-                    self.jump(
-                        blocks[*block],
-                        &vs.iter().map(|v| (*v).into()).collect::<Vec<_>>(),
-                    );
+                    let mut edge_args: Vec<ir::BlockArg> = vs.iter().map(|v| (*v).into()).collect();
+                    if let Some(joins) = f.fip_join_slots.get(block) {
+                        for join in joins {
+                            let val = if let Some((_, sb, si)) =
+                                join.incoming.iter().find(|&&(p, _, _)| p == i)
+                            {
+                                self.use_var(self.reuse_slots[&(*sb, *si)])
+                            } else {
+                                self.zero()
+                            };
+                            edge_args.push(val.into());
+                        }
+                    }
+                    self.jump(blocks[*block], &edge_args);
                 }
                 Terminator::Branch { condition, yes, no } => {
-                    self.branch(values[condition], blocks[*yes], &[], blocks[*no], &[]);
+                    let mut yes_args = Vec::new();
+                    if let Some(joins) = f.fip_join_slots.get(yes) {
+                        for join in joins {
+                            let val = if let Some((_, sb, si)) =
+                                join.incoming.iter().find(|&&(p, _, _)| p == i)
+                            {
+                                self.use_var(self.reuse_slots[&(*sb, *si)])
+                            } else {
+                                self.zero()
+                            };
+                            yes_args.push(val.into());
+                        }
+                    }
+                    let mut no_args = Vec::new();
+                    if let Some(joins) = f.fip_join_slots.get(no) {
+                        for join in joins {
+                            let val = if let Some((_, sb, si)) =
+                                join.incoming.iter().find(|&&(p, _, _)| p == i)
+                            {
+                                self.use_var(self.reuse_slots[&(*sb, *si)])
+                            } else {
+                                self.zero()
+                            };
+                            no_args.push(val.into());
+                        }
+                    }
+                    self.branch(
+                        values[condition],
+                        blocks[*yes],
+                        &yes_args,
+                        blocks[*no],
+                        &no_args,
+                    );
                 }
                 Terminator::Match { value, arms } => {
                     let ty = crate::numeric::default_type(&substitute(
@@ -2751,7 +2871,20 @@ impl<M: Module> Codegen<'_, '_, M> {
                     for (p, target) in arms {
                         let next = self.b.create_block();
                         let condition = self.pattern_condition(p, values[value], &ty)?;
-                        self.branch(condition, blocks[*target], &[], next, &[]);
+                        let mut arm_args = Vec::new();
+                        if let Some(joins) = f.fip_join_slots.get(target) {
+                            for join in joins {
+                                let val = if let Some((_, sb, si)) =
+                                    join.incoming.iter().find(|&&(p_idx, _, _)| p_idx == i)
+                                {
+                                    self.use_var(self.reuse_slots[&(*sb, *si)])
+                                } else {
+                                    self.zero()
+                                };
+                                arm_args.push(val.into());
+                            }
+                        }
+                        self.branch(condition, blocks[*target], &arm_args, next, &[]);
                         self.b.switch_to_block(next);
                     }
                     self.b.ins().trap(ir::TrapCode::unwrap_user(1));
@@ -2916,15 +3049,42 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
     }
     fn bind(&mut self, p: &Pattern, value: ir::Value, ty: &Type) -> Result<(), String> {
+        self.bind_with_box(false, p, value, ty)
+    }
+    fn bind_with_box(
+        &mut self,
+        inside_box: bool,
+        p: &Pattern,
+        value: ir::Value,
+        ty: &Type,
+    ) -> Result<(), String> {
         match &p.kind {
             PatternKind::Bind(n) => {
-                let var = self.b.declare_var(self.b.func.dfg.value_type(value));
-                self.def_var(var, value);
+                let bound_value = if inside_box {
+                    let layout = Layout::of(self.world, ty)?;
+                    if layout.aggregate() {
+                        let copy = self.alloc(layout.size);
+                        self.copy_bytes(value, copy, layout.size);
+                        copy
+                    } else {
+                        value
+                    }
+                } else {
+                    value
+                };
+                let var = self.b.declare_var(self.b.func.dfg.value_type(bound_value));
+                self.def_var(var, bound_value);
                 self.vars.insert(n.clone(), var);
                 self.local_types.insert(n.clone(), ty.clone());
                 Ok(())
             }
-            PatternKind::Wild | PatternKind::Literal(_) => Ok(()),
+            PatternKind::Wild => {
+                if !self.in_fip_fn && crate::fip::type_contains_box(self.world, ty) {
+                    self.drop_box_value(value, ty)?;
+                }
+                Ok(())
+            }
+            PatternKind::Literal(_) => Ok(()),
             PatternKind::Tuple(ps) => {
                 if ps.is_empty() {
                     return Ok(());
@@ -2936,7 +3096,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 for (p, f) in ps.iter().zip(fields) {
                     let ptr = self.offset(value, f.offset);
                     let v = self.load(ptr, &f.ty)?;
-                    self.bind(p, v, &f.ty)?;
+                    self.bind_with_box(inside_box, p, v, &f.ty)?;
                 }
                 Ok(())
             }
@@ -2946,7 +3106,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                         .cloned()
                         .ok_or("Box pattern expects Box[T]")?;
                     let inner_val = self.load(value, &inner)?;
-                    return self.bind(&fields[0].1, inner_val, &inner);
+                    self.bind_with_box(true, &fields[0].1, inner_val, &inner)?;
+                    if !self.in_fip_fn {
+                        self.fip_box_free(value)?;
+                    }
+                    return Ok(());
                 }
                 let layout = Layout::of(self.world, ty)?;
                 let (_, fs) = layout
@@ -2959,7 +3123,18 @@ impl<M: Module> Codegen<'_, '_, M> {
                         .ok_or("native pattern has unknown field")?;
                     let ptr = self.offset(value, f.offset);
                     let v = self.load(ptr, &f.ty)?;
-                    self.bind(p, v, &f.ty)?;
+                    self.bind_with_box(inside_box, p, v, &f.ty)?;
+                }
+                if !self.in_fip_fn {
+                    for f in fs {
+                        if !fields.iter().any(|(n, _)| n == &f.name)
+                            && crate::fip::type_contains_box(self.world, &f.ty)
+                        {
+                            let ptr = self.offset(value, f.offset);
+                            let v = self.load(ptr, &f.ty)?;
+                            self.drop_box_value(v, &f.ty)?;
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -3160,49 +3335,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(ptr)
     }
     fn equal(&mut self, a: ir::Value, b: ir::Value, ty: &Type) -> Result<ir::Value, String> {
-        if matches!(ty, Type::Function { .. }) {
-            return Ok(self.b.ins().iconst(types::I8, 0));
-        }
-        let layout = Layout::of(self.world, ty)?;
-        match layout.kind {
-            LayoutKind::Scalar => Ok(if ty.name() == "f64" {
-                self.b.ins().fcmp(FloatCC::Equal, a, b)
-            } else {
-                self.b.ins().icmp(IntCC::Equal, a, b)
-            }),
-            LayoutKind::Product(fs) => self.equal_fields(a, b, &fs),
-            LayoutKind::Enum(vs) => {
-                let at = self.b.ins().load(types::I64, ir::MemFlags::new(), a, 0);
-                let bt = self.b.ins().load(types::I64, ir::MemFlags::new(), b, 0);
-                let tags = self.b.ins().icmp(IntCC::Equal, at, bt);
-                let mut result = self.b.ins().iconst(types::I8, 0);
-                for (i, v) in vs.iter().enumerate() {
-                    let fields = self.equal_fields(a, b, &v.fields)?;
-                    let active = self.b.ins().icmp_imm(IntCC::Equal, at, i as i64);
-                    let active = self.b.ins().band(active, tags);
-                    let eq = self.b.ins().band(active, fields);
-                    result = self.b.ins().bor(result, eq);
-                }
-                Ok(result)
-            }
-        }
-    }
-    fn equal_fields(
-        &mut self,
-        a: ir::Value,
-        b: ir::Value,
-        fs: &[LayoutField],
-    ) -> Result<ir::Value, String> {
-        let mut result = self.b.ins().iconst(types::I8, 1);
-        for f in fs {
-            let ap = self.offset(a, f.offset);
-            let bp = self.offset(b, f.offset);
-            let av = self.load(ap, &f.ty)?;
-            let bv = self.load(bp, &f.ty)?;
-            let eq = self.equal(av, bv, &f.ty)?;
-            result = self.b.ins().band(result, eq);
-        }
-        Ok(result)
+        emit_equal(&mut self.b, self.m, self.world, a, b, ty)
     }
     /// Lower `e` with its source span as the location of the instructions
     /// it emits ([`CodegenOptions::source_locations`]); the enclosing
@@ -3416,7 +3549,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let bv = self.expr(b)?;
                 if matches!(op.as_str(), "==" | "!=")
                     && (Layout::of(self.world, &ty)?.aggregate()
-                        || matches!(ty, Type::Function { .. }))
+                        || matches!(ty, Type::Function { .. })
+                        || crate::fip::is_box_type(self.world, &ty))
                 {
                     let eq = self.equal(av, bv, &ty)?;
                     let eq = if op == "!=" {
@@ -4278,6 +4412,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             let generic_scope = std::mem::replace(&mut self.generic_vars, vars);
             let caller_slot_scope = std::mem::replace(&mut self.caller_slot, call_slot_arg);
             let reuse_scope = std::mem::take(&mut self.reuse_slots);
+            let fip_scope = std::mem::replace(&mut self.in_fip_fn, f.fip);
             let mut incoming_caps = BTreeMap::new();
             for (index, effect) in f.effects.instances.iter().enumerate() {
                 let key = if effect.label.is_none() {
@@ -4343,6 +4478,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.generic_vars = generic_scope;
             self.caller_slot = caller_slot_scope;
             self.reuse_slots = reuse_scope;
+            self.in_fip_fn = fip_scope;
             self.capabilities = capability_scope;
             result?
         } else {
@@ -4439,6 +4575,73 @@ impl<M: Module> Codegen<'_, '_, M> {
         let reference = self.m.declare_func_in_func(id, self.b.func);
         let call = self.b.ins().call(reference, &[size_val]);
         Ok(self.b.inst_results(call)[0])
+    }
+    fn fip_box_free(&mut self, ptr: ir::Value) -> Result<(), String> {
+        emit_fip_box_free(&mut self.b, self.m, ptr)
+    }
+    fn drop_box_value(&mut self, value: ir::Value, ty: &Type) -> Result<(), String> {
+        emit_drop_box_value(&mut self.b, self.m, self.world, value, ty)
+    }
+    fn emit_fip_drop(
+        &mut self,
+        drop: &crate::fip::FipDrop,
+        values: &BTreeMap<crate::ir::ValueId, ir::Value>,
+        _span: Span,
+    ) -> Result<(), String> {
+        match drop {
+            crate::fip::FipDrop::Value(val_id, ty) => {
+                let ty = crate::numeric::default_type(&substitute(ty, &self.generic_vars));
+                if crate::fip::type_contains_box(self.world, &ty)
+                    && let Some(&val) = values.get(val_id)
+                {
+                    self.drop_box_value(val, &ty)?;
+                }
+                Ok(())
+            }
+            crate::fip::FipDrop::Place(place, ty) => {
+                let ty = crate::numeric::default_type(&substitute(ty, &self.generic_vars));
+                if let (Some(&var), Some(root_ty)) = (
+                    self.vars.get(&place.root),
+                    self.local_types.get(&place.root).cloned(),
+                ) && crate::fip::type_contains_box(self.world, &ty)
+                {
+                    let mut cur_val = self.use_var(var);
+                    let mut cur_ty = root_ty;
+                    for field in &place.path {
+                        let layout = Layout::of(self.world, &cur_ty)?;
+                        let f = layout
+                            .field(field)
+                            .ok_or_else(|| format!("unknown native field '{field}' in {cur_ty}"))?;
+                        let ptr = self.offset(cur_val, f.offset);
+                        cur_val = self.load(ptr, &f.ty)?;
+                        cur_ty = f.ty.clone();
+                    }
+                    self.drop_box_value(cur_val, &ty)?;
+                }
+                Ok(())
+            }
+            crate::fip::FipDrop::OtherFields { value, ty, keep } => {
+                let ty = crate::numeric::default_type(&substitute(ty, &self.generic_vars));
+                if crate::fip::type_contains_box(self.world, &ty)
+                    && let Some(&base_val) = values.get(value)
+                {
+                    let layout = Layout::of(self.world, &ty)?;
+                    let fs = match &layout.kind {
+                        LayoutKind::Product(fs) => fs.as_slice(),
+                        LayoutKind::Enum(vs) if vs.len() == 1 => vs[0].fields.as_slice(),
+                        _ => return Ok(()),
+                    };
+                    for f in fs {
+                        if &f.name != keep && crate::fip::type_contains_box(self.world, &f.ty) {
+                            let ptr = self.offset(base_val, f.offset);
+                            let v = self.load(ptr, &f.ty)?;
+                            self.drop_box_value(v, &f.ty)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+        }
     }
     fn fip_op(
         &mut self,
@@ -4874,6 +5077,435 @@ fn ir_place_expr(p: &crate::check::Place, span: Span) -> Expr {
         };
     }
     e
+}
+
+fn fnv1a64(s: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for b in s.as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn type_is_recursive(world: &World, ty: &Type) -> bool {
+    fn walk(world: &World, ty: &Type, visiting: &mut BTreeSet<String>) -> bool {
+        let ty = crate::numeric::default_type(ty);
+        if crate::fip::is_box_type(world, &ty)
+            && let Some(inner) = crate::fip::box_inner(world, &ty)
+        {
+            return walk(world, inner, visiting);
+        }
+        match &ty {
+            Type::Tuple(ts) => ts.iter().any(|t| walk(world, t, visiting)),
+            Type::Named(n, args) => {
+                if let Some(a) = world.adts.get(n) {
+                    let key = ty.to_string();
+                    if !visiting.insert(key.clone()) {
+                        return true;
+                    }
+                    let vars: BTreeMap<String, Type> = a
+                        .generics
+                        .iter()
+                        .zip(args)
+                        .map(|(g, t)| (g.name.clone(), t.clone()))
+                        .collect();
+                    let rec = a.variants.iter().any(|v| {
+                        v.fields
+                            .iter()
+                            .any(|f| walk(world, &substitute(&f.ty, &vars), visiting))
+                    });
+                    visiting.remove(&key);
+                    rec
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+    walk(world, ty, &mut BTreeSet::new())
+}
+
+fn helper_load(
+    b: &mut FunctionBuilder<'_>,
+    world: &World,
+    ptr: ir::Value,
+    ty: &Type,
+) -> Result<ir::Value, String> {
+    if Layout::of(world, ty)?.aggregate() {
+        Ok(ptr)
+    } else {
+        Ok(b.ins().load(scalar(ty, &[])?, ir::MemFlags::new(), ptr, 0))
+    }
+}
+
+fn emit_equal<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    world: &World,
+    a: ir::Value,
+    b_val: ir::Value,
+    ty: &Type,
+) -> Result<ir::Value, String> {
+    let ty = crate::numeric::default_type(ty);
+    if type_is_recursive(world, &ty) {
+        let id = declare_or_define_eq_helper(m, world, &ty)?;
+        let fun = m.declare_func_in_func(id, b.func);
+        let call = b.ins().call(fun, &[a, b_val]);
+        return Ok(b.inst_results(call)[0]);
+    }
+    emit_equal_inline(b, m, world, a, b_val, &ty)
+}
+
+fn emit_equal_inline<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    world: &World,
+    a: ir::Value,
+    b_val: ir::Value,
+    ty: &Type,
+) -> Result<ir::Value, String> {
+    if matches!(ty, Type::Function { .. }) {
+        return Ok(b.ins().iconst(types::I8, 0));
+    }
+    if crate::fip::is_box_type(world, ty) {
+        let inner =
+            crate::fip::box_inner(world, ty).ok_or_else(|| format!("Box[T] expected, got {ty}"))?;
+        let av = helper_load(b, world, a, inner)?;
+        let bv = helper_load(b, world, b_val, inner)?;
+        return emit_equal(b, m, world, av, bv, inner);
+    }
+    let layout = Layout::of(world, ty)?;
+    match layout.kind {
+        LayoutKind::Scalar => Ok(if ty.name() == "f64" {
+            b.ins().fcmp(FloatCC::Equal, a, b_val)
+        } else {
+            b.ins().icmp(IntCC::Equal, a, b_val)
+        }),
+        LayoutKind::Product(fs) => emit_equal_fields(b, m, world, a, b_val, &fs),
+        LayoutKind::Enum(vs) => {
+            if vs.is_empty() {
+                return Ok(b.ins().iconst(types::I8, 0));
+            }
+            let at = b.ins().load(types::I64, ir::MemFlags::new(), a, 0);
+            let bt = b.ins().load(types::I64, ir::MemFlags::new(), b_val, 0);
+            let tags_eq = b.ins().icmp(IntCC::Equal, at, bt);
+            let done = b.create_block();
+            b.append_block_param(done, types::I8);
+            let mismatch = b.create_block();
+            let mut check_block = b.create_block();
+            b.ins().brif(tags_eq, check_block, &[], mismatch, &[]);
+
+            b.switch_to_block(mismatch);
+            let zero = b.ins().iconst(types::I8, 0);
+            b.ins().jump(done, &[zero.into()]);
+
+            for (i, v) in vs.iter().enumerate() {
+                b.switch_to_block(check_block);
+                let is_var = b.ins().icmp_imm(IntCC::Equal, at, i as i64);
+                let this_var = b.create_block();
+                let next_var = if i + 1 < vs.len() {
+                    b.create_block()
+                } else {
+                    mismatch
+                };
+                b.ins().brif(is_var, this_var, &[], next_var, &[]);
+
+                b.switch_to_block(this_var);
+                let eq = emit_equal_fields(b, m, world, a, b_val, &v.fields)?;
+                b.ins().jump(done, &[eq.into()]);
+
+                check_block = next_var;
+            }
+
+            b.switch_to_block(done);
+            Ok(b.block_params(done)[0])
+        }
+    }
+}
+
+fn emit_equal_fields<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    world: &World,
+    a: ir::Value,
+    b_val: ir::Value,
+    fs: &[LayoutField],
+) -> Result<ir::Value, String> {
+    let mut result = b.ins().iconst(types::I8, 1);
+    for f in fs {
+        let ap = b.ins().iadd_imm(a, i64::from(f.offset));
+        let bp = b.ins().iadd_imm(b_val, i64::from(f.offset));
+        let av = helper_load(b, world, ap, &f.ty)?;
+        let bv = helper_load(b, world, bp, &f.ty)?;
+        let eq = emit_equal(b, m, world, av, bv, &f.ty)?;
+        result = b.ins().band(result, eq);
+    }
+    Ok(result)
+}
+
+fn declare_or_define_eq_helper<M: Module>(
+    m: &mut M,
+    world: &World,
+    ty: &Type,
+) -> Result<FuncId, String> {
+    let sym = format!("__vesper_eq_{:016x}", fnv1a64(&ty.to_string()));
+    if let Some(id) = m.get_name(&sym) {
+        let cranelift_module::FuncOrDataId::Func(func_id) = id else {
+            return Err(format!("{sym} collides with data symbol"));
+        };
+        return Ok(func_id);
+    }
+    let layout = Layout::of(world, ty)?;
+    let arg_ty = if layout.aggregate() {
+        m.target_config().pointer_type()
+    } else {
+        scalar(ty, &[])?
+    };
+    let mut sig = m.make_signature();
+    sig.params.push(AbiParam::new(arg_ty));
+    sig.params.push(AbiParam::new(arg_ty));
+    sig.returns.push(AbiParam::new(types::I8));
+
+    let jit = std::any::type_name::<M>().contains("JITModule");
+    let linkage = if jit {
+        Linkage::Preemptible
+    } else {
+        Linkage::Local
+    };
+    let id = m
+        .declare_function(&sym, linkage, &sig)
+        .map_err(|e| e.to_string())?;
+
+    let mut ctx = m.make_context();
+    ctx.func.signature = sig;
+    let mut fb_ctx = FunctionBuilderContext::new();
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let params = b.block_params(entry);
+        let a = params[0];
+        let b_val = params[1];
+        let eq = emit_equal_inline(&mut b, m, world, a, b_val, ty)?;
+        b.ins().return_(&[eq]);
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    if jit {
+        DefinitionLinkage::Jit.normalize_references(&mut ctx.func);
+    }
+    m.define_function(id, &mut ctx).map_err(|e| e.to_string())?;
+    m.clear_context(&mut ctx);
+    Ok(id)
+}
+
+fn emit_fip_box_free<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    ptr: ir::Value,
+) -> Result<(), String> {
+    let jit = std::any::type_name::<M>().contains("JITModule");
+    let id = if jit {
+        let mut sig = m.make_signature();
+        sig.params.push(AbiParam::new(types::I64));
+        m.declare_function("vesper_box_free", Linkage::Import, &sig)
+            .map_err(|e| e.to_string())?
+    } else {
+        if m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
+            return Err(
+                "Box[T] in a freestanding image needs a box runtime; the generated one uses the C library"
+                    .into(),
+            );
+        }
+        crate::fip::aot_runtime::declare_or_define_free(m)?
+    };
+    let reference = m.declare_func_in_func(id, b.func);
+    b.ins().call(reference, &[ptr]);
+    Ok(())
+}
+
+fn emit_drop_box_value<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    world: &World,
+    val: ir::Value,
+    ty: &Type,
+) -> Result<(), String> {
+    let ty = crate::numeric::default_type(ty);
+    if !crate::fip::type_contains_box(world, &ty) {
+        return Ok(());
+    }
+    if type_is_recursive(world, &ty) {
+        let id = declare_or_define_drop_helper(m, world, &ty)?;
+        let fun = m.declare_func_in_func(id, b.func);
+        b.ins().call(fun, &[val]);
+        return Ok(());
+    }
+    emit_drop_box_inline(b, m, world, val, &ty)
+}
+
+fn emit_drop_box_inline<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    world: &World,
+    val: ir::Value,
+    ty: &Type,
+) -> Result<(), String> {
+    if !crate::fip::type_contains_box(world, ty) {
+        return Ok(());
+    }
+    if crate::fip::is_box_type(world, ty) {
+        let inner =
+            crate::fip::box_inner(world, ty).ok_or_else(|| format!("Box[T] expected, got {ty}"))?;
+        if crate::fip::type_contains_box(world, inner) {
+            let non_null = b.create_block();
+            let done = b.create_block();
+            let is_null = b.ins().icmp_imm(IntCC::Equal, val, 0);
+            b.ins().brif(is_null, done, &[], non_null, &[]);
+
+            b.switch_to_block(non_null);
+            let inner_val = helper_load(b, world, val, inner)?;
+            emit_drop_box_value(b, m, world, inner_val, inner)?;
+            emit_fip_box_free(b, m, val)?;
+            b.ins().jump(done, &[]);
+
+            b.switch_to_block(done);
+            return Ok(());
+        }
+        return emit_fip_box_free(b, m, val);
+    }
+    let layout = Layout::of(world, ty)?;
+    match layout.kind {
+        LayoutKind::Scalar => Ok(()),
+        LayoutKind::Product(fs) => {
+            let box_fields: Vec<LayoutField> = fs
+                .into_iter()
+                .filter(|f| crate::fip::type_contains_box(world, &f.ty))
+                .collect();
+            if box_fields.is_empty() {
+                return Ok(());
+            }
+            let non_null = b.create_block();
+            let done = b.create_block();
+            let is_null = b.ins().icmp_imm(IntCC::Equal, val, 0);
+            b.ins().brif(is_null, done, &[], non_null, &[]);
+
+            b.switch_to_block(non_null);
+            for f in box_fields {
+                let ptr = b.ins().iadd_imm(val, i64::from(f.offset));
+                let fv = helper_load(b, world, ptr, &f.ty)?;
+                emit_drop_box_value(b, m, world, fv, &f.ty)?;
+            }
+            b.ins().jump(done, &[]);
+
+            b.switch_to_block(done);
+            Ok(())
+        }
+        LayoutKind::Enum(vs) => {
+            let box_variants: Vec<(usize, Vec<LayoutField>)> = vs
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    let bfs: Vec<LayoutField> = v
+                        .fields
+                        .into_iter()
+                        .filter(|f| crate::fip::type_contains_box(world, &f.ty))
+                        .collect();
+                    (!bfs.is_empty()).then_some((i, bfs))
+                })
+                .collect();
+            if box_variants.is_empty() {
+                return Ok(());
+            }
+            let non_null = b.create_block();
+            let done = b.create_block();
+            let is_null = b.ins().icmp_imm(IntCC::Equal, val, 0);
+            b.ins().brif(is_null, done, &[], non_null, &[]);
+
+            b.switch_to_block(non_null);
+            let tag = b.ins().load(types::I64, ir::MemFlags::new(), val, 0);
+            let mut check_block = b.create_block();
+            b.ins().jump(check_block, &[]);
+            for (idx, (tag_idx, bfs)) in box_variants.iter().enumerate() {
+                b.switch_to_block(check_block);
+                let is_var = b.ins().icmp_imm(IntCC::Equal, tag, *tag_idx as i64);
+                let this_var = b.create_block();
+                let next_var = if idx + 1 < box_variants.len() {
+                    b.create_block()
+                } else {
+                    done
+                };
+                b.ins().brif(is_var, this_var, &[], next_var, &[]);
+
+                b.switch_to_block(this_var);
+                for f in bfs {
+                    let ptr = b.ins().iadd_imm(val, i64::from(f.offset));
+                    let fv = helper_load(b, world, ptr, &f.ty)?;
+                    emit_drop_box_value(b, m, world, fv, &f.ty)?;
+                }
+                b.ins().jump(done, &[]);
+                check_block = next_var;
+            }
+            b.switch_to_block(done);
+            Ok(())
+        }
+    }
+}
+
+fn declare_or_define_drop_helper<M: Module>(
+    m: &mut M,
+    world: &World,
+    ty: &Type,
+) -> Result<FuncId, String> {
+    let sym = format!("__vesper_drop_{:016x}", fnv1a64(&ty.to_string()));
+    if let Some(id) = m.get_name(&sym) {
+        let cranelift_module::FuncOrDataId::Func(func_id) = id else {
+            return Err(format!("{sym} collides with data symbol"));
+        };
+        return Ok(func_id);
+    }
+    let layout = Layout::of(world, ty)?;
+    let arg_ty = if layout.aggregate() {
+        m.target_config().pointer_type()
+    } else {
+        scalar(ty, &[])?
+    };
+    let mut sig = m.make_signature();
+    sig.params.push(AbiParam::new(arg_ty));
+
+    let jit = std::any::type_name::<M>().contains("JITModule");
+    let linkage = if jit {
+        Linkage::Preemptible
+    } else {
+        Linkage::Local
+    };
+    let id = m
+        .declare_function(&sym, linkage, &sig)
+        .map_err(|e| e.to_string())?;
+
+    let mut ctx = m.make_context();
+    ctx.func.signature = sig;
+    let mut fb_ctx = FunctionBuilderContext::new();
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let val = b.block_params(entry)[0];
+        emit_drop_box_inline(&mut b, m, world, val, ty)?;
+        b.ins().return_(&[]);
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    if jit {
+        DefinitionLinkage::Jit.normalize_references(&mut ctx.func);
+    }
+    m.define_function(id, &mut ctx).map_err(|e| e.to_string())?;
+    m.clear_context(&mut ctx);
+    Ok(id)
 }
 
 extern "C" fn native_float_remainder(a: f64, b: f64) -> f64 {

@@ -257,7 +257,7 @@ const FIP_RULES: &str = r#"(sort ReuseObj)
       ((union a s)))
 "#;
 
-fn fip_reuse_pass(world: &World, program: &mut ir::Program) -> Result<usize, String> {
+pub fn fip_reuse_pass(world: &World, program: &mut ir::Program) -> Result<usize, String> {
     if !crate::fip::active(world) {
         return Ok(0);
     }
@@ -320,6 +320,8 @@ fn fip_reuse_pass(world: &World, program: &mut ir::Program) -> Result<usize, Str
             continue;
         }
 
+        f.fip_join_slots.clear();
+        let mut next_join_id = f.values.keys().copied().max().map_or(0, |m| m + 1);
         let mut exit_slots: Vec<Vec<ReuseSlotInfo>> = vec![vec![]; n_blocks];
         let mut exit_caller_used = vec![false; n_blocks];
         let ret_slot_key = crate::fip::box_inner(world, &src_fn.result)
@@ -330,21 +332,115 @@ fn fip_reuse_pass(world: &World, program: &mut ir::Program) -> Result<usize, Str
                 continue;
             }
             let r_preds: Vec<usize> = preds[b].iter().copied().filter(|&p| reachable[p]).collect();
-            let mut live: Vec<ReuseSlotInfo> = if let Some((&first, rest)) = r_preds.split_first() {
-                let mut init = exit_slots[first].clone();
-                for &p in rest {
-                    let other = &exit_slots[p];
-                    init.retain(|s| {
-                        other
-                            .iter()
-                            .any(|o| o.bind_dest == s.bind_dest && o.slot_index == s.slot_index)
-                    });
-                }
-                init
+            let non_never_preds: Vec<usize> = r_preds
+                .iter()
+                .copied()
+                .filter(|&p| {
+                    !matches!(
+                        &f.blocks[p].terminator,
+                        Terminator::Jump { block, args }
+                            if *block == b
+                                && args.iter().any(|id| {
+                                    f.values.get(id).is_some_and(|t| t.name() == "Never")
+                                })
+                    )
+                })
+                .collect();
+            let active_preds = if non_never_preds.is_empty() {
+                &r_preds
             } else {
-                vec![]
+                &non_never_preds
             };
-            let mut caller_used = r_preds.iter().any(|&p| exit_caller_used[p]);
+            let mut live: Vec<ReuseSlotInfo> =
+                if let Some((&first, rest)) = active_preds.split_first() {
+                    if rest.is_empty() {
+                        exit_slots[first].clone()
+                    } else {
+                        let mut joined = Vec::new();
+                        let mut used: Vec<Vec<bool>> = rest
+                            .iter()
+                            .map(|&p| vec![false; exit_slots[p].len()])
+                            .collect();
+                        let mut used_first = vec![false; exit_slots[first].len()];
+                        // First keep identical slots (same bind_dest & slot_index) across all live predecessors.
+                        for (i0, s0) in exit_slots[first].iter().enumerate() {
+                            let mut matched_indices = Vec::with_capacity(rest.len());
+                            let mut all_have = true;
+                            for (pi, &p) in rest.iter().enumerate() {
+                                if let Some(idx) =
+                                    exit_slots[p].iter().enumerate().position(|(idx, o)| {
+                                        !used[pi][idx]
+                                            && o.bind_dest == s0.bind_dest
+                                            && o.slot_index == s0.slot_index
+                                    })
+                                {
+                                    matched_indices.push(idx);
+                                } else {
+                                    all_have = false;
+                                    break;
+                                }
+                            }
+                            if all_have {
+                                used_first[i0] = true;
+                                for (pi, idx) in matched_indices.into_iter().enumerate() {
+                                    used[pi][idx] = true;
+                                }
+                                joined.push(s0.clone());
+                            }
+                        }
+                        // Next merge remaining branch-local slots that share the same slot key across all live predecessors.
+                        for (i0, s0) in exit_slots[first].iter().enumerate() {
+                            if used_first[i0] {
+                                continue;
+                            }
+                            let mut matched_indices = Vec::with_capacity(rest.len());
+                            let mut all_have = true;
+                            for (pi, &p) in rest.iter().enumerate() {
+                                if let Some(idx) = exit_slots[p]
+                                    .iter()
+                                    .enumerate()
+                                    .position(|(idx, o)| !used[pi][idx] && o.key == s0.key)
+                                {
+                                    matched_indices.push(idx);
+                                } else {
+                                    all_have = false;
+                                    break;
+                                }
+                            }
+                            if all_have {
+                                used_first[i0] = true;
+                                let canon_bind = next_join_id;
+                                next_join_id += 1;
+                                let mut incoming = Vec::with_capacity(active_preds.len());
+                                incoming.push((first, s0.bind_dest, s0.slot_index));
+                                for (pi, idx) in matched_indices.into_iter().enumerate() {
+                                    used[pi][idx] = true;
+                                    let p = rest[pi];
+                                    let sp = &exit_slots[p][idx];
+                                    incoming.push((p, sp.bind_dest, sp.slot_index));
+                                }
+                                f.fip_join_slots.entry(b).or_default().push(
+                                    crate::fip::FipJoinSlot {
+                                        dest_slot: (canon_bind, 0),
+                                        incoming,
+                                    },
+                                );
+                                joined.push(ReuseSlotInfo {
+                                    slot_id: 0,
+                                    bind_dest: canon_bind,
+                                    slot_index: 0,
+                                    key: s0.key.clone(),
+                                    rank: 0,
+                                    size: s0.size,
+                                });
+                            }
+                        }
+                        joined
+                    }
+                } else {
+                    vec![]
+                };
+            let mut caller_used = active_preds.iter().any(|&p| exit_caller_used[p]);
 
             let mut next_slot_id: i64 = 0;
             let mut next_alloc_id: i64 = 0;

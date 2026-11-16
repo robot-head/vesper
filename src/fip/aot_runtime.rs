@@ -1,8 +1,9 @@
-//! Generated Cranelift AOT runtime for `Box[T]` (`vesper_box_alloc`) (§12.4).
+//! Generated Cranelift AOT runtime for `Box[T]` (`vesper_box_alloc` / `vesper_box_free`) (§12.4).
 //!
 //! Only emitted into an `ObjectModule` if a non-`@fip` function actually calls
-//! `Box::new` or calls a `Box::new_in_caller` `@fip` function from non-`@fip`
-//! code; pure `@fip` libraries never even reference `vesper_box_alloc`.
+//! `Box::new`, reclaims an unpacked/dropped `Box[T]`, or calls a
+//! `Box::new_in_caller` `@fip` function from non-`@fip` code; pure `@fip`
+//! libraries never reference `vesper_box_alloc` or `vesper_box_free`.
 
 use cranelift_codegen::ir::{AbiParam, InstBuilder, condcodes::IntCC, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -76,4 +77,54 @@ pub fn declare_or_define<M: Module>(m: &mut M) -> Result<FuncId, String> {
     m.define_function(alloc_id, &mut ctx).map_err(e)?;
     m.clear_context(&mut ctx);
     Ok(alloc_id)
+}
+
+pub fn declare_or_define_free<M: Module>(m: &mut M) -> Result<FuncId, String> {
+    let e = |err: cranelift_module::ModuleError| err.to_string();
+    if let Some(id) = m.get_name("vesper_box_free") {
+        let cranelift_module::FuncOrDataId::Func(func_id) = id else {
+            return Err("vesper_box_free collides with data symbol".into());
+        };
+        return Ok(func_id);
+    }
+    if m.target_config().pointer_type() != types::I64 {
+        return Err("Box[T] AOT runtime requires a 64-bit target".into());
+    }
+    let mut free_sig = m.make_signature();
+    free_sig.params.push(AbiParam::new(types::I64));
+    let libc_free = m
+        .declare_function("free", Linkage::Import, &free_sig)
+        .map_err(e)?;
+
+    let box_free_id = m
+        .declare_function("vesper_box_free", Linkage::Local, &free_sig)
+        .map_err(e)?;
+
+    let mut ctx = m.make_context();
+    ctx.func.signature = free_sig;
+    let mut fb_ctx = FunctionBuilderContext::new();
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+        let entry = b.create_block();
+        let do_free = b.create_block();
+        let done = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let ptr = b.block_params(entry)[0];
+        let is_null = b.ins().icmp_imm(IntCC::Equal, ptr, 0);
+        b.ins().brif(is_null, done, &[], do_free, &[]);
+
+        b.switch_to_block(do_free);
+        let free_ref = m.declare_func_in_func(libc_free, b.func);
+        b.ins().call(free_ref, &[ptr]);
+        b.ins().jump(done, &[]);
+
+        b.switch_to_block(done);
+        b.ins().return_(&[]);
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    m.define_function(box_free_id, &mut ctx).map_err(e)?;
+    m.clear_context(&mut ctx);
+    Ok(box_free_id)
 }

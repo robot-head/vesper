@@ -136,6 +136,14 @@ pub struct FunctionIr {
     pub locals: BTreeMap<String, Type>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub fip_call_slots: BTreeMap<ValueId, crate::fip::CallSlot>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fip_join_slots: BTreeMap<usize, Vec<crate::fip::FipJoinSlot>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub box_drops_before_inst: BTreeMap<usize, Vec<(usize, crate::fip::FipDrop)>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub box_drops_after_inst: BTreeMap<usize, Vec<(usize, crate::fip::FipDrop)>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub box_drops_before_term: BTreeMap<usize, Vec<crate::fip::FipDrop>>,
 }
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Program {
@@ -266,6 +274,10 @@ pub fn lower_world(world: &World) -> Program {
                     values: l.values,
                     locals: l.locals,
                     fip_call_slots: BTreeMap::new(),
+                    fip_join_slots: BTreeMap::new(),
+                    box_drops_before_inst: BTreeMap::new(),
+                    box_drops_after_inst: BTreeMap::new(),
+                    box_drops_before_term: BTreeMap::new(),
                 },
             );
         }

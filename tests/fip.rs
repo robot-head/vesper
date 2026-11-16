@@ -718,3 +718,402 @@ fn main() -> u64 {{
         String::from_utf8_lossy(&jit_cli.stderr)
     );
 }
+
+#[test]
+fn fip_rejects_transitive_and_method_hidden_box_allocations_in_non_fip_helpers() {
+    // Direct non-@fip helper allocating and freeing a Box internally.
+    rejected(
+        r#"
+fn hidden_alloc() -> i64 {
+    let Box(x) = Box::new(42);
+    x
+}
+
+@fip fn bad() -> i64 eff [] {
+    hidden_alloc()
+}
+"#,
+        "E0801",
+        "non-@fip",
+    );
+
+    // Transitive chain through non-@fip helper.
+    rejected(
+        r#"
+fn leaf_alloc() -> i64 {
+    let Box(x) = Box::new(7);
+    x
+}
+
+fn middle() -> i64 {
+    leaf_alloc()
+}
+
+@fip fn bad() -> i64 eff [] {
+    middle()
+}
+"#,
+        "E0801",
+        "non-@fip",
+    );
+
+    // Non-@fip method allocating a Box internally called from @fip.
+    rejected(
+        r#"
+copy struct Holder { v: i64 }
+impl Holder {
+    fn hidden(in self) -> i64 {
+        let Box(x) = Box::new(self.v);
+        x
+    }
+}
+
+@fip fn bad(h: Holder) -> i64 eff [] {
+    h.hidden()
+}
+"#,
+        "E0801",
+        "non-@fip",
+    );
+
+    // Non-@fip pure arithmetic helper IS still permitted from @fip.
+    accepted(
+        r#"
+fn pure_add(x: i64, y: i64) -> i64 {
+    wrapping_add(x, y)
+}
+
+@fip fn good(sink b: Box[i64]) -> Box[i64] eff [] {
+    let Box(v) = b;
+    Box::new(pure_add(v, 1))
+}
+"#,
+    );
+}
+
+#[test]
+fn stage4_ir_opt_joins_branch_local_reuse_slots_across_if_match_and_nested_joins() {
+    let source = r#"
+@fip fn branch_reuse(flag: bool, nested: bool, sink b: Box[i64]) -> Box[i64] eff [] {
+    let next = if flag {
+        if nested {
+            let Box(x) = b;
+            wrapping_add(x, 10)
+        } else {
+            let Box(x) = b;
+            wrapping_add(x, 20)
+        }
+    } else {
+        match b {
+            Box(x) => wrapping_add(x, 30),
+        }
+    };
+    Box::new(next)
+}
+
+fn main() -> u64 {
+    let Box(r1) = branch_reuse(true, true, Box::new(5));
+    let Box(r2) = branch_reuse(true, false, Box::new(5));
+    let Box(r3) = branch_reuse(false, false, Box::new(5));
+    let sum = wrapping_add(r1, wrapping_add(r2, r3));
+    if sum == 75 { 1 } else { 0 }
+}
+"#;
+
+    let c = accepted(source);
+    let mut program = ir::lower_world(&c.world);
+    ir_opt::optimize(&c.world, &mut program).unwrap();
+
+    let f = &program.functions["branch_reuse"];
+    let mut box_new = 0usize;
+    let mut box_reuse = 0usize;
+    for blk in &f.blocks {
+        for inst in &blk.instructions {
+            if let ir::Op::Fip { op, .. } = &inst.op {
+                match op {
+                    fip::FipOp::BoxNew => box_new += 1,
+                    fip::FipOp::BoxReuse { .. } => box_reuse += 1,
+                    fip::FipOp::BoxNewInCaller => {}
+                }
+            }
+        }
+    }
+    assert_eq!(
+        box_new, 0,
+        "Box::new after join must be rewritten to BoxReuse"
+    );
+    assert_eq!(box_reuse, 1, "expected 1 BoxReuse after join block");
+    assert!(
+        !f.fip_join_slots.is_empty(),
+        "expected fip_join_slots across branch/nested joins"
+    );
+
+    assert_eq!(differential("branch_reuse", source), "1");
+
+    let mut seen_fip = false;
+    native::object_with_observer(
+        &c.world,
+        "main",
+        None,
+        true,
+        Some(&mut |ef| {
+            if ef.source == "branch_reuse" {
+                seen_fip = true;
+                assert!(
+                    !ef.callees
+                        .iter()
+                        .any(|(_, s)| s == "vesper_box_alloc" || s == "vesper_box_free"),
+                    "branch_reuse must not allocate or free: {:?}",
+                    ef.callees
+                );
+            }
+        }),
+    )
+    .expect("object compilation");
+    assert!(seen_fip);
+
+    fip::native_runtime::reset_counts();
+    assert_eq!(native::jit(&c.world, "main").unwrap().to_string(), "1");
+    assert_eq!(fip::native_runtime::alloc_count(), 3);
+    assert_eq!(fip::native_runtime::free_count(), 3);
+    assert_eq!(fip::native_runtime::live_count(), 0);
+}
+
+#[test]
+fn box_structural_equality_handles_scalars_enums_recursive_lists_and_nan() {
+    let source = r#"
+enum List {
+    Nil,
+    Cons { head: i64, tail: Box[List] },
+}
+
+struct BoxPair {
+    first: Box[i64],
+    second: Box[i64],
+}
+
+fn opt_some(v: i64) -> Option[Box[i64]] {
+    Some(Box::new(v))
+}
+
+fn opt_none() -> Option[Box[i64]] {
+    None
+}
+
+fn cons(h: i64, sink t: List) -> List {
+    List::Cons { head: h, tail: Box::new(t) }
+}
+
+fn check_nan() -> bool {
+    let z = 0.0;
+    let nan = z / z;
+    !(Box::new(nan) == Box::new(nan)) && (Box::new(nan) != Box::new(nan))
+}
+
+fn main() -> u64 {
+    let s1 = Box::new(42) == Box::new(42);
+    let s2 = Box::new(42) != Box::new(43);
+    let nested = Box::new(Box::new(9)) == Box::new(Box::new(9));
+    let nested_ne = Box::new(Box::new(9)) != Box::new(Box::new(10));
+
+    let pair_eq = BoxPair { first: Box::new(1), second: Box::new(2) }
+        == BoxPair { first: Box::new(1), second: Box::new(2) };
+
+    let opt_eq = opt_some(42) == opt_some(42);
+    let opt_none_eq = opt_none() == opt_none();
+    let opt_mixed = opt_some(42) != opt_none() && !(opt_none() == opt_some(42));
+
+    let l1 = cons(1, cons(2, List::Nil));
+    let l2 = cons(1, cons(2, List::Nil));
+    let l3 = cons(1, cons(3, List::Nil));
+    let list_eq = (l1 == l2) && (cons(1, List::Nil) != List::Nil);
+    let list_ne = (cons(1, cons(2, List::Nil)) == l3) == false;
+
+    if s1 && s2 && nested && nested_ne && pair_eq && opt_eq && opt_none_eq && opt_mixed && list_eq && list_ne && check_nan() {
+        1
+    } else {
+        0
+    }
+}
+"#;
+
+    assert_eq!(differential("box_eq", source), "1");
+    let c = accepted(source);
+    fip::native_runtime::reset_counts();
+    assert_eq!(native::jit(&c.world, "main").unwrap().to_string(), "1");
+    assert_eq!(
+        fip::native_runtime::free_count(),
+        fip::native_runtime::alloc_count(),
+        "every Box allocated during equality tests must be reclaimed"
+    );
+    assert_eq!(fip::native_runtime::live_count(), 0);
+}
+
+#[test]
+fn non_fip_box_reclamation_frees_all_allocations_across_jit_and_aot() {
+    let source = r#"
+struct Pair {
+    first: Box[i64],
+    second: Box[i64],
+}
+
+enum Rec {
+    Leaf(i64),
+    Node { left: Box[Rec], right: Box[Rec] },
+}
+
+fn borrow_read(in _b: Box[i64]) -> i64 {
+    5
+}
+
+fn loop_allocs(n: i64) -> i64 {
+    if n <= 0 {
+        0
+    } else {
+        let Box(a) = Box::new(n);
+        let _ = Box::new(wrapping_add(n, 1));
+        let ow = Box::new(1);
+        ow = Box::new(2);
+        let Box(ov) = ow;
+        let pair = Pair { first: Box::new(3), second: Box::new(4) };
+        let Box(pf) = pair.first;
+        let br = borrow_read(Box::new(5));
+        let tree = Rec::Node {
+            left: Box::new(Rec::Leaf(6)),
+            right: Box::new(Rec::Node {
+                left: Box::new(Rec::Leaf(7)),
+                right: Box::new(Rec::Leaf(8)),
+            }),
+        };
+        let tv = match tree {
+            Rec::Leaf(x) => x,
+            Rec::Node { left: Box(Rec::Leaf(x)), right: _ } => x,
+            Rec::Node { left: _, right: _ } => 0,
+        };
+        let cur = wrapping_add(a, wrapping_add(ov, wrapping_add(pf, wrapping_add(br, tv))));
+        wrapping_add(cur, loop_allocs(wrapping_sub(n, 1)))
+    }
+}
+
+fn main() -> u64 {
+    if loop_allocs(4) == 74 { 1 } else { 0 }
+}
+"#;
+
+    assert_eq!(differential("non_fip_reclaim", source), "1");
+
+    let c = accepted(source);
+    for optimize in [true, false] {
+        fip::native_runtime::reset_counts();
+        let res = native::jit_with_options(&c.world, "main", optimize)
+            .unwrap()
+            .to_string();
+        assert_eq!(res, "1");
+        let allocs = fip::native_runtime::alloc_count();
+        let frees = fip::native_runtime::free_count();
+        assert!(
+            allocs >= 32,
+            "expected multiple iterations of allocations, got {allocs}"
+        );
+        assert_eq!(
+            frees, allocs,
+            "optimize={optimize}: free_count ({frees}) != alloc_count ({allocs})"
+        );
+        assert_eq!(fip::native_runtime::live_count(), 0);
+    }
+
+    let mut saw_free = false;
+    native::object_with_observer(
+        &c.world,
+        "main",
+        None,
+        true,
+        Some(&mut |ef| {
+            if ef.source == "loop_allocs" && ef.callees.iter().any(|(_, s)| s == "vesper_box_free")
+            {
+                saw_free = true;
+            }
+        }),
+    )
+    .expect("object compilation");
+    assert!(
+        saw_free,
+        "expected loop_allocs AOT IR to call vesper_box_free"
+    );
+}
+
+#[test]
+fn native_session_coverage_and_batch_compile_and_run_box_programs() {
+    let source = r#"
+@fip fn bump(sink b: Box[i64]) -> Box[i64] eff [] {
+    let Box(v) = b;
+    Box::new(wrapping_add(v, 10))
+}
+
+fn run_box(x: i64) -> i64 {
+    let Box(v) = bump(Box::new(x));
+    v
+}
+
+fn scalar_entry() -> i64 {
+    42
+}
+
+fn main() -> i64 {
+    run_box(32)
+}
+"#;
+    let c = accepted(source);
+
+    // NativeSession
+    fip::native_runtime::reset_counts();
+    let sess = native::session::NativeSession::compile_with_options(&c.world, "main", &[], true)
+        .expect("NativeSession compile");
+    let exit = sess
+        .fiber()
+        .expect("session fiber")
+        .start()
+        .exited()
+        .expect("pure Box session should exit immediately");
+    let out = sess.decode_exit(&c.world, &exit).expect("decode exit");
+    assert!(
+        matches!(out, native::session::SessionResult::Returned(ref v) if v.to_string() == "42"),
+        "unexpected session result: {out:?}"
+    );
+    assert_eq!(fip::native_runtime::alloc_count(), 1);
+    assert_eq!(fip::native_runtime::free_count(), 1);
+    assert_eq!(fip::native_runtime::live_count(), 0);
+
+    // NativeCoverage / InstrumentedJit
+    fip::native_runtime::reset_counts();
+    let mut cov = vesper::native_coverage::NativeCoverage::compile(source, &c.world, "run_box")
+        .expect("NativeCoverage compile");
+    let outcome = cov.run(&[32]).expect("NativeCoverage run");
+    assert!(matches!(
+        outcome,
+        vesper::native_coverage::NativeOutcome::Returned
+    ));
+    assert_eq!(cov.last_result(), Some(42));
+    assert_eq!(fip::native_runtime::alloc_count(), 1);
+    assert_eq!(fip::native_runtime::free_count(), 1);
+    assert_eq!(fip::native_runtime::live_count(), 0);
+
+    // NativeBatch: compiles cleanly on Box-active worlds (scalar entries run, Op::Fip preflights cleanly)
+    let mut batch = native::batch::NativeBatch::compile(
+        &c.world,
+        &["scalar_entry"],
+        native::batch::BatchLimits::default(),
+    )
+    .expect("NativeBatch compile on Box-active world");
+    let batch_out = batch.run("scalar_entry").expect("NativeBatch run");
+    assert_eq!(batch_out.to_string(), "42");
+    assert!(
+        native::batch::NativeBatch::compile(
+            &c.world,
+            &["main"],
+            native::batch::BatchLimits::default(),
+        )
+        .is_err(),
+        "NativeBatch preflight should reject Op::Fip"
+    );
+}
