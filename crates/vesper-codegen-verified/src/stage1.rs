@@ -13,10 +13,26 @@ pub enum Stage1Error {
     Syntax(String),
     InvalidField(&'static str),
     ParentInvalid(String),
-    DigestMismatch { field: String },
+    DigestMismatch {
+        field: String,
+    },
     CorpusMismatch,
-    ResultMismatch { program: String },
-    BackendUnavailable { program: String, reason: String },
+    ResultMismatch {
+        program: String,
+    },
+    BackendUnavailable {
+        program: String,
+        reason: String,
+    },
+    /// A fresh measurement lost a verified build that the reference lock has.
+    Regression {
+        program: String,
+        reason: String,
+    },
+    TargetMismatch {
+        locked: String,
+        measured: String,
+    },
 }
 impl std::fmt::Display for Stage1Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -98,6 +114,21 @@ fn label(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
 }
+/// How a fresh measurement differs from a reference lock that it does not
+/// contradict. `improved` names programs whose verified build is new;
+/// `stale` names fields whose recorded values a re-record would change.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OutcomeReport {
+    pub improved: Vec<String>,
+    pub stale: Vec<String>,
+}
+impl OutcomeReport {
+    /// True when the fresh measurement would re-record to the same lock.
+    pub fn is_current(&self) -> bool {
+        self.improved.is_empty() && self.stale.is_empty()
+    }
+}
+
 impl Stage1Lock {
     pub fn parse(bytes: &[u8]) -> Result<Self, Stage1Error> {
         if bytes.len() > MAX_BYTES {
@@ -255,6 +286,74 @@ impl Stage1Lock {
             }
         }
         Ok(())
+    }
+    /// Ratchet a fresh measurement against this reference lock without
+    /// requiring bit-identical artifacts. The seed, the frontend sources and
+    /// the generated artifacts change with every compiler commit, so a
+    /// difference there is only reported as stale. Hard failures: another
+    /// target or parent, another corpus (names, kinds or source bytes), and a
+    /// program whose verified build the reference has but the fresh run lost.
+    /// Every fresh result was already checked against the seed and across
+    /// backends when the fresh lock was recorded.
+    pub fn compare_outcome(&self, fresh: &Stage1Lock) -> Result<OutcomeReport, Stage1Error> {
+        self.validate()?;
+        fresh.validate()?;
+        if self.target != fresh.target {
+            return Err(Stage1Error::TargetMismatch {
+                locked: self.target.clone(),
+                measured: fresh.target.clone(),
+            });
+        }
+        if self.parent_seed_lock != fresh.parent_seed_lock {
+            return Err(Stage1Error::DigestMismatch {
+                field: "parent_seed_lock".into(),
+            });
+        }
+        if self.programs.len() != fresh.programs.len()
+            || self
+                .programs
+                .iter()
+                .zip(&fresh.programs)
+                .any(|(a, b)| a.name != b.name || a.kind != b.kind || a.source != b.source)
+        {
+            return Err(Stage1Error::CorpusMismatch);
+        }
+        let mut report = OutcomeReport::default();
+        for (field, locked, measured) in [
+            ("seed_binary", &self.seed_binary, &fresh.seed_binary),
+            (
+                "frontend_sources",
+                &self.frontend_sources,
+                &fresh.frontend_sources,
+            ),
+        ] {
+            if locked != measured {
+                report.stale.push(field.into());
+            }
+        }
+        for (locked, measured) in self.programs.iter().zip(&fresh.programs) {
+            let name = &locked.name;
+            if locked.result != measured.result {
+                report.stale.push(format!("{name}.result"));
+            }
+            if locked.cranelift_artifact != measured.cranelift_artifact {
+                report.stale.push(format!("{name}.cranelift_artifact"));
+            }
+            match (&locked.verified, &measured.verified) {
+                (VerifiedRecord::Built { .. }, VerifiedRecord::Unavailable { reason }) => {
+                    return Err(Stage1Error::Regression {
+                        program: name.clone(),
+                        reason: reason.clone(),
+                    });
+                }
+                (VerifiedRecord::Unavailable { .. }, VerifiedRecord::Built { .. }) => {
+                    report.improved.push(name.clone());
+                }
+                (a, b) if a != b => report.stale.push(format!("{name}.verified")),
+                _ => {}
+            }
+        }
+        Ok(report)
     }
     pub fn require_cross_backend(&self) -> Result<(), Stage1Error> {
         self.validate()?;

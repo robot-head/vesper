@@ -1,0 +1,25 @@
+// Nested handlers of two instances of one generic effect: an operation
+// written with type arguments goes to the handler of that instance.
+linear effect Tell[T] {
+    fn tell(sink v: T) -> i64;
+}
+
+fn main() -> i64 {
+    handle Tell[i64] in {
+        handle Tell[bool] in {
+            wrapping_add(Tell::tell[i64](7), Tell::tell[bool](true))
+        } with {
+            return value => value,
+            tell(b, resume) => resume(
+                if b {
+                    100
+                } else {
+                    200
+                }
+            ),
+        }
+    } with {
+        return value => value,
+        tell(n, resume) => resume(wrapping_mul(n, 2)),
+    }
+}

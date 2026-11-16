@@ -4,6 +4,53 @@ Base: `40d0b33b8c5fb0e3a38526ec86c9e32e35df6f87`, a descendant of the
 wave-nine baseline `37f7b8b`. The issue and open PR board were checked before
 editing; there was no competing bootstrap PR. Changes stay in lane 5's paths.
 
+## Update 2026-11-16: reproducible runner, outcome ratchet and CI
+
+Base `5a018bd` (after #835). This is the harness half of #582; the strict
+cross-backend lock follows once the verified backend accepts the whole
+frontend (planned lanes: abort-only `Fail`, monomorphization, then a frontend
+coverage driver). #582 stays open.
+
+- `bootstrap/run.sh stage1 --reproduce` builds the Stage 1 runner twice from
+  clean target directories at two different paths, records a lock with each,
+  and fails with `ReproducibilityMismatch` unless the two locks are byte
+  identical (seed digest, Cranelift objects, verified executable). The
+  target directory is now remapped (`=/target`) in both the Cargo build and
+  the adapter compile, so the runner digest no longer depends on where it is
+  built. Measured on the 4 vCPU cloud host with Rust 1.100.0: pass, 8 min 15 s
+  wall for both builds, both measurements and the ratchet.
+- `--outcome` ratchets a fresh measurement against the committed lock without
+  requiring identical artifacts (the seed changes with every compiler
+  commit). `Stage1Lock::compare_outcome` fails with `TargetMismatch`,
+  `DigestMismatch { parent_seed_lock }`, `CorpusMismatch` (names, kinds or
+  source bytes) or `Regression { program, reason }` when a program the
+  reference records as verified-built no longer builds. New verified builds
+  are reported as `improved`, other differences as `stale` fields; the fresh
+  lock is written to `WORK/stage1.fresh.lock` and the reference is never
+  replaced. CLI: `vesper-bootstrap compare-stage1-outcome REFERENCE FRESH`.
+- The Bazel `//bootstrap:stage1_test` now ratchets against the committed lock
+  instead of asserting that the parser is refused, so backend PRs that make
+  the frontend build do not break it; the committed-lock unit test still
+  asserts the current refusal and is flipped when the lock is re-recorded.
+- New workflow `.github/workflows/bootstrap-stage1.yml` (not a required
+  check; path-filtered PRs, main, weekly, manual): `run.sh stage1 --reproduce
+  --outcome`, then the strict gate, which must pass on the fresh lock once
+  the committed lock is strict and is a notice before. Its weekly/manual job
+  runs the Stage 0 two-seed build and Path B (the `#[ignore]`d
+  `two_seed_builds_compile_the_corpus_bit_identically`) with Lean from
+  `scripts/ci/install-lean.sh`.
+- `bootstrap/stage1.lock` is re-recorded on this branch: same CST results and
+  the same verified probe executable; seed, frontend-source and Cranelift
+  object digests changed with main. SHA-256
+  `2d1110391b22f12f9a726c71e108ec85b6729eaf92e31cd6d010dab191cb1e20`.
+
+Remaining for #582: the verified backend still refuses `parse_main`
+(`unsupported Effect ... effect handlers`). When it accepts the frontend,
+`run.sh stage1 --reproduce --record --require-cross-backend` records the
+strict lock, and the unit test's `BackendUnavailable` assertion becomes an
+acceptance assertion. A true DDC (stage2 by a diverse stage1, manuscript
+10.2) needs a self-hosted compiler that emits code, which does not exist yet.
+
 ## Result and boundary
 
 The Rust seed builds the actual five-file `@vesper-lang/compiler` frontend

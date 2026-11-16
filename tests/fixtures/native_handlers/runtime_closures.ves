@@ -1,0 +1,33 @@
+// A closure chosen at run time is passed to an effectful function.
+linear effect Ask {
+    fn ask() -> i64;
+}
+
+fn apply(
+    sink f: fn @copy (i64) -> i64 eff [Fail[ArithOverflow], Ask],
+    sink x: i64,
+) -> i64 eff [Fail[ArithOverflow], Ask] {
+    f(x) + f(x)
+}
+
+fn pick(sink n: i64) -> fn @copy (i64) -> i64 eff [Fail[ArithOverflow], Ask] {
+    if n > 0 {
+        | v | v + Ask::ask()
+    } else {
+        | v | v * Ask::ask()
+    }
+}
+
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        handle Ask state calls = 0 in {
+            apply(pick(1), 5) + apply(pick(0), 5)
+        } with {
+            return (value, calls) => value * 100 + calls,
+            ask(calls, resume) => resume(wrapping_add(calls, 2), wrapping_add(calls, 1)),
+        }
+    } with {
+        return value => value,
+        raise(overflow, resume) => -1,
+    }
+}

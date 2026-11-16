@@ -245,7 +245,83 @@ exercised by the tests.
 
 ### Remaining gaps
 
-- No encoding proof exists yet for x86-64 or AArch64.
+- No encoding proof exists yet for x86-64 (milestone 6 below covers
+  AArch64).
 - The RV64 proof covers encoding only. Instruction semantics (that the
   emitted sequence implements `Mach.step`) are still checked by
   differential tests under QEMU.
+
+## Milestone 6: AArch64 encodings proved against the A64 encoding diagrams
+
+### What was built
+
+- `lean/CodegenA64Encoding.lean` (imports `VerifiedCodegen.lean`) models the
+  AArch64 encoder the same way milestone 5 models RV64.
+  - `Inst` is the A64 subset `aarch64.rs` uses, named as in the Arm ARM:
+    - `LDR`/`STR` (unsigned offset), `MOVZ`/`MOVK`;
+    - `B.cond`, `B`, `BL`, `CBZ`/`CBNZ`;
+    - `ADD`/`ADDS`/`SUB`/`SUBS`/`AND` (shifted register, `LSL` or `ASR`);
+    - `MADD`/`MSUB`/`SMULH`/`UMULH`, `UDIV`/`SDIV`;
+    - `ADD`/`ADDS`/`SUB` (immediate, optionally `LSL #12`), `EOR`
+      (bitmask immediate), `CSINC`;
+    - `FMOV` between `Xn` and `Dn`, `FADD`/`FSUB`/`FMUL`/`FDIV`, `FNEG`,
+      `FCMP` (double);
+    - `STP` (pre-index), `LDP` (post-index), `RET`.
+  - `decode` is the specification. It dispatches on bits 31:26 and then on
+    each encoding diagram's fixed bits (`sf`, `op`, `S`, `opc`, `ftype`,
+    `op31`, `o0`, `op2`, bit 21 of the shifted-register forms, the shift
+    type). It reads the operand fields at their positions and sign-extends
+    `imm19`, `imm26` and `imm7`. `SMULH`/`UMULH` require `Ra = 31`, as the
+    manual does. Bitmask immediates are decoded only for `N = 1` with
+    `imms ≠ 111111` (a single 64-bit element), the only form the emitter
+    writes; other `N`/`imms` values decode to `none` rather than being
+    misread.
+  - `encode` writes the fields the way `aarch64.rs` does.
+- `decode_encode`:
+  - Statement: every well-formed instruction (registers below 32, every
+    immediate and offset in its field's range) encodes to a word below
+    `2^32` that `decode` maps back to the same instruction.
+  - Each case computes the fields the decoder reads on that instruction's
+    path with `omega`, rewrites them, and lets the dispatch reduce.
+  - `bytes_encode` gives the little-endian bytes.
+- `emit` mirrors `aarch64::emit` for every `M` instruction: the
+  four-instruction `movz`/`movk` immediates, the flag-based trap checks,
+  `cset` as `csinc` with the inverted condition, and the frame's
+  `stp`/`sub sp` (with the shifted form above 4 KiB)/`ldp`/`ret`.
+  - `emit_ok` proves every item is well formed for any `M` whose frame
+    indices fit the 12-bit scaled offset (frames are at most
+    `MAX_FRAME_WORDS` = 4000 words) and whose frame size is below 2^24
+    bytes.
+  - `emit_decodes` chains `emit_ok` and `decode_encode` over the layout.
+- The listing check:
+  - The Lean file prints the words of 61 sample instructions: milestone 5's
+    59 plus `enter 1000` and `enter 512`, which take the shifted `sub sp`
+    forms.
+  - `aarch64::encoding_listing()` (re-exported as
+    `verified_codegen::a64_encoding_listing`) runs the Rust emitter on the
+    same samples. The shared samples and the listing loop moved to
+    `asm::encoding_samples` and `asm::encoding_listing`, so the RV64 listing
+    is unchanged.
+  - `tests/verified_codegen_lean.rs` requires the listings to be equal line
+    for line, and checks the file's hygiene and axiom report like the RV64
+    model's.
+- `scripts/ci/check-lean-models.sh` compiles the new file.
+
+### Checks
+
+- With Lean 4.35.0 the file compiles with no warnings in about 20 s.
+- Every axiom report uses only `propext`, `Classical.choice` and
+  `Quot.sound`.
+- `cargo test --test verified_codegen_lean` passes with `VESPER_LEAN` set:
+  7 tests, including both encoding listings.
+
+### Remaining gaps
+
+- x86-64 has no encoding proof. Its variable-length encodings (REX,
+  ModRM, SIB, displacement widths) need a byte-level decoder rather than
+  32-bit fields.
+- As for RV64, this proves encoding, not semantics. That the emitted A64
+  sequences implement `Mach.step` is still checked by running programs
+  natively and under QEMU.
+- The prologue and system-call code in `aarch64::start` are outside `emit`
+  and not modelled.

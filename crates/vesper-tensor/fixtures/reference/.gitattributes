@@ -1,0 +1,2 @@
+# Golden vectors: keep every byte exactly as generated (CR, NUL, trailing spaces).
+* -text
