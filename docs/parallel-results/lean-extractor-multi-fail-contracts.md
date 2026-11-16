@@ -1,8 +1,9 @@
 # Contracts over multiple Fail effects (#593)
 
-Branch: `codex/extractor-multi-fail-contracts`. This slice builds on PR #830's
-single labeled Fail support and targets that branch as a dependent PR. Main was
-pulled at `d5ec6ff1` before implementation.
+Branch: `codex/extractor-multi-fail-contracts`. This slice includes PR #830's
+single labeled Fail support. Both branches are rebased onto main `471d44ac`;
+this PR now targets main directly. Merge #830 first to isolate this extension
+in the remaining diff.
 
 Contracts now support closed rows containing any number of `Fail[E]` instances,
 including labels with identical payload types. A single instance retains the
@@ -35,13 +36,13 @@ still produces a typed unsupported error.
 
 The end-to-end admission test accepts the exact closed contract proof and
 input witness for a two-instance model, then rejects the unchanged proof after
-the successful branch returns an incorrect value. All 15 extraction tests and
-the targeted admission regression pass with Lean 4.35.0, as do scoped Clippy,
+the successful branch returns an incorrect value. After rebasing, all 18
+extraction tests and all three targeted admission tests pass with Lean 4.35.0, as do scoped Clippy,
 formatting and manifest checks. Commands:
 
 ```sh
 VESPER_LEAN=/tmp/lean-4.35.0-linux/bin/lean cargo +stable test --locked --test lean_extract
-VESPER_LEAN=/tmp/lean-4.35.0-linux/bin/lean cargo +stable test --locked --test verify_extract_cli multi_fail_contract_admission
+VESPER_LEAN=/tmp/lean-4.35.0-linux/bin/lean cargo +stable test --locked --test verify_extract_cli contract_admission
 cargo +stable clippy --locked -p vesper --test lean_extract --test verify_extract_cli --no-deps -- -D warnings
 cargo +stable fmt --all -- --check
 python tools/bazel/sync_build_files.py --check
