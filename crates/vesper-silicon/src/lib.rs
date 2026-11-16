@@ -19,12 +19,16 @@
 //!   to 4 address cells, `interrupt-map` nexus resolution, interrupt
 //!   controllers (RISC-V hart intc, one or more PLICs, APLIC, IMSIC,
 //!   CLINT/ACLINT, GIC) with trigger types and `interrupt-map-pass-thru`,
-//!   ISA extensions, DMA coherence and `dma-ranges`, feeding the frame,
+//!   ISA extensions, DMA coherence and `dma-ranges` (also below PCI hosts),
+//!   PCI `msi-map`/`msi-map-mask`, feeding the frame,
 //!   IrqGuard and DMA models.
 //! * [`aia`]: RISC-V AIA register models: APLIC domains (direct delivery
 //!   through IDCs and MSI forwarding, delegation, edge/level/detached source
-//!   modes) and IMSIC interrupt files (`seteipnum`, `eidelivery`,
-//!   `eithreshold`, `eip`/`eie`, `*topei`).
+//!   modes) and IMSIC interrupt files (`seteipnum`, `eidelivery` including
+//!   0x40000000, `eithreshold`, `eip`/`eie`, `*topei`); [`intc`] adds guest
+//!   interrupt files with `hstatus.VGEIN`, `hgeie`, `hgeip`, `vsireg`,
+//!   `vstopei` and VS-level claims, and PCI MSIs routed by requester ID
+//!   (`msi-map`/`msi-parent`, [`dtb::Platform::pci_msi_route`]).
 //! * [`ccache`]: the SiFive L2 cache controller's `FLUSH64`/`FLUSH32` and
 //!   way-enable registers, used for non-coherent DMA on the StarFive JH7100.
 //! * [`intc`]: PLIC, APLIC, IMSIC and CLINT/ACLINT register-level emulation

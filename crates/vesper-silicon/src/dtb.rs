@@ -51,10 +51,14 @@
 //!   [`Platform::dma_address`] (a missing `dma-ranges` is identity, an empty
 //!   one is identity at that level, as in Linux).
 //!
+//! * PCI `msi-map`/`msi-map-mask` and `msi-parent`: a requester ID's MSI
+//!   controller and device ID ([`Platform::pci_msi_route`], Linux
+//!   `of_map_id` rules), and the host bridge's own `dma-ranges` for the
+//!   functions below it ([`Platform::pci_dma_windows`]).
+//!
 //! Not supported (typed errors): versions before 16, translation across a bus
-//! without `ranges` (a non-memory-mapped bus such as I2C or SPI), PCI
-//! `msi-map`, and resolving a wired interrupt to an IMSIC (IMSICs take MSIs
-//! only).
+//! without `ranges` (a non-memory-mapped bus such as I2C or SPI), and
+//! resolving a wired interrupt to an IMSIC (IMSICs take MSIs only).
 
 use std::collections::BTreeMap;
 
@@ -279,6 +283,17 @@ pub enum DtbError {
     /// The usable memory exceeds [`MAX_MODEL_FRAMES`].
     TooManyFrames {
         frames: u64,
+    },
+    /// The PCI host's `msi-map` has no entry for this requester ID, so the
+    /// function has no MSI controller (Linux's `of_map_id` leaves the
+    /// target unset and the device gets no MSI domain).
+    NoMsiMapEntry {
+        node: String,
+        rid: u32,
+    },
+    /// Neither the host nor an ancestor has `msi-map` or `msi-parent`.
+    NoMsiController {
+        node: String,
     },
 }
 
@@ -889,13 +904,24 @@ impl DeviceTree {
     /// several levels compose by intersection. PCI child addresses drop
     /// their `phys.hi` cell. Windows are sorted by bus address.
     pub fn dma_windows(&self, id: usize) -> Result<Vec<DmaWindow>, DtbError> {
+        self.windows_below(id, self.nodes[id].parent)
+    }
+
+    /// The DMA windows of a bus master directly below `bus` (a PCI function
+    /// below its host bridge, which the tree does not list): `bus`'s own
+    /// `dma-ranges` and every ancestor's.
+    pub fn bus_dma_windows(&self, bus: usize) -> Result<Vec<DmaWindow>, DtbError> {
+        self.windows_below(bus, Some(bus))
+    }
+
+    fn windows_below(&self, id: usize, first: Option<usize>) -> Result<Vec<DmaWindow>, DtbError> {
         let overflow = || DtbError::AddressOverflow {
             node: self.path(id),
         };
         // (dma, addr in the current bus's parent space, size); `None` is
         // the identity over everything.
         let mut cur: Option<Vec<(u128, u128, u128)>> = None;
-        let mut bus = self.nodes[id].parent;
+        let mut bus = first;
         while let Some(b) = bus {
             let Some(parent) = self.nodes[b].parent else {
                 break;
@@ -1519,6 +1545,39 @@ pub struct DmaWindow {
     pub size: u64,
 }
 
+/// One `msi-map` entry (PCI MSI binding, `pci-msi.txt`): requester IDs
+/// `rid_base..rid_base + length` (after `msi-map-mask`) map to `controller`
+/// with device IDs from `msi_base`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MsiMapEntry {
+    pub rid_base: u32,
+    pub controller: String,
+    pub msi_base: u32,
+    pub length: u32,
+}
+
+/// Where a PCI function's MSIs go: the MSI controller (an IMSIC on RISC-V,
+/// a GICv3 ITS on Arm) and the device ID it sees. An IMSIC ignores the
+/// device ID (the identity is the MSI data); an IOMMU or an ITS uses it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MsiRoute {
+    pub controller: String,
+    pub device_id: u32,
+    /// The node whose `msi-map` or `msi-parent` decided it.
+    pub via: String,
+}
+
+/// A PCI requester ID: `bus << 8 | device << 3 | function`.
+pub fn requester_id(bus: u8, device: u8, function: u8) -> Result<u32, DtbError> {
+    if device >= 32 || function >= 8 {
+        return Err(DtbError::BadInterruptSpecifier {
+            node: String::new(),
+            detail: format!("PCI {bus:02x}:{device:02x}.{function} does not exist"),
+        });
+    }
+    Ok((u32::from(bus) << 8) | (u32::from(device) << 3) | u32::from(function))
+}
+
 /// What the Silicon models take from a devicetree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Platform {
@@ -2080,6 +2139,140 @@ impl Platform {
             cur = self.tree.node(n).parent;
         }
         Ok(None)
+    }
+
+    /// The `msi-map` of `node` and its `msi-map-mask` (all ones when
+    /// absent), or `None` without `msi-map`. Each entry is four cells, as
+    /// Linux's `of_map_id` reads them; an empty map, a length that is not a
+    /// multiple of four cells, a zero or overflowing length, a base the
+    /// mask ignores, and an unknown phandle are typed errors.
+    pub fn msi_map(&self, node: &str) -> Result<Option<(Vec<MsiMapEntry>, u32)>, DtbError> {
+        let n = self.node_of(node)?;
+        let Some(cells) = self.tree.prop_cells(n, "msi-map")? else {
+            return Ok(None);
+        };
+        if cells.is_empty() || !cells.len().is_multiple_of(4) {
+            return Err(self.tree.bad(
+                n,
+                "msi-map",
+                format!("{} cells is not a multiple of 4", cells.len()),
+            ));
+        }
+        let mask = self.tree.prop_u32(n, "msi-map-mask")?.unwrap_or(u32::MAX);
+        let mut out = Vec::new();
+        for &[rid_base, ph, msi_base, length] in cells.as_chunks::<4>().0 {
+            if rid_base & !mask != 0 {
+                return Err(self.tree.bad(
+                    n,
+                    "msi-map",
+                    format!("msi-map-mask {mask:#x} ignores rid-base {rid_base:#x}"),
+                ));
+            }
+            if length == 0
+                || rid_base.checked_add(length - 1).is_none()
+                || msi_base.checked_add(length - 1).is_none()
+            {
+                return Err(self.tree.bad(
+                    n,
+                    "msi-map",
+                    format!(
+                        "entry {rid_base:#x}+{length:#x} -> {msi_base:#x} overflows or is empty"
+                    ),
+                ));
+            }
+            let ctl = self
+                .tree
+                .by_phandle(ph)
+                .ok_or_else(|| DtbError::UnknownPhandle {
+                    node: self.tree.path(n),
+                    phandle: ph,
+                })?;
+            out.push(MsiMapEntry {
+                rid_base,
+                controller: self.tree.path(ctl),
+                msi_base,
+                length,
+            });
+        }
+        Ok(Some((out, mask)))
+    }
+
+    /// The MSI controller and device ID of requester ID `rid` below PCI
+    /// host `host`, as Linux's `of_msi_map_id`/`of_map_id` resolve them:
+    /// the nearest node (the host, then its ancestors) with `msi-map`
+    /// decides: the first entry whose range holds `rid & msi-map-mask`
+    /// gives `msi_base + (masked - rid_base)`, and no matching entry is
+    /// [`DtbError::NoMsiMapEntry`]. Without `msi-map`, the nearest
+    /// `msi-parent` takes the requester ID unchanged.
+    pub fn pci_msi_route(&self, host: &str, rid: u32) -> Result<MsiRoute, DtbError> {
+        let h = self.node_of(host)?;
+        if !self.tree.is_pci_bus(h)? {
+            return Err(self.tree.bad(h, "device_type", "not a PCI bus"));
+        }
+        if rid > 0xffff {
+            return Err(DtbError::BadInterruptSpecifier {
+                node: self.tree.path(h),
+                detail: format!("requester ID {rid:#x} is wider than 16 bits"),
+            });
+        }
+        let mut cur = Some(h);
+        while let Some(n) = cur {
+            let path = self.tree.path(n);
+            if let Some((entries, mask)) = self.msi_map(&path)? {
+                let masked = rid & mask;
+                return entries
+                    .iter()
+                    .find(|e| masked >= e.rid_base && masked - e.rid_base < e.length)
+                    .map(|e| MsiRoute {
+                        controller: e.controller.clone(),
+                        device_id: e.msi_base + (masked - e.rid_base),
+                        via: path.clone(),
+                    })
+                    .ok_or(DtbError::NoMsiMapEntry { node: path, rid });
+            }
+            cur = self.tree.node(n).parent;
+        }
+        let parent = self
+            .msi_parent(host)?
+            .ok_or_else(|| DtbError::NoMsiController {
+                node: self.tree.path(h),
+            })?;
+        let mut via = Some(h);
+        while let Some(n) = via {
+            if self.tree.has_prop(n, "msi-parent") {
+                break;
+            }
+            via = self.tree.node(n).parent;
+        }
+        Ok(MsiRoute {
+            controller: parent,
+            device_id: rid,
+            via: via.map_or_else(String::new, |n| self.tree.path(n)),
+        })
+    }
+
+    /// The DMA windows of the functions below PCI host `host`: the host's
+    /// own `dma-ranges` and its ancestors' (see
+    /// [`DeviceTree::bus_dma_windows`]).
+    pub fn pci_dma_windows(&self, host: &str) -> Result<Vec<DmaWindow>, DtbError> {
+        self.tree.bus_dma_windows(self.node_of(host)?)
+    }
+
+    /// The CPU physical address that a bus-master write by a function below
+    /// `host` to bus address `[dma, dma + len)` reaches.
+    pub fn pci_cpu_address(&self, host: &str, dma: u64, len: u64) -> Result<u64, DtbError> {
+        let end = dma.checked_add(len);
+        self.pci_dma_windows(host)?
+            .iter()
+            .find(|w| {
+                dma >= w.dma_addr && end.is_some_and(|e| e <= w.dma_addr.saturating_add(w.size))
+            })
+            .and_then(|w| w.cpu_addr.checked_add(dma - w.dma_addr))
+            .ok_or(DtbError::NotDmaAddressable {
+                node: host.to_string(),
+                addr: dma,
+                len,
+            })
     }
 
     /// The device's DMA windows (see [`DeviceTree::dma_windows`]).
