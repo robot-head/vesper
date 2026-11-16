@@ -3,7 +3,8 @@
 Retained work plans and prompts use the section identifiers from the earlier
 design. This table is a navigation aid to the authoritative
 [manuscript](manuscript/README.md), not a specification copy. Find the named topic
-within the destination chapter; subsection numbers changed during consolidation.
+within the destination chapter; subsection numbers changed during consolidation. The destinations below include
+the continuation-fission insertion as Chapter 6 (42 chapters total).
 
 | Earlier section | Topic | Manuscript chapter |
 | --- | --- | --- |
@@ -13,42 +14,42 @@ within the destination chapter; subsection numbers changed during consolidation.
 | 4 | Core calculus and modes | 3 |
 | 5 | Places and typing judgments | 3–4 |
 | 6 | Effects and soundness | 5; Appendix A |
-| 7, 10 | Compiler and workspace architecture | 7 |
-| 8 | Loom | 10 |
-| 9 | SemVer | 11 |
-| 11 | Lean extractor | 8 |
-| 12 | Pulse and SimPulse | 14 |
-| 13 | Bridge and FFI | 15 |
-| 14 | Vector and SIMD | 13 |
-| 15 | Strata | 12 |
-| 16 | Pact and Forge | 6 |
-| 17 | Prism | 33 |
-| 18 | Aura | 37 |
-| 19 | Ignis | 38 |
-| 20 | Wire and Json | 29 |
-| 21 | Lens | 17 |
-| 22 | Beacon | 31 |
-| 23 | Vault | 27 |
-| 24 | Quarry | 35 |
-| 25 | Chorus | 34 |
-| 26 | Silicon | 24 |
-| 27 | eBPF | 25 |
-| 28 | Tensor | 41 |
-| 29 | Crucible and migrate | 21 |
-| 30 | Nexus | 16 |
-| 31 | Chrono | 22 |
-| 32 | Resonance | 40 |
-| 33 | Aegis | 28 |
-| 34 | Flux | 36 |
-| 35 | Warp | 32 |
-| 36 | Kinetic | 39 |
-| 37 | Aether | 26 |
-| 38 | Grammar | 30 |
-| 39 | Stylus and Lint | 18 |
-| 40 | Codex | 19 |
-| 41 | Metronome | 23 |
-| 42 | Bootstrap and verified codegen | 9 |
-| 43 | Chroma | 20 |
-| 44 | Unified modal, destination, refinement, and graded theory | 3–5, 7, 11; Appendix A |
+| 7, 10 | Compiler and workspace architecture | 8 |
+| 8 | Loom | 11 |
+| 9 | SemVer | 12 |
+| 11 | Lean extractor | 9 |
+| 12 | Pulse and SimPulse | 15 |
+| 13 | Bridge and FFI | 16 |
+| 14 | Vector and SIMD | 14 |
+| 15 | Strata | 13 |
+| 16 | Pact and Forge | 7 |
+| 17 | Prism | 34 |
+| 18 | Aura | 38 |
+| 19 | Ignis | 39 |
+| 20 | Wire and Json | 30 |
+| 21 | Lens | 18 |
+| 22 | Beacon | 32 |
+| 23 | Vault | 28 |
+| 24 | Quarry | 36 |
+| 25 | Chorus | 35 |
+| 26 | Silicon | 25 |
+| 27 | eBPF | 26 |
+| 28 | Tensor | 42 |
+| 29 | Crucible and migrate | 22 |
+| 30 | Nexus | 17 |
+| 31 | Chrono | 23 |
+| 32 | Resonance | 41 |
+| 33 | Aegis | 29 |
+| 34 | Flux | 37 |
+| 35 | Warp | 33 |
+| 36 | Kinetic | 40 |
+| 37 | Aether | 27 |
+| 38 | Grammar | 31 |
+| 39 | Stylus and Lint | 19 |
+| 40 | Codex | 20 |
+| 41 | Metronome | 24 |
+| 42 | Bootstrap and verified codegen | 10 |
+| 43 | Chroma | 21 |
+| 44 | Unified modal, destination, refinement, and graded theory | 3–5, 8, 12; Appendix A |
 | Appendix A | Metatheory | Appendix A |
 | Appendix B | Brand identity | Appendix B |
