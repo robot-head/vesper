@@ -9,7 +9,7 @@
 #set document(
   title: "Vesper: Language Design and Formal Specification",
   author: "Vesper",
-  description: "The complete Vesper language specification: Parts I–VIII (Chapters 1–41), mechanized Lean 4 metatheory, and official brand specification.",
+  description: "The complete Vesper language specification: Parts I–VIII (Chapters 1–42), mechanized Lean 4 metatheory, and official brand specification.",
   keywords: ("Vesper", "systems programming", "linear types", "lexical effects", "refinement types", "Lean 4"),
   date: datetime(year: 2026, month: 11, day: 14),
 )
@@ -19,8 +19,9 @@
 #set heading(numbering: none)
 #show heading: set text(hyphenate: false)
 #show heading.where(level: 1): set text(size: 18pt, weight: "bold")
-#show heading.where(level: 2): set text(size: 12.5pt, weight: "bold")
-#show heading.where(level: 3): set text(size: 11pt, weight: "bold")
+#show heading.where(level: 2): set text(size: 16pt, weight: "bold")
+#show heading.where(level: 3): set text(size: 12.5pt, weight: "bold")
+#show heading.where(level: 4): set text(size: 11pt, weight: "bold")
 #show heading.where(level: 1): it => {
   pagebreak(weak: true)
   block(above: 0pt, below: 12pt, it)
@@ -60,7 +61,7 @@
 #v(10mm)
 #line(length: 100%, stroke: 0.6pt + rule)
 #v(7mm)
-#text(size: 12pt)[Parts I–VIII · Chapters 1–41 · Appendices A and B]
+#text(size: 12pt)[Parts I–VIII · Chapters 1–42 · Appendices A and B]
 #v(1fr)
 #text(size: 10.5pt, fill: muted)[Manuscript edition\ 14 November 2026]
 #v(8mm)
@@ -71,14 +72,12 @@
 #counter(page).update(1)
 #text(size: 18pt, weight: "bold")[About this specification]
 #v(8mm)
-This monograph defines the canonical end-state design, formal typing rules,
-compiler and runtime architecture, standard platform substrates, and
-mechanized metatheory of the Vesper programming language ($lambda_(upright("Vesper"))$).
+This manuscript describes a proposed end-state design for the Vesper programming language ($lambda_(upright("Vesper"))$). It contains illustrative rules, implementation sketches, and research goals alongside existing code. It is under technical review and is not a conformance standard or evidence of an end-to-end soundness or security proof. In particular, do not rely on its runtime isolation, cancellation, snapshot, or distributed-memory claims without independent validation against the implementation.
 
 The specification is organized bottom-up into eight architectural parts
-spanning Chapters 1–41 and Appendices A–B: core language design and unified
+spanning Chapters 1–42 and Appendices A–B: core language design and unified
 four-axis modal, destination, liquid-refinement, and graded effect theory
-(Part I); the five-stage compiler pipeline, 49-crate host workspace,
+(Part I); the five-stage compiler pipeline, host workspace,
 prophecy-free Lean 4 verification extractor, verified bootstrap, Vesper Loom,
 and mathematical SemVer variance (Part II); zero-GC memory, SIMD, fiber I/O,
 wire FFI, and WasmFX substrates (Part III); incremental IDE, formatting,
@@ -89,8 +88,7 @@ serialization, non-malleable binary parsers, telemetry, kernel-bypass
 networking, HTTP/3 services, choreographic consensus, hermetic SQL, and DBSP
 stream processing (Part VI); and native user interfaces, tri-backend 3D
 graphics, deterministic physics, hard-realtime DSP, and shape-checked tensor
-compute (Part VII). Appendix A presents the complete zero-`sorryAx` Lean 4
-soundness artifacts, and Appendix B specifies Vesper's geometric and visual
+compute (Part VII). Appendix A presents illustrative Lean 4 kernel models, and Appendix B specifies Vesper's geometric and visual
 identity.
 
 #v(5mm)
@@ -114,7 +112,7 @@ exact source text in the editable Typst manuscript.
 #text(size: 9pt, fill: muted)[Typeset with Typst 0.15.1. Libertinus Serif, DejaVu Sans Mono, and New Computer Modern Math are embedded using Typst's bundled fonts.]
 
 #pagebreak()
-#outline(title: [Contents], depth: 1, indent: auto)
+#outline(title: [Contents], depth: 2, indent: auto)
 
 #pagebreak()
 #set page(

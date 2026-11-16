@@ -978,3 +978,32 @@ fn branch_joins_resolve_empty_constructors_and_callback_rows() {
         "E0403",
     );
 }
+
+#[test]
+fn explicit_field_floor_survives_instantiation() {
+    rejects(
+        "copy struct OwnedFd { raw: i64 @@ linear } fn main() -> i64 { let fd = OwnedFd { raw: 7 }; 0 }",
+        "E0302",
+    );
+    let world = checked(
+        "copy struct Scalar { raw: i64 } copy struct OwnedFd { raw: i64 @@ linear } copy enum MaybeFd { None, Some(OwnedFd) }",
+    );
+    let bounds = std::collections::BTreeMap::new();
+    assert_eq!(
+        world.mode(&Type::Named("Scalar".into(), vec![]), &bounds),
+        Mode::Copy
+    );
+    assert_eq!(
+        world.mode(&Type::Named("OwnedFd".into(), vec![]), &bounds),
+        Mode::Linear
+    );
+    assert_eq!(
+        world.mode(&Type::Named("MaybeFd".into(), vec![]), &bounds),
+        Mode::Linear
+    );
+    assert_eq!(world.adts["Scalar"].variants[0].fields[0].modality, None);
+    assert_eq!(
+        world.adts["OwnedFd"].variants[0].fields[0].modality,
+        Some(Mode::Linear)
+    );
+}

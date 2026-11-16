@@ -92,7 +92,7 @@ pub(crate) fn derive_scheme(world: &dyn SourceWorld, adt: &Adt) -> Result<ModeSc
     let base = evaluate(world, adt, &all_copy);
     // A parameter is joined when raising it alone raises the result. The
     // probe may exceed the declared bound; agreement is only required on the
-    // well-formed domain below, where the field-modality meet is the identity.
+    // well-formed domain below. Explicit field floors contribute to the base.
     let joins: Vec<u32> = type_params
         .iter()
         .copied()

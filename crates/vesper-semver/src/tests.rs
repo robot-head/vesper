@@ -37,8 +37,51 @@ fn cap(name: &str, q: Resumption) -> Capability {
         arguments: vec![],
         resumption: q,
         ceiling: None,
+        grade_relation: GradeRelation::UpperBound,
     }
 }
+#[test]
+fn exact_grades_cannot_change_weaken_or_disappear() {
+    let mut old = function();
+    let mut timing = cap("ConstTime", Resumption::Linear);
+    timing.ceiling = Some(100);
+    timing.grade_relation = GradeRelation::Exact;
+    old.effects.capabilities.push(timing);
+    assert_eq!(
+        check(old.clone(), old.clone()).classification,
+        Classification::Patch
+    );
+    for value in [0, 99, 101, u64::MAX] {
+        let mut new = old.clone();
+        new.effects.capabilities[0].ceiling = Some(value);
+        let report = check(old.clone(), new);
+        assert_eq!(report.classification, Classification::Major);
+        assert!(report.issues.iter().any(|i| i.rule == "SV-Grade"));
+    }
+    let mut weaker = old.clone();
+    weaker.effects.capabilities[0].grade_relation = GradeRelation::UpperBound;
+    assert_eq!(
+        check(old.clone(), weaker).classification,
+        Classification::Major
+    );
+    assert_eq!(
+        check(old.clone(), function()).classification,
+        Classification::Major
+    );
+    let mut malformed = old.clone();
+    malformed.effects.capabilities[0].ceiling = None;
+    assert_eq!(
+        check(old.clone(), malformed).classification,
+        Classification::Unknown
+    );
+    let json = serde_json::to_string(&interface(old.clone())).unwrap();
+    assert!(json.contains("\"grade_relation\":\"exact\""));
+    assert_eq!(
+        serde_json::from_str::<Interface>(&json).unwrap(),
+        interface(old)
+    );
+}
+
 #[test]
 fn constant_resource_ceilings_are_covariant_and_missing_is_unknown() {
     let mut old = function();

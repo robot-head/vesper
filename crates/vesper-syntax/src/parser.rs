@@ -619,12 +619,12 @@ impl Parser<'_> {
             self.expect(K::Colon);
             let ty = self.ty();
             let modality = if self.eat(K::AtAt) {
-                self.mode().unwrap_or_else(|| {
+                Some(self.mode().unwrap_or_else(|| {
                     self.error("expected field modality");
                     Mode::Linear
-                })
+                }))
             } else {
-                Mode::Linear
+                None
             };
             out.push(Field {
                 name,
@@ -746,7 +746,7 @@ impl Parser<'_> {
                             fields.push(Field {
                                 name: fields.len().to_string(),
                                 ty: self.ty(),
-                                modality: Mode::Linear,
+                                modality: None,
                                 temperature: None,
                             });
                             if !self.eat(K::Comma) {

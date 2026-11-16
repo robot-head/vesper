@@ -227,6 +227,7 @@ fn expected_code(name: &str) -> Option<&'static str> {
         "duplicate_variants" => Some("E0100"),
         "effect_missing" => Some("E0401"),
         "field_mode" => Some("E0105"),
+        "explicit_linear_field_drop" => Some("E0302"),
         "field_mode_dag" => Some("E0105"),
         "function_linear_drop" => Some("E0302"),
         "function_linear_twice" => Some("E0303"),

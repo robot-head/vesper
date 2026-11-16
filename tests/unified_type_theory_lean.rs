@@ -23,6 +23,14 @@ fn model_has_no_escape_hatches() {
     }
     for theorem in [
         "modevec_le_trans",
+        "exclusive_place_never_duplicated",
+        "ordered_owner_never_duplicated",
+        "shared_linear_view_can_split",
+        "capsule_rejects_thread_affinity",
+        "capsule_rejects_outer_capability",
+        "capsule_rejects_external_alias",
+        "capsule_rejects_shared_owner",
+        "capsule_rejects_ordered_owner",
         "capsule_seal_produces_portable_uncontended",
         "lifo_rejects_out_of_order_irq_restore",
         "ghost_linear_token_zero_runtime_footprint",

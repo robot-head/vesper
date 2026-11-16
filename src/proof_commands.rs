@@ -1,7 +1,7 @@
 //! Local Lean artifact replay and axiom-policy auditing; never a cache certificate.
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     env,
     fs::{self, File},
     io::Read,
@@ -17,7 +17,7 @@ const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_FILES: usize = 4096;
 const MAX_CAPTURE: usize = 8 * 1024 * 1024;
 const MARKER: &str = "VESPER_PROOF_AUDIT_V1:";
-const HELP: &str = "Usage: vesper proof-audit <Module> --root <artifact-directory> --theorem <Qualified.name> [--theorem ...] [--allow-axiom <Name>] [--lean <path>] [--timeout <seconds>] [--json]\n\nReplay existing local Lean 4.35.0 artifacts through the kernel and audit named theorems.\nArtifact imports disable package environment extensions and plugins.\nThe selected Lean toolchain and artifact parser remain trusted; this is not an OS sandbox, provenance certificate or reusable proof-cache approval.\nThe default axiom policy is empty; sorryAx is always forbidden.\n";
+const HELP: &str = "Usage: vesper proof-audit <Module> --root <artifact-directory> --theorem <Qualified.name> [--theorem ...] [--allow-axiom <Name>] [--lean <path>] [--timeout <seconds>] [--json]\n\nReplay existing local Lean 4.35.0 artifacts through the kernel and audit named theorems.\nArtifact imports disable package environment extensions and plugins.\nThe selected Lean toolchain and artifact parser remain trusted; this is not an OS sandbox, provenance certificate or reusable proof-cache approval.\nThe default axiom policy is empty; sorryAx, compiler-trust axioms, and generated _native axioms are always forbidden.\n";
 
 #[derive(Default)]
 struct Options {
@@ -25,6 +25,7 @@ struct Options {
     root: Option<PathBuf>,
     theorems: BTreeSet<String>,
     allowed: BTreeSet<String>,
+    expected_types: BTreeMap<String, String>,
     lean: Option<String>,
     timeout: Option<u64>,
     json: bool,
@@ -39,6 +40,15 @@ pub(crate) fn name_valid(name: &str) -> bool {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'\'')
         })
+}
+
+/// These axioms bypass kernel justification of the claimed result. Explicit
+/// policies may admit mathematical assumptions, but never proof/compiler escapes.
+pub(crate) fn forbidden_axiom(name: &str) -> bool {
+    matches!(name, "sorryAx" | "Lean.ofReduceBool" | "Lean.trustCompiler")
+        // Lean 4.35's Meta.nativeEqTrue creates per-theorem axioms under
+        // `_native ++ tacticName ++ ax`; see Lean/Meta/Native.lean.
+        || name.split('.').any(|part| part == "_native")
 }
 
 pub fn run(args: Vec<String>) -> Result<(), String> {
@@ -68,8 +78,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                 if arg == "--theorem" {
                     options.theorems.insert(name);
                 } else {
-                    if name == "sorryAx" {
-                        return Err("sorryAx cannot be allowed by the audit policy".into());
+                    if forbidden_axiom(&name) {
+                        return Err(format!("{name} cannot be allowed by the audit policy"));
                     }
                     options.allowed.insert(name);
                 }
@@ -486,16 +496,45 @@ pub(crate) fn audit_generated_with_policy(
     lean: &str,
     timeout: u64,
 ) -> Result<serde_json::Value, String> {
+    audit_generated_with_types(
+        root,
+        module,
+        theorems,
+        allowed_axioms,
+        &BTreeMap::new(),
+        lean,
+        timeout,
+    )
+}
+
+/// Additionally require designated wrapper theorems to have exactly the closed
+/// constant type emitted for their source contract, with no extra hypotheses.
+pub(crate) fn audit_generated_with_types(
+    root: &Path,
+    module: &str,
+    theorems: &[&str],
+    allowed_axioms: &[&str],
+    expected_types: &BTreeMap<String, String>,
+    lean: &str,
+    timeout: u64,
+) -> Result<serde_json::Value, String> {
     if !name_valid(module)
         || theorems.is_empty()
         || theorems.len() > 128
         || theorems.iter().any(|name| !name_valid(name))
-        || allowed_axioms.iter().any(|name| {
-            !name_valid(name)
-                || matches!(
-                    *name,
-                    "sorryAx" | "Lean.ofReduceBool" | "Lean.trustCompiler"
-                )
+        || allowed_axioms
+            .iter()
+            .any(|name| !name_valid(name) || forbidden_axiom(name))
+        || expected_types.iter().any(|(theorem, ty)| {
+            !theorems.contains(&theorem.as_str())
+                || !name_valid(theorem)
+                || !ty
+                    .strip_prefix("Vesper.")
+                    .and_then(|n| {
+                        n.strip_suffix("$contract")
+                            .or_else(|| n.strip_suffix("$admissible"))
+                    })
+                    .is_some_and(|function| name_valid(function) && !function.contains('.'))
         })
         || !(1..=300).contains(&timeout)
     {
@@ -503,6 +542,7 @@ pub(crate) fn audit_generated_with_policy(
     }
     let options = Options {
         theorems: theorems.iter().map(|name| (*name).to_owned()).collect(),
+        expected_types: expected_types.clone(),
         allowed: allowed_axioms
             .iter()
             .map(|name| (*name).to_owned())
@@ -519,7 +559,7 @@ pub(crate) fn audit_generated_with_policy(
 }
 
 /// Replay local Lean artifacts under an explicit allowed-axiom whitelist for
-/// package publication gates (`vesper publish`), always rejecting `sorryAx`.
+/// package publication gates (`vesper publish`), always rejecting proof/compiler escape axioms.
 pub(crate) fn audit_policy(
     root: &Path,
     module: &str,
@@ -544,8 +584,10 @@ pub(crate) fn audit_policy(
     }
     let mut allowed = BTreeSet::new();
     for ax in allowed_axioms {
-        if ax == "sorryAx" {
-            return Err("sorryAx cannot be allowed by the publish proof policy".into());
+        if forbidden_axiom(ax) {
+            return Err(format!(
+                "{ax} cannot be allowed by the publish proof policy"
+            ));
         }
         if !name_valid(ax) {
             return Err(format!("invalid Lean axiom name '{ax}'"));
@@ -602,7 +644,8 @@ fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, St
         &request,
         serde_json::to_vec(&serde_json::json!({
             "schema_version":1,"root":snapshot,"toolchain_prefix":prefix,
-            "module":module,"theorems":options.theorems
+            "module":module,"theorems":options.theorems,
+            "expected_types": options.expected_types.iter().collect::<Vec<_>>()
         }))
         .map_err(|e| e.to_string())?,
     )
@@ -699,7 +742,7 @@ fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, St
         .theorems
         .iter()
         .flat_map(|t| t.axioms.iter())
-        .filter(|axiom| axiom.as_str() == "sorryAx" || !options.allowed.contains(*axiom))
+        .filter(|axiom| forbidden_axiom(axiom) || !options.allowed.contains(*axiom))
         .cloned()
         .collect::<BTreeSet<_>>();
     Ok(AuditReport {
@@ -729,6 +772,37 @@ fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, St
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_and_generated_policies_reject_escape_axioms_before_io() {
+        for axiom in [
+            "sorryAx",
+            "Lean.ofReduceBool",
+            "Lean.trustCompiler",
+            "Example.native._native.native_decide.ax_1_1",
+        ] {
+            let error = audit_policy(
+                Path::new("missing-artifacts"),
+                "Model",
+                &["Model.ok".into()],
+                &[axiom.into()],
+                Some("missing-lean"),
+                Some(30),
+            )
+            .unwrap_err();
+            assert!(error.contains(&format!("{axiom} cannot be allowed")));
+            let error = audit_generated_with_policy(
+                Path::new("missing-artifacts"),
+                "Model",
+                &["Model.ok"],
+                &[axiom],
+                "missing-lean",
+                30,
+            )
+            .unwrap_err();
+            assert_eq!(error, "invalid generated proof audit request");
+        }
+    }
 
     #[test]
     fn identifier_surface_is_bounded_and_cannot_inject_source() {

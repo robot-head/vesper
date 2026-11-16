@@ -1,27 +1,75 @@
 # Manuscript publication checks
 
-Edition: 14 November 2026. Compiler: Typst 0.15.1, bundled fonts only.
-Applied revision: `0001-manuscript-unify-end-state-specification.patch`.
+The checked-in PDF was regenerated from the under-review manuscript using Typst 0.15.1 and bundled fonts. The current review status and outstanding technical findings are recorded in [REVIEW-STATUS.md](REVIEW-STATUS.md).
 
-| Check | Result |
-| --- | --- |
-| Architectural parts | I–VIII, each once and in order |
-| Complete numbered chapter inventory | Chapters 1–41, each once and in numerical order |
-| Appendices | A and B in Part VIII |
-| Pages | 228 |
-| PDF bookmarks | 280 |
-| Hyperlinks and internal cross-references | 534; all internal PDF destinations are valid |
-| Source-code preservation | All 157 complete blocks survive normalized PDF text extraction |
-| Patch source-code fidelity | All 157 fenced listings are identical to the supplied patch |
-| Fonts | All 7 used font subsets embedded |
-| Missing text glyphs | None found |
-| Text exceeding checked margins | None found |
-| Nearly empty spill pages | None found |
-| Typst compilation diagnostics | None |
-| Website design actions | All three point to the PDF; no specification-text link remains |
+`verify.py` passed for the revised PDF: 220 pages, Parts I–VIII, Chapters 1–42, Appendices A and B, 293 bookmarks, 530 links, 159 preserved code blocks, and seven embedded font subsets. It found no missing text glyphs, checked-margin overflows, or sparse body pages under its current line-count and height thresholds. The verifier also checked that named theorems in explicitly cited Lean listings exist, without checking their signatures or proofs.
 
-All 228 pages were rendered into contact sheets and reviewed. Detailed renders covered the cover and contents, part openers, tables, formal rules, code listings, and both appendices. Two wide inference-rule premises were split across lines. Four code listings use slightly tighter line spacing to eliminate isolated short continuation pages while retaining their font size and exact source text. Unsupported symbol names and TeX-style math escapes in the supplied patch were corrected to native Typst notation.
+These are publication checks, not an audit of language rules, examples, proofs, implementations, security claims, or the completeness of spill-page detection.
 
-The source-code comparison uses Typst's evaluated raw blocks and actual PDF text. A separate comparison against the applied patch confirms that no code listing changed during the publication repairs. All 273 document labels are unique and all 416 source-level internal cross-references resolve. Mathematical expressions were visually checked; this is a publication check, not an independent proof audit.
+Formal-model validation: Lean 4.35.0 passed `scripts/ci/check-lean-models.sh`, including the repaired ADT and capsule models and new scalar-store strong-update model. The emitted axiom reports contain no `sorryAx`; these checks do not extend the models beyond their stated scope.
 
-Two successive local compilations with the pinned compiler and bundled fonts produced identical PDF bytes. The website build checks verify that the published file is a PDF and that every design action opens it. Publication counts, the PDF digest, source digests, and the applied patch digest are recorded in `source-manifest.json`.
+The strengthened Appendix A fragment proves evaluation existence, type preservation, fresh allocation IDs, and exactly-once consumption for closed copy-result programs. Lean 4.35.0 checked the new proofs with only `propext`, `Quot.sound`, and `Classical.choice` in their reported dependencies. This is not a proof for the full compiler or surface language.
+
+Implementation regression checks: 18 core unit tests, 16 syntax unit tests, 108 language tests, 14 LSP navigation tests, and all four self-hosted checker suites passed. The self-hosted suites include native execution and repository-wide differential checking; the new explicit-linear scalar-field fixture is rejected by both checkers. These tests are conformance evidence for the change, not an end-to-end compiler proof.
+
+The full Lean-model CI script also passed with `GhostErasure.lean` compiled against a freshly built `MetatheoryAppendix.olean`. Erasure equivalence, non-interference, ghost termination, leak rejection, and failure rejection were kernel-checked. Their reported dependencies are within the same three-axiom allowlist.
+
+The larger operational developments (`MetatheoryFull`, `Metatheory/Closures`, `Metatheory/Polymorphism`, and `MetatheoryPlaces`) passed their Rust-driven Lean kernel checks and exhaustive per-theorem axiom audits. The first three now reject copy typing of scalar wrappers with explicit linear floors; progress, preservation, substitution, handler-state safety, escape prevention, and exhaustion remain checked. The CI model script now includes all four developments.
+
+The finite `ResourceModel42` suite passed fresh compilation, projection and kernel replay of its artifact closure, exhaustive axiom-policy checking, and corrupt/missing/private-constructor/forbidden-axiom controls. The resource-oracle protocol suite passed all 18 tests across the initial run and the corrected fixture rerun; the affine-branch and dynamic-growth fixtures now use copy floors for scalar fields. These results validate the finite model and its proof transport, not a production compiler refinement.
+
+The heap-field strong-update extension and `RefinementPlaces` bridge passed Lean 4.35.0. The latter connects the snapshot postcondition to the effect-place model's `patch`, including composed lenses. Regression theorems cover stale aliases, dependent sibling facts, exact reachable post-states, and physical disjointness. Allocation and linear payload ownership remain outside this proof.
+
+Both `refinement_places_lean` tests passed with the pinned compiler: all theorem declarations in the new refinement modules are audited, imports are freshly compiled, and axiom reports stay within the standard allowlist. The heap model additionally proves execution existence and total correctness for its finite command language.
+
+Upstream integration: pulled `origin/main` through `7783cf2d`, preserved the upstream parser changes and added Lean models, and extended the field-floor correction to the newly added generic `mode_cross` kinding API. Core and syntax unit/integration/doc tests, all 108 language tests, and the merged Lean-model CI script passed. A follow-up pull reported already up to date.
+
+Clock/quotient admission: core tests passed, including six new regressions for delayed linear payloads, ghost forcing, recursive capture/effect restrictions, and exact public-operation proof-status coverage. The extension audit freshly compiled `ClockQuotientSafety.lean` and checked all ten theorem reports. Clocked forcing and rejected counterexamples use no axioms; quotient lifting uses `Quot.sound`. The Rust declaration helper validates caller-supplied statuses, not kernel certificates.
+
+Contention refinement: the heap model now proves sound weakening under arbitrary interference outside immutable locations, stable retention obligations, and the disjunction rejection case. Both extension-audit tests passed after fresh compilation of the model and lens bridge; the revised PDF passed publication QA. These predicates are not yet implemented as a general source refinement checker.
+
+Ordered contexts: the core suite passed with nine mode-crossing tests, including permission contraction, ordinary-context LIFO rejection, shared-linear views, and ordered aggregate fields. The updated unified Lean model and the new ordered trace model passed kernel checking; extension audits cover checker/typing equivalence, prefixes and per-identity conservation. The Rust `LifoState` helper and the Lean trace model still require source-event correspondence.
+
+Capsule admission: the Rust helper requires supplied ownership/isolation facts and rejects ordered obligations. Lean checked all five rejection cases and the strengthened successful-admission theorem, preserving usage while producing portable, uncontended, unordered output. This is an admission check, not a heap graph analysis or a transfer implementation.
+
+Upstream FIP integration: pulled through `e9c731af`, changed the generated `Box[T]` field to inherit its payload mode, and verified affine scalar boxes and linear token boxes. All six FIP tests, 108 language tests, core/syntax suites, and the full Lean-model script passed after integration and capsule changes.
+
+Pulled through `d59349ed` and retained upstream Prism, output-slice, grade, ghost, and SemVer changes. Resolved the Lean CI list conflict by retaining all models. Core and SemVer suites passed after repairing ghost observation, permission splitting, presence separation, and erasure admission; exhaustive cases cover all modes, permissions and presences. The added upstream Prism model also passed Lean.
+
+Resource grades: all 39 SemVer unit tests and nine release-policy integration tests passed, including exact-cost changes, weakening, removal, malformed grades, and serialization. The extension harness freshly compiled and audited all eleven `ResourceGrades` theorems alongside the other extensions. The finite call-tree model proves peak-stack bounds, exact-time non-interference, and preservation of caller cost contracts; it does not establish processor timing or graded-handler soundness. The revised PDF passed publication QA.
+
+All 16 compiler interface-export tests passed after adding exact-grade metadata; ordinary source exports retain the default upper-bound relation. The ghost output-observation regression also passed for both runtime and ghost presences.
+
+Operational ghost composition: both extension audit tests passed after freshly compiling the polymorphic calculus, Appendix A core, and ghost extension. All 20 bridge theorems have standard-only axiom reports. The bridge preserves runtime traces, safety, and per-kind exhaustion while proving finite ghost-only execution; examples cover recursion, stateful handlers, divergence, and rejected ghost leaks/aborts. The manuscript PDF was rebuilt and passed QA.
+
+Typed place composition: both extension audit tests passed with all dependencies freshly built. All 17 `TypedPlaceRefinements` theorems use only the standard axiom allowlist. They connect snapshot postconditions to actual frame/stack writes, retain borrow invariants under the existing overlap premise, and account for every linear payload identity. Regression theorems reject overwriting a live linear root and treating an uninitialized path as a lawful initialized-value lens. PDF publication QA passed.
+
+Simultaneous updates: the fresh extension audit passed with 27 typed-place and nine refinement-lens theorems. Disjoint paired lenses give a combined snapshot postcondition; swaps preserve all identity counts and freshness and match the actual frame setter and machine transition. A two-linear-handle example passes, and aliased paired lenses are rejected. The rebuilt PDF passed publication QA.
+
+Bounded handler grades: the core suite passed (45 unit tests plus its integration suites), including checked additive handler composition and overflow rejection. Both extension audits passed with nine new `HandlerGrades` theorem reports. The finite one-shot handler evaluator agrees with the existing CPS encoding and supports positive operation-clause overhead, early stopping, and skipped post-resumption work on abort. Source inference and combined linear-state grading remain open. The updated PDF passed publication QA.
+
+Proof admission: all 35 CLI unit tests, eight artifact-audit tests, six publication tests, and seven extraction tests passed with Lean 4.35.0. The native-decision regression checks actual generated `_native` axioms and explicit whitelist rejection. A valid unrelated artifact deliberately published under the current source's CAS derivation is rejected; ordinary fresh compilation and cache reuse pass. Cache hits now require fresh compilation and byte equality, followed by kernel replay of the fresh artifact closure. The revised Chapter 8 and rebuilt 212-page PDF passed publication QA. Expected source-contract signatures and native executable correspondence remain open.
+
+Pulled through `db8c0ddd`, integrated upstream public-method parsing with explicit field-floor preservation, and retained benchmark and WAL additions. The syntax suite and both upstream WAL model tests passed; the WAL model is now included in the Lean CI script.
+
+After upstream integration, all 108 language tests, six FIP tests, and 17 interface tests passed. The opening architecture summary now uses the same explicit proof boundaries as Appendix A; the rebuilt PDF passed QA again.
+
+The final routine pull advanced to `dfd92c1f` with non-overlapping grammar framing and Ignis barrier changes. Both affected crate suites passed after integration.
+
+Explicit contract admission: all 35 CLI unit tests, eight standalone audit tests, the private-declaration replay test, and nine extraction tests passed. `--contract-proof` requires complete emitted-contract coverage and kernel-checked wrappers with exact closed contract types. Regressions reject unrelated theorems, changed implementations, missing/unknown bindings, and hidden section-instance hypotheses. The trusted auditor checks Lean expression structure rather than printed type strings. The rebuilt PDF passed publication QA. These checks prove requested partial-correctness propositions of the extracted model under its reported axioms; they do not establish satisfiable preconditions, extraction correctness, or native-code correspondence.
+
+Direct-backend composition: both extension audit tests passed with fresh dependencies and all 13 `CodegenComposition` theorem reports restricted to standard axioms. All three existing verified-codegen Lean/table tests passed, including comparison with the Rust selection table. The new simulation covers finite straight-line streams, abort propagation, and abstract hardware-fault exclusion under reachable-row operand conditions. Examples establish normal addition, overflow short-circuiting, and rejection of an ill-typed continuation. Rust lowering, static discharge of the conditions, control flow/calls, byte encodings, and physical hardware remain open. The PDF passed publication QA, and the routine pull reported already up to date.
+
+Abstract control flow: both fresh extension audits passed, including all 16 `CodegenControlFlow` theorem reports. The interpreter executes branches and jumps from the actual selection table, preserves finite execution prefixes and terminal outcomes under an explicit invariant, excludes abstract faults, and preserves/reflects divergence. A checked infinite loop and an out-of-range branch counterexample exercise the result and its premise. Calls, physical control addresses, frame management, byte encodings, and compiler discharge of the invariant remain open. The PDF passed QA and the routine pull was already current.
+
+Place/polymorphism correspondence: both fresh extension audits passed, including all 22 `PlacePolymorphismBridge` theorem reports with standard-only axioms. The representation preserves kinds and exact handle ownership, getters/setters commute with encoding, and exchange invokes the existing polymorphic preservation theorem directly and under evaluation contexts. A two-handle example and duplicate/uninitialized rejection cases pass. Heap-stored closures, captured borrows, allocation, and source elaboration remain open. The rebuilt PDF passed QA; the routine pull was already current.
+
+Precondition admission: `cargo check --bin vesper`, 35 CLI unit tests, 11 extraction-model tests, and eight standalone audit tests passed. All 12 extraction CLI cases passed across the initial run and corrected test reruns. The new cases cover existential witnesses over multiple parameters, contradictory preconditions, a vacuous false-postcondition proof, unrelated witnesses, hidden section-instance assumptions, missing bindings, and custom-axiom rejection. Each explicit contract proof now requires an exact closed input witness under standard axioms; the general standalone auditor retains explicit custom policies. This establishes model input inhabitation alongside partial correctness, not termination or extraction/native correspondence. The trusted helper compiled with Lean 4.35.0, and the rebuilt 212-page PDF passed QA.
+
+Executable backend validation: both fresh extension audits passed with all 22 `CodegenValidation` and 22 `CodegenFlowValidation` theorem reports restricted to standard axioms. The first validator establishes straight-line operand obligations by propagating and replacing range facts; the second checks finite per-row certificates across branches, jumps, and loop back edges and constructs the operational invariant. Checked examples include aliased writes, frame copies, overflow, a concrete branch result, and an infinite loop. Regressions reject stale facts, unknown operands, forged Boolean ranges, invalid back edges, and invalid branch arms. These are validators of the abstract IR models, not proof of production compiler integration, calls, physical addresses, or native encodings. The rebuilt 213-page PDF passed publication QA. Routine pulls after both chunks reported already current.
+
+Remainder-range completion: both fresh extension audits passed with 25 straight-line validator and 22 control-flow validator theorem reports, all restricted to standard axioms. Successful remainder now preserves the result kind instead of dropping its range fact. The proof handles signed and unsigned bounds; checked pipelines cover aliased destinations and the signed minimum modulo minus one. The dependent control-flow proof remains checked, and the rebuilt 213-page PDF passed QA.
+
+Continuation-fission insertion: the supplied chapter is Chapter 6 in Part I, followed by Pact/Forge as Chapter 7 and the compiler pipeline as Chapter 8. The verifier now requires `range(1, 43)` and the shifted Part boundaries. Source checks confirmed all 156 original code blocks and anchors are preserved and displayed cross-references agree with their target headings; three supplied code blocks were added. Typst 0.15.1 compilation, both verifier unit tests, and publication QA passed after replacing the unsupported `leadsto` symbol and splitting two overwide inference-rule premises. The missing ContinuationFission source citation is explicitly illustrative; no new formal soundness claim was validated by this publication work.
+
+Chapter integration upstream check: pulled through `2e29cd2a`, reapplied the existing Box field-floor fix and regression without conflicts, and removed the task-owned stash after validation. All 11 FIP tests, 108 language tests, eight top CLI tests, and the Chrono package suite passed. The website build and checks also passed with the updated PDF.

@@ -574,7 +574,7 @@ fn catalog() -> Result<BTreeMap<String, String>, Error> {
             return Err(bad("fixed unclosed scope"));
         }
     }
-    if roots.len() != 284 {
+    if roots.len() != 286 {
         return Err(bad("fixed theorem source catalog completeness"));
     }
     for (name, module) in [
@@ -957,4 +957,24 @@ pub(super) fn bind(
         alias_originals,
         omission_parents,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_catalog_includes_field_floor_regressions() {
+        verify_bundle().expect("embedded resource sources match their pins");
+        let roots = catalog().expect("complete fixed source catalog");
+        for name in [
+            "checker_rejects_dropped_scalar_linear_floor",
+            "checker_accepts_dropped_default_scalar_fields",
+        ] {
+            assert_eq!(
+                roots.get(&format!("Vesper.ResourceModel42.Acceptance.{name}")),
+                Some(&"ResourceModel42.Acceptance".to_owned())
+            );
+        }
+    }
 }

@@ -301,6 +301,24 @@ pub enum ResourceGradeError {
     },
 }
 
+/// Additive bound for a bounded one-shot handler: body work, operation-clause
+/// overhead, and the return clause. `clause_work` excludes the resumed
+/// continuation, whose work is already included in the body/count analysis.
+/// The caller must justify both the operation count and per-clause bound;
+/// this arithmetic helper does not infer them from source or handle stack peaks.
+pub fn handler_additive_bound(
+    body_work: u64,
+    operation_count: u64,
+    clause_work: u64,
+    return_work: u64,
+) -> Result<u64, ResourceGradeError> {
+    operation_count
+        .checked_mul(clause_work)
+        .and_then(|overhead| body_work.checked_add(overhead))
+        .and_then(|total| total.checked_add(return_work))
+        .ok_or(ResourceGradeError::ArithmeticOverflow)
+}
+
 /// Verifies `eff [Region @ <= ceiling]` and returns `Ok(true)` when the inferred
 /// usage interval is provably within `0..=ceiling` (§7.4).
 pub fn verify_graded_resource_ceiling(
@@ -332,6 +350,24 @@ pub fn verify_graded_resource_ceiling(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handler_bounds_charge_clause_overhead_once_per_operation() {
+        assert_eq!(handler_additive_bound(10, 3, 64, 5), Ok(207));
+        assert_eq!(handler_additive_bound(0, 2, 64, 0), Ok(128));
+        assert_eq!(handler_additive_bound(10, 0, u64::MAX, 5), Ok(15));
+        assert_eq!(handler_additive_bound(0, 1, u64::MAX, 0), Ok(u64::MAX));
+        for inputs in [
+            (0, 2, u64::MAX, 0),
+            (1, 1, u64::MAX, 0),
+            (0, 1, u64::MAX, 1),
+        ] {
+            assert_eq!(
+                handler_additive_bound(inputs.0, inputs.1, inputs.2, inputs.3),
+                Err(ResourceGradeError::ArithmeticOverflow)
+            );
+        }
+    }
 
     fn box_add(a: RefineTerm, b: RefineTerm) -> RefineTerm {
         RefineTerm::Add(Box::new(a), Box::new(b))

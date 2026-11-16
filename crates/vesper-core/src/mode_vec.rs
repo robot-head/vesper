@@ -42,6 +42,16 @@ pub enum Order {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ModeVec(u8);
 
+/// Graph facts supplied by an ownership/isolation analysis before capsule admission.
+/// This metadata is not a proof certificate, and this module does not inspect heaps.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapsuleEvidence {
+    pub uniquely_owned: bool,
+    pub external_aliases: usize,
+    pub free_outer_caps: usize,
+    pub thread_affine_handles: usize,
+}
+
 impl ModeVec {
     pub const BOTTOM: Self = Self::new(
         Usage::Copy,
@@ -111,7 +121,7 @@ impl ModeVec {
         }
     }
 
-    /// Returns `true` when values at this mode may cross fiber/thread shards.
+    /// Checks the portability axis. Transfer also requires ownership and order admission.
     #[inline]
     pub const fn is_portable(self) -> bool {
         (self.0 & 4) == 0
@@ -129,17 +139,25 @@ impl ModeVec {
         (self.0 & 16) != 0
     }
 
-    /// Shifts a shared `in` view across a thread boundary (`[M-ContendStrip]`, §4.5, §7.4).
+    /// Sets the contention axis; does not validate transfer or weaken heap refinements.
     #[inline]
     pub const fn as_contended(self) -> Self {
         Self(self.0 | (1 << 3))
     }
 
-    /// Seals an unaliased (`sink`) `uncontended` graph into a `portable`
-    /// `Capsule[T]` (§3.3, §7.4), returning `None` if already `Contended`.
+    /// Admits capsule sealing from supplied graph evidence (§3.3, §7.4).
+    /// Ordered obligations cannot leave their acquisition stack. Callers must
+    /// establish the evidence from the reachable graph and consume its owner;
+    /// this value-level helper does neither analysis nor runtime transfer.
     #[inline]
-    pub const fn try_seal_capsule(self) -> Option<Self> {
-        if !self.is_contended() {
+    pub const fn try_seal_capsule(self, evidence: CapsuleEvidence) -> Option<Self> {
+        if evidence.uniquely_owned
+            && evidence.external_aliases == 0
+            && evidence.free_outer_caps == 0
+            && evidence.thread_affine_handles == 0
+            && !self.is_contended()
+            && !self.is_lifo()
+        {
             Some(Self(self.0 & !(1 << 2)))
         } else {
             None
@@ -244,6 +262,12 @@ mod tests {
 
     #[test]
     fn contention_shift_and_capsule_sealing_obey_lattice_laws() {
+        let isolated = CapsuleEvidence {
+            uniquely_owned: true,
+            external_aliases: 0,
+            free_outer_caps: 0,
+            thread_affine_handles: 0,
+        };
         let all: Vec<_> = (0..32).filter_map(ModeVec::from_bits).collect();
         for &m in &all {
             let contended = m.as_contended();
@@ -253,16 +277,42 @@ mod tests {
             assert_eq!(contended.portability(), m.portability());
             assert_eq!(contended.order(), m.order());
             assert_eq!(contended.as_contended(), contended);
-            assert!(contended.try_seal_capsule().is_none());
+            assert!(contended.try_seal_capsule(isolated).is_none());
+            assert_eq!(
+                m.try_seal_capsule(isolated).is_some(),
+                !m.is_contended() && !m.is_lifo()
+            );
+            for invalid in [
+                CapsuleEvidence {
+                    uniquely_owned: false,
+                    ..isolated
+                },
+                CapsuleEvidence {
+                    external_aliases: 1,
+                    ..isolated
+                },
+                CapsuleEvidence {
+                    free_outer_caps: 1,
+                    ..isolated
+                },
+                CapsuleEvidence {
+                    thread_affine_handles: 1,
+                    ..isolated
+                },
+            ] {
+                assert!(m.try_seal_capsule(invalid).is_none());
+            }
 
-            if !m.is_contended() {
-                let sealed = m.try_seal_capsule().expect("uncontended graph seals");
+            if !m.is_contended() && !m.is_lifo() {
+                let sealed = m
+                    .try_seal_capsule(isolated)
+                    .expect("isolated unordered graph seals");
                 assert!(sealed.is_portable());
                 assert!(!sealed.is_contended());
                 assert!(sealed.leq(m));
                 assert_eq!(sealed.usage(), m.usage());
                 assert_eq!(sealed.order(), m.order());
-                assert_eq!(sealed.try_seal_capsule(), Some(sealed));
+                assert_eq!(sealed.try_seal_capsule(isolated), Some(sealed));
             }
         }
 
@@ -272,15 +322,6 @@ mod tests {
             Contention::Uncontended,
             Order::Lifo,
         );
-        let capsule = pinned_arena.try_seal_capsule().unwrap();
-        assert_eq!(
-            capsule,
-            ModeVec::new(
-                Usage::Linear,
-                Portability::Portable,
-                Contention::Uncontended,
-                Order::Lifo,
-            )
-        );
+        assert_eq!(pinned_arena.try_seal_capsule(isolated), None);
     }
 }

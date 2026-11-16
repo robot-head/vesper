@@ -12,7 +12,7 @@ fn make_option(payload: KindType) -> KindType {
         fields: vec![AdtFieldKind {
             name: "value".into(),
             ty: KindType::Var("T".into()),
-            override_mode: ModeVec::TOP,
+            override_mode: None,
         }],
         type_args: vec![payload],
     }
@@ -46,12 +46,10 @@ fn generic_option_and_mode_crossing_follow_sec_3_2_and_4_2() {
     );
     assert_eq!(
         infer_modal_kind(&delta, &opt_linear_lifo),
-        Ok(ModeVec::new(
-            Usage::Linear,
-            Portability::Pinned,
-            Contention::Uncontended,
-            Order::Lifo,
-        ))
+        Err(ModeJudgmentError::OrderedField {
+            adt: "Option".into(),
+            field: "value".into()
+        })
     );
 
     // [T-Cross]: generic result at TOP crosses back to copy on Option[u64], affine on Option[PoolSlice].
@@ -65,7 +63,11 @@ fn generic_option_and_mode_crossing_follow_sec_3_2_and_4_2() {
     );
     // Crossing cannot weaken below the intrinsic kind (pinned linear cannot cross to portable affine).
     assert_eq!(
-        mode_cross(&delta, &opt_linear_lifo, usage_mode(Usage::Affine)),
+        mode_cross(
+            &delta,
+            &KindType::Var("IrqGuard".into()),
+            usage_mode(Usage::Affine)
+        ),
         Err(ModeJudgmentError::ModeOrderViolation {
             actual: ModeVec::new(
                 Usage::Linear,
@@ -160,12 +162,12 @@ fn nested_adt_substitution_respects_parameter_scopes_and_preserves_linearity() {
             AdtFieldKind {
                 name: "value".into(),
                 ty: KindType::Var("T".into()),
-                override_mode: ModeVec::TOP,
+                override_mode: None,
             },
             AdtFieldKind {
                 name: "pending".into(),
                 ty: make_option(KindType::Var("Txn".into())),
-                override_mode: ModeVec::TOP,
+                override_mode: None,
             },
         ],
         type_args: vec![KindType::Prim(PrimKind::U64)],
@@ -194,12 +196,12 @@ fn nested_adt_substitution_respects_parameter_scopes_and_preserves_linearity() {
             AdtFieldKind {
                 name: "outer".into(),
                 ty: KindType::Var("U".into()),
-                override_mode: ModeVec::TOP,
+                override_mode: None,
             },
             AdtFieldKind {
                 name: "inner".into(),
                 ty: KindType::Var("T".into()),
-                override_mode: ModeVec::TOP,
+                override_mode: None,
             },
         ],
         type_args: vec![KindType::Prim(PrimKind::U64)],
@@ -211,7 +213,7 @@ fn nested_adt_substitution_respects_parameter_scopes_and_preserves_linearity() {
         fields: vec![AdtFieldKind {
             name: "inner".into(),
             ty: pair_box,
-            override_mode: ModeVec::TOP,
+            override_mode: None,
         }],
         type_args: vec![KindType::Var("T".into())],
     };
@@ -233,5 +235,147 @@ fn t_var_rejects_uninitialized_out_slot_as_target() {
     assert_eq!(
         check_var_use(&gamma_only_dst, Presence::Runtime, "dst"),
         Err(ModeJudgmentError::UninitializedVar { name: "dst".into() })
+    );
+}
+
+#[test]
+fn explicit_field_floors_survive_generic_instantiation_and_crossing() {
+    let delta = KindEnv::default();
+    for floor in [
+        usage_mode(Usage::Affine),
+        usage_mode(Usage::Linear),
+        ModeVec::new(
+            Usage::Linear,
+            Portability::Pinned,
+            Contention::Contended,
+            Order::Unordered,
+        ),
+    ] {
+        let wrapper = KindType::Adt {
+            name: "OwnedScalar".into(),
+            decl_mode: ModeVec::BOTTOM,
+            params: vec!["T".into()],
+            fields: vec![AdtFieldKind {
+                name: "raw".into(),
+                ty: KindType::Var("T".into()),
+                override_mode: Some(floor),
+            }],
+            type_args: vec![KindType::Prim(PrimKind::I64)],
+        };
+        assert_eq!(infer_modal_kind(&delta, &wrapper), Ok(floor));
+        assert_eq!(mode_cross(&delta, &wrapper, ModeVec::TOP), Ok(floor));
+        assert!(mode_cross(&delta, &wrapper, ModeVec::BOTTOM).is_err());
+    }
+}
+
+#[test]
+fn permission_contraction_never_copies_exclusive_or_ordered_owners() {
+    for usage in [Usage::Copy, Usage::Affine, Usage::Linear] {
+        for order in [Order::Unordered, Order::Lifo] {
+            for ownership in [
+                PlaceOwnership::Own,
+                PlaceOwnership::SharedBorrow,
+                PlaceOwnership::MutBorrow,
+                PlaceOwnership::OutSlot,
+            ] {
+                let entry = VarContextEntry {
+                    name: "p".into(),
+                    presence: Presence::Runtime,
+                    mode: ModeVec::new(
+                        usage,
+                        Portability::Portable,
+                        Contention::Uncontended,
+                        order,
+                    ),
+                    ownership,
+                    initialized: true,
+                };
+                let contracts = ownership == PlaceOwnership::SharedBorrow
+                    || (ownership == PlaceOwnership::Own
+                        && usage == Usage::Copy
+                        && order == Order::Unordered);
+                assert_eq!(entry.is_contractible(), contracts);
+                let discards = ownership == PlaceOwnership::SharedBorrow
+                    || (ownership == PlaceOwnership::Own
+                        && usage <= Usage::Affine
+                        && order == Order::Unordered);
+                assert_eq!(entry.is_discardable(), discards);
+                let uninitialized = VarContextEntry {
+                    initialized: false,
+                    ..entry
+                };
+                assert!(!uninitialized.is_contractible());
+                assert!(!uninitialized.is_discardable());
+            }
+        }
+    }
+}
+
+#[test]
+fn ordered_owner_cannot_bypass_stack_by_becoming_an_ordinary_context_entry() {
+    let guard = VarContextEntry {
+        name: "guard".into(),
+        presence: Presence::Runtime,
+        mode: ModeVec::new(
+            Usage::Copy,
+            Portability::Portable,
+            Contention::Uncontended,
+            Order::Lifo,
+        ),
+        ownership: PlaceOwnership::Own,
+        initialized: true,
+    };
+    let ordinary = VarContextEntry {
+        name: "x".into(),
+        mode: ModeVec::BOTTOM,
+        ..guard.clone()
+    };
+    for target in ["guard", "x"] {
+        assert_eq!(
+            check_var_use(
+                &[ordinary.clone(), guard.clone()],
+                Presence::Runtime,
+                target
+            ),
+            Err(ModeJudgmentError::OrderedBindingRequiresStack {
+                name: "guard".into()
+            })
+        );
+    }
+    let view = VarContextEntry {
+        ownership: PlaceOwnership::SharedBorrow,
+        mode: ModeVec::new(
+            Usage::Linear,
+            Portability::Pinned,
+            Contention::Uncontended,
+            Order::Lifo,
+        ),
+        ..guard
+    };
+    assert_eq!(
+        check_var_use(&[ordinary, view], Presence::Runtime, "x"),
+        Ok((Presence::Runtime, ModeVec::BOTTOM))
+    );
+}
+
+#[test]
+fn explicit_ordered_scalar_field_is_rejected_even_without_a_resource_payload() {
+    let wrapper = KindType::Adt {
+        name: "HiddenGuard".into(),
+        decl_mode: ModeVec::BOTTOM,
+        params: vec![],
+        type_args: vec![],
+        fields: vec![AdtFieldKind {
+            name: "raw".into(),
+            ty: KindType::Prim(PrimKind::U64),
+            override_mode: Some(ModeVec::TOP),
+        }],
+    };
+    assert_eq!(
+        infer_modal_kind(&KindEnv::default(), &wrapper),
+        Err(ModeJudgmentError::OrderedField {
+            adt: "HiddenGuard".into(),
+            field: "raw".into()
+        })
     );
 }

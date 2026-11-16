@@ -23,7 +23,7 @@ const EXTRACT_BUILDER_VERSION: &str = "1";
 const MAX_INPUT: usize = 128 * 1024;
 const MAX_JSON: usize = 2 * 1024 * 1024;
 const MAX_OLEAN_BYTES: u64 = 256 * 1024 * 1024;
-const HELP: &str = "Usage: vesper verify SOURCE --format [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n       vesper verify SOURCE --extract [--proofs FILE.lean] [--theorem Name ...] [--allow-axiom Name ...] [--olean-store DIR|default] [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n\n--format: Kernel-check a formatter document-algebra comment-conservation model with Lean 4.35.0.\n--extract: Extract Lean 4 models from a checked .ves source, compile and replay through the Lean 4.35.0 kernel, and audit axioms (sorryAx is always forbidden).\n--proofs joins an explicit Lean proof script containing theorem proofs for the extracted model.\n--theorem selects theorem names to audit (default: theorems discovered in --proofs, or an internal model-compilation witness).\n--allow-axiom permits named axioms such as propext, Quot.sound, or Classical.choice.\n--olean-store caches and remounts audited .olean certificates in a Loom CAS directory (`default` is ~/.vesper/store).\n--emit-lean prints the generated Lean source only after compilation and kernel replay.\n--timeout bounds each Lean process (1 to 300 seconds; default 30).\nThe selected Lean toolchain and artifact parser remain trusted.\n";
+const HELP: &str = "Usage: vesper verify SOURCE --format [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n       vesper verify SOURCE --extract [--proofs FILE.lean] [--theorem Name ...] [--contract-proof Function=Theorem --contract-witness Function=Theorem ...] [--allow-axiom Name ...] [--olean-store DIR|default] [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n\n--format: Kernel-check a formatter document-algebra comment-conservation model with Lean 4.35.0.\n--extract: Extract Lean 4 models from a checked .ves source, compile and replay through the Lean 4.35.0 kernel, and audit axioms (sorryAx is always forbidden).\n--proofs joins an explicit Lean proof script containing theorem proofs for the extracted model.\n--theorem selects theorem names to audit (default: theorems discovered in --proofs, or an internal model-compilation witness).\n--contract-proof binds an emitted function contract to a theorem; when used, every emitted contract must be covered. Each binding requires --contract-witness for the generated existential input precondition. This checks model partial correctness and inhabited input preconditions, not termination or native-code correspondence. Explicit contract admission permits only the three standard Lean axioms.\n--allow-axiom permits named axioms such as propext, Quot.sound, or Classical.choice.\n--olean-store stores audited .olean artifacts and compares cache hits with a fresh compilation in a Loom CAS directory (`default` is ~/.vesper/store).\n--emit-lean prints the generated Lean source only after compilation and kernel replay.\n--timeout bounds each Lean process (1 to 300 seconds; default 30).\nThe selected Lean toolchain and artifact parser remain trusted.\n";
 
 #[derive(Debug)]
 struct Failure {
@@ -53,6 +53,8 @@ struct Options {
     source: PathBuf,
     proofs: Option<PathBuf>,
     theorems: BTreeSet<String>,
+    contract_proofs: BTreeMap<String, String>,
+    contract_witnesses: BTreeMap<String, String>,
     allowed_axioms: BTreeSet<String>,
     olean_store: Option<String>,
     lean: String,
@@ -75,6 +77,8 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
     let mut extract = false;
     let mut proofs = None;
     let mut theorems = BTreeSet::new();
+    let mut contract_proofs = BTreeMap::new();
+    let mut contract_witnesses = BTreeMap::new();
     let mut allowed_axioms = BTreeSet::new();
     let mut olean_store = None;
     let mut json = false;
@@ -129,6 +133,38 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
                     }
                     continue;
                 }
+                "--contract-proof" | "--contract-witness" => {
+                    let bindings = if arg == "--contract-proof" {
+                        &mut contract_proofs
+                    } else {
+                        &mut contract_witnesses
+                    };
+                    let binding = args.next().ok_or_else(|| {
+                        Failure::new("config", format!("{arg} requires Function=Theorem"))
+                    })?;
+                    let (function, theorem) = binding.split_once('=').ok_or_else(|| {
+                        Failure::new("config", format!("{arg} requires Function=Theorem"))
+                    })?;
+                    if !proof_commands::name_valid(function)
+                        || function.contains('.')
+                        || !proof_commands::name_valid(theorem)
+                    {
+                        return Err(Failure::new("config", "invalid contract proof binding"));
+                    }
+                    if bindings
+                        .insert(function.to_owned(), theorem.to_owned())
+                        .is_some()
+                    {
+                        return Err(Failure::new("config", "duplicate contract proof binding"));
+                    }
+                    if bindings.len() > 128 {
+                        return Err(Failure::new(
+                            "config",
+                            "at most 128 contract proofs are supported",
+                        ));
+                    }
+                    continue;
+                }
                 "--allow-axiom" => {
                     let name = args
                         .next()
@@ -139,10 +175,7 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
                             format!("invalid axiom name '{name}'"),
                         ));
                     }
-                    if matches!(
-                        name.as_str(),
-                        "sorryAx" | "Lean.ofReduceBool" | "Lean.trustCompiler"
-                    ) {
+                    if proof_commands::forbidden_axiom(&name) {
                         return Err(Failure::new(
                             "config",
                             format!("{name} cannot be allowed by the audit policy"),
@@ -231,12 +264,24 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
     if format
         && (proofs.is_some()
             || !theorems.is_empty()
+            || !contract_proofs.is_empty()
+            || !contract_witnesses.is_empty()
             || !allowed_axioms.is_empty()
             || olean_store.is_some())
     {
         return Err(Failure::new(
             "config",
-            "--proofs, --theorem, --allow-axiom, and --olean-store require --extract",
+            "--proofs, --theorem, --contract-proof, --contract-witness, --allow-axiom, and --olean-store require --extract",
+        ));
+    }
+    if (!contract_proofs.is_empty() || !contract_witnesses.is_empty())
+        && allowed_axioms
+            .iter()
+            .any(|name| !matches!(name.as_str(), "propext" | "Classical.choice" | "Quot.sound"))
+    {
+        return Err(Failure::new(
+            "config",
+            "explicit contract admission only permits propext, Classical.choice, and Quot.sound",
         ));
     }
     if json && emit_lean {
@@ -256,6 +301,8 @@ fn options(args: Vec<String>) -> Result<Options, Failure> {
         source: source.ok_or_else(|| Failure::new("config", "verify requires a source file"))?,
         proofs,
         theorems,
+        contract_proofs,
+        contract_witnesses,
         allowed_axioms,
         olean_store,
         lean,
@@ -304,6 +351,26 @@ fn read_source(path: &Path) -> Result<String, Failure> {
     }
     String::from_utf8(bytes).map_err(|_| Failure::new("parse", "verification source must be UTF-8"))
 }
+fn read_olean(path: &Path) -> Result<Vec<u8>, Failure> {
+    let meta = fs::symlink_metadata(path).map_err(|e| Failure::new("io", e))?;
+    if !meta.is_file() || meta.len() > MAX_OLEAN_BYTES {
+        return Err(Failure::new(
+            "resource",
+            ".olean must be a bounded regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|e| Failure::new("io", e))?
+        .take(MAX_OLEAN_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Failure::new("io", e))?;
+    if bytes.len() as u64 > MAX_OLEAN_BYTES {
+        return Err(Failure::new("resource", ".olean exceeds size limit"));
+    }
+    Ok(bytes)
+}
+
 fn compile(
     toolchain: &LeanToolchain,
     stage: &Path,
@@ -367,6 +434,8 @@ struct ExtractSuccess {
     input_bytes: usize,
     totality: BTreeMap<String, String>,
     contracts: Vec<String>,
+    checked_contracts: BTreeMap<String, String>,
+    checked_preconditions: BTreeMap<String, String>,
     lean_version: String,
     audit: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1039,6 +1108,68 @@ fn resolve_store_dir(spec: &str) -> Result<PathBuf, Failure> {
         Ok(PathBuf::from(spec))
     }
 }
+fn contract_bindings(
+    contracts: &[String],
+    requested: &BTreeMap<String, String>,
+    witnesses: &BTreeMap<String, String>,
+) -> Result<(String, Vec<String>), Failure> {
+    if requested.is_empty() && witnesses.is_empty() {
+        return Ok((String::new(), Vec::new()));
+    }
+    for function in requested.keys().chain(witnesses.keys()) {
+        if !contracts.contains(function) {
+            return Err(Failure::new(
+                "contracts",
+                format!("no emitted contract for '{function}'"),
+            ));
+        }
+    }
+    for function in contracts {
+        if !requested.contains_key(function) {
+            return Err(Failure::new(
+                "contracts",
+                format!("missing proof binding for contract '{function}'"),
+            ));
+        }
+    }
+    for function in contracts {
+        if !witnesses.contains_key(function) {
+            return Err(Failure::new(
+                "contracts",
+                format!("missing precondition witness for contract '{function}'"),
+            ));
+        }
+    }
+    let mut source = String::new();
+    let mut names = Vec::new();
+    for (index, (function, theorem)) in requested.iter().enumerate() {
+        // Inputs are bounded ASCII names checked by options(). Quote every
+        // component and use root names so proof-script namespaces/open commands
+        // cannot redirect the contract or selected theorem.
+        let proof = theorem
+            .split('.')
+            .map(|part| format!("«{part}»"))
+            .collect::<Vec<_>>()
+            .join(".");
+        let name = format!("VesperVerify.contract_{index}");
+        source.push_str(&format!(
+            "\ntheorem _root_.{name} : _root_.Vesper.«{function}$contract» := _root_.{proof}\n"
+        ));
+        names.push(name);
+        let witness = witnesses[function]
+            .split('.')
+            .map(|part| format!("«{part}»"))
+            .collect::<Vec<_>>()
+            .join(".");
+        let name = format!("VesperVerify.precondition_{index}");
+        source.push_str(&format!(
+            "\ntheorem _root_.{name} : _root_.Vesper.«{function}$admissible» := _root_.{witness}\n"
+        ));
+        names.push(name);
+    }
+    Ok((source, names))
+}
+
 fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
     let source = read_source(&options.source)?;
     let proofs = options.proofs.as_deref().map(read_source).transpose()?;
@@ -1076,7 +1207,12 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
     let proofs_blake3 = proofs
         .as_deref()
         .map(|p| blake3::hash(p.as_bytes()).to_hex().to_string());
-    let (bundle_text, audit_theorems) = if let Some(proof_text) = &proofs {
+    let (bindings, binding_theorems) = contract_bindings(
+        &report.contracts,
+        &options.contract_proofs,
+        &options.contract_witnesses,
+    )?;
+    let (mut bundle_text, mut audit_theorems) = if let Some(proof_text) = &proofs {
         let thms: Vec<String> = if options.theorems.is_empty() {
             let found = discover_theorems(proof_text)?;
             if found.is_empty() {
@@ -1098,6 +1234,16 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
         );
         (with_witness, vec!["VesperVerify.model_verified".to_owned()])
     };
+    bundle_text.push_str(&bindings);
+    audit_theorems.extend(binding_theorems);
+    audit_theorems.sort();
+    audit_theorems.dedup();
+    if audit_theorems.len() > 128 {
+        return Err(Failure::new(
+            "contracts",
+            "selected theorems and contract bindings exceed 128",
+        ));
+    }
     let toolchain =
         proof_commands::lean_toolchain(&options.lean).map_err(|e| Failure::new("toolchain", e))?;
     let stage = Stage::new().map_err(|e| Failure::new("io", e))?;
@@ -1133,40 +1279,63 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
             .with_option("allowed_axioms", axioms_csv.clone())
     });
 
+    // A CAS derivation records a claimed input/output association, not a proof
+    // that Lean produced this artifact from this bundle. Always compile the
+    // current source and keep its complete artifact closure for kernel replay.
+    // A cache hit is accepted only when its bytes match that fresh result.
+    compile(&toolchain, &stage.0, "VesperExtract", options.timeout)?;
     let mut cert_report = None;
-    if let (Some(store), Some(inputs), Some(dir)) = (&opened_store, &deriv_inputs, &store_dir) {
-        if let Some(cached_id) = store
+    if let (Some(store), Some(inputs), Some(dir)) = (&opened_store, &deriv_inputs, &store_dir)
+        && let Some(cached_id) = store
             .lookup_derivation(inputs)
             .map_err(|e| Failure::new("store", e))?
-        {
-            let bytes = store
-                .read_blob(&cached_id)
-                .map_err(|e| Failure::new("store", e))?;
-            if bytes.len() as u64 > MAX_OLEAN_BYTES {
-                return Err(Failure::new("store", "cached .olean exceeds size limit"));
-            }
-            fs::write(stage.0.join("VesperExtract.olean"), &bytes)
-                .map_err(|e| Failure::new("io", e))?;
-            cert_report = Some(OleanCertReport {
-                store: dir.display().to_string(),
-                object_id: cached_id.to_string(),
-                cache_hit: true,
-                newly_recorded: false,
-            });
-        } else {
-            compile(&toolchain, &stage.0, "VesperExtract", options.timeout)?;
+    {
+        let bytes = store
+            .read_blob(&cached_id)
+            .map_err(|e| Failure::new("store", e))?;
+        if bytes.len() as u64 > MAX_OLEAN_BYTES {
+            return Err(Failure::new("store", "cached .olean exceeds size limit"));
         }
-    } else {
-        compile(&toolchain, &stage.0, "VesperExtract", options.timeout)?;
+        let fresh = read_olean(&stage.0.join("VesperExtract.olean"))?;
+        if bytes != fresh {
+            return Err(Failure::new(
+                "store",
+                "cached .olean does not match a fresh compilation of the current source and proofs",
+            ));
+        }
+        cert_report = Some(OleanCertReport {
+            store: dir.display().to_string(),
+            object_id: cached_id.to_string(),
+            cache_hit: true,
+            newly_recorded: false,
+        });
     }
 
     let theorem_refs: Vec<&str> = audit_theorems.iter().map(String::as_str).collect();
     let allowed_refs: Vec<&str> = options.allowed_axioms.iter().map(String::as_str).collect();
-    let audit = proof_commands::audit_generated_with_policy(
+    let expected_types = options
+        .contract_proofs
+        .keys()
+        .enumerate()
+        .flat_map(|(index, function)| {
+            [
+                (
+                    format!("VesperVerify.contract_{index}"),
+                    format!("Vesper.{function}$contract"),
+                ),
+                (
+                    format!("VesperVerify.precondition_{index}"),
+                    format!("Vesper.{function}$admissible"),
+                ),
+            ]
+        })
+        .collect();
+    let audit = proof_commands::audit_generated_with_types(
         &stage.0,
         "VesperExtract",
         &theorem_refs,
         &allowed_refs,
+        &expected_types,
         &options.lean,
         options.timeout,
     )
@@ -1176,11 +1345,7 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
         && let (Some(store), Some(inputs), Some(dir)) = (&opened_store, &deriv_inputs, &store_dir)
     {
         let olean_path = stage.0.join("VesperExtract.olean");
-        let meta = fs::symlink_metadata(&olean_path).map_err(|e| Failure::new("io", e))?;
-        if meta.len() > MAX_OLEAN_BYTES {
-            return Err(Failure::new("resource", ".olean exceeds size limit"));
-        }
-        let olean_bytes = fs::read(&olean_path).map_err(|e| Failure::new("io", e))?;
+        let olean_bytes = read_olean(&olean_path)?;
         store
             .put_blob(Domain::Source, bundle_text.as_bytes())
             .map_err(|e| Failure::new("store", e))?;
@@ -1203,9 +1368,10 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
     }
     if !options.json {
         return Ok(format!(
-            "Lean extraction model: kernel checked ({} function(s), {} contract(s), {} theorem(s)).\n",
+            "Lean extraction model: kernel checked ({} function(s), {} contract proposition(s), {} bound contract proof(s) with input witnesses, {} theorem(s)).\n",
             report.totality.len(),
             report.contracts.len(),
+            options.contract_proofs.len(),
             audit_theorems.len(),
         )
         .into_bytes());
@@ -1225,6 +1391,8 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
         input_bytes: source.len(),
         totality,
         contracts: report.contracts,
+        checked_contracts: options.contract_proofs.clone(),
+        checked_preconditions: options.contract_witnesses.clone(),
         lean_version: audit["lean_version"]
             .as_str()
             .ok_or_else(|| Failure::new("kernel", "audit omitted its actual Lean version"))?
