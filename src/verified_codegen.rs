@@ -25,7 +25,12 @@
 //!    addresses and calling conventions remain outside those proofs.
 //!    `CodegenValidation` and `CodegenFlowValidation` provide executable Lean
 //!    validators that establish the operand conditions and invariant for
-//!    accepted model programs. They are not integrated into Rust lowering.
+//!    accepted model programs. [`certificate`] generates a per-row range
+//!    certificate for every lowered function and checks it with a Rust
+//!    mirror of `validateProgram` (differentially tested against Lean
+//!    `#eval`) plus conservative, unproved rules for `Enter`, `Call` and
+//!    `Return`; a program whose certificate is rejected is refused before
+//!    any code is selected.
 //! 3. **Encoding** (`x86_64.rs`, `aarch64.rs`) of each abstract instruction
 //!    to fixed bytes, and a container (`container.rs`): a static Linux ELF
 //!    executable, or a Mach-O AArch64 object for the system linker.
@@ -60,6 +65,7 @@ use std::fmt;
 
 mod aarch64;
 mod asm;
+pub mod certificate;
 mod cli;
 mod container;
 mod lower;
@@ -341,6 +347,7 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
         let _ = (lowered.slots, lowered.out_words);
         lir.push((plan.functions[index].name.clone(), lowered.rows));
     }
+    certificate::check(&lir)?;
     let entry_plan = &plan.functions[0];
     let result_words = entry_plan.result.0.clone();
     let mut a = asm::Asm::default();
