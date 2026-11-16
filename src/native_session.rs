@@ -914,6 +914,8 @@ fn compile_session_with_linkage<M: Module>(
             handlers: vec![],
             inline_depth: 0,
             fail_record: None,
+            trace_fail: None,
+            trace_entry: None,
             source_locations: true,
             srcloc: cranelift_codegen::ir::SourceLoc::default(),
             session: Some(SessionCodegen {
