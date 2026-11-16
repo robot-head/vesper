@@ -12,6 +12,6 @@ pub mod modal_kind;
 pub mod mode_cross;
 pub mod mode_vec;
 pub mod numeric;
-pub mod resource_grade;
 pub mod pcg;
+pub mod resource_grade;
 pub mod slice_projections;
