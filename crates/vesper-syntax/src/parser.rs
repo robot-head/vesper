@@ -597,6 +597,15 @@ impl Parser<'_> {
         let mut out = vec![];
         self.expect(K::LBrace);
         while !self.at(K::RBrace) && !self.at(K::Eof) {
+            // `pub` is contextual: `pub: T` remains a field named `pub`.
+            if self.at_word(0, "pub")
+                && ((self.nth(1) == K::Lower && self.nth(2) == K::Colon)
+                    || ((self.at_word(1, "hot") || self.at_word(1, "cold"))
+                        && self.nth(2) == K::Lower
+                        && self.nth(3) == K::Colon))
+            {
+                self.bump();
+            }
             let temperature = if self.at_word(0, "hot") && self.nth(1) == K::Lower {
                 self.bump();
                 Some(FieldTemperature::Hot)
@@ -637,7 +646,11 @@ impl Parser<'_> {
             return None;
         }
         let public = self.at_word(0, "pub")
-            && (self.at_word(1, "trait") || self.at_word(1, "model") || self.nth(1) == K::Fn);
+            && (self.at_word(1, "trait")
+                || self.at_word(1, "model")
+                || matches!(self.nth(1), K::Fn | K::Struct | K::Enum | K::Effect)
+                || (matches!(self.nth(1), K::Copy | K::Affine | K::Linear)
+                    && matches!(self.nth(2), K::Struct | K::Enum | K::Effect)));
         if public {
             self.bump();
         }

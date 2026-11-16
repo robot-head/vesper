@@ -491,7 +491,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
             }
         };
         let (passed, cases) =
-            run_tests_on_world(&source, &checked.world, &selected, opts.fuel, true);
+            run_tests_on_world(&source, &checked.world, &selected, opts.fuel, !opts.mutate);
         if !passed {
             all_passed = false;
         }
@@ -751,7 +751,12 @@ fn collect_file_mutants(unit: &FileUnitTests) -> Vec<MutantCandidate> {
                     collect_mutants_in_fn(&unit.display, &unit.source, &tokens, m, &mut candidates);
                 }
             }
-            Item::Adt(_) | Item::Effect(_) | Item::Trait(_) | Item::Conformance(_) => {}
+            Item::Conformance(c) => {
+                for m in &c.methods {
+                    collect_mutants_in_fn(&unit.display, &unit.source, &tokens, m, &mut candidates);
+                }
+            }
+            Item::Adt(_) | Item::Effect(_) | Item::Trait(_) => {}
         }
     }
     candidates.sort_by_key(|c| (c.start, c.end, c.replacement.clone()));

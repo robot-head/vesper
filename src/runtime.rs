@@ -401,6 +401,16 @@ impl<'a> Runtime<'a> {
         self.resource_trace = Some(Box::new(engine));
         Ok(observer)
     }
+    /// Active lexical handler effect names currently installed on the runtime stack.
+    pub fn active_effects(&self) -> Vec<String> {
+        self.stack
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Handler(handler) => Some(handler.effect.name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
     fn construct_data(
         &mut self,
         ty: String,
