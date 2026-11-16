@@ -7,7 +7,7 @@ lean --version | grep -F "version $(sed 's/.*:v//' lean-toolchain)"
 for model in \
   Foundations RuntimeFrames SpecificationCounterexample EffectPlaces \
   CheckedArithmetic FluxDbsp AetherMemory MetatheoryAppendix MetronomeArithmetic \
-  StylusAndLintSafety RewriteWitness CodexSearchAndLayout InspectorUiSpecs BrandGeometrySafety IgnisTriBackendEquiv; do
+  StylusAndLintSafety RewriteWitness CodexSearchAndLayout InspectorUiSpecs BrandGeometrySafety IgnisTriBackendEquiv PrismAuthSafety; do
   echo "lean lean/$model.lean"
   lean "lean/$model.lean"
 done

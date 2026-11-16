@@ -133,7 +133,20 @@ fn tied_extremes_and_open_ends_are_preserved() {
     let maximum: Vec<i64> = (0..MAX_SIGNED_RANK_CONFIDENCE_PAIRS)
         .map(|i| 1i64 << i)
         .collect();
-    assert!(!signed_rank_confidence_set(&maximum).unwrap().is_empty());
+    let unique_breakpoints: std::collections::BTreeSet<i128> = maximum
+        .iter()
+        .enumerate()
+        .flat_map(|(i, &a)| {
+            maximum[i..]
+                .iter()
+                .map(move |&b| i128::from(a) + i128::from(b))
+        })
+        .collect();
+    assert_eq!(unique_breakpoints.len(), 528);
+    let maximum_set = signed_rank_confidence_set(&maximum).unwrap();
+    assert!(!maximum_set.is_empty());
+    assert!(!contains(&maximum_set, 0));
+    assert!(!contains(&maximum_set, 4 * (i128::from(1i64 << 31) + 1)));
 }
 
 #[test]
