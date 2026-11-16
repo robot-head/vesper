@@ -63,9 +63,11 @@ if [[ ${1:-seed} == stage1 ]]; then
   stage1_target=$(rustc -vV | sed -n 's/^host: //p')
   stage1_out=${OUT:-$ROOT/bootstrap/stage1.lock}
   # build_runner TARGET_DIR EXE: the target directory is remapped too, so
-  # the runner's digest does not depend on where it was built.
+  # the runner's digest does not depend on where it was built. rustc applies
+  # the last matching prefix, so the target mapping comes last (WORK may lie
+  # inside the checkout).
   build_runner() {
-    RUSTFLAGS="--remap-path-prefix=$1=/target --remap-path-prefix=$ROOT=/vesper --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo" \
+    RUSTFLAGS="--remap-path-prefix=$ROOT=/vesper --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo --remap-path-prefix=$1=/target" \
       cargo build --locked --profile "$stage1_profile" --target-dir "$1" \
       --lib -p vesper -p vesper-codegen-verified
     # Cargo 1.100 may place dependencies in build/<crate>/<hash>/out rather
