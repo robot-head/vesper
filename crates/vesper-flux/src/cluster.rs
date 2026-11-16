@@ -70,11 +70,45 @@
 //!
 //! # Rescaling
 //!
-//! If the last commit was made by a different worker count or different
-//! partition columns, the run first rescales: it restores every old worker,
-//! sums their input integrals, routes them to the new workers, recomputes
-//! every derived integral (gathering exchange inputs globally), checkpoints
-//! the new workers, and commits the rescaled global manifest with no outputs.
+//! Keys hash into [`BINS`] bins, and a layout assigns every bin an owner by
+//! rendezvous hashing, so going from `n` to `m` workers moves only the bins
+//! whose winner changes (about `|n - m| / max(n, m)` of them).
+//!
+//! If the last commit was made under a different layout or different
+//! partition columns, the run first rescales offline: it restores every old
+//! worker, sums their input integrals, routes them to the new workers,
+//! recomputes every derived integral (gathering exchange inputs globally),
+//! checkpoints the new workers, and commits the rescaled global manifest
+//! with no outputs.
+//!
+//! A live rescale ([`LiveRescale`]) happens after a barrier while the job
+//! runs, Megaphone-style, one bin at a time: once the barrier commits, every
+//! old owner sends each new owner the rows of the bins moving between them
+//! and drops them; a new owner adds them to the rows it keeps, rebuilds its
+//! derived integrals, checkpoints and reports; the coordinator commits the
+//! new layout with no outputs. Workers whose bins do not change switch
+//! layouts without waiting and the new manifest reuses their checkpoints.
+//! With `migration_bins_per_step` a rescale runs as several such steps at
+//! consecutive barriers, each moving a bounded number of bins (grouped by
+//! old and new owner, so a step disturbs few workers).
+//!
+//! A rescale can also be requested at run time ([`RescaleRequest`]). Workers
+//! read source epochs only up to a lease of two checkpoint intervals past
+//! the last commit they know of. The coordinator turns a request into a live
+//! rescale after the first barrier at or past the lease granted before its
+//! next commit and records the decision in that commit's global manifest,
+//! so no worker has read past the barrier under the old layout, and the
+//! decision survives a coordinator failover or a restart (a request waiting
+//! for its commit stays queued).
+//!
+//! A worker or coordinator fault inside a reconfiguration window (between
+//! the commit at the barrier and the commit of the new layout) is recovered
+//! partially, like any other: a replaced worker restores the commit at the
+//! barrier and rejoins the migration (its peers resend migrated bins from
+//! upstream backup, and receivers check that a resent part equals the
+//! original); a replaced coordinator announces the barrier again and workers
+//! that already migrated resend their reports. Only a whole-cluster crash in
+//! the window rescales offline.
 //!
 //! # Scope
 //!
@@ -242,7 +276,11 @@ impl Schedule {
             .filter(|&b| from.owner[b] != target.owner[b])
             .collect();
         moved.sort_by_key(|&b| (from.owner[b], target.owner[b], b));
-        let chunk = if per_step == 0 { moved.len().max(1) } else { per_step };
+        let chunk = if per_step == 0 {
+            moved.len().max(1)
+        } else {
+            per_step
+        };
         let count = moved.len().div_ceil(chunk).max(1);
         let first = self.steps.len();
         let mut layout = from.clone();
@@ -255,7 +293,11 @@ impl Schedule {
                 .checked_mul(interval)
                 .and_then(|d| after.checked_add(d))
                 .ok_or(Error::Overflow)?;
-            let step = if k + 1 == count { target.clone() } else { layout.clone() };
+            let step = if k + 1 == count {
+                target.clone()
+            } else {
+                layout.clone()
+            };
             self.steps.push((at, step));
         }
         self.rescales.push((first, count));
@@ -613,9 +655,7 @@ fn split(set: &ZSet, col: usize, layout: &Layout) -> Vec<ZSet> {
         })
         .collect();
     for (row, w) in &set.rows {
-        parts[layout.route(row[col])]
-            .rows
-            .insert(row.clone(), *w);
+        parts[layout.route(row[col])].rows.insert(row.clone(), *w);
     }
     parts
 }
@@ -846,6 +886,10 @@ struct Global {
     after_epoch: u64,
     entries: Vec<(ObjectId, Option<ObjectId>)>,
     layout: Layout,
+    /// Workers of the barrier epoch's layout, which sent the messages in the
+    /// entries' channel state (a new-layout manifest reuses untouched
+    /// workers' entries from the commit at the barrier).
+    channel_workers: usize,
     /// Runtime rescale decisions committed so far.
     decisions: Vec<(u64, usize)>,
 }
@@ -1078,6 +1122,7 @@ impl State<'_> {
         layout: &Layout,
         after_epoch: u64,
         entries: &[(ObjectId, Option<ObjectId>)],
+        channel_workers: usize,
         decision: Option<(u64, usize)>,
     ) -> Result<ObjectId, Error> {
         let workers = layout.workers;
@@ -1104,6 +1149,7 @@ impl State<'_> {
             }
         }
         b.extend_from_slice(&layout.owner);
+        put_u32(&mut b, channel_workers)?;
         let decisions: Vec<_> = self.decided.iter().copied().chain(decision).collect();
         put_u32(&mut b, decisions.len())?;
         for (after, w) in decisions {
@@ -1160,6 +1206,10 @@ impl State<'_> {
         if owner.iter().any(|o| usize::from(*o) >= workers) {
             return Err(Error::Checkpoint("global manifest bin owner"));
         }
+        let channel_workers = r.usize32()?;
+        if channel_workers == 0 || channel_workers > MAX_WORKERS {
+            return Err(Error::Checkpoint("global manifest workers"));
+        }
         let count = r.usize32()?;
         if count > MAX_DECISIONS {
             return Err(Error::Checkpoint("global manifest decisions"));
@@ -1185,6 +1235,7 @@ impl State<'_> {
             after_epoch,
             entries,
             layout,
+            channel_workers,
             decisions,
         })
     }
@@ -1352,7 +1403,7 @@ impl State<'_> {
                 // reuses only untouched workers' entries from it).
                 let inboxes = self.read_channel(
                     plan,
-                    self.n_at(global.after_epoch),
+                    global.channel_workers,
                     &ch,
                     w,
                     restored.ticks,
@@ -1395,10 +1446,7 @@ impl State<'_> {
                 _ => None,
             };
             if let Some(k) = key
-                && set
-                    .rows
-                    .keys()
-                    .any(|row| global.layout.route(row[k]) != w)
+                && set.rows.keys().any(|row| global.layout.route(row[k]) != w)
             {
                 return Err(Error::Checkpoint("rows on the wrong worker"));
             }
@@ -2197,7 +2245,8 @@ impl State<'_> {
                 }
             }
             self.moving.insert((b, w), (moved, total));
-            let gains_from = |dest: usize| (0..BINS).any(|x| old.owner(x) == w && new.owner(x) == dest);
+            let gains_from =
+                |dest: usize| (0..BINS).any(|x| old.owner(x) == w && new.owner(x) == dest);
             for (dest, parts) in parts.into_iter().enumerate() {
                 if dest == w || !gains_from(dest) {
                     continue;
@@ -2286,7 +2335,8 @@ impl State<'_> {
             }
             sums.push(sum);
         }
-        if got.values().any(|p| p.len() != keyed.len()) || got.keys().any(|f| !senders.contains(f)) {
+        if got.values().any(|p| p.len() != keyed.len()) || got.keys().any(|f| !senders.contains(f))
+        {
             return Err(Error::Cluster("malformed migration"));
         }
         let mut sums = sums.into_iter();
@@ -2565,10 +2615,11 @@ impl State<'_> {
                     // A worker replaced inside the window migrates again and
                     // may report a second checkpoint of the same state; the
                     // first one wins.
-                    if self.coord.migrated.contains_key(&worker) {
-                        self.duplicates += 1;
-                    } else {
-                        self.coord.migrated.insert(worker, manifest);
+                    match self.coord.migrated.entry(worker) {
+                        std::collections::btree_map::Entry::Occupied(_) => self.duplicates += 1,
+                        std::collections::btree_map::Entry::Vacant(v) => {
+                            v.insert(manifest);
+                        }
                     }
                     continue;
                 }
@@ -2775,7 +2826,14 @@ impl State<'_> {
                             None => *old.entries.get(w).ok_or(Error::Cluster("migration"))?,
                         });
                     }
-                    let global = self.write_global(&self.plan, &layout, b, &entries, None)?;
+                    let global = self.write_global(
+                        &self.plan,
+                        &layout,
+                        b,
+                        &entries,
+                        self.sched.layout(g).workers,
+                        None,
+                    )?;
                     self.coord.pending = Pending::Written {
                         after: b,
                         global,
@@ -2794,7 +2852,14 @@ impl State<'_> {
                 let entries: Vec<_> = acks.iter().flatten().copied().collect();
                 let decision = self.decide(after);
                 let layout = self.sched.layout_at(after).clone();
-                let global = self.write_global(&self.plan, &layout, after, &entries, decision)?;
+                let global = self.write_global(
+                    &self.plan,
+                    &layout,
+                    after,
+                    &entries,
+                    layout.workers,
+                    decision,
+                )?;
                 self.coord.pending = Pending::Written {
                     after,
                     global,
@@ -3178,7 +3243,14 @@ fn rescale_from(
         entries.push((report.manifest, None));
         moved.push((exec, ckpt));
     }
-    let manifest = state.write_global(&state.plan, to, record.after_epoch, &entries, None)?;
+    let manifest = state.write_global(
+        &state.plan,
+        to,
+        record.after_epoch,
+        &entries,
+        to.workers,
+        None,
+    )?;
     let new_record = CommitRecord {
         fingerprint: state.base_fp,
         after_epoch: record.after_epoch,

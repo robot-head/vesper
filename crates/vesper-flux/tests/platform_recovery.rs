@@ -201,8 +201,18 @@ fn native_rescale_up_and_down_preserves_exactly_once_recovery() {
                 // the coordinator recovers inside the window and the
                 // migration completes live.
                 let whole = kind == FaultKind::Cluster;
-                let restore = if whole { Restore::Rescaled } else { Restore::Exact };
-                let recovered = run(&inputs, &expected, &store, &cfg, Some((fault(kind, step), restore)));
+                let restore = if whole {
+                    Restore::Rescaled
+                } else {
+                    Restore::Exact
+                };
+                let recovered = run(
+                    &inputs,
+                    &expected,
+                    &store,
+                    &cfg,
+                    Some((fault(kind, step), restore)),
+                );
                 assert_eq!(recovered.recoveries[0].phase, CheckpointPhase::Committed);
                 assert!(recovered.recoveries[0].in_reconfiguration);
                 assert_eq!(recovered.recovery_rescales, usize::from(whole));

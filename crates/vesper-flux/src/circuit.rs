@@ -10,10 +10,9 @@ pub use checkpoint::durable::{
 #[path = "cluster.rs"]
 mod cluster;
 pub use cluster::{
-    CheckpointMode, CheckpointPhase, ClusterConfig, ClusterRun, CommittedCheckpoint, EpochSource,
-    BINS, Fault, FaultKind, GcReport, LiveMigration, LiveRescale, Recovery, Rescale, RescaleRequest,
-    run_cluster,
-    run_cluster_with,
+    BINS, CheckpointMode, CheckpointPhase, ClusterConfig, ClusterRun, CommittedCheckpoint,
+    EpochSource, Fault, FaultKind, GcReport, LiveMigration, LiveRescale, Recovery, Rescale,
+    RescaleRequest, run_cluster, run_cluster_with,
 };
 #[path = "kafka_client.rs"]
 mod client;

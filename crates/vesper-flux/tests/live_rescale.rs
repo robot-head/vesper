@@ -1,5 +1,5 @@
 //! Live rescaling: the worker count changes at a barrier while the job runs.
-//! Keyed state moves between running workers as messages (nothing is read
+//! Keyed state moves between running workers bin by bin (nothing is read
 //! back from storage, nothing restarts), and every output must equal both the
 //! single-executor reference and a fixed-parallelism cluster run. Faults are
 //! injected at every scheduler step around the reconfiguration.
@@ -223,7 +223,7 @@ fn sweep_with(cfg: ClusterConfig, make: impl Fn(u64) -> Fault) -> (usize, usize)
     )
     .unwrap();
     assert_eq!(base.outputs, expected);
-    let (mut escalated, mut offline) = (0, 0);
+    let (mut window, mut offline) = (0, 0);
     let mut phases: BTreeMap<CheckpointPhase, usize> = BTreeMap::new();
     for step in 1..=base.steps {
         let fault = make(step);
@@ -238,7 +238,7 @@ fn sweep_with(cfg: ClusterConfig, make: impl Fn(u64) -> Fault) -> (usize, usize)
         assert_eq!(run.materialized, total(&expected), "{what}");
         assert_eq!(run.recoveries.len(), 1, "{what}");
         let rec = run.recoveries[0];
-        escalated += usize::from(rec.in_reconfiguration);
+        window += usize::from(rec.in_reconfiguration);
         offline += run.recovery_rescales;
         // Each rescale step either migrated live or a recovery redid it
         // offline.
@@ -258,7 +258,7 @@ fn sweep_with(cfg: ClusterConfig, make: impl Fn(u64) -> Fault) -> (usize, usize)
         phases.len() >= 4,
         "{from}->{schedule:?} {mode:?}: {phases:?}"
     );
-    (escalated, offline)
+    (window, offline)
 }
 
 #[test]
@@ -393,11 +393,19 @@ fn per_bin_migration_moves_only_reassigned_bins() {
             "{from}->{to}: {} of {BINS} bins moved",
             m.bins_moved
         );
-        assert!(m.rows_moved < m.rows_total, "{from}->{to}: not every row moves");
+        assert!(
+            m.rows_moved < m.rows_total,
+            "{from}->{to}: not every row moves"
+        );
     }
 }
 
-fn gradual(from: usize, mode: CheckpointMode, rescales: &[(u64, usize)], per_step: usize) -> ClusterConfig {
+fn gradual(
+    from: usize,
+    mode: CheckpointMode,
+    rescales: &[(u64, usize)],
+    per_step: usize,
+) -> ClusterConfig {
     ClusterConfig {
         migration_bins_per_step: per_step,
         ..config(from, mode, rescales)
@@ -469,9 +477,15 @@ fn rescale_requested_at_run_time() {
             let mut sink = MemorySink::new();
             let cfg = ClusterConfig {
                 rescale_requests: vec![
-                    RescaleRequest { at_step, workers: to },
+                    RescaleRequest {
+                        at_step,
+                        workers: to,
+                    },
                     // Asks for the layout already requested: dropped.
-                    RescaleRequest { at_step: at_step + 1, workers: to },
+                    RescaleRequest {
+                        at_step: at_step + 1,
+                        workers: to,
+                    },
                 ],
                 ..config(from, mode, &[])
             };
@@ -506,11 +520,21 @@ fn faults_around_a_runtime_rescale_request() {
     let expected = reference(&inputs);
     for mode in [CheckpointMode::Aligned, CheckpointMode::Unaligned] {
         let cfg = ClusterConfig {
-            rescale_requests: vec![RescaleRequest { at_step: 30, workers: 3 }],
+            rescale_requests: vec![RescaleRequest {
+                at_step: 30,
+                workers: 3,
+            }],
             ..config(2, mode, &[])
         };
-        let base =
-            run_cluster_with(&circuit(), &inputs, &mut MemorySink::new(), &store, &cfg, &[]).unwrap();
+        let base = run_cluster_with(
+            &circuit(),
+            &inputs,
+            &mut MemorySink::new(),
+            &store,
+            &cfg,
+            &[],
+        )
+        .unwrap();
         assert_eq!(base.outputs, expected);
         assert_eq!(base.migrations.len(), 1);
         let (mut window, mut offline) = (0, 0);

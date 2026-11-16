@@ -143,7 +143,7 @@ impl Fail {
     }
     /// The coordinator moved or is not ready: look it up again.
     pub(crate) fn coordinator_moved(&self) -> bool {
-        matches!(self.code(), Some(14 | 15 | 16))
+        matches!(self.code(), Some(14..=16))
     }
     pub(crate) fn fenced(&self) -> bool {
         matches!(self.code(), Some(47 | 90 | 82))
@@ -1210,7 +1210,7 @@ mod tests {
         let mut headers = BTreeMap::new();
         headers.insert("h".to_string(), vec![i; 3]);
         KafkaRecord {
-            key: (i % 2 == 0).then(|| vec![i]),
+            key: i.is_multiple_of(2).then(|| vec![i]),
             value: Some(vec![i; usize::from(i) * 50]),
             headers,
             timestamp: 1_000 + i64::from(i),
