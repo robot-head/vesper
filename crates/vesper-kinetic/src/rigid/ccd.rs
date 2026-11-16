@@ -353,15 +353,17 @@ impl RigidWorld {
     /// with poses `pa`, `pb`: velocity at the impact, then a linear impulse
     /// that removes the approach along the normal (with restitution).
     fn redirect(&mut self, m: &ContactManifold, s: f64, mut pa: State, mut pb: State) {
-        let t = det::mul(s as f32, self.config.dt);
+        // A path's state keeps the velocity at the path's start (the tick
+        // start, or an earlier impact), so gravity acts from there.
         let g = self.config.gravity;
+        let since = |w: &Self, i: usize| det::mul((s - w.path_start(i)) as f32, w.config.dt);
         let a = m.a as usize;
         if pa.inv_mass > 0.0 {
-            pa.v = add(pa.v, scale(g, t));
+            pa.v = add(pa.v, scale(g, since(self, a)));
         }
         let wb = match m.b {
-            Some(_) if pb.inv_mass > 0.0 => {
-                pb.v = add(pb.v, scale(g, t));
+            Some(b) if pb.inv_mass > 0.0 => {
+                pb.v = add(pb.v, scale(g, since(self, b as usize)));
                 pb.inv_mass
             }
             _ => 0.0,

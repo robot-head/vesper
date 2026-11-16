@@ -374,7 +374,13 @@ impl RigidWorld {
         if !(friction.is_finite() && friction >= 0.0) {
             return Err(bad("joint friction must be finite and >= 0"));
         }
+        let (a, b) = (j.joint.a, j.joint.b);
         self.joints[i].friction = friction;
+        // Less friction can release a load that was asleep on it.
+        self.wake(a as usize);
+        if let Some(b) = b {
+            self.wake(b as usize);
+        }
         Ok(())
     }
 

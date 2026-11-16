@@ -404,3 +404,40 @@ fn malformed_diff_scenes_are_typed_errors() {
     ));
     assert_eq!(gradients(&base, &[]), Err(RigidDiffError::SeedLength));
 }
+
+#[test]
+fn overlapping_rotated_boxes_are_pushed_apart() {
+    // Overlapping boxes whose deepest axis is an edge pair with several
+    // parallel candidates: the supporting pair must be the one chosen.
+    let rot = |q1: [f64; 4], q2: [f64; 4]| {
+        let ([x1, y1, z1, w1], [x2, y2, z2, w2]) = (q1, q2);
+        [
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        ]
+    };
+    let mut b = body([0.0, -0.35, -0.5], 0, [6.0; 3]);
+    b.orientation = rot(quat([0.0, 1.0, 0.0], 0.5), quat([0.0, 0.0, 1.0], 0.3));
+    let mut s = scene(
+        vec![fixed([0.0; 3], 0), b],
+        vec![DiffShape::Box {
+            half_extents: [0.7, 0.3, 0.2],
+        }],
+        4,
+    );
+    s.ground = None;
+    s.gravity = [0.0; 3];
+    let g = gradients(&s, &seeds(2)).unwrap();
+    assert!(
+        g.activations.iter().sum::<usize>() > 0,
+        "{:?}",
+        g.activations
+    );
+    let out = simulate(&s).unwrap();
+    let moved: f64 = (0..3)
+        .map(|k| (out[1].pos[k] - s.bodies[1].pos[k]).powi(2))
+        .sum();
+    assert!(moved.sqrt() > 1e-3, "not pushed apart: {:?}", out[1].pos);
+}

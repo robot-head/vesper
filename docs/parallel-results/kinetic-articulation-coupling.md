@@ -252,10 +252,18 @@ workspace`):
     bounding-sphere reject);
   - no soft self-collision.
 - **CCD re-sweep:** one TOI pass per tick.
-- **The lavapipe kinetic-gpu tests run only locally.** Adding
-  `-p vesper-kinetic-gpu` to `.github/workflows/gpu-compute.yml` (fmt,
-  clippy and test steps) is a CI change outside this lane's paths. It was
-  not made, and needs the integration coordinator. In the required checks
-  the crate builds and its tests skip without a device.
+- **The lavapipe kinetic-gpu tests run in the GPU compute workflow.** At
+  the user's request, `-p vesper-kinetic-gpu` was added to the fmt, clippy
+  and test steps of `.github/workflows/gpu-compute.yml`. In the required
+  checks the crate builds and its device tests skip without a device.
+- **Review fixes (Codex on #858):**
+  - CCD redirect now adds gravity only since each body's own path start.
+  - Articulation drives saturate on the solved effort, implicit part
+    included.
+  - `set_joint_friction` wakes the joint's bodies.
+  - Edge-pair SAT picks only edges on the support planes.
+
+  The drive and edge-pair fixes have regression tests that fail without
+  them.
 - **Lean:** no Lean changes. The colouring proof is unaffected, because the
   joint drives add no constraints to the colouring.

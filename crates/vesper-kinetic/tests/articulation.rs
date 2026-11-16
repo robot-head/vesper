@@ -511,3 +511,36 @@ fn articulation_errors_are_typed() {
         Err(ArticulationError::UnknownLink { link: 3 })
     ));
 }
+
+#[test]
+fn implicit_drive_effort_stays_within_max_effort() {
+    // At its target but moving fast: the explicit PD term is 0, the
+    // implicit spring is not. The drive may change the rate by at most
+    // `max_effort / m · h`.
+    let links = [ArticulationLink::new(
+        None,
+        ArticulationJoint::Prismatic {
+            axis: [1.0, 0.0, 0.0],
+        },
+        [0.0; 3],
+        1.0,
+        [0.0; 3],
+        ZERO3,
+    )];
+    let mut art = Articulation::new(config(0.1, 1), &links).unwrap();
+    art.set_state(0, 0.0, 100.0).unwrap();
+    art.set_drive(
+        0,
+        Some(ArticulationDrive {
+            target_position: 0.0,
+            target_velocity: 0.0,
+            stiffness: 100.0,
+            damping: 0.0,
+            max_effort: 1.0,
+        }),
+    )
+    .unwrap();
+    art.step().unwrap();
+    let qd = art.qd()[0];
+    assert!((qd - (100.0 - 0.1)).abs() < 1e-9, "rate {qd}");
+}

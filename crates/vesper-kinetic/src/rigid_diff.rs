@@ -884,8 +884,10 @@ impl<'s> Model<'s> {
                                 .fold(f64::NEG_INFINITY, f64::max);
                             let es = lo_i - hi_j;
                             // Parallel edges share an axis and so its
-                            // separation: of those, the pair that is
-                            // nearest (the supporting edges) is the contact.
+                            // separation: the contact is the pair on the
+                            // support planes (both ends of `a`'s edge at
+                            // `lo_i`, of `b`'s at `hi_j`); of several such
+                            // pairs (a supporting face), the nearest.
                             let (a0, a1) = (
                                 vadd64(pi.x, rotate(pi.q, *p)),
                                 vadd64(pi.x, rotate(pi.q, *q)),
@@ -894,6 +896,14 @@ impl<'s> Model<'s> {
                                 vadd64(pj.x, rotate(pj.q, *r)),
                                 vadd64(pj.x, rotate(pj.q, *t)),
                             );
+                            let tol = 1e-9 * (1.0 + lo_i.abs() + hi_j.abs());
+                            if dot64(n, a0) - lo_i > tol
+                                || dot64(n, a1) - lo_i > tol
+                                || hi_j - dot64(n, b0) > tol
+                                || hi_j - dot64(n, b1) > tol
+                            {
+                                continue;
+                            }
                             let (ca, cb) = closest_segments(a0, a1, b0, b1);
                             let gap = dot64(sub64(ca, cb), sub64(ca, cb));
                             let tie = 1e-9 * (1.0 + es.abs());

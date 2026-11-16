@@ -28,8 +28,10 @@
 //! evaluated *implicitly* at the end of the substep: with semi-implicit
 //! Euler this adds `k h² + c h` to `dᵢ` and leaves the explicit part in
 //! `τᵢ`, so stiff position servos and hard velocity motors stay stable at
-//! any gain. When the explicit drive torque exceeds the drive's
-//! `max_effort` it is clamped and applied explicitly (a saturated motor).
+//! any gain. When the drive torque exceeds the drive's `max_effort`, either
+//! explicitly or as solved (the implicit part `−(k h² + c h) q̈` included,
+//! checked after the pass, which is then redone), it is clamped and applied
+//! explicitly (a saturated motor).
 //! Coulomb joint friction uses two passes: a frictionless pass predicts
 //! `q̇ᵢ + h q̈ᵢ`, the torque that would stop the joint against its
 //! articulated inertia `dᵢ` is applied when it is within `±friction`
@@ -487,6 +489,9 @@ pub struct Articulation {
     tau: Vec<f64>,
     /// Joint friction torques of the last substep.
     friction_tau: Vec<f64>,
+    /// Per link, this substep: the explicit torque of a drive whose solved
+    /// effort exceeded `max_effort` (`±max_effort`), or 0 for none.
+    drive_clamp: Vec<f64>,
     scratch: Vec<Scratch>,
     saved: Vec<(f64, f64)>,
     tick: u64,
@@ -609,6 +614,7 @@ impl Articulation {
             qdd: vec![0.0; n],
             tau: vec![0.0; n],
             friction_tau: vec![0.0; n],
+            drive_clamp: vec![0.0; n],
             scratch: vec![ZERO_SCRATCH; n],
             saved: vec![(0.0, 0.0); n],
             tick: 0,
@@ -709,7 +715,9 @@ impl Articulation {
         let (q, qd) = (self.q[i], self.qd[i]);
         let mut explicit = self.tau[i] - l.damping * qd;
         let mut implicit = l.damping * h;
-        if let Some(d) = l.drive {
+        if l.drive.is_some() && self.drive_clamp[i] != 0.0 {
+            explicit += self.drive_clamp[i];
+        } else if let Some(d) = l.drive {
             let raw = d.stiffness * (d.target_position - q) + d.damping * (d.target_velocity - qd);
             if raw.abs() > d.max_effort {
                 explicit += if raw > 0.0 {
@@ -843,9 +851,42 @@ impl Articulation {
         Ok(&self.qdd)
     }
 
+    /// The effort an unsaturated implicit drive exerts at the solved `q̈`.
+    fn drive_effort(&self, i: usize, h: f64) -> Option<(f64, f64)> {
+        let d = self.links[i].drive?;
+        if self.drive_clamp[i] != 0.0 {
+            return None;
+        }
+        let (q, qd) = (self.q[i], self.qd[i]);
+        let raw = d.stiffness * (d.target_position - q) + d.damping * (d.target_velocity - qd);
+        if raw.abs() > d.max_effort {
+            return None;
+        }
+        let tau = d.stiffness * (d.target_position - q - h * qd)
+            + d.damping * (d.target_velocity - qd)
+            - (d.stiffness * h * h + d.damping * h) * self.qdd[i];
+        Some((tau, d.max_effort))
+    }
+
     fn substep(&mut self, h: f64) -> Result<(), ArticulationError> {
         let any_friction = self.links.iter().any(|l| l.friction > 0.0);
+        self.drive_clamp.fill(0.0);
         self.aba(h, false)?;
+        // An implicit drive whose solved effort (including the implicit
+        // `−(k h² + c h) q̈` part) exceeds `max_effort` saturates: one more
+        // pass with it clamped and explicit.
+        let mut clamped = false;
+        for i in 0..self.links.len() {
+            if let Some((tau, max)) = self.drive_effort(i, h)
+                && tau.abs() > max
+            {
+                self.drive_clamp[i] = if tau > 0.0 { max } else { -max };
+                clamped = true;
+            }
+        }
+        if clamped {
+            self.aba(h, false)?;
+        }
         if any_friction {
             for i in 0..self.links.len() {
                 let f = self.links[i].friction;
