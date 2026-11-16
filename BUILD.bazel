@@ -115,6 +115,9 @@ vesper_crate(
     # The corpus implements TEST_TOTAL_SHARDS/TEST_SHARD_INDEX itself.
     test_shards = {"test/self_host_front_end": 4},
     # Reservations include subprocess overhead; they do not enforce RSS limits.
+    # `lean_replay` marks the Lean/Logos replay suite. PR runs of "Test all
+    # targets" skip it unless Lean-facing paths change; pushes to main run it
+    # (scripts/ci/lean_replay_scope.py, docs/ci-platforms.md "PR test tiers").
     test_tags = {
         # These harnesses can run several compiler/evaluator cases in parallel.
         "vesper_unit_test": [
@@ -142,51 +145,63 @@ vesper_crate(
         "test/lean4lean_foundations42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/lean4lean_construction42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/lean4lean_order42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/lean4lean_map42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/lean4lean_normalize42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/lean4lean_normalization42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/lean4lean_comparison42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/logos42_acceptance": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         # Serial Lean -j1/-M4096 stages plus estimated wrapper overhead (#615).
         "test/resource_oracle42": [
             "resources:memory:5120",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/resource_model42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/oracle42_acceptance": [
             "resources:memory:5120",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/replay42_kernel": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         # Four actual corpus workers; memory is an estimate, not an RSS cap.
         "test/self_host_front_end": [
@@ -196,26 +211,32 @@ vesper_crate(
         "test/lean4lean_shape42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/lean4lean_addability42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/lean4lean_completion42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/lean4lean_reconstruction42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/lean4lean_normalized_completion42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
         "test/lean4lean_map_tree42": [
             "resources:memory:9216",
             "resources:cpu:1",
+            "lean_replay",
         ],
     },
     # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
