@@ -142,13 +142,32 @@ fn run(args: &[String]) -> Result<bool, String> {
             println!("stage1 cross-backend record ok ({} programs)", lock.programs.len());
             Ok(true)
         }
+        Some("compare-stage1-outcome") if args.len() == 3 => {
+            use vesper_codegen_verified::stage1::Stage1Lock;
+            let reference = Stage1Lock::parse(&read(Path::new(&args[1]))?).map_err(|e| e.to_string())?;
+            let fresh = Stage1Lock::parse(&read(Path::new(&args[2]))?).map_err(|e| e.to_string())?;
+            let report = reference.compare_outcome(&fresh).map_err(|e| e.to_string())?;
+            for program in &report.improved {
+                println!("improved: {program} now builds with the verified backend; re-record the lock");
+            }
+            for field in &report.stale {
+                println!("stale: {field}");
+            }
+            println!(
+                "stage1 outcome ok ({} programs, {} improved, {} stale fields)",
+                fresh.programs.len(),
+                report.improved.len(),
+                report.stale.len()
+            );
+            Ok(true)
+        }
         Some("check-lock") if args.len() == 2 => {
             let lock = parse_lock(&read(Path::new(&args[1]))?).map_err(|e| e.to_string())?;
             println!("lock ok: fixed point {}", lock.quorum.path_a_stage3);
             Ok(true)
         }
         _ => Err(
-            "usage: vesper-bootstrap seed-lock ... | check-seed-lock FILE | check-stage1-lock FILE | check-lock FILE".into(),
+            "usage: vesper-bootstrap seed-lock ... | check-seed-lock FILE | check-stage1-lock FILE | compare-stage1-outcome REFERENCE FRESH | check-lock FILE".into(),
         ),
     }
 }

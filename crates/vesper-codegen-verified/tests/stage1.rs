@@ -222,3 +222,106 @@ fn cli_never_certifies_an_unavailable_backend() {
     }
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+fn outcome_ratchet_reports_staleness_and_improvement_but_rejects_regression() {
+    let refused = record(&[program(Err("unsupported Effect"))]);
+    let built = record(&[program(Ok(b"verified"))]);
+    // Same measurement: current.
+    assert!(refused.compare_outcome(&refused).unwrap().is_current());
+    // A new verified build is an improvement, never a failure.
+    let report = refused.compare_outcome(&built).unwrap();
+    assert_eq!(report.improved, ["fib"]);
+    assert!(report.stale.is_empty());
+    // Losing it is a typed regression.
+    assert_eq!(
+        built.compare_outcome(&refused),
+        Err(Stage1Error::Regression {
+            program: "fib".into(),
+            reason: "unsupported Effect".into()
+        })
+    );
+    // Another seed, other frontend bytes, other artifacts or results: stale only.
+    let mut other = [program(Ok(b"verified again"))];
+    other[0].cranelift.artifact = b"cranelift 2";
+    other[0].seed_result = 7;
+    other[0].cranelift.result = 7;
+    other[0].verified.as_mut().unwrap().result = 7;
+    let sources: &[(&str, &[u8])] = &[("src/parser.ves", b"frontend 2")];
+    let fresh = Stage1Lock::record(
+        "x86_64-unknown-linux-gnu",
+        &Stage1Evidence {
+            seed_binary: b"seed 2",
+            frontend_sources: sources,
+            ..evidence(&other)
+        },
+    )
+    .unwrap();
+    let report = built.compare_outcome(&fresh).unwrap();
+    assert!(report.improved.is_empty());
+    assert_eq!(
+        report.stale,
+        [
+            "seed_binary",
+            "frontend_sources",
+            "fib.result",
+            "fib.cranelift_artifact",
+            "fib.verified"
+        ]
+    );
+    // Another target or corpus is a hard failure.
+    let elsewhere =
+        Stage1Lock::record("aarch64-unknown-linux-gnu", &evidence(&[program(Ok(b"v"))])).unwrap();
+    assert!(matches!(
+        built.compare_outcome(&elsewhere),
+        Err(Stage1Error::TargetMismatch { .. })
+    ));
+    let mut renamed = [program(Ok(b"verified"))];
+    renamed[0].name = "gcd";
+    assert_eq!(
+        built.compare_outcome(&record(&renamed)),
+        Err(Stage1Error::CorpusMismatch)
+    );
+    let mut edited = [program(Ok(b"verified"))];
+    edited[0].source = b"fn main() -> i64 { 2 }";
+    assert_eq!(
+        built.compare_outcome(&record(&edited)),
+        Err(Stage1Error::CorpusMismatch)
+    );
+}
+
+#[test]
+fn cli_outcome_ratchet_fails_closed_on_regression() {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("stage1-outcome-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let refused = dir.join("refused.lock");
+    let built = dir.join("built.lock");
+    std::fs::write(
+        &refused,
+        record(&[program(Err("unsupported Effect"))])
+            .to_toml()
+            .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &built,
+        record(&[program(Ok(b"verified"))]).to_toml().unwrap(),
+    )
+    .unwrap();
+    let run = |reference: &std::path::Path, fresh: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_vesper-bootstrap"))
+            .arg("compare-stage1-outcome")
+            .arg(reference)
+            .arg(fresh)
+            .output()
+            .unwrap()
+    };
+    let improved = run(&refused, &built);
+    assert!(improved.status.success());
+    assert!(String::from_utf8_lossy(&improved.stdout).contains("improved: fib"));
+    let regressed = run(&built, &refused);
+    assert!(!regressed.status.success());
+    assert!(String::from_utf8_lossy(&regressed.stderr).contains("Regression"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
