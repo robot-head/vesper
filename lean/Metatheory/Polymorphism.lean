@@ -624,6 +624,19 @@ theorem splitR_comm {R R1 R2 : RCtx} (h : SplitR R R1 R2) : SplitR R R2 R1 := by
 theorem splitR_empty_left (R : RCtx) : SplitR R RCtx.empty R := fun _ => Or.inl ⟨rfl, rfl⟩
 theorem splitR_empty_right (R : RCtx) : SplitR R R RCtx.empty := fun _ => Or.inr ⟨rfl, rfl⟩
 
+theorem splitR_no_shared_entry {R A B : RCtx} {r : Nat} {a b : Ent}
+    (split : SplitR R A B) (left : A r = some a) (right : B r = some b) : False := by
+  rcases split r with ⟨absent, _⟩ | ⟨absent, _⟩
+  · rw [left] at absent; cases absent
+  · rw [right] at absent; cases absent
+
+theorem splitR_identical_implies_empty {R A : RCtx} (split : SplitR R A A) :
+    REmpty A := by
+  intro r
+  cases member : A r with
+  | none => rfl
+  | some entry => exact False.elim (splitR_no_shared_entry split member member)
+
 theorem splitR_of_empty_left {R R1 R2 : RCtx} (h : SplitR R R1 R2) (h1 : REmpty R1) : ∀ r, R r = R2 r := by
   intro r; have := h r; have := h1 r; unfold SRE at *; grind
 
@@ -853,6 +866,19 @@ theorem vt_rleM {R v τ} (h : VT Sig R v τ) : RLeM R τ.kind := by
     · exact rleM_mono ih1 (Mode.le_trans hk1 (Mode.le_trans (Mode.le_join_left _ _) (Mode.le_join_right _ _)))
     · exact rleM_mono ih2 (Mode.le_trans hk2 (Mode.le_trans (Mode.le_join_right _ _) (Mode.le_join_right _ _)))
 
+theorem vt_fixc_environment_copy {R : RCtx} {v body : Expr} {τ : Ty}
+    (typed : VT Sig R (.fixc v body) τ) :
+    ∃ τz, VT Sig R v τz ∧ τz.kind = .copy := by
+  cases typed with
+  | fixc environment bound _ _ => exact ⟨_, environment, Mode.le_copy bound⟩
+
+/-- Even a linear recursive function cannot own a live environment resource. -/
+theorem vt_fixc_resource_free {R : RCtx} {v body : Expr} {τ : Ty}
+    (typed : VT Sig R (.fixc v body) τ) : REmpty R := by
+  obtain ⟨_, environment, copy⟩ := vt_fixc_environment_copy typed
+  apply rleM_copy
+  simpa only [copy] using vt_rleM environment
+
 /-- Any value typing splits into its exact resources and discarded ones. -/
 theorem val_inv {Γ R v τ m ε} (h : HasType Sig Γ R v τ m ε) (hv : IsVal v) :
     ∃ Rv Rd, SplitR R Rv Rd ∧ DiscardR Rd ∧ VT Sig Rv v τ ∧ Mode.Le τ.kind m := by
@@ -884,6 +910,32 @@ theorem val_inv {Γ R v τ m ε} (h : HasType Sig Γ R v τ m ε) (hv : IsVal v)
       obtain ⟨hA, hB, hC⟩ := split4 hsr hs1 hs2
       exact ⟨_, _, hA, discardR_join hC hd1 hd2, .pair hB hvt1 hvt2 hk1 hk2, hk⟩
   | _ => cases hv
+
+theorem typed_fixc_only_discarded_resources {Γ : Ctx} {R : RCtx} {v body : Expr}
+    {τ : Ty} {m : Mode} {ε : Row}
+    (typed : HasType Sig Γ R (.fixc v body) τ m ε) (value : IsVal v) : DiscardR R := by
+  obtain ⟨Rv, Rd, split, discarded, exactValue, _⟩ := val_inv typed (.fixc body value)
+  intro r entry member
+  have equal := splitR_of_empty_left split (vt_fixc_resource_free exactValue) r
+  exact discarded r entry (equal.symm.trans member)
+
+theorem fixc_handle_capture_rejected {Γ : Ctx} {R : RCtx} {r : Nat} {body : Expr}
+    {τ : Ty} {m : Mode} {ε : Row} :
+    ¬ HasType Sig Γ R (.fixc (.hdlV r) body) τ m ε := by
+  intro typed
+  cases typed with
+  | fixc _ environment _ _ _ =>
+    cases environment with
+    | hdlV _ _ _ _ bound => exact absurd bound (by decide)
+
+theorem fixc_continuation_capture_rejected {Γ : Ctx} {R : RCtx} {r : Nat}
+    {continuation body : Expr} {τ : Ty} {m : Mode} {ε : Row} :
+    ¬ HasType Sig Γ R (.fixc (.kontV r continuation) body) τ m ε := by
+  intro typed
+  cases typed with
+  | fixc _ environment _ _ _ =>
+    cases environment with
+    | kontV _ _ _ _ _ _ _ _ _ bound => exact RMode.not_le_copy _ bound
 
 /-- No scalar wrapper value with a linear field floor can be typed copy. -/
 theorem scalar_linear_wrapper_not_copy (Sig : Nat → EffSig) (R : RCtx) (ε : Row) :
@@ -2588,8 +2640,8 @@ theorem head_pres {e L n a e' L' n'} (hh : Head Sig e L n a e' L' n') :
       obtain ⟨Rf, Rfd, hsf, hfd, hvf, _⟩ := val_inv hfun (.fixc _ hv)
       cases hvf with
       | fixc hvenv hkz hσ hbody =>
-        have hRf : REmpty Rf := rleM_copy (rleM_mono (vt_rleM hvenv) hkz)
         have hvself := VT.fixc hvenv hkz hσ hbody
+        have hRf : REmpty Rf := vt_fixc_resource_free hvself
         rw [rempty_eq hRf] at hvself
         obtain ⟨Rwv, Rwd, hsw, hwd, hvw, _⟩ := val_inv ha hw
         obtain ⟨hA, hB, hC⟩ := split4 (splitR_comm hsR) hsw hsf
@@ -4498,6 +4550,71 @@ theorem escape_rejected (Γ : Ctx) (R : RCtx) (τ : Ty) (m : Mode) (ε : Row) :
           obtain ⟨rfl, _⟩ := hi
           exact hdτ (Or.inr (Or.inr hl))
 
+namespace RecursiveCapture
+
+/-- Under the let binder, index 3 is the recursive self binding. -/
+def body : Expr := .letE (.consume (.var 1)) (.app (.var 3) .unitV)
+def closure : Expr := .fixc (.hdlV 0) body
+def call : Expr := .app closure .unitV
+def unfolded : Expr := .letE (.consume (.hdlV 0)) call
+def live : RCtx := RCtx.single 0 .hdl
+def dead : RCtx := live.set 0 none
+
+/-- The same environment occurs in the pending consumption and recursive self. -/
+theorem unfolding_duplicates_environment (L : RCtx) (n : Nat) :
+    Head exSig call L n .silent unfolded L n :=
+  Head.appFix (.hdlV 0) .unitV
+
+/-- If this rejected capture were admitted, unfolding would reuse a dead id. -/
+theorem reaches_repeated_consumption :
+    Steps exSig ⟨call, live, 1⟩ [.silent, .consume 0, .silent, .silent]
+      ⟨unfolded, dead, 1⟩ := by
+  apply Steps.cons (Step.ctx .hole (unfolding_duplicates_environment live 1))
+  apply Steps.cons (Step.ctx (.letC .hole call) (Head.consume (by rfl)))
+  apply Steps.cons (Step.ctx .hole (Head.letV .unitV))
+  apply Steps.cons (Step.ctx .hole (unfolding_duplicates_environment dead 1))
+  exact .refl _
+
+theorem dead_consume_cannot_step {c a c'} (step : Step exSig c a c')
+    (expression : c.e = .consume (.hdlV 0)) (absent : c.live 0 = none) : False := by
+  cases step with
+  | @ctx e L n a e' L' n' E head =>
+    simp only at expression absent
+    cases E with
+    | hole =>
+      simp only [plug] at expression
+      subst expression
+      cases head with
+      | consume present => rw [absent] at present; cases present
+    | letC E e2 => simp [plug] at expression
+    | handleC l s E ret cls => simp [plug] at expression
+
+theorem repeated_consumption_stuck {c a c'}
+    (expression : c.e = unfolded) (absent : c.live 0 = none) :
+    ¬ Step exSig c a c' := by
+  intro step
+  cases step with
+  | @ctx e L n a e' L' n' E head =>
+    simp only at expression absent
+    cases E with
+    | hole =>
+      simp only [plug] at expression
+      subst expression
+      cases head with
+      | letV value => cases value
+    | letC E e2 =>
+      simp only [plug, unfolded, Expr.letE.injEq] at expression
+      exact dead_consume_cannot_step (Step.ctx E head) expression.1 absent
+    | handleC l s E ret cls => simp [plug, unfolded] at expression
+
+theorem repeated_consumption_not_terminal :
+    ¬ IsVal unfolded ∧ unfolded ≠ .abort := by
+  constructor
+  · intro value; cases value
+  · intro equal; cases equal
+
+end RecursiveCapture
+
 end Examples
 
 -- Kernel axiom audit: every theorem of this file.
@@ -4805,3 +4922,16 @@ end Vesper.Metatheory.Polymorphism
 #print axioms Vesper.Metatheory.Polymorphism.scalar_linear_floor_kind
 #print axioms Vesper.Metatheory.Polymorphism.scalar_default_floor_kind
 #print axioms Vesper.Metatheory.Polymorphism.scalar_linear_wrapper_not_copy
+
+#print axioms Vesper.Metatheory.Polymorphism.splitR_no_shared_entry
+#print axioms Vesper.Metatheory.Polymorphism.splitR_identical_implies_empty
+#print axioms Vesper.Metatheory.Polymorphism.vt_fixc_environment_copy
+#print axioms Vesper.Metatheory.Polymorphism.vt_fixc_resource_free
+#print axioms Vesper.Metatheory.Polymorphism.typed_fixc_only_discarded_resources
+#print axioms Vesper.Metatheory.Polymorphism.fixc_handle_capture_rejected
+#print axioms Vesper.Metatheory.Polymorphism.fixc_continuation_capture_rejected
+#print axioms Vesper.Metatheory.Polymorphism.RecursiveCapture.unfolding_duplicates_environment
+#print axioms Vesper.Metatheory.Polymorphism.RecursiveCapture.reaches_repeated_consumption
+#print axioms Vesper.Metatheory.Polymorphism.RecursiveCapture.dead_consume_cannot_step
+#print axioms Vesper.Metatheory.Polymorphism.RecursiveCapture.repeated_consumption_stuck
+#print axioms Vesper.Metatheory.Polymorphism.RecursiveCapture.repeated_consumption_not_terminal

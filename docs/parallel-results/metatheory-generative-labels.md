@@ -1,4 +1,4 @@
-# Row-lacks foundation for #584
+# Row-lacks and recursive-capture foundations for #584
 
 Base: `042c8590`. Branch: `codex/metatheory-row-lacks`.
 
@@ -39,13 +39,37 @@ The 25 new theorems also establish:
 ## Validation
 
 Both `metatheory_poly` tests pass with Lean 4.35.0. They compile the complete
-model, check that all 300 theorem names have exactly one axiom report, and
+model, check that all 312 theorem names have exactly one axiom report, and
 reject missing reports, forbidden source escapes, diagnostics and any axiom
 outside `propext`, `Classical.choice`, and `Quot.sound`. The headline list now
 includes the new substitution, composition, lifting, opening, exact semantic
 characterization and capture-counterexample results. Existing progress,
 preservation, fuel safety and linear-exhaustion results are checked in the
 same run.
+
+## Recursive environment ownership
+
+The additional 12 theorems state the restriction of the current recursive
+closure calculus precisely. `vt_fixc_environment_copy` shows that a recursive
+closure's environment has copy kind; `vt_fixc_resource_free` derives that its
+exact resource context is empty, regardless of the function's own mode. The
+recursive case of `head_pres` now uses this invariant directly.
+
+`typed_fixc_only_discarded_resources` distinguishes ownership from discarded
+ambient resources: a typing derivation can discard unrelated affine resources,
+but the recursive value itself cannot own them. Direct captures of handles
+and either affine or linear one-shot continuations are rejected. Resource
+splitting also cannot assign the same live entry to two components; identical
+component contexts must be empty.
+
+The `RecursiveCapture` example uses the existing operational semantics. An
+untyped recursive closure consumes its captured handle and calls itself.
+Four steps reach another consumption of the same, now dead, id. That endpoint
+has no step and is neither a value nor an abort. The current typing rules
+reject this capture; this is a counterexample to admitting unrestricted
+capture with the existing unfolding rule, not a counterexample to the proved
+type safety theorem. Supporting noncopy recursive environments requires a
+different ownership or unfolding discipline and a new preservation proof.
 
 ```sh
 VESPER_LEAN=/tmp/lean-4.35.0-linux/bin/lean cargo +stable test --locked --test metatheory_poly
@@ -63,7 +87,8 @@ so requires tracking constraints in typing and transforming expression-level
 row annotations consistently with `inst_open_general`.
 
 Runtime-generative handler allocation, its label context and lexical-scoping
-proofs, first-class System F type abstraction/application, and recursive
-closures capturing affine/linear environments remain open. The existing
+proofs, first-class System F type abstraction/application, and a redesigned
+recursive closure discipline allowing affine/linear environments remain open.
+The existing
 metatheory models remain fragments. These theorems do not establish soundness
 of the Rust compiler or the entire manuscript, and do not close #584.
