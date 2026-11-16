@@ -50,6 +50,7 @@ LEAN_PATH="$oracle_import_dir" lean lean/OrderedContexts.lean
 
 # Compose the existing instruction-selection table over full data-row streams.
 lean -o "$oracle_model_dir/VerifiedCodegen.olean" lean/VerifiedCodegen.lean
+LEAN_PATH="$oracle_import_dir" lean lean/CodegenRv64Encoding.lean
 LEAN_PATH="$oracle_import_dir" lean -o "$oracle_model_dir/CodegenComposition.olean" lean/CodegenComposition.lean
 LEAN_PATH="$oracle_import_dir" lean -o "$oracle_model_dir/CodegenControlFlow.olean" lean/CodegenControlFlow.lean
 LEAN_PATH="$oracle_import_dir" lean -o "$oracle_model_dir/CodegenValidation.olean" lean/CodegenValidation.lean

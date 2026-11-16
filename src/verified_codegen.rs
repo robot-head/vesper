@@ -72,6 +72,7 @@ pub use machine::{
     ArithOp, Cond, FloatOp, Kind, Label, Lir, Loc, M, Reg, Sign, Slot, TrapKind, WrapOp, select,
     table_listing, table_rows,
 };
+pub use riscv64::encoding_listing as rv64_encoding_listing;
 
 /// The value of `vesper build --codegen` that selects this backend.
 pub const CODEGEN: &str = "verified";

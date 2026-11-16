@@ -8,8 +8,11 @@
 //! the AArch64 encoding. RISC-V has no flags, so every checked operation
 //! computes its abort condition explicitly. Conditional branches reach only
 //! ±4 KiB, so a branch to a label is an inverted branch over a `jal`
-//! (±1 MiB). These encodings are tested by running the emitted programs
-//! under QEMU; they are not covered by the Lean theorem.
+//! (±1 MiB). The emitted programs run under QEMU in the tests, and
+//! `lean/CodegenRv64Encoding.lean` models this file's `emit`: it proves every
+//! instruction that model produces encodes to a word the ISA's format tables
+//! decode back to that instruction, and prints the words of sample
+//! instructions that the tests compare with [`encoding_listing`].
 use super::asm::{Asm, Fix};
 use super::machine::{Cond, FloatOp, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
 use super::{ResultProtocol, VerifiedError};
@@ -383,6 +386,76 @@ pub fn start(
         syscall(a, 93);
     }
     Ok(())
+}
+
+/// The words `emit` writes for sample instructions, one line per
+/// instruction (`<instruction>: <word> ...`, words as eight hex digits), in
+/// the format `lean/CodegenRv64Encoding.lean` prints. The abort exits are
+/// bound before the instruction and label 9 after it.
+pub fn encoding_listing() -> String {
+    use Loc::{In, Out, Slot};
+    use Reg::{R0, R1, R2};
+    const CONDS: [Cond; 6] = [Cond::Eq, Cond::Ne, Cond::Lt, Cond::Le, Cond::Gt, Cond::Ge];
+    let mut samples = vec![
+        M::Ld(R0, Slot(1)),
+        M::Ld(R1, Slot(300)),
+        M::St(Out(2), R0),
+        M::Ld(R2, In(3)),
+        M::St(In(400), R1),
+        M::Imm(R0, 0x0123_4567_89ab_cdef),
+        M::Imm(R2, u64::MAX),
+    ];
+    for s in [Sign::S, Sign::U] {
+        samples.extend([M::AddChk(s), M::SubChk(s), M::MulChk(s)]);
+    }
+    samples.extend([
+        M::Wrap(WrapOp::Add),
+        M::Wrap(WrapOp::Sub),
+        M::Wrap(WrapOp::Mul),
+        M::AndR2,
+        M::TrapGtU,
+        M::TrapZero,
+        M::TrapDivOvf,
+        M::Div(Sign::S),
+        M::Div(Sign::U),
+        M::Rem(Sign::S),
+        M::Rem(Sign::U),
+        M::NegChk(Sign::S),
+        M::NegChk(Sign::U),
+        M::XorOne,
+    ]);
+    for c in CONDS {
+        samples.extend([M::Cmp(c, Sign::S), M::Cmp(c, Sign::U)]);
+    }
+    samples.extend([FloatOp::Add, FloatOp::Sub, FloatOp::Mul, FloatOp::Div].map(M::FOp));
+    samples.push(M::FNeg);
+    samples.extend(CONDS.map(M::FCmp));
+    samples.extend([
+        M::Jmp(9),
+        M::Bz(9),
+        M::Call(9),
+        M::Enter(4),
+        M::Enter(300),
+        M::Leave,
+    ]);
+    samples.extend(TrapKind::ALL.map(M::Trap));
+
+    let mut out = String::new();
+    for m in &samples {
+        let mut a = Asm::default();
+        for k in TrapKind::ALL {
+            a.bind(k.label()).expect("fresh label");
+        }
+        emit(&mut a, m).expect("sample instructions encode");
+        a.bind(9).expect("fresh label");
+        let code = a.finish().expect("labels resolve");
+        out.push_str(&format!("{m}:"));
+        for word in code.as_chunks::<4>().0 {
+            out.push_str(&format!(" {:08x}", u32::from_le_bytes(*word)));
+        }
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]

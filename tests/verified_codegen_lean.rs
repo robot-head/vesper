@@ -5,6 +5,11 @@
 //!
 //! The theorems are about the Lean models of the slot IR, the abstract
 //! machine and the selection table, not about the Rust emitter.
+//!
+//! `lean/CodegenRv64Encoding.lean` (which imports that model) proves the
+//! RV64 encoder model against the ISA's instruction formats; it prints the
+//! encoded words of sample instructions, which must be the words
+//! `verified_codegen::rv64_encoding_listing` gets from the Rust emitter.
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -25,8 +30,99 @@ const KEY_THEOREMS: [&str; 12] = [
     "toS_mod_eq",
 ];
 
+const RV64_NAMESPACE: &str = "Vesper.VerifiedCodegen.Rv64";
+const RV64_KEY_THEOREMS: [&str; 4] = ["decode_encode", "emit_ok", "emit_decodes", "bytes_encode"];
+
 fn model() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/VerifiedCodegen.lean")
+}
+
+fn rv64_model() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/CodegenRv64Encoding.lean")
+}
+
+/// A fresh private directory (Bazel runfiles are symlinks, so the models
+/// are compiled from regular-file copies).
+fn scratch(tag: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "vesper-verified-codegen-{tag}-{}-{nanos}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    dir
+}
+
+/// Every axiom report in Lean's output is standard; returns the audited names.
+fn audit_axioms(stdout: &str) -> BTreeSet<String> {
+    let mut audited = BTreeSet::new();
+    for line in stdout.lines() {
+        let Some(rest) = line.strip_prefix('\'') else {
+            continue;
+        };
+        let Some((name, report)) = rest.split_once('\'') else {
+            continue;
+        };
+        if let Some(list) = report
+            .trim()
+            .strip_prefix("depends on axioms: [")
+            .and_then(|r| r.strip_suffix(']'))
+        {
+            for axiom in list.split(',').map(str::trim) {
+                assert!(
+                    STANDARD_AXIOMS.contains(&axiom),
+                    "{name} depends on {axiom}"
+                );
+            }
+        } else {
+            assert!(report.contains("does not depend on any axioms"), "{line}");
+        }
+        audited.insert(name.to_owned());
+    }
+    audited
+}
+
+/// The source has no escape hatches (other than the allowed imports), has
+/// unique theorem names, and audits every theorem.
+fn check_hygiene(file: &str, source: &str, namespace: &str, imports: &[&str], keys: &[&str]) {
+    let mut code = strip_comments(source);
+    for import in imports {
+        code = code.replacen(&format!("import {import}\n"), "", 1);
+    }
+    for banned in [
+        "sorry",
+        "admit",
+        "axiom ",
+        "unsafe",
+        "partial ",
+        "native_decide",
+        "bv_decide",
+        "@[implemented_by",
+        "@[extern",
+        "opaque ",
+        "import ",
+    ] {
+        assert!(!code.contains(banned), "{file} contains {banned:?}");
+    }
+    let names = theorems(&code);
+    let unique: BTreeSet<&String> = names.iter().collect();
+    assert_eq!(
+        unique.len(),
+        names.len(),
+        "duplicate theorem names in {file}"
+    );
+    for t in &names {
+        assert!(
+            code.contains(&format!("#print axioms {namespace}.{t}\n")),
+            "{t} not audited in {file}"
+        );
+    }
+    for key in keys {
+        assert!(names.iter().any(|n| n == key), "{key} missing from {file}");
+    }
 }
 
 fn strip_comments(source: &str) -> String {
@@ -72,37 +168,30 @@ fn theorems(code: &str) -> Vec<String> {
 #[test]
 fn model_has_no_escape_hatches_and_audits_every_theorem() {
     let source = std::fs::read_to_string(model()).expect("read lean/VerifiedCodegen.lean");
-    let code = strip_comments(&source);
-    for banned in [
-        "sorry",
-        "admit",
-        "axiom ",
-        "unsafe",
-        "partial ",
-        "native_decide",
-        "bv_decide",
-        "@[implemented_by",
-        "@[extern",
-        "opaque ",
-        "import ",
-    ] {
-        assert!(
-            !code.contains(banned),
-            "VerifiedCodegen.lean contains {banned:?}"
-        );
-    }
-    let names = theorems(&code);
-    let unique: BTreeSet<&String> = names.iter().collect();
-    assert_eq!(unique.len(), names.len(), "duplicate theorem names");
-    for t in &names {
-        assert!(
-            code.contains(&format!("#print axioms {NAMESPACE}.{t}\n")),
-            "{t} not audited"
-        );
-    }
-    for key in KEY_THEOREMS {
-        assert!(names.iter().any(|n| n == key), "{key} missing");
-    }
+    check_hygiene(
+        "VerifiedCodegen.lean",
+        &source,
+        NAMESPACE,
+        &[],
+        &KEY_THEOREMS,
+    );
+    let source = std::fs::read_to_string(rv64_model()).expect("read the RV64 model");
+    check_hygiene(
+        "CodegenRv64Encoding.lean",
+        &source,
+        RV64_NAMESPACE,
+        &["VerifiedCodegen"],
+        &RV64_KEY_THEOREMS,
+    );
+}
+
+#[test]
+fn rust_rv64_listing_covers_every_instruction_kind() {
+    let listing = vesper::verified_codegen::rv64_encoding_listing();
+    assert_eq!(listing.lines().count(), 59);
+    // add a0,a0,a1; bgeu a0,a1,+8; j ovf (the abort exits sit at offset 0)
+    assert!(listing.contains("addchk u: 00b50533 00b57463 ff9ff06f\n"));
+    assert!(listing.contains("leave: 00040113 00013403 00813083 01010113 00008067\n"));
 }
 
 #[test]
@@ -131,16 +220,7 @@ fn lean_model_compiles_and_prints_the_rust_table() {
     };
     let source = std::fs::read_to_string(model()).expect("read the model");
     let names = theorems(&strip_comments(&source));
-    // Compile a private regular-file copy: Bazel runfiles are symlinks.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
-        "vesper-verified-codegen-lean-{}-{nanos}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&dir).unwrap();
+    let dir = scratch("lean");
     let file = dir.join("VerifiedCodegen.lean");
     std::fs::write(&file, &source).unwrap();
     let out = std::process::Command::new(&lean)
@@ -169,33 +249,71 @@ fn lean_model_compiles_and_prints_the_rust_table() {
         "the Lean selection table differs from the Rust one"
     );
 
-    let mut audited = BTreeSet::new();
-    for line in stdout.lines() {
-        let Some(rest) = line.strip_prefix('\'') else {
-            continue;
-        };
-        let Some((name, report)) = rest.split_once('\'') else {
-            continue;
-        };
-        if let Some(list) = report
-            .trim()
-            .strip_prefix("depends on axioms: [")
-            .and_then(|r| r.strip_suffix(']'))
-        {
-            for axiom in list.split(',').map(str::trim) {
-                assert!(
-                    STANDARD_AXIOMS.contains(&axiom),
-                    "{name} depends on {axiom}"
-                );
-            }
-        } else {
-            assert!(report.contains("does not depend on any axioms"), "{line}");
-        }
-        audited.insert(name.to_owned());
-    }
+    let audited = audit_axioms(&stdout);
     for t in &names {
         assert!(
             audited.contains(&format!("{NAMESPACE}.{t}")),
+            "{t} has no axiom report"
+        );
+    }
+}
+
+#[test]
+fn lean_rv64_encoding_model_compiles_and_prints_the_rust_words() {
+    let Ok(lean) = std::env::var("VESPER_LEAN") else {
+        eprintln!("VESPER_LEAN unset; Lean compilation of CodegenRv64Encoding.lean skipped");
+        return;
+    };
+    let source = std::fs::read_to_string(rv64_model()).expect("read the RV64 model");
+    let names = theorems(&strip_comments(&source));
+    let dir = scratch("rv64");
+    let base = dir.join("VerifiedCodegen.lean");
+    std::fs::write(&base, std::fs::read_to_string(model()).unwrap()).unwrap();
+    let file = dir.join("CodegenRv64Encoding.lean");
+    std::fs::write(&file, &source).unwrap();
+    let olean = std::process::Command::new(&lean)
+        .current_dir(&dir)
+        .arg("-o")
+        .arg(dir.join("VerifiedCodegen.olean"))
+        .arg(&base)
+        .output()
+        .expect("spawn Lean");
+    assert!(
+        olean.status.success(),
+        "Lean failed on VerifiedCodegen.lean ({}):\n{}\n{}",
+        olean.status,
+        String::from_utf8_lossy(&olean.stdout),
+        String::from_utf8_lossy(&olean.stderr)
+    );
+    let out = std::process::Command::new(&lean)
+        .current_dir(&dir)
+        .env("LEAN_PATH", &dir)
+        .arg(&file)
+        .output()
+        .expect("spawn Lean");
+    let _ = std::fs::remove_dir_all(&dir);
+    let stdout = String::from_utf8(out.stdout).expect("UTF-8 output");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "Lean failed:\n{stdout}\n{stderr}");
+    assert!(
+        !stdout.contains("warning:") && !stdout.contains("error:"),
+        "Lean diagnostics:\n{stdout}"
+    );
+    assert!(!stdout.contains("sorryAx"), "sorry in the axiom report");
+    let words = stdout
+        .split_once("BEGIN RV64\n")
+        .and_then(|(_, rest)| rest.split_once("END RV64\n"))
+        .map(|(t, _)| t)
+        .expect("the Lean file prints the listing");
+    assert_eq!(
+        words,
+        vesper::verified_codegen::rv64_encoding_listing(),
+        "the Lean RV64 encoder differs from the Rust one"
+    );
+    let audited = audit_axioms(&stdout);
+    for t in &names {
+        assert!(
+            audited.contains(&format!("{RV64_NAMESPACE}.{t}")),
             "{t} has no axiom report"
         );
     }

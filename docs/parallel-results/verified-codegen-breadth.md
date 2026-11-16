@@ -191,3 +191,61 @@ exact unwind description: a trap is a jump into the stub from the
 function's own frame, so a stack walk started there would be imprecise.
 Nothing in these programs raises SEH exceptions, and no unwinding is
 exercised by the tests.
+
+## Milestone 5: RV64 encodings proved against the ISA formats
+
+### What was built
+
+- `lean/CodegenRv64Encoding.lean` (imports `VerifiedCodegen.lean`) models
+  the RV64 encoder:
+  - `Inst` is the subset the emitter uses, named as in the ISA manual:
+    - the `OP` and `OP-IMM` operations;
+    - `slli`, `srai`, `ld`, `sd`, the four branches, `jal`, `jalr` and `ecall`;
+    - the D-extension operations and `fmv.d.x`/`fmv.x.d`.
+  - `decode` is the specification:
+    - the R/I/S/B/J field positions;
+    - the scattered B and J immediate bits;
+    - sign extension;
+    - the manual's opcode, `funct3` and `funct7` tables.
+  - `encode` writes the fields the way `riscv64.rs` does.
+- `decode_encode`:
+  - Statement: every well-formed instruction encodes to a word below
+    `2^32`, and `decode` maps that word back to the same instruction.
+  - Well-formed means registers below 32, immediates in their field's
+    range, and even branch and jump offsets.
+  - `bytes_encode` gives the little-endian bytes.
+- `emit` mirrors `riscv64::emit` for every `M` instruction. It covers the
+  11-instruction `li`, large frame offsets through `t0`, and the
+  inverted-branch-over-`jal` trap checks. Two theorems cover it:
+  - `emit_ok` proves every instruction `emit` produces is well formed, for
+    any `M` with `u32` frame indices and sizes.
+  - `emit_decodes` chains `emit_ok` with `decode_encode` over the laid-out
+    sequence.
+- The listing check:
+  - The Lean file prints the words of 59 sample `M` instructions, covering
+    every instruction kind, both signs, every condition, large offsets and
+    full 64-bit immediates.
+  - `riscv64::encoding_listing()` (re-exported as
+    `verified_codegen::rv64_encoding_listing`) runs the Rust emitter on the
+    same instructions.
+  - `tests/verified_codegen_lean.rs` requires the two listings to be equal
+    line for line. This ties the Rust bit-twiddling to the proven model on
+    those samples. Outside the samples it is a test, not a proof.
+- `scripts/ci/check-lean-models.sh` compiles the new file after
+  `VerifiedCodegen.olean`.
+
+### Checks
+
+- With Lean 4.35.0 the file compiles with no warnings.
+- Every theorem's axiom report uses only `propext`, `Classical.choice` and
+  `Quot.sound`. The hygiene test bans `sorry`, `native_decide`,
+  `bv_decide` and similar escape hatches.
+- The listings agree: `cargo test --test verified_codegen_lean` passes
+  with `VESPER_LEAN` set.
+
+### Remaining gaps
+
+- No encoding proof exists yet for x86-64 or AArch64.
+- The RV64 proof covers encoding only. Instruction semantics (that the
+  emitted sequence implements `Mach.step`) are still checked by
+  differential tests under QEMU.
