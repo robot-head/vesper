@@ -444,6 +444,7 @@ impl Generated {
                         } else {
                             op_name(symbol, &lengths)
                         },
+                        fip: false,
                         generics: vec![],
                         params,
                         result: shape.result.clone(),
