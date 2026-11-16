@@ -334,3 +334,91 @@ fn adding_a_joint_wakes_the_bodies_it_binds() {
     let p = w.body(0).unwrap().pos;
     assert!((p[0] - 1.0).abs() < 1e-3, "pulled to the anchor: {p:?}");
 }
+
+/// A fast ball that strikes a floor and then slides into a wall within the
+/// same tick. Its ballistic path passes under the wall, so only re-sweeping
+/// finds the wall impact.
+fn floor_then_wall(resweep: bool) -> RigidWorld {
+    let floor = RigidCollider {
+        shape: ColliderShape::Box {
+            half_extents: [5.0, 0.1, 1.0],
+        },
+        material: material(0.0),
+    };
+    let wall = RigidCollider {
+        shape: ColliderShape::Box {
+            half_extents: [0.05, 1.0, 1.0],
+        },
+        material: material(0.0),
+    };
+    let r = 0.1f32;
+    let mut ball = RigidBody::new([0.5, 0.6, 0.0], 1.0, sphere_inv_inertia(1.0, r), 2);
+    ball.vel = [90.0, -90.0, 0.0];
+    let bodies = [
+        RigidBody::new([0.0, -0.1, 0.0], 0.0, [0.0; 3], 0),
+        RigidBody::new([2.0, 1.0, 0.0], 0.0, [0.0; 3], 1),
+        ball,
+    ];
+    let cfg = RigidConfig {
+        dt: 1.0 / 60.0,
+        substeps: 8,
+        gravity: [0.0; 3],
+        ground: None,
+        ..RigidConfig::default()
+    };
+    let mut w =
+        RigidWorld::new(cfg, &bodies, &[floor, wall, ball_collider(r)]).unwrap();
+    w.set_ccd(Some(CcdConfig::default())).unwrap();
+    w.set_ccd_resweep(resweep);
+    w
+}
+
+fn ball_collider(r: f32) -> RigidCollider {
+    ball(r, material(0.0))
+}
+
+/// World height of the wall contact's anchor (on the wall), if any.
+fn wall_contact_height(w: &RigidWorld) -> Option<f32> {
+    let m = w
+        .manifolds()
+        .iter()
+        .find(|m| (m.a, m.b) == (1, Some(2)) || (m.a, m.b) == (2, Some(1)))?;
+    let local = if m.a == 1 {
+        m.points[0].local_a
+    } else {
+        m.points[0].local_b
+    };
+    Some(local[1] + 1.0)
+}
+
+#[test]
+fn resweeping_ccd_finds_the_wall_after_the_floor() {
+    let mut with = floor_then_wall(true);
+    with.step().unwrap();
+    assert_eq!(with.last_ccd_hits(), 1, "the floor impact");
+    assert_eq!(with.last_ccd_resweeps(), 1, "the wall impact after it");
+    // The ball slides along the floor's top (y = r) into the wall.
+    let h = wall_contact_height(&with).expect("a wall contact");
+    assert!((h - 0.1).abs() < 0.03, "re-swept wall contact at y = {h}");
+    // Without re-sweeping the wall contact is the speculative one of the
+    // start pose, level with the ball's start height.
+    let mut without = floor_then_wall(false);
+    without.step().unwrap();
+    assert_eq!(without.last_ccd_resweeps(), 0);
+    let h0 = wall_contact_height(&without).expect("a speculative wall contact");
+    assert!((h0 - 0.6).abs() < 0.03, "speculative wall contact at y = {h0}");
+    // The re-swept world keeps the ball out of the floor and the wall.
+    for _ in 0..30 {
+        with.step().unwrap();
+        let p = with.body(2).unwrap().pos;
+        assert!(p[1] > 0.09 && p[0] < 1.86, "ball at {p:?}");
+    }
+    // And it is deterministic across narrowphase thread counts.
+    let mut a = floor_then_wall(true);
+    let mut b = floor_then_wall(true);
+    b.set_solver_threads(3).unwrap();
+    b.set_parallel_threshold(0);
+    for _ in 0..30 {
+        assert_eq!(a.step().unwrap(), b.step().unwrap());
+    }
+}

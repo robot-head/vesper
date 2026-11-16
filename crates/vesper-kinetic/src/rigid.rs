@@ -63,6 +63,54 @@ pub const MAX_MANIFOLD_POINTS: usize = 4;
 /// Largest convex hull accepted.
 pub const MAX_HULL_VERTICES: usize = 64;
 
+/// Most narrowphase threads ([`RigidWorld::set_solver_threads`]).
+pub const MAX_RIGID_THREADS: usize = 64;
+
+/// Fewest candidate pairs for which a step runs the narrowphase on more
+/// than one thread (by default).
+pub const RIGID_PARALLEL_MIN_PAIRS: usize = 32;
+
+/// What the narrowphase found for one candidate pair.
+#[derive(Debug, Clone, Copy)]
+enum PairOutcome {
+    /// A manifold (or none, when the pair is apart), and whether it was
+    /// built at a CCD time of impact.
+    Contact {
+        m: Option<ContactManifold>,
+        ccd: bool,
+    },
+    /// A time of impact whose manifold waits for the re-sweep pass.
+    Toi {
+        s: f64,
+        a: u32,
+        b: u32,
+        sa: State,
+        sb: State,
+    },
+}
+
+/// The time of a deferred pair that has no impact on its ballistic paths.
+const NO_IMPACT: f64 = 2.0;
+
+/// A deferred time of impact (re-sweeping CCD).
+#[derive(Debug, Clone, Copy)]
+struct Toi {
+    s: f64,
+    a: u32,
+    /// `None`: the ground.
+    b: Option<u32>,
+    sa: State,
+    sb: State,
+}
+
+/// One narrowphase thread's scratch.
+#[derive(Debug, Default)]
+struct NarrowScratch {
+    verts_a: Vec<[f64; 3]>,
+    verts_b: Vec<[f64; 3]>,
+    out: Vec<Result<PairOutcome, RigidError>>,
+}
+
 type V3 = [f32; 3];
 type Q = [f32; 4];
 
@@ -342,6 +390,8 @@ pub enum RigidError {
         joint: usize,
         reason: &'static str,
     },
+    /// The narrowphase thread count is outside `1..=`[`MAX_RIGID_THREADS`].
+    InvalidThreads(usize),
 }
 
 impl std::fmt::Display for RigidError {
@@ -365,6 +415,9 @@ impl std::fmt::Display for RigidError {
             Self::TickOverflow => write!(f, "tick counter overflow"),
             Self::NonFinite { body } => write!(f, "body {body} left the finite range"),
             Self::InvalidJoint { joint, reason } => write!(f, "joint {joint}: {reason}"),
+            Self::InvalidThreads(n) => {
+                write!(f, "narrowphase threads must be 1..={MAX_RIGID_THREADS}, got {n}")
+            }
         }
     }
 }
@@ -469,6 +522,16 @@ pub struct RigidWorld {
     // Continuous collision detection.
     ccd: Option<CcdConfig>,
     ccd_hits: usize,
+    ccd_resweep: bool,
+    ccd_resweeps: usize,
+    tois: Vec<Toi>,
+    overrides: Vec<Option<(f64, State)>>,
+    // Narrowphase threads.
+    threads: usize,
+    parallel_min: usize,
+    narrow: Vec<u32>,
+    outcomes: Vec<Result<PairOutcome, RigidError>>,
+    par: Vec<NarrowScratch>,
 }
 
 // ----- vector and quaternion helpers (binary32, fixed order) -----------------
@@ -1020,6 +1083,15 @@ impl RigidWorld {
             deferred: Vec::with_capacity(max_pairs),
             ccd: None,
             ccd_hits: 0,
+            ccd_resweep: false,
+            ccd_resweeps: 0,
+            tois: Vec::new(),
+            overrides: vec![None; n],
+            threads: 1,
+            parallel_min: RIGID_PARALLEL_MIN_PAIRS,
+            narrow: Vec::with_capacity(max_pairs),
+            outcomes: Vec::with_capacity(max_pairs),
+            par: Vec::new(),
         })
     }
 
@@ -1307,6 +1379,8 @@ impl RigidWorld {
         self.manifolds.clear();
         self.boxes.clear();
         self.ccd_hits = 0;
+        self.ccd_resweeps = 0;
+        self.tois.clear();
         for i in 0..n {
             self.sweeps[i] = self.sweep_of(i);
             if !self.sweeps[i].is_finite() {
@@ -1348,10 +1422,25 @@ impl RigidWorld {
                     < f64::from(det::add(margin, self.sweeps[i]))
             {
                 match self.ccd_ground(i, ground) {
-                    Some(at) => {
+                    Some((s, at)) if self.ccd_resweep => self.tois.push(Toi {
+                        s,
+                        a: i as u32,
+                        b: None,
+                        sa: at,
+                        sb: at,
+                    }),
+                    Some((_, at)) => {
+                        self.ccd_hits += 1;
                         world_core(shape_of(&self.colliders, &at), &at, &mut self.verts_a);
                         self.ground_manifold(i, at, ground, r)?;
                     }
+                    None if self.ccd_resweep && self.is_fast(i) => self.tois.push(Toi {
+                        s: NO_IMPACT,
+                        a: i as u32,
+                        b: None,
+                        sa: self.bodies[i],
+                        sb: self.bodies[i],
+                    }),
                     None => self.ground_manifold(i, self.bodies[i], ground, r)?,
                 }
             }
@@ -1374,6 +1463,7 @@ impl RigidWorld {
             }
         }
         self.deferred.clear();
+        self.narrow.clear();
         for k in 0..self.pairs.len() {
             let (a, b) = self.pairs[k];
             let (sa, sb) = (&self.bodies[a as usize], &self.bodies[b as usize]);
@@ -1389,12 +1479,136 @@ impl RigidWorld {
                 self.deferred.push(k as u32);
                 continue;
             }
-            self.pair_manifold(a as usize, b as usize)?;
+            self.narrow.push(k as u32);
+        }
+        self.narrow_outcomes();
+        let mut outcomes = std::mem::take(&mut self.outcomes);
+        let mut result = Ok(());
+        for o in outcomes.drain(..) {
+            result = o.and_then(|o| self.apply_outcome(o));
+            if result.is_err() {
+                break;
+            }
+        }
+        self.outcomes = outcomes;
+        result?;
+        if !self.tois.is_empty() {
+            self.resolve_tois()?;
         }
         if self.sleep.is_some() {
             self.wake_islands()?;
         }
         Ok(())
+    }
+
+    /// Narrowphase threads (`1..=`[`MAX_RIGID_THREADS`], default 1). The
+    /// pairs are split into contiguous ranges, each thread builds its
+    /// range's manifolds from the same start-of-tick state, and the
+    /// manifolds are pushed in broadphase order, so every thread count
+    /// gives the same manifolds, the same errors and the same bits.
+    pub fn set_solver_threads(&mut self, threads: usize) -> Result<(), RigidError> {
+        if threads == 0 || threads > MAX_RIGID_THREADS {
+            return Err(RigidError::InvalidThreads(threads));
+        }
+        self.threads = threads;
+        Ok(())
+    }
+
+    /// Narrowphase threads.
+    pub fn solver_threads(&self) -> usize {
+        self.threads
+    }
+
+    /// Fewest candidate pairs for which a step uses more than one thread.
+    pub fn set_parallel_threshold(&mut self, min_pairs: usize) {
+        self.parallel_min = min_pairs;
+    }
+
+    /// Fill `self.outcomes` with the narrowphase result of every pair in
+    /// `self.narrow`, in order, stopping after the first error.
+    fn narrow_outcomes(&mut self) {
+        let defer = self.ccd.is_some() && self.ccd_resweep;
+        self.outcomes.clear();
+        let len = self.narrow.len();
+        let threads = self.threads.min(len);
+        if threads <= 1 || len < self.parallel_min {
+            let mut va = std::mem::take(&mut self.verts_a);
+            let mut vb = std::mem::take(&mut self.verts_b);
+            for k in 0..len {
+                let (a, b) = self.pairs[self.narrow[k] as usize];
+                let r = self.pair_outcome(a as usize, b as usize, defer, &mut va, &mut vb);
+                let stop = r.is_err();
+                self.outcomes.push(r);
+                if stop {
+                    break;
+                }
+            }
+            self.verts_a = va;
+            self.verts_b = vb;
+            return;
+        }
+        let mut par = std::mem::take(&mut self.par);
+        if par.len() < threads {
+            par.resize_with(threads, NarrowScratch::default);
+        }
+        let this = &*self;
+        std::thread::scope(|scope| {
+            for (t, ps) in par.iter_mut().enumerate().take(threads) {
+                let (lo, hi) = (t * len / threads, (t + 1) * len / threads);
+                scope.spawn(move || {
+                    ps.out.clear();
+                    for k in lo..hi {
+                        let (a, b) = this.pairs[this.narrow[k] as usize];
+                        let r = this.pair_outcome(
+                            a as usize,
+                            b as usize,
+                            defer,
+                            &mut ps.verts_a,
+                            &mut ps.verts_b,
+                        );
+                        let stop = r.is_err();
+                        ps.out.push(r);
+                        if stop {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        'merge: for ps in par.iter_mut().take(threads) {
+            for r in ps.out.drain(..) {
+                let stop = r.is_err();
+                self.outcomes.push(r);
+                if stop {
+                    break 'merge;
+                }
+            }
+        }
+        self.par = par;
+    }
+
+    fn apply_outcome(&mut self, o: PairOutcome) -> Result<(), RigidError> {
+        match o {
+            PairOutcome::Contact { m, ccd } => {
+                if ccd {
+                    self.ccd_hits += 1;
+                }
+                match m {
+                    Some(m) => self.push_manifold(m),
+                    None => Ok(()),
+                }
+            }
+            PairOutcome::Toi { s, a, b, sa, sb } => {
+                self.tois.push(Toi {
+                    s,
+                    a,
+                    b: Some(b),
+                    sa,
+                    sb,
+                });
+                Ok(())
+            }
+        }
     }
 
     /// Whether body `i` is dynamic and awake.
@@ -1472,30 +1686,76 @@ impl RigidWorld {
         self.push_manifold(m)
     }
 
+    /// Collide one pair now (the wake-up path of sleeping islands).
     fn pair_manifold(&mut self, a: usize, b: usize) -> Result<(), RigidError> {
+        let mut va = std::mem::take(&mut self.verts_a);
+        let mut vb = std::mem::take(&mut self.verts_b);
+        let r = self.pair_outcome(a, b, false, &mut va, &mut vb);
+        self.verts_a = va;
+        self.verts_b = vb;
+        self.apply_outcome(r?)
+    }
+
+    /// The narrowphase of one pair, from the start-of-tick state only.
+    fn pair_outcome(
+        &self,
+        a: usize,
+        b: usize,
+        defer_toi: bool,
+        va: &mut Vec<[f64; 3]>,
+        vb: &mut Vec<[f64; 3]>,
+    ) -> Result<PairOutcome, RigidError> {
         let (sa, sb) = (self.bodies[a], self.bodies[b]);
         if self.ccd.is_some()
-            && let Some((ta, tb)) = self.ccd_pair(a, b)?
+            && let Some((s, ta, tb)) = self.ccd_pair(a, b, va, vb)?
         {
-            return self.pair_manifold_at(a, b, ta, tb);
+            if defer_toi {
+                return Ok(PairOutcome::Toi {
+                    s,
+                    a: a as u32,
+                    b: b as u32,
+                    sa: ta,
+                    sb: tb,
+                });
+            }
+            return Ok(PairOutcome::Contact {
+                m: self.pair_manifold_at(a, b, ta, tb, va, vb)?,
+                ccd: true,
+            });
         }
-        self.pair_manifold_at(a, b, sa, sb)
+        if defer_toi && (self.is_fast(a) || self.is_fast(b)) {
+            // No impact on the ballistic paths; the pair is swept again if
+            // an earlier impact changes either path (`s > 1`: none yet).
+            return Ok(PairOutcome::Toi {
+                s: NO_IMPACT,
+                a: a as u32,
+                b: b as u32,
+                sa,
+                sb,
+            });
+        }
+        Ok(PairOutcome::Contact {
+            m: self.pair_manifold_at(a, b, sa, sb, va, vb)?,
+            ccd: false,
+        })
     }
 
     /// The manifold of `a` and `b` with the geometry of poses `sa`, `sb`.
     fn pair_manifold_at(
-        &mut self,
+        &self,
         a: usize,
         b: usize,
         sa: State,
         sb: State,
-    ) -> Result<(), RigidError> {
+        verts_a: &mut Vec<[f64; 3]>,
+        verts_b: &mut Vec<[f64; 3]>,
+    ) -> Result<Option<ContactManifold>, RigidError> {
         let ca = &self.colliders[sa.collider as usize];
         let cb = &self.colliders[sb.collider as usize];
-        let ra = world_core(&ca.shape, &sa, &mut self.verts_a);
-        let rb = world_core(&cb.shape, &sb, &mut self.verts_b);
-        let shape_a = gjk_shape(&self.verts_a, ra);
-        let shape_b = gjk_shape(&self.verts_b, rb);
+        let ra = world_core(&ca.shape, &sa, verts_a);
+        let rb = world_core(&cb.shape, &sb, verts_b);
+        let shape_a = gjk_shape(verts_a, ra);
+        let shape_b = gjk_shape(verts_b, rb);
         let sep = gjk::separation(&shape_a, &shape_b).map_err(|error| RigidError::Narrowphase {
             a,
             b,
@@ -1506,7 +1766,7 @@ impl RigidWorld {
             det::add(self.sweeps[a], self.sweeps[b]),
         ));
         if sep.distance > margin {
-            return Ok(());
+            return Ok(None);
         }
         // Normal from b to a.
         let n = [-sep.normal[0], -sep.normal[1], -sep.normal[2]];
@@ -1525,8 +1785,8 @@ impl RigidWorld {
             depth: -sep.distance,
         }];
         // Vertices of b against a's support plane.
-        if self.verts_a.len() > 1 || self.verts_b.len() > 1 {
-            for v in &self.verts_b {
+        if verts_a.len() > 1 || verts_b.len() > 1 {
+            for v in verts_b.iter() {
                 let s = axpy64(*v, rb, n);
                 let depth = dot64(s, n) - a_min;
                 if depth > -margin {
@@ -1540,7 +1800,7 @@ impl RigidWorld {
                     }
                 }
             }
-            for u in &self.verts_a {
+            for u in verts_a.iter() {
                 let s = axpy64(*u, -ra, n);
                 let depth = b_max - dot64(s, n);
                 if depth > -margin {
@@ -1574,7 +1834,7 @@ impl RigidWorld {
             p.local_b = rotate64(conj(sb.q), sub64(core_b, to64(sb.x))).map(|v| v as f32);
             p.depth = c.depth as f32;
         }
-        self.push_manifold(m)
+        Ok(Some(m))
     }
 
     /// World contact points (current state) of point `k` of manifold `m`.
