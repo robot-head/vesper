@@ -3,9 +3,10 @@
 
 use crate::{
     ast::{Literal, Pass, Type},
-    check::Place,
+    check::{Place, World},
     numeric::IntegerKind,
 };
+use std::collections::BTreeSet;
 use vesper_lean_syntax::{BinaryOp, Ident, Name, Projection, Term, UnaryOp};
 
 pub(crate) fn ident(value: &str) -> Result<Ident, String> {
@@ -50,16 +51,25 @@ pub(crate) fn tuple(mut terms: Vec<Term>) -> Term {
     }
 }
 
-pub(crate) fn ty(value: &Type) -> Result<Term, String> {
-    typed(value, None)
+pub(crate) fn ty_with_fip(value: &Type, erase_box: bool) -> Result<Term, String> {
+    typed(value, None, erase_box)
 }
-pub(crate) fn ty_monad(value: &Type, monad: &Term) -> Result<Term, String> {
-    typed(value, Some(monad))
+pub(crate) fn ty_monad_with_fip(
+    value: &Type,
+    monad: &Term,
+    erase_box: bool,
+) -> Result<Term, String> {
+    typed(value, Some(monad), erase_box)
 }
 
-fn typed(value: &Type, monad: Option<&Term>) -> Result<Term, String> {
+fn typed(value: &Type, monad: Option<&Term>, erase_box: bool) -> Result<Term, String> {
     Ok(match value {
-        Type::IntLiteral(n) => typed(&IntegerKind::default_for(*n).ty(), monad)?,
+        Type::IntLiteral(n) => typed(&IntegerKind::default_for(*n).ty(), monad, erase_box)?,
+        Type::Named(name, arguments)
+            if erase_box && name == crate::fip::BOX_TYPE && arguments.len() == 1 =>
+        {
+            typed(&arguments[0], monad, erase_box)?
+        }
         Type::Named(name, arguments) => {
             let constructor = match name.as_str() {
                 "u8" => global(&["UInt8"]),
@@ -90,7 +100,7 @@ fn typed(value: &Type, monad: Option<&Term>) -> Result<Term, String> {
                     constructor,
                     ordered
                         .into_iter()
-                        .map(|t| typed(t, monad))
+                        .map(|t| typed(t, monad, erase_box))
                         .collect::<Result<Vec<_>, _>>()?,
                 )
             }
@@ -98,7 +108,7 @@ fn typed(value: &Type, monad: Option<&Term>) -> Result<Term, String> {
         Type::Tuple(terms) => product(
             terms
                 .iter()
-                .map(|t| typed(t, monad))
+                .map(|t| typed(t, monad, erase_box))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
         Type::Function {
@@ -107,12 +117,12 @@ fn typed(value: &Type, monad: Option<&Term>) -> Result<Term, String> {
             effects,
             ..
         } => {
-            let mut results = vec![typed(result, monad)?];
+            let mut results = vec![typed(result, monad, erase_box)?];
             results.extend(
                 params
                     .iter()
                     .filter(|(pass, _)| *pass == Pass::Inout)
-                    .map(|(_, t)| typed(t, monad))
+                    .map(|(_, t)| typed(t, monad, erase_box))
                     .collect::<Result<Vec<_>, _>>()?,
             );
             let result = product(results);
@@ -130,13 +140,75 @@ fn typed(value: &Type, monad: Option<&Term>) -> Result<Term, String> {
                 result = Term::Arrow(Box::new(global(&["Unit"])), Box::new(result));
             }
             for (_, parameter) in params.iter().rev() {
-                result = Term::Arrow(Box::new(typed(parameter, monad)?), Box::new(result));
+                result = Term::Arrow(
+                    Box::new(typed(parameter, monad, erase_box)?),
+                    Box::new(result),
+                );
             }
             result
         }
         Type::Infer => Term::Infer,
         Type::Row(_) => return Err("effect rows are not first-class Lean values".into()),
     })
+}
+
+pub(crate) fn recursive_structs(world: &World) -> BTreeSet<String> {
+    let fip_active = crate::fip::active(world);
+    let mut graph = petgraph::graphmap::DiGraphMap::<&str, ()>::new();
+    for a in world.adts.values().filter(|a| {
+        a.name != "Option" && a.name != "Result" && (!fip_active || a.name != crate::fip::BOX_TYPE)
+    }) {
+        graph.add_node(&a.name);
+    }
+    fn deps<'a>(t: &'a Type, names: &mut Vec<&'a str>) {
+        match t {
+            Type::Named(n, ts) => {
+                names.push(n);
+                for t in ts {
+                    deps(t, names);
+                }
+            }
+            Type::Tuple(ts) => {
+                for t in ts {
+                    deps(t, names);
+                }
+            }
+            Type::Function { params, result, .. } => {
+                for (_, t) in params {
+                    deps(t, names);
+                }
+                deps(result, names);
+            }
+            _ => {}
+        }
+    }
+    for a in world.adts.values() {
+        if !graph.contains_node(a.name.as_str()) {
+            continue;
+        }
+        for field in a.variants.iter().flat_map(|v| &v.fields) {
+            let mut names = vec![];
+            deps(&field.ty, &mut names);
+            for n in names {
+                if graph.contains_node(n) {
+                    graph.add_edge(a.name.as_str(), n, ());
+                }
+            }
+        }
+    }
+    let mut rec = BTreeSet::new();
+    for group in petgraph::algo::tarjan_scc(&graph) {
+        let is_cycle =
+            group.len() > 1 || (group.len() == 1 && graph.contains_edge(group[0], group[0]));
+        if is_cycle {
+            for n in group {
+                if !world.adts[n].is_enum {
+                    rec.insert(n.to_owned());
+                }
+            }
+        }
+    }
+    rec
 }
 
 pub(crate) fn effectful_arrow(value: &Type) -> bool {
@@ -279,22 +351,71 @@ pub(crate) fn arith_term(
     }
 }
 
-pub(crate) fn update_place(place: &Place, value: Term) -> Result<Term, String> {
-    fn update(base: Term, path: &[String], value: Term) -> Result<Term, String> {
+pub(crate) fn update_place_typed(
+    world: &World,
+    place: &Place,
+    value: Term,
+    root_ty: Option<&Type>,
+    recursive_structs: &BTreeSet<String>,
+) -> Result<Term, String> {
+    fn update(
+        world: &World,
+        base: Term,
+        ty: Option<&Type>,
+        path: &[String],
+        value: Term,
+        recursive_structs: &BTreeSet<String>,
+    ) -> Result<Term, String> {
         let Some((field, rest)) = path.split_first() else {
             return Ok(value);
         };
-        let field = ident(field)?;
+        let field_ty = ty.and_then(|t| world.field(t, std::slice::from_ref(field)));
+        let field_id = ident(field)?;
         let next = Term::Project {
             base: Box::new(base.clone()),
-            projection: Projection::Field(field.clone()),
+            projection: Projection::Field(field_id.clone()),
         };
+        let updated = update(
+            world,
+            next,
+            field_ty.as_ref(),
+            rest,
+            value,
+            recursive_structs,
+        )?;
+        if let Some(Type::Named(adt_name, args)) = ty
+            && recursive_structs.contains(adt_name)
+            && let Some(adt) = world.adts.get(adt_name)
+        {
+            let _ = args;
+            let ctor =
+                Name::qualified([ident(&adt.name)?, ident("mk")?]).map_err(|e| e.to_string())?;
+            let fields = adt.variants[0]
+                .fields
+                .iter()
+                .map(|fld| {
+                    if fld.name == *field {
+                        Ok(updated.clone())
+                    } else {
+                        Ok(project(base.clone(), &fld.name))
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            return Ok(Term::app(Term::Ref(ctor), fields));
+        }
         Ok(Term::Update {
             base: Box::new(base),
-            fields: vec![(field, update(next, rest, value)?)],
+            fields: vec![(field_id, updated)],
         })
     }
-    update(source_ref(&place.root)?, &place.path, value)
+    update(
+        world,
+        source_ref(&place.root)?,
+        root_ty,
+        &place.path,
+        value,
+        recursive_structs,
+    )
 }
 
 pub(crate) fn tiled_op_term(

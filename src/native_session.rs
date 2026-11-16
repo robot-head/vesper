@@ -853,7 +853,10 @@ fn compile_session_with_linkage<M: Module>(
     let mut program = crate::ir::lower_world(world);
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;
+    } else {
+        crate::ir_opt::fip_reuse_pass(world, &mut program)?;
     }
+    crate::fip::elaborate_non_fip_drops(world, &mut program);
     let ids = super::declare_instances(m, world, &plan.entry, &instances, linkage)?;
     let mut text = super::define_instances(m, world, &instances, &ids, &program, linkage)?;
     let ptr = m.target_config().pointer_type();
@@ -914,6 +917,10 @@ fn compile_session_with_linkage<M: Module>(
             handlers: vec![],
             inline_depth: 0,
             fail_record: None,
+            caller_slot: None,
+            reuse_slots: BTreeMap::new(),
+            current_call_slot: None,
+            in_fip_fn: world.functions.get(&plan.entry).is_some_and(|f| f.fip),
             trace_fail: None,
             trace_entry: None,
             source_locations: true,
@@ -1263,7 +1270,7 @@ mod host {
                 clif::PARK_SYMBOL,
                 vesper_fiber_abi::fiber::vesper_fiber_park as *const u8,
             );
-            builder.symbol("fmod", super::super::native_float_remainder as *const u8);
+            super::super::register_jit_runtime_symbols(&mut builder, false);
             let mut module = cranelift_jit::JITModule::new(builder);
             let (id, clif) = compile_session_with_linkage(
                 &mut module,
