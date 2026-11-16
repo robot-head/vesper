@@ -334,7 +334,7 @@ fn malformed_contracts_are_typed_errors() {
         contract_error(
             "fn f(inout x: u64) -> u64 { x = 1; x } fn ensures_f(x: u64, r: u64) -> bool { true } fn main() -> u64 { 0 }"
         ),
-        ContractError::Unsupported { function, .. } if function == "f"
+        ContractError::Signature { function, .. } if function == "f"
     ));
     assert!(matches!(
         contract_error(
@@ -447,6 +447,74 @@ fn generated_unsigned_simp_bundle_preserves_machine_ranges() {
         "fn arith_simps() -> u64 { 42 } fn main() -> u64 { arith_simps() }",
         &proofs,
         &[("arith_simps", Totality::Total), ("main", Totality::Total)],
+        "42",
+    );
+}
+
+#[test]
+fn inout_contracts_relate_original_inputs_results_and_final_states() {
+    let (source, proofs) = fixture!("inout_contracts");
+    let report = lean::extract_report(&world(source)).unwrap();
+    assert_eq!(
+        report.contracts,
+        [
+            "drain",
+            "exchange",
+            "increment",
+            "replace",
+            "reset",
+            "set_cell"
+        ]
+    );
+    proves(
+        source,
+        proofs,
+        &[
+            ("drain", Totality::Fuel),
+            ("exchange", Totality::Total),
+            ("increment", Totality::Total),
+            ("replace", Totality::Total),
+            ("reset", Totality::Total),
+            ("set_cell", Totality::Total),
+        ],
+        "42",
+    );
+}
+
+#[test]
+fn generic_type_binders_and_inout_post_state_compose() {
+    proves(
+        "fn replace[T](inout x: u64, value: u64) -> u64 { let old = x; x = value; old } fn ensures_replace[U](before: u64, value: u64, result: u64, after: u64) -> bool { result == before && after == value } fn main() -> u64 { let x: u64 = 5; replace[bool](inout x, 42); x }",
+        "namespace VesperProofs.GenericInout\nopen Vesper\ntheorem replace_contract : «replace$contract» := by\n  intro T before value\n  simp [ensures_replace, replace]\ntheorem replace_input : «replace$admissible» := ⟨Bool, 5, 42, trivial⟩\nend VesperProofs.GenericInout\n",
+        &[("replace", Totality::Total)],
+        "42",
+    );
+}
+
+#[test]
+fn inout_contracts_reject_missing_mistyped_and_mutating_postconditions() {
+    for post in [
+        "fn ensures_f(before: u64, result: u64) -> bool { true }",
+        "fn ensures_f(before: u64, result: u64, after: bool) -> bool { true }",
+        "fn ensures_f(before: u64, result: u64, after: u64, extra: u64) -> bool { true }",
+    ] {
+        assert!(matches!(
+            contract_error(&format!("fn f(inout x: u64) -> u64 {{ x = 1; x }} {post} fn main() -> u64 {{ 0 }}")),
+            ContractError::Signature { function, .. } if function == "f"
+        ));
+    }
+    assert!(matches!(
+        contract_error("fn f(inout x: u64) -> u64 { x } fn ensures_f(before: u64, result: u64, inout after: u64) -> bool { true } fn main() -> u64 { 0 }"),
+        ContractError::Predicate { function, .. } if function == "ensures_f"
+    ));
+}
+
+#[test]
+fn inout_postconditions_use_the_changed_value_not_the_original_input() {
+    proves(
+        "fn bad_reset(inout x: u64) { x = 0; } fn ensures_bad_reset(before: u64, result: (), after: u64) -> bool { after == before } fn main() -> u64 { 42 }",
+        "namespace VesperProofs.IncorrectState\nopen Vesper\ntheorem changed_state_refutes_old_value_contract : ¬ «bad_reset$contract» := by\n  intro h\n  have impossible := h (1 : UInt64)\n  simpa [ensures_bad_reset, bad_reset] using impossible\nend VesperProofs.IncorrectState\n",
+        &[("bad_reset", Totality::Total)],
         "42",
     );
 }
