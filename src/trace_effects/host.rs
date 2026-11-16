@@ -147,13 +147,53 @@ impl fmt::Display for TraceRunError {
 
 impl std::error::Error for TraceRunError {}
 
-/// Runs `entry` (which must carry exactly `eff [Trace]`) with the Beacon host.
-pub fn run_traced(
-    checked: &Checked,
-    entry: &str,
-    args: Vec<Value>,
-    config: TraceConfig,
-) -> Result<TraceRun, TraceRunError> {
+/// Raw host-agnostic `SpanContext` representation shared across evaluator,
+/// native, and Wasm backends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawSpanContext {
+    pub trace_id_hi: u64,
+    pub trace_id_lo: u64,
+    pub span_id: u64,
+    pub flags: u8,
+}
+
+impl RawSpanContext {
+    pub fn trace_id(self) -> u128 {
+        (u128::from(self.trace_id_hi) << 64) | u128::from(self.trace_id_lo)
+    }
+
+    pub fn from_w3c(ctx: W3cSpanContext) -> Self {
+        let id = ctx.trace_id();
+        Self {
+            trace_id_hi: (id >> 64) as u64,
+            trace_id_lo: id as u64,
+            span_id: ctx.span_id(),
+            flags: ctx.trace_flags(),
+        }
+    }
+
+    pub fn root(trace_id: u128, flags: u8) -> Self {
+        Self {
+            trace_id_hi: (trace_id >> 64) as u64,
+            trace_id_lo: trace_id as u64,
+            span_id: 0,
+            flags,
+        }
+    }
+}
+
+/// Raw host-agnostic `ActiveSpan` representation shared across backends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawActiveSpan {
+    pub ctx: RawSpanContext,
+    pub parent_span_id: u64,
+    pub start_mono_ns: u64,
+    pub schema_id: u32,
+}
+
+/// Validates that `checked` is clean, uses the built-in Beacon prelude, and
+/// `entry` carries `eff [Trace]`.
+pub fn validate_traced_entry(checked: &Checked, entry: &str) -> Result<(), TraceRunError> {
     if !checked.diagnostics.is_empty() {
         return Err(TraceRunError::NotChecked(checked.diagnostics.len()));
     }
@@ -173,34 +213,113 @@ pub fn run_traced(
             "'{entry}' must carry exactly eff [Trace]"
         )));
     }
+    Ok(())
+}
+
+/// Content-independent redacted telemetry marker.
+pub fn redacted_attribute() -> PrimaryAttribute {
+    PrimaryAttribute::Redacted(Secret::new(()).redact())
+}
+
+/// Runs `entry` (which must carry exactly `eff [Trace]`) with the Beacon host
+/// on the reference evaluator.
+pub fn run_traced(
+    checked: &Checked,
+    entry: &str,
+    args: Vec<Value>,
+    config: TraceConfig,
+) -> Result<TraceRun, TraceRunError> {
+    validate_traced_entry(checked, entry)?;
+    let world = &checked.world;
     let first = NonZeroU64::new(config.first_span_id).ok_or(TraceRunError::InvalidContext)?;
     let pool = SpanPool::<ACTIVE_SPANS>::new(config.trace_id, first, config.flags)
         .map_err(|_| TraceRunError::InvalidContext)?;
-    let mut host = Host {
-        config,
-        pool: &pool,
-        ring: TelemetryRing::default(),
-        open: BTreeMap::new(),
-        stack: vec![],
-        names: BTreeMap::new(),
-        messages: BTreeMap::new(),
-        exported: vec![],
-        clock: 0,
-    };
-    let result = host.drive(world, entry, args);
-    let unclosed = host.cancel_open();
-    let value = result?;
-    if unclosed > 0 {
-        return Err(TraceRunError::UnclosedSpans(unclosed));
+    let mut host = BeaconHost::new(&pool, config);
+    let result = drive_evaluator(&mut host, world, entry, args);
+    match (result, host.finish()) {
+        (Ok(value), Ok(spans)) => Ok(TraceRun { value, spans }),
+        (Err(e), _) => Err(e),
+        (Ok(_), Err(e)) => Err(e),
     }
-    host.drain()?;
-    Ok(TraceRun {
-        value,
-        spans: host.exported,
-    })
 }
 
-struct Host<'p> {
+fn drive_evaluator(
+    host: &mut BeaconHost<'_>,
+    world: &crate::check::World,
+    entry: &str,
+    args: Vec<Value>,
+) -> Result<Value, TraceRunError> {
+    let mut runtime = Runtime::new(world);
+    runtime.fuel = host.config().fuel;
+    let mut state = runtime
+        .begin_external(entry, args)
+        .map_err(TraceRunError::Runtime)?;
+    loop {
+        match state {
+            Execution::Complete(value) => return Ok(value),
+            Execution::Suspended(suspension) => {
+                let request = suspension.request();
+                if request.effect.name != TRACE {
+                    return Err(TraceRunError::UnsupportedEffect(
+                        request.effect.name.clone(),
+                    ));
+                }
+                let reply = eval_operation(host, &request.operation, &request.arguments)?;
+                state = suspension.resume(reply).map_err(TraceRunError::Runtime)?;
+            }
+        }
+    }
+}
+
+fn eval_operation(
+    host: &mut BeaconHost<'_>,
+    op: &str,
+    args: &[Value],
+) -> Result<Value, TraceRunError> {
+    match (op, args) {
+        ("current_ctx", []) => Ok(raw_context_value(host.current_ctx())),
+        ("start_span", [schema, name]) => {
+            let schema_id = uint(schema, "schema id")?;
+            let Value::String(name) = name else {
+                return Err(TraceRunError::Malformed("span name"));
+            };
+            Ok(raw_span_value(host.start_span(schema_id, name)?))
+        }
+        ("start_child", [parent, schema, name]) => {
+            let parent = raw_context_fields(parent)?;
+            let schema_id = uint(schema, "schema id")?;
+            let Value::String(name) = name else {
+                return Err(TraceRunError::Malformed("span name"));
+            };
+            Ok(raw_span_value(host.start_child(parent, schema_id, name)?))
+        }
+        ("emit_ok", [span, attr]) => {
+            let span_ctx = span_context_from_value(span)?;
+            let attr = uint(attr, "attribute")?;
+            host.emit_ok(span_ctx, attr)?;
+            Ok(Value::Tuple(vec![]))
+        }
+        ("emit_err", [span, code, message]) => {
+            let span_ctx = span_context_from_value(span)?;
+            let code = uint(code, "error code")?;
+            let Value::String(message) = message else {
+                return Err(TraceRunError::Malformed("error message"));
+            };
+            host.emit_err(span_ctx, code, message)?;
+            Ok(Value::Tuple(vec![]))
+        }
+        ("emit_attr", [span, attr]) => {
+            let span_ctx = span_context_from_value(span)?;
+            let attr = telemetry_attr(attr)?;
+            host.emit_attr(span_ctx, attr)?;
+            Ok(Value::Tuple(vec![]))
+        }
+        _ => Err(TraceRunError::Malformed("Trace operation")),
+    }
+}
+
+/// Shared host state machine serving `Trace` operations through `vesper-beacon`.
+pub struct BeaconHost<'p> {
     config: TraceConfig,
     pool: &'p SpanPool<ACTIVE_SPANS>,
     ring: TelemetryRing<RING_CAPACITY>,
@@ -213,33 +332,23 @@ struct Host<'p> {
     clock: u64,
 }
 
-impl Host<'_> {
-    fn drive(
-        &mut self,
-        world: &crate::check::World,
-        entry: &str,
-        args: Vec<Value>,
-    ) -> Result<Value, TraceRunError> {
-        let mut runtime = Runtime::new(world);
-        runtime.fuel = self.config.fuel;
-        let mut state = runtime
-            .begin_external(entry, args)
-            .map_err(TraceRunError::Runtime)?;
-        loop {
-            match state {
-                Execution::Complete(value) => return Ok(value),
-                Execution::Suspended(suspension) => {
-                    let request = suspension.request();
-                    if request.effect.name != TRACE {
-                        return Err(TraceRunError::UnsupportedEffect(
-                            request.effect.name.clone(),
-                        ));
-                    }
-                    let reply = self.operation(&request.operation, &request.arguments)?;
-                    state = suspension.resume(reply).map_err(TraceRunError::Runtime)?;
-                }
-            }
+impl<'p> BeaconHost<'p> {
+    pub fn new(pool: &'p SpanPool<ACTIVE_SPANS>, config: TraceConfig) -> Self {
+        Self {
+            config,
+            pool,
+            ring: TelemetryRing::default(),
+            open: BTreeMap::new(),
+            stack: vec![],
+            names: BTreeMap::new(),
+            messages: BTreeMap::new(),
+            exported: vec![],
+            clock: 0,
         }
+    }
+
+    pub fn config(&self) -> TraceConfig {
+        self.config
     }
 
     fn tick(&mut self) -> u64 {
@@ -247,69 +356,97 @@ impl Host<'_> {
         self.clock
     }
 
-    fn current(&self) -> Value {
+    fn current_raw(&self) -> RawSpanContext {
         match self.stack.last().copied().or(self.config.parent) {
-            Some(ctx) => context_value(ctx),
-            None => root_value(self.config.trace_id, self.config.flags),
+            Some(ctx) => RawSpanContext::from_w3c(ctx),
+            None => RawSpanContext::root(self.config.trace_id, self.config.flags),
         }
     }
 
-    fn operation(&mut self, op: &str, args: &[Value]) -> Result<Value, TraceRunError> {
-        let now = self.tick();
-        match (op, args) {
-            ("current_ctx", []) => Ok(self.current()),
-            ("start_span", [schema, name]) => {
-                let parent = self.current();
-                self.start(&parent, schema, name, now)
-            }
-            ("start_child", [parent, schema, name]) => self.start(parent, schema, name, now),
-            ("emit_ok", [span, attr]) => {
-                let attr = PrimaryAttribute::ItemCount(uint(attr, "attribute")?);
-                self.finish(span, SpanStatus::Ok, attr, None, now)
-            }
-            ("emit_err", [span, code, message]) => {
-                let code = match uint(code, "error code")? {
-                    0 => ErrorCode::InvalidInput,
-                    1 => ErrorCode::Storage,
-                    2 => ErrorCode::Timeout,
-                    3 => ErrorCode::Cancelled,
-                    other => return Err(TraceRunError::UnknownErrorCode(other)),
-                };
-                let Value::String(message) = message else {
-                    return Err(TraceRunError::Malformed("error message"));
-                };
-                self.finish(
-                    span,
-                    SpanStatus::Error(code),
-                    PrimaryAttribute::None,
-                    Some(message.clone()),
-                    now,
-                )
-            }
-            ("emit_attr", [span, attr]) => {
-                let attr = telemetry_attr(attr)?;
-                self.finish(span, SpanStatus::Ok, attr, None, now)
-            }
-            _ => Err(TraceRunError::Malformed("Trace operation")),
-        }
+    pub fn current_ctx(&mut self) -> RawSpanContext {
+        let _ = self.tick();
+        self.current_raw()
     }
 
-    fn start(
+    pub fn start_span(
         &mut self,
-        parent: &Value,
-        schema: &Value,
-        name: &Value,
+        schema_id: u64,
+        name: &str,
+    ) -> Result<RawActiveSpan, TraceRunError> {
+        let now = self.tick();
+        let parent = self.current_raw();
+        self.start_at(parent, schema_id, name, now)
+    }
+
+    pub fn start_child(
+        &mut self,
+        parent: RawSpanContext,
+        schema_id: u64,
+        name: &str,
+    ) -> Result<RawActiveSpan, TraceRunError> {
+        let now = self.tick();
+        self.start_at(parent, schema_id, name, now)
+    }
+
+    pub fn emit_ok(
+        &mut self,
+        span_ctx: RawSpanContext,
+        attr_u64: u64,
+    ) -> Result<(), TraceRunError> {
+        let now = self.tick();
+        self.finish_span(
+            span_ctx,
+            SpanStatus::Ok,
+            PrimaryAttribute::ItemCount(attr_u64),
+            None,
+            now,
+        )
+    }
+
+    pub fn emit_err(
+        &mut self,
+        span_ctx: RawSpanContext,
+        err_code: u64,
+        message: &str,
+    ) -> Result<(), TraceRunError> {
+        let now = self.tick();
+        let code = match err_code {
+            0 => ErrorCode::InvalidInput,
+            1 => ErrorCode::Storage,
+            2 => ErrorCode::Timeout,
+            3 => ErrorCode::Cancelled,
+            other => return Err(TraceRunError::UnknownErrorCode(other)),
+        };
+        self.finish_span(
+            span_ctx,
+            SpanStatus::Error(code),
+            PrimaryAttribute::None,
+            Some(message.to_owned()),
+            now,
+        )
+    }
+
+    pub fn emit_attr(
+        &mut self,
+        span_ctx: RawSpanContext,
+        attr: PrimaryAttribute,
+    ) -> Result<(), TraceRunError> {
+        let now = self.tick();
+        self.finish_span(span_ctx, SpanStatus::Ok, attr, None, now)
+    }
+
+    fn start_at(
+        &mut self,
+        parent: RawSpanContext,
+        schema_id: u64,
+        name: &str,
         now: u64,
-    ) -> Result<Value, TraceRunError> {
-        let schema_id = uint(schema, "schema id")?;
+    ) -> Result<RawActiveSpan, TraceRunError> {
         let schema = match schema_id {
             0 => SpanSchema::Request,
             1 => SpanSchema::StorageAppend,
             2 => SpanSchema::Background,
             other => return Err(TraceRunError::UnknownSchema(other)),
-        };
-        let Value::String(name) = name else {
-            return Err(TraceRunError::Malformed("span name"));
         };
         let parent = self.parent_context(parent)?;
         let span = self
@@ -320,51 +457,42 @@ impl Host<'_> {
                 StartError::IdExhausted => TraceRunError::IdExhausted,
             })?;
         let ctx = span.context();
-        self.names.insert(ctx.span_id(), name.clone());
+        self.names.insert(ctx.span_id(), name.to_owned());
         self.stack.push(ctx);
         self.open.insert(ctx.span_id(), span);
-        let mut fields = BTreeMap::new();
-        fields.insert("ctx".into(), context_value(ctx));
-        fields.insert(
-            "parent_span_id".into(),
-            Value::UInt(parent.map_or(0, W3cSpanContext::span_id), 64),
-        );
-        fields.insert("start_mono_ns".into(), Value::UInt(now, 64));
-        fields.insert("schema_id".into(), Value::UInt(schema_id, 32));
-        Ok(data(ACTIVE_SPAN, fields))
+        Ok(RawActiveSpan {
+            ctx: RawSpanContext::from_w3c(ctx),
+            parent_span_id: parent.map_or(0, W3cSpanContext::span_id),
+            start_mono_ns: now,
+            schema_id: schema_id as u32,
+        })
     }
 
     /// A source context: a valid W3C context, or this trace's root marker.
-    fn parent_context(&self, v: &Value) -> Result<Option<W3cSpanContext>, TraceRunError> {
-        let (trace_id, span_id, flags) = context_fields(v)?;
-        if span_id == 0 {
+    fn parent_context(&self, raw: RawSpanContext) -> Result<Option<W3cSpanContext>, TraceRunError> {
+        let trace_id = raw.trace_id();
+        if raw.span_id == 0 {
             return if trace_id == self.config.trace_id {
                 Ok(None)
             } else {
                 Err(TraceRunError::InvalidContext)
             };
         }
-        W3cSpanContext::new(trace_id, span_id, flags)
+        W3cSpanContext::new(trace_id, raw.span_id, raw.flags)
             .map(Some)
             .map_err(|_| TraceRunError::InvalidContext)
     }
 
-    fn finish(
+    fn finish_span(
         &mut self,
-        span: &Value,
+        span_ctx: RawSpanContext,
         status: SpanStatus,
         attribute: PrimaryAttribute,
         message: Option<String>,
         now: u64,
-    ) -> Result<Value, TraceRunError> {
-        let Value::Data { ty, fields, .. } = span else {
-            return Err(TraceRunError::Malformed("span"));
-        };
-        if ty != ACTIVE_SPAN {
-            return Err(TraceRunError::Malformed("span"));
-        }
-        let (trace_id, span_id, _) =
-            context_fields(fields.get("ctx").ok_or(TraceRunError::Malformed("span"))?)?;
+    ) -> Result<(), TraceRunError> {
+        let trace_id = span_ctx.trace_id();
+        let span_id = span_ctx.span_id;
         let owner = self
             .open
             .remove(&span_id)
@@ -404,7 +532,7 @@ impl Host<'_> {
         if let Some(message) = message {
             self.messages.insert(span_id, message);
         }
-        Ok(Value::Tuple(vec![]))
+        Ok(())
     }
 
     fn drain(&mut self) -> Result<(), TraceRunError> {
@@ -433,9 +561,20 @@ impl Host<'_> {
         Ok(())
     }
 
+    /// Cancels any open spans, verifies zero unclosed spans, and drains all
+    /// exported spans.
+    pub fn finish(mut self) -> Result<Vec<ExportedSpan>, TraceRunError> {
+        let unclosed = self.cancel_open();
+        if unclosed > 0 {
+            return Err(TraceRunError::UnclosedSpans(unclosed));
+        }
+        self.drain()?;
+        Ok(self.exported)
+    }
+
     /// Cancels spans a failed run left open, so that no Beacon owner is
     /// dropped silently. Returns how many there were.
-    fn cancel_open(&mut self) -> usize {
+    pub fn cancel_open(&mut self) -> usize {
         let open = std::mem::take(&mut self.open);
         let count = open.len();
         let end = self.clock.saturating_add(1);
@@ -469,39 +608,26 @@ impl Host<'_> {
     }
 }
 
-fn data(ty: &str, fields: BTreeMap<String, Value>) -> Value {
-    Value::Data {
-        ty: ty.into(),
-        constructor: ty.into(),
-        fields,
-        resource_identity: None,
-    }
+fn raw_context_value(ctx: RawSpanContext) -> Value {
+    context_parts(ctx.trace_id_hi, ctx.trace_id_lo, ctx.span_id, ctx.flags)
 }
 
-fn context_value(ctx: W3cSpanContext) -> Value {
-    let id = ctx.trace_id();
-    context_parts(
-        (id >> 64) as u64,
-        id as u64,
-        ctx.span_id(),
-        ctx.trace_flags(),
-    )
-}
-
-fn root_value(trace_id: u128, flags: u8) -> Value {
-    context_parts((trace_id >> 64) as u64, trace_id as u64, 0, flags)
-}
-
-fn context_parts(hi: u64, lo: u64, span_id: u64, flags: u8) -> Value {
+fn raw_span_value(span: RawActiveSpan) -> Value {
     let mut fields = BTreeMap::new();
-    fields.insert("trace_id_hi".into(), Value::UInt(hi, 64));
-    fields.insert("trace_id_lo".into(), Value::UInt(lo, 64));
-    fields.insert("span_id".into(), Value::UInt(span_id, 64));
-    fields.insert("flags".into(), Value::UInt(u64::from(flags), 8));
-    data(SPAN_CONTEXT, fields)
+    fields.insert("ctx".into(), raw_context_value(span.ctx));
+    fields.insert(
+        "parent_span_id".into(),
+        Value::UInt(span.parent_span_id, 64),
+    );
+    fields.insert("start_mono_ns".into(), Value::UInt(span.start_mono_ns, 64));
+    fields.insert(
+        "schema_id".into(),
+        Value::UInt(u64::from(span.schema_id), 32),
+    );
+    data(ACTIVE_SPAN, fields)
 }
 
-fn context_fields(v: &Value) -> Result<(u128, u64, u8), TraceRunError> {
+fn raw_context_fields(v: &Value) -> Result<RawSpanContext, TraceRunError> {
     let Value::Data { ty, fields, .. } = v else {
         return Err(TraceRunError::Malformed("context"));
     };
@@ -514,14 +640,41 @@ fn context_fields(v: &Value) -> Result<(u128, u64, u8), TraceRunError> {
             .ok_or(TraceRunError::Malformed("context"))
             .and_then(|v| uint(v, "context"))
     };
-    let hi = field("trace_id_hi")?;
-    let lo = field("trace_id_lo")?;
     let flags = u8::try_from(field("flags")?).map_err(|_| TraceRunError::Malformed("context"))?;
-    Ok((
-        (u128::from(hi) << 64) | u128::from(lo),
-        field("span_id")?,
+    Ok(RawSpanContext {
+        trace_id_hi: field("trace_id_hi")?,
+        trace_id_lo: field("trace_id_lo")?,
+        span_id: field("span_id")?,
         flags,
-    ))
+    })
+}
+
+fn span_context_from_value(span: &Value) -> Result<RawSpanContext, TraceRunError> {
+    let Value::Data { ty, fields, .. } = span else {
+        return Err(TraceRunError::Malformed("span"));
+    };
+    if ty != ACTIVE_SPAN {
+        return Err(TraceRunError::Malformed("span"));
+    }
+    raw_context_fields(fields.get("ctx").ok_or(TraceRunError::Malformed("span"))?)
+}
+
+fn data(ty: &str, fields: BTreeMap<String, Value>) -> Value {
+    Value::Data {
+        ty: ty.into(),
+        constructor: ty.into(),
+        fields,
+        resource_identity: None,
+    }
+}
+
+fn context_parts(hi: u64, lo: u64, span_id: u64, flags: u8) -> Value {
+    let mut fields = BTreeMap::new();
+    fields.insert("trace_id_hi".into(), Value::UInt(hi, 64));
+    fields.insert("trace_id_lo".into(), Value::UInt(lo, 64));
+    fields.insert("span_id".into(), Value::UInt(span_id, 64));
+    fields.insert("flags".into(), Value::UInt(u64::from(flags), 8));
+    data(SPAN_CONTEXT, fields)
 }
 
 fn uint(v: &Value, what: &'static str) -> Result<u64, TraceRunError> {

@@ -43,7 +43,7 @@ mod lower;
 mod module;
 
 pub use component::{ENTRY_INTERFACE, WASI_RUN};
-pub use host::{HostCapability, WASI_MONOTONIC_CLOCK, WASI_STDOUT, WASI_STREAMS};
+pub use host::{BEACON_TRACE, HostCapability, WASI_MONOTONIC_CLOCK, WASI_STDOUT, WASI_STREAMS};
 
 /// The target triple routed to this backend by `vesper build --target`.
 pub const TARGET: &str = "wasm32-wasip2";

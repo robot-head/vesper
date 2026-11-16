@@ -915,6 +915,7 @@ pub(crate) fn encode(mut core: Vec<u8>, wit: &str, world: WasmWorld) -> Result<V
         ("wasi-io.wit", super::host::IO_WIT),
         ("wasi-cli.wit", super::host::CLI_WIT),
         ("wasi-clocks.wit", super::host::CLOCKS_WIT),
+        ("vesper-beacon.wit", super::host::BEACON_WIT),
     ] {
         resolve
             .push_source(name, source)
