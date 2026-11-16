@@ -288,6 +288,16 @@ fn der_actual_values_and_typed_set_of_require_canonical_reencoding() {
     assert_eq!(data["result"]["roundtrip_bytes_equal"], true);
     fs::write(&input, b"\x0c\x02\xc0\x80").unwrap();
     report(&invoke(&["check", "der", path(&input), "--json"]), false);
+    fs::write(&input, b"\x16\x03abc").unwrap();
+    let data = report(&invoke(&["check", "der", path(&input), "--json"]), true);
+    assert_eq!(data["result"]["projection"]["kind"], "Ia5String");
+    fs::write(&input, b"\x16\x02\xc3\xa9").unwrap();
+    report(&invoke(&["check", "der", path(&input), "--json"]), false);
+    fs::write(&input, b"\x13\x03A+1").unwrap();
+    let data = report(&invoke(&["check", "der", path(&input), "--json"]), true);
+    assert_eq!(data["result"]["projection"]["kind"], "PrintableString");
+    fs::write(&input, b"\x13\x01@").unwrap();
+    report(&invoke(&["check", "der", path(&input), "--json"]), false);
     fs::write(&input, [0x31, 6, 2, 1, 1, 2, 1, 2]).unwrap();
     report(&invoke(&["check", "der", path(&input), "--json"]), false);
     let data = report(

@@ -120,3 +120,91 @@ fn intervals_cover_zero_for_exact_signed_rank_fraction() {
         assert_eq!(covered, expected.unwrap(), "sample size {n}");
     }
 }
+
+#[test]
+fn paired_difference_gate_uses_exact_interval_bounds_and_preserves_evidence() {
+    use vesper_bench::{Decision, PairedDifferenceInconclusive, gate_paired_difference};
+    let positive = [1, 2, 4, 8, 16, 32];
+    let pass = gate_paired_difference(&positive, 32).unwrap();
+    assert_eq!(pass.decision, Decision::Pass);
+    assert_eq!(pass.reason, None);
+    assert_eq!(pass.estimate, hodges_lehmann_paired(&positive).unwrap());
+    let overlap = gate_paired_difference(&positive, 1).unwrap();
+    assert_eq!(overlap.decision, Decision::Inconclusive);
+    assert_eq!(
+        overlap.reason,
+        Some(PairedDifferenceInconclusive::IntervalCrossesThreshold)
+    );
+    assert_eq!(
+        gate_paired_difference(&positive, 0).unwrap().decision,
+        Decision::Regression
+    );
+    assert_eq!(
+        gate_paired_difference(&positive, i64::MIN)
+            .unwrap()
+            .decision,
+        Decision::Regression
+    );
+    assert_eq!(
+        gate_paired_difference(&positive, i64::MAX)
+            .unwrap()
+            .decision,
+        Decision::Pass
+    );
+    let negative = [-1, -2, -4, -8, -16, -32];
+    assert_eq!(
+        gate_paired_difference(&negative, -1).unwrap().decision,
+        Decision::Pass
+    );
+    assert_eq!(
+        gate_paired_difference(&negative, -33).unwrap().decision,
+        Decision::Regression
+    );
+    let too_few = gate_paired_difference(&positive[..5], 0).unwrap();
+    assert_eq!(too_few.decision, Decision::Inconclusive);
+    assert_eq!(
+        too_few.reason,
+        Some(PairedDifferenceInconclusive::InsufficientPairs)
+    );
+    assert!(too_few.estimate.interval.is_none());
+    assert_eq!(
+        gate_paired_difference(&[0, 1], 0),
+        Err(HodgesLehmannError::ZeroDifference)
+    );
+    assert_eq!(
+        gate_paired_difference(&[-1, 1], 0),
+        Err(HodgesLehmannError::TiedAbsoluteDifferences)
+    );
+}
+
+#[test]
+fn paired_difference_gate_compares_fractional_bounds_without_rounding() {
+    use vesper_bench::{Decision, gate_paired_difference};
+    let sample = [
+        26226, 107474, 116740, 146317, 234054, 256788, 288390, 670488, 772247, 777573,
+    ];
+    let estimate = hodges_lehmann_paired(&sample).unwrap();
+    let interval = estimate.interval.unwrap();
+    assert!(interval.lower_times_two % 2 != 0 || interval.upper_times_two % 2 != 0);
+    assert_eq!(interval.upper_times_two, 1_034_361);
+    assert_eq!(
+        gate_paired_difference(&sample, 517180).unwrap().decision,
+        Decision::Inconclusive
+    );
+    assert_eq!(
+        gate_paired_difference(&sample, 517181).unwrap().decision,
+        Decision::Pass
+    );
+    for threshold in [0, 130139, 130140, 130141, 517180, 517181, 1_000_000] {
+        let gate = gate_paired_difference(&sample, threshold).unwrap();
+        let exact_threshold = i128::from(threshold) * 2;
+        let expected = if interval.upper_times_two <= exact_threshold {
+            Decision::Pass
+        } else if interval.lower_times_two > exact_threshold {
+            Decision::Regression
+        } else {
+            Decision::Inconclusive
+        };
+        assert_eq!(gate.decision, expected, "threshold {threshold}");
+    }
+}

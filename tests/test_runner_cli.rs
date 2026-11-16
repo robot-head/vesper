@@ -250,3 +250,114 @@ fn test_add_positive_weak() -> bool eff [Fail[ArithOverflow]] {
     assert_eq!(weak_json["passed"], false);
     assert!(weak_json["survived"].as_u64().unwrap() >= 1);
 }
+
+#[test]
+fn mutation_gate_validates_baseline_with_same_fuel_and_engine() {
+    let source = r#"
+fn unused_helper() -> bool {
+    true
+}
+
+fn test_ok() -> bool {
+    true
+}
+"#;
+    let temp = Temp::new(&[("fuel.ves", source)]);
+    let out = vesper(
+        &temp.0,
+        &["test", "fuel.ves", "--mutate", "--fuel", "1", "--json"],
+    );
+    assert!(
+        !out.status.success(),
+        "baseline fuel exhaustion must fail before mutant classification: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let report = parse_json(&out);
+    assert_eq!(report["mode"], "mutate");
+    assert_eq!(report["passed"], false);
+    assert_eq!(
+        report["error"],
+        "baseline unit tests failed before mutation testing"
+    );
+    assert!(report.get("mutants").is_none());
+}
+
+#[test]
+fn mutation_gate_collects_and_tests_trait_impl_and_model_methods() {
+    let strong = r#"
+copy struct Pair { a: i64, b: i64 }
+
+trait Check {
+    fn valid(in self) -> bool;
+}
+
+impl Check for Pair {
+    fn valid(in self) -> bool {
+        self.a > 0
+    }
+}
+
+model Strict: Check for Pair {
+    fn valid(in self) -> bool {
+        self.a > 0 && self.b > 0
+    }
+}
+
+fn test_canonical_and_model() -> bool {
+    let p1 = Pair { a: 1, b: 0 };
+    let p2 = Pair { a: 0, b: 1 };
+    let p3 = Pair { a: 1, b: 1 };
+    let canon_ok = p1.valid() && !p2.valid();
+    use model Strict;
+    canon_ok && p3.valid() && !p1.valid() && !p2.valid()
+}
+"#;
+    let weak = r#"
+copy struct Pair { a: i64, b: i64 }
+
+trait Check {
+    fn valid(in self) -> bool;
+}
+
+impl Check for Pair {
+    fn valid(in self) -> bool {
+        self.a > 0
+    }
+}
+
+model Strict: Check for Pair {
+    fn valid(in self) -> bool {
+        self.a > 0 && self.b > 0
+    }
+}
+
+fn test_only_positive() -> bool {
+    let p = Pair { a: 1, b: 1 };
+    let canon = p.valid();
+    use model Strict;
+    canon && p.valid()
+}
+"#;
+    let temp = Temp::new(&[("strong.ves", strong), ("weak.ves", weak)]);
+
+    let strong_out = vesper(&temp.0, &["test", "strong.ves", "--mutate", "--json"]);
+    assert!(
+        strong_out.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&strong_out.stdout),
+        String::from_utf8_lossy(&strong_out.stderr)
+    );
+    let strong_json = parse_json(&strong_out);
+    assert_eq!(strong_json["mode"], "mutate");
+    assert_eq!(strong_json["passed"], true);
+    assert_eq!(strong_json["survived"], 0);
+    assert!(strong_json["total_candidates"].as_u64().unwrap() >= 6);
+    assert!(strong_json["killed"].as_u64().unwrap() >= 6);
+
+    let weak_out = vesper(&temp.0, &["test", "weak.ves", "--mutate", "--json"]);
+    assert!(!weak_out.status.success());
+    let weak_json = parse_json(&weak_out);
+    assert_eq!(weak_json["mode"], "mutate");
+    assert_eq!(weak_json["passed"], false);
+    assert!(weak_json["survived"].as_u64().unwrap() >= 1);
+}
