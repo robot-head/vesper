@@ -1226,18 +1226,33 @@ fn contract(
             .map(|p| &p.ty),
     );
     signature(ensures, with_result)?;
-    let fail = match f.effects.instances.as_slice() {
+    let failures = match f.effects.instances.as_slice() {
         _ if f.effects.tail.is_some() => {
             return Err(unsupported("open effect rows have no model monad"));
         }
-        [] => None,
-        [e] if e.name == "Fail" && e.args.len() == 1 => Some(ty(&e.args[0]).map_err(internal)?),
+        effects
+            if effects
+                .iter()
+                .all(|e| e.name == "Fail" && e.args.len() == 1) =>
+        {
+            effects
+                .iter()
+                .map(|e| ty(&e.args[0]).map_err(internal))
+                .collect::<Result<Vec<_>, _>>()?
+        }
         _ => {
             return Err(unsupported(
-                "only pure and single Fail[E] functions have a model monad",
+                "only pure and Fail[E] functions have a model monad",
             ));
         }
     };
+    // A right-associated sum preserves the identity of every row instance,
+    // including different labels with the same error payload type.
+    let fail = failures.split_last().map(|(last, rest)| {
+        rest.iter().rev().fold(last.clone(), |tail, head| {
+            app(global(&["Sum"]), [head.clone(), tail])
+        })
+    });
     let fuel = match totality.get(&f.name) {
         Some(Totality::Total) => false,
         Some(Totality::Fuel) => true,
@@ -1287,6 +1302,30 @@ fn contract(
             name: fixed("m"),
             value: model.clone(),
         });
+    }
+    if failures.len() > 1 {
+        for index in 0..failures.len() {
+            let mut error = named("$error");
+            if index + 1 < failures.len() {
+                error = app(global(&["Sum", "inl"]), [error]);
+            }
+            for _ in 0..index {
+                error = app(global(&["Sum", "inr"]), [error]);
+            }
+            let error = ascribe(error, fail.clone().expect("nonempty failure row"));
+            call_args.push(Argument::Named {
+                name: fixed(&format!("$cap{index}")),
+                value: Term::Record {
+                    fields: vec![(
+                        fixed("raise"),
+                        inferred(
+                            vec![fixed("$error")],
+                            app(global(&["MonadExcept", "throw"]), [error]),
+                        ),
+                    )],
+                },
+            });
+        }
     }
     if fuel {
         call_args.push(Argument::Named {
