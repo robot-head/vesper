@@ -538,20 +538,32 @@ fn actual_lean_extract_verification_contracts_policy_and_olean_cas_roundtrip() {
     assert_eq!(cert2["object_id"], oid1);
     assert_eq!(second_json["audit"]["kernel_replayed"], true);
 
-    // 4. Axiom policy rejections & partial-declaration gate with real Lean kernel.
+    // 4. Recursive models use the total projection, with explicit scope.
     let f_partial = Fixture::new(PARTIAL_CONTRACTS.as_bytes());
-    reject_json(
-        f_partial.verify(&[
-            "--extract",
-            "--json",
-            "--lean",
-            lean_str,
-            "--timeout",
-            "300",
-        ]),
-        Some("kernel"),
+    let projected = f_partial.verify(&[
+        "--extract",
+        "--json",
+        "--lean",
+        lean_str,
+        "--timeout",
+        "300",
+    ]);
+    assert!(
+        projected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&projected.stdout)
     );
+    let projected: Value = serde_json::from_slice(&projected.stdout).unwrap();
+    assert_eq!(projected["scope"], "source_lean_fuel_projection");
+    assert!(
+        projected["omitted_executable_definitions"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("Vesper.countdown"))
+    );
+    assert_eq!(projected["checked_contracts"], serde_json::json!({}));
 
+    // Axiom policy and proof-supplied unsafe declarations still fail closed.
     let f_pure = Fixture::new(PURE_VES.as_bytes());
     let sorry_proofs = f_pure.root.join("sorry.lean");
     fs::write(
@@ -1343,12 +1355,13 @@ fn multi_fail_contract_admission_checks_tagged_model_results() {
 }
 
 #[test]
-fn effectful_recursive_callback_artifact_keeps_the_strict_unsafe_rejection() {
+fn effectful_recursive_callback_contract_admission_uses_total_proof_projection() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let Some(lean) = lean() else { return };
     let source = include_str!("fixtures/lean_extract/recursive_values.ves");
     let f = Fixture::new(source.as_bytes());
     let proofs = f.root.join("recursive-values.lean");
+    let store = f.root.join("proof-store");
     fs::write(
         &proofs,
         include_str!("fixtures/lean_extract/recursive_values.proofs.lean"),
@@ -1356,6 +1369,8 @@ fn effectful_recursive_callback_artifact_keeps_the_strict_unsafe_rejection() {
     .unwrap();
     let args = [
         "--extract",
+        "--olean-store",
+        store.to_str().unwrap(),
         "--proofs",
         proofs.to_str().unwrap(),
         "--contract-proof",
@@ -1375,15 +1390,46 @@ fn effectful_recursive_callback_artifact_keeps_the_strict_unsafe_rejection() {
         "--json",
     ];
     let audited = f.verify(&args);
-    let report: Value = serde_json::from_slice(&audited.stdout).unwrap();
-    let message = report["message"].as_str().unwrap();
     assert!(
-        message.contains("unsupported unsafe or partial artifact declaration"),
-        "{report}"
+        audited.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audited.stdout)
     );
-    assert!(message.contains("_unsafe_rec"), "{report}");
-    reject_json(audited, Some("kernel"));
+    let report: Value = serde_json::from_slice(&audited.stdout).unwrap();
+    assert_eq!(
+        report["checked_contracts"],
+        serde_json::json!({"down": "VesperProofs.RecursiveValues.down_contract"})
+    );
+    assert_eq!(
+        report["checked_preconditions"],
+        serde_json::json!({"down": "VesperProofs.RecursiveValues.down_input"})
+    );
+    assert_eq!(report["scope"], "source_lean_fuel_projection");
+    assert_eq!(
+        report["omitted_executable_definitions"],
+        serde_json::json!(["Vesper.down", "Vesper.main", "Vesper.spin", "Vesper.stored"])
+    );
+    assert_eq!(report["olean_certificate"]["cache_hit"], false);
+    let cached = f.verify(&args);
+    assert!(
+        cached.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cached.stdout)
+    );
+    let cached: Value = serde_json::from_slice(&cached.stdout).unwrap();
+    assert_eq!(cached["olean_certificate"]["cache_hit"], true);
+    assert_eq!(cached["lean_model_blake3"], report["lean_model_blake3"]);
     // The first 42 is the base-case result; leave the postcondition unchanged.
     let wrong = Fixture::new(source.replacen("42", "41", 1).as_bytes());
     reject_json(wrong.verify(&args), Some("compile"));
+    // The projection does not allow unsafe declarations supplied by a proof.
+    fs::write(
+        &proofs,
+        format!(
+            "{}\nunsafe def forbidden : Nat := 0\n",
+            include_str!("fixtures/lean_extract/recursive_values.proofs.lean")
+        ),
+    )
+    .unwrap();
+    reject_json(f.verify(&args), Some("kernel"));
 }

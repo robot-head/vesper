@@ -880,9 +880,44 @@ pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
         );
         functions.push((f.name.clone(), generator.function(f)?));
     }
+    let owners = functions
+        .iter()
+        .map(|(owner, definition)| (definition.name.clone(), owner.clone()))
+        .collect::<BTreeMap<_, _>>();
     let ordered = order_definitions(functions, DefinitionKind::PartialDef);
-    declarations.extend(ordered.declarations);
     let family = std::rc::Rc::new(ordered.recursive_reach);
+    let mut proof_declarations = declarations.clone();
+    let mut omitted_executable_definitions = vec![];
+    for declaration in &ordered.declarations {
+        let definitions = match declaration {
+            Declaration::Definition(d) => std::slice::from_ref(d),
+            Declaration::MutualDefinitions(ds) => ds.as_slice(),
+            _ => {
+                return Err(ExtractError::Unsupported(
+                    "unexpected function declaration".into(),
+                ));
+            }
+        };
+        if definitions
+            .iter()
+            .any(|d| family.contains(&owners[&d.name]))
+        {
+            omitted_executable_definitions.extend(definitions.iter().map(|d| {
+                format!(
+                    "Vesper.{}",
+                    d.name
+                        .components()
+                        .iter()
+                        .map(Ident::as_str)
+                        .collect::<Vec<_>>()
+                        .join(".")
+                )
+            }));
+        } else {
+            proof_declarations.push(declaration.clone());
+        }
+    }
+    declarations.extend(ordered.declarations);
     let mut companions = BTreeMap::new();
     let mut totality = BTreeMap::new();
     for f in world.functions.values() {
@@ -925,29 +960,57 @@ pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
         totality.insert(owner.clone(), Totality::Fuel);
     }
     let companions = order_definitions(companions.into_iter().collect(), DefinitionKind::Def);
+    // Lean elaborates total recursion through trusted recursors. Suppress its
+    // executable unsafe helpers in the proof projection, without changing the
+    // kernel definitions or the strict artifact auditor.
+    for declaration in &companions.declarations {
+        let mut declaration = declaration.clone();
+        match &mut declaration {
+            Declaration::Definition(d) => d.kind = DefinitionKind::NoncomputableDef,
+            Declaration::MutualDefinitions(ds) => {
+                for d in ds {
+                    d.kind = DefinitionKind::NoncomputableDef;
+                }
+            }
+            _ => {
+                return Err(ExtractError::Unsupported(
+                    "unexpected fuel declaration".into(),
+                ));
+            }
+        }
+        proof_declarations.push(declaration);
+    }
     declarations.extend(companions.declarations);
     let contracts = contracts(world, &totality).map_err(ExtractError::Contract)?;
     let contract_names = contracts.iter().map(|(n, _)| n.clone()).collect();
-    declarations.extend(
-        contracts
-            .into_iter()
-            .flat_map(|(_, definitions)| definitions.into_iter().map(Declaration::Definition)),
-    );
-    let module = Module {
-        imports: vec![ModuleName::new("Std").map_err(|e| e.to_string())?],
-        declarations: vec![
-            Declaration::SetOption {
-                option: LeanOption::LinterUnusedVariables,
-                value: OptionValue::Bool(false),
-            },
-            Declaration::Namespace {
-                name: source_name("Vesper")?,
-                declarations,
-            },
-        ],
+    let contract_declarations = contracts
+        .into_iter()
+        .flat_map(|(_, definitions)| definitions.into_iter().map(Declaration::Definition))
+        .collect::<Vec<_>>();
+    proof_declarations.extend(contract_declarations.clone());
+    declarations.extend(contract_declarations);
+    let make_module = |declarations| {
+        Ok::<_, String>(Module {
+            imports: vec![ModuleName::new("Std").map_err(|e| e.to_string())?],
+            declarations: vec![
+                Declaration::SetOption {
+                    option: LeanOption::LinterUnusedVariables,
+                    value: OptionValue::Bool(false),
+                },
+                Declaration::Namespace {
+                    name: source_name("Vesper")?,
+                    declarations,
+                },
+            ],
+        })
     };
+    let module = make_module(declarations)?;
+    let proof_module = make_module(proof_declarations)?;
+    omitted_executable_definitions.sort();
     Ok(Extraction {
         module,
+        proof_module,
+        omitted_executable_definitions,
         totality,
         contracts: contract_names,
     })
@@ -1021,6 +1084,10 @@ impl std::error::Error for ExtractError {}
 /// A whole extraction with the facts proof tooling (Lens, tests) needs.
 pub struct Extraction {
     pub module: Module,
+    /// Kernel proof model: total companions have no executable code, and
+    /// original recursive definitions and their callers are omitted.
+    pub proof_module: Module,
+    pub omitted_executable_definitions: Vec<String>,
     pub totality: BTreeMap<String, Totality>,
     /// Source functions that received a `f$contract : Prop`.
     pub contracts: Vec<String>,
