@@ -102,6 +102,8 @@ pub struct TelemetrySnapshot {
     pub schema_version: u32,
     #[serde(default)]
     pub source: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub observer_truncated: bool,
     pub fibers: Vec<FiberTelemetry>,
 }
 
@@ -126,6 +128,8 @@ struct WaitEdge {
 struct TelemetryReport {
     schema_version: u32,
     source: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    observer_truncated: bool,
     total_fibers: usize,
     parked_fibers: usize,
     total_run_ns: u64,
@@ -238,52 +242,186 @@ fn compute_latency(samples: &[u64]) -> LatencyStats {
 }
 
 /// Deterministic canonical wait-for graph cycle detection.
-/// Normalizes every simple cycle to start at its smallest fiber ID and deduplicates.
+/// Restricts cycle enumeration to strongly connected components via Tarjan's
+/// algorithm and Johnson's circuit search so acyclic DAGs run in O(V + E) time
+/// while preserving all distinct canonical elementary cycles.
 fn detect_wait_cycles(edges: &[WaitEdge]) -> Vec<Vec<u64>> {
-    let mut adj: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
-    let mut nodes: BTreeSet<u64> = BTreeSet::new();
+    let mut nodes_set: BTreeSet<u64> = BTreeSet::new();
     for e in edges {
-        adj.entry(e.from_fiber).or_default().insert(e.to_fiber);
-        nodes.insert(e.from_fiber);
-        nodes.insert(e.to_fiber);
+        nodes_set.insert(e.from_fiber);
+        nodes_set.insert(e.to_fiber);
+    }
+    if nodes_set.is_empty() {
+        return Vec::new();
+    }
+    let nodes: Vec<u64> = nodes_set.into_iter().collect();
+    let idx_of: BTreeMap<u64, usize> = nodes.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+    let n = nodes.len();
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for e in edges {
+        let u = idx_of[&e.from_fiber];
+        let v = idx_of[&e.to_fiber];
+        adj[u].push(v);
+    }
+    for neighbors in &mut adj {
+        neighbors.sort_unstable();
+        neighbors.dedup();
     }
 
+    let sccs = tarjan_sccs(&adj);
     let mut found: BTreeSet<Vec<u64>> = BTreeSet::new();
-    for &start in &nodes {
-        let mut stack = vec![start];
-        let mut on_stack = BTreeSet::from([start]);
-        dfs_cycles(start, start, &adj, &mut stack, &mut on_stack, &mut found);
+    let mut in_scc = vec![false; n];
+    let mut blocked = vec![false; n];
+    let mut b_map: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
+
+    struct CircuitFrame {
+        v: usize,
+        next_edge: usize,
+        found_cycle: bool,
     }
+
+    for mut scc in sccs {
+        if scc.len() == 1 {
+            let u = scc[0];
+            if adj[u].binary_search(&u).is_ok() {
+                found.insert(vec![nodes[u], nodes[u]]);
+            }
+            continue;
+        }
+        scc.sort_unstable();
+        for &u in &scc {
+            in_scc[u] = true;
+        }
+        for (pos, &start) in scc.iter().enumerate() {
+            for &u in &scc[pos..] {
+                blocked[u] = false;
+                b_map[u].clear();
+            }
+
+            let mut path = vec![start];
+            blocked[start] = true;
+            let mut frames = vec![CircuitFrame {
+                v: start,
+                next_edge: 0,
+                found_cycle: false,
+            }];
+
+            'dfs: while let Some(top) = frames.last_mut() {
+                let v = top.v;
+                while top.next_edge < adj[v].len() {
+                    let w = adj[v][top.next_edge];
+                    top.next_edge += 1;
+                    if w < start || !in_scc[w] {
+                        continue;
+                    }
+                    if w == start {
+                        let mut cycle: Vec<u64> = path.iter().map(|&idx| nodes[idx]).collect();
+                        cycle.push(nodes[start]);
+                        found.insert(cycle);
+                        top.found_cycle = true;
+                    } else if !blocked[w] {
+                        blocked[w] = true;
+                        path.push(w);
+                        frames.push(CircuitFrame {
+                            v: w,
+                            next_edge: 0,
+                            found_cycle: false,
+                        });
+                        continue 'dfs;
+                    }
+                }
+
+                let frame = frames.pop().expect("non-empty circuit frame stack");
+                path.pop();
+                if frame.found_cycle {
+                    let mut unblock_stack = vec![frame.v];
+                    while let Some(u) = unblock_stack.pop() {
+                        if blocked[u] {
+                            blocked[u] = false;
+                            let deps = std::mem::take(&mut b_map[u]);
+                            for w in deps {
+                                if blocked[w] {
+                                    unblock_stack.push(w);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(parent) = frames.last_mut() {
+                        parent.found_cycle = true;
+                    }
+                } else {
+                    for &w in &adj[frame.v] {
+                        if w >= start && in_scc[w] {
+                            b_map[w].insert(frame.v);
+                        }
+                    }
+                }
+            }
+
+            in_scc[start] = false;
+        }
+    }
+
     found.into_iter().collect()
 }
 
-fn dfs_cycles(
-    start: u64,
-    curr: u64,
-    adj: &BTreeMap<u64, BTreeSet<u64>>,
-    stack: &mut Vec<u64>,
-    on_stack: &mut BTreeSet<u64>,
-    found: &mut BTreeSet<Vec<u64>>,
-) {
-    let Some(neighbors) = adj.get(&curr) else {
-        return;
-    };
-    for &next in neighbors {
-        if next < start {
+fn tarjan_sccs(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    let n = adj.len();
+    let mut index: Vec<Option<usize>> = vec![None; n];
+    let mut lowlink: Vec<usize> = vec![0; n];
+    let mut on_stack = vec![false; n];
+    let mut tarjan_stack = Vec::new();
+    let mut call_stack: Vec<(usize, usize)> = Vec::new();
+    let mut next_index = 0usize;
+    let mut sccs = Vec::new();
+
+    for root in 0..n {
+        if index[root].is_some() {
             continue;
         }
-        if next == start {
-            let mut cycle = stack.clone();
-            cycle.push(start);
-            found.insert(cycle);
-        } else if !on_stack.contains(&next) {
-            on_stack.insert(next);
-            stack.push(next);
-            dfs_cycles(start, next, adj, stack, on_stack, found);
-            stack.pop();
-            on_stack.remove(&next);
+        index[root] = Some(next_index);
+        lowlink[root] = next_index;
+        next_index += 1;
+        on_stack[root] = true;
+        tarjan_stack.push(root);
+        call_stack.push((root, 0));
+
+        while let Some((u, edge_i)) = call_stack.last_mut() {
+            let u = *u;
+            if *edge_i < adj[u].len() {
+                let v = adj[u][*edge_i];
+                *edge_i += 1;
+                if index[v].is_none() {
+                    index[v] = Some(next_index);
+                    lowlink[v] = next_index;
+                    next_index += 1;
+                    on_stack[v] = true;
+                    tarjan_stack.push(v);
+                    call_stack.push((v, 0));
+                } else if on_stack[v] {
+                    lowlink[u] = lowlink[u].min(index[v].expect("visited index"));
+                }
+            } else {
+                call_stack.pop();
+                if let Some(&(parent, _)) = call_stack.last() {
+                    lowlink[parent] = lowlink[parent].min(lowlink[u]);
+                }
+                if lowlink[u] == index[u].expect("root index") {
+                    let mut scc = Vec::new();
+                    while let Some(w) = tarjan_stack.pop() {
+                        on_stack[w] = false;
+                        scc.push(w);
+                        if w == u {
+                            break;
+                        }
+                    }
+                    sccs.push(scc);
+                }
+            }
         }
     }
+
+    sccs
 }
 
 fn analyze_snapshot(snapshot: &TelemetrySnapshot) -> TelemetryReport {
@@ -373,6 +511,7 @@ fn analyze_snapshot(snapshot: &TelemetrySnapshot) -> TelemetryReport {
     TelemetryReport {
         schema_version: 1,
         source: snapshot.source.clone(),
+        observer_truncated: snapshot.observer_truncated,
         total_fibers: fibers.len(),
         parked_fibers,
         total_run_ns,
@@ -416,7 +555,8 @@ fn chrono_session_to_snapshot(path: &Path, session: &ReplaySession) -> Telemetry
         waiting_on: Option<u64>,
     }
     let mut per_fiber: BTreeMap<u64, Acc> = BTreeMap::new();
-    for rec in &bundle.records {
+    let mut sim_now_ns: Option<u64> = None;
+    for (idx, rec) in bundle.records.iter().enumerate() {
         let label = match rec.effect_id {
             0xFFF0 => "InOutWrite".to_string(),
             0xFFF1 => "LinearObligation".to_string(),
@@ -428,13 +568,18 @@ fn chrono_session_to_snapshot(path: &Path, session: &ReplaySession) -> Telemetry
             && let Ok(event) = serde_json::from_slice::<TraceEvent>(&rec.payload)
         {
             match event {
-                TraceEvent::ClockAdvance { .. } => continue,
+                TraceEvent::ClockAdvance { to_ns, .. } => {
+                    sim_now_ns = Some(to_ns);
+                    continue;
+                }
                 TraceEvent::Spawn { task, at_ns } => {
+                    sim_now_ns = Some(at_ns);
                     let entry = per_fiber.entry(task.get()).or_default();
                     entry.effects.insert(label);
                     entry.sched_state = SchedState::RunnableSince(at_ns);
                 }
                 TraceEvent::Dispatch { task, at_ns, .. } => {
+                    sim_now_ns = Some(at_ns);
                     let entry = per_fiber.entry(task.get()).or_default();
                     entry.effects.insert(label);
                     match entry.sched_state {
@@ -455,6 +600,7 @@ fn chrono_session_to_snapshot(path: &Path, session: &ReplaySession) -> Telemetry
                     entry.sched_state = SchedState::RunningSince(at_ns);
                 }
                 TraceEvent::Yield { task, at_ns } => {
+                    sim_now_ns = Some(at_ns);
                     let entry = per_fiber.entry(task.get()).or_default();
                     entry.effects.insert(label);
                     if let SchedState::RunningSince(start) = entry.sched_state {
@@ -463,17 +609,42 @@ fn chrono_session_to_snapshot(path: &Path, session: &ReplaySession) -> Telemetry
                     entry.sched_state = SchedState::RunnableSince(at_ns);
                 }
                 TraceEvent::Sleep { task, .. } | TraceEvent::SubmitIo { task, .. } => {
+                    let next_timeline_ns = bundle.records[idx + 1..].iter().find_map(|future| {
+                        if future.effect_id != 0xFFF3 {
+                            return None;
+                        }
+                        let future_ev =
+                            serde_json::from_slice::<TraceEvent>(&future.payload).ok()?;
+                        match future_ev {
+                            TraceEvent::ClockAdvance { from_ns, .. } => Some(from_ns),
+                            TraceEvent::Spawn { at_ns, .. }
+                            | TraceEvent::Dispatch { at_ns, .. }
+                            | TraceEvent::Yield { at_ns, .. }
+                            | TraceEvent::TimerElapsed { at_ns, .. }
+                            | TraceEvent::IoCompleted { at_ns, .. }
+                            | TraceEvent::CancelRequested { at_ns, .. }
+                            | TraceEvent::Finish { at_ns, .. } => Some(at_ns),
+                            TraceEvent::Sleep { .. } | TraceEvent::SubmitIo { .. } => None,
+                        }
+                    });
+                    let at_ns = match (sim_now_ns, next_timeline_ns) {
+                        (Some(prev), Some(next_bound)) if rec.time_ns > next_bound => {
+                            prev.max(next_bound)
+                        }
+                        (None, Some(next_bound)) if rec.time_ns > next_bound => next_bound,
+                        _ => rec.time_ns,
+                    };
+                    sim_now_ns = Some(at_ns);
                     let entry = per_fiber.entry(task.get()).or_default();
                     entry.effects.insert(label);
                     if let SchedState::RunningSince(start) = entry.sched_state {
-                        entry.run_ns = entry
-                            .run_ns
-                            .saturating_add(rec.time_ns.saturating_sub(start));
+                        entry.run_ns = entry.run_ns.saturating_add(at_ns.saturating_sub(start));
                     }
-                    entry.sched_state = SchedState::ParkedSince(rec.time_ns);
+                    entry.sched_state = SchedState::ParkedSince(at_ns);
                 }
                 TraceEvent::TimerElapsed { task, at_ns, .. }
                 | TraceEvent::IoCompleted { task, at_ns, .. } => {
+                    sim_now_ns = Some(at_ns);
                     let entry = per_fiber.entry(task.get()).or_default();
                     entry.effects.insert(label);
                     if let SchedState::ParkedSince(parked) = entry.sched_state {
@@ -481,11 +652,13 @@ fn chrono_session_to_snapshot(path: &Path, session: &ReplaySession) -> Telemetry
                     }
                     entry.sched_state = SchedState::RunnableSince(at_ns);
                 }
-                TraceEvent::CancelRequested { task, .. } => {
+                TraceEvent::CancelRequested { task, at_ns } => {
+                    sim_now_ns = Some(at_ns);
                     let entry = per_fiber.entry(task.get()).or_default();
                     entry.effects.insert(label);
                 }
                 TraceEvent::Finish { task, at_ns } => {
+                    sim_now_ns = Some(at_ns);
                     let entry = per_fiber.entry(task.get()).or_default();
                     entry.effects.insert(label);
                     if let SchedState::RunningSince(start) = entry.sched_state {
@@ -555,6 +728,7 @@ fn chrono_session_to_snapshot(path: &Path, session: &ReplaySession) -> Telemetry
     TelemetrySnapshot {
         schema_version: 1,
         source: format!("chrono:{}", path.display()),
+        observer_truncated: false,
         fibers,
     }
 }
@@ -614,17 +788,16 @@ fn run_module_snapshot(
     let observer = if linear_types.is_empty() {
         None
     } else {
-        let mut limits = ResourceTraceLimits::default();
-        limits.max_selected_types = limits.max_selected_types.max(linear_types.len());
+        let mut limits = ResourceTraceLimits::HARD;
+        limits.max_selected_types = linear_types.len();
         let total_name_bytes: usize = linear_types.iter().map(String::len).sum();
-        if total_name_bytes > limits.max_selected_name_bytes
-            && total_name_bytes <= ResourceTraceLimits::HARD.max_selected_name_bytes
-        {
-            limits.max_selected_name_bytes = total_name_bytes;
+        if total_name_bytes <= ResourceTraceLimits::HARD.max_selected_name_bytes {
+            limits.max_selected_name_bytes = total_name_bytes.max(1);
         }
         let selected_refs: Vec<&str> = linear_types.iter().map(String::as_str).collect();
         let config = ResourceTraceConfig::new(&checked.world, &selected_refs, limits)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?
+            .with_best_effort(true);
         Some(
             runtime
                 .observe_resources(config)
@@ -635,8 +808,10 @@ fn run_module_snapshot(
     let elapsed_ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
     let effect_stack = runtime.active_effects();
     let mut obligations = Vec::new();
+    let mut observer_truncated = false;
     if let Some(observer) = observer {
         let report = observer.snapshot().map_err(|e| e.to_string())?;
+        observer_truncated = report.truncated();
         let selected = report.selected_types();
         for live in report.live() {
             obligations.push(ObligationEntry {
@@ -656,6 +831,7 @@ fn run_module_snapshot(
     Ok(TelemetrySnapshot {
         schema_version: 1,
         source: format!("vesper:{}#{entry}", path.display()),
+        observer_truncated,
         fibers: vec![FiberTelemetry {
             fiber_id: 1,
             worker_core: 0,
@@ -678,6 +854,9 @@ fn print_human(report: &TelemetryReport, no_banner: bool) {
         "pulse top [{}] — {} fiber(s) ({} parked), {} live linear obligation(s)",
         report.source, report.total_fibers, report.parked_fibers, report.total_live_obligations
     );
+    if report.observer_truncated {
+        println!("note: linear obligation trace truncated at observer capacity");
+    }
     println!(
         "wake-to-poll latency ({} samples): min={}ns p50={}ns p95={}ns max={}ns",
         report.wake_to_poll.samples,

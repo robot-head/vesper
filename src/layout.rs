@@ -56,6 +56,7 @@ impl Layout {
             )
             || crate::regions::is_handle_type(ty)
             || crate::tiled::is_seq_type(ty)
+            || crate::fip::is_box_type(world, ty)
             || *ty == Type::unit()
         {
             return Ok(Self {
@@ -225,6 +226,23 @@ pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::
         return Err("native result buffer is too short".into());
     }
     let word = || u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+    if let Some(inner_ty) = crate::fip::box_inner(world, ty) {
+        let ptr = word() as *const u8;
+        if ptr.is_null() {
+            return Err("null native Box pointer".into());
+        }
+        let inner_layout = Layout::of(world, inner_ty)?;
+        let slice = unsafe { std::slice::from_raw_parts(ptr, inner_layout.size as usize) };
+        let inner_val = decode(world, inner_ty, slice)?;
+        let mut fields = BTreeMap::new();
+        fields.insert("0".into(), inner_val);
+        return Ok(Value::Data {
+            ty: crate::fip::BOX_TYPE.into(),
+            constructor: crate::fip::BOX_TYPE.into(),
+            fields,
+            resource_identity: None,
+        });
+    }
     if let Some(value) = crate::vector::decode(ty, bytes) {
         return Ok(value);
     }

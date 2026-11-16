@@ -90,6 +90,11 @@ pub enum Op {
         args: Vec<Argument>,
         capability: Option<String>,
     },
+    /// Zero-RC Functional-But-In-Place `Box[T]` allocation / slot reuse (§12.4).
+    Fip {
+        op: crate::fip::FipOp,
+        args: Vec<Argument>,
+    },
 }
 #[derive(Debug, Clone, Serialize)]
 pub enum Terminator {
@@ -129,6 +134,16 @@ pub struct FunctionIr {
     pub blocks: Vec<Block>,
     pub values: BTreeMap<ValueId, Type>,
     pub locals: BTreeMap<String, Type>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fip_call_slots: BTreeMap<ValueId, crate::fip::CallSlot>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fip_join_slots: BTreeMap<usize, Vec<crate::fip::FipJoinSlot>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub box_drops_before_inst: BTreeMap<usize, Vec<(usize, crate::fip::FipDrop)>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub box_drops_after_inst: BTreeMap<usize, Vec<(usize, crate::fip::FipDrop)>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub box_drops_before_term: BTreeMap<usize, Vec<crate::fip::FipDrop>>,
 }
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct Program {
@@ -258,6 +273,11 @@ pub fn lower_world(world: &World) -> Program {
                     blocks: l.blocks,
                     values: l.values,
                     locals: l.locals,
+                    fip_call_slots: BTreeMap::new(),
+                    fip_join_slots: BTreeMap::new(),
+                    box_drops_before_inst: BTreeMap::new(),
+                    box_drops_after_inst: BTreeMap::new(),
+                    box_drops_before_term: BTreeMap::new(),
                 },
             );
         }
@@ -289,6 +309,7 @@ pub fn state_action(i: &Instruction) -> bool {
             | Op::Closure { .. }
             | Op::Index(..)
             | Op::Tiled { .. }
+            | Op::Fip { .. }
     ) || i.fallible
         || matches!(&i.op, Op::Binary(op, ..) if matches!(op.as_str(), "/" | "%"))
 }
@@ -398,6 +419,7 @@ impl Lower<'_> {
         self.nested.push((
             Function {
                 name: nested_name(kind, &body.span),
+                fip: false,
                 params,
                 result,
                 effects,
@@ -1061,6 +1083,26 @@ impl Lower<'_> {
                             let a = self.expr(&args[0].expr);
                             return self.emit(Op::Unary(name, a), e, false);
                         }
+                    }
+                    if receiver.is_none()
+                        && crate::fip::active(self.world)
+                        && (name == crate::fip::BOX_NEW || name == crate::fip::BOX_NEW_IN_CALLER)
+                        && args.len() == 1
+                    {
+                        let arg = self.argument(&args[0].expr, Pass::Sink, vec![]);
+                        let op = if name == crate::fip::BOX_NEW {
+                            crate::fip::FipOp::BoxNew
+                        } else {
+                            crate::fip::FipOp::BoxNewInCaller
+                        };
+                        return self.emit(
+                            Op::Fip {
+                                op,
+                                args: vec![arg],
+                            },
+                            e,
+                            true,
+                        );
                     }
                     if self.world.constructor(&name).is_some() {
                         let fields = args

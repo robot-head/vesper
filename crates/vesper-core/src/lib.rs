@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod clock_quotient;
 pub mod field_tree;
+pub mod ghost;
 pub mod guarded_graph;
 pub mod lifo;
 pub mod modal_kind;
@@ -13,5 +14,7 @@ pub mod mode_cross;
 pub mod mode_vec;
 pub mod numeric;
 pub mod out_tree;
+pub mod out_slice;
 pub mod pcg;
+pub mod resource_grade;
 pub mod slice_projections;

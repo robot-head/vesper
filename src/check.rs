@@ -37,6 +37,9 @@ impl World {
         if crate::regions::needs_prelude(module) {
             builtins.items.extend(crate::regions::prelude());
         }
+        if crate::fip::needs_prelude(module) {
+            builtins.items.extend(crate::fip::prelude());
+        }
         let builtin_count = builtins.items.len();
         // Built-in secret operations used by the module (§23.2).
         let secret_prelude = crate::capability_effects::secret_prelude(module);
@@ -503,6 +506,7 @@ pub(crate) fn check_core(
     }
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::regions::check_world(&world));
+        diagnostics.extend(crate::fip::check_world(&world));
     }
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::ir_check::validate(
@@ -1746,6 +1750,13 @@ impl Checker<'_> {
             self.error("E0201", format!("unknown constructor '{name}'"), span);
             return Type::Infer;
         };
+        if crate::fip::active(self.world) && a.name == crate::fip::BOX_TYPE {
+            self.error(
+                "E0800",
+                "Box[T] must be constructed with Box::new or Box::new_in_caller",
+                span.clone(),
+            );
+        }
         let mut vars = BTreeMap::new();
         if *expected != Type::Infer {
             self.valid_type(expected, &self.generics.clone(), span.clone());
@@ -1840,6 +1851,14 @@ impl Checker<'_> {
         if let ExprKind::Name(name) = &callee.kind
             && !env.bindings.contains_key(name)
         {
+            if crate::fip::active(self.world)
+                && matches!(
+                    name.as_str(),
+                    crate::fip::BOX_NEW | crate::fip::BOX_NEW_IN_CALLER
+                )
+            {
+                return self.fip_box_call(name, types, args, env, span, expected);
+            }
             if self.world.constructor(name).is_some() {
                 let t = self.construct(
                     name,
@@ -2020,6 +2039,7 @@ impl Checker<'_> {
         {
             let f = Function {
                 name: "<closure>".into(),
+                fip: false,
                 generics: vec![],
                 params: params
                     .iter()
@@ -2046,6 +2066,65 @@ impl Checker<'_> {
             self.error("E0206", format!("{t} is not callable"), span);
             Type::Infer
         }
+    }
+    fn fip_box_call(
+        &mut self,
+        name: &str,
+        types: &[Type],
+        args: &[Arg],
+        env: &mut Env,
+        span: Span,
+        expected: &Type,
+    ) -> Type {
+        if types.len() > 1 {
+            self.error(
+                "E0207",
+                format!(
+                    "'{name}' expects at most 1 type argument, found {}",
+                    types.len()
+                ),
+                span.clone(),
+            );
+        }
+        if args.len() != 1 {
+            self.error(
+                "E0207",
+                format!("'{name}' expects 1 argument, found {}", args.len()),
+                span.clone(),
+            );
+            for a in args {
+                self.expr(&a.expr, env, Usage::Own);
+            }
+            return Type::Named(crate::fip::BOX_TYPE.into(), vec![Type::Infer]);
+        }
+        let arg = &args[0];
+        if arg.explicit && arg.pass != Pass::Sink {
+            self.error(
+                "E0308",
+                format!("argument mode {:?} does not match Sink parameter", arg.pass),
+                arg.expr.span.clone(),
+            );
+        }
+        let inner_expected = if let Some(t) = types.first() {
+            self.valid_type(t, &self.generics.clone(), span.clone());
+            t.clone()
+        } else if let Type::Named(n, a) = expected
+            && n == crate::fip::BOX_TYPE
+            && a.len() == 1
+        {
+            a[0].clone()
+        } else {
+            Type::Infer
+        };
+        let actual = self.expr_expected(&arg.expr, env, Usage::Own, &inner_expected);
+        let inner = if inner_expected != Type::Infer {
+            self.expect_type(&inner_expected, &actual, arg.expr.span.clone());
+            refine_annotation(&inner_expected, &actual)
+        } else {
+            crate::numeric::default_type(&actual)
+        };
+        self.constrain_literals(&arg.expr, &inner);
+        Type::Named(crate::fip::BOX_TYPE.into(), vec![inner])
     }
     /// Resolves a trait call through the frontend. `None`: not a trait call.
     /// `Some(None)`: a trait call that failed (diagnosed). `Some(Some(f))`:
@@ -2624,20 +2703,29 @@ impl Checker<'_> {
                 }
             }
             ExprKind::Call { callee, args, .. } => {
-                if let ExprKind::Name(n) = &callee.kind
-                    && let Some((a, v)) = self.world.constructor(n)
-                {
-                    let vars = if let Type::Named(_, ts) = target {
-                        a.generics
-                            .iter()
-                            .zip(ts)
-                            .map(|(g, t)| (g.name.clone(), t.clone()))
-                            .collect()
-                    } else {
-                        BTreeMap::new()
-                    };
-                    for (a, f) in args.iter().zip(&v.fields) {
-                        self.constrain_literals(&a.expr, &substitute(&f.ty, &vars));
+                if let ExprKind::Name(n) = &callee.kind {
+                    if crate::fip::active(self.world)
+                        && matches!(
+                            n.as_str(),
+                            crate::fip::BOX_NEW | crate::fip::BOX_NEW_IN_CALLER
+                        )
+                        && let Type::Named(_, ts) = target
+                        && let (Some(arg), Some(inner_t)) = (args.first(), ts.first())
+                    {
+                        self.constrain_literals(&arg.expr, inner_t);
+                    } else if let Some((a, v)) = self.world.constructor(n) {
+                        let vars = if let Type::Named(_, ts) = target {
+                            a.generics
+                                .iter()
+                                .zip(ts)
+                                .map(|(g, t)| (g.name.clone(), t.clone()))
+                                .collect()
+                        } else {
+                            BTreeMap::new()
+                        };
+                        for (a, f) in args.iter().zip(&v.fields) {
+                            self.constrain_literals(&a.expr, &substitute(&f.ty, &vars));
+                        }
                     }
                 }
             }
@@ -3904,9 +3992,45 @@ fn pattern_names(p: &Pattern) -> BTreeSet<String> {
     }
 }
 // Constructor-specialization coverage matrix, including nested enum payloads.
+fn is_uninhabited(world: &World, ty: &Type, seen: &mut BTreeSet<String>) -> bool {
+    match ty {
+        Type::Named(n, _) if n == "Never" => true,
+        Type::Tuple(ts) => ts.iter().any(|t| is_uninhabited(world, t, seen)),
+        Type::Named(n, args) => {
+            let Some(a) = world.adts.get(n) else {
+                return false;
+            };
+            if a.variants.is_empty() {
+                return true;
+            }
+            if !seen.insert(n.clone()) {
+                return false;
+            }
+            let vars: BTreeMap<String, Type> = a
+                .generics
+                .iter()
+                .zip(args)
+                .map(|(g, t)| (g.name.clone(), t.clone()))
+                .collect();
+            let uninhabited = a.variants.iter().all(|v| {
+                v.fields
+                    .iter()
+                    .any(|f| is_uninhabited(world, &substitute(&f.ty, &vars), seen))
+            });
+            seen.remove(n);
+            uninhabited
+        }
+        _ => false,
+    }
+}
 fn matrix_covered(world: &World, rows: &[Vec<Pattern>], types: &[Type], depth: usize) -> bool {
     if types.is_empty() {
         return !rows.is_empty();
+    }
+    if rows.is_empty() {
+        return types
+            .iter()
+            .any(|t| is_uninhabited(world, t, &mut BTreeSet::new()));
     }
     if depth > 64 {
         return false;

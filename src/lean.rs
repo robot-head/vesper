@@ -1,8 +1,8 @@
 //! Lean extraction through structured syntax. Mutable parameters become explicit
 //! returned state; unhandled effects become monadic evidence, not axioms.
 use crate::lean_nodes::{
-    arith_term, effectful_arrow, global, ident, in_range, literal, source_name, source_ref,
-    tiled_op_term, ty, ty_monad,
+    arith_term, effectful_arrow, global, ident, in_range, literal, recursive_structs, source_name,
+    source_ref, tiled_op_term, ty_monad_with_fip, ty_with_fip,
 };
 use crate::{ast::*, check::World};
 use std::{
@@ -454,12 +454,11 @@ fn adt_groups(world: &World) -> Vec<Vec<&Adt>> {
             _ => {}
         }
     }
+    let fip_active = crate::fip::active(world);
     let mut graph = petgraph::graphmap::DiGraphMap::<&str, ()>::new();
-    for a in world
-        .adts
-        .values()
-        .filter(|a| a.name != "Option" && a.name != "Result")
-    {
+    for a in world.adts.values().filter(|a| {
+        a.name != "Option" && a.name != "Result" && (!fip_active || a.name != crate::fip::BOX_TYPE)
+    }) {
         graph.add_node(&a.name);
     }
     for a in world.adts.values() {
@@ -493,14 +492,30 @@ pub fn extract_module(world: &World) -> Result<Module, String> {
 /// definition, and which functions received contract propositions.
 pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
     let mut declarations = prelude()?;
+    let fip_active = crate::fip::active(world);
+    let rec_structs = recursive_structs(world);
+    let ty = |t: &Type| ty_with_fip(t, fip_active);
     for group in adt_groups(world) {
         let mut types = vec![];
+        let mut getters = vec![];
         for a in group {
             let parameters = a
                 .generics
                 .iter()
                 .filter(|g| !g.row)
                 .map(|g| Ok(explicit(ident(&g.name)?, type0())))
+                .collect::<Result<Vec<_>, String>>()?;
+            let type_binders = a
+                .generics
+                .iter()
+                .filter(|g| !g.row)
+                .map(|g| {
+                    Ok(Binder {
+                        name: Some(ident(&g.name)?),
+                        ty: Box::new(type0()),
+                        kind: BinderKind::Implicit,
+                    })
+                })
                 .collect::<Result<Vec<_>, String>>()?;
             types.push(if a.is_enum {
                 TypeDeclaration::Inductive {
@@ -526,6 +541,59 @@ pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
                         .collect::<Result<Vec<_>, String>>()?,
                     deriving: vec![],
                 }
+            } else if rec_structs.contains(&a.name) {
+                let fields = &a.variants[0].fields;
+                let adt_args = a
+                    .generics
+                    .iter()
+                    .filter(|g| !g.row)
+                    .map(|g| source_ref(&g.name))
+                    .collect::<Result<Vec<_>, String>>()?;
+                let adt_ty = if adt_args.is_empty() {
+                    source_ref(&a.name)?
+                } else {
+                    app(source_ref(&a.name)?, adt_args)
+                };
+                let ctor_name =
+                    Name::qualified([ident(&a.name)?, fixed("mk")]).map_err(|e| e.to_string())?;
+                for (idx, field) in fields.iter().enumerate() {
+                    let mut pat_args = vec![LP::Wildcard; fields.len()];
+                    pat_args[idx] = LP::Bind(fixed("$field"));
+                    let mut binders = type_binders.clone();
+                    binders.push(explicit(fixed("$self"), adt_ty.clone()));
+                    getters.push(Declaration::Definition(Definition {
+                        name: Name::qualified([ident(&a.name)?, ident(&field.name)?])
+                            .map_err(|e| e.to_string())?,
+                        binders,
+                        result: ty(&field.ty)?,
+                        body: Term::Match {
+                            scrutinee: Box::new(named("$self")),
+                            arms: vec![MatchArm {
+                                pattern: ctor_pattern(ctor_name.clone(), pat_args),
+                                body: named("$field"),
+                            }],
+                        },
+                        kind: DefinitionKind::Def,
+                    }));
+                }
+                TypeDeclaration::Inductive {
+                    name: source_name(&a.name)?,
+                    parameters,
+                    sort: type0(),
+                    constructors: vec![Constructor {
+                        name: fixed("mk"),
+                        binders: fields
+                            .iter()
+                            .map(|f| Ok(explicit(ident(&format!("f{}", f.name))?, ty(&f.ty)?)))
+                            .collect::<Result<Vec<_>, String>>()?,
+                        result: None,
+                    }],
+                    deriving: if a.tile_width.is_some() {
+                        vec![source_name("Inhabited")?]
+                    } else {
+                        vec![]
+                    },
+                }
             } else {
                 TypeDeclaration::Structure {
                     name: source_name(&a.name)?,
@@ -550,6 +618,7 @@ pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
             });
         }
         declarations.push(Declaration::MutualTypes(types));
+        declarations.extend(getters);
     }
     for effect in world.effects.values() {
         let mut parameters = effect
@@ -951,21 +1020,27 @@ fn contracts(
     totality: &BTreeMap<String, Totality>,
 ) -> Result<Vec<(String, Definition)>, ContractError> {
     let mut out = vec![];
+    let fip_active = crate::fip::active(world);
     for f in world.functions.values() {
         let Some(ensures) = world.functions.get(&format!("ensures_{}", f.name)) else {
             continue;
         };
         let requires = world.functions.get(&format!("requires_{}", f.name));
-        out.push((f.name.clone(), contract(totality, f, requires, ensures)?));
+        out.push((
+            f.name.clone(),
+            contract(totality, fip_active, f, requires, ensures)?,
+        ));
     }
     Ok(out)
 }
 fn contract(
     totality: &BTreeMap<String, Totality>,
+    fip_active: bool,
     f: &Function,
     requires: Option<&Function>,
     ensures: &Function,
 ) -> Result<Definition, ContractError> {
+    let ty = |t: &Type| ty_with_fip(t, fip_active);
     let function = f.name.clone();
     let unsupported = |reason: &str| ContractError::Unsupported {
         function: function.clone(),
@@ -1256,6 +1331,8 @@ struct Generator<'a> {
     /// Functions whose total fuel companions are being generated. Calls to
     /// them are monadic and pass the predecessor fuel.
     fuel: Option<std::rc::Rc<BTreeSet<String>>>,
+    fip_active: bool,
+    rec_structs: BTreeSet<String>,
 }
 struct Saved {
     scope: BTreeMap<String, Local>,
@@ -1518,6 +1595,8 @@ impl Generator<'_> {
             alias_written: false,
             unlabeled: BTreeMap::new(),
             fuel: None,
+            fip_active: crate::fip::active(world),
+            rec_structs: recursive_structs(world),
         }
     }
     fn in_family(&self, n: &str) -> bool {
@@ -1611,7 +1690,7 @@ impl Generator<'_> {
         self.scope.get(n).map(|l| reference(&self.current[&l.id]))
     }
     fn ty(&self, t: &Type) -> Result<Term, String> {
-        ty_monad(t, &self.monad)
+        ty_monad_with_fip(t, &self.monad, self.fip_active)
     }
     fn type_of(&self, e: &Expr) -> Option<Type> {
         self.world
@@ -1781,6 +1860,24 @@ impl Generator<'_> {
                     .collect::<Vec<_>>(),
             ));
         }
+        if let Type::Named(adt_name, _) = ty
+            && self.rec_structs.contains(adt_name)
+            && let Some(adt) = self.world.adts.get(adt_name)
+        {
+            let ctor = self.constructor(&adt.name)?;
+            let fields = adt.variants[0]
+                .fields
+                .iter()
+                .map(|fld| {
+                    if fld.name == *f {
+                        Ok(updated.clone())
+                    } else {
+                        project(base.clone(), &fld.name)
+                    }
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            return Ok(app(ctor, fields));
+        }
         Ok(Term::Update {
             base: Box::new(base),
             fields: vec![(ident(f)?, updated)],
@@ -1868,6 +1965,15 @@ impl Generator<'_> {
     }
 
     fn pattern_types(&self, p: &Pattern, t: &Type, out: &mut Vec<(String, Type)>) {
+        if crate::fip::is_box_pattern(self.world, p) {
+            let inner = crate::fip::box_inner(self.world, t).unwrap_or(t);
+            if let PatternKind::Constructor { fields, .. } = &p.kind {
+                for (_, sub) in fields {
+                    self.pattern_types(sub, inner, out);
+                }
+            }
+            return;
+        }
         match &p.kind {
             PatternKind::Bind(n) => out.push((n.clone(), t.clone())),
             PatternKind::Tuple(ps) => {
@@ -1908,6 +2014,16 @@ impl Generator<'_> {
         path: Vec<String>,
         out: &mut Vec<(String, Vec<String>, Type)>,
     ) -> Result<(), String> {
+        if crate::fip::is_box_pattern(self.world, p) {
+            let inner =
+                crate::fip::box_inner(self.world, t).ok_or("Box pattern lacks Box[T] type")?;
+            if let PatternKind::Constructor { fields, .. } = &p.kind {
+                for (_, sub) in fields {
+                    self.pattern_paths(sub, inner, path.clone(), out)?;
+                }
+            }
+            return Ok(());
+        }
         match &p.kind {
             PatternKind::Bind(n) => out.push((n.clone(), path, t.clone())),
             PatternKind::Wild => {}
@@ -1984,6 +2100,12 @@ impl Generator<'_> {
         Ok(())
     }
     fn pat(&mut self, p: &Pattern, renames: &mut BTreeMap<String, Ident>) -> Result<LP, String> {
+        if crate::fip::is_box_pattern(self.world, p) {
+            let PatternKind::Constructor { fields, .. } = &p.kind else {
+                unreachable!();
+            };
+            return self.pat(&fields[0].1, renames);
+        }
         Ok(match &p.kind {
             PatternKind::Wild => LP::Wildcard,
             PatternKind::Bind(n) => {
@@ -2013,10 +2135,10 @@ impl Generator<'_> {
             } => {
                 if *named
                     && let Some((adt, variant)) = self.world.constructor(n)
-                    && adt.is_enum
+                    && (adt.is_enum || self.rec_structs.contains(&adt.name))
                 {
                     // Lean's `{ … }` patterns need a structure type, so a
-                    // named enum pattern becomes positional in field order.
+                    // named enum or recursive inductive pattern becomes positional.
                     let mut arguments = vec![];
                     for field in &variant.fields {
                         arguments.push(match fields.iter().find(|(f, _)| *f == field.name) {
@@ -2100,7 +2222,11 @@ impl Generator<'_> {
                         },
                     );
                 }
-                let args = e.args.iter().map(ty).collect::<Result<Vec<_>, _>>()?;
+                let args = e
+                    .args
+                    .iter()
+                    .map(|t| ty_with_fip(t, self.fip_active))
+                    .collect::<Result<Vec<_>, _>>()?;
                 binders.push(instance(
                     Some(variable),
                     app(effect_ref(&e.name)?, args.into_iter().chain([named("m")])),
@@ -2245,7 +2371,7 @@ impl Generator<'_> {
                 let values =
                     self.operands(&fields.iter().map(|(_, e)| e).collect::<Vec<_>>(), out)?;
                 if let Some((adt, variant)) = self.world.constructor(n)
-                    && adt.is_enum
+                    && (adt.is_enum || self.rec_structs.contains(&adt.name))
                 {
                     // An enum variant literal is its constructor applied in
                     // declaration order; operands were evaluated in source order.
@@ -2818,6 +2944,12 @@ impl Generator<'_> {
             });
             let layer = typed.or_else(|| self.layers.iter().rposition(|l| l.effect.name == eff));
             return self.perform(eff, op, layer, None, args, out);
+        }
+        if self.fip_active && (n == crate::fip::BOX_NEW || n == crate::fip::BOX_NEW_IN_CALLER) {
+            let [arg] = args else {
+                return Err("Box::new expects one argument".into());
+            };
+            return self.expr(&arg.expr, out);
         }
         if self.world.constructor(n).is_some() && !self.scope.contains_key(n) {
             let values = self.operands(&args.iter().map(|a| &a.expr).collect::<Vec<_>>(), out)?;

@@ -117,8 +117,10 @@ impl NativeBatch {
             return Err("native batch duplicate entry".into());
         }
         preflight_ast(world, limits)?;
-        let program = crate::ir::lower_world(world);
+        let mut program = crate::ir::lower_world(world);
         let (reachable, max_work) = preflight_ir(world, &program, entries, limits)?;
+        crate::ir_opt::fip_reuse_pass(world, &mut program)?;
+        crate::fip::elaborate_non_fip_drops(world, &mut program);
         let instances: InstanceMap = reachable
             .iter()
             .map(|name| (name.clone(), (name.clone(), BTreeMap::new())))
@@ -140,7 +142,7 @@ impl NativeBatch {
             .finish(settings::Flags::new(flags))
             .map_err(|e| e.to_string())?;
         let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-        builder.symbol("fmod", native_float_remainder as *const u8);
+        super::register_jit_runtime_symbols(&mut builder, false);
         let mut owned = Self {
             module: Some(JITModule::new(builder)),
             entries: BTreeMap::new(),
@@ -472,7 +474,8 @@ fn preflight_ir(
                     | Op::Index(_, _)
                     | Op::Try(_)
                     | Op::Vector { .. }
-                    | Op::Tiled { .. } => {
+                    | Op::Tiled { .. }
+                    | Op::Fip { .. } => {
                         return Err(
                             "native batch unsupported aggregate/indirect/handler operation".into(),
                         );
