@@ -40,9 +40,74 @@ impl Shape {
 /// their fields in declaration order.
 pub fn shape(world: &World, ty: &Type, function: &str) -> Result<Shape, VerifiedError> {
     let mut out = vec![];
-    flatten(world, ty, &mut vec![], &mut out, function, 0)?;
+    flatten(world, ty, &mut vec![], &mut out, function, 0, &mut vec![])?;
     Ok(Shape(out))
 }
+
+/// Path of an enum's tag word.
+pub const TAG: &str = "#tag";
+/// Path prefix of an enum's payload words.
+pub const PAYLOAD: &str = "#payload";
+
+/// The generic substitution of `adt` instantiated at `args`.
+fn adt_vars(adt: &crate::ast::Adt, args: &[Type]) -> BTreeMap<String, Type> {
+    adt.generics
+        .iter()
+        .zip(args)
+        .map(|(g, t)| (g.name.clone(), t.clone()))
+        .collect()
+}
+
+/// One variant of an enum value's layout: its tag and, per field, the
+/// field's name, its word offset from the start of the value (after the tag
+/// word) and its substituted type.
+pub struct VariantLayout {
+    pub tag: u64,
+    pub fields: Vec<(String, u32, Type)>,
+}
+
+/// The layout of variant `ctor` (a short or `Enum::Variant` name) of the
+/// enum type `ty`, or `None` when `ty` is not an enum.
+pub fn variant_layout(
+    world: &World,
+    ty: &Type,
+    ctor: &str,
+    function: &str,
+) -> Option<Result<VariantLayout, VerifiedError>> {
+    let ty = crate::numeric::default_type(ty);
+    let Type::Named(n, args) = &ty else {
+        return None;
+    };
+    let adt = world.adts.get(n).filter(|a| a.is_enum)?;
+    let short = ctor.rsplit("::").next().unwrap_or(ctor);
+    let Some((tag, variant)) = adt
+        .variants
+        .iter()
+        .enumerate()
+        .find(|(_, v)| v.name == short)
+    else {
+        return Some(Err(VerifiedError::Invalid(format!(
+            "{ctor} is not a variant of {ty}"
+        ))));
+    };
+    let vars = adt_vars(adt, args);
+    let mut offset = 1;
+    let mut fields = vec![];
+    for f in &variant.fields {
+        let t = substitute(&f.ty, &vars);
+        let words = match shape(world, &t, function) {
+            Ok(s) => s.len(),
+            Err(e) => return Some(Err(e)),
+        };
+        fields.push((f.name.clone(), offset, t));
+        offset += words;
+    }
+    Some(Ok(VariantLayout {
+        tag: tag as u64,
+        fields,
+    }))
+}
+
 fn flatten(
     world: &World,
     ty: &Type,
@@ -50,6 +115,7 @@ fn flatten(
     out: &mut Vec<(Vec<String>, Kind)>,
     function: &str,
     depth: usize,
+    active: &mut Vec<String>,
 ) -> Result<(), VerifiedError> {
     if depth > 32 {
         return Err(VerifiedError::Limit(format!(
@@ -73,7 +139,7 @@ fn flatten(
         Type::Tuple(ts) => {
             for (i, t) in ts.iter().enumerate() {
                 path.push(i.to_string());
-                flatten(world, t, path, out, function, depth + 1)?;
+                flatten(world, t, path, out, function, depth + 1, active)?;
                 path.pop();
             }
             Ok(())
@@ -97,19 +163,48 @@ fn flatten(
                     format!("type {ty}"),
                 ));
             };
+            let vars = adt_vars(adt, args);
             if adt.is_enum {
-                return Err(VerifiedError::unsupported(
-                    Unsupported::Enum,
-                    function,
-                    format!("enum {ty}"),
-                ));
+                // A tag word, then a union payload as wide as the widest
+                // variant. Payload words are untyped (`u64`): each variant
+                // reads them at its own field kinds.
+                if active.iter().any(|a| a == n) {
+                    return Err(VerifiedError::unsupported(
+                        Unsupported::Enum,
+                        function,
+                        format!("recursive enum {ty} (no heap in this backend)"),
+                    ));
+                }
+                active.push(n.clone());
+                let mut widest = 0;
+                for v in &adt.variants {
+                    let mut words = vec![];
+                    for f in &v.fields {
+                        flatten(
+                            world,
+                            &substitute(&f.ty, &vars),
+                            &mut vec![],
+                            &mut words,
+                            function,
+                            depth + 1,
+                            active,
+                        )?;
+                    }
+                    widest = widest.max(words.len());
+                }
+                active.pop();
+                path.push(TAG.into());
+                out.push((path.clone(), Kind::U64));
+                path.pop();
+                for i in 0..widest {
+                    path.push(PAYLOAD.into());
+                    path.push(i.to_string());
+                    out.push((path.clone(), Kind::U64));
+                    path.pop();
+                    path.pop();
+                }
+                return Ok(());
             }
-            let vars = adt
-                .generics
-                .iter()
-                .zip(args)
-                .map(|(g, t)| (g.name.clone(), t.clone()))
-                .collect();
             for f in &adt.variants[0].fields {
                 path.push(f.name.clone());
                 flatten(
@@ -119,6 +214,7 @@ fn flatten(
                     out,
                     function,
                     depth + 1,
+                    active,
                 )?;
                 path.pop();
             }
@@ -303,6 +399,12 @@ struct FnLower<'a> {
     rows: Vec<Lir>,
     next_slot: Slot,
     values: BTreeMap<ValueId, (Slot, Shape)>,
+    types: BTreeMap<ValueId, Type>,
+    /// The block being lowered.
+    block: usize,
+    /// Arm blocks of a `match` terminator, with the scrutinee: their leading
+    /// `Bind` of that value was already tested by the dispatch.
+    arm_values: BTreeMap<usize, ValueId>,
     locals: BTreeMap<String, (Slot, Shape)>,
     block_labels: Vec<Label>,
     out_words: u32,
@@ -357,6 +459,7 @@ impl FnLower<'_> {
         let shape = shape(self.world, ty, &self.f.name)?;
         let slot = self.alloc(shape.len())?;
         self.values.insert(v, (slot, shape.clone()));
+        self.types.insert(v, crate::numeric::default_type(ty));
         Ok((slot, shape))
     }
     fn value(&self, v: ValueId) -> Result<(Slot, Shape), VerifiedError> {
@@ -400,63 +503,189 @@ impl FnLower<'_> {
         Ok((slot + start, sub))
     }
 
-    fn bind(&mut self, p: &Pattern, src: Slot, shape: &Shape) -> Result<(), VerifiedError> {
+    /// The words of `ty`.
+    fn words(&self, ty: &Type) -> Result<u32, VerifiedError> {
+        Ok(shape(self.world, ty, &self.f.name)?.len())
+    }
+
+    /// The sub-values a non-leaf pattern destructures: `(sub-pattern, word
+    /// offset, type)`, plus the enum tag the value must carry, if any.
+    #[allow(clippy::type_complexity)]
+    fn parts<'p>(
+        &self,
+        p: &'p Pattern,
+        ty: &Type,
+    ) -> Result<(Option<u64>, Vec<(&'p Pattern, u32, Type)>), VerifiedError> {
+        let ty = crate::numeric::default_type(ty);
+        match &p.kind {
+            PatternKind::Tuple(ps) => {
+                let Type::Tuple(ts) = &ty else {
+                    return Err(VerifiedError::Invalid(format!("tuple pattern on {ty}")));
+                };
+                if ts.len() != ps.len() {
+                    return Err(VerifiedError::Invalid("tuple pattern arity".into()));
+                }
+                let mut offset = 0;
+                let mut out = vec![];
+                for (p, t) in ps.iter().zip(ts) {
+                    out.push((p, offset, t.clone()));
+                    offset += self.words(t)?;
+                }
+                Ok((None, out))
+            }
+            PatternKind::Constructor { name, fields, .. } => {
+                if let Some(layout) = variant_layout(self.world, &ty, name, &self.f.name) {
+                    let layout = layout?;
+                    let mut out = vec![];
+                    for (field, p) in fields {
+                        let (_, offset, t) = layout
+                            .fields
+                            .iter()
+                            .find(|(n, _, _)| n == field)
+                            .ok_or_else(|| {
+                                VerifiedError::Invalid(format!("{name} has no field {field}"))
+                            })?;
+                        out.push((p, *offset, t.clone()));
+                    }
+                    return Ok((Some(layout.tag), out));
+                }
+                let Type::Named(n, args) = &ty else {
+                    return Err(VerifiedError::Invalid(format!(
+                        "constructor pattern on {ty}"
+                    )));
+                };
+                let adt = self
+                    .world
+                    .adts
+                    .get(n)
+                    .filter(|a| !a.is_enum && a.variants.len() == 1)
+                    .ok_or_else(|| VerifiedError::Invalid(format!("pattern {name} on {ty}")))?;
+                let vars = adt_vars(adt, args);
+                let mut offsets = BTreeMap::new();
+                let mut offset = 0;
+                for f in &adt.variants[0].fields {
+                    let t = substitute(&f.ty, &vars);
+                    let w = self.words(&t)?;
+                    offsets.insert(f.name.clone(), (offset, t));
+                    offset += w;
+                }
+                let mut out = vec![];
+                for (field, p) in fields {
+                    let (offset, t) = offsets.get(field).cloned().ok_or_else(|| {
+                        VerifiedError::Invalid(format!("{name} has no field {field}"))
+                    })?;
+                    out.push((p, offset, t));
+                }
+                Ok((None, out))
+            }
+            _ => Ok((None, vec![])),
+        }
+    }
+
+    /// Bind the names of `p` to the words of the value of type `ty` at
+    /// `src`. A refutable part (an enum variant of a multi-variant enum, a
+    /// literal) is accepted only when `tested`: a `match` dispatch already
+    /// checked it.
+    fn bind(
+        &mut self,
+        p: &Pattern,
+        src: Slot,
+        ty: &Type,
+        tested: bool,
+    ) -> Result<(), VerifiedError> {
         match &p.kind {
             PatternKind::Wild => Ok(()),
             PatternKind::Bind(name) => {
+                let words = self.words(ty)?;
                 let (dst, s) = self.local(name)?;
-                if s.len() != shape.len() {
+                if s.len() != words {
                     return Err(VerifiedError::Invalid(format!(
-                        "binding '{name}' has {} words, value has {}",
+                        "binding '{name}' has {} words, value has {words}",
                         s.len(),
-                        shape.len()
                     )));
                 }
-                self.copy(dst, src, shape.len())
+                self.copy(dst, src, words)
             }
-            PatternKind::Tuple(ps) => {
-                for (i, p) in ps.iter().enumerate() {
-                    let (start, len) = shape
-                        .range(&[i.to_string()])
-                        .ok_or_else(|| VerifiedError::Invalid("tuple pattern".into()))?;
-                    let sub = Shape(shape.0[start as usize..(start + len) as usize].to_vec());
-                    let rel = Shape(
-                        sub.0
-                            .iter()
-                            .map(|(path, k)| (path[1..].to_vec(), *k))
-                            .collect(),
-                    );
-                    self.bind(p, src + start, &rel)?;
-                }
-                Ok(())
-            }
-            PatternKind::Constructor { name, fields, .. } => {
-                match self.world.constructor(name) {
-                    Some((adt, _)) if !adt.is_enum => {}
-                    _ => {
-                        return Err(self.err(
-                            Unsupported::Enum,
-                            format!("refutable constructor pattern {name}"),
-                        ));
-                    }
-                }
-                for (field, p) in fields {
-                    let (start, len) = shape
-                        .range(std::slice::from_ref(field))
-                        .ok_or_else(|| VerifiedError::Invalid("struct pattern".into()))?;
-                    let sub = Shape(shape.0[start as usize..(start + len) as usize].to_vec());
-                    let rel = Shape(
-                        sub.0
-                            .iter()
-                            .map(|(path, k)| (path[1..].to_vec(), *k))
-                            .collect(),
-                    );
-                    self.bind(p, src + start, &rel)?;
-                }
-                Ok(())
-            }
+            PatternKind::Literal(_) if tested => Ok(()),
             PatternKind::Literal(_) => {
                 Err(self.err(Unsupported::Match, "refutable literal pattern in a binding"))
+            }
+            PatternKind::Tuple(_) | PatternKind::Constructor { .. } => {
+                if let PatternKind::Constructor { name, .. } = &p.kind
+                    && !tested
+                    && let Some((adt, _)) = self.world.constructor(name)
+                    && adt.is_enum
+                    && adt.variants.len() > 1
+                {
+                    return Err(self.err(
+                        Unsupported::Match,
+                        format!("refutable constructor pattern {name} in a binding"),
+                    ));
+                }
+                let (_, parts) = self.parts(p, ty)?;
+                for (p, offset, t) in parts {
+                    self.bind(p, src + offset, &t, tested)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Emit a test that jumps to `fail` unless the value of type `ty` at
+    /// `src` matches `p` (first-match `match` dispatch).
+    fn test(
+        &mut self,
+        p: &Pattern,
+        src: Slot,
+        ty: &Type,
+        fail: Label,
+    ) -> Result<(), VerifiedError> {
+        let check = |this: &mut Self, kind: Kind, word: u64| -> Result<(), VerifiedError> {
+            let tmp = this.alloc(2)?;
+            this.push(Lir::Const { dst: tmp, word })?;
+            this.push(Lir::Compare {
+                cond: Cond::Eq,
+                kind,
+                dst: tmp + 1,
+                a: src,
+                b: tmp,
+            })?;
+            this.push(Lir::BranchZero {
+                cond: tmp + 1,
+                target: fail,
+            })
+        };
+        match &p.kind {
+            PatternKind::Wild | PatternKind::Bind(_) => Ok(()),
+            PatternKind::Literal(Literal::Int(n)) => {
+                let s = shape(self.world, ty, &self.f.name)?;
+                let kind = kind_of(&s, &self.f.name, "integer pattern")?;
+                let ik = crate::numeric::IntegerKind::from_type(&crate::numeric::default_type(ty))
+                    .ok_or_else(|| VerifiedError::Invalid("integer pattern type".into()))?;
+                if kind == Kind::Bool || !ik.fits(*n) {
+                    // A literal outside the type never matches.
+                    return self.push(Lir::Jump(fail));
+                }
+                check(self, kind, *n as u64)
+            }
+            PatternKind::Literal(Literal::Bool(b)) => check(self, Kind::Bool, *b as u64),
+            PatternKind::Literal(Literal::Float(_)) => {
+                Err(self.err(Unsupported::Float, "float pattern"))
+            }
+            PatternKind::Literal(Literal::String(_)) => {
+                Err(self.err(Unsupported::String, "string pattern"))
+            }
+            #[allow(unreachable_patterns)]
+            PatternKind::Literal(_) => Err(self.err(Unsupported::Match, "literal pattern")),
+            PatternKind::Tuple(_) | PatternKind::Constructor { .. } => {
+                let (tag, parts) = self.parts(p, ty)?;
+                if let Some(tag) = tag {
+                    check(self, Kind::U64, tag)?;
+                }
+                for (p, offset, t) in parts {
+                    self.test(p, src + offset, &t, fail)?;
+                }
+                Ok(())
             }
         }
     }
@@ -531,9 +760,15 @@ impl FnLower<'_> {
                 self.copy(dst, src, shape.len())
             }
             Op::Bind { pattern, value } => {
-                let (src, shape) = self.value(*value)?;
+                let (src, _) = self.value(*value)?;
+                let ty = self
+                    .types
+                    .get(value)
+                    .cloned()
+                    .ok_or_else(|| VerifiedError::Invalid(format!("untyped value %{value}")))?;
                 self.value_of(i.dest, &Type::unit())?;
-                self.bind(pattern, src, &shape)
+                let tested = self.arm_values.get(&self.block) == Some(value);
+                self.bind(pattern, src, &ty, tested)
             }
             Op::Write { place, op, value } => {
                 let mut parts = place.split('.');
@@ -655,7 +890,35 @@ impl FnLower<'_> {
                     )));
                 };
                 if adt.is_enum {
-                    return Err(self.err(Unsupported::Enum, format!("enum constructor {name}")));
+                    let (dst, shape) = self.value_of(i.dest, &i.ty)?;
+                    let ty = self.types[&i.dest].clone();
+                    let layout = variant_layout(self.world, &ty, name, &self.f.name).ok_or_else(
+                        || VerifiedError::Invalid(format!("enum constructor {name} at {ty}")),
+                    )??;
+                    self.push(Lir::Const {
+                        dst,
+                        word: layout.tag,
+                    })?;
+                    let mut written = 1;
+                    for (field, offset, _) in &layout.fields {
+                        let Some((_, v)) = fields.iter().find(|(n, _)| n == field) else {
+                            return Err(VerifiedError::Invalid(format!(
+                                "constructor {name} misses field {field}"
+                            )));
+                        };
+                        let (src, s) = self.value(*v)?;
+                        self.copy(dst + offset, src, s.len())?;
+                        written = written.max(offset + s.len());
+                    }
+                    // Unused payload words are zero, so results are
+                    // deterministic.
+                    for w in written..shape.len() {
+                        self.push(Lir::Const {
+                            dst: dst + w,
+                            word: 0,
+                        })?;
+                    }
+                    return Ok(());
                 }
                 let (dst, shape) = self.value_of(i.dest, &i.ty)?;
                 for field in &variant.fields {
@@ -846,7 +1109,15 @@ impl FnLower<'_> {
             }
             index += s.len();
         }
+        for block in &self.f.blocks {
+            if let Terminator::Match { value, arms } = &block.terminator {
+                for (_, target) in arms {
+                    self.arm_values.insert(*target, *value);
+                }
+            }
+        }
         for (b, block) in self.f.blocks.iter().enumerate() {
+            self.block = b;
             if b > 0 {
                 self.push(Lir::Label(self.block_labels[b]))?;
             }
@@ -946,8 +1217,21 @@ impl FnLower<'_> {
                     })?;
                     self.push(Lir::Jump(self.block_labels[*yes]))?;
                 }
-                Terminator::Match { .. } => {
-                    return Err(self.err(Unsupported::Match, "match on a value"));
+                Terminator::Match { value, arms } => {
+                    let (src, _) = self.value(*value)?;
+                    let ty =
+                        self.types.get(value).cloned().ok_or_else(|| {
+                            VerifiedError::Invalid(format!("untyped value %{value}"))
+                        })?;
+                    for (p, target) in arms {
+                        let next = *self.next_label;
+                        *self.next_label += 1;
+                        self.test(p, src, &ty, next)?;
+                        self.push(Lir::Jump(self.block_labels[*target]))?;
+                        self.push(Lir::Label(next))?;
+                    }
+                    // The checker proves the arms exhaustive.
+                    self.push(Lir::Trap(TrapKind::Unreachable))?;
                 }
                 Terminator::Unreachable => self.push(Lir::Trap(TrapKind::Unreachable))?,
             }
@@ -965,7 +1249,6 @@ impl FnLower<'_> {
         for row in &mut self.rows {
             relocate(row, out);
         }
-        let _ = &mut self.next_label;
         Ok(Lowered {
             rows: self.rows,
             slots: self.next_slot,
@@ -1031,6 +1314,9 @@ pub fn function(
         rows: vec![],
         next_slot: 0,
         values: BTreeMap::new(),
+        types: BTreeMap::new(),
+        block: 0,
+        arm_values: BTreeMap::new(),
         locals: BTreeMap::new(),
         block_labels,
         out_words: 0,

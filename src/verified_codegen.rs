@@ -38,9 +38,14 @@
 //! position is a loop; `inout` arguments (copy-in/copy-out); `let` with
 //! irrefutable tuple and struct patterns. Functions may declare
 //! `Fail[ArithOverflow]` and `Fail[RuntimeError]`: an abort exits the
-//! process with [`EXIT_OVERFLOW`] or [`EXIT_DIVISION_BY_ZERO`]. Handlers and
-//! every other effect, floats, strings, enums and `match`, closures, generic
-//! functions, vectors and regions are rejected.
+//! process with [`EXIT_OVERFLOW`] or [`EXIT_DIVISION_BY_ZERO`]. Non-recursive
+//! enums (generic ones after substitution) are a tag word followed by a
+//! union payload as wide as the widest variant; `match` is a first-match
+//! chain of word tests over tag, integer and `bool` literal, tuple, struct
+//! and variant patterns, built only from existing slot-IR rows (`Const`,
+//! `Compare`, `BranchZero`, `Jump`), so it needs no new rows in the Lean
+//! table. Handlers and every other effect, floats, strings, recursive
+//! enums, closures, generic functions, vectors and regions are rejected.
 //!
 //! Values live in frame slots, never in registers across slot-IR rows: there
 //! is no register allocator, so the code is slow but each row is local, which
@@ -457,6 +462,36 @@ fn decode_at(
                     .map(|t| decode_at(world, t, words, at, depth + 1))
                     .collect::<Result<_, _>>()?,
             ),
+            Type::Named(n, _) if world.adts.get(n).is_some_and(|a| a.is_enum) => {
+                let adt = &world.adts[n];
+                let start = *at;
+                let total = lower::shape(world, &ty, "<result>")?.len() as usize;
+                let tag = words
+                    .get(start)
+                    .copied()
+                    .ok_or_else(|| VerifiedError::Invalid("too few result words".into()))?;
+                let variant = usize::try_from(tag)
+                    .ok()
+                    .and_then(|t| adt.variants.get(t))
+                    .ok_or_else(|| VerifiedError::Invalid(format!("tag {tag} of {ty}")))?;
+                let layout = lower::variant_layout(world, &ty, &variant.name, "<result>")
+                    .ok_or_else(|| VerifiedError::Invalid(format!("cannot decode {ty}")))??;
+                let mut fields = std::collections::BTreeMap::new();
+                for (name, offset, t) in &layout.fields {
+                    *at = start + *offset as usize;
+                    fields.insert(name.clone(), decode_at(world, t, words, at, depth + 1)?);
+                }
+                *at = start + total;
+                if *at > words.len() {
+                    return Err(VerifiedError::Invalid("too few result words".into()));
+                }
+                Value::Data {
+                    ty: n.clone(),
+                    constructor: variant.name.clone(),
+                    fields,
+                    resource_identity: None,
+                }
+            }
             Type::Named(n, args) => {
                 let adt = world
                     .adts

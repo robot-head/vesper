@@ -1,0 +1,52 @@
+// Literal, tuple and nested patterns, first match wins.
+copy enum Op {
+    Add,
+    Sub,
+    Halt
+}
+
+fn classify(n: u8, flag: bool) -> u32 {
+    match (n, flag) {
+        (0, _) => 100,
+        (255, true) => 200,
+        (_, true) => 300,
+        (7, false) => 400,
+        _ => 500,
+    }
+}
+
+fn step(op: Op, x: i64) -> Result[i64, Op] eff [Fail[ArithOverflow]] {
+    match op {
+        Op::Add => Ok(x + 1),
+        Op::Sub => Ok(x - 1),
+        Op::Halt => Err(Op::Halt),
+    }
+}
+
+fn sign(x: i64) -> i64 {
+    match x {
+        -9223372036854775808 => -2,
+        0 => 0,
+        _ => if x < 0 {
+            -1
+        } else {
+            1
+        },
+    }
+}
+
+fn main()
+    -> (u32, u32, u32, u32, u32, Result[i64, Op], Result[i64, Op], (i64, i64, i64)) eff [
+    Fail[ArithOverflow]
+] {
+    (
+        classify(0, true),
+        classify(255, true),
+        classify(3, true),
+        classify(7, false),
+        classify(8, false),
+        step(Op::Add, 41),
+        step(Op::Halt, 0),
+        (sign(-9223372036854775808), sign(-5), sign(0))
+    )
+}

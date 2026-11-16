@@ -310,6 +310,10 @@ fn fixture(name: &str) -> String {
     .unwrap()
 }
 
+/// Rendered by the evaluator; the tests check the other engines agree.
+const ENUMS: &str = "(110, 5, 6, -1, Some(42), Rect(3, 5))";
+const LITERALS: &str = "(100, 200, 300, 400, 500, Ok(42), Err(Halt), (-2, -1, 0))";
+
 #[test]
 fn fixtures_agree_with_the_evaluator_and_cranelift() {
     for (name, expected) in [
@@ -326,6 +330,8 @@ fn fixtures_agree_with_the_evaluator_and_cranelift() {
         ("overflow.ves", "overflow"),
         ("divide.ves", "div0"),
         ("unit.ves", "()"),
+        ("enums.ves", ENUMS),
+        ("literals.ves", LITERALS),
     ] {
         assert_eq!(differential(&fixture(name)), expected, "{name}");
     }
@@ -417,10 +423,17 @@ fn rejects(source: &str, construct: Unsupported) {
 fn constructs_outside_the_subset_are_typed_errors() {
     rejects("fn main() -> f64 { 1.5 }", Unsupported::Float);
     rejects("fn main() -> i64 { let s = \"x\"; 1 }", Unsupported::String);
-    rejects("fn main() -> Option[i64] { Some(1) }", Unsupported::Enum);
     rejects(
-        "fn main() -> i64 { match true { true => 1, false => 0, } }",
-        Unsupported::Match,
+        "enum L { Nil, Cons(i64, L) } fn main() -> i64 { match L::Nil { L::Nil => 0, L::Cons(x, _) => x, } }",
+        Unsupported::Enum,
+    );
+    rejects(
+        "fn main() -> i64 { match \"a\" { \"a\" => 1, _ => 0, } }",
+        Unsupported::String,
+    );
+    rejects(
+        "fn main() -> i64 { match 1.5 { 1.5 => 1, _ => 0, } }",
+        Unsupported::Float,
     );
     rejects(
         "fn id[T](sink x: T) -> T { x } fn main() -> i64 { id[i64](4) }",
