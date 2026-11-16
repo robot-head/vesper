@@ -7,9 +7,11 @@
 //! representative of the root e-class is extracted with egglog's tree-cost
 //! extractor. The extracted term is returned as a hash-consed arena so a
 //! shared subterm is converted once.
+use crate::witness::{self, RuleSet, Summary, Witness};
 use crate::{Error, MAX_EXTRACTED};
 use egglog::{CommandOutput, EGraph, Term, TermDag, ast::Literal};
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
 /// Saturation iterations; every shipped rule set reaches a fixpoint sooner on
 /// the graphs the tests use, and this caps work on adversarial graphs.
@@ -99,6 +101,152 @@ pub fn run(rules: &str, bindings: &str, root: &str, saturate: bool) -> Result<Ex
         return Err(Error::Egglog("no extraction output".into()));
     };
     convert(&dag, cost, term)
+}
+
+/// A checked fusion: the unfused and fused extractions, the rewrite witness
+/// that connects them, and what checking it established.
+#[derive(Clone, Debug)]
+pub struct Fusion {
+    /// The input graph extracted without saturation (its cost is the unfused
+    /// cost).
+    pub before: Extracted,
+    /// The cheapest term after saturation.
+    pub term: Extracted,
+    /// The source term rebuilt from the bindings (not by egglog).
+    pub source: (Vec<Node>, usize),
+    /// The rewrite chain from `source` to `term`.
+    pub witness: Witness,
+    /// The result of [`witness::check`].
+    pub summary: Summary,
+}
+
+/// Stack for the proof thread (virtual; pages are touched only as used).
+const PROOF_STACK: usize = 1 << 30;
+
+/// Prefix of the bindings that name the extracted term in the proof query.
+const TARGET_PREFIX: &str = "fusionwitness";
+
+/// Saturates `bindings` with `rules`, extracts `root`, asks egglog for a proof
+/// that `root` equals the extracted term, converts it into a [`Witness`] and
+/// checks the witness against the source term rebuilt from `bindings` and the
+/// extracted term. Any failure refuses the fusion.
+pub fn fuse(rules: &str, set: &RuleSet, bindings: &str, root: &str) -> Result<Fusion, Error> {
+    if bindings.contains(TARGET_PREFIX) {
+        return Err(Error::Witness(
+            "binding names collide with the query".into(),
+        ));
+    }
+    let before = run(rules, bindings, root, false)?;
+    let source = witness::source_term(bindings, root)?;
+    // egglog's proof extraction recurses over proof depth, which grows with
+    // the graph, so it runs on a thread with a stack sized for MAX_NODES-node
+    // chains. egglog reports malformed states by panicking; a panic there is
+    // a refusal, not a crash of the caller.
+    let (term, witness) = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("vesper-fusion-proof".into())
+            .stack_size(PROOF_STACK)
+            .spawn_scoped(scope, || {
+                run_proved(rules, set, bindings, root, (&source.0, source.1))
+            })
+            .map_err(|e| Error::Witness(format!("cannot start the proof thread: {e}")))?
+            .join()
+            .map_err(|_| Error::Witness("egglog panicked while producing the proof".into()))?
+    })?;
+    let summary = witness::check(
+        set,
+        (&source.0, source.1),
+        (&term.nodes, term.root),
+        &witness,
+    )?;
+    Ok(Fusion {
+        before,
+        term,
+        source,
+        witness,
+        summary,
+    })
+}
+
+fn run_proved(
+    rules: &str,
+    set: &RuleSet,
+    bindings: &str,
+    root: &str,
+    source: (&[Node], usize),
+) -> Result<(Extracted, Witness), Error> {
+    let mut program = String::with_capacity(rules.len() + bindings.len() + 64);
+    program.push_str(rules);
+    program.push_str(bindings);
+    let _ = writeln!(program, "(run {ITERATIONS})\n(extract {root})");
+    let mut egraph = EGraph::new_with_proofs();
+    let outputs = egraph
+        .parse_and_run_program(None, &program)
+        .map_err(|e| Error::Egglog(e.to_string()))?;
+    let Some((dag, cost, term)) = outputs.into_iter().rev().find_map(|o| match o {
+        CommandOutput::ExtractBest(dag, cost, term) => Some((dag, cost, term)),
+        _ => None,
+    }) else {
+        return Err(Error::Egglog("no extraction output".into()));
+    };
+    let term = convert(&dag, cost, term)?;
+    // Write the extracted term out for the query: a subterm with several
+    // parents gets its own binding (so a shared DAG stays linear in size),
+    // the rest is inlined (each `let` is a command, and commands are slow in
+    // proof mode).
+    let mut parents = vec![0usize; term.nodes.len()];
+    for node in &term.nodes {
+        if let Node::App(_, kids) = node {
+            kids.iter().for_each(|&k| parents[k] += 1);
+        }
+    }
+    fn write_term(nodes: &[Node], shared: &[bool], id: usize, top: bool, out: &mut String) {
+        match &nodes[id] {
+            Node::Int(v) => {
+                let _ = write!(out, "{v}");
+            }
+            Node::Str(s) => {
+                let _ = write!(out, "\"{s}\"");
+            }
+            Node::App(_, _) if shared[id] && !top => {
+                let _ = write!(out, "{TARGET_PREFIX}{id}");
+            }
+            Node::App(head, kids) => {
+                let _ = write!(out, "({head}");
+                for &k in kids {
+                    out.push(' ');
+                    write_term(nodes, shared, k, false, out);
+                }
+                out.push(')');
+            }
+        }
+    }
+    let shared: Vec<bool> = parents.iter().map(|&p| p > 1).collect();
+    let mut query = String::new();
+    for id in (0..term.nodes.len()).filter(|&id| shared[id]) {
+        if matches!(term.nodes[id], Node::App(..)) {
+            let _ = write!(query, "(let {TARGET_PREFIX}{id} ");
+            write_term(&term.nodes, &shared, id, true, &mut query);
+            query.push_str(")\n");
+        }
+    }
+    let _ = write!(query, "(prove (= {root} ");
+    write_term(&term.nodes, &shared, term.root, false, &mut query);
+    query.push_str("))\n");
+    let outputs = egraph
+        .parse_and_run_program(None, &query)
+        .map_err(|e| Error::Witness(format!("egglog could not prove the extraction: {e}")))?;
+    let Some((store, proof)) = outputs.into_iter().rev().find_map(|o| match o {
+        CommandOutput::ProveExists {
+            proof_store,
+            proof_id,
+        } => Some((proof_store, proof_id)),
+        _ => None,
+    }) else {
+        return Err(Error::Witness("egglog returned no proof".into()));
+    };
+    let witness = witness::produce(set, &store, proof, source, &term)?;
+    Ok((term, witness))
 }
 
 /// Prints `root` as an s-expression, eliding past a fixed budget (a shared
