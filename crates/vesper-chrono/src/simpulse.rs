@@ -20,6 +20,7 @@ use crate::wire::EFFECT_SCHEDULER;
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SimPulseTap {
     copied: usize,
+    last_time_ns: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,7 +65,7 @@ impl SimPulseTap {
     }
 
     /// Record every journal event committed since the last drain. Each is
-    /// stamped with the simulator's current virtual time.
+    /// stamped with the simulator virtual time at that transition.
     pub fn drain<T>(
         &mut self,
         sim: &Simulator<T>,
@@ -79,12 +80,26 @@ impl SimPulseTap {
             Err(vesper_simpulse::Error::ReplayUnconsumed { remaining }) => events.len() - remaining,
             Err(other) => return Err(SimPulseError::Encode(other.to_string())),
         };
-        self.copied = self.copied.min(committed);
+        if self.copied > committed {
+            self.copied = committed;
+        }
         let fresh = &events[self.copied..committed];
         let mut n = 0;
         for event in fresh {
-            Self::record_event(recorder, sim.now_ns(), event)?;
+            let time_ns = match *event {
+                TraceEvent::Spawn { at_ns, .. }
+                | TraceEvent::Dispatch { at_ns, .. }
+                | TraceEvent::Yield { at_ns, .. }
+                | TraceEvent::TimerElapsed { at_ns, .. }
+                | TraceEvent::IoCompleted { at_ns, .. }
+                | TraceEvent::CancelRequested { at_ns, .. }
+                | TraceEvent::Finish { at_ns, .. } => at_ns,
+                TraceEvent::ClockAdvance { to_ns, .. } => to_ns,
+                TraceEvent::Sleep { .. } | TraceEvent::SubmitIo { .. } => self.last_time_ns,
+            };
+            Self::record_event(recorder, time_ns, event)?;
             // Advance per record so a failed drain never re-records on retry.
+            self.last_time_ns = time_ns;
             self.copied += 1;
             n += 1;
         }

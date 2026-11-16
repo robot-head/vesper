@@ -341,3 +341,162 @@ fn top_chrono_closes_session_decodes_scheduler_timing_and_attributes_handoff() {
     assert_eq!(r["wake_to_poll"]["min_ns"], 500);
     assert_eq!(r["wake_to_poll"]["max_ns"], 2_500);
 }
+
+#[test]
+fn top_handles_40_node_acyclic_wait_dag_without_exponential_blowup() {
+    let f = Fixture::new();
+    let fibers: Vec<Value> = (0u64..40)
+        .map(|i| {
+            let obligations: Vec<Value> = ((i + 1)..40)
+                .map(|j| {
+                    json!({
+                        "obligation_id": i * 100 + j + 1,
+                        "kind": "Edge",
+                        "parked": true,
+                        "waiting_on_fiber": j,
+                    })
+                })
+                .collect();
+            json!({
+                "fiber_id": i,
+                "status": "parked",
+                "run_ns": 10,
+                "idle_ns": 10,
+                "obligations": obligations,
+            })
+        })
+        .collect();
+    f.write_json(
+        "dag40.json",
+        &json!({
+            "schema_version": 1,
+            "source": "dag40",
+            "fibers": fibers,
+        }),
+    );
+
+    let out = f.run(&["--trace", "dag40.json", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let r = json_out(&out);
+    assert_eq!(r["total_fibers"], 40);
+    assert_eq!(r["deadlock_cycles"], json!([]));
+}
+
+#[test]
+fn top_chrono_uses_scheduler_transition_time_when_drained_at_end() {
+    use vesper_chrono::{
+        Bundle, BundleKey, FlightRecorder, RecorderConfig, RedactionPolicy,
+        simpulse::{SimPulseTap, TraceEvent},
+    };
+
+    let f = Fixture::new();
+    let key_bytes = [0x24u8; 32];
+    let key = BundleKey::new(key_bytes);
+    let mut rec = FlightRecorder::new(RecorderConfig::small()).unwrap();
+
+    // Simulate a bundle whose scheduler records all carry the later drain timestamp (10ns),
+    // while task 1 actually dispatched and slept at 0ns, woke at 10ns, and finished at 10ns.
+    let events = [
+        json!({ "Spawn": { "task": 1, "at_ns": 0 } }),
+        json!({ "Dispatch": { "task": 1, "at_ns": 0, "round": 0 } }),
+        json!({ "Sleep": { "task": 1, "completion": 1, "deadline_ns": 10 } }),
+        json!({ "ClockAdvance": { "from_ns": 0, "to_ns": 10 } }),
+        json!({ "TimerElapsed": { "task": 1, "completion": 1, "at_ns": 10 } }),
+        json!({ "Dispatch": { "task": 1, "at_ns": 10, "round": 1 } }),
+        json!({ "Finish": { "task": 1, "at_ns": 10 } }),
+    ];
+    for v in events {
+        let ev: TraceEvent = serde_json::from_value(v).unwrap();
+        SimPulseTap::record_event(&mut rec, 10, &ev).unwrap();
+    }
+
+    let sealed = Bundle::capture(&rec, &RedactionPolicy::new(), b"drain-end")
+        .seal(&key)
+        .unwrap();
+    fs::write(f.0.join("drained.vchrono"), sealed).unwrap();
+    let hex_key: String = key_bytes.iter().map(|b| format!("{b:02x}")).collect();
+
+    let out = f.run(&["--chrono", "drained.vchrono", "--key", &hex_key, "--json"]);
+    assert!(
+        out.status.success(),
+        "top --chrono failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let r = json_out(&out);
+    assert_eq!(r["total_fibers"], 1);
+    assert_eq!(r["fibers"][0]["status"], "completed");
+    assert_eq!(r["fibers"][0]["run_ns"], 0);
+    assert_eq!(r["fibers"][0]["idle_ns"], 10);
+}
+
+#[test]
+fn top_source_module_does_not_abort_when_linear_count_exceeds_observer_capacity() {
+    let f = Fixture::new();
+    f.write_str(
+        "many_tickets.ves",
+        "\
+linear struct Ticket {}
+fn b10() -> i64 {
+    let Ticket {} = Ticket {};
+    let Ticket {} = Ticket {};
+    let Ticket {} = Ticket {};
+    let Ticket {} = Ticket {};
+    let Ticket {} = Ticket {};
+    let Ticket {} = Ticket {};
+    let Ticket {} = Ticket {};
+    let Ticket {} = Ticket {};
+    let Ticket {} = Ticket {};
+    let Ticket {} = Ticket {};
+    0
+}
+fn b100() -> i64 {
+    let _ = b10();
+    let _ = b10();
+    let _ = b10();
+    let _ = b10();
+    let _ = b10();
+    let _ = b10();
+    let _ = b10();
+    let _ = b10();
+    let _ = b10();
+    let _ = b10();
+    0
+}
+fn b1000() -> i64 {
+    let _ = b100();
+    let _ = b100();
+    let _ = b100();
+    let _ = b100();
+    let _ = b100();
+    let _ = b100();
+    let _ = b100();
+    let _ = b100();
+    let _ = b100();
+    let _ = b100();
+    0
+}
+fn main() -> Ticket {
+    let _ = b1000();
+    let _ = b1000();
+    let _ = b1000();
+    let _ = b1000();
+    let _ = b100();
+    Ticket {}
+}
+",
+    );
+
+    let out = f.run(&["many_tickets.ves", "--json"]);
+    assert!(
+        out.status.success(),
+        "top failed on >4096 linear constructions: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let r = json_out(&out);
+    assert_eq!(r["observer_truncated"], true);
+    assert_eq!(r["total_fibers"], 1);
+}
