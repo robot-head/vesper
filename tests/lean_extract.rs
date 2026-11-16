@@ -304,6 +304,17 @@ fn a_parameter_shadowing_a_function_is_not_recursion() {
 }
 
 #[test]
+fn block_inputs_preserve_values_shadowing_global_functions() {
+    let (source, proofs) = fixture!("shadowed_values");
+    proves(
+        source,
+        proofs,
+        &[("pack", Totality::Total), ("local", Totality::Total)],
+        "42",
+    );
+}
+
+#[test]
 fn recursion_through_a_pure_closure_stays_partial_and_compiles() {
     let source = "fn down(n: u64) -> u64 { if n == 0 { 0 } else { let step = |x: u64| down(x); step(wrapping_sub(n, 1)) } } fn main() -> u64 { down(3) }";
     let report = lean::extract_report(&world(source)).unwrap();

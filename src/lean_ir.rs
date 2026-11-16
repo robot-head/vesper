@@ -69,12 +69,14 @@ fn call_states<'a>(
         .filter(|(p, _)| p.pass == Pass::Inout)
         .collect()
 }
-fn uses_defs(world: &World, op: &Op) -> (BTreeSet<Local>, BTreeSet<Local>) {
+fn uses_defs(world: &World, f: &FunctionIr, op: &Op) -> (BTreeSet<Local>, BTreeSet<Local>) {
     let mut uses = BTreeSet::new();
     let mut defs = BTreeSet::new();
     match op {
         Op::Read { root, .. } => {
-            if !world.functions.contains_key(root) {
+            // A slot can shadow a global function. Match the read emitter's
+            // resolution so every local read is passed into its block.
+            if f.locals.contains_key(root) || !world.functions.contains_key(root) {
                 uses.insert(Local::Slot(root.clone()));
             }
         }
@@ -219,7 +221,7 @@ fn liveness(world: &World, f: &FunctionIr) -> Vec<BTreeSet<Local>> {
                 if index == 0 && arms.contains_key(&id) {
                     continue;
                 }
-                let (uses, defs) = uses_defs(world, &i.op);
+                let (uses, defs) = uses_defs(world, f, &i.op);
                 for d in defs {
                     required.remove(&d);
                 }

@@ -1,0 +1,48 @@
+struct Wrapped {
+    value: u64,
+}
+struct Envelope[T] {
+    payload: T,
+    value: u64,
+}
+fn value(n: u64) -> u64 {
+    n
+}
+fn global_callable() -> u64 {
+    let op = value;
+    op(42)
+}
+fn envelope[T](sink payload: T, value: u64) -> Envelope[T] {
+    Envelope {
+        payload: payload,
+        value: value
+    }
+}
+fn pack(value: u64, choose: bool) -> Wrapped {
+    if choose {
+        Wrapped {
+            value: value
+        }
+    } else {
+        Wrapped {
+            value: value
+        }
+    }
+}
+fn ensures_pack(value: u64, choose: bool, result: Wrapped) -> bool {
+    result.value == value
+}
+fn local(n: u64) -> u64 {
+    let value = n;
+    if n == 0 {
+        value
+    } else {
+        value
+    }
+}
+fn ensures_local(n: u64, result: u64) -> bool {
+    result == n
+}
+fn main() -> u64 {
+    pack(local(global_callable()), true).value
+}
