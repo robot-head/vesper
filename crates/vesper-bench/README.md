@@ -48,6 +48,14 @@ continuous differences symmetric about their population location. The API
 does not establish those assumptions or convert benchmark measurements into
 differences. It is separate from the ratio-based regression gate below.
 
+`gate_paired_difference` compares those unrounded interval bounds against a
+maximum candidate-minus-baseline difference in the same units. It passes only
+when the upper bound is at or below the threshold, reports a regression only
+when the lower bound is above it, and otherwise returns an inconclusive result.
+It retains the estimate and interval and uses the same assumptions and input
+restrictions; it does not establish measurement provenance or operate the
+existing ratio gate.
+
 `mann_whitney_ranks(first, second)` separately computes exact Mann–Whitney U
 rank counts for two bounded `u64` samples. Counts are doubled to represent tied
 pairs without rounding. It returns no p-value, confidence interval or gate
@@ -61,6 +69,12 @@ repeated values anywhere in the combined samples. The returned fraction uses
 twice the smaller inclusive tail, capped at one; it is not rounded. Its null
 interpretation requires exchangeable observations, and it is not a paired ABBA
 test or a confidence interval. It does not participate in the regression gate.
+
+`mann_whitney_exact_with_ties(first, second)` also supports repeated values,
+using pooled midranks and counting all physical label assignments. It calculates
+both inclusive tails separately before doubling the smaller one, because ties
+can produce an asymmetric permutation distribution. It uses the same sample
+limits and exchangeability assumption and likewise does not operate the gate.
 
 ## Optional population-median confidence gate
 
@@ -172,6 +186,28 @@ signed-rank report for the selected measured metric. It supports up to 32
 measured epochs, or up to 32 aggregate randomized-layout samples; it excludes
 deterministic mode. All-zero differences report unavailable. The report does
 not add a gate and explicitly states the conditional-sign assumption.
+
+## Tied paired signed-rank confidence sets
+
+`signed_rank_confidence_set` inverts the exact two-sided 5% Wilcoxon
+signed-rank test for up to 16 caller-provided integer paired differences. It
+visits every distinct Walsh breakpoint and the intervals between them, discards
+centered zeros, and uses doubled midranks for tied absolute differences. Its
+ordered segments can be disconnected, open, closed, singleton, or unbounded;
+finite endpoints are stored as twice the location without rounding. A candidate
+with all centered differences zero is not rejected.
+
+Coverage of at least 95% requires independent, equiprobable signs conditional
+on the centered nonzero magnitudes and zero pattern at the true location. The
+API does not establish those assumptions or measurement provenance, and it does
+not alter the existing regression gate.
+
+`gate_signed_rank_confidence` compares the complete confidence set against a
+maximum candidate-minus-baseline difference in the same units. It passes only
+if every retained location is at or below the threshold and reports a regression
+only if every retained location is strictly above it. Empty or nonseparating
+sets are inconclusive; open, closed, and unbounded endpoints retain their exact
+meaning. The gate preserves the set and inherits its stated assumptions.
 
 ## Tied Walsh point estimates
 
