@@ -384,6 +384,23 @@ fn recursion_through_function_values_stays_partial_and_says_why() {
 }
 
 #[test]
+fn effectful_recursive_values_capture_predecessor_fuel() {
+    let (source, proofs) = fixture!("recursive_values");
+    proves(
+        source,
+        proofs,
+        &[
+            ("apply", Totality::Total),
+            ("run", Totality::Total),
+            ("down", Totality::Fuel),
+            ("spin", Totality::Fuel),
+            ("stored", Totality::Fuel),
+        ],
+        "42",
+    );
+}
+
+#[test]
 fn non_recursive_functions_are_ordinary_definitions_in_dependency_order() {
     let text = lean::extract(&world(
         "fn b(x: u64) -> u64 { wrapping_add(x, 1) } fn a(x: u64) -> u64 { b(b(x)) } fn main() -> u64 { a(1) }",

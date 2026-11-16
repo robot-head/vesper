@@ -1341,3 +1341,49 @@ fn multi_fail_contract_admission_checks_tagged_model_results() {
     let wrong = Fixture::new(source.replace("else { n }", "else { 0 }").as_bytes());
     reject_json(wrong.verify(&args), Some("compile"));
 }
+
+#[test]
+fn effectful_recursive_callback_artifact_keeps_the_strict_unsafe_rejection() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(lean) = lean() else { return };
+    let source = include_str!("fixtures/lean_extract/recursive_values.ves");
+    let f = Fixture::new(source.as_bytes());
+    let proofs = f.root.join("recursive-values.lean");
+    fs::write(
+        &proofs,
+        include_str!("fixtures/lean_extract/recursive_values.proofs.lean"),
+    )
+    .unwrap();
+    let args = [
+        "--extract",
+        "--proofs",
+        proofs.to_str().unwrap(),
+        "--contract-proof",
+        "down=VesperProofs.RecursiveValues.down_contract",
+        "--contract-witness",
+        "down=VesperProofs.RecursiveValues.down_input",
+        "--allow-axiom",
+        "propext",
+        "--allow-axiom",
+        "Classical.choice",
+        "--allow-axiom",
+        "Quot.sound",
+        "--lean",
+        lean.to_str().unwrap(),
+        "--timeout",
+        "300",
+        "--json",
+    ];
+    let audited = f.verify(&args);
+    let report: Value = serde_json::from_slice(&audited.stdout).unwrap();
+    let message = report["message"].as_str().unwrap();
+    assert!(
+        message.contains("unsupported unsafe or partial artifact declaration"),
+        "{report}"
+    );
+    assert!(message.contains("_unsafe_rec"), "{report}");
+    reject_json(audited, Some("kernel"));
+    // The first 42 is the base-case result; leave the postcondition unchanged.
+    let wrong = Fixture::new(source.replacen("42", "41", 1).as_bytes());
+    reject_json(wrong.verify(&args), Some("compile"));
+}

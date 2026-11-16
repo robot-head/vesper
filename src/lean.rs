@@ -2564,9 +2564,31 @@ impl Generator<'_> {
                         local.depth,
                     )?
                 } else if self.in_family(n) {
-                    return Err(format!(
-                        "a fuel companion cannot pass the recursive function '{n}' as a value"
-                    ));
+                    let f = &self.world.functions[n];
+                    if !effectful_function(f)
+                        || !f.generics.is_empty()
+                        || self.monad == global(&["Id"])
+                        || function_requirements(f).iter().any(|e| e.label.is_some())
+                    {
+                        return Err(format!(
+                            "a fuel companion cannot pass the recursive function '{n}' as a value unless it is effectful, non-generic, unlabeled and in a monadic context"
+                        ));
+                    }
+                    // Its callback type already returns m A. Capture the
+                    // predecessor fuel while preserving that monadic type.
+                    let arguments = vec![Argument::Named {
+                        name: fixed(FUEL),
+                        value: named(FUEL),
+                    }];
+                    let value = Term::App {
+                        function: Box::new(Term::Ref(fuel_name(n)?)),
+                        arguments,
+                    };
+                    if f.params.is_empty() {
+                        lambda(vec![explicit(fixed("$unit"), global(&["Unit"]))], value)
+                    } else {
+                        value
+                    }
                 } else if self
                     .world
                     .functions
