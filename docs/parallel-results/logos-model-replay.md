@@ -22,7 +22,7 @@ Logos root, nightly and on every PR that can change them.
 | Declarations accepted by Logos | 1,955,538 across batches (the shared `Init`/`Std`/`Lean` closure is counted once per batch); 26,731 owned by the replayed modules |
 | Skipped as `unsafe`/`partial` | 348, all compiler `_unsafe_rec` implementations; their kernel-visible definitions are replayed |
 | Logos rejections | 0 |
-| Logos declines | 1: `Vesper.VerifiedCodegen.Rv64.decode_encode` (below) |
+| Logos declines | 2: `Vesper.VerifiedCodegen.Rv64.decode_encode` and, since the AArch64 encoding proof landed on main, `Vesper.VerifiedCodegen.A64.decode_encode` (below) |
 | Coverage control | passed: dropping one inventory entry is refused by the bridge |
 | Time | 25 min on 4 cores with 2 batch jobs; peak memory about 7.7 GB. CI uses 2 batch jobs on a 4-core GitHub runner |
 
@@ -38,7 +38,7 @@ Per-batch figures (export size is the lean4export NDJSON):
 The full JSON report (per module: checked, skipped and withheld names) is
 written by every run; CI prints its summary at the end of the step.
 
-## The one decline
+## Declines
 
 Logos at the pinned revision declines
 `Vesper.VerifiedCodegen.Rv64.decode_encode` (`lean/CodegenRv64Encoding.lean`):
@@ -50,6 +50,8 @@ replays the other declarations of that module, and lists all four as checked
 by Lean's kernel only. It is recorded in `tools/logos-sweep/expected-declines.json`;
 the sweep fails on any unlisted decline and on a listed one that Logos starts
 accepting.
+
+`lean/CodegenA64Encoding.lean`'s `decode_encode` (added on main after the first local run) hits the same limit; the CI run on this PR (159 modules, 1,956,772 declarations, 14 min on a GitHub runner) found it, refused it as unlisted, and it is now listed with the same treatment.
 
 Follow-up options: restate `decode_encode` so the field lemmas are proved by
 rewriting rather than kernel evaluation of large numerals, or raise the limit
