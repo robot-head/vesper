@@ -71,6 +71,78 @@ fn make_executable(path: &Path) {
 #[cfg(not(unix))]
 fn make_executable(_: &Path) {}
 
+fn emitted_output(cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    let started = std::time::Instant::now();
+    loop {
+        match cmd.output() {
+            // A concurrent fork can briefly inherit another test's writable
+            // executable descriptor before exec closes it. Retry only the
+            // Linux launch error, never an executable's nonzero exit status.
+            Err(error)
+                if cfg!(target_os = "linux")
+                    && error.raw_os_error() == Some(26)
+                    && started.elapsed() < std::time::Duration::from_secs(1) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn emitted_launch_retries_temporary_text_busy_but_preserves_failures() {
+    use std::io::{Read, Write};
+    use std::process::Stdio;
+
+    let dir = scratch();
+    let exe = dir.join("program");
+    // Keep the writable descriptor in a separate process so concurrent test
+    // forks cannot inherit it from this process and extend the busy interval.
+    let mut writer = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "exec 3>\"$1\"; printf '%s' \"$2\" >&3; printf ready; read -r release",
+            "held-writer",
+        ])
+        .arg(&exe)
+        .arg("#!/bin/sh\nprintf launched\nexit 17\n")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = [0; 5];
+    writer
+        .stdout
+        .take()
+        .unwrap()
+        .read_exact(&mut ready)
+        .unwrap();
+    assert_eq!(&ready, b"ready");
+    make_executable(&exe);
+    let busy = emitted_output(&mut Command::new(&exe)).unwrap_err();
+    assert_eq!(busy.raw_os_error(), Some(26));
+
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        writer
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"release\n")
+            .unwrap();
+        assert!(writer.wait().unwrap().success());
+    });
+    let out = emitted_output(&mut Command::new(&exe)).unwrap();
+    release.join().unwrap();
+    assert_eq!(out.stdout, b"launched");
+    assert_eq!(out.status.code(), Some(17));
+    let missing = emitted_output(&mut Command::new(dir.join("missing"))).unwrap_err();
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// Run an artifact built with `ResultProtocol::Words`.
 fn execute(artifact: &Artifact, prefix: &[PathBuf]) -> Outcome {
     let dir = scratch();
@@ -100,7 +172,7 @@ fn execute(artifact: &Artifact, prefix: &[PathBuf]) -> Outcome {
         }
         None => Command::new(&exe),
     };
-    let out = cmd.output().expect("run the emitted executable");
+    let out = emitted_output(&mut cmd).expect("run the emitted executable");
     let _ = std::fs::remove_dir_all(&dir);
     Outcome::from_exit(out.status.code(), &out.stdout)
 }
