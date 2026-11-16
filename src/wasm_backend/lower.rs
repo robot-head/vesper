@@ -191,6 +191,95 @@ impl<'a> Lowerer<'a> {
                         &[ValType::I64],
                     )?;
                 }
+                HostCapability::Trace => {
+                    imp(
+                        &mut b,
+                        &mut host_imports,
+                        "current-ctx",
+                        super::host::BEACON_TRACE,
+                        &[ValType::I32],
+                        &[],
+                    )?;
+                    imp(
+                        &mut b,
+                        &mut host_imports,
+                        "start-span",
+                        super::host::BEACON_TRACE,
+                        &[ValType::I32; 4],
+                        &[],
+                    )?;
+                    imp(
+                        &mut b,
+                        &mut host_imports,
+                        "start-child",
+                        super::host::BEACON_TRACE,
+                        &[
+                            ValType::I64,
+                            ValType::I64,
+                            ValType::I64,
+                            ValType::I32,
+                            ValType::I32,
+                            ValType::I32,
+                            ValType::I32,
+                            ValType::I32,
+                        ],
+                        &[],
+                    )?;
+                    imp(
+                        &mut b,
+                        &mut host_imports,
+                        "emit-ok",
+                        super::host::BEACON_TRACE,
+                        &[
+                            ValType::I64,
+                            ValType::I64,
+                            ValType::I64,
+                            ValType::I32,
+                            ValType::I64,
+                            ValType::I64,
+                            ValType::I32,
+                            ValType::I64,
+                        ],
+                        &[],
+                    )?;
+                    imp(
+                        &mut b,
+                        &mut host_imports,
+                        "emit-err",
+                        super::host::BEACON_TRACE,
+                        &[
+                            ValType::I64,
+                            ValType::I64,
+                            ValType::I64,
+                            ValType::I32,
+                            ValType::I64,
+                            ValType::I64,
+                            ValType::I32,
+                            ValType::I32,
+                            ValType::I32,
+                            ValType::I32,
+                        ],
+                        &[],
+                    )?;
+                    imp(
+                        &mut b,
+                        &mut host_imports,
+                        "emit-attr",
+                        super::host::BEACON_TRACE,
+                        &[
+                            ValType::I64,
+                            ValType::I64,
+                            ValType::I64,
+                            ValType::I32,
+                            ValType::I64,
+                            ValType::I64,
+                            ValType::I32,
+                            ValType::I32,
+                            ValType::I64,
+                        ],
+                        &[],
+                    )?;
+                }
             }
         }
         let heap = b.global(0);
@@ -484,6 +573,257 @@ impl<'a> Lowerer<'a> {
                     ]
                 }
                 HostCapability::Clock => vec![I::Call(self.host_imports["now"]), I::End],
+                HostCapability::Trace => {
+                    let (a1, a2) = (3u32, 4u32);
+                    let (out, ctx, tag, payload) = (first + 1, first + 2, first + 3, first + 4);
+                    let mem_u8 = |offset| MemArg {
+                        offset,
+                        align: 0,
+                        memory_index: 0,
+                    };
+                    let mem_u32 = |offset| MemArg {
+                        offset,
+                        align: 2,
+                        memory_index: 0,
+                    };
+                    let push_str = |code: &mut Vec<I<'static>>, s: u32| {
+                        code.extend([
+                            I::LocalGet(s),
+                            I::I64Const(8),
+                            I::I64Add,
+                            I::I32WrapI64,
+                            I::LocalGet(s),
+                            I::I32WrapI64,
+                            I::I64Load(mem(0)),
+                            I::I32WrapI64,
+                        ]);
+                    };
+                    let push_span_context = |code: &mut Vec<I<'static>>, ptr: u32| {
+                        code.extend([
+                            I::LocalGet(ptr),
+                            I::I32WrapI64,
+                            I::I64Load(mem(0)),
+                            I::LocalGet(ptr),
+                            I::I32WrapI64,
+                            I::I64Load(mem(8)),
+                            I::LocalGet(ptr),
+                            I::I32WrapI64,
+                            I::I64Load(mem(16)),
+                            I::LocalGet(ptr),
+                            I::I32WrapI64,
+                            I::I64Load(mem(24)),
+                            I::I32WrapI64,
+                        ]);
+                    };
+                    let push_active_span = |code: &mut Vec<I<'static>>, span: u32, ctx_l: u32| {
+                        code.extend([
+                            I::LocalGet(span),
+                            I::I32WrapI64,
+                            I::I64Load(mem(0)),
+                            I::LocalSet(ctx_l),
+                        ]);
+                        push_span_context(code, ctx_l);
+                        code.extend([
+                            I::LocalGet(span),
+                            I::I32WrapI64,
+                            I::I64Load(mem(8)),
+                            I::LocalGet(span),
+                            I::I32WrapI64,
+                            I::I64Load(mem(16)),
+                            I::LocalGet(span),
+                            I::I32WrapI64,
+                            I::I64Load(mem(24)),
+                            I::I32WrapI64,
+                        ]);
+                    };
+                    let build_span_context =
+                        |code: &mut Vec<I<'static>>, src: u32, dst: u32, alloc: u32| {
+                            code.extend([
+                                I::I64Const(32),
+                                I::Call(alloc),
+                                I::LocalTee(dst),
+                                I::I32WrapI64,
+                                I::LocalGet(src),
+                                I::I32WrapI64,
+                                I::I64Load(mem(0)),
+                                I::I64Store(mem(0)),
+                                I::LocalGet(dst),
+                                I::I32WrapI64,
+                                I::LocalGet(src),
+                                I::I32WrapI64,
+                                I::I64Load(mem(8)),
+                                I::I64Store(mem(8)),
+                                I::LocalGet(dst),
+                                I::I32WrapI64,
+                                I::LocalGet(src),
+                                I::I32WrapI64,
+                                I::I64Load(mem(16)),
+                                I::I64Store(mem(16)),
+                                I::LocalGet(dst),
+                                I::I32WrapI64,
+                                I::LocalGet(src),
+                                I::I32WrapI64,
+                                I::I64Load8U(mem_u8(24)),
+                                I::I64Store(mem(24)),
+                            ]);
+                        };
+                    let build_active_span =
+                        |code: &mut Vec<I<'static>>, src: u32, ctx_l: u32, dst: u32, alloc: u32| {
+                            build_span_context(code, src, ctx_l, alloc);
+                            code.extend([
+                                I::I64Const(32),
+                                I::Call(alloc),
+                                I::LocalTee(dst),
+                                I::I32WrapI64,
+                                I::LocalGet(ctx_l),
+                                I::I64Store(mem(0)),
+                                I::LocalGet(dst),
+                                I::I32WrapI64,
+                                I::LocalGet(src),
+                                I::I32WrapI64,
+                                I::I64Load(mem(32)),
+                                I::I64Store(mem(8)),
+                                I::LocalGet(dst),
+                                I::I32WrapI64,
+                                I::LocalGet(src),
+                                I::I32WrapI64,
+                                I::I64Load(mem(40)),
+                                I::I64Store(mem(16)),
+                                I::LocalGet(dst),
+                                I::I32WrapI64,
+                                I::LocalGet(src),
+                                I::I32WrapI64,
+                                I::I64Load32U(mem_u32(48)),
+                                I::I64Store(mem(24)),
+                            ]);
+                        };
+                    let mut code = vec![
+                        // op 0: current_ctx() -> SpanContext
+                        I::LocalGet(1),
+                        I::I64Eqz,
+                        I::If(BlockType::Empty),
+                        I::I64Const(32),
+                        I::Call(self.alloc),
+                        I::LocalTee(ret),
+                        I::I32WrapI64,
+                        I::Call(self.host_imports["current-ctx"]),
+                    ];
+                    build_span_context(&mut code, ret, out, self.alloc);
+                    code.extend([
+                        // op 1: start_span(schema_id, name) -> ActiveSpan
+                        I::Else,
+                        I::LocalGet(1),
+                        I::I64Const(1),
+                        I::I64Eq,
+                        I::If(BlockType::Empty),
+                        I::I64Const(56),
+                        I::Call(self.alloc),
+                        I::LocalSet(ret),
+                        I::LocalGet(a0),
+                        I::I32WrapI64,
+                    ]);
+                    push_str(&mut code, a1);
+                    code.extend([
+                        I::LocalGet(ret),
+                        I::I32WrapI64,
+                        I::Call(self.host_imports["start-span"]),
+                    ]);
+                    build_active_span(&mut code, ret, ctx, out, self.alloc);
+                    code.extend([
+                        // op 2: start_child(parent, schema_id, name) -> ActiveSpan
+                        I::Else,
+                        I::LocalGet(1),
+                        I::I64Const(2),
+                        I::I64Eq,
+                        I::If(BlockType::Empty),
+                        I::I64Const(56),
+                        I::Call(self.alloc),
+                        I::LocalSet(ret),
+                    ]);
+                    push_span_context(&mut code, a0);
+                    code.extend([I::LocalGet(a1), I::I32WrapI64]);
+                    push_str(&mut code, a2);
+                    code.extend([
+                        I::LocalGet(ret),
+                        I::I32WrapI64,
+                        I::Call(self.host_imports["start-child"]),
+                    ]);
+                    build_active_span(&mut code, ret, ctx, out, self.alloc);
+                    code.extend([
+                        // op 3: emit_ok(span, attr_u64) -> Unit
+                        I::Else,
+                        I::LocalGet(1),
+                        I::I64Const(3),
+                        I::I64Eq,
+                        I::If(BlockType::Empty),
+                    ]);
+                    push_active_span(&mut code, a0, ctx);
+                    code.extend([
+                        I::LocalGet(a1),
+                        I::Call(self.host_imports["emit-ok"]),
+                        I::I64Const(0),
+                        I::LocalSet(out),
+                        // op 4: emit_err(span, err_code, msg) -> Unit
+                        I::Else,
+                        I::LocalGet(1),
+                        I::I64Const(4),
+                        I::I64Eq,
+                        I::If(BlockType::Empty),
+                    ]);
+                    push_active_span(&mut code, a0, ctx);
+                    code.extend([I::LocalGet(a1), I::I32WrapI64]);
+                    push_str(&mut code, a2);
+                    code.extend([
+                        I::Call(self.host_imports["emit-err"]),
+                        I::I64Const(0),
+                        I::LocalSet(out),
+                        // op 5: emit_attr(span, attr) -> Unit
+                        I::Else,
+                        I::LocalGet(1),
+                        I::I64Const(5),
+                        I::I64Eq,
+                        I::If(BlockType::Empty),
+                        I::LocalGet(a1),
+                        I::I32WrapI64,
+                        I::I64Load(mem(0)),
+                        I::LocalTee(tag),
+                        I::I64Const(1),
+                        I::I64Eq,
+                        I::LocalGet(tag),
+                        I::I64Const(2),
+                        I::I64Eq,
+                        I::I32Or,
+                        I::If(BlockType::Empty),
+                        I::LocalGet(a1),
+                        I::I32WrapI64,
+                        I::I64Load(mem(8)),
+                        I::LocalSet(payload),
+                        I::Else,
+                        I::I64Const(0),
+                        I::LocalSet(payload),
+                        I::End,
+                    ]);
+                    push_active_span(&mut code, a0, ctx);
+                    code.extend([
+                        I::LocalGet(tag),
+                        I::I32WrapI64,
+                        I::LocalGet(payload),
+                        I::Call(self.host_imports["emit-attr"]),
+                        I::I64Const(0),
+                        I::LocalSet(out),
+                        I::Else,
+                        I::Unreachable,
+                        I::End,
+                        I::End,
+                        I::End,
+                        I::End,
+                        I::End,
+                        I::End,
+                        I::LocalGet(out),
+                        I::End,
+                    ]);
+                    code
+                }
             };
             let mut f = Function::new([(5, ValType::I64)]);
             for ins in &code {
