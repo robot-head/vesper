@@ -413,6 +413,14 @@ def mergeEnv : Env → Env → Except Diag Env
         moved := a.moved || b.moved } :: rest
   | _, _ => pure []
 
+/-- In this immutable fragment an ordinary if can retain missing incoming facts.
+Pair bindings by position and name/type, preserving all other joined fields. -/
+def restoreIfFacts : Env → Env → Env
+  | old :: olds, joined :: rest =>
+      { joined with fact := if old.name == joined.name && old.ty == joined.ty
+          then joined.fact.or old.fact else joined.fact } :: restoreIfFacts olds rest
+  | _, joined => joined
+
 def liftE {α : Type} (x : Except Diag α) : CM α := fun s => (fun a => (a, s)) <$> x
 
 def factFits (t : Ty) (f : Option Int) : Option Int :=
@@ -673,7 +681,7 @@ def inferExpr : Nat → Cx → Expr → Option Ty → CM Out
       expectTy result b
       if a == .never then setEnv right
       else if b == .never then setEnv left
-      else setEnv (← liftE (mergeEnv left right))
+      else setEnv (restoreIfFacts env (← liftE (mergeEnv left right)))
       return (.ite c' t' e', result, none)
   | .call f args, exp => do
       match ← lookup f with

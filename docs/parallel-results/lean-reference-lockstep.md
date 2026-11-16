@@ -268,3 +268,14 @@ root package's files as data, so Bazel picks up `//:test/lockstep`, with
 - Nightly-sized runs are a manual or scheduled command
   (`nightly_campaign`); no nightly workflow was added, because CI belongs to
   the integration coordinator.
+
+## Follow-up: #497 ordinary-if facts (2026-11-15, Pacific time)
+
+The imprecision recorded above is repaired by the coordinated Rust/reference
+change described in [the integration report](../rfcs/integer-fact-join497-integration.md).
+The original reproducer is now an acceptance fixture with value 6. The live
+reference regenerated the goldens; the fixed 400-program generated golden is
+unchanged. Mutable write and borrow-invalidation regressions remain Rust-side
+because the reference fragment does not represent those operations. Historical
+results and limitations above remain evidence for their original source, not
+claims about this follow-up or whole-checker correctness.

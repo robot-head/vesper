@@ -9,6 +9,11 @@ accept bool value false ; captures=0 resumes=0 live_linear=0 steps=4
 accept i64 value -1 ; captures=1 resumes=0 live_linear=0 steps=20
 accept i64 value 12 ; captures=2 resumes=2 live_linear=0 steps=23
 accept i64 value 4 ; captures=0 resumes=0 live_linear=0 steps=15
+accept i64 value 6 ; captures=0 resumes=0 live_linear=0 steps=19
+accept i64 value 6 ; captures=0 resumes=0 live_linear=0 steps=19
+accept i64 value 6 ; captures=0 resumes=0 live_linear=0 steps=19
+accept i64 value 6 ; captures=0 resumes=0 live_linear=0 steps=22
+accept i64 value 6 ; captures=0 resumes=0 live_linear=0 steps=19
 accept i64 value 3 ; captures=0 resumes=0 live_linear=0 steps=9
 accept i64 value 6 ; captures=0 resumes=0 live_linear=0 steps=9
 accept i64 value 107 ; captures=2 resumes=2 live_linear=0 steps=20
@@ -33,7 +38,6 @@ reject E0410
 reject E0402
 reject E0207
 reject E0200
-reject E0401
 reject E0401
 reject E0200
 reject E0204
