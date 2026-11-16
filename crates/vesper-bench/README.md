@@ -48,6 +48,14 @@ continuous differences symmetric about their population location. The API
 does not establish those assumptions or convert benchmark measurements into
 differences. It is separate from the ratio-based regression gate below.
 
+`gate_paired_difference` compares those unrounded interval bounds against a
+maximum candidate-minus-baseline difference in the same units. It passes only
+when the upper bound is at or below the threshold, reports a regression only
+when the lower bound is above it, and otherwise returns an inconclusive result.
+It retains the estimate and interval and uses the same assumptions and input
+restrictions; it does not establish measurement provenance or operate the
+existing ratio gate.
+
 `mann_whitney_ranks(first, second)` separately computes exact Mann–Whitney U
 rank counts for two bounded `u64` samples. Counts are doubled to represent tied
 pairs without rounding. It returns no p-value, confidence interval or gate
@@ -61,6 +69,12 @@ repeated values anywhere in the combined samples. The returned fraction uses
 twice the smaller inclusive tail, capped at one; it is not rounded. Its null
 interpretation requires exchangeable observations, and it is not a paired ABBA
 test or a confidence interval. It does not participate in the regression gate.
+
+`mann_whitney_exact_with_ties(first, second)` also supports repeated values,
+using pooled midranks and counting all physical label assignments. It calculates
+both inclusive tails separately before doubling the smaller one, because ties
+can produce an asymmetric permutation distribution. It uses the same sample
+limits and exchangeability assumption and likewise does not operate the gate.
 
 ## Optional population-median confidence gate
 

@@ -30,7 +30,7 @@ struct Options {
     json: bool,
 }
 
-fn name_valid(name: &str) -> bool {
+pub(crate) fn name_valid(name: &str) -> bool {
     name.len() <= 1024
         && name.split('.').all(|part| {
             !part.is_empty()
@@ -473,25 +473,101 @@ pub(crate) fn audit_generated(
     lean: &str,
     timeout: u64,
 ) -> Result<serde_json::Value, String> {
+    audit_generated_with_policy(root, module, theorems, &[], lean, timeout)
+}
+
+/// Kernel-replay a freshly generated module under an explicit allowed-axiom
+/// whitelist. `sorryAx` and compiler-trust escapes are always forbidden.
+pub(crate) fn audit_generated_with_policy(
+    root: &Path,
+    module: &str,
+    theorems: &[&str],
+    allowed_axioms: &[&str],
+    lean: &str,
+    timeout: u64,
+) -> Result<serde_json::Value, String> {
     if !name_valid(module)
         || theorems.is_empty()
         || theorems.len() > 128
         || theorems.iter().any(|name| !name_valid(name))
+        || allowed_axioms.iter().any(|name| {
+            !name_valid(name)
+                || matches!(
+                    *name,
+                    "sorryAx" | "Lean.ofReduceBool" | "Lean.trustCompiler"
+                )
+        })
         || !(1..=300).contains(&timeout)
     {
         return Err("invalid generated proof audit request".into());
     }
     let options = Options {
         theorems: theorems.iter().map(|name| (*name).to_owned()).collect(),
+        allowed: allowed_axioms
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
         lean: Some(lean.to_owned()),
         timeout: Some(timeout),
         ..Options::default()
     };
     let report = audit(&options, root, module)?;
     if !report.accepted || !report.kernel_replayed || !report.forbidden_axioms.is_empty() {
-        return Err("generated theorem failed the empty-axiom kernel audit".into());
+        return Err("generated theorem failed the kernel axiom policy".into());
     }
     serde_json::to_value(report).map_err(|error| error.to_string())
+}
+
+/// Replay local Lean artifacts under an explicit allowed-axiom whitelist for
+/// package publication gates (`vesper publish`), always rejecting `sorryAx`.
+pub(crate) fn audit_policy(
+    root: &Path,
+    module: &str,
+    theorems: &[String],
+    allowed_axioms: &[String],
+    lean: Option<&str>,
+    timeout: Option<u64>,
+) -> Result<(bool, serde_json::Value), String> {
+    if !name_valid(module)
+        || matches!(
+            module.split('.').next(),
+            Some("Lean" | "Std" | "Init" | "Lake")
+        )
+    {
+        return Err(
+            "module must be a qualified ASCII identifier outside trusted toolchain namespaces"
+                .into(),
+        );
+    }
+    if theorems.is_empty() || theorems.len() > 128 || theorems.iter().any(|n| !name_valid(n)) {
+        return Err("invalid or empty theorem list for proof gate (1..=128 theorems)".into());
+    }
+    let mut allowed = BTreeSet::new();
+    for ax in allowed_axioms {
+        if ax == "sorryAx" {
+            return Err("sorryAx cannot be allowed by the publish proof policy".into());
+        }
+        if !name_valid(ax) {
+            return Err(format!("invalid Lean axiom name '{ax}'"));
+        }
+        allowed.insert(ax.clone());
+    }
+    if let Some(secs) = timeout
+        && !(1..=300).contains(&secs)
+    {
+        return Err("--timeout must be between 1 and 300 seconds".into());
+    }
+    let options = Options {
+        theorems: theorems.iter().cloned().collect(),
+        allowed,
+        lean: lean.map(str::to_owned),
+        timeout,
+        ..Options::default()
+    };
+    let report = audit(&options, root, module)?;
+    let accepted = report.accepted && report.kernel_replayed && report.forbidden_axioms.is_empty();
+    let value = serde_json::to_value(report).map_err(|e| e.to_string())?;
+    Ok((accepted, value))
 }
 
 fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, String> {
