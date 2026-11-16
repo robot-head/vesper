@@ -2239,3 +2239,87 @@ impl RigidWorld {
         }
     }
 }
+
+// ----- hooks for soft-rigid coupling (crate::couple) -------------------------
+
+impl RigidWorld {
+    /// Signed distance from a sphere of `radius` at `p` to body `i`'s
+    /// collider, the unit normal from the body towards the sphere, and the
+    /// arm from the body's centre to the witness point on its surface.
+    pub(crate) fn sphere_query(
+        &mut self,
+        i: usize,
+        p: [f64; 3],
+        radius: f64,
+    ) -> Result<(f64, V3, V3), RigidError> {
+        let s = self.bodies[i];
+        let shape = &self.colliders[s.collider as usize].shape;
+        let r = world_core(shape, &s, &mut self.verts_a);
+        let body = gjk_shape(&self.verts_a, r);
+        let probe = Shape::Sphere { center: p, radius };
+        let sep = gjk::separation(&probe, &body).map_err(|error| RigidError::Narrowphase {
+            a: i,
+            b: i,
+            error,
+        })?;
+        let n = [-sep.normal[0], -sep.normal[1], -sep.normal[2]];
+        let arm = sub64(sep.point_b, to64(s.x));
+        Ok((sep.distance, n.map(|v| v as f32), arm.map(|v| v as f32)))
+    }
+
+    /// Centre and bounding radius of body `i`'s collider.
+    pub(crate) fn bounding_sphere(&self, i: usize) -> (V3, f32) {
+        let s = &self.bodies[i];
+        (s.x, self.bound_radius(s.collider))
+    }
+
+    /// Generalized inverse mass of body `i` in direction `d` at `arm` (zero
+    /// for a static body).
+    pub(crate) fn point_weight(&self, i: usize, arm: V3, d: V3) -> f32 {
+        let s = &self.bodies[i];
+        if s.inv_mass == 0.0 {
+            return 0.0;
+        }
+        det::add(s.inv_mass, angular_weight(s, cross(arm, d)))
+    }
+
+    /// Positional impulse `p` at `arm` on body `i`: position and
+    /// orientation, like a contact projection.
+    pub(crate) fn push_at(&mut self, i: usize, arm: V3, p: V3) {
+        let s = &mut self.bodies[i];
+        if s.inv_mass == 0.0 {
+            return;
+        }
+        s.x = add(s.x, scale(p, s.inv_mass));
+        turn(s, cross(arm, p));
+        s.q = normalize_q(s.q);
+    }
+
+    /// Linear impulse `p` and angular impulse `l` (world) on body `i`.
+    pub(crate) fn impulse_sum(&mut self, i: usize, p: V3, l: V3) {
+        if self.bodies[i].inv_mass == 0.0 {
+            return;
+        }
+        self.wake(i);
+        let s = &mut self.bodies[i];
+        s.v = add(s.v, scale(p, s.inv_mass));
+        s.w = add(s.w, inv_inertia_world(s, l));
+    }
+
+    /// The velocity of body `i`'s material point at `arm` (zero for a
+    /// static body).
+    pub(crate) fn point_velocity(&self, i: usize, arm: V3) -> V3 {
+        let s = &self.bodies[i];
+        if s.inv_mass == 0.0 {
+            return [0.0; 3];
+        }
+        add(s.v, cross(s.w, arm))
+    }
+
+    /// Whether every body is finite.
+    pub(crate) fn first_non_finite(&self) -> Option<usize> {
+        self.bodies
+            .iter()
+            .position(|s| !(finite3(s.x) && finite3(s.v) && finite3(s.w)))
+    }
+}

@@ -31,6 +31,7 @@
 
 pub mod articulation;
 pub mod coloring;
+pub mod couple;
 pub mod crmath;
 pub mod detfloat;
 pub mod diff;
@@ -53,6 +54,7 @@ pub use articulation::{
     ArticulationLink,
 };
 pub use coloring::{BodyId, Colorer, ColoringError, ConstraintBodies, MultiColorer};
+pub use couple::{CoupledError, CoupledWorld, CouplingConfig};
 pub use detfloat::{AuditError, DetFloatPolicy, ReductionOrder, VerifierFinding, audit};
 pub use morton::MortonError;
 pub use rigid::{
