@@ -1,6 +1,12 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
 vesper_crate(
+    # Fusion runs egglog with proofs on (rewrite witnesses), which is slow in
+    # unoptimized builds.
+    test_timeouts = {
+        "test/dsp_fusion": "long",
+        "test/tensor_fusion": "long",
+    },
     # Lean resolves symlinked runfiles to the source tree and then rejects
     # them as outside --root, so the model check runs in a copy of regular files.
     copy_test_cwd = ["test/lean_model"],

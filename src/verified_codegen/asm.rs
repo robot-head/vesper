@@ -1,6 +1,6 @@
 //! A tiny label-resolving assembler buffer shared by the encoders.
 use super::VerifiedError;
-use super::machine::Label;
+use super::machine::{Cond, FloatOp, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,4 +108,83 @@ impl Asm {
         }
         Ok(self.code)
     }
+}
+
+/// Sample machine instructions covering every instruction kind (and both
+/// frame-offset ranges of each target), for the encoding listings the Lean
+/// encoding models print.
+pub fn encoding_samples() -> Vec<M> {
+    use Loc::{In, Out, Slot};
+    use Reg::{R0, R1, R2};
+    const CONDS: [Cond; 6] = [Cond::Eq, Cond::Ne, Cond::Lt, Cond::Le, Cond::Gt, Cond::Ge];
+    let mut samples = vec![
+        M::Ld(R0, Slot(1)),
+        M::Ld(R1, Slot(300)),
+        M::St(Out(2), R0),
+        M::Ld(R2, In(3)),
+        M::St(In(400), R1),
+        M::Imm(R0, 0x0123_4567_89ab_cdef),
+        M::Imm(R2, u64::MAX),
+    ];
+    for s in [Sign::S, Sign::U] {
+        samples.extend([M::AddChk(s), M::SubChk(s), M::MulChk(s)]);
+    }
+    samples.extend([
+        M::Wrap(WrapOp::Add),
+        M::Wrap(WrapOp::Sub),
+        M::Wrap(WrapOp::Mul),
+        M::AndR2,
+        M::TrapGtU,
+        M::TrapZero,
+        M::TrapDivOvf,
+        M::Div(Sign::S),
+        M::Div(Sign::U),
+        M::Rem(Sign::S),
+        M::Rem(Sign::U),
+        M::NegChk(Sign::S),
+        M::NegChk(Sign::U),
+        M::XorOne,
+    ]);
+    for c in CONDS {
+        samples.extend([M::Cmp(c, Sign::S), M::Cmp(c, Sign::U)]);
+    }
+    samples.extend([FloatOp::Add, FloatOp::Sub, FloatOp::Mul, FloatOp::Div].map(M::FOp));
+    samples.push(M::FNeg);
+    samples.extend(CONDS.map(M::FCmp));
+    samples.extend([
+        M::Jmp(9),
+        M::Bz(9),
+        M::Call(9),
+        M::Enter(4),
+        M::Enter(300),
+        M::Leave,
+    ]);
+    samples.extend(TrapKind::ALL.map(M::Trap));
+
+    samples
+}
+
+/// The words `emit` writes for each sample, one line per instruction
+/// (`<instruction>: <word> ...`, words as eight hex digits). The abort exits
+/// are bound before the instruction and label 9 after it.
+pub fn encoding_listing(
+    samples: &[M],
+    emit: fn(&mut Asm, &M) -> Result<(), VerifiedError>,
+) -> String {
+    let mut out = String::new();
+    for m in samples {
+        let mut a = Asm::default();
+        for k in TrapKind::ALL {
+            a.bind(k.label()).expect("fresh label");
+        }
+        emit(&mut a, m).expect("sample instructions encode");
+        a.bind(9).expect("fresh label");
+        let code = a.finish().expect("labels resolve");
+        out.push_str(&format!("{m}:"));
+        for word in code.as_chunks::<4>().0 {
+            out.push_str(&format!(" {:08x}", u32::from_le_bytes(*word)));
+        }
+        out.push('\n');
+    }
+    out
 }

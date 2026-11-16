@@ -21,15 +21,23 @@
 //! reassociate are proved over exact rationals only and are checked against
 //! the unfused graph within a stated float tolerance by the tests.
 //!
+//! Every fusion is checked before it is used ([`witness`]): egglog is run
+//! with proofs on, its proof that the root equals the extracted term becomes
+//! a witness with one step per applied rewrite (rule, direction, position,
+//! substitution), and a checker that does not use egglog replays the steps
+//! from the source term rebuilt from the graph to the extracted term, using
+//! only named rules that have a lemma. `fuse` returns [`Error::Witness`]
+//! instead of a fused term when that fails.
+//!
 //! This is a host library, not the compiler's Stage 4 optimizer (`src/ir_opt`
-//! and the rewrite-witness work are separate): nothing here reads Vesper
-//! source, and Rust ownership in this crate is not evidence that Vesper's
-//! source typing rules are implemented.
+//! is separate): nothing here reads Vesper source, and Rust ownership in this
+//! crate is not evidence that Vesper's source typing rules are implemented.
 #![forbid(unsafe_code)]
 
 pub mod dsp;
 pub mod engine;
 pub mod tensor;
+pub mod witness;
 
 /// Fusion errors. Malformed, over-budget and non-finite inputs are reported
 /// here rather than panicking.
@@ -57,6 +65,9 @@ pub enum Error {
     Egglog(String),
     /// The extracted term does not match the rule set's grammar.
     Extraction(String),
+    /// No rewrite witness could be produced, or the witness failed
+    /// [`witness::check`]; the fused term is not used.
+    Witness(String),
     /// An error from `vesper-tensor`.
     Tensor(vesper_tensor::Error),
     /// An error from the Resonance PDC scheduler.

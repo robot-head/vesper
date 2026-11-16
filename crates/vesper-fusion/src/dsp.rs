@@ -17,10 +17,12 @@
 //! [`gain_tolerance`] / [`filter_tolerance`] in FP32. Biquads start from zero
 //! state on every evaluation, which the gain-folding rules require (a linear
 //! time-invariant section commutes with a gain only from a scaled state).
-use crate::engine::{self, Extracted};
+use crate::engine::{self, Extracted, Node};
+use crate::witness::{RuleSet, Summary, Witness};
 use crate::{Error, MAX_ELEMENTS, MAX_NODES, next_owner, valid_name};
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 use vesper_resonance::pdc::{self, Input, NodeId, NodeSpec};
 
 /// The DSP rule set. A stage that writes a stereo buffer costs 16; a fused
@@ -65,6 +67,29 @@ pub const RULES: &str = r#"
 ; mix-sends: two gain sends of one source mix into one gain stage.
 (rewrite (Mix (Stereo a b s) (Stereo c d s)) (Stereo (GAdd a c) (GAdd b d) s))
 "#;
+
+/// Names of the rewrites of [`RULES`], in order (each has a lemma in
+/// [`crate::RULE_LEMMAS`]).
+pub const REWRITE_NAMES: &[&str] = &[
+    "gain-stereo",
+    "pan-stereo",
+    "stereo-compose",
+    "biquad-cascade",
+    "cascade-merge",
+    "cascade-append-nil",
+    "cascade-append-cons",
+    "gain-into-biquad",
+    "gain-before-biquad",
+    "mix-sends",
+];
+
+/// [`RULES`] parsed for the witness checker.
+pub fn rule_set() -> Result<&'static RuleSet, Error> {
+    static SET: OnceLock<Result<RuleSet, Error>> = OnceLock::new();
+    SET.get_or_init(|| RuleSet::parse(RULES, REWRITE_NAMES))
+        .as_ref()
+        .map_err(Clone::clone)
+}
 
 /// Normalized biquad coefficients (`a0 = 1`), transposed direct form II:
 /// `y = b0 x + s1; s1 = b1 x - a1 y + s2; s2 = b2 x - a2 y`.
@@ -317,18 +342,20 @@ impl DspGraph {
     pub fn fuse(&self, root: Signal) -> Result<FusedDsp, Error> {
         let r = self.index(root)?;
         let bindings = self.bindings(r);
-        let before = engine::run(RULES, &bindings, &format!("s{r}"), false)?;
-        let term = engine::run(RULES, &bindings, &format!("s{r}"), true)?;
+        let fusion = engine::fuse(RULES, rule_set()?, &bindings, &format!("s{r}"))?;
         let live = self.reachable(r);
         let fused = FusedDsp {
             params: self.params.clone(),
-            unfused_cost: before.cost,
+            unfused_cost: fusion.before.cost,
             unfused_passes: live
                 .iter()
                 .zip(&self.nodes)
                 .filter(|(l, n)| **l && !matches!(n, Op::Source(_)))
                 .count(),
-            term,
+            term: fusion.term,
+            source: fusion.source,
+            witness: fusion.witness,
+            summary: fusion.summary,
         };
         fused.plan()?;
         Ok(fused)
@@ -466,9 +493,33 @@ pub struct FusedDsp {
     unfused_cost: u64,
     unfused_passes: usize,
     term: Extracted,
+    source: (Vec<Node>, usize),
+    witness: Witness,
+    summary: Summary,
 }
 
 impl FusedDsp {
+    /// The rewrite witness from the input graph to the fused term; it was
+    /// checked by [`crate::witness::check`] before this value was returned.
+    pub fn witness(&self) -> &Witness {
+        &self.witness
+    }
+
+    /// What checking the witness established (steps and rules used).
+    pub fn witness_summary(&self) -> &Summary {
+        &self.summary
+    }
+
+    /// Checks `witness` against this fusion's source and fused terms.
+    pub fn check_witness(&self, witness: &Witness) -> Result<Summary, Error> {
+        crate::witness::check(
+            rule_set()?,
+            (&self.source.0, self.source.1),
+            (&self.term.nodes, self.term.root),
+            witness,
+        )
+    }
+
     /// The fused term as an s-expression.
     pub fn term(&self) -> &str {
         &self.term.text
