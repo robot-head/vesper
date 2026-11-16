@@ -24,7 +24,8 @@ input witnesses retain their existing meaning and admission checks.
 
 ## Verification
 
-With Lean 4.35.0, all 14 `lean_extract` tests pass. The new fixture proves:
+With Lean 4.35.0, all 14 `lean_extract` tests and all 13
+`verify_extract_cli` tests pass. The new fixture proves:
 
 - A scalar update returns the original value and produces the specified state.
 - Two mutable inputs with an immutable input between them preserve suffix order.
