@@ -195,9 +195,14 @@ pub struct Param {
     pub ty: Type,
     pub span: Span,
 }
+fn is_false(v: &bool) -> bool {
+    !*v
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Function {
     pub name: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fip: bool,
     pub generics: Vec<Generic>,
     pub params: Vec<Param>,
     pub result: Type,
