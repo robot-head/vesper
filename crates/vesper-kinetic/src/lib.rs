@@ -29,6 +29,7 @@
 // `unsafe` is denied everywhere except the `std::arch` kernels in [`simd`].
 #![deny(unsafe_code)]
 
+pub mod articulation;
 pub mod coloring;
 pub mod crmath;
 pub mod detfloat;
@@ -47,11 +48,15 @@ pub mod soft;
 pub mod tile;
 pub mod world;
 
+pub use articulation::{
+    Articulation, ArticulationConfig, ArticulationDrive, ArticulationError, ArticulationJoint,
+    ArticulationLink,
+};
 pub use coloring::{BodyId, Colorer, ColoringError, ConstraintBodies, MultiColorer};
 pub use detfloat::{AuditError, DetFloatPolicy, ReductionOrder, VerifierFinding, audit};
 pub use morton::MortonError;
 pub use rigid::{
-    CcdConfig, ColliderShape, ContactManifold, GroundPlane, JointKind, RigidBody, RigidBroadphase,
+    CcdConfig, ColliderShape, ContactManifold, GroundPlane, JointDrive, JointKind, RigidBody, RigidBroadphase,
     RigidCollider, RigidConfig, RigidError, RigidJoint, RigidMaterial, RigidWorld, SleepConfig,
 };
 pub use rollback::{ResimulateError, RollbackError, RollbackTicket, SnapshotRing};

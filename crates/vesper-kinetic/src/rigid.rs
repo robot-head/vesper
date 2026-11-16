@@ -54,7 +54,7 @@ mod joints;
 mod sleep;
 
 pub use ccd::CcdConfig;
-pub use joints::{JointKind, RigidJoint};
+pub use joints::{JointDrive, JointKind, RigidJoint};
 pub use sleep::SleepConfig;
 
 /// Most points in one contact manifold.
@@ -1691,7 +1691,11 @@ impl RigidWorld {
         let g1 = det::add(det::add(g[0].abs(), g[1].abs()), g[2].abs());
         let bounce_floor = det::mul(det::mul(2.0, g1), h);
         let mut manifolds = std::mem::take(&mut self.manifolds);
+        let joint_friction = self.joints.iter().any(|j| j.has_friction());
         for _ in 0..self.config.substeps {
+            if joint_friction {
+                self.record_joint_coordinates();
+            }
             // Integrate.
             let sleeping = self.sleep.is_some();
             let gyroscopic = self.gyroscopic;
@@ -1770,6 +1774,7 @@ impl RigidWorld {
                 for idx in 0..self.colorer.layer(color).len() {
                     let mi = self.colorer.layer(color)[idx] as usize;
                     if mi >= nm {
+                        self.joint_velocity(mi - nm, h);
                         continue;
                     }
                     let m = manifolds[mi];
