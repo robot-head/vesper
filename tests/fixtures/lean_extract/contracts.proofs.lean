@@ -5,19 +5,19 @@ open Vesper
 theorem clamp_contract : «clamp$contract» := by
   intro x hi
   by_cases h : x > hi <;> simp [ensures_clamp, clamp, h]
-  · simp [UInt64.le_iff_toNat_le, UInt64.lt_iff_toNat_lt] at *; omega
-  · split <;> simp_all [UInt64.le_iff_toNat_le, UInt64.lt_iff_toNat_lt]
+  · simp [«$arith_simps»] at *; omega
+  · split <;> simp_all [«$arith_simps»]
 
 /-- `Fail[ArithOverflow]` contract under its precondition, in `Except`. -/
 theorem add_small_contract : «add_small$contract» := by
   intro a b pre r run
   simp [requires_add_small] at pre
-  split at pre <;> simp_all [UInt64.lt_iff_toNat_lt]
+  split at pre <;> simp_all [«$arith_simps»]
   have fits : a.toNat + b.toNat ≤ 18446744073709551615 := by omega
   simp [add_small, fits] at run
   cases run
   simp [ensures_add_small]
-  split <;> simp_all [UInt64.le_iff_toNat_le, UInt64.lt_iff_toNat_lt, UInt64.toNat_add] <;> omega
+  split <;> simp_all [«$arith_simps»] <;> omega
 
 /-- Recursive contract: partial correctness of the fuel companion. -/
 theorem countdown_contract : «countdown$contract» := by

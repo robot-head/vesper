@@ -214,6 +214,96 @@ fn known_type(t: &Type) -> bool {
     }
 }
 
+/// A conjunction of ordinary kernel-checked theorems acts as a named simp set:
+/// `simp only [Vesper.«$arith_simps»]`. Keep it structured and free of custom
+/// attribute initializers so the same module still passes artifact replay.
+fn arithmetic_simp_bundle() -> Result<Declaration, String> {
+    let mut rules = Vec::new();
+    for (width, kind) in [(8, "UInt8"), (16, "UInt16"), (32, "UInt32"), (64, "UInt64")] {
+        let x = named("x");
+        let y = named("y");
+        let nat = |value| app(global(&[kind, "toNat"]), [value]);
+        let modulus = || Term::Nat((1u128 << width).into());
+        for (op, lemma) in [
+            (BinaryOp::Le, "le_iff_toNat_le"),
+            (BinaryOp::Lt, "lt_iff_toNat_lt"),
+        ] {
+            let proposition = Term::binary(
+                BinaryOp::Iff,
+                Term::binary(op, x.clone(), y.clone()),
+                Term::binary(op, nat(x.clone()), nat(y.clone())),
+            );
+            let binders = vec![
+                explicit(fixed("x"), global(&[kind])),
+                explicit(fixed("y"), global(&[kind])),
+            ];
+            rules.push((
+                Term::Forall {
+                    binders: binders.clone(),
+                    body: Box::new(proposition),
+                },
+                lambda(binders, global(&[kind, lemma])),
+            ));
+        }
+        for (op, lemma) in [
+            (BinaryOp::Add, "toNat_add"),
+            (BinaryOp::Sub, "toNat_sub"),
+            (BinaryOp::Mul, "toNat_mul"),
+        ] {
+            let result = if op == BinaryOp::Sub {
+                Term::binary(
+                    BinaryOp::Add,
+                    Term::binary(BinaryOp::Sub, modulus(), nat(y.clone())),
+                    nat(x.clone()),
+                )
+            } else {
+                Term::binary(op, nat(x.clone()), nat(y.clone()))
+            };
+            let proposition = Term::binary(
+                BinaryOp::Eq,
+                nat(Term::binary(op, x.clone(), y.clone())),
+                Term::binary(BinaryOp::Mod, result, modulus()),
+            );
+            let binders = vec![
+                explicit(fixed("x"), global(&[kind])),
+                explicit(fixed("y"), global(&[kind])),
+            ];
+            rules.push((
+                Term::Forall {
+                    binders: binders.clone(),
+                    body: Box::new(proposition),
+                },
+                lambda(binders, app(global(&[kind, lemma]), [x.clone(), y.clone()])),
+            ));
+        }
+        let n = named("n");
+        let binders = vec![explicit(fixed("n"), global(&["Nat"]))];
+        let proposition = Term::binary(
+            BinaryOp::Eq,
+            nat(app(global(&[kind, "ofNat"]), [n.clone()])),
+            Term::binary(BinaryOp::Mod, n, modulus()),
+        );
+        rules.push((
+            Term::Forall {
+                binders: binders.clone(),
+                body: Box::new(proposition),
+            },
+            lambda(binders, global(&[kind, "toNat_ofNat"])),
+        ));
+    }
+    let (mut proposition, mut proof) = rules.pop().expect("fixed nonempty arithmetic rules");
+    while let Some((next, evidence)) = rules.pop() {
+        proposition = Term::binary(BinaryOp::And, next, proposition);
+        proof = app(global(&["And", "intro"]), [evidence, proof]);
+    }
+    Ok(Declaration::Theorem {
+        name: source_name("$arith_simps")?,
+        binders: vec![],
+        proposition,
+        proof,
+    })
+}
+
 fn prelude() -> Result<Vec<Declaration>, String> {
     let (s, o, m, a) = (named("S"), named("O"), named("m"), named("A"));
     let cps = |args: Vec<Term>| app(named("HandlerCPS"), args);
@@ -289,6 +379,7 @@ fn prelude() -> Result<Vec<Declaration>, String> {
         ),
         kind: DefinitionKind::Def,
     }));
+    declarations.push(arithmetic_simp_bundle()?);
     declarations.push(Declaration::Definition(Definition {
         name: source_name("$arithmetic_semantics")?,
         binders: vec![],

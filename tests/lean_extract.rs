@@ -334,3 +334,25 @@ fn compiles(text: &str) {
         String::from_utf8_lossy(&result.stdout)
     );
 }
+
+#[test]
+fn generated_unsigned_simp_bundle_preserves_machine_ranges() {
+    let mut proofs = String::from("namespace VesperProofs.UnsignedArithmetic\n");
+    for (kind, width) in [("UInt8", 8), ("UInt16", 16), ("UInt32", 32), ("UInt64", 64)] {
+        let modulus = 1u128 << width;
+        proofs.push_str(&format!(
+            "theorem {kind}_addition (x y : {kind}) (h : x.toNat + y.toNat < {modulus}) : (x + y).toNat = x.toNat + y.toNat := by\n  simp only [Vesper.«$arith_simps»]; omega\n\
+             theorem {kind}_multiplication (x y : {kind}) (h : x.toNat * y.toNat < {modulus}) : (x * y).toNat = x.toNat * y.toNat := by\n  simp only [Vesper.«$arith_simps»]; omega\n\
+             theorem {kind}_underflow : ((0 : {kind}) - 1).toNat = {} := by\n  simp only [Vesper.«$arith_simps»] <;> decide\n\
+             theorem {kind}_overflow : (({} : {kind}) + 1).toNat = 0 := by\n  simp only [Vesper.«$arith_simps»] <;> decide\n",
+            modulus - 1, modulus - 1,
+        ));
+    }
+    proofs.push_str("end VesperProofs.UnsignedArithmetic\n");
+    proves(
+        "fn arith_simps() -> u64 { 42 } fn main() -> u64 { arith_simps() }",
+        &proofs,
+        &[("arith_simps", Totality::Total), ("main", Totality::Total)],
+        "42",
+    );
+}
