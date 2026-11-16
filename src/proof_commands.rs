@@ -494,6 +494,58 @@ pub(crate) fn audit_generated(
     serde_json::to_value(report).map_err(|error| error.to_string())
 }
 
+/// Replay local Lean artifacts under an explicit allowed-axiom whitelist for
+/// package publication gates (`vesper publish`), always rejecting `sorryAx`.
+pub(crate) fn audit_policy(
+    root: &Path,
+    module: &str,
+    theorems: &[String],
+    allowed_axioms: &[String],
+    lean: Option<&str>,
+    timeout: Option<u64>,
+) -> Result<(bool, serde_json::Value), String> {
+    if !name_valid(module)
+        || matches!(
+            module.split('.').next(),
+            Some("Lean" | "Std" | "Init" | "Lake")
+        )
+    {
+        return Err(
+            "module must be a qualified ASCII identifier outside trusted toolchain namespaces"
+                .into(),
+        );
+    }
+    if theorems.is_empty() || theorems.len() > 128 || theorems.iter().any(|n| !name_valid(n)) {
+        return Err("invalid or empty theorem list for proof gate (1..=128 theorems)".into());
+    }
+    let mut allowed = BTreeSet::new();
+    for ax in allowed_axioms {
+        if ax == "sorryAx" {
+            return Err("sorryAx cannot be allowed by the publish proof policy".into());
+        }
+        if !name_valid(ax) {
+            return Err(format!("invalid Lean axiom name '{ax}'"));
+        }
+        allowed.insert(ax.clone());
+    }
+    if let Some(secs) = timeout
+        && !(1..=300).contains(&secs)
+    {
+        return Err("--timeout must be between 1 and 300 seconds".into());
+    }
+    let options = Options {
+        theorems: theorems.iter().cloned().collect(),
+        allowed,
+        lean: lean.map(str::to_owned),
+        timeout,
+        ..Options::default()
+    };
+    let report = audit(&options, root, module)?;
+    let accepted = report.accepted && report.kernel_replayed && report.forbidden_axioms.is_empty();
+    let value = serde_json::to_value(report).map_err(|e| e.to_string())?;
+    Ok((accepted, value))
+}
+
 fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, String> {
     let launcher = options
         .lean

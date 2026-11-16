@@ -917,6 +917,8 @@ fn compile_session_with_linkage<M: Module>(
             caller_slot: None,
             reuse_slots: BTreeMap::new(),
             current_call_slot: None,
+            trace_fail: None,
+            trace_entry: None,
             source_locations: true,
             srcloc: cranelift_codegen::ir::SourceLoc::default(),
             session: Some(SessionCodegen {

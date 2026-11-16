@@ -118,8 +118,17 @@ fn prefix(source: &str, tokens: &[Token], at: usize) -> Option<(DK, Option<Span>
             saw_fip = true;
             i = next(tokens, next(tokens, i + 1) + 1);
         }
+        if !saw_fip && matches!(token_kind(tokens, i), K::Copy | K::Affine | K::Linear) {
+            i = next(tokens, i + 1);
+            if !matches!(token_kind(tokens, i), K::Struct | K::Enum | K::Effect) {
+                return None;
+            }
+        }
         if token_kind(tokens, i) != K::Fn
-            && (saw_fip || (!word(source, tokens, i, "trait") && !word(source, tokens, i, "model")))
+            && (saw_fip
+                || (!matches!(token_kind(tokens, i), K::Struct | K::Enum | K::Effect)
+                    && !word(source, tokens, i, "trait")
+                    && !word(source, tokens, i, "model")))
         {
             return None;
         }
@@ -246,6 +255,8 @@ fn extent(
         if token_kind(tokens, head) == K::At && word(source, tokens, next(tokens, head + 1), "fip")
         {
             head = next(tokens, next(tokens, head + 1) + 1);
+        } else if matches!(token_kind(tokens, head), K::Copy | K::Affine | K::Linear) {
+            head = next(tokens, head + 1);
         }
     }
     let mut i = if kind == DK::Other { start } else { head + 1 };

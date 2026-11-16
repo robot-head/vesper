@@ -66,7 +66,18 @@ fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
         )),
     }
 }
+fn uses_trace_fail(world: &World, trace_host: bool, key: &str, entry: &str, f: &Function) -> bool {
+    trace_host && (key == entry || trace_host_direct(world, f))
+}
 fn signature<M: Module>(m: &M, world: &World, f: &Function) -> Result<ir::Signature, String> {
+    signature_with_trace(m, world, f, false)
+}
+fn signature_with_trace<M: Module>(
+    m: &M,
+    world: &World,
+    f: &Function,
+    trace_fail: bool,
+) -> Result<ir::Signature, String> {
     let mut sig = m.make_signature();
     let result = Layout::of(world, &f.result)?;
     if result.aggregate() {
@@ -87,7 +98,7 @@ fn signature<M: Module>(m: &M, world: &World, f: &Function) -> Result<ir::Signat
         sig.params
             .push(AbiParam::new(m.target_config().pointer_type()));
     }
-    if fail_only(world, f) {
+    if fail_only(world, f) || trace_fail {
         sig.params
             .push(AbiParam::new(m.target_config().pointer_type()));
     }
@@ -392,6 +403,23 @@ fn fail_record_size(world: &World, f: &Function) -> Result<u32, String> {
 }
 type InstanceMap = BTreeMap<String, (String, BTreeMap<String, Type>)>;
 fn instances(world: &World, entry: &str) -> Result<InstanceMap, String> {
+    instances_for_entry(world, entry, false)
+}
+fn trace_host_direct(world: &World, f: &Function) -> bool {
+    crate::trace_effects::active(world)
+        && f.effects.tail.is_none()
+        && !contains_function(world, &f.result)
+        && f.params.iter().all(|p| !contains_function(world, &p.ty))
+        && f.effects.instances.iter().all(|e| {
+            crate::capability_effects::is_capability_effect(&e.name)
+                || (e.name == crate::trace_effects::TRACE && e.label.is_none() && e.args.is_empty())
+        })
+}
+fn instances_for_entry(
+    world: &World,
+    entry: &str,
+    include_entry: bool,
+) -> Result<InstanceMap, String> {
     let program = crate::ir::lower_world(world);
     let references = program
         .functions
@@ -423,7 +451,10 @@ fn instances(world: &World, entry: &str) -> Result<InstanceMap, String> {
             return Err("native monomorphization exceeds 1024 function instances".into());
         }
         let f = concrete(world, &name, &vars)?;
-        if !specialized_function(world, &f) || !function_arguments(&vars).is_empty() {
+        if (include_entry && (key == entry || trace_host_direct(world, &f)))
+            || !specialized_function(world, &f)
+            || !function_arguments(&vars).is_empty()
+        {
             result.insert(key, (name.clone(), vars.clone()));
         }
         if let Some(body) = &f.body {
@@ -491,6 +522,13 @@ fn instances(world: &World, entry: &str) -> Result<InstanceMap, String> {
     }
     Ok(result)
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntryEffects {
+    Handled,
+    FailOnly,
+    CapabilityOrFail,
+    TraceHost,
+}
 fn compile<M: Module>(
     m: &mut M,
     world: &World,
@@ -508,8 +546,7 @@ fn compile<M: Module>(
         observer,
         instrument,
         options,
-        false,
-        false,
+        EntryEffects::Handled,
         DefinitionLinkage::Object,
     )
 }
@@ -530,17 +567,15 @@ fn compile_jit(
         observer,
         instrument,
         options,
-        false,
-        false,
+        EntryEffects::Handled,
         DefinitionLinkage::Jit,
     )
 }
-/// [`compile`]; with `fail_entry`, an entry whose only effects are `Fail`
-/// instances is accepted and keeps its hidden failure-record parameter
-/// (lane 27: the freestanding runtime turns an escaping failure into an
-/// abort). With `capability_entry`, an entry whose effects are closed built-in
-/// capability effects (`Realtime`, `ConstTime`, `DetFloat`, `ConstDenorm`) is
-/// accepted for offline verification and WCSD stack measurement.
+/// [`compile`]; `entry_effects` controls whether an entry may leave `Fail`
+/// (`FailOnly`, lane 27), closed built-in capability effects or `Fail`
+/// (`CapabilityOrFail`, for offline verification and WCSD stack measurement),
+/// or the built-in Beacon `Trace` effect (`TraceHost`) unhandled at the entry
+/// boundary.
 #[allow(clippy::too_many_arguments)]
 fn compile_entry<M: Module>(
     m: &mut M,
@@ -550,20 +585,34 @@ fn compile_entry<M: Module>(
     observer: Option<&mut dyn FnMut(EmittedFunction)>,
     instrument: Option<Instrument<'_>>,
     options: CodegenOptions,
-    fail_entry: bool,
-    capability_entry: bool,
+    entry_effects: EntryEffects,
     linkage: DefinitionLinkage,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
     // Foreign capabilities are granted by the package's `.vsys` import.
+    let trace_ok = entry_effects == EntryEffects::TraceHost
+        && crate::trace_effects::active(world)
+        && entry_fn.effects.tail.is_none()
+        && entry_fn.effects.instances.iter().any(|e| {
+            e.name == crate::trace_effects::TRACE && e.label.is_none() && e.args.is_empty()
+        })
+        && entry_fn.effects.instances.iter().all(|e| {
+            crate::ffi_lowering::is_foreign_effect(&e.name)
+                || (e.name == crate::trace_effects::TRACE && e.label.is_none() && e.args.is_empty())
+        });
     if (entry_fn
         .effects
         .instances
         .iter()
         .any(|e| !crate::ffi_lowering::is_foreign_effect(&e.name))
         || entry_fn.effects.tail.is_some())
-        && !(fail_entry && fail_only(world, entry_fn))
-        && !(capability_entry && entry_fn.effects.tail.is_none() && capability_only(entry_fn))
+        && !((entry_effects == EntryEffects::FailOnly
+            || entry_effects == EntryEffects::CapabilityOrFail)
+            && fail_only(world, entry_fn))
+        && !(entry_effects == EntryEffects::CapabilityOrFail
+            && entry_fn.effects.tail.is_none()
+            && capability_only(entry_fn))
+        && !trace_ok
     {
         return Err("native entry must handle all effects".into());
     }
@@ -575,14 +624,26 @@ fn compile_entry<M: Module>(
     {
         return Err("native entry cannot expose specialized closure values; invoke them within the entry function".into());
     }
-    let instances = instances(world, entry)?;
+    let instances = instances_for_entry(world, entry, trace_ok)?;
     let mut program = crate::ir::lower_world(world);
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;
     }
-    let ids = declare_instances(m, world, entry, &instances, linkage)?;
-    let clif = define_instances_observed(
-        m, world, &instances, &ids, &program, observer, instrument, options, linkage,
+    let (ids, trace_entry_id) =
+        declare_instances_with_trace(m, world, entry, &instances, linkage, trace_ok)?;
+    let trace_entry = trace_entry_id.map(|id| (entry, id));
+    let clif = define_instances_observed_with_trace(
+        m,
+        world,
+        &instances,
+        &ids,
+        &program,
+        observer,
+        instrument,
+        options,
+        linkage,
+        trace_ok,
+        trace_entry,
     )?;
     let mut abi = Vec::new();
     for (key, (name, vars)) in &instances {
@@ -696,24 +757,52 @@ fn declare_instances<M: Module>(
     instances: &InstanceMap,
     linkage: DefinitionLinkage,
 ) -> Result<BTreeMap<String, FuncId>, String> {
+    let (ids, _) = declare_instances_with_trace(m, world, entry, instances, linkage, false)?;
+    Ok(ids)
+}
+fn declare_instances_with_trace<M: Module>(
+    m: &mut M,
+    world: &World,
+    entry: &str,
+    instances: &InstanceMap,
+    linkage: DefinitionLinkage,
+    trace_host: bool,
+) -> Result<(BTreeMap<String, FuncId>, Option<FuncId>), String> {
     let mut ids = BTreeMap::new();
+    let mut trace_entry_id = None;
     for (i, (key, (name, vars))) in instances.iter().enumerate() {
         let f = concrete(world, name, vars)?;
-        let symbol = if key == entry {
-            entry.to_owned()
+        if trace_host && key == entry {
+            let public_id = m
+                .declare_function(entry, linkage.function(true), &signature(m, world, &f)?)
+                .map_err(|e| e.to_string())?;
+            let internal_id = m
+                .declare_function(
+                    &format!("__vesper_trace_entry_{i}"),
+                    linkage.function(false),
+                    &signature_with_trace(m, world, &f, true)?,
+                )
+                .map_err(|e| e.to_string())?;
+            ids.insert(key.clone(), public_id);
+            trace_entry_id = Some(internal_id);
         } else {
-            format!("vesper_function_{i}")
-        };
-        let id = m
-            .declare_function(
-                &symbol,
-                linkage.function(key == entry),
-                &signature(m, world, &f)?,
-            )
-            .map_err(|e| e.to_string())?;
-        ids.insert(key.clone(), id);
+            let pass_trace = uses_trace_fail(world, trace_host, key, entry, &f);
+            let symbol = if key == entry {
+                entry.to_owned()
+            } else {
+                format!("vesper_function_{i}")
+            };
+            let id = m
+                .declare_function(
+                    &symbol,
+                    linkage.function(key == entry),
+                    &signature_with_trace(m, world, &f, pass_trace)?,
+                )
+                .map_err(|e| e.to_string())?;
+            ids.insert(key.clone(), id);
+        }
     }
-    Ok(ids)
+    Ok((ids, trace_entry_id))
 }
 /// Define the bodies of the instances declared by [`declare_instances`].
 fn define_instances<M: Module>(
@@ -724,7 +813,7 @@ fn define_instances<M: Module>(
     program: &crate::ir::Program,
     linkage: DefinitionLinkage,
 ) -> Result<String, String> {
-    define_instances_observed(
+    define_instances_observed_with_trace(
         m,
         world,
         instances,
@@ -734,10 +823,12 @@ fn define_instances<M: Module>(
         None,
         CodegenOptions::default(),
         linkage,
+        false,
+        None,
     )
 }
 #[allow(clippy::too_many_arguments)]
-fn define_instances_observed<M: Module>(
+fn define_instances_observed_with_trace<M: Module>(
     m: &mut M,
     world: &World,
     instances: &InstanceMap,
@@ -747,13 +838,24 @@ fn define_instances_observed<M: Module>(
     mut instrument: Option<Instrument<'_>>,
     options: CodegenOptions,
     linkage: DefinitionLinkage,
+    trace_host: bool,
+    trace_entry: Option<(&str, FuncId)>,
 ) -> Result<String, String> {
     let mut clif = String::new();
     let denorm = crate::capability_effects::const_denorm_spans(world);
     for (key, (name, generic_vars)) in instances {
         let f = concrete(world, name, generic_vars)?;
+        let entry_name = trace_entry.map(|(e, _)| e).unwrap_or("");
+        let pass_trace = uses_trace_fail(world, trace_host, key, entry_name, &f);
+        let define_id = if let Some((entry_name, internal_id)) = trace_entry
+            && key == entry_name
+        {
+            internal_id
+        } else {
+            ids[key]
+        };
         let mut ctx = m.make_context();
-        ctx.func.signature = signature(m, world, &f)?;
+        ctx.func.signature = signature_with_trace(m, world, &f, pass_trace)?;
         let mut fbctx = FunctionBuilderContext::new();
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
@@ -761,6 +863,7 @@ fn define_instances_observed<M: Module>(
             b.append_block_params_for_function_params(entry);
             b.switch_to_block(entry);
             let mut values = b.block_params(entry).to_vec();
+            let trace_fail = if pass_trace { values.pop() } else { None };
             let fail_record = if fail_only(world, &f) {
                 values.pop()
             } else {
@@ -826,6 +929,8 @@ fn define_instances_observed<M: Module>(
                 caller_slot,
                 reuse_slots: BTreeMap::new(),
                 current_call_slot: None,
+                trace_fail,
+                trace_entry: trace_entry.map(|(e, id)| (e.to_owned(), id)),
                 session: None,
                 denorm: &denorm,
                 source_locations: options.source_locations,
@@ -866,6 +971,20 @@ fn define_instances_observed<M: Module>(
                     }
                 }
             }
+            if trace_host && crate::trace_effects::active(world) {
+                for (index, effect) in f.effects.instances.iter().enumerate() {
+                    if effect.name == crate::trace_effects::TRACE
+                        && effect.label.is_none()
+                        && effect.args.is_empty()
+                    {
+                        let identity = "native-trace-host".to_string();
+                        c.capabilities
+                            .insert(format!("$effect:{}", effect.name), identity.clone());
+                        c.capabilities
+                            .insert(format!("$static:$fncap:{name}:{index}"), identity.clone());
+                    }
+                }
+            }
             c.ir_function(
                 program
                     .functions
@@ -882,9 +1001,8 @@ fn define_instances_observed<M: Module>(
         linkage.normalize_references(&mut ctx.func);
         clif.push_str(&format!("; {key}\n{}\n", ctx.func.display()));
         if let Some(observe) = observer.as_mut() {
-            let id = ids[key];
             let mut function = ctx.func.clone();
-            function.name = ir::UserFuncName::user(0, id.as_u32());
+            function.name = ir::UserFuncName::user(0, define_id.as_u32());
             let declarations = m.declarations();
             let callees = function
                 .params
@@ -907,17 +1025,56 @@ fn define_instances_observed<M: Module>(
                 source: name.clone(),
                 symbol: m
                     .declarations()
-                    .get_function_decl(id)
-                    .linkage_name(id)
+                    .get_function_decl(define_id)
+                    .linkage_name(define_id)
                     .into_owned(),
-                func_id: id.as_u32(),
+                func_id: define_id.as_u32(),
                 function,
                 callees,
                 vars: generic_vars.clone(),
             });
         }
-        m.define_function(ids[key], &mut ctx)
+        m.define_function(define_id, &mut ctx)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
+        m.clear_context(&mut ctx);
+    }
+    if let Some((entry_name, internal_id)) = trace_entry {
+        let f = world.functions.get(entry_name).ok_or("unknown entry")?;
+        let public_id = ids[entry_name];
+        let mut ctx = m.make_context();
+        ctx.func.signature = signature(m, world, f)?;
+        let mut fbctx = FunctionBuilderContext::new();
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+            let block = b.create_block();
+            b.append_block_params_for_function_params(block);
+            b.switch_to_block(block);
+            let mut args = b.block_params(block).to_vec();
+            let slot = b.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                8,
+                3,
+            ));
+            let zero = b.ins().iconst(types::I64, 0);
+            b.ins().stack_store(zero, slot, 0);
+            let flag = b
+                .ins()
+                .stack_addr(m.target_config().pointer_type(), slot, 0);
+            args.push(flag);
+            let callee = m.declare_func_in_func(internal_id, b.func);
+            let call = b.ins().call(callee, &args);
+            let result = b.inst_results(call)[0];
+            b.ins().return_(&[result]);
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        linkage.normalize_references(&mut ctx.func);
+        clif.push_str(&format!(
+            "; {entry_name} (trace wrapper)\n{}\n",
+            ctx.func.display()
+        ));
+        m.define_function(public_id, &mut ctx)
+            .map_err(|e| format!("native codegen '{entry_name}': {e}"))?;
         m.clear_context(&mut ctx);
     }
     Ok(clif)
@@ -929,6 +1086,23 @@ pub fn jit_with_options(
     world: &World,
     entry: &str,
     optimize: bool,
+) -> Result<crate::runtime::Value, String> {
+    jit_run_entry(world, entry, optimize, EntryEffects::Handled)
+}
+/// [`jit_with_options`] for an entry carrying `eff [Trace]` lowered to the
+/// Beacon native host (`vesper_trace_*` runtime symbols).
+pub fn jit_traced_with_options(
+    world: &World,
+    entry: &str,
+    optimize: bool,
+) -> Result<crate::runtime::Value, String> {
+    jit_run_entry(world, entry, optimize, EntryEffects::TraceHost)
+}
+fn jit_run_entry(
+    world: &World,
+    entry: &str,
+    optimize: bool,
+    entry_effects: EntryEffects,
 ) -> Result<crate::runtime::Value, String> {
     let f = world.functions.get(entry).ok_or("missing entry function")?;
     if !f.params.is_empty() {
@@ -951,10 +1125,13 @@ pub fn jit_with_options(
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     builder.symbol("fmod", native_float_remainder as *const u8);
     builder.symbols(crate::regions::native_runtime::symbols());
+    if entry_effects == EntryEffects::TraceHost {
+        builder.symbols(crate::trace_effects::native_runtime::symbols());
+    }
     builder.symbols(crate::tiled::native_runtime::symbols());
     builder.symbols(crate::fip::native_runtime::symbols());
     let mut m = JITModule::new(builder);
-    let (ids, _) = compile_jit(
+    let (ids, _) = compile_entry(
         &mut m,
         world,
         entry,
@@ -962,6 +1139,8 @@ pub fn jit_with_options(
         None,
         None,
         CodegenOptions::default(),
+        entry_effects,
+        DefinitionLinkage::Jit,
     )?;
     m.finalize_definitions().map_err(|e| e.to_string())?;
     let code = m.get_finalized_function(ids[entry]);
@@ -973,11 +1152,17 @@ pub fn jit_with_options(
             let mut result = vec![0u64; layout.size as usize / 8];
             let call: unsafe extern "C" fn(*mut u64) -> i64 = std::mem::transmute(code);
             call(result.as_mut_ptr());
-            crate::layout::decode(
-                world,
-                &f.result,
-                std::slice::from_raw_parts(result.as_ptr().cast::<u8>(), layout.size as usize),
-            )?
+            if entry_effects == EntryEffects::TraceHost
+                && crate::trace_effects::native_runtime::has_failed()
+            {
+                crate::runtime::Value::Tuple(vec![])
+            } else {
+                crate::layout::decode(
+                    world,
+                    &f.result,
+                    std::slice::from_raw_parts(result.as_ptr().cast::<u8>(), layout.size as usize),
+                )?
+            }
         } else if f.result.name() == "f64" {
             let call: unsafe extern "C" fn() -> f64 = std::mem::transmute(code);
             crate::runtime::Value::Float(call())
@@ -1115,8 +1300,33 @@ pub fn object_for_isa(
         observer,
         None,
         CodegenOptions::default(),
-        true,
-        false,
+        EntryEffects::FailOnly,
+        DefinitionLinkage::Object,
+    )?;
+    let bytes = m.finish().emit().map_err(|e| e.to_string())?;
+    Ok((bytes, clif))
+}
+/// [`object_with_options`] for an entry carrying `eff [Trace]` lowered to
+/// `vesper_trace_*` runtime imports.
+pub fn object_traced_with_options(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+) -> Result<(Vec<u8>, String), String> {
+    let isa = object_isa_for(world, target)?;
+    let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
+        .map_err(|e| e.to_string())?;
+    let mut m = ObjectModule::new(builder);
+    let (_, clif) = compile_entry(
+        &mut m,
+        world,
+        entry,
+        optimize,
+        None,
+        None,
+        CodegenOptions::default(),
+        EntryEffects::TraceHost,
         DefinitionLinkage::Object,
     )?;
     let bytes = m.finish().emit().map_err(|e| e.to_string())?;
@@ -1144,8 +1354,7 @@ pub fn emit_capability_entry(
         Some(observer),
         None,
         CodegenOptions::default(),
-        true,
-        true,
+        EntryEffects::CapabilityOrFail,
         DefinitionLinkage::Object,
     )?;
     Ok(())
@@ -1381,6 +1590,8 @@ struct Codegen<'a, 'b, M: Module> {
     reuse_slots: BTreeMap<(crate::ir::ValueId, usize), Variable>,
     /// Selected caller-slot source for the active `Op::Call`, if optimized by Stage 4.
     current_call_slot: Option<crate::fip::CallSlot>,
+    trace_fail: Option<ir::Value>,
+    trace_entry: Option<(String, FuncId)>,
     /// Present only while compiling a suspending session entry: external
     /// operations park instead of resolving to a lexical handler.
     session: Option<session::SessionCodegen>,
@@ -4046,7 +4257,19 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.current_call_slot = None;
             None
         };
-        let result = if specialized_function(self.world, &f) {
+        let call_key = instance_key(name, &vars);
+        let trace_entry_name = self
+            .trace_entry
+            .as_ref()
+            .map(|(e, _)| e.as_str())
+            .unwrap_or("");
+        let direct_trace = self
+            .capabilities
+            .get(&format!("$effect:{}", crate::trace_effects::TRACE))
+            .is_some_and(|id| id == "native-trace-host")
+            && self.ids.contains_key(&call_key)
+            && (trace_host_direct(self.world, &f) || call_key == trace_entry_name);
+        let result = if specialized_function(self.world, &f) && !direct_trace {
             if self.inline_depth >= 64 {
                 return Err("recursive effect specialization exceeds 64 inline frames".into());
             }
@@ -4124,10 +4347,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             result?
         } else {
             let key = instance_key(name, &vars);
-            let id = *self
-                .ids
-                .get(&key)
-                .ok_or_else(|| format!("missing monomorphized function '{key}'"))?;
+            let id = match &self.trace_entry {
+                Some((entry_name, internal_id)) if &key == entry_name => *internal_id,
+                _ => *self
+                    .ids
+                    .get(&key)
+                    .ok_or_else(|| format!("missing monomorphized function '{key}'"))?,
+            };
             let output = if result_layout.aggregate() {
                 Some(self.alloc(result_layout.size))
             } else {
@@ -4146,6 +4372,19 @@ impl<M: Module> Codegen<'_, '_, M> {
             } else {
                 None
             };
+            let pass_trace = uses_trace_fail(
+                self.world,
+                self.trace_fail.is_some(),
+                &key,
+                self.trace_entry
+                    .as_ref()
+                    .map(|(e, _)| e.as_str())
+                    .unwrap_or(""),
+                &f,
+            );
+            if pass_trace {
+                values.push(self.trace_fail.ok_or("missing native trace failure slot")?);
+            }
             let fun = self.m.declare_func_in_func(id, self.b.func);
             let sig = self.b.func.dfg.ext_funcs[fun].signature;
             let params = &self.b.func.dfg.signatures[sig].params;
@@ -4159,6 +4398,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             let call = self.b.ins().call(fun, &values);
             let result = output.unwrap_or_else(|| self.b.inst_results(call)[0]);
+            if pass_trace {
+                self.check_trace_failed();
+            }
             if let Some(record) = record {
                 self.reraise(&f, record)?;
             }
@@ -4398,6 +4640,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         if let Some(result) = self.session_operation(&identity, effect, op, &values, &refs)? {
             return Ok(result);
         }
+        if effect == crate::trace_effects::TRACE && identity == "native-trace-host" {
+            return self.trace_perform(op, &values);
+        }
         if let Some(index) = identity.strip_prefix("native-fail-exit:") {
             let index = index.parse::<i64>().map_err(|e| e.to_string())?;
             return self.fail_exit(index, effect, instance, values);
@@ -4518,6 +4763,96 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.generic_vars = old_generics;
         self.capabilities = old_capabilities;
         Ok(result)
+    }
+    fn return_trace_placeholder(&mut self) {
+        let returns = self.b.func.signature.returns[0].value_type;
+        let placeholder = if returns == types::F64 {
+            self.b.ins().f64const(0.0)
+        } else {
+            self.b.ins().iconst(returns, 0)
+        };
+        self.b.ins().return_(&[placeholder]);
+    }
+    fn abort_on_nonzero_status(&mut self, status: ir::Value) {
+        let failed = self.b.ins().icmp_imm(IntCC::NotEqual, status, 0);
+        let bad = self.b.create_block();
+        let good = self.b.create_block();
+        self.branch(failed, bad, &[], good, &[]);
+        self.b.switch_to_block(bad);
+        if let Some(flag) = self.trace_fail {
+            let one = self.b.ins().iconst(types::I64, 1);
+            self.b.ins().store(ir::MemFlags::new(), one, flag, 0);
+        }
+        self.return_trace_placeholder();
+        self.b.switch_to_block(good);
+    }
+    fn check_trace_failed(&mut self) {
+        if let Some(flag) = self.trace_fail {
+            let flagged = self.b.ins().load(types::I64, ir::MemFlags::new(), flag, 0);
+            let cond = self.b.ins().icmp_imm(IntCC::NotEqual, flagged, 0);
+            let bad = self.b.create_block();
+            let good = self.b.create_block();
+            self.branch(cond, bad, &[], good, &[]);
+            self.b.switch_to_block(bad);
+            self.return_trace_placeholder();
+            self.b.switch_to_block(good);
+        }
+    }
+    fn trace_call(&mut self, symbol: &str, args: &[ir::Value]) -> Result<ir::Value, String> {
+        let mut signature = self.m.make_signature();
+        for arg in args {
+            signature
+                .params
+                .push(AbiParam::new(self.b.func.dfg.value_type(*arg)));
+        }
+        signature.returns.push(AbiParam::new(types::I64));
+        let id = self
+            .m
+            .declare_function(symbol, Linkage::Import, &signature)
+            .map_err(|e| e.to_string())?;
+        let reference = self.m.declare_func_in_func(id, self.b.func);
+        let call = self.b.ins().call(reference, args);
+        let status = self.b.inst_results(call)[0];
+        self.abort_on_nonzero_status(status);
+        Ok(status)
+    }
+    fn trace_perform(&mut self, op: &str, values: &[ir::Value]) -> Result<ir::Value, String> {
+        match (op, values) {
+            ("current_ctx", []) => {
+                let layout =
+                    Layout::of(self.world, &Type::named(crate::trace_effects::SPAN_CONTEXT))?;
+                let out = self.alloc(layout.size);
+                self.trace_call("vesper_trace_current_ctx", &[out])?;
+                Ok(out)
+            }
+            ("start_span", [schema, name]) => {
+                let layout =
+                    Layout::of(self.world, &Type::named(crate::trace_effects::ACTIVE_SPAN))?;
+                let out = self.alloc(layout.size);
+                self.trace_call("vesper_trace_start_span", &[*schema, *name, out])?;
+                Ok(out)
+            }
+            ("start_child", [parent, schema, name]) => {
+                let layout =
+                    Layout::of(self.world, &Type::named(crate::trace_effects::ACTIVE_SPAN))?;
+                let out = self.alloc(layout.size);
+                self.trace_call("vesper_trace_start_child", &[*parent, *schema, *name, out])?;
+                Ok(out)
+            }
+            ("emit_ok", [span, attr]) => {
+                self.trace_call("vesper_trace_emit_ok", &[*span, *attr])?;
+                Ok(self.zero())
+            }
+            ("emit_err", [span, code, msg]) => {
+                self.trace_call("vesper_trace_emit_err", &[*span, *code, *msg])?;
+                Ok(self.zero())
+            }
+            ("emit_attr", [span, attr]) => {
+                self.trace_call("vesper_trace_emit_attr", &[*span, *attr])?;
+                Ok(self.zero())
+            }
+            _ => Err(format!("unknown native Trace operation '{op}'")),
+        }
     }
 }
 fn effect_key(e: &Effect) -> String {

@@ -9,6 +9,8 @@ use vesper_loom_calculus::{
     SystemSelection, validate_manifest, validate_solution,
 };
 
+pub mod optimize;
+
 /// An untrusted local catalog. Alternative versions are candidates, not installations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -73,7 +75,7 @@ impl std::fmt::Display for ResolveError {
 }
 impl std::error::Error for ResolveError {}
 
-fn diagnostic(
+pub(crate) fn diagnostic(
     code: &str,
     package: Option<&PackageName>,
     subject: &str,
@@ -86,7 +88,7 @@ fn diagnostic(
         message: message.into(),
     }
 }
-fn from_calculus(d: Diagnostic) -> ResolveDiagnostic {
+pub(crate) fn from_calculus(d: Diagnostic) -> ResolveDiagnostic {
     ResolveDiagnostic {
         code: format!("{:?}", d.code),
         package: d.package,
@@ -94,7 +96,7 @@ fn from_calculus(d: Diagnostic) -> ResolveDiagnostic {
         message: d.message,
     }
 }
-fn error(
+pub(crate) fn error(
     kind: ErrorKind,
     decisions: usize,
     mut diagnostics: Vec<ResolveDiagnostic>,
@@ -120,11 +122,11 @@ fn system_requirement(source: &str) -> Option<(String, VersionReq)> {
     Some((name.into(), VersionReq::parse(requirement.trim()).ok()?))
 }
 
-struct Inputs<'a> {
-    packages: BTreeMap<PackageName, Vec<&'a Manifest>>,
-    systems: BTreeMap<String, Vec<&'a SystemSelection>>,
+pub(crate) struct Inputs<'a> {
+    pub(crate) packages: BTreeMap<PackageName, Vec<&'a Manifest>>,
+    pub(crate) systems: BTreeMap<String, Vec<&'a SystemSelection>>,
 }
-fn inputs(request: &ResolveRequest) -> Result<Inputs<'_>, ResolveError> {
+pub(crate) fn inputs(request: &ResolveRequest) -> Result<Inputs<'_>, ResolveError> {
     let mut invalid = vec![];
     if request.catalog.schema_version != SCHEMA_VERSION {
         invalid.push(diagnostic(
@@ -310,7 +312,7 @@ fn closure(
     }
 }
 
-fn solution(
+pub(crate) fn solution(
     request: &ResolveRequest,
     assigned: &Assigned<'_>,
     closure: &Closure,
