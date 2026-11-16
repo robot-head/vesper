@@ -234,7 +234,8 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
 /// `svc` with the system-call number in `x8` (Linux) or `x16` (macOS).
 fn syscall(a: &mut Asm, os: Os, linux: u32, macos: u32) {
     match os {
-        Os::Linux => {
+        // Windows AArch64 is rejected before code generation.
+        Os::Linux | Os::Windows => {
             a.u32(0xd280_0000 | linux << 5 | 8);
             a.u32(0xd400_0001);
         }
@@ -278,7 +279,7 @@ pub fn start(
         a.u32(0xd280_0000);
     }
     match os {
-        Os::Linux => syscall(a, os, 93, 1),
+        Os::Linux | Os::Windows => syscall(a, os, 93, 1),
         Os::MacOs => {
             // mov sp, x29; ldp x29, x30, [sp], #16; ret
             a.u32(0x9100_03bf);

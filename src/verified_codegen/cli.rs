@@ -1,5 +1,6 @@
-//! `vesper build --codegen verified`: write a static ELF executable, or link
-//! the Mach-O object with the system linker.
+//! `vesper build --codegen verified`: write a static ELF executable, link
+//! the Mach-O object with the system linker, or link the COFF object with
+//! the MSVC linker.
 use super::{Container, Options, Target, compile};
 use crate::check::World;
 use std::path::Path;
@@ -45,6 +46,18 @@ pub fn build_command(
             if !status?.success() {
                 return Err("linker failed".into());
             }
+        }
+        Container::CoffObject => {
+            let object = output.with_extension("vesper.obj");
+            std::fs::write(&object, &artifact.bytes)
+                .map_err(|e| format!("{}: {e}", object.display()))?;
+            // As for the Cranelift path, the default `cc` means "find the
+            // MSVC linker".
+            let explicit = (linker != "cc").then(|| std::path::PathBuf::from(linker));
+            let linked =
+                crate::native::windows::link_executable(&object, output, explicit.as_deref());
+            let _ = std::fs::remove_file(&object);
+            linked.map_err(|e| e.to_string())?;
         }
     }
     Ok(format!(

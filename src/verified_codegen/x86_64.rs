@@ -187,15 +187,108 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         }
         M::Call(l) => rel(a, 0xe8, l),
         // push rbp; mov rbp, rsp; sub rsp, imm32
-        M::Enter(words) => {
-            a.bytes(&[0x55, 0x48, 0x89, 0xe5, 0x48, 0x81, 0xec]);
-            a.bytes(&(words * 8).to_le_bytes());
+        M::Enter(words) => prologue(a, words * 8),
+        // mov rsp, rbp; pop rbp; ret  |  Windows: add rsp, frame; pop rbp; ret
+        // (the only epilogue shape the Windows x64 unwinder recognises)
+        M::Leave if a.windows => {
+            let frame = a.frame;
+            a.bytes(&[0x48, 0x81, 0xc4]);
+            a.bytes(&frame.to_le_bytes());
+            a.bytes(&[0x5d, 0xc3]);
         }
-        // mov rsp, rbp; pop rbp; ret
         M::Leave => a.bytes(&[0x48, 0x89, 0xec, 0x5d, 0xc3]),
         M::Trap(k) => rel(a, 0xe9, k.label()),
     }
     Ok(())
+}
+
+/// `push rbp; mov rbp, rsp; sub rsp, bytes`. On Windows, frames of a page
+/// or more first touch each page below `rsp` in order (`test [rsp - 4096k],
+/// esp`), as `__chkstk` would, so the guard page grows the stack, and the
+/// prologue is recorded for the unwind tables.
+fn prologue(a: &mut Asm, bytes: u32) {
+    let start = a.here();
+    a.bytes(&[0x55]);
+    let push_end = (a.here() - start) as u8;
+    a.bytes(&[0x48, 0x89, 0xe5]);
+    if a.windows {
+        for page in 1..=bytes / 4096 {
+            a.bytes(&[0x85, 0xa4, 0x24]);
+            a.bytes(&(-((page * 4096) as i32)).to_le_bytes());
+        }
+    }
+    a.bytes(&[0x48, 0x81, 0xec]);
+    a.bytes(&bytes.to_le_bytes());
+    a.frame = bytes;
+    if a.windows {
+        a.prologues.push(super::asm::Prologue {
+            start,
+            push_end,
+            alloc_end: (a.here() - start) as u8,
+            frame: bytes,
+            end: None,
+        });
+    }
+}
+
+/// `call` an external symbol (resolved by the linker).
+fn call_external(a: &mut Asm, name: &'static str) {
+    a.bytes(&[0xe8]);
+    let at = a.here();
+    a.bytes(&[0; 4]);
+    a.externals.push((at, name));
+}
+
+/// The Windows C `main`: reserve the result area, call the entry, optionally
+/// write the result words with `WriteFile`, and return the status to the
+/// C runtime. The abort exits call `ExitProcess`. Returns the offset of
+/// `main` in the code.
+pub fn start_windows(
+    a: &mut Asm,
+    protocol: ResultProtocol,
+    result_words: u32,
+    entry: Label,
+) -> Result<usize, VerifiedError> {
+    let main = a.here();
+    let area = ((result_words.max(1) + 1) & !1) * 8;
+    prologue(a, area);
+    rel(a, 0xe8, entry);
+    if protocol == ResultProtocol::Words && result_words > 0 {
+        // sub rsp, 48 (shadow space, the fifth argument, `written`)
+        a.bytes(&[0x48, 0x83, 0xec, 0x30]);
+        // mov ecx, -11 (STD_OUTPUT_HANDLE); call GetStdHandle
+        a.bytes(&[0xb9, 0xf5, 0xff, 0xff, 0xff]);
+        call_external(a, "GetStdHandle");
+        // mov rcx, rax; lea rdx, [rsp + 48]; mov r8d, len; lea r9, [rsp + 40];
+        // mov qword [rsp + 32], 0; call WriteFile; add rsp, 48
+        a.bytes(&[0x48, 0x89, 0xc1, 0x48, 0x8d, 0x54, 0x24, 0x30, 0x41, 0xb8]);
+        a.bytes(&(result_words * 8).to_le_bytes());
+        a.bytes(&[0x4c, 0x8d, 0x4c, 0x24, 0x28]);
+        a.bytes(&[0x48, 0xc7, 0x44, 0x24, 0x20, 0, 0, 0, 0]);
+        call_external(a, "WriteFile");
+        a.bytes(&[0x48, 0x83, 0xc4, 0x30]);
+    }
+    if protocol == ResultProtocol::ExitStatus && result_words > 0 {
+        // movzx eax, byte [rsp]
+        a.bytes(&[0x0f, 0xb6, 0x04, 0x24]);
+    } else {
+        // xor eax, eax
+        a.bytes(&[0x31, 0xc0]);
+    }
+    emit(a, &M::Leave)?;
+    let here = a.here();
+    if let Some(p) = a.prologues.last_mut() {
+        p.end = Some(here);
+    }
+    for k in TrapKind::ALL {
+        a.bind(k.label())?;
+        // Function bodies keep rsp 16-byte aligned.
+        // sub rsp, 32; mov ecx, status; call ExitProcess
+        a.bytes(&[0x48, 0x83, 0xec, 0x20, 0xb9, k.exit_status(), 0, 0, 0]);
+        call_external(a, "ExitProcess");
+        a.bytes(&[0xcc]);
+    }
+    Ok(main)
 }
 
 /// `_start`: reserve the entry's result area, call it, optionally write the

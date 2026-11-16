@@ -149,3 +149,198 @@ pub fn macho_object(code: &[u8]) -> Vec<u8> {
     out.extend_from_slice(strings);
     out
 }
+
+/// The Windows x64 `UNWIND_INFO` (version 1, no handler, no frame register)
+/// of a prologue `push rbp; mov rbp, rsp; [probes;] sub rsp, frame`: the
+/// unwinder restores `rsp` by the fixed allocation and pops `rbp`, which is
+/// valid because function bodies never move `rsp`.
+pub fn unwind_info(p: &super::asm::Prologue) -> Vec<u8> {
+    let mut codes: Vec<u16> = vec![];
+    if p.frame > 0 {
+        if p.frame <= 128 {
+            // UWOP_ALLOC_SMALL
+            codes.push(u16::from(p.alloc_end) | (2 | (((p.frame - 8) / 8) as u16) << 4) << 8);
+        } else if p.frame <= 512 * 1024 - 8 {
+            // UWOP_ALLOC_LARGE, OpInfo 0: the size / 8 in the next slot
+            codes.push(u16::from(p.alloc_end) | 1 << 8);
+            codes.push((p.frame / 8) as u16);
+        } else {
+            // UWOP_ALLOC_LARGE, OpInfo 1: the size in the next two slots
+            codes.push(u16::from(p.alloc_end) | (1 | 1 << 4) << 8);
+            codes.push((p.frame & 0xffff) as u16);
+            codes.push((p.frame >> 16) as u16);
+        }
+    }
+    // UWOP_PUSH_NONVOL rbp (register 5)
+    codes.push(u16::from(p.push_end) | (5 << 4) << 8);
+    let count = codes.len() as u8;
+    if codes.len() % 2 == 1 {
+        codes.push(0);
+    }
+    let mut out = vec![1, p.alloc_end, count, 0];
+    for c in codes {
+        put16(&mut out, c);
+    }
+    out
+}
+
+const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+const IMAGE_REL_AMD64_ADDR32NB: u16 = 3;
+const IMAGE_REL_AMD64_REL32: u16 = 4;
+
+/// A COFF symbol name: inline when it fits in eight bytes, else an offset
+/// into the string table.
+fn coff_name(out: &mut Vec<u8>, name: &str, strings: &mut Vec<u8>) {
+    if name.len() <= 8 {
+        let mut b = [0u8; 8];
+        b[..name.len()].copy_from_slice(name.as_bytes());
+        out.extend_from_slice(&b);
+    } else {
+        put32(out, 0);
+        put32(out, 4 + strings.len() as u32);
+        strings.extend_from_slice(name.as_bytes());
+        strings.push(0);
+    }
+}
+
+/// An x86-64 COFF object for `link.exe`: `.text` with the code and the
+/// external `main` at `main`, `.xdata` with one `UNWIND_INFO` per function
+/// and `.pdata` with one `RUNTIME_FUNCTION` per function, sorted by address,
+/// relocated with `IMAGE_REL_AMD64_ADDR32NB`; calls to `externals` are
+/// `IMAGE_REL_AMD64_REL32`. No timestamps: deterministic bytes.
+pub fn coff_object(
+    code: &[u8],
+    main: usize,
+    prologues: &[super::asm::Prologue],
+    externals: &[(usize, &'static str)],
+) -> Vec<u8> {
+    // Function ranges in address order.
+    let mut functions: Vec<(u32, u32, Vec<u8>)> = vec![];
+    let mut sorted = prologues.to_vec();
+    sorted.sort_by_key(|p| p.start);
+    for (i, p) in sorted.iter().enumerate() {
+        let end = p
+            .end
+            .or_else(|| sorted.get(i + 1).map(|n| n.start))
+            .unwrap_or(code.len());
+        functions.push((p.start as u32, end as u32, unwind_info(p)));
+    }
+    let mut xdata = vec![];
+    let mut pdata = vec![];
+    let mut pdata_relocs = vec![];
+    for (begin, end, info) in &functions {
+        let offset = xdata.len() as u32;
+        xdata.extend_from_slice(info);
+        let row = pdata.len() as u32;
+        put32(&mut pdata, *begin);
+        put32(&mut pdata, *end);
+        put32(&mut pdata, offset);
+        // Symbol 0 is `.text`, symbol 1 is `.xdata`.
+        pdata_relocs.push((row, 0u32));
+        pdata_relocs.push((row + 4, 0));
+        pdata_relocs.push((row + 8, 1));
+    }
+    let mut names: Vec<&'static str> = externals.iter().map(|(_, n)| *n).collect();
+    names.sort_unstable();
+    names.dedup();
+    let symbol_of = |name: &str| 3 + names.iter().position(|n| *n == name).unwrap_or(0) as u32;
+
+    let header = 20;
+    let sections = 3 * 40;
+    let text_at = header + sections;
+    let text_relocs_at = text_at + code.len();
+    let xdata_at = text_relocs_at + externals.len() * 10;
+    let pdata_at = xdata_at + xdata.len();
+    let pdata_relocs_at = pdata_at + pdata.len();
+    let symbols_at = pdata_relocs_at + pdata_relocs.len() * 10;
+    let symbol_count = 3 + names.len();
+
+    let mut out = vec![];
+    put16(&mut out, IMAGE_FILE_MACHINE_AMD64);
+    put16(&mut out, 3); // sections
+    put32(&mut out, 0); // timestamp
+    put32(&mut out, symbols_at as u32);
+    put32(&mut out, symbol_count as u32);
+    put16(&mut out, 0); // optional header
+    put16(&mut out, 0); // characteristics
+    let section = |out: &mut Vec<u8>,
+                   name: &[u8; 8],
+                   size: usize,
+                   at: usize,
+                   relocs_at: usize,
+                   relocs: usize,
+                   flags: u32| {
+        out.extend_from_slice(name);
+        put32(out, 0);
+        put32(out, 0);
+        put32(out, size as u32);
+        put32(out, at as u32);
+        put32(out, if relocs > 0 { relocs_at as u32 } else { 0 });
+        put32(out, 0);
+        put16(out, relocs as u16);
+        put16(out, 0);
+        put32(out, flags);
+    };
+    // CNT_CODE | ALIGN_16BYTES | MEM_EXECUTE | MEM_READ
+    section(
+        &mut out,
+        b".text\0\0\0",
+        code.len(),
+        text_at,
+        text_relocs_at,
+        externals.len(),
+        0x6050_0020,
+    );
+    // CNT_INITIALIZED_DATA | ALIGN_4BYTES | MEM_READ
+    section(
+        &mut out,
+        b".xdata\0\0",
+        xdata.len(),
+        xdata_at,
+        0,
+        0,
+        0x4030_0040,
+    );
+    section(
+        &mut out,
+        b".pdata\0\0",
+        pdata.len(),
+        pdata_at,
+        pdata_relocs_at,
+        pdata_relocs.len(),
+        0x4030_0040,
+    );
+    out.extend_from_slice(code);
+    for (at, name) in externals {
+        put32(&mut out, *at as u32);
+        put32(&mut out, symbol_of(name));
+        put16(&mut out, IMAGE_REL_AMD64_REL32);
+    }
+    out.extend_from_slice(&xdata);
+    out.extend_from_slice(&pdata);
+    for (at, symbol) in &pdata_relocs {
+        put32(&mut out, *at);
+        put32(&mut out, *symbol);
+        put16(&mut out, IMAGE_REL_AMD64_ADDR32NB);
+    }
+    let mut strings = vec![];
+    // (name, value, section, type, storage class)
+    let mut symbol =
+        |out: &mut Vec<u8>, name: &str, value: u32, section: i16, ty: u16, class: u8| {
+            coff_name(out, name, &mut strings);
+            put32(out, value);
+            put16(out, section as u16);
+            put16(out, ty);
+            out.push(class);
+            out.push(0);
+        };
+    symbol(&mut out, ".text", 0, 1, 0, 3);
+    symbol(&mut out, ".xdata", 0, 2, 0, 3);
+    symbol(&mut out, "main", main as u32, 1, 0x20, 2);
+    for name in &names {
+        symbol(&mut out, name, 0, 0, 0x20, 2);
+    }
+    put32(&mut out, 4 + strings.len() as u32);
+    out.extend_from_slice(&strings);
+    out
+}

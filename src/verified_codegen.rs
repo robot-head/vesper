@@ -98,6 +98,7 @@ pub enum Arch {
 pub enum Os {
     Linux,
     MacOs,
+    Windows,
 }
 /// A supported target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,6 +123,10 @@ impl Target {
         arch: Arch::Riscv64,
         os: Os::Linux,
     };
+    pub const X86_64_WINDOWS: Target = Target {
+        arch: Arch::X86_64,
+        os: Os::Windows,
+    };
     /// Parse a target triple.
     pub fn from_triple(triple: &str) -> Result<Self, VerifiedError> {
         let arch = if triple.starts_with("x86_64-") {
@@ -139,6 +144,8 @@ impl Target {
             Os::Linux
         } else if triple.contains("-apple-darwin") || triple.contains("-macos") {
             Os::MacOs
+        } else if triple.contains("-windows") {
+            Os::Windows
         } else {
             return Err(VerifiedError::Target(format!(
                 "unsupported operating system in '{triple}'"
@@ -147,6 +154,11 @@ impl Target {
         if arch != Arch::Aarch64 && os == Os::MacOs {
             return Err(VerifiedError::Target(format!(
                 "{arch:?} macOS is not a verified-codegen target"
+            )));
+        }
+        if arch != Arch::X86_64 && os == Os::Windows {
+            return Err(VerifiedError::Target(format!(
+                "{arch:?} Windows is not a verified-codegen target"
             )));
         }
         Ok(Self { arch, os })
@@ -158,6 +170,7 @@ impl Target {
             ("aarch64", "linux") => Some(Self::AARCH64_LINUX),
             ("aarch64", "macos") => Some(Self::AARCH64_MACOS),
             ("riscv64", "linux") => Some(Self::RISCV64_LINUX),
+            ("x86_64", "windows") => Some(Self::X86_64_WINDOWS),
             _ => None,
         }
     }
@@ -270,6 +283,10 @@ pub enum Container {
     ElfExecutable,
     /// A Mach-O object exporting `_main` (link it with `cc`).
     MachOObject,
+    /// An x86-64 COFF object exporting the C `main`, with `.pdata`/`.xdata`
+    /// unwind tables (link it with `link.exe`, see
+    /// `native::windows::link_executable`).
+    CoffObject,
 }
 
 #[derive(Clone, Debug)]
@@ -326,12 +343,22 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
     let entry_plan = &plan.functions[0];
     let result_words = entry_plan.result.0.clone();
     let mut a = asm::Asm::default();
+    a.windows = options.target.os == Os::Windows;
+    let mut windows_main = 0;
     if options.target.arch == Arch::Riscv64 && options.target.os != Os::Linux {
         return Err(VerifiedError::Target(
             "riscv64 is a Linux-only verified-codegen target".into(),
         ));
     }
     match options.target.arch {
+        Arch::X86_64 if options.target.os == Os::Windows => {
+            windows_main = x86_64::start_windows(
+                &mut a,
+                options.protocol,
+                entry_plan.result.len(),
+                entry_plan.label,
+            )?;
+        }
         Arch::X86_64 => x86_64::start(
             &mut a,
             options.target.os,
@@ -372,6 +399,8 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
             }
         }
     }
+    let prologues = std::mem::take(&mut a.prologues);
+    let externals = std::mem::take(&mut a.externals);
     let code = a.finish()?;
     let (container, bytes) = match options.target {
         Target {
@@ -400,8 +429,19 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
             container::elf_executable(container::EM_RISCV, &code),
         ),
         Target {
+            arch: Arch::X86_64,
+            os: Os::Windows,
+        } => (
+            Container::CoffObject,
+            container::coff_object(&code, windows_main, &prologues, &externals),
+        ),
+        Target {
             arch: Arch::X86_64 | Arch::Riscv64,
             os: Os::MacOs,
+        }
+        | Target {
+            arch: Arch::Aarch64 | Arch::Riscv64,
+            os: Os::Windows,
         } => {
             return Err(VerifiedError::Target(format!(
                 "{:?} macOS is not a verified-codegen target",

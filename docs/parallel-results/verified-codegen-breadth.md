@@ -142,3 +142,52 @@ not in this milestone. They follow as separate PRs.
 - `VESPER_LEAN=<lean 4.35.0> cargo test --locked --test verified_codegen_lean
   --test refinement_places_lean`: pass, including the line-for-line table
   comparison (93 rows).
+
+## Milestone 4: Windows x64 COFF
+
+### What was built
+
+- `Target::X86_64_WINDOWS` (`x86_64-pc-windows-msvc`) emits an x86-64 COFF
+  object (written directly, deterministically) with `.text`, `.xdata` and
+  `.pdata`, exporting the C `main`. `vesper build --codegen verified
+  --target x86_64-pc-windows-msvc` links it with the same MSVC linker
+  discovery and static runtime libraries as the Cranelift Windows path
+  (`native::windows::link_executable`, read-only reuse).
+- Every compiled function and `main` get one `RUNTIME_FUNCTION` and a
+  version-1 `UNWIND_INFO` (`UWOP_PUSH_NONVOL rbp`, then
+  `UWOP_ALLOC_SMALL`/`ALLOC_LARGE` for the fixed frame), with
+  `IMAGE_REL_AMD64_ADDR32NB` relocations. Function bodies never move `rsp`,
+  so the fixed allocation is the whole unwind state. On Windows the
+  epilogue is the canonical `add rsp, frame; pop rbp; ret`, and frames of a
+  page or more touch each page below `rsp` in order (as `__chkstk` does)
+  before allocating.
+- `main` calls the entry, writes the result words with `GetStdHandle` and
+  `WriteFile` (raw bytes, no CRT text mode) for the word protocol, and
+  returns the low byte of the first word as the exit status. Abort exits
+  call `ExitProcess(101|102|103)`. The x86-64 integer, float and control
+  encodings are otherwise shared with Linux: they use only `rax`, `rcx`,
+  `rdx`, `xmm0` and `xmm1` (volatile in the Windows ABI) and `rbp`, which
+  the prologue saves.
+
+### Checks
+
+- The differential tests include the Windows target. Locally the objects
+  were linked with MinGW-w64 GCC 13 and run under Wine 9.0: every fixture,
+  every checked-arithmetic boundary and the ten-million-iteration loop
+  agree with the evaluator and Cranelift. On the Windows CI job the same
+  tests link with `link.exe` and run natively; elsewhere the target is
+  reported as unavailable.
+- `containers_are_well_formed` checks the object with
+  `native::windows::inspect`: AMD64, `.text`/`.xdata`/`.pdata`, one
+  `RUNTIME_FUNCTION` and `UNWIND_INFO` per function plus `main`, and three
+  `ADDR32NB` relocations per row.
+- `builds_and_runs_on_the_host` now builds and runs the native `.exe` on
+  Windows (exit status `6765 % 256`, and 101 for an unhandled overflow).
+
+### Limits
+
+The abort stubs, and the brief `WriteFile` call window in `main`, have no
+exact unwind description: a trap is a jump into the stub from the
+function's own frame, so a stack walk started there would be imprecise.
+Nothing in these programs raises SEH exceptions, and no unwinding is
+exercised by the tests.

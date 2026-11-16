@@ -15,11 +15,34 @@ pub enum Fix {
     Jal,
 }
 
+/// A function's prologue, for Windows unwind tables: where it starts, how
+/// many bytes it is, and the frame it allocates below the saved `rbp`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Prologue {
+    pub start: usize,
+    /// Offset of the end of `push rbp` from `start`.
+    pub push_end: u8,
+    /// Offset of the end of `sub rsp, frame` from `start`.
+    pub alloc_end: u8,
+    pub frame: u32,
+    /// Where the function's unwind range ends, when it is not the next
+    /// prologue's start.
+    pub end: Option<usize>,
+}
+
 #[derive(Default)]
 pub struct Asm {
     pub code: Vec<u8>,
     labels: BTreeMap<Label, usize>,
     fixups: Vec<(usize, Label, Fix)>,
+    /// Emit for Windows x64 (stack probes, canonical epilogues, unwind
+    /// prologues).
+    pub windows: bool,
+    /// The frame of the function being emitted (for Windows epilogues).
+    pub frame: u32,
+    pub prologues: Vec<Prologue>,
+    /// `rel32` fields that call an external symbol.
+    pub externals: Vec<(usize, &'static str)>,
 }
 impl Asm {
     pub fn bytes(&mut self, b: &[u8]) {
