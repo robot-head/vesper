@@ -18,12 +18,14 @@ pub mod contract_gate;
 mod execution;
 mod hodges_lehmann;
 pub mod layout;
+mod paired_difference;
 mod signed_rank_confidence;
 mod statistics;
 mod walsh;
 pub mod wire;
 pub use arithmetic::*;
 pub use execution::*;
+pub use paired_difference::*;
 pub use signed_rank_confidence::*;
 
 pub use hodges_lehmann::*;

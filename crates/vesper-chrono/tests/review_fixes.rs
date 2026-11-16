@@ -100,3 +100,25 @@ fn a_failed_tap_drain_never_duplicates_records_on_retry() {
     assert_eq!(rec.len(), 1, "Spawn recorded once");
     sim.finish(token).unwrap();
 }
+
+#[test]
+fn tap_drain_preserves_transition_times_when_drained_at_end() {
+    let mut rec = FlightRecorder::new(RecorderConfig::small()).unwrap();
+    let mut sim = Simulator::new(7);
+    sim.spawn(()).unwrap();
+    while let Some(token) = sim.next_task().unwrap() {
+        if matches!(token.reason(), vesper_simpulse::WakeReason::Timer(_)) {
+            sim.finish(token).unwrap();
+        } else {
+            sim.sleep(token, 10).unwrap();
+        }
+    }
+    assert_eq!(sim.now_ns(), 10);
+
+    let mut tap = SimPulseTap::new();
+    tap.drain(&sim, &mut rec).unwrap();
+    let bundle =
+        vesper_chrono::Bundle::capture(&rec, &vesper_chrono::RedactionPolicy::new(), b"drain");
+    let times: Vec<u64> = bundle.records.iter().map(|r| r.time_ns).collect();
+    assert_eq!(times, vec![0, 0, 0, 10, 10, 10, 10]);
+}

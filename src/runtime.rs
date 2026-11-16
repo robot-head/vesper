@@ -459,33 +459,52 @@ impl<'a> Runtime<'a> {
     }
     fn consume_owned_patterns(&mut self, roots: &[(&Pattern, &Value)]) -> Result<(), String> {
         if let Some(trace) = &mut self.resource_trace {
+            let best_effort = trace.is_best_effort();
             let limits = trace.limits();
             let mut pending = Vec::new();
             if !roots.is_empty() && limits.max_value_depth == 0 {
+                if best_effort {
+                    trace.mark_truncated();
+                    return Ok(());
+                }
                 return Err(trace
                     .fail(ResourceTraceFailure::ValueDepthLimit, None)
                     .to_string());
             }
             for &(pattern, value) in roots.iter().rev() {
-                trace_push(
+                if let Err(reason) = trace_push(
                     &mut pending,
                     (pattern, value, 1usize),
                     limits.max_value_nodes,
-                )
-                .map_err(|reason| trace.fail(reason, Some(pattern.span.clone())).to_string())?;
+                ) {
+                    if best_effort {
+                        trace.mark_truncated();
+                        return Ok(());
+                    }
+                    return Err(trace.fail(reason, Some(pattern.span.clone())).to_string());
+                }
             }
             let mut consumes = Vec::new();
             let mut nodes = 0usize;
             while let Some((pattern, value, depth)) = pending.pop() {
-                nodes = nodes.checked_add(1).ok_or_else(|| {
-                    trace
+                let Some(next_nodes) = nodes.checked_add(1) else {
+                    if best_effort {
+                        trace.mark_truncated();
+                        break;
+                    }
+                    return Err(trace
                         .fail(
                             ResourceTraceFailure::ValueNodeLimit,
                             Some(pattern.span.clone()),
                         )
-                        .to_string()
-                })?;
+                        .to_string());
+                };
+                nodes = next_nodes;
                 if nodes > limits.max_value_nodes {
+                    if best_effort {
+                        trace.mark_truncated();
+                        break;
+                    }
                     return Err(trace
                         .fail(
                             ResourceTraceFailure::ValueNodeLimit,
@@ -494,6 +513,10 @@ impl<'a> Runtime<'a> {
                         .to_string());
                 }
                 if depth > limits.max_value_depth {
+                    if best_effort {
+                        trace.mark_truncated();
+                        break;
+                    }
                     return Err(trace
                         .fail(
                             ResourceTraceFailure::ValueDepthLimit,
@@ -503,19 +526,38 @@ impl<'a> Runtime<'a> {
                 }
                 match (&pattern.kind, value) {
                     (PatternKind::Tuple(patterns), Value::Tuple(values)) => {
-                        let next_depth = trace_child_depth(
+                        let next_depth = match trace_child_depth(
                             trace,
                             nodes,
                             pending.len(),
                             patterns.len(),
                             depth,
                             Some(&pattern.span),
-                        )?;
+                        ) {
+                            Ok(d) => d,
+                            Err(err) => {
+                                if best_effort {
+                                    trace.mark_truncated();
+                                    break;
+                                }
+                                return Err(err);
+                            }
+                        };
+                        let mut overflowed = false;
                         for (p, v) in patterns.iter().zip(values).rev() {
-                            trace_push(&mut pending, (p, v, next_depth), limits.max_value_nodes)
-                                .map_err(|reason| {
-                                    trace.fail(reason, Some(p.span.clone())).to_string()
-                                })?;
+                            if let Err(reason) =
+                                trace_push(&mut pending, (p, v, next_depth), limits.max_value_nodes)
+                            {
+                                if best_effort {
+                                    trace.mark_truncated();
+                                    overflowed = true;
+                                    break;
+                                }
+                                return Err(trace.fail(reason, Some(p.span.clone())).to_string());
+                            }
+                        }
+                        if overflowed {
+                            break;
                         }
                     }
                     (
@@ -545,6 +587,10 @@ impl<'a> Runtime<'a> {
                         }
                         if trace.is_selected(ty) {
                             if consumes.len() >= limits.max_events {
+                                if best_effort {
+                                    trace.mark_truncated();
+                                    break;
+                                }
                                 return Err(trace
                                     .fail(
                                         ResourceTraceFailure::EventLimit,
@@ -552,7 +598,7 @@ impl<'a> Runtime<'a> {
                                     )
                                     .to_string());
                             }
-                            trace_push(
+                            if let Err(reason) = trace_push(
                                 &mut consumes,
                                 ResourceConsume {
                                     ty,
@@ -562,19 +608,34 @@ impl<'a> Runtime<'a> {
                                     site: pattern.span.clone(),
                                 },
                                 limits.max_events,
-                            )
-                            .map_err(|reason| {
-                                trace.fail(reason, Some(pattern.span.clone())).to_string()
-                            })?;
+                            ) {
+                                if best_effort {
+                                    trace.mark_truncated();
+                                    break;
+                                }
+                                return Err(trace
+                                    .fail(reason, Some(pattern.span.clone()))
+                                    .to_string());
+                            }
                         } else {
-                            let next_depth = trace_child_depth(
+                            let next_depth = match trace_child_depth(
                                 trace,
                                 nodes,
                                 pending.len(),
                                 patterns.len(),
                                 depth,
                                 Some(&pattern.span),
-                            )?;
+                            ) {
+                                Ok(d) => d,
+                                Err(err) => {
+                                    if best_effort {
+                                        trace.mark_truncated();
+                                        break;
+                                    }
+                                    return Err(err);
+                                }
+                            };
+                            let mut overflowed = false;
                             for (name, p) in patterns.iter().rev() {
                                 let v = fields.get(name).ok_or_else(|| {
                                     trace
@@ -584,14 +645,23 @@ impl<'a> Runtime<'a> {
                                         )
                                         .to_string()
                                 })?;
-                                trace_push(
+                                if let Err(reason) = trace_push(
                                     &mut pending,
                                     (p, v, next_depth),
                                     limits.max_value_nodes,
-                                )
-                                .map_err(|reason| {
-                                    trace.fail(reason, Some(p.span.clone())).to_string()
-                                })?;
+                                ) {
+                                    if best_effort {
+                                        trace.mark_truncated();
+                                        overflowed = true;
+                                        break;
+                                    }
+                                    return Err(trace
+                                        .fail(reason, Some(p.span.clone()))
+                                        .to_string());
+                                }
+                            }
+                            if overflowed {
+                                break;
                             }
                         }
                     }
@@ -614,6 +684,9 @@ impl<'a> Runtime<'a> {
         let Some(trace) = &mut self.resource_trace else {
             return Ok(());
         };
+        if trace.is_best_effort() {
+            return Ok(());
+        }
         let function = self.world.functions.get(entry).ok_or_else(|| {
             trace
                 .fail(ResourceTraceFailure::UnsupportedValue, None)
@@ -1095,6 +1168,20 @@ impl<'a> Runtime<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.tiled_op(&op, values, &state.env)?
             }
+            Op::Fip { args, .. } => {
+                let inner = args
+                    .into_iter()
+                    .next()
+                    .map(|a| get(a.value))
+                    .transpose()?
+                    .ok_or("Box constructor requires 1 argument")?;
+                Value::Data {
+                    ty: crate::fip::BOX_TYPE.into(),
+                    constructor: crate::fip::BOX_TYPE.into(),
+                    fields: BTreeMap::from([("0".into(), inner)]),
+                    resource_identity: None,
+                }
+            }
             Op::Data(name, fields) => {
                 let (a, v) = self
                     .world
@@ -1305,6 +1392,10 @@ impl<'a> Runtime<'a> {
                         ExprKind::Name(n) => {
                             let value = if let Some(slot) = env.get(&n) {
                                 slot.get()?
+                            } else if crate::fip::active(self.world)
+                                && (n == crate::fip::BOX_NEW || n == crate::fip::BOX_NEW_IN_CALLER)
+                            {
+                                Value::Constructor(crate::fip::BOX_TYPE.into())
                             } else if self.world.functions.contains_key(&n) {
                                 Value::Function(n)
                             } else if let Some((a, v)) = self.world.constructor(&n) {
