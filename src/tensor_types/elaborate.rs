@@ -201,6 +201,7 @@ impl Lower<'_> {
         }));
         Function {
             name: f.name.clone(),
+            fip: f.fip,
             generics: f
                 .generics
                 .iter()

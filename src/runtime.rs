@@ -1168,6 +1168,20 @@ impl<'a> Runtime<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.tiled_op(&op, values, &state.env)?
             }
+            Op::Fip { args, .. } => {
+                let inner = args
+                    .into_iter()
+                    .next()
+                    .map(|a| get(a.value))
+                    .transpose()?
+                    .ok_or("Box constructor requires 1 argument")?;
+                Value::Data {
+                    ty: crate::fip::BOX_TYPE.into(),
+                    constructor: crate::fip::BOX_TYPE.into(),
+                    fields: BTreeMap::from([("0".into(), inner)]),
+                    resource_identity: None,
+                }
+            }
             Op::Data(name, fields) => {
                 let (a, v) = self
                     .world
@@ -1378,6 +1392,10 @@ impl<'a> Runtime<'a> {
                         ExprKind::Name(n) => {
                             let value = if let Some(slot) = env.get(&n) {
                                 slot.get()?
+                            } else if crate::fip::active(self.world)
+                                && (n == crate::fip::BOX_NEW || n == crate::fip::BOX_NEW_IN_CALLER)
+                            {
+                                Value::Constructor(crate::fip::BOX_TYPE.into())
                             } else if self.world.functions.contains_key(&n) {
                                 Value::Function(n)
                             } else if let Some((a, v)) = self.world.constructor(&n) {
