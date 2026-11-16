@@ -5847,6 +5847,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-kinetic-gpu"
+version = "0.1.0"
+dependencies = [
+ "vesper-gpu-compute",
+ "vesper-kinetic",
+]
+
+[[package]]
 name = "vesper-lean-syntax"
 version = "0.1.0"
 
