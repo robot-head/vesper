@@ -3,8 +3,8 @@
 //! idempotent / transactional producer and classic consumer-group
 //! membership.
 use super::wire::{
-    Batch, Conn, ConnSettings, Fail, KResult, KafkaCompression, KafkaRecord, ProducerStamp, R,
-    W, api, committed_records, decode_batches, encode_batch,
+    Batch, Conn, ConnSettings, Fail, KResult, KafkaCompression, KafkaRecord, ProducerStamp, R, W,
+    api, committed_records, decode_batches, encode_batch,
 };
 use crate::Error;
 use std::collections::{BTreeMap, BTreeSet};
@@ -296,7 +296,12 @@ impl Client {
         })
     }
 
-    pub(crate) fn delete_records(&mut self, topic: &str, partition: i32, offset: i64) -> KResult<()> {
+    pub(crate) fn delete_records(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        offset: i64,
+    ) -> KResult<()> {
         self.retry(|c| {
             let node = c.leader(topic, partition)?;
             let body = c.call(node, api::DELETE_RECORDS, |w| {
@@ -375,7 +380,11 @@ impl Client {
         self.retry(|c| {
             let node = c.leader(topic, partition)?;
             let body = c.call(node, api::FETCH, |w| {
-                w.i32(-1).i32(50).i32(1).i32(max_bytes).i8(i8::from(committed));
+                w.i32(-1)
+                    .i32(50)
+                    .i32(1)
+                    .i32(max_bytes)
+                    .i8(i8::from(committed));
                 w.i32(0).i32(-1);
                 w.array(1)?.str(topic)?;
                 w.array(1)?
@@ -606,7 +615,8 @@ impl Client {
         protocol: &str,
         metadata: &[u8],
     ) -> KResult<Joined> {
-        let ms = |d: Duration| i32::try_from(d.as_millis()).map_err(|_| Fail::Local(Error::Overflow));
+        let ms =
+            |d: Duration| i32::try_from(d.as_millis()).map_err(|_| Fail::Local(Error::Overflow));
         let (st, rt) = (ms(session_timeout)?, ms(rebalance_timeout)?);
         self.set_read_timeout(GROUP, group, rebalance_timeout + Duration::from_secs(5))?;
         let body = self.coord_call(GROUP, group, api::JOIN_GROUP, |w| {
@@ -715,7 +725,11 @@ impl Client {
     /// InitProducerId: (producer id, epoch). With a transactional id this
     /// fences every earlier incarnation and completes (aborts) its open
     /// transaction first.
-    pub(crate) fn init_producer(&mut self, txn: Option<&str>, timeout: Duration) -> KResult<(i64, i16)> {
+    pub(crate) fn init_producer(
+        &mut self,
+        txn: Option<&str>,
+        timeout: Duration,
+    ) -> KResult<(i64, i16)> {
         let ms = i32::try_from(timeout.as_millis()).map_err(|_| Fail::Local(Error::Overflow))?;
         self.retry(|c| {
             let body = match txn {

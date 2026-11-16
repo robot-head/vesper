@@ -350,16 +350,24 @@ impl<'a> R<'a> {
         Ok(self.take(1)?[0] != 0)
     }
     pub(crate) fn i16(&mut self) -> KResult<i16> {
-        Ok(i16::from_be_bytes(self.take(2)?.try_into().map_err(|_| MALFORMED)?))
+        Ok(i16::from_be_bytes(
+            self.take(2)?.try_into().map_err(|_| MALFORMED)?,
+        ))
     }
     pub(crate) fn i32(&mut self) -> KResult<i32> {
-        Ok(i32::from_be_bytes(self.take(4)?.try_into().map_err(|_| MALFORMED)?))
+        Ok(i32::from_be_bytes(
+            self.take(4)?.try_into().map_err(|_| MALFORMED)?,
+        ))
     }
     pub(crate) fn u32(&mut self) -> KResult<u32> {
-        Ok(u32::from_be_bytes(self.take(4)?.try_into().map_err(|_| MALFORMED)?))
+        Ok(u32::from_be_bytes(
+            self.take(4)?.try_into().map_err(|_| MALFORMED)?,
+        ))
     }
     pub(crate) fn i64(&mut self) -> KResult<i64> {
-        Ok(i64::from_be_bytes(self.take(8)?.try_into().map_err(|_| MALFORMED)?))
+        Ok(i64::from_be_bytes(
+            self.take(8)?.try_into().map_err(|_| MALFORMED)?,
+        ))
     }
     pub(crate) fn uvarint(&mut self) -> KResult<u64> {
         let mut v = 0u64;
@@ -693,8 +701,9 @@ impl Conn {
         let mut r = R::new(&body, false);
         let code = r.i16()?;
         check(code, "sasl handshake")?;
-        let config = SASLConfig::with_credentials(None, sasl.username.clone(), sasl.password.clone())
-            .map_err(|_| Fail::Local(Error::Kafka("sasl configuration")))?;
+        let config =
+            SASLConfig::with_credentials(None, sasl.username.clone(), sasl.password.clone())
+                .map_err(|_| Fail::Local(Error::Kafka("sasl configuration")))?;
         let client = SASLClient::new(config);
         let mech = Mechname::parse(sasl.mechanism.name().as_bytes())
             .map_err(|_| Fail::Local(Error::Kafka("sasl configuration")))?;
@@ -1088,12 +1097,9 @@ fn compress(codec: KafkaCompression, raw: &[u8]) -> KResult<Vec<u8>> {
         KafkaCompression::Lz4 => {
             let mut e = lz4_flex::frame::FrameEncoder::new(Vec::new());
             e.write_all(raw).map_err(io)?;
-            e.finish()
-                .map_err(|_| Fail::Local(Error::Kafka("lz4")))?
+            e.finish().map_err(|_| Fail::Local(Error::Kafka("lz4")))?
         }
-        KafkaCompression::Zstd => {
-            zstd::bulk::compress(raw, 3).map_err(io)?
-        }
+        KafkaCompression::Zstd => zstd::bulk::compress(raw, 3).map_err(io)?,
     })
 }
 
@@ -1274,7 +1280,9 @@ mod tests {
         for _ in 0..2000 {
             let mut b = good.clone();
             for _ in 0..3 {
-                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let i = (x >> 33) as usize % b.len();
                 b[i] ^= (x >> 13) as u8;
             }
@@ -1283,7 +1291,12 @@ mod tests {
         // Readers reject hostile lengths without allocating.
         let mut r = R::new(&[0x7f, 0xff, 0xff, 0xff], false);
         assert!(r.array().is_err());
-        let mut r = R::new(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1], true);
+        let mut r = R::new(
+            &[
+                0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1,
+            ],
+            true,
+        );
         assert!(r.uvarint().is_err());
     }
 
@@ -1324,7 +1337,13 @@ mod tests {
         for v in [0i64, 1, -1, 63, -64, 300, i64::MAX, i64::MIN] {
             w.varint(v);
         }
-        w.str("héllo").unwrap().nstr(None).unwrap().bytes(&[1, 2]).unwrap().tags();
+        w.str("héllo")
+            .unwrap()
+            .nstr(None)
+            .unwrap()
+            .bytes(&[1, 2])
+            .unwrap()
+            .tags();
         let mut r = R::new(&w.buf, true);
         for v in [0i64, 1, -1, 63, -64, 300, i64::MAX, i64::MIN] {
             assert_eq!(r.varint().unwrap(), v);

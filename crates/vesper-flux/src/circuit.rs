@@ -27,10 +27,10 @@ pub use kafka::{
 #[path = "kafka_group.rs"]
 mod kafka_group;
 pub use kafka_group::{GroupPoll, KafkaGroupConfig, KafkaGroupSource};
-#[path = "kafka_wire.rs"]
-mod wire;
 #[path = "log.rs"]
 mod log;
+#[path = "kafka_wire.rs"]
+mod wire;
 pub use log::{InputLog, LogLimits, LogRecovery};
 #[path = "sink.rs"]
 mod sink;

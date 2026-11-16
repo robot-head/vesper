@@ -31,7 +31,9 @@
 //! partitions the group gave away meanwhile.
 use super::cdc::CdcPolicy;
 use super::client::Client;
-use super::kafka::{GroupOffsetSource, GroupOffsets, KafkaBinding, KafkaConnection, KafkaSourceLimits};
+use super::kafka::{
+    GroupOffsetSource, GroupOffsets, KafkaBinding, KafkaConnection, KafkaSourceLimits,
+};
 use super::wire::{Fail, KResult, R, W};
 use super::{Circuit, EpochSource, TickInput};
 use crate::zset::Accumulator;
@@ -111,7 +113,11 @@ impl Index {
     fn header(fp: &[u8; 32], count: usize) -> Result<Vec<u8>, Error> {
         let mut h = Vec::new();
         h.extend_from_slice(MAGIC);
-        h.extend_from_slice(&u32::try_from(count).map_err(|_| Error::Overflow)?.to_le_bytes());
+        h.extend_from_slice(
+            &u32::try_from(count)
+                .map_err(|_| Error::Overflow)?
+                .to_le_bytes(),
+        );
         h.extend_from_slice(fp);
         let s = sum(b"vesper.flux.kafka-group-index.header/1", &h);
         h.extend_from_slice(&s);
@@ -285,7 +291,12 @@ impl std::fmt::Debug for KafkaGroupSource {
     }
 }
 
-fn fingerprint(policy: &CdcPolicy, topics: &[KafkaBinding], widths: &[usize], group: &str) -> [u8; 32] {
+fn fingerprint(
+    policy: &CdcPolicy,
+    topics: &[KafkaBinding],
+    widths: &[usize],
+    group: &str,
+) -> [u8; 32] {
     let mut h = blake3::Hasher::new();
     h.update(b"vesper.flux.kafka-group-source/1");
     h.update(&(group.len() as u64).to_le_bytes());
@@ -571,13 +582,13 @@ impl KafkaGroupSource {
         };
         let g = &self.group;
         let r = self.conn.raw(|c: &mut Client| {
-            c.retry(|c| {
-                match c.heartbeat(&g.group_id, gen_, &id, g.instance_id.as_deref()) {
+            c.retry(
+                |c| match c.heartbeat(&g.group_id, gen_, &id, g.instance_id.as_deref()) {
                     Err(Fail::Code(27 | 22 | 25, _)) => Ok(true),
                     Err(e) => Err(e),
                     Ok(()) => Ok(false),
-                }
-            })
+                },
+            )
         });
         let mut m = self.member.borrow_mut();
         m.last_heartbeat = Instant::now();
@@ -776,9 +787,9 @@ impl GroupOffsetSource for KafkaGroupSource {
             // The epoch must continue exactly where the group's offset is: a
             // partition another member read meanwhile, or one the group gave
             // away, would deliver its records twice.
-            let committed = self
-                .conn
-                .group_offsets(&self.group.group_id, &t.topic, &[t.partition])?;
+            let committed =
+                self.conn
+                    .group_offsets(&self.group.group_id, &t.topic, &[t.partition])?;
             let continues = match committed.get(&t.partition) {
                 Some((offset, _)) => *offset == s.start.0,
                 None => true,
@@ -786,7 +797,12 @@ impl GroupOffsetSource for KafkaGroupSource {
             if !owned.contains(&i) || !continues {
                 return Err(Error::Kafka("assignment lost unpublished epochs"));
             }
-            offsets.push((t.topic.clone(), t.partition, s.end.0, input_metadata(s.end.1)));
+            offsets.push((
+                t.topic.clone(),
+                t.partition,
+                s.end.0,
+                input_metadata(s.end.1),
+            ));
         }
         if offsets.is_empty() {
             return Ok(None);
@@ -804,4 +820,3 @@ impl GroupOffsetSource for KafkaGroupSource {
         m.published = Some(m.published.map_or(epoch, |p| p.max(epoch)));
     }
 }
-

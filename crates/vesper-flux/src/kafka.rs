@@ -193,6 +193,30 @@ impl KafkaConnection {
         Ok((earliest, latest))
     }
 
+    /// Wait (up to `timeout`) until no transaction is open on the partition:
+    /// its last stable offset reaches the high watermark. Transaction
+    /// markers are written after EndTxn returns, so a reader may otherwise
+    /// briefly miss a just-committed transaction. Returns whether it did.
+    pub fn wait_stable(
+        &self,
+        topic: &str,
+        partition: i32,
+        timeout: Duration,
+    ) -> Result<bool, Error> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let stable = self.run(|c| c.list_offset(topic, partition, -1, true))?;
+            let high = self.run(|c| c.list_offset(topic, partition, -1, false))?;
+            if stable >= high {
+                return Ok(true);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Append records as one batch without a producer id (acks = all, with
     /// client retries): at-least-once, a lost response can duplicate the
     /// batch. Returns the base offset. Use [`KafkaProducer`] for
@@ -309,10 +333,18 @@ pub struct HeldProduce {
     batch: Vec<u8>,
 }
 impl HeldProduce {
-    /// Send the request once, now, over `conn`: the base offset, `-1` if
-    /// the broker recognised it as a duplicate, or its error.
+    /// Send the request once, now, over `conn`: the base offset (for a
+    /// duplicate, the original batch's offset, or `-1` from brokers that
+    /// answer DUPLICATE_SEQUENCE_NUMBER), or its error.
     pub fn deliver(&self, conn: &KafkaConnection) -> Result<i64, Error> {
-        conn.run(|c| c.produce_once(&self.topic, self.partition, self.txn.as_deref(), &self.batch))
+        conn.run(|c| {
+            c.produce_once(
+                &self.topic,
+                self.partition,
+                self.txn.as_deref(),
+                &self.batch,
+            )
+        })
     }
 }
 
@@ -1270,10 +1302,7 @@ impl<S: CommitSink> KafkaSink<S> {
             return Ok(());
         }
         self.progress = None;
-        let (timeout, codec) = (
-            self.conn.cfg.transaction_timeout,
-            self.conn.cfg.compression,
-        );
+        let (timeout, codec) = (self.conn.cfg.transaction_timeout, self.conn.cfg.compression);
         let txn = self.cfg.transactional_id.clone();
         let state = self
             .conn
@@ -1501,6 +1530,8 @@ pub fn read_kafka_output(
     let tag = circuit_tag(&circuit_identity(circuit)?);
     let mut epochs: BTreeMap<u64, Vec<(Row, i64)>> = BTreeMap::new();
     for p in 0..partitions {
+        // Let just-committed transactions' markers land.
+        conn.wait_stable(topic, p, conn.cfg.retry_for)?;
         let (earliest, latest) = conn.offsets(topic, p)?;
         if earliest != 0 {
             return Err(Error::Kafka("output topic truncated"));
