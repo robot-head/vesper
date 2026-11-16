@@ -138,6 +138,7 @@ impl std::error::Error for ResourceTraceError {}
 pub struct ResourceTraceConfig {
     selected: Rc<Vec<String>>,
     limits: ResourceTraceLimits,
+    best_effort: bool,
 }
 impl ResourceTraceConfig {
     pub fn new(
@@ -193,7 +194,17 @@ impl ResourceTraceConfig {
         Ok(Self {
             selected: Rc::new(names),
             limits,
+            best_effort: false,
         })
+    }
+    /// When enabled, hitting observer capacity or unsupported boundary value
+    /// shapes marks the report as truncated instead of aborting execution.
+    pub fn with_best_effort(mut self, best_effort: bool) -> Self {
+        self.best_effort = best_effort;
+        self
+    }
+    pub fn is_best_effort(&self) -> bool {
+        self.best_effort
     }
     pub(crate) fn validate_world(&self, world: &World) -> Result<(), ResourceTraceError> {
         for name in self.selected.iter() {
@@ -336,6 +347,7 @@ pub struct ResourceTraceReport {
     live: Vec<ResourceLive>,
     status: ResourceTraceStatus,
     failure: Option<ResourceTraceError>,
+    truncated: bool,
 }
 impl ResourceTraceReport {
     pub fn selected_types(&self) -> &[String] {
@@ -359,6 +371,9 @@ impl ResourceTraceReport {
     }
     pub fn failure(&self) -> Option<&ResourceTraceError> {
         self.failure.as_ref()
+    }
+    pub fn truncated(&self) -> bool {
+        self.truncated
     }
 }
 
@@ -392,6 +407,7 @@ struct State {
     seen: Vec<bool>,
     status: ResourceTraceStatus,
     failure: Option<FailureRecord>,
+    truncated: bool,
 }
 impl State {
     fn record(&mut self, error: &ResourceTraceError) {
@@ -435,6 +451,9 @@ impl State {
                 ResourceTraceFailure::MalformedCarrier,
                 site,
             ));
+        }
+        if identity.is_none() && self.config.best_effort && self.truncated {
+            return Ok(None);
         }
         let identity = identity.ok_or_else(|| {
             ResourceTraceError::new(ResourceTraceFailure::MissingIdentity, site.clone())
@@ -527,6 +546,7 @@ impl ResourceTraceObserver {
             live,
             status,
             failure: failure.map(FailureRecord::error),
+            truncated: state.truncated,
         })
     }
 }
@@ -582,6 +602,7 @@ impl ResourceTraceEngine {
             seen,
             status: ResourceTraceStatus::Idle,
             failure: None,
+            truncated: false,
         };
         Ok(Self {
             shared: Rc::new(Shared {
@@ -595,6 +616,9 @@ impl ResourceTraceEngine {
     pub(super) fn limits(&self) -> ResourceTraceLimits {
         self.config.limits
     }
+    pub(super) fn is_best_effort(&self) -> bool {
+        self.config.best_effort
+    }
     pub(super) fn is_selected(&self, ty: &str) -> bool {
         self.config.kind(ty).is_some()
     }
@@ -602,6 +626,12 @@ impl ResourceTraceEngine {
         ResourceTraceObserver {
             shared: self.shared.clone(),
         }
+    }
+    pub(super) fn mark_truncated(&mut self) {
+        let _ = self.apply(|state| {
+            state.truncated = true;
+            Ok(())
+        });
     }
     fn apply<T>(
         &mut self,
@@ -644,6 +674,7 @@ impl ResourceTraceEngine {
             state.ledger.clear();
             state.seen.fill(false);
             state.failure = None;
+            state.truncated = false;
             state.status = ResourceTraceStatus::Running;
             Ok(())
         })
@@ -672,21 +703,39 @@ impl ResourceTraceEngine {
                     Some(site),
                 ));
             }
+            if state.config.best_effort && state.truncated {
+                return Ok(None);
+            }
             if state.ledger.len() >= state.config.limits.max_resources {
+                if state.config.best_effort {
+                    state.truncated = true;
+                    return Ok(None);
+                }
                 return Err(ResourceTraceError::new(
                     ResourceTraceFailure::ResourceLimit,
                     Some(site),
                 ));
             }
             if state.events.len() >= state.config.limits.max_events {
+                if state.config.best_effort {
+                    state.truncated = true;
+                    return Ok(None);
+                }
                 return Err(ResourceTraceError::new(
                     ResourceTraceFailure::EventLimit,
                     Some(site),
                 ));
             }
-            let next = state.next_serial.checked_add(1).ok_or_else(|| {
-                ResourceTraceError::new(ResourceTraceFailure::SerialExhausted, Some(site.clone()))
-            })?;
+            let Some(next) = state.next_serial.checked_add(1) else {
+                if state.config.best_effort {
+                    state.truncated = true;
+                    return Ok(None);
+                }
+                return Err(ResourceTraceError::new(
+                    ResourceTraceFailure::SerialExhausted,
+                    Some(site),
+                ));
+            };
             let identity = ResourceIdentity {
                 instance: state.instance,
                 run: state.run,
@@ -717,6 +766,10 @@ impl ResourceTraceEngine {
         self.apply(|state| {
             state.running()?;
             if batch.len() > state.config.limits.max_value_nodes {
+                if state.config.best_effort {
+                    state.truncated = true;
+                    return Ok(());
+                }
                 return Err(ResourceTraceError::new(
                     ResourceTraceFailure::ValueNodeLimit,
                     None,
@@ -750,28 +803,33 @@ impl ResourceTraceEngine {
                     plan.push((index, item.site.clone()));
                 }
             }
-            if state
+            let event_limit_exceeded = state
                 .events
                 .len()
                 .checked_add(plan.len())
-                .is_none_or(|n| n > state.config.limits.max_events)
-            {
+                .is_none_or(|n| n > state.config.limits.max_events);
+            if event_limit_exceeded && !state.config.best_effort {
                 return Err(ResourceTraceError::new(
                     ResourceTraceFailure::EventLimit,
                     None,
                 ));
+            }
+            if event_limit_exceeded {
+                state.truncated = true;
             }
             // Every carrier, duplicate and capacity check completed. Private
             // ledger indices remain stable throughout this infallible commit.
             for (index, site) in plan {
                 let entry = &mut state.ledger[index];
                 entry.live = false;
-                state.events.push(ResourceEvent {
-                    action: ResourceAction::Consume,
-                    kind: entry.resource.kind,
-                    identity: entry.resource.identity,
-                    site,
-                });
+                if state.events.len() < state.config.limits.max_events {
+                    state.events.push(ResourceEvent {
+                        action: ResourceAction::Consume,
+                        kind: entry.resource.kind,
+                        identity: entry.resource.identity,
+                        site,
+                    });
+                }
             }
             Ok(())
         })
@@ -783,12 +841,20 @@ impl ResourceTraceEngine {
             state.running()?;
             let limits = state.config.limits;
             if values.len() > limits.max_value_nodes {
+                if state.config.best_effort {
+                    state.truncated = true;
+                    return Ok(());
+                }
                 return Err(ResourceTraceError::new(
                     ResourceTraceFailure::ValueNodeLimit,
                     None,
                 ));
             }
             if !values.is_empty() && limits.max_value_depth == 0 {
+                if state.config.best_effort {
+                    state.truncated = true;
+                    return Ok(());
+                }
                 return Err(ResourceTraceError::new(
                     ResourceTraceFailure::ValueDepthLimit,
                     None,
@@ -802,16 +868,32 @@ impl ResourceTraceEngine {
             state.seen.fill(false);
             let mut visited = 0usize;
             while let Some((value, depth)) = stack.pop() {
-                visited = visited.checked_add(1).ok_or_else(|| {
-                    ResourceTraceError::new(ResourceTraceFailure::ValueNodeLimit, None)
-                })?;
+                let Some(next_visited) = visited.checked_add(1) else {
+                    if state.config.best_effort {
+                        state.truncated = true;
+                        return Ok(());
+                    }
+                    return Err(ResourceTraceError::new(
+                        ResourceTraceFailure::ValueNodeLimit,
+                        None,
+                    ));
+                };
+                visited = next_visited;
                 if visited > limits.max_value_nodes {
+                    if state.config.best_effort {
+                        state.truncated = true;
+                        return Ok(());
+                    }
                     return Err(ResourceTraceError::new(
                         ResourceTraceFailure::ValueNodeLimit,
                         None,
                     ));
                 }
                 if depth > limits.max_value_depth {
+                    if state.config.best_effort {
+                        state.truncated = true;
+                        return Ok(());
+                    }
                     return Err(ResourceTraceError::new(
                         ResourceTraceFailure::ValueDepthLimit,
                         None,
@@ -848,6 +930,10 @@ impl ResourceTraceEngine {
                     | Value::Bool(_)
                     | Value::String(_) => 0,
                     _ => {
+                        if state.config.best_effort {
+                            state.truncated = true;
+                            return Ok(());
+                        }
                         return Err(ResourceTraceError::new(
                             ResourceTraceFailure::UnsupportedValue,
                             None,
@@ -859,6 +945,10 @@ impl ResourceTraceEngine {
                     .and_then(|n| n.checked_add(child_count))
                     .is_none_or(|n| n > limits.max_value_nodes)
                 {
+                    if state.config.best_effort {
+                        state.truncated = true;
+                        return Ok(());
+                    }
                     return Err(ResourceTraceError::new(
                         ResourceTraceFailure::ValueNodeLimit,
                         None,
@@ -867,10 +957,21 @@ impl ResourceTraceEngine {
                 if child_count == 0 {
                     continue;
                 }
-                let next_depth = depth.checked_add(1).ok_or_else(|| {
-                    ResourceTraceError::new(ResourceTraceFailure::ValueDepthLimit, None)
-                })?;
+                let Some(next_depth) = depth.checked_add(1) else {
+                    if state.config.best_effort {
+                        state.truncated = true;
+                        return Ok(());
+                    }
+                    return Err(ResourceTraceError::new(
+                        ResourceTraceFailure::ValueDepthLimit,
+                        None,
+                    ));
+                };
                 if next_depth > limits.max_value_depth {
+                    if state.config.best_effort {
+                        state.truncated = true;
+                        return Ok(());
+                    }
                     return Err(ResourceTraceError::new(
                         ResourceTraceFailure::ValueDepthLimit,
                         None,

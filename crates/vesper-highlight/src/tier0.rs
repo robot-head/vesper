@@ -432,7 +432,8 @@ fn classify(src: &str, toks: &[Tok], token_mode: bool) -> Vec<HighlightSpan> {
                     C::WireEndianScalar
                 } else if before == Some(K::At) && word == "proof" {
                     C::DocProofAnchor
-                } else if is_tiled_decl || is_field_temp {
+                } else if (before == Some(K::At) && word == "fip") || is_tiled_decl || is_field_temp
+                {
                     C::KeywordControl
                 } else if before == Some(K::Fn) || after == Some(K::LParen) {
                     C::FunctionIdent
@@ -472,6 +473,9 @@ fn classify(src: &str, toks: &[Tok], token_mode: bool) -> Vec<HighlightSpan> {
             }
             K::At if next(i).is_some_and(|n| n.kind == K::Lower && text(n) == "proof") => {
                 C::DocProofAnchor
+            }
+            K::At if next(i).is_some_and(|n| n.kind == K::Lower && text(n) == "fip") => {
+                C::KeywordControl
             }
             K::Arrow
             | K::FatArrow
