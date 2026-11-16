@@ -287,7 +287,9 @@ fn rust_a64_listing_covers_every_instruction_kind() {
 #[test]
 fn rust_table_covers_every_row_kind() {
     let listing = vesper::verified_codegen::table_listing();
-    assert_eq!(listing.lines().count(), 93);
+    assert_eq!(listing.lines().count(), 94);
+    // Milestone 7: a trap scope is one machine pseudo-instruction.
+    assert!(listing.contains("scope: scope L9 L10\n"));
     assert!(listing.contains("farith div: ld r0 s1; ld r1 s2; fop div; st s0 r0\n"));
     assert!(listing.contains("fcompare ne: ld r0 s1; ld r1 s2; fcmp ne; st s0 r0\n"));
     assert!(listing.contains("fneg: ld r0 s1; fneg; st s0 r0\n"));

@@ -8,9 +8,10 @@
 //! still use it.
 
 use crate::error::VulkanError;
+use crate::format::Format;
 use crate::shader::{BindingKind, CompiledShader, Stage, check_layout};
 use ash::{ext, khr, vk};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString, c_void};
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -39,11 +40,23 @@ pub enum Validation {
     Required,
 }
 
+/// How resources are shared between the queue families in use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sharing {
+    /// `VK_SHARING_MODE_CONCURRENT` across every family in use (no
+    /// ownership transfers).
+    Concurrent,
+    /// `VK_SHARING_MODE_EXCLUSIVE`: the backend emits queue-family ownership
+    /// release/acquire barriers at cross-family handoffs.
+    Exclusive,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceConfig {
     pub validation: Validation,
     /// Case-insensitive substring of the device name to select.
     pub device_name: Option<String>,
+    pub sharing: Sharing,
 }
 
 impl Default for DeviceConfig {
@@ -51,6 +64,7 @@ impl Default for DeviceConfig {
         Self {
             validation: Validation::IfAvailable,
             device_name: None,
+            sharing: Sharing::Concurrent,
         }
     }
 }
@@ -64,9 +78,14 @@ impl DeviceConfig {
             Ok("required") | Ok("1") => Validation::Required,
             _ => Validation::IfAvailable,
         };
+        let sharing = match std::env::var("VESPER_IGNIS_VULKAN_SHARING").as_deref() {
+            Ok("exclusive") => Sharing::Exclusive,
+            _ => Sharing::Concurrent,
+        };
         Self {
             validation,
             device_name: std::env::var("VESPER_IGNIS_VULKAN_DEVICE").ok(),
+            sharing,
         }
     }
 }
@@ -84,6 +103,15 @@ pub struct DeviceInfo {
     pub sync_validation: bool,
     /// (family index, flags, queue count) of the families in use.
     pub families: Vec<(u32, String, u32)>,
+    /// `VK_KHR_swapchain` and `VK_KHR_xcb_surface` are enabled.
+    pub presentation: bool,
+    /// Binary semaphores can be exported as Linux sync files
+    /// (`VK_KHR_external_semaphore_fd`, `SYNC_FD`).
+    pub sync_fd_export: bool,
+    /// `separateDepthStencilLayouts` is enabled (depth and stencil planes
+    /// may be in different layouts).
+    pub separate_depth_stencil_layouts: bool,
+    pub sharing: Sharing,
 }
 
 /// One validation-layer message of warning or error severity.
@@ -141,11 +169,21 @@ unsafe extern "system" fn debug_callback(
 pub(crate) struct Family {
     pub index: u32,
     pub count: u32,
+    pub flags: vk::QueueFlags,
 }
 
 pub(crate) struct Inner {
-    _entry: ash::Entry,
-    instance: ash::Instance,
+    /// Keeps the loaded `libvulkan` alive for the instance and device.
+    #[allow(dead_code)]
+    pub entry: ash::Entry,
+    pub instance: ash::Instance,
+    pub physical: vk::PhysicalDevice,
+    pub surface: Option<khr::surface::Instance>,
+    pub xcb: Option<khr::xcb_surface::Instance>,
+    pub swapchain: Option<khr::swapchain::Device>,
+    pub semaphore_fd: Option<khr::external_semaphore_fd::Device>,
+    pub separate_ds: bool,
+    pub exclusive: bool,
     debug: Option<(ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
     messages: Box<Messages>,
     pub device: ash::Device,
@@ -163,6 +201,8 @@ pub(crate) struct Inner {
     /// Serializes host access to the shared `VkQueue`s (external
     /// synchronization), across every backend built on this device.
     pub submit_lock: Mutex<()>,
+    /// Counters of the last accepted submission on this device.
+    pub stats: Mutex<crate::vk::backend::SubmitStats>,
 }
 
 impl Drop for Inner {
@@ -227,8 +267,12 @@ impl Inner {
                     .contains(want)
         })
     }
+    /// Capabilities of an Ignis queue of `kind` on its family.
+    pub fn caps(&self, kind: QueueKind) -> crate::translate::QueueCaps {
+        crate::translate::QueueCaps::new(kind, self.family(kind).flags)
+    }
     fn sharing<'a, T: SharingInfo<'a>>(&'a self, info: T) -> T {
-        if self.sharing.len() > 1 {
+        if self.sharing.len() > 1 && !self.exclusive {
             info.concurrent(&self.sharing)
         } else {
             info
@@ -311,6 +355,9 @@ impl Device {
                 .any(|e| e.extension_name_as_c_str().ok() == Some(name))
         };
         let debug_utils = validation && has_ext(ext::debug_utils::NAME);
+        let surface_exts = cfg!(target_os = "linux")
+            && has_ext(khr::surface::NAME)
+            && has_ext(khr::xcb_surface::NAME);
         let sync_validation = validation && has_ext(ext::validation_features::NAME);
         let mut ext_names = Vec::new();
         if debug_utils {
@@ -318,6 +365,10 @@ impl Device {
         }
         if sync_validation {
             ext_names.push(ext::validation_features::NAME.as_ptr());
+        }
+        if surface_exts {
+            ext_names.push(khr::surface::NAME.as_ptr());
+            ext_names.push(khr::xcb_surface::NAME.as_ptr());
         }
         let layer_names = if validation {
             vec![VALIDATION_LAYER.as_ptr()]
@@ -391,6 +442,7 @@ impl Device {
                 .map(|(i, f)| Family {
                     index: i as u32,
                     count: f.queue_count.clamp(1, 4),
+                    flags: f.queue_flags,
                 })
         };
         let direct = find(
@@ -423,8 +475,33 @@ impl Device {
                     .queue_priorities(&priorities[..fam.count as usize])
             })
             .collect();
-        let device_exts = [khr::push_descriptor::NAME.as_ptr()];
-        let mut f12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
+        // SAFETY: valid physical device.
+        let dev_exts =
+            unsafe { instance.enumerate_device_extension_properties(physical) }.unwrap_or_default();
+        let has_dev_ext = |name: &CStr| {
+            dev_exts
+                .iter()
+                .any(|e| e.extension_name_as_c_str().ok() == Some(name))
+        };
+        let mut device_exts = vec![khr::push_descriptor::NAME.as_ptr()];
+        let presentation = surface_exts && has_dev_ext(khr::swapchain::NAME);
+        if presentation {
+            device_exts.push(khr::swapchain::NAME.as_ptr());
+        }
+        let sync_fd_export = cfg!(target_os = "linux")
+            && has_dev_ext(khr::external_semaphore_fd::NAME)
+            && sync_fd_exportable(instance, physical);
+        if sync_fd_export {
+            device_exts.push(khr::external_semaphore_fd::NAME.as_ptr());
+        }
+        let mut have12 = vk::PhysicalDeviceVulkan12Features::default();
+        let mut have = vk::PhysicalDeviceFeatures2::default().push_next(&mut have12);
+        // SAFETY: valid physical device; the chain borrows locals.
+        unsafe { instance.get_physical_device_features2(physical, &mut have) };
+        let separate_ds = have12.separate_depth_stencil_layouts == vk::TRUE;
+        let mut f12 = vk::PhysicalDeviceVulkan12Features::default()
+            .timeline_semaphore(true)
+            .separate_depth_stencil_layouts(separate_ds);
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
             .synchronization2(true)
             .dynamic_rendering(true);
@@ -453,6 +530,12 @@ impl Device {
         // SAFETY: valid physical device.
         let memory = unsafe { instance.get_physical_device_memory_properties(physical) };
         let push = khr::push_descriptor::Device::new(instance, &device);
+        let surface = surface_exts.then(|| khr::surface::Instance::new(&entry, instance));
+        let xcb = surface_exts.then(|| khr::xcb_surface::Instance::new(&entry, instance));
+        let swapchain = presentation.then(|| khr::swapchain::Device::new(instance, &device));
+        let semaphore_fd =
+            sync_fd_export.then(|| khr::external_semaphore_fd::Device::new(instance, &device));
+        let exclusive = config.sharing == Sharing::Exclusive;
         let name = props
             .0
             .device_name_as_c_str()
@@ -485,13 +568,24 @@ impl Device {
                     (*i, family_flags(f.queue_flags), f.queue_count)
                 })
                 .collect(),
+            presentation,
+            sync_fd_export,
+            separate_depth_stencil_layouts: separate_ds,
+            sharing: config.sharing,
         };
         let mut guard = guard;
         let mut debug_guard = debug_guard;
         Ok(Device {
             inner: Arc::new(Inner {
-                _entry: entry,
+                entry,
                 instance: guard.0.take().expect("live"),
+                physical,
+                surface,
+                xcb,
+                swapchain,
+                semaphore_fd,
+                separate_ds,
+                exclusive,
                 debug: debug_guard.0.take(),
                 messages,
                 device,
@@ -506,6 +600,7 @@ impl Device {
                 info,
                 lost: AtomicBool::new(false),
                 submit_lock: Mutex::new(()),
+                stats: Mutex::new(Default::default()),
             }),
         })
     }
@@ -552,6 +647,12 @@ impl Device {
 
     pub fn is_lost(&self) -> bool {
         self.inner.is_lost()
+    }
+
+    /// What the last accepted submission on this device recorded (split
+    /// events, narrowed barriers, filtered barriers, ownership transfers).
+    pub fn last_submit_stats(&self) -> crate::SubmitStats {
+        self.inner.stats.lock().map(|s| *s).unwrap_or_default()
     }
 
     /// A host-visible, coherent, persistently mapped buffer usable as a
@@ -625,12 +726,62 @@ impl Device {
             memory,
             size,
             ptr,
+            owner: Cell::new(None),
             live: true,
         })
     }
 
-    /// A 2D RGBA8 texture usable as a color attachment, sampled image,
-    /// storage image and copy source/destination, starting in `UNDEFINED`.
+    /// The image usages `format` supports with optimal tiling on this
+    /// device, among those a texture of that format can have here.
+    pub fn format_usage(&self, format: Format) -> vk::ImageUsageFlags {
+        // SAFETY: valid physical device of this instance.
+        let props = unsafe {
+            self.inner
+                .instance
+                .get_physical_device_format_properties(self.inner.physical, format.vk())
+        };
+        let f = props.optimal_tiling_features;
+        let mut usage = vk::ImageUsageFlags::empty();
+        let mut add = |feature: vk::FormatFeatureFlags, u: vk::ImageUsageFlags| {
+            if f.contains(feature) {
+                usage |= u;
+            }
+        };
+        add(
+            vk::FormatFeatureFlags::TRANSFER_SRC,
+            vk::ImageUsageFlags::TRANSFER_SRC,
+        );
+        add(
+            vk::FormatFeatureFlags::TRANSFER_DST,
+            vk::ImageUsageFlags::TRANSFER_DST,
+        );
+        add(
+            vk::FormatFeatureFlags::SAMPLED_IMAGE,
+            vk::ImageUsageFlags::SAMPLED,
+        );
+        if format.is_color() {
+            add(
+                vk::FormatFeatureFlags::COLOR_ATTACHMENT,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            );
+            add(
+                vk::FormatFeatureFlags::STORAGE_IMAGE,
+                vk::ImageUsageFlags::STORAGE,
+            );
+        } else {
+            add(
+                vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT,
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            );
+        }
+        usage
+    }
+
+    /// A 2D texture of `desc.format` with every usage the device supports
+    /// for it among: color or depth/stencil attachment, sampled image,
+    /// storage image (color only) and copy source/destination, starting in
+    /// `UNDEFINED`. A format without copy support and an attachment usage is
+    /// [`VulkanError::UnsupportedFormat`].
     pub fn create_texture(&self, desc: TextureInfo) -> Result<GpuTexture, VulkanError> {
         self.inner.ensure_live("vkCreateImage")?;
         let max = self.inner.limits.max_image_dimension2_d.min(16_384);
@@ -644,8 +795,19 @@ impl Device {
         if desc.array_layers == 0 || desc.array_layers > 64 {
             return Err(VulkanError::InvalidDesc("array layers"));
         }
+        let usage = self.format_usage(desc.format);
+        let attachment = if desc.format.is_color() {
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+        } else {
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+        };
+        if !usage.contains(
+            vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST | attachment,
+        ) {
+            return Err(VulkanError::UnsupportedFormat(desc.format));
+        }
         let d = &self.inner.device;
-        let format = vk::Format::R8G8B8A8_UNORM;
+        let format = desc.format.vk();
         let info = self.inner.sharing(
             vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
@@ -659,13 +821,7 @@ impl Device {
                 .array_layers(desc.array_layers)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(
-                    vk::ImageUsageFlags::COLOR_ATTACHMENT
-                        | vk::ImageUsageFlags::SAMPLED
-                        | vk::ImageUsageFlags::STORAGE
-                        | vk::ImageUsageFlags::TRANSFER_SRC
-                        | vk::ImageUsageFlags::TRANSFER_DST,
-                )
+                .usage(usage)
                 .initial_layout(vk::ImageLayout::UNDEFINED),
         );
         // SAFETY: valid create info; destroyed on every error path below.
@@ -711,35 +867,55 @@ impl Device {
             free();
             return Err(e);
         }
-        let view_info = vk::ImageViewCreateInfo::default()
-            .image(image)
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(format)
-            .subresource_range(vk::ImageSubresourceRange {
-                aspect_mask: vk::ImageAspectFlags::COLOR,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: 1,
-            });
-        // SAFETY: bound image, matching format.
-        let view = match self.inner.check("vkCreateImageView", unsafe {
-            d.create_image_view(&view_info, None)
-        }) {
+        let make_view = |aspect: vk::ImageAspectFlags| {
+            let view_info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: aspect,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            // SAFETY: bound image, matching format.
+            self.inner.check("vkCreateImageView", unsafe {
+                d.create_image_view(&view_info, None)
+            })
+        };
+        let view = match make_view(desc.format.aspects()) {
             Ok(v) => v,
             Err(e) => {
                 free();
                 return Err(e);
             }
         };
-        let count = (desc.mip_levels * desc.array_layers) as usize;
+        // A sampled view of a depth/stencil image may name one aspect only.
+        let sampled_view = if desc.format.has_stencil() {
+            match make_view(vk::ImageAspectFlags::DEPTH) {
+                Ok(v) => v,
+                Err(e) => {
+                    // SAFETY: unused view.
+                    unsafe { d.destroy_image_view(view, None) };
+                    free();
+                    return Err(e);
+                }
+            }
+        } else {
+            view
+        };
+        let count = (desc.mip_levels * desc.array_layers * desc.format.plane_count()) as usize;
         Ok(GpuTexture {
             inner: ManuallyDrop::new(self.inner.clone()),
             image,
             view,
+            sampled_view,
             memory,
             desc,
+            usage,
             layouts: RefCell::new(vec![vk::ImageLayout::UNDEFINED; count]),
+            owner: Cell::new(None),
             live: true,
         })
     }
@@ -752,8 +928,36 @@ impl Device {
         vertex: &CompiledShader,
         fragment: &CompiledShader,
     ) -> Result<Pipeline, VulkanError> {
+        self.create_graphics_pipeline_with(vertex, fragment, &GraphicsDesc::default())
+    }
+
+    /// A graphics pipeline for dynamic rendering with the attachments and
+    /// depth/stencil state of `desc`: no vertex buffers, a triangle list, no
+    /// culling, no descriptor bindings.
+    pub fn create_graphics_pipeline_with(
+        &self,
+        vertex: &CompiledShader,
+        fragment: &CompiledShader,
+        desc: &GraphicsDesc,
+    ) -> Result<Pipeline, VulkanError> {
         if vertex.stage != Stage::Vertex || fragment.stage != Stage::Fragment {
             return Err(VulkanError::InvalidDesc("graphics pipeline stages"));
+        }
+        if desc.color.is_some_and(|f| !f.is_color()) || desc.depth.is_some_and(|f| f.is_color()) {
+            return Err(VulkanError::InvalidDesc("attachment formats"));
+        }
+        if desc.color.is_none() && desc.depth.is_none() {
+            return Err(VulkanError::InvalidDesc("a pipeline needs an attachment"));
+        }
+        if desc.depth.is_none() && (desc.depth_test.is_some() || desc.stencil.is_some()) {
+            return Err(VulkanError::InvalidDesc(
+                "depth state without a depth format",
+            ));
+        }
+        if desc.stencil.is_some() && !desc.depth.is_some_and(|f| f.has_stencil()) {
+            return Err(VulkanError::InvalidDesc(
+                "stencil state without a stencil plane",
+            ));
         }
         check_layout(vertex, &[])?;
         check_layout(fragment, &[])?;
@@ -795,13 +999,44 @@ impl Device {
             .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let attachments = [vk::PipelineColorBlendAttachmentState::default()
             .color_write_mask(vk::ColorComponentFlags::RGBA)];
-        let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let blend =
+            vk::PipelineColorBlendStateCreateInfo::default().attachments(if desc.color.is_some() {
+                &attachments
+            } else {
+                &[]
+            });
+        let mut dynamic_states = vec![vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        if desc.stencil.is_some() {
+            dynamic_states.push(vk::DynamicState::STENCIL_REFERENCE);
+        }
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let formats = [vk::Format::R8G8B8A8_UNORM];
-        let mut rendering =
-            vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
-        let info = vk::GraphicsPipelineCreateInfo::default()
+        let stencil_op = desc.stencil.map(|s| {
+            vk::StencilOpState::default()
+                .fail_op(vk::StencilOp::KEEP)
+                .pass_op(s.pass)
+                .depth_fail_op(vk::StencilOp::KEEP)
+                .compare_op(s.compare)
+                .compare_mask(0xff)
+                .write_mask(0xff)
+        });
+        let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(desc.depth_test.is_some())
+            .depth_write_enable(desc.depth_test.is_some() && desc.depth_write)
+            .depth_compare_op(desc.depth_test.unwrap_or(vk::CompareOp::ALWAYS))
+            .stencil_test_enable(stencil_op.is_some())
+            .front(stencil_op.unwrap_or_default())
+            .back(stencil_op.unwrap_or_default());
+        let formats: Vec<vk::Format> = desc.color.iter().map(|f| f.vk()).collect();
+        let depth_format = desc.depth.map_or(vk::Format::UNDEFINED, |f| f.vk());
+        let stencil_format = desc
+            .depth
+            .filter(|f| f.has_stencil())
+            .map_or(vk::Format::UNDEFINED, |f| f.vk());
+        let mut rendering = vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&formats)
+            .depth_attachment_format(depth_format)
+            .stencil_attachment_format(stencil_format);
+        let mut info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
             .vertex_input_state(&vertex_input)
             .input_assembly_state(&assembly)
@@ -812,13 +1047,16 @@ impl Device {
             .dynamic_state(&dynamic)
             .layout(objects.layout)
             .push_next(&mut rendering);
+        if desc.depth.is_some() {
+            info = info.depth_stencil_state(&depth_stencil);
+        }
         // SAFETY: every referenced object is live; arrays borrow locals.
         let pipelines =
             unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) };
         objects.pipeline = self
             .inner
             .check("vkCreateGraphicsPipelines", pipelines.map_err(|(_, e)| e))?[0];
-        Ok(objects.finish(PipelineKind::Graphics))
+        Ok(objects.finish(PipelineKind::Graphics(desc.clone())))
     }
 
     /// A compute pipeline whose `@group(0)` bindings are exactly `bindings`,
@@ -899,6 +1137,7 @@ impl Device {
             inner: ManuallyDrop::new(self.inner.clone()),
             pool,
             buffers: RefCell::new(Vec::new()),
+            events: RefCell::new(Vec::new()),
             family,
             kind,
             live: true,
@@ -929,6 +1168,20 @@ type Props = (
     vk::PhysicalDeviceProperties,
     vk::PhysicalDeviceDriverProperties<'static>,
 );
+
+/// A binary semaphore can be exported as a sync file.
+fn sync_fd_exportable(instance: &ash::Instance, physical: vk::PhysicalDevice) -> bool {
+    let info = vk::PhysicalDeviceExternalSemaphoreInfo::default()
+        .handle_type(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
+    let mut props = vk::ExternalSemaphoreProperties::default();
+    // SAFETY: valid physical device; core Vulkan 1.1 query.
+    unsafe {
+        instance.get_physical_device_external_semaphore_properties(physical, &info, &mut props)
+    };
+    props
+        .external_semaphore_features
+        .contains(vk::ExternalSemaphoreFeatureFlags::EXPORTABLE)
+}
 
 fn pick_physical(
     instance: &ash::Instance,
@@ -1014,15 +1267,53 @@ pub struct TextureInfo {
     pub height: u32,
     pub mip_levels: u32,
     pub array_layers: u32,
+    pub format: Format,
 }
 
 impl TextureInfo {
+    /// One RGBA8 mip and layer.
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
             mip_levels: 1,
             array_layers: 1,
+            format: Format::Rgba8Unorm,
+        }
+    }
+    pub fn with_format(mut self, format: Format) -> Self {
+        self.format = format;
+        self
+    }
+}
+
+/// Stencil state of a [`GraphicsDesc`] (front and back faces alike); the
+/// reference value is set per draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StencilDesc {
+    pub compare: vk::CompareOp,
+    pub pass: vk::StencilOp,
+}
+
+/// Attachments and depth/stencil state of a graphics pipeline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphicsDesc {
+    pub color: Option<Format>,
+    pub depth: Option<Format>,
+    /// Depth test compare op; `None` disables the depth test.
+    pub depth_test: Option<vk::CompareOp>,
+    pub depth_write: bool,
+    pub stencil: Option<StencilDesc>,
+}
+
+impl Default for GraphicsDesc {
+    fn default() -> Self {
+        Self {
+            color: Some(Format::Rgba8Unorm),
+            depth: None,
+            depth_test: None,
+            depth_write: false,
+            stencil: None,
         }
     }
 }
@@ -1035,6 +1326,8 @@ pub struct GpuBuffer {
     memory: vk::DeviceMemory,
     size: u64,
     ptr: *mut u8,
+    /// Owning queue family under exclusive sharing (`None` before first use).
+    pub(crate) owner: Cell<Option<u32>>,
     live: bool,
 }
 
@@ -1101,17 +1394,23 @@ impl Drop for GpuBuffer {
     }
 }
 
-/// Owned RGBA8 texture. Its tracked per-subresource Vulkan layout is the
+/// Owned 2D texture. Its tracked per-subresource Vulkan layout is the
 /// layout after all work submitted so far.
 #[must_use = "a GpuTexture must be released with destroy()"]
 pub struct GpuTexture {
     pub(crate) inner: ManuallyDrop<Arc<Inner>>,
     pub(crate) image: vk::Image,
+    /// Every aspect, mip 0, layer 0 (attachments).
     pub(crate) view: vk::ImageView,
+    /// The color or depth aspect only, mip 0, layer 0 (sampling).
+    pub(crate) sampled_view: vk::ImageView,
     memory: vk::DeviceMemory,
     desc: TextureInfo,
-    /// Indexed `mip + mips * layer`.
+    pub(crate) usage: vk::ImageUsageFlags,
+    /// Indexed `mip + mips * (layer + layers * plane)`.
     pub(crate) layouts: RefCell<Vec<vk::ImageLayout>>,
+    /// Owning queue family under exclusive sharing (`None` before first use).
+    pub(crate) owner: Cell<Option<u32>>,
     live: bool,
 }
 
@@ -1127,20 +1426,33 @@ impl GpuTexture {
     pub fn info(&self) -> TextureInfo {
         self.desc
     }
-    /// Tracked Vulkan layout of one subresource.
+    pub fn format(&self) -> Format {
+        self.desc.format
+    }
+    pub fn usage(&self) -> vk::ImageUsageFlags {
+        self.usage
+    }
+    pub(crate) fn slot(&self, plane: u32, mip: u32, layer: u32) -> Option<usize> {
+        let d = &self.desc;
+        (plane < d.format.plane_count() && mip < d.mip_levels && layer < d.array_layers)
+            .then(|| (mip + d.mip_levels * (layer + d.array_layers * plane)) as usize)
+    }
+    /// Tracked Vulkan layout of one subresource of plane 0.
     pub fn layout(&self, mip: u32, layer: u32) -> Option<vk::ImageLayout> {
-        if mip >= self.desc.mip_levels || layer >= self.desc.array_layers {
-            return None;
-        }
-        self.layouts
-            .borrow()
-            .get((mip + self.desc.mip_levels * layer) as usize)
-            .copied()
+        self.plane_layout(0, mip, layer)
+    }
+    /// Tracked Vulkan layout of one subresource (plane 1 is stencil).
+    pub fn plane_layout(&self, plane: u32, mip: u32, layer: u32) -> Option<vk::ImageLayout> {
+        let i = self.slot(plane, mip, layer)?;
+        self.layouts.borrow().get(i).copied()
     }
     pub fn destroy(mut self) {
         // SAFETY: not in flight (owned by the caller, see `GpuBuffer::read`).
         unsafe {
             let d = &self.inner.device;
+            if self.sampled_view != self.view {
+                d.destroy_image_view(self.sampled_view, None);
+            }
             d.destroy_image_view(self.view, None);
             d.destroy_image(self.image, None);
             d.free_memory(self.memory, None);
@@ -1160,7 +1472,7 @@ impl Drop for GpuTexture {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum PipelineKind {
-    Graphics,
+    Graphics(GraphicsDesc),
     Compute(Vec<BindingKind>),
 }
 
@@ -1302,6 +1614,8 @@ pub struct CommandAllocator {
     pub(crate) pool: vk::CommandPool,
     /// Command buffers allocated from the pool, reused after each reset.
     pub(crate) buffers: RefCell<Vec<vk::CommandBuffer>>,
+    /// Split-barrier events, reused (host-reset) by each submission.
+    pub(crate) events: RefCell<Vec<vk::Event>>,
     pub(crate) family: u32,
     kind: QueueKind,
     live: bool,
@@ -1319,9 +1633,37 @@ impl CommandAllocator {
     pub fn kind(&self) -> QueueKind {
         self.kind
     }
+    /// The first `n` split-barrier events, created as needed and reset on
+    /// the host. Only called while the allocator is not in flight (the
+    /// lifecycle runtime returns allocators after retirement), so no
+    /// pending command uses them.
+    pub(crate) fn events(&self, n: usize) -> Result<Vec<vk::Event>, VulkanError> {
+        if n > 4096 {
+            return Err(VulkanError::Limit("split barrier events"));
+        }
+        let mut events = self.events.borrow_mut();
+        let d = &self.inner.device;
+        while events.len() < n {
+            let e = self.inner.check("vkCreateEvent", unsafe {
+                // SAFETY: valid create info; destroyed with the allocator.
+                d.create_event(&vk::EventCreateInfo::default(), None)
+            })?;
+            events.push(e);
+        }
+        for e in &events[..n] {
+            self.inner.check("vkResetEvent", unsafe {
+                // SAFETY: host reset of an event no pending command uses.
+                d.reset_event(*e)
+            })?;
+        }
+        Ok(events[..n].to_vec())
+    }
     pub fn destroy(mut self) {
         // SAFETY: not in flight (owned by the caller).
         unsafe {
+            for e in self.events.borrow().iter() {
+                self.inner.device.destroy_event(*e, None);
+            }
             self.inner.device.destroy_command_pool(self.pool, None);
             ManuallyDrop::drop(&mut self.inner);
         }

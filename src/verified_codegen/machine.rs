@@ -282,6 +282,16 @@ pub enum Lir {
     },
     Return,
     Trap(TrapKind),
+    // --- Milestone 7 (abort-only `Fail[E]`): trap scopes. ---
+    /// From here on in emission order, an `Overflow` abort jumps to `ovf`
+    /// and a `DivisionByZero` abort to `div0` instead of the program-wide
+    /// exits (which are `TrapKind::label()`, the default scope). A function
+    /// whose implicit failures are caught sets its scope after its prologue
+    /// and restores the default at its end.
+    Scope {
+        ovf: Label,
+        div0: Label,
+    },
 }
 
 /// Scratch registers of the abstract machine. Values never live in
@@ -372,6 +382,9 @@ pub enum M {
     Enter(u32),
     Leave,
     Trap(TrapKind),
+    /// Emits no code: sets the labels later `Overflow` and `DivisionByZero`
+    /// aborts jump to (see [`Lir::Scope`]).
+    Scope(Label, Label),
 }
 impl fmt::Display for M {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -402,6 +415,7 @@ impl fmt::Display for M {
             Self::Enter(n) => write!(f, "enter {n}"),
             Self::Leave => write!(f, "leave"),
             Self::Trap(k) => write!(f, "trap {}", k.name()),
+            Self::Scope(o, d) => write!(f, "scope L{o} L{d}"),
         }
     }
 }
@@ -485,6 +499,7 @@ pub fn select(row: &Lir) -> Vec<M> {
         Lir::Enter { words } => vec![Enter(words)],
         Lir::Return => vec![Leave],
         Lir::Trap(k) => vec![Trap(k)],
+        Lir::Scope { ovf, div0 } => vec![Scope(ovf, div0)],
     }
 }
 
@@ -576,6 +591,9 @@ pub fn table_rows() -> Vec<(String, Lir)> {
             Lir::Trap(TrapKind::Unreachable),
         ),
     ]);
+    // --- Milestone 7 (abort-only `Fail[E]`) ---
+    rows.push(("scope".to_owned(), Lir::Scope { ovf: 9, div0: 10 }));
+    // --- end Milestone 7 ---
     rows
 }
 

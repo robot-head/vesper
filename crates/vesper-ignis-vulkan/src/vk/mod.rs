@@ -4,12 +4,20 @@
 
 mod backend;
 mod device;
+#[cfg(target_os = "linux")]
+mod present;
+#[cfg(unix)]
+mod syncfd;
 
 pub use backend::{
-    Bind, FrameParts, FrameResources, MAX_FRAME_OBJECTS, MAX_PENDING_SIGNALS, NoScratch, PassWork,
-    PipelineId, VulkanBackend,
+    Bind, ColorTarget, DepthTarget, FrameParts, FrameResources, MAX_FRAME_OBJECTS,
+    MAX_PENDING_SIGNALS, NoScratch, PassWork, PipelineId, SubmitStats, VulkanBackend,
 };
 pub use device::{
-    CommandAllocator, Device, DeviceConfig, DeviceInfo, GpuBuffer, GpuTexture, Pipeline,
-    TextureInfo, Validation, ValidationMessage, leaked_owners,
+    CommandAllocator, Device, DeviceConfig, DeviceInfo, GpuBuffer, GpuTexture, GraphicsDesc,
+    Pipeline, Sharing, StencilDesc, TextureInfo, Validation, ValidationMessage, leaked_owners,
 };
+#[cfg(target_os = "linux")]
+pub use present::{Swapchain, SwapchainDesc, XcbWindow};
+#[cfg(unix)]
+pub use syncfd::{CloseError, SyncFd, SyncFdExporter, SyncFdKind, SyncFdMode};

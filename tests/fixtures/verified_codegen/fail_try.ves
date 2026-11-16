@@ -1,0 +1,68 @@
+// Milestone 7: `?` on user error types, propagation through a call chain,
+// `Fail::raise`, and non-resuming `handle Fail[E]` with return clauses.
+copy enum Bad {
+    Negative(i64),
+    Zero
+}
+copy struct Limit {
+    at: i64,
+    max: i64
+}
+
+fn checked(x: i64) -> i64 eff [Fail[Bad], Fail[ArithOverflow]] {
+    let r: Result[i64, Bad] = if x < 0 {
+        Err(Bad::Negative(x))
+    } else if x == 0 {
+        Err(Bad::Zero)
+    } else {
+        Ok(x * 2)
+    };
+    r?
+}
+
+fn sum(a: i64, b: i64) -> i64 eff [Fail[Bad], Fail[ArithOverflow]] {
+    checked(a) + checked(b)
+}
+
+fn over(x: i64) -> i64 eff [Fail[Limit]] {
+    Fail::raise(
+        Limit {
+            at: x,
+            max: 100
+        }
+    )
+}
+
+fn bounded(x: i64) -> i64 eff [Fail[Limit], Fail[Bad], Fail[ArithOverflow]] {
+    let y = sum(x, 1);
+    if y > 100 {
+        over(x)
+    } else {
+        y
+    }
+}
+
+fn code(x: i64) -> i64 eff [Fail[Limit], Fail[ArithOverflow]] {
+    handle Fail[Bad] in {
+        bounded(x)
+    } with {
+        return v => v + 1000,
+        raise(e, resume) => match e {
+            Bad::Negative(n) => n,
+            Bad::Zero => -7,
+        },
+    }
+}
+
+fn limited(x: i64) -> i64 eff [Fail[ArithOverflow]] {
+    handle Fail[Limit] in {
+        code(x)
+    } with {
+        return v => v,
+        raise(l, _) => l.at * 10000 + l.max,
+    }
+}
+
+fn main() -> (i64, i64, i64, i64) eff [Fail[ArithOverflow]] {
+    (limited(5), limited(-3), limited(0), limited(70))
+}

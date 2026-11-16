@@ -670,6 +670,9 @@ def emit (win : Bool) (frame : Nat) : M → List Item
   | .leave => if win then [.ins (.grpI32 .add rsp frame), .ins (.pop rbp), .ins .ret]
       else [.ins (.alu .mov rsp rbp), .ins (.pop rbp), .ins .ret]
   | .trap f => [.br .jmp (trapLabel f)]
+  -- Milestone 7: a trap scope emits no code (it changes which labels the
+  -- checked instructions' branches name).
+  | .scope _ _ => []
 
 /-! ## Layout: abort exits at offset 0, other labels at the end -/
 

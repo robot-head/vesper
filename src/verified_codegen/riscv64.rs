@@ -193,7 +193,7 @@ fn int_min(a: &mut Asm, rd: u32) {
 }
 
 pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
-    let ovf = TrapKind::Overflow.label();
+    let ovf = a.trap_label(TrapKind::Overflow);
     match *m {
         M::Ld(r, l) => ldst(a, true, reg(r), l),
         M::St(l, r) => ldst(a, false, reg(r), l),
@@ -241,7 +241,10 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         M::Wrap(WrapOp::Mul) => muldiv(a, MUL, A0, A0, A1),
         M::AndR2 => r(a, 0, 7, A0, A0, A2),
         M::TrapGtU => branch_to(a, BLTU, A2, A0, ovf),
-        M::TrapZero => branch_to(a, BEQ, A1, ZERO, TrapKind::DivisionByZero.label()),
+        M::TrapZero => {
+            let l = a.trap_label(TrapKind::DivisionByZero);
+            branch_to(a, BEQ, A1, ZERO, l)
+        }
         // a2 := MIN; bne a0, a2, +16; li t0, -1; bne a1, t0, +8; j ovf
         M::TrapDivOvf => {
             int_min(a, A2);
@@ -346,7 +349,11 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
             addi(a, SP, SP, 16);
             i(a, JALR, 0, ZERO, RA, 0);
         }
-        M::Trap(k) => jal(a, ZERO, k.label()),
+        M::Trap(k) => {
+            let l = a.trap_label(k);
+            jal(a, ZERO, l)
+        }
+        M::Scope(ovf, div0) => a.set_scope(ovf, div0),
     }
     Ok(())
 }

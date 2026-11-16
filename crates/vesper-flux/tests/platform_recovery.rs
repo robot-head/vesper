@@ -160,7 +160,7 @@ fn native_checkpoint_commit_boundaries_recover_each_fault_kind() {
                     Some((fault(kind, step), Restore::Exact)),
                 );
                 assert_eq!(recovered.recoveries[0].phase, phase, "{mode:?} {kind:?}");
-                assert!(!recovered.recoveries[0].escalated);
+                assert!(!recovered.recoveries[0].in_reconfiguration);
             }
         }
     }
@@ -197,20 +197,26 @@ fn native_rescale_up_and_down_preserves_exactly_once_recovery() {
                 FaultKind::Worker(1),
                 FaultKind::Coordinator,
             ] {
+                // Only a whole-cluster crash rescales offline; a worker or
+                // the coordinator recovers inside the window and the
+                // migration completes live.
+                let whole = kind == FaultKind::Cluster;
+                let restore = if whole {
+                    Restore::Rescaled
+                } else {
+                    Restore::Exact
+                };
                 let recovered = run(
                     &inputs,
                     &expected,
                     &store,
                     &cfg,
-                    Some((fault(kind, step), Restore::Rescaled)),
+                    Some((fault(kind, step), restore)),
                 );
                 assert_eq!(recovered.recoveries[0].phase, CheckpointPhase::Committed);
-                assert_eq!(
-                    recovered.recoveries[0].escalated,
-                    kind != FaultKind::Cluster
-                );
-                assert_eq!(recovered.recovery_rescales, 1);
-                assert!(recovered.migrations.is_empty());
+                assert!(recovered.recoveries[0].in_reconfiguration);
+                assert_eq!(recovered.recovery_rescales, usize::from(whole));
+                assert_eq!(recovered.migrations.len(), usize::from(!whole));
             }
         }
     }
@@ -250,7 +256,7 @@ fn native_retired_worker_fault_does_not_duplicate_outputs() {
             Some((Fault::worker(commits[1].step + 1, 1), Restore::Exact)),
         );
         assert_eq!(recovered.recoveries[0].phase, CheckpointPhase::Committed);
-        assert!(!recovered.recoveries[0].escalated);
+        assert!(!recovered.recoveries[0].in_reconfiguration);
         assert_eq!(recovered.migrations.len() + recovered.recovery_rescales, 2);
     }
 }

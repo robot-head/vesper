@@ -98,7 +98,7 @@ fn sub_sp(a: &mut Asm, bytes: u32) {
 }
 
 pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
-    let ovf = TrapKind::Overflow.label();
+    let ovf = a.trap_label(TrapKind::Overflow);
     match *m {
         M::Ld(r, l) => ldst(a, true, r, l),
         M::St(l, r) => ldst(a, false, r, l),
@@ -135,7 +135,10 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
             rrr(a, SUBS, XZR, 0, 2);
             bcond(a, HI, ovf);
         }
-        M::TrapZero => cb(a, false, 1, TrapKind::DivisionByZero.label()),
+        M::TrapZero => {
+            let l = a.trap_label(TrapKind::DivisionByZero);
+            cb(a, false, 1, l)
+        }
         // movz x2, #0x8000, lsl #48; cmp x0, x2; b.ne +3; cmn x1, #1; b.eq ovf
         M::TrapDivOvf => {
             a.u32(0xd280_0000 | 3 << 21 | 0x8000 << 5 | 2);
@@ -228,7 +231,11 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
             a.u32(0xa8c1_7bfd);
             a.u32(0xd65f_03c0);
         }
-        M::Trap(k) => branch(a, 0x1400_0000, k.label()),
+        M::Trap(k) => {
+            let l = a.trap_label(k);
+            branch(a, 0x1400_0000, l)
+        }
+        M::Scope(ovf, div0) => a.set_scope(ovf, div0),
     }
     Ok(())
 }

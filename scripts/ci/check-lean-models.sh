@@ -57,3 +57,5 @@ LEAN_PATH="$oracle_import_dir" lean -o "$oracle_model_dir/CodegenComposition.ole
 LEAN_PATH="$oracle_import_dir" lean -o "$oracle_model_dir/CodegenControlFlow.olean" lean/CodegenControlFlow.lean
 LEAN_PATH="$oracle_import_dir" lean -o "$oracle_model_dir/CodegenValidation.olean" lean/CodegenValidation.lean
 LEAN_PATH="$oracle_import_dir" lean lean/CodegenFlowValidation.lean
+# Milestone 7: caught overflow/division aborts under trap scopes.
+LEAN_PATH="$oracle_import_dir" lean lean/CodegenFailScope.lean

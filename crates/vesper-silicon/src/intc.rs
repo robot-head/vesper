@@ -50,6 +50,31 @@
 //!   (`claimi`), then its PLIC contexts. A level that stays high after
 //!   [`STORM_BUDGET`] handler runs is counted as a storm and left asserted.
 //!
+//! An IMSIC file whose hart and level a PLIC context or a direct APLIC IDC
+//! also reaches supports `eidelivery` = 0x40000000 (and resets to it): the
+//! hart's external interrupt at that level then comes from the PLIC/APLIC
+//! instead of the file (AIA §3.8.1); with 1 it comes only from the file.
+//! Routing a wired source selects 0x40000000 (refused with
+//! [`IntcError::ImsicOwnsLevel`] while the file delivers its own MSIs);
+//! routing an MSI selects 1.
+//!
+//! Hypervisor level (H extension): each S-level file is followed by guest
+//! files `1..=GEILEN` (`2^riscv,guest-index-bits - 1` unless
+//! [`RiscvIntc::limit_guest_files`] says fewer, as QEMU's `aia-guests`
+//! does). `hgeip` bit `g` is guest file `g`'s output; `hgeie` has writable
+//! bits `GEILEN:1`; SGEIP (12) is `hgeip & hgeie != 0` and VSEIP (10) is
+//! `hgeip[VGEIN]`; `vsiselect`/`vsireg` and `vstopei` reach the file
+//! `hstatus.VGEIN` names, else [`IntcError::NoGuestFile`] (the
+//! illegal-instruction trap). [`RiscvIntc::install_guest_msi`] gives HS-mode
+//! software a VS-level handler: on SGEIP it switches VGEIN to each guest
+//! with a live bit and claims through `vstopei`. `hvip`, `hvictl`,
+//! `vsie` and the virtual hart itself are not modelled.
+//!
+//! PCI MSIs ([`RiscvIntc::pci_msi_write`]) take the controller and device
+//! ID their requester ID maps to through `msi-map`/`msi-parent`, and the
+//! host's `dma-ranges`; with no IOMMU the write lands wherever its CPU
+//! address decodes, and the record says whether that was the routed IMSIC.
+//!
 //! Machine-mode software ([`Privilege::Machine`]) receives MEIP (11) from
 //! its M-level PLIC contexts, APLIC IDCs or IMSIC file, MSIP (3) and MTIP
 //! (7); supervisor-mode software ([`Privilege::Supervisor`]) receives SEIP
@@ -82,6 +107,12 @@ pub const MTIP: u32 = 7;
 pub const SEIP: u32 = 9;
 /// Machine external interrupt.
 pub const MEIP: u32 = 11;
+/// Virtual supervisor external interrupt (`mip.VSEIP`, H extension).
+pub const VSEIP: u32 = 10;
+/// Supervisor guest external interrupt (`mip.SGEIP`, H extension).
+pub const SGEIP: u32 = 12;
+/// Largest GEILEN on RV64 (`hgeip` bits 63:1).
+pub const MAX_GEILEN: u32 = 63;
 
 /// Most handler runs for one delivery before the level is declared a storm.
 pub const STORM_BUDGET: usize = 64;
@@ -198,6 +229,34 @@ pub enum IntcError {
     ImsicLayout {
         imsic: String,
         detail: String,
+    },
+    /// `hstatus.VGEIN` is not the number of an implemented guest file of
+    /// the hart, so `vsiselect`/`vsireg` (0x70..=0xff) and `vstopei` are
+    /// inaccessible: an illegal-instruction exception from M or HS mode
+    /// (AIA §2.3, §3.9).
+    NoGuestFile {
+        hart: u32,
+        vgein: u32,
+    },
+    /// A guest file number outside `1..=GEILEN`.
+    NoSuchGuest {
+        hart: u32,
+        guest: u32,
+    },
+    /// The hart's IMSIC file at this level delivers its own interrupts
+    /// (`eidelivery` = 1), so a direct APLIC IDC or PLIC context cannot
+    /// reach the hart until software selects 0x40000000.
+    ImsicOwnsLevel {
+        hart: u32,
+        cause: u32,
+    },
+    /// Guest external interrupts are an HS-mode facility: the modelled
+    /// software must run at [`Privilege::Supervisor`].
+    GuestNeedsSupervisor,
+    /// A PCI MSI resolved (through `msi-map` or `msi-parent`) to a
+    /// controller that is not one of the platform's IMSICs.
+    MsiControllerNotModelled {
+        controller: String,
     },
     Aia(AiaError),
     Dtb(DtbError),
@@ -584,6 +643,8 @@ struct ImsicBlock {
     files: Vec<Vec<ImsicFile>>,
     /// Allocated identities per file.
     used: Vec<BTreeSet<u32>>,
+    /// Allocated identities per guest file `(file, guest)`.
+    guest_used: BTreeMap<(usize, usize), BTreeSet<u32>>,
 }
 
 impl ImsicBlock {
@@ -618,6 +679,49 @@ struct State {
     ext_log: Vec<ExternalDelivery>,
     stats: IntcStats,
     lost_msis: Vec<Msi>,
+    /// `hstatus.VGEIN` and `hgeie` per hart.
+    hyp: BTreeMap<u32, Hyp>,
+    guest_log: Vec<GuestDelivery>,
+    pci_log: Vec<PciMsi>,
+}
+
+/// The hypervisor CSR state of one hart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Hyp {
+    vgein: u32,
+    hgeie: u64,
+}
+
+/// One VS-level external interrupt claimed through `vstopei`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuestDelivery {
+    pub hart: u32,
+    /// The guest interrupt file (`hstatus.VGEIN` during the claim).
+    pub guest: u32,
+    pub id: u32,
+}
+
+/// One PCI MSI write and where it went.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PciMsi {
+    /// Requester ID (`bus << 8 | device << 3 | function`).
+    pub rid: u32,
+    /// The ID the MSI controller sees (`msi-map` output).
+    pub device_id: u32,
+    pub controller: String,
+    /// The bus address the function wrote and the CPU address it reached.
+    pub bus_addr: u64,
+    pub cpu_addr: u64,
+    pub data: u32,
+    /// The IMSIC, hart and guest file (0 = the hart's own) it landed in
+    /// (`None` for an APLIC `setipnum_le`).
+    pub imsic: Option<String>,
+    pub hart: Option<u32>,
+    pub guest: Option<u32>,
+    /// Whether it landed in a file of `controller`. Without an IOMMU a
+    /// function can reach any interrupt file; `false` flags a write that
+    /// bypassed its routed controller.
+    pub in_parent: bool,
 }
 
 impl State {
@@ -657,7 +761,8 @@ impl State {
         };
         match cause {
             MEIP | SEIP => {
-                self.plics
+                let wired = self
+                    .plics
                     .iter()
                     .any(|p| (0..p.contexts.len()).any(|c| p.contexts[c] == want && p.eip(c)))
                     || self.aplics.iter().zip(&self.aplic_info).any(|(d, info)| {
@@ -665,14 +770,24 @@ impl State {
                             .iter()
                             .enumerate()
                             .any(|(i, t)| *t == want && d.idc_asserted(i))
-                    })
-                    || self.imsics.iter().any(|m| {
-                        m.info
-                            .targets
-                            .iter()
-                            .enumerate()
-                            .any(|(k, t)| *t == want && m.files[k][0].asserted())
-                    })
+                    });
+                // With an interrupt file at this level, `eidelivery` picks
+                // the file (1) or the PLIC/APLIC (0x40000000) (AIA §3.8.1).
+                match self.imsic_file(hart, cause) {
+                    Some((b, k)) => {
+                        let f = &self.imsics[b].files[k][0];
+                        f.asserted() || (f.delivers_external() && wired)
+                    }
+                    None => wired,
+                }
+            }
+            SGEIP => {
+                let h = self.hyp.get(&hart).copied().unwrap_or_default();
+                self.hgeip(hart) & h.hgeie != 0
+            }
+            VSEIP => {
+                let h = self.hyp.get(&hart).copied().unwrap_or_default();
+                h.vgein < 64 && self.hgeip(hart) >> h.vgein & 1 != 0
             }
             MSIP | SSIP => self
                 .blocks
@@ -685,6 +800,39 @@ impl State {
                         .any(|k| now >= b.mtimecmp[k] && b.timer_target(k) == Some(want))
             }),
             _ => false,
+        }
+    }
+
+    /// `hart`'s S-level IMSIC file and its GEILEN (guest files
+    /// `1..=GEILEN`).
+    fn guest_files(&self, hart: u32) -> Option<(usize, usize, u32)> {
+        let (b, k) = self.imsic_file(hart, SEIP)?;
+        let n = (self.imsics[b].files[k].len() as u32).saturating_sub(1);
+        Some((b, k, n.min(MAX_GEILEN)))
+    }
+
+    fn geilen(&self, hart: u32) -> u32 {
+        self.guest_files(hart).map_or(0, |g| g.2)
+    }
+
+    /// `hgeip`: bit `g` is guest file `g`'s interrupt output.
+    fn hgeip(&self, hart: u32) -> u64 {
+        let Some((b, k, n)) = self.guest_files(hart) else {
+            return 0;
+        };
+        (1..=n)
+            .filter(|&g| self.imsics[b].files[k][g as usize].asserted())
+            .fold(0, |acc, g| acc | 1 << g)
+    }
+
+    /// The guest file `hstatus.VGEIN` selects, or the typed exception.
+    fn vs_file(&mut self, hart: u32) -> Result<&mut ImsicFile, IntcError> {
+        let vgein = self.hyp.get(&hart).map_or(0, |h| h.vgein);
+        match self.guest_files(hart) {
+            Some((b, k, n)) if vgein != 0 && vgein <= n => {
+                Ok(&mut self.imsics[b].files[k][vgein as usize])
+            }
+            _ => Err(IntcError::NoGuestFile { hart, vgein }),
         }
     }
 
@@ -752,8 +900,13 @@ impl State {
     fn deliver_msi(&mut self, addr: u64, data: u32) -> Result<(), IntcError> {
         for m in &mut self.imsics {
             if let Some((k, g, off)) = m.locate(addr) {
-                m.files[k][g].mmio_write32(off, data);
-                return Ok(());
+                return match m.files[k].get_mut(g) {
+                    Some(f) => {
+                        f.mmio_write32(off, data);
+                        Ok(())
+                    }
+                    None => Err(IntcError::Unmapped { addr }),
+                };
             }
         }
         for d in &mut self.aplics {
@@ -960,6 +1113,10 @@ impl State {
             if f.asserted() {
                 return Some((Ctl::Imsic(b, k), f.claim() >> 16));
             }
+            if !f.delivers_external() {
+                // The file, not the PLIC/APLIC, supplies this level.
+                return None;
+            }
         }
         for d in 0..self.aplics.len() {
             for (i, t) in self.aplic_info[d].idcs.iter().enumerate() {
@@ -1032,6 +1189,7 @@ pub struct IrqEvent<'a> {
 }
 
 type Handler = Box<dyn FnMut(&IrqEvent<'_>)>;
+type GuestIsrs = Rc<RefCell<BTreeMap<(u32, u32, u32), Handler>>>;
 
 /// Shared access to the controller registers from inside handlers (an ISR
 /// acknowledging its device, a timer handler moving MTIMECMP). Changes made
@@ -1172,10 +1330,77 @@ impl IntcHandle {
         self.with_file(hart, level, |f| f.claim())
     }
 
+    /// GEILEN of `hart`: the number of guest interrupt files after its
+    /// S-level IMSIC file (`2^riscv,guest-index-bits - 1`, at most 63), or 0.
+    pub fn geilen(&self, hart: u32) -> u32 {
+        self.state.borrow().geilen(hart)
+    }
+
+    /// `hstatus.VGEIN` (a 6-bit field, stored as written; accesses check
+    /// that it names an implemented guest file).
+    pub fn vgein(&self, hart: u32) -> u32 {
+        self.state.borrow().hyp.get(&hart).map_or(0, |h| h.vgein)
+    }
+
+    /// A write of `hstatus.VGEIN`.
+    pub fn set_vgein(&self, hart: u32, vgein: u32) {
+        self.state.borrow_mut().hyp.entry(hart).or_default().vgein = vgein & 0x3f;
+    }
+
+    /// `hgeie`: bits `GEILEN:1` are writable, bit 0 and the rest read zero.
+    pub fn hgeie(&self, hart: u32) -> u64 {
+        self.state.borrow().hyp.get(&hart).map_or(0, |h| h.hgeie)
+    }
+
+    pub fn set_hgeie(&self, hart: u32, v: u64) {
+        let mut st = self.state.borrow_mut();
+        let n = st.geilen(hart);
+        let mask = ((1u64 << n) - 1) << 1;
+        st.hyp.entry(hart).or_default().hgeie = v & mask;
+    }
+
+    /// `hgeip` (read-only): bit `g` is set while guest file `g` signals an
+    /// interrupt (`eidelivery` = 1 and a pending, enabled identity below
+    /// its threshold).
+    pub fn hgeip(&self, hart: u32) -> u64 {
+        self.state.borrow().hgeip(hart)
+    }
+
+    /// The H-extension bits of `mip`: SGEIP (`hgeip & hgeie != 0`) and
+    /// VSEIP (`hgeip` bit VGEIN). `hvip.VSEIP` is not modelled.
+    pub fn hyp_pending(&self, hart: u32) -> u64 {
+        let st = self.state.borrow();
+        (u64::from(st.level(hart, SGEIP)) << SGEIP) | (u64::from(st.level(hart, VSEIP)) << VSEIP)
+    }
+
+    /// `vsiselect = isel; vsireg` read: the guest file VGEIN selects.
+    pub fn vs_imsic_csr_read(&self, hart: u32, isel: u32) -> Result<u64, IntcError> {
+        let mut st = self.state.borrow_mut();
+        st.vs_file(hart)?.csr_read(isel).map_err(IntcError::from)
+    }
+
+    /// `vsiselect = isel; vsireg = v`.
+    pub fn vs_imsic_csr_write(&self, hart: u32, isel: u32, v: u64) -> Result<(), IntcError> {
+        let mut st = self.state.borrow_mut();
+        st.vs_file(hart)?
+            .csr_write(isel, v)
+            .map_err(IntcError::from)
+    }
+
+    /// `vstopei` read (from M or HS mode).
+    pub fn vstopei(&self, hart: u32) -> Result<u32, IntcError> {
+        let mut st = self.state.borrow_mut();
+        Ok(st.vs_file(hart)?.topei())
+    }
+
+    /// `csrrw rd, vstopei, x0`: the VS-level claim.
+    pub fn claim_vstopei(&self, hart: u32) -> Result<u32, IntcError> {
+        let mut st = self.state.borrow_mut();
+        Ok(st.vs_file(hart)?.claim())
+    }
+
     /// Whether identity `id` is pending in guest file `guest` (1 and up)
-    /// of `hart`'s S-level IMSIC. Guest files take MSIs but raise no hart
-    /// cause here (there is no hypervisor model); this is what `hgeip`
-    /// and the guest's `vstopei` would build on.
+    /// of `hart`'s S-level IMSIC.
     pub fn guest_eip(&self, hart: u32, guest: u32, id: u32) -> Result<bool, IntcError> {
         let st = self.state.borrow();
         let none = IntcError::NoImsic { hart, cause: SEIP };
@@ -1194,6 +1419,8 @@ pub struct RiscvIntc {
     harts: Vec<(u32, Cpu)>,
     handle: IntcHandle,
     isrs: Rc<RefCell<BTreeMap<(Ctl, u32), Handler>>>,
+    /// VS-level handlers by `(hart, guest, identity)`.
+    guest_isrs: GuestIsrs,
     plic_paths: Vec<String>,
 }
 
@@ -1269,15 +1496,36 @@ impl RiscvIntc {
             .map(Plic::new)
             .collect::<Result<Vec<_>, _>>()?;
         let mut imsics = Vec::new();
+        // A file whose hart and level a PLIC context or a direct APLIC IDC
+        // also reaches supports eidelivery = 0x40000000; guest files never
+        // do (AIA §3.8.1).
+        let wired = |t: &HartTarget| {
+            platform.plics.iter().any(|p| p.contexts.contains(t))
+                || platform.aplics.iter().any(|a| a.idcs.contains(t))
+        };
         for info in &platform.imsics {
             let guests = 1usize << info.guest_index_bits;
-            let files = (0..info.files.len())
-                .map(|_| (0..guests).map(|_| ImsicFile::new(info.ids)).collect())
+            let files = info
+                .targets
+                .iter()
+                .take(info.files.len())
+                .map(|t| {
+                    (0..guests)
+                        .map(|g| {
+                            if g == 0 && wired(t) {
+                                ImsicFile::with_external_delivery(info.ids)
+                            } else {
+                                ImsicFile::new(info.ids)
+                            }
+                        })
+                        .collect()
+                })
                 .collect::<Result<Vec<Vec<_>>, _>>()?;
             imsics.push(ImsicBlock {
                 info: info.clone(),
                 files,
                 used: vec![BTreeSet::new(); info.files.len()],
+                guest_used: BTreeMap::new(),
             });
         }
         let mut aplics = Vec::new();
@@ -1313,6 +1561,9 @@ impl RiscvIntc {
             ext_log: Vec::new(),
             stats: IntcStats::default(),
             lost_msis: Vec::new(),
+            hyp: BTreeMap::new(),
+            guest_log: Vec::new(),
+            pci_log: Vec::new(),
         };
         Self::firmware(&mut state, platform, privilege)?;
         let harts = platform
@@ -1327,6 +1578,7 @@ impl RiscvIntc {
                 state: Rc::new(RefCell::new(state)),
             },
             isrs: Rc::new(RefCell::new(BTreeMap::new())),
+            guest_isrs: Rc::new(RefCell::new(BTreeMap::new())),
             plic_paths: platform.plics.iter().map(|p| p.path.clone()).collect(),
         })
     }
@@ -1649,6 +1901,7 @@ impl RiscvIntc {
                         .ok_or(IntcError::NoContext { hart, cause })?;
                     (st.plics[p].base, ctx)
                 };
+                self.select_wired_delivery(hart, cause)?;
                 self.handle.state.borrow_mut().plics[p].set_edge(src, edge)?;
                 self.ensure_external(hart)?;
                 self.isrs.borrow_mut().insert((ctl, src), Box::new(handler));
@@ -1777,6 +2030,7 @@ impl RiscvIntc {
                 .iter()
                 .position(|t| *t == want)
                 .ok_or(IntcError::NoContext { hart, cause })?;
+            self.select_wired_delivery(hart, cause)?;
             h.write32(base, APLIC_DOMAINCFG_IE)?;
             h.write32(base + 4 * u64::from(src), mode.bits())?;
             let iprio = 8 - priority.max(1);
@@ -1791,6 +2045,26 @@ impl RiscvIntc {
                 .insert((Ctl::Aplic(d), src), Box::new(handler));
             h.write32(base + 0x1edc, src)?;
         }
+        Ok(())
+    }
+
+    /// Before a direct APLIC IDC or PLIC context serves `(hart, cause)`:
+    /// if the hart has an IMSIC file at that level, select
+    /// `eidelivery` = 0x40000000, unless the file is delivering its own
+    /// MSIs.
+    fn select_wired_delivery(&self, hart: u32, cause: u32) -> Result<(), IntcError> {
+        let mut st = self.handle.state.borrow_mut();
+        let Some((b, k)) = st.imsic_file(hart, cause) else {
+            return Ok(());
+        };
+        let f = &mut st.imsics[b].files[k][0];
+        if f.eidelivery() == crate::aia::EIDELIVERY_ON || !f.supports_external_delivery() {
+            return Err(IntcError::ImsicOwnsLevel { hart, cause });
+        }
+        f.csr_write(
+            crate::aia::ISEL_EIDELIVERY,
+            u64::from(crate::aia::EIDELIVERY_EXTERNAL),
+        )?;
         Ok(())
     }
 
@@ -2146,6 +2420,305 @@ impl RiscvIntc {
                 hart: 0,
                 cause: MTIP,
             })
+    }
+
+    /// GEILEN of `hart` (see [`IntcHandle::geilen`]).
+    pub fn geilen(&self, hart: u32) -> u32 {
+        self.handle.geilen(hart)
+    }
+
+    /// Implements only guest files `1..=geilen` behind every S-level
+    /// IMSIC file (GEILEN is a property of the hart, not of the
+    /// devicetree: Linux probes it by writing all ones to `hgeie`; QEMU's
+    /// `aia-guests=N` gives GEILEN = N inside a `2^guest-index-bits`
+    /// stride). An MSI to a page past the last implemented file is lost.
+    pub fn limit_guest_files(&mut self, geilen: u32) -> Result<(), IntcError> {
+        {
+            let mut st = self.handle.state.borrow_mut();
+            let keep = geilen as usize + 1;
+            // Check every file before changing any.
+            for m in st.imsics.iter().filter(|m| m.info.supervisor()) {
+                for (k, files) in m.files.iter().enumerate() {
+                    if keep > files.len() {
+                        return Err(IntcError::NoSuchGuest {
+                            hart: m.info.targets[k].hart,
+                            guest: geilen,
+                        });
+                    }
+                }
+            }
+            for m in st.imsics.iter_mut().filter(|m| m.info.supervisor()) {
+                for files in &mut m.files {
+                    files.truncate(keep);
+                }
+                m.guest_used.retain(|&(_, g), _| g < keep);
+            }
+            // hgeie bits of guests that no longer exist read zero.
+            let harts: Vec<u32> = st.hyp.keys().copied().collect();
+            for hart in harts {
+                let n = st.geilen(hart);
+                if let Some(h) = st.hyp.get_mut(&hart) {
+                    h.hgeie &= ((1u64 << n) - 1) << 1;
+                }
+            }
+        }
+        self.guest_isrs
+            .borrow_mut()
+            .retain(|&(_, g, _), _| g <= geilen);
+        self.sync();
+        Ok(())
+    }
+
+    /// A write of `hstatus.VGEIN`.
+    pub fn set_vgein(&mut self, hart: u32, vgein: u32) {
+        self.handle.set_vgein(hart, vgein);
+        self.sync();
+    }
+
+    pub fn vgein(&self, hart: u32) -> u32 {
+        self.handle.vgein(hart)
+    }
+
+    /// A write of `hgeie`.
+    pub fn set_hgeie(&mut self, hart: u32, v: u64) {
+        self.handle.set_hgeie(hart, v);
+        self.sync();
+    }
+
+    pub fn hgeie(&self, hart: u32) -> u64 {
+        self.handle.hgeie(hart)
+    }
+
+    /// `hgeip` of `hart`.
+    pub fn hgeip(&self, hart: u32) -> u64 {
+        self.handle.hgeip(hart)
+    }
+
+    /// `mip & (SGEIP | VSEIP)` of `hart`.
+    pub fn hyp_pending(&self, hart: u32) -> u64 {
+        self.handle.hyp_pending(hart)
+    }
+
+    /// `vsiselect`/`vsireg` read of the guest file VGEIN selects.
+    pub fn vs_imsic_csr_read(&mut self, hart: u32, isel: u32) -> Result<u64, IntcError> {
+        self.handle.vs_imsic_csr_read(hart, isel)
+    }
+
+    /// `vsiselect`/`vsireg` write.
+    pub fn vs_imsic_csr_write(&mut self, hart: u32, isel: u32, v: u64) -> Result<(), IntcError> {
+        let r = self.handle.vs_imsic_csr_write(hart, isel, v);
+        self.sync();
+        r
+    }
+
+    /// `vstopei` read.
+    pub fn vstopei(&mut self, hart: u32) -> Result<u32, IntcError> {
+        self.handle.vstopei(hart)
+    }
+
+    /// `csrrw rd, vstopei, x0`.
+    pub fn claim_vstopei(&mut self, hart: u32) -> Result<u32, IntcError> {
+        let r = self.handle.claim_vstopei(hart);
+        self.sync();
+        r
+    }
+
+    /// The address of guest file `guest` of `hart` (what a device assigned
+    /// to that guest's virtual hart is programmed with).
+    pub fn guest_msi_target(&self, hart: u32, guest: u32) -> Result<u64, IntcError> {
+        let st = self.handle.state.borrow();
+        let (b, k, n) = st
+            .guest_files(hart)
+            .ok_or(IntcError::NoImsic { hart, cause: SEIP })?;
+        if guest == 0 || guest > n {
+            return Err(IntcError::NoSuchGuest { hart, guest });
+        }
+        Ok(st.imsics[b].info.files[k] + u64::from(guest) * crate::aia::IMSIC_PAGE)
+    }
+
+    /// Installs a VS-level `handler` for an MSI to guest file `guest` of
+    /// `hart`: allocates the lowest free identity in that file, enables it
+    /// and the file's delivery, sets the guest's `hgeie` bit, and returns
+    /// the address/data pair the device must write. The modelled HS-mode
+    /// software takes SGEIP; for each guest with a set `hgeip & hgeie` bit
+    /// (lowest first) it switches `hstatus.VGEIN` to that guest, the guest
+    /// claims through `vstopei` and its handler runs (cause [`VSEIP`]),
+    /// then VGEIN is restored.
+    pub fn install_guest_msi(
+        &mut self,
+        hart: u32,
+        guest: u32,
+        handler: impl FnMut(&IrqEvent<'_>) + 'static,
+    ) -> Result<Msi, IntcError> {
+        if self.privilege != Privilege::Supervisor {
+            return Err(IntcError::GuestNeedsSupervisor);
+        }
+        self.cpu(hart)?;
+        let addr = self.guest_msi_target(hart, guest)?;
+        let id = {
+            let mut st = self.handle.state.borrow_mut();
+            let (b, k, _) = st
+                .guest_files(hart)
+                .ok_or(IntcError::NoImsic { hart, cause: SEIP })?;
+            let ids = st.imsics[b].info.ids;
+            let used = st.imsics[b]
+                .guest_used
+                .entry((k, guest as usize))
+                .or_default();
+            let id = (1..=ids)
+                .find(|i| !used.contains(i))
+                .ok_or(IntcError::NoFreeIdentity { hart })?;
+            used.insert(id);
+            let f = &mut st.imsics[b].files[k][guest as usize];
+            f.csr_write(crate::aia::ISEL_EIDELIVERY, 1)?;
+            let isel = crate::aia::ISEL_EIE0 + 2 * (id / 64);
+            let old = f.csr_read(isel)?;
+            f.csr_write(isel, old | 1 << (id % 64))?;
+            id
+        };
+        let hgeie = self.handle.hgeie(hart);
+        self.handle.set_hgeie(hart, hgeie | 1 << guest);
+        self.ensure_guest(hart)?;
+        self.guest_isrs
+            .borrow_mut()
+            .insert((hart, guest, id), Box::new(handler));
+        self.sync();
+        Ok(Msi { addr, data: id })
+    }
+
+    /// Every VS-level claim so far.
+    pub fn guest_deliveries(&self) -> Vec<GuestDelivery> {
+        self.handle.state.borrow().guest_log.clone()
+    }
+
+    /// Registers the SGEIP loop for `hart` once.
+    fn ensure_guest(&mut self, hart: u32) -> Result<(), IntcError> {
+        if !self.handle.state.borrow_mut().mie.insert((hart, SGEIP)) {
+            return Ok(());
+        }
+        let handle = self.handle.clone();
+        let isrs = self.guest_isrs.clone();
+        self.cpu(hart)?.register_isr(SGEIP, move |ictx| {
+            let mut runs = 0usize;
+            loop {
+                let next = {
+                    let st = handle.state.borrow();
+                    let h = st.hyp.get(&hart).copied().unwrap_or_default();
+                    let live = st.hgeip(hart) & h.hgeie;
+                    (live != 0).then(|| live.trailing_zeros())
+                };
+                let Some(guest) = next else {
+                    if runs == 0 {
+                        handle.state.borrow_mut().stats.spurious += 1;
+                    }
+                    break;
+                };
+                if runs == STORM_BUDGET {
+                    handle.state.borrow_mut().stats.storms += 1;
+                    break;
+                }
+                runs += 1;
+                // The hypervisor switches to the guest's virtual hart; the
+                // guest claims through vstopei (its stopei).
+                let saved = handle.vgein(hart);
+                handle.set_vgein(hart, guest);
+                let id = handle.claim_vstopei(hart).map_or(0, |v| v >> 16);
+                if id == 0 {
+                    handle.set_vgein(hart, saved);
+                    break;
+                }
+                handle
+                    .state
+                    .borrow_mut()
+                    .guest_log
+                    .push(GuestDelivery { hart, guest, id });
+                let isr = isrs.borrow_mut().remove(&(hart, guest, id));
+                match isr {
+                    Some(mut f) => {
+                        f(&IrqEvent {
+                            ctx: ictx,
+                            hart,
+                            cause: VSEIP,
+                            source: id,
+                            intc: &handle,
+                        });
+                        isrs.borrow_mut().entry((hart, guest, id)).or_insert(f);
+                    }
+                    None => handle.state.borrow_mut().stats.unhandled += 1,
+                }
+                handle.set_vgein(hart, saved);
+            }
+            handle.state.borrow_mut().asserted.remove(&(hart, SGEIP));
+        });
+        Ok(())
+    }
+
+    /// A PCI function below `host` with requester ID `rid` writes `data` to
+    /// bus address `bus_addr` (its MSI address register; a plain MSI
+    /// capability writes its 16-bit message data zero-extended). The
+    /// requester ID picks the MSI controller and device ID through
+    /// `msi-map`/`msi-parent` ([`Platform::pci_msi_route`]), and the host's
+    /// `dma-ranges` translate the address ([`Platform::pci_cpu_address`]).
+    /// There is no IOMMU here, so the write lands wherever the CPU address
+    /// decodes, as on QEMU `virt`; [`PciMsi::in_parent`] says whether that
+    /// is a file of the routed controller. A write that decodes to no
+    /// interrupt file or `setipnum_le` is counted in
+    /// [`RiscvIntc::lost_msis`] and refused.
+    pub fn pci_msi_write(
+        &mut self,
+        platform: &Platform,
+        host: &str,
+        rid: u32,
+        bus_addr: u64,
+        data: u32,
+    ) -> Result<PciMsi, IntcError> {
+        let route = platform.pci_msi_route(host, rid)?;
+        if !bus_addr.is_multiple_of(4) {
+            return Err(IntcError::Misaligned { addr: bus_addr });
+        }
+        let cpu_addr = platform.pci_cpu_address(host, bus_addr, 4)?;
+        let rec = {
+            let mut st = self.handle.state.borrow_mut();
+            if !st.imsics.iter().any(|m| m.info.path == route.controller) {
+                return Err(IntcError::MsiControllerNotModelled {
+                    controller: route.controller.clone(),
+                });
+            }
+            let landed = st.imsics.iter().find_map(|m| {
+                m.locate(cpu_addr)
+                    .filter(|&(k, g, _)| g < m.files[k].len())
+                    .map(|(k, g, _)| (m.info.path.clone(), m.info.targets[k].hart, g as u32))
+            });
+            if let Err(e) = st.deliver_msi(cpu_addr, data) {
+                st.lost_msis.push(Msi {
+                    addr: cpu_addr,
+                    data,
+                });
+                return Err(e);
+            }
+            st.settle();
+            let rec = PciMsi {
+                rid,
+                device_id: route.device_id,
+                in_parent: landed.as_ref().is_some_and(|l| l.0 == route.controller),
+                controller: route.controller,
+                bus_addr,
+                cpu_addr,
+                data,
+                imsic: landed.as_ref().map(|l| l.0.clone()),
+                hart: landed.as_ref().map(|l| l.1),
+                guest: landed.as_ref().map(|l| l.2),
+            };
+            st.pci_log.push(rec.clone());
+            rec
+        };
+        self.sync();
+        Ok(rec)
+    }
+
+    /// Every PCI MSI written through [`RiscvIntc::pci_msi_write`].
+    pub fn pci_msis(&self) -> Vec<PciMsi> {
+        self.handle.state.borrow().pci_log.clone()
     }
 
     /// Re-evaluates every enabled cause on every hart and raises those whose

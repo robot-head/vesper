@@ -21,15 +21,23 @@
 //! * [`rigid_diff`]: forward-mode contact gradients for boxes, capsules and
 //!   convex hulls.
 //!
-//! Not here: the GPU broadphase (Ignis; no GPU in CI) and the compiler's
-//! `eff [DetFloat]` source effect. Ownership-based linearity in this crate is
+//! * [`articulation`]: reduced-coordinate (Featherstone) articulations with
+//!   implicit drives and joint friction.
+//! * [`couple`]: two-way soft-rigid coupling.
+//!
+//! The GPU broadphase plugs into [`World`] through [`PairBackend`]
+//! ([`BroadphaseMode::Gpu`]); the Vulkan implementation lives in
+//! `vesper-gpu-compute` and its adapter in `vesper-kinetic-gpu`. Not here:
+//! the compiler's `eff [DetFloat]` source effect. Ownership-based linearity in this crate is
 //! host-library discipline, not an implementation of Vesper's source typing
 //! rules.
 
 // `unsafe` is denied everywhere except the `std::arch` kernels in [`simd`].
 #![deny(unsafe_code)]
 
+pub mod articulation;
 pub mod coloring;
+pub mod couple;
 pub mod crmath;
 pub mod detfloat;
 pub mod diff;
@@ -47,12 +55,18 @@ pub mod soft;
 pub mod tile;
 pub mod world;
 
+pub use articulation::{
+    Articulation, ArticulationConfig, ArticulationDrive, ArticulationError, ArticulationJoint,
+    ArticulationLink,
+};
 pub use coloring::{BodyId, Colorer, ColoringError, ConstraintBodies, MultiColorer};
+pub use couple::{CoupledError, CoupledWorld, CouplingConfig};
 pub use detfloat::{AuditError, DetFloatPolicy, ReductionOrder, VerifierFinding, audit};
 pub use morton::MortonError;
 pub use rigid::{
-    CcdConfig, ColliderShape, ContactManifold, GroundPlane, JointKind, RigidBody, RigidBroadphase,
-    RigidCollider, RigidConfig, RigidError, RigidJoint, RigidMaterial, RigidWorld, SleepConfig,
+    CcdConfig, ColliderShape, ContactManifold, GroundPlane, JointDrive, JointKind, RigidBody,
+    RigidBroadphase, RigidCollider, RigidConfig, RigidError, RigidJoint, RigidMaterial, RigidWorld,
+    SleepConfig,
 };
 pub use rollback::{ResimulateError, RollbackError, RollbackTicket, SnapshotRing};
 pub use sap::{SapError, SweepAndPrune};
@@ -62,6 +76,6 @@ pub use soft::{SoftConfig, SoftConstraint, SoftError, SoftParticle, SoftWorld};
 pub use tile::{Body, RigidBodyTile, TILE_WIDTH, TiledBodies};
 pub use world::{
     BATCH_WIDTH, BroadphaseMode, ContactMaterial, DistanceConstraint, MAX_SOLVER_THREADS,
-    PARALLEL_MIN_CONSTRAINTS, SolverMode, SphereCollider, StepError, StepTimings, World,
-    WorldConfig,
+    PARALLEL_MIN_CONSTRAINTS, PairBackend, PairBackendError, SolverMode, SphereCollider, StepError,
+    StepTimings, World, WorldConfig,
 };
