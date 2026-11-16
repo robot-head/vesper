@@ -256,6 +256,7 @@ impl Connection {
             .map_err(|_| GrpcError::InvalidEndpoint(endpoint.to_owned()))?
             .connect_timeout(Duration::from_secs(10));
         if let Some(tls) = &options.tls {
+            ensure_crypto_provider();
             let mut config =
                 ClientTlsConfig::new().ca_certificate(Certificate::from_pem(&tls.ca_pem));
             if let Some(domain) = &tls.domain {
@@ -853,11 +854,24 @@ pub async fn serve_otap_tls(
         .await
 }
 
+/// Installs rustls' `ring` provider as the process default when there is
+/// none. rustls picks a default only when exactly one provider feature is
+/// enabled, and a build that also enables `aws-lc-rs` elsewhere (feature
+/// unification) has none, so TLS would panic at the first handshake. A
+/// default the application installed is left alone.
+fn ensure_crypto_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        // Losing a race to another installer is fine: a default exists.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    }
+}
+
 fn server_builder(
     tls: Option<&ServerTls>,
 ) -> Result<tonic::transport::Server, tonic::transport::Error> {
     let mut builder = tonic::transport::Server::builder();
     if let Some(tls) = tls {
+        ensure_crypto_provider();
         let mut config =
             ServerTlsConfig::new().identity(Identity::from_pem(&tls.cert_pem, &tls.key_pem));
         if let Some(ca) = &tls.client_ca_pem {

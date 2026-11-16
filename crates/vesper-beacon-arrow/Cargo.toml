@@ -9,7 +9,7 @@ description = "Budgeted Apache Arrow IPC and OTel Arrow (OTAP) adapter for Beaco
 default = ["grpc"]
 # OTAP and OTLP over HTTP/2 gRPC (tonic). Without it the crate still encodes,
 # decodes and frames OTAP/OTLP messages.
-grpc = ["dep:tonic", "dep:tonic-prost", "dep:tokio", "dep:subtle"]
+grpc = ["dep:tonic", "dep:tonic-prost", "dep:tokio", "dep:subtle", "dep:rustls"]
 
 [dependencies]
 vesper-beacon = { path = "../vesper-beacon" }
@@ -22,6 +22,10 @@ zstd = { version = "=0.13.3", default-features = false }
 ciborium = { version = "=0.2.2", default-features = false, features = ["std"] }
 loona-hpack = "=0.4.3"
 subtle = { version = "=2.6.1", optional = true }
+# The ring provider tonic's `tls-ring` uses, installed explicitly when no
+# process default exists (builds that unify rustls features with aws-lc-rs
+# have no automatic default).
+rustls = { version = "=0.23.46", optional = true, default-features = false, features = ["std", "ring"] }
 arrow-select = "=56.2.0"
 prost = { version = "=0.14.6", default-features = false, features = ["derive", "std"] }
 hmac = "=0.12.1"

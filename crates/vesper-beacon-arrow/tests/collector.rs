@@ -410,7 +410,7 @@ fn client_options(pki: Option<&Pki>, token: &str) -> ConnectOptions {
 }
 fn url(pki: Option<&Pki>, port: u16) -> String {
     match pki {
-        Some(_) => format!("https://localhost:{port}"),
+        Some(_) => format!("https://127.0.0.1:{port}"),
         None => format!("http://127.0.0.1:{port}"),
     }
 }

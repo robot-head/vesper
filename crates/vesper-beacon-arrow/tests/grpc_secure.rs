@@ -61,7 +61,7 @@ async fn otlp_server(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let endpoint = match tls {
-        Some(_) => format!("https://localhost:{port}"),
+        Some(_) => format!("https://127.0.0.1:{port}"),
         None => format!("http://127.0.0.1:{port}"),
     };
     let (service, rx) = OtlpService::new(config);
@@ -89,7 +89,7 @@ async fn otap_server(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let endpoint = match tls {
-        Some(_) => format!("https://localhost:{port}"),
+        Some(_) => format!("https://127.0.0.1:{port}"),
         None => format!("http://127.0.0.1:{port}"),
     };
     let (service, rx) = OtapService::new(config);
@@ -217,8 +217,10 @@ async fn tls_with_bearer_tokens_accepts_the_right_token_only() {
         ..ServerConfig::default()
     };
     let (server, mut rx) = otlp_server(config.clone(), Some(pki.server.clone())).await;
+    // Dial 127.0.0.1 (no IPv6 needed) and verify the certificate's name.
     let tls = ClientTls {
         ca_pem: pki.ca_pem.clone(),
+        domain: Some("localhost".into()),
         ..ClientTls::default()
     };
     let with = |t: Option<&str>| ConnectOptions {
@@ -290,6 +292,7 @@ fn pki_untrusted_options() -> ConnectOptions {
     ConnectOptions {
         tls: Some(ClientTls {
             ca_pem: pki().ca_pem,
+            domain: Some("localhost".into()),
             ..ClientTls::default()
         }),
         bearer_token: Some(token("current-token")),
@@ -307,7 +310,7 @@ async fn mutual_tls_requires_a_client_certificate() {
     let options = |identity| ConnectOptions {
         tls: Some(ClientTls {
             ca_pem: pki.ca_pem.clone(),
-            domain: None,
+            domain: Some("localhost".into()),
             identity,
         }),
         ..ConnectOptions::default()
