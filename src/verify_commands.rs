@@ -1285,31 +1285,30 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
     // A cache hit is accepted only when its bytes match that fresh result.
     compile(&toolchain, &stage.0, "VesperExtract", options.timeout)?;
     let mut cert_report = None;
-    if let (Some(store), Some(inputs), Some(dir)) = (&opened_store, &deriv_inputs, &store_dir) {
-        if let Some(cached_id) = store
+    if let (Some(store), Some(inputs), Some(dir)) = (&opened_store, &deriv_inputs, &store_dir)
+        && let Some(cached_id) = store
             .lookup_derivation(inputs)
             .map_err(|e| Failure::new("store", e))?
-        {
-            let bytes = store
-                .read_blob(&cached_id)
-                .map_err(|e| Failure::new("store", e))?;
-            if bytes.len() as u64 > MAX_OLEAN_BYTES {
-                return Err(Failure::new("store", "cached .olean exceeds size limit"));
-            }
-            let fresh = read_olean(&stage.0.join("VesperExtract.olean"))?;
-            if bytes != fresh {
-                return Err(Failure::new(
-                    "store",
-                    "cached .olean does not match a fresh compilation of the current source and proofs",
-                ));
-            }
-            cert_report = Some(OleanCertReport {
-                store: dir.display().to_string(),
-                object_id: cached_id.to_string(),
-                cache_hit: true,
-                newly_recorded: false,
-            });
+    {
+        let bytes = store
+            .read_blob(&cached_id)
+            .map_err(|e| Failure::new("store", e))?;
+        if bytes.len() as u64 > MAX_OLEAN_BYTES {
+            return Err(Failure::new("store", "cached .olean exceeds size limit"));
         }
+        let fresh = read_olean(&stage.0.join("VesperExtract.olean"))?;
+        if bytes != fresh {
+            return Err(Failure::new(
+                "store",
+                "cached .olean does not match a fresh compilation of the current source and proofs",
+            ));
+        }
+        cert_report = Some(OleanCertReport {
+            store: dir.display().to_string(),
+            object_id: cached_id.to_string(),
+            cache_hit: true,
+            newly_recorded: false,
+        });
     }
 
     let theorem_refs: Vec<&str> = audit_theorems.iter().map(String::as_str).collect();
