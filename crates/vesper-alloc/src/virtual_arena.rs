@@ -816,9 +816,18 @@ impl VirtualChunkBacking {
         true
     }
 
+    /// Smallest offset `>= offset` whose absolute address is `align`-aligned.
+    /// The base itself may be less aligned than `align` (page-aligned mmap,
+    /// 64 KiB-aligned `VirtualAlloc`).
+    fn align_offset(&self, offset: usize, align: usize) -> Option<usize> {
+        let base = self.res.base().as_ptr() as usize;
+        let abs = base.checked_add(offset)?.checked_next_multiple_of(align)?;
+        Some(abs - base)
+    }
+
     fn take_hole(&mut self, size: usize, align: usize) -> Option<usize> {
         let (i, at) = self.holes.iter().enumerate().find_map(|(i, &(s, l))| {
-            let at = s.checked_next_multiple_of(align)?;
+            let at = self.align_offset(s, align)?;
             (at.checked_add(size)? <= s + l).then_some((i, at))
         })?;
         // Splitting may need one more entry; reserve before mutating.
@@ -848,7 +857,7 @@ unsafe impl crate::ChunkBacking for VirtualChunkBacking {
         let start = match self.take_hole(size, align) {
             Some(at) => at,
             None => {
-                let at = self.cursor.checked_next_multiple_of(align)?;
+                let at = self.align_offset(self.cursor, align)?;
                 let end = at.checked_add(size)?;
                 if end > self.res.len() || !self.res.commit(end) {
                     return None;

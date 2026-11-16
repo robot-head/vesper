@@ -206,8 +206,6 @@ fn a_large_reservation_is_lazily_backed() {
 #[test]
 fn the_platform_reservation_path_is_used_and_commits_lazily() {
     use vesper_alloc::VirtualBackingKind;
-    // 1 GiB of address space; only what is written may be committed.
-    let mut a = VirtualArena::new(VirtualArenaConfig::reserve(1 << 30)).unwrap();
     let expected = if cfg!(miri) {
         VirtualBackingKind::GlobalAllocator
     } else if cfg!(windows) {
@@ -217,12 +215,24 @@ fn the_platform_reservation_path_is_used_and_commits_lazily() {
     } else {
         VirtualBackingKind::GlobalAllocator
     };
+    let lazy = expected != VirtualBackingKind::GlobalAllocator;
+    // 1 GiB of address space where reservation is lazy; only what is written
+    // may be committed. The eager fallback commits everything up front.
+    let reserve = if lazy { 1 << 30 } else { 4 << 20 };
+    let mut a = VirtualArena::new(VirtualArenaConfig::reserve(reserve)).unwrap();
     assert_eq!(a.backing_kind(), expected);
-    assert_eq!(a.stats().committed_bytes, 0);
+    let committed_or_all = |a: &VirtualArena, lazy_value: usize| {
+        if lazy { lazy_value } else { a.reserved_bytes() }
+    };
+    assert_eq!(a.stats().committed_bytes, committed_or_all(&a, 0));
     let h = a.alloc_bytes(100_000, 64).unwrap();
     a.bytes_mut(&h).unwrap()[99_999] = 7;
     let committed = a.stats().committed_bytes;
-    assert!((100_000..=256 * 1024).contains(&committed), "{committed}");
+    if lazy {
+        assert!((100_000..=256 * 1024).contains(&committed), "{committed}");
+    } else {
+        assert_eq!(committed, a.reserved_bytes());
+    }
     // Growing the tip past the committed prefix commits more, in place.
     let addr = a.bytes_addr(&h).unwrap();
     a.extend(&h, 1 << 20).unwrap();
@@ -230,7 +240,7 @@ fn the_platform_reservation_path_is_used_and_commits_lazily() {
     assert_eq!(a.bytes(&h).unwrap()[99_999], 7);
     assert!(a.bytes(&h).unwrap()[100_000..].iter().all(|b| *b == 0));
     a.reset();
-    assert_eq!(a.stats().committed_bytes, 0);
+    assert_eq!(a.stats().committed_bytes, committed_or_all(&a, 0));
     // Pages handed out again after a reset read as zero.
     let h = a.alloc_bytes(100_000, 64).unwrap();
     assert!(a.bytes(&h).unwrap().iter().all(|b| *b == 0));
