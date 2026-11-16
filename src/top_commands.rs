@@ -17,11 +17,18 @@ use std::{
     env,
     fs::{self, File},
     io::Read,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
 };
-use vesper::{check, parser, runtime::Runtime};
-use vesper_chrono::{BundleKey, BundleLimits, ReplaySession};
+use vesper::{
+    ast::Mode,
+    check, parser,
+    runtime::{
+        Runtime,
+        resource_trace::{ResourceTraceConfig, ResourceTraceLimits},
+    },
+};
+use vesper_chrono::{BundleKey, BundleLimits, HopKind, ReplaySession, simpulse::TraceEvent};
 
 const MAX_TRACE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
@@ -245,16 +252,7 @@ fn detect_wait_cycles(edges: &[WaitEdge]) -> Vec<Vec<u64>> {
     for &start in &nodes {
         let mut stack = vec![start];
         let mut on_stack = BTreeSet::from([start]);
-        let mut visited_from_start = BTreeSet::new();
-        dfs_cycles(
-            start,
-            start,
-            &adj,
-            &mut stack,
-            &mut on_stack,
-            &mut visited_from_start,
-            &mut found,
-        );
+        dfs_cycles(start, start, &adj, &mut stack, &mut on_stack, &mut found);
     }
     found.into_iter().collect()
 }
@@ -265,7 +263,6 @@ fn dfs_cycles(
     adj: &BTreeMap<u64, BTreeSet<u64>>,
     stack: &mut Vec<u64>,
     on_stack: &mut BTreeSet<u64>,
-    visited: &mut BTreeSet<u64>,
     found: &mut BTreeSet<Vec<u64>>,
 ) {
     let Some(neighbors) = adj.get(&curr) else {
@@ -279,15 +276,14 @@ fn dfs_cycles(
             let mut cycle = stack.clone();
             cycle.push(start);
             found.insert(cycle);
-        } else if !on_stack.contains(&next) && !visited.contains(&next) {
+        } else if !on_stack.contains(&next) {
             on_stack.insert(next);
             stack.push(next);
-            dfs_cycles(start, next, adj, stack, on_stack, visited, found);
+            dfs_cycles(start, next, adj, stack, on_stack, found);
             stack.pop();
             on_stack.remove(&next);
         }
     }
-    visited.insert(curr);
 }
 
 fn analyze_snapshot(snapshot: &TelemetrySnapshot) -> TelemetryReport {
@@ -394,26 +390,33 @@ fn chrono_to_snapshot(path: &PathBuf, key: &BundleKey) -> Result<TelemetrySnapsh
     let bytes = read_bounded(path, MAX_TRACE_BYTES)?;
     let session = ReplaySession::open_bundle(&bytes, key, &BundleLimits::default())
         .map_err(|e| format!("{}: {e}", path.display()))?;
+    let snapshot = chrono_session_to_snapshot(path, &session);
+    let _ = session.close();
+    Ok(snapshot)
+}
+
+fn chrono_session_to_snapshot(path: &Path, session: &ReplaySession) -> TelemetrySnapshot {
     let bundle = session.bundle();
+    #[derive(Clone, Copy, Default)]
+    enum SchedState {
+        #[default]
+        Unknown,
+        RunnableSince(u64),
+        RunningSince(u64),
+        ParkedSince(u64),
+        Finished,
+    }
+    #[derive(Default)]
     struct Acc {
-        min_t: u64,
-        max_t: u64,
-        events: u64,
+        run_ns: u64,
+        idle_ns: u64,
+        wake_to_poll_ns: Vec<u64>,
+        sched_state: SchedState,
         effects: BTreeSet<String>,
         waiting_on: Option<u64>,
     }
     let mut per_fiber: BTreeMap<u64, Acc> = BTreeMap::new();
     for rec in &bundle.records {
-        let entry = per_fiber.entry(rec.fiber_id).or_insert(Acc {
-            min_t: rec.time_ns,
-            max_t: rec.time_ns,
-            events: 0,
-            effects: BTreeSet::new(),
-            waiting_on: None,
-        });
-        entry.min_t = entry.min_t.min(rec.time_ns);
-        entry.max_t = entry.max_t.max(rec.time_ns);
-        entry.events += 1;
         let label = match rec.effect_id {
             0xFFF0 => "InOutWrite".to_string(),
             0xFFF1 => "LinearObligation".to_string(),
@@ -421,6 +424,79 @@ fn chrono_to_snapshot(path: &PathBuf, key: &BundleKey) -> Result<TelemetrySnapsh
             0xFFF3 => "Scheduler".to_string(),
             other => format!("Effect#{other:#06x}"),
         };
+        if rec.effect_id == 0xFFF3
+            && let Ok(event) = serde_json::from_slice::<TraceEvent>(&rec.payload)
+        {
+            match event {
+                TraceEvent::ClockAdvance { .. } => continue,
+                TraceEvent::Spawn { task, at_ns } => {
+                    let entry = per_fiber.entry(task.get()).or_default();
+                    entry.effects.insert(label);
+                    entry.sched_state = SchedState::RunnableSince(at_ns);
+                }
+                TraceEvent::Dispatch { task, at_ns, .. } => {
+                    let entry = per_fiber.entry(task.get()).or_default();
+                    entry.effects.insert(label);
+                    match entry.sched_state {
+                        SchedState::RunnableSince(woke) => {
+                            let wait = at_ns.saturating_sub(woke);
+                            entry.wake_to_poll_ns.push(wait);
+                            entry.idle_ns = entry.idle_ns.saturating_add(wait);
+                        }
+                        SchedState::ParkedSince(parked) => {
+                            entry.idle_ns =
+                                entry.idle_ns.saturating_add(at_ns.saturating_sub(parked));
+                        }
+                        SchedState::RunningSince(start) => {
+                            entry.run_ns = entry.run_ns.saturating_add(at_ns.saturating_sub(start));
+                        }
+                        SchedState::Unknown | SchedState::Finished => {}
+                    }
+                    entry.sched_state = SchedState::RunningSince(at_ns);
+                }
+                TraceEvent::Yield { task, at_ns } => {
+                    let entry = per_fiber.entry(task.get()).or_default();
+                    entry.effects.insert(label);
+                    if let SchedState::RunningSince(start) = entry.sched_state {
+                        entry.run_ns = entry.run_ns.saturating_add(at_ns.saturating_sub(start));
+                    }
+                    entry.sched_state = SchedState::RunnableSince(at_ns);
+                }
+                TraceEvent::Sleep { task, .. } | TraceEvent::SubmitIo { task, .. } => {
+                    let entry = per_fiber.entry(task.get()).or_default();
+                    entry.effects.insert(label);
+                    if let SchedState::RunningSince(start) = entry.sched_state {
+                        entry.run_ns = entry
+                            .run_ns
+                            .saturating_add(rec.time_ns.saturating_sub(start));
+                    }
+                    entry.sched_state = SchedState::ParkedSince(rec.time_ns);
+                }
+                TraceEvent::TimerElapsed { task, at_ns, .. }
+                | TraceEvent::IoCompleted { task, at_ns, .. } => {
+                    let entry = per_fiber.entry(task.get()).or_default();
+                    entry.effects.insert(label);
+                    if let SchedState::ParkedSince(parked) = entry.sched_state {
+                        entry.idle_ns = entry.idle_ns.saturating_add(at_ns.saturating_sub(parked));
+                    }
+                    entry.sched_state = SchedState::RunnableSince(at_ns);
+                }
+                TraceEvent::CancelRequested { task, .. } => {
+                    let entry = per_fiber.entry(task.get()).or_default();
+                    entry.effects.insert(label);
+                }
+                TraceEvent::Finish { task, at_ns } => {
+                    let entry = per_fiber.entry(task.get()).or_default();
+                    entry.effects.insert(label);
+                    if let SchedState::RunningSince(start) = entry.sched_state {
+                        entry.run_ns = entry.run_ns.saturating_add(at_ns.saturating_sub(start));
+                    }
+                    entry.sched_state = SchedState::Finished;
+                }
+            }
+            continue;
+        }
+        let entry = per_fiber.entry(rec.fiber_id).or_default();
         entry.effects.insert(label);
     }
 
@@ -429,7 +505,13 @@ fn chrono_to_snapshot(path: &PathBuf, key: &BundleKey) -> Result<TelemetrySnapsh
     let mut ob_by_fiber: BTreeMap<u64, Vec<ObligationEntry>> = BTreeMap::new();
     for ob_id in open {
         if let Ok(chain) = lineage.chain(ob_id) {
-            let owner = chain.last().map_or(0, |h| h.fiber_id);
+            let owner = match chain.last() {
+                Some(hop) => match hop.kind {
+                    HopKind::ChannelHandoff { to_fiber } => to_fiber,
+                    _ => hop.fiber_id,
+                },
+                None => 0,
+            };
             ob_by_fiber.entry(owner).or_default().push(ObligationEntry {
                 obligation_id: ob_id,
                 kind: "ChronoObligation".into(),
@@ -437,37 +519,32 @@ fn chrono_to_snapshot(path: &PathBuf, key: &BundleKey) -> Result<TelemetrySnapsh
                 waiting_on_fiber: None,
                 waiting_on_obligation: None,
             });
-            per_fiber.entry(owner).or_insert(Acc {
-                min_t: 0,
-                max_t: 0,
-                events: 0,
-                effects: BTreeSet::new(),
-                waiting_on: None,
-            });
+            per_fiber.entry(owner).or_default();
         }
     }
 
     let fibers = per_fiber
         .into_iter()
         .map(|(fiber_id, acc)| {
-            let span_ns = acc.max_t.saturating_sub(acc.min_t);
-            let run_ns = acc
-                .events
-                .saturating_mul(1_000)
-                .min(span_ns.max(acc.events * 1_000));
-            let idle_ns = span_ns.saturating_sub(run_ns);
             let obs = ob_by_fiber.remove(&fiber_id).unwrap_or_default();
+            let status = if !obs.is_empty() || matches!(acc.sched_state, SchedState::ParkedSince(_))
+            {
+                FiberStatus::Parked
+            } else {
+                match acc.sched_state {
+                    SchedState::RunningSince(_) => FiberStatus::Running,
+                    SchedState::RunnableSince(_) => FiberStatus::Runnable,
+                    SchedState::ParkedSince(_) => FiberStatus::Parked,
+                    SchedState::Finished | SchedState::Unknown => FiberStatus::Completed,
+                }
+            };
             FiberTelemetry {
                 fiber_id,
                 worker_core: 0,
-                status: if obs.is_empty() {
-                    FiberStatus::Completed
-                } else {
-                    FiberStatus::Parked
-                },
-                run_ns,
-                idle_ns,
-                wake_to_poll_ns: vec![run_ns.min(1_000)],
+                status,
+                run_ns: acc.run_ns,
+                idle_ns: acc.idle_ns,
+                wake_to_poll_ns: acc.wake_to_poll_ns,
                 effect_stack: acc.effects.into_iter().collect(),
                 obligations: obs,
                 waiting_on_fiber: acc.waiting_on,
@@ -475,11 +552,11 @@ fn chrono_to_snapshot(path: &PathBuf, key: &BundleKey) -> Result<TelemetrySnapsh
         })
         .collect();
 
-    Ok(TelemetrySnapshot {
+    TelemetrySnapshot {
         schema_version: 1,
         source: format!("chrono:{}", path.display()),
         fibers,
-    })
+    }
 }
 
 fn run_module_snapshot(
@@ -516,12 +593,65 @@ fn run_module_snapshot(
     if !f.effects.instances.is_empty() || f.effects.tail.is_some() {
         return Err("entry function must handle all effects".into());
     }
-    let effect_stack: Vec<String> = checked.world.effects.keys().cloned().collect();
+    let linear_types: Vec<String> = checked
+        .world
+        .adts
+        .values()
+        .filter(|adt| {
+            adt.mode == Mode::Linear
+                && !adt.is_enum
+                && adt.generics.is_empty()
+                && adt.variants.len() == 1
+                && adt.variants[0].name == adt.name
+                && adt.variants[0].fields.is_empty()
+        })
+        .map(|adt| adt.name.clone())
+        .take(ResourceTraceLimits::HARD.max_selected_types)
+        .collect();
     let started = Instant::now();
     let mut runtime = Runtime::new(&checked.world);
     runtime.fuel = fuel;
+    let observer = if linear_types.is_empty() {
+        None
+    } else {
+        let mut limits = ResourceTraceLimits::default();
+        limits.max_selected_types = limits.max_selected_types.max(linear_types.len());
+        let total_name_bytes: usize = linear_types.iter().map(String::len).sum();
+        if total_name_bytes > limits.max_selected_name_bytes
+            && total_name_bytes <= ResourceTraceLimits::HARD.max_selected_name_bytes
+        {
+            limits.max_selected_name_bytes = total_name_bytes;
+        }
+        let selected_refs: Vec<&str> = linear_types.iter().map(String::as_str).collect();
+        let config = ResourceTraceConfig::new(&checked.world, &selected_refs, limits)
+            .map_err(|e| e.to_string())?;
+        Some(
+            runtime
+                .observe_resources(config)
+                .map_err(|e| e.to_string())?,
+        )
+    };
     let _val = runtime.run(entry, vec![])?;
     let elapsed_ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+    let effect_stack = runtime.active_effects();
+    let mut obligations = Vec::new();
+    if let Some(observer) = observer {
+        let report = observer.snapshot().map_err(|e| e.to_string())?;
+        let selected = report.selected_types();
+        for live in report.live() {
+            obligations.push(ObligationEntry {
+                obligation_id: live.identity().serial().saturating_add(1),
+                kind: selected
+                    .get(live.kind())
+                    .cloned()
+                    .unwrap_or_else(|| "LinearResource".into()),
+                parked: false,
+                waiting_on_fiber: None,
+                waiting_on_obligation: None,
+            });
+        }
+        obligations.sort_by_key(|ob| ob.obligation_id);
+    }
 
     Ok(TelemetrySnapshot {
         schema_version: 1,
@@ -534,7 +664,7 @@ fn run_module_snapshot(
             idle_ns: 0,
             wake_to_poll_ns: vec![elapsed_ns.min(1_000)],
             effect_stack,
-            obligations: Vec::new(),
+            obligations,
             waiting_on_fiber: None,
         }],
     })
