@@ -249,3 +249,49 @@ exercised by the tests.
 - The RV64 proof covers encoding only. Instruction semantics (that the
   emitted sequence implements `Mach.step`) are still checked by
   differential tests under QEMU.
+
+## Milestone 9: front-end coverage driver and dynamic tuple indexing (#838)
+
+### What was built
+
+- `verified_codegen::coverage` plans every function on its own signature
+  and lowers it in a coverage mode that records each refusal and keeps
+  going, so the inventory has every refusal, not just the first one
+  `compile` returns. A function refused only for its effect row is still
+  lowered, so its body's refusals are listed too. A function *compiles*
+  when it has no refusal of its own and all its callees compile.
+- `tests/verified_codegen_front_end.rs` runs it over the three units of
+  `packages/vesper-compiler`: `stage1` (the five Loom.toml files that
+  `bootstrap/stage1.rs` builds), `parser` (`parse_*`/`syntax_*`) and
+  `checker` (the twelve files of `tests/self_host_check.rs`), each with
+  the generated input provider. The result is checked in as
+  `docs/parallel-results/verified-codegen-front-end-inventory.txt`
+  (`VESPER_BLESS=1` rewrites it).
+- Dynamic tuple indexing `(a, b, ...)[i]` (the parser's `syntax_text_*`
+  byte tables and the generated `source_leaf_*` providers) lowers to a
+  first-match chain over the index (`Const`, `Compare`, `BranchZero`,
+  `Move`, `Jump`), so the Lean table needs no new rows. Elements may be
+  several words. Out of range raises `Fail[RuntimeError]`; unhandled, it
+  aborts like division by zero (exit 102) until the Fail lowering of
+  Milestone 7 lands, which then routes it through its raise path.
+
+### Inventory after this milestone
+
+| Unit | Functions | Own refusals | Remaining constructs |
+| --- | --- | --- | --- |
+| stage1 | 141 | 92 functions | `Fail[Diag]`, `?`, `handle Fail` (Milestone 7) |
+| parser | 384 | 225 functions | the above, generics and `eff [r: Region]` (Milestone 8), `handle SyntaxMemory` and `syntax_run`'s closure argument |
+| checker | 259 | 209 functions | `Fail[Diag]`, `Fail[CheckError]`, `?`, `handle Fail` (Milestone 7) |
+
+No structural equality, string or float refusal occurs anywhere in the
+front end. Bodies of `handle` expressions are not lowered yet, so their
+contents are not in this inventory; Milestone 7 lowers them as nested
+functions and they will appear then.
+
+### Checks
+
+- `cargo test --test verified_codegen dynamic_tuple_indexing`: every
+  element, both ends, negative and huge indices, `u8`/`u64` indices and
+  multi-word elements, on x86-64, AArch64 (QEMU) and RV64 (QEMU), each
+  with and without the IR optimizer, against the evaluator and Cranelift.
+- `cargo test --test verified_codegen_front_end`: the inventory matches.

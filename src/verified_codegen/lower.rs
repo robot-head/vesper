@@ -260,8 +260,17 @@ pub struct Plan {
 }
 
 fn effects_supported(world: &World, f: &FunctionIr) -> Result<(), VerifiedError> {
+    effect_refusals(world, f)
+        .into_iter()
+        .next()
+        .map_or(Ok(()), Err)
+}
+
+/// Every refusal of `f`'s declared effect row, in declaration order.
+pub fn effect_refusals(world: &World, f: &FunctionIr) -> Vec<VerifiedError> {
+    let mut out = vec![];
     if f.effects.tail.is_some() {
-        return Err(VerifiedError::unsupported(
+        out.push(VerifiedError::unsupported(
             Unsupported::Effect,
             &f.name,
             "open effect row",
@@ -274,7 +283,7 @@ fn effects_supported(world: &World, f: &FunctionIr) -> Result<(), VerifiedError>
             && e.args.len() == 1
             && matches!(arg, "ArithOverflow" | "RuntimeError");
         if !ok {
-            return Err(VerifiedError::unsupported(
+            out.push(VerifiedError::unsupported(
                 Unsupported::Effect,
                 &f.name,
                 format!(
@@ -297,7 +306,140 @@ fn effects_supported(world: &World, f: &FunctionIr) -> Result<(), VerifiedError>
         }
     }
     let _ = world;
-    Ok(())
+    out
+}
+
+/// Every signature-level refusal of `name` (generics, effects, parameter
+/// and result types), not just the first.
+pub fn signature_refusals(world: &World, program: &Program, name: &str) -> Vec<VerifiedError> {
+    let mut out = vec![];
+    let Some(decl) = world.functions.get(name) else {
+        return vec![VerifiedError::unsupported(
+            Unsupported::ExternalFunction,
+            name,
+            "no such function in the checked world",
+        )];
+    };
+    if !decl.generics.is_empty() {
+        out.push(VerifiedError::unsupported(
+            Unsupported::Generic,
+            name,
+            "generic functions (no monomorphization in this backend)",
+        ));
+    }
+    let Some(f) = program.functions.get(name) else {
+        out.push(VerifiedError::unsupported(
+            Unsupported::ExternalFunction,
+            name,
+            "function without a body",
+        ));
+        return out;
+    };
+    out.extend(effect_refusals(world, f));
+    for p in &f.params {
+        if let Err(e) = shape(world, &p.ty, name) {
+            out.push(e);
+        }
+    }
+    if let Err(e) = shape(world, &f.result, name) {
+        out.push(e);
+    }
+    out
+}
+
+/// Plan the signature of one function at `label`.
+pub fn planned(
+    world: &World,
+    program: &Program,
+    name: &str,
+    label: Label,
+) -> Result<Planned, VerifiedError> {
+    planned_with(world, program, name, label, true)
+}
+
+/// [`planned`], optionally without checking the effect row (coverage lowers
+/// the bodies of functions refused only for their effects).
+pub fn planned_with(
+    world: &World,
+    program: &Program,
+    name: &str,
+    label: Label,
+    check_effects: bool,
+) -> Result<Planned, VerifiedError> {
+    let decl = world.functions.get(name).ok_or_else(|| {
+        VerifiedError::unsupported(
+            Unsupported::ExternalFunction,
+            name,
+            "no such function in the checked world",
+        )
+    })?;
+    if !decl.generics.is_empty() {
+        return Err(VerifiedError::unsupported(
+            Unsupported::Generic,
+            name,
+            "generic functions (no monomorphization in this backend)",
+        ));
+    }
+    let f = program.functions.get(name).ok_or_else(|| {
+        VerifiedError::unsupported(
+            Unsupported::ExternalFunction,
+            name,
+            "function without a body",
+        )
+    })?;
+    if check_effects {
+        effects_supported(world, f)?;
+    }
+    let params = f
+        .params
+        .iter()
+        .map(|p| Ok((p.pass, shape(world, &p.ty, name)?)))
+        .collect::<Result<Vec<_>, VerifiedError>>()?;
+    let writeback = f
+        .params
+        .iter()
+        .zip(&params)
+        .map(|(p, (_, s))| {
+            if p.projections.is_empty() {
+                return Ok(vec![(0, s.len())]);
+            }
+            p.projections
+                .iter()
+                .map(|path| {
+                    s.range(path).ok_or_else(|| {
+                        VerifiedError::Invalid(format!(
+                            "projection {}.{{{}}} of {name}",
+                            p.name,
+                            path.join(".")
+                        ))
+                    })
+                })
+                .collect()
+        })
+        .collect::<Result<Vec<_>, VerifiedError>>()?;
+    let result = shape(world, &f.result, name)?;
+    Ok(Planned {
+        name: name.to_owned(),
+        label,
+        params,
+        writeback,
+        result,
+    })
+}
+
+/// The direct callees of `f` (wrapping intrinsics excluded), in order.
+pub fn callees(f: &FunctionIr) -> impl Iterator<Item = &String> {
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter_map(|i| match &i.op {
+            Op::Call {
+                callee,
+                capability: None,
+                ..
+            } if crate::numeric::wrapping_intrinsic(callee).is_none() => Some(callee),
+            _ => None,
+        })
 }
 
 pub fn plan(
@@ -317,74 +459,14 @@ pub fn plan(
                 "more than {max_functions} reachable functions"
             )));
         }
-        let decl = world.functions.get(&name).ok_or_else(|| {
-            VerifiedError::unsupported(
-                Unsupported::ExternalFunction,
-                &name,
-                "no such function in the checked world",
-            )
-        })?;
-        if !decl.generics.is_empty() {
-            return Err(VerifiedError::unsupported(
-                Unsupported::Generic,
-                &name,
-                "generic functions (no monomorphization in this backend)",
-            ));
-        }
-        let f = program.functions.get(&name).ok_or_else(|| {
-            VerifiedError::unsupported(
-                Unsupported::ExternalFunction,
-                &name,
-                "function without a body",
-            )
-        })?;
-        effects_supported(world, f)?;
-        let params = f
-            .params
-            .iter()
-            .map(|p| Ok((p.pass, shape(world, &p.ty, &name)?)))
-            .collect::<Result<Vec<_>, VerifiedError>>()?;
-        let writeback = f
-            .params
-            .iter()
-            .zip(&params)
-            .map(|(p, (_, s))| {
-                if p.projections.is_empty() {
-                    return Ok(vec![(0, s.len())]);
-                }
-                p.projections
-                    .iter()
-                    .map(|path| {
-                        s.range(path).ok_or_else(|| {
-                            VerifiedError::Invalid(format!(
-                                "projection {}.{{{}}} of {name}",
-                                p.name,
-                                path.join(".")
-                            ))
-                        })
-                    })
-                    .collect()
-            })
-            .collect::<Result<Vec<_>, VerifiedError>>()?;
-        let result = shape(world, &f.result, &name)?;
-        for b in &f.blocks {
-            for i in &b.instructions {
-                if let Op::Call { callee, .. } = &i.op
-                    && crate::numeric::wrapping_intrinsic(callee).is_none()
-                    && seen.insert(callee.clone())
-                {
-                    queue.push_back(callee.clone());
-                }
+        let planned = planned(world, program, &name, label)?;
+        for callee in callees(&program.functions[&name]) {
+            if seen.insert(callee.clone()) {
+                queue.push_back(callee.clone());
             }
         }
-        index.insert(name.clone(), functions.len());
-        functions.push(Planned {
-            name,
-            label,
-            params,
-            writeback,
-            result,
-        });
+        index.insert(name, functions.len());
+        functions.push(planned);
         // Entry label and body label (after the prologue).
         label += 2;
     }
@@ -418,6 +500,9 @@ struct FnLower<'a> {
     out_words: u32,
     next_label: &'a mut Label,
     max_rows: usize,
+    /// Coverage mode: record every refusal here and keep lowering, instead
+    /// of returning the first one (see `coverage.rs`).
+    refusals: Option<Vec<VerifiedError>>,
 }
 
 fn kind_name(kind: Kind) -> &'static str {
@@ -443,6 +528,22 @@ fn kind_of(shape: &Shape, function: &str, what: &str) -> Result<Kind, VerifiedEr
 }
 
 impl FnLower<'_> {
+    /// In coverage mode, record `r`'s error and continue. An `Invalid` error
+    /// after a recorded refusal is its consequence (a value the refused
+    /// construct would have defined) and is dropped.
+    fn tolerate(&mut self, r: Result<(), VerifiedError>) -> Result<(), VerifiedError> {
+        match (r, &mut self.refusals) {
+            (Err(VerifiedError::Invalid(_)), Some(seen)) if !seen.is_empty() => Ok(()),
+            (Err(e), Some(seen)) => {
+                if !seen.contains(&e) {
+                    seen.push(e);
+                }
+                Ok(())
+            }
+            (r, None) => r,
+            (Ok(()), Some(_)) => Ok(()),
+        }
+    }
     fn err(&self, construct: Unsupported, detail: impl Into<String>) -> VerifiedError {
         VerifiedError::unsupported(construct, &self.f.name, detail)
     }
@@ -1100,7 +1201,7 @@ impl FnLower<'_> {
                 }
                 Ok(())
             }
-            Op::Index(..) => Err(self.err(Unsupported::Index, "dynamic indexing")),
+            Op::Index(base, index) => self.index(i, *base, *index),
             Op::Indirect { .. } | Op::Closure { .. } => {
                 Err(self.err(Unsupported::FunctionValue, "closures and indirect calls"))
             }
@@ -1112,6 +1213,71 @@ impl FnLower<'_> {
                 "an IR operation this backend does not know",
             )),
         }
+    }
+
+    /// `base[index]` on a tuple whose elements all have the result's shape:
+    /// a first-match chain of word tests on the index (existing `Const`,
+    /// `Compare`, `BranchZero`, `Jump` and `Move` rows only, so no new Lean
+    /// rows), then a `Fail[RuntimeError]` abort when no element matches. A
+    /// negative index never equals an element number.
+    fn index(
+        &mut self,
+        i: &Instruction,
+        base: ValueId,
+        index: ValueId,
+    ) -> Result<(), VerifiedError> {
+        let ty = self
+            .types
+            .get(&base)
+            .cloned()
+            .ok_or_else(|| VerifiedError::Invalid(format!("untyped value %{base}")))?;
+        let Type::Tuple(elements) = &ty else {
+            return Err(self.err(Unsupported::Index, format!("indexing a value of type {ty}")));
+        };
+        let (src, _) = self.value(base)?;
+        let (at, ishape) = self.value(index)?;
+        let kind = kind_of(&ishape, &self.f.name, "index")?;
+        if matches!(kind, Kind::Bool | Kind::F64) {
+            return Err(VerifiedError::Invalid(format!("index of kind {kind:?}")));
+        }
+        let (dst, dshape) = self.value_of(i.dest, &i.ty)?;
+        let words = dshape.len();
+        for t in elements {
+            if self.words(t)? != words {
+                return Err(self.err(
+                    Unsupported::Index,
+                    format!("indexing a tuple with elements of different sizes ({ty})"),
+                ));
+            }
+        }
+        let tmp = self.alloc(2)?;
+        let done = *self.next_label;
+        *self.next_label += 1;
+        for k in 0..elements.len() as u32 {
+            let next = *self.next_label;
+            *self.next_label += 1;
+            self.push(Lir::Const {
+                dst: tmp,
+                word: u64::from(k),
+            })?;
+            self.push(Lir::Compare {
+                cond: Cond::Eq,
+                kind,
+                dst: tmp + 1,
+                a: at,
+                b: tmp,
+            })?;
+            self.push(Lir::BranchZero {
+                cond: tmp + 1,
+                target: next,
+            })?;
+            self.copy(dst, src + k * words, words)?;
+            self.push(Lir::Jump(done))?;
+            self.push(Lir::Label(next))?;
+        }
+        // Out of range: `Fail[RuntimeError]` (an unhandled one aborts).
+        self.push(Lir::Trap(TrapKind::DivisionByZero))?;
+        self.push(Lir::Label(done))
     }
 
     /// Whether `block` ends in a self call whose result is returned directly.
@@ -1141,7 +1307,122 @@ impl FnLower<'_> {
         }
     }
 
-    fn function(mut self) -> Result<Lowered, VerifiedError> {
+    fn terminator(
+        &mut self,
+        block: &Block,
+        params: &[crate::ast::Param],
+        nres: u32,
+    ) -> Result<(), VerifiedError> {
+        match &block.terminator {
+            Terminator::Return(v) => {
+                let (src, s) = self.value(*v)?;
+                if s.len() != nres {
+                    return Err(VerifiedError::Invalid(format!(
+                        "return shape of '{}'",
+                        self.f.name
+                    )));
+                }
+                for w in 0..nres {
+                    self.push(Lir::StoreIn {
+                        index: w,
+                        src: src + w,
+                    })?;
+                }
+                // `inout` parameters are written back on return.
+                let mut index = nres;
+                for (p, (pass, s)) in params.iter().zip(&self.me.params) {
+                    if *pass == Pass::Inout {
+                        let (slot, _) = self.local(&p.name)?;
+                        for w in 0..s.len() {
+                            self.push(Lir::StoreIn {
+                                index: index + w,
+                                src: slot + w,
+                            })?;
+                        }
+                    }
+                    index += s.len();
+                }
+                self.push(Lir::Return)?;
+            }
+            Terminator::Jump { block, args } => {
+                let target = &self.f.blocks[*block];
+                if target.params.len() != args.len() {
+                    return Err(VerifiedError::Invalid("block arity".into()));
+                }
+                let mut moves = vec![];
+                for (param, arg) in target.params.iter().zip(args) {
+                    let ty = self.f.values.get(param).cloned().ok_or_else(|| {
+                        VerifiedError::Invalid(format!("untyped block parameter %{param}"))
+                    })?;
+                    let (dst, s) = self.value_of(*param, &ty)?;
+                    let (src, a) = self.value(*arg)?;
+                    if a.len() != s.len() {
+                        return Err(VerifiedError::Invalid("jump argument shape".into()));
+                    }
+                    moves.push((dst, src, s.len()));
+                }
+                for (dst, src, len) in moves {
+                    self.copy(dst, src, len)?;
+                }
+                self.push(Lir::Jump(self.block_labels[*block]))?;
+            }
+            Terminator::Branch { condition, yes, no } => {
+                let (c, s) = self.value(*condition)?;
+                if kind_of(&s, &self.f.name, "branch")? != Kind::Bool {
+                    return Err(VerifiedError::Invalid("branch on a non-bool".into()));
+                }
+                self.push(Lir::BranchZero {
+                    cond: c,
+                    target: self.block_labels[*no],
+                })?;
+                self.push(Lir::Jump(self.block_labels[*yes]))?;
+            }
+            Terminator::Match { value, arms } => {
+                let (src, _) = self.value(*value)?;
+                let ty = self
+                    .types
+                    .get(value)
+                    .cloned()
+                    .ok_or_else(|| VerifiedError::Invalid(format!("untyped value %{value}")))?;
+                for (p, target) in arms {
+                    let next = *self.next_label;
+                    *self.next_label += 1;
+                    self.test(p, src, &ty, next)?;
+                    self.push(Lir::Jump(self.block_labels[*target]))?;
+                    self.push(Lir::Label(next))?;
+                }
+                // The checker proves the arms exhaustive.
+                self.push(Lir::Trap(TrapKind::Unreachable))?;
+            }
+            Terminator::Unreachable => self.push(Lir::Trap(TrapKind::Unreachable))?,
+        }
+        Ok(())
+    }
+
+    /// Lower a self call in tail position as a loop.
+    fn tail_call(&mut self, i: &Instruction, nres: u32) -> Result<(), VerifiedError> {
+        let Op::Call { args, .. } = &i.op else {
+            unreachable!()
+        };
+        let mut index = nres;
+        let mut staged = vec![];
+        for arg in args {
+            let (src, s) = self.value(arg.value)?;
+            staged.push((src, s.len(), index));
+            index += s.len();
+        }
+        for (src, len, index) in staged {
+            for w in 0..len {
+                self.push(Lir::StoreIn {
+                    index: index + w,
+                    src: src + w,
+                })?;
+            }
+        }
+        self.push(Lir::Jump(self.me.label + 1))
+    }
+
+    fn function_with_refusals(mut self) -> Result<(Lowered, Vec<VerifiedError>), VerifiedError> {
         let nres = self.me.result.len();
         // Give every block parameter and instruction result its words up
         // front, so the block order does not matter.
@@ -1150,7 +1431,8 @@ impl FnLower<'_> {
                 let ty = self.f.values.get(p).cloned().ok_or_else(|| {
                     VerifiedError::Invalid(format!("untyped block parameter %{p}"))
                 })?;
-                self.value_of(*p, &ty)?;
+                let r = self.value_of(*p, &ty).map(drop);
+                self.tolerate(r)?;
             }
             for i in &block.instructions {
                 let ty = if matches!(i.op, Op::Bind { .. } | Op::Write { .. } | Op::Unit) {
@@ -1158,7 +1440,8 @@ impl FnLower<'_> {
                 } else {
                     i.ty.clone()
                 };
-                self.value_of(i.dest, &ty)?;
+                let r = self.value_of(i.dest, &ty).map(drop);
+                self.tolerate(r)?;
             }
         }
         self.push(Lir::Label(self.me.label))?;
@@ -1168,15 +1451,18 @@ impl FnLower<'_> {
         // Parameters: incoming area words after the results.
         let mut index = nres;
         let params = self.f.params.clone();
-        for p in &params {
-            let (slot, s) = self.local(&p.name)?;
-            for w in 0..s.len() {
-                self.push(Lir::LoadIn {
-                    dst: slot + w,
-                    index: index + w,
-                })?;
-            }
-            index += s.len();
+        for (p, (_, ps)) in params.iter().zip(&self.me.params) {
+            let r = self.local(&p.name).and_then(|(slot, s)| {
+                for w in 0..s.len() {
+                    self.push(Lir::LoadIn {
+                        dst: slot + w,
+                        index: index + w,
+                    })?;
+                }
+                Ok(())
+            });
+            self.tolerate(r)?;
+            index += ps.len();
         }
         for block in &self.f.blocks {
             if let Terminator::Match { value, arms } = &block.terminator {
@@ -1193,123 +1479,33 @@ impl FnLower<'_> {
             let tail = self.tail_self_call(block);
             let count = block.instructions.len();
             for (n, i) in block.instructions.iter().enumerate() {
-                if tail && n + 1 == count {
+                let r = if tail && n + 1 == count {
                     // A self call in tail position is a loop: write the new
                     // arguments into the incoming area and jump to the body.
-                    let Op::Call { args, .. } = &i.op else {
-                        unreachable!()
-                    };
-                    let mut index = nres;
-                    let mut staged = vec![];
-                    for arg in args {
-                        let (src, s) = self.value(arg.value)?;
-                        staged.push((src, s.len(), index));
-                        index += s.len();
-                    }
-                    for (src, len, index) in staged {
-                        for w in 0..len {
-                            self.push(Lir::StoreIn {
-                                index: index + w,
-                                src: src + w,
-                            })?;
-                        }
-                    }
-                    self.push(Lir::Jump(self.me.label + 1))?;
-                    continue;
-                }
-                self.instruction(i)?;
+                    self.tail_call(i, nres)
+                } else {
+                    self.instruction(i)
+                };
+                self.tolerate(r)?;
             }
             if tail {
                 continue;
             }
-            match &block.terminator {
-                Terminator::Return(v) => {
-                    let (src, s) = self.value(*v)?;
-                    if s.len() != nres {
-                        return Err(VerifiedError::Invalid(format!(
-                            "return shape of '{}'",
-                            self.f.name
-                        )));
-                    }
-                    for w in 0..nres {
-                        self.push(Lir::StoreIn {
-                            index: w,
-                            src: src + w,
-                        })?;
-                    }
-                    // `inout` parameters are written back on return.
-                    let mut index = nres;
-                    for (p, (pass, s)) in params.iter().zip(&self.me.params) {
-                        if *pass == Pass::Inout {
-                            let (slot, _) = self.local(&p.name)?;
-                            for w in 0..s.len() {
-                                self.push(Lir::StoreIn {
-                                    index: index + w,
-                                    src: slot + w,
-                                })?;
-                            }
-                        }
-                        index += s.len();
-                    }
-                    self.push(Lir::Return)?;
-                }
-                Terminator::Jump { block, args } => {
-                    let target = &self.f.blocks[*block];
-                    if target.params.len() != args.len() {
-                        return Err(VerifiedError::Invalid("block arity".into()));
-                    }
-                    let mut moves = vec![];
-                    for (param, arg) in target.params.iter().zip(args) {
-                        let ty = self.f.values.get(param).cloned().ok_or_else(|| {
-                            VerifiedError::Invalid(format!("untyped block parameter %{param}"))
-                        })?;
-                        let (dst, s) = self.value_of(*param, &ty)?;
-                        let (src, a) = self.value(*arg)?;
-                        if a.len() != s.len() {
-                            return Err(VerifiedError::Invalid("jump argument shape".into()));
-                        }
-                        moves.push((dst, src, s.len()));
-                    }
-                    for (dst, src, len) in moves {
-                        self.copy(dst, src, len)?;
-                    }
-                    self.push(Lir::Jump(self.block_labels[*block]))?;
-                }
-                Terminator::Branch { condition, yes, no } => {
-                    let (c, s) = self.value(*condition)?;
-                    if kind_of(&s, &self.f.name, "branch")? != Kind::Bool {
-                        return Err(VerifiedError::Invalid("branch on a non-bool".into()));
-                    }
-                    self.push(Lir::BranchZero {
-                        cond: c,
-                        target: self.block_labels[*no],
-                    })?;
-                    self.push(Lir::Jump(self.block_labels[*yes]))?;
-                }
-                Terminator::Match { value, arms } => {
-                    let (src, _) = self.value(*value)?;
-                    let ty =
-                        self.types.get(value).cloned().ok_or_else(|| {
-                            VerifiedError::Invalid(format!("untyped value %{value}"))
-                        })?;
-                    for (p, target) in arms {
-                        let next = *self.next_label;
-                        *self.next_label += 1;
-                        self.test(p, src, &ty, next)?;
-                        self.push(Lir::Jump(self.block_labels[*target]))?;
-                        self.push(Lir::Label(next))?;
-                    }
-                    // The checker proves the arms exhaustive.
-                    self.push(Lir::Trap(TrapKind::Unreachable))?;
-                }
-                Terminator::Unreachable => self.push(Lir::Trap(TrapKind::Unreachable))?,
-            }
+            let r = self.terminator(block, &params, nres);
+            self.tolerate(r)?;
         }
         let words = self
             .next_slot
             .checked_add(self.out_words)
             .filter(|n| *n <= super::MAX_FRAME_WORDS)
-            .ok_or_else(|| VerifiedError::Limit(format!("frame of '{}'", self.f.name)))?;
+            .ok_or_else(|| VerifiedError::Limit(format!("frame of '{}'", self.f.name)));
+        let words = match words {
+            Ok(w) => w,
+            Err(e) => {
+                self.tolerate(Err(e))?;
+                0
+            }
+        };
         // Keep the stack 16-byte aligned.
         let words = words + (words & 1);
         self.rows[enter_at] = Lir::Enter { words };
@@ -1318,11 +1514,14 @@ impl FnLower<'_> {
         for row in &mut self.rows {
             relocate(row, out);
         }
-        Ok(Lowered {
-            rows: self.rows,
-            slots: self.next_slot,
-            out_words: out,
-        })
+        Ok((
+            Lowered {
+                rows: self.rows,
+                slots: self.next_slot,
+                out_words: out,
+            },
+            self.refusals.unwrap_or_default(),
+        ))
     }
 }
 
@@ -1371,6 +1570,42 @@ pub fn function(
     next_label: &mut Label,
     max_rows: usize,
 ) -> Result<Lowered, VerifiedError> {
+    lower_function(world, program, plan, index, next_label, max_rows, None).map(|(l, _)| l)
+}
+
+/// Lower one planned function in coverage mode: every refusal in the body
+/// is recorded and lowering continues past it. Only errors that are not
+/// refusals (a broken invariant before any refusal, a limit) are returned
+/// in the list as well; the rows are meaningless when the list is not
+/// empty.
+pub fn function_refusals(
+    world: &World,
+    program: &Program,
+    plan: &Plan,
+    index: usize,
+    next_label: &mut Label,
+    max_rows: usize,
+) -> Result<(Lowered, Vec<VerifiedError>), VerifiedError> {
+    lower_function(
+        world,
+        program,
+        plan,
+        index,
+        next_label,
+        max_rows,
+        Some(vec![]),
+    )
+}
+
+fn lower_function(
+    world: &World,
+    program: &Program,
+    plan: &Plan,
+    index: usize,
+    next_label: &mut Label,
+    max_rows: usize,
+    refusals: Option<Vec<VerifiedError>>,
+) -> Result<(Lowered, Vec<VerifiedError>), VerifiedError> {
     let me = &plan.functions[index];
     let f = &program.functions[&me.name];
     let block_labels = (0..f.blocks.len())
@@ -1396,6 +1631,7 @@ pub fn function(
         out_words: 0,
         next_label,
         max_rows,
+        refusals,
     }
-    .function()
+    .function_with_refusals()
 }

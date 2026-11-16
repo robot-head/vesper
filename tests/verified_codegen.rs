@@ -505,12 +505,47 @@ fn constructs_outside_the_subset_are_typed_errors() {
         Unsupported::Effect,
     );
     rejects(
-        "fn main() -> i64 { let xs = (1, 2, 3); let i = 1; xs[i] }",
-        Unsupported::Index,
-    );
-    rejects(
         "copy struct P { x: i64 } fn main() -> bool { let a = P { x: 1 }; a == a }",
         Unsupported::StructuralEquality,
+    );
+}
+
+/// Dynamic tuple indexing (the front end's byte tables): every element, the
+/// first and last, out of range on both sides, multi-word elements and
+/// unsigned indices.
+#[test]
+fn dynamic_tuple_indexing() {
+    let table = "fn t(i: i64) -> i64 eff [Fail[RuntimeError]] { (7, 11, 13, 17, 19)[i] }";
+    for i in [
+        "0",
+        "1",
+        "4",
+        "5",
+        "-1",
+        "-9223372036854775808",
+        "9223372036854775807",
+    ] {
+        differential(&format!(
+            "{table}\nfn main() -> i64 eff [Fail[RuntimeError]] {{ t({i}) }}"
+        ));
+    }
+    assert_eq!(
+        differential(&format!(
+            "{table}\nfn sum(i: i64, acc: i64) -> i64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {{ if i == 5 {{ acc }} else {{ sum(i + 1, acc * 3 + t(i)) }} }}\nfn main() -> i64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {{ sum(0, 0) }}"
+        )),
+        "1051"
+    );
+    assert_eq!(
+        differential(
+            "copy struct P { x: i64, y: bool }\nfn pick(i: u8) -> P eff [Fail[RuntimeError]] { (P { x: 1, y: true }, P { x: 2, y: false }, P { x: 3, y: true })[i] }\nfn main() -> (P, P) eff [Fail[RuntimeError]] { (pick(2), pick(1)) }"
+        ),
+        "(P { x: 3, y: true }, P { x: 2, y: false })"
+    );
+    assert_eq!(
+        differential(
+            "fn pick(i: u64) -> (i64, i64) eff [Fail[RuntimeError]] { ((1, 2), (3, 4))[i] }\nfn main() -> (i64, i64) eff [Fail[RuntimeError]] { pick(2) }"
+        ),
+        "div0"
     );
 }
 

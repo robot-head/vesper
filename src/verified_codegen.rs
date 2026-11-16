@@ -48,6 +48,10 @@
 //! IEEE-754 `+ - * /` (round to nearest, ties to even; no fast-math),
 //! negation and ordered comparisons; their Lean rows are proved relative to
 //! one shared binary64 semantics (Lean's `Float`), not against the hardware.
+//! Dynamic indexing of a tuple whose elements have one shape is a
+//! first-match chain on the index, also from existing rows; out of range
+//! raises `Fail[RuntimeError]`. [`coverage`] lists every refusal of a whole
+//! program rather than the first.
 //! Handlers and every other effect, `f32`, `f64` remainder, strings,
 //! recursive enums, closures, generic functions, vectors and regions are
 //! rejected.
@@ -62,12 +66,14 @@ mod aarch64;
 mod asm;
 mod cli;
 mod container;
+mod coverage;
 mod lower;
 mod machine;
 mod riscv64;
 mod x86_64;
 
 pub use cli::build_command;
+pub use coverage::{Coverage, FunctionCoverage, coverage};
 pub use machine::{
     ArithOp, Cond, FloatOp, Kind, Label, Lir, Loc, M, Reg, Sign, Slot, TrapKind, WrapOp, select,
     table_listing, table_rows,
