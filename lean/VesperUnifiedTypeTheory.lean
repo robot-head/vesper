@@ -1,5 +1,5 @@
 -- VesperUnifiedTypeTheory.lean (Appendix A.3)
--- Zero-sorry mechanization of 4-axis ModeVec, Capsule sealing, LIFO order, @0 ghost erasure,
+-- Limited algebraic models of 4-axis ModeVec, Capsule admission, LIFO order, ghost-list erasure,
 -- [T-OutSplitSlice], refinement SemVer variance, graded arena bump-check elision, and Quot.sound.
 --
 -- No `sorry`, no `admit`, and no custom axioms are used.
@@ -36,23 +36,90 @@ theorem modevec_le_trans {a b c : ModeVec} (h1 : ModeVec.Le a b) (h2 : ModeVec.L
   rcases h2 with ⟨u2, p2, c2, o2⟩
   exact ⟨Nat.le_trans u1 u2, Nat.le_trans p1 p2, Nat.le_trans c1 c2, Nat.le_trans o1 o2⟩
 
-def capsuleSealSafe (externalAliases : Nat) (m : ModeVec) : Option ModeVec :=
-  if externalAliases = 0 ∧ m.cont = .uncontended then
+-- These are explicit premises of the abstract model, not a heap analysis.
+-- The production checker must establish them from the reachable graph.
+structure CapsuleEvidence where
+  uniquelyOwned : Bool
+  externalAliases : Nat
+  freeOuterCaps : Nat
+  threadAffineHandles : Nat
+  deriving DecidableEq, Repr
+
+def capsuleSealSafe (e : CapsuleEvidence) (m : ModeVec) : Option ModeVec :=
+  if e.uniquelyOwned = true ∧ e.externalAliases = 0 ∧ e.freeOuterCaps = 0 ∧
+      e.threadAffineHandles = 0 ∧ m.cont = .uncontended ∧ m.ord = .unordered then
     some { m with port := .portable }
-  else
-    none
+  else none
 
 theorem capsule_seal_produces_portable_uncontended
-    {aliases : Nat} {m sealed : ModeVec}
-    (h : capsuleSealSafe aliases m = some sealed) :
-    aliases = 0 ∧ sealed.port = .portable ∧ sealed.cont = .uncontended := by
+    {e : CapsuleEvidence} {m sealed : ModeVec}
+    (h : capsuleSealSafe e m = some sealed) :
+    e.uniquelyOwned = true ∧ e.externalAliases = 0 ∧ e.freeOuterCaps = 0 ∧
+      e.threadAffineHandles = 0 ∧ sealed.port = .portable ∧
+      sealed.cont = .uncontended ∧ sealed.ord = .unordered ∧ sealed.usage = m.usage := by
   unfold capsuleSealSafe at h
-  by_cases h_cond : aliases = 0 ∧ m.cont = .uncontended
-  · rw [ite_eq_left h_cond] at h
+  split at h
+  next hc =>
     cases h
-    exact ⟨h_cond.1, rfl, h_cond.2⟩
-  · rw [ite_eq_right h_cond] at h
-    cases h
+    exact ⟨hc.1, hc.2.1, hc.2.2.1, hc.2.2.2.1, rfl,
+      hc.2.2.2.2.1, hc.2.2.2.2.2, rfl⟩
+  next => cases h
+
+theorem capsule_rejects_thread_affinity (m : ModeVec) :
+    capsuleSealSafe ⟨true, 0, 0, 1⟩ m = none := by simp [capsuleSealSafe]
+
+theorem capsule_rejects_outer_capability (m : ModeVec) :
+    capsuleSealSafe ⟨true, 0, 1, 0⟩ m = none := by simp [capsuleSealSafe]
+
+theorem capsule_rejects_external_alias (m : ModeVec) :
+    capsuleSealSafe ⟨true, 1, 0, 0⟩ m = none := by simp [capsuleSealSafe]
+
+theorem capsule_rejects_shared_owner (m : ModeVec) :
+    capsuleSealSafe ⟨false, 0, 0, 0⟩ m = none := by simp [capsuleSealSafe]
+
+theorem capsule_rejects_ordered_owner (e : CapsuleEvidence) (m : ModeVec)
+    (h : m.ord = .lifo) : capsuleSealSafe e m = none := by simp [capsuleSealSafe, h]
+
+-- Context splitting concerns permission to access a place, not just its value's mode.
+inductive Access where | own | shr | mut | out deriving DecidableEq, Repr
+structure PlaceBinding where
+  access : Access
+  usage : UsageMode
+  order : OrderAxis
+  deriving DecidableEq, Repr
+
+def Contractible (b : PlaceBinding) : Prop :=
+  b.access = .shr ∨ (b.access = .own ∧ b.usage = .copy ∧ b.order = .unordered)
+
+inductive PlaceSplit : Option PlaceBinding → Option PlaceBinding → Option PlaceBinding → Prop where
+  | empty : PlaceSplit none none none
+  | left (b) : PlaceSplit (some b) (some b) none
+  | right (b) : PlaceSplit (some b) none (some b)
+  | both (b) (h : Contractible b) : PlaceSplit (some b) (some b) (some b)
+
+-- Any derivation that supplies the binding to both branches must justify contraction.
+theorem duplicated_place_is_contractible {b left right : PlaceBinding}
+    (h : PlaceSplit (some b) (some left) (some right)) : Contractible b := by
+  cases h with
+  | both _ hc => exact hc
+
+theorem exclusive_place_never_duplicated {b left right : PlaceBinding}
+    (exclusive : b.access = .mut ∨ b.access = .out) :
+    ¬ PlaceSplit (some b) (some left) (some right) := by
+  intro h
+  have hc := duplicated_place_is_contractible h
+  rcases exclusive with hm | ho <;> simp [Contractible, *] at hc
+
+theorem ordered_owner_never_duplicated {b left right : PlaceBinding}
+    (owned : b.access = .own) (ordered : b.order = .lifo) :
+    ¬ PlaceSplit (some b) (some left) (some right) := by
+  intro split
+  have hc := duplicated_place_is_contractible split
+  simp [Contractible, owned, ordered] at hc
+
+theorem shared_linear_view_can_split :
+    PlaceSplit (some ⟨.shr, .linear, .lifo⟩) (some ⟨.shr, .linear, .lifo⟩) (some ⟨.shr, .linear, .lifo⟩) :=
+  .both _ (Or.inl rfl)
 
 -- ==================== 2. LIFO ORDERED EXCHANGE SAFETY ======================
 abbrev GuardId := Nat
@@ -147,3 +214,14 @@ end Vesper.UnifiedTypeTheory
 #print axioms Vesper.UnifiedTypeTheory.semver_refinement_variance_sound
 #print axioms Vesper.UnifiedTypeTheory.graded_region_loop_elides_limit_checks
 #print axioms Vesper.UnifiedTypeTheory.uncompacted_zset_eq_compacted
+
+#print axioms Vesper.UnifiedTypeTheory.capsule_rejects_thread_affinity
+#print axioms Vesper.UnifiedTypeTheory.capsule_rejects_outer_capability
+#print axioms Vesper.UnifiedTypeTheory.capsule_rejects_external_alias
+#print axioms Vesper.UnifiedTypeTheory.capsule_rejects_shared_owner
+#print axioms Vesper.UnifiedTypeTheory.capsule_rejects_ordered_owner
+#print axioms Vesper.UnifiedTypeTheory.duplicated_place_is_contractible
+#print axioms Vesper.UnifiedTypeTheory.exclusive_place_never_duplicated
+#print axioms Vesper.UnifiedTypeTheory.shared_linear_view_can_split
+
+#print axioms Vesper.UnifiedTypeTheory.ordered_owner_never_duplicated

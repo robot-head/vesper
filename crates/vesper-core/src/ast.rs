@@ -166,7 +166,9 @@ pub enum FieldTemperature {
 pub struct Field {
     pub name: String,
     pub ty: Type,
-    pub modality: Mode,
+    /// Explicit field mode floor; omission inherits the instantiated component kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modality: Option<Mode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<FieldTemperature>,
 }

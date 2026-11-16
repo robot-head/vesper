@@ -119,7 +119,7 @@ fn struct_adt(layout: &WireLayout) -> Result<Adt, String> {
         fields.push(Field {
             name: f.name().to_owned(),
             ty,
-            modality: Mode::Linear,
+            modality: None,
             temperature: None,
         });
     }
@@ -388,7 +388,7 @@ impl Generated {
                     fields: vec![Field {
                         name: "raw".into(),
                         ty: Type::named("u64"),
-                        modality: Mode::Linear,
+                        modality: None,
                         temperature: None,
                     }],
                     named: true,

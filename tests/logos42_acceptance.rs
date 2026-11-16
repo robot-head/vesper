@@ -1464,8 +1464,8 @@ fn resource_binding_and_inventory_refusals(root: &Path, receipt: &Value, positiv
     assert!(!aliases.is_empty());
     assert_eq!(
         catalog.len(),
-        284,
-        "fixed source theorem catalog includes all 78 semantic assertions"
+        286,
+        "fixed source theorem catalog includes the field-floor regression assertions"
     );
     let alias_index = inventory
         .constants

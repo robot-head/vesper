@@ -42,6 +42,6 @@ GitHub Pages provisions the TLS certificate; HTTPS is enforced for the configure
 
 ## Language manuscript
 
-The three “Read the design” actions open `/vesper-specification.pdf`. This is the complete, searchable Typst manuscript spanning Parts I–VIII (Chapters 1–41 and Appendices A and B), with linked contents, PDF bookmarks, and internal cross-references. Editable sources and provenance are in `docs/manuscript/`.
+The three “Read the design” actions open `/vesper-specification.pdf`. This is the complete, searchable Typst manuscript spanning Parts I–VIII (Chapters 1–42 and Appendices A and B), with linked contents, PDF bookmarks, and internal cross-references. Editable sources and provenance are in `docs/manuscript/`.
 
 GitHub Pages CI rebuilds the PDF using pinned Typst 0.15.1 and its bundled fonts before building the site. The checked-in PDF supports the existing local Node-only website build. See `docs/manuscript/README.md` for the typesetting command and verification details.

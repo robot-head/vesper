@@ -1,7 +1,8 @@
 -- Appendix A model from the refreshed §41 design, repaired for Lean 4.35.
 -- This is the source's small one-binding calculus, not the production compiler.
--- tLet forces an empty residual frame; the final theorem counts resources.
--- Definitions/statements and the approved compKind ≤ overrideMode premise stay intact.
+-- tLet forces an empty residual frame. Closed programs terminate with preserved
+-- result types and exhaust each freshly minted identity exactly once.
+-- Field annotations are mode floors; omitted annotations default to the component kind.
 namespace Vesper.Metatheory
 inductive Mode : Type where
   | copy   : Mode
@@ -57,48 +58,54 @@ theorem discardable_iff_le_affine (m : Mode) :
 end Mode
 structure AdtFieldSpec where
   compKind     : Mode
-  overrideMode : Mode := .linear
+  overrideMode : Mode := compKind
   deriving DecidableEq, Repr
 @[simp] def FieldModalityWf (f : AdtFieldSpec) : Prop :=
   Mode.Le f.compKind f.overrideMode
 @[simp] def adtKind (mDecl : Mode) (fields : List AdtFieldSpec) : Mode :=
-  fields.foldl (fun acc f => Mode.join acc (Mode.meet f.compKind f.overrideMode)) mDecl
-theorem wf_field_meet_eq_comp (f : AdtFieldSpec) (hwf : FieldModalityWf f) :
-    Mode.meet f.compKind f.overrideMode = f.compKind := by
-  rcases f with ⟨k, m⟩
-  cases k <;> cases m <;> simp [FieldModalityWf, Mode.Le] at hwf <;> rfl
+  fields.foldl (fun acc f => Mode.join acc f.overrideMode) mDecl
+
 theorem foldl_join_ge_init (init : Mode) (fs : List AdtFieldSpec) :
-    Mode.Le init (fs.foldl (fun acc f => Mode.join acc (Mode.meet f.compKind f.overrideMode)) init) := by
+    Mode.Le init (adtKind init fs) := by
   induction fs generalizing init with
   | nil => exact Mode.le_refl init
   | cons hd tl ih =>
-    have h1 := Mode.le_join_left init (Mode.meet hd.compKind hd.overrideMode)
-    exact Mode.le_trans h1 (ih _)
-theorem adt_kind_never_relaxes_linear_component
+    exact Mode.le_trans (Mode.le_join_left init hd.overrideMode) (ih _)
+
+theorem adt_kind_preserves_field_floor
     (mDecl : Mode) (fields : List AdtFieldSpec)
-    (h_wf : forall f, f ∈ fields -> FieldModalityWf f)
-    (fLin : AdtFieldSpec) (h_mem : fLin ∈ fields) (h_lin : fLin.compKind = .linear) :
-    adtKind mDecl fields = .linear := by
-  unfold adtKind
+    (f : AdtFieldSpec) (h_mem : f ∈ fields) :
+    Mode.Le f.overrideMode (adtKind mDecl fields) := by
   induction fields generalizing mDecl with
   | nil => cases h_mem
   | cons hd tl ih =>
-    simp only [List.mem_cons] at h_mem
-    rcases h_mem with rfl | h_in_tl
-    · have h_hd_wf : FieldModalityWf fLin := h_wf fLin (List.mem_cons_self)
-      have h_meet : Mode.meet fLin.compKind fLin.overrideMode = .linear := by
-        rw [wf_field_meet_eq_comp fLin h_hd_wf, h_lin]
-      simp only [List.foldl_cons, h_meet]
-      have h_join : Mode.join mDecl .linear = .linear := by cases mDecl <;> rfl
-      rw [h_join]
-      have h_ge := foldl_join_ge_init .linear tl
-      exact Mode.le_antisymm
-        (by cases tl.foldl (fun acc f => Mode.join acc (Mode.meet f.compKind f.overrideMode)) .linear <;> decide)
-        h_ge
-    · apply ih (Mode.join mDecl (Mode.meet hd.compKind hd.overrideMode))
-      · intro f hf
-        exact h_wf f (List.mem_cons_of_mem hd hf)
-      · exact h_in_tl
+    rcases List.mem_cons.mp h_mem with rfl | h_tail
+    · have h_right : Mode.Le f.overrideMode (Mode.join mDecl f.overrideMode) := by
+        cases mDecl <;> cases f.overrideMode <;> decide
+      exact Mode.le_trans h_right (foldl_join_ge_init _ tl)
+    · exact ih _ h_tail
+
+theorem adt_kind_never_relaxes_linear_component
+    (mDecl : Mode) (fields : List AdtFieldSpec)
+    (h_wf : ∀ f, f ∈ fields → FieldModalityWf f)
+    (fLin : AdtFieldSpec) (h_mem : fLin ∈ fields) (h_lin : fLin.compKind = .linear) :
+    adtKind mDecl fields = .linear := by
+  have h := Mode.le_trans (h_wf fLin h_mem)
+    (adt_kind_preserves_field_floor mDecl fields fLin h_mem)
+  rw [h_lin] at h
+  cases h_kind : adtKind mDecl fields <;> simp_all [Mode.Le]
+
+-- The review's scalar wrapper must remain linear, even though i32 is copy.
+theorem owned_fd_is_linear :
+    adtKind .copy [{ compKind := .copy, overrideMode := .linear }] = .linear := rfl
+
+theorem unannotated_scalar_is_copy :
+    adtKind .copy [{ compKind := .copy }] = .copy := rfl
+
+theorem linear_component_cannot_be_annotated_copy :
+    ¬ FieldModalityWf { compKind := .linear, overrideMode := .copy } := by
+  simp [FieldModalityWf, Mode.Le]
+
 inductive ResumptionMode : Type where
   | affine : ResumptionMode
   | linear : ResumptionMode
@@ -240,7 +247,9 @@ inductive Val : Type where
 def ValTyped (v : Val) : Mode -> Prop
   | .copy   => v.linResources = []
   | .affine => v.linResources = []
-  | .linear => True
+  -- This fragment has exactly one linear value type: a resource handle.
+  -- Mode alone was previously treated as a value shape, admitting stuck consumes.
+  | .linear => ∃ r, v = .linHandle r
 inductive ModeSplit : Option Mode -> Option Mode -> Option Mode -> Prop where
   | none      : ModeSplit none none none
   | copyBoth  : ModeSplit (some .copy) (some .copy) (some .copy)
@@ -393,6 +402,134 @@ theorem vesper_linear_conservation_soundness
       · intro v h
         cases h
       · exact h_len1
+theorem vesper_resource_identity_conservation
+    (resource : ResId)
+    {env : Option Val} {gamma : Option Mode} {e : Expr} {m : Mode} {eff : EffectRow}
+    {n n' : Nat} {minted consumed : List ResId} {out : Outcome}
+    (h_type : HasType gamma e m eff)
+    (h_env  : EnvTyped env gamma)
+    (h_eval : EvalDet env e n minted consumed out n') :
+    (forall v, out = .val v -> ValTyped v m) /\
+    (EnvResources env).count resource + (minted.count resource) =
+      (consumed.count resource) + (OutcomeResources out).count resource := by
+  induction h_type generalizing env n n' minted consumed out with
+  | tVar =>
+    cases h_eval with
+    | evVar v _ =>
+      refine ⟨?_, by simp⟩
+      intro v' hv
+      cases hv
+      exact h_env
+  | tLit k h_disc =>
+    cases h_eval with
+    | evLit _ _ _ =>
+      have h_empty := discardable_env_has_no_linear_resources h_env h_disc
+      constructor
+      · simp [ValTyped]
+      · rw [h_empty]
+        simp
+  | tMint h_disc =>
+    cases h_eval with
+    | evMint _ _ =>
+      have h_empty := discardable_env_has_no_linear_resources h_env h_disc
+      constructor
+      · simp [ValTyped]
+      · rw [h_empty]
+        simp
+  | tConsume _ ih =>
+    cases h_eval with
+    | evConsumeVal h_sub =>
+      obtain ⟨_, h_len⟩ := ih h_env h_sub
+      simp [ValTyped] at h_len |-
+      omega
+    | evConsumeAbort h_sub =>
+      obtain ⟨_, h_len⟩ := ih h_env h_sub
+      constructor
+      · intro v h
+        cases h
+      · exact h_len
+  | tFail h_disc =>
+    cases h_eval with
+    | evFail _ _ =>
+      have h_empty := discardable_env_has_no_linear_resources h_env h_disc
+      constructor
+      · intro v h
+        cases h
+      · rw [h_empty]
+        simp
+  | tLet h_split _ _ h_z_none _ ih1 ih2 =>
+    subst h_z_none
+    have split_empty : ∀ {a b : Option Mode}, ModeSplit a b none → a = b := by
+      intro a b h
+      cases h <;> rfl
+    have h_eq_gamma := split_empty h_split
+    subst h_eq_gamma
+    cases h_eval with
+    | evLetVal h_ev1 h_ev2 =>
+      obtain ⟨h_v1_ty, h_len1⟩ := ih1 h_env h_ev1
+      obtain ⟨h_out2_ty, h_len2⟩ := ih2 (env := some _) (h_v1_ty _ rfl) h_ev2
+      refine ⟨h_out2_ty, ?_⟩
+      simp [EnvResources, OutcomeResources] at h_len1 h_len2 |-
+      omega
+    | evLetAbort h_ev1 =>
+      obtain ⟨_, h_len1⟩ := ih1 h_env h_ev1
+      constructor
+      · intro v h
+        cases h
+      · exact h_len1
+-- Evaluation is now a conclusion, rather than an assumption. This is total
+-- progress for this recursion-free fragment, including handled failure outcomes.
+theorem typed_evaluation_exists
+    {gamma : Option Mode} {e : Expr} {m : Mode} {eff : EffectRow}
+    (typed : HasType gamma e m eff) :
+    ∀ (env : Option Val) (n : Nat), EnvTyped env gamma →
+      ∃ minted consumed out next, EvalDet env e n minted consumed out next := by
+  induction typed with
+  | tVar =>
+    intro env n he
+    cases env with
+    | none => cases he
+    | some v => exact ⟨[], [], .val v, n, .evVar v n⟩
+  | tLit k _ =>
+    intro env n _
+    exact ⟨[], [], .val (.nat k), n, .evLit env k n⟩
+  | tMint _ =>
+    intro env n _
+    exact ⟨[n], [], .val (.linHandle n), n + 1, .evMint env n⟩
+  | tConsume inner ih =>
+    intro env n he
+    obtain ⟨minted, consumed, out, next, ev⟩ := ih env n he
+    cases out with
+    | aborted => exact ⟨minted, consumed, .aborted, next, .evConsumeAbort ev⟩
+    | val v =>
+      have hv := (vesper_linear_conservation_soundness inner he ev).1 v rfl
+      obtain ⟨r, rfl⟩ := hv
+      exact ⟨minted, consumed ++ [r], .val .unit, next, .evConsumeVal ev⟩
+  | tFail _ =>
+    intro env n _
+    exact ⟨[], [], .aborted, n, .evFail env n⟩
+  | tLet split first _ empty _ ih1 ih2 =>
+    intro env n he
+    subst empty
+    have split_empty : ∀ {a b : Option Mode}, ModeSplit a b none → a = b := by
+      intro a b h
+      cases h <;> rfl
+    have same := split_empty split
+    subst same
+    obtain ⟨minted1, consumed1, out1, next1, ev1⟩ := ih1 env n he
+    cases out1 with
+    | aborted => exact ⟨minted1, consumed1, .aborted, next1, .evLetAbort ev1⟩
+    | val v =>
+      have hv := (vesper_linear_conservation_soundness first he ev1).1 v rfl
+      obtain ⟨minted2, consumed2, out2, next2, ev2⟩ := ih2 (some v) next1 hv
+      exact ⟨minted1 ++ minted2, consumed1 ++ consumed2, out2, next2, .evLetVal ev1 ev2⟩
+
+-- The former ValTyped definition admitted a natural as a linear handle, making
+-- consume(var) stuck despite a typed environment. Canonical forms exclude it.
+theorem natural_is_not_a_linear_handle (n : Nat) : ¬ ValTyped (.nat n) .linear := by
+  simp [ValTyped]
+
+
 theorem vesper_total_linear_exhaustion
     {e : Expr} {eff : EffectRow} {n n' : Nat}
     {minted consumed : List ResId} {out : Outcome}
@@ -409,6 +546,85 @@ theorem vesper_total_linear_exhaustion
     have h_no_res : v.linResources = [] := h_val_ty v rfl
     simp [EnvResources, OutcomeResources, h_no_res] at h_cons
     exact h_cons
+
+-- Allocation uses a monotone supply, so identities are fresh even in nested lets.
+theorem evaluation_mints_fresh
+    {env e n minted consumed out next}
+    (ev : EvalDet env e n minted consumed out next) :
+    n ≤ next ∧ minted = List.range' n (next - n) := by
+  induction ev with
+  | evVar | evLit | evFail => simp
+  | evMint => simp
+  | evConsumeVal _ ih | evConsumeAbort _ ih | evLetAbort _ ih => exact ih
+  | @evLetVal env e1 e2 start middle finish m1 c1 m2 c2 v1 out2 first second ih1 ih2 =>
+    obtain ⟨h1, eq1⟩ := ih1
+    obtain ⟨h2, eq2⟩ := ih2
+    refine ⟨Nat.le_trans h1 h2, ?_⟩
+    rw [eq1, eq2]
+    have shift : start + 1 * (middle - start) = middle := by omega
+    have joined := List.range'_append (step := 1) (s := start) (m := middle - start) (n := finish - middle)
+    rw [shift] at joined
+    rw [joined]
+    congr 1
+    omega
+
+-- In this core, Fail is the only abort source. Linear mint/consume operations
+-- cannot abort; the effect row accounts for failures through consume and let.
+theorem aborted_evaluation_has_affine_effect
+    (typed : HasType gamma e m eff)
+    (ev : EvalDet env e n minted consumed .aborted next) : .affine ∈ eff := by
+  generalize h_out : Outcome.aborted = out at ev
+  induction typed generalizing env n minted consumed out next with
+  | tVar => cases ev; cases h_out
+  | tLit => cases ev; cases h_out
+  | tMint => cases ev; cases h_out
+  | tFail => simp
+  | tConsume _ ih =>
+    cases ev with
+    | evConsumeVal => cases h_out
+    | evConsumeAbort sub => exact List.mem_append_left _ (ih _ rfl sub)
+  | tLet _ _ _ _ _ ih1 ih2 =>
+    cases ev with
+    | evLetVal first second => exact List.mem_append_right _ (ih2 _ h_out second)
+    | evLetAbort first => exact List.mem_append_left _ (ih1 _ rfl first)
+
+-- All closed, copy-result programs in this fragment evaluate, preserve their
+-- result type, and exhaust each minted resource identity (not just the count).
+theorem closed_fragment_soundness
+    {e : Expr} {eff : EffectRow} (typed : HasType none e .copy eff) (n : Nat) :
+    ∃ minted consumed out next,
+      EvalDet none e n minted consumed out next ∧
+      (∀ v, out = .val v → ValTyped v .copy) ∧
+      (∀ resource, minted.count resource = consumed.count resource) := by
+  obtain ⟨minted, consumed, out, next, ev⟩ := typed_evaluation_exists typed none n trivial
+  have preservation := (vesper_linear_conservation_soundness (env := none) typed trivial ev).1
+  refine ⟨minted, consumed, out, next, ev, preservation, ?_⟩
+  intro resource
+  have counts := (vesper_resource_identity_conservation (env := none) resource typed trivial ev).2
+  cases out with
+  | aborted => simpa using counts
+  | val v =>
+    have empty : v.linResources = [] := preservation v rfl
+    simpa [empty] using counts
+
+-- No evaluation hypothesis or assumed semantic preservation theorem is needed.
+theorem closed_exact_once
+    {e : Expr} {eff : EffectRow} (typed : HasType none e .copy eff) (n : Nat) :
+    ∃ minted consumed out next,
+      EvalDet none e n minted consumed out next ∧
+      (∀ v, out = .val v → ValTyped v .copy) ∧
+      minted.Nodup ∧
+      (∀ resource, minted.count resource = consumed.count resource) ∧
+      (∀ resource, resource ∈ minted → consumed.count resource = 1) := by
+  obtain ⟨minted, consumed, out, next, ev, preserved, counts⟩ :=
+    closed_fragment_soundness typed n
+  have fresh : minted.Nodup := by
+    rw [(evaluation_mints_fresh ev).2]
+    exact List.nodup_range'
+  refine ⟨minted, consumed, out, next, ev, preserved, fresh, counts, ?_⟩
+  intro resource member
+  rw [← counts resource]
+  exact fresh.count_of_mem member
 
 -- Concrete applicability checks. These extend the examples only; none of the
 -- Appendix definitions or theorem statements above are weakened.
@@ -471,7 +687,10 @@ end Vesper.Metatheory
 #print axioms Vesper.Metatheory.Mode.mode_submode_allows_count
 #print axioms Vesper.Metatheory.Mode.linear_not_discardable
 #print axioms Vesper.Metatheory.Mode.discardable_iff_le_affine
-#print axioms Vesper.Metatheory.wf_field_meet_eq_comp
+#print axioms Vesper.Metatheory.adt_kind_preserves_field_floor
+#print axioms Vesper.Metatheory.owned_fd_is_linear
+#print axioms Vesper.Metatheory.unannotated_scalar_is_copy
+#print axioms Vesper.Metatheory.linear_component_cannot_be_annotated_copy
 #print axioms Vesper.Metatheory.foldl_join_ge_init
 #print axioms Vesper.Metatheory.adt_kind_never_relaxes_linear_component
 #print axioms Vesper.Metatheory.res_le_affine_of_mem_affine
@@ -491,3 +710,14 @@ end Vesper.Metatheory
 #print axioms Vesper.Metatheory.mint_then_leak_rejected
 #print axioms Vesper.Metatheory.mint_then_abort_evaluates
 #print axioms Vesper.Metatheory.mint_then_abort_rejected
+
+#print axioms Vesper.Metatheory.typed_evaluation_exists
+#print axioms Vesper.Metatheory.natural_is_not_a_linear_handle
+#print axioms Vesper.Metatheory.vesper_resource_identity_conservation
+
+#print axioms Vesper.Metatheory.closed_fragment_soundness
+
+#print axioms Vesper.Metatheory.evaluation_mints_fresh
+#print axioms Vesper.Metatheory.closed_exact_once
+
+#print axioms Vesper.Metatheory.aborted_evaluation_has_affine_effect

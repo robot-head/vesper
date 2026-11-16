@@ -50,4 +50,4 @@ The final gate is the conclusive desktop/phone consistency result; the earlier f
 
 ## Published language manuscript
 
-The design actions open the 228-page Typst PDF. The manuscript is organized into eight parts, 41 chapters, and appendices A/B; the advanced types supplement is integrated into the core theory. Site build checks cover all three PDF links and the PDF file header. GitHub Pages compiles the committed manuscript with pinned Typst 0.15.1 and bundled fonts. Full publication checks are recorded in `docs/manuscript/VALIDATION.md`.
+The design actions open the 220-page Typst PDF. The manuscript is organized into eight parts, 42 chapters, and appendices A/B; the advanced types supplement is integrated into the core theory. Site build checks cover all three PDF links and the PDF file header. GitHub Pages compiles the committed manuscript with pinned Typst 0.15.1 and bundled fonts. Full publication checks are recorded in `docs/manuscript/VALIDATION.md`.

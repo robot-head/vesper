@@ -634,10 +634,8 @@ fn mode_work(
                         .collect();
                     let mut m = a.mode;
                     for field in a.variants.iter().flat_map(|v| &v.fields) {
-                        m = m.join(
-                            mode_work(w, &field.ty, &inner, seen, b, depth + 1)?
-                                .meet(field.modality),
-                        );
+                        let intrinsic = mode_work(w, &field.ty, &inner, seen, b, depth + 1)?;
+                        m = m.join(field.modality.unwrap_or(intrinsic));
                     }
                     seen.remove(&key);
                     m

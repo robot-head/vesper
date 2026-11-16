@@ -28,11 +28,11 @@ theorem duplicate_site_in_unselected_branch_refuses :
       .error (.duplicateSite 2) := by rfl
 
 theorem pair_exact_raw_budget :
-    statistics ⟨#[], .pair 0 .copy (.unit 1) .linear (.nat 2 7) .linear⟩
+    statistics ⟨#[], .pair 0 .copy (.unit 1) .copy (.nat 2 7) .linear⟩
       {rawNodes := 3, rawDepth := 2} = .ok ⟨3,2,0,0,0⟩ := by rfl
 
 theorem pair_one_less_raw_budget :
-    statistics ⟨#[], .pair 0 .copy (.unit 1) .linear (.nat 2 7) .linear⟩
+    statistics ⟨#[], .pair 0 .copy (.unit 1) .copy (.nat 2 7) .linear⟩
       {rawNodes := 2} = .error .rawNodes := by rfl
 
 theorem unbound_variable_is_left_for_semantic_checking :
@@ -195,23 +195,34 @@ theorem checker_rejects_nonuniform_linear_branch :
       .error (.checking (.semantic ⟨.branchOwnership,2,some 0⟩)) := by rfl
 theorem checker_accepts_both_consuming_arms : checkedView branchConsumes = .ok (.unit, []) := by rfl
 theorem checker_reports_affine_only_difference_as_profile :
-    checkedView (closed (.letE 0 (.pair 1 .affine (.unit 2) .linear (.unit 3) .linear)
+    checkedView (closed (.letE 0 (.pair 1 .affine (.unit 2) .copy (.unit 3) .copy)
       (.ifz 4 (.nat 5 0) (.atom (.var 6 0))
-        (.pair 7 .affine (.unit 8) .linear (.unit 9) .linear)))) =
+        (.pair 7 .affine (.unit 8) .copy (.unit 9) .copy)))) =
       .error (.checking (.profile (.affineBranchDemand 4 0))) := by rfl
 theorem checker_linear_difference_precedes_earlier_affine_difference :
     checkedView (closed (.letE 0 (.mint 1)
-      (.letE 2 (.pair 3 .affine (.unit 4) .linear (.unit 5) .linear)
+      (.letE 2 (.pair 3 .affine (.unit 4) .copy (.unit 5) .copy)
         (.ifz 6 (.nat 7 0)
           (.pair 8 .copy (.var 9 1) .linear (.var 10 0) .linear)
           (.letE 11 (.mint 12)
-            (.letE 13 (.pair 14 .affine (.unit 15) .linear (.unit 16) .linear)
+            (.letE 13 (.pair 14 .affine (.unit 15) .copy (.unit 16) .copy)
               (.pair 17 .copy (.var 18 1) .linear (.var 19 0) .linear))))))) =
       .error (.checking (.semantic ⟨.branchOwnership,6,some 1⟩)) := by rfl
 theorem checker_field_override_is_semantic_error :
     checkedView (closed (.letE 0 (.mint 1)
-      (.pair 2 .copy (.var 3 0) .copy (.unit 4) .linear))) =
+      (.pair 2 .copy (.var 3 0) .copy (.unit 4) .copy))) =
       .error (.checking (.semantic ⟨.fieldModality,2,none⟩)) := by rfl
+/-- A linear scalar wrapper cannot be silently dropped after construction. -/
+theorem checker_rejects_dropped_scalar_linear_floor :
+    checkedView (closed (.letE 0 (.pair 1 .copy (.nat 2 7) .linear (.unit 3) .copy)
+      (.atom (.unit 4)))) =
+      .error (.checking (.semantic ⟨.unusedLinear,0,some 0⟩)) := by rfl
+
+/-- Unannotated scalar fields elaborate to their intrinsic copy modes. -/
+theorem checker_accepts_dropped_default_scalar_fields :
+    checkedView (closed (.letE 0 (.pair 1 .copy (.nat 2 7) .copy (.unit 3) .copy)
+      (.atom (.unit 4)))) = .ok (.unit, []) := by rfl
+
 theorem checker_accepts_largest_u64_literal :
     checkedView (closed (.atom (.nat 0 (2^64-1)))) = .ok (.nat, []) := by rfl
 theorem checker_rejects_out_of_range_literal :
@@ -226,7 +237,7 @@ theorem checker_result_is_independent_of_invocation_values :
 def doubleLocals : Nat → Nat → SourceExpr
   | 0, site => .atom (.unit site)
   | n + 1, site => .letE site
-      (.pair (site+1) .copy (.var (site+2) 0) .linear (.var (site+3) 0) .linear)
+      (.pair (site+1) .copy (.var (site+2) 0) .copy (.var (site+3) 0) .copy)
       (doubleLocals n (site+4))
 def compactDoubling : RawProgram := closed (.letE 0 (.atom (.nat 1 7)) (doubleLocals 8 2))
 theorem checker_prepays_compact_type_doubling :
@@ -348,8 +359,8 @@ theorem resource_cap_counts_consumed_tombstones_without_cleanup :
 
 def dynamicGrowth : RawProgram := closed (.letE 0 (.mint 1)
   (.letE 2 (.atom (.nat 3 7))
-    (.letE 4 (.pair 5 .copy (.var 6 0) .linear (.var 7 0) .linear)
-      (.letE 8 (.pair 9 .copy (.var 10 0) .linear (.var 11 0) .linear)
+    (.letE 4 (.pair 5 .copy (.var 6 0) .copy (.var 7 0) .copy)
+      (.letE 8 (.pair 9 .copy (.var 10 0) .copy (.var 11 0) .copy)
         (.consume 12 (.var 13 3))))))
 theorem dynamic_growth_checks_before_substitution_or_ledger_commit :
     evaluate dynamicGrowth #[] 6 {valueNodes := 4} =

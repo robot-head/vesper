@@ -123,13 +123,13 @@ inductive Ty : Type where
   handled inside the polymorphic value -/
   | rall (H : List Nat) (τ : Ty)
 
-/-- [K-Prim], [K-Var], [K-Adt] (`m_decl ⊔ ⊔_i (k_i ⊓ m_i)`) and [K-Fn]; a
+/-- [K-Prim], [K-Var], [K-Adt] (`m_decl ⊔ ⊔_i m_i`, with omitted floors elaborated to `k_i`) and [K-Fn]; a
 row abstraction has the kind of its body. -/
 def Ty.kind : Ty → Mode
   | .unit => .copy
   | .nat => .copy
   | .hdl => .linear
-  | .pair md t1 m1 t2 m2 => Mode.join md (Mode.join (Mode.meet t1.kind m1) (Mode.meet t2.kind m2))
+  | .pair md _ m1 _ m2 => Mode.join md (Mode.join m1 m2)
   | .kont _ _ _ _ _ _ q => q.toMode
   | .arrow _ _ _ _ mf => mf
   | .tvar _ m => m
@@ -210,6 +210,14 @@ structure EffSig where
   nops : Nat
   arg : Nat → Ty
   res : Nat → Ty
+
+/-- An explicit linear floor on a scalar must survive kind computation. -/
+theorem scalar_linear_floor_kind :
+    (Ty.pair .copy .nat .linear .unit .copy).kind = .linear := by decide
+
+/-- Omitted scalar floors elaborate to copy, so ordinary records stay copy. -/
+theorem scalar_default_floor_kind :
+    (Ty.pair .copy .nat .copy .unit .copy).kind = .copy := by decide
 
 section Sig
 variable (Sig : Nat → EffSig)
@@ -841,10 +849,9 @@ theorem vt_rleM {R v τ} (h : VT Sig R v τ) : RLeM R τ.kind := by
   | rlam _ _ _ ih => simp only [Ty.kind]; exact ih
   | @pair R R1 R2 a b md t1 m1 t2 m2 hs _ _ hk1 hk2 ih1 ih2 =>
     simp only [Ty.kind]
-    rw [Mode.meet_of_le hk1, Mode.meet_of_le hk2]
     apply rleM_split hs
-    · exact rleM_mono ih1 (Mode.le_trans (Mode.le_join_left _ _) (Mode.le_join_right _ _))
-    · exact rleM_mono ih2 (Mode.le_trans (Mode.le_join_right _ _) (Mode.le_join_right _ _))
+    · exact rleM_mono ih1 (Mode.le_trans hk1 (Mode.le_trans (Mode.le_join_left _ _) (Mode.le_join_right _ _)))
+    · exact rleM_mono ih2 (Mode.le_trans hk2 (Mode.le_trans (Mode.le_join_right _ _) (Mode.le_join_right _ _)))
 
 /-- Any value typing splits into its exact resources and discarded ones. -/
 theorem val_inv {Γ R v τ m ε} (h : HasType Sig Γ R v τ m ε) (hv : IsVal v) :
@@ -877,6 +884,14 @@ theorem val_inv {Γ R v τ m ε} (h : HasType Sig Γ R v τ m ε) (hv : IsVal v)
       obtain ⟨hA, hB, hC⟩ := split4 hsr hs1 hs2
       exact ⟨_, _, hA, discardR_join hC hd1 hd2, .pair hB hvt1 hvt2 hk1 hk2, hk⟩
   | _ => cases hv
+
+/-- No scalar wrapper value with a linear field floor can be typed copy. -/
+theorem scalar_linear_wrapper_not_copy (Sig : Nat → EffSig) (R : RCtx) (ε : Row) :
+    ¬ HasType Sig Ctx.empty R (.pair (.natV 7) .unitV)
+      (Ty.pair .copy .nat .linear .unit .copy) .copy ε := by
+  intro h
+  obtain ⟨_, _, _, _, _, hk⟩ := val_inv h (.pair (.natV 7) .unitV)
+  exact absurd hk (by decide)
 
 theorem val_ty {Rv v τ} (h : VT Sig Rv v τ) :
     ∀ {Γ R Rd m ε}, Discard Γ → DiscardR Rd → SplitR R Rv Rd → Mode.Le τ.kind m →
@@ -1137,7 +1152,7 @@ theorem inst_open (τ : Ty) (θ : Nat → Row) {ρ : Row} (hρ : RowClosed ρ) :
 
 theorem kind_inst (t : Ty) : ∀ θ : Nat → Row, (t.inst θ).kind = t.kind := by
   induction t with
-  | pair md t1 m1 t2 m2 ih1 ih2 => intro θ; simp only [Ty.inst, Ty.kind, ih1, ih2]
+  | pair md t1 m1 t2 m2 ih1 ih2 => intro θ; simp only [Ty.inst, Ty.kind]
   | rall H τ ih => intro θ; simp only [Ty.inst, Ty.kind, ih]
   | _ => intro θ; rfl
 
@@ -3230,8 +3245,7 @@ theorem kind_tsub_le {θ : Nat → Mode → Ty} (hθ : TSubOK θ) (t : Ty) : Mod
   induction t with
   | pair md t1 m1 t2 m2 ih1 ih2 =>
     simp only [Ty.tsub, Ty.kind]
-    exact Mode.join_mono (Mode.le_refl _)
-      (Mode.join_mono (Mode.meet_mono_left _ ih1) (Mode.meet_mono_left _ ih2))
+    exact Mode.le_refl _
   | tvar α m => exact hθ α m
   | rall H τ ih => exact ih
   | _ => exact Mode.le_refl _
@@ -4164,14 +4178,14 @@ theorem count_evaluates :
 def dupF : Expr := .clos .unitV (.pair (.var 0) (.var 0))
 
 def dupTy (m : Mode) : Ty :=
-  .arrow (.tvar 0 m) (.pair .copy (.tvar 0 m) .linear (.tvar 0 m) .linear) .copy [] .copy
+  .arrow (.tvar 0 m) (.pair .copy (.tvar 0 m) m (.tvar 0 m) m) .copy [] .copy
 
 theorem dup_typed : HasType exSig Ctx.empty RCtx.empty dupF (dupTy .copy) .copy [] := by
   have hc := allCopy_two .unit (.tvar 0 .copy)
   refine .clos (.val .unitV) (.unitV discard_empty discardR_empty) (Mode.le_refl _) (Mode.le_refl _) ?_
     (Mode.le_refl _)
   exact .pair (.var 0) (.var 0) (split_self_copy hc) (splitR_empty_left _) (var_copy hc rfl (Mode.le_refl _))
-    (var_copy hc rfl (Mode.le_refl _)) (Mode.le_linear _) (Mode.le_linear _) (by decide)
+    (var_copy hc rfl (Mode.le_refl _)) (Mode.le_refl _) (Mode.le_refl _) (by decide)
 
 theorem exSig_tinv (θ : Nat → Mode → Ty) : SigTInv exSig θ := by
   intro l o
@@ -4182,7 +4196,7 @@ theorem exSig_tinv (θ : Nat → Mode → Ty) : SigTInv exSig θ := by
 /-- Instantiating `α : mod copy` at `nat` (kind copy). -/
 theorem dup_at_nat :
     HasType exSig Ctx.empty RCtx.empty dupF
-      (.arrow .nat (.pair .copy .nat .linear .nat .linear) .copy [] .copy) .copy [] :=
+      (.arrow .nat (.pair .copy .nat .copy .nat .copy) .copy [] .copy) .copy [] :=
   tsub_ty (θ := fun _ _ => .nat) (fun _ m => Mode.copy_le m) (fun _ _ _ => rfl) (exSig_tinv _) dup_typed
     (fun _ h => by simp [HL, dupF] at h)
 
@@ -4216,7 +4230,7 @@ def polyG : Ty := callItTy.inst (openθ [.user 1])
 def polyH : Ty := callItTy.inst (openθ [])
 
 theorem poly_use_typed :
-    HasType exSig Ctx.empty RCtx.empty polyUse (.pair .copy polyG .linear polyH .linear) .copy [] := by
+    HasType exSig Ctx.empty RCtx.empty polyUse (.pair .copy polyG .copy polyH .copy) .copy [] := by
   have hc1 := allCopy_ext allCopy_empty (.rall [] callItTy)
   have hc2 := allCopy_ext hc1 polyG
   have hc3 := allCopy_ext hc2 polyH
@@ -4232,7 +4246,7 @@ theorem poly_use_typed :
     (.rapp (.var 1) (var_copy hc2 rfl (Mode.le_refl _)) (fun n h => by simp at h) (fun _ h => by cases h)) ?_
     (frame_copy _ hc2 _) (rowSub_refl _) (rowSub_refl _)
   exact .pair (.var 1) (.var 0) (split_self_copy hc3) (splitR_empty_left _) (var_copy hc3 rfl (Mode.le_refl _))
-    (var_copy hc3 rfl (Mode.le_refl _)) (Mode.le_linear _) (Mode.le_linear _) (by decide)
+    (var_copy hc3 rfl (Mode.le_refl _)) (Mode.le_refl _) (Mode.le_refl _) (by decide)
 
 theorem poly_use_runs :
     Steps exSig ⟨polyUse, RCtx.empty, 0⟩ (List.replicate 5 .silent) ⟨.pair callIt callIt, RCtx.empty, 0⟩ := by
@@ -4543,3 +4557,7 @@ end Examples
 #print axioms Vesper.Metatheory.Polymorphism.escape_rejected
 
 end Vesper.Metatheory.Polymorphism
+
+#print axioms Vesper.Metatheory.Polymorphism.scalar_linear_floor_kind
+#print axioms Vesper.Metatheory.Polymorphism.scalar_default_floor_kind
+#print axioms Vesper.Metatheory.Polymorphism.scalar_linear_wrapper_not_copy

@@ -23,7 +23,7 @@ Plain import, an empty axiom list, and `--trust=0` alone are insufficient for th
 
 ## Axiom policy and reports
 
-The default allowed-axiom set is empty. `--allow-axiom Example.assumption` explicitly admits that named assumption; it remains visible in the theorem's transitive axiom list. `sorryAx` is always forbidden. This acceptance is conditional on the reported assumptions and trusted Lean toolchain, not a claim of unconditional truth.
+The default allowed-axiom set is empty. `--allow-axiom Example.assumption` explicitly admits that named assumption; it remains visible in the theorem's transitive axiom list. `sorryAx`, `Lean.ofReduceBool`, `Lean.trustCompiler`, and Lean 4.35-generated axioms with a `_native` namespace component are always forbidden, including explicit whitelist attempts. This acceptance is conditional on the reported assumptions and trusted Lean toolchain, not a claim of unconditional truth.
 
 JSON reports include schema version 1, acceptance, kernel-replay status, theorem types/axioms, checked-constant count, the copied artifact inventory and its BLAKE3 digest, actual resolved import parts/digests, the auditor digest, and the real Lean binary version/digest. The inventory records implementation inputs, so changing an imported definition changes it even when theorem statements remain unchanged. Type representations are diagnostic Lean expressions, not canonical public interface hashes.
 
@@ -36,3 +36,23 @@ Use `--lean PATH` or `VESPER_LEAN` to select Lean; the command resolves the real
 The selected toolchain, kernel, artifact deserializer and host OS remain trusted. This command is not an OS sandbox or a safe way to execute arbitrary downloaded proof packages. Input directories are expected to be caller-owned, without hostile concurrent writers. Standard-library import fingerprinting also incurs local file I/O outside the checking-process timeout.
 
 Successful policy checks exit zero; unapproved axioms exit nonzero with the completed audit report. Replay, missing-artifact/name, unsupported-artifact, toolchain and timeout failures exit nonzero; JSON mode emits an `audit_failed` error. Argument validation errors use stderr. Staging is removed after the process ends, including failed checks.
+
+## Binding extracted contracts to proofs
+
+`vesper verify program.ves --extract` compiles an extracted Lean model. Its `contracts` list inventories emitted propositions; a bare invocation does not prove those propositions. To check them, supply one `--contract-proof Function=Theorem` binding and one `--contract-witness Function=Theorem` for every emitted contract:
+
+```sh
+vesper verify program.ves --extract --proofs proofs.lean \
+  --contract-proof answer=Proofs.answer_correct \
+  --contract-witness answer=Proofs.answer_input \
+  --allow-axiom propext --allow-axiom Classical.choice --allow-axiom Quot.sound \
+  --lean /path/to/lean --json
+```
+
+For a source function `answer` with an `ensures_answer` predicate, the selected theorem must prove `Vesper.«answer$contract»`. Once any contract binding is supplied, missing or unknown contracts are rejected. The compiler generates a wrapper for each binding; after kernel replay the auditor inspects its actual expression type, requiring exactly the emitted contract constant with no extra hypotheses. A theorem of `True`, an extra conditional premise, or an implicitly abstracted section instance cannot satisfy this check. The JSON `checked_contracts` map records accepted bindings separately from the proposition inventory.
+
+The input witness must prove `Vesper.«answer$admissible»`: an existential over every source parameter, satisfying `requires_answer` when present (otherwise `True`). A zero-parameter function must establish its precondition directly. The same exact-type and no-extra-hypotheses checks apply to these witnesses, recorded in `checked_preconditions`. Missing witnesses and contradictory preconditions cannot pass explicit contract admission. The axiom policy for this mode is restricted to subsets of `propext`, `Classical.choice`, and `Quot.sound`; the general standalone auditor still supports explicitly declared mathematical assumptions.
+
+These are partial-correctness proofs of the extracted model with inhabited preconditions, under the reported standard axioms. Input inhabitation does not prove that the function terminates or returns successfully. The checks do not establish termination of fuel-based models, the correctness of extraction, or native executable behavior. Proof-script elaboration uses the trusted Lean toolchain and can execute metaprograms; it is not an OS sandbox.
+
+`--olean-store` records artifacts in the local CAS. A cache hit must match a fresh compilation of the current source/proof bundle before kernel replay of the fresh artifact closure. CAS integrity alone does not prove that a valid artifact belongs to its claimed source. Cache hits therefore still incur compilation and checking.

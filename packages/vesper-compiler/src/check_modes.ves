@@ -96,6 +96,11 @@ fn c_kind_fields(at: i64, named: bool, seen: i64, active: i64, depth: i64)
             0
         );
         let head = c_kind_walk(ty.ty, seen, active, depth);
+        let effective = if c_kind(ty.next) == 45 {
+            c_kind(c_next(ty.next)) - 14
+        } else {
+            head.mode
+        };
         let next = if c_kind(ty.next) == 45 {
             c_next(c_next(ty.next))
         } else {
@@ -110,7 +115,7 @@ fn c_kind_fields(at: i64, named: bool, seen: i64, active: i64, depth: i64)
             }
         };
         CKind {
-            mode: c_max(head.mode, tail.mode),
+            mode: c_max(effective, tail.mode),
             seen: tail.seen
         }
     }

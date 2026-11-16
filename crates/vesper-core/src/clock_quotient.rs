@@ -2,13 +2,16 @@
 //! substructural quotient contract verification (`quotient Q = repr R modulo eq`)
 //! for manuscript §5.4 and Appendix A.3.
 //!
-//! Clocks erase completely (`rho = 0`) prior to codegen and quotients adopt the
-//! exact bit layout of `repr R`, while static checks reject unguarded zero-delay
-//! algebraic loops and unverified `@respects` operations. This module provides
-//! standalone verification primitives; full source elaboration remains in higher
-//! compiler stages.
+//! These are standalone checks over caller-supplied type, effect, graph, export,
+//! and proof-status metadata. They do not establish source elaboration, causal
+//! execution, runtime layout, or kernel certification. Ghost forcing is rejected
+//! until clock quantification/freshness are represented by the caller's checker.
+//! Actual quotient lifting requires a kernel-checked congruence proof; see
+//! `lean/ClockQuotientSafety.lean` for the logical rules.
 
-use crate::mode_vec::ModeVec;
+use crate::mode_cross::Presence;
+use crate::mode_vec::{ModeVec, Usage};
+use crate::pcg::EffectRow;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Guarded recursion clock binder identifier `kappa : clock` (§5.4).
@@ -48,6 +51,19 @@ impl Default for Limits {
 /// Errors from guarded recursion or quotient contract verification (§5.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClockQuotientError {
+    LinearDelayedPayload,
+    GhostForceRequiresClockQuantification,
+    NoncopyGuardedCapture,
+    EffectfulGuardedStep,
+    DuplicatePublicOperation {
+        op: OpId,
+    },
+    DuplicateRespectsProof {
+        op: OpId,
+    },
+    UnknownQuotientOperation {
+        op: OpId,
+    },
     ClockMismatch {
         expected: ClockId,
         found: ClockId,
@@ -84,18 +100,31 @@ pub enum ClockQuotientError {
 /// Clocked delayed type `Later[clock, T]` (§5.4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LaterType {
-    pub clock: ClockId,
-    pub inner_mode: ModeVec,
+    clock: ClockId,
+    inner_mode: ModeVec,
 }
 
 impl LaterType {
-    pub const fn delay(clock: ClockId, inner_mode: ModeVec) -> Self {
-        Self { clock, inner_mode }
+    pub const fn delay(clock: ClockId, inner_mode: ModeVec) -> Result<Self, ClockQuotientError> {
+        if matches!(inner_mode.usage(), Usage::Linear) {
+            Err(ClockQuotientError::LinearDelayedPayload)
+        } else {
+            Ok(Self { clock, inner_mode })
+        }
     }
 
     /// Eliminates `Later[clock, T]` at the next causal tick of `active_clock`.
-    /// Rejects cross-clock substitution so independent clocks remain isolated.
-    pub const fn force_tick(self, active_clock: ClockId) -> Result<ModeVec, ClockQuotientError> {
+    /// This is a runtime typing check, not logical elimination of `Later`.
+    /// Proof contexts must use universal clock quantification and freshness;
+    /// until those judgments exist here, ghost forcing is rejected.
+    pub const fn force_tick(
+        self,
+        active_clock: ClockId,
+        context: Presence,
+    ) -> Result<ModeVec, ClockQuotientError> {
+        if matches!(context, Presence::Ghost) {
+            return Err(ClockQuotientError::GhostForceRequiresClockQuantification);
+        }
         if self.clock.0 != active_clock.0 {
             Err(ClockQuotientError::ClockMismatch {
                 expected: self.clock,
@@ -106,9 +135,9 @@ impl LaterType {
         }
     }
 
-    /// Clocks carry `@0` presence and erase completely at code generation (§5.4).
-    pub const fn erases_at_codegen(self) -> bool {
-        true
+    /// Presence of the clock index only; this says nothing about payload erasure.
+    pub const fn clock_presence(self) -> Presence {
+        Presence::Ghost
     }
 }
 
@@ -124,17 +153,28 @@ pub struct SignalEdge {
     pub guard: Option<ClockId>,
 }
 
-/// Audits `guarded_fix[clock]` productivity (§5.4): every cycle in the dependency
+/// Checks a copy-capturing, closed-pure step and its supplied dependency graph.
+/// This does not extract dependencies or prove semantic productivity. Every cycle in the dependency
 /// graph must traverse at least one `Later[clock, T]` delay edge (`guard: Some(clock)`).
 /// Purely combinational cycles (`guard: None`) and cycles guarded only by a
 /// different clock (`guard: Some(j)` with `j != clock`) are rejected as
 /// `UnguardedAlgebraicLoop`.
 pub fn verify_guarded_recursion(
     clock: ClockId,
+    capture_mode: ModeVec,
+    effects: &EffectRow,
     nodes: &[NodeId],
     edges: &[SignalEdge],
     limits: Limits,
 ) -> Result<(), ClockQuotientError> {
+    // A recursive step may be invoked repeatedly. It must not duplicate owned
+    // affine/linear captures or erase effects from proof-only computation.
+    if capture_mode.usage() != Usage::Copy {
+        return Err(ClockQuotientError::NoncopyGuardedCapture);
+    }
+    if !effects.instances.is_empty() || effects.tail_var.is_some() {
+        return Err(ClockQuotientError::EffectfulGuardedStep);
+    }
     if nodes.len() > limits.max_nodes {
         return Err(ClockQuotientError::NodeLimit {
             max: limits.max_nodes,
@@ -202,8 +242,10 @@ pub fn verify_guarded_recursion(
     Ok(())
 }
 
-/// Proof witness linking one public quotient operation to its `@respects`
-/// equivalence-preservation proof (`Quot.sound` in Lean 4 extraction, §5.4).
+/// Admission status for one public operation's congruence obligation.
+/// `proved_respects` must come from a trusted proof checker and be bound to the
+/// operation body and relation. This caller-supplied flag is not a kernel proof;
+/// `verify_quotient_decl` checks coverage and consistency only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RespectsProof {
     pub op: OpId,
@@ -217,16 +259,22 @@ pub struct QuotientDecl {
     pub quotient_mode: ModeVec,
     pub repr_mode: ModeVec,
     pub equiv: EquivId,
+    /// Inventory from the declaration's exports, independent of submitted proofs.
+    pub public_ops: Vec<OpId>,
     pub op_proofs: Vec<RespectsProof>,
 }
 
 /// Verifies a `quotient` declaration (§5.4, Appendix A.3):
 /// 1. The public quotient modality must satisfy `repr_mode <= quotient_mode`
 ///    (cannot silently downgrade e.g. `linear` representation to `copy`).
-/// 2. Every public operation must target the declared `equiv` relation and
-///    discharge its `@respects` congruence obligation (`proved_respects == true`).
+/// 2. The independent public-operation inventory has exactly one admission
+///    status per export, targeting the declared `equiv` relation.
+///
+/// This checks status bookkeeping, not the truth of a congruence theorem. A
+/// trusted caller must supply statuses from proof checking, bound to the actual
+/// operation bodies and relation; untrusted `true` flags are not evidence.
 pub fn verify_quotient_decl(decl: &QuotientDecl, limits: Limits) -> Result<(), ClockQuotientError> {
-    if decl.op_proofs.len() > limits.max_ops {
+    if decl.op_proofs.len() > limits.max_ops || decl.public_ops.len() > limits.max_ops {
         return Err(ClockQuotientError::OpLimit {
             max: limits.max_ops,
         });
@@ -237,7 +285,20 @@ pub fn verify_quotient_decl(decl: &QuotientDecl, limits: Limits) -> Result<(), C
             quotient_mode: decl.quotient_mode,
         });
     }
+    let mut public = BTreeSet::new();
+    for &op in &decl.public_ops {
+        if !public.insert(op) {
+            return Err(ClockQuotientError::DuplicatePublicOperation { op });
+        }
+    }
+    let mut covered = BTreeSet::new();
     for proof in &decl.op_proofs {
+        if !public.contains(&proof.op) {
+            return Err(ClockQuotientError::UnknownQuotientOperation { op: proof.op });
+        }
+        if !covered.insert(proof.op) {
+            return Err(ClockQuotientError::DuplicateRespectsProof { op: proof.op });
+        }
         if proof.equiv != decl.equiv {
             return Err(ClockQuotientError::MismatchedEquivalenceRelation {
                 op: proof.op,
@@ -247,6 +308,11 @@ pub fn verify_quotient_decl(decl: &QuotientDecl, limits: Limits) -> Result<(), C
         }
         if !proof.proved_respects {
             return Err(ClockQuotientError::UnverifiedQuotientOperation { op: proof.op });
+        }
+    }
+    for op in public {
+        if !covered.contains(&op) {
+            return Err(ClockQuotientError::UnverifiedQuotientOperation { op });
         }
     }
     Ok(())
@@ -261,11 +327,14 @@ mod tests {
     fn clock_guarded_feedback_loops_succeed_while_zero_delay_loops_fail() {
         let k0 = ClockId(1);
         let k1 = ClockId(2);
-        let delayed = LaterType::delay(k0, ModeVec::BOTTOM);
-        assert!(delayed.erases_at_codegen());
-        assert_eq!(delayed.force_tick(k0), Ok(ModeVec::BOTTOM));
+        let delayed = LaterType::delay(k0, ModeVec::BOTTOM).unwrap();
+        assert_eq!(delayed.clock_presence(), Presence::Ghost);
         assert_eq!(
-            delayed.force_tick(k1),
+            delayed.force_tick(k0, Presence::Runtime),
+            Ok(ModeVec::BOTTOM)
+        );
+        assert_eq!(
+            delayed.force_tick(k1, Presence::Runtime),
             Err(ClockQuotientError::ClockMismatch {
                 expected: k0,
                 found: k1,
@@ -292,7 +361,14 @@ mod tests {
             },
         ];
         assert_eq!(
-            verify_guarded_recursion(k0, &nodes, &guarded_cycle, Limits::default()),
+            verify_guarded_recursion(
+                k0,
+                ModeVec::BOTTOM,
+                &EffectRow::empty(),
+                &nodes,
+                &guarded_cycle,
+                Limits::default()
+            ),
             Ok(())
         );
 
@@ -315,12 +391,26 @@ mod tests {
             },
         ];
         assert_eq!(
-            verify_guarded_recursion(k0, &nodes, &cross_clock_cycle, Limits::default()),
+            verify_guarded_recursion(
+                k0,
+                ModeVec::BOTTOM,
+                &EffectRow::empty(),
+                &nodes,
+                &cross_clock_cycle,
+                Limits::default()
+            ),
             Err(ClockQuotientError::UnguardedAlgebraicLoop { node: NodeId(1) })
         );
         // The same graph is productive under `guarded_fix[k1]`.
         assert_eq!(
-            verify_guarded_recursion(k1, &nodes, &cross_clock_cycle, Limits::default()),
+            verify_guarded_recursion(
+                k1,
+                ModeVec::BOTTOM,
+                &EffectRow::empty(),
+                &nodes,
+                &cross_clock_cycle,
+                Limits::default()
+            ),
             Ok(())
         );
 
@@ -343,7 +433,14 @@ mod tests {
             },
         ];
         assert_eq!(
-            verify_guarded_recursion(k0, &nodes, &unguarded_cycle, Limits::default()),
+            verify_guarded_recursion(
+                k0,
+                ModeVec::BOTTOM,
+                &EffectRow::empty(),
+                &nodes,
+                &unguarded_cycle,
+                Limits::default()
+            ),
             Err(ClockQuotientError::UnguardedAlgebraicLoop { node: NodeId(1) })
         );
     }
@@ -363,6 +460,7 @@ mod tests {
             quotient_mode: affine,
             repr_mode: affine,
             equiv: eq,
+            public_ops: vec![OpId(1), OpId(2)],
             op_proofs: vec![
                 RespectsProof {
                     op: OpId(1),
@@ -383,6 +481,7 @@ mod tests {
             quotient_mode: affine,
             repr_mode: linear,
             equiv: eq,
+            public_ops: vec![],
             op_proofs: vec![],
         };
         assert_eq!(
@@ -398,6 +497,7 @@ mod tests {
             quotient_mode: affine,
             repr_mode: affine,
             equiv: eq,
+            public_ops: vec![OpId(3)],
             op_proofs: vec![RespectsProof {
                 op: OpId(3),
                 equiv: eq,
@@ -413,6 +513,7 @@ mod tests {
             quotient_mode: affine,
             repr_mode: affine,
             equiv: eq,
+            public_ops: vec![OpId(4)],
             op_proofs: vec![RespectsProof {
                 op: OpId(4),
                 equiv: EquivId(99),

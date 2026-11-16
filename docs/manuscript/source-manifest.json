@@ -2,7 +2,7 @@
   "title": "Vesper: Language Design and Formal Specification",
   "edition_date": "2026-11-14",
   "part_count": 8,
-  "chapter_count": 41,
+  "chapter_count": 42,
   "appendices": [
     "A",
     "B"
@@ -20,22 +20,34 @@
     {
       "appendix": "B",
       "url": "https://drive.google.com/file/d/1QGefoudw60U8k-4xUjNnrRE1L8yplqWp/view"
+    },
+    {
+      "filename": "supplements/continuation-fission.typ",
+      "sha256": "b0051a04d263837d8b770671fa5e12369b5dd2e79508c8ab61a5001a5e79c94e",
+      "inserted_chapter": 6
     }
   ],
   "typesetting_tools": {
     "typst": "0.15.1"
   },
-  "content_sha256": "cff94e6323579e6e1346139309a1fe19edf2d8a093cb45d67b7d1ee3f72e7230",
-  "template_sha256": "172c58d5ec44dafd5a2e6acecb4cc15f7735ca3b8e9e13d1e0aac2762d21d039",
+  "content_sha256": "f25da5a8d88f68a7736e994c53921bf474277e8c20bcb369272137526fb4c77d",
+  "template_sha256": "74e2a1137651abbf2472e28de2202fadc72ae076738849c7d5bc691fe4fbc99c",
   "source_hash_normalization": "UTF-8 with LF line endings",
   "transformations": [
-    "Reorganized organically grown Sections 1–44 and Appendices A–B into a unified 8-Part, 41-Chapter + Appendices A–B monograph.",
-    "Folded Section 44 (four-axis ModeVec, @0 ghost linearity, out destinations, liquid refinements, pomonoid resource grades, clocks, quotients, and vesper-refine) directly into Part I (Chapters 2–5), Part II (Chapters 7 and 11), and Appendix A.",
+    "Reorganized organically grown Sections 1\u201344 and Appendices A\u2013B into a unified 8-Part, 41-Chapter + Appendices A\u2013B monograph.",
+    "Folded Section 44 (four-axis ModeVec, @0 ghost linearity, out destinations, liquid refinements, pomonoid resource grades, clocks, quotients, and vesper-refine) directly into Part I (Chapters 2\u20135), Part II (Chapters 7 and 11), and Appendix A.",
     "Removed Pandoc #strong/#emph wrappers, HTML entities, undefined #divider calls, evolutionary crate-count/roadmap seams, and mid-stream 42-crate workspace manifest.",
-    "Reunited stranded Ignis multi-backend subsections (19.8–19.11) into Chapter 38, vesper-lint into Chapter 18, and WireStructLayout (vesper-ffi) into Chapter 15.",
+    "Reunited stranded Ignis multi-backend subsections (19.8\u201319.11) into Chapter 38, vesper-lint into Chapter 18, and WireStructLayout (vesper-ffi) into Chapter 15.",
     "Recovered exact indented source listings for Chapters 19 (Codex), 26 (Aether), 30 (Grammar), and 39 (Kinetic), and restored dropped subsystem/toolkit spans.",
     "Resolved 273 unique document labels and 416 internal cross-references; retained external scholarly hyperlinks.",
-    "Corrected unsupported Typst symbol names and TeX-style math escapes, split two wide inference-rule premises, and tightened four listing continuations without changing any source-code block."
+    "Corrected unsupported Typst symbol names and TeX-style math escapes, split two wide inference-rule premises, and tightened four listing continuations without changing any source-code block.",
+    "Partially addressed the manuscript critique; the revised document is an under-review draft with outstanding issues tracked in REVIEW-STATUS.md.",
+    "Nested chapters and sections under their parts; improved sparse-page and cited-theorem checks and corrected selected source citations.",
+    "Repaired ADT field-floor and capsule-admission models; added exclusive-place splitting and scalar strong-update soundness proofs; synchronized the Appendix A listings with their Lean sources.",
+    "Added closed-fragment progress, per-identity conservation, fresh minting, and exactly-once exhaustion proofs; corrected host and self-hosted field-floor computation.",
+    "Added an operational ghost-erasure extension importing the checked core, with bidirectional evaluation equivalence, non-interference, and checked ghost-resource termination.",
+    "Inserted the supplied continuation-fission chapter after Chapter 5 in Part I; renumbered former Chapters 6\u201341 to 7\u201342 and updated displayed cross-references and part boundaries while preserving existing anchors. Marked the absent ContinuationFission module as an illustrative listing.",
+    "Adapted the supplied chapter to the nested heading hierarchy, replaced unsupported Typst leadsto with arrow.squiggly, and split two inference-rule premises to fit the existing page layout. Preserved all 156 preexisting code blocks and retained the supplied source as provenance."
   ],
   "revision_patch": {
     "filename": "0001-manuscript-unify-end-state-specification.patch",
@@ -43,18 +55,18 @@
     "applied_commit": "8471e7b41a595018aeae313b9eca516fd1e79b48"
   },
   "publication": {
-    "pages": 228,
+    "pages": 220,
     "parts": 8,
-    "chapters": 41,
+    "chapters": 42,
     "appendices": [
       "A",
       "B"
     ],
-    "bookmarks": 280,
-    "links": 534,
-    "code_blocks_preserved": 157,
+    "bookmarks": 293,
+    "links": 530,
+    "code_blocks_preserved": 159,
     "embedded_font_subsets": 7,
-    "pdf_bytes": 3782075,
-    "pdf_sha256": "94a2f89fe8ac4284c594047440a07a2eef79ea191af8216a51de9b1f9895f9b8"
+    "pdf_bytes": 3946850,
+    "pdf_sha256": "5f0420c5176a5b5ab84ab4d60f0a5b23a2aa9fe01842188f5e3a6b51f4c92034"
   }
 }
