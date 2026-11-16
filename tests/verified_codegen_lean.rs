@@ -225,12 +225,36 @@ fn model_has_no_escape_hatches_and_audits_every_theorem() {
     );
 }
 
+/// The encoding models lay out labels below `firstFree` as the abort exits;
+/// it must be the Rust `FIRST_FREE_LABEL` (one past `TrapKind::ALL`).
+#[test]
+fn encoding_models_reserve_exactly_the_rust_abort_labels() {
+    let expected = format!(
+        "def firstFree : Nat := {}\n",
+        vesper::verified_codegen::FIRST_FREE_LABEL
+    );
+    assert_eq!(
+        vesper::verified_codegen::FIRST_FREE_LABEL as usize,
+        vesper::verified_codegen::TrapKind::ALL.len()
+    );
+    for path in [rv64_model(), a64_model(), x64_model()] {
+        let source = std::fs::read_to_string(&path).expect("read an encoding model");
+        assert!(
+            strip_comments(&source).contains(&expected),
+            "{} does not define {expected:?}",
+            path.display()
+        );
+    }
+}
+
 #[test]
 fn rust_x64_listing_covers_every_instruction_kind() {
     let listing = vesper::verified_codegen::x64_encoding_listing();
-    assert_eq!(listing.lines().count(), 63);
+    assert_eq!(listing.lines().count(), 64);
     // add rax, rcx; jb ovf (the abort exits sit at offset 0)
     assert!(listing.contains("addchk u: 48 01 c8 0f 82 f7 ff ff ff\n"));
+    // The first function label is not an abort exit.
+    assert!(listing.contains("jmp L3: e9 00 00 00 00\n"));
     // push rbp; mov rbp, rsp; test [rsp - 4096], esp; sub rsp, 8000
     assert!(
         listing.contains(
@@ -243,7 +267,7 @@ fn rust_x64_listing_covers_every_instruction_kind() {
 #[test]
 fn rust_rv64_listing_covers_every_instruction_kind() {
     let listing = vesper::verified_codegen::rv64_encoding_listing();
-    assert_eq!(listing.lines().count(), 59);
+    assert_eq!(listing.lines().count(), 60);
     // add a0,a0,a1; bgeu a0,a1,+8; j ovf (the abort exits sit at offset 0)
     assert!(listing.contains("addchk u: 00b50533 00b57463 ff9ff06f\n"));
     assert!(listing.contains("leave: 00040113 00013403 00813083 01010113 00008067\n"));
@@ -252,7 +276,7 @@ fn rust_rv64_listing_covers_every_instruction_kind() {
 #[test]
 fn rust_a64_listing_covers_every_instruction_kind() {
     let listing = vesper::verified_codegen::a64_encoding_listing();
-    assert_eq!(listing.lines().count(), 61);
+    assert_eq!(listing.lines().count(), 62);
     // adds x0, x0, x1; b.hs ovf (the abort exits sit at offset 0)
     assert!(listing.contains("addchk u: ab010000 54ffffe2\n"));
     // sub sp, sp, #1, lsl #12; sub sp, sp, #0xf40

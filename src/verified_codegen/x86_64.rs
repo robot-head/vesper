@@ -206,8 +206,8 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
 }
 
 /// The bytes `emit` writes for each sample instruction (`<instruction>:
-/// <byte> ...`), with the abort exits bound before the instruction and label 9
-/// after it; then the Windows forms of `enter` (stack probes) and `leave`.
+/// <byte> ...`), with the abort exits bound before the instruction and labels
+/// `FIRST_FREE_LABEL` and 9 after it; then the Windows forms of `enter` (stack probes) and `leave`.
 pub fn encoding_listing() -> String {
     use std::fmt::Write;
     fn line(out: &mut String, m: &M, windows: bool, frame: u32, tag: &str) {
@@ -218,6 +218,8 @@ pub fn encoding_listing() -> String {
             a.bind(k.label()).expect("fresh label");
         }
         emit(&mut a, m).expect("sample instructions encode");
+        a.bind(super::machine::FIRST_FREE_LABEL)
+            .expect("fresh label");
         a.bind(9).expect("fresh label");
         let code = a.finish().expect("labels resolve");
         let _ = write!(out, "{m}{tag}:");

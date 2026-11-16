@@ -372,8 +372,16 @@ exercised by the tests.
   - Branches are laid out with the abort exits at offset 0 and every other
     label at the end, and a `rel32` is the displacement modulo 2^32. The
     Rust assembler refuses displacements outside `i32`.
+  - The abort exits are the labels below `firstFree`, which a test checks
+    against `FIRST_FREE_LABEL` (one past `TrapKind::ALL`). Review found that
+    the three encoding models had hard-coded `l < 4` although Rust reserves
+    only labels 0-2, so a branch to the first function label (3) was laid
+    out as an abort exit. All three models now use `firstFree`, and every
+    listing has a `jmp L3` sample, with label 3 bound after the instruction,
+    that catches the difference.
 - The listing check:
-  - The Lean file prints the bytes of milestone 5's 59 samples.
+  - The Lean file prints the bytes of the 60 shared samples (milestone 5's
+    59 plus `jmp L3`; the RV64 and AArch64 listings gain the same line).
   - It adds the Windows forms of `enter 4`, `enter 1000` (one probe) and
     `enter 2048` (four probes), and `leave` with an 8000-byte frame.
   - `x86_64::encoding_listing()` (re-exported as
@@ -388,7 +396,8 @@ exercised by the tests.
 - Every axiom report uses only `propext`, `Classical.choice` and
   `Quot.sound`.
 - `cargo test --test verified_codegen_lean` passes with `VESPER_LEAN` set:
-  9 tests, including all three encoding listings.
+  10 tests, including all three encoding listings and the `firstFree`
+  check.
 
 ### Remaining gaps
 

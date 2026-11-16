@@ -40,8 +40,8 @@ the encoding is a byte list and the specification is a prefix decoder.
   Rust encoder to it on those samples, not in general.
 
 Branch targets: `emit` resolves every `rel32` against a layout where the
-abort exits sit at offset 0 (before the instruction) and every other label at
-the end, which is how the listing lays them out. A `rel32` is the target
+abort exits (labels below `firstFree`) sit at offset 0, before the instruction,
+and every other label at the end, which is how the listing lays them out. A `rel32` is the target
 minus the end of the instruction, modulo `2^32`.
 -/
 
@@ -576,6 +576,11 @@ def JGE : Nat := 0xd
 def JLE : Nat := 0xe
 def JG : Nat := 0xf
 
+/-- `FIRST_FREE_LABEL`: labels below it are the abort exits of
+`TrapKind::ALL` (`tests/verified_codegen_lean.rs` checks the value against the
+Rust constant); every label from it on is a function or block label. -/
+def firstFree : Nat := 3
+
 /-- The program-wide abort exits (`TrapKind::label`). -/
 def trapLabel : Failure → Nat
   | .overflow => 0 | .divZero => 1 | .unreachable => 2 | .fault => 3
@@ -679,7 +684,7 @@ def rel32 (x : Int) : Nat := (x % 2 ^ 32).toNat
 bytes. -/
 def Item.at (p n : Nat) : Item → Inst
   | .ins i => i
-  | .br k l => k.inst (rel32 ((if l < 4 then 0 else (n : Int)) - ((p + k.size : Nat) : Int)))
+  | .br k l => k.inst (rel32 ((if l < firstFree then 0 else (n : Int)) - ((p + k.size : Nat) : Int)))
 
 def place (n : Nat) : Nat → List Item → List Inst
   | _, [] => []
@@ -823,7 +828,7 @@ def samples : List M :=
   ([Cond.eq, .ne, .lt, .le, .gt, .ge].flatMap fun c => [.cmp c .s, .cmp c .u]) ++
   [.fop .add, .fop .sub, .fop .mul, .fop .div, .fneg] ++
   ([Cond.eq, .ne, .lt, .le, .gt, .ge].map .fcmp) ++
-  [.jmp 9, .bz 9, .call 9, .enter 4, .enter 300, .leave,
+  [.jmp 9, .jmp firstFree, .bz 9, .call 9, .enter 4, .enter 300, .leave,
    .trap .overflow, .trap .divZero, .trap .unreachable]
 
 /-- Windows samples: `(instruction, frame bytes, suffix)`. -/

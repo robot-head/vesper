@@ -1,6 +1,6 @@
 //! A tiny label-resolving assembler buffer shared by the encoders.
 use super::VerifiedError;
-use super::machine::{Cond, FloatOp, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
+use super::machine::{Cond, FIRST_FREE_LABEL, FloatOp, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,6 +153,7 @@ pub fn encoding_samples() -> Vec<M> {
     samples.extend(CONDS.map(M::FCmp));
     samples.extend([
         M::Jmp(9),
+        M::Jmp(FIRST_FREE_LABEL),
         M::Bz(9),
         M::Call(9),
         M::Enter(4),
@@ -166,7 +167,8 @@ pub fn encoding_samples() -> Vec<M> {
 
 /// The words `emit` writes for each sample, one line per instruction
 /// (`<instruction>: <word> ...`, words as eight hex digits). The abort exits
-/// are bound before the instruction and label 9 after it.
+/// are bound before the instruction, and labels `FIRST_FREE_LABEL` and 9 after
+/// it.
 pub fn encoding_listing(
     samples: &[M],
     emit: fn(&mut Asm, &M) -> Result<(), VerifiedError>,
@@ -178,6 +180,7 @@ pub fn encoding_listing(
             a.bind(k.label()).expect("fresh label");
         }
         emit(&mut a, m).expect("sample instructions encode");
+        a.bind(FIRST_FREE_LABEL).expect("fresh label");
         a.bind(9).expect("fresh label");
         let code = a.finish().expect("labels resolve");
         out.push_str(&format!("{m}:"));

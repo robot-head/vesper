@@ -30,7 +30,8 @@ target: the 32-bit words `src/verified_codegen/riscv64.rs` writes for each
   Rust encoder to it on those samples, not in general.
 
 Branch targets: `emit` resolves every jump against a layout where the abort
-exits sit just before the instruction and every other label just after it,
+exits (labels below `firstFree`) sit just before the instruction and every
+other label just after it,
 which is how the listing lays them out.
 -/
 
@@ -441,6 +442,11 @@ def a2 : Nat := 12
 def regX : Reg → Nat
   | .r0 => a0 | .r1 => a1 | .r2 => a2
 
+/-- `FIRST_FREE_LABEL`: labels below it are the abort exits of
+`TrapKind::ALL` (`tests/verified_codegen_lean.rs` checks the value against the
+Rust constant); every label from it on is a function or block label. -/
+def firstFree : Nat := 3
+
 /-- The program-wide abort exits (`TrapKind::label`); `fault` is not a
 trap kind of the Rust emitter, which never selects it. -/
 def trapLabel : Failure → Nat
@@ -556,7 +562,7 @@ def emit : M → List Item
 
 def Item.at (k n : Nat) : Item → Inst
   | .ins i => i
-  | .jump rd l => .jal rd (if l < 4 then -(4 * k : Int) else 4 * (n - k : Nat))
+  | .jump rd l => .jal rd (if l < firstFree then -(4 * k : Int) else 4 * (n - k : Nat))
 
 def place (n : Nat) : Nat → List Item → List Inst
   | _, [] => []
@@ -696,7 +702,7 @@ def samples : List M :=
   ([Cond.eq, .ne, .lt, .le, .gt, .ge].flatMap fun c => [.cmp c .s, .cmp c .u]) ++
   [.fop .add, .fop .sub, .fop .mul, .fop .div, .fneg] ++
   ([Cond.eq, .ne, .lt, .le, .gt, .ge].map .fcmp) ++
-  [.jmp 9, .bz 9, .call 9, .enter 4, .enter 300, .leave, .trap .overflow, .trap .divZero,
+  [.jmp 9, .jmp firstFree, .bz 9, .call 9, .enter 4, .enter 300, .leave, .trap .overflow, .trap .divZero,
    .trap .unreachable]
 
 def listing : String :=
