@@ -664,9 +664,11 @@ impl Checker<'_> {
             };
             if !subtype {
                 let witness = if old.pass == new.pass && old.pass != Pass::Inout {
-                    i64_counterexample(&old.ty, &new.ty).map(|value| {
+                    u64_counterexample(&old.ty, &new.ty).map(|value| {
+                        format!("Pass {value}: u64; the old parameter admits this value but the new parameter rejects it.")
+                    }).or_else(|| i64_counterexample(&old.ty, &new.ty).map(|value| {
                         format!("Pass {value}: i64; the old parameter admits this value but the new parameter rejects it.")
-                    })
+                    }))
                 } else {
                     None
                 };
@@ -682,9 +684,18 @@ impl Checker<'_> {
             );
         }
         if !self.subtype(&b.result, &a.result, &format!("{path}.result"), depth + 1) {
-            let witness = i64_counterexample(&b.result, &a.result).map(|value| {
+            let witness =
+                u64_counterexample(&b.result, &a.result)
+                    .map(|value| {
+                        format!(
+                            "The new result admits {value}: u64, which the old result type rejects."
+                        )
+                    })
+                    .or_else(|| {
+                        i64_counterexample(&b.result, &a.result).map(|value| {
                 format!("The new result admits {value}: i64, which the old result type rejects.")
-            });
+            })
+                    });
             self.breaking(
                 path,
                 "SV-Fn",
@@ -925,6 +936,27 @@ impl Checker<'_> {
                 "A caller uses the declaration at its old syntactic and semantic kind.",
             ),
         }
+    }
+}
+/// A value in `sub` but outside `sup`, for validated direct u64 intervals.
+fn u64_counterexample(sub: &Type, sup: &Type) -> Option<u64> {
+    fn bounds(ty: &Type) -> Option<(u64, u64)> {
+        match ty {
+            Type::Primitive {
+                name: Primitive::U64,
+            } => Some((0, u64::MAX)),
+            Type::U64Range { min, max } if min <= max => Some((*min, *max)),
+            _ => None,
+        }
+    }
+    let (sub_min, sub_max) = bounds(sub)?;
+    let (sup_min, sup_max) = bounds(sup)?;
+    if sub_min < sup_min {
+        Some(sub_min)
+    } else if sub_max > sup_max {
+        Some(sub_max)
+    } else {
+        None
     }
 }
 /// A value in `sub` but outside `sup`, for validated direct i64 intervals.

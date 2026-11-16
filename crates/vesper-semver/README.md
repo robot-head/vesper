@@ -11,7 +11,9 @@ this fragment does not decide general predicates or synthesize SMT witnesses.
 Incompatible direct input or result ranges include a concrete distinguishing
 `i64` value in the human-readable witness; it is not a checked caller program.
 The analogous `{"kind":"u64_range","min":0,"max":10}` represents an
-inclusive `u64` interval; its full domain is 0 through `u64::MAX`.
+inclusive `u64` interval; its full domain is 0 through `u64::MAX`. Incompatible
+direct unsigned parameter or result intervals include a distinguishing value
+in the human-readable witness, not a checked caller program.
 
 Resolved interface DTOs may attach a constant `ceiling` to an effect capability.
 For the same capability, lowering the ceiling is compatible and raising it is
