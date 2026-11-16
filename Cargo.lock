@@ -5631,6 +5631,7 @@ dependencies = [
  "loona-hpack",
  "prost",
  "rcgen",
+ "rustls",
  "sha2",
  "subtle",
  "tokio",
