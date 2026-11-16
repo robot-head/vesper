@@ -393,7 +393,7 @@ impl RigidWorld {
     /// impacts of bodies whose path an earlier impact changed.
     pub(super) fn resolve_tois(&mut self) -> Result<(), RigidError> {
         let mut tois = std::mem::take(&mut self.tois);
-        tois.sort_unstable_by_key(|t| (t.s.to_bits(), t.a, t.b.map_or(u32::MAX, |b| b)));
+        tois.sort_unstable_by_key(|t| (t.s.to_bits(), t.a, t.b.unwrap_or(u32::MAX)));
         self.overrides.fill(None);
         let mut result = Ok(());
         for t in &tois {
@@ -410,10 +410,11 @@ impl RigidWorld {
     fn resolve_toi(&mut self, t: &Toi) -> Result<(), RigidError> {
         let a = t.a as usize;
         let b = t.b.map(|b| b as usize);
-        let changed =
-            self.overrides[a].is_some() || b.is_some_and(|b| self.overrides[b].is_some());
+        let changed = self.overrides[a].is_some() || b.is_some_and(|b| self.overrides[b].is_some());
         let hit = if changed {
-            let from = self.path_start(a).max(b.map_or(0.0, |b| self.path_start(b)));
+            let from = self
+                .path_start(a)
+                .max(b.map_or(0.0, |b| self.path_start(b)));
             let hit = self.resweep(a, b, from)?;
             if hit.is_some() {
                 self.ccd_resweeps += 1;

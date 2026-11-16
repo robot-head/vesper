@@ -416,7 +416,10 @@ impl std::fmt::Display for RigidError {
             Self::NonFinite { body } => write!(f, "body {body} left the finite range"),
             Self::InvalidJoint { joint, reason } => write!(f, "joint {joint}: {reason}"),
             Self::InvalidThreads(n) => {
-                write!(f, "narrowphase threads must be 1..={MAX_RIGID_THREADS}, got {n}")
+                write!(
+                    f,
+                    "narrowphase threads must be 1..={MAX_RIGID_THREADS}, got {n}"
+                )
             }
         }
     }

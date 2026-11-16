@@ -7,7 +7,17 @@
 //! once per substep in list order with the generalized inverse mass
 //! `w = Σ 1/m + (r × n)ᵀ I⁻¹ (r × n)` and compliance `α̃ = α/h²`, and
 //! velocities come from the positions (`v = Δx/h`, `ω = 2 vec(q q̄₀)/h`).
-//! Normal contacts only: no friction or restitution in this model.
+//!
+//! Friction and restitution follow `RigidWorld` per contact point (the
+//! world acts on whole patches at their centroid): positional static
+//! friction right after each normal projection (the contact point's
+//! relative tangential motion this substep is undone while that takes less
+//! than `μ_s` times the normal `Δλ`), then, after the velocities are
+//! derived, a velocity pass per contact that sets the normal velocity to
+//! the restitution of the pre-substep approach speed (zero below
+//! `2·|g|₁·h`) and applies dynamic friction bounded by `μ_d Δλ / h`. With all
+//! three coefficients zero (the default) these passes are skipped and the
+//! model is the frictionless one bit for bit.
 //!
 //! Contacts are found once per tick from the values at the start of the
 //! tick, as *features* whose geometry is then a smooth function of the
@@ -27,9 +37,14 @@
 //! A contact projects only while `C > 0`. Activation, the clamps of the
 //! segment parameters and the feature choice are branches on values, so
 //! the derivative is that of the branch the forward pass took: exact away
-//! from the switching surfaces and undefined on them. Edge–edge contact
-//! between two polytopes is not modelled (face-only SAT); a scene whose
-//! deepest feature pair is edge–edge gets face contacts instead.
+//! from the switching surfaces and undefined on them (stick and slip, and
+//! bounce and no bounce, are such branches too).
+//!
+//! * between two polytopes, SAT also tests every edge-pair axis `e_a × e_b`;
+//!   when an edge axis separates by more than the best face (by a tenth of
+//!   the margin, so that resting faces keep their face contact), the
+//!   contact is the closest points of the two edges with the edge axis as
+//!   normal, recomputed every substep: `C = −n · (p_a − p_b)`.
 //!
 //! Derivatives are forward mode: the same generic code runs on `f64` for
 //! [`simulate`] and on a dual number carrying [`TANGENTS`] tangents for
@@ -101,6 +116,12 @@ pub struct DiffRigidScene {
     pub compliance: f64,
     /// Speculative contact distance.
     pub margin: f64,
+    /// Coulomb static coefficient (positional), shared by every contact.
+    pub static_friction: f64,
+    /// Coulomb dynamic coefficient (velocity pass).
+    pub dynamic_friction: f64,
+    /// Normal restitution in `[0, 1]`.
+    pub restitution: f64,
 }
 
 /// Per-body state (also the layout of seeds and gradients).
@@ -121,8 +142,8 @@ pub struct RigidGradients {
     pub compliance: f64,
     /// Contact activations (contact-substeps that projected), by feature:
     /// `[ground, polytope (face, or a rounded body's edge or corner),
-    /// segment pair]`.
-    pub activations: [usize; 3],
+    /// segment pair, polytope edge pair]`.
+    pub activations: [usize; 4],
 }
 
 /// Typed failures.
@@ -337,6 +358,9 @@ struct Geometry {
     round: bool,
 }
 
+fn vadd64(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
 fn sub64(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
@@ -568,6 +592,16 @@ enum Feature<R> {
         poly: usize,
         edge: usize,
     },
+    /// Closest points of edge `ea` of polytope `a` and edge `eb` of
+    /// polytope `b`, with normal `sign · normalize(e_a × e_b)` (from `b` to
+    /// `a`).
+    EdgePair {
+        a: usize,
+        ea: usize,
+        b: usize,
+        eb: usize,
+        sign: f64,
+    },
 }
 
 struct Model<'s> {
@@ -649,6 +683,16 @@ impl<'s> Model<'s> {
         {
             return Err(RigidDiffError::InvalidScene(
                 "gravity, ground, compliance and margin must be finite (>= 0)",
+            ));
+        }
+        let coef = |c: f64| c.is_finite() && c >= 0.0;
+        if !(coef(scene.static_friction)
+            && coef(scene.dynamic_friction)
+            && coef(scene.restitution)
+            && scene.restitution <= 1.0)
+        {
+            return Err(RigidDiffError::InvalidScene(
+                "friction must be finite and >= 0, restitution in [0, 1]",
             ));
         }
         let mut geo = Vec::with_capacity(scene.shapes.len());
@@ -812,6 +856,72 @@ impl<'s> Model<'s> {
                 let Some((sep, rf, face)) = best else {
                     continue;
                 };
+                // Edge-pair axes between two polytopes.
+                if !gi.round && !gj.round {
+                    let (pi, pj) = (&bodies64[i], &bodies64[j]);
+                    let mut best_edge: Option<(f64, usize, usize, f64, f64)> = None;
+                    for (ka, (p, q)) in gi.edges.iter().enumerate() {
+                        let ea = rotate(pi.q, sub64(*q, *p));
+                        for (kb, (r, t)) in gj.edges.iter().enumerate() {
+                            let eb = rotate(pj.q, sub64(*t, *r));
+                            let axis = cross64(ea, eb);
+                            let len = dot64(axis, axis).sqrt();
+                            let scale = dot64(ea, ea).sqrt() * dot64(eb, eb).sqrt();
+                            if !(len > 1e-6 * scale) {
+                                continue;
+                            }
+                            let mut n = axis.map(|x| x / len);
+                            let mut sign = 1.0;
+                            if dot64(n, sub64(pi.x, pj.x)) < 0.0 {
+                                n = n.map(|x| -x);
+                                sign = -1.0;
+                            }
+                            let lo_i = (0..gi.points.len())
+                                .map(|k| dot64(n, self.world_point(pi, si, k).0))
+                                .fold(f64::INFINITY, f64::min);
+                            let hi_j = (0..gj.points.len())
+                                .map(|k| dot64(n, self.world_point(pj, sj, k).0))
+                                .fold(f64::NEG_INFINITY, f64::max);
+                            let es = lo_i - hi_j;
+                            // Parallel edges share an axis and so its
+                            // separation: of those, the pair that is
+                            // nearest (the supporting edges) is the contact.
+                            let (a0, a1) = (
+                                vadd64(pi.x, rotate(pi.q, *p)),
+                                vadd64(pi.x, rotate(pi.q, *q)),
+                            );
+                            let (b0, b1) = (
+                                vadd64(pj.x, rotate(pj.q, *r)),
+                                vadd64(pj.x, rotate(pj.q, *t)),
+                            );
+                            let (ca, cb) = closest_segments(a0, a1, b0, b1);
+                            let gap = dot64(sub64(ca, cb), sub64(ca, cb));
+                            let tie = 1e-9 * (1.0 + es.abs());
+                            if best_edge.is_none_or(|(b, _, _, _, g)| {
+                                es > b + tie || (es > b - tie && gap < g)
+                            }) {
+                                best_edge = Some((es, ka, kb, sign, gap));
+                            }
+                        }
+                    }
+                    if let Some((es, ea, eb, sign, _)) = best_edge
+                        && es > sep + 0.1 * margin + 1e-12
+                    {
+                        if es < margin {
+                            push(
+                                out,
+                                Feature::EdgePair {
+                                    a: i,
+                                    ea,
+                                    b: j,
+                                    eb,
+                                    sign,
+                                },
+                            )?;
+                        }
+                        continue;
+                    }
+                }
                 if sep >= margin {
                     continue;
                 }
@@ -1010,6 +1120,22 @@ impl<'s> Model<'s> {
                 let arm_poly = vsub(pe, bp.x);
                 (c, n, arm_round, arm_poly, round, Some(poly))
             }
+            Feature::EdgePair { a, ea, b, eb, sign } => {
+                let (sa, sb) = (sc.bodies[a].shape, sc.bodies[b].shape);
+                let (ba, bb) = (&bodies[a], &bodies[b]);
+                let (p, q) = self.geo[sa].edges[ea];
+                let (r, t) = self.geo[sb].edges[eb];
+                let a0 = vadd(ba.x, rotate(ba.q, vc(p)));
+                let a1 = vadd(ba.x, rotate(ba.q, vc(q)));
+                let b0 = vadd(bb.x, rotate(bb.q, vc(r)));
+                let b1 = vadd(bb.x, rotate(bb.q, vc(t)));
+                let axis = vcross(vsub(a1, a0), vsub(b1, b0));
+                let len = vdot(axis, axis).sqrt();
+                let n = vscale(axis, R::c(sign) / len);
+                let (pa, pb) = closest_segments(a0, a1, b0, b1);
+                let c = -vdot(n, vsub(pa, pb));
+                (c, n, vsub(pa, ba.x), vsub(pb, bb.x), a, Some(b))
+            }
         }
     }
 
@@ -1044,21 +1170,176 @@ impl<'s> Model<'s> {
         ];
     }
 
+    /// Relative velocity (`a` minus `b`) of the material points at the arms,
+    /// from the velocities in `vel`.
+    fn relative_velocity<R: Real>(
+        &self,
+        vel: &[Body<R>],
+        (a, b): (usize, Option<usize>),
+        (arm_a, arm_b): (V<R>, V<R>),
+    ) -> V<R> {
+        let point = |i: usize, arm: V<R>| {
+            if self.dynamic(i) {
+                vadd(vel[i].v, vcross(vel[i].w, arm))
+            } else {
+                vc([0.0; 3])
+            }
+        };
+        let mut rel = point(a, arm_a);
+        if let Some(b) = b {
+            rel = vsub(rel, point(b, arm_b));
+        }
+        rel
+    }
+
+    fn apply_impulse<R: Real>(&self, i: usize, b: &mut Body<R>, arm: V<R>, p: V<R>) {
+        if !self.dynamic(i) {
+            return;
+        }
+        b.v = vadd(b.v, vscale(p, R::c(self.scene.bodies[i].inv_mass)));
+        b.w = vadd(b.w, self.inv_inertia_world(i, b, vcross(arm, p)));
+    }
+
+    /// Positional static friction after a normal projection of `Δλ = dl`.
+    fn static_friction<R: Real>(
+        &self,
+        f: Feature<R>,
+        bodies: &mut [Body<R>],
+        prev: &[Body<R>],
+        dl: R,
+    ) {
+        let (_, n, arm_a, arm_b, a, b) = self.evaluate(f, bodies);
+        // Motion this substep of the material point now at the contact.
+        let moved = |i: usize, arm: V<R>| {
+            if !self.dynamic(i) {
+                return vc([0.0; 3]);
+            }
+            let local = rotate(conj(bodies[i].q), arm);
+            let then = vadd(prev[i].x, rotate(prev[i].q, local));
+            vsub(vadd(bodies[i].x, arm), then)
+        };
+        let mut dp = moved(a, arm_a);
+        if let Some(b) = b {
+            dp = vsub(dp, moved(b, arm_b));
+        }
+        let tan = vsub(dp, vscale(n, vdot(dp, n)));
+        let lt = vdot(tan, tan).sqrt();
+        if !(lt.v() > 1e-12) {
+            return;
+        }
+        let t = vscale(tan, R::c(1.0) / lt);
+        let mut wt = self.weight(a, &bodies[a], arm_a, t);
+        if let Some(b) = b {
+            wt = wt + self.weight(b, &bodies[b], arm_b, t);
+        }
+        if !(wt.v() > 0.0) {
+            return;
+        }
+        let dlt = lt / wt;
+        if !(dlt.v() < self.scene.static_friction * dl.v()) {
+            return;
+        }
+        let p = vscale(t, -dlt);
+        let mut ba = bodies[a];
+        self.push_body(a, &mut ba, arm_a, p);
+        bodies[a] = ba;
+        if let Some(b) = b {
+            let mut bb = bodies[b];
+            self.push_body(b, &mut bb, arm_b, vscale(p, R::c(-1.0)));
+            bodies[b] = bb;
+        }
+    }
+
+    /// Restitution and dynamic friction of one contact after the velocity
+    /// update.
+    fn velocity_pass<R: Real>(
+        &self,
+        f: Feature<R>,
+        bodies: &mut [Body<R>],
+        (lam, vn_prev): (R, R),
+        h: R,
+        bounce_floor: f64,
+    ) {
+        let sc = self.scene;
+        let (_, n, arm_a, arm_b, a, b) = self.evaluate(f, bodies);
+        let mut w = self.weight(a, &bodies[a], arm_a, n);
+        if let Some(b) = b {
+            w = w + self.weight(b, &bodies[b], arm_b, n);
+        }
+        let apply = |bodies: &mut [Body<R>], p: V<R>| {
+            let mut ba = bodies[a];
+            self.apply_impulse(a, &mut ba, arm_a, p);
+            bodies[a] = ba;
+            if let Some(b) = b {
+                let mut bb = bodies[b];
+                self.apply_impulse(b, &mut bb, arm_b, vscale(p, R::c(-1.0)));
+                bodies[b] = bb;
+            }
+        };
+        if w.v() > 0.0 {
+            let rel = self.relative_velocity(bodies, (a, b), (arm_a, arm_b));
+            let vn = vdot(rel, n);
+            let e = if vn_prev.v().abs() <= bounce_floor {
+                0.0
+            } else {
+                sc.restitution
+            };
+            let bounce = -(R::c(e) * vn_prev);
+            let want = if bounce.v() > 0.0 { bounce } else { R::c(0.0) };
+            let dvn = want - vn;
+            if dvn.v() != 0.0 {
+                apply(bodies, vscale(n, dvn / w));
+            }
+        }
+        if sc.dynamic_friction > 0.0 {
+            let rel = self.relative_velocity(bodies, (a, b), (arm_a, arm_b));
+            let vt = vsub(rel, vscale(n, vdot(rel, n)));
+            let lvt = vdot(vt, vt).sqrt();
+            if !(lvt.v() > 1e-12) {
+                return;
+            }
+            let t = vscale(vt, R::c(1.0) / lvt);
+            let mut wt = self.weight(a, &bodies[a], arm_a, t);
+            if let Some(b) = b {
+                wt = wt + self.weight(b, &bodies[b], arm_b, t);
+            }
+            if !(wt.v() > 0.0) {
+                return;
+            }
+            let stop = lvt / wt;
+            let limit = R::c(sc.dynamic_friction) * lam / h;
+            let j = if limit.v() < stop.v() { limit } else { stop };
+            apply(bodies, vscale(t, -j));
+        }
+    }
+
     fn run<R: Real>(
         &self,
         mut bodies: Vec<Body<R>>,
         alpha: R,
-    ) -> Result<(Vec<Body<R>>, [usize; 3]), RigidDiffError> {
+    ) -> Result<(Vec<Body<R>>, [usize; 4]), RigidDiffError> {
         let sc = self.scene;
         let h = R::c(sc.dt / f64::from(sc.substeps));
         let inv_h = R::c(f64::from(sc.substeps) / sc.dt);
         let alpha_t = alpha * inv_h * inv_h;
         let g = vc(sc.gravity);
         let mut features = Vec::new();
-        let mut activations = [0usize; 3];
+        let mut activations = [0usize; 4];
         let mut prev = bodies.clone();
+        let frictional =
+            sc.static_friction > 0.0 || sc.dynamic_friction > 0.0 || sc.restitution > 0.0;
+        let g1 = sc.gravity[0].abs() + sc.gravity[1].abs() + sc.gravity[2].abs();
+        let bounce_floor = 2.0 * g1 * (sc.dt / f64::from(sc.substeps));
+        let mut lam: Vec<R> = Vec::new();
+        let mut vn_prev: Vec<R> = Vec::new();
         for _ in 0..sc.ticks {
             self.detect(&bodies, &mut features)?;
+            if frictional {
+                lam.clear();
+                lam.resize(features.len(), R::c(0.0));
+                vn_prev.clear();
+                vn_prev.resize(features.len(), R::c(0.0));
+            }
             for _ in 0..sc.substeps {
                 prev.copy_from_slice(&bodies);
                 for (i, b) in bodies.iter_mut().enumerate() {
@@ -1076,7 +1357,17 @@ impl<'s> Model<'s> {
                         b.q[3] + half_h * spin[3],
                     ]);
                 }
-                for f in &features {
+                if frictional {
+                    // Pre-substep normal velocities, at the arms after
+                    // integration (as in RigidWorld).
+                    for (k, f) in features.iter().enumerate() {
+                        let (_, n, arm_a, arm_b, a, b) = self.evaluate(*f, &bodies);
+                        let rel = self.relative_velocity(&prev, (a, b), (arm_a, arm_b));
+                        vn_prev[k] = vdot(rel, n);
+                        lam[k] = R::c(0.0);
+                    }
+                }
+                for (k, f) in features.iter().enumerate() {
                     let (c, n, arm_a, arm_b, a, b) = self.evaluate(*f, &bodies);
                     if !(c.v() > 0.0) {
                         continue;
@@ -1093,6 +1384,7 @@ impl<'s> Model<'s> {
                         Feature::Ground { .. } => 0,
                         Feature::Face { .. } | Feature::Edge { .. } => 1,
                         Feature::Segments { .. } => 2,
+                        Feature::EdgePair { .. } => 3,
                     }] += 1;
                     let dl = c / denom;
                     let p = vscale(n, dl);
@@ -1103,6 +1395,12 @@ impl<'s> Model<'s> {
                         let mut bb = bodies[b];
                         self.push_body(b, &mut bb, arm_b, vscale(p, R::c(-1.0)));
                         bodies[b] = bb;
+                    }
+                    if frictional {
+                        lam[k] = dl;
+                        if sc.static_friction > 0.0 {
+                            self.static_friction(*f, &mut bodies, &prev, dl);
+                        }
                     }
                 }
                 for (i, b) in bodies.iter_mut().enumerate() {
@@ -1118,6 +1416,19 @@ impl<'s> Model<'s> {
                         R::c(-2.0)
                     };
                     b.w = vscale([dq[0], dq[1], dq[2]], s * inv_h);
+                }
+                if frictional {
+                    for (k, f) in features.iter().enumerate() {
+                        if lam[k].v() > 0.0 {
+                            self.velocity_pass(
+                                *f,
+                                &mut bodies,
+                                (lam[k], vn_prev[k]),
+                                h,
+                                bounce_floor,
+                            );
+                        }
+                    }
                 }
             }
             if !bodies.iter().all(|b| {
@@ -1176,7 +1487,7 @@ pub fn gradients(
     let params = PER_BODY * n + 1;
     let mut grad = vec![0.0f64; params];
     let mut loss = 0.0;
-    let mut activations = [0; 3];
+    let mut activations = [0; 4];
     let flat = |s: &DiffRigidState| -> [f64; PER_BODY] {
         let mut out = [0.0; PER_BODY];
         out[..3].copy_from_slice(&s.pos);

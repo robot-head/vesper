@@ -95,12 +95,20 @@ impl std::error::Error for CoupledError {}
 
 #[inline]
 fn add(a: V3, b: V3) -> V3 {
-    [det::add(a[0], b[0]), det::add(a[1], b[1]), det::add(a[2], b[2])]
+    [
+        det::add(a[0], b[0]),
+        det::add(a[1], b[1]),
+        det::add(a[2], b[2]),
+    ]
 }
 
 #[inline]
 fn sub(a: V3, b: V3) -> V3 {
-    [det::sub(a[0], b[0]), det::sub(a[1], b[1]), det::sub(a[2], b[2])]
+    [
+        det::sub(a[0], b[0]),
+        det::sub(a[1], b[1]),
+        det::sub(a[2], b[2]),
+    ]
 }
 
 #[inline]
@@ -220,6 +228,7 @@ impl CoupledWorld {
                 if inv_mass[i] == 0.0 {
                     continue;
                 }
+                #[allow(clippy::needless_range_loop)] // `b` also names the body
                 for b in 0..nb {
                     let (centre, bound) = rigid.bounding_sphere(b);
                     let reach = det::add(bound, det::mul(2.0, radius));
@@ -235,7 +244,7 @@ impl CoupledWorld {
                                 return;
                             }
                         };
-                    if !(d < 0.0) {
+                    if d.is_nan() || d >= 0.0 {
                         continue;
                     }
                     let wp = inv_mass[i];

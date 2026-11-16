@@ -32,6 +32,9 @@ use sha2::Digest;
 
 type V3 = [f32; 3];
 
+/// A contact pass: `(positions, substep start positions, inverse masses, h)`.
+pub(crate) type ContactPass<'a> = dyn FnMut(&mut [V3], &mut [V3], &[f32], f32) + 'a;
+
 /// Most solver threads.
 pub const MAX_SOFT_THREADS: usize = 64;
 
@@ -616,7 +619,7 @@ impl SoftWorld {
     /// too, to change the velocity `(x − x₀)/h` the substep derives.
     pub(crate) fn step_with(
         &mut self,
-        contact: &mut dyn FnMut(&mut [V3], &mut [V3], &[f32], f32),
+        contact: &mut ContactPass<'_>,
     ) -> Result<WorldHashes, SoftError> {
         let next = self.tick.checked_add(1).ok_or(SoftError::TickOverflow)?;
         let saved = (self.pos.clone(), self.vel.clone());

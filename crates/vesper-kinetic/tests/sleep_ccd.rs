@@ -366,8 +366,7 @@ fn floor_then_wall(resweep: bool) -> RigidWorld {
         ground: None,
         ..RigidConfig::default()
     };
-    let mut w =
-        RigidWorld::new(cfg, &bodies, &[floor, wall, ball_collider(r)]).unwrap();
+    let mut w = RigidWorld::new(cfg, &bodies, &[floor, wall, ball_collider(r)]).unwrap();
     w.set_ccd(Some(CcdConfig::default())).unwrap();
     w.set_ccd_resweep(resweep);
     w
@@ -406,7 +405,10 @@ fn resweeping_ccd_finds_the_wall_after_the_floor() {
     without.step().unwrap();
     assert_eq!(without.last_ccd_resweeps(), 0);
     let h0 = wall_contact_height(&without).expect("a speculative wall contact");
-    assert!((h0 - 0.6).abs() < 0.03, "speculative wall contact at y = {h0}");
+    assert!(
+        (h0 - 0.6).abs() < 0.03,
+        "speculative wall contact at y = {h0}"
+    );
     // The re-swept world keeps the ball out of the floor and the wall.
     for _ in 0..30 {
         with.step().unwrap();

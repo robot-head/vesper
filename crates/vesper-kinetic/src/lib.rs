@@ -64,8 +64,9 @@ pub use couple::{CoupledError, CoupledWorld, CouplingConfig};
 pub use detfloat::{AuditError, DetFloatPolicy, ReductionOrder, VerifierFinding, audit};
 pub use morton::MortonError;
 pub use rigid::{
-    CcdConfig, ColliderShape, ContactManifold, GroundPlane, JointDrive, JointKind, RigidBody, RigidBroadphase,
-    RigidCollider, RigidConfig, RigidError, RigidJoint, RigidMaterial, RigidWorld, SleepConfig,
+    CcdConfig, ColliderShape, ContactManifold, GroundPlane, JointDrive, JointKind, RigidBody,
+    RigidBroadphase, RigidCollider, RigidConfig, RigidError, RigidJoint, RigidMaterial, RigidWorld,
+    SleepConfig,
 };
 pub use rollback::{ResimulateError, RollbackError, RollbackTicket, SnapshotRing};
 pub use sap::{SapError, SweepAndPrune};
@@ -74,8 +75,7 @@ pub use snapshot::{KineticSnapshotWireHdr, SNAPSHOT_HEADER_LEN, WorldHashes, has
 pub use soft::{SoftConfig, SoftConstraint, SoftError, SoftParticle, SoftWorld};
 pub use tile::{Body, RigidBodyTile, TILE_WIDTH, TiledBodies};
 pub use world::{
-    BATCH_WIDTH, BroadphaseMode, ContactMaterial, DistanceConstraint, MAX_SOLVER_THREADS, PairBackend,
-    PairBackendError,
-    PARALLEL_MIN_CONSTRAINTS, SolverMode, SphereCollider, StepError, StepTimings, World,
-    WorldConfig,
+    BATCH_WIDTH, BroadphaseMode, ContactMaterial, DistanceConstraint, MAX_SOLVER_THREADS,
+    PARALLEL_MIN_CONSTRAINTS, PairBackend, PairBackendError, SolverMode, SphereCollider, StepError,
+    StepTimings, World, WorldConfig,
 };

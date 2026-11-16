@@ -93,7 +93,12 @@ fn a_jelly_holds_up_a_rigid_box() {
     // The jelly stands on the soft ground; a 0.2 kg rigid box sits on it.
     let s = jelly([-0.15, 0.0, -0.15], G, Some(0.0));
     let h = [0.12, 0.05, 0.12];
-    let lid = RigidBody::new([0.0, 0.3 + 0.05 + 0.03, 0.0], 5.0, box_inv_inertia(0.2, h), 0);
+    let lid = RigidBody::new(
+        [0.0, 0.3 + 0.05 + 0.03, 0.0],
+        5.0,
+        box_inv_inertia(0.2, h),
+        0,
+    );
     let r = rigid(&[lid], &[cube(h)], G);
     let mut w = CoupledWorld::new(r, s, CouplingConfig::default()).unwrap();
     for _ in 0..360 {
@@ -102,7 +107,11 @@ fn a_jelly_holds_up_a_rigid_box() {
     let b = w.rigid().body(0).unwrap();
     // Supported: it neither falls through the jelly (top at 0.3) nor
     // bounces away, and it comes to rest.
-    assert!(b.pos[1] > 0.3 + 0.05 - 0.03 && b.pos[1] < 0.42, "{:?}", b.pos);
+    assert!(
+        b.pos[1] > 0.3 + 0.05 - 0.03 && b.pos[1] < 0.42,
+        "{:?}",
+        b.pos
+    );
     assert!(b.vel.iter().all(|v| v.abs() < 0.05), "{:?}", b.vel);
     let low = lowest(w.soft());
     assert!(low > -0.01, "the jelly stays on the ground: {low}");

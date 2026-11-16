@@ -319,7 +319,11 @@ impl RigidWorld {
     /// Set or clear the drive of hinge or prismatic joint `i`. A ball joint,
     /// a non-finite target, a negative compliance or a `max_force` that is
     /// not positive is [`RigidError::InvalidJoint`].
-    pub fn set_joint_drive(&mut self, i: usize, drive: Option<JointDrive>) -> Result<(), RigidError> {
+    pub fn set_joint_drive(
+        &mut self,
+        i: usize,
+        drive: Option<JointDrive>,
+    ) -> Result<(), RigidError> {
         let bad = |reason| RigidError::InvalidJoint { joint: i, reason };
         let j = self.joints.get(i).ok_or(bad("no such joint"))?;
         if drive.is_some() && matches!(j.joint.kind, JointKind::Ball) {
@@ -465,7 +469,11 @@ impl RigidWorld {
             }
             JointKind::Prismatic { .. } => {
                 let (pa, ra, pb, rb) = self.joint_points(j);
-                let ra = if b.is_some() { add(ra, sub(pb, pa)) } else { ra };
+                let ra = if b.is_some() {
+                    add(ra, sub(pb, pa))
+                } else {
+                    ra
+                };
                 let (_, qa) = self.pose(Some(a));
                 let axis = rotate(qa, j.axis_a);
                 let delta = det::sub(dot(sub(pb, pa), axis), j.coord_start);
@@ -475,7 +483,10 @@ impl RigidWorld {
                 let sa = &self.bodies[a as usize];
                 let mut w = det::add(sa.inv_mass, angular_weight(sa, cross(ra, axis)));
                 if let Some(sb) = self.body_or_none(b) {
-                    w = det::add(w, det::add(sb.inv_mass, angular_weight(sb, cross(rb, axis))));
+                    w = det::add(
+                        w,
+                        det::add(sb.inv_mass, angular_weight(sb, cross(rb, axis))),
+                    );
                 }
                 if !(w > 0.0) || det::div(delta.abs(), w) > bound {
                     return false;
@@ -747,7 +758,10 @@ impl RigidWorld {
         let sa = &self.bodies[a as usize];
         let mut w = det::add(sa.inv_mass, angular_weight(sa, cross(ra, axis)));
         if let Some(sb) = self.body_or_none(b) {
-            w = det::add(w, det::add(sb.inv_mass, angular_weight(sb, cross(rb, axis))));
+            w = det::add(
+                w,
+                det::add(sb.inv_mass, angular_weight(sb, cross(rb, axis))),
+            );
         }
         let denom = det::add(w, alpha);
         if !(denom > 0.0) {
@@ -861,7 +875,11 @@ impl RigidWorld {
                     let (pa, ra, pb, rb) = self.joint_points(&j);
                     // Both impulses at b's anchor between two bodies, as
                     // for the slide itself below.
-                    let ra = if b.is_some() { add(ra, sub(pb, pa)) } else { ra };
+                    let ra = if b.is_some() {
+                        add(ra, sub(pb, pa))
+                    } else {
+                        ra
+                    };
                     let (_, qa) = self.pose(Some(a));
                     let axis = rotate(qa, j.axis_a);
                     let s = dot(sub(pb, pa), axis);

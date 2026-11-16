@@ -97,7 +97,11 @@ fn aba_matches_closed_form_cart_pole() {
     //   m l cosθ ẍ + m l² θ̈ + m g l sinθ = τ
     let mut rng = Lcg(11);
     for _ in 0..200 {
-        let (big_m, m, l) = (rng.range(0.5, 5.0), rng.range(0.1, 2.0), rng.range(0.2, 2.0));
+        let (big_m, m, l) = (
+            rng.range(0.5, 5.0),
+            rng.range(0.1, 2.0),
+            rng.range(0.2, 2.0),
+        );
         let links = [
             ArticulationLink::new(
                 None,
@@ -236,7 +240,10 @@ fn double_pendulum_conserves_energy() {
     eprintln!("energy drift: h = 1/3840 s: {coarse:.3e} J, h = 1/7680 s: {fine:.3e} J");
     assert!(coarse / scale < 1e-2, "energy drift {coarse}");
     let ratio = coarse / fine;
-    assert!((1.6..2.5).contains(&ratio), "first-order convergence: ratio {ratio}");
+    assert!(
+        (1.6..2.5).contains(&ratio),
+        "first-order convergence: ratio {ratio}"
+    );
 }
 
 fn disk_wheel(mass: f64, radius: f64) -> ArticulationLink {
@@ -389,11 +396,7 @@ fn friction_above_gravity_torque_holds_pendulum() {
 fn chain(n: usize) -> Articulation {
     let mut links = Vec::new();
     for i in 0..n {
-        let axis = if i % 2 == 0 {
-            Z
-        } else {
-            [1.0, 0.0, 0.0]
-        };
+        let axis = if i % 2 == 0 { Z } else { [1.0, 0.0, 0.0] };
         let (com, inertia) = rod_link_inertia(0.5 + 0.1 * i as f64, 0.4, [0.0, -1.0, 0.0]);
         let mut l = ArticulationLink::new(
             i.checked_sub(1),
@@ -437,15 +440,20 @@ fn twelve_link_chain_is_bit_deterministic() {
 fn articulation_errors_are_typed() {
     let rev = ArticulationJoint::Revolute { axis: Z };
     let good = ArticulationLink::new(None, rev, [0.0; 3], 1.0, [0.0, -1.0, 0.0], ZERO3);
-    let check = |links: &[ArticulationLink], want: &str| {
-        match Articulation::new(config(0.01, 1), links) {
+    let check =
+        |links: &[ArticulationLink], want: &str| match Articulation::new(config(0.01, 1), links) {
             Err(ArticulationError::InvalidLink { reason, .. }) => {
                 assert!(reason.contains(want), "{reason}")
             }
             other => panic!("expected InvalidLink({want}), got {other:?}"),
-        }
-    };
-    check(&[ArticulationLink { parent: Some(0), ..good }], "earlier");
+        };
+    check(
+        &[ArticulationLink {
+            parent: Some(0),
+            ..good
+        }],
+        "earlier",
+    );
     check(
         &[ArticulationLink {
             joint: ArticulationJoint::Revolute { axis: [0.0; 3] },

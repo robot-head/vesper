@@ -159,14 +159,25 @@ impl Default for ArticulationConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArticulationError {
     InvalidConfig(&'static str),
-    InvalidLink { link: usize, reason: &'static str },
-    TooManyLinks { links: usize },
-    UnknownLink { link: usize },
+    InvalidLink {
+        link: usize,
+        reason: &'static str,
+    },
+    TooManyLinks {
+        links: usize,
+    },
+    UnknownLink {
+        link: usize,
+    },
     /// A joint's articulated inertia `dᵢ` is not positive (a massless
     /// subtree on that joint).
-    Singular { link: usize },
+    Singular {
+        link: usize,
+    },
     /// The state left the finite range.
-    NonFinite { link: usize },
+    NonFinite {
+        link: usize,
+    },
     TickOverflow,
 }
 
@@ -181,7 +192,10 @@ impl std::fmt::Display for ArticulationError {
             ),
             Self::UnknownLink { link } => write!(f, "no link {link}"),
             Self::Singular { link } => {
-                write!(f, "joint {link} has no articulated inertia (massless subtree)")
+                write!(
+                    f,
+                    "joint {link} has no articulated inertia (massless subtree)"
+                )
             }
             Self::NonFinite { link } => write!(f, "link {link} left the finite range"),
             Self::TickOverflow => write!(f, "tick counter overflow"),
@@ -448,10 +462,7 @@ struct Scratch {
 }
 
 const ZERO_SCRATCH: Scratch = Scratch {
-    x: Xform {
-        e: I3,
-        r: [0.0; 3],
-    },
+    x: Xform { e: I3, r: [0.0; 3] },
     xm: [[0.0; 6]; 6],
     v: [0.0; 6],
     c: [0.0; 6],
@@ -701,7 +712,11 @@ impl Articulation {
         if let Some(d) = l.drive {
             let raw = d.stiffness * (d.target_position - q) + d.damping * (d.target_velocity - qd);
             if raw.abs() > d.max_effort {
-                explicit += if raw > 0.0 { d.max_effort } else { -d.max_effort };
+                explicit += if raw > 0.0 {
+                    d.max_effort
+                } else {
+                    -d.max_effort
+                };
             } else {
                 // Spring at `q + h q̇ + h² q̈`, damper at `q̇ + h q̈`.
                 explicit += d.stiffness * (d.target_position - q - h * qd)
@@ -764,7 +779,7 @@ impl Articulation {
             let sc = self.scratch[i];
             let u_vec = mv6(&sc.ia, l.s);
             let d = dot6(l.s, u_vec) + implicit;
-            if !(d > 0.0) {
+            if d.is_nan() || d <= 0.0 {
                 return Err(ArticulationError::Singular { link: i });
             }
             let u = tau - dot6(l.s, sc.pa);
@@ -874,8 +889,8 @@ impl Articulation {
             if result.is_err() {
                 break;
             }
-            if let Some(link) = (0..self.q.len())
-                .find(|&i| !(self.q[i].is_finite() && self.qd[i].is_finite()))
+            if let Some(link) =
+                (0..self.q.len()).find(|&i| !(self.q[i].is_finite() && self.qd[i].is_finite()))
             {
                 result = Err(ArticulationError::NonFinite { link });
                 break;
