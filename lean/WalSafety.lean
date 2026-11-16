@@ -156,8 +156,7 @@ theorem appendBatch_crc_err_aborts_cleanly
     st'.pinnedSlices   = st.pinnedSlices := by
   simp only [RefStorageModel.run, appendBatch, EffM.bind, beginTxn, h_crc,
     recycleBatch, WriteTxn.abort, discardWal, releaseSlice, EffM.fail]
-  dsimp only
-  refine ⟨rfl, ?_, ?_⟩ <;> omega
+  refine ⟨trivial, ?_, ?_⟩ <;> omega
 
 /-- On valid CRC without overflow, `appendBatch` commits, increments `flushedCount`,
 and releases all pinned slices. -/
@@ -174,8 +173,7 @@ theorem appendBatch_ok_commits_and_releases
       proj'.batchesWritten = proj.batchesWritten + 1 := by
   simp only [RefStorageModel.run, appendBatch, EffM.bind, beginTxn, h_crc,
     checkedAddU64, ite_eq_left h_no_ovf, WriteTxn.commit, flushWal, releaseSlice, EffM.pure]
-  dsimp only
-  refine ⟨?_, rfl, rfl, ⟨{ walSlot := st.activeWalSlots },
+  refine ⟨?_, trivial, trivial, ⟨{ walSlot := st.activeWalSlots },
     { index := insertInPlace proj.index batch, batchesWritten := proj.batchesWritten + 1 },
     rfl, rfl⟩⟩
   omega
