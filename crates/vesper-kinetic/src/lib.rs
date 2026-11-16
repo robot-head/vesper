@@ -21,8 +21,14 @@
 //! * [`rigid_diff`]: forward-mode contact gradients for boxes, capsules and
 //!   convex hulls.
 //!
-//! Not here: the GPU broadphase (Ignis; no GPU in CI) and the compiler's
-//! `eff [DetFloat]` source effect. Ownership-based linearity in this crate is
+//! * [`articulation`]: reduced-coordinate (Featherstone) articulations with
+//!   implicit drives and joint friction.
+//! * [`couple`]: two-way soft-rigid coupling.
+//!
+//! The GPU broadphase plugs into [`World`] through [`PairBackend`]
+//! ([`BroadphaseMode::Gpu`]); the Vulkan implementation lives in
+//! `vesper-gpu-compute` and its adapter in `vesper-kinetic-gpu`. Not here:
+//! the compiler's `eff [DetFloat]` source effect. Ownership-based linearity in this crate is
 //! host-library discipline, not an implementation of Vesper's source typing
 //! rules.
 
@@ -68,7 +74,8 @@ pub use snapshot::{KineticSnapshotWireHdr, SNAPSHOT_HEADER_LEN, WorldHashes, has
 pub use soft::{SoftConfig, SoftConstraint, SoftError, SoftParticle, SoftWorld};
 pub use tile::{Body, RigidBodyTile, TILE_WIDTH, TiledBodies};
 pub use world::{
-    BATCH_WIDTH, BroadphaseMode, ContactMaterial, DistanceConstraint, MAX_SOLVER_THREADS,
+    BATCH_WIDTH, BroadphaseMode, ContactMaterial, DistanceConstraint, MAX_SOLVER_THREADS, PairBackend,
+    PairBackendError,
     PARALLEL_MIN_CONSTRAINTS, SolverMode, SphereCollider, StepError, StepTimings, World,
     WorldConfig,
 };

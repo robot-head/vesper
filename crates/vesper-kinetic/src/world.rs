@@ -149,6 +149,13 @@ pub enum StepError {
     InvalidMaterial(&'static str),
     /// The sort-and-sweep broadphase failed.
     SweepAndPrune(SapError),
+    /// [`BroadphaseMode::Gpu`] without a [`PairBackend`].
+    NoPairBackend,
+    /// The [`PairBackend`] failed.
+    PairBackend(PairBackendError),
+    /// The [`PairBackend`]'s output at `index` is out of range or out of
+    /// order.
+    MalformedPairs { index: usize },
 }
 
 impl std::fmt::Display for StepError {
@@ -173,6 +180,11 @@ impl std::fmt::Display for StepError {
             Self::Broadphase(e) => write!(f, "LBVH broadphase: {e}"),
             Self::InvalidMaterial(what) => write!(f, "invalid contact material: {what}"),
             Self::SweepAndPrune(e) => write!(f, "sort-and-sweep broadphase: {e}"),
+            Self::NoPairBackend => write!(f, "GPU broadphase selected but no backend installed"),
+            Self::PairBackend(e) => write!(f, "pair backend: {e}"),
+            Self::MalformedPairs { index } => {
+                write!(f, "pair backend output is malformed at pair {index}")
+            }
         }
     }
 }
@@ -358,6 +370,50 @@ pub enum BroadphaseMode {
     /// same boxes as [`BroadphaseMode::Lbvh`]: the same pairs, so the same
     /// bits.
     SweepAndPrune,
+    /// An installed [`PairBackend`] ([`World::set_pair_backend`]), such as
+    /// the GPU sort-and-sweep of `vesper-gpu-compute`, over the same boxes
+    /// as [`BroadphaseMode::Lbvh`]. A backend that keeps the contract
+    /// (every overlapping pair once, ascending) gives the same pairs, so the
+    /// same bits. A step without a backend is
+    /// [`StepError::NoPairBackend`].
+    Gpu,
+}
+
+/// Failures a [`PairBackend`] reports.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PairBackendError {
+    /// The CPU broadphase's typed error for the same condition (a
+    /// non-finite or inverted box, too many boxes or pairs).
+    Broadphase(LbvhError),
+    /// The device failed (lost, out of memory, a failed submission).
+    Device,
+}
+
+impl std::fmt::Display for PairBackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Broadphase(e) => write!(f, "{e}"),
+            Self::Device => write!(f, "device failure"),
+        }
+    }
+}
+
+/// A pair-finding broadphase outside this crate (a GPU kernel). Given the
+/// world's boxes it must write every pair `(i, j)`, `i < j`, of boxes that
+/// overlap on all three axes as closed intervals, in ascending order, at
+/// most `max_pairs` of them: exactly [`Lbvh::overlapping_pairs`]'s
+/// contract. The world checks the shape of the output (indices in range,
+/// strictly ascending) and rejects anything else with
+/// [`StepError::MalformedPairs`]; it cannot check that no pair is missing.
+pub trait PairBackend: Send + std::fmt::Debug {
+    /// A short name for reports.
+    fn name(&self) -> &str;
+    fn overlapping_pairs(
+        &mut self,
+        boxes: &[Aabb],
+        out: &mut Vec<(u32, u32)>,
+        max_pairs: usize,
+    ) -> Result<(), PairBackendError>;
 }
 
 /// Contact material for every contact of a world (XPBD friction after
@@ -409,6 +465,9 @@ pub struct World {
     constraint_bodies: Vec<ConstraintBodies>,
     colorer: Colorer,
     lbvh: Option<LbvhScratch>,
+    // A Mutex so that the world stays Sync for the solver threads with a
+    // backend that is only Send; steps reach it through `get_mut`.
+    pair_backend: Option<std::sync::Mutex<Box<dyn PairBackend>>>,
     last_layer_count: usize,
     last_manifolds: usize,
 }
@@ -561,6 +620,7 @@ impl World {
             constraint_bodies: Vec::with_capacity(constraint_capacity),
             colorer: Colorer::new(bodies.len(), constraint_capacity),
             lbvh: None,
+            pair_backend: None,
             last_layer_count: 0,
             last_manifolds: 0,
         })
@@ -700,6 +760,28 @@ impl World {
                 _ => {}
             }
         }
+    }
+
+    /// Install (or with `None` remove) the [`PairBackend`] used by
+    /// [`BroadphaseMode::Gpu`].
+    pub fn set_pair_backend(&mut self, backend: Option<Box<dyn PairBackend>>) {
+        self.pair_backend = backend.map(std::sync::Mutex::new);
+    }
+
+    /// The installed [`PairBackend`]'s name.
+    pub fn pair_backend_name(&self) -> Option<String> {
+        let m = self.pair_backend.as_ref()?;
+        let g = m.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        Some(g.name().to_string())
+    }
+
+    /// The most candidate pairs a step's AABB broadphase may report (`4 ·
+    /// max_contacts + bodies`), for sizing a [`PairBackend`].
+    pub fn max_candidate_pairs(&self) -> usize {
+        self.config
+            .max_contacts
+            .saturating_mul(4)
+            .saturating_add(self.bodies.len())
     }
 
     /// The contact material.
@@ -883,7 +965,32 @@ impl World {
                     );
                     scratch.boxes.push(Aabb::around(p, half));
                 }
-                if self.broadphase == BroadphaseMode::Lbvh {
+                if self.broadphase == BroadphaseMode::Gpu {
+                    let backend = self
+                        .pair_backend
+                        .as_mut()
+                        .ok_or(StepError::NoPairBackend)?
+                        .get_mut()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    backend
+                        .overlapping_pairs(&scratch.boxes, &mut scratch.pairs, scratch.max_pairs)
+                        .map_err(StepError::PairBackend)?;
+                    // Untrusted device output: in range and strictly
+                    // ascending, or a typed error.
+                    if scratch.pairs.len() > scratch.max_pairs {
+                        return Err(StepError::MalformedPairs {
+                            index: scratch.max_pairs,
+                        });
+                    }
+                    let n32 = n as u32;
+                    let mut last: Option<(u32, u32)> = None;
+                    for (index, &(a, b)) in scratch.pairs.iter().enumerate() {
+                        if !(a < b && b < n32) || last.is_some_and(|l| l >= (a, b)) {
+                            return Err(StepError::MalformedPairs { index });
+                        }
+                        last = Some((a, b));
+                    }
+                } else if self.broadphase == BroadphaseMode::Lbvh {
                     scratch
                         .tree
                         .build(&scratch.boxes)
