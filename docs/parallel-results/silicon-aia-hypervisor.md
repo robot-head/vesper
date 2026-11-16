@@ -229,7 +229,7 @@ Lean is 4.35.0 from the GitHub release zip, matching `lean-toolchain`.
 | `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings` | see below |
 | `cargo test --workspace --locked --no-fail-fast` | see below |
 
-Workspace-wide clippy and tests: pending in this draft; results are added before merge.
+Workspace-wide `cargo +1.100.0 clippy --workspace --all-targets -- -D warnings` is clean. The local workspace-wide `cargo test` run was cut off twice by container restarts during compilation, so the workspace test result is the one CI reports on this PR (Test all targets, BuildBuddy, macOS and Windows). The vesper-silicon crate passes all 149 tests locally, including the live QEMU 8.2.2 and Lean 4.35 tests.
 
 ## Decisions
 

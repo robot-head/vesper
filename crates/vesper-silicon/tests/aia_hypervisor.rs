@@ -236,6 +236,8 @@ fn guest_csrs_follow_vgein_and_geilen() {
     assert_eq!(intc.hgeie(0), 0b1110);
     intc.limit_guest_files(2).unwrap();
     assert_eq!(intc.geilen(0), 2);
+    // Enable bits of guests that are no longer implemented read zero.
+    assert_eq!(intc.hgeie(0), 0b110);
     intc.set_hgeie(0, u64::MAX);
     assert_eq!(intc.hgeie(0), 0b110);
     assert!(matches!(

@@ -2433,18 +2433,39 @@ impl RiscvIntc {
     /// `aia-guests=N` gives GEILEN = N inside a `2^guest-index-bits`
     /// stride). An MSI to a page past the last implemented file is lost.
     pub fn limit_guest_files(&mut self, geilen: u32) -> Result<(), IntcError> {
-        let mut st = self.handle.state.borrow_mut();
-        for m in st.imsics.iter_mut().filter(|m| m.info.supervisor()) {
-            for files in &mut m.files {
-                if geilen as usize + 1 > files.len() {
-                    return Err(IntcError::NoSuchGuest {
-                        hart: 0,
-                        guest: geilen,
-                    });
+        {
+            let mut st = self.handle.state.borrow_mut();
+            let keep = geilen as usize + 1;
+            // Check every file before changing any.
+            for m in st.imsics.iter().filter(|m| m.info.supervisor()) {
+                for (k, files) in m.files.iter().enumerate() {
+                    if keep > files.len() {
+                        return Err(IntcError::NoSuchGuest {
+                            hart: m.info.targets[k].hart,
+                            guest: geilen,
+                        });
+                    }
                 }
-                files.truncate(geilen as usize + 1);
+            }
+            for m in st.imsics.iter_mut().filter(|m| m.info.supervisor()) {
+                for files in &mut m.files {
+                    files.truncate(keep);
+                }
+                m.guest_used.retain(|&(_, g), _| g < keep);
+            }
+            // hgeie bits of guests that no longer exist read zero.
+            let harts: Vec<u32> = st.hyp.keys().copied().collect();
+            for hart in harts {
+                let n = st.geilen(hart);
+                if let Some(h) = st.hyp.get_mut(&hart) {
+                    h.hgeie &= ((1u64 << n) - 1) << 1;
+                }
             }
         }
+        self.guest_isrs
+            .borrow_mut()
+            .retain(|&(_, g, _), _| g <= geilen);
+        self.sync();
         Ok(())
     }
 
