@@ -739,3 +739,89 @@ fn emitted_metric_schemas_follow_upstream() {
         ]
     );
 }
+
+#[test]
+fn large_shallow_ser_cells_are_charged_before_allocation() {
+    // An array of 1,000,000 one-byte integers: 1 MB on the wire, far more
+    // as a value tree. It must hit the budget, not the allocator.
+    let n = 1_000_000u32;
+    let mut cell = vec![0x9a];
+    cell.extend_from_slice(&n.to_be_bytes());
+    cell.resize(5 + n as usize, 0x00);
+    let limits = DecodeLimits {
+        max_decoded_string_bytes: 4 << 20,
+        ..DecodeLimits::default()
+    };
+    let batch = ser_attrs_batch(schema::value_type::SLICE, &cell);
+    assert!(matches!(
+        OtapDecoder::new(limits).decode(&batch),
+        Err(DecodeError::DecodedTooLarge)
+    ));
+    // The same shape within budget decodes.
+    let mut small = vec![0x83, 0x01, 0x02, 0x03];
+    let d = OtapDecoder::new(limits)
+        .decode(&ser_attrs_batch(schema::value_type::SLICE, &small))
+        .unwrap();
+    assert_eq!(
+        d.spans[0].attributes[0].1,
+        DecodedValue::Slice(vec![
+            DecodedValue::Int(1),
+            DecodedValue::Int(2),
+            DecodedValue::Int(3)
+        ])
+    );
+    // Lengths that claim more than the cell holds are malformed, at once.
+    for claim in [
+        vec![0x9b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00],
+        vec![0x5a, 0xff, 0xff, 0xff, 0xff, 0x00],
+        vec![0xbb, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00],
+    ] {
+        small = claim;
+        assert!(matches!(
+            OtapDecoder::new(limits).decode(&ser_attrs_batch(schema::value_type::SLICE, &small)),
+            Err(DecodeError::BadSerializedValue)
+        ));
+    }
+}
+
+#[test]
+fn compressed_dictionary_growth_counts_toward_the_stream_limit() {
+    // Each batch adds one new, highly compressible 20 kB attribute value
+    // as a dictionary delta. Compressed, the whole stream stays far below
+    // the limit; decompressed, it does not.
+    let limits = DecodeLimits {
+        max_stream_bytes: 256 << 10,
+        ..DecodeLimits::default()
+    };
+    let mut enc = TraceEncoder::new(EncoderConfig {
+        ipc_compression: IpcCompression::Zstd,
+        ..EncoderConfig::default()
+    });
+    let mut dec = OtapDecoder::new(limits);
+    let mut sent = 0usize;
+    let mut result = Ok(());
+    for i in 0..64u64 {
+        let value: &'static str =
+            Box::leak(format!("{i:04}{}", "a".repeat(20_000)).into_boxed_str());
+        let mut span = OtapSpan::from(span_record(i + 1));
+        span.attributes.insert("blob", value).unwrap();
+        let batch = enc.encode_spans(&[span]).unwrap();
+        sent += batch
+            .arrow_payloads
+            .iter()
+            .map(|p| p.record.len())
+            .sum::<usize>();
+        if let Err(e) = dec.decode(&batch) {
+            result = Err(e);
+            break;
+        }
+    }
+    assert!(
+        sent < limits.max_stream_bytes,
+        "compressed bytes sent: {sent}"
+    );
+    assert!(
+        matches!(result, Err(DecodeError::StreamTooLarge)),
+        "{result:?}"
+    );
+}

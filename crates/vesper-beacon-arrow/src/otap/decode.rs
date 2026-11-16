@@ -42,7 +42,8 @@ pub struct DecodeLimits {
     pub max_schema_id_bytes: usize,
     /// IPC bytes of one payload.
     pub max_payload_bytes: usize,
-    /// IPC bytes accepted over a stream's lifetime (bounds dictionary growth).
+    /// IPC bytes accepted over a stream's lifetime, plus the bytes its
+    /// compressed buffers decompressed to (bounds dictionary growth).
     pub max_stream_bytes: usize,
     /// Rows of any one payload.
     pub max_rows: usize,
@@ -551,10 +552,18 @@ impl OtapDecoder {
         let max_rows = self.limits.max_rows;
         let max_decompressed = self.limits.max_decompressed_bytes;
         let reader = &mut stream.reader;
-        let mut batches = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            reader.feed(bytes, max_rows, max_decompressed)
-        }))
-        .map_err(|_| DecodeError::DecoderPanic)??;
+        let (mut batches, decompressed) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                reader.feed(bytes, max_rows, max_decompressed)
+            }))
+            .map_err(|_| DecodeError::DecoderPanic)??;
+        // Decompressed bytes count toward the lifetime limit too: dictionary
+        // deltas keep them, so compression cannot bypass the growth bound.
+        stream.bytes = stream
+            .bytes
+            .checked_add(decompressed)
+            .filter(|b| *b <= self.limits.max_stream_bytes)
+            .ok_or(DecodeError::StreamTooLarge)?;
         if batches.len() > 1 {
             return Err(DecodeError::RecordBatchCount(batches.len()));
         }

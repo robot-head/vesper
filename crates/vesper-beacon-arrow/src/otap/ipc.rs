@@ -398,13 +398,16 @@ pub(crate) struct IpcReader {
 }
 
 impl IpcReader {
-    /// Decodes every message of one payload and returns its record batches.
+    /// Decodes every message of one payload and returns its record batches
+    /// and the bytes its compressed buffers decompressed to (the caller
+    /// charges them to the stream's lifetime limit, since dictionaries
+    /// retain them).
     pub(crate) fn feed(
         &mut self,
         mut bytes: &[u8],
         max_rows: usize,
         max_decompressed: usize,
-    ) -> Result<Vec<RecordBatch>, DecodeError> {
+    ) -> Result<(Vec<RecordBatch>, usize), DecodeError> {
         let mut batches = Vec::new();
         let mut budget = max_decompressed;
         while !bytes.is_empty() {
@@ -509,6 +512,6 @@ impl IpcReader {
             }
             bytes = next;
         }
-        Ok(batches)
+        Ok((batches, max_decompressed - budget))
     }
 }

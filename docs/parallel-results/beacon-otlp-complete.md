@@ -161,7 +161,8 @@ Breaking changes inside the crate:
 | `cargo test -p vesper-beacon-arrow --lib` | 4 passed (incl. `zstdarrowN` normalization) |
 | `VESPER_LEAN=<lean 4.35.0> cargo test -p vesper-beacon-arrow --test lean_model` | 3 passed: model compiles, 10 theorems audited (only `propext`, `Quot.sound`), Rust/Lean differential, structured PII leaves absent from the wire |
 | `VESPER_OTELCOL=<otelcol-contrib 0.165.0> cargo test -p vesper-beacon-arrow --test collector` | 3 passed (below) |
-| `VESPER_LEAN=<lean 4.35.0> cargo test --workspace --locked` | WORKSPACE_RESULT |
+| `VESPER_LEAN=<lean 4.35.0> cargo test --workspace --locked` | not completed locally: the sandbox ran out of disk (24 GB target) while linking an unrelated crate's tests; CI runs the full workspace |
+| `cargo test --locked -p vesper-beacon -p vesper-beacon-arrow --all-features` and `-p vesper --test trace_effects --test wasm_backend` (the root crate's Beacon users) | all passed (16 suites, 146 tests) |
 
 **Collector interop**, OpenTelemetry Collector Contrib **0.165.0**, every
 hop at default compression, run once in the cloud sandbox:
@@ -193,9 +194,11 @@ hop at default compression, run once in the cloud sandbox:
 * `loona-hpack` was chosen over the unmaintained `hpack` 0.3. Its decoder is
   wrapped with size checks and `catch_unwind`, because it predates
   adversarial-input hardening.
-* `ciborium` decodes to its `Value` tree before Beacon's checks. Its own
-  recursion limit bounds depth, and the IPC payload limit bounds total
-  size.
+* `ciborium` builds a `Value` tree, so a structural pre-scan of the CBOR
+  item headers (no allocation) first charges every value, at least
+  `size_of::<Value>()` each, and every string byte to the decoded budget.
+  Decompressed IPC bytes also count toward `max_stream_bytes`, because
+  dictionary deltas retain them (both from review of the PR).
 * Bytes inside slices and maps are `&'static [u8]` like strings, so no
   runtime input is stored. Sensitive bytes go through `PiiPolicy`.
 * TLS uses rustls with the `ring` provider (tonic `tls-ring`), and the
