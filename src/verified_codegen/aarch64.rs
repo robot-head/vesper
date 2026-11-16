@@ -3,7 +3,9 @@
 //! `R0`, `R1`, `R2` are `x0`, `x1`, `x2`; frame words are `[sp, #8n]` (slots
 //! and the outgoing area) and `[x29, #16 + 8n]` (the incoming area). `x18`
 //! (reserved on Apple platforms) is never used. These encodings are tested by
-//! running the emitted programs; they are not covered by the Lean theorem.
+//! running the emitted programs, and `lean/CodegenA64Encoding.lean` proves a
+//! Lean model of `emit` against the A64 encoding diagrams; its listing must
+//! equal [`encoding_listing`] (`tests/verified_codegen_lean.rs`).
 use super::asm::{Asm, Fix};
 use super::machine::{Cond, FloatOp, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
 use super::{Os, ResultProtocol, VerifiedError};
@@ -229,6 +231,19 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         M::Trap(k) => branch(a, 0x1400_0000, k.label()),
     }
     Ok(())
+}
+
+/// The words `emit` writes for the shared samples plus two frame sizes that
+/// need the shifted `sub sp` form, in the format
+/// `lean/CodegenA64Encoding.lean` prints.
+pub fn encoding_listing() -> String {
+    let mut samples = super::asm::encoding_samples();
+    let at = samples
+        .iter()
+        .position(|m| *m == M::Enter(300))
+        .expect("the samples hold enter 300");
+    samples.splice(at + 1..at + 1, [M::Enter(1000), M::Enter(512)]);
+    super::asm::encoding_listing(&samples, emit)
 }
 
 /// `svc` with the system-call number in `x8` (Linux) or `x16` (macOS).

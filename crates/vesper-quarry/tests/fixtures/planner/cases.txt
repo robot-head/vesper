@@ -1,0 +1,102 @@
+# Quarry planner conformance cases (spec: crates/vesper-quarry/spec/planner-ddl.md).
+#
+# Each case: "== name", one "plan:" line (the access path the cost model of
+# the spec must choose for each FROM binding, in FROM order), optional
+# "params:" line (name:TYPE=value, comma separated; value is an integer,
+# 'text' or null), then the SQL on one line. The data set and indexes are
+# defined in tests/planner_spec.rs (`build_store`) and the spec.
+#
+# Plan notation: alias=scan | alias=index(INDEX,eq|range|lower|upper)
+#                | alias=index_join(INDEX,OUTER_ALIAS.COLUMN)
+
+== point_eq_literal
+plan: p=index(p_age,eq)
+SELECT id, name FROM p WHERE age = 30
+
+== point_eq_unique
+plan: p=index(p_id,eq)
+SELECT id, age, city FROM p WHERE id = 17
+
+== point_eq_param
+plan: p=index(p_age,eq)
+params: a:I64=30
+SELECT id FROM p WHERE age = :a
+
+== point_eq_null_param
+plan: p=index(p_age,eq)
+params: a:I64=null
+SELECT id FROM p WHERE age = :a
+
+== wide_range_scans
+plan: p=scan
+SELECT id FROM p WHERE age >= 10 AND age <= 60
+
+== lower_open_range
+plan: p=index(p_id,lower)
+SELECT id, name FROM p WHERE id >= 395
+
+== upper_open_range_exclusive
+plan: p=index(p_id,upper)
+SELECT id FROM p WHERE id < 5
+
+== reversed_operands
+plan: p=index(p_id,upper)
+SELECT id FROM p WHERE 5 > id
+
+== two_indexes_cheaper_wins
+plan: p=index(p_age,eq)
+SELECT id FROM p WHERE age = 30 AND id > 300
+
+== unselective_text_eq_scans
+plan: p=scan
+SELECT id FROM p WHERE city = 'oslo'
+
+== empty_text_range
+plan: p=index(p_city,lower)
+SELECT id FROM p WHERE city >= 'z'
+
+== no_index_scans
+plan: p=scan
+SELECT id FROM p WHERE name = 'p5'
+
+== or_is_not_sargable
+plan: p=scan
+SELECT id FROM p WHERE id = 3 OR id = 9
+
+== not_equal_is_not_sargable
+plan: p=scan
+SELECT id FROM p WHERE id <> 3
+
+== is_null_is_not_indexed
+plan: p=scan
+SELECT id FROM p WHERE city IS NULL
+
+== second_table_range
+plan: o=index(o_amount,lower)
+SELECT id, owner FROM o WHERE amount >= 990
+
+== index_nested_loop_join
+plan: p=index(p_id,eq) o=index_join(o_owner,p.id)
+SELECT p.name, o.id, o.amount FROM p JOIN o ON o.owner = p.id WHERE p.id = 17
+
+== index_nested_loop_left_join
+plan: p=index(p_id,lower) o=index_join(o_owner,p.id)
+SELECT p.id, o.id AS oid FROM p LEFT JOIN o ON o.owner = p.id WHERE p.id >= 398
+
+== unselective_outer_uses_scan
+plan: p=scan o=scan
+SELECT p.id, o.id AS oid FROM p JOIN o ON o.owner = p.id WHERE p.age >= 0
+
+# WHERE on the nullable side of an outer join stays above the join, so it
+# is not sargable; the preserved side o keeps its own index path.
+== right_join_preserved_side_only
+plan: p=scan o=index(o_amount,upper)
+SELECT p.id, o.id AS oid FROM p RIGHT JOIN o ON o.owner = p.id WHERE o.amount < 20 AND p.age = 66
+
+== probe_too_many_matches_scans
+plan: c=scan p=scan
+SELECT c.label, p.id FROM c JOIN p ON p.city = c.code WHERE c.code = 'oslo'
+
+== self_join_two_paths
+plan: a=index(p_id,eq) b=index(p_age,eq)
+SELECT a.id, b.id AS other FROM p a JOIN p b ON b.age = a.age WHERE a.id = 3 AND b.age = 21

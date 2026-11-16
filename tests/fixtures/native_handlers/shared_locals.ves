@@ -1,0 +1,23 @@
+// A handled body assigns enclosing locals (shared); the clauses see the
+// values as of installation and their own assignments stay local.
+linear effect Ask {
+    fn ask() -> i64;
+}
+
+fn main() -> i64 {
+    let x = 1;
+    let y = 2;
+    let result = handle Ask in {
+        x = 40;
+        let got = Ask::ask();
+        y = wrapping_add(y, got);
+        got
+    } with {
+        return value => wrapping_add(value, x),
+        ask(resume) => {
+            x = wrapping_add(x, 1);
+            resume(x)
+        },
+    };
+    wrapping_add(wrapping_mul(x, 1000), wrapping_add(wrapping_mul(y, 100), result))
+}

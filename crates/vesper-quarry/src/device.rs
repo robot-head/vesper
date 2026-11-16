@@ -93,9 +93,143 @@ impl<T: Device + ?Sized> Device for &mut T {
 pub struct FsDevice {
     files: [std::fs::File; 2],
     _lock: std::fs::File,
+    /// A second handle to `quarry.data` opened with `O_DIRECT`, used for
+    /// block-aligned data-file reads and writes.
+    direct: Option<std::fs::File>,
+    direct_io: DirectIo,
 }
+
+/// Whether [`FsDevice`] should bypass the OS page cache for the data file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DirectMode {
+    /// Buffered I/O only (the default).
+    #[default]
+    Off,
+    /// `O_DIRECT` where the platform and filesystem support it, otherwise
+    /// buffered I/O; [`FsDevice::direct_io`] says which and why.
+    Prefer,
+    /// `O_DIRECT` or an `Io` error from [`FsDevice::open_with`].
+    Require,
+}
+
+/// What [`FsDevice`] does for data-file I/O.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DirectIo {
+    /// Buffered I/O was asked for.
+    Off,
+    /// Block-aligned data-file reads and writes use `O_DIRECT` through
+    /// [`DIRECT_ALIGN`]-aligned buffers. The log and unaligned requests stay
+    /// buffered.
+    Active,
+    /// `O_DIRECT` was asked for but is unavailable (the reason says why);
+    /// all I/O is buffered.
+    Unavailable(String),
+}
+
+/// Buffer address, file offset and length alignment used for `O_DIRECT`.
+pub const DIRECT_ALIGN: usize = 4096;
+
+/// `O_DIRECT` for the Linux targets this crate knows; `None` elsewhere.
+const fn o_direct() -> Option<i32> {
+    if cfg!(all(
+        target_os = "linux",
+        any(
+            target_arch = "x86_64",
+            target_arch = "x86",
+            target_arch = "riscv64"
+        )
+    )) {
+        Some(0o40000)
+    } else if cfg!(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "arm")
+    )) {
+        Some(0o200000)
+    } else {
+        None
+    }
+}
+
+/// A zeroed, [`DIRECT_ALIGN`]-aligned byte buffer, built without `unsafe`:
+/// an over-allocated vector and the aligned window inside it.
+struct Aligned {
+    bytes: Vec<u8>,
+    start: usize,
+    len: usize,
+}
+impl Aligned {
+    fn new(len: usize) -> Option<Self> {
+        let bytes = vec![0u8; len + DIRECT_ALIGN];
+        let start = bytes.as_ptr().align_offset(DIRECT_ALIGN);
+        (start < DIRECT_ALIGN).then_some(Self { bytes, start, len })
+    }
+    fn get(&self) -> &[u8] {
+        &self.bytes[self.start..self.start + self.len]
+    }
+    fn get_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes[self.start..self.start + self.len]
+    }
+}
+
+fn aligned_request(offset: u64, len: usize) -> bool {
+    len > 0 && len.is_multiple_of(DIRECT_ALIGN) && offset.is_multiple_of(DIRECT_ALIGN as u64)
+}
+
+/// Opens `path` with `O_DIRECT` and checks that an aligned write and read
+/// of a scratch file in the same directory work (some filesystems accept
+/// the flag at open and fail at I/O time).
+fn open_direct(dir: &std::path::Path, path: &std::path::Path) -> Result<std::fs::File, String> {
+    use std::io::{Read, Seek, SeekFrom, Write};
+    let Some(flag) = o_direct() else {
+        return Err("O_DIRECT is implemented for Linux only here".into());
+    };
+    let open = |p: &std::path::Path, create: bool| -> std::io::Result<std::fs::File> {
+        let mut o = std::fs::OpenOptions::new();
+        o.read(true).write(true).create(create).truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            o.custom_flags(flag);
+        }
+        #[cfg(not(unix))]
+        let _ = flag;
+        o.open(p)
+    };
+    let probe_path = dir.join("quarry.direct-probe");
+    let probe = (|| -> std::io::Result<()> {
+        let mut f = open(&probe_path, true)?;
+        let mut buf = Aligned::new(DIRECT_ALIGN)
+            .ok_or_else(|| std::io::Error::other("could not align a buffer"))?;
+        buf.get_mut()[0] = 0x5a;
+        f.write_all(buf.get())?;
+        f.seek(SeekFrom::Start(0))?;
+        let mut back = Aligned::new(DIRECT_ALIGN)
+            .ok_or_else(|| std::io::Error::other("could not align a buffer"))?;
+        f.read_exact(back.get_mut())?;
+        if back.get()[0] != 0x5a {
+            return Err(std::io::Error::other(
+                "O_DIRECT probe read back wrong bytes",
+            ));
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_file(&probe_path);
+    probe.map_err(|e| format!("O_DIRECT probe failed: {e}"))?;
+    open(path, false).map_err(|e| format!("O_DIRECT open failed: {e}"))
+}
+
 impl FsDevice {
+    /// Opens with buffered I/O ([`DirectMode::Off`]).
     pub fn open(dir: &std::path::Path) -> Result<Self, DeviceError> {
+        Self::open_with(dir, DirectMode::Off)
+    }
+    /// What data-file I/O uses.
+    pub fn direct_io(&self) -> &DirectIo {
+        &self.direct_io
+    }
+    /// Opens the store directory; with [`DirectMode::Prefer`] or
+    /// [`DirectMode::Require`] also an `O_DIRECT` handle to the data file.
+    pub fn open_with(dir: &std::path::Path, mode: DirectMode) -> Result<Self, DeviceError> {
         let io = |e: std::io::Error| DeviceError::Io(e.to_string());
         // Directories that do not exist yet, outermost first.
         let mut created: Vec<&std::path::Path> = dir
@@ -135,7 +269,29 @@ impl FsDevice {
         }
         #[cfg(not(unix))]
         let _ = &created;
-        Ok(Self { files, _lock: lock })
+        let (direct, direct_io) = match mode {
+            DirectMode::Off => (None, DirectIo::Off),
+            DirectMode::Prefer | DirectMode::Require => {
+                match open_direct(dir, &dir.join("quarry.data")) {
+                    Ok(f) => (Some(f), DirectIo::Active),
+                    Err(why) if mode == DirectMode::Prefer => (None, DirectIo::Unavailable(why)),
+                    Err(why) => return Err(DeviceError::Io(why)),
+                }
+            }
+        };
+        Ok(Self {
+            files,
+            _lock: lock,
+            direct,
+            direct_io,
+        })
+    }
+    /// The `O_DIRECT` handle when this request may use it.
+    fn direct_for(&mut self, file: FileId, offset: u64, len: usize) -> Option<&mut std::fs::File> {
+        match (&mut self.direct, file) {
+            (Some(f), FileId::Data) if aligned_request(offset, len) => Some(f),
+            _ => None,
+        }
     }
 }
 impl Device for FsDevice {
@@ -147,6 +303,19 @@ impl Device for FsDevice {
     }
     fn read_at(&mut self, file: FileId, offset: u64, buf: &mut [u8]) -> Result<(), DeviceError> {
         use std::io::{Read, Seek, SeekFrom};
+        let short = |e: std::io::Error| match e.kind() {
+            std::io::ErrorKind::UnexpectedEof => DeviceError::ShortRead,
+            _ => DeviceError::Io(e.to_string()),
+        };
+        if let Some(f) = self.direct_for(file, offset, buf.len()) {
+            let mut a = Aligned::new(buf.len())
+                .ok_or_else(|| DeviceError::Io("could not align a buffer".into()))?;
+            f.seek(SeekFrom::Start(offset))
+                .map_err(|e| DeviceError::Io(e.to_string()))?;
+            f.read_exact(a.get_mut()).map_err(short)?;
+            buf.copy_from_slice(a.get());
+            return Ok(());
+        }
         let f = &mut self.files[file.index()];
         f.seek(SeekFrom::Start(offset))
             .map_err(|e| DeviceError::Io(e.to_string()))?;
@@ -157,6 +326,15 @@ impl Device for FsDevice {
     }
     fn write_at(&mut self, file: FileId, offset: u64, data: &[u8]) -> Result<(), DeviceError> {
         use std::io::{Seek, SeekFrom, Write};
+        if let Some(f) = self.direct_for(file, offset, data.len()) {
+            let mut a = Aligned::new(data.len())
+                .ok_or_else(|| DeviceError::Io("could not align a buffer".into()))?;
+            a.get_mut().copy_from_slice(data);
+            return f
+                .seek(SeekFrom::Start(offset))
+                .and_then(|_| f.write_all(a.get()))
+                .map_err(|e| DeviceError::Io(e.to_string()));
+        }
         let f = &mut self.files[file.index()];
         f.seek(SeekFrom::Start(offset))
             .and_then(|_| f.write_all(data))

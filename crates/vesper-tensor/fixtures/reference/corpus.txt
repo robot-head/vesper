@@ -1,0 +1,38 @@
+Hello world
+Hello, world!
+ leading space
+trailing space 
+double  space
+tabs	and	tabs
+line one
+line two
+
+It's, I'm, you're, we've, they'll, he'd, she's.
+IT'S I'M YOU'RE WE'VE THEY'LL HE'D
+don't won't can't shouldn't
+'quoted' "double quoted"
+Numbers: 0 1 12 123 1234 12345 3.14159 1,000,000 2026-11-16
+Mixed123abc and abc123 and 1st 2nd 3rd
+Punctuation!!! ??? ... --- *** @@@ ### $$$ %%% ^^^ &&& ((( ))) [[[ ]]]
+email@example.com https://example.org/path?q=1&r=2#frag
+snake_case camelCase PascalCase kebab-case SCREAMING_CASE
+fn main() { println!("{}", 1 + 2); }
+let x: Vec<u8> = vec![0xde, 0xad, 0xbe, 0xef];
+café naïve résumé coöperate façade
+Ελληνικά Русский язык עברית العربية हिन्दी
+日本語のテキスト 中文文本 한국어 텍스트
+emoji 😀 🎉 👍🏽 👨‍👩‍👧‍👦 🇺🇸
+combining é vs é: é é
+zero‍width‌joiners and non‑breaking spaces
+   multiple leading spaces
+trailing spaces   
+mixed 	 whitespace 	 runs
+ÀÁÂÃÄÅ àáâãäå ÆæŒœ ß ẞ
+math ∑ ∫ √ ∞ ≈ ≠ ≤ ≥ ± × ÷
+Once upon a time, there was a little girl named Lily. She loved to play outside in the sunshine.
+The quick brown fox jumps over the lazy dog.
+<|endoftext|> is a special token but appears here as text
+Once upon a time, there was a little girl named Lily. She loved to play outside in the park. One day, she saw a big, red ball. She wanted to play with it, but it was too high.
+Lily's mom said, "Lily, let's go to the park." Lily was sad and didn't know what to do. She said, "I want to play with your ball, but I can't find it."
+Lily was sad and didn't know what to do. She said, "I'm sorry, Lily. I didn't know what to do."
+Lily didn't want to help her mom, so she
