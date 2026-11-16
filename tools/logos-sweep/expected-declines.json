@@ -1,0 +1,6 @@
+[
+ {
+  "declaration": "Vesper.VerifiedCodegen.Rv64.decode_encode",
+  "reason": "Logos at the pinned revision stops at its fixed evaluation depth (MAX_DEPTH 200000 in logicaffeine_kernel src/dag/sem) while reducing the RV64 field-extraction arithmetic; Lean's kernel accepts it. It and its users (encode_lt, emit_decodes, bytes_encode) are checked by Lean's kernel only."
+ }
+]
