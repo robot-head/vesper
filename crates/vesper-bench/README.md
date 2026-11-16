@@ -34,6 +34,13 @@ measured epoch, body-call count including warmups, and whole-run elapsed time.
 equal operation counts per arm. Zero totals/operations fail. Warmups are not
 included in statistical evidence.
 
+`exact_paired_differences` converts up to 32 `PairedSample`s into integer
+candidate-minus-baseline differences per operation, using the totals' common
+unit. It rejects fractional or out-of-range differences instead of rounding,
+and returns no partial vector on error. The caller must establish common units,
+measurement provenance, and any downstream inference assumptions. This bridge
+does not change the existing ratio-based regression gate.
+
 ## Paired Hodges–Lehmann estimate
 
 `hodges_lehmann_paired` accepts up to 32 caller-provided signed integer paired
