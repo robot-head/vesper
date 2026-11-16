@@ -1249,3 +1249,572 @@ fn nexus_plugin_runs_out_of_fuel() {
     assert!(host.call_run(&mut inst, 0, 1_000_000_000).is_err());
     host.destroy_instance(inst);
 }
+
+// ---- Beacon Trace capability (§31.2) ------------------------------------------
+
+#[derive(
+    Clone,
+    Copy,
+    wasmtime::component::ComponentType,
+    wasmtime::component::Lift,
+    wasmtime::component::Lower,
+)]
+#[component(record)]
+struct WitSpanContext {
+    #[component(name = "trace-id-hi")]
+    trace_id_hi: u64,
+    #[component(name = "trace-id-lo")]
+    trace_id_lo: u64,
+    #[component(name = "span-id")]
+    span_id: u64,
+    flags: u8,
+}
+
+impl From<vesper::trace_effects::host::RawSpanContext> for WitSpanContext {
+    fn from(c: vesper::trace_effects::host::RawSpanContext) -> Self {
+        Self {
+            trace_id_hi: c.trace_id_hi,
+            trace_id_lo: c.trace_id_lo,
+            span_id: c.span_id,
+            flags: c.flags,
+        }
+    }
+}
+
+impl From<WitSpanContext> for vesper::trace_effects::host::RawSpanContext {
+    fn from(c: WitSpanContext) -> Self {
+        Self {
+            trace_id_hi: c.trace_id_hi,
+            trace_id_lo: c.trace_id_lo,
+            span_id: c.span_id,
+            flags: c.flags,
+        }
+    }
+}
+
+#[derive(
+    Clone,
+    Copy,
+    wasmtime::component::ComponentType,
+    wasmtime::component::Lift,
+    wasmtime::component::Lower,
+)]
+#[component(record)]
+struct WitActiveSpan {
+    ctx: WitSpanContext,
+    #[component(name = "parent-span-id")]
+    parent_span_id: u64,
+    #[component(name = "start-mono-ns")]
+    start_mono_ns: u64,
+    #[component(name = "schema-id")]
+    schema_id: u32,
+}
+
+impl From<vesper::trace_effects::host::RawActiveSpan> for WitActiveSpan {
+    fn from(s: vesper::trace_effects::host::RawActiveSpan) -> Self {
+        Self {
+            ctx: s.ctx.into(),
+            parent_span_id: s.parent_span_id,
+            start_mono_ns: s.start_mono_ns,
+            schema_id: s.schema_id,
+        }
+    }
+}
+
+#[derive(Clone, Copy, wasmtime::component::ComponentType, wasmtime::component::Lift)]
+#[component(variant)]
+enum WitTelemetryAttr {
+    #[component(name = "no-attr")]
+    NoAttr,
+    #[component(name = "count")]
+    Count(u64),
+    #[component(name = "bytes")]
+    Bytes(u64),
+    #[component(name = "redacted")]
+    Redacted,
+}
+
+enum WasmTraceCmd {
+    CurrentCtx,
+    StartSpan {
+        schema_id: u32,
+        name: String,
+    },
+    StartChild {
+        parent: WitSpanContext,
+        schema_id: u32,
+        name: String,
+    },
+    EmitOk {
+        span: WitActiveSpan,
+        attr_u64: u64,
+    },
+    EmitErr {
+        span: WitActiveSpan,
+        err_code: u32,
+        msg: String,
+    },
+    EmitAttr {
+        span: WitActiveSpan,
+        attr: WitTelemetryAttr,
+    },
+}
+
+enum WasmTraceReply {
+    Ctx(WitSpanContext),
+    Span(WitActiveSpan),
+    Unit,
+    Err(vesper::trace_effects::host::TraceRunError),
+}
+
+struct TraceClient {
+    tx: std::sync::mpsc::SyncSender<WasmTraceCmd>,
+    rx: std::sync::mpsc::Receiver<WasmTraceReply>,
+}
+
+impl TraceClient {
+    fn call(&self, cmd: WasmTraceCmd) -> wasmtime::Result<WasmTraceReply> {
+        self.tx
+            .send(cmd)
+            .map_err(|_| wasmtime::Error::msg("trace host closed"))?;
+        let reply = self
+            .rx
+            .recv()
+            .map_err(|_| wasmtime::Error::msg("trace host disconnected"))?;
+        if let WasmTraceReply::Err(ref e) = reply {
+            return Err(wasmtime::Error::msg(e.to_string()));
+        }
+        Ok(reply)
+    }
+}
+
+struct HostedTraceState {
+    wasi: WasiHost,
+    trace: TraceClient,
+}
+
+impl wasmtime_wasi::WasiView for HostedTraceState {
+    fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+        self.wasi.ctx()
+    }
+}
+
+fn add_beacon_trace_to_linker(linker: &mut Linker<HostedTraceState>) -> wasmtime::Result<()> {
+    let mut inst = linker.instance(wasm_backend::BEACON_TRACE)?;
+    inst.func_wrap(
+        "current-ctx",
+        |caller: wasmtime::StoreContextMut<'_, HostedTraceState>, ()| match caller
+            .data()
+            .trace
+            .call(WasmTraceCmd::CurrentCtx)?
+        {
+            WasmTraceReply::Ctx(c) => Ok((c,)),
+            _ => Err(wasmtime::Error::msg("unexpected reply")),
+        },
+    )?;
+    inst.func_wrap(
+        "start-span",
+        |caller: wasmtime::StoreContextMut<'_, HostedTraceState>,
+         (schema_id, name): (u32, String)| {
+            match caller
+                .data()
+                .trace
+                .call(WasmTraceCmd::StartSpan { schema_id, name })?
+            {
+                WasmTraceReply::Span(s) => Ok((s,)),
+                _ => Err(wasmtime::Error::msg("unexpected reply")),
+            }
+        },
+    )?;
+    inst.func_wrap(
+        "start-child",
+        |caller: wasmtime::StoreContextMut<'_, HostedTraceState>,
+         (parent, schema_id, name): (WitSpanContext, u32, String)| {
+            match caller.data().trace.call(WasmTraceCmd::StartChild {
+                parent,
+                schema_id,
+                name,
+            })? {
+                WasmTraceReply::Span(s) => Ok((s,)),
+                _ => Err(wasmtime::Error::msg("unexpected reply")),
+            }
+        },
+    )?;
+    inst.func_wrap(
+        "emit-ok",
+        |caller: wasmtime::StoreContextMut<'_, HostedTraceState>,
+         (span, attr_u64): (WitActiveSpan, u64)| {
+            match caller
+                .data()
+                .trace
+                .call(WasmTraceCmd::EmitOk { span, attr_u64 })?
+            {
+                WasmTraceReply::Unit => Ok(()),
+                _ => Err(wasmtime::Error::msg("unexpected reply")),
+            }
+        },
+    )?;
+    inst.func_wrap(
+        "emit-err",
+        |caller: wasmtime::StoreContextMut<'_, HostedTraceState>,
+         (span, err_code, msg): (WitActiveSpan, u32, String)| {
+            match caller.data().trace.call(WasmTraceCmd::EmitErr {
+                span,
+                err_code,
+                msg,
+            })? {
+                WasmTraceReply::Unit => Ok(()),
+                _ => Err(wasmtime::Error::msg("unexpected reply")),
+            }
+        },
+    )?;
+    inst.func_wrap(
+        "emit-attr",
+        |caller: wasmtime::StoreContextMut<'_, HostedTraceState>,
+         (span, attr): (WitActiveSpan, WitTelemetryAttr)| {
+            match caller
+                .data()
+                .trace
+                .call(WasmTraceCmd::EmitAttr { span, attr })?
+            {
+                WasmTraceReply::Unit => Ok(()),
+                _ => Err(wasmtime::Error::msg("unexpected reply")),
+            }
+        },
+    )?;
+    Ok(())
+}
+
+fn run_traced_wasm(
+    world: &World,
+    art: &WasmArtifact,
+    config: vesper::trace_effects::host::TraceConfig,
+) -> Result<
+    (
+        String,
+        String,
+        Vec<vesper::trace_effects::host::ExportedSpan>,
+    ),
+    vesper::trace_effects::host::TraceRunError,
+> {
+    use std::num::NonZeroU64;
+    use vesper::trace_effects::host::{
+        ACTIVE_SPANS, BeaconHost, TraceRunError, redacted_attribute,
+    };
+    use vesper_beacon::{PrimaryAttribute, SpanPool};
+
+    let first = NonZeroU64::new(config.first_span_id).ok_or(TraceRunError::InvalidContext)?;
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel::<WasmTraceCmd>(0);
+    let (rep_tx, rep_rx) = std::sync::mpsc::sync_channel::<WasmTraceReply>(0);
+
+    std::thread::scope(|scope| {
+        let host_thread = scope.spawn(move || {
+            let pool = SpanPool::<ACTIVE_SPANS>::new(config.trace_id, first, config.flags)
+                .map_err(|_| TraceRunError::InvalidContext)?;
+            let mut host = BeaconHost::new(&pool, config);
+            let mut host_err: Option<TraceRunError> = None;
+            while let Ok(cmd) = cmd_rx.recv() {
+                if let Some(ref e) = host_err {
+                    let _ = rep_tx.send(WasmTraceReply::Err(e.clone()));
+                    continue;
+                }
+                let reply = match cmd {
+                    WasmTraceCmd::CurrentCtx => Ok(WasmTraceReply::Ctx(host.current_ctx().into())),
+                    WasmTraceCmd::StartSpan { schema_id, name } => host
+                        .start_span(u64::from(schema_id), &name)
+                        .map(|s| WasmTraceReply::Span(s.into())),
+                    WasmTraceCmd::StartChild {
+                        parent,
+                        schema_id,
+                        name,
+                    } => host
+                        .start_child(parent.into(), u64::from(schema_id), &name)
+                        .map(|s| WasmTraceReply::Span(s.into())),
+                    WasmTraceCmd::EmitOk { span, attr_u64 } => host
+                        .emit_ok(span.ctx.into(), attr_u64)
+                        .map(|()| WasmTraceReply::Unit),
+                    WasmTraceCmd::EmitErr {
+                        span,
+                        err_code,
+                        msg,
+                    } => host
+                        .emit_err(span.ctx.into(), u64::from(err_code), &msg)
+                        .map(|()| WasmTraceReply::Unit),
+                    WasmTraceCmd::EmitAttr { span, attr } => {
+                        let attr = match attr {
+                            WitTelemetryAttr::NoAttr => PrimaryAttribute::None,
+                            WitTelemetryAttr::Count(n) => PrimaryAttribute::ItemCount(n),
+                            WitTelemetryAttr::Bytes(n) => PrimaryAttribute::ByteCount(n),
+                            WitTelemetryAttr::Redacted => redacted_attribute(),
+                        };
+                        host.emit_attr(span.ctx.into(), attr)
+                            .map(|()| WasmTraceReply::Unit)
+                    }
+                };
+                match reply {
+                    Ok(r) => {
+                        let _ = rep_tx.send(r);
+                    }
+                    Err(e) => {
+                        host_err = Some(e.clone());
+                        let _ = rep_tx.send(WasmTraceReply::Err(e));
+                    }
+                }
+            }
+            match host_err {
+                Some(e) => {
+                    host.cancel_open();
+                    Err(e)
+                }
+                None => host.finish(),
+            }
+        });
+
+        let exec_res = (|| -> Result<(String, String), TraceRunError> {
+            let engine = engine(art.stack_switching);
+            let component = Component::new(&engine, &art.component)
+                .map_err(|e| TraceRunError::Runtime(format!("{e:?}")))?;
+            let mut linker = Linker::<HostedTraceState>::new(&engine);
+            wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+                .map_err(|e| TraceRunError::Runtime(format!("{e:?}")))?;
+            add_beacon_trace_to_linker(&mut linker)
+                .map_err(|e| TraceRunError::Runtime(format!("{e:?}")))?;
+            let stdout = wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(1 << 20);
+            let mut b = wasmtime_wasi::WasiCtxBuilder::new();
+            b.stdout(stdout.clone());
+            b.monotonic_clock(TickClock(Default::default()));
+            let mut store = Store::new(
+                &engine,
+                HostedTraceState {
+                    wasi: WasiHost {
+                        ctx: b.build(),
+                        table: Default::default(),
+                    },
+                    trace: TraceClient {
+                        tx: cmd_tx,
+                        rx: rep_rx,
+                    },
+                },
+            );
+            store.set_fuel(100_000_000).unwrap();
+            let instance = linker
+                .instantiate(&mut store, &component)
+                .map_err(|e| TraceRunError::Runtime(format!("{e:?}")))?;
+            let iface = instance
+                .get_export_index(&mut store, None, ENTRY_INTERFACE)
+                .expect("entry interface");
+            let main = instance
+                .get_export_index(&mut store, Some(&iface), "main")
+                .expect("main export");
+            let func = instance.get_func(&mut store, main).expect("main func");
+            let unit = art.result == Type::unit() || art.result.name() == "Unit";
+            let mut results = if unit { vec![] } else { vec![Val::Bool(false)] };
+            func.call(&mut store, &[], &mut results)
+                .map_err(|e| TraceRunError::Runtime(format!("{e:?}")))?;
+            let value = match results.first() {
+                None => "()".into(),
+                Some(v) => render(world, &art.result, v),
+            };
+            drop(store);
+            Ok((
+                value,
+                String::from_utf8(stdout.contents().to_vec()).expect("utf-8 stdout"),
+            ))
+        })();
+
+        let spans = host_thread
+            .join()
+            .map_err(|_| TraceRunError::Runtime("wasm trace host panicked".into()))?;
+        match (exec_res, spans) {
+            (Ok((val, out)), Ok(spans)) => Ok((val, out, spans)),
+            (_, Err(e)) => Err(e),
+            (Err(e), Ok(_)) => Err(e),
+        }
+    })
+}
+
+fn checked_source(source: &str) -> check::Checked {
+    let p = parser::parse(source);
+    assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    let c = check::check(&p.module);
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    c
+}
+
+#[test]
+fn beacon_trace_differential_matches_evaluator() {
+    use std::path::Path;
+    use vesper::trace_effects::host::{self, TraceConfig};
+    use vesper_beacon::parse_traceparent_55;
+
+    let accept_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/trace_effects/accept");
+    let mut files: Vec<_> = std::fs::read_dir(&accept_dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "ves"))
+        .collect();
+    files.sort();
+    assert_eq!(files.len(), 3);
+
+    let parent =
+        parse_traceparent_55(b"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01").unwrap();
+    for path in files {
+        let source = std::fs::read_to_string(&path).unwrap();
+        let c = checked_source(&source);
+        for config in [
+            TraceConfig::default(),
+            TraceConfig {
+                parent: Some(parent),
+                ..TraceConfig::default()
+            },
+        ] {
+            let expected = host::run_traced(&c, "main", vec![], config).unwrap();
+            for effects in [EffectLowering::StackSwitching, EffectLowering::Portable] {
+                for optimize in [false, true] {
+                    let art = compile(
+                        &c.world,
+                        &WasmOptions {
+                            optimize,
+                            effects,
+                            ..WasmOptions::default()
+                        },
+                    )
+                    .unwrap_or_else(|e| {
+                        panic!("{} ({effects:?}, opt={optimize}): {e}", path.display())
+                    });
+                    assert_eq!(art.imports, vec![wasm_backend::HostCapability::Trace]);
+                    assert!(
+                        art.wit.contains("import vesper:beacon/trace@0.1.0;"),
+                        "{}",
+                        art.wit
+                    );
+                    if art.stack_switching && !stack_switching_host() {
+                        continue;
+                    }
+                    let (val, _out, spans) = run_traced_wasm(&c.world, &art, config)
+                        .unwrap_or_else(|e| {
+                            panic!(
+                                "{} ({effects:?}, opt={optimize}): {e}\n{}",
+                                path.display(),
+                                art.wit
+                            )
+                        });
+                    assert_eq!(val, expected.value.to_string(), "{}", path.display());
+                    assert_eq!(
+                        host::render_tree(&spans),
+                        expected.tree(),
+                        "{}",
+                        path.display()
+                    );
+                    assert_eq!(spans, expected.spans, "{}", path.display());
+                }
+            }
+        }
+    }
+
+    // Recursion + mixed Trace + Stdout + Clock host capabilities.
+    let mixed = format!(
+        "{HOST_PRELUDE}
+        fn walk(n: u64) -> u64 eff [Trace, Stdout, Clock] {{
+            if n == 0 {{
+                let _t = Clock::now_ns();
+                Stdout::write(\"leaf\\n\");
+                0
+            }} else {{
+                let s = Trace::start_span(0, \"step\");
+                let r = walk(wrapping_sub(n, 1));
+                Trace::emit_ok(s, n);
+                wrapping_add(r, n)
+            }}
+        }}
+        fn main() -> u64 eff [Trace, Stdout, Clock] {{ walk(2) }}"
+    );
+    let c = checked_source(&mixed);
+    for effects in [EffectLowering::StackSwitching, EffectLowering::Portable] {
+        let art = compile(
+            &c.world,
+            &WasmOptions {
+                effects,
+                ..WasmOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            art.imports,
+            vec![
+                wasm_backend::HostCapability::Stdout,
+                wasm_backend::HostCapability::Clock,
+                wasm_backend::HostCapability::Trace,
+            ]
+        );
+        if art.stack_switching && !stack_switching_host() {
+            continue;
+        }
+        let (val, out, spans) = run_traced_wasm(&c.world, &art, TraceConfig::default()).unwrap();
+        assert_eq!(val, "3");
+        assert_eq!(out, "leaf\n");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].name, "step");
+        assert_eq!(spans[1].name, "step");
+        assert_eq!(spans[0].parent_span_id, spans[1].span_id);
+    }
+}
+
+#[test]
+fn beacon_trace_rejects_mismatched_and_host_error_cases() {
+    use vesper::trace_effects::host::{TraceConfig, TraceRunError};
+
+    // Custom user-declared `Trace` is not a Beacon host capability.
+    let custom = checked_source(
+        "linear effect Trace { fn tick() -> u64; }
+         fn main() -> u64 eff [Trace] { Trace::tick() }",
+    );
+    assert!(matches!(
+        compile(&custom.world, &WasmOptions::default()),
+        Err(WasmError::Entry(_))
+    ));
+
+    // Labeled `Trace` capability is not a host capability.
+    let labeled = checked_source(
+        "fn main() -> u64 eff [t: Trace] { let s = t.start_span(0, \"a\"); t.emit_ok(s, 0); 0 }",
+    );
+    assert!(matches!(
+        compile(&labeled.world, &WasmOptions::default()),
+        Err(WasmError::Entry(_))
+    ));
+
+    // Out-of-vocabulary host calls propagate typed TraceRunErrors.
+    let cases = [
+        (
+            "fn main() -> u64 eff [Trace] { let s = Trace::start_span(9, \"x\"); Trace::emit_ok(s, 0); 0 }",
+            TraceRunError::UnknownSchema(9),
+        ),
+        (
+            "fn main() -> u64 eff [Trace] { let s = Trace::start_span(0, \"x\"); Trace::emit_err(s, 8, \"m\"); 0 }",
+            TraceRunError::UnknownErrorCode(8),
+        ),
+        (
+            "fn main() -> u64 eff [Trace] {
+                let p = SpanContext { trace_id_hi: 0, trace_id_lo: 0, span_id: 5, flags: 0 };
+                let s = Trace::start_child(p, 0, \"x\");
+                Trace::emit_ok(s, 0);
+                0
+            }",
+            TraceRunError::InvalidContext,
+        ),
+    ];
+    for (source, expected) in cases {
+        let c = checked_source(source);
+        let art = compile(
+            &c.world,
+            &WasmOptions {
+                effects: EffectLowering::Portable,
+                ..WasmOptions::default()
+            },
+        )
+        .unwrap();
+        let err = run_traced_wasm(&c.world, &art, TraceConfig::default()).unwrap_err();
+        assert_eq!(err, expected, "{source}");
+    }
+}
