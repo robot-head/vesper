@@ -168,10 +168,18 @@ impl Rt {
     }
     /// Cancel a continuation nobody resumed: its pending operation returns
     /// with `unwinding` set, and its generated frames return to the entry.
+    ///
+    /// The cancelled fiber's trampoline clears `unwinding` when it ends;
+    /// the enclosing state is restored afterwards, so cancelling an inner
+    /// fiber while an outer one unwinds keeps the outer one unwinding.
     fn cancel(&self, parked: Parked) {
+        let enclosing = self.unwinding.get();
         self.push(parked.fiber().context_ptr());
         let outcome = parked.cancel();
         self.pop();
+        if !self.faulted() {
+            self.unwinding.set(enclosing);
+        }
         if let Outcome::Parked(again) = outcome {
             // Generated code never parks while unwinding; this is the fiber
             // crate's documented abandonment fallback.

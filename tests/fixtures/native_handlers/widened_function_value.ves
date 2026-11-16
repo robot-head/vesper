@@ -1,0 +1,22 @@
+// A pure function passed where a function with an effect is expected: the
+// value is called with a capability it does not take.
+linear effect Ask {
+    fn ask() -> i64;
+}
+
+fn id(x: i64) -> i64 {
+    x
+}
+
+fn apply(sink f: fn (i64) -> i64 eff [Ask], sink x: i64) -> i64 eff [Ask] {
+    wrapping_add(f(x), Ask::ask())
+}
+
+fn main() -> i64 {
+    handle Ask in {
+        apply(id, 42)
+    } with {
+        return value => value,
+        ask(resume) => resume(1),
+    }
+}

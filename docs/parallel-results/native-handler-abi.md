@@ -109,6 +109,10 @@ values must be equal. Each run must also have used at least one fiber.
 | `deep_recursion` | 2000 nested frames each performing an operation |
 | `returned_closures` | closures returned and composed at run time |
 | `runtime_closures` | closure chosen at run time, passed to an effectful function |
+| `widened_function_value` | a pure function passed where `fn .. eff [Ask]` is expected |
+| `forwarded_abandon` | an outer handler abandons an operation forwarded through an inner one |
+| `shared_locals` | a handled body assigns enclosing locals; clauses keep snapshots |
+| `effect_instances` | `Tell[i64]` and `Tell[bool]` nested, operations with type arguments |
 
 `effectful_functions_are_compiled_once` checks that `twice` in
 `shared_function` is one compiled function, although it runs under two
@@ -131,37 +135,64 @@ Cranelift `opt_level=none` in both.
 | Program | Handler ABI bytes | Specializing bytes |
 |---|---:|---:|
 | examples/checked_math.ves | unsupported (constructor patterns) | 341 |
-| examples/closures.ves | 859 | 566 |
-| examples/counter.ves | 1042 | 464 |
+| examples/closures.ves | 884 | 566 |
+| examples/counter.ves | 1099 | 464 |
 | examples/fail.ves | unsupported (`?`) | 647 |
-| examples/fibonacci.ves | 818 | 943 |
+| examples/fibonacci.ves | 852 | 943 |
 | examples/projections.ves | unsupported (aggregates) | 153 |
-| examples/resumptions.ves | 941 | 360 |
+| examples/resumptions.ves | 998 | 360 |
 | examples/transaction.ves | unsupported (aggregates) | 149 |
-| abort_through_handlers | 1184 | unsupported (recursive closure specialization exceeds 64 inline frames) |
-| deep_recursion | 1367 | unsupported (recursive closure specialization exceeds 64 inline frames) |
-| nested_forwarding | 1983 | 1272 |
-| resume_then_compute | 941 | 360 |
-| returned_closures | 859 | 566 |
-| runtime_closures | 2099 | 4256 |
-| shared_function | 1251 | 593 |
-| stateful_counter | 1042 | 464 |
-| unresumed | 1375 | unsupported (recursive effect specialization exceeds 64 inline frames) |
+| abort_through_handlers | 1240 | unsupported (recursive closure specialization exceeds 64 inline frames) |
+| deep_recursion | 1427 | unsupported (recursive closure specialization exceeds 64 inline frames) |
+| effect_instances | 925 | 307 |
+| forwarded_abandon | 796 | 70 |
+| nested_forwarding | 2086 | 1272 |
+| resume_then_compute | 998 | 360 |
+| returned_closures | 884 | 566 |
+| runtime_closures | 2152 | 4256 |
+| shared_function | 1332 | 593 |
+| shared_locals | 591 | 335 |
+| stateful_counter | 1099 | 464 |
+| unresumed | 1432 | unsupported (recursive effect specialization exceeds 64 inline frames) |
+| widened_function_value | 785 | 248 |
 
 There are three findings.
 
 - **Small programs.** For small programs with one handler and one call site,
-  specializing is 1.5–2.6× smaller, because the handler ABI pays for the
-  descriptor, the fiber entry and the clause functions.
+  specializing is 1.5–3.2× smaller, because the handler ABI pays for the
+  descriptor, the fiber entry and the clause functions. (`forwarded_abandon`
+  is the extreme, 796 against 70: specialization folds the abandoned
+  operation away entirely.)
 - **Several closures or call sites.** Where several closures reach several
   call sites, the handler ABI is smaller, because specialization duplicates
-  each body per combination: `runtime_closures` is 2099 bytes against 4256.
-  (`fibonacci` is also smaller, 818 against 943.)
+  each body per combination: `runtime_closures` is 2152 bytes against 4256.
+  (`fibonacci` is also smaller, 852 against 943.)
 - **Recursion through an effect or closure.** These programs do not compile
   on the specializing path at all (it bounds inlining at 64 frames), and
   compile and agree with the evaluator under the handler ABI.
 
 ## Decisions
+
+- **Review fixes (Codex review of the first head).** Four findings, each
+  now covered by a fixture above:
+  - A function value used at a type with a wider effect row (the checker
+    allows the weakening) is wrapped in a *widening adapter* record whose
+    code receives the wider row and passes on only the capabilities the
+    value takes.
+  - Cancelling an inner fiber restores the enclosing `unwinding` state, so
+    an outer handler that abandons a forwarded operation keeps unwinding
+    past the inner `handle`.
+  - A handled body shares the enclosing locals, as the evaluator's handled
+    bodies share their slots. Assignments write through to a `cells`
+    record (the last word of the environment), and the enclosing function
+    reads them back when `handle` returns. Clauses still get the values as
+    of installation.
+  - An operation written with type arguments (`Tell::tell[i64](..)`) goes
+    to the innermost handler of that instance, otherwise to the innermost
+    handler of the effect, as the evaluator does.
+  - Rows are also deduplicated: an inferred row can list one instance
+    several times under the checker's internal labels, and that is one
+    capability.
 
 - **Deep handlers by nesting.** A clause's `resume` drives the rest of the
   `handle` on the handler's stack, so N resumed operations nest N `drive`

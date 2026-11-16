@@ -129,7 +129,18 @@ pub fn row(world: &World, effects: &Effects) -> Result<Vec<Effect>> {
     // pass capabilities in a canonical order (by instance, not label).
     out.sort_by_cached_key(|e| {
         let args: Vec<String> = e.args.iter().map(ToString::to_string).collect();
-        (e.name.clone(), args)
+        (e.name.clone(), args, source_label(&e.label))
+    });
+    // An inferred row can list one instance several times under the
+    // checker's internal labels; it is one capability.
+    out.dedup_by(|a, b| {
+        a.name == b.name
+            && a.args.len() == b.args.len()
+            && a.args
+                .iter()
+                .zip(&b.args)
+                .all(|(x, y)| x.to_string() == y.to_string())
+            && source_label(&a.label) == source_label(&b.label)
     });
     Ok(out)
 }
@@ -153,6 +164,16 @@ fn function_type(t: &Type) -> Option<FunctionParts<'_>> {
 enum Pending {
     Source(String),
     Adapter(String),
+    /// A function value whose type gained effects (`fn() eff [A]` passed
+    /// as `fn() eff [A, B]`): receives the wider row and calls the wrapped
+    /// record (`record[1]`) with the capabilities of its own row.
+    Widen {
+        name: String,
+        /// For each effect of the inner row, its index in the outer row.
+        picks: Vec<usize>,
+        outer: usize,
+        arity: usize,
+    },
     Lambda {
         name: String,
         params: Vec<(String, Type)>,
@@ -338,6 +359,9 @@ impl<'w, M: Module> Lowering<'w, M> {
             Pending::Lambda {
                 name, params, row, ..
             } => (name.clone(), 2 + row.len() + params.len()),
+            Pending::Widen {
+                name, outer, arity, ..
+            } => (name.clone(), 2 + outer + arity),
             Pending::Body { name, .. } => (name.clone(), 3),
             Pending::Clause { name, binds, .. } => (name.clone(), 4 + binds.len()),
             Pending::Ret { name, .. } => (name.clone(), 4),
@@ -383,6 +407,10 @@ struct Local {
     name: String,
     var: Variable,
     kind: Kind,
+    /// A handled body's enclosing local: assignments are also written to
+    /// this word (`cells` record, byte offset), which the enclosing
+    /// function reads back when the `handle` returns.
+    cell: Option<(Variable, i32)>,
 }
 
 struct FnCx<'l, 'w, 'f, M: Module> {
@@ -423,7 +451,16 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
             name: name.to_owned(),
             var,
             kind,
+            cell: None,
         });
+    }
+    /// Assign a local, writing through to its cell if it has one.
+    fn assign(&mut self, local: &Local, v: ir::Value) {
+        self.b.def_var(local.var, v);
+        if let Some((cells, offset)) = local.cell {
+            let cells = self.b.use_var(cells);
+            self.store(cells, offset, v);
+        }
     }
     fn lookup(&self, name: &str) -> Option<&Local> {
         self.locals.iter().rev().find(|l| l.name == name)
@@ -556,6 +593,23 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
                 self.check_unwind();
                 (v, ())
             }
+            Pending::Widen {
+                picks,
+                outer,
+                arity,
+                ..
+            } => {
+                let params = self.entry(2 + outer + arity);
+                let inner = self.load(params[1], 8);
+                let code = self.load(inner, 0);
+                let mut values = vec![params[0], inner];
+                values.extend(picks.iter().map(|&i| params[2 + i]));
+                values.extend(&params[2 + outer..]);
+                let sig = self.l.signature(values.len());
+                let sig = self.b.import_signature(sig);
+                let call = self.b.ins().call_indirect(sig, code, &values);
+                (self.b.inst_results(call)[0], ())
+            }
             Pending::Lambda {
                 params,
                 row,
@@ -580,6 +634,14 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
             } => {
                 let values = self.entry(3);
                 self.unpack(values[1], &captures, &caps, 0);
+                // The body shares the enclosing locals (as the evaluator's
+                // handled bodies share their slots); clauses get snapshots.
+                let cells = self.load(values[1], 8 * (captures.len() + caps.len()) as i32);
+                let cells = self.var(cells);
+                let first = self.locals.len() - captures.len();
+                for (i, local) in self.locals[first..].iter_mut().enumerate() {
+                    local.cell = Some((cells, 8 * i as i32));
+                }
                 let var = self.var(values[2]);
                 self.caps.push((effect_key(&own), own, var));
                 (self.expr(&body, None)?, ())
@@ -690,7 +752,7 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
                     };
                     self.binary(&combined, arith, place, value)?
                 };
-                self.b.def_var(local.var, v);
+                self.assign(&local, v);
                 Ok(self.iconst(0))
             }
             ExprKind::If {
@@ -1058,9 +1120,73 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
             if a.pass == Pass::Inout {
                 return unsupported("inout arguments");
             }
-            out.push(self.expr(&a.expr, types.get(i))?);
+            let v = self.expr(&a.expr, types.get(i))?;
+            out.push(match types.get(i) {
+                Some(to) => self.coerce(&a.expr, v, to)?,
+                None => v,
+            });
         }
         Ok(out)
+    }
+
+    /// A function value used at a type with a wider effect row (the
+    /// checker allows the weakening) is wrapped in a record whose code
+    /// passes on only the capabilities the value expects.
+    fn coerce(&mut self, e: &Expr, v: ir::Value, to: &Type) -> Result<ir::Value> {
+        let world = self.l.world;
+        let Some((to_params, _, to_effects)) = function_type(to) else {
+            return Ok(v);
+        };
+        let from = match self.kind(e) {
+            Kind::Function(t) => t,
+            _ => return Ok(v),
+        };
+        let Some((_, _, from_effects)) = function_type(&from) else {
+            return Ok(v);
+        };
+        let inner = row(world, from_effects)?;
+        let outer = row(world, to_effects)?;
+        let instance = |e: &Effect| {
+            let args: Vec<String> = e.args.iter().map(ToString::to_string).collect();
+            (e.name.clone(), args)
+        };
+        if inner.iter().map(instance).eq(outer.iter().map(instance)) {
+            return Ok(v);
+        }
+        let mut picks = vec![];
+        for e in &inner {
+            let at = outer
+                .iter()
+                .position(|o| instance(o) == instance(e))
+                .or_else(|| outer.iter().position(|o| o.name == e.name));
+            let Some(at) = at else {
+                return invalid(format!(
+                    "function value with effect {} not in its type",
+                    e.name
+                ));
+            };
+            picks.push(at);
+        }
+        let arity = to_params.len();
+        let key = format!("widen${picks:?}${}${arity}", outer.len());
+        let id = match self.l.declared.get(&key) {
+            Some(id) => *id,
+            None => {
+                let id = self.l.declare(&key, 2 + outer.len() + arity)?;
+                self.l.pending.push_back(Pending::Widen {
+                    name: key,
+                    picks,
+                    outer: outer.len(),
+                    arity,
+                });
+                id
+            }
+        };
+        let record = self.alloc(2);
+        let code = self.func_addr(id);
+        self.store(record, 0, code);
+        self.store(record, 8, v);
+        Ok(record)
     }
 
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Arg]) -> Result<ir::Value> {
@@ -1079,7 +1205,11 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
             if let Some((effect, op)) = n.split_once("::")
                 && let Some(decl) = world.effects.get(effect)
             {
-                return self.perform(decl, effect, op, args);
+                let types = match &e.kind {
+                    ExprKind::Call { types, .. } => types.as_slice(),
+                    _ => &[],
+                };
+                return self.perform(decl, effect, op, args, types);
             }
             if world.functions.contains_key(n) {
                 let f = self.l.source(n)?;
@@ -1169,6 +1299,7 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
         effect: &str,
         op: &str,
         args: &[Arg],
+        instance: &[Type],
     ) -> Result<ir::Value> {
         let Some(index) = decl.ops.iter().position(|o| o.name == op) else {
             return invalid(format!("unknown operation {effect}::{op}"));
@@ -1176,14 +1307,30 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
         if args.len() > MAX_OPERATION_ARGS {
             return unsupported("operations with more than four arguments");
         }
-        let candidates: Vec<Variable> = self
-            .caps
-            .iter()
-            .rev()
-            .filter(|(key, e, _)| e.name == effect || key.starts_with(&format!("{effect}[")))
-            .map(|(_, _, v)| *v)
-            .collect();
-        let Some(&cap) = candidates.first() else {
+        // As the evaluator does: an operation written with type arguments
+        // (`Fail::raise[i64](..)`) goes to the innermost handler of that
+        // instance, otherwise to the innermost handler of the effect.
+        let same_instance = |e: &Effect| {
+            e.name == effect
+                && e.args.len() == instance.len()
+                && e.args
+                    .iter()
+                    .zip(instance)
+                    .all(|(a, b)| a.to_string() == b.to_string())
+        };
+        let innermost = |pick: &dyn Fn(&Effect) -> bool| {
+            self.caps
+                .iter()
+                .rev()
+                .find(|(_, e, _)| pick(e))
+                .map(|(_, _, v)| *v)
+        };
+        let exact = if instance.is_empty() {
+            None
+        } else {
+            innermost(&same_instance)
+        };
+        let Some(cap) = exact.or_else(|| innermost(&|e: &Effect| e.name == effect)) else {
             return invalid(format!("no handler for {effect} in scope"));
         };
         let types: Vec<Type> = decl.ops[index]
@@ -1330,12 +1477,17 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
             innermost.reverse();
             innermost
         };
-        let env = self.alloc(captures.len() + caps.len());
+        // `env` is `[captures.., capabilities.., cells]`: the clauses read
+        // the captured values as of installation, the body reads and
+        // writes `cells`.
+        let env = self.alloc(captures.len() + caps.len() + 1);
+        let cells = self.alloc(captures.len());
         let mut offset = 0;
-        for (n, _) in &captures {
+        for (i, (n, _)) in captures.iter().enumerate() {
             let var = self.lookup(n).expect("captured").var;
             let v = self.b.use_var(var);
             self.store(env, offset, v);
+            self.store(cells, 8 * i as i32, v);
             offset += 8;
         }
         for (key, _) in &caps {
@@ -1344,6 +1496,7 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
             self.store(env, offset, v);
             offset += 8;
         }
+        self.store(env, offset, cells);
         // Body.
         let own = effect.clone();
         let body_name = self.l.fresh("handled");
@@ -1447,6 +1600,12 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
         }
         let rt = self.b.use_var(self.rt);
         let v = self.call_runtime(self.l.runtime.handle, &[rt, desc]);
+        // Read back what the body assigned to the enclosing locals.
+        for (i, (n, _)) in captures.iter().enumerate() {
+            let local = self.lookup(n).expect("captured").clone();
+            let w = self.load(cells, 8 * i as i32);
+            self.assign(&local, w);
+        }
         self.check_unwind();
         Ok(v)
     }
