@@ -57,8 +57,9 @@ fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
         }
         Type::Tuple(ts) if ts.is_empty() => Ok(types::I64),
         Type::Infer | Type::Function { .. } => Ok(types::I64),
-        // Region box, watermark, and TiledSeq handles are one word (§12.5, §15).
+        // Region box, watermark, TiledSeq, and Box[T] handles are one word (§12.4, §12.5, §15).
         Type::Named(n, _) if crate::regions::is_handle_name(n) => Ok(types::I64),
+        Type::Named(n, args) if n == crate::fip::BOX_TYPE && args.len() == 1 => Ok(types::I64),
         t if crate::tiled::is_seq_type(t) => Ok(types::I64),
         _ => Err(format!(
             "native backend does not yet lower aggregate type {t}"
@@ -81,6 +82,10 @@ fn signature<M: Module>(m: &M, world: &World, f: &Function) -> Result<ir::Signat
                 scalar(&p.ty, &f.generics)?
             },
         ));
+    }
+    if crate::fip::uses_caller_slot(world, f) {
+        sig.params
+            .push(AbiParam::new(m.target_config().pointer_type()));
     }
     if fail_only(world, f) {
         sig.params
@@ -761,6 +766,11 @@ fn define_instances_observed<M: Module>(
             } else {
                 None
             };
+            let caller_slot = if crate::fip::uses_caller_slot(world, &f) {
+                values.pop()
+            } else {
+                None
+            };
             let result_layout = Layout::of(world, &f.result)?;
             let sret = if result_layout.aggregate() {
                 Some(values.remove(0))
@@ -813,6 +823,9 @@ fn define_instances_observed<M: Module>(
                         fail_instances(&f).map(|e| e.args[0].clone()).collect(),
                     )
                 }),
+                caller_slot,
+                reuse_slots: BTreeMap::new(),
+                current_call_slot: None,
                 session: None,
                 denorm: &denorm,
                 source_locations: options.source_locations,
@@ -939,6 +952,7 @@ pub fn jit_with_options(
     builder.symbol("fmod", native_float_remainder as *const u8);
     builder.symbols(crate::regions::native_runtime::symbols());
     builder.symbols(crate::tiled::native_runtime::symbols());
+    builder.symbols(crate::fip::native_runtime::symbols());
     let mut m = JITModule::new(builder);
     let (ids, _) = compile_jit(
         &mut m,
@@ -968,9 +982,20 @@ pub fn jit_with_options(
             let call: unsafe extern "C" fn() -> f64 = std::mem::transmute(code);
             crate::runtime::Value::Float(call())
         } else {
-            let call: unsafe extern "C" fn() -> i64 = std::mem::transmute(code);
-            let n = call();
-            if f.result.name() == "bool" {
+            let n = if crate::fip::uses_caller_slot(world, f) {
+                let inner_size = crate::fip::box_inner(world, &f.result)
+                    .and_then(|t| Layout::of(world, t).ok())
+                    .map_or(8u64, |l| u64::from(l.size));
+                let slot = crate::fip::native_runtime::vesper_box_alloc(inner_size);
+                let call: unsafe extern "C" fn(u64) -> i64 = std::mem::transmute(code);
+                call(slot)
+            } else {
+                let call: unsafe extern "C" fn() -> i64 = std::mem::transmute(code);
+                call()
+            };
+            if crate::fip::is_box_type(world, &f.result) {
+                crate::layout::decode(world, &f.result, &n.to_le_bytes())?
+            } else if f.result.name() == "bool" {
                 crate::runtime::Value::Bool(n != 0)
             } else if f.result == Type::unit() || f.result.name() == "Unit" {
                 crate::runtime::Value::Tuple(vec![])
@@ -989,6 +1014,7 @@ pub fn jit_with_options(
     };
     crate::regions::native_runtime::finish().map_err(|e| format!("native region fault: {e}"))?;
     crate::tiled::native_runtime::finish().map_err(|e| format!("native tiled fault: {e}"))?;
+    crate::fip::native_runtime::finish();
     Ok(value)
 }
 pub fn object(world: &World, entry: &str) -> Result<(Vec<u8>, String), String> {
@@ -1348,6 +1374,13 @@ struct Codegen<'a, 'b, M: Module> {
     /// The failure-record pointer of a `fail_only` function being compiled,
     /// with the error type of each of its `Fail` instances.
     fail_record: Option<(ir::Value, Vec<Type>)>,
+    /// Caller-supplied `$caller_slot` buffer pointer when compiling an `@fip`
+    /// function that constructs its returned `Box[T]` via `Box::new_in_caller`.
+    caller_slot: Option<ir::Value>,
+    /// ReuseSlot pointers unpacked from `Op::Bind` (`(bind_dest, slot_index)` -> `Variable`).
+    reuse_slots: BTreeMap<(crate::ir::ValueId, usize), Variable>,
+    /// Selected caller-slot source for the active `Op::Call`, if optimized by Stage 4.
+    current_call_slot: Option<crate::fip::CallSlot>,
     /// Present only while compiling a suspending session entry: external
     /// operations park instead of resolving to a lexical handler.
     session: Option<session::SessionCodegen>,
@@ -1957,11 +1990,46 @@ impl<M: Module> Codegen<'_, '_, M> {
             span: 0..0,
         })
     }
-    fn bind_ir(&mut self, p: &Pattern, value: ir::Value, ty: &Type) -> Result<(), String> {
+    fn bind_ir(
+        &mut self,
+        bind_dest: crate::ir::ValueId,
+        slot_index: &mut usize,
+        inside_box: bool,
+        p: &Pattern,
+        value: ir::Value,
+        ty: &Type,
+    ) -> Result<(), String> {
+        if crate::fip::is_box_pattern(self.world, p) {
+            let inner = crate::fip::box_inner(self.world, ty)
+                .cloned()
+                .ok_or("Box pattern expects Box[T]")?;
+            let idx = *slot_index;
+            *slot_index += 1;
+            let var = self.b.declare_var(self.b.func.dfg.value_type(value));
+            self.def_var(var, value);
+            self.reuse_slots.insert((bind_dest, idx), var);
+            let inner_val = self.load(value, &inner)?;
+            let PatternKind::Constructor { fields, .. } = &p.kind else {
+                unreachable!();
+            };
+            return self.bind_ir(bind_dest, slot_index, true, &fields[0].1, inner_val, &inner);
+        }
         match &p.kind {
             PatternKind::Bind(n) => {
                 let var = *self.vars.get(n).ok_or("IR binding lacks a declared slot")?;
-                self.def_var(var, value);
+                let bound_value = if inside_box {
+                    let layout = Layout::of(self.world, ty)?;
+                    if layout.aggregate() {
+                        let copy = self.alloc(layout.size);
+                        self.copy_bytes(value, copy, layout.size);
+                        copy
+                    } else {
+                        value
+                    }
+                } else {
+                    value
+                };
+                self.def_var(var, bound_value);
                 Ok(())
             }
             PatternKind::Tuple(ps) => {
@@ -1975,7 +2043,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 for (p, f) in ps.iter().zip(fs) {
                     let ptr = self.offset(value, f.offset);
                     let v = self.load(ptr, &f.ty)?;
-                    self.bind_ir(p, v, &f.ty)?;
+                    self.bind_ir(bind_dest, slot_index, inside_box, p, v, &f.ty)?;
                 }
                 Ok(())
             }
@@ -1989,7 +2057,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         .ok_or("unknown IR pattern field")?;
                     let ptr = self.offset(value, f.offset);
                     let v = self.load(ptr, &f.ty)?;
-                    self.bind_ir(p, v, &f.ty)?;
+                    self.bind_ir(bind_dest, slot_index, inside_box, p, v, &f.ty)?;
                 }
                 Ok(())
             }
@@ -2183,7 +2251,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                             &f.values[value],
                             &self.generic_vars,
                         ));
-                        self.bind_ir(pattern, values[value], &t)?;
+                        let mut slot_index = 0;
+                        self.bind_ir(
+                            inst.dest,
+                            &mut slot_index,
+                            false,
+                            pattern,
+                            values[value],
+                            &t,
+                        )?;
                         self.zero()
                     }
                     Op::Write { place, op, value } => {
@@ -2279,7 +2355,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                             .collect::<Result<Vec<_>, String>>()?;
                         let site = make(ExprKind::Tuple(vec![]));
                         if self.world.functions.contains_key(callee) {
-                            self.call_function(callee, &es, &site)?
+                            self.current_call_slot = f.fip_call_slots.get(&inst.dest).cloned();
+                            let call_res = self.call_function(callee, &es, &site);
+                            self.current_call_slot = None;
+                            call_res?
                         } else if let Some((effect, op)) = callee.split_once("::") {
                             self.perform(effect, capability.as_deref(), instance, op, &es)?
                         } else {
@@ -2345,6 +2424,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                             })
                             .collect::<Result<Vec<_>, String>>()?;
                         self.tiled_op(op, &operands, capability.as_deref())?
+                    }
+                    Op::Fip { op, args } => {
+                        let operands = args
+                            .iter()
+                            .map(|a| {
+                                values.get(&a.value).copied().ok_or_else(|| {
+                                    format!("undefined native IR value %{}", a.value)
+                                })
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        self.fip_op(op, &operands, &ty)?
                     }
                     Op::Closure { expr, aliases, .. } | Op::Handle { expr, aliases, .. } => {
                         let old_vars = self.vars.clone();
@@ -2640,6 +2730,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 Ok(())
             }
             PatternKind::Constructor { name, fields, .. } => {
+                if crate::fip::is_box_pattern(self.world, p) {
+                    let inner = crate::fip::box_inner(self.world, ty)
+                        .cloned()
+                        .ok_or("Box pattern expects Box[T]")?;
+                    let inner_val = self.load(value, &inner)?;
+                    return self.bind(&fields[0].1, inner_val, &inner);
+                }
                 let layout = Layout::of(self.world, ty)?;
                 let (_, fs) = layout
                     .variant(name)
@@ -2675,6 +2772,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
             PatternKind::Constructor { name, fields, .. } => {
+                if crate::fip::is_box_pattern(self.world, p) {
+                    let inner = crate::fip::box_inner(self.world, ty)
+                        .cloned()
+                        .ok_or("Box pattern expects Box[T]")?;
+                    let box_ptr = self.load(ptr, ty)?;
+                    return self.bind_alias(&fields[0].1, box_ptr, &inner);
+                }
                 let layout = Layout::of(self.world, ty)?;
                 let (_, fs) = layout
                     .variant(name)
@@ -2727,27 +2831,64 @@ impl<M: Module> Codegen<'_, '_, M> {
                 result
             }
             PatternKind::Constructor { name, fields, .. } => {
+                if crate::fip::is_box_pattern(self.world, p) {
+                    let inner = crate::fip::box_inner(self.world, ty)
+                        .cloned()
+                        .ok_or("Box pattern expects Box[T]")?;
+                    let inner_val = self.load(value, &inner)?;
+                    return self.pattern_condition(&fields[0].1, inner_val, &inner);
+                }
                 let layout = Layout::of(self.world, ty)?;
                 let (tag, fs) = layout
                     .variant(name)
                     .ok_or("native pattern has unknown variant")?;
-                let mut result = if matches!(layout.kind, LayoutKind::Enum(_)) {
+                if matches!(layout.kind, LayoutKind::Enum(_)) {
                     let actual = self.b.ins().load(types::I64, ir::MemFlags::new(), value, 0);
-                    self.b.ins().icmp_imm(IntCC::Equal, actual, tag as i64)
+                    let matches_tag = self.b.ins().icmp_imm(IntCC::Equal, actual, tag as i64);
+                    if fields.is_empty() {
+                        matches_tag
+                    } else {
+                        let ok = self.b.create_block();
+                        let fail = self.b.create_block();
+                        let done = self.b.create_block();
+                        self.b.append_block_param(done, types::I8);
+                        self.b.ins().brif(matches_tag, ok, &[], fail, &[]);
+
+                        self.b.switch_to_block(fail);
+                        let zero = self.b.ins().iconst(types::I8, 0);
+                        self.b.ins().jump(done, &[zero.into()]);
+
+                        self.b.switch_to_block(ok);
+                        let mut result = self.b.ins().iconst(types::I8, 1);
+                        for (n, p) in fields {
+                            let f = fs
+                                .iter()
+                                .find(|f| &f.name == n)
+                                .ok_or("native pattern has unknown field")?;
+                            let ptr = self.offset(value, f.offset);
+                            let v = self.load(ptr, &f.ty)?;
+                            let c = self.pattern_condition(p, v, &f.ty)?;
+                            result = self.b.ins().band(result, c);
+                        }
+                        self.b.ins().jump(done, &[result.into()]);
+
+                        self.b.switch_to_block(done);
+                        self.b.block_params(done)[0]
+                    }
                 } else {
-                    self.b.ins().iconst(types::I8, 1)
-                };
-                for (n, p) in fields {
-                    let f = fs
-                        .iter()
-                        .find(|f| &f.name == n)
-                        .ok_or("native pattern has unknown field")?;
-                    let ptr = self.offset(value, f.offset);
-                    let v = self.load(ptr, &f.ty)?;
-                    let c = self.pattern_condition(p, v, &f.ty)?;
-                    result = self.b.ins().band(result, c);
+                    let mut result = self.b.ins().iconst(types::I8, 1);
+                    for (n, p) in fields {
+                        let f = fs
+                            .iter()
+                            .find(|f| &f.name == n)
+                            .ok_or("native pattern has unknown field")?;
+                        let ptr = self.offset(value, f.offset);
+                        let v = self.load(ptr, &f.ty)?;
+                        let c = self.pattern_condition(p, v, &f.ty)?;
+                        result = self.b.ins().band(result, c);
+                    }
+                    result
                 }
-                result
             }
         })
     }
@@ -3308,6 +3449,18 @@ impl<M: Module> Codegen<'_, '_, M> {
                             return self.expr(&args[0].expr);
                         }
                     }
+                    if crate::fip::active(self.world)
+                        && (n == crate::fip::BOX_NEW || n == crate::fip::BOX_NEW_IN_CALLER)
+                        && args.len() == 1
+                    {
+                        let val = self.expr(&args[0].expr)?;
+                        let fip_op = if n == crate::fip::BOX_NEW {
+                            crate::fip::FipOp::BoxNew
+                        } else {
+                            crate::fip::FipOp::BoxNewInCaller
+                        };
+                        return self.fip_op(&fip_op, &[val], &self.ty(e));
+                    }
                     if self.world.constructor(n).is_some() {
                         self.data(
                             Some(n),
@@ -3858,6 +4011,41 @@ impl<M: Module> Codegen<'_, '_, M> {
             Some((vars, values)) => (concrete(self.world, name, &vars)?, vars, values),
             None => (f, vars, values),
         };
+        let call_slot_arg = if crate::fip::uses_caller_slot(self.world, &f) {
+            let slot_ptr = match self.current_call_slot.take() {
+                Some(crate::fip::CallSlot::CallerSlot) => {
+                    if let Some(slot) = self.caller_slot {
+                        slot
+                    } else {
+                        let inner_ty = crate::fip::box_inner(self.world, &f.result)
+                            .ok_or("Box::new_in_caller function must return Box[T]")?;
+                        let inner_layout = Layout::of(self.world, inner_ty)?;
+                        self.fip_box_alloc(inner_layout.size)?
+                    }
+                }
+                Some(crate::fip::CallSlot::ReuseSlot {
+                    bind_dest,
+                    slot_index,
+                    ..
+                }) => {
+                    let var = *self
+                        .reuse_slots
+                        .get(&(bind_dest, slot_index))
+                        .ok_or_else(|| format!("missing reuse slot ({bind_dest}, {slot_index})"))?;
+                    self.use_var(var)
+                }
+                None => {
+                    let inner_ty = crate::fip::box_inner(self.world, &f.result)
+                        .ok_or("Box::new_in_caller function must return Box[T]")?;
+                    let inner_layout = Layout::of(self.world, inner_ty)?;
+                    self.fip_box_alloc(inner_layout.size)?
+                }
+            };
+            Some(slot_ptr)
+        } else {
+            self.current_call_slot = None;
+            None
+        };
         let result = if specialized_function(self.world, &f) {
             if self.inline_depth >= 64 {
                 return Err("recursive effect specialization exceeds 64 inline frames".into());
@@ -3865,6 +4053,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             let scope = std::mem::take(&mut self.vars);
             let type_scope = std::mem::take(&mut self.local_types);
             let generic_scope = std::mem::replace(&mut self.generic_vars, vars);
+            let caller_slot_scope = std::mem::replace(&mut self.caller_slot, call_slot_arg);
+            let reuse_scope = std::mem::take(&mut self.reuse_slots);
             let mut incoming_caps = BTreeMap::new();
             for (index, effect) in f.effects.instances.iter().enumerate() {
                 let key = if effect.label.is_none() {
@@ -3928,6 +4118,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.vars = scope;
             self.local_types = type_scope;
             self.generic_vars = generic_scope;
+            self.caller_slot = caller_slot_scope;
+            self.reuse_slots = reuse_scope;
             self.capabilities = capability_scope;
             result?
         } else {
@@ -3943,6 +4135,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             };
             if let Some(out) = output {
                 values.insert(0, out);
+            }
+            if let Some(slot_ptr) = call_slot_arg {
+                values.push(slot_ptr);
             }
             let record = if fail_only(self.world, &f) {
                 let record = self.alloc(fail_record_size(self.world, &f)?);
@@ -3979,6 +4174,61 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
         }
         Ok(result)
+    }
+    fn fip_box_alloc(&mut self, size: u32) -> Result<ir::Value, String> {
+        let jit = std::any::type_name::<M>().contains("JITModule");
+        let id = if jit {
+            let mut sig = self.m.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.returns.push(AbiParam::new(types::I64));
+            self.m
+                .declare_function("vesper_box_alloc", Linkage::Import, &sig)
+                .map_err(|e| e.to_string())?
+        } else {
+            if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
+                return Err(
+                    "Box[T] in a freestanding image needs a box runtime; the generated one uses the C library"
+                        .into(),
+                );
+            }
+            crate::fip::aot_runtime::declare_or_define(self.m)?
+        };
+        let size_val = self.b.ins().iconst(types::I64, i64::from(size.max(8)));
+        let reference = self.m.declare_func_in_func(id, self.b.func);
+        let call = self.b.ins().call(reference, &[size_val]);
+        Ok(self.b.inst_results(call)[0])
+    }
+    fn fip_op(
+        &mut self,
+        op: &crate::fip::FipOp,
+        operands: &[ir::Value],
+        ty: &Type,
+    ) -> Result<ir::Value, String> {
+        let [value] = operands else {
+            return Err("Box constructor expects exactly one argument".into());
+        };
+        let inner = crate::fip::box_inner(self.world, ty)
+            .ok_or_else(|| format!("Box constructor expects Box[T], got {ty}"))?;
+        let inner_layout = Layout::of(self.world, inner)?;
+        let ptr = match op {
+            crate::fip::FipOp::BoxNew => self.fip_box_alloc(inner_layout.size)?,
+            crate::fip::FipOp::BoxNewInCaller => self
+                .caller_slot
+                .ok_or("Box::new_in_caller requires a caller slot")?,
+            crate::fip::FipOp::BoxReuse {
+                bind_dest,
+                slot_index,
+                ..
+            } => {
+                let var = *self
+                    .reuse_slots
+                    .get(&(*bind_dest, *slot_index))
+                    .ok_or_else(|| format!("missing Box reuse slot ({bind_dest}, {slot_index})"))?;
+                self.use_var(var)
+            }
+        };
+        self.store(ptr, *value, inner)?;
+        Ok(ptr)
     }
     /// When `name` takes function values ([`function_value_instance`]) and
     /// every function-value argument of this call is statically one

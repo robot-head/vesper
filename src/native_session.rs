@@ -914,6 +914,9 @@ fn compile_session_with_linkage<M: Module>(
             handlers: vec![],
             inline_depth: 0,
             fail_record: None,
+            caller_slot: None,
+            reuse_slots: BTreeMap::new(),
+            current_call_slot: None,
             source_locations: true,
             srcloc: cranelift_codegen::ir::SourceLoc::default(),
             session: Some(SessionCodegen {

@@ -104,14 +104,28 @@ fn prefix(source: &str, tokens: &[Token], at: usize) -> Option<(DK, Option<Span>
     if matches!(token_kind(tokens, i), K::Copy | K::Affine | K::Linear) {
         i = next(tokens, i + 1);
     }
+    let mut saw_fip = false;
+    if token_kind(tokens, i) == K::At && word(source, tokens, next(tokens, i + 1), "fip") {
+        saw_fip = true;
+        i = next(tokens, next(tokens, i + 1) + 1);
+    }
     if word(source, tokens, i, "pub") {
         i = next(tokens, i + 1);
+        if !saw_fip
+            && token_kind(tokens, i) == K::At
+            && word(source, tokens, next(tokens, i + 1), "fip")
+        {
+            saw_fip = true;
+            i = next(tokens, next(tokens, i + 1) + 1);
+        }
         if token_kind(tokens, i) != K::Fn
-            && !word(source, tokens, i, "trait")
-            && !word(source, tokens, i, "model")
+            && (saw_fip || (!word(source, tokens, i, "trait") && !word(source, tokens, i, "model")))
         {
             return None;
         }
+    }
+    if saw_fip && token_kind(tokens, i) != K::Fn {
+        return None;
     }
     let n = next(tokens, i + 1);
     let (kind, namekind) = match token_kind(tokens, i) {
@@ -224,8 +238,15 @@ fn extent(
     if matches!(token_kind(tokens, head), K::Copy | K::Affine | K::Linear) {
         head = next(tokens, head + 1);
     }
+    if token_kind(tokens, head) == K::At && word(source, tokens, next(tokens, head + 1), "fip") {
+        head = next(tokens, next(tokens, head + 1) + 1);
+    }
     if word(source, tokens, head, "pub") {
         head = next(tokens, head + 1);
+        if token_kind(tokens, head) == K::At && word(source, tokens, next(tokens, head + 1), "fip")
+        {
+            head = next(tokens, next(tokens, head + 1) + 1);
+        }
     }
     let mut i = if kind == DK::Other { start } else { head + 1 };
     let mut stack = Vec::new();

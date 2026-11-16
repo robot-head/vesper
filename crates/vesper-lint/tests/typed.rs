@@ -12,6 +12,7 @@ fn function(name: &str, effects: Vec<Effect>, actions: Vec<Action>) -> FunctionF
     FunctionFacts {
         declaration: Function {
             name: name.into(),
+            fip: false,
             generics: vec![],
             params: vec![],
             result: Type::unit(),
