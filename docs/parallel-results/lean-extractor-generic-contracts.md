@@ -46,7 +46,9 @@ the same proof after an incorrect implementation change, and rejects a valid
 UInt64-only theorem offered as the universal contract. It uses the existing
 kernel replay and exact closed-contract type checks without changing admission.
 
-Validation uses Lean 4.35.0:
+All 13 extraction tests and all 13 extraction CLI tests pass with Lean 4.35.0.
+Strict scoped Clippy, workspace and fixture formatting,
+Bazel manifest synchronization and diff checks pass. Verification commands:
 
 ```sh
 VESPER_LEAN=/tmp/lean-4.35.0-linux/bin/lean cargo +stable test --locked --test lean_extract
