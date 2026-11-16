@@ -1,7 +1,9 @@
 //! Checked Place IR to the slot IR (`Lir`): plan the reachable functions,
 //! flatten every value of the scalar subset into 64-bit words and reject
 //! everything else with a typed error.
-use super::machine::{ArithOp, Cond, FIRST_FREE_LABEL, Kind, Label, Lir, Slot, TrapKind, WrapOp};
+use super::machine::{
+    ArithOp, Cond, FIRST_FREE_LABEL, FloatOp, Kind, Label, Lir, Slot, TrapKind, WrapOp,
+};
 use super::{Unsupported, VerifiedError};
 use crate::ast::{Literal, Pass, Pattern, PatternKind, Type, substitute};
 use crate::check::World;
@@ -129,6 +131,7 @@ fn flatten(
         "u64" => Some(Kind::U64),
         "i64" => Some(Kind::I64),
         "bool" => Some(Kind::Bool),
+        "f64" => Some(Kind::F64),
         _ => None,
     };
     if let Some(k) = kind {
@@ -145,7 +148,7 @@ fn flatten(
             Ok(())
         }
         Type::Named(n, _) if n == "Unit" => Ok(()),
-        Type::Named(n, _) if n == "f64" || n == "f32" => Err(VerifiedError::unsupported(
+        Type::Named(n, _) if n == "f32" => Err(VerifiedError::unsupported(
             Unsupported::Float,
             function,
             format!("type {ty}"),
@@ -415,6 +418,17 @@ struct FnLower<'a> {
     out_words: u32,
     next_label: &'a mut Label,
     max_rows: usize,
+}
+
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::U8 => "u8",
+        Kind::U32 => "u32",
+        Kind::U64 => "u64",
+        Kind::I64 => "i64",
+        Kind::Bool => "bool",
+        Kind::F64 => "f64",
+    }
 }
 
 fn kind_of(shape: &Shape, function: &str, what: &str) -> Result<Kind, VerifiedError> {
@@ -706,10 +720,21 @@ impl FnLower<'_> {
         })
     }
 
+    fn float_op(&self, op: ArithOp) -> Result<FloatOp, VerifiedError> {
+        Ok(match op {
+            ArithOp::Add => FloatOp::Add,
+            ArithOp::Sub => FloatOp::Sub,
+            ArithOp::Mul => FloatOp::Mul,
+            ArithOp::Div => FloatOp::Div,
+            ArithOp::Rem => return Err(self.err(Unsupported::Float, "f64 remainder")),
+        })
+    }
+
     fn integer(&self, kind: Kind, what: &str) -> Result<Kind, VerifiedError> {
-        if kind == Kind::Bool {
+        if matches!(kind, Kind::Bool | Kind::F64) {
             Err(VerifiedError::Invalid(format!(
-                "{what} on bool in '{}'",
+                "integer {what} on {} in '{}'",
+                kind_name(kind),
                 self.f.name
             )))
         } else {
@@ -744,7 +769,16 @@ impl FnLower<'_> {
                     word: *b as u64,
                 })
             }
-            Op::Constant(Literal::Float(_)) => Err(self.err(Unsupported::Float, "float literal")),
+            Op::Constant(Literal::Float(x)) => {
+                let (dst, shape) = self.value_of(i.dest, &i.ty)?;
+                if kind_of(&shape, &self.f.name, "float literal")? != Kind::F64 {
+                    return Err(self.err(Unsupported::Float, format!("float literal of {}", i.ty)));
+                }
+                self.push(Lir::Const {
+                    dst,
+                    word: x.to_bits(),
+                })
+            }
             Op::Constant(Literal::String(_)) => {
                 Err(self.err(Unsupported::String, "string literal"))
             }
@@ -795,6 +829,15 @@ impl FnLower<'_> {
                     .arith(op)
                     .ok_or_else(|| self.err(Unsupported::Operation, format!("assignment {op}")))?;
                 let kind = kind_of(&shape, &self.f.name, op)?;
+                if kind == Kind::F64 {
+                    let op = self.float_op(aop)?;
+                    return self.push(Lir::FArith {
+                        op,
+                        dst,
+                        a: dst,
+                        b: src,
+                    });
+                }
                 let kind = self.integer(kind, op)?;
                 // A failing compound assignment raises before its write.
                 self.push(Lir::Arith {
@@ -811,6 +854,7 @@ impl FnLower<'_> {
                 let (dst, _) = self.value_of(i.dest, &i.ty)?;
                 match op.as_str() {
                     "!" if kind == Kind::Bool => self.push(Lir::Not { dst, a }),
+                    "-" if kind == Kind::F64 => self.push(Lir::FNeg { dst, a }),
                     "-" if kind != Kind::Bool => self.push(Lir::Neg { kind, dst, a }),
                     _ => Err(self.err(Unsupported::Operation, format!("unary {op}"))),
                 }
@@ -833,6 +877,26 @@ impl FnLower<'_> {
                     )));
                 }
                 let (dst, _) = self.value_of(i.dest, &i.ty)?;
+                if kind == Kind::F64 {
+                    if let Some(aop) = self.arith(op).filter(|_| !op.ends_with('=')) {
+                        let op = self.float_op(aop)?;
+                        return self.push(Lir::FArith { op, dst, a, b });
+                    }
+                    let cond = match op.as_str() {
+                        "==" => Cond::Eq,
+                        "!=" => Cond::Ne,
+                        "<" => Cond::Lt,
+                        "<=" => Cond::Le,
+                        ">" => Cond::Gt,
+                        ">=" => Cond::Ge,
+                        _ => {
+                            return Err(
+                                self.err(Unsupported::Float, format!("operator {op} on f64"))
+                            );
+                        }
+                    };
+                    return self.push(Lir::FCompare { cond, dst, a, b });
+                }
                 if let Some(aop) = self.arith(op).filter(|_| !op.ends_with('=')) {
                     let kind = self.integer(kind, op)?;
                     return self.push(Lir::Arith {
@@ -1278,7 +1342,12 @@ fn relocate(row: &mut Lir, out: u32) {
             *a += out;
             *b += out;
         }
-        Lir::Neg { dst, a, .. } | Lir::Not { dst, a } => {
+        Lir::FArith { dst, a, b, .. } | Lir::FCompare { dst, a, b, .. } => {
+            *dst += out;
+            *a += out;
+            *b += out;
+        }
+        Lir::Neg { dst, a, .. } | Lir::Not { dst, a } | Lir::FNeg { dst, a } => {
             *dst += out;
             *a += out;
         }

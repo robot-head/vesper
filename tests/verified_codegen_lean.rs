@@ -10,7 +10,10 @@ use std::path::PathBuf;
 
 const NAMESPACE: &str = "Vesper.VerifiedCodegen";
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
-const KEY_THEOREMS: [&str; 9] = [
+const KEY_THEOREMS: [&str; 12] = [
+    "sim_farith",
+    "sim_fneg",
+    "sim_fcompare",
     "select_simulates",
     "select_branch",
     "select_control",
@@ -105,7 +108,10 @@ fn model_has_no_escape_hatches_and_audits_every_theorem() {
 #[test]
 fn rust_table_covers_every_row_kind() {
     let listing = vesper::verified_codegen::table_listing();
-    assert_eq!(listing.lines().count(), 82);
+    assert_eq!(listing.lines().count(), 93);
+    assert!(listing.contains("farith div: ld r0 s1; ld r1 s2; fop div; st s0 r0\n"));
+    assert!(listing.contains("fcompare ne: ld r0 s1; ld r1 s2; fcmp ne; st s0 r0\n"));
+    assert!(listing.contains("fneg: ld r0 s1; fneg; st s0 r0\n"));
     assert!(
         listing
             .contains("arith div i64: ld r0 s1; ld r1 s2; trapzero; trapdivovf; div s; st s0 r0\n")

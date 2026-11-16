@@ -1,0 +1,62 @@
+// IEEE-754 binary64 arithmetic and comparisons, NaN and signed zero included.
+copy struct Point {
+    x: f64,
+    y: f64
+}
+
+fn dot(a: Point, b: Point) -> f64 {
+    a.x * b.x + a.y * b.y
+}
+
+fn order(a: f64, b: f64) -> (bool, bool, bool, bool, bool, bool) {
+    (a == b, a != b, a < b, a <= b, a > b, a >= b)
+}
+
+fn sum(n: i64, acc: f64, step: f64) -> f64 {
+    if n == 0 {
+        acc
+    } else {
+        sum(wrapping_sub(n, 1), acc + step, step)
+    }
+}
+
+fn main()
+    -> (
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    (bool, bool, bool, bool, bool, bool),
+    (bool, bool, bool, bool, bool, bool),
+    bool,
+    f64
+) {
+    let zero = 0.0;
+    let nan = zero / zero;
+    let inf = 1.0 / zero;
+    let p = Point {
+        x: 1.5,
+        y: -2.25
+    };
+    let q = Point {
+        x: 4.0,
+        y: 0.1
+    };
+    let tiny = 0.000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000049;
+    let h = 0.1;
+    h += 0.2;
+    (
+        dot(p, q),
+        sum(10, 0.0, 0.1),
+        -zero,
+        inf - inf,
+        tiny / 100000000000000000.0,
+        h,
+        order(1.0, nan),
+        order(-0.0, 0.0),
+        nan != nan,
+        -inf
+    )
+}

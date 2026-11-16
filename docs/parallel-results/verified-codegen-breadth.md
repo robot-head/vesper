@@ -61,7 +61,7 @@ before, Rust lowering is outside the Lean proofs.
 
 ### Remaining gaps in #583
 
-`f64` arithmetic, strings and byte access, Windows PE/COFF
+Strings and byte access, Windows PE/COFF
 output with unwind data, and Lean encoder proofs against an ISA model are
 not in this milestone. They follow as separate PRs.
 
@@ -102,3 +102,43 @@ not in this milestone. They follow as separate PRs.
   reported as unavailable, never as a pass.
 - The Lean model covers abstract instruction selection only; the RV64 byte
   encodings are checked by the unit tests and by execution, not proved.
+
+## Milestone 3: `f64`
+
+### What was built
+
+- `f64` is a one-word kind holding the IEEE-754 binary64 bit pattern.
+  Literals are their `to_bits()`. New slot-IR rows `FArith` (`+ - * /`,
+  also compound assignment), `FNeg` and `FCompare` (`== != < <= > >=`)
+  select to new abstract instructions `fop`, `fneg` and `fcmp`. `%` on `f64`
+  and `f32` are typed `Unsupported::Float` errors.
+- Encodings: x86-64 SSE2 (`movq`, `addsd`/`subsd`/`mulsd`/`divsd`,
+  `ucomisd` with a parity check so `==` is false and `!=` true on NaN,
+  operand swaps for `<`/`<=`, and `btc rax, 63` for negation); AArch64
+  (`fmov`, `fadd`/`fsub`/`fmul`/`fdiv`, `fcmp` with `cset` on EQ, NE, MI,
+  LS, GT, GE, which are all false for an unordered pair except NE, and
+  `fneg`); RV64 D extension (`fmv.d.x`/`fmv.x.d`, `fadd.d` etc. with the
+  static round-to-nearest-even mode, `feq.d`/`flt.d`/`fle.d`, `fsgnjn.d`).
+  No fused multiply-add or reassociation is ever emitted.
+- Lean: `lean/VerifiedCodegen.lean` gains the three rows and three
+  instructions, with `sim_farith`, `sim_fneg` and `sim_fcompare` in
+  `select_simulates`. Both levels are defined with Lean's `Float` on the
+  same bit patterns, so the theorem shows the table routes the right
+  operands to the right binary64 operation and writes the right result
+  word. It does not show that `addsd` (or any target instruction)
+  implements IEEE-754, and NaN payloads, which differ between targets, are
+  not meaningful in the model. `lean/CodegenValidation.lean` drops integer
+  facts for `f64` results (`fcompare` results are `bool`), and every
+  Codegen Lean file still compiles with Lean 4.35.0 and no `sorry`.
+
+### Checks
+
+- `tests/fixtures/verified_codegen/floats.ves` (dot product, a sum loop of
+  `0.1`, `-0.0`, `inf - inf`, a subnormal quotient, `0.1 + 0.2` via `+=`,
+  all six comparisons with NaN and with `-0.0 == 0.0`, `nan != nan`) agrees
+  with the evaluator and Cranelift on x86-64, and on AArch64 and RV64 under
+  QEMU, optimizer on and off. NaN results are compared as NaN, not by
+  payload.
+- `VESPER_LEAN=<lean 4.35.0> cargo test --locked --test verified_codegen_lean
+  --test refinement_places_lean`: pass, including the line-for-line table
+  comparison (93 rows).

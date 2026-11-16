@@ -320,6 +320,13 @@ fn fixture(name: &str) -> String {
 
 /// Rendered by the evaluator; the tests check the other engines agree.
 const ENUMS: &str = "(110, 5, 6, -1, Some(42), Rect(3, 5))";
+/// `tiny / 1e17` is the subnormal 4.9e-322: 321 zeros after the point.
+fn floats_expected() -> String {
+    format!(
+        "(5.775, 0.9999999999999999, -0, NaN, 0.{}49, 0.30000000000000004, (false, true, false, false, false, false), (true, false, false, true, false, true), true, -inf)",
+        "0".repeat(321)
+    )
+}
 const LITERALS: &str = "(100, 200, 300, 400, 500, Ok(42), Err(Halt), (-2, -1, 0))";
 
 #[test]
@@ -341,6 +348,7 @@ fn fixtures_agree_with_the_evaluator_and_cranelift() {
         ("enums.ves", ENUMS),
         ("literals.ves", LITERALS),
         ("nested.ves", "(Some(Some(1)), Some(None), 9, 3, 4)"),
+        ("floats.ves", floats_expected().as_str()),
     ] {
         assert_eq!(differential(&fixture(name)), expected, "{name}");
     }
@@ -430,7 +438,10 @@ fn rejects(source: &str, construct: Unsupported) {
 
 #[test]
 fn constructs_outside_the_subset_are_typed_errors() {
-    rejects("fn main() -> f64 { 1.5 }", Unsupported::Float);
+    rejects(
+        "fn r(a: f64, b: f64) -> f64 { a % b } fn main() -> f64 { r(1.5, 1.0) }",
+        Unsupported::Float,
+    );
     rejects("fn main() -> i64 { let s = \"x\"; 1 }", Unsupported::String);
     rejects(
         "enum L { Nil, Cons(i64, L) } fn main() -> i64 { match L::Nil { L::Nil => 0, L::Cons(x, _) => x, } }",

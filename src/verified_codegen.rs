@@ -30,7 +30,7 @@
 //!    to fixed bytes, and a container (`container.rs`): a static Linux ELF
 //!    executable, or a Mach-O AArch64 object for the system linker.
 //!
-//! The supported subset is: `u8`, `u32`, `u64`, `i64`, `bool` and `Unit`;
+//! The supported subset is: `u8`, `u32`, `u64`, `i64`, `f64`, `bool` and `Unit`;
 //! structs (after generic substitution) and tuples of them, passed as words
 //! on the stack; checked `+ - * / %`, negation and compound assignment with
 //! the `vesper.arith.checked/1` aborts; `wrapping_*`; comparisons; `!`;
@@ -44,8 +44,13 @@
 //! chain of word tests over tag, integer and `bool` literal, tuple, struct
 //! and variant patterns, built only from existing slot-IR rows (`Const`,
 //! `Compare`, `BranchZero`, `Jump`), so it needs no new rows in the Lean
-//! table. Handlers and every other effect, floats, strings, recursive
-//! enums, closures, generic functions, vectors and regions are rejected.
+//! table. `f64` values are their binary64 bit pattern in one word, with
+//! IEEE-754 `+ - * /` (round to nearest, ties to even; no fast-math),
+//! negation and ordered comparisons; their Lean rows are proved relative to
+//! one shared binary64 semantics (Lean's `Float`), not against the hardware.
+//! Handlers and every other effect, `f32`, `f64` remainder, strings,
+//! recursive enums, closures, generic functions, vectors and regions are
+//! rejected.
 //!
 //! Values live in frame slots, never in registers across slot-IR rows: there
 //! is no register allocator, so the code is slow but each row is local, which
@@ -64,7 +69,7 @@ mod x86_64;
 
 pub use cli::build_command;
 pub use machine::{
-    ArithOp, Cond, Kind, Label, Lir, Loc, M, Reg, Sign, Slot, TrapKind, WrapOp, select,
+    ArithOp, Cond, FloatOp, Kind, Label, Lir, Loc, M, Reg, Sign, Slot, TrapKind, WrapOp, select,
     table_listing, table_rows,
 };
 
@@ -490,6 +495,7 @@ fn decode_at(
         "u32" => Value::UInt(word()?, 32),
         "u8" => Value::UInt(word()?, 8),
         "bool" => Value::Bool(word()? != 0),
+        "f64" => Value::Float(f64::from_bits(word()?)),
         "Unit" => Value::Tuple(vec![]),
         _ => match &ty {
             Type::Tuple(ts) => Value::Tuple(

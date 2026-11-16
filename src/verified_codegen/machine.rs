@@ -57,6 +57,8 @@ pub enum Kind {
     U64,
     I64,
     Bool,
+    /// IEEE-754 binary64, as its bit pattern.
+    F64,
 }
 impl Kind {
     pub const INTEGERS: [Kind; 4] = [Self::U8, Self::U32, Self::U64, Self::I64];
@@ -82,6 +84,7 @@ impl Kind {
             Self::U64 => "u64",
             Self::I64 => "i64",
             Self::Bool => "bool",
+            Self::F64 => "f64",
         }
     }
 }
@@ -103,6 +106,26 @@ impl ArithOp {
             Self::Mul => "mul",
             Self::Div => "div",
             Self::Rem => "rem",
+        }
+    }
+}
+/// IEEE-754 binary64 arithmetic, round to nearest, ties to even (no
+/// fast-math: no reassociation, contraction or flushing).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FloatOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+impl FloatOp {
+    pub const ALL: [FloatOp; 4] = [Self::Add, Self::Sub, Self::Mul, Self::Div];
+    fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::Mul => "mul",
+            Self::Div => "div",
         }
     }
 }
@@ -201,6 +224,26 @@ pub enum Lir {
     Compare {
         cond: Cond,
         kind: Kind,
+        dst: Slot,
+        a: Slot,
+        b: Slot,
+    },
+    /// `f64` arithmetic on bit patterns.
+    FArith {
+        op: FloatOp,
+        dst: Slot,
+        a: Slot,
+        b: Slot,
+    },
+    /// `f64` negation (flips the sign bit, NaN included).
+    FNeg {
+        dst: Slot,
+        a: Slot,
+    },
+    /// `f64` comparison: ordered for `== < <= > >=` (false when either
+    /// operand is NaN), and `!=` is the negation of `==`.
+    FCompare {
+        cond: Cond,
         dst: Slot,
         a: Slot,
         b: Slot,
@@ -314,6 +357,13 @@ pub enum M {
     XorOne,
     /// `R0 := (R0 cond R1) ? 1 : 0`.
     Cmp(Cond, Sign),
+    /// `R0 := R0 op R1` on binary64 bit patterns.
+    FOp(FloatOp),
+    /// `R0 := -R0` on a binary64 bit pattern.
+    FNeg,
+    /// `R0 := (R0 cond R1) ? 1 : 0` on binary64 values (see
+    /// [`Lir::FCompare`]).
+    FCmp(Cond),
     Label(Label),
     Jmp(Label),
     /// Branch when `R0 = 0`.
@@ -342,6 +392,9 @@ impl fmt::Display for M {
             Self::NegChk(s) => write!(f, "negchk {}", s.name()),
             Self::XorOne => write!(f, "xorone"),
             Self::Cmp(c, s) => write!(f, "cmp {} {}", c.name(), s.name()),
+            Self::FOp(op) => write!(f, "fop {}", op.name()),
+            Self::FNeg => write!(f, "fneg"),
+            Self::FCmp(c) => write!(f, "fcmp {}", c.name()),
             Self::Label(l) => write!(f, "label L{l}"),
             Self::Jmp(l) => write!(f, "jmp L{l}"),
             Self::Bz(l) => write!(f, "bz L{l}"),
@@ -418,6 +471,9 @@ pub fn select(row: &Lir) -> Vec<M> {
             a,
             b,
         } => binary(a, b, &[Cmp(cond, kind.sign())], dst),
+        Lir::FArith { op, dst, a, b } => binary(a, b, &[FOp(op)], dst),
+        Lir::FNeg { dst, a } => vec![Ld(R0, Loc::Slot(a)), FNeg, St(Loc::Slot(dst), R0)],
+        Lir::FCompare { cond, dst, a, b } => binary(a, b, &[FCmp(cond)], dst),
         Lir::StoreOut { index, src } => vec![Ld(R0, Loc::Slot(src)), St(Loc::Out(index), R0)],
         Lir::LoadOut { dst, index } => vec![Ld(R0, Loc::Out(index)), St(Loc::Slot(dst), R0)],
         Lir::LoadIn { dst, index } => vec![Ld(R0, Loc::In(index)), St(Loc::Slot(dst), R0)],
@@ -485,6 +541,19 @@ pub fn table_rows() -> Vec<(String, Lir)> {
                 },
             ));
         }
+    }
+    for op in FloatOp::ALL {
+        rows.push((
+            format!("farith {}", op.name()),
+            Lir::FArith { op, dst, a, b },
+        ));
+    }
+    rows.push(("fneg".to_owned(), Lir::FNeg { dst, a }));
+    for cond in Cond::ALL {
+        rows.push((
+            format!("fcompare {}", cond.name()),
+            Lir::FCompare { cond, dst, a, b },
+        ));
     }
     rows.extend([
         ("storeout".to_owned(), Lir::StoreOut { index: 3, src: a }),

@@ -79,6 +79,8 @@ inductive ArithOp | add | sub | mul | div | rem
   deriving DecidableEq, Repr
 inductive WrapOp | add | sub | mul
   deriving DecidableEq, Repr
+inductive FloatOp | add | sub | mul | div
+  deriving DecidableEq, Repr
 inductive Cond | eq | ne | lt | le | gt | ge
   deriving DecidableEq, Repr
 inductive Failure | overflow | divZero | unreachable | fault
@@ -96,6 +98,9 @@ inductive Lir
   | neg (k : Kind) (d a : Nat)
   | not (d a : Nat)
   | compare (c : Cond) (k : Kind) (d a b : Nat)
+  | farith (op : FloatOp) (d a b : Nat)
+  | fneg (d a : Nat)
+  | fcompare (c : Cond) (d a b : Nat)
   | storeOut (i src : Nat)
   | loadOut (d i : Nat)
   | loadIn (d i : Nat)
@@ -163,6 +168,35 @@ def wrapOp (op : WrapOp) (x y : Int) : Int :=
   | .sub => x - y
   | .mul => x * y
 
+/-! ### binary64
+
+`f64` values are stored as their bit pattern. Both levels use Lean's `Float`
+(IEEE-754 binary64, round to nearest, ties to even) on the same bit patterns,
+so the selection proof below is relative to that one shared semantics: it
+shows the table passes the right operands to the right operation, not that a
+target instruction implements IEEE-754 (that is the hardware's contract, and
+the encodings are tested by execution). NaN payloads are not modelled
+meaningfully: targets may return different NaN bit patterns. -/
+
+def fbits (x : Int) : Float := Float.ofBits (UInt64.ofNat (enc x).toNat)
+def fword (f : Float) : Int := Int.ofNat f.toBits.toNat
+
+def fop : FloatOp → Float → Float → Float
+  | .add, x, y => x + y
+  | .sub, x, y => x - y
+  | .mul, x, y => x * y
+  | .div, x, y => x / y
+
+/-- Ordered comparisons (false on NaN); `ne` is the negation of `eq`. -/
+def fcond (c : Cond) (x y : Float) : Bool :=
+  match c with
+  | .eq => x == y
+  | .ne => !(x == y)
+  | .lt => decide (x < y)
+  | .le => decide (x ≤ y)
+  | .gt => decide (y < x)
+  | .ge => decide (y ≤ x)
+
 /-- One data row of the slot IR. Control rows do not change the store. -/
 def lirStep (r : Lir) (s : Store) : Res Store :=
   match r with
@@ -178,6 +212,11 @@ def lirStep (r : Lir) (s : Store) : Res Store :=
   | .not d a => .ok (upd s (.slot d) (1 - s (.slot a)))
   | .compare c _ d a b =>
       .ok (upd s (.slot d) (if cond c (s (.slot a)) (s (.slot b)) then 1 else 0))
+  | .farith op d a b =>
+      .ok (upd s (.slot d) (fword (fop op (fbits (s (.slot a))) (fbits (s (.slot b))))))
+  | .fneg d a => .ok (upd s (.slot d) (fword (-(fbits (s (.slot a))))))
+  | .fcompare c d a b =>
+      .ok (upd s (.slot d) (if fcond c (fbits (s (.slot a))) (fbits (s (.slot b))) then 1 else 0))
   | .storeOut i src => .ok (upd s (.out i) (s (.slot src)))
   | .loadOut d i => .ok (upd s (.slot d) (s (.out i)))
   | .loadIn d i => .ok (upd s (.slot d) (s (.inn i)))
@@ -209,6 +248,9 @@ inductive M
   | negchk (sg : Sign)
   | xorone
   | cmp (c : Cond) (sg : Sign)
+  | fop (op : FloatOp)
+  | fneg
+  | fcmp (c : Cond)
   | label (l : Nat)
   | jmp (l : Nat)
   | bz (l : Nat)
@@ -283,6 +325,9 @@ def Mach.step (i : M) (m : Mach) : Res Mach :=
   | .xorone => .ok (setReg m .r0 (if a % 2 = 0 then a + 1 else a - 1))
   | .cmp c .s => .ok (setReg m .r0 (if cond c (toS a) (toS b) then 1 else 0))
   | .cmp c .u => .ok (setReg m .r0 (if cond c a b then 1 else 0))
+  | .fop op => .ok (setReg m .r0 (fword (fop op (fbits a) (fbits b))))
+  | .fneg => .ok (setReg m .r0 (fword (-(fbits a))))
+  | .fcmp c => .ok (setReg m .r0 (if fcond c (fbits a) (fbits b) then 1 else 0))
   | .trap f => .abort f
   | _ => .ok m
 
@@ -329,6 +374,9 @@ def select : Lir → List M
   | .neg k d a => [.ld .r0 (.slot a), .negchk k.sign, .st (.slot d) .r0]
   | .not d a => [.ld .r0 (.slot a), .xorone, .st (.slot d) .r0]
   | .compare c k d a b => binary a b [.cmp c k.sign] d
+  | .farith op d a b => binary a b [.fop op] d
+  | .fneg d a => [.ld .r0 (.slot a), .fneg, .st (.slot d) .r0]
+  | .fcompare c d a b => binary a b [.fcmp c] d
   | .storeOut i src => [.ld .r0 (.slot src), .st (.out i) .r0]
   | .loadOut d i => [.ld .r0 (.out i), .st (.slot d) .r0]
   | .loadIn d i => [.ld .r0 (.inn i), .st (.slot d) .r0]
@@ -429,6 +477,13 @@ theorem tmod_neg_one (x : Int) : x.tmod (-1) = 0 := by simp [Int.tmod_eq_emod]
 theorem toS_mod_i64 (x : Int) (h : -9223372036854775808 ≤ x ∧ x ≤ 9223372036854775807) :
     toS (x % 18446744073709551616) = x := by
   simp only [toS, H, W]; split <;> omega
+
+theorem fword_enc (f : Float) : fword f = enc (fword f) := by
+  have := f.toBits.toNat_lt
+  simp only [fword, enc, W, Int.ofNat_eq_natCast]; omega
+
+theorem fbits_enc (x : Int) : fbits (enc x) = fbits x := by
+  simp only [fbits, enc_idem]
 
 /-! ### Row theorems -/
 
@@ -593,6 +648,24 @@ theorem sim_compare (c : Cond) (k : Kind) (d a b : Nat) (ht : Typed (.compare c 
   all_goals simp only [Sim]
   all_goals exact rel_st s m hR _ _ _ _ (by simp only [enc, W]; split <;> omega)
 
+theorem sim_farith (op : FloatOp) (d a b : Nat) :
+    Sim (lirStep (.farith op d a b) s) (run (select (.farith op d a b)) m) := by
+  simp only [lirStep, select, binary, run, List.cons_append, List.nil_append]
+  simp [Mach.step, setReg, hR (.slot a), hR (.slot b), fbits_enc, Sim]
+  exact rel_st s m hR _ _ _ _ (fword_enc _)
+
+theorem sim_fneg (d a : Nat) :
+    Sim (lirStep (.fneg d a) s) (run (select (.fneg d a)) m) := by
+  simp only [lirStep, select, run]
+  simp [Mach.step, setReg, hR (.slot a), fbits_enc, Sim]
+  exact rel_st s m hR _ _ _ _ (fword_enc _)
+
+theorem sim_fcompare (c : Cond) (d a b : Nat) :
+    Sim (lirStep (.fcompare c d a b) s) (run (select (.fcompare c d a b)) m) := by
+  simp only [lirStep, select, binary, run, List.cons_append, List.nil_append]
+  simp [Mach.step, setReg, hR (.slot a), hR (.slot b), fbits_enc, Sim]
+  exact rel_st s m hR _ _ _ _ (by simp only [enc, W]; split <;> omega)
+
 end Rows
 
 /-! ### The table -/
@@ -609,6 +682,9 @@ theorem select_simulates (r : Lir) (s : Store) (m : Mach) (hR : Rel s m) (hd : D
   | neg k d a => exact sim_neg s m hR k d a ht
   | not d a => exact sim_not s m hR d a ht
   | compare c k d a b => exact sim_compare s m hR c k d a b ht
+  | farith op d a b => exact sim_farith s m hR op d a b
+  | fneg d a => exact sim_fneg s m hR d a
+  | fcompare c d a b => exact sim_fcompare s m hR c d a b
   | storeOut i a => exact sim_storeOut s m hR i a
   | loadOut d i => exact sim_loadOut s m hR d i
   | loadIn d i => exact sim_loadIn s m hR d i
@@ -648,6 +724,8 @@ def ArithOp.render : ArithOp → String
   | .add => "add" | .sub => "sub" | .mul => "mul" | .div => "div" | .rem => "rem"
 def WrapOp.render : WrapOp → String
   | .add => "add" | .sub => "sub" | .mul => "mul"
+def FloatOp.render : FloatOp → String
+  | .add => "add" | .sub => "sub" | .mul => "mul" | .div => "div"
 def Cond.render : Cond → String
   | .eq => "eq" | .ne => "ne" | .lt => "lt" | .le => "le" | .gt => "gt" | .ge => "ge"
 def Sign.render : Sign → String
@@ -676,6 +754,9 @@ def M.render : M → String
   | .negchk sg => s!"negchk {sg.render}"
   | .xorone => "xorone"
   | .cmp c sg => s!"cmp {c.render} {sg.render}"
+  | .fop op => s!"fop {op.render}"
+  | .fneg => "fneg"
+  | .fcmp c => s!"fcmp {c.render}"
   | .label l => s!"label L{l}"
   | .jmp l => s!"jmp L{l}"
   | .bz l => s!"bz L{l}"
@@ -699,6 +780,11 @@ def tableRows : List (String × Lir) :=
   ([Cond.eq, .ne, .lt, .le, .gt, .ge].flatMap fun c =>
     [Kind.u8, .u32, .u64, .i64, .bool].map fun k =>
       (s!"compare {c.render} {k.render}", .compare c k 0 1 2)) ++
+  ([FloatOp.add, .sub, .mul, .div].map fun op =>
+    (s!"farith {op.render}", .farith op 0 1 2)) ++
+  [("fneg", .fneg 0 1)] ++
+  ([Cond.eq, .ne, .lt, .le, .gt, .ge].map fun c =>
+    (s!"fcompare {c.render}", .fcompare c 0 1 2)) ++
   [("storeout", .storeOut 3 1), ("loadout", .loadOut 0 3), ("loadin", .loadIn 0 3),
    ("storein", .storeIn 3 1), ("branchzero", .branchZero 1 9), ("jump", .jump 9),
    ("label", .label 9), ("call", .call 9), ("enter", .enter 4), ("return", .ret),
@@ -735,6 +821,11 @@ def listing : String :=
 #print axioms Vesper.VerifiedCodegen.sim_neg
 #print axioms Vesper.VerifiedCodegen.sim_not
 #print axioms Vesper.VerifiedCodegen.sim_compare
+#print axioms Vesper.VerifiedCodegen.fword_enc
+#print axioms Vesper.VerifiedCodegen.fbits_enc
+#print axioms Vesper.VerifiedCodegen.sim_farith
+#print axioms Vesper.VerifiedCodegen.sim_fneg
+#print axioms Vesper.VerifiedCodegen.sim_fcompare
 #print axioms Vesper.VerifiedCodegen.select_simulates
 #print axioms Vesper.VerifiedCodegen.select_branch
 #print axioms Vesper.VerifiedCodegen.select_control

@@ -45,7 +45,9 @@ def transfer (facts : Facts) : Lir → Facts
   | .const d value => put facts (.slot d) (constantKind value)
   | .move d a => put facts (.slot d) (facts (.slot a))
   | .arith _ kind d _ _ | .wrapping _ kind d _ _ | .neg kind d _ => put facts (.slot d) (some kind)
-  | .not d _ | .compare _ _ d _ _ => put facts (.slot d) (some .bool)
+  | .not d _ | .compare _ _ d _ _ | .fcompare _ d _ _ => put facts (.slot d) (some .bool)
+  -- A binary64 bit pattern has no integer-kind fact.
+  | .farith _ d _ _ | .fneg d _ => put facts (.slot d) none
   | .storeOut i a => put facts (.out i) (facts (.slot a))
   | .loadOut d i => put facts (.slot d) (facts (.out i))
   | .loadIn d i => put facts (.slot d) (facts (.inn i))
@@ -203,6 +205,21 @@ theorem transfer_sound {facts : Facts} {store next : Store} (holds : Holds facts
     simp only [Typed, InRange, Kind.lo, Kind.hi] at typed ⊢
     omega
   | compare c k d a b =>
+    simp only [lirStep, Res.ok.injEq] at result
+    subst next
+    apply put_sound holds
+    intro k' same
+    cases same
+    split <;> simp [InRange, Kind.lo, Kind.hi]
+  | farith op d a b =>
+    simp only [lirStep, Res.ok.injEq] at result
+    subst next
+    exact put_sound holds _ _ _ (fun _ known => by cases known)
+  | fneg d a =>
+    simp only [lirStep, Res.ok.injEq] at result
+    subst next
+    exact put_sound holds _ _ _ (fun _ known => by cases known)
+  | fcompare c d a b =>
     simp only [lirStep, Res.ok.injEq] at result
     subst next
     apply put_sound holds

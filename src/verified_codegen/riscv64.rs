@@ -1,5 +1,5 @@
 //! The RV64 encoding of each abstract machine instruction (RV64I plus the
-//! M extension; no compressed instructions, so the code also runs on any
+//! M and D extensions; no compressed instructions, so the code also runs on any
 //! RV64GC core).
 //!
 //! `R0`, `R1`, `R2` are `a0`, `a1`, `a2`; `t0` and `t1` are scratch inside
@@ -11,7 +11,7 @@
 //! (±1 MiB). These encodings are tested by running the emitted programs
 //! under QEMU; they are not covered by the Lean theorem.
 use super::asm::{Asm, Fix};
-use super::machine::{Cond, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
+use super::machine::{Cond, FloatOp, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
 use super::{ResultProtocol, VerifiedError};
 
 const ZERO: u32 = 0;
@@ -116,6 +116,20 @@ const DIV: u32 = 4;
 const DIVU: u32 = 5;
 const REM: u32 = 6;
 const REMU: u32 = 7;
+
+/// OP-FP `funct7 rd, rs1, rs2` with `funct3` (the rounding mode for
+/// arithmetic: 0 is round to nearest, ties to even).
+fn fp(a: &mut Asm, funct7: u32, funct3: u32, rd: u32, rs1: u32, rs2: u32) {
+    a.u32(funct7 << 25 | rs2 << 20 | rs1 << 15 | funct3 << 12 | rd << 7 | 0x53);
+}
+/// `fmv.d.x fd, rs1`.
+fn fmv_d_x(a: &mut Asm, fd: u32, rs1: u32) {
+    fp(a, 0x79, 0, fd, rs1, 0);
+}
+/// `fmv.x.d rd, fs1`.
+fn fmv_x_d(a: &mut Asm, rd: u32, fs1: u32) {
+    fp(a, 0x71, 0, rd, fs1, 0);
+}
 
 /// `li rd, w` as a fixed eleven-instruction sequence: the top nine bits,
 /// then five 11-bit chunks shifted in (`ori` takes non-negative 11-bit
@@ -274,6 +288,41 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
                 }
             }
         }
+        // fmv.d.x f0, a0; fmv.d.x f1, a1; f<op>.d f0, f0, f1 (rne); fmv.x.d a0, f0
+        M::FOp(op) => {
+            let funct7 = match op {
+                FloatOp::Add => 0x01,
+                FloatOp::Sub => 0x05,
+                FloatOp::Mul => 0x09,
+                FloatOp::Div => 0x0d,
+            };
+            fmv_d_x(a, 0, A0);
+            fmv_d_x(a, 1, A1);
+            fp(a, funct7, 0, 0, 0, 1);
+            fmv_x_d(a, A0, 0);
+        }
+        // fmv.d.x f0, a0; fsgnjn.d f0, f0, f0; fmv.x.d a0, f0
+        M::FNeg => {
+            fmv_d_x(a, 0, A0);
+            fp(a, 0x11, 1, 0, 0, 0);
+            fmv_x_d(a, A0, 0);
+        }
+        // feq/flt/fle.d write 0 for an unordered pair; `!=` is `feq` negated.
+        M::FCmp(c) => {
+            fmv_d_x(a, 0, A0);
+            fmv_d_x(a, 1, A1);
+            let (funct3, x, y) = match c {
+                Cond::Eq | Cond::Ne => (2, 0, 1),
+                Cond::Lt => (1, 0, 1),
+                Cond::Le => (0, 0, 1),
+                Cond::Gt => (1, 1, 0),
+                Cond::Ge => (0, 1, 0),
+            };
+            fp(a, 0x51, funct3, A0, x, y);
+            if c == Cond::Ne {
+                xori(a, A0, A0, 1);
+            }
+        }
         M::Label(l) => a.bind(l)?,
         M::Jmp(l) => jal(a, ZERO, l),
         M::Bz(l) => branch_to(a, BEQ, A0, ZERO, l),
@@ -366,6 +415,11 @@ mod tests {
         assert_eq!(one(|a| sltu(a, A0, ZERO, T0)), 0x0050_3533); // snez a0,t0
         assert_eq!(one(|a| b(a, BNE, A0, A2, 16)), 0x00c5_1863); // bne a0,a2,+16
         assert_eq!(one(|a| i(a, JALR, 0, ZERO, RA, 0)), 0x0000_8067); // ret
+        assert_eq!(one(|a| fmv_d_x(a, 0, A0)), 0xf205_0053); // fmv.d.x ft0,a0
+        assert_eq!(one(|a| fmv_x_d(a, A0, 0)), 0xe200_0553); // fmv.x.d a0,ft0
+        assert_eq!(one(|a| fp(a, 0x01, 0, 0, 0, 1)), 0x0210_0053); // fadd.d ft0,ft0,ft1,rne
+        assert_eq!(one(|a| fp(a, 0x51, 2, A0, 0, 1)), 0xa210_2553); // feq.d a0,ft0,ft1
+        assert_eq!(one(|a| fp(a, 0x11, 1, 0, 0, 0)), 0x2200_1053); // fneg.d ft0,ft0
     }
 
     #[test]

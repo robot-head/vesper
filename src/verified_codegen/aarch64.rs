@@ -5,7 +5,7 @@
 //! (reserved on Apple platforms) is never used. These encodings are tested by
 //! running the emitted programs; they are not covered by the Lean theorem.
 use super::asm::{Asm, Fix};
-use super::machine::{Cond, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
+use super::machine::{Cond, FloatOp, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
 use super::{Os, ResultProtocol, VerifiedError};
 
 const SP: u32 = 31;
@@ -24,6 +24,7 @@ const EQ: u32 = 0;
 const NE: u32 = 1;
 const HS: u32 = 2;
 const LO: u32 = 3;
+const MI: u32 = 4;
 const VS: u32 = 6;
 const HI: u32 = 8;
 const LS: u32 = 9;
@@ -172,6 +173,41 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
                 (Cond::Ge, Sign::U) => HS,
             };
             rrr(a, SUBS, XZR, 0, 1);
+            a.u32(0x9a9f_07e0 | (cond ^ 1) << 12);
+        }
+        // fmov d0, x0; fmov d1, x1; f<op> d0, d0, d1; fmov x0, d0
+        M::FOp(op) => {
+            let opcode = match op {
+                FloatOp::Add => 0x1e61_2800,
+                FloatOp::Sub => 0x1e61_3800,
+                FloatOp::Mul => 0x1e61_0800,
+                FloatOp::Div => 0x1e61_1800,
+            };
+            a.u32(0x9e67_0000);
+            a.u32(0x9e67_0021);
+            a.u32(opcode);
+            a.u32(0x9e66_0000);
+        }
+        // fmov d0, x0; fneg d0, d0; fmov x0, d0
+        M::FNeg => {
+            a.u32(0x9e67_0000);
+            a.u32(0x1e61_4000);
+            a.u32(0x9e66_0000);
+        }
+        // fmov d0, x0; fmov d1, x1; fcmp d0, d1; cset x0, cond. An unordered
+        // pair sets C and V, so MI, LS, GT, GE and EQ are false and NE true.
+        M::FCmp(c) => {
+            let cond = match c {
+                Cond::Eq => EQ,
+                Cond::Ne => NE,
+                Cond::Lt => MI,
+                Cond::Le => LS,
+                Cond::Gt => GT,
+                Cond::Ge => GE,
+            };
+            a.u32(0x9e67_0000);
+            a.u32(0x9e67_0021);
+            a.u32(0x1e61_2000);
             a.u32(0x9a9f_07e0 | (cond ^ 1) << 12);
         }
         M::Label(l) => a.bind(l)?,

@@ -103,7 +103,11 @@ fn rejects_bad_flags_and_unsupported_programs() {
         assert!(!out.status.success(), "{args:?} should fail");
     }
     let source = dir.join("float.ves");
-    std::fs::write(&source, "fn main() -> f64 { 1.5 }\n").unwrap();
+    std::fs::write(
+        &source,
+        "fn r(a: f64, b: f64) -> f64 { a % b }\nfn main() -> f64 { r(1.5, 1.0) }\n",
+    )
+    .unwrap();
     let out = vesper()
         .arg("build")
         .arg(&source)

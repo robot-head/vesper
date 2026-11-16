@@ -5,7 +5,7 @@
 //! These encodings are tested by running the emitted programs; they are not
 //! covered by the Lean theorem.
 use super::asm::{Asm, Fix};
-use super::machine::{Cond, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
+use super::machine::{Cond, FloatOp, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
 use super::{Os, ResultProtocol, VerifiedError};
 
 fn reg(r: Reg) -> u8 {
@@ -135,6 +135,48 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
                 (Cond::Ge, Sign::U) => 0x93,
             };
             a.bytes(&[0x48, 0x39, 0xc8, 0x0f, cc, 0xc0, 0x0f, 0xb6, 0xc0]);
+        }
+        // movq xmm0, rax; movq xmm1, rcx; <op>sd xmm0, xmm1; movq rax, xmm0
+        M::FOp(op) => {
+            let opcode = match op {
+                FloatOp::Add => 0x58,
+                FloatOp::Sub => 0x5c,
+                FloatOp::Mul => 0x59,
+                FloatOp::Div => 0x5e,
+            };
+            a.bytes(&[0x66, 0x48, 0x0f, 0x6e, 0xc0, 0x66, 0x48, 0x0f, 0x6e, 0xc9]);
+            a.bytes(&[0xf2, 0x0f, opcode, 0xc1]);
+            a.bytes(&[0x66, 0x48, 0x0f, 0x7e, 0xc0]);
+        }
+        // btc rax, 63
+        M::FNeg => a.bytes(&[0x48, 0x0f, 0xba, 0xf8, 0x3f]),
+        // movq xmm0, rax; movq xmm1, rcx; ucomisd; then a NaN-aware setcc.
+        // `ucomisd` sets ZF, PF and CF on an unordered pair.
+        M::FCmp(c) => {
+            a.bytes(&[0x66, 0x48, 0x0f, 0x6e, 0xc0, 0x66, 0x48, 0x0f, 0x6e, 0xc9]);
+            // ucomisd xmm0, xmm1 / ucomisd xmm1, xmm0
+            const AB: [u8; 4] = [0x66, 0x0f, 0x2e, 0xc1];
+            const BA: [u8; 4] = [0x66, 0x0f, 0x2e, 0xc8];
+            match c {
+                // ucomisd; mov eax, 0|1; jp +3; sete/setne al
+                Cond::Eq | Cond::Ne => {
+                    let (init, cc) = if c == Cond::Eq { (0, 0x94) } else { (1, 0x95) };
+                    a.bytes(&AB);
+                    a.bytes(&[0xb8, init, 0, 0, 0, 0x7a, 0x03, 0x0f, cc, 0xc0]);
+                }
+                // a > b: seta (CF = 0 and ZF = 0); a >= b: setae (CF = 0).
+                // a < b and a <= b swap the operands.
+                _ => {
+                    let (order, cc) = match c {
+                        Cond::Gt => (AB, 0x97),
+                        Cond::Ge => (AB, 0x93),
+                        Cond::Lt => (BA, 0x97),
+                        _ => (BA, 0x93),
+                    };
+                    a.bytes(&order);
+                    a.bytes(&[0x0f, cc, 0xc0, 0x0f, 0xb6, 0xc0]);
+                }
+            }
         }
         M::Label(l) => a.bind(l)?,
         M::Jmp(l) => rel(a, 0xe9, l),
