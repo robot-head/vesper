@@ -2,8 +2,10 @@
 //! written by hand with `prost` derives so no `protoc` is needed at build
 //! time. Packages, field numbers and types follow opentelemetry-proto `main`
 //! (fetched 2026-11-14): `common/v1/common.proto`, `resource/v1`,
-//! `trace/v1`, `metrics/v1` (histograms only; other metric data kinds are
-//! skipped as unknown fields when decoding), `logs/v1` and the three
+//! `trace/v1`, `metrics/v1` (gauges, sums, histograms, exponential
+//! histograms and exemplars; summaries are skipped as unknown fields when
+//! decoding; checked against `go.opentelemetry.io/proto/otlp` 2026-11-16),
+//! `logs/v1` and the three
 //! `collector/*/v1/*_service.proto` request/response pairs.
 
 // ---------------------------------------------------------------- common.v1
@@ -191,14 +193,126 @@ pub struct Metric {
     pub description: String,
     #[prost(string, tag = "3")]
     pub unit: String,
-    #[prost(oneof = "metric::Data", tags = "9")]
+    #[prost(oneof = "metric::Data", tags = "5, 7, 9, 10")]
     pub data: Option<metric::Data>,
 }
 pub mod metric {
     #[derive(Clone, PartialEq, prost::Oneof)]
     pub enum Data {
+        #[prost(message, tag = "5")]
+        Gauge(super::Gauge),
+        #[prost(message, tag = "7")]
+        Sum(super::Sum),
         #[prost(message, tag = "9")]
         Histogram(super::Histogram),
+        #[prost(message, tag = "10")]
+        ExponentialHistogram(super::ExponentialHistogram),
+    }
+}
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct Gauge {
+    #[prost(message, repeated, tag = "1")]
+    pub data_points: Vec<NumberDataPoint>,
+}
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct Sum {
+    #[prost(message, repeated, tag = "1")]
+    pub data_points: Vec<NumberDataPoint>,
+    #[prost(int32, tag = "2")]
+    pub aggregation_temporality: i32,
+    #[prost(bool, tag = "3")]
+    pub is_monotonic: bool,
+}
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ExponentialHistogram {
+    #[prost(message, repeated, tag = "1")]
+    pub data_points: Vec<ExponentialHistogramDataPoint>,
+    #[prost(int32, tag = "2")]
+    pub aggregation_temporality: i32,
+}
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct NumberDataPoint {
+    #[prost(message, repeated, tag = "7")]
+    pub attributes: Vec<KeyValue>,
+    #[prost(fixed64, tag = "2")]
+    pub start_time_unix_nano: u64,
+    #[prost(fixed64, tag = "3")]
+    pub time_unix_nano: u64,
+    #[prost(oneof = "number_data_point::Value", tags = "4, 6")]
+    pub value: Option<number_data_point::Value>,
+    #[prost(message, repeated, tag = "5")]
+    pub exemplars: Vec<Exemplar>,
+    #[prost(uint32, tag = "8")]
+    pub flags: u32,
+}
+pub mod number_data_point {
+    #[derive(Clone, Copy, PartialEq, prost::Oneof)]
+    pub enum Value {
+        #[prost(double, tag = "4")]
+        AsDouble(f64),
+        #[prost(sfixed64, tag = "6")]
+        AsInt(i64),
+    }
+}
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct ExponentialHistogramDataPoint {
+    #[prost(message, repeated, tag = "1")]
+    pub attributes: Vec<KeyValue>,
+    #[prost(fixed64, tag = "2")]
+    pub start_time_unix_nano: u64,
+    #[prost(fixed64, tag = "3")]
+    pub time_unix_nano: u64,
+    #[prost(fixed64, tag = "4")]
+    pub count: u64,
+    #[prost(double, optional, tag = "5")]
+    pub sum: Option<f64>,
+    #[prost(sint32, tag = "6")]
+    pub scale: i32,
+    #[prost(fixed64, tag = "7")]
+    pub zero_count: u64,
+    #[prost(message, optional, tag = "8")]
+    pub positive: Option<Buckets>,
+    #[prost(message, optional, tag = "9")]
+    pub negative: Option<Buckets>,
+    #[prost(uint32, tag = "10")]
+    pub flags: u32,
+    #[prost(message, repeated, tag = "11")]
+    pub exemplars: Vec<Exemplar>,
+    #[prost(double, optional, tag = "12")]
+    pub min: Option<f64>,
+    #[prost(double, optional, tag = "13")]
+    pub max: Option<f64>,
+    #[prost(double, tag = "14")]
+    pub zero_threshold: f64,
+}
+/// `ExponentialHistogramDataPoint.Buckets`.
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct Buckets {
+    #[prost(sint32, tag = "1")]
+    pub offset: i32,
+    #[prost(uint64, repeated, tag = "2")]
+    pub bucket_counts: Vec<u64>,
+}
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct Exemplar {
+    #[prost(message, repeated, tag = "7")]
+    pub filtered_attributes: Vec<KeyValue>,
+    #[prost(fixed64, tag = "2")]
+    pub time_unix_nano: u64,
+    #[prost(oneof = "exemplar::Value", tags = "3, 6")]
+    pub value: Option<exemplar::Value>,
+    #[prost(bytes = "vec", tag = "4")]
+    pub span_id: Vec<u8>,
+    #[prost(bytes = "vec", tag = "5")]
+    pub trace_id: Vec<u8>,
+}
+pub mod exemplar {
+    #[derive(Clone, Copy, PartialEq, prost::Oneof)]
+    pub enum Value {
+        #[prost(double, tag = "3")]
+        AsDouble(f64),
+        #[prost(sfixed64, tag = "6")]
+        AsInt(i64),
     }
 }
 #[derive(Clone, PartialEq, prost::Message)]
@@ -225,6 +339,8 @@ pub struct HistogramDataPoint {
     pub bucket_counts: Vec<u64>,
     #[prost(double, repeated, tag = "7")]
     pub explicit_bounds: Vec<f64>,
+    #[prost(message, repeated, tag = "8")]
+    pub exemplars: Vec<Exemplar>,
     #[prost(uint32, tag = "10")]
     pub flags: u32,
     #[prost(double, optional, tag = "11")]

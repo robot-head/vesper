@@ -22,17 +22,19 @@
 //! regardless of metadata.
 
 use super::attributes::{AttributeValue, Attributes, SpanAttributes};
+use super::cbor;
 use super::model::{
-    LogRecord, Resource, ResourceGroup, Scope, SpanEvent, SpanKind, SpanLink, TraceState,
+    Exemplar, ExpHistogramPoint, LogRecord, NumberKind, NumberPoint, NumberValue, Resource,
+    ResourceGroup, Scope, ScopeGroup, SpanEvent, SpanKind, SpanLink, TraceState,
 };
 use super::proto::{ArrowPayload, ArrowPayloadType, BatchArrowRecords};
 use super::schema::{self, value_type, IdEncoding};
 use arrow_array::{
     builder::{Float64Builder, ListBuilder, UInt64Builder},
     types::{UInt16Type, UInt8Type},
-    ArrayRef, BooleanArray, DictionaryArray, DurationNanosecondArray, FixedSizeBinaryArray,
-    Float64Array, Int32Array, Int64Array, RecordBatch, StringArray, StructArray,
-    TimestampNanosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    ArrayRef, BinaryArray, BooleanArray, DictionaryArray, DurationNanosecondArray,
+    FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array, RecordBatch, StringArray,
+    StructArray, TimestampNanosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow_ipc::writer::{DictionaryHandling, IpcWriteOptions, StreamWriter};
 use arrow_ipc::MetadataVersion;
@@ -59,6 +61,19 @@ pub struct EncoderConfig {
     pub max_dictionary_entries: usize,
     /// Id column encoding; [`IdEncoding::Transport`] for upstream peers.
     pub id_encoding: IdEncoding,
+    /// Arrow IPC buffer compression (upstream `payload_compression`). Off
+    /// by default: gRPC message compression already compresses the whole
+    /// batch, and upstream turns IPC compression on only without it.
+    pub ipc_compression: IpcCompression,
+}
+/// Arrow IPC `BodyCompression` codec of emitted record and dictionary
+/// batches.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IpcCompression {
+    #[default]
+    None,
+    /// Per-buffer zstd (`CompressionType::ZSTD`), as upstream writes it.
+    Zstd,
 }
 impl Default for EncoderConfig {
     fn default() -> Self {
@@ -66,6 +81,7 @@ impl Default for EncoderConfig {
             max_rows: 4096,
             max_dictionary_entries: 4096,
             id_encoding: IdEncoding::Transport,
+            ipc_compression: IpcCompression::None,
         }
     }
 }
@@ -88,6 +104,9 @@ pub enum EncodeError {
         column: &'static str,
     },
     BatchIdExhausted,
+    /// A data point that OTLP does not allow (named field), such as an
+    /// exponential histogram whose bucket counts do not add up to `count`.
+    InvalidPoint(&'static str),
     Arrow(ArrowError),
 }
 impl EncodeError {
@@ -220,6 +239,7 @@ enum Col {
     Duration(Vec<Option<i64>>),
     Fixed(Vec<Option<Vec<u8>>>),
     Utf8(Vec<Option<String>>),
+    Binary(Vec<Option<Vec<u8>>>),
     Dict(&'static str, Key, Vec<Option<String>>),
     Struct(Vec<Col>),
     ListU64(Vec<Option<Vec<u64>>>),
@@ -260,6 +280,7 @@ impl Col {
                 Arc::new(fixed(v, *width)?)
             }
             Col::Utf8(v) => Arc::new(StringArray::from(v)),
+            Col::Binary(v) => Arc::new(BinaryArray::from_iter(v)),
             Col::Dict(_, key, v) => {
                 let dict = dicts.next().expect("one dictionary per dictionary column");
                 match key {
@@ -464,6 +485,66 @@ const HISTOGRAM_DP_ATTRS: Kind = Kind {
     schema: schema::attrs32_schema_with,
     limit: Limit::Attributes,
 };
+const NUMBER_POINTS: Kind = Kind {
+    ty: ArrowPayloadType::NumberDataPoints,
+    prefix: "number_dps",
+    schema: schema::number_points_schema_with,
+    limit: Limit::Related,
+};
+const NUMBER_DP_ATTRS: Kind = Kind {
+    ty: ArrowPayloadType::NumberDpAttrs,
+    prefix: "number_dp_attrs",
+    schema: schema::attrs32_schema_with,
+    limit: Limit::Attributes,
+};
+const NUMBER_DP_EXEMPLARS: Kind = Kind {
+    ty: ArrowPayloadType::NumberDpExemplars,
+    prefix: "number_dp_exemplars",
+    schema: schema::exemplars_schema_with,
+    limit: Limit::Related,
+};
+const NUMBER_DP_EXEMPLAR_ATTRS: Kind = Kind {
+    ty: ArrowPayloadType::NumberDpExemplarAttrs,
+    prefix: "number_dp_exemplar_attrs",
+    schema: schema::attrs32_schema_with,
+    limit: Limit::Attributes,
+};
+const HISTOGRAM_DP_EXEMPLARS: Kind = Kind {
+    ty: ArrowPayloadType::HistogramDpExemplars,
+    prefix: "histogram_dp_exemplars",
+    schema: schema::exemplars_schema_with,
+    limit: Limit::Related,
+};
+const HISTOGRAM_DP_EXEMPLAR_ATTRS: Kind = Kind {
+    ty: ArrowPayloadType::HistogramDpExemplarAttrs,
+    prefix: "histogram_dp_exemplar_attrs",
+    schema: schema::attrs32_schema_with,
+    limit: Limit::Attributes,
+};
+const EXP_HISTOGRAM_POINTS: Kind = Kind {
+    ty: ArrowPayloadType::ExpHistogramDataPoints,
+    prefix: "exp_histogram_dps",
+    schema: schema::exp_histogram_points_schema_with,
+    limit: Limit::Related,
+};
+const EXP_HISTOGRAM_DP_ATTRS: Kind = Kind {
+    ty: ArrowPayloadType::ExpHistogramDpAttrs,
+    prefix: "exp_histogram_dp_attrs",
+    schema: schema::attrs32_schema_with,
+    limit: Limit::Attributes,
+};
+const EXP_HISTOGRAM_DP_EXEMPLARS: Kind = Kind {
+    ty: ArrowPayloadType::ExpHistogramDpExemplars,
+    prefix: "exp_histogram_dp_exemplars",
+    schema: schema::exemplars_schema_with,
+    limit: Limit::Related,
+};
+const EXP_HISTOGRAM_DP_EXEMPLAR_ATTRS: Kind = Kind {
+    ty: ArrowPayloadType::ExpHistogramDpExemplarAttrs,
+    prefix: "exp_histogram_dp_exemplar_attrs",
+    schema: schema::attrs32_schema_with,
+    limit: Limit::Attributes,
+};
 const LOGS: Kind = Kind {
     ty: ArrowPayloadType::Logs,
     prefix: "logs",
@@ -533,8 +614,13 @@ impl StreamSet {
     }
     fn open(&mut self, kind: &Kind, caps: &[usize]) -> Result<(), EncodeError> {
         let schema: SchemaRef = Arc::new((kind.schema)(self.config.id_encoding));
+        let compression = match self.config.ipc_compression {
+            IpcCompression::None => None,
+            IpcCompression::Zstd => Some(arrow_ipc::CompressionType::ZSTD),
+        };
         let options = IpcWriteOptions::try_new(8, false, MetadataVersion::V5)?
-            .with_dictionary_handling(DictionaryHandling::Delta);
+            .with_dictionary_handling(DictionaryHandling::Delta)
+            .try_with_compression(compression)?;
         let writer = StreamWriter::try_new_with_options(Vec::new(), &schema, options)?;
         let generation = self.next_generation;
         self.next_generation += 1;
@@ -668,19 +754,24 @@ struct AttrRow {
     key: &'static str,
     value: AttrCell,
 }
-#[derive(PartialEq)]
 enum AttrCell {
     Str(String),
     Int(i64),
     Double(f64),
     Bool(bool),
+    Bytes(Vec<u8>),
+    /// CBOR of a slice or map, with its type code.
+    Ser(u8, Vec<u8>),
 }
 impl AttrCell {
-    fn of(value: AttributeValue) -> Self {
+    fn of(value: &AttributeValue) -> Self {
         match value {
-            AttributeValue::Bool(b) => AttrCell::Bool(b),
-            AttributeValue::Int(v) => AttrCell::Int(v),
-            AttributeValue::Double(v) => AttrCell::Double(v),
+            AttributeValue::Bool(b) => AttrCell::Bool(*b),
+            AttributeValue::Int(v) => AttrCell::Int(*v),
+            AttributeValue::Double(v) => AttrCell::Double(*v),
+            AttributeValue::Bytes(b) => AttrCell::Bytes(b.to_vec()),
+            AttributeValue::Slice(_) => AttrCell::Ser(value_type::SLICE, cbor::encode(value)),
+            AttributeValue::Map(_) => AttrCell::Ser(value_type::MAP, cbor::encode(value)),
             other => AttrCell::Str(other.export_str().expect("string forms")),
         }
     }
@@ -690,7 +781,78 @@ impl AttrCell {
             AttrCell::Int(_) => value_type::INT,
             AttrCell::Double(_) => value_type::DOUBLE,
             AttrCell::Bool(_) => value_type::BOOL,
+            AttrCell::Bytes(_) => value_type::BYTES,
+            AttrCell::Ser(t, _) => *t,
         }
+    }
+    /// Upstream `carrow.Equal`: scalars and bytes by value (`f64 ==`),
+    /// slices and maps never equal.
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (AttrCell::Str(a), AttrCell::Str(b)) => a == b,
+            (AttrCell::Int(a), AttrCell::Int(b)) => a == b,
+            (AttrCell::Double(a), AttrCell::Double(b)) => a == b,
+            (AttrCell::Bool(a), AttrCell::Bool(b)) => a == b,
+            (AttrCell::Bytes(a), AttrCell::Bytes(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+/// The `type`, `str`, `int`, `double`, `bool`, `bytes` and `ser` cells of
+/// one value (attribute or log body).
+struct Cells {
+    types: Vec<Option<u8>>,
+    strs: Vec<Option<String>>,
+    ints: Vec<Option<i64>>,
+    doubles: Vec<Option<f64>>,
+    bools: Vec<Option<bool>>,
+    bytes: Vec<Option<Vec<u8>>>,
+    sers: Vec<Option<Vec<u8>>>,
+}
+impl Cells {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            types: Vec::with_capacity(n),
+            strs: Vec::with_capacity(n),
+            ints: Vec::with_capacity(n),
+            doubles: Vec::with_capacity(n),
+            bools: Vec::with_capacity(n),
+            bytes: Vec::with_capacity(n),
+            sers: Vec::with_capacity(n),
+        }
+    }
+    fn push(&mut self, cell: Option<AttrCell>) {
+        self.types.push(Some(
+            cell.as_ref().map_or(value_type::EMPTY, AttrCell::type_code),
+        ));
+        let (mut s, mut i, mut d, mut b, mut y, mut z) = (None, None, None, None, None, None);
+        match cell {
+            None => {}
+            Some(AttrCell::Str(v)) => s = Some(v),
+            Some(AttrCell::Int(v)) => i = Some(v),
+            Some(AttrCell::Double(v)) => d = Some(v),
+            Some(AttrCell::Bool(v)) => b = Some(v),
+            Some(AttrCell::Bytes(v)) => y = Some(v),
+            Some(AttrCell::Ser(_, v)) => z = Some(v),
+        }
+        self.strs.push(s);
+        self.ints.push(i);
+        self.doubles.push(d);
+        self.bools.push(b);
+        self.bytes.push(y);
+        self.sers.push(z);
+    }
+    /// Columns in schema order, after `type` (which comes first).
+    fn into_cols(self, str_name: &'static str) -> [Col; 7] {
+        [
+            Col::U8(self.types),
+            Col::Dict(str_name, Key::U16, self.strs),
+            Col::I64(self.ints),
+            Col::F64(self.doubles),
+            Col::Bool(self.bools),
+            Col::Binary(self.bytes),
+            Col::Binary(self.sers),
+        ]
     }
 }
 fn push_attrs(rows: &mut Vec<AttrRow>, parent: u32, attrs: &Attributes) {
@@ -698,16 +860,16 @@ fn push_attrs(rows: &mut Vec<AttrRow>, parent: u32, attrs: &Attributes) {
         rows.push(AttrRow {
             parent,
             key,
-            value: AttrCell::of(value),
+            value: AttrCell::of(&value),
         });
     }
 }
 fn attrs_plan(kind: &'static Kind, rows: Vec<AttrRow>, wide: bool, encoding: IdEncoding) -> Plan {
     let parents: Vec<u32> = rows.iter().map(|r| r.parent).collect();
-    // Upstream `AttrsParentIDDecoder`: equal key and equal value (f64 `==`).
+    // Upstream `AttrsParentIDDecoder`: equal key and `carrow.Equal` value.
     let parents = quasi_delta(
         &parents,
-        |i| rows[i].key == rows[i - 1].key && rows[i].value == rows[i - 1].value,
+        |i| rows[i].key == rows[i - 1].key && rows[i].value.same(&rows[i - 1].value),
         encoding,
     );
     let parent = if wide {
@@ -717,36 +879,25 @@ fn attrs_plan(kind: &'static Kind, rows: Vec<AttrRow>, wide: bool, encoding: IdE
     };
     let n = rows.len();
     let mut keys = Vec::with_capacity(n);
-    let mut types = Vec::with_capacity(n);
-    let mut strs = Vec::with_capacity(n);
-    let mut ints = Vec::with_capacity(n);
-    let mut doubles = Vec::with_capacity(n);
-    let mut bools = Vec::with_capacity(n);
+    let mut cells = Cells::with_capacity(n);
     for row in rows {
         keys.push(Some(row.key.to_owned()));
-        types.push(Some(row.value.type_code()));
-        let (s, i, d, b) = match row.value {
-            AttrCell::Str(s) => (Some(s), None, None, None),
-            AttrCell::Int(v) => (None, Some(v), None, None),
-            AttrCell::Double(v) => (None, None, Some(v), None),
-            AttrCell::Bool(v) => (None, None, None, Some(v)),
-        };
-        strs.push(s);
-        ints.push(i);
-        doubles.push(d);
-        bools.push(b);
+        cells.push(Some(row.value));
     }
+    let [types, strs, ints, doubles, bools, bytes, sers] = cells.into_cols("str");
     Plan {
         kind,
         rows: n,
         cols: vec![
             parent,
             Col::Dict("key", Key::U8, keys),
-            Col::U8(types),
-            Col::Dict("str", Key::U16, strs),
-            Col::I64(ints),
-            Col::F64(doubles),
-            Col::Bool(bools),
+            types,
+            strs,
+            ints,
+            doubles,
+            bools,
+            bytes,
+            sers,
         ],
         always: false,
     }
@@ -1187,7 +1338,6 @@ impl TraceEncoder {
 /// exact below 2^53 and rounded above it. `sum` is the histogram's exact
 /// sum rounded to `f64`; `min` and `max` are exact below 2^53. Consecutive
 /// points of one scope with the same name and unit share one metric row.
-/// Exemplars are not exported.
 #[derive(Clone)]
 pub struct HistogramPoint<'a> {
     pub name: &'static str,
@@ -1196,6 +1346,7 @@ pub struct HistogramPoint<'a> {
     pub time_unix_ns: u64,
     pub histogram: &'a FastLogHistogram,
     pub attributes: Attributes,
+    pub exemplars: Vec<Exemplar>,
 }
 impl<'a> HistogramPoint<'a> {
     pub fn new(
@@ -1212,7 +1363,28 @@ impl<'a> HistogramPoint<'a> {
             time_unix_ns,
             histogram,
             attributes: Attributes::new(),
+            exemplars: Vec::new(),
         }
+    }
+    /// One exemplar per bin that holds a span id (see
+    /// `FastLogHistogram::record_with_exemplar`), stamped `time_unix_ns`.
+    /// Beacon keeps only the span id per bin, so the value is the bin's
+    /// lower end (an estimate within 12.5% of the recorded value, exact
+    /// below 16) and the trace id is `trace_id`.
+    pub fn with_bin_exemplars(mut self, time_unix_ns: u64, trace_id: Option<u128>) -> Self {
+        for i in 0..HISTOGRAM_BINS {
+            if let Some(span) = self.histogram.exemplar(i) {
+                let lower = FastLogHistogram::bin_range(i).expect("bin index").lower;
+                let value = i64::try_from(lower)
+                    .map_or(NumberValue::Double(lower as f64), NumberValue::Int);
+                self.exemplars.push(Exemplar {
+                    span_id: Some(span.get()),
+                    trace_id,
+                    ..Exemplar::new(time_unix_ns, value)
+                });
+            }
+        }
+        self
     }
 }
 
@@ -1229,34 +1401,478 @@ pub(crate) fn buckets(h: &FastLogHistogram) -> (Vec<u64>, Vec<f64>) {
     (counts, bounds)
 }
 
+/// A metric data point of any kind Beacon exports.
+#[derive(Clone)]
+pub enum MetricPoint<'a> {
+    /// A gauge or sum point.
+    Number(NumberPoint),
+    Histogram(HistogramPoint<'a>),
+    ExpHistogram(ExpHistogramPoint),
+}
+impl From<NumberPoint> for MetricPoint<'_> {
+    fn from(p: NumberPoint) -> Self {
+        Self::Number(p)
+    }
+}
+impl<'a> From<HistogramPoint<'a>> for MetricPoint<'a> {
+    fn from(p: HistogramPoint<'a>) -> Self {
+        Self::Histogram(p)
+    }
+}
+impl From<ExpHistogramPoint> for MetricPoint<'_> {
+    fn from(p: ExpHistogramPoint) -> Self {
+        Self::ExpHistogram(p)
+    }
+}
+
+/// The metric row a point belongs to: consecutive points of one scope with
+/// equal keys share a row.
+#[derive(Clone, Copy, PartialEq)]
+pub struct MetricKey {
+    pub name: &'static str,
+    pub unit: &'static str,
+    pub description: Option<&'static str>,
+    pub metric_type: u8,
+    pub temporality: Option<i32>,
+    pub monotonic: Option<bool>,
+}
+impl MetricPoint<'_> {
+    pub fn key(&self) -> MetricKey {
+        match self {
+            Self::Number(p) => {
+                let (metric_type, temporality, monotonic) = match p.kind {
+                    NumberKind::Gauge => (schema::METRIC_TYPE_GAUGE, None, None),
+                    NumberKind::Sum {
+                        monotonic,
+                        temporality,
+                    } => (
+                        schema::METRIC_TYPE_SUM,
+                        Some(temporality as i32),
+                        Some(monotonic),
+                    ),
+                };
+                MetricKey {
+                    name: p.name,
+                    unit: p.unit,
+                    description: p.description,
+                    metric_type,
+                    temporality,
+                    monotonic,
+                }
+            }
+            Self::Histogram(p) => MetricKey {
+                name: p.name,
+                unit: p.unit,
+                description: None,
+                metric_type: schema::METRIC_TYPE_HISTOGRAM,
+                temporality: Some(schema::TEMPORALITY_CUMULATIVE),
+                monotonic: None,
+            },
+            Self::ExpHistogram(p) => MetricKey {
+                name: p.name,
+                unit: p.unit,
+                description: p.description,
+                metric_type: schema::METRIC_TYPE_EXP_HISTOGRAM,
+                temporality: Some(p.temporality as i32),
+                monotonic: None,
+            },
+        }
+    }
+    fn exemplars(&self) -> &[Exemplar] {
+        match self {
+            Self::Number(p) => &p.exemplars,
+            Self::Histogram(p) => &p.exemplars,
+            Self::ExpHistogram(p) => &p.exemplars,
+        }
+    }
+    fn attributes(&self) -> &Attributes {
+        match self {
+            Self::Number(p) => &p.attributes,
+            Self::Histogram(p) => &p.attributes,
+            Self::ExpHistogram(p) => &p.attributes,
+        }
+    }
+}
+
+/// Data-point `parent_id`: the metric id, delta-encoded row by row (upstream
+/// number, histogram and exponential histogram decoders).
+fn point_parents(metric_of: &[u32], encoding: IdEncoding) -> Col {
+    let mut prev = 0;
+    Col::U16(
+        metric_of
+            .iter()
+            .map(|p| {
+                let v = if encoding == IdEncoding::Plain {
+                    *p
+                } else {
+                    let d = p - prev;
+                    prev = *p;
+                    d
+                };
+                Some(v as u16)
+            })
+            .collect(),
+    )
+}
+
+/// The payload kinds of one data-point family.
+struct Family {
+    points: &'static Kind,
+    attrs: &'static Kind,
+    exemplars: &'static Kind,
+    exemplar_attrs: &'static Kind,
+}
+const NUMBER_FAMILY: Family = Family {
+    points: &NUMBER_POINTS,
+    attrs: &NUMBER_DP_ATTRS,
+    exemplars: &NUMBER_DP_EXEMPLARS,
+    exemplar_attrs: &NUMBER_DP_EXEMPLAR_ATTRS,
+};
+const HISTOGRAM_FAMILY: Family = Family {
+    points: &HISTOGRAM_POINTS,
+    attrs: &HISTOGRAM_DP_ATTRS,
+    exemplars: &HISTOGRAM_DP_EXEMPLARS,
+    exemplar_attrs: &HISTOGRAM_DP_EXEMPLAR_ATTRS,
+};
+const EXP_HISTOGRAM_FAMILY: Family = Family {
+    points: &EXP_HISTOGRAM_POINTS,
+    attrs: &EXP_HISTOGRAM_DP_ATTRS,
+    exemplars: &EXP_HISTOGRAM_DP_EXEMPLARS,
+    exemplar_attrs: &EXP_HISTOGRAM_DP_EXEMPLAR_ATTRS,
+};
+
+/// Per-family rows collected while planning.
+#[derive(Default)]
+struct Rows<'p, 'a> {
+    points: Vec<(u32, &'p MetricPoint<'a>)>,
+}
+
+fn same_exemplar_value(a: NumberValue, b: NumberValue) -> bool {
+    // Upstream `ExemplarParentIdDecoder`: same type and value (`f64 ==`).
+    match (a, b) {
+        (NumberValue::Int(x), NumberValue::Int(y)) => x == y,
+        (NumberValue::Double(x), NumberValue::Double(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// The exemplar and exemplar-attribute plans of one family.
+fn exemplar_plans(
+    family: &Family,
+    points: &[(u32, &MetricPoint<'_>)],
+    encoding: IdEncoding,
+) -> Result<[Plan; 2], EncodeError> {
+    let mut parents = Vec::new();
+    let mut rows: Vec<&Exemplar> = Vec::new();
+    for (dp, (_, p)) in points.iter().enumerate() {
+        for e in p.exemplars() {
+            parents.push(dp as u32);
+            rows.push(e);
+        }
+    }
+    let n = rows.len();
+    if n > MAX_BATCH_ROWS {
+        return Err(EncodeError::RelatedRowLimit(family.exemplars.ty));
+    }
+    let parent_ids = quasi_delta(
+        &parents,
+        |i| same_exemplar_value(rows[i].value, rows[i - 1].value),
+        encoding,
+    );
+    let mut times = Vec::with_capacity(n);
+    let mut ints = Vec::with_capacity(n);
+    let mut doubles = Vec::with_capacity(n);
+    let mut span_ids = Vec::with_capacity(n);
+    let mut trace_ids = Vec::with_capacity(n);
+    let mut attrs = Vec::new();
+    for (i, e) in rows.iter().enumerate() {
+        times.push(Some(signed(e.time_unix_ns, "exemplar.time_unix_nano")?));
+        let (iv, dv) = match e.value {
+            NumberValue::Int(v) => (Some(v), None),
+            NumberValue::Double(v) => (None, Some(v)),
+        };
+        ints.push(iv);
+        doubles.push(dv);
+        span_ids.push(e.span_id.map(|s| be(s, 8)));
+        trace_ids.push(e.trace_id.map(|t| be(t, 16)));
+        push_attrs(&mut attrs, i as u32, &e.filtered_attributes);
+        if attrs.len() > MAX_BATCH_ROWS {
+            return Err(EncodeError::AttributeRowLimit);
+        }
+    }
+    let exemplars = Plan {
+        kind: family.exemplars,
+        rows: n,
+        cols: vec![
+            Col::U32(delta_ids((0..n as u32).map(Some).collect(), encoding)),
+            Col::U32(parent_ids.into_iter().map(Some).collect()),
+            Col::Time(times),
+            Col::I64(ints),
+            Col::F64(doubles),
+            Col::Fixed(span_ids),
+            Col::Fixed(trace_ids),
+        ],
+        always: false,
+    };
+    Ok([
+        exemplars,
+        attrs_plan(family.exemplar_attrs, attrs, true, encoding),
+    ])
+}
+
+/// Data-point attribute rows of one family (parent: the point's id).
+fn point_attrs(
+    family: &Family,
+    points: &[(u32, &MetricPoint<'_>)],
+    encoding: IdEncoding,
+) -> Result<Plan, EncodeError> {
+    let mut rows = Vec::new();
+    for (i, (_, p)) in points.iter().enumerate() {
+        push_attrs(&mut rows, i as u32, p.attributes());
+        if rows.len() > MAX_BATCH_ROWS {
+            return Err(EncodeError::AttributeRowLimit);
+        }
+    }
+    Ok(attrs_plan(family.attrs, rows, true, encoding))
+}
+
+fn number_plan(
+    points: &[(u32, &MetricPoint<'_>)],
+    encoding: IdEncoding,
+) -> Result<Plan, EncodeError> {
+    let n = points.len();
+    let metric_of: Vec<u32> = points.iter().map(|(m, _)| *m).collect();
+    let mut starts = Vec::with_capacity(n);
+    let mut times = Vec::with_capacity(n);
+    let mut ints = Vec::with_capacity(n);
+    let mut doubles = Vec::with_capacity(n);
+    let mut flags = Vec::with_capacity(n);
+    for (_, p) in points {
+        let MetricPoint::Number(p) = p else {
+            unreachable!("number family")
+        };
+        starts.push(
+            p.start_unix_ns
+                .map(|t| signed(t, "start_time_unix_nano"))
+                .transpose()?,
+        );
+        times.push(Some(signed(p.time_unix_ns, "time_unix_nano")?));
+        let (iv, dv) = match p.value {
+            NumberValue::Int(v) => (Some(v), None),
+            NumberValue::Double(v) => (None, Some(v)),
+        };
+        ints.push(iv);
+        doubles.push(dv);
+        flags.push(nonzero(p.flags));
+    }
+    Ok(Plan {
+        kind: &NUMBER_POINTS,
+        rows: n,
+        cols: vec![
+            Col::U32(delta_ids((0..n as u32).map(Some).collect(), encoding)),
+            point_parents(&metric_of, encoding),
+            Col::Time(starts),
+            Col::Time(times),
+            Col::I64(ints),
+            Col::F64(doubles),
+            Col::U32(flags),
+        ],
+        always: false,
+    })
+}
+
+fn histogram_plan(
+    points: &[(u32, &MetricPoint<'_>)],
+    encoding: IdEncoding,
+    always: bool,
+) -> Result<Plan, EncodeError> {
+    let n = points.len();
+    let metric_of: Vec<u32> = points.iter().map(|(m, _)| *m).collect();
+    let mut starts = Vec::with_capacity(n);
+    let mut times = Vec::with_capacity(n);
+    let mut counts = Vec::with_capacity(n);
+    let mut sums = Vec::with_capacity(n);
+    let mut bucket_counts = Vec::with_capacity(n);
+    let mut bounds = Vec::with_capacity(n);
+    let mut mins = Vec::with_capacity(n);
+    let mut maxs = Vec::with_capacity(n);
+    for (_, p) in points {
+        let MetricPoint::Histogram(p) = p else {
+            unreachable!("histogram family")
+        };
+        starts.push(Some(signed(p.start_unix_ns, "start_time_unix_nano")?));
+        times.push(Some(signed(p.time_unix_ns, "time_unix_nano")?));
+        counts.push(Some(p.histogram.total_count()));
+        sums.push(Some(p.histogram.sum() as f64));
+        mins.push(p.histogram.min().map(|v| v as f64));
+        maxs.push(p.histogram.max().map(|v| v as f64));
+        let (c, b) = buckets(p.histogram);
+        bucket_counts.push(Some(c));
+        bounds.push(Some(b));
+    }
+    Ok(Plan {
+        kind: &HISTOGRAM_POINTS,
+        rows: n,
+        cols: vec![
+            Col::U32(delta_ids((0..n as u32).map(Some).collect(), encoding)),
+            point_parents(&metric_of, encoding),
+            Col::Time(starts),
+            Col::Time(times),
+            Col::U64(counts),
+            Col::F64(sums),
+            Col::ListU64(bucket_counts),
+            Col::ListF64(bounds),
+            Col::U32(vec![None; n]),
+            Col::F64(mins),
+            Col::F64(maxs),
+        ],
+        always,
+    })
+}
+
+fn exp_histogram_plan(
+    points: &[(u32, &MetricPoint<'_>)],
+    encoding: IdEncoding,
+) -> Result<Plan, EncodeError> {
+    let n = points.len();
+    let metric_of: Vec<u32> = points.iter().map(|(m, _)| *m).collect();
+    let mut starts = Vec::with_capacity(n);
+    let mut times = Vec::with_capacity(n);
+    let mut counts = Vec::with_capacity(n);
+    let mut sums = Vec::with_capacity(n);
+    let mut scales = Vec::with_capacity(n);
+    let mut zero_counts = Vec::with_capacity(n);
+    let mut pos_offsets = Vec::with_capacity(n);
+    let mut pos_counts = Vec::with_capacity(n);
+    let mut neg_offsets = Vec::with_capacity(n);
+    let mut neg_counts = Vec::with_capacity(n);
+    let mut flags = Vec::with_capacity(n);
+    let mut mins = Vec::with_capacity(n);
+    let mut maxs = Vec::with_capacity(n);
+    let mut thresholds = Vec::with_capacity(n);
+    for (_, p) in points {
+        let MetricPoint::ExpHistogram(p) = p else {
+            unreachable!("exponential histogram family")
+        };
+        check_exp_point(p)?;
+        starts.push(
+            p.start_unix_ns
+                .map(|t| signed(t, "start_time_unix_nano"))
+                .transpose()?,
+        );
+        times.push(Some(signed(p.time_unix_ns, "time_unix_nano")?));
+        counts.push(Some(p.count));
+        sums.push(p.sum);
+        scales.push(Some(p.scale));
+        zero_counts.push(Some(p.zero_count));
+        pos_offsets.push(Some(p.positive.offset));
+        pos_counts.push(Some(p.positive.counts.clone()));
+        neg_offsets.push(Some(p.negative.offset));
+        neg_counts.push(Some(p.negative.counts.clone()));
+        flags.push(nonzero(p.flags));
+        mins.push(p.min);
+        maxs.push(p.max);
+        thresholds.push((p.zero_threshold != 0.0).then_some(p.zero_threshold));
+    }
+    Ok(Plan {
+        kind: &EXP_HISTOGRAM_POINTS,
+        rows: n,
+        cols: vec![
+            Col::U32(delta_ids((0..n as u32).map(Some).collect(), encoding)),
+            point_parents(&metric_of, encoding),
+            Col::Time(starts),
+            Col::Time(times),
+            Col::U64(counts),
+            Col::F64(sums),
+            Col::I32(scales),
+            Col::U64(zero_counts),
+            Col::Struct(vec![Col::I32(pos_offsets), Col::ListU64(pos_counts)]),
+            Col::Struct(vec![Col::I32(neg_offsets), Col::ListU64(neg_counts)]),
+            Col::U32(flags),
+            Col::F64(mins),
+            Col::F64(maxs),
+            Col::F64(thresholds),
+        ],
+        always: false,
+    })
+}
+
+/// OTLP exponential histogram range limits Beacon enforces before export.
+pub const EXP_SCALE_RANGE: std::ops::RangeInclusive<i32> = -10..=20;
+/// Buckets per side of one exported exponential histogram point.
+pub const MAX_EXP_BUCKETS: usize = 16_384;
+
+fn check_exp_point(p: &ExpHistogramPoint) -> Result<(), EncodeError> {
+    let bad = |what| Err(EncodeError::InvalidPoint(what));
+    if !EXP_SCALE_RANGE.contains(&p.scale) {
+        return bad("scale");
+    }
+    let mut total = p.zero_count;
+    for side in [&p.positive, &p.negative] {
+        if side.counts.len() > MAX_EXP_BUCKETS {
+            return bad("bucket_counts");
+        }
+        if i32::try_from(side.counts.len())
+            .ok()
+            .and_then(|l| side.offset.checked_add(l))
+            .is_none()
+        {
+            return bad("offset");
+        }
+        for c in &side.counts {
+            total = match total.checked_add(*c) {
+                Some(t) => t,
+                None => return bad("count"),
+            };
+        }
+    }
+    if total != p.count {
+        return bad("count");
+    }
+    if !(p.zero_threshold >= 0.0 && p.zero_threshold.is_finite()) {
+        return bad("zero_threshold");
+    }
+    Ok(())
+}
+
 fn plan_metrics(
-    entries: &[Entry<'_, HistogramPoint<'_>>],
+    entries: &[Entry<'_, MetricPoint<'_>>],
     encoding: IdEncoding,
 ) -> Result<Vec<Plan>, EncodeError> {
-    let n = entries.len();
-    if n > MAX_BATCH_ROWS {
-        return Err(EncodeError::RelatedRowLimit(
-            ArrowPayloadType::HistogramDataPoints,
-        ));
-    }
-    // Metric rows: consecutive points of one scope with the same name/unit.
-    let mut metric_of = Vec::with_capacity(n);
+    // Metric rows: consecutive points of one scope with the same key.
     let mut metric_rows: Vec<usize> = Vec::new();
+    let mut number = Rows::default();
+    let mut histogram = Rows::default();
+    let mut exp = Rows::default();
     for (i, e) in entries.iter().enumerate() {
         let same = i > 0 && {
             let p = &entries[i - 1];
-            p.group == e.group && p.item.name == e.item.name && p.item.unit == e.item.unit
+            p.group == e.group && p.item.key() == e.item.key()
         };
         if !same {
             metric_rows.push(i);
         }
-        metric_of.push(metric_rows.len() as u32 - 1);
+        let metric = metric_rows.len() as u32 - 1;
+        match e.item {
+            MetricPoint::Number(_) => number.points.push((metric, e.item)),
+            MetricPoint::Histogram(_) => histogram.points.push((metric, e.item)),
+            MetricPoint::ExpHistogram(_) => exp.points.push((metric, e.item)),
+        }
     }
     let m = metric_rows.len();
     if m > MAX_BATCH_ROWS {
         return Err(EncodeError::RowLimit);
     }
-    let metric_entries: Vec<Entry<'_, HistogramPoint<'_>>> = metric_rows
+    for (rows, family) in [
+        (&number, &NUMBER_FAMILY),
+        (&histogram, &HISTOGRAM_FAMILY),
+        (&exp, &EXP_HISTOGRAM_FAMILY),
+    ] {
+        if rows.points.len() > MAX_BATCH_ROWS {
+            return Err(EncodeError::RelatedRowLimit(family.points.ty));
+        }
+    }
+    let metric_entries: Vec<Entry<'_, MetricPoint<'_>>> = metric_rows
         .iter()
         .map(|&i| Entry {
             group: entries[i].group,
@@ -1265,6 +1881,7 @@ fn plan_metrics(
             item: entries[i].item,
         })
         .collect();
+    let keys: Vec<MetricKey> = metric_entries.iter().map(|e| e.item.key()).collect();
     let g = groups(&metric_entries);
     let (rs_cols, rs_attrs) = resource_scope(&g, encoding);
     let [resource, scope, schema_url] = rs_cols;
@@ -1279,99 +1896,57 @@ fn plan_metrics(
             resource,
             scope,
             schema_url,
-            Col::U8(vec![Some(schema::METRIC_TYPE_HISTOGRAM); m]),
+            Col::U8(keys.iter().map(|k| Some(k.metric_type)).collect()),
             Col::Dict(
                 "name",
                 Key::U8,
-                metric_entries
-                    .iter()
-                    .map(|e| Some(e.item.name.to_owned()))
-                    .collect(),
+                keys.iter().map(|k| Some(k.name.to_owned())).collect(),
             ),
-            Col::Dict("description", Key::U8, vec![None; m]),
+            Col::Dict(
+                "description",
+                Key::U8,
+                keys.iter().map(|k| opt_str(k.description)).collect(),
+            ),
             Col::Dict(
                 "unit",
                 Key::U8,
-                metric_entries
-                    .iter()
-                    .map(|e| (!e.item.unit.is_empty()).then(|| e.item.unit.to_owned()))
+                keys.iter()
+                    .map(|k| (!k.unit.is_empty()).then(|| k.unit.to_owned()))
                     .collect(),
             ),
-            Col::I32(vec![Some(schema::TEMPORALITY_CUMULATIVE); m]),
-            Col::Bool(vec![None; m]),
-        ],
-        always: true,
-    };
-    let mut starts = Vec::with_capacity(n);
-    let mut times = Vec::with_capacity(n);
-    let mut counts = Vec::with_capacity(n);
-    let mut sums = Vec::with_capacity(n);
-    let mut bucket_counts = Vec::with_capacity(n);
-    let mut bounds = Vec::with_capacity(n);
-    let mut mins = Vec::with_capacity(n);
-    let mut maxs = Vec::with_capacity(n);
-    let mut dp_attrs = Vec::new();
-    for (i, e) in entries.iter().enumerate() {
-        let p = e.item;
-        starts.push(Some(signed(p.start_unix_ns, "start_time_unix_nano")?));
-        times.push(Some(signed(p.time_unix_ns, "time_unix_nano")?));
-        counts.push(Some(p.histogram.total_count()));
-        sums.push(Some(p.histogram.sum() as f64));
-        mins.push(p.histogram.min().map(|v| v as f64));
-        maxs.push(p.histogram.max().map(|v| v as f64));
-        let (c, b) = buckets(p.histogram);
-        bucket_counts.push(Some(c));
-        bounds.push(Some(b));
-        push_attrs(&mut dp_attrs, i as u32, &p.attributes);
-        if dp_attrs.len() > MAX_BATCH_ROWS {
-            return Err(EncodeError::AttributeRowLimit);
-        }
-    }
-    // Data-point `parent_id` is the metric id, delta-encoded row by row.
-    let parents: Vec<u16> = if encoding == IdEncoding::Plain {
-        metric_of.iter().map(|p| *p as u16).collect()
-    } else {
-        let mut prev = 0;
-        metric_of
-            .iter()
-            .map(|p| {
-                let d = p - prev;
-                prev = *p;
-                d as u16
-            })
-            .collect()
-    };
-    let points = Plan {
-        kind: &HISTOGRAM_POINTS,
-        rows: n,
-        cols: vec![
-            Col::U32(delta_ids((0..n as u32).map(Some).collect(), encoding)),
-            Col::U16(parents.into_iter().map(Some).collect()),
-            Col::Time(starts),
-            Col::Time(times),
-            Col::U64(counts),
-            Col::F64(sums),
-            Col::ListU64(bucket_counts),
-            Col::ListF64(bounds),
-            Col::U32(vec![None; n]),
-            Col::F64(mins),
-            Col::F64(maxs),
+            Col::I32(keys.iter().map(|k| k.temporality).collect()),
+            Col::Bool(keys.iter().map(|k| k.monotonic).collect()),
         ],
         always: true,
     };
     let [resource_attrs, scope_attrs] = rs_attrs;
-    Ok(vec![
-        metrics,
-        resource_attrs,
-        scope_attrs,
-        points,
-        attrs_plan(&HISTOGRAM_DP_ATTRS, dp_attrs, true, encoding),
-    ])
+    let mut plans = vec![metrics, resource_attrs, scope_attrs];
+    // Histogram points keep their earlier behaviour: emitted (possibly
+    // empty) whenever no other point kind is present.
+    let histogram_always = number.points.is_empty() && exp.points.is_empty();
+    for (rows, family) in [
+        (&number, &NUMBER_FAMILY),
+        (&histogram, &HISTOGRAM_FAMILY),
+        (&exp, &EXP_HISTOGRAM_FAMILY),
+    ] {
+        let points = match family.points.ty {
+            ArrowPayloadType::NumberDataPoints => number_plan(&rows.points, encoding)?,
+            ArrowPayloadType::HistogramDataPoints => {
+                histogram_plan(&rows.points, encoding, histogram_always)?
+            }
+            _ => exp_histogram_plan(&rows.points, encoding)?,
+        };
+        let attrs = point_attrs(family, &rows.points, encoding)?;
+        let [exemplars, exemplar_attrs] = exemplar_plans(family, &rows.points, encoding)?;
+        plans.extend([points, attrs, exemplars, exemplar_attrs]);
+    }
+    Ok(plans)
 }
 
-/// Producer for the `ArrowMetricsService` stream: `UNIVARIATE_METRICS` and
-/// `HISTOGRAM_DATA_POINTS`, plus `RESOURCE_ATTRS`, `SCOPE_ATTRS` and
-/// `HISTOGRAM_DP_ATTRS` when nonempty.
+/// Producer for the `ArrowMetricsService` stream: `UNIVARIATE_METRICS` plus
+/// each nonempty data-point, data-point attribute, exemplar and exemplar
+/// attribute payload of the number (gauge, sum), histogram and exponential
+/// histogram families, and `RESOURCE_ATTRS` and `SCOPE_ATTRS`.
 pub struct MetricsEncoder {
     set: StreamSet,
 }
@@ -1391,26 +1966,75 @@ impl MetricsEncoder {
         &mut self,
         points: &[HistogramPoint<'_>],
     ) -> Result<BatchArrowRecords, EncodeError> {
-        self.encode(&default_group(points))
+        self.encode(&histogram_groups(points))
     }
+    /// Histogram points only (see [`Self::encode_metrics`] for every kind).
     pub fn encode(
         &mut self,
         groups: &[ResourceGroup<HistogramPoint<'_>>],
     ) -> Result<BatchArrowRecords, EncodeError> {
+        self.encode_metrics(&to_metric_groups(groups))
+    }
+    /// Points of every kind, grouped by resource and scope.
+    pub fn encode_metrics(
+        &mut self,
+        groups: &[ResourceGroup<MetricPoint<'_>>],
+    ) -> Result<BatchArrowRecords, EncodeError> {
         encode_one(&mut self.set, &flatten(groups), plan_metrics)
+    }
+    /// Points of every kind in one default resource and scope.
+    pub fn encode_points(
+        &mut self,
+        points: &[MetricPoint<'_>],
+    ) -> Result<BatchArrowRecords, EncodeError> {
+        self.encode_metrics(&default_group(points))
     }
     pub fn encode_histograms_split(
         &mut self,
         points: &[HistogramPoint<'_>],
     ) -> Result<Vec<BatchArrowRecords>, EncodeError> {
-        self.encode_split(&default_group(points))
+        self.encode_split(&histogram_groups(points))
     }
     pub fn encode_split(
         &mut self,
         groups: &[ResourceGroup<HistogramPoint<'_>>],
     ) -> Result<Vec<BatchArrowRecords>, EncodeError> {
+        self.encode_metrics_split(&to_metric_groups(groups))
+    }
+    pub fn encode_metrics_split(
+        &mut self,
+        groups: &[ResourceGroup<MetricPoint<'_>>],
+    ) -> Result<Vec<BatchArrowRecords>, EncodeError> {
         encode_split_all(&mut self.set, &flatten(groups), &plan_metrics)
     }
+}
+
+fn histogram_groups<'a>(points: &[HistogramPoint<'a>]) -> [ResourceGroup<HistogramPoint<'a>>; 1] {
+    default_group(points)
+}
+/// Histogram groups as metric groups.
+pub fn to_metric_groups<'a>(
+    groups: &[ResourceGroup<HistogramPoint<'a>>],
+) -> Vec<ResourceGroup<MetricPoint<'a>>> {
+    groups
+        .iter()
+        .map(|g| ResourceGroup {
+            resource: g.resource.clone(),
+            scopes: g
+                .scopes
+                .iter()
+                .map(|s| ScopeGroup {
+                    scope: s.scope.clone(),
+                    items: s
+                        .items
+                        .iter()
+                        .cloned()
+                        .map(MetricPoint::Histogram)
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 // ------------------------------------------------------------------ logs
@@ -1431,11 +2055,7 @@ fn plan_logs(
     let mut span_ids = Vec::with_capacity(n);
     let mut severities = Vec::with_capacity(n);
     let mut severity_texts = Vec::with_capacity(n);
-    let mut body_type = Vec::with_capacity(n);
-    let mut body_str = Vec::with_capacity(n);
-    let mut body_int = Vec::with_capacity(n);
-    let mut body_double = Vec::with_capacity(n);
-    let mut body_bool = Vec::with_capacity(n);
+    let mut body = Cells::with_capacity(n);
     let mut dropped = Vec::with_capacity(n);
     let mut flags = Vec::with_capacity(n);
     let mut event_names = Vec::with_capacity(n);
@@ -1456,21 +2076,7 @@ fn plan_logs(
         span_ids.push(l.span_id.map(|s| be(s, 8)));
         severities.push(Some(i32::from(l.severity.number())));
         severity_texts.push(opt_str(l.severity_text));
-        let cell = l.body.map(AttrCell::of);
-        body_type.push(Some(
-            cell.as_ref().map_or(value_type::EMPTY, AttrCell::type_code),
-        ));
-        let (s, iv, d, b) = match cell {
-            None => (None, None, None, None),
-            Some(AttrCell::Str(s)) => (Some(s), None, None, None),
-            Some(AttrCell::Int(v)) => (None, Some(v), None, None),
-            Some(AttrCell::Double(v)) => (None, None, Some(v), None),
-            Some(AttrCell::Bool(v)) => (None, None, None, Some(v)),
-        };
-        body_str.push(s);
-        body_int.push(iv);
-        body_double.push(d);
-        body_bool.push(b);
+        body.push(l.body.as_ref().map(AttrCell::of));
         dropped.push(nonzero(l.dropped_attributes_count));
         flags.push(nonzero(l.flags));
         event_names.push(opt_str(l.event_name));
@@ -1497,13 +2103,7 @@ fn plan_logs(
             Col::Fixed(span_ids),
             Col::I32(severities),
             Col::Dict("severity_text", Key::U8, severity_texts),
-            Col::Struct(vec![
-                Col::U8(body_type),
-                Col::Dict("body.str", Key::U16, body_str),
-                Col::I64(body_int),
-                Col::F64(body_double),
-                Col::Bool(body_bool),
-            ]),
+            Col::Struct(body.into_cols("body.str").into()),
             Col::U32(dropped),
             Col::U32(flags),
             Col::Dict("event_name", Key::U8, event_names),

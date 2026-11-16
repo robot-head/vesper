@@ -2,9 +2,9 @@
 //! Go schemas (`TracesSchema`, `EventSchema`, `LinkSchema`, `ResourceDT`,
 //! `ScopeDT`, `AttrsSchema16`/`AttrsSchema32`, `MetricsSchema`,
 //! `HistogramDataPointSchema`, `LogsSchema`). Names, physical types and
-//! column order follow upstream. Beacon omits only the columns it never
-//! fills: attribute `bytes`/`ser` values, exemplars and the non-histogram
-//! metric payloads.
+//! column order follow upstream (`NumberDataPointSchema`,
+//! `EHistogramDataPointSchema` and `ExemplarSchema` included). Beacon omits
+//! only summaries and multivariate metrics, which it never produces.
 //!
 //! **Id encodings.** Beacon emits upstream's default transport encodings and
 //! no `encoding` metadata, because the upstream Go decoder (used by the
@@ -139,9 +139,11 @@ fn attrs(parent: DataType, encoding: IdEncoding) -> Schema {
         Field::new("int", DataType::Int64, true),
         Field::new("double", DataType::Float64, true),
         Field::new("bool", DataType::Boolean, true),
+        Field::new("bytes", DataType::Binary, true),
+        Field::new("ser", DataType::Binary, true),
     ])
 }
-/// Upstream `AttrsSchema16` without `bytes`/`ser`: `RESOURCE_ATTRS`,
+/// Upstream `AttrsSchema16`: `RESOURCE_ATTRS`,
 /// `SCOPE_ATTRS`, `SPAN_ATTRS`, `LOG_ATTRS`.
 pub fn attrs16_schema_with(encoding: IdEncoding) -> Schema {
     attrs(DataType::UInt16, encoding)
@@ -153,7 +155,7 @@ pub fn attrs16_schema() -> Schema {
 pub fn span_attrs_schema() -> Schema {
     attrs16_schema()
 }
-/// Upstream `AttrsSchema32` without `bytes`/`ser`: `SPAN_EVENT_ATTRS`,
+/// Upstream `AttrsSchema32`: `SPAN_EVENT_ATTRS`,
 /// `SPAN_LINK_ATTRS`, `HISTOGRAM_DP_ATTRS`.
 pub fn attrs32_schema_with(encoding: IdEncoding) -> Schema {
     attrs(DataType::UInt32, encoding)
@@ -232,7 +234,73 @@ pub fn histogram_points_schema() -> Schema {
     histogram_points_schema_with(IdEncoding::Transport)
 }
 
-/// Children of the `LOGS` `body` struct (no `bytes`/`ser`).
+/// `NUMBER_DATA_POINTS` payload schema (gauge and sum points).
+pub fn number_points_schema_with(encoding: IdEncoding) -> Schema {
+    Schema::new(vec![
+        with_encoding(Field::new("id", DataType::UInt32, true), encoding),
+        with_encoding(Field::new("parent_id", DataType::UInt16, false), encoding),
+        Field::new("start_time_unix_nano", timestamp(), true),
+        Field::new("time_unix_nano", timestamp(), false),
+        Field::new("int_value", DataType::Int64, true),
+        Field::new("double_value", DataType::Float64, true),
+        Field::new("flags", DataType::UInt32, true),
+    ])
+}
+pub fn number_points_schema() -> Schema {
+    number_points_schema_with(IdEncoding::Transport)
+}
+
+/// Upstream `EHistogramDataPointBucketsDT`.
+pub(crate) fn exp_buckets_fields() -> Fields {
+    Fields::from(vec![
+        Field::new("offset", DataType::Int32, true),
+        Field::new("bucket_counts", list_of(DataType::UInt64), true),
+    ])
+}
+
+/// `EXP_HISTOGRAM_DATA_POINTS` payload schema.
+pub fn exp_histogram_points_schema_with(encoding: IdEncoding) -> Schema {
+    Schema::new(vec![
+        with_encoding(Field::new("id", DataType::UInt32, true), encoding),
+        with_encoding(Field::new("parent_id", DataType::UInt16, false), encoding),
+        Field::new("start_time_unix_nano", timestamp(), true),
+        Field::new("time_unix_nano", timestamp(), false),
+        Field::new("count", DataType::UInt64, true),
+        Field::new("sum", DataType::Float64, true),
+        Field::new("scale", DataType::Int32, true),
+        Field::new("zero_count", DataType::UInt64, true),
+        Field::new("positive", DataType::Struct(exp_buckets_fields()), true),
+        Field::new("negative", DataType::Struct(exp_buckets_fields()), true),
+        Field::new("flags", DataType::UInt32, true),
+        Field::new("min", DataType::Float64, true),
+        Field::new("max", DataType::Float64, true),
+        Field::new("zero_threshold", DataType::Float64, true),
+    ])
+}
+pub fn exp_histogram_points_schema() -> Schema {
+    exp_histogram_points_schema_with(IdEncoding::Transport)
+}
+
+/// Upstream `ExemplarSchema`: `NUMBER_DP_EXEMPLARS`, `HISTOGRAM_DP_EXEMPLARS`,
+/// `EXP_HISTOGRAM_DP_EXEMPLARS`. `parent_id` (the data point id) is
+/// quasi-delta keyed on the exemplar value (upstream
+/// `ExemplarParentIdDecoder`).
+pub fn exemplars_schema_with(encoding: IdEncoding) -> Schema {
+    Schema::new(vec![
+        with_encoding(Field::new("id", DataType::UInt32, true), encoding),
+        with_encoding(Field::new("parent_id", DataType::UInt32, false), encoding),
+        Field::new("time_unix_nano", timestamp(), false),
+        Field::new("int_value", DataType::Int64, true),
+        Field::new("double_value", DataType::Float64, true),
+        Field::new("span_id", DataType::FixedSizeBinary(8), true),
+        Field::new("trace_id", DataType::FixedSizeBinary(16), true),
+    ])
+}
+pub fn exemplars_schema() -> Schema {
+    exemplars_schema_with(IdEncoding::Transport)
+}
+
+/// Children of the `LOGS` `body` struct.
 pub(crate) fn body_fields() -> Fields {
     Fields::from(vec![
         Field::new("type", DataType::UInt8, true),
@@ -240,6 +308,8 @@ pub(crate) fn body_fields() -> Fields {
         Field::new("int", DataType::Int64, true),
         Field::new("double", DataType::Float64, true),
         Field::new("bool", DataType::Boolean, true),
+        Field::new("bytes", DataType::Binary, true),
+        Field::new("ser", DataType::Binary, true),
     ])
 }
 
@@ -279,8 +349,14 @@ pub mod value_type {
     pub const SLICE: u8 = 6;
     pub const BYTES: u8 = 7;
 }
-/// OTLP `metric_type` for an explicit-bucket histogram.
+/// OTLP `metric_type` codes (pmetric.MetricType numbering).
+pub const METRIC_TYPE_GAUGE: u8 = 1;
+pub const METRIC_TYPE_SUM: u8 = 2;
 pub const METRIC_TYPE_HISTOGRAM: u8 = 3;
+pub const METRIC_TYPE_EXP_HISTOGRAM: u8 = 4;
+pub const METRIC_TYPE_SUMMARY: u8 = 5;
+/// OTLP `AGGREGATION_TEMPORALITY_DELTA`.
+pub const TEMPORALITY_DELTA: i32 = 1;
 /// OTLP `AGGREGATION_TEMPORALITY_CUMULATIVE`.
 pub const TEMPORALITY_CUMULATIVE: i32 = 2;
 /// OTLP `Status.code` values.

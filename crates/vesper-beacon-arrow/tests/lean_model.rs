@@ -16,7 +16,7 @@ const MODEL_ID: &str = "vesper.beacon.redaction-model/1";
 const MODEL_CLAIM: &str =
     "attribute redaction and dictionary export stream models; not a proof about the Rust implementation";
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
-const THEOREMS: [&str; 7] = [
+const THEOREMS: [&str; 10] = [
     "export_attr_noninterference",
     "redact_only_low",
     "export_span_noninterference",
@@ -24,6 +24,9 @@ const THEOREMS: [&str; 7] = [
     "stream_noninterference",
     "emitted_strings_exported",
     "pii_never_emitted",
+    "export_val_noninterference",
+    "struct_attrs_noninterference",
+    "exported_texts_public",
 ];
 
 fn root() -> PathBuf {
@@ -300,4 +303,52 @@ fn lean_model_compiles_and_matches_rust_redaction() {
     }
     assert!(lines.next().is_none());
     assert!(compared > 300, "compared {compared} cases");
+}
+
+/// The run-time counterpart of `exported_texts_public` on real bytes: PII
+/// leaves inside slices and maps go through the policy, so neither the
+/// OTAP batch (CBOR `ser` cell) nor the OTLP request carries them, and the
+/// decoded value holds the marker where the model's `exportVal` does.
+#[test]
+fn structured_pii_leaves_never_reach_the_wire() {
+    let secret = "alice@example.com";
+    let leaf = || PiiPolicy::Redact.apply(Pii::new(secret.to_owned()));
+    let value = AttributeValue::map([
+        ("route", AttributeValue::Static("/login")),
+        ("email", leaf()),
+        (
+            "history",
+            AttributeValue::slice([leaf(), AttributeValue::Int(3)]).unwrap(),
+        ),
+    ])
+    .unwrap();
+    let pool = SpanPool::<1>::new(1, core::num::NonZeroU64::new(1).unwrap(), 0).unwrap();
+    let mut ring = TelemetryRing::<1>::default();
+    pool.start_span(None, SpanSchema::Request, 0, 0)
+        .unwrap()
+        .finish_ok(&mut ring, 1, PrimaryAttribute::None)
+        .unwrap();
+    let mut span = OtapSpan::from(ring.records().next().unwrap());
+    span.attributes.insert_value("user", value).unwrap();
+    let batch = TraceEncoder::new(EncoderConfig::default())
+        .encode_spans(std::slice::from_ref(&span))
+        .unwrap();
+    let wire = prost::Message::encode_to_vec(&batch);
+    assert!(!wire.windows(secret.len()).any(|w| w == secret.as_bytes()));
+    let decoded = OtapDecoder::default().decode(&batch).unwrap();
+    let redacted = || DecodedValue::Str(REDACTED_MARKER.into());
+    assert_eq!(
+        decoded.spans[0].attributes,
+        vec![(
+            "user".to_string(),
+            DecodedValue::Map(vec![
+                ("route".into(), DecodedValue::Str("/login".into())),
+                ("email".into(), redacted()),
+                (
+                    "history".into(),
+                    DecodedValue::Slice(vec![redacted(), DecodedValue::Int(3)])
+                ),
+            ])
+        )]
+    );
 }

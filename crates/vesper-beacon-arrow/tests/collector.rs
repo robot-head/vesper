@@ -13,6 +13,13 @@
 //!    → file.
 //! 3. OTLP into the collector → collector `otelarrow` exporter (the upstream
 //!    Go encoder) → Beacon's OTAP gRPC server and decoder.
+//! 4. Both directions again over TLS with `bearertokenauth` on every hop.
+//!
+//! Every hop runs with default compression: Beacon's clients send zstd, the
+//! collector's `otelarrow` exporter sends `zstdarrow` gRPC compression, and
+//! one Beacon stream also compresses its Arrow IPC buffers. The signals
+//! cover gauges, sums, histograms with exemplars, exponential histograms,
+//! and map, slice and bytes attribute values.
 //!
 //! Record the collector version (`otelcol-contrib --version`) with any
 //! result; the report names the version this was run against.
@@ -97,22 +104,97 @@ struct Ports {
     otlp_back: u16,
     beacon_server: u16,
 }
+fn ports() -> Ports {
+    Ports {
+        arrow_in: free_port(),
+        otlp_in: free_port(),
+        otlp_back: free_port(),
+        beacon_server: free_port(),
+    }
+}
 
-fn start(bin: &Path, name: &str, ports: &Ports) -> (Collector, PathBuf) {
+/// Certificates for the TLS run: a CA and a leaf for `localhost` and
+/// `127.0.0.1`, shared by the collector and Beacon's server.
+struct Pki {
+    ca_pem: Vec<u8>,
+    tls: ServerTls,
+}
+fn pki() -> Pki {
+    use rcgen::{BasicConstraints, CertificateParams, IsCa, Issuer, KeyPair};
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+    ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+    let issuer = Issuer::new(ca_params, ca_key);
+    let key = KeyPair::generate().unwrap();
+    let cert = CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
+        .unwrap()
+        .signed_by(&key, &issuer)
+        .unwrap();
+    Pki {
+        ca_pem: ca.pem().into_bytes(),
+        tls: ServerTls {
+            cert_pem: cert.pem().into_bytes(),
+            key_pem: key.serialize_pem().into_bytes(),
+            client_ca_pem: None,
+        },
+    }
+}
+const TOKEN: &str = "vesper-interop-token";
+
+fn start(bin: &Path, name: &str, ports: &Ports, pki: Option<&Pki>) -> (Collector, PathBuf) {
     let dir = std::env::temp_dir().join(format!("vesper-otelcol-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let out = dir.join("out.json");
+    // Receivers Beacon sends to, and the exporter towards Beacon's server:
+    // plaintext, or TLS plus bearer tokens.
+    let (server_tls, client_tls, extensions, ext_list) = match pki {
+        None => (
+            String::new(),
+            "\n    tls:\n      insecure: true".to_owned(),
+            String::new(),
+            String::new(),
+        ),
+        Some(pki) => {
+            let cert = dir.join("server.pem");
+            let key = dir.join("server.key");
+            let ca = dir.join("ca.pem");
+            std::fs::write(&cert, &pki.tls.cert_pem).unwrap();
+            std::fs::write(&key, &pki.tls.key_pem).unwrap();
+            std::fs::write(&ca, &pki.ca_pem).unwrap();
+            (
+                format!(
+                    "\n        tls:\n          cert_file: {}\n          key_file: {}\n        auth:\n          authenticator: bearertokenauth/server",
+                    cert.display(),
+                    key.display()
+                ),
+                format!(
+                    "\n    tls:\n      ca_file: {}\n    auth:\n      authenticator: bearertokenauth/client",
+                    ca.display()
+                ),
+                format!(
+                    "extensions:\n  bearertokenauth/server:\n    token: {TOKEN}\n  bearertokenauth/client:\n    token: {TOKEN}\n"
+                ),
+                "\n  extensions: [bearertokenauth/server, bearertokenauth/client]".to_owned(),
+            )
+        }
+    };
+    let host = if pki.is_some() {
+        "localhost"
+    } else {
+        "127.0.0.1"
+    };
     let config = format!(
-        r#"receivers:
+        r#"{extensions}receivers:
   otelarrow:
     protocols:
       grpc:
-        endpoint: 127.0.0.1:{arrow_in}
+        endpoint: 127.0.0.1:{arrow_in}{server_tls}
   otlp:
     protocols:
       grpc:
-        endpoint: 127.0.0.1:{otlp_in}
+        endpoint: 127.0.0.1:{otlp_in}{server_tls}
   otlp/back:
     protocols:
       grpc:
@@ -122,18 +204,12 @@ exporters:
     path: {out}
     flush_interval: 100ms
   otelarrow:
-    endpoint: 127.0.0.1:{beacon_server}
-    tls:
-      insecure: true
-    # Beacon's server has no gRPC compression; the exporter's default is
-    # `zstdarrow5`.
-    compression: none
+    # Default compression (zstdarrow gRPC compression).
+    endpoint: {host}:{beacon_server}{client_tls}
     arrow:
       num_streams: 1
       disable_downgrade: true
-      # Nor Arrow IPC buffer compression (on when gRPC compression is off).
-      payload_compression: none
-service:
+service:{ext_list}
   telemetry:
     metrics:
       level: none
@@ -205,11 +281,38 @@ fn span(span_id: u64, parent: u64, route: &'static str) -> OtapSpan {
     s.kind = SpanKind::Server;
     s.trace_state = Some(TraceState::parse("vesper=1").unwrap());
     s.attributes.insert("http.route", route).unwrap();
+    s.attributes
+        .insert_value("app.placement", placement())
+        .unwrap();
+    s.attributes
+        .insert_value("app.digest", AttributeValue::bytes(DIGEST))
+        .unwrap();
     let mut e = SpanEvent::new("vesper.accepted", 1_700_000_000_000_000_100);
     e.attributes.insert("queue", "fast").unwrap();
     s.events.push(e);
     s.links.push(SpanLink::new(0x1111, 0x22));
     s
+}
+const DIGEST: &[u8] = b"\x00\x01beacon\xff";
+/// A map holding a scalar and a slice: OTLP `kvlistValue` / `arrayValue`.
+fn placement() -> AttributeValue {
+    AttributeValue::map([
+        ("region", AttributeValue::Static("eu-west")),
+        (
+            "zones",
+            AttributeValue::slice([AttributeValue::Int(1), AttributeValue::Int(2)]).unwrap(),
+        ),
+    ])
+    .unwrap()
+}
+fn decoded_placement() -> DecodedValue {
+    DecodedValue::Map(vec![
+        ("region".into(), DecodedValue::Str("eu-west".into())),
+        (
+            "zones".into(),
+            DecodedValue::Slice(vec![DecodedValue::Int(1), DecodedValue::Int(2)]),
+        ),
+    ])
 }
 fn resource(service: &'static str) -> Resource {
     let mut r = Resource::default();
@@ -243,26 +346,97 @@ fn log(body: &'static str, policy: &PiiPolicy) -> LogRecord {
             policy,
         )
         .unwrap();
+    l.attributes
+        .insert_value("app.placement", placement())
+        .unwrap();
     l
 }
 
-#[test]
-fn beacon_otap_and_otlp_reach_the_collector() {
-    let Some(bin) = collector() else { return };
-    let ports = Ports {
-        arrow_in: free_port(),
-        otlp_in: free_port(),
-        otlp_back: free_port(),
-        beacon_server: free_port(),
-    };
-    let (_collector, out) = start(&bin, "in", &ports);
+fn exemplar(value: NumberValue) -> Exemplar {
+    let mut e = Exemplar::new(1_700_000_000_000_000_050, value);
+    e.span_id = Some(1);
+    e.trace_id = Some(TRACE);
+    e
+}
+/// One point of every kind: gauge, sum, histogram with bin exemplars and
+/// exponential histogram, all named under `prefix`.
+fn points<'a>(
+    names: [&'static str; 4],
+    h: &'a FastLogHistogram,
+    exp: &ExponentialHistogram,
+) -> Vec<MetricPoint<'a>> {
+    const T: u64 = 1_700_000_000_000_000_000;
+    let mut gauge = NumberPoint::gauge(names[0], "1", T, NumberValue::Int(7));
+    gauge.attributes.insert("queue", "fast").unwrap();
+    gauge.exemplars.push(exemplar(NumberValue::Int(7)));
+    let mut sum = NumberPoint::sum(
+        names[1],
+        "By",
+        true,
+        Temporality::Cumulative,
+        1,
+        T,
+        NumberValue::Double(1.5),
+    );
+    sum.exemplars.push(exemplar(NumberValue::Double(1.5)));
+    let mut hist = HistogramPoint::new(names[2], "ns", 1, T, h).with_bin_exemplars(T, Some(TRACE));
+    hist.attributes.insert("rpc.method", "Export").unwrap();
+    let mut eh = ExpHistogramPoint::from_histogram(names[3], "By", 1, T, exp);
+    eh.attributes
+        .insert_value("app.placement", placement())
+        .unwrap();
+    vec![gauge.into(), sum.into(), hist.into(), eh.into()]
+}
+fn histograms() -> (FastLogHistogram, ExponentialHistogram) {
+    let mut h = FastLogHistogram::default();
+    for v in [5, 50, 500] {
+        h.record_with_exemplar(v, nz(1)).unwrap();
+    }
+    let mut exp = ExponentialHistogram::default();
+    for v in [0, 3, 1000, 4096, 1 << 30] {
+        exp.record(v).unwrap();
+    }
+    (h, exp)
+}
+fn client_options(pki: Option<&Pki>, token: &str) -> ConnectOptions {
+    ConnectOptions {
+        tls: pki.map(|p| ClientTls {
+            ca_pem: p.ca_pem.clone(),
+            ..ClientTls::default()
+        }),
+        bearer_token: pki.map(|_| BearerToken::new(token).unwrap()),
+        allow_insecure_auth: false,
+    }
+}
+fn url(pki: Option<&Pki>, port: u16) -> String {
+    match pki {
+        Some(_) => format!("https://localhost:{port}"),
+        None => format!("http://127.0.0.1:{port}"),
+    }
+}
+
+/// Beacon → collector over OTAP and OTLP.
+fn inbound(bin: &Path, pki: Option<&Pki>) {
+    let ports = ports();
+    let (_collector, out) = start(
+        bin,
+        if pki.is_some() { "in-tls" } else { "in" },
+        &ports,
+        pki,
+    );
     let policy = PiiPolicy::Redact;
+    let options = client_options(pki, TOKEN);
 
     // OTAP traces: two batches on one stream (the second has dictionary
-    // deltas), then metrics and logs on their own streams.
-    let endpoint = format!("http://127.0.0.1:{}", ports.arrow_in);
-    let mut transport =
-        GrpcTransport::connect(&endpoint, OtapSignal::Traces, ClientConfig::default()).unwrap();
+    // deltas), then metrics (with zstd Arrow IPC buffers) and logs.
+    let endpoint = url(pki, ports.arrow_in);
+    let mut transport = GrpcTransport::connect_with(
+        &endpoint,
+        &options,
+        OtapSignal::Traces,
+        ClientConfig::default(),
+    )
+    .unwrap();
     let mut encoder = TraceEncoder::new(EncoderConfig::default());
     for (first, routes) in [(1, ["/arrow/a", "/arrow/b"]), (3, ["/arrow/c", "/arrow/d"])] {
         let b = encoder
@@ -276,27 +450,34 @@ fn beacon_otap_and_otlp_reach_the_collector() {
         assert!(status.is_ok(), "{status:?}");
     }
     assert_eq!(transport.streams_opened, 1);
-    let mut h = FastLogHistogram::default();
-    for v in [5, 50, 500] {
-        h.record_with_exemplar(v, nz(1)).unwrap();
-    }
-    let mut point = HistogramPoint::new(
-        "vesper.rpc.duration",
-        "ns",
-        1,
-        1_700_000_000_000_000_000,
+    let (h, exp) = histograms();
+    let otap_points = points(
+        [
+            "otap.queue.depth",
+            "otap.bytes.sent",
+            "otap.rpc.duration",
+            "otap.rpc.size",
+        ],
         &h,
+        &exp,
     );
-    point.attributes.insert("rpc.method", "Export").unwrap();
-    let metrics_batch = MetricsEncoder::new(EncoderConfig::default())
-        .encode(&[ResourceGroup::single(
-            resource("beacon-otap"),
-            scope(),
-            vec![point.clone()],
-        )])
-        .unwrap();
-    let mut mt =
-        GrpcTransport::connect(&endpoint, OtapSignal::Metrics, ClientConfig::default()).unwrap();
+    let metrics_batch = MetricsEncoder::new(EncoderConfig {
+        ipc_compression: IpcCompression::Zstd,
+        ..EncoderConfig::default()
+    })
+    .encode_metrics(&[ResourceGroup::single(
+        resource("beacon-otap"),
+        scope(),
+        otap_points,
+    )])
+    .unwrap();
+    let mut mt = GrpcTransport::connect_with(
+        &endpoint,
+        &options,
+        OtapSignal::Metrics,
+        ClientConfig::default(),
+    )
+    .unwrap();
     let status = mt.exchange(&metrics_batch).unwrap();
     assert!(status.is_ok(), "{status:?}");
     let logs_batch = LogsEncoder::new(EncoderConfig::default())
@@ -306,14 +487,21 @@ fn beacon_otap_and_otlp_reach_the_collector() {
             vec![log("otap log", &policy)],
         )])
         .unwrap();
-    let mut lt =
-        GrpcTransport::connect(&endpoint, OtapSignal::Logs, ClientConfig::default()).unwrap();
+    let mut lt = GrpcTransport::connect_with(
+        &endpoint,
+        &options,
+        OtapSignal::Logs,
+        ClientConfig::default(),
+    )
+    .unwrap();
     let status = lt.exchange(&logs_batch).unwrap();
     assert!(status.is_ok(), "{status:?}");
 
-    // OTLP/gRPC.
+    // OTLP/gRPC (zstd, the client default).
+    let otlp_endpoint = url(pki, ports.otlp_in);
     let mut client =
-        BlockingOtlpClient::connect(&format!("http://127.0.0.1:{}", ports.otlp_in)).unwrap();
+        BlockingOtlpClient::connect_with(&otlp_endpoint, &options, GrpcCompression::default())
+            .unwrap();
     client
         .export_traces(
             otlp::traces_request(&[ResourceGroup::single(
@@ -324,11 +512,21 @@ fn beacon_otap_and_otlp_reach_the_collector() {
             .unwrap(),
         )
         .unwrap();
+    let otlp_points = points(
+        [
+            "otlp.queue.depth",
+            "otlp.bytes.sent",
+            "otlp.rpc.duration",
+            "otlp.rpc.size",
+        ],
+        &h,
+        &exp,
+    );
     client
-        .export_metrics(otlp::metrics_request(&[ResourceGroup::single(
+        .export_metrics(otlp::metric_points_request(&[ResourceGroup::single(
             resource("beacon-otlp"),
             scope(),
-            vec![point],
+            otlp_points,
         )]))
         .unwrap();
     client
@@ -338,68 +536,126 @@ fn beacon_otap_and_otlp_reach_the_collector() {
             vec![log("otlp log", &policy)],
         )]))
         .unwrap();
+    if pki.is_some() {
+        // The collector's bearertokenauth refuses a wrong token.
+        let mut wrong = BlockingOtlpClient::connect_with(
+            &otlp_endpoint,
+            &client_options(pki, "not-the-token"),
+            GrpcCompression::default(),
+        )
+        .unwrap();
+        let e = wrong
+            .export_logs(otlp::logs_request(&[ResourceGroup::single(
+                resource("beacon-intruder"),
+                scope(),
+                vec![log("intruder log", &policy)],
+            )]))
+            .unwrap_err();
+        assert!(
+            matches!(&e, GrpcError::Status(s) if s.code() == tonic::Code::Unauthenticated),
+            "{e:?}"
+        );
+    }
 
-    let text = wait_for(
-        &out,
-        &[
-            // Traces from OTAP: ids in OTLP-JSON hex, parent, kind, state,
-            // attributes, events, links, resource and scope.
-            "5ee500000000000000000000000000ab",
-            "\"spanId\":\"0000000000000001\"",
-            "\"parentSpanId\":\"0000000000000001\"",
-            "/arrow/a",
-            "/arrow/b",
-            "/arrow/c",
-            "/arrow/d",
-            "vesper=1",
-            "vesper.accepted",
-            "\"kind\":2",
-            "beacon-otap",
-            "vesper.interop",
-            "scope.kind",
-            // Metrics and logs from OTAP.
-            "vesper.rpc.duration",
-            "\"sum\":555",
-            "\"min\":5",
-            "\"max\":500",
-            "rpc.method",
-            "otap log",
-            "vesper.login_failed",
-            // OTLP.
-            "beacon-otlp",
-            "/otlp/a",
-            "otlp log",
-        ],
-    );
+    let mut needles = vec![
+        // Traces from OTAP: ids in OTLP-JSON hex, parent, kind, state,
+        // attributes, events, links, resource and scope.
+        "5ee500000000000000000000000000ab",
+        "\"spanId\":\"0000000000000001\"",
+        "\"parentSpanId\":\"0000000000000001\"",
+        "/arrow/a",
+        "/arrow/b",
+        "/arrow/c",
+        "/arrow/d",
+        "vesper=1",
+        "vesper.accepted",
+        "\"kind\":2",
+        "beacon-otap",
+        "vesper.interop",
+        "scope.kind",
+        // Structured values (bytes in base64).
+        "\"kvlistValue\"",
+        "\"arrayValue\"",
+        "\"bytesValue\":\"AAFiZWFjb27/\"",
+        "eu-west",
+        // Logs.
+        "otap log",
+        "vesper.login_failed",
+        // OTLP.
+        "beacon-otlp",
+        "/otlp/a",
+        "otlp log",
+        // Metric kinds and exemplars.
+        "\"gauge\"",
+        "\"asInt\":\"7\"",
+        "\"asDouble\":1.5",
+        "\"isMonotonic\":true",
+        "\"exponentialHistogram\"",
+        "\"exemplars\"",
+        "\"sum\":555",
+        "\"min\":5",
+        "\"max\":500",
+        "rpc.method",
+    ];
+    let names = [
+        "otap.queue.depth",
+        "otap.bytes.sent",
+        "otap.rpc.duration",
+        "otap.rpc.size",
+        "otlp.queue.depth",
+        "otlp.bytes.sent",
+        "otlp.rpc.duration",
+        "otlp.rpc.size",
+    ];
+    needles.extend(names);
+    let text = wait_for(&out, &needles);
     assert!(
         !text.contains("alice@example.com"),
         "PII crossed the boundary"
     );
+    assert!(
+        !text.contains("intruder"),
+        "unauthenticated export accepted"
+    );
     assert!(text.contains("[REDACTED]"));
+    // The exponential histograms arrive with Beacon's buckets: scale and
+    // offset in OTLP-JSON.
+    assert!(
+        text.contains(&format!("\"scale\":{}", exp.scale())),
+        "{text}"
+    );
 }
 
-#[test]
-fn collector_otelarrow_exporter_reaches_the_beacon_server() {
-    let Some(bin) = collector() else { return };
+/// Collector `otelarrow` exporter (Go encoder) → Beacon's OTAP server.
+fn outbound(bin: &Path, pki: Option<&Pki>) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let ports = Ports {
-        arrow_in: free_port(),
-        otlp_in: free_port(),
-        otlp_back: free_port(),
-        beacon_server: free_port(),
-    };
+    let ports = ports();
     let listener = rt
         .block_on(tokio::net::TcpListener::bind((
             "127.0.0.1",
             ports.beacon_server,
         )))
         .unwrap();
-    let (service, mut rx) = OtapService::new(ServerConfig::default());
+    let (service, mut rx) = OtapService::new(ServerConfig {
+        bearer_tokens: pki
+            .map(|_| vec![BearerToken::new(TOKEN).unwrap()])
+            .unwrap_or_default(),
+        ..ServerConfig::default()
+    });
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-    let server = rt.spawn(serve_otap(listener, service, async {
-        let _ = stopped.await;
-    }));
-    let (collector, _out) = start(&bin, "back", &ports);
+    let tls = pki.map(|p| p.tls.clone());
+    let server = rt.spawn(async move {
+        serve_otap_tls(listener, service, tls.as_ref(), async {
+            let _ = stopped.await;
+        })
+        .await
+    });
+    let (collector, _out) = start(
+        bin,
+        if pki.is_some() { "back-tls" } else { "back" },
+        &ports,
+        pki,
+    );
 
     let mut client =
         BlockingOtlpClient::connect(&format!("http://127.0.0.1:{}", ports.otlp_back)).unwrap();
@@ -413,13 +669,12 @@ fn collector_otelarrow_exporter_reaches_the_beacon_server() {
             .unwrap(),
         )
         .unwrap();
-    let mut h = FastLogHistogram::default();
-    h.record_with_exemplar(42, nz(1)).unwrap();
+    let (h, exp) = histograms();
     client
-        .export_metrics(otlp::metrics_request(&[ResourceGroup::single(
+        .export_metrics(otlp::metric_points_request(&[ResourceGroup::single(
             resource("via-go-encoder"),
             scope(),
-            vec![HistogramPoint::new("go.hist", "ns", 1, 2, &h)],
+            points(["go.gauge", "go.sum", "go.hist", "go.exp"], &h, &exp),
         )]))
         .unwrap();
     client
@@ -430,9 +685,15 @@ fn collector_otelarrow_exporter_reaches_the_beacon_server() {
         )]))
         .unwrap();
 
-    let (mut spans, mut hists, mut logs) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut spans, mut hists, mut numbers, mut exps, mut logs) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let deadline = Instant::now() + Duration::from_secs(30);
-    while spans.len() < 2 || hists.is_empty() || logs.is_empty() {
+    while spans.len() < 2
+        || hists.is_empty()
+        || numbers.len() < 2
+        || exps.is_empty()
+        || logs.is_empty()
+    {
         let left = deadline.saturating_duration_since(Instant::now());
         let got = rt
             .block_on(async { tokio::time::timeout(left, rx.recv()).await })
@@ -447,13 +708,18 @@ fn collector_otelarrow_exporter_reaches_the_beacon_server() {
         }
         spans.extend(b.spans);
         hists.extend(b.histograms);
+        numbers.extend(b.numbers);
+        exps.extend(b.exp_histograms);
         logs.extend(b.logs);
     }
     spans.sort_by_key(|s| s.span_id);
+    numbers.sort_by(|a, b| a.name.cmp(&b.name));
     eprintln!(
-        "decoded {} spans, {} histograms, {} logs from the Go encoder",
+        "decoded {} spans, {} histograms, {} number points, {} exponential histograms, {} logs from the Go encoder",
         spans.len(),
         hists.len(),
+        numbers.len(),
+        exps.len(),
         logs.len()
     );
     assert_eq!(spans[0].trace_id, TRACE);
@@ -465,10 +731,74 @@ fn collector_otelarrow_exporter_reaches_the_beacon_server() {
         attr(&spans[0].attributes, "http.route"),
         Some(&DecodedValue::Str("/go/a".into()))
     );
+    // Structured values through upstream's CBOR `ser` column.
+    assert_eq!(
+        attr(&spans[0].attributes, "app.placement"),
+        Some(&decoded_placement())
+    );
+    assert_eq!(
+        attr(&spans[0].attributes, "app.digest"),
+        Some(&DecodedValue::Bytes(DIGEST.to_vec()))
+    );
+    assert_eq!(
+        attr(&logs[0].attributes, "app.placement"),
+        Some(&decoded_placement())
+    );
     assert_eq!(hists[0].name, "go.hist");
-    assert_eq!(hists[0].count, Some(1));
+    assert_eq!(hists[0].count, Some(3));
+    assert_eq!(hists[0].exemplars.len(), 3, "{:?}", hists[0].exemplars);
+    assert_eq!(hists[0].exemplars[0].trace_id, Some(TRACE));
+    let (g, s) = (&numbers[0], &numbers[1]);
+    assert_eq!(g.name, "go.gauge");
+    assert_eq!(g.metric_type, schema::METRIC_TYPE_GAUGE);
+    assert_eq!(g.value, Some(NumberValue::Int(7)));
+    assert_eq!(g.exemplars[0].value, NumberValue::Int(7));
+    assert_eq!(g.exemplars[0].span_id, Some(1));
+    assert_eq!(g.exemplars[0].trace_id, Some(TRACE));
+    assert_eq!(s.name, "go.sum");
+    assert_eq!(s.metric_type, schema::METRIC_TYPE_SUM);
+    assert_eq!(s.value, Some(NumberValue::Double(1.5)));
+    assert_eq!(s.is_monotonic, Some(true));
+    assert_eq!(
+        s.aggregation_temporality,
+        Some(schema::TEMPORALITY_CUMULATIVE)
+    );
+    assert_eq!(s.exemplars[0].value, NumberValue::Double(1.5));
+    let e = &exps[0];
+    assert_eq!(e.name, "go.exp");
+    assert_eq!((e.count, e.zero_count, e.scale), (5, 1, exp.scale()));
+    assert_eq!(e.positive.offset, exp.offset());
+    assert_eq!(e.positive.counts, exp.positive_counts());
+    // The Go encoder writes a zero min as null (observed with 0.165.0), so
+    // a min of 0 does not survive this hop; the max does.
+    assert_eq!(e.min, None);
+    assert_eq!(e.max, Some((1u64 << 30) as f64));
+    assert_eq!(
+        attr(&e.attributes, "app.placement"),
+        Some(&decoded_placement())
+    );
     assert_eq!(logs[0].body, Some(DecodedValue::Str("go log".into())));
     drop(collector);
     let _ = stop.send(());
     rt.block_on(server).unwrap().unwrap();
+}
+
+#[test]
+fn beacon_otap_and_otlp_reach_the_collector() {
+    let Some(bin) = collector() else { return };
+    inbound(&bin, None);
+}
+
+#[test]
+fn collector_otelarrow_exporter_reaches_the_beacon_server() {
+    let Some(bin) = collector() else { return };
+    outbound(&bin, None);
+}
+
+#[test]
+fn both_directions_over_tls_with_bearer_tokens() {
+    let Some(bin) = collector() else { return };
+    let pki = pki();
+    inbound(&bin, Some(&pki));
+    outbound(&bin, Some(&pki));
 }

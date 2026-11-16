@@ -20,6 +20,7 @@
 //! producer's reset-on-error.
 
 use super::ipc::IpcReader;
+use super::model::{ExpBuckets, NumberValue};
 use super::proto::{ArrowPayloadType, BatchArrowRecords};
 use super::schema::{self, value_type};
 use arrow_array::{
@@ -45,6 +46,9 @@ pub struct DecodeLimits {
     pub max_stream_bytes: usize,
     /// Rows of any one payload.
     pub max_rows: usize,
+    /// Bytes one payload's Arrow IPC buffers may decompress to (payloads
+    /// with zstd `BodyCompression`).
+    pub max_decompressed_bytes: usize,
     /// Bytes of owned strings one batch may decode into. Dictionary columns
     /// expand each referenced value per row, so this bounds the expansion
     /// independently of the encoded size.
@@ -56,7 +60,9 @@ pub struct DecodeLimits {
 ///
 /// Upstream's exporter fills `headers` with its outgoing gRPC metadata
 /// (for example W3C trace context), HPACK-encoded with a dynamic table that
-/// persists across one stream's batches. Beacon has no HPACK decoder.
+/// persists across one stream's batches (see [`HeaderDecoder`]).
+///
+/// [`HeaderDecoder`]: super::HeaderDecoder
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeaderPolicy {
     /// Any non-empty `headers` is [`DecodeError::HeadersUnsupported`].
@@ -64,6 +70,14 @@ pub enum HeaderPolicy {
     /// Keep the raw bytes, undecoded, in [`DecodedBatch::headers`], up to
     /// `max_bytes` per batch ([`DecodeError::HeadersTooLarge`] beyond).
     KeepRaw { max_bytes: usize },
+    /// HPACK-decode each batch's block, in stream order, into
+    /// [`DecodedBatch::header_fields`] (the raw bytes are kept too). At most
+    /// `max_bytes` of encoded block and of decoded fields per batch, and a
+    /// dynamic table of at most `max_table_size` bytes.
+    Decode {
+        max_bytes: usize,
+        max_table_size: usize,
+    },
 }
 impl Default for DecodeLimits {
     fn default() -> Self {
@@ -74,6 +88,7 @@ impl Default for DecodeLimits {
             max_payload_bytes: 16 << 20,
             max_stream_bytes: 256 << 20,
             max_rows: super::encode::MAX_BATCH_ROWS,
+            max_decompressed_bytes: 64 << 20,
             max_decoded_string_bytes: 64 << 20,
             headers: HeaderPolicy::Reject,
         }
@@ -83,8 +98,10 @@ impl Default for DecodeLimits {
 #[derive(Debug)]
 pub enum DecodeError {
     HeadersUnsupported,
-    /// Raw `headers` larger than [`HeaderPolicy::KeepRaw`] allows.
+    /// Raw or decoded `headers` larger than the [`HeaderPolicy`] allows.
     HeadersTooLarge,
+    /// A malformed HPACK block (or one that needs a larger dynamic table).
+    BadHeaders(&'static str),
     TooManyPayloads,
     UnknownPayloadType(i32),
     UnsupportedPayloadType(ArrowPayloadType),
@@ -98,6 +115,8 @@ pub enum DecodeError {
     TooManyStreams,
     PayloadTooLarge,
     StreamTooLarge,
+    /// Compressed Arrow IPC buffers would exceed `max_decompressed_bytes`.
+    DecompressedTooLarge,
     /// The payload did not contain exactly one complete record batch.
     RecordBatchCount(usize),
     TruncatedMessage,
@@ -123,7 +142,15 @@ pub enum DecodeError {
     /// Related payloads without their main record in the same batch.
     MissingMainRecord,
     BadAttribute(u8),
+    /// A `ser` cell that is not one well-formed CBOR value of the supported
+    /// kinds (see the `cbor` module), or nests too deep.
+    BadSerializedValue,
+    /// A metric type Beacon does not decode (summary, empty or unknown).
     UnsupportedMetricType(u8),
+    /// A data point whose metric row has another type (the row's type).
+    PointKindMismatch(u8),
+    /// Histogram or exponential histogram buckets, bounds, counts or scale
+    /// that OTLP does not allow.
     HistogramShape,
     /// Decoded strings would exceed `max_decoded_string_bytes`.
     DecodedTooLarge,
@@ -136,14 +163,33 @@ impl std::fmt::Display for DecodeError {
 }
 impl std::error::Error for DecodeError {}
 
-/// A decoded attribute or body value. Equality on `Double` is `f64 ==`, as
-/// in upstream's quasi-delta comparison.
+/// A decoded attribute or body value. `PartialEq` is structural (`f64 ==`
+/// on doubles); the quasi-delta comparison follows upstream instead (slices
+/// and maps never repeat).
 #[derive(Clone, Debug, PartialEq)]
 pub enum DecodedValue {
     Str(String),
     Int(i64),
     Double(f64),
     Bool(bool),
+    Bytes(Vec<u8>),
+    Slice(Vec<DecodedValue>),
+    Map(Vec<(String, DecodedValue)>),
+    /// An empty value inside a slice or map (CBOR null).
+    Empty,
+}
+impl DecodedValue {
+    /// Upstream `carrow.Equal`.
+    fn same(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Str(a), Self::Str(b)) => a == b,
+            (Self::Int(a), Self::Int(b)) => a == b,
+            (Self::Double(a), Self::Double(b)) => a == b,
+            (Self::Bool(a), Self::Bool(b)) => a == b,
+            (Self::Bytes(a), Self::Bytes(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 pub type DecodedAttributes = Vec<(String, DecodedValue)>;
 
@@ -220,6 +266,57 @@ pub struct DecodedHistogram {
     pub max: Option<f64>,
     pub flags: Option<u32>,
     pub attributes: DecodedAttributes,
+    pub exemplars: Vec<DecodedExemplar>,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodedExemplar {
+    pub time_unix_ns: u64,
+    pub value: NumberValue,
+    pub span_id: Option<u64>,
+    pub trace_id: Option<u128>,
+    pub filtered_attributes: DecodedAttributes,
+}
+/// A gauge (`metric_type` 1) or sum (2) data point.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodedNumber {
+    pub name: String,
+    pub unit: Option<String>,
+    pub description: Option<String>,
+    pub metric_type: u8,
+    pub aggregation_temporality: Option<i32>,
+    pub is_monotonic: Option<bool>,
+    pub resource: usize,
+    pub scope: usize,
+    pub start_unix_ns: Option<u64>,
+    pub time_unix_ns: u64,
+    /// `None` when neither `int_value` nor `double_value` is set.
+    pub value: Option<NumberValue>,
+    pub flags: Option<u32>,
+    pub attributes: DecodedAttributes,
+    pub exemplars: Vec<DecodedExemplar>,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct DecodedExpHistogram {
+    pub name: String,
+    pub unit: Option<String>,
+    pub description: Option<String>,
+    pub aggregation_temporality: Option<i32>,
+    pub resource: usize,
+    pub scope: usize,
+    pub start_unix_ns: Option<u64>,
+    pub time_unix_ns: u64,
+    pub count: u64,
+    pub sum: Option<f64>,
+    pub scale: i32,
+    pub zero_count: u64,
+    pub zero_threshold: f64,
+    pub positive: ExpBuckets,
+    pub negative: ExpBuckets,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub flags: Option<u32>,
+    pub attributes: DecodedAttributes,
+    pub exemplars: Vec<DecodedExemplar>,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct DecodedLog {
@@ -247,11 +344,14 @@ pub struct DecodedBatch {
     pub scopes: Vec<DecodedScope>,
     pub spans: Vec<DecodedSpan>,
     pub histograms: Vec<DecodedHistogram>,
+    pub numbers: Vec<DecodedNumber>,
+    pub exp_histograms: Vec<DecodedExpHistogram>,
     pub logs: Vec<DecodedLog>,
-    /// The batch's raw HPACK `headers` under [`HeaderPolicy::KeepRaw`]
-    /// (empty otherwise). Not decoded: the HPACK dynamic table spans the
-    /// stream, so a consumer must decode a stream's headers in order.
+    /// The batch's raw HPACK `headers` under [`HeaderPolicy::KeepRaw`] and
+    /// [`HeaderPolicy::Decode`] (empty otherwise).
     pub headers: Vec<u8>,
+    /// The decoded header fields under [`HeaderPolicy::Decode`].
+    pub header_fields: Vec<super::HeaderField>,
 }
 
 struct RxStream {
@@ -264,6 +364,7 @@ pub struct OtapDecoder {
     limits: DecodeLimits,
     streams: HashMap<String, RxStream>,
     string_budget: Cell<usize>,
+    hpack: Option<super::HeaderDecoder>,
 }
 impl Default for OtapDecoder {
     fn default() -> Self {
@@ -285,7 +386,18 @@ fn signal_of(ty: ArrowPayloadType) -> Option<(Signal, bool)> {
             (Signal::Traces, false)
         }
         T::UnivariateMetrics => (Signal::Metrics, true),
-        T::HistogramDataPoints | T::HistogramDpAttrs => (Signal::Metrics, false),
+        T::NumberDataPoints
+        | T::NumberDpAttrs
+        | T::NumberDpExemplars
+        | T::NumberDpExemplarAttrs
+        | T::HistogramDataPoints
+        | T::HistogramDpAttrs
+        | T::HistogramDpExemplars
+        | T::HistogramDpExemplarAttrs
+        | T::ExpHistogramDataPoints
+        | T::ExpHistogramDpAttrs
+        | T::ExpHistogramDpExemplars
+        | T::ExpHistogramDpExemplarAttrs => (Signal::Metrics, false),
         T::Logs => (Signal::Logs, true),
         T::LogAttrs => (Signal::Logs, false),
         _ => return None,
@@ -298,6 +410,7 @@ impl OtapDecoder {
             limits,
             streams: HashMap::new(),
             string_budget: Cell::new(limits.max_decoded_string_bytes),
+            hpack: None,
         }
     }
     pub fn stream_count(&self) -> usize {
@@ -305,6 +418,7 @@ impl OtapDecoder {
     }
     pub fn reset(&mut self) {
         self.streams.clear();
+        self.hpack = None;
     }
 
     pub fn decode(&mut self, batch: &BatchArrowRecords) -> Result<DecodedBatch, DecodeError> {
@@ -321,11 +435,23 @@ impl OtapDecoder {
             HeaderPolicy::Reject if !batch.headers.is_empty() => {
                 return Err(DecodeError::HeadersUnsupported)
             }
-            HeaderPolicy::KeepRaw { max_bytes } if batch.headers.len() > max_bytes => {
+            HeaderPolicy::KeepRaw { max_bytes } | HeaderPolicy::Decode { max_bytes, .. }
+                if batch.headers.len() > max_bytes =>
+            {
                 return Err(DecodeError::HeadersTooLarge)
             }
             _ => {}
         }
+        let header_fields = match self.limits.headers {
+            HeaderPolicy::Decode {
+                max_bytes,
+                max_table_size,
+            } if !batch.headers.is_empty() => self
+                .hpack
+                .get_or_insert_with(|| super::HeaderDecoder::new(max_table_size, max_bytes))
+                .decode(&batch.headers)?,
+            _ => Vec::new(),
+        };
         if batch.arrow_payloads.len() > self.limits.max_payloads {
             return Err(DecodeError::TooManyPayloads);
         }
@@ -378,6 +504,7 @@ impl OtapDecoder {
             out: DecodedBatch {
                 batch_id: batch.batch_id,
                 headers: batch.headers.clone(),
+                header_fields,
                 ..DecodedBatch::default()
             },
         };
@@ -422,9 +549,10 @@ impl OtapDecoder {
             .filter(|b| *b <= self.limits.max_stream_bytes)
             .ok_or(DecodeError::StreamTooLarge)?;
         let max_rows = self.limits.max_rows;
+        let max_decompressed = self.limits.max_decompressed_bytes;
         let reader = &mut stream.reader;
         let mut batches = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            reader.feed(bytes, max_rows)
+            reader.feed(bytes, max_rows, max_decompressed)
         }))
         .map_err(|_| DecodeError::DecoderPanic)??;
         if batches.len() > 1 {
@@ -622,6 +750,35 @@ fn strings(
         _ => Err(DecodeError::ColumnType(name)),
     }
 }
+/// Byte strings from plain `Binary` or `Dictionary<_, Binary>` columns,
+/// charged against `budget` before each copy.
+fn binaries(
+    c: Option<C<'_>>,
+    n: usize,
+    budget: &Cell<usize>,
+) -> Result<Vec<Option<Vec<u8>>>, DecodeError> {
+    let Some(c) = c else {
+        return Ok(vec![None; n]);
+    };
+    let a = plain(&c)?;
+    if a.data_type() != &DataType::Binary {
+        return Err(DecodeError::ColumnType(c.name));
+    }
+    a.as_binary::<i32>()
+        .iter()
+        .map(|v| {
+            v.map(|v| {
+                let left = budget
+                    .get()
+                    .checked_sub(v.len())
+                    .ok_or(DecodeError::DecodedTooLarge)?;
+                budget.set(left);
+                Ok(v.to_vec())
+            })
+            .transpose()
+        })
+        .collect()
+}
 fn lists<T: ArrowPrimitiveType>(
     c: Option<C<'_>>,
     n: usize,
@@ -753,15 +910,28 @@ fn attrs_weight(attrs: &DecodedAttributes) -> usize {
         .map(Weight::weight)
         .fold(0, usize::saturating_add)
 }
+impl Weight for DecodedValue {
+    fn weight(&self) -> usize {
+        match self {
+            DecodedValue::Str(s) => s.len(),
+            DecodedValue::Bytes(b) => b.len(),
+            DecodedValue::Slice(items) => items
+                .iter()
+                .map(|v| ENTRY_WEIGHT.saturating_add(v.weight()))
+                .fold(0, usize::saturating_add),
+            DecodedValue::Map(entries) => entries
+                .iter()
+                .map(Weight::weight)
+                .fold(0, usize::saturating_add),
+            _ => 0,
+        }
+    }
+}
 impl Weight for (String, DecodedValue) {
     fn weight(&self) -> usize {
-        let value = match &self.1 {
-            DecodedValue::Str(s) => s.len(),
-            _ => 0,
-        };
         ENTRY_WEIGHT
             .saturating_add(self.0.len())
-            .saturating_add(value)
+            .saturating_add(self.1.weight())
     }
 }
 impl Weight for DecodedEvent {
@@ -769,6 +939,11 @@ impl Weight for DecodedEvent {
         ENTRY_WEIGHT
             .saturating_add(self.name.len())
             .saturating_add(attrs_weight(&self.attributes))
+    }
+}
+impl Weight for DecodedExemplar {
+    fn weight(&self) -> usize {
+        ENTRY_WEIGHT.saturating_add(attrs_weight(&self.filtered_attributes))
     }
 }
 impl Weight for DecodedLink {
@@ -828,6 +1003,67 @@ impl<T: Clone + Weight> ByParent<T> {
     }
 }
 
+/// The value columns of an attribute payload or of the log `body` struct.
+struct Values {
+    strs: Vec<Option<String>>,
+    ints: Vec<Option<i64>>,
+    doubles: Vec<Option<f64>>,
+    bools: Vec<Option<bool>>,
+    bytes: Vec<Option<Vec<u8>>>,
+    sers: Vec<Option<Vec<u8>>>,
+    names: [&'static str; 6],
+}
+impl Values {
+    /// Columns `str`, `int`, `double`, `bool`, `bytes`, `ser`.
+    fn read(n: usize, budget: &Cell<usize>, cols: [Option<C<'_>>; 6]) -> Result<Self, DecodeError> {
+        let [s, i, d, b, y, z] = cols;
+        let name = |c: &Option<C<'_>>, default| c.as_ref().map_or(default, |c| c.name);
+        let names = [
+            name(&s, "str"),
+            name(&i, "int"),
+            name(&d, "double"),
+            name(&b, "bool"),
+            name(&y, "bytes"),
+            name(&z, "ser"),
+        ];
+        Ok(Self {
+            strs: strings(s, n, budget)?,
+            ints: opt_prim::<Int64Type>(i, n, is(DataType::Int64))?,
+            doubles: opt_prim::<Float64Type>(d, n, is(DataType::Float64))?,
+            bools: bools(b, n)?,
+            bytes: binaries(y, n, budget)?,
+            sers: binaries(z, n, budget)?,
+            names,
+        })
+    }
+    /// Row `i` of type `ty`; `None` for an unknown type, and for `EMPTY`.
+    fn take(
+        &mut self,
+        i: usize,
+        ty: u8,
+        budget: &Cell<usize>,
+    ) -> Result<Option<DecodedValue>, DecodeError> {
+        let null = |k: usize| DecodeError::NullValue(self.names[k]);
+        Ok(Some(match ty {
+            value_type::STR => DecodedValue::Str(self.strs[i].take().ok_or(null(0))?),
+            value_type::INT => DecodedValue::Int(self.ints[i].ok_or(null(1))?),
+            value_type::DOUBLE => DecodedValue::Double(self.doubles[i].ok_or(null(2))?),
+            value_type::BOOL => DecodedValue::Bool(self.bools[i].ok_or(null(3))?),
+            value_type::BYTES => DecodedValue::Bytes(self.bytes[i].take().ok_or(null(4))?),
+            value_type::SLICE | value_type::MAP => {
+                let ser = self.sers[i].take().ok_or(null(5))?;
+                let value = super::cbor::decode(&ser, budget)?;
+                match (ty, &value) {
+                    (value_type::SLICE, DecodedValue::Slice(_))
+                    | (value_type::MAP, DecodedValue::Map(_)) => value,
+                    _ => return Err(DecodeError::BadSerializedValue),
+                }
+            }
+            _ => return Ok(None),
+        }))
+    }
+}
+
 fn attributes(
     batch: Option<&RecordBatch>,
     name: &'static str,
@@ -840,32 +1076,215 @@ fn attributes(
     let n = batch.num_rows();
     let keys = strings(Some(need(batch, "key")?), n, budget)?;
     let types = prim::<UInt8Type>(&need(batch, "type")?, is(DataType::UInt8))?;
-    let strs = strings(find(batch, "str"), n, budget)?;
-    let ints = opt_prim::<Int64Type>(find(batch, "int"), n, is(DataType::Int64))?;
-    let doubles = opt_prim::<Float64Type>(find(batch, "double"), n, is(DataType::Float64))?;
-    let bools = bools(find(batch, "bool"), n)?;
+    let mut values = Values::read(
+        n,
+        budget,
+        [
+            find(batch, "str"),
+            find(batch, "int"),
+            find(batch, "double"),
+            find(batch, "bool"),
+            find(batch, "bytes"),
+            find(batch, "ser"),
+        ],
+    )?;
     let mut rows = Vec::with_capacity(n);
     for i in 0..n {
         let key = keys[i].clone().ok_or(DecodeError::NullValue("key"))?;
         let ty = types[i].ok_or(DecodeError::NullValue("type"))?;
-        let value = match ty {
-            value_type::STR => {
-                DecodedValue::Str(strs[i].clone().ok_or(DecodeError::NullValue("str"))?)
-            }
-            value_type::INT => DecodedValue::Int(ints[i].ok_or(DecodeError::NullValue("int"))?),
-            value_type::DOUBLE => {
-                DecodedValue::Double(doubles[i].ok_or(DecodeError::NullValue("double"))?)
-            }
-            value_type::BOOL => DecodedValue::Bool(bools[i].ok_or(DecodeError::NullValue("bool"))?),
-            other => return Err(DecodeError::BadAttribute(other)),
-        };
+        let value = values
+            .take(i, ty, budget)?
+            .ok_or(DecodeError::BadAttribute(ty))?;
         rows.push((key, value));
     }
     // Upstream `AttrsParentIDDecoder`: equal key and value continue a run.
-    let parents = quasi_ids(&need(batch, "parent_id")?, |i| rows[i] == rows[i - 1])?;
+    let parents = quasi_ids(&need(batch, "parent_id")?, |i| {
+        rows[i].0 == rows[i - 1].0 && rows[i].1.same(&rows[i - 1].1)
+    })?;
     for (parent, row) in parents.into_iter().zip(rows) {
         out.push(parent, row);
     }
+    Ok(out)
+}
+
+// ------------------------------------------------------------------ metrics helpers
+
+/// Payload types and error names of one data-point family.
+#[derive(Clone, Copy)]
+struct FamilyNames {
+    points: ArrowPayloadType,
+    attrs: ArrowPayloadType,
+    exemplars: ArrowPayloadType,
+    exemplar_attrs: ArrowPayloadType,
+    id: &'static str,
+    attrs_parent: &'static str,
+    exemplar_attrs_parent: &'static str,
+}
+impl FamilyNames {
+    const NUMBER: Self = Self {
+        points: ArrowPayloadType::NumberDataPoints,
+        attrs: ArrowPayloadType::NumberDpAttrs,
+        exemplars: ArrowPayloadType::NumberDpExemplars,
+        exemplar_attrs: ArrowPayloadType::NumberDpExemplarAttrs,
+        id: "number_dps.id",
+        attrs_parent: "number_dp_attrs.parent_id",
+        exemplar_attrs_parent: "number_dp_exemplar_attrs.parent_id",
+    };
+    const HISTOGRAM: Self = Self {
+        points: ArrowPayloadType::HistogramDataPoints,
+        attrs: ArrowPayloadType::HistogramDpAttrs,
+        exemplars: ArrowPayloadType::HistogramDpExemplars,
+        exemplar_attrs: ArrowPayloadType::HistogramDpExemplarAttrs,
+        id: "histogram_dps.id",
+        attrs_parent: "histogram_dp_attrs.parent_id",
+        exemplar_attrs_parent: "histogram_dp_exemplar_attrs.parent_id",
+    };
+    const EXP_HISTOGRAM: Self = Self {
+        points: ArrowPayloadType::ExpHistogramDataPoints,
+        attrs: ArrowPayloadType::ExpHistogramDpAttrs,
+        exemplars: ArrowPayloadType::ExpHistogramDpExemplars,
+        exemplar_attrs: ArrowPayloadType::ExpHistogramDpExemplarAttrs,
+        id: "exp_histogram_dps.id",
+        attrs_parent: "exp_histogram_dp_attrs.parent_id",
+        exemplar_attrs_parent: "exp_histogram_dp_exemplar_attrs.parent_id",
+    };
+}
+
+/// The columns every data-point family shares, for one point.
+struct PointCommon {
+    row: usize,
+    start_unix_ns: Option<u64>,
+    time_unix_ns: u64,
+    flags: Option<u32>,
+    attributes: DecodedAttributes,
+    exemplars: Vec<DecodedExemplar>,
+}
+struct MetricMeta {
+    name: String,
+    unit: Option<String>,
+    description: Option<String>,
+    aggregation_temporality: Option<i32>,
+    resource: usize,
+    scope: usize,
+}
+
+/// Data-point `parent_id`: delta-encoded row by row, or plain.
+fn row_delta_parents(c: &C<'_>) -> Result<Vec<u32>, DecodeError> {
+    let (raw, max) = ids(c)?;
+    let plain = codec(c, Codec::Delta)? == Codec::Plain;
+    let mut acc = 0u32;
+    raw.into_iter()
+        .map(|v| {
+            let v = v.ok_or(DecodeError::NullValue("parent_id"))?;
+            acc = if plain {
+                v
+            } else {
+                acc.checked_add(v)
+                    .filter(|a| *a <= max)
+                    .ok_or(DecodeError::IdOverflow("parent_id"))?
+            };
+            Ok(acc)
+        })
+        .collect()
+}
+
+fn checked_total(counts: &[u64], start: u64) -> Result<u64, DecodeError> {
+    counts.iter().try_fold(start, |acc, c| {
+        acc.checked_add(*c).ok_or(DecodeError::HistogramShape)
+    })
+}
+
+/// An exponential histogram `positive`/`negative` struct column.
+fn exp_buckets(c: Option<C<'_>>, n: usize) -> Result<Vec<ExpBuckets>, DecodeError> {
+    let Some(c) = c else {
+        return Ok(vec![ExpBuckets::default(); n]);
+    };
+    let (s, fields) = as_struct(&c)?;
+    let offsets = opt_prim::<Int32Type>(child(s, fields, "offset"), n, is(DataType::Int32))?;
+    let counts = lists::<UInt64Type>(child(s, fields, "bucket_counts"), n, &DataType::UInt64)?;
+    Ok(offsets
+        .into_iter()
+        .zip(counts)
+        .map(|(o, c)| ExpBuckets {
+            offset: o.unwrap_or(0),
+            counts: c.unwrap_or_default(),
+        })
+        .collect())
+}
+
+fn same_number(a: Option<NumberValue>, b: Option<NumberValue>) -> bool {
+    match (a, b) {
+        (Some(NumberValue::Int(x)), Some(NumberValue::Int(y))) => x == y,
+        (Some(NumberValue::Double(x)), Some(NumberValue::Double(y))) => x == y,
+        _ => false,
+    }
+}
+
+/// Exemplars of one family grouped by data-point id. `parent_id` is
+/// quasi-delta keyed on the value (upstream `ExemplarParentIdDecoder`);
+/// Beacon requires every exemplar to carry a value.
+fn exemplars(
+    batch: Option<&RecordBatch>,
+    attrs_batch: Option<&RecordBatch>,
+    attrs_parent: &'static str,
+    budget: &Cell<usize>,
+) -> Result<ByParent<DecodedExemplar>, DecodeError> {
+    let mut out = ByParent::new("exemplars.parent_id");
+    let mut attrs = attributes(attrs_batch, attrs_parent, budget)?;
+    let Some(batch) = batch else {
+        attrs.finish()?;
+        return Ok(out);
+    };
+    let n = batch.num_rows();
+    let ids = match find(batch, "id") {
+        Some(c) => delta_ids(&c)?,
+        None => vec![None; n],
+    };
+    let ints = opt_prim::<Int64Type>(find(batch, "int_value"), n, is(DataType::Int64))?;
+    let doubles = opt_prim::<Float64Type>(find(batch, "double_value"), n, is(DataType::Float64))?;
+    let values: Vec<Option<NumberValue>> = (0..n)
+        .map(|i| match (ints[i], doubles[i]) {
+            (Some(v), _) => Some(NumberValue::Int(v)),
+            (None, Some(v)) => Some(NumberValue::Double(v)),
+            (None, None) => None,
+        })
+        .collect();
+    if values.iter().any(Option::is_none) {
+        return Err(DecodeError::NullValue("exemplar value"));
+    }
+    let parents = quasi_ids(&need(batch, "parent_id")?, |i| {
+        same_number(values[i], values[i - 1])
+    })?;
+    let times = prim::<TimestampNanosecondType>(&need(batch, "time_unix_nano")?, is_time)?;
+    let span_ids = fixed(find(batch, "span_id"), n, 8)?;
+    let trace_ids = fixed(find(batch, "trace_id"), n, 16)?;
+    let mut seen = HashSet::new();
+    for i in 0..n {
+        let filtered_attributes = match ids[i] {
+            Some(id) if !seen.insert(id) => return Err(DecodeError::DuplicateId("exemplars.id")),
+            Some(id) => attrs.claim(id, budget)?,
+            None => Vec::new(),
+        };
+        out.push(
+            parents[i],
+            DecodedExemplar {
+                time_unix_ns: time(
+                    Some(times[i].ok_or(DecodeError::NullValue("time_unix_nano"))?),
+                    "time_unix_nano",
+                )?
+                .expect("some"),
+                value: values[i].expect("checked"),
+                span_id: span_ids[i]
+                    .as_ref()
+                    .map(|b| u64::from_be_bytes(b.as_slice().try_into().expect("width 8"))),
+                trace_id: trace_ids[i]
+                    .as_ref()
+                    .map(|b| u128::from_be_bytes(b.as_slice().try_into().expect("width 16"))),
+                filtered_attributes,
+            },
+        );
+    }
+    attrs.finish()?;
     Ok(out)
 }
 
@@ -1239,6 +1658,66 @@ impl Cx<'_> {
         Ok(out)
     }
 
+    /// One data-point family's payloads: rows, their metric row, id, times,
+    /// flags, attributes and exemplars, in point order.
+    fn family(
+        &mut self,
+        names: FamilyNames,
+        by_id: &HashMap<u32, usize>,
+    ) -> Result<Option<(RecordBatch, Vec<PointCommon>)>, DecodeError> {
+        let budget = self.budget;
+        let mut dp_attrs = attributes(self.take(names.attrs).as_ref(), names.attrs_parent, budget)?;
+        let exemplar_attrs = self.take(names.exemplar_attrs);
+        let mut exemplars = exemplars(
+            self.take(names.exemplars).as_ref(),
+            exemplar_attrs.as_ref(),
+            names.exemplar_attrs_parent,
+            budget,
+        )?;
+        let Some(points) = self.take(names.points) else {
+            dp_attrs.finish()?;
+            exemplars.finish()?;
+            return Ok(None);
+        };
+        let n = points.num_rows();
+        let dp_ids = match find(&points, "id") {
+            Some(c) => delta_ids(&c)?,
+            None => vec![None; n],
+        };
+        let parents = row_delta_parents(&need(&points, "parent_id")?)?;
+        let start =
+            opt_prim::<TimestampNanosecondType>(find(&points, "start_time_unix_nano"), n, is_time)?;
+        let times = prim::<TimestampNanosecondType>(&need(&points, "time_unix_nano")?, is_time)?;
+        let flags = opt_prim::<UInt32Type>(find(&points, "flags"), n, is(DataType::UInt32))?;
+        let mut seen = HashSet::new();
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let row = *by_id
+                .get(&parents[i])
+                .ok_or(DecodeError::DanglingParent("parent_id"))?;
+            let (attributes, exemplars) = match dp_ids[i] {
+                Some(id) if !seen.insert(id) => return Err(DecodeError::DuplicateId(names.id)),
+                Some(id) => (dp_attrs.claim(id, budget)?, exemplars.claim(id, budget)?),
+                None => (Vec::new(), Vec::new()),
+            };
+            out.push(PointCommon {
+                row,
+                start_unix_ns: time(start[i], "start_time_unix_nano")?,
+                time_unix_ns: time(
+                    Some(times[i].ok_or(DecodeError::NullValue("time_unix_nano"))?),
+                    "time_unix_nano",
+                )?
+                .expect("some"),
+                flags: flags[i],
+                attributes,
+                exemplars,
+            });
+        }
+        dp_attrs.finish()?;
+        exemplars.finish()?;
+        Ok(Some((points, out)))
+    }
+
     fn metrics(&mut self) -> Result<(), DecodeError> {
         let budget = self.budget;
         let metrics = self
@@ -1246,11 +1725,6 @@ impl Cx<'_> {
             .expect("main record present");
         let m = metrics.num_rows();
         let place = self.place(&metrics)?;
-        let mut dp_attrs = attributes(
-            self.take(ArrowPayloadType::HistogramDpAttrs).as_ref(),
-            "histogram_dp_attrs.parent_id",
-            budget,
-        )?;
         let metric_ids = delta_ids(&need(&metrics, "id")?)?;
         let types = prim::<UInt8Type>(&need(&metrics, "metric_type")?, is(DataType::UInt8))?;
         let names = strings(Some(need(&metrics, "name")?), m, budget)?;
@@ -1261,116 +1735,189 @@ impl Cx<'_> {
             m,
             is(DataType::Int32),
         )?;
+        let monotonic = bools(find(&metrics, "is_monotonic"), m)?;
         let mut by_id = HashMap::new();
+        let mut kinds = Vec::with_capacity(m);
         for i in 0..m {
             let id = metric_ids[i].ok_or(DecodeError::NullValue("id"))?;
             let ty = types[i].ok_or(DecodeError::NullValue("metric_type"))?;
-            if ty != schema::METRIC_TYPE_HISTOGRAM {
+            if !matches!(
+                ty,
+                schema::METRIC_TYPE_GAUGE
+                    | schema::METRIC_TYPE_SUM
+                    | schema::METRIC_TYPE_HISTOGRAM
+                    | schema::METRIC_TYPE_EXP_HISTOGRAM
+            ) {
                 return Err(DecodeError::UnsupportedMetricType(ty));
             }
-            let name = names[i].clone().ok_or(DecodeError::NullValue("name"))?;
+            if names[i].is_none() {
+                return Err(DecodeError::NullValue("name"));
+            }
             if by_id.insert(id, i).is_some() {
                 return Err(DecodeError::DuplicateId("id"));
             }
-            let _ = name;
+            kinds.push(ty);
         }
-        let Some(points) = self.take(ArrowPayloadType::HistogramDataPoints) else {
-            // Metrics without histogram points are only valid when empty.
-            dp_attrs.finish()?;
-            return if m == 0 {
+        let check_kind = |row: usize, allowed: &[u8]| {
+            if allowed.contains(&kinds[row]) {
                 Ok(())
             } else {
-                Err(DecodeError::HistogramShape)
-            };
-        };
-        let n = points.num_rows();
-        let dp_ids = match find(&points, "id") {
-            Some(c) => delta_ids(&c)?,
-            None => vec![None; n],
-        };
-        // `parent_id` is delta-encoded row by row (upstream histogram decoder).
-        let parent_col = need(&points, "parent_id")?;
-        let (raw_parents, max) = ids(&parent_col)?;
-        let plain_parents = codec(&parent_col, Codec::Delta)? == Codec::Plain;
-        let mut acc = 0u32;
-        let mut parents = Vec::with_capacity(n);
-        for v in raw_parents {
-            let v = v.ok_or(DecodeError::NullValue("parent_id"))?;
-            acc = if plain_parents {
-                v
-            } else {
-                acc.checked_add(v)
-                    .filter(|a| *a <= max)
-                    .ok_or(DecodeError::IdOverflow("parent_id"))?
-            };
-            parents.push(acc);
-        }
-        let start =
-            opt_prim::<TimestampNanosecondType>(find(&points, "start_time_unix_nano"), n, is_time)?;
-        let times = prim::<TimestampNanosecondType>(&need(&points, "time_unix_nano")?, is_time)?;
-        let counts = opt_prim::<UInt64Type>(find(&points, "count"), n, is(DataType::UInt64))?;
-        let sums = opt_prim::<Float64Type>(find(&points, "sum"), n, is(DataType::Float64))?;
-        let buckets = lists::<UInt64Type>(find(&points, "bucket_counts"), n, &DataType::UInt64)?;
-        let bounds = lists::<Float64Type>(find(&points, "explicit_bounds"), n, &DataType::Float64)?;
-        let flags = opt_prim::<UInt32Type>(find(&points, "flags"), n, is(DataType::UInt32))?;
-        let mins = opt_prim::<Float64Type>(find(&points, "min"), n, is(DataType::Float64))?;
-        let maxs = opt_prim::<Float64Type>(find(&points, "max"), n, is(DataType::Float64))?;
-        let mut seen = HashSet::new();
-        for i in 0..n {
-            let row = *by_id
-                .get(&parents[i])
-                .ok_or(DecodeError::DanglingParent("parent_id"))?;
-            let bucket_counts = buckets[i].clone().unwrap_or_default();
-            let explicit_bounds = bounds[i].clone().unwrap_or_default();
-            // OTLP: N bounds describe N + 1 buckets; bounds strictly increase.
-            if !bucket_counts.is_empty() && explicit_bounds.len() + 1 != bucket_counts.len()
-                || explicit_bounds
-                    .windows(2)
-                    .any(|w| w[0].partial_cmp(&w[1]) != Some(std::cmp::Ordering::Less))
-                || explicit_bounds.iter().any(|b| !b.is_finite())
-            {
-                return Err(DecodeError::HistogramShape);
+                Err(DecodeError::PointKindMismatch(kinds[row]))
             }
-            if let Some(total) = counts[i] {
-                let mut sum = 0u64;
-                for c in &bucket_counts {
-                    sum = sum.checked_add(*c).ok_or(DecodeError::HistogramShape)?;
-                }
-                if !bucket_counts.is_empty() && sum != total {
+        };
+        let meta = |row: usize| MetricMeta {
+            name: names[row].clone().expect("checked"),
+            unit: units[row].clone(),
+            description: descriptions[row].clone(),
+            aggregation_temporality: temporality[row],
+            resource: place.resource[row],
+            scope: place.scope[row],
+        };
+
+        if let Some((points, common)) = self.family(FamilyNames::NUMBER, &by_id)? {
+            let n = points.num_rows();
+            let ints = opt_prim::<Int64Type>(find(&points, "int_value"), n, is(DataType::Int64))?;
+            let doubles =
+                opt_prim::<Float64Type>(find(&points, "double_value"), n, is(DataType::Float64))?;
+            for (i, c) in common.into_iter().enumerate() {
+                check_kind(c.row, &[schema::METRIC_TYPE_GAUGE, schema::METRIC_TYPE_SUM])?;
+                let value = match (ints[i], doubles[i]) {
+                    (Some(v), _) => Some(NumberValue::Int(v)),
+                    (None, Some(v)) => Some(NumberValue::Double(v)),
+                    (None, None) => None,
+                };
+                let meta = meta(c.row);
+                self.out.numbers.push(DecodedNumber {
+                    name: meta.name,
+                    unit: meta.unit,
+                    description: meta.description,
+                    metric_type: kinds[c.row],
+                    aggregation_temporality: meta.aggregation_temporality,
+                    is_monotonic: monotonic[c.row],
+                    resource: meta.resource,
+                    scope: meta.scope,
+                    start_unix_ns: c.start_unix_ns,
+                    time_unix_ns: c.time_unix_ns,
+                    value,
+                    flags: c.flags,
+                    attributes: c.attributes,
+                    exemplars: c.exemplars,
+                });
+            }
+        }
+
+        if let Some((points, common)) = self.family(FamilyNames::HISTOGRAM, &by_id)? {
+            let n = points.num_rows();
+            let counts = opt_prim::<UInt64Type>(find(&points, "count"), n, is(DataType::UInt64))?;
+            let sums = opt_prim::<Float64Type>(find(&points, "sum"), n, is(DataType::Float64))?;
+            let buckets =
+                lists::<UInt64Type>(find(&points, "bucket_counts"), n, &DataType::UInt64)?;
+            let bounds =
+                lists::<Float64Type>(find(&points, "explicit_bounds"), n, &DataType::Float64)?;
+            let mins = opt_prim::<Float64Type>(find(&points, "min"), n, is(DataType::Float64))?;
+            let maxs = opt_prim::<Float64Type>(find(&points, "max"), n, is(DataType::Float64))?;
+            for (i, c) in common.into_iter().enumerate() {
+                check_kind(c.row, &[schema::METRIC_TYPE_HISTOGRAM])?;
+                let bucket_counts = buckets[i].clone().unwrap_or_default();
+                let explicit_bounds = bounds[i].clone().unwrap_or_default();
+                // OTLP: N bounds describe N + 1 buckets; bounds strictly increase.
+                if !bucket_counts.is_empty() && explicit_bounds.len() + 1 != bucket_counts.len()
+                    || explicit_bounds
+                        .windows(2)
+                        .any(|w| w[0].partial_cmp(&w[1]) != Some(std::cmp::Ordering::Less))
+                    || explicit_bounds.iter().any(|b| !b.is_finite())
+                {
                     return Err(DecodeError::HistogramShape);
                 }
-            }
-            let attributes = match dp_ids[i] {
-                Some(id) if !seen.insert(id) => {
-                    return Err(DecodeError::DuplicateId("histogram_dps.id"))
+                if let Some(total) = counts[i] {
+                    let sum = checked_total(&bucket_counts, 0)?;
+                    if !bucket_counts.is_empty() && sum != total {
+                        return Err(DecodeError::HistogramShape);
+                    }
                 }
-                Some(id) => dp_attrs.claim(id, self.budget)?,
-                None => Vec::new(),
-            };
-            self.out.histograms.push(DecodedHistogram {
-                name: names[row].clone().expect("checked"),
-                unit: units[row].clone(),
-                start_unix_ns: time(start[i], "start_time_unix_nano")?,
-                time_unix_ns: time(
-                    Some(times[i].ok_or(DecodeError::NullValue("time_unix_nano"))?),
-                    "time_unix_nano",
-                )?
-                .expect("some"),
-                count: counts[i],
-                bucket_counts,
-                explicit_bounds,
-                resource: place.resource[row],
-                scope: place.scope[row],
-                description: descriptions[row].clone(),
-                aggregation_temporality: temporality[row],
-                sum: sums[i],
-                min: mins[i],
-                max: maxs[i],
-                flags: flags[i],
-                attributes,
-            });
+                let meta = meta(c.row);
+                self.out.histograms.push(DecodedHistogram {
+                    name: meta.name,
+                    unit: meta.unit,
+                    start_unix_ns: c.start_unix_ns,
+                    time_unix_ns: c.time_unix_ns,
+                    count: counts[i],
+                    bucket_counts,
+                    explicit_bounds,
+                    resource: meta.resource,
+                    scope: meta.scope,
+                    description: meta.description,
+                    aggregation_temporality: meta.aggregation_temporality,
+                    sum: sums[i],
+                    min: mins[i],
+                    max: maxs[i],
+                    flags: c.flags,
+                    attributes: c.attributes,
+                    exemplars: c.exemplars,
+                });
+            }
         }
-        dp_attrs.finish()
+
+        if let Some((points, common)) = self.family(FamilyNames::EXP_HISTOGRAM, &by_id)? {
+            let n = points.num_rows();
+            let counts = opt_prim::<UInt64Type>(find(&points, "count"), n, is(DataType::UInt64))?;
+            let sums = opt_prim::<Float64Type>(find(&points, "sum"), n, is(DataType::Float64))?;
+            let scales = opt_prim::<Int32Type>(find(&points, "scale"), n, is(DataType::Int32))?;
+            let zero_counts =
+                opt_prim::<UInt64Type>(find(&points, "zero_count"), n, is(DataType::UInt64))?;
+            let positive = exp_buckets(find(&points, "positive"), n)?;
+            let negative = exp_buckets(find(&points, "negative"), n)?;
+            let mins = opt_prim::<Float64Type>(find(&points, "min"), n, is(DataType::Float64))?;
+            let maxs = opt_prim::<Float64Type>(find(&points, "max"), n, is(DataType::Float64))?;
+            let thresholds =
+                opt_prim::<Float64Type>(find(&points, "zero_threshold"), n, is(DataType::Float64))?;
+            for (i, c) in common.into_iter().enumerate() {
+                check_kind(c.row, &[schema::METRIC_TYPE_EXP_HISTOGRAM])?;
+                let scale = scales[i].unwrap_or(0);
+                let zero_count = zero_counts[i].unwrap_or(0);
+                let zero_threshold = thresholds[i].unwrap_or(0.0);
+                let (pos, neg) = (positive[i].clone(), negative[i].clone());
+                if !(-10..=20).contains(&scale)
+                    || !(zero_threshold >= 0.0 && zero_threshold.is_finite())
+                    || [&pos, &neg].iter().any(|b| {
+                        i32::try_from(b.counts.len())
+                            .ok()
+                            .and_then(|l| b.offset.checked_add(l))
+                            .is_none()
+                    })
+                {
+                    return Err(DecodeError::HistogramShape);
+                }
+                let total = checked_total(&neg.counts, checked_total(&pos.counts, zero_count)?)?;
+                if counts[i].is_some_and(|c| c != total) {
+                    return Err(DecodeError::HistogramShape);
+                }
+                let meta = meta(c.row);
+                self.out.exp_histograms.push(DecodedExpHistogram {
+                    name: meta.name,
+                    unit: meta.unit,
+                    description: meta.description,
+                    aggregation_temporality: meta.aggregation_temporality,
+                    resource: meta.resource,
+                    scope: meta.scope,
+                    start_unix_ns: c.start_unix_ns,
+                    time_unix_ns: c.time_unix_ns,
+                    count: counts[i].unwrap_or(total),
+                    sum: sums[i],
+                    scale,
+                    zero_count,
+                    zero_threshold,
+                    positive: pos,
+                    negative: neg,
+                    min: mins[i],
+                    max: maxs[i],
+                    flags: c.flags,
+                    attributes: c.attributes,
+                    exemplars: c.exemplars,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn logs(&mut self) -> Result<(), DecodeError> {
@@ -1412,27 +1959,44 @@ impl Cx<'_> {
         if let Some(body) = find(&batch, "body") {
             let (s, fields) = as_struct(&body)?;
             let ty = opt_prim::<UInt8Type>(child(s, fields, "type"), n, is(DataType::UInt8))?;
-            let strs = strings(child(s, fields, "str"), n, budget)?;
-            let ints = opt_prim::<Int64Type>(child(s, fields, "int"), n, is(DataType::Int64))?;
-            let doubles =
-                opt_prim::<Float64Type>(child(s, fields, "double"), n, is(DataType::Float64))?;
-            let bools = bools(child(s, fields, "bool"), n)?;
+            let mut values = Values::read(
+                n,
+                budget,
+                [
+                    child(s, fields, "str").map(|c| C {
+                        name: "body.str",
+                        ..c
+                    }),
+                    child(s, fields, "int").map(|c| C {
+                        name: "body.int",
+                        ..c
+                    }),
+                    child(s, fields, "double").map(|c| C {
+                        name: "body.double",
+                        ..c
+                    }),
+                    child(s, fields, "bool").map(|c| C {
+                        name: "body.bool",
+                        ..c
+                    }),
+                    child(s, fields, "bytes").map(|c| C {
+                        name: "body.bytes",
+                        ..c
+                    }),
+                    child(s, fields, "ser").map(|c| C {
+                        name: "body.ser",
+                        ..c
+                    }),
+                ],
+            )?;
             for i in 0..n {
                 bodies[i] = match ty[i] {
                     None | Some(value_type::EMPTY) => None,
-                    Some(value_type::STR) => Some(DecodedValue::Str(
-                        strs[i].clone().ok_or(DecodeError::NullValue("body.str"))?,
-                    )),
-                    Some(value_type::INT) => Some(DecodedValue::Int(
-                        ints[i].ok_or(DecodeError::NullValue("body.int"))?,
-                    )),
-                    Some(value_type::DOUBLE) => Some(DecodedValue::Double(
-                        doubles[i].ok_or(DecodeError::NullValue("body.double"))?,
-                    )),
-                    Some(value_type::BOOL) => Some(DecodedValue::Bool(
-                        bools[i].ok_or(DecodeError::NullValue("body.bool"))?,
-                    )),
-                    Some(other) => return Err(DecodeError::BadAttribute(other)),
+                    Some(t) => Some(
+                        values
+                            .take(i, t, budget)?
+                            .ok_or(DecodeError::BadAttribute(t))?,
+                    ),
                 };
             }
         }
