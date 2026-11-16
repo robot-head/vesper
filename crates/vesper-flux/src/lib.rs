@@ -22,7 +22,7 @@ pub use circuit::{
     InputLog, KafkaBinding, KafkaCompression, KafkaConfig, KafkaConnection, KafkaGroupConfig,
     KafkaGroupSource, KafkaPosition, KafkaProducer, KafkaRecord, KafkaSasl, KafkaSecurity,
     KafkaSink, KafkaSinkConfig, KafkaSinkStats, KafkaSource, KafkaSourceLimits, KafkaSourceStats,
-    KafkaTls, LiveMigration, LiveRescale, LogLimits, LogRecovery, MAX_SPINE_LEVELS, MemorySink,
+    KafkaTls, LiveMigration, LiveRescale, RescaleRequest, BINS, LogLimits, LogRecovery, MAX_SPINE_LEVELS, MemorySink,
     NodeId, Predicate, PublishFault, QuarrySink, Recovery, Rescale, SaslMechanism, SinkRecovery,
     SourceBinding, TickInput, WeightPolicy, cdc_value, kafka_record, read_kafka_output,
     run_cluster, run_cluster_with,
