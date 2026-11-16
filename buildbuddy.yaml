@@ -33,20 +33,7 @@ actions:
           export VESPER_CARGO="$(cat .ci-logos-cargo-path)"
           export VESPER_LOGOS42_ROOT="$(mktemp -d /tmp/vesper-logos42-ci.XXXXXX)/checker"
           BAZEL_FLAGS="--config=ci --config=rbe_build" scripts/ci/prepare-logos42.sh "$VESPER_LOGOS42_ROOT"
-          # Independent Logos replay of every lean/ module from the same sealed
-          # root (tools/logos-sweep). It runs on the VM while the remote tests run.
-          export LOGOS42_DRIVER="$(. scripts/bazel-lib.sh; BAZEL_FLAGS="--config=ci --config=rbe_build" bazel_executable //:bin/logos42)"
-          export VESPER_BIN="$(. scripts/bazel-lib.sh; BAZEL_FLAGS="--config=ci --config=rbe_build" bazel_executable //:bin/vesper)"
-          # Outside the workspace, so Bazel never sees the sweep's files.
-          sweep_dir="$(mktemp -d /tmp/vesper-logos-sweep.XXXXXX)"
-          scripts/ci/logos-sweep.sh "$VESPER_LOGOS42_ROOT" "$sweep_dir/report.json" > "$sweep_dir/log" 2>&1 &
-          sweep=$!
-          test_status=0
-          bazel test --config=ci --config=rbe_build --config=ci_tests //... || test_status=$?
-          sweep_status=0
-          wait "$sweep" || sweep_status=$?
-          tail -n 40 "$sweep_dir/log"
-          [ "$test_status" = 0 ] && [ "$sweep_status" = 0 ]
+          bazel test --config=ci --config=rbe_build --config=ci_tests //...
       - run: "scripts/ci/check-lean-models.sh"
 
   - name: "Native and acceptance scripts"

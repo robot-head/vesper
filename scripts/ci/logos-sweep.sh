@@ -21,7 +21,7 @@ fi
 status=0
 python3 tools/logos-sweep/sweep.py \
   --root "$1" --driver "$LOGOS42_DRIVER" --vesper "$VESPER_BIN" --lean "$VESPER_LEAN" \
-  --batch-jobs "${LOGOS_SWEEP_BATCH_JOBS:-3}" \
+  --batch-jobs "${LOGOS_SWEEP_BATCH_JOBS:-2}" \
   --report "$2" || status=$?
 if [[ -f "$2" ]]; then
   python3 - "$2" <<'PY'

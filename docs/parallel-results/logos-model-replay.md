@@ -1,7 +1,8 @@
 # Independent Logos replay of every Lean model (COMP-02)
 
 Claim: #843. Tool: [`tools/logos-sweep`](../../tools/logos-sweep/README.md).
-CI: BuildBuddy "Test all targets", `scripts/ci/logos-sweep.sh`.
+CI: `.github/workflows/logos-sweep.yml` (nightly on main, and on PRs touching
+Lean, the extractor or the Logos tooling), `scripts/ci/logos-sweep.sh`.
 
 ## Gap closed
 
@@ -10,7 +11,7 @@ three fixed closures (`RewriteWitness`, `ArithmeticOracle`, the ResourceModel42
 kernel snapshot). The other Lean modules, including every verified-codegen
 model, were checked by Lean's own kernel only. The sweep now replays every
 module under `lean/` and every §11 extraction fixture with the same sealed
-Logos root, on every PR.
+Logos root, nightly and on every PR that can change them.
 
 ## Result (Lean 4.35.0, Logos 8ce95bd, lean4export df81913; 2026-11-16)
 
@@ -23,7 +24,7 @@ Logos root, on every PR.
 | Logos rejections | 0 |
 | Logos declines | 1: `Vesper.VerifiedCodegen.Rv64.decode_encode` (below) |
 | Coverage control | passed: dropping one inventory entry is refused by the bridge |
-| Time | 25 min on 4 cores with 2 batch jobs; peak memory about 7.7 GB. CI uses 3 batch jobs on 8 cores, alongside the remote Bazel tests |
+| Time | 25 min on 4 cores with 2 batch jobs; peak memory about 7.7 GB. CI uses 2 batch jobs on a 4-core GitHub runner |
 
 Per-batch figures (export size is the lean4export NDJSON):
 

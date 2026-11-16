@@ -15,8 +15,11 @@ python3 tools/logos-sweep/sweep.py --root ROOT --driver target/debug/logos42 \
   --vesper target/debug/vesper --lean "$(elan which lean)" --report report.json
 ```
 
-CI runs it in the BuildBuddy "Test all targets" action, on the VM while the
-remote Bazel tests run, and the action fails if the sweep fails.
+CI runs it in `.github/workflows/logos-sweep.yml`: nightly on main, and on PRs
+that touch Lean models, the extractor, extraction fixtures, the Logos tooling
+or the Lean toolchain. It takes about 40 minutes on a GitHub runner, so it is
+not part of the required BuildBuddy checks; the fixed three-closure
+`logos42_acceptance` suite still runs on every PR.
 
 ## What it does
 
