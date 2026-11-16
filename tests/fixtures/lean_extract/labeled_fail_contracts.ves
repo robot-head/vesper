@@ -1,0 +1,38 @@
+fn choose(n: u64, reject: bool) -> u64 eff [stop: Fail[u64]] {
+    if reject {
+        stop.raise(n)
+    } else {
+        n
+    }
+}
+fn ensures_choose(n: u64, reject: bool, result: u64) -> bool {
+    result == n
+}
+fn forward(n: u64, reject: bool) -> u64 eff [stop: Fail[u64]] {
+    choose(n, reject)
+}
+fn ensures_forward(n: u64, reject: bool, result: u64) -> bool {
+    result == n
+}
+fn descend(n: u64, reject: bool) -> u64 eff [stop: Fail[u64]] {
+    if n == 0 {
+        if reject {
+            stop.raise(7)
+        } else {
+            42
+        }
+    } else {
+        descend(wrapping_sub(n, 1), reject)
+    }
+}
+fn ensures_descend(n: u64, reject: bool, result: u64) -> bool {
+    result == 42
+}
+fn main() -> u64 {
+    handle stop: Fail[u64] in {
+        forward(42, false)
+    } with {
+        return value => value,
+        raise(error, resume) => error,
+    }
+}

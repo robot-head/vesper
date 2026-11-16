@@ -1230,12 +1230,10 @@ fn contract(
             return Err(unsupported("open effect rows have no model monad"));
         }
         [] => None,
-        [e] if e.name == "Fail" && e.label.is_none() && e.args.len() == 1 => {
-            Some(ty(&e.args[0]).map_err(internal)?)
-        }
+        [e] if e.name == "Fail" && e.args.len() == 1 => Some(ty(&e.args[0]).map_err(internal)?),
         _ => {
             return Err(unsupported(
-                "only pure and single unlabeled Fail[E] functions have a model monad",
+                "only pure and single Fail[E] functions have a model monad",
             ));
         }
     };

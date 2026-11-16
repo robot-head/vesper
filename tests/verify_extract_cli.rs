@@ -1198,3 +1198,50 @@ fn generic_contract_admission_requires_a_universal_proof_and_type_witness() {
     fs::write(&proofs, format!("theorem choose_ok : ∀ (x : UInt64) (flag : Bool), Vesper.ensures_choose x flag (Vesper.choose x flag) = true := by intro x flag; simp [Vesper.ensures_choose, Vesper.choose]\n{witness}")).unwrap();
     reject_json(f.verify(&args), Some("compile"));
 }
+
+#[test]
+fn labeled_fail_contract_admission_checks_successful_results() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(lean) = lean() else { return };
+    let source = "fn choose(n: u64, reject: bool) -> u64 eff [stop: Fail[u64]] { if reject { stop.raise(n) } else { n } }\nfn ensures_choose(n: u64, reject: bool, result: u64) -> bool { result == n }\nfn main() -> u64 { 0 }\n";
+    let f = Fixture::new(source.as_bytes());
+    let proofs = f.root.join("labeled.lean");
+    fs::write(&proofs, "theorem choose_ok : Vesper.«choose$contract» := by\n  intro n reject result run\n  cases reject with\n  | false =>\n    simp [Vesper.choose] at run\n    cases run\n    simp [Vesper.ensures_choose]\n  | true =>\n    change Except.error n = Except.ok result at run\n    contradiction\ntheorem choose_input : Vesper.«choose$admissible» := ⟨42, false, trivial⟩\n").unwrap();
+    let args = [
+        "--extract",
+        "--proofs",
+        proofs.to_str().unwrap(),
+        "--contract-proof",
+        "choose=choose_ok",
+        "--contract-witness",
+        "choose=choose_input",
+        "--allow-axiom",
+        "propext",
+        "--allow-axiom",
+        "Classical.choice",
+        "--allow-axiom",
+        "Quot.sound",
+        "--lean",
+        lean.to_str().unwrap(),
+        "--timeout",
+        "300",
+        "--json",
+    ];
+    let accepted = f.verify(&args);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stdout)
+    );
+    let report: Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(
+        report["checked_contracts"],
+        serde_json::json!({"choose": "choose_ok"})
+    );
+    assert_eq!(
+        report["checked_preconditions"],
+        serde_json::json!({"choose": "choose_input"})
+    );
+    let wrong = Fixture::new(source.replace("else { n }", "else { 0 }").as_bytes());
+    reject_json(wrong.verify(&args), Some("compile"));
+}

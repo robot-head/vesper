@@ -1,4 +1,4 @@
-# Lean extractor proof support: unsigned arithmetic bundle (#593)
+# Lean extractor proof support (#593)
 
 Base: `b91fbae747012d47977f4b0d66cd0e2bd6ca861b`, current main when this
 slice began. Open PRs #750, #752, #823 and #824 did not overlap this source
@@ -59,12 +59,46 @@ python tools/bazel/sync_build_files.py --check
 git diff --check
 ```
 
+## Single labeled Fail contract follow-up
+
+Base: `d5ec6ff1`. Branch: `codex/extractor-labeled-fail-contracts`.
+
+A function with one `Fail[E]` effect can now have a label on that effect.
+For example, `fn choose(n: u64, reject: bool) -> u64 eff [stop: Fail[u64]]`
+can use `ensures_choose(n: u64, reject: bool, result: u64) -> bool`. Calls to
+`stop.raise(n)` use the existing explicit capability evidence; the contract
+selects the same canonical Fail model already used for unlabeled effects.
+With exactly one effect instance, this introduces no ambiguity about which
+label supplies the evidence. Multiple instances still require a distinct model
+and remain typed refusals.
+
+The proposition constrains successful returns in `Except E`; recursive fuel
+companions use `ExceptT E Option` and constrain successful `some (.ok result)`
+observations. It does not constrain error payloads or guarantee success or
+termination. Separate kernel-checked fixture theorems establish the concrete
+`.error 13` and `.ok 42` observations, and a fuel induction establishes the
+recursive contract. A labeled forwarding call and a source handler are also
+covered. No runtime, effect evidence, ownership or admission rule changes.
+
+All 14 extraction tests pass with Lean 4.35.0. The targeted end-to-end admission
+test accepts the closed contract proof/input witness and rejects that proof
+after the successful branch returns an incorrect value. Strict scoped Clippy,
+workspace/fixture formatting, Bazel manifest synchronization and diff checks
+pass. Additional commands for this slice:
+
+```sh
+VESPER_LEAN=/tmp/lean-4.35.0-linux/bin/lean cargo +stable test --locked --test lean_extract
+VESPER_LEAN=/tmp/lean-4.35.0-linux/bin/lean cargo +stable test --locked --test verify_extract_cli labeled_fail_contract_admission
+cargo +stable clippy --locked -p vesper --test lean_extract --test verify_extract_cli --no-deps -- -D warnings
+target/debug/vesper fmt --check tests/fixtures/lean_extract/labeled_fail_contracts.ves
+```
+
 ## Remaining #593 work
 
 - General fuel/partial-definition equivalence or direct structural termination
   evidence; successful finite fuel execution is currently partial correctness.
 - Total companions for recursion through first-class function/closure values.
-- Contracts over `inout` state transitions, generics, labeled/multiple `Fail`
+- Contracts over `inout` state transitions, generics, multiple `Fail`
   instances, and handled non-`Fail` effects. Existing typed refusals remain.
 - Source-level termination/decreases inference and a compiler extraction
   refinement proof. The arithmetic helper establishes none of these results.

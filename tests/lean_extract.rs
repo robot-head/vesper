@@ -278,6 +278,30 @@ fn generic_contracts_reject_incompatible_predicate_parameters() {
     ));
 }
 
+#[test]
+fn labeled_fail_contracts_cover_success_and_preserve_raised_payloads() {
+    let (source, proofs) = fixture!("labeled_fail_contracts");
+    let report = lean::extract_report(&world(source)).unwrap();
+    assert_eq!(report.contracts, ["choose", "descend", "forward"]);
+    proves(
+        source,
+        proofs,
+        &[
+            ("choose", Totality::Total),
+            ("forward", Totality::Total),
+            ("descend", Totality::Fuel),
+        ],
+        "42",
+    );
+}
+
+#[test]
+fn multiple_fail_contracts_still_require_a_distinct_model() {
+    assert!(
+        matches!(contract_error("fn f(n: u64) -> u64 eff [left: Fail[u64], right: Fail[bool]] { n } fn ensures_f(n: u64, result: u64) -> bool { result == n } fn main() -> u64 { 0 }"), ContractError::Unsupported { function, .. } if function == "f")
+    );
+}
+
 fn contract_error(source: &str) -> ContractError {
     match lean::extract_report(&world(source)) {
         Err(ExtractError::Contract(e)) => e,
