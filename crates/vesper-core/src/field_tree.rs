@@ -139,7 +139,7 @@ impl FieldTree {
     /// overlapping leaf paths.
     pub fn is_disjoint(&self, other: &Self) -> Result<bool, FieldTreeError> {
         let mut work = MAX_TREE_WORK;
-        let mut stack = vec![(self, other, 1usize)];
+        let mut stack = vec![(self, other, 0usize)];
         while let Some((lhs, rhs, depth)) = stack.pop() {
             charge_work(&mut work, 1)?;
             if depth > MAX_TREE_DEPTH {
@@ -152,6 +152,7 @@ impl FieldTree {
                 (View::Whole, _) | (_, View::Whole) => return Ok(false),
                 (View::Fields(lmap), View::Fields(rmap)) => {
                     for (field, lsub) in lmap {
+                        charge_work(&mut work, 1)?;
                         if let Some(rsub) = rmap.get(field) {
                             stack.push((lsub, rsub, depth + 1));
                         }
@@ -166,7 +167,7 @@ impl FieldTree {
     /// reachable in `self` is covered by `older`.
     pub fn is_subset_of(&self, older: &Self) -> Result<bool, FieldTreeError> {
         let mut work = MAX_TREE_WORK;
-        let mut stack = vec![(self, older, 1usize)];
+        let mut stack = vec![(self, older, 0usize)];
         while let Some((sub, sup, depth)) = stack.pop() {
             charge_work(&mut work, 1)?;
             if depth > MAX_TREE_DEPTH {
@@ -180,6 +181,7 @@ impl FieldTree {
                 (View::Fields(_), View::Empty) => return Ok(false),
                 (View::Fields(smap), View::Fields(omap)) => {
                     for (field, ssub) in smap {
+                        charge_work(&mut work, 1)?;
                         if ssub.is_empty() {
                             continue;
                         }
@@ -197,7 +199,7 @@ impl FieldTree {
     /// Computes the union of two projection trees without mutating either input.
     pub fn union(&self, other: &Self) -> Result<Self, FieldTreeError> {
         let mut work = MAX_TREE_WORK;
-        self.union_inner(other, 1, &mut work)
+        self.union_inner(other, 0, &mut work)
     }
 
     fn union_inner(
@@ -220,6 +222,7 @@ impl FieldTree {
             (View::Fields(lmap), View::Fields(rmap)) => {
                 let mut merged = BTreeMap::new();
                 for (field, lsub) in lmap {
+                    charge_work(work, 1)?;
                     if let Some(rsub) = rmap.get(field) {
                         let joined = lsub.union_inner(rsub, depth + 1, work)?;
                         if !joined.is_empty() {
@@ -233,6 +236,7 @@ impl FieldTree {
                     }
                 }
                 for (field, rsub) in rmap {
+                    charge_work(work, 1)?;
                     if !lmap.contains_key(field) {
                         let cloned = rsub.clone_bounded(depth + 1, work)?;
                         if !cloned.is_empty() {
@@ -547,6 +551,103 @@ mod tests {
             Err(FieldTreeError::TooManyCallArgs {
                 count: MAX_CALL_ARGS + 1,
                 max_args: MAX_CALL_ARGS,
+            })
+        );
+    }
+
+    #[test]
+    fn max_depth_trees_work_across_operations_and_exceeding_depth_is_rejected() {
+        let path_a = vec![FieldIdx(0); MAX_TREE_DEPTH];
+        let path_b = vec![FieldIdx(1); MAX_TREE_DEPTH];
+        let tree_a = FieldTree::from_paths(&[&path_a]).unwrap();
+        let tree_b = FieldTree::from_paths(&[&path_b]).unwrap();
+
+        assert_eq!(tree_a.is_subset_of(&tree_a), Ok(true));
+        assert_eq!(tree_a.is_disjoint(&tree_a), Ok(false));
+        assert_eq!(tree_a.is_disjoint(&tree_b), Ok(true));
+        assert_eq!(tree_a.union(&FieldTree::Empty), Ok(tree_a.clone()));
+        assert_eq!(FieldTree::Empty.union(&tree_a), Ok(tree_a.clone()));
+        let combined = tree_a.union(&tree_b).unwrap();
+        assert_eq!(tree_a.is_subset_of(&combined), Ok(true));
+        assert_eq!(tree_b.is_subset_of(&combined), Ok(true));
+
+        // Manually construct a depth = MAX_TREE_DEPTH + 1 tree to verify operations reject it.
+        let mut over_deep = FieldTree::Whole;
+        for _ in 0..=MAX_TREE_DEPTH {
+            over_deep = FieldTree::Fields(BTreeMap::from([(FieldIdx(0), over_deep)]));
+        }
+        assert_eq!(
+            over_deep.is_disjoint(&over_deep),
+            Err(FieldTreeError::DepthLimitExceeded {
+                max_depth: MAX_TREE_DEPTH,
+            })
+        );
+        assert_eq!(
+            over_deep.is_subset_of(&over_deep),
+            Err(FieldTreeError::DepthLimitExceeded {
+                max_depth: MAX_TREE_DEPTH,
+            })
+        );
+        assert_eq!(
+            over_deep.union(&FieldTree::Empty),
+            Err(FieldTreeError::DepthLimitExceeded {
+                max_depth: MAX_TREE_DEPTH,
+            })
+        );
+    }
+
+    #[test]
+    fn disjoint_wide_trees_respect_work_limit() {
+        let mut left_children = BTreeMap::new();
+        for leaf in 0u16..400 {
+            left_children.insert(FieldIdx(leaf), FieldTree::Whole);
+        }
+        let mut left_root = BTreeMap::new();
+        let mut right_root = BTreeMap::new();
+        for parent in 0u16..400 {
+            left_root.insert(FieldIdx(parent), FieldTree::Fields(left_children.clone()));
+            right_root.insert(
+                FieldIdx(parent),
+                FieldTree::Fields(BTreeMap::from([(FieldIdx(999), FieldTree::Whole)])),
+            );
+        }
+        let left = FieldTree::Fields(left_root);
+        let right = FieldTree::Fields(right_root);
+
+        assert_eq!(
+            left.is_disjoint(&right),
+            Err(FieldTreeError::WorkLimitExceeded {
+                max_work: MAX_TREE_WORK,
+            })
+        );
+        assert_eq!(
+            left.union(&right),
+            Err(FieldTreeError::WorkLimitExceeded {
+                max_work: MAX_TREE_WORK,
+            })
+        );
+
+        let half: BTreeMap<FieldIdx, FieldTree> = (0u16..35_000)
+            .map(|i| (FieldIdx(i), FieldTree::Empty))
+            .collect();
+        let wide_empty = FieldTree::Fields(BTreeMap::from([
+            (FieldIdx(0), FieldTree::Fields(half.clone())),
+            (FieldIdx(1), FieldTree::Fields(half)),
+        ]));
+        let two_parents = FieldTree::Fields(BTreeMap::from([
+            (
+                FieldIdx(0),
+                FieldTree::Fields(BTreeMap::from([(FieldIdx(0), FieldTree::Empty)])),
+            ),
+            (
+                FieldIdx(1),
+                FieldTree::Fields(BTreeMap::from([(FieldIdx(0), FieldTree::Empty)])),
+            ),
+        ]));
+        assert_eq!(
+            wide_empty.is_subset_of(&two_parents),
+            Err(FieldTreeError::WorkLimitExceeded {
+                max_work: MAX_TREE_WORK,
             })
         );
     }

@@ -712,3 +712,71 @@ fn u64_mutable_refinements_remain_invariant() {
     assert!(!check(old.clone(), new.clone()).is_compatible());
     assert!(!check(new, old).is_compatible());
 }
+
+#[test]
+fn unsigned_range_witnesses_include_rejected_values_at_both_extremes() {
+    let full = Type::Primitive {
+        name: Primitive::U64,
+    };
+    for (sub, sup, value) in [
+        (u64_range(0, 10), u64_range(1, 10), 0),
+        (u64_range(0, 10), u64_range(0, 9), 10),
+        (full.clone(), u64_range(1, u64::MAX), 0),
+        (full, u64_range(0, u64::MAX - 1), u64::MAX),
+    ] {
+        let mut old = function();
+        let mut new = old.clone();
+        old.parameters[0].ty = sub.clone();
+        new.parameters[0].ty = sup.clone();
+        let report = check(old, new);
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.message == "parameter type is incompatible")
+            .unwrap();
+        assert!(
+            issue.caller_witness.contains(&format!("Pass {value}: u64")),
+            "{issue:?}"
+        );
+        let mut old = function();
+        let mut new = old.clone();
+        old.result = sup;
+        new.result = sub;
+        let report = check(old, new);
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.message == "return type is incompatible")
+            .unwrap();
+        assert!(
+            issue
+                .caller_witness
+                .contains(&format!("admits {value}: u64")),
+            "{issue:?}"
+        );
+    }
+}
+
+#[test]
+fn unsigned_range_witness_keeps_invariant_and_invalid_fallbacks() {
+    let mut old = function();
+    old.parameters[0].pass = Pass::Inout;
+    old.parameters[0].ty = u64_range(0, 10);
+    let mut new = old.clone();
+    new.parameters[0].ty = u64_range(0, 20);
+    let report = check(old, new);
+    let issue = report
+        .issues
+        .iter()
+        .find(|i| i.message == "parameter type is incompatible")
+        .unwrap();
+    assert!(issue.caller_witness.contains("mutable places"));
+    assert_eq!(
+        u64_counterexample(&u64_range(1, 0), &u64_range(0, 10)),
+        None
+    );
+    assert_eq!(
+        u64_counterexample(&u64_range(1, 9), &u64_range(0, 10)),
+        None
+    );
+}
