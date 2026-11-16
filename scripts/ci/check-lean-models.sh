@@ -6,9 +6,11 @@ export PATH="$HOME/.elan/bin:$PATH"
 lean --version | grep -F "version $(sed 's/.*:v//' lean-toolchain)"
 for model in \
   Foundations RuntimeFrames SpecificationCounterexample EffectPlaces \
-  MetatheoryFull Metatheory/Closures Metatheory/Polymorphism MetatheoryPlaces \
-  CheckedArithmetic FluxDbsp AetherMemory WalSafety MetatheoryAppendix VesperUnifiedTypeTheory StrongUpdate ClockQuotientSafety ResourceGrades MetronomeArithmetic \
-  StylusAndLintSafety RewriteWitness CodexSearchAndLayout GrammarNonMalleability PrismAuthSafety IgnisTriBackendEquiv BrandGeometrySafety; do
+  MetatheoryFull Metatheory/Closures Metatheory/Polymorphism MetatheoryPlaces CheckedArithmetic \
+  FluxDbsp AetherMemory WalSafety MetatheoryAppendix VesperUnifiedTypeTheory \
+  StrongUpdate ClockQuotientSafety ResourceGrades MetronomeArithmetic StylusAndLintSafety \
+  RewriteWitness CodexSearchAndLayout GrammarNonMalleability PrismAuthSafety IgnisTriBackendEquiv \
+  BrandGeometrySafety InspectorUiSpecs; do
   echo "lean lean/$model.lean"
   lean "lean/$model.lean"
 done

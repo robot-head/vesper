@@ -384,6 +384,14 @@ theorem mergeEnv_names : ∀ {l r m : Env}, mergeEnv l r = Except.ok m → names
             simp only [names, List.map_cons] at this ⊢
             rw [this]
 
+theorem names_restoreIfFacts : ∀ base joined,
+    names (restoreIfFacts base joined) = names joined
+  | [], joined => rfl
+  | _ :: _, [] => rfl
+  | old :: olds, joined :: rest => by
+      simp only [restoreIfFacts, names, List.map_cons]
+      rw [← names, names_restoreIfFacts, names]
+
 theorem pres_joinCheck (a b : Ty) : Pres (joinCheck a b) := by
   unfold joinCheck; pres_tac
 
@@ -473,7 +481,7 @@ theorem shape_ok {cx : Cx} : ∀ {fuel : Nat} {e : Expr} {exp : Option Ty} {s : 
                 | error d => rw [hme] at hm; cases hm
                 | ok m' =>
                     rw [hme] at hm; cases hm
-                    rw [mergeEnv_names hme (by rw [nL, nR]), nL]
+                    rw [names_restoreIfFacts, mergeEnv_names hme (by rw [nL, nR]), nL]
           rw [e5, names_refine, base] at okt
           rw [e8, names_refine, base] at oke
           exact ⟨.ifz oa okt oke, n13⟩
@@ -500,6 +508,7 @@ theorem reference_checker_sound_closed (Sig : Nat → Vesper.MetatheoryFull.EffS
 end Vesper.ReferenceEval.Soundness
 
 #print axioms Vesper.ReferenceEval.Soundness.ok_typed
+#print axioms Vesper.ReferenceEval.Soundness.names_restoreIfFacts
 #print axioms Vesper.ReferenceEval.Soundness.shape_ok
 #print axioms Vesper.ReferenceEval.Soundness.reference_checker_sound
 #print axioms Vesper.ReferenceEval.Soundness.reference_checker_sound_closed

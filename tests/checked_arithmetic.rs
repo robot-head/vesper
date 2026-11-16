@@ -598,3 +598,52 @@ fn interface_exports_the_builtin_overflow_contract() {
     let json = serde_json::to_string(&interface.exports["@example/library::fn::f"]).unwrap();
     assert!(json.contains("std/core::type::ArithOverflow"), "{json}");
 }
+
+#[test]
+fn untouched_integer_facts_survive_ordinary_if_joins() {
+    for condition in ["x == 0", "x != 0", "0 == x", "0 != x"] {
+        agree(
+            &format!(
+                "fn main() -> i64 {{ let x = 5; let y = if {condition} {{ 1 }} else {{ 2 }}; x + 1 }}"
+            ),
+            "6",
+        );
+    }
+    accepted(
+        "fn f(flag: bool) -> i64 { let x = 5; let y = if flag { if x == 0 { 1 } else { 2 } } else { 3 }; x + 1 }",
+    );
+    accepted(
+        "fn f(flag: bool) -> i64 { let x = 0; x = 5; let y = if flag { if x == 0 { 1 } else { 2 } } else { 3 }; x + 1 }",
+    );
+    agree(
+        "fn main() -> i64 { let x = 5; let y = if x == 0 { let x = 9; x } else { let x = 10; x }; x + 1 }",
+        "6",
+    );
+}
+
+#[test]
+fn if_fact_restoration_cannot_hide_writes_or_borrow_invalidation() {
+    for body in [
+        "x = a;",
+        "if flag { x = a; } else {};",
+        "let ignored = match flag { true => { x = a; 1 }, false => 2 };",
+        "let ignored = flag && { x = a; true };",
+        "set(inout x);",
+    ] {
+        rejects(
+            &format!(
+                "fn set(inout x: u8) {{ x = 255; }} fn f(a: u8, flag: bool) -> u8 {{ let x: u8 = 5; let y = if x == 0 {{ {body} 1 }} else {{ 2 }}; x + 1 }}"
+            ),
+            "E0401",
+        );
+    }
+    // A write in the condition precedes the incoming snapshot.
+    rejects(
+        "fn f(a: u8) -> u8 { let x: u8 = 5; let y = if { x = a; x == 0 } { 1 } else { 2 }; x + 1 }",
+        "E0401",
+    );
+    // Agreeing branch results remain authoritative, even after mutation.
+    accepted(
+        "fn f(flag: bool) -> u8 { let x: u8 = 255; if flag { x = 1; } else { x = 1; }; x + 1 }",
+    );
+}

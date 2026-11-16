@@ -1,0 +1,731 @@
+{
+  "base": "b91fbae747012d47977f4b0d66cd0e2bd6ca861b",
+  "scope": "All 52 open issues returned by GitHub; source/PR inventory, not full subsystem certification",
+  "issues": [
+    {
+      "number": 775,
+      "title": "[Codex claimed] Gate fractional paired-sample confidence sets exactly",
+      "url": "https://github.com/robot-head/vesper/issues/775",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "crates/vesper-bench/src/signed_rank_confidence.rs",
+      "finding": "gate_paired_sample_confidence and fractional/extreme endpoint tests exist; benchmark suite passed.",
+      "related_merged_prs": [
+        {
+          "number": 778,
+          "base": "codex/paired-sample-confidence",
+          "url": "https://github.com/robot-head/vesper/pull/778"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T18:00:30Z"
+    },
+    {
+      "number": 768,
+      "title": "[Codex claimed] Build exact confidence sets from paired benchmark samples",
+      "url": "https://github.com/robot-head/vesper/issues/768",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "crates/vesper-bench/src/signed_rank_confidence.rs",
+      "finding": "paired_samples_confidence_set preserves the common denominator; benchmark suite passed.",
+      "related_merged_prs": [
+        {
+          "number": 772,
+          "base": "codex/signed-rank-confidence-32",
+          "url": "https://github.com/robot-head/vesper/pull/772"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T17:56:43Z"
+    },
+    {
+      "number": 764,
+      "title": "[Codex claimed] Decode bounded local Cap\u2019n Proto primitive lists",
+      "url": "https://github.com/robot-head/vesper/issues/764",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "crates/vesper-grammar/src/capnp.rs",
+      "finding": "local_list_pointer implements shallow primitive-list decoding; grammar suite passed.",
+      "related_merged_prs": [
+        {
+          "number": 766,
+          "base": "codex/capnp-local-struct",
+          "url": "https://github.com/robot-head/vesper/pull/766"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T17:53:04Z"
+    },
+    {
+      "number": 754,
+      "title": "[Codex claimed] Report exact paired signed-rank evidence in vesper bench",
+      "url": "https://github.com/robot-head/vesper/issues/754",
+      "status": "Open \u2014 stacked PR",
+      "chapter": "24",
+      "evidence": "src/bench_commands.rs",
+      "finding": "PR #752 remains open against main. Fractional PairedSample ranking and the --signed-rank CLI path are absent in main; merged stacked PR #760 does not establish main completion.",
+      "related_merged_prs": [
+        {
+          "number": 760,
+          "base": "codex/signed-rank-paired-samples",
+          "url": "https://github.com/robot-head/vesper/pull/760"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T17:41:05Z"
+    },
+    {
+      "number": 751,
+      "title": "[Codex claimed] Rank fractional paired benchmark differences exactly",
+      "url": "https://github.com/robot-head/vesper/issues/751",
+      "status": "Open \u2014 stacked PR",
+      "chapter": "24",
+      "evidence": "crates/vesper-bench/src/signed_rank.rs",
+      "finding": "PR #752 remains open against main. Fractional PairedSample ranking and the --signed-rank CLI path are absent in main; merged stacked PR #760 does not establish main completion.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T17:36:10Z"
+    },
+    {
+      "number": 749,
+      "title": "[Antigravity claimed] Add mechanized Lean 4 InspectorUiSpecs accessibility and close-txn proofs (\u00a737.6)",
+      "url": "https://github.com/robot-head/vesper/issues/749",
+      "status": "Open \u2014 PR #750",
+      "chapter": "38.6",
+      "evidence": "docs/manuscript/content.typ",
+      "finding": "PR #750 remains open; lean/InspectorUiSpecs.lean is absent from main. Keep proof scope limited to its actual model.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T17:35:37Z"
+    },
+    {
+      "number": 731,
+      "title": "[Codex claimed] Gate tied paired differences using confidence sets",
+      "url": "https://github.com/robot-head/vesper/issues/731",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "crates/vesper-bench/src/signed_rank_confidence.rs",
+      "finding": "gate_signed_rank_confidence handles the complete set; benchmark suite passed.",
+      "related_merged_prs": [
+        {
+          "number": 735,
+          "base": "codex/tied-signed-rank-confidence",
+          "url": "https://github.com/robot-head/vesper/pull/735"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T17:25:39Z"
+    },
+    {
+      "number": 687,
+      "title": "[Codex claimed] Support DER PrintableString values (\u00a730)",
+      "url": "https://github.com/robot-head/vesper/issues/687",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "crates/vesper-grammar/src/der.rs",
+      "finding": "PrintableString tag 19 and repertoire checks exist; grammar suite passed.",
+      "related_merged_prs": [
+        {
+          "number": 691,
+          "base": "codex/issue-675-der-ia5",
+          "url": "https://github.com/robot-head/vesper/pull/691"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T16:53:56Z"
+    },
+    {
+      "number": 679,
+      "title": "[Codex claimed] Parse explicit public field declarations",
+      "url": "https://github.com/robot-head/vesper/issues/679",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "crates/vesper-syntax/src/parser.rs",
+      "finding": "fields accepts the pub prefix and preserves the pub field name; syntax suite passed.",
+      "related_merged_prs": [
+        {
+          "number": 681,
+          "base": "codex/parse-pub-declarations",
+          "url": "https://github.com/robot-head/vesper/pull/681"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T16:47:06Z"
+    },
+    {
+      "number": 627,
+      "title": "Expose the backend and blocking boundary in the direct Pulse drain timeout",
+      "url": "https://github.com/robot-head/vesper/issues/627",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "crates/vesper-pulse/tests/drivers.rs",
+      "finding": "Merged main PR #628 supplies the requested direct-drain traces. This closes diagnostics only; no production kernel-hang cause is established.",
+      "related_merged_prs": [
+        {
+          "number": 628,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/628"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T07:19:22Z"
+    },
+    {
+      "number": 615,
+      "title": "Account for frontend workers and Lean endpoint resources in Bazel scheduling",
+      "url": "https://github.com/robot-head/vesper/issues/615",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "BUILD.bazel",
+      "finding": "Exact CPU/memory reservations requested by the issue already exist. Scheduler estimates do not prove a runtime/RSS bound.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T01:28:18Z"
+    },
+    {
+      "number": 611,
+      "title": "[Claude claimed] Wave 9 lane 34: Bridge: linear extern types and sink finalizers in .vsys, pointer results and narrow integers, `vesper build` wiring and a sandbox stack (\u00a713)",
+      "url": "https://github.com/robot-head/vesper/issues/611",
+      "status": "Open \u2014 completion not established",
+      "chapter": "16",
+      "evidence": "crates/vesper-ffi",
+      "finding": "Linear extern/sink finalizers, pointer/narrow ABI and sandbox-stack integration need completion evidence. The wave-nine completion report `docs/parallel-results/bridge-linear-extern.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [
+        {
+          "number": 612,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/612"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T00:17:54Z"
+    },
+    {
+      "number": 610,
+      "title": "[Claude claimed] Wave 9 lane 33: Strata collections: CacheBTree and ChunkSeq, VirtualArena-backed regions with 2 MiB hints, Windows reservations and a lock-free remote queue (\u00a715)",
+      "url": "https://github.com/robot-head/vesper/issues/610",
+      "status": "Open \u2014 completion not established",
+      "chapter": "13",
+      "evidence": "crates/vesper-alloc",
+      "finding": "CacheBTree/ChunkSeq and cross-platform region/remote-queue scope remains unverified. The wave-nine completion report `docs/parallel-results/strata-collections-rest.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:51Z"
+    },
+    {
+      "number": 609,
+      "title": "[Claude claimed] Wave 9 lane 32: Prism and Warp interop: WebTransport against wtransport and headless Chromium, HTTP/3 against h3, and the remaining Warp lifecycle rules (\u00a717, \u00a735)",
+      "url": "https://github.com/robot-head/vesper/issues/609",
+      "status": "Open \u2014 completion not established",
+      "chapter": "33\u201334",
+      "evidence": "crates/vesper-prism",
+      "finding": "Named wtransport/Chromium/h3 interoperability and remaining lifecycle requirements need real peer evidence. The wave-nine completion report `docs/parallel-results/quic-interop.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:48Z"
+    },
+    {
+      "number": 608,
+      "title": "[Claude claimed] Wave 9 lane 31: Scalable vectors and JSON: the RVV SIGILL under QEMU 10, wider element types and LMUL>1, f32 float decoding and an RVV JSON path (\u00a714.3, \u00a720)",
+      "url": "https://github.com/robot-head/vesper/issues/608",
+      "status": "Open \u2014 completion not established",
+      "chapter": "14, 30",
+      "evidence": "crates/vesper-simd",
+      "finding": "RVV SIGILL, wider lanes/LMUL and JSON f32/RVV acceptance need completion evidence. The wave-nine completion report `docs/parallel-results/simd-serde-scalable-rest.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:46Z"
+    },
+    {
+      "number": 607,
+      "title": "[Claude claimed] Wave 9 lane 30: Silicon: Lean model of AIA and dma-ranges, guest interrupt files, PCI MSI maps and IMSIC delivery from the APLIC (\u00a726)",
+      "url": "https://github.com/robot-head/vesper/issues/607",
+      "status": "Open \u2014 completion not established",
+      "chapter": "25",
+      "evidence": "crates/vesper-silicon",
+      "finding": "AIA/dma-ranges proof and guest interrupt delivery are not established by the older APLIC/IMSIC report. The wave-nine completion report `docs/parallel-results/silicon-aia-hypervisor.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:43Z"
+    },
+    {
+      "number": 606,
+      "title": "[Claude claimed] Wave 9 lane 29: Aether: virtio devices served to real Linux guest drivers under QEMU, net RSS, ring reset and vsock SEQPACKET (\u00a737)",
+      "url": "https://github.com/robot-head/vesper/issues/606",
+      "status": "Open \u2014 completion not established",
+      "chapter": "27",
+      "evidence": "crates/vesper-aether",
+      "finding": "Real Linux guest-driver TCG tests, RSS/reset and vsock scope need completion evidence; KVM is separate. The wave-nine completion report `docs/parallel-results/aether-qemu-guests.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:40Z"
+    },
+    {
+      "number": 605,
+      "title": "[Claude claimed] Wave 9 lane 28: Ignis Vulkan: depth/stencil and more formats, swapchains under Xvfb, split and sub-range barriers, queue-family transfers and sync-fd polling (\u00a719)",
+      "url": "https://github.com/robot-head/vesper/issues/605",
+      "status": "Open \u2014 completion not established",
+      "chapter": "39",
+      "evidence": "crates/vesper-ignis-vulkan",
+      "finding": "Depth/formats, swapchain and ownership/sync-fd acceptance remain distinct from merged abstract barrier models. The wave-nine completion report `docs/parallel-results/ignis-vulkan-depth.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:33Z"
+    },
+    {
+      "number": 604,
+      "title": "[Claude claimed] Wave 9 lane 27: Tensor: llama.cpp-exact Q4_K, Q8 activations, GPT-2 byte-level BPE and tokenizer.json, MXFP8, and quantized GPU kernels on lavapipe (\u00a728)",
+      "url": "https://github.com/robot-head/vesper/issues/604",
+      "status": "Open \u2014 completion not established",
+      "chapter": "42",
+      "evidence": "crates/vesper-tensor",
+      "finding": "Exact formats/tokenizer and quantized lavapipe kernels need completion evidence, distinct from model proofs. The wave-nine completion report `docs/parallel-results/tensor-quant-gpu.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:31Z"
+    },
+    {
+      "number": 603,
+      "title": "[Claude claimed] Wave 9 lane 26: Beacon: gRPC and Arrow compression, an HPACK decoder, gauges, sums and exponential histograms, exemplars, TLS and structured attributes (\u00a722)",
+      "url": "https://github.com/robot-head/vesper/issues/603",
+      "status": "Open \u2014 completion not established",
+      "chapter": "32",
+      "evidence": "crates/vesper-beacon",
+      "finding": "Trace lowering landed separately; compression/HPACK/metrics/TLS completeness remains unverified. The wave-nine completion report `docs/parallel-results/beacon-otlp-complete.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:28Z"
+    },
+    {
+      "number": 602,
+      "title": "[Claude claimed] Wave 9 lane 25: Kinetic: motors and joint friction, Featherstone articulation, multi-threaded RigidWorld, soft-rigid coupling and GPU broadphase in World (\u00a736)",
+      "url": "https://github.com/robot-head/vesper/issues/602",
+      "status": "Open \u2014 completion not established",
+      "chapter": "40",
+      "evidence": "crates/vesper-kinetic",
+      "finding": "Motors/articulation/threading/coupling/GPU broadphase are broader than the older joints/CCD implementation. The wave-nine completion report `docs/parallel-results/kinetic-articulation-coupling.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [
+        {
+          "number": 726,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/726"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T00:17:25Z"
+    },
+    {
+      "number": 601,
+      "title": "[Claude claimed] Wave 9 lane 24: Quarry: index selection in the SQL planner, online DDL and index builds, O_DIRECT and benchmarks (\u00a724)",
+      "url": "https://github.com/robot-head/vesper/issues/601",
+      "status": "Open \u2014 completion not established",
+      "chapter": "36",
+      "evidence": "crates/vesper-quarry",
+      "finding": "Planner index selection, online DDL/index builds and O_DIRECT acceptance need completion evidence. The wave-nine completion report `docs/parallel-results/quarry-planner-ddl.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:22Z"
+    },
+    {
+      "number": 600,
+      "title": "[Claude claimed] Wave 9 lane 23: Aura GTK 4: libadwaita containers, Aura subtrees in virtual-list rows, keyboard and contrast accessibility checks, and GLib/Pulse fd fusion (\u00a718)",
+      "url": "https://github.com/robot-head/vesper/issues/600",
+      "status": "Open \u2014 completion not established",
+      "chapter": "38",
+      "evidence": "crates/vesper-aura-gtk",
+      "finding": "New SimAura implementation does not close native GTK/libadwaita, row subtree and fd-fusion scope. The wave-nine completion report `docs/parallel-results/aura-gtk-adwaita.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:19Z"
+    },
+    {
+      "number": 599,
+      "title": "[Claude claimed] Wave 9 lane 22: Pulse pool: lock-free work-stealing deques, CPU pinning, per-worker buffers, a long-lived pool and a pollable driver fd (\u00a712.4-\u00a712.5)",
+      "url": "https://github.com/robot-head/vesper/issues/599",
+      "status": "Open \u2014 completion not established",
+      "chapter": "15",
+      "evidence": "crates/vesper-pulse",
+      "finding": "Startup defect is addressed under #573; lock-free deque/pinning/pollable-driver requirements remain separate. The wave-nine completion report `docs/parallel-results/pulse-pool-depth.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [
+        {
+          "number": 628,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/628"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T00:17:17Z"
+    },
+    {
+      "number": 598,
+      "title": "[Claude claimed] Wave 9 lane 21: Fiber ABI: unwinding into host frames, vector callee-saved registers on every frame and userfaultfd write-protect tracking (\u00a712, \u00a731)",
+      "url": "https://github.com/robot-head/vesper/issues/598",
+      "status": "Open \u2014 completion not established",
+      "chapter": "15, 23",
+      "evidence": "crates/vesper-fiber-abi",
+      "finding": "Probe race repair #572 is narrower than host unwinding, vector saved registers and uffd-wp tracking. The wave-nine completion report `docs/parallel-results/fiber-host-unwinding.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:11Z"
+    },
+    {
+      "number": 597,
+      "title": "[Claude claimed] Wave 9 lane 20: Flux: Kafka idempotent producer and transactions, consumer groups, TLS/SASL, compression and per-bin live migration (\u00a734)",
+      "url": "https://github.com/robot-head/vesper/issues/597",
+      "status": "Open \u2014 completion not established",
+      "chapter": "37",
+      "evidence": "crates/vesper-flux",
+      "finding": "Transactions/groups/security/compression and per-bin migration need completion evidence. The wave-nine completion report `docs/parallel-results/flux-kafka-exactly-once.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:08Z"
+    },
+    {
+      "number": 596,
+      "title": "[Claude claimed] Wave 9 lane 19: Crucible: Vesper source fibers on the DPOR step machine (`vesper test --sim`) and multi-worker stealing in SimPulse (\u00a729, \u00a712.6)",
+      "url": "https://github.com/robot-head/vesper/issues/596",
+      "status": "Open \u2014 completion not established",
+      "chapter": "22, 15",
+      "evidence": "crates/vesper-crucible",
+      "finding": "Source fibers on DPOR and multi-worker SimPulse stealing remain unverified; unit runner/mutation gate is separate. The wave-nine completion report `docs/parallel-results/crucible-source-fibers.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:06Z"
+    },
+    {
+      "number": 595,
+      "title": "[Claude claimed] Wave 9 lane 18: Codex docs: alias-aware may-use footprints, cross-file links, proof-audit into the store, and Funs/Specs expansion (\u00a740)",
+      "url": "https://github.com/robot-head/vesper/issues/595",
+      "status": "Open \u2014 completion not established",
+      "chapter": "20",
+      "evidence": "crates/vesper-doc",
+      "finding": "WCSD work landed separately; alias-aware footprints, cross-file links and package Funs/Specs remain unverified. The wave-nine completion report `docs/parallel-results/codex-docs-alias-links.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:03Z"
+    },
+    {
+      "number": 594,
+      "title": "[Claude claimed] Wave 9 lane 17: Lens: incremental rechecking under the 2 ms budget, generics/closures/traits in the editor, cancellation, and Chroma semantic tokens (\u00a721, \u00a743.2)",
+      "url": "https://github.com/robot-head/vesper/issues/594",
+      "status": "Open \u2014 completion not established",
+      "chapter": "18, 21",
+      "evidence": "src/lsp",
+      "finding": "Current fake-Lean repair does not establish incremental latency, cancellation and language breadth milestones. The wave-nine completion report `docs/parallel-results/lens-incremental.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:17:00Z"
+    },
+    {
+      "number": 593,
+      "title": "[Claude claimed] Wave 9 lane 16: Lean extractor: a generated simp set, partial-def/companion equivalence, `decreases`, and contracts over inout, generic and multi-Fail functions (\u00a711)",
+      "url": "https://github.com/robot-head/vesper/issues/593",
+      "status": "Open \u2014 completion not established",
+      "chapter": "9",
+      "evidence": "src/lean.rs",
+      "finding": "Admission gate now checks contract signatures/input witnesses; extraction equivalence, generated simp set, decreases and inout/generic/multi-Fail contracts remain separate. The wave-nine completion report `docs/parallel-results/lean-extractor-proofs.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:16:57Z"
+    },
+    {
+      "number": 592,
+      "title": "[Claude claimed] Wave 9 lane 15: Freestanding images: `vesper build --target`, entry parameters, interrupts with an IrqGuard, the AArch64 MMU and a stack guard (\u00a726, \u00a77)",
+      "url": "https://github.com/robot-head/vesper/issues/592",
+      "status": "Open \u2014 completion not established",
+      "chapter": "25, 8",
+      "evidence": "src/freestanding",
+      "finding": "Entry parameters/IrqGuard/AArch64 MMU and stack-guard integration need completion evidence. The wave-nine completion report `docs/parallel-results/freestanding-images-rest.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:16:54Z"
+    },
+    {
+      "number": 591,
+      "title": "[Claude claimed] Wave 9 lane 14: eBPF: wire-struct packet views, packet writes, XDP_TX and redirect, tracepoint and kprobe entries, and the library's remaining helpers (\u00a727)",
+      "url": "https://github.com/robot-head/vesper/issues/591",
+      "status": "Open \u2014 completion not established",
+      "chapter": "26",
+      "evidence": "src/ebpf_backend.rs",
+      "finding": "Packet views/writes/TX/redirect and remaining entry/helper integration need completion evidence; excluded builder remains excluded. The wave-nine completion report `docs/parallel-results/ebpf-packets-tracing.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:16:49Z"
+    },
+    {
+      "number": 590,
+      "title": "[Claude claimed] Wave 9 lane 13: Wasm target: WASI stdin and filesystem, list parameters, loop reclamation and first-class continuations (\u00a730, \u00a77)",
+      "url": "https://github.com/robot-head/vesper/issues/590",
+      "status": "Open \u2014 completion not established",
+      "chapter": "17, 8",
+      "evidence": "src/wasm_backend.rs",
+      "finding": "WASI filesystem/stdin, lists, loop reclamation and first-class continuation acceptance remain unverified. The wave-nine completion report `docs/parallel-results/wasm-backend-wasi.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:16:45Z"
+    },
+    {
+      "number": 589,
+      "title": "[Claude claimed] Wave 9 lane 12: Source Tensor rest and wire structs: record `wire` in the item schema, tensors in impls and traits, named axes and region-backed views (\u00a728.2, \u00a713.2)",
+      "url": "https://github.com/robot-head/vesper/issues/589",
+      "status": "Open \u2014 completion not established",
+      "chapter": "42, 16",
+      "evidence": "src/tensor_types.rs",
+      "finding": "Wire schema, impl/trait tensor support, named axes and source views need completion evidence. The wave-nine completion report `docs/parallel-results/source-tensor-rest.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:16:43Z"
+    },
+    {
+      "number": 588,
+      "title": "[Claude claimed] Wave 9 lane 11: Source Strata: region generic parameters with renaming at calls, RegionSlice/RegionRef/SlotArena in source and linear payload tracking (\u00a715)",
+      "url": "https://github.com/robot-head/vesper/issues/588",
+      "status": "Open \u2014 completion not established",
+      "chapter": "13",
+      "evidence": "src/regions.rs",
+      "finding": "Region generic renaming and source Slice/Ref/SlotArena linear payloads remain unverified. The wave-nine completion report `docs/parallel-results/strata-region-generics.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:16:40Z"
+    },
+    {
+      "number": 587,
+      "title": "[Claude claimed] Wave 9 lane 10: Source scalable vectors: `VVec[P, T]`/`VMask[P, T]` strip-mined with predicated tails, and profile-polymorphic kernels (\u00a714)",
+      "url": "https://github.com/robot-head/vesper/issues/587",
+      "status": "Open \u2014 completion not established",
+      "chapter": "14",
+      "evidence": "src/vector.rs",
+      "finding": "Host scalable-vector kernels do not close source VVec/VMask lowering and profile polymorphism. The wave-nine completion report `docs/parallel-results/source-vvec-profiles.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:16:36Z"
+    },
+    {
+      "number": 586,
+      "title": "[Claude claimed] Wave 9 lane 9: Native handler ABI: resuming user effects and closures passed at run time without specialization (\u00a76, \u00a77, \u00a712)",
+      "url": "https://github.com/robot-head/vesper/issues/586",
+      "status": "Open \u2014 completion not established",
+      "chapter": "5\u20136, 8, 15",
+      "evidence": "src/native.rs",
+      "finding": "Runtime first-class resuming handler/closure ABI remains distinct from specialized existing lowering. The wave-nine completion report `docs/parallel-results/native-handler-abi.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:16:33Z"
+    },
+    {
+      "number": 585,
+      "title": "[Claude claimed] Wave 9 lane 8: Pulse in executables: a linkable fiber and driver runtime library, and session executables on Linux, macOS and Windows (\u00a712, \u00a77)",
+      "url": "https://github.com/robot-head/vesper/issues/585",
+      "status": "Open \u2014 completion not established",
+      "chapter": "15, 8",
+      "evidence": "src/native_session.rs",
+      "finding": "Requested crates/vesper-pulse-rt is absent; source session executable integration remains open. The wave-nine completion report `docs/parallel-results/pulse-session-executables.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:16:30Z"
+    },
+    {
+      "number": 584,
+      "title": "[Claude claimed] Wave 9 lane 7: Mechanized metatheory: generative handler labels, lacks constraints and first-class type variables (Appendix A, \u00a74-\u00a76)",
+      "url": "https://github.com/robot-head/vesper/issues/584",
+      "status": "Open \u2014 completion not established",
+      "chapter": "Appendix A, 3\u20136",
+      "evidence": "lean/Metatheory/Polymorphism.lean",
+      "finding": "Existing polymorphic/closure safety results are separate calculi; generative labels/lacks and their combined soundness are not established by #822. The wave-nine completion report `docs/parallel-results/metatheory-generative-labels.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:16:24Z"
+    },
+    {
+      "number": 583,
+      "title": "[Claude claimed] Wave 9 lane 6: Verified direct codegen: enums and match, floats, strings, an RV64 target and Windows PE output (\u00a742.1, \u00a77)",
+      "url": "https://github.com/robot-head/vesper/issues/583",
+      "status": "Open \u2014 completion not established",
+      "chapter": "10, Appendix A",
+      "evidence": "src/verified_codegen.rs",
+      "finding": "New abstract control-flow/range validators do not supply enums/floats/strings/RV64/Windows PE production lowering. The wave-nine completion report `docs/parallel-results/verified-codegen-breadth.md` is absent; older baseline reports are not full acceptance evidence.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:16:22Z"
+    },
+    {
+      "number": 582,
+      "title": "[Claude claimed] Wave 9 lane 5: Bootstrap Stage 1: build the self-hosted front end with the seed and verified codegen, record the Stage 1 lock and DDC-check it (\u00a742.2, \u00a742.5)",
+      "url": "https://github.com/robot-head/vesper/issues/582",
+      "status": "Partial",
+      "chapter": "10",
+      "evidence": "docs/parallel-results/bootstrap-stage1-lock.md",
+      "finding": "Main PR #621 locks actual frontend artifacts and records backend refusal; full verified frontend Stage 1/DDC remains unavailable and must not be claimed complete.",
+      "related_merged_prs": [
+        {
+          "number": 621,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/621"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T00:16:19Z"
+    },
+    {
+      "number": 577,
+      "title": "Expose backend and cancellation boundaries in the nursery timeout fixture",
+      "url": "https://github.com/robot-head/vesper/issues/577",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "crates/vesper-pulse/tests/drivers.rs",
+      "finding": "Nursery phase/backend tracing exists; direct drain follow-up landed in #628. Production cancellation diagnosis remains separate.",
+      "related_merged_prs": [
+        {
+          "number": 628,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/628"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T00:08:27Z"
+    },
+    {
+      "number": 576,
+      "title": "Use far-safe function references in Cranelift JIT modules",
+      "url": "https://github.com/robot-head/vesper/issues/576",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "src/native.rs",
+      "finding": "JIT policy uses Preemptible and clears function/data colocation; AOT policy is separate. Retained regression tests and the scoped RFC are present.",
+      "related_merged_prs": [
+        {
+          "number": 612,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/612"
+        }
+      ],
+      "observed_updated_at": "2026-11-15T01:17:39Z"
+    },
+    {
+      "number": 575,
+      "title": "Publish fake Lean executable fixtures without inherited writable descriptors",
+      "url": "https://github.com/robot-head/vesper/issues/575",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "src/lsp/lens_tests.rs",
+      "finding": "Executable fixture publication uses a separate writer process; retained inherited-descriptor controls exist.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-15T00:03:42Z"
+    },
+    {
+      "number": 574,
+      "title": "Classify complete Lean resource endpoint tests with a long Bazel timeout",
+      "url": "https://github.com/robot-head/vesper/issues/574",
+      "status": "Fix prepared",
+      "chapter": "CI",
+      "evidence": "BUILD.bazel",
+      "finding": "Confirmed missing resource_oracle42 long timeout; this branch adds it. Bazel 9.3.1 query confirms timeout=long with the original CPU/memory tags.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-14T23:58:38Z"
+    },
+    {
+      "number": 573,
+      "title": "Diagnose and fix parked-read cancellation hang in Pulse pool",
+      "url": "https://github.com/robot-head/vesper/issues/573",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "crates/vesper-pulse/src/pool.rs",
+      "finding": "Worker startup has an abortable gate; the scoped RFC records partial-spawn reproduction and real queued/I/O controls. This is not a diagnosis of every kernel cancellation hang.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-14T23:14:09Z"
+    },
+    {
+      "number": 572,
+      "title": "Retry occupied fixed-stack probes in the unwind image fixture",
+      "url": "https://github.com/robot-head/vesper/issues/572",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "crates/vesper-fiber-abi/tests/unwind.rs",
+      "finding": "Fixed-address spawning retries only AlreadyExists, at most 16 times, preserving the unwind assertions.",
+      "related_merged_prs": [
+        {
+          "number": 526,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/526"
+        },
+        {
+          "number": 412,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/412"
+        }
+      ],
+      "observed_updated_at": "2026-11-14T22:55:49Z"
+    },
+    {
+      "number": 571,
+      "title": "Bound local test concurrency after BuildBuddy VM memory exhaustion",
+      "url": "https://github.com/robot-head/vesper/issues/571",
+      "status": "Implemented in main",
+      "chapter": "See corrected section map",
+      "evidence": "buildbuddy.yaml",
+      "finding": "The all-target action has memory 22GB and local_test_jobs=2; native action remains 16GB. This does not guarantee every future suite fits.",
+      "related_merged_prs": [
+        {
+          "number": 526,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/526"
+        },
+        {
+          "number": 498,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/498"
+        },
+        {
+          "number": 449,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/449"
+        },
+        {
+          "number": 442,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/442"
+        },
+        {
+          "number": 432,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/432"
+        },
+        {
+          "number": 423,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/423"
+        },
+        {
+          "number": 417,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/417"
+        },
+        {
+          "number": 412,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/412"
+        },
+        {
+          "number": 407,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/407"
+        }
+      ],
+      "observed_updated_at": "2026-11-14T19:51:59Z"
+    },
+    {
+      "number": 569,
+      "title": "Regress untouched facts and mutation invalidation in Rust/reference lockstep",
+      "url": "https://github.com/robot-head/vesper/issues/569",
+      "status": "Open \u2014 reproduced precision gap",
+      "chapter": "4\u20135, Appendix A",
+      "evidence": "tests/fixtures/lockstep/reject_fact_lost_after_if.ves",
+      "finding": "Rust still intersects branch integer facts without mutation-identity restoration; reference uses mergeEnv and the original reject fixture remains. Keep #567/#568/#569 coordinated under #497 to preserve lockstep and mutation invalidation.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-14T17:47:37Z"
+    },
+    {
+      "number": 568,
+      "title": "Align the executable Lean reference if-join and its soundness framing",
+      "url": "https://github.com/robot-head/vesper/issues/568",
+      "status": "Open \u2014 reproduced precision gap",
+      "chapter": "4\u20135, Appendix A",
+      "evidence": "lean/ReferenceEval.lean",
+      "finding": "Rust still intersects branch integer facts without mutation-identity restoration; reference uses mergeEnv and the original reject fixture remains. Keep #567/#568/#569 coordinated under #497 to preserve lockstep and mutation invalidation.",
+      "related_merged_prs": [],
+      "observed_updated_at": "2026-11-14T17:47:33Z"
+    },
+    {
+      "number": 567,
+      "title": "Track integer-fact writes across conditional joins",
+      "url": "https://github.com/robot-head/vesper/issues/567",
+      "status": "Open \u2014 reproduced precision gap",
+      "chapter": "4\u20135, Appendix A",
+      "evidence": "src/check.rs",
+      "finding": "Rust still intersects branch integer facts without mutation-identity restoration; reference uses mergeEnv and the original reject fixture remains. Keep #567/#568/#569 coordinated under #497 to preserve lockstep and mutation invalidation.",
+      "related_merged_prs": [
+        {
+          "number": 612,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/612"
+        }
+      ],
+      "observed_updated_at": "2026-11-14T17:47:30Z"
+    },
+    {
+      "number": 497,
+      "title": "Checker drops a binding's integer fact after an if that refines it, causing a spurious E0401",
+      "url": "https://github.com/robot-head/vesper/issues/497",
+      "status": "Open \u2014 reproduced precision gap",
+      "chapter": "4\u20135, Appendix A",
+      "evidence": "src/check.rs",
+      "finding": "Rust still intersects branch integer facts without mutation-identity restoration; reference uses mergeEnv and the original reject fixture remains. Keep #567/#568/#569 coordinated under #497 to preserve lockstep and mutation invalidation.",
+      "related_merged_prs": [
+        {
+          "number": 510,
+          "base": "main",
+          "url": "https://github.com/robot-head/vesper/pull/510"
+        }
+      ],
+      "observed_updated_at": "2026-11-14T17:45:16Z"
+    }
+  ]
+}

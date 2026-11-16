@@ -1,6 +1,7 @@
 //! Bidirectional type/mode inference and path-sensitive place capability checking.
 use crate::ast::*;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 #[path = "vector/check.rs"]
 mod vector_check;
 
@@ -344,6 +345,8 @@ struct Binding {
     span: Span,
     integer: Option<i128>,
     nonzero: bool,
+    // Identity changes on actual writes/invalidation, never on branch refinement.
+    mutation: Arc<()>,
 }
 impl Binding {
     fn remember_move(&mut self, path: &[String], span: Span) {
@@ -373,6 +376,7 @@ struct Env {
 impl Env {
     fn invalidate_borrowed_facts(&mut self) {
         for binding in self.bindings.values_mut().filter(|b| b.pass != Pass::Sink) {
+            binding.mutation = Arc::new(());
             binding.integer = None;
             binding.nonzero = false;
         }
@@ -882,6 +886,7 @@ impl Checker<'_> {
                         moved: vec![],
                         move_causes: vec![],
                         span: p.span.clone(),
+                        mutation: Arc::new(()),
                         integer: None,
                         nonzero: false,
                     },
@@ -1545,6 +1550,7 @@ impl Checker<'_> {
                 let nonzero = fact.is_some_and(|n| n != 0) || (op == "=" && self.nonzero(r, env));
                 // A write to a field never establishes a fact about its root.
                 if let Some(binding) = env.bindings.get_mut(&p.root) {
+                    binding.mutation = Arc::new(());
                     binding.integer = fact.filter(|_| p.path.is_empty());
                     binding.nonzero = nonzero && p.path.is_empty();
                 }
@@ -1557,6 +1563,7 @@ impl Checker<'_> {
             } => {
                 let t = self.expr(condition, env, Usage::Own);
                 self.expect_type(&Type::named("bool"), &t, condition.span.clone());
+                let original = env.clone();
                 let mut left = env.clone();
                 Self::refine_condition(condition, &mut left, true);
                 let a = self.expr_expected(then, &mut left, Usage::Own, expected);
@@ -1579,6 +1586,22 @@ impl Checker<'_> {
                     *env = left;
                 } else {
                     self.merge(env, &left, &right, e.span.clone());
+                    for (name, binding) in &mut env.bindings {
+                        if binding.integer.is_none()
+                            && let (Some(before), Some(a), Some(b)) = (
+                                original.bindings.get(name),
+                                left.bindings.get(name),
+                                right.bindings.get(name),
+                            )
+                            && binding.span == before.span
+                            && a.span == before.span
+                            && b.span == before.span
+                            && Arc::ptr_eq(&before.mutation, &a.mutation)
+                            && Arc::ptr_eq(&before.mutation, &b.mutation)
+                        {
+                            binding.integer = before.integer;
+                        }
+                    }
                 }
                 result
             }
@@ -2554,6 +2577,7 @@ impl Checker<'_> {
                 if let Some(place) = &place
                     && let Some(binding) = env.bindings.get_mut(&place.root)
                 {
+                    binding.mutation = Arc::new(());
                     binding.integer = None;
                     binding.nonzero = false;
                 }
@@ -2986,8 +3010,16 @@ impl Checker<'_> {
                         }
                     }
                 }
+                binding.mutation = if x.span == y.span && Arc::ptr_eq(&x.mutation, &y.mutation) {
+                    Arc::clone(&x.mutation)
+                } else {
+                    Arc::new(())
+                };
                 binding.integer = x.integer.filter(|n| Some(*n) == y.integer);
                 binding.nonzero = x.nonzero && y.nonzero;
+            } else {
+                // A missing branch binding cannot certify an unchanged value.
+                binding.mutation = Arc::new(());
             }
         }
     }
@@ -3262,6 +3294,7 @@ impl Checker<'_> {
                         moved: vec![],
                         move_causes: vec![],
                         span: p.span.clone(),
+                        mutation: Arc::new(()),
                         integer: None,
                         nonzero: false,
                     },
@@ -3426,6 +3459,7 @@ impl Checker<'_> {
                     moved: vec![],
                     move_causes: vec![],
                     span: p.span.clone(),
+                    mutation: Arc::new(()),
                     integer: None,
                     nonzero: false,
                 },

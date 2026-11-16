@@ -1,0 +1,11 @@
+fn main() -> i64 {
+    let x = 5;
+    let y = if x == 0 {
+        let x = 9;
+        x
+    } else {
+        let x = 10;
+        x
+    };
+    x + 1
+}
