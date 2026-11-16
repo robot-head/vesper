@@ -12,6 +12,7 @@ pub const ELF_CODE_OFFSET: u64 = 0x80;
 
 pub const EM_X86_64: u16 = 62;
 pub const EM_AARCH64: u16 = 183;
+pub const EM_RISCV: u16 = 243;
 
 fn put16(out: &mut Vec<u8>, v: u16) {
     out.extend_from_slice(&v.to_le_bytes());

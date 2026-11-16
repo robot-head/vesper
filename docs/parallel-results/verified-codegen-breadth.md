@@ -13,7 +13,10 @@ This report is updated by each milestone PR.
   lays its fields out from word 1 in declaration order. Unused payload words
   are written as zero, so results are deterministic. A recursive enum
   (`enum L { Nil, Cons(i64, L) }`) has no finite layout without a heap and is
-  rejected with `Unsupported::Enum`.
+  rejected with `Unsupported::Enum`. Recursion is detected per
+  instantiation, so finite nesting such as `Option[Option[i64]]` is laid
+  out normally (`nested.ves`); polymorphic recursion hits the type-depth
+  limit.
 - **Constructors.** `Op::Data` of an enum variant writes the tag, the
   fields at their variant offsets and the zero padding.
 - **`match`.** `Terminator::Match` lowers to a first-match chain: each arm's
@@ -42,7 +45,7 @@ before, Rust lowering is outside the Lean proofs.
 - `cargo test --locked --test verified_codegen --test verified_codegen_cli
   --test verified_codegen_lean`: 13 passed. New fixtures
   `tests/fixtures/verified_codegen/enums.ves` and `literals.ves` agree with the
-  evaluator and the Cranelift JIT on x86-64 Linux (native) and AArch64 Linux
+  evaluator and the Cranelift JIT (with `nested.ves`) on x86-64 Linux (native) and AArch64 Linux
   (QEMU 8.2.2 user mode), with and without the IR optimizer. AArch64 macOS
   objects are built and checked for determinism but only run on Apple
   silicon (macOS CI).
@@ -58,6 +61,44 @@ before, Rust lowering is outside the Lean proofs.
 
 ### Remaining gaps in #583
 
-`f64` arithmetic, strings and byte access, the RV64GC target, Windows PE/COFF
+`f64` arithmetic, strings and byte access, Windows PE/COFF
 output with unwind data, and Lean encoder proofs against an ISA model are
 not in this milestone. They follow as separate PRs.
+
+## Milestone 2: RV64 target
+
+### What was built
+
+- `Target::RISCV64_LINUX` (`riscv64gc-unknown-linux-gnu`, any `riscv64*`
+  Linux triple) and a static ELF (`EM_RISCV`) executable container.
+- `src/verified_codegen/riscv64.rs`: one fixed RV64I + M sequence per
+  abstract instruction, using the same frame layout as AArch64 (`s0` frame
+  pointer, incoming area at `16 + 8n(s0)`). No compressed instructions are
+  emitted, so the output runs on RV64GC. RISC-V has no flags: unsigned
+  carry and borrow are `bltu` tests, signed add/sub overflow uses the
+  `(b < 0) != (sum < a)` identity, multiplication compares `mulh`/`mulhu`
+  with the sign extension of the low word, and `i64::MIN / -1` is trapped
+  before `div`. RISC-V's own `rem` already gives `MIN rem -1 = 0` and the
+  dividend's sign. Conditional branches reach only ±4 KiB, so each branch to
+  a label is an inverted branch over a `jal` (±1 MiB, a new `Fix::Jal`
+  fixup with a typed `Limit` error when out of range). Frame offsets of
+  2048 bytes or more go through a computed address.
+- 64-bit immediates are a fixed eleven-instruction sequence (`addi` of the
+  top nine bits, then five `slli 11; ori` chunks); a unit test interprets
+  the sequence for boundary values.
+- `vesper build --codegen verified --target riscv64gc-unknown-linux-gnu`
+  writes the RV64 executable; `tests/verified_codegen_cli.rs` checks the
+  ELF header and runs it under QEMU when present.
+- Encoder unit tests compare fifteen instruction forms with the reference
+  encodings from the RISC-V unprivileged specification.
+
+### Checks
+
+- Every differential test in `tests/verified_codegen.rs` (all fixtures,
+  more than ninety checked-arithmetic boundary cases, the ten-million-
+  iteration tail loop) now also runs the RV64 executable under QEMU 8.2.2
+  `qemu-riscv64` user mode and agrees with the evaluator and Cranelift.
+  BuildBuddy CI already installs `qemu-user`; elsewhere a missing QEMU is
+  reported as unavailable, never as a pass.
+- The Lean model covers abstract instruction selection only; the RV64 byte
+  encodings are checked by the unit tests and by execution, not proved.

@@ -1,4 +1,4 @@
-//! A tiny label-resolving assembler buffer shared by both encoders.
+//! A tiny label-resolving assembler buffer shared by the encoders.
 use super::VerifiedError;
 use super::machine::Label;
 use std::collections::BTreeMap;
@@ -11,6 +11,8 @@ pub enum Fix {
     Imm26,
     /// AArch64 `b.cond`/`cbz` imm19 in the instruction word at `at`.
     Imm19,
+    /// RISC-V `jal` imm20 (±1 MiB) in the instruction word at `at`.
+    Jal,
 }
 
 #[derive(Default)]
@@ -52,6 +54,20 @@ impl Asm {
                     let rel = i32::try_from(rel)
                         .map_err(|_| VerifiedError::Limit("x86-64 branch out of range".into()))?;
                     self.code[at..at + 4].copy_from_slice(&rel.to_le_bytes());
+                }
+                Fix::Jal => {
+                    let rel = target - at as i64;
+                    if !(-(1i64 << 20)..(1i64 << 20)).contains(&rel) {
+                        return Err(VerifiedError::Limit("RISC-V jump out of range".into()));
+                    }
+                    let imm = rel as u32;
+                    let field = ((imm >> 20) & 1) << 31
+                        | ((imm >> 1) & 0x3ff) << 21
+                        | ((imm >> 11) & 1) << 20
+                        | ((imm >> 12) & 0xff) << 12;
+                    let mut w = u32::from_le_bytes(self.code[at..at + 4].try_into().unwrap());
+                    w |= field;
+                    self.code[at..at + 4].copy_from_slice(&w.to_le_bytes());
                 }
                 Fix::Imm26 | Fix::Imm19 => {
                     let words = (target - at as i64) / 4;

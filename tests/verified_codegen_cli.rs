@@ -90,7 +90,7 @@ fn rejects_bad_flags_and_unsupported_programs() {
             "--codegen",
             "verified",
             "--target",
-            "riscv64gc-unknown-linux-gnu",
+            "powerpc64le-unknown-linux-gnu",
         ],
     ] {
         let out = vesper()
@@ -123,5 +123,52 @@ fn rejects_bad_flags_and_unsupported_programs() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `--target riscv64gc-unknown-linux-gnu` cross-builds a static RV64 ELF;
+/// it runs under `qemu-riscv64` when that is installed.
+#[test]
+fn builds_rv64_executables() {
+    let dir = scratch("rv64");
+    let exe = dir.join("fib");
+    let out = vesper()
+        .arg("build")
+        .arg(fixture("fibonacci.ves"))
+        .args([
+            "--codegen",
+            "verified",
+            "--target",
+            "riscv64gc-unknown-linux-gnu",
+            "-o",
+        ])
+        .arg(&exe)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bytes = std::fs::read(&exe).unwrap();
+    assert_eq!(&bytes[..4], b"\x7fELF");
+    assert_eq!(u16::from_le_bytes([bytes[18], bytes[19]]), 243, "EM_RISCV");
+    let qemu = std::env::var_os("PATH").and_then(|p| {
+        std::env::split_paths(&p)
+            .flat_map(|d| [d.join("qemu-riscv64"), d.join("qemu-riscv64-static")])
+            .find(|q| q.is_file())
+    });
+    match qemu {
+        Some(q) if cfg!(target_os = "linux") => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let status = Command::new(q).arg(&exe).status().unwrap();
+            assert_eq!(status.code(), Some(6765 % 256));
+        }
+        _ => eprintln!("qemu-riscv64 unavailable; RV64 run skipped"),
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }

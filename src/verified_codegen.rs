@@ -59,6 +59,7 @@ mod cli;
 mod container;
 mod lower;
 mod machine;
+mod riscv64;
 mod x86_64;
 
 pub use cli::build_command;
@@ -85,6 +86,8 @@ pub const MAX_FRAME_WORDS: u32 = 4000;
 pub enum Arch {
     X86_64,
     Aarch64,
+    /// RV64I with the M extension (runs on RV64GC).
+    Riscv64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Os {
@@ -110,15 +113,21 @@ impl Target {
         arch: Arch::Aarch64,
         os: Os::MacOs,
     };
+    pub const RISCV64_LINUX: Target = Target {
+        arch: Arch::Riscv64,
+        os: Os::Linux,
+    };
     /// Parse a target triple.
     pub fn from_triple(triple: &str) -> Result<Self, VerifiedError> {
         let arch = if triple.starts_with("x86_64-") {
             Arch::X86_64
         } else if triple.starts_with("aarch64-") || triple.starts_with("arm64-") {
             Arch::Aarch64
+        } else if triple.starts_with("riscv64") {
+            Arch::Riscv64
         } else {
             return Err(VerifiedError::Target(format!(
-                "unsupported target '{triple}' (x86_64 or aarch64 Linux, aarch64 macOS)"
+                "unsupported target '{triple}' (x86_64, aarch64 or riscv64 Linux, aarch64 macOS)"
             )));
         };
         let os = if triple.contains("-linux") {
@@ -130,10 +139,10 @@ impl Target {
                 "unsupported operating system in '{triple}'"
             )));
         };
-        if arch == Arch::X86_64 && os == Os::MacOs {
-            return Err(VerifiedError::Target(
-                "x86_64 macOS is not a verified-codegen target".into(),
-            ));
+        if arch != Arch::Aarch64 && os == Os::MacOs {
+            return Err(VerifiedError::Target(format!(
+                "{arch:?} macOS is not a verified-codegen target"
+            )));
         }
         Ok(Self { arch, os })
     }
@@ -143,6 +152,7 @@ impl Target {
             ("x86_64", "linux") => Some(Self::X86_64_LINUX),
             ("aarch64", "linux") => Some(Self::AARCH64_LINUX),
             ("aarch64", "macos") => Some(Self::AARCH64_MACOS),
+            ("riscv64", "linux") => Some(Self::RISCV64_LINUX),
             _ => None,
         }
     }
@@ -311,17 +321,33 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
     let entry_plan = &plan.functions[0];
     let result_words = entry_plan.result.0.clone();
     let mut a = asm::Asm::default();
-    let start = match options.target.arch {
-        Arch::X86_64 => x86_64::start,
-        Arch::Aarch64 => aarch64::start,
-    };
-    start(
-        &mut a,
-        options.target.os,
-        options.protocol,
-        entry_plan.result.len(),
-        entry_plan.label,
-    )?;
+    if options.target.arch == Arch::Riscv64 && options.target.os != Os::Linux {
+        return Err(VerifiedError::Target(
+            "riscv64 is a Linux-only verified-codegen target".into(),
+        ));
+    }
+    match options.target.arch {
+        Arch::X86_64 => x86_64::start(
+            &mut a,
+            options.target.os,
+            options.protocol,
+            entry_plan.result.len(),
+            entry_plan.label,
+        )?,
+        Arch::Aarch64 => aarch64::start(
+            &mut a,
+            options.target.os,
+            options.protocol,
+            entry_plan.result.len(),
+            entry_plan.label,
+        )?,
+        Arch::Riscv64 => riscv64::start(
+            &mut a,
+            options.protocol,
+            entry_plan.result.len(),
+            entry_plan.label,
+        )?,
+    }
     let mut machine_instructions = 0;
     for (_, rows) in &lir {
         for row in rows {
@@ -330,6 +356,7 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
                 match options.target.arch {
                     Arch::X86_64 => x86_64::emit(&mut a, &m)?,
                     Arch::Aarch64 => aarch64::emit(&mut a, &m)?,
+                    Arch::Riscv64 => riscv64::emit(&mut a, &m)?,
                 }
             }
             if a.here() > options.max_code_bytes {
@@ -361,12 +388,20 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
             os: Os::MacOs,
         } => (Container::MachOObject, container::macho_object(&code)),
         Target {
-            arch: Arch::X86_64,
+            arch: Arch::Riscv64,
+            os: Os::Linux,
+        } => (
+            Container::ElfExecutable,
+            container::elf_executable(container::EM_RISCV, &code),
+        ),
+        Target {
+            arch: Arch::X86_64 | Arch::Riscv64,
             os: Os::MacOs,
         } => {
-            return Err(VerifiedError::Target(
-                "x86_64 macOS is not a verified-codegen target".into(),
-            ));
+            return Err(VerifiedError::Target(format!(
+                "{:?} macOS is not a verified-codegen target",
+                options.target.arch
+            )));
         }
     };
     Ok(Artifact {
