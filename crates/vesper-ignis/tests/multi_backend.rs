@@ -771,3 +771,94 @@ fn vulkan14_collapses_split_barriers_on_copy_queue_into_ordinary_barriers() {
         None
     );
 }
+
+#[test]
+fn vulkan14_postbuild_and_clear_uav_map_to_transfer_write() {
+    let mut g = RenderGraph::new();
+    let direct = g.add_queue(QueueKind::Direct);
+    let postbuild_buf = g
+        .add_buffer(BufferDesc {
+            name: "postbuild_out".into(),
+            size: 256,
+        })
+        .unwrap();
+    let cleared_buf = g
+        .add_buffer(BufferDesc {
+            name: "cleared_uav".into(),
+            size: 256,
+        })
+        .unwrap();
+
+    g.add_pass(PassDesc::new("emit_postbuild", direct).buffer(
+        postbuild_buf,
+        ByteRange::WHOLE,
+        Access::UNORDERED_ACCESS,
+        Sync::EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO,
+    ))
+    .unwrap();
+    g.add_pass(PassDesc::new("read_postbuild", direct).buffer(
+        postbuild_buf,
+        ByteRange::WHOLE,
+        Access::SHADER_RESOURCE,
+        Sync::COMPUTE_SHADING,
+    ))
+    .unwrap();
+
+    g.add_pass(PassDesc::new("clear_uav", direct).buffer(
+        cleared_buf,
+        ByteRange::WHOLE,
+        Access::UNORDERED_ACCESS,
+        Sync::CLEAR_UNORDERED_ACCESS_VIEW,
+    ))
+    .unwrap();
+    g.add_pass(PassDesc::new("read_cleared", direct).buffer(
+        cleared_buf,
+        ByteRange::WHOLE,
+        Access::SHADER_RESOURCE,
+        Sync::COMPUTE_SHADING,
+    ))
+    .unwrap();
+
+    let plan = g
+        .plan_with(PlanOptions {
+            split_barriers: false,
+        })
+        .unwrap();
+    let vk = lower_plan(GpuApiTarget::Vulkan14, &plan);
+    let barriers: Vec<NativeBackendBarrier> = vk.queues[0]
+        .commands
+        .iter()
+        .flat_map(|c| match c {
+            LoweredCommand::Barriers(bs) => bs.clone(),
+            _ => Vec::new(),
+        })
+        .collect();
+    assert_eq!(
+        barriers,
+        vec![
+            NativeBackendBarrier::Vulkan14BufferBarrier2 {
+                resource: postbuild_buf,
+                src_stage_mask: 1 << 28,  // ACCELERATION_STRUCTURE_COPY_KHR
+                dst_stage_mask: 1 << 11,  // COMPUTE_SHADER
+                src_access_mask: 1 << 12, // TRANSFER_WRITE (no SHADER_READ/SHADER_WRITE)
+                dst_access_mask: 1 << 5,  // SHADER_READ
+            },
+            NativeBackendBarrier::Vulkan14BufferBarrier2 {
+                resource: cleared_buf,
+                src_stage_mask: 1 << 35,  // CLEAR
+                dst_stage_mask: 1 << 11,  // COMPUTE_SHADER
+                src_access_mask: 1 << 12, // TRANSFER_WRITE (no SHADER_READ/SHADER_WRITE)
+                dst_access_mask: 1 << 5,  // SHADER_READ
+            },
+        ]
+    );
+
+    // Combining postbuild with a shader stage preserves both transfer and shader UAV accesses.
+    assert_eq!(
+        vesper_ignis::multi_backend::vk_access_bits_for_sync(
+            Access::UNORDERED_ACCESS,
+            Sync::EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO | Sync::COMPUTE_SHADING
+        ),
+        (1 << 5) | (1 << 6) | (1 << 12)
+    );
+}

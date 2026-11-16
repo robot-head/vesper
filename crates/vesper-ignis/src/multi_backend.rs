@@ -236,17 +236,21 @@ fn lower_barrier_with_split_hint(
                             })
                         }
                     } else if bb.sync_before.contains(Sync::SPLIT) && !collapse_splits {
+                        let effective_before = split_producer_sync.unwrap_or(Sync::ALL);
                         let dst_stage_mask =
                             vk_stage_bits_for_access(bb.sync_after, bb.access_after);
                         Some(NativeBackendBarrier::Vulkan14SplitEventWait {
                             event_id: split_event_id,
                             resource: ResourceRef::Buffer(bb.resource),
                             dst_stage_mask,
-                            src_access_mask: vk_access_bits(bb.access_before),
+                            src_access_mask: vk_access_bits_for_sync(
+                                bb.access_before,
+                                effective_before,
+                            ),
                             dst_access_mask: if dst_stage_mask == 0 {
                                 0
                             } else {
-                                vk_access_bits(bb.access_after)
+                                vk_access_bits_for_sync(bb.access_after, bb.sync_after)
                             },
                             old_layout: None,
                             new_layout: None,
@@ -269,12 +273,12 @@ fn lower_barrier_with_split_hint(
                             src_access_mask: if src_stage_mask == 0 {
                                 0
                             } else {
-                                vk_access_bits(bb.access_before)
+                                vk_access_bits_for_sync(bb.access_before, effective_before)
                             },
                             dst_access_mask: if dst_stage_mask == 0 {
                                 0
                             } else {
-                                vk_access_bits(bb.access_after)
+                                vk_access_bits_for_sync(bb.access_after, bb.sync_after)
                             },
                         })
                     }
@@ -294,17 +298,21 @@ fn lower_barrier_with_split_hint(
                             })
                         }
                     } else if tb.sync_before.contains(Sync::SPLIT) && !collapse_splits {
+                        let effective_before = split_producer_sync.unwrap_or(Sync::ALL);
                         let dst_stage_mask =
                             vk_stage_bits_for_access(tb.sync_after, tb.access_after);
                         Some(NativeBackendBarrier::Vulkan14SplitEventWait {
                             event_id: split_event_id,
                             resource: ResourceRef::Texture(tb.resource),
                             dst_stage_mask,
-                            src_access_mask: vk_access_bits(tb.access_before),
+                            src_access_mask: vk_access_bits_for_sync(
+                                tb.access_before,
+                                effective_before,
+                            ),
                             dst_access_mask: if dst_stage_mask == 0 {
                                 0
                             } else {
-                                vk_access_bits(tb.access_after)
+                                vk_access_bits_for_sync(tb.access_after, tb.sync_after)
                             },
                             old_layout: Some(tb.layout_before),
                             new_layout: Some(tb.layout_after),
@@ -328,12 +336,12 @@ fn lower_barrier_with_split_hint(
                             src_access_mask: if src_stage_mask == 0 {
                                 0
                             } else {
-                                vk_access_bits(tb.access_before)
+                                vk_access_bits_for_sync(tb.access_before, effective_before)
                             },
                             dst_access_mask: if dst_stage_mask == 0 {
                                 0
                             } else {
-                                vk_access_bits(tb.access_after)
+                                vk_access_bits_for_sync(tb.access_after, tb.sync_after)
                             },
                             old_layout: tb.layout_before,
                             new_layout: tb.layout_after,
@@ -611,6 +619,48 @@ pub const fn vk_access_bits(acc: Access) -> u64 {
         Ok(bits) => bits,
         Err(_) => vk_access_bits_lossy(acc),
     }
+}
+
+/// Convert Ignis/D3D12 [`Access`] bits to `VkAccessFlags2` bits for a specific
+/// [`Sync`] scope.
+///
+/// Operations executed outside shader stages—such as
+/// [`Sync::EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO`]
+/// (`ACCELERATION_STRUCTURE_COPY_KHR`) and
+/// [`Sync::CLEAR_UNORDERED_ACCESS_VIEW`] (`CLEAR`)—write their UAV output via
+/// `VK_ACCESS_TRANSFER_WRITE`, not `VK_ACCESS_SHADER_READ | VK_ACCESS_SHADER_WRITE`.
+pub const fn vk_access_bits_for_sync(acc: Access, sync: Sync) -> u64 {
+    let base = vk_access_bits(acc);
+    if (acc.bits() & Access::UNORDERED_ACCESS.bits()) == 0
+        || acc.bits() == Access::COMMON.bits()
+        || acc.bits() == Access::NO_ACCESS.bits()
+    {
+        return base;
+    }
+    let sync_bits = sync.bits() & !Sync::SPLIT.bits();
+    let transfer_uav_scope = Sync::EMIT_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO.bits()
+        | Sync::CLEAR_UNORDERED_ACCESS_VIEW.bits();
+    if sync_bits & transfer_uav_scope == 0 {
+        return base;
+    }
+    let shader_or_all_scope = Sync::ALL.bits()
+        | Sync::DRAW.bits()
+        | Sync::VERTEX_SHADING.bits()
+        | Sync::PIXEL_SHADING.bits()
+        | Sync::COMPUTE_SHADING.bits()
+        | Sync::RAYTRACING.bits()
+        | Sync::ALL_SHADING.bits()
+        | Sync::NON_PIXEL_SHADING.bits();
+    let mut adjusted = base;
+    if (sync_bits & shader_or_all_scope) == 0 {
+        let remaining = acc.bits() & !Access::UNORDERED_ACCESS.bits();
+        adjusted = if remaining == 0 {
+            0
+        } else {
+            vk_access_bits_lossy(Access::from_bits(remaining))
+        };
+    }
+    adjusted | VK_ACCESS_TRANSFER_WRITE
 }
 
 const fn vk_access_bits_lossy(acc: Access) -> u64 {
