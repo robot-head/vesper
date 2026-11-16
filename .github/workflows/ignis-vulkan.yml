@@ -4,7 +4,9 @@ name: Ignis Vulkan (lavapipe)
 # with VK_LAYER_KHRONOS_validation and synchronization validation required.
 # Elsewhere (Bazel, macOS, Windows) the device tests report the device as
 # unavailable and pass; here VESPER_IGNIS_VULKAN_REQUIRE makes that a failure,
-# and any validation error fails the test that caused it.
+# and any validation error fails the test that caused it. Presentation runs
+# against Xvfb (the test starts its own server) and sync fds use lavapipe's
+# native SYNC_FD export, which needs /dev/udmabuf; both are required here.
 
 on:
   workflow_dispatch:
@@ -13,6 +15,7 @@ on:
     paths:
       - 'crates/vesper-ignis/**'
       - 'crates/vesper-ignis-vulkan/**'
+      - 'crates/vesper-pulse/**'
       - '.github/workflows/ignis-vulkan.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -20,6 +23,7 @@ on:
     paths:
       - 'crates/vesper-ignis/**'
       - 'crates/vesper-ignis-vulkan/**'
+      - 'crates/vesper-pulse/**'
       - '.github/workflows/ignis-vulkan.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -40,6 +44,8 @@ env:
   VESPER_IGNIS_VULKAN_VALIDATION: required
   VESPER_IGNIS_VULKAN_DEVICE: llvmpipe
   VESPER_IGNIS_VULKAN_PRINT: '1'
+  VESPER_IGNIS_VULKAN_REQUIRE_PRESENT: '1'
+  VESPER_IGNIS_VULKAN_REQUIRE_SYNC_FD: '1'
 
 jobs:
   lavapipe:
@@ -52,9 +58,23 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            mesa-vulkan-drivers libvulkan1 vulkan-validationlayers vulkan-tools
+            mesa-vulkan-drivers libvulkan1 vulkan-validationlayers vulkan-tools \
+            xvfb libxcb1
+      - name: Load udmabuf (lavapipe sync-fd export needs /dev/udmabuf)
+        run: |
+          # Built into some runner kernels; a module on others. The sync-fd
+          # test itself fails (VESPER_IGNIS_VULKAN_REQUIRE_SYNC_FD) if the
+          # extension is still missing afterwards.
+          if [ ! -e /dev/udmabuf ]; then
+            sudo modprobe udmabuf || {
+              sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" &&
+                sudo modprobe udmabuf
+            } || echo "udmabuf unavailable"
+          fi
+          if [ -e /dev/udmabuf ]; then sudo chmod a+rw /dev/udmabuf; ls -l /dev/udmabuf; fi
       - name: Report the Vulkan device
         run: |
+          vulkaninfo | grep -E "external_(semaphore|fence)_fd|xcb_surface" || echo "no sync-fd or XCB extensions"
           dpkg-query -W mesa-vulkan-drivers vulkan-validationlayers libvulkan1
           vulkaninfo --summary
       - uses: dtolnay/rust-toolchain@stable

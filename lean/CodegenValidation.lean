@@ -227,6 +227,10 @@ theorem transfer_sound {facts : Facts} {store next : Store} (holds : Holds facts
     cases same
     split <;> simp [InRange, Kind.lo, Kind.hi]
   | trap failure => cases result
+  | scope o d =>
+    simp only [lirStep, Res.ok.injEq] at result
+    subst next
+    exact holds
   | branchZero _ _ | jump _ | label _ | call _ | enter _ | ret =>
     simp [checkRow] at accepted
 

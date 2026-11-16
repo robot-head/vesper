@@ -507,3 +507,20 @@ Rust code.
 Not built: latch coupling or concurrency inside one `Store` (callers serialize
 through `&mut` or `SharedStore`), leaf merge or rebalancing (empty leaves are
 freed), secondary indexes, serializable isolation, rows over 4,096 bytes.
+
+## Planner and online DDL specification (for the Vesper port)
+
+Index selection in the SQL planner and online DDL are specified, not
+implemented, in Rust: see [`spec/planner-ddl.md`](spec/planner-ddl.md). The
+conformance cases live in `tests/fixtures/planner/` and are checked by
+`tests/planner_spec.rs`, which also runs a port given by `QUARRY_PORT_CMD`
+differentially against `golden.txt`.
+
+`FsDevice::open_with(dir, DirectMode::Prefer)` opens the data file a second
+time with `O_DIRECT` (Linux x86_64, x86, riscv64, aarch64, arm) and uses it
+for block-aligned data-file reads and writes through 4096-byte-aligned
+buffers, built without `unsafe`. `FsDevice::direct_io()` reports `Active`,
+or `Unavailable(reason)` when the platform or filesystem refuses it (a
+probe file write and read decides), in which case I/O stays buffered.
+`DirectMode::Require` turns that into an `Io` error. The log and unaligned
+requests always use the buffered handle.

@@ -245,7 +245,218 @@ exercised by the tests.
 
 ### Remaining gaps
 
-- No encoding proof exists yet for x86-64 or AArch64.
+- No encoding proof exists yet for x86-64 (milestone 6 below covers
+  AArch64).
 - The RV64 proof covers encoding only. Instruction semantics (that the
   emitted sequence implements `Mach.step`) are still checked by
   differential tests under QEMU.
+
+## Milestone 6: AArch64 encodings proved against the A64 encoding diagrams
+
+### What was built
+
+- `lean/CodegenA64Encoding.lean` (imports `VerifiedCodegen.lean`) models the
+  AArch64 encoder the same way milestone 5 models RV64.
+  - `Inst` is the A64 subset `aarch64.rs` uses, named as in the Arm ARM:
+    - `LDR`/`STR` (unsigned offset), `MOVZ`/`MOVK`;
+    - `B.cond`, `B`, `BL`, `CBZ`/`CBNZ`;
+    - `ADD`/`ADDS`/`SUB`/`SUBS`/`AND` (shifted register, `LSL` or `ASR`);
+    - `MADD`/`MSUB`/`SMULH`/`UMULH`, `UDIV`/`SDIV`;
+    - `ADD`/`ADDS`/`SUB` (immediate, optionally `LSL #12`), `EOR`
+      (bitmask immediate), `CSINC`;
+    - `FMOV` between `Xn` and `Dn`, `FADD`/`FSUB`/`FMUL`/`FDIV`, `FNEG`,
+      `FCMP` (double);
+    - `STP` (pre-index), `LDP` (post-index), `RET`.
+  - `decode` is the specification. It dispatches on bits 31:26 and then on
+    each encoding diagram's fixed bits (`sf`, `op`, `S`, `opc`, `ftype`,
+    `op31`, `o0`, `op2`, bit 21 of the shifted-register forms, the shift
+    type). It reads the operand fields at their positions and sign-extends
+    `imm19`, `imm26` and `imm7`. `SMULH`/`UMULH` require `Ra = 31`, as the
+    manual does. Bitmask immediates are decoded only for `N = 1` with
+    `imms ≠ 111111` (a single 64-bit element), the only form the emitter
+    writes; other `N`/`imms` values decode to `none` rather than being
+    misread.
+  - `encode` writes the fields the way `aarch64.rs` does.
+- `decode_encode`:
+  - Statement: every well-formed instruction (registers below 32, every
+    immediate and offset in its field's range) encodes to a word below
+    `2^32` that `decode` maps back to the same instruction.
+  - Each case computes the fields the decoder reads on that instruction's
+    path with `omega`, rewrites them, and lets the dispatch reduce.
+  - `bytes_encode` gives the little-endian bytes.
+- `emit` mirrors `aarch64::emit` for every `M` instruction: the
+  four-instruction `movz`/`movk` immediates, the flag-based trap checks,
+  `cset` as `csinc` with the inverted condition, and the frame's
+  `stp`/`sub sp` (with the shifted form above 4 KiB)/`ldp`/`ret`.
+  - `emit_ok` proves every item is well formed for any `M` whose frame
+    indices fit the 12-bit scaled offset (frames are at most
+    `MAX_FRAME_WORDS` = 4000 words) and whose frame size is below 2^24
+    bytes.
+  - `emit_decodes` chains `emit_ok` and `decode_encode` over the layout.
+- The listing check:
+  - The Lean file prints the words of 61 sample instructions: milestone 5's
+    59 plus `enter 1000` and `enter 512`, which take the shifted `sub sp`
+    forms.
+  - `aarch64::encoding_listing()` (re-exported as
+    `verified_codegen::a64_encoding_listing`) runs the Rust emitter on the
+    same samples. The shared samples and the listing loop moved to
+    `asm::encoding_samples` and `asm::encoding_listing`, so the RV64 listing
+    is unchanged.
+  - `tests/verified_codegen_lean.rs` requires the listings to be equal line
+    for line, and checks the file's hygiene and axiom report like the RV64
+    model's.
+- `scripts/ci/check-lean-models.sh` compiles the new file.
+
+### Checks
+
+- With Lean 4.35.0 the file compiles with no warnings in about 20 s.
+- Every axiom report uses only `propext`, `Classical.choice` and
+  `Quot.sound`.
+- `cargo test --test verified_codegen_lean` passes with `VESPER_LEAN` set:
+  7 tests, including both encoding listings.
+
+### Remaining gaps
+
+- x86-64 has no encoding proof. Its variable-length encodings (REX,
+  ModRM, SIB, displacement widths) need a byte-level decoder rather than
+  32-bit fields.
+- As for RV64, this proves encoding, not semantics. That the emitted A64
+  sequences implement `Mach.step` is still checked by running programs
+  natively and under QEMU.
+- The prologue and system-call code in `aarch64::start` are outside `emit`
+  and not modelled.
+
+## Milestone 7: abort-only `Fail[E]`, `?` and `handle Fail`
+
+Claim #837 (lane V1 of the verified-compiler parallel plan). Refs #582,
+#583. Base: `5a018bd` (origin/main).
+
+### What was built
+
+- Failure codes (`src/verified_codegen/fail.rs`):
+  - Every error type the planned program raises or handles gets a
+    program-wide code (1, 2, ...). Code 0 means no failure.
+  - A raise set is computed for every planned function. It is a least
+    fixpoint over the call graph, and a `handle Fail[E]` removes `E`'s code
+    from its body's set.
+  - Local raises come from three places:
+    - `?` on `Result[T, E]`.
+    - `Fail::raise(e)`.
+    - Checked arithmetic, counted conservatively by operator: `+ - *`,
+      unary `-` and compound assignment may overflow, and `/ %` may also
+      divide by zero.
+- The status protocol:
+  - A function that may raise to its caller (any planned function except
+    the entry) returns a status word. Word 0 of its incoming result area
+    is the status. The words after it hold the result when the status is 0,
+    or the raised error's payload. Parameters follow these words.
+  - After each call to such a function, the caller tests the status
+    (`LoadOut`, `Const`, `Compare`, `BranchZero`). On a failure it does one
+    of three things:
+    - jumps to the matching handler clause;
+    - passes the status and payload on to its own caller;
+    - at the entry, aborts the process with the existing exit status for
+      `ArithOverflow` (101) or `RuntimeError` (102).
+  - Any other error type that can reach the entry is a typed
+    `Unsupported::Effect`.
+- `?`: the `Err` tag is tested. On `Err` the payload is raised, and
+  otherwise the `Ok` payload is copied.
+- `handle Fail[E] in body with { return v => r, raise(e, k) => h }`:
+  - The nested `$handler_body`/`$handler_clause` functions the IR already
+    produces are called directly, with their captures passed as arguments
+    (`inout` captures are copied back).
+  - On success the `return` clause is called with the body's value. On a
+    raise of `E` the `raise` clause is called with the payload. Every other
+    failure passes on.
+  - The continuation `k` must be unused, so only non-resuming handlers
+    compile. It is erased from the clause's parameters.
+  - These are refused with typed errors: stateful handlers, labeled `Fail`
+    instances, destructuring clause patterns and every other effect.
+- Implicit failures:
+  - `ArithOverflow` and `RuntimeError` join the protocol only when the
+    program handles or explicitly raises them somewhere. Otherwise they stay
+    process aborts, so programs without handlers compile exactly as before.
+    `trap_scopes_only_where_implicit_failures_are_caught` checks this.
+  - When they are caught, a function that passes them on gets a new slot-IR
+    row, `Lir::Scope { ovf, div0 }`, after its prologue.
+  - The row selects to `M::Scope`, which emits no code. The three encoders
+    resolve every overflow or division-by-zero branch through
+    `Asm::trap_label`, so the checked instructions jump to the function's own
+    raise stubs instead of the process exits. The default scope is restored
+    at the function's end.
+  - `FnLower::raise_runtime_error(variant)` raises a `RuntimeError` variant
+    from lowering code. The index-bounds check of the coverage lane (V3) is
+    meant to use it.
+- `Never` values have no words. A `return` or `jump` of one, which can only
+  follow a raise, lowers to the unreachable trap.
+- The checker forbids an abortable effect crossing an active `inout`
+  borrow (E0402), so failures never meet `inout` parameters. The raise path
+  still writes them back, which keeps the protocol safe if that rule is ever
+  relaxed.
+
+### Lean
+
+- `lean/VerifiedCodegen.lean` gains the `scope` row and instruction, the
+  table row `scope: scope L9 L10` (the Rust listing must still match) and
+  `sim_scope`.
+- `CodegenComposition`, `CodegenControlFlow`, `CodegenValidation`,
+  `CodegenFlowValidation` and `CodegenRv64Encoding` are extended for the
+  new constructor. The RV64 encoding of `scope` is empty.
+- New `lean/CodegenFailScope.lean` (imports `CodegenControlFlow`):
+  - `abort_preserves_memory`: every selected row writes memory only in its
+    trailing stores, which cannot abort, so the machine state at an
+    aborting instruction has the memory the row started with.
+  - `row_simulatesC`: with a trap scope, a source row whose failure is
+    caught moves to the handler label with the store it started from. The
+    target block branches to the same label with a related machine state.
+    Uncaught failures, faults and unreachable code still abort identically.
+  - `prefixes_simulateC`: lifts this to every finite execution prefix
+    under an explicit invariant. The scope in effect at a row is the last
+    `scope` row before it in program order (`scopeAt`), as in the
+    assembler's linear pass.
+  - `scopeAt_default`, `sourceRowC_default` and `targetRowC_default` show
+    that the scoped semantics equals the existing one when no scope is set.
+  - `caught_source`, `caught_invariant` and `caught_target` work through a
+    concrete `u8` overflow caught by a handler.
+- Checks:
+  - With Lean 4.35.0, every file compiles with no warnings and no `sorry`.
+  - The axiom reports use only `propext`, `Classical.choice` and
+    `Quot.sound`.
+  - `tests/refinement_places_lean.rs` audits every theorem of the new file.
+  - `scripts/ci/check-lean-models.sh` compiles it.
+
+### Tests
+
+- `tests/verified_codegen.rs`, `fail_effects_agree_with_the_evaluator_and_cranelift`:
+  - `fail_try.ves`: `?` on a user enum, propagation through two calls,
+    `Fail::raise` of a struct, nested handlers and `return` clauses.
+  - `fail_implicit.ves`: `u8` and `u64` overflow and division by zero
+    caught by handlers, both directly and across calls, `i64::MIN / -1`
+    caught as overflow, and a `return` clause that can itself overflow.
+  - Every target is compiled, with and without the IR optimizer. The output
+    is checked for determinism and run on x86-64 natively and on AArch64 and
+    RV64 under QEMU 8.2.2. Results are compared with the evaluator and the
+    Cranelift JIT.
+- `unhandled_user_failures_at_the_entry_are_typed_errors` and
+  `trap_scopes_only_where_implicit_failures_are_caught`.
+- `tests/verified_codegen_fail_front_end.rs` runs on the real
+  self-hosted front end:
+  - Every function with scalar parameters and a `Fail`-only row (160) is
+    wrapped in an entry that handles its non-arithmetic `Fail[E]`.
+  - **54** of them now compile, up from 22 before this milestone, where
+    every handler was refused. All 54 agree with the evaluator on x86-64,
+    AArch64 and RV64, and 12 of the runs take a raise clause.
+  - The remaining refusals belong to other lanes: dynamic indexing (103,
+    V3), `Region` handlers (2) and one generic function (V2). No refusal
+    names `Fail`.
+
+### Remaining gaps
+
+- Resuming handlers, stateful handlers and labeled `Fail` instances are
+  refused.
+- An `IndexOutOfBounds` that reaches the entry maps to the
+  division-by-zero exit status, because the entry has one exit per failure
+  kind.
+- The status protocol, the call convention and the Rust lowering of
+  raises, tests and handlers are covered by differential tests, not by the
+  Lean models, like calls before this milestone.

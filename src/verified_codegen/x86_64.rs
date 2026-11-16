@@ -50,7 +50,7 @@ const JNE: u8 = 0x5;
 const JA: u8 = 0x7;
 
 pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
-    let ovf = TrapKind::Overflow.label();
+    let ovf = a.trap_label(TrapKind::Overflow);
     match *m {
         M::Ld(r, l) => mem(a, 0x8b, r, l),
         M::St(l, r) => mem(a, 0x89, r, l),
@@ -90,7 +90,8 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         // test rcx, rcx; je
         M::TrapZero => {
             a.bytes(&[0x48, 0x85, 0xc9]);
-            jcc(a, JE, TrapKind::DivisionByZero.label());
+            let l = a.trap_label(TrapKind::DivisionByZero);
+            jcc(a, JE, l);
         }
         // movabs rdx, MIN; cmp rax, rdx; jne +10; cmp rcx, -1; je ovf
         M::TrapDivOvf => {
@@ -197,7 +198,11 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
             a.bytes(&[0x5d, 0xc3]);
         }
         M::Leave => a.bytes(&[0x48, 0x89, 0xec, 0x5d, 0xc3]),
-        M::Trap(k) => rel(a, 0xe9, k.label()),
+        M::Trap(k) => {
+            let l = a.trap_label(k);
+            rel(a, 0xe9, l)
+        }
+        M::Scope(ovf, div0) => a.set_scope(ovf, div0),
     }
     Ok(())
 }

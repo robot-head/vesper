@@ -193,7 +193,7 @@ fn int_min(a: &mut Asm, rd: u32) {
 }
 
 pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
-    let ovf = TrapKind::Overflow.label();
+    let ovf = a.trap_label(TrapKind::Overflow);
     match *m {
         M::Ld(r, l) => ldst(a, true, reg(r), l),
         M::St(l, r) => ldst(a, false, reg(r), l),
@@ -241,7 +241,10 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         M::Wrap(WrapOp::Mul) => muldiv(a, MUL, A0, A0, A1),
         M::AndR2 => r(a, 0, 7, A0, A0, A2),
         M::TrapGtU => branch_to(a, BLTU, A2, A0, ovf),
-        M::TrapZero => branch_to(a, BEQ, A1, ZERO, TrapKind::DivisionByZero.label()),
+        M::TrapZero => {
+            let l = a.trap_label(TrapKind::DivisionByZero);
+            branch_to(a, BEQ, A1, ZERO, l)
+        }
         // a2 := MIN; bne a0, a2, +16; li t0, -1; bne a1, t0, +8; j ovf
         M::TrapDivOvf => {
             int_min(a, A2);
@@ -346,7 +349,11 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
             addi(a, SP, SP, 16);
             i(a, JALR, 0, ZERO, RA, 0);
         }
-        M::Trap(k) => jal(a, ZERO, k.label()),
+        M::Trap(k) => {
+            let l = a.trap_label(k);
+            jal(a, ZERO, l)
+        }
+        M::Scope(ovf, div0) => a.set_scope(ovf, div0),
     }
     Ok(())
 }
@@ -388,74 +395,11 @@ pub fn start(
     Ok(())
 }
 
-/// The words `emit` writes for sample instructions, one line per
-/// instruction (`<instruction>: <word> ...`, words as eight hex digits), in
-/// the format `lean/CodegenRv64Encoding.lean` prints. The abort exits are
-/// bound before the instruction and label 9 after it.
+/// The words `emit` writes for the shared sample instructions
+/// ([`super::asm::encoding_samples`]), in the format
+/// `lean/CodegenRv64Encoding.lean` prints.
 pub fn encoding_listing() -> String {
-    use Loc::{In, Out, Slot};
-    use Reg::{R0, R1, R2};
-    const CONDS: [Cond; 6] = [Cond::Eq, Cond::Ne, Cond::Lt, Cond::Le, Cond::Gt, Cond::Ge];
-    let mut samples = vec![
-        M::Ld(R0, Slot(1)),
-        M::Ld(R1, Slot(300)),
-        M::St(Out(2), R0),
-        M::Ld(R2, In(3)),
-        M::St(In(400), R1),
-        M::Imm(R0, 0x0123_4567_89ab_cdef),
-        M::Imm(R2, u64::MAX),
-    ];
-    for s in [Sign::S, Sign::U] {
-        samples.extend([M::AddChk(s), M::SubChk(s), M::MulChk(s)]);
-    }
-    samples.extend([
-        M::Wrap(WrapOp::Add),
-        M::Wrap(WrapOp::Sub),
-        M::Wrap(WrapOp::Mul),
-        M::AndR2,
-        M::TrapGtU,
-        M::TrapZero,
-        M::TrapDivOvf,
-        M::Div(Sign::S),
-        M::Div(Sign::U),
-        M::Rem(Sign::S),
-        M::Rem(Sign::U),
-        M::NegChk(Sign::S),
-        M::NegChk(Sign::U),
-        M::XorOne,
-    ]);
-    for c in CONDS {
-        samples.extend([M::Cmp(c, Sign::S), M::Cmp(c, Sign::U)]);
-    }
-    samples.extend([FloatOp::Add, FloatOp::Sub, FloatOp::Mul, FloatOp::Div].map(M::FOp));
-    samples.push(M::FNeg);
-    samples.extend(CONDS.map(M::FCmp));
-    samples.extend([
-        M::Jmp(9),
-        M::Bz(9),
-        M::Call(9),
-        M::Enter(4),
-        M::Enter(300),
-        M::Leave,
-    ]);
-    samples.extend(TrapKind::ALL.map(M::Trap));
-
-    let mut out = String::new();
-    for m in &samples {
-        let mut a = Asm::default();
-        for k in TrapKind::ALL {
-            a.bind(k.label()).expect("fresh label");
-        }
-        emit(&mut a, m).expect("sample instructions encode");
-        a.bind(9).expect("fresh label");
-        let code = a.finish().expect("labels resolve");
-        out.push_str(&format!("{m}:"));
-        for word in code.as_chunks::<4>().0 {
-            out.push_str(&format!(" {:08x}", u32::from_le_bytes(*word)));
-        }
-        out.push('\n');
-    }
-    out
+    super::asm::encoding_listing(&super::asm::encoding_samples(), emit)
 }
 
 #[cfg(test)]

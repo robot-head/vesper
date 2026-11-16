@@ -1,0 +1,30 @@
+// The inner handler handles Ask; Log is forwarded to the outer handler.
+linear effect Ask {
+    fn ask() -> i64;
+}
+
+linear effect Log {
+    fn log(sink value: i64) -> i64;
+}
+
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        handle Log state total = 0 in {
+            handle Ask in {
+                let a = Ask::ask();
+                let b = Log::log(a);
+                let c = Ask::ask();
+                Log::log(c) + b
+            } with {
+                return value => value * 10,
+                ask(resume) => resume(3) + 1,
+            }
+        } with {
+            return (value, total) => value + total * 1000,
+            log(value, total, resume) => resume(value, wrapping_add(total, value)),
+        }
+    } with {
+        return value => value,
+        raise(overflow, resume) => -1,
+    }
+}

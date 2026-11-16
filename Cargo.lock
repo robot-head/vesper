@@ -5826,8 +5826,10 @@ name = "vesper-ignis-vulkan"
 version = "0.1.0"
 dependencies = [
  "ash",
+ "libloading",
  "naga",
  "vesper-ignis",
+ "vesper-pulse",
 ]
 
 [[package]]
@@ -5844,6 +5846,14 @@ dependencies = [
  "target-lexicon",
  "vesper-alloc",
  "vesper-tensor",
+]
+
+[[package]]
+name = "vesper-kinetic-gpu"
+version = "0.1.0"
+dependencies = [
+ "vesper-gpu-compute",
+ "vesper-kinetic",
 ]
 
 [[package]]

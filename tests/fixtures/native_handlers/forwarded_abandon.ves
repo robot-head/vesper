@@ -1,0 +1,24 @@
+// An outer handler abandons an operation forwarded through an inner
+// handler: nothing after the inner handle may run.
+linear effect Ask {
+    fn ask() -> i64;
+}
+
+effect Stop {
+    fn stop() -> i64;
+}
+
+fn main() -> i64 {
+    handle Stop in {
+        let a = handle Ask in {
+            Stop::stop()
+        } with {
+            return value => value,
+            ask(resume) => resume(0),
+        };
+        wrapping_add(a, Stop::stop())
+    } with {
+        return value => value,
+        stop(resume) => 7,
+    }
+}

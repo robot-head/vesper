@@ -1,0 +1,26 @@
+// `twice` is compiled once and called under two different handlers.
+linear effect Ask {
+    fn ask() -> i64;
+}
+
+fn twice() -> i64 eff [Fail[ArithOverflow], Ask] {
+    Ask::ask() + Ask::ask()
+}
+
+fn under(sink answer: i64) -> i64 eff [Fail[ArithOverflow]] {
+    handle Ask in {
+        twice()
+    } with {
+        return value => value,
+        ask(resume) => resume(answer),
+    }
+}
+
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        under(20) + under(1)
+    } with {
+        return value => value,
+        raise(overflow, resume) => -1,
+    }
+}

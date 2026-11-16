@@ -620,3 +620,26 @@ fn mixed_scene_is_bit_identical_across_broadphases_and_pinned() {
     eprintln!("arch={} rigid sha256={hex}", std::env::consts::ARCH);
     assert_eq!(hex, GOLDEN_RIGID_SHA256);
 }
+
+#[test]
+fn mixed_scene_is_bit_identical_for_every_narrowphase_thread_count() {
+    for threads in [2usize, 3, 8, 64] {
+        let mut w = mixed_scene(RigidBroadphase::Lbvh);
+        w.set_solver_threads(threads).unwrap();
+        w.set_parallel_threshold(0);
+        for _ in 0..RIGID_TICKS {
+            w.step().unwrap();
+        }
+        let hex: String = w.hash().sha256.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, GOLDEN_RIGID_SHA256, "{threads} threads");
+    }
+    let mut w = mixed_scene(RigidBroadphase::Lbvh);
+    assert_eq!(
+        w.set_solver_threads(0),
+        Err(vesper_kinetic::RigidError::InvalidThreads(0))
+    );
+    assert_eq!(
+        w.set_solver_threads(65),
+        Err(vesper_kinetic::RigidError::InvalidThreads(65))
+    );
+}

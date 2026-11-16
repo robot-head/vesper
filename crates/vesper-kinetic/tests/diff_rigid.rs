@@ -42,6 +42,9 @@ fn scene(bodies: Vec<DiffRigidBody>, shapes: Vec<DiffShape>, ticks: u32) -> Diff
         ground: Some(0.0),
         compliance: 1e-5,
         margin: 0.05,
+        static_friction: 0.0,
+        dynamic_friction: 0.0,
+        restitution: 0.0,
     }
 }
 
@@ -85,7 +88,7 @@ fn loss(s: &DiffRigidScene, seeds: &[DiffRigidState]) -> f64 {
 }
 
 /// Compare every analytic derivative with a central difference.
-fn check(s: &DiffRigidScene, what: &str, kinds: [bool; 3]) -> usize {
+fn check(s: &DiffRigidScene, what: &str, kinds: [bool; 4]) -> usize {
     let seeds = seeds(s.bodies.len());
     let g = gradients(s, &seeds).unwrap();
     assert!((g.loss - loss(s, &seeds)).abs() < 1e-12 * (1.0 + g.loss.abs()));
@@ -177,7 +180,7 @@ fn tumbling_box_on_the_ground() {
         }],
         30,
     );
-    check(&s, "box", [true, false, false]);
+    check(&s, "box", [true, false, false, false]);
 }
 
 #[test]
@@ -201,7 +204,7 @@ fn tilted_capsule_on_the_ground_and_on_a_box() {
         ],
         30,
     );
-    check(&s, "capsule", [true, true, false]);
+    check(&s, "capsule", [true, true, false, false]);
 }
 
 #[test]
@@ -231,7 +234,7 @@ fn hull_lands_on_a_box() {
         ],
         30,
     );
-    check(&s, "hull", [false, true, false]);
+    check(&s, "hull", [false, true, false, false]);
 }
 
 #[test]
@@ -260,7 +263,7 @@ fn colliding_capsules_and_box_on_box() {
         24,
     );
     s.gravity = [0.0, -2.0, 0.0];
-    check(&s, "capsules and boxes", [false, true, true]);
+    check(&s, "capsules and boxes", [false, true, true, false]);
 }
 
 #[test]
@@ -296,14 +299,77 @@ fn rounded_bodies_touch_box_edges_and_corners() {
         d > 0.49 && p[0] > 1.2 && (p[0] - p[1]).abs() < 1e-9 && p[2] == 0.0,
         "pushed off the edge: {p:?}"
     );
-    check(&s, "sphere on a box edge", [false, true, false]);
+    check(&s, "sphere on a box edge", [false, true, false, false]);
     let mut cap = body([1.25, 1.2, 1.2], 2, [6.0, 4.0, 5.0]);
     cap.orientation = quat([0.0, 1.0, 1.0], 0.7);
     cap.vel = [-0.3, -0.4, -0.2];
     let mut s = scene(vec![fixed([0.0, 0.0, 0.0], 0), cap], shapes, 12);
     s.ground = None;
     s.gravity = [0.0; 3];
-    check(&s, "capsule on a box corner", [false, true, false]);
+    check(&s, "capsule on a box corner", [false, true, false, false]);
+}
+
+#[test]
+fn sliding_bouncing_box_with_friction_and_restitution() {
+    let mut b = body([0.0, 0.7, 0.0], 0, [4.0, 6.0, 8.0]);
+    b.orientation = quat([1.0, 0.3, 0.2], 0.3);
+    b.vel = [1.5, -2.0, 0.4];
+    b.ang_vel = [0.5, 0.2, -1.0];
+    let mut s = scene(
+        vec![b],
+        vec![DiffShape::Box {
+            half_extents: [0.4, 0.25, 0.3],
+        }],
+        30,
+    );
+    s.static_friction = 0.6;
+    s.dynamic_friction = 0.4;
+    s.restitution = 0.3;
+    check(
+        &s,
+        "box with friction and restitution",
+        [true, false, false, false],
+    );
+    // Friction slows the slide: the final x is short of the frictionless one.
+    let slide = simulate(&s).unwrap()[0].pos[0];
+    s.static_friction = 0.0;
+    s.dynamic_friction = 0.0;
+    let free = simulate(&s).unwrap()[0].pos[0];
+    assert!(
+        slide < free - 0.05,
+        "friction {slide} vs frictionless {free}"
+    );
+}
+
+#[test]
+fn crossed_boxes_meet_edge_to_edge() {
+    // A ridge (a box turned 45° about x) under a box turned 45° about z:
+    // the two top and bottom edges cross, and only an edge pair separates.
+    let mut a = fixed([0.0, 0.0, 0.0], 0);
+    a.orientation = quat([1.0, 0.0, 0.0], std::f64::consts::FRAC_PI_4);
+    let mut b = body([0.0, 1.13, 0.0], 1, [6.0, 6.0, 6.0]);
+    b.orientation = quat([0.0, 0.0, 1.0], std::f64::consts::FRAC_PI_4);
+    b.vel = [0.0, -0.3, 0.0];
+    let mut s = scene(
+        vec![a, b],
+        vec![
+            DiffShape::Box {
+                half_extents: [0.5; 3],
+            },
+            DiffShape::Box {
+                half_extents: [0.3; 3],
+            },
+        ],
+        10,
+    );
+    s.ground = None;
+    s.gravity = [0.0, -2.0, 0.0];
+    check(&s, "crossed edges", [false, false, false, true]);
+    // B ends up resting on the crossing: the edge gap (y of B's lowest edge
+    // minus the ridge top, both √2·half) is about zero.
+    let y = simulate(&s).unwrap()[1].pos[1];
+    let rest = (0.5 + 0.3) * std::f64::consts::SQRT_2;
+    assert!((y - rest).abs() < 0.02, "edge rest {y} vs {rest}");
 }
 
 #[test]
@@ -337,4 +403,41 @@ fn malformed_diff_scenes_are_typed_errors() {
         Err(RigidDiffError::InvalidBody { .. })
     ));
     assert_eq!(gradients(&base, &[]), Err(RigidDiffError::SeedLength));
+}
+
+#[test]
+fn overlapping_rotated_boxes_are_pushed_apart() {
+    // Overlapping boxes whose deepest axis is an edge pair with several
+    // parallel candidates: the supporting pair must be the one chosen.
+    let rot = |q1: [f64; 4], q2: [f64; 4]| {
+        let ([x1, y1, z1, w1], [x2, y2, z2, w2]) = (q1, q2);
+        [
+            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+        ]
+    };
+    let mut b = body([0.0, -0.35, -0.5], 0, [6.0; 3]);
+    b.orientation = rot(quat([0.0, 1.0, 0.0], 0.5), quat([0.0, 0.0, 1.0], 0.3));
+    let mut s = scene(
+        vec![fixed([0.0; 3], 0), b],
+        vec![DiffShape::Box {
+            half_extents: [0.7, 0.3, 0.2],
+        }],
+        4,
+    );
+    s.ground = None;
+    s.gravity = [0.0; 3];
+    let g = gradients(&s, &seeds(2)).unwrap();
+    assert!(
+        g.activations.iter().sum::<usize>() > 0,
+        "{:?}",
+        g.activations
+    );
+    let out = simulate(&s).unwrap();
+    let moved: f64 = (0..3)
+        .map(|k| (out[1].pos[k] - s.bodies[1].pos[k]).powi(2))
+        .sum();
+    assert!(moved.sqrt() > 1e-3, "not pushed apart: {:?}", out[1].pos);
 }

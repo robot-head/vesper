@@ -1,0 +1,10 @@
+[package]
+name = "vesper-kinetic-gpu"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Kinetic (design section 36): the Vulkan sort-and-sweep of vesper-gpu-compute as the World's BroadphaseMode::Gpu pair backend"
+publish = false
+
+[dependencies]
+vesper-gpu-compute = { path = "../../vesper-gpu-compute" }
+vesper-kinetic = { path = ".." }
