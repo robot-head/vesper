@@ -203,3 +203,21 @@ fn explicit_public_function_has_the_existing_public_interface() {
         }
     );
 }
+
+#[test]
+fn explicitly_public_adts_and_effects_keep_existing_interfaces() {
+    let explicit = export(
+        "pub copy struct Pair { a: u64 } pub linear enum Choice { A(u64), B } pub linear effect Store { fn read()->u64; }",
+    );
+    let implicit = export(
+        "copy struct Pair { a: u64 } linear enum Choice { A(u64), B } linear effect Store { fn read()->u64; }",
+    );
+    assert_eq!(explicit, implicit);
+}
+
+#[test]
+fn explicitly_public_fields_keep_existing_public_interface() {
+    let explicit = export("pub copy struct Pair { pub value: u64, pub: u64 }");
+    let implicit = export("copy struct Pair { value: u64, pub: u64 }");
+    assert_eq!(explicit, implicit);
+}

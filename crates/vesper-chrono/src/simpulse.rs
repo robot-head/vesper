@@ -9,7 +9,8 @@
 //! effect records. This adapter allocates (JSON) and is not part of the
 //! recorder's zero-allocation steady state.
 
-use vesper_simpulse::{Journal, Simulator, TraceEvent};
+pub use vesper_simpulse::TraceEvent;
+use vesper_simpulse::{Journal, Simulator};
 
 use crate::bundle::Bundle;
 use crate::ring::{FlightRecorder, RecordError};
@@ -49,6 +50,19 @@ impl SimPulseTap {
         Self::default()
     }
 
+    /// Record a single committed scheduler transition event into `recorder`.
+    pub fn record_event(
+        recorder: &mut FlightRecorder,
+        time_ns: u64,
+        event: &TraceEvent,
+    ) -> Result<u64, SimPulseError> {
+        let payload =
+            serde_json::to_vec(event).map_err(|e| SimPulseError::Encode(e.to_string()))?;
+        recorder
+            .record_effect_internal(task_of(event), time_ns, EFFECT_SCHEDULER, &payload)
+            .map_err(SimPulseError::Record)
+    }
+
     /// Record every journal event committed since the last drain. Each is
     /// stamped with the simulator's current virtual time.
     pub fn drain<T>(
@@ -69,11 +83,7 @@ impl SimPulseTap {
         let fresh = &events[self.copied..committed];
         let mut n = 0;
         for event in fresh {
-            let payload =
-                serde_json::to_vec(event).map_err(|e| SimPulseError::Encode(e.to_string()))?;
-            recorder
-                .record_effect_internal(task_of(event), sim.now_ns(), EFFECT_SCHEDULER, &payload)
-                .map_err(SimPulseError::Record)?;
+            Self::record_event(recorder, sim.now_ns(), event)?;
             // Advance per record so a failed drain never re-records on retry.
             self.copied += 1;
             n += 1;

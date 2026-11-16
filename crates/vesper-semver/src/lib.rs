@@ -663,7 +663,14 @@ impl Checker<'_> {
                 self.subtype(&old.ty, &new.ty, &p, depth + 1)
             };
             if !subtype {
-                self.breaking(&p,"SV-Fn","parameter type is incompatible","Pass a value admitted by the old parameter type; mutable places cannot change stored type.");
+                let witness = if old.pass == new.pass && old.pass != Pass::Inout {
+                    u64_counterexample(&old.ty, &new.ty).map(|value| {
+                        format!("Pass {value}: u64; the old parameter admits this value but the new parameter rejects it.")
+                    })
+                } else {
+                    None
+                };
+                self.breaking(&p,"SV-Fn","parameter type is incompatible",witness.as_deref().unwrap_or("Pass a value admitted by the old parameter type; mutable places cannot change stored type."));
             }
         }
         if b.result_mode > a.result_mode {
@@ -675,11 +682,16 @@ impl Checker<'_> {
             );
         }
         if !self.subtype(&b.result, &a.result, &format!("{path}.result"), depth + 1) {
+            let witness = u64_counterexample(&b.result, &a.result).map(|value| {
+                format!("The new result admits {value}: u64, which the old result type rejects.")
+            });
             self.breaking(
                 path,
                 "SV-Fn",
                 "return type is incompatible",
-                "Use the returned value at the old result type.",
+                witness
+                    .as_deref()
+                    .unwrap_or("Use the returned value at the old result type."),
             );
         }
         let subset = b.effects.capabilities.iter().all(|n| {
@@ -913,6 +925,27 @@ impl Checker<'_> {
                 "A caller uses the declaration at its old syntactic and semantic kind.",
             ),
         }
+    }
+}
+/// A value in `sub` but outside `sup`, for validated direct u64 intervals.
+fn u64_counterexample(sub: &Type, sup: &Type) -> Option<u64> {
+    fn bounds(ty: &Type) -> Option<(u64, u64)> {
+        match ty {
+            Type::Primitive {
+                name: Primitive::U64,
+            } => Some((0, u64::MAX)),
+            Type::U64Range { min, max } if min <= max => Some((*min, *max)),
+            _ => None,
+        }
+    }
+    let (sub_min, sub_max) = bounds(sub)?;
+    let (sup_min, sup_max) = bounds(sup)?;
+    if sub_min < sup_min {
+        Some(sub_min)
+    } else if sub_max > sup_max {
+        Some(sub_max)
+    } else {
+        None
     }
 }
 fn resumption(effects: &Effects, generics: &[Generic]) -> Resumption {
