@@ -131,7 +131,14 @@ const TARGET_PREFIX: &str = "fusionwitness";
 /// checks the witness against the source term rebuilt from `bindings` and the
 /// extracted term. Any failure refuses the fusion.
 pub fn fuse(rules: &str, set: &RuleSet, bindings: &str, root: &str) -> Result<Fusion, Error> {
-    if bindings.contains(TARGET_PREFIX) {
+    // Only binding identifiers can collide with the query's bindings; input
+    // and matrix names appear as quoted strings and may contain anything.
+    let collides = bindings.lines().any(|line| {
+        line.trim_start()
+            .strip_prefix("(let ")
+            .is_some_and(|rest| rest.trim_start().starts_with(TARGET_PREFIX))
+    });
+    if collides {
         return Err(Error::Witness(
             "binding names collide with the query".into(),
         ));

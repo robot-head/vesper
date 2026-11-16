@@ -252,3 +252,20 @@ fn an_unsound_rewrite_egglog_applies_is_refused() {
     // A rule set that does not match the text egglog runs is refused too.
     assert!(engine::fuse(dsp::RULES, set, bindings, "t2").is_err());
 }
+
+#[test]
+fn resource_names_may_contain_the_query_prefix() {
+    let mut g = TensorGraph::new();
+    let x = g.input("fusionwitness0", DType::F32, 8).unwrap();
+    let y = g.activation(Activation::Relu, x).unwrap();
+    let y = g.add(y, x).unwrap();
+    assert!(g.fuse(y).unwrap().witness_summary().steps > 0);
+    // A binding identifier that would shadow the query is still refused.
+    let set = tensor::rule_set().unwrap();
+    refused(engine::fuse(
+        tensor::RULES,
+        set,
+        "(let fusionwitness0 (In \"x\"))\n",
+        "fusionwitness0",
+    ));
+}
