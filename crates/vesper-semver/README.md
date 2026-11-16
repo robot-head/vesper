@@ -8,6 +8,8 @@ contravariant input and covariant result comparisons; `inout` and other
 invariant positions remain invariant. Reversed bounds produce an unknown
 comparison. Source interface export does not yet emit these refinements, and
 this fragment does not decide general predicates or synthesize SMT witnesses.
+Incompatible direct input or result ranges include a concrete distinguishing
+`i64` value in the human-readable witness; it is not a checked caller program.
 The analogous `{"kind":"u64_range","min":0,"max":10}` represents an
 inclusive `u64` interval; its full domain is 0 through `u64::MAX`. Incompatible
 direct unsigned parameter or result intervals include a distinguishing value

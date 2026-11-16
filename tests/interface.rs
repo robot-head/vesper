@@ -221,3 +221,19 @@ fn explicitly_public_fields_keep_existing_public_interface() {
     let implicit = export("copy struct Pair { value: u64, pub: u64 }");
     assert_eq!(explicit, implicit);
 }
+
+#[test]
+fn explicit_public_method_has_the_existing_public_interface() {
+    let explicit = export(
+        "copy struct Boxed { value: u64 } impl Boxed { pub fn get(in self) -> u64 { self.value } }",
+    );
+    let implicit = export(
+        "copy struct Boxed { value: u64 } impl Boxed { fn get(in self) -> u64 { self.value } }",
+    );
+    assert_eq!(explicit, implicit);
+    assert!(
+        explicit
+            .exports
+            .contains_key("@example/library::fn::Boxed::get")
+    );
+}
