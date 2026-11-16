@@ -1,5 +1,5 @@
 use vesper_core::clock_quotient::*;
-use vesper_core::mode_cross::{usage_mode, Presence};
+use vesper_core::mode_cross::{Presence, usage_mode};
 use vesper_core::mode_vec::{ModeVec, Usage};
 use vesper_core::pcg::{EffectId, EffectInst, EffectRow, ResumptionMode};
 

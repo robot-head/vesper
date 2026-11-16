@@ -1,6 +1,6 @@
 use vesper_core::mode_cross::{
-    check_var_use, infer_modal_kind, mode_cross, sub_mode, usage_mode, AdtFieldKind, KindEnv,
-    KindType, ModeJudgmentError, PlaceOwnership, Presence, PrimKind, VarContextEntry,
+    AdtFieldKind, KindEnv, KindType, ModeJudgmentError, PlaceOwnership, Presence, PrimKind,
+    VarContextEntry, check_var_use, infer_modal_kind, mode_cross, sub_mode, usage_mode,
 };
 use vesper_core::mode_vec::{Contention, ModeVec, Order, Portability, Usage};
 
