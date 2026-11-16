@@ -18,12 +18,14 @@ pub use circuit::{
     CdcHeader, CdcPolicy, CheckpointLimits, CheckpointMode, CheckpointPhase, Circuit,
     CircuitBuilder, ClusterConfig, ClusterRun, CommitRecord, CommitSink, CommittedCheckpoint,
     CrashMedium, DurableCheckpointer, DurableReport, DurableRestore, EpochSource, Executor, Fault,
-    FaultKind, Field, GcReport, Ingested, InputLog, KafkaBinding, KafkaConfig, KafkaConnection,
-    KafkaPosition, KafkaSink, KafkaSinkConfig, KafkaSinkStats, KafkaSource, KafkaSourceLimits,
-    KafkaSourceStats, LiveMigration, LiveRescale, LogLimits, LogRecovery, MAX_SPINE_LEVELS,
-    MemorySink, NodeId, Predicate, QuarrySink, Recovery, Rescale, SinkRecovery, SourceBinding,
-    TickInput, WeightPolicy, cdc_value, kafka_record, read_kafka_output, run_cluster,
-    run_cluster_with,
+    FaultKind, Field, GcReport, GroupOffsetSource, GroupOffsets, GroupPoll, HeldProduce, Ingested,
+    InputLog, KafkaBinding, KafkaCompression, KafkaConfig, KafkaConnection, KafkaGroupConfig,
+    KafkaGroupSource, KafkaPosition, KafkaProducer, KafkaRecord, KafkaSasl, KafkaSecurity,
+    KafkaSink, KafkaSinkConfig, KafkaSinkStats, KafkaSource, KafkaSourceLimits, KafkaSourceStats,
+    KafkaTls, LiveMigration, LiveRescale, LogLimits, LogRecovery, MAX_SPINE_LEVELS, MemorySink,
+    NodeId, Predicate, PublishFault, QuarrySink, Recovery, Rescale, SaslMechanism, SinkRecovery,
+    SourceBinding, TickInput, WeightPolicy, cdc_value, kafka_record, read_kafka_output,
+    run_cluster, run_cluster_with,
 };
 pub use frontier::{Frontier, FrontierTicket, TicketError};
 pub use zset::{Row, ZSet};

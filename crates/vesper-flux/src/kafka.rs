@@ -1,5 +1,8 @@
-//! Kafka source and sink for the Flux cluster, over the pure-Rust `rskafka`
-//! wire client (no librdkafka).
+//! Kafka source, sink, producer and consumer group for the Flux cluster,
+//! over a small synchronous wire client of its own (`kafka_wire.rs`,
+//! `kafka_client.rs`): TLS through rustls, SASL PLAIN and SCRAM through
+//! `rsasl`, v2 record batches with gzip/snappy/lz4/zstd, read-committed
+//! fetches, and the idempotent-producer, transaction and group APIs.
 //!
 //! # Source: offsets are part of the checkpoint
 //!
@@ -7,7 +10,7 @@
 //! `width` little-endian i64 cells, as in `Executor::ingest_cdc`) from one or
 //! more Kafka partitions, each bound to a [`CdcPolicy`] binding. Epochs are
 //! cut by [`KafkaSource::poll`]: it fetches the records between the end of
-//! the last epoch and the partitions' current high watermarks (at most
+//! the last epoch and the partitions' current last stable offsets (at most
 //! `max_records_per_epoch` per partition), decodes and validates them, and
 //! then appends the new end offsets and next LSNs to a durable *epoch index*
 //! file (one checksummed, fsynced frame per epoch) before the epoch is
@@ -18,99 +21,99 @@
 //! handle, in the same Quarry transaction, as one epoch number.
 //! [`KafkaSource::committed`] maps a commit back to offsets and
 //! [`KafkaSource::release`] deletes the records a commit no longer needs.
-//! Offsets are not committed to a Kafka consumer group; the Flux checkpoint
-//! is the only authority.
+//! Fetches are read-committed by default: records of aborted transactions
+//! and transaction markers are never seen.
 //!
 //! LSNs must be consecutive per binding. A record whose LSN is below the
 //! next expected one is a producer retry and is dropped (counted in
-//! [`KafkaSourceStats::duplicates`]); a gap, a foreign partition id or
-//! schema, reserved flags, a bad weight or a value of the wrong length is a
-//! typed error, and the epoch is not cut.
+//! [`KafkaSourceStats::duplicates`]); a gap is a typed error and the epoch
+//! is not cut. A *malformed* record (wrong length, foreign partition id or
+//! schema, reserved flags, bad weight, no value) is a typed error by default;
+//! with [`KafkaSourceLimits::dead_letter`] set it is copied to the
+//! dead-letter topic instead (key = source topic, partition and offset) and
+//! skipped, so it never blocks the partition.
 //!
-//! # Sink: commit, then publish, fenced by epoch
+//! # Sink: commit, then publish each epoch in one Kafka transaction
 //!
-//! A [`KafkaSink`] wraps a transactional [`CommitSink`] (normally a
-//! `QuarrySink`). Outputs are committed there first (with the offsets and
-//! the checkpoint); only committed epochs are then produced to the output
-//! topic, so nothing a reader saw is ever rolled back. Every output record
-//! carries its epoch, its position in the epoch's partition slice and a
-//! per-partition LSN; before publishing after a crash or an ambiguous produce
-//! failure the sink reads the last record of each output partition and skips
-//! everything already there. Produce requests use no client-side retries, so
-//! the only way a record reaches the topic twice would be a second writer.
-//! Together: exactly-once in the output topic for a single writer per output
-//! partition, with publication lagging the commit. Readers see a prefix of a
-//! partition, never a duplicate.
-//!
-//! # Scope
-//!
-//! Plaintext connections only (no TLS or SASL), uncompressed batches, no
-//! Kafka transactions or idempotent-producer sequence numbers (rskafka 0.6
-//! implements neither), no consumer groups. The output fence needs the last
-//! record of each output partition: if retention deleted it, publishing
-//! stops with a typed error instead of guessing.
+//! A [`KafkaSink`] wraps a [`CommitSink`] (normally a `QuarrySink`).
+//! Outputs are committed there first (with the offsets and the checkpoint);
+//! only committed epochs are then produced to the output topic, so nothing a
+//! reader saw is ever rolled back. Each epoch is published in its own Kafka
+//! transaction under the sink's transactional id: its records, plus a
+//! *progress* offset commit (group `<transactional id>.progress`, one offset
+//! per output partition: the next output LSN, with the epoch and the
+//! circuit tag as metadata) and, when a [`GroupOffsetSource`] is attached,
+//! the consumer group's input offsets for that epoch. The transaction
+//! commits all of them or none. A new sink incarnation calls
+//! InitProducerId, which fences every earlier producer with the same id (a
+//! request it still has in flight is rejected with a fenced-epoch error)
+//! and aborts its open transaction; it then reads the progress offsets with
+//! `require_stable` and publishes exactly the epochs after them. Exactly-once
+//! publication therefore rests on broker-side fencing, not on a time window.
+//! Readers must read committed.
 use super::cdc::CdcPolicy;
+use super::client::{Client, ProducerState};
 use super::sink::{CommitRecord, CommitSink};
+use super::wire::{ConnSettings, Fail, KResult};
 use super::{Circuit, EpochSource, TickInput};
 use crate::zset::Accumulator;
 use crate::{Budget, CdcHeader, Error, Limits, Row, ZSet};
-use rskafka::BackoffConfig;
-use rskafka::client::error::{Error as ClientError, ProtocolError};
-use rskafka::client::partition::{Compression, OffsetAt, PartitionClient, UnknownTopicHandling};
-use rskafka::client::{Client, ClientBuilder};
-use rskafka::record::Record;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::rc::Rc;
+use std::time::Duration;
+
+pub use super::client::GroupOffsets;
+pub use super::wire::{
+    KafkaCompression, KafkaRecord, KafkaSasl, KafkaSecurity, KafkaTls, SaslMechanism,
+};
 
 /// How to reach the brokers.
 #[derive(Clone, Debug)]
 pub struct KafkaConfig {
-    /// `host:port` bootstrap brokers (plaintext).
+    /// `host:port` bootstrap brokers.
     pub bootstrap: Vec<String>,
     pub client_id: String,
-    /// How long one read or metadata operation keeps retrying a broker that
-    /// is unreachable or not yet leader. Produce requests never retry.
+    /// TLS and SASL for every connection.
+    pub security: KafkaSecurity,
+    /// How long one operation keeps retrying a broker that is unreachable,
+    /// not yet leader, or a coordinator that is loading or moved.
     pub retry_for: Duration,
-    /// Deadline of one operation including its retries.
+    /// Socket read/write timeout of one request.
     pub request_timeout: Duration,
     /// Upper bound of one fetch response.
     pub fetch_bytes: i32,
-    /// After a failed produce, how long the sink waits before it reads the
-    /// partition back and resends: the failed request may still be in flight
-    /// at the broker, and the wait must outlast it (see `KafkaSink`).
-    pub produce_in_doubt: Duration,
+    /// Codec of produced batches.
+    pub compression: KafkaCompression,
+    /// Read only committed transactional records (the default).
+    pub read_committed: bool,
+    /// Transaction timeout requested at InitProducerId.
+    pub transaction_timeout: Duration,
 }
 impl KafkaConfig {
     pub fn new(bootstrap: impl Into<String>) -> Self {
         Self {
             bootstrap: vec![bootstrap.into()],
             client_id: "vesper-flux".into(),
+            security: KafkaSecurity::default(),
             retry_for: Duration::from_secs(20),
             request_timeout: Duration::from_secs(30),
             fetch_bytes: 1 << 20,
-            produce_in_doubt: Duration::from_secs(60),
+            compression: KafkaCompression::None,
+            read_committed: true,
+            transaction_timeout: Duration::from_secs(60),
         }
     }
 }
 
-/// One connection to a Kafka cluster, with a private single-threaded Tokio
-/// runtime: every call blocks until the broker answered.
+/// One client of a Kafka cluster. Every call blocks until the broker
+/// answered (or the retry deadline passed).
 pub struct KafkaConnection {
-    rt: tokio::runtime::Runtime,
-    /// Retries transient failures for `retry_for`.
-    client: Client,
-    /// Never retries (produce: a retry after a lost response could append
-    /// the same batch twice). Dropped after a failed produce, which closes
-    /// its broker connections; rebuilt on the next produce.
-    once: RefCell<Option<Arc<Client>>>,
+    client: RefCell<Client>,
     cfg: KafkaConfig,
-    partitions: RefCell<BTreeMap<(String, i32, bool), Arc<PartitionClient>>>,
-    last_error: RefCell<Option<String>>,
 }
 impl std::fmt::Debug for KafkaConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -120,222 +123,132 @@ impl std::fmt::Debug for KafkaConnection {
     }
 }
 
-fn new_client(
-    rt: &tokio::runtime::Runtime,
-    cfg: &KafkaConfig,
-    deadline: Duration,
-    last_error: &RefCell<Option<String>>,
-) -> Result<Client, Error> {
-    let build = ClientBuilder::new(cfg.bootstrap.clone())
-        .client_id(cfg.client_id.clone())
-        .backoff_config(BackoffConfig {
-            init_backoff: Duration::from_millis(50),
-            max_backoff: Duration::from_secs(1),
-            base: 3.0,
-            deadline: Some(deadline),
-        })
-        .build();
-    match rt.block_on(async { tokio::time::timeout(cfg.request_timeout, build).await }) {
-        Ok(Ok(c)) => Ok(c),
-        Ok(Err(e)) => {
-            *last_error.borrow_mut() = Some(format!("connect: {e}"));
-            Err(classify(&e))
-        }
-        Err(_) => Err(Error::Kafka("timeout")),
-    }
-}
-
-fn classify(e: &ClientError) -> Error {
-    match e {
-        ClientError::ServerError { protocol_error, .. } => match protocol_error {
-            ProtocolError::OffsetOutOfRange => Error::Kafka("offset out of range"),
-            ProtocolError::TopicAlreadyExists => Error::Kafka("topic exists"),
-            ProtocolError::UnknownTopicOrPartition => Error::Kafka("unknown topic or partition"),
-            ProtocolError::MessageTooLarge | ProtocolError::RecordListTooLarge => {
-                Error::Kafka("batch too large")
-            }
-            _ => Error::Kafka("broker error"),
-        },
-        _ => Error::Kafka("unavailable"),
-    }
-}
-
 impl KafkaConnection {
+    /// Connect (and authenticate) to a bootstrap broker.
     pub fn connect(cfg: &KafkaConfig) -> Result<Self, Error> {
-        if cfg.bootstrap.is_empty() || cfg.fetch_bytes < 1024 {
+        if cfg.bootstrap.is_empty() || cfg.fetch_bytes < 1024 || cfg.request_timeout.is_zero() {
             return Err(Error::Kafka("configuration"));
         }
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| Error::Kafka("runtime"))?;
-        let last_error = RefCell::new(None);
-        let client = new_client(&rt, cfg, cfg.retry_for, &last_error)?;
-        let once = new_client(&rt, cfg, Duration::ZERO, &last_error)?;
-        Ok(Self {
-            rt,
-            client,
-            once: RefCell::new(Some(Arc::new(once))),
+        let max = usize::try_from(cfg.fetch_bytes)
+            .map_err(|_| Error::Kafka("configuration"))?
+            .saturating_mul(4)
+            .max(16 << 20);
+        let settings = ConnSettings::new(&cfg.client_id, cfg.request_timeout, max, &cfg.security)?;
+        let conn = Self {
+            client: RefCell::new(Client::new(settings, cfg.bootstrap.clone(), cfg.retry_for)),
             cfg: cfg.clone(),
-            partitions: RefCell::new(BTreeMap::new()),
-            last_error,
-        })
+        };
+        conn.run(|c| c.reachable())?;
+        Ok(conn)
     }
 
-    /// How long a failed produce stays in doubt (`KafkaConfig::produce_in_doubt`).
-    pub fn in_doubt_window(&self) -> Duration {
-        self.cfg.produce_in_doubt
+    pub fn config(&self) -> &KafkaConfig {
+        &self.cfg
     }
 
     /// The client's message for the last failed operation.
     pub fn last_error(&self) -> Option<String> {
-        self.last_error.borrow().clone()
+        self.client.borrow().last_error.clone()
     }
 
-    fn run<T>(
-        &self,
-        what: &str,
-        f: impl std::future::Future<Output = Result<T, ClientError>>,
-    ) -> Result<T, Error> {
-        match self
-            .rt
-            .block_on(async { tokio::time::timeout(self.cfg.request_timeout, f).await })
-        {
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => {
-                *self.last_error.borrow_mut() = Some(format!("{what}: {e}"));
-                Err(classify(&e))
-            }
-            Err(_) => {
-                *self.last_error.borrow_mut() = Some(format!("{what}: timeout"));
-                Err(Error::Kafka("timeout"))
-            }
+    pub(crate) fn run<T>(&self, f: impl FnOnce(&mut Client) -> KResult<T>) -> Result<T, Error> {
+        let mut c = self.client.borrow_mut();
+        f(&mut c).map_err(|e| {
+            c.note(&e);
+            e.error()
+        })
+    }
+
+    pub(crate) fn raw<T>(&self, f: impl FnOnce(&mut Client) -> KResult<T>) -> KResult<T> {
+        let mut c = self.client.borrow_mut();
+        let r = f(&mut c);
+        if let Err(e) = &r {
+            c.note(e);
         }
+        r
     }
 
-    fn partition(
-        &self,
-        topic: &str,
-        partition: i32,
-        once: bool,
-    ) -> Result<Arc<PartitionClient>, Error> {
-        let key = (topic.to_string(), partition, once);
-        if let Some(p) = self.partitions.borrow().get(&key) {
-            return Ok(Arc::clone(p));
-        }
-        let p = if once {
-            let client = match self.once.borrow().clone() {
-                Some(c) => c,
-                None => {
-                    let c = Arc::new(new_client(
-                        &self.rt,
-                        &self.cfg,
-                        Duration::ZERO,
-                        &self.last_error,
-                    )?);
-                    *self.once.borrow_mut() = Some(Arc::clone(&c));
-                    c
-                }
-            };
-            self.run(
-                "partition",
-                client.partition_client(topic, partition, UnknownTopicHandling::Error),
-            )?
-        } else {
-            self.run(
-                "partition",
-                self.client
-                    .partition_client(topic, partition, UnknownTopicHandling::Error),
-            )?
-        };
-        let p = Arc::new(p);
-        self.partitions.borrow_mut().insert(key, Arc::clone(&p));
-        Ok(p)
-    }
-
-    /// Create a topic with replication factor 1.
+    /// Create a topic with replication factor 1 and wait for its leaders.
     pub fn create_topic(&self, topic: &str, partitions: i32) -> Result<(), Error> {
-        let controller = self.client.controller_client().map_err(|e| classify(&e))?;
-        self.run(
-            "create topic",
-            controller.create_topic(topic, partitions, 1, 30_000),
-        )
+        if !(1..=10_000).contains(&partitions) {
+            return Err(Error::Kafka("partitions"));
+        }
+        self.run(|c| c.create_topic(topic, partitions))
     }
 
-    /// Earliest retained and next (high watermark) offset of a partition.
+    /// Number of partitions of a topic.
+    pub fn partitions(&self, topic: &str) -> Result<i32, Error> {
+        self.run(|c| c.partitions(topic))
+    }
+
+    /// Earliest retained and end offset of a partition: the last stable
+    /// offset when reading committed, else the high watermark.
     pub fn offsets(&self, topic: &str, partition: i32) -> Result<(i64, i64), Error> {
-        let p = self.partition(topic, partition, false)?;
-        let earliest = self.run("earliest offset", p.get_offset(OffsetAt::Earliest))?;
-        let latest = self.run("latest offset", p.get_offset(OffsetAt::Latest))?;
+        let rc = self.cfg.read_committed;
+        let earliest = self.run(|c| c.list_offset(topic, partition, -2, rc))?;
+        let latest = self.run(|c| c.list_offset(topic, partition, -1, rc))?;
         if earliest < 0 || latest < earliest {
             return Err(Error::Kafka("offsets"));
         }
         Ok((earliest, latest))
     }
 
-    /// Append records as one batch with client retries: at-least-once (a
-    /// lost response can duplicate the batch). Returns their offsets.
+    /// Append records as one batch without a producer id (acks = all, with
+    /// client retries): at-least-once, a lost response can duplicate the
+    /// batch. Returns the base offset. Use [`KafkaProducer`] for
+    /// idempotent or transactional appends.
     pub fn produce(
         &self,
         topic: &str,
         partition: i32,
-        records: Vec<Record>,
-    ) -> Result<Vec<i64>, Error> {
-        let p = self.partition(topic, partition, false)?;
-        self.run("produce", p.produce(records, Compression::NoCompression))
+        records: Vec<KafkaRecord>,
+    ) -> Result<i64, Error> {
+        let batch = self.run(|_| {
+            super::wire::encode_batch(
+                &records,
+                self.cfg.compression,
+                super::wire::ProducerStamp::NONE,
+            )
+        })?;
+        self.run(|c| c.retry(|c| c.produce_once(topic, partition, None, &batch)))
     }
 
-    /// Append records as one batch, one attempt: on error the batch may or
-    /// may not be in the log.
-    fn produce_once(
-        &self,
-        topic: &str,
-        partition: i32,
-        records: Vec<Record>,
-    ) -> Result<Vec<i64>, Error> {
-        let p = self.partition(topic, partition, true)?;
-        let out = self.run("produce", p.produce(records, Compression::NoCompression));
-        if out.is_err() {
-            // Close the produce connections (a broken one is cached in the
-            // client, and an open one could still carry the request): every
-            // produce partition client goes, then the client itself.
-            self.partitions.borrow_mut().retain(|k, _| !k.2);
-            *self.once.borrow_mut() = None;
-        }
-        out
-    }
-
-    /// Every record with offset in `from..to`, in offset order.
+    /// Every record with offset in `from..to` that the configured isolation
+    /// level shows, in offset order.
     pub fn fetch(
         &self,
         topic: &str,
         partition: i32,
         from: i64,
         to: i64,
-    ) -> Result<Vec<(i64, Record)>, Error> {
-        let p = self.partition(topic, partition, false)?;
+    ) -> Result<Vec<(i64, KafkaRecord)>, Error> {
         let mut out = Vec::new();
         let mut at = from;
+        let rc = self.cfg.read_committed;
         while at < to {
-            let (records, high) =
-                self.run("fetch", p.fetch_records(at, 1..self.cfg.fetch_bytes, 100))?;
-            let before = out.len();
-            for r in records {
-                if r.offset < at {
+            let f = self.run(|c| c.fetch(topic, partition, at, self.cfg.fetch_bytes, rc))?;
+            if f.log_start > at {
+                return Err(Error::Kafka("offset out of range"));
+            }
+            for (o, r) in f.records {
+                if o < at {
                     continue;
                 }
-                if r.offset >= to {
+                if o >= to {
                     break;
                 }
-                at = r.offset + 1;
-                out.push((r.offset, r.record));
+                out.push((o, r));
             }
-            if out.len() == before {
-                if high < to {
-                    return Err(Error::Kafka("records missing below the high watermark"));
+            match f.end {
+                Some(end) if end > at => at = end,
+                _ => {
+                    let visible = if rc { f.last_stable } else { f.high_watermark };
+                    if visible < to {
+                        return Err(Error::Kafka("records missing below the end offset"));
+                    }
+                    // Offsets in `at..to` hold no batch we can see.
+                    break;
                 }
-                // Offsets in `at..to` hold no data records (control batches).
-                break;
             }
         }
         Ok(out)
@@ -343,8 +256,144 @@ impl KafkaConnection {
 
     /// Delete every record below `offset`.
     pub fn delete_before(&self, topic: &str, partition: i32, offset: i64) -> Result<(), Error> {
-        let p = self.partition(topic, partition, false)?;
-        self.run("delete records", p.delete_records(offset, 30_000))
+        self.run(|c| c.delete_records(topic, partition, offset))
+    }
+
+    /// Committed offsets of a consumer group (stable: waits for pending
+    /// transactional offset commits): partition to (offset, metadata).
+    pub fn group_offsets(
+        &self,
+        group: &str,
+        topic: &str,
+        partitions: &[i32],
+    ) -> Result<BTreeMap<i32, (i64, String)>, Error> {
+        let got = self.run(|c| c.offset_fetch(group, topic, partitions))?;
+        Ok(got
+            .into_iter()
+            .map(|(p, c)| (p, (c.offset, c.metadata)))
+            .collect())
+    }
+}
+
+// ----------------------------------------------------------------------
+// Producer
+// ----------------------------------------------------------------------
+
+/// An idempotent or transactional producer.
+///
+/// Every batch carries the producer id, epoch and per-partition sequence
+/// number, so the broker appends it at most once however often it is
+/// resent. A transactional producer additionally groups batches and offset
+/// commits into transactions; creating one with a transactional id fences
+/// every earlier producer with that id.
+pub struct KafkaProducer {
+    conn: KafkaConnection,
+    state: ProducerState,
+}
+impl std::fmt::Debug for KafkaProducer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KafkaProducer")
+            .field("transactional_id", &self.state.txn)
+            .field("producer", &self.state.pid)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A produce request encoded (with its sequence number) but not yet sent:
+/// fault injection for delayed or duplicated in-flight requests.
+#[derive(Clone, Debug)]
+pub struct HeldProduce {
+    topic: String,
+    partition: i32,
+    txn: Option<String>,
+    batch: Vec<u8>,
+}
+impl HeldProduce {
+    /// Send the request once, now, over `conn`: the base offset, `-1` if
+    /// the broker recognised it as a duplicate, or its error.
+    pub fn deliver(&self, conn: &KafkaConnection) -> Result<i64, Error> {
+        conn.run(|c| c.produce_once(&self.topic, self.partition, self.txn.as_deref(), &self.batch))
+    }
+}
+
+impl KafkaProducer {
+    /// An idempotent producer (no transactions).
+    pub fn idempotent(conn: KafkaConnection) -> Result<Self, Error> {
+        let (timeout, codec) = (conn.cfg.transaction_timeout, conn.cfg.compression);
+        let state = conn.run(|c| ProducerState::init(c, None, timeout, codec))?;
+        Ok(Self { conn, state })
+    }
+    /// A transactional producer. Fences every earlier producer with
+    /// `transactional_id` and aborts the transaction it left open.
+    pub fn transactional(conn: KafkaConnection, transactional_id: &str) -> Result<Self, Error> {
+        if transactional_id.is_empty() {
+            return Err(Error::Kafka("transactional id"));
+        }
+        let (timeout, codec) = (conn.cfg.transaction_timeout, conn.cfg.compression);
+        let state =
+            conn.run(|c| ProducerState::init(c, Some(transactional_id.into()), timeout, codec))?;
+        Ok(Self { conn, state })
+    }
+    /// Producer id and epoch.
+    pub fn id(&self) -> (i64, i16) {
+        self.state.pid
+    }
+    pub fn connection(&self) -> &KafkaConnection {
+        &self.conn
+    }
+    /// Whether the broker reported this producer fenced (it can do nothing
+    /// more).
+    pub fn fenced(&self) -> bool {
+        self.state.fenced
+    }
+    pub fn begin(&mut self) -> Result<(), Error> {
+        self.state.begin().map_err(|e| e.error())
+    }
+    /// Append `records` as one batch; returns the base offset (`-1` when
+    /// the broker already held it).
+    pub fn send(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        records: &[KafkaRecord],
+    ) -> Result<i64, Error> {
+        let state = &mut self.state;
+        self.conn.run(|c| {
+            let batch = state.prepare(c, topic, partition, records)?;
+            state.deliver(c, topic, partition, &batch)
+        })
+    }
+    /// Encode the next batch (registering the partition with the open
+    /// transaction) without sending it.
+    pub fn hold(
+        &mut self,
+        topic: &str,
+        partition: i32,
+        records: &[KafkaRecord],
+    ) -> Result<HeldProduce, Error> {
+        let state = &mut self.state;
+        let batch = self
+            .conn
+            .run(|c| state.prepare(c, topic, partition, records))?;
+        Ok(HeldProduce {
+            topic: topic.into(),
+            partition,
+            txn: self.state.txn.clone(),
+            batch,
+        })
+    }
+    /// Commit consumer-group offsets as part of the open transaction.
+    pub fn send_offsets(&mut self, offsets: &GroupOffsets) -> Result<(), Error> {
+        let state = &mut self.state;
+        self.conn.run(|c| state.send_offsets(c, offsets))
+    }
+    pub fn commit(&mut self) -> Result<(), Error> {
+        let state = &mut self.state;
+        self.conn.run(|c| state.end(c, true))
+    }
+    pub fn abort(&mut self) -> Result<(), Error> {
+        let state = &mut self.state;
+        self.conn.run(|c| state.end(c, false))
     }
 }
 
@@ -358,12 +407,10 @@ pub fn cdc_value(header: CdcHeader, row: &[i64]) -> Vec<u8> {
     v
 }
 /// A Kafka record holding `value`, no key or headers.
-pub fn kafka_record(value: Vec<u8>) -> Record {
-    Record {
-        key: None,
+pub fn kafka_record(value: Vec<u8>) -> KafkaRecord {
+    KafkaRecord {
         value: Some(value),
-        headers: BTreeMap::new(),
-        timestamp: rskafka::chrono::DateTime::from_timestamp_millis(0).unwrap_or_default(),
+        ..KafkaRecord::default()
     }
 }
 fn decode_value(value: Option<&Vec<u8>>, width: usize) -> Result<(CdcHeader, Row), Error> {
@@ -633,13 +680,16 @@ pub struct KafkaBinding {
     pub partition: i32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KafkaSourceLimits {
     /// Records cut into one epoch from one partition (1..=65536).
     pub max_records_per_epoch: usize,
     pub max_epochs: u64,
     /// Decoded epochs kept in memory for workers reading the same epoch.
     pub cache_epochs: usize,
+    /// Topic (partition 0) that receives malformed records instead of
+    /// failing the epoch. `None`: a malformed record is a typed error.
+    pub dead_letter: Option<String>,
 }
 impl Default for KafkaSourceLimits {
     fn default() -> Self {
@@ -647,6 +697,7 @@ impl Default for KafkaSourceLimits {
             max_records_per_epoch: 512,
             max_epochs: 1 << 20,
             cache_epochs: 16,
+            dead_letter: None,
         }
     }
 }
@@ -659,6 +710,9 @@ pub struct KafkaSourceStats {
     pub duplicates: u64,
     /// Epochs decoded from the broker (not served from the cache).
     pub decoded: u64,
+    /// Malformed records copied to the dead-letter topic (at the first cut;
+    /// replays skip them again without copying).
+    pub dead_lettered: u64,
 }
 
 /// A replayable [`EpochSource`] over Kafka partitions (see the module docs).
@@ -716,6 +770,7 @@ impl KafkaSource {
     ) -> Result<(Self, u64), Error> {
         policy.validate(circuit)?;
         if topics.len() != policy.bindings.len()
+            || source_limits.dead_letter.as_deref() == Some("")
             || source_limits.max_records_per_epoch == 0
             || source_limits.max_records_per_epoch > 65_536
             || source_limits.max_records_per_epoch > circuit.limits.max_input_entries
@@ -788,7 +843,19 @@ impl KafkaSource {
         if !any {
             return Ok(None);
         }
-        let (input, lsns) = self.decode(&start, &ends)?;
+        let (input, lsns, dead) = self.decode(&start, &ends)?;
+        // Malformed records reach the dead-letter topic before the epoch
+        // is durable: a crash in between copies them again (the key names
+        // the source position, so copies are recognisable).
+        if let Some(topic) = &self.source_limits.dead_letter
+            && !dead.is_empty()
+        {
+            let n = dead.len() as u64;
+            self.conn.produce(topic, 0, dead)?;
+            let mut st = self.stats.get();
+            st.dead_lettered += n;
+            self.stats.set(st);
+        }
         let frame: Vec<(i64, u64)> = ends.into_iter().zip(lsns).collect();
         let e = self.index.append(&frame)?;
         self.remember(e, input);
@@ -833,8 +900,13 @@ impl KafkaSource {
         }
     }
 
-    /// Fetch and decode the records in `start..ends` of every binding.
-    fn decode(&self, start: &[(i64, u64)], ends: &[i64]) -> Result<(TickInput, Vec<u64>), Error> {
+    /// Fetch and decode the records in `start..ends` of every binding; also
+    /// the dead-letter copies of malformed records (when configured).
+    fn decode(
+        &self,
+        start: &[(i64, u64)],
+        ends: &[i64],
+    ) -> Result<(TickInput, Vec<u64>, Vec<KafkaRecord>), Error> {
         let mut acc: Vec<Accumulator> = self
             .widths
             .iter()
@@ -843,17 +915,30 @@ impl KafkaSource {
         let mut budget = Budget::new(self.limits);
         let mut stats = self.stats.get();
         let mut lsns = Vec::with_capacity(start.len());
+        let mut dead = Vec::new();
         for (i, (t, (from, first))) in self.topics.iter().zip(start).enumerate() {
             let binding = &self.policy.bindings[i];
             let width = self.widths[binding.input];
             let mut next = *first;
-            for (_, record) in self.conn.fetch(&t.topic, t.partition, *from, ends[i])? {
+            for (offset, record) in self.conn.fetch(&t.topic, t.partition, *from, ends[i])? {
                 stats.fetched += 1;
                 budget.charge(1)?;
-                let (header, row) = decode_value(record.value.as_ref(), width)?;
-                if self.policy.binding(header)? != i {
-                    return Err(Error::Cdc("partition"));
-                }
+                let decoded = decode_value(record.value.as_ref(), width).and_then(|(h, row)| {
+                    match self.policy.binding(h)? {
+                        b if b == i => Ok((h, row)),
+                        _ => Err(Error::Cdc("partition")),
+                    }
+                });
+                let (header, row) = match decoded {
+                    Ok(v) => v,
+                    Err(e) => match &self.source_limits.dead_letter {
+                        None => return Err(e),
+                        Some(_) => {
+                            dead.push(dead_letter(t, offset, &record, &e));
+                            continue;
+                        }
+                    },
+                };
                 if header.source_lsn < next {
                     stats.duplicates += 1;
                     continue;
@@ -878,7 +963,21 @@ impl KafkaSource {
         {
             return Err(Error::Limit("input entries"));
         }
-        Ok((TickInput { deltas }, lsns))
+        Ok((TickInput { deltas }, lsns, dead))
+    }
+}
+
+/// The dead-letter copy of a malformed record.
+fn dead_letter(t: &KafkaBinding, offset: i64, record: &KafkaRecord, e: &Error) -> KafkaRecord {
+    let position = format!("{}/{}/{}", t.topic, t.partition, offset);
+    let mut headers = record.headers.clone();
+    headers.insert("vesper-flux-error".into(), format!("{e}").into_bytes());
+    headers.insert("vesper-flux-source".into(), position.clone().into_bytes());
+    KafkaRecord {
+        key: Some(position.into_bytes()),
+        value: record.value.clone(),
+        headers,
+        timestamp: record.timestamp,
     }
 }
 
@@ -896,7 +995,7 @@ impl EpochSource for KafkaSource {
             .start_of(epoch.checked_add(1).ok_or(Error::Overflow)?)?;
         let ends: Vec<i64> = end.iter().map(|(o, _)| *o).collect();
         let lsns: Vec<u64> = end.iter().map(|(_, l)| *l).collect();
-        let (input, got) = self.decode(&start, &ends)?;
+        let (input, got, _) = self.decode(&start, &ends)?;
         if got != lsns {
             // The partition no longer holds what the epoch was cut from.
             return Err(Error::Kafka("replay differs from the indexed epoch"));
@@ -907,14 +1006,16 @@ impl EpochSource for KafkaSource {
 }
 
 // ----------------------------------------------------------------------
+// ----------------------------------------------------------------------
 // Sink
 // ----------------------------------------------------------------------
 
 const H_EPOCH: &str = "vesper-flux-epoch";
 const H_SEQ: &str = "vesper-flux-seq";
 const H_CIRCUIT: &str = "vesper-flux-circuit";
+const PROGRESS_PREFIX: &str = "vflux/1";
 
-/// Output topic layout.
+/// Output topic layout and the producer's transactional id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KafkaSinkConfig {
     pub topic: String,
@@ -922,41 +1023,71 @@ pub struct KafkaSinkConfig {
     /// `key_column` value.
     pub partitions: i32,
     pub key_column: usize,
-    /// Records per produce request (one Kafka batch, appended atomically).
+    /// Records per produce request.
     pub max_batch_records: usize,
+    /// Kafka transactional id: one per output topic and job. A new sink with
+    /// the same id fences the previous one.
+    pub transactional_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct KafkaSinkStats {
     pub published: u64,
-    /// Records skipped because the topic already held them (after a crash
-    /// or an ambiguous produce failure).
+    /// Committed Kafka transactions (one per published epoch).
+    pub transactions: u64,
+    /// Transactions this incarnation aborted after a failure.
+    pub aborted: u64,
+    /// Epochs skipped because the progress offsets show them published.
     pub already_present: u64,
-    /// Fence reads (last record of an output partition).
-    pub fences_read: u64,
+    /// Producer (re)initialisations: each fences earlier incarnations.
+    pub inits: u64,
+    /// Progress reads.
+    pub progress_reads: u64,
     /// Publications that failed and were left for the next commit or flush.
     pub failures: u64,
 }
 
+/// Fault injection: where the next publication stops, leaving its Kafka
+/// transaction open as if the process died there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Fence {
-    Unknown,
-    Empty,
-    At { epoch: u64, seq: u32, lsn: u64 },
+pub enum PublishFault {
+    /// After the epoch's records were produced.
+    AfterRecords,
+    /// After the progress (and input) offsets were added too.
+    AfterOffsets,
 }
 
-/// Commits into `inner`, then publishes committed epochs to Kafka (see the
-/// module docs). A publication failure never fails the commit: it stays
-/// pending until the next commit or [`KafkaSink::flush`].
+/// Input offsets of a consumer-group source, committed inside the output
+/// transaction of the epoch they end.
+pub trait GroupOffsetSource {
+    /// The group offsets at the end of `epoch`, or `None` if the source has
+    /// nothing to commit for it.
+    fn offsets_after(&self, epoch: u64) -> Result<Option<GroupOffsets>, Error>;
+    /// `epoch` and everything before it is published.
+    fn published(&self, epoch: u64);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Progress {
+    /// Last published epoch.
+    epoch: Option<u64>,
+    /// Next output LSN per partition.
+    next_lsn: Vec<u64>,
+}
+
+/// Commits into `inner`, then publishes committed epochs to Kafka, one
+/// transaction per epoch (see the module docs). A publication failure never
+/// fails the commit: it stays pending until the next commit or
+/// [`KafkaSink::flush`].
 pub struct KafkaSink<S: CommitSink> {
     inner: S,
     conn: KafkaConnection,
     cfg: KafkaSinkConfig,
-    width: usize,
-    fences: Vec<Fence>,
-    /// Per partition: a failed produce may land until this instant.
-    in_doubt: Vec<Option<Instant>>,
+    producer: Option<ProducerState>,
+    progress: Option<Progress>,
+    offsets: Option<Rc<dyn GroupOffsetSource>>,
     pending: Option<Error>,
+    fault: Option<PublishFault>,
     stats: KafkaSinkStats,
 }
 impl<S: CommitSink> std::fmt::Debug for KafkaSink<S> {
@@ -978,7 +1109,7 @@ fn output_partition(key: i64, partitions: i32) -> i32 {
     // partitions is 1..=1024, so the remainder fits.
     (mix(u64::from_le_bytes(key.to_le_bytes())) % partitions as u64) as i32
 }
-fn header_u64(r: &Record, name: &str) -> Result<u64, Error> {
+fn header_u64(r: &KafkaRecord, name: &str) -> Result<u64, Error> {
     let v = r
         .headers
         .get(name)
@@ -997,9 +1128,12 @@ fn circuit_identity(circuit: &Circuit) -> Result<[u8; 32], Error> {
 fn circuit_tag(fp: &[u8; 32]) -> Vec<u8> {
     fp[..16].to_vec()
 }
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
 /// One decoded output record: epoch, seq, LSN, circuit tag, row, weight.
 type OutputRecord = (u64, u32, u64, Vec<u8>, Row, i64);
-fn decode_output(r: &Record, width: usize, partition: i32) -> Result<OutputRecord, Error> {
+fn decode_output(r: &KafkaRecord, width: usize, partition: i32) -> Result<OutputRecord, Error> {
     let epoch = header_u64(r, H_EPOCH)?;
     let seq =
         u32::try_from(header_u64(r, H_SEQ)?).map_err(|_| Error::Kafka("output record headers"))?;
@@ -1013,6 +1147,31 @@ fn decode_output(r: &Record, width: usize, partition: i32) -> Result<OutputRecor
         return Err(Error::Kafka("output record"));
     }
     Ok((epoch, seq, h.source_lsn, tag, row, h.z_weight))
+}
+/// Progress metadata: `vflux/1 e=<epoch> t=<circuit tag hex>`.
+fn progress_metadata(epoch: u64, tag: &[u8]) -> String {
+    format!("{PROGRESS_PREFIX} e={epoch} t={}", hex(tag))
+}
+fn parse_progress(meta: &str) -> Result<(u64, String), Error> {
+    let bad = Error::Kafka("output progress");
+    let mut it = meta.split(' ');
+    if it.next() != Some(PROGRESS_PREFIX) {
+        return Err(bad);
+    }
+    let e = it
+        .next()
+        .and_then(|s| s.strip_prefix("e="))
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or(bad.clone())?;
+    let t = it
+        .next()
+        .and_then(|s| s.strip_prefix("t="))
+        .ok_or(bad.clone())?
+        .to_string();
+    if it.next().is_some() || t.len() != 32 {
+        return Err(bad);
+    }
+    Ok((e, t))
 }
 
 impl<S: CommitSink> KafkaSink<S> {
@@ -1028,14 +1187,13 @@ impl<S: CommitSink> KafkaSink<S> {
             || cfg.key_column >= width
             || cfg.max_batch_records == 0
             || cfg.max_batch_records > 65_536
+            || cfg.transactional_id.is_empty()
         {
             return Err(Error::Kafka("sink configuration"));
         }
-        let fences = vec![Fence::Unknown; cfg.partitions as usize];
-        let in_doubt = vec![None; cfg.partitions as usize];
         let mut inner = inner;
         // A reopened sink may hold committed epochs a dead incarnation never
-        // published: replay the whole outbox before anything newer.
+        // published: the progress offsets decide, at the first publication.
         let pending = inner
             .last_commit()?
             .map(|_| Error::Kafka("opened with committed epochs"));
@@ -1043,12 +1201,19 @@ impl<S: CommitSink> KafkaSink<S> {
             inner,
             conn,
             cfg,
-            width,
-            fences,
+            producer: None,
+            progress: None,
+            offsets: None,
             pending,
-            in_doubt,
+            fault: None,
             stats: KafkaSinkStats::default(),
         })
+    }
+    /// Commit a consumer group's input offsets inside every epoch's output
+    /// transaction.
+    pub fn with_group_offsets(mut self, source: Rc<dyn GroupOffsetSource>) -> Self {
+        self.offsets = Some(source);
+        self
     }
     pub fn inner(&self) -> &S {
         &self.inner
@@ -1065,6 +1230,18 @@ impl<S: CommitSink> KafkaSink<S> {
     }
     pub fn connection(&self) -> &KafkaConnection {
         &self.conn
+    }
+    /// The last epoch the output topic holds (read at the first publication).
+    pub fn published_through(&self) -> Option<u64> {
+        self.progress.as_ref().and_then(|p| p.epoch)
+    }
+    /// Fault injection: stop the next publication at `fault`, leave its
+    /// transaction open and forget the producer, as a dying process would.
+    pub fn inject_publish_fault(&mut self, fault: PublishFault) {
+        self.fault = Some(fault);
+    }
+    fn progress_group(&self) -> String {
+        format!("{}.progress", self.cfg.transactional_id)
     }
 
     /// Publish every committed epoch the topic does not hold yet.
@@ -1086,71 +1263,122 @@ impl<S: CommitSink> KafkaSink<S> {
         }
     }
 
-    fn read_fence(&mut self, p: i32, tag: &[u8]) -> Result<Fence, Error> {
-        self.stats.fences_read += 1;
-        let (earliest, latest) = self.conn.offsets(&self.cfg.topic, p)?;
-        if latest == 0 {
-            return Ok(Fence::Empty);
+    /// InitProducerId (fencing every earlier incarnation), then the stable
+    /// progress offsets.
+    fn ensure_producer(&mut self, tag: &[u8]) -> Result<(), Error> {
+        if self.producer.is_some() && self.progress.is_some() {
+            return Ok(());
         }
-        if earliest == latest {
-            return Err(Error::Kafka("output fence lost to retention"));
+        self.progress = None;
+        let (timeout, codec) = (
+            self.conn.cfg.transaction_timeout,
+            self.conn.cfg.compression,
+        );
+        let txn = self.cfg.transactional_id.clone();
+        let state = self
+            .conn
+            .run(|c| ProducerState::init(c, Some(txn), timeout, codec))?;
+        self.producer = Some(state);
+        self.stats.inits += 1;
+        self.stats.progress_reads += 1;
+        let parts: Vec<i32> = (0..self.cfg.partitions).collect();
+        let got = self
+            .conn
+            .group_offsets(&self.progress_group(), &self.cfg.topic, &parts)?;
+        let want = hex(tag);
+        let mut epoch: Option<u64> = None;
+        let mut next_lsn = vec![0u64; parts.len()];
+        if !got.is_empty() {
+            if got.len() != parts.len() {
+                return Err(Error::Kafka("output progress"));
+            }
+            for (p, (offset, meta)) in &got {
+                let (e, t) = parse_progress(meta)?;
+                if t != want {
+                    return Err(Error::Kafka("output topic belongs to another circuit"));
+                }
+                if epoch.is_some_and(|x| x != e) {
+                    return Err(Error::Kafka("output progress"));
+                }
+                epoch = Some(e);
+                let slot = usize::try_from(*p).map_err(|_| Error::Kafka("output progress"))?;
+                *next_lsn
+                    .get_mut(slot)
+                    .ok_or(Error::Kafka("output progress"))? =
+                    u64::try_from(*offset).map_err(|_| Error::Kafka("output progress"))?;
+            }
         }
-        let records = self.conn.fetch(&self.cfg.topic, p, latest - 1, latest)?;
-        let (_, last) = records
-            .last()
-            .ok_or(Error::Kafka("output fence lost to retention"))?;
-        let (epoch, seq, lsn, got, _, _) = decode_output(last, self.width, p)?;
-        if got != tag {
-            return Err(Error::Kafka("output topic belongs to another circuit"));
-        }
-        Ok(Fence::At { epoch, seq, lsn })
+        self.progress = Some(Progress { epoch, next_lsn });
+        Ok(())
     }
 
     fn publish(&mut self, fingerprint: &[u8; 32], outputs: &[(u64, ZSet)]) -> Result<(), Error> {
         let tag = circuit_tag(fingerprint);
-        for p in 0..self.cfg.partitions {
-            let slot = p as usize;
-            if let Some(until) = self.in_doubt[slot] {
-                // A failed produce may still be in flight at the broker: do not
-                // read the fence (and resend) until it can no longer land.
-                if Instant::now() < until {
-                    return Err(Error::Kafka("produce in doubt"));
+        self.ensure_producer(&tag)?;
+        for (epoch, set) in outputs {
+            let done = self.progress.as_ref().and_then(|p| p.epoch);
+            if done.is_some_and(|d| *epoch <= d) {
+                self.stats.already_present += 1;
+                if let Some(src) = &self.offsets {
+                    src.published(*epoch);
                 }
-                self.in_doubt[slot] = None;
-                self.fences[slot] = Fence::Unknown;
+                continue;
             }
-            if self.fences[slot] == Fence::Unknown {
-                self.fences[slot] = self.read_fence(p, &tag)?;
-            }
-            let mut fence = self.fences[slot];
-            let mut batch: Vec<Record> = Vec::new();
-            let mut last = fence;
-            let mut next_lsn = match fence {
-                Fence::At { lsn, .. } => lsn.checked_add(1).ok_or(Error::Overflow)?,
-                _ => 0,
-            };
-            for (epoch, set) in outputs {
-                if let Fence::At { epoch: fe, .. } = fence
-                    && *epoch < fe
+            if let Err(e) = self.publish_epoch(*epoch, set, &tag) {
+                // Abort what can be aborted; a fenced, broken or faulted
+                // producer is simply dropped (the next InitProducerId aborts
+                // its transaction).
+                if let Some(mut p) = self.producer.take()
+                    && p.in_txn
+                    && !p.fenced
+                    && e != Error::Kafka("injected fault")
                 {
-                    continue;
+                    let ok = self.conn.run(|c| p.end(c, false)).is_ok();
+                    if ok {
+                        self.stats.aborted += 1;
+                        self.producer = Some(p);
+                    }
                 }
-                let (key, parts) = (self.cfg.key_column, self.cfg.partitions);
+                if self.producer.is_none() {
+                    self.progress = None;
+                }
+                return Err(e);
+            }
+            if let Some(src) = &self.offsets {
+                src.published(*epoch);
+            }
+        }
+        Ok(())
+    }
+
+    fn publish_epoch(&mut self, epoch: u64, set: &ZSet, tag: &[u8]) -> Result<(), Error> {
+        let fault = self.fault.take();
+        let mut next = self
+            .progress
+            .as_ref()
+            .ok_or(Error::Kafka("output progress"))?
+            .next_lsn
+            .clone();
+        let progress_group = self.progress_group();
+        let group_offsets = match &self.offsets {
+            Some(src) => src.offsets_after(epoch)?,
+            None => None,
+        };
+        let producer = self.producer.as_mut().ok_or(Error::Kafka("producer"))?;
+        let (key, parts) = (self.cfg.key_column, self.cfg.partitions);
+        let mut published = 0u64;
+        self.conn.run(|c| -> KResult<()> {
+            producer.begin()?;
+            for p in 0..parts {
+                let slot = p as usize;
                 let rows = set
                     .entries()
                     .filter(|(row, _)| output_partition(row[key], parts) == p);
+                let mut batch: Vec<KafkaRecord> = Vec::new();
                 for (seq, (row, weight)) in rows.enumerate() {
-                    let seq = u32::try_from(seq).map_err(|_| Error::Overflow)?;
-                    if let Fence::At {
-                        epoch: fe, seq: fs, ..
-                    } = fence
-                        && (*epoch, seq) <= (fe, fs)
-                    {
-                        self.stats.already_present += 1;
-                        continue;
-                    }
+                    let seq = u64::try_from(seq).map_err(|_| Fail::Local(Error::Overflow))?;
                     let header = CdcHeader {
-                        source_lsn: next_lsn,
+                        source_lsn: next[slot],
                         event_ts_ms: 0,
                         z_weight: weight,
                         partition_id: p as u32,
@@ -1163,45 +1391,58 @@ impl<S: CommitSink> KafkaSink<S> {
                         .insert(H_EPOCH.into(), epoch.to_be_bytes().to_vec());
                     record
                         .headers
-                        .insert(H_SEQ.into(), u64::from(seq).to_be_bytes().to_vec());
-                    record.headers.insert(H_CIRCUIT.into(), tag.clone());
+                        .insert(H_SEQ.into(), seq.to_be_bytes().to_vec());
+                    record.headers.insert(H_CIRCUIT.into(), tag.to_vec());
                     batch.push(record);
-                    last = Fence::At {
-                        epoch: *epoch,
-                        seq,
-                        lsn: next_lsn,
-                    };
-                    next_lsn = next_lsn.checked_add(1).ok_or(Error::Overflow)?;
+                    next[slot] = next[slot]
+                        .checked_add(1)
+                        .ok_or(Fail::Local(Error::Overflow))?;
                     if batch.len() == self.cfg.max_batch_records {
-                        self.produce(p, std::mem::take(&mut batch), last)?;
-                        fence = last;
+                        let b = producer.prepare(c, &self.cfg.topic, p, &batch)?;
+                        producer.deliver(c, &self.cfg.topic, p, &b)?;
+                        published += batch.len() as u64;
+                        batch.clear();
                     }
                 }
+                if !batch.is_empty() {
+                    let b = producer.prepare(c, &self.cfg.topic, p, &batch)?;
+                    producer.deliver(c, &self.cfg.topic, p, &b)?;
+                    published += batch.len() as u64;
+                }
             }
-            if !batch.is_empty() {
-                self.produce(p, batch, last)?;
+            if fault == Some(PublishFault::AfterRecords) {
+                return Err(Fail::Local(Error::Kafka("injected fault")));
             }
-        }
+            let meta = progress_metadata(epoch, tag);
+            let progress = GroupOffsets {
+                group: progress_group.clone(),
+                generation: -1,
+                member_id: String::new(),
+                instance_id: None,
+                offsets: (0..parts)
+                    .map(|p| -> KResult<_> {
+                        let lsn = i64::try_from(next[p as usize])
+                            .map_err(|_| Fail::Local(Error::Overflow))?;
+                        Ok((self.cfg.topic.clone(), p, lsn, meta.clone()))
+                    })
+                    .collect::<KResult<Vec<_>>>()?,
+            };
+            producer.send_offsets(c, &progress)?;
+            if let Some(g) = &group_offsets {
+                producer.send_offsets(c, g)?;
+            }
+            if fault == Some(PublishFault::AfterOffsets) {
+                return Err(Fail::Local(Error::Kafka("injected fault")));
+            }
+            producer.end(c, true)
+        })?;
+        self.stats.published += published;
+        self.stats.transactions += 1;
+        self.progress = Some(Progress {
+            epoch: Some(epoch),
+            next_lsn: next,
+        });
         Ok(())
-    }
-
-    fn produce(&mut self, p: i32, batch: Vec<Record>, last: Fence) -> Result<(), Error> {
-        let n = batch.len() as u64;
-        match self.conn.produce_once(&self.cfg.topic, p, batch) {
-            Ok(_) => {
-                self.fences[p as usize] = last;
-                self.stats.published += n;
-                Ok(())
-            }
-            Err(e) => {
-                // The batch may or may not be in the log, and the request may
-                // still be in flight: the produce connection is dropped, and the
-                // partition is read back only after the in-doubt window.
-                self.fences[p as usize] = Fence::Unknown;
-                self.in_doubt[p as usize] = Some(Instant::now() + self.conn.in_doubt_window());
-                Err(e)
-            }
-        }
     }
 }
 
@@ -1231,8 +1472,10 @@ impl<S: CommitSink> CommitSink for KafkaSink<S> {
     }
     fn crash(&mut self) -> Result<(), Error> {
         self.inner.crash()?;
-        // A new incarnation knows nothing about the topic.
-        self.fences.fill(Fence::Unknown);
+        // A new incarnation knows nothing about the topic: it fences the
+        // old producer and reads the progress again.
+        self.producer = None;
+        self.progress = None;
         self.pending = Some(Error::Kafka("restarted"));
         Ok(())
     }
@@ -1241,15 +1484,18 @@ impl<S: CommitSink> CommitSink for KafkaSink<S> {
     }
 }
 
-/// Read an output topic back as per-epoch deltas, checking that every
-/// partition is a gap- and duplicate-free sequence (LSN `0, 1, ...` and
-/// increasing `(epoch, seq)`) written for one circuit.
+/// Read an output topic back (read-committed) as per-epoch deltas, checking
+/// that every partition is a gap- and duplicate-free sequence (LSN
+/// `0, 1, ...` and increasing `(epoch, seq)`) written for one circuit.
 pub fn read_kafka_output(
     conn: &KafkaConnection,
     circuit: &Circuit,
     topic: &str,
     partitions: i32,
 ) -> Result<BTreeMap<u64, ZSet>, Error> {
+    if !conn.cfg.read_committed {
+        return Err(Error::Kafka("output must be read committed"));
+    }
     let width = circuit.nodes[circuit.output].width;
     let limits = circuit.limits;
     let tag = circuit_tag(&circuit_identity(circuit)?);
