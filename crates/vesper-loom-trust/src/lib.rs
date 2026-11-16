@@ -10,6 +10,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use vesper_loom_calculus::PackageName;
 use vesper_loom_cas::{DerivationKey, Digest, Domain, ObjectId, ObjectKind};
 
+pub mod slopsquat;
+
 pub const SCHEMA_VERSION: u32 = 1;
 pub const MAX_POLICY_KEYS: usize = 64;
 pub const MAX_ATTESTATIONS: usize = 128;
