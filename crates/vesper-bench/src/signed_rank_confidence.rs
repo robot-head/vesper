@@ -4,8 +4,8 @@
 //! equiprobable signs conditional on the centered nonzero magnitudes and zero
 //! pattern. This API does not establish those assumptions or measurement
 //! provenance, and is separate from the benchmark regression gate.
-use crate::Decision;
-use std::fmt;
+use crate::{Decision, PairedSample};
+use std::{cmp::Ordering, fmt};
 
 /// The inversion visits at most 1057 open intervals and breakpoint atoms.
 pub const MAX_SIGNED_RANK_CONFIDENCE_PAIRS: usize = 32;
@@ -36,6 +36,154 @@ pub struct SignedRankConfidenceSegment {
     pub lower_inclusive: bool,
     pub upper_times_two: Option<i128>,
     pub upper_inclusive: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairedSampleConfidenceError {
+    EmptyEvidence,
+    TooManySamples,
+    OperationsMismatch { index: usize },
+    DifferenceOutOfRange { index: usize },
+    Inversion(SignedRankConfidenceError),
+}
+impl fmt::Display for PairedSampleConfidenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "paired sample confidence: {self:?}")
+    }
+}
+impl std::error::Error for PairedSampleConfidenceError {}
+
+/// Confidence-set endpoints are stored in twice-total-difference units.
+/// Divide each finite endpoint by `2 * operations_per_arm` to obtain the exact
+/// per-operation location; neither component is rounded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairedSampleConfidenceSet {
+    operations_per_arm: u64,
+    segments: Vec<SignedRankConfidenceSegment>,
+}
+impl PairedSampleConfidenceSet {
+    pub fn operations_per_arm(&self) -> u64 {
+        self.operations_per_arm
+    }
+    pub fn segments(&self) -> &[SignedRankConfidenceSegment] {
+        &self.segments
+    }
+    pub fn endpoint_denominator(&self) -> u128 {
+        2 * u128::from(self.operations_per_arm)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PairedSampleGateInconclusive {
+    EmptyConfidenceSet,
+    ThresholdNotSeparated,
+}
+
+/// A decision and its complete exact per-operation confidence evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PairedSampleConfidenceGate {
+    pub decision: Decision,
+    pub reason: Option<PairedSampleGateInconclusive>,
+    pub confidence: PairedSampleConfidenceSet,
+}
+
+/// Compare an exact paired-sample confidence set against a maximum allowed
+/// candidate-minus-baseline difference per operation, in the samples' common
+/// unit. The entire set must be at or below the threshold to pass, or strictly
+/// above it to report regression. Empty or nonseparating sets are inconclusive.
+/// This inherits [`paired_samples_confidence_set`]'s restrictions and
+/// assumptions, and does not change the existing ratio gate.
+pub fn gate_paired_sample_confidence(
+    samples: &[PairedSample],
+    max_difference: i64,
+) -> Result<PairedSampleConfidenceGate, PairedSampleConfidenceError> {
+    let confidence = paired_samples_confidence_set(samples)?;
+    let (decision, reason) = classify_paired_sample_set(
+        confidence.segments(),
+        confidence.operations_per_arm(),
+        max_difference,
+    );
+    Ok(PairedSampleConfidenceGate {
+        decision,
+        reason,
+        confidence,
+    })
+}
+
+// The confidence builder returns ordered, nonempty segments and a positive
+// common operation count. The full threshold product can exceed i128, so it
+// is compared as a sign and u128 magnitude rather than rounded or saturated.
+fn compare_endpoint(endpoint: i128, operations: u64, max_difference: i64) -> Ordering {
+    // |i64::MIN| * u64::MAX * 2 is below 2^128, so this product fits u128.
+    let threshold = u128::from(max_difference.unsigned_abs()) * u128::from(operations) * 2;
+    match (endpoint < 0, max_difference < 0) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => endpoint.unsigned_abs().cmp(&threshold),
+        (true, true) => threshold.cmp(&endpoint.unsigned_abs()),
+    }
+}
+
+fn classify_paired_sample_set(
+    segments: &[SignedRankConfidenceSegment],
+    operations: u64,
+    max_difference: i64,
+) -> (Decision, Option<PairedSampleGateInconclusive>) {
+    let (Some(first), Some(last)) = (segments.first(), segments.last()) else {
+        return (
+            Decision::Inconclusive,
+            Some(PairedSampleGateInconclusive::EmptyConfidenceSet),
+        );
+    };
+    if last.upper_times_two.is_some_and(|upper| {
+        compare_endpoint(upper, operations, max_difference) != Ordering::Greater
+    }) {
+        (Decision::Pass, None)
+    } else if first.lower_times_two.is_some_and(|lower| {
+        let order = compare_endpoint(lower, operations, max_difference);
+        order == Ordering::Greater || (order == Ordering::Equal && !first.lower_inclusive)
+    }) {
+        (Decision::Regression, None)
+    } else {
+        (
+            Decision::Inconclusive,
+            Some(PairedSampleGateInconclusive::ThresholdNotSeparated),
+        )
+    }
+}
+
+/// Build an exact per-operation confidence set from paired totals with the same
+/// operation count. The common positive denominator preserves all signed-rank
+/// orderings, ties and fractional endpoints. A difference outside i64 or a
+/// differing operation count is rejected; no samples are silently discarded.
+/// Callers must establish common units, measurement provenance, and the
+/// conditional-sign assumptions of [`signed_rank_confidence_set`]. This does
+/// not change the existing ratio gate.
+pub fn paired_samples_confidence_set(
+    samples: &[PairedSample],
+) -> Result<PairedSampleConfidenceSet, PairedSampleConfidenceError> {
+    if samples.is_empty() {
+        return Err(PairedSampleConfidenceError::EmptyEvidence);
+    }
+    if samples.len() > MAX_SIGNED_RANK_CONFIDENCE_PAIRS {
+        return Err(PairedSampleConfidenceError::TooManySamples);
+    }
+    let operations = samples[0].operations_per_arm();
+    let mut differences = [0i64; MAX_SIGNED_RANK_CONFIDENCE_PAIRS];
+    for (index, sample) in samples.iter().enumerate() {
+        if sample.operations_per_arm() != operations {
+            return Err(PairedSampleConfidenceError::OperationsMismatch { index });
+        }
+        let delta = i128::from(sample.candidate_total()) - i128::from(sample.baseline_total());
+        differences[index] = i64::try_from(delta)
+            .map_err(|_| PairedSampleConfidenceError::DifferenceOutOfRange { index })?;
+    }
+    let segments = signed_rank_confidence_set(&differences[..samples.len()])
+        .map_err(PairedSampleConfidenceError::Inversion)?;
+    Ok(PairedSampleConfidenceSet {
+        operations_per_arm: operations,
+        segments,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,6 +386,82 @@ fn accepts(differences: &[i64], location_times_four: i128) -> bool {
     // 2*tail / total > 1/20, equivalently 40*tail > total. With at most
     // 32 nonzero observations, both the subset counts and 40*tail fit u64.
     40 * tail > total
+}
+
+#[cfg(test)]
+mod paired_gate_tests {
+    use super::*;
+
+    fn segment(
+        lower: Option<i128>,
+        lower_inclusive: bool,
+        upper: Option<i128>,
+        upper_inclusive: bool,
+    ) -> SignedRankConfidenceSegment {
+        SignedRankConfidenceSegment {
+            lower_times_two: lower,
+            lower_inclusive,
+            upper_times_two: upper,
+            upper_inclusive,
+        }
+    }
+
+    #[test]
+    fn compare_thresholds_respects_fractional_open_and_disconnected_sets() {
+        assert_eq!(
+            classify_paired_sample_set(&[], 2, 0),
+            (
+                Decision::Inconclusive,
+                Some(PairedSampleGateInconclusive::EmptyConfidenceSet)
+            )
+        );
+        let right_open = [segment(Some(0), false, Some(2), true)];
+        assert_eq!(
+            classify_paired_sample_set(&right_open, 2, 0),
+            (Decision::Regression, None)
+        );
+        let right_closed = [segment(Some(0), true, Some(2), true)];
+        assert_eq!(
+            classify_paired_sample_set(&right_closed, 2, 0),
+            (
+                Decision::Inconclusive,
+                Some(PairedSampleGateInconclusive::ThresholdNotSeparated)
+            )
+        );
+        let left_open = [segment(None, false, Some(0), false)];
+        assert_eq!(
+            classify_paired_sample_set(&left_open, 2, 0),
+            (Decision::Pass, None)
+        );
+        let disconnected = [
+            segment(Some(-4), true, Some(-2), true),
+            segment(Some(2), true, Some(4), true),
+        ];
+        assert_eq!(
+            classify_paired_sample_set(&disconnected, 2, 0),
+            (
+                Decision::Inconclusive,
+                Some(PairedSampleGateInconclusive::ThresholdNotSeparated)
+            )
+        );
+        let all = [segment(None, false, None, false)];
+        assert_eq!(
+            classify_paired_sample_set(&all, u64::MAX, i64::MIN).0,
+            Decision::Inconclusive
+        );
+        assert_eq!(
+            classify_paired_sample_set(&all, u64::MAX, i64::MAX).0,
+            Decision::Inconclusive
+        );
+        assert_eq!(
+            compare_endpoint(i128::MIN, u64::MAX, i64::MIN),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_endpoint(i128::MAX, u64::MAX, i64::MAX),
+            Ordering::Less
+        );
+    }
 }
 
 #[cfg(test)]

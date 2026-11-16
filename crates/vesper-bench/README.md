@@ -163,6 +163,22 @@ on the centered nonzero magnitudes and zero pattern at the true location. The
 API does not establish those assumptions or measurement provenance, and it does
 not alter the existing regression gate.
 
+`paired_samples_confidence_set` builds that set directly from up to 32
+`PairedSample`s with the same operations-per-arm count. It inverts exact total
+differences and retains the common count: divide each finite returned endpoint
+by `endpoint_denominator()` to obtain the per-operation location. Different
+operation counts and total differences outside `i64` are rejected, not rounded.
+The caller must establish common measurement units, provenance, and the same
+conditional-sign assumptions.
+
+`gate_paired_sample_confidence` compares that complete set with an integer
+per-operation maximum using exact arithmetic. It passes when every retained
+location is at or below the maximum, reports a regression when every location
+is strictly above it, and is inconclusive for an empty set or one that does
+not separate the threshold. Open and unbounded endpoints are respected. The
+result retains the confidence set and inherits its input requirements and
+caller-established assumptions.
+
 `gate_signed_rank_confidence` compares the complete confidence set against a
 maximum candidate-minus-baseline difference in the same units. It passes only
 if every retained location is at or below the threshold and reports a regression
