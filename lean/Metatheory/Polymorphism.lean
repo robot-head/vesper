@@ -1118,6 +1118,218 @@ theorem liftθ_comp (θ1 θ2 : Nat → Row) : liftθ (compθ θ1 θ2) = compθ (
     congr 1
     funext k; simp only [compθ, shiftθ]; rw [row_inst_rvar]; rfl
 
+/-! ### Lacks constraints for open rows
+
+This algebra uses the calculus's actual rows and substitutions. It does not
+change `HasType.rapp`, whose closed-row premise is still in force. -/
+namespace RowLacks
+
+abbrev Constraints := Nat → List Nat
+
+def empty : Constraints := fun _ => []
+
+/-- A variable records the labels every allowed instance must omit. -/
+def excludes (Δ : Constraints) (ρ : Row) (l : Nat) : Prop :=
+  ∀ entry, entry ∈ ρ → match entry with
+    | .abort => True
+    | .user k => k ≠ l
+    | .rvar n => l ∈ Δ n
+
+def Respects (Δ Γ : Constraints) (θ : Nat → Row) : Prop :=
+  ∀ n l, l ∈ Δ n → excludes Γ (θ n) l
+
+def extend (Δ : Constraints) (H : List Nat) : Constraints
+  | 0 => H
+  | n + 1 => Δ n
+
+def Closing (Δ : Constraints) (θ : Nat → Row) : Prop :=
+  (∀ n, RowClosed (θ n)) ∧ Respects Δ empty θ
+
+theorem excludes_nil (Δ : Constraints) (l : Nat) : excludes Δ [] l := by
+  intro entry h; cases h
+
+theorem excludes_user_iff (Δ : Constraints) (k l : Nat) :
+    excludes Δ [.user k] l ↔ k ≠ l := by
+  simp [excludes]
+
+theorem excludes_variable_iff (Δ : Constraints) (n l : Nat) :
+    excludes Δ [.rvar n] l ↔ l ∈ Δ n := by
+  simp [excludes]
+
+theorem excludes_implies_absent {Δ : Constraints} {ρ : Row} {l : Nat}
+    (h : excludes Δ ρ l) : .user l ∉ ρ := by
+  intro member
+  exact h (.user l) member rfl
+
+theorem closed_rows_iff {Δ : Constraints} {ρ : Row} {l : Nat} (closed : RowClosed ρ) :
+    excludes Δ ρ l ↔ .user l ∉ ρ := by
+  refine ⟨excludes_implies_absent, ?_⟩
+  intro absent entry member
+  cases entry with
+  | abort => trivial
+  | user k => intro equal; subst k; exact absent member
+  | rvar n => exact False.elim (closed n member)
+
+theorem substitution_preserves {Δ Γ : Constraints} {θ : Nat → Row} {ρ : Row} {l : Nat}
+    (h : excludes Δ ρ l) (respects : Respects Δ Γ θ) :
+    excludes Γ (Row.inst θ ρ) l := by
+  intro entry member
+  obtain ⟨source, inRow, inImage⟩ := List.mem_flatMap.mp member
+  cases source with
+  | abort =>
+    simp only [Label.inst, List.mem_singleton] at inImage
+    subst entry; trivial
+  | user k =>
+    simp only [Label.inst, List.mem_singleton] at inImage
+    subst entry
+    exact h (.user k) inRow
+  | rvar n => exact respects n l (h (.rvar n) inRow) entry inImage
+
+theorem identity_respects (Δ : Constraints) : Respects Δ Δ idθ := by
+  intro n l member
+  exact (excludes_variable_iff Δ n l).mpr member
+
+theorem composition_respects {Δ Γ Ξ : Constraints} {θ σ : Nat → Row}
+    (first : Respects Δ Γ θ) (second : Respects Γ Ξ σ) :
+    Respects Δ Ξ (compθ θ σ) := by
+  intro n l member
+  exact substitution_preserves (first n l member) second
+
+theorem shift_respects (Δ : Constraints) (H : List Nat) :
+    Respects Δ (extend Δ H) shiftθ := by
+  intro n l member
+  exact (excludes_variable_iff (extend Δ H) (n + 1) l).mpr member
+
+theorem lift_respects {Δ Γ : Constraints} {θ : Nat → Row}
+    (h : Respects Δ Γ θ) (H : List Nat) :
+    Respects (extend Δ H) (extend Γ H) (liftθ θ) := by
+  intro n l member
+  cases n with
+  | zero => exact (excludes_variable_iff (extend Γ H) 0 l).mpr member
+  | succ n => exact substitution_preserves (h n l member) (shift_respects Γ H)
+
+/-- Opening may use an open row if its variables carry the required lacks. -/
+theorem open_respects {Δ : Constraints} {ρ : Row} {H : List Nat}
+    (h : ∀ l, l ∈ H → excludes Δ ρ l) :
+    Respects (extend Δ H) Δ (openθ ρ) := by
+  intro n l member
+  cases n with
+  | zero => exact h l member
+  | succ n => exact (excludes_variable_iff Δ n l).mpr member
+
+theorem opening_preserves {Δ : Constraints} {ρ ε : Row} {H : List Nat} {l : Nat}
+    (instanceLacks : ∀ k, k ∈ H → excludes Δ ρ k)
+    (bodyLacks : excludes (extend Δ H) ε l) :
+    excludes Δ (Row.inst (openθ ρ) ε) l :=
+  substitution_preserves bodyLacks (open_respects instanceLacks)
+
+/-- Constraints always have a concrete witness: an empty row for each variable. -/
+theorem empty_closing (Δ : Constraints) : Closing Δ (fun _ => []) := by
+  constructor
+  · intro n k member; cases member
+  · intro n l member; exact excludes_nil empty l
+
+theorem closing_avoids {Δ : Constraints} {ρ : Row} {l : Nat} {θ : Nat → Row}
+    (h : excludes Δ ρ l) (closing : Closing Δ θ) :
+    .user l ∉ Row.inst θ ρ :=
+  excludes_implies_absent (substitution_preserves h closing.2)
+
+theorem closed_after_inst (θ : Nat → Row) (closed : ∀ n, RowClosed (θ n))
+    (ρ : Row) : RowClosed (Row.inst θ ρ) := by
+  intro n member
+  obtain ⟨entry, _, inImage⟩ := List.mem_flatMap.mp member
+  cases entry with
+  | abort => simp [Label.inst] at inImage
+  | user k => simp [Label.inst] at inImage
+  | rvar k => exact closed k n inImage
+
+theorem closing_composition {Δ Γ : Constraints} {θ σ : Nat → Row}
+    (first : Respects Δ Γ θ) (second : Closing Γ σ) :
+    Closing Δ (compθ θ σ) :=
+  ⟨fun n => closed_after_inst σ second.1 (θ n), composition_respects first second.2⟩
+
+theorem opening_closing_avoids {Δ : Constraints} {ρ ε : Row} {H : List Nat}
+    {l : Nat} {θ : Nat → Row}
+    (instanceLacks : ∀ k, k ∈ H → excludes Δ ρ k)
+    (bodyLacks : excludes (extend Δ H) ε l) (closing : Closing Δ θ) :
+    .user l ∉ Row.inst θ (Row.inst (openθ ρ) ε) :=
+  closing_avoids (opening_preserves instanceLacks bodyLacks) closing
+
+/-- A concrete counter-instance for an unconstrained variable/label pair. -/
+def expose (n l : Nat) : Nat → Row := fun k => if k = n then [.user l] else []
+
+theorem expose_closing {Δ : Constraints} {n l : Nat} (notForbidden : l ∉ Δ n) :
+    Closing Δ (expose n l) := by
+  constructor
+  · intro k rowVar
+    by_cases equal : k = n <;> simp [expose, equal]
+  · intro k forbiddenLabel member
+    by_cases equal : k = n
+    · subst k
+      have avoid : l ≠ forbiddenLabel := by
+        intro same
+        apply notForbidden
+        simpa only [same] using member
+      simpa [expose] using (excludes_user_iff empty l forbiddenLabel).mpr avoid
+    · simpa [expose, equal] using excludes_nil empty forbiddenLabel
+
+/-- The constraint is exact for all concrete instances, not merely sufficient. -/
+theorem closed_instantiations_iff {Δ : Constraints} {ρ : Row} {l : Nat} :
+    excludes Δ ρ l ↔
+      ∀ θ, Closing Δ θ → .user l ∉ Row.inst θ ρ := by
+  constructor
+  · intro h θ closing; exact closing_avoids h closing
+  · intro semantic entry member
+    cases entry with
+    | abort => trivial
+    | user k =>
+      intro equal
+      subst k
+      apply semantic (fun _ => []) (empty_closing Δ)
+      exact List.mem_flatMap.mpr ⟨.user l, member, by simp [Label.inst]⟩
+    | rvar n =>
+      by_cases forbidden : l ∈ Δ n
+      · exact forbidden
+      · exact False.elim (semantic (expose n l) (expose_closing forbidden)
+          (List.mem_flatMap.mpr ⟨.rvar n, member, by simp [Label.inst, expose]⟩))
+
+theorem closed_lacks_iff_avoids {Δ : Constraints} {ρ : Row} {H : List Nat}
+    (closed : RowClosed ρ) :
+    (∀ l, l ∈ H → excludes Δ ρ l) ↔ Avoids ρ H := by
+  constructor
+  · intro h l member; exact excludes_implies_absent (h l member)
+  · intro h l member; exact (closed_rows_iff closed).mpr (h l member)
+
+theorem open_instance_does_not_capture :
+    Respects (extend (fun _ => [7]) [7]) (fun _ => [7]) (openθ [.rvar 0]) := by
+  apply open_respects
+  intro l member
+  have same : l = 7 := by simpa using member
+  subst l
+  exact (excludes_variable_iff _ 0 7).mpr (by simp)
+
+theorem open_row_constrained :
+    excludes (fun _ => [7]) [.rvar 0] 7 ∧ ¬ RowClosed [.rvar 0] := by
+  constructor
+  · exact (excludes_variable_iff _ 0 7).mpr (by simp)
+  · intro h; exact h 0 (by simp)
+
+theorem capture_rejected :
+    ¬ Respects (fun _ => [7]) empty (fun _ => [.user 7]) := by
+  intro h
+  have bad := (excludes_user_iff empty 7 7).mp (h 0 7 (by simp))
+  exact bad rfl
+
+/-- Plain syntactic avoidance does not protect an unconstrained open variable. -/
+theorem syntactic_avoidance_is_not_stable :
+    ∃ ρ θ, Avoids ρ [7] ∧ (∀ n, RowClosed (θ n)) ∧ .user 7 ∈ Row.inst θ ρ := by
+  refine ⟨[.rvar 0], (fun _ => [.user 7]), ?_, ?_, ?_⟩
+  · intro l _ member; simp at member
+  · intro n k member; simp at member
+  · simp [Row.inst, Label.inst]
+
+end RowLacks
+
 theorem ty_inst_id (t : Ty) : t.inst idθ = t := by
   induction t with
   | pair md t1 m1 t2 m2 ih1 ih2 => simp only [Ty.inst, ih1, ih2]
@@ -1135,20 +1347,26 @@ theorem ty_inst_inst (t : Ty) : ∀ θ1 θ2 : Nat → Row, (t.inst θ1).inst θ2
   | rall H τ ih => intro θ1 θ2; simp only [Ty.inst, ih, liftθ_comp]
   | _ => intro θ1 θ2; rfl
 
-/-- Instantiating after opening `∀ρ` at a closed row is opening after
-instantiating under the binder. -/
-theorem inst_open (τ : Ty) (θ : Nat → Row) {ρ : Row} (hρ : RowClosed ρ) :
-    (τ.inst (openθ ρ)).inst θ = (τ.inst (liftθ θ)).inst (openθ ρ) := by
+/-- Opening commutes with substitution for an arbitrary, possibly open row;
+the opening row must itself be instantiated. -/
+theorem inst_open_general (τ : Ty) (θ : Nat → Row) (ρ : Row) :
+    (τ.inst (openθ ρ)).inst θ =
+      (τ.inst (liftθ θ)).inst (openθ (Row.inst θ ρ)) := by
   rw [ty_inst_inst, ty_inst_inst]
   congr 1
   funext n; cases n with
-  | zero => simp only [compθ, openθ, liftθ]; rw [row_inst_closed hρ, row_inst_rvar]; rfl
+  | zero => simp only [compθ, openθ, liftθ]; rw [row_inst_rvar]; rfl
   | succ n =>
     simp only [compθ, openθ, liftθ]
     rw [row_inst_rvar, row_inst_inst]
-    have : compθ shiftθ (openθ ρ) = idθ := by
+    have : compθ shiftθ (openθ (Row.inst θ ρ)) = idθ := by
       funext k; simp only [compθ, shiftθ, row_inst_rvar]; rfl
     rw [this, row_inst_id]
+
+/-- The original closed-row identity is a corollary of general opening. -/
+theorem inst_open (τ : Ty) (θ : Nat → Row) {ρ : Row} (hρ : RowClosed ρ) :
+    (τ.inst (openθ ρ)).inst θ = (τ.inst (liftθ θ)).inst (openθ ρ) := by
+  simpa only [row_inst_closed hρ θ] using inst_open_general τ θ ρ
 
 theorem kind_inst (t : Ty) : ∀ θ : Nat → Row, (t.inst θ).kind = t.kind := by
   induction t with
@@ -4555,6 +4773,32 @@ end Examples
 #print axioms Vesper.Metatheory.Polymorphism.poly_use_typed
 #print axioms Vesper.Metatheory.Polymorphism.poly_use_runs
 #print axioms Vesper.Metatheory.Polymorphism.escape_rejected
+
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.excludes_nil
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.excludes_user_iff
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.excludes_variable_iff
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.excludes_implies_absent
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.closed_rows_iff
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.substitution_preserves
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.identity_respects
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.composition_respects
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.shift_respects
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.lift_respects
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.open_respects
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.opening_preserves
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.empty_closing
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.closing_avoids
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.closed_after_inst
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.closing_composition
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.opening_closing_avoids
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.expose_closing
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.closed_instantiations_iff
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.closed_lacks_iff_avoids
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.open_instance_does_not_capture
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.open_row_constrained
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.capture_rejected
+#print axioms Vesper.Metatheory.Polymorphism.RowLacks.syntactic_avoidance_is_not_stable
+#print axioms Vesper.Metatheory.Polymorphism.inst_open_general
 
 end Vesper.Metatheory.Polymorphism
 

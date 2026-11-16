@@ -14,7 +14,7 @@ use std::path::PathBuf;
 const NAMESPACE: &str = "Vesper.Metatheory.Polymorphism";
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
 /// The headline results; the report lists all of them.
-const KEY_THEOREMS: [&str; 43] = [
+const KEY_THEOREMS: [&str; 52] = [
     "scalar_linear_floor_kind",
     "scalar_default_floor_kind",
     "scalar_linear_wrapper_not_copy",
@@ -58,6 +58,15 @@ const KEY_THEOREMS: [&str; 43] = [
     "st_handler_exhausts",
     "lin_closure_twice_rejected",
     "linear_state_across_abort_rejected",
+    "RowLacks.substitution_preserves",
+    "RowLacks.composition_respects",
+    "RowLacks.lift_respects",
+    "RowLacks.opening_preserves",
+    "RowLacks.closed_instantiations_iff",
+    "RowLacks.capture_rejected",
+    "RowLacks.closing_composition",
+    "inst_open_general",
+    "RowLacks.syntactic_avoidance_is_not_stable",
 ];
 
 /// Resolve an elan proxy to the pinned toolchain's real binary from the
