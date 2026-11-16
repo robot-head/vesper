@@ -1,3 +1,4 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
-vesper_crate()
+# Pure Rust tests: no external tools or host services.
+vesper_crate(remote_tests = ["*"])

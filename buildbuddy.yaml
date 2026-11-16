@@ -1,7 +1,7 @@
 # CI on BuildBuddy Workflows (https://www.buildbuddy.io/docs/workflows-config).
 # Each action is one GitHub check. Every build and test runs through Bazel
 # (docs/bazel.md): compile actions execute on BuildBuddy's remote executors
-# (--config=rbe_build), tests run inside the workflow VM, which has Lean and
+# (--config=rbe_build); host-dependent tests run in the VM, which has Lean and
 # QEMU. BuildBuddy adds the API key, build event upload and ROLE=CI itself.
 
 actions:
@@ -33,7 +33,7 @@ actions:
           export VESPER_CARGO="$(cat .ci-logos-cargo-path)"
           export VESPER_LOGOS42_ROOT="$(mktemp -d /tmp/vesper-logos42-ci.XXXXXX)/checker"
           BAZEL_FLAGS="--config=ci --config=rbe_build" scripts/ci/prepare-logos42.sh "$VESPER_LOGOS42_ROOT"
-          bazel test --config=ci --config=rbe_build --local_test_jobs=2 //...
+          bazel test --config=ci --config=rbe_build --config=ci_tests //...
       - run: "scripts/ci/check-lean-models.sh"
 
   - name: "Native and acceptance scripts"

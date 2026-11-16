@@ -21,7 +21,6 @@ common --@rules_rust//rust/settings:extra_rustc_flag=-Alinker-messages
 
 # Tests that check generated Lean pass it through when it is set.
 test --test_env=VESPER_LEAN
-test --test_env=VESPER_LOGOS42_ROOT
 test --test_output=errors
 test --test_summary=terse
 
@@ -56,10 +55,19 @@ common:rbe --extra_execution_platforms=//platforms:rbe_linux_x86_64
 common:rbe --platforms=//platforms:rbe_linux_x86_64
 common:rbe --jobs=100
 
-# --config=rbe_build: compile remotely but run tests on this machine, which
-# has the host tools (Lean, QEMU, network namespaces) some tests use.
+# --config=rbe_build: compile remotely. Audited hermetic tests may run remotely;
+# other Rust tests carry no-remote-exec and use this machine's host tools.
 common:rbe_build --config=rbe
-test:rbe_build --strategy=TestRunner=local
+test:rbe_build --strategy=TestRunner=remote,local
+
+# The 8 CPU / 22GB workflow VM reserves resources for Bazel and downloads.
+# Zero enables per-test CPU/memory estimates instead of a blanket test count.
+# The conservative default reserves 4GiB for unclassified local tests.
+test:ci_tests --local_test_jobs=0
+common:ci_tests --local_resources=cpu=6
+common:ci_tests --local_resources=memory=18432
+test:ci_tests --default_test_resources=memory=4096
+test:ci_tests --default_test_resources=cpu=1
 
 # Personal settings, such as the BuildBuddy API key.
 try-import %workspace%/user.bazelrc

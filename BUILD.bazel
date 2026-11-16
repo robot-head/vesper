@@ -1,4 +1,5 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel/tests:ci_analysis_test.bzl", "compile_inputs_test", "environment_test", "runfiles_test")
 
 exports_files([
     "Cargo.lock",
@@ -8,6 +9,25 @@ exports_files([
 # The root package also owns docs/, examples/, lean/, scripts/ and tools/
 # (directories without their own BUILD.bazel), which the CLI and its tests read.
 vesper_crate(
+    # CLI checkers embed their own source identities; keep those inputs out of
+    # the library compilation used by every crate and integration test.
+    binary_compile_data = [
+        "lean/**",
+        "tools/logos42/**",
+        "tools/resource-model42/KernelSnapshot.lean",
+        "docs/rfcs/resource-model42-source-manifest.json",
+    ],
+    # Only files embedded by library/binary sources, including cfg(test) code.
+    # Runtime docs, website pages and proof packets must not rebuild the compiler.
+    compile_data = [
+        "assets/fonts/**",
+        "examples/*.ves",
+        "src/**/*.ves",
+        "tests/fixtures/source_macros/keep.ves",
+        "lean/StylusAndLintSafety.lean",
+        "lean/RewriteWitness.lean",
+        "tools/proof-audit/Audit.lean",
+    ],
     copy_test_cwd = [
         "test/lean4lean_foundations42",
         "test/lean4lean_construction42",
@@ -24,7 +44,7 @@ vesper_crate(
         "test/lean4lean_map_tree42",
         "test/resource_oracle42",
     ],
-    extra_compile_data = ["//crates/vesper-doc:files"],
+    extra_integration_compile_data = ["//crates/vesper-doc:files"],
     extra_test_data = [
         "//crates/vesper-doc:files",
         "//crates/vesper-grammar:files",
@@ -36,27 +56,167 @@ vesper_crate(
         "//crates/vesper-pact-bridge:files",
         "//crates/vesper-sim-session:files",
     ],
-    # One Lean -M4096 stage plus estimated wrapper/runtime overhead; see #537.
+    integration_compile_data = [
+        "src/**/*.rs",
+        "tests/fixtures/**",
+        "examples/**",
+        "assets/fonts/**",
+        "website/brand/**",
+        "tools/logos42/**",
+        "tools/proof-audit/**",
+        "tools/resource-model42/KernelSnapshot.lean",
+        "docs/rfcs/resource-model42-source-manifest.json",
+        "lean/**",
+    ],
+    remote_tests = ["test/self_host_front_end"],
+    test_data_by_target = {
+        "test/lean4lean_foundations42": [":proof_packet_data"],
+        "test/lean4lean_construction42": [":proof_packet_data"],
+        "test/lean4lean_order42": [":proof_packet_data"],
+        "test/lean4lean_map42": [":proof_packet_data"],
+        "test/lean4lean_normalize42": [":proof_packet_data"],
+        "test/lean4lean_normalization42": [":proof_packet_data"],
+        "test/lean4lean_comparison42": [":proof_packet_data"],
+        "test/lean4lean_shape42": [":proof_packet_data"],
+        "test/lean4lean_addability42": [":proof_packet_data"],
+        "test/lean4lean_completion42": [":proof_packet_data"],
+        "test/lean4lean_reconstruction42": [":proof_packet_data"],
+        "test/lean4lean_normalized_completion42": [":proof_packet_data"],
+        "test/lean4lean_map_tree42": [":proof_packet_data"],
+        "test/self_host_front_end": glob([
+            "packages/**/*.ves",
+            "examples/**/*.ves",
+            "src/**/*.ves",
+            "tests/fixtures/**/*.ves",
+        ]) + [
+            "//bootstrap:files",
+            "//crates/vesper-doc:files",
+            "//crates/vesper-grammar:files",
+            "//crates/vesper-loom-trust:files",
+            "//crates/vesper-lint:files",
+            "//crates/vesper-nexus:files",
+            "//crates/vesper-pact-bridge:files",
+            "//crates/vesper-sim-session:files",
+        ],
+    },
+    # The sealed Logos root is a fresh external input on every CI run. Only
+    # its acceptance test inherits the random path (and must rerun).
+    test_env_inherit = {
+        "test/logos42_acceptance": ["VESPER_LOGOS42_ROOT"],
+        "test/self_host_front_end": ["SELF_HOST_TRACE"],
+    },
+    test_exec_properties = {
+        "test/self_host_front_end": {
+            "EstimatedCPU": "4",
+            "EstimatedMemory": "5GiB",
+        },
+    },
+    test_path_binaries = {"test/self_host_front_end": []},
+    # The corpus implements TEST_TOTAL_SHARDS/TEST_SHARD_INDEX itself.
+    test_shards = {"test/self_host_front_end": 4},
+    # Reservations include subprocess overhead; they do not enforce RSS limits.
     test_tags = {
+        # These harnesses can run several compiler/evaluator cases in parallel.
+        "vesper_unit_test": [
+            "resources:memory:9216",
+            "resources:cpu:6",
+        ],
+        "test/self_host_check": [
+            "resources:memory:9216",
+            "resources:cpu:8",
+        ],
+        # The CLI audit subprocess permits Lean -M8192 and runs serially.
+        "test/proof_audit_cli": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/format_proof_cli": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/verify_extract_cli": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
         # Lean 4.35 full-library audits allow 8 GiB, plus wrapper overhead.
-        "test/lean4lean_foundations42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/lean4lean_construction42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/lean4lean_order42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/lean4lean_map42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/lean4lean_normalize42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/lean4lean_normalization42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/lean4lean_comparison42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/logos42_acceptance": ["resources:memory:9216", "resources:cpu:1"],
+        "test/lean4lean_foundations42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/lean4lean_construction42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/lean4lean_order42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/lean4lean_map42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/lean4lean_normalize42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/lean4lean_normalization42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/lean4lean_comparison42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/logos42_acceptance": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
         # Serial Lean -j1/-M4096 stages plus estimated wrapper overhead (#615).
-        "test/resource_oracle42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/resource_oracle42": [
+            "resources:memory:5120",
+            "resources:cpu:1",
+        ],
+        "test/resource_model42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/oracle42_acceptance": [
+            "resources:memory:5120",
+            "resources:cpu:1",
+        ],
+        "test/replay42_kernel": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
         # Four actual corpus workers; memory is an estimate, not an RSS cap.
-        "test/self_host_front_end": ["resources:memory:5120", "resources:cpu:4"],
-        "test/lean4lean_shape42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/lean4lean_addability42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/lean4lean_completion42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/lean4lean_reconstruction42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/lean4lean_normalized_completion42": ["resources:memory:9216", "resources:cpu:1"],
-        "test/lean4lean_map_tree42": ["resources:memory:9216", "resources:cpu:1"],
+        "test/self_host_front_end": [
+            "resources:memory:5120",
+            "resources:cpu:4",
+        ],
+        "test/lean4lean_shape42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/lean4lean_addability42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/lean4lean_completion42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/lean4lean_reconstruction42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/lean4lean_normalized_completion42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
+        "test/lean4lean_map_tree42": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
     },
     # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
     # "Linux-only suites" in docs/ci-platforms.md.
@@ -186,6 +346,20 @@ vesper_crate(
         "test/self_host_check": "long",
     },
 )
+
+# Fixed logical replays read only their sources, provenance, snapshot tool and
+# negative-control fixtures. Documentation changes must not replay all packets.
+filegroup(
+    name = "proof_packet_data",
+    srcs = glob([
+        "lean/**",
+        "tools/lean4lean-foundations42/**",
+        "tools/lean4lean42/source-manifest.json",
+        "tools/lean4lean42/patches/kernel.patch",
+        "tools/resource-model42/**",
+    ]),
+)
+
 # Narrow slices of the root package for members that read them.
 filegroup(
     name = "examples",
@@ -203,4 +377,95 @@ filegroup(
     name = "website",
     srcs = glob(["website/**"]),
     visibility = ["//visibility:public"],
+)
+
+# Guard test-cache scope and embedded compiler inputs.
+environment_test(
+    name = "logos_environment_test",
+    expected = ["VESPER_LOGOS42_ROOT"],
+    target_under_test = "//:test/logos42_acceptance",
+)
+
+environment_test(
+    name = "ordinary_environment_test",
+    expected = [],
+    target_under_test = "//:test/tiled",
+)
+
+environment_test(
+    name = "frontend_environment_test",
+    expected = ["SELF_HOST_TRACE"],
+    target_under_test = "//:test/self_host_front_end",
+)
+
+compile_inputs_test(
+    name = "compiler_inputs_test",
+    forbidden = [
+        "README.md",
+        "docs/bazel.md",
+        "tests/self_host_front_end.rs",
+        "MODULE.bazel.lock",
+        ".ci-logos-cargo-path",
+        ".ci-bazel-executables",
+    ],
+    required = ["lean/RewriteWitness.lean"],
+    target_under_test = "//:vesper",
+)
+
+compile_inputs_test(
+    name = "integration_inputs_test",
+    forbidden = [
+        "tests/logos42_acceptance.rs",
+        "docs/bazel.md",
+        "MODULE.bazel.lock",
+    ],
+    required = [
+        "tests/self_host_front_end.rs",
+        "tests/common/corpus_shard.rs",
+    ],
+    target_under_test = "//:test/_self_host_front_end.bin",
+)
+
+test_suite(
+    name = "bazel_ci_tests",
+    tests = [
+        ":compiler_inputs_test",
+        ":frontend_environment_test",
+        ":frontend_runfiles_test",
+        ":integration_inputs_test",
+        ":logos_environment_test",
+        ":ordinary_environment_test",
+        ":proof_packet_runfiles_test",
+    ],
+)
+
+runfiles_test(
+    name = "proof_packet_runfiles_test",
+    forbidden = [
+        "docs/bazel.md",
+        "README.md",
+        "website/index.html",
+    ],
+    required = [
+        "tools/resource-model42/KernelSnapshot.lean",
+        "tools/lean4lean-foundations42/source-provenance.json",
+        "tools/lean4lean42/source-manifest.json",
+        "tools/lean4lean42/patches/kernel.patch",
+    ],
+    target_under_test = "//:test/lean4lean_foundations42",
+)
+
+runfiles_test(
+    name = "frontend_runfiles_test",
+    forbidden = [
+        "docs/bazel.md",
+        "README.md",
+        "bin/logos42",
+        "bin/vesper",
+    ],
+    required = [
+        "packages/vesper-compiler/src/lexer.ves",
+        "examples/counter.ves",
+    ],
+    target_under_test = "//:test/self_host_front_end",
 )

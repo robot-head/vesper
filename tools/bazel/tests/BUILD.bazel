@@ -1,0 +1,32 @@
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("//tools/bazel:cargo_test.bzl", "cargo_test")
+
+exports_files(["ci_analysis_test.bzl"])
+
+rust_test(
+    name = "environment_probe_bin",
+    srcs = ["environment_probe.rs"],
+    edition = "2024",
+    tags = ["manual"],
+)
+
+cargo_test(
+    name = "scoped_environment_test",
+    env = {"VESPER_BAZEL_ENV_PROBE": "default"},
+    env_inherit = ["VESPER_BAZEL_ENV_PROBE"],
+    tags = [
+        "resources:cpu:1",
+        "resources:memory:32",
+    ],
+    test = ":environment_probe_bin",
+)
+
+cargo_test(
+    name = "unrelated_environment_test",
+    env = {"VESPER_BAZEL_ENV_PROBE": "default"},
+    tags = [
+        "resources:cpu:1",
+        "resources:memory:32",
+    ],
+    test = ":environment_probe_bin",
+)

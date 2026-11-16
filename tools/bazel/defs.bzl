@@ -33,8 +33,8 @@ load("@rules_rs//rs:rust_proc_macro.bzl", "rust_proc_macro")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("@rules_rs//rs/private:all_crate_deps.bzl", _all_crate_deps = "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_clippy_test", "rust_doc_test", "rustfmt_test")
-load(":cargo_test.bzl", "cargo_test")
 load("@vesper_cargo//:packages.bzl", "PACKAGES")
+load(":cargo_test.bzl", "cargo_test")
 
 # Files that are never inputs, whichever package glob picks them up.
 _NEVER = [
@@ -50,6 +50,9 @@ _NEVER = [
     # Personal settings (may hold the BuildBuddy API key) and CI scratch.
     "user.bazelrc",
     ".ci-lean-path",
+    ".ci-logos-cargo-path",
+    ".ci-bazel-executables",
+    "MODULE.bazel.lock",
 ]
 
 def _fix_label(label):
@@ -92,12 +95,21 @@ def _strip_rs(src):
 
 def vesper_crate(
         compile_data = None,
+        binary_compile_data = [],
         test_data = None,
+        integration_compile_data = None,
+        test_data_by_target = {},
         extra_compile_data = [],
+        extra_integration_compile_data = [],
         extra_test_data = [],
         build_script_data = [],
         build_script_env = {},
         test_env = {},
+        test_env_inherit = {},
+        test_shards = {},
+        test_path_binaries = {},
+        test_exec_properties = {},
+        remote_tests = [],
         test_tags = {},
         copy_test_cwd = [],
         test_size = "medium",
@@ -107,9 +119,25 @@ def vesper_crate(
 
     Args:
       compile_data: globs of files `include_str!`/`include_bytes!` may read.
-        Defaults to every file in the package.
+        Defaults to package files outside tests/, examples/ and benches/.
+      binary_compile_data: extra compile-time globs for binaries, in addition
+        to compile_data (e.g. the checker's embedded source manifests).
       test_data: globs of files tests may read at run time. Defaults to every
         file in the package.
+      integration_compile_data: optional compile-time globs for integration tests.
+        Defaults to compile_data when set, otherwise package files excluding
+        other integration-test entrypoints. Keep runtime-only fixtures in test data.
+      extra_integration_compile_data: additional compile-time labels used only
+        by integration tests, such as another package's embedded fixtures.
+      test_data_by_target: target name to complete runtime data labels; overrides
+        test_data and extra_test_data for that target.
+      test_env_inherit: target name to client environment variables it needs.
+      test_exec_properties: target name to remote execution platform properties.
+      test_shards: target name to shard count; the test must implement Bazel sharding.
+      test_path_binaries: target name to binary labels needed at runtime.
+        Defaults to every binary of the package.
+      remote_tests: audited target names (or "*") allowed to execute remotely.
+        Other Rust tests keep no-remote-exec, including when RBE is enabled.
       extra_compile_data: labels of files outside the package read at compile
         time, e.g. `//crates/vesper-loom-sandbox:files`.
       extra_test_data: labels of files outside the package read at run time.
@@ -147,10 +175,12 @@ def vesper_crate(
         visibility = ["//visibility:public"],
     )
 
-    compile_files = native.glob(compile_data, exclude = _NEVER, allow_empty = True) if compile_data != None else [":files"]
+    compile_files = native.glob(compile_data, exclude = _NEVER, allow_empty = True) if compile_data != None else native.glob(["**"], exclude = _NEVER + ["tests/**", "examples/**", "benches/**"])
     test_files = native.glob(test_data, exclude = _NEVER, allow_empty = True) if test_data != None else [":files"]
     compile_files = compile_files + extra_compile_data
     test_files = test_files + extra_test_data
+    binary_files = compile_files + [f for f in native.glob(binary_compile_data, exclude = _NEVER, allow_empty = True) if f not in compile_files]
+    integration_files = native.glob(integration_compile_data, exclude = _NEVER, allow_empty = True) + extra_compile_data if integration_compile_data != None else compile_files
 
     # Cargo sets these for every target of a package.
     pkg_env = {
@@ -221,6 +251,9 @@ def vesper_crate(
         version = version,
     )
 
+    def execution_tags(label):
+        return test_tags.get(label, []) + ([] if "*" in remote_tests or label in remote_tests else ["no-remote-exec"])
+
     def wrapped_test(label, path_binaries = [], **kwargs):
         # The rust_test itself is an implementation detail of the cargo_test
         # that runs it; `manual` keeps `bazel test //...` from running it
@@ -228,7 +261,7 @@ def vesper_crate(
         inner = "_" + label + ".bin" if "/" not in label else label.replace("/", "/_", 1) + ".bin"
         rust_test(
             name = inner,
-            data = test_files + path_binaries,
+            data = test_data_by_target.get(label, test_files) + path_binaries,
             rustc_env = dict(test_rustc_env, **kwargs.pop("rustc_env", {})),
             tags = ["manual"],
             **kwargs
@@ -240,11 +273,14 @@ def vesper_crate(
             cwd = rel_dir,
             copy_cwd = label in copy_test_cwd,
             env = test_env,
+            env_inherit = test_env_inherit.get(label, []),
+            shard_count = test_shards.get(label, 0),
+            exec_properties = test_exec_properties.get(label, {}),
             path_binaries = path_binaries,
             size = test_size,
             timeout = test_timeouts.get(label),
             target_compatible_with = test_target_compatible_with.get(label, []),
-            tags = test_tags.get(label, []),
+            tags = execution_tags(label),
         )
 
     if lib:
@@ -274,7 +310,7 @@ def vesper_crate(
                 name = name + "_doc_test",
                 crate = ":" + name,
                 deps = dev,
-                tags = test_tags.get(name + "_doc_test", []),
+                tags = execution_tags(name + "_doc_test"),
             )
 
     lib_dep = [":" + name] if lib else []
@@ -295,7 +331,7 @@ def vesper_crate(
             srcs = srcs + ([b["src"]] if b["src"] not in srcs else []),
             crate_root = b["src"],
             edition = b["edition"],
-            compile_data = compile_files,
+            compile_data = binary_files,
             deps = normal + build_deps + lib_dep,
             rustc_env = pkg_env,
             visibility = ["//visibility:public"],
@@ -310,23 +346,29 @@ def vesper_crate(
                 **common
             )
 
-    test_srcs = native.glob(["tests/**/*.rs"], allow_empty = True)
+    # Other Cargo test entrypoints are independent crates. Shared nested modules
+    # remain declared, along with source modules imported via #[path].
+    test_roots = [t["src"] for t in tests]
+    if integration_compile_data == None and compile_data == None:
+        integration_files = native.glob(["**"], exclude = _NEVER + test_roots) + extra_compile_data
+    test_srcs = native.glob(["tests/**/*.rs"], exclude = test_roots, allow_empty = True)
     for t in tests:
         if not _enabled(t, crate_data):
             continue
         wrapped_test(
             "test/" + t["name"],
-            path_binaries = bin_labels,
+            path_binaries = test_path_binaries.get("test/" + t["name"], bin_labels),
             crate_name = t["name"].replace("-", "_"),
-            srcs = test_srcs + ([t["src"]] if t["src"] not in test_srcs else []),
+            srcs = test_srcs + [t["src"]],
             crate_root = t["src"],
             edition = t["edition"],
-            compile_data = compile_files,
+            compile_data = integration_files + extra_integration_compile_data,
             deps = normal_and_dev + build_deps + lib_dep,
             rustc_env = dict(integration_rustc_env, **bin_env),
             **common
         )
 
+    example_files = compile_files if compile_data != None else native.glob(["**"], exclude = _NEVER) + extra_compile_data
     example_srcs = native.glob(["examples/**/*.rs"], allow_empty = True)
     for e in examples:
         if not _enabled(e, crate_data):
@@ -337,7 +379,7 @@ def vesper_crate(
             srcs = example_srcs + ([e["src"]] if e["src"] not in example_srcs else []),
             crate_root = e["src"],
             edition = e["edition"],
-            compile_data = compile_files,
+            compile_data = example_files,
             deps = normal_and_dev + build_deps + lib_dep,
             # Scripts run examples from the repository root, like `cargo run`.
             rustc_env = dict(pkg_env, CARGO_MANIFEST_DIR = rel_dir),

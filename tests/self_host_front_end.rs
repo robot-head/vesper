@@ -2,6 +2,9 @@
 #[path = "fixtures/self_host/driver.rs"]
 mod support;
 use support::*;
+#[path = "common/corpus_shard.rs"]
+mod corpus_shard;
+use corpus_shard::Shard;
 
 #[derive(Default, Debug)]
 struct Tally {
@@ -101,22 +104,64 @@ fn compare(front_end: &str, name: &str, source: &str, native: bool, tally: &mut 
 /// for every fourth source and every source above EVALUATOR_MAX_BYTES.
 #[test]
 fn differential_over_repository_sources() {
+    let shard = Shard::from_environment();
+    let started = std::time::Instant::now();
     let front_end = std::sync::Arc::new(read_front_end());
     let files = fixtures();
     for own in FRONT_END {
         assert!(files.contains(&root().join(own)), "{own}");
     }
-    let files = std::sync::Arc::new(files);
+    let (selected, expected) = on_big_stack(move || {
+        // Keep the original full-corpus coverage floors on every shard. The cheap
+        // seed classifies all inputs; the evaluator/JIT compares only this shard.
+        let mut coverage = Tally::default();
+        let mut expected = Tally::default();
+        for (i, path) in files.iter().enumerate() {
+            let source = std::fs::read_to_string(path).unwrap();
+            let tokens = seed_tokens(&source).is_some();
+            let cst = seed_cst(&source).is_some();
+            let native = source.len() > EVALUATOR_MAX_BYTES || i % 4 == 0;
+            coverage.tokens_matched += usize::from(tokens);
+            coverage.cst_matched += usize::from(cst);
+            coverage.native += usize::from(native);
+            if shard.contains(i) {
+                expected.tokens_matched += usize::from(tokens);
+                expected.tokens_rejected += usize::from(!tokens);
+                expected.cst_matched += usize::from(cst);
+                expected.cst_rejected += usize::from(!cst);
+                expected.native += usize::from(native);
+            }
+        }
+        assert!(files.len() >= 363, "{}", files.len());
+        assert!(coverage.tokens_matched >= 100, "{coverage:?}");
+        assert!(coverage.cst_matched >= 50, "{coverage:?}");
+        assert!(coverage.native >= 50, "{coverage:?}");
+        let selected: Vec<_> = files
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| shard.contains(*i))
+            .collect();
+        (selected, expected)
+    });
+    let files = std::sync::Arc::new(selected);
+    // Take the next case as each worker finishes, avoiding a long final worker.
+    let next = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     const WORKERS: usize = 4;
     let workers: Vec<_> = (0..WORKERS)
-        .map(|w| {
+        .map(|_| {
             let front_end = front_end.clone();
             let files = files.clone();
+            let next = next.clone();
             std::thread::Builder::new()
                 .stack_size(512 << 20)
                 .spawn(move || {
                     let mut tally = Tally::default();
-                    for (i, path) in files.iter().enumerate().skip(w).step_by(WORKERS) {
+                    loop {
+                        let slot = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some((i, path)) = files.get(slot) else {
+                            break;
+                        };
+
                         let source = std::fs::read_to_string(path).unwrap();
                         let name = path.strip_prefix(root()).unwrap().display().to_string();
                         compare(&front_end, &name, &source, i % 4 == 0, &mut tally);
@@ -135,11 +180,18 @@ fn differential_over_repository_sources() {
         tally.cst_rejected += t.cst_rejected;
         tally.native += t.native;
     }
-    eprintln!("{} sources: {tally:?}", files.len());
-    assert!(files.len() >= 363, "{}", files.len());
-    assert!(tally.tokens_matched >= 100, "{tally:?}");
-    assert!(tally.cst_matched >= 50, "{tally:?}");
-    assert!(tally.native >= 50, "{tally:?}");
+    assert_eq!(tally.tokens_matched, expected.tokens_matched);
+    assert_eq!(tally.tokens_rejected, expected.tokens_rejected);
+    assert_eq!(tally.cst_matched, expected.cst_matched);
+    assert_eq!(tally.cst_rejected, expected.cst_rejected);
+    assert_eq!(tally.native, expected.native);
+    eprintln!(
+        "corpus shard {}/{}: {} sources, {tally:?}, {:?}",
+        shard.index,
+        shard.total,
+        files.len(),
+        started.elapsed()
+    );
 }
 
 /// What the Vesper front end must report for a hand-written input.
@@ -204,6 +256,10 @@ fn chain(head: &str, tail: &str, n: usize) -> String {
 /// subset, each against the seed.
 #[test]
 fn edge_cases_and_typed_errors() {
+    // This fixed suite runs once, while the repository corpus is partitioned.
+    if Shard::from_environment().index != 0 {
+        return;
+    }
     on_big_stack(|| {
         let front_end = read_front_end();
         let cases: &[(&str, Expect)] = &[

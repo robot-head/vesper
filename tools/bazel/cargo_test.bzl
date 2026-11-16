@@ -40,7 +40,7 @@ def _cargo_test_impl(ctx):
         DefaultInfo(executable = out, runfiles = runfiles),
         RunEnvironmentInfo(
             environment = env,
-            inherited_environment = test[RunEnvironmentInfo].inherited_environment if RunEnvironmentInfo in test else [],
+            inherited_environment = (test[RunEnvironmentInfo].inherited_environment if RunEnvironmentInfo in test else []) + ctx.attr.env_inherit,
         ),
     ]
 
@@ -51,6 +51,7 @@ cargo_test = rule(
         "copy_cwd": attr.bool(doc = "Run in a copy of `cwd` made of regular files."),
         "cwd": attr.string(doc = "Runfiles path of the directory to run in."),
         "env": attr.string_dict(),
+        "env_inherit": attr.string_list(doc = "Client environment variables needed only by this test."),
         "path_binaries": attr.label_list(
             allow_files = True,
             cfg = "target",

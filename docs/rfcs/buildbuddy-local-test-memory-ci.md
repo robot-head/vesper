@@ -4,6 +4,12 @@
 > The [manuscript](../manuscript/README.md) is the sole specification; use the
 > [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
 
+The historical two-job mitigation below is superseded by the
+[resource-based scheduling policy](../bazel.md#test-throughput-and-cache-keys).
+The workflow retains 22GB, reserves CPU and memory for Bazel, and schedules
+local tests by their resource estimates. Audited hermetic tests may execute
+remotely; Lean and other host-dependent tests remain local.
+
 Public issue #571 follows the user-supplied full-suite log for PR #538 head a34aba403b619647bdad042c67110563900e1fe7, invocation c623b61f-e8de-4182-a913-41d12ec1c20e. BuildBuddy reports 20.91 GB used against 20.4 GB total and recommends 22 GB. The run ends at 437/809 tests with Bazel server Socket closed/error 14 and command exit 37. No failing test assertion is identified. Up to 69 running actions are shown; that is not a count of local tests or Lean processes. The separate #442 failure remains undiagnosed.
 
 The Test all targets action now requests 22GB instead of 19GB and passes --local_test_jobs=2 to its existing bazel test command. Bazel 9.3.1 help defines this flag as the maximum concurrent local test jobs. It bounds concurrent local test actions without changing //... selection or remote compilation concurrency. The VM also hosts Bazel, wrappers and other processes: packet resource reservations are scheduler estimates, not total-process RSS limits. Two local actions do not imply only two threads or subprocesses. The 22GB request follows the observed workflow recommendation; it is not a measured upper bound or a guarantee of future full-suite completion.
