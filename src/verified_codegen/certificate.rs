@@ -20,8 +20,13 @@
 //!   `validateProgram` alone, which the tests compare against Lean `#eval`.
 //! * [`check`] widens every comparison to the widest kind of its
 //!   signedness ([`widen`]; Lean `widened_validation_sound`: the machine code
-//!   and the source steps do not change), then generates, validates and refuses: `vesper build --codegen
-//!   verified` emits no code for a program whose certificate is rejected.
+//!   and the source steps do not change), then generates and validates. The outcome is
+//!   `Artifact::certificate`; with `Options::require_certificate`,
+//!   compilation emits no code for a program whose certificate is rejected.
+//!   The gate is off by default because the facts are not yet
+//!   variant-sensitive: an enum payload word that holds a `u8` in one variant
+//!   and a `bool` in another gets their join even after the tag test, and a
+//!   call that never returns leaves its continuation without facts.
 //!
 //! Integer constants are 64-bit words in the slot IR and mathematical
 //! integers in the Lean model. A word at or above 2^63 is the Lean constant
@@ -59,7 +64,6 @@
 //! Lean simulation needs (no hardware division fault, every checked row on
 //! in-range operands). It does not prove the lowering correct, termination,
 //! absence of language aborts, or the byte encodings.
-use super::VerifiedError;
 use super::machine::{Kind, Label, Lir, Loc};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -101,16 +105,15 @@ impl std::fmt::Display for Rejection {
     }
 }
 
-/// Generate the certificate of `program` and validate it; refuse the program
-/// when validation fails.
-pub fn check(program: &[(String, Vec<Lir>)]) -> Result<Certificate, VerifiedError> {
+/// Widen, generate and validate the certificate of `program` (the rows the
+/// code is selected from).
+pub fn check(program: &[(String, Vec<Lir>)]) -> Result<Certificate, Rejection> {
     let widened: Vec<(String, Vec<Lir>)> = program
         .iter()
         .map(|(name, rows)| (name.clone(), rows.iter().map(widen).collect()))
         .collect();
-    let program = widened.as_slice();
-    let certificate = generate(program);
-    validate(program, &certificate).map_err(|r| VerifiedError::Invalid(r.to_string()))?;
+    let certificate = generate(&widened);
+    validate(&widened, &certificate)?;
     Ok(certificate)
 }
 
@@ -417,11 +420,14 @@ pub fn validate(
             }
         }
     }
+    // Every shape first: a call reads its callee's entry annotation.
     for (f, ((_, rows), cert)) in program.iter().zip(&certificate.functions).enumerate() {
-        let annotations = &cert.annotations;
-        if annotations.len() != rows.len() {
+        if cert.annotations.len() != rows.len() {
             return Err(reject(f, 0, "one annotation per row".into()));
         }
+    }
+    for (f, ((_, rows), cert)) in program.iter().zip(&certificate.functions).enumerate() {
+        let annotations = &cert.annotations;
         if let Some(pc) = cert
             .signed_constants
             .iter()
@@ -629,6 +635,88 @@ struct Summaries {
     post: Vec<Option<State>>,
 }
 
+/// The locations whose facts row `pc` or a later row can still need
+/// (backward liveness over the certificate's edges). Annotations keep only
+/// these, so they stay proportional to the live values rather than to every
+/// temporary the function ever wrote. `In` and `Out` words are few and stay
+/// live across `Return` and `Call` (the summaries read them).
+fn live_locations(rows: &[Lir]) -> Vec<BTreeSet<Loc>> {
+    let labels = labels_of(rows);
+    let mut ins = BTreeSet::new();
+    let mut outs = BTreeSet::new();
+    for row in rows {
+        match *row {
+            Lir::LoadIn { index, .. } | Lir::StoreIn { index, .. } => {
+                ins.insert(Loc::In(index));
+            }
+            Lir::LoadOut { index, .. } | Lir::StoreOut { index, .. } => {
+                outs.insert(Loc::Out(index));
+            }
+            _ => {}
+        }
+    }
+    let successors = |pc: usize| -> Vec<usize> {
+        let next = (pc + 1 < rows.len()).then_some(pc + 1);
+        match rows[pc] {
+            Lir::Jump(l) => labels.get(&l).copied().into_iter().collect(),
+            Lir::BranchZero { target, .. } => labels
+                .get(&target)
+                .copied()
+                .into_iter()
+                .chain(next)
+                .collect(),
+            Lir::Return | Lir::Trap(_) => vec![],
+            _ => next.into_iter().collect(),
+        }
+    };
+    let mut live: Vec<BTreeSet<Loc>> = vec![BTreeSet::new(); rows.len()];
+    loop {
+        let mut changed = false;
+        for pc in (0..rows.len()).rev() {
+            let mut after = BTreeSet::new();
+            for s in successors(pc) {
+                after.extend(live[s].iter().copied());
+            }
+            let copy = |dst: Loc, src: Loc, after: &mut BTreeSet<Loc>| {
+                if after.remove(&dst) {
+                    after.insert(src);
+                }
+            };
+            match rows[pc] {
+                Lir::Move { dst, src } => copy(Loc::Slot(dst), Loc::Slot(src), &mut after),
+                Lir::StoreOut { index, src } => copy(Loc::Out(index), Loc::Slot(src), &mut after),
+                Lir::LoadOut { dst, index } => copy(Loc::Slot(dst), Loc::Out(index), &mut after),
+                Lir::LoadIn { dst, index } => copy(Loc::Slot(dst), Loc::In(index), &mut after),
+                Lir::StoreIn { index, src } => copy(Loc::In(index), Loc::Slot(src), &mut after),
+                Lir::Return => after.extend(ins.iter().copied()),
+                Lir::Call { .. } => {
+                    after.retain(|l| !matches!(l, Loc::Out(_)));
+                    after.extend(outs.iter().copied());
+                }
+                Lir::Enter { .. } => after.retain(|l| matches!(l, Loc::In(_))),
+                ref row => {
+                    if let Lir::Const { dst, .. } = row {
+                        after.remove(&Loc::Slot(*dst));
+                    }
+                    if let Some(dst) = destination(row) {
+                        after.remove(&Loc::Slot(dst));
+                    }
+                    for (l, _) in required(row) {
+                        after.insert(l);
+                    }
+                }
+            }
+            if after != live[pc] {
+                live[pc] = after;
+                changed = true;
+            }
+        }
+        if !changed {
+            return live;
+        }
+    }
+}
+
 /// Analyse function `f` under the current summaries; returns the state
 /// before each row, and updates the callees' entry and this exit summary.
 fn analyse(
@@ -638,9 +726,11 @@ fn analyse(
     f: usize,
     summaries: &mut Summaries,
     flips: &mut BTreeSet<ConstId>,
+    lives: &[Vec<BTreeSet<Loc>>],
 ) -> (Vec<Option<State>>, bool) {
     let rows = &program[f].1;
     let labels = labels_of(rows);
+    let live = &lives[f];
     let mut states: Vec<Option<State>> = vec![None; rows.len()];
     let mut changed = false;
     let Some(pre) = summaries.pre[f].clone() else {
@@ -649,6 +739,8 @@ fn analyse(
     if rows.is_empty() {
         return (states, false);
     }
+    let mut pre = pre;
+    pre.retain(|l| live[0].contains(l));
     states[0] = Some(pre);
     let mut work = vec![0usize];
     let mut queued = vec![false; rows.len()];
@@ -747,8 +839,12 @@ fn analyse(
                 successors.push((pc + 1, next));
             }
         }
-        for (target, s) in successors {
-            if target < rows.len() && join_into(&mut states[target], &s) && !queued[target] {
+        for (target, mut s) in successors {
+            if target >= rows.len() {
+                continue;
+            }
+            s.retain(|l| live[target].contains(l));
+            if join_into(&mut states[target], &s) && !queued[target] {
                 queued[target] = true;
                 work.push(target);
             }
@@ -786,6 +882,10 @@ pub fn generate(program: &[(String, Vec<Lir>)]) -> Certificate {
             entries.entry(*l).or_insert(f);
         }
     }
+    let lives: Vec<_> = program
+        .iter()
+        .map(|(_, rows)| live_locations(rows))
+        .collect();
     let mut signed = BTreeSet::new();
     loop {
         let mut summaries = Summaries {
@@ -801,7 +901,15 @@ pub fn generate(program: &[(String, Vec<Lir>)]) -> Certificate {
             let mut states = vec![];
             flips.clear();
             for f in 0..program.len() {
-                let (s, c) = analyse(program, &entries, &signed, f, &mut summaries, &mut flips);
+                let (s, c) = analyse(
+                    program,
+                    &entries,
+                    &signed,
+                    f,
+                    &mut summaries,
+                    &mut flips,
+                    &lives,
+                );
                 changed |= c;
                 states.push(s);
             }

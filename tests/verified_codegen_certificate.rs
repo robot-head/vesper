@@ -24,7 +24,11 @@ fn lower(source: &str) -> Program {
     let c = check::check(&p.module);
     assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
     let target = Target::from_triple("x86_64-unknown-linux-gnu").unwrap();
-    let artifact = vc::compile(&c.world, "main", &Options::new(target)).expect("compiles");
+    let options = Options {
+        require_certificate: true,
+        ..Options::new(target)
+    };
+    let artifact = vc::compile(&c.world, "main", &options).expect("compiles");
     artifact
         .lir
         .into_iter()
@@ -214,6 +218,77 @@ fn compilation_refuses_a_program_whose_certificate_fails() {
     )];
     let err = certificate::check(&program).expect_err("refused");
     assert!(err.to_string().contains("Not"), "{err}");
+}
+
+fn world(source: &str) -> vesper::check::World {
+    let p = parser::parse(source);
+    assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    let c = check::check(&p.module);
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    c.world
+}
+
+/// Programs the facts are not yet precise enough for still compile by
+/// default (the rejection is recorded) and are refused when the gate is on.
+#[test]
+fn imprecise_programs_compile_unless_the_gate_is_required() {
+    let target = Target::from_triple("x86_64-unknown-linux-gnu").unwrap();
+    for (source, construct) in [
+        (
+            // The payload word is a `u8` for one call and a `bool` for the
+            // other; the join forgets that `Flag` holds a `bool`.
+            "copy enum E { Byte(u8), Flag(bool) }
+             fn f(e: E) -> bool { match e { E::Flag(b) => !b, E::Byte(_) => false } }
+             fn main() -> (bool, bool) { (f(E::Byte(7)), f(E::Flag(true))) }",
+            "Not",
+        ),
+        (
+            // `spin` never returns, so its continuation has no facts.
+            "fn spin() -> i64 { spin() }
+             fn main() -> i64 eff [Fail[ArithOverflow]] { spin() + 1 }",
+            "Arith",
+        ),
+    ] {
+        let w = world(source);
+        let artifact = vc::compile(&w, "main", &Options::new(target)).expect("compiles");
+        let rejection = artifact.certificate.expect_err("imprecise");
+        assert!(rejection.reason.contains(construct), "{rejection}");
+        let strict = Options {
+            require_certificate: true,
+            ..Options::new(target)
+        };
+        let err = vc::compile(&w, "main", &strict).expect_err("refused");
+        assert!(
+            err.to_string().contains("range certificate rejected"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_callee_certificate_is_a_rejection_not_a_panic() {
+    let program = lower(
+        "fn add(a: u8, b: u8) -> u8 eff [Fail[ArithOverflow]] { a + b }\n\
+         fn main() -> u8 eff [Fail[ArithOverflow]] { add(200, 3) }",
+    );
+    let mut cert = certificate::generate(&program);
+    cert.functions[1].annotations.clear();
+    assert!(first_rejection(&program, &cert).contains("one annotation per row"));
+}
+
+/// Facts of temporaries nobody reads again are pruned: the certificate of a
+/// long straight-line function stays linear in its length.
+#[test]
+fn dead_facts_are_pruned() {
+    let mut rows = vec![Lir::Label(3), Lir::Enter { words: 4000 }];
+    for dst in 0..3998 {
+        rows.push(Lir::Const { dst, word: 1 });
+    }
+    rows.push(Lir::Return);
+    let program: Program = vec![("main".into(), rows)];
+    let cert = certificate::check(&program).expect("accepted");
+    let facts: usize = cert.functions[0].annotations.iter().map(Vec::len).sum();
+    assert_eq!(facts, 0);
 }
 
 // ---------------------------------------------------------------------------

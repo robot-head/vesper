@@ -29,7 +29,8 @@
 //!    certificate for every lowered function and checks it with a Rust
 //!    mirror of `validateProgram` (differentially tested against Lean
 //!    `#eval`) plus conservative, unproved rules for `Enter`, `Call` and
-//!    `Return`; a program whose certificate is rejected is refused before
+//!    `Return`. The outcome is [`Artifact::certificate`];
+//!    [`Options::require_certificate`] refuses a rejected program before
 //!    any code is selected.
 //! 3. **Encoding** (`x86_64.rs`, `aarch64.rs`) of each abstract instruction
 //!    to fixed bytes, and a container (`container.rs`): a static Linux ELF
@@ -205,6 +206,11 @@ pub struct Options {
     pub max_rows: usize,
     /// AArch64 conditional branches reach ±1 MiB.
     pub max_code_bytes: usize,
+    /// Refuse a program whose range certificate ([`certificate`]) is
+    /// rejected. Off by default until the certificates track enum payload
+    /// ranges per variant and non-returning calls; the outcome is always in
+    /// [`Artifact::certificate`].
+    pub require_certificate: bool,
 }
 impl Options {
     pub fn new(target: Target) -> Self {
@@ -215,6 +221,7 @@ impl Options {
             max_functions: 4096,
             max_rows: 1_000_000,
             max_code_bytes: 1 << 20,
+            require_certificate: false,
         }
     }
 }
@@ -309,6 +316,8 @@ pub struct Artifact {
     pub lir: Vec<(String, Vec<Lir>)>,
     /// Number of abstract machine instructions emitted.
     pub machine_instructions: usize,
+    /// The range certificate of `lir`, or why it was rejected.
+    pub certificate: Result<certificate::Certificate, certificate::Rejection>,
 }
 
 /// Compile `entry` (no parameters) and everything it reaches.
@@ -347,7 +356,10 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
         let _ = (lowered.slots, lowered.out_words);
         lir.push((plan.functions[index].name.clone(), lowered.rows));
     }
-    certificate::check(&lir)?;
+    let certificate = certificate::check(&lir);
+    if let (true, Err(r)) = (options.require_certificate, &certificate) {
+        return Err(VerifiedError::Invalid(r.to_string()));
+    }
     let entry_plan = &plan.functions[0];
     let result_words = entry_plan.result.0.clone();
     let mut a = asm::Asm::default();
@@ -465,6 +477,7 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
         result_words,
         lir,
         machine_instructions,
+        certificate,
     })
 }
 
