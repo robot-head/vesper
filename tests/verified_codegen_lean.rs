@@ -10,6 +10,8 @@
 //! RV64 encoder model against the ISA's instruction formats; it prints the
 //! encoded words of sample instructions, which must be the words
 //! `verified_codegen::rv64_encoding_listing` gets from the Rust emitter.
+//! `lean/CodegenA64Encoding.lean` does the same for AArch64 against the A64
+//! encoding diagrams (`verified_codegen::a64_encoding_listing`).
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -37,8 +39,15 @@ fn model() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/VerifiedCodegen.lean")
 }
 
+const A64_NAMESPACE: &str = "Vesper.VerifiedCodegen.A64";
+const A64_KEY_THEOREMS: [&str; 4] = ["decode_encode", "emit_ok", "emit_decodes", "bytes_encode"];
+
 fn rv64_model() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/CodegenRv64Encoding.lean")
+}
+
+fn a64_model() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/CodegenA64Encoding.lean")
 }
 
 /// A fresh private directory (Bazel runfiles are symlinks, so the models
@@ -183,6 +192,14 @@ fn model_has_no_escape_hatches_and_audits_every_theorem() {
         &["VerifiedCodegen"],
         &RV64_KEY_THEOREMS,
     );
+    let source = std::fs::read_to_string(a64_model()).expect("read the AArch64 model");
+    check_hygiene(
+        "CodegenA64Encoding.lean",
+        &source,
+        A64_NAMESPACE,
+        &["VerifiedCodegen"],
+        &A64_KEY_THEOREMS,
+    );
 }
 
 #[test]
@@ -192,6 +209,17 @@ fn rust_rv64_listing_covers_every_instruction_kind() {
     // add a0,a0,a1; bgeu a0,a1,+8; j ovf (the abort exits sit at offset 0)
     assert!(listing.contains("addchk u: 00b50533 00b57463 ff9ff06f\n"));
     assert!(listing.contains("leave: 00040113 00013403 00813083 01010113 00008067\n"));
+}
+
+#[test]
+fn rust_a64_listing_covers_every_instruction_kind() {
+    let listing = vesper::verified_codegen::a64_encoding_listing();
+    assert_eq!(listing.lines().count(), 61);
+    // adds x0, x0, x1; b.hs ovf (the abort exits sit at offset 0)
+    assert!(listing.contains("addchk u: ab010000 54ffffe2\n"));
+    // sub sp, sp, #1, lsl #12; sub sp, sp, #0xf40
+    assert!(listing.contains("enter 1000: a9bf7bfd 910003fd d14007ff d13d03ff\n"));
+    assert!(listing.contains("leave: 910003bf a8c17bfd d65f03c0\n"));
 }
 
 #[test]
@@ -258,20 +286,24 @@ fn lean_model_compiles_and_prints_the_rust_table() {
     }
 }
 
-#[test]
-fn lean_rv64_encoding_model_compiles_and_prints_the_rust_words() {
-    let Ok(lean) = std::env::var("VESPER_LEAN") else {
-        eprintln!("VESPER_LEAN unset; Lean compilation of CodegenRv64Encoding.lean skipped");
-        return;
-    };
-    let source = std::fs::read_to_string(rv64_model()).expect("read the RV64 model");
+/// Compile an encoding model (which imports `VerifiedCodegen`) and check
+/// its printed listing against the Rust emitter's and its axiom report.
+fn check_encoding_model(
+    lean: &str,
+    model_path: PathBuf,
+    file_name: &str,
+    namespace: &str,
+    tag: &str,
+    rust_listing: String,
+) {
+    let source = std::fs::read_to_string(model_path).expect("read the encoding model");
     let names = theorems(&strip_comments(&source));
-    let dir = scratch("rv64");
+    let dir = scratch(&tag.to_lowercase());
     let base = dir.join("VerifiedCodegen.lean");
     std::fs::write(&base, std::fs::read_to_string(model()).unwrap()).unwrap();
-    let file = dir.join("CodegenRv64Encoding.lean");
+    let file = dir.join(file_name);
     std::fs::write(&file, &source).unwrap();
-    let olean = std::process::Command::new(&lean)
+    let olean = std::process::Command::new(lean)
         .current_dir(&dir)
         .arg("-o")
         .arg(dir.join("VerifiedCodegen.olean"))
@@ -285,7 +317,7 @@ fn lean_rv64_encoding_model_compiles_and_prints_the_rust_words() {
         String::from_utf8_lossy(&olean.stdout),
         String::from_utf8_lossy(&olean.stderr)
     );
-    let out = std::process::Command::new(&lean)
+    let out = std::process::Command::new(lean)
         .current_dir(&dir)
         .env("LEAN_PATH", &dir)
         .arg(&file)
@@ -301,20 +333,51 @@ fn lean_rv64_encoding_model_compiles_and_prints_the_rust_words() {
     );
     assert!(!stdout.contains("sorryAx"), "sorry in the axiom report");
     let words = stdout
-        .split_once("BEGIN RV64\n")
-        .and_then(|(_, rest)| rest.split_once("END RV64\n"))
+        .split_once(&format!("BEGIN {tag}\n"))
+        .and_then(|(_, rest)| rest.split_once(&format!("END {tag}\n")))
         .map(|(t, _)| t)
         .expect("the Lean file prints the listing");
     assert_eq!(
-        words,
-        vesper::verified_codegen::rv64_encoding_listing(),
-        "the Lean RV64 encoder differs from the Rust one"
+        words, rust_listing,
+        "the Lean {tag} encoder differs from the Rust one"
     );
     let audited = audit_axioms(&stdout);
     for t in &names {
         assert!(
-            audited.contains(&format!("{RV64_NAMESPACE}.{t}")),
+            audited.contains(&format!("{namespace}.{t}")),
             "{t} has no axiom report"
         );
     }
+}
+
+#[test]
+fn lean_rv64_encoding_model_compiles_and_prints_the_rust_words() {
+    let Ok(lean) = std::env::var("VESPER_LEAN") else {
+        eprintln!("VESPER_LEAN unset; Lean compilation of CodegenRv64Encoding.lean skipped");
+        return;
+    };
+    check_encoding_model(
+        &lean,
+        rv64_model(),
+        "CodegenRv64Encoding.lean",
+        RV64_NAMESPACE,
+        "RV64",
+        vesper::verified_codegen::rv64_encoding_listing(),
+    );
+}
+
+#[test]
+fn lean_a64_encoding_model_compiles_and_prints_the_rust_words() {
+    let Ok(lean) = std::env::var("VESPER_LEAN") else {
+        eprintln!("VESPER_LEAN unset; Lean compilation of CodegenA64Encoding.lean skipped");
+        return;
+    };
+    check_encoding_model(
+        &lean,
+        a64_model(),
+        "CodegenA64Encoding.lean",
+        A64_NAMESPACE,
+        "A64",
+        vesper::verified_codegen::a64_encoding_listing(),
+    );
 }
