@@ -378,7 +378,8 @@ fn cli() -> Result<(), String> {
                 .get("main")
                 .ok_or("missing main function")?;
             if !f.params.is_empty()
-                || !matches!(f.result.name(), "i64" | "u64" | "u32" | "u8" | "Unit" | "")
+                || !(vesper::numeric::is_integer_name(f.result.name())
+                    || matches!(f.result.name(), "Unit" | ""))
             {
                 return Err(
                     "executable main must take no arguments and return an integer or Unit".into(),

@@ -1441,10 +1441,8 @@ impl Parser<'_> {
         args
     }
     fn primitive(&self) -> bool {
-        matches!(
-            &self.source[self.span()],
-            "u8" | "u32" | "u64" | "i64" | "f64" | "bool"
-        )
+        vesper_core::numeric::is_scalar_name(&self.source[self.span()])
+            && !matches!(&self.source[self.span()], "Unit" | "Never")
     }
     fn effects(&mut self) -> Effects {
         if !self.eat(K::Eff) {
@@ -1897,8 +1895,13 @@ impl Parser<'_> {
                 K::And => (3, false),
                 K::EqEq | K::Ne => (4, false),
                 K::Lt | K::Le | K::Gt | K::Ge => (5, false),
-                K::Plus | K::Minus => (6, false),
-                K::Star | K::Slash | K::Percent => (7, false),
+                // Bit operators bind tighter than comparisons, as in Rust.
+                K::Pipe => (6, false),
+                K::Caret => (7, false),
+                K::Amp => (8, false),
+                K::Shl | K::Shr => (9, false),
+                K::Plus | K::Minus => (10, false),
+                K::Star | K::Slash | K::Percent => (11, false),
                 _ => (0, false),
             };
             if prec == 0 || prec < min {
@@ -1990,10 +1993,10 @@ impl Parser<'_> {
                         || self.nth(1) == K::LBracket
                         || {
                             let i = self.index(1);
-                            matches!(
-                                &self.source[self.tokens[i].span.clone()],
-                                "u8" | "u32" | "u64" | "i64" | "f64" | "bool" | "fn"
-                            )
+                            let text = &self.source[self.tokens[i].span.clone()];
+                            text == "fn"
+                                || (vesper_core::numeric::is_scalar_name(text)
+                                    && !matches!(text, "Unit" | "Never"))
                         };
                     if generic {
                         let types = self.type_args();

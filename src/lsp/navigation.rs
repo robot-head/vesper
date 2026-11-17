@@ -610,10 +610,7 @@ fn mode_work(
         Type::Named(n, args) => {
             if let Some(m) = bounds.get(n) {
                 *m
-            } else if matches!(
-                n.as_str(),
-                "u8" | "u32" | "u64" | "i64" | "f64" | "bool" | "Unit" | "Never"
-            ) {
+            } else if crate::numeric::is_scalar_name(n) {
                 Mode::Copy
             } else if n == "String" {
                 Mode::Affine

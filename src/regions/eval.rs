@@ -154,8 +154,10 @@ fn value_type(world: &crate::check::World, v: &Value) -> Option<Type> {
     Some(match v {
         Value::Int(_) => Type::named("i64"),
         Value::UInt(_, 8) => Type::named("u8"),
+        Value::UInt(_, 16) => Type::named("u16"),
         Value::UInt(_, 32) => Type::named("u32"),
         Value::UInt(..) => Type::named("u64"),
+        Value::SInt(_, bits) => Type::named(&format!("i{bits}")),
         Value::Float(_) => Type::named("f64"),
         Value::Bool(_) => Type::named("bool"),
         Value::String(_) => Type::named("String"),

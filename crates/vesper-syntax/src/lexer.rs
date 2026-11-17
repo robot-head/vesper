@@ -158,6 +158,14 @@ pub enum TokenKind {
     DotDot,
     #[token("..=")]
     DotDotEq,
+    #[token("&")]
+    Amp,
+    #[token("^")]
+    Caret,
+    #[token("<<")]
+    Shl,
+    #[token(">>")]
+    Shr,
 }
 fn block_comment(lex: &mut logos::Lexer<TokenKind>) -> bool {
     let rest = lex.remainder();

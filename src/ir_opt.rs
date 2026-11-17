@@ -24,10 +24,7 @@ const RULES: &str = r#"(sort V)
 "#;
 
 fn scalar(t: &Type) -> bool {
-    matches!(
-        t.name(),
-        "u8" | "u32" | "u64" | "i64" | "f64" | "bool" | "Unit"
-    ) || *t == Type::unit()
+    (crate::numeric::is_scalar_name(t.name()) && t.name() != "Never") || *t == Type::unit()
 }
 fn place(root: &str, path: &[String]) -> Place {
     Place {

@@ -367,7 +367,7 @@ pub(crate) fn secret_prelude(module: &Module) -> Module {
 }
 
 /// Every name and field/method name mentioned in `e`.
-fn used_names(e: &Expr, out: &mut BTreeSet<String>) {
+pub(crate) fn used_names(e: &Expr, out: &mut BTreeSet<String>) {
     let mut each = |e: &Expr| used_names(e, out);
     match &e.kind {
         ExprKind::Literal(_) => {}
@@ -1740,7 +1740,10 @@ impl<'w> Walker<'w> {
                 if let Some(f) = self.world.functions.get(n) {
                     return Callee::Function(f);
                 }
-                if bit_intrinsic(n).is_some() || n == WIDEN_INTRINSIC {
+                if bit_intrinsic(n).is_some()
+                    || crate::numeric::conversion(n).is_some()
+                    || crate::numeric::rotate_intrinsic(n).is_some()
+                {
                     return Callee::Intrinsic;
                 }
                 if let Some((eff, op)) = n.split_once("::")

@@ -763,7 +763,7 @@ impl Emitter<'_> {
                 op: match op.as_str() {
                     "-" => syntax::UnaryOp::Neg,
                     "!" => syntax::UnaryOp::BoolNot,
-                    _ => return Err("unsupported Lean unary operator".into()),
+                    _ => return Err(format!("unsupported Lean unary operator {op}")),
                 },
                 value: Box::new(value(*v)?),
             },

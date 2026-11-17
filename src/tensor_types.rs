@@ -145,9 +145,8 @@ pub mod codes {
 /// Explicit-endian integers (and `i8`) valid only as wire struct fields.
 pub fn wire_integer(name: &str) -> Option<vesper_ffi::Integer> {
     use vesper_ffi::{Endian, Integer};
-    if name == "i8" {
-        return Some(Integer::signed(8, Endian::Native));
-    }
+    // `i8` was a wire-only spelling before it became a source integer kind
+    // (`vesper.arith.checked/1`); wire fields of it map in `field_type`.
     let (base, endian) = if let Some(b) = name.strip_suffix("le") {
         (b, Endian::Little)
     } else {
