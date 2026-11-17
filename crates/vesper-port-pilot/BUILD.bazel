@@ -28,7 +28,7 @@ vesper_port_object(
 
 rust_library(
     name = "port",
-    srcs = glob(["src/**/*.rs"]),
+    srcs = glob(["src/**/*.rs"]) + ["port/binding.rs"],
     crate_features = ["vesper-port"],
     crate_name = "vesper_port_pilot",
     crate_root = "src/lib.rs",
@@ -49,6 +49,7 @@ rust_test(
 rust_test(
     name = "_port_api_divergent.bin",
     srcs = ["tests/api.rs"],
+    crate_name = "api_divergent",
     compile_data = [":pilot_vesper_divergent"],
     crate_features = ["vesper-port"],
     edition = "2024",

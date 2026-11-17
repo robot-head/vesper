@@ -2,7 +2,7 @@
 //!
 //! The public API below has two implementations: Rust (`src/reference.rs`,
 //! the default) and Vesper (`vesper/pilot.ves`, under the `vesper-port`
-//! feature, reached through the generated `src/port_binding.rs`). The tests
+//! feature, reached through the generated `port/binding.rs`). The tests
 //! in `tests/` are written against the API only, so they run unchanged
 //! against both builds. That is the recipe every crate port follows
 //! (`docs/maintenance/porting-a-crate.md`).
@@ -35,8 +35,11 @@ mod reference;
 #[cfg(not(feature = "vesper-port"))]
 pub use reference::*;
 
+// Generated and committed, but kept outside src/ so formatters, which
+// check every file under src/, never reflow it (see the porting recipe).
 #[cfg(feature = "vesper-port")]
 #[rustfmt::skip]
+#[path = "../port/binding.rs"]
 mod port_binding;
 #[cfg(feature = "vesper-port")]
 pub use port_binding::*;

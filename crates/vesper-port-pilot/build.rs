@@ -5,7 +5,7 @@ fn main() {
     #[cfg(feature = "vesper-port")]
     {
         let port = vesper_port_harness::Port::new("pilot", "vesper/pilot.ves")
-            .binding("src/port_binding.rs")
+            .binding("port/binding.rs")
             .rust_types("crate");
         // The divergence check: one comparison is off by one, so the port
         // run of tests/api.rs must fail (CI asserts that it does).

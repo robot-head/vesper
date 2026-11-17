@@ -32,7 +32,7 @@ fn pilot_binding_is_current() {
             types_path: Some("crate".into()),
         },
     );
-    vesper_port_harness::check_binding(&pilot().join("src/port_binding.rs"), &expected)
+    vesper_port_harness::check_binding(&pilot().join("port/binding.rs"), &expected)
         .expect("regenerate with VESPER_PORT_BLESS=1 cargo test -p vesper-port-pilot --features vesper-port");
 }
 

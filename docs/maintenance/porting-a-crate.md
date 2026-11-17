@@ -93,7 +93,7 @@ Sequences and strings get added to the ABI once P0 lanes 3 and 7 land.
    fn main() {
        #[cfg(feature = "vesper-port")]
        vesper_port_harness::Port::new("<name>", "vesper/<name>.ves")
-           .binding("src/port_binding.rs")
+           .binding("port/binding.rs")
            .rust_types("crate")
            .build();
    }
@@ -101,7 +101,9 @@ Sequences and strings get added to the ABI once P0 lanes 3 and 7 land.
 
 4. **Generate the binding.** Run
    `VESPER_PORT_BLESS=1 cargo test -p <crate> --features vesper-port` once and
-   commit `src/port_binding.rs`. After that, every build checks it: a change to
+   commit `port/binding.rs`. Keep it outside `src/`: Bazel's rustfmt check
+   formats every file under `src/` and ignores `#[rustfmt::skip]`, and the
+   generated text is not rustfmt-formatted. After that, every build checks it: a change to
    the Vesper source that changes a signature fails the build until you bless
    the binding again and review the diff.
 
@@ -116,6 +118,7 @@ Sequences and strings get added to the ABI once P0 lanes 3 and 7 land.
 
    #[cfg(feature = "vesper-port")]
    #[rustfmt::skip]
+   #[path = "../port/binding.rs"]
    mod port_binding;
    #[cfg(feature = "vesper-port")]
    pub use port_binding::*;
@@ -133,8 +136,8 @@ Sequences and strings get added to the ABI once P0 lanes 3 and 7 land.
    test first.
 
 7. **Add CI.**
-   - Bazel: copy the `vesper_port_object`, `rust_library` and `rust_test`
-     targets from `crates/vesper-port-pilot/BUILD.bazel`, so that Linux runs the
+   - Bazel: copy the `vesper_port_object`, `rust_library` (with
+     `port/binding.rs` in `srcs`) and `rust_test` targets from `crates/vesper-port-pilot/BUILD.bazel`, so that Linux runs the
      port tests.
    - macOS and Windows: add the crate to `scripts/test-port-harness.sh`.
 

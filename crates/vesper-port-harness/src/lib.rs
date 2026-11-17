@@ -13,7 +13,7 @@
 //!
 //! ```no_run
 //! vesper_port_harness::Port::new("pilot", "vesper/pilot.ves")
-//!     .binding("src/port_binding.rs")
+//!     .binding("port/binding.rs")
 //!     .rust_types("crate")
 //!     .build();
 //! ```
