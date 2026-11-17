@@ -446,6 +446,21 @@ impl<'a> Index<'a> {
                     env.truncate(old);
                 }
             }
+            ExprKind::For { pat, iter, body } => {
+                self.expr(iter, f, env, depth + 1, resolve)?;
+                let old = env.len();
+                self.pattern(pat, env, depth + 1)?;
+                self.expr(body, f, env, depth + 1, resolve)?;
+                env.truncate(old);
+            }
+            k @ (ExprKind::Loop(_)
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_)) => {
+                for c in k.control_children().into_iter().flatten() {
+                    self.expr(c, f, env, depth + 1, resolve)?;
+                }
+            }
             ExprKind::Closure { params, body, .. } => {
                 let old = env.len();
                 for p in params {

@@ -148,7 +148,7 @@ fn borrowed_noncopy_consume_attempts_never_become_completed_consumption_witnesse
 }
 #[test]
 fn mutable_loan_overlap_and_abort_use_the_real_read_and_parameter_span() {
-    let source = "copy struct Pair{x:u64} effect Stop{fn act();} fn touch(inout x:Pair){} fn f(inout p:Pair){touch(inout p);p.x=1;} fn g() eff[Stop]{let p=Pair{x:0};touch(inout p);Stop::act();}";
+    let source = "copy struct Pair{x:u64} effect Stop{fn act();} fn touch(inout x:Pair){} fn f(inout p:Pair){touch(inout p);p.x=1;} fn g() eff[Stop]{let mut p=Pair{x:0};touch(inout p);Stop::act();}";
     let (checked, mut program) = lower(source);
     let parameter = program.functions["f"].params[0].span.clone();
     let mut reads = Vec::new();

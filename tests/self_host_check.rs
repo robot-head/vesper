@@ -355,7 +355,14 @@ fn walk(dir: &Path, paths: &mut Vec<PathBuf>) {
         }
         if path.is_dir() {
             walk(&path, paths)
-        } else if path.extension().is_some_and(|e| e == "ves") {
+        } else if path.extension().is_some_and(|e| e == "ves")
+            // Loops, early exits and `let mut` (lane F6, #876) are not in
+            // the self-hosted front end yet; such sources join this corpus
+            // once it parses them.
+            && std::fs::read_to_string(&path).map_or(true, |source| {
+                !vesper::loops::uses_loop_syntax(&vesper::parser::parse(&source).module)
+            })
+        {
             paths.push(path)
         }
     }

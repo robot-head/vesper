@@ -200,13 +200,13 @@ fn compound_assignment_failures_leave_the_target_unchanged() {
     for (op, start, operand) in [("+=", "250", "10"), ("-=", "3", "4"), ("*=", "128", "2")] {
         agree(
             &format!(
-                "fn bump(a: u8, b: u8) -> u8 {{ let x: u8 = a; let ok = handle Fail[ArithOverflow] in {{ x {op} b; true }} with {{ return v => v, raise(e, k) => false, }}; if ok {{ 0 }} else {{ x }} }} fn main() -> u8 {{ bump({start}, {operand}) }}"
+                "fn bump(a: u8, b: u8) -> u8 {{ let mut x: u8 = a; let ok = handle Fail[ArithOverflow] in {{ x {op} b; true }} with {{ return v => v, raise(e, k) => false, }}; if ok {{ 0 }} else {{ x }} }} fn main() -> u8 {{ bump({start}, {operand}) }}"
             ),
             start,
         );
     }
     agree(
-        "copy struct Acc { total: i64 } fn add(a: i64) -> i64 { let acc = Acc { total: 9223372036854775800 }; let r = handle Fail[ArithOverflow] in { acc.total += a; 1 } with { return v => v, raise(e, k) => 0, }; wrapping_add(wrapping_mul(r, 100), wrapping_sub(acc.total, 9223372036854775800)) } fn main() -> i64 { wrapping_add(wrapping_mul(add(7), 1000), add(8)) }",
+        "copy struct Acc { total: i64 } fn add(a: i64) -> i64 { let mut acc = Acc { total: 9223372036854775800 }; let r = handle Fail[ArithOverflow] in { acc.total += a; 1 } with { return v => v, raise(e, k) => 0, }; wrapping_add(wrapping_mul(r, 100), wrapping_sub(acc.total, 9223372036854775800)) } fn main() -> i64 { wrapping_add(wrapping_mul(add(7), 1000), add(8)) }",
         "107000",
     );
 }
@@ -266,7 +266,7 @@ fn signed_division_corners() {
     agree(
         &guarded(
             "i64",
-            "let x: i64 = -9223372036854775807; x -= 1; let y = handle Fail[RuntimeError] in { let d: i64 = -1; x /= d; 0 } with { return v => v, raise(e, k) => 5, }; y",
+            "let mut x: i64 = -9223372036854775807; x -= 1; let y = handle Fail[RuntimeError] in { let d: i64 = -1; x /= d; 0 } with { return v => v, raise(e, k) => 5, }; y",
             "6",
         ),
         "6",
@@ -425,26 +425,29 @@ fn aborts_respect_linear_values_state_and_continuations() {
 #[test]
 fn facts_are_invalidated_by_assignment_inout_calls_and_resumptions() {
     // Assignment replaces the fact.
-    rejects("fn f(a: u8) -> u8 { let x: u8 = 1; x = a; x + 1 }", "E0401");
+    rejects(
+        "fn f(a: u8) -> u8 { let mut x: u8 = 1; x = a; x + 1 }",
+        "E0401",
+    );
     // Field writes never establish a fact about their root.
     rejects(
-        "copy struct P { v: u8 } fn f(a: u8) -> u8 { let p = P { v: 1 }; p.v = a; p.v + 1 }",
+        "copy struct P { v: u8 } fn f(a: u8) -> u8 { let mut p = P { v: 1 }; p.v = a; p.v + 1 }",
         "E0401",
     );
     // A compound assignment's own fact is the checked result.
-    accepted("fn f() -> u8 { let x: u8 = 100; x += 100; x + 55 }");
+    accepted("fn f() -> u8 { let mut x: u8 = 100; x += 100; x + 55 }");
     rejects(
-        "fn f() -> u8 { let x: u8 = 100; x += 100; x + 56 }",
+        "fn f() -> u8 { let mut x: u8 = 100; x += 100; x + 56 }",
         "E0401",
     );
     // An inout call may change the place.
     rejects(
-        "fn set(inout x: u8) { x = 255; } fn f() -> u8 { let x: u8 = 1; set(inout x); x + 1 }",
+        "fn set(inout x: u8) { x = 255; } fn f() -> u8 { let mut x: u8 = 1; set(inout x); x + 1 }",
         "E0401",
     );
     // A resumption may change a place aliased by an operation argument.
     rejects(
-        "linear effect Mut { fn change(inout x: u8); } fn f() -> u8 { let x: u8 = 1; handle Mut in { Mut::change(inout x); x + 1 } with { return v => v, change(x, k) => { x = 255; k(()) }, } }",
+        "linear effect Mut { fn change(inout x: u8); } fn f() -> u8 { let mut x: u8 = 1; handle Mut in { Mut::change(inout x); x + 1 } with { return v => v, change(x, k) => { x = 255; k(()) }, } }",
         "E0401",
     );
     rejects(
@@ -454,28 +457,28 @@ fn facts_are_invalidated_by_assignment_inout_calls_and_resumptions() {
     // A right operand that reassigns the left operand's binding cannot
     // discharge the check with the new value.
     rejects(
-        "fn f() -> i64 eff [Fail[RuntimeError]] { let x: i64 = -9223372036854775808; x / { x = 0; -1 } }",
+        "fn f() -> i64 eff [Fail[RuntimeError]] { let mut x: i64 = -9223372036854775808; x / { x = 0; -1 } }",
         "E0400",
     );
     rejects(
-        "fn f() -> u8 { let x: u8 = 255; x + { x = 0; 1 } }",
+        "fn f() -> u8 { let mut x: u8 = 255; x + { x = 0; 1 } }",
         "E0401",
     );
     rejects(
-        "fn f() -> u8 { let x: u8 = 255; x += { x = 0; 1 }; x }",
+        "fn f() -> u8 { let mut x: u8 = 255; x += { x = 0; 1 }; x }",
         "E0401",
     );
     agree(
         &guarded(
             "i64",
-            "handle Fail[RuntimeError] in { let x: i64 = -9223372036854775808; x / { x = 5; -1 } } with { return v => v, raise(e, k) => 3, }",
+            "handle Fail[RuntimeError] in { let mut x: i64 = -9223372036854775808; x / { x = 5; -1 } } with { return v => v, raise(e, k) => 3, }",
             "4",
         ),
         "4",
     );
     // The handled program observes the modified value.
     agree(
-        "linear effect Mut { fn change(inout x: u8); } fn main() -> u8 { let x: u8 = 1; handle Mut in { Mut::change(inout x); handle Fail[ArithOverflow] in { x + 1 } with { return v => v, raise(e, k) => 9, } } with { return v => v, change(x, k) => { x = 255; k(()) }, } }",
+        "linear effect Mut { fn change(inout x: u8); } fn main() -> u8 { let mut x: u8 = 1; handle Mut in { Mut::change(inout x); handle Fail[ArithOverflow] in { x + 1 } with { return v => v, raise(e, k) => 9, } } with { return v => v, change(x, k) => { x = 255; k(()) }, } }",
         "9",
     );
 }
@@ -613,7 +616,7 @@ fn untouched_integer_facts_survive_ordinary_if_joins() {
         "fn f(flag: bool) -> i64 { let x = 5; let y = if flag { if x == 0 { 1 } else { 2 } } else { 3 }; x + 1 }",
     );
     accepted(
-        "fn f(flag: bool) -> i64 { let x = 0; x = 5; let y = if flag { if x == 0 { 1 } else { 2 } } else { 3 }; x + 1 }",
+        "fn f(flag: bool) -> i64 { let mut x = 0; x = 5; let y = if flag { if x == 0 { 1 } else { 2 } } else { 3 }; x + 1 }",
     );
     agree(
         "fn main() -> i64 { let x = 5; let y = if x == 0 { let x = 9; x } else { let x = 10; x }; x + 1 }",
@@ -639,11 +642,11 @@ fn if_fact_restoration_cannot_hide_writes_or_borrow_invalidation() {
     }
     // A write in the condition precedes the incoming snapshot.
     rejects(
-        "fn f(a: u8) -> u8 { let x: u8 = 5; let y = if { x = a; x == 0 } { 1 } else { 2 }; x + 1 }",
+        "fn f(a: u8) -> u8 { let mut x: u8 = 5; let y = if { x = a; x == 0 } { 1 } else { 2 }; x + 1 }",
         "E0401",
     );
     // Agreeing branch results remain authoritative, even after mutation.
     accepted(
-        "fn f(flag: bool) -> u8 { let x: u8 = 255; if flag { x = 1; } else { x = 1; }; x + 1 }",
+        "fn f(flag: bool) -> u8 { let mut x: u8 = 255; if flag { x = 1; } else { x = 1; }; x + 1 }",
     );
 }

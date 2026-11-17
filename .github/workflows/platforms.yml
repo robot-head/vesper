@@ -125,6 +125,8 @@ jobs:
         run: |
           cargo build --locked --bin vesper
           VESPER_NATIVE_BINARY=target/debug/vesper scripts/ci/test-native-executables.sh
+      - name: Test the Vesper port harness
+        run: scripts/test-port-harness.sh
 
   windows:
     needs: plan
@@ -160,6 +162,8 @@ jobs:
         run: |
           cargo build --locked --bin vesper
           VESPER_NATIVE_BINARY=target/debug/vesper.exe VESPER_NATIVE_SUFFIX=.exe scripts/ci/test-native-executables.sh
+      - name: Test the Vesper port harness
+        run: scripts/test-port-harness.sh
 
   complete:
     name: Platform validation complete

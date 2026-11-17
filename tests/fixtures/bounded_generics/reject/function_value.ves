@@ -1,0 +1,12 @@
+// expect E0607: a bounded function has no single value without a dictionary.
+fn max[T: mod copy](a: T, b: T) -> T where T: Ord {
+    match a.cmp(b) {
+        Less => b,
+        _ => a,
+    }
+}
+
+fn main() -> i64 {
+    let f = max;
+    0
+}

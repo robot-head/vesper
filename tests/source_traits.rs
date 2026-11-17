@@ -164,7 +164,7 @@ impl Step[Log] for Counter {
     fn step(inout self) -> i64 eff [Log] { Log::log(self.n); self.n = wrapping_add(self.n, 1); self.n }
 }
 fn main() -> i64 {
-    let c = Counter { n: 1 };
+    let mut c = Counter { n: 1 };
     handle Log in {
         let a = c.step();
         let b = c.step();
@@ -391,28 +391,37 @@ fn main() -> i64 { let b = Box { v: 1 }; b.deep() }";
 }
 
 #[test]
-fn generic_dictionary_dispatch_is_rejected() {
-    rejects(
-        &format!("{BASE} fn f[T: Show](in x: T) -> i64 {{ 0 }} fn main() -> i64 {{ 0 }}"),
-        "E0607",
+fn bounded_generics_monomorphize_and_unbounded_calls_are_rejected() {
+    // Trait bounds on function generics are accepted (port lane 5, F7a):
+    // they are instantiated per use instead of passing a dictionary.
+    let w = world(&format!(
+        "{BASE} fn f[T: Show](in x: T) -> i64 {{ 0 }} fn main() -> i64 {{ 0 }}"
+    ));
+    assert!(
+        !w.functions.contains_key("f"),
+        "uninstantiated generic dropped"
     );
-    rejects(
-        &format!("{BASE} fn f[T](in x: T) -> i64 where T: Show {{ 0 }} fn main() -> i64 {{ 0 }}"),
-        "E0607",
-    );
-    rejects(
+    world(&format!(
+        "{BASE} fn f[T](in x: T) -> i64 where T: Show {{ 0 }} fn main() -> i64 {{ 0 }}"
+    ));
+    // A trait call on an unbounded parameter still has no static target.
+    let ds = rejects(
         &format!(
             "{BASE} impl Show for Point {{ type Out = i64; fn show(in self) -> i64 {{ 1 }} }} fn f[T](in x: T) -> i64 {{ x.show() }} fn main() -> i64 {{ 0 }}"
         ),
         "E0607",
     );
-    // A where-clause assumption cannot be discharged statically.
+    assert!(
+        ds.iter()
+            .any(|d| d.message.contains("add the bound `T: Show`")),
+        "{ds:?}"
+    );
+    // A where-clause assumption is discharged per instance.
     let src = "copy struct Box[T: mod copy] { v: T } trait Show { fn show(in self) -> i64; }
 impl Show for i64 { fn show(in self) -> i64 { 5 } }
 impl[T: mod copy] Show for Box[T] where T: Show { fn show(in self) -> i64 { self.v.show() } }
 fn main() -> i64 { let b = Box { v: 1 }; b.show() }";
-    rejects(src, "E0607");
-    // Without needing the assumption the generic impl executes.
+    assert_eq!(execute(src), "5");
     let ok = src.replace("self.v.show()", "7");
     assert_eq!(execute(&ok), "7");
 }

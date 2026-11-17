@@ -396,6 +396,13 @@ fn surface_expansion(module: &ast::Module) -> Result<(), String> {
                         stack.push(value);
                         stack.extend(arms.iter().map(|(_, e)| e));
                     }
+                    k @ (ast::ExprKind::Loop(_)
+                    | ast::ExprKind::For { .. }
+                    | ast::ExprKind::Range { .. }
+                    | ast::ExprKind::Break(_)
+                    | ast::ExprKind::Return(_)) => {
+                        stack.extend(k.control_children().into_iter().flatten());
+                    }
                     ast::ExprKind::Closure {
                         params,
                         result,

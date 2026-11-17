@@ -1001,7 +1001,7 @@ fn loop_allocs(n: i64) -> i64 {
     } else {
         let Box(a) = Box::new(n);
         let _ = Box::new(wrapping_add(n, 1));
-        let ow = Box::new(1);
+        let mut ow = Box::new(1);
         ow = Box::new(2);
         let Box(ov) = ow;
         let pair = Pair { first: Box::new(3), second: Box::new(4) };

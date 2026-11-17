@@ -26,7 +26,7 @@ const PROGRAMS: &[(&str, &str)] = &[
     ("u8", "fn main() -> u8 { 255 }"),
     (
         "inout",
-        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let x = 41; inc(inout x); x }",
+        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let mut x = 41; inc(inout x); x }",
     ),
     (
         "handler",

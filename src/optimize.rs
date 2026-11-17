@@ -190,6 +190,15 @@ fn visit(e: &mut Expr, types: &TypeMap) {
                 visit(&mut c.body, types)
             }
         }
+        k @ (ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_)) => {
+            for c in k.control_children_mut().into_iter().flatten() {
+                visit(c, types)
+            }
+        }
         _ => {}
     }
 }

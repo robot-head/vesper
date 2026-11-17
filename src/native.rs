@@ -20,6 +20,9 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cell::RefCell, rc::Rc};
 
+/// `vesper build --lib`: C-ABI library objects (port P0 lane 6, #878).
+#[path = "native_export.rs"]
+pub mod export;
 /// Foreign calls of imported `.vsys` libraries (§13, `crate::ffi_lowering`).
 #[path = "ffi_lowering/native.rs"]
 mod ffi;
@@ -254,6 +257,15 @@ fn visit(e: &Expr, callback: &mut impl FnMut(&Expr)) {
             visit(&ret.body, callback);
             for c in ops {
                 visit(&c.body, callback)
+            }
+        }
+        k @ (ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_)) => {
+            for c in k.control_children().into_iter().flatten() {
+                visit(c, callback)
             }
         }
         _ => {}
@@ -920,6 +932,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 generic_vars: generic_vars.clone(),
                 pointers,
                 handlers: vec![],
+                exits: vec![],
                 inline_depth: 0,
                 fail_record: fail_record.map(|record| {
                     (
@@ -1563,6 +1576,15 @@ enum ClosureTarget {
         control: HandlerControl,
     },
 }
+/// Where a `return` from a graph's owner continues: its caller's join block
+/// (an inlined graph) or the Cranelift return, through `sret` when present.
+#[derive(Clone)]
+struct ExitTarget {
+    owner: String,
+    join: Option<ir::Block>,
+    sret: Option<ir::Value>,
+    result: Type,
+}
 struct Codegen<'a, 'b, M: Module> {
     b: FunctionBuilder<'a>,
     m: &'b mut M,
@@ -1580,6 +1602,9 @@ struct Codegen<'a, 'b, M: Module> {
     generic_vars: BTreeMap<String, Type>,
     pointers: BTreeMap<u32, Variable>,
     handlers: Vec<Handler>,
+    /// The graphs being emitted, innermost last: the targets of `return`
+    /// ([`crate::ir::Op::Exit`]) by lowered function or closure name.
+    exits: Vec<ExitTarget>,
     inline_depth: usize,
     /// The failure-record pointer of a `fail_only` function being compiled,
     /// with the error type of each of its `Fail` instances.
@@ -2441,9 +2466,51 @@ impl<M: Module> Codegen<'_, '_, M> {
                 graph.add_edge(id, target, ());
             }
         }
-        let order = petgraph::algo::toposort(&graph, None).map_err(
-            |_| "native closure specialization requires structured acyclic function CFGs",
-        )?;
+        // Blocks after a `break` or `return` (`crate::loops`) have no
+        // predecessors; they are emitted last so the entry stays first.
+        // Acyclic graphs keep their topological order; a loop's back edges
+        // need a reverse postorder from the entry instead. Frontend
+        // variables join values across either order.
+        let mut postorder = vec![];
+        let mut dfs = petgraph::visit::DfsPostOrder::new(&graph, 0);
+        while let Some(n) = dfs.next(&graph) {
+            postorder.push(n);
+        }
+        let reached = postorder.iter().copied().collect::<BTreeSet<_>>();
+        let unreached = (0..f.blocks.len()).filter(|n| !reached.contains(n));
+        let mut live = graph.clone();
+        for n in unreached.clone() {
+            live.remove_node(n);
+        }
+        let mut order = petgraph::algo::toposort(&live, None).unwrap_or_else(|_| {
+            postorder.reverse();
+            postorder
+        });
+        order.extend(unreached);
+        // Box drop elaboration (`fip::elaborate_non_fip_drops`) assumes a
+        // forward-only graph without early exits; refuse rather than leak.
+        if f.blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| matches!(i.op, Op::Loop | Op::Exit { .. }))
+            && f.values
+                .values()
+                .chain(f.locals.values())
+                .any(|t| crate::fip::mentions_box(self.world, t))
+        {
+            return Err(format!(
+                "native '{}': {}",
+                f.name,
+                crate::loops::BOX_REFUSAL
+            ));
+        }
+        let result_type = crate::numeric::default_type(&substitute(&f.result, &self.generic_vars));
+        self.exits.push(ExitTarget {
+            owner: f.name.clone(),
+            join: return_to,
+            sret,
+            result: result_type,
+        });
         for i in order {
             let block = &f.blocks[i];
             if self.b.current_block() != Some(blocks[i]) {
@@ -2488,6 +2555,16 @@ impl<M: Module> Codegen<'_, '_, M> {
                     None
                 };
                 let value = match &inst.op {
+                    Op::Loop => self.zero(),
+                    Op::Exit { value, owner } => {
+                        let v = values
+                            .get(value)
+                            .copied()
+                            .ok_or_else(|| format!("undefined native IR value %{value}"))?;
+                        let ty = f.values.get(value).cloned().unwrap_or(Type::Infer);
+                        self.exit_to(owner, v, &ty)?;
+                        self.zero()
+                    }
                     Op::Constant(l) => self.expr(&make(ExprKind::Literal(l.clone())))?,
                     Op::Unit => self.zero(),
                     Op::Read {
@@ -2888,6 +2965,38 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
         }
+        self.exits.pop();
+        Ok(())
+    }
+    /// `return value` from the graph lowered as `owner` (`Op::Exit`).
+    fn exit_to(&mut self, owner: &str, value: ir::Value, ty: &Type) -> Result<(), String> {
+        let target = self
+            .exits
+            .iter()
+            .rev()
+            .find(|t| t.owner == owner)
+            .cloned()
+            .ok_or_else(|| format!("native 'return' target '{owner}' is not being emitted"))?;
+        let value = if ty.name() == "Never" {
+            self.default_value(&target.result)?
+        } else {
+            value
+        };
+        let value = if let Some(output) = target.sret {
+            let layout = Layout::of(self.world, &target.result)?;
+            self.copy_bytes(value, output, layout.size);
+            self.zero()
+        } else {
+            value
+        };
+        if let Some(join) = target.join {
+            self.jump(join, &[value.into()]);
+        } else {
+            self.b.ins().return_(&[value]);
+        }
+        // Whatever follows the jump is emitted into a block nothing reaches.
+        let dead = self.b.create_block();
+        self.b.switch_to_block(dead);
         Ok(())
     }
     fn default_value(&mut self, ty: &Type) -> Result<ir::Value, String> {
@@ -3924,6 +4033,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.b.block_params(join)[0]
             }
             ExprKind::Closure { params, body, .. } => self.closure_tag(e, params, body)?,
+            ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_) => {
+                return Err("native loops and early exits are lowered from Place IR".into());
+            }
             ExprKind::Handle {
                 effect,
                 state,

@@ -369,6 +369,13 @@ pub struct TraitBoundSyntax {
     pub param: String,
     pub trait_ref: TraitRef,
     pub span: Span,
+    /// The item whose generic parameter the bound constrains: a function
+    /// name (`f`), an inherent method (`Type::m`, one entry per method of a
+    /// bounded `impl[K: Ord] Type[K]` block) or a type (`CacheBTree`).
+    /// Methods of traits and conformances and effect operations carry an
+    /// `$unsupported::` prefix.
+    #[serde(default)]
+    pub owner: String,
 }
 
 /// Reserved frontend-only encoding of an associated-type projection
@@ -473,7 +480,15 @@ pub struct Arg {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum Statement {
-    Let { pat: Pattern, ty: Type, value: Expr },
+    Let {
+        pat: Pattern,
+        ty: Type,
+        value: Expr,
+        /// `let mut`: the binding is declared assignable (manuscript ch. 2.2
+        /// `LetStmt`). Omitted from serialized trees when false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        mutable: bool,
+    },
     Expr(Expr),
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -530,6 +545,53 @@ pub enum ExprKind {
         ret: Box<Clause>,
         ops: Vec<Clause>,
     },
+    /// `loop { body }`: repeats until a `break` (manuscript `LoopExpr`).
+    Loop(Box<Expr>),
+    /// `for pat in iter { body }` (manuscript `ForExpr`). The iterable is
+    /// an integer [`ExprKind::Range`] for now.
+    For {
+        pat: Pattern,
+        iter: Box<Expr>,
+        body: Box<Expr>,
+    },
+    /// `start..end` (half-open) or `start..=end` (closed) integer interval.
+    Range {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        inclusive: bool,
+    },
+    /// `break` or `break value`: leaves the innermost `loop` or `for`.
+    Break(Option<Box<Expr>>),
+    /// `return` or `return value`: leaves the enclosing function or closure.
+    Return(Option<Box<Expr>>),
+}
+impl ExprKind {
+    /// The direct subexpressions of a loop-family node (`Loop`, `For`,
+    /// `Range`, `Break`, `Return`) in evaluation order, or `None` for every
+    /// other kind. A `For` pattern binds in its body only.
+    pub fn control_children(&self) -> Option<Vec<&Expr>> {
+        Some(match self {
+            ExprKind::Loop(body) => vec![&**body],
+            ExprKind::For { iter, body, .. } => vec![&**iter, &**body],
+            ExprKind::Range { start, end, .. } => vec![&**start, &**end],
+            ExprKind::Break(value) | ExprKind::Return(value) => {
+                value.iter().map(|e| &**e).collect()
+            }
+            _ => return None,
+        })
+    }
+    /// Mutable form of [`ExprKind::control_children`].
+    pub fn control_children_mut(&mut self) -> Option<Vec<&mut Expr>> {
+        Some(match self {
+            ExprKind::Loop(body) => vec![&mut **body],
+            ExprKind::For { iter, body, .. } => vec![&mut **iter, &mut **body],
+            ExprKind::Range { start, end, .. } => vec![&mut **start, &mut **end],
+            ExprKind::Break(value) | ExprKind::Return(value) => {
+                value.iter_mut().map(|e| &mut **e).collect()
+            }
+            _ => return None,
+        })
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Pattern {

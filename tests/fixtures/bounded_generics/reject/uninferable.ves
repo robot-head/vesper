@@ -1,0 +1,8 @@
+// expect E0607: nothing fixes the element type of `None` for the bound.
+fn first[T: mod copy](a: Option[T], b: Option[T]) -> i64 where T: Ord {
+    0
+}
+
+fn main() -> i64 {
+    first(None, None)
+}

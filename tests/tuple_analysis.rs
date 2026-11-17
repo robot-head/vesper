@@ -25,7 +25,7 @@ fn bounded_shapes_parameters_helpers_and_destructuring_reach_actual_checker() {
         "fn f()->(i64,i64){let x=42;let y={let x=true;(x,);};(x,x)}",
         "fn f(in c:bool)->(i64,i64){if c {(1,2)} else {(3,4)}}",
         "fn f(in c:bool)->(i64,i64){match c{true=>(1,2),false=>(3,4)}}",
-        "fn update(inout p:(i64,i64)){} fn f()->(i64,i64){let p=(1,42);update(inout p);update(inout p);p}",
+        "fn update(inout p:(i64,i64)){} fn f()->(i64,i64){let mut p=(1,42);update(inout p);update(inout p);p}",
         "copy struct Boxed{value:(i64,i64)} fn f(in p:Boxed)->((i64,i64),){(p.value,)}",
         "copy enum Mark{Ready} fn f()->(Mark,){(Mark::Ready,)}",
     ] {

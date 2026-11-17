@@ -377,6 +377,13 @@ fn is_binary_operator(kind: K) -> bool {
             | K::Shr
     )
 }
+/// Whether a token can start the upper bound of a range.
+fn starts_range_bound(kind: K) -> bool {
+    matches!(
+        kind,
+        K::Int | K::Float | K::Lower | K::Upper | K::LParen | K::Minus | K::SelfKw
+    )
+}
 /// Whether a token can end an operand, so a following `-`/`*` is infix.
 fn ends_operand(kind: K) -> bool {
     matches!(
@@ -424,6 +431,12 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
         return Gap::Empty;
     }
     if current.kind == K::ColonColon {
+        return Gap::None;
+    }
+    // Ranges (`for i in 0..n`) are written tight on both sides.
+    if matches!(current.kind, K::DotDot | K::DotDotEq) && ends_operand(previous.kind)
+        || matches!(previous.kind, K::DotDot | K::DotDotEq) && starts_range_bound(current.kind)
+    {
         return Gap::None;
     }
     if current.kind == K::Arrow {

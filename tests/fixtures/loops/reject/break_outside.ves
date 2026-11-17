@@ -1,0 +1,10 @@
+// E0213: `break` outside a loop, here across a closure boundary.
+fn main() -> i64 {
+    loop {
+        let f = || {
+            break;
+        };
+        break;
+    }
+    0
+}

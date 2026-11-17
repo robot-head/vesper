@@ -291,6 +291,15 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             visit_expr(value, f);
             arms.iter().for_each(|(_, e)| visit_expr(e, f));
         }
+        k @ (ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_)) => {
+            for c in k.control_children().into_iter().flatten() {
+                visit_expr(c, f);
+            }
+        }
         ExprKind::Closure { body, .. } => visit_expr(body, f),
         ExprKind::Handle {
             state,

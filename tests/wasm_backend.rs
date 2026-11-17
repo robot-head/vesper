@@ -243,7 +243,7 @@ fn scalars() {
     differential("fn main() -> f64 { -(1.5 * 2.0) }");
     differential("fn main() -> Unit { }");
     differential("fn main() -> bool { false && (1 / 0 == 0) }");
-    differential("fn main() -> i64 { let x = 1; if true { x += 41; } else { x -= 1; }; x }");
+    differential("fn main() -> i64 { let mut x = 1; if true { x += 41; } else { x -= 1; }; x }");
     differential("fn main() -> i64 { let x = 42; { let x = 2; x }; x }");
 }
 
@@ -285,8 +285,8 @@ fn checked_arithmetic_matches_the_evaluator() {
         "let x: u64 = 1; let z = -x; 0",
         "let x: u64 = 7; let y: u64 = 0; let z = x / y; 0",
         "let x: u64 = 18446744073709551615; if x > 1 { 1 } else { 0 }",
-        "let a: i64 = 10; a -= 20; a *= 3; a",
-        "let a: i64 = 9223372036854775807; a += 1; a",
+        "let mut a: i64 = 10; a -= 20; a *= 3; a",
+        "let mut a: i64 = 9223372036854775807; a += 1; a",
     ];
     for c in cases {
         arith(c);
@@ -304,7 +304,7 @@ fn failure_selects_its_own_instance() {
         "fn index(i: i64) -> i64 eff [Fail[RuntimeError]] { let xs = (10, 20); xs[i] } fn main() -> i64 { handle Fail[RuntimeError] in { index(-1) } with { return x => x, raise(e, k) => match e { RuntimeError::IndexOutOfBounds => 42, RuntimeError::DivisionByZero => 0, }, } }",
     );
     differential(
-        "fn rem(b: u64) -> u64 eff [Fail[RuntimeError]] { let a: u64 = 84; a %= b; a } fn main() -> u64 { handle Fail[RuntimeError] in { rem(0) } with { return x => x, raise(e, k) => 42, } }",
+        "fn rem(b: u64) -> u64 eff [Fail[RuntimeError]] { let mut a: u64 = 84; a %= b; a } fn main() -> u64 { handle Fail[RuntimeError] in { rem(0) } with { return x => x, raise(e, k) => 42, } }",
     );
     differential(
         "fn main() -> u8 { handle Fail[i64] in { let x: Result[u8, i64] = Ok(42); x? } with { return x => x, raise(e, k) => 0, } }",
@@ -321,7 +321,7 @@ fn failure_selects_its_own_instance() {
 fn aggregates() {
     differential("copy struct Pair { x: i64, y: i64 } fn main() -> Pair { Pair { y: 2, x: 1 } }");
     differential(
-        "copy struct Pair { x: i64, y: i64 } fn main() -> i64 { let a = Pair { x: 1, y: 2 }; let b = a; b.x = 42; a.x }",
+        "copy struct Pair { x: i64, y: i64 } fn main() -> i64 { let a = Pair { x: 1, y: 2 }; let mut b = a; b.x = 42; a.x }",
     );
     differential(
         "copy struct Pair { x: i64, y: i64 } fn sum(in p: Pair) -> i64 { wrapping_add(p.x, p.y) } fn main() -> i64 { let p = Pair { x: 20, y: 22 }; sum(in p) }",
@@ -348,7 +348,7 @@ fn aggregates() {
     differential(include_str!("../examples/transaction.ves"));
     differential(include_str!("../examples/projections.ves"));
     differential(
-        "copy struct Inner { a: i64, b: i64 } copy struct Outer { inner: Inner, c: u8 } fn main() -> Outer { let o = Outer { inner: Inner { a: 1, b: 2 }, c: 3 }; let p = o; p.inner.b = 40; o.inner.a = wrapping_add(p.inner.b, 2); o }",
+        "copy struct Inner { a: i64, b: i64 } copy struct Outer { inner: Inner, c: u8 } fn main() -> Outer { let mut o = Outer { inner: Inner { a: 1, b: 2 }, c: 3 }; let mut p = o; p.inner.b = 40; o.inner.a = wrapping_add(p.inner.b, 2); o }",
     );
     differential(
         "copy enum Shape { Dot, Circle(i64), Rect { w: i64, h: i64 } } fn area(s: Shape) -> i64 { match s { Shape::Dot => 0, Shape::Circle(r) => wrapping_mul(3, wrapping_mul(r, r)), Shape::Rect { w, h } => wrapping_mul(w, h), } } fn main() -> (i64, i64, i64) { (area(Shape::Dot), area(Shape::Circle(2)), area(Shape::Rect { w: 6, h: 7 })) }",
@@ -381,16 +381,16 @@ fn calls_and_mutation() {
         "fn a() -> i64 { 1 } fn b() -> i64 { 2 } fn main() -> i64 { if true { a() } else { b() } }",
     );
     differential(
-        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let x = 41; inc(inout x); x }",
+        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let mut x = 41; inc(inout x); x }",
     );
     differential(
-        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn twice(inout x: i64) { inc(inout x); inc(inout x); } fn main() -> i64 { let x = 40; twice(inout x); x }",
+        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn twice(inout x: i64) { inc(inout x); inc(inout x); } fn main() -> i64 { let mut x = 40; twice(inout x); x }",
     );
     differential(
-        "copy struct P { x: i64, y: i64 } fn bump(inout p: P) { p.x = wrapping_add(p.x, 1); } fn main() -> P { let p = P { x: 1, y: 2 }; bump(inout p); bump(inout p); p }",
+        "copy struct P { x: i64, y: i64 } fn bump(inout p: P) { p.x = wrapping_add(p.x, 1); } fn main() -> P { let mut p = P { x: 1, y: 2 }; bump(inout p); bump(inout p); p }",
     );
     differential(
-        "copy struct P { x: i64, y: i64 } fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> P { let p = P { x: 1, y: 2 }; inc(inout p.y); p }",
+        "copy struct P { x: i64, y: i64 } fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> P { let mut p = P { x: 1, y: 2 }; inc(inout p.y); p }",
     );
     differential("fn double(x: f64) -> f64 { x * 2.0 } fn main() -> f64 { double(21.0) }");
     differential("fn id[T](sink x: T) -> T { x } fn main() -> i64 { id[i64](42) }");
@@ -448,8 +448,8 @@ fn tail_resumptive_and_aborting_handlers_are_portable() {
         "effect Stop { fn stop() -> Never; } fn main() -> i64 { handle Stop in { Stop::stop(); 99 } with { return x => x, stop(k) => 7, } }",
         "effect Stop { fn stop() -> Never; } fn main() -> f64 { handle Stop in { Stop::stop(); 99.0 } with { return x => x, stop(k) => 7.0, } }",
         "copy struct Receipt { id: u64 } effect Stop { fn stop() -> Never; } fn main() -> Receipt { handle Stop in { Stop::stop(); Receipt { id: 99 } } with { return x => x, stop(k) => Receipt { id: 42 }, } }",
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let result = handle Ask in { x = 40; Ask::ask() } with { return value => wrapping_add(value, x), ask(k) => { x += 1; k(x) }, }; wrapping_add(x, result) }",
-        "copy struct Config { x: i64 } linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let config = Config { x: 1 }; let result = handle Ask in { config.x = 40; wrapping_add(Ask::ask(), Ask::ask()) } with { return value => wrapping_add(value, config.x), ask(k) => { config.x = wrapping_add(config.x, 1); k(config.x) }, }; wrapping_add(config.x, result) }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let mut x = 1; let result = handle Ask in { x = 40; Ask::ask() } with { return value => wrapping_add(value, x), ask(k) => { x += 1; k(x) }, }; wrapping_add(x, result) }",
+        "copy struct Config { x: i64 } linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let mut config = Config { x: 1 }; let result = handle Ask in { config.x = 40; wrapping_add(Ask::ask(), Ask::ask()) } with { return value => wrapping_add(value, config.x), ask(k) => { config.x = wrapping_add(config.x, 1); k(config.x) }, }; wrapping_add(config.x, result) }",
         "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { wrapping_add(outer.ask(), inner.ask()) } with { return x => x, ask(k) => k(2), } } with { return x => x, ask(k) => k(40), } }",
         "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { inner.ask() } with { return x => x, ask(k) => k(wrapping_add(outer.ask(), 2)), } } with { return x => x, ask(k) => k(40), } }",
         "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { handle Ask in { Ask::ask() } with { return x => x, ask(k) => k(wrapping_add(Ask::ask(), 1)), } } with { return x => x, ask(k) => k(10), } }",
@@ -593,9 +593,9 @@ fn closures_and_function_values() {
         "fn make(sink x: i64) -> fn(i64) -> i64 { |y| wrapping_add(x, y) } fn main() -> i64 { let f = make(40); f(2) }",
         "fn apply(sink f: fn(i64) -> i64, x: i64) -> i64 { f(x) } fn main() -> i64 { apply(|x| wrapping_add(x, 2), 40) }",
         "fn main() -> i64 { let f = || 40; let g = || wrapping_add(f(), 2); g() }",
-        "fn main() -> i64 { let x = 0; let f = || { x += 1; x }; wrapping_add(f(), f()) }",
+        "fn main() -> i64 { let mut x = 0; let f = || { x += 1; x }; wrapping_add(f(), f()) }",
         "fn main() -> i64 { let x = 40; let f = if true { |y: i64| wrapping_add(x, y) } else { |y: i64| wrapping_sub(x, y) }; f(2) }",
-        "fn main() -> i64 { let inc = |inout x: i64| { x = wrapping_add(x, 1); x }; let x = 40; let y = inc(inout x); wrapping_sub(wrapping_add(x, y), 40) }",
+        "fn main() -> i64 { let inc = |inout x: i64| { x = wrapping_add(x, 1); x }; let mut x = 40; let y = inc(inout x); wrapping_sub(wrapping_add(x, y), 40) }",
         "fn answer() -> i64 { 42 } fn main() -> i64 { let f = answer; f() }",
         "copy struct Callback { f: fn@copy() -> i64 } fn invoke(in c: Callback) -> i64 { c.f() } fn main() -> i64 { let x = 42; let c = Callback { f: || x }; invoke(in c) }",
         "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { let f = || eff [Ask] Ask::ask(); f() } with { return x => x, ask(k) => k(42), } }",
@@ -618,7 +618,7 @@ fn closures_and_function_values() {
 #[test]
 fn float_remainder_is_exact() {
     differential(include_str!("fixtures/wasm_backend/remainder.ves"));
-    differential("fn main() -> f64 { let a: f64 = 10.5; a %= 4.0; a }");
+    differential("fn main() -> f64 { let mut a: f64 = 10.5; a %= 4.0; a }");
     differential("fn main() -> f64 { let n: f64 = 0.0; let a: f64 = 1.0; a % (n / n) }");
     differential("fn main() -> f64 { let n: f64 = 0.0; let a: f64 = 1.0; (a / n) % 2.0 }");
     differential("fn main() -> f64 { let n: f64 = 0.0; let a: f64 = 2.0; a % (1.0 / n) }");
@@ -712,17 +712,17 @@ fn labelled_rows_and_inout_operation_arguments() {
         "linear effect Ask { fn ask() -> i64; } fn get() -> i64 eff [outer: Ask] { wrapping_add(wrapping_mul(outer.ask(), 100), Ask::ask()) } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { wrapping_add(get(), inner.ask()) } with { return x => x, ask(k) => k(2), } } with { return x => x, ask(k) => k(40), } }",
         // Labels pass through nested labelled callees and closures.
         "linear effect Ask { fn ask() -> i64; } fn leaf() -> i64 eff [a: Ask] { a.ask() } fn mid() -> i64 eff [a: Ask] { let f = || eff [a: Ask] a.ask(); wrapping_add(leaf(), f()) } fn main() -> i64 { handle a: Ask in { handle b: Ask in { mid() } with { return x => x, ask(k) => k(1000), } } with { return x => x, ask(k) => k(21), } }",
-        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let mut x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
         // A named function with a labelled row called through a value.
         "linear effect Ask { fn ask() -> i64; } fn get() -> i64 eff [outer: Ask] { wrapping_add(wrapping_mul(outer.ask(), 100), Ask::ask()) } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { let f = get; wrapping_add(f(), inner.ask()) } with { return x => x, ask(k) => k(2), } } with { return x => x, ask(k) => k(40), } }",
-        "copy struct P { a: i64, b: i64 } linear effect Inc { fn inc(inout x: i64); } fn main() -> P { let p = P { a: 1, b: 10 }; handle Inc in { Inc::inc(inout p.b); Inc::inc(inout p.b); p } with { return n => n, inc(n, k) => { n = wrapping_mul(n, 3); k(()) }, } }",
-        "linear effect Swap { fn swap(inout x: i64, sink v: i64) -> i64; } fn go() -> i64 eff [Swap] { let x = 1; let old = Swap::swap(inout x, 5); wrapping_add(wrapping_mul(x, 10), old) } fn main() -> i64 { handle Swap in { go() } with { return n => n, swap(x, v, k) => { let old = x; x = v; k(old) }, } }",
+        "copy struct P { a: i64, b: i64 } linear effect Inc { fn inc(inout x: i64); } fn main() -> P { let mut p = P { a: 1, b: 10 }; handle Inc in { Inc::inc(inout p.b); Inc::inc(inout p.b); p } with { return n => n, inc(n, k) => { n = wrapping_mul(n, 3); k(()) }, } }",
+        "linear effect Swap { fn swap(inout x: i64, sink v: i64) -> i64; } fn go() -> i64 eff [Swap] { let mut x = 1; let old = Swap::swap(inout x, 5); wrapping_add(wrapping_mul(x, 10), old) } fn main() -> i64 { handle Swap in { go() } with { return n => n, swap(x, v, k) => { let old = x; x = v; k(old) }, } }",
     ] {
         differential(source);
     }
     // An aborting clause would write the cell after it was copied back.
     unsupported(
-        "effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = 1; 7 }, } }",
+        "effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let mut x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = 1; 7 }, } }",
         Unsupported::InoutEffectArgument,
     );
 }

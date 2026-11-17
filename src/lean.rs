@@ -1681,6 +1681,11 @@ fn visit_expr<'e>(e: &'e Expr, f: &mut dyn FnMut(&'e Expr)) {
             go(value);
             arms.iter().for_each(|(_, e)| go(e));
         }
+        k @ (ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_)) => k.control_children().into_iter().flatten().for_each(go),
         ExprKind::Closure { body, .. } => go(body),
         ExprKind::Handle {
             state,
@@ -2926,6 +2931,11 @@ impl Generator<'_> {
                 reference(&t)
             }
             ExprKind::Call { callee, args, .. } => self.call(e, callee, args, out)?,
+            ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_) => return Err(crate::loops::LEAN_REFUSAL.into()),
             ExprKind::Closure { params, body, .. } => self.closure(e, params, body, out)?,
             ExprKind::Handle {
                 effect,
@@ -3031,7 +3041,9 @@ impl Generator<'_> {
     }
     fn statement(&mut self, st: &Statement, out: &mut Statements) -> Result<(), String> {
         match st {
-            Statement::Let { pat, ty: t, value } => {
+            Statement::Let {
+                pat, ty: t, value, ..
+            } => {
                 let val = self.expr(value, out)?;
                 let inferred = if *t == Type::Infer {
                     if let Some(t) = self.type_of(value) {

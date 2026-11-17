@@ -136,12 +136,18 @@ fn op_name(op: &Op) -> &'static str {
         Op::Try(_) => "`?`",
         Op::Closure { .. } => "closure",
         Op::Handle { .. } => "effect handler",
+        Op::Loop => "loop",
+        Op::Exit { .. } => "early return",
     }
 }
 
 fn op_uses(op: &Op) -> Vec<ValueId> {
     match op {
-        Op::Bind { value, .. } | Op::Write { value, .. } | Op::Unary(_, value) | Op::Try(value) => {
+        Op::Bind { value, .. }
+        | Op::Write { value, .. }
+        | Op::Unary(_, value)
+        | Op::Try(value)
+        | Op::Exit { value, .. } => {
             vec![*value]
         }
         Op::Binary(_, a, b) | Op::Index(a, b) => vec![*a, *b],

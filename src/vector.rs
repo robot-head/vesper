@@ -882,6 +882,15 @@ impl IsaWalker<'_> {
                     self.expr(&a.expr, available);
                 }
             }
+            k @ (ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_)) => {
+                for c in k.control_children().into_iter().flatten() {
+                    self.expr(c, available);
+                }
+            }
             ExprKind::Closure { effects, body, .. } => {
                 // A closure may run outside this scope: only its own row
                 // grants it a profile.

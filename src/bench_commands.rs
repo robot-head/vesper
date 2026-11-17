@@ -561,7 +561,7 @@ fn scalar_source(module: &Module) -> Result<(), String> {
             ExprKind::Block { statements, tail } => {
                 for statement in statements {
                     match statement {
-                        Statement::Let { pat, ty, value } => {
+                        Statement::Let { pat, ty, value, .. } => {
                             if !matches!(pat.kind, PatternKind::Bind(_) | PatternKind::Wild)
                                 || (*ty != Type::Infer && !primitive(ty))
                             {

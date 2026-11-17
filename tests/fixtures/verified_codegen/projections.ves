@@ -9,7 +9,7 @@ fn update(inout p.{x}: Pair, inout q.{y}: Pair) {
 }
 
 fn main() -> (i64, i64) {
-    let p = Pair {
+    let mut p = Pair {
         x: 20,
         y: 19
     };

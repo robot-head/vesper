@@ -999,6 +999,21 @@ impl<'a> Runtime<'a> {
             Control::Eval(body, env)
         }
     }
+    /// `return` from the IR function `current` to the caller of `owner`
+    /// ([`crate::ir::Op::Exit`]): abandons every frame up to and including
+    /// the suspended `owner` activation (its handlers and their clauses).
+    fn exit_to(&mut self, current: &str, owner: &str, value: Value) -> Result<Control, String> {
+        if current != owner {
+            loop {
+                match self.stack.pop() {
+                    Some(Frame::IrResume { state, .. }) if state.function == owner => break,
+                    Some(_) => {}
+                    None => return Err(format!("'return' target '{owner}' is not active")),
+                }
+            }
+        }
+        Ok(Control::Return(value))
+    }
     fn ir_step(&mut self, mut state: IrState) -> Result<Control, String> {
         use crate::ir::{Op, Terminator};
         let block = self
@@ -1074,6 +1089,11 @@ impl<'a> Runtime<'a> {
         };
         let flush = crate::capability_effects::flushes_subnormals(&self.denorm, &instruction.span);
         let result = match instruction.op {
+            Op::Loop => Value::Tuple(vec![]),
+            Op::Exit { value, owner } => {
+                let value = get(value)?;
+                return self.exit_to(&state.function, &owner, value);
+            }
             Op::Constant(l) => match l {
                 Literal::Int(n) => {
                     if n > i64::MAX as i128 {
@@ -1385,6 +1405,13 @@ impl<'a> Runtime<'a> {
                             .push(Frame::Coerce(ty.clone(), evidence_environment(&env)));
                     }
                     match e.kind {
+                        ExprKind::Loop(_)
+                        | ExprKind::For { .. }
+                        | ExprKind::Range { .. }
+                        | ExprKind::Break(_)
+                        | ExprKind::Return(_) => {
+                            return Err("loops and early exits run only as lowered Place IR".into());
+                        }
                         ExprKind::Literal(l) => Control::Return(match l {
                             Literal::Int(n) => {
                                 if n > i64::MAX as i128 {

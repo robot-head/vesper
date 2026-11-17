@@ -1,0 +1,11 @@
+// expect E0607: a trait method on a parameter needs a bound naming the trait.
+fn compare[T: mod copy](a: T, b: T) -> i64 where T: Eq {
+    match a.cmp(b) {
+        Less => 1,
+        _ => 0,
+    }
+}
+
+fn main() -> i64 {
+    compare(1, 2)
+}

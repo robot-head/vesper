@@ -373,7 +373,7 @@ fn a_handler_that_swallows_a_host_span_is_reported_unclosed() {
 fn review_cases_spans_through_places_labels_closures_and_return_patterns() {
     // Assigning through a span's nested field forges its context.
     let c = checked(
-        "fn main() -> u64 eff [Trace] { let s = Trace::start_span(0, \"a\"); s.ctx.span_id = 99; Trace::emit_ok(s, 0); 0 }",
+        "fn main() -> u64 eff [Trace] { let mut s = Trace::start_span(0, \"a\"); s.ctx.span_id = 99; Trace::emit_ok(s, 0); 0 }",
     );
     assert!(codes(&c).contains(&"E0751"), "{:?}", c.diagnostics);
     // Labeled Trace capabilities start spans like `Trace::`.

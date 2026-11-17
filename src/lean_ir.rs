@@ -964,6 +964,7 @@ impl Emitter<'_> {
                 };
                 value(arg.value)?
             }
+            Op::Loop | Op::Exit { .. } => return Err(crate::loops::LEAN_REFUSAL.into()),
             _ => return Err("unsupported operation in Lean CFG extraction".into()),
         };
         out.push(let_value(

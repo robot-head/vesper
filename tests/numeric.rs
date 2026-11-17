@@ -46,7 +46,7 @@ fn byte_wrap() {
 #[test]
 fn byte_compound_wrap() {
     eval(
-        "fn main() -> u8 { let x: u8 = 255; x = wrapping_add(x, 2); x }",
+        "fn main() -> u8 { let mut x: u8 = 255; x = wrapping_add(x, 2); x }",
         "1",
     );
 }

@@ -1,0 +1,20 @@
+// E0302: `break` would drop a linear value bound inside the loop.
+linear struct Token {
+    id: i64
+}
+fn spend(sink t: Token) -> i64 {
+    let Token {
+        id
+    }
+    = t;
+    id
+}
+fn main() -> i64 {
+    loop {
+        let t = Token {
+            id: 1
+        };
+        break;
+    }
+    0
+}

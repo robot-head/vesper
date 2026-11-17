@@ -1,0 +1,8 @@
+[package]
+name = "vesper-port-abi"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime support for Rust bindings of `vesper build --lib` libraries (export ABI vesper.native.export-abi/1)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]

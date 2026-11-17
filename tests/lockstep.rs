@@ -590,7 +590,7 @@ impl Translator {
             };
         };
         match first {
-            Statement::Let { pat, ty, value } => {
+            Statement::Let { pat, ty, value, .. } => {
                 let PatternKind::Bind(x) = &pat.kind else {
                     return Err("destructuring let is outside the fragment".into());
                 };

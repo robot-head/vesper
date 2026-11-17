@@ -22,7 +22,7 @@ fn digest(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
         value
     }
     = s;
-    let acc: u64 = 7;
+    let mut acc: u64 = 7;
     accumulate(inout acc, value);
     Secret {
         value: acc

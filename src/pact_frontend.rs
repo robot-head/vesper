@@ -20,9 +20,19 @@
 //! existing `Type`/`ExprKind`/Place-IR schemas are unchanged and unresolved
 //! trait operations never reach a backend.
 //!
-//! Generic dictionary dispatch (trait-bounded function generics, calls
-//! resolved only by a where-clause assumption), unresolved projections and
-//! cross-package dispatch are rejected before a World is accepted.
+//! Trait-bounded generics (`fn f[K: Ord]`, `where` clauses, bounded
+//! `impl[K: Ord] Type[K]` blocks and conformances with where-clauses) are
+//! compiled by monomorphization without dictionaries (see [`mono`]): a call
+//! on a bounded parameter resolves to the bound's Pact assumption in the
+//! first pass, and every instance becomes a private clone whose calls name
+//! the conformance selected at the instance. The builtin `Eq`, `Ord` and
+//! `Hash` traits live in [`builtin_traits`]. Dictionary dispatch (`dyn`
+//! values, bounded functions used as values), associated types of bounded
+//! parameters, unresolved projections and cross-package dispatch are
+//! rejected before a World is accepted.
+mod builtin_traits;
+mod mono;
+
 use crate::ast::*;
 use crate::check::{self, Checked, TraitCall, TraitCalls, World};
 use std::cell::RefCell;
@@ -102,7 +112,7 @@ pub struct FrontendChecked {
 
 /// [`check::check`]: elaborate under [`DEFAULT_PACKAGE`].
 pub fn check_module(module: &Module) -> Checked {
-    if !has_frontend_syntax(module) {
+    if !has_frontend_syntax(module) && !builtin_traits::wanted(module) {
         return check::check_core(module, None).0;
     }
     check_package(module, &default_identity()).checked
@@ -122,7 +132,10 @@ pub fn check_package_with(
     options: &FrontendOptions,
 ) -> FrontendChecked {
     let empty = BindingsDto::empty(identity.clone());
-    if !has_frontend_syntax(module) && options.dependencies.is_empty() {
+    if !has_frontend_syntax(module)
+        && !builtin_traits::wanted(module)
+        && options.dependencies.is_empty()
+    {
         let checked = check::check_core(module, None).0;
         return FrontendChecked {
             checked,
@@ -146,6 +159,18 @@ pub fn check_package_with(
     if let Err(e) = identity.validate() {
         return fail(vec![Diagnostic::new("E0600", e, 0..0)], empty);
     }
+    let spans = mono::SpanMap::new(module);
+    let injected;
+    let module = if builtin_traits::wanted(module) {
+        let (stripped, items, owners) = match builtin_traits::prelude(module) {
+            Ok(p) => p,
+            Err(d) => return fail(d, empty),
+        };
+        injected = spans.with_builtins(&stripped, items, &owners);
+        &injected
+    } else {
+        module
+    };
     let mut fe = match Frontend::new(module, identity, options) {
         Ok(fe) => fe,
         Err(d) => return fail(d, empty),
@@ -160,6 +185,8 @@ pub fn check_package_with(
     };
     let revision = session.revision().clone();
     let fe = Elaborator {
+        spans,
+        instances: RefCell::new(BTreeMap::new()),
         fe,
         session,
         evidence: RefCell::new(BTreeMap::new()),
@@ -174,7 +201,9 @@ pub fn check_package_with(
             return fail(d, bindings);
         }
     };
-    let (first, resolved) = check::check_core(&pass1, Some(&fe));
+    let (mut first, resolved) = check::check_core(&pass1, Some(&fe));
+    fe.spans.drop_stub_errors(&mut first.diagnostics);
+    fe.spans.relocate(&mut first.diagnostics);
     if !first.diagnostics.is_empty() {
         let Elaborator { fe, session, .. } = fe;
         return FrontendChecked {
@@ -185,9 +214,19 @@ pub fn check_package_with(
             evidence: vec![],
         };
     }
-    // Pass 2: the elaborated module contains only ordinary calls.
+    // Pass 2: the elaborated module contains only ordinary calls; bounded
+    // generics are replaced by their instances.
     let pass2 = rewrite_calls(pass1, &resolved);
+    let pass2 = match fe.monomorphize(pass2, &first.world) {
+        Ok(m) => m,
+        Err(mut d) => {
+            fe.spans.relocate(&mut d);
+            let bindings = fe.fe.bindings.clone();
+            return fail(d, bindings);
+        }
+    };
     let (mut checked, _) = check::check_core(&pass2, None);
+    fe.spans.relocate(&mut checked.diagnostics);
     let mut extra = vec![];
     for f in checked.world.functions.values() {
         let mut residue = false;
@@ -204,6 +243,7 @@ pub fn check_package_with(
     checked.diagnostics.extend(extra);
     if checked.diagnostics.is_empty() {
         checked.world.elaboration = fe.metadata(&revision);
+        fe.instance_metadata(&mut checked.world);
     }
     let Elaborator {
         fe,
@@ -361,6 +401,20 @@ struct Frontend {
     diagnostics: Vec<Diagnostic>,
     /// Declaration spans by stable path, for coherence diagnostics.
     spans: BTreeMap<DefPath, Span>,
+    /// Trait bounds by the checked function they constrain: free functions,
+    /// inherent methods (`Type::m`) and the generated functions of local
+    /// conformances with where-clauses.
+    bounds: BTreeMap<String, Vec<Bound>>,
+    /// Trait bounds of type parameters, by type: (parameter index, bound).
+    type_bounds: BTreeMap<String, Vec<(usize, Bound)>>,
+}
+
+/// One trait bound `ty: Trait[args]` of a function, method or type.
+#[derive(Clone, Debug)]
+struct Bound {
+    ty: Type,
+    key: TraitKey,
+    args: Vec<Type>,
 }
 
 fn d(code: &str, msg: impl Into<String>, span: &Span) -> Diagnostic {
@@ -459,6 +513,8 @@ impl Frontend {
             solver: options.solver,
             diagnostics: vec![],
             spans: BTreeMap::new(),
+            bounds: BTreeMap::new(),
+            type_bounds: BTreeMap::new(),
         };
         for dep in &options.dependencies {
             fe.add_dependency(dep)?;
@@ -629,14 +685,26 @@ impl Frontend {
             }
         }
         for b in &module.trait_bounds {
-            self.diagnostics.push(d(
-                "E0607",
-                format!(
-                    "unsupported generic dictionary dispatch: '{}: {}' on a function needs a runtime dictionary; only concrete (static) trait calls are elaborated",
-                    b.param, b.trait_ref.name
-                ),
-                &b.span,
-            ));
+            self.collect_bound(b);
+        }
+        for c in self.confs.clone().iter().filter(|c| c.local) {
+            let bounds: Vec<Bound> = c
+                .decl
+                .where_clauses
+                .iter()
+                .filter_map(|w| {
+                    Some(Bound {
+                        ty: w.ty.clone(),
+                        key: self.where_key(&w.trait_ref)?,
+                        args: w.trait_ref.args.clone(),
+                    })
+                })
+                .collect();
+            if !bounds.is_empty() {
+                for g in c.generated.values() {
+                    self.bounds.insert(g.clone(), bounds.clone());
+                }
+            }
         }
         for item in &module.items {
             match item {
@@ -671,6 +739,73 @@ impl Frontend {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Validates a bound outside a conformance head and records it under
+    /// the function, method or type it constrains.
+    fn collect_bound(&mut self, b: &TraitBoundSyntax) {
+        let unsupported = |m: String| d("E0607", m, &b.span);
+        if b.owner.is_empty() || b.owner.starts_with("$unsupported::") {
+            self.diagnostics.push(unsupported(format!(
+                "trait bound '{}: {}' is not supported here; bounds go on functions, inherent impl blocks and type declarations",
+                b.param, b.trait_ref.name
+            )));
+            return;
+        }
+        let generics: Vec<Generic> = if let Some(f) = self.base_world.functions.get(&b.owner) {
+            f.generics.clone()
+        } else if let Some(a) = self.base_world.adts.get(&b.owner) {
+            a.generics.clone()
+        } else {
+            self.diagnostics.push(unsupported(format!(
+                "trait bound '{}: {}' constrains an unknown item '{}'",
+                b.param, b.trait_ref.name, b.owner
+            )));
+            return;
+        };
+        let Some(index) = generics.iter().position(|g| g.name == b.param && !g.row) else {
+            self.diagnostics.push(unsupported(format!(
+                "'{}' in the bound '{}: {}' is not a type parameter of '{}'; where-clauses on functions constrain their own type parameters",
+                b.param, b.param, b.trait_ref.name, b.owner
+            )));
+            return;
+        };
+        let Some(key) = self.trait_key(&b.trait_ref) else {
+            return;
+        };
+        if key.0 != self.identity {
+            self.diagnostics.push(unsupported(format!(
+                "the bound '{}: {}' names a trait of another package; cross-package dispatch is not supported",
+                b.param, b.trait_ref.name
+            )));
+            return;
+        }
+        let params = self.traits[&key].decl.generics.len();
+        if params != b.trait_ref.args.len() {
+            self.diagnostics.push(d(
+                "E0601",
+                format!(
+                    "trait '{}' takes {params} arguments, found {}",
+                    key.1,
+                    b.trait_ref.args.len()
+                ),
+                &b.trait_ref.span,
+            ));
+            return;
+        }
+        let bound = Bound {
+            ty: Type::named(&b.param),
+            key,
+            args: b.trait_ref.args.clone(),
+        };
+        if self.base_world.functions.contains_key(&b.owner) {
+            self.bounds.entry(b.owner.clone()).or_default().push(bound);
+        } else {
+            self.type_bounds
+                .entry(b.owner.clone())
+                .or_default()
+                .push((index, bound));
         }
     }
 
@@ -1540,6 +1675,10 @@ fn bridge_diagnostics(e: &BridgeError, spans: &BTreeMap<DefPath, Span>) -> Vec<D
 // Elaboration
 
 struct Elaborator {
+    /// Span ranges of builtin declarations, stubs and instances.
+    spans: mono::SpanMap,
+    /// Monomorphized instances: clone name to the function it instantiates.
+    instances: RefCell<BTreeMap<String, String>>,
     fe: Frontend,
     session: CoherentSession,
     evidence: RefCell<BTreeMap<(usize, usize), ResolvedCall>>,
@@ -1598,6 +1737,21 @@ impl Elaborator {
                     cx.assumptions.push(GoalDto::Implements {
                         self_ty,
                         trait_ref: self.fe.trait_def_ref(&key, self.identity()),
+                        args,
+                        brand: None,
+                    });
+                }
+            }
+        } else if let Some(bounds) = self.fe.bounds.get(function) {
+            // A bounded function or method: its bounds are assumptions.
+            for b in bounds {
+                if let (Ok(self_ty), Ok(args)) = (
+                    self.fe.dto(&b.ty, generics),
+                    self.fe.where_args(&b.key, &b.args, generics),
+                ) {
+                    cx.assumptions.push(GoalDto::Implements {
+                        self_ty,
+                        trait_ref: self.fe.trait_def_ref(&b.key, self.identity()),
                         args,
                         brand: None,
                     });
@@ -1710,13 +1864,22 @@ impl Elaborator {
 
     /// Accepts only re-checked, consumed `Proven` evidence that selects an
     /// impl or model. Error tags: 0 unsupported, 1 no solution, 2
-    /// ambiguous, 3 overflow, 4 dictionary (assumption/rigid).
+    /// ambiguous, 3 overflow, 4 dictionary (rigid/alias bound), 5 a bound
+    /// of the enclosing generic (see [`mono`]).
     fn accept(&self, outcome: BridgeOutcome) -> Result<(usize, Certificate, String), (u8, String)> {
         match outcome {
             BridgeOutcome::Proven(e) => {
                 let consumed = self.session.consume(&e).map_err(|e| (0, e.to_string()))?;
                 let path = match &consumed.selection {
                     Selection::Impl { path, .. } | Selection::Model { path, .. } => path.clone(),
+                    // A bound of the enclosing generic: resolved per
+                    // instance by monomorphization.
+                    Selection::Assumption(_) => {
+                        return Err((
+                            5,
+                            "the obligation is discharged by a trait bound of the enclosing generic".into(),
+                        ));
+                    }
                     other => {
                         return Err((
                             4,
@@ -1786,10 +1949,14 @@ impl Elaborator {
         (tag, msg): (u8, String),
         span: &Span,
     ) -> Diagnostic {
+        let msg = msg.trim_end();
         match tag {
             1 => d(
                 "E0608",
-                format!("no implementation of {what} for {receiver}: {msg}"),
+                format!(
+                    "no implementation of {what} for {receiver}: {msg}{}",
+                    builtin_traits::derive_hint(what, receiver)
+                ),
                 span,
             ),
             2 => d(
@@ -1892,6 +2059,13 @@ impl Elaborator {
                     1 | 4 => d(
                         "E0612",
                         format!("unresolved projection {what} escapes static elaboration: {m}"),
+                        span,
+                    ),
+                    5 => d(
+                        "E0607",
+                        format!(
+                            "unsupported projection {what}: associated types of a bounded type parameter are not supported yet"
+                        ),
                         span,
                     ),
                     _ => self.failure(&what, &self_ty, (tag, m), span),
@@ -2053,6 +2227,9 @@ impl Elaborator {
                 module.items.push(Item::Function(Box::new(f)));
             }
         }
+        for f in self.stubs() {
+            module.items.push(Item::Function(Box::new(f)));
+        }
         if errors.is_empty() {
             Ok(module)
         } else {
@@ -2066,10 +2243,20 @@ impl Elaborator {
             revision: Some(revision.to_string()),
             ..Elaboration::default()
         };
-        for t in self.fe.traits.values().filter(|t| t.local) {
+        for t in self
+            .fe
+            .traits
+            .values()
+            .filter(|t| t.local && !self.spans.is_builtin(&t.decl.span))
+        {
             e.traits.push(t.decl.name.clone());
         }
-        for c in self.fe.confs.iter().filter(|c| c.local) {
+        for c in self
+            .fe
+            .confs
+            .iter()
+            .filter(|c| c.local && !self.spans.is_builtin(&c.decl.span))
+        {
             let (model, public) = match &c.decl.kind {
                 ConformanceKind::Canonical => (None, true),
                 ConformanceKind::Model { name, public } => (Some(name.clone()), *public),
@@ -2141,6 +2328,7 @@ impl TraitCalls for Elaborator {
         }
         let mut found = vec![];
         let mut failures = vec![];
+        let mut bounded = vec![];
         for key in &keys {
             match self.select(
                 key,
@@ -2152,8 +2340,31 @@ impl TraitCalls for Elaborator {
                 span,
             ) {
                 Ok(ok) => found.push((key.clone(), ok)),
+                Err((5, _)) => bounded.push(key.clone()),
                 Err(e) => failures.push((key.clone(), e)),
             }
+        }
+        if let [key] = bounded.as_slice()
+            && found.is_empty()
+        {
+            // A call on a bounded parameter: an ordinary call of the
+            // bound's stub, replaced per instance by `mono`.
+            return Some(self.bound_stub(key, method, span));
+        }
+        if !bounded.is_empty() {
+            return Some(Err(d(
+                "E0609",
+                format!(
+                    "ambiguous method '{method}' on {receiver}: provided by {}; call it as Trait::{method}(...)",
+                    found
+                        .iter()
+                        .map(|(k, _)| k.1.as_str())
+                        .chain(bounded.iter().map(|k| k.1.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                span,
+            )));
         }
         match found.len() {
             1 => {
@@ -2183,8 +2394,11 @@ impl TraitCalls for Elaborator {
                     return Some(Err(d(
                         "E0607",
                         format!(
-                            "unsupported generic dictionary dispatch: no static implementation of {} for generic {receiver}: {}",
-                            key.1, err.1
+                            "no static implementation of {} for generic {receiver}: {}; add the bound `{receiver}: {}` to '{}'",
+                            key.1,
+                            err.1.trim_end(),
+                            key.1,
+                            call.function
                         ),
                         span,
                     )));
@@ -2325,6 +2539,15 @@ fn walk_expr(e: &mut Expr, g: &mut dyn FnMut(&mut Type, &Span)) {
             walk_expr(value, g);
             for (_, a) in arms {
                 walk_expr(a, g);
+            }
+        }
+        k @ (ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_)) => {
+            for c in k.control_children_mut().into_iter().flatten() {
+                walk_expr(c, g);
             }
         }
         ExprKind::Closure {
@@ -2473,6 +2696,15 @@ fn rewrite_expr(
             rewrite_expr(value, resolved, params);
             for (_, a) in arms {
                 rewrite_expr(a, resolved, params);
+            }
+        }
+        k @ (ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_)) => {
+            for c in k.control_children_mut().into_iter().flatten() {
+                rewrite_expr(c, resolved, params);
             }
         }
         ExprKind::Closure { body, .. } => rewrite_expr(body, resolved, params),

@@ -5,8 +5,8 @@ linear effect Ask {
 }
 
 fn main() -> i64 {
-    let x = 1;
-    let y = 2;
+    let mut x = 1;
+    let mut y = 2;
     let result = handle Ask in {
         x = 40;
         let got = Ask::ask();

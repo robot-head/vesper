@@ -20,6 +20,7 @@ fn parser<'a>(
         kind: K::Eof,
         span: end..end,
     });
+    let item_names = super::contextual_item_names(&owned, source);
     Ok(Parser {
         source,
         tokens: owned,
@@ -28,7 +29,7 @@ fn parser<'a>(
         diagnostics: vec![],
         no_struct: false,
         row_names: Default::default(),
-        bound_values: Default::default(),
+        bound_values: item_names,
         model_uses: vec![],
         trait_bounds: vec![],
         uses: vec![],

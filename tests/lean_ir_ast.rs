@@ -80,7 +80,7 @@ fn update(inout a.{x}: Pair, inout b.{y}: Pair) -> i64 {
     wrapping_add(a.x, b.y)
 }
 fn main() -> i64 {
-    let pair = Pair { x: 19, y: 20 };
+    let mut pair = Pair { x: 19, y: 20 };
     let update_pair = |inout p: Pair| update(inout p, inout p);
     let observed = update_pair(inout pair);
     wrapping_sub(wrapping_add(observed, wrapping_add(pair.x, pair.y)), 42)

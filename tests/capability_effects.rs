@@ -457,7 +457,7 @@ fn function_typed_fields_are_callable_values() {
 fn assignments_into_capability_function_types_are_coerced() {
     let bypass = "fn apply(sink f: fn(f64) -> f64 eff [DetFloat], x: f64) -> f64 eff [DetFloat] { f(x) } \
                   fn good(x: f64) -> f64 eff [DetFloat] { x } fn bad(x: f64) -> f64 { x % 2.0 } \
-                  fn main() -> f64 { let f: fn(f64) -> f64 eff [DetFloat] = good; f = bad; apply(f, 1.0) }";
+                  fn main() -> f64 { let mut f: fn(f64) -> f64 eff [DetFloat] = good; f = bad; apply(f, 1.0) }";
     assert!(
         codes(bypass).contains(&"E0708".to_string()),
         "{:?}",
@@ -465,11 +465,11 @@ fn assignments_into_capability_function_types_are_coerced() {
     );
     let ok = "fn apply(sink f: fn(f64) -> f64 eff [DetFloat], x: f64) -> f64 eff [DetFloat] { f(x) } \
               fn good(x: f64) -> f64 eff [DetFloat] { x } fn also(x: f64) -> f64 eff [DetFloat] { x * 2.0 } \
-              fn main() -> f64 { let f: fn(f64) -> f64 eff [DetFloat] = good; f = also; apply(f, 1.0) }";
+              fn main() -> f64 { let mut f: fn(f64) -> f64 eff [DetFloat] = good; f = also; apply(f, 1.0) }";
     assert!(codes(ok).is_empty(), "{:?}", codes(ok));
     // Reassigning a lexically checked closure local drops its exemption.
     let relexical = "fn plain(x: f64) -> f64 { x } \
-                     fn f(x: f64) -> f64 eff [DetFloat] { let g = |y: f64| -> f64 { y }; g = plain; g(x) }";
+                     fn f(x: f64) -> f64 eff [DetFloat] { let mut g = |y: f64| -> f64 { y }; g = plain; g(x) }";
     let c = codes(relexical);
     assert!(c.iter().any(|c| c == "E0700" || c == "E0708"), "{c:?}");
 }

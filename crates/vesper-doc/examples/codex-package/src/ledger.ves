@@ -15,7 +15,7 @@ copy struct Ledger {
 ///
 /// ```vesper,entry=posted
 /// fn posted() -> u64 {
-///     let ledger = Ledger {
+///     let mut ledger = Ledger {
 ///         total: 1,
 ///         count: 0
 ///     };

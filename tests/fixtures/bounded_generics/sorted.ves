@@ -1,0 +1,79 @@
+// Generic sorted insert into a list, keyed by a struct with a derived `Ord`.
+copy struct Key {
+    major: u64,
+    minor: u64
+}
+
+impl Ord for Key {}
+
+enum List[T] {
+    Nil,
+    Cons {
+        head: T,
+        tail: Box[List[T]]
+    },
+}
+
+fn insert[T: mod copy](sink l: List[T], x: T) -> List[T] where T: Ord {
+    match l {
+        List::Nil => List::Cons {
+            head: x,
+            tail: Box::new(List::Nil)
+        },
+        List::Cons {
+            head,
+            tail
+        }
+        => match x.cmp(head) {
+            Greater => match tail {
+                Box(rest) => List::Cons {
+                    head: head,
+                    tail: Box::new(insert(rest, x))
+                },
+            },
+            _ => List::Cons {
+                head: x,
+                tail: Box::new(
+                    List::Cons {
+                        head: head,
+                        tail: tail
+                    }
+                )
+            },
+        },
+    }
+}
+
+fn digest(sink l: List[Key], acc: u64) -> u64 {
+    match l {
+        List::Nil => acc,
+        List::Cons {
+            head,
+            tail
+        }
+        => match tail {
+            Box(rest) => digest(
+                rest,
+                wrapping_add(
+                    wrapping_mul(acc, 100),
+                    wrapping_add(wrapping_mul(head.major, 10), head.minor)
+                )
+            ),
+        },
+    }
+}
+
+fn key(major: u64, minor: u64) -> Key {
+    Key {
+        major: major,
+        minor: minor
+    }
+}
+
+fn main() -> u64 {
+    let l = insert(List::Nil, key(2, 1));
+    let l = insert(l, key(1, 5));
+    let l = insert(l, key(2, 0));
+    let l = insert(l, key(1, 2));
+    digest(l, 0)
+}

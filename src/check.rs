@@ -13,6 +13,9 @@ mod integer_widths_rules;
 #[path = "tiled/check.rs"]
 mod tiled_rules;
 
+#[path = "loops/check.rs"]
+mod loop_rules;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct World {
     pub adts: BTreeMap<String, Adt>,
@@ -352,6 +355,9 @@ struct Binding {
     nonzero: bool,
     // Identity changes on actual writes/invalidation, never on branch refinement.
     mutation: Arc<()>,
+    /// Bound by `let` without `mut`: assignment and `inout` borrows are
+    /// rejected (E0313).
+    frozen: bool,
 }
 impl Binding {
     fn remember_move(&mut self, path: &[String], span: Span) {
@@ -483,6 +489,8 @@ pub(crate) fn check_core(
             traits,
             current: String::new(),
             resolved: BTreeMap::new(),
+            control: vec![],
+            shadowed: vec![],
         };
         c.declarations();
         for f in world.functions.values() {
@@ -571,6 +579,10 @@ struct Checker<'a> {
     traits: Option<&'a dyn TraitCalls>,
     current: String,
     resolved: BTreeMap<(usize, usize), String>,
+    /// Loop, function and handler boundaries for `break`/`return`.
+    control: Vec<loop_rules::ControlFrame>,
+    /// Bindings each enclosing block has shadowed, innermost last.
+    shadowed: Vec<BTreeMap<String, Binding>>,
 }
 impl Checker<'_> {
     fn error(&mut self, code: &str, msg: impl Into<String>, span: Span) {
@@ -894,6 +906,7 @@ impl Checker<'_> {
                         move_causes: vec![],
                         span: p.span.clone(),
                         mutation: Arc::new(()),
+                        frozen: false,
                         integer: None,
                         nonzero: false,
                     },
@@ -905,7 +918,9 @@ impl Checker<'_> {
         }
         self.valid_effects(&f.effects, &f.generics, f.span.clone());
         if let Some(body) = &f.body {
+            let outer = self.enter_function(&f.result);
             let actual = self.expr_expected(body, &mut env, Usage::Own, &f.result);
+            let actual = self.leave_function(outer, actual, body.span.clone());
             self.expect_type(&f.result, &actual, body.span.clone());
             self.results
                 .insert(f.name.clone(), refine_annotation(&f.result, &actual));
@@ -1018,6 +1033,18 @@ impl Checker<'_> {
             self.error("E0201", format!("unknown binding '{}'", p.root), span);
             return Type::Infer;
         };
+        if b.frozen && matches!(usage, Usage::Borrow(Pass::Inout)) {
+            self.error(
+                "E0313",
+                format!(
+                    "cannot mutate '{}': it is bound by 'let' without 'mut'",
+                    p.root
+                ),
+                span.clone(),
+            );
+            self.related(b.span.clone(), "binding introduced here");
+            self.help("Declare the binding with 'let mut' to assign to it or pass it 'inout'.");
+        }
         let mut transfer_allowed = true;
         if b.moved
             .iter()
@@ -1280,14 +1307,20 @@ impl Checker<'_> {
             }
             ExprKind::Block { statements, tail } => {
                 let original = env.clone();
-                let mut shadowed = BTreeMap::new();
+                self.shadowed.push(BTreeMap::new());
                 let mut result = Type::unit();
                 for s in statements {
                     if result.name() == "Never" {
                         break;
                     }
                     match s {
-                        Statement::Let { pat, ty, value } => {
+                        Statement::Let {
+                            pat,
+                            ty,
+                            value,
+                            mutable,
+                            ..
+                        } => {
                             let ty = &self.region_annotation(ty);
                             self.valid_type(ty, &self.generics.clone(), value.span.clone());
                             let actual = self.expr_expected(value, env, Usage::Own, ty);
@@ -1311,6 +1344,7 @@ impl Checker<'_> {
                                 if let (Some(before), Some(current)) =
                                     (original.bindings.get(&n), env.bindings.get(&n))
                                     && before.span == current.span
+                                    && let Some(shadowed) = self.shadowed.last_mut()
                                 {
                                     shadowed.insert(n, current.clone());
                                 }
@@ -1322,6 +1356,11 @@ impl Checker<'_> {
                                 let binding = env.bindings.get_mut(n).unwrap();
                                 binding.integer = fact;
                                 binding.nonzero = nonzero;
+                            }
+                            for n in pattern_names(pat) {
+                                if let Some(binding) = env.bindings.get_mut(&n) {
+                                    binding.frozen = !*mutable;
+                                }
                             }
                         }
                         Statement::Expr(e) => {
@@ -1359,7 +1398,7 @@ impl Checker<'_> {
                 for n in locals {
                     env.bindings.remove(&n);
                 }
-                for (n, b) in shadowed {
+                for (n, b) in self.shadowed.pop().unwrap_or_default() {
                     env.bindings.insert(n, b);
                 }
                 result
@@ -1744,6 +1783,13 @@ impl Checker<'_> {
                     e.span.clone(),
                 )
             }
+            ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_) => self
+                .control_expr(e, env, expected)
+                .expect("loop-family expression"),
             ExprKind::Handle {
                 effect,
                 state,
@@ -3270,6 +3316,7 @@ impl Checker<'_> {
                         move_causes: vec![],
                         span: p.span.clone(),
                         mutation: Arc::new(()),
+                        frozen: false,
                         integer: None,
                         nonzero: false,
                     },
@@ -3435,6 +3482,7 @@ impl Checker<'_> {
                     move_causes: vec![],
                     span: p.span.clone(),
                     mutation: Arc::new(()),
+                    frozen: false,
                     integer: None,
                     nonzero: false,
                 },
@@ -3453,7 +3501,9 @@ impl Checker<'_> {
         self.caps.extend(resolved_effects.instances.iter().cloned());
         self.effect_inference
             .push((infer_effects, cap_base, Effects::default(), prefix));
+        let outer = self.enter_function(result);
         let actual = self.expr_expected(body, &mut captured, Usage::Own, result);
+        let actual = self.leave_function(outer, actual, body.span.clone());
         let (_, _, observed, _) = self.effect_inference.pop().unwrap();
         self.caps.truncate(cap_base);
         if infer_effects {
@@ -3554,7 +3604,11 @@ impl Checker<'_> {
             ));
         }
         self.start_observing();
+        self.enter_control(loop_rules::ControlFrame::HandledBody {
+            region: region.is_some(),
+        });
         let body_type = self.expr(body, env, Usage::Own);
+        self.leave_control();
         let mut outgoing = self.finish_observing();
         outgoing.instances.retain(|e| e.label != cap.label);
         if guarded {
@@ -3612,7 +3666,9 @@ impl Checker<'_> {
         }
         self.bind(&ret.pats[0], &return_ty, &mut ret_env);
         self.start_observing();
+        self.enter_control(loop_rules::ControlFrame::Clause);
         let returned = self.expr_expected(&ret.body, &mut ret_env, Usage::Own, expected);
+        self.leave_control();
         union_effects(&mut outgoing, &self.finish_observing());
         let mut resume_effects = outgoing.clone();
         if let Some(previous) = self.world.handler_effects.get(&(span.start, span.end)) {
@@ -3694,7 +3750,9 @@ impl Checker<'_> {
                 }
             }
             self.start_observing();
+            self.enter_control(loop_rules::ControlFrame::Clause);
             let actual = self.expr_expected(&op.body, &mut local, Usage::Own, &out);
+            self.leave_control();
             union_effects(&mut outgoing, &self.finish_observing());
             self.expect_type(&out, &actual, op.body.span.clone());
             self.exhaust(
@@ -3982,6 +4040,22 @@ pub fn free_names(e: &Expr) -> BTreeSet<String> {
                         pat(p, &mut bound);
                     }
                     out.extend(used.difference(&bound).cloned());
+                }
+            }
+            ExprKind::For { pat: p, iter, body } => {
+                walk(iter, out);
+                let mut used = BTreeSet::new();
+                walk(body, &mut used);
+                let mut bound = BTreeSet::new();
+                pat(p, &mut bound);
+                out.extend(used.difference(&bound).cloned());
+            }
+            k @ (ExprKind::Loop(_)
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_)) => {
+                for c in k.control_children().into_iter().flatten() {
+                    walk(c, out)
                 }
             }
             _ => {}

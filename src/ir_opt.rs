@@ -599,6 +599,7 @@ fn operands(op: &mut Op, resolve: impl Fn(ValueId) -> ValueId) {
         | Op::Write { value, .. }
         | Op::Try(value)
         | Op::Unary(_, value)
+        | Op::Exit { value, .. }
         | Op::Project(value, _) => *value = resolve(*value),
         Op::Binary(_, a, b) | Op::Index(a, b) => {
             *a = resolve(*a);

@@ -1,0 +1,9 @@
+// E0313: an `inout` argument mutates its place, so it needs `let mut`.
+fn bump(inout x: i64) {
+    x = wrapping_add(x, 1);
+}
+fn main() -> i64 {
+    let x = 1;
+    bump(inout x);
+    x
+}

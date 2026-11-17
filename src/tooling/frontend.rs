@@ -754,7 +754,7 @@ fn ast_items_guard(
                 E::Block { statements, tail } => {
                     for s in statements {
                         match s {
-                            Statement::Let { pat, ty, value } => {
+                            Statement::Let { pat, ty, value, .. } => {
                                 if matches!(ty, Type::Function { .. })
                                     && matches!(value.kind, E::Closure { .. })
                                 {
@@ -809,6 +809,21 @@ fn ast_items_guard(
                         stack.push((Node::Pattern(p), next));
                         stack.push((Node::Expr(e), next));
                     }
+                }
+                E::Loop(e) => stack.push((Node::Expr(e), next)),
+                E::Break(v) | E::Return(v) => {
+                    if let Some(e) = v {
+                        stack.push((Node::Expr(e), next));
+                    }
+                }
+                E::Range { start, end, .. } => {
+                    stack.push((Node::Expr(start), next));
+                    stack.push((Node::Expr(end), next));
+                }
+                E::For { pat, iter, body } => {
+                    stack.push((Node::Pattern(pat), next));
+                    stack.push((Node::Expr(iter), next));
+                    stack.push((Node::Expr(body), next));
                 }
                 E::Closure {
                     params,

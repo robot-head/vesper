@@ -25,7 +25,7 @@ fn agrees(source: &str, expected: &str) {
 }
 #[test]
 fn forwards_scalar_binding_and_disjoint_write() {
-    let source = "copy struct Pair { x: i64, y: i64 } fn main() -> i64 { let p = Pair { x: 42, y: 0 }; let before = p.x; p.y = 10; wrapping_sub(wrapping_add(p.x, before), 42) }";
+    let source = "copy struct Pair { x: i64, y: i64 } fn main() -> i64 { let mut p = Pair { x: 42, y: 0 }; let before = p.x; p.y = 10; wrapping_sub(wrapping_add(p.x, before), 42) }";
     let w = checked(source);
     let mut program = ir::lower_world(&w);
     assert!(ir_opt::optimize(&w, &mut program).unwrap() >= 2);
@@ -34,27 +34,27 @@ fn forwards_scalar_binding_and_disjoint_write() {
 #[test]
 fn mutable_call_is_a_state_barrier() {
     agrees(
-        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let x = 1; let before = x; inc(inout x); wrapping_add(before, x) }",
+        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let mut x = 1; let before = x; inc(inout x); wrapping_add(before, x) }",
         "3",
     );
 }
 #[test]
 fn overlapping_record_write_invalidates_read() {
     agrees(
-        "copy struct Pair { x: i64, y: i64 } fn main() -> i64 { let p = Pair { x: 40, y: 0 }; let before = p.x; p = Pair { x: 2, y: 0 }; wrapping_add(p.x, before) }",
+        "copy struct Pair { x: i64, y: i64 } fn main() -> i64 { let mut p = Pair { x: 40, y: 0 }; let before = p.x; p = Pair { x: 2, y: 0 }; wrapping_add(p.x, before) }",
         "42",
     );
 }
 #[test]
 fn branch_join_uses_path_specific_state() {
     agrees(
-        "fn choose(b: bool) -> i64 { let x = 0; if b { x = 1; } else { x = 2; }; x } fn main() -> i64 { wrapping_add(choose(true), choose(false)) }",
+        "fn choose(b: bool) -> i64 { let mut x = 0; if b { x = 1; } else { x = 2; }; x } fn main() -> i64 { wrapping_add(choose(true), choose(false)) }",
         "3",
     );
 }
 #[test]
 fn evidence_checker_rejects_stale_tokens_and_wrong_phi() {
-    let w = checked("fn main() -> i64 { let x = 0; if true { x = 1; } else { x = 2; }; x }");
+    let w = checked("fn main() -> i64 { let mut x = 0; if true { x = 1; } else { x = 2; }; x }");
     let mut program = ir::lower_world(&w);
     assert!(ir_check::evidence(&program).is_empty());
     let f = program.functions.get_mut("main").unwrap();

@@ -394,6 +394,7 @@ impl Uses {
                     .chain(ops.iter().flat_map(|c| &c.pats))
                     .for_each(|p| self.pattern(p));
             }
+            ExprKind::For { pat, .. } => self.pattern(pat),
             _ => {}
         });
     }

@@ -1,0 +1,13 @@
+// expect E0608: `Interval[K: Ord]` cannot be instantiated at f64.
+copy struct Interval[K: Ord] {
+    lo: K,
+    hi: K
+}
+
+fn main() -> i64 {
+    let i = Interval {
+        lo: 1.0,
+        hi: 2.0
+    };
+    0
+}

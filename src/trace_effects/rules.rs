@@ -115,6 +115,7 @@ impl Walker<'_> {
                             },
                         ty,
                         value,
+                        ..
                     } = st
                     {
                         let t = match ty {
@@ -230,6 +231,19 @@ impl Walker<'_> {
                     self.expr(arm, scope);
                 }
             }
+            ExprKind::For { pat, iter, body } => {
+                self.expr(iter, scope);
+                self.pattern(pat, scope);
+                self.expr(body, scope);
+            }
+            k @ (ExprKind::Loop(_)
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_)) => {
+                for c in k.control_children().into_iter().flatten() {
+                    self.expr(c, scope);
+                }
+            }
             ExprKind::Closure {
                 params,
                 result,
@@ -335,7 +349,7 @@ impl Walker<'_> {
                     }
                     self.expr(x, scope);
                 }
-                Statement::Let { pat, ty, value } => {
+                Statement::Let { pat, ty, value, .. } => {
                     let context = is_named(ty, SPAN_CONTEXT) || self.is_context(value);
                     if context {
                         match &pat.kind {
@@ -533,6 +547,7 @@ fn local_bindings(pats: &[Pattern], body: &Expr, params: &[Param]) -> BTreeSet<S
                 .chain(state.iter().map(|(p, _)| p))
                 .for_each(|p| bindings(p, &mut local));
         }
+        ExprKind::For { pat, .. } => bindings(pat, &mut local),
         _ => {}
     });
     local

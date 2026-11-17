@@ -1,0 +1,24 @@
+// E0312: a linear value moved by one iteration is gone in the next.
+linear struct Token {
+    id: i64
+}
+fn spend(sink t: Token) -> i64 {
+    let Token {
+        id
+    }
+    = t;
+    id
+}
+fn main() -> i64 {
+    let t = Token {
+        id: 1
+    };
+    let mut n = 0;
+    loop {
+        n = spend(t);
+        if n > 0 {
+            break;
+        }
+    }
+    n
+}

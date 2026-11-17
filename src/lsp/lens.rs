@@ -1151,7 +1151,7 @@ impl Walker<'_> {
                 self.scopes.push(Vec::new());
                 for statement in statements {
                     match statement {
-                        Statement::Let { pat, ty, value } => {
+                        Statement::Let { pat, ty, value, .. } => {
                             self.expr(value, true)?;
                             let ty = if *ty == Type::Infer {
                                 self.ty_of(value)
@@ -1254,6 +1254,12 @@ impl Walker<'_> {
                     self.scopes.pop();
                 }
             }
+            // The ownership lens does not model loop-carried state or early exits.
+            ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_) => return Err(Unavailable::OpaqueDeclaration),
             ExprKind::Closure { params, body, .. } => {
                 self.scopes.push(Vec::new());
                 for p in params {

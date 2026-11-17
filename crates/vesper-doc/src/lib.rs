@@ -1813,7 +1813,7 @@ pub fn ast_preflight(module: &vesper_core::ast::Module) -> Result<(), String> {
                 E::Block { statements, tail } => {
                     for s in statements {
                         match s {
-                            Statement::Let { pat, ty, value } => {
+                            Statement::Let { pat, ty, value, .. } => {
                                 if matches!(ty, Type::Function { .. })
                                     && matches!(value.kind, E::Closure { .. })
                                 {
@@ -1846,7 +1846,23 @@ pub fn ast_preflight(module: &vesper_core::ast::Module) -> Result<(), String> {
                 E::Field(_, name) if generic_values.contains(name) => {
                     return Err("generic method inference is unsupported before checking".into());
                 }
-                E::Field(e, _) | E::Try(e) | E::Unary(_, e) => stack.push((Node::Expr(e), next)),
+                E::Field(e, _) | E::Try(e) | E::Unary(_, e) | E::Loop(e) => {
+                    stack.push((Node::Expr(e), next))
+                }
+                E::Break(v) | E::Return(v) => {
+                    if let Some(e) = v {
+                        stack.push((Node::Expr(e), next));
+                    }
+                }
+                E::Range { start, end, .. } => {
+                    stack.push((Node::Expr(start), next));
+                    stack.push((Node::Expr(end), next));
+                }
+                E::For { pat, iter, body } => {
+                    stack.push((Node::Pattern(pat), next));
+                    stack.push((Node::Expr(iter), next));
+                    stack.push((Node::Expr(body), next));
+                }
                 E::Index(a, b) | E::Binary(_, a, b) | E::Assign(_, a, b) => {
                     stack.push((Node::Expr(a), next));
                     stack.push((Node::Expr(b), next));

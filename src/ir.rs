@@ -11,6 +11,9 @@ use petgraph::{
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "loops/ir.rs"]
+mod loop_lowering;
+
 pub type ValueId = u32;
 #[derive(Debug, Clone, Serialize)]
 pub struct Argument {
@@ -94,6 +97,17 @@ pub enum Op {
     Fip {
         op: crate::fip::FipOp,
         args: Vec<Argument>,
+    },
+    /// The first instruction of a loop header, the target of the loop's
+    /// back edges ([`crate::loops`]). Its value is `Unit`. A backend that
+    /// needs an acyclic CFG refuses it.
+    Loop,
+    /// `return value`: leaves the function or closure lowered as `owner`
+    /// (this graph, or the one enclosing this handled body) with `value`.
+    /// Its block ends `Unreachable`.
+    Exit {
+        value: ValueId,
+        owner: String,
     },
 }
 #[derive(Debug, Clone, Serialize)]
@@ -221,6 +235,7 @@ pub fn lower_world(world: &World) -> Program {
             (f, BTreeSet::new(), caps)
         })
         .collect::<Vec<_>>();
+    let mut owners: BTreeMap<String, String> = BTreeMap::new();
     while let Some((f, external_captures, capabilities)) = pending.pop() {
         if program.functions.contains_key(&f.name) {
             continue;
@@ -252,9 +267,16 @@ pub fn lower_world(world: &World) -> Program {
                     .collect(),
                 nested: vec![],
                 capabilities,
+                owner: owners
+                    .get(&f.name)
+                    .cloned()
+                    .unwrap_or_else(|| f.name.clone()),
+                loops: vec![],
+                owners: BTreeMap::new(),
             };
             let value = l.expr(body);
             l.blocks[l.current].terminator = Terminator::Return(value);
+            owners.extend(std::mem::take(&mut l.owners));
             pending.extend(l.nested);
             program.functions.insert(
                 f.name.clone(),
@@ -310,6 +332,7 @@ pub fn state_action(i: &Instruction) -> bool {
             | Op::Index(..)
             | Op::Tiled { .. }
             | Op::Fip { .. }
+            | Op::Exit { .. }
     ) || i.fallible
         || matches!(&i.op, Op::Binary(op, ..) if matches!(op.as_str(), "/" | "%" | "<<" | ">>"))
 }
@@ -370,6 +393,12 @@ struct Lower<'a> {
     generics: Vec<Generic>,
     permissions: BTreeMap<String, (Pass, Vec<Vec<String>>)>,
     nested: Vec<(Function, BTreeSet<String>, BTreeMap<String, String>)>,
+    /// The function or closure a `return` here leaves (see [`Op::Exit`]).
+    owner: String,
+    /// Enclosing loops, innermost last.
+    loops: Vec<loop_lowering::LoopTarget>,
+    /// Owners of the handled bodies nested here.
+    owners: BTreeMap<String, String>,
 }
 impl Lower<'_> {
     fn capture_params(&self, names: BTreeSet<String>, borrowed: bool, span: &Span) -> Vec<Param> {
@@ -416,6 +445,10 @@ impl Lower<'_> {
         } else {
             BTreeSet::new()
         };
+        if kind == "handler_body" {
+            self.owners
+                .insert(nested_name(kind, &body.span), self.owner.clone());
+        }
         self.nested.push((
             Function {
                 name: nested_name(kind, &body.span),
@@ -642,7 +675,7 @@ impl Lower<'_> {
         {
             ty = crate::numeric::default_type(&t);
         }
-        if matches!(op, Op::Bind { .. } | Op::Write { .. }) {
+        if matches!(op, Op::Bind { .. } | Op::Write { .. } | Op::Loop) {
             ty = Type::unit();
         }
         let key = (e.span.start, e.span.end);
@@ -1296,6 +1329,11 @@ impl Lower<'_> {
                 e,
                 false,
             ),
+            ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_) => self.control(e),
             ExprKind::Handle { .. } => self.emit(
                 Op::Handle {
                     state_value: None,

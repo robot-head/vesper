@@ -625,7 +625,7 @@ pub fn validate_rendered(
     }
     let mut total = 0;
     for (i, (stmt, expected)) in statements.iter().zip(&p.locals).enumerate() {
-        let Statement::Let { pat, ty, value } = stmt else {
+        let Statement::Let { pat, ty, value, .. } = stmt else {
             return Err(error("extra source statement"));
         };
         if !binding(pat, &format!("t{i}")) || !typed(p.kind, ty) {

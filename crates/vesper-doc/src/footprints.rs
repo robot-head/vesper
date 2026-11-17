@@ -356,6 +356,22 @@ impl<'a> Walk<'a> {
                 let names = params.iter().map(|p| p.name.clone()).collect();
                 self.scoped(names, |w| w.expr(body, Ctx::Value, depth + 1))?;
             }
+            ExprKind::Loop(body) => self.expr(body, Ctx::Value, depth + 1)?,
+            ExprKind::For { pat, iter, body } => {
+                self.expr(iter, Ctx::Value, depth + 1)?;
+                let mut names = BTreeSet::new();
+                bind(pat, &mut names);
+                self.scoped(names, |w| w.expr(body, Ctx::Value, depth + 1))?;
+            }
+            ExprKind::Range { start, end, .. } => {
+                self.expr(start, Ctx::Value, depth + 1)?;
+                self.expr(end, Ctx::Value, depth + 1)?;
+            }
+            ExprKind::Break(value) | ExprKind::Return(value) => {
+                if let Some(v) = value {
+                    self.expr(v, Ctx::Value, depth + 1)?;
+                }
+            }
             ExprKind::Handle {
                 effect,
                 state,

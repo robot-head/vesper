@@ -600,7 +600,8 @@ impl Flow<'_> {
                     }
                 }
             }
-            Op::Unary(_, v) => self.consume(s, *v, &i.span),
+            Op::Unary(_, v) | Op::Exit { value: v, .. } => self.consume(s, *v, &i.span),
+            Op::Loop => {}
             Op::Binary(_, a, b) => {
                 self.consume(s, *a, &i.span);
                 self.consume(s, *b, &i.span);

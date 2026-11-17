@@ -771,8 +771,11 @@ fn resumed_value(
 /// Values an operation reads.
 pub(crate) fn operands(op: &Op) -> Vec<ValueId> {
     match op {
-        Op::Constant(_) | Op::Unit | Op::Read { .. } | Op::Closure { .. } => vec![],
-        Op::Bind { value, .. } | Op::Write { value, .. } | Op::Unary(_, value) => vec![*value],
+        Op::Constant(_) | Op::Unit | Op::Read { .. } | Op::Closure { .. } | Op::Loop => vec![],
+        Op::Bind { value, .. }
+        | Op::Write { value, .. }
+        | Op::Unary(_, value)
+        | Op::Exit { value, .. } => vec![*value],
         Op::Binary(_, a, b) | Op::Index(a, b) => vec![*a, *b],
         Op::Tuple(vs) | Op::Vector { args: vs, .. } => vs.clone(),
         Op::Data(_, fs) => fs.iter().map(|(_, v)| *v).collect(),

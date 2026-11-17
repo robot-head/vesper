@@ -1,5 +1,7 @@
 fn target(inout x: bool) {}
-fn main() {
-    let x = 1;
+fn run(sink x: i64) {
     target(inout x);
+}
+fn main() {
+    run(1);
 }

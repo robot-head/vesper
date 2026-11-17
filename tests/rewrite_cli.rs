@@ -207,7 +207,7 @@ fn actual_cli_preserves_overflow_totality_high_unsigned_values_and_barrier_order
             "42",
         ),
         (
-            "fn next(inout n: i64) -> i64 { n = wrapping_add(n, 1); n } fn main() -> i64 { let n = 0; let a = wrapping_mul(next(inout n), 0); let b = next(inout n); wrapping_add(wrapping_mul(n, 100), wrapping_add(wrapping_mul(a, 10), b)) }",
+            "fn next(inout n: i64) -> i64 { n = wrapping_add(n, 1); n } fn main() -> i64 { let mut n = 0; let a = wrapping_mul(next(inout n), 0); let b = next(inout n); wrapping_add(wrapping_mul(n, 100), wrapping_add(wrapping_mul(a, 10), b)) }",
             "202",
         ),
     ] {

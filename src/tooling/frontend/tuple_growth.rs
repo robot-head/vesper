@@ -775,7 +775,7 @@ impl<'a> Admission<'a> {
                 let mark = self.env.len();
                 for s in statements {
                     match s {
-                        Statement::Let { pat, ty, value } => {
+                        Statement::Let { pat, ty, value, .. } => {
                             // Initializer sees the previous binding, never itself.
                             let value = if *ty == Type::Infer {
                                 self.expr(value)?
@@ -908,6 +908,13 @@ impl<'a> Admission<'a> {
             // Dynamic indexing can synthesize a repeated joined element type
             // even for ill-typed heterogeneous tuples. Its envelope is separate.
             ExprKind::Index(_, _) | ExprKind::Closure { .. } => return Err(UNCERTAIN.into()),
+            // Loop-carried environments are joined at a fixpoint the model
+            // does not bound.
+            ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_) => return Err(UNCERTAIN.into()),
             ExprKind::Unary(_, e) => {
                 v = self.expr_in(e, expected)?;
             }

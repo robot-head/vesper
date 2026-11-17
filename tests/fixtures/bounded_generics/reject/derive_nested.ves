@@ -1,0 +1,14 @@
+// expect E0616: a field of another struct conforms only if that struct derives or implements the trait too.
+copy struct Inner {
+    v: i64
+}
+
+copy struct Outer {
+    inner: Inner
+}
+
+impl Hash for Outer {}
+
+fn main() -> i64 {
+    0
+}

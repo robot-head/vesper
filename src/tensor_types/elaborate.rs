@@ -302,10 +302,16 @@ impl Lower<'_> {
                 statements: statements
                     .iter()
                     .map(|s| match s {
-                        Statement::Let { pat, ty, value } => Statement::Let {
+                        Statement::Let {
+                            pat,
+                            ty,
+                            value,
+                            mutable,
+                        } => Statement::Let {
                             pat: pat.clone(),
                             ty: self.ty(ty),
                             value: self.expr(value),
+                            mutable: *mutable,
                         },
                         Statement::Expr(x) => Statement::Expr(self.expr(x)),
                     })
@@ -378,6 +384,23 @@ impl Lower<'_> {
                     .map(|(p, x)| (p.clone(), self.expr(x)))
                     .collect(),
             },
+            ExprKind::Loop(body) => ExprKind::Loop(Box::new(self.expr(body))),
+            ExprKind::For { pat, iter, body } => ExprKind::For {
+                pat: pat.clone(),
+                iter: Box::new(self.expr(iter)),
+                body: Box::new(self.expr(body)),
+            },
+            ExprKind::Range {
+                start,
+                end,
+                inclusive,
+            } => ExprKind::Range {
+                start: Box::new(self.expr(start)),
+                end: Box::new(self.expr(end)),
+                inclusive: *inclusive,
+            },
+            ExprKind::Break(v) => ExprKind::Break(v.as_ref().map(|x| Box::new(self.expr(x)))),
+            ExprKind::Return(v) => ExprKind::Return(v.as_ref().map(|x| Box::new(self.expr(x)))),
             ExprKind::Closure {
                 params,
                 mode,

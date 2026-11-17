@@ -3,6 +3,6 @@ fn touch(inout x: u8) {
 }
 
 fn main() {
-    let a: u8 = 1;
+    let mut a: u8 = 1;
     touch(inout a);
 }

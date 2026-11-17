@@ -1,0 +1,6 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+vesper_crate(
+    # tests/export.rs checks the pilot's committed binding.
+    extra_test_data = ["//crates/vesper-port-pilot:files"],
+)

@@ -226,7 +226,7 @@ fn review_findings_are_covered() {
     assert_eq!(
         differential(&baseline(
             "(u64, u64)",
-            "let x: u64 = 1; let v = Vec::from[u64, 2](x, { x = 2; x }); (Vec::extract(v, 0), Vec::extract(v, 1))"
+            "let mut x: u64 = 1; let v = Vec::from[u64, 2](x, { x = 2; x }); (Vec::extract(v, 0), Vec::extract(v, 1))"
         )),
         "Some((1, 2))"
     );
@@ -679,7 +679,7 @@ fn step(acc: Vec[u32, 4], n: u64) -> Vec[u32, 4] eff [Isa[Baseline128]] {
     if n == 0 { acc } else { step(Vec::add(acc, Vec::from[u32, 4](1, 2, 3, 4)), wrapping_sub(n, 1)) }
 }
 fn kernel() -> (u32, u32) eff [Isa[Baseline128]] {
-    let v = step(Vec::splat[u32, 4](0), 10);
+    let mut v = step(Vec::splat[u32, 4](0), 10);
     v = pick(false, v, Vec::mul(v, v));
     (Vec::extract(v, 0), Vec::extract(v, 3))
 }

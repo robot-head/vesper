@@ -85,7 +85,7 @@ fn main() -> i64 {
         x: 3,
         y: 4
     };
-    let c = Counter {
+    let mut c = Counter {
         n: 5
     };
     wrapping_add(total(p), wrapping_mul(drain(inout c), 100000000))

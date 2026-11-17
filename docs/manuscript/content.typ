@@ -410,7 +410,10 @@ OpClause       ::= LowerIdent '(' PatList? ')' '=>' Expr ','? ;
 MatchExpr      ::= 'match' Expr '{' ( Pat '=>' Expr ','? )* '}' ;
 IfExpr         ::= 'if' Expr Block ( 'else' ( IfExpr | Block ) )? ;
 LoopExpr       ::= 'loop' Block ;
-ForExpr        ::= 'for' Pat 'in' Expr Block ;
+ForExpr        ::= 'for' Pat 'in' RangeExpr Block ;
+RangeExpr      ::= BinaryExpr ( '..' | '..=' ) BinaryExpr ;
+ReturnExpr     ::= 'return' Expr? ;
+BreakExpr      ::= 'break' Expr? ;
 ClosureExpr    ::= ( '||' | '|' ClosureParams '|' ) ( '@' ModeSpec )?
                    ( '->' Type )? EffClause? Expr ;
 ClosureParams  ::= ( 'cap' LowerIdent | Param ) ( ',' ClosureParams )? ;
@@ -446,6 +449,8 @@ FieldPatList   ::= ( LowerIdent ( ':' Pat )? ) ( ',' FieldPatList )? ;
 UpperIdent     ::= /[A-Z][A-Za-z0-9_]*/ ;
 LowerIdent     ::= /[a-z_][A-Za-z0-9_]*/ ;
 ```
+
+*Loops and early exits.* `loop`, `for`, `break` and `return` are contextual keywords outside their statement positions, and a statement-position `loop`, `for`, `if` or `match` ending in `}` needs no `;`. `loop B` has the join of its `break` values as its type, or `Never` when it has no `break`; `for p in a..b B` and `a..=b` bind successive values of one integer type to the irrefutable pattern `p`, have type `()`, and accept `break` without a value only. The closed range leaves at its bound before incrementing, so `for b in 0..=255` over `u8` does not overflow. `return e` leaves the innermost function or closure, including from inside a handled block (skipping the handler's return clause), and is rejected inside handler clauses and region blocks (`E0213`). A linear value live at a `break` or `return` that would drop it is rejected (`E0302`), as is a linear value moved by one iteration and needed by the next (`E0312`). Assigning to a `let` binding, or passing it `inout`, requires `let mut` (`E0313`); parameters stay assignable, since `mut` is not part of parameter syntax. `for` over `Slice` and `ChunkSeq` waits for the port-readiness Slice lane.
 
 *Integer kinds.* The ten integer `PrimType`s are distinct types with no implicit conversions; `usize` and `isize` are 64 bits wide on every target. Under the checked-arithmetic contract `vesper.arith.checked/1`, `+`, `-`, `*`, negation and signed `MIN / -1` raise `Fail[ArithOverflow]`, and division by zero raises `Fail[RuntimeError]`. `&`, `|`, `^` and prefix `~` are total; `a << n` and `a >> n` accept an amount `n` of any integer kind and raise `Fail[ArithOverflow]` unless `0 <= n < bits(a)` (`>>` is arithmetic on signed kinds). Conversions are explicit calls named after the target kind `k`: `widen_k` (accepted only when lossless), `narrow_k` (checked, `Fail[ArithOverflow]`) and `wrapping_k` (modulo `2^bits(k)`). `rotate_left`/`rotate_right` and the byte-order functions `to_le_bytes_k`, `to_be_bytes_k`, `from_le_bytes_k`, `from_be_bytes_k` (over tuples of `u8`) are total.
 
@@ -1311,6 +1316,8 @@ fn write_partition_ids(in ids: Slice[Uuid], inout buf: ByteSlice) -> Result[usiz
 )
 
 `CacheBTree[Uuid, Offset]` and `CacheBTree[Uuid, Offset, ReverseUuidOrd]` share identical runtime layouts yet remain statically distinct types, preventing accidental B-tree invariant corruption. In `vesper-verify-lean` (#link(<ch-8>)[Chapter 9]), `trait` declarations extract to Lean 4 `class` definitions and `model` declarations extract to named `instance` values.
+
++ *Bounded Generics by Monomorphization:* A trait bound on a function, inherent `impl` block or type parameter (`fn max[T: Ord]`, `where K: Ord`, `T: mod copy + Ord`, `struct CacheBTree[K: Ord, V]`) is discharged statically, never by a runtime dictionary. Inside the generic body the bound is a solver assumption; every instance is resolved at its call site under that site's lexical `use model` scopes (as in `write_partition_ids` above), and the selected evidence flows into nested instances that use the same bound. Each instance is compiled as a private specialized copy, so backends and Lean extraction see only concrete code. A missing or ambiguous conformance is reported at the instance, and polymorphic recursion that would need unboundedly many instances is rejected. `dyn Trait` values and bounded functions used as first-class values remain out of scope until dictionary passing exists. The current implementation provides `Eq`, `Ord` (with `Ordering`) and `Hash` as builtin traits with canonical conformances for the integer scalars, `bool`, `()` and tuples of two to four copy elements. Struct conformances are opt-in: an empty canonical impl over all of the struct's parameters (`impl Ord for Point {}`, `impl[T] Ord for Pair[T] {}`) derives the conformance lexicographically in field order, with a where-bound on each parameter a field mentions, and every field must already conform. Opting in keeps field order from silently becoming an ordering or hashing contract and keeps types holding secrets unhashable unless asked; `Hash` is a deterministic FNV-style fold that never depends on addresses or iteration order. These declarations move to `@vesper-std/core` (#link(<ch-12>)[Chapter 13]).
 
 === 7.4 Vesper Forge: Two-Way Hygiene and WASI Macro Confinement
 <ch-6-4>
@@ -3347,6 +3354,16 @@ pub fn verify_wire_struct_layout(
 }
 ```
 
+
+=== 16.6 Exporting Vesper Libraries (`vesper build --lib`)
+<ch-15-6>
+Bridge imports foreign code. The export direction lets Rust and C link compiled Vesper, which is how crates are ported one at a time (`docs/maintenance/porting-a-crate.md`). `vesper build --lib` emits one object in which every `pub fn` of the module is the C-ABI symbol `vesper_<library>_<fn>`, with the target's C calling convention. ABI `vesper.native.export-abi/1` fixes the rest:
+
+- *Values* are the eight-byte-word layouts of the native backend: a scalar is one word, products are their fields in order, enums are a tag word (the variant index) followed by the variant's fields. Scalars pass by value (`f64` as a double); aggregates pass as a pointer to a scratch copy of their words, and an aggregate result is written through a leading result pointer.
+- *`Fail[E1], ..., Fail[En]`* adds a trailing failure-record pointer. Its first word is the status: the caller stores 0; on return 0 means success and `k` means the `k`-th `Fail` of the row was raised, with the error value in the following words.
+- *Only `Fail` crosses the boundary.* Generic functions, `inout` parameters, every other effect (capabilities, `Ffi[Lib]`, user effects) and types without a fixed word layout (affine or linear data, strings, closures, region handles) are refused at export with a typed error naming the function. Sequences and strings join the ABI with their source types.
+
+A machine-readable interface file describes every symbol, and a generated Rust binding wraps each one so that the status word becomes `Result`.
 
 == 17. Vesper Nexus: WasmFX Sandboxes and Linear WIT Plugins
 <ch-16>
