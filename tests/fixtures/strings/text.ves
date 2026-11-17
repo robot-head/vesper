@@ -80,20 +80,46 @@ fn checksum() -> u64 eff [Fail[RuntimeError]] {
     total = wrapping_add(wrapping_mul(total, 1000003), widen_u64(mixed.byte_at(1)));
     total = wrapping_add(wrapping_mul(total, 1000003), widen_u64(mixed.char_at(1)));
     total = wrapping_add(wrapping_mul(total, 1000003), widen_u64(mixed.char_at(8)));
-    let boundary: u64 = if mixed.is_char_boundary(1) && !mixed.is_char_boundary(2) && mixed.is_char_boundary(mixed.len()) { 1 } else { 0 };
+    let after_ascii = mixed.is_char_boundary(1);
+    let inside_char = mixed.is_char_boundary(2);
+    let at_end = mixed.is_char_boundary(mixed.len());
+    let boundary: u64 = if after_ascii && !inside_char && at_end {
+        1
+    } else {
+        0
+    };
     total = wrapping_add(wrapping_mul(total, 1000003), boundary);
     let missing: u64 = match mixed.try_byte_at(mixed.len()) {
         Option::Some(b) => 1,
         Option::None => 2,
     };
     total = wrapping_add(wrapping_mul(total, 1000003), missing);
-    let rejected: u64 = if mixed.concat("").len() == mixed.len() { 1 } else { 0 };
+    let rejected: u64 = if mixed.concat("").len() == mixed.len() {
+        1
+    } else {
+        0
+    };
     total = wrapping_add(wrapping_mul(total, 1000003), rejected);
     let mut scratch = "temporary";
-    let surrogate: u64 = if scratch.push_char(55296) { 1 } else { 0 };
-    let too_big: u64 = if scratch.push_char(1114112) { 1 } else { 0 };
-    let top: u64 = if scratch.push_char(1114111) { 1 } else { 0 };
-    total = wrapping_add(wrapping_mul(total, 1000003), wrapping_add(wrapping_mul(surrogate, 4), wrapping_add(wrapping_mul(too_big, 2), top)));
+    let surrogate: u64 = if scratch.push_char(55296) {
+        1
+    } else {
+        0
+    };
+    let too_big: u64 = if scratch.push_char(1114112) {
+        1
+    } else {
+        0
+    };
+    let top: u64 = if scratch.push_char(1114111) {
+        1
+    } else {
+        0
+    };
+    total = wrapping_add(
+        wrapping_mul(total, 1000003),
+        wrapping_add(wrapping_mul(surrogate, 4), wrapping_add(wrapping_mul(too_big, 2), top))
+    );
     total = wrapping_add(wrapping_mul(total, 1000003), scratch.len());
     scratch.clear();
     scratch.reserve(100);
@@ -105,7 +131,11 @@ fn checksum() -> u64 eff [Fail[RuntimeError]] {
     total = wrapping_add(wrapping_mul(total, 1000003), order_bits("z", "é"));
     total = wrapping_add(wrapping_mul(total, 1000003), order_bits(mixed, joined));
     total = wrapping_add(wrapping_mul(total, 1000003), order_bits(mixed[0..1], "h"));
-    let same: u64 = if mixed == built() && mixed != ascii { 1 } else { 0 };
+    let same: u64 = if mixed == built() && mixed != ascii {
+        1
+    } else {
+        0
+    };
     total = wrapping_add(wrapping_mul(total, 1000003), same);
     total
 }
