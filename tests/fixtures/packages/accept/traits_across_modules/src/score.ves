@@ -1,0 +1,15 @@
+// A trait declared in one module; trait names are global.
+pub trait Score {
+    fn score(in self) -> i64;
+}
+
+// A bounded generic function used from another module.
+pub fn best[T: mod copy + Score](a: T, b: T) -> i64 {
+    let x = a.score();
+    let y = b.score();
+    if x > y {
+        x
+    } else {
+        y
+    }
+}

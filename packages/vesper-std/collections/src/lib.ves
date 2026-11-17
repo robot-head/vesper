@@ -1,0 +1,14 @@
+// @vesper-std/collections: Strata's collection suite (manuscript
+// chapter 13), written in Vesper over the builtin `ChunkSeq[T]`.
+//
+// Modules:
+// - `btree`: `CacheBTree[K, V]`, an ordered map (B+tree, 16 keys per node).
+// - `flat_table`: `FlatTable[K, V]`, a hash map with a deterministic hasher.
+// - `sets`: `OrderedSet[K]` and `FlatSet[K]`.
+// - `radix_seq`: `RadixSeq[T]`, a 32-way radix sequence with O(1) `freeze`
+//   snapshots and path-copying edits.
+
+// The package version, for diagnostics.
+pub fn version() -> u64 {
+    1
+}

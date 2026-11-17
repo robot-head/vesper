@@ -1,0 +1,4 @@
+// Trait names are global: a second `Score` is ambiguous.
+pub trait Score {
+    fn score(in self) -> i64;
+}

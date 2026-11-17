@@ -1,0 +1,109 @@
+// Helpers shared by the @vesper-std unit tests.
+use @vesper-std/fmt::{
+    ParseIntError,
+    fnv1a64
+};
+
+// The first failure: `prior` if set, else `id` when `ok` is false.
+pub fn check(ok: bool, id: u64, prior: u64) -> u64 {
+    if prior != 0 {
+        prior
+    } else if ok {
+        0
+    } else {
+        id
+    }
+}
+
+// `n` as a `u64` loop bound.
+pub fn count(n: u64) -> u64 {
+    n
+}
+
+// `v % d`, and 0 when `d` is 0.
+pub fn rem(v: u64, d: u64) -> u64 {
+    if d == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        v % d
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    }
+}
+
+// Up to 8 ASCII bytes packed little-endian into each word (0 ends a word).
+pub fn ascii(inout out: ChunkSeq[u8], w: u64) {
+    let mut x = w;
+    loop {
+        if x == 0 {
+            break;
+        }
+        out.push(wrapping_u8(x));
+        x = x >> 8;
+    }
+}
+
+pub fn text(a: u64, b: u64, c: u64) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    ascii(inout out, a);
+    ascii(inout out, b);
+    ascii(inout out, c);
+    out
+}
+
+// Whether `s` holds exactly the bytes of the packed words.
+pub fn same_text(in s: Slice[u8], a: u64, b: u64, c: u64) -> bool {
+    let want = text(a, b, c);
+    if want.len() != s.len() {
+        return false;
+    }
+    fnv1a64(in want.as_slice()) == fnv1a64(in s)
+}
+
+pub fn parsed_u64(r: Result[u64, ParseIntError], want: u64) -> bool {
+    match r {
+        Result::Ok(v) => v == want,
+        Result::Err(_) => false,
+    }
+}
+
+pub fn parsed_i64(r: Result[i64, ParseIntError], want: i64) -> bool {
+    match r {
+        Result::Ok(v) => v == want,
+        Result::Err(_) => false,
+    }
+}
+
+pub fn parse_error(r: Result[u64, ParseIntError]) -> u64 {
+    match r {
+        Result::Ok(_) => 0,
+        Result::Err(ParseIntError::EmptyInput) => 1,
+        Result::Err(ParseIntError::InvalidDigit) => 2,
+        Result::Err(ParseIntError::OutOfRange) => 3,
+    }
+}
+
+pub fn parse_error_i64(r: Result[i64, ParseIntError]) -> u64 {
+    match r {
+        Result::Ok(_) => 0,
+        Result::Err(ParseIntError::EmptyInput) => 1,
+        Result::Err(ParseIntError::InvalidDigit) => 2,
+        Result::Err(ParseIntError::OutOfRange) => 3,
+    }
+}
+
+pub fn some_u64(o: Option[u64], want: u64) -> bool {
+    match o {
+        Option::Some(v) => v == want,
+        Option::None => false,
+    }
+}
+
+pub fn some_pair(o: Option[(u64, u64)], k: u64, v: u64) -> bool {
+    match o {
+        Option::Some((a, b)) => a == k && b == v,
+        Option::None => false,
+    }
+}

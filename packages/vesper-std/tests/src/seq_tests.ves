@@ -1,0 +1,81 @@
+// Unit tests for the sets and sequences of @vesper-std/collections.
+use @vesper-std/collections::version;
+use @vesper-std/collections::sets::{
+    OrderedSet,
+    FlatSet,
+    ordered_set_new,
+    flat_set_new
+};
+use @vesper-std/collections::radix_seq::{
+    RadixSeq,
+    SeqSnapshot,
+    radix_seq_new,
+    snapshot_len
+};
+use @vesper-std/core::option::is_none;
+use self::support::{
+    check,
+    some_u64
+};
+
+pub fn test_sets() -> u64 {
+    let mut r: u64 = 0;
+    let mut s: OrderedSet[u64] = ordered_set_new[u64]();
+    r = check(s.is_empty() && is_none(s.first()) && is_none(s.last()), 1, r);
+    r = check(s.insert(5) && s.insert(1) && s.insert(9) && !s.insert(5), 2, r);
+    r = check(s.len() == 3 && s.contains(9) && !s.contains(2), 3, r);
+    r = check(some_u64(s.first(), 1) && some_u64(s.last(), 9) && some_u64(s.nth(1), 5), 4, r);
+    r = check(some_u64(s.ceiling(6), 9) && is_none(s.ceiling(10)), 5, r);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    s.elements_into(inout out);
+    r = check(out.len() == 3 && some_u64(out.try_get(2), 9), 6, r);
+    r = check(s.remove(5) && !s.remove(5) && s.len() == 2, 7, r);
+    s.clear();
+    r = check(s.is_empty(), 8, r);
+    let mut h: FlatSet[u64] = flat_set_new[u64]();
+    r = check(h.is_empty() && h.insert(7) && h.insert(3) && !h.insert(7), 9, r);
+    r = check(h.len() == 2 && h.contains(3) && !h.contains(4), 10, r);
+    r = check(some_u64(h.element_at(0), 7) && some_u64(h.element_at(1), 3), 11, r);
+    let mut hs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    h.elements_into(inout hs);
+    r = check(hs.len() == 2, 12, r);
+    r = check(h.remove(7) && !h.remove(7) && some_u64(h.element_at(0), 3), 13, r);
+    h.clear();
+    r = check(h.is_empty() && is_none(h.element_at(0)), 14, r);
+    r
+}
+
+// `n` elements; past 1024 the tree has a second internal level.
+pub fn test_radix_seq(n: u64) -> u64 {
+    let mut r: u64 = 0;
+    let mut s: RadixSeq[u64] = radix_seq_new[u64]();
+    r = check(s.is_empty() && s.len() == 0 && is_none(s.pop()) && is_none(s.get(0)), 1, r);
+    r = check(!s.set(0, 1), 2, r);
+    for i in 0..n {
+        s.push(i);
+    }
+    let last = wrapping_sub(n, 1);
+    let mid = n / 2;
+    r = check(s.len() == n && some_u64(s.get(last), last) && some_u64(s.get(7), 7), 3, r);
+    let snap = s.freeze();
+    r = check(snapshot_len(snap) == n, 4, r);
+    r = check(s.set(mid, 7) && some_u64(s.get(mid), 7), 5, r);
+    r = check(some_u64(s.snapshot_get(snap, mid), mid), 6, r);
+    r = check(some_u64(s.pop(), last) && s.len() == last, 7, r);
+    s.push(5);
+    r = check(some_u64(s.snapshot_get(snap, last), last) && some_u64(s.get(last), 5), 8, r);
+    r = check(is_none(s.snapshot_get(snap, n)), 9, r);
+    s.thaw(snap);
+    r = check(s.len() == n && some_u64(s.get(mid), mid), 10, r);
+    s.set(0, 42);
+    r = check(some_u64(s.snapshot_get(snap, 0), 0) && some_u64(s.get(0), 42), 11, r);
+    s.clear();
+    r = check(s.is_empty() && is_none(s.get(0)) && some_u64(s.snapshot_get(snap, 3), 3), 12, r);
+    s.push(9);
+    r = check(s.len() == 1 && some_u64(s.get(0), 9), 13, r);
+    r
+}
+
+pub fn test_version() -> u64 {
+    check(version() == 1, 1, 0)
+}

@@ -317,9 +317,11 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
             if path.is_dir() {
                 // Syntax the self-hosted parser does not have yet: `use` imports
                 // (lane F0, #873; follow-up #880) and slice intervals `p[a..b]`
-                // (lane F1, #874; follow-up #887). These fixtures join the corpus once
-                // packages/vesper-compiler parses them.
-                if path.ends_with("tests/fixtures/packages") || path.ends_with("tests/fixtures/seq")
+                // (lane F1, #874; follow-up #887). These fixtures and the @vesper-std
+                // packages (#897) join the corpus once packages/vesper-compiler parses them.
+                if path.ends_with("tests/fixtures/packages")
+                    || path.ends_with("tests/fixtures/seq")
+                    || path.ends_with("packages/vesper-std")
                 {
                     continue;
                 }

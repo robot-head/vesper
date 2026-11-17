@@ -1,0 +1,7 @@
+trait Score {
+    fn score(in self) -> i64;
+}
+
+fn main() -> i64 {
+    0
+}

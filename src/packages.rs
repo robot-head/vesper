@@ -709,22 +709,6 @@ impl Loader {
                     }
                 }
                 let is_root_module = p == root && m.path.is_empty();
-                if (!m.parsed.model_uses.is_empty()
-                    || !m.parsed.trait_bounds.is_empty()
-                    || m.parsed
-                        .items
-                        .iter()
-                        .any(|i| matches!(i, Item::Trait(_) | Item::Conformance(_))))
-                    && (packages.len() > 1 || package.modules.len() > 1)
-                {
-                    self.error(
-                        file,
-                        INVALID_PACKAGE,
-                        "traits, models and trait bounds are not supported in multi-module packages yet"
-                            .into(),
-                        0..0,
-                    );
-                }
                 let mut renamer = Renamer {
                     names: &names,
                     hidden: if is_root_module {
@@ -747,7 +731,7 @@ impl Loader {
                                 renamer.diagnostics.push(Diagnostic::new(
                                     AMBIGUOUS,
                                     format!(
-                                        "'{name}' is also declared in {owner}; enum variants and effect operations share one namespace"
+                                        "'{name}' is also declared in {owner}; enum variants, effect operations, traits and models share one namespace"
                                     ),
                                     span.start - base..span.end - base,
                                 ));
@@ -761,15 +745,27 @@ impl Loader {
                     }
                     out.items.push(item);
                 }
+                // Trait bounds and `use model` scopes are side tables keyed by
+                // owner name and span: rename the owner and shift the spans.
+                // Trait and model names stay global, like enum variants.
+                for b in &m.parsed.trait_bounds {
+                    let mut b = b.clone();
+                    b.owner = renamer.owner(&b.owner);
+                    renamer.trait_ref(&mut b.trait_ref);
+                    renamer.span(&mut b.span);
+                    out.trait_bounds.push(b);
+                }
+                for u in &m.parsed.model_uses {
+                    let mut u = u.clone();
+                    renamer.span(&mut u.span);
+                    renamer.span(&mut u.scope);
+                    out.model_uses.push(u);
+                }
                 for d in renamer.diagnostics {
                     self.diagnostics.push(PackageDiagnostic {
                         file: Some(file),
                         diagnostic: d,
                     });
-                }
-                if is_root_module {
-                    out.model_uses = m.parsed.model_uses.clone();
-                    out.trait_bounds = m.parsed.trait_bounds.clone();
                 }
                 out.public_items.extend(
                     m.parsed
@@ -836,6 +832,12 @@ fn global_names(item: &Item) -> Vec<(String, Span)> {
             .iter()
             .map(|o| (o.name.clone(), o.span.clone()))
             .collect(),
+        Item::Trait(t) => vec![(t.name.clone(), t.span.clone())],
+        Item::Conformance(Conformance {
+            kind: ConformanceKind::Model { name, .. },
+            span,
+            ..
+        }) => vec![(name.clone(), span.clone())],
         _ => vec![],
     }
 }
@@ -1026,9 +1028,66 @@ impl Renamer<'_> {
                 }
                 self.types.truncate(mark);
             }
-            // Rejected in multi-module packages; a one-file package keeps
-            // them as written (its names are not renamed).
-            Item::Trait(_) | Item::Conformance(_) => {}
+            // Trait and model names are global; their signatures, heads and
+            // method bodies refer to items like any other code.
+            Item::Trait(t) => {
+                let mark = self.types.len();
+                self.types.push("Self".into());
+                self.generics(&t.generics);
+                self.types.extend(t.assoc.iter().map(|a| a.name.clone()));
+                for m in &mut t.methods {
+                    self.function(m, &[]);
+                }
+                for a in &mut t.assoc {
+                    self.span(&mut a.span);
+                }
+                self.types.truncate(mark);
+                self.span(&mut t.span);
+            }
+            Item::Conformance(c) => {
+                let mark = self.types.len();
+                self.types.push("Self".into());
+                self.generics(&c.generics);
+                let span = c.span.clone();
+                self.trait_ref(&mut c.trait_ref);
+                self.ty(&mut c.self_ty, &span);
+                for w in &mut c.where_clauses {
+                    self.ty(&mut w.ty, &span);
+                    self.trait_ref(&mut w.trait_ref);
+                    self.span(&mut w.span);
+                }
+                for a in &mut c.assoc {
+                    self.ty(&mut a.ty, &span);
+                    self.span(&mut a.span);
+                }
+                for m in &mut c.methods {
+                    self.function(m, &[]);
+                }
+                self.types.truncate(mark);
+                self.span(&mut c.span);
+            }
+        }
+    }
+    /// A trait reference: the trait name is global, its arguments are types.
+    fn trait_ref(&mut self, t: &mut TraitRef) {
+        let span = t.span.clone();
+        for a in &mut t.args {
+            self.ty(a, &span);
+        }
+        self.span(&mut t.span);
+    }
+    /// The owner of a trait bound: `f`, `Type::method` or `Type`.
+    fn owner(&self, owner: &str) -> String {
+        let (head, rest) = match owner.split_once("::") {
+            Some((h, r)) => (h, Some(r)),
+            None => (owner, None),
+        };
+        let Some(t) = self.names.get(head) else {
+            return owner.to_owned();
+        };
+        match rest {
+            Some(r) => format!("{t}::{r}"),
+            None => t.clone(),
         }
     }
     fn function(&mut self, f: &mut Function, outer: &[Generic]) {
