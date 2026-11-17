@@ -900,6 +900,46 @@ fn tail_resumptive_handlers() {
         ),
         "100"
     );
+    // Two calls passing the same function value in one block.
+    assert_eq!(
+        differential(
+            "fn one() -> i64 { 1 }\nfn apply(sink f: fn() -> i64) -> i64 { f() }\nfn main() -> i64 { wrapping_add(apply(one), apply(one)) }"
+        ),
+        "2"
+    );
+    // `let v = k(e); v` (the optimizer leaves the bind).
+    assert_eq!(
+        differential(
+            "linear effect Ask { fn ask() -> i64; }\nfn main() -> i64 { handle Ask in { wrapping_add(Ask::ask(), 1) } with { return x => x, ask(k) => { let value = k(21); value }, } }"
+        ),
+        "22"
+    );
+    assert_eq!(
+        differential(
+            "linear effect Ask { fn ask() -> i64; }\nfn main() -> (i64, i64) { handle Ask in { wrapping_add(Ask::ask(), 1) } with { return x => (x, 2), ask(k) => { let value = k(21); value }, } }"
+        ),
+        "(22, 2)"
+    );
+    // A handler body that assigns an enclosing local is refused, for user
+    // effects and `Fail` alike: the write would be lost.
+    for source in [
+        "linear effect Ask { fn ask() -> i64; }\nfn main() -> i64 { let x = 1; let r = handle Ask in { x = 50; Ask::ask() } with { return v => v, ask(k) => k(4), }; wrapping_add(r, x) }",
+        "fn main() -> i64 { let x = 1; let r = handle Fail[ArithOverflow] in { x = 50; 2 } with { return v => v, raise(e, k) => 0, }; wrapping_add(r, x) }",
+    ] {
+        let w = world(source);
+        let err = vc::compile(&w, "main", &Options::new(TARGETS[0])).unwrap_err();
+        assert!(
+            err.to_string().contains("assigns the captured place 'x'"),
+            "{err}"
+        );
+    }
+    // Coverage of only effect-polymorphic roots still reports.
+    let w = world(
+        "linear effect Ask { fn ask() -> i64; }\nfn work() -> i64 eff [Ask] { Ask::ask() }\nfn main() -> i64 { 1 }",
+    );
+    let roots = std::collections::BTreeSet::from(["work".to_owned()]);
+    let cover = vc::coverage(&w, Some(&roots), true).unwrap();
+    assert!(!cover.compiles("work"));
     // A clause that does not resume in tail position is refused.
     let w = world(
         "effect Boom {\n    fn boom(x: i64) -> i64;\n}\nfn main() -> i64 { handle Boom in { wrapping_add(Boom::boom(1), 1) } with { return v => v, boom(x, resume) => wrapping_add(resume(x), 1), } }",

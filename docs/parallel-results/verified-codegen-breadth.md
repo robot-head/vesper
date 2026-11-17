@@ -783,6 +783,8 @@ planning, so the planner and the slot lowering see only first-order calls.
     as `_` are dropped.
   - The `handle` instruction becomes a call of the body, then of the
     `return` clause.
+  A clause may bind the resumed value before returning it
+  (`let v = k(e); v`).
   A clause that does not resume, resumes twice or outside tail position,
   captures its continuation, or performs the handled effect is refused
   with a typed `Effect` error. So are a stateful or labeled handler and a
@@ -795,6 +797,9 @@ planning, so the planner and the slot lowering see only first-order calls.
   `Const`/`Compare`/`BranchZero` chain per code). After the body call, the
   handler site restores the original code. The raise-set fixpoint applies
   the same maps. No new `Lir` or machine instruction is needed.
+- A handler body or clause that assigns a local it captures by value is
+  refused. This applies to `handle Fail` as well: Milestone 7 silently
+  lost such a write (`x = 50` inside the body left `x` at its old value).
 - Coverage no longer treats an effect-polymorphic function as an entry.
   Its handler instances are planned instead. A function whose effect no
   handler in the program instantiates is listed as such.

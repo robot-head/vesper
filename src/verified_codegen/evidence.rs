@@ -353,6 +353,9 @@ fn specialize_function_arguments(program: &mut Program) {
                 }
             }
         }
+        // Argument reads are removed after every call is rewritten, so the
+        // recorded instruction positions stay valid.
+        let mut dead = vec![];
         for (b, k, callee, subst) in edits {
             let map: BTreeMap<String, String> = subst
                 .iter()
@@ -376,7 +379,6 @@ fn specialize_function_arguments(program: &mut Program) {
             }
             let f = program.functions.get_mut(&name).expect("caller");
             let removed: BTreeSet<usize> = subst.iter().map(|(j, _, _)| *j).collect();
-            let mut dead = vec![];
             if let Op::Call {
                 callee: c, args, ..
             } = &mut f.blocks[b].instructions[k].op
@@ -392,10 +394,12 @@ fn specialize_function_arguments(program: &mut Program) {
                     keep
                 });
             }
+            queue.push_back(name.clone());
+        }
+        if let Some(f) = program.functions.get_mut(&name) {
             for block in &mut f.blocks {
                 block.instructions.retain(|i| !dead.contains(&i.dest));
             }
-            queue.push_back(name.clone());
         }
     }
 }
@@ -579,6 +583,26 @@ fn site(
         if !program.functions.contains_key(f) {
             return Err(VerifiedError::Invalid(format!(
                 "handler function {f} was not lowered"
+            )));
+        }
+    }
+    // Captures are passed by value (an `inout` one is copied back): a body
+    // or clause that assigns one would lose the write.
+    let clause_fns = ops
+        .iter()
+        .map(|c| nested_instance(parent, &nested_name("handler_clause", &c.body.span)));
+    for g in [body_fn.clone(), ret_fn.clone()]
+        .into_iter()
+        .chain(clause_fns)
+    {
+        if let Some(root) = program
+            .functions
+            .get(&g)
+            .and_then(super::lower::assigned_capture)
+        {
+            return Err(unsupported(format!(
+                "handler for {} assigns the captured place '{root}'",
+                effect.name
             )));
         }
     }
@@ -804,18 +828,54 @@ fn tail_resumptive(c: &mut FunctionIr, pats: usize) -> Result<Vec<String>, &'sta
     if resumed.len() != reads.len() {
         return Err("uses its continuation other than by resuming");
     }
+    // Values that stand for a resumption's result in their block: the
+    // call, and reads of a local bound to it (`let v = k(e); v`).
+    let mut tails: BTreeSet<ValueId> = BTreeSet::new();
+    let mut retyped: BTreeSet<ValueId> = BTreeSet::new();
+    let mut rebound: BTreeSet<String> = BTreeSet::new();
     for b in &c.blocks {
-        for v in terminator_uses(&b.terminator)
-            .into_iter()
-            .chain(b.instructions.iter().flat_map(|i| op_uses(&i.op)))
-        {
-            if resumed.contains_key(&v) && !matches!(b.terminator, Terminator::Return(r) if r == v)
-            {
+        let mut alias: BTreeSet<ValueId> = BTreeSet::new();
+        let mut bound: BTreeSet<String> = BTreeSet::new();
+        // After a resumption only bindings of its value and reads of them
+        // may follow.
+        for i in &b.instructions {
+            if !alias.is_empty() {
+                match &i.op {
+                    Op::Bind { pattern, value } if alias.contains(value) => match &pattern.kind {
+                        PatternKind::Bind(n) => {
+                            bound.insert(n.clone());
+                        }
+                        PatternKind::Wild => {}
+                        _ => return Err("resumes other than in tail position"),
+                    },
+                    Op::Read { root, path, .. } if path.is_empty() && bound.contains(root) => {
+                        alias.insert(i.dest);
+                        retyped.insert(i.dest);
+                    }
+                    _ => return Err("resumes other than in tail position"),
+                }
+            } else if resumed.contains_key(&i.dest) {
+                alias.insert(i.dest);
+            } else if op_uses(&i.op).iter().any(|v| resumed.contains_key(v)) {
                 return Err("resumes other than in tail position");
             }
         }
+        rebound.extend(bound);
+        if !alias.is_empty() {
+            match b.terminator {
+                Terminator::Return(r) if alias.contains(&r) => {
+                    tails.insert(r);
+                }
+                _ => return Err("resumes other than in tail position"),
+            }
+        } else if terminator_uses(&b.terminator)
+            .iter()
+            .any(|v| resumed.contains_key(v))
+        {
+            return Err("resumes other than in tail position");
+        }
         if let Terminator::Return(r) = b.terminator
-            && !resumed.contains_key(&r)
+            && !tails.contains(&r)
             && c.values
                 .get(&r)
                 .or_else(|| b.instructions.iter().find(|i| i.dest == r).map(|i| &i.ty))
@@ -828,6 +888,13 @@ fn tail_resumptive(c: &mut FunctionIr, pats: usize) -> Result<Vec<String>, &'sta
     for b in &mut c.blocks {
         b.instructions
             .retain(|i| !reads.contains(&i.dest) && !resumed.contains_key(&i.dest));
+        for i in &mut b.instructions {
+            if let Op::Bind { value, .. } = &mut i.op
+                && let Some(v) = resumed.get(value)
+            {
+                *value = *v;
+            }
+        }
         if let Terminator::Return(r) = &mut b.terminator
             && let Some(v) = resumed.get(r)
         {
@@ -849,6 +916,18 @@ fn tail_resumptive(c: &mut FunctionIr, pats: usize) -> Result<Vec<String>, &'sta
         result = Some(t.clone());
     }
     c.result = result.ok_or("resumes with an untyped value")?;
+    // Locals bound to a resumption now hold the resumed value.
+    for n in &rebound {
+        c.locals.insert(n.clone(), c.result.clone());
+    }
+    for v in &retyped {
+        c.values.insert(*v, c.result.clone());
+    }
+    for i in c.blocks.iter_mut().flat_map(|b| &mut b.instructions) {
+        if retyped.contains(&i.dest) {
+            i.ty = c.result.clone();
+        }
+    }
     c.params.pop();
     c.locals.remove(&resume);
     let captures = c.params.len() + 1 - pats;

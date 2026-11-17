@@ -220,14 +220,20 @@ pub fn coverage(
     let mut handler_refusals = BTreeMap::new();
     let sites =
         super::evidence::rewrite(world, &mut program, &entries, Some(&mut handler_refusals))?;
-    let plan = lower::plan_with(
-        world,
-        &program,
-        &entries,
-        usize::MAX,
-        &sites,
-        Some(&mut refusals),
-    )?;
+    // With no plannable entry (every root is generic or effect-polymorphic)
+    // the coverage is the refusals alone.
+    let plan = if entries.is_empty() {
+        lower::Plan::empty()
+    } else {
+        lower::plan_with(
+            world,
+            &program,
+            &entries,
+            usize::MAX,
+            &sites,
+            Some(&mut refusals),
+        )?
+    };
     // A handler the rewrite refused is also refused by the planner, with
     // less detail.
     for (name, errors) in handler_refusals {

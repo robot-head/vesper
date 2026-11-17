@@ -321,6 +321,19 @@ pub struct Plan {
     pub recode: BTreeMap<String, BTreeMap<u64, u64>>,
 }
 
+impl Plan {
+    /// A plan with no functions.
+    pub fn empty() -> Self {
+        Self {
+            functions: vec![],
+            index: BTreeMap::new(),
+            fails: Fails::default(),
+            handlers: BTreeMap::new(),
+            recode: BTreeMap::new(),
+        }
+    }
+}
+
 fn effect_name(e: &crate::ast::Effect) -> String {
     format!(
         "{}{}",
@@ -767,6 +780,37 @@ pub fn plan_with(
         handlers,
         recode,
     })
+}
+
+/// A parameter of the nested function `f` that is captured by value (not
+/// `inout`) but assigned in its body: the caller would lose the write.
+pub(super) fn assigned_capture(f: &FunctionIr) -> Option<String> {
+    let by_value: BTreeSet<&str> = f
+        .params
+        .iter()
+        .filter(|p| p.pass != Pass::Inout)
+        .map(|p| p.name.as_str())
+        .collect();
+    for ins in f.blocks.iter().flat_map(|b| &b.instructions) {
+        let written: Vec<String> = match &ins.op {
+            Op::Write { place, .. } => place
+                .split('.')
+                .next()
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            Op::Call { args, .. } => args
+                .iter()
+                .filter(|a| a.pass == Pass::Inout)
+                .filter_map(|a| a.place.as_ref().map(|p| p.root.clone()))
+                .collect(),
+            _ => vec![],
+        };
+        if let Some(root) = written.into_iter().find(|r| by_value.contains(r.as_str())) {
+            return Some(root);
+        }
+    }
+    None
 }
 
 /// The direct callees of `f` (wrapping intrinsics, effect operations and
@@ -1909,6 +1953,15 @@ impl FnLower<'_> {
                 .ok_or_else(|| VerifiedError::Invalid(format!("unplanned {name}")))
         };
         let (body, ret, raise) = (index(&h.body)?, index(&h.ret)?, index(&h.raise)?);
+        // Captures are passed by value (an `inout` one is copied back).
+        for g in [&h.body, &h.ret, &h.raise] {
+            if let Some(root) = self.program.functions.get(g).and_then(assigned_capture) {
+                return Err(self.err(
+                    Unsupported::Effect,
+                    format!("handler assigns the captured place '{root}'"),
+                ));
+            }
+        }
         let (dst, _) = self.value_of(i.dest, &i.ty)?;
         let value = self.alloc(self.plan.functions[body].result.len())?;
         let code = self.plan.fails.code(&h.error);
@@ -2035,35 +2088,11 @@ impl FnLower<'_> {
             .ok_or_else(|| VerifiedError::Invalid(format!("missing region body {body}")))?;
         // Captured places are copied in (and `inout` ones back); a body that
         // assigns a place captured by value would lose the write.
-        let by_value: BTreeSet<&str> = f
-            .params
-            .iter()
-            .filter(|p| p.pass != Pass::Inout)
-            .map(|p| p.name.as_str())
-            .collect();
-        for b in &f.blocks {
-            for ins in &b.instructions {
-                let written: Vec<String> = match &ins.op {
-                    Op::Write { place, .. } => place
-                        .split('.')
-                        .next()
-                        .map(str::to_owned)
-                        .into_iter()
-                        .collect(),
-                    Op::Call { args, .. } => args
-                        .iter()
-                        .filter(|a| a.pass == Pass::Inout)
-                        .filter_map(|a| a.place.as_ref().map(|p| p.root.clone()))
-                        .collect(),
-                    _ => vec![],
-                };
-                if let Some(root) = written.iter().find(|r| by_value.contains(r.as_str())) {
-                    return Err(self.err(
-                        Unsupported::Effect,
-                        format!("region block assigns the captured place '{root}'"),
-                    ));
-                }
-            }
+        if let Some(root) = assigned_capture(f) {
+            return Err(self.err(
+                Unsupported::Effect,
+                format!("region block assigns the captured place '{root}'"),
+            ));
         }
         // Open: a header in the heap.
         let (globals, header, top, _) = self.heap_alloc(HEADER)?;
