@@ -2,9 +2,9 @@
 // call of the C library declared in bridge.vsys, gated by eff [Ffi[Bridge]].
 fn scalars() -> u64 eff [Ffi[Bridge]] {
     Bridge::bridge_report32(1, Bridge::bridge_sum(40, 2));
-    Bridge::bridge_report_signed(2, Bridge::bridge_negative());
-    Bridge::bridge_report32(3, Bridge::bridge_wide());
-    Bridge::bridge_report_signed(4, Bridge::bridge_small());
+    Bridge::bridge_report_signed(2, widen_i64(Bridge::bridge_negative()));
+    Bridge::bridge_report32(3, widen_u32(Bridge::bridge_wide()));
+    Bridge::bridge_report_signed(4, widen_i64(Bridge::bridge_small()));
     // Two calls of a counter are two calls, never one.
     let a = Bridge::bridge_tick();
     let b = Bridge::bridge_tick();
@@ -69,7 +69,7 @@ fn slices() -> u64 eff [Ffi[Bridge]] {
     let one: (u8, u8) = (9, 9);
     Bridge::bridge_crc_update(inout crc, in one);
     Bridge::bridge_report32(24, crc);
-    n
+    widen_u64(n)
 }
 
 fn structs() -> u64 eff [Ffi[Bridge]] {
@@ -80,7 +80,7 @@ fn structs() -> u64 eff [Ffi[Bridge]] {
     let ok = Bridge::bridge_split(77309411333, inout pair);
     Bridge::bridge_report32(30, pair.lo);
     Bridge::bridge_report32(31, pair.hi);
-    Bridge::bridge_report_signed(32, ok);
+    Bridge::bridge_report_signed(32, widen_i64(ok));
     let h = Hdr {
         magic: 16909060,
         version: 5,

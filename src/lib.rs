@@ -18,6 +18,7 @@ pub mod ebpf_backend;
 pub mod ffi_lowering;
 pub mod fip;
 pub mod forge_frontend;
+pub mod integer_widths;
 pub mod interface;
 #[cfg(target_os = "linux")]
 pub mod io_session;

@@ -178,6 +178,8 @@ pub fn encoding_samples() -> Vec<M> {
         M::Leave,
     ]);
     samples.extend(TrapKind::ALL.map(M::Trap));
+    // Milestone 8: heap words.
+    samples.extend([M::LdH(3), M::StH(3), M::LdH(300), M::StH(300)]);
 
     samples
 }

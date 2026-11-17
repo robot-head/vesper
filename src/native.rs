@@ -48,10 +48,8 @@ fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
         Type::IntLiteral(_) => Ok(types::I64),
         Type::Named(n, _) if n == "f64" => Ok(types::F64),
         Type::Named(n, _)
-            if matches!(
-                n.as_str(),
-                "u8" | "u32" | "u64" | "i64" | "bool" | "Unit" | "Never"
-            ) || generics.iter().any(|g| g.name == *n) =>
+            if (crate::numeric::is_scalar_name(n) && n != "f64")
+                || generics.iter().any(|g| g.name == *n) =>
         {
             Ok(types::I64)
         }
@@ -1193,11 +1191,7 @@ fn jit_run_entry(
                 crate::runtime::Value::Tuple(vec![])
             } else {
                 if let Some(k) = crate::numeric::IntegerKind::from_type(&f.result) {
-                    if k.unsigned() {
-                        crate::runtime::Value::UInt(n as u64 & k.mask(), k.bits())
-                    } else {
-                        crate::runtime::Value::Int(n)
-                    }
+                    crate::runtime::integer_from_word(k, n as u64)
                 } else {
                     crate::runtime::Value::Int(n)
                 }
@@ -3487,6 +3481,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.local_types = type_scope;
                 out
             }
+            ExprKind::Unary(op, v) if op == "~" => {
+                let v = self.expr(v)?;
+                self.b.ins().bnot(v)
+            }
+            ExprKind::Unary(op, v) if crate::numeric::conversion(op).is_some() => {
+                let from = crate::numeric::IntegerKind::from_type(&self.ty(v));
+                let value = self.expr(v)?;
+                self.convert(op, from, value, &e.span)?
+            }
             ExprKind::Unary(op, v) => {
                 let kind = crate::numeric::IntegerKind::from_type(&self.ty(v));
                 let v = self.expr(v)?;
@@ -3504,7 +3507,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     let overflow = if kind.unsigned() {
                         self.b.ins().icmp_imm(IntCC::NotEqual, v, 0)
                     } else {
-                        self.b.ins().icmp_imm(IntCC::Equal, v, i64::MIN)
+                        self.b.ins().icmp_imm(IntCC::Equal, v, kind.min() as i64)
                     };
                     self.check_overflow(overflow)?;
                 }
@@ -3542,6 +3545,25 @@ impl<M: Module> Codegen<'_, '_, M> {
                     },
                     span: e.span.clone(),
                 })?
+            }
+            ExprKind::Binary(op, a, b)
+                if crate::numeric::is_shift(op)
+                    || crate::numeric::rotate_intrinsic(op).is_some() =>
+            {
+                let kind = crate::numeric::IntegerKind::from_type(&self.ty(a))
+                    .ok_or("native shift of a non-integer value")?;
+                let av = self.expr(a)?;
+                let bv = self.expr(b)?;
+                self.shift(op, kind, av, bv, &e.span)?
+            }
+            ExprKind::Binary(op, a, b) if matches!(op.as_str(), "&" | "|" | "^") => {
+                let av = self.expr(a)?;
+                let bv = self.expr(b)?;
+                match op.as_str() {
+                    "&" => self.b.ins().band(av, bv),
+                    "|" => self.b.ins().bor(av, bv),
+                    _ => self.b.ins().bxor(av, bv),
+                }
             }
             ExprKind::Binary(op, a, b) => {
                 let ty = self.ty(a);
@@ -3789,9 +3811,21 @@ impl<M: Module> Codegen<'_, '_, M> {
                             let v = self.bitwise(n, kind, a, b)?;
                             return Ok(self.coerce(v, Some(&self.ty(e))));
                         }
-                        if n == crate::capability_effects::WIDEN_INTRINSIC && args.len() == 1 {
-                            // Unsigned values are kept zero-extended in I64.
-                            return self.expr(&args[0].expr);
+                        if crate::numeric::conversion(n).is_some() && args.len() == 1 {
+                            let from =
+                                crate::numeric::IntegerKind::from_type(&self.ty(&args[0].expr));
+                            let value = self.expr(&args[0].expr)?;
+                            let v = self.convert(n, from, value, &e.span)?;
+                            return Ok(self.coerce(v, Some(&self.ty(e))));
+                        }
+                        if crate::numeric::rotate_intrinsic(n).is_some() && args.len() == 2 {
+                            let kind =
+                                crate::numeric::IntegerKind::from_type(&self.ty(&args[0].expr))
+                                    .ok_or("native rotation of a non-integer value")?;
+                            let a = self.expr(&args[0].expr)?;
+                            let b = self.expr(&args[1].expr)?;
+                            let v = self.shift(n, kind, a, b, &e.span)?;
+                            return Ok(self.coerce(v, Some(&self.ty(e))));
                         }
                     }
                     if crate::fip::active(self.world)
@@ -4036,14 +4070,128 @@ impl<M: Module> Codegen<'_, '_, M> {
         let ty = self.ty(e);
         Ok(self.coerce(value, Some(&ty)))
     }
+    /// Reduce a 64-bit lane to its canonical `t` form: narrow unsigned kinds
+    /// are zero-extended and narrow signed kinds sign-extended.
     fn coerce(&mut self, v: ir::Value, t: Option<&Type>) -> ir::Value {
         if let Some(kind) = t.and_then(crate::numeric::IntegerKind::from_type)
             && kind.bits() < 64
             && self.b.func.dfg.value_type(v) == types::I64
         {
-            return self.b.ins().band_imm(v, kind.mask() as i64);
+            if kind.unsigned() {
+                return self.b.ins().band_imm(v, kind.mask() as i64);
+            }
+            let up = i64::from(64 - kind.bits());
+            let high = self.b.ins().ishl_imm(v, up);
+            return self.b.ins().sshr_imm(high, up);
         }
         v
+    }
+    /// `<<`, `>>` (raising `Fail[ArithOverflow]` when the checker could not
+    /// prove the amount in range) and `rotate_left`/`rotate_right` on a
+    /// canonical `kind` lane. Callers reduce the result with `coerce`.
+    fn shift(
+        &mut self,
+        op: &str,
+        kind: crate::numeric::IntegerKind,
+        a: ir::Value,
+        n: ir::Value,
+        span: &Span,
+    ) -> Result<ir::Value, String> {
+        if crate::numeric::is_shift(op) && self.world.overflow_ops.contains(&(span.start, span.end))
+        {
+            // Negative amounts are huge as unsigned lanes.
+            let bad =
+                self.b
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, n, i64::from(kind.bits()));
+            self.check_overflow(bad)?;
+        }
+        Ok(match op {
+            "<<" => self.b.ins().ishl(a, n),
+            ">>" if kind.unsigned() => self.b.ins().ushr(a, n),
+            ">>" => self.b.ins().sshr(a, n),
+            _ => {
+                let left = crate::numeric::rotate_intrinsic(op).ok_or("unknown native shift")?;
+                // Rotate in the kind's own width; Cranelift takes the
+                // amount modulo the width, matching `rem_euclid`.
+                let narrow = match kind.bits() {
+                    8 => types::I8,
+                    16 => types::I16,
+                    32 => types::I32,
+                    _ => types::I64,
+                };
+                let x = if narrow == types::I64 {
+                    a
+                } else {
+                    self.b.ins().ireduce(narrow, a)
+                };
+                let r = if left {
+                    self.b.ins().rotl(x, n)
+                } else {
+                    self.b.ins().rotr(x, n)
+                };
+                if narrow == types::I64 {
+                    r
+                } else if kind.unsigned() {
+                    self.b.ins().uextend(types::I64, r)
+                } else {
+                    self.b.ins().sextend(types::I64, r)
+                }
+            }
+        })
+    }
+    /// `widen_k`, `narrow_k` and `wrapping_k` on a canonical `from` lane.
+    /// In-range values have the same lane in every kind, so only the range
+    /// check of a narrowing and the reduction of a wrapping emit code.
+    fn convert(
+        &mut self,
+        name: &str,
+        from: Option<crate::numeric::IntegerKind>,
+        v: ir::Value,
+        span: &Span,
+    ) -> Result<ir::Value, String> {
+        use crate::numeric::Conversion;
+        let (conversion, to) =
+            crate::numeric::conversion(name).ok_or("unknown native conversion")?;
+        let from = from.ok_or("native conversion of a non-integer value")?;
+        match conversion {
+            Conversion::Widen => Ok(v),
+            Conversion::Wrapping => Ok(self.coerce(v, Some(&to.ty()))),
+            Conversion::Narrow => {
+                if self.world.overflow_ops.contains(&(span.start, span.end)) {
+                    let (low, high) = if from.unsigned() {
+                        // The lane is the value as a u64; the target
+                        // minimum is at most 0.
+                        let high = (to.max() < from.max()).then(|| {
+                            self.b
+                                .ins()
+                                .icmp_imm(IntCC::UnsignedGreaterThan, v, to.max() as i64)
+                        });
+                        (None, high)
+                    } else {
+                        let low = (to.min() > from.min()).then(|| {
+                            self.b
+                                .ins()
+                                .icmp_imm(IntCC::SignedLessThan, v, to.min() as i64)
+                        });
+                        let high = (to.max() < from.max()).then(|| {
+                            self.b
+                                .ins()
+                                .icmp_imm(IntCC::SignedGreaterThan, v, to.max() as i64)
+                        });
+                        (low, high)
+                    };
+                    let overflow = match (low, high) {
+                        (Some(l), Some(h)) => Some(self.b.ins().bor(l, h)),
+                        (l, h) => l.or(h),
+                    };
+                    if let Some(overflow) = overflow {
+                        self.check_overflow(overflow)?;
+                    }
+                }
+                Ok(v)
+            }
+        }
     }
     fn primitive_failure(&mut self, variant: &str) -> Result<(), String> {
         let ty = Type::named("RuntimeError");
@@ -4075,7 +4223,24 @@ impl<M: Module> Codegen<'_, '_, M> {
     ) -> Result<ir::Value, String> {
         use crate::numeric::IntegerKind as K;
         let overflow = match (op, kind) {
-            ("+" | "*", K::U8 | K::U32) => {
+            ("+" | "-" | "*", K::I8 | K::I16 | K::I32) => {
+                // Exact in 64 bits; overflow iff the result leaves the kind.
+                let r = match op {
+                    "+" => self.b.ins().iadd(a, b),
+                    "-" => self.b.ins().isub(a, b),
+                    _ => self.b.ins().imul(a, b),
+                };
+                let up = i64::from(64 - kind.bits());
+                let high = self.b.ins().ishl_imm(r, up);
+                let canonical = self.b.ins().sshr_imm(high, up);
+                Some(self.b.ins().icmp(IntCC::NotEqual, canonical, r))
+            }
+            ("/", K::I8 | K::I16 | K::I32) => {
+                let min = self.b.ins().icmp_imm(IntCC::Equal, a, kind.min() as i64);
+                let minus_one = self.b.ins().icmp_imm(IntCC::Equal, b, -1);
+                Some(self.b.ins().band(min, minus_one))
+            }
+            ("+" | "*", K::U8 | K::U16 | K::U32) => {
                 let r = if op == "+" {
                     self.b.ins().iadd(a, b)
                 } else {
@@ -4087,18 +4252,18 @@ impl<M: Module> Codegen<'_, '_, M> {
                         .icmp_imm(IntCC::UnsignedGreaterThan, r, kind.mask() as i64),
                 )
             }
-            ("-", K::U8 | K::U32 | K::U64) => {
+            ("-", K::U8 | K::U16 | K::U32 | K::U64 | K::Usize) => {
                 Some(self.b.ins().icmp(IntCC::UnsignedLessThan, a, b))
             }
-            ("+", K::U64) => {
+            ("+", K::U64 | K::Usize) => {
                 let r = self.b.ins().iadd(a, b);
                 Some(self.b.ins().icmp(IntCC::UnsignedLessThan, r, a))
             }
-            ("*", K::U64) => {
+            ("*", K::U64 | K::Usize) => {
                 let high = self.b.ins().umulhi(a, b);
                 Some(self.b.ins().icmp_imm(IntCC::NotEqual, high, 0))
             }
-            ("+" | "-", K::I64) => {
+            ("+" | "-", K::I64 | K::Isize) => {
                 let r = if op == "+" {
                     self.b.ins().iadd(a, b)
                 } else {
@@ -4116,13 +4281,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let both = self.b.ins().band(x, y);
                 Some(self.b.ins().icmp_imm(IntCC::SignedLessThan, both, 0))
             }
-            ("*", K::I64) => {
+            ("*", K::I64 | K::Isize) => {
                 let r = self.b.ins().imul(a, b);
                 let high = self.b.ins().smulhi(a, b);
                 let sign = self.b.ins().sshr_imm(r, 63);
                 Some(self.b.ins().icmp(IntCC::NotEqual, high, sign))
             }
-            ("/", K::I64) => {
+            ("/", K::I64 | K::Isize) => {
                 let min = self.b.ins().icmp_imm(IntCC::Equal, a, i64::MIN);
                 let minus_one = self.b.ins().icmp_imm(IntCC::Equal, b, -1);
                 Some(self.b.ins().band(min, minus_one))

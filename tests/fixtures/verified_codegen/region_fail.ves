@@ -1,0 +1,40 @@
+// A failure leaving a region block closes it (milestones 7 and 8).
+copy enum E {
+    Big
+}
+
+fn check(n: i64) -> i64 eff [Fail[E]] {
+    if n > 10 {
+        Fail::raise(E::Big)
+    } else {
+        n
+    }
+}
+
+fn boxed(n: i64) -> i64 eff [r: Region, Fail[E]] {
+    let b = r.box(n);
+    check(r.get(b))
+}
+
+fn attempt(n: i64) -> i64 {
+    handle Fail[E] in {
+        region r(64) {
+            let c = r.box(n);
+            wrapping_add(boxed(r.get(c)), 1)
+        }
+    } with {
+        return v => v,
+        raise(_, _) => -1,
+    }
+}
+
+fn main() -> (i64, i64, i64, u64) {
+    region outer(1024) {
+        let b = outer.box(3);
+        let first = attempt(20);
+        let second = attempt(7);
+        let third = attempt(30);
+        outer.set(b, wrapping_add(outer.get(b), second));
+        (first, second, third, outer.used())
+    }
+}

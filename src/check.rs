@@ -8,6 +8,8 @@ mod vector_check;
 #[path = "regions/check.rs"]
 mod region_rules;
 
+#[path = "integer_widths/check.rs"]
+mod integer_widths_rules;
 #[path = "tiled/check.rs"]
 mod tiled_rules;
 
@@ -44,11 +46,17 @@ impl World {
         let builtin_count = builtins.items.len();
         // Built-in secret operations used by the module (§23.2).
         let secret_prelude = crate::capability_effects::secret_prelude(module);
+        // Byte-order intrinsics used by the module (`vesper.arith.checked/1`).
+        let width_prelude = crate::integer_widths::prelude(
+            module,
+            crate::integer_widths::module_end(&secret_prelude),
+        );
         for (index, item) in builtins
             .items
             .iter()
             .chain(module.items.iter())
             .chain(secret_prelude.items.iter())
+            .chain(width_prelude.items.iter())
             .enumerate()
         {
             match item {
@@ -198,10 +206,7 @@ impl World {
                     if crate::vector::shape_of(ty).is_some() {
                         return Mode::Copy;
                     }
-                    if matches!(
-                        n.as_str(),
-                        "u8" | "u32" | "u64" | "i64" | "f64" | "bool" | "Unit" | "Never"
-                    ) {
+                    if crate::numeric::is_scalar_name(n) {
                         return Mode::Copy;
                     }
                     if n == "String" {
@@ -702,17 +707,9 @@ impl Checker<'_> {
                     .get(n)
                     .map(|a| a.generics.len())
                     .or_else(|| {
-                        if matches!(
-                            n.as_str(),
-                            "u8" | "u32"
-                                | "u64"
-                                | "i64"
-                                | "f64"
-                                | "bool"
-                                | "Unit"
-                                | "Never"
-                                | "String"
-                        ) || g.iter().any(|p| &p.name == n && !p.row)
+                        if crate::numeric::is_scalar_name(n)
+                            || n == "String"
+                            || g.iter().any(|p| &p.name == n && !p.row)
                         {
                             Some(0)
                         } else {
@@ -727,10 +724,9 @@ impl Checker<'_> {
                             span.clone(),
                         );
                     }
-                } else if !matches!(
-                    n.as_str(),
-                    "u8" | "u32" | "u64" | "i64" | "f64" | "bool" | "Unit" | "Never" | "String"
-                ) && !g.iter().any(|p| &p.name == n)
+                } else if !crate::numeric::is_scalar_name(n)
+                    && n != "String"
+                    && !g.iter().any(|p| &p.name == n)
                 {
                     self.error("E0101", format!("unknown type '{n}'"), span.clone());
                 }
@@ -1377,7 +1373,7 @@ impl Checker<'_> {
                 let t = self.expr_expected(v, env, Usage::Own, expected);
                 let t = crate::numeric::default_type(&t);
                 if op == "~" {
-                    self.error("E0200", "prefix '~' is not supported yet", e.span.clone());
+                    self.check_complement(&t, e.span.clone());
                     t
                 } else if op == "!" {
                     self.expect_type(&Type::named("bool"), &t, e.span.clone());
@@ -1397,8 +1393,12 @@ impl Checker<'_> {
                     t
                 }
             }
+            ExprKind::Binary(op, l, r) if crate::numeric::is_shift(op) => {
+                self.shift_expr(op, l, r, env, e.span.clone(), expected)
+            }
             ExprKind::Binary(op, l, r) => {
-                let arithmetic = matches!(op.as_str(), "+" | "-" | "*" | "/" | "%");
+                let bit = crate::numeric::is_bit_operator(op);
+                let arithmetic = bit || matches!(op.as_str(), "+" | "-" | "*" | "/" | "%");
                 let goal = if matches!(op.as_str(), "&&" | "||") {
                     Type::named("bool")
                 } else if arithmetic && numeric(expected) && *expected != Type::Infer {
@@ -1454,7 +1454,9 @@ impl Checker<'_> {
                     self.types
                         .insert((r.span.start, r.span.end), common.clone());
                 }
-                if (arithmetic || matches!(op.as_str(), "<" | "<=" | ">" | ">="))
+                if bit {
+                    self.check_bit_operands(op, &common, e.span.clone());
+                } else if (arithmetic || matches!(op.as_str(), "<" | "<=" | ">" | ">="))
                     && !numeric(&common)
                 {
                     self.error(
@@ -1944,8 +1946,13 @@ impl Checker<'_> {
             if crate::capability_effects::bit_intrinsic(name).is_some() {
                 return self.wrapping_call(name, types, args, env, span, expected);
             }
-            if name == crate::capability_effects::WIDEN_INTRINSIC {
-                return self.widen_call(name, types, args, env, span);
+            // Integer conversions and rotations (`vesper.arith.checked/1`);
+            // user functions take precedence.
+            if let Some(conversion) = crate::numeric::conversion(name) {
+                return self.conversion_call(name, conversion, types, args, env, span);
+            }
+            if crate::numeric::rotate_intrinsic(name).is_some() {
+                return self.rotate_call(name, types, args, env, span, expected);
             }
             if name
                 .split_once("::")
@@ -3159,49 +3166,6 @@ impl Checker<'_> {
         }
         common
     }
-    /// `widen_u64(x)`: zero extension of one `u8`, `u32` or `u64` operand.
-    fn widen_call(
-        &mut self,
-        name: &str,
-        types: &[Type],
-        args: &[Arg],
-        env: &mut Env,
-        span: Span,
-    ) -> Type {
-        if !types.is_empty() || args.len() != 1 {
-            self.error(
-                "E0207",
-                format!("'{name}' takes one operand and no type arguments"),
-                span.clone(),
-            );
-        }
-        for a in args {
-            if a.pass != Pass::In || a.explicit {
-                self.error(
-                    "E0308",
-                    format!("'{name}' takes its operand by value"),
-                    a.expr.span.clone(),
-                );
-            }
-            let t = self.expr_expected(&a.expr, env, Usage::Own, &Type::Infer);
-            let t = if let Type::IntLiteral(_) = t {
-                let u64 = Type::named("u64");
-                self.types
-                    .insert((a.expr.span.start, a.expr.span.end), u64.clone());
-                u64
-            } else {
-                t
-            };
-            if !matches!(t.name(), "u8" | "u32" | "u64") {
-                self.error(
-                    "E0200",
-                    format!("'{name}' requires a u8, u32 or u64 operand, found {t}"),
-                    a.expr.span.clone(),
-                );
-            }
-        }
-        Type::named("u64")
-    }
     fn nonzero(&self, e: &Expr, env: &Env) -> bool {
         self.integer_fact(e, env).is_some_and(|n| n != 0)
             || matches!(&e.kind, ExprKind::Name(n) if env.bindings.get(n).is_some_and(|b| b.nonzero))
@@ -3774,8 +3738,7 @@ pub fn function_type(f: &Function) -> Type {
     }
 }
 pub fn integer(t: &Type) -> bool {
-    matches!(t.name(), "u8" | "u32" | "u64" | "i64")
-        || matches!(t, Type::IntLiteral(_) | Type::Infer)
+    crate::numeric::is_integer_name(t.name()) || matches!(t, Type::IntLiteral(_) | Type::Infer)
 }
 pub fn numeric(t: &Type) -> bool {
     integer(t) || t.name() == "f64"

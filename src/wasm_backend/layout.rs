@@ -75,6 +75,13 @@ pub(crate) fn shape(world: &World, ty: &Type) -> Result<Shape, WasmError> {
             "Unit" => Shape::Scalar(Scalar::Unit),
             "Never" => Shape::Scalar(Scalar::Never),
             "String" => Shape::Str,
+            n if crate::numeric::is_integer_name(n) => {
+                return Err(WasmError::unsupported(
+                    Unsupported::IntegerWidth,
+                    "",
+                    format!("integer kind {n}"),
+                ));
+            }
             _ => {
                 let Some(adt) = world.adts.get(n) else {
                     return Ok(Shape::Opaque);

@@ -345,7 +345,7 @@ fn edge_cases_and_typed_errors() {
             (&deep_parens(60), Expect::ParseError(CODE_LIMIT)),
             (&deep_parens(20), Expect::Seed),
             // Lexical errors carry the offending offset.
-            ("fn f() { & }", Expect::LexError(9)),
+            ("fn f() { ` }", Expect::LexError(9)),
             ("fn f() { \"open }", Expect::LexError(9)),
             ("fn f() {} /* open", Expect::LexError(10)),
             ("fn f() { \"\\\n\" }", Expect::LexError(9)),

@@ -371,6 +371,10 @@ fn is_binary_operator(kind: K) -> bool {
             | K::Ge
             | K::And
             | K::Or
+            | K::Amp
+            | K::Caret
+            | K::Shl
+            | K::Shr
     )
 }
 /// Whether a token can end an operand, so a following `-`/`*` is infix.
@@ -586,7 +590,7 @@ fn sequence<'a>(
         }
         previous_block = is_block;
         // A prefix `-`/`!` binds to its operand with no space.
-        previous_unary = matches!(current.kind, K::Minus | K::Bang)
+        previous_unary = matches!(current.kind, K::Minus | K::Bang | K::Tilde)
             && previous.is_none_or(|p| !ends_operand(p.kind));
         previous = Some(Piece {
             kind: match current.kind {

@@ -3208,6 +3208,15 @@ impl Generator<'_> {
                 "Lean extraction of method and indirect calls requires named functions".into(),
             );
         };
+        if (crate::numeric::conversion(n).is_some()
+            || crate::numeric::rotate_intrinsic(n).is_some())
+            && !self.scope.contains_key(n)
+            && !self.world.functions.contains_key(n)
+        {
+            return Err(format!(
+                "Lean extraction does not model the integer intrinsic '{n}' yet (vesper.arith.checked/1 bit operations, shifts and conversions are refused)"
+            ));
+        }
         if let Some(op) = crate::numeric::wrapping_intrinsic(n)
             && !self.scope.contains_key(n)
             && !self.world.functions.contains_key(n)

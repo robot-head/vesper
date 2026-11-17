@@ -22,9 +22,17 @@ pub enum TrapKind {
     DivisionByZero,
     /// A block the checker marked unreachable was reached.
     Unreachable,
+    /// A region's byte or allocation bound (`vesper.region.accounting/1`)
+    /// or the program heap was exhausted.
+    Region,
 }
 impl TrapKind {
-    pub const ALL: [TrapKind; 3] = [Self::Overflow, Self::DivisionByZero, Self::Unreachable];
+    pub const ALL: [TrapKind; 4] = [
+        Self::Overflow,
+        Self::DivisionByZero,
+        Self::Unreachable,
+        Self::Region,
+    ];
     /// The label of the shared abort exit.
     pub fn label(self) -> Label {
         self as Label
@@ -35,6 +43,7 @@ impl TrapKind {
             Self::Overflow => super::EXIT_OVERFLOW,
             Self::DivisionByZero => super::EXIT_DIVISION_BY_ZERO,
             Self::Unreachable => super::EXIT_UNREACHABLE,
+            Self::Region => super::EXIT_REGION,
         }
     }
     fn name(self) -> &'static str {
@@ -42,11 +51,12 @@ impl TrapKind {
             Self::Overflow => "ovf",
             Self::DivisionByZero => "div0",
             Self::Unreachable => "unreachable",
+            Self::Region => "region",
         }
     }
 }
 /// Labels below this value are the abort exits.
-pub const FIRST_FREE_LABEL: Label = 3;
+pub const FIRST_FREE_LABEL: Label = 4;
 
 /// The machine representation of a scalar: a zero-extended (unsigned, `bool`)
 /// or two's-complement (`i64`) 64-bit word.
@@ -266,6 +276,19 @@ pub enum Lir {
         index: u32,
         src: Slot,
     },
+    /// `dst := heap[slot ptr + offset]`: a word of a region payload. Heap
+    /// words are addressed by word index; region handles are such indices.
+    LoadPtr {
+        dst: Slot,
+        ptr: Slot,
+        offset: u32,
+    },
+    /// `heap[slot ptr + offset] := src`.
+    StorePtr {
+        ptr: Slot,
+        offset: u32,
+        src: Slot,
+    },
     Call {
         callee: Label,
     },
@@ -374,6 +397,10 @@ pub enum M {
     /// `R0 := (R0 cond R1) ? 1 : 0` on binary64 values (see
     /// [`Lir::FCompare`]).
     FCmp(Cond),
+    /// `R0 := heap[R1 + offset]` (heap words by index).
+    LdH(u32),
+    /// `heap[R1 + offset] := R0`.
+    StH(u32),
     Label(Label),
     Jmp(Label),
     /// Branch when `R0 = 0`.
@@ -408,6 +435,8 @@ impl fmt::Display for M {
             Self::FOp(op) => write!(f, "fop {}", op.name()),
             Self::FNeg => write!(f, "fneg"),
             Self::FCmp(c) => write!(f, "fcmp {}", c.name()),
+            Self::LdH(n) => write!(f, "ldh {n}"),
+            Self::StH(n) => write!(f, "sth {n}"),
             Self::Label(l) => write!(f, "label L{l}"),
             Self::Jmp(l) => write!(f, "jmp L{l}"),
             Self::Bz(l) => write!(f, "bz L{l}"),
@@ -492,6 +521,12 @@ pub fn select(row: &Lir) -> Vec<M> {
         Lir::LoadOut { dst, index } => vec![Ld(R0, Loc::Out(index)), St(Loc::Slot(dst), R0)],
         Lir::LoadIn { dst, index } => vec![Ld(R0, Loc::In(index)), St(Loc::Slot(dst), R0)],
         Lir::StoreIn { index, src } => vec![Ld(R0, Loc::Slot(src)), St(Loc::In(index), R0)],
+        Lir::LoadPtr { dst, ptr, offset } => {
+            vec![Ld(R1, Loc::Slot(ptr)), LdH(offset), St(Loc::Slot(dst), R0)]
+        }
+        Lir::StorePtr { ptr, offset, src } => {
+            vec![Ld(R1, Loc::Slot(ptr)), Ld(R0, Loc::Slot(src)), StH(offset)]
+        }
         Lir::Call { callee } => vec![Call(callee)],
         Lir::Label(l) => vec![Label(l)],
         Lir::Jump(l) => vec![Jmp(l)],
@@ -590,6 +625,26 @@ pub fn table_rows() -> Vec<(String, Lir)> {
             "trap unreachable".to_owned(),
             Lir::Trap(TrapKind::Unreachable),
         ),
+    ]);
+    // Milestone 8 (regions): heap rows and the region abort.
+    rows.extend([
+        (
+            "loadptr".to_owned(),
+            Lir::LoadPtr {
+                dst,
+                ptr: a,
+                offset: 3,
+            },
+        ),
+        (
+            "storeptr".to_owned(),
+            Lir::StorePtr {
+                ptr: a,
+                offset: 3,
+                src: b,
+            },
+        ),
+        ("trap region".to_owned(), Lir::Trap(TrapKind::Region)),
     ]);
     // --- Milestone 7 (abort-only `Fail[E]`) ---
     rows.push(("scope".to_owned(), Lir::Scope { ovf: 9, div0: 10 }));

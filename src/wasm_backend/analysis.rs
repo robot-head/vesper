@@ -555,10 +555,8 @@ fn mentions_generic(world: &World, t: &Type) -> bool {
         Type::Named(n, args) => {
             (args.is_empty()
                 && !world.adts.contains_key(n)
-                && !matches!(
-                    n.as_str(),
-                    "i64" | "u64" | "u32" | "u8" | "bool" | "f64" | "Unit" | "Never" | "String"
-                ))
+                && !crate::numeric::is_scalar_name(n)
+                && n != "String")
                 || args.iter().any(|a| mentions_generic(world, a))
         }
         Type::Tuple(ts) => ts.iter().any(|a| mentions_generic(world, a)),

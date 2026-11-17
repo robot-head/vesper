@@ -418,6 +418,9 @@ GhostExpr      ::= 'ghost' PrimaryExpr ;
 
 AssignExpr     ::= BinaryExpr ( ( '=' | '+=' | '-=' | '|=' | '&=' ) Expr )? ;
 BinaryExpr     ::= UnaryExpr ( BinOp UnaryExpr )* ;
+BinOp          ::= '||' | '&&' | '==' | '!=' | '<' | '<=' | '>' | '>='
+                 | '|' | '^' | '&' | '<<' | '>>'      (* loosest to tightest, *)
+                 | '+' | '-' | '*' | '/' | '%' ;      (* left-associative    *)
 UnaryExpr      ::= ( '!' | '-' | '~' )? PostfixExpr ;
 PostfixExpr    ::= PrimaryExpr PostfixOp* ;
 PostfixOp      ::= '(' ArgList? ')'                    (* value or effect call *)
@@ -443,6 +446,8 @@ FieldPatList   ::= ( LowerIdent ( ':' Pat )? ) ( ',' FieldPatList )? ;
 UpperIdent     ::= /[A-Z][A-Za-z0-9_]*/ ;
 LowerIdent     ::= /[a-z_][A-Za-z0-9_]*/ ;
 ```
+
+*Integer kinds.* The ten integer `PrimType`s are distinct types with no implicit conversions; `usize` and `isize` are 64 bits wide on every target. Under the checked-arithmetic contract `vesper.arith.checked/1`, `+`, `-`, `*`, negation and signed `MIN / -1` raise `Fail[ArithOverflow]`, and division by zero raises `Fail[RuntimeError]`. `&`, `|`, `^` and prefix `~` are total; `a << n` and `a >> n` accept an amount `n` of any integer kind and raise `Fail[ArithOverflow]` unless `0 <= n < bits(a)` (`>>` is arithmetic on signed kinds). Conversions are explicit calls named after the target kind `k`: `widen_k` (accepted only when lossless), `narrow_k` (checked, `Fail[ArithOverflow]`) and `wrapping_k` (modulo `2^bits(k)`). `rotate_left`/`rotate_right` and the byte-order functions `to_le_bytes_k`, `to_be_bytes_k`, `from_le_bytes_k`, `from_be_bytes_k` (over tuples of `u8`) are total.
 
 == 3. Core Calculus, Four-Axis Modalities, and Ghost Linearity
 <ch-3>

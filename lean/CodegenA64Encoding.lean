@@ -786,11 +786,13 @@ def LE : Nat := 13
 /-- `FIRST_FREE_LABEL`: labels below it are the abort exits of
 `TrapKind::ALL` (`tests/verified_codegen_lean.rs` checks the value against the
 Rust constant); every label from it on is a function or block label. -/
-def firstFree : Nat := 3
+def firstFree : Nat := 4
 
 /-- The program-wide abort exits (`TrapKind::label`). -/
 def trapLabel : Failure → Nat
-  | .overflow => 0 | .divZero => 1 | .unreachable => 2 | .fault => 3
+  | .overflow => 0 | .divZero => 1 | .unreachable => 2 | .region => 3
+  -- A fault is the hardware's exit, not a label `emit` branches to.
+  | .fault => 4
 def ovf : Nat := trapLabel .overflow
 
 /-- The branch instructions that take a label. -/
@@ -817,6 +819,8 @@ def imm (d w : Nat) : List Item :=
 def frame : Loc → Nat × Nat
   | .slot n | .out n => (sp, n)
   | .inn n => (fp, n + 2)
+  -- Never selected: heap words are reached through `ldh`/`sth`.
+  | .heap _ => (xzr, 0)
 
 def ldst (load : Bool) (r : Nat) (l : Loc) : List Item :=
   [.ins (if load then .ldr r (frame l).1 (frame l).2 else .str r (frame l).1 (frame l).2)]
@@ -842,6 +846,9 @@ def floatCond : Cond → Nat
 
 def fopOf : FloatOp → FOp
   | .add => .fadd | .sub => .fsub | .mul => .fmul | .div => .fdiv
+
+/-- `x16` = the address of heap word `x1` (`HEAP_BASE` = 2^28). -/
+def heapAt : List Item := [.ins (.movz 16 1 0x1000), .ins (.sreg .add .lsl 16 16 1 3)]
 
 def emit : M → List Item
   | .ld r l => ldst true (regX r) l
@@ -879,6 +886,10 @@ def emit : M → List Item
       subSp (words * 8)
   | .leave => [.ins (.aimm .add sp fp 0 0), .ins (.ldpPost fp lr sp 2), .ins (.ret lr)]
   | .trap f => [.br .b (trapLabel f)]
+  -- Heap word `x1 + off` (milestone 8): `movz x16, #HEAP_BASE >> 16, lsl #16;
+  -- add x16, x16, x1, lsl #3; ldr x0, [x16, #8*off]` (`str` for `sth`).
+  | .ldh off => heapAt ++ [.ins (.ldr 0 16 off)]
+  | .sth off => heapAt ++ [.ins (.str 0 16 off)]
   | .scope _ _ => []
 
 /-! ## Layout: abort exits before the instruction, other labels after it -/
@@ -932,8 +943,9 @@ theorem place_wf (n : Nat) (hn : n < 2 ^ 18) :
 `MAX_FRAME_WORDS` (4000) words, so slot, outgoing and incoming indices fit
 the scaled 12-bit offset, and frame sizes fit `sub sp` (below 2^24 bytes). -/
 def mBounded : M → Prop
-  | .ld _ l | .st l _ => match l with | .slot n | .out n => n < 4096 | .inn n => n + 2 < 4096
+  | .ld _ l | .st l _ => match l with | .slot n | .out n => n < 4096 | .inn n => n + 2 < 4096 | .heap _ => True
   | .enter words => words < 2 ^ 21
+  | .ldh off | .sth off => off < 4096
   | _ => True
 
 theorem imm_ok (d w : Nat) (hd : d < 32) : ∀ it ∈ imm d w, it.Ok := by
@@ -942,10 +954,10 @@ theorem imm_ok (d w : Nat) (hd : d < 32) : ∀ it ∈ imm d w, it.Ok := by
   rcases hit with rfl | rfl | rfl | rfl <;> simp only [Item.Ok, Inst.Wf] <;> omega
 
 theorem ldst_ok (load : Bool) (r : Nat) (l : Loc) (hr : r < 32)
-    (hl : match l with | .slot n | .out n => n < 4096 | .inn n => n + 2 < 4096) :
+    (hl : match l with | .slot n | .out n => n < 4096 | .inn n => n + 2 < 4096 | .heap _ => True) :
     ∀ it ∈ ldst load r l, it.Ok := by
   have hf : (frame l).1 < 32 ∧ (frame l).2 < 4096 := by
-    cases l <;> simp only [frame, sp, fp] at hl ⊢ <;> omega
+    cases l <;> simp only [frame, sp, fp, xzr] at hl ⊢ <;> omega
   intro it hit
   simp only [ldst, List.mem_cons, List.not_mem_nil, or_false] at hit
   subst hit
@@ -978,6 +990,12 @@ theorem emit_ok (m : M) (hm : mBounded m) : ∀ it ∈ emit m, it.Ok := by
   | fcmp c => cases c <;> decide
   | trap f => cases f <;> decide
   | label l | jmp l | bz l | call l => simp [emit, Item.Ok, Br.Ok]
+  | ldh off | sth off =>
+    simp only [mBounded] at hm
+    intro it hit
+    simp only [emit, heapAt, List.cons_append, List.nil_append, List.mem_cons,
+      List.not_mem_nil, or_false] at hit
+    rcases hit with rfl | rfl | rfl <;> simp only [Item.Ok, Inst.Wf] <;> omega
   | scope _ _ => simp [emit]
   | _ => decide
 
@@ -992,7 +1010,7 @@ theorem emit_length (m : M) : (emit m).length ≤ 8 := by
   | cmp c sg => cases c <;> cases sg <;> decide
   | fcmp c => cases c <;> decide
   | trap f => cases f <;> decide
-  | _ => simp [emit]
+  | _ => simp [emit, heapAt]
 
 /-- The theorem the listing relies on: every word of the laid-out `emit m`
 is the encoding of a well-formed instruction, a 32-bit word the encoding
@@ -1019,7 +1037,8 @@ def samples : List M :=
   [.fop .add, .fop .sub, .fop .mul, .fop .div, .fneg] ++
   ([Cond.eq, .ne, .lt, .le, .gt, .ge].map .fcmp) ++
   [.jmp 9, .jmp firstFree, .bz 9, .call 9, .enter 4, .enter 300, .enter 1000, .enter 512, .leave,
-   .trap .overflow, .trap .divZero, .trap .unreachable]
+   .trap .overflow, .trap .divZero, .trap .unreachable, .trap .region,
+   .ldh 3, .sth 3, .ldh 300, .sth 300]
 
 def listing : String :=
   String.join (samples.map fun m =>

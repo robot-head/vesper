@@ -41,6 +41,10 @@ def checkRow (facts : Facts) : Lir → Bool
   | .branchZero .. | .jump _ | .label _ | .call _ | .enter _ | .ret | .trap .fault => false
   | _ => true
 
+def forgetHeap (facts : Facts) : Facts
+  | .heap _ => none
+  | other => facts other
+
 def transfer (facts : Facts) : Lir → Facts
   | .const d value => put facts (.slot d) (constantKind value)
   | .move d a => put facts (.slot d) (facts (.slot a))
@@ -52,6 +56,10 @@ def transfer (facts : Facts) : Lir → Facts
   | .loadOut d i => put facts (.slot d) (facts (.out i))
   | .loadIn d i => put facts (.slot d) (facts (.inn i))
   | .storeIn i a => put facts (.inn i) (facts (.slot a))
+  -- Heap words are addressed through run-time pointers: a load knows
+  -- nothing, a store forgets every heap fact.
+  | .loadPtr d _ _ => put facts (.slot d) none
+  | .storePtr .. => forgetHeap facts
   | _ => facts
 
 def validate : List Lir → Facts → Bool
@@ -227,6 +235,19 @@ theorem transfer_sound {facts : Facts} {store next : Store} (holds : Holds facts
     cases same
     split <;> simp [InRange, Kind.lo, Kind.hi]
   | trap failure => cases result
+  | loadPtr d p off =>
+    simp only [lirStep, Res.ok.injEq] at result
+    subst next
+    exact put_sound holds _ _ _ (fun _ known => by cases known)
+  | storePtr p off src =>
+    simp only [lirStep, Res.ok.injEq] at result
+    subst next
+    intro location kind known
+    cases location with
+    | heap n => simp [transfer, forgetHeap] at known
+    | slot n => simpa [upd] using holds _ kind known
+    | out n => simpa [upd] using holds _ kind known
+    | inn n => simpa [upd] using holds _ kind known
   | scope o d =>
     simp only [lirStep, Res.ok.injEq] at result
     subst next

@@ -307,6 +307,9 @@ fn kind_spec(k: IntegerKind) -> Spec {
             IntegerKind::U32 => "u32",
             IntegerKind::U64 => "u64",
             IntegerKind::I64 => "i64",
+            // Witnesses are built only for the four kinds above
+            // (`witness::closed_kind`).
+            other => other.name(),
         }),
         rooted: true,
     }
@@ -931,6 +934,13 @@ fn kind_tag(k: IntegerKind) -> u8 {
         IntegerKind::U32 => 1,
         IntegerKind::U64 => 2,
         IntegerKind::I64 => 3,
+        // Not produced by `witness::closed_kind`; distinct tags regardless.
+        IntegerKind::U16 => 4,
+        IntegerKind::Usize => 5,
+        IntegerKind::I8 => 6,
+        IntegerKind::I16 => 7,
+        IntegerKind::I32 => 8,
+        IntegerKind::Isize => 9,
     }
 }
 fn op_tag(op: IntOp) -> u8 {

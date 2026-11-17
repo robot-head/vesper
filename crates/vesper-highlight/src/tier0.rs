@@ -17,7 +17,7 @@ pub const DEFAULT_MAX_SOURCE_BYTES: usize = 1024 * 1024;
 
 /// Every lexer token kind, in discriminant order (the CST stores tokens as
 /// `SyntaxKind(TokenKind as u16)`).
-const TOKEN_KINDS: [K; 75] = [
+const TOKEN_KINDS: [K; 81] = [
     K::Whitespace,
     K::Comment,
     K::BlockComment,
@@ -93,6 +93,12 @@ const TOKEN_KINDS: [K; 75] = [
     K::Tilde,
     K::PipeEq,
     K::AmpEq,
+    K::DotDot,
+    K::DotDotEq,
+    K::Amp,
+    K::Caret,
+    K::Shl,
+    K::Shr,
 ];
 
 fn token_kind(raw: SyntaxKind) -> K {
