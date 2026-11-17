@@ -38,8 +38,12 @@ divide, carries no obligation.
 
 Assumptions, stated as hypotheses: `FNegFlips` (`Float` negation flips the
 sign bit, which `Float` cannot prove in the kernel), `Frame.Ok` (the frame
-lies in the address space and is 8-aligned), `Fits` (loads and stores name
-valid frame words, immediates are words). `call`, `enter` and `leave` are
+lies in the address space and is 8-aligned, and the heap at `HEAP_BASE`
+fits and is apart from the frame), `Fits` (loads and stores name valid frame
+words, immediates are words), and `HeapIdx`/`HeapOk`/`RowHeap` (every
+`ldh`/`sth` index lies in the heap; `Mach`'s heap is unbounded, so the bound
+is the allocator's obligation). The heap words are valid locations of the
+frame, so `Corr` relates them like the slots. `call`, `enter` and `leave` are
 not covered.
 -/
 
@@ -338,24 +342,34 @@ structure Frame where
   out : Nat
   words : Nat
   inWords : Nat
+  /-- Words of the program heap at `HEAP_BASE` (`Rv64.heapAt`). -/
+  heapWords : Nat
 
 structure Frame.Ok (fr : Frame) : Prop where
   nonneg : 0 ≤ fr.sp
   aligned : fr.sp % 8 = 0
   out_le : fr.out ≤ fr.words
   fits : fr.sp + 8 * fr.words + 16 + 8 * fr.inWords ≤ W
+  heap_fits : 268435456 + 8 * fr.heapWords ≤ W
+  apart : fr.sp + 8 * fr.words + 16 + 8 * fr.inWords ≤ 268435456 ∨
+    268435456 + 8 * fr.heapWords ≤ fr.sp
 
 def Frame.addr (fr : Frame) : Loc → Int
   | .slot n | .out n => fr.sp + 8 * n
   | .inn n => fr.sp + 8 * fr.words + 16 + 8 * n
-  -- Heap words are not frame words (see `DataM`).
-  | .heap _ => 0
+  -- `HEAP_BASE = 2^28`, word-indexed.
+  | .heap n => 268435456 + 8 * n
 
 def Frame.Valid (fr : Frame) : Loc → Prop
   | .slot n => fr.out ≤ n ∧ n < fr.words
   | .out n => n < fr.out
   | .inn n => n < fr.inWords
+  | .heap n => n < fr.heapWords
+
+/-- Locations `ld`/`st` reach through the frame registers. -/
+def FrameLoc : Loc → Prop
   | .heap _ => False
+  | _ => True
 
 structure Corr (fr : Frame) (k : Bool) (m : Mach) (s : St) : Prop where
   words : ∀ r, Word (s.x r)
@@ -407,17 +421,21 @@ def needs2 : M → Bool
   | _ => false
 
 def Fits (fr : Frame) : M → Prop
-  | .ld _ l | .st l _ => fr.Valid l
+  | .ld _ l | .st l _ => fr.Valid l ∧ FrameLoc l
   | .imm _ w => Word w
   | _ => True
 
 /-- The instructions `emit_sim` covers. Control instructions have their own
-lemmas; the heap instructions `ldh`/`sth` (milestone 8) are not modelled
-here yet: `Corr` relates only the frame, not the program heap. -/
+lemmas. -/
 def DataM : M → Prop
   | .label _ | .jmp _ | .bz _ | .call _ | .enter _ | .leave => False
-  | .ldh _ | .sth _ => False
   | _ => True
+
+/-- The heap index of `ldh`/`sth` lies in the heap (the bound the allocator
+rows establish; `Mach`'s heap is unbounded). -/
+def HeapIdx (fr : Frame) : M → Mach → Prop
+  | .ldh off, m | .sth off, m => (m.reg .r1).toNat + off < fr.heapWords
+  | _, _ => True
 
 def FNegFlips : Prop := ∀ x, Word x → fword (-(fbits x)) = signFlip x
 
@@ -588,6 +606,36 @@ theorem imm_lands {base : Int} {lab : Nat → Int} {rest : List Item} {s : St} {
   repeat' split
   all_goals first | rfl | (unfold W; omega)
 
+/-- `imm_lands` for an immediate at index `j` of any code `c`. -/
+theorem imm_lands_at {base : Int} {c rest : List Inst} {s : St} {P : St → Prop}
+    (j rd n : Nat) (hrd : rd ≠ 0) (hn : n < 18446744073709551616) (hp : s.pc = 4 * j)
+    (hd : c.drop j = code (fun _ => 0) (imm rd n) ++ rest)
+    (h : Lands base c (setPc (wx s rd n) (s.pc + 44)) P) : Lands base c s P := by
+  have g : ∀ i, c[j + i]? = (code (fun _ => 0) (imm rd n) ++ rest)[i]? := fun i => by
+    rw [← hd, List.getElem?_drop]
+  refine lands_step j (by omega) ((g 0).trans rfl) rfl ?_
+  refine chunk_lands (j + 1) rd hrd (n / 2 ^ 55 : Nat) (n / 2 ^ 44 % 2048 : Nat) (by omega)
+    (by omega) (by simp only [next_pc, wx_pc, hp]; omega) ((g 1).trans rfl) ((g 2).trans rfl)
+    (by simp only [rx_next, rx_wx, hrd, reduceIte, iop, zero, rx_zero, W]; omega) ?_
+  refine chunk_lands (j + 3) rd hrd (n / 2 ^ 44 : Nat) (n / 2 ^ 33 % 2048 : Nat) (by omega)
+    (by omega) (by simp only [setPc_pc, next_pc, wx_pc, hp]; omega) ((g 3).trans rfl)
+    ((g 4).trans rfl) (by simp only [rx_setPc, rx_wx, hrd, reduceIte, W]; omega) ?_
+  refine chunk_lands (j + 5) rd hrd (n / 2 ^ 33 : Nat) (n / 2 ^ 22 % 2048 : Nat) (by omega)
+    (by omega) (by simp only [setPc_pc, next_pc, wx_pc, hp]; omega) ((g 5).trans rfl)
+    ((g 6).trans rfl) (by simp only [rx_setPc, rx_wx, hrd, reduceIte, W]; omega) ?_
+  refine chunk_lands (j + 7) rd hrd (n / 2 ^ 22 : Nat) (n / 2 ^ 11 % 2048 : Nat) (by omega)
+    (by omega) (by simp only [setPc_pc, next_pc, wx_pc, hp]; omega) ((g 7).trans rfl)
+    ((g 8).trans rfl) (by simp only [rx_setPc, rx_wx, hrd, reduceIte, W]; omega) ?_
+  refine chunk_lands (j + 9) rd hrd (n / 2 ^ 11 : Nat) (n % 2048 : Nat) (by omega) (by omega)
+    (by simp only [setPc_pc, next_pc, wx_pc, hp]; omega) ((g 9).trans rfl) ((g 10).trans rfl)
+    (by simp only [rx_setPc, rx_wx, hrd, reduceIte, W]; omega) ?_
+  refine lands_congr ?_ h
+  simp only [next, setPc, wx, St.mk.injEq, and_true, true_and]
+  refine ⟨?_, by omega⟩
+  funext r'
+  repeat' split
+  all_goals first | rfl | (unfold W; omega)
+
 theorem exec_ld (base : Int) (s : St) (rd r1 : Nat) (imm A : Int) (hA : enc (rx s r1 + imm) = A)
     (h8 : A % 8 = 0) : exec base (.ld rd r1 imm) s = some (next (wx s rd (s.mem A))) := by
   simp only [exec, hA, h8, reduceIte]
@@ -596,19 +644,20 @@ theorem exec_sd (base : Int) (s : St) (r2 r1 : Nat) (imm A : Int) (hA : enc (rx 
     (h8 : A % 8 = 0) : exec base (.sd r2 r1 imm) s = some (next (wmem s A (rx s r2))) := by
   simp only [exec, hA, h8, reduceIte]
 
-theorem addr_inj {fr : Frame} {l l' : Loc} (hle : fr.out ≤ fr.words) (hv : fr.Valid l)
+theorem addr_inj {fr : Frame} {l l' : Loc} (hok : fr.Ok) (hv : fr.Valid l)
     (hv' : fr.Valid l') (h : fr.addr l' = fr.addr l) : l' = l := by
+  have := hok.out_le; have := hok.apart; have := hok.nonneg
   cases l <;> cases l' <;> simp only [Frame.Valid, Frame.addr] at hv hv' h <;>
     first | (congr 1; omega) | omega
 
-theorem upd_frame {fr : Frame} {l : Loc} {A : Int} (hle : fr.out ≤ fr.words) (hv : fr.Valid l)
+theorem upd_frame {fr : Frame} {l : Loc} {A : Int} (hok : fr.Ok) (hv : fr.Valid l)
     (hA : A = fr.addr l)
     (v : Int) (mm : Store) (l' : Loc) (hl' : fr.Valid l') :
     (if fr.addr l' = A then v else mm l') = upd mm l v l' := by
   unfold upd; subst hA
   by_cases e : l' = l
   · subst e; simp
-  · rw [ite_eq_right (fun h => e (addr_inj hle hv hl' h)), ite_eq_right e]
+  · rw [ite_eq_right (fun h => e (addr_inj hok hv hl' h)), ite_eq_right e]
 
 section Instr
 set_option linter.unusedSectionVars false
@@ -660,7 +709,7 @@ macro "rv_corr" hc:ident "[" hs:Lean.Parser.Tactic.simpLemma,* "]" : tactic => `
   · simp only [wx_mem, next_mem, setPc_mem, wf_mem, wmem_mem]
     repeat' split
     all_goals try simp only [rx_wx, rx_next, rx_setPc, rx_wf, rx_wmem, Nat.reduceEqDiff, reduceIte,
-      a0, a1, a2, t0, regX]
+      a0, a1, a2, t0, t1, regX]
     all_goals first | exact ($hc).mwords a | exact ($hc).word _
   · rv_simp [($hc).sp, $hs,*]
   · rv_simp [($hc).s0, $hs,*]
@@ -1152,16 +1201,17 @@ theorem sim_imm (r : Reg) (w : Int) (hw : Word w) :
   cases r <;>
   · refine lands_done ⟨by simp only [setPc_pc, code, imm, placeL, List.length_cons, List.length_nil, List.append_nil]; rfl, ?_⟩
     rv_corr hc [hp, hw', regX, a0, a1, a2]
-theorem sim_ld (r : Reg) (l : Loc) (hok : fr.Ok) (hv : fr.Valid l) :
+theorem sim_ld (r : Reg) (l : Loc) (hok : fr.Ok) (hv : fr.Valid l) (hfl : FrameLoc l) :
     RSim fr base lab (flag (.ld r l) k) (code lab (emit (.ld r l))) s (Mach.step (.ld r l) m) := by
   have hfr := hc.frame l hv
   have hmw := hc.mwords (fr.addr l)
   have hsp := hc.sp; have hs0 := hc.s0
-  have ⟨hn, ha8, hle, hfit⟩ := hok
+  have ⟨hn, ha8, hle, hfit, _, _⟩ := hok
   simp only [Mach.step, RSim]
   unfold Word W at hmw; unfold W at hfit
   by_cases hb : 2048 ≤ (frame l).2 <;>
-    rcases l with n | n | n | n <;> simp only [Frame.Valid, Frame.addr] at hv hfr hmw <;>
+    rcases l with n | n | n | n <;> simp only [FrameLoc] at hfl <;>
+    simp only [Frame.Valid, Frame.addr] at hv hfr hmw <;>
     simp only [frame] at hb <;> simp only [emit, ldst, frame, hb, reduceIte, ite_true, ite_false]
   · refine imm_lands t0 _ (by decide) (by omega) hp ?_
     cases r <;>
@@ -1194,46 +1244,46 @@ theorem sim_ld (r : Reg) (l : Loc) (hok : fr.Ok) (hv : fr.Valid l) :
       refine lands_done ⟨by rv_simp [hp, hsp, hs0, regX, a0, a1, a2, t0, sp, s0]; rfl, ?_⟩
       rv_corr hc [hp, hsp, hs0, regX, a0, a1, a2, t0, sp, s0, hfr]
 
-theorem sim_st (l : Loc) (r : Reg) (hok : fr.Ok) (hv : fr.Valid l) (hrv : rx s (regX r) = m.reg r) :
+theorem sim_st (l : Loc) (r : Reg) (hok : fr.Ok) (hv : fr.Valid l) (hfl : FrameLoc l) (hrv : rx s (regX r) = m.reg r) :
     RSim fr base lab (flag (.st l r) k) (code lab (emit (.st l r))) s (Mach.step (.st l r) m) := by
   have hsp := hc.sp; have hs0 := hc.s0
   have h0 := hc.r0; have h1 := hc.r1
-  have ⟨hn, ha8, hle, hfit⟩ := hok
+  have ⟨hn, ha8, hle, hfit, _, _⟩ := hok
   simp only [Mach.step, RSim]
   unfold W at hfit
   by_cases hb : 2048 ≤ (frame l).2 <;>
-    rcases l with n | n | n | n <;> simp only [Frame.Valid] at hv <;>
+    rcases l with n | n | n | n <;> simp only [FrameLoc] at hfl <;> simp only [Frame.Valid] at hv <;>
     simp only [frame] at hb <;> simp only [emit, ldst, frame, hb, reduceIte, ite_true, ite_false]
   · refine imm_lands t0 _ (by decide) (by omega) hp ?_
     cases r <;> simp only [regX, a0, a1, a2] at hrv <;>
     · rv 11 [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]
       rvm 12 exec_sd (fr.sp + 8 * n) [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]
       refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]; rfl, ?_⟩
-      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .slot n) hle hv (A := fr.sp + 8 * n) rfl]
+      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .slot n) hok hv (A := fr.sp + 8 * n) rfl]
   · refine imm_lands t0 _ (by decide) (by omega) hp ?_
     cases r <;> simp only [regX, a0, a1, a2] at hrv <;>
     · rv 11 [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]
       rvm 12 exec_sd (fr.sp + 8 * n) [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]
       refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]; rfl, ?_⟩
-      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .out n) hle hv (A := fr.sp + 8 * n) rfl]
+      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .out n) hok hv (A := fr.sp + 8 * n) rfl]
   · refine imm_lands t0 _ (by decide) (by omega) hp ?_
     cases r <;> simp only [regX, a0, a1, a2] at hrv <;>
     · rv 11 [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]
       rvm 12 exec_sd (fr.sp + 8 * fr.words + 16 + 8 * n) [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]
       refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]; rfl, ?_⟩
-      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .inn n) hle hv (A := fr.sp + 8 * fr.words + 16 + 8 * n) rfl]
+      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .inn n) hok hv (A := fr.sp + 8 * fr.words + 16 + 8 * n) rfl]
   · cases r <;> simp only [regX, a0, a1, a2] at hrv <;>
     · rvm 0 exec_sd (fr.sp + 8 * n) [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]
       refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]; rfl, ?_⟩
-      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .slot n) hle hv (A := fr.sp + 8 * n) rfl]
+      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .slot n) hok hv (A := fr.sp + 8 * n) rfl]
   · cases r <;> simp only [regX, a0, a1, a2] at hrv <;>
     · rvm 0 exec_sd (fr.sp + 8 * n) [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]
       refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]; rfl, ?_⟩
-      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .out n) hle hv (A := fr.sp + 8 * n) rfl]
+      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .out n) hok hv (A := fr.sp + 8 * n) rfl]
   · cases r <;> simp only [regX, a0, a1, a2] at hrv <;>
     · rvm 0 exec_sd (fr.sp + 8 * fr.words + 16 + 8 * n) [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]
       refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]; rfl, ?_⟩
-      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .inn n) hle hv (A := fr.sp + 8 * fr.words + 16 + 8 * n) rfl]
+      rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .inn n) hok hv (A := fr.sp + 8 * fr.words + 16 + 8 * n) rfl]
 
 /-- A trap scope emits no code and leaves the machine unchanged. -/
 theorem sim_scope (o d : Nat) :
@@ -1242,14 +1292,91 @@ theorem sim_scope (o d : Nat) :
   simp only [Mach.step, RSim, emit, flag]
   exact lands_done ⟨by simp only [code, placeL, List.length_nil, hp]; rfl, hc⟩
 
+theorem sim_ldh (off : Nat) (hok : fr.Ok) (hh : HeapIdx fr (.ldh off) m) :
+    RSim fr base lab (flag (.ldh off) k) (code lab (emit (.ldh off))) s
+      (Mach.step (.ldh off) m) := by
+  simp only [HeapIdx] at hh
+  have hfr := hc.frame (.heap ((m.reg .r1).toNat + off)) hh
+  have hmw := hc.mwords (fr.addr (.heap ((m.reg .r1).toNat + off)))
+  have hsp := hc.sp; have hs0 := hc.s0
+  have h0 := hc.r0; have h1 := hc.r1
+  have ha1 := hc.word 11
+  rw [h1] at ha1; unfold Word W at ha1
+  have hbn : (((m.reg .r1).toNat : Nat) : Int) = m.reg .r1 := Int.toNat_of_nonneg ha1.1
+  have hhf := hok.heap_fits; unfold W at hhf
+  simp only [Frame.addr, Int.natCast_add, hbn] at hfr hmw
+  rw [hfr] at hmw; unfold Word W at hmw
+  simp only [Mach.step, RSim]
+  by_cases hb : 2048 ≤ off * 8
+  · simp only [emit, heapAt, heapDisp, hb, reduceIte, ite_true, memOp, List.append_assoc,
+      List.cons_append, List.nil_append]
+    rv 0 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 1 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 2 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 3 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    refine imm_lands_at 4 t1 (off * 8) (by decide) (by omega)
+      (by simp only [next_pc, wx_pc, hp]; omega) (rest := [.r .add t0 t0 t1, .ld a0 t0 0]) rfl ?_
+    rv 15 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rvm 16 exec_ld (268435456 + 8 * (m.reg .r1 + (off : Int))) [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]; rfl, ?_⟩
+    rv_corr hc [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi, hfr]
+  · simp only [emit, heapAt, heapDisp, hb, reduceIte, ite_false, memOp, List.append_nil,
+      List.cons_append, List.nil_append]
+    rv 0 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 1 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 2 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 3 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rvm 4 exec_ld (268435456 + 8 * (m.reg .r1 + (off : Int))) [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]; rfl, ?_⟩
+    rv_corr hc [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi, hfr]
+
+theorem sim_sth (off : Nat) (hok : fr.Ok) (hh : HeapIdx fr (.sth off) m) :
+    RSim fr base lab (flag (.sth off) k) (code lab (emit (.sth off))) s
+      (Mach.step (.sth off) m) := by
+  simp only [HeapIdx] at hh
+  have hfr := hc.frame (.heap ((m.reg .r1).toNat + off)) hh
+  have hmw := hc.mwords (fr.addr (.heap ((m.reg .r1).toNat + off)))
+  have hsp := hc.sp; have hs0 := hc.s0
+  have h0 := hc.r0; have h1 := hc.r1
+  have ha1 := hc.word 11
+  rw [h1] at ha1; unfold Word W at ha1
+  have hbn : (((m.reg .r1).toNat : Nat) : Int) = m.reg .r1 := Int.toNat_of_nonneg ha1.1
+  have hhf := hok.heap_fits; unfold W at hhf
+  simp only [Frame.addr, Int.natCast_add, hbn] at hfr hmw
+  rw [hfr] at hmw; unfold Word W at hmw
+  simp only [Mach.step, RSim]
+  by_cases hb : 2048 ≤ off * 8
+  · simp only [emit, heapAt, heapDisp, hb, reduceIte, ite_true, memOp, List.append_assoc,
+      List.cons_append, List.nil_append]
+    rv 0 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 1 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 2 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 3 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    refine imm_lands_at 4 t1 (off * 8) (by decide) (by omega)
+      (by simp only [next_pc, wx_pc, hp]; omega) (rest := [.r .add t0 t0 t1, .sd a0 t0 0]) rfl ?_
+    rv 15 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rvm 16 exec_sd (268435456 + 8 * (m.reg .r1 + (off : Int))) [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]; rfl, ?_⟩
+    rv_corr hc [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi, upd_frame (l := .heap ((m.reg .r1).toNat + off)) hok hh (A := (268435456 + 8 * (m.reg .r1 + (off : Int)))) (by simp only [Frame.addr, Int.natCast_add, hbn])]
+  · simp only [emit, heapAt, heapDisp, hb, reduceIte, ite_false, memOp, List.append_nil,
+      List.cons_append, List.nil_append]
+    rv 0 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 1 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 2 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rv 3 [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    rvm 4 exec_sd (268435456 + 8 * (m.reg .r1 + (off : Int))) [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]
+    refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi]; rfl, ?_⟩
+    rv_corr hc [hp, hsp, hs0, h0, h1, ha1, hbn, regX, a0, a1, a2, t0, t1, sp, s0, zero, Rv64.addi, upd_frame (l := .heap ((m.reg .r1).toNat + off)) hok hh (A := (268435456 + 8 * (m.reg .r1 + (off : Int)))) (by simp only [Frame.addr, Int.natCast_add, hbn])]
+
 /-- Every data instruction's emitted RV64 sequence implements `Mach.step`. -/
 theorem emit_sim (i : M) (hok : fr.Ok) (hn : FNegFlips) (hd : DataM i) (hf : Fits fr i)
+    (hh : HeapIdx fr i m)
     (h2 : needs2 i = true → k = true) :
     RSim fr base lab (flag i k) (code lab (emit i)) s (Mach.step i m) := by
   cases i with
-  | ld r l => exact sim_ld _ _ _ _ _ _ hc hp hl r l hok hf
+  | ld r l => exact sim_ld _ _ _ _ _ _ hc hp hl r l hok hf.1 hf.2
   | st l r =>
-    refine sim_st _ _ _ _ _ _ hc hp hl l r hok hf ?_
+    refine sim_st _ _ _ _ _ _ hc hp hl l r hok hf.1 hf.2 ?_
     cases r
     · exact hc.r0
     · exact hc.r1
@@ -1273,7 +1400,9 @@ theorem emit_sim (i : M) (hok : fr.Ok) (hn : FNegFlips) (hd : DataM i) (hf : Fit
   | fcmp c => exact sim_fcmp _ _ _ _ _ _ hc hp hl c
   | trap f => exact sim_trap _ _ _ _ _ _ hc hp hl f
   | scope o d => exact sim_scope _ _ _ _ _ _ hc hp hl o d
-  | label | jmp | bz | call | enter | leave | ldh | sth => exact hd.elim
+  | ldh off => exact sim_ldh _ _ _ _ _ _ hc hp hl off hok hh
+  | sth off => exact sim_sth _ _ _ _ _ _ hc hp hl off hok hh
+  | label | jmp | bz | call | enter | leave => exact hd.elim
 
 /-- `bz l` jumps to label `l` exactly when `r0` is zero, and otherwise falls
 through with the state unchanged. -/
@@ -1313,24 +1442,32 @@ def R2Ok : Bool → List M → Prop
   | _, [] => True
   | k, i :: is => (needs2 i = true → k = true) ∧ R2Ok (flag i k) is
 
+/-- Every heap access along the run is in bounds. -/
+def HeapOk (fr : Frame) : List M → Mach → Prop
+  | [], _ => True
+  | i :: is, m => HeapIdx fr i m ∧ ∀ m', Mach.step i m = .ok m' → HeapOk fr is m'
+
 /-- A straight-line run of data instructions: the concatenated RV64 code
 reaches its end in a related state, or a trap label when the machine aborts. -/
 theorem run_sim (fr : Frame) (hok : fr.Ok) (hn : FNegFlips) :
     ∀ (is : List M) (base : Int) (lab : Nat → Int) (k : Bool) (m : Mach) (s : St),
-      (∀ i ∈ is, DataM i ∧ Fits fr i) → R2Ok k is → Corr fr k m s → s.pc = 0 →
-      (∀ f, lab (trapLabel f) < 0) →
+      (∀ i ∈ is, DataM i ∧ Fits fr i) → R2Ok k is → HeapOk fr is m → Corr fr k m s →
+      s.pc = 0 → (∀ f, lab (trapLabel f) < 0) →
       RSim fr base lab (flagL is k) (code lab (is.flatMap emit)) s (run is m)
-  | [], base, lab, k, m, s, _, _, hc, hp, _ => by
+  | [], base, lab, k, m, s, _, _, _, hc, hp, _ => by
     simp only [run, RSim, List.flatMap_nil, flagL]
     exact lands_done ⟨by simp only [code, placeL, List.length_nil, hp]; rfl, hc⟩
-  | i :: is, base, lab, k, m, s, hd, hr, hc, hp, hl => by
+  | i :: is, base, lab, k, m, s, hd, hr, hh, hc, hp, hl => by
     have hi := emit_sim fr base lab k m s hc hp hl i hok hn (hd i (List.mem_cons_self ..)).1
-      (hd i (List.mem_cons_self ..)).2 hr.1
+      (hd i (List.mem_cons_self ..)).2 hh.1 hr.1
     have hd' : ∀ j ∈ is, DataM j ∧ Fits fr j := fun j hj => hd j (List.mem_cons_of_mem _ hj)
     simp only [run, List.flatMap_cons, flagL]
     revert hi
+    have hh2 := hh.2
+    revert hh2
     cases Mach.step i m with
     | abort f =>
+      intro _
       intro hi
       simp only [Res.bind, RSim] at hi ⊢
       intro hf
@@ -1338,12 +1475,12 @@ theorem run_sim (fr : Frame) (hok : fr.Ok) (hn : FNegFlips) :
       refine ⟨s', ?_, hpc⟩
       rw [code_append]; exact hs.append _
     | ok m' =>
-      intro hi
+      intro hh2 hi
       obtain ⟨s1, hs1, hpc1, hc1⟩ := hi
       rw [code_length] at hpc1
       simp only [Res.bind_ok]
       have ih := run_sim fr hok hn is (base + 4 * (emit i).length) (shiftLab lab (emit i).length)
-        (flag i k) m' (setPc s1 0) hd' hr.2 (hc1.setPc 0) rfl
+        (flag i k) m' (setPc s1 0) hd' hr.2 (hh2 m' rfl) (hc1.setPc 0) rfl
         (by intro f; unfold shiftLab; have := hl f; omega)
       revert ih
       cases run is m' with
@@ -1359,14 +1496,8 @@ theorem run_sim (fr : Frame) (hok : fr.Ok) (hn : FNegFlips) :
         refine ⟨_, steps_seq hs1 hpc1 hs2, ?_⟩
         simp only [setPc_pc, hpc2, shiftLab]; omega
 
-/-- Rows that touch only the frame: the heap rows (milestone 8) select
-`ldh`/`sth`, which `emit_sim` does not cover yet. -/
-def FrameRow : Lir → Prop
-  | .loadPtr .. | .storePtr .. => False
-  | _ => True
-
-theorem select_data (r : Lir) (hd : DataRow r) (hh : FrameRow r) : ∀ i ∈ select r, DataM i := by
-  cases r <;> simp only [DataRow, FrameRow] at hd hh <;>
+theorem select_data (r : Lir) (hd : DataRow r) : ∀ i ∈ select r, DataM i := by
+  cases r <;> simp only [DataRow] at hd <;>
     simp only [select, binary, rangeCheck, List.cons_append, List.nil_append, List.mem_cons,
       List.mem_nil_iff, or_false, forall_eq_or_imp, forall_eq, DataM, true_and, and_true,
       imp_self, implies_true] <;>
@@ -1388,19 +1519,73 @@ theorem select_r2 (r : Lir) : R2Ok false (select r) := by
     | (rename_i c k _ _ _; cases k <;> simp [R2Ok, needs2, flag])
     | simp [R2Ok, needs2, flag]
 
+/-- The heap rows' word index lies in the heap. -/
+def RowHeap (fr : Frame) : Lir → Store → Prop
+  | .loadPtr _ p off, st | .storePtr p off _, st => (enc (st (.slot p))).toNat + off < fr.heapWords
+  | _, _ => True
+
+theorem heapOk_free (fr : Frame) :
+    ∀ (is : List M) (m : Mach), (∀ i ∈ is, ∀ m, HeapIdx fr i m) → HeapOk fr is m
+  | [], _, _ => trivial
+  | i :: is, m, h => ⟨h i (List.mem_cons_self ..) m, fun m' _ =>
+      heapOk_free fr is m' fun j hj => h j (List.mem_cons_of_mem _ hj)⟩
+
+/-- Instructions that do not touch the heap. -/
+def NoHeapM : M → Prop
+  | .ldh _ | .sth _ => False
+  | _ => True
+
+theorem heapIdx_of {fr : Frame} {i : M} {m : Mach} (h : NoHeapM i) : HeapIdx fr i m := by
+  cases i <;> simp only [NoHeapM, HeapIdx] at h ⊢ <;> trivial
+
+def IsHeapRow : Lir → Prop
+  | .loadPtr .. | .storePtr .. => True
+  | _ => False
+
+theorem select_noheap (r : Lir) (h : ¬ IsHeapRow r) : ∀ i ∈ select r, NoHeapM i := by
+  cases r <;> simp only [IsHeapRow, not_true_eq_false] at h <;>
+    simp only [select, binary, rangeCheck, List.cons_append, List.nil_append, List.mem_cons,
+      List.mem_nil_iff, or_false, forall_eq_or_imp, forall_eq, NoHeapM, true_and, and_true,
+      imp_self, implies_true] <;>
+    first
+    | trivial
+    | (rename_i op k _ _ _; cases op <;> cases k <;>
+        simp [Kind.mask, Kind.sign, NoHeapM, List.mem_cons, rangeCheck])
+    | (rename_i op k _ _ _; cases k <;> simp [Kind.mask, NoHeapM])
+
+theorem select_heapOk (fr : Frame) (r : Lir) (st : Store) (m : Mach) (hR : Rel st m)
+    (h : RowHeap fr r st) : HeapOk fr (select r) m := by
+  cases r with
+  | loadPtr d p off =>
+    simp only [RowHeap] at h
+    refine ⟨trivial, fun m' e => ⟨?_, fun _ _ => ⟨trivial, fun _ _ => trivial⟩⟩⟩
+    simp only [Mach.step, Res.ok.injEq] at e
+    subst e
+    simp only [HeapIdx, setReg_reg, hR (.slot p)]; exact h
+  | storePtr p off src =>
+    simp only [RowHeap] at h
+    refine ⟨trivial, fun m' e => ⟨trivial, fun m'' e' => ⟨?_, fun _ _ => trivial⟩⟩⟩
+    simp only [Mach.step, Res.ok.injEq] at e e'
+    subst e e'
+    simp only [HeapIdx, setReg_reg, reduceCtorEq, reduceIte, hR (.slot p)]; exact h
+  | _ =>
+    exact heapOk_free fr _ m fun i hi _ =>
+      heapIdx_of (select_noheap _ (by simp only [IsHeapRow, not_false_eq_true]) i hi)
+
 /-- A data row of the slot IR: the abstract machine simulates the row
 (`select_simulates`), and the RV64 code emitted for the row's instructions
 simulates the abstract machine. -/
 theorem row_sim (r : Lir) (st : Store) (m : Mach) (s : St) (fr : Frame) (base : Int)
     (lab : Nat → Int) (hok : fr.Ok) (hn : FNegFlips) (hR : Rel st m) (hd : DataRow r)
-    (hh : FrameRow r) (ht : Typed r st) (hfit : ∀ i ∈ select r, Fits fr i) (hc : Corr fr false m s) (hp : s.pc = 0)
-    (hl : ∀ f, lab (trapLabel f) < 0) :
+    (ht : Typed r st) (hfit : ∀ i ∈ select r, Fits fr i) (hh : RowHeap fr r st)
+    (hc : Corr fr false m s) (hp : s.pc = 0) (hl : ∀ f, lab (trapLabel f) < 0) :
     Sim (lirStep r st) (run (select r) m) ∧
       RSim fr base lab (flagL (select r) false) (code lab ((select r).flatMap emit)) s
         (run (select r) m) :=
   ⟨select_simulates r st m hR hd ht,
    run_sim fr hok hn (select r) base lab false m s
-     (fun i hi => ⟨select_data r hd hh i hi, hfit i hi⟩) (select_r2 r) hc hp hl⟩
+     (fun i hi => ⟨select_data r hd i hi, hfit i hi⟩) (select_r2 r)
+     (select_heapOk fr r st m hR hh) hc hp hl⟩
 
 end Vesper.VerifiedCodegen.Rv64.Sem
 
@@ -1510,7 +1695,14 @@ end Vesper.VerifiedCodegen.Rv64.Sem
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.emit_sim
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_bz
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_jmp
+#print axioms Vesper.VerifiedCodegen.Rv64.Sem.imm_lands_at
+#print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_ldh
+#print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_sth
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.run_sim
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.select_data
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.select_r2
+#print axioms Vesper.VerifiedCodegen.Rv64.Sem.heapOk_free
+#print axioms Vesper.VerifiedCodegen.Rv64.Sem.heapIdx_of
+#print axioms Vesper.VerifiedCodegen.Rv64.Sem.select_noheap
+#print axioms Vesper.VerifiedCodegen.Rv64.Sem.select_heapOk
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.row_sim

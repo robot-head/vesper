@@ -1,7 +1,7 @@
 schema = "vesper.bootstrap.stage1/1"
 target = "x86_64-unknown-linux-gnu"
 parent_seed_lock = "blake3:85c8883f8ca2f1ad5ec4767aa1491206abe577603978284ff3f596a30539a4ae"
-seed_binary = "blake3:9d5296d6bbf276510ae6397f64db93917d18ec5c423bbdb2d4dd57386ca1d69a"
+seed_binary = "blake3:5b9cc079a15813e22ca3fa7a1aab3653386158482a8d10fd561a1c269cce8d10"
 frontend_sources = "blake3:86837578331e5a9d9994cf76d187d0f000acac0a4ec533b7c399d58e2840feb0"
 
 [[programs]]
@@ -12,8 +12,8 @@ cranelift_artifact = "blake3:aeedf56fabdfda549a27c167932e74150b719119651fdb6217c
 result = 1485434365019303214
 
 [programs.verified]
-status = "unavailable"
-reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+status = "built"
+artifact = "blake3:ece86ea9fb9fe341ebc6e1b28a68807bb9f29c3f29f9fafab98b0121cd32e6d1"
 
 [[programs]]
 name = "collatz"
@@ -23,8 +23,8 @@ cranelift_artifact = "blake3:9d569e3f4b68c6cfc406d181e03738f81646fcf3803689ca6cb
 result = 2373264641022808506
 
 [programs.verified]
-status = "unavailable"
-reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+status = "built"
+artifact = "blake3:cd50919596569574dca5939125c328ea0d6e744915d63b61e331c4fb913b0bc1"
 
 [[programs]]
 name = "divide_by_zero"
@@ -34,8 +34,8 @@ cranelift_artifact = "blake3:0689cccca3b0db65e987dee2e9035b73b6a840f158012a897eb
 result = 654848876726359854
 
 [programs.verified]
-status = "unavailable"
-reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+status = "built"
+artifact = "blake3:0068a03af421dcb915b23a2081274d0ab49d28c88bf6351452e36a0609c54e56"
 
 [[programs]]
 name = "factorial_overflow"
@@ -45,8 +45,8 @@ cranelift_artifact = "blake3:8401749d684ab3967bdc33159fce810a1cf5959224097f6b00e
 result = 1011879377799080863
 
 [programs.verified]
-status = "unavailable"
-reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+status = "built"
+artifact = "blake3:eaaaa42950bbce5c5bf35a2bafa42fc52d1636f79a4284101e65d5e013b40362"
 
 [[programs]]
 name = "fib"
@@ -56,8 +56,8 @@ cranelift_artifact = "blake3:c84e7fce55a8d38a77a266c758102435c9d9b41a5896b931ca7
 result = 6050003413031704367
 
 [programs.verified]
-status = "unavailable"
-reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+status = "built"
+artifact = "blake3:1820bd2e042f3b262fb67e0cafa2f8e928effb92834be298bf376abcdcc2760d"
 
 [[programs]]
 name = "gcd"
@@ -67,8 +67,8 @@ cranelift_artifact = "blake3:899d3114952dd24d384fe7a1bb511809378ca6205fee2fb6d6f
 result = 4951861024179010883
 
 [programs.verified]
-status = "unavailable"
-reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+status = "built"
+artifact = "blake3:3ae86194985275ae30430b7bcb048178795fb50bb7ac2f54d02f5deb1304dfa9"
 
 [[programs]]
 name = "lets_negative"
@@ -78,8 +78,8 @@ cranelift_artifact = "blake3:84f6594a908806cdec2ebbb2e85e13e5121e5c8c94cede52936
 result = 8264158072176226959
 
 [programs.verified]
-status = "unavailable"
-reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+status = "built"
+artifact = "blake3:21f9fbaa7b7a9c8e04efe43ce3658d8e1d1f2446fdd86ba81c33f753ff663694"
 
 [[programs]]
 name = "lexer-byte-classes"
@@ -90,7 +90,7 @@ result = 7856525685952484840
 
 [programs.verified]
 status = "built"
-artifact = "blake3:aa38dedae2f8918687b9fe638485ca08fdcf23e6da11906daa353baad54f5419"
+artifact = "blake3:1dccad96fdc37cc8b5a35627518c0f4897c6e7fc1df68f440fa5cefde755a383"
 
 [[programs]]
 name = "max3"
@@ -100,8 +100,8 @@ cranelift_artifact = "blake3:5adaca049f6d0f295837bde6e8eb7d583697041123d684a9fa6
 result = 7416355136139759522
 
 [programs.verified]
-status = "unavailable"
-reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+status = "built"
+artifact = "blake3:381a8045949538ad9a82946a1634b16fb9c674f057567ba3ff14d250594b19a7"
 
 [[programs]]
 name = "pow_mod"
@@ -111,8 +111,8 @@ cranelift_artifact = "blake3:811bcd3a3a2432d6c78501604b610a912a617c41634fbe6dbbb
 result = 7168756620995499439
 
 [programs.verified]
-status = "unavailable"
-reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+status = "built"
+artifact = "blake3:3746b0f941a4fa7d583e05f06d14ef7cc53e4601e9209bee4cb52dd3272877bb"
 
 [[programs]]
 name = "sum_squares"
@@ -122,5 +122,5 @@ cranelift_artifact = "blake3:287fe654c835bcb36f39b307ff3f02f7b33be12b3642e4b4470
 result = 4102976720223137155
 
 [programs.verified]
-status = "unavailable"
-reason = "verified codegen: unsupported Effect in 'parse_main': effect handlers"
+status = "built"
+artifact = "blake3:cc8d340bdeb8b20fa08f78d07fd30c734dba1b253b7b4b92162146e16b34ac35"
