@@ -5,7 +5,13 @@
 //! executables need only `malloc`, `realloc` and `exit` from the C library
 //! (plus `write` for the fault message off Windows). An allocation that fails
 //! or overflows exits with [`crate::seq::FAULT_STATUS`].
-use cranelift_codegen::ir::{self, AbiParam, InstBuilder, MemFlags, condcodes::IntCC, types};
+//!
+//! `vesper_seq_free` frees a header and its buffer (export ABI v2 calls it),
+//! and [`LIVE_COUNTER`] counts the live header and buffer allocations so
+//! that leak tests can see allocations a Rust allocator never sees (#898).
+use cranelift_codegen::ir::{
+    self, AbiParam, AtomicRmwOp, InstBuilder, MemFlags, condcodes::IntCC, types,
+};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 
@@ -13,6 +19,10 @@ const MESSAGES: [&str; 2] = [
     "vesper: native ChunkSeq fault: out of memory\n",
     "vesper: native ChunkSeq fault: slice interval out of bounds\n",
 ];
+
+/// The local data word holding the number of live sequence allocations
+/// (headers plus element buffers).
+pub(crate) const LIVE_COUNTER: &str = "vesper_seq_live";
 
 pub fn defined<M: Module>(m: &M) -> bool {
     m.get_name("vesper_seq_fault").is_some()
@@ -22,6 +32,7 @@ struct Imports {
     malloc: FuncId,
     realloc: FuncId,
     fault: FuncId,
+    live: cranelift_module::DataId,
 }
 
 pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
@@ -50,10 +61,18 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         let s = sig(m, params, true);
         m.declare_function(name, Linkage::Local, &s).map_err(e)
     };
+    let live = m
+        .declare_data(LIVE_COUNTER, Linkage::Local, true, false)
+        .map_err(e)?;
+    let mut zero_word = DataDescription::new();
+    zero_word.define_zeroinit(8);
+    zero_word.set_align(8);
+    m.define_data(live, &zero_word).map_err(e)?;
     let im = Imports {
         malloc: import(m, "malloc", 1, true)?,
         realloc: import(m, "realloc", 2, true)?,
         fault: local(m, "vesper_seq_fault", 1)?,
+        live,
     };
     let exit = import(m, "exit", 1, false)?;
     let messages = if windows {
@@ -108,6 +127,7 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         let header_bytes = b.ins().iconst(types::I64, crate::seq::HEADER_BYTES);
         let header = call(b, m, im.malloc, &[header_bytes])[0];
         non_null(b, m, &im, header);
+        count(b, m, &im, 1);
         let zero = b.ins().iconst(types::I64, 0);
         b.ins().store(MemFlags::new(), zero, header, 0);
         b.ins().store(MemFlags::new(), cap, header, 8);
@@ -120,6 +140,7 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         let bytes = checked_bytes(b, m, &im, cap, stride);
         let data = call(b, m, im.malloc, &[bytes])[0];
         non_null(b, m, &im, data);
+        count(b, m, &im, 1);
         b.ins().store(MemFlags::new(), data, header, 16);
         b.ins().jump(done, &[]);
         b.switch_to_block(done);
@@ -142,13 +163,59 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         let bytes = checked_bytes(b, m, &im, new_cap, stride);
         let grown = call(b, m, im.realloc, &[data, bytes])[0];
         non_null(b, m, &im, grown);
+        // `realloc(NULL, n)` is a fresh buffer.
+        let fresh = b.ins().icmp_imm(IntCC::Equal, data, 0);
+        let added = b.ins().uextend(types::I64, fresh);
+        count_value(b, m, &im, added);
         b.ins().store(MemFlags::new(), new_cap, header, 8);
         b.ins().store(MemFlags::new(), grown, header, 16);
         let zero = b.ins().iconst(types::I64, 0);
         b.ins().return_(&[zero]);
         Ok(())
     })?;
+    let free = {
+        let mut s = m.make_signature();
+        s.params.push(AbiParam::new(types::I64));
+        m.declare_function("free", Linkage::Import, &s).map_err(e)?
+    };
+    let release = local(m, "vesper_seq_free", 1)?;
+    compile(m, release, 1, |b, m, args| {
+        let header = args[0];
+        let data = b.ins().load(types::I64, MemFlags::new(), header, 16);
+        let has_data = b.ins().icmp_imm(IntCC::NotEqual, data, 0);
+        let free_data = b.create_block();
+        let done = b.create_block();
+        b.ins().brif(has_data, free_data, &[], done, &[]);
+        b.switch_to_block(free_data);
+        call(b, m, free, &[data]);
+        count(b, m, &im, -1);
+        b.ins().jump(done, &[]);
+        b.switch_to_block(done);
+        call(b, m, free, &[header]);
+        count(b, m, &im, -1);
+        let zero = b.ins().iconst(types::I64, 0);
+        b.ins().return_(&[zero]);
+        Ok(())
+    })?;
     Ok(())
+}
+
+/// Add `delta` to the live-allocation counter.
+fn count<M: Module>(b: &mut FunctionBuilder, m: &mut M, im: &Imports, delta: i64) {
+    let delta = b.ins().iconst(types::I64, delta);
+    count_value(b, m, im, delta);
+}
+
+fn count_value<M: Module>(b: &mut FunctionBuilder, m: &mut M, im: &Imports, delta: ir::Value) {
+    let data = m.declare_data_in_func(im.live, b.func);
+    let address = b.ins().symbol_value(types::I64, data);
+    b.ins().atomic_rmw(
+        types::I64,
+        MemFlags::trusted(),
+        AtomicRmwOp::Add,
+        address,
+        delta,
+    );
 }
 
 /// `cap * max(stride, 1)`, faulting on overflow past `isize::MAX`.
