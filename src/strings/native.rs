@@ -58,15 +58,17 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
 
     /// Whether byte offset `i` of `value` (with `i <= len`) starts a char.
+    /// At `i == len` the load reads a zeroed stack byte instead of the
+    /// string, whose data may be null (empty) or end exactly at `i`.
     fn str_boundary(&mut self, value: ir::Value, i: ir::Value, len: ir::Value) -> ir::Value {
         let at_end = self.b.ins().icmp(IntCC::Equal, i, len);
-        let zero = self.zero();
-        let safe = self.b.ins().select(at_end, zero, i);
-        let byte = self.str_byte(value, safe);
+        let scratch = self.alloc(8);
+        let data = self.str_word(value, DATA);
+        let inside = self.b.ins().iadd(data, i);
+        let address = self.b.ins().select(at_end, scratch, inside);
+        let byte = self.b.ins().uload8(types::I64, MemFlags::new(), address, 0);
         let high = self.b.ins().band_imm(byte, 0xC0);
         let lead = self.b.ins().icmp_imm(IntCC::NotEqual, high, 0x80);
-        let empty = self.b.ins().icmp_imm(IntCC::Equal, len, 0);
-        let lead = self.b.ins().bor(lead, empty);
         self.b.ins().bor(at_end, lead)
     }
 

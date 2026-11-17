@@ -81,9 +81,6 @@ impl Checker<'_> {
                 span.clone(),
             );
         }
-        if op.is_view() {
-            return Some(self.text_view(base, None, op, env, span));
-        }
         if args.len() != op.arity() {
             self.error(
                 "E0207",
@@ -94,6 +91,14 @@ impl Checker<'_> {
                 ),
                 span.clone(),
             );
+        }
+        if op.is_view() {
+            // Views take no arguments; still check any extras for their
+            // effects, since lowering evaluates every supplied argument.
+            for a in args {
+                self.expr(&a.expr, env, Usage::Own);
+            }
+            return Some(self.text_view(base, None, op, env, span));
         }
         if op.mutates() {
             let Some(p) = Place::from_expr(base) else {

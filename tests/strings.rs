@@ -267,6 +267,22 @@ fn view_intervals_off_char_boundaries_are_faults() {
 }
 
 #[test]
+fn empty_views_never_read_past_the_bytes() {
+    // `""` and `String::new()` have null data; the boundary check at
+    // `i == len` must not load from it.
+    let source = "fn total(in s: Str) -> u64 { wrapping_add(s.len(), 1) }
+fn main() -> u64 {
+    let e = \"\";
+    let n = String::new();
+    let s = \"a\u{e9}\";
+    let low = wrapping_add(total(e[0..0]), wrapping_mul(total(n[0..0]), 10));
+    let high = wrapping_add(wrapping_mul(total(s[3..3]), 100), wrapping_mul(total(s[0..3]), 1000));
+    wrapping_add(low, high)
+}";
+    assert_eq!(differential("empty_views", source), "4111");
+}
+
+#[test]
 fn grown_strings_return_from_the_evaluator_and_the_jit() {
     let source = "fn main() -> String {
     let mut s = String::new();
@@ -329,6 +345,16 @@ fn views_are_second_class() {
         "fn f() -> u64 { let mut s = \"ab\"; s.push_str(s.as_str()); 0 }",
         "E0301",
         "grows",
+    );
+    rejected(
+        "fn size(in s: Str) -> u64 { s.len() }\nfn f(in s: String) -> u64 { size(s.as_str(1)) }",
+        "E0207",
+        "expects 0 arguments",
+    );
+    rejected(
+        "fn size(in s: Str) -> u64 { s.len() }\nfn f(in s: String) -> u64 { size(s.as_str(undefined_name)) }",
+        "E0201",
+        "undefined_name",
     );
     rejected(
         "fn f(in s: String) -> bool { s == 3 }",
