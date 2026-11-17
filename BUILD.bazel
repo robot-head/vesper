@@ -44,7 +44,11 @@ vesper_crate(
         "test/lean4lean_map_tree42",
         "test/resource_oracle42",
     ],
-    extra_integration_compile_data = ["//crates/vesper-doc:files"],
+    extra_integration_compile_data = [
+        "//crates/vesper-doc:files",
+        # tests/native_export_v2.rs embeds the port pilot's Vesper sources.
+        "//crates/vesper-port-pilot:files",
+    ],
     extra_test_data = [
         "//crates/vesper-doc:files",
         "//crates/vesper-grammar:files",
