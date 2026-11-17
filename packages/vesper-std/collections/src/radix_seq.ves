@@ -1,0 +1,299 @@
+// @vesper-std/collections::radix_seq: `RadixSeq[T]`, the transient
+// radix-balanced sequence of manuscript chapter 13 built over the builtin
+// `ChunkSeq[T]`.
+//
+// Elements live in 32-element leaf chunks under 32-way internal nodes. The
+// sequence is edited in place while it owns the nodes on a path; `freeze`
+// returns an O(1) `SeqSnapshot` and starts a new epoch, after which an edit
+// copies only the path it touches (path copying), so a snapshot never
+// observes later edits. `thaw` makes a snapshot the transient again.
+//
+// Every node a sequence and its snapshots share stays in the sequence's
+// arenas: nodes are not reclaimed until the `RadixSeq` itself is dropped.
+// A snapshot is a handle into the sequence that made it and is meaningful
+// only with that sequence.
+
+fn none_id() -> u64 {
+    18446744073709551615
+}
+
+// `x >> s`, and 0 when `s >= 64`.
+fn shr(x: u64, s: u64) -> u64 {
+    if s >= 64 {
+        return 0;
+    }
+    handle Fail[ArithOverflow] in {
+        x >> s
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+// An immutable view of a `RadixSeq` at the moment of `freeze`.
+pub copy struct SeqSnapshot {
+    root: u64,
+    height: u64,
+    len: u64
+}
+
+pub struct RadixSeq[T] {
+    elems: ChunkSeq[T],
+    leaf_epoch: ChunkSeq[u64],
+    kids: ChunkSeq[u64],
+    node_epoch: ChunkSeq[u64],
+    root: u64,
+    height: u64,
+    len: u64,
+    epoch: u64
+}
+
+fn at[T: mod copy](in s: Slice[T], i: u64, fallback: T) -> T {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => fallback,
+    }
+}
+
+// An empty sequence.
+pub fn radix_seq_new[T: mod copy]() -> RadixSeq[T] {
+    RadixSeq {
+        elems: ChunkSeq::new[T](),
+        leaf_epoch: ChunkSeq::new[u64](),
+        kids: ChunkSeq::new[u64](),
+        node_epoch: ChunkSeq::new[u64](),
+        root: none_id(),
+        height: 0,
+        len: 0,
+        epoch: 0
+    }
+}
+
+pub fn snapshot_len(s: SeqSnapshot) -> u64 {
+    s.len
+}
+
+impl [T: mod copy] RadixSeq[T] {
+    pub fn len(in self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(in self) -> bool {
+        self.len == 0
+    }
+
+    // Remove every element (snapshots are unaffected).
+    pub fn clear(inout self) {
+        self.root = none_id();
+        self.height = 0;
+        self.len = 0;
+    }
+
+    // Take an O(1) snapshot of the current contents.
+    pub fn freeze(inout self) -> SeqSnapshot {
+        self.epoch = wrapping_add(self.epoch, 1);
+        SeqSnapshot {
+            root: self.root,
+            height: self.height,
+            len: self.len
+        }
+    }
+
+    // Replace the contents with those of `s`, in O(1). Later edits copy
+    // the paths they touch, so `s` itself never changes.
+    pub fn thaw(inout self, s: SeqSnapshot) {
+        self.epoch = wrapping_add(self.epoch, 1);
+        self.root = s.root;
+        self.height = s.height;
+        self.len = s.len;
+    }
+
+    // The current contents as a snapshot, without starting a new epoch.
+    fn view(in self) -> SeqSnapshot {
+        SeqSnapshot {
+            root: self.root,
+            height: self.height,
+            len: self.len
+        }
+    }
+
+    fn new_leaf(inout self, fill: T) -> u64 {
+        let id = self.leaf_epoch.len();
+        let mut i: u64 = 0;
+        loop {
+            if i >= 32 {
+                break;
+            }
+            self.elems.push(fill);
+            i = wrapping_add(i, 1);
+        }
+        self.leaf_epoch.push(self.epoch);
+        id
+    }
+
+    fn new_node(inout self) -> u64 {
+        let id = self.node_epoch.len();
+        let mut i: u64 = 0;
+        loop {
+            if i >= 32 {
+                break;
+            }
+            self.kids.push(none_id());
+            i = wrapping_add(i, 1);
+        }
+        self.node_epoch.push(self.epoch);
+        id
+    }
+
+    // `leaf` if this epoch owns it, else a fresh copy of it.
+    fn own_leaf(inout self, leaf: u64, fill: T) -> u64 {
+        if at(in self.leaf_epoch.as_slice(), leaf, 0) == self.epoch {
+            return leaf;
+        }
+        let id = self.leaf_epoch.len();
+        let base = wrapping_mul(leaf, 32);
+        let mut i: u64 = 0;
+        loop {
+            if i >= 32 {
+                break;
+            }
+            let x = at(in self.elems.as_slice(), wrapping_add(base, i), fill);
+            self.elems.push(x);
+            i = wrapping_add(i, 1);
+        }
+        self.leaf_epoch.push(self.epoch);
+        id
+    }
+
+    // `node` if this epoch owns it, else a fresh copy of it.
+    fn own_node(inout self, node: u64) -> u64 {
+        if at(in self.node_epoch.as_slice(), node, 0) == self.epoch {
+            return node;
+        }
+        let id = self.node_epoch.len();
+        let base = wrapping_mul(node, 32);
+        let mut i: u64 = 0;
+        loop {
+            if i >= 32 {
+                break;
+            }
+            let x = at(in self.kids.as_slice(), wrapping_add(base, i), none_id());
+            self.kids.push(x);
+            i = wrapping_add(i, 1);
+        }
+        self.node_epoch.push(self.epoch);
+        id
+    }
+
+    // Element `i` of the contents `s`.
+    fn read(in self, s: SeqSnapshot, i: u64) -> Option[T] {
+        if i >= s.len {
+            return Option::None;
+        }
+        let mut node = s.root;
+        let mut level = s.height;
+        loop {
+            if level == 0 {
+                break self.elems.try_get(wrapping_add(wrapping_mul(node, 32), i & 31));
+            }
+            let slot = shr(i, wrapping_mul(level, 5)) & 31;
+            node = at(
+                in self.kids.as_slice(),
+                wrapping_add(wrapping_mul(node, 32), slot),
+                none_id()
+            );
+            level = wrapping_sub(level, 1);
+        }
+    }
+
+    // Element `i`, if `i < len`.
+    pub fn get(in self, i: u64) -> Option[T] {
+        self.read(self.view(), i)
+    }
+
+    // Element `i` of snapshot `s`, if `i < snapshot_len(s)`.
+    pub fn snapshot_get(in self, s: SeqSnapshot, i: u64) -> Option[T] {
+        self.read(s, i)
+    }
+
+    // Write `v` at index `i`, copying shared nodes on the way. With
+    // `fresh`, the path to `i` is new past the existing elements.
+    fn write(inout self, i: u64, v: T, fresh: bool) {
+        let mut level = self.height;
+        let root = self.root;
+        let top = if level == 0 {
+            self.own_leaf(root, v)
+        } else {
+            self.own_node(root)
+        };
+        self.root = top;
+        let mut node = top;
+        loop {
+            if level == 0 {
+                self.elems.try_set(wrapping_add(wrapping_mul(node, 32), i & 31), v);
+                break;
+            }
+            let shift = wrapping_mul(level, 5);
+            let slot = shr(i, shift) & 31;
+            let below = i & shr(18446744073709551615, wrapping_sub(64, shift));
+            let at_start = fresh && below == 0;
+            let index = wrapping_add(wrapping_mul(node, 32), slot);
+            let old = at(in self.kids.as_slice(), index, none_id());
+            let child = if level == 1 {
+                if at_start || old == none_id() {
+                    self.new_leaf(v)
+                } else {
+                    self.own_leaf(old, v)
+                }
+            } else if at_start || old == none_id() {
+                self.new_node()
+            } else {
+                self.own_node(old)
+            };
+            self.kids.try_set(index, child);
+            node = child;
+            level = wrapping_sub(level, 1);
+        }
+    }
+
+    // Append `v`.
+    pub fn push(inout self, v: T) {
+        if self.root == none_id() {
+            self.root = self.new_leaf(v);
+            self.height = 0;
+        } else {
+            // Grow a level when the tree is full: 32^(height + 1) elements.
+            let full = shr(self.len, wrapping_mul(wrapping_add(self.height, 1), 5)) != 0;
+            if full {
+                let top = self.new_node();
+                let old = self.root;
+                self.kids.try_set(wrapping_mul(top, 32), old);
+                self.root = top;
+                self.height = wrapping_add(self.height, 1);
+            }
+        }
+        let i = self.len;
+        self.write(i, v, true);
+        self.len = wrapping_add(i, 1);
+    }
+
+    // Remove and return the last element.
+    pub fn pop(inout self) -> Option[T] {
+        if self.len == 0 {
+            return Option::None;
+        }
+        let last = wrapping_sub(self.len, 1);
+        let v = self.read(self.view(), last);
+        self.len = last;
+        v
+    }
+
+    // Replace element `i`; `false` (and no change) when `i >= len`.
+    pub fn set(inout self, i: u64, v: T) -> bool {
+        if i >= self.len {
+            return false;
+        }
+        self.write(i, v, false);
+        true
+    }
+}

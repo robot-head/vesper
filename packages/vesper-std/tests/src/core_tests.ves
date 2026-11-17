@@ -1,0 +1,300 @@
+// Unit tests for @vesper-std/core.
+use @vesper-std/core::{
+    min,
+    max,
+    clamp,
+    swap,
+    ordering_sign,
+    reverse,
+    then_cmp
+};
+use @vesper-std/core::option::{
+    is_some,
+    is_none,
+    unwrap_or,
+    unwrap_or_else,
+    unwrap,
+    map as option_map,
+    map_or,
+    and_then as option_and_then,
+    or as option_or,
+    filter,
+    zip,
+    ok_or
+};
+use @vesper-std/core::result::{
+    is_ok,
+    is_err,
+    ok,
+    err,
+    unwrap_or as result_unwrap_or,
+    unwrap_or_else as result_unwrap_or_else,
+    map as result_map,
+    map_err,
+    and_then as result_and_then,
+    or as result_or
+};
+use self::support::{
+    check,
+    some_u64,
+    some_pair
+};
+
+pub fn test_core_ordering() -> u64 {
+    let mut r: u64 = 0;
+    r = check(min(3, 5) == 3 && min(5, 3) == 3, 1, r);
+    r = check(max(3, 5) == 5 && max(5, 3) == 5, 2, r);
+    r = check(clamp(9, 1, 4) == 4, 3, r);
+    r = check(clamp(0, 1, 4) == 1, 4, r);
+    r = check(clamp(2, 1, 4) == 2, 5, r);
+    r = check(clamp(2, 4, 1) == 4, 6, r);
+    let mut a: u64 = 1;
+    let mut b: u64 = 2;
+    swap(inout a, inout b);
+    r = check(a == 2 && b == 1, 7, r);
+    r = check(ordering_sign(reverse(3 .cmp(4))) == 1, 8, r);
+    r = check(ordering_sign(reverse(4 .cmp(4))) == 0, 9, r);
+    r = check(ordering_sign(then_cmp(1 .cmp(1), 2 .cmp(1))) == 1, 10, r);
+    r = check(ordering_sign(then_cmp(1 .cmp(2), 2 .cmp(1))) == -1, 11, r);
+    r
+}
+
+pub fn test_core_option() -> u64 {
+    let mut r: u64 = 0;
+    let some: Option[u64] = Option::Some(4);
+    let none: Option[u64] = Option::None;
+    r = check(is_some(some) && !is_some(none), 1, r);
+    r = check(is_none(none) && !is_none(some), 2, r);
+    r = check(unwrap_or(none, 7) == 7 && unwrap_or(some, 7) == 4, 3, r);
+    r = check(
+        unwrap_or_else(
+            none,
+            || -> u64 {
+                9
+            }
+        )
+            == 9,
+        4,
+        r
+    );
+    r = check(
+        unwrap_or_else(
+            some,
+            || -> u64 {
+                9
+            }
+        )
+            == 4,
+        5,
+        r
+    );
+    r = check(
+        some_u64(
+            option_map(
+                some,
+                | x: u64 | -> u64 {
+                    wrapping_add(x, 1)
+                }
+            ),
+            5
+        ),
+        6,
+        r
+    );
+    r = check(
+        is_none(
+            option_map(
+                none,
+                | x: u64 | -> u64 {
+                    x
+                }
+            )
+        ),
+        7,
+        r
+    );
+    r = check(
+        map_or(
+            some,
+            0,
+            | x: u64 | -> u64 {
+                wrapping_mul(x, 10)
+            }
+        )
+            == 40,
+        8,
+        r
+    );
+    r = check(
+        map_or(
+            none,
+            3,
+            | x: u64 | -> u64 {
+                x
+            }
+        )
+            == 3,
+        9,
+        r
+    );
+    let half = option_and_then(
+        some,
+        | x: u64 | -> Option[u64] {
+            if x % 2 == 0 {
+                Option::Some(x / 2)
+            } else {
+                Option::None
+            }
+        }
+    );
+    r = check(some_u64(half, 2), 10, r);
+    r = check(some_u64(option_or(none, some), 4) && some_u64(option_or(some, none), 4), 11, r);
+    r = check(
+        is_none(
+            filter(
+                some,
+                | x: u64 | -> bool {
+                    x > 10
+                }
+            )
+        ),
+        12,
+        r
+    );
+    r = check(
+        some_u64(
+            filter(
+                some,
+                | x: u64 | -> bool {
+                    x < 10
+                }
+            ),
+            4
+        ),
+        13,
+        r
+    );
+    r = check(is_none(zip(some, none)), 14, r);
+    let pair = zip(some, some);
+    r = check(some_pair(pair, 4, 4), 15, r);
+    let e: u64 = 99;
+    r = check(is_err(ok_or(none, e)) && is_ok(ok_or(some, e)), 16, r);
+    let got = handle Fail[RuntimeError] in {
+        unwrap(some)
+    } with {
+        return x => x,
+        raise(error, k) => 0,
+    };
+    r = check(got == 4, 17, r);
+    let missing = handle Fail[RuntimeError] in {
+        unwrap(none)
+    } with {
+        return x => x,
+        raise(error, k) => 77,
+    };
+    r = check(missing == 77, 18, r);
+    r
+}
+
+pub fn test_core_result() -> u64 {
+    let mut r: u64 = 0;
+    let good: Result[u64, u64] = Result::Ok(6);
+    let bad: Result[u64, u64] = Result::Err(3);
+    r = check(is_ok(good) && !is_ok(bad), 1, r);
+    r = check(is_err(bad) && !is_err(good), 2, r);
+    r = check(some_u64(ok(good), 6) && is_none(ok(bad)), 3, r);
+    r = check(some_u64(err(bad), 3) && is_none(err(good)), 4, r);
+    r = check(result_unwrap_or(bad, 1) == 1 && result_unwrap_or(good, 1) == 6, 5, r);
+    r = check(
+        result_unwrap_or_else(
+            bad,
+            | e: u64 | -> u64 {
+                wrapping_mul(e, 2)
+            }
+        )
+            == 6,
+        6,
+        r
+    );
+    r = check(
+        result_unwrap_or_else(
+            good,
+            | e: u64 | -> u64 {
+                e
+            }
+        )
+            == 6,
+        7,
+        r
+    );
+    let doubled = result_map(
+        good,
+        | x: u64 | -> u64 {
+            wrapping_mul(x, 2)
+        }
+    );
+    r = check(result_unwrap_or(doubled, 0) == 12, 8, r);
+    r = check(
+        is_err(
+            result_map(
+                bad,
+                | x: u64 | -> u64 {
+                    x
+                }
+            )
+        ),
+        9,
+        r
+    );
+    let relabeled = map_err(
+        bad,
+        | e: u64 | -> u64 {
+            wrapping_add(e, 100)
+        }
+    );
+    r = check(some_u64(err(relabeled), 103), 10, r);
+    r = check(
+        some_u64(
+            ok(
+                map_err(
+                    good,
+                    | e: u64 | -> u64 {
+                        e
+                    }
+                )
+            ),
+            6
+        ),
+        11,
+        r
+    );
+    let chained = result_and_then(
+        good,
+        | x: u64 | -> Result[u64, u64] {
+            if x > 5 {
+                Result::Err(x)
+            } else {
+                Result::Ok(x)
+            }
+        }
+    );
+    r = check(some_u64(err(chained), 6), 12, r);
+    r = check(
+        is_err(
+            result_and_then(
+                bad,
+                | x: u64 | -> Result[u64, u64] {
+                    Result::Ok(x)
+                }
+            )
+        ),
+        13,
+        r
+    );
+    r = check(
+        some_u64(ok(result_or(bad, good)), 6) && some_u64(ok(result_or(good, bad)), 6),
+        14,
+        r
+    );
+    r
+}

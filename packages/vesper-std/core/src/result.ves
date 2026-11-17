@@ -1,0 +1,80 @@
+// @vesper-std/core::result: combinators over the builtin `Result[T, E]`.
+
+pub fn is_ok[T: mod copy, E: mod copy](r: Result[T, E]) -> bool {
+    match r {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+
+pub fn is_err[T: mod copy, E: mod copy](r: Result[T, E]) -> bool {
+    match r {
+        Result::Ok(_) => false,
+        Result::Err(_) => true,
+    }
+}
+
+// The success value, if any.
+pub fn ok[T: mod copy, E: mod copy](r: Result[T, E]) -> Option[T] {
+    match r {
+        Result::Ok(x) => Option::Some(x),
+        Result::Err(_) => Option::None,
+    }
+}
+
+// The error value, if any.
+pub fn err[T: mod copy, E: mod copy](r: Result[T, E]) -> Option[E] {
+    match r {
+        Result::Ok(_) => Option::None,
+        Result::Err(e) => Option::Some(e),
+    }
+}
+
+pub fn unwrap_or[T: mod copy, E: mod copy](r: Result[T, E], fallback: T) -> T {
+    match r {
+        Result::Ok(x) => x,
+        Result::Err(_) => fallback,
+    }
+}
+
+// The success value, or `f(error)`.
+pub fn unwrap_or_else[T: mod copy, E: mod copy](r: Result[T, E], sink f: fn(E) -> T) -> T {
+    match r {
+        Result::Ok(x) => x,
+        Result::Err(e) => f(e),
+    }
+}
+
+pub fn map[T: mod copy, U: mod copy, E: mod copy](r: Result[T, E], sink f: fn(T) -> U)
+    -> Result[U, E] {
+    match r {
+        Result::Ok(x) => Result::Ok(f(x)),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn map_err[T: mod copy, E: mod copy, F: mod copy](r: Result[T, E], sink f: fn(E) -> F)
+    -> Result[T, F] {
+    match r {
+        Result::Ok(x) => Result::Ok(x),
+        Result::Err(e) => Result::Err(f(e)),
+    }
+}
+
+pub fn and_then[T: mod copy, U: mod copy, E: mod copy](
+    r: Result[T, E],
+    sink f: fn(T) -> Result[U, E]
+) -> Result[U, E] {
+    match r {
+        Result::Ok(x) => f(x),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+// `r` when it succeeded, else `other`.
+pub fn or[T: mod copy, E: mod copy](r: Result[T, E], other: Result[T, E]) -> Result[T, E] {
+    match r {
+        Result::Ok(x) => Result::Ok(x),
+        Result::Err(_) => other,
+    }
+}

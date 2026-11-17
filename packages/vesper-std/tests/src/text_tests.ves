@@ -1,0 +1,183 @@
+// Unit tests for @vesper-std/fmt and @vesper-std/bytes.
+use @vesper-std/fmt::{
+    ParseIntError,
+    write_u64_radix,
+    write_u64,
+    write_i64,
+    write_hex_u64,
+    write_bool,
+    write_bytes,
+    parse_u64_radix,
+    parse_u64,
+    parse_i64,
+    fnv1a64
+};
+use @vesper-std/bytes::{
+    read_u8,
+    read_u16_le,
+    read_u16_be,
+    read_u32_le,
+    read_u32_be,
+    read_u64_le,
+    read_u64_be,
+    read_i64_le,
+    read_i64_be,
+    push_u16_le,
+    push_u16_be,
+    push_u32_le,
+    push_u32_be,
+    push_u64_le,
+    push_u64_be,
+    push_i64_le,
+    push_i64_be,
+    put_u16_le,
+    put_u16_be,
+    put_u32_le,
+    put_u32_be,
+    put_u64_le,
+    put_u64_be
+};
+use @vesper-std/core::option::is_none;
+use self::support::{
+    check,
+    text,
+    same_text,
+    parsed_u64,
+    parsed_i64,
+    parse_error,
+    parse_error_i64,
+    some_u64
+};
+
+pub fn test_fmt_write() -> u64 {
+    let mut r: u64 = 0;
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    write_u64(inout out, 123);
+    r = check(same_text(in out.as_slice(), 3355185, 0, 0), 1, r);
+    out.clear();
+    write_u64(inout out, 18446744073709551615);
+    r = check(
+        same_text(in out.as_slice(), 3761692294704805937, 3834033537023162160, 892417585),
+        2,
+        r
+    );
+    out.clear();
+    write_i64(inout out, -42);
+    r = check(same_text(in out.as_slice(), 3290157, 0, 0), 3, r);
+    out.clear();
+    write_i64(inout out, -9223372036854775808);
+    r = check(
+        same_text(in out.as_slice(), 3618417120593983789, 3978706198986109744, 942684213),
+        4,
+        r
+    );
+    out.clear();
+    write_hex_u64(inout out, 255, 1);
+    r = check(same_text(in out.as_slice(), 26214, 0, 0), 5, r);
+    out.clear();
+    write_hex_u64(inout out, 0, 3);
+    r = check(out.len() == 3 && out.try_get(2) == Option::Some(48), 6, r);
+    out.clear();
+    write_u64_radix(inout out, 1295, 36, 1);
+    r = check(same_text(in out.as_slice(), 31354, 0, 0), 7, r);
+    out.clear();
+    write_u64_radix(inout out, 5, 1, 1);
+    r = check(out.len() == 0, 8, r);
+    write_u64_radix(inout out, 5, 2, 8);
+    r = check(out.len() == 8, 9, r);
+    out.clear();
+    write_bool(inout out, true);
+    r = check(same_text(in out.as_slice(), 1702195828, 0, 0), 10, r);
+    out.clear();
+    write_bool(inout out, false);
+    r = check(same_text(in out.as_slice(), 435728179558, 0, 0), 11, r);
+    let abc = text(6513249, 0, 0);
+    out.clear();
+    write_bytes(inout out, in abc.as_slice());
+    r = check(same_text(in out.as_slice(), 6513249, 0, 0), 12, r);
+    // FNV-1a 64 of the empty input and of "abc".
+    let empty: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    r = check(fnv1a64(in empty.as_slice()) == 14695981039346656037, 13, r);
+    r = check(fnv1a64(in abc.as_slice()) == 16654208175385433931, 14, r);
+    r
+}
+
+pub fn test_fmt_parse() -> u64 {
+    let mut r: u64 = 0;
+    let s = text(3355185, 0, 0);
+    r = check(parsed_u64(parse_u64(in s.as_slice()), 123), 1, r);
+    let max = text(3761692294704805937, 3834033537023162160, 892417585);
+    r = check(parsed_u64(parse_u64(in max.as_slice()), 18446744073709551615), 2, r);
+    let over = text(3761692294704805937, 3834033537023162160, 909194801);
+    r = check(parse_error(parse_u64(in over.as_slice())) == 3, 3, r);
+    let empty: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    r = check(parse_error(parse_u64(in empty.as_slice())) == 1, 4, r);
+    let bad = text(30769, 0, 0);
+    r = check(parse_error(parse_u64(in bad.as_slice())) == 2, 5, r);
+    let hex = text(17990, 0, 0);
+    r = check(parsed_u64(parse_u64_radix(in hex.as_slice(), 16), 255), 6, r);
+    r = check(parse_error(parse_u64_radix(in hex.as_slice(), 10)) == 2, 7, r);
+    r = check(parse_error(parse_u64_radix(in hex.as_slice(), 40)) == 2, 8, r);
+    let neg = text(3290157, 0, 0);
+    r = check(parsed_i64(parse_i64(in neg.as_slice()), -42), 9, r);
+    let plus = text(14123, 0, 0);
+    r = check(parsed_i64(parse_i64(in plus.as_slice()), 7), 10, r);
+    let min = text(3618417120593983789, 3978706198986109744, 942684213);
+    r = check(parsed_i64(parse_i64(in min.as_slice()), -9223372036854775808), 11, r);
+    let too_big = text(3472898955697861177, 3834594305099970099, 3682360);
+    r = check(parse_error_i64(parse_i64(in too_big.as_slice())) == 3, 12, r);
+    let sign = text(45, 0, 0);
+    r = check(parse_error_i64(parse_i64(in sign.as_slice())) == 1, 13, r);
+    r = check(parse_error_i64(parse_i64(in empty.as_slice())) == 1, 14, r);
+    r = check(parse_error_i64(parse_i64(in bad.as_slice())) == 2, 15, r);
+    // Round trip through the writer.
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    write_i64(inout out, -1234567890123);
+    r = check(parsed_i64(parse_i64(in out.as_slice()), -1234567890123), 16, r);
+    r
+}
+
+pub fn test_bytes() -> u64 {
+    let mut r: u64 = 0;
+    let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let a16: u16 = 4660;
+    let a32: u32 = 305419896;
+    push_u16_le(inout b, a16);
+    push_u16_be(inout b, a16);
+    push_u32_le(inout b, a32);
+    push_u32_be(inout b, a32);
+    push_u64_le(inout b, 81985529216486895);
+    push_u64_be(inout b, 81985529216486895);
+    push_i64_le(inout b, -2);
+    push_i64_be(inout b, -2);
+    r = check(b.len() == 44, 1, r);
+    r = check(read_u8(in b.as_slice(), 0) == Option::Some(52), 2, r);
+    r = check(read_u16_le(in b.as_slice(), 0) == Option::Some(a16), 3, r);
+    r = check(read_u16_be(in b.as_slice(), 2) == Option::Some(a16), 4, r);
+    r = check(read_u16_be(in b.as_slice(), 0) == Option::Some(13330), 5, r);
+    r = check(read_u32_le(in b.as_slice(), 4) == Option::Some(a32), 6, r);
+    r = check(read_u32_be(in b.as_slice(), 8) == Option::Some(a32), 7, r);
+    r = check(some_u64(read_u64_le(in b.as_slice(), 12), 81985529216486895), 8, r);
+    r = check(some_u64(read_u64_be(in b.as_slice(), 20), 81985529216486895), 9, r);
+    r = check(read_i64_le(in b.as_slice(), 28) == Option::Some(-2), 10, r);
+    r = check(read_i64_be(in b.as_slice(), 36) == Option::Some(-2), 11, r);
+    r = check(is_none(read_u64_le(in b.as_slice(), 37)), 12, r);
+    r = check(is_none(read_u64_be(in b.as_slice(), 18446744073709551615)), 13, r);
+    r = check(read_u8(in b.as_slice(), 44) == Option::None, 14, r);
+    r = check(put_u16_le(inout b.as_slice_mut(), 0, 258), 15, r);
+    r = check(read_u16_le(in b.as_slice(), 0) == Option::Some(258), 16, r);
+    r = check(put_u16_be(inout b.as_slice_mut(), 0, 258), 17, r);
+    r = check(read_u8(in b.as_slice(), 0) == Option::Some(1), 18, r);
+    r = check(put_u32_le(inout b.as_slice_mut(), 4, 7), 19, r);
+    r = check(read_u32_le(in b.as_slice(), 4) == Option::Some(7), 20, r);
+    r = check(put_u32_be(inout b.as_slice_mut(), 4, 7), 21, r);
+    r = check(read_u32_be(in b.as_slice(), 4) == Option::Some(7), 22, r);
+    r = check(put_u64_le(inout b.as_slice_mut(), 36, 9), 23, r);
+    r = check(some_u64(read_u64_le(in b.as_slice(), 36), 9), 24, r);
+    r = check(put_u64_be(inout b.as_slice_mut(), 36, 9), 25, r);
+    r = check(some_u64(read_u64_be(in b.as_slice(), 36), 9), 26, r);
+    r = check(!put_u64_be(inout b.as_slice_mut(), 37, 9), 27, r);
+    r = check(!put_u16_le(inout b.as_slice_mut(), 43, 9), 28, r);
+    r = check(some_u64(read_u64_be(in b.as_slice(), 36), 9), 29, r);
+    r
+}

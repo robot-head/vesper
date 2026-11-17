@@ -1,0 +1,71 @@
+// @vesper-std/core: ordering helpers over the builtin `Ord` trait.
+//
+// `Eq`, `Ord` (with `Ordering`) and `Hash` are still builtin traits of the
+// compiler (manuscript chapter 17); this package builds on them.
+
+// The smaller of `a` and `b`; `a` when they are equal.
+pub fn min[T: mod copy + Ord](a: T, b: T) -> T {
+    match b.cmp(a) {
+        Less => b,
+        _ => a,
+    }
+}
+
+// The larger of `a` and `b`; `b` when they are equal.
+pub fn max[T: mod copy + Ord](a: T, b: T) -> T {
+    match b.cmp(a) {
+        Less => a,
+        _ => b,
+    }
+}
+
+// `x` limited to `lo..=hi`. When `hi < lo`, the result is `lo`.
+pub fn clamp[T: mod copy + Ord](x: T, lo: T, hi: T) -> T {
+    match x.cmp(hi) {
+        Greater => {
+            match hi.cmp(lo) {
+                Less => lo,
+                _ => hi,
+            }
+        },
+        _ => {
+            match x.cmp(lo) {
+                Less => lo,
+                _ => x,
+            }
+        },
+    }
+}
+
+// Exchange the values of two places.
+pub fn swap[T: mod copy](inout a: T, inout b: T) {
+    let t = a;
+    a = b;
+    b = t;
+}
+
+// `Ordering` as -1, 0 or 1.
+pub fn ordering_sign(o: Ordering) -> i64 {
+    match o {
+        Less => -1,
+        Equal => 0,
+        Greater => 1,
+    }
+}
+
+// The reverse of an ordering.
+pub fn reverse(o: Ordering) -> Ordering {
+    match o {
+        Less => Greater,
+        Equal => Equal,
+        Greater => Less,
+    }
+}
+
+// `a.cmp(b)`, then `then` when `a` and `b` are equal (lexicographic chains).
+pub fn then_cmp(first: Ordering, then: Ordering) -> Ordering {
+    match first {
+        Equal => then,
+        _ => first,
+    }
+}

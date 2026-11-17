@@ -1,0 +1,204 @@
+// @vesper-std/bytes: fixed-width integer reads and writes over byte
+// sequences, in little-endian (`_le`) and big-endian (`_be`) byte order.
+// Reads are `None` and in-place writes are `false` when the `width` bytes at
+// `at` are not all inside the slice; nothing is written then.
+
+// Whether `width` bytes starting at `at` fit in `len` bytes.
+fn fits(len: u64, at: u64, width: u64) -> bool {
+    at <= len && width <= wrapping_sub(len, at)
+}
+
+// The unsigned `width`-byte integer at `at`.
+fn read_uint(in s: Slice[u8], at: u64, width: u64, little: bool) -> Option[u64] {
+    if !fits(s.len(), at, width) {
+        return Option::None;
+    }
+    let mut v: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= width {
+            break Option::Some(v);
+        }
+        let index = if little {
+            wrapping_add(at, wrapping_sub(wrapping_sub(width, 1), i))
+        } else {
+            wrapping_add(at, i)
+        };
+        let b = match s.try_get(index) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        v = wrapping_add(wrapping_mul(v, 256), widen_u64(b));
+        i = wrapping_add(i, 1);
+    }
+}
+
+// Append the low `width` bytes of `v`.
+fn push_uint(inout out: ChunkSeq[u8], v: u64, width: u64, little: bool) {
+    let from = out.len();
+    let mut x = v;
+    let mut i: u64 = 0;
+    loop {
+        if i >= width {
+            break;
+        }
+        out.push(wrapping_u8(x));
+        x = x >> 8;
+        i = wrapping_add(i, 1);
+    }
+    if !little {
+        // Written little-endian; reverse the new bytes.
+        let mut a = from;
+        let mut b = wrapping_sub(out.len(), 1);
+        loop {
+            if b <= a {
+                break;
+            }
+            let x = match out.try_get(a) {
+                Option::Some(y) => y,
+                Option::None => 0,
+            };
+            let y = match out.try_get(b) {
+                Option::Some(z) => z,
+                Option::None => 0,
+            };
+            out.try_set(a, y);
+            out.try_set(b, x);
+            a = wrapping_add(a, 1);
+            b = wrapping_sub(b, 1);
+        }
+    }
+}
+
+// Overwrite the `width` bytes at `at` with the low bytes of `v`.
+fn put_uint(inout s: Slice[u8], at: u64, v: u64, width: u64, little: bool) -> bool {
+    if !fits(s.len(), at, width) {
+        return false;
+    }
+    let mut x = v;
+    let mut i: u64 = 0;
+    loop {
+        if i >= width {
+            break true;
+        }
+        let index = if little {
+            wrapping_add(at, i)
+        } else {
+            wrapping_add(at, wrapping_sub(wrapping_sub(width, 1), i))
+        };
+        s.try_set(index, wrapping_u8(x));
+        x = x >> 8;
+        i = wrapping_add(i, 1);
+    }
+}
+
+pub fn read_u8(in s: Slice[u8], at: u64) -> Option[u8] {
+    s.try_get(at)
+}
+
+pub fn read_u16_le(in s: Slice[u8], at: u64) -> Option[u16] {
+    match read_uint(in s, at, 2, true) {
+        Option::Some(v) => Option::Some(wrapping_u16(v)),
+        Option::None => Option::None,
+    }
+}
+
+pub fn read_u16_be(in s: Slice[u8], at: u64) -> Option[u16] {
+    match read_uint(in s, at, 2, false) {
+        Option::Some(v) => Option::Some(wrapping_u16(v)),
+        Option::None => Option::None,
+    }
+}
+
+pub fn read_u32_le(in s: Slice[u8], at: u64) -> Option[u32] {
+    match read_uint(in s, at, 4, true) {
+        Option::Some(v) => Option::Some(wrapping_u32(v)),
+        Option::None => Option::None,
+    }
+}
+
+pub fn read_u32_be(in s: Slice[u8], at: u64) -> Option[u32] {
+    match read_uint(in s, at, 4, false) {
+        Option::Some(v) => Option::Some(wrapping_u32(v)),
+        Option::None => Option::None,
+    }
+}
+
+pub fn read_u64_le(in s: Slice[u8], at: u64) -> Option[u64] {
+    read_uint(in s, at, 8, true)
+}
+
+pub fn read_u64_be(in s: Slice[u8], at: u64) -> Option[u64] {
+    read_uint(in s, at, 8, false)
+}
+
+// Two's complement reinterpretation of `read_u64_le`.
+pub fn read_i64_le(in s: Slice[u8], at: u64) -> Option[i64] {
+    match read_uint(in s, at, 8, true) {
+        Option::Some(v) => Option::Some(wrapping_i64(v)),
+        Option::None => Option::None,
+    }
+}
+
+pub fn read_i64_be(in s: Slice[u8], at: u64) -> Option[i64] {
+    match read_uint(in s, at, 8, false) {
+        Option::Some(v) => Option::Some(wrapping_i64(v)),
+        Option::None => Option::None,
+    }
+}
+
+pub fn push_u16_le(inout out: ChunkSeq[u8], v: u16) {
+    push_uint(inout out, widen_u64(v), 2, true);
+}
+
+pub fn push_u16_be(inout out: ChunkSeq[u8], v: u16) {
+    push_uint(inout out, widen_u64(v), 2, false);
+}
+
+pub fn push_u32_le(inout out: ChunkSeq[u8], v: u32) {
+    push_uint(inout out, widen_u64(v), 4, true);
+}
+
+pub fn push_u32_be(inout out: ChunkSeq[u8], v: u32) {
+    push_uint(inout out, widen_u64(v), 4, false);
+}
+
+pub fn push_u64_le(inout out: ChunkSeq[u8], v: u64) {
+    push_uint(inout out, v, 8, true);
+}
+
+pub fn push_u64_be(inout out: ChunkSeq[u8], v: u64) {
+    push_uint(inout out, v, 8, false);
+}
+
+pub fn push_i64_le(inout out: ChunkSeq[u8], v: i64) {
+    push_uint(inout out, wrapping_u64(v), 8, true);
+}
+
+pub fn push_i64_be(inout out: ChunkSeq[u8], v: i64) {
+    push_uint(inout out, wrapping_u64(v), 8, false);
+}
+
+pub fn put_u16_le(inout s: Slice[u8], at: u64, v: u16) -> bool {
+    put_uint(inout s, at, widen_u64(v), 2, true)
+}
+
+pub fn put_u16_be(inout s: Slice[u8], at: u64, v: u16) -> bool {
+    put_uint(inout s, at, widen_u64(v), 2, false)
+}
+
+pub fn put_u32_le(inout s: Slice[u8], at: u64, v: u32) -> bool {
+    put_uint(inout s, at, widen_u64(v), 4, true)
+}
+
+pub fn put_u32_be(inout s: Slice[u8], at: u64, v: u32) -> bool {
+    put_uint(inout s, at, widen_u64(v), 4, false)
+}
+
+pub fn put_u64_le(inout s: Slice[u8], at: u64, v: u64) -> bool {
+    put_uint(inout s, at, v, 8, true)
+}
+
+pub fn put_u64_be(inout s: Slice[u8], at: u64, v: u64) -> bool {
+    put_uint(inout s, at, v, 8, false)
+}

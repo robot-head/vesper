@@ -265,6 +265,26 @@ fn every_import_diagnostic_has_a_reject_fixture() {
 }
 
 #[test]
+fn traits_models_and_bounds_work_across_modules() {
+    // `best(square(3), square(4))` (16) * 1000 + side 5 * 100 + 9 * 10 + 1
+    // (`use model Descending` picks the smaller element).
+    let checked = world("tests/fixtures/packages/accept/traits_across_modules");
+    let interpreted = Runtime::new(&checked.world)
+        .run("main", vec![])
+        .unwrap()
+        .to_string();
+    assert_eq!(interpreted, "16591");
+    let jit = native::jit(&checked.world, "main").unwrap().to_string();
+    assert_eq!(jit, interpreted);
+    assert_rejects(
+        "ambiguous_trait",
+        packages::AMBIGUOUS,
+        "ambiguous_trait/src/other.ves",
+        "'Score' is also declared in",
+    );
+}
+
+#[test]
 fn optional_dependencies_are_not_loaded() {
     let o = cli()
         .args(["run", "tests/fixtures/packages/accept/optional_dependency"])

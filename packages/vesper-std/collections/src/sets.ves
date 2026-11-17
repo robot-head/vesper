@@ -1,0 +1,160 @@
+// @vesper-std/collections::sets: sets on top of the maps.
+// `OrderedSet[K]` keeps its keys in `Ord` order (a `CacheBTree[K, ()]`);
+// `FlatSet[K]` is a hash set (a `FlatTable[K, ()]`) whose element order is
+// insertion order, adjusted by removals as in `FlatTable`.
+use self::btree::{
+    CacheBTree,
+    BTreeCursor,
+    btree_new
+};
+use self::flat_table::{
+    FlatTable,
+    flat_table_new
+};
+
+pub struct OrderedSet[K] {
+    map: CacheBTree[K, ()]
+}
+
+pub fn ordered_set_new[K: mod copy + Ord]() -> OrderedSet[K] {
+    OrderedSet {
+        map: btree_new[K, ()]()
+    }
+}
+
+impl [K: mod copy + Ord] OrderedSet[K] {
+    pub fn len(in self) -> u64 {
+        self.map.len()
+    }
+
+    pub fn is_empty(in self) -> bool {
+        self.map.len() == 0
+    }
+
+    // Add `k`; `true` when it was not already present.
+    pub fn insert(inout self, k: K) -> bool {
+        match self.map.insert(k, ()) {
+            Option::Some(_) => false,
+            Option::None => true,
+        }
+    }
+
+    // Remove `k`; `true` when it was present.
+    pub fn remove(inout self, k: K) -> bool {
+        match self.map.remove(k) {
+            Option::Some(_) => true,
+            Option::None => false,
+        }
+    }
+
+    pub fn contains(in self, k: K) -> bool {
+        self.map.contains_key(k)
+    }
+
+    pub fn first(in self) -> Option[K] {
+        match self.map.first() {
+            Option::Some((k, _)) => Option::Some(k),
+            Option::None => Option::None,
+        }
+    }
+
+    pub fn last(in self) -> Option[K] {
+        match self.map.last() {
+            Option::Some((k, _)) => Option::Some(k),
+            Option::None => Option::None,
+        }
+    }
+
+    // The element of rank `i` (0 is the smallest).
+    pub fn nth(in self, i: u64) -> Option[K] {
+        match self.map.nth(i) {
+            Option::Some((k, _)) => Option::Some(k),
+            Option::None => Option::None,
+        }
+    }
+
+    // The smallest element not below `k`.
+    pub fn ceiling(in self, k: K) -> Option[K] {
+        match self.map.entry(self.map.lower_bound(k)) {
+            Option::Some((x, _)) => Option::Some(x),
+            Option::None => Option::None,
+        }
+    }
+
+    pub fn clear(inout self) {
+        self.map.clear();
+    }
+
+    // Append every element to `out`, ascending.
+    pub fn elements_into(in self, inout out: ChunkSeq[K]) {
+        let mut c = self.map.cursor_first();
+        loop {
+            match self.map.entry(c) {
+                Option::Some((k, _)) => {
+                    out.push(k);
+                },
+                Option::None => {
+                    break;
+                },
+            }
+            c = self.map.advance(c);
+        }
+    }
+}
+
+pub struct FlatSet[K] {
+    map: FlatTable[K, ()]
+}
+
+pub fn flat_set_new[K: mod copy + Eq + Hash]() -> FlatSet[K] {
+    FlatSet {
+        map: flat_table_new[K, ()]()
+    }
+}
+
+impl [K: mod copy + Eq + Hash] FlatSet[K] {
+    pub fn len(in self) -> u64 {
+        self.map.len()
+    }
+
+    pub fn is_empty(in self) -> bool {
+        self.map.len() == 0
+    }
+
+    // Add `k`; `true` when it was not already present.
+    pub fn insert(inout self, k: K) -> bool {
+        match self.map.insert(k, ()) {
+            Option::Some(_) => false,
+            Option::None => true,
+        }
+    }
+
+    // Remove `k`; `true` when it was present.
+    pub fn remove(inout self, k: K) -> bool {
+        match self.map.remove(k) {
+            Option::Some(_) => true,
+            Option::None => false,
+        }
+    }
+
+    pub fn contains(in self, k: K) -> bool {
+        self.map.contains_key(k)
+    }
+
+    // The element at position `i`, in the set's deterministic order.
+    pub fn element_at(in self, i: u64) -> Option[K] {
+        match self.map.entry_at(i) {
+            Option::Some((k, _)) => Option::Some(k),
+            Option::None => Option::None,
+        }
+    }
+
+    pub fn clear(inout self) {
+        self.map.clear();
+    }
+
+    // Append every element to `out`, in the set's order.
+    pub fn elements_into(in self, inout out: ChunkSeq[K]) {
+        self.map.keys_into(inout out);
+    }
+}

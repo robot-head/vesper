@@ -1,0 +1,257 @@
+// @vesper-std/collections::flat_table: `FlatTable[K, V]`, a hash map
+// (manuscript chapter 13) with a deterministic hasher.
+//
+// Entries are stored densely in insertion order; an open-addressing index
+// of `u64` slots (linear probing, power-of-two capacity) maps hashes to
+// entry positions. Removal moves the last entry into the hole, so the
+// order of entries is a function of the operations performed and never of
+// hash values or capacity: iterating by position is deterministic.
+//
+// Slot values: 0 is empty, `none_id()` is a tombstone, anything else is an
+// entry position plus one.
+
+fn none_id() -> u64 {
+    18446744073709551615
+}
+
+fn at[T: mod copy](in s: Slice[T], i: u64, fallback: T) -> T {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => fallback,
+    }
+}
+
+// The builtin `Hash` (FNV-style, deterministic) with its bits mixed so
+// that the low bits used for probing depend on every input bit.
+fn mix(h: u64) -> u64 {
+    let a = wrapping_mul(h ^ (h >> 33), 18397679294719823053);
+    let b = wrapping_mul(a ^ (a >> 33), 14181476777654086739);
+    b ^ (b >> 33)
+}
+
+pub struct FlatTable[K, V] {
+    keys: ChunkSeq[K],
+    vals: ChunkSeq[V],
+    hashes: ChunkSeq[u64],
+    slots: ChunkSeq[u64],
+    mask: u64,
+    tombs: u64
+}
+
+// An empty table.
+pub fn flat_table_new[K: mod copy + Eq + Hash, V: mod copy]() -> FlatTable[K, V] {
+    let mut slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= 8 {
+            break;
+        }
+        slots.push(0);
+        i = wrapping_add(i, 1);
+    }
+    FlatTable {
+        keys: ChunkSeq::new[K](),
+        vals: ChunkSeq::new[V](),
+        hashes: ChunkSeq::new[u64](),
+        slots: slots,
+        mask: 7,
+        tombs: 0
+    }
+}
+
+impl [K: mod copy + Eq + Hash, V: mod copy] FlatTable[K, V] {
+    pub fn len(in self) -> u64 {
+        self.keys.len()
+    }
+
+    pub fn is_empty(in self) -> bool {
+        self.keys.len() == 0
+    }
+
+    // The slot holding `k`, or `none_id()`.
+    fn find_slot(in self, k: K, h: u64) -> u64 {
+        let mut i = h & self.mask;
+        loop {
+            let s = at(in self.slots.as_slice(), i, 0);
+            if s == 0 {
+                break none_id();
+            }
+            if s != none_id() {
+                let e = wrapping_sub(s, 1);
+                if at(in self.hashes.as_slice(), e, 0) == h {
+                    match self.keys.try_get(e) {
+                        Option::Some(x) => {
+                            if x.eq(k) {
+                                break i;
+                            }
+                        },
+                        Option::None => {},
+                    }
+                }
+            }
+            i = wrapping_add(i, 1) & self.mask;
+        }
+    }
+
+    // The slot whose value is `value` on the probe path of hash `h`.
+    fn slot_of(in self, h: u64, value: u64) -> u64 {
+        let mut i = h & self.mask;
+        loop {
+            let s = at(in self.slots.as_slice(), i, 0);
+            if s == value || s == 0 {
+                break i;
+            }
+            i = wrapping_add(i, 1) & self.mask;
+        }
+    }
+
+    // Put entry position `e` (hash `h`) in the first free slot of its path.
+    fn place(inout self, h: u64, e: u64) {
+        let mut i = h & self.mask;
+        loop {
+            let s = at(in self.slots.as_slice(), i, 0);
+            if s == 0 || s == none_id() {
+                if s == none_id() {
+                    self.tombs = wrapping_sub(self.tombs, 1);
+                }
+                self.slots.try_set(i, wrapping_add(e, 1));
+                break;
+            }
+            i = wrapping_add(i, 1) & self.mask;
+        }
+    }
+
+    // Rebuild the index with `capacity` slots (a power of two).
+    fn rebuild(inout self, capacity: u64) {
+        self.slots.clear();
+        let mut i: u64 = 0;
+        loop {
+            if i >= capacity {
+                break;
+            }
+            self.slots.push(0);
+            i = wrapping_add(i, 1);
+        }
+        self.mask = wrapping_sub(capacity, 1);
+        self.tombs = 0;
+        let n = self.keys.len();
+        let mut e: u64 = 0;
+        loop {
+            if e >= n {
+                break;
+            }
+            let h = at(in self.hashes.as_slice(), e, 0);
+            self.place(h, e);
+            e = wrapping_add(e, 1);
+        }
+    }
+
+    // Insert or replace; the previous value for `k`, if any.
+    pub fn insert(inout self, k: K, v: V) -> Option[V] {
+        let h = mix(k.hash());
+        let s = self.find_slot(k, h);
+        if s != none_id() {
+            let e = wrapping_sub(at(in self.slots.as_slice(), s, 1), 1);
+            let old = self.vals.try_get(e);
+            self.vals.try_set(e, v);
+            return old;
+        }
+        // Keep occupied slots plus tombstones at most 7/8 of capacity.
+        let capacity = wrapping_add(self.mask, 1);
+        let used = wrapping_add(wrapping_add(self.keys.len(), self.tombs), 1);
+        if wrapping_mul(used, 8) > wrapping_mul(capacity, 7) {
+            let live = wrapping_add(self.keys.len(), 1);
+            let grown = if wrapping_mul(live, 2) > capacity {
+                wrapping_mul(capacity, 2)
+            } else {
+                capacity
+            };
+            self.rebuild(grown);
+        }
+        let e = self.keys.len();
+        self.keys.push(k);
+        self.vals.push(v);
+        self.hashes.push(h);
+        self.place(h, e);
+        Option::None
+    }
+
+    // The value for `k`, if present.
+    pub fn get(in self, k: K) -> Option[V] {
+        let h = mix(k.hash());
+        let s = self.find_slot(k, h);
+        if s == none_id() {
+            return Option::None;
+        }
+        self.vals.try_get(wrapping_sub(at(in self.slots.as_slice(), s, 1), 1))
+    }
+
+    pub fn contains_key(in self, k: K) -> bool {
+        let h = mix(k.hash());
+        self.find_slot(k, h) != none_id()
+    }
+
+    // Remove `k`; its value, if it was present. The last entry takes the
+    // removed entry's position.
+    pub fn remove(inout self, k: K) -> Option[V] {
+        let h = mix(k.hash());
+        let s = self.find_slot(k, h);
+        if s == none_id() {
+            return Option::None;
+        }
+        let e = wrapping_sub(at(in self.slots.as_slice(), s, 1), 1);
+        let old = self.vals.try_get(e);
+        self.slots.try_set(s, none_id());
+        self.tombs = wrapping_add(self.tombs, 1);
+        let last = wrapping_sub(self.keys.len(), 1);
+        if e != last {
+            let lh = at(in self.hashes.as_slice(), last, 0);
+            let ls = self.slot_of(lh, wrapping_add(last, 1));
+            self.slots.try_set(ls, wrapping_add(e, 1));
+            match self.keys.try_get(last) {
+                Option::Some(x) => {
+                    self.keys.try_set(e, x);
+                },
+                Option::None => {},
+            }
+            match self.vals.try_get(last) {
+                Option::Some(x) => {
+                    self.vals.try_set(e, x);
+                },
+                Option::None => {},
+            }
+            self.hashes.try_set(e, lh);
+        }
+        self.keys.pop();
+        self.vals.pop();
+        self.hashes.pop();
+        old
+    }
+
+    // Remove every entry.
+    pub fn clear(inout self) {
+        self.keys.clear();
+        self.vals.clear();
+        self.hashes.clear();
+        self.rebuild(8);
+    }
+
+    // The entry at position `i` (0 ..< len), in the deterministic entry
+    // order described above.
+    pub fn entry_at(in self, i: u64) -> Option[(K, V)] {
+        match self.keys.try_get(i) {
+            Option::Some(k) => {
+                match self.vals.try_get(i) {
+                    Option::Some(v) => Option::Some((k, v)),
+                    Option::None => Option::None,
+                }
+            },
+            Option::None => Option::None,
+        }
+    }
+
+    // Append every key to `out`, in entry order.
+    pub fn keys_into(in self, inout out: ChunkSeq[K]) {
+        out.extend(in self.keys.as_slice());
+    }
+}
