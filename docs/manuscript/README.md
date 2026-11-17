@@ -33,12 +33,14 @@ GitHub Pages runs the same typesetting command with the same pinned compiler bef
 
 The publication uses PDF 1.7, embedded Libertinus Serif, DejaVu Sans Mono, and New Computer Modern Math fonts, searchable text, a linked contents page, and PDF bookmarks. The bundled-font flag keeps layout independent of installed fonts.
 
+The current manuscript edition is 16 November 2026. Its editorial revision clarifies reading paths, summaries, and selected body explanations while preserving code listings and inference rules. [VALIDATION.md](VALIDATION.md) records the checks for this edition separately from earlier compiler and model validation.
+
 ## Verify
 
 Optional publication QA requires Python and PyMuPDF:
 
 ```sh
-python docs/manuscript/verify.py --typst /path/to/typst
+python -X utf8 docs/manuscript/verify.py --typst /path/to/typst
 ```
 
 The verification covers document structure (Parts I–VIII, Chapters 1–42, and Appendices A–B), source-code preservation, font embedding, and page geometry. Implementation workflows are documented in [the documentation index](../README.md).

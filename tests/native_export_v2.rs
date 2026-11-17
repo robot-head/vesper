@@ -151,12 +151,24 @@ fn still_refused_forms_name_the_function() {
             "cannot export 'f': type Box[i64] owns memory",
         ),
         (
-            "pub fn s() -> String { \"hi\" }",
-            "cannot export 's': type String has no fixed word layout",
+            "pub fn f(sink s: String) -> u64 { 0 }",
+            "cannot export 'f': type String is a string taken by value",
+        ),
+        (
+            "pub fn f() -> u64 eff [Fail[String]] { 0 }",
+            "cannot export 'f': type String is not a copy type",
+        ),
+        (
+            "struct N { s: String }\npub fn f(sink n: N) -> u64 { 0 }",
+            "cannot export 'f': type N is a handle that owns a sequence, taken by value",
         ),
         (
             "pub fn f(in xs: Slice[String]) -> u64 { 0 }",
-            "cannot export 'f': type String",
+            "cannot export 'f': type Slice[String] has non-copy elements",
+        ),
+        (
+            "pub fn f() -> ChunkSeq[String] { ChunkSeq::new[String]() }",
+            "cannot export 'f': type ChunkSeq[String] has non-copy elements",
         ),
         (
             "effect Tick { fn tick() -> i64; }\npub fn f() -> i64 eff [Tick] { Tick::tick() }",

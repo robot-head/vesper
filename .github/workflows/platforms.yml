@@ -126,6 +126,9 @@ jobs:
           cargo build --locked --bin vesper
           VESPER_NATIVE_BINARY=target/debug/vesper scripts/ci/test-native-executables.sh
       - name: Test the Vesper port harness
+        # Every port compiles with the vesper binary built above.
+        env:
+          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper
         run: scripts/test-port-harness.sh
 
   windows:
@@ -163,6 +166,9 @@ jobs:
           cargo build --locked --bin vesper
           VESPER_NATIVE_BINARY=target/debug/vesper.exe VESPER_NATIVE_SUFFIX=.exe scripts/ci/test-native-executables.sh
       - name: Test the Vesper port harness
+        # Every port compiles with the vesper binary built above.
+        env:
+          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper.exe
         run: scripts/test-port-harness.sh
 
   complete:

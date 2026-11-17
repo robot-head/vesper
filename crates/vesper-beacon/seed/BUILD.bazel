@@ -1,0 +1,51 @@
+# The frozen Rust seed copy of vesper-beacon (package vesper-beacon-seed,
+# library vesper_beacon) that the compiler links: ../src built without the
+# port, so cfg(vesper_port) is off. Written by hand because its sources live
+# in the parent package; see "Crates the compiler links" in
+# docs/maintenance/porting-a-crate.md.
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test")
+
+rust_library(
+    name = "seed",
+    srcs = ["//crates/vesper-beacon:rust_srcs"],
+    crate_name = "vesper_beacon",
+    crate_root = "//crates/vesper-beacon:src/lib.rs",
+    edition = "2021",
+    rustc_env = {
+        "CARGO_PKG_NAME": "vesper-beacon-seed",
+        "CARGO_PKG_VERSION": "0.1.0",
+    },
+    version = "0.1.0",
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "seed_unit_test",
+    crate = ":seed",
+    edition = "2021",
+)
+
+[
+    rust_test(
+        name = "seed_test_" + t,
+        srcs = ["//crates/vesper-beacon:tests/%s.rs" % t],
+        crate_root = "//crates/vesper-beacon:tests/%s.rs" % t,
+        edition = "2021",
+        deps = [":seed"],
+    )
+    for t in [
+        "behavior",
+        "exponential",
+    ]
+]
+
+rust_clippy_test(
+    name = "clippy",
+    targets = [":seed"],
+    tags = [
+        "clippy",
+        "lint",
+    ],
+)

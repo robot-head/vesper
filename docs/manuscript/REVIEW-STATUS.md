@@ -2,6 +2,10 @@
 
 This is a partial response to the review of commit `dab991a3827711198436490c528e021ff3b64eb8`. The manuscript remains a draft, not a validated language standard or security specification. Warnings in the manuscript identify known gaps; they are not substitutes for the missing implementations or proofs.
 
+## Editorial revision: 16 November 2026
+
+The revised introduction identifies the audience, prerequisites, and reading paths. Part summaries, chapter descriptions, and selected body passages now explain mechanisms more directly and distinguish proposed guarantees from demonstrated results. The grammar and metatheory summaries reflect the limitations already recorded below, and the continuation-fission comparison labels its claims as proposal requirements. Code listings, formal inference rules, document anchors, and external URLs are unchanged. This revision addresses presentation and consistency; it does not close the remaining implementation, proof, security, or bibliography findings.
+
 ## Corrected in the manuscript
 
 - REPO-01: Use `.ves` for source modules and identify `.vsys` bindings.

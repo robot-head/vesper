@@ -152,6 +152,53 @@ impl Tokens {
     }
 }
 
+/// `"hello, " + name`.
+pub fn greet(name: &str) -> String {
+    format!("hello, {name}")
+}
+
+/// How many space-separated words `text` holds.
+pub fn word_count(text: &str) -> u64 {
+    text.split(' ').filter(|w| !w.is_empty()).count() as u64
+}
+
+/// Append `!`.
+pub fn shout(s: &mut String) {
+    s.push('!');
+}
+
+/// A text that remembers how often it was edited.
+#[derive(Debug)]
+pub struct Note {
+    text: String,
+    edits: u64,
+}
+
+impl Note {
+    pub fn new(text: &str) -> Note {
+        Note {
+            text: text.to_string(),
+            edits: 0,
+        }
+    }
+    pub fn append(&mut self, more: &str) {
+        self.text.push_str(more);
+        self.edits = self.edits.wrapping_add(1);
+    }
+    pub fn edits(&self) -> u64 {
+        self.edits
+    }
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.edits = self.edits.wrapping_add(1);
+    }
+}
+
+/// The text of a [`Note`].
+pub fn note_text(note: &Note) -> &str {
+    &note.text
+}
+
 /// Word boundaries of space-separated `text`, as start/end pairs.
 pub fn word_bounds(text: &[u8]) -> Vec<u64> {
     let mut out = Vec::new();

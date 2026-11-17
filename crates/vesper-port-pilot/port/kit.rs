@@ -108,6 +108,63 @@ impl<'a> CounterRef<'a> {
     }
 }
 
+/// Owned handle of a Vesper `Note` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_kit_Note_drop`.
+pub struct Note {
+    words: [u64; 4],
+}
+
+impl Note {
+    /// # Safety
+    /// `words` must hold a `Note` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 4];
+        owned.copy_from_slice(&words[..4]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> NoteRef<'_> {
+        NoteRef { words: &self.words }
+    }
+}
+
+impl Drop for Note {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_kit_Note_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for Note {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Note { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for Note {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for Note {}
+
+/// A borrowed view of a Vesper `Note` value, read in place.
+#[derive(Clone, Copy)]
+pub struct NoteRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> NoteRef<'a> {
+    pub fn text(&self) -> &'a str {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::str_view(&w[0..]) }
+    }
+    pub fn edits(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[3..])
+    }
+}
+
 /// Owned handle of a Vesper `Ticket` value: its words, which own the Vesper
 /// allocations they point to. It is linear: it has no `Drop`, and only a consuming call releases it.
 #[must_use = "a linear Vesper value must be released by a consuming call"]
@@ -292,6 +349,7 @@ unsafe extern "C" {
     fn vesper_kit_seq_free(seq: i64) -> i64;
     fn vesper_kit_live_allocations() -> i64;
     fn vesper_kit_Counter_drop(value: *mut u64) -> i64;
+    fn vesper_kit_Note_drop(value: *mut u64) -> i64;
     fn vesper_kit_Tokens_drop(value: *mut u64) -> i64;
     fn vesper_kit_Tree_drop(value: *mut u64) -> i64;
     fn vesper_kit_bump(x: *mut u64, by: i64) -> i64;
@@ -304,12 +362,18 @@ unsafe extern "C" {
     fn vesper_kit_counter_total(c: *mut u64) -> i64;
     fn vesper_kit_digits(n: i64) -> i64;
     fn vesper_kit_expired(now: i64, deadline: i64) -> i64;
+    fn vesper_kit_greet(result: *mut u64, name: *mut u64) -> i64;
     fn vesper_kit_largest_i64(xs: *mut u64, init: i64) -> i64;
     fn vesper_kit_largest_u64(xs: *mut u64, init: i64) -> i64;
     fn vesper_kit_mean(xs: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_kit_note_append(n: *mut u64, more: *mut u64) -> i64;
+    fn vesper_kit_note_clear(n: *mut u64) -> i64;
+    fn vesper_kit_note_edits(n: *mut u64) -> i64;
+    fn vesper_kit_note_new(result: *mut u64, text: *mut u64) -> i64;
     fn vesper_kit_plan_sends(peers: i64, bytes: i64, pause: i64) -> i64;
     fn vesper_kit_push_squares(xs: *mut u64, n: i64) -> i64;
     fn vesper_kit_scale(xs: *mut u64, k: i64) -> i64;
+    fn vesper_kit_shout(s: *mut u64) -> i64;
     fn vesper_kit_squares(n: i64) -> i64;
     fn vesper_kit_stamp(base: i64) -> i64;
     fn vesper_kit_sum(xs: *mut u64) -> i64;
@@ -321,6 +385,7 @@ unsafe extern "C" {
     fn vesper_kit_tree_build(result: *mut u64, depth: i64) -> i64;
     fn vesper_kit_tree_sum(t: *mut u64) -> i64;
     fn vesper_kit_word_bounds(text: *mut u64) -> i64;
+    fn vesper_kit_word_count(text: *mut u64) -> i64;
 }
 
 /// The sequence runtime of the Vesper library `kit`.
@@ -431,6 +496,16 @@ pub fn expired(now: u64, deadline: u64) -> bool {
     raw != 0
 }
 
+/// Calls `greet` of the Vesper library `kit` (`vesper_kit_greet`).
+pub fn greet(name: &str) -> String {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_kit_greet` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_str(name, |view_name| unsafe { vesper_kit_greet(result.as_mut_ptr(), view_name) });
+    unsafe { vesper_port_abi::string_take(RUNTIME, &result[0..]) }
+}
+
 /// Calls `largest_i64` of the Vesper library `kit` (`vesper_kit_largest_i64`).
 pub fn largest_i64(xs: &[i64], init: i64) -> i64 {
     // SAFETY: `vesper_kit_largest_i64` has exactly this signature in the export ABI; every
@@ -463,6 +538,44 @@ pub fn mean(xs: &[u64]) -> Result<u64, crate::kit::KitError> {
     }
 }
 
+/// Calls `note_append` of the Vesper library `kit` (`vesper_kit_note_append`).
+pub fn note_append(n: &mut Note, more: &str) -> () {
+    // SAFETY: `vesper_kit_note_append` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_str(more, |view_more| unsafe { vesper_kit_note_append(n.words.as_mut_ptr(), view_more) });
+    { let _ = raw; }
+}
+
+/// Calls `note_clear` of the Vesper library `kit` (`vesper_kit_note_clear`).
+pub fn note_clear(n: &mut Note) -> () {
+    // SAFETY: `vesper_kit_note_clear` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_kit_note_clear(n.words.as_mut_ptr()) };
+    { let _ = raw; }
+}
+
+/// Calls `note_edits` of the Vesper library `kit` (`vesper_kit_note_edits`).
+pub fn note_edits(n: &Note) -> u64 {
+    let mut arg_n = n.words;
+    // SAFETY: `vesper_kit_note_edits` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_kit_note_edits(arg_n.as_mut_ptr()) };
+    raw as u64
+}
+
+/// Calls `note_new` of the Vesper library `kit` (`vesper_kit_note_new`).
+pub fn note_new(text: &str) -> Note {
+    let mut result = [0u64; 4];
+    // SAFETY: `vesper_kit_note_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_str(text, |view_text| unsafe { vesper_kit_note_new(result.as_mut_ptr(), view_text) });
+    unsafe { Note::from_words(&result[0..]) }
+}
+
 /// Calls `plan_sends` of the Vesper library `kit` (`vesper_kit_plan_sends`).
 pub fn plan_sends(peers: u32, bytes: u64, pause: u64) -> Vec<crate::kit::Command> {
     // SAFETY: `vesper_kit_plan_sends` has exactly this signature in the export ABI; every
@@ -487,6 +600,15 @@ pub fn scale(xs: &mut [i32], k: i32) -> () {
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice_mut(xs, |view_xs| unsafe { vesper_kit_scale(view_xs, k as i64) });
+    { let _ = raw; }
+}
+
+/// Calls `shout` of the Vesper library `kit` (`vesper_kit_shout`).
+pub fn shout(s: &mut String) -> () {
+    // SAFETY: `vesper_kit_shout` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_string_mut(RUNTIME, s, |view_s| unsafe { vesper_kit_shout(view_s) });
     { let _ = raw; }
 }
 
@@ -597,6 +719,15 @@ pub fn word_bounds(text: &[u8]) -> Vec<u64> {
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 
+/// Calls `word_count` of the Vesper library `kit` (`vesper_kit_word_count`).
+pub fn word_count(text: &str) -> u64 {
+    // SAFETY: `vesper_kit_word_count` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_str(text, |view_text| unsafe { vesper_kit_word_count(view_text) });
+    raw as u64
+}
+
 impl Counter {
     /// `counter_hits` (`vesper_kit_counter_hits`).
     pub fn hits(&self) -> Vec<u64> {
@@ -621,6 +752,28 @@ impl Counter {
     /// `counter_total` (`vesper_kit_counter_total`).
     pub fn total(&self) -> u64 {
         counter_total(self)
+    }
+}
+
+impl Note {
+    /// `note_append` (`vesper_kit_note_append`).
+    pub fn append(&mut self, more: &str) -> () {
+        note_append(self, more)
+    }
+
+    /// `note_clear` (`vesper_kit_note_clear`).
+    pub fn clear(&mut self) -> () {
+        note_clear(self)
+    }
+
+    /// `note_edits` (`vesper_kit_note_edits`).
+    pub fn edits(&self) -> u64 {
+        note_edits(self)
+    }
+
+    /// `note_new` (`vesper_kit_note_new`).
+    pub fn new(text: &str) -> Note {
+        note_new(text)
     }
 }
 

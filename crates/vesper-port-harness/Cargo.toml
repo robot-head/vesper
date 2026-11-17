@@ -2,12 +2,15 @@
 name = "vesper-port-harness"
 version = "0.1.0"
 edition = "2024"
-description = "Cargo build-script helper that compiles a Vesper port with `vesper build --lib` and links it"
+description = "Cargo build-script helper that builds a Vesper port with `vesper build --lib` and links it"
 license = "MIT OR Apache-2.0"
 
+# No dependency on the `vesper` library: a crate the compiler itself links can
+# use this helper without a package cycle (port wave P1 lane 2, #899).
 [dependencies]
 cc = "1"
-vesper = { path = "../.." }
+toml = "0.8"
 
 [dev-dependencies]
 serde_json = { workspace = true }
+vesper = { path = "../.." }

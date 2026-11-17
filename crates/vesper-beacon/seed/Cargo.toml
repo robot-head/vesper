@@ -1,0 +1,32 @@
+[package]
+name = "vesper-beacon-seed"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Frozen Rust seed copy of vesper-beacon for the compiler's own dependency closure"
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899): the compiler links this
+# package, the Rust build of ../src, under the library name `vesper_beacon`.
+# Crates inside `cargo tree -p vesper -e normal,build` depend on it with
+# `vesper-beacon = { path = ".../seed", package = "vesper-beacon-seed" }`;
+# every other crate uses the port-backed package `vesper-beacon`. The Rust
+# code takes bug fixes only until self-hosting Stage 2.
+[lib]
+name = "vesper_beacon"
+path = "../src/lib.rs"
+
+[[test]]
+name = "behavior"
+path = "../tests/behavior.rs"
+
+[[test]]
+name = "exponential"
+path = "../tests/exponential.rs"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

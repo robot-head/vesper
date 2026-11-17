@@ -1,0 +1,4 @@
+// A submodule of the path dependency, imported as `scale::triple`.
+pub fn triple(x: i64) -> i64 eff [Fail[ArithOverflow]] {
+    x * 3
+}

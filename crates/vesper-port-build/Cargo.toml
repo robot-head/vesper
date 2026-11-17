@@ -1,0 +1,18 @@
+[package]
+name = "vesper-port-build"
+version = "0.1.0"
+edition = "2024"
+description = "Fixture for the Vesper port harness: a multi-file Loom package with a path dependency, linked through Cargo and Bazel"
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+
+[features]
+# Build the port from an edited copy of the package (a divergence check on
+# package sources): tests/package.rs must then fail.
+divergent = []
+
+[dependencies]
+vesper-port-abi = { path = "../vesper-port-abi" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }

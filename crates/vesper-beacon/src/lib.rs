@@ -1,5 +1,9 @@
-#![no_std]
-#![forbid(unsafe_code)]
+// The seed build (the compiler's copy) stays no_std and safe. The
+// port-backed build links the Vesper port through the generated binding,
+// which allocates its failure record and calls the C ABI.
+#![cfg_attr(not(vesper_port), no_std)]
+#![cfg_attr(not(vesper_port), forbid(unsafe_code))]
+#![cfg_attr(vesper_port, deny(unsafe_code))]
 //! Bounded host-library foundations for Beacon, independent of compiler/runtime effects.
 //!
 //! No TLS, clocks, allocator, transport, Arrow/OTLP encoding, or performance guarantee.
@@ -19,6 +23,19 @@ pub use histogram::*;
 pub use redaction::*;
 pub use spans::*;
 pub use traceparent::*;
+
+// Generated and committed, but kept outside src/ so formatters, which
+// check every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+
+/// Which build this is: `"vesper"` for the port-backed package
+/// `vesper-beacon`, `"rust"` for the seed copy `vesper-beacon-seed` that the
+/// compiler links.
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
 
 /// Payload intentionally has no `Debug`, formatting, or telemetry encoding implementation.
 /// This wrapper does not zeroize memory or prove information-flow noninterference.

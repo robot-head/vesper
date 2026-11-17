@@ -77,3 +77,13 @@ only a nonmutating `records()` iterator and transactional `try_consume_prefix`
 callback. The callback borrows the current ring, preventing mutation between
 prefix selection and successful removal; errors leave the FIFO intact. Arrow
 dependencies, schema/serialization and logical export budgets stay in the adapter.
+
+## Seed copy and port
+
+Port wave P1 (#899) splits this crate into two packages built from the same
+sources. `vesper-beacon` is the port-backed build: `build.rs` links the Vesper
+package in `vesper/` (for now a stub that ports only
+`FastLogHistogram::bucket_index`; the full port is lane 4, #901). The compiler
+and every crate in its dependency closure link `vesper-beacon-seed`
+(`seed/`), the frozen Rust build, under the same library name. See "Crates the
+compiler links" in `docs/maintenance/porting-a-crate.md`.

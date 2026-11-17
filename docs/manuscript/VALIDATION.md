@@ -2,9 +2,23 @@
 
 The checked-in PDF was regenerated from the under-review manuscript using Typst 0.15.1 and bundled fonts. The current review status and outstanding technical findings are recorded in [REVIEW-STATUS.md](REVIEW-STATUS.md).
 
-`verify.py` passed for the revised PDF: 220 pages, Parts I–VIII, Chapters 1–42, Appendices A and B, 293 bookmarks, 530 links, 159 preserved code blocks, and seven embedded font subsets. It found no missing text glyphs, checked-margin overflows, or sparse body pages under its current line-count and height thresholds. The verifier also checked that named theorems in explicitly cited Lean listings exist, without checking their signatures or proofs.
+`verify.py` passed for the 16 November 2026 editorial revision: 223 pages, Parts I–VIII, Chapters 1–42, Appendices A and B, 294 bookmarks, 530 links, 160 preserved code blocks, and seven embedded font subsets. It found no missing text glyphs, checked-margin overflows, or sparse body pages under its current line-count and height thresholds. The verifier also checked that named theorems in explicitly cited Lean listings exist, without checking their signatures or proofs.
 
 These are publication checks, not an audit of language rules, examples, proofs, implementations, security claims, or the completeness of spill-page detection.
+
+## Editorial revision: 16 November 2026
+
+The revision clarifies the audience and reading paths, shortens part and chapter summaries, and revises selected dense body explanations. It distinguishes proposed contracts and performance targets from implementation evidence and model proofs. The continuation-fission comparison now states its assumptions and proposal status. These edits do not resolve the open technical findings in `REVIEW-STATUS.md`.
+
+Comparison with the pre-edit source confirmed that all 160 fenced code blocks, 36 inference-rule blocks, 288 document anchors, and 43 external URL occurrences remain unchanged. The supplementary continuation-fission source remains provenance and was not edited. The edition date, normalized source hashes, and PDF metadata in `source-manifest.json` match the revised artifacts.
+
+Typst 0.15.1 compiled the PDF with bundled fonts. Both `test_verify.py` tests passed, and the website build and checks passed with the regenerated PDF. Full-document contact sheets and full-size samples of the introduction, continuation-fission chapter, trait chapter, extraction chapter, and realtime chapter were visually inspected for layout defects. On Windows, the Python checks ran with `-X utf8` to read the Unicode sources consistently.
+
+Integration on 17 November 2026 retained upstream manuscript additions through `b69383e3`, including float semantics, collections, strings, standard-library packages, and builtin-trait status. The combined PDF passed publication QA with 223 pages; all fenced code listings, inference rules, and anchors match the upstream source.
+
+## Earlier implementation and model validation
+
+The records below describe earlier work. The editorial revision did not rerun the compiler or Lean-model suites.
 
 Formal-model validation: Lean 4.35.0 passed `scripts/ci/check-lean-models.sh`, including the repaired ADT and capsule models and new scalar-store strong-update model. The emitted axiom reports contain no `sorryAx`; these checks do not extend the models beyond their stated scope.
 

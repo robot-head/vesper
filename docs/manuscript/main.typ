@@ -9,9 +9,9 @@
 #set document(
   title: "Vesper: Language Design and Formal Specification",
   author: "Vesper",
-  description: "The complete Vesper language specification: Parts I–VIII (Chapters 1–42), mechanized Lean 4 metatheory, and official brand specification.",
+  description: "An under-review Vesper language and platform design: Parts I–VIII (Chapters 1–42), selected Lean 4 models, and the official brand specification.",
   keywords: ("Vesper", "systems programming", "linear types", "lexical effects", "refinement types", "Lean 4"),
-  date: datetime(year: 2026, month: 11, day: 14),
+  date: datetime(year: 2026, month: 11, day: 16),
 )
 #set text(font: "Libertinus Serif", size: 10.5pt, fill: ink, lang: "en", hyphenate: true)
 #set par(justify: true, leading: 0.58em, spacing: 0.7em)
@@ -63,7 +63,7 @@
 #v(7mm)
 #text(size: 12pt)[Parts I–VIII · Chapters 1–42 · Appendices A and B]
 #v(1fr)
-#text(size: 10.5pt, fill: muted)[Manuscript edition\ 14 November 2026]
+#text(size: 10.5pt, fill: muted)[Manuscript edition\ 16 November 2026]
 #v(8mm)
 #link("https://vesper-lang.org")[vesper-lang.org]
 
@@ -72,24 +72,13 @@
 #counter(page).update(1)
 #text(size: 18pt, weight: "bold")[About this specification]
 #v(8mm)
-This manuscript describes a proposed end-state design for the Vesper programming language ($lambda_(upright("Vesper"))$). It contains illustrative rules, implementation sketches, and research goals alongside existing code. It is under technical review and is not a conformance standard or evidence of an end-to-end soundness or security proof. In particular, do not rely on its runtime isolation, cancellation, snapshot, or distributed-memory claims without independent validation against the implementation.
+This manuscript describes the proposed Vesper programming language and platform. It is for systems programmers, compiler developers, and programming-language researchers familiar with types, ownership, and concurrency. It introduces Vesper's notation as needed; the formal chapters assume experience reading typing judgments and operational semantics.
 
-The specification is organized bottom-up into eight architectural parts
-spanning Chapters 1–42 and Appendices A–B: core language design and unified
-four-axis modal, destination, liquid-refinement, and graded effect theory
-(Part I); the five-stage compiler pipeline, host workspace,
-prophecy-free Lean 4 verification extractor, verified bootstrap, Vesper Loom,
-and mathematical SemVer variance (Part II); zero-GC memory, SIMD, fiber I/O,
-wire FFI, and WasmFX substrates (Part III); incremental IDE, formatting,
-documentation, highlighting, concolic fuzzing, flight-recording, and PMU
-benchmarking tools (Part IV); bare-metal kernels, eBPF, unikernels,
-constant-time cryptography, and confidential enclaves (Part V); region
-serialization, non-malleable binary parsers, telemetry, kernel-bypass
-networking, HTTP/3 services, choreographic consensus, hermetic SQL, and DBSP
-stream processing (Part VI); and native user interfaces, tri-backend 3D
-graphics, deterministic physics, hard-realtime DSP, and shape-checked tensor
-compute (Part VII). Appendix A presents illustrative Lean 4 kernel models, and Appendix B specifies Vesper's geometric and visual
-identity.
+The draft combines design proposals, illustrative rules and listings, implemented components, and Lean 4 models. Each model establishes properties of its stated fragment. The manuscript remains under technical review and does not establish a conformance standard or an end-to-end soundness or security proof. Validate runtime isolation, cancellation, snapshots, and distributed-memory behavior against the implementation before relying on those claims.
+
+The eight parts progress from language foundations to platform applications. Part I covers ownership, borrowing, refinements, effects, traits, and macros. Part II covers compilation, proof extraction, bootstrap, packages, and compatibility. Part III introduces memory management, vectors, fibers, foreign interfaces, and WebAssembly plugins. Part IV covers developer tools and testing. Parts V–VII describe kernel and security services; data, networking, and storage; and interfaces, graphics, simulation, audio, and tensor compute. Part VIII contains the Lean model overview in Appendix A and the visual identity specification in Appendix B.
+
+Start with the Specification Overview for a map of the design. Read Chapters 1–5 for the core concepts before the proposed continuation-fission extension in Chapter 6. For proof scope, read Appendix A alongside Chapters 9–10. The repository's `docs/manuscript/REVIEW-STATUS.md` tracks unresolved technical findings; `VALIDATION.md` records publication checks and earlier validation results.
 
 #v(5mm)
 #text(weight: "bold")[Provenance]
@@ -101,12 +90,7 @@ identity.
 #v(5mm)
 #text(weight: "bold")[Typography and navigation]
 
-The manuscript is authored in native Typst markup with custom inference-rule
-blocks, mathematical equations, syntax-clean raw listings, and resolved
-internal cross-references across all parts, chapters, subsections, and
-appendices. Linked contents and PDF bookmarks provide direct navigation. Code
-blocks wrap at the page boundary and continue across pages while preserving
-exact source text in the editable Typst manuscript.
+Linked contents, cross-references, and PDF bookmarks connect the parts, chapters, and appendices. The editable Typst sources contain the inference rules, equations, tables, and code listings. Long listings wrap and continue across pages; the publication verifier checks that PDF text extraction preserves their source text.
 
 #v(5mm)
 #text(size: 9pt, fill: muted)[Typeset with Typst 0.15.1. Libertinus Serif, DejaVu Sans Mono, and New Computer Modern Math are embedded using Typst's bundled fonts.]

@@ -4,7 +4,7 @@
 > The [manuscript](../manuscript/README.md) is the sole specification; use the
 > [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
 
-`vesper build --lib` now exports sequences, slices, owned and linear handles,
+`vesper build --lib` now exports sequences, slices, strings, owned and linear handles,
 boxes and recursive enums, generic instances and `.vsys` imports under the
 schema `vesper.native.export-abi/2`. A library that uses none of them keeps
 schema `/1`, and its interface and binding are byte-identical to before
@@ -37,14 +37,22 @@ user-facing description is "The ABI", "What is exportable today" and
   `src/fip/aot_runtime.rs`, each its own commit. The box runtime now declares
   `exit` with a word argument, as the other runtimes do, so one module can
   link both.
+- Strings (follow-up after #920): `String` and `Str` cross as the
+  three-word value `{len, cap, data}`. `in Str`/`in String` lend a `&str`
+  in place (`vesper_port_abi::with_str`), `inout String` lends a
+  `&mut String` (`with_string_mut`), a `String` result is copied and freed
+  (`string_take`), and a `String` handle field is freed by the handle's drop
+  function (the local `vesper_str_release` in `src/seq/aot_runtime.rs`) and
+  read through the view (`str_view`). The kit's `greet`, `word_count`,
+  `shout` and `Note` handle exercise them.
 - The pilot's second library, `crates/vesper-port-pilot/vesper/kit.ves`,
   exercises every form and the five patterns. `pilot.ves` stays v1.
 
 ## Acceptance
 
-- `tests/kit.rs` (12 tests) passes against the Rust build and the Vesper
+- `tests/kit.rs` (13 tests) passes against the Rust build and the Vesper
   build. The divergent build changes one thing per form, and the test of
-  each form fails: `sequence_results`, `slice_parameters`, `owned_handles`,
+  each form fails: `sequence_results`, `slice_parameters`, `strings`, `owned_handles`,
   `linear_handles`, `recursive_enum_handles`, `generic_instances`,
   `vsys_imports`. The pattern tests keep passing.
 - `tests/kit_memory.rs` runs 10^5 cycles of every owning form, and
@@ -60,10 +68,9 @@ user-facing description is "The ABI", "What is exportable today" and
 
 ## Known gaps
 
-- Strings wait on #896/#920 (the 24-byte `{len, cap, data}` String and
-  `Str` view). They are the follow-up of this lane.
-- Native code does not free a sequence that goes out of scope, so a
-  sequence or a sequence-owning handle taken by value (`sink`) is refused.
+- Native code does not free a sequence or string that goes out of scope, so
+  a sequence, a string, or a handle owning one taken by value (`sink`) is
+  refused. Strings as sequence elements and `String` errors are refused too.
   Boxes are freed. Fixing the drop elaboration for sequences would lift this.
 - `Ord` on `i32` fails in the trait solver (`BRIDGE0004: unknown type i32`),
   so the pilot instantiates `largest` at `u64` and `i64`.

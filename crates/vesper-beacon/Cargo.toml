@@ -3,4 +3,17 @@ name = "vesper-beacon"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Bounded host tracing, v00 TraceContext, and full-u64 histograms"
+description = "Bounded host tracing, v00 TraceContext, and full-u64 histograms (port-backed build)"
+build = "build.rs"
+
+# This is the port-backed build: build.rs links the Vesper package in vesper/
+# and sets cfg(vesper_port). The compiler and every crate inside
+# `cargo tree -p vesper -e normal,build` use the frozen Rust seed copy,
+# crates/vesper-beacon/seed (package vesper-beacon-seed, same library name),
+# instead; see "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
+
+[dependencies]
+vesper-port-abi = { path = "../vesper-port-abi" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }

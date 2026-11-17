@@ -1,6 +1,42 @@
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
 vesper_crate(
     # tests/export.rs checks the pilot's committed binding.
     extra_test_data = ["//crates/vesper-port-pilot:files"],
+)
+
+# The seed-copy guard on the Bazel graph (the Cargo graph is checked by
+# tests/closure_guard.rs): no `vesper_port_object` may be a dependency of
+# the compiler or of the verified backend. The beacon-arrow query is the
+# positive control: it must find the port that crate links.
+[
+    genquery(
+        name = "ports_in_" + name,
+        expression = "kind('vesper_port_object', deps(%s))" % label,
+        opts = ["--output=label"],
+        scope = [label],
+    )
+    for name, label in [
+        ("vesper", "//:vesper"),
+        ("codegen_verified", "//crates/vesper-codegen-verified"),
+        ("beacon_arrow", "//crates/vesper-beacon-arrow"),
+    ]
+]
+
+rust_test(
+    name = "compiler_closure_has_no_ports",
+    srcs = ["bazel/closure_guard.rs"],
+    crate_root = "bazel/closure_guard.rs",
+    data = [
+        ":ports_in_beacon_arrow",
+        ":ports_in_codegen_verified",
+        ":ports_in_vesper",
+    ],
+    edition = "2024",
+    env = {
+        "PORTS_IN_BEACON_ARROW": "$(rootpath :ports_in_beacon_arrow)",
+        "PORTS_IN_CODEGEN_VERIFIED": "$(rootpath :ports_in_codegen_verified)",
+        "PORTS_IN_VESPER": "$(rootpath :ports_in_vesper)",
+    },
 )

@@ -44,6 +44,18 @@ impl Default for FastLogHistogram {
 }
 impl FastLogHistogram {
     pub const FOOTPRINT_BYTES: usize = core::mem::size_of::<Self>();
+    /// The port-backed build forwards to the Vesper stub port
+    /// (`vesper/src/lib.ves`); the seed build keeps the Rust below.
+    #[cfg(vesper_port)]
+    pub fn bucket_index(value: u64) -> usize {
+        match crate::port_binding::bucket_index(value) {
+            Ok(index) => index,
+            // Every u64 has a bin: the port's checked arithmetic cannot
+            // overflow (the bin index is at most 495).
+            Err(_) => unreachable!("bucket_index overflowed for {value}"),
+        }
+    }
+    #[cfg(not(vesper_port))]
     pub fn bucket_index(value: u64) -> usize {
         if value < 16 {
             return value as usize;

@@ -1,0 +1,8 @@
+// The index of the highest set bit of `v > 0`, plus `k`.
+pub fn highest_bit(v: u64, k: u64) -> u64 eff [Fail[ArithOverflow]] {
+    if v >> 1 == 0 {
+        k
+    } else {
+        highest_bit(v >> 1, k + 1)
+    }
+}

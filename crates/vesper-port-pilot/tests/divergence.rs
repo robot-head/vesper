@@ -33,6 +33,7 @@ fn divergent_port_fails_the_api_tests() {
 const KIT_FAILING: &[&str] = &[
     "sequence_results",
     "slice_parameters",
+    "strings",
     "owned_handles",
     "linear_handles",
     "recursive_enum_handles",

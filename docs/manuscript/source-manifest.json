@@ -1,6 +1,6 @@
 {
   "title": "Vesper: Language Design and Formal Specification",
-  "edition_date": "2026-11-14",
+  "edition_date": "2026-11-16",
   "part_count": 8,
   "chapter_count": 42,
   "appendices": [
@@ -30,8 +30,8 @@
   "typesetting_tools": {
     "typst": "0.15.1"
   },
-  "content_sha256": "a0fe689b2ec648f3d155ab6d0a569142f9c066719551847462f5d165d231e23e",
-  "template_sha256": "74e2a1137651abbf2472e28de2202fadc72ae076738849c7d5bc691fe4fbc99c",
+  "content_sha256": "a6a0243dacd94921b9522b722da6d2e4f8c2091956f0d5c8f315e0ce1031e605",
+  "template_sha256": "91ab2eb10ee7baf3033441bc84a94def9bf1671874f80854a3936117dc65340d",
   "source_hash_normalization": "UTF-8 with LF line endings",
   "transformations": [
     "Reorganized organically grown Sections 1\u201344 and Appendices A\u2013B into a unified 8-Part, 41-Chapter + Appendices A\u2013B monograph.",
@@ -47,7 +47,9 @@
     "Added closed-fragment progress, per-identity conservation, fresh minting, and exactly-once exhaustion proofs; corrected host and self-hosted field-floor computation.",
     "Added an operational ghost-erasure extension importing the checked core, with bidirectional evaluation equivalence, non-interference, and checked ghost-resource termination.",
     "Inserted the supplied continuation-fission chapter after Chapter 5 in Part I; renumbered former Chapters 6\u201341 to 7\u201342 and updated displayed cross-references and part boundaries while preserving existing anchors. Marked the absent ContinuationFission module as an illustrative listing.",
-    "Adapted the supplied chapter to the nested heading hierarchy, replaced unsupported Typst leadsto with arrow.squiggly, and split two inference-rule premises to fit the existing page layout. Preserved all 156 preexisting code blocks and retained the supplied source as provenance."
+    "Adapted the supplied chapter to the nested heading hierarchy, replaced unsupported Typst leadsto with arrow.squiggly, and split two inference-rule premises to fit the existing page layout. Preserved all 156 preexisting code blocks and retained the supplied source as provenance.",
+    "Editorial revision on 16 November 2026: clarified audience and reading paths, revised all part and chapter descriptions and selected body explanations, and aligned grammar, metatheory, and continuation-fission summaries with the existing draft status. Preserved all 160 code blocks, 36 inference-rule blocks, 288 anchors, and 43 external URL occurrences against the pre-edit source.",
+    "Integrated the editorial revision with upstream main through b69383e3, preserving float, collection, string, and standard-library additions and the corrected builtin-trait status. Rebuilt and checked the 223-page PDF."
   ],
   "revision_patch": {
     "filename": "0001-manuscript-unify-end-state-specification.patch",
@@ -55,18 +57,18 @@
     "applied_commit": "8471e7b41a595018aeae313b9eca516fd1e79b48"
   },
   "publication": {
-    "pages": 220,
+    "pages": 223,
     "parts": 8,
     "chapters": 42,
     "appendices": [
       "A",
       "B"
     ],
-    "bookmarks": 293,
+    "bookmarks": 294,
     "links": 530,
-    "code_blocks_preserved": 159,
+    "code_blocks_preserved": 160,
     "embedded_font_subsets": 7,
-    "pdf_bytes": 3946850,
-    "pdf_sha256": "5f0420c5176a5b5ab84ab4d60f0a5b23a2aa9fe01842188f5e3a6b51f4c92034"
+    "pdf_bytes": 3970550,
+    "pdf_sha256": "8af8e0d579b710c131faa7bfa863319768f1028962c815e7a456f0058acb7597"
   }
 }

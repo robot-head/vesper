@@ -53,11 +53,11 @@
 <overview>
 
 *Review status:* This document mixes proposed designs and illustrative listings with implemented components. Paths under `illustrative/` identify examples and are not repository files. Claims about proof, performance, security, and complete implementation remain subject to verification; no conformance or production-safety conclusion follows from this draft.
-#chapter-deck[Unified Language Architecture, Core Guarantees, and Platform Map]
+#chapter-deck[Design Goals, Proof Boundaries, and a Guide to the Platform]
 
 *Vesper* is a systems-language design with a native compiler and Lean 4 models for selected language and runtime properties. Its goals include explicit resource ownership, lexical borrowing, deterministic execution, and compositional verification. The implementation and mechanized models cover different subsets; this draft does not establish end-to-end memory safety, data-race freedom, or functional correctness for every backend and subsystem.
 
-Four design goals organize the language. Appendix A identifies the separate calculi and the properties actually proved; a single calculus combining all features remains open.
+The overview introduces four design goals and maps them to the eight parts below. Read Chapters 1–5 for the core notation, then follow the chapter links for individual subsystems. Appendix A identifies the separate calculi and their proved properties; a single calculus combining all features remains open.
 
 + *Four-Axis Modal Linearity and `@0` Ghost Erasure:* Bindings combine runtime presence $rho in {0, 1}$ with a modal vector $bold(m) = (u, p, c, o)$ for usage, portability, contention, and exchange order. The checked models establish resource conservation and exhaustion in their specified fragments. Closed, terminating ghost instrumentation has an operational erasure proof; general source ghost elaboration and captured ghost obligations remain open.
 + *Four-Mode Disjoint Projections and Liquid Refinements:* The design uses parameter modes (`in`, `inout`, `out`, `sink`) over field and slice projections. The place calculus and typed lens bridge establish safety and snapshot properties for initialized, same-typed updates and disjoint swaps. General dependent heap typing, allocation, and a complete refinement solver are not established by those proofs. Solver fragments and limits must be stated separately; no fixed query latency is guaranteed.
@@ -68,10 +68,10 @@ Four design goals organize the language. Appendix A identifies the separate calc
   table(
     columns: (23%, 15%, 62%),
     align: (left, left, left),
-    table.header([*Architectural Part*], [*Chapters*], [*Draft Scope, Packages, and Host Crates*]),
+    table.header([*Architectural Part*], [*Chapters*], [*Design Scope, Packages, and Host Crates*]),
     [*Part I: Language & Type Theory*],
     [#link(<part-1>)[Chapters 1--7]],
-    [PL foundations, deterministic LL(2) grammar, $lambda_(upright("Vesper"))$ 4-axis `ModeVec` lattice, `@0` ghost linearity, `in`/`inout`/`out`/`sink` field & slice projections, liquid refinements, one-shot lexical & pomonoid-graded effects, guarded clocks, quotients, *Pact* traits (`vesper-pact`), and *Forge* WASI macros (`vesper-forge`).],
+    [PL foundations, proposed LL(2) grammar, $lambda_(upright("Vesper"))$ 4-axis `ModeVec` lattice, `@0` ghost linearity, `in`/`inout`/`out`/`sink` field & slice projections, liquid refinements, one-shot lexical & pomonoid-graded effects, guarded clocks, quotients, *Pact* traits (`vesper-pact`), and *Forge* WASI macros (`vesper-forge`).],
     [*Part II: Compiler, Proofs & Governance*],
     [#link(<part-2>)[Chapters 8--12]],
     [5-stage compiler & workspace (`vesper-syntax`, `vesper-hir`, `vesper-refine`, `vesper-mir-pcg`, `vesper-opt-egglog`, `vesper-codegen-clif`), *Lean 4 Proof Extractor* (`vesper-verify-lean`), *Verified Bootstrap & DDC* (`vesper-codegen-verified`), *Vesper Loom* (`vesper-loom-*`), and *SemVer Variance* (`vesper-semver`).],
@@ -92,17 +92,17 @@ Four design goals organize the language. Appendix A identifies the separate calc
     [*Aura* native WinUI 3 / GTK 4 / SwiftUI (`vesper-aura`), *Ignis* tri-backend D3D12 / Vulkan 1.4 / Metal 4 engine (`vesper-ignis`), *Kinetic* bit-deterministic XPBD physics (`vesper-kinetic`), *Resonance* hard-realtime DSP & robotics (`vesper-resonance`), and *Tensor* shape-checked Paged-KV inference (`vesper-tensor`).],
     [*Part VIII: Metatheory & Identity*],
     [#link(<appendix-a>)[Appendices A--B]],
-    [Lean 4 mechanizations of stated fragments and their operational bridges; see Appendix A for proof scope and source files and canonical CAD/OKLCH brand geometry (*The Disjoint Field-Tree Prism*).],
+    [Lean 4 models of stated fragments and their operational bridges (Appendix A); canonical CAD/OKLCH brand geometry, *The Disjoint Field-Tree Prism* (Appendix B).],
   ),
   kind: table,
 )
 
 = Part I. Language Design and Formal Type Theory
 <part-1>
-#chapter-deck[Foundations, LL(2) Surface Syntax, Four-Axis Modal Calculus, Disjoint Projections, Liquid Refinements, Lexical Effects, and Trait Coherence]
+#chapter-deck[Language Foundations, Proposed Syntax, Ownership, Borrowing, Effects, and Abstraction]
 
 #_part-summary("Part I Architectural Scope")[
-  Part I defines the normative surface language and formal type theory of Vesper ($lambda_(upright("Vesper"))$). #link(<ch-1>)[Chapter 1] grounds Vesper's design in contemporary programming-languages research and introduces its core invariants. #link(<ch-2>)[Chapter 2] specifies the complete turbofish-free LL(2) grammar. #link(<ch-3>)[Chapters 3] through #link(<ch-5>)[5] formalize the four-axis modal lattice, `@0` ghost linearity, four-mode disjoint place and slice projections (`in`, `inout`, `out`, `sink`), decidable liquid refinement types, one-shot lexical and pomonoid-graded effect handlers, clock-indexed guarded recursion, and substructural quotients. #link(<ch-fission>)[Chapter 6] proposes continuation fission, escrow custody, and reaper calculus. #link(<ch-6>)[Chapter 7] completes the core language with colorless effect-polymorphic traits (*Vesper Pact*) and fuel-metered hygienic WASI macros (*Vesper Forge*).
+  Part I introduces Vesper's proposed language and type theory. #link(<ch-1>)[Chapter 1] explains the design rationale, and #link(<ch-2>)[Chapter 2] sketches the surface grammar and its unresolved ambiguities. #link(<ch-3>)[Chapters 3]–#link(<ch-5>)[5] present ownership modes, ghost values, place projections, refinements, effects, clocks, and quotients. #link(<ch-fission>)[Chapter 6] proposes continuation fission and escrow custody for cancellation. #link(<ch-6>)[Chapter 7] describes traits in *Pact* and macros in *Forge*. The rules describe intended behavior; Appendix A states which fragments have mechanized proofs.
 ]
 
 #figure(
@@ -111,7 +111,7 @@ Four design goals organize the language. Appendix A identifies the separate calc
     align: (left, left, left),
     table.header([*Chapter*], [*Title*], [*Key Judgments and Constructs*]),
     [#link(<ch-1>)[Chapter 1]], [Research Foundations and Rationale], [Substructural ownership, Mutable Value Semantics, Affect one-shot effects, `WriteTxn` walkthrough],
-    [#link(<ch-2>)[Chapter 2]], [Lexical Structure and LL(2) Grammar], [`UpperIdent`/`LowerIdent` separation, `[T]` generics, `@` index sigils, complete EBNF],
+    [#link(<ch-2>)[Chapter 2]], [Lexical Structure and Proposed Grammar], [`UpperIdent`/`LowerIdent` separation, `[T]` generics, `@` index sigils, proposed EBNF],
     [#link(<ch-3>)[Chapter 3]], [Core Calculus and Four-Axis Modalities], [`ModeVec` ($u, p, c, o$), `[K-Adt]` field well-formedness, `Capsule[T]`, `@ lifo`, `@0` ghost erasure],
     [#link(<ch-4>)[Chapter 4]], [Place Projections, Destinations, and Refinements], [`[T-Let]`, `[T-CallProj]`, `[T-CallSliceProj]`, `[T-OutSplitSlice]`, `[T-StrongUpdate]`, `[M-ContendStrip]`],
     [#link(<ch-5>)[Chapter 5]], [Lexical Effects, Resource Grades, and Quotients], [`[T-Perform]`, `[T-Handle]`, pomonoid budgets (`Region`, `Stack`, `ConstTime`), `Later[k, T]`, `quotient`],
@@ -123,20 +123,20 @@ Four design goals organize the language. Appendix A identifies the separate calc
 
 == 1. Research Foundations and Systems Design Rationale
 <ch-1>
-#chapter-deck[Scholarly Synthesis, Structural Gaps in Affine Systems Languages, and Canonical Overview]
+#chapter-deck[Research Influences, Ownership Tradeoffs, and a Transaction Example]
 
-Programming-language scholarship across POPL, PLDI, ICFP, OOPSLA, CAV, and USENIX Security (2025--2026) establishes a coherent post-lifetime systems agenda: achieving zero-GC memory safety, data-race freedom, and machine-checked functional correctness without viral lifetime parameters, colored asynchronous execution, `Pin` self-referential coroutines, or backward-prophecy verification overhead.
+Vesper explores how ownership modes, lexical borrowing, effects, and proof extraction can work together in a systems language. This chapter explains the research influences and design tradeoffs behind that proposal. Memory safety without garbage collection, data-race freedom, and machine-checked functional correctness are goals; the cited work and separate models do not establish all three for the complete Vesper implementation.
 
 === 1.1 Scholarly Foundations in Systems Language Design
 <ch-1-1>
 
-Six converging research streams directly shape Vesper's formal calculus and compiler pipeline:
+The following research streams inform the proposed calculus and compiler pipeline:
 
 #figure(
   table(
     columns: (23%, 24%, 53%),
     align: (left, left, left),
-    table.header([*Research Stream*], [*Representative Work*], [*Core Mechanism Unified in Vesper*]),
+    table.header([*Research Stream*], [*Representative Work*], [*Mechanism Informing the Vesper Design*]),
     [*Modal & Substructural Ownership*],
     [OxCaml Mode Crossing (ICFP 2026); _Data Race Freedom à la Mode_ (POPL 2025); _Ordered Adjoint Logic_ (IJCAR 2026)],
     [Replaces syntactic lifetime annotations with orthogonal modal axes (`copy`/`affine`/`linear`, `portable`/`pinned`, `uncontended`/`contended`, `unordered`/`lifo`) and automatic structural mode strengthening.],
@@ -159,16 +159,16 @@ Six converging research streams directly shape Vesper's formal calculus and comp
   kind: table,
 )
 
-Three insights from this literature anchor Vesper's design:
+The design draws on three ideas from this literature:
 
-- *Substructural Aliasing Without Syntactic Lifetimes:* _Tree Borrows_ (Villani, Hostert, Dreyer, and Jung, PLDI 2025) and _Place Capability Graphs_ demonstrate that fine-grained field-path exclusivity can be tracked over a place hierarchy without infecting surface types with region variables, while OxCaml's _Mode Crossing_ (ICFP 2026) shows how concrete component types automatically strengthen modal bounds without redundant trait constraints.
+- *Substructural Aliasing Without Syntactic Lifetimes:* _Tree Borrows_ (Villani, Hostert, Dreyer, and Jung, PLDI 2025) and _Place Capability Graphs_ demonstrate that fine-grained field-path exclusivity can be tracked over a place hierarchy without adding region variables to surface types, while OxCaml's _Mode Crossing_ (ICFP 2026) shows how concrete component types automatically strengthen modal bounds without redundant trait constraints.
 - *Linearity Across Delimited Control:* Multi-shot algebraic effect handlers violate linear ownership because invoking a captured continuation twice duplicates unique resources held on the suspended stack. _Affect: An Affine Type and Effect System_ (van Rooij and Krebbers, POPL 2025; see the #link("https://iris-project.org/pdfs/2025-popl-affect.pdf")[paper] and #link("https://www.youtube.com/watch?v=ftxm1NTmd_U")[presentation]) resolves this conflict by typing delimited continuations within the same substructural lattice as values.
 - *Compositional Verification Without Heap Separation Logic:* Because second-class mutable projections terminate strictly at call return and never alias, mutable systems code admits direct functional extraction into Lean 4 (`bv_decide`, `omega`, `grind`) without separation-logic frame boilerplate.
 
 === 1.2 Structural Limitations of Prior Affine Systems Languages
 <ch-1-2>
 
-Conventional ownership-based systems languages centered on affine destructors and first-class lifetime-indexed references exhibit five structural bottlenecks:
+Affine destructors and first-class lifetime-indexed references create tradeoffs that motivate five Vesper design goals:
 
 + *Affine (`at-most-once`) vs. True Linear (`exact-once`) Finalization:* Where ownership is purely affine, `mem::forget` is safe and implicit scope cleanup (`Drop`) is synchronous and infallible. The type system cannot enforce that a write-ahead log transaction is committed, an `io_uring` DMA buffer is harvested, a QUIC AEAD nonce ticket is retired, or a confidential-VM snapshot is reseeded across every control-flow and error path.
 + *Function Coloring, `Pin`, and Silent Cancellation Bugs:* Poll-based coroutine state machines split APIs into incompatible synchronous and `async` worlds, require `Pin` wrappers to stabilize self-referential borrows across suspension points, and silently drop partially mutated state when racing branches cancel a future at an arbitrary yield point.
@@ -263,7 +263,7 @@ pub fn append_batch(
 
 == 2. Lexical Structure and Proposed Surface Grammar
 <ch-2>
-#chapter-deck[Case-Partitioned Identifiers, Square-Bracket Generics, Refinement Sigils, and Complete EBNF]
+#chapter-deck[Identifier Classes, Generics, Refinement Sigils, and Grammar Sketch]
 
 Vesper source modules (`.ves`) and declarative FFI bindings (`.vsys`) are UTF-8 encoded. The grammar below is an incomplete design sketch, not a complete description of the implemented parser (`crates/vesper-syntax`). In particular, `f[k](x)` can denote either a generic call or an indexed function call under the productions below; no LL(2) guarantee follows from them.
 
@@ -458,9 +458,9 @@ LowerIdent     ::= /[a-z_][A-Za-z0-9_]*/ ;
 
 == 3. Core Calculus, Four-Axis Modalities, and Ghost Linearity
 <ch-3>
-#chapter-deck[Elaboration to $lambda_(upright("Vesper"))$, the Packed `ModeVec` Lattice, Mode Crossing, Capsule Sealing, LIFO Order, and `@0` Erasure]
+#chapter-deck[Ownership Modes, Mode Crossing, Capsules, Release Order, and Ghost Values]
 
-Surface modules elaborate into the core substructural calculus $lambda_(upright("Vesper"))$, in which every method receiver desugars into an explicit `in`, `inout`, `out`, or `sink` parameter projection, every `?` operator desugars into `match` over `Fail::raise`, and every effect operation targets an explicit lexical capability $l$.
+The proposed core calculus, $lambda_(upright("Vesper"))$, makes ownership and effects explicit. Method receivers become `in`, `inout`, `out`, or `sink` parameter projections; `?` becomes a `match` over `Fail::raise`; and each effect operation targets a lexical capability $l$. This chapter introduces the modes and ghost-presence annotations used in the later typing rules.
 
 === 3.1 Quantitative Presence and the Four-Axis Modal Lattice
 <ch-3-1>
@@ -537,7 +537,7 @@ Every type $tau$ possesses a modal kind bound $Delta tack.r tau : upright("mod "
   $Delta tack.r (tau_1 arrow.r^(epsilon)_(bold(m)) tau_2) : upright("mod ") bold(m)$,
 )
 
-+ *Field-Modality Well-Formedness ($forall i, bold(k)_i subset.eq.sq bold(m)_i$ in `[K-Adt]`):* Unannotated fields contribute their intrinsic kind $bold(m)_i = bold(k)_i$. An explicit field annotation `f_i: tau_i @@ m_i` raises the field mode floor and contributes $bold(m)_i$ only when the field's intrinsic kind under $Delta$ satisfies $bold(k)_i subset.eq.sq bold(m)_i$ (`E0105`). Consequently, `@@ copy` accepts only components provably `copy`, and `@@ affine` accepts only components at most `affine`; wrapping a `linear` obligation inside a `copy` struct via `Ticket @@ copy` is statically rejected, preventing this particular form of obligation weakening. Enum kinding joins the field contributions of every variant. Owned LIFO obligations cannot be aggregate fields: each effective field order must be `unordered`. A guard type may itself be nominally `lifo`, with its scalar representation fields unordered.
++ *Field-Modality Well-Formedness ($forall i, bold(k)_i subset.eq.sq bold(m)_i$ in `[K-Adt]`):* An unannotated field contributes its intrinsic kind, $bold(m)_i = bold(k)_i$. An annotation `f_i: tau_i @@ m_i` raises the field's mode floor only if its intrinsic kind under $Delta$ satisfies $bold(k)_i subset.eq.sq bold(m)_i$; otherwise the checker reports `E0105`. Thus `@@ copy` accepts only provably `copy` components, and `@@ affine` accepts only components at most `affine`. The checker rejects `Ticket @@ copy` when `Ticket` is linear, preventing a copyable wrapper from weakening that obligation. Enum kinding joins contributions from every variant. Aggregate fields must have effective order `unordered`; a nominally `lifo` guard may contain unordered scalar representation fields.
 + *Polymorphic Container Specialization Without Trait Duplication:* For `copy enum Option[T] { None, Some(T) }`, $bold(m)_(upright("decl")) = bot$, so `[K-Adt]` evaluates to $bot union.sq bold(k)_T = bold(k)_T$:
   - `Option[u64]` has kind `mod copy` (freely copied and implicitly dropped);
   - `Option[BufferPoolSlice]` has kind `mod affine` (implicitly droppable, non-copyable);
@@ -565,7 +565,9 @@ Refinement type indices (`Slice[u8, @len]`) and zero-sized Iris-style capability
 
 == 4. Place Projections, Destination Calculus, and Liquid Refinements
 <ch-4>
-#chapter-deck[Substructural Typing Judgments, Disjoint Field and Slice Projections, Write-Only OutSlots, and Horn SMT Refinements]
+#chapter-deck[Typing Contexts, Field and Slice Permissions, Initialization, and Refinements]
+
+Place projections describe which parts of a value a call may read, mutate, initialize, or consume. This chapter introduces the typing contexts, disjointness conditions, and snapshot postconditions used to express those permissions. The rules distinguish the proposed general system from the narrower place and refinement models in Appendix A.
 
 === 4.1 Typing Judgments, Discardability, and Context Splitting
 <ch-4-1>
@@ -647,7 +649,7 @@ Three core properties follow directly from these rules:
 
 + *Mode Crossing (`[T-Cross]`):* Generic code operating at `linear` mode strengthens concrete scalar results back to `copy` automatically as soon as $Delta tack.r tau : upright("mod copy")$ holds.
 + *No Escaping Second-Class Borrows (`[T-Abs]`):* Closures capture only owned values (`shr`, `mut`, and `out` projections cannot escape into heap closures), and capturing any `linear` value forces $u(bold(m)_(upright("fn"))) = upright("linear")$ (exact-once invocation).
-+ *Resumption Frame Condition (`u(bold(m)_z) subset.eq.sq upright("res")(epsilon_1)` in `[T-Let]`):* Pure expressions and `linear effect` operations (`Storage`, `Net`) satisfy $upright("res")(epsilon_1) = upright("linear")$, allowing live `linear` values in $Gamma_2$ to remain suspended across fiber yield points. Abortable effects (`Fail`, `Cancel`) yield $upright("res")(epsilon_1) = upright("affine")$, statically rejecting any live initialized `linear` obligation in $Gamma_2$ ($upright("linear") subset.eq.sq upright("affine")$ is false, `E0301`) while `[T-Match]` enforces identical consumption across every branch arm.
++ *Resumption Frame Condition (`u(bold(m)_z) subset.eq.sq upright("res")(epsilon_1)` in `[T-Let]`):* The continuation's live obligations must fit the effect's resumption mode. Pure expressions and `linear effect` operations (`Storage`, `Net`) have $upright("res")(epsilon_1) = upright("linear")$, so $Gamma_2$ may retain live linear values across a fiber yield. Abortable effects (`Fail`, `Cancel`) have $upright("res")(epsilon_1) = upright("affine")$. A live initialized linear obligation then fails the condition because $upright("linear") subset.eq.sq upright("affine")$ is false (`E0301`). Separately, `[T-Match]` requires identical consumption in every branch.
 
 === 4.3 Four-Mode Disjoint Place and Slice Projections
 <ch-4-3>
@@ -783,7 +785,9 @@ where
 
 == 5. Lexical Effects, Graded Budgets, Clocks, and Quotients
 <ch-5>
-#chapter-deck[One-Shot Algebraic Handlers, Resumption Soundness, Pomonoid Resource Grades, Guarded Recursion, and Metatheory]
+#chapter-deck[One-Shot Handlers, Resource Budgets, Guarded Recursion, and Quotients]
+
+Lexical effects connect operations to handlers whose continuation usage is explicit. This chapter presents handler typing, resource grades, guarded clocks, and quotient interfaces. Their rules have separate mechanized models; combining all of these features with linear state and source inference remains open.
 
 === 5.1 Effect Perform and Stateful Lexical Handler Typing
 <ch-5-1>
@@ -842,7 +846,7 @@ Resource accounting separates cumulative work, peak live stack space, and exact 
 
 The clock and quotient rules must separate logical validity from runtime scheduling and representation metadata:
 
-- *Clocked Guarded Recursion (`Later[k: clock, T]`):* A delayed runtime payload must have usage at most `affine`; a recursive step must capture only `copy` values and have a closed empty effect row. A graph without instantaneous cycles is only a dependency check, not a proof that source execution is productive. At proof presence `@0`, matching the active clock name is insufficient to force `Later`. Elimination requires universal clock quantification with a fresh clock absent from the ambient assumptions. Until that judgment is represented in the source checker, ghost forcing is rejected. `lean/ClockQuotientSafety.lean` gives a step-indexed logical model: validity at every clock index permits forcing, a delayed false proposition at the initial tick cannot be forced, and total guarded steps preserve clock-closed validity. It does not model runtime scheduling or linear payload ownership.
+- *Clocked Guarded Recursion (`Later[k: clock, T]`):* A delayed runtime payload must be at most `affine`. A recursive step must capture only `copy` values and have a closed, empty effect row. A graph without instantaneous cycles checks dependencies; it does not prove productive source execution. At `@0`, forcing requires universal clock quantification with a fresh clock absent from ambient assumptions. Matching the active clock name is insufficient, and the source checker rejects ghost forcing until it represents the required judgment. The step-indexed model in `lean/ClockQuotientSafety.lean` permits forcing from validity at every clock index, rejects a delayed false proposition at the initial tick, and preserves clock-closed validity through total guarded steps. It excludes runtime scheduling and linear payload ownership.
 - *Substructural `quotient` Types:* The representation kind must lie below the quotient's declared kind. Every public operation, including `inout` methods, requires a congruence certificate. An observation must return equal results for related representatives; an updating operation must additionally return related post-states. `ClockQuotientSafety.publicObserve` and `publicStep` use actual Lean proofs to construct `Quot.lift`; the representation-capacity counterexample cannot satisfy their premises. The core declaration helper checks an independent export inventory for missing, duplicate, unrelated, or mismatched proof statuses. A caller-supplied `proved_respects` flag is bookkeeping, not a certificate: integration must obtain it from trusted proof checking and bind it to the operation body and relation. Source elaboration, artifact binding, and runtime layout correspondence remain separate obligations.
 
 === 5.5 Core Metatheoretic Soundness Guarantees
@@ -857,22 +861,24 @@ The repository proves progress, preservation, resource exhaustion, handler-state
 
 == 6. Substructural Continuation Fission, Escrow Projections, and Reaper Calculus
 <ch-fission>
-#chapter-deck[Additive-Conjunctive Continuations (`resume` & `reap`), Co-Owned `escrow` DMA Leases, PCG Backward Slicing, and Graded Quarantine Bounds]
+#chapter-deck[Proposed Cancellation Paths, Escrow Custody, and Cleanup Budgets]
 
 *Design status:* This chapter is a proposed extension. Its grammar, lowering, timing and memory-budget claims are not implementation guarantees or completed end-to-end soundness proofs; the existing manuscript review status applies.
 
 Core substructural effect systems—including #link("https://iris-project.org/pdfs/2025-popl-affect.pdf")[Affect] (van Rooij and Krebbers, POPL 2025) and #link("https://www.microsoft.com/en-us/research/wp-content/uploads/2023/11/qualified-effect-types-2018.pdf")[Qualified Effect Types] (Leijen, 2018)—assign a single monolithic usage mode $q in {upright("copy"), upright("affine"), upright("linear")}$ to each captured delimited continuation $k$. In #link(<ch-4-2>)[Section 4.2] and #link(<ch-5-2>)[Section 5.2], Vesper's baseline `[T-Let]` Resumption Frame Condition ($u(bold(m)_z) subset.eq.sq upright("res")(epsilon_1)$) enforces soundness under that monolithic assumption by statically rejecting (`E0301`) any abortable effect (`Fail::raise` via `?` or `Cancel` via `Pulse::timeout`) whenever a `linear` obligation resides in the continuation frame $Gamma_2$.
 
-In real systems software, however, monolithic continuations create an acute three-way trilemma across completion-based kernel I/O (`io_uring`, IOCP), zero-copy RDMA, GPU command queues, and transactional storage:
+Completion I/O (`io_uring`, IOCP), RDMA, GPU queues, and transactional storage motivate three cancellation concerns:
 
-+ *Synchronous Coroutine Drop Causes Hardware DMA Use-After-Free:* In poll-based coroutine languages (#link("https://without.boats/blog/poll-drop/")[Asynchronous Destructors], Without Boats; #link("https://sabrinajewson.org/blog/async-drop")[Async Destructors and Completion Futures], Jewson; #link("https://clef-lang.com/blog/rusts-retrofits/")[Rust's Retrofits]), cancelling a future by dropping its state machine reclaims stack or coroutine memory synchronously while kernel `io_uring` SQEs (#link("https://man7.org/linux/man-pages/man7/io_uring_cancelation.7.html")[`io_uring_cancelation(7)`]) or remote RNIC `rkey` windows (#link(<ch-34-2>)[Section 35.2]) still hold live physical DMA pointers into that memory.
-+ *Inline Blocking `AsyncDrop` Destroys Timeout Latency:* Stalling the cancelling fiber inside an asynchronous destructor until a wedged disk controller, stalled peer, or remote RNIC finishes draining defeats the deadline guarantee that motivated cancellation in the first place.
-+ *Monolithic Linear Rejection (`E0301`) Prohibits Idiomatic `?` and Timeouts:* Requiring manual destructuring before every fallible `?` check or `Pulse::race` branch forces quadratic state-cleanup boilerplate across pipelined I/O loops.
++ *Synchronous Drop and DMA Lifetimes:* Dropping a coroutine state machine can reclaim its memory before external operations finish. If kernel `io_uring` SQEs or remote RNIC `rkey` windows still reference that memory, early reclamation risks use-after-free. Relevant discussions include #link("https://without.boats/blog/poll-drop/")[Asynchronous Destructors] (Without Boats), #link("https://sabrinajewson.org/blog/async-drop")[Async Destructors and Completion Futures] (Jewson), #link("https://clef-lang.com/blog/rusts-retrofits/")[Rust's Retrofits], #link("https://man7.org/linux/man-pages/man7/io_uring_cancelation.7.html")[`io_uring_cancelation(7)`], and the RDMA design in #link(<ch-34-2>)[Section 35.2].
++ *Cleanup Latency:* Waiting inline for a disk controller, peer, or RNIC to drain can delay the cancelling fiber beyond its requested deadline. The proposal separates waking that caller from completing cleanup.
++ *Explicit Linear Cleanup:* The baseline rule rejects `?` or a `Pulse::race` abort while a linear obligation remains live (`E0301`). Manual cleanup before each fallible branch becomes difficult to maintain in pipelined I/O loops.
 
-*Substructural Continuation Fission* resolves all three constraints simultaneously without garbage collection, `'static` heap boxing, or `Pin`. Rather than treating a captured continuation $k$ as an indivisible function, Vesper fissions $k$ along Stage 3's Place Capability Graph (#link(<ch-7-5>)[Section 8.5]) into a *linear additive conjunction* ($amp$, Girard's _with_) pairing the normal resumption path $k . upright("resume")$ with a compiler-sliced residual reaper $k . upright("reap")$, backed by co-owned `escrow` place projections and pomonoid quarantine-memory budgets (`EscrowMem`).
+*Substructural Continuation Fission* proposes to address these constraints without garbage collection, `'static` heap boxing, or `Pin`. Rather than treating a captured continuation $k$ as an indivisible function, Vesper fissions $k$ along Stage 3's Place Capability Graph (#link(<ch-7-5>)[Section 8.5]) into a *linear additive conjunction* ($amp$, Girard's _with_) pairing the normal resumption path $k . upright("resume")$ with a compiler-sliced residual reaper $k . upright("reap")$, backed by co-owned `escrow` place projections and pomonoid quarantine-memory budgets (`EscrowMem`).
 
-=== 6.1 Architectural Comparison and Core Fission Guarantees
+=== 6.1 Architectural Comparison and Fission Requirements
 <ch-fission-1>
+
+The table compares the proposed contracts. Its fission column states design targets, not measured performance or completed proofs. Other columns summarize the cleanup strategies assumed by this comparison.
 
 #figure(
   table(
@@ -883,35 +889,35 @@ In real systems software, however, monolithic continuations create an acute thre
       [*Sync Coroutine `Drop`*],
       [*Inline `AsyncDrop`*],
       [*Monolithic `[T-Let]`*],
-      [*Vesper Continuation Fission*],
+      [*Proposed Fission Contract*],
     ),
     [*Normal-Path Linearity*],
     [None (`mem::forget` legal)],
     [Weak (opt-in binding)],
     [*Exact-once* (`Theorem 2`)],
-    [*Exact-once* (`Theorem 2` preserved)],
+    [Exact-once preservation required],
     [*`?` / `Cancel` Across Live Obligations*],
     [Permitted (silent drops)],
     [Permitted (inline await)],
     [*Rejected* (`E0301`)],
     [*Permitted* for types with `reap`],
     [*`io_uring` / RDMA Stack DMA Safety*],
-    [*Unsound* (DMA UAF on drop)],
-    [Sound only if caller blocks],
+    [Unsafe if DMA outlives storage],
+    [Wait for DMA before reclaiming],
     [Requires `OwnedDmaBuf`],
-    [*Sound* (`EscrowCell` CQE quarantine)],
+    [Quarantine via `EscrowCell` until CQE],
     [*Caller Wakeup on Timeout*],
-    [$O(1)$ (unsafe)],
+    [$O(1)$ drop; DMA lifetime separate],
     [*Unbounded stall*],
     [Cannot cancel],
-    [*$O(1)$ deterministic* (`4` instructions)],
+    [$O(1)$ target (`4` instructions)],
     [*Zombie Quarantine Memory*],
     [N/A],
     [Caller frame retained],
     [N/A],
-    [*Statically bounded* (`EscrowMem @ <= B`)],
+    [Bound required (`EscrowMem @ <= B`)],
     [*Lean 4 Verification*],
-    [Requires Iris prophecies],
+    [Proof approach depends on model],
     [Opaque poll state machine],
     [Single-path `EffM`],
     [*Dual-branch pure state reducer*],
@@ -919,7 +925,7 @@ In real systems software, however, monolithic continuations create an acute thre
   kind: table,
 )
 
-Four normative guarantees govern Continuation Fission across all five compiler stages:
+The proposal sets four requirements for continuation fission across the compiler stages:
 
 + *Uncompromised Normal-Path Linearity:* Defining a `reap` clause on a `linear struct` *never* relaxes its usage mode to `affine`. Falling off the end of a block without an explicit terminal consumer (`tx.commit()`, `IoUring::await_read()`) remains a hard compile-time error; `reap` is reachable exclusively along typed abort edges (`k.reap()`).
 + *Co-Owned `escrow` Custody Without `'static` Heap Copies:* Passing `escrow buf[0..4096]` loans disjoint read/write custody of `buf` to an external hardware or kernel queue bound to a linear ticket `h : T[@buf]`. While `h` is live, the Place Capability Graph forbids all CPU `in`, `inout`, `out`, and `sink` accesses to `buf[0..4096]`.
@@ -929,7 +935,7 @@ Four normative guarantees govern Continuation Fission across all five compiler s
 === 6.2 LL(2) Surface Grammar Extensions: `escrow` and `reap`
 <ch-fission-2>
 
-Continuation Fission extends #link(<ch-2-2>)[Section 2.2]'s deterministic LL(2) grammar with three conflict-free productions (`'escrow'` and `'reap'` are reserved keywords in parameter/item positions):
+Continuation Fission proposes three additions to the grammar sketch in #link(<ch-2-2>)[Section 2.2] (`'escrow'` and `'reap'` are reserved keywords in parameter/item positions):
 
 ```text
 (* 1. Fifth Place-Passing Mode: Asynchronous Hardware / Kernel Co-Custody *)
@@ -947,7 +953,7 @@ PostfixOp      ::= ...
                  | '.' 'reap'   '(' ')' ;            (* pi_2(k): residual obligation reaper *)
 ```
 
-Lookahead remains strictly *LL(2)*: inside `StructDecl`, `'reap' '('` disambiguates in two tokens from `FieldDecl` (`Vis? GhostMod? TempTier? LowerIdent ':'`), and inside `Arg` / `Param`, `'escrow'` occupies the exact lexical slot of `PassMode`.
+The intended local lookahead argument is: inside `StructDecl`, `'reap' '('` disambiguates in two tokens from `FieldDecl` (`Vis? GhostMod? TempTier? LowerIdent ':'`), and inside `Arg` / `Param`, `'escrow'` occupies the exact lexical slot of `PassMode`.
 
 === 6.3 Formal Typing Judgments: `escrow`, `[T-Let-Fission]`, and `[T-Handle-With]`
 <ch-fission-3>
@@ -1232,7 +1238,7 @@ end Vesper.ContinuationFission
 === 6.7 Five-Stage Lowering, Split `EscrowCell` ABI, and SemVer Variance
 <ch-fission-7>
 
-Continuation Fission introduces zero overhead on functions without `escrow` projections and zero heap allocations on abort paths:
+The proposed lowering targets no additional overhead for functions without `escrow` projections and no heap allocation on abort paths. The instruction counts below are design estimates:
 
 + *Stage 3 — Backward Reaper Slicing (`vesper-mir-pcg`):* At every CFG edge performing an abortable effect (`res(epsilon) = affine`), the PCG solver walks live `linear` bindings $h_m, dots, h_1$ in reverse dominance order, validates `[T-ReapSlice]` disjointness, and marks only locals referenced by `escrow` parameters of asynchronous `reap` blocks with storage class `Storage::EscrowSubFrame`.
 + *Stage 4 — Split `EscrowCell` Sub-Frame Placement (`vesper-opt-egglog`):* CPU-only locals remain in standard stack slots on the 64 KiB `Pulse` fiber stack. `Storage::EscrowSubFrame` locals pack into a cache-aligned `EscrowCell` bumped in 3 instructions from the worker shard's Domain-1 `ShardSlab` (#link(<ch-12-3>)[Section 13.3]) at function prologue and popped inline on normal return (`0` `memcpy`, `0` atomic instructions).
@@ -1241,9 +1247,9 @@ Continuation Fission introduces zero overhead on functions without `escrow` proj
 
 == 7. Vesper Pact and Forge: Traits, Coherence, and WASI Macros
 <ch-6>
-#chapter-deck[Colorless Modal Traits, Stratified Canonical and Named Coherence, and Anti-Smuggling WASI Metaprogramming]
+#chapter-deck[Effect-Polymorphic Traits, Coherence, Named Models, and Hygienic Macros]
 
-*Vesper Pact* (`crates/vesper-pact`) and *Vesper Forge* (`crates/vesper-forge`) provide Vesper's trait polymorphism and compile-time metaprogramming layer, grounded in type-class coherence theory (#link("https://arxiv.org/abs/2502.20546")[On the State of Coherence in the Land of Type Classes], Racordon et al., 2025), tabled canonical goal resolution (#link("https://blog.rust-lang.org/2026/08/21/enabling-next-solver-on-nightly/")[Next-Generation Trait Solver], 2026), capability-passing effect polymorphism, and Lean 4's two-way macro hygiene (#link("https://arxiv.org/abs/2001.10490")[Beyond Notations], Ullrich and de Moura).
+*Vesper Pact* (`crates/vesper-pact`) describes trait polymorphism, while *Vesper Forge* (`crates/vesper-forge`) describes compile-time macros. Pact combines type-class coherence, tabled goal resolution, and capability-passing effect polymorphism. Forge uses Lean 4's two-way macro-hygiene approach. The research references are #link("https://arxiv.org/abs/2502.20546")[On the State of Coherence in the Land of Type Classes] (Racordon et al., 2025), the #link("https://blog.rust-lang.org/2026/08/21/enabling-next-solver-on-nightly/")[Next-Generation Trait Solver] (2026), and #link("https://arxiv.org/abs/2001.10490")[Beyond Notations] (Ullrich and de Moura).
 
 === 7.1 Core Abstraction and Metaprogramming Invariants
 <ch-6-1>
@@ -1319,7 +1325,9 @@ fn write_partition_ids(in ids: Slice[Uuid], inout buf: ByteSlice) -> Result[usiz
 
 `CacheBTree[Uuid, Offset]` and `CacheBTree[Uuid, Offset, ReverseUuidOrd]` share identical runtime layouts yet remain statically distinct types, preventing accidental B-tree invariant corruption. In `vesper-verify-lean` (#link(<ch-8>)[Chapter 9]), `trait` declarations extract to Lean 4 `class` definitions and `model` declarations extract to named `instance` values.
 
-+ *Bounded Generics by Monomorphization:* A trait bound on a function, inherent `impl` block or type parameter (`fn max[T: Ord]`, `where K: Ord`, `T: mod copy + Ord`, `struct CacheBTree[K: Ord, V]`) is discharged statically, never by a runtime dictionary. Inside the generic body the bound is a solver assumption; every instance is resolved at its call site under that site's lexical `use model` scopes (as in `write_partition_ids` above), and the selected evidence flows into nested instances that use the same bound. Each instance is compiled as a private specialized copy, so backends and Lean extraction see only concrete code. A missing or ambiguous conformance is reported at the instance, and polymorphic recursion that would need unboundedly many instances is rejected. `dyn Trait` values and bounded functions used as first-class values remain out of scope until dictionary passing exists. The current implementation provides `Eq`, `Ord` (with `Ordering`) and `Hash` as builtin traits with canonical conformances for the integer scalars, `bool`, `()` and tuples of two to four copy elements. Struct conformances are opt-in: an empty canonical impl over all of the struct's parameters (`impl Ord for Point {}`, `impl[T] Ord for Pair[T] {}`) derives the conformance lexicographically in field order, with a where-bound on each parameter a field mentions, and every field must already conform. Opting in keeps field order from silently becoming an ordering or hashing contract and keeps types holding secrets unhashable unless asked; `Hash` is a deterministic FNV-style fold that never depends on addresses or iteration order. They stay builtin for now (the self-hosted front end cannot yet parse the package that would declare them); `@vesper-std/core` (#link(<ch-12>)[Chapter 13]) builds its ordering helpers on them.
++ *Bounded Generics by Monomorphization:* Trait bounds on functions, inherent `impl` blocks, and type parameters (`fn max[T: Ord]`, `where K: Ord`, `T: mod copy + Ord`, `struct CacheBTree[K: Ord, V]`) are discharged statically. A bound is a solver assumption inside a generic body. Each call site resolves the bound under its lexical `use model` scopes, and the selected evidence flows to nested instances using that bound, as in `write_partition_ids` above. Each instance becomes a private specialized copy, so backends and Lean extraction receive concrete code without runtime dictionaries. Missing or ambiguous conformances are reported at the instance. The compiler rejects polymorphic recursion requiring unboundedly many instances; `dyn Trait` values and first-class bounded functions remain outside this mechanism until dictionary passing exists.
+
+  The current builtins are `Eq`, `Ord` (with `Ordering`), and `Hash`. Canonical conformances cover integer scalars, `bool`, `()`, and tuples of two to four copy elements. Struct conformances require an explicit empty canonical implementation over all struct parameters, such as `impl Ord for Point {}` or `impl[T] Ord for Pair[T] {}`. Derivation follows field order lexicographically, adds a where-bound for each parameter mentioned by a field, and requires every field to conform. This opt-in makes ordering and hashing contracts explicit and keeps secret-holding types unhashable unless requested. `Hash` uses a deterministic FNV-style fold independent of addresses and iteration order. These traits remain builtin because the self-hosted front end cannot yet parse the package that would declare them. `@vesper-std/core` (#link(<ch-12>)[Chapter 13]) builds its ordering helpers on them.
 
 === 7.4 Vesper Forge: Two-Way Hygiene and WASI Macro Confinement
 <ch-6-4>
@@ -1503,10 +1511,10 @@ pub fn verify_macro_anti_smuggling(
 
 = Part II. Compiler Architecture, Verification, Bootstrap, and Governance
 <part-2>
-#chapter-deck[Five-Stage Compilation Pipeline, Host Workspace, Lean 4 Proof Extraction, Verified Bootstrap, Vesper Loom, and Mathematical SemVer]
+#chapter-deck[Compilation, Proof Extraction, Bootstrap, Package Policies, and Compatibility]
 
 #_part-summary("Part II Architectural Scope")[
-  Part II specifies the compiler architecture, formal verification pipeline, self-hosted bootstrap, and supply-chain governance of Vesper. #link(<ch-7>)[Chapter 8] defines the five-stage compiler pipeline and the unified workspace (`vesper-hir`, `vesper-refine`, `vesper-mir-pcg`). #link(<ch-8>)[Chapter 9] specifies prophecy-free functional extraction from `PlaceIr` to Lean 4 (`vesper-verify-lean`) and `.olean` proof certificate auditing. #link(<ch-9>)[Chapter 10] formalizes the self-hosted compiler (`@vesper-lang/compiler`), equational `egglog` rewrite witnesses, and Diverse Double-Compiling (`vesper-codegen-verified`). #link(<ch-10>)[Chapter 11] and #link(<ch-11>)[Chapter 12] specify *Vesper Loom* hermetic package governance (`vesper-loom-*`) and mathematical SemVer contextual substitutability (`vesper-semver`).
+  Part II follows source code through compilation, verification, and distribution. #link(<ch-7>)[Chapter 8] presents the five-stage compiler architecture. #link(<ch-8>)[Chapter 9] explains extraction from `PlaceIr` to Lean 4 and the proof-admission checks. #link(<ch-9>)[Chapter 10] describes bootstrap, rewrite witnesses, and diverse double-compiling. #link(<ch-10>)[Chapter 11] covers *Vesper Loom* package policies and build confinement. #link(<ch-11>)[Chapter 12] distinguishes source-interface compatibility from binary compatibility. These mechanisms have separate trust boundaries; together they do not yet establish end-to-end compiler correctness.
 ]
 
 #figure(
@@ -1525,9 +1533,9 @@ pub fn verify_macro_anti_smuggling(
 
 == 8. Compiler Pipeline and Host Architecture
 <ch-7>
-#chapter-deck[Five-Stage Compilation Pipeline, Synchronized Workspace Topology, HIR/ModeVec Types, and Place Capability Graphs]
+#chapter-deck[Compilation Stages, Workspace Structure, HIR, and Place Capability Graphs]
 
-Vesper's compiler, proof extractor, SemVer solver, Loom package manager, IDE server, and standard domain engines inhabit a unified modular workspace compiled into a single static `vesper` toolchain binary.
+Vesper's compiler and supporting tools share a modular workspace. This chapter follows the proposed five-stage pipeline from source syntax to native code and Lean models, then describes the host representations and place-capability analysis. The workspace also contains the proof extractor, SemVer solver, Loom package manager, IDE server, and domain libraries; the actual build and CLI determine which components a toolchain binary includes.
 
 === 8.1 Five-Stage Compilation and Dual-Backend Pipeline
 <ch-7-1>
@@ -1871,13 +1879,19 @@ impl PcgState {
 
 == 9. Prophecy-Free Lean 4 Verification Extractor
 <ch-8>
-#chapter-deck[Direct Functional Translation from `PlaceIr`, Lawful Field-Tree Lenses, `EffM` Interaction Trees, and Zero-`sorryAx` Certificates]
+#chapter-deck[Model Extraction, Mutable-State Translation, and Proof Admission]
 
-While modal linearity and disjoint place projections rule out memory corruption, data races, and leaked protocol handles by construction, critical systems substrates—WAL storage engines, consensus state machines, cryptographic sealers, and hypervisor page mappers—also require machine-checked proof of *functional correctness*. Verification pipelines for lifetime-based languages such as *Charon + Aeneas* and *Hax* (#link("https://arxiv.org/abs/2605.30106")[A Rust-to-Lean Verification Pipeline with AI Provers], CAV/AIMACS 2026) prove the value of targeting *Lean 4*'s small kernel (verified in #link("https://drops.dagstuhl.de/storage/00lipics/lipics-vol384-types2025/LIPIcs.TYPES.2025.2/LIPIcs.TYPES.2025.2.pdf")[Lean4Lean], TYPES 2025), yet must reconstruct region graphs and synthesize backward prophecy continuations wherever first-class `&'a mut T` pointers or `Pin` coroutines appear.
+Functional correctness requires a program to satisfy its stated behavior, beyond its ownership and borrowing rules. Storage engines, consensus machines, cryptographic operations, and hypervisor page mappers motivate Vesper's Lean 4 extraction design. *Charon + Aeneas* and *Hax* are related approaches; see #link("https://arxiv.org/abs/2605.30106")[A Rust-to-Lean Verification Pipeline with AI Provers] (CAV/AIMACS 2026). #link("https://drops.dagstuhl.de/storage/00lipics/lipics-vol384-types2025/LIPIcs.TYPES.2025.2/LIPIcs.TYPES.2025.2.pdf")[Lean4Lean] (TYPES 2025) studies kernel verification. This chapter distinguishes model extraction, proof admission, and the remaining obligation to connect those models to source and native execution.
 
 The repository extractor in `src/lean.rs` translates a checked subset into Lean models. Lexical mutable borrows motivate its functional state-passing representation, but the typing schemas alone do not prove that translation preserves source execution. The operational models and place bridges in Appendix A establish narrower correspondences; a complete compiler refinement remains open.
 
-A zero-`sorryAx` count is insufficient for proof governance: user axioms, opaque or unsafe definitions, compiler substitution, and trusted native evaluation can bypass it. A sound admission gate requires fresh kernel replay, a transitive axiom allowlist, inspection of executable substitutions, expected theorem signatures, and justified satisfiable assumptions. The current CLI implements fresh kernel replay and explicit axiom policies. It rejects `sorryAx`, the older compiler-trust axiom names, and Lean 4.35-generated axioms with a `_native` namespace component, even when explicitly whitelisted. For explicit extraction contract bindings, the auditor checks the replayed theorem type against the generated contract constant and rejects extra hypotheses. It also requires an exact, closed witness of the generated existential input precondition and restricts axioms to `propext`, `Classical.choice`, and `Quot.sound`. This excludes contracts admitted solely through contradictory preconditions or custom axioms. Termination, executable substitution checks, extraction correctness, and correspondence to native code remain additional obligations.
+A zero-`sorryAx` count does not establish proof validity: user axioms, opaque or unsafe definitions, compiler substitution, and trusted native evaluation can bypass it. A sound admission gate requires fresh kernel replay, a transitive axiom allowlist, inspection of executable substitutions, expected theorem signatures, and justified satisfiable assumptions.
+
+The current CLI implements fresh kernel replay and explicit axiom policies. It rejects `sorryAx`, the older compiler-trust axiom names, and Lean 4.35-generated axioms with a `_native` namespace component, even when explicitly whitelisted.
+
+For explicit extraction contract bindings, the auditor checks the replayed theorem type against the generated contract constant and rejects extra hypotheses. It also requires an exact, closed witness of the generated existential input precondition and restricts axioms to `propext`, `Classical.choice`, and `Quot.sound`. This excludes contracts admitted solely through contradictory preconditions or custom axioms.
+
+Termination, executable substitution checks, extraction correctness, and correspondence to native code remain additional obligations.
 
 === 9.1 Verification Architecture Overview
 <ch-8-1>
@@ -2031,7 +2045,7 @@ theorem appendBatch_crc_err_aborts_cleanly
 
 The implementation separates theorem checking from source and executable correspondence:
 
-+ *Kernel replay and explicit assumptions:* `src/proof_commands.rs` snapshots bounded artifact inputs and invokes `tools/proof-audit/Audit.lean`. The helper imports package artifacts with environment extensions and plugins disabled, then checks declarations in a fresh kernel environment. Requested names must be artifact theorems. The report records their types, transitive axioms, artifact inventory, and toolchain fingerprints. The default axiom policy is empty; explicitly permitted mathematical assumptions remain assumptions. Proof/compiler escape axioms cannot be allowed. An audit report is not reusable cache approval or a provenance certificate.
++ *Kernel replay and explicit assumptions:* `src/proof_commands.rs` snapshots bounded artifact inputs and invokes `tools/proof-audit/Audit.lean`. The helper disables environment extensions and plugins when importing package artifacts, then checks declarations in a fresh kernel environment. Requested names must identify artifact theorems. Reports include theorem types, transitive axioms, artifact inventory, and toolchain fingerprints. The default axiom policy is empty. Explicitly permitted mathematical axioms remain assumptions; proof/compiler escape axioms are never permitted. An audit report grants neither reusable cache approval nor a provenance certificate.
 + *Extraction and source binding:* `vesper verify --extract` generates a Lean bundle from a checked source module and optional proof script. A bare invocation checks model compilation using an internal `True` witness; it does not prove every emitted contract proposition. Selected user theorems are replayed under the explicit axiom policy. Supplying `--contract-proof Function=Theorem` requires a binding and a `--contract-witness Function=Theorem` input witness for every emitted contract. Generated wrappers must have exactly the corresponding contract constant as their replayed type, without additional hypotheses; even implicitly abstracted section instances are rejected. The `checked_contracts` report field separates these proofs from the proposition inventory. Each witness proves the generated `f$admissible` proposition: there exist values for all parameters satisfying the declared precondition, or `True` when no precondition is declared. The same closed-signature check applies to the witnesses, reported as `checked_preconditions`. Contradictory preconditions and hidden instance assumptions fail this gate. Input inhabitation alone does not establish termination or successful return. Cached `.olean` bytes must equal a fresh compilation of the current bundle, and replay uses that fresh compilation's artifact closure. A valid unrelated theorem recorded under the right cache key is rejected. Cache hits therefore still incur compilation and replay.
 + *Publication scope:* `vesper publish` can apply the same artifact replay policy as a release gate. Its acceptance does not independently prove that selected theorem statements describe the release's executable behavior. Publication does not yet require the extraction contract bindings described above; package-wide expected-signature checks and SemVer proof transport remain open. The separate finite `ResourceModel42` transport tests do not establish whole-compiler refinement or a universal second-checker gate.
 
@@ -2052,9 +2066,9 @@ These commands require the pinned Lean 4.35.0 toolchain and real input files. Ad
 
 == 10. Verified Bootstrap, Rewrite Witnesses, and Diverse Double-Compiling
 <ch-9>
-#chapter-deck[In-Logic Self-Hosting, Equational E-Graph Witnesses, Direct Verified Codegen, and Seed-Trojan Elimination]
+#chapter-deck[Self-Hosting, Optimization Witnesses, Direct Codegen, and Build-Chain Trust]
 
-Vesper proposes both extraction of user proofs and validation of its own compiler. Neither the current Lean artifacts nor the examples below establish end-to-end compiler correctness or eliminate trust in the build chain. An inventory of the actual trusted compiler, runtime, proof checker, system libraries, and hardware is needed before assigning a TCB size.
+Vesper proposes validating both user programs and the compiler that translates them. This chapter describes self-hosting, optimization witnesses, direct code generation, and diverse double-compiling. The current Lean artifacts and examples do not establish end-to-end compiler correctness or eliminate build-chain trust. Assessing the trusted computing base (TCB) requires an inventory of the compiler, runtime, proof checker, system libraries, and hardware.
 
 === 10.1 Five Pillars of Toolchain Verification
 <ch-9-1>
@@ -2251,9 +2265,9 @@ pub fn audit_ddc_bootstrap_quorum(
 
 == 11. Vesper Loom: Hermetic Package Governance and Supply-Chain Confinement
 <ch-10>
-#chapter-deck[Package Calculus Resolution, Capability Ceilings, WASI Build Sandboxes, Content-Addressed Storage, and Unified CLI]
+#chapter-deck[Dependency Resolution, Capability Policies, Build Sandboxes, and Artifact Caches]
 
-*Vesper Loom* (`crates/vesper-loom-*`, surfaced directly through the `vesper` CLI) unifies dependency resolution, hermetic build execution, capability-bounded supply-chain confinement, reproducible artifact distribution, and `.olean` proof caching inside the compiler pipeline—eliminating unsandboxed build scripts, ambient library authority, non-monotonic feature collisions, and external audit-plugin fragmentation.
+*Vesper Loom* (`crates/vesper-loom-*`, exposed through the `vesper` CLI) brings dependency resolution, build execution, artifact distribution, and `.olean` proof caching into the compiler pipeline. Its proposed policies bound package capabilities, confine build scripts, and support reproducible artifacts. This chapter describes those policies and their enforcement boundaries; a package policy alone does not establish supply-chain security.
 
 === 11.1 Formal Foundations of Package Resolution and Supply-Chain Security
 <ch-10-1>
@@ -2446,9 +2460,9 @@ pub fn run_hermetic_build_step(cfg: &HermeticBuildConfig<'_>) -> anyhow::Result<
 
 == 12. Mathematical SemVer Variance and Interface Subtyping
 <ch-11>
-#chapter-deck[Contextual Substitutability Across Modalities, Field Trees, Effect Rows, Liquid Refinements, and Resource Grades]
+#chapter-deck[Source Compatibility Across Ownership, Effects, Refinements, and Resource Bounds]
 
-`vesper semver` (`crates/vesper-semver`) conservatively compares supported, resolved source interfaces. Its diagnostics and counterexample descriptions are not a proof of contextual substitutability for the whole language. Source compatibility and binary compatibility are separate relations: a source-compatible change may alter sizes, alignments, field offsets, calling conventions, or caller resource bounds. Precompiled ABI consumers and layout-sensitive graded callers need an additional checked layout contract; the current source-interface schema does not certify one.
+`vesper semver` (`crates/vesper-semver`) conservatively compares supported, resolved source interfaces. Its diagnostics do not prove contextual substitutability for the whole language. A source-compatible change may still alter sizes, alignments, field offsets, calling conventions, or caller resource bounds. Precompiled consumers and layout-sensitive graded callers therefore need a separate checked layout contract; the current source-interface schema does not certify one.
 
 === 12.1 Modal, Effect-Row, and Field-Tree Subtyping Orders
 <ch-11-1>
@@ -2539,10 +2553,10 @@ Whenever `vesper semver` or `vesper publish` detects $I_(upright("new")) prec.cu
 
 = Part III. Core Runtime, Memory, SIMD, and Interoperability Substrates
 <part-3>
-#chapter-deck[Lexical Arenas, `AoSoA` Collections, Portable and Scalable SIMD, Fiber Completion I/O, Zero-Copy Wire FFI, and WasmFX Plugins]
+#chapter-deck[Memory Management, Vector Operations, Fiber I/O, Foreign Calls, and WebAssembly Plugins]
 
 #_part-summary("Part III Architectural Scope")[
-  Part III specifies the foundational zero-GC runtime and hardware-interoperability substrates upon which all higher-level Vesper services execute. #link(<ch-12>)[Chapter 13] (*Vesper Strata*) defines explicit heap capabilities, escape-free `VirtualArena` regions, `@fip` constructor reuse, and `tiled(N) struct` (`AoSoA`) collections. #link(<ch-13>)[Chapter 14] (*Vesper Vector*) specifies capability-typed fixed and scalable SIMD (`eff [Isa[P]]`). #link(<ch-14>)[Chapter 15] (*Vesper Pulse*) defines the stack-switching fiber runtime, `io_uring`/IOCP/`kqueue` DMA borrowing, and `SimPulse` deterministic simulation. #link(<ch-15>)[Chapter 16] (*Vesper Bridge*) and #link(<ch-16>)[Chapter 17] (*Vesper Nexus*) specify padding-free `wire struct` layouts, MPK/POE hardware-isolated C FFI, and Component-Model WasmFX plugins.
+  Part III describes memory management and the runtime interfaces used by later subsystems. #link(<ch-12>)[Chapter 13] introduces *Strata* allocation capabilities, lexical regions, constructor reuse, and tiled collections. #link(<ch-13>)[Chapter 14] covers *Vector* fixed-width and scalable SIMD. #link(<ch-14>)[Chapter 15] describes *Pulse* fibers, completion I/O, and deterministic simulation. #link(<ch-15>)[Chapter 16] covers *Bridge* wire layouts and foreign calls; #link(<ch-16>)[Chapter 17] covers *Nexus* WebAssembly plugins. The chapters identify the proposed ownership and isolation contracts, including obligations that require further implementation and validation.
 ]
 
 #figure(
@@ -2562,9 +2576,9 @@ Whenever `vesper semver` or `vesper publish` detects $I_(upright("new")) prec.cu
 
 == 13. Vesper Strata: Lexical Regions, Allocators, and AoSoA Collections
 <ch-12>
-#chapter-deck[Explicit Allocation Authority, Escape-Free Lexical Regions, `ShardSlab` and `VirtualArena` Tiers, `@fip` Reuse, and `tiled(N)` Cache Layouts]
+#chapter-deck[Allocation Capabilities, Lexical Arenas, Constructor Reuse, and Tiled Collections]
 
-*Vesper Strata* (`@vesper-std/alloc` and `@vesper-std/collections`, implemented in `crates/vesper-alloc`) defines Vesper's zero-GC memory management, lexical arena, and cache-conscious collection substrate. Rather than threading allocator type parameters through container signatures, infecting domain structs with region lifetimes, or defaulting to pointer-chasing Array-of-Structs (`AoS`) heap nodes, Strata pairs capability-gated allocation with compiler-managed cache tiling:
+*Vesper Strata* (`@vesper-std/alloc` and `@vesper-std/collections`, with implementation code in `crates/vesper-alloc`) describes memory management without garbage collection, lexical arenas, and cache-conscious collections. The design combines explicit allocation capabilities with compiler-managed tiling. Its proposed mechanisms are:
 
 - *Region Locality Under Adversarial Fragmentation:* #link("https://arxiv.org/abs/2605.17119")[Reconsidering "Reconsidering Custom Memory Allocation"] (van Kempen and Berger, ISMM 2026) demonstrates under adversarial heap preconditioning that general-purpose allocators suffer up to 2x slowdowns once long-running workloads fragment the heap, whereas *region allocators* preserve contiguous spatial locality and `O(1)` bulk reclamation regardless of prior heap state.
 - *Lexical Arenas With Safe Intra-Region Cycles:* #link("https://arxiv.org/html/2509.04253v3")[A Type System for Arenas with Higher-Order Reachability Tracking] (He et al., 2026) and #link("https://arxiv.org/html/2510.08939v2")[Reachability Types with Flow-Sensitive Effects] (2026) prove that tracking reachability at the lexically scoped arena boundary safely permits shared and cyclic graph topologies inside an arena while reclaiming the entire region in bulk at scope exit without garbage collection.
@@ -2823,9 +2837,9 @@ impl SizeClassSlab {
 
 == 14. Vesper Vector: Capability-Typed Portable and Scalable SIMD
 <ch-13>
-#chapter-deck[Zero-Cost ISA Lexical Capabilities, Fixed and Strip-Mined Scalable Vectors, `egglog` Saturation, and SAT Bit-Blast Equivalence]
+#chapter-deck[Instruction-Set Capabilities, Fixed and Scalable Vectors, and Equivalence Checks]
 
-*Vesper Vector* (`@vesper-std/simd`, implemented in `crates/vesper-simd`) specifies Vesper's capability-typed portable and scalable SIMD substrate across `SSE4.2`, `AVX2`, and `AVX-512` / `AVX10` on `x86_64`, `NEON` and `SVE2` on `AArch64`, and ratified `RVV v1.0` on `RISC-V`. Grounded in #link("https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/isle/veri/README.md")[_VeriISLE_] (ASPLOS 2024), _Guided Equality Saturation_ (Koehler et al., POPL 2024), _Verified Equality Saturation to SIMD in Lean 4_ (2026), and length-agnostic `SVE2` / `RVV 1.0` predication semantics, Vector represents target instruction-set availability as a zero-cost lexical capability (`eff [Isa[P]]`)—making fixed-width (`Vec[T, N]`) and scalable (`VVec[P, T]`) vector kernels safe by construction, inlineable across generic higher-order closures, equality-saturated via `egglog`, and bit-blast verifiable in Lean 4.
+*Vesper Vector* (`@vesper-std/simd`, with implementation code in `crates/vesper-simd`) describes fixed-width and scalable single-instruction, multiple-data (SIMD) operations. Target instruction sets include `SSE4.2`, `AVX2`, and `AVX-512` / `AVX10` on `x86_64`; `NEON` and `SVE2` on `AArch64`; and `RVV v1.0` on `RISC-V`. The design represents instruction-set availability as a lexical capability (`eff [Isa[P]]`) and proposes `egglog` optimization with Lean 4 equivalence checks. Its research influences include #link("https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/isle/veri/README.md")[_VeriISLE_] (ASPLOS 2024), _Guided Equality Saturation_ (Koehler et al., POPL 2024), and _Verified Equality Saturation to SIMD in Lean 4_ (2026).
 
 === 14.1 Core SIMD Safety, Portability, and Predication Guarantees
 <ch-13-1>
@@ -2955,9 +2969,9 @@ impl IsaProfileKind {
 
 == 15. Vesper Pulse: Asynchronous Fiber Runtime and Deterministic Simulation
 <ch-14>
-#chapter-deck[Cancel-Safe Lexical I/O Capabilities, Zero-Copy `io_uring` DMA, Structured Nurseries, Stack-Switching Fiber ABI, and `SimPulse`]
+#chapter-deck[Completion I/O, Cancellation, Fiber Stacks, Nurseries, and Simulation]
 
-*Vesper Pulse* (`@vesper-std/pulse`, implemented in `crates/vesper-pulse`) specifies Vesper's asynchronous completion I/O, structured fiber concurrency, live flight telemetry, and deterministic simulation substrate. Grounded in _Zero-Overhead Lexical Effect Handlers_ (Ma et al., OOPSLA 2025), _Virtualizing Continuations_ (Ma, Jung, and Zhang, PLDI 2026), _An Equational Axiomatization of Dynamic Threads via Algebraic Effects_ (Kammar et al., POPL 2026), and _Iris-WasmFX_ (2026), Pulse executes colorless `eff [...]` functions on pooled Zero-`Pin` fiber stacks—unifying `io_uring`/IOCP/`kqueue` DMA borrowing, `[T-Let]` cancel safety, disjoint-projection structured nurseries, and seeded `SimPulse` deterministic chaos testing.
+*Vesper Pulse* (`@vesper-std/pulse`, with implementation code in `crates/vesper-pulse`) describes completion I/O, structured fiber concurrency, telemetry, and seeded `SimPulse` simulation. The proposed runtime executes effectful functions on pooled fiber stacks and combines `io_uring`/IOCP/`kqueue` borrowing with cancellation and nursery rules. Research influences include _Zero-Overhead Lexical Effect Handlers_ (Ma et al., OOPSLA 2025), _Virtualizing Continuations_ (Ma, Jung, and Zhang, PLDI 2026), _An Equational Axiomatization of Dynamic Threads via Algebraic Effects_ (Kammar et al., POPL 2026), and _Iris-WasmFX_ (2026). Cancellation and stack relocation require the additional lifetime conditions discussed below.
 
 === 15.1 Asynchronous Runtime Architecture and Guarantees
 <ch-14-1>
@@ -3197,9 +3211,9 @@ impl PulseWorkerShard {
 
 == 16. Vesper Bridge: Zero-Copy Wire Layouts and Isolated FFI
 <ch-15>
-#chapter-deck[Padding-Free Endian-Safe `wire struct` Views, Declarative `.vsys` Bindings, Omniglot `ForeignVal` Validation, and Hardware MPK/POE Isolation]
+#chapter-deck[Wire Layouts, Binding Declarations, Foreign Values, and Isolation Boundaries]
 
-*Vesper Bridge* (`@vesper-std/ffi`, implemented in `crates/vesper-ffi`) specifies Vesper's zero-serialization wire layout and hardware-isolated Foreign Function Interface for kernel rings (`liburing`), native codecs (`liblz4`, `libzstd`), RDMA verbs (`rdma-core`), and columnar wire formats (Apache Arrow IPC, Kafka `RecordBatch` segments). Grounded in #link("https://www.usenix.org/conference/osdi25/presentation/schuermann")[Building Bridges: Safe Interactions with Foreign Languages through Omniglot] (Schuermann, Toubes, Potyondy, Pannuto, Milano, and Levy, OSDI 2025 Best Paper), #link("https://www.usenix.org/conference/usenixsecurity26/presentation/braunsdorf")[SafeFFI] (Braunsdorf et al., USENIX Security 2026), _Rage Against the State Machine / Abacus_ (Potyondy et al., ASPLOS 2026), and formal zero-copy layout typing, Bridge preserves modal linearity, disjoint borrowing, bit-validity invariants, and *Vesper Loom* supply-chain confinement across every foreign ABI boundary.
+*Vesper Bridge* (`@vesper-std/ffi`, with implementation code in `crates/vesper-ffi`) describes wire layouts and the foreign function interface (FFI). Its intended uses include kernel rings (`liburing`), codecs (`liblz4`, `libzstd`), RDMA verbs (`rdma-core`), Apache Arrow IPC, and Kafka `RecordBatch` segments. The design aims to preserve ownership, borrowing, bit validity, and Loom capability policies at foreign calls. Research influences include #link("https://www.usenix.org/conference/osdi25/presentation/schuermann")[Building Bridges: Safe Interactions with Foreign Languages through Omniglot] (Schuermann, Toubes, Potyondy, Pannuto, Milano, and Levy, OSDI 2025 Best Paper), #link("https://www.usenix.org/conference/usenixsecurity26/presentation/braunsdorf")[SafeFFI] (Braunsdorf et al., USENIX Security 2026), and _Rage Against the State Machine / Abacus_ (Potyondy et al., ASPLOS 2026).
 
 === 16.1 Cross-Language Memory, ABI, and Isolation Guarantees
 <ch-15-1>
@@ -3373,9 +3387,9 @@ A machine-readable interface file describes every symbol, and a generated Rust b
 
 == 17. Vesper Nexus: WasmFX Sandboxes and Linear WIT Plugins
 <ch-16>
-#chapter-deck[Component-Model WasmFX Delimited Continuations, Substructural WIT Resource Capabilities, and Zero-Copy Host/Guest Views]
+#chapter-deck[WebAssembly Continuations, Resource Lifecycles, and Host/Guest Views]
 
-*Vesper Nexus* (`@vesper-wasm/nexus`, implemented in `crates/vesper-nexus`) specifies Vesper's zero-GC WebAssembly Component Model (`wasm32-wasip2` and `wasip3`) compilation target and multi-tenant host plugin runtime. Generalizing #link(<ch-10-2>)[Section 11.2]'s compile-time macro sandbox into a production execution substrate, Nexus lowers one-shot lexical effects directly onto *WasmFX delimited continuations* (`cont.new`, `resume`, `suspend`), enforces WIT `resource` lifecycles statically via `Mode::Linear`, and streams multi-gigabyte payloads across host/guest boundaries over zero-copy Hardware Domain-1 shared memory rings.
+*Vesper Nexus* (`@vesper-wasm/nexus`, with implementation code in `crates/vesper-nexus`) describes a WebAssembly Component Model target (`wasm32-wasip2` and `wasip3`) and a multi-tenant plugin runtime. It extends the compile-time macro sandbox in #link(<ch-10-2>)[Section 11.2] to runtime plugins. The proposal maps one-shot effects to WasmFX continuations (`cont.new`, `resume`, `suspend`), tracks WIT `resource` lifecycles with `Mode::Linear`, and uses Hardware Domain-1 shared rings for host/guest payloads. Each mechanism requires the isolation and lifetime checks described below.
 
 === 17.1 WebAssembly Component, Continuation, and Resource Guarantees
 <ch-16-1>
@@ -3640,10 +3654,10 @@ impl FuelAccountant {
 
 = Part IV. Developer Tooling, Diagnostics, Verification Testing, and Presentation
 <part-4>
-#chapter-deck[Incremental LSP, CST Formatting and Lints, Living Obligation Docs, Perceptual Highlighting, Concolic Fuzzing, Reverse Debugging, and PMU Benchmarks]
+#chapter-deck[Editor Support, Formatting, Documentation, Highlighting, Testing, Replay, and Benchmarks]
 
 #_part-summary("Part IV Architectural Scope")[
-  Part IV specifies the integrated developer, quality-assurance, observability-debugging, and publication toolchain shipped inside the unified `vesper` binary. #link(<ch-17>)[Chapter 18] and #link(<ch-18>)[Chapter 19] specify *Vesper Lens* (`vesper-lsp`) resilient incremental compilation and *Vesper Stylus & Lint* (`vesper-fmt`, `vesper-lint`) MIF-verified autofixes. #link(<ch-19>)[Chapter 20] and #link(<ch-20>)[Chapter 21] define *Vesper Codex* (`vesper-doc`) living obligation graphs and single-JIT-module doctests alongside *Vesper Chroma* (`vesper-highlight`) OKLCH semantic highlighting. #link(<ch-21>)[Chapters 22] through #link(<ch-23>)[24] specify *Vesper Crucible* (`vesper-crucible`) concolic fuzzing and C/Rust lifting, *Vesper Chrono* (`vesper-chrono`) hardware time-travel debugging, and *Vesper Metronome* (`vesper-bench`) PMU microbenchmarking.
+  Part IV covers the tools used to inspect, test, and present Vesper programs. #link(<ch-17>)[Chapter 18] introduces the *Lens* language server; #link(<ch-18>)[Chapter 19] covers *Stylus* formatting and *Lint* analysis. #link(<ch-19>)[Chapter 20] describes *Codex* documentation and doctests, and #link(<ch-20>)[Chapter 21] describes *Chroma* highlighting. #link(<ch-21>)[Chapters 22]–#link(<ch-23>)[24] cover *Crucible* fuzzing, *Chrono* replay, and *Metronome* benchmarking. Performance budgets and proposed verification features require evidence for the relevant implementation and workload.
 ]
 
 #figure(
@@ -3665,9 +3679,9 @@ impl FuelAccountant {
 
 == 18. Vesper Lens: Incremental IDE Server and Resilient Recovery
 <ch-17>
-#chapter-deck[Sub-2ms `salsa` Query Pipeline, Poison-Free LL(2) Error Absorption, Dual Early-Cutoff Firewalls, and Obligation-Guided Code Actions]
+#chapter-deck[Incremental Queries, Error Recovery, Diagnostic Consistency, and Code Actions]
 
-*Vesper Lens* (`crates/vesper-lsp` and `crates/vesper-span`, invoked via `vesper lsp`) specifies Vesper's incremental Language Server Protocol daemon and multi-span diagnostic engine. Rather than maintaining separate batch-compiler and IDE frontends with divergent typecheckers, Lens executes the canonical production pipeline (`vesper-syntax`, `vesper-hir`, `vesper-refine`, `vesper-pact`, and `vesper-mir-pcg`) inside a demand-driven `salsa` incremental database under a sub-2-millisecond interactive keystroke budget—guaranteeing bit-exact diagnostic parity between live editor feedback and hermetic builds.
+*Vesper Lens* (`crates/vesper-lsp` and `crates/vesper-span`, invoked through `vesper lsp`) describes the incremental Language Server Protocol service and diagnostic engine. The design shares compiler queries across batch builds and editor requests through a demand-driven `salsa` database. It aims to keep diagnostics consistent while meeting a sub-2-millisecond keystroke budget; that budget requires measurement on specified workloads.
 
 === 18.1 Incremental Interactive Compilation and Recovery Guarantees
 <ch-17-1>
@@ -3906,13 +3920,13 @@ impl LensIncrementalState {
 
 == 19. Vesper Stylus and Lint: CST Formatting and Static Analysis
 <ch-18>
-#chapter-deck[Lossless Rowan CST Wadler-Lindig Formatting, Substructural Projection and Arena Lints, and MIF-Verified Autofixes]
+#chapter-deck[Source Formatting, Ownership-Aware Analysis, and Proposed Autofix Checks]
 
-*Vesper Stylus* (`crates/vesper-fmt`, invoked via `vesper fmt`) and *Vesper Lint* (`crates/vesper-lint`, invoked via `vesper lint` and surfaced inline in *Vesper Lens*, #link(<ch-17>)[Chapter 18]) specify Vesper's zero-configuration canonical source formatter and substructural static-analysis/autofix engine. Both subsystems operate directly over the production compiler's lossless `rowan` Concrete Syntax Tree, `vesper-hir` modal/effect checker, `vesper-mir-pcg` Place Capability Graph, and Stage 4 `egglog` e-graph engine—guaranteeing comment-complete formatting and MIF-verified, semantics-preserving code actions.
+*Vesper Stylus* (`crates/vesper-fmt`, `vesper fmt`) formats source code. *Vesper Lint* (`crates/vesper-lint`, `vesper lint`) analyzes programs and proposes fixes, including in *Lens* (#link(<ch-17>)[Chapter 18]). This chapter describes their intended use of the lossless `rowan` concrete syntax tree, HIR mode/effect information, place-capability analysis, and `egglog` optimization. Preserving comments and program behavior are separate obligations; the proposed verification of autofixes requires further implementation evidence.
 
 === 19.1 Canonical Formatting and Substructural Static-Analysis Guarantees
 <ch-18-1>
-+ *Comment-Complete Wadler-Lindig Formatting Over Rowan CSTs (`vesper fmt`):* Rust's `rustfmt` uses a standalone AST parser that routinely bails out on macro bodies, long method chains, or comments nestled inside generic bounds, and exposes dozens of unstable `rustfmt.toml` configuration knobs. Because Vesper's LL(2) square-bracket grammar (#link(<ch-2>)[Chapter 2]) parses deterministically into a lossless `rowan` Red-Green CST where every trivia token (comments, blank lines, attributes) is anchored structurally, Stylus lowers any CST node—including `macro { ... }` quotations (#link(<ch-6-4>)[Section 7.4]) and partial IDE buffers—into a *Wadler-Lindig / Oppen* pretty-printing Doc algebra. Formatting is zero-configuration, deterministic, idempotent (`fmt(fmt(src)) == fmt(src)`), and statically audited to preserve the exact non-trivia token stream plus 100 percent of user comments.
++ *Comment-Preserving Formatting (`vesper fmt`):* Stylus uses the lossless `rowan` concrete syntax tree to retain comments, blank lines, and attributes while formatting code. The proposed formatter lowers nodes to a Wadler-Lindig / Oppen document algebra, including `macro { ... }` quotations (#link(<ch-6-4>)[Section 7.4]) and partial IDE buffers. Its requirements are zero configuration, deterministic output, idempotence (`fmt(fmt(src)) == fmt(src)`), and preservation of the non-trivia token stream and every comment. These formatting requirements are distinct from the unresolved grammar guarantees in #link(<ch-2>)[Chapter 2].
 
 + *Substructural Mode, FieldTree, and Effect-Row Static Analysis (`vesper lint`):* Because `cargo clippy` runs on Rust HIR/MIR without modal kinds, disjoint field-tree projections, or lexical effect rows, it cannot reason about over-broad struct borrows, redundant heap authority, or sub-optimal modal bounds. Vesper Lint queries `vesper-hir` and `vesper-mir-pcg` directly to surface five high-signal systems lints with zero false positives: (2a) *Projection Narrowing (`overbroad_inout_projection`)* detects when `fn update(inout shard: WorkerShard)` mutates only `shard.metrics` and reads `shard.config`, offering a 1-click autofix to narrow the signature to `inout shard.{metrics}, in shard.{config}: WorkerShard`—unlocking caller-side `[T-CallProj]` parallelism (#link(<ch-4>)[Chapter 4]) as a Minor-compatible SemVer evolution (`[SV-Fn]`, #link(<ch-11-2>)[Section 12.2]); (2b) *Zero-Heap Arena Demotion (`demote_alloc_to_region`)* detects functions requesting global `eff [Alloc]` whose allocations never escape the return type, rewriting heap containers into a stack-bounded `Region::scoped` `VirtualArena` (#link(<ch-12-2>)[Section 13.2]) and removing `Alloc` from `eff [...]`; (2c) *Unused Capability and Over-Restrictive Mode Bounds (`unused_effect_capability`, `overly_restrictive_mode`)* flags declared effects in `eff [...]` never performed in the body and generic bounds like `[T: mod copy]` where `T` is consumed at most once (relaxable to `[T: mod linear]`); (2d) *FIP Constructor Pairing (`missed_fip_opportunity`)* queries Stage 4's `ReuseSlot` analysis (#link(<ch-12-4>)[Section 13.4]) when reordering an owned `match` unpack before a same-sized constructor enables `@fip` zero-allocation in-place reuse; and (2e) *Cancel-Point Proximity and Secret Hygiene (`early_cancel_checkpoint`, `unredacted_pii_boundary`)* hoists `Cancel::check()?` above `Mode::Linear` acquisitions (#link(<ch-14-2>)[Section 15.2]) and guards `@pii` / Vault `Sec*` values (#link(<ch-31-4>)[Section 32.4] and #link(<ch-27-2>)[Section 28.2]).
 
@@ -4169,13 +4183,13 @@ pub fn analyze_fn_substructural_lints(
 
 == 20. Vesper Codex: Living Documentation and Hermetic JIT Doctests
 <ch-19>
-#chapter-deck[Substructural Typestate Obligation Graphs, `FieldTree` Footprints, Single-JIT-Module `SimPulse` Doctests, and Variance-Aware Hoogle Search]
+#chapter-deck[Obligation Diagrams, Mutation Footprints, Signature Search, and Doctests]
 
-*Vesper Codex* (`crates/vesper-doc`, invoked via `vesper doc` and `vesper test --doc`, and surfaced inline on hover inside *Vesper Lens*, #link(<ch-17>)[Chapter 18]) specifies Vesper's hermetic living documentation generator, visual memory/protocol inspector, substructural signature search engine, and single-JIT-module doctest runner. Codex queries `vesper-hir`, `vesper-mir-pcg`, `vesper-semver`, and `vesper-verify-lean` directly to synthesize typestate obligation diagrams, `FieldTree` mutation footprints, `.olean` proof badges, and sub-100-millisecond Cranelift JIT doctest verification under `SimPulse`.
+*Vesper Codex* (`crates/vesper-doc`) describes documentation generation, signature search, and doctest execution through `vesper doc` and `vesper test --doc`. It also supplies hover information to *Lens* (#link(<ch-17>)[Chapter 18]). The design queries HIR, place-capability, compatibility, and proof metadata to display typestate diagrams, `FieldTree` mutation footprints, and `.olean` badges. A shared Cranelift JIT module and `SimPulse` are intended to support reproducible doctests; the sub-100-millisecond execution budget is a performance target.
 
 === 20.1 Living Specification, Doctest, and Signature-Search Guarantees
 <ch-19-1>
-+ *Auto-Synthesized Substructural Obligation Graphs, Mode-Crossing Matrices, and FieldTree Heatmaps:* In rustdoc, critical systems contracts—whether a handle must be closed explicitly, which struct fields a `&mut self` method actually mutates, or whether a function allocates on the global heap—are invisible in the rendered signature and rely on prose comments that silently rot. Codex extracts verified compiler metadata to render four interactive visual contracts on every item page: (1a) *Linear Typestate Obligation Diagrams* automatically graph every `Mode::Linear` type (`WriteTxn`, `Responder[HeadersPending]`, `Session[Proto]`, `SnapshotResumeTicket`) from its minting constructors across inout mutation edges to its terminal sink consumers (commit, abort), statically flagging any public linear type lacking a reachable public terminal consumer; (1b) *OxCaml Mode-Crossing Tables* display exact `[K-Adt]` instantiations for generic containers (`Option[T]` -> copy | affine | linear, #link(<ch-3>)[Chapter 3]); (1c) *Interactive FieldTree Borrow Footprints* color-code mutated leaf paths (`inout broker.{index, metrics}`) versus read-only leaf paths (`in broker.{config}`), showing callers at a glance which sibling fields remain free for concurrent `[T-CallProj]` borrows; and (1d) *Byte-Exact Wire and Cache-Line Maps* render 64-byte L1 cache-line diagrams for `tiled(16) struct` (`AoSoA`, #link(<ch-12-5>)[Section 13.5]) and bit/endianness offset rulers for padding-free `wire struct` headers (#link(<ch-15-2>)[Section 16.2]).
++ *Generated Ownership and Layout Views:* Codex proposes four views derived from compiler metadata. Linear typestate diagrams trace `WriteTxn`, `Responder[HeadersPending]`, `Session[Proto]`, and `SnapshotResumeTicket` from constructors through `inout` transitions to terminal `sink` consumers such as commit or abort. They flag a public linear type with no reachable public terminal consumer. Mode-crossing tables show `[K-Adt]` instantiations such as `Option[T]` becoming `copy`, `affine`, or `linear` (#link(<ch-3>)[Chapter 3]). `FieldTree` views distinguish mutated leaves (`inout broker.{index, metrics}`) from shared leaves (`in broker.{config}`), showing sibling fields available for concurrent `[T-CallProj]` borrows. Layout maps show 64-byte cache lines for `tiled(16) struct` collections (#link(<ch-12-5>)[Section 13.5]) and bit/endianness offsets for padding-free `wire struct` headers (#link(<ch-15-2>)[Section 16.2]).
 + *Explicit Authority, Cancel-Safety, and Zero-Alloc Capability Badges:* Because ambient authority does not exist in Vesper, every documented function and package displays compiler-verified capability badges derived from `eff [...]` and `Loom.toml` (#link(<ch-10-2>)[Section 11.2]): *Zero-Alloc* (when `Alloc` is absent from `eff [...]`), *Pure* (`eff []`), *Uncancellable Linear I/O* (`res(eff) = linear`), *Abortable Checkpoint* (when `Fail[E]` or `Cancel` is present, alerting callers holding live `Mode::Linear` values), *Constant-Time Verified* (`eff [ConstTime]`, #link(<ch-27>)[Chapter 28]), and *Hard-Realtime Safe* (`@realtime` WCSD stack byte bound, #link(<ch-24-5>)[Section 25.5] and #link(<ch-40-1>)[Section 41.1]).
 + *Single-JIT-Module Hermetic Doctests in Under 100 Milliseconds (`vesper test --doc`):* Conventional doctest runners invoke full compiler backends and host linkers while executing documentation snippets with unrestricted ambient filesystem and network access. Vesper Codex parses all `///` code blocks across an entire package, wraps each example as an isolated entry function inside a *single in-memory Cranelift JIT module* (`cranelift-jit`, #link(<ch-7>)[Chapter 8]), and executes each snippet inside a resettable 64 KiB `VirtualArena` under *SimPulse* deterministic virtual I/O and clocks (#link(<ch-14-6>)[Section 15.6]) with zero object files and zero system linker invocations. Crucially, every doctest undergoes full Stage 3 PCG checking—guaranteeing that documentation snippets never omit linear obligation cleanup—while `compile_fail(E0301)` doctests assert exact diagnostic error codes (#link(<ch-17-4>)[Section 18.4]) so negative substructural examples never pass for the wrong reason.
 + *Inline Lean 4 Proof Certificates, Pact Model Discovery, and MIF SemVer Changelogs:* Bridging the gap between API docs and formal methods, Codex links directly into `~/.vesper/store/` (`OLEAN_CERTS`, #link(<ch-8-4>)[Section 9.4]): functions verified via `vesper verify` display a green *Verified (0 sorryAx)* badge that expands inline to inspect the extracted prophecy-free Lean 4 functional model (`Funs.lean`), exported invariants (`Specs.lean`), and kernel-audited axiom footprint. Additionally, Codex indexes both canonical `impl` blocks and third-party *Vesper Pact* named models (#link(<ch-6-3>)[Section 7.3]), resolves intra-doc `[Type::method]` links inside Stage 1 `rowan` CSTs (surfacing broken links in under 2 ms in Vesper Lens), and computes automatic SemVer API diffs across `mif:blake3` versions via `vesper-semver` (#link(<ch-11>)[Chapter 12]).
@@ -4413,13 +4427,13 @@ pub struct BatchedJitDoctest {
 
 == 21. Vesper Chroma: Substructural Highlighting and Perceptual Palettes
 <ch-20>
-#chapter-deck[Two-Tier Rowan/HIR Semantic Highlighting, Perceptual OKLCH Contrast Gates, Vector Code Cards, and 26 KiB WASM Rendering]
+#chapter-deck[Syntax and Semantic Highlighting, Palette Contrast, and Code Cards]
 
-*Vesper Chroma* (`@vesper-doc/chroma`, implemented in `crates/vesper-highlight`, invoked via `vesper highlight` and `vesper shot`, and compiled into the 26 KiB `vesper-chroma.wasm` module for *Vesper Codex*, #link(<ch-19>)[Chapter 20]) specifies Vesper's semantic syntax highlighter, inline modal/effect callout engine, and vector SVG / 4x Retina PNG code-card renderer. Chroma reuses Vesper's lossless `rowan` CST (`vesper-syntax`, #link(<ch-7>)[Chapter 8]) and bidirectional mode/effect checker (`vesper-hir`, #link(<ch-7-3>)[Section 8.3]) to render substructural ownership, disjoint projections, and lexical capabilities across perceptually calibrated OKLCH Dusk and Dawn palettes.
+*Vesper Chroma* (`@vesper-doc/chroma`, with implementation code in `crates/vesper-highlight`) describes semantic highlighting and code-card rendering through `vesper highlight` and `vesper shot`. It combines syntax from the lossless `rowan` tree with HIR mode/effect information to display ownership, projections, and lexical capabilities. Outputs include SVG, 4x Retina PNG, and the proposed 26 KiB `vesper-chroma.wasm` module for *Codex* (#link(<ch-19>)[Chapter 20]). Dusk and Dawn palettes use OKLCH color coordinates; contrast checks and artifact size require validation for the generated output.
 
 === 21.1 Semantic Highlighting, Perceptual Contrast, and Card-Rendering Guarantees
 <ch-20-1>
-+ *Dual-Tier Semantic Substructural Highlighting Over Lossless Rowan CSTs and HIR:* Conventional web highlighters (Prism.js, Shiki TextMate regexes, and Tree-sitter highlight queries) operate purely syntactically and cannot distinguish whether a binding tx has mode linear, affine, or copy (especially under OxCaml `[T-Cross]` generic mode crossing, #link(<ch-3>)[Chapter 3]), which leaf paths inside inout broker.{index, metrics} are mutated versus read-only, or whether an effect inside `eff [.\.\.]` is uncancellable (linear effect) versus abortable (effect). Chroma runs a unified two-tier pipeline: *Tier 0 (Lossless LL(2) CST Mode)* highlights arbitrary or incomplete snippets in under 0.2 milliseconds with zero regex backtracking and zero grammar drift, while *Tier 1 (Type-Enriched HIR/PCG Mode)* decorates live Mode::Linear bindings with crisp semantic obligation underlines from minting site to terminal sink discharge, distinguishes mutated FieldTree leaves from shared in leaves, and color-codes linear effect capabilities distinctly from abortable Fail/Cancel checkpoints.
++ *Syntax and Semantic Highlighting:* Chroma separates syntax-only rendering from type-enriched rendering. Tier 0 uses the lossless CST for arbitrary or incomplete snippets, with a target below 0.2 milliseconds and no regex backtracking. Tier 1 uses HIR/PCG information to mark `Mode::Linear` obligations from creation to terminal consumption, distinguish mutated `FieldTree` leaves from shared `in` leaves, and distinguish linear effects from abortable `Fail`/`Cancel` checkpoints. Mode crossing (#link(<ch-3>)[Chapter 3]) requires semantic information because syntax alone does not determine an instantiated binding's mode.
 
 + *Perceptually Uniform OKLCH Palettes with Verified WCAG AAA and APCA Contrast:* Hand-tuned sRGB syntax themes routinely suffer uneven perceived brightness—making punctuation, inout projections, or linear obligation markers either glaring or illegible across dark and light backgrounds. Chroma defines its flagship themes (*Vesper Dusk* deep obsidian dark and *Vesper Dawn* warm alabaster light) in *OKLCH perceptual color space* (Lightness, Chroma, Hue), assigning orthogonal hue families to Vesper's three language pillars: warm amber-coral for linear types, sink transfers, and obligation underlines; cool cyan-teal for second-class inout mutable FieldTree projections; luminous iris-violet for `eff [.\.\.]` lexical capabilities and handle blocks; emerald for `@proof` anchors and wire struct endian scalars (u32be, u64le); and neutral slate for copy/in bindings—all audited statically for at least 7.0:1 WCAG AAA contrast on primary tokens and at least 4.5:1 on comments.
 
@@ -4745,13 +4759,13 @@ pub fn build_code_card_scene(
 
 == 22. Vesper Crucible: Concolic Fuzzing, Shrinking, and C/Rust Lifting
 <ch-21>
-#chapter-deck[Cranelift Coverage-Guided SMT Fuzzing, Substructural `ChoiceTape` Shrinking, and MPK-Shadowed C/Rust Interop Lifting]
+#chapter-deck[Concrete and Symbolic Testing, Counterexample Shrinking, and Interop]
 
-*Vesper Crucible* (`@vesper-test/crucible`, implemented in `crates/vesper-crucible` and surfaced via `vesper fuzz`, `vesper test --mutate`, and `vesper migrate`) specifies Vesper's property-testing, coverage-guided concolic fuzzing, semantic mutation-testing, and C/Rust-to-Vesper migration substrate. Crucible integrates Stage 5 Cranelift edge/comparison instrumentation, Bitwuzla SMT path solving, substructural `ChoiceTape` shrinking, `SimPulse` schedule minimization, and MPK-isolated differential shadow harnesses into a single deterministic verification loop.
+*Vesper Crucible* (`@vesper-test/crucible`, with implementation code in `crates/vesper-crucible`) describes property testing, coverage-guided and concolic fuzzing, mutation testing, and C/Rust migration through `vesper fuzz`, `vesper test --mutate`, and `vesper migrate`. It combines Cranelift edge/comparison instrumentation, Bitwuzla path solving, `ChoiceTape` shrinking, `SimPulse` schedule minimization, and MPK-isolated differential shadow harnesses. This chapter explains their proposed integration with ownership tracking and Lean proof workflows; surviving a search does not prove the property.
 
 === 22.1 Concolic Verification, Substructural Shrinking, and Interop Guarantees
 <ch-21-1>
-+ *Zero-Nightly Cranelift Coverage and Concolic SMT Fuzzing (`vesper fuzz`):* In Rust, `cargo-fuzz` requires a `nightly` compiler, links an external C++ `libFuzzer` runtime, and stalls on magic-number, checksum, or length-prefix branches. Crucible instruments edge-coverage hit counters and branch comparison operands natively inside Stage 5 Cranelift SSA IR (`crates/vesper-codegen-clif`). Each fuzz iteration executes inside a resettable 64 KiB `Region::scoped` `VirtualArena` (#link(<ch-12-3>)[Section 13.3]) at over 500,000 executions per second per core; whenever mutation stalls on a tight branch guard, Crucible's embedded Bitwuzla/Z3 concolic engine (shared with `vesper-loom-solver`, #link(<ch-10-4>)[Section 11.4]) negates the path condition to synthesize branch-piercing inputs automatically.
++ *Coverage-Guided and Concolic Fuzzing (`vesper fuzz`):* The design instruments edge counters and branch-comparison operands in Stage 5 Cranelift SSA (`crates/vesper-codegen-clif`). Each iteration uses a resettable 64 KiB `Region::scoped` `VirtualArena` (#link(<ch-12-3>)[Section 13.3]), targeting more than 500,000 executions per second per core. When mutation stops making progress at a branch guard, an embedded Bitwuzla/Z3 concolic engine negates the path condition to seek a new input. The proposed solver is shared with `vesper-loom-solver` (#link(<ch-10-4>)[Section 11.4]). Coverage, solver support, and throughput need validation for the supported fragment and workload.
 
 + *Obligation-Safe Unified Choice-Tape Shrinking (`ChoiceTape`):* Traditional property-based testers (`QuickCheck` and `proptest`) attach shrinking logic to types, which breaks down when shrinking interleaved asynchronous schedules or `Mode::Linear` protocol state machines (`WriteTxn`, `Session[P]`, `PagePin`). Crucible drives both structured input generation and `SimPulse` fiber scheduling (#link(<ch-14-6>)[Section 15.6]) from a single monotone 64-bit *`ChoiceTape`*. Shrinking reduces the underlying tape in shortlex order (`0`-biasing and block deletion) while re-executing the unmodified handler block—guaranteeing under Theorem 2 that every intermediate shrunk candidate remains 100 percent linear-obligation-valid and deterministically reproduces multi-fiber race conditions.
 
@@ -5022,13 +5036,13 @@ impl CoverageFeedbackMap {
 
 == 23. Vesper Chrono: Hardware Flight Recording and Reverse Debugging
 <ch-22>
-#chapter-deck[Effect-Boundary Flight Logs, Intel PT and Arm CoreSight Instruction Tracing, Zero-Alloc Reverse Watchpoints, and Obligation Lineage]
+#chapter-deck[Effect Logs, Checkpoints, Hardware Traces, and Resource History]
 
-*Vesper Chrono* (`@vesper-debug/chrono`, implemented in `crates/vesper-chrono` and surfaced via `vesper replay` and the *Vesper Lens* Debug Adapter) specifies Vesper's deterministic flight recorder, hardware-assisted time-travel reverse debugger, and substructural obligation provenance engine. Exploiting lexical effect boundaries and Zero-`Pin` fiber stacks, Chrono records multi-core production execution at under 2 percent overhead and enables exact reverse stepping across fiber schedules, `inout` place mutations, and `Mode::Linear` resource lifecycles.
+*Vesper Chrono* (`@vesper-debug/chrono`, with implementation code in `crates/vesper-chrono`) describes flight recording, reverse debugging, and resource-obligation provenance through `vesper replay` and the *Lens* Debug Adapter. The design records outcomes at lexical effect boundaries and combines checkpoints with hardware traces. Exact replay depends on capturing the relevant nondeterminism; the under-2-percent recording overhead is a target requiring workload-specific evidence.
 
 === 23.1 Production Flight-Recording and Time-Travel Debugging Guarantees
 <ch-22-1>
-+ *Effect-Boundary Flight Recording vs. Single-Core Syscall Trapping (`ChronoTape`):* Mozilla `rr` achieves deterministic replay in C++ and Rust by pinning all threads onto a single CPU core and trapping every kernel syscall via `ptrace` and `seccomp`, imposing 1.5x to 3x slowdowns on Linux while failing on Windows, macOS, kernel-bypass RDMA, and GPU command queues. Because Vesper confines all external nondeterminism to explicit lexical capabilities in `Σ` (`Net`, `Storage`, `Clock`, `RdmaQp`, `Ffi`, #link(<ch-5>)[Chapter 5] and #link(<ch-14>)[Chapter 15]), Chrono interposes a lock-free recording handler around `EvidenceVector` (`r15` / `x28`) that logs only compact `wire struct` effect outcomes per shard—preserving full multi-core parallelism across Linux, Windows, and macOS.
++ *Effect-Boundary Flight Recording (`ChronoTape`):* Chrono proposes recording nondeterministic outcomes through lexical capabilities in `Σ`: `Net`, `Storage`, `Clock`, `RdmaQp`, and `Ffi` (#link(<ch-5>)[Chapter 5] and #link(<ch-14>)[Chapter 15]). A lock-free handler around `EvidenceVector` (`r15` / `x28`) writes compact `wire struct` outcomes per shard. This is intended to retain multicore execution across Linux, Windows, and macOS. It differs from the single-core syscall-trapping approach attributed here to Mozilla `rr` (`ptrace` and `seccomp`, with a reported 1.5x–3x slowdown). That comparison needs workload-specific evidence; Chrono also needs a complete account of nondeterminism outside the recorded boundaries.
 
 + *Sub-Microsecond Zero-`Pin` Fiber and `VirtualArena` Checkpointing:* Checkpointing asynchronous Rust processes requires freezing the entire OS address space (`fork`) because `Pin`-wrapped futures scatter self-referential pointers across the global heap. By #link(<ch-5>)[Chapter 5]'s Zero-Pin Stack Relocation Corollary and #link(<ch-12-3>)[Section 13.3]'s contiguous `VirtualArena` regions, Vesper Chrono captures incremental copy-on-write shard checkpoints (`userfaultfd` write-protect on Linux, Mach `vm_copy` on macOS, `MEM_RESET` page tracking on Windows) at fiber yield points in microseconds without global stop-the-world pauses.
 
@@ -5274,13 +5288,13 @@ impl ChronoTimelineIndex {
 
 == 24. Vesper Metronome: Hardware PMU Microbenchmarking and Gates
 <ch-23>
-#chapter-deck[User-Space PMU Cycle Counters, Paired Interleaved A/B Execution, Stabilizer Layout Randomization, and Static `@bench` Contracts]
+#chapter-deck[Hardware Counters, Paired Comparisons, Layout Randomization, and Benchmark Contracts]
 
-*Vesper Metronome* (`@vesper-bench/metronome`, implemented in `crates/vesper-bench` and invoked via `vesper bench` and live CodeLenses in *Vesper Lens*, #link(<ch-17>)[Chapter 18]) specifies Vesper's hardware-PMU microbenchmarking, Cranelift SSA/assembly inspection, and statistical regression-gate subsystem. Metronome unifies 12-cycle user-space `rdpmc` telemetry, CAS-backed paired A/B interleaving across *Vesper Loom* revisions, Stabilizer code/stack layout randomization, zero-distortion `Mode::Linear` input batching, and static `@bench` instruction/allocation contracts.
+*Vesper Metronome* (`@vesper-bench/metronome`, with implementation code in `crates/vesper-bench`) describes microbenchmarking through `vesper bench` and *Lens* CodeLenses (#link(<ch-17>)[Chapter 18]). It combines hardware performance monitoring unit (PMU) counters, SSA/assembly inspection, paired A/B execution, layout randomization, and static `@bench` contracts. CAS-backed baselines support comparisons across Loom revisions. Counter-read costs and regression sensitivity depend on the hardware and experiment.
 
 === 24.1 Deterministic Hardware Microbenchmarking and Regression Guarantees
 <ch-23-1>
-+ *12-Cycle User-Space Hardware PMU Telemetry + Zero-Noise Virtual Cost Gates (`eff [BenchPmu]`):* Wall-clock timers in Rust's Criterion suffer 5 to 15 percent variance on shared cloud CI runners due to turbo-boost frequency scaling and hypervisor scheduling jitter, whereas Valgrind's iai-callgrind runs 20x to 50x slower on a synthetic cache model that misses real branch-predictor, hardware prefetcher, and AVX-512/SVE2 port-contention effects. Metronome reads hardware Performance Monitoring Units directly in user space (\~12 cycles via `x86_64` RDPMC over mmap'd `perf_event_open` pages, macOS Apple Silicon kpc thread counters, and AArch64 `PMCCNTR_EL0`)—capturing retired instructions, core reference cycles, L1D/LLC cache misses, branch mispredictions, and Intel/Arm Top-Down Microarchitecture Analysis (TMA) pipeline slots—while pairing with a deterministic Cranelift SSA + SimPulse virtual-cycle mode (`vesper bench --deterministic`) for 0.00 percent variance CI gates.
++ *Hardware Counters and Deterministic Cost Gates (`eff [BenchPmu]`):* Metronome proposes user-space counter reads through `x86_64` RDPMC over mapped `perf_event_open` pages, macOS Apple Silicon kpc counters, and AArch64 `PMCCNTR_EL0`. The draft estimates about 12 cycles per read. Counters cover retired instructions, reference cycles, cache misses, branch mispredictions, and Intel/Arm Top-Down Microarchitecture Analysis (TMA) slots. A separate SSA + SimPulse virtual-cost mode (`vesper bench --deterministic`) targets 0.00 percent variance. The draft's comparisons—5–15 percent wall-clock variance for Criterion on shared CI and 20x–50x slowdown for iai-callgrind—require specified experiments. Deterministic model costs do not establish constant native execution time.
 
 + *CAS-Backed Paired Interleaved A/B Execution and Stabilizer Layout Randomization:* Subtle 3 to 8 percent benchmark shifts in C++ and Rust routinely turn out to be ghosts caused by 64-byte instruction-cache alignment shifts or BTB aliasing when unrelated code changes link order (Curtsinger and Berger, _Stabilizer_). When running `vesper bench --compare git:main`, Metronome loads the precompiled baseline archive directly from *Vesper Loom*'s content-addressed store (`~/.vesper/store/`, #link(<ch-10-2>)[Section 11.2]) alongside the candidate inside the *same OS process* via `cranelift-jit` (#link(<ch-7>)[Chapter 8]). It alternates 1-millisecond paired quanta (`A, B, B, A`, _Tango_-style) on a core-pinned thread while re-randomizing function entry-point padding offsets modulo 4 KiB across epochs—canceling thermal/VM drift and isolating genuine algorithmic speedups down to 0.3 percent in under 2 seconds.
 
@@ -5513,10 +5527,10 @@ pub fn evaluate_paired_benchmark_gate(
 
 = Part V. Operating Systems, Kernel Programs, Cryptography, and Enclaves
 <part-5>
-#chapter-deck[Freestanding Kernels, Typestate MMIO, Verified Linux eBPF/XDP, PVH Unikernels, Constant-Time PQ Crypto, and Hardware TEEs]
+#chapter-deck[Bare-Metal Execution, Kernel Programs, Virtual Machines, Cryptography, and Attestation]
 
 #_part-summary("Part V Architectural Scope")[
-  Part V specifies Vesper's privileged, freestanding, and cryptographic security substrates. #link(<ch-24>)[Chapter 25] (*Vesper Silicon*) defines zero-heap kernel programming, `@svd_pac` typestate MMIO registers, LIFO `IrqGuard` tokens, and static stack-depth verification. #link(<ch-25>)[Chapter 26] (*Vesper eBPF*) specifies pre-flight abstract eBPF verification and zero-copy XDP packet processing. #link(<ch-26>)[Chapter 27] (*Vesper Aether*) defines sub-1.2ms ring-0 PVH unikernels and clone-safe `userfaultfd` KVM microVM snapshot forking. #link(<ch-27>)[Chapter 28] (*Vesper Vault*) and #link(<ch-28>)[Chapter 29] (*Vesper Aegis*) specify hardware `DIT` constant-time post-quantum cryptography and Iago-safe TDX / SEV-SNP / Arm CCA confidential enclaves.
+  Part V applies the language design to kernels and security-sensitive services. #link(<ch-24>)[Chapter 25] describes *Silicon* bare-metal execution, device registers, interrupts, and DMA. #link(<ch-25>)[Chapter 26] covers eBPF validation, and #link(<ch-26>)[Chapter 27] covers *Aether* unikernels and microVMs. #link(<ch-27>)[Chapter 28] presents *Vault* cryptographic ownership and timing contracts. #link(<ch-28>)[Chapter 29] presents *Aegis* confidential memory and attestation. Type-level contracts alone do not establish the hardware, runtime, or adversarial assumptions these designs require.
 ]
 
 #figure(
@@ -5525,7 +5539,7 @@ pub fn evaluate_paired_benchmark_gate(
     align: (left, left, left),
     table.header([*Chapter*], [*Subsystem*], [*Package, Host Crate, and Security / Hardware Guarantees*]),
     [#link(<ch-24>)[Chapter 25]], [Vesper Silicon (Bare-Metal & MMIO)], [`@vesper-hw/silicon` (`vesper-silicon`): W1C MMIO safety, LIFO `IrqGuard`, DMA ownership, WCSD bounds],
-    [#link(<ch-25>)[Chapter 26]], [Vesper eBPF (Verified Kernel & XDP)], [`@vesper-kernel/ebpf` (`vesper-ebpf`): `BpfRingSlot`, packet-bounds lowering, pre-flight abstract verifier],
+    [#link(<ch-25>)[Chapter 26]], [Vesper eBPF (Kernel & XDP Checks)], [`@vesper-kernel/ebpf` (`vesper-ebpf`): `BpfRingSlot`, packet-bounds lowering, pre-flight abstract verifier],
     [#link(<ch-26>)[Chapter 27]], [Vesper Aether (Unikernels & MicroVMs)], [`@vesper-cloud/aether` (`vesper-aether`): 1.6 MiB PVH unikernels, CAS `UFFDIO_CONTINUE`, `SnapshotResumeTicket`],
     [#link(<ch-27>)[Chapter 28]], [Vesper Vault (Constant-Time Crypto)], [`@vesper-crypto/vault` (`vesper-vault`): `eff [ConstTime]`, SSA taint pass, `NonceTicket`, `X25519MLKEM768`],
     [#link(<ch-28>)[Chapter 29]], [Vesper Aegis (Confidential Computing)], [`@vesper-tee/aegis` (`vesper-aegis`): TDX / SEV-SNP / CCA quotes, `HostBounceGrant` single-fetch DMA],
@@ -5536,15 +5550,15 @@ pub fn evaluate_paired_benchmark_gate(
 
 == 25. Vesper Silicon: Bare-Metal Kernels, Typestate MMIO, and DMA
 <ch-24>
-#chapter-deck[Freestanding Zero-Alloc Kernels, `@svd_pac` Typestate MMIO, LIFO Interrupt Guards, Cache-Coherent DMA, and Static Stack Analysis]
+#chapter-deck[Bare-Metal Execution, Device Registers, Interrupt Guards, DMA, and Stack Bounds]
 
-*Vesper Silicon* (`@vesper-hw/silicon`, implemented in `crates/vesper-silicon`) specifies Vesper's freestanding bare-metal kernel, microcontroller firmware (ARM Cortex-M, Cortex-A, RISC-V, and `x86_64`), and hardware-driver substrate. Because heap allocation and OS I/O are already explicit lexical capabilities rather than ambient standard-library globals, Silicon executes standard Vesper modules on bare metal with zero ecosystem split—combining Zero-`Pin` static SRAM fibers, verified worst-case stack-depth bounds, LIFO interrupt-mask tokens, `@svd_pac` typestate MMIO registers, and linear DMA/page-table ownership.
+*Vesper Silicon* (`@vesper-hw/silicon`, with implementation code in `crates/vesper-silicon`) describes bare-metal kernels, firmware, and device drivers for ARM Cortex-M, Cortex-A, RISC-V, and `x86_64`. Explicit allocation and I/O capabilities are intended to let suitable modules run without a hosted standard library. The proposed contracts cover static SRAM fibers, stack bounds, LIFO interrupt guards, `@svd_pac` device registers, and DMA/page-table ownership. Their hardware and runtime assumptions remain essential.
 
 === 25.1 Bare-Metal, MMIO, Interrupt, and DMA Safety Guarantees
 <ch-24-1>
 + *Unified Freestanding Platform Without `no_std` Ecosystem Split:* Rust divides crates between `std` and `no_std` + `alloc`, forcing library authors to maintain feature flags just to avoid ambient heap or OS assumptions. Because heap provisioning (`Alloc`) and OS I/O (`Net`, `Storage`) are already explicit lexical effects in Vesper (#link(<ch-14>)[Chapter 15] and #link(<ch-12>)[Chapter 13]), any package omitting `Alloc` from `eff [...]` is natively freestanding and guaranteed zero-heap at compile time.
 
-+ *Zero-`Pin` Static SRAM Fibers and Verified Worst-Case Stack Bounds (`@stack_limit`):* Embedded Rust frameworks (`Embassy` and kernel Rust) require `Pin`-projected self-referential futures and manual `PinInit` macros because storing `&'a mut` references across `.await` points forbids relocating task state in static SRAM. By #link(<ch-5>)[Chapter 5]'s Zero-Pin Stack Relocation Corollary, Vesper firmware tasks execute on tiny statically reserved SRAM fiber stacks while Stage 5 (`crates/vesper-silicon`) computes exact worst-case stack depth across Cranelift machine-frame call graphs—statically rejecting stack overflows on MMU-less microcontrollers that lack hardware guard pages.
++ *Static SRAM Fibers and Stack Bounds (`@stack_limit`):* The proposed firmware runtime uses statically reserved SRAM fiber stacks. Stage 5 (`crates/vesper-silicon`) analyzes Cranelift machine-frame call graphs to compute worst-case stack depth and reject stacks exceeding the declared bound, including on MMU-less targets without guard pages. The relocation argument in #link(<ch-5>)[Chapter 5] applies to its stated model; native pointers and external DMA require additional lifetime justification. A valid stack bound also depends on complete call-graph and frame-size information.
 
 + *Compile-Time Interrupt Deadlock and Sleep-in-Atomic Elimination (`IrqGuard`):* Acquiring a spinlock in kernel code without masking local CPU interrupts risks an instant single-core deadlock if an Interrupt Service Routine (ISR) preempts the core and contends for the same lock; conversely, suspending inside an ISR or spinlock section causes fatal "sleeping while atomic" kernel panics. Silicon binds spinlock access to a `Mode::Linear` `IrqGuard` token (which restores `DAIF` / `RFLAGS.IF` / `mstatus.MIE` upon `restore_irq`) and types `@isr` handlers with an `AtomicCtx` frame restriction that statically forbids suspending effects (`Async`, `DmaWait`, `Storage`).
 
@@ -5788,15 +5802,15 @@ pub fn verify_freestanding_stack_and_isr(
 ```
 
 
-== 26. Vesper eBPF: Verifier-Guaranteed Kernel and XDP Programs
+== 26. Vesper eBPF: Kernel and XDP Programs with Pre-Flight Checks
 <ch-25>
-#chapter-deck[Pre-Flight Abstract eBPF Verification, Zero-Copy `wire struct` Packet Views, and Linear `RingBuf` and Socket Reservations]
+#chapter-deck[Pre-Flight Analysis, Packet Views, Stack Bounds, and Kernel Admission]
 
-*Vesper eBPF* (`@vesper-kernel/ebpf`, implemented in `crates/vesper-ebpf`) specifies Vesper's Linux kernel programmability, XDP line-rate packet processing, `tc` traffic-control, and `tracepoint`/`LSM` security-probe substrate. By aligning `Mode::Linear` resource accounting, padding-free `wire struct` packet views, bounded iteration, and static 512-byte call-graph stack verification directly with the Linux kernel verifier's abstract domain, `vesper-ebpf` guarantees before `BPF_PROG_LOAD` that every compiled program satisfies kernel verifier invariants.
+*Vesper eBPF* (`@vesper-kernel/ebpf`, with implementation code in `crates/vesper-ebpf`) describes Linux kernel programs for XDP packet processing, `tc` traffic control, and `tracepoint`/`LSM` probes. The proposed pre-flight checks align linear resource accounting, `wire struct` views, bounded iteration, and 512-byte stack analysis with the kernel verifier's requirements. The kernel verifier remains authoritative at `BPF_PROG_LOAD`; acceptance cannot be inferred for every compiled program from this draft.
 
 === 26.1 Kernel Verifier Compliance, XDP Bounds, and RingBuf Guarantees
 <ch-25-1>
-+ *Compile-Time Linear `RingBuf` and `kptr` Reference Release (`BpfRingSlot`):* In C and Rust (`Aya`), `bpf_ringbuf_reserve` and kernel kfunc pointer acquisitions (`bpf_kptr_xchg`, `bpf_sk_lookup_tcp`) rely on manual release calls or affine `Drop` wrappers; if an early branch or `mem::forget` skips `bpf_ringbuf_submit`, `bpf_ringbuf_discard`, or `bpf_sk_release`, the kernel verifier rejects the program at load time with hundreds of lines of register-state assembly dumps. Vesper types every acquired kernel reference as `Mode::Linear` (`linear struct BpfRingSlot[T]`, `linear struct BpfSocketRef`). Under Theorem 2 and `[T-Let]`, forgetting to release a reservation on any control-flow branch fails compilation instantaneously in Vesper Lens (#link(<ch-17>)[Chapter 18]).
++ *Linear Kernel References (`BpfRingSlot`):* The design represents ring reservations and acquired kernel references as linear values (`linear struct BpfRingSlot[T]`, `linear struct BpfSocketRef`). Acquisitions include `bpf_ringbuf_reserve`, `bpf_kptr_xchg`, and `bpf_sk_lookup_tcp`; terminal operations include `bpf_ringbuf_submit`, `bpf_ringbuf_discard`, and `bpf_sk_release`. Under the proposed `[T-Let]` discipline, each control-flow branch must discharge the obligation. *Lens* (#link(<ch-17>)[Chapter 18]) is intended to report missing releases before kernel loading. Theorem 2 applies only to its formal fragment and does not establish this complete eBPF integration.
 
 + *Verifier-Canonical `wire struct` Packet Bounds Lowering (`XdpPacketCtx`):* The Linux kernel eBPF verifier requires explicit `pkt_ptr + offset <= data_end` pointer comparisons before dereferencing packet bytes, and aggressive LLVM middle-end passes routinely algebraic-simplify or hoist bounds checks in ways that lose packet-range provenance. Vesper eBPF lowers `ctx.view_wire_at[W](offset)` directly into verifier-canonical `r_cursor = r_data + offset; if r_cursor + sizeof(W) > r_data_end goto bail` BPF instruction sequences protected from range-destroying optimizations.
 
@@ -6062,13 +6076,13 @@ pub fn verify_ebpf_block_preflight(
 
 == 27. Vesper Aether: PVH Unikernels and Clone-Safe KVM MicroVMs
 <ch-26>
-#chapter-deck[Sub-1.2ms Ring-0 PVH Unikernels, VirtIO 1.2 Packed Rings, CAS UFFD Page Sharing, and Linear VMGENID Snapshot-Fork Reseeding]
+#chapter-deck[PVH Images, Virtual Devices, Snapshot Forking, and Clone Reseeding]
 
-*Vesper Aether* (`@vesper-cloud/aether`, implemented in `crates/vesper-aether` and invoked via `vesper build --unikernel`) specifies Vesper's containerless ring-0 PVH unikernel target, embedded seccomp-locked microVM monitor (Linux KVM, macOS `Virtualization.framework`, and Windows WHPX), and sub-millisecond snapshot-forking orchestrator. Aether compiles standard capability-typed Vesper services directly into sub-2-MiB unikernels that cold-boot in under 1.2 milliseconds and fork from BLAKE3 content-addressed `userfaultfd` snapshots in 400 microseconds with static `Mode::Linear` VMGENID cryptographic clone safety.
+*Vesper Aether* (`@vesper-cloud/aether`, with implementation code in `crates/vesper-aether`) describes a PVH unikernel target, a microVM monitor, and snapshot-fork orchestration through `vesper build --unikernel`. Proposed host backends include Linux KVM, macOS `Virtualization.framework`, and Windows WHPX. The design targets sub-2-MiB images, cold boot below 1.2 milliseconds, and 400-microsecond forks using BLAKE3-addressed `userfaultfd` snapshots. These are performance targets; VMGENID ownership and reseeding also require independent clone-safety validation.
 
 === 27.1 Unikernel Isolation, Snapshot-Fork Entropy, and UFFD Guarantees
 <ch-26-1>
-+ *Zero-POSIX Containerless Unikernel Compilation (`vesper build --unikernel`):* Conventional cloud deployments package applications inside multi-hundred-megabyte Linux container images (glibc, systemd, VFS, shell utilities, unused kernel drivers) that take 125 to 800 milliseconds to reach user space inside a microVM, while C unikernels (Unikraft and OSv) bolt fragile POSIX/musl compatibility shims onto single-address-space kernels. Because Vesper services already express all external I/O through colorless lexical capabilities (`eff [Net, Storage, Clock, ConstTime]`, #link(<ch-14>)[Chapter 15] and #link(<ch-27>)[Chapter 28]) rather than ambient POSIX syscalls, `vesper build --unikernel` swaps the top-level OS handler for *Vesper Silicon* (#link(<ch-24>)[Chapter 25]) and *Vesper Warp* (#link(<ch-32>)[Chapter 33]) over VirtIO 1.2 MMIO—emitting a standalone 1.6 MiB `x86_64` PVH or AArch64 direct-boot unikernel image with zero BIOS, zero ACPI, zero PCI bus, zero initramfs, under 1.2 ms cold boot, and under 3 MiB memory overhead per instance.
++ *Unikernel Compilation (`vesper build --unikernel`):* The proposed build replaces hosted I/O handlers with *Silicon* (#link(<ch-24>)[Chapter 25]) and *Warp* (#link(<ch-32>)[Chapter 33]) over VirtIO 1.2 MMIO. Services express I/O through lexical effects (`eff [Net, Storage, Clock, ConstTime]`; #link(<ch-14>)[Chapter 15] and #link(<ch-27>)[Chapter 28]) rather than ambient POSIX calls. The design targets a standalone 1.6 MiB `x86_64` PVH or AArch64 direct-boot image without BIOS, ACPI, PCI, or initramfs, cold boot below 1.2 ms, and memory overhead below 3 MiB per instance. These targets and the draft's 125–800-millisecond container-boot comparison need reproducible measurements.
 + *Mode::Linear Clone-Safe Entropy and AEAD Nonce Reseeding Across Snapshot Forks (SnapshotResumeTicket):* Restoring or forking thousands of serverless functions or AI agent sandboxes from a golden memory snapshot introduces a critical cryptographic vulnerability in C, Go, and Rust guests: cloned microVMs wake with identical CSPRNG state, identical TLS/QUIC packet-number counters, and identical session IDs, causing catastrophic AEAD nonce reuse on the first transmitted packet. The proposed `Mode::Linear` typestates do not by themselves prevent snapshot-clone state reuse: quiescing a unikernel for snapshotting (`AetherVm::quiesce_and_fork_snapshot`) consumes active *Vesper Vault* `AeadSealer` handles (`sink old_sealer`, #link(<ch-27-3>)[Section 28.3]) and suspends the VM until hypervisor wake returns a `Mode::Linear SnapshotResumeTicket` carrying the new 128-bit hardware VM Generation ID (VMGENID). A fresh sealer must be derived after resume, and inherited transport sessions must be eliminated before the fork; reseeding alone does not rotate negotiated peer keys.
 + *Content-Addressed Loom CAS Deduping and Zero-Copy `UFFDIO_CONTINUE` Page Sharing:* Standard Firecracker userfaultfd (UFFD) lazy restore faults 4 KiB pages reactively over Unix domain sockets, stalling guest vCPUs on cold working-set misses while duplicating read-only code and ML weights across VMs. Aether integrates its host page server directly with *Vesper Loom*'s BLAKE3 content-addressed store (`~/.vesper/store/`, #link(<ch-10-2>)[Section 11.2]): immutable Cranelift `.text`/`.rodata` segments and *Vesper Tensor* quantized weights (#link(<ch-41>)[Chapter 42]) map across 50,000 concurrent microVMs on the same bare-metal host via zero-copy shared memfd `UFFDIO_CONTINUE` mappings, while mutable `VirtualArena` hot working-set pages stream proactively in 2 MiB batches via `io_uring` before vCPU entry.
 + *Mode::Linear VirtIO 1.2 Packed-Virtqueue Descriptor Chains (VirtqDescLease):* Packed virtqueues originated in VirtIO 1.1; the illustrative guest driver and host VMM use #link("https://docs.oasis-open.org/virtio/virtio/v1.2/virtio-v1.2.html")[VirtIO 1.2] packed virtqueues (virtio-net, virtio-blk, and virtio-vsock) are typed using padding-free `wire struct` descriptors (#link(<ch-15-2>)[Section 16.2]) paired with `Mode::Linear VirtqDescLease` obligations. Under Theorem 2, descriptor slots can never leak on malformed frames, wrap prematurely over in-flight DMA buffers, or suffer hypervisor double-fetch TOCTOU races (reusing *Vesper Aegis* single-fetch bounce semantics when deployed inside Intel TDX or AMD SEV-SNP confidential VMs, #link(<ch-28>)[Chapter 29]).
@@ -6239,9 +6253,9 @@ pub fn classify_uffd_snapshot_fault(
 
 == 28. Vesper Vault: Constant-Time Cryptography and Post-Quantum AEAD
 <ch-27>
-#chapter-deck[Secret Taint Scalars, Hardware `DIT` Scopes, Fenced Zeroization, Linear `NonceTicket` AEAD, and Hybrid `X25519MLKEM768` Sessions]
+#chapter-deck[Secret Tracking, Timing Controls, Zeroization, and Nonce Ownership]
 
-*Vesper Vault* (`@vesper-crypto/vault`, implemented in `crates/vesper-vault`) specifies Vesper's side-channel-resistant cryptography, post-quantum key establishment, and secret-hygiene substrate. Complementing #link(<ch-33-1>)[Section 34.1]'s MPK-isolated foreign TLS bridge, Vault combines `Mode::Linear` `NonceTicket` typestates, Stage 5 Cranelift SSA constant-time taint verification (`eff [ConstTime]`), hardware Data-Independent Timing (`DIT` and `DOITM`), zero-move `SecretSlab` zeroization, and Lean 4 bit-blasting to rule out nonce reuse, secret stack remnants, timing leaks, and unauthenticated plaintext access at compile time.
+*Vesper Vault* (`@vesper-crypto/vault`, with implementation code in `crates/vesper-vault`) describes cryptography, post-quantum key establishment, and secret-memory handling. It complements the foreign TLS bridge in #link(<ch-33-1>)[Section 34.1]. Proposed mechanisms include linear `NonceTicket` values, SSA taint checks (`eff [ConstTime]`), hardware timing controls (`DIT` and `DOITM`), `SecretSlab` zeroization, and Lean 4 bit-blasting. These mechanisms address distinct threats; the draft does not establish complete timing-leak resistance or secret erasure.
 
 === 28.1 Constant-Time Execution, Secret Zeroization, and Nonce Guarantees
 <ch-27-1>
@@ -6249,7 +6263,7 @@ pub fn classify_uffd_snapshot_fault(
 *Review limitation:* The constant-time and zeroization claims in this chapter are goals, not established guarantees. Secret-derived loads must propagate taint and post-register-allocation code and spills need auditing. User space must not directly write privileged x86 DOITM MSRs; hardware timing controls do not eliminate all microarchitectural leakage.
 + *Compile-Time Nonce-Reuse Elimination (`NonceTicket[Alg]`):* In Rust AEAD crates (`aes-gcm`, `chacha20poly1305`), nonces are `Copy` byte slices (`&Nonce`), so nothing in the type system prevents catastrophic `(Key, Nonce)` reuse across retries, cloned sessions, or fiber forks. Vault models every encryption nonce as a `Mode::Linear` obligation (`linear struct NonceTicket[Alg]`) minted exclusively by mutating a stateful monotonic `AeadSealer[Alg]` (`inout sealer`), statically guaranteeing under Theorem 2 that each nonce is consumed at most and at least once (or explicitly burned).
 
-+ *Guaranteed Zero-Move Secret Zeroization (`SecretSlab` and `Vault::shred`):* Rust's `ZeroizeOnDrop` can be bypassed via safe `mem::forget`, leaves unzeroed bitwise copies on stack frames across struct moves or `Future` state transitions, and relies on best-effort volatile writes. Vault allocates long-lived keys inside non-swappable, core-dump-excluded pages (`mlock` plus `MADV_DONTDUMP`) via `linear struct SecretSlot[K]`. Because `SecretSlot[K]` is `Mode::Linear` and accessed strictly via second-class `in` projections (`[T-CallProj]`), secret bytes never move by value across fiber stacks and cannot go out of scope without calling `Vault::shred(sink key)`, which emits volatile zero stores, hardware memory barriers, and scratch-register scrubbing.
++ *Secret Storage and Explicit Zeroization (`SecretSlab`, `Vault::shred`):* Vault proposes storing long-lived keys in non-swappable, core-dump-excluded pages (`mlock` and `MADV_DONTDUMP`) through `linear struct SecretSlot[K]`. Access uses second-class `in` projections (`[T-CallProj]`) to avoid moving secret bytes by value across fiber stacks. The linear contract requires an explicit `Vault::shred(sink key)` terminal operation. Its proposed lowering emits volatile zero stores, memory barriers, and scratch-register scrubbing. Proving this contract requires accounting for backend copies, spills, and all secret-bearing locations; linear ownership alone does not establish zeroization.
 
 + *Backend-Verified Constant-Time Execution (`eff [ConstTime]` and Hardware `DIT`):* Rust's `subtle` library (`Choice`) cannot stop LLVM backend passes from converting branchless selects (`cmov`) back into secret-dependent conditional branches, nor does it enable CPU Data-Independent Timing flags automatically. Vault introduces opaque secret scalars (`SecU8`, `SecU32`, `SecU64`, `SecVec[P, T]`) paired with `copy effect ConstTime`. Entering `ConstTime::scope` enables Armv8.4+ `PSTATE.DIT` (`MSR DIT, #1`) and `x86_64` `DOITM` hardware constant-time execution modes, while Stage 5 (`crates/vesper-vault`) runs a mandatory Cranelift SSA taint verifier that rejects any secret-tainted branch (`brif`, `br_table`), secret-indexed memory access, or variable-latency division (`udiv`, `sdiv`).
 
@@ -6497,13 +6511,13 @@ pub fn verify_constant_time_ssa(
 
 == 29. Vesper Aegis: Hardware Confidential Computing and Enclaves
 <ch-28>
-#chapter-deck[Normalized TDX, SEV-SNP, and Arm CCA Attestation, Iago-Safe Bounce Buffers, and Supply-Chain-Bound RA-TLS Quotes]
+#chapter-deck[Confidential Memory, Host-Input Validation, and Attestation Bindings]
 
-*Vesper Aegis* (`@vesper-tee/aegis`, implemented in `crates/vesper-aegis`) specifies Vesper's hardware confidential computing, Trusted Execution Environment (TEE) confidential-VM substrate, and cryptographic remote-attestation framework across *Intel TDX 1.5+*, *AMD SEV-SNP*, and *Arm CCA Realms*. Aegis enforces encrypted-versus-shared guest physical memory partitioning, single-fetch TOCTOU immunity (`HostBounceGrant`), Iago-resistant hypercall validation (`UntrustedHostVal[T]`), and supply-chain/proof-bound RA-TLS attestation quotes directly in Vesper's type and effect system.
+*Vesper Aegis* (`@vesper-tee/aegis`, with implementation code in `crates/vesper-aegis`) describes confidential virtual machines and remote attestation across Intel TDX 1.5+, AMD SEV-SNP, and Arm CCA Realms. The proposed trusted execution environment (TEE) contracts distinguish encrypted and shared memory, validate untrusted host values, and bind RA-TLS quotes to supply-chain and proof metadata. `HostBounceGrant` and `UntrustedHostVal[T]` express intended protections against repeated host reads and hostile hypercall results. Their security depends on the implementation and platform assumptions.
 
 === 29.1 Confidential VM Memory Partitioning, Single-Fetch, and Attestation Guarantees
 <ch-28-1>
-+ *Static Encrypted vs. Shared-DMA Address-Space Partitioning (PrivateEnc vs. HostBounceSlice):* In C and Rust confidential VMs, both hardware-encrypted private pages and unencrypted hypervisor-shared DMA pages (`SWIOTLB` / VirtIO rings) surface as ordinary `&[u8]` or `*mut u8` pointers; a single misrouted buffer or page-table shared-bit bug silently leaks plaintext secrets to the untrusted cloud host. Extending *Vesper Strata* (`DmaSlab`, #link(<ch-12-3>)[Section 13.3]) and *Vesper Vault* (`SecretSlab`, #link(<ch-27-1>)[Section 28.1]), Aegis partitions memory at the type level: all standard Vesper allocations, fiber stacks, and `VirtualArena` regions reside strictly in hardware-encrypted `PrivateEnc` guest pages, while untrusted VMM exits (`#VE`, `VMGEXIT`, `RSI_HOST_CALL`) accept _only_ `HostBounceSlice` handles allocated from a quarantined unencrypted bounce aperture.
++ *Private and Shared Memory Types (`PrivateEnc`, `HostBounceSlice`):* Aegis proposes distinguishing encrypted guest pages from host-shared DMA pages at the type level. It extends *Strata* `DmaSlab` (#link(<ch-12-3>)[Section 13.3]) and *Vault* `SecretSlab` (#link(<ch-27-1>)[Section 28.1]). Standard allocations, fiber stacks, and `VirtualArena` regions are intended to reside in `PrivateEnc` memory. Host-facing exits (`#VE`, `VMGEXIT`, `RSI_HOST_CALL`) accept only `HostBounceSlice` handles from a quarantined unencrypted aperture. Correct page-table shared bits and validation at each transition are necessary to enforce that distinction.
 
 + *Single-Fetch TOCTOU and Iago Hypercall Defense (`UntrustedHostVal[T]`):* Malicious cloud hypervisors compromise C and Rust enclaves via *double-fetch TOCTOU* attacks (mutating shared VirtIO/ring memory between header validation and payload reads) and *Iago attacks* (returning adversarial `mmap` overlaps, non-monotonic timestamps, or out-of-range byte counts across host exits). Extending *Vesper Bridge*'s Omniglot `ForeignVal[T]` (#link(<ch-15-1>)[Section 16.1]), every hypervisor return and shared-ring header is typed as `UntrustedHostVal[T]`, while `TeeHardware::snapshot_from_host_bounce` copies untrusted bytes _exactly once_ into private encrypted `Region` memory before any parsing, SIMD indexing, or *Vesper Vault* AEAD verification occurs.
 
@@ -6799,10 +6813,10 @@ impl GpaAcceptanceTracker {
 
 = Part VI. Serialization, Parsing, Telemetry, Networking, Storage, and Streaming
 <part-6>
-#chapter-deck[Zero-Copy Codecs, Non-Malleable Binary Parsers, OTLP-Arrow Telemetry, Kernel-Bypass QUIC, HTTP/3 Services, RDMA Consensus, Hermetic SQL, and DBSP Streams]
+#chapter-deck[Codecs, Parsers, Telemetry, Transports, Web Services, Consensus, Storage, and Streams]
 
 #_part-summary("Part VI Architectural Scope")[
-  Part VI specifies Vesper's data-plane, wire-protocol, distributed-systems, and database substrates in strict protocol-stack order. #link(<ch-29>)[Chapter 30] and #link(<ch-30>)[Chapter 31] define *Vesper Wire & Json* (`vesper-serde`) region codecs and SIMD JSON alongside *Vesper Grammar* (`vesper-grammar`) canonical non-malleable binary/Arrow IPC parsers. #link(<ch-31>)[Chapter 32] specifies *Vesper Beacon* (`vesper-beacon`) W3C TraceContext and zero-copy OTLP-Arrow telemetry. #link(<ch-32>)[Chapters 33] through #link(<ch-34>)[35] layer *Vesper Warp* (`vesper-warp`) `AF_XDP` QUIC/TCP and BBRv3 networking beneath *Vesper Prism* (`vesper-prism`) typestate HTTP/2/3 services and *Vesper Chorus* (`vesper-chorus`) choreographic RDMA consensus. #link(<ch-35>)[Chapter 36] and #link(<ch-36>)[Chapter 37] complete the data plane with *Vesper Quarry* (`vesper-quarry`) hermetic `@sql` storage and *Vesper Flux* (`vesper-flux`) incremental DBSP Z-Set stream processing.
+  Part VI develops the data path from codecs to storage and streaming. #link(<ch-29>)[Chapter 30] covers *Wire and Json* serialization; #link(<ch-30>)[Chapter 31] covers *Grammar* parsers. #link(<ch-31>)[Chapter 32] introduces *Beacon* telemetry. #link(<ch-32>)[Chapters 33]–#link(<ch-34>)[35] describe *Warp* transports, *Prism* web services, and *Chorus* consensus and RDMA. #link(<ch-35>)[Chapter 36] covers *Quarry* SQL and storage, and #link(<ch-36>)[Chapter 37] covers *Flux* incremental streams. Local ownership checks and model proofs have narrower scope than complete distributed-system correctness.
 ]
 
 #figure(
@@ -6825,9 +6839,9 @@ impl GpaAcceptanceTracker {
 
 == 30. Vesper Wire and Json: Arena Serialization and SIMD JSON
 <ch-29>
-#chapter-deck[Colorless Region-Scoped Codecs, Two-Stage Safe SIMD JSON Classification, `StreamVByte` Compression, and `RelPtr32` Zero-Copy Archives]
+#chapter-deck[Region Codecs, SIMD JSON, Integer Compression, and Relative-Pointer Archives]
 
-*Vesper Wire and Json* (`@vesper-wire/serde`, `@vesper-wire/json`, and `@vesper-wire/archive`, implemented in `crates/vesper-serde`) specify Vesper's region-scoped serialization, two-stage safe SIMD JSON parsing, `StreamVByte` integer compression, and `RelPtr32` zero-copy archive substrate. Powering the `@derive(JsonSliceDecode)` and `Json::parse_simd` pipelines in *Vesper Prism* (#link(<ch-33>)[Chapter 34]), `vesper-serde` delivers multi-GB/s colorless codec execution into lexical `r: Region` arenas with zero lifetime annotations, zero `unsafe` intrinsics, and zero global heap allocations.
+*Vesper Wire and Json* (`@vesper-wire/serde`, `@vesper-wire/json`, and `@vesper-wire/archive`, with implementation code in `crates/vesper-serde`) describe region-scoped codecs, SIMD JSON parsing, `StreamVByte` compression, and `RelPtr32` archives. The intended `@derive(JsonSliceDecode)` and `Json::parse_simd` paths feed *Prism* (#link(<ch-33>)[Chapter 34]) through lexical `r: Region` arenas. Avoiding global heap allocation and reaching multi-GB/s throughput are goals that require validation for each codec and workload.
 
 === 30.1 Zero-Copy Serialization, SIMD Parsing, and Archive Guarantees
 <ch-29-1>
@@ -7070,13 +7084,13 @@ impl JsonSizeBound {
 
 == 31. Vesper Grammar: Non-Malleable Binary Parsers and Arrow IPC
 <ch-30>
-#chapter-deck[Canonical Bijection Binary/PEG Parsers, Side-Channel-Free Secret Grammars, Zero-Copy Arrow IPC Views, and Linear Stream Tails]
+#chapter-deck[Canonical Encodings, Secret Parsing, Arrow IPC Views, and Stream Tails]
 
-*Vesper Grammar* (`@vesper-parse/grammar`, implemented in `crates/vesper-grammar`) specifies Vesper's formally verified binary format, protocol framing, Protocol Buffers / Cap'n Proto / Apache Arrow IPC codec, and LL($k$)/PEG grammar compiler. Grounded in *Vest* (_Verified, Secure, High-Performance Parsing and Serialization for Rust_, Cai et al., USENIX Security 2025), *EverParse / ASN1\** (_Provably Correct Non-Malleable Parsing for ASN.1 DER_, Ni et al., ACM CCS 2025), and verified parse-constraint gates, Grammar enforces canonical bijection non-malleability (`@wire_grammar(canonical = true)`), constant-time secret parsing (`@secret_grammar`), zero-copy Domain-1 Arrow IPC views, and `Mode::Linear` `UnconsumedTail` anti-smuggling leases.
+*Vesper Grammar* (`@vesper-parse/grammar`, with implementation code in `crates/vesper-grammar`) describes binary formats, protocol framing, codecs, and an LL($k$)/PEG grammar compiler. The proposal covers Protocol Buffers, Cap'n Proto, and Apache Arrow IPC. Research influences include *Vest* (_Verified, Secure, High-Performance Parsing and Serialization for Rust_, Cai et al., USENIX Security 2025) and *EverParse / ASN1\** (_Provably Correct Non-Malleable Parsing for ASN.1 DER_, Ni et al., ACM CCS 2025). Intended contracts include canonical encodings (`@wire_grammar(canonical = true)`), secret parsing (`@secret_grammar`), Domain-1 views, and linear `UnconsumedTail` leases. Each contract needs evidence for its supported format and fragment.
 
 === 31.1 Canonical Non-Malleability, Secret Parsing, and Arrow IPC Guarantees
 <ch-30-1>
-+ *Lifetime-Free Dependent Binary and PEG/LL Grammars (`@wire`\_grammar + `RegionSlice[r, u8]`):* Zero-copy parser combinators ordinarily thread `'a` slice lifetimes through every combinator and AST node, while dependent length prefixes (such as TLS 1.3 `u24` headers or ASN.1 TLV envelopes) rely on manual slice arithmetic. Executing inside *Vesper Forge*'s fuel-metered `wasm32-wasip2` sandbox (`macro_emits_effects = []`, #link(<ch-6-4>)[Section 7.4]), `@wire_grammar` compiles declarative dependent binary formats and LL(k)/PEG syntax grammars into branch-coalesced Cranelift state machines tied to lexical `r: Region` (#link(<ch-12-2>)[Section 13.2])—achieving zero `'a` lifetime annotations, guaranteed termination, and static elimination of redundant bounds checks.
++ *Dependent Binary and PEG/LL Grammars (`@wire_grammar`, `RegionSlice[r, u8]`):* The proposed macro ties parsed views to a lexical `r: Region` (#link(<ch-12-2>)[Section 13.2]). It describes dependent lengths, including TLS 1.3 `u24` headers and ASN.1 TLV envelopes, without adding explicit slice-lifetime annotations to every node. `@wire_grammar` runs in *Forge*'s fuel-metered `wasm32-wasip2` sandbox (`macro_emits_effects = []`, #link(<ch-6-4>)[Section 7.4]) and emits branch-coalesced Cranelift state machines. Parser termination and removal of redundant bounds checks are separate proof obligations; macro fuel alone establishes neither.
 + *Compile-Time Strong Non-Malleability and Canonical Bijection Guarantees:* Unverified binary parsers (`prost`, `der`, `serde_cbor`) frequently accept multiple distinct byte sequences for the same logical value—such as overlong LEB128 varints (`0x81 0x00` vs. `0x01`), non-minimal ASN.1 DER lengths, or unsorted map keys—creating catastrophic *signature-verification bypass* and *transaction-malleability* vulnerabilities when bytes are hashed or signed. Grammar enforces *Strong Non-Malleability* by construction: every `@wire_grammar(canonical = true)` format compiles into a verified bijection where `parse(b1) == Ok(v)` and `parse(b2) == Ok(v)` implies `b1 == b2` bit-for-bit.
 + *Side-Channel-Free Secret Format Parsing Over Vesper Vault (`eff [ConstTime]`):* Parsing decrypted PKCS\#8 private keys, TLS 1.3 inner plaintexts, or *Vesper Aegis* confidential enclave payloads (#link(<ch-28>)[Chapter 29]) with standard `nom` or `prost` combinators leaks secret field values and padding lengths via data-dependent branches. Annotating a grammar rule with `@secret_grammar` lowers fixed-layout and bounded-padding fields directly into *Vesper Vault* `SecU8` / `SecU64` constant-time combinators (`eff [ConstTime]`, #link(<ch-27-2>)[Section 28.2]), verified free of secret-dependent branches and memory indices by Stage 5's Cranelift SSA taint pass.
 + *Zero-Allocation Apache Arrow IPC and SIMD Protobuf Projection Into AoSoA Tiles:* Conventional Protobuf and Arrow libraries allocate per-message heap vectors or wrap columnar buffers in atomic reference-counted handles. Grammar validates *Apache Arrow IPC* `RecordBatch` envelopes in place over *Hardware Domain-1* `DmaSlab` pages (#link(<ch-12-3>)[Section 13.3])—exposing 64-byte-aligned validity bitmaps and value buffers directly to *Vesper Vector* `VVec` registers (#link(<ch-13>)[Chapter 14]) with zero copies—and decodes *Protobuf* wire streams via SIMD tag/varint dispatch straight into 16-wide *Vesper Strata* `TiledSeq` (`AoSoA`) cache tiles inside a lexical `Region`.
@@ -7309,9 +7323,9 @@ pub fn verify_disjoint_tag_branches(branch_tag_sets: &[&[u8]]) -> Result<(), Gra
 
 == 32. Vesper Beacon: Distributed TraceContext and OTLP-Arrow Telemetry
 <ch-31>
-#chapter-deck[Lexical Trace Capabilities, Linear `ActiveSpan` Finalization, SIMD W3C `traceparent` Codecs, and Zero-Copy OTLP-Arrow Rings]
+#chapter-deck[Span Lifecycles, TraceContext Propagation, and Columnar Telemetry]
 
-*Vesper Beacon* (`@vesper-obs/beacon`, implemented in `crates/vesper-beacon`) specifies Vesper's distributed tracing, structured logging, PII redaction, and high-cardinality columnar metrics substrate. Complementing #link(<ch-14-6>)[Section 15.6]'s local `vesper top` fiber flight recorder, Beacon pairs `Mode::Linear` `ActiveSpan` completion with automatic W3C `TraceContext` propagation across lexical capabilities and streams zero-copy *OpenTelemetry-Arrow (`OTAP`)* batches directly from per-core `AoSoA` ring buffers.
+*Vesper Beacon* (`@vesper-obs/beacon`, with implementation code in `crates/vesper-beacon`) describes distributed tracing, structured logging, PII redaction, and columnar metrics. It complements the local `vesper top` recorder in #link(<ch-14-6>)[Section 15.6]. The design combines linear `ActiveSpan` completion, W3C `TraceContext` propagation, and OpenTelemetry-Arrow (`OTAP`) batches in per-core `AoSoA` rings. This chapter presents the intended data path and ownership contracts.
 
 === 32.1 Distributed Tracing, Columnar Telemetry, and Redaction Guarantees
 <ch-31-1>
@@ -7563,13 +7577,13 @@ impl FastLogHistogram {
 
 == 33. Vesper Warp: Kernel-Bypass QUIC/TCP and BBRv3 Networking
 <ch-32>
-#chapter-deck[Linear `AF_XDP` and DPDK UMEM Frame Rings, Zero-Copy RFC 9000 QUIC Protection, Hardware EDT Timing Wheels, and Verified BBRv3]
+#chapter-deck[Packet Ownership, QUIC/TCP, Retransmission, and Congestion Control]
 
-*Vesper Warp* (`@vesper-net/warp`, implemented in `crates/vesper-warp`) specifies Vesper's line-rate 100/400 GbE user-space networking stack, unifying kernel-bypass packet I/O (`AF_XDP` zero-copy, DPDK, and hardware NIC offloads) with RFC 9000 QUIC, RFC 9293 TCP, and BBRv3 congestion control. Serving as the transport layer beneath *Vesper Prism* (#link(<ch-33>)[Chapter 34]) and *Vesper Chorus* (#link(<ch-34>)[Chapter 35]), Warp enforces `Mode::Linear` `UmemFrame` conservation across 4-ring NIC queues, split-header zero-copy QUIC AEAD protection, Pin-free retransmission leases, and Lean 4 verified BBRv3 state machines.
+*Vesper Warp* (`@vesper-net/warp`, with implementation code in `crates/vesper-warp`) describes a user-space transport stack for *Prism* (#link(<ch-33>)[Chapter 34]) and *Chorus* (#link(<ch-34>)[Chapter 35]). The proposal combines `AF_XDP`/DPDK packet I/O, NIC offloads, RFC 9000 QUIC, RFC 9293 TCP, and BBRv3 congestion control. Linear `UmemFrame` ownership, retransmission leases, and separate Lean models address specific lifecycle and protocol obligations. Line-rate 100/400 GbE operation is a performance goal, not an established property of every path.
 
 === 33.1 User-Space UMEM Conservation, Zero-Copy QUIC, and Pacing Guarantees
 <ch-32-1>
-+ *Mode::Linear UMEM Frame Conservation Across 4-Ring `AF_XDP` / DPDK Queues (UmemFrame):* In C (libxdp / DPDK `rte_mbuf`) and Rust (aya-xdp / dpdk-rs), shared NIC DMA frame pools (UMEM) rely on manual integer descriptor tracking or atomic refcnt updates across the Fill, Rx, Tx, and Completion rings; dropping a descriptor index on a malformed header branch silently starves the NIC Fill ring until line-rate Rx halts completely, while premature recycling causes catastrophic DMA overwrite of in-flight packets. Warp reifies every 4 KiB Hardware Domain-1 `DmaSlab` UMEM chunk (#link(<ch-12-3>)[Section 13.3]) as a Mode::Linear obligation (linear struct `UmemFrame[State]`). Under Theorem 2 and `[T-Let]`, every harvested RxReady frame must transition along 100 percent of control paths back to FillRing::replenish or TxRing::`submit_tx`—achieving zero-refcount, zero-leak hardware buffer conservation.
++ *UMEM Frame Ownership (`UmemFrame[State]`):* Warp models each 4 KiB Hardware Domain-1 `DmaSlab` chunk (#link(<ch-12-3>)[Section 13.3]) as a linear frame moving through the Fill, Rx, Tx, and Completion rings. The intended `[T-Let]` contract requires each harvested `RxReady` frame to reach `FillRing::replenish` or `TxRing::submit_tx` on every control path. Losing a descriptor can starve the Fill ring; recycling it before DMA completion can overwrite an in-flight packet. The design aims to enforce conservation without reference counting. Theorem 2 does not by itself prove correspondence between these source obligations and NIC ownership.
 
 + *Zero-Copy Split-Header QUIC Packet Protection Over Vesper Vault (NonceTicket + Hardware Crypto):* Standard Rust QUIC stacks (quinn and quiche) copy stream payloads between application Bytes buffers and UDP datagram staging vectors while managing packet-number AEAD nonces via mutable integer counters. Pairing *Vesper Bridge* `wire struct` headers (#link(<ch-15-2>)[Section 16.2]) with Vesper Vault (ConstTime and NonceTicket, #link(<ch-27-3>)[Section 28.3]), Warp formats RFC 9000 short/long headers in place inside UmemFrame headroom, seals payloads in constant time (or offloads inline AES-GCM / ChaCha20-Poly1305 to ConnectX / SmartNIC hardware ktls/`crypto_offload`), and statically prevents RFC 9001 QUIC packet-number nonce reuse.
 
@@ -7795,11 +7809,11 @@ impl XdpUmemAccounting {
 ```
 
 
-== 34. Vesper Prism: Protocol-Verified HTTP/2/3 and WebSocket Services
+== 34. Vesper Prism: HTTP/2/3 and WebSocket Service Contracts
 <ch-33>
-#chapter-deck[Typestate Linear Response Obligations, Disconnect Cancel Safety, Lexical-Handler Middleware, and Zero-Allocation Shard Routing]
+#chapter-deck[Response Typestates, Disconnect Cleanup, Middleware, and Request Routing]
 
-*Vesper Prism* (`@vesper-web/prism`, implemented in `crates/vesper-prism`) specifies Vesper's full-stack HTTP/1.1, HTTP/2, HTTP/3, and WebSocket service framework. Prism integrates `Mode::Linear` typestate response obligations (`Responder[HeadersPending]`), `[T-Let]` client-disconnect cancel safety, stack-allocated lexical-handler middleware, per-request `VirtualArena` reset routing, and SIMD Radix/JSON ingress into a single protocol-verified edge architecture.
+*Vesper Prism* (`@vesper-web/prism`, with implementation code in `crates/vesper-prism`) describes HTTP/1.1, HTTP/2, HTTP/3, and WebSocket services. Its proposed architecture combines linear response typestates (`Responder[HeadersPending]`), disconnect cancellation rules, lexical-handler middleware, request-local arenas, and SIMD routing/JSON ingress. This chapter follows those contracts through a request lifecycle; their composition does not yet establish complete protocol correctness.
 
 === 34.1 HTTP/2/3 Typestate Completion, Middleware, and Routing Guarantees
 <ch-33-1>
@@ -7814,7 +7828,7 @@ impl XdpUmemAccounting {
 Prism encodes RFC 9110 HTTP and RFC 6455 WebSocket state machines directly into substructural modal types:
 
 + *Exact-Once HTTP Response Finalization:* `linear struct Responder[S]` is parameterized by typestate `S` (`HeadersPending` or `StreamingBody`). Consuming transitions such as `res.json(status, in payload)`, `res.problem(status, msg)`, or `res.upgrade_websocket(in req)` discharge `Responder[HeadersPending]` and produce the `ResponseSent` receipt required by the router signature. Forgetting to reply on an error branch or dropping a WebSocket session without completing a close handshake fails compilation under Theorem 2 (Total Linear Exhaustion).
-+ *Compile-Time Client-Disconnect Safety:* Client socket disconnects and request deadlines raise Vesper Pulse's abortable `Cancel` effect (`q = affine`), whereas `TenantDb`, `Storage`, and socket DMA flushes (`Net`) are `linear effect` declarations (`q = linear`). Before acquiring a `linear` `DbTxn`, calling `Cancel::check()?` typechecks cleanly because the outer connection handler owns the unwind boundary. Once `let mut db_tx: DbTxn = TenantDb::begin_write(...)` is live, `[T-Let]` checks `linear ⊑ res(Cancel)` (`linear ⊑ affine`, which is false), statically forbidding timeout or disconnect aborts until `db_tx.commit()` or `db_tx.rollback()` completes.
++ *Client-Disconnect Safety:* Socket disconnects and request deadlines use *Pulse*'s abortable `Cancel` effect (`q = affine`). `TenantDb`, `Storage`, and socket DMA flushes (`Net`) are declared `linear effect` (`q = linear`). Before a linear `DbTxn` is acquired, `Cancel::check()?` may return through the connection handler's unwind boundary. Once `let mut db_tx: DbTxn = TenantDb::begin_write(...)` is live, `[T-Let]` rejects `linear ⊑ res(Cancel)` because `linear ⊑ affine` is false. Under this baseline rule, timeout or disconnect aborts must wait until `db_tx.commit()` or `db_tx.rollback()` discharges the transaction.
 
 === 34.3 Middleware as Lexical Effect Handlers and Disjoint Shard State
 <ch-33-3>
@@ -8053,13 +8067,13 @@ impl CompiledRouteEntry {
 
 == 35. Vesper Chorus: Choreographic Consensus and Zero-Copy RDMA
 <ch-34>
-#chapter-deck[Dual Linear Session Channels, NIC-Safe RDMA Memory Registration, `@choreography` Endpoint Projection, and Quorum Proofs]
+#chapter-deck[Session Endpoints, RDMA Lifetimes, Protocol Projection, and Quorum Models]
 
-*Vesper Chorus* (`@vesper-dist/chorus`, implemented in `crates/vesper-chorus`) specifies Vesper's distributed consensus, multiparty session-typed RPC, and kernel-bypass RDMA (`ibverbs`, RoCEv2, and CXL) substrate. Grounded in _Choreographic Programming_ (PLDI 2026, #link(<ch-1>)[Chapter 1]) and affine/linear multiparty session types, Chorus projects single-source `@choreography` protocols into deadlock-free dual `Session` endpoints, enforces NIC-safe RDMA memory-registration leases (`RdmaRegion` and `InFlightRdmaWrite`), and mechanically verifies Raft/Paxos quorum intersection in Lean 4.
+*Vesper Chorus* (`@vesper-dist/chorus`, with implementation code in `crates/vesper-chorus`) describes consensus, session-typed RPC, and RDMA (`ibverbs`, RoCEv2, and CXL). Drawing on _Choreographic Programming_ (PLDI 2026, #link(<ch-1>)[Chapter 1]) and multiparty session types, it proposes projecting `@choreography` protocols into dual `Session` endpoints. `RdmaRegion` and `InFlightRdmaWrite` track memory-registration obligations, while Lean 4 models address Raft/Paxos quorum intersection. Endpoint typing and quorum lemmas do not by themselves establish distributed liveness or safe hardware revocation.
 
 === 35.1 Deadlock-Free Session Typing, RDMA Registration, and Consensus Guarantees
 <ch-34-1>
-+ *Single-Source Choreographies and Deadlock-Free Endpoint Projection (`@choreography`):* In Rust (`tonic` and `openraft`), client, leader, and follower state machines are written as separate asynchronous loops whose message sequences and branch assumptions easily drift out of sync. Chorus's WASI `@choreography` macro (`macro_emits_effects = []`, #link(<ch-6-4>)[Section 7.4]) compiles a single global protocol specification via *Endpoint Projection (EPP)* into per-role local code proven *deadlock-free by construction*, statically rejecting unmergeable distributed branches where an uninvolved node cannot tell which protocol path was chosen.
++ *Protocol Projection (`@choreography`):* Chorus proposes generating role-local code from one global protocol through endpoint projection (EPP). The WASI macro runs with `macro_emits_effects = []` (#link(<ch-6-4>)[Section 7.4]). Projection must reject unmergeable branches when an uninvolved participant cannot determine which path to follow. The intended deadlock-freedom result depends on the protocol fragment, projection theorem, and communication assumptions; generating dual endpoint types alone does not establish it for a deployed system.
 
 + *Typestate Linear Session Channels (`Session[Proto]`):* Conventional gRPC and TCP streams permit handlers to drop a bidirectional stream mid-handshake or send out-of-order replies. Chorus types every protocol channel as a `Mode::Linear` `Session[P]` obligation advancing across `Send[Msg, Next]`, `Recv[Msg, Next]`, `Select[L, R]`, `Offer[L, R]`, and `End`. Under Theorem 2 and #link(<ch-4>)[Chapter 4]'s `[T-Let]` Resumption Frame Condition, every protocol step must be driven to `End` or explicitly transitioned onto a fault-recovery handler on transport failure (`NetFail`).
 
@@ -8426,13 +8440,13 @@ pub fn are_dual_sessions(r_a: RoleId, s_a: &LocalSessionTy, r_b: RoleId, s_b: &L
 
 == 36. Vesper Quarry: Hermetic SQL, Buffer Pools, and AoSoA Execution
 <ch-35>
-#chapter-deck[Offline WASI `@sql` Verification, Slotted `wire struct` Pages, Linear `PagePin` Eviction Safety, and Vectorized `AoSoA` Query Plans]
+#chapter-deck[SQL Checks, Page Layouts, Buffer-Pool Ownership, and Vectorized Queries]
 
-*Vesper Quarry* (`@vesper-db/quarry`, implemented in `crates/vesper-quarry`) specifies Vesper's embedded transactional storage engine, vectorized analytical query processor, and hermetic compile-time SQL substrate. Providing the concrete storage engine behind #link(<ch-1>)[Chapter 1]'s `WriteTxn` and #link(<ch-33>)[Chapter 34]'s `TenantDb` capabilities, Quarry unifies offline WASI `@sql` catalog verification, zero-atomic `Mode::Linear` `PagePin` buffer-pool management over `io_uring` `O_DIRECT` DMA, `egglog` relational optimization, and predicated SIMD execution over `AoSoA` cache tiles.
+*Vesper Quarry* (`@vesper-db/quarry`, with implementation code in `crates/vesper-quarry`) describes transactional storage, vectorized queries, and compile-time SQL checking. It supplies the storage design behind the `WriteTxn` example in #link(<ch-1>)[Chapter 1] and the `TenantDb` capability in #link(<ch-33>)[Chapter 34]. Proposed mechanisms include offline WASI `@sql` checks, linear `PagePin` ownership, `io_uring` `O_DIRECT` I/O, `egglog` query optimization, and SIMD execution over tiled collections. Storage and concurrency correctness require the additional conditions discussed below.
 
 === 36.1 Compile-Time SQL, Buffer-Pool Pin Conservation, and AoSoA Guarantees
 <ch-35-1>
-+ *Zero-Socket Hermetic Compile-Time SQL Verification (`@sql`):* In Rust, `sqlx::query!` requires a live network database socket (`DATABASE_URL`) during compilation or brittle checked-in JSON metadata files, breaking reproducible offline builds. Quarry's `@sql(...)` macro executes inside Vesper Forge's fuel-metered `wasm32-wasip2` Wasmtime sandbox (`macro_emits_effects = []`, #link(<ch-10-2>)[Section 11.2] and #link(<ch-6-4>)[Section 7.4]), replaying declarative `migrations/*.sql` DDL files into an in-memory catalog to verify SQL syntax, join nullability propagation, bind-parameter types, and output `AoSoA` tile schemas in under 100 microseconds with zero network or ambient filesystem authority.
++ *Offline SQL Checking (`@sql`):* Quarry proposes replaying `migrations/*.sql` DDL into an in-memory catalog, then checking SQL syntax, join nullability, bind-parameter types, and output `AoSoA` schemas. The macro executes in *Forge*'s fuel-metered `wasm32-wasip2` Wasmtime sandbox (`macro_emits_effects = []`; #link(<ch-10-2>)[Section 11.2] and #link(<ch-6-4>)[Section 7.4]). It needs declared migration inputs, without network or ambient filesystem access. The draft targets checks below 100 microseconds; that timing requires a stated catalog and workload.
 
 + *Zero-Atomic Linear Buffer-Pool Page Pinning (`PagePin[M]`):* Conventional C++ and Rust storage engines (`SQLite`, `RocksDB`, `redb`, `LeanStore`) guard cached 4 KiB and 16 KiB B+Tree pages with atomic pin counts (`Arc` or `AtomicU32`), incurring multi-core cache-line contention on root and internal pages while risking silent buffer-pool exhaustion if an error path forgets to unpin. Quarry combines optimistic lock-coupling (`PageEpoch`) for latch-free internal traversal with `linear struct PagePin[Access]` (`Shared` or `Exclusive`) for leaf mutations and scans. Under Theorem 2 and `[T-Let]`, every pinned page frame must be explicitly released via `pool.unpin(sink pin)` or `pool.unpin_dirty(sink pin, wal_lsn)` on 100 percent of control-flow paths.
 
@@ -8758,13 +8772,13 @@ impl RelPlan {
 
 == 37. Vesper Flux: Differential Stream Processing and DBSP Z-Sets
 <ch-36>
-#chapter-deck[Incremental DBSP Z-Set Circuits, `AoSoA` Consolidation, Linear Frontier Watermarks, and Clock-Guarded Feedback Loops]
+#chapter-deck[Incremental Operators, Consolidation, Watermarks, and Feedback]
 
-*Vesper Flux* (`@vesper-stream/flux`, implemented in `crates/vesper-flux`) specifies Vesper's incremental view maintenance (IVM), differential stream-processing, and Change-Data-Capture (CDC) materialized-view engine. Grounded in *DBSP* (_Automatic Incremental View Maintenance for Rich Query Languages_, Budiu, McSherry, Ryzhyk, and Tannen, VLDB 2023 / Feldera 2025–2026), Flux executes Z-Set abelian group operators ($Delta (Q)$), bilinear incremental joins, `Mode::Linear` `FrontierTicket` watermarks, and clock-guarded recursive queries directly over L1-resident `AoSoA` cache tiles.
+*Vesper Flux* (`@vesper-stream/flux`, with implementation code in `crates/vesper-flux`) describes incremental view maintenance (IVM), differential streams, and change-data-capture (CDC) materialized views. Its research basis is *DBSP* (_Automatic Incremental View Maintenance for Rich Query Languages_, Budiu, McSherry, Ryzhyk, and Tannen, VLDB 2023 / Feldera 2025–2026). The design combines Z-Set group operators ($Delta (Q)$), incremental joins, linear `FrontierTicket` watermarks, and clock-guarded recursion over `AoSoA` tiles. Bounded state and distributed execution require separate justification.
 
 === 37.1 Incremental Z-Set Exactness, Frontier Watermark, and State Guarantees
 <ch-36-1>
-+ *Zero-GC DBSP Z-Set Algebra Over AoSoA Cache Tiles (`ZSetTile[K, V]`):* JVM stream processors (Flink) suffer stop-the-world GC pauses and costly RocksDB byte serialization on every state lookup, while Rust's differential-dataflow and dbsp crates rely on `Arc`-shared trace spines and `GlobalAlloc` vector allocations per micro-batch. Flux represents streaming changes as *Z-Sets*—collections of tuples paired with signed 64-bit integer multiplicity weights (`+1` for insertion, `-1` for deletion/retraction)—packed directly into *Vesper Strata* `TiledSeq` (`tiled(16) struct`, #link(<ch-12-5>)[Section 13.5]) columns inside per-epoch `VirtualArena` regions (`Alloc` omitted from `eff [...]`). SIMD consolidation (`eff [Isa[P]]`, #link(<ch-13>)[Chapter 14]) merges duplicate keys and elides net-zero (`+1 - 1 == 0`) updates in L1 cache before touching persistent state.
++ *Z-Set Storage (`ZSetTile[K, V]`):* Flux represents changes as tuples with signed 64-bit multiplicity weights: `+1` inserts a tuple, and `-1` deletes or retracts it. The proposed layout uses *Strata* `TiledSeq` columns (`tiled(16) struct`, #link(<ch-12-5>)[Section 13.5]) in per-epoch `VirtualArena` regions, with `Alloc` omitted from the effect row. SIMD consolidation (`eff [Isa[P]]`, #link(<ch-13>)[Chapter 14]) merges duplicate keys and removes net-zero updates (`+1 - 1 == 0`) before accessing persistent state. Cache residency depends on the batch size and target.
 
 + *Mode::Linear Frontier and Watermark Progress Tracking (FrontierTicket):* In timely-dataflow, operator progress capabilities (`Capability<Timestamp>`) rely on runtime reference counts; retaining a capability accidentally in a map stalls global garbage collection and window emission forever, while premature drops emit corrupt incomplete windows. Flux reifies every event-time watermark hold as a `Mode::Linear` obligation (`linear struct FrontierTicket`). Under Theorem 2 and `[T-Let]`, every shard operator must explicitly advance (`advance_to`) or discharge (`retire_frontier`) its `FrontierTicket` along 100 percent of control paths, guaranteeing deadlock-free monotonic frontier propagation with zero atomic reference counting.
 
@@ -9027,10 +9041,10 @@ impl ZSetCircuitExpr {
 
 = Part VII. Native Interfaces, Tri-Backend Graphics, Simulation, and Machine Learning
 <part-7>
-#chapter-deck[Cross-Platform Native UI, DirectX 12 / Vulkan 1.4 / Metal 4 Rendering, Bit-Deterministic XPBD Physics, Hard-Realtime DSP, and Paged-KV Tensor Compute]
+#chapter-deck[Native Interfaces, Graphics, Physics, Audio, Robotics, and Tensor Compute]
 
 #_part-summary("Part VII Architectural Scope")[
-  Part VII specifies Vesper's interactive client, GPU rendering, physical simulation, real-time control, and machine-learning substrates. #link(<ch-37>)[Chapter 38] (*Vesper Aura*) defines incremental view-delta native UIs across WinUI 3, GTK 4, and SwiftUI with headless WCAG verification. #link(<ch-38>)[Chapter 39] (*Vesper Ignis*) specifies the tri-backend 3D graphics engine unifying single-source WASI Slang shaders, static Enhanced/`Synchronization2`/Metal 4 barrier compilation, and DirectStorage/IOCP asset streaming. #link(<ch-39>)[Chapter 40] and #link(<ch-40>)[Chapter 41] specify *Vesper Kinetic* (`vesper-kinetic`) cross-architecture bit-deterministic XPBD physics and *Vesper Resonance* (`vesper-resonance`) `@realtime` lock-free DSP and 1 kHz robotics loops. #link(<ch-41>)[Chapter 42] (*Vesper Tensor*) closes with symbolic shape-checked tensor compute, `egglog` epilogue fusion, and linear `KvPageLease` LLM serving.
+  Part VII describes client applications and compute services. #link(<ch-37>)[Chapter 38] presents *Aura* native interfaces, and #link(<ch-38>)[Chapter 39] presents *Ignis* graphics across DirectX 12, Vulkan, and Metal. #link(<ch-39>)[Chapter 40] covers *Kinetic* physics and rollback; #link(<ch-40>)[Chapter 41] covers *Resonance* audio and robotics control. #link(<ch-41>)[Chapter 42] presents *Tensor* shape checking and inference. Backend support, numerical determinism, and real-time bounds depend on the implementation and target; the proposed contracts do not establish those properties across every platform.
 ]
 
 #figure(
@@ -9050,9 +9064,9 @@ impl ZSetCircuitExpr {
 
 == 38. Vesper Aura: Cross-Platform Native User Interfaces
 <ch-37>
-#chapter-deck[Incremental View-Delta Calculus, Disjoint State Lenses, Native WinUI 3 / GTK 4 / SwiftUI Backends, and `SimAura` Accessibility]
+#chapter-deck[View Updates, State Lenses, Native Backends, and Accessibility]
 
-*Vesper Aura* (`@vesper-ui/aura`, implemented in `crates/vesper-aura`) specifies Vesper's statically typed, cross-platform native user-interface framework. Rather than emulating controls on a custom GPU canvas, Aura compiles a single declarative Vesper view architecture directly to *WinUI 3* (Windows App SDK 2.x) on Windows, *GTK 4* (`libgtk-4` and `libadwaita`) on Linux, and *SwiftUI* (`NSHostingView` and Swift 6 `ObservationRegistrar`) on macOS.
+*Vesper Aura* (`@vesper-ui/aura`, with implementation code in `crates/vesper-aura`) describes a typed native user-interface framework. Its proposed backends map one declarative view architecture to WinUI 3 (Windows App SDK 2.x), GTK 4 (`libgtk-4` and `libadwaita`), and SwiftUI (`NSHostingView` and Swift 6 `ObservationRegistrar`). This chapter explains view updates, state access, and accessibility contracts; backend coverage must be checked against the implementation.
 
 Grounded in typed view-tree reconciliation (_Xilem_) and generic incremental differentiation (_DeCo: A Core Calculus for Incremental Functional Programming with Generic Data Types_, Böhler, Reinhard, Richter, and Mezini, OOPSLA 2026), Aura reconciles COM/WinRT object trees, GObject signals, and declarative Swift value trees without reference-counted `RefCell` graphs, runtime borrow panics, or heap-boxed `AnyView` erasure—combining disjoint `inout` state lenses, `UiThread` capability confinement, and headless `SimAura` WCAG 2.2 AA verification.
 
@@ -9103,7 +9117,7 @@ Parent views compose modular child views using `Lens::zoom(|in app.{sidebar}| si
 <ch-37-3>
 Aura bridges imperative retained widgets (WinUI 3 and GTK 4) and declarative value-typed views (SwiftUI) through three thin, declarative `.vsys` backends (#link(<ch-15>)[Chapter 16]):
 
-+ *Windows Backend (`AuraWinUi3` — Windows App SDK 2.x COM and WinRT ABI):* `sys/winui3.vsys` binds directly to Windows App SDK flat C/COM activation vtables (`RoGetActivationFactory`, `Microsoft.UI.Xaml.Window`, `MicaBackdrop`, `NavigationView`, `CommandBar`, `ItemsRepeater`, and `Microsoft.UI.Composition`). Every `add_Click` or `add_TextChanged` registration returns a `linear struct WinRtEventSub` holding the 64-bit `EventRegistrationToken`; forgetting to call `remove_Click` during `unmount` fails compilation. String updates borrow UTF-16 slices from the per-frame `VirtualArena` via `WindowsCreateStringReference` (fast-pass stack `HSTRING`) with zero Windows heap allocations.
++ *Windows Backend (`AuraWinUi3`):* The proposed `sys/winui3.vsys` bindings expose Windows App SDK 2.x C/COM activation vtables, including `RoGetActivationFactory`, `Microsoft.UI.Xaml.Window`, `MicaBackdrop`, `NavigationView`, `CommandBar`, `ItemsRepeater`, and `Microsoft.UI.Composition`. Each `add_Click` or `add_TextChanged` registration returns a linear `WinRtEventSub` containing the 64-bit `EventRegistrationToken`. The intended unmount contract requires explicit deregistration, such as `remove_Click`. String updates borrow UTF-16 slices from the per-frame `VirtualArena` through `WindowsCreateStringReference` (a fast-pass stack `HSTRING`), aiming to avoid Windows heap allocation. Native callback and string lifetimes must match those borrows.
 + *Linux Backend (`AuraGtk4` — `libgtk-4` and `libadwaita` Wayland/Vulkan GSK):* `sys/gtk4.vsys` models `GInitiallyUnowned` constructors via Omniglot `ForeignVal[FloatingGObj[T]]`, requiring immediate `g_object_ref_sink` validation before yielding an owned `affine struct GObj[T]`. Signal connections (`g_signal_connect_data`) return a `linear struct GSignalSub` wrapping the `gulong` handler ID to guarantee disconnection on unmount. Semantic Aura containers map natively to `AdwApplicationWindow`, `AdwHeaderBar`, `AdwNavigationSplitView`, and GTK 4's Vulkan GSK renderer.
 + *macOS Backend (`AuraSwiftUi` — Swift 6 `@_cdecl` and `ObservationRegistrar` Slot Graph):* Wrapping imperative `NSView` controls loses macOS vibrancy, automatic toolbar/sidebar collapse, and SwiftUI animations, whereas regenerating `AnyView` trees across FFI defeats SwiftUI's `AttributeGraph`. Aura solves this via a compact (\~400 LOC) hermetic Swift 6 host library (`AuraSwiftHost`) bound via `@_cdecl` C ABI functions. On mount, Vesper emits a flat `wire struct NodeOp` topology buffer binding dynamic properties to numeric `u32` Slot IDs inside a Swift `VesperSlotStore` backed by `ObservationRegistrar`. During `View::reconcile`, Vesper writes only changed slot values in place and calls `aura_swift_notify_slot_changed(host, slot_id)`, waking only the exact leaf SwiftUI `View` node in `AttributeGraph` at 120 Hz ProMotion frame rates.
 
@@ -9314,9 +9328,9 @@ impl AuraSlotTable {
 
 == 39. Vesper Ignis: Tri-Backend 3D Graphics Engine
 <ch-38>
-#chapter-deck[Single-Source WASI Slang Shaders, DirectX 12 / Vulkan 1.4 / Metal 4 Lowering, Static Render-Graph Barriers, and DirectStorage Residency]
+#chapter-deck[Shader Compilation, Backend Synchronization, Render Graphs, and Asset Residency]
 
-*Vesper Ignis* (`@vesper-game/ignis`, implemented in `crates/vesper-ignis`) specifies Vesper's zero-GC, tri-backend 3D graphics engine targeting *DirectX 12 Agility SDK (1.620+)* on Windows, *Vulkan 1.4 (`VK_EXT_descriptor_heap` and Roadmap 2026)* on Linux and SteamOS, and *Apple Metal 4 (`MTL4CommandBuffer` and `MTLResidencySet`)* on macOS 26+. Ignis maps explicit modern GPU hardware contracts directly onto modal linearity, disjoint place projections, and one-shot lexical capabilities—unifying an `AoSoA` Entity-Component-System, a compile-time hazard-verified render graph emitting Enhanced Barriers / `Synchronization2` / Metal 4 Intra-Pass Barriers, single-source WASI Slang shader compilation, GPU-driven meshlets, hardware raytracing with Shader Execution Reordering, and asynchronous NVMe-to-VRAM streaming.
+*Vesper Ignis* (`@vesper-game/ignis`, with implementation code in `crates/vesper-ignis`) describes a 3D graphics engine without garbage collection. Proposed targets are DirectX 12 Agility SDK 1.620+ on Windows, Vulkan 1.4 (`VK_EXT_descriptor_heap` and Roadmap 2026) on Linux/SteamOS, and Metal 4 (`MTL4CommandBuffer` and `MTLResidencySet`) on macOS 26+. The design combines a tiled entity-component system, render-graph synchronization, WASI Slang shaders, meshlets, ray tracing, and NVMe-to-VRAM streaming. Ownership and capability contracts express intended hardware lifecycles; feature availability and correctness depend on each backend.
 
 === 39.1 Zero-GC ECS, Static GPU Barrier, and Tri-Backend Lowering Guarantees
 <ch-38-1>
@@ -9949,13 +9963,13 @@ const fn mtl4_stage_bits(sync: BarrierSync) -> u32 {
 
 == 40. Vesper Kinetic: Bit-Deterministic XPBD Physics and Rollback
 <ch-39>
-#chapter-deck[Compiler-Verified `DetFloat` IEEE-754 Determinism, Graph-Colored SIMD XPBD Over `AoSoA` Tiles, and Linear Rollback Checkpoints]
+#chapter-deck[Numerical Determinism, SIMD Constraint Solving, and Rollback Ownership]
 
-*Vesper Kinetic* (`@vesper-sim/kinetic`, implemented in `crates/vesper-kinetic`) specifies Vesper's rigid-body, articulated-multibody, and soft-body physics simulation engine built on *Extended Position-Based Dynamics (XPBD)* and *Temporal Gauss-Seidel (TGS)* substepping. Powering deterministic rollback netcode in *Vesper Ignis* (#link(<ch-38>)[Chapter 39]) and differentiable sim-to-real digital twins for *Vesper Resonance* robotics controllers (#link(<ch-40>)[Chapter 41]), Kinetic enforces cross-ISA IEEE-754 bit-determinism (`eff [DetFloat]`), parallel graph-colored `VVec` SIMD constraint solving over `AoSoA` body tiles, zero-allocation Morton LBVH broadphase arenas, and `Mode::Linear` `RollbackCheckpoint` leases.
+*Vesper Kinetic* (`@vesper-sim/kinetic`, with implementation code in `crates/vesper-kinetic`) describes rigid-body, articulated, and soft-body simulation using Extended Position-Based Dynamics (XPBD) and Temporal Gauss-Seidel (TGS) substeps. It targets rollback in *Ignis* (#link(<ch-38>)[Chapter 39]) and differentiable simulation for *Resonance* robotics (#link(<ch-40>)[Chapter 41]). Proposed mechanisms include `eff [DetFloat]` numerical contracts, graph-colored SIMD constraint solving, arena broadphase storage, and linear `RollbackCheckpoint` leases. Cross-architecture bit determinism requires validation of the numerical and backend assumptions.
 
 === 40.1 Cross-ISA Bit-Determinism, Graph-Colored XPBD, and Rollback Guarantees
 <ch-39-1>
-+ *Compiler-Enforced Cross-Architecture Bit-Determinism (`eff [DetFloat]`):* In C++ (Jolt / PhysX) and Rust (`rapier3d`), achieving bit-identical simulation across Intel/AMD `x86_64` and Apple Silicon / Arm AArch64 peers fails silently whenever the backend fuses multiply-add into a single-rounding hardware FMA on one target but not another, reorders SIMD horizontal reductions, or calls platform libm transcendentals (`sinf`, `acosf`) with 1-ULP drift. Kinetic introduces `copy effect DetFloat`: inside `DetFloat::scope`, Stage 4 (`vesper-opt-egglog`, #link(<ch-7>)[Chapter 8]) and Stage 5 (`vesper-codegen-clif`) pin IEEE-754 round-to-nearest-even (RN), forbid unannotated FMA contraction (mul + add stays two-rounded unless explicit hardware `DetFloat::fma` is invoked on both ISAs), enforce canonical binary-tree vector reductions, and route trigonometry through *CORE-MATH* correctly-rounded (at most 0.5 ULP) minimax polynomials—guaranteeing bit-for-bit identical world hashes across `x86_64`, AArch64, and RISC-V.
++ *Cross-Architecture Numerical Contracts (`eff [DetFloat]`):* Backend differences in FMA contraction, SIMD reduction order, and library functions such as `sinf` and `acosf` can change simulation results, including through 1-ULP drift. Kinetic proposes `copy effect DetFloat` and `DetFloat::scope` to constrain Stage 4 (`vesper-opt-egglog`, #link(<ch-7>)[Chapter 8]) and Stage 5 (`vesper-codegen-clif`). The contract fixes IEEE-754 round-to-nearest-even, keeps multiply and add separately rounded unless both targets explicitly use `DetFloat::fma`, fixes binary-tree reduction order, and uses CORE-MATH correctly rounded polynomials (at most 0.5 ULP). Identical world hashes across `x86_64`, AArch64, and RISC-V require proof or validation of every relevant numerical path.
 + *Disjoint Graph-Colored SIMD XPBD Solver Over AoSoA Bodies (`ColorIsland`):* Solving coupled contact and joint constraints in parallel in C++ or Rust requires either unsafe raw-pointer body aliasing or runtime `RefCell` / `Mutex` locks per rigid body. Kinetic partitions active contact manifolds via a deterministic greedy graph-coloring pass into conflict-free `ColorBatch` layers and projects disjoint `inout bodies.{pos_x, pos_y, pos_z}` versus `in bodies.{inv_mass, compliance_alpha}` columns over 16-wide *Vesper Strata* `tiled(16) struct` (`AoSoA`, #link(<ch-12-5>)[Section 13.5]) rigid-body tiles—solving 16 independent contact constraints simultaneously in *Vesper Vector* `VVec` registers (`eff [Isa[P]]`, #link(<ch-13>)[Chapter 14]) across *Vesper Pulse* `Scope` fibers with zero locks and zero unsafe.
 + *Zero-Global-Heap Broadphase BVH and Rollback Snapshot Rings (0 Alloc):* Multiplayer rollback netcode (GGPO-style) re-simulates 4 to 8 physics ticks within a single 8.33 ms (120 Hz) frame whenever a remote input arrives late; heap-allocating contact manifolds or cloning `Vec` worlds causes catastrophic frame-time spikes. Kinetic allocates per-step 64-bit Morton LBVH nodes and GJK/EPA contact manifolds strictly inside a resettable lexical `Region::scoped` `VirtualArena` (#link(<ch-12-2>)[Section 13.2]) and snapshots entire 10,000-body `TiledSeq` worlds via `memcpy` into a pre-allocated ring buffer in under 80 microseconds.
 + *Mode::Linear Rollback Tickets and Tri-Backend Ignis GPU Compute Co-Execution:* Networked rollback frames and asynchronous GPU broadphase dispatches (sharing *Vesper Ignis*'s single-source WASI Slang radix-sort and LBVH shaders across DirectX 12, Vulkan 1.4, and Metal 4, #link(<ch-38-8>)[Section 39.8]) are governed by `Mode::Linear` obligations (`linear struct RollbackCheckpoint`, `linear struct GpuBroadphaseLease`). Under Theorem 2 and `[T-Let]`, speculative prediction ticks cannot overwrite committed history or drop an in-flight GPU contact buffer before fence retirement.
@@ -10177,13 +10191,13 @@ pub fn color_constraints_deterministic(
 
 == 41. Vesper Resonance: Hard-Realtime DSP and Robotics Control
 <ch-40>
-#chapter-deck[Compile-Time `@realtime` Non-Blocking Confinement, Sample-Accurate Event Splitting, Wait-Free SPSC Rings, and Delay Compensation]
+#chapter-deck[Callback Effect Restrictions, Event Timing, Parameter Rings, and Delay Compensation]
 
-*Vesper Resonance* (`@vesper-rt/resonance`, implemented in `crates/vesper-resonance`) specifies Vesper's glitch-free hard-realtime digital signal processing (DSP), low-latency audio/MIDI engine (CoreAudio, PipeWire, and WASAPI/ASIO), and deterministic 1–10 kHz robotics/EtherCAT control-loop substrate. Resonance elevates realtime non-blocking discipline into a static compile-time contract (`@realtime` and `eff [Realtime]`), pairing worst-case stack-depth verification and hardware FTZ/DAZ subnormal suppression with sample-accurate event splitting, wait-free substructural SPSC parameter rings, and automatic Plugin Delay Compensation (`PDC`).
+*Vesper Resonance* (`@vesper-rt/resonance`, with implementation code in `crates/vesper-resonance`) describes digital signal processing (DSP), audio/MIDI through CoreAudio, PipeWire, and WASAPI/ASIO, and 1–10 kHz robotics/EtherCAT control loops. The design uses `@realtime` and `eff [Realtime]` to restrict callback effects. Stack bounds, floating-point subnormal controls, sample-accurate events, SPSC parameter rings, and plugin delay compensation (PDC) address separate execution constraints. These contracts do not by themselves establish hard real-time deadlines on a target system.
 
 === 41.1 Hard-Realtime Allocation Freedom, FPU Determinism, and Graph Guarantees
 <ch-40-1>
-+ *Compile-Time Realtime Effect Confinement (`@realtime` and `eff [Realtime]`):* In C++20/23 (`[[clang::nonblocking]]` / `rtsan`) and Rust (`cpal` + `rtrb`), nothing in the core type system stops a transitive helper or logging macro on an audio or motor-control thread from calling `malloc`/`GlobalAlloc`, locking a `Mutex`, performing a blocking syscall, or unwinding. Resonance enforces hard-realtime safety directly through Vesper's lexical capability system: `@realtime` callbacks restrict their allowed effect row to wait-free register and SIMD capabilities (`eff [Realtime, Isa[P], ConstDenorm]`), statically rejecting `Alloc`, `Net`, `Storage`, `Async`, `Scope`, and mutex acquisition across 100 percent of transitive callees while reusing Vesper Silicon's Stage 5 Worst-Case Stack Depth (`WCSD`, #link(<ch-24-5>)[Section 25.5]) verifier to guarantee zero stack-growth page faults.
++ *Realtime Effect Confinement (`@realtime`, `eff [Realtime]`):* The proposed callback contract permits wait-free register and SIMD capabilities (`eff [Realtime, Isa[P], ConstDenorm]`). It rejects `Alloc`, `Net`, `Storage`, `Async`, `Scope`, and mutex acquisition throughout the transitive call graph, including helpers and macros. The design also uses *Silicon*'s Stage 5 worst-case stack-depth (WCSD) analysis (#link(<ch-24-5>)[Section 25.5]) to bound stack use. Excluding blocking effects and bounding stack depth address specific deadline risks; hard real-time execution still requires target-specific scheduling and memory-residency guarantees.
 
 + *Subnormals-Flushed Hardware FPU Scope (`eff [ConstDenorm]`):* IIR biquad filters, reverbs, and PID state estimators routinely decay toward zero on silence or steady-state error, producing IEEE-754 denormalized floats that trigger 50x–100x microcode assist stalls on `x86_64` and AArch64—causing sudden audio xruns or missed 1 kHz actuator deadlines. Entering `Resonance::realtime_quantum` activates `copy effect ConstDenorm`, emitting hardware Flush-to-Zero and Denormals-Are-Zero (`MXCSR.FTZ|DAZ` on `x86_64`, `FPCR.FZ` on AArch64) around the callback and restoring caller FPU flags on exit.
 
@@ -10422,13 +10436,13 @@ pub fn compile_pdc_schedule(nodes: &[DspNodeSpec]) -> Result<Vec<ScheduledDspOp>
 
 == 42. Vesper Tensor: Shape-Checked Compute and Paged-KV Inference
 <ch-41>
-#chapter-deck[Symbolic Shape-Typed Tensors, Zero-Copy Quantized Super-Blocks, `egglog` Epilogue Fusion, and Linear Paged-KV LLM Serving]
+#chapter-deck[Shape Contracts, Quantized Weights, Operator Fusion, and KV-Cache Ownership]
 
-*Vesper Tensor* (`@vesper-ml/tensor`, implemented in `crates/vesper-tensor`) specifies Vesper's differentiable tensor compute, polyhedral operator-fusion, and local LLM/VLM inference substrate. Tensor unifies compile-time symbolic named-axis verification (`Tensor[r, DType, Shape]`), zero-copy `wire struct` quantized weight mapping (`GGUF` and `Safetensors` `Q4_K` / `FP8` / `MXFP4` super-blocks), Stage 4 `egglog` epilogue fusion across CPU SIMD/AMX/SME2 and tri-backend GPUs, and `Mode::Linear` `KvPageLease` PagedAttention serving.
+*Vesper Tensor* (`@vesper-ml/tensor`, with implementation code in `crates/vesper-tensor`) describes differentiable tensor compute, operator fusion, and local LLM/VLM inference. Its proposed contracts combine named-axis shape checking (`Tensor[r, DType, Shape]`), mapped quantized weights (`GGUF`, `Safetensors`, `Q4_K`, `FP8`, and `MXFP4`), CPU/GPU epilogue fusion, and linear `KvPageLease` serving. This chapter explains those mechanisms and their intended composition; format, backend, and lifecycle coverage require implementation-specific validation.
 
 === 42.1 Compile-Time Dimension Unification, Operator Fusion, and KV-Lease Guarantees
 <ch-41-1>
-+ *Symbolic Named-Axis Shape Unification (`Tensor[r, DType, Shape]`):* In Rust ML frameworks, `candle` defers dimension and broadcasting checks to runtime `Result` errors that fail mid-inference, whereas `dfdx` encodes shapes via nested positional traits that produce multi-page compiler errors and cannot express dynamic sequence lengths cleanly. Vesper Tensor tracks symbolic named dimensions (`[Batch: dim, Seq: dim, Heads: 32, HeadDim: 128]`) in `vesper-hir`, unifying static constants and symbolic runtime dimensions (`Seq`) at compile time so matrix contraction mismatches, invalid Rotary Position Embedding (`RoPE`) even-width assumptions, and Grouped-Query Attention (`Heads % KvHeads == 0`) errors are caught instantaneously in Vesper Lens (#link(<ch-17>)[Chapter 18]).
++ *Named-Axis Shape Checking (`Tensor[r, DType, Shape]`):* Tensor proposes tracking named dimensions such as `[Batch: dim, Seq: dim, Heads: 32, HeadDim: 128]` in `vesper-hir`. Unification must distinguish static constants from symbolic runtime dimensions such as `Seq`. Intended checks include matrix contraction compatibility, even-width requirements for rotary position embeddings (RoPE), and grouped-query attention constraints (`Heads % KvHeads == 0`). *Lens* (#link(<ch-17>)[Chapter 18]) is intended to report failed obligations before execution. A symbolic runtime dimension requires a justified constraint or runtime check; its name alone does not establish the bound.
 
 + *Zero-Copy `wire struct` Quantized Weight Mapping (`GGUF` and `Safetensors`):* Loading multi-gigabyte `BF16`, `FP8` (`E4M3`), or 4-bit `Q4_K` / `MXFP4` weights in Python and Rust frameworks typically parses headers on the heap or relies on `unsafe` byte-slice transmutations. Pairing Vesper Bridge padding-free `wire struct` block layouts (#link(<ch-15-2>)[Section 16.2]) with Vesper Pulse `mmap` and `io_uring` fixed-buffer streaming into Hardware Domain 1 (#link(<ch-12-3>)[Section 13.3]), Vesper Tensor projects quantized super-blocks directly in place with zero global heap allocations and zero `unsafe` casts.
 
@@ -10700,10 +10714,10 @@ impl TensorIr {
 
 = Part VIII. Mechanized Metatheory and Official Geometric Identity
 <part-8>
-#chapter-deck[Zero-`sorryAx` Lean 4 Soundness Artifacts and Parametric Disjoint Field-Tree Prism Specification]
+#chapter-deck[Selected Lean Models, Their Proof Scope, and the Visual Identity Specification]
 
 #_part-summary("Part VIII Architectural Scope")[
-  Part VIII provides the complete self-contained Lean 4 mechanization of $lambda_(upright("Vesper"))$ (#link(<appendix-a>)[Appendix A])—unifying core substructural modes, field-modality well-formedness, Resumption Frame Conditions, Place Capability Graph disjointness, total linear exhaustion, four-axis `ModeVec` transitions, LIFO stack safety, `@0` ghost erasure, `out` parallel slice splits, liquid refinement SemVer variance, graded arena bump-check elision, and `Quot.sound` lifting—followed by the canonical CAD, perceptual OKLCH, and SVG specification of Vesper's official visual identity (#link(<appendix-b>)[Appendix B]).
+  Part VIII separates proof scope from visual identity. #link(<appendix-a>)[Appendix A] presents selected Lean 4 models and explains the properties, operational bridges, and limitations of each. The models do not form a single mechanization of the full language or compiler. #link(<appendix-b>)[Appendix B] specifies the geometry, OKLCH palettes, and SVG construction of Vesper's official visual identity. Its geometric rules are independent of the language's soundness claims.
 ]
 
 #figure(

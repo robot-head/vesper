@@ -1,0 +1,55 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
+
+# A multi-file Loom package (vesper/app) with a path dependency (vesper/math),
+# compiled by `vesper_port_object(package = ...)` and linked through build.rs,
+# whose harness checks port/binding.rs against the generated binding.
+vesper_package(
+    name = "math_package",
+    srcs = glob(["vesper/math/src/**/*.ves"]),
+    manifest = "vesper/math/Loom.toml",
+)
+
+vesper_package(
+    name = "app_package",
+    srcs = glob(["vesper/app/src/**/*.ves"]),
+    manifest = "vesper/app/Loom.toml",
+    deps = [":math_package"],
+)
+
+vesper_port_object(
+    name = "port_build_vesper",
+    library = "port_build",
+    package = ":app_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "port_build_vesper_binding",
+    srcs = [":port_build_vesper"],
+    output_group = "rust_binding",
+)
+
+# The divergent package build (the Cargo `divergent` feature applies the
+# same edit): it must build, from a copy of the closure with the edit applied
+# in a second module of the root package. The Cargo run in
+# scripts/test-port-harness.sh asserts that the tests catch it.
+vesper_port_object(
+    name = "port_build_vesper_divergent",
+    edit_src = "vesper/app/src/shapes.ves",
+    edits = {"2 * (w + h)": "2 * (w + h) + 1"},
+    library = "port_build",
+    package = ":app_package",
+    target = VESPER_TARGET,
+)
+
+vesper_crate(
+    build_script_data = [
+        ":port_build_vesper",
+        ":port_build_vesper_binding",
+    ],
+    build_script_env = {
+        "VESPER_PORT_OBJECT": "$(execpath :port_build_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :port_build_vesper_binding)",
+    },
+)

@@ -296,6 +296,95 @@ pub unsafe fn box_words<'a>(pointer: u64, words: usize) -> &'a [u64] {
     unsafe { core::slice::from_raw_parts(pointer as usize as *const u64, words) }
 }
 
+/// Lend `s` to Vesper as an `in Str` (or `in String`): `call` runs with a
+/// pointer to the three-word value `{len, 0, data}`, which borrows the bytes
+/// in place (capacity 0 marks borrowed bytes; Vesper never writes them).
+pub fn with_str<R>(s: &str, call: impl FnOnce(*mut u64) -> R) -> R {
+    let mut words = [s.len() as u64, 0, s.as_ptr() as usize as u64];
+    call(words.as_mut_ptr())
+}
+
+/// Lend `s` to Vesper as an `inout String`. The value starts out borrowing
+/// the Rust bytes (Vesper copies them before its first write); after the
+/// call the (possibly grown or replaced) string is copied back into `s` and
+/// its Vesper buffer freed.
+///
+/// Panics if Vesper left bytes that are not UTF-8, which a Vesper `String`
+/// never holds.
+pub fn with_string_mut<R>(rt: SeqRuntime, s: &mut String, call: impl FnOnce(*mut u64) -> R) -> R {
+    // SAFETY: `seq_new(0, 1)` returns a three-word header with no buffer,
+    // which is a valid `String` value; it stays owned here and Vesper only
+    // borrows it for the call. `seq_free` frees the header and, when the
+    // capacity is not 0, the buffer Vesper allocated.
+    unsafe {
+        let handle = (rt.new)(0, 1) as u64;
+        let h = handle as usize as *mut u64;
+        *h = s.len() as u64;
+        *h.add(1) = 0;
+        *h.add(2) = s.as_ptr() as usize as u64;
+        let result = call(h);
+        let text = string_copy(core::slice::from_raw_parts(h, 3));
+        (rt.free)(handle as i64);
+        *s = text;
+        result
+    }
+}
+
+/// Copy a returned `String` value (its three words) into a Rust `String`
+/// and free its Vesper buffer.
+///
+/// # Safety
+/// `words` must be a live Vesper string of `rt`'s library, owned by the
+/// caller; its buffer is freed.
+pub unsafe fn string_take(rt: SeqRuntime, words: &[u64]) -> String {
+    // SAFETY: forwarded from the caller; the fresh header takes over the
+    // string's buffer so that `seq_free` releases it (or skips borrowed
+    // bytes, whose capacity is 0).
+    unsafe {
+        let text = string_copy(words);
+        let handle = (rt.new)(0, 1) as u64;
+        let h = handle as usize as *mut u64;
+        for (i, word) in words[..3].iter().enumerate() {
+            *h.add(i) = *word;
+        }
+        (rt.free)(handle as i64);
+        text
+    }
+}
+
+/// Borrow the bytes of a live Vesper string value (its three words).
+///
+/// # Safety
+/// `words` must be a live Vesper string that stays alive and unchanged
+/// while the result is borrowed.
+pub unsafe fn str_view(words: &[u64]) -> &str {
+    // SAFETY: forwarded from the caller.
+    let bytes = unsafe { string_bytes(words) };
+    core::str::from_utf8(bytes).expect("a Vesper string holds UTF-8")
+}
+
+/// The bytes of a string value `{len, cap, data}`.
+///
+/// # Safety
+/// `words` must be a live Vesper string.
+unsafe fn string_bytes(words: &[u64]) -> &[u8] {
+    let len = words[0] as usize;
+    if len == 0 {
+        return &[];
+    }
+    // SAFETY: forwarded from the caller.
+    unsafe { core::slice::from_raw_parts(words[2] as usize as *const u8, len) }
+}
+
+/// Copy a string value into a Rust `String`.
+///
+/// # Safety
+/// `words` must be a live Vesper string.
+unsafe fn string_copy(words: &[u64]) -> String {
+    // SAFETY: forwarded from the caller.
+    String::from(unsafe { str_view(words) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +425,18 @@ mod tests {
             unsafe { write_elem(data, 1, &8i32) };
         });
         assert_eq!(xs, [-1, 8, i32::MIN]);
+    }
+
+    #[test]
+    fn strings_are_lent_and_viewed_in_place() {
+        let text = "héllo";
+        with_str(text, |words| {
+            // SAFETY: the value lives for the call.
+            let view = unsafe { str_view(core::slice::from_raw_parts(words, 3)) };
+            assert_eq!(view, text);
+            assert_eq!(view.as_ptr(), text.as_ptr());
+            assert_eq!(unsafe { *words.add(1) }, 0);
+        });
+        assert_eq!(unsafe { str_view(&[0, 0, 0]) }, "");
     }
 }

@@ -1,0 +1,14 @@
+// Vesper port of vesper-beacon (port wave P1). Until lane 4 (#901) ports the
+// crate, this is the one-function stub that port wave P1 lane 2 (#899) uses
+// to show the seed-copy rule: `FastLogHistogram::bucket_index` forwards here
+// in the port build, and the compiler keeps the Rust seed copy.
+use self::bits::highest_bit;
+
+pub fn bucket_index(value: u64) -> usize eff [Fail[ArithOverflow]] {
+    if value < 16 {
+        widen_usize(value)
+    } else {
+        let octave = highest_bit(value, 0);
+        widen_usize(16 + (octave - 4) * 8 + ((value >> (octave - 3)) - 8))
+    }
+}

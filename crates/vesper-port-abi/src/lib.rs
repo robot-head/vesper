@@ -15,6 +15,10 @@
 //! [`with_seq_mut`] lends a `Vec<T>` as an `inout ChunkSeq[T]`,
 //! [`seq_take`] copies a returned `ChunkSeq[T]` into a `Vec<T>` and frees it,
 //! and [`SeqRef`] reads a sequence a handle owns without copying it.
+//! Strings cross as the three-word value `{len, cap, data}`: [`with_str`]
+//! lends a `&str`, [`with_string_mut`] lends a `&mut String`, [`string_take`]
+//! copies a returned `String` and frees it, and [`str_view`] borrows a
+//! string a handle owns.
 //!
 //! This crate has no dependencies, so a crate with a `vesper-port` feature
 //! can depend on it unconditionally.
@@ -22,6 +26,7 @@
 
 extern crate alloc;
 
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 

@@ -1,0 +1,18 @@
+// Root module of the port: its `pub fn`s are the exported API.
+use @vesper/port-build-math::{
+    square
+};
+use @vesper/port-build-math::scale::{
+    triple
+};
+use self::shapes::{
+    perimeter
+};
+
+pub fn square_plus_triple(x: i64) -> i64 eff [Fail[ArithOverflow]] {
+    square(x) + triple(x)
+}
+
+pub fn rect_perimeter(w: i64, h: i64) -> i64 eff [Fail[ArithOverflow]] {
+    perimeter(w, h)
+}

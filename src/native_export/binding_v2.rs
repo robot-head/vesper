@@ -98,6 +98,8 @@ impl Gen<'_> {
             }
             AbiType::Slice { elem } => format!("&mut [{}]", self.copy_type(elem)),
             AbiType::Seq { elem } => format!("&mut Vec<{}>", self.copy_type(elem)),
+            AbiType::Str { .. } if !inout => "&str".into(),
+            AbiType::Str { .. } => "&mut String".into(),
             ty if self.handle(ty).is_some() => {
                 let name = &self.handle(ty).expect("handle").name;
                 match p.pass() {
@@ -125,6 +127,9 @@ impl Gen<'_> {
                 "unsafe {{ vesper_port_abi::seq_take::<{}>(RUNTIME, {buffer}[{offset}]) }}",
                 self.copy_type(elem)
             ),
+            AbiType::Str { .. } => {
+                format!("unsafe {{ vesper_port_abi::string_take(RUNTIME, &{buffer}[{offset}..]) }}")
+            }
             AbiType::Named { name, args } if name == "Option" => format!(
                 "match {buffer}[{offset}] {{ 0 => None, 1 => Some({}), tag => panic!(\"invalid Option tag {{tag}} from Vesper\") }}",
                 self.take(&args[0], buffer, offset + 1)
@@ -165,6 +170,10 @@ impl Gen<'_> {
             AbiType::Seq { elem } => (
                 format!("vesper_port_abi::SeqRef<'a, {}>", self.copy_type(elem)),
                 format!("unsafe {{ vesper_port_abi::SeqRef::from_handle({base}[{offset}]) }}"),
+            ),
+            AbiType::Str { .. } => (
+                "&'a str".into(),
+                format!("unsafe {{ vesper_port_abi::str_view(&{base}[{offset}..]) }}"),
             ),
             AbiType::Box { inner } => {
                 let pointee = format!(
@@ -419,6 +428,18 @@ impl Gen<'_> {
                     };
                     wraps.push((
                         format!("vesper_port_abi::{helper}({n}, |{view}| "),
+                        ")".into(),
+                    ));
+                    args.push(view.clone());
+                }
+                AbiType::Str { .. } => {
+                    let helper = if inout {
+                        "with_string_mut(RUNTIME, "
+                    } else {
+                        "with_str("
+                    };
+                    wraps.push((
+                        format!("vesper_port_abi::{helper}{n}, |{view}| "),
                         ")".into(),
                     ));
                     args.push(view.clone());

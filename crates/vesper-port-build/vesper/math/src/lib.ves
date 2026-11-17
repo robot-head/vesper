@@ -1,0 +1,4 @@
+// Root module of the path dependency.
+pub fn square(x: i64) -> i64 eff [Fail[ArithOverflow]] {
+    x * x
+}

@@ -37,6 +37,8 @@ const KIT_EDITS: &[(&str, &str)] = &[
     ),
     // Slices: `slice_parameters` fails.
     ("if c >= 48 && c <= 57 {", "if c >= 48 && c <= 58 {"),
+    // Strings: `strings` fails.
+    ("    s.push_char(33);", "    s.push_char(63);"),
     // Owned handles: `owned_handles` fails.
     (
         "c.total = wrapping_add(c.total, v);",

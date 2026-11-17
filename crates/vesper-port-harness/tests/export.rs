@@ -138,8 +138,8 @@ fn unexportable_functions_are_refused_with_the_reason() {
             "is a sequence taken by value",
         ),
         (
-            "pub fn s() -> String { \"hi\" }",
-            "type String has no fixed word layout",
+            "pub fn s(sink s: String) -> u64 { 0 }",
+            "type String is a string taken by value",
         ),
         (
             "struct S { xs: ChunkSeq[u64] }\npub fn f(sink s: S) -> u64 { 0 }",

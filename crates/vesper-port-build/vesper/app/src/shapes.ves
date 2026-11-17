@@ -1,0 +1,4 @@
+// A second module of the root package.
+pub fn perimeter(w: i64, h: i64) -> i64 eff [Fail[ArithOverflow]] {
+    2 * (w + h)
+}

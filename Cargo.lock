@@ -5536,7 +5536,7 @@ dependencies = [
  "target-lexicon",
  "vesper-aegis",
  "vesper-alloc",
- "vesper-beacon",
+ "vesper-beacon-seed",
  "vesper-bench",
  "vesper-bench-pmu",
  "vesper-chrono",
@@ -5638,6 +5638,10 @@ dependencies = [
 [[package]]
 name = "vesper-beacon"
 version = "0.1.0"
+dependencies = [
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
 
 [[package]]
 name = "vesper-beacon-arrow"
@@ -5664,6 +5668,10 @@ dependencies = [
  "vesper-beacon",
  "zstd 0.13.4",
 ]
+
+[[package]]
+name = "vesper-beacon-seed"
+version = "0.1.0"
 
 [[package]]
 name = "vesper-bench"
@@ -6119,11 +6127,20 @@ name = "vesper-port-abi"
 version = "0.1.0"
 
 [[package]]
+name = "vesper-port-build"
+version = "0.1.0"
+dependencies = [
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
+
+[[package]]
 name = "vesper-port-harness"
 version = "0.1.0"
 dependencies = [
  "cc",
  "serde_json",
+ "toml 0.8.23",
  "vesper",
 ]
 
