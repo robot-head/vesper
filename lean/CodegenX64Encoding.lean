@@ -118,6 +118,13 @@ inductive Inst
   /-- `POP r64` (`58+r`). -/
   | pop (r : Nat)
   | ret
+  /-- `MOV r11d, imm32` (`REX.B B8+3 id`, milestone 8). -/
+  | movR11 (imm : Nat)
+  /-- `MOV rax, [r11 + rcx*8 + disp32]` (`REX.WB 8B /r`, ModRM `84`, SIB `CB`):
+  a heap word. -/
+  | heapLd (disp : Nat)
+  /-- `MOV [r11 + rcx*8 + disp32], rax` (`REX.WB 89 /r`). -/
+  | heapSt (disp : Nat)
   deriving DecidableEq, Repr
 
 /-! ## The specification: the Intel SDM encodings -/
@@ -271,6 +278,15 @@ def decode : List Nat → Option (Inst × List Nat)
     else if b = 0xe9 then (rdLE 4 r).map fun (n, r) => (.jmp n, r)
     else if b = 0xe8 then (rdLE 4 r).map fun (n, r) => (.call n, r)
     else if b = 0xc3 then some (.ret, r)
+    else if b = 0x41 then
+      match r with
+      | 0xbb :: r => (rdLE 4 r).map fun (n, r) => (.movR11 n, r)
+      | _ => none
+    else if b = 0x49 then
+      match r with
+      | 0x8b :: 0x84 :: 0xcb :: r => (rdLE 4 r).map fun (d, r) => (.heapLd d, r)
+      | 0x89 :: 0x84 :: 0xcb :: r => (rdLE 4 r).map fun (d, r) => (.heapSt d, r)
+      | _ => none
     else none
   | [] => none
 
@@ -312,6 +328,9 @@ def encode : Inst → List Nat
   | .push r => [0x50 + r]
   | .pop r => [0x58 + r]
   | .ret => [0xc3]
+  | .movR11 n => [0x41, 0xbb] ++ le 4 n
+  | .heapLd d => [0x49, 0x8b, 0x84, 0xcb] ++ le 4 d
+  | .heapSt d => [0x49, 0x89, 0x84, 0xcb] ++ le 4 d
 
 /-- Every register below 8 and every field in its range. -/
 def Inst.Wf : Inst → Prop
@@ -326,7 +345,7 @@ def Inst.Wf : Inst → Prop
   | .jcc8 cc n => cc < 16 ∧ n < 256
   | .setcc cc r => cc < 16 ∧ r < 8
   | .jmp8 n => n < 256
-  | .jmp n | .call n => n < 2 ^ 32
+  | .jmp n | .call n | .movR11 n | .heapLd n | .heapSt n => n < 2 ^ 32
   | .cqo | .ret => True
 
 instance (i : Inst) : Decidable i.Wf := by
@@ -513,6 +532,15 @@ theorem decode_encode (i : Inst) (h : i.Wf) (rest : List Nat) :
     have n6 : 0x58 + r ≠ 0x85 := by omega
     simp [encode, decode, e1, e2, n1, n2, n3, n4, n5, n6]
   | ret => simp [encode, decode]
+  | movR11 n =>
+    have h4 : n < 2 ^ (8 * 4) := h
+    simp [encode, decode, rdLE_le 4 n rest h4]
+  | heapLd d =>
+    have h4 : d < 2 ^ (8 * 4) := h
+    simp [encode, decode, rdLE_le 4 d rest h4]
+  | heapSt d =>
+    have h4 : d < 2 ^ (8 * 4) := h
+    simp [encode, decode, rdLE_le 4 d rest h4]
 
 /-- Every encoded byte is a byte. -/
 theorem encode_bytes (i : Inst) (h : i.Wf) : ∀ b ∈ encode i, b < 256 := by
@@ -579,11 +607,13 @@ def JG : Nat := 0xf
 /-- `FIRST_FREE_LABEL`: labels below it are the abort exits of
 `TrapKind::ALL` (`tests/verified_codegen_lean.rs` checks the value against the
 Rust constant); every label from it on is a function or block label. -/
-def firstFree : Nat := 3
+def firstFree : Nat := 4
 
 /-- The program-wide abort exits (`TrapKind::label`). -/
 def trapLabel : Failure → Nat
-  | .overflow => 0 | .divZero => 1 | .unreachable => 2 | .fault => 3
+  | .overflow => 0 | .divZero => 1 | .unreachable => 2 | .region => 3
+  -- A fault is the hardware's exit, not a label `emit` branches to.
+  | .fault => 4
 def ovf : Nat := trapLabel .overflow
 
 /-- The branch instructions that take a label (all `rel32`). -/
@@ -604,6 +634,8 @@ inductive Item
 def mem (load : Bool) (r : Nat) : Loc → Item
   | .slot n | .out n => .ins (if load then .load r .rsp (n * 8) else .store r .rsp (n * 8))
   | .inn n => .ins (if load then .load r .rbp (16 + n * 8) else .store r .rbp (16 + n * 8))
+  -- Never selected: heap words are reached through `ldh`/`sth`.
+  | .heap _ => .ins .ret
 
 /-- `movq xmm0, rax; movq xmm1, rcx`. -/
 def toXmm : List Item := [.ins (.movqToX 0 0), .ins (.movqToX 1 1)]
@@ -673,6 +705,10 @@ def emit (win : Bool) (frame : Nat) : M → List Item
   -- Milestone 7: a trap scope emits no code (it changes which labels the
   -- checked instructions' branches name).
   | .scope _ _ => []
+  -- Milestone 8: `mov r11d, HEAP_BASE; mov rax, [r11 + rcx*8 + 8*off]`
+  -- (`mov [r11 + rcx*8 + 8*off], rax` for `sth`).
+  | .ldh off => [.ins (.movR11 0x10000000), .ins (.heapLd (off * 8))]
+  | .sth off => [.ins (.movR11 0x10000000), .ins (.heapSt (off * 8))]
 
 /-! ## Layout: abort exits at offset 0, other labels at the end -/
 
@@ -736,13 +772,16 @@ theorem place_wf (n : Nat) :
 `MAX_FRAME_WORDS` (4000) words, so every frame displacement and frame size
 fits its 32-bit field. -/
 def mBounded (frame : Nat) : M → Prop
-  | .ld _ l | .st l _ => match l with | .slot n | .out n => n < 2 ^ 28 | .inn n => n < 2 ^ 28
+  | .ld _ l | .st l _ => match l with
+    | .slot n | .out n => n < 2 ^ 28 | .inn n => n < 2 ^ 28 | .heap _ => True
   | .enter words => words < 2 ^ 28
+  | .ldh off | .sth off => off < 2 ^ 28
   | .leave => frame < 2 ^ 32
   | _ => True
 
 theorem mem_ok (load : Bool) (r : Nat) (l : Loc) (hr : r < 8)
-    (hl : match l with | .slot n | .out n => n < 2 ^ 28 | .inn n => n < 2 ^ 28) :
+    (hl : match l with
+      | .slot n | .out n => n < 2 ^ 28 | .inn n => n < 2 ^ 28 | .heap _ => True) :
     (mem load r l).Ok := by
   cases l <;> cases load <;> simp only [mem, Item.Ok, Inst.Wf, Bool.false_eq_true,
     ite_false, ite_true] at hl ⊢ <;> omega
@@ -790,6 +829,11 @@ theorem emit_ok (win : Bool) (frame : Nat) (m : M) (hm : mBounded frame m) :
   | cmp c sg => cases c <;> cases sg <;> simp [emit, Item.Ok, Br.Ok, Inst.Wf, toXmm, JO, JB, JAE, JE, JNE, JBE, JA, JP, JL, JGE, JLE, JG, ovf, trapLabel, intCC, sseOfOp]
   | fcmp c => cases c <;> simp [emit, Item.Ok, Br.Ok, Inst.Wf, toXmm, JO, JB, JAE, JE, JNE, JBE, JA, JP, JL, JGE, JLE, JG, ovf, trapLabel, intCC, sseOfOp]
   | trap f => cases f <;> simp [emit, Item.Ok, Br.Ok, Inst.Wf, toXmm, JO, JB, JAE, JE, JNE, JBE, JA, JP, JL, JGE, JLE, JG, ovf, trapLabel, intCC, sseOfOp]
+  | ldh off | sth off =>
+    simp only [mBounded] at hm
+    simp only [emit, List.mem_cons, List.not_mem_nil, or_false]
+    intro it hit
+    rcases hit with rfl | rfl <;> simp only [Item.Ok, Inst.Wf] <;> omega
   | _ => simp [emit, Item.Ok, Br.Ok, Inst.Wf, toXmm, JO, JB, JAE, JE, JNE, JBE, JA, JP, JL, JGE, JLE, JG, ovf, trapLabel, intCC, sseOfOp]
 
 /-- The theorem the listing relies on: the laid-out bytes of `emit m` are
@@ -832,7 +876,8 @@ def samples : List M :=
   [.fop .add, .fop .sub, .fop .mul, .fop .div, .fneg] ++
   ([Cond.eq, .ne, .lt, .le, .gt, .ge].map .fcmp) ++
   [.jmp 9, .jmp firstFree, .bz 9, .call 9, .enter 4, .enter 300, .leave,
-   .trap .overflow, .trap .divZero, .trap .unreachable]
+   .trap .overflow, .trap .divZero, .trap .unreachable, .trap .region,
+   .ldh 3, .sth 3, .ldh 300, .sth 300]
 
 /-- Windows samples: `(instruction, frame bytes, suffix)`. -/
 def windowsSamples : List (M × Nat) :=

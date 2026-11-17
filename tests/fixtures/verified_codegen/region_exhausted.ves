@@ -1,0 +1,14 @@
+// 24 bytes fit; the fourth 8-byte payload exhausts the region.
+fn fill(n: i64) -> i64 eff [r: Region] {
+    if n == 0 {
+        0
+    } else {
+        let b = r.box(n);
+        wrapping_add(r.get(b), fill(wrapping_sub(n, 1)))
+    }
+}
+fn main() -> i64 {
+    region r(24) {
+        fill(4)
+    }
+}

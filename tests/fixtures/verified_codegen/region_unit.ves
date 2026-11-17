@@ -1,0 +1,8 @@
+// Zero-word payloads get distinct handles, as in the evaluator.
+fn main() -> bool {
+    region r(64) {
+        let a = r.box(());
+        let b = r.box(());
+        a == b
+    }
+}

@@ -25,7 +25,13 @@
 //!    addresses and calling conventions remain outside those proofs.
 //!    `CodegenValidation` and `CodegenFlowValidation` provide executable Lean
 //!    validators that establish the operand conditions and invariant for
-//!    accepted model programs. They are not integrated into Rust lowering.
+//!    accepted model programs. [`certificate`] generates a per-row range
+//!    certificate for every lowered function and checks it with a Rust
+//!    mirror of `validateProgram` (differentially tested against Lean
+//!    `#eval`) plus conservative, unproved rules for `Enter`, `Call` and
+//!    `Return`. The outcome is [`Artifact::certificate`];
+//!    [`Options::require_certificate`] refuses a rejected program before
+//!    any code is selected.
 //! 3. **Encoding** (`x86_64.rs`, `aarch64.rs`) of each abstract instruction
 //!    to fixed bytes, and a container (`container.rs`): a static Linux ELF
 //!    executable, or a Mach-O AArch64 object for the system linker.
@@ -53,9 +59,20 @@
 //! that may raise returns a status word before its result, callers test it
 //! after each call, and implicit `ArithOverflow`/`RuntimeError` failures
 //! that a handler catches are redirected by a trap scope ([`Lir::Scope`]).
+//! Generic functions are monomorphized per instance (`mono.rs`). Region
+//! blocks, `RegionBox[r, T]` handles and region-polymorphic functions
+//! (`eff [r: Region]`, a hidden pointer-word parameter per capability) work
+//! over a bump-allocated program heap with `vesper.region.accounting/1`
+//! bounds (`box`, `get`, `set`, `used`; exhaustion exits with
+//! [`EXIT_REGION`]); only the Linux ELF executable maps that heap. A
+//! failure leaving a region block closes it.
+//! Dynamic indexing of a tuple whose elements have one shape is a
+//! first-match chain on the index; out of range raises
+//! `RuntimeError::IndexOutOfBounds`. [`coverage`] lists every refusal of a
+//! whole program rather than the first.
 //! Resuming or stateful handlers and every other effect, `f32`, `f64`
-//! remainder, strings, recursive enums, closures, generic functions, vectors
-//! and regions are rejected.
+//! remainder, strings, recursive enums, closures, vectors and region
+//! watermarks and `take` are rejected.
 //!
 //! Values live in frame slots, never in registers across slot-IR rows: there
 //! is no register allocator, so the code is slow but each row is local, which
@@ -65,16 +82,20 @@ use std::fmt;
 
 mod aarch64;
 mod asm;
+pub mod certificate;
 mod cli;
 mod container;
+mod coverage;
 mod fail;
 mod lower;
 mod machine;
+mod mono;
 mod riscv64;
 mod x86_64;
 
 pub use aarch64::encoding_listing as a64_encoding_listing;
 pub use cli::build_command;
+pub use coverage::{Coverage, FunctionCoverage, coverage};
 pub use machine::{
     ArithOp, Cond, FIRST_FREE_LABEL, FloatOp, Kind, Label, Lir, Loc, M, Reg, Sign, Slot, TrapKind,
     WrapOp, select, table_listing, table_rows,
@@ -92,6 +113,13 @@ pub const EXIT_OVERFLOW: u8 = 101;
 pub const EXIT_DIVISION_BY_ZERO: u8 = 102;
 /// Process exit status when an unreachable block is reached.
 pub const EXIT_UNREACHABLE: u8 = 103;
+/// Process exit status when a region bound or the program heap is exhausted.
+pub const EXIT_REGION: u8 = 104;
+/// Virtual address of the program heap that holds region payloads (a
+/// zero-fill ELF segment, present only when the program uses regions).
+pub const HEAP_BASE: u64 = 0x1000_0000;
+/// Words of the program heap (512 MiB).
+pub const HEAP_WORDS: u64 = 1 << 26;
 /// Frame words per function (slots plus the outgoing call area). Keeps every
 /// frame offset inside one AArch64 scaled 12-bit immediate.
 pub const MAX_FRAME_WORDS: u32 = 4000;
@@ -207,6 +235,11 @@ pub struct Options {
     pub max_rows: usize,
     /// AArch64 conditional branches reach ±1 MiB.
     pub max_code_bytes: usize,
+    /// Refuse a program whose range certificate ([`certificate`]) is
+    /// rejected. Off by default until the certificates track enum payload
+    /// ranges per variant and non-returning calls; the outcome is always in
+    /// [`Artifact::certificate`].
+    pub require_certificate: bool,
 }
 impl Options {
     pub fn new(target: Target) -> Self {
@@ -217,6 +250,7 @@ impl Options {
             max_functions: 4096,
             max_rows: 1_000_000,
             max_code_bytes: 1 << 20,
+            require_certificate: false,
         }
     }
 }
@@ -311,6 +345,8 @@ pub struct Artifact {
     pub lir: Vec<(String, Vec<Lir>)>,
     /// Number of abstract machine instructions emitted.
     pub machine_instructions: usize,
+    /// The range certificate of `lir`, or why it was rejected.
+    pub certificate: Result<certificate::Certificate, certificate::Rejection>,
 }
 
 /// Compile `entry` (no parameters) and everything it reaches.
@@ -328,6 +364,13 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
     if options.optimize {
         crate::ir_opt::optimize(world, &mut program).map_err(VerifiedError::Invalid)?;
     }
+    // One copy of every reachable function per instance the checker fixed.
+    let program = mono::monomorphize(
+        world,
+        &program,
+        entry,
+        options.max_functions.saturating_mul(4),
+    )?;
     let plan = lower::plan(world, &program, entry, options.max_functions)?;
     let mut next_label = plan
         .functions
@@ -349,7 +392,23 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
         let _ = (lowered.slots, lowered.out_words);
         lir.push((plan.functions[index].name.clone(), lowered.rows));
     }
+    let certificate = certificate::check(&lir);
+    if let (true, Err(r)) = (options.require_certificate, &certificate) {
+        return Err(VerifiedError::Invalid(r.to_string()));
+    }
     let entry_plan = &plan.functions[0];
+    // Region payloads live in the program heap, which only the ELF
+    // container maps (a zero-fill segment at `HEAP_BASE`).
+    let heap = lir
+        .iter()
+        .flat_map(|(_, rows)| rows)
+        .any(|r| matches!(r, Lir::LoadPtr { .. } | Lir::StorePtr { .. }));
+    if heap && options.target.os != Os::Linux {
+        return Err(VerifiedError::Target(format!(
+            "regions need the program heap, which only the Linux ELF executable maps (not {:?})",
+            options.target.os
+        )));
+    }
     let result_words = entry_plan.result.0.clone();
     let mut a = asm::Asm::default();
     a.windows = options.target.os == Os::Windows;
@@ -417,14 +476,14 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
             os: Os::Linux,
         } => (
             Container::ElfExecutable,
-            container::elf_executable(container::EM_X86_64, &code),
+            container::elf_executable(container::EM_X86_64, &code, heap),
         ),
         Target {
             arch: Arch::Aarch64,
             os: Os::Linux,
         } => (
             Container::ElfExecutable,
-            container::elf_executable(container::EM_AARCH64, &code),
+            container::elf_executable(container::EM_AARCH64, &code, heap),
         ),
         Target {
             arch: Arch::Aarch64,
@@ -435,7 +494,7 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
             os: Os::Linux,
         } => (
             Container::ElfExecutable,
-            container::elf_executable(container::EM_RISCV, &code),
+            container::elf_executable(container::EM_RISCV, &code, heap),
         ),
         Target {
             arch: Arch::X86_64,
@@ -466,6 +525,7 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
         result_words,
         lir,
         machine_instructions,
+        certificate,
     })
 }
 
@@ -477,6 +537,8 @@ pub enum Outcome {
     Overflow,
     DivisionByZero,
     Unreachable,
+    /// A region bound or the heap was exhausted.
+    Region,
     /// Any other exit (a bug or a signal).
     Other(String),
 }
@@ -495,6 +557,7 @@ impl Outcome {
             Some(c) if c == i32::from(EXIT_OVERFLOW) => Self::Overflow,
             Some(c) if c == i32::from(EXIT_DIVISION_BY_ZERO) => Self::DivisionByZero,
             Some(c) if c == i32::from(EXIT_UNREACHABLE) => Self::Unreachable,
+            Some(c) if c == i32::from(EXIT_REGION) => Self::Region,
             other => Self::Other(format!("exit {other:?}, {} stdout bytes", stdout.len())),
         }
     }

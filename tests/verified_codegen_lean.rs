@@ -20,7 +20,10 @@ use std::path::PathBuf;
 
 const NAMESPACE: &str = "Vesper.VerifiedCodegen";
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
-const KEY_THEOREMS: [&str; 12] = [
+const KEY_THEOREMS: [&str; 14] = [
+    // Milestone 8: region heap words.
+    "sim_loadPtr",
+    "sim_storePtr",
     "sim_farith",
     "sim_fneg",
     "sim_fcompare",
@@ -36,7 +39,13 @@ const KEY_THEOREMS: [&str; 12] = [
 ];
 
 const RV64_NAMESPACE: &str = "Vesper.VerifiedCodegen.Rv64";
-const RV64_KEY_THEOREMS: [&str; 4] = ["decode_encode", "emit_ok", "emit_decodes", "bytes_encode"];
+const RV64_KEY_THEOREMS: [&str; 5] = [
+    "decode_encode",
+    "emit_ok",
+    "emit_decodes",
+    "bytes_encode",
+    "heap_ok",
+];
 
 fn model() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/VerifiedCodegen.lean")
@@ -250,11 +259,13 @@ fn encoding_models_reserve_exactly_the_rust_abort_labels() {
 #[test]
 fn rust_x64_listing_covers_every_instruction_kind() {
     let listing = vesper::verified_codegen::x64_encoding_listing();
-    assert_eq!(listing.lines().count(), 64);
+    assert_eq!(listing.lines().count(), 69);
     // add rax, rcx; jb ovf (the abort exits sit at offset 0)
     assert!(listing.contains("addchk u: 48 01 c8 0f 82 f7 ff ff ff\n"));
     // The first function label is not an abort exit.
-    assert!(listing.contains("jmp L3: e9 00 00 00 00\n"));
+    assert!(listing.contains("jmp L4: e9 00 00 00 00\n"));
+    // Milestone 8: mov r11d, HEAP_BASE; mov rax, [r11 + rcx*8 + 24].
+    assert!(listing.contains("ldh 3: 41 bb 00 00 00 10 49 8b 84 cb 18 00 00 00\n"));
     // push rbp; mov rbp, rsp; test [rsp - 4096], esp; sub rsp, 8000
     assert!(
         listing.contains(
@@ -267,7 +278,9 @@ fn rust_x64_listing_covers_every_instruction_kind() {
 #[test]
 fn rust_rv64_listing_covers_every_instruction_kind() {
     let listing = vesper::verified_codegen::rv64_encoding_listing();
-    assert_eq!(listing.lines().count(), 60);
+    assert_eq!(listing.lines().count(), 65);
+    // Milestone 8: t0 := 1 << 28; t1 := a1 << 3; t0 += t1; ld a0, 24(t0).
+    assert!(listing.contains("ldh 3: 00100293 01c29293 00359313 006282b3 0182b503\n"));
     // add a0,a0,a1; bgeu a0,a1,+8; j ovf (the abort exits sit at offset 0)
     assert!(listing.contains("addchk u: 00b50533 00b57463 ff9ff06f\n"));
     assert!(listing.contains("leave: 00040113 00013403 00813083 01010113 00008067\n"));
@@ -276,7 +289,10 @@ fn rust_rv64_listing_covers_every_instruction_kind() {
 #[test]
 fn rust_a64_listing_covers_every_instruction_kind() {
     let listing = vesper::verified_codegen::a64_encoding_listing();
-    assert_eq!(listing.lines().count(), 62);
+    assert_eq!(listing.lines().count(), 67);
+    // Milestone 8: movz x16, #0x1000, lsl #16; add x16, x16, x1, lsl #3;
+    // ldr x0, [x16, #24].
+    assert!(listing.contains("ldh 3: d2a20010 8b010e10 f9400e00\n"));
     // adds x0, x0, x1; b.hs ovf (the abort exits sit at offset 0)
     assert!(listing.contains("addchk u: ab010000 54ffffe2\n"));
     // sub sp, sp, #1, lsl #12; sub sp, sp, #0xf40
@@ -287,7 +303,10 @@ fn rust_a64_listing_covers_every_instruction_kind() {
 #[test]
 fn rust_table_covers_every_row_kind() {
     let listing = vesper::verified_codegen::table_listing();
-    assert_eq!(listing.lines().count(), 94);
+    assert_eq!(listing.lines().count(), 97);
+    assert!(listing.contains("loadptr: ld r1 s1; ldh 3; st s0 r0\n"));
+    assert!(listing.contains("storeptr: ld r1 s1; ld r0 s2; sth 3\n"));
+    assert!(listing.contains("trap region: trap region\n"));
     // Milestone 7: a trap scope is one machine pseudo-instruction.
     assert!(listing.contains("scope: scope L9 L10\n"));
     assert!(listing.contains("farith div: ld r0 s1; ld r1 s2; fop div; st s0 r0\n"));

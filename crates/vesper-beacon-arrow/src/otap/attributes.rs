@@ -13,6 +13,7 @@
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::sync::Arc;
 use vesper_beacon::{Sensitive, Telemetrable, TelemetryValue};
 
 /// Exported string of a redacted attribute.
@@ -71,8 +72,11 @@ impl core::fmt::Debug for PiiPolicy {
 }
 
 /// A stored attribute value. Its only string forms are static vocabulary,
-/// the redaction marker and fingerprints, so no runtime input is held.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// the redaction marker and fingerprints, and its only byte strings are
+/// static, so no runtime input is held. Slices and maps nest stored values,
+/// so every leaf passed the same boundary ([`AttributeValue::public`],
+/// [`PiiPolicy::apply`]) as a top-level value.
+#[derive(Clone, Debug, PartialEq)]
 pub enum AttributeValue {
     Bool(bool),
     Int(i64),
@@ -80,7 +84,19 @@ pub enum AttributeValue {
     Static(&'static str),
     Redacted,
     Fingerprint([u8; 8]),
+    /// OTLP `bytes_value`: static bytes (sensitive bytes go through a
+    /// [`PiiPolicy`] like any other sensitive value).
+    Bytes(&'static [u8]),
+    /// OTLP `array_value`. Build with [`AttributeValue::slice`].
+    Slice(Arc<[AttributeValue]>),
+    /// OTLP `kvlist_value`, keys unique. Build with [`AttributeValue::map`].
+    Map(Arc<[(&'static str, AttributeValue)]>),
 }
+/// Nesting depth of a structured value (a scalar is depth 1).
+pub const MAX_VALUE_DEPTH: usize = 8;
+/// Values (scalars, slices and maps) inside one structured value.
+pub const MAX_VALUE_NODES: usize = 256;
+
 impl AttributeValue {
     /// The stored form of a public value.
     pub fn public(value: impl Telemetrable) -> Self {
@@ -94,6 +110,63 @@ impl AttributeValue {
             TelemetryValue::Static(s) => Self::Static(s),
             TelemetryValue::Redacted(_) => Self::Redacted,
         }
+    }
+    /// A static byte string.
+    pub fn bytes(value: &'static [u8]) -> Self {
+        Self::Bytes(value)
+    }
+    /// A slice of stored values, at most [`MAX_VALUE_DEPTH`] deep and
+    /// [`MAX_VALUE_NODES`] values in all.
+    pub fn slice(items: impl IntoIterator<Item = AttributeValue>) -> Result<Self, AttributeError> {
+        let value = Self::Slice(items.into_iter().collect());
+        value.check_shape()?;
+        Ok(value)
+    }
+    /// A map of stored values with unique, nonempty keys of at most
+    /// [`MAX_KEY_BYTES`], bounded like [`AttributeValue::slice`].
+    pub fn map(
+        entries: impl IntoIterator<Item = (&'static str, AttributeValue)>,
+    ) -> Result<Self, AttributeError> {
+        let entries: Vec<_> = entries.into_iter().collect();
+        for (i, (key, _)) in entries.iter().enumerate() {
+            if key.is_empty() {
+                return Err(AttributeError::EmptyKey);
+            }
+            if key.len() > MAX_KEY_BYTES {
+                return Err(AttributeError::KeyTooLong);
+            }
+            if entries[..i].iter().any(|(k, _)| k == key) {
+                return Err(AttributeError::DuplicateKey);
+            }
+        }
+        let value = Self::Map(entries.into());
+        value.check_shape()?;
+        Ok(value)
+    }
+    /// Nesting depth (1 for a scalar).
+    pub fn depth(&self) -> usize {
+        match self {
+            Self::Slice(items) => 1 + items.iter().map(Self::depth).max().unwrap_or(0),
+            Self::Map(entries) => 1 + entries.iter().map(|(_, v)| v.depth()).max().unwrap_or(0),
+            _ => 1,
+        }
+    }
+    /// Number of values, this one included.
+    pub fn nodes(&self) -> usize {
+        match self {
+            Self::Slice(items) => 1 + items.iter().map(Self::nodes).sum::<usize>(),
+            Self::Map(entries) => 1 + entries.iter().map(|(_, v)| v.nodes()).sum::<usize>(),
+            _ => 1,
+        }
+    }
+    fn check_shape(&self) -> Result<(), AttributeError> {
+        if self.depth() > MAX_VALUE_DEPTH {
+            return Err(AttributeError::TooDeep);
+        }
+        if self.nodes() > MAX_VALUE_NODES {
+            return Err(AttributeError::TooManyValues);
+        }
+        Ok(())
     }
     /// The exported string, if this value is exported as an OTLP string.
     pub fn export_str(&self) -> Option<String> {
@@ -111,7 +184,12 @@ impl AttributeValue {
                 out.push(']');
                 Some(out)
             }
-            Self::Bool(_) | Self::Int(_) | Self::Double(_) => None,
+            Self::Bool(_)
+            | Self::Int(_)
+            | Self::Double(_)
+            | Self::Bytes(_)
+            | Self::Slice(_)
+            | Self::Map(_) => None,
         }
     }
 }
@@ -124,6 +202,10 @@ pub enum AttributeError {
     ReservedKey,
     DuplicateKey,
     TooManyAttributes,
+    /// A structured value nested deeper than [`MAX_VALUE_DEPTH`].
+    TooDeep,
+    /// A structured value with more than [`MAX_VALUE_NODES`] values.
+    TooManyValues,
 }
 
 /// Bounded, ordered attribute set of one span, resource, scope, event, link,
@@ -143,7 +225,7 @@ impl SpanAttributes {
         self.entries.is_empty()
     }
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (&'static str, AttributeValue)> + '_ {
-        self.entries.iter().copied()
+        self.entries.iter().map(|(k, v)| (*k, v.clone()))
     }
     fn check(&self, key: &'static str) -> Result<(), AttributeError> {
         if key.is_empty() {

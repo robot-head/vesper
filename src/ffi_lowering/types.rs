@@ -57,40 +57,34 @@ pub(super) fn op_name(symbol: &str, lengths: &[usize]) -> String {
     }
 }
 
-/// Source carrier of a by-value scalar parameter or pointee.
+/// Source type of a by-value scalar parameter or pointee: the integer kind
+/// of the same name (`usize` is the 64-bit source `usize`).
 fn parameter_scalar(s: Scalar) -> Result<&'static str, String> {
-    match s {
-        Scalar::U8 => Ok("u8"),
-        Scalar::U32 => Ok("u32"),
-        Scalar::U64 | Scalar::Usize => Ok("u64"),
-        Scalar::I64 => Ok("i64"),
-        Scalar::I8 | Scalar::I16 | Scalar::I32 | Scalar::U16 => Err(format!(
-            "{} parameters have no source carrier yet (source integers are u8, u32, u64 and i64)",
-            s.name()
-        )),
-    }
+    Ok(s.name())
 }
-/// Source carrier of a scalar result: narrow results widen losslessly.
+/// Source type of a scalar result.
 fn result_scalar(s: Scalar) -> &'static str {
-    match s {
-        Scalar::U8 => "u8",
-        Scalar::U16 | Scalar::U32 => "u32",
-        Scalar::U64 | Scalar::Usize => "u64",
-        Scalar::I8 | Scalar::I16 | Scalar::I32 | Scalar::I64 => "i64",
-    }
+    s.name()
 }
-/// Source carrier of a wire-struct integer field.
+/// Source type of a wire-struct integer field.
 fn field_integer(i: &vesper_ffi::Integer) -> Result<&'static str, String> {
-    match (i.bits, i.signed) {
-        (8, false) => Ok("u8"),
-        (32, false) => Ok("u32"),
-        (64, false) => Ok("u64"),
-        (64, true) => Ok("i64"),
-        (bits, signed) => Err(format!(
-            "wire field of {}{bits} has no source carrier yet",
-            if signed { "i" } else { "u" }
-        )),
-    }
+    let name = match (i.bits, i.signed) {
+        (8, false) => "u8",
+        (16, false) => "u16",
+        (32, false) => "u32",
+        (64, false) => "u64",
+        (8, true) => "i8",
+        (16, true) => "i16",
+        (32, true) => "i32",
+        (64, true) => "i64",
+        (bits, signed) => {
+            return Err(format!(
+                "wire field of {}{bits} has no source carrier",
+                if signed { "i" } else { "u" }
+            ));
+        }
+    };
+    Ok(name)
 }
 
 pub(super) struct Generated {

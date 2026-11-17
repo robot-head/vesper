@@ -1,0 +1,35 @@
+fn apply(sink f: fn(u64) -> u64 eff [Fail[u64]], n: u64) -> u64 eff [Fail[u64]] {
+    f(n)
+}
+fn down(n: u64) -> u64 eff [Fail[u64]] {
+    if n == 0 {
+        42
+    } else {
+        apply(down, wrapping_sub(n, 1))
+    }
+}
+fn ensures_down(n: u64, result: u64) -> bool {
+    result == 42
+}
+fn run(sink f: fn() -> u64 eff [Fail[u64]]) -> u64 eff [Fail[u64]] {
+    f()
+}
+fn spin() -> u64 eff [Fail[u64]] {
+    run(spin)
+}
+fn stored(n: u64) -> u64 eff [Fail[u64]] {
+    if n == 0 {
+        42
+    } else {
+        let next = stored;
+        next(wrapping_sub(n, 1))
+    }
+}
+fn main() -> u64 {
+    handle Fail[u64] in {
+        down(3)
+    } with {
+        return value => value,
+        raise(error, resume) => error,
+    }
+}

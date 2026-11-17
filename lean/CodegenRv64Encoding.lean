@@ -445,12 +445,12 @@ def regX : Reg → Nat
 /-- `FIRST_FREE_LABEL`: labels below it are the abort exits of
 `TrapKind::ALL` (`tests/verified_codegen_lean.rs` checks the value against the
 Rust constant); every label from it on is a function or block label. -/
-def firstFree : Nat := 3
+def firstFree : Nat := 4
 
 /-- The program-wide abort exits (`TrapKind::label`); `fault` is not a
 trap kind of the Rust emitter, which never selects it. -/
 def trapLabel : Failure → Nat
-  | .overflow => 0 | .divZero => 1 | .unreachable => 2 | .fault => 3
+  | .overflow => 0 | .divZero => 1 | .unreachable => 2 | .region => 3 | .fault => 4
 
 /-- An emitted instruction, or a `jal rd` to a label resolved by layout. -/
 inductive Item
@@ -472,6 +472,8 @@ def imm (rd w : Nat) : List Item :=
 def frame : Loc → Nat × Nat
   | .slot n | .out n => (sp, n * 8)
   | .inn n => (s0, 16 + n * 8)
+  -- Never selected: heap words are reached through `ldh`/`sth`.
+  | .heap _ => (zero, 0)
 
 def memOp : Bool → Nat → Nat → Nat → Item
   | true, r, base, off => .ins (.ld r base off)
@@ -481,6 +483,13 @@ def ldst (load : Bool) (r : Nat) (l : Loc) : List Item :=
   if 2048 ≤ (frame l).2 then
     imm t0 (frame l).2 ++ [.ins (.r .add t0 t0 (frame l).1), memOp load r t0 0]
   else [memOp load r (frame l).1 (frame l).2]
+
+/-- `t0 := HEAP_BASE + 8 * a1 (+ 8 * off when it leaves the 12-bit
+displacement)`, with `HEAP_BASE = 2^28`. -/
+def heapAt (off : Nat) : List Item :=
+  [addi t0 zero 1, .ins (.slli t0 t0 28), .ins (.slli t1 a1 3), .ins (.r .add t0 t0 t1)] ++
+  (if 2048 ≤ off * 8 then imm t1 (off * 8) ++ [.ins (.r .add t0 t0 t1)] else [])
+def heapDisp (off : Nat) : Nat := if 2048 ≤ off * 8 then 0 else off * 8
 
 def subSp (bytes : Nat) : List Item :=
   if bytes < 2048 then [addi sp sp (-(bytes : Int))]
@@ -557,6 +566,8 @@ def emit : M → List Item
   | .leave => [addi sp s0 0, .ins (.ld s0 sp 0), .ins (.ld ra sp 8), addi sp sp 16,
       .ins (.jalr zero ra 0)]
   | .trap f => [.jump zero (trapLabel f)]
+  | .ldh off => heapAt off ++ [memOp true a0 t0 (heapDisp off)]
+  | .sth off => heapAt off ++ [memOp false a0 t0 (heapDisp off)]
   -- Milestone 7: a trap scope emits no code (it changes which labels the
   -- checked instructions' branches name).
   | .scope _ _ => []
@@ -604,8 +615,9 @@ theorem place_wf (n : Nat) (hn : n < 2 ^ 18) :
 /-- `M` operands the Rust emitter can be given: frame indices and frame
 sizes are `u32`. -/
 def mBounded : M → Prop
-  | .ld _ l | .st l _ => match l with | .slot n | .out n | .inn n => n < 2 ^ 32
+  | .ld _ l | .st l _ => match l with | .slot n | .out n | .inn n => n < 2 ^ 32 | .heap _ => True
   | .enter words => words < 2 ^ 32
+  | .ldh off | .sth off => off < 2 ^ 32
   | _ => True
 
 theorem imm_ok (rd w : Nat) (hd : rd < 32) (hw : w < 2 ^ 64) : ∀ it ∈ imm rd w, it.Ok := by
@@ -615,10 +627,10 @@ theorem imm_ok (rd w : Nat) (hd : rd < 32) (hw : w < 2 ^ 64) : ∀ it ∈ imm rd
     simp only [Item.Ok, Inst.Wf, Imm12, zero] <;> omega
 
 theorem ldst_ok (load : Bool) (r : Nat) (l : Loc) (hr : r < 32)
-    (hl : match l with | .slot n | .out n | .inn n => n < 2 ^ 32) :
+    (hl : match l with | .slot n | .out n | .inn n => n < 2 ^ 32 | .heap _ => True) :
     ∀ it ∈ ldst load r l, it.Ok := by
   have hf : (frame l).1 < 32 ∧ (frame l).2 < 2 ^ 64 := by
-    cases l <;> simp only [frame, sp, s0] at hl ⊢ <;> omega
+    cases l <;> simp only [frame, sp, s0, zero] at hl ⊢ <;> omega
   unfold ldst
   split
   · intro it hit
@@ -644,6 +656,25 @@ theorem subSp_ok (bytes : Nat) (hb : bytes < 2 ^ 64) : ∀ it ∈ subSp bytes, i
     · exact imm_ok t0 _ (by decide) hb it hit
     · simp only [Item.Ok, Inst.Wf, sp, t0]; omega
 
+theorem heap_ok (load : Bool) (off : Nat) (ho : off < 2 ^ 32) :
+    ∀ it ∈ heapAt off ++ [memOp load a0 t0 (heapDisp off)], it.Ok := by
+  intro it hit
+  have h4 : ∀ it ∈ [addi t0 zero 1, .ins (.slli t0 t0 28), .ins (.slli t1 a1 3),
+      .ins (.r .add t0 t0 t1)], it.Ok := by decide
+  have hm : (memOp load a0 t0 (heapDisp off)).Ok := by
+    cases load <;> simp only [memOp, Item.Ok, Inst.Wf, Imm12, heapDisp, t0, a0] <;>
+      split <;> omega
+  simp only [heapAt, List.mem_append, List.mem_singleton] at hit
+  rcases hit with (h | h) | h
+  · exact h4 it h
+  · split at h
+    · rcases List.mem_append.1 h with h | h
+      · exact imm_ok t1 _ (by decide) (by omega) it h
+      · simp only [List.mem_singleton] at h
+        subst h; simp only [Item.Ok, Inst.Wf, t0, t1]; omega
+    · simp at h
+  · subst h; exact hm
+
 /-- Every item `emit` produces is well formed. -/
 theorem emit_ok (m : M) (hm : mBounded m) : ∀ it ∈ emit m, it.Ok := by
   cases m with
@@ -664,6 +695,8 @@ theorem emit_ok (m : M) (hm : mBounded m) : ∀ it ∈ emit m, it.Ok := by
   | cmp c sg => cases c <;> cases sg <;> decide
   | fcmp c => cases c <;> decide
   | trap f => cases f <;> decide
+  | ldh off => exact heap_ok true off hm
+  | sth off => exact heap_ok false off hm
   | label l | jmp l | bz l | call l =>
     simp [emit, branchTo, Item.Ok, Inst.Wf, zero, a0, ra]
   | scope _ _ => simp [emit]
@@ -680,6 +713,7 @@ theorem emit_length (m : M) : (emit m).length ≤ 24 := by
   | cmp c sg => cases c <;> cases sg <;> decide
   | fcmp c => cases c <;> decide
   | trap f => cases f <;> decide
+  | ldh off | sth off => simp only [emit, heapAt]; split <;> simp [imm]
   | _ => simp [emit, branchTo, intMin]
 
 /-- The theorem the listing relies on: every word of the laid-out `emit m`
@@ -707,7 +741,9 @@ def samples : List M :=
   [.fop .add, .fop .sub, .fop .mul, .fop .div, .fneg] ++
   ([Cond.eq, .ne, .lt, .le, .gt, .ge].map .fcmp) ++
   [.jmp 9, .jmp firstFree, .bz 9, .call 9, .enter 4, .enter 300, .leave, .trap .overflow, .trap .divZero,
-   .trap .unreachable]
+   .trap .unreachable, .trap .region] ++
+  -- Milestone 8: heap words.
+  [.ldh 3, .sth 3, .ldh 300, .sth 300]
 
 def listing : String :=
   String.join (samples.map fun m =>
@@ -739,6 +775,7 @@ def listing : String :=
 #print axioms Vesper.VerifiedCodegen.Rv64.imm_ok
 #print axioms Vesper.VerifiedCodegen.Rv64.ldst_ok
 #print axioms Vesper.VerifiedCodegen.Rv64.subSp_ok
+#print axioms Vesper.VerifiedCodegen.Rv64.heap_ok
 #print axioms Vesper.VerifiedCodegen.Rv64.emit_ok
 #print axioms Vesper.VerifiedCodegen.Rv64.emit_length
 #print axioms Vesper.VerifiedCodegen.Rv64.emit_decodes

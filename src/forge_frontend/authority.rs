@@ -1550,9 +1550,10 @@ mod parameter_header_tests {
                 name: "fixed".into(),
                 span: invocation.span.clone(),
                 function: function.id,
+                host: function.header.name.clone(),
             },
         )]);
-        let (candidate, _) = render(
+        let candidate = render(
             &syntax,
             &bodies,
             &origins,
@@ -1561,7 +1562,8 @@ mod parameter_header_tests {
                 remaining: 16 * 1024 * 1024,
             },
         )
-        .unwrap();
+        .unwrap()
+        .expanded;
         let checked = check_source(&candidate, AnalysisLimits::default()).unwrap();
         derive_expanded(
             &checked,

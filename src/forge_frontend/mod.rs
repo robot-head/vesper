@@ -2,6 +2,7 @@
 //! carries semantic authority; original macro source and provenance do not.
 pub mod authority;
 pub mod lower;
+pub mod provenance;
 
 use crate::{
     ast::{Diagnostic, Item, Span},
@@ -10,6 +11,7 @@ use crate::{
 };
 use authority::{AuthorityLimits, SourceBindings};
 use lower::{LowerLimits, LoweredBody, SegmentOrigin};
+use provenance::{DiagnosticOrigin, ExpansionInput, ProvenanceTable};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -132,9 +134,15 @@ pub struct CompileFailure {
     stage: Stage,
     message: String,
     diagnostics: Vec<Diagnostic>,
+    /// Aligned with `diagnostics`: where in the original source (and through
+    /// which macro) each diagnostic about expanded code originates.
+    origins: Vec<Option<DiagnosticOrigin>>,
     expanded_source: Option<Arc<str>>,
 }
 impl CompileFailure {
+    pub fn origins(&self) -> &[Option<DiagnosticOrigin>] {
+        &self.origins
+    }
     pub fn stage(&self) -> Stage {
         self.stage
     }
@@ -164,6 +172,7 @@ fn failure(stage: Stage, message: impl AsRef<str>) -> CompileFailure {
         stage,
         message: message[..end].to_owned(),
         diagnostics: vec![],
+        origins: vec![],
         expanded_source: None,
     }
 }
@@ -198,7 +207,7 @@ fn lower_error(error: lower::LowerError) -> CompileFailure {
     };
     stage_error(stage, error)
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ByteRange {
     pub start: usize,
     pub end: usize,
@@ -211,7 +220,7 @@ impl From<&Span> for ByteRange {
         }
     }
 }
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MapKind {
     Source,
@@ -242,6 +251,7 @@ pub struct ExpandedChecked {
     program: ir::Program,
     map: Vec<SourceMapSegment>,
     audits: Vec<InvocationAudit>,
+    provenance: ProvenanceTable,
     definitions: usize,
     invocations: usize,
 }
@@ -272,6 +282,10 @@ impl ExpandedChecked {
     }
     pub fn audits(&self) -> &[InvocationAudit] {
         &self.audits
+    }
+    /// Per-function macro provenance, bound to both source hashes.
+    pub fn provenance(&self) -> &ProvenanceTable {
+        &self.provenance
     }
     pub fn macro_definitions(&self) -> usize {
         self.definitions
@@ -415,6 +429,7 @@ struct InvocationInfo {
     name: String,
     span: Span,
     function: FunctionId,
+    host: String,
 }
 struct Body {
     function: FunctionId,
@@ -451,13 +466,19 @@ fn append_map(
     map.push(entry);
     Ok(())
 }
+type Generated = BTreeMap<ExpansionId, Vec<ByteRange>>;
+struct Rendered {
+    expanded: Arc<str>,
+    map: Vec<SourceMapSegment>,
+    generated: Generated,
+}
 fn render(
     source: &MacroSource,
     bodies: &[Body],
     origins: &BTreeMap<ExpansionId, InvocationInfo>,
     limits: CompileLimits,
     work: &mut Work,
-) -> Result<(Arc<str>, Vec<SourceMapSegment>), CompileFailure> {
+) -> Result<Rendered, CompileFailure> {
     let parameter_count = bodies.iter().try_fold(0usize, |n, body| {
         n.checked_add(body.lowered.parameter_renames().len())
             .ok_or_else(|| failure(Stage::Resource, "parameter edit count overflow"))
@@ -560,6 +581,7 @@ fn render(
         .try_reserve_exact(length)
         .map_err(|_| failure(Stage::Resource, "expanded source allocation failed"))?;
     let mut cursor = 0;
+    let mut generated: Generated = BTreeMap::new();
     let mut raw_maps = Vec::new();
     raw_maps
         .try_reserve_exact(map_count)
@@ -591,6 +613,10 @@ fn render(
                             failure(Stage::Lower, "unknown generated source origin")
                         })?;
                         work.charge(site.name.len())?;
+                        generated.entry(*expansion).or_default().push(ByteRange {
+                            start: offset + segment.span.start,
+                            end: offset + segment.span.end,
+                        });
                         (
                             site.span.clone(),
                             MapKind::Generated,
@@ -651,7 +677,11 @@ fn render(
         )?;
     }
     encoded_size(&map, limits.max_metadata_bytes)?;
-    Ok((Arc::from(output), map))
+    Ok(Rendered {
+        expanded: Arc::from(output),
+        map,
+        generated,
+    })
 }
 /// No WASI/native execution occurs. The only success is a fully checked normal
 /// expanded program with current conditional macro authority audits.
@@ -797,7 +827,11 @@ pub fn expand_source(
             let definition = parsed
                 .definition(invocation.definition)
                 .map_err(|e| stage_error(Stage::Parse, e))?;
-            overhead.charge(definition.name_span.len() + std::mem::size_of::<InvocationInfo>())?;
+            overhead.charge(
+                definition.name_span.len()
+                    + function.header.name.len()
+                    + std::mem::size_of::<InvocationInfo>(),
+            )?;
             let name = source[definition.name_span.clone()].to_owned();
             origins.insert(
                 expansion_id,
@@ -805,6 +839,7 @@ pub fn expand_source(
                     name,
                     span: invocation.span.clone(),
                     function: function.id,
+                    host: function.header.name.clone(),
                 },
             );
             let expression = host
@@ -840,7 +875,11 @@ pub fn expand_source(
             lowered,
         });
     }
-    let (expanded, map) = render(&parsed, &bodies, &origins, limits, &mut overhead)?;
+    let Rendered {
+        expanded,
+        map,
+        generated,
+    } = render(&parsed, &bodies, &origins, limits, &mut overhead)?;
     total.reserve()?; // complete normal frontend/nominal/type checking allowance
     let checked = check_source(
         &expanded,
@@ -858,6 +897,7 @@ pub fn expand_source(
         CompileFailure {
             stage,
             message: error.to_string(),
+            origins: provenance::diagnostic_origins(&map, error.diagnostics()),
             diagnostics: error.diagnostics().to_vec(),
             expanded_source: Some(Arc::clone(&expanded)),
         }
@@ -959,10 +999,21 @@ pub fn expand_source(
         return Err(CompileFailure {
             stage: Stage::Ir,
             message: "expanded IR validation failed".into(),
+            origins: provenance::diagnostic_origins(&map, &diagnostics),
             diagnostics,
             expanded_source: Some(expanded),
         });
     }
+    let provenance = build_provenance(
+        &config.package,
+        source,
+        &expanded,
+        &origins,
+        generated,
+        &checked,
+        &program,
+    )?;
+    encoded_size(&provenance, limits.max_metadata_bytes)?;
     Ok(ExpandedChecked {
         original: Arc::from(source),
         original_hash: parsed.source_hash(),
@@ -971,7 +1022,58 @@ pub fn expand_source(
         program,
         map,
         audits,
+        provenance,
         definitions: parsed.definitions().len(),
         invocations: parsed.invocations().len(),
     })
+}
+
+fn build_provenance(
+    package: &str,
+    original: &str,
+    expanded: &str,
+    origins: &BTreeMap<ExpansionId, InvocationInfo>,
+    mut generated: Generated,
+    checked: &CheckedSource,
+    program: &ir::Program,
+) -> Result<ProvenanceTable, CompileFailure> {
+    let source_functions = checked
+        .parsed()
+        .module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Function(f) => Some(f.name.as_str()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut inputs = Vec::with_capacity(origins.len());
+    for (id, info) in origins {
+        inputs.push(ExpansionInput {
+            r#macro: &info.name,
+            invocation: &info.span,
+            host_function: &info.host,
+            generated: generated.remove(id).unwrap_or_default(),
+        });
+    }
+    if !generated.is_empty() {
+        return Err(failure(
+            Stage::Lower,
+            "macro provenance: generated code from an unknown expansion",
+        ));
+    }
+    let functions = program
+        .functions
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    ProvenanceTable::build(
+        package,
+        original,
+        expanded,
+        inputs,
+        &functions,
+        &source_functions,
+    )
+    .map_err(|e| stage_error(Stage::Lower, e))
 }

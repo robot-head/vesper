@@ -182,6 +182,15 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
                 }
             }
         }
+        // mov r11d, HEAP_BASE; mov rax, [r11 + rcx*8 + 8*off]
+        // (mov [r11 + rcx*8 + 8*off], rax).
+        M::LdH(off) | M::StH(off) => {
+            a.bytes(&[0x41, 0xbb]);
+            a.bytes(&(super::HEAP_BASE as u32).to_le_bytes());
+            let opcode = if matches!(m, M::LdH(_)) { 0x8b } else { 0x89 };
+            a.bytes(&[0x49, opcode, 0x84, 0xcb]);
+            a.bytes(&(off * 8).to_le_bytes());
+        }
         M::Label(l) => a.bind(l)?,
         M::Jmp(l) => rel(a, 0xe9, l),
         // test rax, rax; je

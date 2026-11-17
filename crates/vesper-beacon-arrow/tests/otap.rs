@@ -496,6 +496,7 @@ fn histograms_round_trip_with_explicit_bounds() {
             time_unix_ns: 20,
             histogram: &latency,
             attributes: Attributes::new(),
+            exemplars: Vec::new(),
         },
         HistogramPoint {
             name: "vesper.idle",
@@ -504,6 +505,7 @@ fn histograms_round_trip_with_explicit_bounds() {
             time_unix_ns: 20,
             histogram: &empty,
             attributes: Attributes::new(),
+            exemplars: Vec::new(),
         },
     ];
     let mut decoder = OtapDecoder::default();
@@ -1047,7 +1049,7 @@ const REFERENCE: [(&str, Columns); 8] = [
             ("severity_text", "string", false),
             (
                 "body",
-                "struct{type:u8,str:string,int:i64,double:f64,bool:bool}",
+                "struct{type:u8,str:string,int:i64,double:f64,bool:bool,bytes:binary,ser:binary}",
                 false,
             ),
             ("dropped_attributes_count", "u32", false),

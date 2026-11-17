@@ -4,9 +4,9 @@ use vesper_syntax::lexer::{TokenKind as K, lex};
 fn bitwise_spellings_are_lossless_and_use_longest_match() {
     let source = "x|=~y & z &= y || x | y == z // |= &= ~\n";
     let (tokens, diagnostics) = lex(source);
-    // A single ampersand is not yet a supported token; the new &= must still
-    // be recognized independently of that error.
-    assert_eq!(diagnostics.len(), 1);
+    // A single ampersand is the bitwise-and token; &= is still recognized
+    // independently of it.
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
     let actual: Vec<_> = tokens
         .iter()
         .map(|t| (t.kind, &source[t.span.clone()]))
@@ -19,7 +19,7 @@ fn bitwise_spellings_are_lossless_and_use_longest_match() {
             (K::Tilde, "~"),
             (K::Lower, "y"),
             (K::Whitespace, " "),
-            (K::Error, "&"),
+            (K::Amp, "&"),
             (K::Whitespace, " "),
             (K::Lower, "z"),
             (K::Whitespace, " "),

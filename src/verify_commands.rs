@@ -23,7 +23,7 @@ const EXTRACT_BUILDER_VERSION: &str = "1";
 const MAX_INPUT: usize = 128 * 1024;
 const MAX_JSON: usize = 2 * 1024 * 1024;
 const MAX_OLEAN_BYTES: u64 = 256 * 1024 * 1024;
-const HELP: &str = "Usage: vesper verify SOURCE --format [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n       vesper verify SOURCE --extract [--proofs FILE.lean] [--theorem Name ...] [--contract-proof Function=Theorem --contract-witness Function=Theorem ...] [--allow-axiom Name ...] [--olean-store DIR|default] [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n\n--format: Kernel-check a formatter document-algebra comment-conservation model with Lean 4.35.0.\n--extract: Extract Lean 4 models from a checked .ves source, compile and replay through the Lean 4.35.0 kernel, and audit axioms (sorryAx is always forbidden).\n--proofs joins an explicit Lean proof script containing theorem proofs for the extracted model.\n--theorem selects theorem names to audit (default: theorems discovered in --proofs, or an internal model-compilation witness).\n--contract-proof binds an emitted function contract to a theorem; when used, every emitted contract must be covered. Each binding requires --contract-witness for the generated existential input precondition. This checks model partial correctness and inhabited input preconditions, not termination or native-code correspondence. Explicit contract admission permits only the three standard Lean axioms.\n--allow-axiom permits named axioms such as propext, Quot.sound, or Classical.choice.\n--olean-store stores audited .olean artifacts and compares cache hits with a fresh compilation in a Loom CAS directory (`default` is ~/.vesper/store).\n--emit-lean prints the generated Lean source only after compilation and kernel replay.\n--timeout bounds each Lean process (1 to 300 seconds; default 30).\nThe selected Lean toolchain and artifact parser remain trusted.\n";
+const HELP: &str = "Usage: vesper verify SOURCE --format [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n       vesper verify SOURCE --extract [--proofs FILE.lean] [--theorem Name ...] [--contract-proof Function=Theorem --contract-witness Function=Theorem ...] [--allow-axiom Name ...] [--olean-store DIR|default] [--json | --emit-lean] [--lean PATH] [--timeout SECONDS]\n\n--format: Kernel-check a formatter document-algebra comment-conservation model with Lean 4.35.0.\n--extract: Extract a Lean 4 proof model from checked .ves source, compile and replay through the Lean 4.35.0 kernel, and audit axioms (sorryAx is always forbidden). Total fuel companions are noncomputable; original recursive executable definitions and their callers are omitted and listed in JSON.\n--proofs joins an explicit Lean proof script containing theorem proofs for the extracted model.\n--theorem selects theorem names to audit (default: theorems discovered in --proofs, or an internal model-compilation witness).\n--contract-proof binds an emitted function contract to a theorem; when used, every emitted contract must be covered. Each binding requires --contract-witness for the generated existential input precondition. This checks model partial correctness and inhabited input preconditions, not termination or native-code correspondence. Explicit contract admission permits only the three standard Lean axioms.\n--allow-axiom permits named axioms such as propext, Quot.sound, or Classical.choice.\n--olean-store stores audited .olean artifacts and compares cache hits with a fresh compilation in a Loom CAS directory (`default` is ~/.vesper/store).\n--emit-lean prints the generated Lean source only after compilation and kernel replay.\n--timeout bounds each Lean process (1 to 300 seconds; default 30).\nThe selected Lean toolchain and artifact parser remain trusted.\n";
 
 #[derive(Debug)]
 struct Failure {
@@ -433,6 +433,7 @@ struct ExtractSuccess {
     proofs_blake3: Option<String>,
     input_bytes: usize,
     totality: BTreeMap<String, String>,
+    omitted_executable_definitions: Vec<String>,
     contracts: Vec<String>,
     checked_contracts: BTreeMap<String, String>,
     checked_preconditions: BTreeMap<String, String>,
@@ -1199,7 +1200,7 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
     }
     let report = lean::extract_report(&checked.world).map_err(|e| Failure::new("extract", e))?;
     let extracted = report
-        .module
+        .proof_module
         .render()
         .map_err(|e| Failure::new("emit", e))?;
     let source_blake3 = blake3::hash(source.as_bytes()).to_hex().to_string();
@@ -1368,11 +1369,12 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
     }
     if !options.json {
         return Ok(format!(
-            "Lean extraction model: kernel checked ({} function(s), {} contract proposition(s), {} bound contract proof(s) with input witnesses, {} theorem(s)).\n",
+            "Lean extraction proof model: kernel checked ({} function(s), {} contract proposition(s), {} bound contract proof(s) with input witnesses, {} theorem(s), {} omitted executable definition(s)).\n",
             report.totality.len(),
             report.contracts.len(),
             options.contract_proofs.len(),
             audit_theorems.len(),
+            report.omitted_executable_definitions.len(),
         )
         .into_bytes());
     }
@@ -1384,12 +1386,17 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
     let report = ExtractSuccess {
         schema: EXTRACT_SCHEMA,
         status: "kernel_checked",
-        scope: "source_lean_extraction",
+        scope: if report.omitted_executable_definitions.is_empty() {
+            "source_lean_extraction"
+        } else {
+            "source_lean_fuel_projection"
+        },
         source_blake3,
         lean_model_blake3,
         proofs_blake3,
         input_bytes: source.len(),
         totality,
+        omitted_executable_definitions: report.omitted_executable_definitions,
         contracts: report.contracts,
         checked_contracts: options.contract_proofs.clone(),
         checked_preconditions: options.contract_witnesses.clone(),

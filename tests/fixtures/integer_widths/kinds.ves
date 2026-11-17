@@ -1,0 +1,394 @@
+// Every integer kind's checked arithmetic, comparisons and negation, as one
+// program that the evaluator, the JIT and Lean extraction agree on.
+
+fn mix_u8(a: u8, b: u8) -> u8 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q: u8 = a / b;
+    let r: u8 = a % b;
+    if q < r {
+        r - q + 0
+    } else {
+        q - r + 0
+    }
+}
+
+fn grow_u8(a: u8) -> u8 eff [Fail[ArithOverflow]] {
+    a * 2
+}
+
+fn try_u8(a: u8, b: u8) -> (u8, u8) {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            (mix_u8(a, b), grow_u8(a))
+        } with {
+            return v => v,
+            raise(e, k) => {
+                let code: u8 = 1;
+                let zero: u8 = 0;
+                (code, zero)
+            }
+        }
+    } with {
+        return v => v,
+        raise(e, k) => {
+            let code: u8 = 2;
+            let zero: u8 = 0;
+            (code, zero)
+        }
+    }
+}
+
+fn mix_u16(a: u16, b: u16) -> u16 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q: u16 = a / b;
+    let r: u16 = a % b;
+    if q < r {
+        r - q + 0
+    } else {
+        q - r + 0
+    }
+}
+
+fn grow_u16(a: u16) -> u16 eff [Fail[ArithOverflow]] {
+    a * 2
+}
+
+fn try_u16(a: u16, b: u16) -> (u16, u16) {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            (mix_u16(a, b), grow_u16(a))
+        } with {
+            return v => v,
+            raise(e, k) => {
+                let code: u16 = 1;
+                let zero: u16 = 0;
+                (code, zero)
+            }
+        }
+    } with {
+        return v => v,
+        raise(e, k) => {
+            let code: u16 = 2;
+            let zero: u16 = 0;
+            (code, zero)
+        }
+    }
+}
+
+fn mix_u32(a: u32, b: u32) -> u32 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q: u32 = a / b;
+    let r: u32 = a % b;
+    if q < r {
+        r - q + 0
+    } else {
+        q - r + 0
+    }
+}
+
+fn grow_u32(a: u32) -> u32 eff [Fail[ArithOverflow]] {
+    a * 2
+}
+
+fn try_u32(a: u32, b: u32) -> (u32, u32) {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            (mix_u32(a, b), grow_u32(a))
+        } with {
+            return v => v,
+            raise(e, k) => {
+                let code: u32 = 1;
+                let zero: u32 = 0;
+                (code, zero)
+            }
+        }
+    } with {
+        return v => v,
+        raise(e, k) => {
+            let code: u32 = 2;
+            let zero: u32 = 0;
+            (code, zero)
+        }
+    }
+}
+
+fn mix_u64(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q: u64 = a / b;
+    let r: u64 = a % b;
+    if q < r {
+        r - q + 0
+    } else {
+        q - r + 0
+    }
+}
+
+fn grow_u64(a: u64) -> u64 eff [Fail[ArithOverflow]] {
+    a * 2
+}
+
+fn try_u64(a: u64, b: u64) -> (u64, u64) {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            (mix_u64(a, b), grow_u64(a))
+        } with {
+            return v => v,
+            raise(e, k) => {
+                let code: u64 = 1;
+                let zero: u64 = 0;
+                (code, zero)
+            }
+        }
+    } with {
+        return v => v,
+        raise(e, k) => {
+            let code: u64 = 2;
+            let zero: u64 = 0;
+            (code, zero)
+        }
+    }
+}
+
+fn mix_usize(a: usize, b: usize) -> usize eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q: usize = a / b;
+    let r: usize = a % b;
+    if q < r {
+        r - q + 0
+    } else {
+        q - r + 0
+    }
+}
+
+fn grow_usize(a: usize) -> usize eff [Fail[ArithOverflow]] {
+    a * 2
+}
+
+fn try_usize(a: usize, b: usize) -> (usize, usize) {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            (mix_usize(a, b), grow_usize(a))
+        } with {
+            return v => v,
+            raise(e, k) => {
+                let code: usize = 1;
+                let zero: usize = 0;
+                (code, zero)
+            }
+        }
+    } with {
+        return v => v,
+        raise(e, k) => {
+            let code: usize = 2;
+            let zero: usize = 0;
+            (code, zero)
+        }
+    }
+}
+
+fn mix_i8(a: i8, b: i8) -> i8 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q: i8 = a / b;
+    let r: i8 = a % b;
+    let n: i8 = -(b % 5);
+    if q < r {
+        r - q + n
+    } else {
+        q - r + n
+    }
+}
+
+fn grow_i8(a: i8) -> i8 eff [Fail[ArithOverflow]] {
+    a * 2
+}
+
+fn try_i8(a: i8, b: i8) -> (i8, i8) {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            (mix_i8(a, b), grow_i8(a))
+        } with {
+            return v => v,
+            raise(e, k) => {
+                let code: i8 = 1;
+                let zero: i8 = 0;
+                (code, zero)
+            }
+        }
+    } with {
+        return v => v,
+        raise(e, k) => {
+            let code: i8 = 2;
+            let zero: i8 = 0;
+            (code, zero)
+        }
+    }
+}
+
+fn mix_i16(a: i16, b: i16) -> i16 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q: i16 = a / b;
+    let r: i16 = a % b;
+    let n: i16 = -(b % 5);
+    if q < r {
+        r - q + n
+    } else {
+        q - r + n
+    }
+}
+
+fn grow_i16(a: i16) -> i16 eff [Fail[ArithOverflow]] {
+    a * 2
+}
+
+fn try_i16(a: i16, b: i16) -> (i16, i16) {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            (mix_i16(a, b), grow_i16(a))
+        } with {
+            return v => v,
+            raise(e, k) => {
+                let code: i16 = 1;
+                let zero: i16 = 0;
+                (code, zero)
+            }
+        }
+    } with {
+        return v => v,
+        raise(e, k) => {
+            let code: i16 = 2;
+            let zero: i16 = 0;
+            (code, zero)
+        }
+    }
+}
+
+fn mix_i32(a: i32, b: i32) -> i32 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q: i32 = a / b;
+    let r: i32 = a % b;
+    let n: i32 = -(b % 5);
+    if q < r {
+        r - q + n
+    } else {
+        q - r + n
+    }
+}
+
+fn grow_i32(a: i32) -> i32 eff [Fail[ArithOverflow]] {
+    a * 2
+}
+
+fn try_i32(a: i32, b: i32) -> (i32, i32) {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            (mix_i32(a, b), grow_i32(a))
+        } with {
+            return v => v,
+            raise(e, k) => {
+                let code: i32 = 1;
+                let zero: i32 = 0;
+                (code, zero)
+            }
+        }
+    } with {
+        return v => v,
+        raise(e, k) => {
+            let code: i32 = 2;
+            let zero: i32 = 0;
+            (code, zero)
+        }
+    }
+}
+
+fn mix_i64(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q: i64 = a / b;
+    let r: i64 = a % b;
+    let n: i64 = -(b % 5);
+    if q < r {
+        r - q + n
+    } else {
+        q - r + n
+    }
+}
+
+fn grow_i64(a: i64) -> i64 eff [Fail[ArithOverflow]] {
+    a * 2
+}
+
+fn try_i64(a: i64, b: i64) -> (i64, i64) {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            (mix_i64(a, b), grow_i64(a))
+        } with {
+            return v => v,
+            raise(e, k) => {
+                let code: i64 = 1;
+                let zero: i64 = 0;
+                (code, zero)
+            }
+        }
+    } with {
+        return v => v,
+        raise(e, k) => {
+            let code: i64 = 2;
+            let zero: i64 = 0;
+            (code, zero)
+        }
+    }
+}
+
+fn mix_isize(a: isize, b: isize) -> isize eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let q: isize = a / b;
+    let r: isize = a % b;
+    let n: isize = -(b % 5);
+    if q < r {
+        r - q + n
+    } else {
+        q - r + n
+    }
+}
+
+fn grow_isize(a: isize) -> isize eff [Fail[ArithOverflow]] {
+    a * 2
+}
+
+fn try_isize(a: isize, b: isize) -> (isize, isize) {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            (mix_isize(a, b), grow_isize(a))
+        } with {
+            return v => v,
+            raise(e, k) => {
+                let code: isize = 1;
+                let zero: isize = 0;
+                (code, zero)
+            }
+        }
+    } with {
+        return v => v,
+        raise(e, k) => {
+            let code: isize = 2;
+            let zero: isize = 0;
+            (code, zero)
+        }
+    }
+}
+
+fn main()
+    -> (
+    (u8, u8),
+    (u16, u16),
+    (u32, u32),
+    (u64, u64),
+    (usize, usize),
+    (i8, i8),
+    (i16, i16),
+    (i32, i32),
+    (i64, i64),
+    (isize, isize)
+) {
+    (
+        try_u8(100, 27),
+        try_u16(60000, 5001),
+        try_u32(2000000000, 77),
+        try_u64(18446744073709551000, 9),
+        try_usize(9223372036854775807, 1),
+        try_i8(-60, 7),
+        try_i16(-32000, -700),
+        try_i32(-1073741000, -99),
+        try_i64(-9223372036854775000, 12345),
+        try_isize(4611686018427387903, -2),
+    )
+}

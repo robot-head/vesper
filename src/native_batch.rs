@@ -66,7 +66,8 @@ pub struct BatchStats {
 }
 #[derive(Clone, Copy)]
 enum ResultKind {
-    Signed,
+    /// A signed integer of the given width, sign-extended in its lane.
+    Signed(u32),
     Unsigned(u32),
     Float,
     Bool,
@@ -78,10 +79,14 @@ fn result_kind(t: &Type) -> Result<ResultKind, String> {
     }
     match t {
         Type::Named(n, args) if args.is_empty() => match n.as_str() {
-            "i64" => Ok(ResultKind::Signed),
-            "u8" => Ok(ResultKind::Unsigned(8)),
-            "u32" => Ok(ResultKind::Unsigned(32)),
-            "u64" => Ok(ResultKind::Unsigned(64)),
+            n if crate::numeric::is_integer_name(n) => {
+                let k = crate::numeric::IntegerKind::from_name(n).unwrap();
+                Ok(if k.unsigned() {
+                    ResultKind::Unsigned(k.bits())
+                } else {
+                    ResultKind::Signed(k.bits())
+                })
+            }
             "f64" => Ok(ResultKind::Float),
             "bool" => Ok(ResultKind::Bool),
             _ => Err(format!("native batch unsupported scalar type {t}")),
@@ -231,7 +236,19 @@ impl NativeBatch {
                 let call: unsafe extern "C" fn() -> i64 = std::mem::transmute(entry.code);
                 let n = call();
                 match entry.result {
-                    ResultKind::Signed => crate::runtime::Value::Int(n),
+                    ResultKind::Signed(bits) => {
+                        if bits < 64 && (n << (64 - bits)) >> (64 - bits) != n {
+                            return Err("noncanonical native signed result".into());
+                        }
+                        crate::runtime::integer_from_word(
+                            if bits == 64 {
+                                crate::numeric::IntegerKind::I64
+                            } else {
+                                crate::numeric::IntegerKind::from_name(&format!("i{bits}")).unwrap()
+                            },
+                            n as u64,
+                        )
+                    }
                     ResultKind::Unsigned(bits) => {
                         let value = n as u64;
                         if bits < 64 && value >> bits != 0 {
