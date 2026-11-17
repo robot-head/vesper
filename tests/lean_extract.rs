@@ -296,9 +296,27 @@ fn labeled_fail_contracts_cover_success_and_preserve_raised_payloads() {
 }
 
 #[test]
-fn multiple_fail_contracts_still_require_a_distinct_model() {
+fn mixed_effect_contracts_still_require_a_distinct_model() {
     assert!(
-        matches!(contract_error("fn f(n: u64) -> u64 eff [left: Fail[u64], right: Fail[bool]] { n } fn ensures_f(n: u64, result: u64) -> bool { result == n } fn main() -> u64 { 0 }"), ContractError::Unsupported { function, .. } if function == "f")
+        matches!(contract_error("linear effect Ask { fn ask() -> bool; } fn f(n: u64) -> u64 eff [left: Fail[u64], right: Ask] { n } fn ensures_f(n: u64, result: u64) -> bool { result == n } fn main() -> u64 { 0 }"), ContractError::Unsupported { function, .. } if function == "f")
+    );
+}
+
+#[test]
+fn multiple_fail_contracts_tag_each_effect_instance_in_row_order() {
+    let (source, proofs) = fixture!("multi_fail_contracts");
+    let report = lean::extract_report(&world(source)).unwrap();
+    assert_eq!(report.contracts, ["descend", "distinct", "forward", "pick"]);
+    proves(
+        source,
+        proofs,
+        &[
+            ("pick", Totality::Total),
+            ("forward", Totality::Total),
+            ("distinct", Totality::Total),
+            ("descend", Totality::Fuel),
+        ],
+        "42",
     );
 }
 
