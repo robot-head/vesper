@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
-const THEOREMS: [&str; 22] = [
+const THEOREMS: [&str; 28] = [
     "bilinear_join_exact",
     "retraction_cancels",
     "integrate_delta",
@@ -29,6 +29,12 @@ const THEOREMS: [&str; 22] = [
     "migration_assembles_owner",
     "migration_preserves_global",
     "fenced_publish_exactly_once",
+    "untouched_worker_keeps_state",
+    "bin_step_assembles_owner",
+    "gradual_steps_preserve_global",
+    "visible_append",
+    "aborted_is_invisible",
+    "transactional_resume_exactly_once",
 ];
 
 fn root() -> PathBuf {
