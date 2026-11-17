@@ -41,8 +41,9 @@ impl LibFlags {
             || !self.instances.is_empty()
     }
 
-    /// Whether `source` must be compiled by [`LibFlags::build_module`]: its
-    /// `.vsys` imports check only through the Bridge lowering.
+    /// Whether `source` imports `.vsys` libraries (`// @export vsys`), which
+    /// check only through the Bridge lowering, so the plain check's
+    /// diagnostics do not apply to it.
     pub fn needs_module(&self, source: &str) -> bool {
         (self.enabled || self.any_option()) && source.contains("// @export vsys")
     }

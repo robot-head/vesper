@@ -101,3 +101,50 @@ fn instance_flag_exports_a_generic_at_a_stable_symbol() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// `@export` directives of a dependency apply to the dependency's own
+/// names, not to the root library being built (review of #921).
+#[test]
+fn package_builds_read_directives_from_the_root_module_only() {
+    let dir = std::env::temp_dir().join(format!("vesper-lib-pkg-{}", std::process::id()));
+    let write = |path: &str, text: &str| {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    write(
+        "app/Loom.toml",
+        "[package]\nname = \"@demo/app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\n\"@demo/dep\" = { version = \"^0.1\", path = \"../dep\" }\n",
+    );
+    write(
+        "app/src/lib.ves",
+        "use @demo/dep::twice;\n\npub fn four() -> u64 {\n    twice(2)\n}\n",
+    );
+    write(
+        "dep/Loom.toml",
+        "[package]\nname = \"@demo/dep\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    );
+    write(
+        "dep/src/lib.ves",
+        "// @export instance id[u64]\npub fn id[T](sink x: T) -> T {\n    x\n}\n\npub fn twice(x: u64) -> u64 {\n    wrapping_add(x, x)\n}\n",
+    );
+    let interface = dir.join("app.json");
+    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        .args(["build", "--lib", "--lib-name", "app"])
+        .arg(dir.join("app"))
+        .arg("-o")
+        .arg(dir.join("app.o"))
+        .arg("--interface")
+        .arg(&interface)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = std::fs::read_to_string(&interface).unwrap();
+    assert!(json.contains("\"symbol\": \"vesper_app_four\""), "{json}");
+    assert!(!json.contains("id__u64"), "{json}");
+    std::fs::remove_dir_all(&dir).ok();
+}

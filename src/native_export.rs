@@ -1104,13 +1104,15 @@ fn instance_wrappers(
             if !plain(&ty) {
                 return Err(refuse(format!("parameter '{}' has type {ty}", p.name)));
             }
-            let pass = match p.pass {
-                Pass::In => "in ",
-                Pass::Inout => "inout ",
-                Pass::Sink => "",
+            // The wrapper keeps the generic's passing modes: an unannotated
+            // parameter would default to `in` and could not be consumed.
+            let (declared, passed) = match p.pass {
+                Pass::In => ("in ", "in "),
+                Pass::Inout => ("inout ", "inout "),
+                Pass::Sink => ("sink ", ""),
             };
-            params.push(format!("{pass}{}: {ty}", p.name));
-            args.push(format!("{pass}{}", p.name));
+            params.push(format!("{declared}{}: {ty}", p.name));
+            args.push(format!("{passed}{}", p.name));
         }
         let result = crate::ast::substitute(&f.result, &vars);
         if !plain(&result) {

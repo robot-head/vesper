@@ -38,11 +38,11 @@ pub trait Abi: Sized {
     fn get(words: &[u64]) -> Self;
     /// Bytes per element inside a Vesper sequence buffer
     /// (`vesper::seq::elem_bytes`): 1 for `u8` and `bool`, 4 for `u32`, and
-    /// the word size of the value for every other type.
+    /// the word size of the value for every other type. The sequence helpers
+    /// check it against [`Abi::WORDS`] before any raw access (a stride of 1
+    /// or 4 needs one word, any other stride is `WORDS * 8`) and panic on a
+    /// mismatch, so a wrong implementation cannot reach out of bounds.
     const STRIDE: usize = Self::WORDS * 8;
-    /// Whether a Rust `[Self]` already has the packed layout of a Vesper
-    /// sequence buffer, so a slice can be lent to Vesper without a copy.
-    const NATIVE: bool = false;
 }
 
 /// `max(a, b)` in constant context.
@@ -51,11 +51,10 @@ pub const fn max(a: usize, b: usize) -> usize {
 }
 
 macro_rules! integer {
-    ($($t:ty => $stride:expr, $native:expr);*) => {$(
+    ($($t:ty => $stride:expr);*) => {$(
         impl Abi for $t {
             const WORDS: usize = 1;
             const STRIDE: usize = $stride;
-            const NATIVE: bool = $native;
             fn put(&self, out: &mut [u64]) {
                 out[0] = *self as u64;
             }
@@ -69,14 +68,13 @@ macro_rules! integer {
 // type does that), unsigned ones zero-extended; `usize`/`isize` are 64-bit
 // on every target the export ABI supports.
 integer!(
-    u8 => 1, true; u16 => 8, false; u32 => 4, true; u64 => 8, true; usize => 8, true;
-    i8 => 8, false; i16 => 8, false; i32 => 8, false; i64 => 8, true; isize => 8, true
+    u8 => 1; u16 => 8; u32 => 4; u64 => 8; usize => 8;
+    i8 => 8; i16 => 8; i32 => 8; i64 => 8; isize => 8
 );
 
 impl Abi for bool {
     const WORDS: usize = 1;
     const STRIDE: usize = 1;
-    const NATIVE: bool = true;
     fn put(&self, out: &mut [u64]) {
         out[0] = u64::from(*self);
     }
@@ -87,7 +85,6 @@ impl Abi for bool {
 
 impl Abi for f64 {
     const WORDS: usize = 1;
-    const NATIVE: bool = true;
     fn put(&self, out: &mut [u64]) {
         out[0] = self.to_bits();
     }

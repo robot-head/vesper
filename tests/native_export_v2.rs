@@ -206,3 +206,27 @@ fn instance_spellings_are_checked() {
         );
     }
 }
+
+/// Instance wrappers keep `sink`, so a handle instance consumes its argument.
+#[test]
+fn sink_instances_of_handle_types_export() {
+    let source = "// @export instance id_token = id[Token]\naffine struct Token {\n    id: u64\n}\n\npub fn id[T](sink x: T) -> T {\n    x\n}\n\npub fn token(id: u64) -> Token {\n    Token {\n        id: id\n    }\n}\n";
+    let lib = compile_source("t.ves", source, &options("t", None)).unwrap();
+    let f = lib
+        .interface
+        .functions
+        .iter()
+        .find(|f| f.name == "id_token")
+        .unwrap();
+    assert_eq!(f.params[0].pass(), "sink");
+}
+
+/// Generated locals of the v2 binding never shadow a parameter.
+#[test]
+fn binding_locals_avoid_parameter_names() {
+    let source = "pub fn f(in xs: Slice[u64], view_xs: u64, result: u64, raw: u64) -> (u64, u64) {\n    (view_xs, wrapping_add(result, raw))\n}\n";
+    let lib = compile_source("t.ves", source, &options("t", None)).unwrap();
+    let text = rust_binding(&lib.interface, &BindingOptions::default());
+    assert!(text.contains("|view_xs_| unsafe { vesper_t_f(result_.as_mut_ptr(), view_xs_, view_xs as i64, result as i64, raw as i64) }"), "{text}");
+    assert!(text.contains("let raw_ = "), "{text}");
+}

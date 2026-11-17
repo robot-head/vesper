@@ -17,12 +17,47 @@ pub struct SeqRuntime {
     pub free: unsafe extern "C" fn(i64) -> i64,
 }
 
+/// Whether `T`'s Rust layout is the packed Vesper one, so `[T]` can be lent
+/// to Vesper in place. Only the built-in scalars qualify: their sizes match
+/// their strides, and every bit pattern Vesper writes is a valid value.
+/// (Implementors of the safe [`Abi`] trait cannot opt in.)
+fn native<T: Abi + 'static>() -> bool {
+    use core::any::TypeId;
+    let id = TypeId::of::<T>();
+    let builtin = [
+        TypeId::of::<u8>(),
+        TypeId::of::<u32>(),
+        TypeId::of::<u64>(),
+        TypeId::of::<i64>(),
+        TypeId::of::<usize>(),
+        TypeId::of::<isize>(),
+        TypeId::of::<f64>(),
+    ];
+    builtin.contains(&id) && core::mem::size_of::<T>() == T::STRIDE
+}
+
+/// Panic unless `T::STRIDE` and `T::WORDS` describe one layout, which every
+/// raw access below relies on.
+fn check_layout<T: Abi>() {
+    let ok = match T::STRIDE {
+        1 | 4 => T::WORDS == 1,
+        stride => T::WORDS >= 1 && stride == T::WORDS * 8,
+    };
+    assert!(
+        ok,
+        "inconsistent Abi layout: STRIDE {} with WORDS {}",
+        T::STRIDE,
+        T::WORDS
+    );
+}
+
 /// Read element `i` of a packed buffer.
 ///
 /// # Safety
 /// `data` must point to at least `i + 1` initialized elements of stride
 /// `T::STRIDE`, eight-byte aligned when the stride is a multiple of eight.
 pub unsafe fn read_elem<T: Abi>(data: *const u8, i: usize) -> T {
+    check_layout::<T>();
     // SAFETY: the caller guarantees the element is in bounds and aligned.
     unsafe {
         let at = data.add(i * T::STRIDE);
@@ -39,6 +74,7 @@ pub unsafe fn read_elem<T: Abi>(data: *const u8, i: usize) -> T {
 /// # Safety
 /// As [`read_elem`], and the buffer must be writable.
 pub unsafe fn write_elem<T: Abi>(data: *mut u8, i: usize, value: &T) {
+    check_layout::<T>();
     // SAFETY: the caller guarantees the element is in bounds and aligned.
     unsafe {
         let at = data.add(i * T::STRIDE);
@@ -80,10 +116,10 @@ fn packed<T: Abi>(items: &[T]) -> Vec<u64> {
 
 /// Lend `items` to Vesper as an `in Slice[T]` view and run `call` with the
 /// pointer to the view's words. Elements whose Rust layout is the packed
-/// Vesper layout ([`Abi::NATIVE`]) are lent in place, others are copied.
-pub fn with_slice<T: Abi, R>(items: &[T], call: impl FnOnce(*mut u64) -> R) -> R {
+/// Vesper layout (the built-in scalars, see `native`) are lent in place, others are copied.
+pub fn with_slice<T: Abi + 'static, R>(items: &[T], call: impl FnOnce(*mut u64) -> R) -> R {
     let copy;
-    let data = if T::NATIVE {
+    let data = if native::<T>() {
         items.as_ptr().cast::<u8>()
     } else {
         copy = packed(items);
@@ -97,9 +133,9 @@ pub fn with_slice<T: Abi, R>(items: &[T], call: impl FnOnce(*mut u64) -> R) -> R
 
 /// Lend `items` to Vesper as an `inout Slice[T]` view. Non-native elements
 /// are copied in and back after the call.
-pub fn with_slice_mut<T: Abi, R>(items: &mut [T], call: impl FnOnce(*mut u64) -> R) -> R {
+pub fn with_slice_mut<T: Abi + 'static, R>(items: &mut [T], call: impl FnOnce(*mut u64) -> R) -> R {
     let len = items.len() as u64;
-    if T::NATIVE {
+    if native::<T>() {
         let mut header = [len, len, items.as_mut_ptr() as usize as u64];
         let mut view = [header.as_mut_ptr() as usize as u64, 0, len];
         return call(view.as_mut_ptr());
@@ -118,9 +154,9 @@ pub fn with_slice_mut<T: Abi, R>(items: &mut [T], call: impl FnOnce(*mut u64) ->
 
 /// Lend `items` to Vesper as an `in ChunkSeq[T]` and run `call` with the
 /// handle (a header the caller owns; Vesper only reads it).
-pub fn with_seq<T: Abi, R>(items: &[T], call: impl FnOnce(u64) -> R) -> R {
+pub fn with_seq<T: Abi + 'static, R>(items: &[T], call: impl FnOnce(u64) -> R) -> R {
     let copy;
-    let data = if T::NATIVE {
+    let data = if native::<T>() {
         items.as_ptr().cast::<u8>()
     } else {
         copy = packed(items);
@@ -258,4 +294,47 @@ impl<T: Abi + core::fmt::Debug> core::fmt::Debug for SeqRef<'_, T> {
 pub unsafe fn box_words<'a>(pointer: u64, words: usize) -> &'a [u64] {
     // SAFETY: forwarded from the caller.
     unsafe { core::slice::from_raw_parts(pointer as usize as *const u64, words) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A safe `Abi` implementation whose stride disagrees with its words.
+    struct Wide(u64, u64);
+    impl Abi for Wide {
+        const WORDS: usize = 2;
+        const STRIDE: usize = 8;
+        fn put(&self, out: &mut [u64]) {
+            out[0] = self.0;
+            out[1] = self.1;
+        }
+        fn get(words: &[u64]) -> Self {
+            Wide(words[0], words[1])
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "inconsistent Abi layout")]
+    fn inconsistent_layouts_are_refused_before_raw_access() {
+        with_slice(&[Wide(1, 2)], |_| ());
+    }
+
+    #[test]
+    fn only_builtin_scalars_are_lent_in_place() {
+        assert!(native::<u64>() && native::<u8>() && native::<u32>() && native::<f64>());
+        assert!(!native::<bool>() && !native::<i32>() && !native::<(u64,)>());
+    }
+
+    #[test]
+    fn copied_slices_round_trip() {
+        let mut xs = [-1i32, 7, i32::MIN];
+        with_slice_mut(&mut xs, |view| {
+            // SAFETY: the view's header and buffer live for the call.
+            let header = unsafe { *view } as usize as *const u64;
+            let data = unsafe { *header.add(2) } as usize as *mut u8;
+            unsafe { write_elem(data, 1, &8i32) };
+        });
+        assert_eq!(xs, [-1, 8, i32::MIN]);
+    }
 }

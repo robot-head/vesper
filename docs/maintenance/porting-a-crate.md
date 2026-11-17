@@ -29,7 +29,7 @@ Values cross the boundary as eight-byte words, using the layouts in
 - An enum is a tag word (the variant index) followed by the variant's fields.
 - A `ChunkSeq[T]` and a `Box[T]` are one word, a pointer. The sequence header
   it points to is `{len, cap, data}`; `data` holds `len` elements packed at
-  their stride (1 byte for `u8` and `bool`, 4 for `u32` and `i32`, otherwise
+  their stride (1 byte for `u8` and `bool`, 4 for `u32`, otherwise
   the element's words).
 - A `Slice[T]` is the three-word view `{header, start, len}`.
 
@@ -63,9 +63,10 @@ it to `vesper.native.export-abi/2` (#898), which adds:
 - **Sequences and slices.** A returned `ChunkSeq[T]` becomes `Vec<T>`.
   `in Slice[T]` becomes `&[T]`, `inout Slice[T]` becomes `&mut [T]`,
   `in ChunkSeq[T]` becomes `&[T]`, and `inout ChunkSeq[T]` becomes
-  `&mut Vec<T>`. Elements whose Rust layout is the packed one (`u8`, `u32`,
-  `i32`, `u64`, `i64`, `usize`, `isize`, `f64`, `bool`) are lent without a
-  copy (`vesper_port_abi::Abi::NATIVE`).
+  `&mut Vec<T>`. Slices of the scalars whose Rust layout is the packed one
+  (`u8`, `u32`, `u64`, `i64`, `usize`, `isize`, `f64`) are lent without a
+  copy; other elements are copied into a packed buffer (and back, for
+  `inout`).
 - **Handles.** A non-`copy` struct or enum becomes an owned Rust type that
   holds its words. Dropping it calls `vesper_<lib>_<Type>_drop`, which frees
   every sequence and box the value owns. Functions named

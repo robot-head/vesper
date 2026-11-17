@@ -392,16 +392,24 @@ impl Gen<'_> {
                 );
             }
         }
+        // Generated locals never shadow a parameter (or each other).
+        let mut names = Names::new(f.params.iter().map(|p| ident(&p.name)));
+        let result = names.fresh("result");
+        let fail = names.fresh("fail");
+        let raw = names.fresh("raw");
         let mut args = vec![];
         let mut wraps: Vec<(String, String)> = vec![];
         let mut after = vec![];
         if f.result_pointer {
-            let _ = writeln!(out, "    let mut result = [0u64; {}];", f.result_words);
-            args.push("result.as_mut_ptr()".to_string());
+            let _ = writeln!(out, "    let mut {result} = [0u64; {}];", f.result_words);
+            args.push(format!("{result}.as_mut_ptr()"));
         }
         for p in &f.params {
             let n = ident(&p.name);
             let inout = p.pass() == "inout";
+            let view = names.fresh(&format!("view_{}", p.name));
+            let seq = names.fresh(&format!("seq_{}", p.name));
+            let arg = names.fresh(&format!("arg_{}", p.name));
             match &p.ty {
                 AbiType::Slice { .. } => {
                     let helper = if inout {
@@ -410,68 +418,62 @@ impl Gen<'_> {
                         "with_slice"
                     };
                     wraps.push((
-                        format!("vesper_port_abi::{helper}({n}, |view_{}| ", p.name),
+                        format!("vesper_port_abi::{helper}({n}, |{view}| "),
                         ")".into(),
                     ));
-                    args.push(format!("view_{}", p.name));
+                    args.push(view.clone());
                 }
                 AbiType::Seq { .. } if inout => {
                     wraps.push((
-                        format!(
-                            "vesper_port_abi::with_seq_mut(RUNTIME, {n}, |seq_{}| ",
-                            p.name
-                        ),
+                        format!("vesper_port_abi::with_seq_mut(RUNTIME, {n}, |{seq}| "),
                         ")".into(),
                     ));
-                    args.push(format!("seq_{}", p.name));
+                    args.push(seq.clone());
                 }
                 AbiType::Seq { .. } => {
                     wraps.push((
-                        format!("vesper_port_abi::with_seq({n}, |seq_{}| ", p.name),
+                        format!("vesper_port_abi::with_seq({n}, |{seq}| "),
                         ")".into(),
                     ));
-                    args.push(format!("seq_{} as i64", p.name));
+                    args.push(format!("{seq} as i64"));
                 }
                 ty if self.handle(ty).is_some() => match p.pass() {
                     "in" => {
-                        let _ = writeln!(out, "    let mut arg_{} = {n}.words;", p.name);
-                        args.push(format!("arg_{}.as_mut_ptr()", p.name));
+                        let _ = writeln!(out, "    let mut {arg} = {n}.words;");
+                        args.push(format!("{arg}.as_mut_ptr()"));
                     }
                     "inout" => args.push(format!("{n}.words.as_mut_ptr()")),
                     _ => {
                         let _ = writeln!(
                             out,
-                            "    let mut arg_{} = core::mem::ManuallyDrop::new({n});",
-                            p.name
+                            "    let mut {arg} = core::mem::ManuallyDrop::new({n});"
                         );
-                        args.push(format!("arg_{}.words.as_mut_ptr()", p.name));
+                        args.push(format!("{arg}.words.as_mut_ptr()"));
                     }
                 },
                 ty if inout => {
                     let t = self.copy_type(ty);
                     let _ = writeln!(
                         out,
-                        "    let mut arg_{0} = [0u64; <{t} as Abi>::WORDS];\n    Abi::put(&*{n}, &mut arg_{0});",
-                        p.name
+                        "    let mut {arg} = [0u64; <{t} as Abi>::WORDS];\n    Abi::put(&*{n}, &mut {arg});"
                     );
-                    args.push(format!("arg_{}.as_mut_ptr()", p.name));
-                    after.push(format!("    *{n} = <{t} as Abi>::get(&arg_{});", p.name));
+                    args.push(format!("{arg}.as_mut_ptr()"));
+                    after.push(format!("    *{n} = <{t} as Abi>::get(&{arg});"));
                 }
                 ty if p.pointer => {
                     let t = self.copy_type(ty);
                     let _ = writeln!(
                         out,
-                        "    let mut arg_{0} = [0u64; <{t} as Abi>::WORDS];\n    Abi::put(&{n}, &mut arg_{0});",
-                        p.name
+                        "    let mut {arg} = [0u64; <{t} as Abi>::WORDS];\n    Abi::put(&{n}, &mut {arg});"
                     );
-                    args.push(format!("arg_{}.as_mut_ptr()", p.name));
+                    args.push(format!("{arg}.as_mut_ptr()"));
                 }
                 ty => args.push(scalar_in(&n, ty)),
             }
         }
         if let Some(words) = f.fail_record_words {
-            let _ = writeln!(out, "    let mut fail = [0u64; {words}];");
-            args.push("fail.as_mut_ptr()".into());
+            let _ = writeln!(out, "    let mut {fail} = [0u64; {words}];");
+            args.push(format!("{fail}.as_mut_ptr()"));
         }
         let mut call = format!("unsafe {{ {}({}) }}", f.symbol, args.join(", "));
         for (open, close) in wraps.iter().rev() {
@@ -479,21 +481,21 @@ impl Gen<'_> {
         }
         let _ = writeln!(
             out,
-            "    // SAFETY: `{}` has exactly this signature in the export ABI; every\n    // pointer is a live, writable buffer of the size the ABI requires, and\n    // every handle passed is owned or borrowed as its mode requires.\n    let raw = {call};",
+            "    // SAFETY: `{}` has exactly this signature in the export ABI; every\n    // pointer is a live, writable buffer of the size the ABI requires, and\n    // every handle passed is owned or borrowed as its mode requires.\n    let {raw} = {call};",
             f.symbol
         );
         for line in &after {
             let _ = writeln!(out, "{line}");
         }
         let produce = if f.result_pointer {
-            self.take(&f.result, "result", 0)
+            self.take(&f.result, &result, 0)
         } else {
             match &f.result {
                 AbiType::Seq { elem } => format!(
-                    "unsafe {{ vesper_port_abi::seq_take::<{}>(RUNTIME, raw as u64) }}",
+                    "unsafe {{ vesper_port_abi::seq_take::<{}>(RUNTIME, {raw} as u64) }}",
                     self.copy_type(elem)
                 ),
-                other => scalar_out("raw", other),
+                other => scalar_out(&raw, other),
             }
         };
         match f.errors.as_slice() {
@@ -501,10 +503,10 @@ impl Gen<'_> {
                 let _ = writeln!(out, "    {produce}");
             }
             errors => {
-                out.push_str("    match fail[0] {\n");
+                let _ = writeln!(out, "    match {fail}[0] {{");
                 let _ = writeln!(out, "        0 => Ok({produce}),");
                 for (k, e) in errors.iter().enumerate() {
-                    let decode = format!("<{} as Abi>::get(&fail[1..])", self.copy_type(e));
+                    let decode = format!("<{} as Abi>::get(&{fail}[1..])", self.copy_type(e));
                     if errors.len() == 1 {
                         let _ = writeln!(out, "        {} => Err({decode}),", k + 1);
                     } else {
@@ -686,4 +688,23 @@ pub(super) fn generate(interface: &LibraryInterface, options: &BindingOptions) -
         g.methods(&mut out, decl);
     }
     out
+}
+
+/// Fresh local names for a generated wrapper: a name already taken (by a
+/// parameter or an earlier local) gets trailing underscores.
+struct Names(BTreeSet<String>);
+
+impl Names {
+    fn new(taken: impl IntoIterator<Item = String>) -> Self {
+        Self(taken.into_iter().collect())
+    }
+
+    fn fresh(&mut self, base: &str) -> String {
+        let mut name = base.to_string();
+        while self.0.contains(&name) {
+            name.push('_');
+        }
+        self.0.insert(name.clone());
+        name
+    }
 }

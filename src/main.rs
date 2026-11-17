@@ -344,12 +344,33 @@ fn cli() -> Result<(), String> {
             })
             .cloned()
             .collect();
+        // `@export` directives belong to the root module (file 0 of a
+        // package); other files are blanked so their directives, written
+        // against their own names, do not apply. The length is kept, since
+        // the export path places generated code past the end.
+        let directives_source = match &loaded {
+            Some(p) => p
+                .sources
+                .files
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    let text = if i == 0 {
+                        f.text.clone()
+                    } else {
+                        " ".repeat(f.text.len())
+                    };
+                    text + "\n"
+                })
+                .collect(),
+            None => source.clone(),
+        };
         return lib.build(
             &command,
             parsed.module,
             &public,
             &input,
-            &source,
+            &directives_source,
             output,
             target.as_deref(),
             opt,
