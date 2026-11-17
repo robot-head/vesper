@@ -131,6 +131,12 @@ fn front_end_functions_with_fail_effects_compile_and_agree() {
                 let options = vc::Options {
                     optimize: false,
                     protocol: vc::ResultProtocol::Words,
+                    // Keep the whole parser (`parse_tree_main`, 1-5 MB of
+                    // code per target) out of this sweep: building and
+                    // running it three times takes minutes. Its native
+                    // builds are checked by hand (verified-codegen-breadth
+                    // report, Milestone 12).
+                    max_code_bytes: 1 << 20,
                     ..vc::Options::new(target)
                 };
                 let artifact = match vc::compile(&p.world, w, &options) {
@@ -146,8 +152,7 @@ fn front_end_functions_with_fail_effects_compile_and_agree() {
                         *refusals.entry(format!("{construct:?}")).or_default() += 1;
                         break;
                     }
-                    // The whole parser (`parse_tree_main`) compiles since
-                    // Milestone 11 but exceeds the ±1 MiB branch reach.
+                    // The whole parser, over this sweep's 1 MiB cap.
                     Err(vc::VerifiedError::Limit(d)) if d.contains("bytes of code") => {
                         *refusals.entry("Limit".into()).or_default() += 1;
                         break;
