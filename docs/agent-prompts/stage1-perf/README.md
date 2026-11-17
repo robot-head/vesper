@@ -48,20 +48,19 @@ Claims are #931-#937 (lane n is issue 930+n).
 | 2 | [Sequence access and drops](02-seq-access-drops.md) | #932 | `try_get` + `Option` per read; local and by-value sequences and strings never freed | now | `src/seq/{native,native_runtime,aot_runtime,ir}.rs`, `src/strings/native.rs`, the drop elaboration in `src/fip.rs`, the by-value refusal hunk in `src/native_export.rs` (own commit, coordinate with lane 4), `tests/native_seq_drop*.rs` |
 | 3 | [Byte loops](03-byte-loops.md) | #933 | per-byte bounds-checked loops; no block copy, wide reads, check hoisting or 64x64->128 multiply | after lane 2 (shares `src/seq/**`); hoisting and the multiply can start now | `src/seq/check.rs`, `src/seq/eval.rs`, `src/seq/lean.rs` (builtin typing and reference semantics), NEW `src/bounds_hoist.rs`, the new-builtin hunks in `src/seq/native.rs` after lane 2 merges, `packages/vesper-std/bytes/**`, `tests/native_bytes*.rs` |
 | 4 | [Export ABI v3](04-export-abi-v3.md) | #934 | state copied across the Vesper/Rust boundary every call | now | `src/native_export.rs`, `src/native_export/**`, `src/lib_commands.rs`, `crates/vesper-port-abi/**`, `crates/vesper-port-pilot/**`, `tests/native_export*.rs`, `tests/fixtures/native_export/**`, `docs/maintenance/porting-a-crate.md` (ABI sections) |
-| 5 | [Fail lowering](05-fail-lowering.md) | #935 | `Fail`/`inout` force a Result plus a copy per call | after lane 4 (export glue) and lane 1 (call sites) | the native `Fail` row lowering in `src/native.rs` (`fail_record_size`, `fail_exit` and call-site status handling), the `Fail` hunks of `src/native_export/glue.rs` after lane 4 merges, `tests/native_fail*.rs` |
+| 5 | [Fail across inout and Fail lowering](05-fail-lowering.md) | #935 | `Fail`/`inout` force a Result plus a copy per call | language change now (owner chose keep-writes, 2026-11-17); codegen after lanes 4 and 1 | the E0402 check in `src/check.rs`, the Tier-1 inout lowering in `src/lean.rs` (coordinate with #593), the manuscript §4.3/§4.5/§5.2/§8.2 hunks, the native `Fail` row lowering in `src/native.rs` (`fail_record_size`, `fail_exit` and call-site status handling), the `Fail` hunks of `src/native_export/glue.rs` after lane 4 merges, `tests/native_fail*.rs` |
 | 6 | [Vectorized byte builtins](06-simd-bytes.md) | #936 | no SIMD | after lane 3 | `src/native_vector.rs` (byte-builtin hunks), the builtin hunks lane 3 adds, `tests/native_simd_bytes*.rs` |
 | 7 | [Formatter cap](07-fmt-cap.md) | #937 | `vesper fmt` refuses files over 8,192 tokens (4·N² work) | now | `crates/vesper-fmt/**`, `src/fmt_commands.rs`, `tests/fmt*.rs` |
 
-**Start now:** lanes 1, 2, 4 and 7, plus lane 3's hoisting and multiply.
+**Start now:** lanes 1, 2, 4 and 7, lane 3's hoisting and multiply, and lane 5's language change.
 **Recommended merge order:** 1, 2, 3, 4, 5, 6, with 7 whenever it is green.
 
 ### Not in this wave
 
 - Source-level scalable vectors (`VVec`, F11) stay with wave-nine lane 10
   (#587). Lane 6 adds no syntax.
-- Relaxing E0402 (raising `Fail` while an `inout` argument is live) is a
-  language change. Lane 5 does it only if the owner approves; otherwise lane 5
-  is codegen only.
+- (Decided 2026-11-17.) The owner approved relaxing E0402 for stationary
+  `inout` arguments with keep-writes semantics; lane 5's prompt has the rules.
 - Re-recording `bootstrap/stage1.lock`. Lanes keep the verified artifacts
   identical; a later owner-approved PR re-records the Cranelift digests once the
   wave lands.
