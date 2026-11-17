@@ -156,13 +156,16 @@ fn in_and_sink_parameters_leave_the_caller_alone() {
         level: i32::MAX,
         weight: 200,
     };
-    assert_eq!(
-        sample_score(s),
-        i64::from(i32::MAX.wrapping_mul(3)) + 200
-    );
+    assert_eq!(sample_score(s), i64::from(i32::MAX.wrapping_mul(3)) + 200);
     assert_eq!(sample_score(s), sample_score(s));
     assert_eq!(span_width(Span { lo: -5, hi: 7 }), 12);
-    assert_eq!(span_width(Span { lo: i64::MIN, hi: 0 }), i64::MIN);
+    assert_eq!(
+        span_width(Span {
+            lo: i64::MIN,
+            hi: 0
+        }),
+        i64::MIN
+    );
 }
 
 #[test]

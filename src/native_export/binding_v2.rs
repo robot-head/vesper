@@ -474,9 +474,7 @@ impl Gen<'_> {
                     match p.pass() {
                         // In place: Vesper reads (`in`) or updates
                         // (`inout`) the caller's mirror.
-                        "in" => args.push(format!(
-                            "({n} as *const {m}).cast_mut().cast::<u64>()"
-                        )),
+                        "in" => args.push(format!("({n} as *const {m}).cast_mut().cast::<u64>()")),
                         "inout" => args.push(format!("({n} as *mut {m}).cast::<u64>()")),
                         // A consumed value's storage may be reused.
                         _ => {
@@ -629,11 +627,13 @@ impl Gen<'_> {
             Some(p) => format!("{p}::"),
             None => "super::".into(),
         };
-        out.push_str("/// `#[repr(C)]` mirrors of the library's copy structs in the Vesper word
+        out.push_str(
+            "/// `#[repr(C)]` mirrors of the library's copy structs in the Vesper word
 /// layout (export ABI v3): `in`/`inout` parameters and slices of them are
 /// lent to Vesper in place.
 pub mod repr {
-");
+",
+        );
         for decl in &decls {
             let v = &decl.variants[0];
             let mut fields = v.fields.iter().collect::<Vec<_>>();
@@ -666,14 +666,18 @@ pub mod repr {
                 for (f, c) in &cells {
                     let _ = writeln!(out, "        pub {}: {c},", ident(&f.name));
                 }
-                out.push_str("    }
+                out.push_str(
+                    "    }
 
-");
+",
+                );
             }
         }
-        out.push_str("}
+        out.push_str(
+            "}
 
-");
+",
+        );
         for decl in &decls {
             let name = &decl.name;
             let words = decl.words;
@@ -693,9 +697,11 @@ const _: () = {{
                     f.offset
                 );
             }
-            out.push_str("};
+            out.push_str(
+                "};
 
-");
+",
+            );
             let _ = writeln!(
                 out,
                 "// SAFETY: `repr::{name}` is `#[repr(C)]`, {words} words, eight-byte aligned

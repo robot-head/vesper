@@ -92,7 +92,9 @@ fn gauge_binding_asserts_every_offset() {
     }
     // In place: no word buffer for the state or the slice.
     assert!(text.contains("pub fn gauge_record(g: &mut repr::Gauge, s: &repr::Sample) -> ()"));
-    assert!(text.contains("pub fn gauge_scan(g: &mut repr::Gauge, samples: &[repr::Sample]) -> u64"));
+    assert!(
+        text.contains("pub fn gauge_scan(g: &mut repr::Gauge, samples: &[repr::Sample]) -> u64")
+    );
     assert!(text.contains("vesper_port_abi::with_mirror_slice_mut(samples"));
     assert!(!text.contains("arg_g"));
 }

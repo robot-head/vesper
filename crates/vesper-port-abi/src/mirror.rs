@@ -252,10 +252,7 @@ pub fn with_mirror_slice<T: Mirror, R>(items: &[T], call: impl FnOnce(*mut u64) 
 }
 
 /// Lend `items` to Vesper as an `inout Slice[T]` view, in place.
-pub fn with_mirror_slice_mut<T: Mirror, R>(
-    items: &mut [T],
-    call: impl FnOnce(*mut u64) -> R,
-) -> R {
+pub fn with_mirror_slice_mut<T: Mirror, R>(items: &mut [T], call: impl FnOnce(*mut u64) -> R) -> R {
     let len = items.len() as u64;
     let mut header = [len, len, items.as_mut_ptr() as usize as u64];
     let mut view = [header.as_mut_ptr() as usize as u64, 0, len];
