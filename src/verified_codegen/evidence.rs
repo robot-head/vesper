@@ -67,8 +67,8 @@ fn with_suffix(name: &str, item: &str) -> String {
 fn op_uses(op: &Op) -> Vec<ValueId> {
     let args = |a: &[Argument]| a.iter().map(|a| a.value).collect::<Vec<_>>();
     match op {
-        Op::Constant(_) | Op::Unit | Op::Read { .. } | Op::Closure { .. } | Op::Loop => vec![],
-        Op::Bind { value, .. } | Op::Write { value, .. } | Op::Exit { value, .. } => vec![*value],
+        Op::Constant(_) | Op::Unit | Op::Read { .. } | Op::Closure { .. } => vec![],
+        Op::Bind { value, .. } | Op::Write { value, .. } => vec![*value],
         Op::Unary(_, v) | Op::Project(v, _) | Op::Try(v) => vec![*v],
         Op::Binary(_, a, b) | Op::Index(a, b) => vec![*a, *b],
         Op::Tuple(vs) => vs.clone(),
