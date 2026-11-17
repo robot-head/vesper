@@ -53,10 +53,19 @@ vesper_port_object(
     target = VESPER_TARGET,
 )
 
+# The export ABI v3 library (#934): copy structs lent in place.
+vesper_port_object(
+    name = "gauge_vesper",
+    src = "vesper/gauge.ves",
+    library = "gauge",
+    target = VESPER_TARGET,
+)
+
 rust_library(
     name = "port",
     srcs = glob(["src/**/*.rs"]) + [
         "port/binding.rs",
+        "port/gauge.rs",
         "port/kit.rs",
     ],
     crate_features = ["vesper-port"],
@@ -70,6 +79,7 @@ rust_test(
     name = "port_api_test",
     srcs = ["tests/api.rs"],
     compile_data = [
+        ":gauge_vesper",
         ":kit_vesper",
         ":pilot_vesper",
     ],
@@ -78,6 +88,7 @@ rust_test(
     rustc_flags = [
         "-Clink-arg=$(location :pilot_vesper)",
         "-Clink-arg=$(location :kit_vesper)",
+        "-Clink-arg=$(location :gauge_vesper)",
     ],
     deps = [":port"],
 )
@@ -87,6 +98,7 @@ rust_test(
     srcs = ["tests/api.rs"],
     crate_name = "api_divergent",
     compile_data = [
+        ":gauge_vesper",
         ":kit_vesper",
         ":pilot_vesper_divergent",
     ],
@@ -95,6 +107,7 @@ rust_test(
     rustc_flags = [
         "-Clink-arg=$(location :pilot_vesper_divergent)",
         "-Clink-arg=$(location :kit_vesper)",
+        "-Clink-arg=$(location :gauge_vesper)",
     ],
     tags = ["manual"],
     deps = [":port"],
@@ -105,6 +118,7 @@ rust_test(
         name = name,
         srcs = [src],
         compile_data = [
+            ":gauge_vesper",
             ":pilot_vesper",
             kit,
         ],
@@ -114,13 +128,18 @@ rust_test(
         rustc_flags = [
             "-Clink-arg=$(location :pilot_vesper)",
             "-Clink-arg=$(location %s)" % kit,
+            "-Clink-arg=$(location :gauge_vesper)",
         ],
         tags = tags,
-        deps = [":port"],
+        deps = [
+            ":port",
+            "//crates/vesper-port-abi",
+        ],
     )
     for name, src, crate, kit, tags in [
         ("port_kit_test", "tests/kit.rs", "kit", ":kit_vesper", []),
         ("port_kit_memory_test", "tests/kit_memory.rs", "kit_memory", ":kit_vesper", []),
+        ("port_gauge_test", "tests/gauge.rs", "gauge", ":kit_vesper", []),
         ("_port_kit_divergent.bin", "tests/kit.rs", "kit_divergent", ":kit_vesper_divergent", ["manual"]),
         ("_port_kit_memory_divergent.bin", "tests/kit_memory.rs", "kit_memory_divergent", ":kit_vesper_divergent", ["manual"]),
     ]

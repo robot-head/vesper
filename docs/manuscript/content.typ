@@ -3385,6 +3385,8 @@ Bridge imports foreign code. The export direction lets Rust and C link compiled 
 
 A machine-readable interface file describes every symbol, and a generated Rust binding wraps each one so that the status word becomes `Result`.
 
+ABI `vesper.native.export-abi/3`, which a library opts into with the source directive `// @export abi 3`, keeps the v2 object and changes what the Rust side passes. Each `copy` struct gets a `#[repr(C)]` *mirror* in the binding whose fields are the struct's words in layout order: full-word scalars as their Rust type, narrower scalars, `bool` and field-less enums as a canonical word cell, nested structs as nested mirrors, and other copy values as a word block converted on access. The binding asserts the mirror's size, alignment and every field offset at compile time. An `in` or `inout` parameter of a mirrored struct, and an `in`/`inout Slice[T]` of one, is then a pointer to the caller's own storage, with no conversion and no scratch copy; Vesper never writes an `in` aggregate, and a `sink` one receives a copy. Enums and tuples have no fixed Rust layout and keep the v2 conversion.
+
 == 17. Vesper Nexus: WasmFX Sandboxes and Linear WIT Plugins
 <ch-16>
 #chapter-deck[WebAssembly Continuations, Resource Lifecycles, and Host/Guest Views]

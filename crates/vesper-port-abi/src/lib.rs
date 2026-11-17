@@ -20,6 +20,12 @@
 //! copies a returned `String` and frees it, and [`str_view`] borrows a
 //! string a handle owns.
 //!
+//! Export ABI v3 (`vesper.native.export-abi/3`) lends Rust storage to Vesper
+//! in place: a [`Mirror`] is a `#[repr(C)]` struct in the Vesper word layout
+//! (cells [`Word`] and [`Words`]), passed by pointer for `in`/`inout`
+//! parameters, and [`with_mirror_slice`]/[`with_mirror_slice_mut`] lend a
+//! slice of mirrors without copying it.
+//!
 //! This crate has no dependencies, so a crate with a `vesper-port` feature
 //! can depend on it unconditionally.
 #![no_std]
@@ -30,7 +36,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
+mod mirror;
 mod seq;
+pub use mirror::*;
 pub use seq::*;
 
 /// A value with a fixed word layout at the export boundary.

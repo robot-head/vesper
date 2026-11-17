@@ -24,6 +24,12 @@ fn main() {
             .iter()
             .fold(kit, |kit, (from, to)| kit.edit(from, to));
         kit.build();
+        // The export ABI v3 library (#934): copy structs lent in place
+        // through `#[repr(C)]` mirrors.
+        vesper_port_harness::Port::new("gauge", "vesper/gauge.ves")
+            .binding("port/gauge.rs")
+            .rust_types("crate::gauge")
+            .build();
     }
 }
 

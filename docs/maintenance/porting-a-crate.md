@@ -103,8 +103,51 @@ it to `vesper.native.export-abi/2` (#898), which adds:
   object's target. The binding references the shim symbols, so the linker
   keeps them.
 
-Directives are line comments that start with `// @export`. Anything else after
-`@export` is an error, so a typo cannot be ignored silently.
+### Export ABI v3: state lent in place
+
+The v2 binding converts every `copy` aggregate to words and back around each
+call. For a port whose state is a large `copy` struct taken `inout` (BBR's
+`Bbrv3` is 70 words), that conversion is most of the call. Writing
+`// @export abi 3` in the source makes the library
+`vesper.native.export-abi/3` (#934). The object is the same as in v2; the
+binding changes:
+
+- **Mirrors.** Every `copy` struct gets `repr::<Type>`, a `#[repr(C)]`
+  struct in the Vesper word layout. A full-word scalar field (`i64`, `u64`,
+  `isize`, `usize`, `f64`) is the plain Rust type. A narrower scalar, a
+  `bool`, `Unit` or a field-less enum is a `vesper_port_abi::Word<T>`: the
+  canonical word, read with `.get()` and written with `.set(v)`. A nested
+  `copy` struct is its own mirror. Any other copy value (an `Option`, a
+  `Result`, a tuple, an enum with payloads) is a
+  `vesper_port_abi::Words<T, N>`, converted on `.get()`/`.set()`. The
+  binding asserts the mirror's size, alignment and every field offset at
+  compile time, implements `vesper_port_abi::Mirror` for it, and adds
+  `from_value(&T)` and `to_value()` to convert from and to the Rust value
+  type.
+- **In place.** An `in` or `inout` parameter of a mirrored struct is
+  `&repr::T` or `&mut repr::T`, passed as a pointer to the caller's storage
+  with no conversion and no scratch copy. `in Slice[T]` and
+  `inout Slice[T]` of a mirrored struct are `&[repr::T]` and
+  `&mut [repr::T]`, lent without a heap copy. A mirrored struct result is
+  returned as `repr::T`. A `sink` parameter takes `repr::T` by value, and
+  the binding passes a copy, since Vesper may reuse a consumed value's
+  storage. Vesper never writes an `in` aggregate (`E0307`).
+- **Converted.** Enums and tuples have no fixed Rust layout (tag and payload
+  validity, Rust's tuple layout), so they keep the v2 conversion. The
+  interface says so for each type (`"mirror": {"kind": "converted",
+  "reason": ..}`), and marks every in-place parameter `"in_place": true`.
+- **Aliasing.** An `inout` mirror and a borrowed slice of the same storage
+  cannot reach one call: the wrapper takes `&mut T` and `&[T]`, and the
+  borrow checker refuses the alias.
+
+To use v3, keep the mirror as the port's storage in the Vesper build, and
+the Rust value in the Rust build, behind the same API. The pilot's `gauge`
+library (`src/gauge.rs`, `vesper/gauge.ves`, `tests/gauge.rs`) is the
+pattern: `Meter` holds `repr::Gauge` or `Gauge`, `Samples` holds
+`Vec<repr::Sample>` or `Vec<Sample>`, and the tests run against both builds.
+
+Directives are line comments that start with `// @export`: `abi 3`,
+`instance` and `vsys`. Anything else after `@export` is an error, so a typo cannot be ignored silently.
 
 What is exportable today:
 

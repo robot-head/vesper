@@ -6,6 +6,7 @@
 //! the Bazel rule) reads the same ones from the same file.
 //!
 //! ```text
+//! // @export abi 3
 //! // @export instance largest_u64 = largest[u64]
 //! // @export instance largest[i32]
 //! // @export vsys direct rust=crate::shim
@@ -15,6 +16,9 @@
 //! // | }
 //! ```
 //!
+//! * `abi 3` makes the library an export ABI v3 library: copy structs get
+//!   `#[repr(C)]` mirrors that cross in place (see the module docs of
+//!   `native::export`).
 //! * `instance [name =] f[T1, ..]` exports that monomorphic instance of the
 //!   generic `pub fn f` as `vesper_<lib>_<name>`. Without a name the symbol
 //!   is the stable mangling `f__t1__t2` (type names lowercased, type
@@ -33,6 +37,9 @@ use crate::ffi_lowering::Handler;
 pub struct Directives {
     pub instances: Vec<Instance>,
     pub vsys: Vec<VsysImport>,
+    /// `abi 3`: the export ABI version the library opts into (v3 is the
+    /// only one a source names; v1 and v2 follow from the forms used).
+    pub abi: Option<u32>,
 }
 
 /// One generic instance to export.
@@ -186,7 +193,21 @@ impl Directives {
                 continue;
             };
             let rest = rest.trim();
-            if let Some(spec) = rest.strip_prefix("instance ") {
+            if let Some(spec) = rest.strip_prefix("abi") {
+                match spec.trim() {
+                    "3" if out.abi.is_none() => out.abi = Some(3),
+                    "3" => {
+                        return Err(ExportError::Directive(
+                            "@export abi: the ABI is named twice".into(),
+                        ));
+                    }
+                    other => {
+                        return Err(ExportError::Directive(format!(
+                            "@export abi: expected 3, found '{other}' (v1 and v2 follow from the forms a library uses)"
+                        )));
+                    }
+                }
+            } else if let Some(spec) = rest.strip_prefix("instance ") {
                 out.instances.push(parse_instance(spec.trim())?);
             } else if let Some(spec) = rest.strip_prefix("vsys") {
                 let mut words = spec.split_whitespace();
@@ -237,7 +258,7 @@ impl Directives {
                 });
             } else {
                 return Err(ExportError::Directive(format!(
-                    "unknown directive '// @export {rest}' (expected instance or vsys)"
+                    "unknown directive '// @export {rest}' (expected abi, instance or vsys)"
                 )));
             }
         }

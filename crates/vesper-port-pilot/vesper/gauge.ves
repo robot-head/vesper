@@ -1,0 +1,140 @@
+// Vesper side of the pilot's export ABI v3 gauge (src/gauge.rs, #934): copy
+// structs lent to Vesper in place through `#[repr(C)]` mirrors, one field per
+// mirror cell (plain words, narrow Word cells, a field-less enum, an Option in
+// Words, a nested mirror), plus in-place slices of a copy struct.
+//
+// @export abi 3
+
+// A field-less enum: one canonical tag word.
+copy enum Phase {
+    Idle,
+    Rising,
+    Falling
+}
+
+// One reading; slices of it cross in place.
+copy struct Sample {
+    at: u64,
+    level: i32,
+    weight: u8
+}
+
+// A nested copy struct: a nested mirror.
+copy struct Span {
+    lo: i64,
+    hi: i64
+}
+
+// The gauge state: one field of every mirror cell.
+copy struct Gauge {
+    count: u64,
+    total: i64,
+    last: i32,
+    small: i8,
+    wide: u16,
+    flags: u32,
+    seen: bool,
+    phase: Phase,
+    peak: Option[u64],
+    span: Span,
+    ratio: f64,
+    index: usize,
+    delta: isize
+}
+
+pub fn gauge_new(origin: i64) -> Gauge {
+    Gauge {
+        count: 0,
+        total: origin,
+        last: 0,
+        small: 0,
+        wide: 0,
+        flags: 0,
+        seen: false,
+        phase: Phase::Idle,
+        peak: Option::None,
+        span: Span { lo: origin, hi: origin },
+        ratio: 0.5,
+        index: 0,
+        delta: 0
+    }
+}
+
+// Every field changes; the narrow ones wrap at their width.
+pub fn gauge_record(inout g: Gauge, in s: Sample) {
+    let level = s.level;
+    let wide_level = widen_i64(level);
+    g.phase = if level > g.last {
+        Phase::Rising
+    } else if level < g.last {
+        Phase::Falling
+    } else {
+        Phase::Idle
+    };
+    g.count = wrapping_add(g.count, 1);
+    g.total = wrapping_add(g.total, wide_level);
+    g.last = level;
+    g.small = wrapping_i8(wrapping_add(widen_i64(g.small), widen_i64(s.weight)));
+    g.wide = wrapping_u16(wrapping_add(widen_u64(g.wide), s.at));
+    g.flags = wrapping_u32(wrapping_add(widen_u64(g.flags), widen_u64(s.weight)));
+    g.seen = true;
+    g.peak = match g.peak {
+        Option::None => Option::Some(s.at),
+        Option::Some(p) => if s.at > p {
+            Option::Some(s.at)
+        } else {
+            Option::Some(p)
+        },
+    };
+    if wide_level < g.span.lo {
+        g.span.lo = wide_level;
+    }
+    if wide_level > g.span.hi {
+        g.span.hi = wide_level;
+    }
+    g.ratio = g.ratio * 2.0;
+    g.index = wrapping_add(g.index, 1);
+    g.delta = wrapping_isize(wrapping_sub(widen_i64(g.last), 1));
+}
+
+// Record every sample of a slice lent in place; returns the new count.
+pub fn gauge_scan(inout g: Gauge, in samples: Slice[Sample]) -> u64 {
+    for i in 0..samples.len() {
+        match samples.try_get(i) {
+            Option::Some(s) => gauge_record(g, s),
+            Option::None => (),
+        }
+    }
+    g.count
+}
+
+// An `in` mirror is read in place, so the callee works on a local copy.
+pub fn sample_score(in s: Sample) -> i64 {
+    let mut local = s;
+    local.level = wrapping_i32(wrapping_mul(widen_i64(local.level), 3));
+    wrapping_add(widen_i64(local.level), widen_i64(s.weight))
+}
+
+pub fn gauge_phase(in g: Gauge) -> Phase {
+    g.phase
+}
+
+// Update a slice of samples in place.
+pub fn shift_samples(inout samples: Slice[Sample], by: i32) {
+    for i in 0..samples.len() {
+        match samples.try_get(i) {
+            Option::Some(s) => {
+                let mut moved = s;
+                moved.level = wrapping_i32(wrapping_add(widen_i64(s.level), widen_i64(by)));
+                moved.weight = wrapping_u8(wrapping_add(widen_u64(s.weight), 1));
+                samples.try_set(i, moved);
+            }
+            Option::None => (),
+        }
+    }
+}
+
+// A consumed mirror: the binding passes a copy.
+pub fn span_width(sink s: Span) -> i64 {
+    wrapping_sub(s.hi, s.lo)
+}

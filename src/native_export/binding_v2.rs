@@ -14,6 +14,12 @@
 //!   makes `&mut self`, by value consumes `self`, and a function that
 //!   returns the type without taking it is an associated function;
 //! * `live_allocations()`, the library's live sequence and box count.
+//!
+//! A v3 library (#934) also gets `pub mod repr`: one `#[repr(C)]` mirror per
+//! copy struct, with compile-time layout asserts, `from_value`/`to_value`
+//! conversions and `vesper_port_abi::Mirror`. Its `in`/`inout` parameters,
+//! slices and results of mirrored structs take and return the mirrors, lent
+//! in place.
 use super::*;
 use std::fmt::Write as _;
 
@@ -63,8 +69,21 @@ impl Gen<'_> {
         rust_type(ty, &self.types_path)
     }
 
+    /// v3: the mirror of a mirrored struct, as seen from the binding.
+    fn mirror(&self, ty: &AbiType) -> Option<String> {
+        match ty {
+            AbiType::Named { name, .. } if self.interface.mirrored(ty) => {
+                Some(format!("repr::{name}"))
+            }
+            _ => None,
+        }
+    }
+
     /// The Rust type a value of `ty` is handed out as.
     fn out_type(&self, ty: &AbiType) -> String {
+        if let Some(m) = self.mirror(ty) {
+            return m;
+        }
         if !self.owning(ty) {
             return self.copy_type(ty);
         }
@@ -92,7 +111,22 @@ impl Gen<'_> {
     /// The Rust type of a parameter.
     fn param_type(&self, p: &ExportParam) -> String {
         let inout = p.pass() == "inout";
+        if let Some(m) = self.mirror(&p.ty) {
+            return match p.pass() {
+                "in" => format!("&{m}"),
+                "inout" => format!("&mut {m}"),
+                _ => m,
+            };
+        }
         match &p.ty {
+            AbiType::Slice { elem } if p.in_place => {
+                let m = self.mirror(elem).expect("an in-place slice holds mirrors");
+                if inout {
+                    format!("&mut [{m}]")
+                } else {
+                    format!("&[{m}]")
+                }
+            }
             AbiType::Slice { elem } | AbiType::Seq { elem } if !inout => {
                 format!("&[{}]", self.copy_type(elem))
             }
@@ -116,6 +150,9 @@ impl Gen<'_> {
     /// An expression that takes ownership of a value of `ty` stored in
     /// `buffer[offset..]`.
     fn take(&self, ty: &AbiType, buffer: &str, offset: u32) -> String {
+        if let Some(m) = self.mirror(ty) {
+            return format!("vesper_port_abi::mirror_from_words::<{m}>(&{buffer}[{offset}..])");
+        }
         if !self.owning(ty) {
             return format!(
                 "<{} as Abi>::get(&{buffer}[{offset}..])",
@@ -420,6 +457,34 @@ impl Gen<'_> {
             let seq = names.fresh(&format!("seq_{}", p.name));
             let arg = names.fresh(&format!("arg_{}", p.name));
             match &p.ty {
+                AbiType::Slice { .. } if p.in_place => {
+                    let helper = if inout {
+                        "with_mirror_slice_mut"
+                    } else {
+                        "with_mirror_slice"
+                    };
+                    wraps.push((
+                        format!("vesper_port_abi::{helper}({n}, |{view}| "),
+                        ")".into(),
+                    ));
+                    args.push(view.clone());
+                }
+                ty if self.mirror(ty).is_some() => {
+                    let m = self.mirror(ty).expect("checked");
+                    match p.pass() {
+                        // In place: Vesper reads (`in`) or updates
+                        // (`inout`) the caller's mirror.
+                        "in" => args.push(format!(
+                            "({n} as *const {m}).cast_mut().cast::<u64>()"
+                        )),
+                        "inout" => args.push(format!("({n} as *mut {m}).cast::<u64>()")),
+                        // A consumed value's storage may be reused.
+                        _ => {
+                            let _ = writeln!(out, "    let mut {arg} = {n};");
+                            args.push(format!("(&mut {arg} as *mut {m}).cast::<u64>()"));
+                        }
+                    }
+                }
                 AbiType::Slice { .. } => {
                     let helper = if inout {
                         "with_slice_mut"
@@ -551,6 +616,137 @@ impl Gen<'_> {
         out.push_str("}\n");
     }
 
+    /// v3: the `repr` module (one `#[repr(C)]` mirror per mirrored copy
+    /// struct), the layout asserts, and the conversions.
+    fn mirrors(&self, out: &mut String) {
+        let decls = self
+            .types()
+            .values()
+            .filter(|d| d.mirror == Some(Mirror::ReprC))
+            .collect::<Vec<_>>();
+        // Paths as seen from inside `mod repr`.
+        let inner_path = match &self.options.types_path {
+            Some(p) => format!("{p}::"),
+            None => "super::".into(),
+        };
+        out.push_str("/// `#[repr(C)]` mirrors of the library's copy structs in the Vesper word
+/// layout (export ABI v3): `in`/`inout` parameters and slices of them are
+/// lent to Vesper in place.
+pub mod repr {
+");
+        for decl in &decls {
+            let v = &decl.variants[0];
+            let mut fields = v.fields.iter().collect::<Vec<_>>();
+            fields.sort_by_key(|f| f.offset);
+            let cells = fields
+                .iter()
+                .map(|f| (f, self.cell(&f.ty, &inner_path)))
+                .collect::<Vec<_>>();
+            let _ = writeln!(
+                out,
+                "    /// Mirror of the Vesper copy struct `{}` ({} words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]",
+                decl.name, decl.words
+            );
+            if positional(v) {
+                let _ = writeln!(
+                    out,
+                    "    pub struct {}({});
+",
+                    decl.name,
+                    cells
+                        .iter()
+                        .map(|(_, c)| format!("pub {c}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            } else {
+                let _ = writeln!(out, "    pub struct {} {{", decl.name);
+                for (f, c) in &cells {
+                    let _ = writeln!(out, "        pub {}: {c},", ident(&f.name));
+                }
+                out.push_str("    }
+
+");
+            }
+        }
+        out.push_str("}
+
+");
+        for decl in &decls {
+            let name = &decl.name;
+            let words = decl.words;
+            let value = format!("{}{name}", self.types_path);
+            let _ = writeln!(
+                out,
+                "// The mirror of `{name}` has exactly the Vesper layout.
+const _: () = {{
+    assert!(core::mem::size_of::<repr::{name}>() == {words} * 8);
+    assert!(core::mem::align_of::<repr::{name}>() == 8);"
+            );
+            for f in &decl.variants[0].fields {
+                let _ = writeln!(
+                    out,
+                    "    assert!(core::mem::offset_of!(repr::{name}, {}) == {} * 8);",
+                    ident(&f.name),
+                    f.offset
+                );
+            }
+            out.push_str("};
+
+");
+            let _ = writeln!(
+                out,
+                "// SAFETY: `repr::{name}` is `#[repr(C)]`, {words} words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::{name} {{
+    const WORDS: usize = {words};
+}}
+"
+            );
+            let _ = writeln!(
+                out,
+                "impl repr::{name} {{
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &{value}) -> Self {{
+        let mut words = [0u64; {words}];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }}
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> {value} {{
+        <{value} as Abi>::get(vesper_port_abi::mirror_words(self))
+    }}
+}}
+"
+            );
+        }
+    }
+
+    /// v3: the mirror cell of a field of type `ty`, with `path` the prefix
+    /// of the library's Rust types inside `mod repr`.
+    fn cell(&self, ty: &AbiType, path: &str) -> String {
+        match ty {
+            AbiType::Scalar { name }
+                if matches!(name.as_str(), "i64" | "u64" | "isize" | "usize" | "f64") =>
+            {
+                name.clone()
+            }
+            AbiType::Scalar { .. } => format!("vesper_port_abi::Word<{}>", rust_type(ty, path)),
+            AbiType::Named { name, .. } if self.interface.mirrored(ty) => name.clone(),
+            ty if self.words(ty) == 1 => {
+                format!("vesper_port_abi::Word<{}>", rust_type(ty, path))
+            }
+            ty => format!(
+                "vesper_port_abi::Words<{}, {}>",
+                rust_type(ty, path),
+                self.words(ty)
+            ),
+        }
+    }
+
     /// Methods of handle type `decl`: the functions named `<type>_<method>`
     /// that take the handle first, or return it without taking it.
     fn methods(&self, out: &mut String, decl: &TypeDecl) {
@@ -643,6 +839,9 @@ pub(super) fn generate(interface: &LibraryInterface, options: &BindingOptions) -
     );
     for decl in interface.types.values().filter(|d| d.handle) {
         g.handle_type(&mut out, decl);
+    }
+    if interface.is_v3() {
+        g.mirrors(&mut out);
     }
     // Compile-time cross-check of every copy boundary type's word count.
     let mut checked = BTreeSet::new();

@@ -70,6 +70,30 @@
 //! `.vsys` libraries, closures, region handles, strings, sequences of
 //! non-copy elements, and boxes outside a handle type.
 //!
+//! # ABI v3 (`vesper.native.export-abi/3`)
+//!
+//! A library whose source has the directive `// @export abi 3` is a v3
+//! library. The object is the v2 object; v3 changes what the Rust side
+//! passes. Every copy struct of the library gets a `#[repr(C)]` *mirror*
+//! (`repr::<Type>` in the binding, [`Mirror`]): its fields are the Vesper
+//! words in layout order, a plain `i64`/`u64`/`isize`/`usize`/`f64` for a
+//! full-word scalar, `vesper_port_abi::Word<T>` for a narrower scalar, a
+//! `bool`, `Unit` or a field-less enum (canonical word), a nested mirror for
+//! a nested copy struct, and `vesper_port_abi::Words<T, N>` (converted on
+//! access) for any other copy value. The binding asserts the mirror's size,
+//! alignment and every field offset at compile time.
+//!
+//! * An `in` or `inout` parameter of a mirrored struct is a pointer to the
+//!   caller's mirror (`&T`/`&mut T`), with no conversion and no scratch
+//!   copy. Vesper code never writes an `in` aggregate; a `sink` one gets a
+//!   copy of the mirror, as its storage may be reused.
+//! * `in`/`inout Slice[T]` of a mirrored struct is the view over the
+//!   caller's `&[T]`/`&mut [T]`, with no heap copy.
+//! * A mirrored struct result is written straight into a mirror.
+//! * Copy enums and tuples have no fixed Rust layout (payload validity,
+//!   tuple layout), so they keep the v2 conversion; the interface says so
+//!   ([`Mirror::Converted`]).
+//!
 //! The machine-readable [`LibraryInterface`] describes every symbol; the
 //! Rust binding generator ([`rust_binding`]) turns it into `extern "C"`
 //! declarations plus safe wrappers built on the `vesper-port-abi` crate.
@@ -92,6 +116,9 @@ pub use directives::{Directives, Instance, VsysImport};
 pub const EXPORT_ABI: &str = "vesper.native.export-abi/1";
 /// Version of a library that uses any v2 form.
 pub const EXPORT_ABI_V2: &str = "vesper.native.export-abi/2";
+/// Version of a library that opts into in-place mirrors
+/// (`// @export abi 3`).
+pub const EXPORT_ABI_V3: &str = "vesper.native.export-abi/3";
 
 /// Builtin types whose Rust counterparts live in `vesper-port-abi`, with
 /// the variant order that crate hard-codes.
@@ -227,6 +254,19 @@ pub struct TypeDecl {
     /// sequence yet).
     #[serde(default, skip_serializing_if = "is_false")]
     pub owns_sequence: bool,
+    /// v3: how a copy type is held on the Rust side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<Mirror>,
+}
+
+/// v3: the Rust storage of a copy type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Mirror {
+    /// A `#[repr(C)]` mirror in the Vesper layout, lent in place.
+    ReprC,
+    /// No fixed Rust layout matches; values are converted as in v2.
+    Converted { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -253,6 +293,10 @@ pub struct ExportParam {
     /// v2: `in`, `inout` or `sink`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass: Option<String>,
+    /// v3: the pointer is the caller's mirror storage (a mirrored struct,
+    /// or the elements of a slice of one), lent without a copy.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub in_place: bool,
 }
 
 impl ExportParam {
@@ -286,6 +330,9 @@ pub struct ExportedFunction {
     /// v2: the imported `.vsys` libraries the row names.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign: Vec<String>,
+    /// v3: the result is written straight into a mirror.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub result_in_place: bool,
 }
 
 /// v2: the runtime entry points every v2 library exports.
@@ -329,9 +376,20 @@ pub struct LibraryInterface {
 }
 
 impl LibraryInterface {
-    /// Whether the library uses export ABI v2.
+    /// Whether the library uses export ABI v2 or later (v3 objects are v2
+    /// objects).
     pub fn is_v2(&self) -> bool {
-        self.abi == EXPORT_ABI_V2
+        self.abi == EXPORT_ABI_V2 || self.is_v3()
+    }
+
+    /// Whether the library uses export ABI v3 (in-place mirrors).
+    pub fn is_v3(&self) -> bool {
+        self.abi == EXPORT_ABI_V3
+    }
+
+    /// Whether `ty` is a copy struct with a `#[repr(C)]` mirror.
+    pub fn mirrored(&self, ty: &AbiType) -> bool {
+        mirrored(ty, &self.types)
     }
 }
 
@@ -428,7 +486,21 @@ pub fn plan_with(
     if !errors.is_empty() {
         return Err(errors);
     }
-    let v2 = planner.v2 || !directives.vsys.is_empty() || !directives.instances.is_empty();
+    let v3 = directives.abi == Some(3);
+    let v2 = v3 || planner.v2 || !directives.vsys.is_empty() || !directives.instances.is_empty();
+    if v3 {
+        mark_mirrors(&mut planner.types);
+        for f in &mut functions {
+            for p in &mut f.params {
+                p.in_place = match (&p.ty, p.pass()) {
+                    (AbiType::Slice { elem }, _) => mirrored(elem, &planner.types),
+                    (ty, "in" | "inout") => mirrored(ty, &planner.types),
+                    _ => false,
+                };
+            }
+            f.result_in_place = mirrored(&f.result, &planner.types);
+        }
+    }
     if v2 {
         for f in &mut functions {
             for p in &mut f.params {
@@ -447,7 +519,14 @@ pub fn plan_with(
         })
         .collect();
     Ok(LibraryInterface {
-        abi: if v2 { EXPORT_ABI_V2 } else { EXPORT_ABI }.into(),
+        abi: if v3 {
+            EXPORT_ABI_V3
+        } else if v2 {
+            EXPORT_ABI_V2
+        } else {
+            EXPORT_ABI
+        }
+        .into(),
         library: library.into(),
         types: planner.types,
         functions,
@@ -533,6 +612,7 @@ impl Planner<'_> {
                 pointer: layout(self.world, &function, &p.ty)?.aggregate() || p.pass == Pass::Inout,
                 ty,
                 pass: (p.pass != Pass::In).then(|| pass_name(p.pass).into()),
+                in_place: false,
             });
         }
         let result = self.ty(&function, &f.result)?;
@@ -557,6 +637,7 @@ impl Planner<'_> {
             fail_record_words,
             instance_of,
             foreign,
+            result_in_place: false,
         })
     }
 
@@ -745,6 +826,7 @@ impl Planner<'_> {
                             drop_symbol: (handle && mode != Mode::Linear)
                                 .then(|| format!("vesper_{}_{n}_drop", self.library)),
                             owns_sequence: false,
+                            mirror: None,
                         },
                     );
                     let fields_of = |fields: &[crate::layout::LayoutField],
@@ -823,6 +905,31 @@ impl Planner<'_> {
             }
         }
     }
+}
+
+/// v3: give every copy type its Rust storage. Every copy struct with at
+/// least one field is mirrored (each field cell is one or more words);
+/// enums and empty structs are converted.
+fn mark_mirrors(types: &mut BTreeMap<String, TypeDecl>) {
+    for decl in types.values_mut().filter(|d| !d.handle) {
+        decl.mirror = Some(if decl.is_enum {
+            Mirror::Converted {
+                reason: "an enum's payload words have no fixed Rust layout (tag and payload validity), so it is converted as in v2".into(),
+            }
+        } else if decl.variants[0].fields.is_empty() {
+            Mirror::Converted {
+                reason: "a struct without fields is one ignored word".into(),
+            }
+        } else {
+            Mirror::ReprC
+        });
+    }
+}
+
+/// Whether `ty` is a copy struct with a `#[repr(C)]` mirror (v3).
+pub(crate) fn mirrored(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
+    matches!(ty, AbiType::Named { name, .. }
+        if types.get(name).is_some_and(|d| d.mirror == Some(Mirror::ReprC)))
 }
 
 fn holds_sequence(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
