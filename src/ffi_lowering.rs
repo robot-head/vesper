@@ -425,6 +425,36 @@ impl ForeignChecked {
     pub fn calls(&self) -> &[ForeignCall] {
         &self.calls
     }
+    /// Run `compile` (which emits native code for [`Self::world`]) with the
+    /// foreign-call plan in place, as [`Self::object`] does for one entry.
+    /// `vesper build --lib` uses it for libraries that import `.vsys`
+    /// surfaces (export ABI v2, `native::export`).
+    pub fn with_lowering<R>(
+        &self,
+        target: Option<&str>,
+        compile: impl FnOnce(&World) -> Result<R, String>,
+    ) -> Result<R, FfiError> {
+        let codegen = |m: String| FfiError::new(FfiErrorKind::Codegen, m, None);
+        let triple: target_lexicon::Triple = match target {
+            Some(t) => t
+                .parse()
+                .map_err(|e| codegen(format!("invalid target: {e}")))?,
+            None => target_lexicon::Triple::host(),
+        };
+        let mut plan = self.plan.clone();
+        for library in self.plan.libraries.values() {
+            if let Err(e) = target_support(library, &triple) {
+                plan.blocked.insert(library.name.clone(), e);
+            }
+        }
+        PLAN.with(|p| *p.borrow_mut() = Some(Rc::new(plan)));
+        let _guard = PlanGuard;
+        compile(&self.checked.world).map_err(|m| {
+            FAULT
+                .with(|f| f.borrow_mut().take())
+                .unwrap_or_else(|| codegen(m))
+        })
+    }
     /// Compile `entry` (exported under its own name) to an object for
     /// `target` (default: the host).
     pub fn object(&self, entry: &str, target: Option<&str>) -> Result<ForeignObject, FfiError> {
