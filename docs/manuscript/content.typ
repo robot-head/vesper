@@ -3326,6 +3326,16 @@ pub fn verify_wire_struct_layout(
 ```
 
 
+=== 16.6 Exporting Vesper Libraries (`vesper build --lib`)
+<ch-15-6>
+Bridge imports foreign code. The export direction lets Rust and C link compiled Vesper, which is how crates are ported one at a time (`docs/maintenance/porting-a-crate.md`). `vesper build --lib` emits one object in which every `pub fn` of the module is the C-ABI symbol `vesper_<library>_<fn>`, with the target's C calling convention. ABI `vesper.native.export-abi/1` fixes the rest:
+
+- *Values* are the eight-byte-word layouts of the native backend: a scalar is one word, products are their fields in order, enums are a tag word (the variant index) followed by the variant's fields. Scalars pass by value (`f64` as a double); aggregates pass as a pointer to a scratch copy of their words, and an aggregate result is written through a leading result pointer.
+- *`Fail[E1], ..., Fail[En]`* adds a trailing failure-record pointer. Its first word is the status: the caller stores 0; on return 0 means success and `k` means the `k`-th `Fail` of the row was raised, with the error value in the following words.
+- *Only `Fail` crosses the boundary.* Generic functions, `inout` parameters, every other effect (capabilities, `Ffi[Lib]`, user effects) and types without a fixed word layout (affine or linear data, strings, closures, region handles) are refused at export with a typed error naming the function. Sequences and strings join the ABI with their source types.
+
+A machine-readable interface file describes every symbol, and a generated Rust binding wraps each one so that the status word becomes `Result`.
+
 == 17. Vesper Nexus: WasmFX Sandboxes and Linear WIT Plugins
 <ch-16>
 #chapter-deck[Component-Model WasmFX Delimited Continuations, Substructural WIT Resource Capabilities, and Zero-Copy Host/Guest Views]
