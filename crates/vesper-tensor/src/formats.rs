@@ -17,10 +17,10 @@
 //!   448) and E5M2 is IEEE-like (bias 15, infinities and NaNs). Weight
 //!   matrices reject NaN and infinite codes.
 //!
-//! The Q4_K quantizer here is a simple min/max quantizer (documented on
-//! [`quantize_q4_k`]); it is not GGML's iterative `make_qkx2_quants`, but its
-//! output is a valid Q4_K block and dequantizes with GGML's rule. The MXFP4
-//! quantizer follows GGML / gguf-py's rule with an exact exponent.
+//! The Q4_K quantizer is a transliteration of llama.cpp's
+//! `quantize_row_q4_K_ref` and `make_qkx2_quants` ([`quantize_q4_k`]) and
+//! produces llama.cpp's bytes. The MXFP4 quantizer follows GGML / gguf-py's
+//! rule with an exact exponent.
 use crate::host::decode_fp16;
 use crate::quant::encode_fp16;
 use crate::Error;
@@ -74,76 +74,215 @@ pub fn check_q4_k_block(block: &[u8]) -> Result<(), Error> {
     }
 }
 
-/// Quantizes rows of 256-element super-blocks to Q4_K.
-///
-/// Per 32-element sub-block it takes `lo = min(0, min x)` and
-/// `hi = max x`, scale `(hi - lo) / 15` and offset `-lo`. The super-block
-/// `d` and `dmin` are the largest sub-block scale and offset divided by 63
-/// (rounded to binary16), the 6-bit codes are rounded to nearest, and each
-/// quant is `clamp(round((x + dmin*m) / (d*sc)), 0, 15)` using the decoded
-/// scales, so the reconstruction error is that of the stored parameters.
+/// GGML `nearest_int`: round to nearest, ties to even, by adding
+/// `1.5 * 2^23` in FP32 and reading the low mantissa bits. Exact for
+/// `|v| <= 4194303`; outside that range it returns the same (meaningless)
+/// bits as the C code, so callers keep GGML's behaviour bit for bit.
+#[inline]
+pub fn nearest_int(v: f32) -> i32 {
+    let bits = (v + 12_582_912.0f32).to_bits() as i32;
+    (bits & 0x007f_ffff) - 0x0040_0000
+}
+
+/// GGML `make_qkx2_quants` for `x.len()` elements with non-negative
+/// `weights`: an affine quantizer `x ≈ scale * L + min` with `L` in
+/// `0..=nmax`, refined over `nstep + 1` candidate inverse scales
+/// `(rmin + rdelta * is + nmax) / (max - min)` by weighted least squares.
+/// Returns `(scale, -min)` and writes `l`. Every operation is FP32 in the C
+/// source's order (no fused multiply-add), so the result is bit-identical to
+/// a GGML build without FP contraction.
+#[allow(clippy::too_many_arguments)]
+pub fn make_qkx2_quants(
+    nmax: i32,
+    x: &[f32],
+    weights: &[f32],
+    l: &mut [u8],
+    laux: &mut [u8],
+    rmin: f32,
+    rdelta: f32,
+    nstep: i32,
+    use_mad: bool,
+) -> (f32, f32) {
+    let n = x.len();
+    let mut min = x[0];
+    let mut max = x[0];
+    let mut sum_w = weights[0];
+    let mut sum_x = sum_w * x[0];
+    for i in 1..n {
+        if x[i] < min {
+            min = x[i];
+        }
+        if x[i] > max {
+            max = x[i];
+        }
+        let w = weights[i];
+        sum_w += w;
+        sum_x += w * x[i];
+    }
+    if min > 0.0 {
+        min = 0.0;
+    }
+    if max == min {
+        l[..n].fill(0);
+        return (0.0, -min);
+    }
+    let nmax_f = nmax as f32;
+    let mut iscale = nmax_f / (max - min);
+    let mut scale = 1.0 / iscale;
+    let err = |diff: f32| if use_mad { diff.abs() } else { diff * diff };
+    let mut best_error = 0.0f32;
+    for i in 0..n {
+        let q = nearest_int(iscale * (x[i] - min)).clamp(0, nmax);
+        l[i] = q as u8;
+        let diff = scale * f32::from(l[i]) + min - x[i];
+        best_error += weights[i] * err(diff);
+    }
+    if nstep < 1 {
+        return (scale, -min);
+    }
+    for is in 0..=nstep {
+        iscale = (rmin + rdelta * is as f32 + nmax_f) / (max - min);
+        let (mut sum_l, mut sum_l2, mut sum_xl) = (0.0f32, 0.0f32, 0.0f32);
+        for i in 0..n {
+            let q = nearest_int(iscale * (x[i] - min)).clamp(0, nmax);
+            laux[i] = q as u8;
+            let w = weights[i];
+            let lf = q as f32;
+            sum_l += w * lf;
+            sum_l2 += w * lf * lf;
+            sum_xl += w * lf * x[i];
+        }
+        let d = sum_w * sum_l2 - sum_l * sum_l;
+        if d > 0.0 {
+            let mut this_scale = (sum_w * sum_xl - sum_x * sum_l) / d;
+            let mut this_min = (sum_l2 * sum_x - sum_l * sum_xl) / d;
+            if this_min > 0.0 {
+                this_min = 0.0;
+                this_scale = sum_xl / sum_l2;
+            }
+            let mut cur_error = 0.0f32;
+            for i in 0..n {
+                let diff = this_scale * f32::from(laux[i]) + this_min - x[i];
+                cur_error += weights[i] * err(diff);
+            }
+            if cur_error < best_error {
+                l[..n].copy_from_slice(&laux[..n]);
+                best_error = cur_error;
+                scale = this_scale;
+                min = this_min;
+            }
+        }
+    }
+    (scale, -min)
+}
+
+/// Quantizes rows of 256-element super-blocks to Q4_K exactly as llama.cpp's
+/// `quantize_row_q4_K_ref` (the path `llama-quantize` takes without an
+/// importance matrix): per 32-element sub-block, weights
+/// `sqrt(mean(x^2)) + |x|` and [`make_qkx2_quants`]`(15, …, -1, 0.1, 20)`;
+/// 6-bit scale and minimum codes relative to the largest of each, `d` and
+/// `dmin` rounded to binary16, and the 4-bit quants recomputed from the
+/// stored parameters. The bytes equal llama.cpp's for the same FP32 input
+/// (checked against a llama.cpp-quantized GGUF in `tests/kquant_interop.rs`).
 pub fn quantize_q4_k(data: &[f32], cols: usize) -> Result<Vec<u8>, Error> {
     check_rows(data, cols, QK_K)?;
     let mut out = Vec::new();
     out.try_reserve_exact(data.len() / QK_K * Q4_K_BYTES)
         .map_err(|_| Error::Limit("allocation"))?;
-    for block in data.as_chunks::<QK_K>().0.iter() {
-        let mut scale = [0.0f32; 8];
-        let mut offset = [0.0f32; 8];
-        for (s, sub) in block.as_chunks::<32>().0.iter().enumerate() {
-            let lo = sub.iter().copied().fold(0.0f32, f32::min);
-            let hi = sub.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            scale[s] = (hi - lo) / 15.0;
-            offset[s] = -lo;
-        }
-        let max_scale = scale.iter().copied().fold(0.0f32, f32::max);
-        let max_offset = offset.iter().copied().fold(0.0f32, f32::max);
-        let d_bits = encode_fp16(max_scale / 63.0);
-        let dmin_bits = encode_fp16(max_offset / 63.0);
-        let (d, dmin) = (decode_fp16(d_bits), decode_fp16(dmin_bits));
-        if !(d.is_finite() && dmin.is_finite()) {
+    for x in data.as_chunks::<QK_K>().0.iter() {
+        let block = quantize_q4_k_block(x);
+        if !(half(&block, 0).is_finite() && half(&block, 2).is_finite()) {
             return Err(Error::Limit("Q4_K scale exceeds binary16"));
         }
-        let code = |v: f32, unit: f32| -> u8 {
-            if unit > 0.0 {
-                (v / unit).round().clamp(0.0, 63.0) as u8
-            } else {
-                0
-            }
-        };
-        let mut sc = [0u8; 8];
-        let mut mn = [0u8; 8];
-        for s in 0..8 {
-            sc[s] = code(scale[s], d);
-            mn[s] = code(offset[s], dmin);
-        }
-        let mut scales = [0u8; 12];
-        for j in 0..4 {
-            scales[j] = sc[j] | ((sc[j + 4] >> 4) << 6);
-            scales[j + 4] = mn[j] | ((mn[j + 4] >> 4) << 6);
-            scales[j + 8] = (sc[j + 4] & 0x0f) | ((mn[j + 4] & 0x0f) << 4);
-        }
-        let mut qs = [0u8; 128];
-        for (s, sub) in block.as_chunks::<32>().0.iter().enumerate() {
-            let (c, m) = q4_k_scale_min(s, &scales);
-            let unit = d * f32::from(c);
-            let bias = dmin * f32::from(m);
-            for (l, &v) in sub.iter().enumerate() {
-                let q = if unit > 0.0 {
-                    ((v + bias) / unit).round().clamp(0.0, 15.0) as u8
-                } else {
-                    0
-                };
-                let byte = &mut qs[32 * (s / 2) + l];
-                *byte |= if s % 2 == 0 { q } else { q << 4 };
-            }
-        }
-        out.extend_from_slice(&d_bits.to_le_bytes());
-        out.extend_from_slice(&dmin_bits.to_le_bytes());
-        out.extend_from_slice(&scales);
-        out.extend_from_slice(&qs);
+        out.extend_from_slice(&block);
     }
     Ok(out)
+}
+
+/// One llama.cpp `quantize_row_q4_K_ref` super-block.
+pub fn quantize_q4_k_block(x: &[f32; QK_K]) -> [u8; Q4_K_BYTES] {
+    let mut l = [0u8; QK_K];
+    let mut laux = [0u8; 32];
+    let mut weights = [0.0f32; 32];
+    let mut mins = [0.0f32; 8];
+    let mut scales = [0.0f32; 8];
+    let mut max_scale = 0.0f32;
+    let mut max_min = 0.0f32;
+    for j in 0..8 {
+        let sub = &x[32 * j..32 * j + 32];
+        let mut sum_x2 = 0.0f32;
+        for &v in sub {
+            sum_x2 += v * v;
+        }
+        let av_x = (sum_x2 / 32.0).sqrt();
+        for (w, &v) in weights.iter_mut().zip(sub) {
+            *w = av_x + v.abs();
+        }
+        let (scale, min) = make_qkx2_quants(
+            15,
+            sub,
+            &weights,
+            &mut l[32 * j..32 * j + 32],
+            &mut laux,
+            -1.0,
+            0.1,
+            20,
+            false,
+        );
+        scales[j] = scale;
+        mins[j] = min;
+        if scale > max_scale {
+            max_scale = scale;
+        }
+        if min > max_min {
+            max_min = min;
+        }
+    }
+    let inv_scale = if max_scale > 0.0 {
+        63.0 / max_scale
+    } else {
+        0.0
+    };
+    let inv_min = if max_min > 0.0 { 63.0 / max_min } else { 0.0 };
+    let mut packed = [0u8; 12];
+    for j in 0..8 {
+        // C: `uint8_t ls = nearest_int(...)` truncates modulo 256 first.
+        let ls = (nearest_int(inv_scale * scales[j]) as u8).min(63);
+        let lm = (nearest_int(inv_min * mins[j]) as u8).min(63);
+        if j < 4 {
+            packed[j] = ls;
+            packed[j + 4] = lm;
+        } else {
+            packed[j + 4] = (ls & 0x0f) | ((lm & 0x0f) << 4);
+            packed[j - 4] |= (ls >> 4) << 6;
+            packed[j] |= (lm >> 4) << 6;
+        }
+    }
+    let d_bits = encode_fp16(max_scale / 63.0);
+    let dmin_bits = encode_fp16(max_min / 63.0);
+    let (d_all, dmin_all) = (decode_fp16(d_bits), decode_fp16(dmin_bits));
+    for j in 0..8 {
+        let (sc, m) = q4_k_scale_min(j, &packed);
+        let d = d_all * f32::from(sc);
+        if d == 0.0 {
+            continue;
+        }
+        let dm = dmin_all * f32::from(m);
+        for ii in 0..32 {
+            let q = nearest_int((x[32 * j + ii] + dm) / d).clamp(0, 15);
+            l[32 * j + ii] = q as u8;
+        }
+    }
+    let mut block = [0u8; Q4_K_BYTES];
+    block[0..2].copy_from_slice(&d_bits.to_le_bytes());
+    block[2..4].copy_from_slice(&dmin_bits.to_le_bytes());
+    block[4..16].copy_from_slice(&packed);
+    for j in 0..4 {
+        for i in 0..32 {
+            block[16 + 32 * j + i] = l[64 * j + i] | (l[64 * j + 32 + i] << 4);
+        }
+    }
+    block
 }
 
 /// E2M1 code values, doubled (GGML `kvalues_mxfp4`).

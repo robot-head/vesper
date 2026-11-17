@@ -294,18 +294,29 @@ fn measure(root: &Path, work: &Path, target: &str, seed: &[u8]) -> Result<Stage1
     .map_err(|e| e.to_string())
 }
 
+const USAGE: &str =
+    "usage: stage1 ROOT WORK TARGET OUT [--record | --outcome] [--require-cross-backend]";
+
 fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.len() < 4 {
-        return Err(
-            "usage: stage1 ROOT WORK TARGET OUT [--record] [--require-cross-backend]".into(),
-        );
+        return Err(USAGE.into());
     }
-    if args[4..]
+    let flags = &args[4..];
+    if flags
         .iter()
-        .any(|s| s != "--record" && s != "--require-cross-backend")
+        .any(|s| s != "--record" && s != "--outcome" && s != "--require-cross-backend")
     {
-        return Err("unknown argument".into());
+        return Err(format!("unknown argument; {USAGE}"));
+    }
+    let flag = |name: &str| flags.iter().any(|s| s == name);
+    let (record, outcome, strict) = (
+        flag("--record"),
+        flag("--outcome"),
+        flag("--require-cross-backend"),
+    );
+    if record && outcome {
+        return Err(format!("--record and --outcome are exclusive; {USAGE}"));
     }
     let root = Path::new(&args[0]);
     let work = Path::new(&args[1]);
@@ -313,12 +324,16 @@ fn run() -> Result<(), String> {
     // This executable contains the root Rust compiler facade and is the seed
     // that actually performs this build. Do not hash an unrelated CLI binary.
     let seed = read(&std::env::current_exe().map_err(|e| e.to_string())?)?;
-    // Check retained artifacts before regeneration can overwrite them. A clean
-    // work directory is allowed; every rebuilt artifact is compared below.
-    let prior = if args.iter().any(|s| s == "--record") {
+    let prior = if record {
         None
     } else {
-        let prior = Stage1Lock::parse(&read(out)?).map_err(|e| e.to_string())?;
+        Some(Stage1Lock::parse(&read(out)?).map_err(|e| e.to_string())?)
+    };
+    // Exact mode: check retained artifacts before regeneration can overwrite
+    // them. A clean work directory is allowed; every rebuilt artifact is
+    // compared below. Outcome mode measures another commit's seed, so its
+    // artifacts are expected to differ and only the outcome is ratcheted.
+    if let Some(prior) = prior.as_ref().filter(|_| !outcome) {
         if prior.seed_binary != vesper_codegen_verified::stage1::digest(&seed) {
             return Err("DigestMismatch { field: seed_binary }".into());
         }
@@ -347,20 +362,38 @@ fn run() -> Result<(), String> {
                 }
             }
         }
-        Some(prior)
-    };
+    }
     let lock = measure(root, work, &args[2], &seed)?;
     let text = lock.to_toml().map_err(|e| e.to_string())?;
-    if prior.is_some_and(|prior| prior != lock) {
+    if outcome {
+        let report = prior
+            .as_ref()
+            .ok_or("outcome mode needs a reference lock")?
+            .compare_outcome(&lock)
+            .map_err(|e| e.to_string())?;
+        for program in &report.improved {
+            println!("improved: {program} now builds with the verified backend; re-record");
+        }
+        for field in &report.stale {
+            println!("stale: {field}");
+        }
+    } else if prior.is_some_and(|prior| prior != lock) {
         return Err("DigestMismatch { field: stage1 record }".into());
     }
-    if args.iter().any(|s| s == "--require-cross-backend") {
+    if strict {
         lock.require_cross_backend().map_err(|e| e.to_string())?;
     }
-    // Publish only after every available comparison and any requested strict gate.
-    std::fs::write(out, text).map_err(|e| e.to_string())?;
-    if let Err(e) = lock.require_cross_backend() {
-        println!("recorded Cranelift frontend evidence; cross-backend gate: {e}");
+    // Publish only after every available comparison and any requested strict
+    // gate. Outcome mode never replaces the reference lock.
+    let dest = if outcome {
+        work.join("stage1.fresh.lock")
+    } else {
+        out.to_path_buf()
+    };
+    std::fs::write(&dest, text).map_err(|e| e.to_string())?;
+    match lock.require_cross_backend() {
+        Ok(()) => println!("cross-backend gate: ok; wrote {}", dest.display()),
+        Err(e) => println!("cross-backend gate: {e}; wrote {}", dest.display()),
     }
     Ok(())
 }
@@ -410,10 +443,16 @@ mod tests {
             probe.verified,
             vesper_codegen_verified::stage1::VerifiedRecord::Built { .. }
         ));
-        assert!(matches!(
-            lock.require_cross_backend(),
-            Err(vesper_codegen_verified::stage1::Stage1Error::BackendUnavailable { .. })
-        ));
+        // Ratchet against the committed lock: backend work may turn a refusal
+        // into a verified build (reported, then re-recorded), but losing a
+        // recorded verified build or changing the corpus fails.
+        let committed =
+            Stage1Lock::parse(&std::fs::read(root.join("bootstrap/stage1.lock")).unwrap()).unwrap();
+        if committed.target == target {
+            let report = committed.compare_outcome(&lock).unwrap();
+            println!("stage1 outcome vs committed lock: {report:?}");
+        }
+        println!("cross-backend gate: {:?}", lock.require_cross_backend());
         std::fs::remove_dir_all(work).unwrap();
     }
 }

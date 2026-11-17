@@ -1,5 +1,7 @@
+use crate::format::Format;
 use crate::schedule::ScheduleError;
 use crate::shader::ShaderError;
+use crate::split::SplitError;
 use crate::translate::TranslateError;
 use ash::vk;
 use vesper_ignis::{PassId, QueueKind, ResourceRef};
@@ -72,6 +74,25 @@ pub enum VulkanError {
     Pending,
     /// A configured bound was exceeded.
     Limit(&'static str),
+    /// The device cannot use this format for a texture (copies plus a
+    /// color or depth/stencil attachment).
+    UnsupportedFormat(Format),
+    /// Split-barrier halves of a stream do not pair up.
+    Split(SplitError),
+    /// A device feature or extension the call needs is not available; the
+    /// string names it.
+    Unsupported(&'static str),
+    /// Under exclusive sharing, a resource owned by a queue family that has
+    /// no stream in this submission must be released there first.
+    OwnershipTransfer(ResourceRef),
+    /// A presentation-surface or window-system call failed; the string says
+    /// which.
+    Window(String),
+    /// The swapchain no longer matches its surface
+    /// (`VK_ERROR_OUT_OF_DATE_KHR`); recreate it.
+    OutOfDate,
+    /// An I/O error from the sync-fd path (export, bridging or polling).
+    Io(String),
 }
 
 impl VulkanError {
@@ -125,6 +146,15 @@ impl std::fmt::Display for VulkanError {
             Self::AllocatorFamily => f.write_str("allocator queue family does not match stream"),
             Self::Pending => f.write_str("submitted work may still be running"),
             Self::Limit(what) => write!(f, "limit exceeded: {what}"),
+            Self::UnsupportedFormat(fmt) => write!(f, "format {fmt:?} is not supported here"),
+            Self::Split(e) => e.fmt(f),
+            Self::Unsupported(what) => write!(f, "unsupported: {what}"),
+            Self::OwnershipTransfer(r) => {
+                write!(f, "{r:?} is owned by a queue family with no stream here")
+            }
+            Self::Window(what) => write!(f, "window system: {what}"),
+            Self::OutOfDate => f.write_str("swapchain out of date"),
+            Self::Io(what) => write!(f, "I/O: {what}"),
         }
     }
 }
@@ -138,6 +168,11 @@ impl From<TranslateError> for VulkanError {
 impl From<ScheduleError> for VulkanError {
     fn from(e: ScheduleError) -> Self {
         VulkanError::Schedule(e)
+    }
+}
+impl From<SplitError> for VulkanError {
+    fn from(e: SplitError) -> Self {
+        VulkanError::Split(e)
     }
 }
 impl From<ShaderError> for VulkanError {

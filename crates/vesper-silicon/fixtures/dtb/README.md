@@ -22,6 +22,7 @@
 | `qemu-riscv64-virt-aia-2socket.dtb` | The same two-socket command with `virt,aia=aplic-imsic` (one APLIC pair per socket, IMSIC group bits), compacted |
 | `sun20i-d1-nezha.dtb` | Allwinner D1 Nezha (T-Head C906 PLIC with two-cell edge/level specifiers), same Ubuntu package, `allwinner/` (`GPL-2.0 OR MIT`). Unmodified. |
 | `vesper-aia-edge.dts` / `.dtb` | Hand-written: a two-cell T-Head-style PLIC with edge and level sources, a second PLIC, an `interrupt-map-pass-thru` nexus, nested `dma-ranges` and a SiFive cache controller without the JH7100 flush; compiled with `dtc` 1.7.0 |
+| `vesper-aia-hyp.dts` / `.dtb` | Hand-written: H-extension harts whose M-level IMSIC files share their harts with the root APLIC's IDCs (and hart 1's with a PLIC context), so `eidelivery` supports 0x40000000; an S-level IMSIC with `riscv,guest-index-bits = 2`; PCI hosts with `msi-map`/`msi-map-mask` and `dma-ranges`, with `msi-parent` only, with neither, and with five malformed `msi-map`s; compiled with `dtc` 1.7.0 (its PCI and unit-name warnings are expected) |
 
 The `.dts` files next to the QEMU blobs are `dtc -I dtb -O dts` listings,
 kept only so a reader can see what the tests assert; the tests read the
@@ -51,6 +52,7 @@ afe0d68f2d601196ea686a2749ae66816c1751f863d8901a75afe8cfd0ef43d4  qemu-riscv64-v
 283674439d5e47a12f49bbc12c0f30989db8d5b6f692ec99a77ca43f81642238  qemu-riscv64-virt-aia-2socket.dtb
 828a3637480ed073543399da0a493d8c65e3c256bee9969a5cf8bba7ebcce709  sun20i-d1-nezha.dtb
 7a1d5241aeebba85b868bd26b4493656073242f8da26f0b76ea23e3e6abc7ae1  vesper-aia-edge.dtb
+77722a87b9771f34cdc1cb2d086f6db862d951093f200c7fdf23e1478f5f56f6  vesper-aia-hyp.dtb
 ```
 
 The full package SHA-256 is
@@ -60,9 +62,13 @@ The full package SHA-256 is
 
 `aia-probe.S` is a bare-metal M-mode op interpreter that `tests/aia_qemu.rs`
 runs on `qemu-system-riscv64 -machine virt,aia=... -smp 2 -m 256M -bios none`
-to read the APLIC/IMSIC state QEMU produces for the same operations the model
-runs. `aia-probe.elf` (SHA-256
-`f7d495ce6e7aa3e8a2de18c82e8411a0920ebd755fbf0a3053a70e99362116bd`) is built
+(the guest-file scenarios use `aia=aplic-imsic,aia-guests=2 -smp 4`, and the
+PCI one adds `-device edu`) to read the APLIC/IMSIC state QEMU produces for
+the same operations the model runs. Since wave nine it also drives the
+hypervisor CSRs (`hstatus`, `hgeie`, `hgeip`, `vsiselect`/`vsireg`,
+`vstopei`, `mip.SGEIP/VSEIP`) and records a trapping op as
+`0xfa17 << 48 | mcause`. `aia-probe.elf` (SHA-256
+`fcdd73633f441952c14d65e72ab91d266276ec6b768ef5d4389a8b8c0f04e3d5`) is built
 from it with clang 18 and ld.lld 18 as its header says. The test compares
 against recorded QEMU 8.2.2 output always, and against a live QEMU when
 `qemu-system-riscv64` is on `PATH` (or `VESPER_QEMU_RISCV64` names it;

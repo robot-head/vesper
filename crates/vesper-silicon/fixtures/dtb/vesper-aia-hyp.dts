@@ -1,0 +1,224 @@
+/*
+ * Hand-written for the wave-nine Silicon tests (describes no real board):
+ * two H-extension harts whose M-level IMSIC files also take the root
+ * APLIC's direct (IDC) outputs (hart 1's also a PLIC context), so
+ * eidelivery supports 0x40000000; an
+ * S-level IMSIC with three guest files per hart; and PCI host bridges with
+ * msi-map/msi-map-mask, msi-parent, dma-ranges and deliberately malformed
+ * msi-map properties.
+ */
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	compatible = "vesper,aia-hyp";
+	model = "Vesper AIA hypervisor/PCI MSI board";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <10000000>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "riscv";
+			riscv,isa = "rv64imafdch_smaia_ssaia";
+			cpu0_intc: interrupt-controller {
+				#interrupt-cells = <1>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+
+		cpu@1 {
+			device_type = "cpu";
+			reg = <1>;
+			compatible = "riscv";
+			riscv,isa = "rv64imafdch_smaia_ssaia";
+			cpu1_intc: interrupt-controller {
+				#interrupt-cells = <1>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x40000000>;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		imsic_m: interrupt-controller@24000000 {
+			compatible = "riscv,imsics";
+			reg = <0x0 0x24000000 0x0 0x2000>;
+			interrupts-extended = <&cpu0_intc 11>, <&cpu1_intc 11>;
+			riscv,num-ids = <255>;
+			interrupt-controller;
+			#interrupt-cells = <0>;
+			msi-controller;
+			#msi-cells = <0>;
+		};
+
+		imsic_s: interrupt-controller@28000000 {
+			compatible = "riscv,imsics";
+			reg = <0x0 0x28000000 0x0 0x8000>;
+			interrupts-extended = <&cpu0_intc 9>, <&cpu1_intc 9>;
+			riscv,num-ids = <127>;
+			riscv,guest-index-bits = <2>;
+			interrupt-controller;
+			#interrupt-cells = <0>;
+			msi-controller;
+			#msi-cells = <0>;
+		};
+
+		/* Both delivery modes: msi-parent and IDCs to the M-level files. */
+		aplic_m: interrupt-controller@c000000 {
+			compatible = "riscv,aplic";
+			reg = <0x0 0xc000000 0x0 0x8000>;
+			interrupts-extended = <&cpu0_intc 11>, <&cpu1_intc 11>;
+			msi-parent = <&imsic_m>;
+			riscv,num-sources = <32>;
+			riscv,children = <&aplic_s>;
+			riscv,delegation = <&aplic_s 1 16>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+		};
+
+		aplic_s: interrupt-controller@d000000 {
+			compatible = "riscv,aplic";
+			reg = <0x0 0xd000000 0x0 0x8000>;
+			msi-parent = <&imsic_s>;
+			riscv,num-sources = <32>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+		};
+
+		/* A PLIC context for hart 1's M level as well. */
+		plic: interrupt-controller@e000000 {
+			compatible = "sifive,plic-1.0.0";
+			reg = <0x0 0xe000000 0x0 0x400000>;
+			interrupts-extended = <&cpu1_intc 11>;
+			interrupt-controller;
+			#address-cells = <0>;
+			#interrupt-cells = <1>;
+			riscv,ndev = <8>;
+		};
+
+		gpio@10001000 {
+			compatible = "vesper,test-gpio";
+			reg = <0x0 0x10001000 0x0 0x100>;
+			interrupt-parent = <&plic>;
+			interrupts = <3>;
+		};
+
+		serial@10000000 {
+			compatible = "ns16550a";
+			reg = <0x0 0x10000000 0x0 0x100>;
+			interrupt-parent = <&aplic_s>;
+			interrupts = <10 4>;
+		};
+
+		/* Bus 0 to the S IMSIC (device IDs from 0x100); bus 1 to the M
+		 * IMSIC; bus numbers above 1 have no entry. The mask drops bit 15.
+		 * dma-ranges: bus 0xf000_0000 reaches the S IMSIC, bus 0 DRAM. */
+		pci@30000000 {
+			compatible = "pci-host-ecam-generic";
+			device_type = "pci";
+			reg = <0x0 0x30000000 0x0 0x1000000>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			bus-range = <0 0xff>;
+			ranges = <0x02000000 0x0 0x40000000 0x0 0x40000000 0x0 0x10000000>;
+			dma-ranges = <0x02000000 0x0 0x00000000 0x0 0x80000000 0x0 0x40000000>,
+				     <0x02000000 0x0 0xf0000000 0x0 0x28000000 0x0 0x00008000>;
+			msi-map = <0x0000 &imsic_s 0x100 0x100>,
+				  <0x0100 &imsic_m 0x0 0x100>;
+			msi-map-mask = <0x7fff>;
+		};
+
+		/* No msi-map: msi-parent takes requester IDs unchanged. */
+		pci@31000000 {
+			compatible = "pci-host-ecam-generic";
+			device_type = "pci";
+			reg = <0x0 0x31000000 0x0 0x1000000>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x02000000 0x0 0x50000000 0x0 0x50000000 0x0 0x1000000>;
+			msi-parent = <&imsic_s>;
+		};
+
+		/* Neither msi-map nor msi-parent anywhere above. */
+		pci@32000000 {
+			compatible = "pci-host-ecam-generic";
+			device_type = "pci";
+			reg = <0x0 0x32000000 0x0 0x1000000>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x02000000 0x0 0x51000000 0x0 0x51000000 0x0 0x1000000>;
+		};
+
+		/* bad-len */
+		pci@33000000 {
+			compatible = "pci-host-ecam-generic";
+			device_type = "pci";
+			reg = <0x0 0x33000000 0x0 0x1000000>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x02000000 0x0 0x52000000 0x0 0x52000000 0x0 0x1000000>;
+			msi-map = <0x0 &imsic_s 0x0>;
+		};
+
+		/* bad-mask */
+		pci@34000000 {
+			compatible = "pci-host-ecam-generic";
+			device_type = "pci";
+			reg = <0x0 0x34000000 0x0 0x1000000>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x02000000 0x0 0x53000000 0x0 0x53000000 0x0 0x1000000>;
+			msi-map = <0x100 &imsic_s 0x0 0x10>;
+			msi-map-mask = <0xff>;
+		};
+
+		/* bad-overflow */
+		pci@35000000 {
+			compatible = "pci-host-ecam-generic";
+			device_type = "pci";
+			reg = <0x0 0x35000000 0x0 0x1000000>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x02000000 0x0 0x54000000 0x0 0x54000000 0x0 0x1000000>;
+			msi-map = <0x0 &imsic_s 0xfffffff0 0x100>;
+		};
+
+		/* bad-phandle */
+		pci@36000000 {
+			compatible = "pci-host-ecam-generic";
+			device_type = "pci";
+			reg = <0x0 0x36000000 0x0 0x1000000>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x02000000 0x0 0x55000000 0x0 0x55000000 0x0 0x1000000>;
+			msi-map = <0x0 0x777 0x0 0x100>;
+		};
+
+		/* bad-empty */
+		pci@37000000 {
+			compatible = "pci-host-ecam-generic";
+			device_type = "pci";
+			reg = <0x0 0x37000000 0x0 0x1000000>;
+			#address-cells = <3>;
+			#size-cells = <2>;
+			ranges = <0x02000000 0x0 0x56000000 0x0 0x56000000 0x0 0x1000000>;
+			msi-map = <0x0 &imsic_s 0x0 0x0>;
+		};
+	};
+};

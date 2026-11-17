@@ -15,10 +15,12 @@
 //! bit-identical. `rmsnorm-prologue` factors the inverse RMS out of the dot
 //! product, `inv * sum(W[c] * (w[c] * x[c]))` instead of
 //! `sum(W[c] * (w[c] * (inv * x[c])))`; see [`rmsnorm_tolerance`].
-use crate::engine::{self, Extracted};
+use crate::engine::{self, Extracted, Node};
+use crate::witness::{RuleSet, Summary, Witness};
 use crate::{Error, MAX_ELEMENTS, MAX_NODES, next_owner, valid_name};
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 use vesper_tensor::quant::{Matrix, WeightFormat};
 
 /// The tensor rule set. `:cost` is the cost model: a node that writes a
@@ -60,6 +62,27 @@ pub const RULES: &str = r#"
 ; rmsnorm-prologue: the inverse RMS factors out of each row dot product.
 (rewrite (MatVec m (RmsNorm x w e)) (RmsMatVec m x w e))
 "#;
+
+/// Names of the rewrites of [`RULES`], in order (each has a lemma in
+/// [`crate::RULE_LEMMAS`]).
+pub const REWRITE_NAMES: &[&str] = &[
+    "ew-act",
+    "ew-add",
+    "ew-mul",
+    "ew-scale",
+    "ew-inline",
+    "matvec-epilogue",
+    "dequant-into-matmul",
+    "rmsnorm-prologue",
+];
+
+/// [`RULES`] parsed for the witness checker.
+pub fn rule_set() -> Result<&'static RuleSet, Error> {
+    static SET: OnceLock<Result<RuleSet, Error>> = OnceLock::new();
+    SET.get_or_init(|| RuleSet::parse(RULES, REWRITE_NAMES))
+        .as_ref()
+        .map_err(Clone::clone)
+}
 
 /// Elementwise activation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -498,13 +521,15 @@ impl TensorGraph {
         self.node(root)?;
         let r = root.index as usize;
         let bindings = self.bindings(r);
-        let before = engine::run(RULES, &bindings, &format!("t{r}"), false)?;
-        let term = engine::run(RULES, &bindings, &format!("t{r}"), true)?;
+        let fusion = engine::fuse(RULES, rule_set()?, &bindings, &format!("t{r}"))?;
         let fused = FusedTensor {
             decls: self.decls.clone(),
-            unfused_cost: before.cost,
+            unfused_cost: fusion.before.cost,
             unfused_kernels: self.kernels(root)?,
-            term,
+            term: fusion.term,
+            source: fusion.source,
+            witness: fusion.witness,
+            summary: fusion.summary,
         };
         // Reject a term outside the grammar now rather than at evaluation.
         fused.lengths()?;
@@ -724,9 +749,33 @@ pub struct FusedTensor {
     unfused_cost: u64,
     unfused_kernels: usize,
     term: Extracted,
+    source: (Vec<Node>, usize),
+    witness: Witness,
+    summary: Summary,
 }
 
 impl FusedTensor {
+    /// The rewrite witness from the input graph to the fused term; it was
+    /// checked by [`crate::witness::check`] before this value was returned.
+    pub fn witness(&self) -> &Witness {
+        &self.witness
+    }
+
+    /// What checking the witness established (steps and rules used).
+    pub fn witness_summary(&self) -> &Summary {
+        &self.summary
+    }
+
+    /// Checks `witness` against this fusion's source and fused terms.
+    pub fn check_witness(&self, witness: &Witness) -> Result<Summary, Error> {
+        crate::witness::check(
+            rule_set()?,
+            (&self.source.0, self.source.1),
+            (&self.term.nodes, self.term.root),
+            witness,
+        )
+    }
+
     /// The fused term as an s-expression.
     pub fn term(&self) -> &str {
         &self.term.text

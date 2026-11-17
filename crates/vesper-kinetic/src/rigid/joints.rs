@@ -22,6 +22,31 @@
 //!
 //! With `b == None` the joint attaches `a` to the static world: `anchor_b`
 //! and hinge `axis_b` are world coordinates.
+//!
+//! **Drives and joint friction** ([`RigidWorld::set_joint_drive`],
+//! [`RigidWorld::set_joint_friction`]) act on the free coordinate of a
+//! hinge (the angle of `b` relative to `a` about the axis, from the pose
+//! at [`RigidWorld::add_joint`]) or a prismatic joint (the offset of `b`'s
+//! anchor from `a`'s along the axis):
+//!
+//! * a position drive is one more compliant XPBD part in the position
+//!   pass, towards the target coordinate, with its accumulated `λ` bounded
+//!   by `max_force · h²` (a servo that cannot exceed its torque);
+//! * a velocity drive (a motor) and Coulomb joint friction act in the
+//!   velocity pass, after the contacts' and in the same colour order: the
+//!   motor's impulse moves the coordinate rate towards the target and is
+//!   bounded by `max_force · h`; friction then opposes the remaining rate
+//!   with an impulse bounded by `friction · h`;
+//! * static joint friction is positional, like the contacts' (Müller et al.
+//!   2020 §3.5): at the end of the joint's position part, the coordinate's
+//!   motion since the start of the substep is undone when the impulse that
+//!   takes is within `friction · h²`. Without it gravity would make a held
+//!   joint creep by `g h²` every substep. So a joint sticks while the load
+//!   stays below the friction torque (force) and slides with the friction
+//!   impulse of the velocity pass otherwise.
+//!
+//! A compliant position drive is an undamped XPBD spring (it oscillates
+//! about the target); a rigid one (`compliance = 0`) settles at once.
 
 use super::{
     IDENTITY, Q, RigidError, RigidWorld, State, V3, add, angular_weight, conj, cross, det, dot,
@@ -87,6 +112,24 @@ impl RigidJoint {
     }
 }
 
+/// A drive on a hinge's angle or a prismatic joint's offset.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum JointDrive {
+    /// Motor: drive the coordinate rate (rad/s or m/s) to `target`, with a
+    /// torque (force) of at most `max_force`.
+    Velocity { target: f32, max_force: f32 },
+    /// Servo: an XPBD constraint pulling the coordinate (rad or m) to
+    /// `target` with `compliance` (`0` is rigid), plus implicit viscous
+    /// `damping` of the coordinate rate (N·m·s/rad or N·s/m) in the velocity
+    /// pass, each with a torque (force) of at most `max_force`.
+    Position {
+        target: f32,
+        compliance: f32,
+        damping: f32,
+        max_force: f32,
+    },
+}
+
 /// A joint and its solver state.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct JointState {
@@ -104,13 +147,23 @@ pub(super) struct JointState {
     lambda_lim: f32,
     /// Positional λ of the last substep, for the constraint force.
     last_lambda: f32,
+    drive: Option<JointDrive>,
+    friction: f32,
+    lambda_drive: f32,
+    /// Free coordinate at the start of the substep (joints with friction).
+    coord_start: f32,
 }
 
 impl JointState {
+    pub(super) fn has_friction(&self) -> bool {
+        self.friction > 0.0
+    }
+
     pub(super) fn reset(&mut self) {
         self.lambda_pos = 0.0;
         self.lambda_ang = 0.0;
         self.lambda_lim = 0.0;
+        self.lambda_drive = 0.0;
     }
 }
 
@@ -172,6 +225,10 @@ impl RigidWorld {
             lambda_ang: 0.0,
             lambda_lim: 0.0,
             last_lambda: 0.0,
+            drive: None,
+            friction: 0.0,
+            lambda_drive: 0.0,
+            coord_start: 0.0,
         };
         let check_limits = |l: Option<[f32; 2]>, max: f32| {
             l.is_none_or(|[lo, hi]| {
@@ -259,6 +316,338 @@ impl RigidWorld {
             .map(|j| det::div(j.last_lambda, det::mul(h, h)))
     }
 
+    /// Set or clear the drive of hinge or prismatic joint `i`. A ball joint,
+    /// a non-finite target, a negative compliance or a `max_force` that is
+    /// not positive is [`RigidError::InvalidJoint`].
+    pub fn set_joint_drive(
+        &mut self,
+        i: usize,
+        drive: Option<JointDrive>,
+    ) -> Result<(), RigidError> {
+        let bad = |reason| RigidError::InvalidJoint { joint: i, reason };
+        let j = self.joints.get(i).ok_or(bad("no such joint"))?;
+        if drive.is_some() && matches!(j.joint.kind, JointKind::Ball) {
+            return Err(bad("drives need a hinge or prismatic joint"));
+        }
+        let ok = match drive {
+            None => true,
+            Some(JointDrive::Velocity { target, max_force }) => {
+                target.is_finite() && !max_force.is_nan() && max_force > 0.0
+            }
+            Some(JointDrive::Position {
+                target,
+                compliance,
+                damping,
+                max_force,
+            }) => {
+                target.is_finite()
+                    && compliance.is_finite()
+                    && compliance >= 0.0
+                    && damping.is_finite()
+                    && damping >= 0.0
+                    && !max_force.is_nan()
+                    && max_force > 0.0
+            }
+        };
+        if !ok {
+            return Err(bad(
+                "drive target must be finite, compliance and damping >= 0, max_force > 0",
+            ));
+        }
+        let (a, b) = (j.joint.a, j.joint.b);
+        self.joints[i].drive = drive;
+        self.wake(a as usize);
+        if let Some(b) = b {
+            self.wake(b as usize);
+        }
+        Ok(())
+    }
+
+    /// Set the Coulomb friction torque (hinge, N·m) or force (prismatic, N)
+    /// of joint `i`; `0` disables it.
+    pub fn set_joint_friction(&mut self, i: usize, friction: f32) -> Result<(), RigidError> {
+        let bad = |reason| RigidError::InvalidJoint { joint: i, reason };
+        let j = self.joints.get(i).ok_or(bad("no such joint"))?;
+        if friction != 0.0 && matches!(j.joint.kind, JointKind::Ball) {
+            return Err(bad("joint friction needs a hinge or prismatic joint"));
+        }
+        if !(friction.is_finite() && friction >= 0.0) {
+            return Err(bad("joint friction must be finite and >= 0"));
+        }
+        let (a, b) = (j.joint.a, j.joint.b);
+        self.joints[i].friction = friction;
+        // Less friction can release a load that was asleep on it.
+        self.wake(a as usize);
+        if let Some(b) = b {
+            self.wake(b as usize);
+        }
+        Ok(())
+    }
+
+    /// The drive of joint `i`.
+    pub fn joint_drive(&self, i: usize) -> Option<JointDrive> {
+        self.joints.get(i).and_then(|j| j.drive)
+    }
+
+    /// The free coordinate of hinge or prismatic joint `i`: the angle of
+    /// `b` relative to `a` about the axis (radians, in `[-π, π]`) or the
+    /// offset of `b`'s anchor from `a`'s along the axis (metres). `None`
+    /// for a ball joint or past the end.
+    pub fn joint_coordinate(&self, i: usize) -> Option<f32> {
+        let j = self.joints.get(i)?;
+        match j.joint.kind {
+            JointKind::Ball => None,
+            JointKind::Hinge { .. } => Some(self.hinge_angle(j).0),
+            JointKind::Prismatic { .. } => {
+                let (pa, _, pb, _) = self.joint_points(j);
+                let (_, qa) = self.pose(Some(j.joint.a));
+                Some(dot(sub(pb, pa), rotate(qa, j.axis_a)))
+            }
+        }
+    }
+
+    /// The rate of joint `i`'s free coordinate (rad/s or m/s).
+    pub fn joint_rate(&self, i: usize) -> Option<f32> {
+        let j = self.joints.get(i)?;
+        match j.joint.kind {
+            JointKind::Ball => None,
+            _ => Some(self.coordinate_rate(j).0),
+        }
+    }
+
+    /// The free coordinate of a hinge or prismatic joint (`0` for a ball).
+    fn coordinate(&self, j: &JointState) -> f32 {
+        match j.joint.kind {
+            JointKind::Ball => 0.0,
+            JointKind::Hinge { .. } => self.hinge_angle(j).0,
+            JointKind::Prismatic { .. } => {
+                let (pa, _, pb, _) = self.joint_points(j);
+                let (_, qa) = self.pose(Some(j.joint.a));
+                dot(sub(pb, pa), rotate(qa, j.axis_a))
+            }
+        }
+    }
+
+    /// Record the free coordinate of every joint with friction at the start
+    /// of a substep.
+    pub(super) fn record_joint_coordinates(&mut self) {
+        for k in 0..self.joints.len() {
+            if self.joints[k].friction > 0.0 {
+                let c = self.coordinate(&self.joints[k]);
+                self.joints[k].coord_start = c;
+            }
+        }
+    }
+
+    /// Positional static friction of joint `j`: undo the coordinate's motion
+    /// this substep if that takes an impulse within `friction · h²`.
+    fn static_joint_friction(&mut self, j: &JointState, h2: f32) -> bool {
+        let (a, b) = (j.joint.a, j.joint.b);
+        let bound = det::mul(j.friction, h2);
+        match j.joint.kind {
+            JointKind::Ball => false,
+            JointKind::Hinge { .. } => {
+                let (phi, axis, ua, ub) = self.hinge_angle(j);
+                let mut delta = det::sub(phi, j.coord_start);
+                let pi = std::f32::consts::PI;
+                if delta > pi {
+                    delta = det::sub(delta, 2.0 * pi);
+                } else if delta < -pi {
+                    delta = det::add(delta, 2.0 * pi);
+                }
+                if delta == 0.0 {
+                    return false;
+                }
+                let mut w = angular_weight(&self.bodies[a as usize], axis);
+                if let Some(sb) = self.body_or_none(b) {
+                    w = det::add(w, angular_weight(sb, axis));
+                }
+                if !(w > 0.0) || det::div(delta.abs(), w) > bound {
+                    return false;
+                }
+                let goal = add(
+                    scale(ua, fastmath::cosf(j.coord_start)),
+                    scale(cross(axis, ua), fastmath::sinf(j.coord_start)),
+                );
+                let mut lambda = 0.0;
+                self.bounded_angular_part((a, b), cross(goal, ub), 0.0, f32::INFINITY, &mut lambda);
+                true
+            }
+            JointKind::Prismatic { .. } => {
+                let (pa, ra, pb, rb) = self.joint_points(j);
+                let ra = if b.is_some() {
+                    add(ra, sub(pb, pa))
+                } else {
+                    ra
+                };
+                let (_, qa) = self.pose(Some(a));
+                let axis = rotate(qa, j.axis_a);
+                let delta = det::sub(dot(sub(pb, pa), axis), j.coord_start);
+                if delta == 0.0 {
+                    return false;
+                }
+                let sa = &self.bodies[a as usize];
+                let mut w = det::add(sa.inv_mass, angular_weight(sa, cross(ra, axis)));
+                if let Some(sb) = self.body_or_none(b) {
+                    w = det::add(
+                        w,
+                        det::add(sb.inv_mass, angular_weight(sb, cross(rb, axis))),
+                    );
+                }
+                if !(w > 0.0) || det::div(delta.abs(), w) > bound {
+                    return false;
+                }
+                let mut lambda = 0.0;
+                self.bounded_positional_part(
+                    (a, b),
+                    (ra, rb),
+                    (axis, delta),
+                    0.0,
+                    f32::INFINITY,
+                    &mut lambda,
+                );
+                true
+            }
+        }
+    }
+
+    /// Hinge angle and the world vectors it is measured with: `(φ, axis,
+    /// u_a, u_b)`.
+    fn hinge_angle(&self, j: &JointState) -> (f32, V3, V3, V3) {
+        let (_, qa) = self.pose(Some(j.joint.a));
+        let (_, qb) = self.pose(j.joint.b);
+        let axis = rotate(qa, j.axis_a);
+        let ua = rotate(qa, j.ref_a);
+        let ub = rotate(qb, j.ref_b);
+        let sin = dot(cross(ua, ub), axis);
+        let cos = dot(ua, ub);
+        (fastmath::atan2f(sin, cos), axis, ua, ub)
+    }
+
+    /// Rate of the free coordinate, the world axis, and the arms (zero for
+    /// a hinge).
+    fn coordinate_rate(&self, j: &JointState) -> (f32, V3, V3, V3) {
+        let (_, qa) = self.pose(Some(j.joint.a));
+        let axis = rotate(qa, j.axis_a);
+        let sa = &self.bodies[j.joint.a as usize];
+        let sb = self.body_or_none(j.joint.b);
+        match j.joint.kind {
+            JointKind::Prismatic { .. } => {
+                let (pa, ra, pb, rb) = self.joint_points(j);
+                // a's material point at b's anchor (see the slide part).
+                let ra = if j.joint.b.is_some() {
+                    add(ra, sub(pb, pa))
+                } else {
+                    ra
+                };
+                let va = add(sa.v, cross(sa.w, ra));
+                let vb = sb.map_or([0.0; 3], |sb| add(sb.v, cross(sb.w, rb)));
+                (dot(sub(vb, va), axis), axis, ra, rb)
+            }
+            _ => {
+                let wb = sb.map_or([0.0; 3], |sb| sb.w);
+                (dot(sub(wb, sa.w), axis), axis, [0.0; 3], [0.0; 3])
+            }
+        }
+    }
+
+    /// Velocity pass of joint `k`: the motor, then Coulomb friction.
+    pub(super) fn joint_velocity(&mut self, k: usize, h: f32) {
+        let j = self.joints[k];
+        // (target rate, implicit damping, bound); a velocity motor is
+        // infinitely stiff in rate.
+        let motor = match j.drive {
+            Some(JointDrive::Velocity { target, max_force }) => Some((target, None, max_force)),
+            Some(JointDrive::Position {
+                damping, max_force, ..
+            }) if damping > 0.0 => Some((0.0, Some(damping), max_force)),
+            _ => None,
+        };
+        if motor.is_none() && j.friction == 0.0 {
+            return;
+        }
+        let (a, b) = (j.joint.a, j.joint.b);
+        if self.sleep.is_some() && !self.live(a, b) {
+            return;
+        }
+        let prismatic = matches!(j.joint.kind, JointKind::Prismatic { .. });
+        let (rate, axis, ra, rb) = self.coordinate_rate(&j);
+        // Generalized inverse mass of the coordinate.
+        let sa = &self.bodies[a as usize];
+        let mut w = if prismatic {
+            det::add(sa.inv_mass, angular_weight(sa, cross(ra, axis)))
+        } else {
+            angular_weight(sa, axis)
+        };
+        if let Some(sb) = self.body_or_none(b) {
+            w = det::add(
+                w,
+                if prismatic {
+                    det::add(sb.inv_mass, angular_weight(sb, cross(rb, axis)))
+                } else {
+                    angular_weight(sb, axis)
+                },
+            );
+        }
+        if !(w > 0.0) {
+            return;
+        }
+        let mut rate = rate;
+        if let Some((target, damping, max_force)) = motor {
+            let bound = det::mul(max_force, h);
+            let mut want = det::div(det::sub(target, rate), w);
+            if let Some(c) = damping {
+                // Backward Euler: Δ = −c h q̇' with q̇' = q̇ + w Δ.
+                let chw = det::mul(det::mul(c, h), w);
+                want = det::mul(want, det::div(chw, det::add(1.0, chw)));
+            }
+            let imp = det::max(det::neg(bound), if want < bound { want } else { bound });
+            self.coordinate_impulse((a, b), prismatic, axis, (ra, rb), imp);
+            rate = self.coordinate_rate(&j).0;
+        }
+        if j.friction > 0.0 && rate != 0.0 {
+            let bound = det::mul(j.friction, h);
+            let stop = det::div(rate.abs(), w);
+            let mag = if stop < bound { stop } else { bound };
+            let imp = if rate > 0.0 { det::neg(mag) } else { mag };
+            self.coordinate_impulse((a, b), prismatic, axis, (ra, rb), imp);
+        }
+    }
+
+    /// Velocity impulse `imp` on the free coordinate: `+imp` along the axis
+    /// on `b` and `−imp` on `a` (angular for a hinge, linear at the anchors
+    /// for a prismatic joint).
+    fn coordinate_impulse(
+        &mut self,
+        (a, b): (u32, Option<u32>),
+        prismatic: bool,
+        axis: V3,
+        (ra, rb): (V3, V3),
+        imp: f32,
+    ) {
+        let p = scale(axis, imp);
+        let sa = &mut self.bodies[a as usize];
+        if sa.inv_mass > 0.0 {
+            if prismatic {
+                sa.v = sub(sa.v, scale(p, sa.inv_mass));
+                sa.w = sub(sa.w, super::inv_inertia_world(sa, cross(ra, p)));
+            } else {
+                sa.w = sub(sa.w, super::inv_inertia_world(sa, p));
+            }
+        }
+        if let Some(b) = b {
+            let sb = &mut self.bodies[b as usize];
+            if sb.inv_mass > 0.0 {
+                if prismatic {
+                    sb.v = add(sb.v, scale(p, sb.inv_mass));
+                    sb.w = add(sb.w, super::inv_inertia_world(sb, cross(rb, p)));
+                } else {
+                    sb.w = add(sb.w, super::inv_inertia_world(sb, p));
+                }
+            }
+        }
+    }
+
     /// World anchors and arms of a joint.
     fn joint_points(&self, j: &JointState) -> (V3, V3, V3, V3) {
         let sa = &self.bodies[j.joint.a as usize];
@@ -325,6 +714,71 @@ impl RigidWorld {
         let dl = det::div(det::sub(theta, det::mul(alpha, *lambda)), denom);
         *lambda = det::add(*lambda, dl);
         self.apply_rotation_to(a, b, scale(n, dl));
+    }
+
+    /// [`RigidWorld::angular_part`] with the accumulated `|λ|` bounded.
+    fn bounded_angular_part(
+        &mut self,
+        (a, b): (u32, Option<u32>),
+        dq: V3,
+        alpha: f32,
+        bound: f32,
+        lambda: &mut f32,
+    ) {
+        let theta = length(dq);
+        if !(theta > 0.0) {
+            return;
+        }
+        let n = scale(dq, det::div(1.0, theta));
+        let mut w = angular_weight(&self.bodies[a as usize], n);
+        if let Some(sb) = self.body_or_none(b) {
+            w = det::add(w, angular_weight(sb, n));
+        }
+        let denom = det::add(w, alpha);
+        if !(denom > 0.0) {
+            return;
+        }
+        let dl = det::div(det::sub(theta, det::mul(alpha, *lambda)), denom);
+        let total = det::add(*lambda, dl);
+        let clamped = det::max(det::neg(bound), if total < bound { total } else { bound });
+        let dl = det::sub(clamped, *lambda);
+        *lambda = clamped;
+        self.apply_rotation_to(a, b, scale(n, dl));
+    }
+
+    /// A positional part along the unit `axis` with signed violation `c`
+    /// (`b`'s anchor is `c` too far along the axis), its accumulated `λ`
+    /// bounded by `±bound`.
+    fn bounded_positional_part(
+        &mut self,
+        (a, b): (u32, Option<u32>),
+        (ra, rb): (V3, V3),
+        (axis, c): (V3, f32),
+        alpha: f32,
+        bound: f32,
+        lambda: &mut f32,
+    ) {
+        if c == 0.0 {
+            return;
+        }
+        let sa = &self.bodies[a as usize];
+        let mut w = det::add(sa.inv_mass, angular_weight(sa, cross(ra, axis)));
+        if let Some(sb) = self.body_or_none(b) {
+            w = det::add(
+                w,
+                det::add(sb.inv_mass, angular_weight(sb, cross(rb, axis))),
+            );
+        }
+        let denom = det::add(w, alpha);
+        if !(denom > 0.0) {
+            return;
+        }
+        let dl = det::div(det::sub(c, det::mul(alpha, *lambda)), denom);
+        let total = det::add(*lambda, dl);
+        let clamped = det::max(det::neg(bound), if total < bound { total } else { bound });
+        let dl = det::sub(clamped, *lambda);
+        *lambda = clamped;
+        self.apply_positional_to(a, b, ra, rb, scale(axis, dl));
     }
 
     /// Project joint `k` once (one substep of length `h`).
@@ -395,6 +849,60 @@ impl RigidWorld {
                 j.lambda_ang = lambda;
             }
         }
+        if let Some(JointDrive::Position {
+            target,
+            compliance,
+            max_force,
+            ..
+        }) = j.drive
+        {
+            let alpha_d = det::div(compliance, h2);
+            let bound = det::mul(max_force, h2);
+            match j.joint.kind {
+                JointKind::Hinge { .. } => {
+                    let (phi, axis, ua, ub) = self.hinge_angle(&j);
+                    if phi != target {
+                        let goal = add(
+                            scale(ua, fastmath::cosf(target)),
+                            scale(cross(axis, ua), fastmath::sinf(target)),
+                        );
+                        let mut lambda = j.lambda_drive;
+                        self.bounded_angular_part(
+                            (a, b),
+                            cross(goal, ub),
+                            alpha_d,
+                            bound,
+                            &mut lambda,
+                        );
+                        j.lambda_drive = lambda;
+                    }
+                }
+                JointKind::Prismatic { .. } => {
+                    let (pa, ra, pb, rb) = self.joint_points(&j);
+                    // Both impulses at b's anchor between two bodies, as
+                    // for the slide itself below.
+                    let ra = if b.is_some() {
+                        add(ra, sub(pb, pa))
+                    } else {
+                        ra
+                    };
+                    let (_, qa) = self.pose(Some(a));
+                    let axis = rotate(qa, j.axis_a);
+                    let s = dot(sub(pb, pa), axis);
+                    let mut lambda = j.lambda_drive;
+                    self.bounded_positional_part(
+                        (a, b),
+                        (ra, rb),
+                        (axis, det::sub(s, target)),
+                        alpha_d,
+                        bound,
+                        &mut lambda,
+                    );
+                    j.lambda_drive = lambda;
+                }
+                JointKind::Ball => {}
+            }
+        }
         let (pa, mut ra, pb, rb) = self.joint_points(&j);
         let d = sub(pb, pa);
         if let (JointKind::Prismatic { .. }, Some(_)) = (j.joint.kind, b) {
@@ -434,6 +942,22 @@ impl RigidWorld {
         self.positional_part((a, b), (ra, rb), delta, alpha, &mut lambda);
         j.lambda_pos = lambda;
         j.last_lambda = lambda;
+        // The hinge undo turns the bodies about their centres of mass, and
+        // pinning the anchors again turns them back a little: two rounds
+        // leave a residual creep (2.4e-3 rad in 1 s for the held rod of
+        // tests/joint_drives.rs, against 2e-2 rad without the rounds).
+        for _ in 0..2 {
+            if !(j.friction > 0.0 && self.static_joint_friction(&j, h2)) {
+                break;
+            }
+            if !matches!(j.joint.kind, JointKind::Hinge { .. }) {
+                break;
+            }
+            let (pa, ra, pb, rb) = self.joint_points(&j);
+            let mut lambda = j.lambda_pos;
+            self.positional_part((a, b), (ra, rb), sub(pb, pa), alpha, &mut lambda);
+            j.lambda_pos = lambda;
+        }
         self.joints[k] = j;
     }
 }

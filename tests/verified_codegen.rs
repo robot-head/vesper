@@ -547,6 +547,13 @@ fn dynamic_tuple_indexing() {
         ),
         "div0"
     );
+    // A handled out-of-range index is `RuntimeError::IndexOutOfBounds`.
+    assert_eq!(
+        differential(&format!(
+            "{table}\nfn caught(i: i64) -> i64 {{ handle Fail[RuntimeError] in {{ t(i) }} with {{ return v => v, raise(e, r) => match e {{ RuntimeError::IndexOutOfBounds => -1, _ => -2, }}, }} }}\nfn main() -> (i64, i64, i64) {{ (caught(3), caught(5), caught(-1)) }}"
+        )),
+        "(17, -1, -1)"
+    );
 }
 
 #[test]
@@ -681,4 +688,101 @@ fn tail_self_calls_are_loops() {
             assert_eq!(render(&w, &execute(&artifact, &prefix)), "30000007");
         }
     }
+}
+
+// --- Milestone 7 (abort-only `Fail[E]`) ---
+
+/// `?`, `Fail::raise` and non-resuming `handle Fail[E]` agree with the
+/// evaluator and Cranelift on every target, including implicit
+/// `ArithOverflow` and division by zero caught by handlers and `inout`
+/// writes made before a failure.
+#[test]
+fn fail_effects_agree_with_the_evaluator_and_cranelift() {
+    for (name, expected) in [
+        ("fail_try.ves", "(1012, -3, -7, 700100)"),
+        ("fail_implicit.ves", "(210, 0, 1000000001, 7, 42, -2, -99)"),
+    ] {
+        assert_eq!(differential(&fixture(name)), expected, "{name}");
+    }
+}
+
+/// A user error type that can reach the entry has no process abort to map
+/// to; only `ArithOverflow` and `RuntimeError` abort. Non-`Fail` handlers
+/// stay refused.
+#[test]
+fn unhandled_user_failures_at_the_entry_are_typed_errors() {
+    rejects(
+        "copy enum E { A } fn main() -> i64 eff [Fail[E]] { let r: Result[i64, E] = Err(E::A); r? }",
+        Unsupported::Effect,
+    );
+    rejects(
+        "copy enum E { A } fn f() -> i64 eff [Fail[E]] { Fail::raise(E::A) } fn main() -> i64 eff [Fail[E]] { f() }",
+        Unsupported::Effect,
+    );
+    // The entry aborts rather than returning a status, so it may not be
+    // called (here under a handler) when it can fail.
+    rejects(
+        "fn main() -> u8 eff [Fail[ArithOverflow]] { let x: u8 = 200; let y = x + x; if y == 0 { handle Fail[ArithOverflow] in { main() } with { return v => v, raise(_, _) => 1, } } else { y } }",
+        Unsupported::Effect,
+    );
+    // Handled, the same program compiles.
+    let w = world(
+        "copy enum E { A } fn f() -> i64 eff [Fail[E]] { Fail::raise(E::A) } fn main() -> i64 { handle Fail[E] in { f() } with { return v => v, raise(_, _) => 3, } }",
+    );
+    vc::compile(&w, "main", &Options::new(Target::X86_64_LINUX)).unwrap();
+}
+
+/// A raise clause that names its continuation but leaves it unused is
+/// non-resuming even when it holds a nested handler (whose IR alias map lists
+/// every name in scope). Capturing the continuation there is a checker
+/// error (E0404), so the checker already refuses that case.
+#[test]
+fn nested_handlers_in_raise_clauses_capture_only_their_free_names() {
+    differential(
+        "copy enum E { A } copy enum G { B } fn f() -> i64 eff [Fail[E]] { Fail::raise(E::A) } fn g() -> i64 eff [Fail[G]] { Fail::raise(G::B) } fn main() -> i64 { handle Fail[E] in { f() } with { return v => v, raise(_, k) => handle Fail[G] in { g() } with { return w => w, raise(_, j) => 5, }, } }",
+    );
+}
+
+/// Programs without handlers compile as before: no trap scope and no status
+/// word. A function that passes a caught implicit failure on sets a scope
+/// after its prologue and restores the default at its end.
+#[test]
+fn trap_scopes_only_where_implicit_failures_are_caught() {
+    let scoped = |source: &str| {
+        let w = world(source);
+        let a = vc::compile(&w, "main", &Options::new(Target::X86_64_LINUX)).unwrap();
+        a.lir
+            .into_iter()
+            .filter(|(_, rows)| rows.iter().any(|r| matches!(r, vc::Lir::Scope { .. })))
+            .map(|(n, _)| n)
+            .collect::<Vec<_>>()
+    };
+    for name in [
+        "overflow.ves",
+        "divide.ves",
+        "fibonacci.ves",
+        "fail_try.ves",
+    ] {
+        assert!(scoped(&fixture(name)).is_empty(), "{name}");
+    }
+    let names = scoped(&fixture("fail_implicit.ves"));
+    for f in ["bump", "divide"] {
+        assert!(names.iter().any(|n| n == f), "{f} in {names:?}");
+    }
+    let w = world(&fixture("fail_implicit.ves"));
+    let a = vc::compile(&w, "main", &Options::new(Target::X86_64_LINUX)).unwrap();
+    let (_, bump) = a.lir.iter().find(|(n, _)| n == "bump").unwrap();
+    let scopes: Vec<_> = bump
+        .iter()
+        .filter_map(|r| match r {
+            vc::Lir::Scope { ovf, div0 } => Some((*ovf, *div0)),
+            _ => None,
+        })
+        .collect();
+    let ovf = vc::TrapKind::Overflow.label();
+    let div0 = vc::TrapKind::DivisionByZero.label();
+    assert_eq!(scopes.len(), 2, "{bump:?}");
+    assert!(scopes[0].0 != ovf && scopes[0].1 == div0);
+    assert_eq!(scopes[1], (ovf, div0));
+    assert!(matches!(bump.last(), Some(vc::Lir::Scope { .. })));
 }

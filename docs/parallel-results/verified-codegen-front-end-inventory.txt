@@ -1,376 +1,195 @@
 == stage1 ==
-functions: 141
-without own refusal: 49
-compiling with all callees: 28
-refusals: 96
-  Effect: 96
+functions: 159
+without own refusal: 157
+compiling with all callees: 153
+refusals: 2
+  Effect: 2
 by detail:
-    89 Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-     4 Effect: `?`
-     3 Effect: effect handlers
+     2 Effect: handler for Region (only Fail handlers)
 
-advance:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: next_sig
-args:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expr, pass
-arms:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, eat, expect, expr, fail_p, nth, pattern
-at:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-at_end:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-at_literal:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-at_region:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_word, nth
-at_trait_or_model:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_word
-at_word:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: nth, text_is
+$handler_body_45657_45885:
+  calls refused: $handler_body_45688_45781
+$handler_body_45688_45781:
+  Effect: handler for Region (only Fail handlers)
+$handler_body_46048_46279:
+  calls refused: $handler_body_46079_46175
+$handler_body_46079_46175:
+  Effect: handler for Region (only Fail handlers)
+$handler_body_46753_46849: ok, 41 rows
+$handler_body_46784_46804: ok, 35 rows
+$handler_clause_45817_45822: ok, 7 rows
+$handler_clause_45856_45868: ok, 33 rows
+$handler_clause_45917_45922: ok, 7 rows
+$handler_clause_45959_45978: ok, 18 rows
+$handler_clause_46211_46216: ok, 7 rows
+$handler_clause_46250_46262: ok, 33 rows
+$handler_clause_46311_46316: ok, 7 rows
+$handler_clause_46353_46372: ok, 18 rows
+$handler_clause_46824_46825: ok, 7 rows
+$handler_clause_46842_46844: ok, 7 rows
+$handler_clause_46869_46870: ok, 7 rows
+$handler_clause_46887_46889: ok, 6 rows
+advance: ok, 66 rows
+args: ok, 347 rows
+arms: ok, 502 rows
+at: ok, 37 rows
+at_end: ok, 51 rows
+at_literal: ok, 89 rows
+at_region: ok, 180 rows
+at_trait_or_model: ok, 111 rows
+at_word: ok, 79 rows
 ate: ok, 26 rows
-binary:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: binary_rest, bump, enter, postfix, primary
-binary_rest:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: binary, bump, enter, expr
-block:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, expect, statements
-bump:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: advance, fail_p
-check_escapes:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, source_byte
-clauses:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expect, expr, lower, pattern_list
-close: ok, 50 rows
-closure:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, effects, expect, expr, mode, params, ty
-compare_max:
-  calls refused: source_byte
-diag_code: ok, 92 rows
+binary: ok, 468 rows
+binary_rest: ok, 334 rows
+block: ok, 222 rows
+bump: ok, 134 rows
+check_escapes: ok, 211 rows
+clauses: ok, 385 rows
+close: ok, 86 rows
+closure: ok, 721 rows
+compare_max: ok, 106 rows
+diag_code: ok, 145 rows
 digest: ok, 22 rows
-digit_count:
-  calls refused: source_byte
-dimension:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: dimension_factor, eat
-dimension_factor:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, bump, ty
-dimensions:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, dimension, dimension_factor, eat
-eat:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, bump
-effect_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, eat, expect, lower, nth, type_args, upper
-effects:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, effect_list, expect
-encode: ok, 14 rows
-enter:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_p
-expect:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: advance, fail_p
-exponent_end:
-  calls refused: scan_digits, source_byte
-expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, expr_inner
-expr_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_region, binary, closure, handle_expr, if_expr, match_expr, region_expr
-fail_i:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-fail_lexer:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-fail_p:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-fail_tok:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-field_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expect, lower, required_mode, ty
-field_patterns:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, lower, pattern
-field_values:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expr, lower
-fields:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: expect, field_list
-first_significant:
-  calls refused: source_byte
-function:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_word, block, bump, effects, expect, generics, lower, params, ty, where_clauses
-functions:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, function
-generic_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, at_word, bump, eat, expect, fail_p, ident, nth, required_mode, trait_ref
-generics:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, expect, generic_list
-handle_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, block, clauses, eat, expect, expr, lower, pattern, type_args, upper
+digit_count: ok, 84 rows
+dimension: ok, 205 rows
+dimension_factor: ok, 231 rows
+dimensions: ok, 347 rows
+eat: ok, 130 rows
+effect_list: ok, 825 rows
+effects: ok, 277 rows
+encode: ok, 22 rows
+enter: ok, 111 rows
+expect: ok, 135 rows
+exponent_end: ok, 139 rows
+expr: ok, 212 rows
+expr_inner: ok, 501 rows
+fail_i: ok, 36 rows
+fail_lexer: ok, 45 rows
+fail_p: ok, 70 rows
+fail_tok: ok, 40 rows
+field_list: ok, 561 rows
+field_patterns: ok, 491 rows
+field_values: ok, 491 rows
+fields: ok, 151 rows
+first_significant: ok, 64 rows
+function: ok, 822 rows
+functions: ok, 140 rows
+generic_list: ok, 1051 rows
+generics: ok, 244 rows
+handle_expr: ok, 1001 rows
 hex_digit: ok, 39 rows
-ident:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, fail_p, nth
-if_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, if_inner
-if_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, block, eat, expect, if_expr, restricted
-impl_item:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_word, bump, expect, fail_p, functions, generics, nth, ty
-int_over:
-  calls refused: compare_max, digit_count, first_significant, is_hex_literal
-int_small:
-  calls refused: is_hex_literal, small_value
+ident: ok, 219 rows
+if_expr: ok, 150 rows
+if_inner: ok, 417 rows
+impl_item: ok, 688 rows
+int_over: ok, 189 rows
+int_small: ok, 82 rows
 is_digit: ok, 22 rows
 is_hex: ok, 75 rows
-is_hex_literal:
-  calls refused: source_byte
+is_hex_literal: ok, 70 rows
 is_ident: ok, 38 rows
 is_lower_start: ok, 35 rows
 is_space: ok, 61 rows
 is_trivia: ok, 35 rows
 is_upper: ok, 22 rows
-item:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_trait_or_model, at_word, bump, expect, fail_p, fields, function, functions, generics, impl_item, mode, nth, upper, variants
-items:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, item
+item: ok, 1715 rows
+items: ok, 197 rows
 json_escape: ok, 87 rows
-keyword:
-  calls refused: word
+keyword: ok, 254 rows
 kind: ok, 15 rows
 leave: ok, 49 rows
-lex_at:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: keyword, number, punct, scan_block, scan_ident, scan_line, scan_space, scan_string, source_byte
-lex_digest:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_until_eof
+lex_at: ok, 432 rows
+lex_digest: ok, 78 rows
 lex_main:
-  Effect: effect handlers
-lex_step:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_lexer, lex_at
-lex_steps:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_step
-lex_until_eof:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_steps
-literal:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, check_escapes, fail_p, int_over, nth
-lower:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, fail_p, nth
-match_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: arms, expect, restricted
+  calls refused: $handler_body_45657_45885
+lex_step: ok, 161 rows
+lex_steps: ok, 167 rows
+lex_until_eof: ok, 89 rows
+literal: ok, 301 rows
+lower: ok, 206 rows
+match_expr: ok, 239 rows
 max_depth: ok, 6 rows
 max_tokens: ok, 6 rows
 max_u64_digit: ok, 186 rows
-mix: ok, 16 rows
-mix_token: ok, 25 rows
-mode:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump
-next_sig:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_at
-nth:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: nth_from
-nth_from:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: next_sig
-number:
-  calls refused: exponent_end, scan_decimal, scan_digits, scan_hex, source_byte
+mix: ok, 30 rows
+mix_token: ok, 72 rows
+mode: ok, 156 rows
+next_sig: ok, 59 rows
+nth: ok, 82 rows
+nth_from: ok, 76 rows
+number: ok, 270 rows
 offset_basis: ok, 6 rows
-open: ok, 53 rows
-pack:
-  calls refused: source_byte
-params:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, lower, pass, place_tree, ty
-parse_digest:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: items, lex_digest, next_sig
+open: ok, 89 rows
+pack: ok, 43 rows
+params: ok, 706 rows
+parse_digest: ok, 186 rows
 parse_main:
-  Effect: effect handlers
-pass:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump
-pattern:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, pattern_inner
-pattern_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_literal, bump, eat, expect, fail_p, field_patterns, literal, nth, pattern_list, upper
-pattern_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, pattern
-place_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, expect, lower, place_list, place_tree
-place_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, place_tree
-place_tree:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, place_inner
-postfix:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, postfix_op
-postfix_op:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: args, bump, expect, expr, fail_p, lower, nth, postfix, starts_type_args, type_args
+  calls refused: $handler_body_46048_46279
+pass: ok, 156 rows
+pattern: ok, 212 rows
+pattern_inner: ok, 1405 rows
+pattern_list: ok, 316 rows
+place_inner: ok, 447 rows
+place_list: ok, 307 rows
+place_tree: ok, 144 rows
+postfix: ok, 211 rows
+postfix_op: ok, 1046 rows
 precedence: ok, 254 rows
-primary:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, primary_inner
-primary_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_literal, block, bump, eat, expect, fail_p, field_values, ident, literal, nth, tuple_values
-primitive:
-  calls refused: word
-punct:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_tok, source_byte
-region_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: block, bump, eat, expect, fail_p, int_over, int_small, lower, nth
-required_mode:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_p, mode, nth
-restricted:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: expr
-scan_block:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, source_byte
-scan_decimal:
-  calls refused: source_byte
-scan_digits:
-  calls refused: source_byte
-scan_hex:
-  calls refused: source_byte
-scan_ident:
-  calls refused: source_byte
-scan_line:
-  calls refused: source_byte
-scan_space:
-  calls refused: source_byte
-scan_string:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, source_byte
-small_value:
-  calls refused: source_byte
-source_byte:
-  Effect: effect handlers
-source_leaf_0: ok, 523 rows
+primary: ok, 150 rows
+primary_inner: ok, 952 rows
+primitive: ok, 108 rows
+punct: ok, 972 rows
+region_expr: ok, 615 rows
+required_mode: ok, 226 rows
+restricted: ok, 147 rows
+scan_block: ok, 221 rows
+scan_decimal: ok, 49 rows
+scan_digits: ok, 34 rows
+scan_hex: ok, 34 rows
+scan_ident: ok, 34 rows
+scan_line: ok, 47 rows
+scan_space: ok, 34 rows
+scan_string: ok, 183 rows
+small_value: ok, 108 rows
+source_byte: ok, 56 rows
+source_leaf_0: ok, 541 rows
 source_len: ok, 6 rows
-starts_type_args:
-  calls refused: primitive
-statements:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, at_word, eat, expect, expr, fail_p, nth, pattern, ty
-text_is:
-  calls refused: word
+starts_type_args: ok, 68 rows
+statements: ok, 994 rows
+text_is: ok, 47 rows
 tok: ok, 16 rows
-trait_ref:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, fail_p, nth, type_args, upper
-tuple_values:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expr
-ty:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, ty_inner
-ty_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, bump, dimensions, effects, expect, fail_p, ident, mode, nth, ty, ty_list, ty_params, type_args
-ty_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, ty
-ty_params:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, pass, ty
-type_arg:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, eat, fail_p, lower, nth, primitive, ty, type_args, upper
-type_arg_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, type_arg
-type_args:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, enter, expect, type_arg_list
-upper:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: expect
-variants:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, eat, expect, fields, ty_list, upper
-where_clauses:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, eat, expect, trait_ref, ty
+trait_ref: ok, 232 rows
+tuple_values: ok, 313 rows
+ty: ok, 212 rows
+ty_inner: ok, 1235 rows
+ty_list: ok, 313 rows
+ty_params: ok, 347 rows
+type_arg: ok, 1010 rows
+type_arg_list: ok, 313 rows
+type_args: ok, 330 rows
+upper: ok, 75 rows
+variants: ok, 617 rows
+where_clauses: ok, 358 rows
 with_flags: ok, 43 rows
-word:
-  calls refused: pack
+word: ok, 47 rows
 
 == parser ==
-functions: 384
-without own refusal: 159
-compiling with all callees: 132
-refusals: 357
-  Effect: 336
+functions: 423
+without own refusal: 286
+compiling with all callees: 280
+refusals: 148
+  Effect: 131
   ExternalFunction: 2
   FunctionValue: 1
   Generic: 3
-  Type: 15
+  Type: 11
 by detail:
-   199 Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-   112 Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-    12 Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-     8 Effect: effect handlers
-     5 Effect: `?`
+   118 Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+    11 Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
      3 Generic: generic functions (no monomorphization in this backend)
-     3 Type: type T
+     2 Effect: handler for Region (only Fail handlers)
      2 ExternalFunction: no such function in the checked world
-     1 FunctionValue: type fn() -> T
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_directory:0"), name: "Region", args: [] ...
+     1 FunctionValue: type fn() -> i64
      1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_0:0"), name: "Region", args: [] }],...
      1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_1:0"), name: "Region", args: [] }],...
      1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_2:0"), name: "Region", args: [] }],...
@@ -383,1788 +202,1015 @@ by detail:
      1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }]...
      1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }]...
 
+$handler_body_122129_122166: ok, 37 rows
+$handler_body_13603_13831:
+  calls refused: $handler_body_13634_13727
+$handler_body_13634_13727:
+  Effect: handler for Region (only Fail handlers)
+$handler_body_138724_138820: ok, 41 rows
+$handler_body_138755_138775: ok, 35 rows
+$handler_body_13994_14225:
+  calls refused: $handler_body_14025_14121
+$handler_body_14025_14121:
+  Effect: handler for Region (only Fail handlers)
+$handler_body_43858_43939: ok, 45 rows
+$handler_body_45913_46095:
+  calls refused: $handler_body_45944_45991
+$handler_body_45944_45991:
+  FunctionValue: type fn() -> i64
+  calls refused: syntax_run
+$handler_body_46282_46462:
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: $handler_body_46313_46350, $handler_clause_46386_46391, $handler_clause_46429_46445
+$handler_body_46313_46350:
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: parse_build
+$handler_body_87161_91512: ok, 2349 rows
+$handler_clause_122202_122207: ok, 13 rows
+$handler_clause_122245_122288: ok, 41 rows
+$handler_clause_13763_13768: ok, 7 rows
+$handler_clause_13802_13814: ok, 33 rows
+$handler_clause_13863_13868: ok, 7 rows
+$handler_clause_138795_138796: ok, 7 rows
+$handler_clause_138813_138815: ok, 7 rows
+$handler_clause_138840_138841: ok, 7 rows
+$handler_clause_138858_138860: ok, 6 rows
+$handler_clause_13905_13924: ok, 18 rows
+$handler_clause_14157_14162: ok, 7 rows
+$handler_clause_14196_14208: ok, 33 rows
+$handler_clause_14257_14262: ok, 7 rows
+$handler_clause_14299_14318: ok, 18 rows
+$handler_clause_43975_43980: ok, 7 rows
+$handler_clause_44018_44022: ok, 9 rows
+$handler_clause_46027_46032: ok, 7 rows
+$handler_clause_46066_46078: ok, 33 rows
+$handler_clause_46127_46132: ok, 7 rows
+$handler_clause_46169_46188: ok, 18 rows
+$handler_clause_46386_46391:
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+$handler_clause_46429_46445:
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+$handler_clause_46494_46499:
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+$handler_clause_46533_46552:
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+$handler_clause_91548_91553: ok, 7 rows
+$handler_clause_91591_91593: ok, 7 rows
 SyntaxMemory::read:
   ExternalFunction: no such function in the checked world
 SyntaxMemory::write:
   ExternalFunction: no such function in the checked world
-advance:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: next_sig
-args:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expr, pass
-arms:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, eat, expect, expr, fail_p, nth, pattern
-at:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-at_end:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-at_literal:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-at_region:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_word, nth
-at_trait_or_model:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_word
-at_word:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: nth, text_is
+advance: ok, 66 rows
+args: ok, 347 rows
+arms: ok, 502 rows
+at: ok, 37 rows
+at_end: ok, 51 rows
+at_literal: ok, 89 rows
+at_region: ok, 180 rows
+at_trait_or_model: ok, 111 rows
+at_word: ok, 79 rows
 ate: ok, 26 rows
-binary:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: binary_rest, bump, enter, postfix, primary
-binary_rest:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: binary, bump, enter, expr
-block:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, expect, statements
-bump:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: advance, fail_p
-check_escapes:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, source_byte
-clauses:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expect, expr, lower, pattern_list
-close: ok, 50 rows
-closure:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, effects, expect, expr, mode, params, ty
-compare_max:
-  calls refused: source_byte
-diag_code: ok, 92 rows
+binary: ok, 468 rows
+binary_rest: ok, 334 rows
+block: ok, 222 rows
+bump: ok, 134 rows
+check_escapes: ok, 211 rows
+clauses: ok, 385 rows
+close: ok, 86 rows
+closure: ok, 721 rows
+compare_max: ok, 106 rows
+diag_code: ok, 145 rows
 digest: ok, 22 rows
-digit_count:
-  calls refused: source_byte
-dimension:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: dimension_factor, eat
-dimension_factor:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, bump, ty
-dimensions:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, dimension, dimension_factor, eat
-eat:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, bump
-effect_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, eat, expect, lower, nth, type_args, upper
-effects:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, effect_list, expect
-encode: ok, 14 rows
-enter:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_p
-expect:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: advance, fail_p
-exponent_end:
-  calls refused: scan_digits, source_byte
-expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, expr_inner
-expr_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_region, binary, closure, handle_expr, if_expr, match_expr, region_expr
-fail_i:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-fail_lexer:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-fail_p:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-fail_tok:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-field_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expect, lower, required_mode, ty
-field_patterns:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, lower, pattern
-field_values:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expr, lower
-fields:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: expect, field_list
-first_significant:
-  calls refused: source_byte
-function:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_word, block, bump, effects, expect, generics, lower, params, ty, where_clauses
-functions:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, function
-generic_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, at_word, bump, eat, expect, fail_p, ident, nth, required_mode, trait_ref
-generics:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, expect, generic_list
-handle_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, block, clauses, eat, expect, expr, lower, pattern, type_args, upper
+digit_count: ok, 84 rows
+dimension: ok, 205 rows
+dimension_factor: ok, 231 rows
+dimensions: ok, 347 rows
+eat: ok, 130 rows
+effect_list: ok, 825 rows
+effects: ok, 277 rows
+encode: ok, 22 rows
+enter: ok, 111 rows
+expect: ok, 135 rows
+exponent_end: ok, 139 rows
+expr: ok, 212 rows
+expr_inner: ok, 501 rows
+fail_i: ok, 36 rows
+fail_lexer: ok, 45 rows
+fail_p: ok, 70 rows
+fail_tok: ok, 40 rows
+field_list: ok, 561 rows
+field_patterns: ok, 491 rows
+field_values: ok, 491 rows
+fields: ok, 151 rows
+first_significant: ok, 64 rows
+function: ok, 822 rows
+functions: ok, 140 rows
+generic_list: ok, 1051 rows
+generics: ok, 244 rows
+handle_expr: ok, 1001 rows
 hex_digit: ok, 39 rows
-ident:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, fail_p, nth
-if_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, if_inner
-if_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, block, eat, expect, if_expr, restricted
-impl_item:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_word, bump, expect, fail_p, functions, generics, nth, ty
-int_over:
-  calls refused: compare_max, digit_count, first_significant, is_hex_literal
-int_small:
-  calls refused: is_hex_literal, small_value
+ident: ok, 219 rows
+if_expr: ok, 150 rows
+if_inner: ok, 417 rows
+impl_item: ok, 688 rows
+int_over: ok, 189 rows
+int_small: ok, 82 rows
 is_digit: ok, 22 rows
 is_hex: ok, 75 rows
-is_hex_literal:
-  calls refused: source_byte
+is_hex_literal: ok, 70 rows
 is_ident: ok, 38 rows
 is_lower_start: ok, 35 rows
 is_space: ok, 61 rows
 is_trivia: ok, 35 rows
 is_upper: ok, 22 rows
-item:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_trait_or_model, at_word, bump, expect, fail_p, fields, function, functions, generics, impl_item, mode, nth, upper, variants
-items:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, item
+item: ok, 1715 rows
+items: ok, 197 rows
 json_escape: ok, 87 rows
-keyword:
-  calls refused: word
+keyword: ok, 254 rows
 kind: ok, 15 rows
 leave: ok, 49 rows
-lex_at:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: keyword, number, punct, scan_block, scan_ident, scan_line, scan_space, scan_string, source_byte
-lex_digest:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_until_eof
+lex_at: ok, 432 rows
+lex_digest: ok, 78 rows
 lex_main:
-  Effect: effect handlers
-lex_step:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_lexer, lex_at
-lex_steps:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_step
-lex_until_eof:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_steps
-literal:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, check_escapes, fail_p, int_over, nth
-lower:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, fail_p, nth
-match_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: arms, expect, restricted
+  calls refused: $handler_body_13603_13831
+lex_step: ok, 161 rows
+lex_steps: ok, 167 rows
+lex_until_eof: ok, 89 rows
+literal: ok, 301 rows
+lower: ok, 206 rows
+match_expr: ok, 239 rows
 max_depth: ok, 6 rows
 max_tokens: ok, 6 rows
 max_u64_digit: ok, 186 rows
-mix: ok, 16 rows
-mix_token: ok, 25 rows
-mode:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump
-next_sig:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_at
-nth:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: nth_from
-nth_from:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: next_sig
-number:
-  calls refused: exponent_end, scan_decimal, scan_digits, scan_hex, source_byte
+mix: ok, 30 rows
+mix_token: ok, 72 rows
+mode: ok, 156 rows
+next_sig: ok, 59 rows
+nth: ok, 82 rows
+nth_from: ok, 76 rows
+number: ok, 270 rows
 offset_basis: ok, 6 rows
-open: ok, 53 rows
-pack:
-  calls refused: source_byte
-params:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, lower, pass, place_tree, ty
+open: ok, 89 rows
+pack: ok, 43 rows
+params: ok, 706 rows
 parse_advance:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_attach, syntax_sig, syntax_tok
 parse_args:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_expr, parse_pass
 parse_arms:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_at_end, parse_ate, parse_eat, parse_expect, parse_expr, parse_pattern, syntax_heads, syntax_issue
 parse_associated:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_at_end, parse_at_word, parse_ate, parse_bump, parse_eat, parse_expect, parse_function, parse_required_mode, parse_ty, parse_upper, syntax_issue
 parse_at:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_kind
 parse_at_end:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_kind
 parse_at_literal:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_kind
 parse_at_region:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_word, parse_nth
 parse_at_trait_or_model:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_word
 parse_at_word:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: parse_nth, text_is
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: parse_nth
 parse_ate:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
 parse_binary:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_binary_rest, parse_bump, parse_enter, parse_kind, parse_leave, parse_postfix, parse_primary, syntax_callee
 parse_binary_rest:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_binary, parse_bump, parse_enter, parse_expr, parse_kind
 parse_block:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_enter, parse_expect, parse_leave, parse_statements, syntax_heads
 parse_build:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_items, parse_open, syntax_attach, syntax_cell, syntax_close, syntax_lex, syntax_put, syntax_sig, syntax_tok
 parse_bump:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: parse_advance, parse_fail_p
-parse_check_escapes:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, parse_check_unicode, source_byte
-parse_check_unicode:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, parse_check_escapes, parse_unicode_unit, source_byte
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: parse_advance
+parse_check_escapes: ok, 211 rows
+parse_check_unicode: ok, 279 rows
 parse_clauses:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_eat, parse_expect, parse_expr, parse_lower, parse_pattern_list, syntax_heads
 parse_close:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_close
 parse_closure:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_ate, parse_eat, parse_effects, parse_expect, parse_expr, parse_mode, parse_params, parse_ty, syntax_heads
 parse_conformance:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_associated, parse_at_word, parse_bump, parse_expect, parse_ty, parse_where_clauses
-parse_digest:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: items, lex_digest, next_sig
+parse_digest: ok, 186 rows
 parse_dimension:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_ate, parse_dimension_factor, parse_eat
 parse_dimension_factor:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_bump, parse_close, parse_open, parse_ty
 parse_dimensions:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_dimension, parse_dimension_factor, parse_eat
 parse_eat:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_bump
 parse_effect_list:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_at_end, parse_ate, parse_eat, parse_expect, parse_lower, parse_nth, parse_type_args, parse_upper
 parse_effects:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_ate, parse_eat, parse_effect_list, parse_expect
 parse_enter:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: parse_fail_p
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
 parse_expect:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_advance, syntax_expected
 parse_expect_word:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_word, parse_bump, syntax_issue
 parse_expr:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_close, parse_enter, parse_expr_inner, parse_leave, parse_open
 parse_expr_inner:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_region, parse_binary, parse_closure, parse_handle_expr, parse_if_expr, parse_kind, parse_match_expr, parse_region_expr
-parse_fail_p:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
+parse_fail_p: ok, 90 rows
 parse_field_list:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_expect, parse_field_mode, parse_lower, parse_ty
 parse_field_mode:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_ate, parse_mode, syntax_issue
 parse_field_patterns:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_lower, parse_pattern, syntax_heads, syntax_name
 parse_field_values:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_expr, parse_lower
 parse_fields:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_expect, parse_field_list
 parse_function:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_at_word, parse_block, parse_bump, parse_effects, parse_expect, parse_generics, parse_lower, parse_params, parse_ty, parse_where_clauses, parse_with_flags, syntax_heads
 parse_functions:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_function
 parse_generic_list:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, parse_at, parse_at_end, parse_at_word, parse_ate, parse_bump, parse_eat, parse_expect, parse_ident, parse_required_mode, parse_trait_ref, parse_with_flags, syntax_bind, syntax_cell, syntax_issue, syntax_put
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: parse_at, parse_at_end, parse_at_word, parse_ate, parse_bump, parse_eat, parse_expect, parse_ident, parse_required_mode, parse_trait_ref, parse_with_flags, syntax_bind, syntax_cell, syntax_issue, syntax_put
 parse_generics:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_ate, parse_eat, parse_expect, parse_generic_list, syntax_put
 parse_handle_expr:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_ate, parse_block, parse_clauses, parse_eat, parse_expect, parse_expr, parse_lower, parse_pattern, parse_type_args, parse_upper, syntax_heads
 parse_ident:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_bump, parse_kind, syntax_issue
 parse_if_expr:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_enter, parse_if_inner, parse_leave
 parse_if_inner:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_ate, parse_block, parse_eat, parse_expect, parse_if_expr, parse_restricted
 parse_impl_item:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_at_word, parse_bump, parse_conformance, parse_expect, parse_expect_word, parse_functions, parse_generics, parse_trait_ref, parse_ty, parse_with_flags, syntax_bounds, syntax_heads, syntax_issue
 parse_item:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_trait_or_model, parse_at_word, parse_bump, parse_expect, parse_fields, parse_function, parse_functions, parse_generics, parse_impl_item, parse_kind, parse_mode, parse_model_item, parse_nth, parse_trait_item, parse_upper, parse_use_model, parse_variants, syntax_issue
 parse_items:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_bump, parse_close, parse_item, parse_open, syntax_issue
 parse_kind:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
 parse_leave:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
 parse_literal:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect handlers
-  calls refused: int_over, parse_bump, syntax_issue
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: parse_bump, syntax_issue
 parse_lower:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_ident, parse_kind, syntax_issue
 parse_main:
-  Effect: effect handlers
+  calls refused: $handler_body_13994_14225
 parse_match_expr:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_arms, parse_expect, parse_restricted
 parse_max_depth: ok, 6 rows
 parse_mode:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_bump, parse_kind
 parse_model_item:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_word, parse_bump, parse_conformance, parse_expect, parse_generics, parse_trait_ref, parse_upper, parse_with_flags, syntax_heads, syntax_issue
 parse_nth:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_nth
 parse_open:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_open
 parse_package_path:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_bump, parse_kind, parse_nth
 parse_params:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_lower, parse_pass, parse_place_tree, parse_ty, syntax_bind
 parse_pass:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_bump, parse_kind
 parse_pattern:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_close, parse_enter, parse_leave, parse_open, parse_pattern_inner
 parse_pattern_inner:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_at_literal, parse_at_word, parse_ate, parse_bump, parse_eat, parse_expect, parse_field_patterns, parse_kind, parse_literal, parse_pattern_list, parse_upper, syntax_bind, syntax_issue
 parse_pattern_list:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_pattern
 parse_place_inner:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_ate, parse_eat, parse_expect, parse_lower, parse_place_list, parse_place_tree
 parse_place_list:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_place_tree
 parse_place_tree:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_enter, parse_leave, parse_place_inner
 parse_postfix:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_enter, parse_kind, parse_postfix_op
 parse_postfix_op:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: parse_args, parse_bump, parse_expect, parse_expr, parse_lower, parse_nth, parse_postfix, parse_type_args, starts_type_args, syntax_contains
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: parse_args, parse_bump, parse_expect, parse_expr, parse_lower, parse_nth, parse_postfix, parse_type_args, syntax_contains
 parse_primary:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_enter, parse_leave, parse_primary_inner
 parse_primary_inner:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_at_literal, parse_ate, parse_block, parse_bump, parse_eat, parse_expect, parse_field_values, parse_ident, parse_kind, parse_literal, parse_tuple_values, syntax_issue
 parse_region_expr:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: int_over, int_small, parse_ate, parse_block, parse_bump, parse_eat, parse_expect, parse_literal, parse_lower, syntax_issue
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: parse_ate, parse_block, parse_bump, parse_eat, parse_expect, parse_literal, parse_lower, syntax_issue
 parse_required_mode:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_ate, parse_mode, syntax_issue
 parse_restricted:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_expr, parse_with_flags
 parse_statements:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_at_word, parse_ate, parse_eat, parse_expect, parse_expr, parse_pattern, parse_ty, parse_use_model, syntax_heads
 parse_trait_item:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_associated, parse_bump, parse_expect, parse_generics, parse_upper, parse_with_flags, syntax_bounds, syntax_heads
 parse_trait_ref:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_bump, parse_expect, parse_package_path, parse_type_args, parse_upper
 parse_transport:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect handlers
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: $handler_body_46282_46462, $handler_clause_46494_46499, $handler_clause_46533_46552
 parse_tree_main:
-  Effect: effect handlers
+  calls refused: $handler_body_45913_46095
 parse_tuple_values:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_expr
 parse_ty:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_close, parse_enter, parse_leave, parse_open, parse_ty_inner
 parse_ty_inner:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_bump, parse_dimensions, parse_effects, parse_expect, parse_expect_word, parse_ident, parse_kind, parse_mode, parse_nth, parse_ty, parse_ty_list, parse_ty_params, parse_type_args, parse_upper
 parse_ty_list:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_ty
 parse_ty_params:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_pass, parse_ty
 parse_type_arg:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: parse_ate, parse_bump, parse_close, parse_eat, parse_lower, parse_nth, parse_open, parse_ty, parse_type_args, parse_upper, primitive, syntax_issue
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: parse_ate, parse_bump, parse_close, parse_eat, parse_lower, parse_nth, parse_open, parse_ty, parse_type_args, parse_upper, syntax_issue
 parse_type_arg_list:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_type_arg
 parse_type_args:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_ate, parse_eat, parse_enter, parse_expect, parse_leave, parse_type_arg_list
-parse_unicode_unit:
-  calls refused: source_byte
+parse_unicode_unit: ok, 106 rows
 parse_upper:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_ident, syntax_issue
 parse_use_model:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_bump, parse_expect, parse_upper
 parse_variants:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_at_end, parse_ate, parse_eat, parse_expect, parse_fields, parse_ty_list, parse_upper
 parse_where_clauses:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at, parse_ate, parse_eat, parse_expect, parse_trait_ref, parse_ty
 parse_with_flags:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-pass:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump
-pattern:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, pattern_inner
-pattern_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_literal, bump, eat, expect, fail_p, field_patterns, literal, nth, pattern_list, upper
-pattern_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, pattern
-place_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, expect, lower, place_list, place_tree
-place_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, place_tree
-place_tree:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, place_inner
-postfix:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, postfix_op
-postfix_op:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: args, bump, expect, expr, fail_p, lower, nth, postfix, starts_type_args, type_args
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+pass: ok, 156 rows
+pattern: ok, 212 rows
+pattern_inner: ok, 1405 rows
+pattern_list: ok, 316 rows
+place_inner: ok, 447 rows
+place_list: ok, 307 rows
+place_tree: ok, 144 rows
+postfix: ok, 211 rows
+postfix_op: ok, 1046 rows
 precedence: ok, 254 rows
-primary:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, primary_inner
-primary_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_literal, block, bump, eat, expect, fail_p, field_values, ident, literal, nth, tuple_values
-primitive:
-  calls refused: word
-punct:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_tok, source_byte
-region_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: block, bump, eat, expect, fail_p, int_over, int_small, lower, nth
-required_mode:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_p, mode, nth
-restricted:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: expr
-scan_block:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, source_byte
-scan_decimal:
-  calls refused: source_byte
-scan_digits:
-  calls refused: source_byte
-scan_hex:
-  calls refused: source_byte
-scan_ident:
-  calls refused: source_byte
-scan_line:
-  calls refused: source_byte
-scan_space:
-  calls refused: source_byte
-scan_string:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, source_byte
-small_value:
-  calls refused: source_byte
-source_byte:
-  Effect: effect handlers
-source_leaf_0: ok, 523 rows
+primary: ok, 150 rows
+primary_inner: ok, 952 rows
+primitive: ok, 108 rows
+punct: ok, 972 rows
+region_expr: ok, 615 rows
+required_mode: ok, 226 rows
+restricted: ok, 147 rows
+scan_block: ok, 221 rows
+scan_decimal: ok, 49 rows
+scan_digits: ok, 34 rows
+scan_hex: ok, 34 rows
+scan_ident: ok, 34 rows
+scan_line: ok, 47 rows
+scan_space: ok, 34 rows
+scan_string: ok, 183 rows
+small_value: ok, 108 rows
+source_byte: ok, 56 rows
+source_leaf_0: ok, 541 rows
 source_len: ok, 6 rows
-starts_type_args:
-  calls refused: primitive
-statements:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, at_word, eat, expect, expr, fail_p, nth, pattern, ty
+starts_type_args: ok, 68 rows
+statements: ok, 994 rows
 syntax_attach:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_cell, syntax_put
-syntax_bad_string:
-  calls refused: source_byte
+syntax_bad_string: ok, 105 rows
 syntax_bind:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_heads, syntax_name
 syntax_bounds:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_cell, syntax_diag
 syntax_byte:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, syntax_cell
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: syntax_cell
 syntax_callee:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_grouped_name, syntax_sig
 syntax_cell:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: SyntaxMemory::read, fail_i
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: SyntaxMemory::read
 syntax_close:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_cell, syntax_put
 syntax_contains:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: syntax_cell, syntax_text_equal
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: syntax_cell
 syntax_diag:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, syntax_cell, syntax_put
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: syntax_cell, syntax_put
 syntax_directory:
   Generic: generic functions (no monomorphization in this backend)
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_directory:0"), name: "Region", args: [] ...
 syntax_expected:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_diag
 syntax_grouped_close:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_sig, syntax_tok
 syntax_grouped_name:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_tok, syntax_grouped_close, syntax_sig, syntax_tok
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: syntax_grouped_close, syntax_sig, syntax_tok
 syntax_heads:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
 syntax_issue:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_diag
 syntax_lex:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, syntax_lex_steps, syntax_put
-syntax_lex_error_end:
-  calls refused: source_byte, syntax_bad_string, syntax_utf8_end
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: syntax_lex_steps, syntax_put
+syntax_lex_error_end: ok, 107 rows
 syntax_lex_step:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect handlers
-  calls refused: fail_lexer, syntax_diag, syntax_put
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: syntax_diag, syntax_put
 syntax_lex_steps:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_lex_step
-syntax_message_byte:
-  calls refused: syntax_static_byte
-syntax_message_len: ok, 39 rows
+syntax_message_byte: ok, 118 rows
+syntax_message_len: ok, 47 rows
 syntax_name:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, syntax_cell, syntax_put
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: syntax_cell, syntax_put
 syntax_nth:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_sig, syntax_tok
 syntax_open:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, syntax_cell, syntax_put
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: syntax_cell, syntax_put
 syntax_put:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: SyntaxMemory::write, fail_i
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+  calls refused: SyntaxMemory::write
 syntax_read_0:
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
   Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_0:0"), name: "Region", args: [] }],...
   calls refused: syntax_slot
 syntax_read_1:
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
   Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_1:0"), name: "Region", args: [] }],...
   calls refused: syntax_read_0, syntax_slot
 syntax_read_2:
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
   Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_2:0"), name: "Region", args: [] }],...
   calls refused: syntax_read_1, syntax_slot
 syntax_read_3:
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
   Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_3:0"), name: "Region", args: [] }],...
   calls refused: syntax_read_2, syntax_slot
 syntax_read_4:
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
   Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_4:0"), name: "Region", args: [] }],...
   calls refused: syntax_read_3, syntax_slot
 syntax_run:
   Generic: generic functions (no monomorphization in this backend)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  FunctionValue: type fn() -> T
-  Type: type T
 syntax_sig:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_tok
 syntax_slot:
   Generic: generic functions (no monomorphization in this backend)
-  Type: type T
-  Type: type T
-syntax_static_byte:
-  Effect: effect handlers
+syntax_static_byte: ok, 63 rows
 syntax_static_len: ok, 924 rows
-syntax_text_10: ok, 273 rows
-syntax_text_100: ok, 89 rows
-syntax_text_101: ok, 65 rows
-syntax_text_102: ok, 105 rows
-syntax_text_103: ok, 49 rows
-syntax_text_104: ok, 49 rows
-syntax_text_105: ok, 49 rows
-syntax_text_106: ok, 33 rows
-syntax_text_107: ok, 57 rows
-syntax_text_108: ok, 57 rows
-syntax_text_109: ok, 41 rows
-syntax_text_11: ok, 177 rows
-syntax_text_110: ok, 57 rows
-syntax_text_111: ok, 41 rows
-syntax_text_112: ok, 25 rows
-syntax_text_113: ok, 33 rows
-syntax_text_114: ok, 41 rows
-syntax_text_115: ok, 57 rows
-syntax_text_116: ok, 57 rows
-syntax_text_117: ok, 33 rows
-syntax_text_118: ok, 33 rows
-syntax_text_119: ok, 25 rows
-syntax_text_12: ok, 393 rows
-syntax_text_120: ok, 49 rows
-syntax_text_121: ok, 41 rows
-syntax_text_122: ok, 57 rows
-syntax_text_123: ok, 57 rows
-syntax_text_124: ok, 49 rows
-syntax_text_125: ok, 41 rows
-syntax_text_126: ok, 57 rows
-syntax_text_127: ok, 49 rows
-syntax_text_128: ok, 25 rows
-syntax_text_129: ok, 41 rows
-syntax_text_13: ok, 361 rows
-syntax_text_130: ok, 41 rows
-syntax_text_131: ok, 49 rows
-syntax_text_132: ok, 57 rows
-syntax_text_133: ok, 57 rows
-syntax_text_134: ok, 57 rows
-syntax_text_135: ok, 57 rows
-syntax_text_136: ok, 73 rows
-syntax_text_137: ok, 73 rows
-syntax_text_138: ok, 49 rows
-syntax_text_139: ok, 41 rows
-syntax_text_14: ok, 257 rows
-syntax_text_140: ok, 49 rows
-syntax_text_141: ok, 89 rows
-syntax_text_142: ok, 33 rows
-syntax_text_143: ok, 73 rows
-syntax_text_144: ok, 25 rows
-syntax_text_145: ok, 41 rows
-syntax_text_146: ok, 49 rows
-syntax_text_147: ok, 73 rows
-syntax_text_148: ok, 25 rows
-syntax_text_149: ok, 57 rows
-syntax_text_15: ok, 321 rows
-syntax_text_150: ok, 57 rows
-syntax_text_151: ok, 65 rows
-syntax_text_152: ok, 81 rows
-syntax_text_153: ok, 65 rows
-syntax_text_154: ok, 41 rows
-syntax_text_155: ok, 49 rows
-syntax_text_156: ok, 41 rows
-syntax_text_157: ok, 49 rows
-syntax_text_158: ok, 65 rows
-syntax_text_159: ok, 41 rows
-syntax_text_16: ok, 305 rows
-syntax_text_160: ok, 25 rows
-syntax_text_161: ok, 25 rows
-syntax_text_162: ok, 25 rows
-syntax_text_163: ok, 25 rows
-syntax_text_164: ok, 25 rows
-syntax_text_165: ok, 33 rows
-syntax_text_166: ok, 25 rows
-syntax_text_167: ok, 41 rows
-syntax_text_168: ok, 41 rows
-syntax_text_169: ok, 49 rows
-syntax_text_17: ok, 313 rows
-syntax_text_170: ok, 33 rows
-syntax_text_171: ok, 57 rows
-syntax_text_18: ok, 281 rows
-syntax_text_19: ok, 353 rows
-syntax_text_2: ok, 161 rows
-syntax_text_20: ok, 481 rows
-syntax_text_200: ok, 81 rows
-syntax_text_201: ok, 73 rows
-syntax_text_21: ok, 593 rows
-syntax_text_22: ok, 321 rows
-syntax_text_23: ok, 305 rows
-syntax_text_24: ok, 249 rows
-syntax_text_25: ok, 193 rows
-syntax_text_26: ok, 305 rows
-syntax_text_27: ok, 305 rows
-syntax_text_28: ok, 281 rows
-syntax_text_3: ok, 265 rows
-syntax_text_4: ok, 273 rows
-syntax_text_5: ok, 169 rows
-syntax_text_6: ok, 185 rows
-syntax_text_7: ok, 161 rows
-syntax_text_8: ok, 137 rows
-syntax_text_9: ok, 305 rows
-syntax_text_equal:
-  calls refused: source_byte
+syntax_text_10: ok, 287 rows
+syntax_text_100: ok, 103 rows
+syntax_text_101: ok, 79 rows
+syntax_text_102: ok, 119 rows
+syntax_text_103: ok, 63 rows
+syntax_text_104: ok, 63 rows
+syntax_text_105: ok, 63 rows
+syntax_text_106: ok, 47 rows
+syntax_text_107: ok, 71 rows
+syntax_text_108: ok, 71 rows
+syntax_text_109: ok, 55 rows
+syntax_text_11: ok, 191 rows
+syntax_text_110: ok, 71 rows
+syntax_text_111: ok, 55 rows
+syntax_text_112: ok, 39 rows
+syntax_text_113: ok, 47 rows
+syntax_text_114: ok, 55 rows
+syntax_text_115: ok, 71 rows
+syntax_text_116: ok, 71 rows
+syntax_text_117: ok, 47 rows
+syntax_text_118: ok, 47 rows
+syntax_text_119: ok, 39 rows
+syntax_text_12: ok, 407 rows
+syntax_text_120: ok, 63 rows
+syntax_text_121: ok, 55 rows
+syntax_text_122: ok, 71 rows
+syntax_text_123: ok, 71 rows
+syntax_text_124: ok, 63 rows
+syntax_text_125: ok, 55 rows
+syntax_text_126: ok, 71 rows
+syntax_text_127: ok, 63 rows
+syntax_text_128: ok, 39 rows
+syntax_text_129: ok, 55 rows
+syntax_text_13: ok, 375 rows
+syntax_text_130: ok, 55 rows
+syntax_text_131: ok, 63 rows
+syntax_text_132: ok, 71 rows
+syntax_text_133: ok, 71 rows
+syntax_text_134: ok, 71 rows
+syntax_text_135: ok, 71 rows
+syntax_text_136: ok, 87 rows
+syntax_text_137: ok, 87 rows
+syntax_text_138: ok, 63 rows
+syntax_text_139: ok, 55 rows
+syntax_text_14: ok, 271 rows
+syntax_text_140: ok, 63 rows
+syntax_text_141: ok, 103 rows
+syntax_text_142: ok, 47 rows
+syntax_text_143: ok, 87 rows
+syntax_text_144: ok, 39 rows
+syntax_text_145: ok, 55 rows
+syntax_text_146: ok, 63 rows
+syntax_text_147: ok, 87 rows
+syntax_text_148: ok, 39 rows
+syntax_text_149: ok, 71 rows
+syntax_text_15: ok, 335 rows
+syntax_text_150: ok, 71 rows
+syntax_text_151: ok, 79 rows
+syntax_text_152: ok, 95 rows
+syntax_text_153: ok, 79 rows
+syntax_text_154: ok, 55 rows
+syntax_text_155: ok, 63 rows
+syntax_text_156: ok, 55 rows
+syntax_text_157: ok, 63 rows
+syntax_text_158: ok, 79 rows
+syntax_text_159: ok, 55 rows
+syntax_text_16: ok, 319 rows
+syntax_text_160: ok, 39 rows
+syntax_text_161: ok, 39 rows
+syntax_text_162: ok, 39 rows
+syntax_text_163: ok, 39 rows
+syntax_text_164: ok, 39 rows
+syntax_text_165: ok, 47 rows
+syntax_text_166: ok, 39 rows
+syntax_text_167: ok, 55 rows
+syntax_text_168: ok, 55 rows
+syntax_text_169: ok, 63 rows
+syntax_text_17: ok, 327 rows
+syntax_text_170: ok, 47 rows
+syntax_text_171: ok, 71 rows
+syntax_text_18: ok, 295 rows
+syntax_text_19: ok, 367 rows
+syntax_text_2: ok, 175 rows
+syntax_text_20: ok, 495 rows
+syntax_text_200: ok, 95 rows
+syntax_text_201: ok, 87 rows
+syntax_text_21: ok, 607 rows
+syntax_text_22: ok, 335 rows
+syntax_text_23: ok, 319 rows
+syntax_text_24: ok, 263 rows
+syntax_text_25: ok, 207 rows
+syntax_text_26: ok, 319 rows
+syntax_text_27: ok, 319 rows
+syntax_text_28: ok, 295 rows
+syntax_text_3: ok, 279 rows
+syntax_text_4: ok, 287 rows
+syntax_text_5: ok, 183 rows
+syntax_text_6: ok, 199 rows
+syntax_text_7: ok, 175 rows
+syntax_text_8: ok, 151 rows
+syntax_text_9: ok, 319 rows
+syntax_text_equal: ok, 71 rows
 syntax_tok:
-  Effect: effect SyntaxMemory (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_cell
-syntax_utf8_end:
-  calls refused: source_byte
+syntax_utf8_end: ok, 47 rows
 syntax_words:
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
   Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_words:0"), name: "Region", args: [] }], ...
 syntax_write_0:
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
   Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_0:0"), name: "Region", args: [] }]...
   calls refused: syntax_slot
 syntax_write_1:
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
   Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_1:0"), name: "Region", args: [] }]...
   calls refused: syntax_slot, syntax_words, syntax_write_0
 syntax_write_2:
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
   Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_2:0"), name: "Region", args: [] }]...
   calls refused: syntax_directory, syntax_slot, syntax_write_1
 syntax_write_3:
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
   Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }]...
   calls refused: syntax_directory, syntax_slot, syntax_write_2
 syntax_write_4:
-  Effect: effect Region (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
+  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
   Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }]...
   calls refused: syntax_directory, syntax_slot, syntax_write_3
-text_is:
-  calls refused: word
+text_is: ok, 47 rows
 tok: ok, 16 rows
-trait_ref:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, fail_p, nth, type_args, upper
-tuple_values:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expr
-ty:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, ty_inner
-ty_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, bump, dimensions, effects, expect, fail_p, ident, mode, nth, ty, ty_list, ty_params, type_args
-ty_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, ty
-ty_params:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, pass, ty
-type_arg:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, eat, fail_p, lower, nth, primitive, ty, type_args, upper
-type_arg_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, type_arg
-type_args:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, enter, expect, type_arg_list
-upper:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: expect
-variants:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, eat, expect, fields, ty_list, upper
-where_clauses:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, eat, expect, trait_ref, ty
+trait_ref: ok, 232 rows
+tuple_values: ok, 313 rows
+ty: ok, 212 rows
+ty_inner: ok, 1235 rows
+ty_list: ok, 313 rows
+ty_params: ok, 347 rows
+type_arg: ok, 1010 rows
+type_arg_list: ok, 313 rows
+type_args: ok, 330 rows
+upper: ok, 75 rows
+variants: ok, 617 rows
+where_clauses: ok, 358 rows
 with_flags: ok, 43 rows
-word:
-  calls refused: pack
+word: ok, 47 rows
 
 == checker ==
-functions: 259
-without own refusal: 50
-compiling with all callees: 29
-refusals: 334
-  Effect: 334
+functions: 295
+without own refusal: 292
+compiling with all callees: 285
+refusals: 3
+  Effect: 3
 by detail:
-   205 Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-   115 Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-     7 Effect: `?`
-     7 Effect: effect handlers
+     3 Effect: handler for Region (only Fail handlers)
 
-advance:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: next_sig
-args:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expr, pass
-arms:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, eat, expect, expr, fail_p, nth, pattern
-at:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-at_end:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-at_literal:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-at_region:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_word, nth
-at_trait_or_model:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_word
-at_word:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: nth, text_is
+$handler_body_128354_129110:
+  calls refused: $handler_body_128385_128667
+$handler_body_128385_128667:
+  calls refused: $handler_body_128426_128534
+$handler_body_128426_128534:
+  Effect: handler for Region (only Fail handlers)
+$handler_body_130983_131079: ok, 41 rows
+$handler_body_131014_131034: ok, 35 rows
+$handler_body_45657_45885:
+  calls refused: $handler_body_45688_45781
+$handler_body_45688_45781:
+  Effect: handler for Region (only Fail handlers)
+$handler_body_46048_46279:
+  calls refused: $handler_body_46079_46175
+$handler_body_46079_46175:
+  Effect: handler for Region (only Fail handlers)
+$handler_body_51639_51667: ok, 398 rows
+$handler_body_55926_55947: ok, 24 rows
+$handler_body_56157_56178: ok, 24 rows
+$handler_clause_128574_128579: ok, 7 rows
+$handler_clause_128621_128642: ok, 48 rows
+$handler_clause_128703_128708: ok, 7 rows
+$handler_clause_128746_129093: ok, 155 rows
+$handler_clause_129142_129147: ok, 7 rows
+$handler_clause_129181_129203: ok, 18 rows
+$handler_clause_131054_131055: ok, 7 rows
+$handler_clause_131072_131074: ok, 7 rows
+$handler_clause_131099_131100: ok, 7 rows
+$handler_clause_131117_131119: ok, 6 rows
+$handler_clause_45817_45822: ok, 7 rows
+$handler_clause_45856_45868: ok, 33 rows
+$handler_clause_45917_45922: ok, 7 rows
+$handler_clause_45959_45978: ok, 18 rows
+$handler_clause_46211_46216: ok, 7 rows
+$handler_clause_46250_46262: ok, 33 rows
+$handler_clause_46311_46316: ok, 7 rows
+$handler_clause_46353_46372: ok, 18 rows
+$handler_clause_51695_51696: ok, 22 rows
+$handler_clause_51726_51969: ok, 73 rows
+$handler_clause_55979_55984: ok, 7 rows
+$handler_clause_56014_56024: ok, 29 rows
+$handler_clause_56210_56215: ok, 7 rows
+$handler_clause_56245_56255: ok, 29 rows
+advance: ok, 66 rows
+args: ok, 347 rows
+arms: ok, 502 rows
+at: ok, 37 rows
+at_end: ok, 51 rows
+at_literal: ok, 89 rows
+at_region: ok, 180 rows
+at_trait_or_model: ok, 111 rows
+at_word: ok, 79 rows
 ate: ok, 26 rows
-binary:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: binary_rest, bump, enter, postfix, primary
-binary_rest:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: binary, bump, enter, expr
-block:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, expect, statements
-bump:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: advance, fail_p
-c_abort_frame:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_lookup, c_mode, c_moved, c_slot
-c_abort_loans:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_slot
-c_arg_count:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_arg_count_tail, c_kind
-c_arg_count_tail:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_group, c_kind, c_next
-c_arg_overlap:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_slot
-c_args:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_arg_overlap, c_argument_end, c_compatible, c_error, c_expect_type, c_expr, c_kind, c_mode, c_next, c_param, c_pass, c_pass_next, c_place_shape, c_push, c_result, c_token, c_type_has_effects, c_unsupported
-c_argument_end:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_group, c_kind
-c_arm_has:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_name, c_next, c_pattern_end, c_syntax_expr_end, c_take, c_token, c_unsupported
-c_assign:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_expect_type, c_expr, c_lookup, c_mode, c_next, c_result, c_slot, c_token, c_unsupported, c_use
-c_bind_name:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_lookup, c_mode, c_moved, c_push, c_slot, c_word
-c_bind_params:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_kind, c_lookup, c_next, c_param, c_push, c_token, c_type_has_effects, c_unsupported, c_valid_type
-c_bind_pattern:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_bind_name, c_ctor_find, c_error, c_kind, c_limit, c_next, c_pattern_end, c_pattern_fields, c_payload_irrefutable, c_result, c_same, c_token, c_unsupported
-c_block:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_exhaust, c_group, c_statements, c_take, c_token, c_truncate
-c_budget:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_limit, c_token
-c_callee_usage:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_group, c_kind, c_token
-c_check:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_budget, c_functions, c_limit, c_validate_adts, c_validate_decls, parse_digest
-c_check_loans:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_slot
-c_compare:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_expect_type, c_kind, c_mode, c_next, c_order, c_postfix, c_primary, c_result
-c_compatible:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_compatible_params, c_kind, c_limit, c_mode, c_next, c_row_subset, c_same, c_signature
-c_compatible_params:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_compatible, c_kind, c_next, c_param
-c_coverage:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_arm_has, c_error, c_kind, c_token, c_variant_next
-c_ctor_find:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_ctor_later, c_decl, c_error, c_find_variant, c_kind, c_name, c_next, c_token, c_unsupported
-c_ctor_later:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_decl, c_find_variant, c_kind, c_name, c_next
-c_decl:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_group, c_kind, c_next, c_signature, c_token, c_unsupported
-c_decl_index:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_decl, c_kind, c_limit, c_token
-c_div:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect handlers
-c_duplicate_field:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_field_next, c_kind, c_name, c_token
-c_empty:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-c_encode: ok, 19 rows
-c_equal_bytes:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: source_byte
-c_error:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-c_exhaust:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_lookup, c_mode, c_moved, c_slot
-c_expect_type:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_compatible, c_error
-c_expr:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_assign, c_block, c_callee_usage, c_compare, c_if, c_kind, c_limit, c_match, c_next, c_order, c_postfix, c_primary, c_result
-c_field_next:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next, c_take, c_type
-c_find:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_decl, c_kind, c_name
-c_find_variant:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_name, c_token, c_variant_next
-c_finish_error:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: parse_digest
-c_fn_at:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next
-c_function:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_bind_params, c_block, c_empty, c_exhaust, c_expect_type, c_fn_at, c_signature, c_valid_row, c_valid_type
-c_functions:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_decl, c_function, c_next_decl
-c_group:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_group_tail, c_kind, c_limit, c_next
-c_group_tail:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_group, c_kind, c_next, c_unsupported
-c_if:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_block, c_expect_type, c_expr, c_join, c_join_type, c_kind, c_next, c_result, c_token
-c_init:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_expect_type, c_expr, c_field_next, c_kind, c_name, c_next, c_result, c_take, c_token, c_type, c_unsupported
-c_irrefutable:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_ctor_find, c_kind, c_limit, c_next, c_payload_irrefutable, c_same, c_token, c_unsupported, c_variant_next
-c_irrefutable_fields:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_field_next, c_irrefutable, c_kind, c_name, c_next, c_pattern_end, c_take, c_token, c_type, c_unsupported
-c_join:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_mode, c_move, c_moved, c_slot
-c_join_shape:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_limit, c_next, c_same, c_same_params, c_signature
-c_join_type:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_compatible, c_expect_type, c_join_shape, c_same, c_unsupported
-c_kind:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_token
-c_kind_fields:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_kind_walk, c_max, c_next, c_take, c_type
-c_kind_variants:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_kind_fields, c_max, c_next, c_variant_next
-c_kind_walk:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_decl, c_decl_index, c_div, c_error, c_find, c_kind, c_kind_fields, c_kind_variants, c_max, c_next, c_power, c_token, c_unsupported
-c_less:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_less_bytes
-c_less_bytes:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: source_byte
-c_limit:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-c_literal_name:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: word
-c_literal_primary:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_expect_type, c_expr, c_kind, c_next, c_postfix, c_primary, c_result, c_take, c_token, c_unsupported, int_small
-c_live_loans:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_push, c_slot
-c_lookup:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_name, c_slot
-c_match:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_coverage, c_decl, c_expr, c_find, c_group, c_match_arms, c_next, c_result, c_take, c_token, c_unsupported
-c_match_arms:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_bind_pattern, c_exhaust, c_expr, c_join, c_join_type, c_kind, c_next, c_result, c_take, c_truncate, c_unsupported
-c_max:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-c_mod:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect handlers
-c_mode:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind_walk
-c_move:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_moved, c_power
-c_moved:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_div, c_power
-c_name:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_equal_bytes
-c_name_primary:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_find, c_fn_at, c_lookup, c_result, c_slot, c_token, c_unsupported, c_use, c_word, word
-c_next:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_token
-c_next_decl:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_decl, c_kind, c_less
-c_nominal_primary:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_ctor_find, c_error, c_group, c_init, c_kind, c_next, c_result, c_token, c_unsupported, c_word
-c_order:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_expect_type, c_kind, c_next, c_postfix, c_primary, c_result
-c_param:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_pass, c_pass_next, c_take, c_token, c_type
-c_param_count:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next, c_param
-c_params_end:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next, c_param, c_take
-c_params_have_effects:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next, c_param, c_type_has_effects
-c_pass:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind
-c_pass_next:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next
-c_pattern_end:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_group, c_kind, c_next, c_token
-c_pattern_fields:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_bind_pattern, c_field_next, c_kind, c_name, c_next, c_result, c_take, c_token, c_type, c_unsupported
-c_payload_irrefutable:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_irrefutable_fields, c_kind, c_next, c_token
-c_place_shape:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_argument_end, c_group, c_token
-c_postfix:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_arg_count, c_args, c_empty, c_error, c_group, c_kind, c_live_loans, c_next, c_param_count, c_require_row, c_result, c_signature, c_unsupported
-c_power:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-c_primary:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_literal_primary, c_name_primary, c_nominal_primary
-c_push:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_limit, c_slot
-c_require_row:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_abort_frame, c_abort_loans, c_error, c_kind, c_next, c_row_satisfies, c_take, c_type
-c_reserved_decl:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_literal_name
-c_result:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-c_row_end:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next, c_take, c_type, c_unsupported, c_word
-c_row_has:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_compatible, c_kind, c_next, c_take, c_type
-c_row_satisfies:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_compatible, c_kind, c_next, c_row_has, c_take, c_type
-c_row_subset:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next, c_row_has, c_take, c_type
-c_same:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_limit, c_mode, c_name, c_next, c_row_subset, c_same_params, c_signature, c_token
-c_same_params:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next, c_param, c_same
-c_signature:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next, c_params_end, c_row_end, c_take, c_type
-c_slot:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect handlers
-c_statements:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_bind_pattern, c_error, c_expect_type, c_expr, c_irrefutable, c_kind, c_limit, c_mode, c_next, c_pattern_end, c_result, c_take, c_token, c_type, c_valid_type
-c_syntax_expr_end:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_group, c_kind, c_limit
-c_take:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_token, c_unsupported
-c_token:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: next_sig
-c_truncate:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_mod, c_power
-c_type:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_limit, c_next, c_signature, c_token, c_unsupported, c_word, word
-c_type_has_effects:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_limit, c_next, c_params_have_effects, c_signature
-c_unsupported:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-  calls refused: next_sig
-c_use:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_check_loans, c_error, c_mode, c_move, c_moved, c_slot
-c_valid_params:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next, c_param, c_valid_type
-c_valid_row:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_kind, c_next, c_take, c_type, c_valid_type
-c_valid_type:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_find, c_signature, c_token, c_unsupported, c_valid_params, c_valid_row
-c_validate_adts:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_decl, c_next, c_next_decl, c_validate_fields, c_validate_variants
-c_validate_decls:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_decl, c_error, c_find, c_kind, c_reserved_decl
-c_validate_fields:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_duplicate_field, c_error, c_field_next, c_kind, c_mode, c_next, c_take, c_token, c_type, c_valid_type
-c_validate_variants:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_error, c_find_variant, c_kind, c_next, c_token, c_validate_fields, c_variant_next
-c_variant_next:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_group, c_kind, c_next
-c_word:
-  Effect: effect Fail[CheckError] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: c_token, word
-check_escapes:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, source_byte
+binary: ok, 468 rows
+binary_rest: ok, 334 rows
+block: ok, 222 rows
+bump: ok, 134 rows
+c_abort_frame: ok, 1117 rows
+c_abort_loans: ok, 609 rows
+c_arg_count: ok, 68 rows
+c_arg_count_tail: ok, 200 rows
+c_arg_overlap: ok, 629 rows
+c_args: ok, 3566 rows
+c_argument_end: ok, 87 rows
+c_arm_has: ok, 365 rows
+c_assign: ok, 2592 rows
+c_bind_name: ok, 1932 rows
+c_bind_params: ok, 1372 rows
+c_bind_pattern: ok, 3865 rows
+c_block: ok, 1678 rows
+c_budget: ok, 309 rows
+c_callee_usage: ok, 150 rows
+c_check: ok, 180 rows
+c_check_loans: ok, 672 rows
+c_compare: ok, 2818 rows
+c_compatible: ok, 431 rows
+c_compatible_params: ok, 381 rows
+c_coverage: ok, 157 rows
+c_ctor_find: ok, 654 rows
+c_ctor_later: ok, 237 rows
+c_decl: ok, 425 rows
+c_decl_index: ok, 169 rows
+c_div: ok, 60 rows
+c_duplicate_field: ok, 182 rows
+c_empty: ok, 417 rows
+c_encode: ok, 27 rows
+c_equal_bytes: ok, 71 rows
+c_error: ok, 44 rows
+c_exhaust: ok, 1112 rows
+c_expect_type: ok, 89 rows
+c_expr: ok, 5784 rows
+c_field_next: ok, 213 rows
+c_find: ok, 199 rows
+c_find_variant: ok, 167 rows
+c_finish_error: ok, 131 rows
+c_fn_at: ok, 91 rows
+c_function: ok, 1434 rows
+c_functions: ok, 143 rows
+c_group: ok, 195 rows
+c_group_tail: ok, 165 rows
+c_if: ok, 3832 rows
+c_init: ok, 2372 rows
+c_irrefutable: ok, 487 rows
+c_irrefutable_fields: ok, 592 rows
+c_join: ok, 2906 rows
+c_join_shape: ok, 337 rows
+c_join_type: ok, 303 rows
+c_kind: ok, 36 rows
+c_kind_fields: ok, 438 rows
+c_kind_variants: ok, 241 rows
+c_kind_walk: ok, 670 rows
+c_less: ok, 38 rows
+c_less_bytes: ok, 95 rows
+c_limit: ok, 40 rows
+c_literal_name: ok, 166 rows
+c_literal_primary: ok, 5949 rows
+c_live_loans: ok, 1667 rows
+c_lookup: ok, 612 rows
+c_match: ok, 2379 rows
+c_match_arms: ok, 4478 rows
+c_max: ok, 21 rows
+c_mod: ok, 60 rows
+c_mode: ok, 53 rows
+c_move: ok, 652 rows
+c_moved: ok, 157 rows
+c_name: ok, 55 rows
+c_name_primary: ok, 2778 rows
+c_next: ok, 36 rows
+c_next_decl: ok, 275 rows
+c_nominal_primary: ok, 4188 rows
+c_order: ok, 2375 rows
+c_param: ok, 163 rows
+c_param_count: ok, 158 rows
+c_params_end: ok, 199 rows
+c_params_have_effects: ok, 196 rows
+c_pass: ok, 77 rows
+c_pass_next: ok, 91 rows
+c_pattern_end: ok, 192 rows
+c_pattern_fields: ok, 2656 rows
+c_payload_irrefutable: ok, 254 rows
+c_place_shape: ok, 147 rows
+c_postfix: ok, 3539 rows
+c_power: ok, 44 rows
+c_primary: ok, 2366 rows
+c_push: ok, 4738 rows
+c_require_row: ok, 1373 rows
+c_reserved_decl: ok, 431 rows
+c_result: ok, 424 rows
+c_row_end: ok, 300 rows
+c_row_has: ok, 271 rows
+c_row_satisfies: ok, 346 rows
+c_row_subset: ok, 264 rows
+c_same: ok, 579 rows
+c_same_params: ok, 381 rows
+c_signature: ok, 400 rows
+c_slot: ok, 279 rows
+c_statements: ok, 5500 rows
+c_syntax_expr_end: ok, 151 rows
+c_take: ok, 75 rows
+c_token: ok, 37 rows
+c_truncate: ok, 439 rows
+c_type: ok, 800 rows
+c_type_has_effects: ok, 248 rows
+c_unsupported: ok, 73 rows
+c_use: ok, 1799 rows
+c_valid_params: ok, 195 rows
+c_valid_row: ok, 256 rows
+c_valid_type: ok, 287 rows
+c_validate_adts: ok, 232 rows
+c_validate_decls: ok, 248 rows
+c_validate_fields: ok, 590 rows
+c_validate_variants: ok, 325 rows
+c_variant_next: ok, 153 rows
+c_word: ok, 56 rows
+check_escapes: ok, 211 rows
 check_main:
-  Effect: effect handlers
-clauses:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expect, expr, lower, pattern_list
-close: ok, 50 rows
-closure:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, effects, expect, expr, mode, params, ty
-compare_max:
-  calls refused: source_byte
-diag_code: ok, 92 rows
+  calls refused: $handler_body_128354_129110
+clauses: ok, 385 rows
+close: ok, 86 rows
+closure: ok, 721 rows
+compare_max: ok, 106 rows
+diag_code: ok, 145 rows
 digest: ok, 22 rows
-digit_count:
-  calls refused: source_byte
-dimension:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: dimension_factor, eat
-dimension_factor:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, bump, ty
-dimensions:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, dimension, dimension_factor, eat
-eat:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, bump
-effect_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, eat, expect, lower, nth, type_args, upper
-effects:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, effect_list, expect
-encode: ok, 14 rows
-enter:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_p
-expect:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: advance, fail_p
-exponent_end:
-  calls refused: scan_digits, source_byte
-expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, expr_inner
-expr_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_region, binary, closure, handle_expr, if_expr, match_expr, region_expr
-fail_i:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-fail_lexer:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-fail_p:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-fail_tok:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  Effect: `?`
-field_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expect, lower, required_mode, ty
-field_patterns:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, lower, pattern
-field_values:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expr, lower
-fields:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: expect, field_list
-first_significant:
-  calls refused: source_byte
-function:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_word, block, bump, effects, expect, generics, lower, params, ty, where_clauses
-functions:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, function
-generic_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, at_word, bump, eat, expect, fail_p, ident, nth, required_mode, trait_ref
-generics:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, expect, generic_list
-handle_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, block, clauses, eat, expect, expr, lower, pattern, type_args, upper
+digit_count: ok, 84 rows
+dimension: ok, 205 rows
+dimension_factor: ok, 231 rows
+dimensions: ok, 347 rows
+eat: ok, 130 rows
+effect_list: ok, 825 rows
+effects: ok, 277 rows
+encode: ok, 22 rows
+enter: ok, 111 rows
+expect: ok, 135 rows
+exponent_end: ok, 139 rows
+expr: ok, 212 rows
+expr_inner: ok, 501 rows
+fail_i: ok, 36 rows
+fail_lexer: ok, 45 rows
+fail_p: ok, 70 rows
+fail_tok: ok, 40 rows
+field_list: ok, 561 rows
+field_patterns: ok, 491 rows
+field_values: ok, 491 rows
+fields: ok, 151 rows
+first_significant: ok, 64 rows
+function: ok, 822 rows
+functions: ok, 140 rows
+generic_list: ok, 1051 rows
+generics: ok, 244 rows
+handle_expr: ok, 1001 rows
 hex_digit: ok, 39 rows
-ident:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, fail_p, nth
-if_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, if_inner
-if_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, block, eat, expect, if_expr, restricted
-impl_item:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_word, bump, expect, fail_p, functions, generics, nth, ty
-int_over:
-  calls refused: compare_max, digit_count, first_significant, is_hex_literal
-int_small:
-  calls refused: is_hex_literal, small_value
+ident: ok, 219 rows
+if_expr: ok, 150 rows
+if_inner: ok, 417 rows
+impl_item: ok, 688 rows
+int_over: ok, 189 rows
+int_small: ok, 82 rows
 is_digit: ok, 22 rows
 is_hex: ok, 75 rows
-is_hex_literal:
-  calls refused: source_byte
+is_hex_literal: ok, 70 rows
 is_ident: ok, 38 rows
 is_lower_start: ok, 35 rows
 is_space: ok, 61 rows
 is_trivia: ok, 35 rows
 is_upper: ok, 22 rows
-item:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_trait_or_model, at_word, bump, expect, fail_p, fields, function, functions, generics, impl_item, mode, nth, upper, variants
-items:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, item
+item: ok, 1715 rows
+items: ok, 197 rows
 json_escape: ok, 87 rows
-keyword:
-  calls refused: word
+keyword: ok, 254 rows
 kind: ok, 15 rows
 leave: ok, 49 rows
-lex_at:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: keyword, number, punct, scan_block, scan_ident, scan_line, scan_space, scan_string, source_byte
-lex_digest:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_until_eof
+lex_at: ok, 432 rows
+lex_digest: ok, 78 rows
 lex_main:
-  Effect: effect handlers
-lex_step:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_lexer, lex_at
-lex_steps:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_step
-lex_until_eof:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_steps
-literal:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, check_escapes, fail_p, int_over, nth
-lower:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, fail_p, nth
-match_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: arms, expect, restricted
+  calls refused: $handler_body_45657_45885
+lex_step: ok, 161 rows
+lex_steps: ok, 167 rows
+lex_until_eof: ok, 89 rows
+literal: ok, 301 rows
+lower: ok, 206 rows
+match_expr: ok, 239 rows
 max_depth: ok, 6 rows
 max_tokens: ok, 6 rows
 max_u64_digit: ok, 186 rows
-mix: ok, 16 rows
-mix_token: ok, 25 rows
-mode:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump
-next_sig:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: lex_at
-nth:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: nth_from
-nth_from:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: next_sig
-number:
-  calls refused: exponent_end, scan_decimal, scan_digits, scan_hex, source_byte
+mix: ok, 30 rows
+mix_token: ok, 72 rows
+mode: ok, 156 rows
+next_sig: ok, 59 rows
+nth: ok, 82 rows
+nth_from: ok, 76 rows
+number: ok, 270 rows
 offset_basis: ok, 6 rows
-open: ok, 53 rows
-pack:
-  calls refused: source_byte
-params:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, lower, pass, place_tree, ty
-parse_digest:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: items, lex_digest, next_sig
+open: ok, 89 rows
+pack: ok, 43 rows
+params: ok, 706 rows
+parse_digest: ok, 186 rows
 parse_main:
-  Effect: effect handlers
-pass:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump
-pattern:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, pattern_inner
-pattern_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_literal, bump, eat, expect, fail_p, field_patterns, literal, nth, pattern_list, upper
-pattern_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, pattern
-place_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, expect, lower, place_list, place_tree
-place_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, place_tree
-place_tree:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, place_inner
-postfix:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, postfix_op
-postfix_op:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: args, bump, expect, expr, fail_p, lower, nth, postfix, starts_type_args, type_args
+  calls refused: $handler_body_46048_46279
+pass: ok, 156 rows
+pattern: ok, 212 rows
+pattern_inner: ok, 1405 rows
+pattern_list: ok, 316 rows
+place_inner: ok, 447 rows
+place_list: ok, 307 rows
+place_tree: ok, 144 rows
+postfix: ok, 211 rows
+postfix_op: ok, 1046 rows
 precedence: ok, 254 rows
-primary:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, primary_inner
-primary_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_literal, block, bump, eat, expect, fail_p, field_values, ident, literal, nth, tuple_values
-primitive:
-  calls refused: word
-punct:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_tok, source_byte
-region_expr:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: block, bump, eat, expect, fail_p, int_over, int_small, lower, nth
-required_mode:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_p, mode, nth
-restricted:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: expr
-scan_block:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, source_byte
-scan_decimal:
-  calls refused: source_byte
-scan_digits:
-  calls refused: source_byte
-scan_hex:
-  calls refused: source_byte
-scan_ident:
-  calls refused: source_byte
-scan_line:
-  calls refused: source_byte
-scan_space:
-  calls refused: source_byte
-scan_string:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: fail_i, source_byte
-small_value:
-  calls refused: source_byte
-source_byte:
-  Effect: effect handlers
-source_leaf_0: ok, 523 rows
+primary: ok, 150 rows
+primary_inner: ok, 952 rows
+primitive: ok, 108 rows
+punct: ok, 972 rows
+region_expr: ok, 615 rows
+required_mode: ok, 226 rows
+restricted: ok, 147 rows
+scan_block: ok, 221 rows
+scan_decimal: ok, 49 rows
+scan_digits: ok, 34 rows
+scan_hex: ok, 34 rows
+scan_ident: ok, 34 rows
+scan_line: ok, 47 rows
+scan_space: ok, 34 rows
+scan_string: ok, 183 rows
+small_value: ok, 108 rows
+source_byte: ok, 56 rows
+source_leaf_0: ok, 541 rows
 source_len: ok, 6 rows
-starts_type_args:
-  calls refused: primitive
-statements:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, at_word, eat, expect, expr, fail_p, nth, pattern, ty
-text_is:
-  calls refused: word
+starts_type_args: ok, 68 rows
+statements: ok, 994 rows
+text_is: ok, 47 rows
 tok: ok, 16 rows
-trait_ref:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, fail_p, nth, type_args, upper
-tuple_values:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, expr
-ty:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: enter, ty_inner
-ty_inner:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, bump, dimensions, effects, expect, fail_p, ident, mode, nth, ty, ty_list, ty_params, type_args
-ty_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, ty
-ty_params:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, pass, ty
-type_arg:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: bump, eat, fail_p, lower, nth, primitive, ty, type_args, upper
-type_arg_list:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at_end, eat, type_arg
-type_args:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: eat, enter, expect, type_arg_list
-upper:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: expect
-variants:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, at_end, eat, expect, fields, ty_list, upper
-where_clauses:
-  Effect: effect Fail[Diag] (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)
-  calls refused: at, eat, expect, trait_ref, ty
+trait_ref: ok, 232 rows
+tuple_values: ok, 313 rows
+ty: ok, 212 rows
+ty_inner: ok, 1235 rows
+ty_list: ok, 313 rows
+ty_params: ok, 347 rows
+type_arg: ok, 1010 rows
+type_arg_list: ok, 313 rows
+type_args: ok, 330 rows
+upper: ok, 75 rows
+variants: ok, 617 rows
+where_clauses: ok, 358 rows
 with_flags: ok, 43 rows
-word:
-  calls refused: pack
+word: ok, 47 rows
 

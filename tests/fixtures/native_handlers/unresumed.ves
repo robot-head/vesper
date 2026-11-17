@@ -1,0 +1,28 @@
+// A non-linear effect whose clause does not resume: the handled body is
+// abandoned and the clause's value is the value of the handle.
+effect Stop {
+    fn stop(sink code: i64) -> i64;
+}
+
+fn count(sink n: i64) -> i64 eff [Fail[ArithOverflow], Stop] {
+    if n == 5 {
+        Stop::stop(n * 7)
+    } else {
+        count(n + 1) + 1
+    }
+}
+
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        let a = handle Stop in {
+            count(0)
+        } with {
+            return value => value,
+            stop(code, resume) => code + 100,
+        };
+        a + 1
+    } with {
+        return value => value,
+        raise(overflow, resume) => -1,
+    }
+}

@@ -148,7 +148,7 @@ fn detail(e: &VerifiedError) -> String {
 const UNPLANNED: &str = "call to unplanned function ";
 
 /// Cover `roots` (every function with a body when `None`) and everything
-/// they call.
+/// they call, including the nested functions of `handle` expressions.
 pub fn coverage(
     world: &World,
     roots: Option<&BTreeSet<String>>,
@@ -158,79 +158,66 @@ pub fn coverage(
     if optimize {
         crate::ir_opt::optimize(world, &mut program).map_err(VerifiedError::Invalid)?;
     }
-    let mut names: BTreeSet<String> = match roots {
-        Some(r) => r.clone(),
-        None => program.functions.keys().cloned().collect(),
+    let roots: Vec<String> = match roots {
+        Some(r) => r.iter().cloned().collect(),
+        None => program
+            .functions
+            .keys()
+            .filter(|n| !n.starts_with('$'))
+            .cloned()
+            .collect(),
     };
-    let mut queue: Vec<String> = names.iter().cloned().collect();
-    while let Some(name) = queue.pop() {
-        if let Some(f) = program.functions.get(&name) {
-            for c in lower::callees(f) {
-                if names.insert(c.clone()) {
-                    queue.push(c.clone());
-                }
-            }
-        }
-    }
     let mut refusals: BTreeMap<String, Vec<VerifiedError>> = BTreeMap::new();
-    let mut plan = lower::Plan {
-        functions: vec![],
-        index: BTreeMap::new(),
-    };
-    let mut label = super::machine::FIRST_FREE_LABEL;
-    for name in &names {
-        let mut own = lower::signature_refusals(world, &program, name);
-        // A function refused only for its effect row is still lowered, so
-        // its body's refusals are listed too.
-        let effects_only = own.iter().all(|e| {
-            matches!(
-                e,
-                VerifiedError::Unsupported {
-                    construct: Unsupported::Effect,
-                    ..
-                }
-            )
-        });
-        if effects_only {
-            match lower::planned_with(world, &program, name, label, false) {
-                Ok(p) => {
-                    plan.index.insert(name.clone(), plan.functions.len());
-                    plan.functions.push(p);
-                    label += 2;
-                }
-                Err(e) => own.push(e),
-            }
-        }
-        refusals.insert(name.clone(), own);
-    }
+    let plan = lower::plan_with(world, &program, &roots, usize::MAX, Some(&mut refusals))?;
+    // Everything the plan reached or refused.
+    let mut names: BTreeSet<String> = refusals.keys().cloned().collect();
+    names.extend(plan.functions.iter().map(|f| f.name.clone()));
     let mut rows = BTreeMap::new();
-    let mut next_label = label;
+    let mut next_label = plan
+        .functions
+        .last()
+        .map(|f| f.label + 2)
+        .unwrap_or(super::machine::FIRST_FREE_LABEL);
     for index in 0..plan.functions.len() {
         let name = plan.functions[index].name.clone();
-        let body =
-            lower::function_refusals(world, &program, &plan, index, &mut next_label, usize::MAX);
-        let own = refusals.get_mut(&name).expect("planned function");
-        match body {
-            Ok((lowered, found)) => {
-                let found: Vec<_> = found
-                    .into_iter()
-                    .filter(|e| {
-                        !matches!(e, VerifiedError::Unsupported {
-                            construct: Unsupported::ExternalFunction,
-                            detail,
-                            ..
-                        } if detail.starts_with(UNPLANNED))
-                    })
-                    .collect();
-                if found.is_empty() {
-                    rows.insert(name, lowered.rows.len());
-                }
-                own.extend(found);
-            }
-            Err(e) => own.push(e),
+        let mut found = vec![];
+        let lowered =
+            lower::function_refusals(world, &program, &plan, index, &mut next_label, &mut found);
+        found.retain(|e| {
+            !matches!(e, VerifiedError::Unsupported {
+                construct: Unsupported::ExternalFunction,
+                detail,
+                ..
+            } if detail.starts_with(UNPLANNED))
+                && !matches!(e, VerifiedError::Invalid(d) if d.starts_with("unplanned "))
+        });
+        let own = refusals.entry(name.clone()).or_default();
+        // A broken invariant after a planning refusal is its consequence.
+        if !own.is_empty() {
+            found.retain(|e| !matches!(e, VerifiedError::Invalid(_)));
         }
+        if let (Some(l), true) = (lowered, found.is_empty() && own.is_empty()) {
+            rows.insert(name, l.rows.len());
+        }
+        own.extend(found);
     }
-    // A function compiles when it and all its callees have no refusal.
+    // The functions each one depends on: direct calls and the nested
+    // functions of its `handle` expressions.
+    let deps = |name: &str| -> Vec<String> {
+        let Some(f) = program.functions.get(name) else {
+            return vec![];
+        };
+        let mut out: Vec<String> = lower::callees(f).cloned().collect();
+        for i in f.blocks.iter().flat_map(|b| &b.instructions) {
+            if let crate::ir::Op::Handle { expr, .. } = &i.op
+                && let Some(h) = plan.handlers.get(&(expr.span.start, expr.span.end))
+            {
+                out.extend([h.body.clone(), h.ret.clone(), h.raise.clone()]);
+            }
+        }
+        out.retain(|c| c != name);
+        out
+    };
     let mut broken: BTreeSet<String> = refusals
         .iter()
         .filter(|(_, r)| !r.is_empty())
@@ -240,12 +227,7 @@ pub fn coverage(
         let more: Vec<String> = names
             .iter()
             .filter(|n| !broken.contains(*n))
-            .filter(|n| {
-                program
-                    .functions
-                    .get(*n)
-                    .is_some_and(|f| lower::callees(f).any(|c| broken.contains(c)))
-            })
+            .filter(|n| deps(n).iter().any(|c| broken.contains(c)))
             .cloned()
             .collect();
         if more.is_empty() {
@@ -258,16 +240,10 @@ pub fn coverage(
         .map(|name| FunctionCoverage {
             name: name.clone(),
             refusals: refusals.remove(name).unwrap_or_default(),
-            refused_callees: program
-                .functions
-                .get(name)
-                .map(|f| {
-                    lower::callees(f)
-                        .filter(|c| *c != name && broken.contains(*c))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default(),
+            refused_callees: deps(name)
+                .into_iter()
+                .filter(|c| broken.contains(c))
+                .collect(),
             rows: rows.get(name).copied().unwrap_or(0),
         })
         .collect();

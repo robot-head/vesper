@@ -23,7 +23,9 @@ pub enum TranslateError {
     /// Access bits with no supported Vulkan access (raw remaining bits).
     UnsupportedAccess(Access),
     UnsupportedLayout(Layout),
-    /// `SYNC_SPLIT` barriers would need `vkCmdSetEvent2`/`vkCmdWaitEvents2`.
+    /// A `SYNC_SPLIT` half reached the per-barrier translation. Split
+    /// barriers are paired per queue stream first ([`crate::split`]) and
+    /// translated as the whole barrier; an unpaired half is this error.
     SplitBarrier,
     /// The planner never emits `LayoutAfter = UNDEFINED`; a hand-built one is
     /// rejected because Vulkan forbids transitioning *to* `UNDEFINED`.
@@ -41,7 +43,7 @@ impl std::fmt::Display for TranslateError {
             Self::UnsupportedSync(s) => write!(f, "no Vulkan stage for D3D12 sync {s}"),
             Self::UnsupportedAccess(a) => write!(f, "no Vulkan access for D3D12 access {a}"),
             Self::UnsupportedLayout(l) => write!(f, "no Vulkan image layout for D3D12 layout {l}"),
-            Self::SplitBarrier => f.write_str("split barriers are not supported"),
+            Self::SplitBarrier => f.write_str("unpaired split barrier half"),
             Self::UndefinedLayoutAfter => f.write_str("layout after must not be UNDEFINED"),
             Self::PlaneOutOfRange {
                 first_plane,
@@ -220,13 +222,13 @@ pub enum Planes {
 }
 
 impl Planes {
-    fn count(self) -> u32 {
+    pub fn count(self) -> u32 {
         match self {
             Planes::Color | Planes::Depth => 1,
             Planes::DepthStencil => 2,
         }
     }
-    fn aspect(self, plane: u32) -> vk::ImageAspectFlags {
+    pub fn aspect(self, plane: u32) -> vk::ImageAspectFlags {
         match (self, plane) {
             (Planes::Color, _) => vk::ImageAspectFlags::COLOR,
             (_, 0) => vk::ImageAspectFlags::DEPTH,
@@ -350,6 +352,187 @@ pub fn barrier(b: &Barrier, planes: Planes) -> Result<Barrier2, TranslateError> 
     match b {
         Barrier::Buffer(b) => buffer_barrier(b).map(Barrier2::Buffer),
         Barrier::Texture(t) => image_barrier(t, planes).map(Barrier2::Image),
+    }
+}
+
+/// What a queue can execute, from its Vulkan family flags and its Ignis
+/// queue kind (a D3D12 compute queue never runs graphics work, even on a
+/// universal Vulkan family).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueueCaps {
+    pub graphics: bool,
+    pub compute: bool,
+}
+
+impl QueueCaps {
+    pub const UNIVERSAL: QueueCaps = QueueCaps {
+        graphics: true,
+        compute: true,
+    };
+    pub const COMPUTE: QueueCaps = QueueCaps {
+        graphics: false,
+        compute: true,
+    };
+    pub const TRANSFER: QueueCaps = QueueCaps {
+        graphics: false,
+        compute: false,
+    };
+
+    /// Capabilities of an Ignis queue of `kind` on a family with `flags`.
+    pub fn new(kind: vesper_ignis::QueueKind, flags: vk::QueueFlags) -> Self {
+        use vesper_ignis::QueueKind::*;
+        let (g, c) = match kind {
+            Direct => (true, true),
+            Compute => (false, true),
+            Copy => (false, false),
+        };
+        QueueCaps {
+            graphics: g && flags.contains(vk::QueueFlags::GRAPHICS),
+            compute: c && flags.contains(vk::QueueFlags::COMPUTE),
+        }
+    }
+
+    /// `vkCmdSetEvent2`/`vkCmdWaitEvents2` need a graphics or compute
+    /// capable command pool; transfer-only queues collapse split barriers.
+    pub fn events(self) -> bool {
+        self.graphics || self.compute
+    }
+}
+
+const GRAPHICS_STAGES: u64 = S2::DRAW_INDIRECT.as_raw()
+    | S2::VERTEX_INPUT.as_raw()
+    | S2::INDEX_INPUT.as_raw()
+    | S2::VERTEX_ATTRIBUTE_INPUT.as_raw()
+    | S2::VERTEX_SHADER.as_raw()
+    | S2::TESSELLATION_CONTROL_SHADER.as_raw()
+    | S2::TESSELLATION_EVALUATION_SHADER.as_raw()
+    | S2::GEOMETRY_SHADER.as_raw()
+    | S2::PRE_RASTERIZATION_SHADERS.as_raw()
+    | S2::FRAGMENT_SHADER.as_raw()
+    | S2::EARLY_FRAGMENT_TESTS.as_raw()
+    | S2::LATE_FRAGMENT_TESTS.as_raw()
+    | S2::COLOR_ATTACHMENT_OUTPUT.as_raw()
+    | S2::ALL_GRAPHICS.as_raw()
+    | S2::RESOLVE.as_raw()
+    | S2::BLIT.as_raw();
+const COMPUTE_STAGES: u64 = S2::COMPUTE_SHADER.as_raw() | S2::DRAW_INDIRECT.as_raw();
+const ANY_QUEUE_STAGES: u64 = S2::TOP_OF_PIPE.as_raw()
+    | S2::BOTTOM_OF_PIPE.as_raw()
+    | S2::ALL_COMMANDS.as_raw()
+    | S2::HOST.as_raw()
+    | S2::COPY.as_raw()
+    | S2::CLEAR.as_raw()
+    | S2::ALL_TRANSFER.as_raw();
+
+/// Removes the stages a queue with `caps` cannot execute
+/// (`VUID-vkCmdPipelineBarrier2-srcStageMask-03849` and friends). A
+/// non-empty mask that loses every stage becomes `ALL_COMMANDS`, so the
+/// execution dependency is kept (conservatively) rather than dropped.
+pub fn filter_stages(stages: S2, caps: QueueCaps) -> S2 {
+    if stages == S2::NONE {
+        return S2::NONE;
+    }
+    let mut allowed = ANY_QUEUE_STAGES;
+    if caps.graphics {
+        allowed |= GRAPHICS_STAGES;
+    }
+    if caps.compute {
+        allowed |= COMPUTE_STAGES;
+    }
+    let kept = stages.as_raw() & allowed;
+    if kept == 0 {
+        S2::ALL_COMMANDS
+    } else {
+        S2::from_raw(kept)
+    }
+}
+
+/// Removes the accesses none of `stages` can perform
+/// (`VUID-VkMemoryBarrier2-srcAccessMask-*`): for example the depth
+/// attachment accesses of a D3D12 `ALL_SHADING` scope on a compute queue.
+pub fn filter_accesses(access: A2, stages: S2) -> A2 {
+    if stages.intersects(S2::ALL_COMMANDS) {
+        return access;
+    }
+    let graphics = stages.intersects(S2::ALL_GRAPHICS);
+    let any = |m: S2| graphics || stages.intersects(m);
+    let shader = S2::from_raw(
+        S2::VERTEX_SHADER.as_raw()
+            | S2::TESSELLATION_CONTROL_SHADER.as_raw()
+            | S2::TESSELLATION_EVALUATION_SHADER.as_raw()
+            | S2::GEOMETRY_SHADER.as_raw()
+            | S2::PRE_RASTERIZATION_SHADERS.as_raw()
+            | S2::FRAGMENT_SHADER.as_raw(),
+    );
+    let compute_shader = stages.intersects(S2::COMPUTE_SHADER);
+    let transfer = S2::from_raw(
+        S2::COPY.as_raw()
+            | S2::CLEAR.as_raw()
+            | S2::RESOLVE.as_raw()
+            | S2::BLIT.as_raw()
+            | S2::ALL_TRANSFER.as_raw(),
+    );
+    let table: [(A2, bool); 14] = [
+        (
+            A2::INDIRECT_COMMAND_READ,
+            stages.intersects(S2::DRAW_INDIRECT) || graphics,
+        ),
+        (A2::INDEX_READ, any(S2::VERTEX_INPUT | S2::INDEX_INPUT)),
+        (
+            A2::VERTEX_ATTRIBUTE_READ,
+            any(S2::VERTEX_INPUT | S2::VERTEX_ATTRIBUTE_INPUT),
+        ),
+        (A2::UNIFORM_READ, any(shader) || compute_shader),
+        (A2::SHADER_SAMPLED_READ, any(shader) || compute_shader),
+        (A2::SHADER_STORAGE_READ, any(shader) || compute_shader),
+        (A2::SHADER_STORAGE_WRITE, any(shader) || compute_shader),
+        (A2::INPUT_ATTACHMENT_READ, any(S2::FRAGMENT_SHADER)),
+        (A2::COLOR_ATTACHMENT_READ, any(S2::COLOR_ATTACHMENT_OUTPUT)),
+        (A2::COLOR_ATTACHMENT_WRITE, any(S2::COLOR_ATTACHMENT_OUTPUT)),
+        (
+            A2::DEPTH_STENCIL_ATTACHMENT_READ,
+            any(S2::EARLY_FRAGMENT_TESTS | S2::LATE_FRAGMENT_TESTS),
+        ),
+        (
+            A2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            any(S2::EARLY_FRAGMENT_TESTS | S2::LATE_FRAGMENT_TESTS),
+        ),
+        (A2::TRANSFER_READ, stages.intersects(transfer) || graphics),
+        (A2::TRANSFER_WRITE, stages.intersects(transfer) || graphics),
+    ];
+    let mut out = access;
+    for (bit, ok) in table {
+        if !ok {
+            out &= !bit;
+        }
+    }
+    out
+}
+
+/// Narrows a translated buffer barrier to what a queue with `caps` can
+/// execute and access.
+pub fn filter_buffer_barrier(b: BufferBarrier2, caps: QueueCaps) -> BufferBarrier2 {
+    let src_stage = filter_stages(b.src_stage, caps);
+    let dst_stage = filter_stages(b.dst_stage, caps);
+    BufferBarrier2 {
+        src_stage,
+        src_access: filter_accesses(b.src_access, src_stage),
+        dst_stage,
+        dst_access: filter_accesses(b.dst_access, dst_stage),
+    }
+}
+
+/// Narrows a translated image barrier to what a queue with `caps` can
+/// execute and access.
+pub fn filter_image_barrier(b: ImageBarrier2, caps: QueueCaps) -> ImageBarrier2 {
+    let src_stage = filter_stages(b.src_stage, caps);
+    let dst_stage = filter_stages(b.dst_stage, caps);
+    ImageBarrier2 {
+        src_stage,
+        src_access: filter_accesses(b.src_access, src_stage),
+        dst_stage,
+        dst_access: filter_accesses(b.dst_access, dst_stage),
+        ..b
     }
 }
 
@@ -584,5 +767,42 @@ mod tests {
                 .as_raw(),
             0x800
         );
+    }
+
+    #[test]
+    fn stage_masks_are_filtered_by_queue_capability() {
+        let all_shading = stages(Sync::ALL_SHADING).unwrap();
+        let on_compute = filter_stages(all_shading, QueueCaps::COMPUTE);
+        assert_eq!(on_compute, S2::COMPUTE_SHADER);
+        assert_eq!(
+            filter_stages(all_shading, QueueCaps::UNIVERSAL),
+            all_shading
+        );
+        // A purely graphics scope on a transfer queue keeps an execution
+        // dependency instead of vanishing.
+        assert_eq!(
+            filter_stages(S2::COLOR_ATTACHMENT_OUTPUT, QueueCaps::TRANSFER),
+            S2::ALL_COMMANDS
+        );
+        assert_eq!(filter_stages(S2::NONE, QueueCaps::TRANSFER), S2::NONE);
+        let copy = stages(Sync::COPY).unwrap();
+        assert_eq!(filter_stages(copy, QueueCaps::TRANSFER), copy);
+        // Depth accesses are dropped once no fragment-test stage remains.
+        let ds = accesses(
+            Access::DEPTH_STENCIL_WRITE | Access::SHADER_RESOURCE,
+            S2::ALL_COMMANDS,
+        )
+        .unwrap();
+        let kept = filter_accesses(ds, on_compute);
+        assert!(kept.contains(A2::SHADER_SAMPLED_READ));
+        assert!(!kept.intersects(A2::DEPTH_STENCIL_ATTACHMENT_WRITE));
+        assert_eq!(filter_accesses(ds, S2::ALL_COMMANDS), ds);
+        assert!(
+            QueueCaps::new(
+                vesper_ignis::QueueKind::Compute,
+                vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE
+            ) == QueueCaps::COMPUTE
+        );
+        assert!(!QueueCaps::TRANSFER.events());
     }
 }

@@ -48,13 +48,18 @@
 //! IEEE-754 `+ - * /` (round to nearest, ties to even; no fast-math),
 //! negation and ordered comparisons; their Lean rows are proved relative to
 //! one shared binary64 semantics (Lean's `Float`), not against the hardware.
+//! Abort-only `Fail[E]` (Milestone 7, `fail.rs`): `?`, `Fail::raise` and
+//! non-resuming `handle Fail[E]` are structured early exits. A function
+//! that may raise returns a status word before its result, callers test it
+//! after each call, and implicit `ArithOverflow`/`RuntimeError` failures
+//! that a handler catches are redirected by a trap scope ([`Lir::Scope`]).
 //! Dynamic indexing of a tuple whose elements have one shape is a
-//! first-match chain on the index, also from existing rows; out of range
-//! raises `Fail[RuntimeError]`. [`coverage`] lists every refusal of a whole
-//! program rather than the first.
-//! Handlers and every other effect, `f32`, `f64` remainder, strings,
-//! recursive enums, closures, generic functions, vectors and regions are
-//! rejected.
+//! first-match chain on the index; out of range raises
+//! `RuntimeError::IndexOutOfBounds`. [`coverage`] lists every refusal of a
+//! whole program rather than the first.
+//! Resuming or stateful handlers and every other effect, `f32`, `f64`
+//! remainder, strings, recursive enums, closures, generic functions, vectors
+//! and regions are rejected.
 //!
 //! Values live in frame slots, never in registers across slot-IR rows: there
 //! is no register allocator, so the code is slow but each row is local, which
@@ -67,11 +72,13 @@ mod asm;
 mod cli;
 mod container;
 mod coverage;
+mod fail;
 mod lower;
 mod machine;
 mod riscv64;
 mod x86_64;
 
+pub use aarch64::encoding_listing as a64_encoding_listing;
 pub use cli::build_command;
 pub use coverage::{Coverage, FunctionCoverage, coverage};
 pub use machine::{
