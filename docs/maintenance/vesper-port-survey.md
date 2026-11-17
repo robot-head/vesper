@@ -14,6 +14,7 @@ The strategy it assumes was agreed in the project thread:
 ## Summary
 
 - **The language is the bottleneck, not the backend.** Today Vesper source has `u8`, `u32`, `u64`, `i64`, `f64`, `bool`, tuples, structs, enums, generics, static traits, closures, `Box[T]`, regions (`RegionBox`, `Watermark`), `TiledSeq`, effects and handlers, and loops only as tail recursion. It has no growable sequence, no byte buffer or slice, no string operations beyond literals, no map or set, no narrow integers (`i8`, `i16`, `i32`, `u16`, `usize`), no `f32`, and no dynamic dispatch. The self-hosted front end says so in its own header (`packages/vesper-compiler/src/lexer.ves`): its source is a function `source_byte(i)` and its CST is folded into a digest, because there is no buffer to hold either. Every crate below needs at least growable sequences and byte buffers. Most need maps and strings too.
+- **There is no package system to put one in.** Loom checks a package as one compilation unit and source has no `use` of another package, so F0 (multi-file packages and imports) comes before everything else.
 - **There is no Vesper standard library yet.** The manuscript names `@vesper-std/alloc` and `@vesper-std/collections`, but no package exists: no prelude, no `Option`/`Result` helpers, no collections, no formatting. Building one is the first step of the porting kit.
 - **Ported library crates should target the native (Cranelift) backend first.** The verified backend matters for the bootstrap trust chain (the compiler and what it links). After #850, #857 and #859 it covers the scalar subset, structs, tuples, non-recursive enums and `match`, `f64`, abort-only `Fail[E]`, generics by monomorphization, and regions on Linux ELF. It still rejects closures, recursive enums, strings, resuming handlers, `f32`, FFI, vectors and heap memory on macOS and Windows. Library ports should not wait on it. Each verified-backend milestone widens what the compiler-adjacent crates (wave P4) can rely on.
 - **70 crates, 335k lines of Rust source, 4,035 `#[test]` functions.** 16 crates (62k lines) are port-first, 13 are port-later (115k lines), 14 are compiler toolchain crates that move with self-hosting Stage 2 (53k lines), and 27 stay in Rust behind an `extern` boundary (106k lines). The root `vesper` package (134k lines in `src/`) is the compiler and is out of scope here: it is Stage 2 of the bootstrap.
@@ -140,6 +141,7 @@ Each feature gets its own lane, ahead of the ports that need it. The order is th
 
 | # | Feature | Unblocks | Status on main |
 |---|---|---|---|
+| F0 | **Multi-file packages and imports**: Loom assembles a package from all its `src/**/*.ves` files, and source can `use` items from another package (`@vesper-std/...`) with `pub` visibility and qualified names | every port, and `@vesper-std` itself | none: Loom checks one compilation unit, and multi-file tools (doctests, the Stage 1 front end) concatenate files whose top-level names must be disjoint |
 | F1 | **Growable sequences and byte buffers**: the manuscript's `ChunkSeq[T]` (chapter 13), byte buffers, borrowed slices `Slice[T]` / `RegionSlice[r, T]` with bounds-checked indexing, region-backed and heap-backed. `Vec[Elem, N]` is already the SIMD vector type, so the growable sequence must not be called `Vec` | every crate | `TiledSeq` and `RegionBox` only; source `RegionSlice`/`SlotArena` open in #588 |
 | F2 | **Strings**: UTF-8 `String`/`Str` with byte access, slicing, comparison, building, and integer/float formatting | all protocol and text crates: Prism, Beacon, Semver, Loom calculus/solver, Serde, Quarry catalog, every toolchain crate | literals only |
 | F3 | **Narrow integers** `i8 i16 i32 u16 usize` with checked, wrapping and bit operations, shifts, rotates, byte-order conversion | Warp TCP/BBR/wheel, Grammar, Serde, Tensor (`u16` for bf16/fp16), Quarry pages, eBPF codec | `u8 u32 u64 i64` only |
@@ -161,7 +163,7 @@ Each wave starts when the features it needs have merged. Inside a wave, crates a
 
 ### Wave P0: porting kit and prerequisites
 
-F1, F2, F3, F5, F6 and F8, plus the std library and harness below. Nothing ports before this wave lands. F4 can run in parallel because only Tensor in P1 needs it.
+F0, F1, F2, F3, F5, F6 and F8, plus the std library and harness below. Nothing ports before this wave lands. F4 can run in parallel because only Tensor in P1 needs it.
 
 ### Wave P1: pilots, then the three crates with specs
 
