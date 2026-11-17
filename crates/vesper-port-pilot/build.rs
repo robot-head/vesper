@@ -12,5 +12,50 @@ fn main() {
         #[cfg(feature = "vesper-port-divergent")]
         let port = port.edit("c >= 48 && c <= 57", "c >= 48 && c <= 58");
         port.build();
+        // The export ABI v2 library (#898). Its divergent build changes one
+        // thing per exported form, plus one Vesper-side free (the old
+        // sequence is dropped instead of cleared); tests/kit.rs and
+        // tests/kit_memory.rs must each catch theirs.
+        let kit = vesper_port_harness::Port::new("kit", "vesper/kit.ves")
+            .binding("port/kit.rs")
+            .rust_types("crate::kit");
+        #[cfg(feature = "vesper-port-divergent")]
+        let kit = KIT_EDITS
+            .iter()
+            .fold(kit, |kit, (from, to)| kit.edit(from, to));
+        kit.build();
     }
 }
+
+/// The kit's divergence edits, one per form (mirrored in BUILD.bazel).
+#[cfg(feature = "vesper-port-divergent")]
+const KIT_EDITS: &[(&str, &str)] = &[
+    // Sequence results: `sequence_results` fails.
+    (
+        "        s.push(wrapping_mul(i, i));",
+        "        s.push(wrapping_mul(i, wrapping_add(i, 1)));",
+    ),
+    // Slices: `slice_parameters` fails.
+    ("if c >= 48 && c <= 57 {", "if c >= 48 && c <= 58 {"),
+    // Owned handles: `owned_handles` fails.
+    (
+        "c.total = wrapping_add(c.total, v);",
+        "c.total = wrapping_add(c.total, wrapping_add(v, 1));",
+    ),
+    // Linear handles: `linear_handles` fails.
+    ("    id\n}", "    wrapping_add(id, 1)\n}"),
+    // Boxes and recursive enums: `recursive_enum_handles` fails.
+    (
+        "Tree::Leaf(v) => v,",
+        "Tree::Leaf(v) => wrapping_add(v, 1),",
+    ),
+    // Generic instances: `generic_instances` fails.
+    ("Greater => {", "Less => {"),
+    // `.vsys` imports: `vsys_imports` fails.
+    (
+        "wrapping_add(base, Clock::pilot_clock_ticks())",
+        "wrapping_sub(base, Clock::pilot_clock_ticks())",
+    ),
+    // One Vesper-side free omitted: tests/kit_memory.rs fails.
+    ("c.hits.clear();", "c.hits = ChunkSeq::new[u64]();"),
+];

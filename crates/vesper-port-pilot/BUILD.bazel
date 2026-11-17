@@ -26,9 +26,38 @@ vesper_port_object(
     target = VESPER_TARGET,
 )
 
+# The export ABI v2 library (#898), and its divergent build: the edits of
+# KIT_EDITS in build.rs, one per exported form plus one omitted free.
+vesper_port_object(
+    name = "kit_vesper",
+    src = "vesper/kit.ves",
+    library = "kit",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "kit_vesper_divergent",
+    src = "vesper/kit.ves",
+    edits = {
+        "        s.push(wrapping_mul(i, i));": "        s.push(wrapping_mul(i, wrapping_add(i, 1)));",
+        "if c >= 48 && c <= 57 {": "if c >= 48 && c <= 58 {",
+        "c.total = wrapping_add(c.total, v);": "c.total = wrapping_add(c.total, wrapping_add(v, 1));",
+        "    id\n}": "    wrapping_add(id, 1)\n}",
+        "Tree::Leaf(v) => v,": "Tree::Leaf(v) => wrapping_add(v, 1),",
+        "Greater => {": "Less => {",
+        "wrapping_add(base, Clock::pilot_clock_ticks())": "wrapping_sub(base, Clock::pilot_clock_ticks())",
+        "c.hits.clear();": "c.hits = ChunkSeq::new[u64]();",
+    },
+    library = "kit",
+    target = VESPER_TARGET,
+)
+
 rust_library(
     name = "port",
-    srcs = glob(["src/**/*.rs"]) + ["port/binding.rs"],
+    srcs = glob(["src/**/*.rs"]) + [
+        "port/binding.rs",
+        "port/kit.rs",
+    ],
     crate_features = ["vesper-port"],
     crate_name = "vesper_port_pilot",
     crate_root = "src/lib.rs",
@@ -39,10 +68,16 @@ rust_library(
 rust_test(
     name = "port_api_test",
     srcs = ["tests/api.rs"],
-    compile_data = [":pilot_vesper"],
+    compile_data = [
+        ":kit_vesper",
+        ":pilot_vesper",
+    ],
     crate_features = ["vesper-port"],
     edition = "2024",
-    rustc_flags = ["-Clink-arg=$(location :pilot_vesper)"],
+    rustc_flags = [
+        "-Clink-arg=$(location :pilot_vesper)",
+        "-Clink-arg=$(location :kit_vesper)",
+    ],
     deps = [":port"],
 )
 
@@ -50,18 +85,58 @@ rust_test(
     name = "_port_api_divergent.bin",
     srcs = ["tests/api.rs"],
     crate_name = "api_divergent",
-    compile_data = [":pilot_vesper_divergent"],
+    compile_data = [
+        ":kit_vesper",
+        ":pilot_vesper_divergent",
+    ],
     crate_features = ["vesper-port"],
     edition = "2024",
-    rustc_flags = ["-Clink-arg=$(location :pilot_vesper_divergent)"],
+    rustc_flags = [
+        "-Clink-arg=$(location :pilot_vesper_divergent)",
+        "-Clink-arg=$(location :kit_vesper)",
+    ],
     tags = ["manual"],
     deps = [":port"],
 )
 
+[
+    rust_test(
+        name = name,
+        srcs = [src],
+        compile_data = [
+            ":pilot_vesper",
+            kit,
+        ],
+        crate_features = ["vesper-port"],
+        crate_name = crate,
+        edition = "2024",
+        rustc_flags = [
+            "-Clink-arg=$(location :pilot_vesper)",
+            "-Clink-arg=$(location %s)" % kit,
+        ],
+        tags = tags,
+        deps = [":port"],
+    )
+    for name, src, crate, kit, tags in [
+        ("port_kit_test", "tests/kit.rs", "kit", ":kit_vesper", []),
+        ("port_kit_memory_test", "tests/kit_memory.rs", "kit_memory", ":kit_vesper", []),
+        ("_port_kit_divergent.bin", "tests/kit.rs", "kit_divergent", ":kit_vesper_divergent", ["manual"]),
+        ("_port_kit_memory_divergent.bin", "tests/kit_memory.rs", "kit_memory_divergent", ":kit_vesper_divergent", ["manual"]),
+    ]
+]
+
 rust_test(
     name = "port_divergence_detected",
     srcs = ["tests/divergence.rs"],
-    data = [":_port_api_divergent.bin"],
+    data = [
+        ":_port_api_divergent.bin",
+        ":_port_kit_divergent.bin",
+        ":_port_kit_memory_divergent.bin",
+    ],
     edition = "2024",
-    env = {"VESPER_PORT_DIVERGENT_TEST": "$(rootpath :_port_api_divergent.bin)"},
+    env = {
+        "VESPER_PORT_DIVERGENT_TEST": "$(rootpath :_port_api_divergent.bin)",
+        "VESPER_PORT_KIT_DIVERGENT_TEST": "$(rootpath :_port_kit_divergent.bin)",
+        "VESPER_PORT_KIT_MEMORY_DIVERGENT_TEST": "$(rootpath :_port_kit_memory_divergent.bin)",
+    },
 )

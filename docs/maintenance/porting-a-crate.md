@@ -27,12 +27,19 @@ Values cross the boundary as eight-byte words, using the layouts in
 - A scalar is one word.
 - A tuple or struct is its fields in order.
 - An enum is a tag word (the variant index) followed by the variant's fields.
+- A `ChunkSeq[T]` and a `Box[T]` are one word, a pointer. The sequence header
+  it points to is `{len, cap, data}`; `data` holds `len` elements packed at
+  their stride (1 byte for `u8` and `bool`, 4 for `u32` and `i32`, otherwise
+  the element's words).
+- A `Slice[T]` is the three-word view `{header, start, len}`.
 
 Calls use the platform C calling convention:
 
 - Scalars are passed as `i64`, and `f64` is passed as `f64`.
 - Aggregates are passed as a pointer to their words. The callee may overwrite
   those words, so the caller passes a scratch copy.
+- An `inout` parameter is passed as a pointer to its words, which the callee
+  updates in place.
 - An aggregate result is written through a pointer that comes before every
   other parameter.
 - A function with `Fail[E1], .., Fail[En]` in its row takes one more pointer
@@ -45,22 +52,107 @@ The binding maps the status word to `Result<T, E>`. With several `Fail` types,
 it maps to `Result<T, <Fn>Error>`, an enum with one variant per error type,
 named after the type.
 
+A library that uses only scalars, copy data and `Fail` keeps schema
+`vesper.native.export-abi/1`, byte for byte. Using any form below switches
+it to `vesper.native.export-abi/2` (#898), which adds:
+
+- **Runtime entry points.** `vesper_<lib>_seq_new(capacity, stride)`,
+  `vesper_<lib>_seq_free(seq)` and `vesper_<lib>_live_allocations()`. The
+  binding exposes them as `RUNTIME` and `live_allocations()`; the last one is
+  for leak tests.
+- **Sequences and slices.** A returned `ChunkSeq[T]` becomes `Vec<T>`.
+  `in Slice[T]` becomes `&[T]`, `inout Slice[T]` becomes `&mut [T]`,
+  `in ChunkSeq[T]` becomes `&[T]`, and `inout ChunkSeq[T]` becomes
+  `&mut Vec<T>`. Elements whose Rust layout is the packed one (`u8`, `u32`,
+  `i32`, `u64`, `i64`, `usize`, `isize`, `f64`, `bool`) are lent without a
+  copy (`vesper_port_abi::Abi::NATIVE`).
+- **Handles.** A non-`copy` struct or enum becomes an owned Rust type that
+  holds its words. Dropping it calls `vesper_<lib>_<Type>_drop`, which frees
+  every sequence and box the value owns. Functions named
+  `<type>_<method>` whose first parameter is the handle become methods:
+  `in` is `&self`, `inout` is `&mut self`, and `sink` consumes `self`. A
+  function returning the type becomes an associated constructor. A `linear`
+  type gets `#[must_use]` and no `Drop`: only a consuming call releases it.
+  `as_ref()` gives a borrowed view (`<Type>Ref`) that reads fields in place;
+  a sequence field reads as `vesper_port_abi::SeqRef`.
+- **Boxes and recursive enums.** A `Box[T]` field is read through the view,
+  so `enum Tree { Leaf(u64), Node(Box[Tree], Box[Tree]) }` becomes `Tree`,
+  and `tree.as_ref().view()` gives `TreeView::Node(TreeRef, TreeRef)`.
+- **Generic instances.** `// @export instance [name =] f[T, ..]` in the
+  source, or `--instance` on the command line, exports one instance as
+  `vesper_<lib>_<name>`. The default name is `f__t1__t2`, so the symbol stays
+  stable as long as the spelling does.
+- **`.vsys` imports.** `// @export vsys direct rust=<path>` followed by
+  `// | ` lines holding a `sys library` declaration imports C functions
+  (`eff [Ffi[Lib]]`) that the Rust crate itself provides at `<path>`. Write
+  `target = "@TARGET@", abi = "@ABI@"`; the compiler fills them in for the
+  object's target. The binding references the shim symbols, so the linker
+  keeps them.
+
+Directives are line comments that start with `// @export`. Anything else after
+`@export` is an error, so a typo cannot be ignored silently.
+
 What is exportable today:
 
 - Scalars: every integer kind (`u8 u16 u32 u64 usize i8 i16 i32 i64 isize`), `f64`, `bool` and `Unit`.
 - Tuples, and non-generic `copy` structs and enums built from exportable types.
 - `Option[T]`, `Result[T, E]`, `ArithOverflow` and `RuntimeError`.
-- Effect rows that hold only unlabeled `Fail[E]`.
+- Effect rows that hold only unlabeled `Fail[E]` and imported `Ffi[Lib]`.
+- `inout` scalars and aggregates.
+- `ChunkSeq[T]` results and `in`/`inout` parameters, and `Slice[T]`
+  parameters, of `copy` elements.
+- Handle types (non-`copy` structs and enums, affine or linear), with
+  sequence, box, `Option` and nested handle fields.
+- Instances of generic functions.
 
-Everything else is refused, with a message that names the function:
+Everything else is refused, with a message that names the function
+(`tests/native_export_v2.rs` lists every case):
 
-- generic functions
-- `inout` parameters
-- any other effect, including capability and foreign effects
-- strings, closures, region handles, boxes, sequences
-- affine and linear data
+- generic functions without an instance
+- a sequence, or a handle that owns a sequence, taken by value (`sink`):
+  native code does not free a dropped sequence yet, so take it `in` or
+  `inout`
+- a `Box[T]` as a parameter or result of its own (wrap it in a handle type)
+- any other effect, including capability effects and unlabeled rows
+- strings (until #896 lands), closures and region handles
+- generic user types
+- `.vsys` imports for targets `vesper-ffi` has no ABI for (for example
+  `x86_64-apple-darwin`)
 
-Sequences and strings get added to the ABI once P0 lanes 3 and 7 land.
+## Patterns for Rust APIs
+
+Many Rust APIs do not map onto the forms above one to one. These five
+patterns cover the common cases. Each has a pilot example in
+`crates/vesper-port-pilot` (`vesper/kit.ves`, `src/kit/patterns.rs`), and
+`tests/kit.rs` runs it against both builds.
+
+**(a) Owned handles.** A Rust type with private state and methods becomes a
+Vesper struct and `<type>_<method>` functions. The binding turns them into a
+Rust type with methods and `Drop`, so callers do not change. Example:
+`Counter` (`counter_new`, `counter_record`, `counter_hits`, ...) and the
+linear `Ticket`, which must be closed.
+
+**(b) Token slabs.** When the Rust API stores arbitrary `T` (closures, trait
+objects, borrowed data), keep the values in a Rust `Vec<Option<T>>` and give
+Vesper only the `u64` slot numbers. Vesper owns the logic (order, priority,
+expiry), and Rust owns the payloads. Example: `TokenSlab<T>` over `Tokens`.
+
+**(c) Sink closures become returned sequences.** A function that calls
+`f(item)` for every result returns a `ChunkSeq` of the results instead, and
+a thin Rust wrapper calls the closure. Example: `for_each_word` over
+`word_bounds`.
+
+**(d) A trait becomes a passed value or a command plan.** If the Rust code
+asks a trait object for a value (`clock.now()`), ask it in the wrapper and
+pass the answer in. Example: `is_expired`. If it tells the trait object to
+act (`transport.send(..)`), Vesper returns the actions as a sequence of a
+`copy` enum, and the wrapper applies them in order. Example: `broadcast` over
+`plan_sends`.
+
+**(e) Errors go through `Fail[E]`.** Declare the crate's error enum as a
+`copy enum` in Vesper and raise it with `Fail::raise(e)`. With
+`--rust-types`, the binding returns the crate's own Rust enum, so `?` and
+`Display` keep working. Example: `mean` and `mean_or_zero`.
 
 ## Steps
 

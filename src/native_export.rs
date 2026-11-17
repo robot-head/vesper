@@ -1,5 +1,6 @@
 //! `vesper build --lib`: a native library that Rust (or C) code links
-//! (port wave P0 lane 6, #878; survey `docs/maintenance/vesper-port-survey.md`).
+//! (port wave P0 lane 6, #878; export ABI v2: port wave P1 lane 1, #898;
+//! survey `docs/maintenance/vesper-port-survey.md`).
 //!
 //! Every `pub fn` of the module becomes one C-ABI symbol
 //! `vesper_<library>_<function>` in a single object. The object needs no
@@ -30,11 +31,44 @@
 //!   is in the words after the status word. The result is valid only when the
 //!   status is 0.
 //!
-//! Generic functions, `inout` parameters, effects other than `Fail`
-//! (capabilities, foreign libraries, user effects), and types without a fixed
-//! word layout (strings, closures, region handles, boxes, sequences, affine
-//! or linear data) are refused with an [`ExportError`]. Sequences and strings
-//! follow once their source types exist (P0 lanes 3 and 7).
+//! # ABI v2 (`vesper.native.export-abi/2`)
+//!
+//! A library that uses any of the forms below is a v2 library; one that uses
+//! none of them keeps the v1 interface and binding byte for byte.
+//!
+//! * `inout` parameters of every exportable type: a pointer to the value's
+//!   words (one word for a scalar), updated in place.
+//! * `ChunkSeq[T]` of a copy element type is one word, a pointer to the
+//!   header `{len, cap, data}` with elements packed at
+//!   [`crate::seq::elem_bytes`]. It crosses as a result (the caller owns it and
+//!   frees it with `vesper_<lib>_seq_free`), as an `in` parameter (a header
+//!   the caller lends), or as an `inout` parameter (a pointer to the handle
+//!   word of a sequence made with `vesper_<lib>_seq_new`). A by-value
+//!   sequence parameter is refused: native code does not free a dropped
+//!   sequence yet.
+//! * `in`/`inout Slice[T]` of a copy element type is the view
+//!   `{header, start, len}`, passed as a pointer to its three words.
+//! * A non-copy struct or enum (affine, linear, or holding sequences or
+//!   boxes) crosses as an *owned handle*: its words live in caller memory and
+//!   own the Vesper allocations they point to. `vesper_<lib>_<Type>_drop`
+//!   (exported for every non-linear handle type) frees them. `in` and
+//!   `inout` handle parameters are borrowed; a by-value parameter consumes the
+//!   handle. Fields may be copy values, sequences, `Box[T]`, other handle
+//!   types and `Option` of those, so recursive enums cross too.
+//! * Monomorphic instances of generic functions named by `@export instance`
+//!   directives or `--instance` (see [`directives`]).
+//! * `Ffi[Lib]` rows of `.vsys` libraries named by `@export vsys`
+//!   directives: the object imports the library's symbols, which the linking
+//!   crate provides.
+//!
+//! Every v2 library exports `vesper_<lib>_seq_new(cap, stride)`,
+//! `vesper_<lib>_seq_free(seq)` and `vesper_<lib>_live_allocations()` (the
+//! number of live sequence and box allocations, for leak tests).
+//!
+//! Still refused, with an [`ExportError`] that names the function: generic
+//! functions without an instance, effects other than `Fail` and imported
+//! `.vsys` libraries, closures, region handles, strings, sequences of
+//! non-copy elements, and boxes outside a handle type.
 //!
 //! The machine-readable [`LibraryInterface`] describes every symbol; the
 //! Rust binding generator ([`rust_binding`]) turns it into `extern "C"`
@@ -44,8 +78,20 @@ use crate::layout::{Layout, LayoutKind};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Version of the export ABI and of the [`LibraryInterface`] schema.
+#[path = "native_export/binding.rs"]
+mod binding;
+#[path = "native_export/directives.rs"]
+pub mod directives;
+#[path = "native_export/glue.rs"]
+mod glue;
+pub use binding::{BindingOptions, rust_binding};
+pub use directives::{Directives, Instance, VsysImport};
+
+/// Version of the export ABI and of the [`LibraryInterface`] schema that a
+/// library using only the v1 forms carries.
 pub const EXPORT_ABI: &str = "vesper.native.export-abi/1";
+/// Version of a library that uses any v2 form.
+pub const EXPORT_ABI_V2: &str = "vesper.native.export-abi/2";
 
 /// Builtin types whose Rust counterparts live in `vesper-port-abi`, with
 /// the variant order that crate hard-codes.
@@ -67,14 +113,17 @@ pub enum ExportError {
     Generic { function: String },
     /// An effect other than unlabeled `Fail[E]`, or an open row.
     Effect { function: String, effect: String },
-    /// `inout` parameters have no export representation yet.
-    Inout { function: String, param: String },
     /// A parameter or result type without a fixed word layout.
     Type {
         function: String,
         ty: String,
         reason: String,
     },
+    /// An `@export instance` directive or `--instance` that cannot be
+    /// exported.
+    Instance { instance: String, reason: String },
+    /// A malformed `@export` directive.
+    Directive(String),
     /// The source does not parse or check, or code generation failed.
     Compile(String),
 }
@@ -89,21 +138,21 @@ impl fmt::Display for ExportError {
             Self::NoExports => write!(f, "library has no `pub fn` to export"),
             Self::Generic { function } => write!(
                 f,
-                "cannot export generic function '{function}'; export a monomorphic wrapper"
+                "cannot export generic function '{function}'; name an instance with `// @export instance {function}[..]` or --instance"
             ),
             Self::Effect { function, effect } => write!(
                 f,
-                "cannot export '{function}': effect {effect} is not exportable (only Fail[E] is)"
-            ),
-            Self::Inout { function, param } => write!(
-                f,
-                "cannot export '{function}': inout parameter '{param}' is not exportable yet"
+                "cannot export '{function}': effect {effect} is not exportable (only Fail[E] and imported .vsys libraries are)"
             ),
             Self::Type {
                 function,
                 ty,
                 reason,
             } => write!(f, "cannot export '{function}': type {ty} {reason}"),
+            Self::Instance { instance, reason } => {
+                write!(f, "cannot export instance '{instance}': {reason}")
+            }
+            Self::Directive(e) => write!(f, "{e}"),
             Self::Compile(e) => write!(f, "{e}"),
         }
     }
@@ -129,6 +178,23 @@ pub enum AbiType {
         name: String,
         args: Vec<AbiType>,
     },
+    /// v2: `ChunkSeq[T]`, one word (a header pointer).
+    Seq {
+        elem: Box<AbiType>,
+    },
+    /// v2: `Slice[T]`, the three-word view `{header, start, len}`.
+    Slice {
+        elem: Box<AbiType>,
+    },
+    /// v2: `Box[T]`, one word (a pointer to `T`'s words); only inside a
+    /// handle type.
+    Box {
+        inner: Box<AbiType>,
+    },
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 /// A user type declared by the library.
@@ -141,6 +207,20 @@ pub struct TypeDecl {
     pub words: u32,
     /// A struct has one variant named after the type.
     pub variants: Vec<VariantDecl>,
+    /// v2: a non-copy type, which crosses as an owned handle.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub handle: bool,
+    /// v2: a linear handle; only a consuming call releases it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub linear: bool,
+    /// v2: the exported drop glue of a non-linear handle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_symbol: Option<String>,
+    /// v2: the value owns a sequence, directly or through its fields, so a
+    /// consuming call is refused (native code does not free a dropped
+    /// sequence yet).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub owns_sequence: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +244,16 @@ pub struct ExportParam {
     pub ty: AbiType,
     /// Passed as a pointer to its words.
     pub pointer: bool,
+    /// v2: `in`, `inout` or `sink`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass: Option<String>,
+}
+
+impl ExportParam {
+    /// The parameter's passing mode (`in` when the interface predates v2).
+    pub fn pass(&self) -> &str {
+        self.pass.as_deref().unwrap_or("in")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,6 +273,38 @@ pub struct ExportedFunction {
     /// not empty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fail_record_words: Option<u32>,
+    /// v2: the generic function and type arguments this instance compiles,
+    /// as `f[T1, T2]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_of: Option<String>,
+    /// v2: the imported `.vsys` libraries the row names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreign: Vec<String>,
+}
+
+/// v2: the runtime entry points every v2 library exports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeSymbols {
+    /// `seq_new(capacity, stride) -> seq`: an empty sequence.
+    pub seq_new: String,
+    /// `seq_free(seq)`: free a sequence the caller owns.
+    pub seq_free: String,
+    /// `live_allocations() -> i64`: live sequence and box allocations.
+    pub live_allocations: String,
+}
+
+/// v2: an imported `.vsys` library whose symbols the linking crate provides.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForeignLibrary {
+    pub name: String,
+    /// `direct` or `isolated(mpk)`.
+    pub handler: String,
+    /// The C symbols of the library's functions.
+    pub symbols: Vec<String>,
+    /// The Rust module that defines the symbols, which the binding
+    /// references so that every linker keeps them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rust_path: Option<String>,
 }
 
 /// The machine-readable description of a `vesper build --lib` object.
@@ -192,6 +314,19 @@ pub struct LibraryInterface {
     pub library: String,
     pub types: BTreeMap<String, TypeDecl>,
     pub functions: Vec<ExportedFunction>,
+    /// v2: the runtime entry points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RuntimeSymbols>,
+    /// v2: imported `.vsys` libraries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub foreign: Vec<ForeignLibrary>,
+}
+
+impl LibraryInterface {
+    /// Whether the library uses export ABI v2.
+    pub fn is_v2(&self) -> bool {
+        self.abi == EXPORT_ABI_V2
+    }
 }
 
 fn valid_library_name(name: &str) -> bool {
@@ -209,11 +344,27 @@ pub fn plan(
     public: &BTreeSet<String>,
     library: &str,
 ) -> Result<LibraryInterface, Vec<ExportError>> {
+    plan_with(world, public, library, &Directives::default())
+}
+
+/// [`plan`] with generic instances and `.vsys` imports.
+pub fn plan_with(
+    world: &World,
+    public: &BTreeSet<String>,
+    library: &str,
+    directives: &Directives,
+) -> Result<LibraryInterface, Vec<ExportError>> {
     if !valid_library_name(library) {
         return Err(vec![ExportError::LibraryName(library.into())]);
     }
+    let mut planner = Planner {
+        world,
+        library,
+        types: BTreeMap::new(),
+        v2: false,
+        foreign: directives.vsys.iter().map(|v| v.library.clone()).collect(),
+    };
     let mut errors = vec![];
-    let mut types = BTreeMap::new();
     let mut functions = vec![];
     for (name, f) in &world.functions {
         if name.contains("::")
@@ -222,91 +373,488 @@ pub fn plan(
         {
             continue;
         }
-        match export_function(world, library, f, &mut types) {
+        if !f.generics.is_empty() && directives.instances.iter().any(|i| &i.function == name) {
+            continue;
+        }
+        match planner.function(f, &f.name, None) {
             Ok(e) => functions.push(e),
             Err(e) => errors.push(e),
+        }
+    }
+    // Instances are compiled as generated monomorphic wrappers
+    // (`instance_wrappers`), which export like any `pub fn`.
+    for f in &mut functions {
+        if let Some(i) = directives.instances.iter().find(|i| i.alias() == f.name) {
+            f.instance_of = Some(i.spelling());
         }
     }
     if functions.is_empty() && errors.is_empty() {
         errors.push(ExportError::NoExports);
     }
+    let mut symbols = BTreeSet::new();
+    for f in &functions {
+        if !symbols.insert(f.symbol.clone()) {
+            errors.push(ExportError::Instance {
+                instance: f.instance_of.clone().unwrap_or_else(|| f.name.clone()),
+                reason: format!("symbol {} is exported twice", f.symbol),
+            });
+        }
+    }
     if !errors.is_empty() {
         return Err(errors);
     }
+    functions.sort_by(|a, b| a.name.cmp(&b.name));
+    planner.mark_owned_sequences();
+    for f in &functions {
+        for p in &f.params {
+            if p.pass() == "sink"
+                && let AbiType::Named { name, .. } = &p.ty
+                && planner.types.get(name).is_some_and(|d| d.owns_sequence)
+            {
+                errors.push(ExportError::Type {
+                    function: f.name.clone(),
+                    ty: name.clone(),
+                    reason: "is a handle that owns a sequence, taken by value; native code does not free a dropped sequence yet, so take it `inout`".into(),
+                });
+            }
+        }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    let v2 = planner.v2 || !directives.vsys.is_empty() || !directives.instances.is_empty();
+    if v2 {
+        for f in &mut functions {
+            for p in &mut f.params {
+                p.pass.get_or_insert_with(|| "in".into());
+            }
+        }
+    }
+    let foreign = directives
+        .vsys
+        .iter()
+        .map(|v| ForeignLibrary {
+            name: v.library.clone(),
+            handler: v.handler.name().into(),
+            symbols: v.symbols.clone(),
+            rust_path: v.rust_path.clone(),
+        })
+        .collect();
     Ok(LibraryInterface {
-        abi: EXPORT_ABI.into(),
+        abi: if v2 { EXPORT_ABI_V2 } else { EXPORT_ABI }.into(),
         library: library.into(),
-        types,
+        types: planner.types,
         functions,
+        runtime: v2.then(|| RuntimeSymbols {
+            seq_new: format!("vesper_{library}_seq_new"),
+            seq_free: format!("vesper_{library}_seq_free"),
+            live_allocations: format!("vesper_{library}_live_allocations"),
+        }),
+        foreign,
     })
 }
 
-fn export_function(
-    world: &World,
-    library: &str,
-    f: &Function,
-    types: &mut BTreeMap<String, TypeDecl>,
-) -> Result<ExportedFunction, ExportError> {
-    let function = f.name.clone();
-    if !f.generics.is_empty() {
-        return Err(ExportError::Generic { function });
-    }
-    if let Some(tail) = &f.effects.tail {
-        return Err(ExportError::Effect {
-            function,
-            effect: format!("row variable {tail}"),
-        });
-    }
-    let mut errors = vec![];
-    for e in &f.effects.instances {
-        if e.name == "Fail" && e.label.is_none() && e.args.len() == 1 {
-            errors.push(abi_type(world, &function, &e.args[0], types)?);
-        } else {
+struct Planner<'a> {
+    world: &'a World,
+    library: &'a str,
+    types: BTreeMap<String, TypeDecl>,
+    /// Whether any v2 form was used.
+    v2: bool,
+    /// Imported `.vsys` library names.
+    foreign: Vec<String>,
+}
+
+/// Where an [`AbiType`] occurs, for the position rules of the v2 forms.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Position {
+    Param(Pass),
+    Result,
+    Error,
+}
+
+impl Planner<'_> {
+    fn function(
+        &mut self,
+        f: &Function,
+        export_name: &str,
+        instance_of: Option<String>,
+    ) -> Result<ExportedFunction, ExportError> {
+        let function = export_name.to_string();
+        if !f.generics.is_empty() {
+            return Err(ExportError::Generic { function });
+        }
+        if let Some(tail) = &f.effects.tail {
             return Err(ExportError::Effect {
                 function,
-                effect: e.name.clone(),
+                effect: format!("row variable {tail}"),
             });
         }
-    }
-    if crate::fip::uses_caller_slot(world, f) {
-        return Err(ExportError::Type {
-            function,
-            ty: f.result.to_string(),
-            reason: "is returned through a caller Box slot".into(),
-        });
-    }
-    let mut params = vec![];
-    for p in &f.params {
-        if p.pass == Pass::Inout {
-            return Err(ExportError::Inout {
+        let mut errors = vec![];
+        let mut foreign = vec![];
+        let prefix = crate::ffi_lowering::effect_name("");
+        for e in &f.effects.instances {
+            if e.name == "Fail" && e.label.is_none() && e.args.len() == 1 {
+                let t = self.ty(&function, &e.args[0])?;
+                self.position(&function, &e.args[0], &t, Position::Error)?;
+                errors.push(t);
+            } else if let Some(library) = e.name.strip_prefix(prefix.as_str()).filter(|l| {
+                e.label.is_none() && e.args.is_empty() && self.foreign.iter().any(|f| f == l)
+            }) {
+                foreign.push(library.to_string());
+            } else {
+                return Err(ExportError::Effect {
+                    function,
+                    effect: e.name.clone(),
+                });
+            }
+        }
+        if crate::fip::uses_caller_slot(self.world, f) {
+            return Err(ExportError::Type {
                 function,
-                param: p.name.clone(),
+                ty: f.result.to_string(),
+                reason: "is returned through a caller Box slot".into(),
             });
         }
-        let ty = abi_type(world, &function, &p.ty, types)?;
-        params.push(ExportParam {
-            name: p.name.clone(),
-            pointer: layout(world, &function, &p.ty)?.aggregate(),
-            ty,
-        });
+        let mut params = vec![];
+        for p in &f.params {
+            let ty = self.ty(&function, &p.ty)?;
+            self.position(&function, &p.ty, &ty, Position::Param(p.pass))?;
+            if p.pass == Pass::Inout {
+                self.v2 = true;
+            }
+            params.push(ExportParam {
+                name: p.name.clone(),
+                pointer: layout(self.world, &function, &p.ty)?.aggregate() || p.pass == Pass::Inout,
+                ty,
+                pass: (p.pass != Pass::In).then(|| pass_name(p.pass).into()),
+            });
+        }
+        let result = self.ty(&function, &f.result)?;
+        self.position(&function, &f.result, &result, Position::Result)?;
+        let result_layout = layout(self.world, &function, &f.result)?;
+        let fail_record_words = if errors.is_empty() {
+            None
+        } else {
+            Some(fail_record_size(self.world, f).map_err(ExportError::Compile)? / 8)
+        };
+        if !foreign.is_empty() {
+            self.v2 = true;
+        }
+        Ok(ExportedFunction {
+            symbol: format!("vesper_{}_{function}", self.library),
+            name: function,
+            params,
+            result,
+            result_words: result_layout.size / 8,
+            result_pointer: result_layout.aggregate(),
+            errors,
+            fail_record_words,
+            instance_of,
+            foreign,
+        })
     }
-    let result = abi_type(world, &function, &f.result, types)?;
-    let result_layout = layout(world, &function, &f.result)?;
-    let fail_record_words = if errors.is_empty() {
-        None
-    } else {
-        Some(fail_record_size(world, f).map_err(ExportError::Compile)? / 8)
-    };
-    Ok(ExportedFunction {
-        symbol: format!("vesper_{library}_{}", f.name),
-        name: function,
-        params,
-        result,
-        result_words: result_layout.size / 8,
-        result_pointer: result_layout.aggregate(),
-        errors,
-        fail_record_words,
-    })
+
+    /// Whether `ty` owns memory (a sequence, slice, box or handle).
+    fn owning(&self, ty: &AbiType) -> bool {
+        owning(ty, &self.types)
+    }
+
+    /// The position rules: where each owning form may cross.
+    fn position(
+        &self,
+        function: &str,
+        source: &Type,
+        ty: &AbiType,
+        position: Position,
+    ) -> Result<(), ExportError> {
+        let refuse = |reason: &str| ExportError::Type {
+            function: function.into(),
+            ty: source.to_string(),
+            reason: reason.into(),
+        };
+        if !self.owning(ty) {
+            return Ok(());
+        }
+        match position {
+            Position::Error => Err(refuse("is not a copy type; error types must be copy")),
+            Position::Param(pass) => match (ty, pass) {
+                (AbiType::Slice { .. }, _) => Ok(()),
+                (AbiType::Seq { .. }, Pass::In | Pass::Inout) => Ok(()),
+                (AbiType::Seq { .. }, Pass::Sink) => Err(refuse(
+                    "is a sequence taken by value; native code does not free a dropped sequence yet, so take it `in` or `inout`",
+                )),
+                (AbiType::Named { name, .. }, _) if self.handle(name) => Ok(()),
+                _ => Err(refuse(
+                    "owns memory; only sequences, slices and handle types cross as parameters",
+                )),
+            },
+            Position::Result => self.result_shape(ty).map_err(|r| refuse(&r)),
+        }
+    }
+
+    fn handle(&self, name: &str) -> bool {
+        self.types.get(name).is_some_and(|d| d.handle)
+    }
+
+    /// Owning results: sequences, handles, and `Option`/tuples of them.
+    fn result_shape(&self, ty: &AbiType) -> Result<(), String> {
+        match ty {
+            _ if !self.owning(ty) => Ok(()),
+            AbiType::Seq { .. } => Ok(()),
+            AbiType::Named { name, .. } if self.handle(name) => Ok(()),
+            AbiType::Named { name, args } if name == "Option" => self.result_shape(&args[0]),
+            AbiType::Tuple { items } => items.iter().try_for_each(|t| self.result_shape(t)),
+            AbiType::Box { .. } => {
+                Err("is a box; return a handle type that holds it instead".into())
+            }
+            _ => Err("owns memory in a form no result can carry".into()),
+        }
+    }
+
+    /// The forms a field of a handle type may have.
+    fn field_shape(&self, ty: &AbiType) -> Result<(), String> {
+        match ty {
+            _ if !self.owning(ty) => Ok(()),
+            AbiType::Seq { .. } => Ok(()),
+            AbiType::Named { name, .. } if self.handle(name) => Ok(()),
+            AbiType::Named { name, args } if name == "Option" => self.field_shape(&args[0]),
+            AbiType::Box { inner } => self.field_shape(inner),
+            _ => Err(
+                "is a field form handles do not carry yet (use a sequence, a box, a handle type or an Option of one)"
+                    .into(),
+            ),
+        }
+    }
+
+    fn ty(&mut self, function: &str, ty: &Type) -> Result<AbiType, ExportError> {
+        let refuse = |reason: &str| ExportError::Type {
+            function: function.into(),
+            ty: ty.to_string(),
+            reason: reason.into(),
+        };
+        let world = self.world;
+        match ty {
+            Type::Tuple(items) if items.is_empty() => Ok(AbiType::Scalar {
+                name: "Unit".into(),
+            }),
+            Type::Tuple(items) => Ok(AbiType::Tuple {
+                items: items
+                    .iter()
+                    .map(|t| self.ty(function, t))
+                    .collect::<Result<_, _>>()?,
+            }),
+            Type::Named(n, args)
+                if args.is_empty() && crate::numeric::is_scalar_name(n) && n != "Never" =>
+            {
+                Ok(AbiType::Scalar { name: n.clone() })
+            }
+            t if crate::seq::is_seq_or_slice(t) => {
+                let elem = crate::seq::elem(t).expect("sequence element");
+                let abi = self.ty(function, elem)?;
+                if world.mode(elem, &BTreeMap::new()) != Mode::Copy || self.owning(&abi) {
+                    return Err(refuse(
+                        "has non-copy elements; only sequences and slices of copy elements cross the boundary",
+                    ));
+                }
+                self.v2 = true;
+                let elem = Box::new(abi);
+                Ok(if crate::seq::is_seq_type(t) {
+                    AbiType::Seq { elem }
+                } else {
+                    AbiType::Slice { elem }
+                })
+            }
+            t if crate::fip::is_box_type(world, t) => {
+                let inner = crate::fip::box_inner(world, t).expect("box inner").clone();
+                self.v2 = true;
+                Ok(AbiType::Box {
+                    inner: Box::new(self.ty(function, &inner)?),
+                })
+            }
+            Type::Named(n, args) => {
+                let Some(adt) = world.adts.get(n) else {
+                    return Err(refuse("has no fixed word layout"));
+                };
+                if adt.generics.len() != args.len() {
+                    return Err(refuse("has unresolved type arguments"));
+                }
+                if adt.tile_width.is_some() {
+                    return Err(refuse("is a tiled struct"));
+                }
+                if let Some((_, order)) = BUILTIN_TYPES.iter().find(|(b, _)| b == n) {
+                    let names = adt
+                        .variants
+                        .iter()
+                        .map(|v| v.name.as_str())
+                        .collect::<Vec<_>>();
+                    if names != *order {
+                        return Err(refuse("has a builtin variant order this ABI does not know"));
+                    }
+                    return Ok(AbiType::Named {
+                        name: n.clone(),
+                        args: args
+                            .iter()
+                            .map(|t| self.ty(function, t))
+                            .collect::<Result<_, _>>()?,
+                    });
+                }
+                if !args.is_empty() {
+                    return Err(refuse(
+                        "is a generic user type; export a monomorphic type instead",
+                    ));
+                }
+                if !self.types.contains_key(n) {
+                    let mode = world.mode(ty, &BTreeMap::new());
+                    let l = layout(world, function, ty)?;
+                    let handle = mode != Mode::Copy;
+                    if handle {
+                        self.v2 = true;
+                    }
+                    // Insert before recursing so a recursive type cannot
+                    // loop (recursion goes through a box, whose layout is
+                    // one word).
+                    self.types.insert(
+                        n.clone(),
+                        TypeDecl {
+                            name: n.clone(),
+                            is_enum: adt.is_enum,
+                            words: l.size / 8,
+                            variants: vec![],
+                            handle,
+                            linear: mode == Mode::Linear,
+                            drop_symbol: (handle && mode != Mode::Linear)
+                                .then(|| format!("vesper_{}_{n}_drop", self.library)),
+                            owns_sequence: false,
+                        },
+                    );
+                    let fields_of = |fields: &[crate::layout::LayoutField],
+                                     planner: &mut Self|
+                     -> Result<Vec<FieldDecl>, ExportError> {
+                        fields
+                            .iter()
+                            .map(|f| {
+                                let ty = planner.ty(function, &f.ty)?;
+                                if handle {
+                                    planner.field_shape(&ty).map_err(|reason| {
+                                        ExportError::Type {
+                                            function: function.into(),
+                                            ty: format!("{n}.{}", f.name),
+                                            reason,
+                                        }
+                                    })?;
+                                }
+                                Ok(FieldDecl {
+                                    name: f.name.clone(),
+                                    ty,
+                                    offset: f.offset as u32 / 8,
+                                })
+                            })
+                            .collect()
+                    };
+                    let variants = match &l.kind {
+                        LayoutKind::Product(fields) => vec![VariantDecl {
+                            name: n.clone(),
+                            fields: fields_of(fields, self)?,
+                        }],
+                        LayoutKind::Enum(variants) => variants
+                            .iter()
+                            .map(|v| {
+                                Ok(VariantDecl {
+                                    name: v.name.clone(),
+                                    fields: fields_of(&v.fields, self)?,
+                                })
+                            })
+                            .collect::<Result<_, ExportError>>()?,
+                        LayoutKind::Scalar => return Err(refuse("has no word layout")),
+                    };
+                    self.types.get_mut(n).expect("inserted above").variants = variants;
+                }
+                Ok(AbiType::Named {
+                    name: n.clone(),
+                    args: vec![],
+                })
+            }
+            _ => Err(refuse("has no fixed word layout")),
+        }
+    }
+
+    /// Mark every handle type that owns a sequence, through fields, boxes
+    /// and nested handles (a fixpoint, since types may be recursive).
+    fn mark_owned_sequences(&mut self) {
+        loop {
+            let mut changed = false;
+            let names = self.types.keys().cloned().collect::<Vec<_>>();
+            for name in names {
+                if self.types[&name].owns_sequence {
+                    continue;
+                }
+                let owns = self.types[&name]
+                    .variants
+                    .iter()
+                    .flat_map(|v| &v.fields)
+                    .any(|f| holds_sequence(&f.ty, &self.types));
+                if owns {
+                    self.types.get_mut(&name).expect("listed").owns_sequence = true;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+    }
+}
+
+fn holds_sequence(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
+    match ty {
+        AbiType::Seq { .. } => true,
+        AbiType::Scalar { .. } | AbiType::Slice { .. } => false,
+        AbiType::Tuple { items } => items.iter().any(|t| holds_sequence(t, types)),
+        AbiType::Box { inner } => holds_sequence(inner, types),
+        AbiType::Named { name, args } => {
+            types.get(name).is_some_and(|d| d.owns_sequence)
+                || args.iter().any(|t| holds_sequence(t, types))
+        }
+    }
+}
+
+/// Whether a value of `ty` owns memory (a sequence, a box or a handle).
+pub(crate) fn owning(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
+    match ty {
+        AbiType::Seq { .. } | AbiType::Slice { .. } | AbiType::Box { .. } => true,
+        AbiType::Scalar { .. } => false,
+        AbiType::Tuple { items } => items.iter().any(|t| owning(t, types)),
+        AbiType::Named { name, args } => {
+            types.get(name).is_some_and(|d| d.handle) || args.iter().any(|t| owning(t, types))
+        }
+    }
+}
+
+/// Size of `ty` in words.
+pub(crate) fn abi_words(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> u32 {
+    match ty {
+        AbiType::Scalar { .. } | AbiType::Seq { .. } | AbiType::Box { .. } => 1,
+        AbiType::Slice { .. } => 3,
+        AbiType::Tuple { items } => items
+            .iter()
+            .map(|t| abi_words(t, types))
+            .sum::<u32>()
+            .max(1),
+        AbiType::Named { name, args } => match name.as_str() {
+            "Option" => 1 + abi_words(&args[0], types),
+            "Result" => 1 + abi_words(&args[0], types).max(abi_words(&args[1], types)),
+            "ArithOverflow" | "RuntimeError" => 1,
+            _ => types.get(name).map_or(1, |d| d.words),
+        },
+    }
+}
+
+fn pass_name(pass: Pass) -> &'static str {
+    match pass {
+        Pass::In => "in",
+        Pass::Inout => "inout",
+        Pass::Sink => "sink",
+    }
 }
 
 fn layout(world: &World, function: &str, ty: &Type) -> Result<Layout, ExportError> {
@@ -317,124 +865,10 @@ fn layout(world: &World, function: &str, ty: &Type) -> Result<Layout, ExportErro
     })
 }
 
-fn abi_type(
-    world: &World,
-    function: &str,
-    ty: &Type,
-    types: &mut BTreeMap<String, TypeDecl>,
-) -> Result<AbiType, ExportError> {
-    let refuse = |reason: &str| ExportError::Type {
-        function: function.into(),
-        ty: ty.to_string(),
-        reason: reason.into(),
-    };
-    match ty {
-        Type::Tuple(items) if items.is_empty() => Ok(AbiType::Scalar {
-            name: "Unit".into(),
-        }),
-        Type::Tuple(items) => Ok(AbiType::Tuple {
-            items: items
-                .iter()
-                .map(|t| abi_type(world, function, t, types))
-                .collect::<Result<_, _>>()?,
-        }),
-        Type::Named(n, args)
-            if args.is_empty() && crate::numeric::is_scalar_name(n) && n != "Never" =>
-        {
-            Ok(AbiType::Scalar { name: n.clone() })
-        }
-        Type::Named(n, args) => {
-            let Some(adt) = world.adts.get(n) else {
-                return Err(refuse("has no fixed word layout"));
-            };
-            if adt.generics.len() != args.len() {
-                return Err(refuse("has unresolved type arguments"));
-            }
-            if adt.mode != Mode::Copy {
-                return Err(refuse("is not a copy type"));
-            }
-            if adt.tile_width.is_some() {
-                return Err(refuse("is a tiled struct"));
-            }
-            if let Some((_, order)) = BUILTIN_TYPES.iter().find(|(b, _)| b == n) {
-                let names = adt
-                    .variants
-                    .iter()
-                    .map(|v| v.name.as_str())
-                    .collect::<Vec<_>>();
-                if names != *order {
-                    return Err(refuse("has a builtin variant order this ABI does not know"));
-                }
-                return Ok(AbiType::Named {
-                    name: n.clone(),
-                    args: args
-                        .iter()
-                        .map(|t| abi_type(world, function, t, types))
-                        .collect::<Result<_, _>>()?,
-                });
-            }
-            if !args.is_empty() {
-                return Err(refuse(
-                    "is a generic user type; export a monomorphic type instead",
-                ));
-            }
-            if !types.contains_key(n) {
-                let l = layout(world, function, ty)?;
-                // Insert before recursing so a recursive type cannot loop
-                // (its layout above already failed for inline recursion).
-                types.insert(
-                    n.clone(),
-                    TypeDecl {
-                        name: n.clone(),
-                        is_enum: adt.is_enum,
-                        words: l.size / 8,
-                        variants: vec![],
-                    },
-                );
-                let fields_of = |fields: &[crate::layout::LayoutField],
-                                 types: &mut BTreeMap<String, TypeDecl>|
-                 -> Result<Vec<FieldDecl>, ExportError> {
-                    fields
-                        .iter()
-                        .map(|f| {
-                            Ok(FieldDecl {
-                                name: f.name.clone(),
-                                ty: abi_type(world, function, &f.ty, types)?,
-                                offset: f.offset as u32 / 8,
-                            })
-                        })
-                        .collect()
-                };
-                let variants = match &l.kind {
-                    LayoutKind::Product(fields) => vec![VariantDecl {
-                        name: n.clone(),
-                        fields: fields_of(fields, types)?,
-                    }],
-                    LayoutKind::Enum(variants) => variants
-                        .iter()
-                        .map(|v| {
-                            Ok(VariantDecl {
-                                name: v.name.clone(),
-                                fields: fields_of(&v.fields, types)?,
-                            })
-                        })
-                        .collect::<Result<_, ExportError>>()?,
-                    LayoutKind::Scalar => return Err(refuse("has no word layout")),
-                };
-                types.get_mut(n).expect("inserted above").variants = variants;
-            }
-            Ok(AbiType::Named {
-                name: n.clone(),
-                args: vec![],
-            })
-        }
-        _ => Err(refuse("has no fixed word layout")),
-    }
-}
-
 /// Compile every function of `interface` into one object for `target`
 /// (the host when `None`). Exported functions keep their export symbols for
-/// calls between them; everything else they reach is local.
+/// calls between them; everything else they reach is local. A v2 library
+/// also gets its runtime entry points and the drop glue of its handles.
 pub fn object(
     world: &World,
     interface: &LibraryInterface,
@@ -449,20 +883,21 @@ pub fn object(
     let isa = object_isa_for(world, target)?;
     if windows::is_windows(isa.triple()) {
         return windows::emit_with(isa, "vesper", |m| {
-            compile_exports(m, world, &exports, optimize)
+            compile_exports(m, world, interface, &exports, optimize)
         })
         .map(|(bytes, _)| bytes);
     }
     let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
     let mut m = ObjectModule::new(builder);
-    compile_exports(&mut m, world, &exports, optimize)?;
+    compile_exports(&mut m, world, interface, &exports, optimize)?;
     m.finish().emit().map_err(|e| e.to_string())
 }
 
 fn compile_exports<M: Module>(
     m: &mut M,
     world: &World,
+    interface: &LibraryInterface,
     exports: &BTreeMap<String, String>,
     optimize: bool,
 ) -> Result<String, String> {
@@ -498,7 +933,11 @@ fn compile_exports<M: Module>(
             .map_err(|e| e.to_string())?;
         ids.insert(key.clone(), id);
     }
-    define_instances(m, world, &all, &ids, &program, DefinitionLinkage::Object)
+    let clif = define_instances(m, world, &all, &ids, &program, DefinitionLinkage::Object)?;
+    if interface.is_v2() {
+        glue::define(m, world, interface)?;
+    }
+    Ok(clif)
 }
 
 /// A compiled library: its object bytes and interface.
@@ -520,38 +959,265 @@ pub struct LibraryOptions<'a> {
 }
 
 /// Parse, check, optimize and compile `source` exactly as
-/// `vesper build --lib` does. `path` only labels diagnostics.
+/// `vesper build --lib` does. `path` only labels diagnostics. The source's
+/// `@export` directives ([`directives`]) name generic instances and `.vsys`
+/// imports.
 pub fn compile_source(
     path: &str,
     source: &str,
     options: &LibraryOptions<'_>,
 ) -> Result<Library, ExportError> {
-    let first = |ds: &[crate::ast::Diagnostic], what: &str| {
-        let shown = ds
-            .iter()
-            .take(8)
-            .map(|d| format!("{path}:{}: {}: {}", d.span.start, d.code, d.message))
-            .collect::<Vec<_>>()
-            .join("\n");
-        ExportError::Compile(format!("{} {what} error(s)\n{shown}", ds.len()))
-    };
-    let mut parsed = crate::parser::parse(source);
+    compile_source_with(path, source, options, &[])
+}
+
+/// [`compile_source`] with extra instances (`--instance`) on top of the
+/// source's directives.
+pub fn compile_source_with(
+    path: &str,
+    source: &str,
+    options: &LibraryOptions<'_>,
+    instances: &[Instance],
+) -> Result<Library, ExportError> {
+    let parsed = crate::parser::parse(source);
     if !parsed.diagnostics.is_empty() {
-        return Err(first(&parsed.diagnostics, "syntax"));
+        return Err(diagnostics(path, &parsed.diagnostics, "syntax"));
     }
-    let public = parsed.module.public_items.iter().cloned().collect();
-    let mut checked = crate::check::check(&parsed.module);
+    compile_module(path, parsed.module, source, options, instances, None)
+}
+
+fn diagnostics(path: &str, ds: &[crate::ast::Diagnostic], what: &str) -> ExportError {
+    let shown = ds
+        .iter()
+        .take(8)
+        .map(|d| format!("{path}:{}: {}: {}", d.span.start, d.code, d.message))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ExportError::Compile(format!("{} {what} error(s)\n{shown}", ds.len()))
+}
+
+/// Check, optimize and compile a parsed module (a single file, or the
+/// assembled module of a package). `source` is the text the `@export`
+/// directives are read from. The exports are `public` (the module's
+/// `public_items` when `None`) plus one generated wrapper per instance.
+pub fn compile_module(
+    path: &str,
+    mut module: crate::ast::Module,
+    source: &str,
+    options: &LibraryOptions<'_>,
+    instances: &[Instance],
+    public: Option<&BTreeSet<String>>,
+) -> Result<Library, ExportError> {
+    let mut directives = Directives::parse(source, options.target)?;
+    directives.instances.extend(instances.iter().cloned());
+    let mut public = match public {
+        Some(p) => p.clone(),
+        None => module.public_items.iter().cloned().collect(),
+    };
+    instance_wrappers(&mut module, source.len(), &directives, &mut public)?;
+    if !directives.vsys.is_empty() {
+        return compile_foreign(&module, &public, options, &directives);
+    }
+    let mut checked = crate::check::check(&module);
     if !checked.diagnostics.is_empty() {
-        return Err(first(&checked.diagnostics, "semantic"));
+        return Err(diagnostics(path, &checked.diagnostics, "semantic"));
     }
     if options.optimize {
-        crate::optimize::optimize(&mut parsed.module, &checked.expression_types);
-        checked = crate::check::check(&parsed.module);
+        crate::optimize::optimize(&mut module, &checked.expression_types);
+        checked = crate::check::check(&module);
         if !checked.diagnostics.is_empty() {
-            return Err(first(&checked.diagnostics, "optimizer validation"));
+            return Err(diagnostics(
+                path,
+                &checked.diagnostics,
+                "optimizer validation",
+            ));
         }
     }
-    compile_world(&checked.world, &public, options)
+    let interface =
+        plan_with(&checked.world, &public, options.library, &directives).map_err(joined)?;
+    let object = object(&checked.world, &interface, options.target, options.optimize)
+        .map_err(ExportError::Compile)?;
+    Ok(Library { object, interface })
+}
+
+/// Append one monomorphic `pub fn <alias>` per instance that calls the
+/// generic function at its type arguments, so bounded generics (which
+/// exist only as monomorphized clones after checking) export too. The
+/// wrappers are parsed past the end of the source, so their spans never
+/// collide with the source's.
+fn instance_wrappers(
+    module: &mut crate::ast::Module,
+    source_len: usize,
+    directives: &Directives,
+    public: &mut BTreeSet<String>,
+) -> Result<(), ExportError> {
+    if directives.instances.is_empty() {
+        return Ok(());
+    }
+    let mut text = String::new();
+    for instance in &directives.instances {
+        let refuse = |reason: String| ExportError::Instance {
+            instance: instance.spelling(),
+            reason,
+        };
+        let generic = module.items.iter().find_map(|item| match item {
+            crate::ast::Item::Function(f) if f.name == instance.function => Some(f),
+            _ => None,
+        });
+        let Some(f) = generic else {
+            return Err(refuse(format!("no function '{}'", instance.function)));
+        };
+        if !public.contains(&instance.function) {
+            return Err(refuse(format!("'{}' is not pub", instance.function)));
+        }
+        if f.generics.len() != instance.args.len() || f.generics.iter().any(|g| g.row) {
+            return Err(refuse(format!(
+                "'{}' has {} type parameter(s)",
+                instance.function,
+                f.generics.len()
+            )));
+        }
+        let alias = instance.alias();
+        if !valid_library_name(&alias) || public.contains(&alias) {
+            return Err(refuse(format!(
+                "instance name '{alias}' must be a new name matching [a-z][a-z0-9_]*"
+            )));
+        }
+        let vars = f
+            .generics
+            .iter()
+            .zip(&instance.args)
+            .map(|(g, t)| (g.name.clone(), t.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let plain = |t: &Type| {
+            fn visit(t: &Type) -> bool {
+                match t {
+                    Type::Named(_, args) | Type::Tuple(args) => args.iter().all(visit),
+                    _ => false,
+                }
+            }
+            visit(t) && !matches!(t, Type::Tuple(items) if items.len() == 1)
+        };
+        let mut params = vec![];
+        let mut args = vec![];
+        for p in &f.params {
+            let ty = crate::ast::substitute(&p.ty, &vars);
+            if !plain(&ty) {
+                return Err(refuse(format!("parameter '{}' has type {ty}", p.name)));
+            }
+            let pass = match p.pass {
+                Pass::In => "in ",
+                Pass::Inout => "inout ",
+                Pass::Sink => "",
+            };
+            params.push(format!("{pass}{}: {ty}", p.name));
+            args.push(format!("{pass}{}", p.name));
+        }
+        let result = crate::ast::substitute(&f.result, &vars);
+        if !plain(&result) {
+            return Err(refuse(format!("the result has type {result}")));
+        }
+        let effects = crate::ast::substitute_effects(&f.effects, &vars);
+        if effects.tail.is_some() {
+            return Err(refuse("the effect row is open".into()));
+        }
+        let row = effects
+            .instances
+            .iter()
+            .map(|e| {
+                let label = e
+                    .label
+                    .as_ref()
+                    .map(|l| format!("{l}: "))
+                    .unwrap_or_default();
+                if e.args.is_empty() {
+                    format!("{label}{}", e.name)
+                } else {
+                    format!(
+                        "{label}{}[{}]",
+                        e.name,
+                        e.args
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        let row = if row.is_empty() {
+            String::new()
+        } else {
+            format!(" eff [{}]", row.join(", "))
+        };
+        text.push_str(&format!(
+            "pub fn {alias}({}) -> {result}{row} {{\n    {}[{}]({})\n}}\n",
+            params.join(", "),
+            instance.function,
+            instance
+                .args
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
+            args.join(", ")
+        ));
+        public.insert(alias);
+    }
+    // Parse past the end of the source (and of any package's combined
+    // sources, which `source_len` covers).
+    let padded = format!("{}\n{text}", " ".repeat(source_len));
+    let parsed = crate::parser::parse(&padded);
+    if !parsed.diagnostics.is_empty() {
+        return Err(ExportError::Directive(format!(
+            "generated instance wrappers do not parse: {}",
+            parsed
+                .diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )));
+    }
+    module.public_items.extend(parsed.module.public_items);
+    module.items.extend(parsed.module.items);
+    Ok(())
+}
+
+/// A module that imports `.vsys` libraries: checked and compiled through
+/// [`crate::ffi_lowering`], which owns the foreign-call plan. Source-level
+/// optimization is skipped (the IR optimizer still runs).
+fn compile_foreign(
+    module: &crate::ast::Module,
+    public: &BTreeSet<String>,
+    options: &LibraryOptions<'_>,
+    directives: &Directives,
+) -> Result<Library, ExportError> {
+    let mut imports = crate::ffi_lowering::Imports::new();
+    for v in &directives.vsys {
+        imports
+            .add(&v.source, v.handler)
+            .map_err(|e| ExportError::Directive(format!("@export vsys {}: {e}", v.library)))?;
+    }
+    let checked = crate::ffi_lowering::check_module(module, &imports)
+        .map_err(|e| ExportError::Compile(e.to_string()))?;
+    let interface =
+        plan_with(checked.world(), public, options.library, directives).map_err(joined)?;
+    let object = checked
+        .with_lowering(options.target, |world| {
+            object(world, &interface, options.target, options.optimize)
+        })
+        .map_err(|e| ExportError::Compile(e.to_string()))?;
+    Ok(Library { object, interface })
+}
+
+fn joined(errors: Vec<ExportError>) -> ExportError {
+    ExportError::Compile(
+        errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
 }
 
 /// [`compile_source`] for an already checked (and optimized) module.
@@ -560,478 +1226,26 @@ pub fn compile_world(
     public: &BTreeSet<String>,
     options: &LibraryOptions<'_>,
 ) -> Result<Library, ExportError> {
-    let interface = plan(world, public, options.library).map_err(|errors| {
-        ExportError::Compile(
-            errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-    })?;
+    compile_world_with(world, public, options, &Directives::default())
+}
+
+/// [`compile_world`] with directives. Generic instances and `.vsys` imports
+/// need the parsed module, so they compile only through [`compile_module`].
+pub fn compile_world_with(
+    world: &World,
+    public: &BTreeSet<String>,
+    options: &LibraryOptions<'_>,
+    directives: &Directives,
+) -> Result<Library, ExportError> {
+    if !directives.vsys.is_empty() || !directives.instances.is_empty() {
+        return Err(ExportError::Directive(
+            "@export vsys and instances need the module: compile it with compile_module".into(),
+        ));
+    }
+    let interface = plan_with(world, public, options.library, directives).map_err(joined)?;
     let object = object(world, &interface, options.target, options.optimize)
         .map_err(ExportError::Compile)?;
     Ok(Library { object, interface })
-}
-
-/// Options of [`rust_binding`].
-#[derive(Debug, Clone, Default)]
-pub struct BindingOptions {
-    /// Path of an existing Rust module that already defines the library's
-    /// user types with the same names, fields and variants (for example
-    /// `crate`): the binding then implements `Abi` for them instead of
-    /// declaring its own, so a port forwards to the crate's own types. A
-    /// function with several `Fail` types then returns the crate's
-    /// `<path>::<CamelName>Error`, whose variants are named after the error
-    /// types.
-    pub types_path: Option<String>,
-}
-
-const RUST_KEYWORDS: [&str; 39] = [
-    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern",
-    "false", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut",
-    "pub", "ref", "return", "self", "Self", "static", "struct", "super", "trait", "true", "type",
-    "unsafe", "use", "where", "while",
-];
-
-fn ident(name: &str) -> String {
-    if RUST_KEYWORDS.contains(&name) {
-        format!("r#{name}")
-    } else {
-        name.into()
-    }
-}
-
-fn camel(name: &str) -> String {
-    name.split('_')
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            let mut c = s.chars();
-            c.next()
-                .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
-                .unwrap_or_default()
-        })
-        .collect()
-}
-
-fn rust_type(ty: &AbiType, types_path: &str) -> String {
-    match ty {
-        AbiType::Scalar { name } => match name.as_str() {
-            "Unit" => "()".into(),
-            other => other.into(),
-        },
-        AbiType::Tuple { items } if items.len() == 1 => {
-            format!("({},)", rust_type(&items[0], types_path))
-        }
-        AbiType::Tuple { items } => format!(
-            "({})",
-            items
-                .iter()
-                .map(|t| rust_type(t, types_path))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-        AbiType::Named { name, args } => match name.as_str() {
-            "Option" | "Result" => format!(
-                "{name}<{}>",
-                args.iter()
-                    .map(|t| rust_type(t, types_path))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            "ArithOverflow" | "RuntimeError" => format!("vesper_port_abi::{name}"),
-            _ => format!("{types_path}{name}"),
-        },
-    }
-}
-
-/// The Rust binding module of `interface`: `extern "C"` declarations of
-/// every symbol plus a safe wrapper per function that marshals words with
-/// `vesper_port_abi::Abi` and maps the failure status to `Result`. The text
-/// is deterministic, so a port can commit it and check it for drift.
-pub fn rust_binding(interface: &LibraryInterface, options: &BindingOptions) -> String {
-    use std::fmt::Write as _;
-    let types_path = match &options.types_path {
-        Some(p) => format!("{p}::"),
-        None => String::new(),
-    };
-    let mut out = String::new();
-    let _ = writeln!(
-        out,
-        "// @generated by `vesper build --lib` ({}) for library `{}`.\n// Do not edit: regenerate it from the Vesper source.\n",
-        interface.abi, interface.library
-    );
-    out.push_str("#![allow(clippy::all, unused_imports, unused_mut, non_snake_case, dead_code)]\n\nuse vesper_port_abi::Abi;\n\n");
-    // User types: declarations (unless they live at types_path) and Abi impls.
-    for decl in interface.types.values() {
-        let name = &decl.name;
-        if options.types_path.is_none() {
-            out.push_str("#[derive(Debug, Clone, Copy, PartialEq)]\n");
-            if decl.is_enum {
-                let _ = writeln!(out, "pub enum {name} {{");
-                for v in &decl.variants {
-                    let _ = writeln!(
-                        out,
-                        "    {}{},",
-                        v.name,
-                        variant_shape(v, &types_path, false)
-                    );
-                }
-                out.push_str("}\n\n");
-            } else {
-                let v = &decl.variants[0];
-                let shape = variant_shape(v, &types_path, true);
-                let _ = writeln!(
-                    out,
-                    "pub struct {name}{shape}{}\n",
-                    if positional(v) || v.fields.is_empty() {
-                        ";"
-                    } else {
-                        ""
-                    }
-                );
-            }
-        }
-        let full = format!("{types_path}{name}");
-        let _ = writeln!(
-            out,
-            "impl Abi for {full} {{\n    const WORDS: usize = {};",
-            decl.words
-        );
-        out.push_str("    fn put(&self, out: &mut [u64]) {\n");
-        if decl.is_enum {
-            out.push_str("        match self {\n");
-            for (tag, v) in decl.variants.iter().enumerate() {
-                let _ = writeln!(
-                    out,
-                    "            {full}::{}{} => {{\n                out[0] = {tag};",
-                    v.name,
-                    bind_pattern(v)
-                );
-                for (i, f) in v.fields.iter().enumerate() {
-                    let _ = writeln!(
-                        out,
-                        "                Abi::put(f{i}, &mut out[{}..]);",
-                        f.offset
-                    );
-                }
-                out.push_str("            }\n");
-            }
-            out.push_str("        }\n    }\n");
-        } else {
-            for f in &decl.variants[0].fields {
-                let _ = writeln!(
-                    out,
-                    "        Abi::put(&self.{}, &mut out[{}..]);",
-                    field_access(&f.name),
-                    f.offset
-                );
-            }
-            out.push_str("    }\n");
-        }
-        out.push_str("    fn get(words: &[u64]) -> Self {\n");
-        if decl.is_enum {
-            out.push_str("        match words[0] {\n");
-            for (tag, v) in decl.variants.iter().enumerate() {
-                let _ = writeln!(
-                    out,
-                    "            {tag} => {full}::{}{},",
-                    v.name,
-                    construct(v, &types_path)
-                );
-            }
-            let _ = writeln!(
-                out,
-                "            tag => panic!(\"invalid {name} tag {{tag}} from Vesper\"),"
-            );
-            out.push_str("        }\n    }\n}\n\n");
-        } else {
-            let _ = writeln!(
-                out,
-                "        {full}{}\n    }}\n}}\n",
-                construct(&decl.variants[0], &types_path)
-            );
-        }
-    }
-    // Compile-time cross-check of every boundary type's word count.
-    let mut checked = BTreeSet::new();
-    for f in &interface.functions {
-        let _ = checked.insert((rust_type(&f.result, &types_path), f.result_words));
-    }
-    for decl in interface.types.values() {
-        let _ = checked.insert((format!("{types_path}{}", decl.name), decl.words));
-    }
-    for (ty, words) in &checked {
-        let _ = writeln!(
-            out,
-            "const _: () = assert!(<{ty} as Abi>::WORDS == {words});"
-        );
-    }
-    out.push_str("\nunsafe extern \"C\" {\n");
-    for f in &interface.functions {
-        let mut params = vec![];
-        if f.result_pointer {
-            params.push("result: *mut u64".to_string());
-        }
-        for p in &f.params {
-            params.push(format!("{}: {}", ident(&p.name), c_type(&p.ty, p.pointer)));
-        }
-        if f.fail_record_words.is_some() {
-            params.push("fail: *mut u64".into());
-        }
-        let ret = if !f.result_pointer
-            && matches!(&f.result, AbiType::Scalar { name } if name == "f64")
-        {
-            "f64"
-        } else {
-            "i64"
-        };
-        let _ = writeln!(out, "    fn {}({}) -> {ret};", f.symbol, params.join(", "));
-    }
-    out.push_str("}\n");
-    for f in &interface.functions {
-        out.push('\n');
-        let value = rust_type(&f.result, &types_path);
-        let error = match f.errors.as_slice() {
-            [] => None,
-            [one] => Some(rust_type(one, &types_path)),
-            _ if options.types_path.is_some() => {
-                Some(format!("{types_path}{}Error", camel(&f.name)))
-            }
-            many => {
-                let enum_name = format!("{}Error", camel(&f.name));
-                let _ = writeln!(
-                    out,
-                    "/// The errors `{}` can raise, in status order.\n#[derive(Debug, Clone, Copy, PartialEq)]\npub enum {enum_name} {{",
-                    f.name
-                );
-                for e in many {
-                    let _ = writeln!(
-                        out,
-                        "    {}({}),",
-                        error_variant(e),
-                        rust_type(e, &types_path)
-                    );
-                }
-                out.push_str("}\n\n");
-                Some(enum_name)
-            }
-        };
-        let ret = match &error {
-            Some(e) => format!("Result<{value}, {e}>"),
-            None => value.clone(),
-        };
-        let params = f
-            .params
-            .iter()
-            .map(|p| format!("{}: {}", ident(&p.name), rust_type(&p.ty, &types_path)))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = writeln!(
-            out,
-            "/// Calls `{}` of the Vesper library `{}` (`{}`).",
-            f.name, interface.library, f.symbol
-        );
-        let _ = writeln!(out, "pub fn {}({params}) -> {ret} {{", ident(&f.name));
-        let mut args = vec![];
-        if f.result_pointer {
-            let _ = writeln!(out, "    let mut result = vec![0u64; {}];", f.result_words);
-            args.push("result.as_mut_ptr()".to_string());
-        }
-        for p in &f.params {
-            let n = ident(&p.name);
-            if p.pointer {
-                let _ = writeln!(
-                    out,
-                    "    let mut arg_{0} = vec![0u64; <{1} as Abi>::WORDS];\n    Abi::put(&{n}, &mut arg_{0});",
-                    p.name,
-                    rust_type(&p.ty, &types_path)
-                );
-                args.push(format!("arg_{}.as_mut_ptr()", p.name));
-            } else {
-                args.push(scalar_in(&n, &p.ty));
-            }
-        }
-        if let Some(words) = f.fail_record_words {
-            let _ = writeln!(out, "    let mut fail = vec![0u64; {words}];");
-            args.push("fail.as_mut_ptr()".into());
-        }
-        let _ = writeln!(
-            out,
-            "    // SAFETY: `{}` has exactly this signature in the export ABI; every\n    // pointer is a live, writable buffer of the size the ABI requires.\n    {}unsafe {{ {}({}) }};",
-            f.symbol,
-            if f.result_pointer { "" } else { "let raw = " },
-            f.symbol,
-            args.join(", ")
-        );
-        let produce = if f.result_pointer {
-            format!("<{value} as Abi>::get(&result)")
-        } else {
-            scalar_out("raw", &f.result)
-        };
-        match f.errors.as_slice() {
-            [] => {
-                let _ = writeln!(out, "    {produce}");
-            }
-            errors => {
-                out.push_str("    match fail[0] {\n");
-                let _ = writeln!(out, "        0 => Ok({produce}),");
-                for (k, e) in errors.iter().enumerate() {
-                    let decode = format!("<{} as Abi>::get(&fail[1..])", rust_type(e, &types_path));
-                    if errors.len() == 1 {
-                        let _ = writeln!(out, "        {} => Err({decode}),", k + 1);
-                    } else {
-                        let _ = writeln!(
-                            out,
-                            "        {} => Err({}::{}({decode})),",
-                            k + 1,
-                            error.as_deref().unwrap_or_default(),
-                            error_variant(e)
-                        );
-                    }
-                }
-                let _ = writeln!(
-                    out,
-                    "        status => panic!(\"invalid failure status {{status}} from {}\"),",
-                    f.symbol
-                );
-                out.push_str("    }\n");
-            }
-        }
-        out.push_str("}\n");
-    }
-    out
-}
-
-fn error_variant(ty: &AbiType) -> String {
-    match ty {
-        AbiType::Named { name, args } if args.is_empty() => name.clone(),
-        AbiType::Named { name, args } => format!(
-            "{name}{}",
-            args.iter().map(error_variant).collect::<String>()
-        ),
-        AbiType::Scalar { name } => camel(name),
-        AbiType::Tuple { items } => format!(
-            "Tuple{}",
-            items.iter().map(error_variant).collect::<String>()
-        ),
-    }
-}
-
-fn positional(v: &VariantDecl) -> bool {
-    !v.fields.is_empty()
-        && v.fields
-            .iter()
-            .all(|f| f.name.chars().all(|c| c.is_ascii_digit()))
-}
-
-fn field_access(name: &str) -> String {
-    ident(name)
-}
-
-fn variant_shape(v: &VariantDecl, types_path: &str, public_fields: bool) -> String {
-    let vis = if public_fields { "pub " } else { "" };
-    if v.fields.is_empty() {
-        String::new()
-    } else if positional(v) {
-        format!(
-            "({})",
-            v.fields
-                .iter()
-                .map(|f| format!("{vis}{}", rust_type(&f.ty, types_path)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    } else {
-        format!(
-            " {{ {} }}",
-            v.fields
-                .iter()
-                .map(|f| format!("{vis}{}: {}", ident(&f.name), rust_type(&f.ty, types_path)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
-}
-
-fn bind_pattern(v: &VariantDecl) -> String {
-    if v.fields.is_empty() {
-        String::new()
-    } else if positional(v) {
-        format!(
-            "({})",
-            (0..v.fields.len())
-                .map(|i| format!("f{i}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    } else {
-        format!(
-            " {{ {} }}",
-            v.fields
-                .iter()
-                .enumerate()
-                .map(|(i, f)| format!("{}: f{i}", ident(&f.name)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
-}
-
-fn construct(v: &VariantDecl, _types_path: &str) -> String {
-    if v.fields.is_empty() {
-        String::new()
-    } else if positional(v) {
-        format!(
-            "({})",
-            v.fields
-                .iter()
-                .map(|f| format!("Abi::get(&words[{}..])", f.offset))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    } else {
-        format!(
-            " {{ {} }}",
-            v.fields
-                .iter()
-                .map(|f| format!("{}: Abi::get(&words[{}..])", ident(&f.name), f.offset))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    }
-}
-
-fn c_type(ty: &AbiType, pointer: bool) -> &'static str {
-    if pointer {
-        "*mut u64"
-    } else if matches!(ty, AbiType::Scalar { name } if name == "f64") {
-        "f64"
-    } else {
-        "i64"
-    }
-}
-
-fn scalar_in(name: &str, ty: &AbiType) -> String {
-    match ty {
-        AbiType::Scalar { name: s } if s == "f64" => name.into(),
-        AbiType::Scalar { name: s } if s == "Unit" => {
-            format!("{{ let () = {name}; 0 }}")
-        }
-        _ => format!("{name} as i64"),
-    }
-}
-
-fn scalar_out(raw: &str, ty: &AbiType) -> String {
-    match ty {
-        AbiType::Scalar { name } => match name.as_str() {
-            "f64" | "i64" => raw.into(),
-            "bool" => format!("{raw} != 0"),
-            "Unit" => format!("{{ let _ = {raw}; }}"),
-            other => format!("{raw} as {other}"),
-        },
-        _ => raw.into(),
-    }
 }
 
 /// The interface file text: pretty JSON with a trailing newline.
@@ -1041,17 +1255,14 @@ pub fn interface_json(interface: &LibraryInterface) -> Result<String, String> {
     Ok(json)
 }
 
-/// `vesper build --lib`: write the object to `output`, and optionally the
+/// Write a compiled library: the object to `output`, and optionally the
 /// interface JSON and the Rust binding. Returns the summary line.
-pub fn build_command(
-    world: &World,
-    public: &BTreeSet<String>,
-    options: &LibraryOptions<'_>,
+pub fn write_library(
+    library: &Library,
     output: &std::path::Path,
     interface_path: Option<&std::path::Path>,
     binding: Option<(&std::path::Path, &BindingOptions)>,
 ) -> Result<String, String> {
-    let library = compile_world(world, public, options).map_err(|e| e.to_string())?;
     std::fs::write(output, &library.object).map_err(|e| format!("{}: {e}", output.display()))?;
     if let Some(path) = interface_path {
         let json = interface_json(&library.interface)?;
@@ -1062,8 +1273,24 @@ pub fn build_command(
             .map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(format!(
-        "built {} ({} exported function(s), {EXPORT_ABI})",
+        "built {} ({} exported function(s), {})",
         output.display(),
-        library.interface.functions.len()
+        library.interface.functions.len(),
+        library.interface.abi
     ))
+}
+
+/// `vesper build --lib` for a checked world: write the object to `output`,
+/// and optionally the interface JSON and the Rust binding. Returns the
+/// summary line.
+pub fn build_command(
+    world: &World,
+    public: &BTreeSet<String>,
+    options: &LibraryOptions<'_>,
+    output: &std::path::Path,
+    interface_path: Option<&std::path::Path>,
+    binding: Option<(&std::path::Path, &BindingOptions)>,
+) -> Result<String, String> {
+    let library = compile_world(world, public, options).map_err(|e| e.to_string())?;
+    write_library(&library, output, interface_path, binding)
 }

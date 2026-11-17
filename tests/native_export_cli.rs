@@ -55,3 +55,49 @@ fn verifier_tee_and_codegen_flags_are_refused() {
     }
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn instance_flag_exports_a_generic_at_a_stable_symbol() {
+    let dir = scratch("instance");
+    std::fs::write(
+        dir.join("t.ves"),
+        "pub fn pick[T: mod copy](a: T, b: T, first: bool) -> T {\n    if first { a } else { b }\n}\n",
+    )
+    .unwrap();
+    let interface = dir.join("t.json");
+    let out = build(
+        &dir,
+        &[
+            "--instance",
+            "pick[u64]",
+            "--instance",
+            "pick_byte = pick[u8]",
+            "--interface",
+            interface.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json = std::fs::read_to_string(&interface).unwrap();
+    assert!(
+        json.contains("\"symbol\": \"vesper_t_pick__u64\""),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"symbol\": \"vesper_t_pick_byte\""),
+        "{json}"
+    );
+    assert!(json.contains("vesper.native.export-abi/2"), "{json}");
+    // Without an instance the generic is refused by name.
+    let refused = build(&dir, &[]);
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("cannot export generic function 'pick'"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

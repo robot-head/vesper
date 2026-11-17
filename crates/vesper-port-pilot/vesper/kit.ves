@@ -1,0 +1,321 @@
+// Vesper side of the pilot's export ABI v2 kit (src/kit.rs, #898): one
+// function or type per new ABI form and per pattern of the porting recipe
+// (docs/maintenance/porting-a-crate.md, "Patterns for Rust APIs").
+//
+// The export directives below name the generic instances and the .vsys import.
+// @export instance largest_u64 = largest[u64]
+// @export instance largest_i64 = largest[i64]
+// @export vsys direct rust=crate::kit::shim
+// | sys library Clock (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_port_pilot",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     fn pilot_clock_ticks() -> ForeignVal[u64];
+// | }
+
+// A plan step the Rust wrapper applies to its backend (pattern d).
+copy enum Command {
+    Wait(u64),
+    Send {
+        to: u32,
+        bytes: u64
+    }
+}
+
+// The crate's own error enum (pattern e).
+copy enum KitError {
+    Empty,
+    TooLarge(u64)
+}
+
+// An owned handle with a sequence field (pattern a).
+struct Counter {
+    hits: ChunkSeq[u64],
+    total: u64
+}
+
+// A linear handle: only ticket_close releases it.
+linear struct Ticket {
+    id: u64
+}
+
+// A recursive enum, returned as a handle and read through its view.
+enum Tree {
+    Leaf(u64),
+    Node(Box[Tree], Box[Tree])
+}
+
+// Token slab (pattern b): Vesper keeps the order of u64 tokens, the Rust
+// wrapper keeps the payloads.
+struct Tokens {
+    ring: ChunkSeq[u64],
+    head: u64
+}
+
+// Sequence results, at a one-byte, a four-byte and a word stride.
+pub fn squares(n: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..n {
+        s.push(wrapping_mul(i, i));
+    }
+    s
+}
+
+pub fn digits(n: u64) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut rest = n;
+    loop {
+        s.push(wrapping_u8(rest % 10));
+        rest = rest / 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    s
+}
+
+pub fn countdown(n: i32) -> ChunkSeq[i32] {
+    let mut s: ChunkSeq[i32] = ChunkSeq::new[i32]();
+    let mut i = n;
+    loop {
+        if i < 0 {
+            break;
+        }
+        s.push(i);
+        i = wrapping_sub(i, 1);
+    }
+    s
+}
+
+// Slice parameters.
+pub fn sum(in xs: Slice[u64]) -> u64 {
+    let mut acc: u64 = 0;
+    for i in 0..xs.len() {
+        let v = match xs.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        acc = wrapping_add(acc, v);
+    }
+    acc
+}
+
+pub fn count_digits(in text: Slice[u8]) -> u64 {
+    let mut n: u64 = 0;
+    for i in 0..text.len() {
+        let c = match text.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if c >= 48 && c <= 57 {
+            n = wrapping_add(n, 1);
+        }
+    }
+    n
+}
+
+pub fn scale(inout xs: Slice[i32], k: i32) {
+    for i in 0..xs.len() {
+        let v = match xs.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        xs.try_set(i, wrapping_mul(v, k));
+    }
+}
+
+pub fn push_squares(inout xs: ChunkSeq[u64], n: u64) {
+    for i in 0..n {
+        xs.push(wrapping_mul(i, i));
+    }
+}
+
+pub fn bump(inout x: u64, by: u64) {
+    x = wrapping_add(x, by);
+}
+
+// A generic function exported at two instances.
+pub fn largest[T: mod copy](in xs: Slice[T], init: T) -> T where T: Ord {
+    let mut best = init;
+    for i in 0..xs.len() {
+        match xs.try_get(i) {
+            Option::Some(v) => match v.cmp(best) {
+                Greater => {
+                    best = v;
+                },
+                _ => (),
+            },
+            Option::None => (),
+        }
+    }
+    best
+}
+
+// Owned handles: constructor, methods, view.
+pub fn counter_new() -> Counter {
+    Counter {
+        hits: ChunkSeq::new[u64](),
+        total: 0
+    }
+}
+
+pub fn counter_record(inout c: Counter, v: u64) {
+    c.hits.push(v);
+    c.total = wrapping_add(c.total, v);
+}
+
+pub fn counter_total(in c: Counter) -> u64 {
+    c.total
+}
+
+pub fn counter_hits(in c: Counter) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..c.hits.len() {
+        match c.hits.try_get(i) {
+            Option::Some(v) => out.push(v),
+            Option::None => (),
+        }
+    }
+    out
+}
+
+pub fn counter_reset(inout c: Counter) {
+    c.hits.clear();
+    c.total = 0;
+}
+
+pub fn ticket_open(id: u64) -> Ticket {
+    Ticket {
+        id: id
+    }
+}
+
+pub fn ticket_close(sink t: Ticket) -> u64 {
+    let Ticket {
+        id
+    }
+    = t;
+    id
+}
+
+fn grow(depth: u64, at: u64) -> Tree {
+    if depth == 0 {
+        Tree::Leaf(at)
+    } else {
+        let left = grow(wrapping_sub(depth, 1), wrapping_mul(at, 2));
+        let right = grow(wrapping_sub(depth, 1), wrapping_add(wrapping_mul(at, 2), 1));
+        Tree::Node(Box::new(left), Box::new(right))
+    }
+}
+
+pub fn tree_build(depth: u64) -> Tree {
+    grow(depth, 1)
+}
+
+// Consumes the tree; native code frees every box it unpacks.
+pub fn tree_sum(sink t: Tree) -> u64 {
+    match t {
+        Tree::Leaf(v) => v,
+        Tree::Node(l, r) => match l {
+            Box(a) => match r {
+                Box(b) => wrapping_add(tree_sum(a), tree_sum(b)),
+            },
+        },
+    }
+}
+
+pub fn tokens_new() -> Tokens {
+    Tokens {
+        ring: ChunkSeq::new[u64](),
+        head: 0
+    }
+}
+
+pub fn tokens_push(inout q: Tokens, token: u64) {
+    q.ring.push(token);
+}
+
+pub fn tokens_pop(inout q: Tokens) -> Option[u64] {
+    let at = q.head;
+    match q.ring.try_get(at) {
+        Option::Some(token) => {
+            q.head = wrapping_add(at, 1);
+            if q.head == q.ring.len() {
+                q.ring.clear();
+                q.head = 0;
+            }
+            Option::Some(token)
+        },
+        Option::None => Option::None,
+    }
+}
+
+// Sink closure (pattern c): the word boundaries, as start/end pairs.
+pub fn word_bounds(in text: Slice[u8]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut start: u64 = 0;
+    let mut inside = false;
+    for i in 0..text.len() {
+        let c = match text.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 32,
+        };
+        if c == 32 {
+            if inside {
+                out.push(start);
+                out.push(i);
+                inside = false;
+            }
+        } else if !inside {
+            start = i;
+            inside = true;
+        }
+    }
+    if inside {
+        out.push(start);
+        out.push(text.len());
+    }
+    out
+}
+
+// A trait call made a value (pattern d): the wrapper asks its clock first.
+pub fn expired(now: u64, deadline: u64) -> bool {
+    now >= deadline
+}
+
+// A recorded command plan (pattern d): the wrapper applies it.
+pub fn plan_sends(peers: u32, bytes: u64, pause: u64) -> ChunkSeq[Command] {
+    let mut plan: ChunkSeq[Command] = ChunkSeq::new[Command]();
+    for p in 0..peers {
+        plan
+            .push(
+            Command::Send {
+                to: p,
+                bytes: bytes
+            }
+        );
+        plan.push(Command::Wait(pause));
+    }
+    plan
+}
+
+// Errors through Fail[E] (pattern e).
+pub fn mean(in xs: Slice[u64]) -> u64 eff [Fail[KitError]] {
+    let n = xs.len();
+    if n == 0 {
+        Fail::raise(KitError::Empty)
+    } else {
+        let total = sum(in xs);
+        if total > 1000000 {
+            Fail::raise(KitError::TooLarge(total))
+        } else {
+            total / n
+        }
+    }
+}
+
+// A .vsys import: the crate provides pilot_clock_ticks (src/kit/shim.rs).
+pub fn stamp(base: u64) -> u64 eff [Ffi[Clock]] {
+    wrapping_add(base, Clock::pilot_clock_ticks())
+}

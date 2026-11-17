@@ -8,6 +8,8 @@
 //! (`docs/maintenance/porting-a-crate.md`).
 pub use vesper_port_abi::{ArithOverflow, RuntimeError};
 
+pub mod kit;
+
 /// A point on the integer grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Point {
