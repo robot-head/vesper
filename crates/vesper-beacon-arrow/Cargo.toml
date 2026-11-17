@@ -18,7 +18,7 @@ arrow-buffer = "=56.2.1"
 arrow-schema = "=56.2.0"
 arrow-ipc = { version = "=56.2.0", default-features = false, features = ["zstd"] }
 flatbuffers = { version = "=25.12.19", default-features = false }
-zstd = { version = "=0.13.3", default-features = false }
+zstd = { version = "=0.13.4", default-features = false }
 ciborium = { version = "=0.2.2", default-features = false, features = ["std"] }
 loona-hpack = "=0.4.3"
 subtle = { version = "=2.6.1", optional = true }

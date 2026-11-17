@@ -221,3 +221,19 @@ fn feature_scene_is_bit_identical_across_broadphases_and_pinned() {
     eprintln!("arch={} feature sha256={hex}", std::env::consts::ARCH);
     assert_eq!(hex, GOLDEN_FEATURE_SHA256);
 }
+
+#[test]
+fn feature_scene_is_bit_identical_for_every_narrowphase_thread_count() {
+    // CCD, sleeping islands (deferred pairs collided on waking) and joints
+    // with the narrowphase split over threads.
+    for threads in [2usize, 3, 8] {
+        let mut w = feature_scene(RigidBroadphase::SweepAndPrune);
+        w.set_solver_threads(threads).unwrap();
+        w.set_parallel_threshold(0);
+        for _ in 0..FEATURE_TICKS {
+            w.step().unwrap();
+        }
+        let hex: String = w.hash().sha256.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, GOLDEN_FEATURE_SHA256, "{threads} threads");
+    }
+}

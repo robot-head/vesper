@@ -1,0 +1,68 @@
+copy struct Cell {
+    value: u64,
+    tag: u64,
+}
+fn set_cell(inout cell: Cell, value: u64) -> u64 {
+    let old = cell.value;
+    cell.value = value;
+    old
+}
+fn ensures_set_cell(before: Cell, value: u64, result: u64, after: Cell) -> bool {
+    result == before.value && after.value == value && after.tag == before.tag
+}
+fn replace(inout x: u64, value: u64) -> u64 {
+    let old = x;
+    x = value;
+    old
+}
+fn ensures_replace(before: u64, value: u64, result: u64, after: u64) -> bool {
+    result == before && after == value
+}
+fn exchange(inout left: u64, keep: u64, inout right: u64) -> u64 {
+    let old = left;
+    left = right;
+    right = old;
+    keep
+}
+fn ensures_exchange(
+    left_before: u64,
+    keep: u64,
+    right_before: u64,
+    result: u64,
+    left_after: u64,
+    right_after: u64
+) -> bool {
+    result == keep && left_after == right_before && right_after == left_before
+}
+fn increment(inout x: u64) -> u64 eff [Fail[ArithOverflow]] {
+    x = wrapping_add(x, 1);
+    x
+}
+fn requires_increment(before: u64) -> bool {
+    before < 1000
+}
+fn ensures_increment(before: u64, result: u64, after: u64) -> bool {
+    result == after && after == wrapping_add(before, 1)
+}
+fn reset(inout x: u64) {
+    x = 0;
+}
+fn ensures_reset(before: u64, result: (), after: u64) -> bool {
+    after == 0
+}
+fn drain(inout x: u64) -> u64 {
+    if x == 0 {
+        0
+    } else {
+        x = wrapping_sub(x, 1);
+        drain(inout x)
+    }
+}
+fn ensures_drain(before: u64, result: u64, after: u64) -> bool {
+    result == 0 && after == 0
+}
+fn main() -> u64 {
+    let x: u64 = 5;
+    replace(inout x, 42);
+    x
+}

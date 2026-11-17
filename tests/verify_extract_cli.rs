@@ -1245,3 +1245,52 @@ fn labeled_fail_contract_admission_checks_successful_results() {
     let wrong = Fixture::new(source.replace("else { n }", "else { 0 }").as_bytes());
     reject_json(wrong.verify(&args), Some("compile"));
 }
+
+#[test]
+fn inout_contract_admission_binds_post_state_and_rejects_changed_implementation() {
+    let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(lean) = lean() else { return };
+    let source = "fn replace(inout x: u64, value: u64) -> u64 { let old = x; x = value; old }\nfn ensures_replace(before: u64, value: u64, result: u64, after: u64) -> bool { result == before && after == value }\nfn main() -> u64 { 0 }\n";
+    let f = Fixture::new(source.as_bytes());
+    let proofs = f.root.join("inout.lean");
+    fs::write(&proofs, "theorem replace_ok : Vesper.«replace$contract» := by intro before value; simp [Vesper.ensures_replace, Vesper.replace]\ntheorem replace_input : Vesper.«replace$admissible» := ⟨5, 42, trivial⟩\n").unwrap();
+    let args = [
+        "--extract",
+        "--proofs",
+        proofs.to_str().unwrap(),
+        "--contract-proof",
+        "replace=replace_ok",
+        "--contract-witness",
+        "replace=replace_input",
+        "--allow-axiom",
+        "propext",
+        "--allow-axiom",
+        "Classical.choice",
+        "--allow-axiom",
+        "Quot.sound",
+        "--lean",
+        lean.to_str().unwrap(),
+        "--timeout",
+        "300",
+        "--json",
+    ];
+    let accepted = f.verify(&args);
+    assert!(
+        accepted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&accepted.stdout)
+    );
+    let report: Value = serde_json::from_slice(&accepted.stdout).unwrap();
+    assert_eq!(
+        report["checked_contracts"],
+        serde_json::json!({"replace": "replace_ok"})
+    );
+    assert_eq!(
+        report["checked_preconditions"],
+        serde_json::json!({"replace": "replace_input"})
+    );
+    // Returning the old value still works, but silently failing to update x
+    // invalidates the same closed contract proof.
+    let wrong = Fixture::new(source.replace("x = value;", "x = 0;").as_bytes());
+    reject_json(wrong.verify(&args), Some("compile"));
+}

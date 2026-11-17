@@ -12,7 +12,7 @@ Direct production dependencies are pinned Apache `arrow-array`, `arrow-schema`,
 and `arrow-ipc` **56.2.0** (`arrow-buffer` 56.2.1), plus `prost` 0.14.6 for the
 OTAP protobuf messages and `hmac` 0.12.1 / `sha2` 0.10.9 for PII fingerprints. `arrow-ipc` is built
 with only its `zstd` feature (OTAP buffer compression; the original
-top-level API writes uncompressed streams), with `zstd` 0.13.3 and
+top-level API writes uncompressed streams), with `zstd` 0.13.4 and
 `flatbuffers` 25.12.19 for Beacon's own bounded decompression, `ciborium`
 0.2.2 for structured attribute values and `loona-hpack` 0.4.3 for gRPC
 headers. A different implementation, `arrow2` **0.18.0** with `io_ipc`,
