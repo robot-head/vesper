@@ -87,7 +87,9 @@ fn bounded_inherent_impl_blocks_instantiate_their_methods() {
     assert_eq!(execute(INTERVAL), "1910");
     let w = world(INTERVAL);
     assert!(
-        w.functions.keys().any(|n| n.starts_with("Interval::widen$mono$")),
+        w.functions
+            .keys()
+            .any(|n| n.starts_with("Interval::widen$mono$")),
         "{:?}",
         w.functions.keys()
     );
@@ -95,7 +97,9 @@ fn bounded_inherent_impl_blocks_instantiate_their_methods() {
     // The impl's bound is checked where the type is used.
     let head = &INTERVAL[..INTERVAL.find("fn main").unwrap()];
     rejects(
-        &format!("{head} fn main() -> i64 {{ let i = Interval {{ lo: 3.0, hi: 5.0 }}; let j = i.widen(1.0); 0 }}"),
+        &format!(
+            "{head} fn main() -> i64 {{ let i = Interval {{ lo: 3.0, hi: 5.0 }}; let j = i.widen(1.0); 0 }}"
+        ),
         "E0608",
     );
 }
