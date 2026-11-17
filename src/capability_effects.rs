@@ -1845,7 +1845,25 @@ impl<'w> Walker<'w> {
             .unwrap_or_default();
         let span = e.span.clone();
         match resolved {
-            Callee::Constructor | Callee::Intrinsic => any,
+            Callee::Constructor => any,
+            Callee::Intrinsic => {
+                // A checked conversion (`narrow_k`) of a secret branches on it.
+                if any
+                    && self.has(Capability::ConstTime)
+                    && self.world.overflow_ops.contains(&(span.start, span.end))
+                {
+                    self.error(
+                        "E0703",
+                        format!(
+                            "eff [ConstTime] checked conversion of a secret value may abort depending on the secret (in '{}')",
+                            self.function.name
+                        ),
+                        span,
+                        "use wrapping_k conversions on secrets",
+                    );
+                }
+                any
+            }
             Callee::Function(f) => {
                 self.direct_calls.push((f.name.clone(), span.clone()));
                 self.edge(&f.name, span.clone());

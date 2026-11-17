@@ -2490,6 +2490,7 @@ fn bind_pattern(p: &Pattern, value: &Value, env: &mut Env) -> bool {
         PatternKind::Literal(l) => match (l, value) {
             (Literal::Int(a), Value::Int(b)) => *a == *b as i128,
             (Literal::Int(a), Value::UInt(b, _)) => *a == *b as i128,
+            (Literal::Int(a), Value::SInt(b, _)) => *a == *b as i128,
             (Literal::Float(a), Value::Float(b)) => a == b,
             (Literal::Bool(a), Value::Bool(b)) => a == b,
             (Literal::String(a), Value::String(b)) => a == b,

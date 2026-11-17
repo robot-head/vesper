@@ -28,6 +28,15 @@ impl Checker<'_> {
     fn shift_amount(&mut self, e: &Expr, env: &mut Env, what: &str) -> Option<i128> {
         let t = self.expr_expected(e, env, Usage::Own, &Type::Infer);
         let fact = self.integer_fact(e, env);
+        if let Type::IntLiteral(n) = t
+            && !IntegerKind::U32.fits(n)
+        {
+            self.error(
+                "E0209",
+                format!("integer literal {n} is outside the range of u32"),
+                e.span.clone(),
+            );
+        }
         let t = self.settle_literal(e, &t, &Type::named("u32"));
         if IntegerKind::from_type(&t).is_none() && t != Type::Infer {
             self.error(

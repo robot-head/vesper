@@ -292,6 +292,34 @@ fn invalid_uses_are_rejected() {
     rejects("fn f(a: usize) -> u64 { a }", "E0200");
     rejects("fn f(a: isize) -> i64 { a }", "E0200");
     rejects("fn f(a: u32) -> i32 { a }", "E0200");
+    // An unsuffixed shift amount is a u32 literal.
+    rejects(
+        "fn f() -> u64 eff [Fail[ArithOverflow]] { 1 << 4294967296 }",
+        "E0209",
+    );
+    // A checked conversion of a secret branches on it; a wrapping one does not.
+    rejects(
+        "copy struct Secret[T] { value: T } fn f(s: Secret[u64]) -> Unit eff [ConstTime, Fail[ArithOverflow]] { let Secret { value } = s; let x = narrow_u8(value); }",
+        "E0703",
+    );
+    accepted(
+        "copy struct Secret[T] { value: T } fn f(s: Secret[u64]) -> Secret[u8] eff [ConstTime] { let Secret { value } = s; Secret { value: wrapping_u8(value) } }",
+    );
+}
+
+#[test]
+fn literal_patterns_match_every_kind() {
+    for kind in INTEGER_KINDS {
+        let k = kind.name();
+        let n = if kind.signed() { "-1" } else { "1" };
+        agree(
+            &format!(
+                "fn pick(x: {k}) -> u8 {{ match x {{ {n} => 10, 0 => 20, _ => 30 }} }}
+fn main() -> (u8, u8, u8) {{ let a: {k} = {n}; let b: {k} = 0; let c: {k} = 2; (pick(a), pick(b), pick(c)) }}"
+            ),
+            "(10, 20, 30)",
+        );
+    }
 }
 
 #[test]
