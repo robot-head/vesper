@@ -1,0 +1,89 @@
+// Vesper port of the vesper-port-pilot crate (src/reference.rs).
+// Every `pub fn` is exported as `vesper_pilot_<name>` by `vesper build --lib`.
+copy struct Point {
+    x: i64,
+    y: i64
+}
+
+copy enum Shape {
+    Empty,
+    Square(i64),
+    Rect {
+        w: i64,
+        h: i64
+    }
+}
+
+pub fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+pub fn clamp(x: i64, lo: i64, hi: i64) -> i64 {
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+pub fn bounds(a: i64, b: i64) -> (i64, i64) {
+    if a <= b {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+pub fn midpoint(in p: Point, in q: Point) -> Point eff [Fail[ArithOverflow]] {
+    Point {
+        x: (p.x + q.x) / 2,
+        y: (p.y + q.y) / 2
+    }
+}
+
+pub fn area(in s: Shape) -> i64 eff [Fail[ArithOverflow]] {
+    match s {
+        Shape::Empty => 0,
+        Shape::Square(n) => n * n,
+        Shape::Rect {
+            w,
+            h
+        }
+        => w * h,
+    }
+}
+
+pub fn ratio(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    a / b
+}
+
+pub fn is_digit(c: u8) -> bool {
+    c >= 48 && c <= 57
+}
+
+pub fn first_some(a: Option[u32], b: Option[u32]) -> Option[u32] {
+    match a {
+        Some(v) => Some(v),
+        None => b,
+    }
+}
+
+fn collatz_from(n: u64, steps: u64) -> u64 eff [Fail[ArithOverflow]] {
+    if n <= 1 {
+        steps
+    } else if n % 2 == 0 {
+        collatz_from(n / 2, steps + 1)
+    } else {
+        collatz_from(3 * n + 1, steps + 1)
+    }
+}
+
+pub fn collatz_steps(n: u64) -> u64 eff [Fail[ArithOverflow]] {
+    collatz_from(n, 0)
+}

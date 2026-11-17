@@ -1,0 +1,19 @@
+# Host triples for `vesper build --lib` objects (vesper_port.bzl).
+[
+    config_setting(
+        name = "vesper_" + os + "_" + cpu,
+        constraint_values = [
+            "@platforms//os:" + os,
+            "@platforms//cpu:" + cpu,
+        ],
+    )
+    for os in [
+        "linux",
+        "macos",
+        "windows",
+    ]
+    for cpu in [
+        "x86_64",
+        "aarch64",
+    ]
+]

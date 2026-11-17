@@ -6083,6 +6083,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-port-abi"
+version = "0.1.0"
+
+[[package]]
+name = "vesper-port-harness"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "serde_json",
+ "vesper",
+]
+
+[[package]]
+name = "vesper-port-pilot"
+version = "0.1.0"
+dependencies = [
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
+
+[[package]]
 name = "vesper-prism"
 version = "0.1.0"
 

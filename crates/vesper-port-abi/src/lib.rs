@@ -1,0 +1,241 @@
+//! Runtime support for Rust bindings of `vesper build --lib` libraries.
+//!
+//! The export ABI (`vesper.native.export-abi/1`, see `src/native_export.rs`
+//! in the compiler) passes every value as eight-byte words: a scalar is one
+//! word, a tuple or struct is its fields in order, and an enum is a tag word
+//! (the variant index) followed by the variant's fields. Every value is at
+//! least one word. [`Abi`] converts between Rust values and those words.
+//! Generated bindings implement it for the library's own types; this crate
+//! implements it for scalars, tuples, `Option`, `Result` and the Vesper
+//! builtin error types.
+//!
+//! This crate has no dependencies, so a crate with a `vesper-port` feature
+//! can depend on it unconditionally.
+#![no_std]
+
+/// A value with a fixed word layout at the export boundary.
+pub trait Abi: Sized {
+    /// Size in eight-byte words (at least 1).
+    const WORDS: usize;
+    /// Write the value's words to `out[..Self::WORDS]`.
+    fn put(&self, out: &mut [u64]);
+    /// Read a value from `words[..Self::WORDS]`.
+    fn get(words: &[u64]) -> Self;
+}
+
+/// `max(a, b)` in constant context.
+pub const fn max(a: usize, b: usize) -> usize {
+    if a > b { a } else { b }
+}
+
+macro_rules! integer {
+    ($($t:ty),*) => {$(
+        impl Abi for $t {
+            const WORDS: usize = 1;
+            fn put(&self, out: &mut [u64]) {
+                out[0] = *self as u64;
+            }
+            fn get(words: &[u64]) -> Self {
+                words[0] as $t
+            }
+        }
+    )*};
+}
+integer!(u8, u32, u64, i64);
+
+impl Abi for bool {
+    const WORDS: usize = 1;
+    fn put(&self, out: &mut [u64]) {
+        out[0] = u64::from(*self);
+    }
+    fn get(words: &[u64]) -> Self {
+        words[0] != 0
+    }
+}
+
+impl Abi for f64 {
+    const WORDS: usize = 1;
+    fn put(&self, out: &mut [u64]) {
+        out[0] = self.to_bits();
+    }
+    fn get(words: &[u64]) -> Self {
+        f64::from_bits(words[0])
+    }
+}
+
+/// `Unit` is one ignored word.
+impl Abi for () {
+    const WORDS: usize = 1;
+    fn put(&self, out: &mut [u64]) {
+        out[0] = 0;
+    }
+    fn get(_: &[u64]) -> Self {}
+}
+
+macro_rules! tuple {
+    ($($name:ident $index:tt),+) => {
+        impl<$($name: Abi),+> Abi for ($($name,)+) {
+            const WORDS: usize = max(1, 0 $(+ $name::WORDS)+);
+            #[allow(unused_assignments)]
+            fn put(&self, out: &mut [u64]) {
+                let mut at = 0;
+                $(
+                    self.$index.put(&mut out[at..]);
+                    at += $name::WORDS;
+                )+
+            }
+            #[allow(unused_assignments)]
+            fn get(words: &[u64]) -> Self {
+                let mut at = 0;
+                ($(
+                    {
+                        let value = $name::get(&words[at..]);
+                        at += $name::WORDS;
+                        value
+                    },
+                )+)
+            }
+        }
+    };
+}
+tuple!(A 0);
+tuple!(A 0, B 1);
+tuple!(A 0, B 1, C 2);
+tuple!(A 0, B 1, C 2, D 3);
+tuple!(A 0, B 1, C 2, D 3, E 4);
+tuple!(A 0, B 1, C 2, D 3, E 4, F 5);
+tuple!(A 0, B 1, C 2, D 3, E 4, F 5, G 6);
+tuple!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
+
+/// Vesper `copy enum Option[T] { None, Some(T) }`.
+impl<T: Abi> Abi for Option<T> {
+    const WORDS: usize = 1 + T::WORDS;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            None => out[0] = 0,
+            Some(value) => {
+                out[0] = 1;
+                value.put(&mut out[1..]);
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => None,
+            1 => Some(T::get(&words[1..])),
+            tag => panic!("invalid Option tag {tag} from Vesper"),
+        }
+    }
+}
+
+/// Vesper `copy enum Result[T, E] { Ok(T), Err(E) }`.
+impl<T: Abi, E: Abi> Abi for Result<T, E> {
+    const WORDS: usize = 1 + max(T::WORDS, E::WORDS);
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            Ok(value) => {
+                out[0] = 0;
+                value.put(&mut out[1..]);
+            }
+            Err(error) => {
+                out[0] = 1;
+                error.put(&mut out[1..]);
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => Ok(T::get(&words[1..])),
+            1 => Err(E::get(&words[1..])),
+            tag => panic!("invalid Result tag {tag} from Vesper"),
+        }
+    }
+}
+
+/// Vesper's builtin `copy struct ArithOverflow {}`, raised by checked
+/// arithmetic (`vesper.arith.checked/1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct ArithOverflow;
+
+impl Abi for ArithOverflow {
+    const WORDS: usize = 1;
+    fn put(&self, out: &mut [u64]) {
+        out[0] = 0;
+    }
+    fn get(_: &[u64]) -> Self {
+        ArithOverflow
+    }
+}
+
+impl core::fmt::Display for ArithOverflow {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("arithmetic overflow")
+    }
+}
+
+/// Vesper's builtin `copy enum RuntimeError { DivisionByZero, IndexOutOfBounds }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RuntimeError {
+    DivisionByZero,
+    IndexOutOfBounds,
+}
+
+impl Abi for RuntimeError {
+    const WORDS: usize = 1;
+    fn put(&self, out: &mut [u64]) {
+        out[0] = match self {
+            RuntimeError::DivisionByZero => 0,
+            RuntimeError::IndexOutOfBounds => 1,
+        };
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => RuntimeError::DivisionByZero,
+            1 => RuntimeError::IndexOutOfBounds,
+            tag => panic!("invalid RuntimeError tag {tag} from Vesper"),
+        }
+    }
+}
+
+impl core::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            RuntimeError::DivisionByZero => "division by zero",
+            RuntimeError::IndexOutOfBounds => "index out of bounds",
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round_trip<T: Abi + PartialEq + core::fmt::Debug>(value: T) {
+        let mut words = [0u64; 16];
+        value.put(&mut words);
+        assert_eq!(T::get(&words), value);
+    }
+
+    #[test]
+    fn layouts_match_the_compiler() {
+        // Sizes from src/layout.rs: scalars are one word, products sum their
+        // fields (at least one word), enums add a tag word.
+        assert_eq!(<(i64, bool) as Abi>::WORDS, 2);
+        assert_eq!(<Option<u32> as Abi>::WORDS, 2);
+        assert_eq!(<Result<(i64, i64), ArithOverflow> as Abi>::WORDS, 3);
+        assert_eq!(<Option<Option<u8>> as Abi>::WORDS, 3);
+        round_trip((-5i64, true, 7u8));
+        round_trip(Some((1u64, -2.5f64)));
+        round_trip(Err::<u64, RuntimeError>(RuntimeError::IndexOutOfBounds));
+        round_trip(Ok::<u64, RuntimeError>(u64::MAX));
+    }
+
+    #[test]
+    fn option_tags_follow_the_builtin_declaration() {
+        let mut words = [9u64; 2];
+        Some(3u8).put(&mut words);
+        assert_eq!(words, [1, 3]);
+        None::<u8>.put(&mut words);
+        assert_eq!(words[0], 0);
+    }
+}

@@ -1,0 +1,66 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_port_object")
+
+# The Rust build (default features), with its tests.
+vesper_crate()
+
+# The Vesper build: the same API forwarding to vesper/pilot.ves through the
+# committed binding, and tests/api.rs run unchanged against it. The
+# vesper-port-harness tests check that the committed binding is current.
+vesper_port_object(
+    name = "pilot_vesper",
+    src = "vesper/pilot.ves",
+    library = "pilot",
+    target = VESPER_TARGET,
+)
+
+# The divergence check: the same edit build.rs applies under the
+# `vesper-port-divergent` feature. :port_divergence_detected expects the
+# test binary linked against it to fail.
+vesper_port_object(
+    name = "pilot_vesper_divergent",
+    src = "vesper/pilot.ves",
+    edits = {"c >= 48 && c <= 57": "c >= 48 && c <= 58"},
+    library = "pilot",
+    target = VESPER_TARGET,
+)
+
+rust_library(
+    name = "port",
+    srcs = glob(["src/**/*.rs"]),
+    crate_features = ["vesper-port"],
+    crate_name = "vesper_port_pilot",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    deps = ["//crates/vesper-port-abi"],
+)
+
+rust_test(
+    name = "port_api_test",
+    srcs = ["tests/api.rs"],
+    compile_data = [":pilot_vesper"],
+    crate_features = ["vesper-port"],
+    edition = "2024",
+    rustc_flags = ["-Clink-arg=$(location :pilot_vesper)"],
+    deps = [":port"],
+)
+
+rust_test(
+    name = "_port_api_divergent.bin",
+    srcs = ["tests/api.rs"],
+    compile_data = [":pilot_vesper_divergent"],
+    crate_features = ["vesper-port"],
+    edition = "2024",
+    rustc_flags = ["-Clink-arg=$(location :pilot_vesper_divergent)"],
+    tags = ["manual"],
+    deps = [":port"],
+)
+
+rust_test(
+    name = "port_divergence_detected",
+    srcs = ["tests/divergence.rs"],
+    data = [":_port_api_divergent.bin"],
+    edition = "2024",
+    env = {"VESPER_PORT_DIVERGENT_TEST": "$(rootpath :_port_api_divergent.bin)"},
+)
