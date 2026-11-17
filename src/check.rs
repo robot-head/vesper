@@ -17,6 +17,8 @@ mod tiled_rules;
 
 #[path = "loops/check.rs"]
 mod loop_rules;
+#[path = "seq/check.rs"]
+mod seq_rules;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct World {
@@ -242,6 +244,13 @@ impl World {
                             .get(1)
                             .map_or(Mode::Linear, |t| visit(w, t, bounds, seen));
                     }
+                    // ChunkSeq[T] owns its elements; Slice[T] is a borrow (§13).
+                    if n == crate::seq::CHUNK_SEQ_TYPE || n == crate::seq::SLICE_TYPE {
+                        return args
+                            .first()
+                            .map_or(Mode::Affine, |t| visit(w, t, bounds, seen))
+                            .join(Mode::Affine);
+                    }
                     // TiledSeq[T] is an affine AoSoA sequence container (§12.5).
                     if n == crate::tiled::TILED_SEQ_TYPE {
                         return args
@@ -282,6 +291,13 @@ impl World {
         let mut ty = ty.clone();
         for name in path {
             ty = match &ty {
+                // An interval loan `s[a..b]` of a sequence or slice place.
+                Type::Named(n, args)
+                    if crate::seq::is_segment(name)
+                        && (n == crate::seq::CHUNK_SEQ_TYPE || n == crate::seq::SLICE_TYPE) =>
+                {
+                    crate::seq::slice_of(args.first()?.clone())
+                }
                 Type::Named(n, args) if n == crate::tiled::TILED_SEQ_TYPE => {
                     let Type::Named(elem_name, elem_args) = args.first()? else {
                         return None;
@@ -506,6 +522,7 @@ pub(crate) fn check_core(
             caps: vec![],
             cap_aliases: BTreeMap::new(),
             loans: vec![],
+            slice_args: BTreeMap::new(),
             effect_inference: vec![],
             traits,
             current: String::new(),
@@ -554,6 +571,10 @@ pub(crate) fn check_core(
         diagnostics.extend(crate::vector::check_world(&world));
         diagnostics.extend(crate::tiled::check_world_adts(&world));
     }
+    if traits.is_none() {
+        // Slice placement is independent of every other judgment.
+        diagnostics.extend(crate::seq::check_world(&world));
+    }
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::regions::check_world(&world));
         diagnostics.extend(crate::fip::check_world(&world));
@@ -596,6 +617,8 @@ struct Checker<'a> {
     caps: Vec<Effect>,
     cap_aliases: BTreeMap<String, String>,
     loans: Vec<(Place, Pass, Span)>,
+    /// Spans of call arguments that may be slice views (`s[a..b]`).
+    slice_args: BTreeMap<(usize, usize), Pass>,
     effect_inference: Vec<(bool, usize, Effects, String)>,
     traits: Option<&'a dyn TraitCalls>,
     current: String,
@@ -713,6 +736,11 @@ impl Checker<'_> {
             return;
         }
         match t {
+            Type::Named(n, args)
+                if n == crate::seq::CHUNK_SEQ_TYPE || n == crate::seq::SLICE_TYPE =>
+            {
+                self.valid_seq_type(n, args, g, span);
+            }
             Type::Named(n, args) if n == crate::tiled::TILED_SEQ_TYPE => {
                 if !matches!(args.len(), 1 | 2) {
                     self.error(
@@ -1312,6 +1340,9 @@ impl Checker<'_> {
                         })
                 }
             }
+            ExprKind::Index(base, index) if self.seq_index_applies(e, base, env) => self
+                .seq_index(e, base, index, env, usage)
+                .unwrap_or(Type::Infer),
             ExprKind::Index(base, index) => {
                 let t = self.expr(base, env, Usage::Borrow(Pass::In));
                 let i = self.expr(index, env, Usage::Own);
@@ -2037,6 +2068,11 @@ impl Checker<'_> {
             {
                 return t;
             }
+            if !self.world.functions.contains_key(name)
+                && let Some(t) = self.seq_call(name, types, args, env, span.clone(), expected)
+            {
+                return t;
+            }
             if let Some(f) = self.world.functions.get(name) {
                 return self.apply(f, types, args, None, env, span, expected);
             }
@@ -2172,6 +2208,9 @@ impl Checker<'_> {
             if let Some(t) =
                 self.tiled_method_call(base, method, types, args, env, span.clone(), expected)
             {
+                return t;
+            }
+            if let Some(t) = self.seq_method_call(base, method, types, args, env, span.clone()) {
                 return t;
             }
             let t = self.peek_type(base, env);
@@ -2593,6 +2632,14 @@ impl Checker<'_> {
         }
         let mut loans: Vec<(Place, Pass, Span)> = vec![];
         let mut constraints = vec![];
+        self.seq_call_slices(
+            &actuals
+                .iter()
+                .zip(&f.params)
+                .map(|((e, _), p)| (*e, p.pass))
+                .collect::<Vec<_>>(),
+            env,
+        );
         for ((expr, explicit), param) in actuals.into_iter().zip(&f.params) {
             if let Some(pass) = explicit
                 && pass != param.pass
@@ -2606,7 +2653,7 @@ impl Checker<'_> {
                     expr.span.clone(),
                 );
             }
-            let place = Place::from_expr(expr);
+            let place = Place::from_expr(expr).or_else(|| self.seq_view_place(expr));
             if param.pass == Pass::Inout && place.is_none() {
                 self.error(
                     "E0300",

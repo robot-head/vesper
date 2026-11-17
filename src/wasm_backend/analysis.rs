@@ -780,9 +780,10 @@ pub(crate) fn operands(op: &Op) -> Vec<ValueId> {
         Op::Tuple(vs) | Op::Vector { args: vs, .. } => vs.clone(),
         Op::Data(_, fs) => fs.iter().map(|(_, v)| *v).collect(),
         Op::Project(v, _) | Op::Try(v) => vec![*v],
-        Op::Call { args, .. } | Op::Tiled { args, .. } | Op::Fip { args, .. } => {
-            args.iter().map(|a| a.value).collect()
-        }
+        Op::Call { args, .. }
+        | Op::Tiled { args, .. }
+        | Op::Seq { args, .. }
+        | Op::Fip { args, .. } => args.iter().map(|a| a.value).collect(),
         Op::Indirect { callee, args } => {
             let mut v = vec![*callee];
             v.extend(args.iter().map(|a| a.value));

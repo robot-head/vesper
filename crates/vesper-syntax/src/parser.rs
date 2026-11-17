@@ -2293,7 +2293,18 @@ impl Parser<'_> {
                         }
                     } else {
                         self.bump();
-                        let index = self.expr();
+                        let mut index = self.expr();
+                        // A slice interval `p[a..b]` (§2.2) is an index whose
+                        // expression is the binary `..` of its bounds.
+                        if self.kind() == K::DotDot {
+                            let op = self.bump();
+                            let hi = self.expr();
+                            let span = index.span.start..hi.span.end;
+                            index = self.record_expr(Expr {
+                                kind: ExprKind::Binary(op, Box::new(index), Box::new(hi)),
+                                span,
+                            });
+                        }
                         self.expect(K::RBracket);
                         ExprKind::Index(Box::new(e), Box::new(index))
                     }

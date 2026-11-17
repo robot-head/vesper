@@ -16,6 +16,9 @@ use vesper_lean_syntax::{
 };
 
 type Statements = Vec<DS>;
+
+#[path = "seq/lean.rs"]
+mod seq_lean;
 /// Generated fuel binder of total companions; `$` keeps it out of source names.
 const FUEL: &str = "$fuel";
 fn fuel_name(function: &str) -> Result<Name, String> {
@@ -2461,8 +2464,8 @@ impl Generator<'_> {
         Ok(match n {
             "Ok" => fixed_name(&["Except", "ok"]).rooted(),
             "Err" => fixed_name(&["Except", "error"]).rooted(),
-            "Some" => fixed_name(&["Option", "some"]).rooted(),
-            "None" => fixed_name(&["Option", "none"]).rooted(),
+            "Some" | "Option::Some" => fixed_name(&["Option", "some"]).rooted(),
+            "None" | "Option::None" => fixed_name(&["Option", "none"]).rooted(),
             _ => {
                 let (a, v) = self
                     .world
@@ -2974,6 +2977,7 @@ impl Generator<'_> {
                 bind_local(out, t.clone(), action, None);
                 reference(&t)
             }
+            ExprKind::Index(..) if let Some(term) = self.seq_expr(e, out) => term?,
             ExprKind::Index(base, index) => {
                 let Some(Type::Tuple(ts)) = self.type_of(base) else {
                     return Err("Lean indexing requires a typed tuple".into());
@@ -3129,6 +3133,18 @@ impl Generator<'_> {
         args: &[Arg],
         out: &mut Statements,
     ) -> Result<Term, String> {
+        if let ExprKind::Name(n) = &callee.kind
+            && self.world.functions.get(n).is_some_and(|f| {
+                f.params
+                    .iter()
+                    .any(|p| p.pass == Pass::Inout && crate::seq::is_slice_type(&p.ty))
+            })
+        {
+            return Err(seq_lean::INOUT_SLICE.into());
+        }
+        if let Some(term) = self.seq_expr(e, out) {
+            return term;
+        }
         if let Some((name, receiver)) = match &callee.kind {
             ExprKind::Name(n) if !self.scope.contains_key(n) => Some((n.as_str(), None)),
             ExprKind::Field(base, method)

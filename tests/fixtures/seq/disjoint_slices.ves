@@ -1,0 +1,56 @@
+// Disjoint `inout` sub-slices of one sequence, split at a shared bound, are
+// updated by one call. Code that updates an `inout` slice uses the total
+// `try_get`/`try_set`, since no abortable effect may cross an inout loan.
+fn fill(inout s: ChunkSeq[u64], i: u64, n: u64) {
+    if i < n {
+        s.push(i);
+        fill(inout s, wrapping_add(i, 1), n);
+    } else {
+        ()
+    }
+}
+
+fn scale(inout x: Slice[u64], i: u64, k: u64) {
+    let current = match x.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    if x.try_set(i, wrapping_mul(current, k)) {
+        scale(inout x, wrapping_add(i, 1), k);
+    } else {
+        ()
+    }
+}
+
+fn split(inout low: Slice[u64], inout high: Slice[u64]) {
+    scale(inout low, 0, 10);
+    scale(inout high, 0, 100);
+}
+
+fn total(in x: Slice[u64], i: u64, acc: u64) -> u64 eff [Fail[RuntimeError]] {
+    if i < x.len() {
+        total(in x, wrapping_add(i, 1), wrapping_add(acc, x.get(i)))
+    } else {
+        acc
+    }
+}
+
+fn run() -> u64 eff [Fail[RuntimeError]] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    fill(inout s, 0, 10);
+    let mid: u64 = 4;
+    let n = s.len();
+    split(inout s[0..mid], inout s[mid..n]);
+    // Overlapping `in` views are shared reads.
+    let both = wrapping_add(total(in s[0..6], 0, 0), total(in s[3..10], 0, 0));
+    wrapping_add(wrapping_add(total(in s.as_slice(), 0, 0), both), s[9])
+}
+
+fn main() -> u64 {
+    handle Fail[RuntimeError] in {
+        run()
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    }
+}

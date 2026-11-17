@@ -923,8 +923,8 @@ fn tail_resumptive_handlers() {
     // A handler body that assigns an enclosing local is refused, for user
     // effects and `Fail` alike: the write would be lost.
     for source in [
-        "linear effect Ask { fn ask() -> i64; }\nfn main() -> i64 { let x = 1; let r = handle Ask in { x = 50; Ask::ask() } with { return v => v, ask(k) => k(4), }; wrapping_add(r, x) }",
-        "fn main() -> i64 { let x = 1; let r = handle Fail[ArithOverflow] in { x = 50; 2 } with { return v => v, raise(e, k) => 0, }; wrapping_add(r, x) }",
+        "linear effect Ask { fn ask() -> i64; }\nfn main() -> i64 { let mut x = 1; let r = handle Ask in { x = 50; Ask::ask() } with { return v => v, ask(k) => k(4), }; wrapping_add(r, x) }",
+        "fn main() -> i64 { let mut x = 1; let r = handle Fail[ArithOverflow] in { x = 50; 2 } with { return v => v, raise(e, k) => 0, }; wrapping_add(r, x) }",
     ] {
         let w = world(source);
         let err = vc::compile(&w, "main", &Options::new(TARGETS[0])).unwrap_err();

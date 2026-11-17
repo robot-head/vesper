@@ -92,7 +92,7 @@ fn typed(value: &Type, monad: Option<&Term>, erase_box: bool) -> Result<Term, St
                 "String" => global(&["String"]),
                 "Option" => global(&["Option"]),
                 "Result" => global(&["Except"]),
-                "TiledSeq" => global(&["Array"]),
+                "TiledSeq" | "ChunkSeq" | "Slice" => global(&["Array"]),
                 _ => source_ref(name)?,
             };
             let ordered = if name == "Result" && arguments.len() == 2 {
@@ -280,7 +280,7 @@ fn nat(value: u128) -> Term {
 fn negative(value: u128) -> Term {
     unary(UnaryOp::Neg, nat(value))
 }
-fn project(value: Term, field: &str) -> Term {
+pub(crate) fn project(value: Term, field: &str) -> Term {
     Term::Project {
         base: Box::new(value),
         projection: Projection::Field(Ident::new(field).expect("fixed numeric method")),
