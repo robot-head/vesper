@@ -4,7 +4,19 @@ version = "0.1.0"
 edition = "2024"
 description = "Sans-IO BBRv3 congestion control and earliest-departure-time pacing for Vesper Warp (design §35)"
 publish = false
+build = "build.rs"
+
+[features]
+# Forward the implementation to the Vesper port in vesper/src/bbr.ves.
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# A deliberately wrong Vesper build: the port test run must fail.
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }
 
 [dev-dependencies]
+vesper-bench = { path = "../vesper-bench" }

@@ -1,0 +1,154 @@
+// @vesper/warp-bbr, part 2 of 8 (order in ../Loom.toml): integer helpers,
+// including the 64x64 -> 128-bit products the Rust code computed in u128.
+
+// The draft's "Infinity" for volumes and rates.
+fn infinity() -> u64 {
+    18446744073709551615
+}
+
+fn min(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn max(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn add_overflows(a: u64, b: u64) -> bool {
+    wrapping_add(a, b) < a
+}
+
+fn sat_add(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        infinity()
+    } else {
+        s
+    }
+}
+
+fn sat_sub(a: u64, b: u64) -> u64 {
+    if a > b {
+        wrapping_sub(a, b)
+    } else {
+        0
+    }
+}
+
+// `a * b` as (high, low) words.
+fn mul_full(a: u64, b: u64) -> (u64, u64) {
+    let m: u64 = 4294967295;
+    let a0 = a & m;
+    let a1 = a >> 32;
+    let b0 = b & m;
+    let b1 = b >> 32;
+    let p00 = wrapping_mul(a0, b0);
+    let p01 = wrapping_mul(a0, b1);
+    let p10 = wrapping_mul(a1, b0);
+    let p11 = wrapping_mul(a1, b1);
+    let mid = wrapping_add(wrapping_add(p00 >> 32, p01 & m), p10 & m);
+    let lo = (p00 & m) | (mid << 32);
+    let hi = wrapping_add(wrapping_add(wrapping_add(p11, p01 >> 32), p10 >> 32), mid >> 32);
+    (hi, lo)
+}
+
+fn sat_mul(a: u64, b: u64) -> u64 {
+    let (hi, lo) = mul_full(a, b);
+    if hi != 0 {
+        infinity()
+    } else {
+        lo
+    }
+}
+
+// `a / b` for a divisor the caller knows is non-zero (0 otherwise).
+fn div(a: u64, b: u64) -> u64 {
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+// `2^n` for `n < 64` (0 otherwise).
+fn pow2(n: u32) -> u64 {
+    handle Fail[ArithOverflow] in {
+        let one: u64 = 1;
+        one << n
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+// floor((hi * 2^64 + lo) / d), saturated to u64::MAX; `d > 0`.
+fn div_wide_sat(hi: u64, lo: u64, d: u64) -> u64 {
+    if d == 0 {
+        return infinity();
+    }
+    if hi == 0 {
+        return div(lo, d);
+    }
+    if hi >= d {
+        return infinity();
+    }
+    // Restoring long division: the remainder stays below d, and the bit
+    // shifted out of it (`top`) stands for 2^64.
+    let mut rem = hi;
+    let mut rest = lo;
+    let mut q: u64 = 0;
+    for i in 0..64 {
+        let top = rem >> 63;
+        rem = (rem << 1) | (rest >> 63);
+        rest = rest << 1;
+        q = q << 1;
+        if top == 1 || rem >= d {
+            rem = wrapping_sub(rem, d);
+            q = q | 1;
+        }
+    }
+    q
+}
+
+// floor(a * b / c), saturated; `c > 0`.
+// The common case, both factors below 2^32, needs no wide product.
+fn mul_div_sat(a: u64, b: u64, c: u64) -> u64 {
+    if a <= 4294967295 && b <= 4294967295 {
+        return div(wrapping_mul(a, b), c);
+    }
+    let (hi, lo) = mul_full(a, b);
+    div_wide_sat(hi, lo, c)
+}
+
+// Whether a * b > c * d, exactly.
+fn product_gt(a: u64, b: u64, c: u64, d: u64) -> bool {
+    if a <= 4294967295 && b <= 4294967295 && c <= 4294967295 && d <= 4294967295 {
+        return wrapping_mul(a, b) > wrapping_mul(c, d);
+    }
+    let (h1, l1) = mul_full(a, b);
+    let (h2, l2) = mul_full(c, d);
+    h1 > h2 || (h1 == h2 && l1 > l2)
+}
+
+// Saturating `x * gain / 1000`; Infinity stays Infinity.
+pub fn mul_gain(x: u64, gain: u64) -> u64 {
+    if x == infinity() {
+        infinity()
+    } else {
+        mul_div_sat(x, gain, 1000)
+    }
+}
+
+// Saturating `bw * ns / 10^9`: bytes delivered at `bw` over `ns`.
+fn bw_volume(bw: u64, ns: u64) -> u64 {
+    mul_div_sat(bw, ns, 1000000000)
+}

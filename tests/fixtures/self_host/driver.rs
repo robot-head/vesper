@@ -324,6 +324,9 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     || path.ends_with("tests/fixtures/seq")
                     || path.ends_with("tests/fixtures/strings")
                     || path.ends_with("packages/vesper-std")
+                    // Port P1 lane 10 (#907): parts of one compilation unit,
+                    // which do not check on their own; joins with #880.
+                    || path.ends_with("crates/vesper-warp-bbr/vesper")
                 {
                     continue;
                 }

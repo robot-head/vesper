@@ -21,6 +21,7 @@ pub const NANOS_PER_SEC: u64 = 1_000_000_000;
 /// `u64::MAX`, which makes every later departure saturate at `u64::MAX`.
 /// The controller never sets a zero pacing rate (it floors at one byte per
 /// second), so this case is only reachable through this pure function.
+#[cfg(not(feature = "vesper-port"))]
 #[must_use]
 pub const fn pacing_delay_ns(bytes: u32, rate_bytes_per_sec: u64) -> u64 {
     if rate_bytes_per_sec == 0 {
@@ -41,6 +42,7 @@ pub const fn pacing_delay_ns(bytes: u32, rate_bytes_per_sec: u64) -> u64 {
 /// `next = launch.saturating_add(delay)`. Saturation at `u64::MAX` is the
 /// documented behaviour at the end of the clock; it keeps both results
 /// monotone (`bbrv3_edt_launch_monotonic` in `lean/WarpBbr.lean`).
+#[cfg(not(feature = "vesper-port"))]
 #[must_use]
 pub const fn edt_step(prev_next_ns: u64, now_ns: u64, delay_ns: u64) -> (u64, u64) {
     let launch = if now_ns > prev_next_ns {
@@ -55,6 +57,7 @@ pub const fn edt_step(prev_next_ns: u64, now_ns: u64, delay_ns: u64) -> (u64, u6
 /// exact: the result lies in `[4 * mss, max(inflight_hi, 4 * mss)]`.
 ///
 /// `inflight_hi == u64::MAX` means "no upper bound yet".
+#[cfg(not(feature = "vesper-port"))]
 #[must_use]
 pub const fn clamp_target_cwnd(cwnd: u64, mss: u32, inflight_hi: u64) -> u64 {
     let floor = mss as u64 * 4;
@@ -76,9 +79,44 @@ pub const fn clamp_target_cwnd(cwnd: u64, mss: u32, inflight_hi: u64) -> u64 {
 /// send transitions only: after the window is cut below the current flight,
 /// in-flight bytes can exceed `cwnd + max_packet`, and the guard then blocks
 /// every send until enough data is acknowledged or declared lost.
+#[cfg(not(feature = "vesper-port"))]
 #[must_use]
 pub const fn send_allowed(bytes_in_flight: u64, cwnd: u64) -> bool {
     bytes_in_flight < cwnd
+}
+
+// The Vesper build (`vesper-port`): the same four functions, in
+// `vesper/src/bbr.ves`.
+
+/// Delay, in nanoseconds, that pacing `bytes` at `rate_bytes_per_sec`
+/// takes: `ceil(bytes * 10^9 / rate)`, `u64::MAX` for a zero rate.
+#[cfg(feature = "vesper-port")]
+#[must_use]
+pub fn pacing_delay_ns(bytes: u32, rate_bytes_per_sec: u64) -> u64 {
+    crate::port::pacing_delay_ns(bytes, rate_bytes_per_sec)
+}
+
+/// One earliest-departure-time step: `(launch, next)` with
+/// `launch = max(now, prev_next)` and `next = launch.saturating_add(delay)`.
+#[cfg(feature = "vesper-port")]
+#[must_use]
+pub fn edt_step(prev_next_ns: u64, now_ns: u64, delay_ns: u64) -> (u64, u64) {
+    crate::port::edt_step(prev_next_ns, now_ns, delay_ns)
+}
+
+/// The §35.5 congestion-window clamp to
+/// `[4 * mss, max(inflight_hi, 4 * mss)]`.
+#[cfg(feature = "vesper-port")]
+#[must_use]
+pub fn clamp_target_cwnd(cwnd: u64, mss: u32, inflight_hi: u64) -> u64 {
+    crate::port::clamp_target_cwnd(cwnd, mss, inflight_hi)
+}
+
+/// The congestion-window send guard: `bytes_in_flight < cwnd`.
+#[cfg(feature = "vesper-port")]
+#[must_use]
+pub fn send_allowed(bytes_in_flight: u64, cwnd: u64) -> bool {
+    crate::port::send_allowed(bytes_in_flight, cwnd)
 }
 
 #[cfg(test)]

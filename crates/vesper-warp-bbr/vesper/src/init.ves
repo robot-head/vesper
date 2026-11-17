@@ -1,0 +1,232 @@
+// @vesper/warp-bbr, part 4 of 8: configuration, `OnInit()` and validation.
+
+// Configuration, state predicates and small outputs.
+
+// QUIC defaults: RFC 9002 section 7.2 initial window
+// min(10 * smss, max(14720, 2 * smss)), selective ACKs, QUIC offload.
+pub fn bbr_config_quic(smss: u32) -> BbrConfig {
+    let ten = wrapping_mul(widen_u64(smss), 10);
+    let two = wrapping_mul(widen_u64(smss), 2);
+    let iw = min(ten, max(two, 14720));
+    BbrConfig {
+        smss: smss,
+        initial_cwnd: wrapping_u32(min(iw, 4294967295)),
+        has_selective_acks: true,
+        offload: OffloadModel::Quic,
+        probe_seed: 0x6262723377617270
+    }
+}
+
+// `IsInAProbeBWState()`.
+pub fn bbr_state_is_probe_bw(s: BbrState) -> bool {
+    match s {
+        BbrState::ProbeBwDown => true,
+        BbrState::ProbeBwCruise => true,
+        BbrState::ProbeBwRefill => true,
+        BbrState::ProbeBwUp => true,
+        _ => false,
+    }
+}
+
+// A volume saturated to the u32 window type of the contract.
+pub fn saturate_u32(x: u64) -> u32 {
+    wrapping_u32(min(x, 4294967295))
+}
+
+// Infinity as None.
+pub fn finite(x: u64) -> Option[u64] {
+    if x == infinity() {
+        Option::None
+    } else {
+        Option::Some(x)
+    }
+}
+
+// `C.app_limited != 0`.
+pub fn app_limited_marked(app_limited: u64) -> bool {
+    app_limited != 0
+}
+
+// The configuration check of `OnInit()`.
+fn config_fault(c: BbrConfig) -> Option[BbrFault] {
+    if c.smss == 0 || c.smss > 65535 {
+        Option::Some(BbrFault::InvalidConfig(0))
+    } else if c.initial_cwnd < c.smss {
+        Option::Some(BbrFault::InvalidConfig(1))
+    } else {
+        Option::None
+    }
+}
+
+fn empty_rate_sample() -> RateSample {
+    RateSample {
+        delivery_rate: 0,
+        is_app_limited: false,
+        interval_ns: 0,
+        delivered: 0,
+        prior_delivered: 0,
+        prior_time_ns: Option::None,
+        send_elapsed_ns: 0,
+        ack_elapsed_ns: 0,
+        last_acked_pn: 0,
+        rtt_ns: Option::None,
+        newly_acked: 0,
+        tx_in_flight: 0,
+        lost: 0
+    }
+}
+
+// `OnInit()` at time `now_ns`.
+pub fn bbrv3_new(config: BbrConfig, now_ns: u64) -> Result[Bbrv3, BbrFault] {
+    match config_fault(config) {
+        Option::Some(e) => {
+            return Result::Err(e);
+        },
+        Option::None => (),
+    }
+    let smss = widen_u64(config.smss);
+    let initial_cwnd = widen_u64(config.initial_cwnd);
+    let mut b = Bbrv3 {
+        smss: smss,
+        initial_cwnd: initial_cwnd,
+        has_selective_acks: config.has_selective_acks,
+        offload: config.offload,
+        rng: config.probe_seed,
+        delivered: 0,
+        delivered_ns: 0,
+        first_sent_ns: 0,
+        app_limited: 0,
+        lost: 0,
+        ce_bytes: 0,
+        inflight: 0,
+        cwnd: initial_cwnd,
+        pacing_rate: 1,
+        send_quantum: wrapping_mul(smss, 2),
+        next_edt_ns: 0,
+        srtt_ns: Option::None,
+        lifetime_min_rtt_ns: Option::None,
+        pacing_from_rtt: false,
+        is_cwnd_limited: false,
+        cwnd_limited_this_round: false,
+        in_recovery: false,
+        recovery_start_ns: 0,
+        last_now_ns: now_ns,
+        ce_pending: false,
+        ce_in_loss_round: false,
+        rs: empty_rate_sample(),
+        bbr_state: BbrState::Startup,
+        pacing_gain: 2770,
+        cwnd_gain: 2000,
+        round_count: 0,
+        round_start: false,
+        next_round_delivered: 0,
+        idle_restart: false,
+        drain_start_round: 0,
+        max_bw_filter: CycleMax {
+            previous: 0,
+            current: 0
+        },
+        max_bw: 0,
+        bw_shortterm: infinity(),
+        bw: 0,
+        cycle_count: 0,
+        min_rtt_ns: Option::None,
+        min_rtt_stamp_ns: now_ns,
+        min_rtt_expired: false,
+        bdp: 0,
+        extra_acked_filter: windowed_max_new(0, 0),
+        extra_acked: 0,
+        extra_acked_interval_start_ns: now_ns,
+        extra_acked_delivered: 0,
+        offload_budget: 0,
+        max_inflight: 0,
+        inflight_longterm: infinity(),
+        inflight_shortterm: infinity(),
+        bw_latest: 0,
+        inflight_latest: 0,
+        loss_round_delivered: 0,
+        loss_round_start: false,
+        is_loss_in_round: false,
+        loss_events_in_round: 0,
+        full_bw_reached: false,
+        full_bw_now: false,
+        full_bw: 0,
+        full_bw_count: 0,
+        is_bw_probe_stopping: false,
+        check_probe_loss: false,
+        bw_probe_up_acked: 0,
+        probe_up_acked_per_inc: infinity(),
+        bw_probe_up_rounds: 0,
+        rounds_since_probe_up: 0,
+        bw_probe_wait_ns: 0,
+        cycle_stamp_ns: 0,
+        prev_probe_too_high: false,
+        prev_probe_precautionary: false,
+        undo_state: Option::None,
+        undo_bw_shortterm: 0,
+        undo_inflight_shortterm: 0,
+        undo_inflight_longterm: 0,
+        prior_cwnd: 0,
+        probe_rtt_done_stamp_ns: Option::None,
+        probe_rtt_round_done: false,
+        probe_rtt_cwnd: infinity()
+    };
+    init_pacing_rate(inout b);
+    set_send_quantum(inout b);
+    enter_startup(inout b);
+    Result::Ok(b)
+}
+
+// ---------------------------------------------------------------------
+// Validation helpers.
+
+// The event time must not precede the latest one.
+pub fn check_time(last_ns: u64, now_ns: u64) -> Result[Unit, BbrFault] {
+    if now_ns < last_ns {
+        Result::Err(
+            BbrFault::TimeWentBackwards {
+                last_ns: last_ns,
+                now_ns: now_ns
+            }
+        )
+    } else {
+        Result::Ok(())
+    }
+}
+
+fn pn_fault(pn: u64) -> Option[BbrFault] {
+    if pn > 4611686018427387903 {
+        Option::Some(
+            BbrFault::PacketNumberOutOfRange {
+                pn: pn
+            }
+        )
+    } else {
+        Option::None
+    }
+}
+
+fn congested(in b: Bbrv3) -> u64 {
+    sat_add(b.lost, b.ce_bytes)
+}
+
+fn snapshot_fault(pn: u64, s: PacketDeliveryState, delivered: u64, congested_bytes: u64)
+    -> Option[BbrFault] {
+    if s.delivered > delivered || s.lost > congested_bytes {
+        Option::Some(
+            BbrFault::ForeignSnapshot {
+                pn: pn
+            }
+        )
+    } else {
+        Option::None
+    }
+}
+
+fn min_pipe_cwnd(in b: Bbrv3) -> u64 {
+    wrapping_mul(b.smss, 4)
+}
+
+fn is_probe_bw(in b: Bbrv3) -> bool {
+    bbr_state_is_probe_bw(b.bbr_state)
+}

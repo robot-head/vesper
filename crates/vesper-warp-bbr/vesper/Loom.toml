@@ -1,0 +1,14 @@
+[package]
+name = "@vesper/warp-bbr"
+version = "0.1.0"
+edition = "2026"
+# Sans-IO: the controller may only fail.
+capability_ceiling = ["Fail"]
+
+# `vesper fmt` formats files of at most 8192 tokens, and the port harness
+# compiles one source file, so the package is one compilation unit split
+# into parts, concatenated in this order (build.rs and BUILD.bazel do it):
+#   src/types.ves, src/arith.ves, src/pacing.ves, src/init.ves,
+#   src/inputs.ves, src/model.ves, src/probe.ves, src/control.ves
+# The parts use no `use` imports; the Vesper build of the crate compiles
+# their concatenation with `vesper build --lib`.

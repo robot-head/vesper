@@ -1,8 +1,128 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("//tools/bazel:cargo_test.bzl", "cargo_test")
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_port_object")
 
+# The Rust build (default features), with its tests.
 vesper_crate(
     # Lean resolves symlinked runfiles to the source tree and then rejects
     # them as outside --root, so these run in a copy of regular files.
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
+)
+
+# The Vesper build (port wave P1 lane 10, #907): the same API forwarding to
+# the Vesper port through the committed binding, with every test of the
+# crate run unchanged against it.
+#
+# The port is one compilation unit split into parts (vesper/Loom.toml),
+# concatenated in this order, as build.rs does for Cargo.
+PARTS = [
+    "types",
+    "arith",
+    "pacing",
+    "init",
+    "inputs",
+    "model",
+    "probe",
+    "control",
+]
+
+genrule(
+    name = "warp_bbr_ves",
+    srcs = ["vesper/src/%s.ves" % p for p in PARTS],
+    outs = ["warp_bbr.ves"],
+    cmd = "(" + "; ".join(["cat $(location vesper/src/%s.ves); echo" % p for p in PARTS]) + ") > $@",
+)
+
+vesper_port_object(
+    name = "bbr_vesper",
+    src = ":warp_bbr_ves",
+    library = "bbr",
+    target = VESPER_TARGET,
+)
+
+# The divergence check: the edits of DIVERGENT_EDITS in build.rs, one per
+# ported module. :port_divergence_detected expects the unit tests linked
+# against it to fail on exactly those modules' tests.
+vesper_port_object(
+    name = "bbr_vesper_divergent",
+    src = ":warp_bbr_ves",
+    edits = {
+        "        wrapping_add(q, 1)": "        wrapping_add(q, 2)",
+        "    f.current = 0;": "    f.current = 1;",
+        "sat_add(b.inflight, b.smss)": "sat_add(b.inflight, wrapping_add(b.smss, 1))",
+    },
+    library = "bbr",
+    target = VESPER_TARGET,
+)
+
+PORT_SRCS = glob(["src/**/*.rs"]) + ["port/binding.rs"]
+
+rust_library(
+    name = "port",
+    srcs = PORT_SRCS,
+    crate_features = ["vesper-port"],
+    crate_name = "vesper_warp_bbr",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    deps = ["//crates/vesper-port-abi"],
+)
+
+# Integration tests run in the package directory, as Cargo runs them.
+[
+    (
+        rust_test(
+            name = "_port_%s.bin" % test,
+            srcs = ["tests/%s.rs" % test] + glob(["tests/sim/*.rs"]),
+            compile_data = [":bbr_vesper"],
+            crate_features = ["vesper-port"],
+            crate_name = test,
+            crate_root = "tests/%s.rs" % test,
+            data = [":files"] + (["//:lean"] if test == "lean_model" else []),
+            edition = "2024",
+            rustc_env = {"CARGO_MANIFEST_DIR": "."},
+            rustc_flags = ["-Clink-arg=$(location :bbr_vesper)"],
+            tags = ["manual"],
+            deps = [":port"],
+        ),
+        cargo_test(
+            name = "port_%s_test" % test,
+            copy_cwd = test == "lean_model",
+            cwd = package_name(),
+            tags = ["no-remote-exec"],
+            test = ":_port_%s.bin" % test,
+        ),
+    )
+    for test in [
+        "lean_model",
+        "properties",
+        "simulator",
+        "zero_alloc",
+    ]
+]
+
+# The unit tests (src/**), against the port and against the divergent port.
+[
+    rust_test(
+        name = name,
+        compile_data = [obj],
+        crate = ":port",
+        crate_features = ["vesper-port"],
+        edition = "2024",
+        rustc_flags = ["-Clink-arg=$(location %s)" % obj],
+        tags = tags,
+    )
+    for name, obj, tags in [
+        ("port_unit_test", ":bbr_vesper", []),
+        ("_port_unit_divergent.bin", ":bbr_vesper_divergent", ["manual"]),
+    ]
+]
+
+rust_test(
+    name = "port_divergence_detected",
+    srcs = ["tests/divergence.rs"],
+    data = [":_port_unit_divergent.bin"],
+    edition = "2024",
+    env = {"VESPER_PORT_DIVERGENT_TEST": "$(rootpath :_port_unit_divergent.bin)"},
 )

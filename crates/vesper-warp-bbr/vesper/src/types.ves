@@ -1,0 +1,255 @@
+// @vesper/warp-bbr, part 1 of 8 (order in ../Loom.toml): sans-IO BBRv3
+// congestion control and earliest-departure-time pacing for Vesper Warp
+// (port wave P1 lane 10, #907).
+//
+// This is the implementation of the `vesper-warp-bbr` crate. The Rust crate
+// keeps the public types and a thin wrapper that forwards every call here
+// through the generated binding (`port/binding.rs`).
+//
+// The state machine follows draft-ietf-ccwg-bbr-07, transcribed into integer
+// arithmetic: volumes in bytes, rates in bytes per second, times in caller-
+// supplied virtual nanoseconds, gains per mille (1000 means 1.0). The
+// draft's "Infinity" is 18446744073709551615 (`u64::MAX`). Products the Rust
+// code computed in `u128` use the 64x64 -> 128 helpers of part 2 and saturate
+// to `u64::MAX`; differences of counters saturate at 0.
+//
+// Fail cannot cross an inout parameter, so every entry point that can
+// reject its input returns `Result[.., BbrFault]` as a value and checks
+// everything before it changes the state: a rejected call leaves the
+// controller unchanged.
+
+// ---------------------------------------------------------------------
+// Types shared with the Rust crate (same names, fields and variants).
+
+// `BBR.state`.
+copy enum BbrState {
+    Startup,
+    Drain,
+    ProbeBwDown,
+    ProbeBwCruise,
+    ProbeBwRefill,
+    ProbeBwUp,
+    ProbeRtt
+}
+
+// How `BBR.offload_budget` is computed.
+copy enum OffloadModel {
+    Quic,
+    Tcp
+}
+
+// Controller configuration.
+copy struct BbrConfig {
+    smss: u32,
+    initial_cwnd: u32,
+    has_selective_acks: bool,
+    offload: OffloadModel,
+    probe_seed: u64
+}
+
+// The per-ACK rate sample `RS`.
+copy struct RateSample {
+    delivery_rate: u64,
+    is_app_limited: bool,
+    interval_ns: u64,
+    delivered: u64,
+    prior_delivered: u64,
+    prior_time_ns: Option[u64],
+    send_elapsed_ns: u64,
+    ack_elapsed_ns: u64,
+    last_acked_pn: u64,
+    rtt_ns: Option[u64],
+    newly_acked: u64,
+    tx_in_flight: u64,
+    lost: u64
+}
+
+// Kathleen Nichols' windowed running maximum over three (time, value)
+// samples, as in Linux `lib/minmax.c`.
+copy struct WindowedMax {
+    t0: u64,
+    v0: u64,
+    t1: u64,
+    v1: u64,
+    t2: u64,
+    v2: u64
+}
+
+// The two-slot bandwidth filter keyed by `BBR.cycle_count`.
+copy struct CycleMax {
+    previous: u64,
+    current: u64
+}
+
+// A packet handed to the network.
+copy struct SentPacket {
+    pn: u64,
+    sent_ns: u64,
+    bytes: u32,
+    ack_eliciting: bool,
+    in_flight: bool
+}
+
+// A packet newly acknowledged by the peer.
+copy struct AckedPacket {
+    pn: u64,
+    sent_ns: u64,
+    bytes: u32
+}
+
+// A packet declared lost by loss detection.
+copy struct LostPacket {
+    pn: u64,
+    sent_ns: u64,
+    bytes: u32
+}
+
+// RTT estimator output for the ACK being processed (RFC 9002 section 5).
+copy struct RttSample {
+    latest_ns: u64,
+    min_ns: u64,
+    smoothed_ns: u64,
+    ack_delay_ns: u64
+}
+
+// Delivery-rate state snapshotted when a packet is sent.
+copy struct PacketDeliveryState {
+    delivered: u64,
+    delivered_ns: u64,
+    first_sent_ns: u64,
+    is_app_limited: bool,
+    tx_in_flight: u64,
+    lost: u64,
+    counted: bool
+}
+
+// The crate's `BbrError`, with the configuration message as a code
+// (0: smss out of range, 1: initial_cwnd below smss); the Rust wrapper maps
+// it to the error's `&'static str`.
+copy enum BbrFault {
+    InvalidConfig(u64),
+    PacketNumberOutOfRange {
+        pn: u64
+    },
+    EmptyInFlightPacket {
+        pn: u64
+    },
+    CwndFull {
+        bytes_in_flight: u64,
+        cwnd: u64
+    },
+    InflightUnderflow {
+        bytes_in_flight: u64,
+        released: u64
+    },
+    ForeignSnapshot {
+        pn: u64
+    },
+    TimeWentBackwards {
+        last_ns: u64,
+        now_ns: u64
+    },
+    AckedBeforeSent {
+        pn: u64
+    },
+    CounterOverflow
+}
+
+// The BBRv3 controller and EDT pacer for one flow. `rng` is the SplitMix64
+// state of the randomized probe wait.
+copy struct Bbrv3 {
+    smss: u64,
+    initial_cwnd: u64,
+    has_selective_acks: bool,
+    offload: OffloadModel,
+    rng: u64,
+    delivered: u64,
+    delivered_ns: u64,
+    first_sent_ns: u64,
+    app_limited: u64,
+    lost: u64,
+    ce_bytes: u64,
+    inflight: u64,
+    cwnd: u64,
+    pacing_rate: u64,
+    send_quantum: u64,
+    next_edt_ns: u64,
+    srtt_ns: Option[u64],
+    lifetime_min_rtt_ns: Option[u64],
+    pacing_from_rtt: bool,
+    is_cwnd_limited: bool,
+    cwnd_limited_this_round: bool,
+    in_recovery: bool,
+    recovery_start_ns: u64,
+    last_now_ns: u64,
+    ce_pending: bool,
+    ce_in_loss_round: bool,
+    rs: RateSample,
+    bbr_state: BbrState,
+    pacing_gain: u64,
+    cwnd_gain: u64,
+    round_count: u64,
+    round_start: bool,
+    next_round_delivered: u64,
+    idle_restart: bool,
+    drain_start_round: u64,
+    max_bw_filter: CycleMax,
+    max_bw: u64,
+    bw_shortterm: u64,
+    bw: u64,
+    cycle_count: u64,
+    min_rtt_ns: Option[u64],
+    min_rtt_stamp_ns: u64,
+    min_rtt_expired: bool,
+    bdp: u64,
+    extra_acked_filter: WindowedMax,
+    extra_acked: u64,
+    extra_acked_interval_start_ns: u64,
+    extra_acked_delivered: u64,
+    offload_budget: u64,
+    max_inflight: u64,
+    inflight_longterm: u64,
+    inflight_shortterm: u64,
+    bw_latest: u64,
+    inflight_latest: u64,
+    loss_round_delivered: u64,
+    loss_round_start: bool,
+    is_loss_in_round: bool,
+    loss_events_in_round: u64,
+    full_bw_reached: bool,
+    full_bw_now: bool,
+    full_bw: u64,
+    full_bw_count: u32,
+    is_bw_probe_stopping: bool,
+    check_probe_loss: bool,
+    bw_probe_up_acked: u64,
+    probe_up_acked_per_inc: u64,
+    bw_probe_up_rounds: u32,
+    rounds_since_probe_up: u64,
+    bw_probe_wait_ns: u64,
+    cycle_stamp_ns: u64,
+    prev_probe_too_high: bool,
+    prev_probe_precautionary: bool,
+    undo_state: Option[BbrState],
+    undo_bw_shortterm: u64,
+    undo_inflight_shortterm: u64,
+    undo_inflight_longterm: u64,
+    prior_cwnd: u64,
+    probe_rtt_done_stamp_ns: Option[u64],
+    probe_rtt_round_done: bool,
+    probe_rtt_cwnd: u64
+}
+
+// The state of one ACK between the calls the Rust wrapper makes for it:
+// `ack_check` per packet (validation, no state change), `ack_check_totals`
+// once, then `bbrv3_ack_step` per packet. This replaces the Rust slice
+// parameter, which the export ABI would copy into a heap buffer.
+copy struct AckProgress {
+    rs: RateSample,
+    has_newest: bool,
+    newest_sent_ns: u64,
+    newest_tx_in_flight: u64,
+    newest_lost: u64,
+    released: u64,
+    newly_delivered: u64
+}

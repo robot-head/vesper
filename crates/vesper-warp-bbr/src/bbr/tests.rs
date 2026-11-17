@@ -3,7 +3,10 @@
 //! transitions themselves always run through the public event API.
 
 use super::*;
-use crate::events::AckedPacket;
+use crate::events::{
+    AckedPacket, Delivered, LostPacket, MAX_PACKET_NUMBER, PacketDeliveryState, RttSample,
+    SentPacket,
+};
 use std::collections::VecDeque;
 
 const MSS: u32 = 1200;
@@ -126,7 +129,7 @@ impl Pipe {
     }
 
     fn reach_probe_bw(&mut self) {
-        assert!(self.run_until(|b| b.state.is_probe_bw(), 5_000 * MS));
+        assert!(self.run_until(|b| b.bbr_state.is_probe_bw(), 5_000 * MS));
     }
 }
 
@@ -342,7 +345,7 @@ fn probe_rtt_bounds_cwnd_to_half_bdp() {
 #[test]
 fn probe_rtt_exits_to_startup_if_pipe_never_filled() {
     let mut b = Bbrv3::new(BbrConfig::quic(MSS), 0).unwrap();
-    b.state = BbrState::ProbeRtt;
+    b.bbr_state = BbrState::ProbeRtt;
     b.probe_rtt_done_stamp_ns = Some(100);
     b.check_probe_rtt_done(101);
     assert_eq!(b.state(), BbrState::Startup);
@@ -507,7 +510,7 @@ fn loss_while_cruising_cuts_short_term_model_by_beta_once_per_round() {
 #[test]
 fn inflight_hi_grows_in_probe_up_when_cwnd_limited() {
     let mut b = Bbrv3::new(BbrConfig::quic(MSS), 0).unwrap();
-    b.state = BbrState::ProbeBwUp;
+    b.bbr_state = BbrState::ProbeBwUp;
     b.cwnd = 100_000;
     b.inflight_longterm = 100_000;
     b.is_cwnd_limited = true;
@@ -538,7 +541,7 @@ fn precautionary_probe_stops_up_at_inflight_hi() {
     // And if the precautionary probe saw no excess loss, the end of its
     // feedback round goes straight back to REFILL.
     let mut c = Bbrv3::new(BbrConfig::quic(MSS), 0).unwrap();
-    c.state = BbrState::ProbeBwDown;
+    c.bbr_state = BbrState::ProbeBwDown;
     c.is_bw_probe_stopping = true;
     c.round_start = true;
     c.prev_probe_precautionary = true;

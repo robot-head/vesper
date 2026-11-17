@@ -4,55 +4,101 @@
 /// `lib/minmax.c`. Time is a caller-chosen virtual clock (here: packet-timed
 /// round count). Samples older than `window` time units expire.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+///
+/// The three `(time, value)` samples are named fields (`t0`/`v0` is the
+/// best), so that the Vesper port can share the layout.
 pub struct WindowedMax {
-    samples: [(u64, u64); 3], // (time, value)
+    pub(crate) t0: u64,
+    pub(crate) v0: u64,
+    pub(crate) t1: u64,
+    pub(crate) v1: u64,
+    pub(crate) t2: u64,
+    pub(crate) v2: u64,
 }
 
+impl WindowedMax {
+    /// Current maximum.
+    #[must_use]
+    pub const fn get(&self) -> u64 {
+        self.v0
+    }
+}
+
+#[cfg(not(feature = "vesper-port"))]
 impl WindowedMax {
     /// A filter holding `value` at `time`.
     #[must_use]
     pub const fn new(time: u64, value: u64) -> Self {
         Self {
-            samples: [(time, value); 3],
+            t0: time,
+            v0: value,
+            t1: time,
+            v1: value,
+            t2: time,
+            v2: value,
         }
     }
 
-    /// Current maximum.
-    #[must_use]
-    pub const fn get(&self) -> u64 {
-        self.samples[0].1
+    const fn sample(&self, i: usize) -> (u64, u64) {
+        match i {
+            0 => (self.t0, self.v0),
+            1 => (self.t1, self.v1),
+            _ => (self.t2, self.v2),
+        }
+    }
+
+    fn set(&mut self, i: usize, (t, v): (u64, u64)) {
+        match i {
+            0 => (self.t0, self.v0) = (t, v),
+            1 => (self.t1, self.v1) = (t, v),
+            _ => (self.t2, self.v2) = (t, v),
+        }
     }
 
     /// Add a sample and return the windowed maximum.
     pub fn update(&mut self, window: u64, time: u64, value: u64) -> u64 {
         let sample = (time, value);
-        if value >= self.samples[0].1 || time.saturating_sub(self.samples[2].0) > window {
+        if value >= self.sample(0).1 || time.saturating_sub(self.sample(2).0) > window {
             *self = Self::new(time, value);
             return value;
         }
-        if value >= self.samples[1].1 {
-            self.samples[1] = sample;
-            self.samples[2] = sample;
-        } else if value >= self.samples[2].1 {
-            self.samples[2] = sample;
+        if value >= self.sample(1).1 {
+            self.set(1, sample);
+            self.set(2, sample);
+        } else if value >= self.sample(2).1 {
+            self.set(2, sample);
         }
-        let dt = time.saturating_sub(self.samples[0].0);
+        let dt = time.saturating_sub(self.sample(0).0);
         if dt > window {
-            self.samples[0] = self.samples[1];
-            self.samples[1] = self.samples[2];
-            self.samples[2] = sample;
-            if time.saturating_sub(self.samples[0].0) > window {
-                self.samples[0] = self.samples[1];
-                self.samples[1] = self.samples[2];
-                self.samples[2] = sample;
+            self.set(0, self.sample(1));
+            self.set(1, self.sample(2));
+            self.set(2, sample);
+            if time.saturating_sub(self.sample(0).0) > window {
+                self.set(0, self.sample(1));
+                self.set(1, self.sample(2));
+                self.set(2, sample);
             }
-        } else if self.samples[1].0 == self.samples[0].0 && dt > window / 4 {
-            self.samples[1] = sample;
-            self.samples[2] = sample;
-        } else if self.samples[2].0 == self.samples[1].0 && dt > window / 2 {
-            self.samples[2] = sample;
+        } else if self.sample(1).0 == self.sample(0).0 && dt > window / 4 {
+            self.set(1, sample);
+            self.set(2, sample);
+        } else if self.sample(2).0 == self.sample(1).0 && dt > window / 2 {
+            self.set(2, sample);
         }
-        self.samples[0].1
+        self.sample(0).1
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+impl WindowedMax {
+    /// A filter holding `value` at `time`.
+    #[must_use]
+    pub fn new(time: u64, value: u64) -> Self {
+        crate::port::windowed_max_new(time, value)
+    }
+
+    /// Add a sample and return the windowed maximum.
+    pub fn update(&mut self, window: u64, time: u64, value: u64) -> u64 {
+        crate::port::windowed_max_update(self, window, time, value)
     }
 }
 
@@ -61,10 +107,11 @@ impl WindowedMax {
 /// `BBR.cycle_count`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct CycleMax {
-    previous: u64,
-    current: u64,
+    pub(crate) previous: u64,
+    pub(crate) current: u64,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 impl CycleMax {
     /// Current maximum over both slots.
     #[must_use]
@@ -92,11 +139,31 @@ impl CycleMax {
     }
 }
 
+#[cfg(feature = "vesper-port")]
+impl CycleMax {
+    /// Current maximum over both slots.
+    #[must_use]
+    pub fn get(&self) -> u64 {
+        crate::port::cycle_max_get(*self)
+    }
+
+    /// Record a sample in the current cycle.
+    pub fn update(&mut self, value: u64) -> u64 {
+        crate::port::cycle_max_update(self, value)
+    }
+
+    /// Start a new cycle: the current slot becomes the previous one.
+    pub fn advance(&mut self) -> u64 {
+        crate::port::cycle_max_advance(self)
+    }
+}
+
 /// SplitMix64: a tiny deterministic PRNG for the randomized probe wait.
 /// Not cryptographic; seeded from the configuration so runs replay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SplitMix64(pub u64);
 
+#[cfg(not(feature = "vesper-port"))]
 impl SplitMix64 {
     /// Next 64-bit output.
     pub fn next_u64(&mut self) -> u64 {
@@ -110,6 +177,19 @@ impl SplitMix64 {
     /// Uniform in `0..bound` (`bound > 0`), by rejection-free multiply-high.
     pub fn below(&mut self, bound: u64) -> u64 {
         ((self.next_u64() as u128 * bound as u128) >> 64) as u64
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+impl SplitMix64 {
+    /// Next 64-bit output.
+    pub fn next_u64(&mut self) -> u64 {
+        crate::port::splitmix_next(&mut self.0)
+    }
+
+    /// Uniform in `0..bound` (`bound > 0`), by rejection-free multiply-high.
+    pub fn below(&mut self, bound: u64) -> u64 {
+        crate::port::splitmix_below(&mut self.0, bound)
     }
 }
 

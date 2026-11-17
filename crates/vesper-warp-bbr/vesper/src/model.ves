@@ -1,0 +1,263 @@
+// @vesper/warp-bbr, part 6 of 8: draft procedures (model and signals).
+
+// Draft procedures.
+
+fn note_rtt(inout b: Bbrv3, sample: RttSample) {
+    b.srtt_ns = Option::Some(sample.smoothed_ns);
+    let lifetime = match b.lifetime_min_rtt_ns {
+        Option::Some(m) => min(m, sample.min_ns),
+        Option::None => sample.min_ns,
+    };
+    b.lifetime_min_rtt_ns = Option::Some(min(lifetime, sample.latest_ns));
+    // InitPacingRate() after the first non-zero RTT sample, while no
+    // bandwidth sample exists yet.
+    if !b.pacing_from_rtt && b.max_bw == 0 && sample.smoothed_ns > 0 {
+        b.pacing_from_rtt = true;
+        init_pacing_rate(inout b);
+    }
+}
+
+fn init_pacing_rate(inout b: Bbrv3) {
+    let srtt = match b.srtt_ns {
+        Option::Some(s) => if s > 0 {
+            s
+        } else {
+            1000000
+        },
+        Option::None => 1000000,
+    };
+    // initial_cwnd is at most u32::MAX, so the product is exact in u64.
+    let nominal = div(wrapping_mul(b.initial_cwnd, 1000000000), srtt);
+    let rate = mul_div_sat(nominal, 2770, 1000);
+    b.pacing_rate = max(rate, 1);
+}
+
+fn enter_startup(inout b: Bbrv3) {
+    b.bbr_state = BbrState::Startup;
+    b.pacing_gain = 2770;
+    b.cwnd_gain = 2000;
+}
+
+fn enter_drain(inout b: Bbrv3) {
+    b.bbr_state = BbrState::Drain;
+    b.pacing_gain = 500;
+    b.cwnd_gain = 2000;
+    b.drain_start_round = b.round_count;
+}
+
+fn handle_restart_from_idle(inout b: Bbrv3, now_ns: u64) {
+    if b.inflight == 0 && b.app_limited != 0 {
+        b.idle_restart = true;
+        b.extra_acked_interval_start_ns = now_ns;
+        if is_probe_bw(in b) {
+            set_pacing_rate_with_gain(inout b, 1000);
+        } else if b.bbr_state == BbrState::ProbeRtt {
+            check_probe_rtt_done(inout b, now_ns);
+        }
+    }
+}
+
+fn mark_connection_app_limited(inout b: Bbrv3) {
+    b.app_limited = max(sat_add(b.delivered, b.inflight), 1);
+}
+
+fn update_model_and_state(inout b: Bbrv3, now_ns: u64) {
+    update_latest_delivery_signals(inout b);
+    update_congestion_signals(inout b);
+    update_ack_aggregation(inout b, now_ns);
+    check_full_bw_reached(inout b);
+    check_startup_done(inout b);
+    check_drain_done(inout b, now_ns);
+    update_probe_bw_cycle_phase(inout b, now_ns);
+    update_min_rtt(inout b, now_ns);
+    check_probe_rtt(inout b, now_ns);
+    advance_latest_delivery_signals(inout b);
+    bound_bw_for_model(inout b);
+}
+
+fn update_control_parameters(inout b: Bbrv3) {
+    set_pacing_rate(inout b);
+    set_send_quantum(inout b);
+    set_cwnd(inout b);
+}
+
+fn update_latest_delivery_signals(inout b: Bbrv3) {
+    b.loss_round_start = false;
+    b.bw_latest = max(b.bw_latest, b.rs.delivery_rate);
+    b.inflight_latest = max(b.inflight_latest, b.rs.delivered);
+    if b.rs.prior_delivered >= b.loss_round_delivered {
+        b.loss_round_delivered = b.delivered;
+        b.loss_round_start = true;
+    }
+}
+
+fn advance_latest_delivery_signals(inout b: Bbrv3) {
+    if b.loss_round_start {
+        b.bw_latest = b.rs.delivery_rate;
+        b.inflight_latest = b.rs.delivered;
+        b.loss_events_in_round = 0;
+        b.ce_in_loss_round = false;
+    }
+}
+
+fn reset_congestion_signals(inout b: Bbrv3) {
+    b.is_loss_in_round = false;
+    b.loss_events_in_round = 0;
+    b.ce_in_loss_round = false;
+    b.bw_latest = 0;
+    b.inflight_latest = 0;
+}
+
+fn update_congestion_signals(inout b: Bbrv3) {
+    update_max_bw(inout b);
+    if !b.loss_round_start {
+        return;
+    }
+    adapt_lower_bounds_from_congestion(inout b);
+    b.is_loss_in_round = false;
+}
+
+fn adapt_lower_bounds_from_congestion(inout b: Bbrv3) {
+    if is_probing_bw(in b) {
+        return;
+    }
+    if b.is_loss_in_round {
+        init_lower_bounds(inout b);
+        loss_lower_bounds(inout b);
+    }
+}
+
+fn init_lower_bounds(inout b: Bbrv3) {
+    if b.bw_shortterm == infinity() {
+        b.bw_shortterm = b.max_bw;
+    }
+    if b.inflight_shortterm == infinity() {
+        b.inflight_shortterm = b.cwnd;
+    }
+}
+
+fn loss_lower_bounds(inout b: Bbrv3) {
+    b.bw_shortterm = max(b.bw_latest, mul_gain(b.bw_shortterm, 700));
+    b.inflight_shortterm = max(b.inflight_latest, mul_gain(b.inflight_shortterm, 700));
+}
+
+fn reset_short_term_model(inout b: Bbrv3) {
+    b.bw_shortterm = infinity();
+    b.inflight_shortterm = infinity();
+}
+
+fn bound_bw_for_model(inout b: Bbrv3) {
+    b.bw = min(b.max_bw, b.bw_shortterm);
+}
+
+fn update_round(inout b: Bbrv3) {
+    if b.rs.prior_delivered >= b.next_round_delivered {
+        start_round(inout b);
+        b.round_count = sat_add(b.round_count, 1);
+        b.rounds_since_probe_up = sat_add(b.rounds_since_probe_up, 1);
+        b.round_start = true;
+        // C.is_cwnd_limited: cwnd was fully used in the last round.
+        b.is_cwnd_limited = b.cwnd_limited_this_round;
+        b.cwnd_limited_this_round = false;
+    } else {
+        b.round_start = false;
+    }
+}
+
+fn start_round(inout b: Bbrv3) {
+    b.next_round_delivered = b.delivered;
+}
+
+fn update_max_bw(inout b: Bbrv3) {
+    update_round(inout b);
+    let rate = b.rs.delivery_rate;
+    if rate > 0 && (rate >= b.max_bw || !b.rs.is_app_limited) {
+        b.max_bw = cycle_max_update(inout b.max_bw_filter, rate);
+    }
+}
+
+fn advance_max_bw_filter(inout b: Bbrv3) {
+    b.cycle_count = sat_add(b.cycle_count, 1);
+    b.max_bw = cycle_max_advance(inout b.max_bw_filter);
+}
+
+fn update_ack_aggregation(inout b: Bbrv3, now_ns: u64) {
+    let interval = sat_sub(now_ns, b.extra_acked_interval_start_ns);
+    let mut expected = bw_volume(b.bw, interval);
+    if b.extra_acked_delivered <= expected {
+        b.extra_acked_delivered = 0;
+        b.extra_acked_interval_start_ns = now_ns;
+        expected = 0;
+    }
+    b.extra_acked_delivered = sat_add(b.extra_acked_delivered, b.rs.newly_acked);
+    let extra = min(wrapping_sub(b.extra_acked_delivered, expected), b.cwnd);
+    let filter_len: u64 = if b.full_bw_reached {
+        10
+    } else {
+        1
+    };
+    let round = b.round_count;
+    b.extra_acked = windowed_max_update(inout b.extra_acked_filter, filter_len, round, extra);
+}
+
+fn reset_full_bw(inout b: Bbrv3) {
+    b.full_bw = 0;
+    b.full_bw_count = 0;
+    b.full_bw_now = false;
+}
+
+fn check_full_bw_reached(inout b: Bbrv3) {
+    if b.full_bw_now || !b.round_start || b.rs.is_app_limited {
+        return;
+    }
+    // rate * 1.0 >= full_bw * 1.25, exactly.
+    if !product_gt(b.full_bw, 1250, b.rs.delivery_rate, 1000) {
+        reset_full_bw(inout b);
+        b.full_bw = b.rs.delivery_rate;
+        return;
+    }
+    b.full_bw_count = wrapping_add(b.full_bw_count, 1);
+    b.full_bw_now = b.full_bw_count >= 3;
+    if b.full_bw_now {
+        b.full_bw_reached = true;
+    }
+}
+
+fn check_startup_done(inout b: Bbrv3) {
+    check_startup_high_loss(inout b);
+    if b.bbr_state == BbrState::Startup && b.full_bw_reached {
+        enter_drain(inout b);
+    }
+}
+
+fn check_startup_high_loss(inout b: Bbrv3) {
+    // CE marks stand in for fast recovery: without them an ECN path that
+    // never drops could not take the loss-based Startup exit.
+    if b.full_bw_reached || !b.loss_round_start || !(b.in_recovery || b.ce_in_loss_round) {
+        return;
+    }
+    if b.loss_events_in_round < 6 && b.has_selective_acks {
+        return;
+    }
+    if !is_inflight_too_high(in b, b.rs.lost, b.rs.tx_in_flight) {
+        return;
+    }
+    b.undo_state = Option::Some(BbrState::Startup);
+    b.full_bw_reached = true;
+    b.inflight_longterm = max(b.bdp, b.inflight_latest);
+}
+
+fn check_drain_done(inout b: Bbrv3, now_ns: u64) {
+    if b.bbr_state == BbrState::Drain {
+        let target = inflight_with_gain(inout b, 1000);
+        let drained = b.inflight <= target;
+        if drained || b.round_count > sat_add(b.drain_start_round, 3) {
+            enter_probe_bw(inout b, now_ns);
+        }
+    }
+}
+
+fn enter_probe_bw(inout b: Bbrv3, now_ns: u64) {
+    b.cwnd_gain = 2000;
+    start_probe_bw_down(inout b, now_ns);
+}

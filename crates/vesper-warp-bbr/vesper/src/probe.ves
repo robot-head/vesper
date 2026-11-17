@@ -1,0 +1,356 @@
+// @vesper/warp-bbr, part 7 of 8: draft procedures (ProbeBW, loss, ProbeRTT).
+
+fn start_probe_bw_down(inout b: Bbrv3, now_ns: u64) {
+    reset_congestion_signals(inout b);
+    b.probe_up_acked_per_inc = infinity();
+    pick_probe_wait(inout b);
+    b.cycle_stamp_ns = now_ns;
+    b.is_bw_probe_stopping = true;
+    start_round(inout b);
+    b.bbr_state = BbrState::ProbeBwDown;
+    b.pacing_gain = 900;
+    b.cwnd_gain = 2000;
+}
+
+fn start_probe_bw_cruise(inout b: Bbrv3) {
+    b.bbr_state = BbrState::ProbeBwCruise;
+    b.pacing_gain = 1000;
+    b.cwnd_gain = 2000;
+}
+
+fn start_probe_bw_refill(inout b: Bbrv3) {
+    reset_short_term_model(inout b);
+    b.bw_probe_up_rounds = 0;
+    b.bw_probe_up_acked = 0;
+    b.prev_probe_precautionary = false;
+    b.is_bw_probe_stopping = false;
+    start_round(inout b);
+    b.bbr_state = BbrState::ProbeBwRefill;
+    b.pacing_gain = 1000;
+    b.cwnd_gain = 2000;
+}
+
+fn start_probe_bw_up(inout b: Bbrv3) {
+    start_round(inout b);
+    reset_full_bw(inout b);
+    b.full_bw = b.rs.delivery_rate;
+    b.bbr_state = BbrState::ProbeBwUp;
+    b.pacing_gain = 1250;
+    b.cwnd_gain = 2250;
+    raise_inflight_longterm_slope(inout b);
+}
+
+fn update_probe_bw_cycle_phase(inout b: Bbrv3, now_ns: u64) {
+    if !b.full_bw_reached {
+        return;
+    }
+    if adapt_long_term_model(inout b, now_ns) {
+        return;
+    }
+    match b.bbr_state {
+        BbrState::ProbeBwDown => {
+            if is_time_to_probe_bw(inout b, now_ns) {
+                return;
+            }
+            if is_time_to_cruise(inout b) {
+                start_probe_bw_cruise(inout b);
+            }
+        },
+        BbrState::ProbeBwCruise => {
+            let started = is_time_to_probe_bw(inout b, now_ns);
+        },
+        BbrState::ProbeBwRefill => {
+            if b.round_start {
+                b.check_probe_loss = true;
+                start_probe_bw_up(inout b);
+            }
+        },
+        BbrState::ProbeBwUp => {
+            if is_time_to_go_down(inout b) {
+                b.prev_probe_too_high = false;
+                start_probe_bw_down(inout b, now_ns);
+            }
+        },
+        _ => (),
+    }
+}
+
+fn is_time_to_cruise(inout b: Bbrv3) -> bool {
+    if b.inflight > inflight_with_headroom(in b) {
+        return false;
+    }
+    let target = inflight_with_gain(inout b, 1000);
+    b.inflight <= target
+}
+
+fn is_time_to_go_down(inout b: Bbrv3) -> bool {
+    if b.prev_probe_too_high && b.inflight >= b.inflight_longterm {
+        b.prev_probe_precautionary = true;
+        return true;
+    }
+    if b.is_cwnd_limited && b.cwnd >= b.inflight_longterm {
+        reset_full_bw(inout b);
+        b.full_bw = b.rs.delivery_rate;
+    } else if b.full_bw_now {
+        return true;
+    }
+    false
+}
+
+fn is_probing_bw(in b: Bbrv3) -> bool {
+    match b.bbr_state {
+        BbrState::Startup => true,
+        BbrState::ProbeBwRefill => true,
+        BbrState::ProbeBwUp => true,
+        _ => false,
+    }
+}
+
+fn is_time_to_probe_bw(inout b: Bbrv3, now_ns: u64) -> bool {
+    let elapsed = now_ns > sat_add(b.cycle_stamp_ns, b.bw_probe_wait_ns);
+    if elapsed || is_reno_coexistence_probe_time(in b) {
+        start_probe_bw_refill(inout b);
+        return true;
+    }
+    false
+}
+
+fn pick_probe_wait(inout b: Bbrv3) {
+    b.rounds_since_probe_up = splitmix_below(inout b.rng, 2);
+    let wait = splitmix_below(inout b.rng, 1000000001);
+    b.bw_probe_wait_ns = wrapping_add(2000000000, wait);
+}
+
+// The draft counts Reno rounds in packets: TargetInflight() is converted
+// from bytes by dividing by SMSS.
+fn is_reno_coexistence_probe_time(in b: Bbrv3) -> bool {
+    let reno_rounds = div(target_inflight(in b), b.smss);
+    b.rounds_since_probe_up >= min(reno_rounds, 63)
+}
+
+fn target_inflight(in b: Bbrv3) -> u64 {
+    min(b.bdp, b.cwnd)
+}
+
+fn inflight_with_headroom(in b: Bbrv3) -> u64 {
+    if b.inflight_longterm == infinity() {
+        return infinity();
+    }
+    let headroom = max(b.smss, mul_gain(b.inflight_longterm, 150));
+    max(sat_sub(b.inflight_longterm, headroom), min_pipe_cwnd(in b))
+}
+
+fn raise_inflight_longterm_slope(inout b: Bbrv3) {
+    let growth_this_round = pow2(b.bw_probe_up_rounds);
+    let next: u32 = wrapping_add(b.bw_probe_up_rounds, 1);
+    b.bw_probe_up_rounds = if next < 30 {
+        next
+    } else {
+        30
+    };
+    b.probe_up_acked_per_inc = max(div(b.cwnd, growth_this_round), b.smss);
+}
+
+fn probe_inflight_longterm_upward(inout b: Bbrv3) {
+    if !b.is_cwnd_limited || b.cwnd < b.inflight_longterm {
+        return;
+    }
+    b.bw_probe_up_acked = sat_add(b.bw_probe_up_acked, b.rs.newly_acked);
+    if b.bw_probe_up_acked >= b.probe_up_acked_per_inc {
+        let delta = div(b.bw_probe_up_acked, b.probe_up_acked_per_inc);
+        let used = wrapping_mul(delta, b.probe_up_acked_per_inc);
+        b.bw_probe_up_acked = wrapping_sub(b.bw_probe_up_acked, used);
+        b.inflight_longterm = sat_add(b.inflight_longterm, sat_mul(delta, b.smss));
+    }
+    if b.round_start {
+        raise_inflight_longterm_slope(inout b);
+    }
+}
+
+fn adapt_long_term_model(inout b: Bbrv3, now_ns: u64) -> bool {
+    if b.is_bw_probe_stopping && b.round_start {
+        b.check_probe_loss = false;
+        b.is_bw_probe_stopping = false;
+        if is_probe_bw(in b) && !b.rs.is_app_limited {
+            advance_max_bw_filter(inout b);
+        }
+        if is_probe_bw(in b) && b.prev_probe_precautionary && !b.prev_probe_too_high {
+            start_probe_bw_refill(inout b);
+            return true;
+        }
+    }
+    // ECN extension: CE marks arrive with ACKs, not with loss events, so the
+    // probing-phase "inflight too high" response runs here when this ACK's
+    // rate sample includes new CE marks.
+    let ce_too_high = b.ce_pending && is_inflight_too_high(in b, b.rs.lost, b.rs.tx_in_flight);
+    if b.check_probe_loss && ce_too_high {
+        let before = b.bbr_state;
+        let app_limited = b.rs.is_app_limited;
+        let tx = b.rs.tx_in_flight;
+        handle_inflight_too_high(inout b, now_ns, app_limited, tx);
+        return b.bbr_state != before;
+    }
+    if !is_inflight_too_high(in b, b.rs.lost, b.rs.tx_in_flight) {
+        if b.inflight_longterm == infinity() {
+            return false;
+        }
+        if b.rs.tx_in_flight > b.inflight_longterm {
+            b.inflight_longterm = b.rs.tx_in_flight;
+        }
+        if b.bbr_state == BbrState::ProbeBwUp {
+            probe_inflight_longterm_upward(inout b);
+        }
+    }
+    false
+}
+
+fn is_inflight_too_high(in b: Bbrv3, lost: u64, tx_in_flight: u64) -> bool {
+    bbrv3_is_inflight_too_high(b.has_selective_acks, lost, tx_in_flight)
+}
+
+fn handle_inflight_too_high(inout b: Bbrv3, now_ns: u64, is_app_limited: bool, tx_in_flight: u64) {
+    b.prev_probe_too_high = true;
+    b.check_probe_loss = false;
+    if !is_app_limited {
+        b.inflight_longterm = max(tx_in_flight, mul_gain(target_inflight(in b), 700));
+    }
+    if b.bbr_state == BbrState::ProbeBwUp {
+        b.undo_state = Option::Some(BbrState::ProbeBwUp);
+        start_probe_bw_down(inout b, now_ns);
+    }
+}
+
+fn note_loss(inout b: Bbrv3) {
+    if !b.is_loss_in_round {
+        b.loss_round_delivered = b.delivered;
+        save_state_upon_loss(inout b);
+    }
+    b.is_loss_in_round = true;
+    b.loss_events_in_round = sat_add(b.loss_events_in_round, 1);
+}
+
+fn handle_lost_packet(inout b: Bbrv3, now_ns: u64, size: u64, p: PacketDeliveryState) {
+    note_loss(inout b);
+    if !b.check_probe_loss {
+        return;
+    }
+    let tx_in_flight = p.tx_in_flight;
+    let lost = sat_sub(congested(in b), p.lost);
+    if is_inflight_too_high(in b, lost, tx_in_flight) {
+        let at_loss = inflight_at_loss(size, tx_in_flight, lost);
+        handle_inflight_too_high(inout b, now_ns, p.is_app_limited, at_loss);
+    }
+}
+
+fn save_state_upon_loss(inout b: Bbrv3) {
+    save_cwnd(inout b);
+    b.undo_state = Option::None;
+    b.undo_bw_shortterm = b.bw_shortterm;
+    b.undo_inflight_shortterm = b.inflight_shortterm;
+    b.undo_inflight_longterm = b.inflight_longterm;
+}
+
+fn save_cwnd(inout b: Bbrv3) {
+    if !b.in_recovery && b.bbr_state != BbrState::ProbeRtt {
+        b.prior_cwnd = b.cwnd;
+    } else {
+        b.prior_cwnd = max(b.prior_cwnd, b.cwnd);
+    }
+}
+
+fn restore_cwnd(inout b: Bbrv3) {
+    b.cwnd = max(b.cwnd, b.prior_cwnd);
+}
+
+fn update_min_rtt(inout b: Bbrv3, now_ns: u64) {
+    b.min_rtt_expired = now_ns > sat_add(b.min_rtt_stamp_ns, 10000000000);
+    if b.min_rtt_expired {
+        b.probe_rtt_cwnd = bdp_multiple(inout b, 500);
+    }
+    match b.rs.rtt_ns {
+        Option::Some(rtt) => {
+            let lower = match b.min_rtt_ns {
+                Option::Some(m) => rtt < m,
+                Option::None => true,
+            };
+            if lower || b.min_rtt_expired {
+                b.min_rtt_ns = Option::Some(rtt);
+                b.min_rtt_stamp_ns = now_ns;
+            }
+        },
+        Option::None => (),
+    }
+}
+
+fn check_probe_rtt(inout b: Bbrv3, now_ns: u64) {
+    if b.bbr_state != BbrState::ProbeRtt && b.min_rtt_expired && !b.idle_restart {
+        save_cwnd(inout b);
+        enter_probe_rtt(inout b);
+        b.probe_rtt_done_stamp_ns = Option::None;
+        b.is_bw_probe_stopping = true;
+        start_round(inout b);
+    }
+    if b.bbr_state == BbrState::ProbeRtt {
+        handle_probe_rtt(inout b, now_ns);
+    }
+    if b.rs.delivered > 0 {
+        b.idle_restart = false;
+    }
+}
+
+fn enter_probe_rtt(inout b: Bbrv3) {
+    b.bbr_state = BbrState::ProbeRtt;
+    b.pacing_gain = 1000;
+    b.cwnd_gain = 500;
+}
+
+fn handle_probe_rtt(inout b: Bbrv3, now_ns: u64) {
+    mark_connection_app_limited(inout b);
+    let pending = match b.probe_rtt_done_stamp_ns {
+        Option::Some(d) => false,
+        Option::None => true,
+    };
+    // The bound is computed (and BBR.bdp refreshed) only while no done
+    // stamp is set, as in the draft's short-circuit condition.
+    let drained = if pending {
+        let bound = probe_rtt_cwnd_bound(inout b);
+        b.inflight <= bound
+    } else {
+        false
+    };
+    if drained {
+        b.probe_rtt_done_stamp_ns = Option::Some(sat_add(now_ns, 200000000));
+        b.probe_rtt_round_done = false;
+        start_round(inout b);
+    } else if !pending {
+        if b.round_start {
+            b.probe_rtt_round_done = true;
+        }
+        if b.probe_rtt_round_done {
+            check_probe_rtt_done(inout b, now_ns);
+        }
+    }
+}
+
+fn check_probe_rtt_done(inout b: Bbrv3, now_ns: u64) {
+    match b.probe_rtt_done_stamp_ns {
+        Option::Some(done) => {
+            if now_ns > done {
+                b.min_rtt_stamp_ns = now_ns;
+                restore_cwnd(inout b);
+                exit_probe_rtt(inout b, now_ns);
+            }
+        },
+        Option::None => (),
+    }
+}
+
+fn exit_probe_rtt(inout b: Bbrv3, now_ns: u64) {
+    reset_short_term_model(inout b);
+    if b.full_bw_reached {
+        start_probe_bw_down(inout b, now_ns);
+        start_probe_bw_cruise(inout b);
+    } else {
+        enter_startup(inout b);
+    }
+}

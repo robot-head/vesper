@@ -1,0 +1,148 @@
+// @vesper/warp-bbr, part 3 of 8: pacing arithmetic, filters and the PRNG.
+
+// Pacing and window arithmetic (src/pacing.rs; lean/WarpBbr.lean models
+// these four functions).
+
+// ceil(bytes * 10^9 / rate); a zero rate saturates to u64::MAX. The
+// product is below 2^63 because bytes is a u32, so it is exact in u64.
+pub fn pacing_delay_ns(bytes: u32, rate_bytes_per_sec: u64) -> u64 {
+    if rate_bytes_per_sec == 0 {
+        return infinity();
+    }
+    let numerator = wrapping_mul(widen_u64(bytes), 1000000000);
+    let q = div(numerator, rate_bytes_per_sec);
+    if wrapping_mul(q, rate_bytes_per_sec) == numerator {
+        q
+    } else {
+        wrapping_add(q, 1)
+    }
+}
+
+// One earliest-departure-time step: (max(now, prev_next), launch + delay
+// saturated).
+pub fn edt_step(prev_next_ns: u64, now_ns: u64, delay_ns: u64) -> (u64, u64) {
+    let launch = if now_ns > prev_next_ns {
+        now_ns
+    } else {
+        prev_next_ns
+    };
+    (launch, sat_add(launch, delay_ns))
+}
+
+// The congestion-window clamp to [4 * mss, max(inflight_hi, 4 * mss)].
+pub fn clamp_target_cwnd(cwnd: u64, mss: u32, inflight_hi: u64) -> u64 {
+    let floor = wrapping_mul(widen_u64(mss), 4);
+    let ceiling = if inflight_hi > floor {
+        inflight_hi
+    } else {
+        floor
+    };
+    let raised = if cwnd > floor {
+        cwnd
+    } else {
+        floor
+    };
+    if raised < ceiling {
+        raised
+    } else {
+        ceiling
+    }
+}
+
+// The send guard: bytes_in_flight < cwnd.
+pub fn send_allowed(bytes_in_flight: u64, cwnd: u64) -> bool {
+    bytes_in_flight < cwnd
+}
+
+// ---------------------------------------------------------------------
+// Filters and the probe-wait PRNG (src/filter.rs).
+
+pub fn windowed_max_new(time: u64, value: u64) -> WindowedMax {
+    WindowedMax {
+        t0: time,
+        v0: value,
+        t1: time,
+        v1: value,
+        t2: time,
+        v2: value
+    }
+}
+
+// Add a sample and return the windowed maximum.
+pub fn windowed_max_update(inout f: WindowedMax, window: u64, time: u64, value: u64) -> u64 {
+    if value >= f.v0 || sat_sub(time, f.t2) > window {
+        f = windowed_max_new(time, value);
+        return value;
+    }
+    if value >= f.v1 {
+        f.t1 = time;
+        f.v1 = value;
+        f.t2 = time;
+        f.v2 = value;
+    } else if value >= f.v2 {
+        f.t2 = time;
+        f.v2 = value;
+    }
+    let dt = sat_sub(time, f.t0);
+    if dt > window {
+        f.t0 = f.t1;
+        f.v0 = f.v1;
+        f.t1 = f.t2;
+        f.v1 = f.v2;
+        f.t2 = time;
+        f.v2 = value;
+        if sat_sub(time, f.t0) > window {
+            f.t0 = f.t1;
+            f.v0 = f.v1;
+            f.t1 = f.t2;
+            f.v1 = f.v2;
+            f.t2 = time;
+            f.v2 = value;
+        }
+    } else if f.t1 == f.t0 && dt > window / 4 {
+        f.t1 = time;
+        f.v1 = value;
+        f.t2 = time;
+        f.v2 = value;
+    } else if f.t2 == f.t1 && dt > window / 2 {
+        f.t2 = time;
+        f.v2 = value;
+    }
+    f.v0
+}
+
+// Current maximum over both slots.
+pub fn cycle_max_get(f: CycleMax) -> u64 {
+    max(f.previous, f.current)
+}
+
+// Record a sample in the current cycle.
+pub fn cycle_max_update(inout f: CycleMax, value: u64) -> u64 {
+    if value > f.current {
+        f.current = value;
+    }
+    cycle_max_get(f)
+}
+
+// Start a new cycle: the current slot becomes the previous one.
+pub fn cycle_max_advance(inout f: CycleMax) -> u64 {
+    f.previous = f.current;
+    f.current = 0;
+    cycle_max_get(f)
+}
+
+// SplitMix64: the next 64-bit output.
+pub fn splitmix_next(inout seed: u64) -> u64 {
+    seed = wrapping_add(seed, 0x9e3779b97f4a7c15);
+    let mut z = seed;
+    z = wrapping_mul(z ^ (z >> 30), 0xbf58476d1ce4e5b9);
+    z = wrapping_mul(z ^ (z >> 27), 0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+
+// Uniform in 0..bound (bound > 0), by multiply-high.
+pub fn splitmix_below(inout seed: u64, bound: u64) -> u64 {
+    let x = splitmix_next(inout seed);
+    let (hi, lo) = mul_full(x, bound);
+    hi
+}
