@@ -444,16 +444,6 @@ UpperIdent     ::= /[A-Z][A-Za-z0-9_]*/ ;
 LowerIdent     ::= /[a-z_][A-Za-z0-9_]*/ ;
 ```
 
-*Modules and imports (implemented in `src/packages.rs`).* A package's modules are its files `src/**/*.ves`: `src/lib.ves` or `src/main.ves` is the root module, and `src/a/b.ves` is module `a::b`. A module sees its own top-level declarations and the items it imports. A `UseDecl` names a package (`@scope/name`, which must be a `[dependencies]` entry of the importing package, or `self` for the importing package), then a module path, then one item or a braced list of items, each optionally renamed with `as`:
-
-```vesper
-use @vesper-std/collections::{ChunkSeq, CacheBTree};
-use @demo/geometry::shapes::{Shape, area as shape_area};
-use self::util::clamp;
-```
-
-Only `Vis`-marked (`pub`) functions, types and effects can be imported; every other item is private to its file. Importing an enum or effect makes its variants or operations usable; variant and operation names share one namespace per program, so two modules may not declare the same one. Importing a name that is also declared or already imported in the module is an ambiguity error, and an unimported item of another module is not in scope. `pub use` re-exports, imports of whole modules and inline qualified paths such as `geometry::area(x)` are not part of this revision. A `UseDecl` in a file checked on its own (outside a package) is an error.
-
 == 3. Core Calculus, Four-Axis Modalities, and Ghost Linearity
 <ch-3>
 #chapter-deck[Elaboration to $lambda_(upright("Vesper"))$, the Packed `ModeVec` Lattice, Mode Crossing, Capsule Sealing, LIFO Order, and `@0` Erasure]
@@ -2330,7 +2320,17 @@ block_unvetted_namespaces = true
 export_lean4_specs = ["src/wal_txn.ves"]
 ```
 
-*Path dependencies (implemented).* A `[dependencies]` entry with a `path` names a local package directory, relative to the manifest: `"@demo/geometry" = { version = "^0.1", path = "../geometry" }`. The dependency's `Loom.toml` must declare the same package name and a version that satisfies `version`. The checker assembles the root package and its dependency closure into one compilation unit (modules and `UseDecl` imports are described in #link(<ch-2-2>)[Section 2.2]); a cycle between packages, a package loaded from two directories, or an entry without a `path` (registry dependencies are not implemented yet) is an error. `vesper check`, `run`, `jit`, `build` and `emit` accept a package directory in place of a source file.
+*Path dependencies (implemented).* A `[dependencies]` entry with a `path` names a local package directory, relative to the manifest: `"@demo/geometry" = { version = "^0.1", path = "../geometry" }`. The dependency's `Loom.toml` must declare the same package name and a version that satisfies `version`. The checker assembles the root package and its dependency closure into one compilation unit; a cycle between packages, a package loaded from two directories, or an entry without a `path` (registry dependencies are not implemented yet) is an error. `vesper check`, `run`, `jit`, `build` and `emit` accept a package directory in place of a source file.
+
+*Modules and imports (implemented in `src/packages.rs`).* Imports use the `UseDecl` production of #link(<ch-2-2>)[Section 2.2]. A package's modules are its files `src/**/*.ves`: `src/lib.ves` or `src/main.ves` is the root module, and `src/a/b.ves` is module `a::b`. A module sees its own top-level declarations and the items it imports. A `UseDecl` names a package (`@scope/name`, which must be a `[dependencies]` entry of the importing package, or `self` for the importing package), then a module path, then one item or a braced list of items, each optionally renamed with `as`:
+
+```vesper
+use @vesper-std/collections::{ChunkSeq, CacheBTree};
+use @demo/geometry::shapes::{Shape, area as shape_area};
+use self::util::clamp;
+```
+
+Only `Vis`-marked (`pub`) functions, types and effects can be imported; every other item is private to its file. Importing an enum or effect makes its variants or operations usable; variant and operation names share one namespace per program, so two modules may not declare the same one. Importing a name that is also declared or already imported in the module is an ambiguity error, and an unimported item of another module is not in scope. `pub use` re-exports, imports of whole modules and inline qualified paths such as `geometry::area(x)` are not part of this revision. A `UseDecl` in a file checked on its own (outside a package) is an error.
 
 Every resolved node in `Loom.lock` records four cryptographic anchors: `source_blake3` (unpacked source Merkle digest), `interface_mif` (`mif:blake3:...` digest of exported types, `ModeVec` bounds, projections, refinements, and effect rows), `effective_capabilities` (verified transitive effect set), and `provenance` (Sigstore Rekor index, `Lila` builder signatures, and `.olean` certificate digest).
 
