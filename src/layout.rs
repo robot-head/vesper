@@ -118,17 +118,11 @@ impl Layout {
                 ),
             });
         }
-        // Source strings originate from literals. A closed module therefore
-        // admits a finite inline representation without a heap owner or GC.
-        if ty.name() == "String" {
-            let words = world.string_capacity.div_ceil(8);
-            let size = u32::try_from(
-                words
-                    .checked_add(1)
-                    .and_then(|n| n.checked_mul(8))
-                    .ok_or("string layout is too large")?,
-            )
-            .map_err(|_| "string layout is too large")?;
+        // A string or string view is `{len, cap, data}` (§13 strings): the
+        // header of a `ChunkSeq[u8]`, so its address is a sequence handle.
+        // Capacity 0 with non-null data marks borrowed bytes (a literal's
+        // static data, or a view).
+        if crate::strings::is_text(ty) {
             let word = Self {
                 ty: Type::named("u64"),
                 size: 8,
@@ -136,11 +130,13 @@ impl Layout {
             };
             return Ok(Self {
                 ty: ty.clone(),
-                size,
+                size: 24,
                 kind: LayoutKind::Product(
-                    (0..=words)
-                        .map(|i| LayoutField {
-                            name: format!("${i}"),
+                    ["len", "cap", "data"]
+                        .iter()
+                        .enumerate()
+                        .map(|(i, name)| LayoutField {
+                            name: (*name).into(),
                             ty: word.ty.clone(),
                             offset: (i * 8) as i32,
                             layout: Box::new(word.clone()),
@@ -256,12 +252,19 @@ pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::
     if let Some(value) = crate::vector::decode(ty, bytes) {
         return Ok(value);
     }
-    if ty.name() == "String" {
+    if crate::strings::is_text(ty) {
         let length = usize::try_from(word()).map_err(|_| "invalid native string length")?;
-        if length > world.string_capacity {
-            return Err("invalid native string length".into());
+        let data = u64::from_ne_bytes(bytes[16..24].try_into().unwrap()) as *const u8;
+        if length == 0 {
+            return Ok(Value::String(String::new()));
         }
-        return String::from_utf8(bytes[8..8 + length].to_vec())
+        if data.is_null() || length > isize::MAX as usize {
+            return Err("invalid native string".into());
+        }
+        // SAFETY: a native string's `data` holds `len` initialized bytes
+        // while the code that produced it is alive, as for a `Box` above.
+        let text = unsafe { std::slice::from_raw_parts(data, length) };
+        return String::from_utf8(text.to_vec())
             .map(Value::String)
             .map_err(|_| "invalid native UTF-8 string".into());
     }

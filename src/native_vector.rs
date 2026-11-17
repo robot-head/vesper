@@ -462,8 +462,8 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
     /// `Vec::load_masked[u8, N](s, offset)`: a direct vector load when all
     /// `N` bytes are inside the string, else lane by lane with zeros past
-    /// its end. Inline strings are a length word followed by the bytes, and
-    /// every in-range byte lies inside the module's string capacity.
+    /// its end. A string is `{len, cap, data}` (§13 strings), and the fast
+    /// path reads whole chunks only when every byte is inside `data`.
     fn load_masked(
         &mut self,
         string: ir::Value,
@@ -471,10 +471,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         shape: Shape,
     ) -> Result<ir::Value, String> {
         let result = self.alloc(shape.bytes());
-        if self.world.string_capacity == 0 {
-            // No string has a byte: every lane is zero.
-            return Ok(result);
-        }
         let len = self.b.ins().load(types::I64, MemFlags::new(), string, 0);
         let available = self.available(offset, len);
         let full = self.b.ins().icmp_imm(
@@ -482,7 +478,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             available,
             i64::from(shape.lanes),
         );
-        let base = self.b.ins().iadd_imm(string, 8);
+        let base = self.b.ins().load(types::I64, MemFlags::new(), string, 16);
         let fast = self.b.create_block();
         let slow = self.b.create_block();
         let join = self.b.create_block();
@@ -505,8 +501,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .ins()
                 .icmp_imm(IntCC::UnsignedGreaterThan, available, i);
             let at = self.b.ins().iadd_imm(offset, i);
-            let at = self.b.ins().select(valid, at, zero);
+            // A lane past the end reads the (zeroed) result buffer instead:
+            // the data of an empty string is null.
             let address = self.b.ins().iadd(base, at);
+            let address = self.b.ins().select(valid, address, result);
             let byte = self.b.ins().uload8(types::I64, MemFlags::new(), address, 0);
             let byte = self.b.ins().select(valid, byte, zero);
             let byte = self.b.ins().ireduce(types::I8, byte);

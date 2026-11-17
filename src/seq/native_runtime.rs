@@ -20,18 +20,23 @@ const DATA: usize = 2;
 
 thread_local! {
     static HEADERS: RefCell<Vec<(*mut u64, u64)>> = const { RefCell::new(Vec::new()) };
+    /// Data buffers grown for headers this runtime did not allocate (native
+    /// strings, §13): `(data, bytes)`.
+    static BUFFERS: RefCell<Vec<(*mut u8, usize)>> = const { RefCell::new(Vec::new()) };
     static FAULT: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-/// Records a recoverable fault (code 1: a slice interval out of bounds).
-/// Generated code continues with an empty view; [`finish`] reports it.
+/// Records a recoverable fault (code 1: a slice interval out of bounds;
+/// code 2: a string interval off a char boundary). Generated code continues
+/// with an empty view; [`finish`] reports it.
 pub extern "C" fn vesper_seq_fault(code: u64) -> u64 {
-    if code != 1 {
-        fault("out of memory");
-    }
+    let message = match code {
+        1 => "native ChunkSeq fault: slice interval out of bounds",
+        2 => "native String fault: interval is not on char boundaries",
+        _ => fault("out of memory"),
+    };
     FAULT.with(|f| {
-        f.borrow_mut()
-            .get_or_insert_with(|| "native ChunkSeq fault: slice interval out of bounds".into());
+        f.borrow_mut().get_or_insert_with(|| message.into());
     });
     0
 }
@@ -89,9 +94,23 @@ pub extern "C" fn vesper_seq_grow(handle: u64, stride: u64, needed: u64) -> u64 
     let new_cap = cap.saturating_mul(2).max(4).max(needed);
     let layout = data_layout(new_cap, stride)
         .unwrap_or_else(|| fault("capacity overflows the address space"));
-    let grown = if data.is_null() {
+    let tracked = HEADERS.with(|h| h.borrow().iter().any(|(p, _)| *p == header));
+    let grown = if data.is_null() || cap == 0 {
         // SAFETY: `layout` has a non-zero size.
-        unsafe { alloc(layout) }
+        let fresh = unsafe { alloc(layout) };
+        if !data.is_null() && !fresh.is_null() {
+            // Capacity 0 with data: borrowed bytes (a string literal or
+            // view). Copy them before the first write.
+            // SAFETY: `header` is valid; `len * stride` bytes are readable
+            // at `data` and fit in the new buffer (`needed > len`).
+            unsafe {
+                let len = header.add(LEN).read();
+                let bytes = usize::try_from(len.saturating_mul(stride.max(1)))
+                    .unwrap_or_else(|_| fault("has a corrupt length"));
+                std::ptr::copy_nonoverlapping(data, fresh, bytes);
+            }
+        }
+        fresh
     } else {
         let old = data_layout(cap, stride).unwrap_or_else(|| fault("has a corrupt capacity"));
         // SAFETY: `data` was allocated with `old`, and the new size is non-zero.
@@ -99,6 +118,13 @@ pub extern "C" fn vesper_seq_grow(handle: u64, stride: u64, needed: u64) -> u64 
     };
     if grown.is_null() {
         fault("out of memory");
+    }
+    if !tracked {
+        BUFFERS.with(|b| {
+            let mut b = b.borrow_mut();
+            b.retain(|(p, _)| *p != data);
+            b.push((grown, layout.size()));
+        });
     }
     // SAFETY: `header` is valid for three words.
     unsafe {
@@ -132,6 +158,13 @@ pub fn finish() -> Result<(), String> {
                 }
                 dealloc(header.cast::<u8>(), Layout::new::<[u64; 3]>());
             }
+        }
+    });
+    BUFFERS.with(|b| {
+        for (data, bytes) in b.borrow_mut().drain(..) {
+            // SAFETY: each buffer came from `vesper_seq_grow` with this size
+            // and alignment and is freed once.
+            unsafe { dealloc(data, Layout::from_size_align_unchecked(bytes, 8)) };
         }
     });
     FAULT.with(|f| f.borrow_mut().take()).map_or(Ok(()), Err)

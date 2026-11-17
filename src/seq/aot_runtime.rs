@@ -9,9 +9,10 @@ use cranelift_codegen::ir::{self, AbiParam, InstBuilder, MemFlags, condcodes::In
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{DataDescription, FuncId, Linkage, Module};
 
-const MESSAGES: [&str; 2] = [
+const MESSAGES: [&str; 3] = [
     "vesper: native ChunkSeq fault: out of memory\n",
     "vesper: native ChunkSeq fault: slice interval out of bounds\n",
+    "vesper: native String fault: interval is not on char boundaries\n",
 ];
 
 pub fn defined<M: Module>(m: &M) -> bool {
@@ -79,21 +80,23 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
     };
     compile(m, im.fault, 1, |b, m, args| {
         if let Some((write, ids)) = messages {
-            // Message 1 (an interval fault) when the code is 1, else 0.
-            let (oom, interval) = (ids[0], ids[1]);
-            let oom_ptr = {
-                let data = m.declare_data_in_func(oom.0, b.func);
+            // Message `code` (1: an interval fault, 2: a string interval off
+            // a char boundary), else 0 (out of memory).
+            let mut ptr = {
+                let data = m.declare_data_in_func(ids[0].0, b.func);
                 b.ins().symbol_value(types::I64, data)
             };
-            let interval_ptr = {
-                let data = m.declare_data_in_func(interval.0, b.func);
-                b.ins().symbol_value(types::I64, data)
-            };
-            let is_interval = b.ins().icmp_imm(IntCC::Equal, args[0], 1);
-            let ptr = b.ins().select(is_interval, interval_ptr, oom_ptr);
-            let oom_len = b.ins().iconst(types::I64, oom.1);
-            let interval_len = b.ins().iconst(types::I64, interval.1);
-            let len = b.ins().select(is_interval, interval_len, oom_len);
+            let mut len = b.ins().iconst(types::I64, ids[0].1);
+            for (code, (id, n)) in ids.iter().enumerate().skip(1) {
+                let this = {
+                    let data = m.declare_data_in_func(*id, b.func);
+                    b.ins().symbol_value(types::I64, data)
+                };
+                let this_len = b.ins().iconst(types::I64, *n);
+                let is = b.ins().icmp_imm(IntCC::Equal, args[0], code as i64);
+                ptr = b.ins().select(is, this, ptr);
+                len = b.ins().select(is, this_len, len);
+            }
             let fd = b.ins().iconst(types::I64, 2);
             call(b, m, write, &[fd, ptr, len]);
         }
@@ -140,11 +143,47 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         let floor = b.ins().umax(doubled, four);
         let new_cap = b.ins().umax(floor, needed);
         let bytes = checked_bytes(b, m, &im, new_cap, stride);
-        let grown = call(b, m, im.realloc, &[data, bytes])[0];
-        non_null(b, m, &im, grown);
+        // Capacity 0 with data marks borrowed bytes (a string literal or
+        // view, §13 strings): copy them into a fresh buffer.
+        let zero = b.ins().iconst(types::I64, 0);
+        let empty = b.ins().icmp_imm(IntCC::Equal, cap, 0);
+        let has_data = b.ins().icmp_imm(IntCC::NotEqual, data, 0);
+        let borrowed = b.ins().band(empty, has_data);
+        let copy = b.create_block();
+        let resize = b.create_block();
+        let joined = b.create_block();
+        b.append_block_param(joined, types::I64);
+        b.ins().brif(borrowed, copy, &[], resize, &[]);
+        b.switch_to_block(copy);
+        let fresh = call(b, m, im.malloc, &[bytes])[0];
+        non_null(b, m, &im, fresh);
+        let len = b.ins().load(types::I64, MemFlags::new(), header, 0);
+        let one = b.ins().iconst(types::I64, 1);
+        let unit = b.ins().umax(stride, one);
+        let count = b.ins().imul(len, unit);
+        let head = b.create_block();
+        let body = b.create_block();
+        b.append_block_param(head, types::I64);
+        b.ins().jump(head, &[zero.into()]);
+        b.switch_to_block(head);
+        let k = b.block_params(head)[0];
+        let more = b.ins().icmp(IntCC::UnsignedLessThan, k, count);
+        b.ins().brif(more, body, &[], joined, &[fresh.into()]);
+        b.switch_to_block(body);
+        let from = b.ins().iadd(data, k);
+        let byte = b.ins().uload8(types::I64, MemFlags::new(), from, 0);
+        let to = b.ins().iadd(fresh, k);
+        b.ins().istore8(MemFlags::new(), byte, to, 0);
+        let next = b.ins().iadd_imm(k, 1);
+        b.ins().jump(head, &[next.into()]);
+        b.switch_to_block(resize);
+        let resized = call(b, m, im.realloc, &[data, bytes])[0];
+        non_null(b, m, &im, resized);
+        b.ins().jump(joined, &[resized.into()]);
+        b.switch_to_block(joined);
+        let grown = b.block_params(joined)[0];
         b.ins().store(MemFlags::new(), new_cap, header, 8);
         b.ins().store(MemFlags::new(), grown, header, 16);
-        let zero = b.ins().iconst(types::I64, 0);
         b.ins().return_(&[zero]);
         Ok(())
     })?;

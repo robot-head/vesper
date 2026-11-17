@@ -418,6 +418,8 @@ impl Checker<'_> {
     pub(super) fn seq_view_place(&self, e: &Expr) -> Option<Place> {
         let (base, segment) = if let Some((base, lo, hi)) = interval(e) {
             (base, interval_segment(lo, hi))
+        } else if let Some(base) = crate::strings::whole_view(e) {
+            (base, WHOLE_SEGMENT.to_string())
         } else {
             let (base, _) = whole_view(e)?;
             (base, WHOLE_SEGMENT.to_string())
@@ -434,7 +436,7 @@ impl Checker<'_> {
         for (e, pass) in actuals {
             let bounds = if let Some((_, lo, hi)) = interval(e) {
                 Some((lo, hi))
-            } else if whole_view(e).is_some() {
+            } else if whole_view(e).is_some() || crate::strings::whole_view(e).is_some() {
                 None
             } else {
                 continue;

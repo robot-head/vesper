@@ -811,7 +811,7 @@ impl<'a> Runtime<'a> {
                         "f64" => Some(matches!(value, Value::Float(_))),
                         "f32" => Some(matches!(value, Value::Float32(_))),
                         "bool" => Some(matches!(value, Value::Bool(_))),
-                        "String" => Some(matches!(value, Value::String(_))),
+                        "String" | "Str" => Some(matches!(value, Value::String(_))),
                         "Unit" => Some(matches!(value, Value::Tuple(values) if values.is_empty())),
                         _ => None,
                     };
@@ -1224,12 +1224,26 @@ impl<'a> Runtime<'a> {
                 self.tiled_op(&op, values, &state.env)?
             }
             Op::Seq { op, args } => {
+                let receiver = args.first().and_then(|a| a.place.clone());
                 let values = args
                     .into_iter()
                     .map(|a| get(a.value))
                     .collect::<Result<Vec<_>, _>>()?;
                 match self.seq_op(op, values, &instruction.span)? {
                     seq::SeqOutcome::Value(v) => v,
+                    seq::SeqOutcome::Update(updated, result) => {
+                        // A string update writes the new string back to the
+                        // receiver's place (`inout` parameters share it).
+                        let place = receiver.ok_or("string update requires a place")?;
+                        let mut slot = state
+                            .env
+                            .get(&place.root)
+                            .cloned()
+                            .ok_or("undefined string receiver place")?;
+                        slot.path.extend(place.path);
+                        slot.set(updated)?;
+                        result
+                    }
                     seq::SeqOutcome::OutOfBounds => {
                         return self.primitive_failure(
                             state,
@@ -2963,9 +2977,14 @@ fn binary(op: &str, a: Value, b: Value) -> Result<Value, Fault> {
             "!=" => Value::Bool(a != b),
             _ => return Err("invalid boolean operator".into()),
         },
+        // Strings compare in byte order (§13 strings).
         (Value::String(a), Value::String(b)) => match op {
             "==" => Value::Bool(a == b),
             "!=" => Value::Bool(a != b),
+            "<" => Value::Bool(a < b),
+            "<=" => Value::Bool(a <= b),
+            ">" => Value::Bool(a > b),
+            ">=" => Value::Bool(a >= b),
             _ => return Err("invalid string operator".into()),
         },
         (a, b) if op == "==" || op == "!=" => {

@@ -16,9 +16,13 @@ pub type SeqCell = Rc<RefCell<Vec<Value>>>;
 pub(crate) enum SeqOutcome {
     Value(Value),
     OutOfBounds,
+    /// A string operation that replaces its receiver (argument 0): the
+    /// caller writes the new string (first) back to the receiver's place;
+    /// the second value is the operation's result.
+    Update(Value, Value),
 }
 
-fn index(v: &Value) -> Result<u64, String> {
+pub(crate) fn index(v: &Value) -> Result<u64, String> {
     match v {
         Value::UInt(n, _) => Ok(*n),
         Value::Int(n) => u64::try_from(*n).map_err(|_| "sequence index is negative".into()),
@@ -61,6 +65,12 @@ impl Runtime<'_> {
             args.get(i)
                 .ok_or_else(|| format!("ChunkSeq::{} is missing an operand", op.name()))
         };
+        if let SeqOp::Str(op) = op {
+            return self.str_op(op, &args, site);
+        }
+        if op == SeqOp::SubSlice && matches!(args.first(), Some(Value::String(_))) {
+            return self.str_op(crate::strings::StrOp::SubStr, &args, site);
+        }
         Ok(match op {
             SeqOp::New => V(Value::Seq(Rc::new(RefCell::new(Vec::new())))),
             SeqOp::WithCapacity => {
@@ -170,6 +180,7 @@ impl Runtime<'_> {
                     len,
                 })
             }
+            SeqOp::Str(_) => unreachable!("string operations return above"),
             SeqOp::SubSlice => {
                 let (cell, start, len) = view(arg(0)?)?;
                 let lo = index(arg(1)?)?;
@@ -185,6 +196,107 @@ impl Runtime<'_> {
                         "ChunkSeq fault: slice interval {lo}..{hi} is out of bounds of length {len}"
                     ));
                 }
+            }
+        })
+    }
+}
+
+impl Runtime<'_> {
+    /// A string primitive (§13 strings). A string and a view are both a
+    /// Rust `String` here: a view is a copy of its bytes, which no
+    /// operation can tell apart from a borrow because views are read-only.
+    fn str_op(
+        &mut self,
+        op: crate::strings::StrOp,
+        args: &[Value],
+        site: &crate::ast::Span,
+    ) -> Result<SeqOutcome, String> {
+        use crate::strings::StrOp;
+        use SeqOutcome::{OutOfBounds, Update, Value as V};
+        let arg = |i: usize| {
+            args.get(i)
+                .ok_or_else(|| format!("String::{} is missing an operand", op.name()))
+        };
+        let text = |v: &Value| match v {
+            Value::String(s) => Ok(s.clone()),
+            _ => Err(format!("String::{} expects a string operand", op.name())),
+        };
+        let s = text(arg(0)?)?;
+        Ok(match op {
+            StrOp::Len => V(u64_value(s.len())),
+            StrOp::ByteAt | StrOp::TryByteAt => {
+                let i = index(arg(1)?)?;
+                let byte = usize::try_from(i)
+                    .ok()
+                    .and_then(|i| s.as_bytes().get(i).copied());
+                match (op, byte) {
+                    (StrOp::ByteAt, Some(b)) => V(Value::UInt(u64::from(b), 8)),
+                    (StrOp::ByteAt, None) => OutOfBounds,
+                    (_, b) => {
+                        let (constructor, fields) = match b {
+                            Some(b) => (
+                                "Some",
+                                BTreeMap::from([("0".to_string(), Value::UInt(u64::from(b), 8))]),
+                            ),
+                            None => ("None", BTreeMap::new()),
+                        };
+                        V(self.construct_data(
+                            "Option".into(),
+                            constructor.into(),
+                            fields,
+                            Some(site.clone()),
+                        )?)
+                    }
+                }
+            }
+            StrOp::AsStr => V(Value::String(s)),
+            StrOp::AsBytes => {
+                let bytes: Vec<Value> = s.bytes().map(|b| Value::UInt(u64::from(b), 8)).collect();
+                let len = bytes.len();
+                V(Value::Slice {
+                    seq: Rc::new(RefCell::new(bytes)),
+                    start: 0,
+                    len,
+                })
+            }
+            StrOp::SubStr => {
+                let lo = index(arg(1)?)?;
+                let hi = index(arg(2)?)?;
+                let len = s.len() as u64;
+                if lo > hi || hi > len {
+                    return Err(format!(
+                        "String fault: interval {lo}..{hi} is out of bounds of length {len}"
+                    ));
+                }
+                match s.get(lo as usize..hi as usize) {
+                    Some(view) => V(Value::String(view.to_string())),
+                    None => {
+                        return Err(format!(
+                            "String fault: interval {lo}..{hi} is not on char boundaries"
+                        ));
+                    }
+                }
+            }
+            StrOp::PushStr => Update(Value::String(s + &text(arg(1)?)?), Value::Tuple(vec![])),
+            StrOp::PushChar => {
+                let c = index(arg(1)?)?;
+                match u32::try_from(c).ok().and_then(char::from_u32) {
+                    Some(c) => {
+                        let mut s = s;
+                        s.push(c);
+                        Update(Value::String(s), Value::Bool(true))
+                    }
+                    None => V(Value::Bool(false)),
+                }
+            }
+            StrOp::Clear => Update(Value::String(String::new()), Value::Tuple(vec![])),
+            StrOp::Reserve => {
+                let n = usize::try_from(index(arg(1)?)?)
+                    .map_err(|_| "String capacity overflows the address space")?;
+                let mut s = s;
+                s.try_reserve(n)
+                    .map_err(|_| "String out of memory: capacity overflows the address space")?;
+                Update(Value::String(s), Value::Tuple(vec![]))
             }
         })
     }

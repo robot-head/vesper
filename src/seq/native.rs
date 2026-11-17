@@ -18,7 +18,11 @@ const CAP: i32 = 8;
 const DATA: i32 = 16;
 
 impl<M: Module> Codegen<'_, '_, M> {
-    fn seq_runtime_call(&mut self, name: &str, args: &[ir::Value]) -> Result<(), String> {
+    pub(super) fn seq_runtime_call(
+        &mut self,
+        name: &str,
+        args: &[ir::Value],
+    ) -> Result<(), String> {
         let jit = std::any::type_name::<M>().contains("JITModule");
         if !jit {
             if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
@@ -118,7 +122,7 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
 
     /// Raises `IndexOutOfBounds` unless `valid` holds.
-    fn seq_guard(&mut self, valid: ir::Value) -> Result<(), String> {
+    pub(super) fn seq_guard(&mut self, valid: ir::Value) -> Result<(), String> {
         let good = self.b.create_block();
         let bad = self.b.create_block();
         self.branch(valid, good, &[], bad, &[]);
@@ -130,7 +134,7 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
 
     /// Grows `handle` to hold `needed` elements when its capacity is short.
-    fn seq_reserve(
+    pub(super) fn seq_reserve(
         &mut self,
         handle: ir::Value,
         needed: ir::Value,
@@ -181,6 +185,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         arg_types: &[Type],
         result: &Type,
     ) -> Result<ir::Value, String> {
+        if let SeqOp::Str(op) = op {
+            return self.str_op(op, args);
+        }
+        if op == SeqOp::SubSlice && arg_types.first().is_some_and(crate::strings::is_text) {
+            return self.str_op(crate::strings::StrOp::SubStr, args);
+        }
         let elem = if op.has_receiver() {
             arg_types.first().and_then(seq::elem)
         } else {
@@ -330,6 +340,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let (h, start, len) = self.seq_view(arg(0)?, &arg_types[0]);
                 self.seq_slice_value(h, start, len)
             }
+            SeqOp::Str(_) => unreachable!("string operations return above"),
             SeqOp::SubSlice => {
                 let (h, start, len) = self.seq_view(arg(0)?, &arg_types[0]);
                 let lo = arg(1)?;
@@ -361,7 +372,7 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
 
     /// An `Option[elem]` that is `Some(load())` when `present` holds.
-    fn seq_option(
+    pub(super) fn seq_option(
         &mut self,
         option: &Type,
         elem: &Type,
@@ -396,7 +407,7 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
 
     /// Copies `bytes` bytes from `src` to `dst` (distinct buffers).
-    fn seq_copy(&mut self, dst: ir::Value, src: ir::Value, bytes: ir::Value) {
+    pub(super) fn seq_copy(&mut self, dst: ir::Value, src: ir::Value, bytes: ir::Value) {
         let head = self.b.create_block();
         let body = self.b.create_block();
         let done = self.b.create_block();
@@ -459,8 +470,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         Some((|| {
             let mut values = vec![];
             let mut types = vec![];
-            for o in operands {
-                values.push(self.expr(o)?);
+            for (i, o) in operands.into_iter().enumerate() {
+                // A string update writes through its receiver's place.
+                let updates_text = i == 0 && op.mutates() && crate::strings::is_text(&self.ty(o));
+                values.push(if updates_text {
+                    self.address(o)?
+                } else {
+                    self.expr(o)?
+                });
                 types.push(self.ty(o));
             }
             let result = self.ty(e);

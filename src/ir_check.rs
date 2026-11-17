@@ -602,9 +602,21 @@ impl Flow<'_> {
             }
             Op::Unary(_, v) | Op::Exit { value: v, .. } => self.consume(s, *v, &i.span),
             Op::Loop => {}
-            Op::Binary(_, a, b) => {
-                self.consume(s, *a, &i.span);
-                self.consume(s, *b, &i.span);
+            Op::Binary(op, a, b) => {
+                for v in [a, b] {
+                    // A string comparison borrows its operands (§13 strings):
+                    // it releases their loans instead of consuming them.
+                    if crate::strings::is_comparison(op)
+                        && let Some(x) = s.values.get_mut(v)
+                        && !x.owned
+                        && crate::strings::is_text(&x.ty)
+                    {
+                        x.consumed = true;
+                        x.loan = None;
+                    } else {
+                        self.consume(s, *v, &i.span);
+                    }
+                }
             }
             Op::Tuple(vs) => {
                 for v in vs {

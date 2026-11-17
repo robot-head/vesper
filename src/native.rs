@@ -45,6 +45,9 @@ mod seq_native;
 /// ABI v2 fiber entries that park through `vesper-fiber-abi`.
 #[path = "native_session.rs"]
 pub mod session;
+/// `String` and `Str` native lowering (§13 strings).
+#[path = "strings/native.rs"]
+mod strings_native;
 /// AoSoA `tiled(N) struct` and `TiledSeq[T]` native lowering (§12.5).
 #[path = "tiled/native.rs"]
 mod tiled;
@@ -3426,25 +3429,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         })
     }
     fn string(&mut self, text: &str) -> Result<ir::Value, String> {
-        let layout = Layout::of(self.world, &Type::named("String"))?;
-        if text.len() > self.world.string_capacity {
-            return Err("string exceeds the checked module's literal capacity".into());
-        }
-        let pointer = self.alloc(layout.size);
-        let length = self.b.ins().iconst(types::I64, text.len() as i64);
-        self.b.ins().store(ir::MemFlags::new(), length, pointer, 0);
-        for (index, bytes) in text.as_bytes().chunks(8).enumerate() {
-            let mut word = [0; 8];
-            word[..bytes.len()].copy_from_slice(bytes);
-            let value = self.b.ins().iconst(types::I64, i64::from_le_bytes(word));
-            self.b.ins().store(
-                ir::MemFlags::new(),
-                value,
-                pointer,
-                ((index + 1) * 8) as i32,
-            );
-        }
-        Ok(pointer)
+        self.string_literal(text)
     }
     fn data(
         &mut self,
@@ -3745,6 +3730,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                     "|" => self.b.ins().bor(av, bv),
                     _ => self.b.ins().bxor(av, bv),
                 }
+            }
+            ExprKind::Binary(op, a, b)
+                if crate::strings::is_comparison(op)
+                    && (crate::strings::is_text(&self.ty(a))
+                        || crate::strings::is_text(&self.ty(b))) =>
+            {
+                let av = self.expr(a)?;
+                let bv = self.expr(b)?;
+                self.str_compare(op, av, bv)?
             }
             ExprKind::Binary(op, a, b) => {
                 let ty = self.ty(a);
@@ -5532,6 +5526,11 @@ fn emit_equal_inline<M: Module>(
 ) -> Result<ir::Value, String> {
     if matches!(ty, Type::Function { .. }) {
         return Ok(b.ins().iconst(types::I8, 0));
+    }
+    // Strings and views are equal when their bytes are (§13 strings).
+    if crate::strings::is_text(ty) {
+        let order = strings_native::emit_str_order(b, a, b_val);
+        return Ok(b.ins().icmp_imm(IntCC::Equal, order, 0));
     }
     if crate::fip::is_box_type(world, ty) {
         let inner =

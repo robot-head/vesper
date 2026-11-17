@@ -89,11 +89,17 @@ pub enum SeqOp {
     SliceGet,
     /// `x.set(i, v)` on a slice.
     SliceSet,
+    /// A `String` or `Str` primitive (§13): a string is a `ChunkSeq[u8]`
+    /// that holds valid UTF-8, so its operations share `Op::Seq`.
+    Str(crate::strings::StrOp),
 }
 
 impl SeqOp {
     /// Whether the operation may raise `Fail[RuntimeError]`.
     pub fn fallible(self) -> bool {
+        if let Self::Str(op) = self {
+            return op.fallible();
+        }
         matches!(
             self,
             Self::Get | Self::Set | Self::Finish | Self::SliceGet | Self::SliceSet
@@ -101,6 +107,9 @@ impl SeqOp {
     }
     /// Whether the operation mutates its receiver (argument 0) in place.
     pub fn mutates(self) -> bool {
+        if let Self::Str(op) = self {
+            return op.mutates();
+        }
         matches!(
             self,
             Self::Push
@@ -141,6 +150,7 @@ impl SeqOp {
             Self::Finish => "finish",
             Self::AsSlice => "as_slice",
             Self::SubSlice => "slice",
+            Self::Str(op) => op.name(),
         }
     }
 }
@@ -309,7 +319,15 @@ pub fn fip_allocation(world: &World, callee: &Expr) -> Option<&'static str> {
     };
     matches!(
         op,
-        SeqOp::New | SeqOp::WithCapacity | SeqOp::Push | SeqOp::Extend
+        SeqOp::New
+            | SeqOp::WithCapacity
+            | SeqOp::Push
+            | SeqOp::Extend
+            | SeqOp::Str(
+                crate::strings::StrOp::PushStr
+                    | crate::strings::StrOp::PushChar
+                    | crate::strings::StrOp::Reserve
+            )
     )
     .then(|| op.name())
 }
@@ -317,6 +335,9 @@ pub fn fip_allocation(world: &World, callee: &Expr) -> Option<&'static str> {
 pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
     if let Some(t) = receiver_ty {
         let method = callee_name.rsplit("::").next().unwrap_or(callee_name);
+        if crate::strings::is_text(t) {
+            return crate::strings::resolve(method, t).map(SeqOp::Str);
+        }
         if is_seq_type(t) {
             return Some(match method {
                 "len" => SeqOp::Len,

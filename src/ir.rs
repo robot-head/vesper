@@ -926,8 +926,23 @@ impl Lower<'_> {
                 })
             }
             ExprKind::Binary(op, a, b) => {
-                let a = self.expr(a);
-                let b = self.expr(b);
+                // String comparisons borrow their operands (§13 strings).
+                let text = |l: &Self, x: &Expr| {
+                    crate::strings::is_comparison(op)
+                        && l.types
+                            .get(&(x.span.start, x.span.end))
+                            .is_some_and(crate::strings::is_text)
+                };
+                let a = if text(self, a) {
+                    self.argument(a, Pass::In, vec![]).value
+                } else {
+                    self.expr(a)
+                };
+                let b = if text(self, b) {
+                    self.argument(b, Pass::In, vec![]).value
+                } else {
+                    self.expr(b)
+                };
                 self.emit(Op::Binary(op.clone(), a, b), e, false)
             }
             ExprKind::Assign(op, p, v) => {
