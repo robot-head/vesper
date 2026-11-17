@@ -3,14 +3,18 @@
 //! Bounded host-library foundations for Beacon, independent of compiler/runtime effects.
 //!
 //! No TLS, clocks, allocator, transport, Arrow/OTLP encoding, or performance guarantee.
+//! Histograms: [`FastLogHistogram`] (log-linear bins) and [`ExponentialHistogram`]
+//! (the OTLP base-2 exponential layout), both fixed-size.
 //! `Telemetrable`/`Sensitive` mark the §22.4 export boundary (see `redaction`).
 //! A forgotten Rust span remains visible as an occupied pool slot; Rust does not enforce
 //! Vesper's total linear exhaustion. Context inheritance is always an explicit argument.
 
+mod exponential;
 mod histogram;
 mod redaction;
 mod spans;
 mod traceparent;
+pub use exponential::*;
 pub use histogram::*;
 pub use redaction::*;
 pub use spans::*;

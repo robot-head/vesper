@@ -62,6 +62,10 @@ pub struct ProofAudit {
     pub theorems: Vec<AuditedTheorem>,
     pub artifact_files: Vec<FileDigest>,
     pub imports: Vec<ModuleDigest>,
+    /// Macro provenance admission evidence (COMP-03), present when the
+    /// artifact carries `$macro_provenance` markers or a manifest was given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macro_provenance: Option<serde_json::Value>,
 }
 
 /// Parse one audit report. Error reports, other schemas and internally

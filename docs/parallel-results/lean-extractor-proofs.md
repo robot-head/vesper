@@ -103,10 +103,15 @@ Open rows and non-Fail model monads remain unsupported.
 
 ## Remaining #593 work
 
+The [effectful recursive value follow-up](lean-extractor-recursive-values.md)
+adds fuel companions for non-generic, unlabeled effectful function values,
+including stored and zero-argument callbacks. Its report describes the checked
+fuel contract and the cases that remain refused.
+
 - General fuel/partial-definition equivalence or direct structural termination
   evidence; successful finite fuel execution is currently partial correctness.
-- Total companions for recursion through first-class function/closure values.
-- Contracts over `inout` state transitions, generics, and handled non-`Fail`
-  effects. Existing typed refusals remain on this branch.
+- Total companions for pure, generic or labeled recursive function values and
+  the remaining closure cases.
+- Contracts over handled non-`Fail` effects. Existing typed refusals remain.
 - Source-level termination/decreases inference and a compiler extraction
   refinement proof. The arithmetic helper establishes none of these results.

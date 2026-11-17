@@ -6,25 +6,40 @@
 //! collector service requests from the grouped model. They use the same
 //! exported attributes as OTAP (the PII boundary is unchanged: only stored
 //! [`AttributeValue`](crate::otap::AttributeValue)s exist). Consecutive
-//! histogram points of one scope with the same name and unit become one
-//! `Metric` with several data points. The gRPC client and receiver live in
+//! points of one scope with the same name, unit and kind become one
+//! `Metric` with several data points ([`metric_points_request`] covers
+//! gauges, sums, histograms and exponential histograms with exemplars). The gRPC client and receiver live in
 //! [`crate::grpc`] (feature `grpc`).
 
 pub mod proto;
 
 use crate::otap::{
-    buckets, exported_attributes, AttributeValue, Attributes, EncodeError, HistogramPoint,
-    LogRecord, OtapSpan, Resource, ResourceGroup, Scope,
+    buckets, exported_attributes, to_metric_groups, AttributeValue, Attributes, EncodeError,
+    Exemplar, ExpBuckets, ExpHistogramPoint, HistogramPoint, LogRecord, MetricKey, MetricPoint,
+    NumberPoint, NumberValue, OtapSpan, Resource, ResourceGroup, Scope,
 };
 use crate::otap::{error_message, schema, span_name};
 use proto::*;
 use vesper_beacon::SpanStatus;
 
-fn any(value: AttributeValue) -> AnyValue {
+fn any(value: &AttributeValue) -> AnyValue {
     let v = match value {
-        AttributeValue::Bool(b) => any_value::Value::BoolValue(b),
-        AttributeValue::Int(i) => any_value::Value::IntValue(i),
-        AttributeValue::Double(d) => any_value::Value::DoubleValue(d),
+        AttributeValue::Bool(b) => any_value::Value::BoolValue(*b),
+        AttributeValue::Int(i) => any_value::Value::IntValue(*i),
+        AttributeValue::Double(d) => any_value::Value::DoubleValue(*d),
+        AttributeValue::Bytes(b) => any_value::Value::BytesValue(b.to_vec()),
+        AttributeValue::Slice(items) => any_value::Value::ArrayValue(ArrayValue {
+            values: items.iter().map(any).collect(),
+        }),
+        AttributeValue::Map(entries) => any_value::Value::KvlistValue(KeyValueList {
+            values: entries
+                .iter()
+                .map(|(k, v)| KeyValue {
+                    key: (*k).to_owned(),
+                    value: Some(any(v)),
+                })
+                .collect(),
+        }),
         other => any_value::Value::StringValue(other.export_str().expect("string forms")),
     };
     AnyValue { value: Some(v) }
@@ -34,7 +49,7 @@ fn key_values(attrs: &Attributes) -> Vec<KeyValue> {
         .iter()
         .map(|(k, v)| KeyValue {
             key: k.to_owned(),
-            value: Some(any(v)),
+            value: Some(any(&v)),
         })
         .collect()
 }
@@ -147,7 +162,20 @@ pub fn traces_request(
     Ok(ExportTraceServiceRequest { resource_spans })
 }
 
-fn point(p: &HistogramPoint<'_>) -> HistogramDataPoint {
+fn exemplar(e: &Exemplar) -> proto::Exemplar {
+    proto::Exemplar {
+        filtered_attributes: key_values(&e.filtered_attributes),
+        time_unix_nano: e.time_unix_ns,
+        value: Some(match e.value {
+            NumberValue::Int(v) => exemplar::Value::AsInt(v),
+            NumberValue::Double(v) => exemplar::Value::AsDouble(v),
+        }),
+        span_id: e.span_id.map_or(Vec::new(), |s| be(s, 8)),
+        trace_id: e.trace_id.map_or(Vec::new(), |t| be(t, 16)),
+    }
+}
+
+fn histogram_point(p: &HistogramPoint<'_>) -> HistogramDataPoint {
     let (bucket_counts, explicit_bounds) = buckets(p.histogram);
     HistogramDataPoint {
         attributes: key_values(&p.attributes),
@@ -157,15 +185,107 @@ fn point(p: &HistogramPoint<'_>) -> HistogramDataPoint {
         sum: Some(p.histogram.sum() as f64),
         bucket_counts,
         explicit_bounds,
+        exemplars: p.exemplars.iter().map(exemplar).collect(),
         flags: 0,
         min: p.histogram.min().map(|v| v as f64),
         max: p.histogram.max().map(|v| v as f64),
     }
 }
 
+fn number_point(p: &NumberPoint) -> NumberDataPoint {
+    NumberDataPoint {
+        attributes: key_values(&p.attributes),
+        start_time_unix_nano: p.start_unix_ns.unwrap_or(0),
+        time_unix_nano: p.time_unix_ns,
+        value: Some(match p.value {
+            NumberValue::Int(v) => number_data_point::Value::AsInt(v),
+            NumberValue::Double(v) => number_data_point::Value::AsDouble(v),
+        }),
+        exemplars: p.exemplars.iter().map(exemplar).collect(),
+        flags: p.flags,
+    }
+}
+
+fn exp_point(p: &ExpHistogramPoint) -> ExponentialHistogramDataPoint {
+    let side = |b: &ExpBuckets| {
+        Some(Buckets {
+            offset: b.offset,
+            bucket_counts: b.counts.clone(),
+        })
+    };
+    ExponentialHistogramDataPoint {
+        attributes: key_values(&p.attributes),
+        start_time_unix_nano: p.start_unix_ns.unwrap_or(0),
+        time_unix_nano: p.time_unix_ns,
+        count: p.count,
+        sum: p.sum,
+        scale: p.scale,
+        zero_count: p.zero_count,
+        positive: side(&p.positive),
+        negative: side(&p.negative),
+        flags: p.flags,
+        exemplars: p.exemplars.iter().map(exemplar).collect(),
+        min: p.min,
+        max: p.max,
+        zero_threshold: p.zero_threshold,
+    }
+}
+
+/// A new, empty `Metric` for the row `key` describes.
+fn metric_for(key: MetricKey) -> Metric {
+    let temporality = key.temporality.unwrap_or(0);
+    Metric {
+        name: key.name.to_owned(),
+        description: key.description.unwrap_or("").to_owned(),
+        unit: key.unit.to_owned(),
+        data: Some(match key.metric_type {
+            schema::METRIC_TYPE_GAUGE => metric::Data::Gauge(Gauge {
+                data_points: Vec::new(),
+            }),
+            schema::METRIC_TYPE_SUM => metric::Data::Sum(Sum {
+                data_points: Vec::new(),
+                aggregation_temporality: temporality,
+                is_monotonic: key.monotonic.unwrap_or(false),
+            }),
+            schema::METRIC_TYPE_HISTOGRAM => metric::Data::Histogram(Histogram {
+                data_points: Vec::new(),
+                aggregation_temporality: temporality,
+            }),
+            _ => metric::Data::ExponentialHistogram(ExponentialHistogram {
+                data_points: Vec::new(),
+                aggregation_temporality: temporality,
+            }),
+        }),
+    }
+}
+
+fn push_point(metric: &mut Metric, p: &MetricPoint<'_>) {
+    match (metric.data.as_mut().expect("set by metric_for"), p) {
+        (metric::Data::Gauge(g), MetricPoint::Number(p)) => g.data_points.push(number_point(p)),
+        (metric::Data::Sum(s), MetricPoint::Number(p)) => s.data_points.push(number_point(p)),
+        (metric::Data::Histogram(h), MetricPoint::Histogram(p)) => {
+            h.data_points.push(histogram_point(p))
+        }
+        (metric::Data::ExponentialHistogram(h), MetricPoint::ExpHistogram(p)) => {
+            h.data_points.push(exp_point(p))
+        }
+        _ => unreachable!("metric rows are keyed by point kind"),
+    }
+}
+
 /// `ExportMetricsServiceRequest` for grouped cumulative histograms.
 pub fn metrics_request(
     groups: &[ResourceGroup<HistogramPoint<'_>>],
+) -> ExportMetricsServiceRequest {
+    metric_points_request(&to_metric_groups(groups))
+}
+
+/// `ExportMetricsServiceRequest` for grouped points of every kind:
+/// consecutive points of one scope with the same name, unit, description,
+/// kind and temporality share one `Metric`, as in OTAP. Exponential
+/// histogram points are exported as given (OTAP export also checks them).
+pub fn metric_points_request(
+    groups: &[ResourceGroup<MetricPoint<'_>>],
 ) -> ExportMetricsServiceRequest {
     let resource_metrics = groups
         .iter()
@@ -176,26 +296,14 @@ pub fn metrics_request(
                 .iter()
                 .map(|sg| {
                     let mut metrics: Vec<Metric> = Vec::new();
-                    let mut prev: Option<(&str, &str)> = None;
+                    let mut prev: Option<MetricKey> = None;
                     for p in &sg.items {
-                        if prev != Some((p.name, p.unit)) {
-                            metrics.push(Metric {
-                                name: p.name.to_owned(),
-                                description: String::new(),
-                                unit: p.unit.to_owned(),
-                                data: Some(metric::Data::Histogram(Histogram {
-                                    data_points: Vec::new(),
-                                    aggregation_temporality: schema::TEMPORALITY_CUMULATIVE,
-                                })),
-                            });
-                            prev = Some((p.name, p.unit));
+                        let key = p.key();
+                        if prev != Some(key) {
+                            metrics.push(metric_for(key));
+                            prev = Some(key);
                         }
-                        let Some(metric::Data::Histogram(h)) =
-                            &mut metrics.last_mut().expect("pushed").data
-                        else {
-                            unreachable!("histogram metrics only")
-                        };
-                        h.data_points.push(point(p));
+                        push_point(metrics.last_mut().expect("pushed"), p);
                     }
                     ScopeMetrics {
                         scope: Some(scope(&sg.scope)),
@@ -216,7 +324,7 @@ fn log(l: &LogRecord) -> proto::LogRecord {
         observed_time_unix_nano: l.observed_time_unix_ns.unwrap_or(0),
         severity_number: i32::from(l.severity.number()),
         severity_text: l.severity_text.unwrap_or("").to_owned(),
-        body: l.body.map(any),
+        body: l.body.as_ref().map(any),
         attributes: key_values(&l.attributes),
         dropped_attributes_count: l.dropped_attributes_count,
         flags: l.flags,

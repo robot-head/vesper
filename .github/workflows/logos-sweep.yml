@@ -1,0 +1,73 @@
+name: Logos model replay
+
+# Independent Logos kernel replay of every Lean module under lean/ and the
+# §11 extraction fixtures (tools/logos-sweep, docs/parallel-results/
+# logos-model-replay.md). It takes about 40 minutes, so it runs nightly on
+# main and on PRs that touch Lean proofs, the extractor or the checker, not
+# in the required BuildBuddy checks. The fixed three-closure Logos acceptance
+# suite (logos42_acceptance) still runs on every PR.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 10 * * *'
+  pull_request:
+    paths:
+      - 'lean/**'
+      - 'tools/logos-sweep/**'
+      - 'tools/logos42/**'
+      - 'tools/lean4lean-foundations42/**'
+      - 'tests/fixtures/lean_extract/**'
+      - 'src/lean.rs'
+      - 'src/lean/**'
+      - 'src/bin/logos42*'
+      - 'src/bin/logos42/**'
+      - 'lean-toolchain'
+      - 'scripts/ci/logos-sweep.sh'
+      - 'scripts/ci/prepare-logos42.sh'
+      - '.github/workflows/logos-sweep.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: logos-sweep-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  sweep:
+    name: Logos replay of every Lean model
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/ci/install-lean.sh
+      - run: scripts/ci/install-logos-rust.sh
+      - name: Build the driver and the compiler
+        run: cargo build --locked --bin logos42 --bin vesper
+      - name: Prepare the sealed Logos root
+        run: |
+          root="$RUNNER_TEMP/logos42/checker"
+          mkdir -p "$(dirname "$root")"
+          lean="$(cat .ci-lean-path)"
+          python3 tools/logos42/setup.py --directory "$root" \
+            --driver "$PWD/target/debug/logos42" --lean "$lean" --lake "$(dirname "$lean")/lake" \
+            --git "$(command -v git)" --cargo "$(cat .ci-logos-cargo-path)"
+          echo "LOGOS_ROOT=$root" >> "$GITHUB_ENV"
+      - name: Replay every model
+        run: |
+          VESPER_LEAN="$(cat .ci-lean-path)" LOGOS42_DRIVER="$PWD/target/debug/logos42" \
+            VESPER_BIN="$PWD/target/debug/vesper" LOGOS_SWEEP_BATCH_JOBS=2 \
+            scripts/ci/logos-sweep.sh "$LOGOS_ROOT" "$RUNNER_TEMP/logos-sweep-report.json"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logos-sweep-report
+          path: ${{ runner.temp }}/logos-sweep-report.json
+          if-no-files-found: ignore
