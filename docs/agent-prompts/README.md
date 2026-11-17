@@ -11,6 +11,9 @@ defines task scope and acceptance work, with earlier section identifiers mapped
 in the [section map](../section-map.md). Read the manuscript for language and
 platform requirements.
 
+The [port wave P1 plan](port-p1/README.md) moves the port-first crates to
+Vesper source; its lanes start after the owner approves the plan.
+
 Earlier assignments retained as dependencies:
 
 - [06-source-simulation](next-wave/06-source-simulation.md)
