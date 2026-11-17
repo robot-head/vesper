@@ -24,9 +24,10 @@ pub fn is_prelude_function(name: &str) -> bool {
 /// uses only correctly rounded IEEE operations, is not recursive and does
 /// not allocate, so `eff [DetFloat]` and `eff [Realtime]` code may call it.
 /// It is not declared with them, so that using it does not turn on NaN
-/// canonicalisation for the whole program.
-pub fn carried_effects(name: &str, effects: &Effects) -> Effects {
-    if !is_prelude_function(name) {
+/// canonicalisation for the whole program. Only the generated definitions
+/// carry them: a user function of the same name keeps its declared effects.
+pub fn carried_effects(world: &crate::check::World, name: &str, effects: &Effects) -> Effects {
+    if !world.float_prelude.contains(name) || !is_prelude_function(name) {
         return effects.clone();
     }
     let mut out = effects.clone();

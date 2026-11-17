@@ -2683,6 +2683,10 @@ fn canonical_value(mode: FloatMode, op: &str, operand: &Value, v: Value) -> Valu
 /// [`unary`], flushing subnormal operands and results when the mode says so
 /// and canonicalising a NaN result in a DetFloat program.
 fn unary_at(mode: FloatMode, op: &str, v: Value) -> Result<Value, Fault> {
+    // Bit reinterpretation is exact: no flushing, as in native code.
+    if crate::numeric::float::bits_intrinsic(op).is_some() {
+        return unary(op, v);
+    }
     let v = flush_value(mode, v);
     let result = unary(op, v.clone())?;
     // A unary minus of a value is a sign-bit operation.

@@ -33,6 +33,10 @@ pub struct World {
     pub calls: BTreeMap<(usize, usize), BTreeMap<String, Type>>,
     /// Source trait/model elaboration metadata (empty without traits).
     pub elaboration: Elaboration,
+    /// Names of the generated transcendental prelude functions this module
+    /// uses (`vesper.float.ieee754/1`); a user definition of the same name
+    /// is not one.
+    pub float_prelude: BTreeSet<String>,
 }
 impl World {
     pub fn collect(module: &Module) -> (Self, Vec<Diagnostic>) {
@@ -59,6 +63,14 @@ impl World {
             crate::integer_widths::module_end(&secret_prelude)
                 .max(crate::integer_widths::module_end(&width_prelude)),
         );
+        w.float_prelude = float_prelude
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Function(f) => Some(f.name.clone()),
+                _ => None,
+            })
+            .collect();
         for (index, item) in builtins
             .items
             .iter()
@@ -1215,13 +1227,15 @@ impl Checker<'_> {
                 es.iter()
                     .enumerate()
                     .map(|(i, e)| {
-                        // Float elements take their kind from the context
-                        // (`vesper.float.ieee754/1`); integer literals
+                        // Float elements, also in nested tuples, take their
+                        // kind from the context (`vesper.float.ieee754/1`);
+                        // integer literals
                         // settle later (`constrain_literals`).
                         let goal = match expected {
                             Type::Tuple(ts)
                                 if ts.len() == es.len()
-                                    && crate::numeric::FloatKind::from_type(&ts[i]).is_some() =>
+                                    && (crate::numeric::FloatKind::from_type(&ts[i]).is_some()
+                                        || matches!(ts[i], Type::Tuple(_))) =>
                             {
                                 ts[i].clone()
                             }

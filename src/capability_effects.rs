@@ -1882,7 +1882,7 @@ impl<'w> Walker<'w> {
                 self.edge(&f.name, span.clone());
                 self.require_carried(
                     &f.name,
-                    &crate::float_math::carried_effects(&f.name, &f.effects),
+                    &crate::float_math::carried_effects(self.world, &f.name, &f.effects),
                     span.clone(),
                 );
                 let mut params: Vec<Type> =

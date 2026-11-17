@@ -728,6 +728,20 @@ fn main() -> (u8, u8, u8, u8) { (pick(1.5), pick(0.0), pick(-0.0), pick(2.0)) }"
 }
 
 #[test]
+fn nested_tuples_take_float_kinds_from_the_context() {
+    agree_with(
+        "fn main() -> ((u32, u32), u32) { let t: ((f32, f32), f32) = ((0.1, 0.2), 0.3); let ((a, b), c) = t; ((to_bits_f32(a), to_bits_f32(b)), to_bits_f32(c)) }",
+        &format!(
+            "(({}, {}), {})",
+            0.1f32.to_bits(),
+            0.2f32.to_bits(),
+            0.3f32.to_bits()
+        ),
+    );
+    accepted("fn f() -> ((f32, f32), f32) { ((0.1, 0.2), 0.3) }");
+}
+
+#[test]
 fn integer_and_float_conversions_agree_with_rust() {
     agree_with(
         "fn main() -> (u32, u32, u64, u64, u32, u64, u32, u64) {
@@ -835,6 +849,20 @@ fn capability_effects_cover_f32() {
     rejects(
         "fn f(a: f32, b: f32) -> f32 eff [DetFloat] { a % b }",
         "E0730",
+    );
+    // Only the generated prelude carries DetFloat: a user definition of the
+    // same name keeps its declared effects.
+    rejects(
+        "fn exp_f64(x: f64) -> f64 { x % 2.0 }
+fn f(x: f64) -> f64 eff [DetFloat] { exp_f64(x) }",
+        "E0700",
+    );
+    // Bit reinterpretation is exact, also under ConstDenorm.
+    agree_with(
+        "fn bits32() -> u32 eff [ConstDenorm] { to_bits_f32(from_bits_f32(1)) }
+fn bits64() -> u64 eff [ConstDenorm] { to_bits_f64(from_bits_f64(1)) }
+fn main() -> (u32, u64) { (bits32(), bits64()) }",
+        "(1, 1)",
     );
     // ConstDenorm flushes f32 subnormal operands and results.
     agree_with(
