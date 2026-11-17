@@ -118,9 +118,7 @@ fn is_request(c: &Conformance) -> bool {
 /// `module` without its derive requests, the builtin declarations (spans
 /// relative to the generated source; the caller relocates them) and, for
 /// each declaration, the span of the request it derives.
-pub(super) fn prelude(
-    module: &Module,
-) -> Result<Prelude, Vec<Diagnostic>> {
+pub(super) fn prelude(module: &Module) -> Result<Prelude, Vec<Diagnostic>> {
     let derived = derivable(module)?;
     let mut stripped = module.clone();
     stripped
