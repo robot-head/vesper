@@ -468,3 +468,24 @@ fn initial_mount_rejection_never_publishes_widgets_slots_or_registrations() {
     assert_eq!(done.created_subscriptions, 2);
     assert_eq!(done.disconnected_subscriptions, 2);
 }
+
+#[test]
+fn maximum_key_is_an_ordinary_key_when_parent_and_child_swap() {
+    let ui = UiThread::claim_current();
+    let mut app = session(&ui);
+    let max = u64::MAX;
+    let container = |key: u64, kids: &[u64]| {
+        Node::new(Key(key), Kind::Container).children(kids.iter().map(|k| Key(*k)))
+    };
+    let before = ViewTree::new(Key(max), vec![container(max, &[1]), container(1, &[])]);
+    mount(&mut app, &ui, before);
+    let (outer, inner) = (app.widget(Key(max)).unwrap(), app.widget(Key(1)).unwrap());
+    let after = ViewTree::new(Key(1), vec![container(1, &[max]), container(max, &[])]);
+    mount(&mut app, &ui, after);
+    assert_eq!(app.widget(Key(max)), Some(outer));
+    assert_eq!(app.widget(Key(1)), Some(inner));
+    let snap = snapshot(&app, &ui);
+    assert_eq!(snap.widgets[&inner].children, vec![outer]);
+    assert!(snap.widgets[&outer].children.is_empty());
+    app.shutdown(&ui).unwrap();
+}

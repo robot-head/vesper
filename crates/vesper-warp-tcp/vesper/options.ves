@@ -1,0 +1,276 @@
+fn no_blk() -> Blk {
+    Blk {
+        left: 0,
+        right: 0
+    }
+}
+
+pub fn opts_default() -> Opts {
+    Opts {
+        mss: Option::None,
+        window_scale: Option::None,
+        sack_permitted: false,
+        b0: no_blk(),
+        b1: no_blk(),
+        b2: no_blk(),
+        b3: no_blk(),
+        sack_len: 0,
+        timestamps: Option::None
+    }
+}
+
+fn opts_blk(o: Opts, k: u64) -> Blk {
+    if k == 0 {
+        o.b0
+    } else if k == 1 {
+        o.b1
+    } else if k == 2 {
+        o.b2
+    } else {
+        o.b3
+    }
+}
+
+fn opts_set_blk(inout o: Opts, k: u64, b: Blk) {
+    if k == 0 {
+        o.b0 = b;
+    } else if k == 1 {
+        o.b1 = b;
+    } else if k == 2 {
+        o.b2 = b;
+    } else {
+        o.b3 = b;
+    }
+}
+
+fn sack_count(o: Opts) -> u64 {
+    min64(widen_u64(o.sack_len), 4)
+}
+
+pub fn opts_encoded_len(o: Opts) -> u64 {
+    let mut n: u64 = 0;
+    match o.mss {
+        Option::Some(m) => {
+            n = wrapping_add(n, 4);
+        },
+        Option::None => (),
+    }
+    match o.window_scale {
+        Option::Some(w) => {
+            n = wrapping_add(n, 4);
+        },
+        Option::None => (),
+    }
+    if o.sack_permitted {
+        n = wrapping_add(n, 4);
+    }
+    match o.timestamps {
+        Option::Some(t) => {
+            n = wrapping_add(n, 12);
+        },
+        Option::None => (),
+    }
+    if o.sack_len > 0 {
+        n = wrapping_add(n, wrapping_add(4, wrapping_mul(8, sack_count(o))));
+    }
+    n
+}
+
+// Byte access. Reads outside the slice are 0 and writes outside it are
+// dropped; every caller checks the bounds first, as the Rust code does.
+fn rd8(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn rd16(in b: Slice[u8], i: u64) -> u16 {
+    widen_u16(rd8(in b, i)) << 8 | widen_u16(rd8(in b, wrapping_add(i, 1)))
+}
+
+fn rd32(in b: Slice[u8], i: u64) -> u32 {
+    widen_u32(rd16(in b, i)) << 16 | widen_u32(rd16(in b, wrapping_add(i, 2)))
+}
+
+fn wr8(inout b: Slice[u8], i: u64, v: u8) {
+    b.try_set(i, v);
+}
+
+fn wr16(inout b: Slice[u8], i: u64, v: u16) {
+    b.try_set(i, wrapping_u8(v >> 8));
+    b.try_set(wrapping_add(i, 1), wrapping_u8(v));
+}
+
+fn wr32(inout b: Slice[u8], i: u64, v: u32) {
+    wr16(inout b, i, wrapping_u16(v >> 16));
+    wr16(inout b, wrapping_add(i, 2), wrapping_u16(v));
+}
+
+// Write the options at `out[at..]`; the caller checked the room.
+fn opts_put(o: Opts, inout out: Slice[u8], at: u64) -> u64 {
+    let mut i = at;
+    match o.mss {
+        Option::Some(mss) => {
+            wr8(inout out, i, 2);
+            wr8(inout out, wrapping_add(i, 1), 4);
+            wr16(inout out, wrapping_add(i, 2), mss);
+            i = wrapping_add(i, 4);
+        },
+        Option::None => (),
+    }
+    match o.window_scale {
+        Option::Some(ws) => {
+            wr8(inout out, i, 1);
+            wr8(inout out, wrapping_add(i, 1), 3);
+            wr8(inout out, wrapping_add(i, 2), 3);
+            wr8(inout out, wrapping_add(i, 3), ws);
+            i = wrapping_add(i, 4);
+        },
+        Option::None => (),
+    }
+    if o.sack_permitted {
+        wr8(inout out, i, 1);
+        wr8(inout out, wrapping_add(i, 1), 1);
+        wr8(inout out, wrapping_add(i, 2), 4);
+        wr8(inout out, wrapping_add(i, 3), 2);
+        i = wrapping_add(i, 4);
+    }
+    match o.timestamps {
+        Option::Some(ts) => {
+            wr8(inout out, i, 1);
+            wr8(inout out, wrapping_add(i, 1), 1);
+            wr8(inout out, wrapping_add(i, 2), 8);
+            wr8(inout out, wrapping_add(i, 3), 10);
+            wr32(inout out, wrapping_add(i, 4), ts.val);
+            wr32(inout out, wrapping_add(i, 8), ts.ecr);
+            i = wrapping_add(i, 12);
+        },
+        Option::None => (),
+    }
+    if o.sack_len > 0 {
+        let n = sack_count(o);
+        wr8(inout out, i, 1);
+        wr8(inout out, wrapping_add(i, 1), 1);
+        wr8(inout out, wrapping_add(i, 2), 5);
+        wr8(inout out, wrapping_add(i, 3), wrapping_u8(wrapping_add(2, wrapping_mul(8, n))));
+        i = wrapping_add(i, 4);
+        for k in 0..n {
+            let b = opts_blk(o, k);
+            wr32(inout out, i, b.left);
+            wr32(inout out, wrapping_add(i, 4), b.right);
+            i = wrapping_add(i, 8);
+        }
+    }
+    wrapping_sub(i, at)
+}
+
+pub fn opts_write(o: Opts, inout out: Slice[u8]) -> Result[u64, WireError] {
+    let len = opts_encoded_len(o);
+    if len > 40 {
+        Result::Err(WireError::OptionsTooLong)
+    } else if out.len() < len {
+        Result::Err(WireError::BufferTooSmall)
+    } else {
+        Result::Ok(opts_put(o, inout out, 0))
+    }
+}
+
+fn malformed(kind: u8) -> Result[Opts, WireError] {
+    Result::Err(
+        WireError::MalformedOption {
+            kind: kind
+        }
+    )
+}
+
+// Parse the option list `bytes[from..to]`.
+fn opts_parse_at(in bytes: Slice[u8], from: u64, to: u64) -> Result[Opts, WireError] {
+    let mut opts = opts_default();
+    let mut i = from;
+    loop {
+        if i >= to {
+            break;
+        }
+        let kind = rd8(in bytes, i);
+        if kind == 0 {
+            // End of option list; the rest is padding.
+            break;
+        }
+        if kind == 1 {
+            i = wrapping_add(i, 1);
+        } else {
+            if wrapping_add(i, 1) >= to {
+                return malformed(kind);
+            }
+            let len = widen_u64(rd8(in bytes, wrapping_add(i, 1)));
+            if len < 2 || wrapping_add(i, len) > to {
+                return malformed(kind);
+            }
+            let body = wrapping_add(i, 2);
+            if kind == 2 {
+                let dup = match opts.mss {
+                    Option::Some(m) => true,
+                    Option::None => false,
+                };
+                if len != 4 || dup {
+                    return malformed(kind);
+                }
+                opts.mss = Option::Some(rd16(in bytes, body));
+            } else if kind == 3 {
+                let dup = match opts.window_scale {
+                    Option::Some(w) => true,
+                    Option::None => false,
+                };
+                if len != 3 || dup {
+                    return malformed(kind);
+                }
+                opts.window_scale = Option::Some(rd8(in bytes, body));
+            } else if kind == 4 {
+                if len != 2 || opts.sack_permitted {
+                    return malformed(kind);
+                }
+                opts.sack_permitted = true;
+            } else if kind == 5 {
+                let n = wrapping_sub(len, 2) / 8;
+                if wrapping_sub(len, 2) % 8 != 0 || n == 0 || n > 4 || opts.sack_len != 0 {
+                    return malformed(kind);
+                }
+                for k in 0..n {
+                    let at = wrapping_add(body, wrapping_mul(k, 8));
+                    opts_set_blk(
+                        inout opts,
+                        k,
+                        Blk {
+                            left: rd32(in bytes, at),
+                            right: rd32(in bytes, wrapping_add(at, 4))
+                        }
+                    );
+                }
+                opts.sack_len = wrapping_u8(n);
+            } else if kind == 8 {
+                let dup = match opts.timestamps {
+                    Option::Some(t) => true,
+                    Option::None => false,
+                };
+                if len != 10 || dup {
+                    return malformed(kind);
+                }
+                opts
+                    .timestamps = Option::Some(
+                    Timestamps {
+                        val: rd32(in bytes, body),
+                        ecr: rd32(in bytes, wrapping_add(body, 4))
+                    }
+                );
+            }
+            // Unknown options with a valid length are skipped.
+            i = wrapping_add(i, len);
+        }
+    }
+    Result::Ok(opts)
+}
+
+pub fn opts_parse(in bytes: Slice[u8]) -> Result[Opts, WireError] {
+    opts_parse_at(in bytes, 0, bytes.len())
+}

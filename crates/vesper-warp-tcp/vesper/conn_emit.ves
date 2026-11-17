@@ -1,0 +1,351 @@
+fn emit_new(
+    inout t: Tcb,
+    now: u64,
+    len: u32,
+    fin: bool,
+    send_base: u64,
+    in send: Slice[u8],
+    inout out: Slice[u8]
+) -> Result[Tx, TcpFail] {
+    let start = t.snd_nxt;
+    let fin_len: u64 = if fin {
+        1
+    } else {
+        0
+    };
+    let end = wrapping_add(wrapping_add(start, widen_u64(len)), fin_len);
+    let mut entry = no_seg();
+    entry.start = start;
+    entry.end = end;
+    entry.fin = fin;
+    // Validate before committing state.
+    match check_view(entry, send_base, send.len(), out.len()) {
+        Option::Some(e) => {
+            return Result::Err(e);
+        },
+        Option::None => (),
+    }
+    if !sq_push(inout t, entry) {
+        return Result::Err(TcpFail::Overflow);
+    }
+    t.snd_nxt = end;
+    if fin {
+        t.fin_abs = Option::Some(wrapping_sub(end, 1));
+    }
+    let i = wrapping_sub(t.sent_len, 1);
+    emit_entry(inout t, now, i, send_base, in send, inout out, false)
+}
+
+fn check_view(s: SentSeg, send_base: u64, send_len: u64, out_len: u64) -> Option[TcpFail] {
+    let ds = seg_data_start(s);
+    let de = seg_data_end(s);
+    if de > ds {
+        let start = wrapping_sub(ds, 1);
+        let end = wrapping_sub(de, 1);
+        let view_end = sat_add64(send_base, send_len);
+        if start < send_base || end > view_end {
+            return Option::Some(
+                TcpFail::SendViewMissing {
+                    start: start,
+                    end: end
+                }
+            );
+        }
+    }
+    if out_len < wrapping_add(60, wrapping_sub(de, ds)) {
+        return Option::Some(TcpFail::BufferTooSmall);
+    }
+    Option::None
+}
+
+fn base_options(in t: Tcb, now: u64, syn: bool) -> Opts {
+    let mut o = opts_default();
+    let active_syn = t.st == State::SynSent;
+    if syn {
+        o.mss = Option::Some(t.cfg.mss);
+        o.window_scale = if active_syn {
+            t.cfg.window_scale
+        } else if t.ws_ok {
+            Option::Some(t.rcv_wscale)
+        } else {
+            Option::None
+        };
+        o.sack_permitted = if active_syn {
+            t.cfg.sack
+        } else {
+            t.sack_ok
+        };
+    }
+    if (syn && active_syn && t.cfg.timestamps) || t.ts_ok {
+        o
+            .timestamps = Option::Some(
+            Timestamps {
+                val: ts_now(now),
+                ecr: if t.ts_ok {
+                    t.ts_recent
+                } else {
+                    0
+                }
+            }
+        );
+    }
+    o
+}
+
+fn fill_sack(in t: Tcb, inout o: Opts, room: u64) {
+    if !t.sack_ok || t.ooo.len() == 0 {
+        return;
+    }
+    let space = min64(sat_sub64(40, opts_encoded_len(o)), room);
+    if space < 12 {
+        return;
+    }
+    let max_blocks = min64(wrapping_sub(space, 4) / 8, 4);
+    // Most recently updated ranges first (RFC 2018 §4).
+    let mut last_stamp = max_u64();
+    let mut n: u64 = 0;
+    loop {
+        if n >= max_blocks {
+            break;
+        }
+        let mut best: Option[OooRange] = Option::None;
+        for i in 0..t.ooo.len() {
+            let r = ooo_at(in t, i);
+            if r.stamp < last_stamp {
+                let better = match best {
+                    Option::Some(b) => r.stamp > b.stamp,
+                    Option::None => true,
+                };
+                if better {
+                    best = Option::Some(r);
+                }
+            }
+        }
+        match best {
+            Option::None => {
+                break;
+            },
+            Option::Some(b) => {
+                last_stamp = b.stamp;
+                opts_set_blk(
+                    inout o,
+                    n,
+                    Blk {
+                        left: seqmap_seq(t.rcv_isn, b.start),
+                        right: seqmap_seq(t.rcv_isn, b.end)
+                    }
+                );
+                n = wrapping_add(n, 1);
+            },
+        }
+    }
+    o.sack_len = wrapping_u8(n);
+}
+
+fn advertised_window(inout t: Tcb, syn: bool) -> u16 {
+    let right = recv_right(in t);
+    let adv_right = if sat_sub64(right, t.rcv_adv_right) >= sws_threshold(in t) {
+        right
+    } else {
+        max64(t.rcv_adv_right, t.rcv_nxt)
+    };
+    let wnd = sat_sub64(adv_right, t.rcv_nxt);
+    if syn {
+        let w = min64(wnd, 65535);
+        t.rcv_adv_right = max64(t.rcv_adv_right, wrapping_add(t.rcv_nxt, w));
+        return wrapping_u16(w);
+    }
+    let shift = widen_u64(t.rcv_wscale);
+    let scaled = min64(shr64(wnd, shift), 65535);
+    t.rcv_adv_right = max64(t.rcv_adv_right, wrapping_add(t.rcv_nxt, shl64(scaled, shift)));
+    wrapping_u16(scaled)
+}
+
+fn after_ack_sent(inout t: Tcb) {
+    t.ack_now = false;
+    t.ack_pending = 0;
+    t.delack_deadline = Option::None;
+    t.last_ack_sent = t.rcv_nxt;
+}
+
+fn emit_ack(inout t: Tcb, now: u64, inout out: Slice[u8]) -> Result[Tx, TcpFail] {
+    let ips = match t.ips {
+        Option::Some(i) => i,
+        Option::None => {
+            return Result::Err(TcpFail::InvalidState(t.st));
+        },
+    };
+    let mut o = base_options(in t, now, false);
+    fill_sack(in t, inout o, 40);
+    let window = advertised_window(inout t, false);
+    let h = Hdr {
+        src_port: t.cfg.local_port,
+        dst_port: t.remote_port,
+        seq: seqmap_seq(t.snd_isn, t.snd_nxt),
+        ack: seqmap_seq(t.rcv_isn, t.rcv_nxt),
+        flags: ack_bit(),
+        window: window,
+        urgent: 0
+    };
+    let n = match write_header(inout out, h, o) {
+        Result::Ok(n) => n,
+        Result::Err(e) => {
+            return wire_err(e);
+        },
+    };
+    match fill_checksum_n(ips, inout out, n) {
+        Result::Ok(u) => (),
+        Result::Err(e) => {
+            return wire_err(e);
+        },
+    }
+    after_ack_sent(inout t);
+    t.stats.segments_sent = wrapping_add(t.stats.segments_sent, 1);
+    Result::Ok(
+        Tx {
+            len: n,
+            edt_ns: now,
+            ips: ips,
+            entry: false,
+            pn: 0,
+            bytes: 0
+        }
+    )
+}
+
+fn emit_entry(
+    inout t: Tcb,
+    now: u64,
+    i: u64,
+    send_base: u64,
+    in send: Slice[u8],
+    inout out: Slice[u8],
+    retransmit: bool
+) -> Result[Tx, TcpFail] {
+    let ips = match t.ips {
+        Option::Some(v) => v,
+        Option::None => {
+            return Result::Err(TcpFail::InvalidState(t.st));
+        },
+    };
+    let s = sq_get(in t, i);
+    match check_view(s, send_base, send.len(), out.len()) {
+        Option::Some(e) => {
+            return Result::Err(e);
+        },
+        Option::None => (),
+    }
+    let ds = seg_data_start(s);
+    let de = seg_data_end(s);
+    let payload_len = wrapping_sub(de, ds);
+    let mut o = base_options(in t, now, s.syn);
+    if !s.syn {
+        let peer = if t.peer_mss < min_send_mss() {
+            min_send_mss()
+        } else {
+            t.peer_mss
+        };
+        let total = widen_u64(
+            if peer > t.cfg.mss {
+                t.cfg.mss
+            } else {
+                peer
+            }
+        );
+        let used = wrapping_add(payload_len, opts_encoded_len(o));
+        fill_sack(in t, inout o, sat_sub64(total, used));
+    }
+    let with_ack = t.have_irs;
+    let window = if with_ack || s.syn {
+        advertised_window(inout t, s.syn)
+    } else {
+        0
+    };
+    let mut flags: u8 = 0;
+    if s.syn {
+        flags = flags | syn_bit();
+    }
+    if with_ack {
+        flags = flags | ack_bit();
+    }
+    if s.fin {
+        flags = flags | fin_bit();
+    }
+    if payload_len > 0 && wrapping_sub(de, 1) == t.write_end {
+        flags = flags | psh_bit();
+    }
+    let h = Hdr {
+        src_port: t.cfg.local_port,
+        dst_port: t.remote_port,
+        seq: seqmap_seq(t.snd_isn, s.start),
+        ack: if with_ack {
+            seqmap_seq(t.rcv_isn, t.rcv_nxt)
+        } else {
+            0
+        },
+        flags: flags,
+        window: window,
+        urgent: 0
+    };
+    let hl = match write_header(inout out, h, o) {
+        Result::Ok(n) => n,
+        Result::Err(e) => {
+            return wire_err(e);
+        },
+    };
+    if payload_len > 0 {
+        let off = wrapping_sub(wrapping_sub(ds, 1), send_base);
+        copy_into(in send, off, inout out, hl, payload_len);
+    }
+    let n = wrapping_add(hl, payload_len);
+    match fill_checksum_n(ips, inout out, n) {
+        Result::Ok(u) => (),
+        Result::Err(e) => {
+            return wire_err(e);
+        },
+    }
+
+    let pn = t.next_pn;
+    t.next_pn = wrapping_add(t.next_pn, 1);
+    let bytes = seg_bytes(s);
+    // The wrapper asks its controller for the departure time and moves
+    // `sent_ns` with `tcb_commit_edt` when it is later than `now`.
+    let edt_ns = now;
+    let mut e = s;
+    e.pn = pn;
+    e.sent_ns = edt_ns;
+    e.lost = false;
+    if retransmit {
+        e.retransmits = sat_add32(e.retransmits, 1);
+        if is_some(t.recovery_point) {
+            e.rexmit_in_recovery = true;
+        }
+        t.stats.retransmits = wrapping_add(t.stats.retransmits, 1);
+        t.stats.retransmitted_bytes = wrapping_add(t.stats.retransmitted_bytes, payload_len);
+    } else if !is_some(t.timed) && !s.syn {
+        t.timed = Option::Some(pn);
+    }
+    if s.syn && !retransmit && !is_some(t.timed) {
+        t.timed = Option::Some(pn);
+    }
+    sq_set(inout t, i, e);
+    if !is_some(t.rto_deadline) {
+        t.rto_deadline = Option::Some(sat_add64(edt_ns, rtt_rto_ns(t.rtt)));
+        t.edt_armed_rto = true;
+    }
+    if with_ack {
+        after_ack_sent(inout t);
+    }
+    t.stats.segments_sent = wrapping_add(t.stats.segments_sent, 1);
+    t.edt_entry = Option::Some(i);
+    Result::Ok(
+        Tx {
+            len: n,
+            edt_ns: edt_ns,
+            ips: ips,
+            entry: true,
+            pn: pn,
+            bytes: bytes
+        }
+    )
+}

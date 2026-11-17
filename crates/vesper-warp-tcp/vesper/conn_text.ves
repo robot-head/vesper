@@ -1,0 +1,227 @@
+// Seventh step: accept segment text into the stream.
+fn accept_text(inout t: Tcb, now: u64, seg: Seg, in bytes: Slice[u8], inout ring: Slice[u8])
+    -> RecvOut {
+    let mut rec = no_recv();
+    let s = t.st;
+    if !(s == State::Established || s == State::FinWait1 || s == State::FinWait2)
+        || seg
+        .pay_len
+        == 0 {
+        return rec;
+    }
+    let mut start = match seqmap_abs(t.rcv_isn, t.rcv_nxt, seg.h.seq) {
+        Option::Some(a) => a,
+        Option::None => {
+            return rec;
+        },
+    };
+    if has(seg.h.flags, syn_bit()) {
+        start = wrapping_add(start, 1);
+    }
+    let mut p_off = seg.pay_off;
+    let mut p_len = seg.pay_len;
+    let right = recv_right(in t);
+    if start < t.rcv_nxt {
+        let skip = wrapping_sub(t.rcv_nxt, start);
+        if skip >= p_len {
+            t.ack_now = true;
+            return rec;
+        }
+        p_off = wrapping_add(p_off, skip);
+        p_len = wrapping_sub(p_len, skip);
+        start = t.rcv_nxt;
+    }
+    if start >= right {
+        t.ack_now = true;
+        return rec;
+    }
+    p_len = min64(wrapping_sub(right, start), p_len);
+    let end = wrapping_add(start, p_len);
+    let cap = widen_u64(t.cfg.recv_buffer);
+
+    if start == t.rcv_nxt {
+        rec.seg_start = p_off;
+        rec.seg_len = p_len;
+        t.rcv_nxt = end;
+        let had_ooo = t.ooo.len() > 0;
+        // Pull any buffered range that now continues the stream.
+        let mut pull: Option[u64] = Option::None;
+        let mut i: u64 = 0;
+        loop {
+            if i >= t.ooo.len() {
+                break;
+            }
+            let r = ooo_at(in t, i);
+            if r.end <= t.rcv_nxt {
+                ooo_remove(inout t, i);
+            } else if r.start <= t.rcv_nxt {
+                pull = Option::Some(r.end);
+                ooo_remove(inout t, i);
+            } else {
+                i = wrapping_add(i, 1);
+            }
+        }
+        match pull {
+            Option::Some(pend) => {
+                let from = t.rcv_nxt;
+                let p0 = rem64(wrapping_sub(from, 1), cap);
+                let len = wrapping_sub(pend, from);
+                let first = min64(len, wrapping_sub(ring.len(), p0));
+                rec.ring_start = p0;
+                rec.ring_len1 = first;
+                rec.ring_len2 = wrapping_sub(len, first);
+                t.rcv_nxt = pend;
+            },
+            Option::None => (),
+        }
+        match t.ooo_fin {
+            Option::Some(fpos) => {
+                if fpos < t.rcv_nxt {
+                    // Data beyond a recorded FIN is a protocol violation;
+                    // the FIN position is discarded rather than trusted.
+                    t.ooo_fin = Option::None;
+                }
+            },
+            Option::None => (),
+        }
+        if had_ooo {
+            t.ack_now = true;
+        } else {
+            schedule_ack(inout t, now);
+        }
+    } else {
+        // Out of order: copy into the ring at its stream position.
+        if !insert_ooo(inout t, start, end) {
+            t.stats.ooo_dropped = wrapping_add(t.stats.ooo_dropped, 1);
+        } else {
+            let p0 = rem64(wrapping_sub(start, 1), cap);
+            let first = min64(p_len, wrapping_sub(ring.len(), p0));
+            copy_into(in bytes, p_off, inout ring, p0, first);
+            copy_into(
+                in bytes,
+                wrapping_add(p_off, first),
+                inout ring,
+                0,
+                wrapping_sub(p_len, first)
+            );
+        }
+        t.ack_now = true;
+    }
+    rec
+}
+
+fn schedule_ack(inout t: Tcb, now: u64) {
+    t.ack_pending = wrapping_add(t.ack_pending, 1);
+    if t.cfg.delayed_ack_ns == 0 || t.ack_pending >= 2 {
+        t.ack_now = true;
+    } else if !is_some(t.delack_deadline) {
+        t.delack_deadline = Option::Some(sat_add64(now, t.cfg.delayed_ack_ns));
+    }
+}
+
+// Insert `[start, end)` into the out-of-order table, merging. Returns false
+// when the table is full and the range touches no existing one.
+fn insert_ooo(inout t: Tcb, start: u64, end: u64) -> bool {
+    t.ooo_stamp = wrapping_add(t.ooo_stamp, 1);
+    let stamp = t.ooo_stamp;
+    let mut ns = start;
+    let mut ne = end;
+    let mut merged = false;
+    let mut i: u64 = 0;
+    loop {
+        if i >= t.ooo.len() {
+            break;
+        }
+        let r = ooo_at(in t, i);
+        if r.start <= ne && ns <= r.end {
+            ns = min64(ns, r.start);
+            ne = max64(ne, r.end);
+            ooo_remove(inout t, i);
+            merged = true;
+        } else {
+            i = wrapping_add(i, 1);
+        }
+    }
+    if !merged && t.ooo.len() >= widen_u64(t.cfg.max_ooo_ranges) {
+        return false;
+    }
+    // Capacity is reserved at construction; this push never reallocates.
+    t
+        .ooo
+        .push(
+        OooRange {
+            start: ns,
+            end: ne,
+            stamp: stamp
+        }
+    );
+    true
+}
+
+// Eighth step: FIN. Returns whether a FIN was consumed.
+fn process_fin(inout t: Tcb, now: u64, seg: Seg) -> bool {
+    if !has(seg.h.flags, fin_bit()) || !state_is_synchronized(t.st) {
+        return false;
+    }
+    let s = t.st;
+    if !(
+        s
+            == State::Established
+            || s
+            == State::FinWait1
+            || s
+            == State::FinWait2
+            || s
+            == State::SynReceived
+    ) {
+        // CLOSE-WAIT, CLOSING, LAST-ACK: remain; TIME-WAIT: restart.
+        if s == State::TimeWait {
+            t.time_wait_deadline = Option::Some(sat_add64(now, t.cfg.time_wait_ns));
+        }
+        t.ack_now = true;
+        return false;
+    }
+    let mut seg_start = match seqmap_abs(t.rcv_isn, t.rcv_nxt, seg.h.seq) {
+        Option::Some(a) => a,
+        Option::None => {
+            return false;
+        },
+    };
+    if has(seg.h.flags, syn_bit()) {
+        seg_start = wrapping_add(seg_start, 1);
+    }
+    let fin_pos = wrapping_add(seg_start, seg.pay_len);
+    t.ack_now = true;
+    if fin_pos > t.rcv_nxt {
+        if fin_pos <= recv_right(in t) {
+            t.ooo_fin = Option::Some(fin_pos);
+        }
+        return false;
+    }
+    if fin_pos < t.rcv_nxt {
+        return false;
+    }
+    consume_fin(inout t, now)
+}
+
+fn consume_fin(inout t: Tcb, now: u64) -> bool {
+    t.rcv_nxt = wrapping_add(t.rcv_nxt, 1);
+    t.fin_received = true;
+    t.ooo_fin = Option::None;
+    t.events = t.events | ev_peer_fin();
+    t.ack_now = true;
+    t.delack_deadline = Option::None;
+    let s = t.st;
+    if s == State::SynReceived || s == State::Established {
+        t.st = State::CloseWait;
+    } else if s == State::FinWait1 {
+        if fin_acked(in t) {
+            enter_time_wait(inout t, now);
+        } else {
+            t.st = State::Closing;
+        }
+    } else if s == State::FinWait2 {
+        enter_time_wait(inout t, now);
+    }
+    true
+}

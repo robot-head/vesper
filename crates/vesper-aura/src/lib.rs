@@ -25,18 +25,34 @@ mod session;
 mod sim_aura;
 mod view;
 
+// The implementation: the frozen Rust build, or the Vesper build of
+// the Loom package in vesper/ behind thin wrappers (port wave P1 lane 13, #910).
+#[cfg(not(feature = "vesper-port"))]
+mod reference;
+#[cfg(not(feature = "vesper-port"))]
+pub use reference::{
+    CloseDecision, PreparedUpdate, RecordingBackend, Session, SimAura, audit_view_tree,
+    encode_view_tree,
+};
+
+#[cfg(feature = "vesper-port")]
+mod ported;
+#[cfg(feature = "vesper-port")]
+pub use ported::{
+    CloseDecision, PreparedUpdate, RecordingBackend, Session, SimAura, audit_view_tree,
+    encode_view_tree,
+};
+
 pub use identity::{SlotId, SubscriptionId, UiThread, WidgetId, WrongThread};
 pub use plan::{Patch, Transaction};
-pub use recording::{
-    BackendError, RecordedEvent, RecordingBackend, RecordingSnapshot, WidgetSnapshot,
-};
+pub use recording::{BackendError, RecordedEvent, RecordingSnapshot, WidgetSnapshot};
 pub use session::{
-    Backend, CloseAction, CloseDecision, CloseError, CloseFailure, CloseOutcome, CloseRequestError,
-    CommitError, CommitFailure, CommitReport, InitError, InitFailure, PrepareError, PrepareFailure,
-    PreparedUpdate, Session, ShutdownError, ShutdownFailure,
+    Backend, CloseAction, CloseError, CloseFailure, CloseOutcome, CloseRequestError, CommitError,
+    CommitFailure, CommitReport, InitError, InitFailure, PrepareError, PrepareFailure,
+    ShutdownError, ShutdownFailure,
 };
 pub use sim_aura::{
-    AuditTarget, AuraSlotTable, NativeUiBackend, NodeOp, SimAura, SimAuraError, SimulatedEvent,
-    SlotValue, WcagReport, WcagViolation, audit_view_tree, encode_view_tree, layout_flags,
+    AuditTarget, AuraSlotTable, NativeUiBackend, NodeOp, SimAuraError, SimulatedEvent, SlotValue,
+    WcagReport, WcagViolation, layout_flags,
 };
 pub use view::{Event, HandlerKey, Key, Kind, Limits, Node, Property, Value, ViewError, ViewTree};

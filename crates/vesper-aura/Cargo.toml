@@ -4,3 +4,21 @@ version = "0.1.0"
 edition = "2024"
 description = "Bounded keyed Aura view reconciliation and transactional retained backend contract"
 publish = false
+build = "build.rs"
+
+[features]
+# Forward the implementation to the Vesper build of the Loom package in vesper/
+# (port wave P1 lane 13, #910).
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# Deliberately wrong Vesper builds, one per ported module: the port test
+# runs must fail (scripts/test-port-harness.sh asserts which tests do).
+vesper-port-divergent = ["vesper-port"]
+
+[dependencies]
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[dev-dependencies]
+vesper-bench = { path = "../vesper-bench" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }

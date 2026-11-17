@@ -1,0 +1,277 @@
+// ---------------------------------------------------------------------------
+// The timing wheel.
+//
+// Entry `i` is the `i`-th element of every `e_*` sequence. Lists
+// `0 .. levels * slots` are the wheel slots, then the overflow list, then
+// the sorted ready list. See src/reference/wheel.rs for the model.
+
+struct WheelCore {
+    e_deadline: ChunkSeq[u64],
+    e_tick: ChunkSeq[u64],
+    e_seq: ChunkSeq[u64],
+    e_generation: ChunkSeq[u64],
+    e_prev: ChunkSeq[u64],
+    e_next: ChunkSeq[u64],
+    e_list: ChunkSeq[u64],
+    l_head: ChunkSeq[u64],
+    l_tail: ChunkSeq[u64],
+    occupied: ChunkSeq[u64],
+    tick_ns: u64,
+    slot_bits: u64,
+    levels: u64,
+    slots: u64,
+    capacity: u64,
+    free_head: u64,
+    len: u64,
+    cursor: u64,
+    now_ns: u64,
+    next_seq: u64,
+    overflow_min_tick: u64
+}
+
+fn config_error(config: WheelConfig) -> Option[WheelConfigError] {
+    if config.tick_ns == 0 {
+        return Option::Some(WheelConfigError::ZeroTick);
+    }
+    if config.slot_bits < 1 || config.slot_bits > 6 {
+        return Option::Some(WheelConfigError::SlotBits(config.slot_bits));
+    }
+    let span = wrapping_mul(widen_u64(config.levels), widen_u64(config.slot_bits));
+    if config.levels == 0 || span > 63 {
+        return Option::Some(WheelConfigError::Levels(config.levels));
+    }
+    if config.capacity == 0 || config.capacity > max_capacity() {
+        return Option::Some(WheelConfigError::Capacity(config.capacity));
+    }
+    if config.start_ns > max_time_ns() {
+        return Option::Some(WheelConfigError::StartOutOfRange);
+    }
+    Option::None
+}
+
+fn build_wheel(config: WheelConfig) -> WheelCore {
+    let slot_bits = widen_u64(config.slot_bits);
+    let levels = widen_u64(config.levels);
+    let slots = shl(1, slot_bits);
+    let cap = widen_u64(config.capacity);
+    let mut next: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](cap);
+    for i in 0..cap {
+        let after = wrapping_add(i, 1);
+        if after < cap {
+            next.push(after);
+        } else {
+            next.push(nil());
+        }
+    }
+    let lists = wrapping_add(wrapping_mul(levels, slots), 2);
+    WheelCore {
+        e_deadline: filled(cap, 0),
+        e_tick: filled(cap, 0),
+        e_seq: filled(cap, 0),
+        e_generation: filled(cap, 0),
+        e_prev: filled(cap, nil()),
+        e_next: next,
+        e_list: filled(cap, nil()),
+        l_head: filled(lists, nil()),
+        l_tail: filled(lists, nil()),
+        occupied: filled(levels, 0),
+        tick_ns: config.tick_ns,
+        slot_bits: slot_bits,
+        levels: levels,
+        slots: slots,
+        capacity: cap,
+        free_head: 0,
+        len: 0,
+        cursor: div(config.start_ns, config.tick_ns),
+        now_ns: config.start_ns,
+        next_seq: 0,
+        overflow_min_tick: u64_max()
+    }
+}
+
+impl WheelCore {
+    fn overflow_list(in self) -> u64 {
+        wrapping_mul(self.levels, self.slots)
+    }
+
+    fn ready_list(in self) -> u64 {
+        wrapping_add(wrapping_mul(self.levels, self.slots), 1)
+    }
+
+    fn slot_mask(in self) -> u64 {
+        wrapping_sub(self.slots, 1)
+    }
+
+    fn deadline_of(in self, index: u64) -> u64 {
+        at(in self.e_deadline.as_slice(), index)
+    }
+
+    fn next_of(in self, index: u64) -> u64 {
+        at(in self.e_next.as_slice(), index)
+    }
+
+    fn prev_of(in self, index: u64) -> u64 {
+        at(in self.e_prev.as_slice(), index)
+    }
+
+    fn head_of(in self, list: u64) -> u64 {
+        at(in self.l_head.as_slice(), list)
+    }
+
+    fn tail_of(in self, list: u64) -> u64 {
+        at(in self.l_tail.as_slice(), list)
+    }
+
+    // `(deadline, sequence)` of `a` is `<=` that of `b`.
+    fn key_le(in self, a: u64, b: u64) -> bool {
+        let da = self.deadline_of(a);
+        let db = self.deadline_of(b);
+        if da != db {
+            da < db
+        } else {
+            at(in self.e_seq.as_slice(), a) <= at(in self.e_seq.as_slice(), b)
+        }
+    }
+
+    fn clear_occupied(inout self, list: u64) {
+        if list < self.overflow_list() {
+            let level = div(list, self.slots);
+            let slot = list & self.slot_mask();
+            let bits = at(in self.occupied.as_slice(), level);
+            self.occupied.try_set(level, bits & ~shl(1, slot));
+        }
+    }
+}
+
+// The wheel's entry operations.
+impl WheelCore {
+    // The entry for a handle, or why the handle names none.
+    fn check(in self, index: u64, generation: u64) -> Option[HandleError] {
+        if index >= self.capacity {
+            return Option::Some(HandleError::Foreign);
+        }
+        if at(in self.e_list.as_slice(), index)
+            == nil()
+            || at(in self.e_generation.as_slice(), index)
+            != generation {
+            return Option::Some(HandleError::Stale);
+        }
+        Option::None
+    }
+
+    // Store a new entry; `(index, generation)` names it.
+    fn insert(inout self, deadline_ns: u64) -> Result[(u64, u64), InsertErrorKind] {
+        if deadline_ns > max_time_ns() {
+            return Result::Err(InsertErrorKind::DeadlineOutOfRange);
+        }
+        let index = self.free_head;
+        if index == nil() {
+            return Result::Err(InsertErrorKind::Full);
+        }
+        let seq = self.next_seq;
+        // A u64 sequence cannot be exhausted by inserts in practice.
+        self.next_seq = wrapping_add(seq, 1);
+        let tick = div(deadline_ns, self.tick_ns);
+        self.free_head = self.next_of(index);
+        self.e_deadline.try_set(index, deadline_ns);
+        self.e_tick.try_set(index, tick);
+        self.e_seq.try_set(index, seq);
+        let generation = at(in self.e_generation.as_slice(), index);
+        self.len = wrapping_add(self.len, 1);
+        self.place(index);
+        Result::Ok((index, generation))
+    }
+
+    fn release(inout self, index: u64) {
+        let generation = at(in self.e_generation.as_slice(), index);
+        self.e_generation.try_set(index, wrapping_add(generation, 1));
+        self.e_list.try_set(index, nil());
+        self.e_prev.try_set(index, nil());
+        self.e_next.try_set(index, self.free_head);
+        self.free_head = index;
+        self.len = wrapping_sub(self.len, 1);
+    }
+
+    // Move the clock to `now_ns`, opening every tick with work up to it.
+    fn advance(inout self, now_ns: u64) -> Option[AdvanceError] {
+        if now_ns < self.now_ns {
+            return Option::Some(
+                AdvanceError::Backwards {
+                    now_ns: self.now_ns,
+                    requested_ns: now_ns
+                }
+            );
+        }
+        if now_ns > max_time_ns() {
+            return Option::Some(AdvanceError::OutOfRange);
+        }
+        self.now_ns = now_ns;
+        let target = div(now_ns, self.tick_ns);
+        loop {
+            if self.cursor > target {
+                break;
+            }
+            match self.next_work_tick() {
+                Option::Some(tick) => {
+                    if tick <= target {
+                        self.cursor = tick;
+                        self.open_tick(tick);
+                        // tick <= target <= MAX_TIME_NS: no overflow.
+                        self.cursor = wrapping_add(tick, 1);
+                    } else {
+                        self.cursor = wrapping_add(target, 1);
+                    }
+                },
+                Option::None => {
+                    self.cursor = wrapping_add(target, 1);
+                },
+            }
+        }
+        Option::None
+    }
+
+    // The earliest due entry, as `(deadline, index)`, released.
+    fn pop_due(inout self) -> Option[(u64, u64)] {
+        let head = self.head_of(self.ready_list());
+        if head == nil() {
+            return Option::None;
+        }
+        let deadline = self.deadline_of(head);
+        if deadline > self.now_ns {
+            return Option::None;
+        }
+        self.unlink(head);
+        self.release(head);
+        Option::Some((deadline, head))
+    }
+
+    fn next_wake_hint(in self) -> Option[u64] {
+        let ready = self.head_of(self.ready_list());
+        if ready != nil() {
+            return Option::Some(self.deadline_of(ready));
+        }
+        match self.next_work_tick() {
+            Option::Some(tick) => {
+                let start_ns = saturating_mul(tick, self.tick_ns);
+                Option::Some(max(start_ns, self.now_ns))
+            },
+            Option::None => Option::None,
+        }
+    }
+
+    // Remove every entry in slab order, as flattened `(deadline, index)`
+    // pairs.
+    fn drain(inout self) -> ChunkSeq[u64] {
+        let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for index in 0..self.capacity {
+            if at(in self.e_list.as_slice(), index) != nil() {
+                let deadline = self.deadline_of(index);
+                self.unlink(index);
+                self.release(index);
+                out.push(deadline);
+                out.push(index);
+            }
+        }
+        out
+    }
+}

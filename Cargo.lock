@@ -5625,6 +5625,11 @@ dependencies = [
 [[package]]
 name = "vesper-aura"
 version = "0.1.0"
+dependencies = [
+ "vesper-bench",
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
 
 [[package]]
 name = "vesper-aura-gtk"
@@ -6352,7 +6357,10 @@ version = "0.1.0"
 name = "vesper-warp-tcp"
 version = "0.1.0"
 dependencies = [
+ "vesper-bench",
  "vesper-ffi",
+ "vesper-port-abi",
+ "vesper-port-harness",
 ]
 
 [[package]]
@@ -6376,6 +6384,11 @@ dependencies = [
 [[package]]
 name = "vesper-warp-wheel"
 version = "0.1.0"
+dependencies = [
+ "vesper-bench",
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
 
 [[package]]
 name = "vmm-sys-util"

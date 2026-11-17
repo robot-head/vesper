@@ -63,34 +63,3 @@ pub(crate) fn new_session() -> Option<u64> {
     NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
         .ok()
 }
-
-#[derive(Debug)]
-pub(crate) struct Ids {
-    pub session: u64,
-    pub serial: u64,
-}
-impl Ids {
-    fn next(&mut self) -> Option<u64> {
-        let n = self.serial;
-        self.serial = n.checked_add(1)?;
-        Some(n)
-    }
-    pub fn widget(&mut self) -> Option<WidgetId> {
-        Some(WidgetId {
-            session: self.session,
-            serial: self.next()?,
-        })
-    }
-    pub fn slot(&mut self) -> Option<SlotId> {
-        Some(SlotId {
-            session: self.session,
-            serial: self.next()?,
-        })
-    }
-    pub fn subscription(&mut self) -> Option<SubscriptionId> {
-        Some(SubscriptionId {
-            session: self.session,
-            serial: self.next()?,
-        })
-    }
-}

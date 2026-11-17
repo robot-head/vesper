@@ -1,0 +1,470 @@
+// recording.rs: the recording backend's state and lookups.
+use self::codes::{
+    none_id
+};
+use self::{
+    BackendFault,
+    Edge,
+    Op,
+    RSlot,
+    RState,
+    RSub,
+    RWidget,
+    Recorder
+};
+use self::util::{
+    add,
+    dec,
+    inc,
+    limits_from,
+    seq_bool
+};
+
+pub fn rstate_new() -> RState {
+    RState {
+        revision: 0,
+        has_root: false,
+        root: 0,
+        has_session: false,
+        session: 0,
+        high_water: 0,
+        created: 0,
+        disconnected: 0,
+        widgets: ChunkSeq::new[RWidget](),
+        wlive: ChunkSeq::new[bool](),
+        edges: ChunkSeq::new[Edge](),
+        slots: ChunkSeq::new[RSlot](),
+        slive: ChunkSeq::new[bool](),
+        subs: ChunkSeq::new[RSub](),
+        blive: ChunkSeq::new[bool](),
+        nwidgets: 0,
+        nslots: 0,
+        nsubs: 0,
+        text: ChunkSeq::new[u8](),
+        events: ChunkSeq::new[Op]()
+    }
+}
+
+pub fn rwidget(in s: ChunkSeq[RWidget], i: u64) -> RWidget {
+    match s.try_get(i) {
+        Option::Some(w) => w,
+        Option::None => RWidget {
+            serial: 0,
+            kind: 0,
+            has_parent: false,
+            parent: 0,
+            user_state: 0
+        },
+    }
+}
+
+pub fn redge(in s: ChunkSeq[Edge], i: u64) -> Edge {
+    match s.try_get(i) {
+        Option::Some(e) => e,
+        Option::None => Edge {
+            parent: none_id(),
+            child: none_id()
+        },
+    }
+}
+
+pub fn rslot(in s: ChunkSeq[RSlot], i: u64) -> RSlot {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => RSlot {
+            serial: 0,
+            widget: 0,
+            property: 0,
+            tag: 0,
+            payload: 0,
+            tstart: 0,
+            tlen: 0
+        },
+    }
+}
+
+pub fn rsub(in s: ChunkSeq[RSub], i: u64) -> RSub {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => RSub {
+            serial: 0,
+            widget: 0,
+            event: 0,
+            handler: 0
+        },
+    }
+}
+
+// The live widget with `serial`, as an index, or none.
+pub fn widget_index(in s: RState, serial: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = s.widgets.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = add(lo, wrapping_sub(hi, lo) / 2);
+        if rwidget(in s.widgets, mid).serial < serial {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    if lo
+        < s
+        .widgets
+        .len()
+        && rwidget(in s.widgets, lo)
+        .serial
+        == serial
+        && seq_bool(in s.wlive, lo) {
+        lo
+    } else {
+        none_id()
+    }
+}
+
+pub fn slot_index(in s: RState, serial: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = s.slots.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = add(lo, wrapping_sub(hi, lo) / 2);
+        if rslot(in s.slots, mid).serial < serial {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    if lo < s.slots.len() && rslot(in s.slots, lo).serial == serial && seq_bool(in s.slive, lo) {
+        lo
+    } else {
+        none_id()
+    }
+}
+
+pub fn sub_index(in s: RState, serial: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = s.subs.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = add(lo, wrapping_sub(hi, lo) / 2);
+        if rsub(in s.subs, mid).serial < serial {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    if lo < s.subs.len() && rsub(in s.subs, lo).serial == serial && seq_bool(in s.blive, lo) {
+        lo
+    } else {
+        none_id()
+    }
+}
+
+// The live slot bound to (widget, property), or none.
+pub fn widget_slot(in s: RState, widget: u64, property: u64) -> u64 {
+    for i in 0..s.slots.len() {
+        if seq_bool(in s.slive, i) {
+            let v = rslot(in s.slots, i);
+            if v.widget == widget && v.property == property {
+                return i;
+            }
+        }
+    }
+    none_id()
+}
+
+pub fn widget_slot_count(in s: RState, widget: u64) -> u64 {
+    let mut n: u64 = 0;
+    for i in 0..s.slots.len() {
+        if seq_bool(in s.slive, i) && rslot(in s.slots, i).widget == widget {
+            n = inc(n);
+        }
+    }
+    n
+}
+
+pub fn widget_sub(in s: RState, widget: u64, event: u64) -> u64 {
+    for i in 0..s.subs.len() {
+        if seq_bool(in s.blive, i) {
+            let v = rsub(in s.subs, i);
+            if v.widget == widget && v.event == event {
+                return i;
+            }
+        }
+    }
+    none_id()
+}
+
+pub fn widget_sub_count(in s: RState, widget: u64) -> u64 {
+    let mut n: u64 = 0;
+    for i in 0..s.subs.len() {
+        if seq_bool(in s.blive, i) && rsub(in s.subs, i).widget == widget {
+            n = inc(n);
+        }
+    }
+    n
+}
+
+pub fn child_count(in s: RState, parent: u64) -> u64 {
+    let mut n: u64 = 0;
+    for i in 0..s.edges.len() {
+        if redge(in s.edges, i).parent == parent {
+            n = inc(n);
+        }
+    }
+    n
+}
+
+// The position in `edges` of the `index`-th child of `parent`, or none.
+pub fn child_edge(in s: RState, parent: u64, index: u64) -> u64 {
+    let mut n: u64 = 0;
+    for i in 0..s.edges.len() {
+        if redge(in s.edges, i).parent == parent {
+            if n == index {
+                return i;
+            }
+            n = inc(n);
+        }
+    }
+    none_id()
+}
+
+pub fn remove_edge(inout s: RState, at: u64) {
+    let n = s.edges.len();
+    if at < n {
+        let mut j = at;
+        loop {
+            if inc(j) >= n {
+                break;
+            }
+            let e = redge(in s.edges, inc(j));
+            s.edges.try_set(j, e);
+            j = inc(j);
+        }
+        s.edges.truncate(dec(n));
+    }
+}
+
+pub fn insert_edge(inout s: RState, at: u64, e: Edge) {
+    let n = s.edges.len();
+    s.edges.push(e);
+    if at < n {
+        let mut j = n;
+        loop {
+            if j <= at {
+                break;
+            }
+            let moved = redge(in s.edges, dec(j));
+            s.edges.try_set(j, moved);
+            j = dec(j);
+        }
+        s.edges.try_set(at, e);
+    }
+}
+
+// Insert `child` as the `index`-th child of `parent` (index <= count).
+pub fn insert_child(inout s: RState, parent: u64, child: u64, index: u64) {
+    let e = Edge {
+        parent: parent,
+        child: child
+    };
+    let at = child_edge(in s, parent, index);
+    if at == none_id() {
+        s.edges.push(e);
+    } else {
+        insert_edge(inout s, at, e);
+    }
+}
+
+pub fn set_widget(inout s: RState, i: u64, w: RWidget) {
+    s.widgets.try_set(i, w);
+}
+
+// Copy `src` into `dst`, dropping dead entries and their text.
+pub fn copy_state(in src: RState, inout dst: RState) {
+    dst.revision = src.revision;
+    dst.has_root = src.has_root;
+    dst.root = src.root;
+    dst.has_session = src.has_session;
+    dst.session = src.session;
+    dst.high_water = src.high_water;
+    dst.created = src.created;
+    dst.disconnected = src.disconnected;
+    dst.widgets.clear();
+    dst.wlive.clear();
+    dst.edges.clear();
+    dst.slots.clear();
+    dst.slive.clear();
+    dst.subs.clear();
+    dst.blive.clear();
+    dst.text.clear();
+    dst.events.clear();
+    for i in 0..src.widgets.len() {
+        if seq_bool(in src.wlive, i) {
+            dst.widgets.push(rwidget(in src.widgets, i));
+            dst.wlive.push(true);
+        }
+    }
+    for i in 0..src.edges.len() {
+        dst.edges.push(redge(in src.edges, i));
+    }
+    for i in 0..src.slots.len() {
+        if seq_bool(in src.slive, i) {
+            let v = rslot(in src.slots, i);
+            let tstart = dst.text.len();
+            for k in 0..v.tlen {
+                match src.text.try_get(add(v.tstart, k)) {
+                    Option::Some(b) => dst.text.push(b),
+                    Option::None => (),
+                }
+            }
+            dst
+                .slots
+                .push(
+                RSlot {
+                    serial: v.serial,
+                    widget: v.widget,
+                    property: v.property,
+                    tag: v.tag,
+                    payload: v.payload,
+                    tstart: tstart,
+                    tlen: v.tlen
+                }
+            );
+            dst.slive.push(true);
+        }
+    }
+    for i in 0..src.subs.len() {
+        if seq_bool(in src.blive, i) {
+            dst.subs.push(rsub(in src.subs, i));
+            dst.blive.push(true);
+        }
+    }
+    dst.nwidgets = src.nwidgets;
+    dst.nslots = src.nslots;
+    dst.nsubs = src.nsubs;
+    for i in 0..src.events.len() {
+        match src.events.try_get(i) {
+            Option::Some(o) => dst.events.push(o),
+            Option::None => (),
+        }
+    }
+}
+
+pub fn copy_recorder(in src: Recorder, inout dst: Recorder) {
+    dst.lim = src.lim;
+    dst.has_reject = src.has_reject;
+    dst.reject = src.reject;
+    copy_state(in src.st, inout dst.st);
+}
+
+pub fn do_recorder_new(in limits: Slice[u64]) -> Recorder {
+    Recorder {
+        lim: limits_from(in limits),
+        st: rstate_new(),
+        stage: rstate_new(),
+        has_reject: false,
+        reject: 0,
+        seen: ChunkSeq::new[bool](),
+        stack: ChunkSeq::new[u64](),
+        depths: ChunkSeq::new[u64]()
+    }
+}
+
+// RecordingBackend::stage_clone, for SimAura's WCAG gate.
+pub fn do_recorder_clone(in rec: Recorder) -> Recorder {
+    let mut out = Recorder {
+        lim: rec.lim,
+        st: rstate_new(),
+        stage: rstate_new(),
+        has_reject: false,
+        reject: 0,
+        seen: ChunkSeq::new[bool](),
+        stack: ChunkSeq::new[u64](),
+        depths: ChunkSeq::new[u64]()
+    };
+    copy_recorder(in rec, inout out);
+    out
+}
+
+// Publish `src` (a staged clone) as `dst`.
+pub fn do_recorder_assign(inout dst: Recorder, in src: Recorder) {
+    copy_recorder(in src, inout dst);
+}
+
+pub fn do_recorder_reject_next_at(inout rec: Recorder, patch: u64) {
+    rec.has_reject = true;
+    rec.reject = patch;
+}
+
+pub fn session_ok(in s: RState, session: u64) -> bool {
+    s.has_session && s.session == session
+}
+
+// RecordingBackend::set_user_state after the thread check.
+pub fn do_recorder_set_user_state(inout rec: Recorder, session: u64, serial: u64, user: u64)
+    -> Option[BackendFault] {
+    if !session_ok(in rec.st, session) {
+        return Option::Some(BackendFault::ForeignSession);
+    }
+    let i = widget_index(in rec.st, serial);
+    if i == none_id() {
+        return Option::Some(BackendFault::StaleWidget);
+    }
+    let w = rwidget(in rec.st.widgets, i);
+    set_widget(
+        inout rec.st,
+        i,
+        RWidget {
+            serial: w.serial,
+            kind: w.kind,
+            has_parent: w.has_parent,
+            parent: w.parent,
+            user_state: user
+        }
+    );
+    Option::None
+}
+
+// The checks of RecordingBackend::widget: foreign session or stale widget.
+pub fn do_recorder_check_widget(in rec: Recorder, session: u64, serial: u64)
+    -> Option[BackendFault] {
+    if !session_ok(in rec.st, session) {
+        Option::Some(BackendFault::ForeignSession)
+    } else if widget_index(in rec.st, serial) == none_id() {
+        Option::Some(BackendFault::StaleWidget)
+    } else {
+        Option::None
+    }
+}
+
+pub fn do_recorder_check_slot(in rec: Recorder, session: u64, serial: u64) -> Option[BackendFault] {
+    if !session_ok(in rec.st, session) {
+        Option::Some(BackendFault::ForeignSession)
+    } else if slot_index(in rec.st, serial) == none_id() {
+        Option::Some(BackendFault::StaleSlot)
+    } else {
+        Option::None
+    }
+}
+
+// RecordingBackend::dispatch: the handler of a live registration.
+pub fn do_recorder_dispatch(in rec: Recorder, session: u64, serial: u64)
+    -> Result[u64, BackendFault] {
+    if !session_ok(in rec.st, session) {
+        Result::Err(BackendFault::ForeignSession)
+    } else {
+        let i = sub_index(in rec.st, serial);
+        if i == none_id() {
+            Result::Err(BackendFault::StaleSubscription)
+        } else {
+            Result::Ok(rsub(in rec.st.subs, i).handler)
+        }
+    }
+}

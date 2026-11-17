@@ -1,0 +1,323 @@
+// ---------------------------------------------------------------------------
+// The PTO lease table: a wheel plus an open-addressing index keyed by
+// `(space, packet number)` (linear probing, backward-shift deletion, load
+// factor <= 1/2). Index slot `i` is empty when `s_space[i] == 0`, and
+// otherwise holds the key `(s_space[i] - 1, s_pn[i])` and the wheel handle
+// `(s_index[i], s_generation[i])`. `k_space`/`k_pn` hold each wheel
+// entry's key, so a fired entry finds its index slot.
+
+struct LeaseCore {
+    wheel: WheelCore,
+    k_space: ChunkSeq[u64],
+    k_pn: ChunkSeq[u64],
+    s_space: ChunkSeq[u64],
+    s_pn: ChunkSeq[u64],
+    s_index: ChunkSeq[u64],
+    s_generation: ChunkSeq[u64],
+    mask: u64
+}
+
+fn space_tag(space: PacketNumberSpace) -> u64 {
+    match space {
+        PacketNumberSpace::Initial => 0,
+        PacketNumberSpace::Handshake => 1,
+        PacketNumberSpace::ApplicationData => 2,
+    }
+}
+
+// SplitMix64 finalizer over the packed key (deterministic by design: keys
+// are inserted only for packets we sent).
+fn mix(tag: u64, pn: u64) -> u64 {
+    let mut z = (tag << 62) | pn;
+    z = wrapping_mul(z ^ (z >> 30), 13787848793156543929);
+    z = wrapping_mul(z ^ (z >> 27), 10723151780598845931);
+    z ^ (z >> 31)
+}
+
+impl LeaseCore {
+    fn home(in self, tag: u64, pn: u64) -> u64 {
+        mix(tag, pn) & self.mask
+    }
+
+    // The index slot holding the key, or `nil()`.
+    fn find(in self, tag: u64, pn: u64) -> u64 {
+        let mut i = self.home(tag, pn);
+        loop {
+            let s = at(in self.s_space.as_slice(), i);
+            if s == 0 {
+                break nil();
+            }
+            if s == wrapping_add(tag, 1) && at(in self.s_pn.as_slice(), i) == pn {
+                break i;
+            }
+            i = wrapping_add(i, 1) & self.mask;
+        }
+    }
+
+    fn set_slot(inout self, i: u64, tag_plus_one: u64, pn: u64, index: u64, generation: u64) {
+        self.s_space.try_set(i, tag_plus_one);
+        self.s_pn.try_set(i, pn);
+        self.s_index.try_set(i, index);
+        self.s_generation.try_set(i, generation);
+    }
+
+    // Empty slot `hole` and backward-shift its probe run. Returns the wheel
+    // handle `(index, generation)` the slot held.
+    fn remove_at(inout self, hole0: u64) -> (u64, u64) {
+        let removed = (
+            at(in self.s_index.as_slice(), hole0),
+            at(in self.s_generation.as_slice(), hole0)
+        );
+        self.s_space.try_set(hole0, 0);
+        let mut hole = hole0;
+        let mut j = hole0;
+        loop {
+            j = wrapping_add(j, 1) & self.mask;
+            let s = at(in self.s_space.as_slice(), j);
+            if s == 0 {
+                break;
+            }
+            let pn = at(in self.s_pn.as_slice(), j);
+            let home = self.home(wrapping_sub(s, 1), pn);
+            // Move `j` into the hole unless its home lies cyclically in
+            // (hole, j].
+            let in_range = if hole <= j {
+                hole < home && home <= j
+            } else {
+                hole < home || home <= j
+            };
+            if !in_range {
+                let index = at(in self.s_index.as_slice(), j);
+                let generation = at(in self.s_generation.as_slice(), j);
+                self.set_slot(hole, s, pn, index, generation);
+                self.s_space.try_set(j, 0);
+                hole = j;
+            }
+        }
+        removed
+    }
+
+    fn park(inout self, space: PacketNumberSpace, pn: u64, deadline_ns: u64)
+        -> Result[u64, ParkErrorKind] {
+        if pn >= max_packet_number() {
+            return Result::Err(ParkErrorKind::PacketNumberOutOfRange);
+        }
+        let tag = space_tag(space);
+        if self.find(tag, pn) != nil() {
+            return Result::Err(ParkErrorKind::Duplicate);
+        }
+        let (index, generation) = match self.wheel.insert(deadline_ns) {
+            Result::Ok(h) => h,
+            Result::Err(InsertErrorKind::Full) => {
+                return Result::Err(ParkErrorKind::Full);
+            },
+            Result::Err(InsertErrorKind::DeadlineOutOfRange) => {
+                return Result::Err(ParkErrorKind::DeadlineOutOfRange);
+            },
+        };
+        self.k_space.try_set(index, tag);
+        self.k_pn.try_set(index, pn);
+        // Load factor <= 1/2 guarantees a free slot.
+        let mut i = self.home(tag, pn);
+        loop {
+            if at(in self.s_space.as_slice(), i) == 0 {
+                break;
+            }
+            i = wrapping_add(i, 1) & self.mask;
+        }
+        self.set_slot(i, wrapping_add(tag, 1), pn, index, generation);
+        Result::Ok(index)
+    }
+
+    fn on_ack(inout self, space: PacketNumberSpace, pn: u64) -> Result[u64, LeaseError] {
+        let i = self.find(space_tag(space), pn);
+        if i == nil() {
+            return Result::Err(LeaseError::NotOutstanding);
+        }
+        let (index, generation) = self.remove_at(i);
+        match self.wheel.check(index, generation) {
+            Option::Some(_) => Result::Err(LeaseError::NotOutstanding),
+            Option::None => {
+                self.wheel.unlink(index);
+                self.wheel.release(index);
+                Result::Ok(index)
+            },
+        }
+    }
+
+    // Returns the entry's old and new wheel index.
+    fn rearm(inout self, space: PacketNumberSpace, pn: u64, deadline_ns: u64)
+        -> Result[(u64, u64), LeaseError] {
+        if deadline_ns > max_time_ns() {
+            return Result::Err(LeaseError::DeadlineOutOfRange);
+        }
+        let tag = space_tag(space);
+        let i = self.find(tag, pn);
+        if i == nil() {
+            return Result::Err(LeaseError::NotOutstanding);
+        }
+        let old = at(in self.s_index.as_slice(), i);
+        let generation = at(in self.s_generation.as_slice(), i);
+        match self.wheel.check(old, generation) {
+            Option::Some(_) => {
+                return Result::Err(LeaseError::NotOutstanding);
+            },
+            Option::None => (),
+        }
+        self.wheel.unlink(old);
+        self.wheel.release(old);
+        // The cancel freed an entry and the deadline is in range, so this
+        // insert cannot fail.
+        match self.wheel.insert(deadline_ns) {
+            Result::Ok((index, new_generation)) => {
+                self.k_space.try_set(index, tag);
+                self.k_pn.try_set(index, pn);
+                self.set_slot(i, wrapping_add(tag, 1), pn, index, new_generation);
+                Result::Ok((old, index))
+            },
+            Result::Err(_) => Result::Err(LeaseError::NotOutstanding),
+        }
+    }
+
+    // After the wheel fired entry `index`, drop its index slot.
+    fn forget(inout self, index: u64) {
+        let tag = at(in self.k_space.as_slice(), index);
+        let pn = at(in self.k_pn.as_slice(), index);
+        let i = self.find(tag, pn);
+        if i != nil() {
+            let _stale = self.remove_at(i);
+        }
+    }
+
+    // Remove every lease of the space; their wheel indices, in index-table
+    // order.
+    fn discard_space(inout self, space: PacketNumberSpace) -> ChunkSeq[u64] {
+        let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let tag_plus_one = wrapping_add(space_tag(space), 1);
+        let n = wrapping_add(self.mask, 1);
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            if at(in self.s_space.as_slice(), i) == tag_plus_one {
+                let (index, generation) = self.remove_at(i);
+                match self.wheel.check(index, generation) {
+                    Option::None => {
+                        self.wheel.unlink(index);
+                        self.wheel.release(index);
+                        out.push(index);
+                    },
+                    Option::Some(_) => (),
+                }
+                // Backward shift may have moved another key into `i`.
+            } else {
+                i = wrapping_add(i, 1);
+            }
+        }
+        out
+    }
+
+    // Remove every lease; their wheel indices, in slab order.
+    fn drain(inout self) -> ChunkSeq[u64] {
+        let n = wrapping_add(self.mask, 1);
+        for i in 0..n {
+            self.s_space.try_set(i, 0);
+        }
+        // Native code does not free a dropped local sequence yet, so the
+        // wheel is drained here directly rather than through its pairs.
+        let mut out: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](self.wheel.len);
+        for index in 0..self.wheel.capacity {
+            if at(in self.wheel.e_list.as_slice(), index) != nil() {
+                self.wheel.unlink(index);
+                self.wheel.release(index);
+                out.push(index);
+            }
+        }
+        out
+    }
+}
+
+fn next_power_of_two(n: u64) -> u64 {
+    let mut p: u64 = 1;
+    loop {
+        if p >= n {
+            break;
+        }
+        p = wrapping_mul(p, 2);
+    }
+    p
+}
+
+pub fn lease_core_new(config: WheelConfig) -> LeaseCore eff [Fail[WheelConfigError]] {
+    let wheel = wheel_core_new(config);
+    let cap = widen_u64(config.capacity);
+    let slots = next_power_of_two(wrapping_mul(cap, 2));
+    LeaseCore {
+        wheel: wheel,
+        k_space: filled(cap, 0),
+        k_pn: filled(cap, 0),
+        s_space: filled(slots, 0),
+        s_pn: filled(slots, 0),
+        s_index: filled(slots, 0),
+        s_generation: filled(slots, 0),
+        mask: wrapping_sub(slots, 1)
+    }
+}
+
+pub fn lease_core_len(in l: LeaseCore) -> u64 {
+    l.wheel.len
+}
+
+pub fn lease_core_now_ns(in l: LeaseCore) -> u64 {
+    l.wheel.now_ns
+}
+
+pub fn lease_core_next_wake_hint_ns(in l: LeaseCore) -> Option[u64] {
+    l.wheel.next_wake_hint()
+}
+
+pub fn lease_core_contains(in l: LeaseCore, space: PacketNumberSpace, pn: u64) -> bool {
+    l.find(space_tag(space), pn) != nil()
+}
+
+// Park a lease; its wheel index.
+pub fn lease_core_park(inout l: LeaseCore, space: PacketNumberSpace, pn: u64, pto_deadline_ns: u64)
+    -> Result[u64, ParkErrorKind] {
+    l.park(space, pn, pto_deadline_ns)
+}
+
+// An ACK: the acknowledged lease's wheel index.
+pub fn lease_core_on_ack(inout l: LeaseCore, space: PacketNumberSpace, pn: u64)
+    -> Result[u64, LeaseError] {
+    l.on_ack(space, pn)
+}
+
+// Move a lease's deadline: its old and new wheel index.
+pub fn lease_core_rearm(inout l: LeaseCore, space: PacketNumberSpace, pn: u64, pto_deadline_ns: u64)
+    -> Result[(u64, u64), LeaseError] {
+    l.rearm(space, pn, pto_deadline_ns)
+}
+
+// Advance, then the earliest expired lease as `(deadline, index)`.
+pub fn lease_core_poll_pto(inout l: LeaseCore, now_ns: u64)
+    -> Result[Option[(u64, u64)], AdvanceError] {
+    match l.wheel.advance(now_ns) {
+        Option::Some(e) => Result::Err(e),
+        Option::None => match l.wheel.pop_due() {
+            Option::Some((deadline, index)) => {
+                l.forget(index);
+                Result::Ok(Option::Some((deadline, index)))
+            },
+            Option::None => Result::Ok(Option::None),
+        },
+    }
+}
+
+pub fn lease_core_discard_space(inout l: LeaseCore, space: PacketNumberSpace) -> ChunkSeq[u64] {
+    l.discard_space(space)
+}
+
+pub fn lease_core_drain(inout l: LeaseCore) -> ChunkSeq[u64] {
+    l.drain()
+}

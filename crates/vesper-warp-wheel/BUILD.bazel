@@ -1,3 +1,102 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_port_object")
 
+# The Rust build (default features), with its tests.
 vesper_crate()
+
+# The Vesper build (port wave P1 lane 3, #900): the same API forwarding to
+# the port in vesper/src/ through the committed binding, and the crate's tests run
+# unchanged against it.
+# The port's files joined in order, as build.rs does (PARTS).
+WHEEL_PARTS = [
+    "vesper/src/types.ves",
+    "vesper/src/util.ves",
+    "vesper/src/wheel.ves",
+    "vesper/src/wheel_lists.ves",
+    "vesper/src/wheel_api.ves",
+    "vesper/src/leases.ves",
+    "vesper/src/edt.ves",
+    "vesper/src/clock.ves",
+]
+
+genrule(
+    name = "wheel_source",
+    srcs = WHEEL_PARTS,
+    outs = ["wheel.ves"],
+    cmd = "for f in %s; do cat $$f; echo; done > $@" % " ".join(["$(location %s)" % p for p in WHEEL_PARTS]),
+)
+
+vesper_port_object(
+    name = "wheel_vesper",
+    src = ":wheel_source",
+    library = "wheel",
+    target = VESPER_TARGET,
+)
+
+# The divergence check: one bug per ported module, the DIVERGENT_EDITS of
+# build.rs. :port_divergence_detected expects the test binaries linked
+# against it to fail exactly the tests that cover each module.
+vesper_port_object(
+    name = "wheel_vesper_divergent",
+    src = ":wheel_source",
+    edits = {
+        "        if deadline > self.now_ns {": "        if deadline > wrapping_add(self.now_ns, 1) {",
+        "        if pn >= max_packet_number() {": "        if pn > max_packet_number() {",
+        "    if edt_ns > saturating_add(now_ns, q.horizon_ns) {": "    if edt_ns >= saturating_add(now_ns, q.horizon_ns) {",
+        "    if requested_ns < now_ns {": "    if requested_ns < wrapping_sub(now_ns, 1) {",
+    },
+    library = "wheel",
+    target = VESPER_TARGET,
+)
+
+rust_library(
+    name = "port",
+    srcs = glob(["src/**/*.rs"]) + ["port/binding.rs"],
+    crate_features = ["vesper-port"],
+    crate_name = "vesper_warp_wheel",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    deps = ["//crates/vesper-port-abi"],
+)
+
+[
+    rust_test(
+        name = name,
+        srcs = [src],
+        compile_data = [obj] + WHEEL_PARTS,
+        crate_features = ["vesper-port"],
+        crate_name = crate,
+        edition = "2024",
+        rustc_flags = ["-Clink-arg=$(location %s)" % obj],
+        tags = tags,
+        deps = [":port"],
+    )
+    for name, src, crate, obj, tags in [
+        ("port_alloc_test", "tests/alloc.rs", "alloc", ":wheel_vesper", []),
+        ("port_layers_test", "tests/layers.rs", "layers", ":wheel_vesper", []),
+        ("port_model_test", "tests/model.rs", "model", ":wheel_vesper", []),
+        ("port_wheel_test", "tests/wheel.rs", "wheel", ":wheel_vesper", []),
+        ("port_memory_test", "tests/port_memory.rs", "port_memory", ":wheel_vesper", []),
+        ("port_alloc_audit_test", "tests/alloc_audit.rs", "alloc_audit", ":wheel_vesper", []),
+        ("_port_layers_divergent.bin", "tests/layers.rs", "layers_divergent", ":wheel_vesper_divergent", ["manual"]),
+        ("_port_model_divergent.bin", "tests/model.rs", "model_divergent", ":wheel_vesper_divergent", ["manual"]),
+        ("_port_wheel_divergent.bin", "tests/wheel.rs", "wheel_divergent", ":wheel_vesper_divergent", ["manual"]),
+    ]
+]
+
+rust_test(
+    name = "port_divergence_detected",
+    srcs = ["tests/divergence.rs"],
+    data = [
+        ":_port_layers_divergent.bin",
+        ":_port_model_divergent.bin",
+        ":_port_wheel_divergent.bin",
+    ],
+    edition = "2024",
+    env = {
+        "VESPER_WHEEL_DIVERGENT_LAYERS_TEST": "$(rootpath :_port_layers_divergent.bin)",
+        "VESPER_WHEEL_DIVERGENT_MODEL_TEST": "$(rootpath :_port_model_divergent.bin)",
+        "VESPER_WHEEL_DIVERGENT_WHEEL_TEST": "$(rootpath :_port_wheel_divergent.bin)",
+    },
+)

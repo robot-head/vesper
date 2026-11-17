@@ -1,0 +1,96 @@
+// ---------------------------------------------------------------------------
+// The EDT launch queue: a wheel, a horizon and the last released EDT.
+
+struct EdtCore {
+    wheel: WheelCore,
+    horizon_ns: u64,
+    last_released_ns: Option[u64]
+}
+
+pub fn edt_core_new(config: WheelConfig, horizon_ns: u64) -> EdtCore eff [Fail[WheelConfigError]] {
+    EdtCore {
+        wheel: wheel_core_new(config),
+        horizon_ns: horizon_ns,
+        last_released_ns: Option::None
+    }
+}
+
+pub fn edt_core_len(in q: EdtCore) -> u64 {
+    q.wheel.len
+}
+
+pub fn edt_core_horizon_ns(in q: EdtCore) -> u64 {
+    q.horizon_ns
+}
+
+pub fn edt_core_now_ns(in q: EdtCore) -> u64 {
+    q.wheel.now_ns
+}
+
+pub fn edt_core_last_released_ns(in q: EdtCore) -> Option[u64] {
+    q.last_released_ns
+}
+
+pub fn edt_core_next_wake_hint_ns(in q: EdtCore) -> Option[u64] {
+    q.wheel.next_wake_hint()
+}
+
+fn edt_submit(inout q: EdtCore, now_ns: u64, edt_ns: u64) -> Result[u64, SubmitErrorKind] {
+    match q.wheel.advance(now_ns) {
+        Option::Some(
+            AdvanceError::Backwards {
+                now_ns: _,
+                requested_ns: _
+            }
+        ) => {
+            return Result::Err(SubmitErrorKind::ClockBackwards);
+        },
+        Option::Some(AdvanceError::OutOfRange) => {
+            return Result::Err(SubmitErrorKind::OutOfRange);
+        },
+        Option::None => (),
+    }
+    if edt_ns > saturating_add(now_ns, q.horizon_ns) {
+        return Result::Err(SubmitErrorKind::BeyondHorizon);
+    }
+    match q.last_released_ns {
+        Option::Some(last) => {
+            if edt_ns < last {
+                return Result::Err(SubmitErrorKind::BehindReleased);
+            }
+        },
+        Option::None => (),
+    }
+    // Packets are not individually cancellable: the generation is dropped.
+    match q.wheel.insert(edt_ns) {
+        Result::Ok((index, _)) => Result::Ok(index),
+        Result::Err(InsertErrorKind::Full) => Result::Err(SubmitErrorKind::Full),
+        Result::Err(InsertErrorKind::DeadlineOutOfRange) => Result::Err(
+            SubmitErrorKind::OutOfRange
+        ),
+    }
+}
+
+// Queue a packet; its wheel index.
+pub fn edt_core_submit(inout q: EdtCore, now_ns: u64, edt_ns: u64) -> Result[u64, SubmitErrorKind] {
+    edt_submit(inout q, now_ns, edt_ns)
+}
+
+// Advance, then the earliest departing packet as `(edt, index)`.
+pub fn edt_core_poll_release(inout q: EdtCore, now_ns: u64)
+    -> Result[Option[(u64, u64)], AdvanceError] {
+    match q.wheel.advance(now_ns) {
+        Option::Some(e) => Result::Err(e),
+        Option::None => match q.wheel.pop_due() {
+            Option::Some((edt, index)) => {
+                q.last_released_ns = Option::Some(edt);
+                Result::Ok(Option::Some((edt, index)))
+            },
+            Option::None => Result::Ok(Option::None),
+        },
+    }
+}
+
+pub fn edt_core_drain(inout q: EdtCore) -> ChunkSeq[u64] {
+    q.wheel.drain()
+}

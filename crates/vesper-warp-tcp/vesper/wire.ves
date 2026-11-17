@@ -1,0 +1,116 @@
+// ---------------------------------------------------------------------
+// wire.rs: header and options, checksums (RFC 9293 §3.1, RFC 7323,
+// RFC 2018, RFC 1071)
+// ---------------------------------------------------------------------
+
+copy enum WireError {
+    Truncated,
+    BadDataOffset,
+    MalformedOption {
+        kind: u8
+    },
+    OptionsTooLong,
+    BufferTooSmall,
+    TooLong,
+    BadChecksum
+}
+
+// A SACK block of the option list (`wire::SackBlock` with plain words).
+copy struct Blk {
+    left: u32,
+    right: u32
+}
+
+copy struct Timestamps {
+    val: u32,
+    ecr: u32
+}
+
+// `wire::TcpOptions`, with the four SACK blocks as fields.
+copy struct Opts {
+    mss: Option[u16],
+    window_scale: Option[u8],
+    sack_permitted: bool,
+    b0: Blk,
+    b1: Blk,
+    b2: Blk,
+    b3: Blk,
+    sack_len: u8,
+    timestamps: Option[Timestamps]
+}
+
+// `wire::HeaderFields` with plain words.
+copy struct Hdr {
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    urgent: u16
+}
+
+// A parsed segment header (`wire::Segment` without its borrowed payload,
+// which starts at `header_len`).
+copy struct Parsed {
+    src_port: u16,
+    dst_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    window: u16,
+    checksum: u16,
+    urgent: u16,
+    header_len: u64,
+    options: Opts
+}
+
+// `wire::IpPair` with the addresses as big-endian words.
+copy enum Ips {
+    V4 {
+        src: u32,
+        dst: u32
+    },
+    V6 {
+        s0: u64,
+        s1: u64,
+        d0: u64,
+        d1: u64
+    }
+}
+
+fn fin_bit() -> u8 {
+    1
+}
+
+fn syn_bit() -> u8 {
+    2
+}
+
+fn rst_bit() -> u8 {
+    4
+}
+
+fn psh_bit() -> u8 {
+    8
+}
+
+fn ack_bit() -> u8 {
+    16
+}
+
+fn urg_bit() -> u8 {
+    32
+}
+
+fn has(flags: u8, bit: u8) -> bool {
+    flags & bit == bit
+}
+
+pub fn flags_contains(f: u8, other: u8) -> bool {
+    f & other == other
+}
+
+pub fn flags_with(f: u8, other: u8) -> u8 {
+    f | other
+}

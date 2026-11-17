@@ -1,0 +1,578 @@
+// Vesper port of vesper-aura (port wave P1 lane 13, #910): the keyed view
+// runtime of manuscript §37.2 and the SimAura backend of §37.6.
+//
+// The Rust crate keeps its public types; its wrappers encode a `ViewTree` or a
+// `Transaction` as words plus one byte buffer of all text, call this library,
+// and decode what comes back. Everything that decides something lives here:
+// validation (view.rs), reconciliation (plan.rs), the session state machine
+// (session.rs), the executing recording backend (recording.rs), and the
+// SimAura focus order, event dispatch, topology encoding and WCAG audits
+// (sim_aura.rs).
+//
+// Codes shared with the wrappers (src/ported/codec.rs):
+// - Kind: 0 Container, 1 Text, 2 Button, 3 Input.
+// - Property: 0 Text, 1 Value, 2 Enabled, 3 Visible, 4 Width.
+// - Event: 0 Click, 1 Changed, 2 Focused.
+// - Value tag: 0 Text, 1 Bool, 2 Int (the payload is the i64's bits).
+// - Limits: nodes, children, depth, properties, subscriptions, text bytes,
+//   total text bytes, patches.
+//
+// Every allocation lives in a handle that the caller owns (a dropped local
+// sequence is not freed natively yet), so scratch space is a field of the
+// handle a function builds or updates.
+use self::apply::{
+    do_recorder_apply
+};
+use self::recording::{
+    do_recorder_assign,
+    do_recorder_check_slot,
+    do_recorder_check_widget,
+    do_recorder_clone,
+    do_recorder_dispatch,
+    do_recorder_new,
+    do_recorder_reject_next_at,
+    do_recorder_set_user_state
+};
+use self::session::{
+    do_prepared_fault,
+    do_prepared_header,
+    do_prepared_ops,
+    do_reconciler_adopt,
+    do_reconciler_close_check,
+    do_reconciler_close_state,
+    do_reconciler_commit_check,
+    do_reconciler_force_counters,
+    do_reconciler_mark_closed,
+    do_reconciler_new,
+    do_reconciler_prepare,
+    do_reconciler_reopen,
+    do_reconciler_request_close,
+    do_reconciler_reserve,
+    do_reconciler_revision,
+    do_reconciler_slot,
+    do_reconciler_subscription,
+    do_reconciler_widget
+};
+use self::sim::{
+    do_audit_tree,
+    do_encode_tree,
+    do_query_answer,
+    do_query_counts,
+    do_query_fault,
+    do_query_items,
+    do_query_values,
+    do_sim_audit,
+    do_sim_focus,
+    do_sim_focusable,
+    do_sim_still_focusable,
+    do_sim_trigger
+};
+use self::util::{
+    do_limits_valid
+};
+
+// view::Limits.
+pub copy struct Lim {
+    nodes: u64,
+    children: u64,
+    depth: u64,
+    properties: u64,
+    subscriptions: u64,
+    text: u64,
+    total: u64,
+    patches: u64
+}
+
+// view::ViewError, with keys as u64 and budgets as codes.
+pub copy enum ViewFault {
+    InvalidLimits,
+    Budget(u64),
+    DuplicateKey(u64),
+    MissingRoot(u64),
+    MissingChild {
+        parent: u64,
+        child: u64
+    },
+    MultipleParents(u64),
+    RootHasParent,
+    CycleOrDisconnected,
+    ChildrenOnLeaf(u64),
+    PropertyType {
+        key: u64,
+        property: u64
+    },
+    UnsupportedEvent {
+        key: u64,
+        event: u64
+    },
+    IdentityExhausted,
+    Closed
+}
+
+// recording::BackendError (WrongThread is checked by the Rust wrapper).
+pub copy enum BackendFault {
+    ForeignSession,
+    StaleRevision,
+    StaleWidget,
+    StaleSlot,
+    StaleSubscription,
+    Invalid(u64),
+    Budget(u64),
+    Injected(u64)
+}
+
+// The answer of Session::request_close.
+pub copy enum CloseRequest {
+    Granted(u64),
+    AlreadyPending,
+    Closed,
+    Exhausted
+}
+
+// One patch or one recorded event: a tag and up to four words.
+//
+// Patches (serials of the plan's session): 0 SetRoot(a = present, b), 1
+// Create(a, kind b), 2 Destroy(a), 3 BindSlot(widget a, property b, slot c,
+// value of input node d), 4 SetSlot(slot a, property b, input node d), 5
+// UnbindSlot(widget a, property b, slot c), 6 Subscribe(widget a, event b,
+// handler c, subscription d), 7 Disconnect(a), 8 RemoveChild, 9 InsertChild
+// (parent a, child b, index c), 10 MoveChild(parent a, child b, from c, to d).
+//
+// Recorded events: 0 RootChanged(a = present, b), 1 Created, 2 Destroyed, 3
+// SlotBound, 4 SlotChanged, 5 SlotUnbound, 6 Subscribed, 7 Disconnected (a),
+// 8 ChildRemoved, 9 ChildInserted (parent a, child b, index c), 10
+// ChildMoved (parent a, child b, from c, to d).
+pub copy struct Op {
+    tag: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64
+}
+
+// A node of a decoded input tree; its fields are ranges of the tree's
+// property, subscription and child sequences.
+pub copy struct TNode {
+    key: u64,
+    kind: u64,
+    pstart: u64,
+    pcount: u64,
+    sstart: u64,
+    scount: u64,
+    cstart: u64,
+    ccount: u64
+}
+
+pub copy struct TProp {
+    property: u64,
+    tag: u64,
+    payload: u64,
+    tstart: u64,
+    tlen: u64
+}
+
+pub copy struct TSub {
+    event: u64,
+    handler: u64
+}
+
+// A decoded and validated input tree. `sorted` lists node indices by key,
+// `parent` holds each node's parent index (or none), `order` is the
+// depth-first pre-order from the root.
+pub struct Tree {
+    root: u64,
+    nodes: ChunkSeq[TNode],
+    props: ChunkSeq[TProp],
+    subs: ChunkSeq[TSub],
+    kids: ChunkSeq[u64],
+    keys: ChunkSeq[u64],
+    sorted: ChunkSeq[u64],
+    tmp: ChunkSeq[u64],
+    parent: ChunkSeq[u64],
+    order: ChunkSeq[u64],
+    seen: ChunkSeq[bool],
+    stack: ChunkSeq[u64],
+    depths: ChunkSeq[u64]
+}
+
+// A mounted node, in pre-order. `src` is its index in the input tree that
+// mounted it.
+pub copy struct MNode {
+    key: u64,
+    id: u64,
+    kind: u64,
+    src: u64,
+    pstart: u64,
+    pcount: u64,
+    sstart: u64,
+    scount: u64,
+    cstart: u64,
+    ccount: u64
+}
+
+pub copy struct MProp {
+    property: u64,
+    slot: u64,
+    tag: u64,
+    payload: u64,
+    tstart: u64,
+    tlen: u64
+}
+
+pub copy struct MSub {
+    event: u64,
+    id: u64,
+    handler: u64
+}
+
+// plan::Mounted: the retained identities of the mounted tree.
+pub struct Mounted {
+    present: bool,
+    nodes: ChunkSeq[MNode],
+    props: ChunkSeq[MProp],
+    subs: ChunkSeq[MSub],
+    kids: ChunkSeq[u64],
+    text: ChunkSeq[u8],
+    keys: ChunkSeq[u64],
+    sorted: ChunkSeq[u64],
+    tmp: ChunkSeq[u64]
+}
+
+// A prepared update: the plan, the next mounted state, and the scratch
+// space that built them. `serial` is the identity counter after planning.
+pub struct Prepared {
+    fault: Option[ViewFault],
+    session: u64,
+    base: u64,
+    next: u64,
+    serial: u64,
+    ops: ChunkSeq[Op],
+    tree: Tree,
+    m: Mounted,
+    prev: ChunkSeq[u64],
+    succ: ChunkSeq[u64],
+    cur: ChunkSeq[u64],
+    cur_start: ChunkSeq[u64],
+    cur_len: ChunkSeq[u64],
+    work: ChunkSeq[u64]
+}
+
+// session::Session without its Rust backend and thread: identities,
+// revision, close state (0 open, 1 pending, 2 closed) and the mounted tree.
+pub struct Reconciler {
+    session: u64,
+    serial: u64,
+    revision: u64,
+    close: u64,
+    close_id: u64,
+    next_close: u64,
+    lim: Lim,
+    m: Mounted
+}
+
+pub copy struct RWidget {
+    serial: u64,
+    kind: u64,
+    has_parent: bool,
+    parent: u64,
+    user_state: u64
+}
+
+pub copy struct Edge {
+    parent: u64,
+    child: u64
+}
+
+pub copy struct RSlot {
+    serial: u64,
+    widget: u64,
+    property: u64,
+    tag: u64,
+    payload: u64,
+    tstart: u64,
+    tlen: u64
+}
+
+pub copy struct RSub {
+    serial: u64,
+    widget: u64,
+    event: u64,
+    handler: u64
+}
+
+// recording::RecordingSnapshot. Widgets, slots and subscriptions are kept
+// in serial order (identities only grow), so lookups are binary searches;
+// a removed entry is marked dead (serial none_id would break the order, so
+// `dead` lists the removed serials) and dropped on the next copy. A
+// widget's children are the edges whose parent it is, in sequence order.
+pub struct RState {
+    revision: u64,
+    has_root: bool,
+    root: u64,
+    has_session: bool,
+    session: u64,
+    high_water: u64,
+    created: u64,
+    disconnected: u64,
+    widgets: ChunkSeq[RWidget],
+    wlive: ChunkSeq[bool],
+    edges: ChunkSeq[Edge],
+    slots: ChunkSeq[RSlot],
+    slive: ChunkSeq[bool],
+    subs: ChunkSeq[RSub],
+    blive: ChunkSeq[bool],
+    nwidgets: u64,
+    nslots: u64,
+    nsubs: u64,
+    text: ChunkSeq[u8],
+    events: ChunkSeq[Op]
+}
+
+// recording::RecordingBackend: the published state, a staging copy, and
+// the injected rejection.
+pub struct Recorder {
+    lim: Lim,
+    st: RState,
+    stage: RState,
+    has_reject: bool,
+    reject: u64,
+    seen: ChunkSeq[bool],
+    stack: ChunkSeq[u64],
+    depths: ChunkSeq[u64]
+}
+
+// The answer of a SimAura query, with its scratch space. `items` holds the
+// focus order (serials), the audit findings (tag, target, kind per finding:
+// tag 0 missing label, 1 hidden subscribed control) or the encoded nodes;
+// `values` holds encoded slot references.
+pub struct Query {
+    fault: Option[ViewFault],
+    code: u64,
+    found: bool,
+    target: u64,
+    has_handler: bool,
+    handler: u64,
+    sub: u64,
+    inspected: u64,
+    interactive: u64,
+    items: ChunkSeq[u64],
+    values: ChunkSeq[u64],
+    stack: ChunkSeq[u64],
+    flags: ChunkSeq[bool],
+    seen: ChunkSeq[bool],
+    tree: Tree
+}
+
+// ---------------------------------------------------------------- exports
+
+// Limits::check, for Session::new.
+pub fn limits_valid(in limits: Slice[u64]) -> bool {
+    do_limits_valid(in limits)
+}
+
+pub fn reconciler_new(session: u64, in limits: Slice[u64]) -> Reconciler {
+    do_reconciler_new(session, in limits)
+}
+
+pub fn reconciler_revision(in r: Reconciler) -> u64 {
+    do_reconciler_revision(in r)
+}
+
+// Session::prepare after the thread check: a plan from the mounted tree to
+// the encoded tree (`has_tree`), or to nothing. The result carries its
+// fault, if any, and the identity counter to reserve either way.
+pub fn reconciler_prepare(
+    in r: Reconciler,
+    has_tree: bool,
+    in words: Slice[u64],
+    in text: Slice[u8]
+) -> Prepared {
+    do_reconciler_prepare(in r, has_tree, in words, in text)
+}
+
+// Identities a plan reserved are never handed out again, whether or not
+// the plan commits.
+pub fn reconciler_reserve(inout r: Reconciler, in p: Prepared) {
+    do_reconciler_reserve(inout r, in p)
+}
+
+// Session::commit's checks before the backend runs: 0 ok, 1 foreign
+// session, 2 stale revision, 3 closed.
+pub fn reconciler_commit_check(in r: Reconciler, in p: Prepared) -> u64 {
+    do_reconciler_commit_check(in r, in p)
+}
+
+// The backend applied the plan: mount its tree and advance the revision.
+pub fn reconciler_adopt(inout r: Reconciler, in p: Prepared) {
+    do_reconciler_adopt(inout r, in p)
+}
+
+pub fn reconciler_widget(in r: Reconciler, key: u64) -> Option[u64] {
+    do_reconciler_widget(in r, key)
+}
+
+pub fn reconciler_slot(in r: Reconciler, key: u64, property: u64) -> Option[u64] {
+    do_reconciler_slot(in r, key, property)
+}
+
+pub fn reconciler_subscription(in r: Reconciler, key: u64, event: u64) -> Option[u64] {
+    do_reconciler_subscription(in r, key, event)
+}
+
+pub fn reconciler_request_close(inout r: Reconciler) -> CloseRequest {
+    do_reconciler_request_close(inout r)
+}
+
+// Session::resolve_close's checks: 0 ok, 1 foreign session, 2 stale.
+pub fn reconciler_close_check(in r: Reconciler, session: u64, id: u64) -> u64 {
+    do_reconciler_close_check(in r, session, id)
+}
+
+pub fn reconciler_reopen(inout r: Reconciler) {
+    do_reconciler_reopen(inout r)
+}
+
+pub fn reconciler_mark_closed(inout r: Reconciler) {
+    do_reconciler_mark_closed(inout r)
+}
+
+// 0 open, 1 close pending, 2 closed.
+pub fn reconciler_close_state(in r: Reconciler) -> u64 {
+    do_reconciler_close_state(in r)
+}
+
+// For the crate's unit test of counter exhaustion only.
+pub fn reconciler_force_counters(inout r: Reconciler, serial: u64, revision: u64) {
+    do_reconciler_force_counters(inout r, serial, revision)
+}
+
+pub fn prepared_fault(in p: Prepared) -> Option[ViewFault] {
+    do_prepared_fault(in p)
+}
+
+pub fn prepared_ops(in p: Prepared) -> ChunkSeq[Op] {
+    do_prepared_ops(in p)
+}
+
+// session, base revision, next revision.
+pub fn prepared_header(in p: Prepared) -> (u64, u64, u64) {
+    do_prepared_header(in p)
+}
+
+pub fn recorder_new(in limits: Slice[u64]) -> Recorder {
+    do_recorder_new(in limits)
+}
+
+// RecordingBackend::stage_clone, for SimAura's WCAG gate.
+pub fn recorder_clone(in rec: Recorder) -> Recorder {
+    do_recorder_clone(in rec)
+}
+
+// Publish `src` (a staged clone) as `dst`.
+pub fn recorder_assign(inout dst: Recorder, in src: Recorder) {
+    do_recorder_assign(inout dst, in src)
+}
+
+pub fn recorder_reject_next_at(inout rec: Recorder, patch: u64) {
+    do_recorder_reject_next_at(inout rec, patch)
+}
+
+// RecordingBackend::set_user_state after the thread check.
+pub fn recorder_set_user_state(inout rec: Recorder, session: u64, serial: u64, user: u64)
+    -> Option[BackendFault] {
+    do_recorder_set_user_state(inout rec, session, serial, user)
+}
+
+// The checks of RecordingBackend::widget: foreign session or stale widget.
+pub fn recorder_check_widget(in rec: Recorder, session: u64, serial: u64) -> Option[BackendFault] {
+    do_recorder_check_widget(in rec, session, serial)
+}
+
+pub fn recorder_check_slot(in rec: Recorder, session: u64, serial: u64) -> Option[BackendFault] {
+    do_recorder_check_slot(in rec, session, serial)
+}
+
+// RecordingBackend::dispatch: the handler of a live registration.
+pub fn recorder_dispatch(in rec: Recorder, session: u64, serial: u64) -> Result[u64, BackendFault] {
+    do_recorder_dispatch(in rec, session, serial)
+}
+
+// Backend::apply for RecordingBackend after the thread check: stage every
+// patch, validate the result, publish it only if everything succeeded.
+// `w` holds ten words per patch, `text` the bytes of their text values.
+pub fn recorder_apply(
+    inout rec: Recorder,
+    session: u64,
+    base: u64,
+    next: u64,
+    in w: Slice[u64],
+    in text: Slice[u8]
+) -> Option[BackendFault] {
+    do_recorder_apply(inout rec, session, base, next, in w, in text)
+}
+
+pub fn sim_focusable(in rec: Recorder) -> Query {
+    do_sim_focusable(in rec)
+}
+
+// SimAura::focus_next (`forward`) or focus_prev: `found` is false when no
+// widget is focusable; otherwise `target` is the newly focused widget and
+// `has_handler`/`handler` its Focused registration.
+pub fn sim_focus(in rec: Recorder, has_focus: bool, focused: u64, forward: bool) -> Query {
+    do_sim_focus(in rec, has_focus, focused, forward)
+}
+
+// SimAura::trigger_event after the thread check: `code` 0 dispatched
+// (`handler`), 1 not focusable, 2 not subscribed. The widget's session was
+// compared by the wrapper (`same_session`).
+pub fn sim_trigger(in rec: Recorder, same_session: bool, widget: u64, event: u64) -> Query {
+    do_sim_trigger(in rec, same_session, widget, event)
+}
+
+// Whether `widget` is still focusable (SimAura::apply drops a focus that
+// is not).
+pub fn sim_still_focusable(in rec: Recorder, widget: u64) -> Query {
+    do_sim_still_focusable(in rec, widget)
+}
+
+// SimAura::audit_wcag (audit_snapshot): pre-order with inherited
+// visibility, then any widget the walk did not reach, in serial order.
+pub fn sim_audit(in rec: Recorder) -> Query {
+    do_sim_audit(in rec)
+}
+
+// audit_view_tree: validate, then audit in pre-order with the visibility a
+// node inherits from its parent. Targets are tree keys.
+pub fn audit_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice[u64]) -> Query {
+    do_audit_tree(in words, in text, in limits)
+}
+
+// encode_view_tree: validate, then one node operation per node in
+// pre-order into `items` (kind tag, child count, slot base, event action,
+// layout flags), and per slot into `values` (property, input node index,
+// 1 when the node sets it).
+pub fn encode_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice[u64]) -> Query {
+    do_encode_tree(in words, in text, in limits)
+}
+
+pub fn query_fault(in q: Query) -> Option[ViewFault] {
+    do_query_fault(in q)
+}
+
+// code, found, target, has_handler, handler, subscription.
+pub fn query_answer(in q: Query) -> (u64, bool, u64, bool, u64, u64) {
+    do_query_answer(in q)
+}
+
+// inspected nodes, interactive controls.
+pub fn query_counts(in q: Query) -> (u64, u64) {
+    do_query_counts(in q)
+}
+
+pub fn query_items(in q: Query) -> ChunkSeq[u64] {
+    do_query_items(in q)
+}
+
+pub fn query_values(in q: Query) -> ChunkSeq[u64] {
+    do_query_values(in q)
+}

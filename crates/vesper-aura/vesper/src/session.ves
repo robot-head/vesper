@@ -1,0 +1,213 @@
+// session.rs: the reconciler a Session wraps.
+use self::codes::{
+    max_u64,
+    none_id
+};
+use self::plan::{
+    copy_mounted,
+    mounted_find,
+    mounted_new,
+    mounted_prop,
+    mounted_sub,
+    plan,
+    prepared_empty
+};
+use self::{
+    CloseRequest,
+    Op,
+    Prepared,
+    Reconciler,
+    ViewFault
+};
+use self::util::{
+    inc,
+    limits_from,
+    mnode,
+    mprop,
+    msub
+};
+use self::view::{
+    decode,
+    validate
+};
+
+pub fn do_reconciler_new(session: u64, in limits: Slice[u64]) -> Reconciler {
+    Reconciler {
+        session: session,
+        serial: 1,
+        revision: 0,
+        close: 0,
+        close_id: 0,
+        next_close: 1,
+        lim: limits_from(in limits),
+        m: mounted_new()
+    }
+}
+
+pub fn do_reconciler_revision(in r: Reconciler) -> u64 {
+    r.revision
+}
+
+// Session::prepare after the thread check: a plan from the mounted tree to
+// the encoded tree (`has_tree`), or to nothing. The result carries its
+// fault, if any, and the identity counter to reserve either way.
+pub fn do_reconciler_prepare(
+    in r: Reconciler,
+    has_tree: bool,
+    in words: Slice[u64],
+    in text: Slice[u8]
+) -> Prepared {
+    let mut p = prepared_empty(r.session, r.revision, r.serial);
+    if r.close == 2 {
+        p.fault = Option::Some(ViewFault::Closed);
+        return p;
+    }
+    if r.revision == max_u64() {
+        p.fault = Option::Some(ViewFault::IdentityExhausted);
+        return p;
+    }
+    p.next = inc(r.revision);
+    if has_tree {
+        decode(inout p.tree, in words);
+        match validate(inout p.tree, r.lim, in text) {
+            Option::Some(f) => {
+                p.fault = Option::Some(f);
+                return p;
+            },
+            Option::None => (),
+        }
+    }
+    plan(in r.m, inout p, has_tree, in text, r.lim.patches);
+    p
+}
+
+// Identities a plan reserved are never handed out again, whether or not
+// the plan commits.
+pub fn do_reconciler_reserve(inout r: Reconciler, in p: Prepared) {
+    if p.session == r.session && p.serial > r.serial {
+        r.serial = p.serial;
+    }
+}
+
+// Session::commit's checks before the backend runs: 0 ok, 1 foreign
+// session, 2 stale revision, 3 closed.
+pub fn do_reconciler_commit_check(in r: Reconciler, in p: Prepared) -> u64 {
+    if p.session != r.session {
+        1
+    } else if p.base != r.revision {
+        2
+    } else if r.close == 2 {
+        3
+    } else {
+        0
+    }
+}
+
+// The backend applied the plan: mount its tree and advance the revision.
+pub fn do_reconciler_adopt(inout r: Reconciler, in p: Prepared) {
+    copy_mounted(in p.m, inout r.m);
+    r.revision = p.next;
+}
+
+pub fn do_reconciler_widget(in r: Reconciler, key: u64) -> Option[u64] {
+    let i = mounted_find(in r.m, key);
+    if i == none_id() {
+        Option::None
+    } else {
+        Option::Some(mnode(in r.m.nodes, i).id)
+    }
+}
+
+pub fn do_reconciler_slot(in r: Reconciler, key: u64, property: u64) -> Option[u64] {
+    let i = mounted_find(in r.m, key);
+    if i == none_id() {
+        Option::None
+    } else {
+        let k = mounted_prop(in r.m, mnode(in r.m.nodes, i), property);
+        if k == none_id() {
+            Option::None
+        } else {
+            Option::Some(mprop(in r.m.props, k).slot)
+        }
+    }
+}
+
+pub fn do_reconciler_subscription(in r: Reconciler, key: u64, event: u64) -> Option[u64] {
+    let i = mounted_find(in r.m, key);
+    if i == none_id() {
+        Option::None
+    } else {
+        let k = mounted_sub(in r.m, mnode(in r.m.nodes, i), event);
+        if k == none_id() {
+            Option::None
+        } else {
+            Option::Some(msub(in r.m.subs, k).id)
+        }
+    }
+}
+
+pub fn do_reconciler_request_close(inout r: Reconciler) -> CloseRequest {
+    if r.close == 1 {
+        CloseRequest::AlreadyPending
+    } else if r.close == 2 {
+        CloseRequest::Closed
+    } else if r.next_close == max_u64() {
+        CloseRequest::Exhausted
+    } else {
+        let id = r.next_close;
+        r.next_close = inc(id);
+        r.close = 1;
+        r.close_id = id;
+        CloseRequest::Granted(id)
+    }
+}
+
+// Session::resolve_close's checks: 0 ok, 1 foreign session, 2 stale.
+pub fn do_reconciler_close_check(in r: Reconciler, session: u64, id: u64) -> u64 {
+    if session != r.session {
+        1
+    } else if r.close != 1 || r.close_id != id {
+        2
+    } else {
+        0
+    }
+}
+
+pub fn do_reconciler_reopen(inout r: Reconciler) {
+    r.close = 0;
+}
+
+pub fn do_reconciler_mark_closed(inout r: Reconciler) {
+    r.close = 2;
+}
+
+// 0 open, 1 close pending, 2 closed.
+pub fn do_reconciler_close_state(in r: Reconciler) -> u64 {
+    r.close
+}
+
+// For the crate's unit test of counter exhaustion only.
+pub fn do_reconciler_force_counters(inout r: Reconciler, serial: u64, revision: u64) {
+    r.serial = serial;
+    r.revision = revision;
+}
+
+pub fn do_prepared_fault(in p: Prepared) -> Option[ViewFault] {
+    p.fault
+}
+
+pub fn do_prepared_ops(in p: Prepared) -> ChunkSeq[Op] {
+    let mut out: ChunkSeq[Op] = ChunkSeq::new[Op]();
+    for i in 0..p.ops.len() {
+        match p.ops.try_get(i) {
+            Option::Some(o) => out.push(o),
+            Option::None => (),
+        }
+    }
+    out
+}
+
+// session, base revision, next revision.
+pub fn do_prepared_header(in p: Prepared) -> (u64, u64, u64) {
+    (p.session, p.base, p.next)
+}

@@ -1,0 +1,154 @@
+// ---------------------------------------------------------------------------
+// Constants and total arithmetic helpers.
+
+// The list terminator and the "free entry" marker (u32::MAX in the Rust
+// build, where entry links are u32).
+fn nil() -> u64 {
+    4294967295
+}
+
+fn u64_max() -> u64 {
+    18446744073709551615
+}
+
+// MAX_TIME_NS: u64::MAX is reserved so the cursor is always representable.
+fn max_time_ns() -> u64 {
+    18446744073709551614
+}
+
+// MAX_CAPACITY = u32::MAX - 1.
+fn max_capacity() -> u32 {
+    4294967294
+}
+
+// MAX_PACKET_NUMBER = 2^62.
+fn max_packet_number() -> u64 {
+    4611686018427387904
+}
+
+fn at(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn min(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn max(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// `x << s` for `s < 64` (every caller's amount is below 64).
+fn shl(x: u64, s: u64) -> u64 {
+    if s >= 64 {
+        return 0;
+    }
+    handle Fail[ArithOverflow] in {
+        x << s
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+// `x >> s` for `s < 64`.
+fn shr(x: u64, s: u64) -> u64 {
+    if s >= 64 {
+        return 0;
+    }
+    handle Fail[ArithOverflow] in {
+        x >> s
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+// `a / b` for `b > 0` (every divisor is a validated tick width or slot
+// width).
+fn div(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+fn saturating_add(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        u64_max()
+    } else {
+        s
+    }
+}
+
+fn saturating_mul(a: u64, b: u64) -> u64 {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    if a > div(u64_max(), b) {
+        u64_max()
+    } else {
+        wrapping_mul(a, b)
+    }
+}
+
+// Index of the highest set bit of a non-zero `x` (63 - leading_zeros).
+fn high_bit(x: u64) -> u64 {
+    let mut v = x;
+    let mut n: u64 = 0;
+    if v >= 4294967296 {
+        v = v >> 32;
+        n = wrapping_add(n, 32);
+    }
+    if v >= 65536 {
+        v = v >> 16;
+        n = wrapping_add(n, 16);
+    }
+    if v >= 256 {
+        v = v >> 8;
+        n = wrapping_add(n, 8);
+    }
+    if v >= 16 {
+        v = v >> 4;
+        n = wrapping_add(n, 4);
+    }
+    if v >= 4 {
+        v = v >> 2;
+        n = wrapping_add(n, 2);
+    }
+    if v >= 2 {
+        n = wrapping_add(n, 1);
+    }
+    n
+}
+
+// Index of the lowest set bit of a non-zero `x` (trailing_zeros).
+fn low_bit(x: u64) -> u64 {
+    high_bit(x & wrapping_sub(0, x))
+}
+
+// A sequence of `n` copies of `v`, allocated once.
+fn filled(n: u64, v: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        s.push(v);
+    }
+    s
+}

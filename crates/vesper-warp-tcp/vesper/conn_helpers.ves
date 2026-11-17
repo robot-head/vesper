@@ -1,0 +1,235 @@
+// ----------------------------------------------------------------
+// Internal helpers
+// ----------------------------------------------------------------
+
+fn clock_iss(in t: Tcb, now: u64) -> u32 {
+    wrapping_add(t.iss_base, wrapping_u32(now / 4000))
+}
+
+fn ts_now(now: u64) -> u32 {
+    // The timestamp clock wraps by design (RFC 7323 §5.2).
+    wrapping_u32(now / 1000000)
+}
+
+fn reset_tcb(inout t: Tcb) {
+    t.passive = false;
+    t.remote_port = 0;
+    t.ips = Option::None;
+    t.snd_isn = 0;
+    t.snd_una = 0;
+    t.snd_nxt = 0;
+    t.snd_wnd = 0;
+    t.max_snd_wnd = 0;
+    t.snd_wl1 = 0;
+    t.snd_wl2 = 0;
+    t.snd_wscale = 0;
+    t.rcv_wscale = 0;
+    t.ws_ok = false;
+    t.sack_ok = false;
+    t.ts_ok = false;
+    t.peer_mss = 536;
+    t.smss = 536;
+    t.need_syn = false;
+    t.write_end = 0;
+    t.fin_requested = false;
+    t.fin_abs = Option::None;
+    t.released_off = 0;
+    sq_clear(inout t);
+    t.rtt = rtt_new(t.cfg.rto);
+    t.timed = Option::None;
+    t.rto_deadline = Option::None;
+    t.retries = 0;
+    t.persist_deadline = Option::None;
+    t.persist_backoff = 0;
+    t.probe_due = false;
+    t.dupacks = 0;
+    t.recovery_point = Option::None;
+    t.force_retx = false;
+    t.rcv_isn = 0;
+    t.have_irs = false;
+    t.rcv_nxt = 0;
+    t.rcv_adv_right = 0;
+    t.read_off = 0;
+    t.ooo.clear();
+    t.ooo_fin = Option::None;
+    t.fin_received = false;
+    t.urgent_off = Option::None;
+    t.ts_recent = 0;
+    t.ts_recent_valid = false;
+    t.last_ack_sent = 0;
+    t.ack_now = false;
+    t.ack_pending = 0;
+    t.delack_deadline = Option::None;
+    t.pending_rst = Option::None;
+    t.time_wait_deadline = Option::None;
+    t.close_reason = Option::None;
+}
+
+fn enter_closed(inout t: Tcb, reason: Option[CloseReason]) {
+    t.st = State::Closed;
+    t.close_reason = reason;
+    t.events = t.events | ev_closed();
+    sq_clear(inout t);
+    t.ooo.clear();
+    t.rto_deadline = Option::None;
+    t.persist_deadline = Option::None;
+    t.delack_deadline = Option::None;
+    t.time_wait_deadline = Option::None;
+    t.need_syn = false;
+    t.ack_now = false;
+    t.probe_due = false;
+}
+
+fn enter_time_wait(inout t: Tcb, now: u64) {
+    t.st = State::TimeWait;
+    t.rto_deadline = Option::None;
+    t.persist_deadline = Option::None;
+    t.time_wait_deadline = Option::Some(sat_add64(now, t.cfg.time_wait_ns));
+}
+
+fn enter_established(inout t: Tcb) {
+    t.st = State::Established;
+    t.events = t.events | ev_connected();
+    if t.fin_requested {
+        t.st = State::FinWait1;
+    }
+}
+
+// Absolute right edge of the receive window (1 + read offset + ring).
+fn recv_right(in t: Tcb) -> u64 {
+    wrapping_add(wrapping_add(1, t.read_off), widen_u64(t.cfg.recv_buffer))
+}
+
+fn recv_window(in t: Tcb) -> u32 {
+    // Bounded by recv_buffer (<= 2^30).
+    wrapping_u32(sat_sub64(recv_right(in t), t.rcv_nxt))
+}
+
+fn sws_threshold(in t: Tcb) -> u64 {
+    widen_u64(max32(min32(t.cfg.recv_buffer / 2, widen_u32(t.cfg.mss)), 1))
+}
+
+fn fin_acked(in t: Tcb) -> bool {
+    match t.fin_abs {
+        Option::Some(f) => t.snd_una > f,
+        Option::None => false,
+    }
+}
+
+fn pipe(in t: Tcb) -> u32 {
+    let mut p: u32 = 0;
+    for i in 0..t.sent_len {
+        let s = sq_get(in t, i);
+        if !s.sacked && !s.lost {
+            p = sat_add32(p, seg_bytes(s));
+        }
+    }
+    if is_some(t.recovery_point) && !t.sack_ok {
+        // RFC 6582: each duplicate ACK signals a segment left the network
+        // (the window-inflation equivalent for pipe).
+        p = sat_sub32(p, sat_mul32(t.dupacks, t.smss));
+    }
+    p
+}
+
+fn set_send_mss(inout t: Tcb) {
+    let base = if t.peer_mss < min_send_mss() {
+        min_send_mss()
+    } else {
+        t.peer_mss
+    };
+    let capped = if base > t.cfg.mss {
+        t.cfg.mss
+    } else {
+        base
+    };
+    let ts: u32 = if t.ts_ok {
+        12
+    } else {
+        0
+    };
+    t.smss = wrapping_sub(widen_u32(capped), ts);
+    let m = t.smss;
+    cc_cmd(inout t, CcCmd::Mss(m));
+}
+
+fn negotiate(inout t: Tcb, opts: Opts, ips: Ips) {
+    t.peer_mss = match opts.mss {
+        Option::Some(m) => m,
+        Option::None => ips_default_mss(ips),
+    };
+    let mut ws = false;
+    match t.cfg.window_scale {
+        Option::Some(ours) => match opts.window_scale {
+            Option::Some(theirs) => {
+                t.snd_wscale = if theirs > 14 {
+                    14
+                } else {
+                    theirs
+                };
+                t.rcv_wscale = ours;
+                t.ws_ok = true;
+                ws = true;
+            },
+            Option::None => (),
+        },
+        Option::None => (),
+    }
+    if !ws {
+        t.snd_wscale = 0;
+        t.rcv_wscale = 0;
+        t.ws_ok = false;
+    }
+    t.sack_ok = t.cfg.sack && opts.sack_permitted;
+    match opts.timestamps {
+        Option::Some(ts) => {
+            t.ts_ok = t.cfg.timestamps;
+            if t.ts_ok {
+                t.ts_recent = ts.val;
+                t.ts_recent_valid = true;
+            }
+        },
+        Option::None => {
+            t.ts_ok = false;
+        },
+    }
+    set_send_mss(inout t);
+}
+
+fn queue_rst_reply(inout t: Tcb, ips_in: Ips, seg: Parsed, seq_len: u32) {
+    // RFC 9293 §3.10.7.1: <SEQ=SEG.ACK><CTL=RST> if ACK is set, else
+    // <SEQ=0><ACK=SEG.SEQ+SEG.LEN><CTL=RST,ACK>.
+    let with_ack = has(seg.flags, ack_bit());
+    t
+        .pending_rst = Option::Some(
+        RstSpec {
+            ips: ips_reversed(ips_in),
+            src_port: seg.dst_port,
+            dst_port: seg.src_port,
+            seq: if with_ack {
+                seg.ack
+            } else {
+                0
+            },
+            ack: if with_ack {
+                Option::None
+            } else {
+                Option::Some(sn_add(seg.seq, seq_len))
+            }
+        }
+    );
+}
+
+fn challenge_ack(inout t: Tcb, now: u64) {
+    if sat_sub64(now, t.challenge_window_ns) >= 1000000000 {
+        t.challenge_window_ns = now;
+        t.challenge_count = 0;
+    }
+    if t.challenge_count < t.cfg.challenge_ack_limit {
+        t.challenge_count = wrapping_add(t.challenge_count, 1);
+        t.stats.challenge_acks = wrapping_add(t.stats.challenge_acks, 1);
+        t.ack_now = true;
+    } else {
+        t.stats.challenge_acks_suppressed = wrapping_add(t.stats.challenge_acks_suppressed, 1);
+    }
+}

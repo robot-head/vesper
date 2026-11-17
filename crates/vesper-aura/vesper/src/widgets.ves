@@ -1,0 +1,125 @@
+// recording.rs: the root, create and destroy patches.
+use self::apply::{
+    allocate,
+    budget,
+    foreign,
+    invalid,
+    record,
+    stale_widget,
+    word
+};
+use self::codes::{
+    b_nodes,
+    i_destroy,
+    i_root_parent,
+    none_id
+};
+use self::recording::{
+    child_count,
+    rwidget,
+    session_ok,
+    widget_index,
+    widget_slot_count,
+    widget_sub_count
+};
+use self::{
+    BackendFault,
+    Lim,
+    RState,
+    RWidget
+};
+use self::util::{
+    dec,
+    inc,
+    op
+};
+
+pub fn patch_set_root(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
+    -> Option[BackendFault] {
+    let has = word(in w, base, 1) == 1;
+    let root = word(in w, base, 3);
+    if has {
+        if !session_ok(in s, word(in w, base, 2)) {
+            return foreign();
+        }
+        let i = widget_index(in s, root);
+        if i == none_id() {
+            return stale_widget();
+        }
+        if rwidget(in s.widgets, i).has_parent {
+            return invalid(i_root_parent());
+        }
+    }
+    s.has_root = has;
+    s.root = root;
+    record(
+        inout s,
+        lim,
+        op(
+            0,
+            if has {
+                1
+            } else {
+                0
+            },
+            root,
+            0,
+            0
+        )
+    )
+}
+
+pub fn patch_create(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
+    -> Option[BackendFault] {
+    let serial = word(in w, base, 2);
+    match allocate(inout s, word(in w, base, 1), serial) {
+        Option::Some(f) => {
+            return Option::Some(f);
+        },
+        Option::None => (),
+    }
+    if s.nwidgets >= lim.nodes {
+        return budget(b_nodes());
+    }
+    s
+        .widgets
+        .push(
+        RWidget {
+            serial: serial,
+            kind: word(in w, base, 3),
+            has_parent: false,
+            parent: 0,
+            user_state: 0
+        }
+    );
+    s.wlive.push(true);
+    s.nwidgets = inc(s.nwidgets);
+    record(inout s, lim, op(1, serial, 0, 0, 0))
+}
+
+pub fn patch_destroy(inout s: RState, lim: Lim, in w: Slice[u64], base: u64, in text: Slice[u8])
+    -> Option[BackendFault] {
+    if !session_ok(in s, word(in w, base, 1)) {
+        return foreign();
+    }
+    let serial = word(in w, base, 2);
+    let i = widget_index(in s, serial);
+    if i == none_id() {
+        return stale_widget();
+    }
+    let node = rwidget(in s.widgets, i);
+    if (s.has_root && s.root == serial)
+        || node
+        .has_parent
+        || child_count(in s, serial)
+        != 0
+        || widget_slot_count(in s, serial)
+        != 0
+        || widget_sub_count(in s, serial)
+        != 0 {
+        return invalid(i_destroy());
+    }
+    s.wlive.try_set(i, false);
+    s.nwidgets = dec(s.nwidgets);
+    record(inout s, lim, op(2, serial, 0, 0, 0))
+}

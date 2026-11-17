@@ -4,8 +4,21 @@ version = "0.1.0"
 edition = "2024"
 description = "Sans-IO RFC 9293 TCP endpoint for Vesper Warp (section 35): wire format, state machine, SACK loss recovery and a deterministic lossy test harness"
 publish = false
+build = "build.rs"
+
+[features]
+# Forward every ported function to the Vesper library in vesper/.
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# A deliberately wrong Vesper build, one change per ported module: the port
+# test runs must fail (scripts/test-port-harness.sh and Bazel assert it).
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }
 
 [dev-dependencies]
+vesper-bench = { path = "../vesper-bench" }
 vesper-ffi = { path = "../vesper-ffi" }

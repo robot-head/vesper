@@ -76,12 +76,20 @@ avoids recursive Doc destruction. No O(N), timing or Rust-renderer refinement
 theorem is claimed. The separate document-model proof path below has a narrower
 kernel-checked comment-conservation theorem.
 
-Defaults are 256 KiB input, 1 MiB output, 8,192 lexer tokens, 100,000 Doc nodes,
-24 delimiter levels and 128 Mi deterministic work units. Token and delimiter
-hard caps remain 8,192 and 24 even if larger limits are requested. A separate
-128-component path/chain guard protects the existing recursive parser: child
-commas/semicolons do not reset an ancestor's unary/assignment/postfix/type chain.
-Root declaration boundaries reset their own path counter. Doc depth is capped
+Defaults are 1 MiB input, 4 MiB output, 131,072 lexer tokens (twice a 64k-token
+file, trivia included), 1,000,000 Doc nodes, 24 delimiter levels and 512 Mi
+deterministic work units. Requested limits above the lexer's hard ceilings
+(8 MiB, 262,144 tokens) are clamped; delimiter depth stays capped at 24. Files
+that use source macros, and the recovery and proof profiles, keep the 8,192-token
+ceiling because their parsers in `vesper-syntax` are not linear. Parser
+preflight charges a fixed number of work units per token (it used to charge
+N² per call), and render lookahead walks the pending stack in place, so
+formatting time and work grow linearly with file size. A separate
+128-component path/chain guard mirrors the parser's expression height limit:
+child commas/semicolons do not reset an ancestor's unary/assignment/postfix/type
+chain. Root declaration boundaries reset their own path counter, and so does a
+closing `}` followed by a token that cannot continue the expression, so a block
+of many methods is not a chain. Doc depth is capped
 at 256. Valid but unusually complex source can be rejected by these conservative
 guards. Work units count scans, conservative parser preflight, nodes, lookahead
 and output bytes; they are not measured CPU instructions or an RSS limit.

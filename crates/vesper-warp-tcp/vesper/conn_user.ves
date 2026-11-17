@@ -1,0 +1,207 @@
+// ----------------------------------------------------------------
+// Accessors
+// ----------------------------------------------------------------
+
+fn data_rcv_end(in t: Tcb) -> u64 {
+    if t.fin_received {
+        sat_sub64(t.rcv_nxt, 2)
+    } else {
+        max_u64()
+    }
+}
+
+pub fn tcb_acked_offset(in t: Tcb) -> u64 {
+    min64(sat_sub64(t.snd_una, 1), t.write_end)
+}
+
+pub fn tcb_recv_offset(in t: Tcb) -> u64 {
+    min64(sat_sub64(t.rcv_nxt, 1), data_rcv_end(in t))
+}
+
+pub fn tcb_unread(in t: Tcb) -> u64 {
+    wrapping_sub(tcb_recv_offset(in t), t.read_off)
+}
+
+pub fn tcb_bytes_in_flight(in t: Tcb) -> u32 {
+    pipe(in t)
+}
+
+pub fn tcb_recv_next_seq(in t: Tcb) -> Option[u32] {
+    if t.have_irs {
+        Option::Some(seqmap_seq(t.rcv_isn, t.rcv_nxt))
+    } else {
+        Option::None
+    }
+}
+
+pub fn tcb_send_seqs(in t: Tcb) -> (u32, u32) {
+    (seqmap_seq(t.snd_isn, t.snd_una), seqmap_seq(t.snd_isn, t.snd_nxt))
+}
+
+pub fn tcb_ooo_ranges(in t: Tcb) -> u64 {
+    t.ooo.len()
+}
+
+pub fn tcb_written(in t: Tcb) -> u64 {
+    t.write_end
+}
+
+fn opt_min(a: Option[u64], b: Option[u64]) -> Option[u64] {
+    match a {
+        Option::None => b,
+        Option::Some(x) => match b {
+            Option::None => a,
+            Option::Some(y) => Option::Some(min64(x, y)),
+        },
+    }
+}
+
+pub fn tcb_poll_timeout(in t: Tcb) -> Option[u64] {
+    opt_min(
+        opt_min(t.rto_deadline, t.persist_deadline),
+        opt_min(t.delack_deadline, t.time_wait_deadline)
+    )
+}
+
+// ----------------------------------------------------------------
+// User calls (RFC 9293 §3.10.1–§3.10.6)
+// ----------------------------------------------------------------
+
+pub fn tcb_listen(inout t: Tcb, iss_base: u32) -> Result[Unit, TcpFail] {
+    if t.st != State::Closed {
+        return Result::Err(TcpFail::InvalidState(t.st));
+    }
+    reset_tcb(inout t);
+    t.iss_base = iss_base;
+    t.passive = true;
+    t.st = State::Listen;
+    Result::Ok(())
+}
+
+pub fn tcb_connect(inout t: Tcb, now: u64, ips: Ips, remote_port: u16, iss_base: u32)
+    -> Result[Unit, TcpFail] {
+    if t.st != State::Closed {
+        return Result::Err(TcpFail::InvalidState(t.st));
+    }
+    reset_tcb(inout t);
+    t.iss_base = iss_base;
+    t.passive = false;
+    t.ips = Option::Some(ips);
+    t.remote_port = remote_port;
+    t.peer_mss = ips_default_mss(ips);
+    t.snd_isn = clock_iss(in t, now);
+    t.need_syn = true;
+    t.st = State::SynSent;
+    Result::Ok(())
+}
+
+pub fn tcb_write(inout t: Tcb, n: u64) -> Result[Unit, TcpFail] {
+    let s = t.st;
+    let open = s
+        == State::SynSent
+        || s
+        == State::SynReceived
+        || s
+        == State::Established
+        || s
+        == State::CloseWait;
+    if open && !t.fin_requested {
+        let v = wrapping_add(t.write_end, n);
+        if v < t.write_end || v >= 4611686018427387904 {
+            Result::Err(TcpFail::Overflow)
+        } else {
+            t.write_end = v;
+            Result::Ok(())
+        }
+    } else if s == State::Closed || s == State::Listen {
+        Result::Err(TcpFail::InvalidState(s))
+    } else {
+        Result::Err(TcpFail::ConnectionClosing)
+    }
+}
+
+pub fn tcb_close(inout t: Tcb) -> Result[Unit, TcpFail] {
+    let s = t.st;
+    if s == State::Listen || s == State::SynSent {
+        enter_closed(inout t, Option::None);
+        Result::Ok(())
+    } else if (s == State::SynReceived || s == State::Established || s == State::CloseWait)
+        && !t
+        .fin_requested {
+        t.fin_requested = true;
+        if s == State::Established {
+            t.st = State::FinWait1;
+        } else if s == State::CloseWait {
+            t.st = State::LastAck;
+        }
+        // RFC 9293 §3.10.4 permits queueing until ESTABLISHED.
+        Result::Ok(())
+    } else if s == State::Closed {
+        Result::Err(TcpFail::InvalidState(s))
+    } else {
+        Result::Err(TcpFail::ConnectionClosing)
+    }
+}
+
+pub fn tcb_abort(inout t: Tcb) {
+    if state_is_synchronized(t.st) && t.st != State::TimeWait {
+        match t.ips {
+            Option::Some(ips) => {
+                t
+                    .pending_rst = Option::Some(
+                    RstSpec {
+                        ips: ips,
+                        src_port: t.cfg.local_port,
+                        dst_port: t.remote_port,
+                        seq: seqmap_seq(t.snd_isn, t.snd_nxt),
+                        ack: Option::None
+                    }
+                );
+            },
+            Option::None => (),
+        }
+    }
+    if t.st != State::Closed {
+        enter_closed(inout t, Option::Some(CloseReason::Aborted));
+    }
+}
+
+pub fn tcb_recv_release(inout t: Tcb, n: u64) -> Result[Unit, TcpFail] {
+    if n > tcb_unread(in t) {
+        return Result::Err(TcpFail::ReleaseExceedsUnread);
+    }
+    t.read_off = wrapping_add(t.read_off, n);
+    if state_is_synchronized(t.st) {
+        let right = recv_right(in t);
+        if sat_sub64(right, t.rcv_adv_right) >= sws_threshold(in t) {
+            t.ack_now = true;
+        }
+    }
+    Result::Ok(())
+}
+
+pub fn tcb_take_released(inout t: Tcb) -> Option[(u64, u64)] {
+    let acked = tcb_acked_offset(in t);
+    if acked > t.released_off {
+        let start = t.released_off;
+        t.released_off = acked;
+        Option::Some((start, acked))
+    } else {
+        Option::None
+    }
+}
+
+pub fn tcb_take_event(inout t: Tcb) -> Option[Event] {
+    if t.events & ev_connected() != 0 {
+        t.events = t.events & ~ev_connected();
+        Option::Some(Event::Connected)
+    } else if t.events & ev_peer_fin() != 0 {
+        t.events = t.events & ~ev_peer_fin();
+        Option::Some(Event::PeerFinished)
+    } else if t.events & ev_closed() != 0 {
+        t.events = t.events & ~ev_closed();
+        Option::Some(Event::Closed(t.close_reason))
+    } else {
+        Option::None
+    }
+}

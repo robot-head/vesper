@@ -1,0 +1,147 @@
+// The budget and message codes the wrappers turn into names (src/ported/codec.rs).
+
+pub fn none_id() -> u64 {
+    18446744073709551615
+}
+
+pub fn max_u64() -> u64 {
+    18446744073709551615
+}
+
+// The budget names of ViewError::Budget and BackendError::Budget.
+pub fn b_nodes() -> u64 {
+    0
+}
+
+pub fn b_teardown() -> u64 {
+    1
+}
+
+pub fn b_children() -> u64 {
+    2
+}
+
+pub fn b_properties() -> u64 {
+    3
+}
+
+pub fn b_subscriptions() -> u64 {
+    4
+}
+
+pub fn b_text() -> u64 {
+    5
+}
+
+pub fn b_total_text() -> u64 {
+    6
+}
+
+pub fn b_depth() -> u64 {
+    7
+}
+
+pub fn b_patches() -> u64 {
+    8
+}
+
+pub fn b_slots() -> u64 {
+    9
+}
+
+pub fn b_handler() -> u64 {
+    10
+}
+
+pub fn b_event_batch() -> u64 {
+    11
+}
+
+pub fn b_subscription_counter() -> u64 {
+    12
+}
+
+pub fn b_disconnect_counter() -> u64 {
+    13
+}
+
+// The messages of BackendError::Invalid.
+pub fn i_limits() -> u64 {
+    0
+}
+
+pub fn i_reused() -> u64 {
+    1
+}
+
+pub fn i_root_parent() -> u64 {
+    2
+}
+
+pub fn i_destroy() -> u64 {
+    3
+}
+
+pub fn i_bound() -> u64 {
+    4
+}
+
+pub fn i_property() -> u64 {
+    5
+}
+
+pub fn i_redundant() -> u64 {
+    6
+}
+
+pub fn i_slot_mismatch() -> u64 {
+    7
+}
+
+pub fn i_subscribed() -> u64 {
+    8
+}
+
+pub fn i_event() -> u64 {
+    9
+}
+
+pub fn i_subscription_mismatch() -> u64 {
+    10
+}
+
+pub fn i_remove_position() -> u64 {
+    11
+}
+
+pub fn i_parent_mismatch() -> u64 {
+    12
+}
+
+pub fn i_insert_detached() -> u64 {
+    13
+}
+
+pub fn i_insert_position() -> u64 {
+    14
+}
+
+pub fn i_move_position() -> u64 {
+    15
+}
+
+pub fn i_unmounted() -> u64 {
+    16
+}
+
+pub fn i_cycle() -> u64 {
+    17
+}
+
+pub fn i_broken_parent() -> u64 {
+    18
+}
+
+pub fn i_disconnected() -> u64 {
+    19
+}

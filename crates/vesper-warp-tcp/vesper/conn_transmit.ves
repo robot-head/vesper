@@ -1,0 +1,268 @@
+// ----------------------------------------------------------------
+// Transmission
+// ----------------------------------------------------------------
+
+fn some_tx(r: Result[Tx, TcpFail]) -> Result[Option[Tx], TcpFail] {
+    match r {
+        Result::Ok(tx) => Result::Ok(Option::Some(tx)),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+// Write the next segment to send into `out`, if any. `cwnd` is the
+// controller's congestion window; `send` holds stream offsets
+// `send_base..`.
+pub fn tcb_poll_transmit(
+    inout t: Tcb,
+    now: u64,
+    cwnd: u32,
+    send_base: u64,
+    in send: Slice[u8],
+    inout out: Slice[u8]
+) -> Result[Option[Tx], TcpFail] {
+    t.edt_entry = Option::None;
+    t.edt_armed_rto = false;
+    if out.len() < 60 {
+        return Result::Err(TcpFail::BufferTooSmall);
+    }
+    match t.pending_rst {
+        Option::Some(rst) => {
+            t.pending_rst = Option::None;
+            let flags = match rst.ack {
+                Option::Some(a) => rst_bit() | ack_bit(),
+                Option::None => rst_bit(),
+            };
+            let h = Hdr {
+                src_port: rst.src_port,
+                dst_port: rst.dst_port,
+                seq: rst.seq,
+                ack: match rst.ack {
+                    Option::Some(a) => a,
+                    Option::None => 0,
+                },
+                flags: flags,
+                window: 0,
+                urgent: 0
+            };
+            let n = match write_header(inout out, h, opts_default()) {
+                Result::Ok(n) => n,
+                Result::Err(e) => {
+                    return wire_err(e);
+                },
+            };
+            match fill_checksum_n(rst.ips, inout out, n) {
+                Result::Ok(u) => (),
+                Result::Err(e) => {
+                    return wire_err(e);
+                },
+            }
+            t.stats.segments_sent = wrapping_add(t.stats.segments_sent, 1);
+            return Result::Ok(
+                Option::Some(
+                    Tx {
+                        len: n,
+                        edt_ns: now,
+                        ips: rst.ips,
+                        entry: false,
+                        pn: 0,
+                        bytes: 0
+                    }
+                )
+            );
+        },
+        Option::None => (),
+    }
+    if t.st == State::Closed || t.st == State::Listen {
+        return Result::Ok(Option::None);
+    }
+    if t.need_syn {
+        let mut syn = no_seg();
+        syn.end = 1;
+        syn.syn = true;
+        if !sq_push(inout t, syn) {
+            return Result::Ok(Option::None);
+        }
+        t.need_syn = false;
+        t.snd_nxt = max64(t.snd_nxt, 1);
+        return some_tx(emit_entry(inout t, now, 0, send_base, in send, inout out, false));
+    }
+    if t.st != State::TimeWait {
+        match try_retransmit(inout t, now, cwnd, send_base, in send, inout out) {
+            Result::Err(e) => {
+                return Result::Err(e);
+            },
+            Result::Ok(o) => match o {
+                Option::Some(tx) => {
+                    return Result::Ok(Option::Some(tx));
+                },
+                Option::None => (),
+            },
+        }
+        match try_new_data(inout t, now, cwnd, send_base, in send, inout out) {
+            Result::Err(e) => {
+                return Result::Err(e);
+            },
+            Result::Ok(o) => match o {
+                Option::Some(tx) => {
+                    return Result::Ok(Option::Some(tx));
+                },
+                Option::None => (),
+            },
+        }
+    }
+    if t.ack_now && t.have_irs && t.st != State::SynSent {
+        return some_tx(emit_ack(inout t, now, inout out));
+    }
+    Result::Ok(Option::None)
+}
+
+// The wrapper's controller scheduled the segment `tcb_poll_transmit` just
+// wrote for `edt_ns` (later than `now`): record it as the send time.
+pub fn tcb_commit_edt(inout t: Tcb, edt_ns: u64) {
+    match t.edt_entry {
+        Option::Some(i) => {
+            let mut e = sq_get(in t, i);
+            e.sent_ns = edt_ns;
+            sq_set(inout t, i, e);
+            if t.edt_armed_rto {
+                t.rto_deadline = Option::Some(sat_add64(edt_ns, rtt_rto_ns(t.rtt)));
+            }
+        },
+        Option::None => (),
+    }
+    t.edt_entry = Option::None;
+    t.edt_armed_rto = false;
+}
+
+fn try_retransmit(
+    inout t: Tcb,
+    now: u64,
+    cwnd: u32,
+    send_base: u64,
+    in send: Slice[u8],
+    inout out: Slice[u8]
+) -> Result[Option[Tx], TcpFail] {
+    let mut found: Option[u64] = Option::None;
+    for i in 0..t.sent_len {
+        let s = sq_get(in t, i);
+        if s.lost && !s.sacked {
+            found = Option::Some(i);
+            break;
+        }
+    }
+    match found {
+        Option::None => {
+            t.force_retx = false;
+            Result::Ok(Option::None)
+        },
+        Option::Some(i) => {
+            if !(t.force_retx || pipe(in t) < cwnd || sq_get(in t, i).syn) {
+                return Result::Ok(Option::None);
+            }
+            t.force_retx = false;
+            some_tx(emit_entry(inout t, now, i, send_base, in send, inout out, true))
+        },
+    }
+}
+
+fn try_new_data(
+    inout t: Tcb,
+    now: u64,
+    cwnd: u32,
+    send_base: u64,
+    in send: Slice[u8],
+    inout out: Slice[u8]
+) -> Result[Option[Tx], TcpFail] {
+    // Data may flow once our SYN is acknowledged.
+    let s = t.st;
+    if !(
+        s
+            == State::Established
+            || s
+            == State::FinWait1
+            || s
+            == State::Closing
+            || s
+            == State::CloseWait
+            || s
+            == State::LastAck
+    ) {
+        return Result::Ok(Option::None);
+    }
+    if is_some(t.fin_abs) || t.sent_len == t.sent_cap {
+        return Result::Ok(Option::None);
+    }
+    let data_end = wrapping_add(1, t.write_end);
+    let unsent = sat_sub64(data_end, t.snd_nxt);
+    let wnd_right = wrapping_add(t.snd_una, widen_u64(t.snd_wnd));
+    let usable = sat_sub64(wnd_right, t.snd_nxt);
+    if unsent == 0 {
+        if !t.fin_requested {
+            return Result::Ok(Option::None);
+        }
+        // FIN occupies sequence space, so it needs one octet of window;
+        // against a zero window it goes out as the persist probe.
+        if usable > 0 {
+            return some_tx(emit_new(inout t, now, 0, true, send_base, in send, inout out));
+        }
+        if t.snd_wnd == 0 && t.sent_len == 0 {
+            if t.probe_due {
+                t.probe_due = false;
+                t.stats.window_probes = wrapping_add(t.stats.window_probes, 1);
+                return some_tx(emit_new(inout t, now, 0, true, send_base, in send, inout out));
+            }
+            arm_persist(inout t, now);
+        }
+        return Result::Ok(Option::None);
+    }
+    let p = pipe(in t);
+    let cwnd_room = widen_u64(sat_sub32(cwnd, p));
+    let smss = widen_u64(t.smss);
+
+    if usable == 0 {
+        // Zero window (or window fully used): RFC 9293 §3.8.6.1 probing.
+        if t.snd_wnd == 0 && t.sent_len == 0 {
+            if t.probe_due {
+                t.probe_due = false;
+                t.stats.window_probes = wrapping_add(t.stats.window_probes, 1);
+                return some_tx(emit_new(inout t, now, 1, false, send_base, in send, inout out));
+            }
+            arm_persist(inout t, now);
+        }
+        return Result::Ok(Option::None);
+    }
+    let len = min64(min64(unsent, smss), min64(usable, cwnd_room));
+    if len == 0 {
+        return Result::Ok(Option::None);
+    }
+    // Sender SWS avoidance and Nagle (RFC 9293 §3.8.6.2.1).
+    let full = len == smss;
+    let all = len == unsent && (!t.cfg.nagle || t.sent_len == 0);
+    let half_window = t.max_snd_wnd > 0 && len >= widen_u64(t.max_snd_wnd / 2);
+    if !(full || all || half_window) {
+        // Nothing in flight will clock this out: RFC 9293 §3.8.6.2.1 (d)
+        // override timeout, driven by the persist timer.
+        if t.sent_len == 0 {
+            if t.probe_due {
+                t.probe_due = false;
+            } else {
+                arm_persist(inout t, now);
+                return Result::Ok(Option::None);
+            }
+        } else {
+            return Result::Ok(Option::None);
+        }
+    }
+    // Attach FIN only when its sequence number also fits the window.
+    let tail = wrapping_add(t.snd_nxt, len);
+    let with_fin = t.fin_requested && tail == data_end && tail < wnd_right;
+    some_tx(emit_new(inout t, now, wrapping_u32(len), with_fin, send_base, in send, inout out))
+}
+
+fn arm_persist(inout t: Tcb, now: u64) {
+    if !is_some(t.persist_deadline) {
+        let backoff = shl64(rtt_rto_ns(t.rtt), widen_u64(min32(t.persist_backoff, 16)));
+        t.persist_backoff = sat_add32(t.persist_backoff, 1);
+        t.persist_deadline = Option::Some(sat_add64(now, min64(backoff, t.cfg.rto.max_ns)));
+    }
+}

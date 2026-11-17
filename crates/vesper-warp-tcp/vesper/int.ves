@@ -1,0 +1,168 @@
+// Vesper port of vesper-warp-tcp (port wave P1 lane 11, #908): the sans-IO
+// RFC 9293 endpoint of crates/vesper-warp-tcp/src. The Rust crate keeps its
+// public types and forwards every function to this library (`tcp`) through
+// port/binding.rs; src/ported/ is the forwarding layer.
+//
+// The library is the files of this directory in the order of `PARTS` in
+// build.rs (and `TCP_PARTS` in BUILD.bazel), concatenated: one per Rust
+// module, the larger ones split by topic, each under the formatter's
+// 8192-token cap. They become package modules once `vesper build --lib`
+// takes a package directory.
+//
+// Every function that updates an `inout` value is total: failures are
+// returned as `Result` values, and the bulk byte reads go through handled
+// helpers (an abortable effect cannot cross an active `inout` borrow).
+// Arithmetic that Rust performs with `wrapping_*`, or that its invariants
+// keep in range, is `wrapping_*` here; Rust's `saturating_*`, `min` and
+// `max` are the helpers below.
+
+// ---------------------------------------------------------------------
+// Integer helpers
+// ---------------------------------------------------------------------
+
+fn max_u64() -> u64 {
+    18446744073709551615
+}
+
+fn max_u32() -> u32 {
+    4294967295
+}
+
+fn min64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn max64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn min32(a: u32, b: u32) -> u32 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn max32(a: u32, b: u32) -> u32 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn sat_add64(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        max_u64()
+    } else {
+        s
+    }
+}
+
+fn sat_sub64(a: u64, b: u64) -> u64 {
+    if a > b {
+        wrapping_sub(a, b)
+    } else {
+        0
+    }
+}
+
+fn sat_add32(a: u32, b: u32) -> u32 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        max_u32()
+    } else {
+        s
+    }
+}
+
+fn sat_sub32(a: u32, b: u32) -> u32 {
+    if a > b {
+        wrapping_sub(a, b)
+    } else {
+        0
+    }
+}
+
+fn sat_mul32(a: u32, b: u32) -> u32 {
+    let p = wrapping_mul(widen_u64(a), widen_u64(b));
+    if p > widen_u64(max_u32()) {
+        max_u32()
+    } else {
+        wrapping_u32(p)
+    }
+}
+
+fn sat_mul4_64(a: u64) -> u64 {
+    if a > 4611686018427387903 {
+        max_u64()
+    } else {
+        wrapping_mul(a, 4)
+    }
+}
+
+// `x << s` for `s < 64`, else 0 (bits shifted out are lost, as in Rust).
+fn shl64(x: u64, s: u64) -> u64 {
+    handle Fail[ArithOverflow] in {
+        x << s
+    } with {
+        return v => v,
+        raise(e, k) => 0
+    }
+}
+
+fn shr64(x: u64, s: u64) -> u64 {
+    handle Fail[ArithOverflow] in {
+        x >> s
+    } with {
+        return v => v,
+        raise(e, k) => 0
+    }
+}
+
+fn shl32(x: u32, s: u64) -> u32 {
+    handle Fail[ArithOverflow] in {
+        x << s
+    } with {
+        return v => v,
+        raise(e, k) => 0
+    }
+}
+
+// `a / b`, 0 when `b == 0` (callers divide by validated non-zero values).
+fn div64(a: u64, b: u64) -> u64 {
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return v => v,
+        raise(e, k) => 0
+    }
+}
+
+fn rem64(a: u64, b: u64) -> u64 {
+    handle Fail[RuntimeError] in {
+        a % b
+    } with {
+        return v => v,
+        raise(e, k) => 0
+    }
+}
+
+fn div32(a: u32, b: u32) -> u32 {
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return v => v,
+        raise(e, k) => 0
+    }
+}

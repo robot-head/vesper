@@ -1218,3 +1218,39 @@ fn fin_is_not_attached_beyond_the_window() {
     assert!(f.has(Flags::FIN));
     assert_eq!(f.seq, t.pack.wrapping_add(10));
 }
+
+#[test]
+fn third_duplicate_ack_triggers_fast_retransmit() {
+    // RFC 5681 §3.2 / RFC 6675 DupThresh = 3: two duplicate ACKs are not
+    // enough, the third retransmits the first unacknowledged segment.
+    let mut t = T::est();
+    let wide = |t: &mut T| {
+        t.rx_opts(
+            t.pseq,
+            t.pack,
+            Flags::ACK,
+            60000,
+            &TcpOptions::default(),
+            &[],
+        )
+        .unwrap();
+    };
+    wide(&mut t);
+    let mss = t.c.send_mss() as usize;
+    t.send = vec![3u8; 4 * mss];
+    t.c.write(4 * mss as u64).unwrap();
+    let sent = t.tx();
+    assert_eq!(sent.len(), 4, "{sent:?}");
+    assert_eq!(sent[0].seq, t.pack);
+    for _ in 0..2 {
+        wide(&mut t);
+        t.none();
+    }
+    assert_eq!(t.c.stats().retransmits, 0);
+    wide(&mut t);
+    let r = t.one();
+    assert_eq!(r.seq, t.pack, "the first hole is resent");
+    assert_eq!(r.payload.len(), mss);
+    assert_eq!(t.c.stats().retransmits, 1);
+    assert_eq!(t.c.stats().dup_acks, 3);
+}

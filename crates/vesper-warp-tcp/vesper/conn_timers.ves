@@ -1,0 +1,64 @@
+// ----------------------------------------------------------------
+// Timers
+// ----------------------------------------------------------------
+
+fn due(d: Option[u64], now: u64) -> bool {
+    match d {
+        Option::Some(v) => v <= now,
+        Option::None => false,
+    }
+}
+
+// Fire every timer whose deadline is at or before `now`.
+pub fn tcb_on_timeout(inout t: Tcb, now: u64) {
+    t.cmds.clear();
+    if due(t.delack_deadline, now) {
+        t.delack_deadline = Option::None;
+        t.ack_now = true;
+    }
+    if due(t.time_wait_deadline, now) {
+        t.time_wait_deadline = Option::None;
+        if t.st == State::TimeWait {
+            enter_closed(inout t, Option::None);
+        }
+        return;
+    }
+    if due(t.persist_deadline, now) {
+        t.persist_deadline = Option::None;
+        t.probe_due = true;
+    }
+    if due(t.rto_deadline, now) {
+        on_rto(inout t, now);
+    }
+}
+
+fn on_rto(inout t: Tcb, now: u64) {
+    t.rto_deadline = Option::None;
+    if t.sent_len == 0 {
+        return;
+    }
+    t.stats.rtos = wrapping_add(t.stats.rtos, 1);
+    let probing = t.snd_wnd == 0 && state_is_synchronized(t.st);
+    if !probing {
+        t.retries = wrapping_add(t.retries, 1);
+        if t.retries > t.cfg.max_retransmits {
+            enter_closed(inout t, Option::Some(CloseReason::TimedOut));
+            return;
+        }
+        cc_event(inout t, CongestionEvent::PersistentCongestion, now);
+    }
+    // RFC 2018 §8: forget SACK state after a timeout.
+    for i in 0..t.sent_len {
+        let mut e = sq_get(in t, i);
+        e.sacked = false;
+        e.lost = true;
+        e.rexmit_in_recovery = false;
+        sq_set(inout t, i, e);
+    }
+    t.recovery_point = Option::Some(t.snd_nxt);
+    t.dupacks = 0;
+    t.timed = Option::None;
+    t.force_retx = true;
+    rtt_backoff(inout t.rtt);
+    t.rto_deadline = Option::Some(sat_add64(now, rtt_rto_ns(t.rtt)));
+}

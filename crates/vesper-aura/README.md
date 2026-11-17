@@ -1,6 +1,12 @@
 # Aura reconciliation core
 
-This dependency-free host library implements a bounded keyed view runtime and
+> **Frozen (port wave P1 lane 13, [#910](https://github.com/robot-head/vesper/issues/910)):**
+> the Rust implementation takes bug fixes only. The Vesper port (`vesper/`,
+> built with the `vesper-port` feature) passes the same tests and stays
+> non-default until it reaches performance parity; see
+> [the port report](../../docs/parallel-results/port-p1-aura.md).
+
+By default this dependency-free host library implements a bounded keyed view runtime and
 an executable recording backend. It is an initial library milestone for design
 [manuscript §37.2](../../docs/manuscript/README.md), not a Vesper compiler feature or a native UI toolkit.
 

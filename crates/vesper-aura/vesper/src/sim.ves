@@ -1,0 +1,494 @@
+// sim_aura.rs: focus order, dispatch, audits and the topology encoding.
+use self::codes::{
+    b_children,
+    b_handler,
+    b_slots,
+    none_id
+};
+use self::recording::{
+    child_count,
+    child_edge,
+    redge,
+    rslot,
+    rsub,
+    rwidget,
+    widget_index,
+    widget_slot,
+    widget_sub,
+    widget_sub_count
+};
+use self::{
+    Query,
+    RState,
+    Recorder,
+    TNode,
+    Tree,
+    ViewFault
+};
+use self::util::{
+    add,
+    blank_seq,
+    blank_slice,
+    dec,
+    inc,
+    limits_from,
+    position,
+    seq_bool,
+    seq_u64,
+    tnode,
+    tprop,
+    tsub
+};
+use self::view::{
+    decode,
+    tree_new,
+    validate
+};
+
+pub fn query_new() -> Query {
+    Query {
+        fault: Option::None,
+        code: 0,
+        found: false,
+        target: 0,
+        has_handler: false,
+        handler: 0,
+        sub: 0,
+        inspected: 0,
+        interactive: 0,
+        items: ChunkSeq::new[u64](),
+        values: ChunkSeq::new[u64](),
+        stack: ChunkSeq::new[u64](),
+        flags: ChunkSeq::new[bool](),
+        seen: ChunkSeq::new[bool](),
+        tree: tree_new()
+    }
+}
+
+// Whether a mounted widget's bool property (2 Enabled, 3 Visible) is false.
+pub fn flag_off(in s: RState, widget: u64, property: u64) -> bool {
+    let k = widget_slot(in s, widget, property);
+    if k == none_id() {
+        false
+    } else {
+        let v = rslot(in s.slots, k);
+        v.tag == 1 && v.payload == 0
+    }
+}
+
+pub fn mounted_label(in s: RState, widget: u64) -> bool {
+    let k = widget_slot(in s, widget, 0);
+    if k == none_id() {
+        false
+    } else {
+        let v = rslot(in s.slots, k);
+        v.tag == 0 && !blank_seq(in s.text, v.tstart, v.tlen)
+    }
+}
+
+// SimAura::focusable_order into `q.items`: depth-first pre-order of the
+// visible, enabled Buttons and Inputs; hidden or disabled widgets prune
+// their subtree.
+pub fn focus_order(in rec: Recorder, inout q: Query) {
+    let s = rec.st.has_root;
+    q.items.clear();
+    if !s {
+        return;
+    }
+    q.seen.clear();
+    for i in 0..rec.st.widgets.len() {
+        q.seen.push(false);
+    }
+    q.stack.clear();
+    q.stack.push(rec.st.root);
+    loop {
+        let top = q.stack.len();
+        if top == 0 {
+            break;
+        }
+        let id = seq_u64(in q.stack, dec(top));
+        q.stack.truncate(dec(top));
+        let i = widget_index(in rec.st, id);
+        if i != none_id() && !seq_bool(in q.seen, i) {
+            q.seen.try_set(i, true);
+            if !flag_off(in rec.st, id, 3) && !flag_off(in rec.st, id, 2) {
+                let kind = rwidget(in rec.st.widgets, i).kind;
+                if kind == 2 || kind == 3 {
+                    q.items.push(id);
+                }
+                let n = child_count(in rec.st, id);
+                let mut j = n;
+                loop {
+                    if j == 0 {
+                        break;
+                    }
+                    j = dec(j);
+                    q.stack.push(redge(in rec.st.edges, child_edge(in rec.st, id, j)).child);
+                }
+            }
+        }
+    }
+}
+
+pub fn do_sim_focusable(in rec: Recorder) -> Query {
+    let mut q = query_new();
+    focus_order(in rec, inout q);
+    q
+}
+
+// The live Focused (or any `event`) subscription of `widget`, into
+// `q.has_handler`/`q.handler`.
+pub fn dispatch_if_subscribed(in rec: Recorder, inout q: Query, widget: u64, event: u64) {
+    let k = widget_sub(in rec.st, widget, event);
+    if k == none_id() {
+        q.has_handler = false;
+    } else {
+        q.has_handler = true;
+        q.sub = rsub(in rec.st.subs, k).serial;
+        q.handler = rsub(in rec.st.subs, k).handler;
+    }
+}
+
+// SimAura::focus_next (`forward`) or focus_prev: `found` is false when no
+// widget is focusable; otherwise `target` is the newly focused widget and
+// `has_handler`/`handler` its Focused registration.
+pub fn do_sim_focus(in rec: Recorder, has_focus: bool, focused: u64, forward: bool) -> Query {
+    let mut q = query_new();
+    focus_order(in rec, inout q);
+    let n = q.items.len();
+    if n == 0 {
+        q.found = false;
+        return q;
+    }
+    q.found = true;
+    let at = if has_focus {
+        position(in q.items, focused)
+    } else {
+        none_id()
+    };
+    let next = if at == none_id() {
+        if forward {
+            seq_u64(in q.items, 0)
+        } else {
+            seq_u64(in q.items, dec(n))
+        }
+    } else if forward {
+        seq_u64(in q.items, inc(at) % n)
+    } else {
+        seq_u64(in q.items, dec(add(at, n)) % n)
+    };
+    q.target = next;
+    dispatch_if_subscribed(in rec, inout q, next, 2);
+    q
+}
+
+// SimAura::trigger_event after the thread check: `code` 0 dispatched
+// (`handler`), 1 not focusable, 2 not subscribed. The widget's session was
+// compared by the wrapper (`same_session`).
+pub fn do_sim_trigger(in rec: Recorder, same_session: bool, widget: u64, event: u64) -> Query {
+    let mut q = query_new();
+    focus_order(in rec, inout q);
+    if !same_session || !rec.st.has_session || position(in q.items, widget) == none_id() {
+        q.code = 1;
+        return q;
+    }
+    dispatch_if_subscribed(in rec, inout q, widget, event);
+    q.code = if q.has_handler {
+        0
+    } else {
+        2
+    };
+    q
+}
+
+// Whether `widget` is still focusable (SimAura::apply drops a focus that
+// is not).
+pub fn do_sim_still_focusable(in rec: Recorder, widget: u64) -> Query {
+    let mut q = query_new();
+    focus_order(in rec, inout q);
+    q.found = position(in q.items, widget) != none_id();
+    q
+}
+
+pub fn audit_one(
+    inout q: Query,
+    kind: u64,
+    visible: bool,
+    labelled: bool,
+    subscribed: bool,
+    target: u64
+) {
+    if kind == 2 || kind == 3 {
+        q.interactive = inc(q.interactive);
+        if visible && !labelled {
+            q.items.push(0);
+            q.items.push(target);
+            q.items.push(kind);
+        }
+        if !visible && subscribed {
+            q.items.push(1);
+            q.items.push(target);
+            q.items.push(kind);
+        }
+    }
+}
+
+// SimAura::audit_wcag (audit_snapshot): pre-order with inherited
+// visibility, then any widget the walk did not reach, in serial order.
+pub fn do_sim_audit(in rec: Recorder) -> Query {
+    let mut q = query_new();
+    q.inspected = rec.st.nwidgets;
+    q.seen.clear();
+    for i in 0..rec.st.widgets.len() {
+        q.seen.push(false);
+    }
+    if rec.st.has_root {
+        q.stack.clear();
+        q.flags.clear();
+        q.stack.push(rec.st.root);
+        q.flags.push(true);
+        loop {
+            let top = q.stack.len();
+            if top == 0 {
+                break;
+            }
+            let id = seq_u64(in q.stack, dec(top));
+            let parent_visible = seq_bool(in q.flags, dec(top));
+            q.stack.truncate(dec(top));
+            q.flags.truncate(dec(top));
+            let i = widget_index(in rec.st, id);
+            if i != none_id() && !seq_bool(in q.seen, i) {
+                q.seen.try_set(i, true);
+                let visible = parent_visible && !flag_off(in rec.st, id, 3);
+                let w = rwidget(in rec.st.widgets, i);
+                audit_one(
+                    inout q,
+                    w.kind,
+                    visible,
+                    mounted_label(in rec.st, id),
+                    widget_sub_count(in rec.st, id) != 0,
+                    id
+                );
+                let n = child_count(in rec.st, id);
+                let mut j = n;
+                loop {
+                    if j == 0 {
+                        break;
+                    }
+                    j = dec(j);
+                    q.stack.push(redge(in rec.st.edges, child_edge(in rec.st, id, j)).child);
+                    q.flags.push(visible);
+                }
+            }
+        }
+    }
+    // Include widgets the walk missed in malformed snapshots so the audit
+    // is total.
+    for i in 0..rec.st.widgets.len() {
+        if seq_bool(in rec.st.wlive, i) && !seq_bool(in q.seen, i) {
+            let w = rwidget(in rec.st.widgets, i);
+            audit_one(
+                inout q,
+                w.kind,
+                !flag_off(in rec.st, w.serial, 3),
+                mounted_label(in rec.st, w.serial),
+                widget_sub_count(in rec.st, w.serial) != 0,
+                w.serial
+            );
+        }
+    }
+    q
+}
+
+// The index of tree node `n`'s property, or none.
+pub fn tree_prop(in t: Tree, n: TNode, property: u64) -> u64 {
+    for j in 0..n.pcount {
+        if tprop(in t.props, add(n.pstart, j)).property == property {
+            return add(n.pstart, j);
+        }
+    }
+    none_id()
+}
+
+pub fn tree_flag_off(in t: Tree, n: TNode, property: u64) -> bool {
+    let k = tree_prop(in t, n, property);
+    if k == none_id() {
+        false
+    } else {
+        let p = tprop(in t.props, k);
+        p.tag == 1 && p.payload == 0
+    }
+}
+
+pub fn tree_label(in t: Tree, n: TNode, in text: Slice[u8]) -> bool {
+    let k = tree_prop(in t, n, 0);
+    if k == none_id() {
+        false
+    } else {
+        let p = tprop(in t.props, k);
+        p.tag == 0 && !blank_slice(in text, p.tstart, p.tlen)
+    }
+}
+
+// audit_view_tree: validate, then audit in pre-order with the visibility a
+// node inherits from its parent. Targets are tree keys.
+pub fn do_audit_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice[u64]) -> Query {
+    let mut q = query_new();
+    decode(inout q.tree, in words);
+    match validate(inout q.tree, limits_from(in limits), in text) {
+        Option::Some(f) => {
+            q.fault = Option::Some(f);
+            return q;
+        },
+        Option::None => (),
+    }
+    let n = q.tree.nodes.len();
+    q.inspected = q.tree.order.len();
+    q.flags.clear();
+    for i in 0..n {
+        q.flags.push(true);
+    }
+    for oi in 0..q.tree.order.len() {
+        let ti = seq_u64(in q.tree.order, oi);
+        let node = tnode(in q.tree.nodes, ti);
+        let parent = seq_u64(in q.tree.parent, ti);
+        let parent_visible = if parent == none_id() {
+            true
+        } else {
+            seq_bool(in q.flags, parent)
+        };
+        let visible = parent_visible && !tree_flag_off(in q.tree, node, 3);
+        q.flags.try_set(ti, visible);
+        let labelled = tree_label(in q.tree, node, in text);
+        audit_one(inout q, node.kind, visible, labelled, node.scount != 0, node.key);
+    }
+    q
+}
+
+// The slot properties of each kind, in slot order (sim_aura::kind_properties).
+pub fn kind_slot_count(kind: u64) -> u64 {
+    if kind == 0 {
+        3
+    } else if kind == 3 {
+        5
+    } else {
+        4
+    }
+}
+
+pub fn kind_slot_property(kind: u64, i: u64) -> u64 {
+    if kind == 0 {
+        add(i, 2)
+    } else if kind == 3 {
+        i
+    } else if i == 0 {
+        0
+    } else {
+        inc(i)
+    }
+}
+
+// encode_view_tree: validate, then one node operation per node in
+// pre-order into `items` (kind tag, child count, slot base, event action,
+// layout flags), and per slot into `values` (property, input node index,
+// 1 when the node sets it).
+pub fn do_encode_tree(in words: Slice[u64], in text: Slice[u8], in limits: Slice[u64]) -> Query {
+    let mut q = query_new();
+    decode(inout q.tree, in words);
+    match validate(inout q.tree, limits_from(in limits), in text) {
+        Option::Some(f) => {
+            q.fault = Option::Some(f);
+            return q;
+        },
+        Option::None => (),
+    }
+    let mut slots: u64 = 0;
+    for oi in 0..q.tree.order.len() {
+        let ti = seq_u64(in q.tree.order, oi);
+        let node = tnode(in q.tree.nodes, ti);
+        if slots > 4294967295 {
+            q.fault = Option::Some(ViewFault::Budget(b_slots()));
+            return q;
+        }
+        let base = slots;
+        for i in 0..kind_slot_count(node.kind) {
+            let property = kind_slot_property(node.kind, i);
+            q.values.push(property);
+            q.values.push(ti);
+            q
+                .values
+                .push(
+                if tree_prop(in q.tree, node, property) == none_id() {
+                    0
+                } else {
+                    1
+                }
+            );
+            slots = inc(slots);
+        }
+        if node.ccount > 65535 {
+            q.fault = Option::Some(ViewFault::Budget(b_children()));
+            return q;
+        }
+        let mut action: u64 = 0;
+        for j in 0..node.scount {
+            let h = tsub(in q.tree.subs, add(node.sstart, j)).handler;
+            if h > 4294967295 {
+                q.fault = Option::Some(ViewFault::Budget(b_handler()));
+                return q;
+            }
+            if j == 0 {
+                action = h;
+            }
+        }
+        let mut flags: u64 = 0;
+        if !tree_flag_off(in q.tree, node, 3) {
+            flags = flags | 1;
+        }
+        if !tree_flag_off(in q.tree, node, 2) {
+            flags = flags | 2;
+        }
+        if node.kind == 2 || node.kind == 3 {
+            flags = flags | 4;
+        }
+        if tree_label(in q.tree, node, in text) {
+            flags = flags | 8;
+        }
+        q.items.push(node.kind);
+        q.items.push(node.ccount);
+        q.items.push(base);
+        q.items.push(action);
+        q.items.push(flags);
+    }
+    q
+}
+
+pub fn do_query_fault(in q: Query) -> Option[ViewFault] {
+    q.fault
+}
+
+// code, found, target, has_handler, handler, subscription.
+pub fn do_query_answer(in q: Query) -> (u64, bool, u64, bool, u64, u64) {
+    (q.code, q.found, q.target, q.has_handler, q.handler, q.sub)
+}
+
+// inspected nodes, interactive controls.
+pub fn do_query_counts(in q: Query) -> (u64, u64) {
+    (q.inspected, q.interactive)
+}
+
+pub fn do_query_items(in q: Query) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..q.items.len() {
+        out.push(seq_u64(in q.items, i));
+    }
+    out
+}
+
+pub fn do_query_values(in q: Query) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..q.values.len() {
+        out.push(seq_u64(in q.values, i));
+    }
+    out
+}

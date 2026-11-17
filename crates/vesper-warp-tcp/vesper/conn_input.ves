@@ -1,0 +1,525 @@
+// ----------------------------------------------------------------
+// Segment arrival (RFC 9293 §3.10.7)
+// ----------------------------------------------------------------
+
+// A parsed segment and its payload `bytes[pay_off..pay_off + pay_len]`.
+copy struct Seg {
+    h: Parsed,
+    pay_off: u64,
+    pay_len: u64
+}
+
+fn copy_into(in src: Slice[u8], from: u64, inout dst: Slice[u8], at: u64, n: u64) {
+    for k in 0..n {
+        match src.try_get(wrapping_add(from, k)) {
+            Option::Some(b) => {
+                dst.try_set(wrapping_add(at, k), b);
+            },
+            Option::None => (),
+        }
+    }
+}
+
+fn wire_err[T](e: WireError) -> Result[T, TcpFail] {
+    Result::Err(TcpFail::Wire(e))
+}
+
+pub fn tcb_on_segment(inout t: Tcb, now: u64, ips: Ips, in bytes: Slice[u8], inout ring: Slice[u8])
+    -> Result[RecvOut, TcpFail] {
+    t.cmds.clear();
+    if ring.len() != widen_u64(t.cfg.recv_buffer) {
+        return Result::Err(TcpFail::RingSizeMismatch);
+    }
+    match verify_checksum(ips, in bytes) {
+        Result::Err(e) => {
+            return Result::Err(TcpFail::Wire(e));
+        },
+        Result::Ok(u) => (),
+    }
+    let h = match segment_parse(in bytes) {
+        Result::Err(e) => {
+            return Result::Err(TcpFail::Wire(e));
+        },
+        Result::Ok(h) => h,
+    };
+    if h.dst_port != t.cfg.local_port {
+        return Result::Err(TcpFail::NotForThisConnection);
+    }
+    if !(t.st == State::Closed || t.st == State::Listen) {
+        let same = match t.ips {
+            Option::Some(mine) => ips_eq(mine, ips_reversed(ips)),
+            Option::None => false,
+        };
+        if h.src_port != t.remote_port || !same {
+            return Result::Err(TcpFail::NotForThisConnection);
+        }
+    }
+    let seg = Seg {
+        h: h,
+        pay_off: h.header_len,
+        pay_len: wrapping_sub(bytes.len(), h.header_len)
+    };
+    if t.st == State::Closed {
+        if !has(h.flags, rst_bit()) {
+            queue_rst_reply(inout t, ips, h, segment_seq_len(h.flags, seg.pay_len));
+        }
+        Result::Ok(no_recv())
+    } else if t.st == State::Listen {
+        on_listen(inout t, now, ips, seg);
+        Result::Ok(no_recv())
+    } else if t.st == State::SynSent {
+        Result::Ok(on_syn_sent(inout t, now, ips, seg, in bytes, inout ring))
+    } else {
+        Result::Ok(on_synchronized(inout t, now, seg, in bytes, inout ring))
+    }
+}
+
+fn on_listen(inout t: Tcb, now: u64, ips: Ips, seg: Seg) {
+    let f = seg.h.flags;
+    if has(f, rst_bit()) {
+        return;
+    }
+    if has(f, ack_bit()) {
+        queue_rst_reply(inout t, ips, seg.h, segment_seq_len(f, seg.pay_len));
+        return;
+    }
+    if !has(f, syn_bit()) {
+        return;
+    }
+    t.ips = Option::Some(ips_reversed(ips));
+    t.remote_port = seg.h.src_port;
+    t.rcv_isn = seg.h.seq;
+    t.have_irs = true;
+    t.rcv_nxt = 1;
+    t.rcv_adv_right = 1;
+    t.last_ack_sent = 1;
+    t.snd_isn = clock_iss(in t, now);
+    negotiate(inout t, seg.h.options, ips);
+    // The window in a SYN is never scaled (RFC 7323 §2.2).
+    t.snd_wnd = widen_u32(seg.h.window);
+    t.max_snd_wnd = t.snd_wnd;
+    t.snd_wl1 = seg.h.seq;
+    t.snd_wl2 = seqmap_seq(t.snd_isn, 0);
+    t.need_syn = true;
+    t.st = State::SynReceived;
+    // Data and FIN carried on the SYN are not acknowledged and will be
+    // retransmitted by the peer (RFC 9293 permits queueing; we drop).
+}
+
+fn mark_first_lost(inout t: Tcb) {
+    if t.sent_len > 0 {
+        let mut e = sq_get(in t, 0);
+        e.lost = true;
+        sq_set(inout t, 0, e);
+        t.force_retx = true;
+    }
+}
+
+fn on_syn_sent(
+    inout t: Tcb,
+    now: u64,
+    ips: Ips,
+    seg: Seg,
+    in bytes: Slice[u8],
+    inout ring: Slice[u8]
+) -> RecvOut {
+    let f = seg.h.flags;
+    let mut acceptable_ack = false;
+    if has(f, ack_bit()) {
+        let iss = t.snd_isn;
+        if sn_le(seg.h.ack, iss) || sn_gt(seg.h.ack, seqmap_seq(t.snd_isn, t.snd_nxt)) {
+            if !has(f, rst_bit()) {
+                queue_rst_reply(inout t, ips, seg.h, segment_seq_len(f, seg.pay_len));
+            }
+            return no_recv();
+        }
+        acceptable_ack = true;
+    }
+    if has(f, rst_bit()) {
+        if acceptable_ack {
+            enter_closed(inout t, Option::Some(CloseReason::Refused));
+        }
+        return no_recv();
+    }
+    if !has(f, syn_bit()) {
+        return no_recv();
+    }
+    t.rcv_isn = seg.h.seq;
+    t.have_irs = true;
+    t.rcv_nxt = 1;
+    t.rcv_adv_right = 1;
+    t.last_ack_sent = 1;
+    negotiate(inout t, seg.h.options, ips);
+    t.snd_wnd = widen_u32(seg.h.window);
+    t.max_snd_wnd = t.snd_wnd;
+    t.snd_wl1 = seg.h.seq;
+    t.snd_wl2 = seg.h.ack;
+    if acceptable_ack {
+        let ack_abs = match seqmap_abs(t.snd_isn, t.snd_una, seg.h.ack) {
+            Option::Some(a) => a,
+            Option::None => 1,
+        };
+        advance_una(inout t, now, ack_abs);
+        enter_established(inout t);
+        t.ack_now = true;
+        // Data or FIN on the SYN-ACK continue at the sixth step.
+        let mut rec = accept_text(inout t, now, seg, in bytes, inout ring);
+        let fin = process_fin(inout t, now, seg);
+        rec.fin = rec.fin || fin;
+        rec
+    } else {
+        // Simultaneous open: resend our SYN as SYN,ACK.
+        t.st = State::SynReceived;
+        mark_first_lost(inout t);
+        no_recv()
+    }
+}
+
+fn rst_to_peer(inout t: Tcb, seq: u32) {
+    t
+        .pending_rst = Option::Some(
+        RstSpec {
+            ips: some_ips(t.ips),
+            src_port: t.cfg.local_port,
+            dst_port: t.remote_port,
+            seq: seq,
+            ack: Option::None
+        }
+    );
+}
+
+fn on_synchronized(inout t: Tcb, now: u64, seg0: Seg, in bytes: Slice[u8], inout ring: Slice[u8])
+    -> RecvOut {
+    let mut seg = seg0;
+    let f = seg.h.flags;
+    let is_rst = has(f, rst_bit());
+
+    // RFC 7323 §3.2 and §5.3 (PAWS).
+    if t.ts_ok && !is_rst {
+        match seg.h.options.timestamps {
+            Option::None => {
+                t.stats.paws_dropped = wrapping_add(t.stats.paws_dropped, 1);
+                return no_recv();
+            },
+            Option::Some(ts) => {
+                if t.ts_recent_valid && sn_lt(ts.val, t.ts_recent) {
+                    t.stats.paws_dropped = wrapping_add(t.stats.paws_dropped, 1);
+                    t.ack_now = true;
+                    return no_recv();
+                }
+            },
+        }
+    }
+
+    // Duplicate SYN while our SYN,ACK is unacknowledged: resend it.
+    if t
+        .st
+        == State::SynReceived
+        && has(f, syn_bit())
+        && !has(f, ack_bit())
+        && !is_rst
+        && seg
+        .h
+        .seq
+        == t
+        .rcv_isn {
+        mark_first_lost(inout t);
+        return no_recv();
+    }
+
+    // First: sequence-number acceptability (RFC 9293 §3.10.7.4).
+    let seg_len = segment_seq_len(f, seg.pay_len);
+    let rcv_wnd = recv_window(in t);
+    let nxt = seqmap_seq(t.rcv_isn, t.rcv_nxt);
+    let hi = sn_add(nxt, rcv_wnd);
+    let acceptable = if seg_len == 0 {
+        if rcv_wnd == 0 {
+            seg.h.seq == nxt
+        } else {
+            sn_in_window(seg.h.seq, nxt, hi)
+        }
+    } else if rcv_wnd == 0 {
+        false
+    } else {
+        sn_in_window(seg.h.seq, nxt, hi)
+            || sn_in_window(sn_add(seg.h.seq, wrapping_sub(seg_len, 1)), nxt, hi)
+    };
+    if !acceptable {
+        if is_rst {
+            return no_recv();
+        }
+        t.ack_now = true;
+        if t.st == State::TimeWait && has(f, fin_bit()) {
+            t.time_wait_deadline = Option::Some(sat_add64(now, t.cfg.time_wait_ns));
+        }
+        // Zero window: still honour valid ACK/RST information.
+        if rcv_wnd == 0 && seg.h.seq == nxt {
+            seg.pay_len = 0;
+            seg.h.flags = seg.h.flags & ~(fin_bit() | syn_bit());
+        } else {
+            return no_recv();
+        }
+    }
+
+    // RFC 7323 §4.3: update TS.Recent.
+    if t.ts_ok {
+        match seg.h.options.timestamps {
+            Option::Some(ts) => {
+                let last = seqmap_seq(t.rcv_isn, t.last_ack_sent);
+                if sn_le(seg.h.seq, last) && (!t.ts_recent_valid || sn_ge(ts.val, t.ts_recent)) {
+                    t.ts_recent = ts.val;
+                    t.ts_recent_valid = true;
+                }
+            },
+            Option::None => (),
+        }
+    }
+
+    // Second: RST (RFC 5961 §3.2).
+    if is_rst {
+        if seg.h.seq == nxt {
+            let s = t.st;
+            if s == State::SynReceived && t.passive {
+                let iss_base = t.iss_base;
+                reset_tcb(inout t);
+                t.iss_base = iss_base;
+                t.passive = true;
+                t.st = State::Listen;
+            } else if s == State::SynReceived {
+                enter_closed(inout t, Option::Some(CloseReason::Refused));
+            } else if s
+                == State::Established
+                || s
+                == State::FinWait1
+                || s
+                == State::FinWait2
+                || s
+                == State::CloseWait {
+                enter_closed(inout t, Option::Some(CloseReason::Reset));
+            } else {
+                enter_closed(inout t, Option::None);
+            }
+        } else {
+            challenge_ack(inout t, now);
+        }
+        return no_recv();
+    }
+
+    // Fourth: SYN in a synchronized state (RFC 5961 §4.2).
+    if has(seg.h.flags, syn_bit()) {
+        challenge_ack(inout t, now);
+        return no_recv();
+    }
+
+    // Fifth: ACK.
+    if !has(f, ack_bit()) {
+        return no_recv();
+    }
+    let una = seqmap_seq(t.snd_isn, t.snd_una);
+    let snd_nxt = seqmap_seq(t.snd_isn, t.snd_nxt);
+    if sn_gt(seg.h.ack, snd_nxt) {
+        if t.st == State::SynReceived {
+            rst_to_peer(inout t, seg.h.ack);
+        } else {
+            t.ack_now = true;
+        }
+        return no_recv();
+    }
+    let zero: u32 = 0;
+    if sn_lt(seg.h.ack, sn_add(una, wrapping_sub(zero, t.max_snd_wnd))) {
+        challenge_ack(inout t, now);
+        return no_recv();
+    }
+    if t.st == State::SynReceived {
+        if sn_lt(una, seg.h.ack) && sn_le(seg.h.ack, snd_nxt) {
+            t.snd_wnd = shl32(widen_u32(seg.h.window), widen_u64(t.snd_wscale));
+            t.max_snd_wnd = max32(t.max_snd_wnd, t.snd_wnd);
+            t.snd_wl1 = seg.h.seq;
+            t.snd_wl2 = seg.h.ack;
+            enter_established(inout t);
+        } else {
+            rst_to_peer(inout t, seg.h.ack);
+            return no_recv();
+        }
+    }
+    if t.st != State::TimeWait {
+        handle_ack(inout t, now, seg);
+    }
+    if t.st == State::FinWait1 {
+        if fin_acked(in t) {
+            t.st = State::FinWait2;
+        }
+    } else if t.st == State::Closing {
+        if fin_acked(in t) {
+            enter_time_wait(inout t, now);
+        } else {
+            return no_recv();
+        }
+    } else if t.st == State::LastAck {
+        if fin_acked(in t) {
+            enter_closed(inout t, Option::None);
+            return no_recv();
+        }
+    }
+
+    // Sixth: URG (recorded; data is delivered inline).
+    let s = t.st;
+    let urgent_ok = has(f, urg_bit())
+        && (s == State::Established || s == State::FinWait1 || s == State::FinWait2);
+    if urgent_ok {
+        match seqmap_abs(t.rcv_isn, t.rcv_nxt, sn_add(seg.h.seq, widen_u32(seg.h.urgent))) {
+            Option::Some(abs) => {
+                let off = sat_sub64(abs, 1);
+                t.urgent_off = match t.urgent_off {
+                    Option::Some(u) => Option::Some(max64(u, off)),
+                    Option::None => Option::Some(off),
+                };
+            },
+            Option::None => (),
+        }
+    }
+
+    // Seventh and eighth: text and FIN.
+    let mut rec = accept_text(inout t, now, seg, in bytes, inout ring);
+    let fin = process_fin(inout t, now, seg);
+    rec.fin = rec.fin || fin;
+    if !rec.fin {
+        let at_fin = match t.ooo_fin {
+            Option::Some(p) => p == t.rcv_nxt,
+            Option::None => false,
+        };
+        if at_fin {
+            rec.fin = consume_fin(inout t, now);
+        }
+    }
+    rec
+}
+
+fn opt_eq(a: Option[u64], b: u64) -> bool {
+    match a {
+        Option::Some(v) => v == b,
+        Option::None => false,
+    }
+}
+
+// Cumulative acknowledgment up to `ack_abs` (> snd_una).
+fn advance_una(inout t: Tcb, now: u64, ack_abs: u64) {
+    if ack_abs <= t.snd_una {
+        return;
+    }
+    let mut sample: Option[u64] = Option::None;
+    loop {
+        if t.sent_len == 0 {
+            break;
+        }
+        let front = sq_get(in t, 0);
+        if front.end <= ack_abs {
+            if opt_eq(t.timed, front.pn) {
+                if front.retransmits == 0 {
+                    sample = Option::Some(sat_sub64(now, front.sent_ns));
+                }
+                t.timed = Option::None;
+            }
+            // Remove first so the event reports post-ACK bytes in flight.
+            sq_pop_front(inout t);
+            if !front.sacked {
+                report_acked(inout t, now, front, seg_bytes(front));
+            }
+        } else if front.start < ack_abs {
+            // Partial acknowledgment of a segment.
+            let part = wrapping_u32(wrapping_sub(ack_abs, front.start));
+            let mut cut = front;
+            cut.start = ack_abs;
+            sq_set(inout t, 0, cut);
+            if !front.sacked {
+                report_acked(inout t, now, front, part);
+            }
+            break;
+        } else {
+            break;
+        }
+    }
+    t.snd_una = ack_abs;
+    match t.timed {
+        Option::Some(p) => {
+            let mut found = false;
+            for i in 0..t.sent_len {
+                if sq_get(in t, i).pn == p {
+                    found = true;
+                }
+            }
+            if !found {
+                t.timed = Option::None;
+            }
+        },
+        Option::None => (),
+    }
+    match sample {
+        Option::Some(r) => {
+            rtt_sample(inout t.rtt, r);
+            let s = RttSample {
+                latest_ns: t.rtt.latest_ns,
+                min_ns: t.rtt.min_ns,
+                smoothed_ns: t.rtt.srtt_ns,
+                ack_delay_ns: 0
+            };
+            cc_cmd(inout t, CcCmd::Rtt(s));
+        },
+        Option::None => (),
+    }
+    t.retries = 0;
+    t.rto_deadline = if t.sent_len == 0 {
+        Option::None
+    } else {
+        Option::Some(sat_add64(now, rtt_rto_ns(t.rtt)))
+    };
+}
+
+fn report_acked(inout t: Tcb, now: u64, s: SentSeg, bytes: u32) {
+    let packet = AckedPacket {
+        pn: s.pn,
+        sent_ns: s.sent_ns,
+        bytes: bytes
+    };
+    let bytes_in_flight = pipe(in t);
+    cc_event(
+        inout t,
+        CongestionEvent::Acked {
+            packet: packet,
+            bytes_in_flight: bytes_in_flight
+        },
+        now
+    );
+}
+
+fn mark_lost(inout t: Tcb, now: u64, i: u64) {
+    let s = sq_get(in t, i);
+    if s.lost || s.sacked {
+        return;
+    }
+    let bytes_in_flight = pipe(in t);
+    let mut e = s;
+    e.lost = true;
+    sq_set(inout t, i, e);
+    let packet = LostPacket {
+        pn: s.pn,
+        sent_ns: s.sent_ns,
+        bytes: seg_bytes(s)
+    };
+    cc_event(
+        inout t,
+        CongestionEvent::Lost {
+            packet: packet,
+            bytes_in_flight: bytes_in_flight
+        },
+        now
+    );
+}
+
+fn enter_recovery(inout t: Tcb) {
+    if !is_some(t.recovery_point) {
+        t.recovery_point = Option::Some(t.snd_nxt);
+        t.stats.recoveries = wrapping_add(t.stats.recoveries, 1);
+        t.force_retx = true;
+    }
+}

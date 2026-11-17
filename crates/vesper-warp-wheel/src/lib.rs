@@ -33,16 +33,54 @@
 //! assert!(wheel.is_empty());
 //! ```
 //!
+//! # Two builds
+//!
+//! The crate is being ported to Vesper (port wave P1 lane 3, #900). By
+//! default the Rust implementation in `src/reference/` runs. With the
+//! `vesper-port` feature, the same public API forwards to the Vesper build
+//! of the files in `vesper/src/` through the generated `port/binding.rs`: Vesper
+//! keeps the scheduling state and entry indices, and the thin wrappers in
+//! `src/port/` keep the payloads (a token slab), feed returned sequences to
+//! the `drain` sinks and keep the virtual clock's value.
+//!
 //! This crate is a software scheduling model. It makes no claim about kernel
 //! timers, NIC launch-time (EDT/`SO_TXTIME`) offload or interrupt-free pacing.
 
-#![forbid(unsafe_code)]
+// The only unsafe code is the generated binding's FFI calls (Vesper build).
+#![cfg_attr(not(feature = "vesper-port"), forbid(unsafe_code))]
+#![cfg_attr(feature = "vesper-port", deny(unsafe_code))]
 #![warn(missing_docs)]
 
 pub mod clock;
 pub mod edt;
 pub mod leases;
 pub mod wheel;
+
+// Generated and committed, kept outside src/ so formatters never reflow it
+// (see docs/maintenance/porting-a-crate.md).
+#[cfg(feature = "vesper-port")]
+#[rustfmt::skip]
+#[allow(unsafe_code, missing_docs)]
+#[path = "../port/binding.rs"]
+mod binding;
+#[cfg(feature = "vesper-port")]
+#[path = "port/slab.rs"]
+mod slab;
+
+/// Live Vesper sequence and box allocations of the Vesper build (for leak
+/// tests; the Rust allocator never sees them).
+#[cfg(feature = "vesper-port")]
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    binding::live_allocations()
+}
+
+/// Which implementation this build runs.
+pub const IMPLEMENTATION: &str = if cfg!(feature = "vesper-port") {
+    "vesper"
+} else {
+    "rust"
+};
 
 pub use clock::{Clock, ClockError, VirtualClock};
 pub use edt::{EdtLaunchQueue, Launch, SubmitError, SubmitErrorKind};

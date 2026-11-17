@@ -1,0 +1,181 @@
+pub fn segment_parse(in bytes: Slice[u8]) -> Result[Parsed, WireError] {
+    if bytes.len() < 20 {
+        return Result::Err(WireError::Truncated);
+    }
+    let header_len = wrapping_mul(widen_u64(rd8(in bytes, 12) >> 4), 4);
+    if header_len < 20 || header_len > bytes.len() {
+        return Result::Err(WireError::BadDataOffset);
+    }
+    match opts_parse_at(in bytes, 20, header_len) {
+        Result::Err(e) => Result::Err(e),
+        Result::Ok(options) => Result::Ok(
+            Parsed {
+                src_port: rd16(in bytes, 0),
+                dst_port: rd16(in bytes, 2),
+                seq: rd32(in bytes, 4),
+                ack: rd32(in bytes, 8),
+                flags: rd8(in bytes, 13),
+                window: rd16(in bytes, 14),
+                checksum: rd16(in bytes, 16),
+                urgent: rd16(in bytes, 18),
+                header_len: header_len,
+                options: options
+            }
+        ),
+    }
+}
+
+pub fn segment_seq_len(flags: u8, payload_len: u64) -> u32 {
+    let mut n = wrapping_u32(payload_len);
+    if has(flags, syn_bit()) {
+        n = wrapping_add(n, 1);
+    }
+    if has(flags, fin_bit()) {
+        n = wrapping_add(n, 1);
+    }
+    n
+}
+
+pub fn write_header(inout out: Slice[u8], h: Hdr, o: Opts) -> Result[u64, WireError] {
+    let opt_len = opts_encoded_len(o);
+    if opt_len > 40 {
+        return Result::Err(WireError::OptionsTooLong);
+    }
+    let header_len = wrapping_add(20, opt_len);
+    if out.len() < header_len {
+        return Result::Err(WireError::BufferTooSmall);
+    }
+    wr16(inout out, 0, h.src_port);
+    wr16(inout out, 2, h.dst_port);
+    wr32(inout out, 4, h.seq);
+    wr32(inout out, 8, h.ack);
+    wr8(inout out, 12, wrapping_u8(header_len / 4) << 4);
+    wr8(inout out, 13, h.flags);
+    wr16(inout out, 14, h.window);
+    wr16(inout out, 16, 0);
+    wr16(inout out, 18, h.urgent);
+    opts_put(o, inout out, 20);
+    Result::Ok(header_len)
+}
+
+pub fn ips_default_mss(ips: Ips) -> u16 {
+    match ips {
+        Ips::V4 {
+            src,
+            dst
+        }
+        => 536,
+        Ips::V6 {
+            s0,
+            s1,
+            d0,
+            d1
+        }
+        => 1220,
+    }
+}
+
+pub fn ips_reversed(ips: Ips) -> Ips {
+    match ips {
+        Ips::V4 {
+            src,
+            dst
+        }
+        => Ips::V4 {
+            src: dst,
+            dst: src
+        },
+        Ips::V6 {
+            s0,
+            s1,
+            d0,
+            d1
+        }
+        => Ips::V6 {
+            s0: d0,
+            s1: d1,
+            d0: s0,
+            d1: s1
+        },
+    }
+}
+
+fn ips_eq(a: Ips, b: Ips) -> bool {
+    match a {
+        Ips::V4 {
+            src,
+            dst
+        }
+        => match b {
+            Ips::V4 {
+                src: s2,
+                dst: d2
+            }
+            => src == s2 && dst == d2,
+            Ips::V6 {
+                s0,
+                s1,
+                d0,
+                d1
+            }
+            => false,
+        },
+        Ips::V6 {
+            s0,
+            s1,
+            d0,
+            d1
+        }
+        => match b {
+            Ips::V4 {
+                src,
+                dst
+            }
+            => false,
+            Ips::V6 {
+                s0: t0,
+                s1: t1,
+                d0: e0,
+                d1: e1
+            }
+            => s0 == t0 && s1 == t1 && d0 == e0 && d1 == e1,
+        },
+    }
+}
+
+fn words16_32(x: u32) -> u64 {
+    wrapping_add(widen_u64(x >> 16), widen_u64(x & 65535))
+}
+
+fn words16_64(x: u64) -> u64 {
+    wrapping_add(wrapping_add(x >> 48, x >> 32 & 65535), wrapping_add(x >> 16 & 65535, x & 65535))
+}
+
+// The one's-complement sum of `bytes[from..to]` as big-endian 16-bit
+// words, an odd trailing byte padded with zero (raw form: reads raise).
+fn sum_range_raw(acc: u64, in bytes: Slice[u8], from: u64, to: u64)
+    -> u64 eff [Fail[RuntimeError]] {
+    let mut a = acc;
+    let mut i = from;
+    loop {
+        if wrapping_add(i, 1) >= to {
+            break;
+        }
+        a = wrapping_add(a, widen_u64(bytes[i]) << 8 | widen_u64(bytes[wrapping_add(i, 1)]));
+        i = wrapping_add(i, 2);
+    }
+    if i < to {
+        a = wrapping_add(a, widen_u64(bytes[i]) << 8);
+    }
+    a
+}
+
+fn sum_range(acc: u64, in bytes: Slice[u8], from: u64, to: u64) -> u64 {
+    let end = min64(to, bytes.len());
+    handle Fail[RuntimeError] in {
+        sum_range_raw(acc, in bytes, from, end)
+    } with {
+        return v => v,
+        raise(e, k) => 0
+    }
+}

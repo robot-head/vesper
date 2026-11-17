@@ -4,5 +4,19 @@ version = "0.1.0"
 edition = "2024"
 description = "Vesper Warp hierarchical hashed timing wheel, PTO lease table and EDT launch queue (design section 35)"
 publish = false
+build = "build.rs"
+
+[features]
+# Forward the public API to the Vesper build of the port in vesper/src/.
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# A deliberately wrong Vesper build: the port test run must fail.
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[dev-dependencies]
+vesper-bench = { path = "../vesper-bench" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }

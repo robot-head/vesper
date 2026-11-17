@@ -28,15 +28,24 @@ pub struct Limits {
     pub max_depth: usize,
     pub max_work: usize,
 }
+/// Default token ceiling: twice the 64k-token target file, so a whole port
+/// fits in one source file. Every token, trivia included, counts.
+pub const DEFAULT_MAX_TOKENS: usize = 128 * 1024;
+/// Work units charged per lexed token for each ordinary parser call. Parsing
+/// is linear in the token count, so the charge is too (it used to be N²).
+const PARSE_UNITS_PER_TOKEN: usize = 64;
+/// Expression-chain components the preflight accepts before refusing input
+/// that the parser's own height limit would reject anyway.
+const MAX_CHAIN: usize = 128;
 impl Default for Limits {
     fn default() -> Self {
         Self {
-            max_input_bytes: 256 * 1024,
-            max_output_bytes: 1024 * 1024,
-            max_tokens: 8192,
-            max_doc_nodes: 100_000,
+            max_input_bytes: 1024 * 1024,
+            max_output_bytes: 4 * 1024 * 1024,
+            max_tokens: DEFAULT_MAX_TOKENS,
+            max_doc_nodes: 1_000_000,
             max_depth: 24,
-            max_work: 128 * 1024 * 1024,
+            max_work: 512 * 1024 * 1024,
         }
     }
 }
@@ -114,22 +123,43 @@ fn guarded_lex(
     allow_macros: bool,
 ) -> Result<Vec<Token>, Error> {
     work.charge(source.len())?;
-    let (tokens, errors) = lexer::lex(source);
-    if let Some(error) = errors.first() {
+    if source.len() > lexer::HARD_SOURCE_BYTES {
+        return Err(Error::InputLimit);
+    }
+    let lexed = lexer::lex_with_limits(
+        source,
+        lexer::LexLimits {
+            max_source_bytes: lexer::HARD_SOURCE_BYTES,
+            max_tokens: lexer::HARD_TOKENS,
+            max_diagnostics: 1,
+        },
+    )
+    .map_err(|_| Error::TokenLimit)?;
+    if lexed.limit.is_some() {
+        return Err(Error::TokenLimit);
+    }
+    if let Some(error) = lexed.diagnostics.first() {
         return Err(Error::Syntax {
             offset: error.span.start,
         });
     }
-    if tokens.len() > limits.max_tokens.min(8192) {
+    let tokens = lexed.tokens;
+    if tokens.len() > limits.max_tokens.min(lexer::HARD_TOKENS) {
         return Err(Error::TokenLimit);
     }
     let mut stack = Vec::new();
     let mut path_counts = vec![0usize];
     let mut previous = None;
+    // A block closed at the current level; the next token there decides
+    // whether the chain continues (`{..} + x`, `}.f()`, `} else`) or a new
+    // item or statement starts (`} fn g()`, `} let x`).
+    let mut after_block = false;
+    let mut scopes = ScopeCopies::default();
     for token in &tokens {
         if token.kind.trivia() || token.kind == K::Eof {
             continue;
         }
+        scopes.visit(token.kind, &source[token.span.clone()], stack.len())?;
         if !allow_macros && token.kind == K::Bang && matches!(previous, Some(K::Lower | K::Upper)) {
             return Err(Error::OpaqueMacro);
         }
@@ -141,6 +171,9 @@ fn guarded_lex(
         // into one parent component. Child commas/semicolons cannot reset an
         // ancestor's expression chain (e.g. f(1,2)+f(1,2)+...).
         let counter = path_counts.last_mut().ok_or(Error::Conservation)?;
+        if std::mem::take(&mut after_block) && !continues_chain(token.kind, text) {
+            *counter = 0;
+        }
         if matches!(token.kind, K::Semi | K::Comma) {
             *counter = 0;
         } else {
@@ -150,7 +183,7 @@ fn guarded_lex(
             .iter()
             .try_fold(0usize, |n, count| n.checked_add(*count))
             .ok_or(Error::Overflow)?
-            > 128
+            > MAX_CHAIN
         {
             return Err(Error::DepthLimit);
         }
@@ -177,24 +210,111 @@ fn guarded_lex(
                 if stack.is_empty() {
                     path_counts[0] = 0;
                 }
+                after_block = token.kind == K::RBrace;
             }
             _ => {}
         }
+        if stack.is_empty() && matches!(token.kind, K::RBrace | K::Semi) {
+            scopes.end_item()?;
+        }
         previous = Some(token.kind);
     }
+    scopes.flush()?;
     if !stack.is_empty() {
         return Err(Error::Syntax {
             offset: source.len(),
         });
     }
-    // Conservative deterministic preflight work units for existing parser calls.
+    // Deterministic preflight work units for the parser call that follows:
+    // linear per token, plus its scope-set copies (see `ScopeCopies`).
     work.charge(
         tokens
             .len()
-            .checked_mul(tokens.len())
+            .checked_mul(PARSE_UNITS_PER_TOKEN)
+            .ok_or(Error::Overflow)?,
+    )?;
+    work.charge(
+        scopes
+            .total
+            .checked_mul(SCOPE_COPY_UNITS)
             .ok_or(Error::Overflow)?,
     )?;
     Ok(tokens)
+}
+/// Work units per copied binding name in the parser's scope sets.
+const SCOPE_COPY_UNITS: usize = 4;
+/// An upper bound on the parser's scope-set copies. The parser clones the
+/// set of bound names on entry to every function, block, `for`, match arm,
+/// closure and handler clause, and that set grows with each binding of the
+/// enclosing function, so one function with thousands of block-initialized
+/// locals costs quadratic time. Per function (a top-level function, or a
+/// method of a top-level `impl`/`trait`/`model` block, whose scope is
+/// restored when it ends), copy sites times identifier tokens bounds it.
+/// Ordinary functions are small, so this stays near-linear for real files.
+#[derive(Default)]
+struct ScopeCopies {
+    sites: usize,
+    names: usize,
+    total: usize,
+    /// The current top-level item is a function, so a `fn` one level down is
+    /// nested in its body and still sees its bindings.
+    in_function: bool,
+}
+impl ScopeCopies {
+    fn visit(&mut self, kind: K, text: &str, depth: usize) -> Result<(), Error> {
+        if kind == K::Fn && (depth == 0 || depth == 1 && !self.in_function) {
+            self.flush()?;
+            self.in_function |= depth == 0;
+        }
+        let site = matches!(kind, K::Fn | K::LBrace | K::FatArrow | K::Pipe)
+            || kind == K::Lower && matches!(text, "for" | "handle" | "match");
+        if site {
+            self.sites = self.sites.checked_add(1).ok_or(Error::Overflow)?;
+        }
+        if kind == K::Lower {
+            self.names = self.names.checked_add(1).ok_or(Error::Overflow)?;
+        }
+        Ok(())
+    }
+    fn end_item(&mut self) -> Result<(), Error> {
+        self.in_function = false;
+        self.flush()
+    }
+    fn flush(&mut self) -> Result<(), Error> {
+        let copies = self.sites.checked_mul(self.names).ok_or(Error::Overflow)?;
+        self.total = self.total.checked_add(copies).ok_or(Error::Overflow)?;
+        self.sites = 0;
+        self.names = 0;
+        Ok(())
+    }
+}
+/// Whether a token right after a closing `}` extends the same expression, so
+/// the preflight keeps counting its chain. Anything else starts a new item or
+/// statement. Unknown cases count as continuations, which only refuses more.
+fn continues_chain(kind: K, text: &str) -> bool {
+    is_binary_operator(kind)
+        || matches!(
+            kind,
+            K::Dot
+                | K::Question
+                | K::Else
+                | K::With
+                | K::LParen
+                | K::LBracket
+                | K::DotDot
+                | K::DotDotEq
+                | K::Eq
+                | K::PlusEq
+                | K::MinusEq
+                | K::StarEq
+                | K::SlashEq
+                | K::PercentEq
+                | K::Arrow
+                | K::FatArrow
+                | K::Colon
+                | K::ColonColon
+        )
+        || text == "as"
 }
 pub(crate) struct ModelCapture<'a> {
     pub(crate) limits: ProofLimits,
@@ -215,7 +335,15 @@ fn once(
     let syntax = if macros {
         macro_source::syntax(source, &tokens, limits, work)?
     } else {
-        let parsed = parser::parse(source);
+        let parsed = parser::parse_with_limits(
+            source,
+            parser::ParseLimits {
+                max_source_bytes: lexer::HARD_SOURCE_BYTES,
+                max_tokens: lexer::HARD_TOKENS,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| Error::TokenLimit)?;
         if let Some(error) = parsed.diagnostics.first() {
             return Err(Error::Syntax {
                 offset: error.span.start,

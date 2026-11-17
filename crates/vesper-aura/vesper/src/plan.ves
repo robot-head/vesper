@@ -1,0 +1,557 @@
+// plan.rs: the mounted state and reconciliation.
+use self::codes::{
+    b_patches,
+    max_u64,
+    none_id
+};
+use self::{
+    MNode,
+    MProp,
+    MSub,
+    Mounted,
+    Op,
+    Prepared,
+    Tree,
+    ViewFault
+};
+use self::util::{
+    add,
+    dec,
+    find_key,
+    inc,
+    insert_at,
+    mnode,
+    mprop,
+    msub,
+    op,
+    position,
+    remove_at,
+    seq_byte,
+    seq_u64,
+    sort_by_key,
+    tnode,
+    tprop,
+    tsub
+};
+use self::view::{
+    tree_find,
+    tree_new
+};
+
+pub fn mounted_new() -> Mounted {
+    Mounted {
+        present: false,
+        nodes: ChunkSeq::new[MNode](),
+        props: ChunkSeq::new[MProp](),
+        subs: ChunkSeq::new[MSub](),
+        kids: ChunkSeq::new[u64](),
+        text: ChunkSeq::new[u8](),
+        keys: ChunkSeq::new[u64](),
+        sorted: ChunkSeq::new[u64](),
+        tmp: ChunkSeq::new[u64]()
+    }
+}
+
+pub fn mounted_find(in m: Mounted, key: u64) -> u64 {
+    if m.present {
+        find_key(in m.keys, in m.sorted, key)
+    } else {
+        none_id()
+    }
+}
+
+// The property `property` of mounted node `n`, as an index into `props`.
+pub fn mounted_prop(in m: Mounted, n: MNode, property: u64) -> u64 {
+    for j in 0..n.pcount {
+        if mprop(in m.props, add(n.pstart, j)).property == property {
+            return add(n.pstart, j);
+        }
+    }
+    none_id()
+}
+
+pub fn mounted_sub(in m: Mounted, n: MNode, event: u64) -> u64 {
+    for j in 0..n.scount {
+        if msub(in m.subs, add(n.sstart, j)).event == event {
+            return add(n.sstart, j);
+        }
+    }
+    none_id()
+}
+
+pub fn copy_mounted(in src: Mounted, inout dst: Mounted) {
+    dst.present = src.present;
+    dst.nodes.clear();
+    dst.props.clear();
+    dst.subs.clear();
+    dst.kids.clear();
+    dst.text.clear();
+    dst.keys.clear();
+    dst.sorted.clear();
+    for i in 0..src.nodes.len() {
+        dst.nodes.push(mnode(in src.nodes, i));
+    }
+    for i in 0..src.props.len() {
+        dst.props.push(mprop(in src.props, i));
+    }
+    for i in 0..src.subs.len() {
+        dst.subs.push(msub(in src.subs, i));
+    }
+    for i in 0..src.kids.len() {
+        dst.kids.push(seq_u64(in src.kids, i));
+    }
+    for i in 0..src.text.len() {
+        match src.text.try_get(i) {
+            Option::Some(b) => dst.text.push(b),
+            Option::None => (),
+        }
+    }
+    for i in 0..src.keys.len() {
+        dst.keys.push(seq_u64(in src.keys, i));
+    }
+    for i in 0..src.sorted.len() {
+        dst.sorted.push(seq_u64(in src.sorted, i));
+    }
+}
+
+// Whether mounted property `a` of `old` holds the same value as `b` of `new`.
+pub fn same_value(in old: Mounted, a: MProp, in new: Mounted, b: MProp) -> bool {
+    if a.tag != b.tag {
+        false
+    } else if a.tag != 0 {
+        a.payload == b.payload
+    } else if a.tlen != b.tlen {
+        false
+    } else {
+        let mut i: u64 = 0;
+        loop {
+            if i >= a.tlen {
+                break true;
+            }
+            if seq_byte(in old.text, add(a.tstart, i)) != seq_byte(in new.text, add(b.tstart, i)) {
+                break false;
+            }
+            i = inc(i);
+        }
+    }
+}
+
+pub fn prepared_empty(session: u64, base: u64, serial: u64) -> Prepared {
+    Prepared {
+        fault: Option::None,
+        session: session,
+        base: base,
+        next: base,
+        serial: serial,
+        ops: ChunkSeq::new[Op](),
+        tree: tree_new(),
+        m: mounted_new(),
+        prev: ChunkSeq::new[u64](),
+        succ: ChunkSeq::new[u64](),
+        cur: ChunkSeq::new[u64](),
+        cur_start: ChunkSeq::new[u64](),
+        cur_len: ChunkSeq::new[u64](),
+        work: ChunkSeq::new[u64]()
+    }
+}
+
+// Ids::next: hand out the counter, failing once it would overflow.
+pub fn next_id(inout p: Prepared) -> Option[u64] {
+    let n = p.serial;
+    if n == max_u64() {
+        Option::None
+    } else {
+        p.serial = inc(n);
+        Option::Some(n)
+    }
+}
+
+// Push one patch, or record the patch budget failure and answer false.
+pub fn emit(inout p: Prepared, max: u64, o: Op) -> bool {
+    if p.ops.len() >= max {
+        p.fault = Option::Some(ViewFault::Budget(b_patches()));
+        false
+    } else {
+        p.ops.push(o);
+        true
+    }
+}
+
+pub fn exhausted(inout p: Prepared) {
+    p.fault = Option::Some(ViewFault::IdentityExhausted);
+}
+
+// Build the next mounted state from the validated tree: retained widgets,
+// slots and subscriptions keep their identities, everything else gets a
+// fresh one, in the order plan::build hands them out. `prev` maps each new
+// node to the old node it retains (or none).
+pub fn mount_next(in old: Mounted, inout p: Prepared, in text: Slice[u8]) {
+    for oi in 0..p.tree.order.len() {
+        let ti = seq_u64(in p.tree.order, oi);
+        let tn = tnode(in p.tree.nodes, ti);
+        let found = mounted_find(in old, tn.key);
+        let retained = found != none_id() && mnode(in old.nodes, found).kind == tn.kind;
+        let prev = if retained {
+            found
+        } else {
+            none_id()
+        };
+        let pn = mnode(in old.nodes, prev);
+        let id = if retained {
+            pn.id
+        } else {
+            match next_id(inout p) {
+                Option::Some(v) => v,
+                Option::None => {
+                    exhausted(inout p);
+                    return;
+                },
+            }
+        };
+        let pstart = p.m.props.len();
+        for j in 0..tn.pcount {
+            let tp = tprop(in p.tree.props, add(tn.pstart, j));
+            let old_prop = if retained {
+                mounted_prop(in old, pn, tp.property)
+            } else {
+                none_id()
+            };
+            let slot = if old_prop != none_id() {
+                mprop(in old.props, old_prop).slot
+            } else {
+                match next_id(inout p) {
+                    Option::Some(v) => v,
+                    Option::None => {
+                        exhausted(inout p);
+                        return;
+                    },
+                }
+            };
+            let tstart = p.m.text.len();
+            if tp.tag == 0 {
+                for k in 0..tp.tlen {
+                    match text.try_get(add(tp.tstart, k)) {
+                        Option::Some(b) => p.m.text.push(b),
+                        Option::None => (),
+                    }
+                }
+            }
+            p
+                .m
+                .props
+                .push(
+                MProp {
+                    property: tp.property,
+                    slot: slot,
+                    tag: tp.tag,
+                    payload: tp.payload,
+                    tstart: tstart,
+                    tlen: if tp.tag == 0 {
+                        tp.tlen
+                    } else {
+                        0
+                    }
+                }
+            );
+        }
+        let sstart = p.m.subs.len();
+        for j in 0..tn.scount {
+            let ts = tsub(in p.tree.subs, add(tn.sstart, j));
+            let old_sub = if retained {
+                mounted_sub(in old, pn, ts.event)
+            } else {
+                none_id()
+            };
+            let keep = old_sub != none_id() && msub(in old.subs, old_sub).handler == ts.handler;
+            let sid = if keep {
+                msub(in old.subs, old_sub).id
+            } else {
+                match next_id(inout p) {
+                    Option::Some(v) => v,
+                    Option::None => {
+                        exhausted(inout p);
+                        return;
+                    },
+                }
+            };
+            p
+                .m
+                .subs
+                .push(
+                MSub {
+                    event: ts.event,
+                    id: sid,
+                    handler: ts.handler
+                }
+            );
+        }
+        let cstart = p.m.kids.len();
+        for j in 0..tn.ccount {
+            p.m.kids.push(seq_u64(in p.tree.kids, add(tn.cstart, j)));
+        }
+        p
+            .m
+            .nodes
+            .push(
+            MNode {
+                key: tn.key,
+                id: id,
+                kind: tn.kind,
+                src: ti,
+                pstart: pstart,
+                pcount: tn.pcount,
+                sstart: sstart,
+                scount: tn.scount,
+                cstart: cstart,
+                ccount: tn.ccount
+            }
+        );
+        p.m.keys.push(tn.key);
+        p.m.sorted.push(oi);
+        p.prev.push(prev);
+        p.cur_start.push(0);
+        p.cur_len.push(0);
+    }
+    p.m.present = true;
+    sort_by_key(in p.m.keys, inout p.m.sorted, inout p.m.tmp);
+}
+
+// Whether `key` has a parent in the new tree and that parent is `parent_key`
+// (a key can be u64::MAX, so a missing parent is not a sentinel key).
+pub fn new_parent_is(in t: Tree, key: u64, parent_key: u64) -> bool {
+    let c = tree_find(in t, key);
+    if c == none_id() {
+        false
+    } else {
+        let parent = seq_u64(in t.parent, c);
+        parent != none_id() && tnode(in t.nodes, parent).key == parent_key
+    }
+}
+
+// Whether old node `oi` is retained, through `succ` (old index to new index).
+pub fn old_retained(in p: Prepared, oi: u64) -> bool {
+    seq_u64(in p.succ, oi) != none_id()
+}
+
+// Detach every edge not retained under the same parent, child-last per
+// node; keep the rest per new node in `cur`.
+pub fn detach(in old: Mounted, inout p: Prepared, max: u64) -> bool {
+    for oi in 0..old.nodes.len() {
+        let node = mnode(in old.nodes, oi);
+        let keep_node = old_retained(in p, oi);
+        p.work.clear();
+        for j in 0..node.ccount {
+            p.work.push(seq_u64(in old.kids, add(node.cstart, j)));
+        }
+        let mut i = node.ccount;
+        loop {
+            if i == 0 {
+                break;
+            }
+            i = dec(i);
+            let child = seq_u64(in p.work, i);
+            let ci = mounted_find(in old, child);
+            let keep = keep_node
+                && old_retained(in p, ci)
+                && new_parent_is(in p.tree, child, node.key);
+            if !keep {
+                if !emit(inout p, max, op(8, node.id, mnode(in old.nodes, ci).id, i, 0)) {
+                    return false;
+                }
+                remove_at(inout p.work, i);
+            }
+        }
+        if keep_node {
+            let nj = seq_u64(in p.succ, oi);
+            p.cur_start.try_set(nj, p.cur.len());
+            p.cur_len.try_set(nj, p.work.len());
+            for j in 0..p.work.len() {
+                p.cur.push(seq_u64(in p.work, j));
+            }
+        }
+    }
+    true
+}
+
+// Disconnect, unbind and destroy, child-first.
+pub fn teardown(in old: Mounted, inout p: Prepared, max: u64) -> bool {
+    let mut oi = old.nodes.len();
+    loop {
+        if oi == 0 {
+            break;
+        }
+        oi = dec(oi);
+        let node = mnode(in old.nodes, oi);
+        let nj = mounted_find(in p.m, node.key);
+        let next = mnode(in p.m.nodes, nj);
+        for j in 0..node.scount {
+            let s = msub(in old.subs, add(node.sstart, j));
+            let keep = if nj == none_id() {
+                false
+            } else {
+                let k = mounted_sub(in p.m, next, s.event);
+                k != none_id() && msub(in p.m.subs, k).id == s.id
+            };
+            if !keep {
+                if !emit(inout p, max, op(7, s.id, 0, 0, 0)) {
+                    return false;
+                }
+            }
+        }
+        for j in 0..node.pcount {
+            let s = mprop(in old.props, add(node.pstart, j));
+            let keep = if nj == none_id() {
+                false
+            } else {
+                let k = mounted_prop(in p.m, next, s.property);
+                k != none_id() && mprop(in p.m.props, k).slot == s.slot
+            };
+            if !keep {
+                if !emit(inout p, max, op(5, node.id, s.property, s.slot, 0)) {
+                    return false;
+                }
+            }
+        }
+        if !old_retained(in p, oi) {
+            if !emit(inout p, max, op(2, node.id, 0, 0, 0)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+// Create new widgets, bind or update slots, subscribe, in pre-order.
+pub fn create(in old: Mounted, inout p: Prepared, max: u64) -> bool {
+    for nj in 0..p.m.nodes.len() {
+        let node = mnode(in p.m.nodes, nj);
+        let prev = seq_u64(in p.prev, nj);
+        let pn = mnode(in old.nodes, prev);
+        if prev == none_id() {
+            if !emit(inout p, max, op(1, node.id, node.kind, 0, 0)) {
+                return false;
+            }
+        }
+        for j in 0..node.pcount {
+            let s = mprop(in p.m.props, add(node.pstart, j));
+            let k = if prev == none_id() {
+                none_id()
+            } else {
+                mounted_prop(in old, pn, s.property)
+            };
+            if k == none_id() {
+                if !emit(inout p, max, op(3, node.id, s.property, s.slot, node.src)) {
+                    return false;
+                }
+            } else if !same_value(in old, mprop(in old.props, k), in p.m, s) {
+                if !emit(inout p, max, op(4, s.slot, s.property, 0, node.src)) {
+                    return false;
+                }
+            }
+        }
+        for j in 0..node.scount {
+            let s = msub(in p.m.subs, add(node.sstart, j));
+            let keep = if prev == none_id() {
+                false
+            } else {
+                let k = mounted_sub(in old, pn, s.event);
+                k != none_id() && msub(in old.subs, k).id == s.id
+            };
+            if !keep {
+                if !emit(inout p, max, op(6, node.id, s.event, s.handler, s.id)) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+// Attach and reorder children: moves for retained edges, inserts for new.
+pub fn attach(inout p: Prepared, max: u64) -> bool {
+    for nj in 0..p.m.nodes.len() {
+        let node = mnode(in p.m.nodes, nj);
+        p.work.clear();
+        let start = seq_u64(in p.cur_start, nj);
+        for j in 0..seq_u64(in p.cur_len, nj) {
+            p.work.push(seq_u64(in p.cur, add(start, j)));
+        }
+        for index in 0..node.ccount {
+            let child = seq_u64(in p.m.kids, add(node.cstart, index));
+            let here = index < p.work.len() && seq_u64(in p.work, index) == child;
+            if !here {
+                let child_id = mnode(in p.m.nodes, mounted_find(in p.m, child)).id;
+                let from = position(in p.work, child);
+                if from != none_id() {
+                    if !emit(inout p, max, op(10, node.id, child_id, from, index)) {
+                        return false;
+                    }
+                    remove_at(inout p.work, from);
+                    insert_at(inout p.work, index, child);
+                } else {
+                    if !emit(inout p, max, op(9, node.id, child_id, index, 0)) {
+                        return false;
+                    }
+                    insert_at(inout p.work, index, child);
+                }
+            }
+        }
+    }
+    true
+}
+
+// plan::build: the sparse patch plan from `old` to the validated tree in
+// `p.tree` (or to nothing), in the same safe application order.
+pub fn plan(in old: Mounted, inout p: Prepared, has_tree: bool, in text: Slice[u8], max: u64) {
+    if has_tree {
+        mount_next(in old, inout p, in text);
+        match p.fault {
+            Option::Some(_) => {
+                return;
+            },
+            Option::None => (),
+        }
+    }
+    for oi in 0..old.nodes.len() {
+        let node = mnode(in old.nodes, oi);
+        let nj = mounted_find(in p.m, node.key);
+        let same = nj != none_id() && mnode(in p.m.nodes, nj).kind == node.kind;
+        p
+            .succ
+            .push(
+            if same {
+                nj
+            } else {
+                none_id()
+            }
+        );
+    }
+    let old_root = mnode(in old.nodes, 0).id;
+    let new_root = mnode(in p.m.nodes, 0).id;
+    if old.present && (!has_tree || old_root != new_root) {
+        if !emit(inout p, max, op(0, 0, 0, 0, 0)) {
+            return;
+        }
+    }
+    if old.present {
+        if !detach(in old, inout p, max) {
+            return;
+        }
+        if !teardown(in old, inout p, max) {
+            return;
+        }
+    }
+    if has_tree {
+        if !create(in old, inout p, max) {
+            return;
+        }
+        if !attach(inout p, max) {
+            return;
+        }
+        if !old.present || new_root != old_root {
+            if !emit(inout p, max, op(0, 1, new_root, 0, 0)) {
+                return;
+            }
+        }
+    }
+}

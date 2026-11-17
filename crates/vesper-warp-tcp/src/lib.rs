@@ -16,7 +16,8 @@
 //! claim with real stacks: the harness validates this implementation against
 //! itself and hand-built fixtures only.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "vesper-port"), forbid(unsafe_code))]
+#![cfg_attr(feature = "vesper-port", deny(unsafe_code))]
 #![warn(missing_docs)]
 
 pub mod cc;
@@ -25,6 +26,14 @@ pub mod harness;
 pub mod rtt;
 pub mod seq;
 pub mod wire;
+
+/// The Vesper build: every function forwards to the Vesper library `tcp`
+/// (`vesper/*.ves`).
+#[cfg(feature = "vesper-port")]
+mod ported;
+/// The Rust implementation, built without `vesper-port`.
+#[cfg(not(feature = "vesper-port"))]
+mod reference;
 
 pub use cc::{CongestionController, CongestionEvent, NewReno};
 pub use conn::{

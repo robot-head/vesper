@@ -1,0 +1,26 @@
+// ---------------------------------------------------------------------------
+// The virtual clock's checks (the Rust `VirtualClock` keeps the value).
+
+pub fn clock_advance_to(now_ns: u64, requested_ns: u64) -> u64 eff [Fail[ClockError]] {
+    if requested_ns < now_ns {
+        Fail::raise(
+            ClockError::Backwards {
+                now_ns: now_ns,
+                requested_ns: requested_ns
+            }
+        )
+    } else if requested_ns > max_time_ns() {
+        Fail::raise(ClockError::OutOfRange)
+    } else {
+        requested_ns
+    }
+}
+
+pub fn clock_advance_by(now_ns: u64, delta_ns: u64) -> u64 eff [Fail[ClockError]] {
+    let next = wrapping_add(now_ns, delta_ns);
+    if next < now_ns {
+        Fail::raise(ClockError::OutOfRange)
+    } else {
+        clock_advance_to(now_ns, next)
+    }
+}

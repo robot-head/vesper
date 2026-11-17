@@ -1,3 +1,134 @@
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_port_object")
 
+# The Rust build (default features), with its tests.
 vesper_crate()
+
+# The Vesper library `tcp`: the files of vesper/ concatenated in this order
+# (`PARTS` in build.rs), each followed by a newline.
+TCP_PARTS = [
+    "int",
+    "seq",
+    "rtt",
+    "cc",
+    "wire",
+    "options",
+    "segment",
+    "checksum",
+    "conn",
+    "conn_user",
+    "conn_helpers",
+    "conn_input",
+    "conn_ack",
+    "conn_text",
+    "conn_timers",
+    "conn_transmit",
+    "conn_emit",
+]
+
+genrule(
+    name = "tcp_source",
+    srcs = ["vesper/%s.ves" % part for part in TCP_PARTS],
+    outs = ["tcp.ves"],
+    cmd = "(" + " ".join([
+        "cat $(location vesper/%s.ves); echo;" % part
+        for part in TCP_PARTS
+    ]) + ") > $@",
+)
+
+# The Vesper build (port wave P1 lane 11, #908): the same API forwarding to
+# the library through the committed binding, every test run unchanged
+# against it.
+vesper_port_object(
+    name = "tcp_vesper",
+    src = ":tcp_source",
+    library = "tcp",
+    target = VESPER_TARGET,
+)
+
+# The divergence check: the edits of DIVERGENT_EDITS in build.rs, one wrong
+# line per ported module (seq, rtt, cc, wire, conn).
+vesper_port_object(
+    name = "tcp_vesper_divergent",
+    src = ":tcp_source",
+    edits = {
+        "    sn_diff(a, b) >= 0\n": "    sn_diff(a, b) > 0\n",
+        "        e.rttvar_ns = r_ns / 2;\n": "        e.rttvar_ns = r_ns;\n",
+        "    cc.ssthresh = max32(cc.cwnd / 2, wrapping_mul(cc.mss, 2));\n    cc.cwnd = cc.ssthresh;": "    cc.ssthresh = max32(cc.cwnd / 2, cc.mss);\n    cc.cwnd = cc.ssthresh;",
+        "        a = wrapping_add(a, widen_u64(bytes[i]) << 8);\n": "        a = wrapping_add(a, 0);\n",
+        "fn dup_thresh() -> u32 {\n    3\n}": "fn dup_thresh() -> u32 {\n    2\n}",
+    },
+    library = "tcp",
+    target = VESPER_TARGET,
+)
+
+rust_library(
+    name = "port",
+    srcs = glob(["src/**/*.rs"]) + ["port/binding.rs"],
+    crate_features = ["vesper-port"],
+    crate_name = "vesper_warp_tcp",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    deps = ["//crates/vesper-port-abi"],
+)
+
+[
+    rust_test(
+        name = "port_%s_test" % test,
+        srcs = ["tests/%s.rs" % test] + (["tests/common/mod.rs"] if common else []),
+        compile_data = [":tcp_vesper"] + (["fixtures/tcp_fixtures.pcap"] if data else []),
+        crate_features = ["vesper-port"],
+        crate_name = test,
+        crate_root = "tests/%s.rs" % test,
+        edition = "2024",
+        rustc_flags = ["-Clink-arg=$(location :tcp_vesper)"],
+        deps = [":port"] + (["//crates/vesper-ffi"] if test == "ffi_layout" else []),
+    )
+    for test, common, data in [
+        ("alloc", False, False),
+        ("controller", True, False),
+        ("ffi_layout", False, True),
+        ("fixtures", False, True),
+        ("malformed", True, False),
+        ("state_machine", True, False),
+        ("transfer", True, False),
+        ("units", False, False),
+    ]
+]
+
+[
+    rust_test(
+        name = "_port_%s_divergent.bin" % test,
+        srcs = ["tests/%s.rs" % test] + (["tests/common/mod.rs"] if common else []),
+        compile_data = [":tcp_vesper_divergent"] + (["fixtures/tcp_fixtures.pcap"] if data else []),
+        crate_features = ["vesper-port"],
+        crate_name = test + "_divergent",
+        crate_root = "tests/%s.rs" % test,
+        edition = "2024",
+        rustc_flags = ["-Clink-arg=$(location :tcp_vesper_divergent)"],
+        tags = ["manual"],
+        deps = [":port"],
+    )
+    for test, common, data in [
+        ("units", False, False),
+        ("fixtures", False, True),
+        ("state_machine", True, False),
+    ]
+]
+
+rust_test(
+    name = "port_divergence_detected",
+    srcs = ["tests/divergence.rs"],
+    data = [
+        ":_port_fixtures_divergent.bin",
+        ":_port_state_machine_divergent.bin",
+        ":_port_units_divergent.bin",
+    ],
+    edition = "2024",
+    env = {
+        "VESPER_TCP_DIVERGENT_FIXTURES": "$(rootpath :_port_fixtures_divergent.bin)",
+        "VESPER_TCP_DIVERGENT_STATE_MACHINE": "$(rootpath :_port_state_machine_divergent.bin)",
+        "VESPER_TCP_DIVERGENT_UNITS": "$(rootpath :_port_units_divergent.bin)",
+    },
+)

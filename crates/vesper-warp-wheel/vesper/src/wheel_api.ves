@@ -1,0 +1,71 @@
+// The exported wheel. The Rust `Wheel<T>` checks the wheel identity of a
+// handle and keeps the payloads; `(index, generation)` is the rest of the
+// handle.
+
+pub fn wheel_core_new(config: WheelConfig) -> WheelCore eff [Fail[WheelConfigError]] {
+    match config_error(config) {
+        Option::Some(e) => Fail::raise(e),
+        Option::None => build_wheel(config),
+    }
+}
+
+pub fn wheel_core_len(in w: WheelCore) -> u64 {
+    w.len
+}
+
+pub fn wheel_core_capacity(in w: WheelCore) -> u64 {
+    w.capacity
+}
+
+pub fn wheel_core_tick_ns(in w: WheelCore) -> u64 {
+    w.tick_ns
+}
+
+pub fn wheel_core_now_ns(in w: WheelCore) -> u64 {
+    w.now_ns
+}
+
+pub fn wheel_core_insert(inout w: WheelCore, deadline_ns: u64)
+    -> Result[(u64, u64), InsertErrorKind] {
+    w.insert(deadline_ns)
+}
+
+pub fn wheel_core_deadline(in w: WheelCore, index: u64, generation: u64)
+    -> u64 eff [Fail[HandleError]] {
+    match w.check(index, generation) {
+        Option::Some(e) => Fail::raise(e),
+        Option::None => w.deadline_of(index),
+    }
+}
+
+pub fn wheel_core_cancel(inout w: WheelCore, index: u64, generation: u64) -> Option[HandleError] {
+    match w.check(index, generation) {
+        Option::Some(e) => Option::Some(e),
+        Option::None => {
+            w.unlink(index);
+            w.release(index);
+            Option::None
+        },
+    }
+}
+
+pub fn wheel_core_advance(inout w: WheelCore, now_ns: u64) -> Option[AdvanceError] {
+    w.advance(now_ns)
+}
+
+// Advance, then the earliest due entry as `(deadline, index)`.
+pub fn wheel_core_poll(inout w: WheelCore, now_ns: u64)
+    -> Result[Option[(u64, u64)], AdvanceError] {
+    match w.advance(now_ns) {
+        Option::Some(e) => Result::Err(e),
+        Option::None => Result::Ok(w.pop_due()),
+    }
+}
+
+pub fn wheel_core_next_wake_hint_ns(in w: WheelCore) -> Option[u64] {
+    w.next_wake_hint()
+}
+
+pub fn wheel_core_drain(inout w: WheelCore) -> ChunkSeq[u64] {
+    w.drain()
+}

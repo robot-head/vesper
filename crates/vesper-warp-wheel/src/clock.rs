@@ -16,7 +16,7 @@ pub trait Clock {
 /// A manually advanced, strictly monotonic (non-decreasing) virtual clock.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VirtualClock {
-    now_ns: u64,
+    pub(crate) now_ns: u64,
 }
 
 /// Rejected virtual-clock movement.
@@ -56,30 +56,6 @@ impl VirtualClock {
     pub const fn starting_at(start_ns: u64) -> Self {
         Self { now_ns: start_ns }
     }
-
-    /// Move to an absolute time; earlier times are rejected.
-    pub fn advance_to(&mut self, now_ns: u64) -> Result<u64, ClockError> {
-        if now_ns < self.now_ns {
-            return Err(ClockError::Backwards {
-                now_ns: self.now_ns,
-                requested_ns: now_ns,
-            });
-        }
-        if now_ns > crate::MAX_TIME_NS {
-            return Err(ClockError::OutOfRange);
-        }
-        self.now_ns = now_ns;
-        Ok(now_ns)
-    }
-
-    /// Move forward by `delta_ns` with checked arithmetic.
-    pub fn advance_by(&mut self, delta_ns: u64) -> Result<u64, ClockError> {
-        let next = self
-            .now_ns
-            .checked_add(delta_ns)
-            .ok_or(ClockError::OutOfRange)?;
-        self.advance_to(next)
-    }
 }
 
 impl Clock for VirtualClock {
@@ -87,3 +63,12 @@ impl Clock for VirtualClock {
         self.now_ns
     }
 }
+
+// The Rust build (the frozen reference) or the Vesper build (forwarding the
+// checks to the Vesper port in vesper/src/). Either adds `advance_to` and `advance_by`.
+#[cfg(not(feature = "vesper-port"))]
+#[path = "reference/clock.rs"]
+mod imp;
+#[cfg(feature = "vesper-port")]
+#[path = "port/clock.rs"]
+mod imp;

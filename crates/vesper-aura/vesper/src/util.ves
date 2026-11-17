@@ -1,0 +1,405 @@
+// Sequence, sort, search and text helpers.
+use self::codes::{
+    none_id
+};
+use self::{
+    Lim,
+    MNode,
+    MProp,
+    MSub,
+    Op,
+    TNode,
+    TProp,
+    TSub
+};
+
+pub fn get_u64(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn seq_u64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => none_id(),
+    }
+}
+
+pub fn seq_bool(in s: ChunkSeq[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+pub fn byte_at(in s: Slice[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+pub fn seq_byte(in s: ChunkSeq[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+pub fn add(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b)
+}
+
+pub fn inc(a: u64) -> u64 {
+    wrapping_add(a, 1)
+}
+
+pub fn dec(a: u64) -> u64 {
+    wrapping_sub(a, 1)
+}
+
+pub fn op(tag: u64, a: u64, b: u64, c: u64, d: u64) -> Op {
+    Op {
+        tag: tag,
+        a: a,
+        b: b,
+        c: c,
+        d: d
+    }
+}
+
+pub fn tnode(in s: ChunkSeq[TNode], i: u64) -> TNode {
+    match s.try_get(i) {
+        Option::Some(n) => n,
+        Option::None => TNode {
+            key: 0,
+            kind: 0,
+            pstart: 0,
+            pcount: 0,
+            sstart: 0,
+            scount: 0,
+            cstart: 0,
+            ccount: 0
+        },
+    }
+}
+
+pub fn tprop(in s: ChunkSeq[TProp], i: u64) -> TProp {
+    match s.try_get(i) {
+        Option::Some(p) => p,
+        Option::None => TProp {
+            property: 0,
+            tag: 0,
+            payload: 0,
+            tstart: 0,
+            tlen: 0
+        },
+    }
+}
+
+pub fn tsub(in s: ChunkSeq[TSub], i: u64) -> TSub {
+    match s.try_get(i) {
+        Option::Some(p) => p,
+        Option::None => TSub {
+            event: 0,
+            handler: 0
+        },
+    }
+}
+
+pub fn mnode(in s: ChunkSeq[MNode], i: u64) -> MNode {
+    match s.try_get(i) {
+        Option::Some(n) => n,
+        Option::None => MNode {
+            key: 0,
+            id: 0,
+            kind: 0,
+            src: 0,
+            pstart: 0,
+            pcount: 0,
+            sstart: 0,
+            scount: 0,
+            cstart: 0,
+            ccount: 0
+        },
+    }
+}
+
+pub fn mprop(in s: ChunkSeq[MProp], i: u64) -> MProp {
+    match s.try_get(i) {
+        Option::Some(p) => p,
+        Option::None => MProp {
+            property: 0,
+            slot: 0,
+            tag: 0,
+            payload: 0,
+            tstart: 0,
+            tlen: 0
+        },
+    }
+}
+
+pub fn msub(in s: ChunkSeq[MSub], i: u64) -> MSub {
+    match s.try_get(i) {
+        Option::Some(p) => p,
+        Option::None => MSub {
+            event: 0,
+            id: 0,
+            handler: 0
+        },
+    }
+}
+
+pub fn limits_from(in w: Slice[u64]) -> Lim {
+    Lim {
+        nodes: get_u64(in w, 0),
+        children: get_u64(in w, 1),
+        depth: get_u64(in w, 2),
+        properties: get_u64(in w, 3),
+        subscriptions: get_u64(in w, 4),
+        text: get_u64(in w, 5),
+        total: get_u64(in w, 6),
+        patches: get_u64(in w, 7)
+    }
+}
+
+pub fn lim_ok(lim: Lim) -> bool {
+    lim.nodes != 0 && lim.depth != 0 && lim.patches != 0
+}
+
+// Limits::check, for Session::new.
+pub fn do_limits_valid(in limits: Slice[u64]) -> bool {
+    lim_ok(limits_from(in limits))
+}
+
+// Remove `s[i]`, keeping the order of the rest.
+pub fn remove_at(inout s: ChunkSeq[u64], i: u64) {
+    let n = s.len();
+    if i < n {
+        let mut j = i;
+        loop {
+            if inc(j) >= n {
+                break;
+            }
+            let v = match s.try_get(inc(j)) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            s.try_set(j, v);
+            j = inc(j);
+        }
+        s.truncate(dec(n));
+    }
+}
+
+// Insert `v` before `s[i]` (or at the end when `i` is the length).
+pub fn insert_at(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    let n = s.len();
+    s.push(v);
+    if i < n {
+        let mut j = n;
+        loop {
+            if j <= i {
+                break;
+            }
+            let w = match s.try_get(dec(j)) {
+                Option::Some(w) => w,
+                Option::None => 0,
+            };
+            s.try_set(j, w);
+            j = dec(j);
+        }
+        s.try_set(i, v);
+    }
+}
+
+// The first position of `v` in `s`, or none.
+pub fn position(in s: ChunkSeq[u64], v: u64) -> u64 {
+    for i in 0..s.len() {
+        if seq_u64(in s, i) == v {
+            return i;
+        }
+    }
+    none_id()
+}
+
+// Stable bottom-up merge sort of the indices `idx` by `keys[idx[i]]`.
+pub fn sort_by_key(in keys: ChunkSeq[u64], inout idx: ChunkSeq[u64], inout tmp: ChunkSeq[u64]) {
+    let n = idx.len();
+    tmp.clear();
+    for i in 0..n {
+        tmp.push(0);
+    }
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = if add(lo, width) < n {
+                add(lo, width)
+            } else {
+                n
+            };
+            let hi = if add(mid, width) < n {
+                add(mid, width)
+            } else {
+                n
+            };
+            let mut a = lo;
+            let mut b = mid;
+            let mut k = lo;
+            loop {
+                if k >= hi {
+                    break;
+                }
+                let take_a = if a < mid {
+                    if b < hi {
+                        seq_u64(in keys, seq_u64(in idx, a)) <= seq_u64(in keys, seq_u64(in idx, b))
+                    } else {
+                        true
+                    }
+                } else {
+                    false
+                };
+                if take_a {
+                    tmp.try_set(k, seq_u64(in idx, a));
+                    a = inc(a);
+                } else {
+                    tmp.try_set(k, seq_u64(in idx, b));
+                    b = inc(b);
+                }
+                k = inc(k);
+            }
+            lo = hi;
+        }
+        for i in 0..n {
+            idx.try_set(i, seq_u64(in tmp, i));
+        }
+        width = wrapping_mul(width, 2);
+    }
+}
+
+// The index whose key is `key`, by binary search over `sorted`; the first
+// such index when keys repeat. None when absent.
+pub fn find_key(in keys: ChunkSeq[u64], in sorted: ChunkSeq[u64], key: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = sorted.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = add(lo, wrapping_sub(hi, lo) / 2);
+        if seq_u64(in keys, seq_u64(in sorted, mid)) < key {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    if lo < sorted.len() {
+        let i = seq_u64(in sorted, lo);
+        if seq_u64(in keys, i) == key {
+            return i;
+        }
+    }
+    none_id()
+}
+
+// Whether a Unicode scalar is White_Space (Rust's char::is_whitespace).
+pub fn is_space(c: u64) -> bool {
+    (c >= 9 && c <= 13)
+        || c
+        == 32
+        || c
+        == 133
+        || c
+        == 160
+        || c
+        == 5760
+        || (c >= 8192 && c <= 8202)
+        || c
+        == 8232
+        || c
+        == 8233
+        || c
+        == 8239
+        || c
+        == 8287
+        || c
+        == 12288
+}
+
+// The width of the UTF-8 sequence that starts with byte `b`.
+pub fn utf8_width(b: u64) -> u64 {
+    if b < 128 {
+        1
+    } else if b < 224 {
+        2
+    } else if b < 240 {
+        3
+    } else {
+        4
+    }
+}
+
+// Whether the UTF-8 text `bytes[start .. start + len]` is empty after
+// trimming White_Space (Rust's `str::trim().is_empty()`). The text came
+// from a Rust `String`, so it is valid UTF-8.
+pub fn blank_slice(in bytes: Slice[u8], start: u64, len: u64) -> bool {
+    let end = add(start, len);
+    let mut i = start;
+    loop {
+        if i >= end {
+            break true;
+        }
+        let b = byte_at(in bytes, i);
+        let w = utf8_width(b);
+        let c = if w == 1 {
+            b
+        } else if w == 2 {
+            ((b & 31) << 6) | (byte_at(in bytes, inc(i)) & 63)
+        } else if w == 3 {
+            ((b & 15) << 12) | ((byte_at(in bytes, inc(i)) & 63) << 6) | (
+                byte_at(in bytes, add(i, 2)) & 63
+            )
+        } else {
+            ((b & 7) << 18) | ((byte_at(in bytes, inc(i)) & 63) << 12) | (
+                (byte_at(in bytes, add(i, 2)) & 63) << 6
+            ) | (byte_at(in bytes, add(i, 3)) & 63)
+        };
+        if !is_space(c) {
+            break false;
+        }
+        i = add(i, w);
+    }
+}
+
+pub fn blank_seq(in bytes: ChunkSeq[u8], start: u64, len: u64) -> bool {
+    blank_slice(in bytes.as_slice(), start, len)
+}
+
+// view::property_valid. `payload` is an Int's bits.
+pub fn property_valid(kind: u64, property: u64, tag: u64, payload: u64) -> bool {
+    if property == 0 && tag == 0 {
+        kind != 0
+    } else if property == 1 && tag == 0 {
+        kind == 3
+    } else if (property == 2 || property == 3) && tag == 1 {
+        true
+    } else if property == 4 && tag == 2 {
+        payload < 9223372036854775808
+    } else {
+        false
+    }
+}
+
+// view::event_valid.
+pub fn event_valid(kind: u64, event: u64) -> bool {
+    (kind == 2 && (event == 0 || event == 2)) || (kind == 3 && (event == 1 || event == 2))
+}

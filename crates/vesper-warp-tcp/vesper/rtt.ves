@@ -1,0 +1,90 @@
+// ---------------------------------------------------------------------
+// rtt.rs: RFC 6298 retransmission-timeout estimation
+// ---------------------------------------------------------------------
+
+copy struct RtoConfig {
+    initial_ns: u64,
+    min_ns: u64,
+    max_ns: u64,
+    granularity_ns: u64
+}
+
+copy struct RttEstimator {
+    cfg: RtoConfig,
+    srtt_ns: u64,
+    rttvar_ns: u64,
+    min_ns: u64,
+    latest_ns: u64,
+    has_sample: bool,
+    backoff_shift: u32
+}
+
+pub fn rtt_new(cfg: RtoConfig) -> RttEstimator {
+    RttEstimator {
+        cfg: cfg,
+        srtt_ns: 0,
+        rttvar_ns: 0,
+        min_ns: max_u64(),
+        latest_ns: 0,
+        has_sample: false,
+        backoff_shift: 0
+    }
+}
+
+pub fn rtt_sample(inout e: RttEstimator, r_ns: u64) {
+    e.latest_ns = r_ns;
+    e.min_ns = min64(e.min_ns, r_ns);
+    if e.has_sample {
+        let err = if e.srtt_ns > r_ns {
+            wrapping_sub(e.srtt_ns, r_ns)
+        } else {
+            wrapping_sub(r_ns, e.srtt_ns)
+        };
+        // RTTVAR = 3/4 RTTVAR + 1/4 |SRTT - R'|; SRTT = 7/8 SRTT + 1/8 R'.
+        e.rttvar_ns = wrapping_add(wrapping_sub(e.rttvar_ns, e.rttvar_ns / 4), err / 4);
+        e.srtt_ns = wrapping_add(wrapping_sub(e.srtt_ns, e.srtt_ns / 8), r_ns / 8);
+    } else {
+        e.srtt_ns = r_ns;
+        e.rttvar_ns = r_ns / 2;
+        e.has_sample = true;
+    }
+    // A new sample after backoff restores the computed RTO (§5.7).
+    e.backoff_shift = 0;
+}
+
+pub fn rtt_backoff(inout e: RttEstimator) {
+    if e.backoff_shift < 32 {
+        e.backoff_shift = wrapping_add(e.backoff_shift, 1);
+    }
+}
+
+pub fn rtt_reset_backoff(inout e: RttEstimator) {
+    e.backoff_shift = 0;
+}
+
+pub fn rtt_rto_ns(e: RttEstimator) -> u64 {
+    let raw = if e.has_sample {
+        sat_add64(e.srtt_ns, max64(e.cfg.granularity_ns, sat_mul4_64(e.rttvar_ns)))
+    } else {
+        e.cfg.initial_ns
+    };
+    let base = if raw < e.cfg.min_ns {
+        e.cfg.min_ns
+    } else if raw > e.cfg.max_ns {
+        e.cfg.max_ns
+    } else {
+        raw
+    };
+    let shift = widen_u64(e.backoff_shift);
+    let shifted = if shift >= 64 {
+        max_u64()
+    } else {
+        let v = shl64(base, shift);
+        if shr64(v, shift) == base {
+            v
+        } else {
+            max_u64()
+        }
+    };
+    min64(shifted, e.cfg.max_ns)
+}

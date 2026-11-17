@@ -1,0 +1,55 @@
+// ---------------------------------------------------------------------
+// seq.rs: modular sequence arithmetic (RFC 9293 §3.4)
+// ---------------------------------------------------------------------
+
+pub fn sn_add(a: u32, n: u32) -> u32 {
+    wrapping_add(a, n)
+}
+
+pub fn sn_diff(a: u32, b: u32) -> i32 {
+    wrapping_i32(wrapping_sub(a, b))
+}
+
+pub fn sn_lt(a: u32, b: u32) -> bool {
+    sn_diff(a, b) < 0
+}
+
+pub fn sn_le(a: u32, b: u32) -> bool {
+    sn_diff(a, b) <= 0
+}
+
+pub fn sn_gt(a: u32, b: u32) -> bool {
+    sn_diff(a, b) > 0
+}
+
+pub fn sn_ge(a: u32, b: u32) -> bool {
+    sn_diff(a, b) >= 0
+}
+
+pub fn sn_in_window(s: u32, lo: u32, hi: u32) -> bool {
+    sn_le(lo, s) && sn_lt(s, hi)
+}
+
+pub fn seqmap_seq(isn: u32, abs: u64) -> u32 {
+    wrapping_add(isn, wrapping_u32(abs))
+}
+
+pub fn seqmap_abs(isn: u32, reference: u64, s: u32) -> Option[u64] {
+    let delta: i64 = widen_i64(sn_diff(s, seqmap_seq(isn, reference)));
+    let zero: i64 = 0;
+    if delta >= zero {
+        let up = wrapping_add(reference, wrapping_u64(delta));
+        if up < reference {
+            Option::None
+        } else {
+            Option::Some(up)
+        }
+    } else {
+        let down = wrapping_u64(wrapping_sub(zero, delta));
+        if down > reference {
+            Option::None
+        } else {
+            Option::Some(wrapping_sub(reference, down))
+        }
+    }
+}

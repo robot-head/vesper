@@ -1,0 +1,89 @@
+// Vesper port of vesper-warp-wheel (port wave P1 lane 3, #900): the
+// hierarchical hashed timing wheel (src/reference/wheel.rs), the PTO lease
+// table (src/reference/leases.rs), the EDT launch queue
+// (src/reference/edt.rs) and the virtual clock's checks
+// (src/reference/clock.rs).
+//
+// Generic payloads use the token-slab pattern: Vesper keeps only entry
+// indices and the scheduling state, and the Rust wrappers in src/port/ keep
+// the payloads in a slab indexed by the entry index. Sink closures become
+// returned sequences that the wrappers feed to the sink in order. Every
+// operation takes `now` from the caller; nothing here reads a clock.
+//
+// The port is one library in several files, joined in the order of PARTS
+// in build.rs (types, util, wheel, wheel_lists, wheel_api, leases, edt,
+// clock). This file holds the types that cross the boundary.
+//
+// All storage is allocated by the constructors. No other function grows a
+// sequence, except `drain` and `discard_space`, which return their results.
+
+// ---------------------------------------------------------------------------
+// Types shared with the Rust crate (same names, fields and variants).
+
+copy struct WheelConfig {
+    tick_ns: u64,
+    slot_bits: u8,
+    levels: u8,
+    capacity: u32,
+    start_ns: u64
+}
+
+copy enum WheelConfigError {
+    ZeroTick,
+    SlotBits(u8),
+    Levels(u8),
+    Capacity(u32),
+    StartOutOfRange
+}
+
+copy enum InsertErrorKind {
+    Full,
+    DeadlineOutOfRange
+}
+
+copy enum HandleError {
+    Foreign,
+    Stale
+}
+
+copy enum AdvanceError {
+    Backwards {
+        now_ns: u64,
+        requested_ns: u64
+    },
+    OutOfRange
+}
+
+copy enum ClockError {
+    Backwards {
+        now_ns: u64,
+        requested_ns: u64
+    },
+    OutOfRange
+}
+
+copy enum PacketNumberSpace {
+    Initial,
+    Handshake,
+    ApplicationData
+}
+
+copy enum ParkErrorKind {
+    PacketNumberOutOfRange,
+    Duplicate,
+    Full,
+    DeadlineOutOfRange
+}
+
+copy enum LeaseError {
+    NotOutstanding,
+    DeadlineOutOfRange
+}
+
+copy enum SubmitErrorKind {
+    BeyondHorizon,
+    BehindReleased,
+    ClockBackwards,
+    OutOfRange,
+    Full
+}

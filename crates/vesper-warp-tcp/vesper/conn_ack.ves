@@ -1,0 +1,132 @@
+fn handle_ack(inout t: Tcb, now: u64, seg: Seg) {
+    let ack_abs = match seqmap_abs(t.snd_isn, t.snd_una, seg.h.ack) {
+        Option::Some(a) => min64(a, t.snd_nxt),
+        Option::None => {
+            return;
+        },
+    };
+    let new_wnd = shl32(widen_u32(seg.h.window), widen_u64(t.snd_wscale));
+    let old_wnd = t.snd_wnd;
+    let prev_una = t.snd_una;
+
+    // Duplicate-ACK test (RFC 5681 §2) before the window update.
+    let is_dup = ack_abs
+        == prev_una
+        && seg
+        .pay_len
+        == 0
+        && !has(seg.h.flags, syn_bit())
+        && !has(seg.h.flags, fin_bit())
+        && new_wnd
+        == old_wnd
+        && t
+        .sent_len
+        > 0;
+
+    // Window update (RFC 9293 §3.10.7.4, SND.WL1/WL2).
+    if sn_lt(t.snd_wl1, seg.h.seq) || (t.snd_wl1 == seg.h.seq && sn_le(t.snd_wl2, seg.h.ack)) {
+        t.snd_wnd = new_wnd;
+        t.max_snd_wnd = max32(t.max_snd_wnd, new_wnd);
+        t.snd_wl1 = seg.h.seq;
+        t.snd_wl2 = seg.h.ack;
+        if old_wnd == 0 && new_wnd > 0 {
+            t.persist_deadline = Option::None;
+            t.persist_backoff = 0;
+            t.probe_due = false;
+        }
+    }
+
+    if ack_abs > prev_una {
+        advance_una(inout t, now, ack_abs);
+        match t.recovery_point {
+            Option::Some(rp) => {
+                if t.snd_una >= rp {
+                    t.recovery_point = Option::None;
+                    t.dupacks = 0;
+                    for i in 0..t.sent_len {
+                        let mut e = sq_get(in t, i);
+                        e.rexmit_in_recovery = false;
+                        sq_set(inout t, i, e);
+                    }
+                } else if !t.sack_ok && t.sent_len > 0 {
+                    // RFC 6582 partial ACK: retransmit the next hole.
+                    t.dupacks = 0;
+                    mark_lost(inout t, now, 0);
+                    t.force_retx = true;
+                }
+            },
+            Option::None => {
+                t.dupacks = 0;
+            },
+        }
+    } else if is_dup {
+        t.dupacks = sat_add32(t.dupacks, 1);
+        t.stats.dup_acks = wrapping_add(t.stats.dup_acks, 1);
+    }
+
+    if t.sack_ok {
+        apply_sack(inout t, now, seg.h.options);
+        scoreboard_losses(inout t, now);
+    }
+    if t.dupacks >= dup_thresh() && !is_some(t.recovery_point) && t.sent_len > 0 {
+        mark_lost(inout t, now, 0);
+        enter_recovery(inout t);
+    }
+}
+
+fn apply_sack(inout t: Tcb, now: u64, opts: Opts) {
+    for k in 0..sack_count(opts) {
+        let b = opts_blk(opts, k);
+        match seqmap_abs(t.snd_isn, t.snd_una, b.left) {
+            Option::Some(l) => match seqmap_abs(t.snd_isn, t.snd_una, b.right) {
+                Option::Some(r) => {
+                    // Ignore blocks outside SND.UNA..SND.NXT (incl. D-SACK).
+                    if !(l <= t.snd_una || r > t.snd_nxt || l >= r) {
+                        for i in 0..t.sent_len {
+                            let s = sq_get(in t, i);
+                            if s.start >= r {
+                                break;
+                            }
+                            if s.start >= l && s.end <= r && !s.sacked {
+                                let mut e = s;
+                                e.sacked = true;
+                                e.lost = false;
+                                sq_set(inout t, i, e);
+                                report_acked(inout t, now, s, seg_bytes(s));
+                            }
+                        }
+                    }
+                },
+                Option::None => (),
+            },
+            Option::None => (),
+        }
+    }
+}
+
+// RFC 6675 IsLost over the scoreboard (single reverse pass).
+fn scoreboard_losses(inout t: Tcb, now: u64) {
+    let mut sacked_count: u32 = 0;
+    let mut sacked_bytes: u64 = 0;
+    let mut any = false;
+    let limit = wrapping_mul(widen_u64(wrapping_sub(dup_thresh(), 1)), widen_u64(t.smss));
+    let n = t.sent_len;
+    for j in 0..n {
+        let i = wrapping_sub(wrapping_sub(n, 1), j);
+        let s = sq_get(in t, i);
+        if s.sacked {
+            sacked_count = wrapping_add(sacked_count, 1);
+            sacked_bytes = wrapping_add(sacked_bytes, widen_u64(seg_bytes(s)));
+        } else if !s
+            .lost
+            && !s
+            .rexmit_in_recovery
+            && (sacked_count >= dup_thresh() || sacked_bytes > limit) {
+            mark_lost(inout t, now, i);
+            any = true;
+        }
+    }
+    if any {
+        enter_recovery(inout t);
+    }
+}

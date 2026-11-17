@@ -1,0 +1,280 @@
+// view.rs: decoding and validating an input tree.
+use self::codes::{
+    b_children,
+    b_depth,
+    b_nodes,
+    b_properties,
+    b_subscriptions,
+    b_teardown,
+    b_text,
+    b_total_text,
+    max_u64,
+    none_id
+};
+use self::plan::{
+    teardown
+};
+use self::{
+    Lim,
+    TNode,
+    TProp,
+    TSub,
+    Tree,
+    ViewFault
+};
+use self::util::{
+    add,
+    dec,
+    event_valid,
+    find_key,
+    get_u64,
+    inc,
+    lim_ok,
+    property_valid,
+    seq_bool,
+    seq_u64,
+    sort_by_key,
+    tnode,
+    tprop,
+    tsub
+};
+
+pub fn tree_new() -> Tree {
+    Tree {
+        root: 0,
+        nodes: ChunkSeq::new[TNode](),
+        props: ChunkSeq::new[TProp](),
+        subs: ChunkSeq::new[TSub](),
+        kids: ChunkSeq::new[u64](),
+        keys: ChunkSeq::new[u64](),
+        sorted: ChunkSeq::new[u64](),
+        tmp: ChunkSeq::new[u64](),
+        parent: ChunkSeq::new[u64](),
+        order: ChunkSeq::new[u64](),
+        seen: ChunkSeq::new[bool](),
+        stack: ChunkSeq::new[u64](),
+        depths: ChunkSeq::new[u64]()
+    }
+}
+
+// Decode the wrapper's words: `root, n`, then per node `key, kind, np, ns,
+// nc`, `np` properties of five words (property, tag, payload, text start,
+// text length), `ns` subscriptions of two words (event, handler) and `nc`
+// child keys.
+pub fn decode(inout t: Tree, in w: Slice[u64]) {
+    t.root = get_u64(in w, 0);
+    let n = get_u64(in w, 1);
+    let mut at: u64 = 2;
+    for i in 0..n {
+        let key = get_u64(in w, at);
+        let kind = get_u64(in w, inc(at));
+        let np = get_u64(in w, add(at, 2));
+        let ns = get_u64(in w, add(at, 3));
+        let nc = get_u64(in w, add(at, 4));
+        at = add(at, 5);
+        let node = TNode {
+            key: key,
+            kind: kind,
+            pstart: t.props.len(),
+            pcount: np,
+            sstart: t.subs.len(),
+            scount: ns,
+            cstart: t.kids.len(),
+            ccount: nc
+        };
+        for j in 0..np {
+            t
+                .props
+                .push(
+                TProp {
+                    property: get_u64(in w, at),
+                    tag: get_u64(in w, inc(at)),
+                    payload: get_u64(in w, add(at, 2)),
+                    tstart: get_u64(in w, add(at, 3)),
+                    tlen: get_u64(in w, add(at, 4))
+                }
+            );
+            at = add(at, 5);
+        }
+        for j in 0..ns {
+            t
+                .subs
+                .push(
+                TSub {
+                    event: get_u64(in w, at),
+                    handler: get_u64(in w, inc(at))
+                }
+            );
+            at = add(at, 2);
+        }
+        for j in 0..nc {
+            t.kids.push(get_u64(in w, at));
+            at = inc(at);
+        }
+        t.nodes.push(node);
+        t.keys.push(key);
+        t.sorted.push(i);
+        t.parent.push(none_id());
+        t.seen.push(false);
+    }
+}
+
+pub fn tree_find(in t: Tree, key: u64) -> u64 {
+    find_key(in t.keys, in t.sorted, key)
+}
+
+// view::validate over a decoded tree, with the same order of checks, so the
+// first error is the same one. Fills `parent` and `order`.
+pub fn validate(inout t: Tree, lim: Lim, in text: Slice[u8]) -> Option[ViewFault] {
+    if !lim_ok(lim) {
+        return Option::Some(ViewFault::InvalidLimits);
+    }
+    let n = t.nodes.len();
+    if n > lim.nodes {
+        return Option::Some(ViewFault::Budget(b_nodes()));
+    }
+    sort_by_key(in t.keys, inout t.sorted, inout t.tmp);
+    // dup[i]: an earlier node has the same key (the sort is stable).
+    t.tmp.clear();
+    for i in 0..n {
+        t.tmp.push(0);
+    }
+    for r in 0..n {
+        if r > 0 {
+            let i = seq_u64(in t.sorted, r);
+            let j = seq_u64(in t.sorted, dec(r));
+            if seq_u64(in t.keys, i) == seq_u64(in t.keys, j) {
+                t.tmp.try_set(i, 1);
+            }
+        }
+    }
+    let mut total: u64 = 0;
+    let mut teardown: u64 = 1;
+    for i in 0..n {
+        let node = tnode(in t.nodes, i);
+        // Every accepted tree must remain fully unmountable under the budget.
+        let more = add(add(add(1, node.pcount), node.scount), node.ccount);
+        if teardown > wrapping_sub(max_u64(), more) {
+            return Option::Some(ViewFault::Budget(b_teardown()));
+        }
+        teardown = add(teardown, more);
+        if teardown > lim.patches {
+            return Option::Some(ViewFault::Budget(b_teardown()));
+        }
+        if seq_u64(in t.tmp, i) == 1 {
+            return Option::Some(ViewFault::DuplicateKey(node.key));
+        }
+        if node.ccount > lim.children {
+            return Option::Some(ViewFault::Budget(b_children()));
+        }
+        if node.pcount > lim.properties {
+            return Option::Some(ViewFault::Budget(b_properties()));
+        }
+        if node.scount > lim.subscriptions {
+            return Option::Some(ViewFault::Budget(b_subscriptions()));
+        }
+        if node.kind != 0 && node.ccount != 0 {
+            return Option::Some(ViewFault::ChildrenOnLeaf(node.key));
+        }
+        for j in 0..node.pcount {
+            let p = tprop(in t.props, add(node.pstart, j));
+            if !property_valid(node.kind, p.property, p.tag, p.payload) {
+                return Option::Some(
+                    ViewFault::PropertyType {
+                        key: node.key,
+                        property: p.property
+                    }
+                );
+            }
+            if p.tag == 0 {
+                if p.tlen > lim.text {
+                    return Option::Some(ViewFault::Budget(b_text()));
+                }
+                if total > wrapping_sub(max_u64(), p.tlen) {
+                    return Option::Some(ViewFault::Budget(b_total_text()));
+                }
+                total = add(total, p.tlen);
+                if total > lim.total {
+                    return Option::Some(ViewFault::Budget(b_total_text()));
+                }
+            }
+        }
+        for j in 0..node.scount {
+            let s = tsub(in t.subs, add(node.sstart, j));
+            if !event_valid(node.kind, s.event) {
+                return Option::Some(
+                    ViewFault::UnsupportedEvent {
+                        key: node.key,
+                        event: s.event
+                    }
+                );
+            }
+        }
+    }
+    let root = tree_find(in t, t.root);
+    if root == none_id() {
+        return Option::Some(ViewFault::MissingRoot(t.root));
+    }
+    for i in 0..n {
+        let node = tnode(in t.nodes, i);
+        for j in 0..node.ccount {
+            let child = seq_u64(in t.kids, add(node.cstart, j));
+            let c = tree_find(in t, child);
+            if c == none_id() {
+                return Option::Some(
+                    ViewFault::MissingChild {
+                        parent: node.key,
+                        child: child
+                    }
+                );
+            }
+            if seq_u64(in t.parent, c) != none_id() {
+                return Option::Some(ViewFault::MultipleParents(child));
+            }
+            t.parent.try_set(c, i);
+        }
+    }
+    if seq_u64(in t.parent, root) != none_id() {
+        return Option::Some(ViewFault::RootHasParent);
+    }
+    t.stack.clear();
+    t.depths.clear();
+    t.stack.push(root);
+    t.depths.push(1);
+    let mut seen: u64 = 0;
+    loop {
+        let top = t.stack.len();
+        if top == 0 {
+            break;
+        }
+        let i = seq_u64(in t.stack, dec(top));
+        let depth = seq_u64(in t.depths, dec(top));
+        t.stack.truncate(dec(top));
+        t.depths.truncate(dec(top));
+        if depth > lim.depth {
+            return Option::Some(ViewFault::Budget(b_depth()));
+        }
+        if seq_bool(in t.seen, i) {
+            return Option::Some(ViewFault::CycleOrDisconnected);
+        }
+        t.seen.try_set(i, true);
+        seen = inc(seen);
+        t.order.push(i);
+        let node = tnode(in t.nodes, i);
+        let mut j = node.ccount;
+        loop {
+            if j == 0 {
+                break;
+            }
+            j = dec(j);
+            let child = seq_u64(in t.kids, add(node.cstart, j));
+            let c = tree_find(in t, child);
+            t.stack.push(c);
+            t.depths.push(inc(depth));
+        }
+    }
+    if seen != n {
+        return Option::Some(ViewFault::CycleOrDisconnected);
+    }
+    Option::None
+}

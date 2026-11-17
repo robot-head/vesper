@@ -1,0 +1,303 @@
+// The wheel's list and cascade operations (the second half of
+// `impl WheelCore`; see wheel.ves).
+
+impl WheelCore {
+    // Place a detached entry relative to the cursor.
+    fn place(inout self, index: u64) {
+        let tick = at(in self.e_tick.as_slice(), index);
+        if tick < self.cursor {
+            self.insert_ready_sorted(index);
+            return;
+        }
+        let diff = tick ^ self.cursor;
+        let level = if diff == 0 {
+            0
+        } else {
+            div(high_bit(diff), self.slot_bits)
+        };
+        if level >= self.levels {
+            self.overflow_min_tick = min(self.overflow_min_tick, tick);
+            let list = self.overflow_list();
+            self.push_back(list, index);
+            return;
+        }
+        let slot = shr(tick, wrapping_mul(level, self.slot_bits)) & self.slot_mask();
+        let bits = at(in self.occupied.as_slice(), level);
+        self.occupied.try_set(level, bits | shl(1, slot));
+        let list = wrapping_add(wrapping_mul(level, self.slots), slot);
+        self.push_back(list, index);
+    }
+
+    fn push_back(inout self, list: u64, index: u64) {
+        let tail = self.tail_of(list);
+        self.e_prev.try_set(index, tail);
+        self.e_next.try_set(index, nil());
+        self.e_list.try_set(index, list);
+        if tail == nil() {
+            self.l_head.try_set(list, index);
+        } else {
+            self.e_next.try_set(tail, index);
+        }
+        self.l_tail.try_set(list, index);
+    }
+
+    fn unlink(inout self, index: u64) {
+        let prev = self.prev_of(index);
+        let next = self.next_of(index);
+        let list = at(in self.e_list.as_slice(), index);
+        if prev == nil() {
+            self.l_head.try_set(list, next);
+        } else {
+            self.e_next.try_set(prev, next);
+        }
+        if next == nil() {
+            self.l_tail.try_set(list, prev);
+        } else {
+            self.e_prev.try_set(next, prev);
+        }
+        if self.head_of(list) == nil() {
+            if list < self.overflow_list() {
+                self.clear_occupied(list);
+            } else if list == self.overflow_list() {
+                self.overflow_min_tick = u64_max();
+            }
+        }
+        self.e_prev.try_set(index, nil());
+        self.e_next.try_set(index, nil());
+    }
+
+    // Detach a whole list, returning its head (entries keep `next` links).
+    fn take_list(inout self, list: u64) -> u64 {
+        let head = self.head_of(list);
+        self.l_head.try_set(list, nil());
+        self.l_tail.try_set(list, nil());
+        self.clear_occupied(list);
+        head
+    }
+
+    // Insert into the sorted ready list, scanning from the tail. The new
+    // entry carries the newest sequence number, so it goes after every
+    // entry with a deadline `<=` its own.
+    fn insert_ready_sorted(inout self, index: u64) {
+        let list = self.ready_list();
+        let deadline = self.deadline_of(index);
+        let mut after = self.tail_of(list);
+        loop {
+            if after == nil() || self.deadline_of(after) <= deadline {
+                break;
+            }
+            after = self.prev_of(after);
+        }
+        let next = if after == nil() {
+            self.head_of(list)
+        } else {
+            self.next_of(after)
+        };
+        self.e_prev.try_set(index, after);
+        self.e_next.try_set(index, next);
+        self.e_list.try_set(index, list);
+        if after == nil() {
+            self.l_head.try_set(list, index);
+        } else {
+            self.e_next.try_set(after, index);
+        }
+        if next == nil() {
+            self.l_tail.try_set(list, index);
+        } else {
+            self.e_prev.try_set(next, index);
+        }
+    }
+
+    // Smallest tick `>= cursor` at which a cascade, overflow re-placement
+    // or level-0 opening is needed.
+    fn next_work_tick(in self) -> Option[u64] {
+        let c = self.cursor;
+        let mut best = u64_max();
+        let mut found = false;
+        for level in 0..self.levels {
+            let bitmap = at(in self.occupied.as_slice(), level);
+            if bitmap != 0 {
+                let low = wrapping_mul(level, self.slot_bits);
+                // rotation <= 63 by the configuration check.
+                let rotation = wrapping_add(low, self.slot_bits);
+                let position = shr(c, low) & self.slot_mask();
+                let base = shl(shr(c, rotation), rotation);
+                let ahead = bitmap & shl(u64_max(), position);
+                if ahead != 0 {
+                    let slot = low_bit(ahead);
+                    let t = max(wrapping_add(base, shl(slot, low)), c);
+                    if !found || t < best {
+                        best = t;
+                        found = true;
+                    }
+                } else {
+                    // Unreachable under the placement invariant (occupied
+                    // slots are never behind the cursor); handled
+                    // conservatively, as the Rust build does.
+                    let slot = low_bit(bitmap);
+                    let block = wrapping_add(base, shl(1, rotation));
+                    if block >= base {
+                        let t = wrapping_add(block, shl(slot, low));
+                        if t >= block {
+                            if !found || t < best {
+                                best = t;
+                                found = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if self.head_of(self.overflow_list()) != nil() {
+            let span = wrapping_mul(self.levels, self.slot_bits);
+            let block = shl(shr(self.overflow_min_tick, span), span);
+            let t = max(block, c);
+            if !found || t < best {
+                best = t;
+                found = true;
+            }
+        }
+        if found {
+            Option::Some(best)
+        } else {
+            Option::None
+        }
+    }
+
+    // Re-place every entry of a detached chain.
+    fn replace_chain(inout self, head: u64) {
+        let mut cur = head;
+        loop {
+            if cur == nil() {
+                break;
+            }
+            let next = self.next_of(cur);
+            self.place(cur);
+            cur = next;
+        }
+    }
+
+    // Open tick `c` (== cursor): re-place overflow if its block is reached,
+    // cascade every level whose boundary `c` is, then move the level-0 slot
+    // to the ready list in sorted order.
+    fn open_tick(inout self, c: u64) {
+        let overflow = self.overflow_list();
+        if self.head_of(overflow) != nil() {
+            let span = wrapping_mul(self.levels, self.slot_bits);
+            if c >= shl(shr(self.overflow_min_tick, span), span) {
+                self.overflow_min_tick = u64_max();
+                let head = self.take_list(overflow);
+                self.replace_chain(head);
+            }
+        }
+        let mut level = wrapping_sub(self.levels, 1);
+        loop {
+            if level < 1 {
+                break;
+            }
+            let low = wrapping_mul(level, self.slot_bits);
+            if c & wrapping_sub(shl(1, low), 1) == 0 {
+                let slot = shr(c, low) & self.slot_mask();
+                let list = wrapping_add(wrapping_mul(level, self.slots), slot);
+                let head = self.take_list(list);
+                self.replace_chain(head);
+            }
+            level = wrapping_sub(level, 1);
+        }
+        let slot = c & self.slot_mask();
+        let head = self.take_list(slot);
+        if head == nil() {
+            return;
+        }
+        let (head, tail) = self.sort_chain(head);
+        let ready = self.ready_list();
+        let ready_tail = self.tail_of(ready);
+        // Entries already on the ready list belong to earlier ticks, so the
+        // sorted chain is appended after them.
+        let mut prev = ready_tail;
+        let mut cur = head;
+        loop {
+            if cur == nil() {
+                break;
+            }
+            self.e_prev.try_set(cur, prev);
+            self.e_list.try_set(cur, ready);
+            prev = cur;
+            cur = self.next_of(cur);
+        }
+        if ready_tail == nil() {
+            self.l_head.try_set(ready, head);
+        } else {
+            self.e_next.try_set(ready_tail, head);
+        }
+        self.l_tail.try_set(ready, tail);
+    }
+
+    // Stable bottom-up merge sort of a `next`-linked chain by
+    // `(deadline, sequence)`, in place. Returns `(head, tail)`.
+    fn sort_chain(inout self, head: u64) -> (u64, u64) {
+        let mut list = head;
+        let mut width: u64 = 1;
+        loop {
+            let mut p = list;
+            list = nil();
+            let mut tail = nil();
+            let mut merges: u64 = 0;
+            loop {
+                if p == nil() {
+                    break;
+                }
+                merges = wrapping_add(merges, 1);
+                let mut q = p;
+                let mut psize: u64 = 0;
+                loop {
+                    if psize >= width || q == nil() {
+                        break;
+                    }
+                    psize = wrapping_add(psize, 1);
+                    q = self.next_of(q);
+                }
+                let mut qsize = width;
+                loop {
+                    if !(psize > 0 || (qsize > 0 && q != nil())) {
+                        break;
+                    }
+                    let take_p = if psize == 0 {
+                        false
+                    } else if qsize == 0 || q == nil() {
+                        true
+                    } else {
+                        self.key_le(p, q)
+                    };
+                    let e = if take_p {
+                        let e = p;
+                        p = self.next_of(p);
+                        psize = wrapping_sub(psize, 1);
+                        e
+                    } else {
+                        let e = q;
+                        q = self.next_of(q);
+                        qsize = wrapping_sub(qsize, 1);
+                        e
+                    };
+                    if tail == nil() {
+                        list = e;
+                    } else {
+                        self.e_next.try_set(tail, e);
+                    }
+                    tail = e;
+                }
+                p = q;
+            }
+            self.e_next.try_set(tail, nil());
+            if merges <= 1 {
+                break(list, tail);
+            }
+            width = if width > 9223372036854775807 {
+                u64_max()
+            } else {
+                wrapping_mul(width, 2)
+            };
+        }
+    }
+}

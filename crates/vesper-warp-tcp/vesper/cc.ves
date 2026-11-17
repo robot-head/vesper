@@ -1,0 +1,153 @@
+// ---------------------------------------------------------------------
+// cc.rs: the congestion-control boundary and NewReno (RFC 5681)
+// ---------------------------------------------------------------------
+
+copy struct AckedPacket {
+    pn: u64,
+    sent_ns: u64,
+    bytes: u32
+}
+
+copy struct LostPacket {
+    pn: u64,
+    sent_ns: u64,
+    bytes: u32
+}
+
+copy struct RttSample {
+    latest_ns: u64,
+    min_ns: u64,
+    smoothed_ns: u64,
+    ack_delay_ns: u64
+}
+
+copy enum CongestionEvent {
+    Acked {
+        packet: AckedPacket,
+        bytes_in_flight: u32
+    },
+    Lost {
+        packet: LostPacket,
+        bytes_in_flight: u32
+    },
+    EcnCe {
+        count: u64
+    },
+    PersistentCongestion,
+    AppLimited
+}
+
+copy struct NewReno {
+    mss: u32,
+    cwnd: u32,
+    ssthresh: u32,
+    ca_acked: u32,
+    recovery_start_ns: Option[u64],
+    srtt_ns: u64
+}
+
+pub fn newreno_new(mss: u32, initial_segments: u32) -> NewReno {
+    let m = max32(mss, 1);
+    NewReno {
+        mss: m,
+        cwnd: sat_mul32(m, max32(initial_segments, 1)),
+        ssthresh: max_u32(),
+        ca_acked: 0,
+        recovery_start_ns: Option::None,
+        srtt_ns: 0
+    }
+}
+
+pub fn newreno_set_mss(inout cc: NewReno, mss: u32, initial_segments: u32) {
+    cc.mss = max32(mss, 1);
+    cc.cwnd = sat_mul32(cc.mss, max32(initial_segments, 1));
+}
+
+fn newreno_in_recovery(cc: NewReno, sent_ns: u64) -> bool {
+    match cc.recovery_start_ns {
+        Option::Some(r) => sent_ns <= r,
+        Option::None => false,
+    }
+}
+
+fn newreno_reduce(inout cc: NewReno, now_ns: u64) {
+    cc.recovery_start_ns = Option::Some(now_ns);
+    cc.ssthresh = max32(cc.cwnd / 2, wrapping_mul(cc.mss, 2));
+    cc.cwnd = cc.ssthresh;
+    cc.ca_acked = 0;
+}
+
+pub fn newreno_on_mss(inout cc: NewReno, smss: u32) {
+    let segments = max32(div32(cc.cwnd, cc.mss), 1);
+    newreno_set_mss(inout cc, smss, segments);
+}
+
+pub fn newreno_on_rtt_sample(inout cc: NewReno, sample: RttSample) {
+    cc.srtt_ns = sample.smoothed_ns;
+}
+
+pub fn newreno_on_event(inout cc: NewReno, event: CongestionEvent, now_ns: u64) {
+    match event {
+        CongestionEvent::Acked {
+            packet,
+            bytes_in_flight
+        }
+        => {
+            if !newreno_in_recovery(cc, packet.sent_ns) {
+                if cc.cwnd < cc.ssthresh {
+                    // RFC 3465 appropriate byte counting with L = 2*SMSS.
+                    cc.cwnd = sat_add32(cc.cwnd, min32(packet.bytes, wrapping_mul(cc.mss, 2)));
+                } else {
+                    cc.ca_acked = sat_add32(cc.ca_acked, packet.bytes);
+                    if cc.ca_acked >= cc.cwnd {
+                        cc.ca_acked = wrapping_sub(cc.ca_acked, cc.cwnd);
+                        cc.cwnd = sat_add32(cc.cwnd, cc.mss);
+                    }
+                }
+            }
+        },
+        CongestionEvent::Lost {
+            packet,
+            bytes_in_flight
+        }
+        => {
+            if !newreno_in_recovery(cc, packet.sent_ns) {
+                newreno_reduce(inout cc, now_ns);
+            }
+        },
+        CongestionEvent::EcnCe {
+            count
+        }
+        => {
+            let due = match cc.recovery_start_ns {
+                Option::Some(r) => now_ns > sat_add64(r, cc.srtt_ns),
+                Option::None => true,
+            };
+            if due {
+                newreno_reduce(inout cc, now_ns);
+            }
+        },
+        CongestionEvent::PersistentCongestion => {
+            // RFC 5681 §3.1 eq. (4) and the loss window of one segment.
+            let fresh = match cc.recovery_start_ns {
+                Option::Some(r) => now_ns > r,
+                Option::None => true,
+            };
+            if fresh {
+                cc.ssthresh = max32(cc.cwnd / 2, wrapping_mul(cc.mss, 2));
+            }
+            cc.cwnd = cc.mss;
+            cc.ca_acked = 0;
+            cc.recovery_start_ns = Option::Some(now_ns);
+        },
+        CongestionEvent::AppLimited => (),
+    }
+}
+
+pub fn newreno_pacing_rate(cc: NewReno) -> u64 {
+    max_u64()
+}
+
+pub fn newreno_schedule_edt(cc: NewReno, bytes: u32, now_ns: u64) -> u64 {
+    now_ns
+}

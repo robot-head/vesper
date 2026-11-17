@@ -1,3 +1,71 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
+
+# The Rust implementation is the default build. The Vesper port (the Loom
+# package in vesper/, Cargo feature `vesper-port`) is non-default until it
+# reaches performance parity; these targets keep it and its five divergent
+# builds compiling under Bazel. scripts/test-port-harness.sh runs the tests
+# against the port and asserts which test catches each divergent edit.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "aura_vesper",
+    library = "aura",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+# The divergent builds, one per ported module (the Cargo
+# `vesper-port-divergent` feature applies the same edits from build.rs): each
+# must build from a copy of the package with its edit applied. The Cargo run
+# in scripts/test-port-harness.sh asserts which test catches each one.
+vesper_port_object(
+    name = "aura_vesper_divergent_view",
+    edit_src = "vesper/src/view.ves",
+    edits = {"if node.ccount > lim.children {": "if node.ccount > inc(lim.children) {"},
+    library = "aura",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "aura_vesper_divergent_plan",
+    edit_src = "vesper/src/plan.ves",
+    edits = {"op(10, node.id, child_id, from, index)": "op(10, node.id, child_id, index, from)"},
+    library = "aura",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "aura_vesper_divergent_session",
+    edit_src = "vesper/src/session.ves",
+    edits = {"    } else if p.base != r.revision {": "    } else if p.base == max_u64() {"},
+    library = "aura",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "aura_vesper_divergent_apply",
+    edit_src = "vesper/src/apply.ves",
+    edits = {"if has_reject && reject == i {": "if has_reject && reject == inc(i) {"},
+    library = "aura",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "aura_vesper_divergent_sim",
+    edit_src = "vesper/src/sim.ves",
+    edits = {"                if kind == 2 || kind == 3 {\n                    q.items.push(id);": "                if kind == 2 {\n                    q.items.push(id);"},
+    library = "aura",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
 
 vesper_crate()
