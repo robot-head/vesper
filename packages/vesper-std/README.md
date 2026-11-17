@@ -10,7 +10,7 @@ library half (port wave P0 lane 8, issue #897; survey in
 |---|---|---|
 | `@vesper-std/core` | `core/` | `min`, `max`, `clamp`, `swap`, `ordering_sign`, `reverse`, `then_cmp`; module `option` (`is_some`, `is_none`, `unwrap_or`, `unwrap_or_else`, `unwrap`, `map`, `map_or`, `and_then`, `or`, `filter`, `zip`, `ok_or`); module `result` (`is_ok`, `is_err`, `ok`, `err`, `unwrap_or`, `unwrap_or_else`, `map`, `map_err`, `and_then`, `or`) |
 | `@vesper-std/collections` | `collections/` | module `btree`: `CacheBTree[K, V]` ordered map (`btree_new`, `insert`, `remove`, `get`, `contains_key`, `len`, `is_empty`, `clear`) with `btree_cursor` (`first`, `last`, `nth`, `lower_bound`, `cursor_first`, `entry`, `advance`, `range_into`); module `flat_table`: `FlatTable[K, V]` hash map; module `sets`: `OrderedSet[K]`, `FlatSet[K]`; module `radix_seq`: `RadixSeq[T]` with O(1) `freeze` snapshots |
-| `@vesper-std/fmt` | `fmt/` | `write_u64`, `write_i64`, `write_hex_u64`, `write_u64_radix`, `write_bool`, `write_bytes`, `parse_u64`, `parse_i64`, `parse_u64_radix` (`ParseIntError`), `fnv1a64` |
+| `@vesper-std/fmt` | `fmt/` | `write_u64`, `write_i64`, `write_hex_u64`, `write_u64_radix`, `write_bool`, `write_bytes`, `parse_u64`, `parse_i64`, `parse_u64_radix` (`ParseIntError`), `fnv1a64`; module `text`: `push_u64`, `push_i64`, `push_hex_u64`, `push_u64_radix`, `push_bool` (append to a `String`), `u64_to_string`, `i64_to_string`, `parse_u64_str`, `parse_i64_str`, `parse_u64_radix_str` (from a `Str`) |
 | `@vesper-std/bytes` | `bytes/` | `read_u8`, `read_{u16,u32,u64,i64}_{le,be}` (an `Option`), `push_*` (append to a `ChunkSeq[u8]`), `put_*` (overwrite in a `Slice[u8]`, `false` when out of range) |
 
 `tests/` is the `@vesper-std/tests` package: unit tests for every public
@@ -61,8 +61,9 @@ them; a struct opts in with empty impls such as `impl Ord for Point {}`.
   (#886), so the packages' rows show only `Fail` where a function can fail.
 - **Inside `inout` methods** code uses `try_get`/`try_set`, because an
   abortable effect may not cross a live `inout` loan (E0402).
-- **Strings.** `fmt` writes ASCII into `ChunkSeq[u8]`. Once `String` lands
-  (#896) thin wrappers will write into it. Float formatting is follow-up work.
+- **Strings.** `fmt` writes ASCII into `ChunkSeq[u8]`; module `fmt::text`
+  wraps the same formatters and parsers for `String` and `Str` (#896). Float
+  formatting is follow-up work.
 - **Eq, Ord, Hash** are still builtin traits of the compiler.
 
 ## Tests

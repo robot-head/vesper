@@ -1,0 +1,90 @@
+// @vesper-std/fmt::text: the integer formatters and parsers over `String`
+// and `Str`. Output is ASCII, so every append keeps the `String` valid UTF-8.
+use self::{
+    ParseIntError,
+    write_u64_radix,
+    write_u64,
+    write_i64,
+    write_hex_u64,
+    write_bool,
+    parse_u64_radix,
+    parse_u64,
+    parse_i64
+};
+
+// Appends the ASCII bytes of `buf` to `s`.
+fn push_ascii(inout s: String, in buf: Slice[u8]) {
+    for i in 0..buf.len() {
+        match buf.try_get(i) {
+            Option::Some(b) => {
+                let pushed = s.push_char(widen_u32(b));
+            }
+            Option::None => {}
+        }
+    }
+}
+
+// Appends `x` in `radix` (2..=36), zero-padded to `min_digits`; nothing for
+// a radix outside that range.
+pub fn push_u64_radix(inout s: String, x: u64, radix: u64, min_digits: u64) {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    write_u64_radix(inout buf, x, radix, min_digits);
+    push_ascii(inout s, in buf.as_slice());
+}
+
+// Appends `x` in decimal.
+pub fn push_u64(inout s: String, x: u64) {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    write_u64(inout buf, x);
+    push_ascii(inout s, in buf.as_slice());
+}
+
+// Appends `x` in decimal with a leading `-` when negative.
+pub fn push_i64(inout s: String, x: i64) {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    write_i64(inout buf, x);
+    push_ascii(inout s, in buf.as_slice());
+}
+
+// Appends `x` in lower-case hexadecimal, zero-padded to `min_digits`.
+pub fn push_hex_u64(inout s: String, x: u64, min_digits: u64) {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    write_hex_u64(inout buf, x, min_digits);
+    push_ascii(inout s, in buf.as_slice());
+}
+
+// Appends `true` or `false`.
+pub fn push_bool(inout s: String, b: bool) {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    write_bool(inout buf, b);
+    push_ascii(inout s, in buf.as_slice());
+}
+
+// `x` in decimal as a new `String`.
+pub fn u64_to_string(x: u64) -> String {
+    let mut s = String::new();
+    push_u64(inout s, x);
+    s
+}
+
+// `x` in decimal as a new `String`.
+pub fn i64_to_string(x: i64) -> String {
+    let mut s = String::new();
+    push_i64(inout s, x);
+    s
+}
+
+// `parse_u64_radix` over the bytes of `s`.
+pub fn parse_u64_radix_str(in s: Str, radix: u64) -> Result[u64, ParseIntError] {
+    parse_u64_radix(in s.as_bytes(), radix)
+}
+
+// `parse_u64` over the bytes of `s`.
+pub fn parse_u64_str(in s: Str) -> Result[u64, ParseIntError] {
+    parse_u64(in s.as_bytes())
+}
+
+// `parse_i64` over the bytes of `s`.
+pub fn parse_i64_str(in s: Str) -> Result[i64, ParseIntError] {
+    parse_i64(in s.as_bytes())
+}

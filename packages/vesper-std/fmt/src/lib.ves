@@ -1,6 +1,6 @@
 // @vesper-std/fmt: integer formatting into byte buffers and integer
-// parsing from byte slices. Output is ASCII, so it is valid UTF-8 and can
-// become a `String` once strings land (port P0 lane 7, #896).
+// parsing from byte slices. Output is ASCII, so it is valid UTF-8; module
+// `text` offers the same functions over `String` and `Str`.
 
 // Why a parse failed.
 pub copy enum ParseIntError {
