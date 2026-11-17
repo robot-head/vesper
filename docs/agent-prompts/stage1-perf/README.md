@@ -44,7 +44,7 @@ Claims are #931-#937 (lane n is issue 930+n).
 
 | Lane | Prompt | Claim | Gap | Starts | Exclusive boundary |
 |---|---|---|---|---|---|
-| 1 | [Inlining and Cranelift opt level](01-inlining.md) | #931 | no inlining; Cranelift default opt level | now | NEW `src/ir_inline.rs` (+ `src/ir_inline/**`), the `optimize` branch of `compile_entry` and the Cranelift `settings::builder()` sites in `src/native*.rs`, `src/bench_commands.rs`, `tests/native_inline*.rs` |
+| 1 | [Inlining and Cranelift opt level](01-inlining.md) | #931 | no inlining; Cranelift default opt level | now | NEW `src/ir_inline.rs` (+ `src/ir_inline/**`), the `if optimize` branches that call `ir_opt::optimize` in `src/native.rs`, `src/native_export.rs` (the library path ports use), `src/native_session.rs` and `src/native_batch.rs`, the Cranelift `settings::builder()` sites in `src/native*.rs` and `src/bench_commands.rs`, `tests/native_inline*.rs` |
 | 2 | [Sequence access and drops](02-seq-access-drops.md) | #932 | `try_get` + `Option` per read; local and by-value sequences and strings never freed | now | `src/seq/{native,native_runtime,aot_runtime,ir}.rs`, `src/strings/native.rs`, the drop elaboration in `src/fip.rs`, the by-value refusal hunk in `src/native_export.rs` (own commit, coordinate with lane 4), `tests/native_seq_drop*.rs` |
 | 3 | [Byte loops](03-byte-loops.md) | #933 | per-byte bounds-checked loops; no block copy, wide reads, check hoisting or 64x64->128 multiply | after lane 2 (shares `src/seq/**`); hoisting and the multiply can start now | `src/seq/check.rs`, `src/seq/eval.rs`, `src/seq/lean.rs` (builtin typing and reference semantics), NEW `src/bounds_hoist.rs`, the new-builtin hunks in `src/seq/native.rs` after lane 2 merges, `packages/vesper-std/bytes/**`, `tests/native_bytes*.rs` |
 | 4 | [Export ABI v3](04-export-abi-v3.md) | #934 | state copied across the Vesper/Rust boundary every call | now | `src/native_export.rs`, `src/native_export/**`, `src/lib_commands.rs`, `crates/vesper-port-abi/**`, `crates/vesper-port-pilot/**`, `tests/native_export*.rs`, `tests/fixtures/native_export/**`, `docs/maintenance/porting-a-crate.md` (ABI sections) |
@@ -120,6 +120,6 @@ Claims are #931-#937 (lane n is issue 930+n).
 |---|---|---|
 | `src/native.rs` | 1 (opt level, `compile_entry` `optimize` branch), 2 (seq drop hooks), 5 (Fail lowering) | Each lane edits only its named hunks. Merge `main` before merging. 5 goes after 1. |
 | `src/seq/native.rs` | 2, then 3, then 6 | Serialize in that order. |
-| `src/native_export.rs`, `src/native_export/**` | 4 owns; 2 (by-value refusal) and 5 (`Fail` glue) add hunks | 2's hunk in its own commit; 5 after 4. |
+| `src/native_export.rs`, `src/native_export/**` | 4 owns; 1 (inliner call, Cranelift flags), 2 (by-value refusal) and 5 (`Fail` glue) add hunks | 1's and 2's hunks in their own commits; 5 after 4. |
 | `packages/vesper-std/bytes/**` | 3 only | Others ask lane 3. |
 | Root `Cargo.toml`/`Cargo.lock` | any lane adding a dependency | Serialize. |

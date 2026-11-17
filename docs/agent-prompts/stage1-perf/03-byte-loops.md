@@ -36,7 +36,7 @@ Exclusive ownership:
 - src/seq/check.rs, src/seq/eval.rs, src/seq/lean.rs (typing and reference semantics of the new builtins)
 - the new-builtin hunks in src/seq/native.rs after lane 2 merges
 - NEW src/bounds_hoist.rs (a native-path pass run only under `optimize`)
-- the wide-multiply builtin in src/numeric.rs or src/integer_widths/** (only that hunk) and its native lowering
+- the wide-multiply builtin: its typing where the `wrapping_*` builtins are typed (src/check.rs, src/integer_widths/**; only that hunk) and its interpreter and native lowerings
 - packages/vesper-std/bytes/** (switch to the new builtins, keep the API)
 - tests/native_bytes*.rs
 - docs/parallel-results/stage1-perf-byte-loops.md
