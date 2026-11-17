@@ -1,0 +1,58 @@
+fn pick(which: u64) -> u64 eff [left: Fail[u64], right: Fail[u64], last: Fail[bool]] {
+    if which == 0 {
+        left.raise(11)
+    } else if which == 1 {
+        right.raise(22)
+    } else if which == 2 {
+        last.raise(true)
+    } else {
+        42
+    }
+}
+fn ensures_pick(which: u64, result: u64) -> bool {
+    result == 42
+}
+fn forward(which: u64) -> u64 eff [left: Fail[u64], right: Fail[u64], last: Fail[bool]] {
+    pick(which)
+}
+fn ensures_forward(which: u64, result: u64) -> bool {
+    result == 42
+}
+fn distinct(n: u64, reject: bool) -> u64 eff [Fail[u64], Fail[bool]] {
+    if reject {
+        Fail::raise(false)
+    } else {
+        n
+    }
+}
+fn ensures_distinct(n: u64, reject: bool, result: u64) -> bool {
+    result == n
+}
+fn descend(n: u64, which: u64) -> u64 eff [left: Fail[u64], right: Fail[u64], last: Fail[bool]] {
+    if n == 0 {
+        pick(which)
+    } else {
+        descend(wrapping_sub(n, 1), which)
+    }
+}
+fn ensures_descend(n: u64, which: u64, result: u64) -> bool {
+    result == 42
+}
+fn main() -> u64 {
+    handle left: Fail[u64] in {
+        handle right: Fail[u64] in {
+            handle last: Fail[bool] in {
+                forward(3)
+            } with {
+                return value => value,
+                raise(error, resume) => 2,
+            }
+        } with {
+            return value => value,
+            raise(error, resume) => error,
+        }
+    } with {
+        return value => value,
+        raise(error, resume) => error,
+    }
+}

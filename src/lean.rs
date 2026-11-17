@@ -1168,11 +1168,6 @@ fn contract(
             "row-polymorphic functions have no contract proposition",
         ));
     }
-    if f.params.iter().any(|p| p.pass == Pass::Inout) {
-        return Err(unsupported(
-            "contracts over inout parameters are not stated; return the updated value instead",
-        ));
-    }
     let types = f.params.iter().map(|p| &p.ty).collect::<Vec<_>>();
     let signature = |predicate: &Function, expected: Vec<&Type>| {
         if predicate.generics.len() != f.generics.len()
@@ -1211,7 +1206,7 @@ fn contract(
                     predicate.name,
                     expected.len(),
                     if predicate.name.starts_with("ensures_") {
-                        " followed by its result"
+                        " followed by its result and final inout values in parameter order"
                     } else {
                         ""
                     }
@@ -1224,19 +1219,40 @@ fn contract(
     }
     let mut with_result = types.clone();
     with_result.push(&f.result);
+    with_result.extend(
+        f.params
+            .iter()
+            .filter(|p| p.pass == Pass::Inout)
+            .map(|p| &p.ty),
+    );
     signature(ensures, with_result)?;
-    let fail = match f.effects.instances.as_slice() {
+    let failures = match f.effects.instances.as_slice() {
         _ if f.effects.tail.is_some() => {
             return Err(unsupported("open effect rows have no model monad"));
         }
-        [] => None,
-        [e] if e.name == "Fail" && e.args.len() == 1 => Some(ty(&e.args[0]).map_err(internal)?),
+        effects
+            if effects
+                .iter()
+                .all(|e| e.name == "Fail" && e.args.len() == 1) =>
+        {
+            effects
+                .iter()
+                .map(|e| ty(&e.args[0]).map_err(internal))
+                .collect::<Result<Vec<_>, _>>()?
+        }
         _ => {
             return Err(unsupported(
-                "only pure and single Fail[E] functions have a model monad",
+                "only pure and Fail[E] functions have a model monad",
             ));
         }
     };
+    // A right-associated sum preserves the identity of every row instance,
+    // including different labels with the same error payload type.
+    let fail = failures.split_last().map(|(last, rest)| {
+        rest.iter().rev().fold(last.clone(), |tail, head| {
+            app(global(&["Sum"]), [head.clone(), tail])
+        })
+    });
     let fuel = match totality.get(&f.name) {
         Some(Totality::Total) => false,
         Some(Totality::Fuel) => true,
@@ -1258,7 +1274,16 @@ fn contract(
         args.push(reference(&name));
     }
     let result = fixed("$result");
-    let result_ty = ty(&f.result).map_err(internal)?;
+    let mut output_types = vec![ty(&f.result).map_err(internal)?];
+    output_types.extend(
+        f.params
+            .iter()
+            .filter(|p| p.pass == Pass::Inout)
+            .map(|p| ty(&p.ty).map_err(internal))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
+    let output_count = output_types.len();
+    let result_ty = tuple_type(&output_types);
     let model = match (&fail, fuel) {
         (None, false) => None,
         (None, true) => Some(global(&["Option"])),
@@ -1278,6 +1303,30 @@ fn contract(
             value: model.clone(),
         });
     }
+    if failures.len() > 1 {
+        for index in 0..failures.len() {
+            let mut error = named("$error");
+            if index + 1 < failures.len() {
+                error = app(global(&["Sum", "inl"]), [error]);
+            }
+            for _ in 0..index {
+                error = app(global(&["Sum", "inr"]), [error]);
+            }
+            let error = ascribe(error, fail.clone().expect("nonempty failure row"));
+            call_args.push(Argument::Named {
+                name: fixed(&format!("$cap{index}")),
+                value: Term::Record {
+                    fields: vec![(
+                        fixed("raise"),
+                        inferred(
+                            vec![fixed("$error")],
+                            app(global(&["MonadExcept", "throw"]), [error]),
+                        ),
+                    )],
+                },
+            });
+        }
+    }
     if fuel {
         call_args.push(Argument::Named {
             name: fixed(FUEL),
@@ -1293,7 +1342,7 @@ fn contract(
         }),
         arguments: call_args,
     };
-    let holds = |predicate: &Function, extra: Option<Term>| -> Result<Term, ContractError> {
+    let holds = |predicate: &Function, extra: Vec<Term>| -> Result<Term, ContractError> {
         let mut values = args.clone();
         values.extend(extra);
         let mut arguments = predicate
@@ -1318,8 +1367,15 @@ fn contract(
             Term::Bool(true),
         ))
     };
+    // The extracted result is the return value followed by all final inout
+    // states. The predicate keeps the original inputs as separate binders.
+    let post_values = |output: Term| {
+        (0..output_count)
+            .map(|index| tuple_get(output.clone(), index, output_count))
+            .collect()
+    };
     let post = if model.is_none() {
-        holds(ensures, Some(call))?
+        holds(ensures, post_values(call))?
     } else {
         let observed = match (&fail, fuel) {
             (None, true) => app(global(&["Option", "some"]), [reference(&result)]),
@@ -1343,14 +1399,14 @@ fn contract(
             binders: quantified,
             body: Box::new(Term::Arrow(
                 Box::new(Term::binary(BinaryOp::Eq, run, observed)),
-                Box::new(holds(ensures, Some(reference(&result)))?),
+                Box::new(holds(ensures, post_values(reference(&result)))?),
             )),
         }
     };
     // Keep satisfiability separate from the implication: an impossible
     // precondition proves every partial-correctness contract vacuously.
     let precondition = match requires {
-        Some(r) => holds(r, None)?,
+        Some(r) => holds(r, vec![])?,
         None => global(&["True"]),
     };
     let admissible = binders

@@ -317,11 +317,227 @@ exercised by the tests.
 
 ### Remaining gaps
 
-- x86-64 has no encoding proof. Its variable-length encodings (REX,
-  ModRM, SIB, displacement widths) need a byte-level decoder rather than
-  32-bit fields.
+- x86-64 had no encoding proof; milestone 9 adds it.
 - As for RV64, this proves encoding, not semantics. That the emitted A64
   sequences implement `Mach.step` is still checked by running programs
   natively and under QEMU.
 - The prologue and system-call code in `aarch64::start` are outside `emit`
   and not modelled.
+
+## Milestone 7: abort-only `Fail[E]`, `?` and `handle Fail`
+
+Claim #837 (lane V1 of the verified-compiler parallel plan). Refs #582,
+#583. Base: `5a018bd` (origin/main).
+
+### What was built
+
+- Failure codes (`src/verified_codegen/fail.rs`):
+  - Every error type the planned program raises or handles gets a
+    program-wide code (1, 2, ...). Code 0 means no failure.
+  - A raise set is computed for every planned function. It is a least
+    fixpoint over the call graph, and a `handle Fail[E]` removes `E`'s code
+    from its body's set.
+  - Local raises come from three places:
+    - `?` on `Result[T, E]`.
+    - `Fail::raise(e)`.
+    - Checked arithmetic, counted conservatively by operator: `+ - *`,
+      unary `-` and compound assignment may overflow, and `/ %` may also
+      divide by zero.
+- The status protocol:
+  - A function that may raise to its caller (any planned function except
+    the entry) returns a status word. Word 0 of its incoming result area
+    is the status. The words after it hold the result when the status is 0,
+    or the raised error's payload. Parameters follow these words.
+  - After each call to such a function, the caller tests the status
+    (`LoadOut`, `Const`, `Compare`, `BranchZero`). On a failure it does one
+    of three things:
+    - jumps to the matching handler clause;
+    - passes the status and payload on to its own caller;
+    - at the entry, aborts the process with the existing exit status for
+      `ArithOverflow` (101) or `RuntimeError` (102).
+  - Any other error type that can reach the entry is a typed
+    `Unsupported::Effect`.
+- `?`: the `Err` tag is tested. On `Err` the payload is raised, and
+  otherwise the `Ok` payload is copied.
+- `handle Fail[E] in body with { return v => r, raise(e, k) => h }`:
+  - The nested `$handler_body`/`$handler_clause` functions the IR already
+    produces are called directly, with their captures passed as arguments
+    (`inout` captures are copied back).
+  - On success the `return` clause is called with the body's value. On a
+    raise of `E` the `raise` clause is called with the payload. Every other
+    failure passes on.
+  - The continuation `k` must be unused, so only non-resuming handlers
+    compile. It is erased from the clause's parameters.
+  - These are refused with typed errors: stateful handlers, labeled `Fail`
+    instances, destructuring clause patterns and every other effect.
+- Implicit failures:
+  - `ArithOverflow` and `RuntimeError` join the protocol only when the
+    program handles or explicitly raises them somewhere. Otherwise they stay
+    process aborts, so programs without handlers compile exactly as before.
+    `trap_scopes_only_where_implicit_failures_are_caught` checks this.
+  - When they are caught, a function that passes them on gets a new slot-IR
+    row, `Lir::Scope { ovf, div0 }`, after its prologue.
+  - The row selects to `M::Scope`, which emits no code. The three encoders
+    resolve every overflow or division-by-zero branch through
+    `Asm::trap_label`, so the checked instructions jump to the function's own
+    raise stubs instead of the process exits. The default scope is restored
+    at the function's end.
+  - `FnLower::raise_runtime_error(variant)` raises a `RuntimeError` variant
+    from lowering code. The index-bounds check of the coverage lane (V3) is
+    meant to use it.
+- `Never` values have no words. A `return` or `jump` of one, which can only
+  follow a raise, lowers to the unreachable trap.
+- The checker forbids an abortable effect crossing an active `inout`
+  borrow (E0402), so failures never meet `inout` parameters. The raise path
+  still writes them back, which keeps the protocol safe if that rule is ever
+  relaxed.
+
+### Lean
+
+- `lean/VerifiedCodegen.lean` gains the `scope` row and instruction, the
+  table row `scope: scope L9 L10` (the Rust listing must still match) and
+  `sim_scope`.
+- `CodegenComposition`, `CodegenControlFlow`, `CodegenValidation`,
+  `CodegenFlowValidation` and `CodegenRv64Encoding` are extended for the
+  new constructor. The RV64 encoding of `scope` is empty.
+- New `lean/CodegenFailScope.lean` (imports `CodegenControlFlow`):
+  - `abort_preserves_memory`: every selected row writes memory only in its
+    trailing stores, which cannot abort, so the machine state at an
+    aborting instruction has the memory the row started with.
+  - `row_simulatesC`: with a trap scope, a source row whose failure is
+    caught moves to the handler label with the store it started from. The
+    target block branches to the same label with a related machine state.
+    Uncaught failures, faults and unreachable code still abort identically.
+  - `prefixes_simulateC`: lifts this to every finite execution prefix
+    under an explicit invariant. The scope in effect at a row is the last
+    `scope` row before it in program order (`scopeAt`), as in the
+    assembler's linear pass.
+  - `scopeAt_default`, `sourceRowC_default` and `targetRowC_default` show
+    that the scoped semantics equals the existing one when no scope is set.
+  - `caught_source`, `caught_invariant` and `caught_target` work through a
+    concrete `u8` overflow caught by a handler.
+- Checks:
+  - With Lean 4.35.0, every file compiles with no warnings and no `sorry`.
+  - The axiom reports use only `propext`, `Classical.choice` and
+    `Quot.sound`.
+  - `tests/refinement_places_lean.rs` audits every theorem of the new file.
+  - `scripts/ci/check-lean-models.sh` compiles it.
+
+### Tests
+
+- `tests/verified_codegen.rs`, `fail_effects_agree_with_the_evaluator_and_cranelift`:
+  - `fail_try.ves`: `?` on a user enum, propagation through two calls,
+    `Fail::raise` of a struct, nested handlers and `return` clauses.
+  - `fail_implicit.ves`: `u8` and `u64` overflow and division by zero
+    caught by handlers, both directly and across calls, `i64::MIN / -1`
+    caught as overflow, and a `return` clause that can itself overflow.
+  - Every target is compiled, with and without the IR optimizer. The output
+    is checked for determinism and run on x86-64 natively and on AArch64 and
+    RV64 under QEMU 8.2.2. Results are compared with the evaluator and the
+    Cranelift JIT.
+- `unhandled_user_failures_at_the_entry_are_typed_errors` and
+  `trap_scopes_only_where_implicit_failures_are_caught`.
+- `tests/verified_codegen_fail_front_end.rs` runs on the real
+  self-hosted front end:
+  - Every function with scalar parameters and a `Fail`-only row (160) is
+    wrapped in an entry that handles its non-arithmetic `Fail[E]`.
+  - **54** of them now compile, up from 22 before this milestone, where
+    every handler was refused. All 54 agree with the evaluator on x86-64,
+    AArch64 and RV64, and 12 of the runs take a raise clause.
+  - The remaining refusals belong to other lanes: dynamic indexing (103,
+    V3), `Region` handlers (2) and one generic function (V2). No refusal
+    names `Fail`.
+
+### Remaining gaps
+
+- Resuming handlers, stateful handlers and labeled `Fail` instances are
+  refused.
+- An `IndexOutOfBounds` that reaches the entry maps to the
+  division-by-zero exit status, because the entry has one exit per failure
+  kind.
+- The status protocol, the call convention and the Rust lowering of
+  raises, tests and handlers are covered by differential tests, not by the
+  Lean models, like calls before this milestone.
+
+## Milestone 9: x86-64 encodings proved against the Intel SDM formats
+
+### What was built
+
+- `lean/CodegenX64Encoding.lean` (imports `VerifiedCodegen.lean`) models
+  the x86-64 encoder. Instructions have variable length, so an encoding is
+  a list of bytes and the specification is a prefix decoder instead of a
+  field reader over a 32-bit word.
+  - `Inst` is the subset `x86_64.rs` uses, named as in the Intel SDM:
+    - `MOV r64, [rsp + disp32]`/`[rbp + disp32]` and the stores, `MOV r64,
+      imm64`, `MOV r32, imm32`;
+    - `ADD`/`SUB`/`AND`/`CMP`/`TEST`/`MOV` (`MR` form, register operands),
+      `IMUL r64, r/m64`, the `F7` group (`MUL`, `NEG`, `DIV`, `IDIV`),
+      `CQO`, `XOR r32, r32`, the `81`/`83` immediate groups;
+    - `Jcc rel32`/`rel8`, `JMP rel32`/`rel8`, `CALL rel32`, `SETcc`,
+      `MOVZX r32, r8`;
+    - `MOVQ` between general and XMM registers, `ADDSD`/`SUBSD`/`MULSD`/
+      `DIVSD`, `UCOMISD`, `BTC r64, imm8`;
+    - `TEST [rsp + disp32], r32` (the Windows stack probe), `PUSH`, `POP`,
+      `RET`.
+  - `decode` reads the `66`/`F2` legacy prefixes, `REX.W`, one- and
+    two-byte (`0F`) opcodes, the ModRM byte (`mod`, `reg`, `r/m`), the SIB
+    byte `24` for `[rsp + disp32]`, and little-endian `disp32`, `imm8`,
+    `imm32`, `imm64`, `rel8` and `rel32` fields. It accepts only the operand
+    forms the emitter writes (`mod = 11` register operands, `mod = 10`
+    memory operands with base `rsp` or `rbp`) and returns `none` for the
+    others. `89` is the store with a memory operand and `MOV` with a
+    register operand, as in the manual.
+  - `encode` writes the bytes the way `x86_64.rs` does.
+- Theorems:
+  - `decode_encode`: every well-formed instruction (registers below 8,
+    every field in range) decodes back from its encoding, whatever bytes
+    follow it. This is the property a prefix code needs, so instruction
+    boundaries are recovered too.
+  - `decodeAll_encodeAll` extends it to instruction sequences: the
+    concatenated bytes decode back to exactly the sequence.
+  - `encode_bytes`: every encoded value is a byte.
+  - `emit` mirrors `x86_64::emit` for every `M` instruction, Linux and
+    Windows. That covers the `jo`/`jb` checks, the `idiv` guard for
+    `MIN / -1` and `rem` by `-1`, the NaN-aware `ucomisd`/`setcc`
+    sequences, and the prologue with one Windows probe per 4 KiB page and
+    the canonical Windows epilogue.
+  - `emit_ok` holds for frame indices and sizes that fit `disp32`/`imm32`.
+  - `emit_decodes` proves that the laid-out bytes of `emit m` are bytes
+    and decode to exactly its instruction sequence.
+  - Branches are laid out with the abort exits at offset 0 and every other
+    label at the end, and a `rel32` is the displacement modulo 2^32. The
+    Rust assembler refuses displacements outside `i32`.
+  - The abort exits are the labels below `firstFree`, which a test checks
+    against `FIRST_FREE_LABEL` (one past `TrapKind::ALL`). Review found that
+    the three encoding models had hard-coded `l < 4` although Rust reserves
+    only labels 0-2, so a branch to the first function label (3) was laid
+    out as an abort exit. All three models now use `firstFree`, and every
+    listing has a `jmp L3` sample, with label 3 bound after the instruction,
+    that catches the difference.
+- The listing check:
+  - The Lean file prints the bytes of the 60 shared samples (milestone 5's
+    59 plus `jmp L3`; the RV64 and AArch64 listings gain the same line).
+  - It adds the Windows forms of `enter 4`, `enter 1000` (one probe) and
+    `enter 2048` (four probes), and `leave` with an 8000-byte frame.
+  - `x86_64::encoding_listing()` (re-exported as
+    `verified_codegen::x64_encoding_listing`) runs the Rust emitter on the
+    same instructions. `tests/verified_codegen_lean.rs` requires the two
+    to be equal line for line, and checks hygiene and the axiom report.
+- `scripts/ci/check-lean-models.sh` compiles the new file.
+
+### Checks
+
+- With Lean 4.35.0 the file compiles with no warnings in about 8 s.
+- Every axiom report uses only `propext`, `Classical.choice` and
+  `Quot.sound`.
+- `cargo test --test verified_codegen_lean` passes with `VESPER_LEAN` set:
+  10 tests, including all three encoding listings and the `firstFree`
+  check.
+
+### Remaining gaps
+
+- This proves encoding, not semantics. That the emitted x86-64 sequences
+  implement `Mach.step` is still checked by running programs.
+- `x86_64::start`, `start_windows` and the external calls are outside
+  `emit` and not modelled. The Windows unwind data is checked by the COFF
+  tests, not by this proof.

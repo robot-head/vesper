@@ -33,7 +33,8 @@ target: the 32-bit words `src/verified_codegen/aarch64.rs` writes for each
   Rust encoder to it on those samples, not in general.
 
 Branch targets: `emit` resolves every branch against a layout where the abort
-exits sit just before the instruction and every other label just after it,
+exits (labels below `firstFree`) sit just before the instruction and every
+other label just after it,
 which is how the listing lays them out. Offsets are in instructions (words),
 as in the `imm19` and `imm26` fields.
 -/
@@ -782,6 +783,11 @@ def LT : Nat := 11
 def GT : Nat := 12
 def LE : Nat := 13
 
+/-- `FIRST_FREE_LABEL`: labels below it are the abort exits of
+`TrapKind::ALL` (`tests/verified_codegen_lean.rs` checks the value against the
+Rust constant); every label from it on is a function or block label. -/
+def firstFree : Nat := 3
+
 /-- The program-wide abort exits (`TrapKind::label`). -/
 def trapLabel : Failure → Nat
   | .overflow => 0 | .divZero => 1 | .unreachable => 2 | .fault => 3
@@ -873,12 +879,13 @@ def emit : M → List Item
       subSp (words * 8)
   | .leave => [.ins (.aimm .add sp fp 0 0), .ins (.ldpPost fp lr sp 2), .ins (.ret lr)]
   | .trap f => [.br .b (trapLabel f)]
+  | .scope _ _ => []
 
 /-! ## Layout: abort exits before the instruction, other labels after it -/
 
 def Item.at (k n : Nat) : Item → Inst
   | .ins i => i
-  | .br bk l => bk.inst (if l < 4 then -(k : Int) else ((n - k : Nat) : Int))
+  | .br bk l => bk.inst (if l < firstFree then -(k : Int) else ((n - k : Nat) : Int))
 
 def place (n : Nat) : Nat → List Item → List Inst
   | _, [] => []
@@ -971,6 +978,7 @@ theorem emit_ok (m : M) (hm : mBounded m) : ∀ it ∈ emit m, it.Ok := by
   | fcmp c => cases c <;> decide
   | trap f => cases f <;> decide
   | label l | jmp l | bz l | call l => simp [emit, Item.Ok, Br.Ok]
+  | scope _ _ => simp [emit]
   | _ => decide
 
 theorem emit_length (m : M) : (emit m).length ≤ 8 := by
@@ -1010,7 +1018,7 @@ def samples : List M :=
   ([Cond.eq, .ne, .lt, .le, .gt, .ge].flatMap fun c => [.cmp c .s, .cmp c .u]) ++
   [.fop .add, .fop .sub, .fop .mul, .fop .div, .fneg] ++
   ([Cond.eq, .ne, .lt, .le, .gt, .ge].map .fcmp) ++
-  [.jmp 9, .bz 9, .call 9, .enter 4, .enter 300, .enter 1000, .enter 512, .leave,
+  [.jmp 9, .jmp firstFree, .bz 9, .call 9, .enter 4, .enter 300, .enter 1000, .enter 512, .leave,
    .trap .overflow, .trap .divZero, .trap .unreachable]
 
 def listing : String :=

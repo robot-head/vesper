@@ -2,8 +2,11 @@
 //!
 //! `R0`, `R1`, `R2` are `rax`, `rcx`, `rdx`; frame words are `[rsp + 8n]`
 //! (slots and the outgoing area) and `[rbp + 16 + 8n]` (the incoming area).
-//! These encodings are tested by running the emitted programs; they are not
-//! covered by the Lean theorem.
+//! These encodings are tested by running the emitted programs.
+//! `lean/CodegenX64Encoding.lean` proves the encoder model against the Intel
+//! SDM instruction formats (a prefix decoder reads every emitted sequence
+//! back); its printed bytes for sample instructions must equal
+//! [`encoding_listing`] (`tests/verified_codegen_lean.rs`).
 use super::asm::{Asm, Fix};
 use super::machine::{Cond, FloatOp, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
 use super::{Os, ResultProtocol, VerifiedError};
@@ -50,7 +53,7 @@ const JNE: u8 = 0x5;
 const JA: u8 = 0x7;
 
 pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
-    let ovf = TrapKind::Overflow.label();
+    let ovf = a.trap_label(TrapKind::Overflow);
     match *m {
         M::Ld(r, l) => mem(a, 0x8b, r, l),
         M::St(l, r) => mem(a, 0x89, r, l),
@@ -90,7 +93,8 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         // test rcx, rcx; je
         M::TrapZero => {
             a.bytes(&[0x48, 0x85, 0xc9]);
-            jcc(a, JE, TrapKind::DivisionByZero.label());
+            let l = a.trap_label(TrapKind::DivisionByZero);
+            jcc(a, JE, l);
         }
         // movabs rdx, MIN; cmp rax, rdx; jne +10; cmp rcx, -1; je ovf
         M::TrapDivOvf => {
@@ -197,9 +201,47 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
             a.bytes(&[0x5d, 0xc3]);
         }
         M::Leave => a.bytes(&[0x48, 0x89, 0xec, 0x5d, 0xc3]),
-        M::Trap(k) => rel(a, 0xe9, k.label()),
+        M::Trap(k) => {
+            let l = a.trap_label(k);
+            rel(a, 0xe9, l)
+        }
+        M::Scope(ovf, div0) => a.set_scope(ovf, div0),
     }
     Ok(())
+}
+
+/// The bytes `emit` writes for each sample instruction (`<instruction>:
+/// <byte> ...`), with the abort exits bound before the instruction and labels
+/// `FIRST_FREE_LABEL` and 9 after it; then the Windows forms of `enter` (stack probes) and `leave`.
+pub fn encoding_listing() -> String {
+    use std::fmt::Write;
+    fn line(out: &mut String, m: &M, windows: bool, frame: u32, tag: &str) {
+        let mut a = Asm::default();
+        a.windows = windows;
+        a.frame = frame;
+        for k in TrapKind::ALL {
+            a.bind(k.label()).expect("fresh label");
+        }
+        emit(&mut a, m).expect("sample instructions encode");
+        a.bind(super::machine::FIRST_FREE_LABEL)
+            .expect("fresh label");
+        a.bind(9).expect("fresh label");
+        let code = a.finish().expect("labels resolve");
+        let _ = write!(out, "{m}{tag}:");
+        for b in code {
+            let _ = write!(out, " {b:02x}");
+        }
+        out.push('\n');
+    }
+    let mut out = String::new();
+    for m in super::asm::encoding_samples() {
+        line(&mut out, &m, false, 0, "");
+    }
+    for words in [4, 1000, 2048] {
+        line(&mut out, &M::Enter(words), true, 0, " (windows)");
+    }
+    line(&mut out, &M::Leave, true, 8000, " (windows, frame 8000)");
+    out
 }
 
 /// `push rbp; mov rbp, rsp; sub rsp, bytes`. On Windows, frames of a page

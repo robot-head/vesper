@@ -112,6 +112,10 @@ inductive Lir
   | enter (words : Nat)
   | ret
   | trap (f : Failure)
+  -- Milestone 7 (abort-only `Fail[E]`): from here on in emission order,
+  -- `overflow` aborts go to label `ovf` and `divZero` aborts to `div0`
+  -- (`CodegenFailScope.lean`). A no-op on the data state.
+  | scope (ovf div0 : Nat)
 
 inductive Res (α : Type) | ok (a : α) | abort (f : Failure)
 
@@ -258,6 +262,8 @@ inductive M
   | enter (words : Nat)
   | leave
   | trap (f : Failure)
+  -- Milestone 7: emits no code; sets the trap labels (see `Lir.scope`).
+  | scope (ovf div0 : Nat)
 
 structure Mach where
   mem : Loc → Int
@@ -388,6 +394,7 @@ def select : Lir → List M
   | .enter n => [.enter n]
   | .ret => [.leave]
   | .trap f => [.trap f]
+  | .scope o d => [.scope o d]
 
 /-! ## The simulation relation and the theorem -/
 
@@ -520,6 +527,11 @@ theorem sim_storeIn (i a : Nat) :
     Sim (lirStep (.storeIn i a) s) (run (select (.storeIn i a)) m) := by
   simp only [lirStep, select, run, Mach.step, setReg, Sim]
   exact enc_upd s _ hR _ _ _ (by simp [hR (.slot a)])
+
+theorem sim_scope (o d : Nat) :
+    Sim (lirStep (.scope o d) s) (run (select (.scope o d)) m) := by
+  simp only [lirStep, select, run, Mach.step, Sim, Res.bind]
+  exact hR
 
 omit hR in
 theorem sim_trap (f : Failure) :
@@ -690,6 +702,7 @@ theorem select_simulates (r : Lir) (s : Store) (m : Mach) (hR : Rel s m) (hd : D
   | loadIn d i => exact sim_loadIn s m hR d i
   | storeIn i a => exact sim_storeIn s m hR i a
   | trap f => exact sim_trap s m f
+  | scope o d => exact sim_scope s m hR o d
   | branchZero => simp [DataRow] at hd
   | jump => simp [DataRow] at hd
   | label => simp [DataRow] at hd
@@ -764,6 +777,7 @@ def M.render : M → String
   | .enter n => s!"enter {n}"
   | .leave => "leave"
   | .trap f => s!"trap {f.render}"
+  | .scope o d => s!"scope L{o} L{d}"
 
 def integerKinds : List Kind := [.u8, .u32, .u64, .i64]
 
@@ -789,7 +803,9 @@ def tableRows : List (String × Lir) :=
    ("storein", .storeIn 3 1), ("branchzero", .branchZero 1 9), ("jump", .jump 9),
    ("label", .label 9), ("call", .call 9), ("enter", .enter 4), ("return", .ret),
    ("trap ovf", .trap .overflow), ("trap div0", .trap .divZero),
-   ("trap unreachable", .trap .unreachable)]
+   ("trap unreachable", .trap .unreachable)] ++
+  -- Milestone 7 (abort-only `Fail[E]`)
+  [("scope", .scope 9 10)]
 
 def listing : String :=
   String.join (tableRows.map fun (name, r) =>
@@ -815,6 +831,7 @@ def listing : String :=
 #print axioms Vesper.VerifiedCodegen.sim_loadIn
 #print axioms Vesper.VerifiedCodegen.sim_storeIn
 #print axioms Vesper.VerifiedCodegen.sim_trap
+#print axioms Vesper.VerifiedCodegen.sim_scope
 #print axioms Vesper.VerifiedCodegen.rel_st
 #print axioms Vesper.VerifiedCodegen.sim_arith
 #print axioms Vesper.VerifiedCodegen.sim_wrapping

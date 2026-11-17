@@ -48,9 +48,14 @@
 //! IEEE-754 `+ - * /` (round to nearest, ties to even; no fast-math),
 //! negation and ordered comparisons; their Lean rows are proved relative to
 //! one shared binary64 semantics (Lean's `Float`), not against the hardware.
-//! Handlers and every other effect, `f32`, `f64` remainder, strings,
-//! recursive enums, closures, generic functions, vectors and regions are
-//! rejected.
+//! Abort-only `Fail[E]` (Milestone 7, `fail.rs`): `?`, `Fail::raise` and
+//! non-resuming `handle Fail[E]` are structured early exits. A function
+//! that may raise returns a status word before its result, callers test it
+//! after each call, and implicit `ArithOverflow`/`RuntimeError` failures
+//! that a handler catches are redirected by a trap scope ([`Lir::Scope`]).
+//! Resuming or stateful handlers and every other effect, `f32`, `f64`
+//! remainder, strings, recursive enums, closures, generic functions, vectors
+//! and regions are rejected.
 //!
 //! Values live in frame slots, never in registers across slot-IR rows: there
 //! is no register allocator, so the code is slow but each row is local, which
@@ -62,6 +67,7 @@ mod aarch64;
 mod asm;
 mod cli;
 mod container;
+mod fail;
 mod lower;
 mod machine;
 mod riscv64;
@@ -70,10 +76,11 @@ mod x86_64;
 pub use aarch64::encoding_listing as a64_encoding_listing;
 pub use cli::build_command;
 pub use machine::{
-    ArithOp, Cond, FloatOp, Kind, Label, Lir, Loc, M, Reg, Sign, Slot, TrapKind, WrapOp, select,
-    table_listing, table_rows,
+    ArithOp, Cond, FIRST_FREE_LABEL, FloatOp, Kind, Label, Lir, Loc, M, Reg, Sign, Slot, TrapKind,
+    WrapOp, select, table_listing, table_rows,
 };
 pub use riscv64::encoding_listing as rv64_encoding_listing;
+pub use x86_64::encoding_listing as x64_encoding_listing;
 
 /// The value of `vesper build --codegen` that selects this backend.
 pub const CODEGEN: &str = "verified";

@@ -24,17 +24,23 @@
 //!   the indirect CSRs `eidelivery`, `eithreshold`, `eip*`, `eie*` (RV64
 //!   numbering: only even-numbered `eip`/`eie` registers exist) and
 //!   `*topei` (read and claim). A lower identity has the higher priority.
+//! * `eidelivery` value 0x40000000 (§3.8.1): a file built with
+//!   [`ImsicFile::with_external_delivery`] accepts it (and resets to it); the
+//!   file then behaves as though `eidelivery` were 0 and the hart's
+//!   external interrupt at that level comes from the APLIC or PLIC instead
+//!   ([`crate::intc`] does the switching). Other files, including every
+//!   guest file, keep bit 0 of a write, as QEMU 8.2.2 does.
 //!
 //! Model choices where the specification leaves room or the hardware
 //! varies: IPRIOLEN is 8 (QEMU's choice); a reserved source mode (2 or 3)
 //! is stored as Inactive; a Detached or Inactive source's rectified input
-//! is 0; `eidelivery` implements only the values 0 and 1 (no PLIC/APLIC
-//! direct mode through the IMSIC). QEMU 8.2.2 differs from the specification
+//! is 0. QEMU 8.2.2 differs from the specification
 //! in four places that the cross-check test records (`tests/aia_qemu.rs`).
 //!
 //! This is a software model of the register protocol; there is no RISC-V
-//! core, no bus timing and no hypervisor (guest files hold state but raise
-//! nothing).
+//! core and no bus timing. Guest files raise their bit of `hgeip`;
+//! [`crate::intc`] models `hstatus.VGEIN`, `hgeie`, `hgeip`, `vsiselect` /
+//! `vsireg` and `vstopei` over them.
 
 use crate::dtb::MemRange;
 
@@ -45,6 +51,11 @@ pub const ISEL_EIDELIVERY: u32 = 0x70;
 pub const ISEL_EITHRESHOLD: u32 = 0x72;
 pub const ISEL_EIP0: u32 = 0x80;
 pub const ISEL_EIE0: u32 = 0xc0;
+/// `eidelivery` values (§3.8.1).
+pub const EIDELIVERY_OFF: u32 = 0;
+pub const EIDELIVERY_ON: u32 = 1;
+/// Delivery from a PLIC or APLIC through this file's position (optional).
+pub const EIDELIVERY_EXTERNAL: u32 = 0x4000_0000;
 /// Smallest and largest IMSIC identity count the binding allows.
 pub const IMSIC_MIN_IDS: u32 = 63;
 pub const IMSIC_MAX_IDS: u32 = 2047;
@@ -119,7 +130,11 @@ impl std::error::Error for AiaError {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImsicFile {
     ids: u32,
-    delivery: bool,
+    /// `eidelivery`: [`EIDELIVERY_OFF`], [`EIDELIVERY_ON`] or
+    /// [`EIDELIVERY_EXTERNAL`].
+    delivery: u32,
+    /// Whether `eidelivery` supports [`EIDELIVERY_EXTERNAL`].
+    external: bool,
     threshold: u32,
     eip: Vec<u64>,
     eie: Vec<u64>,
@@ -134,15 +149,42 @@ impl ImsicFile {
         let words = (ids as usize + 1) / 64;
         Ok(Self {
             ids,
-            delivery: false,
+            delivery: EIDELIVERY_OFF,
+            external: false,
             threshold: 0,
             eip: vec![0; words],
             eie: vec![0; words],
         })
     }
 
+    /// A file whose `eidelivery` also supports [`EIDELIVERY_EXTERNAL`] (a
+    /// machine- or supervisor-level file of a hart that a PLIC or a direct
+    /// APLIC IDC also reaches; never a guest file, §3.8.1). It resets to
+    /// that value, as the specification requires.
+    pub fn with_external_delivery(ids: u32) -> Result<Self, AiaError> {
+        let mut f = Self::new(ids)?;
+        f.external = true;
+        f.delivery = EIDELIVERY_EXTERNAL;
+        Ok(f)
+    }
+
     pub fn ids(&self) -> u32 {
         self.ids
+    }
+
+    /// The `eidelivery` value.
+    pub fn eidelivery(&self) -> u32 {
+        self.delivery
+    }
+
+    /// Whether `eidelivery` selects the PLIC or APLIC
+    /// ([`EIDELIVERY_EXTERNAL`]).
+    pub fn delivers_external(&self) -> bool {
+        self.delivery == EIDELIVERY_EXTERNAL
+    }
+
+    pub fn supports_external_delivery(&self) -> bool {
+        self.external
     }
 
     fn bit(v: &[u64], id: u32) -> bool {
@@ -213,12 +255,19 @@ impl ImsicFile {
         }
     }
 
-    /// `*ireg` write. `eidelivery` keeps bit 0; `eithreshold` keeps the bits
+    /// `*ireg` write. `eidelivery` (WARL) takes 0x40000000 exactly when the
+    /// file supports it and otherwise keeps bit 0; `eithreshold` keeps the bits
     /// needed for `ids`; bit 0 of `eip0`/`eie0` (identity 0) is read-only 0;
     /// registers beyond `ids` are read-only zero.
     pub fn csr_write(&mut self, isel: u32, v: u64) -> Result<(), AiaError> {
         match isel {
-            ISEL_EIDELIVERY => self.delivery = v & 1 != 0,
+            ISEL_EIDELIVERY => {
+                self.delivery = if self.external && v == u64::from(EIDELIVERY_EXTERNAL) {
+                    EIDELIVERY_EXTERNAL
+                } else {
+                    (v & 1) as u32
+                }
+            }
             ISEL_EITHRESHOLD => {
                 let bits = 32 - self.ids.leading_zeros();
                 self.threshold = (v as u32) & ((1u32 << bits) - 1);
@@ -276,9 +325,10 @@ impl ImsicFile {
         v
     }
 
-    /// The file's interrupt output to its hart (or guest).
+    /// The file's interrupt output to its hart (or its `hgeip` bit). With
+    /// `eidelivery` = 0x40000000 the file acts as though it were 0.
     pub fn asserted(&self) -> bool {
-        self.delivery && self.top() != 0
+        self.delivery == EIDELIVERY_ON && self.top() != 0
     }
 }
 

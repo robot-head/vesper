@@ -81,6 +81,7 @@
 //! static guarantees of [T-RegionAlloc]/[T-RegionScope] (escape freedom, exact
 //! consumption of linear payloads and watermarks) remain compiler obligations.
 mod backing;
+mod cache_btree;
 mod capability;
 mod error;
 mod region;
@@ -111,6 +112,10 @@ pub const REGION_LOWERING_CONTRACT_VERSION: u32 = 0;
 /// by the compiler.
 pub const REGION_ACCESS_CONTRACT_VERSION: u32 = 1;
 
+pub use cache_btree::{
+    CACHE_BTREE_B, CacheBTree, CacheBTreeConfig, CacheBTreeError, CacheBTreeInsertError,
+    CacheBTreeStats, Canonical, Iter as CacheBTreeIter, KeyOrder, ReverseOrder,
+};
 pub use capability::{Alloc, RawBlock};
 pub use slab::{
     MAX_SHARDS, REMOTE_FREE_BATCH, SLAB_BYTES, SLAB_SIZE_CLASSES, Shard, ShardBlock, ShardSlab,
@@ -123,6 +128,7 @@ pub use tiled::{
     TiledSeqError,
 };
 pub use virtual_arena::{
-    VIRTUAL_PAGE, VirtualArena, VirtualArenaConfig, VirtualArenaError, VirtualArenaStats,
-    VirtualBackingKind, VirtualBytes, VirtualMark, VirtualPushError, VirtualVec,
+    HUGE_PAGE, HugePageStatus, VIRTUAL_PAGE, VirtualArena, VirtualArenaConfig, VirtualArenaError,
+    VirtualArenaStats, VirtualBackingKind, VirtualBytes, VirtualChunkBacking, VirtualChunkStats,
+    VirtualMark, VirtualPushError, VirtualRegionError, VirtualVec,
 };

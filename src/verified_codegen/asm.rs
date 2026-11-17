@@ -1,6 +1,6 @@
 //! A tiny label-resolving assembler buffer shared by the encoders.
 use super::VerifiedError;
-use super::machine::{Cond, FloatOp, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
+use super::machine::{Cond, FIRST_FREE_LABEL, FloatOp, Label, Loc, M, Reg, Sign, TrapKind, WrapOp};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +43,9 @@ pub struct Asm {
     pub prologues: Vec<Prologue>,
     /// `rel32` fields that call an external symbol.
     pub externals: Vec<(usize, &'static str)>,
+    /// The trap scope set by the last `M::Scope` (`None`: the program-wide
+    /// abort exits).
+    pub scope: Option<(Label, Label)>,
 }
 impl Asm {
     pub fn bytes(&mut self, b: &[u8]) {
@@ -50,6 +53,20 @@ impl Asm {
     }
     pub fn u32(&mut self, w: u32) {
         self.code.extend_from_slice(&w.to_le_bytes());
+    }
+    /// Where an abort of kind `k` jumps in the current trap scope.
+    pub fn trap_label(&self, k: TrapKind) -> Label {
+        match (self.scope, k) {
+            (Some((ovf, _)), TrapKind::Overflow) => ovf,
+            (Some((_, div0)), TrapKind::DivisionByZero) => div0,
+            _ => k.label(),
+        }
+    }
+    /// Set the trap scope (`M::Scope`); the default labels clear it.
+    pub fn set_scope(&mut self, ovf: Label, div0: Label) {
+        self.scope = (ovf != TrapKind::Overflow.label()
+            || div0 != TrapKind::DivisionByZero.label())
+        .then_some((ovf, div0));
     }
     pub fn here(&self) -> usize {
         self.code.len()
@@ -153,6 +170,7 @@ pub fn encoding_samples() -> Vec<M> {
     samples.extend(CONDS.map(M::FCmp));
     samples.extend([
         M::Jmp(9),
+        M::Jmp(FIRST_FREE_LABEL),
         M::Bz(9),
         M::Call(9),
         M::Enter(4),
@@ -166,7 +184,8 @@ pub fn encoding_samples() -> Vec<M> {
 
 /// The words `emit` writes for each sample, one line per instruction
 /// (`<instruction>: <word> ...`, words as eight hex digits). The abort exits
-/// are bound before the instruction and label 9 after it.
+/// are bound before the instruction, and labels `FIRST_FREE_LABEL` and 9 after
+/// it.
 pub fn encoding_listing(
     samples: &[M],
     emit: fn(&mut Asm, &M) -> Result<(), VerifiedError>,
@@ -178,6 +197,7 @@ pub fn encoding_listing(
             a.bind(k.label()).expect("fresh label");
         }
         emit(&mut a, m).expect("sample instructions encode");
+        a.bind(FIRST_FREE_LABEL).expect("fresh label");
         a.bind(9).expect("fresh label");
         let code = a.finish().expect("labels resolve");
         out.push_str(&format!("{m}:"));

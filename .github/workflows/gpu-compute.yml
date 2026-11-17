@@ -65,17 +65,17 @@ jobs:
           dpkg -l mesa-vulkan-drivers libvulkan1 | tail -n 2
           vulkaninfo --summary
       - name: Check formatting
-        run: cargo fmt -p vesper-gpu-compute -- --check
+        run: cargo fmt -p vesper-gpu-compute -p vesper-kinetic-gpu -- --check
       - name: Clippy
-        run: cargo clippy --locked -p vesper-gpu-compute --all-targets -- -D warnings
+        run: cargo clippy --locked -p vesper-gpu-compute -p vesper-kinetic-gpu --all-targets -- -D warnings
       - name: Differential tests on lavapipe
-        run: cargo test --locked -p vesper-gpu-compute -- --nocapture
+        run: cargo test --locked -p vesper-gpu-compute -p vesper-kinetic-gpu -- --nocapture
       - name: Same tests under the Khronos validation layer
         env:
           VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
         run: |
           set -o pipefail
-          cargo test --locked -p vesper-gpu-compute -- --nocapture --test-threads=1 2>&1 | tee validation.log
+          cargo test --locked -p vesper-gpu-compute -p vesper-kinetic-gpu -- --nocapture --test-threads=1 2>&1 | tee validation.log
           if grep -q "Validation Error" validation.log; then
             echo "::error::the Vulkan validation layer reported errors"
             exit 1

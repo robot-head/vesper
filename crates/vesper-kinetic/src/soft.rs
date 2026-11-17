@@ -32,6 +32,9 @@ use sha2::Digest;
 
 type V3 = [f32; 3];
 
+/// A contact pass: `(positions, substep start positions, inverse masses, h)`.
+pub(crate) type ContactPass<'a> = dyn FnMut(&mut [V3], &mut [V3], &[f32], f32) + 'a;
+
 /// Most solver threads.
 pub const MAX_SOFT_THREADS: usize = 64;
 
@@ -607,6 +610,17 @@ impl SoftWorld {
 
     /// Advance one tick. On error the world is unchanged.
     pub fn step(&mut self) -> Result<WorldHashes, SoftError> {
+        self.step_with(&mut |_: &mut [V3], _: &mut [V3], _: &[f32], _: f32| {})
+    }
+
+    /// [`SoftWorld::step`] with an extra contact pass after the ground
+    /// contact of every substep: `contact(positions, substep start
+    /// positions, inverse masses, h)`. The pass may move a start position
+    /// too, to change the velocity `(x − x₀)/h` the substep derives.
+    pub(crate) fn step_with(
+        &mut self,
+        contact: &mut ContactPass<'_>,
+    ) -> Result<WorldHashes, SoftError> {
         let next = self.tick.checked_add(1).ok_or(SoftError::TickOverflow)?;
         let saved = (self.pos.clone(), self.vel.clone());
         let h = det::div(self.config.dt, self.config.substeps as f32);
@@ -629,6 +643,7 @@ impl SoftWorld {
             if let Some(ground) = self.config.ground {
                 self.ground_contact(ground);
             }
+            contact(&mut self.pos, &mut self.prev, &self.inv_mass, h);
             for i in 0..self.pos.len() {
                 if self.inv_mass[i] == 0.0 {
                     continue;
@@ -717,5 +732,13 @@ impl SoftWorld {
                 }
             }
         }
+    }
+}
+
+// ----- hooks for soft-rigid coupling (crate::couple) -------------------------
+
+impl SoftWorld {
+    pub(crate) fn soft_config(&self) -> &SoftConfig {
+        &self.config
     }
 }
