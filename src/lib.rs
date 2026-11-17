@@ -36,6 +36,7 @@ pub mod native_coverage;
 pub mod native_handlers;
 pub mod native_verifiers;
 pub mod optimize;
+pub mod packages;
 pub mod pact_frontend;
 pub mod regions;
 pub mod runtime;

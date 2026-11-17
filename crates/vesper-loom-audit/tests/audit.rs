@@ -30,6 +30,7 @@ fn dependency(package: &mut Selection, target: &str, optional: bool) {
             effects: BTreeSet::new(),
             features: BTreeSet::new(),
             optional,
+            path: None,
         },
     );
 }

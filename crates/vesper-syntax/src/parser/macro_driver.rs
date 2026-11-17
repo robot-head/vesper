@@ -31,6 +31,8 @@ fn parser<'a>(
         bound_values: Default::default(),
         model_uses: vec![],
         trait_bounds: vec![],
+        uses: vec![],
+        public_items: vec![],
         pending_bounds: vec![],
         limits: ParseLimits {
             max_source_bytes: limits.max_source_bytes,
@@ -96,5 +98,7 @@ pub(crate) fn parse_source_item(
         items: vec![item],
         model_uses: p.model_uses,
         trait_bounds: p.trait_bounds,
+        public_items: p.public_items,
+        ..Module::default()
     })
 }

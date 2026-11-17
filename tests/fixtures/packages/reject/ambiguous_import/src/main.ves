@@ -1,0 +1,6 @@
+use @demo/geometry::manhattan as point;
+use @demo/geometry::point;
+
+fn main() -> i64 {
+    0
+}

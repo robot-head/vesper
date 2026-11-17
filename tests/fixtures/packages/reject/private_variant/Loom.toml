@@ -1,0 +1,4 @@
+[package]
+name = "@reject/private-variant"
+version = "0.1.0"
+edition = "2026"

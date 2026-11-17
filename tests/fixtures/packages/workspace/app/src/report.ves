@@ -1,0 +1,4 @@
+// Module `report` of @demo/app.
+pub fn total(distance: i64, area: i64) -> i64 {
+    wrapping_add(wrapping_mul(distance, 100), area)
+}

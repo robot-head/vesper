@@ -28,6 +28,7 @@ fn manifest(
                 effects: effects.iter().map(|s| (*s).to_owned()).collect(),
                 optional: false,
                 features: BTreeSet::new(),
+                path: None,
             },
         );
     }

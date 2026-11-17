@@ -37,6 +37,7 @@ fn dep(manifest: &mut Manifest, s: &str, version: &str) {
             effects: BTreeSet::new(),
             optional: false,
             features: BTreeSet::new(),
+            path: None,
         },
     );
 }

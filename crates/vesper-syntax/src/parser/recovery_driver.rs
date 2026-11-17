@@ -62,6 +62,8 @@ fn parser<'a>(source: &'a str, tokens: Vec<Token>, limits: Limits) -> Parser<'a>
         bound_values: Default::default(),
         model_uses: vec![],
         trait_bounds: vec![],
+        uses: vec![],
+        public_items: vec![],
         pending_bounds: vec![],
         limits: limits.parse,
         depth: 0,
@@ -387,6 +389,7 @@ struct ParsedItem {
     header: Option<HeaderNote>,
     model_uses: Vec<ModelUse>,
     trait_bounds: Vec<TraitBoundSyntax>,
+    public_items: Vec<String>,
     exact: bool,
 }
 fn parse_item(source: &str, tokens: Vec<Token>, limits: Limits) -> Result<ParsedItem, Error> {
@@ -422,6 +425,7 @@ fn parse_item(source: &str, tokens: Vec<Token>, limits: Limits) -> Result<Parsed
         header: p.headers.into_iter().next(),
         model_uses: p.model_uses,
         trait_bounds: p.trait_bounds,
+        public_items: p.public_items,
         exact,
     })
 }
@@ -753,6 +757,7 @@ pub fn parse_complete_items(
         }
         out.model_uses.extend(parsed.model_uses);
         out.trait_bounds.extend(parsed.trait_bounds);
+        out.public_items.extend(parsed.public_items);
     }
     Ok(out)
 }

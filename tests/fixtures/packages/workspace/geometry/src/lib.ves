@@ -1,0 +1,36 @@
+// Root module of @demo/geometry.
+use self::util::abs;
+
+pub copy struct Point {
+    x: i64,
+    y: i64
+}
+
+impl Point {
+    fn sum(in self) -> i64 {
+        wrapping_add(self.x, self.y)
+    }
+}
+
+pub fn point(x: i64, y: i64) -> Point {
+    Point {
+        x: x,
+        y: y
+    }
+}
+
+pub fn manhattan(a: Point, b: Point) -> i64 {
+    wrapping_add(
+        wrapping_add(abs(wrapping_sub(a.x, b.x)), abs(wrapping_sub(a.y, b.y))),
+        wrapping_mul(scale(), 0)
+    )
+}
+
+pub fn coordinate_sum(p: Point) -> i64 {
+    p.sum()
+}
+
+// Private: the app package declares its own `scale`.
+fn scale() -> i64 {
+    10
+}

@@ -1,0 +1,5 @@
+use @demo/geometry::util::helper;
+
+fn main() -> i64 {
+    helper()
+}

@@ -1,0 +1,8 @@
+use self::secret::reveal;
+
+fn main() -> i64 {
+    match Hidden {
+        Hidden => reveal(),
+        _ => 0,
+    }
+}

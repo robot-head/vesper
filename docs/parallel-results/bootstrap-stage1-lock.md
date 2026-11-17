@@ -4,6 +4,37 @@ Base: `40d0b33b8c5fb0e3a38526ec86c9e32e35df6f87`, a descendant of the
 wave-nine baseline `37f7b8b`. The issue and open PR board were checked before
 editing; there was no competing bootstrap PR. Changes stay in lane 5's paths.
 
+## Update 2026-11-17: strict cross-backend Stage 1 lock
+
+Base `01d558d` (after V1 #859, V2 #857 and V3 #850). The verified backend now
+compiles the whole Stage 1 frontend entry `parse_main`, so the strict gate
+passes and #582's Stage 1 acceptance is met.
+
+- `WORK=... bootstrap/run.sh stage1 --reproduce --record --require-cross-backend`
+  with Rust 1.100.0 on the 4 vCPU cloud host: two clean runner builds recorded
+  byte-identical locks; 8 min 30 s wall in total.
+- All 11 programs are `status = "built"`: for each of the ten corpus programs
+  the frontend built by Cranelift and the frontend built by the verified
+  backend (a standalone x86-64 ELF executable, run natively, returning all
+  eight result bytes) return the same full 63-bit CST digest, equal to the
+  digest of the Rust seed parser's CST. The byte-class probe also agrees.
+- Re-running exact mode (`bootstrap/run.sh stage1 --require-cross-backend`,
+  runner only: 25 s) regenerates the committed lock bit for bit.
+- `vesper-bootstrap check-stage1-lock bootstrap/stage1.lock`: ok (11 programs).
+  The committed-lock test now requires every program to be verified-built,
+  and because the committed lock is strict, the outcome ratchet (Bazel test
+  and the Bootstrap Stage 1 workflow) fails on any future verified refusal.
+- Committed lock SHA-256:
+  `605a9189fa7e8c1e58a406edd3d8f6c2706d9babc7ad61896501a372c8bdc5ff`.
+
+What this is and is not: a one-stage, two-backend cross-check of a real
+self-hosted component (the frontend), both builds produced by the same Rust
+seed. It is not DDC in the manuscript's sense (chapter 10.2: stage2 produced
+by a diverse stage1 and compared with the self-compiled stage2), which needs a
+self-hosted compiler that emits code; nor is it a Stage 2/3 fixed point, an
+independent-builder quorum, or a Lean soundness certificate for the frontend.
+Only Linux x86-64 was measured; other hosts record their own seed.
+
 ## Update 2026-11-16: reproducible runner, outcome ratchet and CI
 
 Base `5a018bd` (after #835). This is the harness half of #582; the strict
