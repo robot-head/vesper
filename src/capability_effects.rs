@@ -422,6 +422,15 @@ pub(crate) fn used_names(e: &Expr, out: &mut BTreeSet<String>) {
                 used_names(body, out);
             }
         }
+        ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_) => {
+            for c in e.kind.control_children().into_iter().flatten() {
+                used_names(c, out);
+            }
+        }
         ExprKind::Closure { body, .. } => each(body),
         ExprKind::Handle {
             state,
@@ -536,6 +545,15 @@ fn each_child(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         ExprKind::Match { value, arms } => {
             f(value);
             arms.iter().for_each(|(_, b)| f(b));
+        }
+        ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_) => {
+            for c in e.kind.control_children().into_iter().flatten() {
+                f(c);
+            }
         }
         ExprKind::Closure { body, .. } => f(body),
         ExprKind::Handle {
@@ -930,6 +948,11 @@ struct Walker<'w> {
     node: Option<String>,
     edges: BTreeMap<String, Vec<(String, Span)>>,
     indirect_targets: BTreeSet<String>,
+    /// Whether a `break` value of each enclosing loop is secret-derived.
+    breaks: Vec<bool>,
+    /// The enclosing function or closure result type, and whether an early
+    /// `return` value is secret-derived.
+    returns: Vec<(Type, bool)>,
 }
 
 enum Callee<'w> {
@@ -961,6 +984,8 @@ impl<'w> Walker<'w> {
             node: None,
             edges: BTreeMap::new(),
             indirect_targets: BTreeSet::new(),
+            breaks: vec![],
+            returns: vec![],
         };
         if w.has(Capability::Realtime) {
             w.node = Some(function.name.clone());
@@ -989,9 +1014,11 @@ impl<'w> Walker<'w> {
         let Some(body) = &f.body else {
             return false;
         };
+        self.returns.push((f.result.clone(), false));
         let tainted = self.expr(body);
+        let returned = self.returns.pop().is_some_and(|(_, t)| t);
         self.coerce(body, &f.result);
-        tainted
+        tainted | returned
     }
     fn error(&mut self, code: &str, message: String, span: Span, help: &str) {
         self.diagnostics
@@ -1108,6 +1135,32 @@ impl<'w> Walker<'w> {
         );
     }
 
+    /// Walks a loop body to a taint fixpoint: a secret assigned in one
+    /// iteration reaches the next. Only the last walk's findings are kept.
+    /// Returns whether a `break` value is secret-derived.
+    fn loop_body(&mut self, body: &mut dyn FnMut(&mut Self) -> bool) -> bool {
+        let diagnostics = self.diagnostics.len();
+        let calls = self.direct_calls.len();
+        let edges = self.edges.clone();
+        let taint = |w: &Self| {
+            w.scopes
+                .iter()
+                .flat_map(|s| s.values().map(|l| l.tainted))
+                .collect::<Vec<_>>()
+        };
+        loop {
+            let before = taint(self);
+            self.breaks.push(false);
+            body(self);
+            let broke = self.breaks.pop().unwrap_or(false);
+            if taint(self) == before {
+                return broke;
+            }
+            self.diagnostics.truncate(diagnostics);
+            self.direct_calls.truncate(calls);
+            self.edges = edges.clone();
+        }
+    }
     fn with_scope<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
         self.scopes.push(BTreeMap::new());
         let r = f(self);
@@ -1258,7 +1311,7 @@ impl<'w> Walker<'w> {
             ExprKind::Block { statements, tail } => self.with_scope(|w| {
                 for s in statements {
                     match s {
-                        Statement::Let { pat, ty, value } => {
+                        Statement::Let { pat, ty, value, .. } => {
                             let t = w.expr(value);
                             if *ty != Type::Infer {
                                 w.coerce(value, ty);
@@ -1414,6 +1467,48 @@ impl<'w> Walker<'w> {
                 }
                 t
             }
+            ExprKind::Loop(body) => self.loop_body(&mut |w| w.with_scope(|w| w.expr(body))),
+            ExprKind::For { pat, iter, body } => {
+                let bound = self.expr(iter);
+                if ct && bound {
+                    self.branch_on_secret("'for' range bound", iter.span.clone());
+                }
+                let element = match &iter.kind {
+                    ExprKind::Range { start, .. } => self.ty(start),
+                    _ => None,
+                };
+                self.loop_body(&mut |w| {
+                    w.with_scope(|w| {
+                        w.bind_pattern(pat, bound, element.as_ref());
+                        w.expr(body)
+                    })
+                });
+                false
+            }
+            ExprKind::Range { start, end, .. } => {
+                let a = self.expr(start);
+                let b = self.expr(end);
+                a | b
+            }
+            ExprKind::Break(value) => {
+                let t = value.as_ref().is_some_and(|v| self.expr(v));
+                if let Some(b) = self.breaks.last_mut() {
+                    *b |= t;
+                }
+                false
+            }
+            ExprKind::Return(value) => {
+                if let Some(v) = value {
+                    let t = self.expr(v);
+                    if let Some((target, _)) = self.returns.last().cloned() {
+                        self.coerce(v, &target);
+                    }
+                    if let Some((_, r)) = self.returns.last_mut() {
+                        *r |= t;
+                    }
+                }
+                false
+            }
             ExprKind::Closure {
                 params,
                 effects,
@@ -1468,6 +1563,7 @@ impl<'w> Walker<'w> {
                     self.indirect_targets.insert(node.clone());
                     self.node = Some(node);
                 }
+                self.returns.push((result.clone(), false));
                 let t = self.with_scope(|w| {
                     for p in params {
                         let secret = w.secret_type(&p.ty);
@@ -1484,6 +1580,7 @@ impl<'w> Walker<'w> {
                     }
                     w.expr(body)
                 });
+                let t = t | self.returns.pop().is_some_and(|(_, r)| r);
                 if self.caps.contains(&Capability::ConstTime) && t {
                     let declared = match self.ty(e) {
                         Some(Type::Function { result, .. }) => Some(*result),

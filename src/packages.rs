@@ -1099,7 +1099,7 @@ impl Renamer<'_> {
                 let mark = self.values.len();
                 for s in statements {
                     match s {
-                        Statement::Let { pat, ty, value } => {
+                        Statement::Let { pat, ty, value, .. } => {
                             self.expr(value);
                             self.ty(ty, &pat.span.clone());
                             self.pattern(pat);
@@ -1196,6 +1196,24 @@ impl Renamer<'_> {
                     self.clause(c);
                 }
                 self.values.truncate(mark);
+            }
+            ExprKind::Loop(body) => self.expr(body),
+            ExprKind::For { pat, iter, body } => {
+                // The iterable is evaluated outside the pattern's scope.
+                self.expr(iter);
+                let mark = self.values.len();
+                self.pattern(pat);
+                self.expr(body);
+                self.values.truncate(mark);
+            }
+            ExprKind::Range { start, end, .. } => {
+                self.expr(start);
+                self.expr(end);
+            }
+            ExprKind::Break(value) | ExprKind::Return(value) => {
+                if let Some(v) = value {
+                    self.expr(v);
+                }
             }
         }
         self.span(&mut e.span);

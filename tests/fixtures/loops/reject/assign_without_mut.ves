@@ -1,0 +1,8 @@
+// E0313: assignment needs `let mut`.
+fn main() -> i64 {
+    let total = 0;
+    for i in 0..3 {
+        total = wrapping_add(total, i);
+    }
+    total
+}

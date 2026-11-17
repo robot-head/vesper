@@ -12,7 +12,7 @@ linear effect Source {
     fn read(inout buf: Word) -> Io;
 }
 fn main() -> u64 eff [Source, Fail[ArithOverflow], Fail[RuntimeError]] {
-    let buf = Word {
+    let mut buf = Word {
         v: 0
     };
     let n: u64 = match Source::read(inout buf) {

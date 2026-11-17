@@ -36,7 +36,7 @@ fn main() -> u64 eff [Pulse] {
     let lease = Lease {
         slot: 1000
     };
-    let buf = Word {
+    let mut buf = Word {
         v: 0
     };
     match Pulse::read(inout buf) {

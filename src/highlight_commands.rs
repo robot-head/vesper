@@ -542,7 +542,7 @@ impl<'a> Collector<'a> {
                 let mark = bindings.len();
                 for s in statements {
                     match s {
-                        Statement::Let { pat, ty, value } => {
+                        Statement::Let { pat, ty, value, .. } => {
                             self.expr(value, bounds, bindings, false);
                             let ty = if *ty != Type::Infer {
                                 ty.clone()
@@ -614,6 +614,25 @@ impl<'a> Collector<'a> {
                     self.bind_pattern(pat, &ty, bounds, bindings);
                     self.expr(arm, bounds, bindings, false);
                     self.close(bindings, mark);
+                }
+            }
+            ExprKind::For { pat, iter, body } => {
+                self.expr(iter, bounds, bindings, false);
+                let ty = match &iter.kind {
+                    ExprKind::Range { start, .. } => self.expr_type(start),
+                    _ => Type::Infer,
+                };
+                let mark = bindings.len();
+                self.bind_pattern(pat, &ty, bounds, bindings);
+                self.expr(body, bounds, bindings, false);
+                self.close(bindings, mark);
+            }
+            k @ (ExprKind::Loop(_)
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_)) => {
+                for c in k.control_children().into_iter().flatten() {
+                    self.expr(c, bounds, bindings, false);
                 }
             }
             ExprKind::Closure { params, body, .. } => {

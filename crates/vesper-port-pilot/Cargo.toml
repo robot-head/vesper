@@ -1,0 +1,19 @@
+[package]
+name = "vesper-port-pilot"
+version = "0.1.0"
+edition = "2024"
+description = "Pilot crate for the Vesper port harness: one API, a Rust and a Vesper implementation"
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+
+[features]
+# Forward every public function to the Vesper build of vesper/pilot.ves.
+vesper-port = ["dep:vesper-port-harness"]
+# A deliberately wrong Vesper build: the port test run must fail.
+vesper-port-divergent = ["vesper-port"]
+
+[dependencies]
+vesper-port-abi = { path = "../vesper-port-abi" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }

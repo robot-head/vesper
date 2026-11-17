@@ -1,0 +1,19 @@
+// Ten million iterations in constant stack: `loop` lowers to a back edge,
+// not to recursion.
+fn sum_below(n: u64) -> u64 {
+    let mut total: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i == n {
+            break;
+        }
+        total = wrapping_add(total, i);
+        i = wrapping_add(i, 1);
+    }
+    total
+}
+
+fn main() -> u64 {
+    let n: u64 = 10000000;
+    sum_below(n) % 251
+}

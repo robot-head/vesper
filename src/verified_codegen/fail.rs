@@ -75,6 +75,37 @@ impl Fails {
             .max()
             .unwrap_or(0)
     }
+    /// Add, for every code and handler site tag, the site's escape code
+    /// (same payload): a failure raised by an operation clause travels as
+    /// it through the handled body (see `evidence.rs`).
+    pub fn add_escapes<'a>(&mut self, tags: impl IntoIterator<Item = &'a String>) {
+        let base: Vec<(String, (u64, Type, Shape))> = self
+            .by_type
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let mut next = base.len() as u64 + 1;
+        for t in tags {
+            for (k, (_, ty, s)) in &base {
+                self.by_type
+                    .insert(format!("{k}@{t}"), (next, ty.clone(), s.clone()));
+                next += 1;
+            }
+        }
+    }
+    /// The escape code of `code` at the handler site `tag`.
+    pub fn escape(&self, code: u64, tag: &str) -> Option<u64> {
+        let (k, _) = self.by_type.iter().find(|(_, (c, _, _))| *c == code)?;
+        self.by_type.get(&format!("{k}@{tag}")).map(|(c, _, _)| *c)
+    }
+    /// The codes that are not escape codes.
+    pub fn base_codes(&self) -> Vec<u64> {
+        self.by_type
+            .iter()
+            .filter(|(k, _)| !k.contains('@'))
+            .map(|(_, (c, _, _))| *c)
+            .collect()
+    }
     pub fn name(&self, code: u64) -> String {
         self.payload(code)
             .map(|(t, _)| t.to_string())

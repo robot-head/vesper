@@ -57,13 +57,13 @@ fn validity() -> u64 eff [Ffi[Bridge]] {
 
 fn slices() -> u64 eff [Ffi[Bridge]] {
     let src: (u8, u8, u8, u8) = (1, 2, 3, 4);
-    let dst: (u8, u8, u8) = (0, 0, 0);
+    let mut dst: (u8, u8, u8) = (0, 0, 0);
     let n = Bridge::bridge_copy(in src, inout dst);
     let (x, y, z) = dst;
     Bridge::bridge_report8(20, x);
     Bridge::bridge_report8(21, y);
     Bridge::bridge_report8(22, z);
-    let crc: u32 = 7;
+    let mut crc: u32 = 7;
     Bridge::bridge_crc_update(inout crc, in src);
     Bridge::bridge_report32(23, crc);
     let one: (u8, u8) = (9, 9);
@@ -73,7 +73,7 @@ fn slices() -> u64 eff [Ffi[Bridge]] {
 }
 
 fn structs() -> u64 eff [Ffi[Bridge]] {
-    let pair = Pair {
+    let mut pair = Pair {
         lo: 0,
         hi: 0
     };
@@ -81,7 +81,7 @@ fn structs() -> u64 eff [Ffi[Bridge]] {
     Bridge::bridge_report32(30, pair.lo);
     Bridge::bridge_report32(31, pair.hi);
     Bridge::bridge_report_signed(32, widen_i64(ok));
-    let h = Hdr {
+    let mut h = Hdr {
         magic: 16909060,
         version: 5,
         tag: (1, 2, 3),
@@ -99,7 +99,7 @@ fn structs() -> u64 eff [Ffi[Bridge]] {
 }
 
 fn records() -> u64 eff [Ffi[Bridge]] {
-    let recs = (
+    let mut recs = (
         Rec {
             id: 2,
             value: 10
@@ -138,8 +138,8 @@ fn nullable() -> u64 eff [Ffi[Bridge]] {
     let none: Option[(u8, u8, u8)] = None;
     Bridge::bridge_report32(50, Bridge::bridge_opt_len(in some));
     Bridge::bridge_report32(51, Bridge::bridge_opt_len(in none));
-    let p: Option[u32] = Some(41);
-    let q: Option[u32] = None;
+    let mut p: Option[u32] = Some(41);
+    let mut q: Option[u32] = None;
     Bridge::bridge_report32(52, Bridge::bridge_opt_get(in p));
     Bridge::bridge_report32(53, Bridge::bridge_opt_get(in q));
     Bridge::bridge_opt_bump(inout p);

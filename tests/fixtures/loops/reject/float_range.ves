@@ -1,0 +1,7 @@
+// E0200: `for` ranges are over integers.
+fn main() -> i64 {
+    for x in 0.0..1.0 {
+        let y = x;
+    }
+    0
+}

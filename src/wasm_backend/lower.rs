@@ -2621,6 +2621,13 @@ impl<'l, 'a> Emit<'l, 'a> {
                 self.name
             )));
         }
+        if f.blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .any(|i| matches!(i.op, crate::ir::Op::Loop | crate::ir::Op::Exit { .. }))
+        {
+            return Err(self.err(Unsupported::Operation, crate::loops::WASM_REFUSAL));
+        }
         let order = topological(f).ok_or_else(|| {
             WasmError::Invalid(format!("{}: Place IR block graph is cyclic", self.name))
         })?;

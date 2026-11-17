@@ -152,6 +152,11 @@ fn children(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             arms.iter().for_each(|(_, x)| f(x));
         }
         ExprKind::Closure { body, .. } => f(body),
+        k @ (ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_)) => k.control_children().into_iter().flatten().for_each(f),
         ExprKind::Handle {
             state,
             body,

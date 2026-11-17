@@ -41,7 +41,7 @@ fn worker(id: u64, port: u64, delay: u64) -> Report eff [Clock, Sched, Net] {
     let woke = Clock::now();
     let first = Net::recv(port);
     Sched::yield_now();
-    let slot: u64 = 0;
+    let mut slot: u64 = 0;
     let filled = Net::fill(inout slot);
     let value = if filled {
         slot

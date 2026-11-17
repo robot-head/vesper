@@ -12,7 +12,7 @@ fn append(inout broker.{index, metrics}: Broker, in config: u64) {
 }
 
 fn main() -> u64 {
-    let broker = Broker {
+    let mut broker = Broker {
         index: 1,
         metrics: 0,
         config: 41

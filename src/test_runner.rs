@@ -710,6 +710,15 @@ fn collect_mutants_in_fn(
                 stack.push(value);
             }
             ExprKind::Closure { body, .. } => stack.push(body),
+            k @ (ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_)) => {
+                let mut children = k.control_children().unwrap_or_default();
+                children.reverse();
+                stack.extend(children);
+            }
             ExprKind::Handle {
                 state,
                 body,

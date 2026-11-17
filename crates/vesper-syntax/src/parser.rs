@@ -160,6 +160,7 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
             diagnostics,
         });
     }
+    let item_names = contextual_item_names(&tokens, source);
     let mut p = Parser {
         source,
         tokens,
@@ -168,7 +169,7 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
         diagnostics,
         no_struct: false,
         row_names: Default::default(),
-        bound_values: Default::default(),
+        bound_values: item_names,
         model_uses: vec![],
         trait_bounds: vec![],
         uses: vec![],
@@ -462,7 +463,12 @@ impl Parser<'_> {
                 .chain(std::iter::once(height(value)))
                 .max()
                 .unwrap_or(0),
-            ExprKind::Closure { body, .. } => height(body),
+            ExprKind::Closure { body, .. } | ExprKind::Loop(body) => height(body),
+            ExprKind::For { iter, body, .. } => height(iter).max(height(body)),
+            ExprKind::Range { start, end, .. } => height(start).max(height(end)),
+            ExprKind::Break(value) | ExprKind::Return(value) => {
+                value.as_ref().map_or(0, |e| height(e))
+            }
             ExprKind::Handle {
                 state,
                 body,
@@ -575,20 +581,30 @@ impl Parser<'_> {
                     // `N: dim` (§28.2): a tensor dimension parameter. Its kind
                     // is recovered from use by `vesper::tensor_types`.
                     self.bump();
-                } else if self.at(K::Upper) {
-                    let start = self.start();
-                    let trait_ref = self.trait_ref();
-                    self.pending_bounds.push(TraitBoundSyntax {
-                        param: name.clone(),
-                        trait_ref,
-                        span: start..self.end(),
-                    });
                 } else {
-                    self.expect(K::Mod);
-                    bound = self.mode().unwrap_or_else(|| {
-                        self.error("expected modal bound");
-                        Mode::Linear
-                    });
+                    // `T: Ord`, `T: mod copy`, or several joined by `+`
+                    // (`T: mod copy + Ord + Hash`).
+                    loop {
+                        if self.at(K::Upper) {
+                            let start = self.start();
+                            let trait_ref = self.trait_ref();
+                            self.pending_bounds.push(TraitBoundSyntax {
+                                param: name.clone(),
+                                trait_ref,
+                                span: start..self.end(),
+                                owner: String::new(),
+                            });
+                        } else {
+                            self.expect(K::Mod);
+                            bound = self.mode().unwrap_or_else(|| {
+                                self.error("expected modal bound");
+                                Mode::Linear
+                            });
+                        }
+                        if !self.eat(K::Plus) {
+                            break;
+                        }
+                    }
                 }
             } else if row {
                 self.error("effect row parameters require ': eff'");
@@ -761,6 +777,7 @@ impl Parser<'_> {
                 self.bump();
                 let name = self.upper();
                 let generics = self.generics();
+                self.own_type_bounds(&name);
                 let fields = self.fields();
                 Some(Item::Adt(Adt {
                     name: name.clone(),
@@ -780,6 +797,7 @@ impl Parser<'_> {
                 self.bump();
                 let name = self.upper();
                 let generics = self.generics();
+                self.own_type_bounds(&name);
                 self.expect(K::LBrace);
                 let mut variants = vec![];
                 while !self.at(K::RBrace) && !self.at(K::Eof) {
@@ -832,7 +850,9 @@ impl Parser<'_> {
                 self.expect(K::LBrace);
                 let mut ops = vec![];
                 while self.at(K::Fn) {
+                    let mark = self.trait_bounds.len();
                     ops.push(self.function(true, false));
+                    self.unsupported_owned(mark);
                 }
                 self.expect(K::RBrace);
                 Some(Item::Effect(EffectDecl {
@@ -905,19 +925,27 @@ impl Parser<'_> {
                     self.row_names = old_rows;
                     return Some(Item::Conformance(c));
                 }
-                for b in bounds {
-                    self.diagnostic(Diagnostic::new(
-                        "E0002",
-                        "trait bounds are only allowed on 'impl Trait for Type' and model generics",
-                        b.span,
-                    ));
-                }
                 self.expect(K::LBrace);
                 let mut methods = vec![];
+                let mark = self.trait_bounds.len();
                 while self.at_method() {
                     methods.push(self.method());
                 }
                 self.expect(K::RBrace);
+                // Method bounds are owned by `Type::method`; the impl's own
+                // bounds constrain every method (whose generics are the
+                // impl's generics followed by the method's).
+                let owner = ty.name().to_owned();
+                for b in &mut self.trait_bounds[mark..] {
+                    b.owner = format!("{owner}::{}", b.owner);
+                }
+                for b in bounds {
+                    for m in &methods {
+                        let mut b = b.clone();
+                        b.owner = format!("{owner}::{}", m.name);
+                        self.trait_bounds.push(b);
+                    }
+                }
                 self.row_names = old_rows;
                 Some(Item::Impl {
                     ty,
@@ -934,7 +962,10 @@ impl Parser<'_> {
         let name_span = self.span();
         let name = self.lower();
         let generics = self.generics();
-        self.trait_bounds.append(&mut self.pending_bounds);
+        for mut b in std::mem::take(&mut self.pending_bounds) {
+            b.owner = name.clone();
+            self.trait_bounds.push(b);
+        }
         self.row_names
             .extend(generics.iter().filter(|g| g.row).map(|g| g.name.clone()));
         self.expect(K::LParen);
@@ -955,6 +986,7 @@ impl Parser<'_> {
                     param,
                     trait_ref: w.trait_ref,
                     span: w.span,
+                    owner: name.clone(),
                 });
             }
         }
@@ -1388,7 +1420,9 @@ impl Parser<'_> {
                     span: start..self.end(),
                 });
             } else if self.at(K::Fn) {
+                let mark = self.trait_bounds.len();
                 methods.push(self.function(true, false));
+                self.unsupported_owned(mark);
             } else {
                 self.error("expected 'type' or 'fn' in a trait");
             }
@@ -1434,6 +1468,21 @@ impl Parser<'_> {
         c
     }
     /// The self type, `where` clauses and body of an impl or model.
+    /// Moves the trait bounds of a type's generic parameters to the module
+    /// with the type as their owner.
+    fn own_type_bounds(&mut self, name: &str) {
+        for mut b in std::mem::take(&mut self.pending_bounds) {
+            b.owner = name.to_owned();
+            self.trait_bounds.push(b);
+        }
+    }
+    /// Marks the bounds recorded since `mark` as belonging to a trait,
+    /// conformance or effect operation (which the frontend rejects).
+    fn unsupported_owned(&mut self, mark: usize) {
+        for b in &mut self.trait_bounds[mark..] {
+            b.owner = format!("$unsupported::{}", b.owner);
+        }
+    }
     fn conformance_rest(
         &mut self,
         start: usize,
@@ -1472,7 +1521,9 @@ impl Parser<'_> {
                     span: start..self.end(),
                 });
             } else if self.at_method() {
+                let mark = self.trait_bounds.len();
                 methods.push(self.method());
+                self.unsupported_owned(mark);
             } else {
                 self.error("expected 'type' or 'fn' in an impl or model");
             }
@@ -1683,6 +1734,11 @@ impl Parser<'_> {
                 continue;
             }
             if self.eat(K::Let) {
+                // `let mut` (manuscript `LetStmt`); `mut` is a contextual word.
+                let mutable = self.at_word(0, "mut") && self.nth(1) != K::Colon;
+                if mutable {
+                    self.bump();
+                }
                 let pat = self.pattern();
                 let ty = if self.eat(K::Colon) {
                     self.ty()
@@ -1697,11 +1753,28 @@ impl Parser<'_> {
                     self.recover_statement();
                 }
                 pattern_bindings(&pat, &mut self.bound_values);
-                statements.push(Statement::Let { pat, ty, value });
+                statements.push(Statement::Let {
+                    pat,
+                    ty,
+                    value,
+                    mutable,
+                });
             } else {
                 let diagnostics_before = self.diagnostics.len();
                 let e = self.expr();
                 if self.eat(K::Semi) {
+                    statements.push(Statement::Expr(e));
+                } else if matches!(
+                    e.kind,
+                    ExprKind::Loop(_)
+                        | ExprKind::For { .. }
+                        | ExprKind::If { .. }
+                        | ExprKind::Match { .. }
+                ) && self.source[..e.span.end.min(self.source.len())].ends_with('}')
+                    && !matches!(self.kind(), K::RBrace | K::Eof)
+                {
+                    // A block-like statement ending in `}` needs no `;` before
+                    // the next statement (manuscript `Stmt`).
                     statements.push(Statement::Expr(e));
                 } else if self.editor
                     && !matches!(self.kind(), K::RBrace | K::Eof)
@@ -1759,11 +1832,96 @@ impl Parser<'_> {
             }
             K::Match => self.match_expr(),
             K::If => self.if_expr(),
+            K::Lower if self.at_word(0, "loop") && self.nth(1) == K::LBrace => self.loop_expr(),
+            K::Lower if self.at_word(0, "for") && self.for_header() => self.for_expr(),
+            K::Lower if self.at_word(0, "break") && !self.bound_values.contains("break") => {
+                self.jump_expr(false)
+            }
+            K::Return => self.jump_expr(true),
             K::Pipe | K::Or => self.closure(),
             _ => self.binary(0),
         };
         self.builder.finish_node();
         e
+    }
+    /// `loop { body }` (manuscript `LoopExpr`).
+    fn loop_expr(&mut self) -> Expr {
+        let start = self.start();
+        self.bump();
+        let body = Box::new(self.block());
+        Expr {
+            kind: ExprKind::Loop(body),
+            span: start..self.end(),
+        }
+    }
+    /// Whether `for` starts a `ForExpr` (`for Pat in`), not a value named `for`.
+    fn for_header(&self) -> bool {
+        !self.bound_values.contains("for")
+            && matches!(
+                self.nth(1),
+                K::Lower | K::Upper | K::LParen | K::Int | K::True | K::False
+            )
+    }
+    /// `for pat in start..end { body }` (manuscript `ForExpr`). The iterable
+    /// is any restricted expression; `a..b` and `a..=b` build a range.
+    fn for_expr(&mut self) -> Expr {
+        let start = self.start();
+        self.bump();
+        let pat = self.pattern();
+        self.expect(K::In);
+        let old = self.no_struct;
+        self.no_struct = true;
+        let first = self.binary(2);
+        let iter = if matches!(self.kind(), K::DotDot | K::DotDotEq) {
+            let inclusive = self.at(K::DotDotEq);
+            self.bump();
+            let end = self.binary(2);
+            let span = first.span.start..end.span.end;
+            self.record_expr(Expr {
+                kind: ExprKind::Range {
+                    start: Box::new(first),
+                    end: Box::new(end),
+                    inclusive,
+                },
+                span,
+            })
+        } else {
+            first
+        };
+        self.no_struct = old;
+        let outer_values = self.bound_values.clone();
+        pattern_bindings(&pat, &mut self.bound_values);
+        let body = Box::new(self.block());
+        self.bound_values = outer_values;
+        Expr {
+            kind: ExprKind::For {
+                pat,
+                iter: Box::new(iter),
+                body,
+            },
+            span: start..self.end(),
+        }
+    }
+    /// `return value?` or `break value?` (manuscript `ReturnExpr`, `BreakExpr`).
+    fn jump_expr(&mut self, ret: bool) -> Expr {
+        let start = self.start();
+        self.bump();
+        let value = if matches!(
+            self.kind(),
+            K::Semi | K::RBrace | K::RParen | K::RBracket | K::Comma | K::Eof
+        ) {
+            None
+        } else {
+            Some(Box::new(self.expr()))
+        };
+        Expr {
+            kind: if ret {
+                ExprKind::Return(value)
+            } else {
+                ExprKind::Break(value)
+            },
+            span: start..self.end(),
+        }
     }
     fn restricted(&mut self) -> Expr {
         let old = self.no_struct;
@@ -2454,4 +2612,27 @@ fn pattern_bindings(p: &Pattern, names: &mut std::collections::BTreeSet<String>)
         }
         _ => {}
     }
+}
+
+/// Top-level functions named after a contextual loop word (`fn break()`)
+/// keep that word an ordinary name in calls, like a local binding does.
+pub(crate) fn contextual_item_names(
+    tokens: &[Token],
+    source: &str,
+) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut significant = tokens
+        .iter()
+        .filter(|t| !matches!(t.kind, K::Whitespace | K::Comment | K::BlockComment));
+    let mut previous = None;
+    for t in &mut significant {
+        if previous == Some(K::Fn) && t.kind == K::Lower {
+            let name = &source[t.span.clone()];
+            if matches!(name, "break" | "for" | "loop") {
+                names.insert(name.to_owned());
+            }
+        }
+        previous = Some(t.kind);
+    }
+    names
 }

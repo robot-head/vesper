@@ -213,7 +213,7 @@ fn walk(e: &Expr, f: &mut Visitor<'_>) {
         ExprKind::Block { statements, tail } => {
             for s in statements {
                 match s {
-                    Statement::Let { pat, ty, value } => {
+                    Statement::Let { pat, ty, value, .. } => {
                         f(None, Some(ty), Some(pat));
                         walk_pattern(pat, f);
                         walk(value, f);
@@ -257,6 +257,19 @@ fn walk(e: &Expr, f: &mut Visitor<'_>) {
                 walk(x, f);
             }
         }
+        ExprKind::For { pat, iter, body } => {
+            walk(iter, f);
+            walk_pattern(pat, f);
+            walk(body, f);
+        }
+        k @ (ExprKind::Loop(_)
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_)) => k
+            .control_children()
+            .into_iter()
+            .flatten()
+            .for_each(|x| walk(x, f)),
         ExprKind::Closure {
             params,
             result,
@@ -1028,7 +1041,7 @@ impl Body<'_> {
                 self.env.push(BTreeMap::new());
                 for s in statements {
                     match s {
-                        Statement::Let { pat, ty, value } => self.let_statement(pat, ty, value),
+                        Statement::Let { pat, ty, value, .. } => self.let_statement(pat, ty, value),
                         Statement::Expr(x) => {
                             self.expr(x, None);
                         }
@@ -1124,6 +1137,29 @@ impl Body<'_> {
                     });
                 }
                 result.unwrap_or(Ty::Unknown)
+            }
+            ExprKind::Loop(body) => {
+                self.expr(body, None);
+                Ty::Unknown
+            }
+            ExprKind::For { pat, iter, body } => {
+                let element = self.expr(iter, None);
+                self.env.push(BTreeMap::new());
+                self.pattern(pat, &element);
+                self.expr(body, None);
+                self.env.pop();
+                Ty::unit()
+            }
+            ExprKind::Range { start, end, .. } => {
+                let a = self.expr(start, None);
+                let b = self.expr(end, Some(&a));
+                self.join(a, b, end.span.clone(), "the range end")
+            }
+            ExprKind::Break(value) | ExprKind::Return(value) => {
+                if let Some(v) = value {
+                    self.expr(v, None);
+                }
+                Ty::Unknown
             }
             ExprKind::Closure {
                 params,

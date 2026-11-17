@@ -918,6 +918,7 @@ fn compile_session_with_linkage<M: Module>(
             generic_vars: BTreeMap::new(),
             pointers: BTreeMap::new(),
             handlers: vec![],
+            exits: vec![],
             inline_depth: 0,
             fail_record: None,
             caller_slot: None,

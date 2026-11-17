@@ -1,0 +1,13 @@
+[package]
+name = "vesper-port-harness"
+version = "0.1.0"
+edition = "2024"
+description = "Cargo build-script helper that compiles a Vesper port with `vesper build --lib` and links it"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+cc = "1"
+vesper = { path = "../.." }
+
+[dev-dependencies]
+serde_json = { workspace = true }

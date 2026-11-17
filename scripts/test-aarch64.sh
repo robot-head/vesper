@@ -31,3 +31,17 @@ for case in fibonacci:55 transaction:42 projections:42 counter:3 fail:42 closure
     fi
     printf '%s: AArch64 exit %s\n' "$source" "$actual"
 done
+# Loops and early exits (src/loops.rs): back edges, break values, return.
+for case in count:170 control:62; do
+    source=${case%:*}
+    expected=${case#*:}
+    "$vesper" emit "tests/fixtures/loops/$source.ves" --emit object --target aarch64-unknown-linux-gnu -o "$artifacts/loops_$source.o"
+    "$linker" "$artifacts/start.o" "$artifacts/loops_$source.o" -o "$artifacts/loops_$source"
+    actual=0
+    "$emulator" "$artifacts/loops_$source" || actual=$?
+    if [ "$actual" != "$expected" ]; then
+        printf 'loops/%s: expected %s, got %s\n' "$source" "$expected" "$actual" >&2
+        exit 1
+    fi
+    printf 'loops/%s: AArch64 exit %s\n' "$source" "$actual"
+done

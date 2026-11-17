@@ -300,7 +300,7 @@ fn nested_block_moves_preserve_origin_and_writes_do_not_reinitialize_recovery_st
     // The unchanged checker rejects assignment to an already moved place; it
     // does not implement reinitialization. Do not invent a new initialized state
     // or turn that rejected write into an ownership-transfer witness.
-    let source = "fn bad(){let x=\"old\";let a=x;x=\"new\";let b=x;}";
+    let source = "fn bad(){let mut x=\"old\";let a=x;x=\"new\";let b=x;}";
     let diagnostics = errors(source);
     validate(source, &diagnostics);
     let ds = diagnostics

@@ -51,6 +51,7 @@ fn lex(source: &str, limits: Limits, work: &mut Work) -> Result<lexer::Lexed, Er
     Ok(lexed)
 }
 fn parser<'a>(source: &'a str, tokens: Vec<Token>, limits: Limits) -> Parser<'a> {
+    let item_names = super::contextual_item_names(&tokens, source);
     Parser {
         source,
         tokens,
@@ -59,7 +60,7 @@ fn parser<'a>(source: &'a str, tokens: Vec<Token>, limits: Limits) -> Parser<'a>
         diagnostics: vec![],
         no_struct: false,
         row_names: Default::default(),
-        bound_values: Default::default(),
+        bound_values: item_names,
         model_uses: vec![],
         trait_bounds: vec![],
         uses: vec![],

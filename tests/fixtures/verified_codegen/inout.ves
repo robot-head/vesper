@@ -13,13 +13,13 @@ fn bump(inout x: i64) {
 }
 
 fn main() -> (u32, u64, i64) {
-    let c = Counter {
+    let mut c = Counter {
         hits: 0,
         total: 10
     };
     record(inout c, 5);
     record(inout c, 7);
-    let y = 14;
+    let mut y = 14;
     bump(inout y);
     (c.hits, c.total, y)
 }

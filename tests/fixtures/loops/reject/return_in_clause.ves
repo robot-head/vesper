@@ -1,0 +1,14 @@
+// E0213: `return` cannot leave from inside a handler clause.
+effect Ask {
+    fn ask() -> i64;
+}
+fn main() -> i64 {
+    handle Ask in {
+        Ask::ask()
+    } with {
+        return value => value,
+        ask(resume) => {
+            return 3;
+        },
+    }
+}

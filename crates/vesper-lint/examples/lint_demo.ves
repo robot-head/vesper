@@ -11,7 +11,7 @@ fn update(inout counters: Counters) eff [Audit] {
 }
 
 fn main() -> u64 eff [Audit] {
-    let counters = Counters {
+    let mut counters = Counters {
         hits: 1,
         limit: 41
     };

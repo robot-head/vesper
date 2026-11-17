@@ -1,0 +1,23 @@
+// expect E0608: `max` needs `F: Ord`, and a struct with an f64 field derives no `Ord`.
+copy struct F {
+    v: f64
+}
+
+fn max[T: mod copy](a: T, b: T) -> T where T: Ord {
+    match a.cmp(b) {
+        Less => b,
+        _ => a,
+    }
+}
+
+fn main() -> i64 {
+    let x = max(
+        F {
+            v: 1.0
+        },
+        F {
+            v: 2.0
+        }
+    );
+    0
+}

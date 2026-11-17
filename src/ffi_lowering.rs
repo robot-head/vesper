@@ -896,6 +896,15 @@ impl<'a> Rewriter<'a> {
                     self.expr(a);
                 }
             }
+            k @ (ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_)) => {
+                for c in k.control_children_mut().into_iter().flatten() {
+                    self.expr(c);
+                }
+            }
             ExprKind::Closure {
                 params,
                 result,

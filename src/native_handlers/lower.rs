@@ -789,6 +789,10 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
             ExprKind::Match { value, arms } => self.matches(value, arms, expected),
             ExprKind::Call { callee, args, .. } => self.call(e, callee, args),
             ExprKind::Closure { params, body, .. } => self.closure(e, params, body),
+            ExprKind::Loop(_) | ExprKind::For { .. } | ExprKind::Range { .. } => {
+                unsupported("loops")
+            }
+            ExprKind::Break(_) | ExprKind::Return(_) => unsupported("break and return"),
             ExprKind::Handle {
                 effect,
                 state,
@@ -828,7 +832,7 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
         let depth = self.locals.len();
         for s in statements {
             match s {
-                Statement::Let { pat, ty, value } => {
+                Statement::Let { pat, ty, value, .. } => {
                     let declared = (!matches!(ty, Type::Infer)).then_some(ty);
                     let v = self.expr(value, declared)?;
                     let kind = match declared {

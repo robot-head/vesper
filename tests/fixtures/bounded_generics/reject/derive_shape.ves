@@ -1,0 +1,11 @@
+// expect E0616: an empty impl derives only for a struct of this package with all its parameters.
+copy struct Pair[T: mod copy] {
+    a: T,
+    b: T
+}
+
+impl Eq for Pair[i64] {}
+
+fn main() -> i64 {
+    0
+}

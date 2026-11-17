@@ -1,6 +1,7 @@
 //! Checked Place IR to the slot IR (`Lir`): plan the reachable functions,
 //! flatten every value of the scalar subset into 64-bit words and reject
 //! everything else with a typed error.
+use super::evidence::Sites;
 use super::fail::{self, Fails, Handler};
 use super::machine::{
     ArithOp, Cond, FIRST_FREE_LABEL, FloatOp, Kind, Label, Lir, Slot, TrapKind, WrapOp,
@@ -315,6 +316,22 @@ pub struct Plan {
     /// Resolved handlers, by the function instance and the span of their
     /// `handle` expression.
     pub handlers: BTreeMap<(String, usize, usize), Handler>,
+    /// Failure codes rewritten after a call, by callee (escape codes of
+    /// operation clauses, see `evidence.rs`).
+    pub recode: BTreeMap<String, BTreeMap<u64, u64>>,
+}
+
+impl Plan {
+    /// A plan with no functions.
+    pub fn empty() -> Self {
+        Self {
+            functions: vec![],
+            index: BTreeMap::new(),
+            fails: Fails::default(),
+            handlers: BTreeMap::new(),
+            recode: BTreeMap::new(),
+        }
+    }
 }
 
 fn effect_name(e: &crate::ast::Effect) -> String {
@@ -416,8 +433,16 @@ pub fn plan(
     program: &Program,
     entry: &str,
     max_functions: usize,
+    sites: &Sites,
 ) -> Result<Plan, VerifiedError> {
-    plan_with(world, program, &[entry.to_owned()], max_functions, None)
+    plan_with(
+        world,
+        program,
+        &[entry.to_owned()],
+        max_functions,
+        sites,
+        None,
+    )
 }
 
 /// Plan every function reachable from `entries`. With `refused`
@@ -430,6 +455,7 @@ pub fn plan_with(
     program: &Program,
     entries: &[String],
     max_functions: usize,
+    sites: &Sites,
     mut refused: Option<&mut BTreeMap<String, Vec<VerifiedError>>>,
 ) -> Result<Plan, VerifiedError> {
     let tolerant = refused.is_some();
@@ -634,7 +660,26 @@ pub fn plan_with(
         return Err(VerifiedError::Entry("no plannable function".into()));
     }
     let locals = found.iter().map(|f| &f.local).collect::<Vec<_>>();
-    let fails = fail::codes(world, &locals, &handled, entry)?;
+    let mut fails = fail::codes(world, &locals, &handled, entry)?;
+    fails.add_escapes(sites.tags());
+    let mut recode: BTreeMap<String, BTreeMap<u64, u64>> = BTreeMap::new();
+    for (callee, tag, restore) in sites
+        .escape
+        .iter()
+        .map(|(c, t)| (c, t, false))
+        .chain(sites.restore.iter().map(|(c, t)| (c, t, true)))
+    {
+        let map = recode.entry(callee.clone()).or_default();
+        for c in fails.base_codes() {
+            if let Some(e) = fails.escape(c, tag) {
+                if restore {
+                    map.insert(e, c);
+                } else {
+                    map.insert(c, e);
+                }
+            }
+        }
+    }
     let index: BTreeMap<String, usize> = found
         .iter()
         .enumerate()
@@ -652,7 +697,12 @@ pub fn plan_with(
             // Unplanned callees (coverage) contribute nothing.
             for c in &found[n].calls {
                 if let Some(&k) = index.get(c) {
-                    next.extend(raises[k].iter().copied());
+                    let map = recode.get(c);
+                    next.extend(
+                        raises[k]
+                            .iter()
+                            .map(|r| map.and_then(|m| m.get(r)).copied().unwrap_or(*r)),
+                    );
                 }
             }
             for (error, body, clauses) in &found[n].handles {
@@ -728,7 +778,39 @@ pub fn plan_with(
         index,
         fails,
         handlers,
+        recode,
     })
+}
+
+/// A parameter of the nested function `f` that is captured by value (not
+/// `inout`) but assigned in its body: the caller would lose the write.
+pub(super) fn assigned_capture(f: &FunctionIr) -> Option<String> {
+    let by_value: BTreeSet<&str> = f
+        .params
+        .iter()
+        .filter(|p| p.pass != Pass::Inout)
+        .map(|p| p.name.as_str())
+        .collect();
+    for ins in f.blocks.iter().flat_map(|b| &b.instructions) {
+        let written: Vec<String> = match &ins.op {
+            Op::Write { place, .. } => place
+                .split('.')
+                .next()
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            Op::Call { args, .. } => args
+                .iter()
+                .filter(|a| a.pass == Pass::Inout)
+                .filter_map(|a| a.place.as_ref().map(|p| p.root.clone()))
+                .collect(),
+            _ => vec![],
+        };
+        if let Some(root) = written.into_iter().find(|r| by_value.contains(r.as_str())) {
+            return Some(root);
+        }
+    }
+    None
 }
 
 /// The direct callees of `f` (wrapping intrinsics, effect operations and
@@ -1650,6 +1732,7 @@ impl FnLower<'_> {
         let caps = self.plan.functions[n].caps.clone();
         let cap_slots = self.cap_arguments(&caps, opening)?;
         let target = &self.plan.functions[n];
+        let callee_name = target.name.clone();
         let (label, ret, base, nres, ranges, status, raises) = (
             target.label,
             target.ret_words,
@@ -1715,6 +1798,9 @@ impl FnLower<'_> {
             self.push(Lir::Jump(cont))?;
             self.push(Lir::Label(err))?;
             let mut rest = raises;
+            if let Some(map) = self.plan.recode.get(&callee_name) {
+                rest = self.recode_status(st, &rest, map)?;
+            }
             if let Some((code, handler)) = catch
                 && rest.remove(&code)
             {
@@ -1727,6 +1813,32 @@ impl FnLower<'_> {
             self.push(Lir::Label(cont))?;
         }
         Ok(())
+    }
+
+    /// Rewrite the failure status at `st` (two scratch words after it) by
+    /// `map`; the codes it may hold afterwards.
+    fn recode_status(
+        &mut self,
+        st: Slot,
+        codes: &BTreeSet<u64>,
+        map: &BTreeMap<u64, u64>,
+    ) -> Result<BTreeSet<u64>, VerifiedError> {
+        let done = self.fresh();
+        for code in codes {
+            let Some(&to) = map.get(code) else {
+                continue;
+            };
+            let other = self.fresh();
+            self.status_is(st, *code, st + 1, other)?;
+            self.push(Lir::Const { dst: st, word: to })?;
+            self.push(Lir::Jump(done))?;
+            self.push(Lir::Label(other))?;
+        }
+        self.push(Lir::Label(done))?;
+        Ok(codes
+            .iter()
+            .map(|c| map.get(c).copied().unwrap_or(*c))
+            .collect())
     }
 
     /// `v?` on a `Result[T, E]`: the `Ok` payload, or raise the `Err` one.
@@ -1841,6 +1953,15 @@ impl FnLower<'_> {
                 .ok_or_else(|| VerifiedError::Invalid(format!("unplanned {name}")))
         };
         let (body, ret, raise) = (index(&h.body)?, index(&h.ret)?, index(&h.raise)?);
+        // Captures are passed by value (an `inout` one is copied back).
+        for g in [&h.body, &h.ret, &h.raise] {
+            if let Some(root) = self.program.functions.get(g).and_then(assigned_capture) {
+                return Err(self.err(
+                    Unsupported::Effect,
+                    format!("handler assigns the captured place '{root}'"),
+                ));
+            }
+        }
         let (dst, _) = self.value_of(i.dest, &i.ty)?;
         let value = self.alloc(self.plan.functions[body].result.len())?;
         let code = self.plan.fails.code(&h.error);
@@ -1967,35 +2088,11 @@ impl FnLower<'_> {
             .ok_or_else(|| VerifiedError::Invalid(format!("missing region body {body}")))?;
         // Captured places are copied in (and `inout` ones back); a body that
         // assigns a place captured by value would lose the write.
-        let by_value: BTreeSet<&str> = f
-            .params
-            .iter()
-            .filter(|p| p.pass != Pass::Inout)
-            .map(|p| p.name.as_str())
-            .collect();
-        for b in &f.blocks {
-            for ins in &b.instructions {
-                let written: Vec<String> = match &ins.op {
-                    Op::Write { place, .. } => place
-                        .split('.')
-                        .next()
-                        .map(str::to_owned)
-                        .into_iter()
-                        .collect(),
-                    Op::Call { args, .. } => args
-                        .iter()
-                        .filter(|a| a.pass == Pass::Inout)
-                        .filter_map(|a| a.place.as_ref().map(|p| p.root.clone()))
-                        .collect(),
-                    _ => vec![],
-                };
-                if let Some(root) = written.iter().find(|r| by_value.contains(r.as_str())) {
-                    return Err(self.err(
-                        Unsupported::Effect,
-                        format!("region block assigns the captured place '{root}'"),
-                    ));
-                }
-            }
+        if let Some(root) = assigned_capture(f) {
+            return Err(self.err(
+                Unsupported::Effect,
+                format!("region block assigns the captured place '{root}'"),
+            ));
         }
         // Open: a header in the heap.
         let (globals, header, top, _) = self.heap_alloc(HEADER)?;

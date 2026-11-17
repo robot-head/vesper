@@ -1,0 +1,76 @@
+// A generic container whose type parameter carries a bound, `Eq` and
+// `Hash` on tuples, and a named model chosen at the instance site.
+copy struct Interval[K: Ord] {
+    lo: K,
+    hi: K
+}
+
+model Reverse: Ord for i64 {
+    fn cmp(in self, in other: i64) -> Ordering {
+        if self < other {
+            Greater
+        } else if self == other {
+            Equal
+        } else {
+            Less
+        }
+    }
+}
+
+fn smallest[T: mod copy](a: T, b: T, c: T) -> T where T: Ord {
+    let ab = match a.cmp(b) {
+        Greater => b,
+        _ => a,
+    };
+    match ab.cmp(c) {
+        Greater => c,
+        _ => ab,
+    }
+}
+
+fn same[T: mod copy](a: T, b: T) -> u64 where T: Eq, T: Hash {
+    if a.eq(b) {
+        if a.hash() == b.hash() {
+            1
+        } else {
+            9
+        }
+    } else {
+        0
+    }
+}
+
+fn main() -> i64 {
+    let i = Interval {
+        lo: 3,
+        hi: 5
+    };
+    let inside = if smallest(i.lo, i.hi, 4) == 3 {
+        1
+    } else {
+        0
+    };
+    let canonical = smallest(4, 2, 8);
+    let reversed = {
+        use model Reverse;
+        smallest(4, 2, 8)
+    };
+    let tuples = same((1, true), (1, true));
+    let differ = same((1, true), (2, true));
+    let flags = if tuples == 1 {
+        if differ == 0 {
+            1
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    wrapping_add(
+        wrapping_add(
+            wrapping_add(wrapping_mul(i.lo, 10000), wrapping_mul(i.hi, 1000)),
+            wrapping_add(wrapping_mul(inside, 100), wrapping_mul(canonical, 10))
+        ),
+        wrapping_add(wrapping_mul(reversed, 100000), flags)
+    )
+}

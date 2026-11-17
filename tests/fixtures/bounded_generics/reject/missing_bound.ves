@@ -1,0 +1,15 @@
+// expect E0608: a generic caller must declare the bound it passes on.
+fn max[T: mod copy](a: T, b: T) -> T where T: Ord {
+    match a.cmp(b) {
+        Less => b,
+        _ => a,
+    }
+}
+
+fn pick[T: mod copy](a: T, b: T) -> T {
+    max(a, b)
+}
+
+fn main() -> i64 {
+    pick(1, 2)
+}

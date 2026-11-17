@@ -1,0 +1,92 @@
+effect Ask {
+    fn ask() -> i64;
+}
+
+// Nested `for` over ranges with an inner `break`.
+fn triangle(n: i64) -> i64 {
+    let mut count: i64 = 0;
+    for i in 0..n {
+        for j in 0..n {
+            if j > i {
+                break;
+            }
+            count = wrapping_add(count, 1);
+        }
+    }
+    count
+}
+
+// Nested `loop`s that each leave with a value.
+fn first_pair() -> i64 {
+    let mut a: i64 = 0;
+    let found = loop {
+        let inner = loop {
+            a = wrapping_add(a, 3);
+            if a % 7 == 0 {
+                break a;
+            }
+        };
+        if inner > 50 {
+            break inner;
+        }
+    };
+    wrapping_add(found, a)
+}
+
+// `return` inside a handled body leaves the whole function, skipping the
+// handler's return clause.
+fn early(xp: i64) -> i64 {
+    let x = xp;
+    let r = handle Ask in {
+        let v = Ask::ask();
+        if v > 10 {
+            return wrapping_add(v, 1000);
+        }
+        wrapping_add(v, x)
+    } with {
+        return value => wrapping_mul(value, 2),
+        ask(resume) => resume(x),
+    };
+    wrapping_add(r, 1)
+}
+
+// `return` inside a closure leaves only the closure.
+fn closure_return(k: i64) -> i64 {
+    let f = | x: i64 | -> i64 {
+        if x < 0 {
+            return 0;
+        }
+        wrapping_mul(x, 2)
+    };
+    wrapping_add(f(k), f(-5))
+}
+
+// Inclusive ranges reach their bound without overflowing past it.
+fn inclusive_top() -> i64 {
+    let mut steps: i64 = 0;
+    let lo: u8 = 250;
+    let hi: u8 = 255;
+    for b in lo..=hi {
+        let byte: u8 = b;
+        steps = wrapping_add(steps, 1);
+    }
+    steps
+}
+
+fn unit_return(inout x: i64) {
+    if x > 5 {
+        return;
+    }
+    x = 99;
+}
+
+fn main() -> i64 {
+    let mut y = 3;
+    unit_return(inout y);
+    let mut z = 7;
+    unit_return(inout z);
+    let a = wrapping_add(triangle(10), first_pair());
+    let b = wrapping_add(early(5), early(20));
+    let c = wrapping_add(closure_return(4), wrapping_add(y, z));
+    wrapping_add(wrapping_add(a, b), wrapping_add(c, inclusive_top())) % 256
+}

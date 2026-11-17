@@ -530,7 +530,7 @@ fn inout_contracts_relate_original_inputs_results_and_final_states() {
 #[test]
 fn generic_type_binders_and_inout_post_state_compose() {
     proves(
-        "fn replace[T](inout x: u64, value: u64) -> u64 { let old = x; x = value; old } fn ensures_replace[U](before: u64, value: u64, result: u64, after: u64) -> bool { result == before && after == value } fn main() -> u64 { let x: u64 = 5; replace[bool](inout x, 42); x }",
+        "fn replace[T](inout x: u64, value: u64) -> u64 { let old = x; x = value; old } fn ensures_replace[U](before: u64, value: u64, result: u64, after: u64) -> bool { result == before && after == value } fn main() -> u64 { let mut x: u64 = 5; replace[bool](inout x, 42); x }",
         "namespace VesperProofs.GenericInout\nopen Vesper\ntheorem replace_contract : «replace$contract» := by\n  intro T before value\n  simp [ensures_replace, replace]\ntheorem replace_input : «replace$admissible» := ⟨Bool, 5, 42, trivial⟩\nend VesperProofs.GenericInout\n",
         &[("replace", Totality::Total)],
         "42",

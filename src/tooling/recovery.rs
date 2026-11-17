@@ -870,7 +870,7 @@ impl<'a> Walk<'a, '_, '_> {
                 let mut inner = self.scope(scope)?;
                 for s in statements {
                     match s {
-                        Statement::Let { pat, ty, value } => {
+                        Statement::Let { pat, ty, value, .. } => {
                             if let Err(r) = self.context.ty(ty, true) {
                                 return Ok(Err(r));
                             }
@@ -945,7 +945,14 @@ impl<'a> Walk<'a, '_, '_> {
                     visit!(e, &mut inner);
                 }
             }
-            ExprKind::Try(_) | ExprKind::Closure { .. } | ExprKind::Handle { .. } => {
+            ExprKind::Try(_)
+            | ExprKind::Closure { .. }
+            | ExprKind::Handle { .. }
+            | ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_) => {
                 return Ok(Err(UnavailableReason::UnsupportedFunction));
             }
         }

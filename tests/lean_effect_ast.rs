@@ -115,21 +115,21 @@ fn module_has_structured_prelude_effect_class_instances_and_functions() {
 #[test]
 fn stateful_projected_lenses_survive_non_tail_resumption() {
     evaluate(
-        "copy struct Pair { x: i64, y: i64 } linear effect Mut { fn change(inout p.{x}: Pair) -> i64; } fn main() -> i64 { let p = Pair { x: 1, y: 3 }; let r = handle Mut state n = 10 in { let v = Mut::change(inout p); p.y = wrapping_add(p.y, 100); wrapping_add(v, p.x) } with { return (v, n) => wrapping_add(v, n), change(q, n, k) => { q.x = wrapping_add(q.x, n); let r = k(20, wrapping_add(n, 1)); q.x = wrapping_add(q.x, 1); r }, }; wrapping_add(wrapping_mul(r, 1000), wrapping_add(p.x, p.y)) }",
+        "copy struct Pair { x: i64, y: i64 } linear effect Mut { fn change(inout p.{x}: Pair) -> i64; } fn main() -> i64 { let mut p = Pair { x: 1, y: 3 }; let r = handle Mut state n = 10 in { let v = Mut::change(inout p); p.y = wrapping_add(p.y, 100); wrapping_add(v, p.x) } with { return (v, n) => wrapping_add(v, n), change(q, n, k) => { q.x = wrapping_add(q.x, n); let r = k(20, wrapping_add(n, 1)); q.x = wrapping_add(q.x, 1); r }, }; wrapping_add(wrapping_mul(r, 1000), wrapping_add(p.x, p.y)) }",
     );
 }
 
 #[test]
 fn closures_capture_snapshots_and_keep_outer_evidence() {
     evaluate(
-        "linear effect Ask { fn ask() -> i64; } fn apply[r: eff](sink f: fn() -> i64 eff [r]) -> i64 eff [r] { f() } fn main() -> i64 { let x = 5; handle outer: Ask in { let f = || { x = wrapping_add(x, 1); wrapping_add(x, outer.ask()) }; x = 99; handle Ask in { apply(f) } with { return v => v, ask(k) => k(1), } } with { return v => v, ask(k) => wrapping_add(k(20), 2), } }",
+        "linear effect Ask { fn ask() -> i64; } fn apply[r: eff](sink f: fn() -> i64 eff [r]) -> i64 eff [r] { f() } fn main() -> i64 { let mut x = 5; handle outer: Ask in { let f = || { x = wrapping_add(x, 1); wrapping_add(x, outer.ask()) }; x = 99; handle Ask in { apply(f) } with { return v => v, ask(k) => k(1), } } with { return v => v, ask(k) => wrapping_add(k(20), 2), } }",
     );
 }
 
 #[test]
 fn checked_failures_preserve_the_frame_and_do_not_commit_failed_assignment() {
     evaluate(
-        "fn main() -> i64 { let x: i64 = 9223372036854775807; let y: i64 = 1; let r = handle Fail[ArithOverflow] in { x += y; 0 } with { return v => v, raise(e, k) => 42, }; if x == 9223372036854775807 { r } else { 0 } }",
+        "fn main() -> i64 { let mut x: i64 = 9223372036854775807; let y: i64 = 1; let r = handle Fail[ArithOverflow] in { x += y; 0 } with { return v => v, raise(e, k) => 42, }; if x == 9223372036854775807 { r } else { 0 } }",
     );
     evaluate(
         "fn divide(b: i64) -> i64 eff [Fail[RuntimeError], Fail[ArithOverflow]] { -9223372036854775808 / b } fn main() -> i64 { handle Fail[ArithOverflow] in { handle Fail[RuntimeError] in { divide(0) } with { return v => v, raise(e, k) => 41, } } with { return v => v, raise(e, k) => 99, } }",
@@ -146,7 +146,7 @@ fn subnormal_float_bits_survive_effectful_capture_and_handler_translation() {
 #[test]
 fn unsupported_alias_diagnostic_remains_explicit() {
     let world = world(
-        "linear effect Inc { fn inc(inout x: i64); } fn helper(inout x: i64) eff [Inc] { Inc::inc(inout x); x = wrapping_add(x, 1); } fn main() -> i64 { let x = 1; let r = handle Inc in { helper(inout x); x } with { return n => n, inc(n, k) => { let r = k(()); n = wrapping_add(n, 2); r }, }; wrapping_add(wrapping_mul(r, 100), x) }",
+        "linear effect Inc { fn inc(inout x: i64); } fn helper(inout x: i64) eff [Inc] { Inc::inc(inout x); x = wrapping_add(x, 1); } fn main() -> i64 { let mut x = 1; let r = handle Inc in { helper(inout x); x } with { return n => n, inc(n, k) => { let r = k(()); n = wrapping_add(n, 2); r }, }; wrapping_add(wrapping_mul(r, 100), x) }",
     );
     let error = lean::extract_module(&world).unwrap_err();
     assert!(
@@ -158,6 +158,6 @@ fn unsupported_alias_diagnostic_remains_explicit() {
 #[test]
 fn conditional_and_match_actions_thread_outer_mutable_frame_bindings() {
     evaluate(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { let first = if Ask::ask() > 2 { x = wrapping_add(x, 4); x } else { x = 0; x }; let second = match first { 5 => { x = wrapping_mul(x, 2); x }, _ => { x = 99; x }, }; second } with { return v => v, ask(k) => k(4), }; wrapping_add(wrapping_mul(r, 100), x) }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let mut x = 1; let r = handle Ask in { let first = if Ask::ask() > 2 { x = wrapping_add(x, 4); x } else { x = 0; x }; let second = match first { 5 => { x = wrapping_mul(x, 2); x }, _ => { x = 99; x }, }; second } with { return v => v, ask(k) => k(4), }; wrapping_add(wrapping_mul(r, 100), x) }",
     );
 }

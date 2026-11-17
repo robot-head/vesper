@@ -701,7 +701,7 @@ impl<'a> Builder<'a> {
                 for statement in statements {
                     self.budget.charge(1)?;
                     match statement {
-                        ExprStatement::Let { binder, value } => {
+                        ExprStatement::Let { binder, value, .. } => {
                             let value = self.expr(value, depth + 1)?;
                             let id = *self
                                 .binders
@@ -725,6 +725,7 @@ impl<'a> Builder<'a> {
                                 pat,
                                 ty: Type::Infer,
                                 value,
+                                mutable: false,
                             });
                         }
                         ExprStatement::Expr(e) => {
@@ -994,7 +995,7 @@ impl Emitter<'_> {
                 for statement in statements {
                     self.emit(" ", token)?;
                     match statement {
-                        Statement::Let { pat, ty, value } => {
+                        Statement::Let { pat, ty, value, .. } => {
                             if *ty != Type::Infer {
                                 return Err(LowerError::InvalidInventory("render annotation"));
                             }
@@ -1165,15 +1166,18 @@ pub fn shape_matches(
                                 pat: ap,
                                 ty: at,
                                 value: av,
+                                mutable: am,
                             },
                             Statement::Let {
                                 pat: bp,
                                 ty: bt,
                                 value: bv,
+                                mutable: bm,
                             },
                         ) => {
                             budget.node(depth + 1)?;
-                            if !matches!(at, Type::Infer) || !matches!(bt, Type::Infer) {
+                            if am != bm || !matches!(at, Type::Infer) || !matches!(bt, Type::Infer)
+                            {
                                 return Ok(false);
                             }
                             let (PatternKind::Bind(a), PatternKind::Bind(b)) = (&ap.kind, &bp.kind)

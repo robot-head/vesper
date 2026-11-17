@@ -1,0 +1,23 @@
+// E0302: `return` would drop a live linear value.
+linear struct Token {
+    id: i64
+}
+fn spend(sink t: Token) -> i64 {
+    let Token {
+        id
+    }
+    = t;
+    id
+}
+fn early(flag: bool) -> i64 {
+    let t = Token {
+        id: 1
+    };
+    if flag {
+        return 0;
+    }
+    spend(t)
+}
+fn main() -> i64 {
+    early(true)
+}

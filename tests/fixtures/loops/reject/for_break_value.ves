@@ -1,0 +1,7 @@
+// E0213: a `for` loop has no value to leave with.
+fn main() -> i64 {
+    for i in 0..3 {
+        break i;
+    }
+    0
+}

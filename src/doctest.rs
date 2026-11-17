@@ -758,7 +758,7 @@ pub fn source_check_guard(
                 }
                 ExprKind::Block { statements,tail } => {
                     for statement in statements { match statement {
-                        Statement::Let {pat,ty,value} => { todo.push(Node::Pat(pat,next)); todo.push(Node::Ty(ty,next,true)); todo.push(Node::Expr(value,next)); }
+                        Statement::Let {pat,ty,value, ..} => { todo.push(Node::Pat(pat,next)); todo.push(Node::Ty(ty,next,true)); todo.push(Node::Expr(value,next)); }
                         Statement::Expr(e) => todo.push(Node::Expr(e,next)),
                     } }
                     if let Some(e) = tail { todo.push(Node::Expr(e,next)); }

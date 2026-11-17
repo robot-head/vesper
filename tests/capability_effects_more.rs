@@ -415,7 +415,7 @@ fn inference_is_limited_to_direct_calls_from_const_time_code() {
     // ... while a directly called one returns the secret through the place.
     let direct = "copy struct Secret[T] { value: T } \
                   fn store(inout out: u64, s: Secret[u64]) -> Unit eff [ConstTime] { out = s.value; } \
-                  fn main() -> u64 { let o: u64 = 0; store(inout o, Secret { value: 1 }); o }";
+                  fn main() -> u64 { let mut o: u64 = 0; store(inout o, Secret { value: 1 }); o }";
     assert!(codes(direct).is_empty(), "{:?}", codes(direct));
     // Inferred parameters still reject a secret result returned as public
     // when the secret did not come from the caller.
@@ -519,7 +519,7 @@ fn const_denorm_flushes_subnormals_on_both_backends() {
     // f64::MIN_POSITIVE * 0.5 is subnormal: ConstDenorm code flushes it to a
     // zero of the same sign, plain code keeps it.
     let source = "fn flushed(x: f64) -> f64 eff [ConstDenorm] { x * 0.5 } \
-                  fn negated(x: f64) -> f64 eff [ConstDenorm] { let y: f64 = x; y *= 0.5; -y } \
+                  fn negated(x: f64) -> f64 eff [ConstDenorm] { let mut y: f64 = x; y *= 0.5; -y } \
                   fn plain(x: f64) -> f64 { x * 0.5 } \
                   fn main() -> u64 { \
                     let t: f64 = 2.2250738585072014e-308; \

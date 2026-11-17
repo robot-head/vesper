@@ -1,0 +1,12 @@
+use self::util::sum;
+fn main() -> i64 {
+    let i = 100;
+    let mut k = 0;
+    loop {
+        k = wrapping_add(k, 1);
+        if k == 3 {
+            break;
+        }
+    }
+    wrapping_add(wrapping_add(sum(5), sum(20)), wrapping_add(i, k))
+}

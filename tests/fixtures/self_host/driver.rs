@@ -338,6 +338,14 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
     ] {
         walk(&root().join(dir), &mut out);
     }
+    // Loops, early exits and `let mut` (lane F6, #876) are not in the
+    // self-hosted parser yet; such sources join the corpus once
+    // packages/vesper-compiler parses them.
+    out.retain(|path| {
+        std::fs::read_to_string(path).map_or(true, |source| {
+            !vesper::loops::uses_loop_syntax(&vesper::parser::parse(&source).module)
+        })
+    });
     out.sort();
     out
 }

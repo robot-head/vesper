@@ -146,6 +146,12 @@ fn front_end_functions_with_fail_effects_compile_and_agree() {
                         *refusals.entry(format!("{construct:?}")).or_default() += 1;
                         break;
                     }
+                    // The whole parser (`parse_tree_main`) compiles since
+                    // Milestone 11 but exceeds the ±1 MiB branch reach.
+                    Err(vc::VerifiedError::Limit(d)) if d.contains("bytes of code") => {
+                        *refusals.entry("Limit".into()).or_default() += 1;
+                        break;
+                    }
                     Err(e) => panic!("{n}: {e}"),
                 };
                 any = true;

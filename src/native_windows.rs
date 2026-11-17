@@ -935,7 +935,7 @@ linear effect Pulse {
 }
 fn main() -> u64 eff [Pulse] {
     let ticket = Ticket { id: 7 };
-    let buf = Block { lo: 1, hi: 2 };
+    let mut buf = Block { lo: 1, hi: 2 };
     let n: u64 = match Pulse::read(inout buf) { Got(n) => n, IoFailed(c) => c, IoCancelled => 0, };
     let t: u64 = match Pulse::pause() { Ticked => 1, TickFailed(c) => 2, TickCancelled => 3, };
     let Ticket { id } = ticket;

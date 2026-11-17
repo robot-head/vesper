@@ -697,7 +697,7 @@ fn got(r: Result[u64, u32]) -> u64 { match r { Ok(n) => n, Err(_) => 0 } }
 fn program() -> Triple eff [Net] {
     handle Ask in {
         let asked = Ask::ask();
-        let slot: u64 = 5;
+        let mut slot: u64 = 5;
         let filled = Net::fill(inout slot);
         let kept = if filled { slot } else { asked };
         Triple { asked: asked, slot: kept, after: 0 }

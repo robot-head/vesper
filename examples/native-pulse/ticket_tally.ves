@@ -54,14 +54,14 @@ fn main() -> Summary eff [Pulse] {
     let ticket = Ticket {
         id: 7
     };
-    let tally = Tally {
+    let mut tally = Tally {
         reads: 0,
         bytes: 0,
         sum: 0,
         cancelled: 0,
         failed: 0
     };
-    let buf = Block {
+    let mut buf = Block {
         lo: 1,
         hi: 2
     };

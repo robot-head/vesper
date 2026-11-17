@@ -176,6 +176,12 @@ pub fn is_box_pattern(world: &World, pat: &Pattern) -> bool {
         )
 }
 
+/// Whether `ty` holds a built-in `Box[T]` anywhere (used by backends that
+/// cannot yet reclaim boxes across loops and early exits).
+pub fn mentions_box(world: &World, ty: &Type) -> bool {
+    active(world) && type_mentions_box(ty)
+}
+
 fn type_mentions_box(t: &Type) -> bool {
     match t {
         Type::Named(n, args) => n == BOX_TYPE || args.iter().any(type_mentions_box),
@@ -226,7 +232,7 @@ fn expr_uses_box(e: &Expr) -> bool {
         }
         ExprKind::Block { statements, tail } => {
             statements.iter().any(|s| match s {
-                Statement::Let { pat, ty, value } => {
+                Statement::Let { pat, ty, value, .. } => {
                     pattern_mentions_box(pat) || type_mentions_box(ty) || expr_uses_box(value)
                 }
                 Statement::Expr(e) => expr_uses_box(e),
@@ -256,6 +262,15 @@ fn expr_uses_box(e: &Expr) -> bool {
                     .iter()
                     .any(|(p, e)| pattern_mentions_box(p) || expr_uses_box(e))
         }
+        k @ (ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_)) => k
+            .control_children()
+            .into_iter()
+            .flatten()
+            .any(expr_uses_box),
         ExprKind::Closure {
             params,
             result,
@@ -1125,7 +1140,7 @@ impl<'a> FipChecker<'a> {
                         break;
                     }
                     match stmt {
-                        Statement::Let { pat, ty, value } => {
+                        Statement::Let { pat, ty, value, .. } => {
                             let val_ty = {
                                 let inferred = self.expr_type(value);
                                 if inferred != Type::Infer {
@@ -1183,6 +1198,19 @@ impl<'a> FipChecker<'a> {
                         state.bindings.insert(name, old.clone());
                     }
                 }
+            }
+            ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_) => {
+                // Loops and early exits leave the FIP ownership model (P0 lane 4).
+                self.diagnostics.push(Diagnostic::new(
+                    "E0806",
+                    "@fip function cannot use loop, for, break or return; write the iteration as tail recursion",
+                    e.span.clone(),
+                ));
+                state.diverged = true;
             }
             ExprKind::If {
                 condition,
@@ -1554,6 +1582,7 @@ fn op_reads_value(op: &crate::ir::Op, target: ValueId) -> bool {
         | Op::Write { value, .. }
         | Op::Unary(_, value)
         | Op::Project(value, _)
+        | Op::Exit { value, .. }
         | Op::Try(value) => *value == target,
         Op::Binary(_, a, b) | Op::Index(a, b) => *a == target || *b == target,
         Op::Tuple(vs) | Op::Vector { args: vs, .. } => vs.contains(&target),
@@ -1568,9 +1597,12 @@ fn op_reads_value(op: &crate::ir::Op, target: ValueId) -> bool {
         Op::Indirect { callee, args } => {
             *callee == target || args.iter().any(|a| a.value == target)
         }
-        Op::Constant(_) | Op::Unit | Op::Read { .. } | Op::Closure { .. } | Op::Handle { .. } => {
-            false
-        }
+        Op::Constant(_)
+        | Op::Unit
+        | Op::Read { .. }
+        | Op::Closure { .. }
+        | Op::Handle { .. }
+        | Op::Loop => false,
     }
 }
 
@@ -1958,6 +1990,10 @@ pub fn elaborate_non_fip_drops(world: &World, program: &mut crate::ir::Program) 
                                 owned_values.insert(inst.dest, inst.ty.clone());
                             }
                         }
+                        Op::Exit { value, .. } => {
+                            owned_values.remove(value);
+                        }
+                        Op::Loop => {}
                         Op::Closure { moves, .. } | Op::Handle { moves, .. } => {
                             for p in moves {
                                 if let Some(slot) = slots.get_mut(&p.root)

@@ -438,7 +438,10 @@ fn classify(src: &str, toks: &[Tok], token_mode: bool) -> Vec<HighlightSpan> {
                     C::WireEndianScalar
                 } else if before == Some(K::At) && word == "proof" {
                     C::DocProofAnchor
-                } else if (before == Some(K::At) && word == "fip") || is_tiled_decl || is_field_temp
+                } else if (before == Some(K::At) && word == "fip")
+                    || is_tiled_decl
+                    || is_field_temp
+                    || is_loop_keyword(word, before, after)
                 {
                     C::KeywordControl
                 } else if before == Some(K::Fn) || after == Some(K::LParen) {
@@ -518,6 +521,26 @@ fn classify(src: &str, toks: &[Tok], token_mode: bool) -> Vec<HighlightSpan> {
     spans
 }
 
+/// `loop`, `for`, `break` and `let mut` are contextual words (they stay valid
+/// names elsewhere), classified as keywords where the parser reads them so.
+fn is_loop_keyword(word: &str, before: Option<K>, after: Option<K>) -> bool {
+    let statement_start =
+        before.is_none_or(|b| matches!(b, K::LBrace | K::RBrace | K::Semi | K::FatArrow | K::Eq));
+    match word {
+        "loop" => after == Some(K::LBrace),
+        "for" => statement_start && matches!(after, Some(K::Lower | K::LParen)),
+        "break" => {
+            statement_start
+                && !matches!(
+                    after,
+                    Some(K::Eq | K::Dot | K::Colon | K::ColonColon | K::Comma)
+                )
+        }
+        "mut" => before == Some(K::Let),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -529,6 +552,18 @@ mod tests {
             assert_eq!(token_kind(SyntaxKind(i as u16)), *kind);
         }
         assert_eq!(token_kind(SyntaxKind(500)), K::Error);
+    }
+
+    #[test]
+    fn loop_words_are_keywords_where_they_parse_so() {
+        let src = "fn f() { let mut i = 0; loop { break; } for j in 0..3 { } let loop = 1; }";
+        let spans = highlight_tier0_tokens(src).unwrap();
+        let class = |at: usize| spans.iter().find(|s| s.start == at).unwrap().class;
+        for word in ["mut", "loop {", "break", "for"] {
+            let at = src.find(word).unwrap();
+            assert_eq!(class(at), C::KeywordControl, "{word}");
+        }
+        assert_ne!(class(src.rfind("loop").unwrap()), C::KeywordControl);
     }
 
     #[test]

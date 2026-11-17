@@ -752,7 +752,7 @@ fn ast_walk(
             ExprKind::Block { statements, tail } => {
                 for s in statements {
                     match s {
-                        Statement::Let { ty, value, pat } => {
+                        Statement::Let { ty, value, pat, .. } => {
                             type_walk(ty, next, b, false)?;
                             pattern_walk(pat, next, b)?;
                             stack.push((value, next));
@@ -815,6 +815,27 @@ fn ast_walk(
                     pattern_walk(p, next, b)?;
                     stack.push((e, next));
                 }
+            }
+            k @ (ExprKind::Loop(_)
+            | ExprKind::For { .. }
+            | ExprKind::Range { .. }
+            | ExprKind::Break(_)
+            | ExprKind::Return(_)) => {
+                if let ExprKind::For { pat, .. } = k {
+                    pattern_walk(pat, next, b)?;
+                }
+                if matches!(k, ExprKind::Loop(_) | ExprKind::For { .. }) {
+                    b.branches = b
+                        .branches
+                        .checked_add(1)
+                        .ok_or_else(|| resource("branch_count_overflow"))?;
+                }
+                stack.extend(
+                    k.control_children()
+                        .into_iter()
+                        .flatten()
+                        .map(|e| (e, next)),
+                );
             }
             ExprKind::Closure {
                 params,

@@ -26,7 +26,7 @@ fn scalar() {
 #[test]
 fn native_inout() {
     differential(
-        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let x = 41; inc(inout x); x }",
+        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let mut x = 41; inc(inout x); x }",
     );
 }
 
@@ -52,7 +52,7 @@ fn native_record_return() {
 #[test]
 fn native_record_copy() {
     differential(
-        "copy struct Pair { x: i64, y: i64 } fn main() -> i64 { let a = Pair { x: 1, y: 2 }; let b = a; b.x = 42; a.x }",
+        "copy struct Pair { x: i64, y: i64 } fn main() -> i64 { let a = Pair { x: 1, y: 2 }; let mut b = a; b.x = 42; a.x }",
     );
 }
 #[test]
@@ -144,13 +144,13 @@ fn native_abort_record() {
 #[test]
 fn handler_captures_are_snapshots() {
     differential(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let result = handle Ask in { x = 40; Ask::ask() } with { return value => wrapping_add(value, x), ask(k) => { x += 1; k(x) }, }; wrapping_add(x, result) }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let mut x = 1; let result = handle Ask in { x = 40; Ask::ask() } with { return value => wrapping_add(value, x), ask(k) => { x += 1; k(x) }, }; wrapping_add(x, result) }",
     );
 }
 #[test]
 fn handler_record_captures_are_snapshots() {
     differential(
-        "copy struct Config { x: i64 } linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let config = Config { x: 1 }; let result = handle Ask in { config.x = 40; wrapping_add(Ask::ask(), Ask::ask()) } with { return value => wrapping_add(value, config.x), ask(k) => { config.x = wrapping_add(config.x, 1); k(config.x) }, }; wrapping_add(config.x, result) }",
+        "copy struct Config { x: i64 } linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let mut config = Config { x: 1 }; let result = handle Ask in { config.x = 40; wrapping_add(Ask::ask(), Ask::ask()) } with { return value => wrapping_add(value, config.x), ask(k) => { config.x = wrapping_add(config.x, 1); k(config.x) }, }; wrapping_add(config.x, result) }",
     );
 }
 
@@ -169,7 +169,7 @@ fn native_negative_pattern() {
 #[test]
 fn native_nested_inout() {
     differential(
-        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn twice(inout x: i64) { inc(inout x); inc(inout x); } fn main() -> i64 { let x = 40; twice(inout x); x }",
+        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn twice(inout x: i64) { inc(inout x); inc(inout x); } fn main() -> i64 { let mut x = 40; twice(inout x); x }",
     );
 }
 #[test]
@@ -180,7 +180,7 @@ fn recursion() {
 }
 #[test]
 fn native_mutation() {
-    differential("fn main() -> i64 { let x = 1; if true { x += 41; } else { x -= 1; }; x }");
+    differential("fn main() -> i64 { let mut x = 1; if true { x += 41; } else { x -= 1; }; x }");
 }
 #[test]
 fn native_shadow() {
@@ -240,13 +240,13 @@ fn optimization_preserves_calls() {
 #[test]
 fn native_mutable_effect_argument() {
     differential(
-        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let mut x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
     );
 }
 #[test]
 fn native_mutable_effect_pattern() {
     differential(
-        "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p: Pair); } fn main() -> i64 { let p = Pair { x: 40, y: 0 }; handle Inc in { Inc::inc(inout p); p.x } with { return n => n, inc(Pair { x, y }, k) => { x = wrapping_add(x, 2); k(()) }, } }",
+        "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p: Pair); } fn main() -> i64 { let mut p = Pair { x: 40, y: 0 }; handle Inc in { Inc::inc(inout p); p.x } with { return n => n, inc(Pair { x, y }, k) => { x = wrapping_add(x, 2); k(()) }, } }",
     );
 }
 
@@ -286,7 +286,7 @@ fn native_closure_calls_captured_closure() {
 #[test]
 fn native_closure_capture_is_a_snapshot() {
     differential(
-        "fn main() -> i64 { let x = 0; let f = || { x += 1; x }; wrapping_add(f(), f()) }",
+        "fn main() -> i64 { let mut x = 0; let f = || { x += 1; x }; wrapping_add(f(), f()) }",
     );
 }
 #[test]
@@ -298,7 +298,7 @@ fn native_closure_branch_join() {
 #[test]
 fn native_closure_mutable_parameter() {
     differential(
-        "fn main() -> i64 { let inc = |inout x: i64| { x = wrapping_add(x, 1); x }; let x = 40; let y = inc(inout x); wrapping_sub(wrapping_add(x, y), 40) }",
+        "fn main() -> i64 { let inc = |inout x: i64| { x = wrapping_add(x, 1); x }; let mut x = 40; let y = inc(inout x); wrapping_sub(wrapping_add(x, y), 40) }",
     );
 }
 #[test]
@@ -365,7 +365,7 @@ fn checked_primitive_failures() {
         "fn index(i: i64) -> i64 eff [Fail[RuntimeError]] { let xs = (10, 20); xs[i] } fn main() -> i64 { handle Fail[RuntimeError] in { index(-1) } with { return x => x, raise(e, k) => match e { RuntimeError::IndexOutOfBounds => 42, RuntimeError::DivisionByZero => 0, }, } }",
     );
     differential(
-        "fn rem(b: u64) -> u64 eff [Fail[RuntimeError]] { let a: u64 = 84; a %= b; a } fn main() -> u64 { handle Fail[RuntimeError] in { rem(0) } with { return x => x, raise(e, k) => 42, } }",
+        "fn rem(b: u64) -> u64 eff [Fail[RuntimeError]] { let mut a: u64 = 84; a %= b; a } fn main() -> u64 { handle Fail[RuntimeError] in { rem(0) } with { return x => x, raise(e, k) => 42, } }",
     );
     differential(
         "fn divide(b: i64) -> i64 eff [Fail[RuntimeError]] { 84 / b } fn main() -> i64 { handle Fail[RuntimeError] in { divide(2) } with { return x => x, raise(e, k) => 0, } }",
@@ -418,7 +418,7 @@ fn native_nested_non_tail_and_linear_state() {
 #[test]
 fn native_non_tail_with_place_arguments() {
     differential(
-        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let result = handle Mut in { let y = Mut::change(inout x); wrapping_add(x, y) } with { return v => v, change(x, k) => { x = wrapping_add(x, 1); let result = k(20); x = wrapping_add(x, 1); result }, }; wrapping_add(result, x) }",
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let mut x = 1; let result = handle Mut in { let y = Mut::change(inout x); wrapping_add(x, y) } with { return v => v, change(x, k) => { x = wrapping_add(x, 1); let result = k(20); x = wrapping_add(x, 1); result }, }; wrapping_add(result, x) }",
     );
     differential(
         "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { wrapping_add(Ask::ask(), 1) } with { return x => x, ask(k) => { let resume = ||@linear k(20); let value = resume(); wrapping_mul(value, 2) }, } }",
@@ -446,6 +446,6 @@ fn native_affine_continuation_wildcard() {
 #[test]
 fn native_shared_effect_argument_after_resumption() {
     differential(
-        "linear effect E { fn op(x: i64); } fn main() -> i64 { handle Fail[RuntimeError] in { let x = 1; handle E in { E::op(x); x = 0; 42 } with { return result => result, op(x, k) => if x != 0 { k(()); 1 / x } else { k(()); 0 }, } } with { return result => result, raise(error, _) => 42, } }",
+        "linear effect E { fn op(x: i64); } fn main() -> i64 { handle Fail[RuntimeError] in { let mut x = 1; handle E in { E::op(x); x = 0; 42 } with { return result => result, op(x, k) => if x != 0 { k(()); 1 / x } else { k(()); 0 }, } } with { return result => result, raise(error, _) => 42, } }",
     );
 }

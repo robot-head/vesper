@@ -280,7 +280,7 @@ fn push_rec(inout s: TiledSeq[Particle], i: u64, count: u64) {
 }
 
 fn main() -> u64 {
-    let s: TiledSeq[Particle] = TiledSeq::with_capacity[Particle](4);
+    let mut s: TiledSeq[Particle] = TiledSeq::with_capacity[Particle](4);
     push_range(inout s, 20);
     s.col_set[mass](17, 50);
     s.col_set[payload](17, Pair { a: 3, b: 9 });
@@ -332,7 +332,7 @@ fn read_hits(in s.{hits}: TiledSeq[Entry, arena], idx: u64) -> u64 eff [arena: R
 
 fn main() -> u64 {
     region arena(4096) {
-        let s: TiledSeq[Entry, arena] = TiledSeq::with_region[Entry](arena, 12);
+        let mut s: TiledSeq[Entry, arena] = TiledSeq::with_region[Entry](arena, 12);
         s.push(Entry { key: 10, hits: 3, meta: Pair { a: 100, b: 200 } });
         s.push(Entry { key: 20, hits: 4, meta: Pair { a: 300, b: 400 } });
         bump_key(inout s, 1, 7);
@@ -361,7 +361,7 @@ tiled(8) affine struct Slot {
 }
 
 fn main() -> u64 {
-    let s: TiledSeq[Slot] = TiledSeq::new[Slot]();
+    let mut s: TiledSeq[Slot] = TiledSeq::new[Slot]();
     s.push(Slot { id: 11, weight: 22, tok: Option::None });
     s.col_set[weight](0, 33);
     wrapping_add(s.col_get[id](0), s.col_get[weight](0))
@@ -436,10 +436,10 @@ fn sum_weights(in s.{weights}: TiledSeq[Batch], tile: u64) -> bool eff [Isa[Avx5
 }
 
 fn main() -> u64 {
-    let bs: TiledSeq[ByteBatch] = TiledSeq::new[ByteBatch]();
+    let mut bs: TiledSeq[ByteBatch] = TiledSeq::new[ByteBatch]();
     fill_bytes(inout bs, 0);
     let base = if Isa::supported[Baseline128]() { sum_bytes(in bs, 0) } else { 0 };
-    let s: TiledSeq[Batch] = TiledSeq::new[Batch]();
+    let mut s: TiledSeq[Batch] = TiledSeq::new[Batch]();
     fill(inout s, 0);
     let sum_i = if Isa::supported[Avx2]() { sum_tile(in s, 0) } else { 36 };
     let ok_w = if Isa::supported[Avx512]() { sum_weights(in s, 0) } else { true };
@@ -465,7 +465,7 @@ fn runtime_bounds_faults_agree_across_evaluator_and_native() {
     let oob = r#"
 tiled(8) copy struct P { hot x: u64 }
 fn main() -> u64 {
-    let s: TiledSeq[P] = TiledSeq::new[P]();
+    let mut s: TiledSeq[P] = TiledSeq::new[P]();
     s.push(P { x: 1 });
     s.col_get[x](1)
 }
@@ -498,7 +498,7 @@ tiled(8) copy struct Particle {
 }
 
 fn main() -> u64 {
-    let s: TiledSeq[Particle] = TiledSeq::with_capacity[Particle](4);
+    let mut s: TiledSeq[Particle] = TiledSeq::with_capacity[Particle](4);
     s.push(Particle { x: 10, tag: 1, weight: 5 });
     s.push(Particle { x: 20, tag: 2, weight: 7 });
     s.col_set[x](0, 30);
@@ -768,7 +768,7 @@ tiled(8) copy struct P {
     hot x: u64,
 }
 fn main() -> u64 {
-    let s: TiledSeq[P] = TiledSeq::with_capacity[P](2305843009213693952);
+    let mut s: TiledSeq[P] = TiledSeq::with_capacity[P](2305843009213693952);
     s.push(P { x: 1 });
     s.len()
 }

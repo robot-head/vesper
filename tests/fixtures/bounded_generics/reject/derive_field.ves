@@ -1,0 +1,11 @@
+// expect E0616: deriving `Ord` needs every field to conform, and f64 has no `Ord`.
+copy struct Reading {
+    at: i64,
+    value: f64
+}
+
+impl Ord for Reading {}
+
+fn main() -> i64 {
+    0
+}

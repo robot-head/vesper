@@ -20,7 +20,7 @@ fn move_start(inout s: Segment, x: u64) {
 }
 
 fn main() -> u64 {
-    let p = Point {
+    let mut p = Point {
         x: 1,
         y: 2
     };
