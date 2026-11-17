@@ -5,26 +5,26 @@ compiling with all callees: 161
 refusals: 0
 by detail:
 
-$handler_body_45657_45885: ok, 60 rows
-$handler_body_45688_45781: ok, 80 rows
-$handler_body_45727_45771: ok, 37 rows
-$handler_body_46048_46279: ok, 60 rows
-$handler_body_46079_46175: ok, 80 rows
-$handler_body_46119_46165: ok, 37 rows
-$handler_body_46753_46849: ok, 41 rows
-$handler_body_46784_46804: ok, 35 rows
-$handler_clause_45817_45822: ok, 7 rows
-$handler_clause_45856_45868: ok, 33 rows
-$handler_clause_45917_45922: ok, 7 rows
-$handler_clause_45959_45978: ok, 18 rows
-$handler_clause_46211_46216: ok, 7 rows
-$handler_clause_46250_46262: ok, 33 rows
-$handler_clause_46311_46316: ok, 7 rows
-$handler_clause_46353_46372: ok, 18 rows
-$handler_clause_46824_46825: ok, 7 rows
-$handler_clause_46842_46844: ok, 7 rows
-$handler_clause_46869_46870: ok, 7 rows
-$handler_clause_46887_46889: ok, 6 rows
+$handler_body_45683_45911: ok, 60 rows
+$handler_body_45714_45807: ok, 80 rows
+$handler_body_45753_45797: ok, 37 rows
+$handler_body_46074_46305: ok, 60 rows
+$handler_body_46105_46201: ok, 80 rows
+$handler_body_46145_46191: ok, 37 rows
+$handler_body_46779_46875: ok, 41 rows
+$handler_body_46810_46830: ok, 35 rows
+$handler_clause_45843_45848: ok, 7 rows
+$handler_clause_45882_45894: ok, 33 rows
+$handler_clause_45943_45948: ok, 7 rows
+$handler_clause_45985_46004: ok, 18 rows
+$handler_clause_46237_46242: ok, 7 rows
+$handler_clause_46276_46288: ok, 33 rows
+$handler_clause_46337_46342: ok, 7 rows
+$handler_clause_46379_46398: ok, 18 rows
+$handler_clause_46850_46851: ok, 7 rows
+$handler_clause_46868_46870: ok, 7 rows
+$handler_clause_46895_46896: ok, 7 rows
+$handler_clause_46913_46915: ok, 6 rows
 advance: ok, 66 rows
 args: ok, 347 rows
 arms: ok, 502 rows
@@ -131,7 +131,7 @@ postfix_op: ok, 1046 rows
 precedence: ok, 254 rows
 primary: ok, 150 rows
 primary_inner: ok, 952 rows
-primitive: ok, 108 rows
+primitive: ok, 117 rows
 punct: ok, 972 rows
 region_expr: ok, 615 rows
 required_mode: ok, 226 rows
@@ -182,58 +182,58 @@ by detail:
      1 FunctionValue: type fn() -> i64
      1 Generic: a type parameter without a concrete instance
 
-$handler_body_122129_122166: ok, 37 rows
-$handler_body_13603_13831: ok, 60 rows
-$handler_body_13634_13727: ok, 80 rows
-$handler_body_13673_13717: ok, 37 rows
-$handler_body_138724_138820: ok, 41 rows
-$handler_body_138755_138775: ok, 35 rows
-$handler_body_13994_14225: ok, 60 rows
-$handler_body_14025_14121: ok, 80 rows
-$handler_body_14065_14111: ok, 37 rows
-$handler_body_43858_43939: ok, 45 rows
-$handler_body_45913_46095:
-  calls refused: $handler_body_45944_45991
-$handler_body_45944_45991:
+$handler_body_122155_122192: ok, 37 rows
+$handler_body_13629_13857: ok, 60 rows
+$handler_body_13660_13753: ok, 80 rows
+$handler_body_13699_13743: ok, 37 rows
+$handler_body_138750_138846: ok, 41 rows
+$handler_body_138781_138801: ok, 35 rows
+$handler_body_14020_14251: ok, 60 rows
+$handler_body_14051_14147: ok, 80 rows
+$handler_body_14091_14137: ok, 37 rows
+$handler_body_43884_43965: ok, 45 rows
+$handler_body_45939_46121:
+  calls refused: $handler_body_45970_46017
+$handler_body_45970_46017:
   FunctionValue: type fn() -> i64
   calls refused: syntax_run<T=i64>
-$handler_body_46282_46462:
+$handler_body_46308_46488:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: $handler_body_46313_46350, $handler_clause_46386_46391, $handler_clause_46429_46445
-$handler_body_46313_46350:
+  calls refused: $handler_body_46339_46376, $handler_clause_46412_46417, $handler_clause_46455_46471
+$handler_body_46339_46376:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_build
-$handler_body_87161_91512: ok, 2349 rows
-$handler_clause_122202_122207: ok, 13 rows
-$handler_clause_122245_122288: ok, 41 rows
-$handler_clause_13763_13768: ok, 7 rows
-$handler_clause_13802_13814: ok, 33 rows
-$handler_clause_13863_13868: ok, 7 rows
-$handler_clause_138795_138796: ok, 7 rows
-$handler_clause_138813_138815: ok, 7 rows
-$handler_clause_138840_138841: ok, 7 rows
-$handler_clause_138858_138860: ok, 6 rows
-$handler_clause_13905_13924: ok, 18 rows
-$handler_clause_14157_14162: ok, 7 rows
-$handler_clause_14196_14208: ok, 33 rows
-$handler_clause_14257_14262: ok, 7 rows
-$handler_clause_14299_14318: ok, 18 rows
-$handler_clause_43975_43980: ok, 7 rows
-$handler_clause_44018_44022: ok, 9 rows
-$handler_clause_46027_46032: ok, 7 rows
-$handler_clause_46066_46078: ok, 33 rows
-$handler_clause_46127_46132: ok, 7 rows
-$handler_clause_46169_46188: ok, 18 rows
-$handler_clause_46386_46391:
+$handler_body_87187_91538: ok, 2349 rows
+$handler_clause_122228_122233: ok, 13 rows
+$handler_clause_122271_122314: ok, 41 rows
+$handler_clause_13789_13794: ok, 7 rows
+$handler_clause_13828_13840: ok, 33 rows
+$handler_clause_138821_138822: ok, 7 rows
+$handler_clause_138839_138841: ok, 7 rows
+$handler_clause_138866_138867: ok, 7 rows
+$handler_clause_138884_138886: ok, 6 rows
+$handler_clause_13889_13894: ok, 7 rows
+$handler_clause_13931_13950: ok, 18 rows
+$handler_clause_14183_14188: ok, 7 rows
+$handler_clause_14222_14234: ok, 33 rows
+$handler_clause_14283_14288: ok, 7 rows
+$handler_clause_14325_14344: ok, 18 rows
+$handler_clause_44001_44006: ok, 7 rows
+$handler_clause_44044_44048: ok, 9 rows
+$handler_clause_46053_46058: ok, 7 rows
+$handler_clause_46092_46104: ok, 33 rows
+$handler_clause_46153_46158: ok, 7 rows
+$handler_clause_46195_46214: ok, 18 rows
+$handler_clause_46412_46417:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-$handler_clause_46429_46445:
+$handler_clause_46455_46471:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-$handler_clause_46494_46499:
+$handler_clause_46520_46525:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-$handler_clause_46533_46552:
+$handler_clause_46559_46578:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-$handler_clause_91548_91553: ok, 7 rows
-$handler_clause_91591_91593: ok, 7 rows
+$handler_clause_91574_91579: ok, 7 rows
+$handler_clause_91617_91619: ok, 7 rows
 SyntaxMemory::read:
   ExternalFunction: no such function in the checked world
 SyntaxMemory::write:
@@ -559,9 +559,9 @@ parse_trait_ref:
   calls refused: parse_at, parse_bump, parse_expect, parse_package_path, parse_type_args, parse_upper
 parse_transport:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: $handler_body_46282_46462, $handler_clause_46494_46499, $handler_clause_46533_46552
+  calls refused: $handler_body_46308_46488, $handler_clause_46520_46525, $handler_clause_46559_46578
 parse_tree_main:
-  calls refused: $handler_body_45913_46095
+  calls refused: $handler_body_45939_46121
 parse_tuple_values:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_at_end, parse_ate, parse_eat, parse_expr
@@ -613,7 +613,7 @@ postfix_op: ok, 1046 rows
 precedence: ok, 254 rows
 primary: ok, 150 rows
 primary_inner: ok, 952 rows
-primitive: ok, 108 rows
+primitive: ok, 117 rows
 punct: ok, 972 rows
 region_expr: ok, 615 rows
 required_mode: ok, 226 rows
@@ -859,45 +859,45 @@ compiling with all callees: 298
 refusals: 0
 by detail:
 
-$handler_body_128354_129110: ok, 60 rows
-$handler_body_128385_128667: ok, 72 rows
-$handler_body_128426_128534: ok, 82 rows
-$handler_body_128471_128520: ok, 39 rows
-$handler_body_130983_131079: ok, 41 rows
-$handler_body_131014_131034: ok, 35 rows
-$handler_body_45657_45885: ok, 60 rows
-$handler_body_45688_45781: ok, 80 rows
-$handler_body_45727_45771: ok, 37 rows
-$handler_body_46048_46279: ok, 60 rows
-$handler_body_46079_46175: ok, 80 rows
-$handler_body_46119_46165: ok, 37 rows
-$handler_body_51639_51667: ok, 398 rows
-$handler_body_55926_55947: ok, 24 rows
-$handler_body_56157_56178: ok, 24 rows
-$handler_clause_128574_128579: ok, 7 rows
-$handler_clause_128621_128642: ok, 48 rows
-$handler_clause_128703_128708: ok, 7 rows
-$handler_clause_128746_129093: ok, 155 rows
-$handler_clause_129142_129147: ok, 7 rows
-$handler_clause_129181_129203: ok, 18 rows
-$handler_clause_131054_131055: ok, 7 rows
-$handler_clause_131072_131074: ok, 7 rows
-$handler_clause_131099_131100: ok, 7 rows
-$handler_clause_131117_131119: ok, 6 rows
-$handler_clause_45817_45822: ok, 7 rows
-$handler_clause_45856_45868: ok, 33 rows
-$handler_clause_45917_45922: ok, 7 rows
-$handler_clause_45959_45978: ok, 18 rows
-$handler_clause_46211_46216: ok, 7 rows
-$handler_clause_46250_46262: ok, 33 rows
-$handler_clause_46311_46316: ok, 7 rows
-$handler_clause_46353_46372: ok, 18 rows
-$handler_clause_51695_51696: ok, 22 rows
-$handler_clause_51726_51969: ok, 73 rows
-$handler_clause_55979_55984: ok, 7 rows
-$handler_clause_56014_56024: ok, 29 rows
-$handler_clause_56210_56215: ok, 7 rows
-$handler_clause_56245_56255: ok, 29 rows
+$handler_body_128420_129176: ok, 60 rows
+$handler_body_128451_128733: ok, 72 rows
+$handler_body_128492_128600: ok, 82 rows
+$handler_body_128537_128586: ok, 39 rows
+$handler_body_131049_131145: ok, 41 rows
+$handler_body_131080_131100: ok, 35 rows
+$handler_body_45683_45911: ok, 60 rows
+$handler_body_45714_45807: ok, 80 rows
+$handler_body_45753_45797: ok, 37 rows
+$handler_body_46074_46305: ok, 60 rows
+$handler_body_46105_46201: ok, 80 rows
+$handler_body_46145_46191: ok, 37 rows
+$handler_body_51665_51693: ok, 398 rows
+$handler_body_55952_55973: ok, 24 rows
+$handler_body_56183_56204: ok, 24 rows
+$handler_clause_128640_128645: ok, 7 rows
+$handler_clause_128687_128708: ok, 48 rows
+$handler_clause_128769_128774: ok, 7 rows
+$handler_clause_128812_129159: ok, 155 rows
+$handler_clause_129208_129213: ok, 7 rows
+$handler_clause_129247_129269: ok, 18 rows
+$handler_clause_131120_131121: ok, 7 rows
+$handler_clause_131138_131140: ok, 7 rows
+$handler_clause_131165_131166: ok, 7 rows
+$handler_clause_131183_131185: ok, 6 rows
+$handler_clause_45843_45848: ok, 7 rows
+$handler_clause_45882_45894: ok, 33 rows
+$handler_clause_45943_45948: ok, 7 rows
+$handler_clause_45985_46004: ok, 18 rows
+$handler_clause_46237_46242: ok, 7 rows
+$handler_clause_46276_46288: ok, 33 rows
+$handler_clause_46337_46342: ok, 7 rows
+$handler_clause_46379_46398: ok, 18 rows
+$handler_clause_51721_51722: ok, 22 rows
+$handler_clause_51752_51995: ok, 73 rows
+$handler_clause_56005_56010: ok, 7 rows
+$handler_clause_56040_56050: ok, 29 rows
+$handler_clause_56236_56241: ok, 7 rows
+$handler_clause_56271_56281: ok, 29 rows
 advance: ok, 66 rows
 args: ok, 347 rows
 arms: ok, 502 rows
@@ -1016,7 +1016,7 @@ c_syntax_expr_end: ok, 151 rows
 c_take: ok, 75 rows
 c_token: ok, 37 rows
 c_truncate: ok, 439 rows
-c_type: ok, 800 rows
+c_type: ok, 831 rows
 c_type_has_effects: ok, 248 rows
 c_unsupported: ok, 73 rows
 c_use: ok, 1799 rows
@@ -1122,7 +1122,7 @@ postfix_op: ok, 1046 rows
 precedence: ok, 254 rows
 primary: ok, 150 rows
 primary_inner: ok, 952 rows
-primitive: ok, 108 rows
+primitive: ok, 117 rows
 punct: ok, 972 rows
 region_expr: ok, 615 rows
 required_mode: ok, 226 rows
