@@ -315,10 +315,12 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                // `use` imports (lane F0, #873; follow-up #880) are not in the self-hosted
-                // parser yet; its package fixtures join the corpus once
+                // Syntax the self-hosted parser does not have yet: `use` imports
+                // (lane F0, #873; follow-up #880) and slice intervals `p[a..b]`
+                // (lane F1, #874; follow-up #887). These fixtures join the corpus once
                 // packages/vesper-compiler parses them.
-                if path.ends_with("tests/fixtures/packages") {
+                if path.ends_with("tests/fixtures/packages") || path.ends_with("tests/fixtures/seq")
+                {
                     continue;
                 }
                 walk(&path, out);

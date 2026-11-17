@@ -623,7 +623,7 @@ impl Flow<'_> {
                     }
                 }
             }
-            Op::Tiled { args, .. } | Op::Fip { args, .. } => {
+            Op::Tiled { args, .. } | Op::Seq { args, .. } | Op::Fip { args, .. } => {
                 for a in args {
                     if a.pass == Pass::Sink {
                         self.consume(s, a.value, &i.span);

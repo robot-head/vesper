@@ -501,6 +501,7 @@ fn preflight_ir(
                     | Op::Try(_)
                     | Op::Vector { .. }
                     | Op::Tiled { .. }
+                    | Op::Seq { .. }
                     | Op::Fip { .. } => {
                         return Err(
                             "native batch unsupported aggregate/indirect/handler operation".into(),

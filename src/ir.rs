@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[path = "loops/ir.rs"]
 mod loop_lowering;
+#[path = "seq/ir.rs"]
+mod seq_ir;
 
 pub type ValueId = u32;
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +94,11 @@ pub enum Op {
         op: crate::tiled::TiledOp,
         args: Vec<Argument>,
         capability: Option<String>,
+    },
+    /// Growable `ChunkSeq[T]` or borrowed `Slice[T]` operation (§13).
+    Seq {
+        op: crate::seq::SeqOp,
+        args: Vec<Argument>,
     },
     /// Zero-RC Functional-But-In-Place `Box[T]` allocation / slot reuse (§12.4).
     Fip {
@@ -331,6 +338,7 @@ pub fn state_action(i: &Instruction) -> bool {
             | Op::Closure { .. }
             | Op::Index(..)
             | Op::Tiled { .. }
+            | Op::Seq { .. }
             | Op::Fip { .. }
             | Op::Exit { .. }
     ) || i.fallible
@@ -681,7 +689,7 @@ impl Lower<'_> {
         let key = (e.span.start, e.span.end);
         let fallible = matches!(
             op,
-            Op::Binary(..) | Op::Unary(..) | Op::Write { .. } | Op::Index(..)
+            Op::Binary(..) | Op::Unary(..) | Op::Write { .. } | Op::Index(..) | Op::Seq { .. }
         ) && (self.world.partial_ops.contains(&key)
             || self.world.overflow_ops.contains(&key));
         self.values.insert(dest, ty.clone());
@@ -888,6 +896,7 @@ impl Lower<'_> {
                     self.emit(Op::Project(v, field.clone()), e, false)
                 }
             }
+            ExprKind::Index(..) if let Some(v) = self.seq_expr(e) => v,
             ExprKind::Index(base, index) => {
                 let b = self.expr(base);
                 let i = self.expr(index);
@@ -972,6 +981,7 @@ impl Lower<'_> {
                 self.names = outer;
                 value
             }
+            ExprKind::Call { .. } if let Some(v) = self.seq_expr(e) => v,
             ExprKind::Call {
                 callee,
                 args,

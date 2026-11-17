@@ -1,0 +1,68 @@
+// A sequence of linear elements is linear: it is drained with pop, each
+// element is consumed, and ChunkSeq::finish consumes the empty sequence.
+linear struct Ticket {
+    id: u64,
+}
+
+fn redeem(sink t: Ticket) -> u64 {
+    let Ticket {
+        id
+    }
+    = t;
+    id
+}
+
+fn drain(sink s: ChunkSeq[Ticket], acc: u64) -> u64 eff [Fail[RuntimeError]] {
+    let mut mut_s = s;
+    match mut_s.pop() {
+        Option::Some(t) => drain(mut_s, wrapping_add(wrapping_mul(acc, 10), redeem(t))),
+        Option::None => {
+            ChunkSeq::finish(mut_s);
+            acc
+        },
+    }
+}
+
+fn run() -> u64 eff [Fail[RuntimeError]] {
+    let mut tickets: ChunkSeq[Ticket] = ChunkSeq::new[Ticket]();
+    tickets
+        .push(
+        Ticket {
+            id: 1
+        }
+    );
+    tickets
+        .push(
+        Ticket {
+            id: 2
+        }
+    );
+    tickets
+        .push(
+        Ticket {
+            id: 3
+        }
+    );
+    // Affine elements: sequences of sequences.
+    let mut rows: ChunkSeq[ChunkSeq[u64]] = ChunkSeq::new[ChunkSeq[u64]]();
+    let mut row: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    row.push(40);
+    rows.push(row);
+    let inner = match rows.pop() {
+        Option::Some(r) => match r.try_get(0) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        },
+        Option::None => 0,
+    };
+    wrapping_add(drain(tickets, 0), inner)
+}
+
+fn main() -> u64 {
+    handle Fail[RuntimeError] in {
+        run()
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    }
+}

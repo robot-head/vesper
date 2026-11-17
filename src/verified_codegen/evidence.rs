@@ -74,7 +74,12 @@ fn op_uses(op: &Op) -> Vec<ValueId> {
         Op::Tuple(vs) => vs.clone(),
         Op::Vector { args, .. } => args.clone(),
         Op::Data(_, fs) => fs.iter().map(|(_, v)| *v).collect(),
-        Op::Call { args: a, .. } | Op::Tiled { args: a, .. } | Op::Fip { args: a, .. } => args(a),
+        Op::Call { args: a, .. }
+        | Op::Tiled { args: a, .. }
+        | Op::Seq { args: a, .. }
+        | Op::Fip { args: a, .. } => args(a),
+        Op::Loop => vec![],
+        Op::Exit { value, .. } => vec![*value],
         Op::Indirect { callee, args: a } => {
             let mut out = vec![*callee];
             out.extend(args(a));

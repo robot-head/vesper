@@ -1,0 +1,68 @@
+// ChunkSeq growth past several capacity doublings, element reads and
+// writes, pop, truncate, clear and extend, on every backend.
+copy struct Pair {
+    a: u64,
+    b: u32,
+}
+
+fn fill(inout s: ChunkSeq[u64], i: u64, n: u64) {
+    if i < n {
+        s.push(wrapping_mul(i, 3));
+        fill(inout s, wrapping_add(i, 1), n);
+    } else {
+        ()
+    }
+}
+
+fn sum(in s: Slice[u64], i: u64, acc: u64) -> u64 eff [Fail[RuntimeError]] {
+    if i < s.len() {
+        sum(in s, wrapping_add(i, 1), wrapping_add(acc, s[i]))
+    } else {
+        acc
+    }
+}
+
+fn run() -> u64 eff [Fail[RuntimeError]] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    fill(inout s, 0, 100);
+    s.set(7, 1000);
+    let total = sum(in s.as_slice(), 0, 0);
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](2);
+    bytes.push(250);
+    bytes.push(7);
+    bytes.push(9);
+    let mut pairs: ChunkSeq[Pair] = ChunkSeq::new[Pair]();
+    let first = Pair {
+        a: 5,
+        b: 6
+    };
+    pairs.push(first);
+    let second = Pair {
+        a: 11,
+        b: 12
+    };
+    pairs.push(second);
+    let last = match pairs.pop() {
+        Option::Some(p) => wrapping_add(p.a, widen_u64(p.b)),
+        Option::None => 0,
+    };
+    let mut more: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    more.extend(in s[10..20]);
+    more.truncate(4);
+    let head = sum(in more.as_slice(), 0, 0);
+    s.clear();
+    let small = wrapping_add(widen_u64(bytes.get(0)), widen_u64(bytes[2]));
+    wrapping_add(
+        wrapping_add(total, small),
+        wrapping_add(wrapping_add(last, pairs.len()), wrapping_add(head, s.len()))
+    )
+}
+
+fn main() -> u64 {
+    handle Fail[RuntimeError] in {
+        run()
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    }
+}

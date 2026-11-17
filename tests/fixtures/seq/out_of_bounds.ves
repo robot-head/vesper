@@ -1,0 +1,37 @@
+// Element indexing past the end raises Fail[RuntimeError] IndexOutOfBounds,
+// and finish raises it for a sequence that still holds elements.
+fn read(in s: ChunkSeq[u64], i: u64) -> u64 eff [Fail[RuntimeError]] {
+    s[i]
+}
+
+fn finish_full() -> u64 eff [Fail[RuntimeError]] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    s.push(1);
+    ChunkSeq::finish(s);
+    7
+}
+
+fn attempt(i: u64) -> u64 {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    s.push(5);
+    s.push(6);
+    handle Fail[RuntimeError] in {
+        read(in s, i)
+    } with {
+        return x => x,
+        raise(e, k) => match e {
+            RuntimeError::IndexOutOfBounds => 100,
+            RuntimeError::DivisionByZero => 200,
+        },
+    }
+}
+
+fn main() -> u64 {
+    let finished = handle Fail[RuntimeError] in {
+        finish_full()
+    } with {
+        return x => x,
+        raise(e, k) => 30,
+    };
+    wrapping_add(wrapping_add(attempt(1), attempt(2)), finished)
+}

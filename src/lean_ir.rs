@@ -135,7 +135,7 @@ fn uses_defs(world: &World, f: &FunctionIr, op: &Op) -> (BTreeSet<Local>, BTreeS
                 }
             }
         }
-        Op::Tiled { args, .. } | Op::Fip { args, .. } => {
+        Op::Tiled { args, .. } | Op::Seq { args, .. } | Op::Fip { args, .. } => {
             uses.extend(args.iter().map(|a| Local::Value(a.value)));
             for arg in args.iter().filter(|a| a.pass == Pass::Inout) {
                 if let Some(p) = &arg.place {
@@ -250,7 +250,7 @@ pub(crate) fn extract_function_nodes(
                 || world.partial_ops.contains(&(i.span.start, i.span.end))
                 || world.overflow_ops.contains(&(i.span.start, i.span.end))
                 || match &i.op {
-                    Op::Handle { .. } | Op::Try(_) | Op::Index(..) => true,
+                    Op::Handle { .. } | Op::Try(_) | Op::Index(..) | Op::Seq { .. } => true,
                     Op::Call { callee, .. } => world.functions.get(callee).is_none_or(|f| {
                         !f.effects.instances.is_empty() || f.effects.tail.is_some()
                     }),

@@ -1,0 +1,51 @@
+// ChunkSeq and Slice extract to Lean as `Array T` with the same
+// IndexOutOfBounds failures as the backends.
+fn fill(inout s: ChunkSeq[u64], i: u64, n: u64) {
+    if i < n {
+        s.push(wrapping_mul(i, 2));
+        fill(inout s, wrapping_add(i, 1), n);
+    } else {
+        ()
+    }
+}
+
+fn total(in x: Slice[u64], i: u64, acc: u64) -> u64 eff [Fail[RuntimeError]] {
+    if i < x.len() {
+        total(in x, wrapping_add(i, 1), wrapping_add(acc, x[i]))
+    } else {
+        acc
+    }
+}
+
+fn run() -> u64 eff [Fail[RuntimeError]] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](2);
+    fill(inout s, 0, 6);
+    s.set(1, 50);
+    let replaced = s.try_set(9, 1);
+    let top = match s.pop() {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let mut more: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    more.extend(in s[1..3]);
+    more.truncate(1);
+    let missing = match s.try_get(40) {
+        Option::Some(v) => v,
+        Option::None => 3,
+    };
+    let sum = total(in s.as_slice(), 0, 0);
+    let late = s.get(8);
+    wrapping_add(wrapping_add(sum, top), wrapping_add(more.get(0), wrapping_add(missing, late)))
+}
+
+fn main() -> u64 {
+    handle Fail[RuntimeError] in {
+        run()
+    } with {
+        return x => x,
+        raise(e, k) => match e {
+            RuntimeError::IndexOutOfBounds => 1000,
+            RuntimeError::DivisionByZero => 2000,
+        },
+    }
+}
