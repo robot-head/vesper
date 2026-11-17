@@ -234,7 +234,8 @@ pub struct Options {
     pub optimize: bool,
     pub max_functions: usize,
     pub max_rows: usize,
-    /// AArch64 conditional branches reach ±1 MiB.
+    /// Calls reach ±128 MiB on AArch64 (`bl`) and ±2 GiB elsewhere; a
+    /// function's own branches must stay within ±1 MiB.
     pub max_code_bytes: usize,
     /// Refuse a program whose range certificate ([`certificate`]) is
     /// rejected. Off by default until the certificates track enum payload
@@ -250,7 +251,7 @@ impl Options {
             optimize: true,
             max_functions: 4096,
             max_rows: 1_000_000,
-            max_code_bytes: 1 << 20,
+            max_code_bytes: 1 << 26,
             require_certificate: false,
         }
     }
@@ -349,6 +350,10 @@ pub struct Artifact {
     /// The range certificate of `lir`, or why it was rejected.
     pub certificate: Result<certificate::Certificate, certificate::Rejection>,
 }
+
+/// Bytes of code after which the abort exits are repeated before the next
+/// function (see `Asm::bind_copy`).
+const EXIT_SPACING: usize = 256 * 1024;
 
 /// Compile `entry` (no parameters) and everything it reaches.
 pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact, VerifiedError> {
@@ -453,6 +458,15 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
     }
     let mut machine_instructions = 0;
     for (_, rows) in &lir {
+        // AArch64 conditional branches and RV64 `jal` reach ±1 MiB: repeat
+        // the abort exits before a function far from the last copy.
+        if a.here() - a.last_exits() > EXIT_SPACING {
+            match options.target.arch {
+                Arch::X86_64 => {}
+                Arch::Aarch64 => aarch64::exits(&mut a, options.target.os),
+                Arch::Riscv64 => riscv64::exits(&mut a),
+            }
+        }
         for row in rows {
             for m in select(row) {
                 machine_instructions += 1;

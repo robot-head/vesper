@@ -323,9 +323,22 @@ pub fn start(
     }
     for k in TrapKind::ALL {
         a.bind(k.label())?;
-        // mov x0, #status; exit
-        a.u32(0xd280_0000 | u32::from(k.exit_status()) << 5);
-        syscall(a, os, 93, 1);
+        exit(a, os, k);
     }
     Ok(())
+}
+
+fn exit(a: &mut Asm, os: Os, k: TrapKind) {
+    // mov x0, #status; exit
+    a.u32(0xd280_0000 | u32::from(k.exit_status()) << 5);
+    syscall(a, os, 93, 1);
+}
+
+/// Another copy of the abort exits, between functions: `cbz` and `b.cond`
+/// reach only ±1 MiB, so a trap branch resolves to the nearest copy.
+pub fn exits(a: &mut Asm, os: Os) {
+    for k in TrapKind::ALL {
+        a.bind_copy(k.label());
+        exit(a, os, k);
+    }
 }

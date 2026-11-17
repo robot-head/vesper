@@ -13,6 +13,9 @@ pub enum Fix {
     Imm19,
     /// RISC-V `jal` imm20 (±1 MiB) in the instruction word at `at`.
     Jal,
+    /// RISC-V `auipc rd, hi` at `at` and `jalr rd, lo(rd)` after it
+    /// (±2 GiB), relative to the `auipc`.
+    AuipcJalr,
 }
 
 /// A function's prologue, for Windows unwind tables: where it starts, how
@@ -34,6 +37,9 @@ pub struct Prologue {
 pub struct Asm {
     pub code: Vec<u8>,
     labels: BTreeMap<Label, usize>,
+    /// Further copies of the abort exits (labels below `FIRST_FREE_LABEL`):
+    /// a branch to one resolves to the nearest copy.
+    copies: BTreeMap<Label, Vec<usize>>,
     fixups: Vec<(usize, Label, Fix)>,
     /// Emit for Windows x64 (stack probes, canonical epilogues, unwind
     /// prologues).
@@ -71,6 +77,25 @@ impl Asm {
     pub fn here(&self) -> usize {
         self.code.len()
     }
+    /// Bind another copy of the abort exit `l` here.
+    pub fn bind_copy(&mut self, l: Label) {
+        self.copies.entry(l).or_default().push(self.code.len());
+    }
+    /// Where the last copy of the abort exits was bound.
+    pub fn last_exits(&self) -> usize {
+        self.copies
+            .values()
+            .flatten()
+            .chain(
+                self.labels
+                    .iter()
+                    .filter(|(l, _)| **l < FIRST_FREE_LABEL)
+                    .map(|(_, at)| at),
+            )
+            .copied()
+            .max()
+            .unwrap_or(0)
+    }
     pub fn bind(&mut self, l: Label) -> Result<(), VerifiedError> {
         if self.labels.insert(l, self.code.len()).is_some() {
             return Err(VerifiedError::Invalid(format!("label L{l} bound twice")));
@@ -83,11 +108,17 @@ impl Asm {
     /// Resolve every label reference; the code is final afterwards.
     pub fn finish(mut self) -> Result<Vec<u8>, VerifiedError> {
         for (at, l, kind) in std::mem::take(&mut self.fixups) {
-            let target = *self
+            let mut target = *self
                 .labels
                 .get(&l)
                 .ok_or_else(|| VerifiedError::Invalid(format!("unbound label L{l}")))?
                 as i64;
+            // The nearest copy of an abort exit.
+            for &c in self.copies.get(&l).into_iter().flatten() {
+                if (c as i64 - at as i64).abs() < (target - at as i64).abs() {
+                    target = c as i64;
+                }
+            }
             match kind {
                 Fix::Rel32 => {
                     let rel = target - (at as i64 + 4);
@@ -108,6 +139,20 @@ impl Asm {
                     let mut w = u32::from_le_bytes(self.code[at..at + 4].try_into().unwrap());
                     w |= field;
                     self.code[at..at + 4].copy_from_slice(&w.to_le_bytes());
+                }
+                Fix::AuipcJalr => {
+                    let rel = target - at as i64;
+                    let hi = (rel + 0x800) >> 12;
+                    let lo = rel - (hi << 12);
+                    if !(-(1i64 << 19)..(1i64 << 19)).contains(&hi) {
+                        return Err(VerifiedError::Limit("RISC-V call out of range".into()));
+                    }
+                    let patch = |code: &mut Vec<u8>, at: usize, field: u32| {
+                        let w = u32::from_le_bytes(code[at..at + 4].try_into().unwrap()) | field;
+                        code[at..at + 4].copy_from_slice(&w.to_le_bytes());
+                    };
+                    patch(&mut self.code, at, ((hi as u32) & 0xf_ffff) << 12);
+                    patch(&mut self.code, at + 4, ((lo as u32) & 0xfff) << 20);
                 }
                 Fix::Imm26 | Fix::Imm19 => {
                     let words = (target - at as i64) / 4;
@@ -209,4 +254,57 @@ pub fn encoding_listing(
         out.push('\n');
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A branch to an abort exit resolves to its nearest copy.
+    #[test]
+    fn fixups_pick_the_nearest_exit_copy() {
+        let l = TrapKind::Overflow.label();
+        let mut a = Asm::default();
+        a.bind(l).unwrap();
+        a.u32(0);
+        a.code.resize(0x10_0000, 0);
+        a.bind_copy(l);
+        a.u32(0);
+        let at = a.here();
+        a.u32(0x0000_006f); // jal x0, 0
+        a.fixup(at, l, Fix::Jal);
+        assert_eq!(a.last_exits(), 0x10_0000);
+        let code = a.finish().unwrap();
+        // Back 4 bytes to the copy: imm = -4.
+        let w = u32::from_le_bytes(code[at..at + 4].try_into().unwrap());
+        assert_eq!(w, 0xffdf_f06f);
+    }
+
+    /// `auipc` + `jalr` reaches a target 3 MiB away, past `jal`'s range.
+    #[test]
+    fn auipc_jalr_reaches_far_targets() {
+        let target = 3 << 20;
+        let mut a = Asm::default();
+        a.u32(0x0000_0097); // auipc ra, 0
+        a.u32(0x0000_80e7); // jalr ra, 0(ra)
+        a.fixup(0, FIRST_FREE_LABEL, Fix::AuipcJalr);
+        a.code.resize(target + 0x7f4, 0);
+        a.bind(FIRST_FREE_LABEL).unwrap();
+        let code = a.finish().unwrap();
+        let hi = u32::from_le_bytes(code[0..4].try_into().unwrap()) as i32 >> 12;
+        let lo = u32::from_le_bytes(code[4..8].try_into().unwrap()) as i32 >> 20;
+        assert_eq!(((hi as i64) << 12) + lo as i64, (target + 0x7f4) as i64);
+        // A rounding case: the low part is negative.
+        let mut a = Asm::default();
+        a.u32(0x0000_0097);
+        a.u32(0x0000_80e7);
+        a.fixup(0, FIRST_FREE_LABEL, Fix::AuipcJalr);
+        a.code.resize(target + 0x900, 0);
+        a.bind(FIRST_FREE_LABEL).unwrap();
+        let code = a.finish().unwrap();
+        let hi = u32::from_le_bytes(code[0..4].try_into().unwrap()) as i32 >> 12;
+        let lo = u32::from_le_bytes(code[4..8].try_into().unwrap()) as i32 >> 20;
+        assert!(lo < 0);
+        assert_eq!(((hi as i64) << 12) + lo as i64, (target + 0x900) as i64);
+    }
 }

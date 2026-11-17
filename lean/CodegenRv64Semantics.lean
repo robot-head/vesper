@@ -147,6 +147,7 @@ def exec (base : Int) : Inst → St → Option St
   | .jalr rd r1 imm, s =>
     some (setPc (wx s rd (base + s.pc + 4))
       (enc (rx s r1 + imm) - enc (rx s r1 + imm) % 2 - base))
+  | .auipc rd imm, s => some (next (wx s rd (base + s.pc + imm * 4096)))
   | .ecall, _ => none
   | .fp .faddD rd r1 r2, s => some (next (wf s rd (fword (fbits (s.f r1) + fbits (s.f r2)))))
   | .fp .fsubD rd r1 r2, s => some (next (wf s rd (fword (fbits (s.f r1) - fbits (s.f r2)))))
@@ -176,6 +177,8 @@ inductive Steps (base : Int) (code : List Inst) : St → St → Prop
 def atL (lab : Nat → Int) (k : Nat) : Item → Inst
   | .ins i => i
   | .jump rd l => .jal rd (lab l - 4 * k)
+  | .farHi rd l => .auipc rd (hiOf (lab l - 4 * k))
+  | .farLo rd l => .jalr rd rd (loOf (lab l - 4 * k + 4))
 
 def placeL (lab : Nat → Int) : Nat → List Item → List Inst
   | _, [] => []
@@ -266,6 +269,11 @@ theorem exec_shift (base o : Int) (i : Inst) (s s' : St) (h : exec (base + o) i 
     simp only [rx_setPc]; simp only [setPc, wx, St.mk.injEq]
     refine ⟨?_, trivial, trivial, by omega⟩
     funext r'; split <;> (try rfl); congr 1; omega
+  | auipc rd imm =>
+    simp only [exec, Option.some.injEq] at h ⊢; subst h
+    simp only [next, setPc, wx, St.mk.injEq]
+    refine ⟨?_, trivial, trivial, by omega⟩
+    funext r'; split <;> (try rfl); congr 1; omega
   | _ =>
     simp only [exec, Option.some.injEq] at h ⊢; subst h
     simp [next, setPc, wx, wf, rx]; omega
@@ -306,7 +314,7 @@ theorem placeL_shift (lab : Nat → Int) (n : Nat) : ∀ (j : Nat) (ys : List It
     rw [show n + j + 1 = n + (j + 1) by omega, placeL_shift lab n (j + 1) rest]
     congr 1
     cases y <;> simp only [atL, shiftLab]
-    congr 1; omega
+    all_goals first | (congr 1; omega) | (congr 2; omega)
 
 theorem code_append (lab : Nat → Int) (xs ys : List Item) :
     code lab (xs ++ ys) = code lab xs ++ code (shiftLab lab xs.length) ys := by

@@ -8,7 +8,8 @@
 //! the AArch64 encoding. RISC-V has no flags, so every checked operation
 //! computes its abort condition explicitly. Conditional branches reach only
 //! ±4 KiB, so a branch to a label is an inverted branch over a `jal`
-//! (±1 MiB). The emitted programs run under QEMU in the tests, and
+//! (±1 MiB). A call is `auipc` + `jalr` (±2 GiB), and the abort exits are
+//! repeated through the code (`exits`) so that a trap branch stays near one. The emitted programs run under QEMU in the tests, and
 //! `lean/CodegenRv64Encoding.lean` models this file's `emit`: it proves every
 //! instruction that model produces encodes to a word the ISA's format tables
 //! decode back to that instruction, and prints the words of sample
@@ -43,6 +44,7 @@ const STORE: u32 = 0x23;
 const BRANCH: u32 = 0x63;
 const JAL: u32 = 0x6f;
 const JALR: u32 = 0x67;
+const AUIPC: u32 = 0x17;
 
 /// R-type `op rd, rs1, rs2`.
 fn r(a: &mut Asm, funct7: u32, funct3: u32, rd: u32, rs1: u32, rs2: u32) {
@@ -150,6 +152,13 @@ fn jal(a: &mut Asm, rd: u32, l: Label) {
     let at = a.here();
     a.u32(rd << 7 | JAL);
     a.fixup(at, l, Fix::Jal);
+}
+/// `auipc rd, hi; jalr rd, lo(rd)`: call `l` anywhere within ±2 GiB.
+fn far_call(a: &mut Asm, rd: u32, l: Label) {
+    let at = a.here();
+    a.u32(rd << 7 | AUIPC);
+    a.u32(rd << 15 | rd << 7 | JALR);
+    a.fixup(at, l, Fix::AuipcJalr);
 }
 /// Branch to `l` when `rs1 cond rs2`: the inverted branch skips a `jal`.
 fn branch_to(a: &mut Asm, funct3: u32, rs1: u32, rs2: u32, l: Label) {
@@ -352,7 +361,7 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
         M::Label(l) => a.bind(l)?,
         M::Jmp(l) => jal(a, ZERO, l),
         M::Bz(l) => branch_to(a, BEQ, A0, ZERO, l),
-        M::Call(l) => jal(a, RA, l),
+        M::Call(l) => far_call(a, RA, l),
         // addi sp, sp, -16; sd ra, 8(sp); sd s0, 0(sp); mv s0, sp; sp -= bytes
         M::Enter(words) => {
             addi(a, SP, SP, -16);
@@ -394,7 +403,7 @@ pub fn start(
 ) -> Result<(), VerifiedError> {
     let area = ((result_words.max(1) + 1) & !1) * 8;
     sub_sp(a, area);
-    jal(a, RA, entry);
+    far_call(a, RA, entry);
     if protocol == ResultProtocol::Words && result_words > 0 {
         addi(a, A0, ZERO, 1);
         addi(a, A1, SP, 0);
@@ -409,10 +418,22 @@ pub fn start(
     syscall(a, 93);
     for k in TrapKind::ALL {
         a.bind(k.label())?;
-        addi(a, A0, ZERO, i32::from(k.exit_status()));
-        syscall(a, 93);
+        exit(a, k);
     }
     Ok(())
+}
+
+fn exit(a: &mut Asm, k: TrapKind) {
+    addi(a, A0, ZERO, i32::from(k.exit_status()));
+    syscall(a, 93);
+}
+
+/// Another copy of the abort exits, between functions.
+pub fn exits(a: &mut Asm) {
+    for k in TrapKind::ALL {
+        a.bind_copy(k.label());
+        exit(a, k);
+    }
 }
 
 /// The words `emit` writes for the shared sample instructions

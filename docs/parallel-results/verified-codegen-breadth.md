@@ -837,10 +837,49 @@ Every function `parse_tree_main` reaches now compiles, including
 
 ### Remaining gap: code size
 
-Under the default limit the parser does not build: `max_code_bytes` is
-1 MiB, because AArch64 `cbz`/`b.cond` and RV64 `jal` reach only ±1 MiB,
-and branches to the shared trap stubs cross functions. Building it on
-every target needs long-branch sequences: an inverted branch over `b`
-(±128 MiB) on AArch64, and `auipc` + `jalr` on RV64. Both encoders and
-their Lean encoding proofs would change, so that is a separate step.
+Closed by Milestone 12.
 
+## Milestone 12: long branches (#894)
+
+### What was built
+
+- **Trap exits are copied.** AArch64 `cbz`/`b.cond` and RV64 `jal` reach
+  only ±1 MiB, and every checked operation branches to a shared trap exit.
+  The emitter now places a fresh copy of the exits between functions once
+  256 KiB of code has passed since the last copy (`EXIT_SPACING`). The
+  assembler records every copy of a label (`Asm::bind_copy`) and resolves
+  each fixup to the nearest one, so a trap branch never travels more than
+  about 256 KiB plus the length of its own function.
+- **RV64 far calls.** `M::Call` and the `_start` call are now
+  `auipc ra, hi; jalr ra, lo(ra)` (`Fix::AuipcJalr`, with
+  `hi = (rel + 0x800) >> 12` and `lo = rel - (hi << 12)`), which reach
+  ±2 GiB. AArch64 calls were already `bl` (±128 MiB), and x86-64 uses rel32.
+- **Limit.** `max_code_bytes` is now 64 MiB, which keeps every AArch64 `bl`
+  in range. A single function longer than 1 MiB still fails with a typed
+  `Limit` error from the assembler, not a bad encoding.
+
+### Lean
+
+- `lean/CodegenRv64Encoding.lean` adds the U-format `Inst.auipc` with its
+  decoder, encoder, well-formedness, and a `decode_encode` case. It also
+  adds the `farHi`/`farLo` layout items, and `.call` is emitted as the pair.
+  `place_wf` covers both halves: `hiOf` and `loOf` keep the immediates
+  within the U and I ranges.
+- `lean/CodegenRv64Semantics.lean` gives `auipc` its meaning
+  (`rd := base + pc + imm * 4096`) and extends `exec_shift`/`placeL_shift`
+  to the new items, so `run_sim`/`row_sim` hold as before. The AArch64
+  model does not change: exit copies are just more copies of the same
+  instructions.
+- The Rust RV64 listing still matches the Lean `listing`
+  (`tests/verified_codegen_lean.rs`).
+
+### Checks
+
+- The whole structured parser (input `fn f() -> i64 { 1 }`) now builds
+  under the default limit and exits with 197 on every target:
+  - x86-64: 1,698,911 bytes of code;
+  - AArch64 under QEMU: 974,504 bytes;
+  - RV64 under QEMU: 5,086,616 bytes.
+- `cargo test --test verified_codegen`, `verified_codegen_fail_front_end`,
+  `verified_codegen_front_end` (the inventory is unchanged) and
+  `verified_codegen_lean` with Lean 4.35.

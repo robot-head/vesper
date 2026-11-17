@@ -11,7 +11,7 @@ target: the 32-bit words `src/verified_codegen/riscv64.rs` writes for each
 * `Inst` is the integer and D-extension subset of RV64 the emitter uses, as
   the unprivileged ISA manual names it (`add`, `ld`, `bne`, `fadd.d`, ...).
 * `decode` is the specification: the base instruction formats (R, I, S, B,
-  J) of the ISA manual, field by field (`opcode` in bits 6:0, `rd` in 11:7,
+  J, U) of the ISA manual, field by field (`opcode` in bits 6:0, `rd` in 11:7,
   `funct3` in 14:12, `rs1` in 19:15, `rs2` in 24:20, `funct7` in 31:25, the
   scattered B and J immediates, sign extension of every immediate), with the
   opcode and function codes of the manual's instruction listing.
@@ -29,6 +29,7 @@ target: the 32-bit words `src/verified_codegen/riscv64.rs` writes for each
   instructions. The theorems are about the Lean encoder; the listing ties the
   Rust encoder to it on those samples, not in general.
 
+Calls are far: `auipc` + `jalr` (±2 GiB) instead of a `jal` (±1 MiB).
 Branch targets: `emit` resolves every jump against a layout where the abort
 exits (labels below `firstFree`) sit just before the instruction and every
 other label just after it,
@@ -64,6 +65,8 @@ inductive Inst
   | branch (op : BOp) (rs1 rs2 : Nat) (off : Int)
   | jal (rd : Nat) (off : Int)
   | jalr (rd rs1 : Nat) (imm : Int)
+  /-- `auipc rd, imm`: `rd := pc + imm * 2^12` (U-type). -/
+  | auipc (rd : Nat) (imm : Int)
   | ecall
   | fp (op : FOp) (rd rs1 rs2 : Nat)
   | fmvDX (rd rs1 : Nat)
@@ -122,6 +125,9 @@ def immJ (w : Nat) : Int :=
   sext 20 (w / 2 ^ 31 % 2 * 2 ^ 20 + w / 2 ^ 12 % 256 * 2 ^ 12 + w / 2 ^ 20 % 2 * 2048 +
     w / 2 ^ 21 % 1024 * 2)
 
+/-- U-type: `imm[31:12]` in bits 31:12. -/
+def immU (w : Nat) : Int := sext 19 (w / 2 ^ 12 % 2 ^ 20)
+
 /-- The specification decoder for the subset, on a 32-bit word; `none` for
 anything else. -/
 def decode (w : Nat) : Option Inst :=
@@ -141,6 +147,7 @@ def decode (w : Nat) : Option Inst :=
       fun op => .branch op (rs1F w) (rs2F w) (immB w)
   | 0x6f => some (.jal (rdF w) (immJ w))
   | 0x67 => if funct3 w = 0 then some (.jalr (rdF w) (rs1F w) (immI w)) else none
+  | 0x17 => some (.auipc (rdF w) (immU w))
   | 0x73 => if w = 0x73 then some .ecall else none
   | 0x53 =>
     if funct7 w = 0x79 ∧ funct3 w = 0 ∧ rs2F w = 0 then some (.fmvDX (rdF w) (rs1F w))
@@ -181,6 +188,7 @@ def encode : Inst → Nat
   | .branch op rs1 rs2 off => encB off rs2 rs1 op.code 0x63
   | .jal rd off => encJ off rd 0x6f
   | .jalr rd rs1 imm => encI imm rs1 0 rd 0x67
+  | .auipc rd imm => bits 20 imm * 2 ^ 12 + rd * 2 ^ 7 + 0x17
   | .ecall => 0x73
   | .fp op rd rs1 rs2 => encR op.code.1 rs2 rs1 op.code.2 rd 0x53
   | .fmvDX rd rs1 => encR 0x79 0 rs1 0 rd 0x53
@@ -200,6 +208,7 @@ def Inst.Wf : Inst → Prop
   | .sd rs2 rs1 imm => rs2 < 32 ∧ rs1 < 32 ∧ Imm12 imm
   | .branch _ rs1 rs2 off => rs1 < 32 ∧ rs2 < 32 ∧ -4096 ≤ off ∧ off < 4096 ∧ off % 2 = 0
   | .jal rd off => rd < 32 ∧ -2 ^ 20 ≤ off ∧ off < 2 ^ 20 ∧ off % 2 = 0
+  | .auipc rd imm => rd < 32 ∧ -2 ^ 19 ≤ imm ∧ imm < 2 ^ 19
   | .ecall => True
   | .fmvDX rd rs1 | .fmvXD rd rs1 => rd < 32 ∧ rs1 < 32
 
@@ -412,6 +421,23 @@ theorem decode_encode (i : Inst) (h : i.Wf) :
     refine ⟨lt, ?_⟩
     rw [encode, encJ, decode, ho, immJ_fields, hr, h7, hs1, h3, hs2, hx]
     rfl
+  | auipc rd imm =>
+    obtain ⟨hd, hlo, hhi⟩ := h
+    have hb : bits 20 imm < 2 ^ 20 := by unfold bits; omega
+    have hv : ((bits 20 imm : Nat) : Int) = imm % 1048576 := by unfold bits; omega
+    have lt : encode (.auipc rd imm) < 2 ^ 32 := by simp only [encode]; omega
+    have ho : opcode (encode (.auipc rd imm)) = 0x17 := by
+      simp only [encode, opcode, Nat.reducePow]; omega
+    have hr : rdF (encode (.auipc rd imm)) = rd := by
+      simp only [encode, rdF, Nat.reducePow]; omega
+    have hu : immU (encode (.auipc rd imm)) = imm := by
+      have e : (bits 20 imm * 2 ^ 12 + rd * 2 ^ 7 + 0x17) / 2 ^ 12 % 2 ^ 20 = bits 20 imm := by
+        simp only [Nat.reducePow] at *; omega
+      simp only [immU, encode, e]
+      unfold sext; simp only [Nat.reducePow] at *; split <;> omega
+    refine ⟨lt, ?_⟩
+    rw [decode, ho, hr, hu]
+    rfl
   | ecall => exact ⟨by decide, rfl⟩
 
 theorem encode_lt (i : Inst) (h : i.Wf) : encode i < 2 ^ 32 := (decode_encode i h).1
@@ -452,10 +478,18 @@ trap kind of the Rust emitter, which never selects it. -/
 def trapLabel : Failure → Nat
   | .overflow => 0 | .divZero => 1 | .unreachable => 2 | .region => 3 | .fault => 4
 
-/-- An emitted instruction, or a `jal rd` to a label resolved by layout. -/
+/-- An emitted instruction, or a `jal rd` to a label resolved by layout, or
+the two halves of a far call `auipc rd, hi; jalr rd, lo(rd)` (±2 GiB). -/
 inductive Item
   | ins (i : Inst)
   | jump (rd : Nat) (l : Nat)
+  | farHi (rd : Nat) (l : Nat)
+  | farLo (rd : Nat) (l : Nat)
+
+/-- The `auipc` and `jalr` immediates of a far call to byte offset `off`
+(from the `auipc`): `hi * 2^12 + lo = off` with `lo` in 12 signed bits. -/
+def hiOf (off : Int) : Int := (off + 2048) / 4096
+def loOf (off : Int) : Int := off - hiOf off * 4096
 
 def addi (rd rs1 : Nat) (imm : Int) : Item := .ins (.i .addi rd rs1 imm)
 
@@ -560,7 +594,7 @@ def emit : M → List Item
   | .label _ => []
   | .jmp l => [.jump zero l]
   | .bz l => branchTo .bne a0 zero l
-  | .call l => [.jump ra l]
+  | .call l => [.farHi ra l, .farLo ra l]
   | .enter words => [addi sp sp (-16), .ins (.sd ra sp 8), .ins (.sd s0 sp 0), addi s0 sp 0] ++
       subSp (words * 8)
   | .leave => [addi sp s0 0, .ins (.ld s0 sp 0), .ins (.ld ra sp 8), addi sp sp 16,
@@ -574,9 +608,15 @@ def emit : M → List Item
 
 /-! ## Layout: abort exits before the instruction, other labels after it -/
 
+/-- The byte offset of label `l` from instruction `k` of `n`. -/
+def labelOff (k n l : Nat) : Int := if l < firstFree then -(4 * k : Int) else 4 * (n - k : Nat)
+
 def Item.at (k n : Nat) : Item → Inst
   | .ins i => i
-  | .jump rd l => .jal rd (if l < firstFree then -(4 * k : Int) else 4 * (n - k : Nat))
+  | .jump rd l => .jal rd (labelOff k n l)
+  | .farHi rd l => .auipc rd (hiOf (labelOff k n l))
+  -- Relative to the `auipc` just before.
+  | .farLo rd l => .jalr rd rd (loOf (labelOff k n l + 4))
 
 def place (n : Nat) : Nat → List Item → List Inst
   | _, [] => []
@@ -586,7 +626,7 @@ def layout (items : List Item) : List Inst := place items.length 0 items
 
 def Item.Ok : Item → Prop
   | .ins i => i.Wf
-  | .jump rd _ => rd < 32
+  | .jump rd _ | .farHi rd _ | .farLo rd _ => rd < 32
 
 instance (i : Inst) : Decidable i.Wf := by
   cases i <;> simp only [Inst.Wf, Imm12] <;> infer_instance
@@ -607,9 +647,17 @@ theorem place_wf (n : Nat) (hn : n < 2 ^ 18) :
       cases it with
       | ins j => exact this
       | jump rd l =>
-        simp only [Item.at, Inst.Wf]
+        simp only [Item.at, Inst.Wf, labelOff]
         simp only [List.length_cons] at hk
         refine ⟨this, ?_, ?_, ?_⟩ <;> split <;> omega
+      | farHi rd l =>
+        simp only [Item.at, Inst.Wf, labelOff, hiOf]
+        simp only [List.length_cons] at hk
+        refine ⟨this, ?_, ?_⟩ <;> split <;> omega
+      | farLo rd l =>
+        simp only [Item.at, Inst.Wf, Imm12, loOf, hiOf, labelOff]
+        simp only [List.length_cons] at hk
+        refine ⟨this, this, ?_, ?_⟩ <;> split <;> omega
     · exact ih (k + 1) (by simp at hk; omega) (fun it h => hok it (by simp [h])) i hi
 
 /-- `M` operands the Rust emitter can be given: frame indices and frame
