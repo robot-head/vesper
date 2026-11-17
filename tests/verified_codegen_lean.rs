@@ -11,7 +11,10 @@
 //! encoded words of sample instructions, which must be the words
 //! `verified_codegen::rv64_encoding_listing` gets from the Rust emitter.
 //! `lean/CodegenA64Encoding.lean` does the same for AArch64 against the A64
-//! encoding diagrams (`verified_codegen::a64_encoding_listing`).
+//! encoding diagrams (`verified_codegen::a64_encoding_listing`), and
+//! `lean/CodegenX64Encoding.lean` for x86-64 against the Intel SDM formats:
+//! there the encodings are byte lists, the specification is a prefix decoder,
+//! and the listing prints bytes (`verified_codegen::x64_encoding_listing`).
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
@@ -41,6 +44,18 @@ fn model() -> PathBuf {
 
 const A64_NAMESPACE: &str = "Vesper.VerifiedCodegen.A64";
 const A64_KEY_THEOREMS: [&str; 4] = ["decode_encode", "emit_ok", "emit_decodes", "bytes_encode"];
+
+const X64_NAMESPACE: &str = "Vesper.VerifiedCodegen.X64";
+const X64_KEY_THEOREMS: [&str; 4] = [
+    "decode_encode",
+    "decodeAll_encodeAll",
+    "emit_ok",
+    "emit_decodes",
+];
+
+fn x64_model() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/CodegenX64Encoding.lean")
+}
 
 fn rv64_model() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/CodegenRv64Encoding.lean")
@@ -200,12 +215,59 @@ fn model_has_no_escape_hatches_and_audits_every_theorem() {
         &["VerifiedCodegen"],
         &A64_KEY_THEOREMS,
     );
+    let source = std::fs::read_to_string(x64_model()).expect("read the x86-64 model");
+    check_hygiene(
+        "CodegenX64Encoding.lean",
+        &source,
+        X64_NAMESPACE,
+        &["VerifiedCodegen"],
+        &X64_KEY_THEOREMS,
+    );
+}
+
+/// The encoding models lay out labels below `firstFree` as the abort exits;
+/// it must be the Rust `FIRST_FREE_LABEL` (one past `TrapKind::ALL`).
+#[test]
+fn encoding_models_reserve_exactly_the_rust_abort_labels() {
+    let expected = format!(
+        "def firstFree : Nat := {}\n",
+        vesper::verified_codegen::FIRST_FREE_LABEL
+    );
+    assert_eq!(
+        vesper::verified_codegen::FIRST_FREE_LABEL as usize,
+        vesper::verified_codegen::TrapKind::ALL.len()
+    );
+    for path in [rv64_model(), a64_model(), x64_model()] {
+        let source = std::fs::read_to_string(&path).expect("read an encoding model");
+        assert!(
+            strip_comments(&source).contains(&expected),
+            "{} does not define {expected:?}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn rust_x64_listing_covers_every_instruction_kind() {
+    let listing = vesper::verified_codegen::x64_encoding_listing();
+    assert_eq!(listing.lines().count(), 64);
+    // add rax, rcx; jb ovf (the abort exits sit at offset 0)
+    assert!(listing.contains("addchk u: 48 01 c8 0f 82 f7 ff ff ff\n"));
+    // The first function label is not an abort exit.
+    assert!(listing.contains("jmp L3: e9 00 00 00 00\n"));
+    // push rbp; mov rbp, rsp; test [rsp - 4096], esp; sub rsp, 8000
+    assert!(
+        listing.contains(
+            "enter 1000 (windows): 55 48 89 e5 85 a4 24 00 f0 ff ff 48 81 ec 40 1f 00 00\n"
+        )
+    );
+    assert!(listing.contains("leave (windows, frame 8000): 48 81 c4 40 1f 00 00 5d c3\n"));
 }
 
 #[test]
 fn rust_rv64_listing_covers_every_instruction_kind() {
     let listing = vesper::verified_codegen::rv64_encoding_listing();
-    assert_eq!(listing.lines().count(), 59);
+    assert_eq!(listing.lines().count(), 60);
     // add a0,a0,a1; bgeu a0,a1,+8; j ovf (the abort exits sit at offset 0)
     assert!(listing.contains("addchk u: 00b50533 00b57463 ff9ff06f\n"));
     assert!(listing.contains("leave: 00040113 00013403 00813083 01010113 00008067\n"));
@@ -214,7 +276,7 @@ fn rust_rv64_listing_covers_every_instruction_kind() {
 #[test]
 fn rust_a64_listing_covers_every_instruction_kind() {
     let listing = vesper::verified_codegen::a64_encoding_listing();
-    assert_eq!(listing.lines().count(), 61);
+    assert_eq!(listing.lines().count(), 62);
     // adds x0, x0, x1; b.hs ovf (the abort exits sit at offset 0)
     assert!(listing.contains("addchk u: ab010000 54ffffe2\n"));
     // sub sp, sp, #1, lsl #12; sub sp, sp, #0xf40
@@ -381,5 +443,21 @@ fn lean_a64_encoding_model_compiles_and_prints_the_rust_words() {
         A64_NAMESPACE,
         "A64",
         vesper::verified_codegen::a64_encoding_listing(),
+    );
+}
+
+#[test]
+fn lean_x64_encoding_model_compiles_and_prints_the_rust_bytes() {
+    let Ok(lean) = std::env::var("VESPER_LEAN") else {
+        eprintln!("VESPER_LEAN unset; Lean compilation of CodegenX64Encoding.lean skipped");
+        return;
+    };
+    check_encoding_model(
+        &lean,
+        x64_model(),
+        "CodegenX64Encoding.lean",
+        X64_NAMESPACE,
+        "X64",
+        vesper::verified_codegen::x64_encoding_listing(),
     );
 }

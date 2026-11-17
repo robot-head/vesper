@@ -76,10 +76,11 @@ mod x86_64;
 pub use aarch64::encoding_listing as a64_encoding_listing;
 pub use cli::build_command;
 pub use machine::{
-    ArithOp, Cond, FloatOp, Kind, Label, Lir, Loc, M, Reg, Sign, Slot, TrapKind, WrapOp, select,
-    table_listing, table_rows,
+    ArithOp, Cond, FIRST_FREE_LABEL, FloatOp, Kind, Label, Lir, Loc, M, Reg, Sign, Slot, TrapKind,
+    WrapOp, select, table_listing, table_rows,
 };
 pub use riscv64::encoding_listing as rv64_encoding_listing;
+pub use x86_64::encoding_listing as x64_encoding_listing;
 
 /// The value of `vesper build --codegen` that selects this backend.
 pub const CODEGEN: &str = "verified";
