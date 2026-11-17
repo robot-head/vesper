@@ -321,8 +321,8 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) -> Result<(), String> 
         if name.starts_with('.') {
             continue;
         }
-        let kind = entry
-            .file_type()
+        // `metadata` follows symlinks: Bazel runfiles are symlink trees.
+        let kind = std::fs::metadata(entry.path())
             .map_err(|e| format!("{}: {e}", entry.path().display()))?;
         if kind.is_dir() {
             walk(&entry.path(), depth + 1, out)?;
