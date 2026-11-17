@@ -53,7 +53,9 @@ fn recovery_diagnostics_match_the_seed() {
             "fn f() { \"open }",
             "fn f() {} /* open",
             "trait T[A: Tr, B: Other] {}",
-            "impl[A: Tr, B: Other] A {}",
+            // `impl[A: Tr, B: Other] A {}` left this list with #877: the seed
+            // now accepts bounds on inherent impl blocks (bounded generics),
+            // which the self-hosted parser does not parse yet.
             "model M: Tr X {}",
             "impl fn() for X {}",
             "struct X { f: i64 @@ }",
