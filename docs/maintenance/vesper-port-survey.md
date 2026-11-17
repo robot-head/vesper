@@ -219,6 +219,7 @@ The goal is to reuse every Rust test unchanged.
 
 - For a crate `vesper-x`, the port lives in `packages/x` (Vesper source) and is built with F8 into a static library with generated Rust bindings, in a crate `vesper-x-port`.
 - The Rust crate gains a Cargo feature, `vesper-port`. With it on, the crate's public functions forward to the Vesper build. The existing `tests/` and golden fixtures run unchanged against both builds. CI runs both and compares outputs where a test prints or hashes them.
+- In-crate unit tests (`#[cfg(test)]` modules in `src/`) often reach private state, for example `vesper-beacon/src/histogram.rs` and Strata's slab and arena tests, so forwarding the public API does not cover them. Before deletion, each one is either translated into a differential case through the public API or ported as a Vesper-side test of the port's own internals. The lane lists which treatment each test got, and an unported unit test blocks deletion.
 - For crates with traces or golden files (Strata, Quarry, Tensor), the harness also compares the trace or golden output byte for byte.
 - Crucible can drive both builds with the same choice tape to find divergences the tests miss. Its native-coverage JIT entry already calls compiled Vesper from Rust.
 - Deletion: once both builds pass the whole suite on all four required CI platforms, the lane removes the Rust implementation, makes the forwarding crate the only build, and keeps the tests.
