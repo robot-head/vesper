@@ -132,63 +132,104 @@ impl<'a> Document<'a> {
     }
     // Reserve text following a group on the same line, including delimiters and
     // a block's opening brace. Otherwise a 100-column header plus " {" spills.
+    //
+    // The scan walks the pending render stack from its top in place and
+    // expands each Concat one child at a time, so its cost is the number of
+    // nodes it actually visits before the ribbon overflows or a line breaks,
+    // not the depth of the pending stack (copying the stack for every group
+    // made rendering quadratic in the number of items in one block).
     fn following_width(
         &mut self,
         pending: &[(usize, bool, DocId)],
         remaining: usize,
     ) -> Result<usize, Error> {
-        self.work.charge(pending.len())?;
-        let mut scan = Vec::new();
-        scan.try_reserve(pending.len())
-            .map_err(|_| Error::Allocation)?;
-        scan.extend_from_slice(pending);
         let mut width = 0usize;
-        while let Some((indent, flat, id)) = scan.pop() {
-            self.work.charge(1)?;
-            let text_bytes = match &self.node(id)?.doc {
-                Doc::Text(text) | Doc::Comment(text) => text.len(),
-                _ => 0,
-            };
-            self.work.charge(text_bytes)?;
-            match &self.node(id)?.doc {
-                Doc::Nil => {}
-                Doc::Text(text) | Doc::Comment(text) => {
-                    let first = text.split(['\n', '\r']).next().unwrap_or("");
-                    width = width
-                        .checked_add(first.chars().count())
-                        .ok_or(Error::Overflow)?;
-                    if first.len() != text.len() {
-                        return Ok(width);
+        // Frames of the current pending entry: (node, flat, next child index).
+        let mut frames: Vec<(DocId, bool, usize)> = Vec::new();
+        for &(_, flat, id) in pending.iter().rev() {
+            frames.clear();
+            frames.try_reserve(1).map_err(|_| Error::Allocation)?;
+            frames.push((id, flat, 0));
+            while let Some(frame) = frames.last_mut() {
+                let (id, flat, next) = *frame;
+                let visit = match &self.node(id)?.doc {
+                    Doc::Concat(ids) => {
+                        if let Some(child) = ids.get(next) {
+                            frame.2 += 1;
+                            Some((*child, flat))
+                        } else {
+                            frames.pop();
+                            None
+                        }
+                    }
+                    _ => {
+                        frames.pop();
+                        Some((id, flat))
+                    }
+                };
+                let Some((id, flat)) = visit else {
+                    continue;
+                };
+                self.work.charge(1)?;
+                let text_bytes = match &self.node(id)?.doc {
+                    Doc::Text(text) | Doc::Comment(text) => text.len(),
+                    _ => 0,
+                };
+                self.work.charge(text_bytes)?;
+                match &self.node(id)?.doc {
+                    Doc::Nil => {}
+                    Doc::Text(text) | Doc::Comment(text) => {
+                        let first = text.split(['\n', '\r']).next().unwrap_or("");
+                        width = width
+                            .checked_add(first.chars().count())
+                            .ok_or(Error::Overflow)?;
+                        if first.len() != text.len() {
+                            return Ok(width);
+                        }
+                    }
+                    Doc::HardLine => return Ok(width),
+                    Doc::SoftLineOrSpace | Doc::SoftLineOrEmpty => {
+                        if !flat {
+                            return Ok(width);
+                        }
+                        if matches!(self.node(id)?.doc, Doc::SoftLineOrSpace) {
+                            width = width.checked_add(1).ok_or(Error::Overflow)?;
+                        }
+                    }
+                    Doc::Nest(_, inner) => {
+                        let inner = *inner;
+                        self.push_frame(&mut frames, inner, flat)?;
+                        continue;
+                    }
+                    Doc::Group(inner) => {
+                        let inner = *inner;
+                        self.push_frame(&mut frames, inner, false)?;
+                        continue;
+                    }
+                    Doc::Concat(_) => {
+                        self.push_frame(&mut frames, id, flat)?;
+                        continue;
                     }
                 }
-                Doc::HardLine => return Ok(width),
-                Doc::SoftLineOrSpace | Doc::SoftLineOrEmpty => {
-                    if !flat {
-                        return Ok(width);
-                    }
-                    if matches!(self.node(id)?.doc, Doc::SoftLineOrSpace) {
-                        width = width.checked_add(1).ok_or(Error::Overflow)?;
-                    }
+                if width > remaining {
+                    return Ok(width);
                 }
-                Doc::Nest(_, inner) => scan.push((indent, flat, *inner)),
-                Doc::Group(inner) => scan.push((indent, false, *inner)),
-                Doc::Concat(ids) => {
-                    if scan.len().checked_add(ids.len()).ok_or(Error::Overflow)?
-                        > self.limits.max_doc_nodes
-                    {
-                        return Err(Error::NodeLimit);
-                    }
-                    scan.try_reserve(ids.len()).map_err(|_| Error::Allocation)?;
-                    for id in ids.iter().rev() {
-                        scan.push((indent, flat, *id));
-                    }
-                }
-            }
-            if width > remaining {
-                return Ok(width);
             }
         }
         Ok(width)
+    }
+    fn push_frame(
+        &self,
+        frames: &mut Vec<(DocId, bool, usize)>,
+        id: DocId,
+        flat: bool,
+    ) -> Result<(), Error> {
+        if frames.len() >= self.limits.max_doc_nodes {
+            return Err(Error::NodeLimit);
+        }
+        frames.try_reserve(1).map_err(|_| Error::Allocation)?;
+        frames.push((id, flat, 0));
+        Ok(())
     }
     pub(crate) fn work_used(&self) -> usize {
         self.work.used

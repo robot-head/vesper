@@ -395,3 +395,151 @@ fn comment_heavy_macro_modules_are_not_refused_by_the_allowance_estimate() {
     let output = format_source(&source, Limits::default()).unwrap().output;
     assert!(output.ends_with("keep!(42)\n}\n"), "{output}");
 }
+
+fn token_count(source: &str) -> usize {
+    vesper_syntax::lexer::lex_with_limits(
+        source,
+        vesper_syntax::lexer::LexLimits {
+            max_source_bytes: vesper_syntax::lexer::HARD_SOURCE_BYTES,
+            max_tokens: vesper_syntax::lexer::HARD_TOKENS,
+            max_diagnostics: 1,
+        },
+    )
+    .unwrap()
+    .tokens
+    .len()
+}
+/// A canonical module of `items` functions, each with calls, a tuple, a block
+/// and a comment, so every layout path the renderer has is exercised.
+fn large_module(items: usize) -> String {
+    let mut source = String::new();
+    for i in 0..items {
+        source.push_str(&format!(
+            "// item {i}\nfn item_{i}(in x: u64, in y: u64) -> u64 {{\n    let pair = (x, y);\n    if x > y {{\n        add(x, y) * 2\n    }} else {{\n        y\n    }}\n}}\n\n"
+        ));
+    }
+    source.pop();
+    source
+}
+
+#[test]
+fn a_64k_token_file_formats_inside_the_default_budget() {
+    let source = large_module(1200);
+    assert!(
+        token_count(&source) >= 64 * 1024,
+        "{}",
+        token_count(&source)
+    );
+    let result = format_source(&source, Limits::default()).unwrap();
+    assert!(!result.changed, "the generated module is canonical");
+    assert_eq!(result.output, source);
+    // A scrambled copy reaches the same canonical text.
+    let scrambled = source.replace("\n    ", "\n").replace(", ", ",");
+    assert_eq!(
+        format_source(&scrambled, Limits::default()).unwrap().output,
+        source
+    );
+}
+
+#[test]
+fn formatting_work_grows_linearly_with_the_file() {
+    // The work budget that admits a file must admit half of it with half the
+    // budget (plus slack for constant terms): no quadratic charge remains.
+    let full = large_module(400);
+    let half = large_module(200);
+    let mut low = 0usize;
+    let mut high = 1usize << 31;
+    while low + 1 < high {
+        let mid = low + (high - low) / 2;
+        let limits = Limits {
+            max_work: mid,
+            ..Limits::default()
+        };
+        if format_source(&full, limits).is_ok() {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    let limits = Limits {
+        max_work: high / 2 + 64 * 1024,
+        ..Limits::default()
+    };
+    format_source(&half, limits).unwrap();
+}
+
+#[test]
+fn many_methods_in_one_block_are_not_a_depth_error() {
+    let mut source = String::from("impl Wheel {\n");
+    for i in 0..64 {
+        source.push_str(&format!(
+            "    pub fn tick_{i}(inout self: Wheel, in now: u64) -> u64 {{\n        now\n    }}\n"
+        ));
+    }
+    source.push_str("}\n");
+    assert_eq!(verify(&source), source);
+}
+
+#[test]
+fn many_items_in_one_block_render_in_linear_time() {
+    // Rendering used to copy the whole pending stack for every group, so a
+    // block with tens of thousands of statements was quadratic.
+    let mut source = String::from("fn main() {\n");
+    for _ in 0..9_000 {
+        source.push_str("    let x = (a, b);\n");
+    }
+    source.push_str("}\n");
+    assert!(token_count(&source) >= 120_000);
+    let start = std::time::Instant::now();
+    let result = format_source(&source, Limits::default()).unwrap();
+    assert!(!result.changed);
+    // Generous enough for slow CI machines and debug builds, far below the
+    // tens of seconds the quadratic renderer needed in a debug build.
+    assert!(start.elapsed() < std::time::Duration::from_secs(60));
+}
+
+#[test]
+fn adversarial_inputs_stay_typed_errors() {
+    let deep = format!("fn main() {{{}0{}}}", "(".repeat(5000), ")".repeat(5000));
+    assert_eq!(
+        format_source(&deep, Limits::default()).unwrap_err(),
+        Error::DepthLimit
+    );
+    let deep_blocks = format!("fn main() {}0{}", "{".repeat(5000), "}".repeat(5000));
+    assert_eq!(
+        format_source(&deep_blocks, Limits::default()).unwrap_err(),
+        Error::DepthLimit
+    );
+    // A chain closed by blocks still counts: `}` followed by an operator
+    // continues the expression.
+    let chain = (0..200)
+        .map(|_| "if c { 0 } else { 1 }")
+        .collect::<Vec<_>>()
+        .join(" + ");
+    assert_eq!(
+        format_source(&format!("fn main() {{{chain}}}"), Limits::default()).unwrap_err(),
+        Error::DepthLimit
+    );
+    // Past the token ceiling the input is refused before parsing.
+    let huge = "x ".repeat(DEFAULT_MAX_TOKENS);
+    assert_eq!(
+        format_source(&huge, Limits::default()).unwrap_err(),
+        Error::TokenLimit
+    );
+    let too_long = "x".repeat(Limits::default().max_input_bytes + 1);
+    assert_eq!(
+        format_source(&too_long, Limits::default()).unwrap_err(),
+        Error::InputLimit
+    );
+    // Caller limits above the lexer's hard ceilings are clamped, never a panic.
+    let unbounded = Limits {
+        max_input_bytes: usize::MAX,
+        max_output_bytes: usize::MAX,
+        max_tokens: usize::MAX,
+        max_doc_nodes: usize::MAX,
+        max_depth: usize::MAX,
+        max_work: usize::MAX,
+    };
+    assert!(format_source(&huge, unbounded).is_err());
+    assert!(format_source(&deep, unbounded).is_err());
+}

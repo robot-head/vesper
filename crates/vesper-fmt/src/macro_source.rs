@@ -15,6 +15,9 @@ use vesper_syntax::{
 /// required: without it, ordinary small macro modules with two or more
 /// functions were refused with `WorkLimit`.
 const STAGE_UNITS_PER_TOKEN: usize = 64 * 24 * 4;
+/// The macro-profile parsers resolve names in quadratic time, so files that
+/// use source macros keep the old 8,192-token ceiling. Ordinary files do not.
+const MACRO_MAX_TOKENS: usize = 8192;
 fn allowance(source: &str, tokens: &[Token]) -> Result<usize, Error> {
     tokens
         .len()
@@ -47,13 +50,16 @@ pub(super) fn syntax(
     limits: Limits,
     work: &mut Work,
 ) -> Result<SyntaxNode, Error> {
+    if tokens.len() > limits.max_tokens.min(MACRO_MAX_TOKENS) {
+        return Err(Error::TokenLimit);
+    }
     let stage = allowance(source, tokens)?;
     work.charge(stage)?;
     let parsed = macro_source::parse(
         source,
         macro_source::Limits {
             max_source_bytes: limits.max_input_bytes.min(1024 * 1024),
-            max_tokens: limits.max_tokens.min(8192),
+            max_tokens: limits.max_tokens.min(MACRO_MAX_TOKENS),
             max_depth: limits.max_depth.min(24),
             max_work: stage,
             ..Default::default()
@@ -80,7 +86,7 @@ pub(super) fn syntax(
         recovery::Limits {
             parse: parser::ParseLimits {
                 max_source_bytes: limits.max_input_bytes.min(1024 * 1024),
-                max_tokens: limits.max_tokens.min(8192),
+                max_tokens: limits.max_tokens.min(MACRO_MAX_TOKENS),
                 max_depth: limits.max_depth.min(24),
                 ..Default::default()
             },
