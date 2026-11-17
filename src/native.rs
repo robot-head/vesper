@@ -20,6 +20,9 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cell::RefCell, rc::Rc};
 
+/// `vesper build --lib`: C-ABI library objects (port P0 lane 6, #878).
+#[path = "native_export.rs"]
+pub mod export;
 /// Foreign calls of imported `.vsys` libraries (§13, `crate::ffi_lowering`).
 #[path = "ffi_lowering/native.rs"]
 mod ffi;

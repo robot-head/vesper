@@ -11,6 +11,7 @@ mod forge_commands;
 mod grammar_commands;
 mod highlight_commands;
 mod json_commands;
+mod lib_commands;
 mod lint_commands;
 mod migrate_commands;
 mod package_commands;
@@ -32,7 +33,7 @@ use std::{
 };
 use vesper::{ast::Diagnostic, check, ir, lean, lsp, native, optimize, parser, runtime::Runtime};
 
-const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> [FILE|DIR] [options]   (most commands take one .ves file; see vesper <command> --help)\n\nCommands:\n  forge   Check and expand explicit source Expr macros (forge --help)\n  grammar Validate canonical protocol bytes and Arrow IPC\n  verify  Kernel-check formatter document models (--format), or refute a contract (--refute)\n  fuzz    Crucible fuzzing of a source function (fuzz --help)\n  migrate Lift C/Rust signatures into .ves/.vsys (migrate --help)\n  replay  Verify and replay a Chrono .vchrono bundle (replay --help)\n  ebpf    Pre-flight verify an eBPF program (ebpf check --help)\n  fmt     Format supported source without changing tokens/comments\n  highlight  Chroma semantic highlighting: --html, --ansi, --json, --css (highlight --help)\n  shot    Render an SVG or 1x-4x PNG code card (shot --help)\n  lint    Analyze checked source and validate supported fixes\n  doc     Generate checked API docs, heatmaps and a search bundle (doc --help)\n  test    Run doctests in one shared JIT module, else the evaluator (test --doc)\n  bench   Measure finite scalar source kernels (bench --help)\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  audit   Audit declared dependencies against local policies (see audit --help)\n  top     Inspect Pulse fiber telemetry and linear obligations (top --help)\n  publish Run offline release gates and publish to a local CAS (publish --help)\n  json    Validate bounded JSON documents (see json --help)\n  traceparent  Validate W3C TraceContext v00 (see traceparent --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify and import configured-key signed artifacts (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --linker <path>    Linker for build (default: cc)\n  --codegen verified  build: direct verified code generator (scalar subset, no Cranelift)\n  --no-opt       Disable equality saturation\n  --verify=<list>    Run Stage-5 verifiers on emitted Cranelift (const-time,stack,realtime,detfloat,all)\n  --verify-<name>    One verifier (--verify-const-time, --verify-stack, ...)\n  --verify-policy <file>  Verifier policy JSON (vesper.native-verifiers/1)\n  --tee          build: write the TDX RTMR / CCA REM measurement of the executable\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
+const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> [FILE|DIR] [options]   (most commands take one .ves file; see vesper <command> --help)\n\nCommands:\n  forge   Check and expand explicit source Expr macros (forge --help)\n  grammar Validate canonical protocol bytes and Arrow IPC\n  verify  Kernel-check formatter document models (--format), or refute a contract (--refute)\n  fuzz    Crucible fuzzing of a source function (fuzz --help)\n  migrate Lift C/Rust signatures into .ves/.vsys (migrate --help)\n  replay  Verify and replay a Chrono .vchrono bundle (replay --help)\n  ebpf    Pre-flight verify an eBPF program (ebpf check --help)\n  fmt     Format supported source without changing tokens/comments\n  highlight  Chroma semantic highlighting: --html, --ansi, --json, --css (highlight --help)\n  shot    Render an SVG or 1x-4x PNG code card (shot --help)\n  lint    Analyze checked source and validate supported fixes\n  doc     Generate checked API docs, heatmaps and a search bundle (doc --help)\n  test    Run doctests in one shared JIT module, else the evaluator (test --doc)\n  bench   Measure finite scalar source kernels (bench --help)\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>), or a C-ABI library (--lib)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  audit   Audit declared dependencies against local policies (see audit --help)\n  top     Inspect Pulse fiber telemetry and linear obligations (top --help)\n  publish Run offline release gates and publish to a local CAS (publish --help)\n  json    Validate bounded JSON documents (see json --help)\n  traceparent  Validate W3C TraceContext v00 (see traceparent --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify and import configured-key signed artifacts (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --linker <path>    Linker for build (default: cc)\n  --codegen verified  build: direct verified code generator (scalar subset, no Cranelift)\n  --no-opt       Disable equality saturation\n  --verify=<list>    Run Stage-5 verifiers on emitted Cranelift (const-time,stack,realtime,detfloat,all)\n  --verify-<name>    One verifier (--verify-const-time, --verify-stack, ...)\n  --verify-policy <file>  Verifier policy JSON (vesper.native-verifiers/1)\n  --lib          build: a C-ABI library object (--lib-name, --interface, --rust-binding, --rust-types)\n  --tee          build: write the TDX RTMR / CCA REM measurement of the executable\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
 /// Stack for the CLI thread. The checker, parser and lowering recurse over
 /// expression depth (bounded by their own budgets), and debug builds use large
 /// frames. Windows gives the main thread only 1 MiB, which a 25-deep generic
@@ -184,6 +185,7 @@ fn cli() -> Result<(), String> {
     let mut verifier_policy: Option<PathBuf> = None;
     let mut tee_measure = false;
     let mut codegen = None;
+    let mut lib = lib_commands::LibFlags::default();
     while let Some(a) = args.next() {
         if let Some(v) = vesper::native_verifiers::NativeVerifier::from_flag(&a) {
             verifiers.insert(v);
@@ -225,6 +227,7 @@ fn cli() -> Result<(), String> {
                 print!("{HELP}");
                 return Ok(());
             }
+            _ if lib.flag(&a, &mut args)? => {}
             _ if a.starts_with('-') => return Err(format!("unknown option '{a}'")),
             _ => {
                 if input.replace(a).is_some() {
@@ -308,6 +311,18 @@ fn cli() -> Result<(), String> {
                 checked.diagnostics
             ));
         }
+    }
+    if lib.enabled || lib.any_option() {
+        return lib.build(
+            &command,
+            &checked.world,
+            &source,
+            &input,
+            output,
+            target.as_deref(),
+            opt,
+            json,
+        );
     }
     match command.as_str() {
         "run" => {
