@@ -30,7 +30,7 @@
   "typesetting_tools": {
     "typst": "0.15.1"
   },
-  "content_sha256": "f25da5a8d88f68a7736e994c53921bf474277e8c20bcb369272137526fb4c77d",
+  "content_sha256": "fc634d2dc95ce8349c9a070fa07491f9fb88d2159010f180cfb83c0df6d0d875",
   "template_sha256": "74e2a1137651abbf2472e28de2202fadc72ae076738849c7d5bc691fe4fbc99c",
   "source_hash_normalization": "UTF-8 with LF line endings",
   "transformations": [
