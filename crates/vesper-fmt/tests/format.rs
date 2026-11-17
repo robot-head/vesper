@@ -543,3 +543,49 @@ fn adversarial_inputs_stay_typed_errors() {
     assert!(format_source(&huge, unbounded).is_err());
     assert!(format_source(&deep, unbounded).is_err());
 }
+
+#[test]
+fn quadratic_parser_scope_copies_are_charged() {
+    // The parser copies the scope set at every block, and the set grows with
+    // each distinct local, so this shape is quadratic in the parser. The
+    // preflight charges for it and refuses it instead of spending seconds.
+    let mut source = String::from("fn main() {\n");
+    for i in 0..8_000 {
+        source.push_str(&format!("    let x{i} = {{\n        0\n    }};\n"));
+    }
+    source.push_str("}\n");
+    assert_eq!(
+        format_source(&source, Limits::default()).unwrap_err(),
+        Error::WorkLimit
+    );
+    // The same number of locals spread over many functions is linear.
+    let mut spread = String::new();
+    for f in 0..400 {
+        spread.push_str(&format!("fn f{f}() {{\n"));
+        for i in 0..20 {
+            spread.push_str(&format!("    let x{i} = {{\n        0\n    }};\n"));
+        }
+        spread.push_str("}\n\n");
+    }
+    spread.pop();
+    assert_eq!(
+        format_source(&spread, Limits::default()).unwrap().output,
+        spread
+    );
+}
+
+#[test]
+fn lookahead_over_shared_empty_nodes_is_charged() {
+    let mut doc = Document::new(Limits {
+        max_work: 1_000_000,
+        ..Limits::default()
+    })
+    .unwrap();
+    let nil = doc.push(Doc::Nil).unwrap();
+    let group = doc.push(Doc::Group(nil)).unwrap();
+    let empty = doc.push(Doc::Concat(vec![])).unwrap();
+    let mut children = vec![group; 500];
+    children.extend(std::iter::repeat_n(empty, 100_000));
+    let root = doc.push(Doc::Concat(children)).unwrap();
+    assert_eq!(doc.render(root).unwrap_err(), Error::WorkLimit);
+}

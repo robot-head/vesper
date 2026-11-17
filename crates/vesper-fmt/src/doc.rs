@@ -151,6 +151,9 @@ impl<'a> Document<'a> {
             frames.try_reserve(1).map_err(|_| Error::Allocation)?;
             frames.push((id, flat, 0));
             while let Some(frame) = frames.last_mut() {
+                // Every step costs a unit, including leaving an exhausted or
+                // empty Concat, so shared empty nodes cannot scan for free.
+                self.work.charge(1)?;
                 let (id, flat, next) = *frame;
                 let visit = match &self.node(id)?.doc {
                     Doc::Concat(ids) => {

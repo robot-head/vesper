@@ -154,10 +154,12 @@ fn guarded_lex(
     // whether the chain continues (`{..} + x`, `}.f()`, `} else`) or a new
     // item or statement starts (`} fn g()`, `} let x`).
     let mut after_block = false;
+    let mut scopes = ScopeCopies::default();
     for token in &tokens {
         if token.kind.trivia() || token.kind == K::Eof {
             continue;
         }
+        scopes.visit(token.kind, &source[token.span.clone()], stack.len())?;
         if !allow_macros && token.kind == K::Bang && matches!(previous, Some(K::Lower | K::Upper)) {
             return Err(Error::OpaqueMacro);
         }
@@ -212,21 +214,79 @@ fn guarded_lex(
             }
             _ => {}
         }
+        if stack.is_empty() && matches!(token.kind, K::RBrace | K::Semi) {
+            scopes.end_item()?;
+        }
         previous = Some(token.kind);
     }
+    scopes.flush()?;
     if !stack.is_empty() {
         return Err(Error::Syntax {
             offset: source.len(),
         });
     }
-    // Deterministic preflight work units for the parser call that follows.
+    // Deterministic preflight work units for the parser call that follows:
+    // linear per token, plus its scope-set copies (see `ScopeCopies`).
     work.charge(
         tokens
             .len()
             .checked_mul(PARSE_UNITS_PER_TOKEN)
             .ok_or(Error::Overflow)?,
     )?;
+    work.charge(
+        scopes
+            .total
+            .checked_mul(SCOPE_COPY_UNITS)
+            .ok_or(Error::Overflow)?,
+    )?;
     Ok(tokens)
+}
+/// Work units per copied binding name in the parser's scope sets.
+const SCOPE_COPY_UNITS: usize = 4;
+/// An upper bound on the parser's scope-set copies. The parser clones the
+/// set of bound names on entry to every function, block, `for`, match arm,
+/// closure and handler clause, and that set grows with each binding of the
+/// enclosing function, so one function with thousands of block-initialized
+/// locals costs quadratic time. Per function (a top-level function, or a
+/// method of a top-level `impl`/`trait`/`model` block, whose scope is
+/// restored when it ends), copy sites times identifier tokens bounds it.
+/// Ordinary functions are small, so this stays near-linear for real files.
+#[derive(Default)]
+struct ScopeCopies {
+    sites: usize,
+    names: usize,
+    total: usize,
+    /// The current top-level item is a function, so a `fn` one level down is
+    /// nested in its body and still sees its bindings.
+    in_function: bool,
+}
+impl ScopeCopies {
+    fn visit(&mut self, kind: K, text: &str, depth: usize) -> Result<(), Error> {
+        if kind == K::Fn && (depth == 0 || depth == 1 && !self.in_function) {
+            self.flush()?;
+            self.in_function |= depth == 0;
+        }
+        let site = matches!(kind, K::Fn | K::LBrace | K::FatArrow | K::Pipe)
+            || kind == K::Lower && matches!(text, "for" | "handle" | "match");
+        if site {
+            self.sites = self.sites.checked_add(1).ok_or(Error::Overflow)?;
+        }
+        if kind == K::Lower {
+            self.names = self.names.checked_add(1).ok_or(Error::Overflow)?;
+        }
+        Ok(())
+    }
+    fn end_item(&mut self) -> Result<(), Error> {
+        self.in_function = false;
+        self.flush()
+    }
+    fn flush(&mut self) -> Result<(), Error> {
+        let copies = self.sites.checked_mul(self.names).ok_or(Error::Overflow)?;
+        self.total = self.total.checked_add(copies).ok_or(Error::Overflow)?;
+        self.sites = 0;
+        self.names = 0;
+        Ok(())
+    }
 }
 /// Whether a token right after a closing `}` extends the same expression, so
 /// the preflight keeps counting its chain. Anything else starts a new item or

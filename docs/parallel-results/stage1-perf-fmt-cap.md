@@ -44,6 +44,19 @@ Measured on the baseline, not guessed:
   `{0} + {0} + ...` and `if .. {} else {} + ...` chains still count, so the
   guard still refuses what the parser's height limit (128) would refuse.
   The delimiter-depth limit (24) is unchanged: it was not the problem.
+- **Parser scope copies charged.** The ordinary parser in `vesper-syntax`
+  clones its set of bound names at every function, block, `for`, match arm,
+  closure and handler clause, so one function with thousands of distinct
+  block-initialized locals is quadratic there (8,000 `let xN = { 0 };` took
+  2.4 s). That parser is outside this lane, so the preflight charges an upper
+  bound: copy sites times identifier tokens, per function (a top-level
+  function or a method of a top-level `impl`/`trait`/`model`). Real files stay
+  near-linear; that input shape is now `WorkLimit`. Making the parser's scope
+  sets persistent would remove the charge and is left for a `vesper-syntax`
+  lane.
+- **Every lookahead step is charged**, including leaving an empty `Concat`,
+  so shared empty nodes built through the public `Document` API cannot scan
+  for free.
 - **New defaults.** 1 MiB input, 4 MiB output, 131,072 tokens (twice a
   64k-token file, trivia included), 1,000,000 Doc nodes, 512 Mi work units.
   Requested limits above the lexer's hard ceilings (8 MiB, 262,144 tokens)
@@ -130,6 +143,9 @@ Merging the parts back (warp-bbr `vesper/src/*.ves`, the
 the owner rule keeps this lane off port branches.
 
 ## What is left
+
+- The `vesper-syntax` parser's scope-set copies are quadratic in the number of
+  locals of one function; the formatter refuses that shape with `WorkLimit`.
 
 - The macro-profile, recovery and proof-profile token caps (8,192) need
   linear parsers in `vesper-syntax` first.
