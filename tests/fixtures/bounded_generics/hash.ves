@@ -4,6 +4,8 @@ copy struct Point {
     y: u8
 }
 
+impl Hash for Point {}
+
 fn digest[T: mod copy](x: T) -> u64 where T: Hash {
     x.hash()
 }

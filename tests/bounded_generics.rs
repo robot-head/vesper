@@ -207,3 +207,47 @@ fn parser_records_bound_owners_and_joined_bounds() {
     };
     assert_eq!(generics[0].bound, vesper::ast::Mode::Copy);
 }
+
+/// Explicit type arguments on a bounded call are dropped with the rewrite
+/// to the monomorphic instance.
+#[test]
+fn explicit_type_arguments_on_bounded_calls() {
+    let src = "fn max[T: mod copy](in a: T, in b: T) -> T where T: Ord { match a.cmp(b) { Less => b, _ => a } }
+fn main() -> i64 { max[i64](1, 2) }";
+    assert_eq!(execute(src), "2");
+}
+
+/// Instances at two different function types are distinct.
+#[test]
+fn instances_at_distinct_function_types_do_not_collide() {
+    let src = "fn keep[T: mod copy, F](in a: T, sink g: F) -> F where T: Ord { g }
+fn main() -> i64 {
+    let f = keep(1, |x: i64| wrapping_add(x, 2));
+    let g = keep(1, |b: bool| if b { 10 } else { 20 });
+    wrapping_add(f(1), g(false))
+}";
+    assert_eq!(execute(src), "23");
+}
+
+/// A conformance parameter that occurs only in the trait arguments.
+#[test]
+fn conformance_parameters_bound_by_trait_arguments() {
+    let src = "trait Pick[U] { fn pick(in self, in u: U) -> i64; }
+impl[T] Pick[T] for i64 where T: Eq { fn pick(in self, in u: T) -> i64 { if u.eq(u) { self } else { 0 } } }
+fn choose[S: mod copy, U: mod copy](in s: S, in u: U) -> i64 where S: Pick[U] { s.pick(u) }
+fn main() -> i64 { choose(7, true) }";
+    assert_eq!(execute(src), "7");
+}
+
+/// Struct conformances are opt-in; the diagnostic says how to derive one.
+#[test]
+fn underived_structs_get_a_derive_hint() {
+    let src = include_str!("fixtures/bounded_generics/reject/underived.ves");
+    let diags = rejects(src, "E0608");
+    assert!(
+        diags
+            .iter()
+            .any(|d| d.message.contains("write `impl Ord for Point {}`")),
+        "{diags:?}"
+    );
+}

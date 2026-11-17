@@ -6,6 +6,8 @@ copy struct Pair[T: mod copy] {
     b: T
 }
 
+impl [T] Ord for Pair[T] {}
+
 model Reverse: Ord for i64 {
     fn cmp(in self, in other: i64) -> Ordering {
         Ord::cmp(other, self)

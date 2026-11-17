@@ -162,7 +162,11 @@ pub fn check_package_with(
     let spans = mono::SpanMap::new(module);
     let injected;
     let module = if builtin_traits::wanted(module) {
-        injected = spans.with_builtins(module, builtin_traits::items(module));
+        let (stripped, items, owners) = match builtin_traits::prelude(module) {
+            Ok(p) => p,
+            Err(d) => return fail(d, empty),
+        };
+        injected = spans.with_builtins(&stripped, items, &owners);
         &injected
     } else {
         module
@@ -1949,7 +1953,10 @@ impl Elaborator {
         match tag {
             1 => d(
                 "E0608",
-                format!("no implementation of {what} for {receiver}: {msg}"),
+                format!(
+                    "no implementation of {what} for {receiver}: {msg}{}",
+                    builtin_traits::derive_hint(what, receiver)
+                ),
                 span,
             ),
             2 => d(

@@ -13,12 +13,15 @@
 //! ```
 //!
 //! Canonical conformances exist for `u8`, `u32`, `u64`, `i64`, `bool` and
-//! `()`, for tuples of two to four conforming elements, and are derived for
-//! every struct of the package whose fields all conform (lexicographic in
-//! field order, like tuples). A struct parameter that a field mentions gets
-//! a where-bound, so `struct Pair[T] { a: T, b: T }` derives
-//! `impl[T] Ord for Pair[T] where T: Ord`. A package that writes its own
-//! canonical impl of a builtin trait for a struct keeps it instead.
+//! `()` and for tuples of two to four conforming elements. A struct conforms
+//! only when the package asks: an empty canonical impl (`impl Ord for Point
+//! {}`, or `impl[T] Ord for Pair[T] {}` for a generic struct) derives the
+//! conformance, lexicographic in field order like tuples. Every field must
+//! conform (a field of another package struct needs that struct's own
+//! derived or written impl). A struct parameter that a field mentions gets a
+//! where-bound, so `impl[T] Ord for Pair[T] {}` derives
+//! `impl[T] Ord for Pair[T] where T: Ord`. The empty-impl spelling needs no
+//! new syntax, so every front end (the self-hosted one included) parses it.
 //!
 //! `bool` orders `false` before `true`. `Hash` is a deterministic
 //! multiplicative fold over 64-bit words with the FNV-1a constants
@@ -84,9 +87,56 @@ pub(super) fn wanted(module: &Module) -> bool {
         .any(|needle| text.contains(needle))
 }
 
-/// The builtin declarations for `module`, as parsed items (spans relative
-/// to the generated source; the caller relocates them).
-pub(super) fn items(module: &Module) -> Vec<Item> {
+/// A hint for a missing builtin conformance of a struct: derivation is
+/// opt-in.
+pub(super) fn derive_hint(t: &str, receiver: &Type) -> String {
+    match receiver {
+        Type::Named(n, args) if TRAITS.contains(&t) && !SCALARS.contains(&n.as_str()) => {
+            if args.is_empty() {
+                format!("; to derive it, write `impl {t} for {n} {{}}`")
+            } else {
+                format!(
+                    "; to derive it, write an empty impl over all of the struct's parameters, such as `impl[T] {t} for {n}[T] {{}}`"
+                )
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+/// An empty canonical impl of a builtin trait asks for the derived
+/// conformance.
+fn is_request(c: &Conformance) -> bool {
+    c.kind == ConformanceKind::Canonical
+        && c.trait_ref.package.is_none()
+        && TRAITS.contains(&c.trait_ref.name.as_str())
+        && c.trait_ref.args.is_empty()
+        && c.methods.is_empty()
+        && c.assoc.is_empty()
+}
+
+/// `module` without its derive requests, the builtin declarations (spans
+/// relative to the generated source; the caller relocates them) and, for
+/// each declaration, the span of the request it derives.
+pub(super) fn prelude(
+    module: &Module,
+) -> Result<Prelude, Vec<Diagnostic>> {
+    let derived = derivable(module)?;
+    let mut stripped = module.clone();
+    stripped
+        .items
+        .retain(|i| !matches!(i, Item::Conformance(c) if is_request(c)));
+    let (items, owners) = items(module, &derived);
+    Ok((stripped, items, owners))
+}
+
+/// The module without derive requests, the builtin items and their owners.
+pub(super) type Prelude = (Module, Vec<Item>, Vec<Option<Span>>);
+
+/// Derived conformances: struct name to (trait, request span).
+type Derived = BTreeMap<String, Vec<(&'static str, Span)>>;
+
+fn items(module: &Module, derived: &Derived) -> (Vec<Item>, Vec<Option<Span>>) {
     let mut src = String::new();
     src.push_str("copy enum Ordering { Less, Equal, Greater }\n");
     src.push_str("trait Eq { fn eq(in self, in other: Self) -> bool; }\n");
@@ -155,12 +205,14 @@ pub(super) fn items(module: &Module) -> Vec<Item> {
             src.push_str(&conformance(t, &generics, &wheres, &ty, &Access::Tuple(n)));
         }
     }
-    for (adt, traits) in derivable(module) {
+    let fixed = crate::parser::parse(&src).module.items.len();
+    let mut owners: Vec<Option<Span>> = vec![None; fixed];
+    for (adt, traits) in derived {
         let a = module
             .items
             .iter()
             .find_map(|i| match i {
-                Item::Adt(a) if a.name == adt => Some(a),
+                Item::Adt(a) if a.name == *adt => Some(a),
                 _ => None,
             })
             .expect("derivable structs come from the module");
@@ -208,7 +260,8 @@ pub(super) fn items(module: &Module) -> Vec<Item> {
                 }
             })
             .collect();
-        for t in traits {
+        for (t, request) in traits {
+            owners.push(Some(request.clone()));
             let mut wheres: Vec<String> = bounded.iter().map(|p| format!("{p}: {t}")).collect();
             for w in &own {
                 if !wheres.contains(w) {
@@ -230,7 +283,8 @@ pub(super) fn items(module: &Module) -> Vec<Item> {
         "builtin trait source: {:?}\n{src}",
         parsed.diagnostics
     );
-    parsed.module.items
+    debug_assert_eq!(parsed.module.items.len(), owners.len());
+    (parsed.module.items, owners)
 }
 
 /// How a conformance body reaches the components of `self` and `other`.
@@ -334,10 +388,9 @@ fn mentions_name(t: &Type, name: &str) -> bool {
     }
 }
 
-/// The structs of `module` with a derived conformance, and for which
-/// builtin traits. A struct derives a trait when the package writes no
-/// canonical impl of it for the struct and every field type conforms.
-fn derivable(module: &Module) -> BTreeMap<String, Vec<&'static str>> {
+/// The derive requests of `module`, checked: each names a package struct
+/// (all of its parameters, in order) whose fields all conform.
+fn derivable(module: &Module) -> Result<Derived, Vec<Diagnostic>> {
     let structs: BTreeMap<&str, &Adt> = module
         .items
         .iter()
@@ -348,34 +401,106 @@ fn derivable(module: &Module) -> BTreeMap<String, Vec<&'static str>> {
             _ => None,
         })
         .collect();
-    // Canonical user impls: (trait, self type, its generics).
+    // Canonical user impls with bodies: (trait, self type, its generics).
     let user: Vec<(&str, &Type, &[Generic])> = module
         .items
         .iter()
         .filter_map(|i| match i {
             Item::Conformance(c)
-                if c.kind == ConformanceKind::Canonical && c.trait_ref.package.is_none() =>
+                if c.kind == ConformanceKind::Canonical
+                    && c.trait_ref.package.is_none()
+                    && !is_request(c) =>
             {
                 Some((c.trait_ref.name.as_str(), &c.self_ty, c.generics.as_slice()))
             }
             _ => None,
         })
         .collect();
-    let mut out = BTreeMap::new();
-    for t in TRAITS {
-        let mut memo: BTreeMap<String, bool> = BTreeMap::new();
-        for name in structs.keys() {
-            if user_impl(&user, t, &Type::named(name)) {
-                continue;
-            }
-            if struct_conforms(name, t, &structs, &user, &mut memo) {
-                out.entry((*name).to_owned())
-                    .or_insert_with(Vec::new)
-                    .push(t);
-            }
+    let mut errors = vec![];
+    let mut requests: Vec<(&'static str, &str, Span)> = vec![];
+    for item in &module.items {
+        let Item::Conformance(c) = item else {
+            continue;
+        };
+        if !is_request(c) {
+            continue;
         }
+        let t = TRAITS
+            .into_iter()
+            .find(|t| *t == c.trait_ref.name)
+            .expect("requests name a builtin trait");
+        let target = match &c.self_ty {
+            Type::Named(n, args) => structs.get(n.as_str()).filter(|a| {
+                args.len() == a.generics.len()
+                    && c.generics.len() == args.len()
+                    && args.iter().zip(&c.generics).all(
+                        |(arg, g)| matches!(arg, Type::Named(p, x) if x.is_empty() && *p == g.name),
+                    )
+                    && c.where_clauses.is_empty()
+            }),
+            _ => None,
+        };
+        let Some(a) = target else {
+            errors.push(Diagnostic::new(
+                "E0616",
+                format!(
+                    "an empty `impl {t} for {}` derives {t}, which needs a struct of this package with all its parameters in order and no where clause (for example `impl[T] {t} for Pair[T] {{}}`); write the methods of {t} otherwise",
+                    c.self_ty
+                ),
+                c.span.clone(),
+            ));
+            continue;
+        };
+        requests.push((t, a.name.as_str(), c.span.clone()));
     }
-    out
+    let requested: Vec<(&str, &str)> = requests.iter().map(|(t, n, _)| (*t, *n)).collect();
+    let mut out: Derived = BTreeMap::new();
+    for (t, name, span) in requests {
+        let cx = Cx {
+            structs: &structs,
+            user: &user,
+            requested: &requested,
+        };
+        let mut memo = BTreeMap::new();
+        let a = structs[name];
+        let params = params(a);
+        if let Some(f) = a.variants[0]
+            .fields
+            .iter()
+            .find(|f| !type_conforms(&f.ty, t, &params, &cx, &mut memo))
+        {
+            errors.push(Diagnostic::new(
+                "E0616",
+                format!(
+                    "cannot derive {t} for '{name}': field '{}' of type {} does not conform to {t} (derive or write {t} for it first)",
+                    f.name, f.ty
+                ),
+                span,
+            ));
+            continue;
+        }
+        out.entry(name.to_owned()).or_default().push((t, span));
+    }
+    if errors.is_empty() {
+        Ok(out)
+    } else {
+        Err(errors)
+    }
+}
+
+/// What conformance of a field type may rely on.
+struct Cx<'a> {
+    structs: &'a BTreeMap<&'a str, &'a Adt>,
+    user: &'a [(&'a str, &'a Type, &'a [Generic])],
+    /// Derive requests: (trait, struct).
+    requested: &'a [(&'a str, &'a str)],
+}
+
+fn params(a: &Adt) -> BTreeMap<&str, Mode> {
+    a.generics
+        .iter()
+        .map(|g| (g.name.as_str(), g.bound))
+        .collect()
 }
 
 /// Whether a canonical user impl of `t` covers type `ty` (an exact head or
@@ -394,29 +519,19 @@ fn user_impl(user: &[(&str, &Type, &[Generic])], t: &str, ty: &Type) -> bool {
     })
 }
 
-fn struct_conforms(
-    name: &str,
-    t: &str,
-    structs: &BTreeMap<&str, &Adt>,
-    user: &[(&str, &Type, &[Generic])],
-    memo: &mut BTreeMap<String, bool>,
-) -> bool {
+fn struct_conforms(name: &str, t: &str, cx: &Cx, memo: &mut BTreeMap<String, bool>) -> bool {
     if let Some(v) = memo.get(name) {
         return *v;
     }
     // A struct on the current path (only possible through invalid
     // recursion) does not conform.
     memo.insert(name.to_owned(), false);
-    let a = structs[name];
-    let params: BTreeMap<&str, Mode> = a
-        .generics
-        .iter()
-        .map(|g| (g.name.as_str(), g.bound))
-        .collect();
+    let a = cx.structs[name];
+    let params = params(a);
     let ok = a.variants[0]
         .fields
         .iter()
-        .all(|f| type_conforms(&f.ty, t, &params, structs, user, memo));
+        .all(|f| type_conforms(&f.ty, t, &params, cx, memo));
     memo.insert(name.to_owned(), ok);
     ok
 }
@@ -425,8 +540,7 @@ fn type_conforms(
     ty: &Type,
     t: &str,
     params: &BTreeMap<&str, Mode>,
-    structs: &BTreeMap<&str, &Adt>,
-    user: &[(&str, &Type, &[Generic])],
+    cx: &Cx,
     memo: &mut BTreeMap<String, bool>,
 ) -> bool {
     match ty {
@@ -435,20 +549,22 @@ fn type_conforms(
         Type::Tuple(ts) => {
             (ts.is_empty() || (2..=4).contains(&ts.len()))
                 && ts.iter().all(|e| {
-                    copy_type(e, params, structs)
-                        && type_conforms(e, t, params, structs, user, memo)
+                    copy_type(e, params, cx.structs) && type_conforms(e, t, params, cx, memo)
                 })
         }
         Type::Named(n, args) => {
-            if user_impl(user, t, ty) {
+            if user_impl(cx.user, t, ty) {
                 return true;
             }
-            let Some(a) = structs.get(n.as_str()) else {
+            let Some(a) = cx.structs.get(n.as_str()) else {
                 return false;
             };
+            if !cx.requested.contains(&(t, n.as_str())) {
+                return false;
+            }
             // A generic struct conforms at these arguments when each
             // argument for a field-mentioned parameter conforms.
-            if !struct_conforms(n, t, structs, user, memo) {
+            if !struct_conforms(n, t, cx, memo) {
                 return false;
             }
             a.generics.iter().zip(args).all(|(g, arg)| {
@@ -456,7 +572,7 @@ fn type_conforms(
                     .fields
                     .iter()
                     .any(|f| mentions_name(&f.ty, &g.name))
-                    || type_conforms(arg, t, params, structs, user, memo)
+                    || type_conforms(arg, t, params, cx, memo)
             })
         }
         _ => false,

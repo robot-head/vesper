@@ -4,6 +4,8 @@ copy struct Key {
     minor: u64
 }
 
+impl Ord for Key {}
+
 enum List[T] {
     Nil,
     Cons {

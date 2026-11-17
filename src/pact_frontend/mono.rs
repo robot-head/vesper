@@ -164,9 +164,23 @@ impl SpanMap {
 
     /// `module` with the builtin trait declarations appended (in their own
     /// span range).
-    pub(super) fn with_builtins(&self, module: &Module, items: Vec<Item>) -> Module {
+    /// `module` with the builtin `items` appended. A derived conformance
+    /// keeps the span of the empty impl that asked for it (`owners`), so it
+    /// counts as package source; its method bodies stay builtin.
+    pub(super) fn with_builtins(
+        &self,
+        module: &Module,
+        items: Vec<Item>,
+        owners: &[Option<Span>],
+    ) -> Module {
         let mut out = module.clone();
-        out.items.extend(self.relocate_value(&items, true));
+        let mut items = self.relocate_value(&items, true);
+        for (item, owner) in items.iter_mut().zip(owners) {
+            if let (Item::Conformance(c), Some(span)) = (item, owner) {
+                c.span = span.clone();
+            }
+        }
+        out.items.extend(items);
         out
     }
 
@@ -944,7 +958,14 @@ impl Mono<'_> {
             .filter_map(|g| vars.get(&g.name).cloned())
             .collect();
         let segments: Vec<String> = types.iter().map(key_segment).collect();
-        let key = (origin.to_owned(), segments.clone(), evidence.clone());
+        // `key_segment` is lossy (every function type is "5"), so the cache
+        // keys on the full structural identity; names stay readable and
+        // collisions get a numeric suffix below.
+        let identities: Vec<String> = types
+            .iter()
+            .map(|t| serde_json::to_string(t).unwrap_or_default())
+            .collect();
+        let key = (origin.to_owned(), identities, evidence.clone());
         if let Some(n) = self.instances.get(&key) {
             return n.clone();
         }
@@ -1026,6 +1047,14 @@ impl Mono<'_> {
                 let c = self.el.fe.confs[index].clone();
                 let mut cvars = BTreeMap::new();
                 match_type(&c.decl.self_ty, &ty, &c.decl.generics, &mut cvars);
+                // Conformance parameters may appear only in the trait
+                // arguments (`impl[T] Pick[T] for i64`).
+                for (pattern, actual) in c.decl.trait_ref.args.iter().zip(&args) {
+                    if !closed(actual) {
+                        continue;
+                    }
+                    match_type(pattern, actual, &c.decl.generics, &mut cvars);
+                }
                 let target = if self.bounded.contains(&generated) {
                     let evidence = self.callee_evidence(cx, &generated, &cvars, &span);
                     self.instance(&generated, cvars, evidence, cx.depth + 1, &span)
@@ -1066,9 +1095,17 @@ impl Mono<'_> {
             let Some(target) = rewrites.get(&(e.span.start, e.span.end)) else {
                 return;
             };
-            let ExprKind::Call { callee, args, .. } = &mut e.kind else {
+            let ExprKind::Call {
+                callee,
+                args,
+                types,
+            } = &mut e.kind
+            else {
                 return;
             };
+            // The instance is monomorphic: explicit type arguments of the
+            // generic call (`max[i64](1, 2)`) no longer apply.
+            types.clear();
             if let ExprKind::Field(base, _) = &callee.kind {
                 // An inherent method call: the receiver is the first argument.
                 let origin = instances
