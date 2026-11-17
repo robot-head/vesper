@@ -59,6 +59,11 @@
 //!   must be labels of the same function other than its entry label (the
 //!   Lean model would treat an unknown label as an abort).
 //! * Annotations never mention `f64` (the Lean model has no binary64 kind).
+//! * Under a trap scope (`Scope`, milestone 7), a row that can fail with a
+//!   caught `overflow`/`divZero` must establish the handler label's
+//!   annotation from its own incoming facts ([`caught_targets`]); the
+//!   handler must be a label of the same function. This follows
+//!   `CodegenFailScope` but is not part of the Lean certificate proof.
 //!
 //! What the certificate establishes is the operand-range precondition the
 //! Lean simulation needs (no hardware division fault, every checked row on
@@ -233,6 +238,7 @@ pub fn check_row(facts: &Facts, row: &Lir) -> bool {
         | Lir::LoadOut { .. }
         | Lir::LoadIn { .. }
         | Lir::StoreIn { .. }
+        | Lir::Scope { .. }
         | Lir::Trap(_) => true,
     }
 }
@@ -373,6 +379,42 @@ pub fn labels_of(rows: &[Lir]) -> HashMap<Label, usize> {
 }
 
 // ---------------------------------------------------------------------------
+// Trap scopes (milestone 7).
+
+/// The handler labels each row can jump to when it fails, under the trap
+/// scope in effect (the last `Scope` row before it in emission order, across
+/// functions, as the assembler applies `M::Scope`; `CodegenFailScope.scopeAt`).
+/// A caught failure jumps with the store the row started from
+/// (`abort_preserves_memory`), so the row's own facts must establish the
+/// handler's annotation. Program-wide exits are aborts, not edges.
+pub fn caught_targets(program: &[(String, Vec<Lir>)]) -> Vec<Vec<Vec<Label>>> {
+    use super::machine::TrapKind;
+    let (ovf_exit, div0_exit) = (TrapKind::Overflow.label(), TrapKind::DivisionByZero.label());
+    let mut scope = (ovf_exit, div0_exit);
+    let mut out = vec![];
+    for (_, rows) in program {
+        let mut per_row = vec![];
+        for row in rows {
+            let (ovf, div0) = scope;
+            let ovf = (ovf != ovf_exit).then_some(ovf);
+            let div0 = (div0 != div0_exit).then_some(div0);
+            let targets: Vec<Label> = match *row {
+                Lir::Arith { .. } => ovf.into_iter().chain(div0).collect(),
+                Lir::Neg { .. } | Lir::Trap(TrapKind::Overflow) => ovf.into_iter().collect(),
+                Lir::Trap(TrapKind::DivisionByZero) => div0.into_iter().collect(),
+                _ => vec![],
+            };
+            per_row.push(targets);
+            if let Lir::Scope { ovf, div0 } = *row {
+                scope = (ovf, div0);
+            }
+        }
+        out.push(per_row);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // The production validator.
 
 fn in_to_out(annotation: &[(Loc, Kind)]) -> Annotation {
@@ -426,6 +468,7 @@ pub fn validate(
             return Err(reject(f, 0, "one annotation per row".into()));
         }
     }
+    let caught = caught_targets(program);
     for (f, ((_, rows), cert)) in program.iter().zip(&certificate.functions).enumerate() {
         let annotations = &cert.annotations;
         if let Some(pc) = cert
@@ -474,6 +517,26 @@ pub fn validate(
             }
             let facts = || facts_of(annotation(annotations, pc));
             let next = annotation(annotations, pc + 1);
+            for t in &caught[f][pc] {
+                match labels.get(t) {
+                    Some(target) if t != entry => {
+                        if !entails(&facts(), annotation(annotations, *target)) {
+                            return Err(reject(
+                                f,
+                                pc,
+                                format!("the handler at label {t} is not established"),
+                            ));
+                        }
+                    }
+                    _ => {
+                        return Err(reject(
+                            f,
+                            pc,
+                            format!("trap scope label {t} outside the body"),
+                        ));
+                    }
+                }
+            }
             let accepted = match *row {
                 Lir::Enter { .. } => {
                     let mut facts = facts();
@@ -640,7 +703,7 @@ struct Summaries {
 /// these, so they stay proportional to the live values rather than to every
 /// temporary the function ever wrote. `In` and `Out` words are few and stay
 /// live across `Return` and `Call` (the summaries read them).
-fn live_locations(rows: &[Lir]) -> Vec<BTreeSet<Loc>> {
+fn live_locations(rows: &[Lir], caught: &[Vec<Label>]) -> Vec<BTreeSet<Loc>> {
     let labels = labels_of(rows);
     let mut ins = BTreeSet::new();
     let mut outs = BTreeSet::new();
@@ -706,6 +769,12 @@ fn live_locations(rows: &[Lir]) -> Vec<BTreeSet<Loc>> {
                     }
                 }
             }
+            // A caught failure carries the row's incoming facts.
+            for t in &caught[pc] {
+                if let Some(target) = labels.get(t) {
+                    after.extend(live[*target].iter().copied());
+                }
+            }
             if after != live[pc] {
                 live[pc] = after;
                 changed = true;
@@ -719,18 +788,32 @@ fn live_locations(rows: &[Lir]) -> Vec<BTreeSet<Loc>> {
 
 /// Analyse function `f` under the current summaries; returns the state
 /// before each row, and updates the callees' entry and this exit summary.
+/// What [`analyse`] needs about the whole program.
+struct Program<'a> {
+    functions: &'a [(String, Vec<Lir>)],
+    entries: HashMap<Label, usize>,
+    lives: Vec<Vec<BTreeSet<Loc>>>,
+    caught: Vec<Vec<Vec<Label>>>,
+}
+
 fn analyse(
-    program: &[(String, Vec<Lir>)],
-    entries: &HashMap<Label, usize>,
+    whole: &Program<'_>,
     signed: &BTreeSet<ConstId>,
     f: usize,
     summaries: &mut Summaries,
     flips: &mut BTreeSet<ConstId>,
-    lives: &[Vec<BTreeSet<Loc>>],
 ) -> (Vec<Option<State>>, bool) {
-    let rows = &program[f].1;
+    let (entries, lives, caught) = (&whole.entries, &whole.lives, &whole.caught);
+    let rows = &whole.functions[f].1;
     let labels = labels_of(rows);
     let live = &lives[f];
+    let written: BTreeSet<Loc> = rows
+        .iter()
+        .filter_map(|r| match *r {
+            Lir::StoreIn { index, .. } => Some(Loc::In(index)),
+            _ => None,
+        })
+        .collect();
     let mut states: Vec<Option<State>> = vec![None; rows.len()];
     let mut changed = false;
     let Some(pre) = summaries.pre[f].clone() else {
@@ -745,109 +828,135 @@ fn analyse(
     let mut work = vec![0usize];
     let mut queued = vec![false; rows.len()];
     queued[0] = true;
-    while let Some(pc) = work.pop() {
-        queued[pc] = false;
-        let mut state = states[pc].clone().expect("queued rows have a state");
-        let row = &rows[pc];
-        for (l, k) in required(row) {
-            if k == Kind::I64 && !supports(&state.facts, l, k) {
-                flips.extend(state.origins.get(&l).into_iter().flatten().copied());
-            }
-        }
-        let mut successors: Vec<(usize, State)> = vec![];
-        match *row {
-            Lir::Jump(l) => {
-                if let Some(t) = labels.get(&l) {
-                    successors.push((*t, state));
+    // Rows the entry does not reach (handler stubs no failure is routed
+    // to, continuations of calls that never return) are still checked, so
+    // they are analysed from an empty state once the reachable part is
+    // done. Their `Return`s and calls do not feed the summaries.
+    let mut seeded = false;
+    loop {
+        while let Some(pc) = work.pop() {
+            queued[pc] = false;
+            let mut state = states[pc].clone().expect("queued rows have a state");
+            let row = &rows[pc];
+            for (l, k) in required(row) {
+                if k == Kind::I64 && !supports(&state.facts, l, k) {
+                    flips.extend(state.origins.get(&l).into_iter().flatten().copied());
                 }
             }
-            Lir::BranchZero { target, .. } => {
-                if let Some(t) = labels.get(&target) {
-                    successors.push((*t, state.clone()));
-                }
-                successors.push((pc + 1, state));
-            }
-            Lir::Trap(_) => {}
-            Lir::Return => {
-                let exit = state.rename(|l| matches!(l, Loc::In(_)).then_some(*l));
-                changed |= join_into(&mut summaries.post[f], &exit);
-            }
-            Lir::Enter { .. } => {
-                state.retain(|l| matches!(l, Loc::In(_)));
-                successors.push((pc + 1, state));
-            }
-            Lir::Call { callee } => {
-                if let Some(&g) = entries.get(&callee) {
-                    changed |= join_into(&mut summaries.pre[g], &state.rename(out_as_in));
-                    if let Some(post) = &summaries.post[g] {
-                        state.retain(|l| !matches!(l, Loc::Out(_)));
-                        let results = post.rename(in_as_out);
-                        state.facts.extend(results.facts);
-                        state.origins.extend(results.origins);
-                        successors.push((pc + 1, state));
+            let mut successors: Vec<(usize, State)> = caught[f][pc]
+                .iter()
+                .filter_map(|t| labels.get(t).map(|target| (*target, state.clone())))
+                .collect();
+            match *row {
+                Lir::Jump(l) => {
+                    if let Some(t) = labels.get(&l) {
+                        successors.push((*t, state));
                     }
                 }
-            }
-            Lir::Const { dst, word } => {
-                // A flagged constant is read as an `i64` (wrapping words at
-                // or above 2^63); the others get `constantKind` and remember
-                // their row if an `i64` use could need the flag.
-                let flagged = signed.contains(&(f, pc));
-                let value = constant_value(word, flagged && word >= 1 << 63);
-                let kind = if flagged && fits(Kind::I64, value) {
-                    Some(Kind::I64)
-                } else {
-                    constant_kind(value)
-                };
-                state.set(Loc::Slot(dst), kind);
-                if !flagged && word > u32::MAX as u64 {
-                    state
-                        .origins
-                        .insert(Loc::Slot(dst), BTreeSet::from([(f, pc)]));
+                Lir::BranchZero { target, .. } => {
+                    if let Some(t) = labels.get(&target) {
+                        successors.push((*t, state.clone()));
+                    }
+                    successors.push((pc + 1, state));
                 }
-                successors.push((pc + 1, state));
-            }
-            Lir::Move { dst, src } => {
-                state.copy(Loc::Slot(dst), Loc::Slot(src));
-                successors.push((pc + 1, state));
-            }
-            Lir::StoreOut { index, src } => {
-                state.copy(Loc::Out(index), Loc::Slot(src));
-                successors.push((pc + 1, state));
-            }
-            Lir::LoadOut { dst, index } => {
-                state.copy(Loc::Slot(dst), Loc::Out(index));
-                successors.push((pc + 1, state));
-            }
-            Lir::LoadIn { dst, index } => {
-                state.copy(Loc::Slot(dst), Loc::In(index));
-                successors.push((pc + 1, state));
-            }
-            Lir::StoreIn { index, src } => {
-                state.copy(Loc::In(index), Loc::Slot(src));
-                successors.push((pc + 1, state));
-            }
-            _ => {
-                let facts = transfer(&state.facts, row, false);
-                let mut next = State {
-                    facts,
-                    origins: state.origins,
-                };
-                if let Some(dst) = destination(row) {
-                    next.origins.remove(&Loc::Slot(dst));
+                Lir::Trap(_) => {}
+                Lir::Return => {
+                    if !seeded {
+                        // Only the words this function writes back (results,
+                        // `inout` parameters) are its callers' business.
+                        let mut exit = state.rename(|l| matches!(l, Loc::In(_)).then_some(*l));
+                        exit.retain(|l| written.contains(l));
+                        changed |= join_into(&mut summaries.post[f], &exit);
+                    }
                 }
-                successors.push((pc + 1, next));
+                Lir::Enter { .. } => {
+                    state.retain(|l| matches!(l, Loc::In(_)));
+                    successors.push((pc + 1, state));
+                }
+                Lir::Call { callee } => {
+                    if let Some(&g) = entries.get(&callee) {
+                        if !seeded {
+                            changed |= join_into(&mut summaries.pre[g], &state.rename(out_as_in));
+                        }
+                        if let Some(post) = &summaries.post[g] {
+                            state.retain(|l| !matches!(l, Loc::Out(_)));
+                            let results = post.rename(in_as_out);
+                            state.facts.extend(results.facts);
+                            state.origins.extend(results.origins);
+                            successors.push((pc + 1, state));
+                        }
+                    }
+                }
+                Lir::Const { dst, word } => {
+                    // A flagged constant is read as an `i64` (wrapping words at
+                    // or above 2^63); the others get `constantKind` and remember
+                    // their row if an `i64` use could need the flag.
+                    let flagged = signed.contains(&(f, pc));
+                    let value = constant_value(word, flagged && word >= 1 << 63);
+                    let kind = if flagged && fits(Kind::I64, value) {
+                        Some(Kind::I64)
+                    } else {
+                        constant_kind(value)
+                    };
+                    state.set(Loc::Slot(dst), kind);
+                    if !flagged && word > u32::MAX as u64 {
+                        state
+                            .origins
+                            .insert(Loc::Slot(dst), BTreeSet::from([(f, pc)]));
+                    }
+                    successors.push((pc + 1, state));
+                }
+                Lir::Move { dst, src } => {
+                    state.copy(Loc::Slot(dst), Loc::Slot(src));
+                    successors.push((pc + 1, state));
+                }
+                Lir::StoreOut { index, src } => {
+                    state.copy(Loc::Out(index), Loc::Slot(src));
+                    successors.push((pc + 1, state));
+                }
+                Lir::LoadOut { dst, index } => {
+                    state.copy(Loc::Slot(dst), Loc::Out(index));
+                    successors.push((pc + 1, state));
+                }
+                Lir::LoadIn { dst, index } => {
+                    state.copy(Loc::Slot(dst), Loc::In(index));
+                    successors.push((pc + 1, state));
+                }
+                Lir::StoreIn { index, src } => {
+                    state.copy(Loc::In(index), Loc::Slot(src));
+                    successors.push((pc + 1, state));
+                }
+                _ => {
+                    let facts = transfer(&state.facts, row, false);
+                    let mut next = State {
+                        facts,
+                        origins: state.origins,
+                    };
+                    if let Some(dst) = destination(row) {
+                        next.origins.remove(&Loc::Slot(dst));
+                    }
+                    successors.push((pc + 1, next));
+                }
+            }
+            for (target, mut s) in successors {
+                if target >= rows.len() {
+                    continue;
+                }
+                s.retain(|l| live[target].contains(l));
+                if join_into(&mut states[target], &s) && !queued[target] {
+                    queued[target] = true;
+                    work.push(target);
+                }
             }
         }
-        for (target, mut s) in successors {
-            if target >= rows.len() {
-                continue;
+        match states.iter().position(Option::is_none) {
+            Some(pc) => {
+                seeded = true;
+                states[pc] = Some(State::default());
+                queued[pc] = true;
+                work.push(pc);
             }
-            s.retain(|l| live[target].contains(l));
-            if join_into(&mut states[target], &s) && !queued[target] {
-                queued[target] = true;
-                work.push(target);
-            }
+            None => break,
         }
     }
     (states, changed)
@@ -882,10 +991,18 @@ pub fn generate(program: &[(String, Vec<Lir>)]) -> Certificate {
             entries.entry(*l).or_insert(f);
         }
     }
+    let caught = caught_targets(program);
     let lives: Vec<_> = program
         .iter()
-        .map(|(_, rows)| live_locations(rows))
+        .zip(&caught)
+        .map(|((_, rows), caught)| live_locations(rows, caught))
         .collect();
+    let whole = Program {
+        functions: program,
+        entries,
+        lives,
+        caught,
+    };
     let mut signed = BTreeSet::new();
     loop {
         let mut summaries = Summaries {
@@ -901,15 +1018,7 @@ pub fn generate(program: &[(String, Vec<Lir>)]) -> Certificate {
             let mut states = vec![];
             flips.clear();
             for f in 0..program.len() {
-                let (s, c) = analyse(
-                    program,
-                    &entries,
-                    &signed,
-                    f,
-                    &mut summaries,
-                    &mut flips,
-                    &lives,
-                );
+                let (s, c) = analyse(&whole, &signed, f, &mut summaries, &mut flips);
                 changed |= c;
                 states.push(s);
             }

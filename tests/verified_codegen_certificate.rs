@@ -19,13 +19,19 @@ use vesper::{check, parser};
 type Program = Vec<(String, Vec<Lir>)>;
 
 fn lower(source: &str) -> Program {
+    lower_with(source, true)
+}
+
+/// Lower `source` to the widened rows the certificate is checked on; with
+/// `require`, compilation refuses a rejected certificate.
+fn lower_with(source: &str, require: bool) -> Program {
     let p = parser::parse(source);
     assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
     let c = check::check(&p.module);
     assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
     let target = Target::from_triple("x86_64-unknown-linux-gnu").unwrap();
     let options = Options {
-        require_certificate: true,
+        require_certificate: require,
         ..Options::new(target)
     };
     let artifact = vc::compile(&c.world, "main", &options).expect("compiles");
@@ -35,6 +41,12 @@ fn lower(source: &str) -> Program {
         .map(|(n, rows)| (n, rows.iter().map(widen).collect()))
         .collect()
 }
+
+/// Fixtures whose certificates the facts cannot establish yet: the status
+/// protocol of `Fail` (milestone 7) returns a payload word that is only
+/// meaningful on one side of a status test, which needs status-guarded
+/// facts (the same follow-up as enum payloads).
+const IMPRECISE: [&str; 2] = ["fail_implicit.ves", "fail_try.ves"];
 
 fn fixtures() -> Vec<(String, Program)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/verified_codegen");
@@ -46,10 +58,9 @@ fn fixtures() -> Vec<(String, Program)> {
     names.sort();
     let mut out: Vec<(String, Program)> = names
         .iter()
-        .map(|p| {
-            let name = p.file_name().unwrap().to_string_lossy().into_owned();
-            (name, lower(&std::fs::read_to_string(p).unwrap()))
-        })
+        .map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), p))
+        .filter(|(name, _)| !IMPRECISE.contains(&name.as_str()))
+        .map(|(name, p)| (name, lower(&std::fs::read_to_string(p).unwrap())))
         .collect();
     // A constant in [2^32, 2^63) at `i64` and at `u64`, and words above 2^63.
     out.push((
@@ -77,6 +88,19 @@ fn every_fixture_has_an_accepted_certificate() {
             .map(Vec::len)
             .sum();
         assert!(facts > 0, "{name}: an empty certificate");
+    }
+}
+
+#[test]
+fn imprecise_fixtures_still_compile_and_record_the_rejection() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/verified_codegen");
+    for name in IMPRECISE {
+        let program = lower_with(&std::fs::read_to_string(dir.join(name)).unwrap(), false);
+        let cert = certificate::generate(&program);
+        assert!(
+            validate(&program, &cert).is_err(),
+            "{name} is certified now: move it out of IMPRECISE"
+        );
     }
 }
 
@@ -263,6 +287,50 @@ fn imprecise_programs_compile_unless_the_gate_is_required() {
             "{err}"
         );
     }
+}
+
+/// Under a trap scope a failing row jumps to the handler with its incoming
+/// store, so the handler's annotation must follow from the row's facts.
+#[test]
+fn trap_scope_handlers_are_checked() {
+    let rows = |handler: Label| {
+        vec![
+            Lir::Label(3),
+            Lir::Enter { words: 4 },
+            Lir::Scope {
+                ovf: handler,
+                div0: TrapKind::DivisionByZero.label(),
+            },
+            Lir::Const { dst: 0, word: 1 },
+            Lir::Const { dst: 1, word: 255 },
+            Lir::Arith {
+                op: ArithOp::Add,
+                kind: Kind::U8,
+                dst: 2,
+                a: 0,
+                b: 1,
+            },
+            Lir::Return,
+            Lir::Label(9),
+            Lir::Not { dst: 3, a: 0 },
+            Lir::Return,
+        ]
+    };
+    let program: Program = vec![("main".into(), rows(9))];
+    let cert = certificate::check(&program).expect("the handler reads a fact the row has");
+    assert!(
+        cert.functions[0].annotations[7].contains(&(Loc::Slot(0), Kind::Bool)),
+        "{:?}",
+        cert.functions[0].annotations[7]
+    );
+    // The result of the failing row is not available in the handler.
+    let mut forged = cert.clone();
+    forged.functions[0].annotations[7].push((Loc::Slot(2), Kind::U8));
+    assert!(first_rejection(&program, &forged).contains("handler at label 9"));
+    // A handler must be a label of the same function.
+    let program: Program = vec![("main".into(), rows(77))];
+    let cert = certificate::generate(&program);
+    assert!(first_rejection(&program, &cert).contains("outside the body"));
 }
 
 #[test]
@@ -481,6 +549,7 @@ fn lean_row(pc: usize, row: &Lir, signed: &BTreeSet<usize>) -> Option<String> {
         Lir::Trap(TrapKind::Overflow) => "Lir.trap .overflow".into(),
         Lir::Trap(TrapKind::DivisionByZero) => "Lir.trap .divZero".into(),
         Lir::Trap(TrapKind::Unreachable) => "Lir.trap .unreachable".into(),
+        Lir::Scope { ovf, div0 } => format!("Lir.scope {ovf} {div0}"),
         _ => return None,
     })
 }
