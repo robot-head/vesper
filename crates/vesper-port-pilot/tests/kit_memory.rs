@@ -1,7 +1,7 @@
 //! Leak check of the kit's export ABI v2 handles and sequences (#898): 10^5
-//! cycles of every owning form, after which the library's live sequence and
-//! box allocations are back where they started. The divergent build omits
-//! one Vesper-side free, and this test must fail against it, so it checks
+//! cycles of every owning form, after which the library's live sequence,
+//! string and box allocations are back where they started. The divergent
+//! build omits one Vesper-side free, and this test must fail against it, so it checks
 //! only the counters (the other divergence edits change values). It is the only
 //! test in this binary, so no other test allocates while it counts.
 use vesper_port_pilot::kit::patterns::TokenSlab;
@@ -32,6 +32,14 @@ fn handles_and_sequences_return_every_allocation() {
             slab.pop();
         }
         assert_eq!(plan_sends(1, 1, 1).len(), 2);
+        assert_eq!(greet("x").len(), 8);
+        let mut s = String::from("a");
+        shout(&mut s);
+        let mut note = Note::new("n");
+        note.append("ote");
+        note.clear();
+        note.append("again");
+        drop(note);
     }
     drop(slab);
     assert_eq!(

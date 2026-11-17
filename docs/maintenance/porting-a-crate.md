@@ -32,6 +32,9 @@ Values cross the boundary as eight-byte words, using the layouts in
   their stride (1 byte for `u8` and `bool`, 4 for `u32`, otherwise
   the element's words).
 - A `Slice[T]` is the three-word view `{header, start, len}`.
+- A `String` is the three-word value `{len, cap, data}` of UTF-8 bytes,
+  which is also a valid `ChunkSeq[u8]` header. A `Str` view is
+  `{len, 0, data + start}`: capacity 0 marks bytes the value borrows.
 
 Calls use the platform C calling convention:
 
@@ -67,6 +70,12 @@ it to `vesper.native.export-abi/2` (#898), which adds:
   (`u8`, `u32`, `u64`, `i64`, `usize`, `isize`, `f64`) are lent without a
   copy; other elements are copied into a packed buffer (and back, for
   `inout`).
+- **Strings.** `in Str` and `in String` become `&str`, lent in place
+  without a copy. `inout String` becomes `&mut String`: Vesper copies the
+  bytes before its first write, and the result is copied back. A returned
+  `String` becomes `String` (copied, and the Vesper buffer freed). A
+  `String` field of a handle is freed by its drop function and reads as
+  `&str` through the view.
 - **Handles.** A non-`copy` struct or enum becomes an owned Rust type that
   holds its words. Dropping it calls `vesper_<lib>_<Type>_drop`, which frees
   every sequence and box the value owns. Functions named
@@ -75,7 +84,8 @@ it to `vesper.native.export-abi/2` (#898), which adds:
   function returning the type becomes an associated constructor. A `linear`
   type gets `#[must_use]` and no `Drop`: only a consuming call releases it.
   `as_ref()` gives a borrowed view (`<Type>Ref`) that reads fields in place;
-  a sequence field reads as `vesper_port_abi::SeqRef`.
+  a sequence field reads as `vesper_port_abi::SeqRef`, and a `String`
+  field as `&str`.
 - **Boxes and recursive enums.** A `Box[T]` field is read through the view,
   so `enum Tree { Leaf(u64), Node(Box[Tree], Box[Tree]) }` becomes `Tree`,
   and `tree.as_ref().view()` gives `TreeView::Node(TreeRef, TreeRef)`.
@@ -102,6 +112,8 @@ What is exportable today:
 - `inout` scalars and aggregates.
 - `ChunkSeq[T]` results and `in`/`inout` parameters, and `Slice[T]`
   parameters, of `copy` elements.
+- `String` results, `in Str`, `in String` and `inout String` parameters,
+  and `String` fields of handles.
 - Handle types (non-`copy` structs and enums, affine or linear), with
   sequence, box, `Option` and nested handle fields.
 - Instances of generic functions.
@@ -110,12 +122,13 @@ Everything else is refused, with a message that names the function
 (`tests/native_export_v2.rs` lists every case):
 
 - generic functions without an instance
-- a sequence, or a handle that owns a sequence, taken by value (`sink`):
-  native code does not free a dropped sequence yet, so take it `in` or
-  `inout`
+- a sequence or string, or a handle that owns one, taken by value
+  (`sink`): native code does not free a dropped sequence or string yet, so
+  take it `in` or `inout`
+- strings as sequence or slice elements, and `String` errors
 - a `Box[T]` as a parameter or result of its own (wrap it in a handle type)
 - any other effect, including capability effects and unlabeled rows
-- strings (until #896 lands), closures and region handles
+- closures and region handles
 - generic user types
 - `.vsys` imports for targets `vesper-ffi` has no ABI for (for example
   `x86_64-apple-darwin`)

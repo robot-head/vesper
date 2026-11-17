@@ -3,10 +3,10 @@
 //! Every v2 library exports `vesper_<lib>_seq_new`, `vesper_<lib>_seq_free`
 //! and `vesper_<lib>_live_allocations`, and one `vesper_<lib>_<Type>_drop`
 //! per non-linear handle type. The glue walks the handle's words with the
-//! interface's field offsets: a sequence field is freed, a box field has its
-//! pointee dropped and is then freed, and nested handles, `Option`s and
-//! enum variants recurse. Each handle type gets one function, so recursive
-//! types recurse through calls.
+//! interface's field offsets: a sequence field is freed, a `String` field's
+//! buffer is freed, a box field has its pointee dropped and is then freed,
+//! and nested handles, `Option`s and enum variants recurse. Each handle type
+//! gets one function, so recursive types recurse through calls.
 use super::*;
 use cranelift_codegen::ir::{self, AbiParam, InstBuilder, MemFlags, condcodes::IntCC, types};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -15,6 +15,7 @@ use cranelift_module::{FuncId, Linkage, Module};
 struct Runtime {
     seq_new: FuncId,
     seq_free: FuncId,
+    str_release: FuncId,
     box_free: FuncId,
     /// Drop function of every handle type, by name.
     drops: BTreeMap<String, FuncId>,
@@ -51,9 +52,13 @@ pub(super) fn define<M: Module>(
     let seq_free_local = m
         .declare_function("vesper_seq_free", Linkage::Local, &word_sig(m, 1, true))
         .map_err(e)?;
+    let str_release = m
+        .declare_function("vesper_str_release", Linkage::Local, &word_sig(m, 1, true))
+        .map_err(e)?;
     let mut rt = Runtime {
         seq_new: seq_new_local,
         seq_free: seq_free_local,
+        str_release,
         box_free,
         drops: BTreeMap::new(),
     };
@@ -224,7 +229,11 @@ fn drop_at<M: Module>(
                 call(b, m, *id, &[address]);
             }
         }
-        AbiType::Scalar { .. } | AbiType::Slice { .. } => {}
+        AbiType::Str { owned: true } => {
+            let address = b.ins().iadd_imm(base, i64::from(at));
+            call(b, m, rt.str_release, &[address]);
+        }
+        AbiType::Scalar { .. } | AbiType::Slice { .. } | AbiType::Str { owned: false } => {}
     }
 }
 

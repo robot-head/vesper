@@ -75,6 +75,8 @@ fn rust_type(ty: &AbiType, types_path: &str) -> String {
         AbiType::Seq { elem } => format!("Vec<{}>", rust_type(elem, types_path)),
         AbiType::Slice { elem } => format!("[{}]", rust_type(elem, types_path)),
         AbiType::Box { inner } => format!("Box<{}>", rust_type(inner, types_path)),
+        AbiType::Str { owned: true } => "String".into(),
+        AbiType::Str { owned: false } => "str".into(),
     }
 }
 
@@ -366,6 +368,8 @@ fn error_variant(ty: &AbiType) -> String {
         AbiType::Seq { elem } => format!("Seq{}", error_variant(elem)),
         AbiType::Slice { elem } => format!("Slice{}", error_variant(elem)),
         AbiType::Box { inner } => format!("Box{}", error_variant(inner)),
+        AbiType::Str { owned: true } => "String".into(),
+        AbiType::Str { owned: false } => "Str".into(),
     }
 }
 

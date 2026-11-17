@@ -6,7 +6,8 @@
 //! (plus `write` for the fault message off Windows). An allocation that fails
 //! or overflows exits with [`crate::seq::FAULT_STATUS`].
 //!
-//! `vesper_seq_free` frees a header and its buffer (export ABI v2 calls it),
+//! `vesper_seq_free` frees a header and its buffer and `vesper_str_release`
+//! the buffer of an inline `String` value (export ABI v2 calls them),
 //! and [`LIVE_COUNTER`] counts the live header and buffer allocations so
 //! that leak tests can see allocations a Rust allocator never sees (#898).
 use cranelift_codegen::ir::{
@@ -239,6 +240,28 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         b.switch_to_block(done);
         call(b, m, free, &[header]);
         count(b, m, &im, -1);
+        let zero = b.ins().iconst(types::I64, 0);
+        b.ins().return_(&[zero]);
+        Ok(())
+    })?;
+    // `vesper_str_release(value)`: free the buffer a `String` value (stored
+    // inline, not behind a header pointer) owns; borrowed bytes stay.
+    let release_str = local(m, "vesper_str_release", 1)?;
+    compile(m, release_str, 1, |b, m, args| {
+        let value = args[0];
+        let data = b.ins().load(types::I64, MemFlags::new(), value, 16);
+        let cap = b.ins().load(types::I64, MemFlags::new(), value, 8);
+        let present = b.ins().icmp_imm(IntCC::NotEqual, data, 0);
+        let owned = b.ins().icmp_imm(IntCC::NotEqual, cap, 0);
+        let has_data = b.ins().band(present, owned);
+        let free_data = b.create_block();
+        let done = b.create_block();
+        b.ins().brif(has_data, free_data, &[], done, &[]);
+        b.switch_to_block(free_data);
+        call(b, m, free, &[data]);
+        count(b, m, &im, -1);
+        b.ins().jump(done, &[]);
+        b.switch_to_block(done);
         let zero = b.ins().iconst(types::I64, 0);
         b.ins().return_(&[zero]);
         Ok(())

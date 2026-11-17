@@ -191,6 +191,12 @@ pub enum AbiType {
     Box {
         inner: Box<AbiType>,
     },
+    /// v2: `String` (`owned`) or the `Str` view, the three-word value
+    /// `{len, cap, data}` of valid UTF-8. Capacity 0 marks bytes the value
+    /// does not own (a literal, a view, or bytes Rust lent).
+    Str {
+        owned: bool,
+    },
 }
 
 fn is_false(v: &bool) -> bool {
@@ -584,8 +590,13 @@ impl Planner<'_> {
                     "is a sequence taken by value; native code does not free a dropped sequence yet, so take it `in` or `inout`",
                 )),
                 (AbiType::Named { name, .. }, _) if self.handle(name) => Ok(()),
+                (AbiType::Str { .. }, Pass::In) => Ok(()),
+                (AbiType::Str { owned: true }, Pass::Inout) => Ok(()),
+                (AbiType::Str { .. }, _) => Err(refuse(
+                    "is a string taken by value; native code does not free a dropped string yet, so take it `in` (or `inout String`)",
+                )),
                 _ => Err(refuse(
-                    "owns memory; only sequences, slices and handle types cross as parameters",
+                    "owns memory; only sequences, slices, strings and handle types cross as parameters",
                 )),
             },
             Position::Result => self.result_shape(ty).map_err(|r| refuse(&r)),
@@ -600,7 +611,7 @@ impl Planner<'_> {
     fn result_shape(&self, ty: &AbiType) -> Result<(), String> {
         match ty {
             _ if !self.owning(ty) => Ok(()),
-            AbiType::Seq { .. } => Ok(()),
+            AbiType::Seq { .. } | AbiType::Str { owned: true } => Ok(()),
             AbiType::Named { name, .. } if self.handle(name) => Ok(()),
             AbiType::Named { name, args } if name == "Option" => self.result_shape(&args[0]),
             AbiType::Tuple { items } => items.iter().try_for_each(|t| self.result_shape(t)),
@@ -615,12 +626,12 @@ impl Planner<'_> {
     fn field_shape(&self, ty: &AbiType) -> Result<(), String> {
         match ty {
             _ if !self.owning(ty) => Ok(()),
-            AbiType::Seq { .. } => Ok(()),
+            AbiType::Seq { .. } | AbiType::Str { owned: true } => Ok(()),
             AbiType::Named { name, .. } if self.handle(name) => Ok(()),
             AbiType::Named { name, args } if name == "Option" => self.field_shape(&args[0]),
             AbiType::Box { inner } => self.field_shape(inner),
             _ => Err(
-                "is a field form handles do not carry yet (use a sequence, a box, a handle type or an Option of one)"
+                "is a field form handles do not carry yet (use a sequence, a String, a box, a handle type or an Option of one)"
                     .into(),
             ),
         }
@@ -662,6 +673,15 @@ impl Planner<'_> {
                     AbiType::Seq { elem }
                 } else {
                     AbiType::Slice { elem }
+                })
+            }
+            Type::Named(n, args)
+                if args.is_empty()
+                    && (n == crate::strings::STRING_TYPE || n == crate::strings::STR_TYPE) =>
+            {
+                self.v2 = true;
+                Ok(AbiType::Str {
+                    owned: n == crate::strings::STRING_TYPE,
                 })
             }
             t if crate::fip::is_box_type(world, t) => {
@@ -807,8 +827,9 @@ impl Planner<'_> {
 
 fn holds_sequence(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
     match ty {
-        AbiType::Seq { .. } => true,
-        AbiType::Scalar { .. } | AbiType::Slice { .. } => false,
+        // Native code frees neither a dropped sequence nor a dropped string.
+        AbiType::Seq { .. } | AbiType::Str { owned: true } => true,
+        AbiType::Scalar { .. } | AbiType::Slice { .. } | AbiType::Str { owned: false } => false,
         AbiType::Tuple { items } => items.iter().any(|t| holds_sequence(t, types)),
         AbiType::Box { inner } => holds_sequence(inner, types),
         AbiType::Named { name, args } => {
@@ -821,7 +842,9 @@ fn holds_sequence(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
 /// Whether a value of `ty` owns memory (a sequence, a box or a handle).
 pub(crate) fn owning(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
     match ty {
-        AbiType::Seq { .. } | AbiType::Slice { .. } | AbiType::Box { .. } => true,
+        AbiType::Seq { .. } | AbiType::Slice { .. } | AbiType::Box { .. } | AbiType::Str { .. } => {
+            true
+        }
         AbiType::Scalar { .. } => false,
         AbiType::Tuple { items } => items.iter().any(|t| owning(t, types)),
         AbiType::Named { name, args } => {
@@ -834,7 +857,7 @@ pub(crate) fn owning(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
 pub(crate) fn abi_words(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> u32 {
     match ty {
         AbiType::Scalar { .. } | AbiType::Seq { .. } | AbiType::Box { .. } => 1,
-        AbiType::Slice { .. } => 3,
+        AbiType::Slice { .. } | AbiType::Str { .. } => 3,
         AbiType::Tuple { items } => items
             .iter()
             .map(|t| abi_words(t, types))

@@ -41,6 +41,7 @@ vesper_port_object(
     edits = {
         "        s.push(wrapping_mul(i, i));": "        s.push(wrapping_mul(i, wrapping_add(i, 1)));",
         "if c >= 48 && c <= 57 {": "if c >= 48 && c <= 58 {",
+        "    s.push_char(33);": "    s.push_char(63);",
         "c.total = wrapping_add(c.total, v);": "c.total = wrapping_add(c.total, wrapping_add(v, 1));",
         "    id\n}": "    wrapping_add(id, 1)\n}",
         "Tree::Leaf(v) => v,": "Tree::Leaf(v) => wrapping_add(v, 1),",

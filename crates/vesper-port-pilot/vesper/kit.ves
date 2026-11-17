@@ -46,6 +46,12 @@ enum Tree {
     Node(Box[Tree], Box[Tree])
 }
 
+// An owned handle with a string field.
+struct Note {
+    text: String,
+    edits: u64
+}
+
 // Token slab (pattern b): Vesper keeps the order of u64 tokens, the Rust
 // wrapper keeps the payloads.
 struct Tokens {
@@ -249,6 +255,60 @@ pub fn tokens_pop(inout q: Tokens) -> Option[u64] {
         },
         Option::None => Option::None,
     }
+}
+
+// Strings: `in Str` and `in String` parameters, `inout String` and a
+// `String` result.
+pub fn greet(in name: Str) -> String {
+    let mut s = String::with_capacity(8);
+    s.push_str("hello, ");
+    s.push_str(name);
+    s
+}
+
+pub fn word_count(in text: String) -> u64 {
+    let mut n: u64 = 0;
+    let mut inside = false;
+    for i in 0..text.len() {
+        let c = match text.try_byte_at(i) {
+            Option::Some(c) => c,
+            Option::None => 32,
+        };
+        if c == 32 {
+            inside = false;
+        } else if !inside {
+            n = wrapping_add(n, 1);
+            inside = true;
+        }
+    }
+    n
+}
+
+pub fn shout(inout s: String) {
+    s.push_char(33);
+}
+
+pub fn note_new(in text: Str) -> Note {
+    let mut t = String::with_capacity(text.len());
+    t.push_str(text);
+    Note {
+        text: t,
+        edits: 0
+    }
+}
+
+pub fn note_append(inout n: Note, in more: Str) {
+    n.text.push_str(more);
+    n.edits = wrapping_add(n.edits, 1);
+}
+
+pub fn note_edits(in n: Note) -> u64 {
+    n.edits
+}
+
+pub fn note_clear(inout n: Note) {
+    n.text.clear();
+    n.edits = wrapping_add(n.edits, 1);
 }
 
 // Sink closure (pattern c): the word boundaries, as start/end pairs.

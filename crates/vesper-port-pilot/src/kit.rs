@@ -1,7 +1,7 @@
 //! The pilot's export ABI v2 library (`vesper/kit.ves`, port wave P1 lane 1,
-//! #898): sequences and slices, owned and linear handles, a recursive enum
-//! behind boxes, generic instances and a `.vsys` import, plus the five
-//! "Patterns for Rust APIs" of `docs/maintenance/porting-a-crate.md`
+//! #898): sequences and slices, strings, owned and linear handles, a
+//! recursive enum behind boxes, generic instances and a `.vsys` import, plus
+//! the five "Patterns for Rust APIs" of `docs/maintenance/porting-a-crate.md`
 //! (in [`patterns`]).
 //!
 //! As for the rest of the pilot, the API has a Rust build
@@ -68,4 +68,10 @@ pub fn tree_shape(tree: &Tree) -> TreeNode {
         }
     }
     read(tree.as_ref())
+}
+
+/// The text of a [`Note`] handle, borrowed through its view.
+#[cfg(feature = "vesper-port")]
+pub fn note_text(note: &Note) -> &str {
+    note.as_ref().text()
 }

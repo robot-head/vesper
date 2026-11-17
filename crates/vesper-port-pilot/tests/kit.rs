@@ -42,6 +42,43 @@ fn slice_parameters() {
 }
 
 #[test]
+fn strings() {
+    assert_eq!(greet("Ada"), "hello, Ada");
+    assert_eq!(greet(""), "hello, ");
+    assert_eq!(greet("wörld ✓"), "hello, wörld ✓");
+    assert_eq!(word_count("  the quick  brown fox"), 4);
+    assert_eq!(word_count(""), 0);
+    let mut s = String::from("hey");
+    shout(&mut s);
+    shout(&mut s);
+    assert_eq!(s, "hey!!");
+    let mut empty = String::new();
+    shout(&mut empty);
+    assert_eq!(empty, "!");
+    let mut long = "x".repeat(1000);
+    shout(&mut long);
+    assert_eq!(long.len(), 1001);
+    // A handle that owns a string.
+    let mut note = Note::new("draft");
+    assert_eq!(note_text(&note), "draft");
+    note.append(", then more");
+    note.append(" — and ünïcode");
+    assert_eq!(note_text(&note), "draft, then more — and ünïcode");
+    assert_eq!(note.edits(), 2);
+    note.clear();
+    assert_eq!(note_text(&note), "");
+    assert_eq!(note.edits(), 3);
+    let note = std::thread::spawn(move || {
+        let mut note = note;
+        note.append("moved");
+        note
+    })
+    .join()
+    .unwrap();
+    assert_eq!(note_text(&note), "moved");
+}
+
+#[test]
 fn owned_handles() {
     let mut c = Counter::new();
     assert_eq!(c.total(), 0);

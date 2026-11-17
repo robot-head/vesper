@@ -29,7 +29,7 @@ if cargo test --locked -p vesper-port-pilot --features vesper-port-divergent --t
     echo "the divergent kit passed its API tests" >&2
     exit 1
 fi
-for t in sequence_results slice_parameters owned_handles linear_handles recursive_enum_handles generic_instances vsys_imports; do
+for t in sequence_results slice_parameters strings owned_handles linear_handles recursive_enum_handles generic_instances vsys_imports; do
     if ! grep -q "test $t ... FAILED" "$log"; then
         cat "$log"
         echo "the divergent kit did not fail $t" >&2
