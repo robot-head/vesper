@@ -97,6 +97,7 @@ fn main() {
             time_unix_ns: 1_700_000_000_100,
             histogram: &latency,
             attributes: Attributes::new(),
+            exemplars: Vec::new(),
         }]);
     let metrics = metrics.expect("encode histogram");
     let decoded = OtapDecoder::default().decode(&metrics).expect("decode");

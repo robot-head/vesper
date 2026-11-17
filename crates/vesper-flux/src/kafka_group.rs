@@ -134,6 +134,8 @@ impl Index {
                 .map_err(io)?;
             file.write_all(&header).map_err(io)?;
             file.sync_all().map_err(io)?;
+            // The new directory entry must survive a power loss too.
+            super::kafka::sync_dir(path)?;
             return Ok(Self {
                 file,
                 header_len: header.len() as u64,
@@ -263,6 +265,8 @@ struct Member {
     /// Current position of each owned binding.
     position: BTreeMap<usize, (i64, u64)>,
     rebalance: bool,
+    /// The session expired: the group no longer knows this member.
+    lost: bool,
     last_heartbeat: Instant,
     published: Option<u64>,
     joins: u64,
@@ -316,16 +320,28 @@ fn fingerprint(
     *h.finalize().as_bytes()
 }
 
-/// Consumer protocol subscription (version 0): the topics.
+/// Consumer protocol subscription (version 0): the topics, with the exact
+/// bindings (topic, partition) as user data, so the leader can check that
+/// every member subscribes to the same bindings.
 fn subscription(topics: &[KafkaBinding]) -> KResult<Vec<u8>> {
     let names: BTreeSet<&str> = topics.iter().map(|t| t.topic.as_str()).collect();
+    let bindings: BTreeSet<(&str, i32)> = topics
+        .iter()
+        .map(|t| (t.topic.as_str(), t.partition))
+        .collect();
+    let mut user = W::new(false);
+    user.array(bindings.len())?;
+    for (t, p) in bindings {
+        user.str(t)?;
+        user.i32(p);
+    }
     let mut w = W::new(false);
     w.i16(0);
     w.array(names.len())?;
     for n in names {
         w.str(n)?;
     }
-    w.bytes(&[])?;
+    w.bytes(&user.buf)?;
     Ok(w.buf)
 }
 /// Consumer protocol assignment (version 0).
@@ -414,6 +430,7 @@ impl KafkaGroupSource {
                 owned: BTreeSet::new(),
                 position: BTreeMap::new(),
                 rebalance: false,
+                lost: false,
                 last_heartbeat: Instant::now(),
                 published: None,
                 joins: 0,
@@ -548,6 +565,7 @@ impl KafkaGroupSource {
         m.owned = owned;
         m.position = position;
         m.rebalance = false;
+        m.lost = false;
         m.last_heartbeat = Instant::now();
         m.joins += 1;
         Ok(())
@@ -555,6 +573,14 @@ impl KafkaGroupSource {
 
     /// Leader: round-robin the bindings over the sorted member ids.
     fn assign(&self, members: &[(String, Vec<u8>)]) -> Result<Vec<(String, Vec<u8>)>, Error> {
+        // The round-robin spreads the leader's bindings over every member, so
+        // every member must subscribe to exactly the same bindings.
+        let own = self.conn.run(|_| subscription(&self.topics))?;
+        if members.iter().any(|(_, meta)| *meta != own) {
+            return Err(Error::Kafka(
+                "group members subscribe to different bindings",
+            ));
+        }
         let mut ids: Vec<&str> = members.iter().map(|(m, _)| m.as_str()).collect();
         ids.sort_unstable();
         let mut per: BTreeMap<&str, BTreeMap<String, Vec<i32>>> =
@@ -584,21 +610,33 @@ impl KafkaGroupSource {
         let r = self.conn.raw(|c: &mut Client| {
             c.retry(
                 |c| match c.heartbeat(&g.group_id, gen_, &id, g.instance_id.as_deref()) {
-                    Err(Fail::Code(27 | 22 | 25, _)) => Ok(true),
+                    Err(Fail::Code(27, _)) => Ok((true, false)),
+                    // ILLEGAL_GENERATION, UNKNOWN_MEMBER_ID: the session
+                    // expired and the group moved on without this member.
+                    Err(Fail::Code(22 | 25, _)) => Ok((true, true)),
                     Err(e) => Err(e),
-                    Ok(()) => Ok(false),
+                    Ok(()) => Ok((false, false)),
                 },
             )
         });
         let mut m = self.member.borrow_mut();
         m.last_heartbeat = Instant::now();
         match r {
-            Ok(rebalance) => {
+            Ok((rebalance, lost)) => {
                 m.rebalance |= rebalance;
+                m.lost |= lost;
                 Ok(())
             }
             Err(e) => Err(e.error()),
         }
+    }
+
+    /// Heartbeat now if the interval has passed. Call this from long
+    /// processing between polls: a member whose session expires while it
+    /// holds unpublished epochs cannot commit their input offsets any more.
+    /// The sink also calls it before each transaction.
+    pub fn keep_alive(&self) -> Result<(), Error> {
+        self.heartbeat()
     }
 
     /// Heartbeat; rejoin when a rebalance is pending and everything cut is
@@ -606,12 +644,19 @@ impl KafkaGroupSource {
     pub fn poll(&self) -> Result<GroupPoll, Error> {
         self.heartbeat()?;
         let cut = self.epochs();
-        let (rebalance, published) = {
+        let (rebalance, published, lost) = {
             let m = self.member.borrow();
-            (m.rebalance, m.published)
+            (m.rebalance, m.published, m.lost)
         };
         if rebalance {
             let all_published = cut == 0 || published.is_some_and(|p| p + 1 >= cut);
+            if !all_published && lost {
+                // Waiting would never end: the group already gave the
+                // partitions away, so these epochs cannot be published here.
+                return Err(Error::Kafka(
+                    "group membership lost with unpublished epochs",
+                ));
+            }
             if !all_published {
                 return Ok(GroupPoll::Rebalancing);
             }
@@ -766,6 +811,8 @@ impl EpochSource for KafkaGroupSource {
 
 impl GroupOffsetSource for KafkaGroupSource {
     fn offsets_after(&self, epoch: u64) -> Result<Option<GroupOffsets>, Error> {
+        // Publication can take long: keep the session alive.
+        self.heartbeat()?;
         let spans = {
             let index = self.index.borrow();
             index

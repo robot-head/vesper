@@ -13,8 +13,10 @@
 //! compiler step and is not part of this crate.
 
 mod attributes;
+mod cbor;
 mod decode;
 mod encode;
+mod headers;
 mod ipc;
 mod model;
 pub mod proto;
@@ -24,6 +26,7 @@ mod transport;
 pub use attributes::*;
 pub use decode::*;
 pub use encode::*;
+pub use headers::*;
 pub use model::*;
 pub use schema::IdEncoding;
 pub use transport::*;

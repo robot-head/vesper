@@ -6,7 +6,14 @@
 //! checks every message before handing it to `arrow-ipc`:
 //!
 //! * framing: continuation marker, message length and body length inside
-//!   the payload, metadata version V5, no compression, no EOS mid-stream;
+//!   the payload, metadata version V5, no EOS mid-stream;
+//! * compression: a batch with `BodyCompression` (zstd, per buffer, as the
+//!   collector's `otelarrow` exporter writes with `payload_compression:
+//!   zstd`) is decompressed here, each buffer bounded by its declared
+//!   length and the whole payload by the caller's decompressed-bytes limit,
+//!   and rewritten as an uncompressed message before any other check, so
+//!   `arrow-ipc`'s own (unbounded) decompression never runs; LZ4 is a typed
+//!   error;
 //! * schema: little-endian, at most [`MAX_FIELDS`] fields nested at most
 //!   [`MAX_DEPTH`] deep, and only the types Beacon's OTAP schemas use
 //!   (bool, int, float, utf8, binary, fixed-size binary, timestamp,
@@ -26,7 +33,8 @@ use arrow_buffer::Buffer;
 use arrow_ipc::{
     convert::fb_to_schema,
     reader::{read_dictionary, read_record_batch},
-    root_as_message, Endianness, MessageHeader, MetadataVersion, Precision, Type,
+    root_as_message, BodyCompressionMethod, CompressionType, DictionaryBatchBuilder, Endianness,
+    MessageBuilder, MessageHeader, MetadataVersion, Precision, RecordBatchBuilder, Type,
 };
 use arrow_schema::SchemaRef;
 use std::collections::{HashMap, HashSet};
@@ -198,7 +206,8 @@ fn check_batch(
     max_rows: usize,
 ) -> Result<(), DecodeError> {
     if batch.compression().is_some() {
-        return Err(bad("compressed buffers are not supported"));
+        // `decompress_body` rewrites compressed batches first.
+        return Err(bad("compressed batch reached validation"));
     }
     if batch.variadicBufferCounts().is_some_and(|v| !v.is_empty()) {
         return Err(bad("variadic buffers are not supported"));
@@ -255,6 +264,130 @@ fn check_batch(
     Ok(())
 }
 
+/// Decompresses the buffers of a compressed batch into a fresh body (each
+/// buffer 8-byte aligned) and returns them with a `RecordBatch` flatbuffer
+/// offset list. `budget` bounds the decompressed bytes and is reduced.
+fn decompress_body(
+    batch: &arrow_ipc::RecordBatch<'_>,
+    body: &[u8],
+    budget: &mut usize,
+) -> Result<(Vec<arrow_ipc::Buffer>, Vec<u8>), DecodeError> {
+    let compression = batch.compression().expect("compressed");
+    if compression.method() != BodyCompressionMethod::BUFFER {
+        return Err(bad("unsupported compression method"));
+    }
+    let zstd = match compression.codec() {
+        CompressionType::ZSTD => true,
+        CompressionType::LZ4_FRAME => return Err(bad("lz4 compressed buffers are not supported")),
+        _ => return Err(bad("unknown compression codec")),
+    };
+    debug_assert!(zstd);
+    let buffers = batch.buffers().ok_or(bad("batch without buffers"))?;
+    let mut out = Vec::new();
+    let mut descriptors = Vec::with_capacity(buffers.len());
+    for buffer in buffers {
+        let start =
+            usize::try_from(buffer.offset()).map_err(|_| bad("invalid buffer descriptor"))?;
+        let len = usize::try_from(buffer.length()).map_err(|_| bad("invalid buffer descriptor"))?;
+        let end = start
+            .checked_add(len)
+            .filter(|e| *e <= body.len())
+            .ok_or(bad("buffer outside the message body"))?;
+        let raw = &body[start..end];
+        let offset = out.len();
+        if !raw.is_empty() {
+            if raw.len() < 8 {
+                return Err(bad("compressed buffer without a length prefix"));
+            }
+            let declared = i64::from_le_bytes(raw[..8].try_into().expect("8 bytes"));
+            let data = &raw[8..];
+            let decoded_len = if declared == -1 {
+                data.len()
+            } else {
+                usize::try_from(declared).map_err(|_| bad("negative uncompressed length"))?
+            };
+            *budget = budget
+                .checked_sub(decoded_len)
+                .ok_or(DecodeError::DecompressedTooLarge)?;
+            if declared == -1 {
+                out.extend_from_slice(data);
+            } else {
+                let decoded = zstd::bulk::decompress(data, decoded_len)
+                    .map_err(|_| bad("invalid zstd buffer"))?;
+                if decoded.len() != decoded_len {
+                    return Err(bad("uncompressed length does not match its prefix"));
+                }
+                out.extend_from_slice(&decoded);
+            }
+        }
+        let length = out.len() - offset;
+        out.resize(out.len().next_multiple_of(8), 0);
+        descriptors.push(arrow_ipc::Buffer::new(offset as i64, length as i64));
+    }
+    Ok((descriptors, out))
+}
+
+/// A rewritten message: flatbuffer metadata and body.
+type Rewritten = (Vec<u8>, Vec<u8>);
+
+/// The message re-encoded without compression, with `buffers` and the new
+/// body length; `None` if the message has no compressed batch.
+fn uncompressed_message(
+    message: &arrow_ipc::Message<'_>,
+    body: &[u8],
+    budget: &mut usize,
+) -> Result<Option<Rewritten>, DecodeError> {
+    let (batch, dictionary) = match message.header_type() {
+        MessageHeader::RecordBatch => (message.header_as_record_batch(), None),
+        MessageHeader::DictionaryBatch => {
+            let d = message
+                .header_as_dictionary_batch()
+                .ok_or(bad("missing dictionary batch"))?;
+            (d.data(), Some(d))
+        }
+        _ => return Ok(None),
+    };
+    let Some(batch) = batch.filter(|b| b.compression().is_some()) else {
+        return Ok(None);
+    };
+    if batch.variadicBufferCounts().is_some_and(|v| !v.is_empty()) {
+        return Err(bad("variadic buffers are not supported"));
+    }
+    let (descriptors, new_body) = decompress_body(&batch, body, budget)?;
+    let nodes: Vec<arrow_ipc::FieldNode> = batch
+        .nodes()
+        .ok_or(bad("batch without nodes"))?
+        .iter()
+        .copied()
+        .collect();
+    let mut fbb = flatbuffers::FlatBufferBuilder::new();
+    let nodes = fbb.create_vector(&nodes);
+    let buffers = fbb.create_vector(&descriptors);
+    let mut rb = RecordBatchBuilder::new(&mut fbb);
+    rb.add_length(batch.length());
+    rb.add_nodes(nodes);
+    rb.add_buffers(buffers);
+    let rb = rb.finish();
+    let header = match dictionary {
+        None => rb.as_union_value(),
+        Some(d) => {
+            let mut db = DictionaryBatchBuilder::new(&mut fbb);
+            db.add_id(d.id());
+            db.add_data(rb);
+            db.add_isDelta(d.isDelta());
+            db.finish().as_union_value()
+        }
+    };
+    let mut mb = MessageBuilder::new(&mut fbb);
+    mb.add_version(message.version());
+    mb.add_header_type(message.header_type());
+    mb.add_header(header);
+    mb.add_bodyLength(new_body.len() as i64);
+    let m = mb.finish();
+    fbb.finish(m, None);
+    Ok(Some((fbb.finished_data().to_vec(), new_body)))
+}
+
 #[derive(Default)]
 pub(crate) struct IpcReader {
     schema: Option<SchemaRef>,
@@ -265,13 +398,18 @@ pub(crate) struct IpcReader {
 }
 
 impl IpcReader {
-    /// Decodes every message of one payload and returns its record batches.
+    /// Decodes every message of one payload and returns its record batches
+    /// and the bytes its compressed buffers decompressed to (the caller
+    /// charges them to the stream's lifetime limit, since dictionaries
+    /// retain them).
     pub(crate) fn feed(
         &mut self,
         mut bytes: &[u8],
         max_rows: usize,
-    ) -> Result<Vec<RecordBatch>, DecodeError> {
+        max_decompressed: usize,
+    ) -> Result<(Vec<RecordBatch>, usize), DecodeError> {
         let mut batches = Vec::new();
+        let mut budget = max_decompressed;
         while !bytes.is_empty() {
             if bytes.len() < 8 || bytes[..4] != CONTINUATION {
                 return Err(DecodeError::TruncatedMessage);
@@ -295,6 +433,16 @@ impl IpcReader {
                 return Err(bad("unsupported metadata version"));
             }
             let body = &rest[len..len + body_len];
+            let next = &rest[len + body_len..];
+            let rewritten = uncompressed_message(&message, body, &mut budget)?;
+            let (message, body, body_len) = match &rewritten {
+                Some((m, b)) => (
+                    root_as_message(m).map_err(|_| bad("invalid message flatbuffer"))?,
+                    b.as_slice(),
+                    b.len(),
+                ),
+                None => (message, body, body_len),
+            };
             match message.header_type() {
                 MessageHeader::Schema => {
                     if self.schema.is_some() {
@@ -362,8 +510,8 @@ impl IpcReader {
                 }
                 _ => return Err(bad("unsupported message type")),
             }
-            bytes = &rest[len + body_len..];
+            bytes = next;
         }
-        Ok(batches)
+        Ok((batches, max_decompressed - budget))
     }
 }

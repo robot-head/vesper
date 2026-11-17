@@ -25,10 +25,17 @@ stream, with what is proved about each:
   emitted delta is a key, a public value or the marker of some exported
   attribute; so with only the `redact` policy, a PII value that is not also
   a key or public value never appears in the stream.
+* Structured values (`Val`: OTLP slices, maps and byte strings, every leaf
+  labelled and exported like a top-level value; `exportVal` is the token
+  model of the serialized `ser` cell). `export_val_noninterference` and
+  `struct_attrs_noninterference`: low-equivalent structured values and
+  attribute lists export identically. `exported_texts_public`: every text
+  token of an exported value is a map key, a public leaf or the marker.
 
 These are theorems about these models only, not about the Rust crate
 `crates/vesper-beacon-arrow`: the model abstracts span fields to a `Nat`,
-attribute values to `String`, Arrow IPC framing to `Msg` and the HMAC to `fp`.
+attribute values and byte strings to `String`, numeric leaves to `Int`, CBOR
+to the `Tok` sequence, Arrow IPC framing to `Msg` and the HMAC to `fp`.
 Its tests check the same properties at run time on real encoded bytes, and
 `tests/lean_model.rs` compares `exportAttr` under `redact` with the Rust
 exporter through `lean/BeaconRedaction/Fixture.lean`.
@@ -291,6 +298,188 @@ theorem pii_never_emitted (fp : String → Nat) (cap : Nat) (batches : List (Lis
     exact ⟨b, hb, sp, hsp, a, ha,
       out_strings_public fp a (hr b hb sp hsp a ha) s hso⟩
 
+/-! ## Structured values: slices, maps and byte strings
+
+OTLP `array_value`, `kvlist_value` and `bytes_value`. Every leaf carries its
+own label and passes the same policy as a top-level attribute value; byte
+strings are leaves like strings (modelled as `String`), and booleans,
+integers and doubles are `num` leaves, always public. `exportVal` is the
+token sequence the exporter writes for a value (the model of a CBOR `ser`
+cell: open and close markers around slices and maps, map keys as text). -/
+
+mutual
+inductive Val where
+  | leaf (l : Label) (s : String)
+  | num (n : Int)
+  | slice (xs : Vals)
+  | map (fs : Fields)
+inductive Vals where
+  | nil
+  | cons (v : Val) (rest : Vals)
+inductive Fields where
+  | nil
+  | cons (k : String) (v : Val) (rest : Fields)
+end
+
+inductive Tok where
+  | text (s : String)
+  | tag (h : Nat)
+  | num (n : Int)
+  | openSlice
+  | openMap
+  | close
+  deriving DecidableEq, Repr
+
+def leafTok (fp : String → Nat) (l : Label) (s : String) : Tok :=
+  match l with
+  | .pub => .text s
+  | .pii .redact => .text marker
+  | .pii .fingerprint => .tag (fp s)
+
+mutual
+def exportVal (fp : String → Nat) : Val → List Tok
+  | .leaf l s => [leafTok fp l s]
+  | .num n => [.num n]
+  | .slice xs => .openSlice :: (exportVals fp xs ++ [.close])
+  | .map fs => .openMap :: (exportFields fp fs ++ [.close])
+def exportVals (fp : String → Nat) : Vals → List Tok
+  | .nil => []
+  | .cons v rest => exportVal fp v ++ exportVals fp rest
+def exportFields (fp : String → Nat) : Fields → List Tok
+  | .nil => []
+  | .cons k v rest => .text k :: (exportVal fp v ++ exportFields fp rest)
+end
+
+-- Low-equivalence of structured values: same shape, keys and labels; equal
+-- public leaves; equal fingerprints of fingerprinted leaves.
+mutual
+inductive ValLow (fp : String → Nat) : Val → Val → Prop where
+  | leaf {l : Label} {s t : String} :
+      (l = .pub → s = t) → (l = .pii .fingerprint → fp s = fp t) →
+      ValLow fp (.leaf l s) (.leaf l t)
+  | num (n : Int) : ValLow fp (.num n) (.num n)
+  | slice {xs ys : Vals} : ValsLow fp xs ys → ValLow fp (.slice xs) (.slice ys)
+  | map {xs ys : Fields} : FieldsLow fp xs ys → ValLow fp (.map xs) (.map ys)
+inductive ValsLow (fp : String → Nat) : Vals → Vals → Prop where
+  | nil : ValsLow fp .nil .nil
+  | cons {v w : Val} {r q : Vals} :
+      ValLow fp v w → ValsLow fp r q → ValsLow fp (.cons v r) (.cons w q)
+inductive FieldsLow (fp : String → Nat) : Fields → Fields → Prop where
+  | nil : FieldsLow fp .nil .nil
+  | cons (k : String) {v w : Val} {r q : Fields} :
+      ValLow fp v w → FieldsLow fp r q → FieldsLow fp (.cons k v r) (.cons k w q)
+end
+
+theorem leaf_tok_low (fp : String → Nat) (l : Label) (s t : String)
+    (hp : l = .pub → s = t) (hf : l = .pii .fingerprint → fp s = fp t) :
+    leafTok fp l s = leafTok fp l t := by
+  cases l with
+  | pub => simp [leafTok, hp rfl]
+  | pii p =>
+    cases p with
+    | redact => simp [leafTok]
+    | fingerprint => simp [leafTok, hf rfl]
+
+mutual
+theorem export_val_noninterference (fp : String → Nat) :
+    ∀ {v w : Val}, ValLow fp v w → exportVal fp v = exportVal fp w
+  | _, _, .leaf hp hf => by simp [exportVal, leaf_tok_low fp _ _ _ hp hf]
+  | _, _, .num _ => rfl
+  | _, _, .slice h => by simp [exportVal, export_vals_noninterference fp h]
+  | _, _, .map h => by simp [exportVal, export_fields_noninterference fp h]
+theorem export_vals_noninterference (fp : String → Nat) :
+    ∀ {xs ys : Vals}, ValsLow fp xs ys → exportVals fp xs = exportVals fp ys
+  | _, _, .nil => rfl
+  | _, _, .cons hv hr => by
+    simp [exportVals, export_val_noninterference fp hv, export_vals_noninterference fp hr]
+theorem export_fields_noninterference (fp : String → Nat) :
+    ∀ {xs ys : Fields}, FieldsLow fp xs ys → exportFields fp xs = exportFields fp ys
+  | _, _, .nil => rfl
+  | _, _, .cons _ hv hr => by
+    simp [exportFields, export_val_noninterference fp hv, export_fields_noninterference fp hr]
+end
+
+/-- A structured attribute: key and value. -/
+structure StructAttr where
+  key : String
+  value : Val
+
+def exportStructAttr (fp : String → Nat) (a : StructAttr) : String × List Tok :=
+  (a.key, exportVal fp a.value)
+
+def structAttrLow (fp : String → Nat) (a b : StructAttr) : Prop :=
+  a.key = b.key ∧ ValLow fp a.value b.value
+
+theorem struct_attrs_noninterference (fp : String → Nat) {xs ys : List StructAttr}
+    (h : Pairwise2 (structAttrLow fp) xs ys) :
+    xs.map (exportStructAttr fp) = ys.map (exportStructAttr fp) :=
+  map_eq_of_forall₂ (exportStructAttr fp) (structAttrLow fp)
+    (fun a b ⟨hk, hv⟩ => by simp [exportStructAttr, hk, export_val_noninterference fp hv]) h
+
+-- Text a value may legitimately put on the wire: map keys, public leaves
+-- and the marker.
+mutual
+def valTexts : Val → List String
+  | .leaf .pub s => [s]
+  | .leaf (.pii _) _ => [marker]
+  | .num _ => []
+  | .slice xs => valsTexts xs
+  | .map fs => fieldsTexts fs
+def valsTexts : Vals → List String
+  | .nil => []
+  | .cons v rest => valTexts v ++ valsTexts rest
+def fieldsTexts : Fields → List String
+  | .nil => []
+  | .cons k v rest => k :: (valTexts v ++ fieldsTexts rest)
+end
+
+theorem leaf_tok_text (fp : String → Nat) (l : Label) (s t : String)
+    (h : leafTok fp l s = .text t) : t ∈ valTexts (.leaf l s) := by
+  cases l with
+  | pub => simp [leafTok] at h; simp [valTexts, h]
+  | pii p =>
+    cases p with
+    | redact => simp [leafTok] at h; simp [valTexts, h]
+    | fingerprint => simp [leafTok] at h
+
+-- Every text token of an exported structured value is a map key, a public
+-- leaf or the marker, under either policy (fingerprints are `tag` tokens).
+-- So a PII leaf string that is not also a key or public leaf of the same
+-- value never appears in its serialized form.
+mutual
+theorem exported_texts_public (fp : String → Nat) :
+    ∀ (v : Val) (t : String), Tok.text t ∈ exportVal fp v → t ∈ valTexts v
+  | .leaf l s, t, h => by
+    simp only [exportVal, List.mem_singleton] at h
+    exact leaf_tok_text fp l s t h.symm
+  | .num _, _, h => by simp [exportVal] at h
+  | .slice xs, t, h => by
+    have h' : Tok.text t ∈ exportVals fp xs := by simpa [exportVal] using h
+    simpa [valTexts] using exported_vals_texts_public fp xs t h'
+  | .map fs, t, h => by
+    have h' : Tok.text t ∈ exportFields fp fs := by simpa [exportVal] using h
+    simpa [valTexts] using exported_fields_texts_public fp fs t h'
+theorem exported_vals_texts_public (fp : String → Nat) :
+    ∀ (xs : Vals) (t : String), Tok.text t ∈ exportVals fp xs → t ∈ valsTexts xs
+  | .nil, _, h => by simp [exportVals] at h
+  | .cons v rest, t, h => by
+    simp only [exportVals, List.mem_append] at h
+    simp only [valsTexts, List.mem_append]
+    rcases h with h | h
+    · exact Or.inl (exported_texts_public fp v t h)
+    · exact Or.inr (exported_vals_texts_public fp rest t h)
+theorem exported_fields_texts_public (fp : String → Nat) :
+    ∀ (fs : Fields) (t : String), Tok.text t ∈ exportFields fp fs → t ∈ fieldsTexts fs
+  | .nil, _, h => by simp [exportFields] at h
+  | .cons k v rest, t, h => by
+    simp only [exportFields, List.mem_cons, List.mem_append, Tok.text.injEq] at h
+    simp only [fieldsTexts, List.mem_cons, List.mem_append]
+    rcases h with h | h | h
+    · exact Or.inl h
+    · exact Or.inr (Or.inl (exported_texts_public fp v t h))
+    · exact Or.inr (Or.inr (exported_fields_texts_public fp rest t h))
+end
+
 end Vesper.BeaconRedaction
 
 #print axioms Vesper.BeaconRedaction.export_attr_noninterference
@@ -300,3 +489,6 @@ end Vesper.BeaconRedaction
 #print axioms Vesper.BeaconRedaction.stream_noninterference
 #print axioms Vesper.BeaconRedaction.emitted_strings_exported
 #print axioms Vesper.BeaconRedaction.pii_never_emitted
+#print axioms Vesper.BeaconRedaction.export_val_noninterference
+#print axioms Vesper.BeaconRedaction.struct_attrs_noninterference
+#print axioms Vesper.BeaconRedaction.exported_texts_public
