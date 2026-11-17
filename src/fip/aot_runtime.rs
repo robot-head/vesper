@@ -4,10 +4,46 @@
 //! `Box::new`, reclaims an unpacked/dropped `Box[T]`, or calls a
 //! `Box::new_in_caller` `@fip` function from non-`@fip` code; pure `@fip`
 //! libraries never reference `vesper_box_alloc` or `vesper_box_free`.
+//!
+//! [`LIVE_COUNTER`] counts live boxes, so that leak tests of export ABI v2
+//! libraries can see allocations a Rust allocator never sees (#898).
 
-use cranelift_codegen::ir::{AbiParam, InstBuilder, condcodes::IntCC, types};
+use cranelift_codegen::ir::{
+    AbiParam, AtomicRmwOp, InstBuilder, MemFlags, condcodes::IntCC, types,
+};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use cranelift_module::{FuncId, Linkage, Module};
+use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
+
+/// The local data word holding the number of live boxes.
+pub(crate) const LIVE_COUNTER: &str = "vesper_box_live";
+
+fn live_counter<M: Module>(m: &mut M) -> Result<DataId, String> {
+    let e = |err: cranelift_module::ModuleError| err.to_string();
+    if let Some(cranelift_module::FuncOrDataId::Data(id)) = m.get_name(LIVE_COUNTER) {
+        return Ok(id);
+    }
+    let id = m
+        .declare_data(LIVE_COUNTER, Linkage::Local, true, false)
+        .map_err(e)?;
+    let mut zero = DataDescription::new();
+    zero.define_zeroinit(8);
+    zero.set_align(8);
+    m.define_data(id, &zero).map_err(e)?;
+    Ok(id)
+}
+
+fn count<M: Module>(b: &mut FunctionBuilder, m: &mut M, live: DataId, delta: i64) {
+    let data = m.declare_data_in_func(live, b.func);
+    let address = b.ins().symbol_value(types::I64, data);
+    let delta = b.ins().iconst(types::I64, delta);
+    b.ins().atomic_rmw(
+        types::I64,
+        MemFlags::trusted(),
+        AtomicRmwOp::Add,
+        address,
+        delta,
+    );
+}
 
 pub fn declare_or_define<M: Module>(m: &mut M) -> Result<FuncId, String> {
     let e = |err: cranelift_module::ModuleError| err.to_string();
@@ -20,6 +56,7 @@ pub fn declare_or_define<M: Module>(m: &mut M) -> Result<FuncId, String> {
     if m.target_config().pointer_type() != types::I64 {
         return Err("Box[T] AOT runtime requires a 64-bit target".into());
     }
+    let live = live_counter(m)?;
     let mut calloc_sig = m.make_signature();
     calloc_sig.params.push(AbiParam::new(types::I64));
     calloc_sig.params.push(AbiParam::new(types::I64));
@@ -28,8 +65,11 @@ pub fn declare_or_define<M: Module>(m: &mut M) -> Result<FuncId, String> {
         .declare_function("calloc", Linkage::Import, &calloc_sig)
         .map_err(e)?;
 
+    // `exit` is declared with a word argument, as the sequence, region and
+    // tiled runtimes declare it, so a module that links several runtimes
+    // (an export ABI v2 library) declares one signature.
     let mut abort_sig = m.make_signature();
-    abort_sig.params.push(AbiParam::new(types::I32));
+    abort_sig.params.push(AbiParam::new(types::I64));
     let exit_fn = m
         .declare_function("exit", Linkage::Import, &abort_sig)
         .map_err(e)?;
@@ -64,12 +104,13 @@ pub fn declare_or_define<M: Module>(m: &mut M) -> Result<FuncId, String> {
 
         b.switch_to_block(oom);
         let exit_ref = m.declare_func_in_func(exit_fn, b.func);
-        let status = b.ins().iconst(types::I32, 72);
+        let status = b.ins().iconst(types::I64, 72);
         b.ins().call(exit_ref, &[status]);
         b.ins()
             .trap(cranelift_codegen::ir::TrapCode::unwrap_user(72));
 
         b.switch_to_block(ok);
+        count(&mut b, m, live, 1);
         b.ins().return_(&[ptr]);
         b.seal_all_blocks();
         b.finalize();
@@ -90,6 +131,7 @@ pub fn declare_or_define_free<M: Module>(m: &mut M) -> Result<FuncId, String> {
     if m.target_config().pointer_type() != types::I64 {
         return Err("Box[T] AOT runtime requires a 64-bit target".into());
     }
+    let live = live_counter(m)?;
     let mut free_sig = m.make_signature();
     free_sig.params.push(AbiParam::new(types::I64));
     let libc_free = m
@@ -117,6 +159,7 @@ pub fn declare_or_define_free<M: Module>(m: &mut M) -> Result<FuncId, String> {
         b.switch_to_block(do_free);
         let free_ref = m.declare_func_in_func(libc_free, b.func);
         b.ins().call(free_ref, &[ptr]);
+        count(&mut b, m, live, -1);
         b.ins().jump(done, &[]);
 
         b.switch_to_block(done);
