@@ -16,6 +16,7 @@ fn dep(effects: &[&str]) -> Dependency {
         effects: caps(effects),
         optional: false,
         features: BTreeSet::new(),
+        path: None,
     }
 }
 fn selected(manifest: Manifest) -> Selection {

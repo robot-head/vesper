@@ -1,0 +1,23 @@
+// Module `shapes::area` of @demo/geometry.
+use self::util::abs;
+
+pub copy enum Shape {
+    Square(i64),
+    Rect(i64, i64)
+}
+
+pub fn area(shape: Shape) -> i64 {
+    match shape {
+        Shape::Square(side) => wrapping_mul(side, side),
+        Rect(w, h) => abs(wrapping_mul(w, h)),
+    }
+}
+
+pub fn checked_side(side: i64) -> Shape eff [Fail[RuntimeError]] {
+    if side < 0 {
+        let r: Result[Shape, RuntimeError] = Err(RuntimeError::IndexOutOfBounds);
+        r?
+    } else {
+        Shape::Square(side)
+    }
+}

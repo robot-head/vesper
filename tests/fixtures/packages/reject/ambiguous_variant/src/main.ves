@@ -1,0 +1,10 @@
+use @demo/geometry::shapes::area::area;
+
+copy enum Tile {
+    Square(i64),
+    Blank
+}
+
+fn main() -> i64 {
+    0
+}

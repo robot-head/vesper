@@ -1,0 +1,6 @@
+// `use` needs a package: checking this file alone is E0110.
+use self::util::abs;
+
+fn main() -> i64 {
+    0
+}

@@ -1,0 +1,4 @@
+// Uses a root-module item without importing it.
+pub fn twice() -> i64 {
+    limit() * 2
+}

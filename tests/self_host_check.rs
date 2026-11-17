@@ -348,6 +348,11 @@ fn native_agrees() {
 fn walk(dir: &Path, paths: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
         let path = entry.unwrap().path();
+        // `use` imports (lane F0, #873; follow-up #880) are not in the self-hosted front end
+        // yet; package fixtures join this corpus once it parses them.
+        if path.ends_with("tests/fixtures/packages") {
+            continue;
+        }
         if path.is_dir() {
             walk(&path, paths)
         } else if path.extension().is_some_and(|e| e == "ves") {

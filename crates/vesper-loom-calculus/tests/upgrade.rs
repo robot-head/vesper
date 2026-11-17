@@ -40,6 +40,7 @@ fn dependency(package: &mut Selection, target: &str, capabilities: &[&str]) {
             effects: set(capabilities),
             optional: false,
             features: Default::default(),
+            path: None,
         },
     );
 }

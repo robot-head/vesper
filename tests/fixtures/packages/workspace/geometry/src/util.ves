@@ -1,0 +1,13 @@
+// Module `util` of @demo/geometry.
+pub fn abs(v: i64) -> i64 {
+    if v < 0 {
+        wrapping_sub(0, v)
+    } else {
+        v
+    }
+}
+
+// Private to this file.
+fn helper() -> i64 {
+    1
+}

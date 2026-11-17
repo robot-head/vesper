@@ -119,6 +119,8 @@ pub fn elaborate(module: &Module, cx: &Context) -> Elaborated {
             items,
             model_uses: module.model_uses.clone(),
             trait_bounds: module.trait_bounds.clone(),
+            uses: module.uses.clone(),
+            public_items: module.public_items.clone(),
         },
         synthetic: l.synthetic,
         base,
