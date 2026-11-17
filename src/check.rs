@@ -19,6 +19,8 @@ mod tiled_rules;
 mod loop_rules;
 #[path = "seq/check.rs"]
 mod seq_rules;
+#[path = "strings/check.rs"]
+mod string_rules;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct World {
@@ -42,6 +44,9 @@ pub struct World {
     /// uses (`vesper.float.ieee754/1`); a user definition of the same name
     /// is not one.
     pub float_prelude: BTreeSet<String>,
+    /// Names of the string prelude functions this module received
+    /// (`String::push_char`, `Str::next_char`, ...; §13 strings).
+    pub string_prelude: BTreeSet<String>,
 }
 impl World {
     pub fn collect(module: &Module) -> (Self, Vec<Diagnostic>) {
@@ -68,6 +73,14 @@ impl World {
             crate::integer_widths::module_end(&secret_prelude)
                 .max(crate::integer_widths::module_end(&width_prelude)),
         );
+        // UTF-8 string operations used by the module (§13 strings).
+        let string_prelude = crate::strings::prelude(
+            module,
+            crate::integer_widths::module_end(&secret_prelude)
+                .max(crate::integer_widths::module_end(&width_prelude))
+                .max(crate::integer_widths::module_end(&float_prelude)),
+        );
+        w.string_prelude = crate::strings::prelude_function_names(&string_prelude);
         w.float_prelude = float_prelude
             .items
             .iter()
@@ -83,11 +96,12 @@ impl World {
             .chain(secret_prelude.items.iter())
             .chain(width_prelude.items.iter())
             .chain(float_prelude.items.iter())
+            .chain(string_prelude.items.iter())
             .enumerate()
         {
             match item {
                 Item::Adt(a) => {
-                    if matches!(a.name.as_str(), "Unit" | "Never" | "String") {
+                    if matches!(a.name.as_str(), "Unit" | "Never" | "String" | "Str") {
                         errors.push(Diagnostic::new(
                             "E0100",
                             format!("'{}' is a reserved builtin type", a.name),
@@ -235,7 +249,7 @@ impl World {
                     if crate::numeric::is_scalar_name(n) {
                         return Mode::Copy;
                     }
-                    if n == "String" {
+                    if n == crate::strings::STRING_TYPE || n == crate::strings::STR_TYPE {
                         return Mode::Affine;
                     }
                     // RegionBox[r, T] has the mode of T (§15.2).
@@ -297,6 +311,14 @@ impl World {
                         && (n == crate::seq::CHUNK_SEQ_TYPE || n == crate::seq::SLICE_TYPE) =>
                 {
                     crate::seq::slice_of(args.first()?.clone())
+                }
+                // A view loan `s[a..b]` or `s.as_str()` of a string place.
+                Type::Named(n, args)
+                    if crate::seq::is_segment(name)
+                        && args.is_empty()
+                        && (n == crate::strings::STRING_TYPE || n == crate::strings::STR_TYPE) =>
+                {
+                    Type::named(crate::strings::STR_TYPE)
                 }
                 Type::Named(n, args) if n == crate::tiled::TILED_SEQ_TYPE => {
                     let Type::Named(elem_name, elem_args) = args.first()? else {
@@ -574,6 +596,7 @@ pub(crate) fn check_core(
     if traits.is_none() {
         // Slice placement is independent of every other judgment.
         diagnostics.extend(crate::seq::check_world(&world));
+        diagnostics.extend(crate::strings::check_world(&world));
     }
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::regions::check_world(&world));
@@ -770,6 +793,7 @@ impl Checker<'_> {
                     .or_else(|| {
                         if crate::numeric::is_scalar_name(n)
                             || n == "String"
+                            || n == crate::strings::STR_TYPE
                             || g.iter().any(|p| &p.name == n && !p.row)
                         {
                             Some(0)
@@ -787,6 +811,7 @@ impl Checker<'_> {
                     }
                 } else if !crate::numeric::is_scalar_name(n)
                     && n != "String"
+                    && n != crate::strings::STR_TYPE
                     && !g.iter().any(|p| &p.name == n)
                 {
                     self.error("E0101", format!("unknown type '{n}'"), span.clone());
@@ -1340,6 +1365,7 @@ impl Checker<'_> {
                         })
                 }
             }
+            ExprKind::Index(..) if let Some(t) = self.string_interval(e, env) => t,
             ExprKind::Index(base, index) if self.seq_index_applies(e, base, env) => self
                 .seq_index(e, base, index, env, usage)
                 .unwrap_or(Type::Infer),
@@ -1509,6 +1535,12 @@ impl Checker<'_> {
                     }
                     t
                 }
+            }
+            ExprKind::Binary(op, l, r)
+                if crate::strings::is_comparison(op)
+                    && (self.text_operand(l, env) || self.text_operand(r, env)) =>
+            {
+                self.string_comparison(l, r, env)
             }
             ExprKind::Binary(op, l, r) if crate::numeric::is_shift(op) => {
                 self.shift_expr(op, l, r, env, e.span.clone(), expected)
@@ -2210,10 +2242,17 @@ impl Checker<'_> {
             {
                 return t;
             }
+            if let Some(t) = self.string_method_call(base, method, types, args, env, span.clone()) {
+                return t;
+            }
             if let Some(t) = self.seq_method_call(base, method, types, args, env, span.clone()) {
                 return t;
             }
-            let t = self.peek_type(base, env);
+            let mut t = self.peek_type(base, env);
+            if t == Type::Infer && crate::check::Place::from_expr(base).is_none() {
+                // A literal or call receiver (`"a".concat(b)`).
+                t = self.receiver_type(base, env);
+            }
             let name = format!("{}::{method}", t.name());
             if let Some(f) = self.world.functions.get(&name) {
                 return self.apply(f, types, args, Some(base), env, span, expected);
@@ -2733,6 +2772,9 @@ impl Checker<'_> {
             } else {
                 if param.pass == Pass::Inout {
                     self.expr(expr, env, usage)
+                } else if crate::strings::is_str_type(&target) {
+                    // A String argument is coerced to its view below.
+                    self.expr(expr, env, usage)
                 } else {
                     self.expr_expected(expr, env, usage, &target)
                 }
@@ -2770,6 +2812,13 @@ impl Checker<'_> {
                 }
             } else {
                 actual = instantiate_latent_effects(&actual, &target);
+            }
+            // A String passes to an `in` Str parameter as its whole view.
+            if param.pass == Pass::In
+                && crate::strings::is_str_type(&target)
+                && crate::strings::is_string_type(&actual)
+            {
+                actual = target.clone();
             }
             infer(&param.ty, &actual, &f.generics, vars);
             for (row, fixed) in &fixed_rows {

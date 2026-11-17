@@ -1,0 +1,32 @@
+use self::score::{
+    best,
+    alike
+};
+use self::shapes::square::{
+    Square,
+    Pair,
+    square,
+    pair
+};
+
+fn main() -> i64 {
+    let x: i64 = 3;
+    let same = if alike(x, x) {
+        16
+    } else {
+        0
+    };
+    let s = wrapping_add(best(square(3), square(4)), wrapping_sub(same, 16));
+    let p = pair(square(2), square(5));
+    let side = p.larger().side;
+    let ones: Pair[i64] = pair(1, 9);
+    let plain = ones.larger();
+    let flipped = {
+        use model Descending;
+        ones.larger()
+    };
+    wrapping_add(
+        wrapping_add(wrapping_mul(s, 1000), wrapping_mul(side, 100)),
+        wrapping_add(wrapping_mul(plain, 10), flipped)
+    )
+}

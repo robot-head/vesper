@@ -1,0 +1,107 @@
+// @vesper-std/core::option: combinators over the builtin `Option[T]`.
+
+pub fn is_some[T: mod copy](o: Option[T]) -> bool {
+    match o {
+        Option::Some(_) => true,
+        Option::None => false,
+    }
+}
+
+pub fn is_none[T: mod copy](o: Option[T]) -> bool {
+    match o {
+        Option::Some(_) => false,
+        Option::None => true,
+    }
+}
+
+// The value, or `fallback` when there is none.
+pub fn unwrap_or[T: mod copy](o: Option[T], fallback: T) -> T {
+    match o {
+        Option::Some(x) => x,
+        Option::None => fallback,
+    }
+}
+
+// The value, or `f()` when there is none.
+pub fn unwrap_or_else[T: mod copy](o: Option[T], sink f: fn() -> T) -> T {
+    match o {
+        Option::Some(x) => x,
+        Option::None => f(),
+    }
+}
+
+// The value; raises `IndexOutOfBounds` when there is none.
+pub fn unwrap[T: mod copy](o: Option[T]) -> T eff [Fail[RuntimeError]] {
+    match o {
+        Option::Some(x) => x,
+        Option::None => {
+            let r: Result[T, RuntimeError] = Result::Err(RuntimeError::IndexOutOfBounds);
+            r?
+        },
+    }
+}
+
+pub fn map[T: mod copy, U: mod copy](o: Option[T], sink f: fn(T) -> U) -> Option[U] {
+    match o {
+        Option::Some(x) => Option::Some(f(x)),
+        Option::None => Option::None,
+    }
+}
+
+// `f(x)` for a value `x`, else `fallback`.
+pub fn map_or[T: mod copy, U: mod copy](o: Option[T], fallback: U, sink f: fn(T) -> U) -> U {
+    match o {
+        Option::Some(x) => f(x),
+        Option::None => fallback,
+    }
+}
+
+pub fn and_then[T: mod copy, U: mod copy](o: Option[T], sink f: fn(T) -> Option[U]) -> Option[U] {
+    match o {
+        Option::Some(x) => f(x),
+        Option::None => Option::None,
+    }
+}
+
+// `o` when it holds a value, else `other`.
+pub fn or[T: mod copy](o: Option[T], other: Option[T]) -> Option[T] {
+    match o {
+        Option::Some(x) => Option::Some(x),
+        Option::None => other,
+    }
+}
+
+// The value when `keep(value)` holds.
+pub fn filter[T: mod copy](o: Option[T], sink keep: fn(T) -> bool) -> Option[T] {
+    match o {
+        Option::Some(x) => {
+            if keep(x) {
+                Option::Some(x)
+            } else {
+                Option::None
+            }
+        },
+        Option::None => Option::None,
+    }
+}
+
+// Both values, when both are present.
+pub fn zip[T: mod copy, U: mod copy](a: Option[T], b: Option[U]) -> Option[(T, U)] {
+    match a {
+        Option::Some(x) => {
+            match b {
+                Option::Some(y) => Option::Some((x, y)),
+                Option::None => Option::None,
+            }
+        },
+        Option::None => Option::None,
+    }
+}
+
+// `Ok(value)`, or `Err(error)` when there is none.
+pub fn ok_or[T: mod copy, E: mod copy](o: Option[T], error: E) -> Result[T, E] {
+    match o {
+        Option::Some(x) => Result::Ok(x),
+        Option::None => Result::Err(error),
+    }
+}

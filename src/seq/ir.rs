@@ -60,7 +60,9 @@ impl Lower<'_> {
                             let mut operands: Vec<Argument> =
                                 vec![self.argument(base, pass, vec![])];
                             for a in args {
-                                let pass = if op == SeqOp::Extend {
+                                let pass = if op == SeqOp::Extend
+                                    || op == SeqOp::Str(crate::strings::StrOp::PushStr)
+                                {
                                     Pass::In
                                 } else {
                                     Pass::Sink

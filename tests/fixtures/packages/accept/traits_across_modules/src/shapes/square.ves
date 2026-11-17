@@ -1,0 +1,53 @@
+// A conformance in a third module, for a type declared here.
+pub copy struct Square {
+    side: i64
+}
+
+impl Score for Square {
+    fn score(in self) -> i64 {
+        wrapping_mul(self.side, self.side)
+    }
+}
+
+pub fn square(side: i64) -> Square {
+    Square {
+        side: side
+    }
+}
+
+// An opted-in builtin conformance and a bounded inherent impl.
+impl Ord for Square {}
+
+pub copy struct Pair[T] {
+    a: T,
+    b: T
+}
+
+impl [T: mod copy + Ord] Pair[T] {
+    pub fn larger(in self) -> T {
+        match self.a.cmp(self.b) {
+            Less => self.b,
+            _ => self.a,
+        }
+    }
+}
+
+pub fn pair[T: mod copy](a: T, b: T) -> Pair[T] {
+    Pair {
+        a: a,
+        b: b
+    }
+}
+
+// A named model, selected with `use model` in another module.
+model Descending: Ord for i64 {
+    fn cmp(in self, in other: i64) -> Ordering {
+        if self < other {
+            Greater
+        } else if self == other {
+            Equal
+        } else {
+            Less
+        }
+    }
+}

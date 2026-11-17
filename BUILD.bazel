@@ -87,6 +87,11 @@ vesper_crate(
         "test/lean4lean_reconstruction42": [":proof_packet_data"],
         "test/lean4lean_normalized_completion42": [":proof_packet_data"],
         "test/lean4lean_map_tree42": [":proof_packet_data"],
+        # @vesper-std (#897) replays the Strata conformance traces of #847.
+        "test/vesper_std": [
+            ":files",
+            "//crates/vesper-alloc:files",
+        ],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
         "test/self_host_front_end": glob([

@@ -78,9 +78,10 @@ fn layout_budget(world: &World, ty: &Type, depth: usize, nodes: &mut usize) -> R
                 layout_budget(world, t, depth + 1, nodes)?;
             }
         }
-        Type::Named(n, _) if n == "String" => {
+        // A string is three words `{len, cap, data}` (§13 strings).
+        Type::Named(n, _) if n == "String" || n == crate::strings::STR_TYPE => {
             *nodes = nodes
-                .checked_add(world.string_capacity.div_ceil(8) + 1)
+                .checked_add(3)
                 .ok_or("native layout budget overflow")?;
             if *nodes > 4096 {
                 return Err("native string layout expansion budget exceeded".into());

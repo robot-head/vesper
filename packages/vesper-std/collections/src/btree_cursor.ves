@@ -1,0 +1,223 @@
+// @vesper-std/collections::btree_cursor: ordered traversal of
+// `CacheBTree[K, V]` (the layout is described in `btree.ves`).
+use self::btree::{
+    CacheBTree,
+    BTreeCursor
+};
+
+fn none_id() -> u64 {
+    18446744073709551615
+}
+
+fn at[T: mod copy](in s: Slice[T], i: u64, fallback: T) -> T {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => fallback,
+    }
+}
+
+impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
+    // `c` moved forward past empty leaves to a real entry, or to the end.
+    fn settle(in self, c: BTreeCursor) -> BTreeCursor {
+        let mut leaf = c.leaf;
+        let mut pos = c.pos;
+        loop {
+            if leaf == none_id() {
+                break BTreeCursor {
+                    leaf: none_id(),
+                    pos: 0
+                };
+            }
+            if pos < self.leaf_count(leaf) {
+                break BTreeCursor {
+                    leaf: leaf,
+                    pos: pos
+                };
+            }
+            leaf = self.leaf_next(leaf);
+            pos = 0;
+        }
+    }
+
+    // The cursor at the smallest entry (the end when empty).
+    pub fn cursor_first(in self) -> BTreeCursor {
+        if self.root == none_id() {
+            return BTreeCursor {
+                leaf: none_id(),
+                pos: 0
+            };
+        }
+        let mut node = self.root;
+        let mut h = self.height;
+        loop {
+            if h == 0 {
+                break;
+            }
+            node = self.kid(node, 0);
+            h = wrapping_sub(h, 1);
+        }
+        self
+            .settle(
+            BTreeCursor {
+                leaf: node,
+                pos: 0
+            }
+        )
+    }
+
+    // The cursor at the first entry whose key is not below `k`.
+    pub fn lower_bound(in self, k: K) -> BTreeCursor {
+        if self.root == none_id() {
+            return BTreeCursor {
+                leaf: none_id(),
+                pos: 0
+            };
+        }
+        let leaf = self.find_leaf(k);
+        self
+            .settle(
+            BTreeCursor {
+                leaf: leaf,
+                pos: self.leaf_pos(leaf, k)
+            }
+        )
+    }
+
+    // The entry at `c`, or `None` at the end.
+    pub fn entry(in self, c: BTreeCursor) -> Option[(K, V)] {
+        if c.leaf == none_id() {
+            return Option::None;
+        }
+        let i = wrapping_add(wrapping_mul(c.leaf, 16), c.pos);
+        match self.lkeys.try_get(i) {
+            Option::Some(k) => {
+                match self.lvals.try_get(i) {
+                    Option::Some(v) => Option::Some((k, v)),
+                    Option::None => Option::None,
+                }
+            },
+            Option::None => Option::None,
+        }
+    }
+
+    // The cursor after `c`.
+    pub fn advance(in self, c: BTreeCursor) -> BTreeCursor {
+        if c.leaf == none_id() {
+            return c;
+        }
+        self
+            .settle(
+            BTreeCursor {
+                leaf: c.leaf,
+                pos: wrapping_add(c.pos, 1)
+            }
+        )
+    }
+
+    // The smallest entry.
+    pub fn first(in self) -> Option[(K, V)] {
+        self.entry(self.cursor_first())
+    }
+
+    // The largest entry.
+    pub fn last(in self) -> Option[(K, V)] {
+        if self.root == none_id() {
+            return Option::None;
+        }
+        let mut node = self.root;
+        let mut h = self.height;
+        loop {
+            if h == 0 {
+                break;
+            }
+            node = self.kid(node, at(in self.icount.as_slice(), node, 0));
+            h = wrapping_sub(h, 1);
+        }
+        loop {
+            if node == none_id() {
+                break Option::None;
+            }
+            let n = self.leaf_count(node);
+            if n > 0 {
+                break self
+                    .entry(
+                    BTreeCursor {
+                        leaf: node,
+                        pos: wrapping_sub(n, 1)
+                    }
+                );
+            }
+            node = self.leaf_prev(node);
+        }
+    }
+
+    // The entry of rank `i` in key order (0 is the smallest).
+    pub fn nth(in self, i: u64) -> Option[(K, V)] {
+        if i >= self.len {
+            return Option::None;
+        }
+        let mut c = self.cursor_first();
+        let mut left = i;
+        loop {
+            if c.leaf == none_id() {
+                break Option::None;
+            }
+            let n = self.leaf_count(c.leaf);
+            let room = wrapping_sub(n, c.pos);
+            if left < room {
+                break self
+                    .entry(
+                    BTreeCursor {
+                        leaf: c.leaf,
+                        pos: wrapping_add(c.pos, left)
+                    }
+                );
+            }
+            left = wrapping_sub(left, room);
+            c = self
+                .settle(
+                BTreeCursor {
+                    leaf: self.leaf_next(c.leaf),
+                    pos: 0
+                }
+            );
+        }
+    }
+
+    // Append up to `limit` entries with `lo <= key < hi`, ascending, to
+    // `keys` and `vals`; the number appended.
+    pub fn range_into(
+        in self,
+        lo: K,
+        hi: K,
+        limit: u64,
+        inout keys: ChunkSeq[K],
+        inout vals: ChunkSeq[V]
+    ) -> u64 {
+        let mut c = self.lower_bound(lo);
+        let mut n: u64 = 0;
+        loop {
+            if n >= limit {
+                break n;
+            }
+            match self.entry(c) {
+                Option::Some((k, v)) => {
+                    match k.cmp(hi) {
+                        Less => {
+                            keys.push(k);
+                            vals.push(v);
+                            n = wrapping_add(n, 1);
+                        },
+                        _ => {
+                            break n;
+                        },
+                    }
+                },
+                Option::None => {
+                    break n;
+                },
+            }
+            c = self.advance(c);
+        }
+    }
+}

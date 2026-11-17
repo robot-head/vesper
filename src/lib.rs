@@ -43,6 +43,7 @@ pub mod regions;
 pub mod runtime;
 pub mod seq;
 pub mod stack_bound;
+pub mod strings;
 pub mod tensor_types;
 pub mod tiled;
 pub mod tooling;

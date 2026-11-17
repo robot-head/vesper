@@ -1,0 +1,254 @@
+// @vesper-std/fmt: integer formatting into byte buffers and integer
+// parsing from byte slices. Output is ASCII, so it is valid UTF-8 and can
+// become a `String` once strings land (port P0 lane 7, #896).
+
+// Why a parse failed.
+pub copy enum ParseIntError {
+    EmptyInput,
+    InvalidDigit,
+    OutOfRange
+}
+
+// The ASCII digit for `d` (0..=35): `0`-`9`, then `a`-`z`.
+fn digit(d: u64) -> u8 {
+    if d < 10 {
+        wrapping_u8(wrapping_add(d, 48))
+    } else {
+        wrapping_u8(wrapping_add(d, 87))
+    }
+}
+
+// The value of an ASCII digit in `radix`, or `radix` when it is not one.
+fn digit_value(b: u8, radix: u64) -> u64 {
+    let c = widen_u64(b);
+    let v = if c >= 48 && c <= 57 {
+        wrapping_sub(c, 48)
+    } else if c >= 97 && c <= 122 {
+        wrapping_sub(c, 87)
+    } else if c >= 65 && c <= 90 {
+        wrapping_sub(c, 55)
+    } else {
+        radix
+    };
+    if v < radix {
+        v
+    } else {
+        radix
+    }
+}
+
+// `(v / d, v % d)`, and `(0, 0)` when `d` is 0.
+fn div_rem(v: u64, d: u64) -> (u64, u64) {
+    if d == 0 {
+        return (0, 0);
+    }
+    handle Fail[RuntimeError] in {
+        (v / d, v % d)
+    } with {
+        return q => q,
+        raise(e, k) => (0, 0),
+    }
+}
+
+// Reverse `out[from..]` in place.
+fn reverse_tail(inout out: ChunkSeq[u8], from: u64) {
+    let mut i = from;
+    let mut j = out.len();
+    loop {
+        if j <= i {
+            break;
+        }
+        j = wrapping_sub(j, 1);
+        if j <= i {
+            break;
+        }
+        let a = match out.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let b = match out.try_get(j) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        out.try_set(i, b);
+        out.try_set(j, a);
+        i = wrapping_add(i, 1);
+    }
+}
+
+// Append `x` in `radix` (2..=36; other radixes write nothing), with at
+// least `min_digits` digits (zero-padded).
+pub fn write_u64_radix(inout out: ChunkSeq[u8], x: u64, radix: u64, min_digits: u64) {
+    if radix < 2 || radix > 36 {
+        return;
+    }
+    let from = out.len();
+    let mut v = x;
+    let mut n: u64 = 0;
+    loop {
+        let (q, r) = div_rem(v, radix);
+        out.push(digit(r));
+        v = q;
+        n = wrapping_add(n, 1);
+        if v == 0 && n >= min_digits {
+            break;
+        }
+    }
+    reverse_tail(inout out, from);
+}
+
+// Append `x` in decimal.
+pub fn write_u64(inout out: ChunkSeq[u8], x: u64) {
+    write_u64_radix(inout out, x, 10, 1);
+}
+
+// Append `x` in decimal, with a leading `-` when negative.
+pub fn write_i64(inout out: ChunkSeq[u8], x: i64) {
+    if x < 0 {
+        out.push(45);
+        // Two's complement magnitude; exact for i64::MIN as well.
+        write_u64(inout out, wrapping_add(wrapping_u64(wrapping_sub(0, wrapping_add(x, 1))), 1));
+    } else {
+        write_u64(inout out, wrapping_u64(x));
+    }
+}
+
+// Append `x` as lowercase hexadecimal with at least `min_digits` digits.
+pub fn write_hex_u64(inout out: ChunkSeq[u8], x: u64, min_digits: u64) {
+    write_u64_radix(inout out, x, 16, min_digits);
+}
+
+// Append `true` or `false`.
+pub fn write_bool(inout out: ChunkSeq[u8], b: bool) {
+    if b {
+        out.push(116);
+        out.push(114);
+        out.push(117);
+        out.push(101);
+    } else {
+        out.push(102);
+        out.push(97);
+        out.push(108);
+        out.push(115);
+        out.push(101);
+    }
+}
+
+// Append the bytes of `s`.
+pub fn write_bytes(inout out: ChunkSeq[u8], in s: Slice[u8]) {
+    out.extend(in s);
+}
+
+// Parse all of `s` as an unsigned integer in `radix` (2..=36). Letters may
+// be either case. There is no sign, prefix or separator.
+pub fn parse_u64_radix(in s: Slice[u8], radix: u64) -> Result[u64, ParseIntError] {
+    if radix < 2 || radix > 36 {
+        return Result::Err(ParseIntError::InvalidDigit);
+    }
+    let n = s.len();
+    if n == 0 {
+        return Result::Err(ParseIntError::EmptyInput);
+    }
+    let (limit, _) = div_rem(18446744073709551615, radix);
+    let mut v: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break Result::Ok(v);
+        }
+        let b = match s.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let d = digit_value(b, radix);
+        if d >= radix {
+            break Result::Err(ParseIntError::InvalidDigit);
+        }
+        if v > limit {
+            break Result::Err(ParseIntError::OutOfRange);
+        }
+        let scaled = wrapping_mul(v, radix);
+        let next = wrapping_add(scaled, d);
+        if next < scaled {
+            break Result::Err(ParseIntError::OutOfRange);
+        }
+        v = next;
+        i = wrapping_add(i, 1);
+    }
+}
+
+// Parse all of `s` as a decimal `u64`.
+pub fn parse_u64(in s: Slice[u8]) -> Result[u64, ParseIntError] {
+    parse_u64_radix(in s, 10)
+}
+
+// Parse all of `s` as a decimal `i64` with an optional leading `-` or `+`.
+pub fn parse_i64(in s: Slice[u8]) -> Result[i64, ParseIntError] {
+    let n = s.len();
+    if n == 0 {
+        return Result::Err(ParseIntError::EmptyInput);
+    }
+    let first = match s.try_get(0) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    };
+    let negative = first == 45;
+    let signed = negative || first == 43;
+    if signed && n == 1 {
+        return Result::Err(ParseIntError::EmptyInput);
+    }
+    let start: u64 = if signed {
+        1
+    } else {
+        0
+    };
+    let mut v: u64 = 0;
+    let mut i = start;
+    let bound: u64 = if negative {
+        9223372036854775808
+    } else {
+        9223372036854775807
+    };
+    loop {
+        if i >= n {
+            break;
+        }
+        let b = match s.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let d = digit_value(b, 10);
+        if d >= 10 {
+            return Result::Err(ParseIntError::InvalidDigit);
+        }
+        if v > wrapping_sub(bound, d) / 10 {
+            return Result::Err(ParseIntError::OutOfRange);
+        }
+        v = wrapping_add(wrapping_mul(v, 10), d);
+        i = wrapping_add(i, 1);
+    }
+    if negative {
+        Result::Ok(wrapping_sub(0, wrapping_i64(v)))
+    } else {
+        Result::Ok(wrapping_i64(v))
+    }
+}
+
+// FNV-1a 64 over `s`: the deterministic byte hash the conformance traces
+// and `Hash` documentation use.
+pub fn fnv1a64(in s: Slice[u8]) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    let n = s.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break h;
+        }
+        let b = match s.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+        i = wrapping_add(i, 1);
+    }
+}

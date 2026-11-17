@@ -113,6 +113,17 @@ impl Generator<'_> {
     }
 
     fn seq_op(&mut self, op: SeqOp, es: &[&Expr], out: &mut Statements) -> Result<Term, String> {
+        if let SeqOp::Str(op) = op {
+            return Err(crate::strings::lean_refusal(op));
+        }
+        if op == SeqOp::SubSlice
+            && es
+                .first()
+                .and_then(|r| self.type_of(r))
+                .is_some_and(|t| crate::strings::is_text(&t))
+        {
+            return Err(crate::strings::lean_refusal(crate::strings::StrOp::SubStr));
+        }
         if matches!(op, SeqOp::SliceSet)
             || (op == SeqOp::TrySet
                 && es
@@ -203,7 +214,7 @@ impl Generator<'_> {
                 global(&["Array", "extract"]),
                 [at(0), nat(at(1)), nat(at(2))],
             ),
-            SeqOp::SliceSet => unreachable!("refused above"),
+            SeqOp::SliceSet | SeqOp::Str(_) => unreachable!("refused above"),
         })
     }
 }

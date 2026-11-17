@@ -1,0 +1,274 @@
+// @vesper-std/collections::btree_edit: insertion and removal for
+// `CacheBTree[K, V]` (the layout is described in `btree.ves`).
+use self::btree::CacheBTree;
+
+fn none_id() -> u64 {
+    18446744073709551615
+}
+
+fn at[T: mod copy](in s: Slice[T], i: u64, fallback: T) -> T {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => fallback,
+    }
+}
+
+impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
+    // A new empty leaf, padded with `k` and `v`.
+    fn new_leaf(inout self, k: K, v: V) -> u64 {
+        let id = self.lcount.len();
+        let mut i: u64 = 0;
+        loop {
+            if i >= 16 {
+                break;
+            }
+            self.lkeys.push(k);
+            self.lvals.push(v);
+            i = wrapping_add(i, 1);
+        }
+        self.lcount.push(0);
+        self.lnext.push(none_id());
+        self.lprev.push(none_id());
+        id
+    }
+
+    // A new empty internal node, padded with `k`.
+    fn new_internal(inout self, k: K) -> u64 {
+        let id = self.icount.len();
+        let mut i: u64 = 0;
+        loop {
+            if i >= 16 {
+                break;
+            }
+            self.ikeys.push(k);
+            self.ikids.push(none_id());
+            i = wrapping_add(i, 1);
+        }
+        self.ikids.push(none_id());
+        self.icount.push(0);
+        id
+    }
+
+    // Insert `(k, v)` at position `pos` of a leaf with room for it.
+    fn leaf_insert_at(inout self, leaf: u64, pos: u64, k: K, v: V) {
+        let base = wrapping_mul(leaf, 16);
+        let n = at(in self.lcount.as_slice(), leaf, 0);
+        let mut i = n;
+        loop {
+            if i <= pos {
+                break;
+            }
+            let from = wrapping_add(base, wrapping_sub(i, 1));
+            let to = wrapping_add(base, i);
+            let moved = at(in self.lkeys.as_slice(), from, k);
+            self.lkeys.try_set(to, moved);
+            let moved = at(in self.lvals.as_slice(), from, v);
+            self.lvals.try_set(to, moved);
+            i = wrapping_sub(i, 1);
+        }
+        self.lkeys.try_set(wrapping_add(base, pos), k);
+        self.lvals.try_set(wrapping_add(base, pos), v);
+        self.lcount.try_set(leaf, wrapping_add(n, 1));
+    }
+
+    // Insert or replace; the previous value for `k`, if any.
+    pub fn insert(inout self, k: K, v: V) -> Option[V] {
+        if self.root == none_id() {
+            let leaf = self.new_leaf(k, v);
+            self.leaf_insert_at(leaf, 0, k, v);
+            self.root = leaf;
+            self.height = 0;
+            self.len = 1;
+            return Option::None;
+        }
+        self.path.clear();
+        self.slots.clear();
+        let mut node = self.root;
+        let mut h = self.height;
+        loop {
+            if h == 0 {
+                break;
+            }
+            let slot = self.child_slot(node, k);
+            self.path.push(node);
+            self.slots.push(slot);
+            node = self.kid(node, slot);
+            h = wrapping_sub(h, 1);
+        }
+        let leaf = node;
+        let n = self.leaf_count(leaf);
+        let pos = self.leaf_pos(leaf, k);
+        let base = wrapping_mul(leaf, 16);
+        if pos < n {
+            let found = at(in self.lkeys.as_slice(), wrapping_add(base, pos), k);
+            match found.cmp(k) {
+                Equal => {
+                    let old = self.lvals.try_get(wrapping_add(base, pos));
+                    self.lvals.try_set(wrapping_add(base, pos), v);
+                    return old;
+                },
+                _ => {},
+            }
+        }
+        self.len = wrapping_add(self.len, 1);
+        if n < 16 {
+            self.leaf_insert_at(leaf, pos, k, v);
+            return Option::None;
+        }
+        // Split the full leaf: entries 8..16 move to a new right sibling.
+        let right = self.new_leaf(k, v);
+        let rbase = wrapping_mul(right, 16);
+        let mut i: u64 = 0;
+        loop {
+            if i >= 8 {
+                break;
+            }
+            let from = wrapping_add(base, wrapping_add(8, i));
+            let moved = at(in self.lkeys.as_slice(), from, k);
+            self.lkeys.try_set(wrapping_add(rbase, i), moved);
+            let moved = at(in self.lvals.as_slice(), from, v);
+            self.lvals.try_set(wrapping_add(rbase, i), moved);
+            i = wrapping_add(i, 1);
+        }
+        self.lcount.try_set(leaf, 8);
+        self.lcount.try_set(right, 8);
+        let next = self.leaf_next(leaf);
+        self.lnext.try_set(right, next);
+        self.lprev.try_set(right, leaf);
+        if next != none_id() {
+            self.lprev.try_set(next, right);
+        }
+        self.lnext.try_set(leaf, right);
+        if pos <= 8 {
+            self.leaf_insert_at(leaf, pos, k, v);
+        } else {
+            self.leaf_insert_at(right, wrapping_sub(pos, 8), k, v);
+        }
+        let sep = at(in self.lkeys.as_slice(), rbase, k);
+        self.insert_parent(sep, right);
+        Option::None
+    }
+
+    // After the child at `slots[depth]` of `path[depth]` split, insert the
+    // separator `sep` and the new right child, splitting upwards.
+    fn insert_parent(inout self, first_sep: K, first_child: u64) {
+        let mut sep = first_sep;
+        let mut child = first_child;
+        let mut depth = self.path.len();
+        loop {
+            if depth == 0 {
+                let top = self.new_internal(sep);
+                let tbase = wrapping_mul(top, 17);
+                let old = self.root;
+                self.ikids.try_set(tbase, old);
+                self.ikids.try_set(wrapping_add(tbase, 1), child);
+                self.ikeys.try_set(wrapping_mul(top, 16), sep);
+                self.icount.try_set(top, 1);
+                self.root = top;
+                self.height = wrapping_add(self.height, 1);
+                break;
+            }
+            depth = wrapping_sub(depth, 1);
+            let node = at(in self.path.as_slice(), depth, 0);
+            let slot = at(in self.slots.as_slice(), depth, 0);
+            let n = at(in self.icount.as_slice(), node, 0);
+            let kbase = wrapping_mul(node, 16);
+            let cbase = wrapping_mul(node, 17);
+            // The node's separators and children with the new pair spliced
+            // in at `slot`: `n + 1` separators and `n + 2` children.
+            self.split_keys.clear();
+            self.split_kids.clear();
+            let mut i: u64 = 0;
+            loop {
+                if i > n {
+                    break;
+                }
+                if i == slot {
+                    self.split_keys.push(sep);
+                }
+                if i < n {
+                    self.split_keys.push(at(in self.ikeys.as_slice(), wrapping_add(kbase, i), sep));
+                }
+                self.split_kids.push(at(in self.ikids.as_slice(), wrapping_add(cbase, i), child));
+                if i == slot {
+                    self.split_kids.push(child);
+                }
+                i = wrapping_add(i, 1);
+            }
+            if n < 16 {
+                self.write_internal(node, 0, wrapping_add(n, 1), sep, child);
+                break;
+            }
+            // 17 separators: 0..8 stay, 8 moves up, 9..17 go right.
+            let up = at(in self.split_keys.as_slice(), 8, sep);
+            let right = self.new_internal(sep);
+            self.write_internal(node, 0, 8, sep, child);
+            self.write_internal(right, 9, 8, sep, child);
+            sep = up;
+            child = right;
+        }
+    }
+
+    // Fill `node` with `count` separators from `split_keys[from..]` and
+    // `count + 1` children from `split_kids[from..]`.
+    fn write_internal(inout self, node: u64, from: u64, count: u64, kfill: K, cfill: u64) {
+        let kbase = wrapping_mul(node, 16);
+        let cbase = wrapping_mul(node, 17);
+        let mut i: u64 = 0;
+        loop {
+            if i > count {
+                break;
+            }
+            if i < count {
+                let k = at(in self.split_keys.as_slice(), wrapping_add(from, i), kfill);
+                self.ikeys.try_set(wrapping_add(kbase, i), k);
+            }
+            let c = at(in self.split_kids.as_slice(), wrapping_add(from, i), cfill);
+            self.ikids.try_set(wrapping_add(cbase, i), c);
+            i = wrapping_add(i, 1);
+        }
+        self.icount.try_set(node, count);
+    }
+
+    // Remove `k`; its value, if it was present.
+    pub fn remove(inout self, k: K) -> Option[V] {
+        if self.root == none_id() {
+            return Option::None;
+        }
+        let leaf = self.find_leaf(k);
+        let n = self.leaf_count(leaf);
+        let pos = self.leaf_pos(leaf, k);
+        if pos >= n {
+            return Option::None;
+        }
+        let base = wrapping_mul(leaf, 16);
+        let found = at(in self.lkeys.as_slice(), wrapping_add(base, pos), k);
+        match found.cmp(k) {
+            Equal => {},
+            _ => {
+                return Option::None;
+            },
+        }
+        let old = self.lvals.try_get(wrapping_add(base, pos));
+        let mut i = pos;
+        loop {
+            let next = wrapping_add(i, 1);
+            if next >= n {
+                break;
+            }
+            let from = wrapping_add(base, next);
+            let moved = at(in self.lkeys.as_slice(), from, k);
+            self.lkeys.try_set(wrapping_add(base, i), moved);
+            match self.lvals.try_get(from) {
+                Option::Some(x) => {
+                    self.lvals.try_set(wrapping_add(base, i), x);
+                },
+                Option::None => {},
+            }
+            i = next;
+        }
+        self.lcount.try_set(leaf, wrapping_sub(n, 1));
+        self.len = wrapping_sub(self.len, 1);
+        old
+    }
+}

@@ -1,0 +1,35 @@
+// A trait declared in one module; trait names are global.
+pub trait Score {
+    fn score(in self) -> i64;
+}
+
+// A bounded generic function used from another module.
+pub fn best[T: mod copy + Score](a: T, b: T) -> i64 {
+    let x = a.score();
+    let y = b.score();
+    if x > y {
+        x
+    } else {
+        y
+    }
+}
+
+// A module-level type named like a generic parameter: the bound
+// `Like[T]` below must still mean the parameter `T`.
+pub copy struct T {
+    v: i64
+}
+
+pub trait Like[U] {
+    fn like(in self, in u: U) -> bool;
+}
+
+impl Like[i64] for i64 {
+    fn like(in self, in u: i64) -> bool {
+        self == u
+    }
+}
+
+pub fn alike[T: mod copy + Like[T]](a: T, b: T) -> bool {
+    a.like(b)
+}

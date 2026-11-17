@@ -1,0 +1,11 @@
+[package]
+name = "@vesper-std/tests"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Fail", "Alloc"]
+
+[dependencies]
+"@vesper-std/core" = { version = "^0.1", path = "../core" }
+"@vesper-std/collections" = { version = "^0.1", path = "../collections" }
+"@vesper-std/fmt" = { version = "^0.1", path = "../fmt" }
+"@vesper-std/bytes" = { version = "^0.1", path = "../bytes" }

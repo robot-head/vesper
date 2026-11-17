@@ -110,15 +110,22 @@ fn dispatch(cmd: TraceCmd) -> Option<TraceReply> {
 }
 
 /// # Safety
-/// `ptr` must point to an 8-byte-aligned native `String` block `[len: u64, utf8...]`.
+/// `ptr` must point to an 8-byte-aligned native `String` value
+/// `{len: u64, cap: u64, data: *const u8}` (§13 strings).
 unsafe fn read_native_string(ptr: *const u8) -> Result<String, ()> {
     if ptr.is_null() {
         return Err(());
     }
-    // SAFETY: caller guarantees `ptr` points to a readable native `String` header.
-    let len = unsafe { *(ptr as *const u64) } as usize;
-    // SAFETY: caller guarantees `len` UTF-8 bytes follow the 8-byte length prefix.
-    let bytes = unsafe { std::slice::from_raw_parts(ptr.add(8), len) };
+    // SAFETY: caller guarantees `ptr` points to a readable native `String` value.
+    let (len, data) = unsafe { (*(ptr as *const u64) as usize, *(ptr as *const u64).add(2)) };
+    if len == 0 {
+        return Ok(String::new());
+    }
+    if data == 0 {
+        return Err(());
+    }
+    // SAFETY: caller guarantees `data` holds `len` readable UTF-8 bytes.
+    let bytes = unsafe { std::slice::from_raw_parts(data as *const u8, len) };
     std::str::from_utf8(bytes)
         .map(str::to_owned)
         .map_err(|_| ())
