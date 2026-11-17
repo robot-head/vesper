@@ -199,3 +199,17 @@ fn binding_declares_types_without_a_types_path() {
     assert!(text.contains("pub enum RatioError {"));
     assert!(text.contains("fn vesper_pilot_ratio(a: i64, b: i64, fail: *mut u64) -> i64;"));
 }
+
+#[test]
+fn visibility_is_read_from_tokens() {
+    // Comments between `pub` and `fn`, and `@fip pub fn`, still export.
+    let source = "pub/* API */fn one() -> i64 {\n    1\n}\n\n@fip\npub fn two() -> i64 {\n    2\n}\n\nfn hidden() -> i64 {\n    3\n}\n";
+    let library = compile_source("t.ves", source, &options(None)).expect("exports");
+    let names = library
+        .interface
+        .functions
+        .iter()
+        .map(|f| f.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["one", "two"]);
+}

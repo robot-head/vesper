@@ -194,18 +194,22 @@ pub struct LibraryInterface {
 
 /// Whether the declaration of `f` in `source` is `pub fn`. The AST does not
 /// record function visibility yet (P0 lane 1 adds it), so this reads the
-/// declaration's leading tokens, which start at `f.span`.
+/// declaration's leading non-trivia tokens, which start at `f.span`, the way
+/// the parser does: an optional `@fip`, then `pub`.
 fn is_public(source: &str, f: &Function) -> bool {
     let Some(text) = source.get(f.span.start..f.span.end) else {
         return false;
     };
-    let text = text.trim_start();
-    let text = text
-        .strip_prefix("@fip")
-        .map(str::trim_start)
-        .unwrap_or(text);
-    text.strip_prefix("pub")
-        .is_some_and(|rest| rest.starts_with(char::is_whitespace) || rest.starts_with('@'))
+    let (tokens, _) = crate::lexer::lex(text);
+    let mut words = tokens
+        .iter()
+        .filter(|t| !t.kind.trivia())
+        .map(|t| &text[t.span.start..t.span.end]);
+    let mut first = words.next();
+    if first == Some("@") && words.next() == Some("fip") {
+        first = words.next();
+    }
+    first == Some("pub")
 }
 
 fn valid_library_name(name: &str) -> bool {

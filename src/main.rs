@@ -322,6 +322,7 @@ fn cli() -> Result<(), String> {
             target.as_deref(),
             opt,
             json,
+            !verifiers.is_empty() || verifier_policy.is_some() || tee_measure || codegen.is_some(),
         );
     }
     match command.as_str() {

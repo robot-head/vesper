@@ -49,9 +49,16 @@ impl LibFlags {
         target: Option<&str>,
         optimize: bool,
         json: bool,
+        exclusive: bool,
     ) -> Result<(), String> {
         if command != "build" || !self.enabled {
             return Err("--lib-name, --interface and --rust-binding require build --lib".into());
+        }
+        if exclusive {
+            return Err(
+                "--verify, --verify-policy, --tee and --codegen do not apply to build --lib yet"
+                    .into(),
+            );
         }
         if self.rust_types.is_some() && self.rust_binding.is_none() {
             return Err("--rust-types requires --rust-binding".into());
