@@ -845,11 +845,12 @@ Closed by Milestone 12.
 
 - **Trap exits are copied.** AArch64 `cbz`/`b.cond` and RV64 `jal` reach
   only ±1 MiB, and every checked operation branches to a shared trap exit.
-  The emitter now places a fresh copy of the exits between functions once
-  256 KiB of code has passed since the last copy (`EXIT_SPACING`). The
+  The emitter now places a fresh copy of the exits after any function that
+  ends more than 256 KiB past the last copy (`EXIT_SPACING`). The
   assembler records every copy of a label (`Asm::bind_copy`) and resolves
-  each fixup to the nearest one, so a trap branch never travels more than
-  about 256 KiB plus the length of its own function.
+  each fixup to the nearest one. A function of `n` bytes then starts at
+  most 256 KiB past a copy and is followed by one if it ends further away,
+  so a trap branch in it travels at most `max(256 KiB, (256 KiB + n) / 2)`.
 - **RV64 far calls.** `M::Call` and the `_start` call are now
   `auipc ra, hi; jalr ra, lo(ra)` (`Fix::AuipcJalr`, with
   `hi = (rel + 0x800) >> 12` and `lo = rel - (hi << 12)`), which reach

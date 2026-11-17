@@ -351,8 +351,8 @@ pub struct Artifact {
     pub certificate: Result<certificate::Certificate, certificate::Rejection>,
 }
 
-/// Bytes of code after which the abort exits are repeated before the next
-/// function (see `Asm::bind_copy`).
+/// Bytes of code after which the abort exits are repeated after the
+/// current function (see `Asm::bind_copy`).
 const EXIT_SPACING: usize = 256 * 1024;
 
 /// Compile `entry` (no parameters) and everything it reaches.
@@ -458,15 +458,6 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
     }
     let mut machine_instructions = 0;
     for (_, rows) in &lir {
-        // AArch64 conditional branches and RV64 `jal` reach ±1 MiB: repeat
-        // the abort exits before a function far from the last copy.
-        if a.here() - a.last_exits() > EXIT_SPACING {
-            match options.target.arch {
-                Arch::X86_64 => {}
-                Arch::Aarch64 => aarch64::exits(&mut a, options.target.os),
-                Arch::Riscv64 => riscv64::exits(&mut a),
-            }
-        }
         for row in rows {
             for m in select(row) {
                 machine_instructions += 1;
@@ -481,6 +472,20 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
                     "more than {} bytes of code",
                     options.max_code_bytes
                 )));
+            }
+        }
+        // AArch64 conditional branches and RV64 `jal` reach ±1 MiB: repeat
+        // the abort exits after a function that ends far from the last
+        // copy. Every function then starts at most `EXIT_SPACING` past a
+        // copy and, if it ends further than that, is followed by one, so a
+        // trap branch in a function of `n` bytes travels at most
+        // `max(EXIT_SPACING, (EXIT_SPACING + n) / 2)`: under 1 MiB for any
+        // function the branches themselves can span.
+        if a.here() - a.last_exits() > EXIT_SPACING {
+            match options.target.arch {
+                Arch::X86_64 => {}
+                Arch::Aarch64 => aarch64::exits(&mut a, options.target.os),
+                Arch::Riscv64 => riscv64::exits(&mut a),
             }
         }
     }
