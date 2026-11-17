@@ -129,7 +129,7 @@ Evidence:
 - On this cloud host both runs report the same 22 stale fields against the
   committed lock (the Cranelift and verified digests of 10 programs, all but
   `lexer-byte-classes`). That is a host difference that `main` shows too, not
-  this change; on the GitHub runner the comparison is clean.
+  this change.
 
 ## What is left
 
