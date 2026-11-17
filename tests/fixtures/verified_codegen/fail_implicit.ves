@@ -1,0 +1,65 @@
+// Milestone 7: implicit ArithOverflow and RuntimeError (division by zero)
+// caught by handlers, directly and across calls. (An abortable effect may
+// not cross an active inout borrow, so failures never meet inout.)
+fn bump(x: u8) -> u8 eff [Fail[ArithOverflow]] {
+    x + 200
+}
+
+fn divide(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    a / b
+}
+
+fn guarded(x: u8) -> u8 {
+    handle Fail[ArithOverflow] in {
+        bump(x)
+    } with {
+        return v => v,
+        raise(_, _) => 0,
+    }
+}
+
+fn local(x: u64) -> u64 eff [Fail[ArithOverflow]] {
+    handle Fail[ArithOverflow] in {
+        x * x * x
+    } with {
+        return v => v + 1,
+        raise(_, _) => 7,
+    }
+}
+
+fn safe_div(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow]] {
+    handle Fail[RuntimeError] in {
+        divide(a, b)
+    } with {
+        return v => v,
+        raise(e, _) => match e {
+            RuntimeError::DivisionByZero => -2,
+            RuntimeError::IndexOutOfBounds => -3,
+        },
+    }
+}
+
+fn overflowing_div() -> i64 {
+    handle Fail[ArithOverflow] in {
+        safe_div(-9223372036854775807 - 1, -1)
+    } with {
+        return v => v,
+        raise(_, _) => -99,
+    }
+}
+
+fn main() -> (u8, u8, u64, u64, i64, i64, i64) {
+    handle Fail[ArithOverflow] in {
+        let a = guarded(10);
+        let b = guarded(100);
+        let c = local(1000);
+        let d = local(10000000);
+        let e = safe_div(84, 2);
+        let f = safe_div(1, 0);
+        let g = overflowing_div();
+        (a, b, c, d, e, f, g)
+    } with {
+        return v => v,
+        raise(_, _) => (0, 0, 0, 0, 0, 0, -100),
+    }
+}

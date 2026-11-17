@@ -33,6 +33,7 @@ fn refinement_helpers_and_operational_results_are_audited() {
         "CodegenValidation",
         "CodegenControlFlow",
         "CodegenFlowValidation",
+        "CodegenFailScope",
     ] {
         let source = std::fs::read_to_string(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("lean/{module}.lean")),
@@ -84,6 +85,7 @@ fn compiled_soundness_extensions_have_only_standard_axioms() {
         "CodegenValidation",
         "CodegenControlFlow",
         "CodegenFlowValidation",
+        "CodegenFailScope",
     ] {
         let source = std::fs::read_to_string(root.join(format!("lean/{module}.lean"))).unwrap();
         let path = dir.join(format!("{module}.lean"));

@@ -70,11 +70,45 @@
 //!
 //! # Rescaling
 //!
-//! If the last commit was made by a different worker count or different
-//! partition columns, the run first rescales: it restores every old worker,
-//! sums their input integrals, routes them to the new workers, recomputes
-//! every derived integral (gathering exchange inputs globally), checkpoints
-//! the new workers, and commits the rescaled global manifest with no outputs.
+//! Keys hash into [`BINS`] bins, and a layout assigns every bin an owner by
+//! rendezvous hashing, so going from `n` to `m` workers moves only the bins
+//! whose winner changes (about `|n - m| / max(n, m)` of them).
+//!
+//! If the last commit was made under a different layout or different
+//! partition columns, the run first rescales offline: it restores every old
+//! worker, sums their input integrals, routes them to the new workers,
+//! recomputes every derived integral (gathering exchange inputs globally),
+//! checkpoints the new workers, and commits the rescaled global manifest
+//! with no outputs.
+//!
+//! A live rescale ([`LiveRescale`]) happens after a barrier while the job
+//! runs, Megaphone-style, one bin at a time: once the barrier commits, every
+//! old owner sends each new owner the rows of the bins moving between them
+//! and drops them; a new owner adds them to the rows it keeps, rebuilds its
+//! derived integrals, checkpoints and reports; the coordinator commits the
+//! new layout with no outputs. Workers whose bins do not change switch
+//! layouts without waiting and the new manifest reuses their checkpoints.
+//! With `migration_bins_per_step` a rescale runs as several such steps at
+//! consecutive barriers, each moving a bounded number of bins (grouped by
+//! old and new owner, so a step disturbs few workers).
+//!
+//! A rescale can also be requested at run time ([`RescaleRequest`]). Workers
+//! read source epochs only up to a lease of two checkpoint intervals past
+//! the last commit they know of. The coordinator turns a request into a live
+//! rescale after the first barrier at or past the lease granted before its
+//! next commit and records the decision in that commit's global manifest,
+//! so no worker has read past the barrier under the old layout, and the
+//! decision survives a coordinator failover or a restart (a request waiting
+//! for its commit stays queued).
+//!
+//! A worker or coordinator fault inside a reconfiguration window (between
+//! the commit at the barrier and the commit of the new layout) is recovered
+//! partially, like any other: a replaced worker restores the commit at the
+//! barrier and rejoins the migration (its peers resend migrated bins from
+//! upstream backup, and receivers check that a resent part equals the
+//! original); a replaced coordinator announces the barrier again and workers
+//! that already migrated resend their reports. Only a whole-cluster crash in
+//! the window rescales offline.
 //!
 //! # Scope
 //!
@@ -91,14 +125,17 @@ use super::checkpoint::{CheckpointLimits, identity};
 use super::sink::{CommitRecord, CommitSink, MemorySink};
 use super::{Circuit, Executor, Op, Staged, TickInput, apply};
 use crate::{Error, Frontier, FrontierTicket, Limits, ZSet};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use vesper_loom_cas::{Domain, ObjectId, Store};
 use vesper_simpulse::{Journal, Simulator};
 
-const GLOBAL_MAGIC: &[u8; 8] = b"VFLUXGM2";
+const GLOBAL_MAGIC: &[u8; 8] = b"VFLUXGM3";
 const CHANNEL_MAGIC: &[u8; 8] = b"VFLUXCH1";
 const BLOB_VERSION: u16 = 1;
 const MAX_WORKERS: usize = 64;
+/// Runtime rescale decisions one global manifest may record.
+const MAX_DECISIONS: usize = 4096;
 
 /// How workers take their part of a checkpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,12 +168,23 @@ pub struct ClusterConfig {
     /// Parallelism changes made while the job runs, in increasing epoch
     /// order. `workers` is the parallelism before the first of them.
     pub live_rescales: Vec<LiveRescale>,
+    /// Key bins a live rescale moves per reconfiguration step. `0` moves
+    /// every bin that changes owner at once; otherwise a rescale runs as a
+    /// sequence of steps at consecutive barriers (Megaphone-style gradual
+    /// migration), each moving at most this many bins.
+    pub migration_bins_per_step: usize,
+    /// Rescales requested while the job runs (an operator's request arriving
+    /// at a scheduler step). The coordinator turns each into a live rescale
+    /// at the first barrier no worker may have read past (see the module
+    /// docs on leases) and records the decision in the next commit.
+    pub rescale_requests: Vec<RescaleRequest>,
 }
 
 /// Change the number of workers after a barrier epoch without stopping the
 /// job: from `after_epoch + 1` on, `workers` workers run it. The keyed state
-/// moves between running workers as messages; nothing is restored from
-/// storage unless a fault hits the reconfiguration (see the module docs).
+/// moves between running workers as messages, one key bin at a time; nothing
+/// is restored from storage unless a fault hits the reconfiguration (see the
+/// module docs).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LiveRescale {
     /// A barrier epoch: `(after_epoch + 1) % checkpoint_interval == 0`.
@@ -144,6 +192,161 @@ pub struct LiveRescale {
     /// 1..=64 workers.
     pub workers: usize,
 }
+
+/// A rescale an operator asks for while the job runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RescaleRequest {
+    /// Scheduler step at which the request reaches the cluster.
+    pub at_step: u64,
+    /// 1..=64 workers.
+    pub workers: usize,
+}
+
+/// Key bins: the unit of keyed-state ownership and migration. A key's bin is
+/// fixed; a layout assigns every bin an owner.
+pub const BINS: usize = 256;
+
+fn bin_of(key: i64) -> usize {
+    (mix(u64::from_le_bytes(key.to_le_bytes())) % BINS as u64) as usize
+}
+
+/// A bin-to-worker assignment and the number of workers that take part.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Layout {
+    workers: usize,
+    owner: [u8; BINS],
+}
+impl Layout {
+    /// Rendezvous (highest random weight) hashing over `n` workers: going
+    /// from `n` to `m` workers moves only the bins whose winner changes.
+    fn uniform(n: usize) -> Self {
+        let mut owner = [0u8; BINS];
+        for (bin, o) in owner.iter_mut().enumerate() {
+            let best = (0..n)
+                .max_by_key(|&w| mix(((bin as u64) << 8 | w as u64) ^ 0x6269_6e73))
+                .unwrap_or(0);
+            // n <= 64.
+            *o = best as u8;
+        }
+        Self { workers: n, owner }
+    }
+    fn route(&self, key: i64) -> usize {
+        usize::from(self.owner[bin_of(key)])
+    }
+    fn owner(&self, bin: usize) -> usize {
+        usize::from(self.owner[bin])
+    }
+}
+
+/// The layout generations of a run: generation `g + 1` starts after the
+/// barrier `steps[g].0`.
+#[derive(Clone, Debug)]
+struct Schedule {
+    initial: Layout,
+    steps: Vec<(u64, Layout)>,
+    /// One entry per rescale: the index of its first step and the step count.
+    rescales: Vec<(usize, usize)>,
+}
+impl Schedule {
+    fn new(workers: usize) -> Self {
+        Self {
+            initial: Layout::uniform(workers),
+            steps: Vec::new(),
+            rescales: Vec::new(),
+        }
+    }
+    fn last(&self) -> &Layout {
+        self.steps.last().map_or(&self.initial, |(_, l)| l)
+    }
+    /// Append a rescale to `m` workers after barrier `after`, split into
+    /// steps of at most `per_step` bins (0: one step) at barriers `interval`
+    /// apart.
+    fn push(&mut self, after: u64, m: usize, per_step: usize, interval: u64) -> Result<(), Error> {
+        if m == 0 || m > MAX_WORKERS {
+            return Err(Error::Limit("workers"));
+        }
+        let from = self.last().clone();
+        if self.steps.last().is_some_and(|(b, _)| *b >= after) || from.workers == m {
+            return Err(Error::Cluster("live rescale schedule"));
+        }
+        let target = Layout::uniform(m);
+        // Move one (old owner, new owner) pair's bins after another, so a
+        // step disturbs as few workers as possible.
+        let mut moved: Vec<usize> = (0..BINS)
+            .filter(|&b| from.owner[b] != target.owner[b])
+            .collect();
+        moved.sort_by_key(|&b| (from.owner[b], target.owner[b], b));
+        let chunk = if per_step == 0 {
+            moved.len().max(1)
+        } else {
+            per_step
+        };
+        let count = moved.len().div_ceil(chunk).max(1);
+        let first = self.steps.len();
+        let mut layout = from.clone();
+        layout.workers = from.workers.max(m);
+        for k in 0..count {
+            for &b in moved.iter().skip(k * chunk).take(chunk) {
+                layout.owner[b] = target.owner[b];
+            }
+            let at = (k as u64)
+                .checked_mul(interval)
+                .and_then(|d| after.checked_add(d))
+                .ok_or(Error::Overflow)?;
+            let step = if k + 1 == count {
+                target.clone()
+            } else {
+                layout.clone()
+            };
+            self.steps.push((at, step));
+        }
+        self.rescales.push((first, count));
+        Ok(())
+    }
+    /// Live rescale steps applied before `epoch` (the layout generation).
+    fn gen_at(&self, epoch: u64) -> usize {
+        self.steps.iter().take_while(|(b, _)| *b < epoch).count()
+    }
+    fn layout(&self, generation: usize) -> &Layout {
+        match generation {
+            0 => &self.initial,
+            g => &self.steps[g - 1].1,
+        }
+    }
+    fn layout_at(&self, epoch: u64) -> &Layout {
+        self.layout(self.gen_at(epoch))
+    }
+    fn n_at(&self, epoch: u64) -> usize {
+        self.layout_at(epoch).workers
+    }
+    fn max_workers(&self) -> usize {
+        self.steps
+            .iter()
+            .map(|(_, l)| l.workers)
+            .fold(self.initial.workers, usize::max)
+    }
+    /// The first epoch at or after `from` that worker `w` runs, if any.
+    fn activation(&self, w: usize, from: u64) -> Option<u64> {
+        if w < self.n_at(from) {
+            return Some(from);
+        }
+        self.steps
+            .iter()
+            .filter(|(b, l)| *b >= from && w < l.workers)
+            .map(|(b, _)| b + 1)
+            .next()
+    }
+    /// The rescale (index) and step number of generation `g`'s transition.
+    fn step_of(&self, step: usize) -> (usize, usize, usize) {
+        for (i, &(first, count)) in self.rescales.iter().enumerate() {
+            if (first..first + count).contains(&step) {
+                return (i, step - first, count);
+            }
+        }
+        (0, 0, 1)
+    }
+}
+
 impl ClusterConfig {
     pub fn new(workers: usize, partition_columns: Vec<usize>) -> Self {
         Self {
@@ -157,6 +360,8 @@ impl ClusterConfig {
             mode: CheckpointMode::Aligned,
             collect_garbage: true,
             live_rescales: Vec::new(),
+            migration_bins_per_step: 0,
+            rescale_requests: Vec::new(),
         }
     }
     /// Reject bad shapes and circuits that cannot be planned.
@@ -167,13 +372,18 @@ impl ClusterConfig {
         if self.checkpoint_interval == 0 || self.max_link_delay_ns == 0 || self.max_steps == 0 {
             return Err(Error::Cluster("configuration"));
         }
-        let mut previous: Option<u64> = None;
-        let mut layout = self.workers;
-        for r in &self.live_rescales {
-            if r.workers == layout {
-                return Err(Error::Cluster("live rescale schedule"));
+        for r in &self.rescale_requests {
+            if r.workers == 0 || r.workers > MAX_WORKERS {
+                return Err(Error::Limit("workers"));
             }
-            layout = r.workers;
+        }
+        self.schedule(&[])?;
+        circuit.plan(&self.partition_columns).map(|_| ())
+    }
+    /// The static schedule plus rescales decided at run time (`decided`).
+    fn schedule(&self, decided: &[(u64, usize)]) -> Result<Schedule, Error> {
+        let mut s = Schedule::new(self.workers);
+        for r in &self.live_rescales {
             if r.workers == 0 || r.workers > MAX_WORKERS {
                 return Err(Error::Limit("workers"));
             }
@@ -182,45 +392,33 @@ impl ClusterConfig {
                 .checked_add(1)
                 .ok_or(Error::Overflow)?
                 .is_multiple_of(self.checkpoint_interval);
-            if !barrier || previous.is_some_and(|p| r.after_epoch <= p) {
+            if !barrier {
                 return Err(Error::Cluster("live rescale schedule"));
             }
-            previous = Some(r.after_epoch);
+            s.push(
+                r.after_epoch,
+                r.workers,
+                self.migration_bins_per_step,
+                self.checkpoint_interval,
+            )?;
         }
-        circuit.plan(&self.partition_columns).map(|_| ())
+        for &(after, workers) in decided {
+            s.push(
+                after,
+                workers,
+                self.migration_bins_per_step,
+                self.checkpoint_interval,
+            )?;
+        }
+        Ok(s)
     }
-    /// Workers that run `epoch` under the live rescale schedule.
-    pub fn workers_at(&self, epoch: u64) -> usize {
-        self.live_rescales
-            .iter()
-            .rev()
-            .find(|r| r.after_epoch < epoch)
-            .map_or(self.workers, |r| r.workers)
-    }
-    /// Live rescales applied before `epoch` (the layout generation).
-    fn generation_at(&self, epoch: u64) -> usize {
-        self.live_rescales
-            .iter()
-            .filter(|r| r.after_epoch < epoch)
-            .count()
-    }
-    /// The largest worker count of the schedule.
-    fn max_workers(&self) -> usize {
-        self.live_rescales
+    /// Endpoints the run needs: every worker slot any layout can use.
+    fn max_workers(&self) -> Result<usize, Error> {
+        Ok(self
+            .rescale_requests
             .iter()
             .map(|r| r.workers)
-            .fold(self.workers, usize::max)
-    }
-    /// The first epoch at or after `from` that worker `w` runs, if any.
-    fn activation(&self, w: usize, from: u64) -> Option<u64> {
-        if w < self.workers_at(from) {
-            return Some(from);
-        }
-        self.live_rescales
-            .iter()
-            .filter(|r| r.after_epoch >= from && w < r.workers)
-            .map(|r| r.after_epoch + 1)
-            .next()
+            .fold(self.schedule(&[])?.max_workers(), usize::max))
     }
     /// Exchanges the planner inserts for this configuration.
     pub fn exchanges(&self, circuit: &Circuit) -> Result<usize, Error> {
@@ -339,18 +537,30 @@ pub struct Recovery {
     /// restores no worker state; it reports the commit it read.
     pub restored: Option<CommittedCheckpoint>,
     pub phase: CheckpointPhase,
-    /// A worker or coordinator fault during a live reconfiguration (between
-    /// the commit at its barrier and the commit of the new layout) is
-    /// handled as a whole-cluster recovery.
-    pub escalated: bool,
+    /// The fault hit a live reconfiguration (between the commit at its
+    /// barrier and the commit of the new layout). A worker or coordinator
+    /// fault there is still recovered partially: the replacement rejoins the
+    /// migration from the commit at the barrier.
+    pub in_reconfiguration: bool,
 }
 
 /// A live rescale performed during the run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LiveMigration {
     pub after_epoch: u64,
+    /// Workers taking part before and after this step.
     pub from_workers: usize,
     pub to_workers: usize,
+    /// Which live rescale (in schedule order, runtime decisions last) this
+    /// step belongs to, the step number within it and its step count.
+    pub rescale: usize,
+    pub step: usize,
+    pub steps_total: usize,
+    /// Key bins whose owner changed in this step.
+    pub bins_moved: usize,
+    /// Workers whose bins did not change: they kept running without
+    /// re-checkpointing, and the new layout reuses their checkpoints.
+    pub untouched: usize,
     /// Keyed rows (input and exchange integrals) that changed owner.
     pub rows_moved: usize,
     /// Keyed rows in total at the barrier.
@@ -397,9 +607,14 @@ pub struct ClusterRun {
     pub recoveries: Vec<Recovery>,
     pub committed: Vec<CommittedCheckpoint>,
     pub rescale: Option<Rescale>,
-    /// Live rescales completed in this run (not counting ones redone after
-    /// an escalated fault: those appear as offline `recovery_rescales`).
+    /// Live rescale steps completed in this run (not counting ones a
+    /// whole-cluster recovery redid offline: see `recovery_rescales`).
     pub migrations: Vec<LiveMigration>,
+    /// Runtime rescale requests turned into live rescales, as
+    /// `(after_epoch, workers)`, and requests dropped (no change, or no
+    /// barrier left).
+    pub decided_rescales: Vec<(u64, usize)>,
+    pub dropped_requests: usize,
     /// Offline rescales done by whole-cluster recoveries that restored a
     /// commit made under a layout the schedule had already left.
     pub recovery_rescales: usize,
@@ -431,20 +646,16 @@ fn mix(mut z: u64) -> u64 {
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
 }
-fn route(key: i64, workers: usize) -> usize {
-    // workers <= 64, so both conversions are exact.
-    (mix(u64::from_le_bytes(key.to_le_bytes())) % workers as u64) as usize
-}
 /// Split a canonical set by the owner of `row[col]`.
-fn split(set: &ZSet, col: usize, workers: usize) -> Vec<ZSet> {
-    let mut parts: Vec<ZSet> = (0..workers)
+fn split(set: &ZSet, col: usize, layout: &Layout) -> Vec<ZSet> {
+    let mut parts: Vec<ZSet> = (0..layout.workers)
         .map(|_| ZSet {
             width: set.width,
             rows: BTreeMap::new(),
         })
         .collect();
     for (row, w) in &set.rows {
-        parts[route(row[col], workers)].rows.insert(row.clone(), *w);
+        parts[layout.route(row[col])].rows.insert(row.clone(), *w);
     }
     parts
 }
@@ -490,8 +701,10 @@ enum Msg {
     Reconfigure {
         after_epoch: u64,
     },
-    /// Old worker `from` to new worker: its keyed integrals (inputs and
-    /// exchanges, in node order) whose keys the new layout gives the receiver.
+    /// Old owner `from` to new owner: the rows of its keyed integrals
+    /// (inputs and exchanges, in node order) in the bins the step moves from
+    /// `from` to the receiver. Kept in upstream backup until a later commit,
+    /// so a receiver replaced inside the window gets it again.
     Migrate {
         after_epoch: u64,
         from: usize,
@@ -510,6 +723,7 @@ impl Msg {
         match self {
             Msg::Data { epoch, .. } | Msg::Shuffle { epoch, .. } => *epoch,
             Msg::Barrier { after_epoch, .. } => *after_epoch,
+            Msg::Migrate { after_epoch, .. } => after_epoch.saturating_add(1),
             _ => u64::MAX,
         }
     }
@@ -598,10 +812,14 @@ struct Worker {
     known: Option<u64>,
     resend: Vec<usize>,
     ticket: Option<FrontierTicket>,
-    /// Live rescales applied to `exec`'s layout (see `ClusterConfig`).
+    /// Live rescale steps applied to `exec`'s layout (see `Schedule`).
     generation: usize,
-    /// Live rescale barriers whose reconfiguration notice arrived.
+    /// Live rescale barriers whose reconfiguration notice arrived (or are
+    /// implied: a worker restored inside a window rejoins it).
     reconfigure: BTreeSet<u64>,
+    /// The checkpoint this worker reported for the new layout at a barrier,
+    /// resent when a recovered coordinator announces the barrier again.
+    migrated: Option<(u64, ObjectId)>,
     /// Barrier whose keyed state this worker already sent out.
     migrated_out: Option<u64>,
     /// Migrated parts received, per barrier and old worker.
@@ -618,6 +836,8 @@ enum Pending {
         global: ObjectId,
         /// Workers of the layout the record names.
         workers: usize,
+        /// A runtime rescale this commit decides, as `(after_epoch, workers)`.
+        decision: Option<(u64, usize)>,
     },
     Committed {
         after: u64,
@@ -630,7 +850,7 @@ struct Coordinator {
     pending: Pending,
     committed: Option<CommitRecord>,
     resync: bool,
-    /// Checkpoints of the new layout during a live rescale.
+    /// Checkpoints of the new layout's changed workers during a live rescale.
     migrated: BTreeMap<usize, ObjectId>,
     /// Reconfiguration notices sent for this barrier (and at which step).
     reconfiguring: Option<(u64, u64)>,
@@ -665,6 +885,13 @@ struct Global {
     columns: Vec<usize>,
     after_epoch: u64,
     entries: Vec<(ObjectId, Option<ObjectId>)>,
+    layout: Layout,
+    /// Workers of the barrier epoch's layout, which sent the messages in the
+    /// entries' channel state (a new-layout manifest reuses untouched
+    /// workers' entries from the commit at the barrier).
+    channel_workers: usize,
+    /// Runtime rescale decisions committed so far.
+    decisions: Vec<(u64, usize)>,
 }
 
 /// One planned layout: the planned circuit, its fingerprint and node keys.
@@ -695,6 +922,16 @@ struct State<'a> {
     source: &'a dyn EpochSource,
     sink: &'a mut dyn CommitSink,
     cfg: &'a ClusterConfig,
+    sched: Schedule,
+    /// Runtime rescale decisions committed so far (in the global manifest).
+    decided: Vec<(u64, usize)>,
+    /// Operator requests that reached the cluster and await a decision. They
+    /// stay queued until a commit records the decision, so a coordinator
+    /// failover does not lose them.
+    requests: Vec<usize>,
+    dropped_requests: usize,
+    /// Layout of every global manifest this run wrote or read.
+    layouts: RefCell<BTreeMap<ObjectId, Layout>>,
     store: &'a Store,
     epochs: u64,
     workers: Vec<Worker>,
@@ -719,8 +956,9 @@ struct State<'a> {
     coord_id: usize,
     migrations: Vec<LiveMigration>,
     recovery_rescales: usize,
-    /// Keyed rows moved / in total during the current live rescale.
-    moving: (usize, usize),
+    /// Keyed rows moved / in total per (barrier, old worker) of the open
+    /// reconfiguration.
+    moving: BTreeMap<(u64, usize), (usize, usize)>,
 }
 
 fn timestamp(epoch: u64) -> Result<i64, Error> {
@@ -829,10 +1067,18 @@ fn remove_object(store: &Store, id: &ObjectId) -> Result<u64, Error> {
 impl State<'_> {
     /// Workers that run `epoch`.
     fn n_at(&self, epoch: u64) -> usize {
-        self.cfg.workers_at(epoch)
+        self.sched.n_at(epoch)
     }
     fn gen_at(&self, epoch: u64) -> usize {
-        self.cfg.generation_at(epoch)
+        self.sched.gen_at(epoch)
+    }
+    /// The last epoch workers may read while `known` is the last commit they
+    /// know of. A runtime rescale decided at a commit takes effect after the
+    /// lease that was granted before that commit, so no worker has read past
+    /// its barrier under the old layout.
+    fn lease(&self, known: Option<u64>) -> u64 {
+        let span = self.cfg.checkpoint_interval.saturating_mul(2);
+        known.map_or(span - 1, |c| c.saturating_add(span))
     }
     /// Whether barrier `b` starts a live rescale inside this run.
     fn rescales_after(&self, b: u64) -> bool {
@@ -842,8 +1088,15 @@ impl State<'_> {
     /// still made under the old layout.
     fn in_reconfiguration(&self, record: Option<CommitRecord>) -> Option<u64> {
         let r = record?;
-        (self.rescales_after(r.after_epoch) && r.workers as usize == self.n_at(r.after_epoch))
-            .then_some(r.after_epoch)
+        let b = r.after_epoch;
+        if !self.rescales_after(b) {
+            return None;
+        }
+        let old = match self.layouts.borrow().get(&r.global) {
+            Some(l) => l == self.sched.layout_at(b),
+            None => r.workers as usize == self.n_at(b),
+        };
+        old.then_some(b)
     }
     /// Whether worker `w` holds valid state to run `epoch`.
     fn runs(&self, w: usize, epoch: u64) -> bool {
@@ -866,10 +1119,13 @@ impl State<'_> {
     fn write_global(
         &self,
         plan: &Plan,
-        workers: usize,
+        layout: &Layout,
         after_epoch: u64,
         entries: &[(ObjectId, Option<ObjectId>)],
+        channel_workers: usize,
+        decision: Option<(u64, usize)>,
     ) -> Result<ObjectId, Error> {
+        let workers = layout.workers;
         let mut b = Vec::new();
         b.extend_from_slice(GLOBAL_MAGIC);
         b.extend_from_slice(&BLOB_VERSION.to_le_bytes());
@@ -892,11 +1148,21 @@ impl State<'_> {
                 None => b.push(0),
             }
         }
-        Ok(self
+        b.extend_from_slice(&layout.owner);
+        put_u32(&mut b, channel_workers)?;
+        let decisions: Vec<_> = self.decided.iter().copied().chain(decision).collect();
+        put_u32(&mut b, decisions.len())?;
+        for (after, w) in decisions {
+            b.extend_from_slice(&after.to_le_bytes());
+            put_u32(&mut b, w)?;
+        }
+        let id = self
             .store
             .put_blob(Domain::Artifact, &b)
             .map_err(storage)?
-            .id)
+            .id;
+        self.layouts.borrow_mut().insert(id, layout.clone());
+        Ok(id)
     }
 
     fn read_global(&self, id: &ObjectId) -> Result<Global, Error> {
@@ -935,15 +1201,42 @@ impl State<'_> {
             };
             entries.push((m, ch));
         }
+        let mut owner = [0u8; BINS];
+        owner.copy_from_slice(r.take(BINS)?);
+        if owner.iter().any(|o| usize::from(*o) >= workers) {
+            return Err(Error::Checkpoint("global manifest bin owner"));
+        }
+        let channel_workers = r.usize32()?;
+        if channel_workers == 0 || channel_workers > MAX_WORKERS {
+            return Err(Error::Checkpoint("global manifest workers"));
+        }
+        let count = r.usize32()?;
+        if count > MAX_DECISIONS {
+            return Err(Error::Checkpoint("global manifest decisions"));
+        }
+        let mut decisions = Vec::with_capacity(count);
+        for _ in 0..count {
+            let after = r.u64()?;
+            let w = r.usize32()?;
+            if w == 0 || w > MAX_WORKERS {
+                return Err(Error::Checkpoint("global manifest decisions"));
+            }
+            decisions.push((after, w));
+        }
         if r.at != bytes.len() {
             return Err(Error::Checkpoint("trailing bytes"));
         }
+        let layout = Layout { workers, owner };
+        self.layouts.borrow_mut().insert(*id, layout.clone());
         Ok(Global {
             plan_fp,
             workers,
             columns,
             after_epoch,
             entries,
+            layout,
+            channel_workers,
+            decisions,
         })
     }
 
@@ -1105,9 +1398,12 @@ impl State<'_> {
                 if restored.ticks >= target {
                     return Err(Error::Checkpoint("worker checkpoint epoch"));
                 }
+                // Channel state holds messages of epochs up to the barrier,
+                // sent under the barrier's layout (a new-layout manifest
+                // reuses only untouched workers' entries from it).
                 let inboxes = self.read_channel(
                     plan,
-                    global.workers,
+                    global.channel_workers,
                     &ch,
                     w,
                     restored.ticks,
@@ -1150,10 +1446,7 @@ impl State<'_> {
                 _ => None,
             };
             if let Some(k) = key
-                && set
-                    .rows
-                    .keys()
-                    .any(|row| route(row[k], global.workers) != w)
+                && set.rows.keys().any(|row| global.layout.route(row[k]) != w)
             {
                 return Err(Error::Checkpoint("rows on the wrong worker"));
             }
@@ -1188,6 +1481,7 @@ impl State<'_> {
             reconfigure: BTreeSet::new(),
             migrated_out: None,
             migration_in: BTreeMap::new(),
+            migrated: None,
         })
     }
 
@@ -1196,7 +1490,7 @@ impl State<'_> {
     fn idle_worker(&mut self, w: usize, known: Option<u64>) -> Result<Worker, Error> {
         let exec = self.plan.circuit.clone().executor();
         let mut worker = self.fresh_worker(exec, DurableCheckpointer::new(), known)?;
-        match self.cfg.activation(w, next(known)?) {
+        match self.sched.activation(w, next(known)?) {
             Some(at) => {
                 worker.next_epoch = at;
                 worker.next_source = at;
@@ -1218,10 +1512,26 @@ impl State<'_> {
         // restore it, and the worker then takes part in the migration.
         let window = self.in_reconfiguration(record);
         let layout = match window {
-            Some(b) => self.n_at(b),
-            None => self.n_at(start),
+            Some(b) => self.sched.layout_at(b).clone(),
+            None => self.sched.layout_at(start).clone(),
         };
-        if w >= layout {
+        let mut worker = self.restore_slot(record, w, &layout, window)?;
+        // The commit at the barrier is durable, so the reconfiguration
+        // notice is implied: the replacement rejoins the migration.
+        if let Some(b) = window {
+            worker.reconfigure.insert(b);
+        }
+        Ok(worker)
+    }
+
+    fn restore_slot(
+        &mut self,
+        record: Option<CommitRecord>,
+        w: usize,
+        layout: &Layout,
+        window: Option<u64>,
+    ) -> Result<Worker, Error> {
+        if w >= layout.workers {
             return self.idle_worker(w, record.map(|r| r.after_epoch));
         }
         match record {
@@ -1232,7 +1542,7 @@ impl State<'_> {
             Some(r) => {
                 let global = self.read_global(&r.global)?;
                 if global.plan_fp != self.plan.fingerprint
-                    || global.workers != layout
+                    || global.layout != *layout
                     || global.after_epoch != r.after_epoch
                 {
                     return Err(Error::Checkpoint("global manifest layout"));
@@ -1394,10 +1704,8 @@ impl State<'_> {
             return Err(Error::Cluster("fault worker"));
         }
         let durable = self.sink.last_commit()?;
-        let escalated = kind != FaultKind::Cluster && self.in_reconfiguration(durable).is_some();
-        let restored = if escalated {
-            self.recover_cluster()?
-        } else {
+        let in_reconfiguration = self.in_reconfiguration(durable).is_some();
+        let restored = {
             match kind {
                 FaultKind::Cluster => self.recover_cluster()?,
                 FaultKind::Worker(w) => {
@@ -1429,7 +1737,7 @@ impl State<'_> {
             kind,
             restored: self.restored_checkpoint(restored),
             phase,
-            escalated,
+            in_reconfiguration,
         });
         Ok(())
     }
@@ -1447,8 +1755,9 @@ impl State<'_> {
         let mut moved = None;
         if let Some(r) = record {
             let global = self.read_global(&r.global)?;
-            if global.workers != self.n_at(start) {
-                let (m, _) = rescale_from(self, self.base, &r, &global, self.n_at(start))?;
+            let target = self.sched.layout_at(start).clone();
+            if global.layout != target {
+                let (m, _) = rescale_from(self, self.base, &r, &global, &target)?;
                 self.recovery_rescales += 1;
                 record = self.sink.last_commit()?;
                 moved = Some(m);
@@ -1502,11 +1811,12 @@ impl State<'_> {
     // Workers
     // ------------------------------------------------------------------
 
-    /// Send from worker `w`, keeping data, shuffles and barriers for replay.
+    /// Send from worker `w`, keeping data, shuffles, barriers and migrated
+    /// bins for replay.
     fn send(&mut self, now: u64, w: usize, to: usize, msg: Msg) -> Result<(), Error> {
         if matches!(
             msg,
-            Msg::Data { .. } | Msg::Shuffle { .. } | Msg::Barrier { .. }
+            Msg::Data { .. } | Msg::Shuffle { .. } | Msg::Barrier { .. } | Msg::Migrate { .. }
         ) {
             self.workers[w].sent.push((to, msg.clone()));
         }
@@ -1561,8 +1871,8 @@ impl State<'_> {
     }
 
     fn deliver(&mut self, w: usize, now: u64, msg: Msg) -> Result<bool, Error> {
-        let cfg = self.cfg;
-        let n_at = |e: u64| cfg.workers_at(e);
+        let sched = &self.sched;
+        let n_at = |e: u64| sched.n_at(e);
         let worker = &mut self.workers[w];
         match msg {
             Msg::Data {
@@ -1655,6 +1965,28 @@ impl State<'_> {
                 Ok(true)
             }
             Msg::Reconfigure { after_epoch } => {
+                let next = after_epoch.checked_add(1).ok_or(Error::Overflow)?;
+                if worker.generation >= sched.gen_at(next) {
+                    // Already migrated: a recovered coordinator lost the
+                    // report, so send it again.
+                    if let Some((b, manifest)) = worker.migrated
+                        && b == after_epoch
+                    {
+                        let coordinator = self.coord_id;
+                        self.net.send(
+                            now,
+                            w,
+                            coordinator,
+                            Msg::Migrated {
+                                after_epoch,
+                                worker: w,
+                                manifest,
+                            },
+                        )?;
+                        return Ok(true);
+                    }
+                    return Ok(false);
+                }
                 worker.reconfigure.insert(after_epoch);
                 Ok(false)
             }
@@ -1667,13 +1999,18 @@ impl State<'_> {
                 if from >= n_at(after_epoch) || w >= n_at(next) {
                     return Err(Error::Cluster("malformed migration"));
                 }
-                if worker.generation >= cfg.generation_at(next) {
+                if worker.generation >= sched.gen_at(next) {
                     self.duplicates += 1;
                     return Ok(false);
                 }
                 let got = worker.migration_in.entry(after_epoch).or_default();
-                if got.insert(from, parts).is_some() {
-                    return Err(Error::Cluster("duplicate migration"));
+                match got.get(&from) {
+                    // Resent from upstream backup after a fault.
+                    Some(old) if *old == parts => self.duplicates += 1,
+                    Some(_) => return Err(Error::Cluster("nondeterministic migration")),
+                    None => {
+                        got.insert(from, parts);
+                    }
                 }
                 Ok(false)
             }
@@ -1742,10 +2079,12 @@ impl State<'_> {
         let worker = &self.workers[w];
         if worker.next_source < self.epochs
             && worker.next_source <= worker.next_epoch.saturating_add(1)
+            && worker.next_source <= self.lease(worker.known)
             && w < self.n_at(worker.next_source)
         {
             let epoch = worker.next_source;
-            let n = self.n_at(epoch);
+            let layout = self.sched.layout_at(epoch).clone();
+            let n = layout.workers;
             let input = self.source.read(epoch)?;
             let c = &self.plan.circuit;
             if input.deltas.len() != c.inputs.len() {
@@ -1766,7 +2105,7 @@ impl State<'_> {
                 let col = self.plan.columns[slot];
                 for (i, (row, weight)) in delta.rows.iter().enumerate() {
                     if i % n == w {
-                        parts[route(row[col], n)][slot]
+                        parts[layout.route(row[col])][slot]
                             .rows
                             .insert(row.clone(), *weight);
                     }
@@ -1799,30 +2138,16 @@ impl State<'_> {
             }
             // A worker the next layout does not include stops reading
             // until a later rescale activates it again.
-            self.workers[w].next_source = self.cfg.activation(w, epoch + 1).unwrap_or(u64::MAX);
+            self.workers[w].next_source = self.sched.activation(w, epoch + 1).unwrap_or(u64::MAX);
             return Ok(true);
         }
         Ok(false)
     }
 
-    /// Live rescale at barrier `b`, once its commit is announced: an old
-    /// worker that processed `b` sends each new worker the rows of its keyed
-    /// integrals (inputs and exchanges) the new layout routes there; a new
-    /// worker that has every old worker's part rebuilds its derived
-    /// integrals locally, checkpoints and reports to the coordinator, then
-    /// runs `b + 1`. Old workers the new layout drops retire.
-    fn try_migrate(&mut self, w: usize, now: u64) -> Result<bool, Error> {
-        let Some(&b) = self.workers[w].reconfigure.first() else {
-            return Ok(false);
-        };
-        let after = b.checked_add(1).ok_or(Error::Overflow)?;
-        if self.workers[w].generation >= self.gen_at(after) {
-            self.workers[w].reconfigure.remove(&b);
-            return Ok(true);
-        }
-        let (old_n, new_n) = (self.n_at(b), self.n_at(after));
-        let c = &self.plan.circuit;
-        let keyed: Vec<(usize, usize)> = c
+    /// Keyed nodes of the planned circuit and their key columns.
+    fn keyed(&self) -> Vec<(usize, usize)> {
+        self.plan
+            .circuit
             .nodes
             .iter()
             .enumerate()
@@ -1831,29 +2156,102 @@ impl State<'_> {
                 Op::Exchange { key, .. } => Some((i, key)),
                 _ => None,
             })
-            .collect();
+            .collect()
+    }
+
+    /// Whether worker `w`'s bins change in the step after generation `g`
+    /// (a worker outside either layout counts as changed when it is in one).
+    fn touched(&self, g: usize, w: usize) -> bool {
+        let (old, new) = (self.sched.layout(g), self.sched.layout(g + 1));
+        if w >= old.workers || w >= new.workers {
+            return true;
+        }
+        (0..BINS).any(|b| (old.owner(b) == w) != (new.owner(b) == w))
+    }
+
+    /// Per-bin live migration (Megaphone-style) for the step at barrier `b`
+    /// (generation `g` to `g + 1`).
+    ///
+    /// * A worker whose bins do not change switches layouts as soon as it has
+    ///   processed and snapshotted `b`: it moves nothing, writes no new
+    ///   checkpoint and never waits.
+    /// * Once the commit at `b` is announced, an old owner sends each new
+    ///   owner the rows of its keyed integrals (inputs and exchanges) in the
+    ///   bins that move between them, and drops them. A worker the new
+    ///   layout leaves out then retires.
+    /// * A new owner that has every part it gains keeps its own rows in the
+    ///   bins it keeps, adds the received ones, rebuilds its derived
+    ///   integrals locally, checkpoints and reports to the coordinator, then
+    ///   runs `b + 1`.
+    fn try_migrate(&mut self, w: usize, now: u64) -> Result<bool, Error> {
+        let g = self.workers[w].generation;
+        let Some(&(b, _)) = self.sched.steps.get(g) else {
+            return Ok(false);
+        };
+        if b >= self.last_epoch() {
+            return Ok(false);
+        }
+        let after = b.checked_add(1).ok_or(Error::Overflow)?;
+        let old = self.sched.layout(g).clone();
+        let new = self.sched.layout(g + 1).clone();
+        let holds = w < old.workers;
+        if !holds && w >= new.workers {
+            return Ok(false);
+        }
+        self.workers[w].reconfigure.retain(|x| *x >= b);
         let worker = &self.workers[w];
-        if w < old_n && worker.migrated_out != Some(b) {
-            if worker.next_epoch != after
-                || worker.staged.is_some()
-                || worker.generation != self.gen_at(b)
-            {
-                return Ok(false);
-            }
+        // An old worker takes part once it processed (and snapshotted) `b`.
+        let ready = !holds
+            || (worker.next_epoch == after
+                && worker.staged.is_none()
+                && worker.last_snapshot.is_some_and(|s| s >= b));
+        if !ready {
+            return Ok(false);
+        }
+        let keyed = self.keyed();
+        if !self.touched(g, w) {
+            let total = keyed
+                .iter()
+                .map(|&(node, _)| worker.exec.integrals()[node].len())
+                .sum();
+            self.moving.insert((b, w), (0, total));
+            self.workers[w].generation = g + 1;
+            return Ok(true);
+        }
+        if !worker.reconfigure.contains(&b) {
+            return Ok(false);
+        }
+        if holds && worker.migrated_out != Some(b) {
+            // Send the bins this worker loses, one message per new owner.
             let integrals = worker.exec.integrals();
-            let mut parts: Vec<Vec<ZSet>> = vec![Vec::with_capacity(keyed.len()); new_n];
+            let mut parts: Vec<Vec<ZSet>> = vec![Vec::with_capacity(keyed.len()); new.workers];
+            let (mut moved, mut total) = (0, 0);
             for &(node, key) in &keyed {
                 let set = &integrals[node];
-                self.moving.1 += set.len();
-                for (j, part) in split(set, key, new_n).into_iter().enumerate() {
-                    if j != w {
-                        self.moving.0 += part.len();
+                total += set.len();
+                for p in &mut parts {
+                    p.push(ZSet {
+                        width: set.width,
+                        rows: BTreeMap::new(),
+                    });
+                }
+                for (row, weight) in &set.rows {
+                    let dest = new.route(row[key]);
+                    if dest != w {
+                        moved += 1;
+                        let last = parts[dest].len() - 1;
+                        parts[dest][last].rows.insert(row.clone(), *weight);
                     }
-                    parts[j].push(part);
                 }
             }
+            self.moving.insert((b, w), (moved, total));
+            let gains_from =
+                |dest: usize| (0..BINS).any(|x| old.owner(x) == w && new.owner(x) == dest);
             for (dest, parts) in parts.into_iter().enumerate() {
-                self.net.send(
+                if dest == w || !gains_from(dest) {
+                    continue;
+                }
+                self.send(
                     now,
                     w,
                     dest,
@@ -1865,19 +2263,23 @@ impl State<'_> {
                 )?;
             }
             self.workers[w].migrated_out = Some(b);
-            if w >= new_n {
-                // Retire: everything this worker computed is in the commit at `b`.
-                // Keep what peers already sent for a later activation.
+            if w >= new.workers {
+                // Retire: everything this worker computed is in the commit at
+                // `b`. Keep what peers already sent for a later activation,
+                // and the migration parts for receivers replaced in the window.
                 let mut idle = self.idle_worker(w, Some(b))?;
-                let old = &mut self.workers[w];
-                idle.reconfigure = std::mem::take(&mut old.reconfigure);
+                let old_worker = &mut self.workers[w];
+                idle.reconfigure = std::mem::take(&mut old_worker.reconfigure);
                 idle.reconfigure.remove(&b);
-                idle.inbox = std::mem::take(&mut old.inbox);
+                idle.inbox = std::mem::take(&mut old_worker.inbox);
                 idle.inbox.retain(|e, _| *e > b);
-                idle.barriers = std::mem::take(&mut old.barriers);
+                idle.barriers = std::mem::take(&mut old_worker.barriers);
                 idle.barriers.retain(|e, _| *e > b);
-                idle.migration_in = std::mem::take(&mut old.migration_in);
+                idle.migration_in = std::mem::take(&mut old_worker.migration_in);
                 idle.migration_in.retain(|e, _| *e > b);
+                idle.sent = std::mem::take(&mut old_worker.sent);
+                idle.sent.retain(|(_, m)| m.epoch() > b);
+                idle.resend = std::mem::take(&mut old_worker.resend);
                 if let Some(t) = self.workers[w].ticket.take() {
                     self.frontier.retire(t).map_err(|e| e.error)?;
                 }
@@ -1885,37 +2287,56 @@ impl State<'_> {
             }
             return Ok(true);
         }
-        if w >= new_n {
+        if w >= new.workers {
             return Ok(false);
         }
-        if worker
-            .migration_in
-            .get(&b)
-            .is_none_or(|got| got.len() != old_n)
-            || worker.staged.is_some()
+        // Receive: every old owner of a bin this worker gains sends once.
+        let senders: BTreeSet<usize> = (0..BINS)
+            .filter(|&x| new.owner(x) == w && old.owner(x) != w)
+            .map(|x| old.owner(x))
+            .collect();
+        let got = self.workers[w].migration_in.get(&b);
+        if senders
+            .iter()
+            .any(|s| got.is_none_or(|got| !got.contains_key(s)))
         {
             return Ok(false);
         }
-        let got = self.workers[w]
-            .migration_in
-            .remove(&b)
-            .ok_or(Error::Cluster("migration"))?;
+        let got = self.workers[w].migration_in.remove(&b).unwrap_or_default();
+        let c = &self.plan.circuit;
         let lim = c.limits;
         let limits = self.cfg.checkpoint_limits;
         let mut budget = limits.budget(c);
+        let own = holds && self.workers[w].generation == g;
         let mut sums: Vec<ZSet> = Vec::with_capacity(keyed.len());
-        for (k, &(node, _)) in keyed.iter().enumerate() {
-            let mut sum = ZSet::empty(c.nodes[node].width, lim)?;
-            for parts in got.values() {
+        for (k, &(node, key)) in keyed.iter().enumerate() {
+            let mut sum = ZSet {
+                width: c.nodes[node].width,
+                rows: BTreeMap::new(),
+            };
+            if own {
+                for (row, weight) in &self.workers[w].exec.integrals()[node].rows {
+                    if new.route(row[key]) == w {
+                        sum.rows.insert(row.clone(), *weight);
+                    }
+                }
+            }
+            for (from, parts) in &got {
                 let part = parts.get(k).ok_or(Error::Cluster("malformed migration"))?;
-                if part.width != sum.width {
+                if part.width != sum.width
+                    || part.rows.keys().any(|row| {
+                        let x = bin_of(row[key]);
+                        old.owner(x) != *from || new.owner(x) != w
+                    })
+                {
                     return Err(Error::Cluster("malformed migration"));
                 }
                 sum = sum.plus(part, lim)?;
             }
             sums.push(sum);
         }
-        if got.values().any(|p| p.len() != keyed.len()) {
+        if got.values().any(|p| p.len() != keyed.len()) || got.keys().any(|f| !senders.contains(f))
+        {
             return Err(Error::Cluster("malformed migration"));
         }
         let mut sums = sums.into_iter();
@@ -1939,14 +2360,19 @@ impl State<'_> {
             Some(t) => t,
             None => self.frontier.acquire(timestamp(after)?)?,
         };
-        let generation = self.gen_at(after);
         let worker = &mut self.workers[w];
+        if !holds {
+            // An idle slot (possibly activated by a runtime decision).
+            worker.next_epoch = after;
+            worker.next_source = after;
+        }
         worker.exec = exec;
         worker.ckpt = ckpt;
-        worker.generation = generation;
+        worker.generation = g + 1;
         worker.ticket = Some(ticket);
         worker.reconfigure.remove(&b);
         worker.last_snapshot = Some(b);
+        worker.migrated = Some((b, report.manifest));
         Self::trim(worker, b);
         let coordinator = self.coord_id;
         self.net.send(
@@ -2059,7 +2485,8 @@ impl State<'_> {
         if !self.runs(w, epoch) {
             return Ok(false);
         }
-        let n = self.n_at(epoch);
+        let layout = self.sched.layout_at(epoch);
+        let n = layout.workers;
         let limits = self.limits();
         let aligned = self.cfg.mode == CheckpointMode::Aligned;
         let worker = &mut self.workers[w];
@@ -2111,7 +2538,7 @@ impl State<'_> {
         match worker.exec.run_stage(&mut st, true)? {
             Some((a, key)) => {
                 let x = st.position();
-                let pieces = split(st.local(a)?, key, n);
+                let pieces = split(st.local(a)?, key, layout);
                 worker.staged = Some(st);
                 for (dest, delta) in pieces.into_iter().enumerate() {
                     self.send(
@@ -2181,15 +2608,18 @@ impl State<'_> {
                         self.duplicates += 1;
                         continue;
                     }
-                    if worker >= self.n_at(after_epoch + 1) {
+                    let g = self.gen_at(after_epoch);
+                    if worker >= self.n_at(after_epoch + 1) || !self.touched(g, worker) {
                         return Err(Error::Cluster("malformed acknowledgement"));
                     }
-                    match self.coord.migrated.get(&worker) {
-                        None => {
-                            self.coord.migrated.insert(worker, manifest);
+                    // A worker replaced inside the window migrates again and
+                    // may report a second checkpoint of the same state; the
+                    // first one wins.
+                    match self.coord.migrated.entry(worker) {
+                        std::collections::btree_map::Entry::Occupied(_) => self.duplicates += 1,
+                        std::collections::btree_map::Entry::Vacant(v) => {
+                            v.insert(manifest);
                         }
-                        Some(old) if *old == manifest => self.duplicates += 1,
-                        Some(_) => return Err(Error::Cluster("nondeterministic migration")),
                     }
                     continue;
                 }
@@ -2269,6 +2699,7 @@ impl State<'_> {
                 after,
                 global,
                 workers,
+                decision,
             } => {
                 if self.frontier.watermark() <= timestamp(after)? {
                     return Err(Error::Cluster("checkpoint ahead of frontier"));
@@ -2306,18 +2737,59 @@ impl State<'_> {
                     manifest: global,
                     step,
                 });
+                if let Some((b, m)) = decision {
+                    // The decision is durable now; later leases cover it.
+                    self.sched.push(
+                        b,
+                        m,
+                        self.cfg.migration_bins_per_step,
+                        self.cfg.checkpoint_interval,
+                    )?;
+                    self.decided.push((b, m));
+                    self.requests.remove(0);
+                    // The decision reaches every worker with this commit's
+                    // notice; idle slots it activates start waiting for it.
+                    for w in 0..self.coord_id {
+                        if self.workers[w].next_epoch == u64::MAX
+                            && let Some(at) = self.sched.activation(w, next(Some(after))?)
+                        {
+                            let g = self.gen_at(at).saturating_sub(1);
+                            let worker = &mut self.workers[w];
+                            worker.next_epoch = at;
+                            worker.next_source = at;
+                            worker.generation = g;
+                        }
+                    }
+                }
                 if migration {
                     let started = self.coord.reconfiguring.map_or(step, |(_, s)| s);
+                    let g = self.gen_at(after);
+                    let (old, new) = (self.sched.layout(g), self.sched.layout(g + 1));
+                    let bins_moved = (0..BINS).filter(|&x| old.owner[x] != new.owner[x]).count();
+                    let untouched = (0..workers).filter(|&w| !self.touched(g, w)).count();
+                    let (rescale, part, parts) = self.sched.step_of(g);
+                    let (mut moved, mut total) = (0, 0);
+                    for ((b, _), (m, t)) in &self.moving {
+                        if *b == after {
+                            moved += m;
+                            total += t;
+                        }
+                    }
+                    self.moving.retain(|(b, _), _| *b > after);
                     self.migrations.push(LiveMigration {
                         after_epoch: after,
                         from_workers: self.n_at(after),
                         to_workers: workers,
-                        rows_moved: self.moving.0,
-                        rows_total: self.moving.1,
+                        rescale,
+                        step: part,
+                        steps_total: parts,
+                        bins_moved,
+                        untouched,
+                        rows_moved: moved,
+                        rows_total: total,
                         manifest: global,
                         steps: step.saturating_sub(started),
                     });
-                    self.moving = (0, 0);
                     self.coord.migrated.clear();
                     self.coord.reconfiguring = None;
                 }
@@ -2336,17 +2808,37 @@ impl State<'_> {
                         self.reconfigure(now, b, step)?;
                         return Ok(true);
                     }
-                    let m = self.n_at(b + 1);
-                    if self.coord.migrated.len() != m {
+                    let g = self.gen_at(b);
+                    let layout = self.sched.layout(g + 1).clone();
+                    let touched: Vec<usize> = (0..layout.workers)
+                        .filter(|&w| self.touched(g, w))
+                        .collect();
+                    if touched.iter().any(|w| !self.coord.migrated.contains_key(w)) {
                         return Ok(false);
                     }
-                    let entries: Vec<_> =
-                        self.coord.migrated.values().map(|m| (*m, None)).collect();
-                    let global = self.write_global(&self.plan, m, b, &entries)?;
+                    // Untouched workers keep their checkpoint at `b`.
+                    let committed = self.coord.committed.ok_or(Error::Cluster("migration"))?;
+                    let old = self.read_global(&committed.global)?;
+                    let mut entries = Vec::with_capacity(layout.workers);
+                    for w in 0..layout.workers {
+                        entries.push(match self.coord.migrated.get(&w) {
+                            Some(m) => (*m, None),
+                            None => *old.entries.get(w).ok_or(Error::Cluster("migration"))?,
+                        });
+                    }
+                    let global = self.write_global(
+                        &self.plan,
+                        &layout,
+                        b,
+                        &entries,
+                        self.sched.layout(g).workers,
+                        None,
+                    )?;
                     self.coord.pending = Pending::Written {
                         after: b,
                         global,
-                        workers: m,
+                        workers: layout.workers,
+                        decision: None,
                     };
                     return Ok(true);
                 }
@@ -2358,14 +2850,45 @@ impl State<'_> {
                 }
                 let n = acks.len();
                 let entries: Vec<_> = acks.iter().flatten().copied().collect();
-                let global = self.write_global(&self.plan, n, after, &entries)?;
+                let decision = self.decide(after);
+                let layout = self.sched.layout_at(after).clone();
+                let global = self.write_global(
+                    &self.plan,
+                    &layout,
+                    after,
+                    &entries,
+                    layout.workers,
+                    decision,
+                )?;
                 self.coord.pending = Pending::Written {
                     after,
                     global,
                     workers: n,
+                    decision,
                 };
                 Ok(true)
             }
+        }
+    }
+
+    /// Turn the oldest queued rescale request into a decision recorded by the
+    /// commit at `after`: a live rescale after the first barrier that is past
+    /// both the lease granted before this commit (no worker has read beyond
+    /// it) and the last scheduled step. Requests that change nothing, or
+    /// find no barrier before the last epoch, are dropped.
+    fn decide(&mut self, after: u64) -> Option<(u64, usize)> {
+        loop {
+            let &m = self.requests.first()?;
+            let interval = self.cfg.checkpoint_interval;
+            let mut b = self.lease(self.coord.epoch()).max(after);
+            if let Some(&(last, _)) = self.sched.steps.last() {
+                b = b.max(last.saturating_add(interval));
+            }
+            if m != self.sched.last().workers && b < self.last_epoch() {
+                return Some((b, m));
+            }
+            self.requests.remove(0);
+            self.dropped_requests += 1;
         }
     }
 
@@ -2428,6 +2951,7 @@ pub fn run_cluster_with(
     }
     let exchanges = plan.circuit.exchange_count();
     let sweep_fps = vec![plan.fingerprint];
+    let max_workers = cfg.max_workers()?;
     let mut state = State {
         base: circuit,
         base_fp,
@@ -2435,6 +2959,11 @@ pub fn run_cluster_with(
         source,
         sink,
         cfg,
+        sched: cfg.schedule(&[])?,
+        decided: Vec::new(),
+        requests: Vec::new(),
+        dropped_requests: 0,
+        layouts: RefCell::new(BTreeMap::new()),
         store,
         epochs,
         workers: Vec::new(),
@@ -2446,7 +2975,7 @@ pub fn run_cluster_with(
             max_delay: cfg.max_link_delay_ns,
             sent: 0,
         },
-        frontier: Frontier::new(0, cfg.max_workers())?,
+        frontier: Frontier::new(0, max_workers)?,
         coord: Coordinator::new(record, false),
         done: false,
         visible: Vec::new(),
@@ -2461,10 +2990,10 @@ pub fn run_cluster_with(
         resent: 0,
         duplicates: 0,
         gc: GcReport::default(),
-        coord_id: cfg.max_workers(),
+        coord_id: max_workers,
         migrations: Vec::new(),
         recovery_rescales: 0,
-        moving: (0, 0),
+        moving: BTreeMap::new(),
     };
     let start = next(record.map(|r| r.after_epoch))?;
     if record.is_some_and(|r| r.after_epoch >= epochs) {
@@ -2475,12 +3004,16 @@ pub fn run_cluster_with(
     let mut prepared: Option<Vec<(Executor, DurableCheckpointer)>> = None;
     if let Some(r) = record {
         let global = state.read_global(&r.global)?;
-        let to = cfg.workers_at(start);
-        if global.workers != to || global.columns != cfg.partition_columns {
-            let (moved, manifest) = rescale_from(&mut state, circuit, &r, &global, to)?;
+        // Runtime rescales an earlier run decided are part of the schedule.
+        state.sched = cfg.schedule(&global.decisions)?;
+        state.decided = global.decisions.clone();
+        state.coord_id = state.coord_id.max(state.sched.max_workers());
+        let to = state.sched.layout_at(start).clone();
+        if global.layout != to || global.columns != cfg.partition_columns {
+            let (moved, manifest) = rescale_from(&mut state, circuit, &r, &global, &to)?;
             rescale = Some(Rescale {
                 from_workers: global.workers,
-                to_workers: to,
+                to_workers: to.workers,
                 from_columns: global.columns.clone(),
                 after_epoch: r.after_epoch,
                 manifest,
@@ -2504,6 +3037,8 @@ pub fn run_cluster_with(
             committed: Vec::new(),
             rescale,
             migrations: Vec::new(),
+            decided_rescales: Vec::new(),
+            dropped_requests: 0,
             recovery_rescales: 0,
             exchanges,
             arrangements_written: state.written,
@@ -2542,6 +3077,9 @@ pub fn run_cluster_with(
         }
         let now = sim.now_ns();
         let role = *token.payload();
+        for r in cfg.rescale_requests.iter().filter(|r| r.at_step == steps) {
+            state.requests.push(r.workers);
+        }
         let mut faulted = false;
         for f in faults.iter().filter(|f| f.step == steps) {
             state.fault(f.kind, steps)?;
@@ -2604,6 +3142,8 @@ pub fn run_cluster_with(
         committed: state.history,
         rescale,
         migrations: state.migrations,
+        decided_rescales: state.decided,
+        dropped_requests: state.dropped_requests + state.requests.len(),
         recovery_rescales: state.recovery_rescales,
         exchanges,
         arrangements_written: state.written,
@@ -2627,7 +3167,7 @@ fn rescale_from(
     circuit: &Circuit,
     record: &CommitRecord,
     global: &Global,
-    to: usize,
+    to: &Layout,
 ) -> Result<(Vec<(Executor, DurableCheckpointer)>, ObjectId), Error> {
     let limits = state.cfg.checkpoint_limits;
     let old_plan = Plan::new(circuit, &global.columns, limits)?;
@@ -2660,14 +3200,14 @@ fn rescale_from(
             }
         }
     }
-    let n = to;
+    let n = to.workers;
     let plan = &state.plan;
     let mut budget = limits.budget(&plan.circuit);
     let mut locals: Vec<Vec<ZSet>> = vec![Vec::new(); n];
     for node in &plan.circuit.nodes {
         match &node.op {
             Op::Input(slot) => {
-                for (j, part) in split(&inputs[*slot], plan.columns[*slot], n)
+                for (j, part) in split(&inputs[*slot], plan.columns[*slot], to)
                     .into_iter()
                     .enumerate()
                 {
@@ -2679,7 +3219,7 @@ fn rescale_from(
                 for l in &locals {
                     whole = whole.plus(&l[*a], eval)?;
                 }
-                for (j, part) in split(&whole, *key, n).into_iter().enumerate() {
+                for (j, part) in split(&whole, *key, to).into_iter().enumerate() {
                     locals[j].push(part);
                 }
             }
@@ -2703,7 +3243,14 @@ fn rescale_from(
         entries.push((report.manifest, None));
         moved.push((exec, ckpt));
     }
-    let manifest = state.write_global(&state.plan, n, record.after_epoch, &entries)?;
+    let manifest = state.write_global(
+        &state.plan,
+        to,
+        record.after_epoch,
+        &entries,
+        to.workers,
+        None,
+    )?;
     let new_record = CommitRecord {
         fingerprint: state.base_fp,
         after_epoch: record.after_epoch,

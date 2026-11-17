@@ -551,6 +551,9 @@ def emit : M → List Item
   | .leave => [addi sp s0 0, .ins (.ld s0 sp 0), .ins (.ld ra sp 8), addi sp sp 16,
       .ins (.jalr zero ra 0)]
   | .trap f => [.jump zero (trapLabel f)]
+  -- Milestone 7: a trap scope emits no code (it changes which labels the
+  -- checked instructions' branches name).
+  | .scope _ _ => []
 
 /-! ## Layout: abort exits before the instruction, other labels after it -/
 
@@ -657,6 +660,7 @@ theorem emit_ok (m : M) (hm : mBounded m) : ∀ it ∈ emit m, it.Ok := by
   | trap f => cases f <;> decide
   | label l | jmp l | bz l | call l =>
     simp [emit, branchTo, Item.Ok, Inst.Wf, zero, a0, ra]
+  | scope _ _ => simp [emit]
   | _ => decide
 
 theorem emit_length (m : M) : (emit m).length ≤ 24 := by

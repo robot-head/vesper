@@ -5,9 +5,20 @@
 //! `mmap` (`MAP_NORESERVE` on Linux), so physical pages are only faulted in
 //! when first written. [`VirtualArena::reset`] returns the touched pages with
 //! `madvise(MADV_FREE)` (falling back to `MADV_DONTNEED` where `MADV_FREE` is
-//! refused). Elsewhere, and under Miri, the range comes from the global
-//! allocator, which commits it eagerly; [`VirtualArena::backing_kind`] says
-//! which path is in use.
+//! refused). On Windows the range is reserved with
+//! `VirtualAlloc(MEM_RESERVE)`, committed in 64 KiB steps as the cursor
+//! advances, and decommitted on reset. Elsewhere, and under Miri, the range
+//! comes from the global allocator, which commits it eagerly;
+//! [`VirtualArena::backing_kind`] says which path is in use.
+//!
+//! [`VirtualArenaConfig::huge_page_hint`] aligns the reservation to 2 MiB and,
+//! on Linux, advises transparent huge pages (`madvise(MADV_HUGEPAGE)`);
+//! [`VirtualArena::huge_pages`] reports what the host accepted. The hint never
+//! changes semantics, only page size.
+//!
+//! [`VirtualChunkBacking`] carves [`crate::Region`] chunks out of one such
+//! reservation, so a region's chunks are address-contiguous and released
+//! tails go back to the operating system.
 //!
 //! Because the range never moves, the allocation at the tip can grow in place:
 //! [`VirtualArena::extend`] and [`VirtualVec`] never copy existing bytes. A
@@ -18,13 +29,16 @@
 //! `MADV_FREE` may still hold old data until written). Handles carry the arena
 //! identity and a never-reused serial; rewind, reset and drop make covered
 //! handles stale.
-#[cfg(not(all(unix, not(miri))))]
-use std::alloc::{self, Layout};
+use std::alloc::Layout;
 use std::fmt;
 use std::marker::PhantomData;
 use std::mem::{align_of, size_of};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+mod os;
+pub use os::HUGE_PAGE;
+use os::Reservation;
 
 /// Alignment of the reservation base and the largest allocation alignment.
 pub const VIRTUAL_PAGE: usize = 4096;
@@ -37,6 +51,9 @@ pub struct VirtualArenaConfig {
     pub reserve_bytes: usize,
     pub max_allocations: usize,
     pub max_checkpoints: usize,
+    /// Align the reservation to [`HUGE_PAGE`] (2 MiB) and advise transparent
+    /// huge pages where the host supports it.
+    pub huge_pages: bool,
 }
 
 impl VirtualArenaConfig {
@@ -45,8 +62,35 @@ impl VirtualArenaConfig {
             reserve_bytes,
             max_allocations: 1 << 20,
             max_checkpoints: 1024,
+            huge_pages: false,
         }
     }
+
+    /// The same configuration with the 2 MiB page hint.
+    pub fn huge_page_hint(self) -> Self {
+        Self {
+            huge_pages: true,
+            ..self
+        }
+    }
+}
+
+/// What became of the 2 MiB page hint.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HugePageStatus {
+    #[default]
+    NotRequested,
+    /// 2 MiB aligned and `madvise(MADV_HUGEPAGE)` accepted (Linux). Whether
+    /// the kernel actually backs pages with huge pages depends on the
+    /// transparent-huge-page settings; see [`VirtualArena::resident_huge_bytes`].
+    Advised,
+    /// 2 MiB aligned, but the platform has no advisory call (macOS).
+    AlignedOnly,
+    /// `madvise(MADV_HUGEPAGE)` failed (for example THP compiled out).
+    Refused { errno: i32 },
+    /// Not attempted on this path (Windows large pages need
+    /// `SeLockMemoryPrivilege` and eager commit; the global-allocator path).
+    Unsupported,
 }
 
 /// How the address range was obtained.
@@ -54,6 +98,9 @@ impl VirtualArenaConfig {
 pub enum VirtualBackingKind {
     /// Anonymous `mmap`; pages fault in lazily and are released on reset.
     Mmap,
+    /// `VirtualAlloc(MEM_RESERVE)`; pages are committed as the cursor
+    /// advances and decommitted on reset.
+    VirtualAlloc,
     /// Global allocator (`alloc_zeroed`); no lazy reservation guarantee.
     GlobalAllocator,
 }
@@ -78,6 +125,10 @@ pub enum VirtualArenaError {
     },
     CrossArena,
     Stale,
+    /// The platform refused to commit pages up to `bytes` (Windows).
+    CommitFailed {
+        bytes: usize,
+    },
     /// Only the newest allocation can grow in place.
     NotTip,
     /// The allocation predates the newest checkpoint; bytes added now would be
@@ -109,6 +160,10 @@ pub struct VirtualArenaStats {
     pub allocations: usize,
     pub resets: u64,
     pub in_place_growths: u64,
+    /// Bytes currently usable without a new commit (Windows: committed pages;
+    /// mmap: touched high-water rounded to pages; global allocator: all).
+    pub committed_bytes: usize,
+    pub huge_pages: HugePageStatus,
 }
 
 /// Copyable checked handle to a zeroed byte range in a [`VirtualArena`].
@@ -173,7 +228,7 @@ pub struct VirtualArena {
     id: u64,
     base: NonNull<u8>,
     reserved: usize,
-    kind: VirtualBackingKind,
+    res: Reservation,
     cursor: usize,
     touched: usize,
     allocs: Vec<Alloc>,
@@ -194,60 +249,10 @@ impl fmt::Debug for VirtualArena {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VirtualArena")
             .field("id", &self.id)
-            .field("kind", &self.kind)
+            .field("kind", &self.res.kind())
             .field("reserved", &self.reserved)
             .field("cursor", &self.cursor)
             .finish_non_exhaustive()
-    }
-}
-
-#[cfg(all(unix, not(miri)))]
-mod os {
-    use std::ptr::NonNull;
-
-    pub fn reserve(len: usize) -> Option<NonNull<u8>> {
-        #[cfg(target_os = "linux")]
-        let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE;
-        #[cfg(not(target_os = "linux"))]
-        let flags = libc::MAP_PRIVATE | libc::MAP_ANON;
-        // SAFETY: anonymous private mapping at a kernel-chosen address.
-        let p = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                flags,
-                -1,
-                0,
-            )
-        };
-        if p == libc::MAP_FAILED {
-            None
-        } else {
-            NonNull::new(p.cast())
-        }
-    }
-
-    /// # Safety
-    /// `[ptr, ptr+len)` lies in a mapping from `reserve`, with no live borrows.
-    pub unsafe fn release_pages(ptr: NonNull<u8>, len: usize) {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        {
-            // SAFETY: caller contract; madvise does not unmap.
-            let rc = unsafe { libc::madvise(ptr.as_ptr().cast(), len, libc::MADV_FREE) };
-            if rc == 0 {
-                return;
-            }
-        }
-        // SAFETY: caller contract.
-        unsafe { libc::madvise(ptr.as_ptr().cast(), len, libc::MADV_DONTNEED) };
-    }
-
-    /// # Safety
-    /// `ptr`/`len` are exactly a mapping returned by `reserve`.
-    pub unsafe fn unreserve(ptr: NonNull<u8>, len: usize) {
-        // SAFETY: caller contract.
-        unsafe { libc::munmap(ptr.as_ptr().cast(), len) };
     }
 }
 
@@ -285,12 +290,12 @@ impl VirtualArena {
                 }
             }
         };
-        let (base, kind) = Self::reserve(reserved)?;
+        let res = Reservation::new(reserved, config.huge_pages)?;
         Ok(Self {
             id,
-            base,
+            base: res.base(),
             reserved,
-            kind,
+            res,
             cursor: 0,
             touched: 0,
             allocs: Vec::new(),
@@ -302,25 +307,24 @@ impl VirtualArena {
         })
     }
 
-    #[cfg(all(unix, not(miri)))]
-    fn reserve(len: usize) -> Result<(NonNull<u8>, VirtualBackingKind), VirtualArenaError> {
-        os::reserve(len)
-            .map(|p| (p, VirtualBackingKind::Mmap))
-            .ok_or(VirtualArenaError::ReserveFailed)
-    }
-
-    #[cfg(not(all(unix, not(miri))))]
-    fn reserve(len: usize) -> Result<(NonNull<u8>, VirtualBackingKind), VirtualArenaError> {
-        let layout = Layout::from_size_align(len, VIRTUAL_PAGE)
-            .map_err(|_| VirtualArenaError::SizeOverflow)?;
-        // SAFETY: nonzero size.
-        NonNull::new(unsafe { alloc::alloc_zeroed(layout) })
-            .map(|p| (p, VirtualBackingKind::GlobalAllocator))
-            .ok_or(VirtualArenaError::ReserveFailed)
-    }
-
     pub fn backing_kind(&self) -> VirtualBackingKind {
-        self.kind
+        self.res.kind()
+    }
+
+    /// Outcome of the 2 MiB page hint.
+    pub fn huge_pages(&self) -> HugePageStatus {
+        self.res.huge()
+    }
+
+    /// Base address of the reservation. Inspect only.
+    pub fn base_addr(&self) -> usize {
+        self.base.as_ptr() as usize
+    }
+
+    /// Bytes of the reservation resident in transparent huge pages, from
+    /// `/proc/self/smaps` (Linux only).
+    pub fn resident_huge_bytes(&self) -> Option<usize> {
+        self.res.resident_huge_bytes()
     }
 
     pub fn reserved_bytes(&self) -> usize {
@@ -335,6 +339,8 @@ impl VirtualArena {
             allocations: self.allocs.len(),
             resets: self.resets,
             in_place_growths: self.growths,
+            committed_bytes: self.res.committed(),
+            huge_pages: self.res.huge(),
         }
     }
 
@@ -346,13 +352,17 @@ impl VirtualArena {
         Ok(s)
     }
 
-    /// Zeroes `[start, end)` and records the high-water mark.
-    fn zero(&mut self, start: usize, end: usize) {
+    /// Commits and zeroes `[start, end)` and records the high-water mark.
+    fn zero(&mut self, start: usize, end: usize) -> Result<(), VirtualArenaError> {
         debug_assert!(start <= end && end <= self.reserved);
-        // SAFETY: inside the reservation; no handle can borrow these bytes
-        // while `&mut self` is held.
+        if !self.res.commit(end) {
+            return Err(VirtualArenaError::CommitFailed { bytes: end });
+        }
+        // SAFETY: inside the committed reservation; no handle can borrow these
+        // bytes while `&mut self` is held.
         unsafe { self.base.as_ptr().add(start).write_bytes(0, end - start) };
         self.touched = self.touched.max(end);
+        Ok(())
     }
 
     /// Allocates `len` zeroed bytes aligned to `align` (at most a page).
@@ -388,8 +398,8 @@ impl VirtualArena {
                 requested: len,
                 available: 0,
             })?;
+        self.zero(start, end)?;
         let serial = self.next_serial()?;
-        self.zero(start, end);
         let index = self.allocs.len() as u32;
         self.allocs.push(Alloc { start, len, serial });
         self.cursor = end;
@@ -456,7 +466,7 @@ impl VirtualArena {
                 available: self.reserved - end,
             });
         }
-        self.zero(end, new_end);
+        self.zero(end, new_end)?;
         self.allocs[h.index as usize].len += additional;
         self.cursor = new_end;
         self.growths += 1;
@@ -519,16 +529,9 @@ impl VirtualArena {
         self.allocs.clear();
         self.marks.clear();
         self.cursor = 0;
-        #[cfg(all(unix, not(miri)))]
-        if self.touched > 0 {
-            let len = self
-                .touched
-                .next_multiple_of(VIRTUAL_PAGE)
-                .min(self.reserved);
-            // SAFETY: inside our mapping; no handle can borrow bytes because
-            // every allocation was just invalidated under `&mut self`.
-            unsafe { os::release_pages(self.base, len) };
-        }
+        // SAFETY: no handle can borrow bytes because every allocation was just
+        // invalidated under `&mut self`.
+        unsafe { self.res.release_tail(0) };
         self.touched = 0;
         self.resets += 1;
     }
@@ -658,21 +661,257 @@ impl VirtualArena {
     }
 }
 
-impl Drop for VirtualArena {
-    fn drop(&mut self) {
-        #[cfg(all(unix, not(miri)))]
-        // SAFETY: exactly the mapping from `reserve`; `&mut self` ends every
-        // borrow of it.
-        unsafe {
-            os::unreserve(self.base, self.reserved)
+// ----- Region chunks over one reservation ----------------------------------
+
+/// Counters of a [`VirtualChunkBacking`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VirtualChunkStats {
+    pub reserved_bytes: usize,
+    /// Bump cursor: end of the highest chunk handed out.
+    pub cursor_bytes: usize,
+    pub committed_bytes: usize,
+    pub live_chunks: usize,
+    /// Free gaps below the cursor (returned non-tip chunks, alignment padding).
+    pub hole_bytes: usize,
+    pub chunks_allocated: u64,
+    /// Times a returned tail moved the cursor down and released its pages.
+    pub tail_releases: u64,
+    pub huge_pages: HugePageStatus,
+}
+
+/// A [`crate::ChunkBacking`] that carves [`crate::Region`] chunks out of one
+/// contiguous reservation (the same platform path as [`VirtualArena`]): chunks
+/// are bump-allocated in address order, so a growing region's chunks are
+/// adjacent. A chunk returned at the tip moves the cursor down and its pages
+/// go back to the operating system (`MADV_FREE` / `MEM_DECOMMIT`); a chunk
+/// returned below the tip becomes a hole that later chunks reuse first-fit.
+pub struct VirtualChunkBacking {
+    res: Reservation,
+    cursor: usize,
+    /// Sorted, coalesced `(start, len)` gaps below `cursor`.
+    holes: Vec<(usize, usize)>,
+    live: usize,
+    allocated: u64,
+    tail_releases: u64,
+}
+
+impl fmt::Debug for VirtualChunkBacking {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VirtualChunkBacking")
+            .field("stats", &self.stats())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Failure to build a VirtualArena-backed region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VirtualRegionError {
+    Config(crate::ConfigError),
+    Reserve(VirtualArenaError),
+}
+
+impl fmt::Display for VirtualRegionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for VirtualRegionError {}
+
+impl VirtualChunkBacking {
+    /// Reserves `reserve_bytes` of address space (rounded up to a page, or to
+    /// 2 MiB with the hint).
+    pub fn new(reserve_bytes: usize, huge_pages: bool) -> Result<Self, VirtualArenaError> {
+        if reserve_bytes == 0 {
+            return Err(VirtualArenaError::InvalidConfig(
+                "reserve_bytes must be nonzero",
+            ));
+        }
+        let unit = if huge_pages { HUGE_PAGE } else { VIRTUAL_PAGE };
+        let len = reserve_bytes
+            .checked_next_multiple_of(unit)
+            .filter(|n| *n <= isize::MAX as usize)
+            .ok_or(VirtualArenaError::SizeOverflow)?;
+        Ok(Self {
+            res: Reservation::new(len, huge_pages)?,
+            cursor: 0,
+            holes: Vec::new(),
+            live: 0,
+            allocated: 0,
+            tail_releases: 0,
+        })
+    }
+
+    /// Address space a region with `config` can need at once: a region may
+    /// obtain a replacement chunk before it returns its spares, so twice its
+    /// reservation bound, plus alignment slack for 64 chunks.
+    pub fn reservation_for(config: &crate::RegionConfig) -> Option<usize> {
+        let align = crate::CHUNK_ALIGN.max(config.max_align);
+        config
+            .max_reserved_bytes
+            .checked_mul(2)?
+            .checked_add(align.checked_mul(64)?)
+    }
+
+    pub fn stats(&self) -> VirtualChunkStats {
+        VirtualChunkStats {
+            reserved_bytes: self.res.len(),
+            cursor_bytes: self.cursor,
+            committed_bytes: self.res.committed(),
+            live_chunks: self.live,
+            hole_bytes: self.holes.iter().map(|h| h.1).sum(),
+            chunks_allocated: self.allocated,
+            tail_releases: self.tail_releases,
+            huge_pages: self.res.huge(),
+        }
+    }
+
+    pub fn backing_kind(&self) -> VirtualBackingKind {
+        self.res.kind()
+    }
+
+    pub fn huge_pages(&self) -> HugePageStatus {
+        self.res.huge()
+    }
+
+    /// Base address of the reservation. Inspect only.
+    pub fn base_addr(&self) -> usize {
+        self.res.base().as_ptr() as usize
+    }
+
+    /// Bytes resident in transparent huge pages (Linux only).
+    pub fn resident_huge_bytes(&self) -> Option<usize> {
+        self.res.resident_huge_bytes()
+    }
+
+    /// Records the gap `[start, start+len)` (sorted, coalesced). Returns
+    /// `false` if bookkeeping memory is unavailable; the gap is then only lost
+    /// address space until the cursor passes below it.
+    fn add_hole(&mut self, start: usize, len: usize) -> bool {
+        if len == 0 {
+            return true;
+        }
+        let i = self.holes.partition_point(|h| h.0 < start);
+        let joins_prev = i > 0 && {
+            let p = self.holes[i - 1];
+            p.0 + p.1 == start
         };
-        #[cfg(not(all(unix, not(miri))))]
-        // SAFETY: allocated in `reserve` with this layout.
-        unsafe {
-            alloc::dealloc(
-                self.base.as_ptr(),
-                Layout::from_size_align_unchecked(self.reserved, VIRTUAL_PAGE),
-            )
+        let joins_next = i < self.holes.len() && start + len == self.holes[i].0;
+        match (joins_prev, joins_next) {
+            (true, true) => {
+                let next = self.holes.remove(i);
+                self.holes[i - 1].1 += len + next.1;
+            }
+            (true, false) => self.holes[i - 1].1 += len,
+            (false, true) => {
+                self.holes[i].0 = start;
+                self.holes[i].1 += len;
+            }
+            (false, false) => {
+                if self.holes.try_reserve(1).is_err() {
+                    return false;
+                }
+                self.holes.insert(i, (start, len));
+            }
+        }
+        true
+    }
+
+    /// Smallest offset `>= offset` whose absolute address is `align`-aligned.
+    /// The base itself may be less aligned than `align` (page-aligned mmap,
+    /// 64 KiB-aligned `VirtualAlloc`).
+    fn align_offset(&self, offset: usize, align: usize) -> Option<usize> {
+        let base = self.res.base().as_ptr() as usize;
+        let abs = base.checked_add(offset)?.checked_next_multiple_of(align)?;
+        Some(abs - base)
+    }
+
+    fn take_hole(&mut self, size: usize, align: usize) -> Option<usize> {
+        let (i, at) = self.holes.iter().enumerate().find_map(|(i, &(s, l))| {
+            let at = self.align_offset(s, align)?;
+            (at.checked_add(size)? <= s + l).then_some((i, at))
+        })?;
+        // Splitting may need one more entry; reserve before mutating.
+        self.holes.try_reserve(1).ok()?;
+        let (s, l) = self.holes.remove(i);
+        let suffix = (at + size, s + l - (at + size));
+        let prefix = (s, at - s);
+        for h in [suffix, prefix] {
+            if h.1 > 0 {
+                self.holes.insert(i, h);
+            }
+        }
+        Some(at)
+    }
+}
+
+// SAFETY: every returned pointer is `layout.size()` bytes inside the committed
+// part of our reservation, aligned to `layout.align()`, and not handed out
+// again until `deallocate` returns it (bump cursor plus disjoint holes).
+unsafe impl crate::ChunkBacking for VirtualChunkBacking {
+    fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+        let size = layout.size();
+        let align = layout.align();
+        if size == 0 || align > HUGE_PAGE {
+            return None;
+        }
+        let start = match self.take_hole(size, align) {
+            Some(at) => at,
+            None => {
+                let at = self.align_offset(self.cursor, align)?;
+                let end = at.checked_add(size)?;
+                if end > self.res.len() || !self.res.commit(end) {
+                    return None;
+                }
+                let pad = at - self.cursor;
+                if !self.add_hole(self.cursor, pad) {
+                    return None;
+                }
+                self.cursor = end;
+                at
+            }
         };
+        self.live += 1;
+        self.allocated += 1;
+        // SAFETY: `start + size <= len`, inside the reservation.
+        Some(unsafe { NonNull::new_unchecked(self.res.base().as_ptr().add(start)) })
+    }
+
+    unsafe fn deallocate(&mut self, ptr: NonNull<u8>, layout: Layout) {
+        let start = ptr.as_ptr() as usize - self.res.base().as_ptr() as usize;
+        let end = start + layout.size();
+        debug_assert!(end <= self.cursor);
+        self.live -= 1;
+        if end == self.cursor {
+            self.cursor = start;
+            while let Some(&(s, l)) = self.holes.last()
+                && s + l == self.cursor
+            {
+                self.cursor = s;
+                self.holes.pop();
+            }
+            // SAFETY: the caller returned the tip chunk; everything at or above
+            // the new cursor is free, so nothing borrows it.
+            unsafe { self.res.release_tail(self.cursor) };
+            self.tail_releases += 1;
+        } else {
+            let _ = self.add_hole(start, end - start);
+        }
+    }
+}
+
+impl crate::Region<VirtualChunkBacking> {
+    /// A region whose chunks come from one contiguous reservation sized by
+    /// [`VirtualChunkBacking::reservation_for`], optionally 2 MiB aligned with
+    /// the transparent-huge-page hint.
+    pub fn new_virtual(
+        config: crate::RegionConfig,
+        huge_pages: bool,
+    ) -> Result<Self, VirtualRegionError> {
+        config.validate().map_err(VirtualRegionError::Config)?;
+        let bytes = VirtualChunkBacking::reservation_for(&config)
+            .ok_or(VirtualRegionError::Reserve(VirtualArenaError::SizeOverflow))?;
+        let backing =
+            VirtualChunkBacking::new(bytes, huge_pages).map_err(VirtualRegionError::Reserve)?;
+        Self::with_backing(config, backing).map_err(VirtualRegionError::Config)
     }
 }

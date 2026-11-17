@@ -27,3 +27,25 @@ successful native checks for the same immutable SHA; `full` identifies the
 release workflow profile, not a full workspace rerun on each native OS. The
 workflow publishes nothing. A planning failure, failed test, or wrong checkout
 fails the corresponding required check.
+
+## PR test tiers
+
+`Test all targets` builds and lints every target on every run. Its tests come
+in two tiers:
+
+- **Every run:** all tests except the ones tagged `lean_replay` in
+  `BUILD.bazel`.
+- **`lean_replay`:** the Lean/Logos replay suite (`lean4lean_*42`,
+  `logos42_acceptance`, `oracle42_acceptance`, `resource_oracle42`,
+  `resource_model42`, `replay42_kernel`). Each reserves 5-9 GiB, so together
+  they made up a 20-25 minute tail of the 8 CPU / 22 GB workflow VM (32-38
+  minute runs, November 2026). They run on every push to `main`, and on a pull
+  request only when it changes a path listed in
+  `scripts/ci/lean_replay_scope.py` (Lean models, replay tooling, the
+  Lean-facing compiler modules, those tests, the toolchain and CI config).
+  Put `[ci full]` in a commit message of the PR to force them.
+
+If the scope script cannot read the diff, it runs the full suite. A
+regression in a skipped replay test shows up on the next `main` run; treat it
+like any red main. When you add a test that reads new Lean-facing inputs, tag
+it `lean_replay` only if those inputs are in the trigger list.

@@ -873,6 +873,7 @@ def emit : M → List Item
       subSp (words * 8)
   | .leave => [.ins (.aimm .add sp fp 0 0), .ins (.ldpPost fp lr sp 2), .ins (.ret lr)]
   | .trap f => [.br .b (trapLabel f)]
+  | .scope _ _ => []
 
 /-! ## Layout: abort exits before the instruction, other labels after it -/
 
@@ -971,6 +972,7 @@ theorem emit_ok (m : M) (hm : mBounded m) : ∀ it ∈ emit m, it.Ok := by
   | fcmp c => cases c <;> decide
   | trap f => cases f <;> decide
   | label l | jmp l | bz l | call l => simp [emit, Item.Ok, Br.Ok]
+  | scope _ _ => simp [emit]
   | _ => decide
 
 theorem emit_length (m : M) : (emit m).length ≤ 8 := by

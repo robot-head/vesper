@@ -1,6 +1,7 @@
 //! Checked Place IR to the slot IR (`Lir`): plan the reachable functions,
 //! flatten every value of the scalar subset into 64-bit words and reject
 //! everything else with a typed error.
+use super::fail::{self, Fails, Handler};
 use super::machine::{
     ArithOp, Cond, FIRST_FREE_LABEL, FloatOp, Kind, Label, Lir, Slot, TrapKind, WrapOp,
 };
@@ -147,7 +148,7 @@ fn flatten(
             }
             Ok(())
         }
-        Type::Named(n, _) if n == "Unit" => Ok(()),
+        Type::Named(n, _) if n == "Unit" || n == "Never" => Ok(()),
         Type::Named(n, _) if n == "f32" => Err(VerifiedError::unsupported(
             Unsupported::Float,
             function,
@@ -251,15 +252,54 @@ pub struct Planned {
     /// parameter (`inout p.{x}`), or the whole value when it declares none.
     pub writeback: Vec<Vec<(u32, u32)>>,
     pub result: Shape,
+    /// Parameters with no words: the unused continuation of a non-resuming
+    /// `raise` clause.
+    pub erased: Vec<bool>,
+    /// The failure codes this function passes to its caller
+    /// (see `fail.rs`).
+    pub raises: BTreeSet<u64>,
+    /// Whether it uses the status protocol (it raises, and is not the entry).
+    pub status: bool,
+    /// Words of the incoming result area: `1 + max(result, payloads)` with
+    /// the status protocol, the result words otherwise. Parameters follow.
+    pub ret_words: u32,
+}
+impl Planned {
+    /// Incoming-area index of result word 0.
+    pub fn result_base(&self) -> u32 {
+        u32::from(self.status)
+    }
 }
 
 /// The functions reachable from the entry, in discovery order.
 pub struct Plan {
     pub functions: Vec<Planned>,
     pub index: BTreeMap<String, usize>,
+    pub fails: Fails,
+    /// Resolved handlers, by the span of their `handle` expression.
+    pub handlers: BTreeMap<(usize, usize), Handler>,
 }
 
-fn effects_supported(world: &World, f: &FunctionIr) -> Result<(), VerifiedError> {
+fn effect_name(e: &crate::ast::Effect) -> String {
+    format!(
+        "{}{}",
+        e.name,
+        if e.args.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "[{}]",
+                e.args
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    )
+}
+
+fn effects_supported(f: &FunctionIr) -> Result<(), VerifiedError> {
     if f.effects.tail.is_some() {
         return Err(VerifiedError::unsupported(
             Unsupported::Effect,
@@ -268,35 +308,20 @@ fn effects_supported(world: &World, f: &FunctionIr) -> Result<(), VerifiedError>
         ));
     }
     for e in &f.effects.instances {
-        let arg = e.args.first().map(|t| t.name()).unwrap_or("");
-        let ok = e.name == "Fail"
-            && e.label.is_none()
-            && e.args.len() == 1
-            && matches!(arg, "ArithOverflow" | "RuntimeError");
-        if !ok {
+        // `$`-labels are the checker's own function-capability names, not
+        // source labels.
+        let labeled = e.label.as_ref().is_some_and(|l| !l.starts_with('$'));
+        if e.name != "Fail" || labeled || e.args.len() != 1 {
             return Err(VerifiedError::unsupported(
                 Unsupported::Effect,
                 &f.name,
                 format!(
-                    "effect {}{} (only unhandled Fail[ArithOverflow] and Fail[RuntimeError] aborts)",
-                    e.name,
-                    if e.args.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            "[{}]",
-                            e.args
-                                .iter()
-                                .map(ToString::to_string)
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )
-                    }
+                    "effect {} (only unlabeled Fail[E], aborts and non-resuming handlers)",
+                    effect_name(e)
                 ),
             ));
         }
     }
-    let _ = world;
     Ok(())
 }
 
@@ -306,30 +331,45 @@ pub fn plan(
     entry: &str,
     max_functions: usize,
 ) -> Result<Plan, VerifiedError> {
-    let mut functions = vec![];
-    let mut index = BTreeMap::new();
+    struct Found {
+        name: String,
+        params: Vec<(Pass, Shape)>,
+        writeback: Vec<Vec<(u32, u32)>>,
+        result: Shape,
+        erased: Vec<bool>,
+        local: fail::Local,
+        /// Callees whose failures pass through unchanged.
+        calls: Vec<String>,
+        /// `handle` sites: (handled error type, body, clauses).
+        handles: Vec<(String, String, [String; 2])>,
+    }
+    let mut found: Vec<Found> = vec![];
+    let mut handlers = BTreeMap::new();
+    let mut handled: BTreeMap<String, Type> = BTreeMap::new();
     let mut queue = VecDeque::from([entry.to_owned()]);
     let mut seen = BTreeSet::from([entry.to_owned()]);
-    let mut label = FIRST_FREE_LABEL;
     while let Some(name) = queue.pop_front() {
-        if functions.len() >= max_functions {
+        if found.len() >= max_functions {
             return Err(VerifiedError::Limit(format!(
                 "more than {max_functions} reachable functions"
             )));
         }
-        let decl = world.functions.get(&name).ok_or_else(|| {
-            VerifiedError::unsupported(
-                Unsupported::ExternalFunction,
-                &name,
-                "no such function in the checked world",
-            )
-        })?;
-        if !decl.generics.is_empty() {
-            return Err(VerifiedError::unsupported(
-                Unsupported::Generic,
-                &name,
-                "generic functions (no monomorphization in this backend)",
-            ));
+        let nested = name.starts_with('$');
+        if !nested {
+            let decl = world.functions.get(&name).ok_or_else(|| {
+                VerifiedError::unsupported(
+                    Unsupported::ExternalFunction,
+                    &name,
+                    "no such function in the checked world",
+                )
+            })?;
+            if !decl.generics.is_empty() {
+                return Err(VerifiedError::unsupported(
+                    Unsupported::Generic,
+                    &name,
+                    "generic functions (no monomorphization in this backend)",
+                ));
+            }
         }
         let f = program.functions.get(&name).ok_or_else(|| {
             VerifiedError::unsupported(
@@ -338,11 +378,29 @@ pub fn plan(
                 "function without a body",
             )
         })?;
-        effects_supported(world, f)?;
+        effects_supported(f)?;
+        // The unused continuation of a `raise` clause has no words; any
+        // other function-typed parameter is a function value.
+        let erased = f
+            .params
+            .iter()
+            .map(|p| {
+                nested
+                    && name.starts_with("$handler_clause")
+                    && matches!(p.ty, Type::Function { .. })
+            })
+            .collect::<Vec<_>>();
         let params = f
             .params
             .iter()
-            .map(|p| Ok((p.pass, shape(world, &p.ty, &name)?)))
+            .zip(&erased)
+            .map(|(p, e)| {
+                if *e {
+                    Ok((p.pass, Shape(vec![])))
+                } else {
+                    Ok((p.pass, shape(world, &p.ty, &name)?))
+                }
+            })
             .collect::<Result<Vec<_>, VerifiedError>>()?;
         let writeback = f
             .params
@@ -367,28 +425,135 @@ pub fn plan(
             })
             .collect::<Result<Vec<_>, VerifiedError>>()?;
         let result = shape(world, &f.result, &name)?;
+        let mut calls = vec![];
+        let mut handles = vec![];
+        let mut enqueue = |callee: &str, queue: &mut VecDeque<String>| {
+            if seen.insert(callee.to_owned()) {
+                queue.push_back(callee.to_owned());
+            }
+        };
         for b in &f.blocks {
             for i in &b.instructions {
-                if let Op::Call { callee, .. } = &i.op
-                    && crate::numeric::wrapping_intrinsic(callee).is_none()
-                    && seen.insert(callee.clone())
-                {
-                    queue.push_back(callee.clone());
+                match &i.op {
+                    Op::Call { callee, .. }
+                        if callee != fail::RAISE
+                            && crate::numeric::wrapping_intrinsic(callee).is_none() =>
+                    {
+                        enqueue(callee, &mut queue);
+                        calls.push(callee.clone());
+                    }
+                    Op::Handle {
+                        state_value, expr, ..
+                    } => {
+                        let h = fail::handler(program, &name, *state_value, expr)?;
+                        for g in [&h.body, &h.ret, &h.raise] {
+                            enqueue(g, &mut queue);
+                        }
+                        let k = h.error.to_string();
+                        handled.insert(k.clone(), h.error.clone());
+                        handles.push((k, h.body.clone(), [h.ret.clone(), h.raise.clone()]));
+                        handlers.insert((expr.span.start, expr.span.end), h);
+                    }
+                    _ => {}
                 }
             }
         }
-        index.insert(name.clone(), functions.len());
-        functions.push(Planned {
+        found.push(Found {
             name,
-            label,
             params,
             writeback,
             result,
+            erased,
+            local: fail::local(f)?,
+            calls,
+            handles,
+        });
+    }
+    let locals = found.iter().map(|f| &f.local).collect::<Vec<_>>();
+    let fails = fail::codes(world, &locals, &handled, entry)?;
+    let index: BTreeMap<String, usize> = found
+        .iter()
+        .enumerate()
+        .map(|(n, f)| (f.name.clone(), n))
+        .collect();
+    // Raise sets: a least fixpoint over the call graph.
+    let mut raises: Vec<BTreeSet<u64>> = found
+        .iter()
+        .map(|f| fail::local_codes(&fails, &f.local))
+        .collect();
+    loop {
+        let mut changed = false;
+        for n in 0..found.len() {
+            let mut next = raises[n].clone();
+            for c in &found[n].calls {
+                next.extend(raises[index[c]].iter().copied());
+            }
+            for (error, body, clauses) in &found[n].handles {
+                let caught = fails.code(&handled[error]);
+                next.extend(raises[index[body]].iter().filter(|c| Some(**c) != caught));
+                for g in clauses {
+                    next.extend(raises[index[g]].iter().copied());
+                }
+            }
+            if next != raises[n] {
+                raises[n] = next;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    // The entry aborts instead of returning a status, which is only right
+    // when nothing inside the program calls it.
+    if !raises[0].is_empty() && found.iter().any(|f| f.calls.iter().any(|c| c == entry)) {
+        return Err(VerifiedError::unsupported(
+            Unsupported::Effect,
+            entry,
+            "an entry that may fail and is also called inside the program",
+        ));
+    }
+    for c in &raises[0] {
+        if fails.trap_kind(*c).is_none() {
+            return Err(VerifiedError::unsupported(
+                Unsupported::Effect,
+                entry,
+                format!(
+                    "Fail[{}] can reach the entry unhandled (only ArithOverflow and RuntimeError abort the process)",
+                    fails.name(*c)
+                ),
+            ));
+        }
+    }
+    let mut functions = vec![];
+    let mut label = FIRST_FREE_LABEL;
+    for (n, (f, raises)) in found.into_iter().zip(raises).enumerate() {
+        let status = n > 0 && !raises.is_empty();
+        let ret_words = if status {
+            1 + f.result.len().max(fails.payload_words(&raises))
+        } else {
+            f.result.len()
+        };
+        functions.push(Planned {
+            name: f.name,
+            label,
+            params: f.params,
+            writeback: f.writeback,
+            result: f.result,
+            erased: f.erased,
+            raises,
+            status,
+            ret_words,
         });
         // Entry label and body label (after the prologue).
         label += 2;
     }
-    Ok(Plan { functions, index })
+    Ok(Plan {
+        functions,
+        index,
+        fails,
+        handlers,
+    })
 }
 
 /// The lowered body of one function.
@@ -401,6 +566,7 @@ pub struct Lowered {
 
 struct FnLower<'a> {
     world: &'a World,
+    program: &'a Program,
     plan: &'a Plan,
     me: &'a Planned,
     f: &'a FunctionIr,
@@ -418,6 +584,8 @@ struct FnLower<'a> {
     out_words: u32,
     next_label: &'a mut Label,
     max_rows: usize,
+    /// Raise stubs of caught implicit failures: (label, kind).
+    stubs: Vec<(Label, TrapKind)>,
 }
 
 fn kind_name(kind: Kind) -> &'static str {
@@ -1016,6 +1184,21 @@ impl FnLower<'_> {
                 let (dst, _) = self.value_of(i.dest, &i.ty)?;
                 self.copy(dst, src + start, len)
             }
+            Op::Call { callee, args, .. } if callee == fail::RAISE => {
+                let [arg] = args.as_slice() else {
+                    return Err(VerifiedError::Invalid("Fail::raise arity".into()));
+                };
+                let (src, s) = self.value(arg.value)?;
+                let ty = self.types.get(&arg.value).cloned().ok_or_else(|| {
+                    VerifiedError::Invalid(format!("untyped value %{}", arg.value))
+                })?;
+                let code =
+                    self.plan.fails.code(&ty).ok_or_else(|| {
+                        VerifiedError::Invalid(format!("no failure code for {ty}"))
+                    })?;
+                self.value_of(i.dest, &i.ty)?;
+                self.raise(code, src, s.len())
+            }
             Op::Call {
                 callee,
                 args,
@@ -1028,84 +1211,46 @@ impl FnLower<'_> {
                 if !types.is_empty() {
                     return Err(self.err(Unsupported::Generic, format!("call {callee}[...]")));
                 }
-                let target = self
-                    .plan
-                    .index
-                    .get(callee)
-                    .map(|&n| &self.plan.functions[n])
-                    .ok_or_else(|| {
-                        self.err(
-                            Unsupported::ExternalFunction,
-                            format!("call to unplanned function {callee}"),
-                        )
-                    })?;
-                let (label, nres, params, ranges) = (
-                    target.label,
-                    target.result.len(),
-                    target.params.clone(),
-                    target.writeback.clone(),
-                );
+                let n = *self.plan.index.get(callee).ok_or_else(|| {
+                    self.err(
+                        Unsupported::ExternalFunction,
+                        format!("call to unplanned function {callee}"),
+                    )
+                })?;
+                let params = self.plan.functions[n].params.clone();
                 if params.len() != args.len() {
                     return Err(VerifiedError::Invalid(format!("arity of {callee}")));
                 }
-                let area = nres + params.iter().map(|(_, s)| s.len()).sum::<u32>();
-                self.out_words = self.out_words.max(area);
-                let mut index = nres;
-                let mut writebacks = vec![];
-                for ((arg, (pass, s)), ranges) in args.iter().zip(&params).zip(ranges) {
+                let mut words = vec![];
+                for (arg, (pass, s)) in args.iter().zip(&params) {
                     let (src, ashape) = self.value(arg.value)?;
                     if ashape.len() != s.len() {
                         return Err(VerifiedError::Invalid(format!(
                             "argument shape of {callee}"
                         )));
                     }
-                    for w in 0..s.len() {
-                        self.push(Lir::StoreOut {
-                            index: index + w,
-                            src: src + w,
-                        })?;
-                    }
-                    if *pass == Pass::Inout {
+                    let place = if *pass == Pass::Inout {
                         let place = arg.place.clone().ok_or_else(|| {
                             VerifiedError::Invalid("inout argument without a place".into())
                         })?;
-                        writebacks.push((place, index, ranges));
-                    }
-                    index += s.len();
+                        Some(self.place(&place.root, &place.path)?.0)
+                    } else {
+                        None
+                    };
+                    words.push((src, s.len(), place));
                 }
-                self.push(Lir::Call { callee: label })?;
                 let (dst, dshape) = self.value_of(i.dest, &i.ty)?;
-                if dshape.len() != nres {
+                if dshape.len() != self.plan.functions[n].result.len() {
                     return Err(VerifiedError::Invalid(format!("result shape of {callee}")));
                 }
-                for w in 0..nres {
-                    self.push(Lir::LoadOut {
-                        dst: dst + w,
-                        index: w,
-                    })?;
-                }
-                // Copy back only the words the callee may write: two
-                // `inout` arguments may name disjoint projections of one
-                // place (`f(inout p, inout p)` with `p.{x}` and `q.{y}`).
-                for (place, index, ranges) in writebacks {
-                    let (slot, _) = self.place(&place.root, &place.path)?;
-                    for (start, len) in ranges {
-                        for w in start..start + len {
-                            self.push(Lir::LoadOut {
-                                dst: slot + w,
-                                index: index + w,
-                            })?;
-                        }
-                    }
-                }
-                Ok(())
+                self.call(n, &words, dst, None)
             }
             Op::Index(..) => Err(self.err(Unsupported::Index, "dynamic indexing")),
             Op::Indirect { .. } | Op::Closure { .. } => {
                 Err(self.err(Unsupported::FunctionValue, "closures and indirect calls"))
             }
-            Op::Try(_) => Err(self.err(Unsupported::Effect, "`?`")),
-            Op::Handle { .. } => Err(self.err(Unsupported::Effect, "effect handlers")),
+            Op::Try(v) => self.try_(*v, i),
+            Op::Handle { expr, aliases, .. } => self.handle(expr, aliases, i),
             #[allow(unreachable_patterns)]
             _ => Err(self.err(
                 Unsupported::Operation,
@@ -1113,6 +1258,371 @@ impl FnLower<'_> {
             )),
         }
     }
+
+    // --- Milestone 7 (abort-only `Fail[E]`) ---
+
+    fn fresh(&mut self) -> Label {
+        let l = *self.next_label;
+        *self.next_label += 1;
+        l
+    }
+
+    /// Copy the `inout` parameters into the incoming area (on return and on
+    /// a raise: a caller sees the writes made before a failure).
+    fn write_back_inout(&mut self) -> Result<(), VerifiedError> {
+        let mut index = self.me.ret_words;
+        let params = self.f.params.clone();
+        for ((p, (pass, s)), erased) in params.iter().zip(&self.me.params).zip(&self.me.erased) {
+            if *pass == Pass::Inout && !erased {
+                let (slot, _) = self.local(&p.name)?;
+                for w in 0..s.len() {
+                    self.push(Lir::StoreIn {
+                        index: index + w,
+                        src: slot + w,
+                    })?;
+                }
+            }
+            index += s.len();
+        }
+        Ok(())
+    }
+
+    /// Raise failure `code` with the payload words at `src`: return it to
+    /// the caller with the status protocol, or abort the process (the entry).
+    fn raise(&mut self, code: u64, src: Slot, words: u32) -> Result<(), VerifiedError> {
+        if self.me.status {
+            let c = self.alloc(1)?;
+            self.push(Lir::Const { dst: c, word: code })?;
+            self.push(Lir::StoreIn { index: 0, src: c })?;
+            for w in 0..words {
+                self.push(Lir::StoreIn {
+                    index: 1 + w,
+                    src: src + w,
+                })?;
+            }
+            self.write_back_inout()?;
+            return self.push(Lir::Return);
+        }
+        let k = self.plan.fails.trap_kind(code).ok_or_else(|| {
+            VerifiedError::Invalid(format!(
+                "Fail[{}] raised where nothing handles it",
+                self.plan.fails.name(code)
+            ))
+        })?;
+        self.push(Lir::Trap(k))
+    }
+
+    /// Raise `RuntimeError::<variant>` through this function's context (the
+    /// status protocol when the program handles or raises `RuntimeError`,
+    /// else the division-by-zero abort).
+    pub fn raise_runtime_error(&mut self, variant: &str) -> Result<(), VerifiedError> {
+        let Some(code) = self.plan.fails.implicit(TrapKind::DivisionByZero) else {
+            return self.push(Lir::Trap(TrapKind::DivisionByZero));
+        };
+        let ty = Type::named("RuntimeError");
+        let layout = variant_layout(self.world, &ty, variant, &self.f.name)
+            .ok_or_else(|| VerifiedError::Invalid("RuntimeError is not an enum".into()))??;
+        let words = self.words(&ty)?;
+        let src = self.alloc(words)?;
+        self.push(Lir::Const {
+            dst: src,
+            word: layout.tag,
+        })?;
+        for w in 1..words {
+            self.push(Lir::Const {
+                dst: src + w,
+                word: 0,
+            })?;
+        }
+        self.raise(code, src, words)
+    }
+
+    /// After a call, the status word is in `status`: pass it and its payload
+    /// on to this function's caller, or abort (the entry) for each code the
+    /// callee may raise.
+    fn propagate(&mut self, status: Slot, codes: &BTreeSet<u64>) -> Result<(), VerifiedError> {
+        if self.me.status {
+            let tmp = self.alloc(1)?;
+            self.push(Lir::StoreIn {
+                index: 0,
+                src: status,
+            })?;
+            for w in 1..=self.plan.fails.payload_words(codes) {
+                self.push(Lir::LoadOut { dst: tmp, index: w })?;
+                self.push(Lir::StoreIn { index: w, src: tmp })?;
+            }
+            self.write_back_inout()?;
+            return self.push(Lir::Return);
+        }
+        let tmp = self.alloc(2)?;
+        for &code in codes {
+            let k = self.plan.fails.trap_kind(code).ok_or_else(|| {
+                VerifiedError::Invalid(format!(
+                    "Fail[{}] reaches the entry",
+                    self.plan.fails.name(code)
+                ))
+            })?;
+            let next = self.fresh();
+            self.status_is(status, code, tmp, next)?;
+            self.push(Lir::Trap(k))?;
+            self.push(Lir::Label(next))?;
+        }
+        self.push(Lir::Trap(TrapKind::Unreachable))
+    }
+
+    /// Branch to `otherwise` unless the word at `status` is `code` (uses the
+    /// two scratch words at `tmp`).
+    fn status_is(
+        &mut self,
+        status: Slot,
+        code: u64,
+        tmp: Slot,
+        otherwise: Label,
+    ) -> Result<(), VerifiedError> {
+        self.push(Lir::Const {
+            dst: tmp,
+            word: code,
+        })?;
+        self.push(Lir::Compare {
+            cond: Cond::Eq,
+            kind: Kind::U64,
+            dst: tmp + 1,
+            a: status,
+            b: tmp,
+        })?;
+        self.push(Lir::BranchZero {
+            cond: tmp + 1,
+            target: otherwise,
+        })
+    }
+
+    /// Call planned function `n` with `(src, words, inout place)` per
+    /// parameter and its result written to `dst`. A callee with the status
+    /// protocol is tested after the call: on failure, `catch = (code,
+    /// label)` jumps to `label` for that code (its payload stays in the
+    /// outgoing area at word 1), and every other failure is propagated.
+    fn call(
+        &mut self,
+        n: usize,
+        args: &[(Slot, u32, Option<Slot>)],
+        dst: Slot,
+        catch: Option<(u64, Label)>,
+    ) -> Result<(), VerifiedError> {
+        let target = &self.plan.functions[n];
+        let (label, ret, base, nres, ranges, status, raises) = (
+            target.label,
+            target.ret_words,
+            target.result_base(),
+            target.result.len(),
+            target.writeback.clone(),
+            target.status,
+            target.raises.clone(),
+        );
+        let area = ret + args.iter().map(|(_, w, _)| w).sum::<u32>();
+        self.out_words = self.out_words.max(area);
+        let mut index = ret;
+        let mut writebacks = vec![];
+        for ((src, words, place), ranges) in args.iter().zip(ranges) {
+            for w in 0..*words {
+                self.push(Lir::StoreOut {
+                    index: index + w,
+                    src: src + w,
+                })?;
+            }
+            if let Some(slot) = place {
+                writebacks.push((*slot, index, ranges));
+            }
+            index += words;
+        }
+        self.push(Lir::Call { callee: label })?;
+        // Copy back only the words the callee may write: two `inout`
+        // arguments may name disjoint projections of one place (`f(inout
+        // p, inout p)` with `p.{x}` and `q.{y}`). A failing callee wrote
+        // them back too.
+        for (slot, index, ranges) in writebacks {
+            for (start, len) in ranges {
+                for w in start..start + len {
+                    self.push(Lir::LoadOut {
+                        dst: slot + w,
+                        index: index + w,
+                    })?;
+                }
+            }
+        }
+        let failed = if status {
+            let st = self.alloc(3)?;
+            let err = self.fresh();
+            self.push(Lir::LoadOut { dst: st, index: 0 })?;
+            // Branch to `err` unless the status is 0.
+            self.status_is(st, 0, st + 1, err)?;
+            Some((st, err))
+        } else {
+            None
+        };
+        for w in 0..nres {
+            self.push(Lir::LoadOut {
+                dst: dst + w,
+                index: base + w,
+            })?;
+        }
+        if let Some((st, err)) = failed {
+            let cont = self.fresh();
+            self.push(Lir::Jump(cont))?;
+            self.push(Lir::Label(err))?;
+            let mut rest = raises;
+            if let Some((code, handler)) = catch
+                && rest.remove(&code)
+            {
+                let other = self.fresh();
+                self.status_is(st, code, st + 1, other)?;
+                self.push(Lir::Jump(handler))?;
+                self.push(Lir::Label(other))?;
+            }
+            self.propagate(st, &rest)?;
+            self.push(Lir::Label(cont))?;
+        }
+        Ok(())
+    }
+
+    /// `v?` on a `Result[T, E]`: the `Ok` payload, or raise the `Err` one.
+    fn try_(&mut self, v: ValueId, i: &Instruction) -> Result<(), VerifiedError> {
+        let (src, _) = self.value(v)?;
+        let ty = self
+            .types
+            .get(&v)
+            .cloned()
+            .ok_or_else(|| VerifiedError::Invalid(format!("untyped value %{v}")))?;
+        let Type::Named(_, args) = &ty else {
+            return Err(VerifiedError::Invalid(format!("`?` on {ty}")));
+        };
+        let error = args
+            .get(1)
+            .cloned()
+            .ok_or_else(|| VerifiedError::Invalid(format!("`?` on {ty}")))?;
+        let layout = |this: &Self, ctor: &str| {
+            variant_layout(this.world, &ty, ctor, &this.f.name)
+                .ok_or_else(|| VerifiedError::Invalid(format!("`?` on {ty}")))?
+        };
+        let ok = layout(self, "Ok")?;
+        let err = layout(self, "Err")?;
+        let (dst, dshape) = self.value_of(i.dest, &i.ty)?;
+        let code = self
+            .plan
+            .fails
+            .code(&error)
+            .ok_or_else(|| VerifiedError::Invalid(format!("no failure code for {error}")))?;
+        let tmp = self.alloc(2)?;
+        let is_ok = self.fresh();
+        self.status_is(src, err.tag, tmp, is_ok)?;
+        let ewords = self.words(&error)?;
+        let eoffset = err.fields.first().map(|f| f.1).unwrap_or(1);
+        self.raise(code, src + eoffset, ewords)?;
+        self.push(Lir::Label(is_ok))?;
+        let ooffset = ok.fields.first().map(|f| f.1).unwrap_or(1);
+        self.copy(dst, src + ooffset, dshape.len())
+    }
+
+    /// The argument words for a nested handler function: its captures (the
+    /// enclosing locals of the same source names) and the value `bind`
+    /// names, if any.
+    fn nested_args(
+        &mut self,
+        n: usize,
+        aliases: &BTreeMap<String, String>,
+        bind: Option<(&str, Slot)>,
+    ) -> Result<Vec<(Slot, u32, Option<Slot>)>, VerifiedError> {
+        let name = self.plan.functions[n].name.clone();
+        let target = &self.plan.functions[n];
+        let erased = target.erased.clone();
+        let shapes = target.params.clone();
+        let ir_params = self
+            .plan_program_params(&name)
+            .ok_or_else(|| VerifiedError::Invalid(format!("no IR for {name}")))?;
+        let mut out = vec![];
+        for ((p, (pass, s)), erased) in ir_params.iter().zip(&shapes).zip(erased) {
+            if erased {
+                out.push((0, 0, None));
+                continue;
+            }
+            if let Some((b, slot)) = bind
+                && p.name == b
+            {
+                out.push((slot, s.len(), None));
+                continue;
+            }
+            let local = aliases.get(&p.name).cloned().unwrap_or(p.name.clone());
+            let (slot, ls) = self.local(&local)?;
+            if ls.len() != s.len() {
+                return Err(VerifiedError::Invalid(format!(
+                    "capture '{}' of {name}",
+                    p.name
+                )));
+            }
+            let place = (*pass == Pass::Inout).then_some(slot);
+            out.push((slot, s.len(), place));
+        }
+        Ok(out)
+    }
+
+    fn is_never(&self, v: ValueId) -> bool {
+        self.types.get(&v).is_some_and(|t| t.name() == "Never")
+    }
+
+    fn plan_program_params(&self, name: &str) -> Option<Vec<crate::ast::Param>> {
+        self.program.functions.get(name).map(|f| f.params.clone())
+    }
+
+    /// `handle Fail[E] in body with { return v => r, raise(e, _) => h }`:
+    /// call the body; on success call the `return` clause with its value;
+    /// on a raise of `E` call the `raise` clause with the payload; any
+    /// other failure passes on.
+    fn handle(
+        &mut self,
+        expr: &crate::ast::Expr,
+        aliases: &BTreeMap<String, String>,
+        i: &Instruction,
+    ) -> Result<(), VerifiedError> {
+        let h = self
+            .plan
+            .handlers
+            .get(&(expr.span.start, expr.span.end))
+            .cloned()
+            .ok_or_else(|| VerifiedError::Invalid("unplanned handler".into()))?;
+        let index = |name: &str| {
+            self.plan
+                .index
+                .get(name)
+                .copied()
+                .ok_or_else(|| VerifiedError::Invalid(format!("unplanned {name}")))
+        };
+        let (body, ret, raise) = (index(&h.body)?, index(&h.ret)?, index(&h.raise)?);
+        let (dst, _) = self.value_of(i.dest, &i.ty)?;
+        let value = self.alloc(self.plan.functions[body].result.len())?;
+        let code = self.plan.fails.code(&h.error);
+        let handler = self.fresh();
+        let end = self.fresh();
+        let args = self.nested_args(body, aliases, None)?;
+        self.call(body, &args, value, code.map(|c| (c, handler)))?;
+        let bind = h.ret_bind.as_deref().map(|b| (b, value));
+        let args = self.nested_args(ret, aliases, bind)?;
+        self.call(ret, &args, dst, None)?;
+        self.push(Lir::Jump(end))?;
+        self.push(Lir::Label(handler))?;
+        let words = self.words(&h.error)?;
+        let payload = self.alloc(words)?;
+        for w in 0..words {
+            self.push(Lir::LoadOut {
+                dst: payload + w,
+                index: 1 + w,
+            })?;
+        }
+        let bind = h.raise_bind.as_deref().map(|b| (b, payload));
+        let args = self.nested_args(raise, aliases, bind)?;
+        self.call(raise, &args, dst, None)?;
+        self.push(Lir::Label(end))
+    }
+
+    // --- end Milestone 7 ---
 
     /// Whether `block` ends in a self call whose result is returned directly.
     fn tail_self_call(&self, block: &Block) -> bool {
@@ -1164,11 +1674,39 @@ impl FnLower<'_> {
         self.push(Lir::Label(self.me.label))?;
         let enter_at = self.rows.len();
         self.push(Lir::Enter { words: 0 })?;
+        // A function that passes an implicit failure to its caller catches
+        // its own checked instructions' aborts in raise stubs.
+        let mut scope = (TrapKind::Overflow.label(), TrapKind::DivisionByZero.label());
+        if self.me.status {
+            for k in [TrapKind::Overflow, TrapKind::DivisionByZero] {
+                if let Some(code) = self.plan.fails.implicit(k)
+                    && self.me.raises.contains(&code)
+                {
+                    let l = self.fresh();
+                    self.stubs.push((l, k));
+                    if k == TrapKind::Overflow {
+                        scope.0 = l;
+                    } else {
+                        scope.1 = l;
+                    }
+                }
+            }
+        }
+        if !self.stubs.is_empty() {
+            self.push(Lir::Scope {
+                ovf: scope.0,
+                div0: scope.1,
+            })?;
+        }
         self.push(Lir::Label(self.me.label + 1))?;
-        // Parameters: incoming area words after the results.
-        let mut index = nres;
+        // Parameters: incoming area words after the results (and status).
+        let mut index = self.me.ret_words;
         let params = self.f.params.clone();
-        for p in &params {
+        let erased = self.me.erased.clone();
+        for (p, erased) in params.iter().zip(erased) {
+            if erased {
+                continue;
+            }
             let (slot, s) = self.local(&p.name)?;
             for w in 0..s.len() {
                 self.push(Lir::LoadIn {
@@ -1199,7 +1737,7 @@ impl FnLower<'_> {
                     let Op::Call { args, .. } = &i.op else {
                         unreachable!()
                     };
-                    let mut index = nres;
+                    let mut index = self.me.ret_words;
                     let mut staged = vec![];
                     for arg in args {
                         let (src, s) = self.value(arg.value)?;
@@ -1223,6 +1761,14 @@ impl FnLower<'_> {
                 continue;
             }
             match &block.terminator {
+                // A `Never` value only exists after a raise, which already
+                // left the function: the rest of the block is dead.
+                Terminator::Return(v) if self.is_never(*v) => {
+                    self.push(Lir::Trap(TrapKind::Unreachable))?
+                }
+                Terminator::Jump { args, .. } if args.iter().any(|v| self.is_never(*v)) => {
+                    self.push(Lir::Trap(TrapKind::Unreachable))?
+                }
                 Terminator::Return(v) => {
                     let (src, s) = self.value(*v)?;
                     if s.len() != nres {
@@ -1231,26 +1777,23 @@ impl FnLower<'_> {
                             self.f.name
                         )));
                     }
+                    let base = self.me.result_base();
+                    if self.me.status {
+                        let zero = self.alloc(1)?;
+                        self.push(Lir::Const { dst: zero, word: 0 })?;
+                        self.push(Lir::StoreIn {
+                            index: 0,
+                            src: zero,
+                        })?;
+                    }
                     for w in 0..nres {
                         self.push(Lir::StoreIn {
-                            index: w,
+                            index: base + w,
                             src: src + w,
                         })?;
                     }
                     // `inout` parameters are written back on return.
-                    let mut index = nres;
-                    for (p, (pass, s)) in params.iter().zip(&self.me.params) {
-                        if *pass == Pass::Inout {
-                            let (slot, _) = self.local(&p.name)?;
-                            for w in 0..s.len() {
-                                self.push(Lir::StoreIn {
-                                    index: index + w,
-                                    src: slot + w,
-                                })?;
-                            }
-                        }
-                        index += s.len();
-                    }
+                    self.write_back_inout()?;
                     self.push(Lir::Return)?;
                 }
                 Terminator::Jump { block, args } => {
@@ -1305,6 +1848,34 @@ impl FnLower<'_> {
                 Terminator::Unreachable => self.push(Lir::Trap(TrapKind::Unreachable))?,
             }
         }
+        // Raise stubs of the caught implicit failures, then the default
+        // trap scope again.
+        if !self.stubs.is_empty() {
+            for (l, k) in std::mem::take(&mut self.stubs) {
+                self.push(Lir::Label(l))?;
+                if k == TrapKind::Overflow {
+                    let code = self.plan.fails.implicit(k).ok_or_else(|| {
+                        VerifiedError::Invalid("overflow stub without a code".into())
+                    })?;
+                    let ty = Type::named(crate::numeric::OVERFLOW_TYPE);
+                    let words = self.words(&ty)?;
+                    let src = self.alloc(words)?;
+                    for w in 0..words {
+                        self.push(Lir::Const {
+                            dst: src + w,
+                            word: 0,
+                        })?;
+                    }
+                    self.raise(code, src, words)?;
+                } else {
+                    self.raise_runtime_error("DivisionByZero")?;
+                }
+            }
+            self.push(Lir::Scope {
+                ovf: TrapKind::Overflow.label(),
+                div0: TrapKind::DivisionByZero.label(),
+            })?;
+        }
         let words = self
             .next_slot
             .checked_add(self.out_words)
@@ -1358,7 +1929,8 @@ fn relocate(row: &mut Lir, out: u32) {
         | Lir::Jump(_)
         | Lir::Enter { .. }
         | Lir::Return
-        | Lir::Trap(_) => {}
+        | Lir::Trap(_)
+        | Lir::Scope { .. } => {}
     }
 }
 
@@ -1382,6 +1954,7 @@ pub fn function(
         .collect();
     FnLower {
         world,
+        program,
         plan,
         me,
         f,
@@ -1396,6 +1969,7 @@ pub fn function(
         out_words: 0,
         next_label,
         max_rows,
+        stubs: vec![],
     }
     .function()
 }

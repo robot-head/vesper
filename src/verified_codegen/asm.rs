@@ -43,6 +43,9 @@ pub struct Asm {
     pub prologues: Vec<Prologue>,
     /// `rel32` fields that call an external symbol.
     pub externals: Vec<(usize, &'static str)>,
+    /// The trap scope set by the last `M::Scope` (`None`: the program-wide
+    /// abort exits).
+    pub scope: Option<(Label, Label)>,
 }
 impl Asm {
     pub fn bytes(&mut self, b: &[u8]) {
@@ -50,6 +53,20 @@ impl Asm {
     }
     pub fn u32(&mut self, w: u32) {
         self.code.extend_from_slice(&w.to_le_bytes());
+    }
+    /// Where an abort of kind `k` jumps in the current trap scope.
+    pub fn trap_label(&self, k: TrapKind) -> Label {
+        match (self.scope, k) {
+            (Some((ovf, _)), TrapKind::Overflow) => ovf,
+            (Some((_, div0)), TrapKind::DivisionByZero) => div0,
+            _ => k.label(),
+        }
+    }
+    /// Set the trap scope (`M::Scope`); the default labels clear it.
+    pub fn set_scope(&mut self, ovf: Label, div0: Label) {
+        self.scope = (ovf != TrapKind::Overflow.label()
+            || div0 != TrapKind::DivisionByZero.label())
+        .then_some((ovf, div0));
     }
     pub fn here(&self) -> usize {
         self.code.len()

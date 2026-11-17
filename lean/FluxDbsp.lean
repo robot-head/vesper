@@ -326,4 +326,123 @@ theorem fenced_publish_exactly_once {R : Type} (committed : List R) (n : Nat) :
 #print axioms migration_assembles_owner
 #print axioms migration_preserves_global
 #print axioms fenced_publish_exactly_once
+/-!
+## Per-bin migration and Kafka transactions (wave nine)
+
+Models only: a routing is a function from rows (or their bins) to workers,
+states are `α → Int`, a Kafka partition is a list of transactions with a
+commit flag, and a `read_committed` reader sees the records of committed
+transactions in log order. These are not theorems about the Rust code, the
+Kafka wire protocol or a broker.
+-/
+
+/-- A worker none of whose bins change owner in a step holds the same rows
+under both routings, so its checkpoint at the barrier is reused unchanged. -/
+theorem untouched_worker_keeps_state {α W : Type} [DecidableEq W] (old new : α → W) (w : W)
+    (same : ∀ a, old a = w ↔ new a = w) (f : α → Int) :
+    restrict old w f = restrict new w f := by
+  funext a
+  by_cases h : old a = w
+  · have h' : new a = w := (same a).mp h
+    simp [restrict, h, h']
+  · have h' : ¬ new a = w := fun e => h ((same a).mpr e)
+    simp [restrict, h, h']
+
+/-- A per-bin step: the new owner `j` keeps its own rows that stay and adds
+the rows every old owner sends it, which is exactly its share of the
+global state under the new routing. -/
+theorem bin_step_assembles_owner {α W : Type} [DecidableEq W] (old new : α → W) (j : W)
+    (ws : List W) (nodup : ws.Nodup) (total : ∀ a, old a ∈ ws) (f : α → Int) (a : α) :
+    zsum (ws.map fun i => restrict new j (restrict old i f)) a = restrict new j f a := by
+  have h := migration_assembles_owner new j (ws.map fun i => restrict old i f) a
+  rw [List.map_map] at h
+  have hs : zsum (ws.map fun i => restrict old i f) = f := by
+    funext x
+    exact restrict_parts_sum old ws nodup total f x
+  rw [hs] at h
+  exact h
+
+/-- One migration step under routing `r`: new owner `j` sums what every
+old worker `i` sends it (`i`'s rows that `r` gives `j`). -/
+def reroute {α W : Type} [DecidableEq W] (ws : List W) (r : α → W) (parts : W → α → Int) :
+    W → α → Int :=
+  fun j => zsum (ws.map fun i => restrict r j (parts i))
+
+/-- A sequence of steps, applied in order (gradual migration). -/
+def migrate {α W : Type} [DecidableEq W] (ws : List W) : List (α → W) → (W → α → Int) →
+    W → α → Int
+  | [], parts => parts
+  | r :: rs, parts => migrate ws rs (reroute ws r parts)
+
+/-- Gradual migration loses and duplicates nothing: after any number of
+steps, each re-routing the previous step's parts, the parts still sum to
+the original global state. -/
+theorem gradual_steps_preserve_global {α W : Type} [DecidableEq W] (ws : List W)
+    (nodup : ws.Nodup) (steps : List (α → W)) (total : ∀ r ∈ steps, ∀ a, r a ∈ ws)
+    (parts : W → α → Int) (a : α) :
+    zsum (ws.map (migrate ws steps parts)) a = zsum (ws.map parts) a := by
+  induction steps generalizing parts with
+  | nil => rfl
+  | cons r rs ih =>
+    show zsum (ws.map (migrate ws rs (reroute ws r parts))) a = _
+    rw [ih (fun r' h => total r' (List.mem_cons_of_mem r h))]
+    have step : ws.map (reroute ws r parts) = ws.map fun j => restrict r j (zsum (ws.map parts)) := by
+      apply List.map_congr_left
+      intro j _
+      funext x
+      have h := migration_assembles_owner r j (ws.map parts) x
+      rw [List.map_map] at h
+      exact h
+    rw [step]
+    exact restrict_parts_sum r ws nodup (total r (List.mem_cons_self ..)) _ a
+
+/-- What a `read_committed` reader sees: committed transactions' records. -/
+def visible {R : Type} (log : List (Bool × List R)) : List R :=
+  (log.filter (·.1)).flatMap (·.2)
+
+theorem visible_append {R : Type} (xs ys : List (Bool × List R)) :
+    visible (xs ++ ys) = visible xs ++ visible ys := by
+  simp [visible, List.filter_append, List.flatMap_append]
+
+/-- An aborted transaction (a fenced zombie's, or one a restart aborts)
+adds nothing a `read_committed` reader sees. -/
+theorem aborted_is_invisible {R : Type} (log : List (Bool × List R)) (rs : List R) :
+    visible (log ++ [(false, rs)]) = visible log := by
+  rw [visible_append]
+  simp [visible]
+
+/-- Transactional exactly-once: the sink commits epoch `k`'s records and its
+progress (`k + 1`) in one transaction. A restart reads the committed
+progress `n`, aborts whatever the dead incarnation left open, and resumes at
+epoch `n`; the reader then sees every epoch's records once, in order. -/
+theorem transactional_resume_exactly_once {R : Type} (epochs : List (List R)) (n : Nat)
+    (zombies : List (List R)) :
+    visible ((epochs.take n).map (true, ·) ++ zombies.map (false, ·) ++
+      (epochs.drop n).map (true, ·)) = epochs.flatten := by
+  have hz : visible (zombies.map (fun z => (false, z))) = [] := by
+    induction zombies with
+    | nil => rfl
+    | cons z zs ih =>
+      have : (z :: zs).map (fun z => (false, z)) = [(false, z)] ++ zs.map (fun z => (false, z)) :=
+        rfl
+      rw [this, visible_append, ih]
+      rfl
+  have hc : ∀ (l : List (List R)), visible (l.map (fun e => (true, e))) = l.flatten := by
+    intro l
+    induction l with
+    | nil => rfl
+    | cons e es ih =>
+      have : (e :: es).map (fun e => (true, e)) = [(true, e)] ++ es.map (fun e => (true, e)) :=
+        rfl
+      rw [this, visible_append, ih]
+      simp [visible]
+  rw [visible_append, visible_append, hz, hc, hc, List.append_nil, ← List.flatten_append,
+    List.take_append_drop]
+
+#print axioms untouched_worker_keeps_state
+#print axioms bin_step_assembles_owner
+#print axioms gradual_steps_preserve_global
+#print axioms visible_append
+#print axioms aborted_is_invisible
+#print axioms transactional_resume_exactly_once
 end Vesper.FluxDbsp
