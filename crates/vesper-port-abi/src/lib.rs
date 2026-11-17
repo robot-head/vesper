@@ -41,7 +41,10 @@ macro_rules! integer {
         }
     )*};
 }
-integer!(u8, u32, u64, i64);
+// Signed kinds are sign-extended into the word (`as u64` from a signed
+// type does that), unsigned ones zero-extended; `usize`/`isize` are 64-bit
+// on every target the export ABI supports.
+integer!(u8, u16, u32, u64, usize, i8, i16, i32, i64, isize);
 
 impl Abi for bool {
     const WORDS: usize = 1;
@@ -228,6 +231,16 @@ mod tests {
         round_trip(Some((1u64, -2.5f64)));
         round_trip(Err::<u64, RuntimeError>(RuntimeError::IndexOutOfBounds));
         round_trip(Ok::<u64, RuntimeError>(u64::MAX));
+        round_trip((i8::MIN, -1i16, i32::MIN, isize::MAX, u16::MAX, usize::MAX));
+    }
+
+    #[test]
+    fn signed_words_are_sign_extended() {
+        let mut words = [0u64; 1];
+        (-1i8).put(&mut words);
+        assert_eq!(words[0], u64::MAX);
+        200u8.put(&mut words);
+        assert_eq!(words[0], 200);
     }
 
     #[test]

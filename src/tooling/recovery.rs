@@ -167,29 +167,14 @@ fn reserved(name: &str) -> bool {
             | "RuntimeError"
             | "ArithOverflow"
             | "Fail"
-            | "u8"
-            | "u32"
-            | "u64"
-            | "i64"
-            | "f64"
-            | "bool"
-    ) || crate::numeric::wrapping_intrinsic(name).is_some()
+    ) || crate::numeric::is_scalar_name(name)
+        || crate::numeric::wrapping_intrinsic(name).is_some()
 }
 fn primitive(name: &str) -> bool {
     matches!(
         name,
-        "Unit"
-            | "Never"
-            | "String"
-            | "u8"
-            | "u32"
-            | "u64"
-            | "i64"
-            | "f64"
-            | "bool"
-            | "RuntimeError"
-            | "ArithOverflow"
-    )
+        "Unit" | "Never" | "String" | "RuntimeError" | "ArithOverflow"
+    ) || crate::numeric::is_scalar_name(name)
 }
 fn item_span(item: &Item) -> Option<&Span> {
     match item {

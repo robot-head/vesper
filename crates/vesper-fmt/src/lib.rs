@@ -92,6 +92,8 @@ struct Piece<'a> {
     text: &'a str,
     /// The source whitespace before this token held a blank line.
     blank: bool,
+    /// No whitespace separates this token from the previous one.
+    glued: bool,
 }
 fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
     tokens
@@ -101,6 +103,7 @@ fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
             kind: t.kind,
             text: &source[t.span.clone()],
             blank: false,
+            glued: false,
         })
         .collect()
 }
@@ -224,6 +227,7 @@ fn once(
     // lossless token's byte range; compare against lexer evidence before use.
     let mut atoms = Vec::new();
     let mut blank = false;
+    let mut glued = false;
     let mut expected = tokens.iter().filter(|t| t.kind != K::Eof);
     for element in syntax.descendants_with_tokens() {
         if let Some(token) = element.into_token() {
@@ -239,11 +243,13 @@ fn once(
             }
             if kind == K::Whitespace {
                 blank |= source[start..end].matches('\n').nth(1).is_some();
+                glued = false;
             } else {
                 atoms.push(Piece {
                     kind,
                     text: &source[start..end],
                     blank: std::mem::take(&mut blank),
+                    glued: std::mem::replace(&mut glued, true),
                 });
             }
         }
@@ -365,6 +371,10 @@ fn is_binary_operator(kind: K) -> bool {
             | K::Ge
             | K::And
             | K::Or
+            | K::Amp
+            | K::Caret
+            | K::Shl
+            | K::Shr
     )
 }
 /// Whether a token can end an operand, so a following `-`/`*` is infix.
@@ -469,10 +479,18 @@ fn sequence<'a>(
     let mut previous: Option<Piece<'a>> = None;
     let mut previous_block = false;
     let mut previous_unary = false;
+    // Inside a package name `@scope/name` (`use` and trait paths), whose
+    // tokens must stay adjacent for the parser.
+    let mut package = false;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         let is_block = current.kind == K::LBrace && previous.is_none_or(|p| p.kind != K::Dot);
-        let spacing = if previous_unary {
+        package = current.glued
+            && previous.is_some_and(|p| {
+                (p.kind == K::At && current.kind == K::Lower)
+                    || (package && matches!(current.kind, K::Lower | K::Minus | K::Slash | K::Int))
+            });
+        let spacing = if previous_unary || package {
             Gap::None
         } else {
             previous.map_or(Gap::None, |p| gap(p, current, block, previous_block))
@@ -572,7 +590,7 @@ fn sequence<'a>(
         }
         previous_block = is_block;
         // A prefix `-`/`!` binds to its operand with no space.
-        previous_unary = matches!(current.kind, K::Minus | K::Bang)
+        previous_unary = matches!(current.kind, K::Minus | K::Bang | K::Tilde)
             && previous.is_none_or(|p| !ends_operand(p.kind));
         previous = Some(Piece {
             kind: match current.kind {
@@ -583,6 +601,7 @@ fn sequence<'a>(
             },
             text: current.text,
             blank: false,
+            glued: current.glued,
         });
     }
     concat_group(&mut line, document, &mut output)?;

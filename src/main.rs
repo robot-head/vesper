@@ -33,7 +33,7 @@ use std::{
 };
 use vesper::{ast::Diagnostic, check, ir, lean, lsp, native, optimize, parser, runtime::Runtime};
 
-const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> [FILE|DIR] [options]   (most commands take one .ves file; see vesper <command> --help)\n\nCommands:\n  forge   Check and expand explicit source Expr macros (forge --help)\n  grammar Validate canonical protocol bytes and Arrow IPC\n  verify  Kernel-check formatter document models (--format), or refute a contract (--refute)\n  fuzz    Crucible fuzzing of a source function (fuzz --help)\n  migrate Lift C/Rust signatures into .ves/.vsys (migrate --help)\n  replay  Verify and replay a Chrono .vchrono bundle (replay --help)\n  ebpf    Pre-flight verify an eBPF program (ebpf check --help)\n  fmt     Format supported source without changing tokens/comments\n  highlight  Chroma semantic highlighting: --html, --ansi, --json, --css (highlight --help)\n  shot    Render an SVG or 1x-4x PNG code card (shot --help)\n  lint    Analyze checked source and validate supported fixes\n  doc     Generate checked API docs, heatmaps and a search bundle (doc --help)\n  test    Run doctests in one shared JIT module, else the evaluator (test --doc)\n  bench   Measure finite scalar source kernels (bench --help)\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>), or a C-ABI library (--lib)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  audit   Audit declared dependencies against local policies (see audit --help)\n  top     Inspect Pulse fiber telemetry and linear obligations (top --help)\n  publish Run offline release gates and publish to a local CAS (publish --help)\n  json    Validate bounded JSON documents (see json --help)\n  traceparent  Validate W3C TraceContext v00 (see traceparent --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify and import configured-key signed artifacts (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --linker <path>    Linker for build (default: cc)\n  --codegen verified  build: direct verified code generator (scalar subset, no Cranelift)\n  --no-opt       Disable equality saturation\n  --verify=<list>    Run Stage-5 verifiers on emitted Cranelift (const-time,stack,realtime,detfloat,all)\n  --verify-<name>    One verifier (--verify-const-time, --verify-stack, ...)\n  --verify-policy <file>  Verifier policy JSON (vesper.native-verifiers/1)\n  --lib          build: a C-ABI library object (--lib-name, --interface, --rust-binding, --rust-types)\n  --tee          build: write the TDX RTMR / CCA REM measurement of the executable\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
+const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> [FILE|DIR] [options]   (most commands take one .ves file; check/run/jit/build/emit also take a package directory with a Loom.toml; see vesper <command> --help)\n\nCommands:\n  forge   Check and expand explicit source Expr macros (forge --help)\n  grammar Validate canonical protocol bytes and Arrow IPC\n  verify  Kernel-check formatter document models (--format), or refute a contract (--refute)\n  fuzz    Crucible fuzzing of a source function (fuzz --help)\n  migrate Lift C/Rust signatures into .ves/.vsys (migrate --help)\n  replay  Verify and replay a Chrono .vchrono bundle (replay --help)\n  ebpf    Pre-flight verify an eBPF program (ebpf check --help)\n  fmt     Format supported source without changing tokens/comments\n  highlight  Chroma semantic highlighting: --html, --ansi, --json, --css (highlight --help)\n  shot    Render an SVG or 1x-4x PNG code card (shot --help)\n  lint    Analyze checked source and validate supported fixes\n  doc     Generate checked API docs, heatmaps and a search bundle (doc --help)\n  test    Run doctests in one shared JIT module, else the evaluator (test --doc)\n  bench   Measure finite scalar source kernels (bench --help)\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>), or a C-ABI library (--lib)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  audit   Audit declared dependencies against local policies (see audit --help)\n  top     Inspect Pulse fiber telemetry and linear obligations (top --help)\n  publish Run offline release gates and publish to a local CAS (publish --help)\n  json    Validate bounded JSON documents (see json --help)\n  traceparent  Validate W3C TraceContext v00 (see traceparent --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify and import configured-key signed artifacts (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --linker <path>    Linker for build (default: cc)\n  --codegen verified  build: direct verified code generator (scalar subset, no Cranelift)\n  --no-opt       Disable equality saturation\n  --verify=<list>    Run Stage-5 verifiers on emitted Cranelift (const-time,stack,realtime,detfloat,all)\n  --verify-<name>    One verifier (--verify-const-time, --verify-stack, ...)\n  --verify-policy <file>  Verifier policy JSON (vesper.native-verifiers/1)\n  --lib          build: a C-ABI library object (--lib-name, --interface, --rust-binding, --rust-types)\n  --tee          build: write the TDX RTMR / CCA REM measurement of the executable\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
 /// Stack for the CLI thread. The checker, parser and lowering recurse over
 /// expression depth (bounded by their own budgets), and debug builds use large
 /// frames. Windows gives the main thread only 1 MiB, which a 25-deep generic
@@ -260,7 +260,31 @@ fn cli() -> Result<(), String> {
         return Err("--package requires emit --emit interface".into());
     }
     let input = input.ok_or("missing source file; see --help")?;
-    let source = fs::read_to_string(&input).map_err(|e| format!("{input}: {e}"))?;
+    // Lane F0: a directory with a Loom.toml is a package; its modules and
+    // path dependencies are assembled into one module (`vesper::packages`).
+    let loaded = if vesper::packages::is_package(std::path::Path::new(&input)) {
+        if command == "emit" && format == "cst" {
+            return Err("--emit cst takes one source file, not a package".into());
+        }
+        if target.as_deref() == Some("bpf") {
+            return Err("--target bpf takes one source file, not a package".into());
+        }
+        let assembled = vesper::packages::load(std::path::Path::new(&input))?;
+        if !assembled.ok() {
+            package_diagnostics(&assembled, &assembled.diagnostics, json);
+            return Err(format!(
+                "{} package error(s)",
+                assembled.diagnostics.len() + assembled.manifest_errors.len()
+            ));
+        }
+        Some(assembled)
+    } else {
+        None
+    };
+    let source = match &loaded {
+        Some(p) => p.sources.combined(),
+        None => fs::read_to_string(&input).map_err(|e| format!("{input}: {e}"))?,
+    };
     if command == "build" && target.as_deref() == Some("bpf") {
         // Compiler eBPF target (§27): verified BPF ELF object with BTF.
         let summary =
@@ -268,7 +292,14 @@ fn cli() -> Result<(), String> {
         print!("{summary}");
         return Ok(());
     }
-    let mut parsed = parser::parse(&source);
+    let mut parsed = match &loaded {
+        Some(p) => parser::Parse {
+            module: p.module.clone(),
+            green: parser::parse("").green,
+            diagnostics: vec![],
+        },
+        None => parser::parse(&source),
+    };
     if command == "emit" && format == "cst" {
         if !parsed.diagnostics.is_empty() {
             diagnostics(&input, &source, &parsed.diagnostics, json);
@@ -281,7 +312,17 @@ fn cli() -> Result<(), String> {
     }
     let mut checked = check::check(&parsed.module);
     if !checked.diagnostics.is_empty() {
-        diagnostics(&input, &source, &checked.diagnostics, json);
+        match &loaded {
+            Some(p) => {
+                let localized: Vec<_> = checked
+                    .diagnostics
+                    .iter()
+                    .map(|d| p.sources.localize(d))
+                    .collect();
+                package_diagnostics(p, &localized, json);
+            }
+            None => diagnostics(&input, &source, &checked.diagnostics, json),
+        }
         return Err(format!("{} semantic error(s)", checked.diagnostics.len()));
     }
     if command == "check" {
@@ -293,7 +334,10 @@ fn cli() -> Result<(), String> {
         return Ok(());
     }
     if command == "emit" && format == "interface" {
-        let package = package.ok_or("interface export requires --package @org/name or std/name")?;
+        // A package directory exports under its manifest name by default.
+        let package = package
+            .or_else(|| loaded.as_ref().map(|p| p.package.clone()))
+            .ok_or("interface export requires --package @org/name or std/name")?;
         let interface = vesper::interface::export(&checked.world, &package)?;
         let bytes = serde_json::to_vec_pretty(&interface).map_err(|e| e.to_string())?;
         return if let Some(path) = output {
@@ -313,10 +357,24 @@ fn cli() -> Result<(), String> {
         }
     }
     if lib.enabled || lib.any_option() {
+        // Exports are the root module's `pub` functions. Items of package
+        // submodules and dependencies are renamed (`SourceMap::qualified`)
+        // and stay internal for now.
+        let public = parsed
+            .module
+            .public_items
+            .iter()
+            .filter(|n| {
+                loaded
+                    .as_ref()
+                    .is_none_or(|p| !p.sources.qualified.contains_key(*n))
+            })
+            .cloned()
+            .collect();
         return lib.build(
             &command,
             &checked.world,
-            &source,
+            &public,
             &input,
             output,
             target.as_deref(),
@@ -394,7 +452,8 @@ fn cli() -> Result<(), String> {
                 .get("main")
                 .ok_or("missing main function")?;
             if !f.params.is_empty()
-                || !matches!(f.result.name(), "i64" | "u64" | "u32" | "u8" | "Unit" | "")
+                || !(vesper::numeric::is_integer_name(f.result.name())
+                    || matches!(f.result.name(), "Unit" | ""))
             {
                 return Err(
                     "executable main must take no arguments and return an integer or Unit".into(),
@@ -548,6 +607,47 @@ fn write(path: Option<PathBuf>, bytes: &[u8]) -> Result<(), String> {
             .lock()
             .write_all(bytes)
             .map_err(|e| e.to_string())
+    }
+}
+/// Package diagnostics: manifest errors, then each file's diagnostics
+/// rendered against that file (JSON adds a `file` member).
+fn package_diagnostics(
+    package: &vesper::packages::Assembled,
+    ds: &[vesper::packages::PackageDiagnostic],
+    json: bool,
+) {
+    let files = &package.sources.files;
+    let file_name = |d: &vesper::packages::PackageDiagnostic| {
+        d.file.map_or("Loom.toml", |f| files[f].display.as_str())
+    };
+    if json {
+        let mut out = vec![];
+        for (file, d) in &package.manifest_errors {
+            let mut v = serde_json::to_value(d).unwrap_or_default();
+            v["file"] = serde_json::Value::String(file.clone());
+            out.push(v);
+        }
+        for d in ds {
+            let mut v = serde_json::to_value(&d.diagnostic).unwrap_or_default();
+            v["file"] = serde_json::Value::String(file_name(d).to_owned());
+            out.push(v);
+        }
+        println!("{}", serde_json::Value::Array(out));
+        return;
+    }
+    for (file, d) in &package.manifest_errors {
+        eprintln!("error[{}]: {} ({file})", d.code, d.message);
+    }
+    for d in ds {
+        match d.file {
+            Some(f) => diagnostics(
+                &files[f].display,
+                &files[f].text,
+                std::slice::from_ref(&d.diagnostic),
+                false,
+            ),
+            None => eprintln!("error[{}]: {}", d.diagnostic.code, d.diagnostic.message),
+        }
     }
 }
 fn diagnostics(file: &str, source: &str, ds: &[Diagnostic], json: bool) {

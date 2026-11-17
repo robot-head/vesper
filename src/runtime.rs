@@ -70,6 +70,8 @@ impl Slot {
 pub enum Value {
     Int(i64),
     UInt(u64, u32),
+    /// A narrow signed integer (`i8`, `i16`, `i32`) and its width.
+    SInt(i64, u32),
     Float(f64),
     Bool(bool),
     String(String),
@@ -121,6 +123,7 @@ impl fmt::Display for Value {
         match self {
             Self::Int(v) => write!(f, "{v}"),
             Self::UInt(v, _) => write!(f, "{v}"),
+            Self::SInt(v, _) => write!(f, "{v}"),
             Self::Float(v) => write!(f, "{v}"),
             Self::Bool(v) => write!(f, "{v}"),
             Self::String(v) => write!(f, "{v:?}"),
@@ -770,10 +773,14 @@ impl<'a> Runtime<'a> {
                 }
                 Type::Named(name, args) if args.is_empty() => {
                     let scalar = match name.as_str() {
-                        "i64" => Some(matches!(value, Value::Int(_))),
-                        "u8" => Some(matches!(value, Value::UInt(n, 8) if *n <= u8::MAX as u64)),
-                        "u32" => Some(matches!(value, Value::UInt(n, 32) if *n <= u32::MAX as u64)),
-                        "u64" => Some(matches!(value, Value::UInt(_, 64))),
+                        n if crate::numeric::is_integer_name(n) => {
+                            let kind = crate::numeric::IntegerKind::from_name(n).unwrap();
+                            Some(value_kind(value).is_some_and(|(k, v)| {
+                                k.bits() == kind.bits()
+                                    && k.unsigned() == kind.unsigned()
+                                    && kind.fits(v)
+                            }))
+                        }
                         "f64" => Some(matches!(value, Value::Float(_))),
                         "bool" => Some(matches!(value, Value::Bool(_))),
                         "String" => Some(matches!(value, Value::String(_))),
@@ -1213,6 +1220,7 @@ impl<'a> Runtime<'a> {
                 let i = match get(index)? {
                     Value::Int(n) => usize::try_from(n).ok(),
                     Value::UInt(n, _) => usize::try_from(n).ok(),
+                    Value::SInt(n, _) => usize::try_from(n).ok(),
                     _ => return Err("IR index must be integer".into()),
                 };
                 match get(base)? {
@@ -2482,6 +2490,7 @@ fn bind_pattern(p: &Pattern, value: &Value, env: &mut Env) -> bool {
         PatternKind::Literal(l) => match (l, value) {
             (Literal::Int(a), Value::Int(b)) => *a == *b as i128,
             (Literal::Int(a), Value::UInt(b, _)) => *a == *b as i128,
+            (Literal::Int(a), Value::SInt(b, _)) => *a == *b as i128,
             (Literal::Float(a), Value::Float(b)) => a == b,
             (Literal::Bool(a), Value::Bool(b)) => a == b,
             (Literal::String(a), Value::String(b)) => a == b,
@@ -2572,22 +2581,39 @@ impl From<Fault> for String {
     }
 }
 /// The integer kind carried by a coerced runtime value.
+/// `usize` and `isize` values are carried as `u64` and `i64` values: they
+/// have the same width and semantics, and the checker keeps them apart.
 fn value_kind(v: &Value) -> Option<(crate::numeric::IntegerKind, i128)> {
     use crate::numeric::IntegerKind as K;
     Some(match v {
         Value::Int(n) => (K::I64, *n as i128),
         Value::UInt(n, 8) => (K::U8, *n as i128),
+        Value::UInt(n, 16) => (K::U16, *n as i128),
         Value::UInt(n, 32) => (K::U32, *n as i128),
         Value::UInt(n, _) => (K::U64, *n as i128),
+        Value::SInt(n, 8) => (K::I8, *n as i128),
+        Value::SInt(n, 16) => (K::I16, *n as i128),
+        Value::SInt(n, 32) => (K::I32, *n as i128),
+        Value::SInt(n, _) => (K::I64, *n as i128),
         _ => return None,
     })
 }
 fn integer_value(kind: crate::numeric::IntegerKind, n: i128) -> Value {
     if kind.unsigned() {
         Value::UInt(n as u64, kind.bits())
+    } else if kind.bits() < 64 {
+        Value::SInt(n as i64, kind.bits())
     } else {
         Value::Int(n as i64)
     }
+}
+/// The value of `kind` whose 64-bit lane (or memory word) is `word`: its
+/// low `bits(kind)` bits, read in `kind`'s representation.
+pub fn integer_from_word(kind: crate::numeric::IntegerKind, word: u64) -> Value {
+    integer_value(kind, kind.wrap(word as i128))
+}
+fn arith_fault(f: crate::numeric::ArithFailure) -> Fault {
+    Fault::Raise(Failure::Arith(f))
 }
 /// Software flush-to-zero for `eff [ConstDenorm]` code: a subnormal float
 /// becomes a zero of the same sign.
@@ -2609,9 +2635,14 @@ fn unary(op: &str, v: Value) -> Result<Value, Fault> {
     Ok(match (op, v) {
         ("-", Value::Float(n)) => Value::Float(-n),
         ("!", Value::Bool(b)) => Value::Bool(!b),
-        (crate::capability_effects::WIDEN_INTRINSIC, v) => {
-            let (_, n) = value_kind(&v).ok_or("invalid unary operands")?;
-            Value::UInt(n as u64, 64)
+        ("~", v) => {
+            let (kind, n) = value_kind(&v).ok_or("invalid unary operands")?;
+            integer_value(kind, kind.not(n))
+        }
+        (name, v) if crate::numeric::conversion(name).is_some() => {
+            let (conversion, to) = crate::numeric::conversion(name).unwrap();
+            let (_, n) = value_kind(&v).ok_or("invalid conversion operand")?;
+            integer_value(to, conversion.apply(to, n).map_err(arith_fault)?)
         }
         ("-", v) => {
             let (kind, n) = value_kind(&v).ok_or("invalid unary operands")?;
@@ -2629,7 +2660,18 @@ fn unary(op: &str, v: Value) -> Result<Value, Fault> {
 /// kind; an untyped `Int` operand adopts its unsigned partner's kind.
 fn binary(op: &str, a: Value, b: Value) -> Result<Value, Fault> {
     if let (Some((ak, x)), Some((bk, y))) = (value_kind(&a), value_kind(&b)) {
-        let kind = if ak.unsigned() { ak } else { bk };
+        // The amount of a shift or rotation keeps its own kind.
+        if crate::numeric::is_shift(op) {
+            return Ok(integer_value(ak, ak.shift(op, x, y).map_err(arith_fault)?));
+        }
+        if let Some(left) = crate::numeric::rotate_intrinsic(op) {
+            return Ok(integer_value(ak, ak.rotate(left, x, y)));
+        }
+        let kind = if ak != crate::numeric::IntegerKind::I64 {
+            ak
+        } else {
+            bk
+        };
         let (x, y) = (kind.wrap(x), kind.wrap(y));
         return Ok(match op {
             "+" | "-" | "*" | "/" | "%" => integer_value(
@@ -2645,6 +2687,7 @@ fn binary(op: &str, a: Value, b: Value) -> Result<Value, Fault> {
                 kind,
                 crate::capability_effects::bitwise(op, kind, x, y).unwrap_or_default(),
             ),
+            "&" | "|" | "^" => integer_value(kind, kind.bit(op, x, y).unwrap_or_default()),
             "==" => Value::Bool(x == y),
             "!=" => Value::Bool(x != y),
             "<" => Value::Bool(x < y),
@@ -2692,6 +2735,7 @@ fn equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::UInt(a, ab), Value::UInt(b, bb)) => a == b && ab == bb,
+        (Value::SInt(a, ab), Value::SInt(b, bb)) => a == b && ab == bb,
         (Value::Float(a), Value::Float(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
@@ -2724,22 +2768,9 @@ fn coerce_value(v: Value, t: &Type) -> Value {
     let Some(kind) = crate::numeric::IntegerKind::from_type(t) else {
         return v;
     };
-    match v {
-        Value::Int(n) => {
-            if kind.unsigned() {
-                Value::UInt(n as u64 & kind.mask(), kind.bits())
-            } else {
-                Value::Int(n)
-            }
-        }
-        Value::UInt(n, _) => {
-            if kind.unsigned() {
-                Value::UInt(n & kind.mask(), kind.bits())
-            } else {
-                Value::Int(n as i64)
-            }
-        }
-        _ => v,
+    match value_kind(&v) {
+        Some((_, n)) => integer_value(kind, kind.wrap(n)),
+        None => v,
     }
 }
 

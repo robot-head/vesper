@@ -241,6 +241,7 @@ fn bitwise_intrinsics_match_rust_semantics() {
                         ]
                         .map(i128::from)
                     }
+                    _ => unreachable!("only the four sampled kinds"),
                 };
                 let names = ["bit_and", "bit_or", "bit_xor", "bit_shl", "bit_shr"];
                 for (n, e) in names.iter().zip(expect) {

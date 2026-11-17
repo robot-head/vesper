@@ -51,6 +51,7 @@ fn pilot_interface_lists_every_pub_fn() {
     assert_eq!(
         names,
         [
+            "add_i8",
             "area",
             "bounds",
             "clamp",
@@ -59,7 +60,8 @@ fn pilot_interface_lists_every_pub_fn() {
             "gcd",
             "is_digit",
             "midpoint",
-            "ratio"
+            "ratio",
+            "sum_u16"
         ]
     );
     let ratio = i.functions.iter().find(|f| f.name == "ratio").unwrap();

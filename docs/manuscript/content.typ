@@ -283,7 +283,12 @@ The following are design intentions; the productions and examples do not yet est
 
 ```text
 (* ==================== 1. MODULES & TOP-LEVEL DECLARATIONS ============== *)
-Module         ::= ( Attr* Item )* ;
+Module         ::= ( UseDecl | Attr* Item )* ;
+UseDecl        ::= 'use' UseRoot ( '::' LowerIdent )* '::' UseTarget ';' ;
+UseRoot        ::= '@' LowerIdent ( '-' LowerIdent )* '/' LowerIdent  (* dependency *)
+                 | 'self' ;                            (* this package's root *)
+UseTarget      ::= UseName | '{' UseName ( ',' UseName )* ','? '}' ;
+UseName        ::= ( UpperIdent | LowerIdent ) ( 'as' ( UpperIdent | LowerIdent ) )? ;
 Attr           ::= '@' LowerIdent ( '(' AttrArgs? ')' )?
                  | '#[' LowerIdent ( '(' AttrArgs? ')' )? ']' ;
 
@@ -413,6 +418,9 @@ GhostExpr      ::= 'ghost' PrimaryExpr ;
 
 AssignExpr     ::= BinaryExpr ( ( '=' | '+=' | '-=' | '|=' | '&=' ) Expr )? ;
 BinaryExpr     ::= UnaryExpr ( BinOp UnaryExpr )* ;
+BinOp          ::= '||' | '&&' | '==' | '!=' | '<' | '<=' | '>' | '>='
+                 | '|' | '^' | '&' | '<<' | '>>'      (* loosest to tightest, *)
+                 | '+' | '-' | '*' | '/' | '%' ;      (* left-associative    *)
 UnaryExpr      ::= ( '!' | '-' | '~' )? PostfixExpr ;
 PostfixExpr    ::= PrimaryExpr PostfixOp* ;
 PostfixOp      ::= '(' ArgList? ')'                    (* value or effect call *)
@@ -438,6 +446,8 @@ FieldPatList   ::= ( LowerIdent ( ':' Pat )? ) ( ',' FieldPatList )? ;
 UpperIdent     ::= /[A-Z][A-Za-z0-9_]*/ ;
 LowerIdent     ::= /[a-z_][A-Za-z0-9_]*/ ;
 ```
+
+*Integer kinds.* The ten integer `PrimType`s are distinct types with no implicit conversions; `usize` and `isize` are 64 bits wide on every target. Under the checked-arithmetic contract `vesper.arith.checked/1`, `+`, `-`, `*`, negation and signed `MIN / -1` raise `Fail[ArithOverflow]`, and division by zero raises `Fail[RuntimeError]`. `&`, `|`, `^` and prefix `~` are total; `a << n` and `a >> n` accept an amount `n` of any integer kind and raise `Fail[ArithOverflow]` unless `0 <= n < bits(a)` (`>>` is arithmetic on signed kinds). Conversions are explicit calls named after the target kind `k`: `widen_k` (accepted only when lossless), `narrow_k` (checked, `Fail[ArithOverflow]`) and `wrapping_k` (modulo `2^bits(k)`). `rotate_left`/`rotate_right` and the byte-order functions `to_le_bytes_k`, `to_be_bytes_k`, `from_le_bytes_k`, `from_be_bytes_k` (over tuples of `u8`) are total.
 
 == 3. Core Calculus, Four-Axis Modalities, and Ghost Linearity
 <ch-3>
@@ -2314,6 +2324,18 @@ block_unvetted_namespaces = true
 [verification]
 export_lean4_specs = ["src/wal_txn.ves"]
 ```
+
+*Path dependencies (implemented).* A `[dependencies]` entry with a `path` names a local package directory, relative to the manifest: `"@demo/geometry" = { version = "^0.1", path = "../geometry" }`. The dependency's `Loom.toml` must declare the same package name and a version that satisfies `version`. The checker assembles the root package and its dependency closure into one compilation unit; a cycle between packages, a package loaded from two directories, or an entry without a `path` (registry dependencies are not implemented yet) is an error. `vesper check`, `run`, `jit`, `build` and `emit` accept a package directory in place of a source file.
+
+*Modules and imports (implemented in `src/packages.rs`).* Imports use the `UseDecl` production of #link(<ch-2-2>)[Section 2.2]. A package's modules are its files `src/**/*.ves`: `src/lib.ves` or `src/main.ves` is the root module, and `src/a/b.ves` is module `a::b`. A module sees its own top-level declarations and the items it imports. A `UseDecl` names a package (`@scope/name`, which must be a `[dependencies]` entry of the importing package, or `self` for the importing package), then a module path, then one item or a braced list of items, each optionally renamed with `as`:
+
+```vesper
+use @vesper-std/collections::{ChunkSeq, CacheBTree};
+use @demo/geometry::shapes::{Shape, area as shape_area};
+use self::util::clamp;
+```
+
+Only `Vis`-marked (`pub`) functions, types and effects can be imported; every other item is private to its file. Importing an enum or effect makes its variants or operations usable; variant and operation names share one namespace per program, so two modules may not declare the same one. Importing a name that is also declared or already imported in the module is an ambiguity error, and an unimported item of another module is not in scope. `pub use` re-exports, imports of whole modules and inline qualified paths such as `geometry::area(x)` are not part of this revision. A `UseDecl` in a file checked on its own (outside a package) is an error.
 
 Every resolved node in `Loom.lock` records four cryptographic anchors: `source_blake3` (unpacked source Merkle digest), `interface_mif` (`mif:blake3:...` digest of exported types, `ModeVec` bounds, projections, refinements, and effect rows), `effective_capabilities` (verified transitive effect set), and `provenance` (Sigstore Rekor index, `Lila` builder signatures, and `.olean` certificate digest).
 

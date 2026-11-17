@@ -11,13 +11,19 @@
 //! encoded words of sample instructions, which must be the words
 //! `verified_codegen::rv64_encoding_listing` gets from the Rust emitter.
 //! `lean/CodegenA64Encoding.lean` does the same for AArch64 against the A64
-//! encoding diagrams (`verified_codegen::a64_encoding_listing`).
+//! encoding diagrams (`verified_codegen::a64_encoding_listing`), and
+//! `lean/CodegenX64Encoding.lean` for x86-64 against the Intel SDM formats:
+//! there the encodings are byte lists, the specification is a prefix decoder,
+//! and the listing prints bytes (`verified_codegen::x64_encoding_listing`).
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 const NAMESPACE: &str = "Vesper.VerifiedCodegen";
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
-const KEY_THEOREMS: [&str; 12] = [
+const KEY_THEOREMS: [&str; 14] = [
+    // Milestone 8: region heap words.
+    "sim_loadPtr",
+    "sim_storePtr",
     "sim_farith",
     "sim_fneg",
     "sim_fcompare",
@@ -33,7 +39,13 @@ const KEY_THEOREMS: [&str; 12] = [
 ];
 
 const RV64_NAMESPACE: &str = "Vesper.VerifiedCodegen.Rv64";
-const RV64_KEY_THEOREMS: [&str; 4] = ["decode_encode", "emit_ok", "emit_decodes", "bytes_encode"];
+const RV64_KEY_THEOREMS: [&str; 5] = [
+    "decode_encode",
+    "emit_ok",
+    "emit_decodes",
+    "bytes_encode",
+    "heap_ok",
+];
 
 fn model() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/VerifiedCodegen.lean")
@@ -41,6 +53,18 @@ fn model() -> PathBuf {
 
 const A64_NAMESPACE: &str = "Vesper.VerifiedCodegen.A64";
 const A64_KEY_THEOREMS: [&str; 4] = ["decode_encode", "emit_ok", "emit_decodes", "bytes_encode"];
+
+const X64_NAMESPACE: &str = "Vesper.VerifiedCodegen.X64";
+const X64_KEY_THEOREMS: [&str; 4] = [
+    "decode_encode",
+    "decodeAll_encodeAll",
+    "emit_ok",
+    "emit_decodes",
+];
+
+fn x64_model() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/CodegenX64Encoding.lean")
+}
 
 fn rv64_model() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/CodegenRv64Encoding.lean")
@@ -200,12 +224,63 @@ fn model_has_no_escape_hatches_and_audits_every_theorem() {
         &["VerifiedCodegen"],
         &A64_KEY_THEOREMS,
     );
+    let source = std::fs::read_to_string(x64_model()).expect("read the x86-64 model");
+    check_hygiene(
+        "CodegenX64Encoding.lean",
+        &source,
+        X64_NAMESPACE,
+        &["VerifiedCodegen"],
+        &X64_KEY_THEOREMS,
+    );
+}
+
+/// The encoding models lay out labels below `firstFree` as the abort exits;
+/// it must be the Rust `FIRST_FREE_LABEL` (one past `TrapKind::ALL`).
+#[test]
+fn encoding_models_reserve_exactly_the_rust_abort_labels() {
+    let expected = format!(
+        "def firstFree : Nat := {}\n",
+        vesper::verified_codegen::FIRST_FREE_LABEL
+    );
+    assert_eq!(
+        vesper::verified_codegen::FIRST_FREE_LABEL as usize,
+        vesper::verified_codegen::TrapKind::ALL.len()
+    );
+    for path in [rv64_model(), a64_model(), x64_model()] {
+        let source = std::fs::read_to_string(&path).expect("read an encoding model");
+        assert!(
+            strip_comments(&source).contains(&expected),
+            "{} does not define {expected:?}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn rust_x64_listing_covers_every_instruction_kind() {
+    let listing = vesper::verified_codegen::x64_encoding_listing();
+    assert_eq!(listing.lines().count(), 69);
+    // add rax, rcx; jb ovf (the abort exits sit at offset 0)
+    assert!(listing.contains("addchk u: 48 01 c8 0f 82 f7 ff ff ff\n"));
+    // The first function label is not an abort exit.
+    assert!(listing.contains("jmp L4: e9 00 00 00 00\n"));
+    // Milestone 8: mov r11d, HEAP_BASE; mov rax, [r11 + rcx*8 + 24].
+    assert!(listing.contains("ldh 3: 41 bb 00 00 00 10 49 8b 84 cb 18 00 00 00\n"));
+    // push rbp; mov rbp, rsp; test [rsp - 4096], esp; sub rsp, 8000
+    assert!(
+        listing.contains(
+            "enter 1000 (windows): 55 48 89 e5 85 a4 24 00 f0 ff ff 48 81 ec 40 1f 00 00\n"
+        )
+    );
+    assert!(listing.contains("leave (windows, frame 8000): 48 81 c4 40 1f 00 00 5d c3\n"));
 }
 
 #[test]
 fn rust_rv64_listing_covers_every_instruction_kind() {
     let listing = vesper::verified_codegen::rv64_encoding_listing();
-    assert_eq!(listing.lines().count(), 59);
+    assert_eq!(listing.lines().count(), 65);
+    // Milestone 8: t0 := 1 << 28; t1 := a1 << 3; t0 += t1; ld a0, 24(t0).
+    assert!(listing.contains("ldh 3: 00100293 01c29293 00359313 006282b3 0182b503\n"));
     // add a0,a0,a1; bgeu a0,a1,+8; j ovf (the abort exits sit at offset 0)
     assert!(listing.contains("addchk u: 00b50533 00b57463 ff9ff06f\n"));
     assert!(listing.contains("leave: 00040113 00013403 00813083 01010113 00008067\n"));
@@ -214,7 +289,10 @@ fn rust_rv64_listing_covers_every_instruction_kind() {
 #[test]
 fn rust_a64_listing_covers_every_instruction_kind() {
     let listing = vesper::verified_codegen::a64_encoding_listing();
-    assert_eq!(listing.lines().count(), 61);
+    assert_eq!(listing.lines().count(), 67);
+    // Milestone 8: movz x16, #0x1000, lsl #16; add x16, x16, x1, lsl #3;
+    // ldr x0, [x16, #24].
+    assert!(listing.contains("ldh 3: d2a20010 8b010e10 f9400e00\n"));
     // adds x0, x0, x1; b.hs ovf (the abort exits sit at offset 0)
     assert!(listing.contains("addchk u: ab010000 54ffffe2\n"));
     // sub sp, sp, #1, lsl #12; sub sp, sp, #0xf40
@@ -225,7 +303,10 @@ fn rust_a64_listing_covers_every_instruction_kind() {
 #[test]
 fn rust_table_covers_every_row_kind() {
     let listing = vesper::verified_codegen::table_listing();
-    assert_eq!(listing.lines().count(), 94);
+    assert_eq!(listing.lines().count(), 97);
+    assert!(listing.contains("loadptr: ld r1 s1; ldh 3; st s0 r0\n"));
+    assert!(listing.contains("storeptr: ld r1 s1; ld r0 s2; sth 3\n"));
+    assert!(listing.contains("trap region: trap region\n"));
     // Milestone 7: a trap scope is one machine pseudo-instruction.
     assert!(listing.contains("scope: scope L9 L10\n"));
     assert!(listing.contains("farith div: ld r0 s1; ld r1 s2; fop div; st s0 r0\n"));
@@ -381,5 +462,21 @@ fn lean_a64_encoding_model_compiles_and_prints_the_rust_words() {
         A64_NAMESPACE,
         "A64",
         vesper::verified_codegen::a64_encoding_listing(),
+    );
+}
+
+#[test]
+fn lean_x64_encoding_model_compiles_and_prints_the_rust_bytes() {
+    let Ok(lean) = std::env::var("VESPER_LEAN") else {
+        eprintln!("VESPER_LEAN unset; Lean compilation of CodegenX64Encoding.lean skipped");
+        return;
+    };
+    check_encoding_model(
+        &lean,
+        x64_model(),
+        "CodegenX64Encoding.lean",
+        X64_NAMESPACE,
+        "X64",
+        vesper::verified_codegen::x64_encoding_listing(),
     );
 }

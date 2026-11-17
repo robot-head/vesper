@@ -251,3 +251,186 @@ impl LogRecord {
         self
     }
 }
+
+/// A measurement value: OTLP `as_int` or `as_double`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NumberValue {
+    Int(i64),
+    Double(f64),
+}
+
+/// A sampled measurement attached to a data point (OTLP `Exemplar`).
+/// `filtered_attributes` go through the same PII boundary as every other
+/// attribute set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Exemplar {
+    pub time_unix_ns: u64,
+    pub value: NumberValue,
+    pub span_id: Option<u64>,
+    pub trace_id: Option<u128>,
+    pub filtered_attributes: Attributes,
+}
+impl Exemplar {
+    pub fn new(time_unix_ns: u64, value: NumberValue) -> Self {
+        Self {
+            time_unix_ns,
+            value,
+            span_id: None,
+            trace_id: None,
+            filtered_attributes: Attributes::new(),
+        }
+    }
+}
+
+/// OTLP `AggregationTemporality`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum Temporality {
+    Delta = 1,
+    #[default]
+    Cumulative = 2,
+}
+impl Temporality {
+    pub fn from_i32(v: i32) -> Option<Self> {
+        match v {
+            1 => Some(Self::Delta),
+            2 => Some(Self::Cumulative),
+            _ => None,
+        }
+    }
+}
+
+/// Whether a number point belongs to a gauge or a sum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NumberKind {
+    Gauge,
+    Sum {
+        monotonic: bool,
+        temporality: Temporality,
+    },
+}
+
+/// One gauge or sum data point (OTLP `NumberDataPoint`). Consecutive points
+/// of one scope with the same name, unit, description and kind share one
+/// metric row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NumberPoint {
+    pub name: &'static str,
+    pub unit: &'static str,
+    pub description: Option<&'static str>,
+    pub kind: NumberKind,
+    pub start_unix_ns: Option<u64>,
+    pub time_unix_ns: u64,
+    pub value: NumberValue,
+    pub attributes: Attributes,
+    pub exemplars: Vec<Exemplar>,
+    /// OTLP `DataPointFlags` (bit 0: no recorded value).
+    pub flags: u32,
+}
+impl NumberPoint {
+    pub fn gauge(
+        name: &'static str,
+        unit: &'static str,
+        time_unix_ns: u64,
+        value: NumberValue,
+    ) -> Self {
+        Self {
+            name,
+            unit,
+            description: None,
+            kind: NumberKind::Gauge,
+            start_unix_ns: None,
+            time_unix_ns,
+            value,
+            attributes: Attributes::new(),
+            exemplars: Vec::new(),
+            flags: 0,
+        }
+    }
+    pub fn sum(
+        name: &'static str,
+        unit: &'static str,
+        monotonic: bool,
+        temporality: Temporality,
+        start_unix_ns: u64,
+        time_unix_ns: u64,
+        value: NumberValue,
+    ) -> Self {
+        Self {
+            kind: NumberKind::Sum {
+                monotonic,
+                temporality,
+            },
+            start_unix_ns: Some(start_unix_ns),
+            ..Self::gauge(name, unit, time_unix_ns, value)
+        }
+    }
+}
+
+/// One side (positive or negative) of an exponential histogram.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExpBuckets {
+    pub offset: i32,
+    pub counts: Vec<u64>,
+}
+
+/// One exponential histogram data point (OTLP
+/// `ExponentialHistogramDataPoint`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExpHistogramPoint {
+    pub name: &'static str,
+    pub unit: &'static str,
+    pub description: Option<&'static str>,
+    pub temporality: Temporality,
+    pub start_unix_ns: Option<u64>,
+    pub time_unix_ns: u64,
+    pub count: u64,
+    pub sum: Option<f64>,
+    pub scale: i32,
+    pub zero_count: u64,
+    pub zero_threshold: f64,
+    pub positive: ExpBuckets,
+    pub negative: ExpBuckets,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub attributes: Attributes,
+    pub exemplars: Vec<Exemplar>,
+    pub flags: u32,
+}
+impl ExpHistogramPoint {
+    /// A cumulative point from a Beacon [`ExponentialHistogram`]. `sum`,
+    /// `min` and `max` are rounded to `f64` (exact below 2^53).
+    ///
+    /// [`ExponentialHistogram`]: vesper_beacon::ExponentialHistogram
+    pub fn from_histogram(
+        name: &'static str,
+        unit: &'static str,
+        start_unix_ns: u64,
+        time_unix_ns: u64,
+        h: &vesper_beacon::ExponentialHistogram,
+    ) -> Self {
+        Self {
+            name,
+            unit,
+            description: None,
+            temporality: Temporality::Cumulative,
+            start_unix_ns: Some(start_unix_ns),
+            time_unix_ns,
+            count: h.total_count(),
+            sum: Some(h.sum() as f64),
+            scale: h.scale(),
+            zero_count: h.zero_count(),
+            zero_threshold: 0.0,
+            positive: ExpBuckets {
+                offset: h.offset(),
+                counts: h.positive_counts().to_vec(),
+            },
+            negative: ExpBuckets::default(),
+            min: h.min().map(|v| v as f64),
+            max: h.max().map(|v| v as f64),
+            attributes: Attributes::new(),
+            exemplars: Vec::new(),
+            flags: 0,
+        }
+    }
+}

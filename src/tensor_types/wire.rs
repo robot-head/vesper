@@ -89,10 +89,15 @@ fn field_type(t: &Type, wires: &BTreeSet<String>) -> Result<WireType, String> {
                 return Ok(WireType::Integer(i));
             }
             Ok(match n.as_str() {
-                "u8" => WireType::Integer(Integer::unsigned(8, Endian::Native)),
-                "u32" => WireType::Integer(Integer::unsigned(32, Endian::Native)),
-                "u64" => WireType::Integer(Integer::unsigned(64, Endian::Native)),
-                "i64" => WireType::Integer(Integer::signed(64, Endian::Native)),
+                n if crate::numeric::is_integer_name(n) => {
+                    let k = crate::numeric::IntegerKind::from_name(n).unwrap();
+                    let bits = k.bits() as u16;
+                    WireType::Integer(if k.unsigned() {
+                        Integer::unsigned(bits, Endian::Native)
+                    } else {
+                        Integer::signed(bits, Endian::Native)
+                    })
+                }
                 "bool" => WireType::Bool,
                 _ if wires.contains(n) => WireType::Struct(n.clone()),
                 _ => {

@@ -24,27 +24,38 @@ fn put64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_le_bytes());
 }
 
-/// A static `ET_EXEC` image whose entry point is the first code byte.
-pub fn elf_executable(machine: u16, code: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(ELF_CODE_OFFSET as usize + code.len());
+/// File offset of the code when the image also maps the program heap (two
+/// program headers do not fit below [`ELF_CODE_OFFSET`]).
+pub const ELF_HEAP_CODE_OFFSET: u64 = 0x100;
+
+/// A static `ET_EXEC` image whose entry point is the first code byte. With
+/// `heap`, a second, zero-fill read-write `PT_LOAD` maps
+/// [`super::HEAP_WORDS`] words at [`super::HEAP_BASE`] (no file bytes).
+pub fn elf_executable(machine: u16, code: &[u8], heap: bool) -> Vec<u8> {
+    let code_offset = if heap {
+        ELF_HEAP_CODE_OFFSET
+    } else {
+        ELF_CODE_OFFSET
+    };
+    let mut out = Vec::with_capacity(code_offset as usize + code.len());
     // e_ident: ELFCLASS64, ELFDATA2LSB, EV_CURRENT, ELFOSABI_SYSV.
     out.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
     out.extend_from_slice(&[0; 8]);
     put16(&mut out, 2); // e_type = ET_EXEC
     put16(&mut out, machine);
     put32(&mut out, 1); // e_version
-    put64(&mut out, ELF_BASE + ELF_CODE_OFFSET); // e_entry
+    put64(&mut out, ELF_BASE + code_offset); // e_entry
     put64(&mut out, 64); // e_phoff
     put64(&mut out, 0); // e_shoff
     put32(&mut out, 0); // e_flags
     put16(&mut out, 64); // e_ehsize
     put16(&mut out, 56); // e_phentsize
-    put16(&mut out, 1); // e_phnum
+    put16(&mut out, if heap { 2 } else { 1 }); // e_phnum
     put16(&mut out, 64); // e_shentsize
     put16(&mut out, 0); // e_shnum
     put16(&mut out, 0); // e_shstrndx
     // PT_LOAD, R+X, the whole file at ELF_BASE.
-    let size = ELF_CODE_OFFSET + code.len() as u64;
+    let size = code_offset + code.len() as u64;
     put32(&mut out, 1); // p_type = PT_LOAD
     put32(&mut out, 5); // p_flags = PF_R | PF_X
     put64(&mut out, 0); // p_offset
@@ -53,7 +64,18 @@ pub fn elf_executable(machine: u16, code: &[u8]) -> Vec<u8> {
     put64(&mut out, size); // p_filesz
     put64(&mut out, size); // p_memsz
     put64(&mut out, 0x1000); // p_align
-    out.resize(ELF_CODE_OFFSET as usize, 0);
+    if heap {
+        // PT_LOAD, R+W, zero fill.
+        put32(&mut out, 1);
+        put32(&mut out, 6); // PF_R | PF_W
+        put64(&mut out, 0);
+        put64(&mut out, super::HEAP_BASE);
+        put64(&mut out, super::HEAP_BASE);
+        put64(&mut out, 0); // p_filesz
+        put64(&mut out, super::HEAP_WORDS * 8); // p_memsz
+        put64(&mut out, 0x1000);
+    }
+    out.resize(code_offset as usize, 0);
     out.extend_from_slice(code);
     out
 }

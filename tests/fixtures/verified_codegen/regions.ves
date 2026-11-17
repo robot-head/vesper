@@ -1,0 +1,91 @@
+// Region blocks and region-polymorphic functions (milestone 8): handles are
+// heap word indices, payloads are flattened words.
+copy struct Point {
+    x: i64,
+    y: i64
+}
+copy struct Slots[T: mod copy] {
+    a: T,
+    b: T
+}
+
+fn put(x: i64) -> RegionBox[r, i64] eff [r: Region] {
+    r.box(x)
+}
+fn bump(b: RegionBox[r, i64]) -> Unit eff [r: Region] {
+    r.set(b, wrapping_add(r.get(b), 1))
+}
+fn slots[T: mod copy](v: T) -> Slots[RegionBox[r, T]] eff [r: Region] {
+    Slots {
+        a: r.box(v),
+        b: r.box(v)
+    }
+}
+fn moved(p: RegionBox[r, Point], dx: i64) -> Point eff [r: Region] {
+    let q = r.get(p);
+    r
+        .set(
+        p,
+        Point {
+            x: wrapping_add(q.x, dx),
+            y: q.y
+        }
+    );
+    r.get(p)
+}
+fn count(n: i64, acc: RegionBox[r, i64]) -> i64 eff [r: Region] {
+    if n == 0 {
+        r.get(acc)
+    } else {
+        bump(acc);
+        count(wrapping_sub(n, 1), acc)
+    }
+}
+fn inner_sum(k: i64) -> i64 {
+    // A region per call: its heap words are reused by the next call.
+    region r(4096) {
+        // Zero-word payloads still get distinct handles.
+        let u = r.box(());
+        let b = r.box(k);
+        r.set(u, ());
+        bump(b);
+        bump(b);
+        r.get(b)
+    }
+}
+
+fn main() -> (i64, Point, i64, (bool, bool), u64, i64, i64) {
+    let k = 3;
+    region r(1024) {
+        let b = put(k);
+        bump(b);
+        let p = r
+            .box(
+            Point {
+                x: 1,
+                y: 2
+            }
+        );
+        let moved_p = moved(p, 10);
+        let c = r.box(0);
+        let ten = count(10, c);
+        let s: Slots[RegionBox[r, bool]] = slots(true);
+        r.set(s.b, false);
+        let used = r.used();
+        // An inner block, and an outer-region allocation from inside it.
+        let late = region q(64) {
+            let t = q.box(5);
+            let o = r.box(q.get(t));
+            wrapping_add(r.get(o), inner_sum(q.get(t)))
+        };
+        (
+            r.get(b),
+            moved_p,
+            ten,
+            (r.get(s.a), r.get(s.b)),
+            used,
+            late,
+            wrapping_add(inner_sum(1), inner_sum(2))
+        )
+    }
+}

@@ -50,9 +50,12 @@ const _: () = assert!(<bool as Abi>::WORDS == 1);
 const _: () = assert!(<crate::Point as Abi>::WORDS == 2);
 const _: () = assert!(<crate::Shape as Abi>::WORDS == 3);
 const _: () = assert!(<i64 as Abi>::WORDS == 1);
+const _: () = assert!(<i8 as Abi>::WORDS == 1);
+const _: () = assert!(<u16 as Abi>::WORDS == 1);
 const _: () = assert!(<u64 as Abi>::WORDS == 1);
 
 unsafe extern "C" {
+    fn vesper_pilot_add_i8(a: i64, b: i64, fail: *mut u64) -> i64;
     fn vesper_pilot_area(s: *mut u64, fail: *mut u64) -> i64;
     fn vesper_pilot_bounds(result: *mut u64, a: i64, b: i64) -> i64;
     fn vesper_pilot_clamp(x: i64, lo: i64, hi: i64) -> i64;
@@ -62,6 +65,20 @@ unsafe extern "C" {
     fn vesper_pilot_is_digit(c: i64) -> i64;
     fn vesper_pilot_midpoint(result: *mut u64, p: *mut u64, q: *mut u64, fail: *mut u64) -> i64;
     fn vesper_pilot_ratio(a: i64, b: i64, fail: *mut u64) -> i64;
+    fn vesper_pilot_sum_u16(a: i64, b: i64, fail: *mut u64) -> i64;
+}
+
+/// Calls `add_i8` of the Vesper library `pilot` (`vesper_pilot_add_i8`).
+pub fn add_i8(a: i8, b: i8) -> Result<i8, vesper_port_abi::ArithOverflow> {
+    let mut fail = vec![0u64; 2];
+    // SAFETY: `vesper_pilot_add_i8` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires.
+    let raw = unsafe { vesper_pilot_add_i8(a as i64, b as i64, fail.as_mut_ptr()) };
+    match fail[0] {
+        0 => Ok(raw as i8),
+        1 => Err(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_pilot_add_i8"),
+    }
 }
 
 /// Calls `area` of the Vesper library `pilot` (`vesper_pilot_area`).
@@ -167,5 +184,18 @@ pub fn ratio(a: i64, b: i64) -> Result<i64, crate::RatioError> {
         1 => Err(crate::RatioError::ArithOverflow(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..]))),
         2 => Err(crate::RatioError::RuntimeError(<vesper_port_abi::RuntimeError as Abi>::get(&fail[1..]))),
         status => panic!("invalid failure status {status} from vesper_pilot_ratio"),
+    }
+}
+
+/// Calls `sum_u16` of the Vesper library `pilot` (`vesper_pilot_sum_u16`).
+pub fn sum_u16(a: u16, b: u16) -> Result<u16, vesper_port_abi::ArithOverflow> {
+    let mut fail = vec![0u64; 2];
+    // SAFETY: `vesper_pilot_sum_u16` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires.
+    let raw = unsafe { vesper_pilot_sum_u16(a as i64, b as i64, fail.as_mut_ptr()) };
+    match fail[0] {
+        0 => Ok(raw as u16),
+        1 => Err(<vesper_port_abi::ArithOverflow as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_pilot_sum_u16"),
     }
 }

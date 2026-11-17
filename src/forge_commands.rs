@@ -12,11 +12,19 @@ use vesper::{
     },
 };
 
-const HELP: &str = "Usage: vesper forge <check|expand> SOURCE [--package @local/source] [--policy FILE] [--json]\n\nCheck declarative Expr macros using whole-body hygiene, the ordinary checker and actual compiler-derived authority.\ncheck returns bounded JSON; expand writes exactly the fully checked expanded source.\nMacro-bearing functions must be top-level and nongeneric, with at most eight plain named parameters.\nProjected parameters, source Tier2, attributes, derives, recursive/nested macros and other categories are unsupported.\nNo native code or WASI component is executed. Existing check/LSP behavior is unchanged.\n";
+const HELP: &str = "Usage: vesper forge <check|expand|lean> SOURCE [--package @local/source] [--policy FILE] [--json] [--provenance FILE]\n\nCheck declarative Expr macros using whole-body hygiene, the ordinary checker and actual compiler-derived authority.\ncheck returns bounded JSON with the source map and per-function macro provenance; expand writes exactly the fully checked expanded source.\nlean writes the Lean extraction of the expanded program with `$macro_provenance` marker constants; --provenance FILE (lean only) writes the provenance manifest that `vesper proof-audit --macro-provenance` requires for theorems about expanded code.\nMacro-bearing functions must be top-level and nongeneric, with at most eight plain named parameters.\nProjected parameters, source Tier2, attributes, derives, recursive/nested macros and other categories are unsupported.\nNo native code or WASI component is executed. Existing check/LSP behavior is unchanged.\n";
 const MAX_POLICY: usize = 64 * 1024;
 const MAX_JSON: usize = 2 * 1024 * 1024;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Check,
+    Expand,
+    Lean,
+}
 struct Args {
     check: bool,
+    action: Action,
+    provenance: Option<PathBuf>,
     input: PathBuf,
     package: String,
     policy: Option<PathBuf>,
@@ -33,11 +41,14 @@ fn args(args: &[String]) -> Result<Args, String> {
     let action = args
         .first()
         .ok_or("missing forge action; see forge --help")?;
-    let check = match action.as_str() {
-        "check" => true,
-        "expand" => false,
-        _ => return Err("expected forge check or expand".into()),
+    let action = match action.as_str() {
+        "check" => Action::Check,
+        "expand" => Action::Expand,
+        "lean" => Action::Lean,
+        _ => return Err("expected forge check, expand or lean".into()),
     };
+    let check = action == Action::Check;
+    let mut provenance = None;
     let mut input = None;
     let mut package = None;
     let mut policy = None;
@@ -60,6 +71,13 @@ fn args(args: &[String]) -> Result<Args, String> {
                 }
             }
             "--json" if check && !json => json = true,
+            "--provenance" if action == Action::Lean => {
+                i += 1;
+                let value = args.get(i).ok_or("--provenance requires a file")?;
+                if provenance.replace(PathBuf::from(value)).is_some() {
+                    return Err("duplicate --provenance".into());
+                }
+            }
             value if value.starts_with('-') => {
                 return Err(format!("unsupported source macro option '{value}'"));
             }
@@ -73,6 +91,8 @@ fn args(args: &[String]) -> Result<Args, String> {
     }
     Ok(Args {
         check,
+        action,
+        provenance,
         input: input.ok_or("missing source file")?,
         package: package.unwrap_or_else(|| "@local/source".into()),
         policy,
@@ -182,6 +202,7 @@ struct Success<'a> {
     expanded_source: &'a str,
     source_map: &'a [forge::SourceMapSegment],
     audits: &'a [forge::InvocationAudit],
+    provenance: &'a forge::provenance::ProvenanceTable,
 }
 impl<'a> From<&'a ExpandedChecked> for Success<'a> {
     fn from(value: &'a ExpandedChecked) -> Self {
@@ -203,6 +224,7 @@ impl<'a> From<&'a ExpandedChecked> for Success<'a> {
             expanded_source: value.expanded_source(),
             source_map: value.source_map(),
             audits: value.audits(),
+            provenance: value.provenance(),
         }
     }
 }
@@ -215,6 +237,9 @@ struct Rejected<'a> {
     source_blake3: Option<String>,
     expanded_source: Option<&'a str>,
     diagnostics: &'a [Diagnostic],
+    /// Aligned with `diagnostics`: original span and macro of each one.
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    origins: &'a [Option<forge::provenance::DiagnosticOrigin>],
     source_map: [(); 0],
 }
 fn reject(
@@ -225,6 +250,17 @@ fn reject(
     expanded: Option<&str>,
     diagnostics: &[Diagnostic],
 ) -> Result<(), String> {
+    reject_with_origins(check, stage, message, source, expanded, diagnostics, &[])
+}
+fn reject_with_origins(
+    check: bool,
+    stage: Stage,
+    message: &str,
+    source: Option<&str>,
+    expanded: Option<&str>,
+    diagnostics: &[Diagnostic],
+    origins: &[Option<forge::provenance::DiagnosticOrigin>],
+) -> Result<(), String> {
     if check {
         write_json(&Rejected {
             schema: forge::SCHEMA,
@@ -234,6 +270,7 @@ fn reject(
             source_blake3: source.map(|s| blake3::hash(s.as_bytes()).to_hex().to_string()),
             expanded_source: expanded,
             diagnostics,
+            origins,
             source_map: [],
         })?;
     }
@@ -293,6 +330,9 @@ pub fn run(arguments: Vec<String>) -> Result<(), String> {
         limits,
     ) {
         Ok(artifact) => {
+            if args.action == Action::Lean {
+                return write_lean(&artifact, args.provenance.as_deref());
+            }
             if args.check {
                 if let Err(error) = write_json(&Success::from(&artifact)) {
                     return reject(true, Stage::Resource, &error, Some(&source), None, &[]);
@@ -305,13 +345,36 @@ pub fn run(arguments: Vec<String>) -> Result<(), String> {
                     .map_err(|e| e.to_string())
             }
         }
-        Err(error) => reject(
+        Err(error) => reject_with_origins(
             args.check,
             error.stage(),
             error.message(),
             Some(&source),
             error.expanded_source(),
             error.diagnostics(),
+            error.origins(),
         ),
     }
+}
+
+/// Write the provenance manifest first (refusing to replace an existing file),
+/// then the marked Lean extraction, so no Lean text is emitted whose manifest
+/// was not recorded.
+fn write_lean(artifact: &ExpandedChecked, manifest: Option<&Path>) -> Result<(), String> {
+    let lean = forge::provenance::extract_lean(artifact)?;
+    if let Some(path) = manifest {
+        let bytes = serde_json::to_vec_pretty(artifact.provenance()).map_err(|e| e.to_string())?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        file.write_all(&bytes)
+            .and_then(|()| file.write_all(b"\n"))
+            .map_err(|e| e.to_string())?;
+    }
+    io::stdout()
+        .lock()
+        .write_all(lean.text.as_bytes())
+        .map_err(|e| e.to_string())
 }

@@ -78,6 +78,10 @@ pub struct Dependency {
     pub optional: bool,
     #[serde(default)]
     pub features: BTreeSet<String>,
+    /// Local path dependency: the directory holding the dependency's
+    /// `Loom.toml`, relative to this manifest (manuscript ch 11.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -48,8 +48,8 @@ fn recovery_diagnostics_match_the_seed() {
         for source in [
             "fn f() { let a = ; let b = ; } fn g() { let c = ; }",
             "fn f(x i64) { let y = ; } fn good() {}",
-            "fn f() { & } fn g() { & }",
-            "fn é() {} fn g() { & }",
+            "fn f() { ` } fn g() { ` }",
+            "fn é() {} fn g() { ` }",
             "fn f() { \"open }",
             "fn f() {} /* open",
             "trait T[A: Tr, B: Other] {}",

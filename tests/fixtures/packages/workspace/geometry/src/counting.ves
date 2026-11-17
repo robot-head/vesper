@@ -1,0 +1,26 @@
+// Module `counting` of @demo/geometry: a stateful handler whose state and
+// capability label share names with module functions.
+pub linear effect Counter {
+    fn next() -> i64;
+}
+
+fn counter() -> i64 {
+    1
+}
+
+fn c() -> i64 {
+    2
+}
+
+fn tick(n: i64) -> i64 eff [c: Counter] {
+    wrapping_add(c.next(), n)
+}
+
+pub fn count_twice() -> i64 {
+    handle c: Counter state counter = 0 in {
+        wrapping_add(tick(counter()), c.next())
+    } with {
+        return (value, counter) => wrapping_add(value, counter),
+        next(counter, resume) => resume(counter, wrapping_add(counter, 1)),
+    }
+}

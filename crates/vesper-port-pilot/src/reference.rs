@@ -49,6 +49,16 @@ pub fn ratio(a: i64, b: i64) -> Result<i64, RatioError> {
         .ok_or(RatioError::ArithOverflow(ArithOverflow))
 }
 
+/// Checked `i8` addition (narrow signed words are sign-extended).
+pub fn add_i8(a: i8, b: i8) -> Result<i8, ArithOverflow> {
+    a.checked_add(b).ok_or(ArithOverflow)
+}
+
+/// Checked `u16` addition.
+pub fn sum_u16(a: u16, b: u16) -> Result<u16, ArithOverflow> {
+    a.checked_add(b).ok_or(ArithOverflow)
+}
+
 /// Whether `c` is an ASCII digit.
 pub fn is_digit(c: u8) -> bool {
     in_range(c, b'0', b'9')

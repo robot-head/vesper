@@ -348,11 +348,14 @@ structure Frame.Ok (fr : Frame) : Prop where
 def Frame.addr (fr : Frame) : Loc → Int
   | .slot n | .out n => fr.sp + 8 * n
   | .inn n => fr.sp + 8 * fr.words + 16 + 8 * n
+  -- Heap words are not frame words (see `DataM`).
+  | .heap _ => 0
 
 def Frame.Valid (fr : Frame) : Loc → Prop
   | .slot n => fr.out ≤ n ∧ n < fr.words
   | .out n => n < fr.out
   | .inn n => n < fr.inWords
+  | .heap _ => False
 
 structure Corr (fr : Frame) (k : Bool) (m : Mach) (s : St) : Prop where
   words : ∀ r, Word (s.x r)
@@ -408,8 +411,12 @@ def Fits (fr : Frame) : M → Prop
   | .imm _ w => Word w
   | _ => True
 
+/-- The instructions `emit_sim` covers. Control instructions have their own
+lemmas; the heap instructions `ldh`/`sth` (milestone 8) are not modelled
+here yet: `Corr` relates only the frame, not the program heap. -/
 def DataM : M → Prop
   | .label _ | .jmp _ | .bz _ | .call _ | .enter _ | .leave => False
+  | .ldh _ | .sth _ => False
   | _ => True
 
 def FNegFlips : Prop := ∀ x, Word x → fword (-(fbits x)) = signFlip x
@@ -1154,7 +1161,7 @@ theorem sim_ld (r : Reg) (l : Loc) (hok : fr.Ok) (hv : fr.Valid l) :
   simp only [Mach.step, RSim]
   unfold Word W at hmw; unfold W at hfit
   by_cases hb : 2048 ≤ (frame l).2 <;>
-    rcases l with n | n | n <;> simp only [Frame.Valid, Frame.addr] at hv hfr hmw <;>
+    rcases l with n | n | n | n <;> simp only [Frame.Valid, Frame.addr] at hv hfr hmw <;>
     simp only [frame] at hb <;> simp only [emit, ldst, frame, hb, reduceIte, ite_true, ite_false]
   · refine imm_lands t0 _ (by decide) (by omega) hp ?_
     cases r <;>
@@ -1195,7 +1202,7 @@ theorem sim_st (l : Loc) (r : Reg) (hok : fr.Ok) (hv : fr.Valid l) (hrv : rx s (
   simp only [Mach.step, RSim]
   unfold W at hfit
   by_cases hb : 2048 ≤ (frame l).2 <;>
-    rcases l with n | n | n <;> simp only [Frame.Valid] at hv <;>
+    rcases l with n | n | n | n <;> simp only [Frame.Valid] at hv <;>
     simp only [frame] at hb <;> simp only [emit, ldst, frame, hb, reduceIte, ite_true, ite_false]
   · refine imm_lands t0 _ (by decide) (by omega) hp ?_
     cases r <;> simp only [regX, a0, a1, a2] at hrv <;>
@@ -1228,6 +1235,13 @@ theorem sim_st (l : Loc) (r : Reg) (hok : fr.Ok) (hv : fr.Valid l) (hrv : rx s (
       refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]; rfl, ?_⟩
       rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .inn n) hle hv (A := fr.sp + 8 * fr.words + 16 + 8 * n) rfl]
 
+/-- A trap scope emits no code and leaves the machine unchanged. -/
+theorem sim_scope (o d : Nat) :
+    RSim fr base lab (flag (.scope o d) k) (code lab (emit (.scope o d))) s
+      (Mach.step (.scope o d) m) := by
+  simp only [Mach.step, RSim, emit, flag]
+  exact lands_done ⟨by simp only [code, placeL, List.length_nil, hp]; rfl, hc⟩
+
 /-- Every data instruction's emitted RV64 sequence implements `Mach.step`. -/
 theorem emit_sim (i : M) (hok : fr.Ok) (hn : FNegFlips) (hd : DataM i) (hf : Fits fr i)
     (h2 : needs2 i = true → k = true) :
@@ -1258,7 +1272,8 @@ theorem emit_sim (i : M) (hok : fr.Ok) (hn : FNegFlips) (hd : DataM i) (hf : Fit
   | fneg => exact sim_fneg _ _ _ _ _ _ hc hp hl hn
   | fcmp c => exact sim_fcmp _ _ _ _ _ _ hc hp hl c
   | trap f => exact sim_trap _ _ _ _ _ _ hc hp hl f
-  | label | jmp | bz | call | enter | leave => exact hd.elim
+  | scope o d => exact sim_scope _ _ _ _ _ _ hc hp hl o d
+  | label | jmp | bz | call | enter | leave | ldh | sth => exact hd.elim
 
 /-- `bz l` jumps to label `l` exactly when `r0` is zero, and otherwise falls
 through with the state unchanged. -/
@@ -1344,8 +1359,14 @@ theorem run_sim (fr : Frame) (hok : fr.Ok) (hn : FNegFlips) :
         refine ⟨_, steps_seq hs1 hpc1 hs2, ?_⟩
         simp only [setPc_pc, hpc2, shiftLab]; omega
 
-theorem select_data (r : Lir) (hd : DataRow r) : ∀ i ∈ select r, DataM i := by
-  cases r <;> simp only [DataRow] at hd <;>
+/-- Rows that touch only the frame: the heap rows (milestone 8) select
+`ldh`/`sth`, which `emit_sim` does not cover yet. -/
+def FrameRow : Lir → Prop
+  | .loadPtr .. | .storePtr .. => False
+  | _ => True
+
+theorem select_data (r : Lir) (hd : DataRow r) (hh : FrameRow r) : ∀ i ∈ select r, DataM i := by
+  cases r <;> simp only [DataRow, FrameRow] at hd hh <;>
     simp only [select, binary, rangeCheck, List.cons_append, List.nil_append, List.mem_cons,
       List.mem_nil_iff, or_false, forall_eq_or_imp, forall_eq, DataM, true_and, and_true,
       imp_self, implies_true] <;>
@@ -1372,14 +1393,14 @@ theorem select_r2 (r : Lir) : R2Ok false (select r) := by
 simulates the abstract machine. -/
 theorem row_sim (r : Lir) (st : Store) (m : Mach) (s : St) (fr : Frame) (base : Int)
     (lab : Nat → Int) (hok : fr.Ok) (hn : FNegFlips) (hR : Rel st m) (hd : DataRow r)
-    (ht : Typed r st) (hfit : ∀ i ∈ select r, Fits fr i) (hc : Corr fr false m s) (hp : s.pc = 0)
+    (hh : FrameRow r) (ht : Typed r st) (hfit : ∀ i ∈ select r, Fits fr i) (hc : Corr fr false m s) (hp : s.pc = 0)
     (hl : ∀ f, lab (trapLabel f) < 0) :
     Sim (lirStep r st) (run (select r) m) ∧
       RSim fr base lab (flagL (select r) false) (code lab ((select r).flatMap emit)) s
         (run (select r) m) :=
   ⟨select_simulates r st m hR hd ht,
    run_sim fr hok hn (select r) base lab false m s
-     (fun i hi => ⟨select_data r hd i hi, hfit i hi⟩) (select_r2 r) hc hp hl⟩
+     (fun i hi => ⟨select_data r hd hh i hi, hfit i hi⟩) (select_r2 r) hc hp hl⟩
 
 end Vesper.VerifiedCodegen.Rv64.Sem
 
@@ -1485,6 +1506,7 @@ end Vesper.VerifiedCodegen.Rv64.Sem
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_imm
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_ld
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_st
+#print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_scope
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.emit_sim
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_bz
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_jmp

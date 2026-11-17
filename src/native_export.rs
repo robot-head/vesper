@@ -14,8 +14,9 @@
 //! is one word, products are their fields in order, and enums are a tag word
 //! (the variant index) followed by the variant's fields.
 //!
-//! * Scalars (`u8 u32 u64 i64 bool Unit`) are passed and returned as one
-//!   64-bit integer, `f64` as a double.
+//! * Scalars (every integer kind of `vesper.arith.checked`, `bool`, `Unit`)
+//!   are passed and returned as one 64-bit integer, sign-extended for signed
+//!   kinds and zero-extended for unsigned ones; `f64` is a double.
 //! * An aggregate parameter (tuple, struct, enum) is passed as a pointer to
 //!   its words. The callee may overwrite them (a `sink` parameter's storage
 //!   can be reused), so callers pass a scratch copy.
@@ -114,7 +115,8 @@ impl std::error::Error for ExportError {}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AbiType {
-    /// `u8 u32 u64 i64 f64 bool Unit`.
+    /// An integer kind (`u8`..`u64`, `usize`, `i8`..`i64`, `isize`), `f64`,
+    /// `bool` or `Unit`.
     Scalar {
         name: String,
     },
@@ -192,37 +194,19 @@ pub struct LibraryInterface {
     pub functions: Vec<ExportedFunction>,
 }
 
-/// Whether the declaration of `f` in `source` is `pub fn`. The AST does not
-/// record function visibility yet (P0 lane 1 adds it), so this reads the
-/// declaration's leading non-trivia tokens, which start at `f.span`, the way
-/// the parser does: an optional `@fip`, then `pub`.
-fn is_public(source: &str, f: &Function) -> bool {
-    let Some(text) = source.get(f.span.start..f.span.end) else {
-        return false;
-    };
-    let (tokens, _) = crate::lexer::lex(text);
-    let mut words = tokens
-        .iter()
-        .filter(|t| !t.kind.trivia())
-        .map(|t| &text[t.span.start..t.span.end]);
-    let mut first = words.next();
-    if first == Some("@") && words.next() == Some("fip") {
-        first = words.next();
-    }
-    first == Some("pub")
-}
-
 fn valid_library_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// The exported functions of a checked module, in name order. Every `pub fn`
-/// must be exportable: all refusals are returned together.
+/// The exported functions of a checked module, in name order. `public` is
+/// the module's `pub` item names (`Module::public_items`); every one of them
+/// that is a function must be exportable, and all refusals are returned
+/// together.
 pub fn plan(
     world: &World,
-    source: &str,
+    public: &BTreeSet<String>,
     library: &str,
 ) -> Result<LibraryInterface, Vec<ExportError>> {
     if !valid_library_name(library) {
@@ -234,7 +218,7 @@ pub fn plan(
     for (name, f) in &world.functions {
         if name.contains("::")
             || world.elaboration.generated.contains_key(name)
-            || !is_public(source, f)
+            || !public.contains(name)
         {
             continue;
         }
@@ -355,11 +339,7 @@ fn abi_type(
                 .collect::<Result<_, _>>()?,
         }),
         Type::Named(n, args)
-            if args.is_empty()
-                && matches!(
-                    n.as_str(),
-                    "u8" | "u32" | "u64" | "i64" | "f64" | "bool" | "Unit"
-                ) =>
+            if args.is_empty() && crate::numeric::is_scalar_name(n) && n != "Never" =>
         {
             Ok(AbiType::Scalar { name: n.clone() })
         }
@@ -559,6 +539,7 @@ pub fn compile_source(
     if !parsed.diagnostics.is_empty() {
         return Err(first(&parsed.diagnostics, "syntax"));
     }
+    let public = parsed.module.public_items.iter().cloned().collect();
     let mut checked = crate::check::check(&parsed.module);
     if !checked.diagnostics.is_empty() {
         return Err(first(&checked.diagnostics, "semantic"));
@@ -570,16 +551,16 @@ pub fn compile_source(
             return Err(first(&checked.diagnostics, "optimizer validation"));
         }
     }
-    compile_world(&checked.world, source, options)
+    compile_world(&checked.world, &public, options)
 }
 
 /// [`compile_source`] for an already checked (and optimized) module.
 pub fn compile_world(
     world: &World,
-    source: &str,
+    public: &BTreeSet<String>,
     options: &LibraryOptions<'_>,
 ) -> Result<Library, ExportError> {
-    let interface = plan(world, source, options.library).map_err(|errors| {
+    let interface = plan(world, public, options.library).map_err(|errors| {
         ExportError::Compile(
             errors
                 .iter()
@@ -1064,13 +1045,13 @@ pub fn interface_json(interface: &LibraryInterface) -> Result<String, String> {
 /// interface JSON and the Rust binding. Returns the summary line.
 pub fn build_command(
     world: &World,
-    source: &str,
+    public: &BTreeSet<String>,
     options: &LibraryOptions<'_>,
     output: &std::path::Path,
     interface_path: Option<&std::path::Path>,
     binding: Option<(&std::path::Path, &BindingOptions)>,
 ) -> Result<String, String> {
-    let library = compile_world(world, source, options).map_err(|e| e.to_string())?;
+    let library = compile_world(world, public, options).map_err(|e| e.to_string())?;
     std::fs::write(output, &library.object).map_err(|e| format!("{}: {e}", output.display()))?;
     if let Some(path) = interface_path {
         let json = interface_json(&library.interface)?;

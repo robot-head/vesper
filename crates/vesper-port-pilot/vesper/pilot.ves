@@ -63,6 +63,14 @@ pub fn ratio(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]
     a / b
 }
 
+pub fn add_i8(a: i8, b: i8) -> i8 eff [Fail[ArithOverflow]] {
+    a + b
+}
+
+pub fn sum_u16(a: u16, b: u16) -> u16 eff [Fail[ArithOverflow]] {
+    a + b
+}
+
 pub fn is_digit(c: u8) -> bool {
     c >= 48 && c <= 57
 }

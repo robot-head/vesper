@@ -73,9 +73,15 @@ fn typed(value: &Type, monad: Option<&Term>, erase_box: bool) -> Result<Term, St
         Type::Named(name, arguments) => {
             let constructor = match name.as_str() {
                 "u8" => global(&["UInt8"]),
+                "u16" => global(&["UInt16"]),
                 "u32" => global(&["UInt32"]),
-                "u64" => global(&["UInt64"]),
-                "i64" => global(&["Int64"]),
+                // `usize`/`isize` are 64 bits on every target
+                // (`vesper.arith.checked/1`), not Lean's platform `USize`.
+                "u64" | "usize" => global(&["UInt64"]),
+                "i8" => global(&["Int8"]),
+                "i16" => global(&["Int16"]),
+                "i32" => global(&["Int32"]),
+                "i64" | "isize" => global(&["Int64"]),
                 "f64" => global(&["Float"]),
                 "bool" => global(&["Bool"]),
                 "Unit" => global(&["Unit"]),
@@ -291,10 +297,10 @@ pub(crate) fn in_range(op: &str, kind: IntegerKind, a: Term, b: Term) -> Option<
             _ => return None,
         }
     } else {
+        let min = negative(kind.min().unsigned_abs());
         match op {
-            "+" | "-" | "*" => Term::app(
-                source_ref("inI64").expect("fixed prelude name"),
-                [Term::binary(
+            "+" | "-" | "*" => {
+                let exact = Term::binary(
                     match op {
                         "+" => BinaryOp::Add,
                         "-" => BinaryOp::Sub,
@@ -302,17 +308,26 @@ pub(crate) fn in_range(op: &str, kind: IntegerKind, a: Term, b: Term) -> Option<
                     },
                     project(a, "toInt"),
                     project(b, "toInt"),
-                )],
-            ),
+                );
+                if kind.bits() == 64 {
+                    Term::app(source_ref("inI64").expect("fixed prelude name"), [exact])
+                } else {
+                    decide(Term::binary(
+                        BinaryOp::And,
+                        Term::binary(BinaryOp::Le, min, exact.clone()),
+                        Term::binary(BinaryOp::Le, exact, nat(kind.max() as u128)),
+                    ))
+                }
+            }
             "/" => unary(
                 UnaryOp::BoolNot,
                 Term::binary(
                     BinaryOp::BoolAnd,
-                    Term::binary(BinaryOp::BoolEq, a, negative(1u128 << 63)),
+                    Term::binary(BinaryOp::BoolEq, a, min),
                     Term::binary(BinaryOp::BoolEq, b, negative(1)),
                 ),
             ),
-            "neg" => Term::binary(BinaryOp::BoolNe, a, negative(1u128 << 63)),
+            "neg" => Term::binary(BinaryOp::BoolNe, a, min),
             _ => return None,
         }
     })
@@ -340,7 +355,7 @@ pub(crate) fn arith_term(
         "||" => BinaryOp::BoolOr,
         _ => return Err(format!("unsupported Lean binary operator {op:?}")),
     };
-    if op == "%" && kind == Some(IntegerKind::I64) {
+    if op == "%" && kind.is_some_and(IntegerKind::signed) {
         Ok(Term::If {
             condition: Box::new(Term::binary(BinaryOp::BoolEq, b.clone(), negative(1))),
             yes: Box::new(nat(0)),

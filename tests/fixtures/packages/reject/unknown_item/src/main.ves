@@ -1,0 +1,8 @@
+use @demo/geometry::{
+    point,
+    distance
+};
+
+fn main() -> i64 {
+    0
+}

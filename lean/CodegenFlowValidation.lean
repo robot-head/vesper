@@ -36,9 +36,18 @@ def checkJump (labels : Labels) (certificate : Certificate) (facts : Facts) (lab
   | none => true
   | some target => entails facts (annotation certificate target)
 
+/-- A constant may give its destination any kind that contains the value
+(`constantKind` picks one kind, and no single kind covers both `u64` and
+`i64` uses of a value in `[2^32, 2^63)`). Every other fact must already hold. -/
+def checkConst (facts : Facts) (d : Nat) (value : Int) (next : Annotation) : Bool :=
+  next.all fun (location, kind) => if location = .slot d then fits kind value else supports facts location kind
+
 def checkNode (labels : Labels) (certificate : Certificate) (pc : Nat) (row : Lir) : Bool :=
   let facts := factsOf (annotation certificate pc)
   match row with
+  | .const d value => checkConst facts d value (annotation certificate (pc + 1))
+  -- An abort has no successor, so it constrains no annotation.
+  | .trap failure => checkRow facts (.trap failure)
   | .branchZero slot label => supports facts (.slot slot) .bool &&
       entails facts (annotation certificate (pc + 1)) && checkJump labels certificate facts label
   | .jump label => checkJump labels certificate facts label
@@ -126,7 +135,8 @@ theorem jump_preserves {labels : Labels} {certificate : Certificate} {facts : Fa
     exact entailment_sound (by simpa [checkJump, target] using accepted) holds
 
 theorem data_node_check (labels : Labels) (certificate : Certificate) (pc : Nat)
-    (row : Lir) (data : DataRow row) :
+    (row : Lir) (data : DataRow row) (notConst : ∀ d value, row ≠ .const d value)
+    (notTrap : ∀ failure, row ≠ .trap failure) :
     checkNode labels certificate pc row =
       (checkRow (factsOf (annotation certificate pc)) row &&
         entails (transfer (factsOf (annotation certificate pc)) row) (annotation certificate (pc + 1))) := by
@@ -142,8 +152,28 @@ theorem node_preserves {labels : Labels} {certificate : Certificate} {pc next : 
     (result : sourceRow labels pc row store = .next next state) :
     HoldsAnnotation (annotation certificate next) state := by
   have facts := annotation_holds holds
+  by_cases isConst : ∃ d value, row = .const d value
+  · obtain ⟨d, value, rfl⟩ := isConst
+    simp only [sourceRow, advance, lirStep, Outcome.next.injEq] at result
+    obtain ⟨rfl, rfl⟩ := result
+    have check : checkConst (factsOf (annotation certificate pc)) d value
+        (annotation certificate (pc + 1)) = true := by simpa [checkNode] using accepted
+    intro location kind member
+    simp only [checkConst, List.all_eq_true] at check
+    have one := check (location, kind) member
+    by_cases same : location = .slot d
+    · subst same
+      simp only [↓reduceIte, fits, decide_eq_true_eq] at one
+      simpa [upd, InRange] using one
+    · simp only [same, ↓reduceIte] at one
+      simpa [upd, same] using supports_sound facts one
+  have notConst : ∀ d value, row ≠ .const d value := fun d value same => isConst ⟨d, value, same⟩
+  by_cases isTrap : ∃ failure, row = .trap failure
+  · obtain ⟨failure, rfl⟩ := isTrap
+    simp [sourceRow, advance, lirStep] at result
+  have notTrap : ∀ failure, row ≠ .trap failure := fun failure same => isTrap ⟨failure, same⟩
   by_cases data : DataRow row
-  · rw [data_node_check labels certificate pc row data] at accepted
+  · rw [data_node_check labels certificate pc row data notConst notTrap] at accepted
     obtain ⟨check, edge⟩ : checkRow (factsOf (annotation certificate pc)) row = true ∧
         entails (transfer (factsOf (annotation certificate pc)) row) (annotation certificate (pc + 1)) = true :=
       by simpa using accepted
@@ -274,6 +304,86 @@ theorem bad_branch_arm_rejected :
     validateProgram [.const 0 1, .branchZero 0 9, .const 1 42, .jump 10, .const 1 W, .ret]
       branchLabels branchCertificate = false := by decide
 
+/-- Comparisons depend on their kind only through its signedness, so the
+production validator checks each comparison at the widest kind of the same
+signedness (an enum payload word may hold a `u8` in one variant and a `bool`
+in another). The widened program has the same source steps and selects the
+same machine instructions (`widened_validation_sound`). -/
+def widenKind (k : Kind) : Kind := if k = .i64 then .i64 else .u64
+
+def widen : Lir → Lir
+  | .compare c k d a b => .compare c (widenKind k) d a b
+  | row => row
+
+theorem widen_select (row : Lir) : select (widen row) = select row := by
+  cases row <;> try rfl
+  case compare c k d a b => cases k <;> rfl
+
+theorem widen_source_row (labels : Labels) (pc : Nat) (row : Lir) (s : Store) :
+    sourceRow labels pc (widen row) s = sourceRow labels pc row s := by
+  cases row <;> rfl
+
+theorem widen_target_row (labels : Labels) (pc : Nat) (row : Lir) (m : Mach) :
+    targetRow labels pc (widen row) m = targetRow labels pc row m := by
+  simp only [targetRow, widen_select]
+
+theorem widen_source_step (rows : List Lir) (labels : Labels) (pc : Nat) (s : Store) :
+    sourceStep (program (rows.map widen) labels) pc s = sourceStep (program rows labels) pc s := by
+  simp only [sourceStep, program, List.getElem?_map]
+  cases rows[pc]? <;> simp [widen_source_row]
+
+theorem widen_target_step (rows : List Lir) (labels : Labels) (pc : Nat) (m : Mach) :
+    targetStep (program (rows.map widen) labels) pc m = targetStep (program rows labels) pc m := by
+  simp only [targetStep, program, List.getElem?_map]
+  cases rows[pc]? <;> simp [widen_target_row]
+
+theorem widen_run_source (rows : List Lir) (labels : Labels) (fuel pc : Nat) (s : Store) :
+    runSource fuel (program (rows.map widen) labels) pc s = runSource fuel (program rows labels) pc s := by
+  induction fuel generalizing pc s with
+  | zero => rfl
+  | succ fuel ih =>
+    simp only [runSource, widen_source_step]
+    cases sourceStep (program rows labels) pc s <;> simp [ih]
+
+theorem widen_run_target (rows : List Lir) (labels : Labels) (fuel pc : Nat) (m : Mach) :
+    runTarget fuel (program (rows.map widen) labels) pc m = runTarget fuel (program rows labels) pc m := by
+  induction fuel generalizing pc m with
+  | zero => rfl
+  | succ fuel ih =>
+    simp only [runTarget, widen_target_step]
+    cases targetStep (program rows labels) pc m <;> simp [ih]
+
+/-- What the production validator relies on: a certificate accepted for the
+widened rows gives prefix simulation and fault exclusion for the original rows. -/
+theorem widened_validation_sound {rows : List Lir} {labels : Labels} {certificate : Certificate}
+    (accepted : validateProgram (rows.map widen) labels certificate = true) (fuel pc : Nat)
+    (store : Store) (machine : Mach) (holds : HoldsAnnotation (annotation certificate pc) store)
+    (related : Rel store machine) :
+    Related (runSource fuel (program rows labels) pc store) (runTarget fuel (program rows labels) pc machine) ∧
+      runTarget fuel (program rows labels) pc machine ≠ .abort .fault := by
+  rw [← widen_run_source, ← widen_run_target]
+  exact ⟨validated_prefixes accepted fuel pc store machine holds related,
+    validated_fault_exclusion accepted fuel pc store machine holds related⟩
+
+/-- An enum payload word that is a `u8` on one path and a `bool` on another. -/
+theorem widened_payload_compare_validated :
+    validateProgram ([.const 0 7, .const 1 1, .compare .eq .bool 2 0 1, .ret].map widen) (fun _ => none)
+      [[], [(.slot 0, .u8)], [(.slot 0, .u8), (.slot 1, .bool)], []] = true := by decide
+
+/-- A wide constant may serve an `i64` use: `constantKind` alone says `u64`. -/
+theorem wide_constant_validated :
+    validateProgram [.const 0 4294967296, .const 1 1, .arith .add .i64 2 0 1, .ret] (fun _ => none)
+      [[], [(.slot 0, .i64)], [(.slot 0, .i64), (.slot 1, .u8)], []] = true := by decide
+
+/-- An abort does not have to establish the annotation of the row after it. -/
+theorem trap_has_no_successor :
+    validateProgram [.trap .unreachable, .label 0, .not 0 0, .ret] (fun _ => some 1)
+      [[], [(.slot 0, .bool)], [(.slot 0, .bool)], []] = true := by decide
+
+/-- A constant cannot claim a kind that does not contain it. -/
+theorem forged_constant_rejected :
+    validateProgram [.const 0 (-1), .ret] (fun _ => none) [[], [(.slot 0, .u64)]] = false := by decide
+
 end Vesper.CodegenFlowValidation
 
 #print axioms Vesper.CodegenFlowValidation.annotation_holds
@@ -298,3 +408,15 @@ end Vesper.CodegenFlowValidation
 #print axioms Vesper.CodegenFlowValidation.forged_branch_range_rejected
 #print axioms Vesper.CodegenFlowValidation.bad_back_edge_rejected
 #print axioms Vesper.CodegenFlowValidation.bad_branch_arm_rejected
+#print axioms Vesper.CodegenFlowValidation.widen_select
+#print axioms Vesper.CodegenFlowValidation.widen_source_row
+#print axioms Vesper.CodegenFlowValidation.widen_target_row
+#print axioms Vesper.CodegenFlowValidation.widen_source_step
+#print axioms Vesper.CodegenFlowValidation.widen_target_step
+#print axioms Vesper.CodegenFlowValidation.widen_run_source
+#print axioms Vesper.CodegenFlowValidation.widen_run_target
+#print axioms Vesper.CodegenFlowValidation.widened_validation_sound
+#print axioms Vesper.CodegenFlowValidation.widened_payload_compare_validated
+#print axioms Vesper.CodegenFlowValidation.wide_constant_validated
+#print axioms Vesper.CodegenFlowValidation.trap_has_no_successor
+#print axioms Vesper.CodegenFlowValidation.forged_constant_rejected

@@ -116,6 +116,9 @@ pub enum Unsupported {
     /// An IR operation the backend does not know (including ones added after
     /// it, such as vector operations).
     Operation,
+    /// An integer kind other than `u8`, `u32`, `u64` and `i64`
+    /// (`vesper.arith.checked/1` widths are not lowered to Wasm yet).
+    IntegerWidth,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -242,6 +242,7 @@ fn evaluate(source: &str, world: &World) -> String {
     runtime.fuel = 2_000_000_000;
     match runtime.run("main", vec![]) {
         Ok(v) => v.to_string(),
+        Err(e) if e.contains("region bound exhausted") => "region".into(),
         Err(e) if e.contains("unhandled effect Fail") => {
             let w = status_world(source);
             let mut runtime = Runtime::new(&w);
@@ -291,6 +292,7 @@ fn render(world: &World, outcome: &Outcome) -> String {
             .to_string(),
         Outcome::Overflow => "overflow".into(),
         Outcome::DivisionByZero => "div0".into(),
+        Outcome::Region => "region".into(),
         other => panic!("unexpected outcome {other:?}"),
     }
 }
@@ -307,14 +309,24 @@ const TARGETS: [Target; 5] = [
 /// output is deterministic, run what can run here, and compare with the
 /// evaluator and Cranelift. Returns the rendered outcome.
 fn differential(source: &str) -> String {
+    differential_with(source, true)
+}
+
+/// [`differential`], optionally without the Cranelift JIT: Cranelift
+/// specializes region-polymorphic functions inline and refuses recursion
+/// through them ("recursive effect specialization exceeds 64 inline
+/// frames"), which the verified backend compiles as ordinary calls.
+fn differential_with(source: &str, with_cranelift: bool) -> String {
     let w = world(source);
     let expected = evaluate(source, &w);
-    match cranelift(source, &w) {
-        Some(jit) => assert_eq!(jit, expected, "Cranelift JIT disagrees with the evaluator"),
-        None => assert!(
-            !matches!(expected.as_str(), "overflow" | "div0"),
-            "Cranelift JIT succeeded where the evaluator failed"
-        ),
+    if with_cranelift {
+        match cranelift(source, &w) {
+            Some(jit) => assert_eq!(jit, expected, "Cranelift JIT disagrees with the evaluator"),
+            None => assert!(
+                !matches!(expected.as_str(), "overflow" | "div0"),
+                "Cranelift JIT succeeded where the evaluator failed"
+            ),
+        }
     }
     for target in TARGETS {
         for optimize in [true, false] {
@@ -323,8 +335,16 @@ fn differential(source: &str) -> String {
                 optimize,
                 ..Options::new(target)
             };
-            let artifact = vc::compile(&w, "main", &options)
-                .unwrap_or_else(|e| panic!("{target:?}: {e}\n{source}"));
+            let artifact = match vc::compile(&w, "main", &options) {
+                Ok(a) => a,
+                // Only the Linux ELF executable maps the region heap.
+                Err(VerifiedError::Target(e))
+                    if target.os != vc::Os::Linux && e.contains("program heap") =>
+                {
+                    continue;
+                }
+                Err(e) => panic!("{target:?}: {e}\n{source}"),
+            };
             let again = vc::compile(&w, "main", &options).unwrap();
             assert_eq!(artifact.bytes, again.bytes, "nondeterministic output");
             match runner(target) {
@@ -493,8 +513,19 @@ fn constructs_outside_the_subset_are_typed_errors() {
         Unsupported::Float,
     );
     rejects(
-        "fn id[T](sink x: T) -> T { x } fn main() -> i64 { id[i64](4) }",
-        Unsupported::Generic,
+        "fn main() -> i64 { region r { let m = r.checkpoint(); r.commit(m); 1 } }",
+        Unsupported::Effect,
+    );
+    // Nothing supplies the entry's region capabilities.
+    rejects(
+        "fn main() -> i64 eff [r: Region] { let b = r.box(1); r.get(b) }",
+        Unsupported::Effect,
+    );
+    // Every `inout` argument is checked, not only the first.
+    rejects(
+        "fn both(inout a: i64, inout b: i64) { a = wrapping_add(a, 1); b = wrapping_add(b, 1); } \
+         fn main() -> i64 { let y = 2; region r(64) { let z = 0; both(inout z, inout y); wrapping_add(z, y) } }",
+        Unsupported::Effect,
     );
     rejects(
         "fn main() -> i64 { let f = |x: i64| -> i64 { x }; f(1) }",
@@ -505,12 +536,54 @@ fn constructs_outside_the_subset_are_typed_errors() {
         Unsupported::Effect,
     );
     rejects(
-        "fn main() -> i64 { let xs = (1, 2, 3); let i = 1; xs[i] }",
-        Unsupported::Index,
-    );
-    rejects(
         "copy struct P { x: i64 } fn main() -> bool { let a = P { x: 1 }; a == a }",
         Unsupported::StructuralEquality,
+    );
+}
+
+/// Dynamic tuple indexing (the front end's byte tables): every element, the
+/// first and last, out of range on both sides, multi-word elements and
+/// unsigned indices.
+#[test]
+fn dynamic_tuple_indexing() {
+    let table = "fn t(i: i64) -> i64 eff [Fail[RuntimeError]] { (7, 11, 13, 17, 19)[i] }";
+    for i in [
+        "0",
+        "1",
+        "4",
+        "5",
+        "-1",
+        "-9223372036854775808",
+        "9223372036854775807",
+    ] {
+        differential(&format!(
+            "{table}\nfn main() -> i64 eff [Fail[RuntimeError]] {{ t({i}) }}"
+        ));
+    }
+    assert_eq!(
+        differential(&format!(
+            "{table}\nfn sum(i: i64, acc: i64) -> i64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {{ if i == 5 {{ acc }} else {{ sum(i + 1, acc * 3 + t(i)) }} }}\nfn main() -> i64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {{ sum(0, 0) }}"
+        )),
+        "1051"
+    );
+    assert_eq!(
+        differential(
+            "copy struct P { x: i64, y: bool }\nfn pick(i: u8) -> P eff [Fail[RuntimeError]] { (P { x: 1, y: true }, P { x: 2, y: false }, P { x: 3, y: true })[i] }\nfn main() -> (P, P) eff [Fail[RuntimeError]] { (pick(2), pick(1)) }"
+        ),
+        "(P { x: 3, y: true }, P { x: 2, y: false })"
+    );
+    assert_eq!(
+        differential(
+            "fn pick(i: u64) -> (i64, i64) eff [Fail[RuntimeError]] { ((1, 2), (3, 4))[i] }\nfn main() -> (i64, i64) eff [Fail[RuntimeError]] { pick(2) }"
+        ),
+        "div0"
+    );
+    // A handled out-of-range index is `RuntimeError::IndexOutOfBounds`.
+    assert_eq!(
+        differential(&format!(
+            "{table}\nfn caught(i: i64) -> i64 {{ handle Fail[RuntimeError] in {{ t(i) }} with {{ return v => v, raise(e, r) => match e {{ RuntimeError::IndexOutOfBounds => -1, _ => -2, }}, }} }}\nfn main() -> (i64, i64, i64) {{ (caught(3), caught(5), caught(-1)) }}"
+        )),
+        "(17, -1, -1)"
     );
 }
 
@@ -645,6 +718,47 @@ fn tail_self_calls_are_loops() {
         if let Some(prefix) = runner(target) {
             assert_eq!(render(&w, &execute(&artifact, &prefix)), "30000007");
         }
+    }
+}
+
+/// Milestone 8: generic functions by monomorphization, region blocks and
+/// region-polymorphic functions over the program heap.
+#[test]
+fn generics_and_regions_agree_with_the_evaluator() {
+    for (name, expected) in [
+        (
+            "generics.ves",
+            "(4, true, 9, Pair { a: 20, b: 10 }, 2, true, (3, 4))",
+        ),
+        (
+            "regions.ves",
+            "(4, Point { x: 11, y: 2 }, 10, (true, false), 48, 12, 7)",
+        ),
+        ("region_exhausted.ves", "region"),
+        ("region_unit.ves", "false"),
+        ("region_fail.ves", "(-1, 8, -1, 8)"),
+        // Writes to index 99 land in cell 15 (`syntax_slot`'s catch-all).
+        ("syntax_pages.ves", "(30, 990, 0, true)"),
+    ] {
+        let with_cranelift = name == "generics.ves";
+        if name != "generics.ves" {
+            // Only the Linux ELF executable maps the region heap.
+            let w = world(&fixture(name));
+            for target in [Target::AARCH64_MACOS, Target::X86_64_WINDOWS] {
+                assert!(
+                    matches!(
+                        vc::compile(&w, "main", &Options::new(target)),
+                        Err(VerifiedError::Target(e)) if e.contains("program heap")
+                    ),
+                    "{name} {target:?}"
+                );
+            }
+        }
+        assert_eq!(
+            differential_with(&fixture(name), with_cranelift),
+            expected,
+            "{name}"
+        );
     }
 }
 

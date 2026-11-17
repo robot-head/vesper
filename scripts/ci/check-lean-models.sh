@@ -53,6 +53,7 @@ lean -o "$oracle_model_dir/VerifiedCodegen.olean" lean/VerifiedCodegen.lean
 LEAN_PATH="$oracle_import_dir" lean -o "$oracle_model_dir/CodegenRv64Encoding.olean" lean/CodegenRv64Encoding.lean
 LEAN_PATH="$oracle_import_dir" lean lean/CodegenRv64Semantics.lean
 LEAN_PATH="$oracle_import_dir" lean lean/CodegenA64Encoding.lean
+LEAN_PATH="$oracle_import_dir" lean lean/CodegenX64Encoding.lean
 LEAN_PATH="$oracle_import_dir" lean -o "$oracle_model_dir/CodegenComposition.olean" lean/CodegenComposition.lean
 LEAN_PATH="$oracle_import_dir" lean -o "$oracle_model_dir/CodegenControlFlow.olean" lean/CodegenControlFlow.lean
 LEAN_PATH="$oracle_import_dir" lean -o "$oracle_model_dir/CodegenValidation.olean" lean/CodegenValidation.lean

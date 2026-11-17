@@ -47,7 +47,7 @@ named after the type.
 
 What is exportable today:
 
-- Scalars `u8 u32 u64 i64 f64 bool Unit`.
+- Scalars: every integer kind (`u8 u16 u32 u64 usize i8 i16 i32 i64 isize`), `f64`, `bool` and `Unit`.
 - Tuples, and non-generic `copy` structs and enums built from exportable types.
 - `Option[T]`, `Result[T, E]`, `ArithOverflow` and `RuntimeError`.
 - Effect rows that hold only unlabeled `Fail[E]`.

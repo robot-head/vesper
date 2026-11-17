@@ -2875,7 +2875,8 @@ impl State<'_> {
     /// commit at `after`: a live rescale after the first barrier that is past
     /// both the lease granted before this commit (no worker has read beyond
     /// it) and the last scheduled step. Requests that change nothing, or
-    /// find no barrier before the last epoch, are dropped.
+    /// find no barrier before the last epoch, or exceed `MAX_DECISIONS`, are
+    /// dropped.
     fn decide(&mut self, after: u64) -> Option<(u64, usize)> {
         loop {
             let &m = self.requests.first()?;
@@ -2884,7 +2885,12 @@ impl State<'_> {
             if let Some(&(last, _)) = self.sched.steps.last() {
                 b = b.max(last.saturating_add(interval));
             }
-            if m != self.sched.last().workers && b < self.last_epoch() {
+            // A manifest records at most MAX_DECISIONS decisions (the
+            // reader's limit), so a job past it rejects further requests.
+            if m != self.sched.last().workers
+                && b < self.last_epoch()
+                && self.decided.len() < MAX_DECISIONS
+            {
                 return Some((b, m));
             }
             self.requests.remove(0);

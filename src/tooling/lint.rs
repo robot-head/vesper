@@ -123,6 +123,10 @@ fn preflight(source: &str) -> Result<Vec<Token>, String> {
                 | K::Or
                 | K::Bang
                 | K::Pipe
+                | K::Amp
+                | K::Caret
+                | K::Shl
+                | K::Shr
         ) {
             recursive_tokens += 1;
             if recursive_tokens > 256 {

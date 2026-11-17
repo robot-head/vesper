@@ -139,6 +139,10 @@ vesper_crate(
             "resources:memory:9216",
             "resources:cpu:1",
         ],
+        "test/forge_provenance_cli": [
+            "resources:memory:9216",
+            "resources:cpu:1",
+        ],
         "test/verify_extract_cli": [
             "resources:memory:9216",
             "resources:cpu:1",
@@ -263,6 +267,11 @@ vesper_crate(
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
+        # Macro provenance audits replay Std serially, like proof_audit_cli.
+        "test/forge_provenance_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
         # Same serial Std kernel-replay pattern as proof_audit_cli and format_proof_cli.
         "test/verify_extract_cli": select({
             "@platforms//os:macos": ["@platforms//:incompatible"],
@@ -355,6 +364,7 @@ vesper_crate(
     # while allowing the complete target 900 seconds on slower macOS runners.
     test_timeouts = {
         "test/format_proof_cli": "long",
+        "test/forge_provenance_cli": "long",
         "test/verify_extract_cli": "long",
         # Fresh replay covers both complete model import closures.
         "test/logos42_acceptance": "eternal",

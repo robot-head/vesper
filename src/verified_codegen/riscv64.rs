@@ -329,6 +329,26 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
                 xori(a, A0, A0, 1);
             }
         }
+        // t0 := HEAP_BASE (1 << 28); t0 += a1 << 3; ld a0, 8*off(t0)
+        // (sd a0, ...).
+        M::LdH(off) | M::StH(off) => {
+            const _: () = assert!(super::HEAP_BASE == 1 << 28);
+            addi(a, T0, ZERO, 1);
+            slli(a, T0, T0, 28);
+            slli(a, T1, A1, 3);
+            add(a, T0, T0, T1);
+            let mut offset = off * 8;
+            if offset >= 2048 {
+                imm(a, T1, u64::from(offset));
+                add(a, T0, T0, T1);
+                offset = 0;
+            }
+            if matches!(m, M::LdH(_)) {
+                i(a, LOAD, 3, A0, T0, offset as i32);
+            } else {
+                s(a, 3, T0, A0, offset as i32);
+            }
+        }
         M::Label(l) => a.bind(l)?,
         M::Jmp(l) => jal(a, ZERO, l),
         M::Bz(l) => branch_to(a, BEQ, A0, ZERO, l),

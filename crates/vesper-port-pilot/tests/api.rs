@@ -64,6 +64,16 @@ fn several_fail_types_map_to_one_error_enum() {
 }
 
 #[test]
+fn narrow_integer_kinds() {
+    assert_eq!(add_i8(-100, -28), Ok(i8::MIN));
+    assert_eq!(add_i8(-100, -29), Err(ArithOverflow));
+    assert_eq!(add_i8(100, 27), Ok(i8::MAX));
+    assert_eq!(add_i8(-1, -1), Ok(-2));
+    assert_eq!(sum_u16(65_000, 535), Ok(u16::MAX));
+    assert_eq!(sum_u16(65_000, 536), Err(ArithOverflow));
+}
+
+#[test]
 fn bytes_and_booleans() {
     for c in 0..=255u8 {
         assert_eq!(is_digit(c), c.is_ascii_digit(), "byte {c}");

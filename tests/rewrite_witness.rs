@@ -50,12 +50,7 @@ fn canonical_candidate(source: &Expr) -> Expr {
     candidate
 }
 fn kind_type(kind: IntegerKind) -> &'static str {
-    match kind {
-        IntegerKind::U8 => "u8",
-        IntegerKind::U32 => "u32",
-        IntegerKind::U64 => "u64",
-        IntegerKind::I64 => "i64",
-    }
+    kind.name()
 }
 fn term(kind: IntegerKind, node: TermNode) -> Term {
     Term { kind, node }

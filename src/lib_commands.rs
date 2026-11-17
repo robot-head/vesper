@@ -43,7 +43,7 @@ impl LibFlags {
         self,
         command: &str,
         world: &vesper::check::World,
-        source: &str,
+        public: &std::collections::BTreeSet<String>,
         input: &str,
         output: Option<PathBuf>,
         target: Option<&str>,
@@ -81,7 +81,7 @@ impl LibFlags {
         };
         let summary = export::build_command(
             world,
-            source,
+            public,
             &options,
             &output,
             self.interface.as_deref(),

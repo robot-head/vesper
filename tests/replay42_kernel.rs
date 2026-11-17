@@ -416,12 +416,7 @@ fn checked_island(source: &str) -> (Expr, TypeMap) {
     ((**tail).clone(), checked.expression_types)
 }
 fn kind_name(kind: IntegerKind) -> &'static str {
-    match kind {
-        IntegerKind::U8 => "u8",
-        IntegerKind::U32 => "u32",
-        IntegerKind::U64 => "u64",
-        IntegerKind::I64 => "i64",
-    }
+    kind.name()
 }
 fn canonical_candidate(source: &Expr) -> Expr {
     fn spans(value: &mut Expr, root: &std::ops::Range<usize>) {
@@ -638,6 +633,12 @@ fn kind_tag(kind: IntegerKind) -> u8 {
         IntegerKind::U32 => 1,
         IntegerKind::U64 => 2,
         IntegerKind::I64 => 3,
+        IntegerKind::U16 => 4,
+        IntegerKind::Usize => 5,
+        IntegerKind::I8 => 6,
+        IntegerKind::I16 => 7,
+        IntegerKind::I32 => 8,
+        IntegerKind::Isize => 9,
     }
 }
 fn op_tag(op: IntOp) -> u8 {

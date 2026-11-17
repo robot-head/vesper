@@ -188,15 +188,19 @@ fn imports_are_resolved_with_typed_errors() {
             Handler::Direct,
         )
         .unwrap();
-    for call in ["Narrow::takes_i32(1)", "Narrow::gives_ptr()"] {
-        let e = error_kind(
-            &format!("fn f() -> u64 eff [Ffi[Narrow]] {{ {call}; 1 }}"),
-            &narrow,
-        );
-        assert_eq!(e.kind, FfiErrorKind::UnsupportedType, "{call}: {e}");
-    }
+    let e = error_kind(
+        "fn f() -> u64 eff [Ffi[Narrow]] { Narrow::gives_ptr(); 1 }",
+        &narrow,
+    );
+    assert_eq!(e.kind, FfiErrorKind::UnsupportedType, "{e}");
     ffi_lowering::check_source(
         "fn f() -> u64 eff [Ffi[Narrow]] { Narrow::fine() }",
+        &narrow,
+    )
+    .unwrap();
+    // Narrow integers map to the source kind of the same name.
+    ffi_lowering::check_source(
+        "fn f() -> i32 eff [Ffi[Narrow]] { Narrow::takes_i32(1) }",
         &narrow,
     )
     .unwrap();

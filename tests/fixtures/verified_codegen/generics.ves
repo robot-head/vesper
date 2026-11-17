@@ -1,0 +1,65 @@
+// Generic functions and data, monomorphized per instance (milestone 8).
+copy struct Pair[T: mod copy] {
+    a: T,
+    b: T
+}
+copy enum Choice[T: mod copy] {
+    Left(T),
+    Right(T, T)
+}
+
+fn id[T](sink x: T) -> T {
+    x
+}
+fn first[T: mod copy](p: Pair[T]) -> T {
+    p.a
+}
+fn swap[T: mod copy](p: Pair[T]) -> Pair[T] {
+    Pair {
+        a: p.b,
+        b: p.a
+    }
+}
+fn pick[T: mod copy](c: Choice[T], right: bool) -> T {
+    match c {
+        Choice::Left(x) => x,
+        Choice::Right(x, y) => if right {
+            y
+        } else {
+            x
+        },
+    }
+}
+// Generic recursion at one instance, and a generic calling a generic.
+fn nth[T: mod copy](p: Pair[T], n: i64) -> T {
+    if n == 0 {
+        first(p)
+    } else {
+        nth(swap(p), wrapping_sub(n, 1))
+    }
+}
+
+fn main() -> (i64, bool, u8, Pair[u32], i64, bool, (i64, i64)) {
+    let p: Pair[i64] = Pair {
+        a: 1,
+        b: 2
+    };
+    let q: Pair[bool] = Pair {
+        a: true,
+        b: false
+    };
+    let c: Choice[u8] = Choice::Right(7, 9);
+    let w: Pair[u32] = Pair {
+        a: 10,
+        b: 20
+    };
+    (
+        id[i64](4),
+        first(q),
+        pick(c, true),
+        swap(w),
+        nth(p, 5),
+        nth(q, 2),
+        id((3, 4)),
+    )
+}

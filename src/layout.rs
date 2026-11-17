@@ -50,10 +50,7 @@ impl Layout {
             );
         }
         if matches!(ty, Type::IntLiteral(_) | Type::Function { .. })
-            || matches!(
-                ty.name(),
-                "u8" | "u32" | "u64" | "i64" | "f64" | "bool" | "Unit" | "Never"
-            )
+            || crate::numeric::is_scalar_name(ty.name())
             || crate::regions::is_handle_type(ty)
             || crate::tiled::is_seq_type(ty)
             || crate::fip::is_box_type(world, ty)
@@ -259,9 +256,12 @@ pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::
         LayoutKind::Scalar => Ok(match ty.name() {
             "f64" => Value::Float(f64::from_bits(word())),
             "bool" => Value::Bool(word() != 0),
-            "u8" => Value::UInt(word() & 255, 8),
-            "u32" => Value::UInt(word() & u32::MAX as u64, 32),
-            "u64" => Value::UInt(word(), 64),
+            n if crate::numeric::IntegerKind::from_name(n).is_some() => {
+                crate::runtime::integer_from_word(
+                    crate::numeric::IntegerKind::from_name(n).unwrap(),
+                    word(),
+                )
+            }
             _ => {
                 if *ty == Type::unit() || ty.name() == "Unit" {
                     Value::Tuple(vec![])
