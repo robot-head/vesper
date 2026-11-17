@@ -334,6 +334,13 @@ pub struct TraitBoundSyntax {
     pub param: String,
     pub trait_ref: TraitRef,
     pub span: Span,
+    /// The item whose generic parameter the bound constrains: a function
+    /// name (`f`), an inherent method (`Type::m`, one entry per method of a
+    /// bounded `impl[K: Ord] Type[K]` block) or a type (`CacheBTree`).
+    /// Methods of traits and conformances and effect operations carry an
+    /// `$unsupported::` prefix.
+    #[serde(default)]
+    pub owner: String,
 }
 
 /// Reserved frontend-only encoding of an associated-type projection

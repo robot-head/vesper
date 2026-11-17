@@ -1,0 +1,12 @@
+// expect E0615: every level instantiates `deep` at a larger tuple type.
+fn deep[T: mod copy](x: T, n: i64) -> i64 where T: Ord {
+    if n == 0 {
+        0
+    } else {
+        deep((x, x), wrapping_sub(n, 1))
+    }
+}
+
+fn main() -> i64 {
+    deep(1, 3)
+}

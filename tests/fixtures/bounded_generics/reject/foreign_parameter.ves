@@ -1,0 +1,8 @@
+// expect E0607: a function where-clause constrains its own parameters.
+fn f[T](in x: T) -> i64 where U: Ord {
+    0
+}
+
+fn main() -> i64 {
+    0
+}

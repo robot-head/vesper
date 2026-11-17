@@ -1,0 +1,8 @@
+// expect E0601: the bound names no trait.
+fn f[T](in x: T) -> i64 where T: Missing {
+    0
+}
+
+fn main() -> i64 {
+    0
+}

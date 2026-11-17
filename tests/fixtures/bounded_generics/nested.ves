@@ -1,0 +1,58 @@
+// Bounds pass through nested instances: a generic struct derives `Ord`
+// under a where-bound, and a model chosen at the outer call reaches the
+// inner one.
+copy struct Pair[T: mod copy] {
+    a: T,
+    b: T
+}
+
+model Reverse: Ord for i64 {
+    fn cmp(in self, in other: i64) -> Ordering {
+        Ord::cmp(other, self)
+    }
+}
+
+fn less[T: mod copy](x: T, y: T) -> bool where T: Ord {
+    match x.cmp(y) {
+        Less => true,
+        _ => false,
+    }
+}
+
+fn sorted[T: mod copy](x: T, y: T, z: T) -> bool where T: Ord {
+    if less(x, y) {
+        less(y, z)
+    } else {
+        false
+    }
+}
+
+fn code(b: bool) -> i64 {
+    if b {
+        1
+    } else {
+        0
+    }
+}
+
+fn main() -> i64 {
+    let p = Pair {
+        a: 1,
+        b: 2
+    };
+    let q = Pair {
+        a: 1,
+        b: 3
+    };
+    let r = Pair {
+        a: 2,
+        b: 0
+    };
+    let pairs = code(sorted(p, q, r));
+    let ints = code(sorted(1, 2, 3));
+    let reversed = {
+        use model Reverse;
+        code(sorted(3, 2, 1))
+    };
+    wrapping_add(wrapping_add(wrapping_mul(pairs, 100), wrapping_mul(ints, 10)), reversed)
+}

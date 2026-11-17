@@ -1,0 +1,8 @@
+// expect E0607: bounds on trait methods are not supported.
+trait Show {
+    fn show[T: Ord](in self, x: T) -> i64;
+}
+
+fn main() -> i64 {
+    0
+}

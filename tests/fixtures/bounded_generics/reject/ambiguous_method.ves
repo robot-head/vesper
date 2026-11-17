@@ -1,0 +1,16 @@
+// expect E0609: two bounds provide `get`; the call must name its trait.
+trait A {
+    fn get(in self) -> i64;
+}
+
+trait B {
+    fn get(in self) -> i64;
+}
+
+fn both[T](in x: T) -> i64 where T: A, T: B {
+    x.get()
+}
+
+fn main() -> i64 {
+    0
+}
