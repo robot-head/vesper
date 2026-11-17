@@ -62,7 +62,7 @@ unmerged dependency's branch to get ahead, but it never merges first.
 | Lane | Prompt | Claim | Crate (src LOC, tests) | Needs | Starts after | Compiler links it | Exclusive boundary |
 |---|---|---|---|---|---|---|---|
 | 1 | [Export ABI for ports](01-export-abi-ports.md) | #898 | kit | F1, F2 | now (strings part after #896) | - | `src/native_export.rs`, `src/native_export/**`, `src/lib_commands.rs`, `crates/vesper-port-abi/**`, `crates/vesper-port-pilot/**`, `tests/native_export*.rs`, `tests/fixtures/native_export/**`, `docs/maintenance/porting-a-crate.md` (ABI sections) |
-| 2 | [Cycle-free port builds](02-cycle-free-port-builds.md) | #899 | kit | F8 | now | - | `crates/vesper-port-harness/**`, NEW `crates/vesper-port-build/**`, `tools/bazel/vesper_port.bzl`, `scripts/test-port-harness.sh`, the port-harness steps in `.github/workflows/`, `docs/maintenance/porting-a-crate.md` (build sections), root patch |
+| 2 | [Cycle-free port builds](02-cycle-free-port-builds.md) | #899 | kit | F8 | now | - | `crates/vesper-port-harness/**`, NEW `crates/vesper-port-build/**`, `tools/bazel/vesper_port.bzl`, `scripts/test-port-harness.sh`, the port-harness steps in `.github/workflows/`, `docs/maintenance/porting-a-crate.md` (build sections), a narrow `--lib <package dir>` hunk in `src/lib_commands.rs`, root patch for seed packages |
 | 3 | [vesper-warp-wheel (pilot)](03-warp-wheel.md) | #900 | 1,555, 17 | F1, F3, F7a | lane 1 | no | `crates/vesper-warp-wheel/**` |
 | 4 | [vesper-beacon (pilot)](04-beacon.md) | #901 | 919, 12 | F1, F3, F2 (text forms only) | lanes 1, 2; #896 for traceparent text | yes | `crates/vesper-beacon/**` (not `vesper-beacon-arrow`) |
 | 5 | [vesper-simpulse](05-simpulse.md) | #902 | 712, 18 | F1, F5, F2 | lanes 1, 2, #896, #897 | yes (via sim-session, doc, chrono) | `crates/vesper-simpulse/**` |
@@ -135,9 +135,11 @@ These apply on top of the project rules and the
 - **Self-hosted parser.** `tests/self_host_front_end.rs` parses every `.ves`
   file in the repository with the Stage 1 parser. It cannot parse `use` (#880),
   slice intervals (#887) or inline bounds (`T: Ord`; write `where` clauses).
-  Add the port's `vesper/` directory to the corpus skip list in the same way
-  `tests/fixtures/packages` is skipped, with a comment naming #880, rather than
-  avoiding the syntax. Do not edit `packages/vesper-compiler/**` or
+  Add the port's `vesper/` directory to the corpus skip predicate in
+  `fixtures()` in `tests/fixtures/self_host/driver.rs` (which
+  `tests/self_host_front_end.rs` and `tests/self_host_check.rs` call), the same
+  way `tests/fixtures/packages` is skipped, with a comment naming #880, rather
+  than avoiding the syntax. Do not edit `packages/vesper-compiler/**` or
   `bootstrap/**`.
 - **Keep the API, change the inside.** The Rust crate's public types stay in the
   crate root, so both builds share them and its dependents do not change. A
@@ -188,10 +190,18 @@ platforms, makes `vesper-port` the only build (the feature goes away and
 For the ten crates the compiler links (lanes 4, 5, 6, 8, 9, 15, 16, 17, 18,
 19), deleting the Rust code would make the compiler need itself to build. The
 default in this plan is: **the lane proves parity, keeps both builds, and makes
-the Vesper build the one every dependent other than the compiler uses**. The
-Rust code then stays only as the compiler's seed copy, frozen, until self-hosting
-Stage 2 moves the compiler's own use of the crate. Lane 2 writes down how that
-works in Cargo and Bazel. The owner can choose otherwise in the plan review.
+the Vesper build the one every dependent outside the compiler's dependency
+closure uses**. The Rust code then stays only as the compiler's seed copy,
+frozen, until self-hosting Stage 2 moves the compiler's own use of the crate.
+A Cargo feature cannot do this, because resolver 2 unifies features per package
+across the build: one crate in the closure enabling the port would give the
+compiler the port too. So the frozen Rust becomes a separate seed package
+(`<crate>-seed`, same library name) that every crate in
+`cargo tree -p vesper -e normal,build` depends on by rename, and the original
+package becomes the port build. Lane 2 builds and guards this in Cargo and
+Bazel. Today most dependents of these crates are themselves inside the closure
+(for example the Loom crates and Kinetic), so for several lanes the port build
+is exercised only by the crate's own tests until Stage 2. The owner can choose otherwise in the plan review.
 
 ## Merge order and collisions
 
@@ -200,8 +210,8 @@ works in Cargo and Bazel. The owner can choose otherwise in the plan review.
 | Root `Cargo.toml`/`Cargo.lock` | 2 (new crate), any lane adding a dependency | Serialize. Lane 2 merges before any compiler-linked port. |
 | `src/native_export.rs`, `crates/vesper-port-abi/**` | 1 only | Ports needing an ABI change ask lane 1 (or open a follow-up after it merges) instead of editing them. |
 | `crates/vesper-port-harness/**`, `scripts/test-port-harness.sh` | 2 owns; ports add one line each to the script | Append only; merge `main` before merging. |
-| `tests/self_host_front_end.rs` skip list | every port | One line per port; merge `main` before merging. |
-| Dependents' `Cargo.toml` | compiler-linked ports | One-line switch to the port build per dependent, in its own commit, in the form lane 2 documents. |
+| `fixtures()` skip predicate in `tests/fixtures/self_host/driver.rs` | every port | One line per port; merge `main` before merging. |
+| Dependents' `Cargo.toml` | compiler-linked ports | Seed package inside the compiler closure, port package outside it, in its own commit, as lane 2 documents. |
 | `packages/vesper-std/**` | #897 only | Ports needing a std function request it on #897 or put a private helper in their own package. |
 
 Suggested order: lanes 1 and 2 first; then the pilot 3 and lane 11; then 4 and 10;

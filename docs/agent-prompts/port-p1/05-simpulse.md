@@ -21,7 +21,7 @@ Claim: GitHub issue #902 claims this work. Before you start, check the open issu
 
 Delivery and coordination:
 - Follow every rule in "Rules for every lane" in docs/agent-prompts/port-p1/README.md: freeze, re-measure first, where the port lives, the self-hosted parser skip list, keep the API, what stays in Rust, unit tests, divergence checks, performance, CI, checks before pushing, merging and the report.
-- Edit only the exclusive paths below, plus one line each in the shared lists the plan names (scripts/test-port-harness.sh, the tests/self_host_front_end.rs skip list) and, for a compiler-linked crate, the one-line feature switch in each non-compiler dependent's Cargo.toml (own commit). Other P1 lanes run concurrently; never edit their paths and never depend on an unmerged lane's work.
+- Edit only the exclusive paths below, plus one line each in the shared lists the plan names (scripts/test-port-harness.sh, the self-hosted corpus skip predicate in `fixtures()` in tests/fixtures/self_host/driver.rs) and, for a compiler-linked crate, the dependency switch lane 2 documents: seed package for every crate inside the compiler closure, port package outside it (own commit). Other P1 lanes run concurrently; never edit their paths and never depend on an unmerged lane's work.
 - Do not edit src/verified_codegen/**, packages/vesper-compiler/**, bootstrap/**, packages/vesper-std/** (P0 lane 8, #897) or the strings module (P0 lane 7, #896). Ask those lanes for what you need.
 - Root patch rule: you MAY commit your own minimal root patch (new [workspace.dependencies] entries and the regenerated Cargo.lock; for a new crate, registration in root Cargo.toml `members` and `default-members` plus its BUILD.bazel from `python3 tools/bazel/sync_build_files.py`) onto YOUR branch, in its own commit. Merge origin/main right before merging and regenerate the lockfile with cargo.
 - Bazel: Linux CI runs `bazel test //...` on BuildBuddy with Rust 1.100. Files a test reads from outside its crate must be declared in the crate's BUILD.bazel. Bazel's rustfmt checks every file under src/ and ignores #[rustfmt::skip]: keep generated bindings in port/. Windows and macOS CI use Cargo.
@@ -43,13 +43,13 @@ Implement:
 1. Port the seeded scheduler model (`src/lib.rs`): run queue, timers, seeded choice and the trace it records.
 2. Traces are serialized with serde/serde_json today. Keep the serde derives on the shared Rust types; the port produces the trace values and the wrapper serializes them, so trace bytes stay identical.
 3. Maps use `@vesper-std` `CacheBTree` (deterministic order).
-4. Compiler-linked (through vesper-sim-session, vesper-doc and vesper-chrono): seed-copy rule from lane 2. Every non-compiler dependent (vesper-chorus, vesper-flux, vesper-nexus, vesper-crucible) moves to the port build.
+4. Compiler-linked (through vesper-sim-session, vesper-doc, vesper-chrono and vesper-crucible): seed-copy rule from lane 2. Dependents outside the compiler closure (check `cargo tree -p vesper`; today vesper-chorus, vesper-flux and vesper-nexus) move to the port build.
 
 Stays in Rust: The frozen seed copy; serde serialization of traces in the wrapper.
 
 Acceptance:
 - `tests/kernel.rs` (18 tests) passes against both builds with byte-identical traces on the four required checks.
-- vesper-chorus and vesper-flux tests pass against the port build.
+- Dependents moved to the port build pass their tests.
 - Package exports one Vesper module per Rust module so Crucible can import it.
 - Report: docs/parallel-results/port-p1-simpulse.md, with the API inventory, what was ported, what stays Rust and why, unit-test treatment, divergence checks, benchmarks, platforms run, and whether the Rust code was deleted.
 ~~~
