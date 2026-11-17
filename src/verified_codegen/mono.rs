@@ -214,6 +214,20 @@ pub fn monomorphize(
                         }
                     }
                 }
+                // A named function read as a value (`run(work)`), for the
+                // function-value specialization (`evidence.rs`).
+                if let Op::Read { root, path, .. } = &i.op
+                    && path.is_empty()
+                    && !f.params.iter().any(|p| &p.name == root)
+                    && !f.locals.contains_key(root)
+                    && world
+                        .functions
+                        .get(root)
+                        .is_some_and(|g| g.generics.is_empty())
+                    && program.functions.contains_key(root)
+                {
+                    queue.push_back((root.clone(), Vars::new()));
+                }
                 let Op::Call {
                     callee,
                     types,

@@ -531,8 +531,10 @@ fn constructs_outside_the_subset_are_typed_errors() {
         "fn main() -> i64 { let f = |x: i64| -> i64 { x }; f(1) }",
         Unsupported::FunctionValue,
     );
+    // A tail-resumptive handler compiles (milestone 11); one that resumes
+    // other than in tail position does not.
     rejects(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { Ask::ask() } with { return x => x, ask(k) => k(21), } }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { Ask::ask() } with { return x => x, ask(k) => wrapping_add(k(21), 1), } }",
         Unsupported::Effect,
     );
     rejects(
@@ -857,4 +859,51 @@ fn trap_scopes_only_where_implicit_failures_are_caught() {
     assert!(scopes[0].0 != ovf && scopes[0].1 == div0);
     assert_eq!(scopes[1], (ovf, div0));
     assert!(matches!(bump.last(), Some(vc::Lir::Scope { .. })));
+}
+
+/// Milestone 11: tail-resumptive user-effect handlers by evidence passing,
+/// and named functions passed as function values.
+#[test]
+fn tail_resumptive_handlers() {
+    let mem = "linear effect Mem {\n    fn read(index: i64) -> i64;\n    fn write(index: i64, value: i64);\n}\n";
+    // A capture of the handler, an operation in a callee, a generic
+    // function that takes the body as a function value.
+    assert_eq!(
+        differential(&format!(
+            "{mem}fn work() -> i64 eff [Mem] {{ Mem::write(1, 5); wrapping_add(Mem::read(1), 1) }}\nfn run[T: mod copy](sink consume: fn() -> T eff [Mem]) -> T {{ let base = 10; handle Mem in {{ consume() }} with {{ return value => value, read(i, resume) => resume(wrapping_add(base, i)), write(i, value, resume) => {{ let ignored = wrapping_add(i, value); resume(()) }}, }} }}\nfn main() -> i64 {{ run(work) }}"
+        )),
+        "12"
+    );
+    // Recursion through the effect, a `_` argument, and the `return`
+    // clause (Cranelift's effect specialization does not take recursion).
+    assert_eq!(
+        differential_with(
+            &format!(
+                "{mem}fn count(n: i64, acc: i64) -> i64 eff [Mem] {{ if n == 0 {{ acc }} else {{ count(wrapping_sub(n, 1), wrapping_add(acc, Mem::read(n))) }} }}\nfn main() -> (i64, i64) {{ let k = 3; let r = handle Mem in {{ count(4, 0) }} with {{ return v => wrapping_mul(v, 2), read(i, resume) => resume(wrapping_mul(i, k)), write(_, _, resume) => resume(()), }}; (r, k) }}"
+            ),
+            false
+        ),
+        "(60, 3)"
+    );
+    // A clause runs in the handler's context: its failure skips the
+    // `handle Fail` around the operation.
+    assert_eq!(
+        differential(
+            "effect Boom {\n    fn boom(x: i64) -> i64;\n}\nfn inner() -> i64 eff [Boom, Fail[ArithOverflow]] { handle Fail[ArithOverflow] in { Boom::boom(1) } with { return v => v, raise(e, r) => 100, } }\nfn main() -> i64 { handle Fail[ArithOverflow] in { handle Boom in { inner() } with { return v => v, boom(x, resume) => resume(9223372036854775807 + x), } } with { return v => v, raise(e, r) => 200, } }"
+        ),
+        "200"
+    );
+    // ... while a failure in the body is still caught there.
+    assert_eq!(
+        differential(
+            "effect Boom {\n    fn boom(x: i64) -> i64;\n}\nfn inner() -> i64 eff [Boom, Fail[ArithOverflow]] { handle Fail[ArithOverflow] in { Boom::boom(1) + 9223372036854775807 } with { return v => v, raise(e, r) => 100, } }\nfn main() -> i64 { handle Fail[ArithOverflow] in { handle Boom in { inner() } with { return v => v, boom(x, resume) => resume(x + 1), } } with { return v => v, raise(e, r) => 200, } }"
+        ),
+        "100"
+    );
+    // A clause that does not resume in tail position is refused.
+    let w = world(
+        "effect Boom {\n    fn boom(x: i64) -> i64;\n}\nfn main() -> i64 { handle Boom in { wrapping_add(Boom::boom(1), 1) } with { return v => v, boom(x, resume) => wrapping_add(resume(x), 1), } }",
+    );
+    let err = vc::compile(&w, "main", &Options::new(TARGETS[0])).unwrap_err();
+    assert!(err.to_string().contains("tail-resumptive"), "{err}");
 }

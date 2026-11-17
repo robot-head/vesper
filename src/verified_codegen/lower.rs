@@ -1,6 +1,7 @@
 //! Checked Place IR to the slot IR (`Lir`): plan the reachable functions,
 //! flatten every value of the scalar subset into 64-bit words and reject
 //! everything else with a typed error.
+use super::evidence::Sites;
 use super::fail::{self, Fails, Handler};
 use super::machine::{
     ArithOp, Cond, FIRST_FREE_LABEL, FloatOp, Kind, Label, Lir, Slot, TrapKind, WrapOp,
@@ -315,6 +316,9 @@ pub struct Plan {
     /// Resolved handlers, by the function instance and the span of their
     /// `handle` expression.
     pub handlers: BTreeMap<(String, usize, usize), Handler>,
+    /// Failure codes rewritten after a call, by callee (escape codes of
+    /// operation clauses, see `evidence.rs`).
+    pub recode: BTreeMap<String, BTreeMap<u64, u64>>,
 }
 
 fn effect_name(e: &crate::ast::Effect) -> String {
@@ -416,8 +420,16 @@ pub fn plan(
     program: &Program,
     entry: &str,
     max_functions: usize,
+    sites: &Sites,
 ) -> Result<Plan, VerifiedError> {
-    plan_with(world, program, &[entry.to_owned()], max_functions, None)
+    plan_with(
+        world,
+        program,
+        &[entry.to_owned()],
+        max_functions,
+        sites,
+        None,
+    )
 }
 
 /// Plan every function reachable from `entries`. With `refused`
@@ -430,6 +442,7 @@ pub fn plan_with(
     program: &Program,
     entries: &[String],
     max_functions: usize,
+    sites: &Sites,
     mut refused: Option<&mut BTreeMap<String, Vec<VerifiedError>>>,
 ) -> Result<Plan, VerifiedError> {
     let tolerant = refused.is_some();
@@ -634,7 +647,26 @@ pub fn plan_with(
         return Err(VerifiedError::Entry("no plannable function".into()));
     }
     let locals = found.iter().map(|f| &f.local).collect::<Vec<_>>();
-    let fails = fail::codes(world, &locals, &handled, entry)?;
+    let mut fails = fail::codes(world, &locals, &handled, entry)?;
+    fails.add_escapes(sites.tags());
+    let mut recode: BTreeMap<String, BTreeMap<u64, u64>> = BTreeMap::new();
+    for (callee, tag, restore) in sites
+        .escape
+        .iter()
+        .map(|(c, t)| (c, t, false))
+        .chain(sites.restore.iter().map(|(c, t)| (c, t, true)))
+    {
+        let map = recode.entry(callee.clone()).or_default();
+        for c in fails.base_codes() {
+            if let Some(e) = fails.escape(c, tag) {
+                if restore {
+                    map.insert(e, c);
+                } else {
+                    map.insert(c, e);
+                }
+            }
+        }
+    }
     let index: BTreeMap<String, usize> = found
         .iter()
         .enumerate()
@@ -652,7 +684,12 @@ pub fn plan_with(
             // Unplanned callees (coverage) contribute nothing.
             for c in &found[n].calls {
                 if let Some(&k) = index.get(c) {
-                    next.extend(raises[k].iter().copied());
+                    let map = recode.get(c);
+                    next.extend(
+                        raises[k]
+                            .iter()
+                            .map(|r| map.and_then(|m| m.get(r)).copied().unwrap_or(*r)),
+                    );
                 }
             }
             for (error, body, clauses) in &found[n].handles {
@@ -728,6 +765,7 @@ pub fn plan_with(
         index,
         fails,
         handlers,
+        recode,
     })
 }
 
@@ -1650,6 +1688,7 @@ impl FnLower<'_> {
         let caps = self.plan.functions[n].caps.clone();
         let cap_slots = self.cap_arguments(&caps, opening)?;
         let target = &self.plan.functions[n];
+        let callee_name = target.name.clone();
         let (label, ret, base, nres, ranges, status, raises) = (
             target.label,
             target.ret_words,
@@ -1715,6 +1754,9 @@ impl FnLower<'_> {
             self.push(Lir::Jump(cont))?;
             self.push(Lir::Label(err))?;
             let mut rest = raises;
+            if let Some(map) = self.plan.recode.get(&callee_name) {
+                rest = self.recode_status(st, &rest, map)?;
+            }
             if let Some((code, handler)) = catch
                 && rest.remove(&code)
             {
@@ -1727,6 +1769,32 @@ impl FnLower<'_> {
             self.push(Lir::Label(cont))?;
         }
         Ok(())
+    }
+
+    /// Rewrite the failure status at `st` (two scratch words after it) by
+    /// `map`; the codes it may hold afterwards.
+    fn recode_status(
+        &mut self,
+        st: Slot,
+        codes: &BTreeSet<u64>,
+        map: &BTreeMap<u64, u64>,
+    ) -> Result<BTreeSet<u64>, VerifiedError> {
+        let done = self.fresh();
+        for code in codes {
+            let Some(&to) = map.get(code) else {
+                continue;
+            };
+            let other = self.fresh();
+            self.status_is(st, *code, st + 1, other)?;
+            self.push(Lir::Const { dst: st, word: to })?;
+            self.push(Lir::Jump(done))?;
+            self.push(Lir::Label(other))?;
+        }
+        self.push(Lir::Label(done))?;
+        Ok(codes
+            .iter()
+            .map(|c| map.get(c).copied().unwrap_or(*c))
+            .collect())
     }
 
     /// `v?` on a `Result[T, E]`: the `Ok` payload, or raise the `Err` one.

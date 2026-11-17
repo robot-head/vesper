@@ -168,21 +168,15 @@ with_flags: ok, 43 rows
 word: ok, 47 rows
 
 == parser ==
-functions: 436
-without own refusal: 314
-compiling with all callees: 312
-refusals: 122
-  Effect: 118
-  ExternalFunction: 2
-  FunctionValue: 1
-  Generic: 1
+functions: 434
+without own refusal: 432
+compiling with all callees: 432
+refusals: 2
+  Effect: 2
 by detail:
-   118 Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-     2 ExternalFunction: no such function in the checked world
-     1 FunctionValue: type fn() -> i64
-     1 Generic: a type parameter without a concrete instance
+     2 Effect: effect SyntaxMemory has no handler in the program (only its host handles it)
 
-$handler_body_122129_122166: ok, 37 rows
+$handler_body_122129_122166<SyntaxMemory#0>: ok, 54 rows
 $handler_body_13603_13831: ok, 60 rows
 $handler_body_13634_13727: ok, 80 rows
 $handler_body_13673_13717: ok, 37 rows
@@ -191,21 +185,14 @@ $handler_body_138755_138775: ok, 35 rows
 $handler_body_13994_14225: ok, 60 rows
 $handler_body_14025_14121: ok, 80 rows
 $handler_body_14065_14111: ok, 37 rows
-$handler_body_43858_43939: ok, 45 rows
-$handler_body_45913_46095:
-  calls refused: $handler_body_45944_45991
-$handler_body_45944_45991:
-  FunctionValue: type fn() -> i64
-  calls refused: syntax_run<T=i64>
-$handler_body_46282_46462:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: $handler_body_46313_46350, $handler_clause_46386_46391, $handler_clause_46429_46445
-$handler_body_46313_46350:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_build
+$handler_body_43858_43939<SyntaxMemory#0>: ok, 62 rows
+$handler_body_45913_46095: ok, 60 rows
+$handler_body_45944_45991: ok, 36 rows
 $handler_body_87161_91512: ok, 2349 rows
-$handler_clause_122202_122207: ok, 13 rows
-$handler_clause_122245_122288: ok, 41 rows
+$handler_body_98074_99267<T=i64,consume=parse_build>: ok, 120 rows
+$handler_body_98982_99015<T=i64,consume=parse_build>: ok, 86 rows
+$handler_clause_122202_122207<SyntaxMemory#0>: ok, 30 rows
+$handler_clause_122245_122288<SyntaxMemory#0>: ok, 58 rows
 $handler_clause_13763_13768: ok, 7 rows
 $handler_clause_13802_13814: ok, 33 rows
 $handler_clause_13863_13868: ok, 7 rows
@@ -218,26 +205,17 @@ $handler_clause_14157_14162: ok, 7 rows
 $handler_clause_14196_14208: ok, 33 rows
 $handler_clause_14257_14262: ok, 7 rows
 $handler_clause_14299_14318: ok, 18 rows
-$handler_clause_43975_43980: ok, 7 rows
-$handler_clause_44018_44022: ok, 9 rows
+$handler_clause_43975_43980<SyntaxMemory#0>: ok, 24 rows
+$handler_clause_44018_44022<SyntaxMemory#0>: ok, 26 rows
 $handler_clause_46027_46032: ok, 7 rows
 $handler_clause_46066_46078: ok, 33 rows
 $handler_clause_46127_46132: ok, 7 rows
 $handler_clause_46169_46188: ok, 18 rows
-$handler_clause_46386_46391:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-$handler_clause_46429_46445:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-$handler_clause_46494_46499:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-$handler_clause_46533_46552:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
 $handler_clause_91548_91553: ok, 7 rows
 $handler_clause_91591_91593: ok, 7 rows
-SyntaxMemory::read:
-  ExternalFunction: no such function in the checked world
-SyntaxMemory::write:
-  ExternalFunction: no such function in the checked world
+$handler_clause_99051_99056<T=i64,consume=parse_build>: ok, 7 rows
+$handler_clause_99089_99119<T=i64,consume=parse_build>: ok, 85 rows
+$handler_clause_99160_99250<T=i64,consume=parse_build>: ok, 86 rows
 advance: ok, 66 rows
 args: ok, 347 rows
 arms: ok, 502 rows
@@ -330,277 +308,104 @@ offset_basis: ok, 6 rows
 open: ok, 89 rows
 pack: ok, 43 rows
 params: ok, 706 rows
-parse_advance:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_attach, syntax_sig, syntax_tok
-parse_args:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_eat, parse_expr, parse_pass
-parse_arms:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_at_end, parse_ate, parse_eat, parse_expect, parse_expr, parse_pattern, syntax_heads, syntax_issue
-parse_associated:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_at_end, parse_at_word, parse_ate, parse_bump, parse_eat, parse_expect, parse_function, parse_required_mode, parse_ty, parse_upper, syntax_issue
-parse_at:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_kind
-parse_at_end:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_kind
-parse_at_literal:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_kind
-parse_at_region:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_word, parse_nth
-parse_at_trait_or_model:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_word
-parse_at_word:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_nth
-parse_ate:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-parse_binary:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_binary_rest, parse_bump, parse_enter, parse_kind, parse_leave, parse_postfix, parse_primary, syntax_callee
-parse_binary_rest:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_binary, parse_bump, parse_enter, parse_expr, parse_kind
-parse_block:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_enter, parse_expect, parse_leave, parse_statements, syntax_heads
-parse_build:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_items, parse_open, syntax_attach, syntax_cell, syntax_close, syntax_lex, syntax_put, syntax_sig, syntax_tok
-parse_bump:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_advance
+parse_advance<SyntaxMemory#0>: ok, 295 rows
+parse_args<SyntaxMemory#0>: ok, 670 rows
+parse_arms<SyntaxMemory#0>: ok, 1023 rows
+parse_associated<SyntaxMemory#0>: ok, 1585 rows
+parse_at<SyntaxMemory#0>: ok, 99 rows
+parse_at_end<SyntaxMemory#0>: ok, 113 rows
+parse_at_literal<SyntaxMemory#0>: ok, 151 rows
+parse_at_region<SyntaxMemory#0>: ok, 324 rows
+parse_at_trait_or_model<SyntaxMemory#0>: ok, 214 rows
+parse_at_word<SyntaxMemory#0>: ok, 141 rows
+parse_ate<SyntaxMemory#0>: ok, 51 rows
+parse_binary<SyntaxMemory#0>: ok, 1032 rows
+parse_binary_rest<SyntaxMemory#0>: ok, 640 rows
+parse_block<SyntaxMemory#0>: ok, 554 rows
+parse_build<SyntaxMemory#0>: ok, 1178 rows
+parse_bump<SyntaxMemory#0>: ok, 216 rows
 parse_check_escapes: ok, 211 rows
 parse_check_unicode: ok, 279 rows
-parse_clauses:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_eat, parse_expect, parse_expr, parse_lower, parse_pattern_list, syntax_heads
-parse_close:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_close
-parse_closure:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_ate, parse_eat, parse_effects, parse_expect, parse_expr, parse_mode, parse_params, parse_ty, syntax_heads
-parse_conformance:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_associated, parse_at_word, parse_bump, parse_expect, parse_ty, parse_where_clauses
+parse_clauses<SyntaxMemory#0>: ok, 892 rows
+parse_close<SyntaxMemory#0>: ok, 170 rows
+parse_closure<SyntaxMemory#0>: ok, 1481 rows
+parse_conformance<SyntaxMemory#0>: ok, 708 rows
 parse_digest: ok, 186 rows
-parse_dimension:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_ate, parse_dimension_factor, parse_eat
-parse_dimension_factor:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_bump, parse_close, parse_open, parse_ty
-parse_dimensions:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_dimension, parse_dimension_factor, parse_eat
-parse_eat:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_bump
-parse_effect_list:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_at_end, parse_ate, parse_eat, parse_expect, parse_lower, parse_nth, parse_type_args, parse_upper
-parse_effects:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_ate, parse_eat, parse_effect_list, parse_expect
-parse_enter:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-parse_expect:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_advance, syntax_expected
-parse_expect_word:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_word, parse_bump, syntax_issue
-parse_expr:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_close, parse_enter, parse_expr_inner, parse_leave, parse_open
-parse_expr_inner:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_region, parse_binary, parse_closure, parse_handle_expr, parse_if_expr, parse_kind, parse_match_expr, parse_region_expr
+parse_dimension<SyntaxMemory#0>: ok, 417 rows
+parse_dimension_factor<SyntaxMemory#0>: ok, 485 rows
+parse_dimensions<SyntaxMemory#0>: ok, 670 rows
+parse_eat<SyntaxMemory#0>: ok, 253 rows
+parse_effect_list<SyntaxMemory#0>: ok, 1618 rows
+parse_effects<SyntaxMemory#0>: ok, 539 rows
+parse_enter<SyntaxMemory#0>: ok, 156 rows
+parse_expect<SyntaxMemory#0>: ok, 270 rows
+parse_expect_word<SyntaxMemory#0>: ok, 360 rows
+parse_expr<SyntaxMemory#0>: ok, 462 rows
+parse_expr_inner<SyntaxMemory#0>: ok, 918 rows
 parse_fail_p: ok, 90 rows
-parse_field_list:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_eat, parse_expect, parse_field_mode, parse_lower, parse_ty
-parse_field_mode:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_ate, parse_mode, syntax_issue
-parse_field_patterns:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_eat, parse_lower, parse_pattern, syntax_heads, syntax_name
-parse_field_values:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_eat, parse_expr, parse_lower
-parse_fields:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_expect, parse_field_list
-parse_function:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_at_word, parse_block, parse_bump, parse_effects, parse_expect, parse_generics, parse_lower, parse_params, parse_ty, parse_where_clauses, parse_with_flags, syntax_heads
-parse_functions:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_function
-parse_generic_list:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_at_end, parse_at_word, parse_ate, parse_bump, parse_eat, parse_expect, parse_ident, parse_required_mode, parse_trait_ref, parse_with_flags, syntax_bind, syntax_cell, syntax_issue, syntax_put
-parse_generics:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_ate, parse_eat, parse_expect, parse_generic_list, syntax_put
-parse_handle_expr:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_ate, parse_block, parse_clauses, parse_eat, parse_expect, parse_expr, parse_lower, parse_pattern, parse_type_args, parse_upper, syntax_heads
-parse_ident:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_bump, parse_kind, syntax_issue
-parse_if_expr:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_enter, parse_if_inner, parse_leave
-parse_if_inner:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_ate, parse_block, parse_eat, parse_expect, parse_if_expr, parse_restricted
-parse_impl_item:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_at_word, parse_bump, parse_conformance, parse_expect, parse_expect_word, parse_functions, parse_generics, parse_trait_ref, parse_ty, parse_with_flags, syntax_bounds, syntax_heads, syntax_issue
-parse_item:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_trait_or_model, parse_at_word, parse_bump, parse_expect, parse_fields, parse_function, parse_functions, parse_generics, parse_impl_item, parse_kind, parse_mode, parse_model_item, parse_nth, parse_trait_item, parse_upper, parse_use_model, parse_variants, syntax_issue
-parse_items:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_bump, parse_close, parse_item, parse_open, syntax_issue
-parse_kind:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-parse_leave:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-parse_literal:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_bump, syntax_issue
-parse_lower:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_ident, parse_kind, syntax_issue
+parse_field_list<SyntaxMemory#0>: ok, 1084 rows
+parse_field_mode<SyntaxMemory#0>: ok, 379 rows
+parse_field_patterns<SyntaxMemory#0>: ok, 1053 rows
+parse_field_values<SyntaxMemory#0>: ok, 932 rows
+parse_fields<SyntaxMemory#0>: ok, 303 rows
+parse_function<SyntaxMemory#0>: ok, 1696 rows
+parse_functions<SyntaxMemory#0>: ok, 295 rows
+parse_generic_list<SyntaxMemory#0>: ok, 2341 rows
+parse_generics<SyntaxMemory#0>: ok, 518 rows
+parse_handle_expr<SyntaxMemory#0>: ok, 2226 rows
+parse_ident<SyntaxMemory#0>: ok, 566 rows
+parse_if_expr<SyntaxMemory#0>: ok, 310 rows
+parse_if_inner<SyntaxMemory#0>: ok, 822 rows
+parse_impl_item<SyntaxMemory#0>: ok, 2394 rows
+parse_item<SyntaxMemory#0>: ok, 3424 rows
+parse_items<SyntaxMemory#0>: ok, 787 rows
+parse_kind<SyntaxMemory#0>: ok, 36 rows
+parse_leave<SyntaxMemory#0>: ok, 86 rows
+parse_literal<SyntaxMemory#0>: ok, 550 rows
+parse_lower<SyntaxMemory#0>: ok, 428 rows
 parse_main: ok, 54 rows
-parse_match_expr:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_arms, parse_expect, parse_restricted
+parse_match_expr<SyntaxMemory#0>: ok, 481 rows
 parse_max_depth: ok, 6 rows
-parse_mode:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_bump, parse_kind
-parse_model_item:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_word, parse_bump, parse_conformance, parse_expect, parse_generics, parse_trait_ref, parse_upper, parse_with_flags, syntax_heads, syntax_issue
-parse_nth:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_nth
-parse_open:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_open
-parse_package_path:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_bump, parse_kind, parse_nth
-parse_params:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_eat, parse_lower, parse_pass, parse_place_tree, parse_ty, syntax_bind
-parse_pass:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_bump, parse_kind
-parse_pattern:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_close, parse_enter, parse_leave, parse_open, parse_pattern_inner
-parse_pattern_inner:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_at_literal, parse_at_word, parse_ate, parse_bump, parse_eat, parse_expect, parse_field_patterns, parse_kind, parse_literal, parse_pattern_list, parse_upper, syntax_bind, syntax_issue
-parse_pattern_list:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_eat, parse_pattern
-parse_place_inner:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_ate, parse_eat, parse_expect, parse_lower, parse_place_list, parse_place_tree
-parse_place_list:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_eat, parse_place_tree
-parse_place_tree:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_enter, parse_leave, parse_place_inner
-parse_postfix:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_enter, parse_kind, parse_postfix_op
-parse_postfix_op:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_args, parse_bump, parse_expect, parse_expr, parse_lower, parse_nth, parse_postfix, parse_type_args, syntax_contains
-parse_primary:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_enter, parse_leave, parse_primary_inner
-parse_primary_inner:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_at_literal, parse_ate, parse_block, parse_bump, parse_eat, parse_expect, parse_field_values, parse_ident, parse_kind, parse_literal, parse_tuple_values, syntax_issue
-parse_region_expr:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_ate, parse_block, parse_bump, parse_eat, parse_expect, parse_literal, parse_lower, syntax_issue
-parse_required_mode:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_ate, parse_mode, syntax_issue
-parse_restricted:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_expr, parse_with_flags
-parse_statements:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_at_word, parse_ate, parse_eat, parse_expect, parse_expr, parse_pattern, parse_ty, parse_use_model, syntax_heads
-parse_trait_item:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_associated, parse_bump, parse_expect, parse_generics, parse_upper, parse_with_flags, syntax_bounds, syntax_heads
-parse_trait_ref:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_bump, parse_expect, parse_package_path, parse_type_args, parse_upper
+parse_mode<SyntaxMemory#0>: ok, 279 rows
+parse_model_item<SyntaxMemory#0>: ok, 1040 rows
+parse_nth<SyntaxMemory#0>: ok, 102 rows
+parse_open<SyntaxMemory#0>: ok, 175 rows
+parse_package_path<SyntaxMemory#0>: ok, 417 rows
+parse_params<SyntaxMemory#0>: ok, 1450 rows
+parse_pass<SyntaxMemory#0>: ok, 279 rows
+parse_pattern<SyntaxMemory#0>: ok, 462 rows
+parse_pattern_inner<SyntaxMemory#0>: ok, 3187 rows
+parse_pattern_list<SyntaxMemory#0>: ok, 598 rows
+parse_place_inner<SyntaxMemory#0>: ok, 868 rows
+parse_place_list<SyntaxMemory#0>: ok, 589 rows
+parse_place_tree<SyntaxMemory#0>: ok, 304 rows
+parse_postfix<SyntaxMemory#0>: ok, 384 rows
+parse_postfix_op<SyntaxMemory#0>: ok, 2119 rows
+parse_primary<SyntaxMemory#0>: ok, 310 rows
+parse_primary_inner<SyntaxMemory#0>: ok, 1977 rows
+parse_region_expr<SyntaxMemory#0>: ok, 1156 rows
+parse_required_mode<SyntaxMemory#0>: ok, 379 rows
+parse_restricted<SyntaxMemory#0>: ok, 307 rows
+parse_statements<SyntaxMemory#0>: ok, 2121 rows
+parse_trait_item<SyntaxMemory#0>: ok, 819 rows
+parse_trait_ref<SyntaxMemory#0>: ok, 586 rows
 parse_transport:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: $handler_body_46282_46462, $handler_clause_46494_46499, $handler_clause_46533_46552
-parse_tree_main:
-  calls refused: $handler_body_45913_46095
-parse_tuple_values:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_eat, parse_expr
-parse_ty:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_close, parse_enter, parse_leave, parse_open, parse_ty_inner
-parse_ty_inner:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_bump, parse_dimensions, parse_effects, parse_expect, parse_expect_word, parse_ident, parse_kind, parse_mode, parse_nth, parse_ty, parse_ty_list, parse_ty_params, parse_type_args, parse_upper
-parse_ty_list:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_eat, parse_ty
-parse_ty_params:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_eat, parse_pass, parse_ty
-parse_type_arg:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_ate, parse_bump, parse_close, parse_eat, parse_lower, parse_nth, parse_open, parse_ty, parse_type_args, parse_upper, syntax_issue
-parse_type_arg_list:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at_end, parse_ate, parse_eat, parse_type_arg
-parse_type_args:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_ate, parse_eat, parse_enter, parse_expect, parse_leave, parse_type_arg_list
+  Effect: effect SyntaxMemory has no handler in the program (only its host handles it)
+parse_tree_main: ok, 54 rows
+parse_tuple_values<SyntaxMemory#0>: ok, 595 rows
+parse_ty<SyntaxMemory#0>: ok, 462 rows
+parse_ty_inner<SyntaxMemory#0>: ok, 2998 rows
+parse_ty_list<SyntaxMemory#0>: ok, 595 rows
+parse_ty_params<SyntaxMemory#0>: ok, 670 rows
+parse_type_arg<SyntaxMemory#0>: ok, 1975 rows
+parse_type_arg_list<SyntaxMemory#0>: ok, 595 rows
+parse_type_args<SyntaxMemory#0>: ok, 649 rows
 parse_unicode_unit: ok, 106 rows
-parse_upper:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_ident, syntax_issue
-parse_use_model:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_bump, parse_expect, parse_upper
-parse_variants:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_at_end, parse_ate, parse_eat, parse_expect, parse_fields, parse_ty_list, parse_upper
-parse_where_clauses:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: parse_at, parse_ate, parse_eat, parse_expect, parse_trait_ref, parse_ty
-parse_with_flags:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
+parse_upper<SyntaxMemory#0>: ok, 355 rows
+parse_use_model<SyntaxMemory#0>: ok, 370 rows
+parse_variants<SyntaxMemory#0>: ok, 1193 rows
+parse_where_clauses<SyntaxMemory#0>: ok, 742 rows
+parse_with_flags<SyntaxMemory#0>: ok, 76 rows
 pass: ok, 156 rows
 pattern: ok, 212 rows
 pattern_inner: ok, 1405 rows
@@ -632,85 +437,43 @@ source_leaf_0: ok, 541 rows
 source_len: ok, 6 rows
 starts_type_args: ok, 68 rows
 statements: ok, 994 rows
-syntax_attach:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_cell, syntax_put
+syntax_attach<SyntaxMemory#0>: ok, 189 rows
 syntax_bad_string: ok, 105 rows
-syntax_bind:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_heads, syntax_name
-syntax_bounds:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_cell, syntax_diag
+syntax_bind<SyntaxMemory#0>: ok, 358 rows
+syntax_bounds<SyntaxMemory#0>: ok, 379 rows
 syntax_byte:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_cell
-syntax_callee:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_grouped_name, syntax_sig
-syntax_cell:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: SyntaxMemory::read
-syntax_close:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_cell, syntax_put
-syntax_contains:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_cell
-syntax_diag:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_cell, syntax_put
+  Effect: effect SyntaxMemory has no handler in the program (only its host handles it)
+syntax_callee<SyntaxMemory#0>: ok, 212 rows
+syntax_cell<SyntaxMemory#0>: ok, 135 rows
+syntax_close<SyntaxMemory#0>: ok, 249 rows
+syntax_contains<SyntaxMemory#0>: ok, 319 rows
+syntax_diag<SyntaxMemory#0>: ok, 587 rows
+syntax_directory<T=SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$cap98054"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$cap98054"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$cap98054"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$cap98054"), name: "Region", args: [] }], tail: None }, i64]]]]]]]]]]]>: ok, 1111 rows
 syntax_directory<T=SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_2:0"), name: "Region", args: [] }], tail: None }, i64]]>: ok, 1111 rows
 syntax_directory<T=SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }], tail: None }, i64]]]]]>: ok, 1111 rows
 syntax_directory<T=SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }], tail: None }, i64]]]]]]]]>: ok, 1111 rows
-syntax_expected:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_diag
-syntax_grouped_close:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_sig, syntax_tok
-syntax_grouped_name:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_grouped_close, syntax_sig, syntax_tok
-syntax_heads:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-syntax_issue:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_diag
-syntax_lex:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_lex_steps, syntax_put
+syntax_expected<SyntaxMemory#0>: ok, 130 rows
+syntax_grouped_close<SyntaxMemory#0>: ok, 253 rows
+syntax_grouped_name<SyntaxMemory#0>: ok, 415 rows
+syntax_heads<SyntaxMemory#0>: ok, 75 rows
+syntax_issue<SyntaxMemory#0>: ok, 195 rows
+syntax_lex<SyntaxMemory#0>: ok, 218 rows
 syntax_lex_error_end: ok, 107 rows
-syntax_lex_step:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_diag, syntax_put
-syntax_lex_steps:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_lex_step
+syntax_lex_step<SyntaxMemory#0>: ok, 554 rows
+syntax_lex_steps<SyntaxMemory#0>: ok, 283 rows
 syntax_message_byte: ok, 118 rows
 syntax_message_len: ok, 47 rows
-syntax_name:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_cell, syntax_put
-syntax_nth:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_sig, syntax_tok
-syntax_open:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_cell, syntax_put
-syntax_put:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: SyntaxMemory::write
+syntax_name<SyntaxMemory#0>: ok, 349 rows
+syntax_nth<SyntaxMemory#0>: ok, 211 rows
+syntax_open<SyntaxMemory#0>: ok, 448 rows
+syntax_put<SyntaxMemory#0>: ok, 148 rows
 syntax_read_0: ok, 81 rows
 syntax_read_1: ok, 188 rows
 syntax_read_2: ok, 188 rows
 syntax_read_3: ok, 188 rows
 syntax_read_4: ok, 188 rows
-syntax_run<T=i64>:
-  Generic: a type parameter without a concrete instance
-syntax_sig:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_tok
+syntax_run<T=i64,consume=parse_build>: ok, 80 rows
+syntax_sig<SyntaxMemory#0>: ok, 134 rows
 syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_0:0"), name: "Region", args: [] }], tail: None }, i64]>: ok, 2064 rows
 syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_1:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_1:0"), name: "Region", args: [] }], tail: None }, i64]]]]>: ok, 2064 rows
 syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_2:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_2:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_2:0"), name: "Region", args: [] }], tail: None }, i64]]]]]]]>: ok, 2064 rows
@@ -825,9 +588,7 @@ syntax_text_7: ok, 175 rows
 syntax_text_8: ok, 151 rows
 syntax_text_9: ok, 319 rows
 syntax_text_equal: ok, 71 rows
-syntax_tok:
-  Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-  calls refused: syntax_cell
+syntax_tok<SyntaxMemory#0>: ok, 202 rows
 syntax_utf8_end: ok, 47 rows
 syntax_words: ok, 565 rows
 syntax_write_0: ok, 82 rows

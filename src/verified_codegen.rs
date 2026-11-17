@@ -86,6 +86,7 @@ pub mod certificate;
 mod cli;
 mod container;
 mod coverage;
+mod evidence;
 mod fail;
 mod lower;
 mod machine;
@@ -365,13 +366,15 @@ pub fn compile(world: &World, entry: &str, options: &Options) -> Result<Artifact
         crate::ir_opt::optimize(world, &mut program).map_err(VerifiedError::Invalid)?;
     }
     // One copy of every reachable function per instance the checker fixed.
-    let program = mono::monomorphize(
+    let mut program = mono::monomorphize(
         world,
         &program,
         entry,
         options.max_functions.saturating_mul(4),
     )?;
-    let plan = lower::plan(world, &program, entry, options.max_functions)?;
+    // Tail-resumptive user-effect handlers by evidence passing.
+    let sites = evidence::rewrite(world, &mut program, &[entry.to_owned()], None)?;
+    let plan = lower::plan(world, &program, entry, options.max_functions, &sites)?;
     let mut next_label = plan
         .functions
         .last()

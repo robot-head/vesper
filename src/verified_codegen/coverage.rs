@@ -144,6 +144,22 @@ fn detail(e: &VerifiedError) -> String {
     }
 }
 
+/// The user effects in the row of the checked function `name`.
+fn program_effects(world: &World, name: &str) -> Vec<String> {
+    world
+        .functions
+        .get(name)
+        .map(|f| {
+            f.effects
+                .instances
+                .iter()
+                .filter(|e| super::evidence::is_user_effect(e))
+                .map(|e| e.name.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The detail `lower` gives a call to a function outside the plan.
 const UNPLANNED: &str = "call to unplanned function ";
 
@@ -172,12 +188,24 @@ pub fn coverage(
     // several roots are the same copy.
     let mut mono = crate::ir::Program::default();
     let mut entries = vec![];
+    // A function whose row has a user effect is no entry: only instances of
+    // it specialized for a handler (`evidence.rs`) are planned.
+    let mut polymorphic = BTreeSet::new();
     for root in &roots {
         if world
             .functions
             .get(root)
             .is_some_and(|f| !f.generics.is_empty())
         {
+            continue;
+        }
+        if program.functions.get(root).is_some_and(|f| {
+            f.effects
+                .instances
+                .iter()
+                .any(super::evidence::is_user_effect)
+        }) {
+            polymorphic.insert(root.clone());
             continue;
         }
         match super::mono::monomorphize(world, &program, root, usize::MAX) {
@@ -188,8 +216,48 @@ pub fn coverage(
             Err(e) => refusals.entry(root.clone()).or_default().push(e),
         }
     }
-    let program = mono;
-    let plan = lower::plan_with(world, &program, &entries, usize::MAX, Some(&mut refusals))?;
+    let mut program = mono;
+    let mut handler_refusals = BTreeMap::new();
+    let sites =
+        super::evidence::rewrite(world, &mut program, &entries, Some(&mut handler_refusals))?;
+    let plan = lower::plan_with(
+        world,
+        &program,
+        &entries,
+        usize::MAX,
+        &sites,
+        Some(&mut refusals),
+    )?;
+    // A handler the rewrite refused is also refused by the planner, with
+    // less detail.
+    for (name, errors) in handler_refusals {
+        let own = refusals.entry(name).or_default();
+        own.retain(|e| {
+            !matches!(e, VerifiedError::Unsupported { detail, .. } if detail.contains("(only Fail handlers)"))
+        });
+        own.extend(errors);
+    }
+    // Effect-polymorphic functions no handler instantiates.
+    for root in &polymorphic {
+        let instanced = program.functions.keys().any(|n| {
+            n.strip_prefix(root.as_str())
+                .is_some_and(|r| r.starts_with('<'))
+        });
+        if !instanced {
+            let effects: Vec<String> = program_effects(world, root);
+            refusals
+                .entry(root.clone())
+                .or_default()
+                .push(VerifiedError::unsupported(
+                    Unsupported::Effect,
+                    root,
+                    format!(
+                        "effect {} has no handler in the program (only its host handles it)",
+                        effects.join(", ")
+                    ),
+                ));
+        }
+    }
     // Everything the plan reached or refused.
     let mut names: BTreeSet<String> = refusals.keys().cloned().collect();
     names.extend(plan.functions.iter().map(|f| f.name.clone()));

@@ -755,3 +755,87 @@ allocator's checked arithmetic reads heap words that carry no range fact.
   AArch64 (QEMU) and RV64 (QEMU), each with and without the IR
   optimizer, against the evaluator and Cranelift.
 - `cargo test --test verified_codegen_front_end`: the inventory matches.
+
+## Milestone 11: tail-resumptive handlers and function-value arguments (#838)
+
+### What was built
+
+`verified_codegen::evidence` rewrites the monomorphized Place IR before
+planning, so the planner and the slot lowering see only first-order calls.
+
+- **Function-value arguments.** A call `g(f)` that passes a named function
+  gets an instance `g<p=f>` with the parameter removed. Every call `p(..)`
+  becomes `f(..)`, through the nested functions that capture `p`. A
+  parameter used other than by calling it is left alone, and the planner
+  still refuses it as a function value. Monomorphization now also reaches
+  functions that are only read as values.
+- **Tail-resumptive handlers.** `handle E in body with { return v => r,
+  op(x, k) => c }` for a user effect `E` compiles when every clause
+  resumes once, in tail position (`k(e)` is what the clause returns). The
+  clause loses its continuation and returns `e`, and the handler becomes
+  evidence:
+  - The clauses' captures become hidden parameters (`$ev<n>.<name>`) of
+    the handler body and of an instance `f<E#n>` of every function with
+    `E` in its row that the body reaches.
+  - The region capabilities the clauses use join those rows. The checker's
+    internal `$cap<start>` labels are renamed to the block's source label.
+  - `E::op(a)` becomes `clause(evidence.., a)`; arguments a clause binds
+    as `_` are dropped.
+  - The `handle` instruction becomes a call of the body, then of the
+    `return` clause.
+  A clause that does not resume, resumes twice or outside tail position,
+  captures its continuation, or performs the handled effect is refused
+  with a typed `Effect` error. So are a stateful or labeled handler and a
+  handler of the same effect nested inside another.
+- **Clause failures escape the body.** A clause runs in the handler's
+  context, so a `handle Fail` between the handler and the operation must
+  not catch what the clause raises. Each handler site gets its own escape
+  code for every failure code (same payload). After a call to a clause,
+  the caller rewrites the status to the escape code (`Plan::recode`, one
+  `Const`/`Compare`/`BranchZero` chain per code). After the body call, the
+  handler site restores the original code. The raise-set fixpoint applies
+  the same maps. No new `Lir` or machine instruction is needed.
+- Coverage no longer treats an effect-polymorphic function as an entry.
+  Its handler instances are planned instead. A function whose effect no
+  handler in the program instantiates is listed as such.
+
+### Inventory after this milestone
+
+| Unit | Functions | Own refusals | Remaining constructs |
+| --- | --- | --- | --- |
+| stage1 | 161 | 0 | none |
+| parser | 434 | 2 | `parse_transport` and `syntax_byte`: entries whose `SyntaxMemory` only the host (the Runtime's external handler) handles |
+| checker | 298 | 0 | none |
+
+Every function `parse_tree_main` reaches now compiles, including
+`syntax_run`'s `handle SyntaxMemory` and its `consume` argument (116
+`<SyntaxMemory#0>` instances).
+
+### Checks
+
+- `cargo test --test verified_codegen tail_resumptive_handlers` covers:
+  - a capture of the handler;
+  - an operation performed in a callee;
+  - a generic function given the body as a function value;
+  - recursion through the effect, a `_` argument, and a `return` clause;
+  - a clause failure that skips an inner `handle Fail`, and a body
+    failure that the inner handler still catches;
+  - a non-tail resumption being refused.
+  It runs on x86-64, AArch64 (QEMU) and RV64 (QEMU), with and without the
+  IR optimizer, against the evaluator, and against Cranelift except for
+  the recursive case.
+- `cargo test --test verified_codegen_front_end`: the inventory matches.
+- The whole structured parser, with `fn main() -> i64 { parse_tree_main() }`
+  and input `fn f() -> i64 { 1 }`, built for x86-64 with the code limit
+  raised by hand: 1,699,167 bytes of code. Its exit status (197) is the low
+  byte of the evaluator's result (8801903996191579333).
+
+### Remaining gap: code size
+
+Under the default limit the parser does not build: `max_code_bytes` is
+1 MiB, because AArch64 `cbz`/`b.cond` and RV64 `jal` reach only ±1 MiB,
+and branches to the shared trap stubs cross functions. Building it on
+every target needs long-branch sequences: an inverted branch over `b`
+(±128 MiB) on AArch64, and `auipc` + `jalr` on RV64. Both encoders and
+their Lean encoding proofs would change, so that is a separate step.
+
