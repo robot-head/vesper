@@ -6,8 +6,8 @@ use vesper::{check, native, packages, runtime::Runtime};
 const APP: &str = "tests/fixtures/packages/workspace/app";
 const GEOMETRY: &str = "tests/fixtures/packages/workspace/geometry";
 const REJECT: &str = "tests/fixtures/packages/reject";
-/// `total(7, 9 + 10) + 50 + 0 + 7`.
-const EXPECTED: i64 = 776;
+/// `total(7, 9 + 10) + 50 + 0 + 7 + count_twice()` (4).
+const EXPECTED: i64 = 780;
 
 fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_vesper"))
@@ -65,13 +65,13 @@ fn items_get_qualified_names_and_the_root_module_keeps_its_own() {
         "main",
         "scale",
         "origin",
-        "demo_app__report__total",
-        "demo_geometry__point",
-        "demo_geometry__scale",
-        "demo_geometry__util__abs",
-        "demo_geometry__util__helper",
-        "demo_geometry__shapes__area__area",
-        "demo_geometry__Point::sum",
+        "demo__app__report__total",
+        "demo__geometry__point",
+        "demo__geometry__scale",
+        "demo__geometry__util__abs",
+        "demo__geometry__util__helper",
+        "demo__geometry__shapes__area__area",
+        "demo__geometry__Point::sum",
     ] {
         assert!(
             functions.contains_key(name),
@@ -82,17 +82,17 @@ fn items_get_qualified_names_and_the_root_module_keeps_its_own() {
     // Two private `scale` functions coexist.
     assert_eq!(
         Runtime::new(&checked.world)
-            .run("demo_geometry__scale", vec![])
+            .run("demo__geometry__scale", vec![])
             .unwrap()
             .to_string(),
         "10"
     );
-    assert!(checked.world.adts.contains_key("demo_geometry__Point"));
+    assert!(checked.world.adts.contains_key("demo__geometry__Point"));
     assert!(
         checked
             .world
             .adts
-            .contains_key("demo_geometry__shapes__area__Shape")
+            .contains_key("demo__geometry__shapes__area__Shape")
     );
 }
 
@@ -104,7 +104,7 @@ fn a_library_package_checks_on_its_own() {
         checked
             .world
             .functions
-            .contains_key("demo_geometry__util__abs")
+            .contains_key("demo__geometry__util__abs")
     );
 }
 
@@ -112,7 +112,7 @@ fn a_library_package_checks_on_its_own() {
 fn lean_extraction_sees_the_assembled_world() {
     let checked = world(APP);
     let lean = vesper::lean::extract(&checked.world).unwrap();
-    assert!(lean.contains("demo_geometry__util__abs"), "{lean}");
+    assert!(lean.contains("demo__geometry__util__abs"), "{lean}");
 }
 
 #[test]
@@ -239,6 +239,12 @@ fn every_import_diagnostic_has_a_reject_fixture() {
         "'Square' is also declared in",
     );
     assert_rejects(
+        "private_variant",
+        packages::UNKNOWN_IMPORT,
+        "private_variant/src/main.ves",
+        "variant 'Hidden' belongs to enum @reject/private-variant::secret::Secret",
+    );
+    assert_rejects(
         "cycle/a",
         packages::CYCLE,
         "Loom.toml",
@@ -256,6 +262,16 @@ fn every_import_diagnostic_has_a_reject_fixture() {
         "version_mismatch/Loom.toml",
         "requires version ^2.0",
     );
+}
+
+#[test]
+fn optional_dependencies_are_not_loaded() {
+    let o = cli()
+        .args(["run", "tests/fixtures/packages/accept/optional_dependency"])
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "7");
 }
 
 #[test]
@@ -314,7 +330,10 @@ fn semantic_errors_point_at_the_right_file_with_qualified_names() {
     let text = std::fs::read_to_string(dir.join("src/deep/thing.ves")).unwrap();
     assert!(span <= text.len(), "{stdout}");
     assert!(
-        !first["message"].as_str().unwrap().contains("demo_errors__"),
+        !first["message"]
+            .as_str()
+            .unwrap()
+            .contains("demo__errors__"),
         "{stdout}"
     );
     let _ = std::fs::remove_dir_all(&dir);

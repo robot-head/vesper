@@ -20,10 +20,13 @@
 //! - Items of the root package's root module keep their names, so a
 //!   one-file package checks exactly like `vesper check file.ves`.
 //! - Every other item gets the identifier-safe qualified name
-//!   `{scope}_{name}__{module}__{item}` (`@demo/geometry` module `shapes`
-//!   item `area` is `demo_geometry__shapes__area`). A struct's constructor
-//!   is renamed with it; enum variants and effect operations keep their
-//!   names, and two modules may not declare the same one ([`AMBIGUOUS`]).
+//!   `{scope}__{name}__{module}__{item}`, each component escaped so the
+//!   encoding is injective (`@demo/geometry` module `shapes` item `area` is
+//!   `demo__geometry__shapes__area`; `_` and `-` inside a component become
+//!   `_1` and `_2`). A struct's constructor is renamed with it; enum
+//!   variants and effect operations keep their names, two modules may not
+//!   declare the same one ([`AMBIGUOUS`]), and a module may use a variant
+//!   only when it declares or imports the enum.
 //! - Each file's spans are shifted by its offset in a virtual concatenation
 //!   of all sources ([`SourceMap`]), so span-keyed checker tables never
 //!   collide and diagnostics map back to the right file.
@@ -259,12 +262,38 @@ fn display(path: &Path) -> String {
         .join("/")
 }
 
-/// The identifier-safe stem of a package name: `@demo/geo-lib` -> `demo_geo_lib`.
-fn package_stem(name: &str) -> String {
-    name.trim_start_matches('@')
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
+/// One name component, escaped so `__` only ever separates components:
+/// `_` becomes `_1` and `-` becomes `_2` (`geo-lib` -> `geo_2lib`).
+fn escape_component(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '_' => out.push_str("_1"),
+            '-' => out.push_str("_2"),
+            c => out.push(c),
+        }
+    }
+}
+/// The internal name of `item` in module `path` of package `name`: escaped
+/// components joined by `__` (`@demo/geometry` `util` `abs` ->
+/// `demo__geometry__util__abs`). The encoding is injective.
+fn mangled(name: &str, path: &[String], item: &str) -> String {
+    let mut out = String::new();
+    let (scope, pkg) = name
+        .trim_start_matches('@')
+        .split_once('/')
+        .unwrap_or(("", name));
+    for (i, component) in [scope, pkg]
+        .into_iter()
+        .chain(path.iter().map(String::as_str))
+        .chain([item])
+        .enumerate()
+    {
+        if i > 0 {
+            out.push_str("__");
+        }
+        escape_component(component, &mut out);
+    }
+    out
 }
 
 fn is_module_segment(s: &str) -> bool {
@@ -437,7 +466,9 @@ impl Loader {
         });
         self.by_path.insert(canonical.clone(), index);
         stack.push((canonical, name.as_str().to_owned()));
-        for (dep_name, dep) in &manifest.dependencies {
+        // Optional dependencies are enabled only through features, which
+        // package checking does not select yet, so they are not loaded.
+        for (dep_name, dep) in manifest.dependencies.iter().filter(|(_, d)| !d.optional) {
             let Some(path) = &dep.path else {
                 self.manifest_errors.push((
                     manifest_shown.clone(),
@@ -539,6 +570,26 @@ impl Loader {
             .get(&(root, vec![]))
             .map(|(n, _)| n.clone())
             .unwrap_or_default();
+        // Enum variants keep their names; record each one's owning enum so a
+        // module may use it only when it declares or imports that enum.
+        let mut variants: BTreeMap<String, (String, String)> = BTreeMap::new();
+        for (p, package) in self.packages.iter().enumerate() {
+            for m in &package.modules {
+                for item in &m.parsed.items {
+                    if let Item::Adt(a) = item
+                        && a.is_enum
+                    {
+                        let owner = self.mangle_in(&self.packages, root, p, &m.path, &a.name);
+                        let shown = self.qualified_in(&self.packages, p, &m.path, &a.name);
+                        for v in &a.variants {
+                            variants
+                                .entry(v.name.clone())
+                                .or_insert_with(|| (owner.clone(), shown.clone()));
+                        }
+                    }
+                }
+            }
+        }
         let mut out = Module::default();
         // Variant and operation names stay global; record their owners.
         let mut globals: BTreeMap<String, (String, usize, Span)> = BTreeMap::new();
@@ -565,13 +616,25 @@ impl Loader {
                         Some(dep) => match package.deps.get(dep) {
                             Some(&d) => d,
                             None => {
+                                let optional = package
+                                    .manifest
+                                    .dependencies
+                                    .iter()
+                                    .any(|(n, d)| n.as_str() == dep && d.optional);
                                 self.error(
                                     file,
                                     UNKNOWN_IMPORT,
-                                    format!(
-                                        "{dep} is not a dependency of {}; add it to [dependencies] in Loom.toml",
-                                        package.name.as_str()
-                                    ),
+                                    if optional {
+                                        format!(
+                                            "{dep} is an optional dependency of {}, and package checking does not enable optional dependencies yet",
+                                            package.name.as_str()
+                                        )
+                                    } else {
+                                        format!(
+                                            "{dep} is not a dependency of {}; add it to [dependencies] in Loom.toml",
+                                            package.name.as_str()
+                                        )
+                                    },
                                     u.span.clone(),
                                 );
                                 continue;
@@ -669,6 +732,7 @@ impl Loader {
                     } else {
                         Some(&root_items)
                     },
+                    variants: &variants,
                     shift: base,
                     values: vec![],
                     types: vec![],
@@ -729,14 +793,7 @@ impl Loader {
         if pkg == root && path.is_empty() {
             return item.to_owned();
         }
-        let mut out = package_stem(packages[pkg].name.as_str());
-        for segment in path {
-            out.push_str("__");
-            out.push_str(segment);
-        }
-        out.push_str("__");
-        out.push_str(item);
-        out
+        mangled(packages[pkg].name.as_str(), path, item)
     }
     fn qualified_in(
         &self,
@@ -790,6 +847,8 @@ struct Renamer<'a> {
     names: &'a BTreeMap<String, String>,
     /// Root-module names this module must not see unimported.
     hidden: Option<&'a BTreeSet<String>>,
+    /// Enum variant -> (owning enum's internal name, its display name).
+    variants: &'a BTreeMap<String, (String, String)>,
     shift: usize,
     /// Value bindings in scope.
     values: Vec<String>,
@@ -806,6 +865,19 @@ impl Renamer<'_> {
     fn resolve(&mut self, n: &str, span: &Span) -> Option<String> {
         if let Some(t) = self.names.get(n) {
             return Some(t.clone());
+        }
+        if let Some((owner, shown)) = self.variants.get(n)
+            && !self.names.values().any(|t| t == owner)
+        {
+            self.diagnostics.push(
+                Diagnostic::new(
+                    UNKNOWN_IMPORT,
+                    format!("variant '{n}' belongs to enum {shown}, which is not declared or imported in this module"),
+                    span.clone(),
+                )
+                .with_help("import the enum to use its variants"),
+            );
+            return None;
         }
         if self.hidden.is_some_and(|h| h.contains(n)) {
             self.diagnostics.push(
@@ -891,6 +963,12 @@ impl Renamer<'_> {
             self.ty(a, span);
         }
     }
+    /// Capability labels of an effect row (`eff [c: Counter]`) are value
+    /// names for operation receivers (`c.next()`), never item references.
+    fn labels(&mut self, e: &Effects) {
+        self.values
+            .extend(e.instances.iter().filter_map(|i| i.label.clone()));
+    }
     fn generics(&mut self, gs: &[Generic]) {
         self.types.extend(gs.iter().map(|g| g.name.clone()));
     }
@@ -965,6 +1043,7 @@ impl Renamer<'_> {
         }
         self.ty(&mut f.result, &span);
         self.effects(&mut f.effects, &span);
+        self.labels(&f.effects);
         if let Some(body) = &mut f.body {
             self.expr(body);
         }
@@ -1086,6 +1165,7 @@ impl Renamer<'_> {
                 }
                 self.ty(result, &span);
                 self.effects(effects, &span);
+                self.labels(effects);
                 self.expr(body);
                 self.values.truncate(mark);
             }
@@ -1098,9 +1178,17 @@ impl Renamer<'_> {
             } => {
                 self.effect(effect, &span);
                 let mark = self.values.len();
+                // A capability label (`handle c: E`) names the handler.
+                if let Some(label) = &effect.label {
+                    self.values.push(label.clone());
+                }
+                // The state pattern binds only through the clause patterns;
+                // the body is checked in the outer environment.
                 if let Some((pat, init)) = state {
                     self.expr(init);
+                    let state_mark = self.values.len();
                     self.pattern(pat);
+                    self.values.truncate(state_mark);
                 }
                 self.expr(body);
                 self.clause(ret);
@@ -1111,5 +1199,35 @@ impl Renamer<'_> {
             }
         }
         self.span(&mut e.span);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mangled;
+
+    #[test]
+    fn mangling_is_injective_across_separator_characters() {
+        let s = |v: &[&str]| v.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>();
+        assert_eq!(
+            mangled("@demo/geometry", &s(&["util"]), "abs"),
+            "demo__geometry__util__abs"
+        );
+        assert_ne!(
+            mangled("@foo-bar/baz", &[], "x"),
+            mangled("@foo/bar-baz", &[], "x")
+        );
+        assert_ne!(
+            mangled("@a/b", &s(&["c__d"]), "x"),
+            mangled("@a/b", &s(&["c", "d"]), "x")
+        );
+        assert_ne!(
+            mangled("@a/b", &[], "c__x"),
+            mangled("@a/b", &s(&["c"]), "x")
+        );
+        assert_ne!(
+            mangled("@a/b_c", &[], "x"),
+            mangled("@a/b", &s(&["c"]), "x")
+        );
     }
 }

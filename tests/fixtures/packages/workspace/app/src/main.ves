@@ -10,6 +10,7 @@ use @demo/geometry::shapes::area::{
     area as shape_area,
     checked_side
 };
+use @demo/geometry::counting::count_twice;
 use self::report::total;
 
 fn scale() -> i64 {
@@ -30,5 +31,6 @@ fn main() -> i64 {
         raise(error, _) => 7,
     };
     let sums = wrapping_add(coordinate_sum(point(20, 30)), coordinate_sum(origin()));
-    wrapping_add(wrapping_add(total(d, a), sums), checked)
+    let counted = count_twice();
+    wrapping_add(wrapping_add(wrapping_add(total(d, a), sums), checked), counted)
 }
