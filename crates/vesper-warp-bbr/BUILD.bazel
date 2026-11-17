@@ -103,15 +103,20 @@ rust_library(
 ]
 
 # The unit tests (src/**), against the port and against the divergent port.
+# Built from the sources rather than `crate = ":port"`: with a generated
+# object in compile_data, rules_rust cannot find the inherited crate root.
 [
     rust_test(
         name = name,
+        srcs = PORT_SRCS,
         compile_data = [obj],
-        crate = ":port",
         crate_features = ["vesper-port"],
+        crate_name = "vesper_warp_bbr",
+        crate_root = "src/lib.rs",
         edition = "2024",
         rustc_flags = ["-Clink-arg=$(location %s)" % obj],
         tags = tags,
+        deps = ["//crates/vesper-port-abi"],
     )
     for name, obj, tags in [
         ("port_unit_test", ":bbr_vesper", []),
