@@ -685,7 +685,7 @@ impl EpochIndex {
     }
 }
 #[cfg(unix)]
-fn sync_dir(path: &Path) -> Result<(), Error> {
+pub(super) fn sync_dir(path: &Path) -> Result<(), Error> {
     if let Some(parent) = path.parent() {
         let dir = if parent.as_os_str().is_empty() {
             Path::new(".")
@@ -697,7 +697,7 @@ fn sync_dir(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 #[cfg(not(unix))]
-fn sync_dir(_: &Path) -> Result<(), Error> {
+pub(super) fn sync_dir(_: &Path) -> Result<(), Error> {
     Ok(())
 }
 
@@ -1354,23 +1354,19 @@ impl<S: CommitSink> KafkaSink<S> {
                 continue;
             }
             if let Err(e) = self.publish_epoch(*epoch, set, &tag) {
-                // Abort what can be aborted; a fenced, broken or faulted
-                // producer is simply dropped (the next InitProducerId aborts
-                // its transaction).
+                // Abort what can be aborted, then drop the producer: a failed
+                // produce may have consumed a sequence number the broker never
+                // appended, so the next attempt starts over with a fresh
+                // InitProducerId (which also aborts anything left open).
                 if let Some(mut p) = self.producer.take()
                     && p.in_txn
                     && !p.fenced
                     && e != Error::Kafka("injected fault")
+                    && self.conn.run(|c| p.end(c, false)).is_ok()
                 {
-                    let ok = self.conn.run(|c| p.end(c, false)).is_ok();
-                    if ok {
-                        self.stats.aborted += 1;
-                        self.producer = Some(p);
-                    }
+                    self.stats.aborted += 1;
                 }
-                if self.producer.is_none() {
-                    self.progress = None;
-                }
+                self.progress = None;
                 return Err(e);
             }
             if let Some(src) = &self.offsets {

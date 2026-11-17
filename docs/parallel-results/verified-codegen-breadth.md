@@ -317,9 +317,7 @@ exercised by the tests.
 
 ### Remaining gaps
 
-- x86-64 has no encoding proof. Its variable-length encodings (REX,
-  ModRM, SIB, displacement widths) need a byte-level decoder rather than
-  32-bit fields.
+- x86-64 had no encoding proof; milestone 9 adds it.
 - As for RV64, this proves encoding, not semantics. That the emitted A64
   sequences implement `Mach.step` is still checked by running programs
   natively and under QEMU.
@@ -460,3 +458,86 @@ Claim #837 (lane V1 of the verified-compiler parallel plan). Refs #582,
 - The status protocol, the call convention and the Rust lowering of
   raises, tests and handlers are covered by differential tests, not by the
   Lean models, like calls before this milestone.
+
+## Milestone 9: x86-64 encodings proved against the Intel SDM formats
+
+### What was built
+
+- `lean/CodegenX64Encoding.lean` (imports `VerifiedCodegen.lean`) models
+  the x86-64 encoder. Instructions have variable length, so an encoding is
+  a list of bytes and the specification is a prefix decoder instead of a
+  field reader over a 32-bit word.
+  - `Inst` is the subset `x86_64.rs` uses, named as in the Intel SDM:
+    - `MOV r64, [rsp + disp32]`/`[rbp + disp32]` and the stores, `MOV r64,
+      imm64`, `MOV r32, imm32`;
+    - `ADD`/`SUB`/`AND`/`CMP`/`TEST`/`MOV` (`MR` form, register operands),
+      `IMUL r64, r/m64`, the `F7` group (`MUL`, `NEG`, `DIV`, `IDIV`),
+      `CQO`, `XOR r32, r32`, the `81`/`83` immediate groups;
+    - `Jcc rel32`/`rel8`, `JMP rel32`/`rel8`, `CALL rel32`, `SETcc`,
+      `MOVZX r32, r8`;
+    - `MOVQ` between general and XMM registers, `ADDSD`/`SUBSD`/`MULSD`/
+      `DIVSD`, `UCOMISD`, `BTC r64, imm8`;
+    - `TEST [rsp + disp32], r32` (the Windows stack probe), `PUSH`, `POP`,
+      `RET`.
+  - `decode` reads the `66`/`F2` legacy prefixes, `REX.W`, one- and
+    two-byte (`0F`) opcodes, the ModRM byte (`mod`, `reg`, `r/m`), the SIB
+    byte `24` for `[rsp + disp32]`, and little-endian `disp32`, `imm8`,
+    `imm32`, `imm64`, `rel8` and `rel32` fields. It accepts only the operand
+    forms the emitter writes (`mod = 11` register operands, `mod = 10`
+    memory operands with base `rsp` or `rbp`) and returns `none` for the
+    others. `89` is the store with a memory operand and `MOV` with a
+    register operand, as in the manual.
+  - `encode` writes the bytes the way `x86_64.rs` does.
+- Theorems:
+  - `decode_encode`: every well-formed instruction (registers below 8,
+    every field in range) decodes back from its encoding, whatever bytes
+    follow it. This is the property a prefix code needs, so instruction
+    boundaries are recovered too.
+  - `decodeAll_encodeAll` extends it to instruction sequences: the
+    concatenated bytes decode back to exactly the sequence.
+  - `encode_bytes`: every encoded value is a byte.
+  - `emit` mirrors `x86_64::emit` for every `M` instruction, Linux and
+    Windows. That covers the `jo`/`jb` checks, the `idiv` guard for
+    `MIN / -1` and `rem` by `-1`, the NaN-aware `ucomisd`/`setcc`
+    sequences, and the prologue with one Windows probe per 4 KiB page and
+    the canonical Windows epilogue.
+  - `emit_ok` holds for frame indices and sizes that fit `disp32`/`imm32`.
+  - `emit_decodes` proves that the laid-out bytes of `emit m` are bytes
+    and decode to exactly its instruction sequence.
+  - Branches are laid out with the abort exits at offset 0 and every other
+    label at the end, and a `rel32` is the displacement modulo 2^32. The
+    Rust assembler refuses displacements outside `i32`.
+  - The abort exits are the labels below `firstFree`, which a test checks
+    against `FIRST_FREE_LABEL` (one past `TrapKind::ALL`). Review found that
+    the three encoding models had hard-coded `l < 4` although Rust reserves
+    only labels 0-2, so a branch to the first function label (3) was laid
+    out as an abort exit. All three models now use `firstFree`, and every
+    listing has a `jmp L3` sample, with label 3 bound after the instruction,
+    that catches the difference.
+- The listing check:
+  - The Lean file prints the bytes of the 60 shared samples (milestone 5's
+    59 plus `jmp L3`; the RV64 and AArch64 listings gain the same line).
+  - It adds the Windows forms of `enter 4`, `enter 1000` (one probe) and
+    `enter 2048` (four probes), and `leave` with an 8000-byte frame.
+  - `x86_64::encoding_listing()` (re-exported as
+    `verified_codegen::x64_encoding_listing`) runs the Rust emitter on the
+    same instructions. `tests/verified_codegen_lean.rs` requires the two
+    to be equal line for line, and checks hygiene and the axiom report.
+- `scripts/ci/check-lean-models.sh` compiles the new file.
+
+### Checks
+
+- With Lean 4.35.0 the file compiles with no warnings in about 8 s.
+- Every axiom report uses only `propext`, `Classical.choice` and
+  `Quot.sound`.
+- `cargo test --test verified_codegen_lean` passes with `VESPER_LEAN` set:
+  10 tests, including all three encoding listings and the `firstFree`
+  check.
+
+### Remaining gaps
+
+- This proves encoding, not semantics. That the emitted x86-64 sequences
+  implement `Mach.step` is still checked by running programs.
+- `x86_64::start`, `start_windows` and the external calls are outside
+  `emit` and not modelled. The Windows unwind data is checked by the COFF
+  tests, not by this proof.

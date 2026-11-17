@@ -1228,6 +1228,13 @@ theorem sim_st (l : Loc) (r : Reg) (hok : fr.Ok) (hv : fr.Valid l) (hrv : rx s (
       refine lands_done ⟨by rv_simp [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0]; rfl, ?_⟩
       rv_corr hc [hp, hsp, hs0, h0, h1, regX, a0, a1, a2, t0, sp, s0, hrv, upd_frame (l := .inn n) hle hv (A := fr.sp + 8 * fr.words + 16 + 8 * n) rfl]
 
+/-- A trap scope emits no code and leaves the machine unchanged. -/
+theorem sim_scope (o d : Nat) :
+    RSim fr base lab (flag (.scope o d) k) (code lab (emit (.scope o d))) s
+      (Mach.step (.scope o d) m) := by
+  simp only [Mach.step, RSim, emit, flag]
+  exact lands_done ⟨by simp only [code, placeL, List.length_nil, hp]; rfl, hc⟩
+
 /-- Every data instruction's emitted RV64 sequence implements `Mach.step`. -/
 theorem emit_sim (i : M) (hok : fr.Ok) (hn : FNegFlips) (hd : DataM i) (hf : Fits fr i)
     (h2 : needs2 i = true → k = true) :
@@ -1258,6 +1265,7 @@ theorem emit_sim (i : M) (hok : fr.Ok) (hn : FNegFlips) (hd : DataM i) (hf : Fit
   | fneg => exact sim_fneg _ _ _ _ _ _ hc hp hl hn
   | fcmp c => exact sim_fcmp _ _ _ _ _ _ hc hp hl c
   | trap f => exact sim_trap _ _ _ _ _ _ hc hp hl f
+  | scope o d => exact sim_scope _ _ _ _ _ _ hc hp hl o d
   | label | jmp | bz | call | enter | leave => exact hd.elim
 
 /-- `bz l` jumps to label `l` exactly when `r0` is zero, and otherwise falls
@@ -1485,6 +1493,7 @@ end Vesper.VerifiedCodegen.Rv64.Sem
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_imm
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_ld
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_st
+#print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_scope
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.emit_sim
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_bz
 #print axioms Vesper.VerifiedCodegen.Rv64.Sem.sim_jmp
