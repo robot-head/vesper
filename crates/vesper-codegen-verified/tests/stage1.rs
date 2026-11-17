@@ -6,7 +6,7 @@ const PARENT: &[u8] = include_bytes!("../../../bootstrap/stage0_seed.lock");
 const SOURCES: &[(&str, &[u8])] = &[("src/parser.ves", b"frontend")];
 
 #[test]
-fn committed_record_binds_parent_and_distinguishes_parser_from_supported_probe() {
+fn committed_record_binds_parent_and_is_strictly_cross_backend() {
     use vesper_codegen_verified::stage1::{VerifiedRecord, digest};
     let bytes = include_bytes!("../../../bootstrap/stage1.lock");
     let lock = Stage1Lock::parse(bytes).unwrap();
@@ -25,10 +25,14 @@ fn committed_record_binds_parent_and_distinguishes_parser_from_supported_probe()
         .unwrap();
     assert_eq!(probe.result, 7856525685952484840);
     assert!(matches!(probe.verified, VerifiedRecord::Built { .. }));
-    assert!(matches!(
-        lock.require_cross_backend(),
-        Err(Stage1Error::BackendUnavailable { .. })
-    ));
+    // Strict Stage 1: every frontend build, parser included, was built by the
+    // verified backend too and returned the same full CST digest.
+    assert!(
+        lock.programs
+            .iter()
+            .all(|p| matches!(p.verified, VerifiedRecord::Built { .. }))
+    );
+    lock.require_cross_backend().unwrap();
     assert_eq!(lock.to_toml().unwrap().as_bytes(), bytes);
 }
 
