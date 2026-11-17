@@ -3,18 +3,25 @@
 //! of mirrors are read and updated in place, and no call allocates. The
 //! Vesper-only tests at the end look at the mirrors themselves.
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
 use vesper_port_pilot::gauge::*;
 
-/// Counts allocations, to show the calls lend storage instead of copying it.
+/// Counts allocations per thread, to show the calls lend storage instead of
+/// copying it (other tests run on other threads).
 struct Counting;
 
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+fn allocations() -> usize {
+    ALLOCATIONS.with(Cell::get)
+}
 
 // SAFETY: forwards to the system allocator.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        let _ = ALLOCATIONS.try_with(|n| n.set(n.get() + 1));
         // SAFETY: forwarded.
         unsafe { System.alloc(layout) }
     }
@@ -176,17 +183,15 @@ fn calls_do_not_allocate() {
         samples.push(*s);
     }
     let mut meter = Meter::new(1);
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    let before = allocations();
     for round in 0..1000 {
         meter.record(all[round % all.len()]);
         let _ = meter.scan(&samples);
         samples.shift(1);
         let _ = meter.phase();
     }
-    // Other tests may run on other threads, so allow their noise but not
-    // one allocation per call.
-    let during = ALLOCATIONS.load(Ordering::Relaxed) - before;
-    assert!(during < 100, "{during} allocations over 4000 calls");
+    let during = allocations() - before;
+    assert_eq!(during, 0, "{during} allocations over 4000 calls");
 }
 
 /// The Vesper build's mirrors: canonical narrow words written by Vesper,
