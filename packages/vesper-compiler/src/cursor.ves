@@ -296,6 +296,7 @@ fn primitive(t: Tok) -> bool eff [Fail[ArithOverflow]] {
         0x753332 => true,
         0x753634 => true,
         0x693634 => true,
+        0x663332 => true,
         0x663634 => true,
         0x626f6f6c => true,
         _ => false,
