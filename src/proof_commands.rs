@@ -12,12 +12,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+use vesper::forge_frontend::provenance::{self, ProvenanceTable};
+
 const AUDITOR: &str = include_str!("../tools/proof-audit/Audit.lean");
 const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_FILES: usize = 4096;
 const MAX_CAPTURE: usize = 8 * 1024 * 1024;
 const MARKER: &str = "VESPER_PROOF_AUDIT_V1:";
-const HELP: &str = "Usage: vesper proof-audit <Module> --root <artifact-directory> --theorem <Qualified.name> [--theorem ...] [--allow-axiom <Name>] [--lean <path>] [--timeout <seconds>] [--json]\n\nReplay existing local Lean 4.35.0 artifacts through the kernel and audit named theorems.\nArtifact imports disable package environment extensions and plugins.\nThe selected Lean toolchain and artifact parser remain trusted; this is not an OS sandbox, provenance certificate or reusable proof-cache approval.\nThe default axiom policy is empty; sorryAx, compiler-trust axioms, and generated _native axioms are always forbidden.\n";
+const HELP: &str = "Usage: vesper proof-audit <Module> --root <artifact-directory> --theorem <Qualified.name> [--theorem ...] [--allow-axiom <Name>] [--lean <path>] [--timeout <seconds>] [--macro-provenance <manifest.json>] [--json]\n\nReplay existing local Lean 4.35.0 artifacts through the kernel and audit named theorems.\nArtifact imports disable package environment extensions and plugins.\nThe selected Lean toolchain and artifact parser remain trusted; this is not an OS sandbox, provenance certificate or reusable proof-cache approval.\nThe default axiom policy is empty; sorryAx, compiler-trust axioms, and generated _native axioms are always forbidden.\nA theorem that depends on macro-expanded definitions (those with `$macro_provenance` markers, see `vesper forge lean`) is rejected unless --macro-provenance names the matching provenance manifest.\n";
 
 #[derive(Default)]
 struct Options {
@@ -29,6 +31,7 @@ struct Options {
     lean: Option<String>,
     timeout: Option<u64>,
     json: bool,
+    macro_provenance: Option<PathBuf>,
 }
 
 pub(crate) fn name_valid(name: &str) -> bool {
@@ -105,6 +108,16 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                 options.timeout = Some(seconds);
             }
             "--json" => options.json = true,
+            "--macro-provenance" => {
+                if options.macro_provenance.is_some() {
+                    return Err("--macro-provenance may only be specified once".into());
+                }
+                options.macro_provenance = Some(
+                    args.next()
+                        .ok_or("--macro-provenance requires a manifest file")?
+                        .into(),
+                );
+            }
             _ if arg.starts_with('-') => return Err(format!("unknown proof-audit option '{arg}'")),
             _ => {
                 if options.module.replace(arg).is_some() {
@@ -373,6 +386,15 @@ struct Theorem {
     name: String,
     axioms: Vec<String>,
     type_repr: String,
+    /// Package constants the theorem transitively depends on (kernel view).
+    #[serde(default, skip_serializing)]
+    dependencies: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMarker {
+    name: String,
+    value: String,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -387,6 +409,7 @@ struct RawAudit {
     kernel_replayed: bool,
     checked_constants: u64,
     theorems: Vec<Theorem>,
+    macro_markers: Vec<RawMarker>,
     modules: Vec<RawModule>,
 }
 #[derive(Serialize)]
@@ -413,6 +436,8 @@ struct AuditReport {
     theorems: Vec<Theorem>,
     artifact_files: Vec<FileDigest>,
     imports: Vec<ModuleDigest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    macro_provenance: Option<MacroProvenanceReport>,
 }
 
 fn digest_file(path: &Path, relative: &Path) -> Result<FileDigest, String> {
@@ -738,6 +763,21 @@ fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, St
         });
     }
     imports.sort_by(|a, b| a.name.cmp(&b.name));
+    let manifest = options
+        .macro_provenance
+        .as_deref()
+        .map(read_manifest)
+        .transpose()?;
+    if raw.macro_markers.len() > 65536 {
+        return Err("Lean audit exceeds the macro provenance marker limit".into());
+    }
+    let mut markers = BTreeMap::new();
+    for marker in raw.macro_markers {
+        if markers.insert(marker.name, marker.value).is_some() {
+            return Err("Lean audit reported a duplicate macro provenance marker".into());
+        }
+    }
+    let macro_provenance = macro_provenance_gate(&raw.theorems, &markers, manifest.as_ref())?;
     let forbidden_axioms = raw
         .theorems
         .iter()
@@ -766,7 +806,199 @@ fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, St
         theorems: raw.theorems,
         artifact_files: files,
         imports,
+        macro_provenance,
     })
+}
+
+const MAX_MANIFEST: u64 = 8 * 1024 * 1024;
+
+fn read_manifest(path: &Path) -> Result<ProvenanceTable, String> {
+    let mut text = String::new();
+    File::open(path)
+        .map_err(|e| format!("macro provenance manifest {}: {e}", path.display()))?
+        .take(MAX_MANIFEST + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("macro provenance manifest: {e}"))?;
+    if text.len() as u64 > MAX_MANIFEST {
+        return Err("macro provenance manifest exceeds 8 MiB".into());
+    }
+    let table: ProvenanceTable = serde_json::from_str(&text)
+        .map_err(|e| format!("invalid macro provenance manifest: {e}"))?;
+    table.verify(None).map_err(|e| e.to_string())?;
+    Ok(table)
+}
+
+#[derive(Debug, Serialize)]
+struct ExpandedDependency {
+    constant: String,
+    function: String,
+    macros: Vec<String>,
+}
+#[derive(Debug, Serialize)]
+struct TheoremProvenance {
+    theorem: String,
+    expanded_dependencies: Vec<ExpandedDependency>,
+}
+#[derive(Debug, Serialize)]
+struct MacroProvenanceReport {
+    manifest_digest: Option<String>,
+    source_blake3: Option<String>,
+    expanded_blake3: Option<String>,
+    theorems: Vec<TheoremProvenance>,
+}
+
+fn split_last(name: &str) -> (&str, &str) {
+    name.rsplit_once('.').unwrap_or(("", name))
+}
+
+/// The macro provenance admission rule (COMP-03). Markers come from the
+/// kernel-replayed environment, never from source text:
+/// - function markers require exactly one module marker in the same namespace;
+/// - a supplied manifest must verify, match the module marker, and account for
+///   every function marker;
+/// - a theorem that depends on a marked (macro-expanded) constant is refused
+///   unless a manifest is supplied, and each such dependency must resolve to an
+///   expanded function record whose digest equals its marker;
+/// - with a manifest, a dependency named after one of its expanded functions
+///   but lacking a marker (provenance stripped) is refused.
+fn macro_provenance_gate(
+    theorems: &[Theorem],
+    markers: &BTreeMap<String, String>,
+    manifest: Option<&ProvenanceTable>,
+) -> Result<Option<MacroProvenanceReport>, String> {
+    let mut module_markers = vec![];
+    let mut function_markers = BTreeMap::new();
+    for (name, value) in markers {
+        let (namespace, last) = split_last(name);
+        if last == provenance::MODULE_MARKER {
+            module_markers.push((namespace, value));
+        } else if let Some(stem) = name.strip_suffix(provenance::MARKER_SUFFIX)
+            && !split_last(stem).1.is_empty()
+        {
+            function_markers.insert(stem.to_owned(), value.as_str());
+        } else {
+            return Err(format!("malformed macro provenance marker: {name}"));
+        }
+    }
+    if markers.is_empty() && manifest.is_none() {
+        return Ok(None);
+    }
+    if module_markers.len() > 1 || (!function_markers.is_empty() && module_markers.is_empty()) {
+        return Err("macro provenance markers need exactly one module marker".into());
+    }
+    let namespace = module_markers.first().map(|(namespace, _)| *namespace);
+    if let Some(namespace) = namespace
+        && function_markers
+            .keys()
+            .any(|stem| split_last(stem).0 != namespace)
+    {
+        return Err("macro provenance marker outside the module marker's namespace".into());
+    }
+    if let Some(table) = manifest {
+        match module_markers.first() {
+            Some((_, value)) if **value == table.digest => {}
+            Some(_) => {
+                return Err("macro provenance manifest does not match the module marker".into());
+            }
+            None => {
+                return Err(
+                    "macro provenance manifest supplied but the artifact has no module marker"
+                        .into(),
+                );
+            }
+        }
+        for (stem, value) in &function_markers {
+            if !table
+                .expanded_functions()
+                .any(|f| f.digest.as_str() == *value)
+            {
+                return Err(format!(
+                    "macro provenance marker for {stem} is not in the manifest"
+                ));
+            }
+        }
+    }
+    let mut reports = vec![];
+    for theorem in theorems {
+        let mut expanded = vec![];
+        for dependency in &theorem.dependencies {
+            if dependency.ends_with(provenance::MARKER_SUFFIX) {
+                continue;
+            }
+            if let Some(value) = function_markers.get(dependency) {
+                expanded.push((dependency.as_str(), *value));
+            } else if let (Some(table), Some(namespace)) = (manifest, namespace) {
+                // Use the extractor's ownership rule, so a stripped marker on
+                // a `$block_f_N` helper or `f$...` companion is caught too.
+                let (space, last) = split_last(dependency);
+                let functions = table
+                    .functions
+                    .iter()
+                    .map(|f| f.function.as_str())
+                    .collect::<BTreeSet<_>>();
+                if space == namespace
+                    && provenance::lean_owner(last, &functions)
+                        .and_then(|owner| table.function(owner))
+                        .is_some_and(|f| f.origin == provenance::FunctionOrigin::Expanded)
+                {
+                    return Err(format!(
+                        "theorem {} depends on {dependency}, expanded code whose provenance marker is missing",
+                        theorem.name
+                    ));
+                }
+            }
+        }
+        if expanded.is_empty() {
+            continue;
+        }
+        let Some(table) = manifest else {
+            return Err(format!(
+                "theorem {} depends on macro-expanded definitions ({}) but no --macro-provenance manifest was supplied",
+                theorem.name,
+                expanded
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        };
+        let mut dependencies = vec![];
+        for (constant, value) in expanded {
+            let record = table
+                .expanded_functions()
+                .find(|f| f.digest == value)
+                .ok_or_else(|| format!("no expanded function record for {constant}"))?;
+            let macros = record
+                .expansions
+                .iter()
+                .map(|&i| {
+                    table
+                        .expansions
+                        .get(i as usize)
+                        .map(|e| e.r#macro.clone())
+                        .ok_or_else(|| format!("missing expansion {i} for {constant}"))
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            if macros.is_empty() {
+                return Err(format!("expanded dependency {constant} names no macro"));
+            }
+            dependencies.push(ExpandedDependency {
+                constant: constant.to_owned(),
+                function: record.function.clone(),
+                macros: macros.into_iter().collect(),
+            });
+        }
+        reports.push(TheoremProvenance {
+            theorem: theorem.name.clone(),
+            expanded_dependencies: dependencies,
+        });
+    }
+    Ok(Some(MacroProvenanceReport {
+        manifest_digest: manifest.map(|t| t.digest.clone()),
+        source_blake3: manifest.map(|t| t.source_blake3.clone()),
+        expanded_blake3: manifest.map(|t| t.expanded_blake3.clone()),
+        theorems: reports,
+    }))
 }
 
 #[cfg(all(test, unix))]
@@ -839,6 +1071,49 @@ mod tests {
             Duration::from_secs(5),
         )
         .unwrap();
+    }
+
+    fn theorem(name: &str, dependencies: &[&str]) -> Theorem {
+        Theorem {
+            name: name.into(),
+            axioms: vec![],
+            type_repr: String::new(),
+            dependencies: dependencies.iter().map(|d| (*d).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn macro_markers_without_a_module_marker_or_in_bad_form_are_refused() {
+        let markers = BTreeMap::from([("Vesper.main$macro_provenance".into(), "d".into())]);
+        let error = macro_provenance_gate(&[theorem("T.t", &[])], &markers, None).unwrap_err();
+        assert!(error.contains("exactly one module marker"), "{error}");
+        let markers = BTreeMap::from([
+            ("Vesper.vesper$macro_provenance".into(), "t".into()),
+            ("Other.main$macro_provenance".into(), "d".into()),
+        ]);
+        let error = macro_provenance_gate(&[theorem("T.t", &[])], &markers, None).unwrap_err();
+        assert!(error.contains("namespace"), "{error}");
+        let markers = BTreeMap::from([("$macro_provenance".into(), "d".into())]);
+        assert!(macro_provenance_gate(&[theorem("T.t", &[])], &markers, None).is_err());
+    }
+
+    #[test]
+    fn unmarked_artifacts_need_no_manifest_and_marked_dependencies_do() {
+        assert!(
+            macro_provenance_gate(&[theorem("T.t", &["Vesper.main"])], &BTreeMap::new(), None)
+                .unwrap()
+                .is_none()
+        );
+        let markers = BTreeMap::from([
+            ("Vesper.vesper$macro_provenance".into(), "t".into()),
+            ("Vesper.main$macro_provenance".into(), "d".into()),
+        ]);
+        let report =
+            macro_provenance_gate(&[theorem("T.t", &["Vesper.plain"])], &markers, None).unwrap();
+        assert!(report.unwrap().theorems.is_empty());
+        let error =
+            macro_provenance_gate(&[theorem("T.t", &["Vesper.main"])], &markers, None).unwrap_err();
+        assert!(error.contains("no --macro-provenance manifest"), "{error}");
     }
 
     #[test]

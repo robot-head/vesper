@@ -215,6 +215,18 @@ pub fn emit(a: &mut Asm, m: &M) -> Result<(), VerifiedError> {
             a.u32(0x1e61_2000);
             a.u32(0x9a9f_07e0 | (cond ^ 1) << 12);
         }
+        // movz x16, #HEAP_BASE >> 16, lsl #16; add x16, x16, x1, lsl #3;
+        // ldr x0, [x16, #8*off] (str x0, ...).
+        M::LdH(off) | M::StH(off) => {
+            a.u32(0xd2a0_0000 | ((super::HEAP_BASE >> 16) as u32) << 5 | 16);
+            a.u32(ADD | 1 << 16 | 3 << 10 | 16 << 5 | 16);
+            let op = if matches!(m, M::LdH(_)) {
+                0xf940_0000
+            } else {
+                0xf900_0000
+            };
+            a.u32(op | off << 10 | 16 << 5);
+        }
         M::Label(l) => a.bind(l)?,
         M::Jmp(l) => branch(a, 0x1400_0000, l),
         M::Bz(l) => cb(a, false, 0, l),

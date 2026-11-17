@@ -69,8 +69,8 @@ can use `ensures_choose(n: u64, reject: bool, result: u64) -> bool`. Calls to
 `stop.raise(n)` use the existing explicit capability evidence; the contract
 selects the same canonical Fail model already used for unlabeled effects.
 With exactly one effect instance, this introduces no ambiguity about which
-label supplies the evidence. Multiple instances still require a distinct model
-and remain typed refusals.
+label supplies the evidence. This initial slice refused multiple instances;
+the follow-up below adds their distinct tagged model.
 
 The proposition constrains successful returns in `Except E`; recursive fuel
 companions use `ExceptT E Option` and constrain successful `some (.ok result)`
@@ -93,12 +93,25 @@ cargo +stable clippy --locked -p vesper --test lean_extract --test verify_extrac
 target/debug/vesper fmt --check tests/fixtures/lean_extract/labeled_fail_contracts.ves
 ```
 
+## Multiple Fail contract follow-up
+
+The [multiple-Fail report](lean-extractor-multi-fail-contracts.md) records the
+dependent follow-up: a right-associated error sum in row order, explicit
+per-instance capability evidence, and kernel-checked pure/recursive contracts.
+Labels with identical payload types remain distinguishable by their sum tags.
+Open rows and non-Fail model monads remain unsupported.
+
 ## Remaining #593 work
+
+The [effectful recursive value follow-up](lean-extractor-recursive-values.md)
+adds fuel companions for non-generic, unlabeled effectful function values,
+including stored and zero-argument callbacks. Its report describes the checked
+fuel contract and the cases that remain refused.
 
 - General fuel/partial-definition equivalence or direct structural termination
   evidence; successful finite fuel execution is currently partial correctness.
-- Total companions for recursion through first-class function/closure values.
-- Contracts over `inout` state transitions, generics, multiple `Fail`
-  instances, and handled non-`Fail` effects. Existing typed refusals remain.
+- Total companions for pure, generic or labeled recursive function values and
+  the remaining closure cases.
+- Contracts over handled non-`Fail` effects. Existing typed refusals remain.
 - Source-level termination/decreases inference and a compiler extraction
   refinement proof. The arithmetic helper establishes none of these results.

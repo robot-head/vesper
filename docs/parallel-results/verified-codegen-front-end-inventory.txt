@@ -1,20 +1,16 @@
 == stage1 ==
-functions: 159
-without own refusal: 157
-compiling with all callees: 153
-refusals: 2
-  Effect: 2
+functions: 161
+without own refusal: 161
+compiling with all callees: 161
+refusals: 0
 by detail:
-     2 Effect: handler for Region (only Fail handlers)
 
-$handler_body_45657_45885:
-  calls refused: $handler_body_45688_45781
-$handler_body_45688_45781:
-  Effect: handler for Region (only Fail handlers)
-$handler_body_46048_46279:
-  calls refused: $handler_body_46079_46175
-$handler_body_46079_46175:
-  Effect: handler for Region (only Fail handlers)
+$handler_body_45657_45885: ok, 60 rows
+$handler_body_45688_45781: ok, 80 rows
+$handler_body_45727_45771: ok, 37 rows
+$handler_body_46048_46279: ok, 60 rows
+$handler_body_46079_46175: ok, 80 rows
+$handler_body_46119_46165: ok, 37 rows
 $handler_body_46753_46849: ok, 41 rows
 $handler_body_46784_46804: ok, 35 rows
 $handler_clause_45817_45822: ok, 7 rows
@@ -100,8 +96,7 @@ kind: ok, 15 rows
 leave: ok, 49 rows
 lex_at: ok, 432 rows
 lex_digest: ok, 78 rows
-lex_main:
-  calls refused: $handler_body_45657_45885
+lex_main: ok, 54 rows
 lex_step: ok, 161 rows
 lex_steps: ok, 167 rows
 lex_until_eof: ok, 89 rows
@@ -123,8 +118,7 @@ open: ok, 89 rows
 pack: ok, 43 rows
 params: ok, 706 rows
 parse_digest: ok, 186 rows
-parse_main:
-  calls refused: $handler_body_46048_46279
+parse_main: ok, 54 rows
 pass: ok, 156 rows
 pattern: ok, 212 rows
 pattern_inner: ok, 1405 rows
@@ -174,51 +168,35 @@ with_flags: ok, 43 rows
 word: ok, 47 rows
 
 == parser ==
-functions: 423
-without own refusal: 286
-compiling with all callees: 280
-refusals: 148
-  Effect: 131
+functions: 436
+without own refusal: 314
+compiling with all callees: 312
+refusals: 122
+  Effect: 118
   ExternalFunction: 2
   FunctionValue: 1
-  Generic: 3
-  Type: 11
+  Generic: 1
 by detail:
    118 Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
-    11 Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-     3 Generic: generic functions (no monomorphization in this backend)
-     2 Effect: handler for Region (only Fail handlers)
      2 ExternalFunction: no such function in the checked world
      1 FunctionValue: type fn() -> i64
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_0:0"), name: "Region", args: [] }],...
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_1:0"), name: "Region", args: [] }],...
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_2:0"), name: "Region", args: [] }],...
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_3:0"), name: "Region", args: [] }],...
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_4:0"), name: "Region", args: [] }],...
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_words:0"), name: "Region", args: [] }], ...
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_0:0"), name: "Region", args: [] }]...
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_1:0"), name: "Region", args: [] }]...
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_2:0"), name: "Region", args: [] }]...
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }]...
-     1 Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }]...
+     1 Generic: a type parameter without a concrete instance
 
 $handler_body_122129_122166: ok, 37 rows
-$handler_body_13603_13831:
-  calls refused: $handler_body_13634_13727
-$handler_body_13634_13727:
-  Effect: handler for Region (only Fail handlers)
+$handler_body_13603_13831: ok, 60 rows
+$handler_body_13634_13727: ok, 80 rows
+$handler_body_13673_13717: ok, 37 rows
 $handler_body_138724_138820: ok, 41 rows
 $handler_body_138755_138775: ok, 35 rows
-$handler_body_13994_14225:
-  calls refused: $handler_body_14025_14121
-$handler_body_14025_14121:
-  Effect: handler for Region (only Fail handlers)
+$handler_body_13994_14225: ok, 60 rows
+$handler_body_14025_14121: ok, 80 rows
+$handler_body_14065_14111: ok, 37 rows
 $handler_body_43858_43939: ok, 45 rows
 $handler_body_45913_46095:
   calls refused: $handler_body_45944_45991
 $handler_body_45944_45991:
   FunctionValue: type fn() -> i64
-  calls refused: syntax_run
+  calls refused: syntax_run<T=i64>
 $handler_body_46282_46462:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: $handler_body_46313_46350, $handler_clause_46386_46391, $handler_clause_46429_46445
@@ -331,8 +309,7 @@ kind: ok, 15 rows
 leave: ok, 49 rows
 lex_at: ok, 432 rows
 lex_digest: ok, 78 rows
-lex_main:
-  calls refused: $handler_body_13603_13831
+lex_main: ok, 54 rows
 lex_step: ok, 161 rows
 lex_steps: ok, 167 rows
 lex_until_eof: ok, 89 rows
@@ -506,8 +483,7 @@ parse_literal:
 parse_lower:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_ident, parse_kind, syntax_issue
-parse_main:
-  calls refused: $handler_body_13994_14225
+parse_main: ok, 54 rows
 parse_match_expr:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: parse_arms, parse_expect, parse_restricted
@@ -684,8 +660,9 @@ syntax_contains:
 syntax_diag:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_cell, syntax_put
-syntax_directory:
-  Generic: generic functions (no monomorphization in this backend)
+syntax_directory<T=SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_2:0"), name: "Region", args: [] }], tail: None }, i64]]>: ok, 1111 rows
+syntax_directory<T=SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }], tail: None }, i64]]]]]>: ok, 1111 rows
+syntax_directory<T=SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }], tail: None }, i64]]]]]]]]>: ok, 1111 rows
 syntax_expected:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_diag
@@ -724,33 +701,26 @@ syntax_open:
 syntax_put:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: SyntaxMemory::write
-syntax_read_0:
-  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_0:0"), name: "Region", args: [] }],...
-  calls refused: syntax_slot
-syntax_read_1:
-  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_1:0"), name: "Region", args: [] }],...
-  calls refused: syntax_read_0, syntax_slot
-syntax_read_2:
-  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_2:0"), name: "Region", args: [] }],...
-  calls refused: syntax_read_1, syntax_slot
-syntax_read_3:
-  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_3:0"), name: "Region", args: [] }],...
-  calls refused: syntax_read_2, syntax_slot
-syntax_read_4:
-  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_4:0"), name: "Region", args: [] }],...
-  calls refused: syntax_read_3, syntax_slot
-syntax_run:
-  Generic: generic functions (no monomorphization in this backend)
+syntax_read_0: ok, 81 rows
+syntax_read_1: ok, 188 rows
+syntax_read_2: ok, 188 rows
+syntax_read_3: ok, 188 rows
+syntax_read_4: ok, 188 rows
+syntax_run<T=i64>:
+  Generic: a type parameter without a concrete instance
 syntax_sig:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_tok
-syntax_slot:
-  Generic: generic functions (no monomorphization in this backend)
+syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_0:0"), name: "Region", args: [] }], tail: None }, i64]>: ok, 2064 rows
+syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_1:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_1:0"), name: "Region", args: [] }], tail: None }, i64]]]]>: ok, 2064 rows
+syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_2:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_2:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_2:0"), name: "Region", args: [] }], tail: None }, i64]]]]]]]>: ok, 2064 rows
+syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_3:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_3:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_3:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_3:0"), name: "Region", args: [] }], tail: None }, i64]]]]]]]]]]>: ok, 2064 rows
+syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_read_4:0"), name: "Region", args: [] }], tail: None }, i64]]]]]]]]]]]]]>: ok, 2064 rows
+syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_0:0"), name: "Region", args: [] }], tail: None }, i64]>: ok, 2064 rows
+syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_1:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_1:0"), name: "Region", args: [] }], tail: None }, i64]]]]>: ok, 2064 rows
+syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_2:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_2:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_2:0"), name: "Region", args: [] }], tail: None }, i64]]]]]]]>: ok, 2064 rows
+syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }], tail: None }, i64]]]]]]]]]]>: ok, 2064 rows
+syntax_slot<T=RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }], tail: None }, Option[SyntaxSlots[RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }], tail: None }, i64]]]]]]]]]]]]]>: ok, 2064 rows
 syntax_static_byte: ok, 63 rows
 syntax_static_len: ok, 924 rows
 syntax_text_10: ok, 287 rows
@@ -859,29 +829,12 @@ syntax_tok:
   Effect: effect SyntaxMemory (only unlabeled Fail[E], aborts and non-resuming handlers)
   calls refused: syntax_cell
 syntax_utf8_end: ok, 47 rows
-syntax_words:
-  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_words:0"), name: "Region", args: [] }], ...
-syntax_write_0:
-  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_0:0"), name: "Region", args: [] }]...
-  calls refused: syntax_slot
-syntax_write_1:
-  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_1:0"), name: "Region", args: [] }]...
-  calls refused: syntax_slot, syntax_words, syntax_write_0
-syntax_write_2:
-  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_2:0"), name: "Region", args: [] }]...
-  calls refused: syntax_directory, syntax_slot, syntax_write_1
-syntax_write_3:
-  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_3:0"), name: "Region", args: [] }]...
-  calls refused: syntax_directory, syntax_slot, syntax_write_2
-syntax_write_4:
-  Effect: effect Region (only unlabeled Fail[E], aborts and non-resuming handlers)
-  Type: type RegionBox[eff Effects { instances: [Effect { label: Some("$fncap:syntax_write_4:0"), name: "Region", args: [] }]...
-  calls refused: syntax_directory, syntax_slot, syntax_write_3
+syntax_words: ok, 565 rows
+syntax_write_0: ok, 82 rows
+syntax_write_1: ok, 353 rows
+syntax_write_2: ok, 353 rows
+syntax_write_3: ok, 353 rows
+syntax_write_4: ok, 353 rows
 text_is: ok, 47 rows
 tok: ok, 16 rows
 trait_ref: ok, 232 rows
@@ -900,30 +853,24 @@ with_flags: ok, 43 rows
 word: ok, 47 rows
 
 == checker ==
-functions: 295
-without own refusal: 292
-compiling with all callees: 285
-refusals: 3
-  Effect: 3
+functions: 298
+without own refusal: 298
+compiling with all callees: 298
+refusals: 0
 by detail:
-     3 Effect: handler for Region (only Fail handlers)
 
-$handler_body_128354_129110:
-  calls refused: $handler_body_128385_128667
-$handler_body_128385_128667:
-  calls refused: $handler_body_128426_128534
-$handler_body_128426_128534:
-  Effect: handler for Region (only Fail handlers)
+$handler_body_128354_129110: ok, 60 rows
+$handler_body_128385_128667: ok, 72 rows
+$handler_body_128426_128534: ok, 82 rows
+$handler_body_128471_128520: ok, 39 rows
 $handler_body_130983_131079: ok, 41 rows
 $handler_body_131014_131034: ok, 35 rows
-$handler_body_45657_45885:
-  calls refused: $handler_body_45688_45781
-$handler_body_45688_45781:
-  Effect: handler for Region (only Fail handlers)
-$handler_body_46048_46279:
-  calls refused: $handler_body_46079_46175
-$handler_body_46079_46175:
-  Effect: handler for Region (only Fail handlers)
+$handler_body_45657_45885: ok, 60 rows
+$handler_body_45688_45781: ok, 80 rows
+$handler_body_45727_45771: ok, 37 rows
+$handler_body_46048_46279: ok, 60 rows
+$handler_body_46079_46175: ok, 80 rows
+$handler_body_46119_46165: ok, 37 rows
 $handler_body_51639_51667: ok, 398 rows
 $handler_body_55926_55947: ok, 24 rows
 $handler_body_56157_56178: ok, 24 rows
@@ -1083,8 +1030,7 @@ c_validate_variants: ok, 325 rows
 c_variant_next: ok, 153 rows
 c_word: ok, 56 rows
 check_escapes: ok, 211 rows
-check_main:
-  calls refused: $handler_body_128354_129110
+check_main: ok, 54 rows
 clauses: ok, 385 rows
 close: ok, 86 rows
 closure: ok, 721 rows
@@ -1141,8 +1087,7 @@ kind: ok, 15 rows
 leave: ok, 49 rows
 lex_at: ok, 432 rows
 lex_digest: ok, 78 rows
-lex_main:
-  calls refused: $handler_body_45657_45885
+lex_main: ok, 54 rows
 lex_step: ok, 161 rows
 lex_steps: ok, 167 rows
 lex_until_eof: ok, 89 rows
@@ -1164,8 +1109,7 @@ open: ok, 89 rows
 pack: ok, 43 rows
 params: ok, 706 rows
 parse_digest: ok, 186 rows
-parse_main:
-  calls refused: $handler_body_46048_46279
+parse_main: ok, 54 rows
 pass: ok, 156 rows
 pattern: ok, 212 rows
 pattern_inner: ok, 1405 rows

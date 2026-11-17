@@ -555,6 +555,9 @@ struct Transport {
     closed: bool,
     shutdown_ms: u64,
     artifact_watch: Option<(PathBuf, HarnessLimits)>,
+    /// End of output that arrived after a complete response but before the
+    /// writer thread acknowledged the request; replayed to the next reader.
+    deferred_eof: Option<Instant>,
 }
 impl Transport {
     fn spawn(
@@ -657,6 +660,7 @@ impl Transport {
             threads: vec![reader, writer, error_reader],
             stderr,
             closed: false,
+            deferred_eof: None,
             shutdown_ms: limits.shutdown_timeout_ms,
             artifact_watch: None,
         })
@@ -672,6 +676,12 @@ impl Transport {
         Ok(())
     }
     fn event(&mut self, deadline: Instant) -> Result<Event, HarnessError> {
+        if let Some(at) = self.deferred_eof.take() {
+            return Ok(Event::Frame(at, Ok(None)));
+        }
+        self.poll_event(deadline)
+    }
+    fn poll_event(&mut self, deadline: Instant) -> Result<Event, HarnessError> {
         loop {
             self.check_stderr()?;
             if let Some((root, limits)) = &self.artifact_watch {
@@ -730,6 +740,12 @@ impl Transport {
         }
     }
     fn exchange(&mut self, bytes: Vec<u8>, deadline: Instant) -> Result<Vec<u8>, HarnessError> {
+        if self.deferred_eof.is_some() {
+            return Err(failure(
+                HarnessErrorKind::Crash,
+                "worker ended before request",
+            ));
+        }
         match self
             .rx
             .as_ref()
@@ -763,7 +779,7 @@ impl Transport {
         let mut response = None;
         let mut written = false;
         while !written || response.is_none() {
-            match self.event(deadline)? {
+            match self.poll_event(deadline)? {
                 Event::Written(_, result) => {
                     result?;
                     if written {
@@ -774,9 +790,25 @@ impl Transport {
                     }
                     written = true;
                 }
-                Event::Frame(_, result) => {
-                    let frame = result?
-                        .ok_or_else(|| failure(HarnessErrorKind::Crash, "EOF during request"))?;
+                Event::Frame(at, result) => {
+                    // The reader and writer threads race: a peer that reads
+                    // the whole request, answers and exits can have its
+                    // response and EOF delivered before the write is
+                    // acknowledged. That EOF belongs to the next read, so
+                    // keep it for then instead of calling it a crash here.
+                    let Some(frame) = result? else {
+                        if response.is_some() && !written && self.deferred_eof.is_none() {
+                            self.deferred_eof = Some(at);
+                            continue;
+                        }
+                        return Err(failure(HarnessErrorKind::Crash, "EOF during request"));
+                    };
+                    if self.deferred_eof.is_some() {
+                        return Err(failure(
+                            HarnessErrorKind::Protocol,
+                            "worker output after EOF",
+                        ));
+                    }
                     if response.replace(frame).is_some() {
                         return Err(failure(HarnessErrorKind::Protocol, "extra worker response"));
                     }

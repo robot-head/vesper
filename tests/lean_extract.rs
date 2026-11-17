@@ -84,35 +84,39 @@ fn proves(source: &str, proofs: &str, totality: &[(&str, Totality)], main: &str)
         }
     }
     assert!(!theorems.is_empty(), "fixture proves nothing");
-    let mut file = text.clone();
-    file.push('\n');
-    file.push_str(proofs);
-    for theorem in &theorems {
-        file.push_str(&format!("\n#print axioms {theorem}"));
-    }
-    file.push('\n');
-    let path = std::env::temp_dir().join(format!(
-        "vesper-lean-extract-{}-{}.lean",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::write(&path, &file).unwrap();
-    let result = Command::new(compiler).arg(&path).output().unwrap();
-    let _ = fs::remove_file(&path);
-    let stdout = String::from_utf8_lossy(&result.stdout);
-    assert!(
-        result.status.success(),
-        "{stdout}\n{}\n{file}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(!stdout.contains("sorry"), "{stdout}");
-    assert!(!stdout.contains("ofReduceBool"), "{stdout}");
-    for theorem in &theorems {
+    // Check every fixture's proofs against both the complete extraction and
+    // the total projection used for strict artifact replay.
+    for text in [text, report.proof_module.render().unwrap()] {
+        let mut file = text;
+        file.push('\n');
+        file.push_str(proofs);
+        for theorem in &theorems {
+            file.push_str(&format!("\n#print axioms {theorem}"));
+        }
+        file.push('\n');
+        let path = std::env::temp_dir().join(format!(
+            "vesper-lean-extract-{}-{}.lean",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&path, &file).unwrap();
+        let result = Command::new(&compiler).arg(&path).output().unwrap();
+        let _ = fs::remove_file(&path);
+        let stdout = String::from_utf8_lossy(&result.stdout);
         assert!(
-            stdout.contains(&format!("'{theorem}' depends on axioms"))
-                || stdout.contains(&format!("'{theorem}' does not depend on any axioms")),
-            "missing axiom report for {theorem}:\n{stdout}"
+            result.status.success(),
+            "{stdout}\n{}\n{file}",
+            String::from_utf8_lossy(&result.stderr)
         );
+        assert!(!stdout.contains("sorry"), "{stdout}");
+        assert!(!stdout.contains("ofReduceBool"), "{stdout}");
+        for theorem in &theorems {
+            assert!(
+                stdout.contains(&format!("'{theorem}' depends on axioms"))
+                    || stdout.contains(&format!("'{theorem}' does not depend on any axioms")),
+                "missing axiom report for {theorem}:\n{stdout}"
+            );
+        }
     }
 }
 
@@ -296,9 +300,27 @@ fn labeled_fail_contracts_cover_success_and_preserve_raised_payloads() {
 }
 
 #[test]
-fn multiple_fail_contracts_still_require_a_distinct_model() {
+fn mixed_effect_contracts_still_require_a_distinct_model() {
     assert!(
-        matches!(contract_error("fn f(n: u64) -> u64 eff [left: Fail[u64], right: Fail[bool]] { n } fn ensures_f(n: u64, result: u64) -> bool { result == n } fn main() -> u64 { 0 }"), ContractError::Unsupported { function, .. } if function == "f")
+        matches!(contract_error("linear effect Ask { fn ask() -> bool; } fn f(n: u64) -> u64 eff [left: Fail[u64], right: Ask] { n } fn ensures_f(n: u64, result: u64) -> bool { result == n } fn main() -> u64 { 0 }"), ContractError::Unsupported { function, .. } if function == "f")
+    );
+}
+
+#[test]
+fn multiple_fail_contracts_tag_each_effect_instance_in_row_order() {
+    let (source, proofs) = fixture!("multi_fail_contracts");
+    let report = lean::extract_report(&world(source)).unwrap();
+    assert_eq!(report.contracts, ["descend", "distinct", "forward", "pick"]);
+    proves(
+        source,
+        proofs,
+        &[
+            ("pick", Totality::Total),
+            ("forward", Totality::Total),
+            ("distinct", Totality::Total),
+            ("descend", Totality::Fuel),
+        ],
+        "42",
     );
 }
 
@@ -363,6 +385,30 @@ fn recursion_through_function_values_stays_partial_and_says_why() {
         lean::extract_report(&world),
         Err(ExtractError::Contract(ContractError::Unsupported { function, .. })) if function == "spin"
     ));
+}
+
+#[test]
+fn effectful_recursive_values_capture_predecessor_fuel() {
+    let (source, proofs) = fixture!("recursive_values");
+    let report = lean::extract_report(&world(source)).unwrap();
+    let full = report.module.render().unwrap();
+    let proof = report.proof_module.render().unwrap();
+    assert!(full.contains("partial def «down»"));
+    assert!(!proof.contains("partial def"));
+    assert!(!proof.contains("def «down» "));
+    assert!(proof.contains("noncomputable def «down$fuel»"));
+    proves(
+        source,
+        proofs,
+        &[
+            ("apply", Totality::Total),
+            ("run", Totality::Total),
+            ("down", Totality::Fuel),
+            ("spin", Totality::Fuel),
+            ("stored", Totality::Fuel),
+        ],
+        "42",
+    );
 }
 
 #[test]

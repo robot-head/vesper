@@ -285,6 +285,37 @@ def replay (newConstants : Std.HashMap Name ConstantInfo) (base : Environment) :
 end CheckedKernelReplay
 -- END CHECKED KERNEL REPLAY
 
+/-- Package constants transitively referenced by `root` (including itself).
+Toolchain constants are not followed; only the artifact's own additions. -/
+partial def packageClosure (additions : Std.HashMap Name ConstantInfo)
+    (pending : List Name) (seen : NameSet) : IO NameSet := do
+  match pending with
+  | [] => pure seen
+  | name :: rest =>
+    if seen.contains name then packageClosure additions rest seen
+    else match additions[name]? with
+      | none => packageClosure additions rest seen
+      | some info => do
+        let refs ← CheckedKernelReplay.references info
+        packageClosure additions (refs.toList ++ rest) (seen.insert name)
+
+def macroMarkerSuffix : String := "$macro_provenance"
+
+/-- Macro provenance markers (COMP-03) are package string constants whose last
+component ends in `$macro_provenance`. Their values are read from the
+kernel-replayed environment; anything but a closed string literal is refused. -/
+def macroMarker? (name : Name) (info : ConstantInfo) : IO (Option String) := do
+  match name with
+  | .str _ last =>
+    unless last.endsWith macroMarkerSuffix do return none
+    match info with
+    | .defnInfo d =>
+      match d.value.consumeMData with
+      | .lit (.strVal value) => return some value
+      | _ => fail s!"macro provenance marker is not a string literal: {name}"
+    | _ => fail s!"macro provenance marker is not a definition: {name}"
+  | _ => return none
+
 def audit (request : Request) : IO Json := do
   let library ← IO.FS.realPath (request.toolchainPrefix / "lib" / "lean")
   if within library request.root || within request.root library then
@@ -371,10 +402,21 @@ def audit (request : Request) : IO Json := do
     let (axioms, _) ← (collectAxioms name : CoreM (Array Name)).toIO
       { fileName := "<vesper-proof-audit>", fileMap := default }
       { env := replayed }
+    let dependencies ← packageClosure additions [name] {}
+    let dependencyNames := (dependencies.toArray.qsort Name.lt).map (·.toString (escape := false))
     theoremReports := theoremReports.push <| Json.mkObj [
       ("name", toJson name.toString),
       ("axioms", toJson <| (axioms.qsort Name.lt).map Name.toString),
-      ("type_repr", toJson <| toString checkedTheorem.type)]
+      ("type_repr", toJson <| toString checkedTheorem.type),
+      ("dependencies", toJson dependencyNames)]
+
+  let mut markers : Array (String × String) := #[]
+  for (name, _) in additions.toList do
+    let some checked := replayed.toKernelEnv.find? name |
+      fail s!"kernel replay omitted declaration: {name}"
+    if let some value ← macroMarker? name checked then
+      markers := markers.push (name.toString (escape := false), value)
+  markers := markers.qsort (fun a b => a.1 < b.1)
 
   let mut names : NameSet := trustedModules
   for name in base.header.moduleNames do names := names.insert name
@@ -390,6 +432,8 @@ def audit (request : Request) : IO Json := do
     ("kernel_replayed", toJson true),
     ("theorems", Json.arr theoremReports),
     ("checked_constants", toJson additions.size),
+    ("macro_markers", Json.arr <| markers.map fun (name, value) =>
+      Json.mkObj [("name", toJson name), ("value", toJson value)]),
     ("modules", Json.arr modules)]
 
 end VesperProofAudit

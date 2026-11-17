@@ -1,0 +1,97 @@
+// The region-backed radix pages of the self-hosted front end
+// (packages/vesper-compiler/src/syntax_buffer.ves, without SyntaxMemory),
+// driven through one page of 16 cells.
+copy struct SyntaxSlots[T: mod copy] {
+    slots: (T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T)
+}
+fn syntax_directory[T: mod copy]() -> SyntaxSlots[RegionBox[r, Option[T]]] eff [r: Region] {
+    let empty: Option[T] = Option::None;
+    SyntaxSlots {
+        slots: (
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty)
+        )
+    }
+}
+fn syntax_words() -> SyntaxSlots[RegionBox[r, i64]] eff [r: Region] {
+    SyntaxSlots {
+        slots: (
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0)
+        )
+    }
+}
+fn syntax_read_0(page: SyntaxSlots[RegionBox[r, i64]], index: i64) -> i64 eff [r: Region] {
+    r.get(syntax_slot(page, index))
+}
+fn syntax_write_0(page: SyntaxSlots[RegionBox[r, i64]], index: i64, value: i64)
+    -> Unit eff [r: Region] {
+    r.set(syntax_slot(page, index), value)
+}
+
+// `syntax_slot` with a destructuring `let` instead of constant tuple
+// indexing (`page.slots[0]` is an `Index` this milestone does not lower).
+fn syntax_slot[T: mod copy](page: SyntaxSlots[T], index: i64) -> T {
+    let (s0, s1, s2, s3, s4, s5, s6, s7, s8, s9, s10, s11, s12, s13, s14, s15) = page.slots;
+    match index {
+        0 => s0,
+        1 => s1,
+        2 => s2,
+        3 => s3,
+        4 => s4,
+        5 => s5,
+        6 => s6,
+        7 => s7,
+        8 => s8,
+        9 => s9,
+        10 => s10,
+        11 => s11,
+        12 => s12,
+        13 => s13,
+        14 => s14,
+        _ => s15,
+    }
+}
+
+fn main() -> (i64, i64, i64, bool) {
+    region r(4096) {
+        let page = syntax_words();
+        syntax_write_0(page, 3, 30);
+        syntax_write_0(page, 15, 150);
+        syntax_write_0(page, 99, 990);
+        let dir = syntax_directory[i64]();
+        let empty = match r.get(syntax_slot(dir, 7)) {
+            Option::None => true,
+            Option::Some(_) => false,
+        };
+        (syntax_read_0(page, 3), syntax_read_0(page, 15), syntax_read_0(page, 0), empty)
+    }
+}

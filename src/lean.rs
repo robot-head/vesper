@@ -880,9 +880,44 @@ pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
         );
         functions.push((f.name.clone(), generator.function(f)?));
     }
+    let owners = functions
+        .iter()
+        .map(|(owner, definition)| (definition.name.clone(), owner.clone()))
+        .collect::<BTreeMap<_, _>>();
     let ordered = order_definitions(functions, DefinitionKind::PartialDef);
-    declarations.extend(ordered.declarations);
     let family = std::rc::Rc::new(ordered.recursive_reach);
+    let mut proof_declarations = declarations.clone();
+    let mut omitted_executable_definitions = vec![];
+    for declaration in &ordered.declarations {
+        let definitions = match declaration {
+            Declaration::Definition(d) => std::slice::from_ref(d),
+            Declaration::MutualDefinitions(ds) => ds.as_slice(),
+            _ => {
+                return Err(ExtractError::Unsupported(
+                    "unexpected function declaration".into(),
+                ));
+            }
+        };
+        if definitions
+            .iter()
+            .any(|d| family.contains(&owners[&d.name]))
+        {
+            omitted_executable_definitions.extend(definitions.iter().map(|d| {
+                format!(
+                    "Vesper.{}",
+                    d.name
+                        .components()
+                        .iter()
+                        .map(Ident::as_str)
+                        .collect::<Vec<_>>()
+                        .join(".")
+                )
+            }));
+        } else {
+            proof_declarations.push(declaration.clone());
+        }
+    }
+    declarations.extend(ordered.declarations);
     let mut companions = BTreeMap::new();
     let mut totality = BTreeMap::new();
     for f in world.functions.values() {
@@ -925,29 +960,57 @@ pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
         totality.insert(owner.clone(), Totality::Fuel);
     }
     let companions = order_definitions(companions.into_iter().collect(), DefinitionKind::Def);
+    // Lean elaborates total recursion through trusted recursors. Suppress its
+    // executable unsafe helpers in the proof projection, without changing the
+    // kernel definitions or the strict artifact auditor.
+    for declaration in &companions.declarations {
+        let mut declaration = declaration.clone();
+        match &mut declaration {
+            Declaration::Definition(d) => d.kind = DefinitionKind::NoncomputableDef,
+            Declaration::MutualDefinitions(ds) => {
+                for d in ds {
+                    d.kind = DefinitionKind::NoncomputableDef;
+                }
+            }
+            _ => {
+                return Err(ExtractError::Unsupported(
+                    "unexpected fuel declaration".into(),
+                ));
+            }
+        }
+        proof_declarations.push(declaration);
+    }
     declarations.extend(companions.declarations);
     let contracts = contracts(world, &totality).map_err(ExtractError::Contract)?;
     let contract_names = contracts.iter().map(|(n, _)| n.clone()).collect();
-    declarations.extend(
-        contracts
-            .into_iter()
-            .flat_map(|(_, definitions)| definitions.into_iter().map(Declaration::Definition)),
-    );
-    let module = Module {
-        imports: vec![ModuleName::new("Std").map_err(|e| e.to_string())?],
-        declarations: vec![
-            Declaration::SetOption {
-                option: LeanOption::LinterUnusedVariables,
-                value: OptionValue::Bool(false),
-            },
-            Declaration::Namespace {
-                name: source_name("Vesper")?,
-                declarations,
-            },
-        ],
+    let contract_declarations = contracts
+        .into_iter()
+        .flat_map(|(_, definitions)| definitions.into_iter().map(Declaration::Definition))
+        .collect::<Vec<_>>();
+    proof_declarations.extend(contract_declarations.clone());
+    declarations.extend(contract_declarations);
+    let make_module = |declarations| {
+        Ok::<_, String>(Module {
+            imports: vec![ModuleName::new("Std").map_err(|e| e.to_string())?],
+            declarations: vec![
+                Declaration::SetOption {
+                    option: LeanOption::LinterUnusedVariables,
+                    value: OptionValue::Bool(false),
+                },
+                Declaration::Namespace {
+                    name: source_name("Vesper")?,
+                    declarations,
+                },
+            ],
+        })
     };
+    let module = make_module(declarations)?;
+    let proof_module = make_module(proof_declarations)?;
+    omitted_executable_definitions.sort();
     Ok(Extraction {
         module,
+        proof_module,
+        omitted_executable_definitions,
         totality,
         contracts: contract_names,
     })
@@ -1021,6 +1084,10 @@ impl std::error::Error for ExtractError {}
 /// A whole extraction with the facts proof tooling (Lens, tests) needs.
 pub struct Extraction {
     pub module: Module,
+    /// Kernel proof model: total companions have no executable code, and
+    /// original recursive definitions and their callers are omitted.
+    pub proof_module: Module,
+    pub omitted_executable_definitions: Vec<String>,
     pub totality: BTreeMap<String, Totality>,
     /// Source functions that received a `f$contract : Prop`.
     pub contracts: Vec<String>,
@@ -1226,18 +1293,33 @@ fn contract(
             .map(|p| &p.ty),
     );
     signature(ensures, with_result)?;
-    let fail = match f.effects.instances.as_slice() {
+    let failures = match f.effects.instances.as_slice() {
         _ if f.effects.tail.is_some() => {
             return Err(unsupported("open effect rows have no model monad"));
         }
-        [] => None,
-        [e] if e.name == "Fail" && e.args.len() == 1 => Some(ty(&e.args[0]).map_err(internal)?),
+        effects
+            if effects
+                .iter()
+                .all(|e| e.name == "Fail" && e.args.len() == 1) =>
+        {
+            effects
+                .iter()
+                .map(|e| ty(&e.args[0]).map_err(internal))
+                .collect::<Result<Vec<_>, _>>()?
+        }
         _ => {
             return Err(unsupported(
-                "only pure and single Fail[E] functions have a model monad",
+                "only pure and Fail[E] functions have a model monad",
             ));
         }
     };
+    // A right-associated sum preserves the identity of every row instance,
+    // including different labels with the same error payload type.
+    let fail = failures.split_last().map(|(last, rest)| {
+        rest.iter().rev().fold(last.clone(), |tail, head| {
+            app(global(&["Sum"]), [head.clone(), tail])
+        })
+    });
     let fuel = match totality.get(&f.name) {
         Some(Totality::Total) => false,
         Some(Totality::Fuel) => true,
@@ -1287,6 +1369,30 @@ fn contract(
             name: fixed("m"),
             value: model.clone(),
         });
+    }
+    if failures.len() > 1 {
+        for index in 0..failures.len() {
+            let mut error = named("$error");
+            if index + 1 < failures.len() {
+                error = app(global(&["Sum", "inl"]), [error]);
+            }
+            for _ in 0..index {
+                error = app(global(&["Sum", "inr"]), [error]);
+            }
+            let error = ascribe(error, fail.clone().expect("nonempty failure row"));
+            call_args.push(Argument::Named {
+                name: fixed(&format!("$cap{index}")),
+                value: Term::Record {
+                    fields: vec![(
+                        fixed("raise"),
+                        inferred(
+                            vec![fixed("$error")],
+                            app(global(&["MonadExcept", "throw"]), [error]),
+                        ),
+                    )],
+                },
+            });
+        }
     }
     if fuel {
         call_args.push(Argument::Named {
@@ -2525,9 +2631,31 @@ impl Generator<'_> {
                         local.depth,
                     )?
                 } else if self.in_family(n) {
-                    return Err(format!(
-                        "a fuel companion cannot pass the recursive function '{n}' as a value"
-                    ));
+                    let f = &self.world.functions[n];
+                    if !effectful_function(f)
+                        || !f.generics.is_empty()
+                        || self.monad == global(&["Id"])
+                        || function_requirements(f).iter().any(|e| e.label.is_some())
+                    {
+                        return Err(format!(
+                            "a fuel companion cannot pass the recursive function '{n}' as a value unless it is effectful, non-generic, unlabeled and in a monadic context"
+                        ));
+                    }
+                    // Its callback type already returns m A. Capture the
+                    // predecessor fuel while preserving that monadic type.
+                    let arguments = vec![Argument::Named {
+                        name: fixed(FUEL),
+                        value: named(FUEL),
+                    }];
+                    let value = Term::App {
+                        function: Box::new(Term::Ref(fuel_name(n)?)),
+                        arguments,
+                    };
+                    if f.params.is_empty() {
+                        lambda(vec![explicit(fixed("$unit"), global(&["Unit"]))], value)
+                    } else {
+                        value
+                    }
                 } else if self
                     .world
                     .functions

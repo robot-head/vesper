@@ -149,6 +149,18 @@ fn flatten(
             Ok(())
         }
         Type::Named(n, _) if n == "Unit" || n == "Never" => Ok(()),
+        // A region handle is the heap word index of its payload.
+        Type::Named(n, _) if n == crate::regions::BOX_TYPE => {
+            out.push((path.clone(), Kind::U64));
+            Ok(())
+        }
+        Type::Named(n, _) if n == crate::regions::WATERMARK_TYPE => {
+            Err(VerifiedError::unsupported(
+                Unsupported::Effect,
+                function,
+                "region watermarks (checkpoint, rewind, commit)",
+            ))
+        }
         Type::Named(n, _) if n == "f32" => Err(VerifiedError::unsupported(
             Unsupported::Float,
             function,
@@ -242,6 +254,25 @@ fn flatten(
     }
 }
 
+/// The program heap's global words (heap word indices): words in use beyond
+/// the globals, the innermost open region's header, and the pin (see
+/// `region_block`).
+const G_TOP: u32 = 0;
+const G_INNER: u32 = 1;
+const G_PIN: u32 = 2;
+const GLOBALS: u32 = 3;
+/// Region header words: charged bytes, allocations, the previous innermost
+/// header, the heap words in use when it opened, and the capacity in bytes.
+const H_USED: u32 = 0;
+const H_ALLOCS: u32 = 1;
+const H_PREV: u32 = 2;
+const H_START: u32 = 3;
+const H_CAP: u32 = 4;
+const HEADER: u32 = 5;
+/// Largest payload in words (heap offsets stay inside one AArch64 scaled
+/// 12-bit immediate).
+const MAX_PAYLOAD_WORDS: u32 = 4000;
+
 /// One planned function.
 pub struct Planned {
     pub name: String,
@@ -263,6 +294,11 @@ pub struct Planned {
     /// Words of the incoming result area: `1 + max(result, payloads)` with
     /// the status protocol, the result words otherwise. Parameters follow.
     pub ret_words: u32,
+    /// Region capabilities the function receives, one pointer word each
+    /// after its parameters: the labels of its row's `r: Region` entries,
+    /// and for a region block's body also the enclosing capabilities and the
+    /// block's own label (innermost last).
+    pub caps: Vec<String>,
 }
 impl Planned {
     /// Incoming-area index of result word 0.
@@ -276,8 +312,9 @@ pub struct Plan {
     pub functions: Vec<Planned>,
     pub index: BTreeMap<String, usize>,
     pub fails: Fails,
-    /// Resolved handlers, by the span of their `handle` expression.
-    pub handlers: BTreeMap<(usize, usize), Handler>,
+    /// Resolved handlers, by the function instance and the span of their
+    /// `handle` expression.
+    pub handlers: BTreeMap<(String, usize, usize), Handler>,
 }
 
 fn effect_name(e: &crate::ast::Effect) -> String {
@@ -299,7 +336,7 @@ fn effect_name(e: &crate::ast::Effect) -> String {
     )
 }
 
-fn effects_supported(f: &FunctionIr) -> Result<(), VerifiedError> {
+fn effects_supported(world: &World, f: &FunctionIr) -> Result<(), VerifiedError> {
     if f.effects.tail.is_some() {
         return Err(VerifiedError::unsupported(
             Unsupported::Effect,
@@ -308,6 +345,11 @@ fn effects_supported(f: &FunctionIr) -> Result<(), VerifiedError> {
         ));
     }
     for e in &f.effects.instances {
+        // Region capabilities are passed as pointer words; a handler body's
+        // row may name an enclosing block's capability by its internal label.
+        if e.name == crate::regions::REGION_EFFECT && crate::regions::active(world) {
+            continue;
+        }
         // `$`-labels are the checker's own function-capability names, not
         // source labels.
         let labeled = e.label.as_ref().is_some_and(|l| !l.starts_with('$'));
@@ -323,6 +365,50 @@ fn effects_supported(f: &FunctionIr) -> Result<(), VerifiedError> {
         }
     }
     Ok(())
+}
+
+/// A labelled entry `r: Region` of the built-in region effect.
+fn is_region_capability(world: &World, e: &crate::ast::Effect) -> bool {
+    e.name == crate::regions::REGION_EFFECT
+        && e.label.as_deref().is_some_and(|l| !l.starts_with('$'))
+        && e.args.is_empty()
+        && crate::regions::active(world)
+}
+
+/// The region capability labels of a function's own row, in row order.
+fn row_caps(world: &World, f: &FunctionIr) -> Vec<String> {
+    f.effects
+        .instances
+        .iter()
+        .filter(|e| is_region_capability(world, e))
+        .filter_map(|e| e.label.clone())
+        .collect()
+}
+
+/// The region block an instruction opens: its label, capacity in bytes and
+/// the name of its body's nested function in the instance `parent`.
+pub(super) fn region_block(
+    world: &World,
+    op: &Op,
+    parent: &str,
+) -> Option<(String, usize, String)> {
+    let Op::Handle { expr, .. } = op else {
+        return None;
+    };
+    let crate::ast::ExprKind::Handle {
+        effect, body, ret, ..
+    } = &expr.kind
+    else {
+        return None;
+    };
+    if !crate::regions::active(world) {
+        return None;
+    }
+    let capacity = crate::regions::block_capacity(effect, ret)?;
+    let label = effect.label.clone()?;
+    let body =
+        super::mono::nested_instance(parent, &crate::ir::nested_name("handler_body", &body.span));
+    Some((label, capacity, body))
 }
 
 pub fn plan(
@@ -357,6 +443,7 @@ pub fn plan_with(
         writeback: Vec<Vec<(u32, u32)>>,
         result: Shape,
         erased: Vec<bool>,
+        caps: Vec<String>,
         local: fail::Local,
         /// Callees whose failures pass through unchanged.
         calls: Vec<String>,
@@ -366,43 +453,57 @@ pub fn plan_with(
     let mut found: Vec<Found> = vec![];
     let mut handlers = BTreeMap::new();
     let mut handled: BTreeMap<String, Type> = BTreeMap::new();
-    let mut queue: VecDeque<String> = entries.iter().cloned().collect();
+    let mut queue: VecDeque<(String, Option<Vec<String>>)> =
+        entries.iter().map(|e| (e.clone(), None)).collect();
     let mut seen: BTreeSet<String> = entries.iter().cloned().collect();
-    while let Some(name) = queue.pop_front() {
+    while let Some((name, inherited)) = queue.pop_front() {
         if found.len() >= max_functions {
             return Err(VerifiedError::Limit(format!(
                 "more than {max_functions} reachable functions"
             )));
         }
         let mut soft = vec![];
-        let mut one = || -> Result<Found, VerifiedError> {
+        let one = || -> Result<Found, VerifiedError> {
             let nested = name.starts_with('$');
-            if !nested {
-                let decl = world.functions.get(&name).ok_or_else(|| {
-                    VerifiedError::unsupported(
-                        Unsupported::ExternalFunction,
-                        &name,
-                        "no such function in the checked world",
-                    )
-                })?;
-                if !decl.generics.is_empty() {
-                    return Err(VerifiedError::unsupported(
-                        Unsupported::Generic,
-                        &name,
-                        "generic functions (no monomorphization in this backend)",
-                    ));
-                }
-            }
             let f = program.functions.get(&name).ok_or_else(|| {
-                VerifiedError::unsupported(
-                    Unsupported::ExternalFunction,
-                    &name,
-                    "function without a body",
-                )
+                let detail = if world.functions.contains_key(&name) {
+                    "function without a body"
+                } else {
+                    "no such function in the checked world"
+                };
+                VerifiedError::unsupported(Unsupported::ExternalFunction, &name, detail)
             })?;
-            match effects_supported(f) {
+            // Monomorphization substituted every type parameter of a reachable
+            // instance; one that remains has no concrete instance.
+            // (The unused continuation of a `raise` clause is erased below.)
+            if f.params
+                .iter()
+                .filter(|p| {
+                    !(name.starts_with("$handler_clause") && matches!(p.ty, Type::Function { .. }))
+                })
+                .map(|p| &p.ty)
+                .chain([&f.result])
+                .any(|t| super::mono::mentions_generic(world, t))
+            {
+                return Err(VerifiedError::unsupported(
+                    Unsupported::Generic,
+                    &name,
+                    "a type parameter without a concrete instance",
+                ));
+            }
+            match effects_supported(world, f) {
                 Err(e) if tolerant => soft.push(e),
                 r => r?,
+            }
+            let caps = inherited.unwrap_or_else(|| row_caps(world, f));
+            // Nothing supplies the entry's capabilities: the process starts with
+            // no open region.
+            if !tolerant && name == entry && !caps.is_empty() {
+                return Err(VerifiedError::unsupported(
+                    Unsupported::Effect,
+                    &name,
+                    format!("region capability on the entry ({})", caps.join(", ")),
+                ));
             }
             // The unused continuation of a `raise` clause has no words; any
             // other function-typed parameter is a function value.
@@ -452,19 +553,35 @@ pub fn plan_with(
             let result = shape(world, &f.result, &name)?;
             let mut calls = vec![];
             let mut handles = vec![];
-            let mut enqueue = |callee: &str, queue: &mut VecDeque<String>| {
+            let mut enqueue = |callee: &str, caps: Option<Vec<String>>, queue: &mut VecDeque<_>| {
                 if seen.insert(callee.to_owned()) {
-                    queue.push_back(callee.to_owned());
+                    queue.push_back((callee.to_owned(), caps));
                 }
             };
             for b in &f.blocks {
                 for i in &b.instructions {
+                    if let Some((block_label, _, body)) = region_block(world, &i.op, &name) {
+                        // The body sees the enclosing capabilities and its own
+                        // (which shadows an outer one of the same label). Its
+                        // failures pass through the block.
+                        let mut inner: Vec<String> = caps
+                            .iter()
+                            .filter(|c| **c != block_label)
+                            .cloned()
+                            .collect();
+                        inner.push(block_label);
+                        enqueue(&body, Some(inner), &mut queue);
+                        calls.push(body);
+                        continue;
+                    }
                     match &i.op {
-                        Op::Call { callee, .. }
-                            if callee != fail::RAISE
-                                && crate::numeric::wrapping_intrinsic(callee).is_none() =>
+                        Op::Call {
+                            callee, capability, ..
+                        } if capability.is_none()
+                            && callee != fail::RAISE
+                            && crate::numeric::wrapping_intrinsic(callee).is_none() =>
                         {
-                            enqueue(callee, &mut queue);
+                            enqueue(callee, None, &mut queue);
                             calls.push(callee.clone());
                         }
                         Op::Handle {
@@ -472,12 +589,12 @@ pub fn plan_with(
                         } => {
                             let h = fail::handler(program, &name, *state_value, expr)?;
                             for g in [&h.body, &h.ret, &h.raise] {
-                                enqueue(g, &mut queue);
+                                enqueue(g, None, &mut queue);
                             }
                             let k = h.error.to_string();
                             handled.insert(k.clone(), h.error.clone());
                             handles.push((k, h.body.clone(), [h.ret.clone(), h.raise.clone()]));
-                            handlers.insert((expr.span.start, expr.span.end), h);
+                            handlers.insert((name.clone(), expr.span.start, expr.span.end), h);
                         }
                         _ => {}
                     }
@@ -489,6 +606,7 @@ pub fn plan_with(
                 writeback,
                 result,
                 erased,
+                caps,
                 local: fail::local(f)?,
                 calls,
                 handles,
@@ -600,6 +718,7 @@ pub fn plan_with(
             raises,
             status,
             ret_words,
+            caps: f.caps,
         });
         // Entry label and body label (after the prologue).
         label += 2;
@@ -660,6 +779,11 @@ struct FnLower<'a> {
     max_rows: usize,
     /// Raise stubs of caught implicit failures: (label, kind).
     stubs: Vec<(Label, TrapKind)>,
+    /// The header slot of each region capability in scope.
+    caps: BTreeMap<String, Slot>,
+    /// Region blocks of this function whose body is being called: a
+    /// failure passed on to the caller closes them first.
+    open_regions: Vec<Slot>,
     /// Coverage mode: record every refusal here and keep lowering, instead
     /// of returning the first one (see `coverage.rs`).
     refusals: Option<&'a mut Vec<VerifiedError>>,
@@ -1298,8 +1422,8 @@ impl FnLower<'_> {
                 types,
                 capability,
             } => {
-                if capability.is_some() {
-                    return Err(self.err(Unsupported::Effect, format!("effect operation {callee}")));
+                if let Some(label) = capability {
+                    return self.region_operation(i, label, callee, args);
                 }
                 if !types.is_empty() {
                     return Err(self.err(Unsupported::Generic, format!("call {callee}[...]")));
@@ -1343,7 +1467,13 @@ impl FnLower<'_> {
                 Err(self.err(Unsupported::FunctionValue, "closures and indirect calls"))
             }
             Op::Try(v) => self.try_(*v, i),
-            Op::Handle { expr, aliases, .. } => self.handle(expr, aliases, i),
+            Op::Handle { expr, aliases, .. } => {
+                if let Some((label, capacity, body)) = region_block(self.world, &i.op, &self.f.name)
+                {
+                    return self.region_block(i, &label, capacity, &body, aliases);
+                }
+                self.handle(expr, aliases, i)
+            }
             #[allow(unreachable_patterns)]
             _ => Err(self.err(
                 Unsupported::Operation,
@@ -1435,6 +1565,9 @@ impl FnLower<'_> {
     /// callee may raise.
     fn propagate(&mut self, status: Slot, codes: &BTreeSet<u64>) -> Result<(), VerifiedError> {
         if self.me.status {
+            for header in self.open_regions.clone().into_iter().rev() {
+                self.region_close(header)?;
+            }
             let tmp = self.alloc(1)?;
             self.push(Lir::StoreIn {
                 index: 0,
@@ -1501,6 +1634,21 @@ impl FnLower<'_> {
         dst: Slot,
         catch: Option<(u64, Label)>,
     ) -> Result<(), VerifiedError> {
+        self.call_opening(n, args, dst, catch, None)
+    }
+
+    /// [`Self::call`], where `opening = (label, header)` is a region block
+    /// being opened: its capability resolves to `header`.
+    fn call_opening(
+        &mut self,
+        n: usize,
+        args: &[(Slot, u32, Option<Slot>)],
+        dst: Slot,
+        catch: Option<(u64, Label)>,
+        opening: Option<(&str, Slot)>,
+    ) -> Result<(), VerifiedError> {
+        let caps = self.plan.functions[n].caps.clone();
+        let cap_slots = self.cap_arguments(&caps, opening)?;
         let target = &self.plan.functions[n];
         let (label, ret, base, nres, ranges, status, raises) = (
             target.label,
@@ -1511,7 +1659,7 @@ impl FnLower<'_> {
             target.status,
             target.raises.clone(),
         );
-        let area = ret + args.iter().map(|(_, w, _)| w).sum::<u32>();
+        let area = ret + args.iter().map(|(_, w, _)| w).sum::<u32>() + cap_slots.len() as u32;
         self.out_words = self.out_words.max(area);
         let mut index = ret;
         let mut writebacks = vec![];
@@ -1526,6 +1674,10 @@ impl FnLower<'_> {
                 writebacks.push((*slot, index, ranges));
             }
             index += words;
+        }
+        for src in cap_slots {
+            self.push(Lir::StoreOut { index, src })?;
+            index += 1;
         }
         self.push(Lir::Call { callee: label })?;
         // Copy back only the words the callee may write: two `inout`
@@ -1678,7 +1830,7 @@ impl FnLower<'_> {
         let h = self
             .plan
             .handlers
-            .get(&(expr.span.start, expr.span.end))
+            .get(&(self.f.name.clone(), expr.span.start, expr.span.end))
             .cloned()
             .ok_or_else(|| VerifiedError::Invalid("unplanned handler".into()))?;
         let index = |name: &str| {
@@ -1716,6 +1868,355 @@ impl FnLower<'_> {
     }
 
     // --- end Milestone 7 ---
+
+    /// Pointer words of the region capabilities `caps` for a call, from this
+    /// function's capabilities (`own` names a header slot that `label`
+    /// resolves to first: the block being opened).
+    fn cap_arguments(
+        &self,
+        caps: &[String],
+        own: Option<(&str, Slot)>,
+    ) -> Result<Vec<Slot>, VerifiedError> {
+        caps.iter()
+            .map(|c| match own {
+                Some((label, slot)) if label == c => Ok(slot),
+                _ => self.caps.get(c).copied().ok_or_else(|| {
+                    self.err(
+                        Unsupported::Effect,
+                        format!("region capability '{c}' is not in scope"),
+                    )
+                }),
+            })
+            .collect()
+    }
+
+    fn word(&mut self, word: u64) -> Result<Slot, VerifiedError> {
+        let dst = self.alloc(1)?;
+        self.push(Lir::Const { dst, word })?;
+        Ok(dst)
+    }
+    fn load_ptr(&mut self, ptr: Slot, offset: u32) -> Result<Slot, VerifiedError> {
+        let dst = self.alloc(1)?;
+        self.push(Lir::LoadPtr { dst, ptr, offset })?;
+        Ok(dst)
+    }
+    fn add_u64(&mut self, a: Slot, b: Slot) -> Result<Slot, VerifiedError> {
+        let dst = self.alloc(1)?;
+        self.push(Lir::Arith {
+            op: ArithOp::Add,
+            kind: Kind::U64,
+            dst,
+            a,
+            b,
+        })?;
+        Ok(dst)
+    }
+    /// Abort with [`TrapKind::Region`] unless `a <= b` (unsigned).
+    fn region_bound(&mut self, a: Slot, b: Slot) -> Result<(), VerifiedError> {
+        let ok = self.alloc(1)?;
+        self.push(Lir::Compare {
+            cond: Cond::Le,
+            kind: Kind::U64,
+            dst: ok,
+            a,
+            b,
+        })?;
+        self.push(Lir::BranchZero {
+            cond: ok,
+            target: TrapKind::Region.label(),
+        })
+    }
+    /// Bump-allocate `words` heap words: `(globals pointer, first word,
+    /// words in use before, words in use after)`.
+    fn heap_alloc(&mut self, words: u32) -> Result<(Slot, Slot, Slot, Slot), VerifiedError> {
+        let globals = self.word(0)?;
+        let top = self.load_ptr(globals, G_TOP)?;
+        let base = self.word(u64::from(GLOBALS))?;
+        let first = self.add_u64(top, base)?;
+        let n = self.word(u64::from(words))?;
+        let after = self.add_u64(top, n)?;
+        let limit = self.word(super::HEAP_WORDS - u64::from(GLOBALS))?;
+        self.region_bound(after, limit)?;
+        self.push(Lir::StorePtr {
+            ptr: globals,
+            offset: G_TOP,
+            src: after,
+        })?;
+        Ok((globals, first, top, after))
+    }
+
+    /// `region label(capacity) { body }`: open a header, run the body's
+    /// nested function with the captured places and capabilities, close.
+    fn region_block(
+        &mut self,
+        i: &Instruction,
+        label: &str,
+        capacity: usize,
+        body: &str,
+        aliases: &BTreeMap<String, String>,
+    ) -> Result<(), VerifiedError> {
+        let n = *self
+            .plan
+            .index
+            .get(body)
+            .ok_or_else(|| VerifiedError::Invalid(format!("unplanned region body {body}")))?;
+        let f = self
+            .program
+            .functions
+            .get(body)
+            .ok_or_else(|| VerifiedError::Invalid(format!("missing region body {body}")))?;
+        // Captured places are copied in (and `inout` ones back); a body that
+        // assigns a place captured by value would lose the write.
+        let by_value: BTreeSet<&str> = f
+            .params
+            .iter()
+            .filter(|p| p.pass != Pass::Inout)
+            .map(|p| p.name.as_str())
+            .collect();
+        for b in &f.blocks {
+            for ins in &b.instructions {
+                let written: Vec<String> = match &ins.op {
+                    Op::Write { place, .. } => place
+                        .split('.')
+                        .next()
+                        .map(str::to_owned)
+                        .into_iter()
+                        .collect(),
+                    Op::Call { args, .. } => args
+                        .iter()
+                        .filter(|a| a.pass == Pass::Inout)
+                        .filter_map(|a| a.place.as_ref().map(|p| p.root.clone()))
+                        .collect(),
+                    _ => vec![],
+                };
+                if let Some(root) = written.iter().find(|r| by_value.contains(r.as_str())) {
+                    return Err(self.err(
+                        Unsupported::Effect,
+                        format!("region block assigns the captured place '{root}'"),
+                    ));
+                }
+            }
+        }
+        // Open: a header in the heap.
+        let (globals, header, top, _) = self.heap_alloc(HEADER)?;
+        let zero = self.word(0)?;
+        let cap = self.word(capacity as u64)?;
+        let prev = self.load_ptr(globals, G_INNER)?;
+        for (offset, src) in [
+            (H_USED, zero),
+            (H_ALLOCS, zero),
+            (H_PREV, prev),
+            (H_START, top),
+            (H_CAP, cap),
+        ] {
+            self.push(Lir::StorePtr {
+                ptr: header,
+                offset,
+                src,
+            })?;
+        }
+        self.push(Lir::StorePtr {
+            ptr: globals,
+            offset: G_INNER,
+            src: header,
+        })?;
+        // The body, called like a function with the captured places and the
+        // capabilities in scope. A failure it passes on closes the block
+        // (see `propagate`).
+        let args = self.nested_args(n, aliases, None)?;
+        let (dst, dshape) = self.value_of(i.dest, &i.ty)?;
+        if dshape.len() != self.plan.functions[n].result.len() {
+            return Err(VerifiedError::Invalid(format!("result shape of {body}")));
+        }
+        self.open_regions.push(header);
+        self.call_opening(n, &args, dst, None, Some((label, header)))?;
+        self.open_regions.pop();
+        self.region_close(header)
+    }
+
+    /// Close the region block whose header is in slot `header`.
+    fn region_close(&mut self, header: Slot) -> Result<(), VerifiedError> {
+        // Close: the enclosing block is innermost again, and the heap words
+        // above the block's start are free unless an outer region allocated
+        // while it was open (`pin`).
+        let globals = self.word(0)?;
+        let prev = self.load_ptr(header, H_PREV)?;
+        self.push(Lir::StorePtr {
+            ptr: globals,
+            offset: G_INNER,
+            src: prev,
+        })?;
+        let start = self.load_ptr(header, H_START)?;
+        let pin = self.load_ptr(globals, G_PIN)?;
+        let keep = self.alloc(1)?;
+        self.push(Lir::Compare {
+            cond: Cond::Gt,
+            kind: Kind::U64,
+            dst: keep,
+            a: pin,
+            b: start,
+        })?;
+        let use_start = *self.next_label;
+        let done = *self.next_label + 1;
+        *self.next_label += 2;
+        self.push(Lir::BranchZero {
+            cond: keep,
+            target: use_start,
+        })?;
+        self.push(Lir::StorePtr {
+            ptr: globals,
+            offset: G_TOP,
+            src: pin,
+        })?;
+        self.push(Lir::Jump(done))?;
+        self.push(Lir::Label(use_start))?;
+        self.push(Lir::StorePtr {
+            ptr: globals,
+            offset: G_TOP,
+            src: start,
+        })?;
+        self.push(Lir::Label(done))
+    }
+
+    /// `label.op(args)` on a region capability.
+    fn region_operation(
+        &mut self,
+        i: &Instruction,
+        label: &str,
+        callee: &str,
+        args: &[crate::ir::Argument],
+    ) -> Result<(), VerifiedError> {
+        let op = callee
+            .strip_prefix(crate::regions::REGION_EFFECT)
+            .and_then(|o| o.strip_prefix("::"))
+            .filter(|_| crate::regions::active(self.world))
+            .ok_or_else(|| self.err(Unsupported::Effect, format!("effect operation {callee}")))?;
+        let header = *self.caps.get(label).ok_or_else(|| {
+            self.err(
+                Unsupported::Effect,
+                format!("region capability '{label}' is not in scope"),
+            )
+        })?;
+        let arg = |n: usize| {
+            args.get(n)
+                .map(|a| a.value)
+                .ok_or_else(|| VerifiedError::Invalid(format!("{callee} lacks an argument")))
+        };
+        match op {
+            "box" => {
+                let (src, shape) = self.value(arg(0)?)?;
+                let ty = self
+                    .types
+                    .get(&arg(0)?)
+                    .cloned()
+                    .ok_or_else(|| VerifiedError::Invalid("untyped region payload".into()))?;
+                let size = crate::layout::Layout::of(self.world, &ty)
+                    .map_err(|e| self.err(Unsupported::Type, format!("region payload {ty}: {e}")))?
+                    .size;
+                let bytes = crate::regions::store::slot_bytes(size as usize) as u64;
+                if shape.len() > MAX_PAYLOAD_WORDS {
+                    return Err(VerifiedError::Limit(format!(
+                        "region payload of {} words in '{}'",
+                        shape.len(),
+                        self.f.name
+                    )));
+                }
+                // `vesper.region.accounting/1`: the bytes, then the count.
+                let used = self.load_ptr(header, H_USED)?;
+                let b = self.word(bytes)?;
+                let used2 = self.add_u64(used, b)?;
+                let cap = self.load_ptr(header, H_CAP)?;
+                self.region_bound(used2, cap)?;
+                let allocs = self.load_ptr(header, H_ALLOCS)?;
+                let one = self.word(1)?;
+                let allocs2 = self.add_u64(allocs, one)?;
+                let max = self.word(crate::regions::store::MAX_ALLOCATIONS as u64)?;
+                self.region_bound(allocs2, max)?;
+                self.push(Lir::StorePtr {
+                    ptr: header,
+                    offset: H_USED,
+                    src: used2,
+                })?;
+                self.push(Lir::StorePtr {
+                    ptr: header,
+                    offset: H_ALLOCS,
+                    src: allocs2,
+                })?;
+                // A zero-word payload still takes one word, so that distinct
+                // boxes get distinct handles.
+                let (globals, first, _, after) = self.heap_alloc(shape.len().max(1))?;
+                // An allocation in a region that is not the innermost pins
+                // the heap words below it until the outer region closes.
+                let inner = self.load_ptr(globals, G_INNER)?;
+                let outer = self.alloc(1)?;
+                self.push(Lir::Compare {
+                    cond: Cond::Ne,
+                    kind: Kind::U64,
+                    dst: outer,
+                    a: inner,
+                    b: header,
+                })?;
+                let skip = *self.next_label;
+                *self.next_label += 1;
+                self.push(Lir::BranchZero {
+                    cond: outer,
+                    target: skip,
+                })?;
+                self.push(Lir::StorePtr {
+                    ptr: globals,
+                    offset: G_PIN,
+                    src: after,
+                })?;
+                self.push(Lir::Label(skip))?;
+                for w in 0..shape.len() {
+                    self.push(Lir::StorePtr {
+                        ptr: first,
+                        offset: w,
+                        src: src + w,
+                    })?;
+                }
+                let (dst, _) = self.value_of(i.dest, &i.ty)?;
+                self.push(Lir::Move { dst, src: first })
+            }
+            "get" => {
+                let (ptr, _) = self.value(arg(0)?)?;
+                let (dst, shape) = self.value_of(i.dest, &i.ty)?;
+                for w in 0..shape.len() {
+                    self.push(Lir::LoadPtr {
+                        dst: dst + w,
+                        ptr,
+                        offset: w,
+                    })?;
+                }
+                Ok(())
+            }
+            "set" => {
+                let (ptr, _) = self.value(arg(0)?)?;
+                let (src, shape) = self.value(arg(1)?)?;
+                self.value_of(i.dest, &Type::unit())?;
+                for w in 0..shape.len() {
+                    self.push(Lir::StorePtr {
+                        ptr,
+                        offset: w,
+                        src: src + w,
+                    })?;
+                }
+                Ok(())
+            }
+            "used" => {
+                let (dst, _) = self.value_of(i.dest, &i.ty)?;
+                self.push(Lir::LoadPtr {
+                    dst,
+                    ptr: header,
+                    offset: H_USED,
+                })
+            }
+            other => Err(self.err(
+                Unsupported::Effect,
+                format!("region operation '{other}' (only box, get, set and used)"),
+            )),
+        }
+    }
 
     /// `base[index]` on a tuple whose elements all have the result's shape:
     /// a first-match chain of word tests on the index (existing `Const`,
@@ -1880,6 +2381,12 @@ impl FnLower<'_> {
                 }
             };
             index += words;
+        }
+        for label in self.me.caps.clone() {
+            let slot = self.alloc(1)?;
+            self.push(Lir::LoadIn { dst: slot, index })?;
+            self.caps.insert(label, slot);
+            index += 1;
         }
         for block in &self.f.blocks {
             if let Terminator::Match { value, arms } = &block.terminator {
@@ -2089,6 +2596,14 @@ fn relocate(row: &mut Lir, out: u32) {
             *a += out;
         }
         Lir::StoreOut { src, .. } | Lir::StoreIn { src, .. } => *src += out,
+        Lir::LoadPtr { dst, ptr, .. } => {
+            *dst += out;
+            *ptr += out;
+        }
+        Lir::StorePtr { ptr, src, .. } => {
+            *ptr += out;
+            *src += out;
+        }
         Lir::BranchZero { cond, .. } => *cond += out,
         Lir::Call { .. }
         | Lir::Label(_)
@@ -2182,6 +2697,8 @@ fn lower_function(
         max_rows,
         stubs: vec![],
         refusals,
+        caps: BTreeMap::new(),
+        open_regions: vec![],
     }
     .function()
 }

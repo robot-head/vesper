@@ -105,6 +105,8 @@ theorem runBlockX_toRes (code : List M) (m : Mach) :
 
 def isSt : M → Bool
   | .st _ _ => true
+  -- A heap store (milestone 8) writes memory too.
+  | .sth _ => true
   | _ => false
 
 /-- Memory is written only by a trailing run of stores. -/
@@ -117,6 +119,7 @@ theorem step_memory (i : M) (m next : Mach) (h : Mach.step i m = .ok next)
   cases i
   all_goals simp only [isSt] at hst
   case st => contradiction
+  case sth => contradiction
   all_goals simp only [Mach.step] at h
   all_goals repeat' (first | contradiction | (injection h with h; subst h; rfl) | split at h)
 
@@ -129,8 +132,7 @@ theorem stores_never_abort (code : List M) (m : Mach) (h : code.all isSt = true)
     obtain ⟨head, tail⟩ := h
     cases i <;> simp only [isSt] at head
     all_goals try contradiction
-    simp only [runBlockX, Mach.step]
-    exact ih _ tail
+    all_goals (simp only [runBlockX, Mach.step]; exact ih _ tail)
 
 theorem abort_preserves_memory (code : List M) (m : Mach) (h : storesLast code = true)
     (f : Failure) (m' : Mach) (abort : runBlockX code m = .abort f m') : m'.mem = m.mem := by
@@ -141,8 +143,8 @@ theorem abort_preserves_memory (code : List M) (m : Mach) (h : storesLast code =
     · have tail : rest.all isSt = true := by simpa [storesLast, hst] using h
       cases i <;> simp only [isSt] at hst
       all_goals try contradiction
-      simp only [runBlockX, Mach.step] at abort
-      exact absurd abort (stores_never_abort rest _ tail f m')
+      all_goals (simp only [runBlockX, Mach.step] at abort
+                 exact absurd abort (stores_never_abort rest _ tail f m'))
     · have tail : storesLast rest = true := by simpa [storesLast, hst] using h
       have hst' : isSt i = false := by simpa using hst
       cases i

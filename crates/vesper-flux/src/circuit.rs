@@ -10,19 +10,27 @@ pub use checkpoint::durable::{
 #[path = "cluster.rs"]
 mod cluster;
 pub use cluster::{
-    CheckpointMode, CheckpointPhase, ClusterConfig, ClusterRun, CommittedCheckpoint, EpochSource,
-    Fault, FaultKind, GcReport, LiveMigration, LiveRescale, Recovery, Rescale, run_cluster,
-    run_cluster_with,
+    BINS, CheckpointMode, CheckpointPhase, ClusterConfig, ClusterRun, CommittedCheckpoint,
+    EpochSource, Fault, FaultKind, GcReport, LiveMigration, LiveRescale, Recovery, Rescale,
+    RescaleRequest, run_cluster, run_cluster_with,
 };
+#[path = "kafka_client.rs"]
+mod client;
 #[path = "kafka.rs"]
 mod kafka;
 pub use kafka::{
-    KafkaBinding, KafkaConfig, KafkaConnection, KafkaPosition, KafkaSink, KafkaSinkConfig,
-    KafkaSinkStats, KafkaSource, KafkaSourceLimits, KafkaSourceStats, cdc_value, kafka_record,
-    read_kafka_output,
+    GroupOffsetSource, GroupOffsets, HeldProduce, KafkaBinding, KafkaCompression, KafkaConfig,
+    KafkaConnection, KafkaPosition, KafkaProducer, KafkaRecord, KafkaSasl, KafkaSecurity,
+    KafkaSink, KafkaSinkConfig, KafkaSinkStats, KafkaSource, KafkaSourceLimits, KafkaSourceStats,
+    KafkaTls, PublishFault, SaslMechanism, cdc_value, kafka_record, read_kafka_output,
 };
+#[path = "kafka_group.rs"]
+mod kafka_group;
+pub use kafka_group::{GroupPoll, KafkaGroupConfig, KafkaGroupSource};
 #[path = "log.rs"]
 mod log;
+#[path = "kafka_wire.rs"]
+mod wire;
 pub use log::{InputLog, LogLimits, LogRecovery};
 #[path = "sink.rs"]
 mod sink;

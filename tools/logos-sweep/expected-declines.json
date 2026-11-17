@@ -1,0 +1,10 @@
+[
+ {
+  "declaration": "Vesper.VerifiedCodegen.A64.decode_encode",
+  "reason": "Same fixed Logos evaluation depth (MAX_DEPTH 200000 in logicaffeine_kernel src/dag/sem) as the RV64 entry, reached while reducing the AArch64 field-extraction arithmetic in lean/CodegenA64Encoding.lean; Lean's kernel accepts it. It and its users are checked by Lean's kernel only."
+ },
+ {
+  "declaration": "Vesper.VerifiedCodegen.Rv64.decode_encode",
+  "reason": "Logos at the pinned revision stops at its fixed evaluation depth (MAX_DEPTH 200000 in logicaffeine_kernel src/dag/sem) while reducing the RV64 field-extraction arithmetic; Lean's kernel accepts it. It and its users (encode_lt, emit_decodes, bytes_encode) are checked by Lean's kernel only."
+ }
+]

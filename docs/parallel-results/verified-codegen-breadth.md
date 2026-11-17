@@ -317,9 +317,7 @@ exercised by the tests.
 
 ### Remaining gaps
 
-- x86-64 has no encoding proof. Its variable-length encodings (REX,
-  ModRM, SIB, displacement widths) need a byte-level decoder rather than
-  32-bit fields.
+- x86-64 had no encoding proof; milestone 9 adds it.
 - As for RV64, this proves encoding, not semantics. That the emitted A64
   sequences implement `Mach.step` is still checked by running programs
   natively and under QEMU.
@@ -461,7 +459,242 @@ Claim #837 (lane V1 of the verified-compiler parallel plan). Refs #582,
   raises, tests and handlers are covered by differential tests, not by the
   Lean models, like calls before this milestone.
 
-## Milestone 9: front-end coverage driver and dynamic tuple indexing (#838)
+## Milestone 9: x86-64 encodings proved against the Intel SDM formats
+
+### What was built
+
+- `lean/CodegenX64Encoding.lean` (imports `VerifiedCodegen.lean`) models
+  the x86-64 encoder. Instructions have variable length, so an encoding is
+  a list of bytes and the specification is a prefix decoder instead of a
+  field reader over a 32-bit word.
+  - `Inst` is the subset `x86_64.rs` uses, named as in the Intel SDM:
+    - `MOV r64, [rsp + disp32]`/`[rbp + disp32]` and the stores, `MOV r64,
+      imm64`, `MOV r32, imm32`;
+    - `ADD`/`SUB`/`AND`/`CMP`/`TEST`/`MOV` (`MR` form, register operands),
+      `IMUL r64, r/m64`, the `F7` group (`MUL`, `NEG`, `DIV`, `IDIV`),
+      `CQO`, `XOR r32, r32`, the `81`/`83` immediate groups;
+    - `Jcc rel32`/`rel8`, `JMP rel32`/`rel8`, `CALL rel32`, `SETcc`,
+      `MOVZX r32, r8`;
+    - `MOVQ` between general and XMM registers, `ADDSD`/`SUBSD`/`MULSD`/
+      `DIVSD`, `UCOMISD`, `BTC r64, imm8`;
+    - `TEST [rsp + disp32], r32` (the Windows stack probe), `PUSH`, `POP`,
+      `RET`.
+  - `decode` reads the `66`/`F2` legacy prefixes, `REX.W`, one- and
+    two-byte (`0F`) opcodes, the ModRM byte (`mod`, `reg`, `r/m`), the SIB
+    byte `24` for `[rsp + disp32]`, and little-endian `disp32`, `imm8`,
+    `imm32`, `imm64`, `rel8` and `rel32` fields. It accepts only the operand
+    forms the emitter writes (`mod = 11` register operands, `mod = 10`
+    memory operands with base `rsp` or `rbp`) and returns `none` for the
+    others. `89` is the store with a memory operand and `MOV` with a
+    register operand, as in the manual.
+  - `encode` writes the bytes the way `x86_64.rs` does.
+- Theorems:
+  - `decode_encode`: every well-formed instruction (registers below 8,
+    every field in range) decodes back from its encoding, whatever bytes
+    follow it. This is the property a prefix code needs, so instruction
+    boundaries are recovered too.
+  - `decodeAll_encodeAll` extends it to instruction sequences: the
+    concatenated bytes decode back to exactly the sequence.
+  - `encode_bytes`: every encoded value is a byte.
+  - `emit` mirrors `x86_64::emit` for every `M` instruction, Linux and
+    Windows. That covers the `jo`/`jb` checks, the `idiv` guard for
+    `MIN / -1` and `rem` by `-1`, the NaN-aware `ucomisd`/`setcc`
+    sequences, and the prologue with one Windows probe per 4 KiB page and
+    the canonical Windows epilogue.
+  - `emit_ok` holds for frame indices and sizes that fit `disp32`/`imm32`.
+  - `emit_decodes` proves that the laid-out bytes of `emit m` are bytes
+    and decode to exactly its instruction sequence.
+  - Branches are laid out with the abort exits at offset 0 and every other
+    label at the end, and a `rel32` is the displacement modulo 2^32. The
+    Rust assembler refuses displacements outside `i32`.
+  - The abort exits are the labels below `firstFree`, which a test checks
+    against `FIRST_FREE_LABEL` (one past `TrapKind::ALL`). Review found that
+    the three encoding models had hard-coded `l < 4` although Rust reserves
+    only labels 0-2, so a branch to the first function label (3) was laid
+    out as an abort exit. All three models now use `firstFree`, and every
+    listing has a `jmp L3` sample, with label 3 bound after the instruction,
+    that catches the difference.
+- The listing check:
+  - The Lean file prints the bytes of the 60 shared samples (milestone 5's
+    59 plus `jmp L3`; the RV64 and AArch64 listings gain the same line).
+  - It adds the Windows forms of `enter 4`, `enter 1000` (one probe) and
+    `enter 2048` (four probes), and `leave` with an 8000-byte frame.
+  - `x86_64::encoding_listing()` (re-exported as
+    `verified_codegen::x64_encoding_listing`) runs the Rust emitter on the
+    same instructions. `tests/verified_codegen_lean.rs` requires the two
+    to be equal line for line, and checks hygiene and the axiom report.
+- `scripts/ci/check-lean-models.sh` compiles the new file.
+
+### Checks
+
+- With Lean 4.35.0 the file compiles with no warnings in about 8 s.
+- Every axiom report uses only `propext`, `Classical.choice` and
+  `Quot.sound`.
+- `cargo test --test verified_codegen_lean` passes with `VESPER_LEAN` set:
+  10 tests, including all three encoding listings and the `firstFree`
+  check.
+
+### Remaining gaps
+
+- This proves encoding, not semantics. That the emitted x86-64 sequences
+  implement `Mach.step` is still checked by running programs.
+- `x86_64::start`, `start_windows` and the external calls are outside
+  `emit` and not modelled. The Windows unwind data is checked by the COFF
+  tests, not by this proof.
+
+## Milestone 8: generic and region-polymorphic functions, region memory
+
+Claim #844 (lane V2 of the verified-compiler plan; references #582, #583).
+
+### What was built
+
+- Monomorphization (`src/verified_codegen/mono.rs`) runs before planning.
+  - Starting at the entry, it collects every reachable instance
+    `(function, type arguments)`. The arguments come from the checker's
+    `World::calls` plus explicit `f[T](..)` arguments.
+  - Each instance gets a copy of its Place IR with every type substituted,
+    and every direct callee renamed to the callee's instance.
+  - The nested functions of `handle` bodies are instantiated with their
+    parent's arguments.
+  - An instance is named `name<T=i64,...>`. A function with no type
+    arguments keeps its name, so non-generic programs compile to the same
+    bytes as before.
+  - A call whose type arguments are not all concrete is a typed
+    `Unsupported::Generic`.
+- Regions lower to plain pointer words.
+  - `RegionBox[r, T]` is one word: the heap word index of its payload.
+  - Every `r: Region` entry of a function's row becomes a hidden capability
+    parameter: one pointer word to the region's header, placed after the
+    ordinary parameters. A call passes the caller's capability with the
+    same label, which is how the checker resolves it.
+  - A `region r(N) { .. }` block is an `Op::Handle` of the built-in
+    `Region` effect. Lowering opens a header in the heap, calls the body's
+    nested function with the captured places, the enclosing capabilities
+    and the new one, then closes the header. The identity return clause is
+    skipped. A body that assigns a place it captured by value is refused.
+  - `r.box`, `r.get`, `r.set` and `r.used` follow
+    `vesper.region.accounting/1`. A payload charges
+    `slot_bytes(Layout::of(T).size)` bytes against the block's capacity,
+    and a block allows at most `MAX_ALLOCATIONS` allocations. Payload words
+    are the flattened words of `T`.
+  - `take`, `checkpoint`, `rewind` and `commit` are typed
+    `Unsupported::Effect` refusals.
+- The program heap.
+  - Linux ELF executables that use regions get a second, zero-fill RW
+    `PT_LOAD` of 512 MiB at `HEAP_BASE = 0x1000_0000`. The code moves to
+    file offset `0x100`, because two program headers do not fit below
+    `0x80`.
+  - Heap word 0 holds the words in use, word 1 the innermost open header
+    and word 2 a pin. Payloads and headers are bump-allocated.
+  - Closing a block resets the words in use to where the block started.
+    The exception is when an outer region allocated while the block was
+    open: then it resets to the pin instead, so it never frees live words.
+  - Exceeding a region's bound, its allocation count or the heap aborts
+    with the new `TrapKind::Region`, exit status 104 (`EXIT_REGION`).
+    `FIRST_FREE_LABEL` is now 4.
+  - macOS and Windows outputs refuse programs that use the heap with a
+    `VerifiedError::Target` error, because their containers do not map it.
+- Slot IR and machine.
+  - New rows `LoadPtr { dst, ptr, offset }` and
+    `StorePtr { ptr, offset, src }`.
+  - New instructions `LdH(off)` (`r0 := heap[r1 + off]`) and `StH(off)`
+    (`heap[r1 + off] := r0`), encoded for all three ISAs:
+    - x86-64: `mov r11d, HEAP_BASE` and `[r11 + rcx*8 + disp32]`;
+    - AArch64: `movz x16` / `add x16, x16, x1, lsl #3` / `ldr|str [x16, #imm]`;
+    - RV64: `addi`/`slli` builds `1 << 28` in `t0`, then `slli`/`add`, and
+      `ld|sd` (offsets of 2 KiB or more go through `t1`).
+- Lean.
+  - `VerifiedCodegen.lean`:
+    - `Loc.heap`, `Failure.region`, the rows `loadPtr`/`storePtr` and the
+      instructions `ldh`/`sth` with their semantics;
+    - the table rows, and `sim_loadPtr`/`sim_storePtr`, now cases of
+      `select_simulates`;
+    - a pointer is the machine word its slot holds, read as a word index.
+  - `CodegenRv64Encoding.lean`:
+    - models the new RV64 sequences, and `heap_ok` proves them well formed,
+      so `emit_decodes` covers them;
+    - 65 listing samples (with `trap region`, `ldh 3`, `sth 3`, `ldh 300`
+      and `sth 300`) match `riscv64::encoding_listing()`.
+  - `CodegenA64Encoding.lean` (milestone 6, merged from main):
+    - models the AArch64 `ldh`/`sth` sequences, and maps `trap region` to
+      label 3;
+    - `emit_ok` covers them (heap offsets below 4096, which
+      `MAX_PAYLOAD_WORDS` guarantees), so `emit_decodes` does too;
+    - its 67 listing samples match `aarch64::encoding_listing()`.
+  - `CodegenX64Encoding.lean` (milestone 9, merged from main): new
+    instructions `movR11` (`41 BB id`) and `heapLd`/`heapSt` (`49 8B|89 84
+    CB disp32`) round-trip through the specification decoder. `ldh`/`sth`
+    and `trap region` are in `emit`, `emit_ok` and the listing (69 lines).
+  - All three encoding models set `firstFree := 4` (`TrapKind::Region` is
+    label 3).
+  - `CodegenValidation.lean`:
+    - a heap load gives no range fact, and a heap store forgets every heap
+      fact;
+    - `transfer_sound` covers both rows.
+
+### With `Fail` effects (milestone 7)
+
+- A region block's body is planned like a call: its failures pass through
+  the block. A failure that leaves the block (the status protocol returning
+  to the caller) closes the block first, so the next allocation sees the
+  right innermost region and heap top. `region_fail.ves` raises out of a
+  region block under a `handle Fail[E]` and agrees with the evaluator.
+- Region exhaustion is not a `Fail` effect: it always exits with 104 and no
+  trap scope redirects it.
+- Handlers in generic functions are resolved per instance (the handler
+  table is keyed by instance and span).
+
+### Checks
+
+- `tests/verified_codegen.rs`, `generics_and_regions_agree_with_the_evaluator`:
+  - Fixtures, each compiled with and without the IR optimizer:
+    - `generics.ves`: generic structs and enums, generic recursion, and a
+      generic calling a generic;
+    - `regions.ves`: region-polymorphic functions with struct and generic
+      payloads, recursion through a region-polymorphic function, `used()`,
+      an inner block that allocates in the outer region, and a block per
+      call;
+    - `region_exhausted.ves`: the fourth 8-byte box in a 24-byte region;
+    - `syntax_pages.ves`: the self-hosted front end's radix pages,
+      `syntax_directory[T]`, `syntax_words`, `syntax_read_0` and
+      `syntax_write_0`.
+  - Results:
+    - All four agree with the evaluator on x86-64 (native), AArch64 and RV64
+      (QEMU 8.2.2).
+    - The output is deterministic.
+    - The macOS and Windows targets give the typed heap error.
+  - Cranelift is compared only on `generics.ves`. It refuses recursion
+    through region-polymorphic functions: "recursive effect specialization
+    exceeds 64 inline frames".
+- Lean 4.35.0:
+  - `VerifiedCodegen`, `CodegenRv64Encoding`, `CodegenComposition`,
+    `CodegenControlFlow`, `CodegenValidation` and `CodegenFlowValidation`
+    compile with no warnings;
+  - the axiom audits use only `propext`, `Classical.choice` and
+    `Quot.sound`;
+  - `cargo test --test verified_codegen_lean` passes with `VESPER_LEAN` set.
+
+### Remaining gaps
+
+- The heap exists only in the Linux ELF executables. Mach-O and COFF need a
+  zero-fill section and relocations.
+- The RV64 semantics proof (`CodegenRv64Semantics.lean`, #862) relates
+  only the stack frame. `ldh`/`sth` and the `loadptr`/`storeptr` rows are
+  outside `emit_sim`/`row_sim` (`DataM`, `FrameRow`) until `Corr` also
+  relates the heap at `HEAP_BASE`. That extension also needs the frame to be
+  disjoint from the heap, and heap indices to stay below `HEAP_WORDS`.
+  `CodegenFailScope.lean` counts `sth` as a store.
+- The Lean heap is unbounded. The physical bound (512 MiB) comes from the
+  allocator rows that lowering emits; it is enforced at run time and tested,
+  not proved.
+- Physical words are reclaimed only when a block closes and no outer region
+  allocated while it was open (the pin). Programs that allocate in an outer
+  region from inside an inner block keep those words until the program
+  exits.
+- Constant tuple indexing (`page.slots[0]`) and `handle SyntaxMemory` belong
+  to lane V3, which also takes `syntax_run`'s closure parameter.
+
+## Milestone 10: front-end coverage driver and dynamic tuple indexing (#838)
 
 ### What was built
 
@@ -494,16 +727,25 @@ Claim #837 (lane V1 of the verified-compiler parallel plan). Refs #582,
   `RuntimeError::IndexOutOfBounds` through Milestone 7's
   `raise_runtime_error` (an abort, exit 102, when nothing handles it).
 
-### Inventory after this milestone (on top of Milestone 7)
+### Inventory after this milestone (on top of Milestones 7 and 8)
+
+Coverage monomorphizes from every non-generic root (Milestone 8's
+`mono::monomorphize`) and plans the union.
 
 | Unit | Functions | Own refusals | Remaining constructs |
 | --- | --- | --- | --- |
-| stage1 | 159 | 2 | `region` blocks (Milestone 8) |
-| parser | 423 | 137 | `region` blocks, `eff [r: Region]`, generics (Milestone 8); `SyntaxMemory` and `syntax_run`'s closure argument |
-| checker | 295 | 3 | `region` blocks (Milestone 8) |
+| stage1 | 161 | 0 | none: the Stage 1 front end compiles |
+| parser | 436 | 122 | `SyntaxMemory` (118 functions and its two operations), `syntax_run`'s closure argument and its generic instance |
+| checker | 298 | 0 | none |
 
 No structural equality, string or float refusal occurs anywhere in the
 front end.
+
+Merging Milestone 8 also fixed main: `certificate.rs` (#854) matched `Lir`
+exhaustively and did not know `LoadPtr`/`StorePtr`. The Rust mirror now
+follows `CodegenValidation` (a heap load leaves no fact). The region
+fixtures join the certificate test's imprecise list, because the bump
+allocator's checked arithmetic reads heap words that carry no range fact.
 
 ### Checks
 

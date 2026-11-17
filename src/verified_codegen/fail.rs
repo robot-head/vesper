@@ -50,7 +50,8 @@ impl Fails {
         match kind {
             TrapKind::Overflow => self.by_type.get(OVERFLOW).map(|(c, _, _)| *c),
             TrapKind::DivisionByZero => self.by_type.get(RUNTIME).map(|(c, _, _)| *c),
-            TrapKind::Unreachable => None,
+            // Region exhaustion is not a `Fail` effect: no handler catches it.
+            TrapKind::Unreachable | TrapKind::Region => None,
         }
     }
     /// The process abort a code stands for at the entry, if any.
@@ -166,10 +167,13 @@ pub fn handler(
     };
     let handler = Handler {
         error: crate::numeric::default_type(&effect.args[0]),
-        body: nested_name("handler_body", &body.span),
-        ret: nested_name("handler_clause", &ret.body.span),
+        body: super::mono::nested_instance(site, &nested_name("handler_body", &body.span)),
+        ret: super::mono::nested_instance(site, &nested_name("handler_clause", &ret.body.span)),
         ret_bind: bound(ret_pattern).map_err(|_| destructuring())?,
-        raise: nested_name("handler_clause", &clause.body.span),
+        raise: super::mono::nested_instance(
+            site,
+            &nested_name("handler_clause", &clause.body.span),
+        ),
         raise_bind: bound(error_pattern).map_err(|_| destructuring())?,
         resume: bound(resume_pattern).map_err(|_| destructuring())?,
     };

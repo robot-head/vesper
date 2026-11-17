@@ -27,7 +27,10 @@ encoding of the slot IR value (`Rel`) and the row's operands are in range of
 their kind, then running the selected machine instructions either reaches a
 state that is again related to the slot IR state after the row, or aborts with
 the same failure as the slot IR. `select_branch` shows the branch row tests the
-same condition.
+same condition. The heap rows (milestone 8: `loadPtr`, `storePtr`, region
+payloads at a pointer slot plus an offset) are data rows of the same theorem;
+the heap is unbounded here, and its physical bound is enforced by the
+allocator rows lowering emits, not proved.
 
 What is *not* proved: anything about the Rust code (the emitter, the Place IR
 lowering, the byte encodings of `M`, the ELF/Mach-O containers), the control
@@ -83,11 +86,12 @@ inductive FloatOp | add | sub | mul | div
   deriving DecidableEq, Repr
 inductive Cond | eq | ne | lt | le | gt | ge
   deriving DecidableEq, Repr
-inductive Failure | overflow | divZero | unreachable | fault
+inductive Failure | overflow | divZero | unreachable | fault | region
   deriving DecidableEq, Repr
 
-/-- A frame word: a local slot, the outgoing call area, the incoming area. -/
-inductive Loc | slot (n : Nat) | out (n : Nat) | inn (n : Nat)
+/-- A frame word: a local slot, the outgoing call area, the incoming area;
+or a word of the program heap (region payloads), by word index. -/
+inductive Loc | slot (n : Nat) | out (n : Nat) | inn (n : Nat) | heap (n : Nat)
   deriving DecidableEq, Repr
 
 inductive Lir
@@ -112,6 +116,9 @@ inductive Lir
   | enter (words : Nat)
   | ret
   | trap (f : Failure)
+  -- Milestone 8 (regions): a heap word at a pointer slot plus an offset.
+  | loadPtr (d p off : Nat)
+  | storePtr (p off src : Nat)
   -- Milestone 7 (abort-only `Fail[E]`): from here on in emission order,
   -- `overflow` aborts go to label `ovf` and `divZero` aborts to `div0`
   -- (`CodegenFailScope.lean`). A no-op on the data state.
@@ -226,6 +233,9 @@ def lirStep (r : Lir) (s : Store) : Res Store :=
   | .loadIn d i => .ok (upd s (.slot d) (s (.inn i)))
   | .storeIn i src => .ok (upd s (.inn i) (s (.slot src)))
   | .trap f => .abort f
+  -- A pointer is the word index its slot holds (as a machine word).
+  | .loadPtr d p off => .ok (upd s (.slot d) (s (.heap ((enc (s (.slot p))).toNat + off))))
+  | .storePtr p off src => .ok (upd s (.heap ((enc (s (.slot p))).toNat + off)) (s (.slot src)))
   | _ => .ok s
 
 /-! ## The abstract target instruction subset -/
@@ -262,6 +272,9 @@ inductive M
   | enter (words : Nat)
   | leave
   | trap (f : Failure)
+  -- `r0 := heap[r1 + off]` and `heap[r1 + off] := r0`.
+  | ldh (off : Nat)
+  | sth (off : Nat)
   -- Milestone 7: emits no code; sets the trap labels (see `Lir.scope`).
   | scope (ovf div0 : Nat)
 
@@ -335,6 +348,8 @@ def Mach.step (i : M) (m : Mach) : Res Mach :=
   | .fneg => .ok (setReg m .r0 (fword (-(fbits a))))
   | .fcmp c => .ok (setReg m .r0 (if fcond c (fbits a) (fbits b) then 1 else 0))
   | .trap f => .abort f
+  | .ldh off => .ok (setReg m .r0 (m.mem (.heap (b.toNat + off))))
+  | .sth off => .ok { m with mem := upd m.mem (.heap (b.toNat + off)) a }
   | _ => .ok m
 
 def run : List M → Mach → Res Mach
@@ -394,6 +409,8 @@ def select : Lir → List M
   | .enter n => [.enter n]
   | .ret => [.leave]
   | .trap f => [.trap f]
+  | .loadPtr d p off => [.ld .r1 (.slot p), .ldh off, .st (.slot d) .r0]
+  | .storePtr p off src => [.ld .r1 (.slot p), .ld .r0 (.slot src), .sth off]
   | .scope o d => [.scope o d]
 
 /-! ## The simulation relation and the theorem -/
@@ -538,10 +555,22 @@ theorem sim_trap (f : Failure) :
     Sim (lirStep (.trap f) s) (run (select (.trap f)) m) := by
   simp [lirStep, select, run, Mach.step, Sim]
 
+theorem sim_loadPtr (d p off : Nat) :
+    Sim (lirStep (.loadPtr d p off) s) (run (select (.loadPtr d p off)) m) := by
+  simp only [lirStep, select, run, Mach.step, setReg, Sim]
+  exact enc_upd s _ hR _ _ _ (by simp [hR (.slot p), hR (.heap _)])
+
 theorem rel_st (l : Loc) (v w : Int) (r : Reg → Int) (hw : w = enc v) :
     Rel (upd s l v) { mem := upd m.mem l w, reg := r } := by
   intro l'
   by_cases hl : l' = l <;> simp [upd, hl, hw, hR l']
+
+theorem sim_storePtr (p off src : Nat) :
+    Sim (lirStep (.storePtr p off src) s) (run (select (.storePtr p off src)) m) := by
+  simp only [lirStep, select, run, Mach.step, setReg, Sim]
+  simp only [Res.bind_ok, ite_true]
+  rw [hR (.slot p)]
+  exact rel_st s m hR _ _ _ _ (hR (.slot src))
 
 set_option backward.isDefEq.respectTransparency false in
 set_option maxHeartbeats 4000000 in
@@ -702,6 +731,8 @@ theorem select_simulates (r : Lir) (s : Store) (m : Mach) (hR : Rel s m) (hd : D
   | loadIn d i => exact sim_loadIn s m hR d i
   | storeIn i a => exact sim_storeIn s m hR i a
   | trap f => exact sim_trap s m f
+  | loadPtr d p off => exact sim_loadPtr s m hR d p off
+  | storePtr p off src => exact sim_storePtr s m hR p off src
   | scope o d => exact sim_scope s m hR o d
   | branchZero => simp [DataRow] at hd
   | jump => simp [DataRow] at hd
@@ -746,9 +777,10 @@ def Sign.render : Sign → String
 def Reg.render : Reg → String
   | .r0 => "r0" | .r1 => "r1" | .r2 => "r2"
 def Loc.render : Loc → String
-  | .slot n => s!"s{n}" | .out n => s!"o{n}" | .inn n => s!"i{n}"
+  | .slot n => s!"s{n}" | .out n => s!"o{n}" | .inn n => s!"i{n}" | .heap n => s!"h{n}"
 def Failure.render : Failure → String
   | .overflow => "ovf" | .divZero => "div0" | .unreachable => "unreachable" | .fault => "fault"
+  | .region => "region"
 
 def M.render : M → String
   | .ld r l => s!"ld {r.render} {l.render}"
@@ -777,6 +809,8 @@ def M.render : M → String
   | .enter n => s!"enter {n}"
   | .leave => "leave"
   | .trap f => s!"trap {f.render}"
+  | .ldh n => s!"ldh {n}"
+  | .sth n => s!"sth {n}"
   | .scope o d => s!"scope L{o} L{d}"
 
 def integerKinds : List Kind := [.u8, .u32, .u64, .i64]
@@ -804,6 +838,8 @@ def tableRows : List (String × Lir) :=
    ("label", .label 9), ("call", .call 9), ("enter", .enter 4), ("return", .ret),
    ("trap ovf", .trap .overflow), ("trap div0", .trap .divZero),
    ("trap unreachable", .trap .unreachable)] ++
+  -- Milestone 8 (regions).
+  [("loadptr", .loadPtr 0 1 3), ("storeptr", .storePtr 1 3 2), ("trap region", .trap .region)] ++
   -- Milestone 7 (abort-only `Fail[E]`)
   [("scope", .scope 9 10)]
 
@@ -831,6 +867,8 @@ def listing : String :=
 #print axioms Vesper.VerifiedCodegen.sim_loadIn
 #print axioms Vesper.VerifiedCodegen.sim_storeIn
 #print axioms Vesper.VerifiedCodegen.sim_trap
+#print axioms Vesper.VerifiedCodegen.sim_loadPtr
+#print axioms Vesper.VerifiedCodegen.sim_storePtr
 #print axioms Vesper.VerifiedCodegen.sim_scope
 #print axioms Vesper.VerifiedCodegen.rel_st
 #print axioms Vesper.VerifiedCodegen.sim_arith

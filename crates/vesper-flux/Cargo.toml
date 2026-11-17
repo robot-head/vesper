@@ -7,13 +7,25 @@ description = "Bounded checked host DBSP circuits, owned frontier holds, LSM-spi
 
 [dependencies]
 blake3 = "1.8"
-# Pure-Rust Kafka wire client (no librdkafka). Compression codecs are off:
-# the Flux codec writes uncompressed record batches.
-rskafka = { version = "=0.6.0", default-features = false }
-tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+# The Kafka wire client (src/kafka_wire.rs, src/kafka_client.rs) is Flux's
+# own; these are its vetted building blocks: CRC-32C of record batches,
+# the four Kafka codecs, rustls for TLS and rsasl for SASL PLAIN / SCRAM.
+crc32c = "=0.6.9"
+flate2 = "=1.1.11"
+lz4_flex = { version = "=0.14.1", default-features = false, features = ["std", "frame", "safe-encode", "safe-decode"] }
+rsasl = { version = "=2.3.1", default-features = false, features = ["config_builder", "provider", "plain", "scram-sha-2"] }
+rustls = { workspace = true }
+snap = "=1.1.1"
+zstd = { version = "=0.13.4", default-features = false }
 vesper-loom-cas = { path = "../vesper-loom-cas" }
 vesper-quarry = { path = "../vesper-quarry" }
 vesper-simpulse = { path = "../vesper-simpulse" }
 
 [dev-dependencies]
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }
+# The pure-Rust Kafka client from earlier lanes, kept as an independent
+# second client: the interop tests produce compressed batches with it and
+# read Flux's transactional output back through it.
+rskafka = { version = "=0.6.0", default-features = false, features = ["compression-gzip", "compression-snappy", "compression-zstd"] }
 tempfile = "3"
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }

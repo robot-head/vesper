@@ -10,8 +10,12 @@ canonical-byte uniqueness, or performance claim is made.
 
 Direct production dependencies are pinned Apache `arrow-array`, `arrow-schema`,
 and `arrow-ipc` **56.2.0** (`arrow-buffer` 56.2.1), plus `prost` 0.14.6 for the
-OTAP protobuf messages and `hmac` 0.12.1 / `sha2` 0.10.9 for PII fingerprints. `arrow-ipc` default features are disabled: no IPC
-compression is used. A different implementation, `arrow2` **0.18.0** with `io_ipc`,
+OTAP protobuf messages and `hmac` 0.12.1 / `sha2` 0.10.9 for PII fingerprints. `arrow-ipc` is built
+with only its `zstd` feature (OTAP buffer compression; the original
+top-level API writes uncompressed streams), with `zstd` 0.13.4 and
+`flatbuffers` 25.12.19 for Beacon's own bounded decompression, `ciborium`
+0.2.2 for structured attribute values and `loona-hpack` 0.4.3 for gRPC
+headers. A different implementation, `arrow2` **0.18.0** with `io_ipc`,
 is a development dependency for independent decoding and the self-checking
 example. Root registration and the shared lock file are coordinator-owned.
 
@@ -102,17 +106,33 @@ the upstream field numbers, so no `protoc` runs at build time.
 `SPAN_LINKS`(+`_ATTRS`). Spans carry resource and scope (name, version,
 schema URL, attributes, dropped counts), kind, W3C `trace_state` (validated by
 `TraceState::parse`), events, links and dropped attribute/event/link counts.
-`MetricsEncoder::encode` produces `UNIVARIATE_METRICS` +
-`HISTOGRAM_DATA_POINTS` (+`HISTOGRAM_DP_ATTRS`) from `FastLogHistogram`s with
-`sum`, `min` and `max` and per-point attributes; consecutive points with the
-same name and unit share one metric row. `LogsEncoder::encode` produces `LOGS`
+`MetricsEncoder::encode_metrics` takes `MetricPoint`s of every OTLP kind:
+gauges and sums (`NumberPoint`, int or double, temporality and
+monotonicity) into `NUMBER_DATA_POINTS`, `FastLogHistogram`s
+(`HistogramPoint`, with `sum`, `min`, `max`) into `HISTOGRAM_DATA_POINTS`, and
+base-2 exponential histograms (`ExpHistogramPoint`, from
+`vesper_beacon::ExponentialHistogram`, 160 buckets, scale 20 down to -10)
+into `EXP_HISTOGRAM_DATA_POINTS`, each with `_ATTRS`, `_EXEMPLARS` and
+`_EXEMPLAR_ATTRS` payloads; consecutive points with the same metric key share
+one metric row (`MetricsEncoder::encode` still takes histograms only). `LogsEncoder::encode` produces `LOGS`
 (+`LOG_ATTRS`) with severity, body (`AnyValue` struct), trace/span ids, flags
 and event name. `encode_spans`/`encode_histograms`/`encode_logs` wrap a flat
 slice in one default resource and scope. Explicit bounds are each Beacon bin's
-inclusive upper end as `f64`, exact below 2^53; exemplars are not exported.
+inclusive upper end as `f64`, exact below 2^53;
+`HistogramPoint::with_bin_exemplars` exports each bin's span exemplar.
+Attribute values and log bodies may also be bytes, slices and maps
+(`AttributeValue::{bytes, slice, map}`, at most 8 deep and 256 values, every
+leaf a stored value that passed the PII boundary). Bytes go in the `bytes`
+column and slices and maps in the `ser` column as CBOR, as upstream does;
+the decoder bounds CBOR depth (32) and charges every decoded string against
+the decoded-bytes budget.
+`EncoderConfig::ipc_compression` (`IpcCompression::Zstd`) compresses Arrow
+IPC buffers; the decoder decompresses them itself within
+`DecodeLimits::max_decompressed_bytes` and rejects LZ4 with a typed error.
 Column names and types follow the upstream Go schemas (`TracesSchema`,
 `EventsSchema`, `LinksSchema`, `AttrsSchema16/32`, `MetricsSchema`,
-`HistogramDataPointSchema`, `LogsSchema`); a test checks every emitted column
+`HistogramDataPointSchema`, `NumberDataPointSchema`,
+`EHistogramDataPointSchema`, `ExemplarSchema`, `LogsSchema`); a test checks every emitted column
 against a transcription of those tables.
 
 * **Id encodings.** The upstream Go decoder ignores the `encoding` field
@@ -146,7 +166,7 @@ against a transcription of those tables.
 the same payload type when a new id arrives, and resolves attributes and
 data points against their parents. It bounds payload count, stream count,
 schema-id length, payload bytes, lifetime stream bytes and rows. Its own IPC
-reader validates every message (framing, V5, no compression, a whitelist of
+reader validates every message (framing, V5, zstd-only compression, a whitelist of
 field types, exact node/buffer counts, aligned in-body buffers, bitmap
 lengths) before calling `arrow-ipc`, because `arrow-ipc` 56 panics on several
 inconsistent inputs; a `catch_unwind` guard remains as defense in depth. A
@@ -162,8 +182,15 @@ ring records only after an OK status.
 
 ## gRPC (`vesper_beacon_arrow::grpc`, feature `grpc`, on by default)
 
-HTTP/2 gRPC over `tonic` 0.14.9 (plaintext; no TLS, compression or auth),
-with hand-written service stubs under the upstream names:
+HTTP/2 gRPC over `tonic` 0.14.9 with hand-written service stubs under the
+upstream names. Clients send zstd-compressed requests by default
+(`GrpcCompression::{None, Zstd, Gzip}`); servers accept zstd, gzip and
+upstream's `zstdarrow1`-`zstdarrow10` encodings, with decompression bounded
+by `max_message_bytes`. `ClientTls`/`ServerTls` configure rustls (tonic's
+`tls-ring`), including client certificates; `BearerToken` (RFC 6750) is sent
+on every call, only over TLS unless `allow_insecure_auth`, and
+`ServerConfig::bearer_tokens` makes the server answer `UNAUTHENTICATED`
+without one of them (constant-time comparison). The services:
 
 * **OTAP.** `ArrowTracesService/ArrowTraces`, `ArrowMetricsService/ArrowMetrics`
   and `ArrowLogsService/ArrowLogs`, bidirectional `BatchArrowRecords` →
@@ -185,12 +212,14 @@ with hand-written service stubs under the upstream names:
 runs against a real OpenTelemetry Collector when `VESPER_OTELCOL` names an
 `otelcol-contrib` binary (it bundles the `otelarrow` receiver and exporter):
 Beacon OTAP and OTLP into the collector, and the collector's `otelarrow`
-exporter into Beacon's server. Without the variable it is skipped. Both
-directions passed against OpenTelemetry Collector Contrib 0.165.0. Beacon
-has no compression, so a collector exporting to Beacon needs
-`compression: none` and `arrow: {payload_compression: none}`. The server
-keeps each batch's HPACK `headers` raw and undecoded
-(`HeaderPolicy::KeepRaw`); the plain decoder rejects them by default.
+exporter into Beacon's server, with default compression, every metric kind,
+exemplars and structured attributes, then both directions again over TLS
+with `bearertokenauth`. Without the variable it is skipped. All of it
+passed against OpenTelemetry Collector Contrib 0.165.0. The gRPC server
+HPACK-decodes each batch's `headers` in stream order with one dynamic table
+per stream (`HeaderPolicy::Decode`, bounded table and decoded size) into
+`DecodedBatch::header_fields`; `HeaderPolicy::KeepRaw` keeps them raw, and
+the plain decoder still rejects them by default.
 
 **PII redaction (§31.4).** `SpanAttributes::insert` (alias `Attributes`, used for resource, scope,
 event, link, data-point and log attributes and log bodies) accepts only

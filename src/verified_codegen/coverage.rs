@@ -168,7 +168,28 @@ pub fn coverage(
             .collect(),
     };
     let mut refusals: BTreeMap<String, Vec<VerifiedError>> = BTreeMap::new();
-    let plan = lower::plan_with(world, &program, &roots, usize::MAX, Some(&mut refusals))?;
+    // Monomorphize from every non-generic root; instances reached from
+    // several roots are the same copy.
+    let mut mono = crate::ir::Program::default();
+    let mut entries = vec![];
+    for root in &roots {
+        if world
+            .functions
+            .get(root)
+            .is_some_and(|f| !f.generics.is_empty())
+        {
+            continue;
+        }
+        match super::mono::monomorphize(world, &program, root, usize::MAX) {
+            Ok(p) => {
+                mono.functions.extend(p.functions);
+                entries.push(root.clone());
+            }
+            Err(e) => refusals.entry(root.clone()).or_default().push(e),
+        }
+    }
+    let program = mono;
+    let plan = lower::plan_with(world, &program, &entries, usize::MAX, Some(&mut refusals))?;
     // Everything the plan reached or refused.
     let mut names: BTreeSet<String> = refusals.keys().cloned().collect();
     names.extend(plan.functions.iter().map(|f| f.name.clone()));
@@ -210,7 +231,9 @@ pub fn coverage(
         let mut out: Vec<String> = lower::callees(f).cloned().collect();
         for i in f.blocks.iter().flat_map(|b| &b.instructions) {
             if let crate::ir::Op::Handle { expr, .. } = &i.op
-                && let Some(h) = plan.handlers.get(&(expr.span.start, expr.span.end))
+                && let Some(h) =
+                    plan.handlers
+                        .get(&(name.to_owned(), expr.span.start, expr.span.end))
             {
                 out.extend([h.body.clone(), h.ret.clone(), h.raise.clone()]);
             }

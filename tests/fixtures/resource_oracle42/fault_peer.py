@@ -95,6 +95,13 @@ def main():
         sys.exit(7)
     else:
         raise ValueError("unknown negative transport fixture")
+    if kind in ("malformed", "unknown_constructor", "reordered"):
+        # Keep semantic faults separate from a peer crash: the stdout reader
+        # can otherwise enqueue EOF before the request writer acknowledges
+        # its completed write. Let the harness reject the response and close
+        # stdin during cleanup before this peer exits.
+        if sys.stdin.buffer.read(1):
+            raise ValueError("unexpected request after negative response")
 
 
 if __name__ == "__main__":
