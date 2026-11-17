@@ -411,6 +411,17 @@ pub fn check(module: &Module) -> Checked {
     let beacon = crate::trace_effects::with_prelude(module);
     let mut checked = crate::pact_frontend::check_module(beacon.module());
     beacon.check(&mut checked);
+    // `use` imports resolve only through the package loader (lane F0).
+    for u in &module.uses {
+        checked.diagnostics.push(
+            Diagnostic::new(
+                crate::packages::USE_OUTSIDE_PACKAGE,
+                "`use` imports need a package; check the package directory instead of one file",
+                u.span.clone(),
+            )
+            .with_help("a package is a directory with a Loom.toml and src/**/*.ves"),
+        );
+    }
     checked
 }
 

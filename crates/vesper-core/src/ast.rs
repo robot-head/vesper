@@ -248,6 +248,41 @@ pub struct Module {
     /// which the static elaboration rejects).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trait_bounds: Vec<TraitBoundSyntax>,
+    /// Frontend-only `use` import items (manuscript ch 2.2 `UseDecl`). The
+    /// package loader (`vesper::packages`) resolves and removes them; a
+    /// checked single-file module must have none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uses: Vec<UseDecl>,
+    /// Names of the `pub` functions, types and effects declared by this
+    /// module, in source order. Other modules may import only these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_items: Vec<String>,
+}
+
+/// `use @scope/pkg::module::item;`, `use self::module::{a, b as c};`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UseDecl {
+    /// `Some("@scope/pkg")` for a dependency; `None` for `self` (the
+    /// current package's root module).
+    pub package: Option<String>,
+    /// Module path below the package root (empty for the root module).
+    pub path: Vec<String>,
+    /// Imported items: one for `::item`, several for `::{a, b}`.
+    pub names: Vec<UseName>,
+    pub span: Span,
+}
+/// One imported item, optionally renamed with `as`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct UseName {
+    pub name: String,
+    pub alias: Option<String>,
+    pub span: Span,
+}
+impl UseName {
+    /// The name this import binds in the importing module.
+    pub fn local(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.name)
+    }
 }
 
 // ---------------------------------------------------------------------------

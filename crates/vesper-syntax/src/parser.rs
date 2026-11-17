@@ -171,6 +171,8 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
         bound_values: Default::default(),
         model_uses: vec![],
         trait_bounds: vec![],
+        uses: vec![],
+        public_items: vec![],
         pending_bounds: vec![],
         limits,
         depth: 0,
@@ -201,6 +203,8 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
     p.builder.finish_node();
     module.model_uses = std::mem::take(&mut p.model_uses);
     module.trait_bounds = std::mem::take(&mut p.trait_bounds);
+    module.uses = std::mem::take(&mut p.uses);
+    module.public_items = std::mem::take(&mut p.public_items);
     if p.halted {
         module = Module::default();
     }
@@ -221,6 +225,10 @@ struct Parser<'a> {
     bound_values: std::collections::BTreeSet<String>,
     model_uses: Vec<ModelUse>,
     trait_bounds: Vec<TraitBoundSyntax>,
+    /// Item-level `use` imports (resolved by the package loader).
+    uses: Vec<UseDecl>,
+    /// Names of `pub` functions, types and effects, in source order.
+    public_items: Vec<String>,
     /// Trait bounds read by the latest `generics` call (`[T: Trait]`).
     pending_bounds: Vec<TraitBoundSyntax>,
     limits: ParseLimits,
@@ -649,9 +657,48 @@ impl Parser<'_> {
         }
     }
     fn item(&mut self) -> Option<Item> {
+        // `pub` (before or after `@fip`) marks an importable item.
+        let public = self.at_word(0, "pub")
+            || (self.at(K::At) && self.at_word(1, "fip") && self.at_word(2, "pub"));
+        let item = self.declaration()?;
+        if public {
+            match &item {
+                Item::Adt(a) => self.public_items.push(a.name.clone()),
+                Item::Function(f) => self.public_items.push(f.name.clone()),
+                Item::Effect(e) => self.public_items.push(e.name.clone()),
+                Item::Impl { .. } | Item::Trait(_) | Item::Conformance(_) => {}
+            }
+        }
+        Some(item)
+    }
+    fn declaration(&mut self) -> Option<Item> {
         let start = self.start();
         if self.at_word(0, "use") && self.at_word(1, "model") {
             self.use_model(0..self.source.len());
+            return None;
+        }
+        if self.at_word(0, "use") && matches!(self.nth(1), K::At | K::SelfKw) {
+            self.use_item();
+            return None;
+        }
+        if self.at_word(0, "use") && self.nth(1) == K::Lower && self.nth(2) == K::ColonColon {
+            self.error("an import path starts with `@scope/package` or `self`");
+            self.bump();
+            self.bump();
+            while self.eat(K::ColonColon) {
+                if !self.eat(K::Lower) && !self.eat(K::Upper) {
+                    break;
+                }
+            }
+            self.eat(K::Semi);
+            return None;
+        }
+        if self.at_word(0, "pub") && self.at_word(1, "use") {
+            self.error("`pub use` re-exports are not supported yet; mark the original item `pub`");
+            self.bump();
+            if matches!(self.nth(1), K::At | K::SelfKw) {
+                self.use_item();
+            }
             return None;
         }
         let mut fip = self.fip_attr();
@@ -1166,16 +1213,94 @@ impl Parser<'_> {
             self.ty()
         }
     }
+    /// `@scope/name` at `@`: the adjacent tokens of a package name.
+    fn package_name(&mut self) -> String {
+        let mut package = self.bump();
+        while matches!(self.kind(), K::Lower | K::Minus | K::Slash | K::Int)
+            && self.tokens[self.index(0)].span.start == self.end()
+        {
+            package.push_str(&self.bump());
+        }
+        package
+    }
+    /// `use (@scope/name | self) (:: segment)* :: (item (as alias)? | { list });`
+    /// at `use` (manuscript ch 2.2 `UseDecl`).
+    fn use_item(&mut self) {
+        let start = self.start();
+        self.bump();
+        let package = if self.at(K::At) {
+            Some(self.package_name())
+        } else {
+            self.bump();
+            None
+        };
+        let mut path = vec![];
+        let mut names = vec![];
+        loop {
+            if !self.eat(K::ColonColon) {
+                self.error("expected `::` and an imported item");
+                break;
+            }
+            if self.at(K::LBrace) {
+                self.bump();
+                while !self.at(K::RBrace) && !self.at(K::Eof) {
+                    let before = self.pos;
+                    names.push(self.use_name());
+                    if !self.eat(K::Comma) || self.pos == before {
+                        break;
+                    }
+                }
+                self.expect(K::RBrace);
+                if names.is_empty() {
+                    self.error("an import list names at least one item");
+                }
+                break;
+            }
+            if self.at(K::Lower) && self.nth(1) == K::ColonColon {
+                path.push(self.bump());
+                continue;
+            }
+            names.push(self.use_name());
+            break;
+        }
+        self.expect(K::Semi);
+        self.uses.push(UseDecl {
+            package,
+            path,
+            names,
+            span: start..self.end(),
+        });
+    }
+    fn use_name(&mut self) -> UseName {
+        let start = self.start();
+        let name = if matches!(self.kind(), K::Lower | K::Upper) {
+            self.bump()
+        } else {
+            self.error("expected an imported item name");
+            "<error>".into()
+        };
+        let alias = if self.at_word(0, "as") {
+            self.bump();
+            if matches!(self.kind(), K::Lower | K::Upper) {
+                Some(self.bump())
+            } else {
+                self.error("expected a name after `as`");
+                None
+            }
+        } else {
+            None
+        };
+        UseName {
+            name,
+            alias,
+            span: start..self.end(),
+        }
+    }
     fn trait_ref(&mut self) -> TraitRef {
         let start = self.start();
         let package = if self.at(K::At) {
             // `@scope/name::Trait`: a dependency package's trait.
-            let mut package = self.bump();
-            while matches!(self.kind(), K::Lower | K::Minus | K::Slash | K::Int)
-                && self.tokens[self.index(0)].span.start == self.end()
-            {
-                package.push_str(&self.bump());
-            }
+            let package = self.package_name();
             self.expect(K::ColonColon);
             Some(package)
         } else {
