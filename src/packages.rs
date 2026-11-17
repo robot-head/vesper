@@ -748,10 +748,17 @@ impl Loader {
                 // Trait bounds and `use model` scopes are side tables keyed by
                 // owner name and span: rename the owner and shift the spans.
                 // Trait and model names stay global, like enum variants.
+                // A bound's arguments see its owner's generic parameters.
+                let scopes = generic_scopes(&m.parsed.items);
                 for b in &m.parsed.trait_bounds {
                     let mut b = b.clone();
+                    let mark = renamer.types.len();
+                    if let Some(params) = scopes.get(&b.owner) {
+                        renamer.types.extend(params.iter().cloned());
+                    }
                     b.owner = renamer.owner(&b.owner);
                     renamer.trait_ref(&mut b.trait_ref);
+                    renamer.types.truncate(mark);
                     renamer.span(&mut b.span);
                     out.trait_bounds.push(b);
                 }
@@ -817,6 +824,38 @@ fn item_name(item: &Item) -> Option<String> {
         Item::Effect(e) => Some(e.name.clone()),
         Item::Impl { .. } | Item::Trait(_) | Item::Conformance(_) => None,
     }
+}
+
+/// The generic parameters in scope for each trait-bound owner of a module,
+/// keyed as the parser writes `TraitBoundSyntax::owner`: a function `f`, an
+/// inherent method `Type::m` (the impl's parameters, then the method's) or a
+/// type `Type`.
+fn generic_scopes(items: &[Item]) -> BTreeMap<String, Vec<String>> {
+    let names = |gs: &[Generic]| gs.iter().map(|g| g.name.clone()).collect::<Vec<_>>();
+    let mut out = BTreeMap::new();
+    for item in items {
+        match item {
+            Item::Function(f) => {
+                out.insert(f.name.clone(), names(&f.generics));
+            }
+            Item::Adt(a) => {
+                out.insert(a.name.clone(), names(&a.generics));
+            }
+            Item::Impl {
+                ty,
+                generics,
+                methods,
+            } => {
+                for m in methods {
+                    let mut params = names(generics);
+                    params.extend(names(&m.generics));
+                    out.insert(format!("{}::{}", ty.name(), m.name), params);
+                }
+            }
+            Item::Effect(_) | Item::Trait(_) | Item::Conformance(_) => {}
+        }
+    }
+    out
 }
 
 /// Enum variants and effect operations: names that stay global.

@@ -1,4 +1,7 @@
-use self::score::best;
+use self::score::{
+    best,
+    alike
+};
 use self::shapes::square::{
     Square,
     Pair,
@@ -7,7 +10,13 @@ use self::shapes::square::{
 };
 
 fn main() -> i64 {
-    let s = best(square(3), square(4));
+    let x: i64 = 3;
+    let same = if alike(x, x) {
+        16
+    } else {
+        0
+    };
+    let s = wrapping_add(best(square(3), square(4)), wrapping_sub(same, 16));
     let p = pair(square(2), square(5));
     let side = p.larger().side;
     let ones: Pair[i64] = pair(1, 9);
