@@ -23,6 +23,9 @@ use std::{cell::RefCell, rc::Rc};
 /// Foreign calls of imported `.vsys` libraries (§13, `crate::ffi_lowering`).
 #[path = "ffi_lowering/native.rs"]
 mod ffi;
+/// `f32`, float intrinsics and conversions (`vesper.float.ieee754/1`).
+#[path = "float_math/native.rs"]
+mod float_math;
 /// Lane 27: bare-metal RISC-V and AArch64 images with no runtime.
 #[path = "native_freestanding.rs"]
 pub mod freestanding;
@@ -39,6 +42,7 @@ pub mod session;
 /// AoSoA `tiled(N) struct` and `TiledSeq[T]` native lowering (§12.5).
 #[path = "tiled/native.rs"]
 mod tiled;
+use float_math::is_float_type;
 /// Windows x64 COFF objects with unwind tables, and the MSVC link driver.
 #[path = "native_windows.rs"]
 pub mod windows;
@@ -47,8 +51,9 @@ fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
     match t {
         Type::IntLiteral(_) => Ok(types::I64),
         Type::Named(n, _) if n == "f64" => Ok(types::F64),
+        Type::Named(n, _) if n == "f32" => Ok(types::F32),
         Type::Named(n, _)
-            if (crate::numeric::is_scalar_name(n) && n != "f64")
+            if (crate::numeric::is_scalar_name(n) && !crate::numeric::is_float_name(n))
                 || generics.iter().any(|g| g.name == *n) =>
         {
             Ok(types::I64)
@@ -1102,6 +1107,7 @@ pub fn jit_traced_with_options(
 }
 pub(crate) fn register_jit_runtime_symbols(builder: &mut JITBuilder, trace_host: bool) {
     builder.symbol("fmod", native_float_remainder as *const u8);
+    builder.symbol("fmodf", float_math::native_float_remainder_f32 as *const u8);
     builder.symbols(crate::regions::native_runtime::symbols());
     if trace_host {
         builder.symbols(crate::trace_effects::native_runtime::symbols());
@@ -1171,6 +1177,9 @@ fn jit_run_entry(
         } else if f.result.name() == "f64" {
             let call: unsafe extern "C" fn() -> f64 = std::mem::transmute(code);
             crate::runtime::Value::Float(call())
+        } else if f.result.name() == "f32" {
+            let call: unsafe extern "C" fn() -> f32 = std::mem::transmute(code);
+            crate::runtime::Value::Float32(call())
         } else {
             let n = if crate::fip::uses_caller_slot(world, f) {
                 let inner_size = crate::fip::box_inner(world, &f.result)
@@ -1647,17 +1656,22 @@ impl<M: Module> Codegen<'_, '_, M> {
     fn flushes(&self, span: &crate::ast::Span) -> bool {
         crate::capability_effects::flushes_subnormals(self.denorm, span)
     }
-    /// Software flush-to-zero of an `f64` value when `flush` holds: a
-    /// subnormal (magnitude below `f64::MIN_POSITIVE`) becomes a zero of the
-    /// same sign. Other values pass through.
+    /// Software flush-to-zero of a float value when `flush` holds: a
+    /// subnormal (magnitude below the kind's `MIN_POSITIVE`) becomes a zero
+    /// of the same sign. Other values pass through.
     fn flush(&mut self, flush: bool, v: ir::Value) -> ir::Value {
-        if !flush || self.b.func.dfg.value_type(v) != types::F64 {
+        let ty = self.b.func.dfg.value_type(v);
+        if !flush || !is_float_type(ty) {
             return v;
         }
         let magnitude = self.b.ins().fabs(v);
-        let smallest = self.b.ins().f64const(f64::MIN_POSITIVE);
+        let smallest = if ty == types::F32 {
+            self.b.ins().f32const(f32::MIN_POSITIVE)
+        } else {
+            self.b.ins().f64const(f64::MIN_POSITIVE)
+        };
         let tiny = self.b.ins().fcmp(FloatCC::LessThan, magnitude, smallest);
-        let zero = self.b.ins().f64const(0.0);
+        let zero = self.float_const(ty, 0.0);
         let signed_zero = self.b.ins().fcopysign(zero, v);
         self.b.ins().select(tiny, signed_zero, v)
     }
@@ -2359,11 +2373,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     scalar(&ty, &[])?
                 };
                 let var = self.b.declare_var(native_ty);
-                let zero = if native_ty == types::F64 {
-                    self.b.ins().f64const(0.0)
-                } else {
-                    self.b.ins().iconst(native_ty, 0)
-                };
+                let zero = self.scalar_zero(native_ty);
                 self.def_var(var, zero);
                 self.vars.insert(n.clone(), var);
                 self.local_types.insert(n.clone(), ty.clone());
@@ -2390,11 +2400,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 scalar(&ty, &[])?
             };
             let register = self.b.declare_var(native_ty);
-            let zero = if native_ty == types::F64 {
-                self.b.ins().f64const(0.0)
-            } else {
-                self.b.ins().iconst(native_ty, 0)
-            };
+            let zero = self.scalar_zero(native_ty);
             self.def_var(register, zero);
             registers.insert(*id, register);
         }
@@ -2627,6 +2633,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                             call_res?
                         } else if let Some((effect, op)) = callee.split_once("::") {
                             self.perform(effect, capability.as_deref(), instance, op, &es)?
+                        } else if let Some(v) = self.float_call(callee, &es, &site)? {
+                            // `fma` stays a call in the Place IR.
+                            v
                         } else {
                             return Err("unknown IR native callee".into());
                         }
@@ -2896,6 +2905,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.alloc(l.size)
         } else if ty.name() == "f64" {
             self.b.ins().f64const(0.0)
+        } else if ty.name() == "f32" {
+            self.b.ins().f32const(0.0)
         } else {
             self.zero()
         })
@@ -3188,7 +3199,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 Literal::Int(n) => self.b.ins().icmp_imm(IntCC::Equal, value, *n as i64),
                 Literal::Bool(b) => self.b.ins().icmp_imm(IntCC::Equal, value, i64::from(*b)),
                 Literal::Float(n) => {
-                    let n = self.b.ins().f64const(*n);
+                    let ty = self.b.func.dfg.value_type(value);
+                    let n = self.float_const(ty, *n);
                     self.b.ins().fcmp(FloatCC::Equal, value, n)
                 }
                 Literal::String(s) => {
@@ -3357,6 +3369,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         let value = match &e.kind {
             ExprKind::Literal(l) => match l {
                 Literal::Int(n) => self.b.ins().iconst(types::I64, *n as i64),
+                // An f32 literal is the f32 nearest its f64 value
+                // (`vesper.float.ieee754/1`).
+                Literal::Float(n) if self.ty(e).name() == "f32" => self.b.ins().f32const(*n as f32),
                 Literal::Float(n) => self.b.ins().f64const(*n),
                 Literal::Bool(b) => self.b.ins().iconst(types::I64, i64::from(*b)),
                 Literal::String(s) => self.string(s)?,
@@ -3485,6 +3500,30 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let v = self.expr(v)?;
                 self.b.ins().bnot(v)
             }
+            ExprKind::Unary(op, v)
+                if crate::numeric::float::is_float_intrinsic(op)
+                    || (crate::numeric::conversion(op).is_some()
+                        && crate::numeric::FloatKind::from_type(&self.ty(v)).is_some()) =>
+            {
+                // Place-IR form of a one-operand float intrinsic.
+                let from = self.ty(v);
+                let value = self.expr(v)?;
+                let r = self
+                    .float_unary(op, &from, value, &e.span)?
+                    .ok_or("invalid native float intrinsic")?;
+                self.coerce(r, Some(&self.ty(e)))
+            }
+            ExprKind::Binary(op, a, b) if crate::numeric::float::math_intrinsic(op).is_some() => {
+                // Place-IR form of `min`/`max`.
+                let flush = self.flushes(&e.span);
+                let av = self.expr(a)?;
+                let av = self.flush(flush, av);
+                let bv = self.expr(b)?;
+                let bv = self.flush(flush, bv);
+                let op = crate::numeric::float::math_intrinsic(op).unwrap();
+                let r = self.math(op, &[av, bv])?;
+                self.flush(flush, r)
+            }
             ExprKind::Unary(op, v) if crate::numeric::conversion(op).is_some() => {
                 let from = crate::numeric::IntegerKind::from_type(&self.ty(v));
                 let value = self.expr(v)?;
@@ -3493,7 +3532,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             ExprKind::Unary(op, v) => {
                 let kind = crate::numeric::IntegerKind::from_type(&self.ty(v));
                 let v = self.expr(v)?;
-                let float = self.b.func.dfg.value_type(v) == types::F64;
+                let float = is_float_type(self.b.func.dfg.value_type(v));
                 let flush = float && self.flushes(&e.span);
                 let v = self.flush(flush, v);
                 if op == "-"
@@ -3810,6 +3849,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                             let b = self.expr(&args[1].expr)?;
                             let v = self.bitwise(n, kind, a, b)?;
                             return Ok(self.coerce(v, Some(&self.ty(e))));
+                        }
+                        if let Some(v) = self.float_call(n, args, e)? {
+                            return Ok(v);
                         }
                         if crate::numeric::conversion(n).is_some() && args.len() == 1 {
                             let from =
@@ -4378,7 +4420,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         if self.b.func.dfg.value_type(a) != self.b.func.dfg.value_type(b) {
             return Err("native numeric type mismatch".into());
         }
-        let float = self.b.func.dfg.value_type(a) == types::F64;
+        let float = is_float_type(self.b.func.dfg.value_type(a));
         Ok(if matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=") {
             let v = if float {
                 let cc = match op {
@@ -4466,14 +4508,16 @@ impl<M: Module> Codegen<'_, '_, M> {
                 ("*", true) => self.b.ins().fmul(a, b),
                 ("/", true) => self.b.ins().fdiv(a, b),
                 ("%", true) => {
+                    let ty = self.b.func.dfg.value_type(a);
                     let mut signature = self.m.make_signature();
                     signature
                         .params
-                        .extend([AbiParam::new(types::F64), AbiParam::new(types::F64)]);
-                    signature.returns.push(AbiParam::new(types::F64));
+                        .extend([AbiParam::new(ty), AbiParam::new(ty)]);
+                    signature.returns.push(AbiParam::new(ty));
+                    let name = if ty == types::F32 { "fmodf" } else { "fmod" };
                     let id = self
                         .m
-                        .declare_function("fmod", Linkage::Import, &signature)
+                        .declare_function(name, Linkage::Import, &signature)
                         .map_err(|e| e.to_string())?;
                     let reference = self.m.declare_func_in_func(id, self.b.func);
                     let call = self.b.ins().call(reference, &[a, b]);
@@ -4909,8 +4953,8 @@ impl<M: Module> Codegen<'_, '_, M> {
         let payload = self.offset(record, 8);
         self.store(payload, values[0], &ty)?;
         let returns = self.b.func.signature.returns[0].value_type;
-        let placeholder = if returns == types::F64 {
-            self.b.ins().f64const(0.0)
+        let placeholder = if is_float_type(returns) {
+            self.float_const(returns, 0.0)
         } else {
             self.b.ins().iconst(returns, 0)
         };
@@ -5134,8 +5178,8 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
     fn return_trace_placeholder(&mut self) {
         let returns = self.b.func.signature.returns[0].value_type;
-        let placeholder = if returns == types::F64 {
-            self.b.ins().f64const(0.0)
+        let placeholder = if is_float_type(returns) {
+            self.float_const(returns, 0.0)
         } else {
             self.b.ins().iconst(returns, 0)
         };
@@ -5343,7 +5387,7 @@ fn emit_equal_inline<M: Module>(
     }
     let layout = Layout::of(world, ty)?;
     match layout.kind {
-        LayoutKind::Scalar => Ok(if ty.name() == "f64" {
+        LayoutKind::Scalar => Ok(if crate::numeric::is_float_name(ty.name()) {
             b.ins().fcmp(FloatCC::Equal, a, b_val)
         } else {
             b.ins().icmp(IntCC::Equal, a, b_val)

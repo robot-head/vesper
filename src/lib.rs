@@ -17,6 +17,7 @@ pub mod doctest;
 pub mod ebpf_backend;
 pub mod ffi_lowering;
 pub mod fip;
+pub mod float_math;
 pub mod forge_frontend;
 pub mod integer_widths;
 pub mod interface;

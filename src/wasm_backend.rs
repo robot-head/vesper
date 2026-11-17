@@ -119,6 +119,9 @@ pub enum Unsupported {
     /// An integer kind other than `u8`, `u32`, `u64` and `i64`
     /// (`vesper.arith.checked/1` widths are not lowered to Wasm yet).
     IntegerWidth,
+    /// `f32` (`vesper.float.ieee754/1`), which the Wasm backend does not
+    /// lower yet.
+    Float32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

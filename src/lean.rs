@@ -2611,7 +2611,10 @@ impl Generator<'_> {
     fn expr_inner(&mut self, e: &Expr, out: &mut Statements) -> Result<Term, String> {
         Ok(match &e.kind {
             ExprKind::Literal(l) => {
-                let term = literal(l);
+                let term = match self.type_of(e) {
+                    Some(t) => crate::lean_nodes::typed_literal(l, &t),
+                    None => literal(l),
+                };
                 if let Some(t) = self.type_of(e) {
                     ascribe(term, self.ty(&t)?)
                 } else {
@@ -3208,6 +3211,12 @@ impl Generator<'_> {
                 "Lean extraction of method and indirect calls requires named functions".into(),
             );
         };
+        if let Some(refusal) = crate::float_math::lean_refusal(n)
+            && !self.scope.contains_key(n)
+            && !self.world.functions.contains_key(n)
+        {
+            return Err(refusal);
+        }
         if (crate::numeric::conversion(n).is_some()
             || crate::numeric::rotate_intrinsic(n).is_some())
             && !self.scope.contains_key(n)

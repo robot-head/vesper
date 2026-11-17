@@ -70,6 +70,7 @@ enum ResultKind {
     Signed(u32),
     Unsigned(u32),
     Float,
+    Float32,
     Bool,
     Unit,
 }
@@ -88,6 +89,7 @@ fn result_kind(t: &Type) -> Result<ResultKind, String> {
                 })
             }
             "f64" => Ok(ResultKind::Float),
+            "f32" => Ok(ResultKind::Float32),
             "bool" => Ok(ResultKind::Bool),
             _ => Err(format!("native batch unsupported scalar type {t}")),
         },
@@ -187,6 +189,8 @@ impl NativeBatch {
             let result = result_kind(&f.result)?;
             let expected = if matches!(result, ResultKind::Float) {
                 types::F64
+            } else if matches!(result, ResultKind::Float32) {
+                types::F32
             } else {
                 types::I64
             };
@@ -232,6 +236,9 @@ impl NativeBatch {
             if matches!(entry.result, ResultKind::Float) {
                 let call: unsafe extern "C" fn() -> f64 = std::mem::transmute(entry.code);
                 crate::runtime::Value::Float(call())
+            } else if matches!(entry.result, ResultKind::Float32) {
+                let call: unsafe extern "C" fn() -> f32 = std::mem::transmute(entry.code);
+                crate::runtime::Value::Float32(call())
             } else {
                 let call: unsafe extern "C" fn() -> i64 = std::mem::transmute(entry.code);
                 let n = call();
@@ -267,7 +274,7 @@ impl NativeBatch {
                         }
                         crate::runtime::Value::Tuple(vec![])
                     }
-                    ResultKind::Float => unreachable!(),
+                    ResultKind::Float | ResultKind::Float32 => unreachable!(),
                 }
             }
         };

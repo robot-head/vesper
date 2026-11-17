@@ -83,6 +83,9 @@ fn typed(value: &Type, monad: Option<&Term>, erase_box: bool) -> Result<Term, St
                 "i32" => global(&["Int32"]),
                 "i64" | "isize" => global(&["Int64"]),
                 "f64" => global(&["Float"]),
+                // IEEE binary32, like `Float` for binary64
+                // (`vesper.float.ieee754/1` basic operations).
+                "f32" => global(&["Float32"]),
                 "bool" => global(&["Bool"]),
                 "Unit" => global(&["Unit"]),
                 "Never" => global(&["Empty"]),
@@ -235,6 +238,17 @@ pub(crate) fn effectful_arrow(value: &Type) -> bool {
     }
 }
 
+/// [`literal`] at the checked type `ty`: an f32 float literal is the f32
+/// nearest its f64 value (`vesper.float.ieee754/1`).
+pub(crate) fn typed_literal(value: &Literal, ty: &Type) -> Term {
+    match value {
+        Literal::Float(n) if ty.name() == "f32" => Term::app(
+            global(&["Float32", "ofBits"]),
+            [Term::Nat(u64::from((*n as f32).to_bits()).into())],
+        ),
+        _ => literal(value),
+    }
+}
 pub(crate) fn literal(value: &Literal) -> Term {
     match value {
         Literal::Int(n) => {

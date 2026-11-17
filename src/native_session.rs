@@ -815,6 +815,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.ins().iconst(types::I64, 0)
         } else if self.b.func.dfg.value_type(value) == types::F64 {
             self.b.ins().bitcast(types::I64, ir::MemFlags::new(), value)
+        } else if self.b.func.dfg.value_type(value) == types::F32 {
+            let bits = self.b.ins().bitcast(types::I32, ir::MemFlags::new(), value);
+            self.b.ins().uextend(types::I64, bits)
         } else {
             self.coerce(value, Some(&s.plan.result))
         };

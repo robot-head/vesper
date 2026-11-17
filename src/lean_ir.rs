@@ -644,7 +644,7 @@ impl Emitter<'_> {
     ) -> Result<(), String> {
         let rhs = match &i.op {
             Op::Constant(l) => Term::Ascribe {
-                value: Box::new(nodes::literal(l)),
+                value: Box::new(nodes::typed_literal(l, &i.ty)),
                 ty: Box::new(self.ty(&i.ty)?),
             },
             Op::Unit => Term::Tuple(vec![]),
@@ -759,6 +759,11 @@ impl Emitter<'_> {
                     return Ok(());
                 }
             }
+            Op::Unary(op, _) | Op::Binary(op, _, _)
+                if crate::float_math::lean_refusal(op).is_some() =>
+            {
+                return Err(crate::float_math::lean_refusal(op).unwrap());
+            }
             Op::Unary(op, v) => Term::Unary {
                 op: match op.as_str() {
                     "-" => syntax::UnaryOp::Neg,
@@ -862,6 +867,11 @@ impl Emitter<'_> {
                 Term::Tuple(vec![])
             }
             Op::Call { callee, args, .. } => {
+                if let Some(refusal) = crate::float_math::lean_refusal(callee)
+                    && !self.world.functions.contains_key(callee)
+                {
+                    return Err(refusal);
+                }
                 let function = &self.world.functions[callee];
                 let vars = self.world.calls.get(&(i.span.start, i.span.end));
                 let mut arguments = function

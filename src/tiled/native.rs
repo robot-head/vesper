@@ -50,6 +50,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         let ty = self.b.func.dfg.value_type(v);
         if ty == types::F64 {
             self.b.ins().bitcast(types::I64, MemFlags::new(), v)
+        } else if ty == types::F32 {
+            let bits = self.b.ins().bitcast(types::I32, MemFlags::new(), v);
+            self.b.ins().uextend(types::I64, bits)
         } else if ty.bits() < 64 {
             self.b.ins().uextend(types::I64, v)
         } else {
@@ -60,6 +63,10 @@ impl<M: Module> Codegen<'_, '_, M> {
     fn i64_word_to_type(&mut self, word: ir::Value, ty: &Type) -> Result<ir::Value, String> {
         Ok(match scalar(ty, &[])? {
             types::F64 => self.b.ins().bitcast(types::F64, MemFlags::new(), word),
+            types::F32 => {
+                let bits = self.b.ins().ireduce(types::I32, word);
+                self.b.ins().bitcast(types::F32, MemFlags::new(), bits)
+            }
             t if t.bits() < 64 => self.b.ins().ireduce(t, word),
             _ => word,
         })

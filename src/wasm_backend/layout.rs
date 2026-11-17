@@ -75,6 +75,13 @@ pub(crate) fn shape(world: &World, ty: &Type) -> Result<Shape, WasmError> {
             "Unit" => Shape::Scalar(Scalar::Unit),
             "Never" => Shape::Scalar(Scalar::Never),
             "String" => Shape::Str,
+            "f32" => {
+                return Err(WasmError::unsupported(
+                    Unsupported::Float32,
+                    "",
+                    "float kind f32".to_string(),
+                ));
+            }
             n if crate::numeric::is_integer_name(n) => {
                 return Err(WasmError::unsupported(
                     Unsupported::IntegerWidth,

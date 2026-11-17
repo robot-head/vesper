@@ -255,6 +255,8 @@ pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::
     match &layout.kind {
         LayoutKind::Scalar => Ok(match ty.name() {
             "f64" => Value::Float(f64::from_bits(word())),
+            // An f32 is the low half of its word.
+            "f32" => Value::Float32(f32::from_bits(word() as u32)),
             "bool" => Value::Bool(word() != 0),
             n if crate::numeric::IntegerKind::from_name(n).is_some() => {
                 crate::runtime::integer_from_word(

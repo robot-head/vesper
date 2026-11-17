@@ -99,7 +99,7 @@ impl Checker<'_> {
             );
         }
     }
-    fn by_value_operands(
+    pub(super) fn by_value_operands(
         &mut self,
         name: &str,
         types: &[Type],
@@ -155,6 +155,10 @@ impl Checker<'_> {
             }
             t => t,
         };
+        if let Some(from) = crate::numeric::FloatKind::from_type(&t) {
+            self.float_to_integer(name, conversion, from, a, env, span);
+            return to.ty();
+        }
         let Some(from) = IntegerKind::from_type(&t) else {
             if t != Type::Infer {
                 self.error(

@@ -44,7 +44,10 @@
 //! * Byte order: `to_le_bytes_k`, `to_be_bytes_k`, `from_le_bytes_k` and
 //!   `from_be_bytes_k` for every kind `k` of 16 bits or more convert between
 //!   `k` and a tuple of `bits(k) / 8` `u8`s. They are total.
-//! * `f64` arithmetic keeps IEEE-754 semantics and never raises.
+//! * Float arithmetic (`f32`, `f64`) keeps IEEE-754 semantics and never
+//!   raises; its full contract, `vesper.float.ieee754/1`, is in [`float`].
+//!   `narrow_k(x)` and `saturating_k(x)` also convert a float `x` to the
+//!   integer kind `k` (checked and saturating).
 //! * A failing compound assignment raises before its write, so the target
 //!   keeps its previous value.
 //! * The checker may discharge a failure only from a proof that the exact
@@ -54,6 +57,9 @@
 //!   visible `Fail` capability whose arguments are exactly `E`, and otherwise
 //!   the innermost `Fail` capability (see [`instance_key`]).
 use crate::ast::Type;
+
+pub mod float;
+pub use float::{FloatKind, is_float_name};
 
 /// Versioned identity of the integer semantics. Change it whenever any rule
 /// above changes, since every backend and proof artifact depends on it.
@@ -150,11 +156,11 @@ pub const INTEGER_KINDS: [IntegerKind; 10] = [
 pub fn is_integer_name(name: &str) -> bool {
     IntegerKind::from_name(name).is_some()
 }
-/// Whether `name` spells a builtin scalar type: an integer kind, `f64`,
-/// `bool`, `Unit` or `Never`. Every scalar is one 64-bit word in every
-/// backend's value layout.
+/// Whether `name` spells a builtin scalar type: an integer kind, a float
+/// kind (`f32`, `f64`), `bool`, `Unit` or `Never`. Every scalar is one
+/// 64-bit word in every backend's value layout (an `f32` in its low half).
 pub fn is_scalar_name(name: &str) -> bool {
-    is_integer_name(name) || matches!(name, "f64" | "bool" | "Unit" | "Never")
+    is_integer_name(name) || is_float_name(name) || matches!(name, "bool" | "Unit" | "Never")
 }
 impl IntegerKind {
     pub fn from_name(name: &str) -> Option<Self> {

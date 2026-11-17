@@ -31,9 +31,12 @@
 //! * `DetFloat`: float operations are limited to the correctly rounded IEEE
 //!   754 basic operations (`+ - * /`, negation, comparisons). Float remainder
 //!   and host-implemented effect operations with float signatures are
-//!   rejected. The surface language has no fused multiply-add or libm call;
-//!   contraction in the backend is Stage 5's job (Kinetic's verifier), fed by
-//!   [`capability_policies`].
+//!   rejected. The float intrinsics of `vesper.float.ieee754/1` (`sqrt`,
+//!   `fma`, `min`, `max`, `abs`, `floor`, `ceil`, `round`, `trunc` and the
+//!   conversions) are correctly rounded or exact, so they are allowed, and
+//!   so are the transcendental prelude functions (`exp_f64`, ...) built from
+//!   them; there is no libm call. Contraction in the backend is Stage 5's
+//!   job (Kinetic's verifier), fed by [`capability_policies`].
 //! * `ConstTime`: values whose type mentions a declared secret type
 //!   (`Secret[T]`, or the design's `SecU8`, `SecU32`, `SecU64`, `SecMask64`)
 //!   are secret, and so is everything computed from them. Inside
@@ -471,6 +474,14 @@ pub fn flushes_subnormals(spans: &[Span], span: &Span) -> bool {
         .any(|s| s.start <= span.start && span.end <= s.end && span.start < span.end)
 }
 
+/// Flush-to-zero of one `f32`: a subnormal becomes a zero of the same sign.
+pub fn flush_subnormal_f32(x: f32) -> f32 {
+    if x.is_subnormal() {
+        0.0f32.copysign(x)
+    } else {
+        x
+    }
+}
 /// Flush-to-zero of one `f64`: a subnormal becomes a zero of the same sign.
 pub fn flush_subnormal(x: f64) -> f64 {
     if x.is_subnormal() {
@@ -1557,9 +1568,10 @@ impl<'w> Walker<'w> {
         }
         if self.has(Capability::DetFloat)
             && op == "%"
-            && [l, r]
-                .iter()
-                .any(|x| self.ty(x).is_some_and(|t| t.name() == "f64"))
+            && [l, r].iter().any(|x| {
+                self.ty(x)
+                    .is_some_and(|t| crate::numeric::is_float_name(t.name()))
+            })
         {
             self.error(
                 "E0730",
@@ -1743,6 +1755,7 @@ impl<'w> Walker<'w> {
                 if bit_intrinsic(n).is_some()
                     || crate::numeric::conversion(n).is_some()
                     || crate::numeric::rotate_intrinsic(n).is_some()
+                    || crate::numeric::float::is_float_intrinsic(n)
                 {
                     return Callee::Intrinsic;
                 }
@@ -1867,7 +1880,11 @@ impl<'w> Walker<'w> {
             Callee::Function(f) => {
                 self.direct_calls.push((f.name.clone(), span.clone()));
                 self.edge(&f.name, span.clone());
-                self.require_carried(&f.name, &f.effects, span.clone());
+                self.require_carried(
+                    &f.name,
+                    &crate::float_math::carried_effects(&f.name, &f.effects),
+                    span.clone(),
+                );
                 let mut params: Vec<Type> =
                     f.params.iter().map(|p| substitute(&p.ty, &vars)).collect();
                 let mut flows: Vec<(bool, &Expr)> = vec![];
@@ -2244,7 +2261,7 @@ fn generic_vars_from_call(world: &World, e: &Expr) -> BTreeMap<String, Type> {
 
 fn mentions_float(t: &Type) -> bool {
     match t {
-        Type::Named(n, args) => n == "f64" || args.iter().any(mentions_float),
+        Type::Named(n, args) => crate::numeric::is_float_name(n) || args.iter().any(mentions_float),
         Type::Tuple(ts) => ts.iter().any(mentions_float),
         Type::Function { params, result, .. } => {
             params.iter().any(|(_, t)| mentions_float(t)) || mentions_float(result)

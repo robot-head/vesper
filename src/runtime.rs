@@ -73,6 +73,8 @@ pub enum Value {
     /// A narrow signed integer (`i8`, `i16`, `i32`) and its width.
     SInt(i64, u32),
     Float(f64),
+    /// An `f32` (`vesper.float.ieee754/1`).
+    Float32(f32),
     Bool(bool),
     String(String),
     Tuple(Vec<Value>),
@@ -125,6 +127,7 @@ impl fmt::Display for Value {
             Self::UInt(v, _) => write!(f, "{v}"),
             Self::SInt(v, _) => write!(f, "{v}"),
             Self::Float(v) => write!(f, "{v}"),
+            Self::Float32(v) => write!(f, "{v}"),
             Self::Bool(v) => write!(f, "{v}"),
             Self::String(v) => write!(f, "{v:?}"),
             Self::Tuple(v) => write!(
@@ -213,23 +216,23 @@ enum Frame {
     Coerce(Type, Env),
     /// The operator, whether it flushes subnormals (ConstDenorm code), and
     /// the evidence environment.
-    Unary(String, bool, Env),
+    Unary(String, FloatMode, Env),
     BinaryLeft {
         op: String,
-        flush: bool,
+        flush: FloatMode,
         right: Expr,
         env: Env,
     },
     BinaryRight {
         op: String,
-        flush: bool,
+        flush: FloatMode,
         left: Value,
         evidence: Env,
     },
     Assign {
         slot: Slot,
         op: String,
-        flush: bool,
+        flush: FloatMode,
         evidence: Env,
     },
     Field(String),
@@ -365,10 +368,21 @@ pub struct Runtime<'a> {
     /// Shared: `Suspension` moves the whole machine by value, so this stays
     /// one pointer wide.
     denorm: std::sync::Arc<Vec<Span>>,
+    /// The program has an `eff [DetFloat]` function, so NaN results of
+    /// canonicalising float operations are the canonical NaN, as in the
+    /// native backend (`vesper.float.ieee754/1`).
+    canonical_nans: bool,
     /// Open source region blocks (`region r { ... }`, design §15).
     regions: Box<crate::regions::store::Regions<Value>>,
 }
 impl<'a> Runtime<'a> {
+    /// The float environment of the operation at `span`.
+    fn float_mode(&self, span: &Span) -> FloatMode {
+        FloatMode {
+            flush: crate::capability_effects::flushes_subnormals(&self.denorm, span),
+            canonical: self.canonical_nans,
+        }
+    }
     pub fn new(world: &'a World) -> Self {
         Self {
             world,
@@ -383,6 +397,7 @@ impl<'a> Runtime<'a> {
             resource_trace: None,
             resource_fuel_exhausted: false,
             denorm: std::sync::Arc::new(crate::capability_effects::const_denorm_spans(world)),
+            canonical_nans: crate::native::needs_nan_canonicalization(world),
             regions: Default::default(),
         }
     }
@@ -782,6 +797,7 @@ impl<'a> Runtime<'a> {
                             }))
                         }
                         "f64" => Some(matches!(value, Value::Float(_))),
+                        "f32" => Some(matches!(value, Value::Float32(_))),
                         "bool" => Some(matches!(value, Value::Bool(_))),
                         "String" => Some(matches!(value, Value::String(_))),
                         "Unit" => Some(matches!(value, Value::Tuple(values) if values.is_empty())),
@@ -1072,7 +1088,7 @@ impl<'a> Runtime<'a> {
         } else {
             None
         };
-        let flush = crate::capability_effects::flushes_subnormals(&self.denorm, &instruction.span);
+        let flush = self.float_mode(&instruction.span);
         let result = match instruction.op {
             Op::Constant(l) => match l {
                 Literal::Int(n) => {
@@ -1262,6 +1278,11 @@ impl<'a> Runtime<'a> {
                 let callee = if self.world.functions.contains_key(&callee) {
                     self.call_site = Some((instruction.span.start, instruction.span.end));
                     Value::Function(callee)
+                } else if let Some(op) = crate::numeric::float::math_intrinsic(&callee) {
+                    // `fma` (the only ternary float intrinsic) stays a call.
+                    let value = math_at(flush, op, values)?;
+                    state.values.insert(instruction.dest, value);
+                    return Ok(Control::Ir(Box::new(state)));
                 } else if let Some((effect, op)) = callee.split_once("::") {
                     Value::EffectOp {
                         target: capability
@@ -1447,10 +1468,7 @@ impl<'a> Runtime<'a> {
                             self.block(statements, tail, env)?
                         }
                         ExprKind::Unary(op, v) => {
-                            let flush = crate::capability_effects::flushes_subnormals(
-                                &self.denorm,
-                                &operation_site,
-                            );
+                            let flush = self.float_mode(&operation_site);
                             self.stack
                                 .push(Frame::Unary(op, flush, evidence_environment(&env)));
                             Control::Eval(*v, env)
@@ -1458,10 +1476,7 @@ impl<'a> Runtime<'a> {
                         ExprKind::Binary(op, left, right) => {
                             self.stack.push(Frame::BinaryLeft {
                                 op,
-                                flush: crate::capability_effects::flushes_subnormals(
-                                    &self.denorm,
-                                    &operation_site,
-                                ),
+                                flush: self.float_mode(&operation_site),
                                 right: *right,
                                 env: env.clone(),
                             });
@@ -1472,10 +1487,7 @@ impl<'a> Runtime<'a> {
                             self.stack.push(Frame::Assign {
                                 slot,
                                 op,
-                                flush: crate::capability_effects::flushes_subnormals(
-                                    &self.denorm,
-                                    &operation_site,
-                                ),
+                                flush: self.float_mode(&operation_site),
                                 evidence: evidence_environment(&env),
                             });
                             Control::Eval(*right, env)
@@ -2492,6 +2504,7 @@ fn bind_pattern(p: &Pattern, value: &Value, env: &mut Env) -> bool {
             (Literal::Int(a), Value::UInt(b, _)) => *a == *b as i128,
             (Literal::Int(a), Value::SInt(b, _)) => *a == *b as i128,
             (Literal::Float(a), Value::Float(b)) => a == b,
+            (Literal::Float(a), Value::Float32(b)) => (*a as f32) == *b,
             (Literal::Bool(a), Value::Bool(b)) => a == b,
             (Literal::String(a), Value::String(b)) => a == b,
             _ => false,
@@ -2615,25 +2628,170 @@ pub fn integer_from_word(kind: crate::numeric::IntegerKind, word: u64) -> Value 
 fn arith_fault(f: crate::numeric::ArithFailure) -> Fault {
     Fault::Raise(Failure::Arith(f))
 }
+/// The float environment of one operation (`vesper.float.ieee754/1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FloatMode {
+    /// `eff [ConstDenorm]` code: subnormal operands and results flush to
+    /// zero.
+    flush: bool,
+    /// A DetFloat program: canonicalising operations return the canonical
+    /// NaN.
+    canonical: bool,
+}
 /// Software flush-to-zero for `eff [ConstDenorm]` code: a subnormal float
 /// becomes a zero of the same sign.
-fn flush_value(flush: bool, v: Value) -> Value {
+fn flush_value(mode: FloatMode, v: Value) -> Value {
     match v {
-        Value::Float(x) if flush => Value::Float(crate::capability_effects::flush_subnormal(x)),
+        Value::Float(x) if mode.flush => {
+            Value::Float(crate::capability_effects::flush_subnormal(x))
+        }
+        Value::Float32(x) if mode.flush => {
+            Value::Float32(crate::capability_effects::flush_subnormal_f32(x))
+        }
         v => v,
     }
 }
-/// [`unary`], flushing subnormal operands and results when `flush` holds.
-fn unary_at(flush: bool, op: &str, v: Value) -> Result<Value, Fault> {
-    unary(op, flush_value(flush, v)).map(|v| flush_value(flush, v))
+/// Whether the float operator or intrinsic `op` canonicalises a NaN result
+/// in a DetFloat program, as Cranelift's NaN canonicalisation does: the
+/// arithmetic operators, the math intrinsics but `abs`, and float-to-float
+/// conversions. `%` (a library call), `-x` and bit reinterpretation do not.
+fn canonicalizes(op: &str, operand: &Value) -> bool {
+    use crate::numeric::float::{FloatConversion, FloatKind, float_conversion, math_intrinsic};
+    match (op, operand) {
+        ("+" | "-" | "*" | "/", Value::Float(_) | Value::Float32(_)) => true,
+        _ if math_intrinsic(op).is_some() => math_intrinsic(op).is_some_and(|m| m.canonicalizes()),
+        _ => match float_conversion(op) {
+            Some((FloatConversion::Nearest | FloatConversion::Widen, to)) => match operand {
+                Value::Float32(_) => to == FloatKind::F64,
+                Value::Float(_) => to == FloatKind::F32,
+                _ => false,
+            },
+            None => false,
+        },
+    }
 }
-/// [`binary`], flushing subnormal operands and results when `flush` holds.
-fn binary_at(flush: bool, op: &str, a: Value, b: Value) -> Result<Value, Fault> {
-    binary(op, flush_value(flush, a), flush_value(flush, b)).map(|v| flush_value(flush, v))
+fn canonical_value(mode: FloatMode, op: &str, operand: &Value, v: Value) -> Value {
+    if !mode.canonical || !canonicalizes(op, operand) {
+        return v;
+    }
+    match v {
+        Value::Float(x) if x.is_nan() => Value::Float(f64::from_bits(0x7ff8_0000_0000_0000)),
+        Value::Float32(x) if x.is_nan() => Value::Float32(f32::from_bits(0x7fc0_0000)),
+        v => v,
+    }
+}
+/// [`unary`], flushing subnormal operands and results when the mode says so
+/// and canonicalising a NaN result in a DetFloat program.
+fn unary_at(mode: FloatMode, op: &str, v: Value) -> Result<Value, Fault> {
+    let v = flush_value(mode, v);
+    let result = unary(op, v.clone())?;
+    // A unary minus of a value is a sign-bit operation.
+    let result = if op == "-" {
+        result
+    } else {
+        canonical_value(mode, op, &v, result)
+    };
+    Ok(flush_value(mode, result))
+}
+/// [`binary`], flushing subnormal operands and results when the mode says
+/// so and canonicalising a NaN result in a DetFloat program.
+fn binary_at(mode: FloatMode, op: &str, a: Value, b: Value) -> Result<Value, Fault> {
+    let a = flush_value(mode, a);
+    let result = binary(op, a.clone(), flush_value(mode, b))?;
+    Ok(flush_value(mode, canonical_value(mode, op, &a, result)))
+}
+/// A math intrinsic applied to its operands (`fma` reaches it as a call).
+fn math_at(
+    mode: FloatMode,
+    op: crate::numeric::float::MathOp,
+    args: Vec<Value>,
+) -> Result<Value, String> {
+    let args: Vec<Value> = args.into_iter().map(|v| flush_value(mode, v)).collect();
+    let floats = args
+        .iter()
+        .map(float_of)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| format!("'{}' requires float operands", op.name()))?;
+    let result = op
+        .apply(&floats)
+        .ok_or_else(|| format!("invalid operands of '{}'", op.name()))?;
+    let result = if mode.canonical && op.canonicalizes() {
+        result.canonical()
+    } else {
+        result
+    };
+    Ok(flush_value(mode, value_of_float(result)))
+}
+fn float_of(v: &Value) -> Option<crate::numeric::float::Float> {
+    use crate::numeric::float::Float;
+    match v {
+        Value::Float(x) => Some(Float::F64(*x)),
+        Value::Float32(x) => Some(Float::F32(*x)),
+        _ => None,
+    }
+}
+fn value_of_float(f: crate::numeric::float::Float) -> Value {
+    use crate::numeric::float::Float;
+    match f {
+        Float::F64(x) => Value::Float(x),
+        Float::F32(x) => Value::Float32(x),
+    }
+}
+/// The float intrinsics and conversions of one operand
+/// (`vesper.float.ieee754/1`).
+fn float_unary(op: &str, v: &Value) -> Option<Result<Value, Fault>> {
+    use crate::numeric::float::*;
+    if let Some(m) = math_intrinsic(op) {
+        return Some(
+            float_of(v)
+                .and_then(|f| m.apply(&[f]))
+                .map(value_of_float)
+                .ok_or_else(|| Fault::from("invalid float intrinsic operand")),
+        );
+    }
+    if let Some((_, to)) = float_conversion(op) {
+        return Some(match (float_of(v), value_kind(v)) {
+            (Some(f), _) => Ok(value_of_float(nearest_float(to, f))),
+            (None, Some((_, n))) => Ok(value_of_float(integer_to_float(to, n))),
+            _ => Err("invalid float conversion operand".into()),
+        });
+    }
+    if let Some(k) = saturating_conversion(op) {
+        return Some(
+            float_of(v)
+                .map(|f| integer_value(k, float_to_integer_saturating(k, f)))
+                .ok_or_else(|| Fault::from("invalid saturating conversion operand")),
+        );
+    }
+    if let Some((to_bits, kind)) = bits_intrinsic(op) {
+        return Some(if to_bits {
+            float_of(v)
+                .map(|f| integer_value(kind.bits_kind(), f.to_bits() as i128))
+                .ok_or_else(|| Fault::from("invalid to_bits operand"))
+        } else {
+            value_kind(v)
+                .map(|(_, n)| value_of_float(Float::from_bits(kind, n as u64)))
+                .ok_or_else(|| Fault::from("invalid from_bits operand"))
+        });
+    }
+    if let Some((crate::numeric::Conversion::Narrow, k)) = crate::numeric::conversion(op)
+        && let Some(f) = float_of(v)
+    {
+        return Some(
+            float_to_integer_checked(k, f)
+                .map(|n| integer_value(k, n))
+                .map_err(arith_fault),
+        );
+    }
+    None
 }
 fn unary(op: &str, v: Value) -> Result<Value, Fault> {
+    if let Some(result) = float_unary(op, &v) {
+        return result;
+    }
     Ok(match (op, v) {
         ("-", Value::Float(n)) => Value::Float(-n),
+        ("-", Value::Float32(n)) => Value::Float32(-n),
         ("!", Value::Bool(b)) => Value::Bool(!b),
         ("~", v) => {
             let (kind, n) = value_kind(&v).ok_or("invalid unary operands")?;
@@ -2697,7 +2855,29 @@ fn binary(op: &str, a: Value, b: Value) -> Result<Value, Fault> {
             _ => return Err("invalid integer operator".into()),
         });
     }
+    if let Some(m) = crate::numeric::float::math_intrinsic(op)
+        && let (Some(x), Some(y)) = (float_of(&a), float_of(&b))
+    {
+        return m
+            .apply(&[x, y])
+            .map(value_of_float)
+            .ok_or_else(|| "invalid float intrinsic operands".into());
+    }
     Ok(match (a, b) {
+        (Value::Float32(a), Value::Float32(b)) => match op {
+            "+" => Value::Float32(a + b),
+            "-" => Value::Float32(a - b),
+            "*" => Value::Float32(a * b),
+            "/" => Value::Float32(a / b),
+            "%" => Value::Float32(a % b),
+            "==" => Value::Bool(a == b),
+            "!=" => Value::Bool(a != b),
+            "<" => Value::Bool(a < b),
+            "<=" => Value::Bool(a <= b),
+            ">" => Value::Bool(a > b),
+            ">=" => Value::Bool(a >= b),
+            _ => return Err("invalid float operator".into()),
+        },
         (Value::Float(a), Value::Float(b)) => match op {
             "+" => Value::Float(a + b),
             "-" => Value::Float(a - b),
@@ -2737,6 +2917,7 @@ fn equal(a: &Value, b: &Value) -> bool {
         (Value::UInt(a, ab), Value::UInt(b, bb)) => a == b && ab == bb,
         (Value::SInt(a, ab), Value::SInt(b, bb)) => a == b && ab == bb,
         (Value::Float(a), Value::Float(b)) => a == b,
+        (Value::Float32(a), Value::Float32(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::String(a), Value::String(b)) => a == b,
         (Value::Tuple(a), Value::Tuple(b)) => {
@@ -2765,6 +2946,13 @@ fn equal(a: &Value, b: &Value) -> bool {
 }
 
 fn coerce_value(v: Value, t: &Type) -> Value {
+    // An unsuffixed float literal checked as an f32 evaluates as an f64
+    // and takes its f32 value here (`vesper.float.ieee754/1`).
+    if let Value::Float(x) = v
+        && crate::numeric::FloatKind::from_type(t) == Some(crate::numeric::FloatKind::F32)
+    {
+        return Value::Float32(x as f32);
+    }
     let Some(kind) = crate::numeric::IntegerKind::from_type(t) else {
         return v;
     };

@@ -159,6 +159,7 @@ fn value_type(world: &crate::check::World, v: &Value) -> Option<Type> {
         Value::UInt(..) => Type::named("u64"),
         Value::SInt(_, bits) => Type::named(&format!("i{bits}")),
         Value::Float(_) => Type::named("f64"),
+        Value::Float32(_) => Type::named("f32"),
         Value::Bool(_) => Type::named("bool"),
         Value::String(_) => Type::named("String"),
         Value::Tuple(vs) if vs.is_empty() => Type::unit(),

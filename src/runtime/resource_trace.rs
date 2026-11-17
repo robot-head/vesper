@@ -927,6 +927,7 @@ impl ResourceTraceEngine {
                     Value::Int(_)
                     | Value::UInt(_, _)
                     | Value::Float(_)
+                    | Value::Float32(_)
                     | Value::Bool(_)
                     | Value::String(_) => 0,
                     _ => {

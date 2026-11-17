@@ -1,0 +1,49 @@
+// f32 and f64 basic arithmetic and comparisons (vesper.float.ieee754/1), as
+// one program that the evaluator, the JIT and Lean extraction agree on.
+// Each comparison distinguishes binary32 rounding from binary64 rounding.
+
+fn absorbs_f32(x: f32) -> bool {
+    x + 1.0 == x
+}
+
+fn absorbs_f64(x: f64) -> bool {
+    x + 1.0 == x
+}
+
+fn tenths_f32() -> bool {
+    let a: f32 = 0.1;
+    let b: f32 = 0.2;
+    a + b == 0.3
+}
+
+fn tenths_f64() -> bool {
+    let a: f64 = 0.1;
+    let b: f64 = 0.2;
+    a + b == 0.3
+}
+
+fn third_f32(x: f32) -> f32 {
+    x / 3.0
+}
+
+fn halve(x: f32) -> f32 {
+    0.5 * x
+}
+
+fn order(a: f32, b: f32) -> (bool, bool, bool) {
+    (a < b, a <= b, -a > -b)
+}
+
+fn main() -> (bool, bool, bool, bool, bool, bool, (bool, bool, bool)) {
+    let big: f32 = 16777216.0;
+    let wide: f64 = 16777216.0;
+    (
+        absorbs_f32(big),
+        absorbs_f64(wide),
+        tenths_f32(),
+        tenths_f64(),
+        third_f32(1.0) * 3.0 == 1.0,
+        halve(3.0) == 1.5,
+        order(1.5, 2.5)
+    )
+}

@@ -172,6 +172,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             let ty = self.b.func.dfg.value_type(value);
             vec![if ty == types::F64 {
                 self.b.ins().bitcast(types::I64, ir::MemFlags::new(), value)
+            } else if ty == types::F32 {
+                let bits = self.b.ins().bitcast(types::I32, ir::MemFlags::new(), value);
+                self.b.ins().uextend(types::I64, bits)
             } else if ty.bits() < 64 {
                 self.b.ins().uextend(types::I64, value)
             } else {
@@ -209,6 +212,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         let word = self.region_call("vesper_region_load", &[id, handle, index])?;
         Ok(match scalar(ty, &[])? {
             types::F64 => self.b.ins().bitcast(types::F64, ir::MemFlags::new(), word),
+            types::F32 => {
+                let bits = self.b.ins().ireduce(types::I32, word);
+                self.b.ins().bitcast(types::F32, ir::MemFlags::new(), bits)
+            }
             t if t.bits() < 64 => self.b.ins().ireduce(t, word),
             _ => word,
         })

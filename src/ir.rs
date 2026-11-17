@@ -1089,6 +1089,22 @@ impl Lower<'_> {
                             let b = self.expr(&args[1].expr);
                             return self.emit(Op::Binary(name, a, b), e, false);
                         }
+                        // Float intrinsics (`vesper.float.ieee754/1`): one
+                        // operand is a unary and two a binary operator; `fma`
+                        // stays a call of the intrinsic name.
+                        if crate::numeric::float::is_float_intrinsic(&name) {
+                            let unary = crate::numeric::float::math_intrinsic(&name)
+                                .is_none_or(|op| op.arity() == 1);
+                            if unary && args.len() == 1 {
+                                let a = self.expr(&args[0].expr);
+                                return self.emit(Op::Unary(name, a), e, false);
+                            }
+                            if args.len() == 2 {
+                                let a = self.expr(&args[0].expr);
+                                let b = self.expr(&args[1].expr);
+                                return self.emit(Op::Binary(name, a, b), e, false);
+                            }
+                        }
                     }
                     if receiver.is_none()
                         && crate::fip::active(self.world)
