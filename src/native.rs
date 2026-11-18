@@ -4815,8 +4815,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             BitOp::TrailingZeros => (self.b.ins().ctz(x), false),
             BitOp::CountOnes => (self.b.ins().popcnt(x), false),
             BitOp::WrappingShl | BitOp::WrappingShr => {
+                // Cranelift shifts take the amount modulo the width of `x`.
                 let n = n.ok_or("native bit shift without an amount")?;
-                let n = self.b.ins().band_imm(n, i64::from(kind.bits() - 1));
                 let r = match op {
                     BitOp::WrappingShl => self.b.ins().ishl(x, n),
                     _ if kind.unsigned() => self.b.ins().ushr(x, n),
