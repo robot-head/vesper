@@ -2170,6 +2170,13 @@ fn drop_visit(world: &World, ty: &Type, seen: &mut BTreeSet<String>, unknown: bo
         if crate::seq::is_seq_type(&ty) || crate::strings::is_string_type(&ty) {
             return true;
         }
+        // A trait object (or a `dyn` parameter's hidden type) may own
+        // anything: its vtable's drop decides.
+        if crate::dyn_trait::is_object(&ty)
+            || matches!(&ty, Type::Named(n, a) if a.is_empty() && crate::dyn_trait::is_dyn_generic(n))
+        {
+            return true;
+        }
         match &ty {
             Type::Tuple(ts) => ts.iter().any(|t| visit(world, t, seen)),
             Type::Named(n, args) => {

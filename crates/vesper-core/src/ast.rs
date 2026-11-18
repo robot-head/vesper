@@ -99,6 +99,7 @@ impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::IntLiteral(n) => write!(f, "integer literal {n}"),
+            Self::Named(n, a) if n == DYN_TYPE && a.len() == 1 => write!(f, "dyn {}", a[0]),
             Self::Named(n, a) => {
                 write!(f, "{n}")?;
                 if !a.is_empty() {
@@ -383,6 +384,12 @@ pub struct TraitBoundSyntax {
 /// identifier can spell it, and the frontend normalizes every occurrence to
 /// an ordinary type or rejects the module; it never reaches a checked World.
 pub const PROJECTION_TYPE: &str = "$projection";
+/// The second-class trait object type `dyn Trait[args]` (manuscript §7.1):
+/// `Named(DYN_TYPE, [Named(Trait, args)])`. `dyn` is not a type name, so the
+/// encoding cannot collide with a user type. The frontend
+/// (`vesper::dyn_trait`) admits it only as an `in`, `inout` or `sink`
+/// parameter type.
+pub const DYN_TYPE: &str = "dyn";
 /// Placeholder trait of a shorthand projection whose trait is inferred.
 pub const PROJECTION_ANY_TRAIT: &str = "$any";
 

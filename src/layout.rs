@@ -63,6 +63,18 @@ impl Layout {
                 kind: LayoutKind::Scalar,
             });
         }
+        // A trait object is the pair `{data, vtable}` (§7.1).
+        if crate::dyn_trait::is_object(ty) {
+            let word = Type::named("u64");
+            let mut pair = Self::build(
+                world,
+                &Type::Tuple(vec![word.clone(), word]),
+                seen,
+                depth + 1,
+            )?;
+            pair.ty = ty.clone();
+            return Ok(pair);
+        }
         // A slice is the view `{handle, start, len}` (§13).
         if crate::seq::is_slice_type(ty) {
             let word = Type::named("u64");

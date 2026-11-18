@@ -424,6 +424,8 @@ fn cli() -> Result<(), String> {
             if !verifiers.is_empty() || verifier_policy.is_some() || tee_measure {
                 return Err("--verify and --tee do not apply to --codegen verified".into());
             }
+            vesper::dyn_trait::refuse(&checked.world, "verified code generator")
+                .map_err(|d| format!("{}: {}", d.code, d.message))?;
             let path = output.unwrap_or_else(|| PathBuf::from("a.out"));
             println!(
                 "{}",
@@ -442,6 +444,8 @@ fn cli() -> Result<(), String> {
             if !verifiers.is_empty() || verifier_policy.is_some() || tee_measure {
                 return Err("--verify and --tee apply to native targets only".into());
             }
+            vesper::dyn_trait::refuse(&checked.world, "WebAssembly backend")
+                .map_err(|d| format!("{}: {}", d.code, d.message))?;
             let options = vesper::wasm_backend::WasmOptions {
                 optimize: opt,
                 ..Default::default()

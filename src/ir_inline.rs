@@ -387,6 +387,11 @@ fn inlinable(world: &World, f: &FunctionIr) -> Result<(), &'static str> {
     };
     let refuse = |c: bool, why| if c { Err(why) } else { Ok(()) };
     refuse(source.fip, "fip")?;
+    // A `dyn` function has one body shared by every vtable (§7.1).
+    refuse(
+        world.dyn_objects.params.contains_key(&f.name),
+        "dyn parameters",
+    )?;
     // Trait-bounded generics never get here: the front end monomorphizes
     // them into ordinary `f$mono$T` functions. Any other generic callee is
     // instantiated per call site (`instance`); see `generic_body_ok`.

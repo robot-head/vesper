@@ -15,6 +15,7 @@ pub mod capability_effects;
 pub mod check;
 pub mod database;
 pub mod doctest;
+pub mod dyn_trait;
 pub mod ebpf_backend;
 pub mod ffi_lowering;
 pub mod fip;

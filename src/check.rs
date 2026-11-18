@@ -47,6 +47,9 @@ pub struct World {
     /// Names of the string prelude functions this module received
     /// (`String::push_char`, `Str::next_char`, ...; §13 strings).
     pub string_prelude: BTreeSet<String>,
+    /// Second-class trait objects: `dyn` parameters, vtable stubs and the
+    /// vtables the program needs (empty without `dyn`; §7.1).
+    pub dyn_objects: crate::dyn_trait::DynObjects,
 }
 impl World {
     pub fn collect(module: &Module) -> (Self, Vec<Diagnostic>) {

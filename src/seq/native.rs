@@ -1210,6 +1210,10 @@ pub(super) fn emit_drop_glue<M: Module>(
     if !owns(&ty) {
         return Ok(());
     }
+    if crate::dyn_trait::is_object(&ty) {
+        // An unconsumed `sink dyn` parameter: its vtable's drop.
+        return super::dyn_native::emit_drop_object(b, m, value);
+    }
     if seq::is_seq_type(&ty) {
         // An empty slot or a moved-from field holds handle 0, which the
         // executable runtime does not accept.

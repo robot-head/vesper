@@ -24,6 +24,8 @@ use std::{cell::RefCell, rc::Rc};
 #[path = "native_aggregates.rs"]
 mod aggregates;
 
+#[path = "dyn_trait/native.rs"]
+mod dyn_native;
 #[path = "native_export.rs"]
 pub mod export;
 /// Foreign calls of imported `.vsys` libraries (§13, `crate::ffi_lowering`).
@@ -547,6 +549,8 @@ struct FnAbi {
 #[derive(Default)]
 struct NativeAbi {
     functions: BTreeMap<String, FnAbi>,
+    /// Whether the internal conventions apply (optimized builds).
+    optimize: bool,
 }
 impl NativeAbi {
     fn plan(
@@ -557,24 +561,44 @@ impl NativeAbi {
     ) -> Result<Self, String> {
         let mut functions = BTreeMap::new();
         if !optimize {
-            return Ok(Self { functions });
+            return Ok(Self {
+                functions,
+                optimize,
+            });
         }
         for (key, (name, vars)) in instances {
             if is_boundary(key) {
                 continue;
             }
             let f = concrete(world, name, vars)?;
-            let mut abi = FnAbi::default();
-            if fail_only(world, &f) && !capability_abi(world, &f) {
-                abi.status = true;
-            } else if f.effects.instances.is_empty() && f.effects.tail.is_none() {
-                abi.result_words = register_result_words(world, &f)?;
-            }
+            let abi = Self::internal(world, &f)?;
             if abi != FnAbi::default() {
                 functions.insert(key.clone(), abi);
             }
         }
-        Ok(Self { functions })
+        Ok(Self {
+            functions,
+            optimize,
+        })
+    }
+    /// The internal convention of a non-boundary function `f`.
+    fn internal(world: &World, f: &Function) -> Result<FnAbi, String> {
+        let mut abi = FnAbi::default();
+        if fail_only(world, f) && !capability_abi(world, f) {
+            abi.status = true;
+        } else if f.effects.instances.is_empty() && f.effects.tail.is_none() {
+            abi.result_words = register_result_words(world, f)?;
+        }
+        Ok(abi)
+    }
+    /// The convention of a vtable slot whose stub is `f`: the one every
+    /// non-boundary method instance of that signature uses.
+    fn slot(&self, world: &World, f: &Function) -> Result<FnAbi, String> {
+        if self.optimize {
+            Self::internal(world, f)
+        } else {
+            Ok(FnAbi::default())
+        }
     }
     fn of(&self, key: &str) -> FnAbi {
         self.functions.get(key).copied().unwrap_or_default()
@@ -710,6 +734,21 @@ fn instances_for_entry(
                                 }
                             }
                             instance.extend(bound);
+                        }
+                        // A `dyn` argument needs its vtable's methods; the
+                        // `dyn` function has one instance, its `dyn`
+                        // parameters erased to their object types.
+                        for (_, vtable) in world.dyn_objects.coercions(&name, &instance) {
+                            for (method, vars) in
+                                vtable.map(|v| v.methods.clone()).unwrap_or_default()
+                            {
+                                todo.push((method, vars));
+                            }
+                        }
+                        let instance = world.dyn_objects.erase(&name, &instance);
+                        if world.dyn_objects.stubs.contains_key(&name) {
+                            // A vtable stub is called through its slot.
+                            return;
                         }
                         todo.push((name, instance));
                     }
@@ -5390,14 +5429,31 @@ impl<M: Module> Codegen<'_, '_, M> {
             };
             return self.bit_builtin(name, a, n);
         }
-        let vars = call_vars(self.world, site, &self.generic_vars);
+        // `dyn` parameters take their object types: a `dyn` function has
+        // one instance, and each concrete argument is coerced to an object.
+        let raw_vars = call_vars(self.world, site, &self.generic_vars);
+        let vars = self.world.dyn_objects.erase(name, &raw_vars);
+        let dyn_slot = self
+            .world
+            .dyn_objects
+            .stubs
+            .get(name)
+            .map(|(_, slot)| *slot);
         let f = concrete(self.world, name, &vars)?;
         let result_layout = Layout::of(self.world, &f.result)?;
         let mut values = vec![];
         let mut restores = vec![];
-        for (arg, param) in args.iter().zip(&f.params) {
+        let declared = self.world.functions[name].params.clone();
+        for ((arg, param), declared) in args.iter().zip(&f.params).zip(&declared) {
             let layout = Layout::of(self.world, &param.ty)?;
-            if param.pass == Pass::Inout && crate::seq::is_slice_type(&param.ty) {
+            if let Type::Named(g, _) = &declared.ty
+                && crate::dyn_trait::is_dyn_generic(g)
+                && let Some(actual) = raw_vars.get(g)
+                && !crate::dyn_trait::is_object(actual)
+            {
+                let pair = self.dyn_coerce(arg, param.pass, actual, &param.ty, &mut restores)?;
+                values.push(pair);
+            } else if param.pass == Pass::Inout && crate::seq::is_slice_type(&param.ty) {
                 // A slice view is passed as the address of its value.
                 values.push(self.expr(&arg.expr)?);
             } else if param.pass == Pass::Inout {
@@ -5460,6 +5516,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.current_call_slot = None;
             None
         };
+        // A vtable stub is called through the receiver's slot.
+        let dyn_target = match dyn_slot {
+            Some(slot) => Some(self.dyn_dispatch(&mut values, slot)?),
+            None => None,
+        };
         let call_key = instance_key(name, &vars);
         let trace_entry_name = self
             .trace_entry
@@ -5472,7 +5533,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             .is_some_and(|id| id == "native-trace-host")
             && self.ids.contains_key(&call_key)
             && (trace_host_direct(self.world, &f) || call_key == trace_entry_name);
-        let result = if specialized_function(self.world, &f) && !direct_trace {
+        let result = if specialized_function(self.world, &f)
+            && !direct_trace
+            && dyn_target.is_none()
+        {
             if self.inline_depth >= 64 {
                 return Err("recursive effect specialization exceeds 64 inline frames".into());
             }
@@ -5559,14 +5623,21 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
         } else {
             let key = instance_key(name, &vars);
-            let id = match &self.trace_entry {
-                Some((entry_name, internal_id)) if &key == entry_name => *internal_id,
-                _ => *self
-                    .ids
-                    .get(&key)
-                    .ok_or_else(|| format!("missing monomorphized function '{key}'"))?,
+            let id = match (&self.trace_entry, dyn_target) {
+                (_, Some(_)) => None,
+                (Some((entry_name, internal_id)), None) if &key == entry_name => Some(*internal_id),
+                _ => Some(
+                    *self
+                        .ids
+                        .get(&key)
+                        .ok_or_else(|| format!("missing monomorphized function '{key}'"))?,
+                ),
             };
-            let callee_abi = self.abi.of(&key);
+            let callee_abi = if dyn_target.is_some() {
+                self.abi.slot(self.world, &f)?
+            } else {
+                self.abi.of(&key)
+            };
             let output = if callee_abi.result_words.is_some() {
                 // Register result: the callee returns the words.
                 None
@@ -5604,21 +5675,30 @@ impl<M: Module> Codegen<'_, '_, M> {
             } else {
                 None
             };
-            let pass_trace = uses_trace_fail(
-                self.world,
-                self.trace_fail.is_some(),
-                &key,
-                self.trace_entry
-                    .as_ref()
-                    .map(|(e, _)| e.as_str())
-                    .unwrap_or(""),
-                &f,
-            );
+            let pass_trace = dyn_target.is_none()
+                && uses_trace_fail(
+                    self.world,
+                    self.trace_fail.is_some(),
+                    &key,
+                    self.trace_entry
+                        .as_ref()
+                        .map(|(e, _)| e.as_str())
+                        .unwrap_or(""),
+                    &f,
+                );
             if pass_trace {
                 values.push(self.trace_fail.ok_or("missing native trace failure slot")?);
             }
-            let fun = self.m.declare_func_in_func(id, self.b.func);
-            let sig = self.b.func.dfg.ext_funcs[fun].signature;
+            let (sig, fun) = match id {
+                Some(id) => {
+                    let fun = self.m.declare_func_in_func(id, self.b.func);
+                    (self.b.func.dfg.ext_funcs[fun].signature, Some(fun))
+                }
+                None => {
+                    let sig = signature_with_abi(&*self.m, self.world, &f, false, callee_abi)?;
+                    (self.b.import_signature(sig), None)
+                }
+            };
             let params = &self.b.func.dfg.signatures[sig].params;
             if params.len() != values.len()
                 || params
@@ -5628,7 +5708,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             {
                 return Err(format!("native call ABI mismatch in '{name}'"));
             }
-            let call = self.b.ins().call(fun, &values);
+            let call = match (fun, dyn_target) {
+                (Some(fun), _) => self.b.ins().call(fun, &values),
+                (None, Some(target)) => self.b.ins().call_indirect(sig, target, &values),
+                (None, None) => return Err("native call lacks a callee".into()),
+            };
             let result = if let Some(words) = callee_abi.result_words {
                 let buffer = match into {
                     Some(out) => out,

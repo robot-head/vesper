@@ -460,6 +460,27 @@ pub fn plan_with(
         if !f.generics.is_empty() && directives.instances.iter().any(|i| &i.function == name) {
             continue;
         }
+        if let Some((g, tr)) = world
+            .dyn_objects
+            .params
+            .get(name)
+            .and_then(|p| p.iter().next())
+        {
+            // Second-class trait objects have no export ABI yet (§7.1).
+            let param = f
+                .params
+                .iter()
+                .find(|p| p.ty.name() == g)
+                .map_or("?", |p| p.name.as_str());
+            errors.push(ExportError::Type {
+                function: name.clone(),
+                ty: format!("dyn {tr}"),
+                reason: format!(
+                    "parameter '{param}' is a trait object, which the export ABI does not pass yet"
+                ),
+            });
+            continue;
+        }
         match planner.function(f, &f.name, None) {
             Ok(e) => functions.push(e),
             Err(e) => errors.push(e),

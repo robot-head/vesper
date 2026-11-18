@@ -132,6 +132,36 @@ pub fn check_package_with(
     options: &FrontendOptions,
 ) -> FrontendChecked {
     let empty = BindingsDto::empty(identity.clone());
+    // `dyn` parameters become hidden bounded type parameters (§7.1).
+    let dyn_lowered;
+    let module = if crate::dyn_trait::uses_dyn(module) {
+        match crate::dyn_trait::lower(module) {
+            Ok(l) => {
+                dyn_lowered = l;
+                &dyn_lowered.module
+            }
+            Err(diagnostics) => {
+                return FrontendChecked {
+                    checked: Checked {
+                        world: World::default(),
+                        diagnostics,
+                        expression_types: TypeMap::new(),
+                    },
+                    bindings: empty,
+                    session: None,
+                    revision: None,
+                    evidence: vec![],
+                };
+            }
+        }
+    } else {
+        dyn_lowered = crate::dyn_trait::Lowered {
+            module: Module::default(),
+            params: BTreeMap::new(),
+            forwards: vec![],
+        };
+        module
+    };
     if !has_frontend_syntax(module)
         && !builtin_traits::wanted(module)
         && options.dependencies.is_empty()
@@ -187,6 +217,9 @@ pub fn check_package_with(
     let fe = Elaborator {
         spans,
         instances: RefCell::new(BTreeMap::new()),
+        dyn_params: dyn_lowered.params.clone(),
+        dyn_vtables: RefCell::new(vec![]),
+        dyn_thunks: RefCell::new(vec![]),
         fe,
         session,
         evidence: RefCell::new(BTreeMap::new()),
@@ -203,6 +236,9 @@ pub fn check_package_with(
     };
     let (mut first, resolved) = check::check_core(&pass1, Some(&fe));
     fe.spans.drop_stub_errors(&mut first.diagnostics);
+    if first.diagnostics.is_empty() {
+        first.diagnostics = crate::dyn_trait::check_forwards(&dyn_lowered, &first.world, &resolved);
+    }
     fe.spans.relocate(&mut first.diagnostics);
     if !first.diagnostics.is_empty() {
         let Elaborator { fe, session, .. } = fe;
@@ -226,6 +262,8 @@ pub fn check_package_with(
         }
     };
     let (mut checked, _) = check::check_core(&pass2, None);
+    // Vtable stubs stay declarations in the World.
+    fe.spans.drop_stub_errors(&mut checked.diagnostics);
     fe.spans.relocate(&mut checked.diagnostics);
     let mut extra = vec![];
     for f in checked.world.functions.values() {
@@ -244,6 +282,7 @@ pub fn check_package_with(
     if checked.diagnostics.is_empty() {
         checked.world.elaboration = fe.metadata(&revision);
         fe.instance_metadata(&mut checked.world);
+        fe.dyn_metadata(&mut checked.world);
     }
     let Elaborator {
         fe,
@@ -1679,6 +1718,12 @@ struct Elaborator {
     spans: mono::SpanMap,
     /// Monomorphized instances: clone name to the function it instantiates.
     instances: RefCell<BTreeMap<String, String>>,
+    /// `dyn` parameters by function ([`crate::dyn_trait`]).
+    dyn_params: BTreeMap<String, BTreeMap<String, Type>>,
+    /// Vtables selected by monomorphization.
+    dyn_vtables: RefCell<Vec<crate::dyn_trait::VTable>>,
+    /// Vtable slot functions to add to the module ([`mono`]).
+    dyn_thunks: RefCell<Vec<Function>>,
     fe: Frontend,
     session: CoherentSession,
     evidence: RefCell<BTreeMap<(usize, usize), ResolvedCall>>,
@@ -2230,6 +2275,9 @@ impl Elaborator {
         for f in self.stubs() {
             module.items.push(Item::Function(Box::new(f)));
         }
+        for f in self.dyn_stubs() {
+            module.items.push(Item::Function(Box::new(f)));
+        }
         if errors.is_empty() {
             Ok(module)
         } else {
@@ -2343,6 +2391,16 @@ impl TraitCalls for Elaborator {
                 Err((5, _)) => bounded.push(key.clone()),
                 Err(e) => failures.push((key.clone(), e)),
             }
+        }
+        if let [key] = bounded.as_slice()
+            && found.is_empty()
+            && matches!(&receiver, Type::Named(g, a) if a.is_empty() && crate::dyn_trait::is_dyn_generic(g))
+        {
+            // A call on a `dyn` parameter: its vtable stub.
+            return Some(
+                self.bound_stub(key, method, span)
+                    .map(|_| crate::dyn_trait::stub_name(&key.1, method)),
+            );
         }
         if let [key] = bounded.as_slice()
             && found.is_empty()
@@ -2463,6 +2521,13 @@ fn match_type(
 pub(crate) fn walk_function(f: &mut Function, g: &mut dyn FnMut(&mut Type)) {
     let span = f.span.clone();
     walk_function_at(f, &span, &mut |t, _| g(t));
+}
+
+/// [`walk_function`] with the span each type is written at (its
+/// parameter's, the enclosing expression's, or the function's).
+pub(crate) fn walk_function_spans(f: &mut Function, g: &mut dyn FnMut(&mut Type, &Span)) {
+    let span = f.span.clone();
+    walk_function_at(f, &span, g);
 }
 
 fn walk_function_at(f: &mut Function, span: &Span, g: &mut dyn FnMut(&mut Type, &Span)) {

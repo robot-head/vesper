@@ -356,6 +356,11 @@ fn substitute_function(f: &mut Function, vars: &BTreeMap<String, Type>) {
 // ---------------------------------------------------------------------------
 // Stubs
 
+/// Whether `b` is the bound of a `dyn` parameter's hidden type parameter.
+fn is_dyn_bound(b: &Bound) -> bool {
+    matches!(&b.ty, Type::Named(n, a) if a.is_empty() && crate::dyn_trait::is_dyn_generic(n))
+}
+
 fn stub_name(key: &TraitKey, method: &str) -> String {
     format!("{STUB}{}${method}", key.1)
 }
@@ -388,12 +393,19 @@ struct Mono<'a> {
 }
 
 impl Elaborator {
-    fn bounds_of(&self, function: &str) -> &[Bound] {
+    /// The static (monomorphized) bounds of `function`: a `dyn`
+    /// parameter's bound is discharged by a vtable instead.
+    fn bounds_of(&self, function: &str) -> Vec<Bound> {
         self.fe
             .bounds
             .get(function)
-            .map(Vec::as_slice)
+            .map(|bs| bs.iter().filter(|b| !is_dyn_bound(b)).cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Whether a call of `function` takes a `dyn` parameter.
+    fn dyn_params_of(&self, function: &str) -> Option<&BTreeMap<String, Type>> {
+        self.dyn_params.get(function)
     }
 
     /// The stub a call of `method` on a parameter bounded by `key` names.
@@ -435,9 +447,36 @@ impl Elaborator {
             .bounds
             .values()
             .flatten()
+            .filter(|b| !is_dyn_bound(b))
             .map(|b| &b.key)
             .filter(|k| k.0 == self.fe.identity)
             .collect();
+        self.stub_declarations(keys, stub_name)
+    }
+
+    /// Vtable stub declarations for every trait a `dyn` parameter names
+    /// ([`crate::dyn_trait`]): they stay bodiless in the World, and native
+    /// code calls them through the object's vtable.
+    pub(super) fn dyn_stubs(&self) -> Vec<Function> {
+        let keys: BTreeSet<&TraitKey> = self
+            .fe
+            .bounds
+            .values()
+            .flatten()
+            .filter(|b| is_dyn_bound(b))
+            .map(|b| &b.key)
+            .filter(|k| k.0 == self.fe.identity)
+            .collect();
+        self.stub_declarations(keys, |key, method| {
+            crate::dyn_trait::stub_name(&key.1, method)
+        })
+    }
+
+    fn stub_declarations(
+        &self,
+        keys: BTreeSet<&TraitKey>,
+        name_of: impl Fn(&TraitKey, &str) -> String,
+    ) -> Vec<Function> {
         let mut out = vec![];
         for key in keys {
             let t = &self.fe.traits[key].decl;
@@ -448,7 +487,7 @@ impl Elaborator {
                 if projection || !m.generics.is_empty() {
                     continue;
                 }
-                let name = stub_name(key, &m.name);
+                let name = name_of(key, &m.name);
                 let vars: BTreeMap<String, Type> =
                     [("Self".to_owned(), Type::named("$Self"))].into();
                 let mut f = m.clone();
@@ -581,6 +620,12 @@ impl Elaborator {
             }
             items.push(item);
         }
+        items.extend(
+            self.dyn_thunks
+                .borrow_mut()
+                .drain(..)
+                .map(|f| Item::Function(Box::new(f))),
+        );
         let mut instances = self.instances.borrow_mut();
         for (origin, f) in std::mem::take(&mut m.clones) {
             instances.insert(f.name.clone(), origin);
@@ -655,6 +700,108 @@ impl Elaborator {
             _ => true,
         });
         module
+    }
+
+    /// The vtable slot function of method `m` of `decl` for `self_ty`
+    /// (object trait arguments `args`): a private function with the trait
+    /// method's signature that calls the conformance function `target`.
+    /// Every slot of one method therefore has one calling convention,
+    /// whatever effects the implementation leaves out.
+    fn dyn_thunk(
+        &self,
+        decl: &TraitDecl,
+        m: &Function,
+        args: &[Type],
+        self_ty: &Type,
+        target: &str,
+    ) -> String {
+        let mut vars: BTreeMap<String, Type> = decl
+            .generics
+            .iter()
+            .zip(args)
+            .map(|(g, a)| (g.name.clone(), a.clone()))
+            .collect();
+        vars.insert("Self".into(), self_ty.clone());
+        let mut thunks = self.dyn_thunks.borrow_mut();
+        let mut name = format!(
+            "{}${}",
+            crate::dyn_trait::stub_name(&decl.name, &m.name),
+            key_segment(self_ty)
+        );
+        if thunks.iter().any(|f| f.name == name) {
+            name = format!("{name}${}", thunks.len());
+        }
+        let mut next = 0usize;
+        let mut span = || {
+            next += 1;
+            next - 1..next
+        };
+        let mut f = m.clone();
+        f.name = name.clone();
+        f.generics = vec![];
+        for (i, p) in f.params.iter_mut().enumerate() {
+            p.ty = if i == 0 {
+                self_ty.clone()
+            } else {
+                substitute(&p.ty, &vars)
+            };
+            p.span = span();
+        }
+        f.result = substitute(&f.result, &vars);
+        f.effects = substitute_effects(&f.effects, &vars);
+        let call_args = f
+            .params
+            .iter()
+            .map(|p| Arg {
+                pass: p.pass,
+                explicit: true,
+                expr: Expr {
+                    kind: ExprKind::Name(p.name.clone()),
+                    span: span(),
+                },
+            })
+            .collect();
+        let callee = Expr {
+            kind: ExprKind::Name(target.to_owned()),
+            span: span(),
+        };
+        let call = span();
+        f.body = Some(Expr {
+            kind: ExprKind::Call {
+                callee: Box::new(callee),
+                types: vec![],
+                args: call_args,
+            },
+            span: call,
+        });
+        f.span = 0..next;
+        thunks.push(self.spans.relocate_value(&f, true));
+        name
+    }
+
+    /// The `dyn` metadata native code needs ([`crate::dyn_trait::DynObjects`]).
+    pub(super) fn dyn_metadata(&self, world: &mut World) {
+        if self.dyn_params.is_empty() {
+            return;
+        }
+        let mut objects = crate::dyn_trait::DynObjects::default();
+        let instances = self.instances.borrow();
+        for name in world.functions.keys() {
+            let origin = instances.get(name).unwrap_or(name);
+            if let Some(p) = self.dyn_params.get(origin) {
+                objects.params.insert(name.clone(), p.clone());
+            }
+        }
+        for (key, t) in &self.fe.traits {
+            for (slot, m) in t.decl.methods.iter().enumerate() {
+                let stub = crate::dyn_trait::stub_name(&key.1, &m.name);
+                if world.functions.contains_key(&stub) {
+                    objects.stubs.insert(stub, (key.1.clone(), slot));
+                }
+            }
+        }
+        objects.vtables = self.dyn_vtables.borrow().clone();
+        world.dyn_objects = objects;
     }
 
     /// Records each instance as a private generated function.
@@ -736,8 +883,14 @@ impl Mono<'_> {
                 let open = self.calls_in(f).into_iter().any(|(_, c, vars)| {
                     self.bounded.contains(&c)
                         && vars
-                            .values()
-                            .any(|t| f.generics.iter().any(|g| mentions(t, &g.name)))
+                            .iter()
+                            .filter(|(k, _)| !crate::dyn_trait::is_dyn_generic(k))
+                            .any(|(_, t)| {
+                                f.generics.iter().any(|g| {
+                                    !crate::dyn_trait::is_dyn_generic(&g.name)
+                                        && mentions(t, &g.name)
+                                })
+                            })
                 });
                 if open {
                     added.push(name.clone());
@@ -795,7 +948,7 @@ impl Mono<'_> {
                     .into_iter()
                     .map(|(k, v)| (k, crate::numeric::default_type(&v)))
                     .collect();
-                for b in self.el.bounds_of(&callee).to_vec() {
+                for b in self.el.bounds_of(&callee) {
                     let ty = substitute(&b.ty, &vars);
                     let args: Vec<Type> = b.args.iter().map(|a| substitute(a, &vars)).collect();
                     let what = format!("'{}' requires {ty}: {}", callee, b.key.1);
@@ -1025,10 +1178,16 @@ impl Mono<'_> {
         // records apply.
         let origin = self.funcs[&cx.origin].clone();
         for (span, callee, vars) in self.calls_in(&origin) {
-            let vars: BTreeMap<String, Type> = vars
+            let mut vars: BTreeMap<String, Type> = vars
                 .into_iter()
                 .map(|(k, v)| (k, crate::numeric::default_type(&substitute(&v, &cx.vars))))
                 .collect();
+            if let Some(params) = self.el.dyn_params_of(&callee).cloned() {
+                self.dyn_coercions(cx, &params, &vars, &span);
+                // A `dyn` parameter is not instantiated: the instance keeps
+                // it generic, and the second check infers it again.
+                vars.retain(|k, _| !crate::dyn_trait::is_dyn_generic(k));
+            }
             if let Some(rest) = callee.strip_prefix(STUB) {
                 let Some((trait_name, method)) = rest.split_once('$') else {
                     continue;
@@ -1139,6 +1298,98 @@ impl Mono<'_> {
         });
     }
 
+    /// Selects the vtable of each concrete type a call passes to a `dyn`
+    /// parameter (`params`, the callee's), with the conformance chosen in
+    /// `cx` at `span`, and instantiates its methods.
+    fn dyn_coercions(
+        &mut self,
+        cx: &Ctx,
+        params: &BTreeMap<String, Type>,
+        vars: &BTreeMap<String, Type>,
+        span: &Span,
+    ) {
+        for (g, tr) in params {
+            let Some(ty) = vars.get(g).cloned() else {
+                continue;
+            };
+            if matches!(&ty, Type::Named(n, a) if a.is_empty() && crate::dyn_trait::is_dyn_generic(n))
+            {
+                // Forwarding a `dyn` parameter: its caller chose the vtable.
+                continue;
+            }
+            let tr = crate::numeric::default_type(&substitute(tr, vars));
+            let origin_generics = &self.funcs[&cx.origin].generics;
+            let open = !closed(&ty)
+                || !closed(&tr)
+                || origin_generics
+                    .iter()
+                    .filter(|g| !cx.vars.contains_key(&g.name))
+                    .any(|g| mentions(&ty, &g.name) || mentions(&tr, &g.name));
+            if open {
+                self.errors.push(d(
+                    "E0633",
+                    format!(
+                        "cannot build the vtable of {ty} as `dyn {tr}` here: the type is not known before instantiation; bound the type parameter by the trait so the function is monomorphized"
+                    ),
+                    span,
+                ));
+                continue;
+            }
+            let Type::Named(trait_name, args) = &tr else {
+                continue;
+            };
+            let key = (self.el.fe.identity.clone(), trait_name.clone());
+            let Some(decl) = self.el.fe.traits.get(&key).map(|t| t.decl.clone()) else {
+                continue;
+            };
+            let object = crate::dyn_trait::object(tr.clone());
+            if self
+                .el
+                .dyn_vtables
+                .borrow()
+                .iter()
+                .any(|v| v.object == object && v.self_ty == ty)
+            {
+                continue;
+            }
+            let Some(index) = self.evidence(cx, &key, &ty, args, span) else {
+                continue;
+            };
+            let c = self.el.fe.confs[index].clone();
+            let mut cvars = BTreeMap::new();
+            match_type(&c.decl.self_ty, &ty, &c.decl.generics, &mut cvars);
+            for (pattern, actual) in c.decl.trait_ref.args.iter().zip(args) {
+                match_type(pattern, actual, &c.decl.generics, &mut cvars);
+            }
+            let mut methods = vec![];
+            for m in &decl.methods {
+                let generated = match self.el.conformance_function(index, &m.name, span) {
+                    Ok(g) => g,
+                    Err(e) => {
+                        self.errors.push(e);
+                        return;
+                    }
+                };
+                let target = if self.bounded.contains(&generated) {
+                    let evidence = self.callee_evidence(cx, &generated, &cvars, span);
+                    self.instance(&generated, cvars.clone(), evidence, cx.depth + 1, span)
+                } else {
+                    generated
+                };
+                let thunk = self.el.dyn_thunk(&decl, m, args, &ty, &target);
+                methods.push((thunk, BTreeMap::new()));
+            }
+            self.el
+                .dyn_vtables
+                .borrow_mut()
+                .push(crate::dyn_trait::VTable {
+                    object,
+                    self_ty: ty,
+                    methods,
+                });
+        }
+    }
+
     /// Evidence for each bound of `callee` instantiated at `vars`.
     fn callee_evidence(
         &mut self,
@@ -1148,7 +1399,7 @@ impl Mono<'_> {
         span: &Span,
     ) -> Vec<usize> {
         let mut out = vec![];
-        for b in self.el.bounds_of(callee).to_vec() {
+        for b in self.el.bounds_of(callee) {
             let ty = crate::numeric::default_type(&substitute(&b.ty, vars));
             let args: Vec<Type> = b.args.iter().map(|a| substitute(a, vars)).collect();
             match self.evidence(cx, &b.key, &ty, &args, span) {

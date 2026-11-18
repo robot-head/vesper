@@ -1211,6 +1211,12 @@ impl Parser<'_> {
             self.expect(K::ColonColon);
             let assoc = self.upper();
             projection_type(self_ty, Some((trait_name, trait_args)), assoc)
+        } else if self.at_word(0, DYN_TYPE) && self.nth(1) == K::Upper {
+            // `dyn Trait[args]` (manuscript §5 `DynType`, §7.1).
+            self.bump();
+            let name = self.upper();
+            let args = self.type_args();
+            Type::Named(DYN_TYPE.into(), vec![Type::Named(name, args)])
         } else {
             let name = self.ident();
             if self.at(K::ColonColon) && self.nth(1) == K::Upper {
@@ -1557,7 +1563,10 @@ impl Parser<'_> {
         let mut args = vec![];
         if self.eat(K::LBracket) {
             while !self.at(K::RBracket) && !self.at(K::Eof) {
-                if self.at(K::Lower) && !self.primitive() {
+                if self.at(K::Lower)
+                    && !self.primitive()
+                    && !(self.at_word(0, DYN_TYPE) && self.nth(1) == K::Upper)
+                {
                     let label = self.bump();
                     if self.eat(K::Colon) {
                         let name = self.upper();
