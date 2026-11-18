@@ -1,6 +1,6 @@
 #!/bin/sh
 # The Vesper port of vesper-prism (port wave P1 lane 14, #911) under Cargo, for
-# the macOS and Windows checks; Linux runs the same checks as Bazel targets
+# the Linux Platforms job; Bazel runs the same checks as its own targets
 # (BUILD.bazel). The crate's tests must pass against the Rust build and the
 # Vesper build, vesper-prism-h3 must pass on the Vesper build, and each
 # deliberately divergent Vesper library must fail its module's tests.

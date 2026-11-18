@@ -1,0 +1,869 @@
+// Vesper port of vesper-crucible (port wave P1 lane 18, #915), part 1: the
+// choice tape (src/tape.rs), the SplitMix64 generator (src/rng.rs), the draw
+// decision of a `Source` (src/source.rs `raw`) and the shrinker
+// (src/shrink.rs) as a step machine. The Rust files are the model.
+//
+// Property bodies are Rust closures, so control is inverted: the shrinker
+// proposes the next candidate tape (`shrinker_next`, `shrinker_candidate`),
+// the Rust wrapper runs the property on it, and reports the outcome back
+// (`shrinker_record`). The wrapper keeps only the closure loop and the
+// failure value; every choice of what to try next is made here.
+//
+// Codes shared with the wrapper:
+// - `Draw.code`: 0 ok (`value`), 1 Overrun.
+// - `shrinker_record` outcome: 0 failed with the shrunk kind, 1 invalid,
+//   2 passed or failed with another kind.
+// - `Parsed.code`: 0 ok, 1 MissingHeader, 2 UnknownHeader (`start`/`end`
+//   are the trimmed header's byte range), 3 BadValue (`index`), 4 TooLong.
+// @export abi 3
+
+// ---------------------------------------------------------------------------
+// Helpers.
+
+fn max_u64() -> u64 {
+    18446744073709551615
+}
+
+fn at(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn byte(in s: Slice[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+fn min_u64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+// `a % b` for `b > 0`.
+fn rem(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a % b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+fn copy_of(in s: Slice[u64]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..s.len() {
+        out.push(at(in s, i));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// The shrink key (src/tape.rs `ShrinkKey`): length, then the sum of the
+// choices, held as two words because the sum needs up to 84 bits.
+
+pub copy struct Key {
+    len: u64,
+    hi: u64,
+    lo: u64
+}
+
+pub fn tape_key(in values: Slice[u64]) -> Key {
+    let n = values.len();
+    let mut hi: u64 = 0;
+    let mut lo: u64 = 0;
+    for i in 0..n {
+        let next = wrapping_add(lo, at(in values, i));
+        if next < lo {
+            hi = inc(hi);
+        }
+        lo = next;
+    }
+    Key {
+        len: n,
+        hi: hi,
+        lo: lo
+    }
+}
+
+// Strictly smaller in the `(len, sum)` lexicographic order.
+pub fn key_smaller(a: Key, b: Key) -> bool {
+    if a.len != b.len {
+        a.len < b.len
+    } else if a.hi != b.hi {
+        a.hi < b.hi
+    } else {
+        a.lo < b.lo
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SplitMix64 (src/rng.rs).
+
+pub copy struct Rng {
+    word: u64
+}
+
+pub fn rng_next(inout r: Rng) -> u64 {
+    r.word = wrapping_add(r.word, 0x9e3779b97f4a7c15);
+    let mut z = r.word;
+    z = wrapping_mul(z ^ (z >> 30), 0xbf58476d1ce4e5b9);
+    z = wrapping_mul(z ^ (z >> 27), 0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+
+// Uniform in `0..=max_inclusive`, by rejection sampling.
+pub fn rng_below_inclusive(inout r: Rng, max_inclusive: u64) -> u64 {
+    if max_inclusive == max_u64() {
+        return rng_next(inout r);
+    }
+    let bound = inc(max_inclusive);
+    let threshold = rem(wrapping_sub(0, bound), bound);
+    loop {
+        let value = rng_next(inout r);
+        if value >= threshold {
+            break rem(value, bound);
+        }
+    }
+}
+
+// True with probability `numerator / 1024`.
+pub fn rng_chance(inout r: Rng, numerator: u64) -> bool {
+    rng_below_inclusive(inout r, 1023) < numerator
+}
+
+// ---------------------------------------------------------------------------
+// One draw of a `Source` (src/source.rs `Source::raw`): the replayed value
+// clamped to `max`, an overrun, or a fresh value. The wrapper keeps the
+// realized tape and the draw kinds.
+
+pub copy struct Draw {
+    code: u64,
+    value: u64
+}
+
+// `random` false is strict replay. `bernoulli` true draws 1 with
+// probability `n / 1024`, else the draw is uniform in `0..=max`.
+pub fn source_draw(
+    inout r: Rng,
+    in prefix: Slice[u64],
+    pos: u64,
+    max_draws: u64,
+    max: u64,
+    random: bool,
+    bernoulli: bool,
+    n: u64
+) -> Draw {
+    if pos >= max_draws {
+        return Draw {
+            code: 1,
+            value: 0
+        };
+    }
+    match prefix.try_get(pos) {
+        Option::Some(v) => Draw {
+            code: 0,
+            value: min_u64(v, max)
+        },
+        Option::None => {
+            if !random {
+                Draw {
+                    code: 1,
+                    value: 0
+                }
+            } else if bernoulli {
+                let one: u64 = if rng_chance(inout r, n) {
+                    1
+                } else {
+                    0
+                };
+                Draw {
+                    code: 0,
+                    value: min_u64(one, max)
+                }
+            } else {
+                Draw {
+                    code: 0,
+                    value: rng_below_inclusive(inout r, max)
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The saved-tape text format (src/tape.rs `to_text`, `from_text`).
+
+fn header() -> ChunkSeq[u8] {
+    // "vesper-crucible-tape/1"
+    let mut h: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    h.push(118);
+    h.push(101);
+    h.push(115);
+    h.push(112);
+    h.push(101);
+    h.push(114);
+    h.push(45);
+    h.push(99);
+    h.push(114);
+    h.push(117);
+    h.push(99);
+    h.push(105);
+    h.push(98);
+    h.push(108);
+    h.push(101);
+    h.push(45);
+    h.push(116);
+    h.push(97);
+    h.push(112);
+    h.push(101);
+    h.push(47);
+    h.push(49);
+    h
+}
+
+fn hex_digit(d: u64) -> u8 {
+    if d < 10 {
+        wrapping_u8(wrapping_add(d, 48))
+    } else {
+        wrapping_u8(wrapping_add(d, 87))
+    }
+}
+
+// The header line, then one lowercase hex value per line.
+pub fn tape_to_text(in values: Slice[u64]) -> ChunkSeq[u8] {
+    let mut out = header();
+    out.push(10);
+    for i in 0..values.len() {
+        let mut v = at(in values, i);
+        let start = out.len();
+        loop {
+            out.push(hex_digit(v & 15));
+            v = v >> 4;
+            if v == 0 {
+                break;
+            }
+        }
+        // The digits went in least significant first.
+        let mut lo = start;
+        let mut hi = wrapping_sub(out.len(), 1);
+        loop {
+            if lo >= hi {
+                break;
+            }
+            let x = match out.try_get(lo) {
+                Option::Some(d) => d,
+                Option::None => 0,
+            };
+            let y = match out.try_get(hi) {
+                Option::Some(d) => d,
+                Option::None => 0,
+            };
+            out.try_set(lo, y);
+            out.try_set(hi, x);
+            lo = inc(lo);
+            hi = wrapping_sub(hi, 1);
+        }
+        out.push(10);
+    }
+    out
+}
+
+// The length of the Unicode White_Space character (what Rust's `str::trim`
+// removes) that starts at `i`, or 0.
+fn space_at(in s: Slice[u8], i: u64, end: u64) -> u64 {
+    if i >= end {
+        return 0;
+    }
+    let a = byte(in s, i);
+    if (a >= 9 && a <= 13) || a == 32 {
+        return 1;
+    }
+    if a == 0xc2 && inc(i) < end {
+        let b = byte(in s, inc(i));
+        if b == 0x85 || b == 0xa0 {
+            return 2;
+        }
+        return 0;
+    }
+    if (a == 0xe1 || a == 0xe2 || a == 0xe3) && wrapping_add(i, 2) < end {
+        let b = byte(in s, inc(i));
+        let c = byte(in s, wrapping_add(i, 2));
+        let hit = if a == 0xe1 {
+            b == 0x9a && c == 0x80
+        } else if a == 0xe3 {
+            b == 0x80 && c == 0x80
+        } else if b == 0x80 {
+            c <= 0x8a || c == 0xa8 || c == 0xa9 || c == 0xaf
+        } else {
+            b == 0x81 && c == 0x9f
+        };
+        if hit {
+            return 3;
+        }
+    }
+    0
+}
+
+// The length of the White_Space character that ends just before `end`, or 0.
+fn space_before(in s: Slice[u8], start: u64, end: u64) -> u64 {
+    if end <= start {
+        return 0;
+    }
+    let one = wrapping_sub(end, 1);
+    if space_at(in s, one, end) == 1 {
+        return 1;
+    }
+    if end >= wrapping_add(start, 2) && space_at(in s, wrapping_sub(end, 2), end) == 2 {
+        return 2;
+    }
+    if end >= wrapping_add(start, 3) && space_at(in s, wrapping_sub(end, 3), end) == 3 {
+        return 3;
+    }
+    0
+}
+
+pub struct Parsed {
+    code: u64,
+    index: u64,
+    start: u64,
+    end: u64,
+    values: ChunkSeq[u64]
+}
+
+fn parsed(code: u64, index: u64, start: u64, end: u64, sink values: ChunkSeq[u64]) -> Parsed {
+    Parsed {
+        code: code,
+        index: index,
+        start: start,
+        end: end,
+        values: values
+    }
+}
+
+// The value of `s[start..end]` as 1-16 lowercase hex digits, or `max_u64()`
+// with `ok` false.
+fn hex_value(in s: Slice[u8], start: u64, end: u64) -> (bool, u64) {
+    let n = wrapping_sub(end, start);
+    if n == 0 || n > 16 {
+        return (false, 0);
+    }
+    let mut v: u64 = 0;
+    let mut i = start;
+    loop {
+        if i >= end {
+            break(true, v);
+        }
+        let c = byte(in s, i);
+        let d = if c >= 48 && c <= 57 {
+            wrapping_sub(c, 48)
+        } else if c >= 97 && c <= 102 {
+            wrapping_sub(c, 87)
+        } else {
+            16
+        };
+        if d == 16 {
+            break(false, 0);
+        }
+        v = (v << 4) | d;
+        i = inc(i);
+    }
+}
+
+// Blank lines are ignored; every other line after the header must be 1-16
+// lowercase hex digits. Never fails on untrusted text: errors are codes.
+pub fn tape_parse(in text: Str, max_len: u64) -> Parsed {
+    parse_bytes(in text.as_bytes(), max_len)
+}
+
+fn parse_bytes(in s: Slice[u8], max_len: u64) -> Parsed {
+    let total = s.len();
+    let mut pos: u64 = 0;
+    let mut seen_header = false;
+    let mut values: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    loop {
+        if pos >= total {
+            break;
+        }
+        // The line `s[pos..stop]`, without its `\n`.
+        let mut stop = pos;
+        loop {
+            if stop >= total || byte(in s, stop) == 10 {
+                break;
+            }
+            stop = inc(stop);
+        }
+        let next = inc(stop);
+        let mut a = pos;
+        loop {
+            let w = space_at(in s, a, stop);
+            if w == 0 {
+                break;
+            }
+            a = wrapping_add(a, w);
+        }
+        let mut b = stop;
+        loop {
+            let w = space_before(in s, a, b);
+            if w == 0 {
+                break;
+            }
+            b = wrapping_sub(b, w);
+        }
+        if a < b {
+            if !seen_header {
+                let h = header();
+                let hn = h.len();
+                let mut same = wrapping_sub(b, a) == hn;
+                let mut i: u64 = 0;
+                loop {
+                    if !same || i >= hn {
+                        break;
+                    }
+                    let want = match h.try_get(i) {
+                        Option::Some(x) => widen_u64(x),
+                        Option::None => 0,
+                    };
+                    same = byte(in s, wrapping_add(a, i)) == want;
+                    i = inc(i);
+                }
+                if !same {
+                    return parsed(2, 0, a, b, values);
+                }
+                seen_header = true;
+            } else {
+                let index = values.len();
+                if index == max_len {
+                    return parsed(4, 0, 0, 0, values);
+                }
+                let (ok, v) = hex_value(in s, a, b);
+                if !ok {
+                    return parsed(3, index, 0, 0, values);
+                }
+                values.push(v);
+            }
+        }
+        pos = next;
+    }
+    if !seen_header {
+        return parsed(1, 0, 0, 0, values);
+    }
+    parsed(0, 0, 0, 0, values)
+}
+
+// ---------------------------------------------------------------------------
+// The shrinker (src/shrink.rs `Reducer`) as a step machine. `pc` is the
+// point of the pass loops to continue from; an attempt that needs a
+// property run stops the machine there with the candidate in `cand`, and
+// `shrinker_record` resumes it at `after` with the result in `res`.
+//
+// pc: 1 round start, 2-4 span deletion, 5-7 span zeroing, 8-13 value
+// lowering (8 next value, 9-10 small values, 11-13 binary search), 14-16
+// lower-and-delete, 17 round end, 18 done, 19 waiting for an outcome.
+
+pub copy struct Stats {
+    runs: u64,
+    accepted: u64,
+    invalid: u64,
+    not_reproducing: u64,
+    budget_exhausted: bool
+}
+
+pub struct Shrinker {
+    best: ChunkSeq[u64],
+    cand: ChunkSeq[u64],
+    max_runs: u64,
+    stats: Stats,
+    pc: u64,
+    after: u64,
+    res: bool,
+    improved: bool,
+    chunk: u64,
+    idx: u64,
+    wi: u64,
+    width: u64,
+    i: u64,
+    small: u64,
+    small_end: u64,
+    lo: u64,
+    hi: u64,
+    mid: u64,
+    k: u64
+}
+
+// The shrinker for a tape that failed on its first run (which counts as
+// one run).
+pub fn shrinker_new(sink best: ChunkSeq[u64], max_runs: u64) -> Shrinker {
+    Shrinker {
+        best: best,
+        cand: ChunkSeq::new[u64](),
+        max_runs: max_runs,
+        stats: Stats {
+            runs: 1,
+            accepted: 0,
+            invalid: 0,
+            not_reproducing: 0,
+            budget_exhausted: false
+        },
+        pc: 1,
+        after: 0,
+        res: false,
+        improved: false,
+        chunk: 0,
+        idx: 0,
+        wi: 0,
+        width: 0,
+        i: 0,
+        small: 0,
+        small_end: 0,
+        lo: 0,
+        hi: 0,
+        mid: 0,
+        k: 0
+    }
+}
+
+fn zero_width(wi: u64) -> u64 {
+    if wi == 0 {
+        8
+    } else if wi == 1 {
+        4
+    } else {
+        2
+    }
+}
+
+impl Shrinker {
+    fn out_of_budget(inout self) -> bool {
+        if self.stats.runs >= self.max_runs {
+            self.stats.budget_exhausted = true;
+        }
+        self.stats.budget_exhausted
+    }
+
+    fn best_at(in self, i: u64) -> u64 {
+        at(in self.best.as_slice(), i)
+    }
+
+    fn cand_from_best(inout self) {
+        self.cand.clear();
+        let n = self.best.len();
+        for j in 0..n {
+            self.cand.push(at(in self.best.as_slice(), j));
+        }
+    }
+
+    // `cand` = `best` without `best[from..to]`.
+    fn cand_without(inout self, from: u64, to: u64) {
+        self.cand.clear();
+        let n = self.best.len();
+        for j in 0..n {
+            if j < from || j >= to {
+                self.cand.push(at(in self.best.as_slice(), j));
+            }
+        }
+    }
+
+    // Start an attempt of `cand`, to continue at `after`. True when the
+    // property must run on it; otherwise the attempt failed without a run.
+    fn attempt(inout self, after: u64) -> bool {
+        self.after = after;
+        let smaller = key_smaller(
+            tape_key(in self.cand.as_slice()),
+            tape_key(in self.best.as_slice())
+        );
+        if !smaller || self.out_of_budget() {
+            self.res = false;
+            self.pc = after;
+            return false;
+        }
+        self.stats.runs = inc(self.stats.runs);
+        self.pc = 19;
+        true
+    }
+
+    // Run the machine to the next candidate (true) or to the end (false).
+    fn advance(inout self) -> bool {
+        loop {
+            let pc = self.pc;
+            if pc >= 18 {
+                // 18 done; 19 waits for `shrinker_record`.
+                break false;
+            }
+            let ready = if pc <= 4 {
+                self.step_delete(pc)
+            } else if pc <= 7 {
+                self.step_zero(pc)
+            } else if pc <= 10 {
+                self.step_small(pc)
+            } else if pc <= 13 {
+                self.step_binary(pc)
+            } else {
+                self.step_lower_delete(pc)
+            };
+            if ready {
+                break true;
+            }
+        }
+    }
+
+    // pc 1-4: round start and span deletion.
+    fn step_delete(inout self, pc: u64) -> bool {
+        let n = self.best.len();
+        if pc == 1 {
+            self.improved = false;
+            self.chunk = n >> 1;
+            self.pc = 2;
+            return false;
+        }
+        if pc == 2 {
+            if self.chunk > 0 {
+                self.idx = 0;
+                self.pc = 3;
+            } else {
+                self.wi = 0;
+                self.pc = 5;
+            }
+            return false;
+        }
+        if pc == 3 {
+            if wrapping_add(self.idx, self.chunk) <= n && !self.out_of_budget() {
+                let from = self.idx;
+                let to = wrapping_add(from, self.chunk);
+                self.cand_without(from, to);
+                return self.attempt(4);
+            }
+            self.chunk = self.chunk >> 1;
+            self.pc = 2;
+            return false;
+        }
+        if self.res {
+            self.improved = true;
+        } else {
+            self.idx = inc(self.idx);
+        }
+        self.pc = 3;
+        false
+    }
+
+    // pc 5-7: span zeroing.
+    fn step_zero(inout self, pc: u64) -> bool {
+        let n = self.best.len();
+        if pc == 5 {
+            if self.wi < 3 {
+                self.width = zero_width(self.wi);
+                self.idx = 0;
+                self.pc = 6;
+            } else {
+                self.i = 0;
+                self.pc = 8;
+            }
+            return false;
+        }
+        if pc == 6 {
+            if wrapping_add(self.idx, self.width) <= n && !self.out_of_budget() {
+                let from = self.idx;
+                let to = wrapping_add(from, self.width);
+                let mut nonzero = false;
+                for j in from..to {
+                    if self.best_at(j) != 0 {
+                        nonzero = true;
+                    }
+                }
+                if !nonzero {
+                    self.idx = inc(self.idx);
+                    return false;
+                }
+                self.cand_from_best();
+                for j in from..to {
+                    self.cand.try_set(j, 0);
+                }
+                return self.attempt(7);
+            }
+            self.wi = inc(self.wi);
+            self.pc = 5;
+            return false;
+        }
+        if self.res {
+            self.improved = true;
+        }
+        self.idx = inc(self.idx);
+        self.pc = 6;
+        false
+    }
+
+    // pc 8-10: the next value to lower, and its small values first.
+    fn step_small(inout self, pc: u64) -> bool {
+        let n = self.best.len();
+        if pc == 8 {
+            if self.i < n && !self.out_of_budget() {
+                self.small = 0;
+                self.small_end = min_u64(self.best_at(self.i), 8);
+                self.pc = 9;
+            } else {
+                self.i = 0;
+                self.pc = 14;
+            }
+            return false;
+        }
+        if pc == 9 {
+            if self.small >= self.small_end || self.i >= n || self.small >= self.best_at(self.i) {
+                self.pc = 11;
+                return false;
+            }
+            self.cand_from_best();
+            self.cand.try_set(self.i, self.small);
+            return self.attempt(10);
+        }
+        if self.res {
+            self.improved = true;
+            self.pc = 11;
+        } else {
+            self.small = inc(self.small);
+            self.pc = 9;
+        }
+        false
+    }
+
+    // pc 11-13: binary-search lowering of one value.
+    fn step_binary(inout self, pc: u64) -> bool {
+        let n = self.best.len();
+        if pc == 11 {
+            if self.i >= n {
+                self.i = 0;
+                self.pc = 14;
+            } else {
+                self.lo = 0;
+                self.hi = self.best_at(self.i);
+                self.pc = 12;
+            }
+            return false;
+        }
+        if pc == 12 {
+            if self.lo < self.hi && self.i < n && !self.out_of_budget() {
+                self.mid = wrapping_add(self.lo, wrapping_sub(self.hi, self.lo) >> 1);
+                self.cand_from_best();
+                self.cand.try_set(self.i, self.mid);
+                return self.attempt(13);
+            }
+            self.i = inc(self.i);
+            self.pc = 8;
+            return false;
+        }
+        if self.res {
+            self.improved = true;
+            self.hi = min_u64(self.best_at(self.i), self.mid);
+        } else {
+            self.lo = inc(self.mid);
+        }
+        self.pc = 12;
+        false
+    }
+
+    // pc 14-17: lower a count and delete what follows, then the round end.
+    fn step_lower_delete(inout self, pc: u64) -> bool {
+        let n = self.best.len();
+        if pc == 14 {
+            if self.i < n && !self.out_of_budget() {
+                if self.best_at(self.i) > 0 {
+                    self.k = 1;
+                    self.pc = 15;
+                } else {
+                    self.i = inc(self.i);
+                }
+            } else {
+                self.pc = 17;
+            }
+            return false;
+        }
+        if pc == 15 {
+            let from = inc(self.i);
+            let to = wrapping_add(from, self.k);
+            if self.k > 8 || to > n || self.out_of_budget() {
+                self.i = inc(self.i);
+                self.pc = 14;
+                return false;
+            }
+            self.cand_without(from, to);
+            let lowered = wrapping_sub(self.best_at(self.i), 1);
+            self.cand.try_set(self.i, lowered);
+            return self.attempt(16);
+        }
+        if pc == 16 {
+            if self.res {
+                self.improved = true;
+                self.i = inc(self.i);
+                self.pc = 14;
+            } else {
+                self.k = inc(self.k);
+                self.pc = 15;
+            }
+            return false;
+        }
+        if !self.improved || self.out_of_budget() {
+            self.pc = 18;
+        } else {
+            self.pc = 1;
+        }
+        false
+    }
+}
+
+// Advance to the next candidate: true when `shrinker_candidate` holds one
+// to run, false when shrinking is over.
+pub fn shrinker_next(inout s: Shrinker) -> bool {
+    s.advance()
+}
+
+pub fn shrinker_candidate(in s: Shrinker) -> ChunkSeq[u64] {
+    copy_of(in s.cand.as_slice())
+}
+
+// Report the run of the candidate: `outcome` as in the header, `realized`
+// the tape the run consumed. True when the run is the new best.
+pub fn shrinker_record(inout s: Shrinker, outcome: u64, in realized: Slice[u64]) -> bool {
+    if s.pc != 19 {
+        return false;
+    }
+    let mut accepted = false;
+    if outcome == 0 {
+        if key_smaller(tape_key(in realized), tape_key(in s.best.as_slice())) {
+            // Refilled in place: the buffer is reused and nothing is
+            // dropped by assignment.
+            s.best.clear();
+            for j in 0..realized.len() {
+                s.best.push(at(in realized, j));
+            }
+            s.stats.accepted = inc(s.stats.accepted);
+            accepted = true;
+        }
+    } else if outcome == 1 {
+        s.stats.invalid = inc(s.stats.invalid);
+    } else {
+        s.stats.not_reproducing = inc(s.stats.not_reproducing);
+    }
+    s.res = accepted;
+    s.pc = s.after;
+    accepted
+}
+
+pub fn shrinker_stats(in s: Shrinker) -> Stats {
+    s.stats
+}
+
+pub fn shrinker_best(in s: Shrinker) -> ChunkSeq[u64] {
+    copy_of(in s.best.as_slice())
+}

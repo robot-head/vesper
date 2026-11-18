@@ -81,10 +81,13 @@ failures! {
     DequantizeQ40BlockError [ArithOverflow, RuntimeError],
     DequantizeQ4KBlockError [ArithOverflow, RuntimeError],
     DequantizeQ80BlockError [ArithOverflow, RuntimeError],
+    EncodePromptError [ArithOverflow, RuntimeError, Fault],
     FinitePayloadError [ArithOverflow, RuntimeError],
     Fp8CodesError [ArithOverflow, RuntimeError],
     Fp8ScaleError [RuntimeError, Fault],
     MakeQkx2QuantsError [ArithOverflow, RuntimeError],
+    ParseGgufError [ArithOverflow, RuntimeError, Fault],
+    ParseJsonError [ArithOverflow, RuntimeError],
     Q4KScaleMinError [ArithOverflow, RuntimeError],
     QuantizeMxfp4Error [ArithOverflow, RuntimeError, Fault],
     QuantizeQ40Error [ArithOverflow, RuntimeError, Fault],
@@ -97,6 +100,8 @@ failures! {
     SampleTopPError [ArithOverflow, RuntimeError],
     SoftmaxError [RuntimeError, Fault],
     SwigluError [RuntimeError, Fault],
+    VocabLookupError [ArithOverflow, RuntimeError],
+    VocabTableError [ArithOverflow, RuntimeError],
 }
 
 /// The value of a port call that cannot fail on its inputs: every index is

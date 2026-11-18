@@ -263,7 +263,7 @@ pub fn quantize_q4_k(data: &[f32], cols: usize) -> Result<Vec<u8>, Error> {
         |fault| match fault {
             crate::port::Fault::Shape => Error::Shape("quantized rows need whole blocks"),
             crate::port::Fault::NonFinite => Error::NonFinite,
-            crate::port::Fault::Limit => Error::Limit("Q4_K scale exceeds binary16"),
+            _ => Error::Limit("Q4_K scale exceeds binary16"),
         },
     )
 }

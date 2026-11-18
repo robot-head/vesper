@@ -1,0 +1,518 @@
+// Module store of @vesper/tensor (see lib.ves): the GGUF reader of
+// src/gguf.rs (versions 2 and 3).
+//
+// `parse_gguf` checks the whole header and writes it as a tape of word
+// pairs that src/gguf.rs turns into metadata values and tensor infos:
+//
+// - the version and the alignment, then the metadata count and the tensor
+//   count;
+// - per metadata entry, the key and then the value;
+// - per tensor, the name, `(rank, GGML type)`, one word per dimension and
+//   `(absolute offset, byte length)`.
+//
+// A string is `(8 | len << 8, offset in the file)`, a scalar `(type id,
+// little-endian bits)` and an array `(9 | element type << 8, count)`
+// followed by `(offset of its first element, 0)`: the elements are checked
+// and src/gguf.rs decodes them from the file. It returns the tape length; the words after
+// it are scratch. On a failure it
+// writes `(code, detail, detail)` to `status` (see `fail`) and raises
+// `Fault::Format`; codes 30 and 31 ask the caller to retry with a larger
+// tape and name table (`names.len() / 2` slots, a power of two).
+use self::{
+    Fault
+};
+use self::num::{
+    u64_zero
+};
+use self::text::{
+    utf8_ok
+};
+
+// Failure codes, in src/gguf.rs's messages: 1 "truncated GGUF", 2 "not a
+// GGUF file", 3 version (detail), 4 tensor limit, 5 metadata limit, 6 string
+// length limit, 7 "GGUF string is not UTF-8", 8 "GGUF bool", 9 nested
+// arrays, 10 array length limit, 11 "truncated GGUF array", 12 "unknown
+// GGUF metadata type", 13 "duplicate GGUF metadata key", 14
+// "general.alignment", 15 "GGUF tensor rank", 16 "GGUF zero dimension", 17
+// "duplicate GGUF tensor name", 18 unsupported GGML type (detail), 19 quant
+// block alignment (columns, block), 20 "misaligned GGUF tensor", 21 "GGUF
+// tensor data outside the file", 22 "overlapping GGUF tensors", 30 tape
+// full, 31 name table full.
+fn fail(inout status: Slice[u64], code: u64, a: u64, b: u64) eff [Fail[RuntimeError], Fail[Fault]] {
+    status.set(0, code);
+    status.set(1, a);
+    status.set(2, b);
+    Fail::raise(Fault::Format);
+}
+
+// `at + n` when `b` holds that many bytes from `at`.
+fn need(in b: Slice[u8], inout status: Slice[u64], at: u64, n: u64)
+    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+    let end = at + n;
+    if end > b.len() {
+        fail(inout status, 1, 0, 0);
+    }
+    end
+}
+
+// The `n`-byte little-endian integer at `b[at..]`.
+fn le(in b: Slice[u8], at: u64, n: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let mut v: u64 = 0;
+    let mut k = n;
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = k - 1;
+        v = (v << 8) | widen_u64(b[at + k]);
+    }
+    v
+}
+
+fn put(inout tape: Slice[u64], inout status: Slice[u64], n: u64, tag: u64, payload: u64)
+    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+    if n + 2 > tape.len() {
+        fail(inout status, 30, 0, 0);
+    }
+    tape.set(n, tag);
+    tape.set(n + 1, payload);
+    n + 2
+}
+
+// Checks the string at `at`; returns (its start, its end).
+fn string_at(in b: Slice[u8], inout status: Slice[u64], at: u64)
+    -> (u64, u64) eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+    let start = need(in b, inout status, at, 8);
+    let len = le(in b, at, 8);
+    if len > 16777216 {
+        fail(inout status, 6, 0, 0);
+    }
+    let end = need(in b, inout status, start, len);
+    if !utf8_ok(in b, start, end) {
+        fail(inout status, 7, 0, 0);
+    }
+    (start, end)
+}
+
+fn check_string(in b: Slice[u8], inout status: Slice[u64], at: u64)
+    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+    let (start, end) = string_at(in b, inout status, at);
+    end
+}
+
+// Reads a string at `at`; returns its end. Writes `(8 | len << 8, offset)`
+// at `tape[n..]`.
+fn read_string(in b: Slice[u8], inout tape: Slice[u64], inout status: Slice[u64], n: u64, at: u64)
+    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+    let (start, end) = string_at(in b, inout status, at);
+    put(inout tape, inout status, n, 8 | ((end - start) << 8), start);
+    end
+}
+
+// The byte width of a scalar metadata type, 0 for a string or array, or
+// 99 for an unknown type.
+fn width(ty: u64) -> u64 {
+    if ty == 0 || ty == 1 || ty == 7 {
+        1
+    } else if ty == 2 || ty == 3 {
+        2
+    } else if ty == 4 || ty == 5 || ty == 6 {
+        4
+    } else if ty == 10 || ty == 11 || ty == 12 {
+        8
+    } else if ty == 8 || ty == 9 {
+        0
+    } else {
+        99
+    }
+}
+
+// Reads one non-array value of type `ty` at `at` into `tape[n..]`; returns
+// (its end, the new tape length).
+// Array elements are checked but not written (`write` false).
+fn read_item(
+    in b: Slice[u8],
+    inout tape: Slice[u64],
+    inout status: Slice[u64],
+    n: u64,
+    at: u64,
+    ty: u64,
+    write: bool
+) -> (u64, u64) eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+    if ty == 8 {
+        if !write {
+            return (check_string(in b, inout status, at), n);
+        }
+        let end = read_string(in b, inout tape, inout status, n, at);
+        return (end, n + 2);
+    }
+    let w = width(ty);
+    if w == 99 {
+        fail(inout status, 12, 0, 0);
+    }
+    let end = need(in b, inout status, at, w);
+    let v = le(in b, at, w);
+    if ty == 7 && v > 1 {
+        fail(inout status, 8, 0, 0);
+    }
+    if !write {
+        return (end, n);
+    }
+    (end, put(inout tape, inout status, n, ty, v))
+}
+
+// Reads one metadata value of type `ty`, arrays included.
+fn read_value(
+    in b: Slice[u8],
+    inout tape: Slice[u64],
+    inout status: Slice[u64],
+    n: u64,
+    at: u64,
+    ty: u64
+) -> (u64, u64) eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+    if ty != 9 {
+        return read_item(in b, inout tape, inout status, n, at, ty, true);
+    }
+    let mut i = need(in b, inout status, at, 4);
+    let elem = le(in b, at, 4);
+    let after = need(in b, inout status, i, 8);
+    let count = le(in b, i, 8);
+    i = after;
+    if count > 16777216 {
+        fail(inout status, 10, 0, 0);
+    }
+    if count > b.len() - i {
+        fail(inout status, 11, 0, 0);
+    }
+    let mut m = put(inout tape, inout status, n, 9 | (elem << 8), count);
+    m = put(inout tape, inout status, m, i, 0);
+    for k in u64_zero()..count {
+        if elem == 9 {
+            fail(inout status, 9, 0, 0);
+        }
+        let (end, next) = read_item(in b, inout tape, inout status, m, i, elem, false);
+        i = end;
+    }
+    (i, m)
+}
+
+// Records string `b[start..start + len]` in namespace `space` (0 keys, 1
+// tensor names); returns whether it was new.
+fn add_name(
+    in b: Slice[u8],
+    inout names: Slice[u64],
+    inout status: Slice[u64],
+    space: u64,
+    start: u64,
+    len: u64,
+    count: u64
+) -> bool eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+    let slots = names.len() / 2;
+    if 2 * (count + 1) > slots {
+        fail(inout status, 31, 0, 0);
+    }
+    let mut h: u64 = 14695981039346656037 ^ space;
+    for i in u64_zero()..len {
+        h = wrapping_mul(h ^ widen_u64(b[start + i]), 1099511628211);
+    }
+    let tag = ((len << 1) | space) + 1;
+    let mask = slots - 1;
+    let mut s = h & mask;
+    loop {
+        let t = names[2 * s];
+        if t == 0 {
+            names.set(2 * s, tag);
+            names.set(2 * s + 1, start);
+            return true;
+        }
+        if t == tag {
+            let o = names[2 * s + 1];
+            let mut same = true;
+            for i in u64_zero()..len {
+                if same && b[o + i] != b[start + i] {
+                    same = false;
+                }
+            }
+            if same {
+                return false;
+            }
+        }
+        s = (s + 1) & mask;
+    }
+}
+
+// GGML block geometry `(elements, bytes)`, or `(0, 0)` for an unknown type.
+fn geometry(ty: u64) -> (u64, u64) {
+    if ty == 0 {
+        (1, 4)
+    } else if ty == 1 || ty == 25 || ty == 30 {
+        (1, 2)
+    } else if ty == 2 {
+        (32, 18)
+    } else if ty == 3 {
+        (32, 20)
+    } else if ty == 6 {
+        (32, 22)
+    } else if ty == 7 {
+        (32, 24)
+    } else if ty == 8 {
+        (32, 34)
+    } else if ty == 9 {
+        (32, 36)
+    } else if ty == 10 {
+        (256, 84)
+    } else if ty == 11 {
+        (256, 110)
+    } else if ty == 12 {
+        (256, 144)
+    } else if ty == 13 {
+        (256, 176)
+    } else if ty == 14 {
+        (256, 210)
+    } else if ty == 15 {
+        (256, 292)
+    } else if ty == 24 {
+        (1, 1)
+    } else if ty == 26 {
+        (1, 4)
+    } else if ty == 27 || ty == 28 {
+        (1, 8)
+    } else if ty == 39 {
+        (32, 17)
+    } else {
+        (0, 0)
+    }
+}
+
+// Whether `b[start..start + len]` equals `word`.
+fn same_bytes(in b: Slice[u8], start: u64, len: u64, in word: Slice[u8])
+    -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    if len != word.len() {
+        return false;
+    }
+    for i in u64_zero()..len {
+        if b[start + i] != word[i] {
+            return false;
+        }
+    }
+    true
+}
+
+// Ascending heapsort of the `(start, end)` pairs in `s[base..base + 2 * n]` by start.
+fn sift_pairs(inout s: Slice[u64], base: u64, root: u64, n: u64) eff [
+    Fail[ArithOverflow],
+    Fail[RuntimeError]
+] {
+    let mut r = root;
+    loop {
+        let c = 2 * r + 1;
+        if c >= n {
+            break;
+        }
+        let mut m = c;
+        if c + 1 < n && s[base + 2 * (c + 1)] > s[base + 2 * c] {
+            m = c + 1;
+        }
+        if s[base + 2 * r] >= s[base + 2 * m] {
+            break;
+        }
+        let a0 = s[base + 2 * r];
+        let a1 = s[base + 2 * r + 1];
+        let b0 = s[base + 2 * m];
+        let b1 = s[base + 2 * m + 1];
+        s.set(base + 2 * r, b0);
+        s.set(base + 2 * r + 1, b1);
+        s.set(base + 2 * m, a0);
+        s.set(base + 2 * m + 1, a1);
+        r = m;
+    }
+}
+
+fn sort_pairs(inout s: Slice[u64], base: u64, n: u64) eff [
+    Fail[ArithOverflow],
+    Fail[RuntimeError]
+] {
+    let mut i = n / 2;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = i - 1;
+        sift_pairs(inout s, base, i, n);
+    }
+    let mut end = n;
+    loop {
+        if end < 2 {
+            break;
+        }
+        end = end - 1;
+        let a0 = s[base];
+        let a1 = s[base + 1];
+        let b0 = s[base + 2 * end];
+        let b1 = s[base + 2 * end + 1];
+        s.set(base, b0);
+        s.set(base + 1, b1);
+        s.set(base + 2 * end, a0);
+        s.set(base + 2 * end + 1, a1);
+        sift_pairs(inout s, base, 0, end);
+    }
+}
+
+pub fn parse_gguf(
+    in b: Slice[u8],
+    in alignment_key: Slice[u8],
+    inout tape: Slice[u64],
+    inout names: Slice[u64],
+    inout status: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+    let mut at = need(in b, inout status, 0, 4);
+    if b[0] != 71 || b[1] != 71 || b[2] != 85 || b[3] != 70 {
+        fail(inout status, 2, 0, 0);
+    }
+    let v_end = need(in b, inout status, at, 4);
+    let version = le(in b, at, 4);
+    at = v_end;
+    if version < 2 || version > 3 {
+        fail(inout status, 3, version, 0);
+    }
+    let t_end = need(in b, inout status, at, 8);
+    let tensor_count = le(in b, at, 8);
+    at = t_end;
+    let k_end = need(in b, inout status, at, 8);
+    let kv_count = le(in b, at, 8);
+    at = k_end;
+    if tensor_count > 1048576 {
+        fail(inout status, 4, 0, 0);
+    }
+    if kv_count > 1048576 {
+        fail(inout status, 5, 0, 0);
+    }
+    // The header pair is written last, once the alignment is known.
+    let mut n = put(inout tape, inout status, 0, version, 0);
+    n = put(inout tape, inout status, n, kv_count, tensor_count);
+    let mut count: u64 = 0;
+    // 0: no general.alignment; 1: a valid one; 2: an invalid one.
+    let mut alignment: u64 = 32;
+    let mut alignment_state: u64 = 0;
+    for e in u64_zero()..kv_count {
+        let key_at = n;
+        at = read_string(in b, inout tape, inout status, n, at);
+        n = n + 2;
+        let ty_end = need(in b, inout status, at, 4);
+        let ty = le(in b, at, 4);
+        at = ty_end;
+        let value_at = n;
+        let (end, next) = read_value(in b, inout tape, inout status, n, at, ty);
+        at = end;
+        n = next;
+        let key_start = tape[key_at + 1];
+        let key_len = tape[key_at] >> 8;
+        if !add_name(in b, inout names, inout status, 0, key_start, key_len, count) {
+            fail(inout status, 13, 0, 0);
+        }
+        count = count + 1;
+        if same_bytes(in b, key_start, key_len, in alignment_key) {
+            let a = tape[value_at + 1];
+            if ty == 4 && a > 0 && a & (a - 1) == 0 {
+                alignment = a;
+                alignment_state = 1;
+            } else {
+                alignment_state = 2;
+            }
+        }
+    }
+    if alignment_state == 2 {
+        fail(inout status, 14, 0, 0);
+    }
+    let infos = n;
+    for t in u64_zero()..tensor_count {
+        let name_at = n;
+        at = read_string(in b, inout tape, inout status, n, at);
+        n = n + 2;
+        let r_end = need(in b, inout status, at, 4);
+        let rank = le(in b, at, 4);
+        at = r_end;
+        if rank == 0 || rank > 4 {
+            fail(inout status, 15, 0, 0);
+        }
+        let head = n;
+        n = put(inout tape, inout status, n, rank, 0);
+        for d in u64_zero()..rank {
+            let d_end = need(in b, inout status, at, 8);
+            let dim = le(in b, at, 8);
+            at = d_end;
+            if dim == 0 {
+                fail(inout status, 16, 0, 0);
+            }
+            if n + 1 > tape.len() {
+                fail(inout status, 30, 0, 0);
+            }
+            tape.set(n, dim);
+            n = n + 1;
+        }
+        let g_end = need(in b, inout status, at, 4);
+        let ggml = le(in b, at, 4);
+        at = g_end;
+        let o_end = need(in b, inout status, at, 8);
+        let offset = le(in b, at, 8);
+        at = o_end;
+        tape.set(head + 1, ggml);
+        let name_start = tape[name_at + 1];
+        let name_len = tape[name_at] >> 8;
+        if !add_name(in b, inout names, inout status, 1, name_start, name_len, count) {
+            fail(inout status, 17, 0, 0);
+        }
+        count = count + 1;
+        n = put(inout tape, inout status, n, offset, 0);
+    }
+    let data_start = (at + alignment - 1) / alignment * alignment;
+    if data_start > b.len() {
+        fail(inout status, 1, 0, 0);
+    }
+    // The tensors' `(start, end)` pairs go after the tape, at `tape[n..]`.
+    if n + 2 * tensor_count > tape.len() {
+        fail(inout status, 30, 0, 0);
+    }
+    // The tensors' byte ranges, checked in file order.
+    let mut i = infos;
+    for t in u64_zero()..tensor_count {
+        let rank = tape[i + 2];
+        let ggml = tape[i + 3];
+        let (block, block_bytes) = geometry(ggml);
+        if block == 0 {
+            fail(inout status, 18, ggml, 0);
+        }
+        let cols = tape[i + 4];
+        if cols % block != 0 {
+            fail(inout status, 19, cols, block);
+        }
+        let mut elements: u64 = 1;
+        for d in u64_zero()..rank {
+            elements = elements * tape[i + 4 + d];
+        }
+        let len = (elements / block) * block_bytes;
+        let at_offset = i + 4 + rank;
+        let offset = tape[at_offset];
+        if offset % alignment != 0 {
+            fail(inout status, 20, 0, 0);
+        }
+        let start = data_start + offset;
+        let end = start + len;
+        if end > b.len() {
+            fail(inout status, 21, 0, 0);
+        }
+        tape.set(at_offset, start);
+        tape.set(at_offset + 1, len);
+        tape.set(n + 2 * t, start);
+        tape.set(n + 2 * t + 1, end);
+        i = at_offset + 2;
+    }
+    sort_pairs(inout tape, n, tensor_count);
+    for t in u64_zero()..tensor_count {
+        if t + 1 < tensor_count && tape[n + 2 * t + 1] > tape[n + 2 * t + 2] {
+            fail(inout status, 22, 0, 0);
+        }
+    }
+    tape.set(1, alignment);
+    n
+}

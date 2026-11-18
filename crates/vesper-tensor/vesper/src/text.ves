@@ -1,0 +1,514 @@
+// Module text of @vesper/tensor (see lib.ves): the strict, bounded JSON
+// reader of src/json.rs, which reads safetensors headers.
+//
+// `parse_json` checks the whole document and writes it as a tape of words
+// that src/json.rs turns into `Value`s: the low four bits are the kind
+// (`Null` 0, `true` 1, `false` 2, an integer 3 followed by its value word,
+// a string 4, an object key 5, `[` 6, `]` 7, `{` 8, `}` 9), and a string
+// or key keeps its decoded bytes' offset in `strs` in bits 4..32 and their
+// length in bits 32..60. It returns the tape length, or a failure code
+// (see `json_failure`) as `code << 60`. Codes 11 and 12 ask the caller to
+// retry with a larger tape (`tape.len()` words) and key table
+// (`keys.len() / 2` slots, a power of two).
+use self::num::{
+    u64_zero
+};
+
+// Failure codes, in src/json.rs's messages: 1 "JSON header", 2 "trailing
+// bytes after JSON header", 3 nesting limit, 4 "duplicate JSON key", 5
+// negative number, 6 "JSON number with a leading zero", 7 non-integer
+// number, 8 "unpaired JSON surrogate", 9 "control character in JSON
+// string", 10 "JSON string is not UTF-8", 11 tape full, 12 key table full.
+fn json_failure(code: u64) -> u64 eff [Fail[ArithOverflow]] {
+    code << 60
+}
+
+fn skip_ws(in b: Slice[u8], at: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let mut i = at;
+    loop {
+        if i >= b.len() {
+            break;
+        }
+        let c = b[i];
+        if c != 32 && c != 9 && c != 10 && c != 13 {
+            break;
+        }
+        i = i + 1;
+    }
+    i
+}
+
+// Whether `b[at..]` starts with the ASCII bytes `word` (a 4- or 5-letter
+// literal, given as its letters).
+fn starts(in b: Slice[u8], at: u64, c0: u8, c1: u8, c2: u8, c3: u8, c4: u8, n: u64)
+    -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    if at + n > b.len() {
+        return false;
+    }
+    if b[at] != c0 || b[at + 1] != c1 || b[at + 2] != c2 || b[at + 3] != c3 {
+        return false;
+    }
+    n == 4 || b[at + 4] == c4
+}
+
+fn hex_value(c: u8) -> u64 eff [Fail[ArithOverflow]] {
+    if c >= 48 && c <= 57 {
+        widen_u64(c - 48)
+    } else if c >= 97 && c <= 102 {
+        widen_u64(c - 87)
+    } else if c >= 65 && c <= 70 {
+        widen_u64(c - 55)
+    } else {
+        16
+    }
+}
+
+// The four hex digits at `b[at..at + 4]`, or 65536 when they are not.
+fn hex4(in b: Slice[u8], at: u64) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    if at + 4 > b.len() {
+        return 65536;
+    }
+    let mut v: u64 = 0;
+    for i in u64_zero()..4 {
+        let d = hex_value(b[at + i]);
+        if d == 16 {
+            return 65536;
+        }
+        v = v * 16 + d;
+    }
+    v
+}
+
+// Writes `code` as UTF-8 at `strs[sp..]`; returns the new end.
+fn put_utf8(inout strs: Slice[u8], sp: u64, code: u64)
+    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    if code < 128 {
+        strs.set(sp, wrapping_u8(code));
+        return sp + 1;
+    }
+    if code < 2048 {
+        strs.set(sp, wrapping_u8(192 | (code >> 6)));
+        strs.set(sp + 1, wrapping_u8(128 | (code & 63)));
+        return sp + 2;
+    }
+    if code < 65536 {
+        strs.set(sp, wrapping_u8(224 | (code >> 12)));
+        strs.set(sp + 1, wrapping_u8(128 | ((code >> 6) & 63)));
+        strs.set(sp + 2, wrapping_u8(128 | (code & 63)));
+        return sp + 3;
+    }
+    strs.set(sp, wrapping_u8(240 | (code >> 18)));
+    strs.set(sp + 1, wrapping_u8(128 | ((code >> 12) & 63)));
+    strs.set(sp + 2, wrapping_u8(128 | ((code >> 6) & 63)));
+    strs.set(sp + 3, wrapping_u8(128 | (code & 63)));
+    sp + 4
+}
+
+// Whether `s[start..end]` is UTF-8 as `String::from_utf8` accepts it: no
+// overlong forms, surrogates or code points above U+10FFFF.
+pub fn utf8_ok(in s: Slice[u8], start: u64, end: u64)
+    -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let mut i = start;
+    loop {
+        if i >= end {
+            return true;
+        }
+        let c = s[i];
+        if c < 128 {
+            i = i + 1;
+        } else {
+            let mut n: u64 = 0;
+            let mut lo: u8 = 128;
+            let mut hi: u8 = 191;
+            if c >= 194 && c <= 223 {
+                n = 1;
+            } else if c == 224 {
+                n = 2;
+                lo = 160;
+            } else if (c >= 225 && c <= 236) || c == 238 || c == 239 {
+                n = 2;
+            } else if c == 237 {
+                n = 2;
+                hi = 159;
+            } else if c == 240 {
+                n = 3;
+                lo = 144;
+            } else if c >= 241 && c <= 243 {
+                n = 3;
+            } else if c == 244 {
+                n = 3;
+                hi = 143;
+            } else {
+                return false;
+            }
+            if i + n >= end {
+                return false;
+            }
+            let first = s[i + 1];
+            if first < lo || first > hi {
+                return false;
+            }
+            for k in u64_zero()..n - 1 {
+                let x = s[i + 2 + k];
+                if x < 128 || x > 191 {
+                    return false;
+                }
+            }
+            i = i + n + 1;
+        }
+    }
+}
+
+// Reads the string starting at the quote `b[at]` into `strs[sp..]`.
+// Returns (failure code or 0, the index after the closing quote, the new
+// end of `strs`).
+fn read_string(in b: Slice[u8], at: u64, inout strs: Slice[u8], sp: u64)
+    -> (u64, u64, u64) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    if at >= b.len() || b[at] != 34 {
+        return (1, at, sp);
+    }
+    let start = sp;
+    let mut i = at + 1;
+    let mut o = sp;
+    loop {
+        if i >= b.len() {
+            return (1, i, o);
+        }
+        let c = b[i];
+        i = i + 1;
+        if c == 34 {
+            break;
+        }
+        if c == 92 {
+            if i >= b.len() {
+                return (1, i, o);
+            }
+            let e = b[i];
+            i = i + 1;
+            if e == 117 {
+                let high = hex4(in b, i);
+                if high == 65536 {
+                    return (1, i, o);
+                }
+                i = i + 4;
+                let mut code = high;
+                if high >= 55296 && high < 56320 {
+                    if i + 2 > b.len() || b[i] != 92 || b[i + 1] != 117 {
+                        return (1, i, o);
+                    }
+                    i = i + 2;
+                    let low = hex4(in b, i);
+                    if low == 65536 {
+                        return (1, i, o);
+                    }
+                    i = i + 4;
+                    if low < 56320 || low >= 57344 {
+                        return (8, i, o);
+                    }
+                    code = 65536 + ((high - 55296) << 10) + (low - 56320);
+                } else if high >= 56320 && high < 57344 {
+                    return (8, i, o);
+                }
+                o = put_utf8(inout strs, o, code);
+            } else {
+                let mut d: u8 = 0;
+                if e == 34 || e == 92 || e == 47 {
+                    d = e;
+                } else if e == 98 {
+                    d = 8;
+                } else if e == 102 {
+                    d = 12;
+                } else if e == 110 {
+                    d = 10;
+                } else if e == 114 {
+                    d = 13;
+                } else if e == 116 {
+                    d = 9;
+                } else {
+                    return (1, i, o);
+                }
+                strs.set(o, d);
+                o = o + 1;
+            }
+        } else if c < 32 {
+            return (9, i, o);
+        } else {
+            strs.set(o, c);
+            o = o + 1;
+        }
+    }
+    if !utf8_ok(in strs, start, o) {
+        return (10, i, o);
+    }
+    (0, i, o)
+}
+
+// The tape word of a string or key.
+fn string_word(kind: u64, start: u64, end: u64) -> u64 eff [Fail[ArithOverflow]] {
+    kind | (start << 4) | ((end - start) << 32)
+}
+
+// Records key `word` of object `object`; returns 0, 4 on a duplicate, or
+// 12 when the table is half full.
+fn add_key(inout keys: Slice[u64], in strs: Slice[u8], object: u64, word: u64, count: u64)
+    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let slots = keys.len() / 2;
+    if 2 * (count + 1) > slots {
+        return 12;
+    }
+    let start = (word >> 4) & 268435455;
+    let len = word >> 32;
+    let mut h: u64 = 14695981039346656037 ^ object;
+    for i in u64_zero()..len {
+        h = wrapping_mul(h ^ widen_u64(strs[start + i]), 1099511628211);
+    }
+    let mask = slots - 1;
+    let mut s = h & mask;
+    loop {
+        let tag = keys[2 * s];
+        if tag == 0 {
+            keys.set(2 * s, object + 1);
+            keys.set(2 * s + 1, word);
+            return 0;
+        }
+        let other = keys[2 * s + 1];
+        if tag == object + 1 && other >> 32 == len {
+            let o = (other >> 4) & 268435455;
+            let mut same = true;
+            for i in u64_zero()..len {
+                if same && strs[o + i] != strs[start + i] {
+                    same = false;
+                }
+            }
+            if same {
+                return 4;
+            }
+        }
+        s = (s + 1) & mask;
+    }
+}
+
+// Appends `word` to the tape; returns the new length, or 0 when the tape
+// is full.
+fn push(inout tape: Slice[u64], n: u64, word: u64)
+    -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    if n >= tape.len() {
+        return 0;
+    }
+    tape.set(n, word);
+    n + 1
+}
+
+pub fn parse_json(
+    in b: Slice[u8],
+    inout tape: Slice[u64],
+    inout keys: Slice[u64],
+    inout strs: Slice[u8],
+    inout levels: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let mut at = skip_ws(in b, 0);
+    let mut n: u64 = 0;
+    let mut sp: u64 = 0;
+    let mut depth: u64 = 0;
+    let mut objects: u64 = 0;
+    let mut key_count: u64 = 0;
+    // 0: a value is next; 1: a key is next; 2: a value just ended.
+    let mut step: u64 = 0;
+    loop {
+        if step == 1 {
+            at = skip_ws(in b, at);
+            let (code, next, end) = read_string(in b, at, inout strs, sp);
+            if code != 0 {
+                return json_failure(code);
+            }
+            let word = string_word(5, sp, end);
+            at = next;
+            sp = end;
+            let added = add_key(inout keys, in strs, levels[depth - 1] >> 1, word, key_count);
+            if added != 0 {
+                return json_failure(added);
+            }
+            key_count = key_count + 1;
+            n = push(inout tape, n, word);
+            if n == 0 {
+                return json_failure(11);
+            }
+            at = skip_ws(in b, at);
+            if at >= b.len() || b[at] != 58 {
+                return json_failure(1);
+            }
+            at = skip_ws(in b, at + 1);
+            step = 0;
+        } else if step == 0 {
+            if depth > 8 {
+                return json_failure(3);
+            }
+            if at >= b.len() {
+                return json_failure(1);
+            }
+            let c = b[at];
+            if c == 123 || c == 91 {
+                let object = c == 123;
+                at = at + 1;
+                n = push(
+                    inout tape,
+                    n,
+                    if object {
+                        8
+                    } else {
+                        6
+                    }
+                );
+                if n == 0 {
+                    return json_failure(11);
+                }
+                at = skip_ws(in b, at);
+                let close: u8 = if object {
+                    125
+                } else {
+                    93
+                };
+                if at < b.len() && b[at] == close {
+                    at = at + 1;
+                    n = push(
+                        inout tape,
+                        n,
+                        if object {
+                            9
+                        } else {
+                            7
+                        }
+                    );
+                    if n == 0 {
+                        return json_failure(11);
+                    }
+                    if object {
+                        objects = objects + 1;
+                    }
+                    step = 2;
+                } else {
+                    if object {
+                        levels.set(depth, (objects << 1) | 1);
+                        objects = objects + 1;
+                        step = 1;
+                    } else {
+                        levels.set(depth, 0);
+                        step = 0;
+                    }
+                    depth = depth + 1;
+                }
+            } else if c == 34 {
+                let (code, next, end) = read_string(in b, at, inout strs, sp);
+                if code != 0 {
+                    return json_failure(code);
+                }
+                n = push(inout tape, n, string_word(4, sp, end));
+                if n == 0 {
+                    return json_failure(11);
+                }
+                at = next;
+                sp = end;
+                step = 2;
+            } else if c == 116 || c == 102 || c == 110 {
+                let mut kind: u64 = 0;
+                let mut width: u64 = 4;
+                let mut ok = false;
+                if c == 116 {
+                    kind = 1;
+                    ok = starts(in b, at, 116, 114, 117, 101, 0, 4);
+                } else if c == 102 {
+                    kind = 2;
+                    width = 5;
+                    ok = starts(in b, at, 102, 97, 108, 115, 101, 5);
+                } else {
+                    ok = starts(in b, at, 110, 117, 108, 108, 0, 4);
+                }
+                if !ok {
+                    return json_failure(1);
+                }
+                at = at + width;
+                n = push(inout tape, n, kind);
+                if n == 0 {
+                    return json_failure(11);
+                }
+                step = 2;
+            } else if c >= 48 && c <= 57 {
+                let start = at;
+                loop {
+                    if at >= b.len() || b[at] < 48 || b[at] > 57 {
+                        break;
+                    }
+                    at = at + 1;
+                }
+                if at - start > 1 && b[start] == 48 {
+                    return json_failure(6);
+                }
+                if at < b.len() && (b[at] == 46 || b[at] == 101 || b[at] == 69) {
+                    return json_failure(7);
+                }
+                let mut v: u64 = 0;
+                for i in start..at {
+                    v = v * 10 + widen_u64(b[i] - 48);
+                }
+                n = push(inout tape, n, 3);
+                if n == 0 {
+                    return json_failure(11);
+                }
+                n = push(inout tape, n, v);
+                if n == 0 {
+                    return json_failure(11);
+                }
+                step = 2;
+            } else if c == 45 {
+                return json_failure(5);
+            } else {
+                return json_failure(1);
+            }
+        } else {
+            if depth == 0 {
+                at = skip_ws(in b, at);
+                if at != b.len() {
+                    return json_failure(2);
+                }
+                return n;
+            }
+            let object = levels[depth - 1] & 1 == 1;
+            at = skip_ws(in b, at);
+            if at >= b.len() {
+                return json_failure(1);
+            }
+            let c = b[at];
+            let close: u8 = if object {
+                125
+            } else {
+                93
+            };
+            if c == 44 {
+                at = at + 1;
+                if object {
+                    step = 1;
+                } else {
+                    at = skip_ws(in b, at);
+                    step = 0;
+                }
+            } else if c == close {
+                at = at + 1;
+                n = push(
+                    inout tape,
+                    n,
+                    if object {
+                        9
+                    } else {
+                        7
+                    }
+                );
+                if n == 0 {
+                    return json_failure(11);
+                }
+                depth = depth - 1;
+            } else {
+                return json_failure(1);
+            }
+        }
+    }
+}

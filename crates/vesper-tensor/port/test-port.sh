@@ -1,6 +1,6 @@
 #!/bin/sh
 # vesper-tensor port checks under Cargo (port wave P1 lane 8, #905), run by
-# scripts/test-port-harness.sh on macOS and Windows; Linux runs the same
+# scripts/test-port-harness.sh in the Linux Platforms job; Bazel runs the same
 # checks as Bazel targets (crates/vesper-tensor/BUILD.bazel).
 #
 # - The port-backed package (vesper-tensor) and the compiler's Rust seed
@@ -29,6 +29,9 @@ expect() {
 }
 expect reference_fixtures gpt2_case_file_is_well_formed \
     q4_k_bytes_equal_llama_cpp fp8_channel_block_and_mxfp8_codes_equal_ml_dtypes q8_0_and_q4_0_weights_equal_gguf_py
-expect tokenizer_sampling rng_matches_run_c_xorshift sampling_follows_the_distribution_and_the_nucleus
+expect tokenizer_sampling rng_matches_run_c_xorshift \
+    sampling_follows_the_distribution_and_the_nucleus encoder_matches_run_c_and_round_trips
 expect inference_ops rope_matches_f64_rotation_and_rejects_odd_widths silu_swiglu_softmax_argmax
+expect abba both_builds_encode_the_same_prompt \
+    both_builds_read_the_same_safetensors_headers both_builds_read_the_same_gguf_files
 echo "divergent vesper-tensor port detected (one failing test per ported module)"

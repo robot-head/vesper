@@ -820,6 +820,7 @@ fn compile_entry<M: Module>(
     }
     let instances = instances_for_entry(world, entry, trace_ok)?;
     let mut program = crate::ir::lower_world(world);
+    crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
     let mut inlined_into = BTreeMap::new();
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;
@@ -4079,6 +4080,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let r = self.math(op, &[av, bv])?;
                 self.flush(flush, r)
             }
+            ExprKind::Unary(op, v) if crate::integer_widths::bit_builtin(op).is_some() => {
+                // Place-IR form of a bit count (`integer_widths`).
+                let value = self.expr(v)?;
+                self.bit_builtin(op, value, None)?
+            }
             ExprKind::Unary(op, v) if crate::numeric::conversion(op).is_some() => {
                 let from = crate::numeric::IntegerKind::from_type(&self.ty(v));
                 let value = self.expr(v)?;
@@ -4120,6 +4126,12 @@ impl<M: Module> Codegen<'_, '_, M> {
                     (crate::capability_effects::WIDEN_INTRINSIC, false) => v,
                     _ => return Err("invalid native unary op".into()),
                 }
+            }
+            ExprKind::Binary(op, a, b) if crate::integer_widths::bit_builtin(op).is_some() => {
+                // Place-IR form of `wrapping_shl_k`/`wrapping_shr_k`.
+                let av = self.expr(a)?;
+                let bv = self.expr(b)?;
+                self.bit_builtin(op, av, Some(bv))?
             }
             ExprKind::Binary(op, a, b) if op == "&&" || op == "||" => {
                 let lit = Expr {
@@ -4771,6 +4783,56 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
         })
     }
+    /// A bit builtin of `integer_widths` (`leading_zeros_k`,
+    /// `trailing_zeros_k`, `count_ones_k`, `wrapping_shl_k`,
+    /// `wrapping_shr_k`) on a canonical lane: one `clz`, `ctz`, `popcnt`,
+    /// `ishl`, `ushr` or `sshr` in the kind's own width (`lzcnt`, `tzcnt`
+    /// and `popcnt` where the host has them, `clz`, `rbit`+`clz` and `cnt`
+    /// on AArch64). Counts are `u32` lanes; shifts take the amount modulo
+    /// the width and return a canonical `k` lane.
+    fn bit_builtin(
+        &mut self,
+        name: &str,
+        a: ir::Value,
+        n: Option<ir::Value>,
+    ) -> Result<ir::Value, String> {
+        use crate::integer_widths::BitOp;
+        let (op, kind) =
+            crate::integer_widths::bit_builtin(name).ok_or("unknown native bit builtin")?;
+        let narrow = match kind.bits() {
+            8 => types::I8,
+            16 => types::I16,
+            32 => types::I32,
+            _ => types::I64,
+        };
+        let x = if narrow == types::I64 {
+            a
+        } else {
+            self.b.ins().ireduce(narrow, a)
+        };
+        let (r, signed) = match op {
+            BitOp::LeadingZeros => (self.b.ins().clz(x), false),
+            BitOp::TrailingZeros => (self.b.ins().ctz(x), false),
+            BitOp::CountOnes => (self.b.ins().popcnt(x), false),
+            BitOp::WrappingShl | BitOp::WrappingShr => {
+                // Cranelift shifts take the amount modulo the width of `x`.
+                let n = n.ok_or("native bit shift without an amount")?;
+                let r = match op {
+                    BitOp::WrappingShl => self.b.ins().ishl(x, n),
+                    _ if kind.unsigned() => self.b.ins().ushr(x, n),
+                    _ => self.b.ins().sshr(x, n),
+                };
+                (r, kind.signed())
+            }
+        };
+        Ok(if narrow == types::I64 {
+            r
+        } else if signed {
+            self.b.ins().sextend(types::I64, r)
+        } else {
+            self.b.ins().uextend(types::I64, r)
+        })
+    }
     /// `widen_k`, `narrow_k` and `wrapping_k` on a canonical `from` lane.
     /// In-range values have the same lane in every kind, so only the range
     /// check of a narrowing and the reduction of a wrapping emit code.
@@ -5157,6 +5219,18 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.ins().store(ir::MemFlags::new(), low, ptr, 0);
             self.b.ins().store(ir::MemFlags::new(), high, ptr, 8);
             return Ok(ptr);
+        }
+        if let Some((op, _)) = crate::integer_widths::bit_builtin(name)
+            && args.len() == op.arity()
+            && args.iter().all(|a| a.pass == Pass::In)
+        {
+            // A reserved bit builtin (`integer_widths`): one instruction.
+            let a = self.expr(&args[0].expr)?;
+            let n = match args.get(1) {
+                Some(n) => Some(self.expr(&n.expr)?),
+                None => None,
+            };
+            return self.bit_builtin(name, a, n);
         }
         let vars = call_vars(self.world, site, &self.generic_vars);
         let f = concrete(self.world, name, &vars)?;
