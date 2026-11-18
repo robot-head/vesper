@@ -639,6 +639,71 @@ impl Abi for crate::port::vesper__ebpf__wire__WireError {
     }
 }
 
+/// Owned handle of a Vesper `vesper__ebpf__verifier__Outcome` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_ebpf_vesper__ebpf__verifier__Outcome_drop`.
+pub struct vesper__ebpf__verifier__Outcome {
+    words: [u64; 4],
+}
+
+impl vesper__ebpf__verifier__Outcome {
+    /// # Safety
+    /// `words` must hold a `vesper__ebpf__verifier__Outcome` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 4];
+        owned.copy_from_slice(&words[..4]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> vesper__ebpf__verifier__OutcomeRef<'_> {
+        vesper__ebpf__verifier__OutcomeRef { words: &self.words }
+    }
+}
+
+impl Drop for vesper__ebpf__verifier__Outcome {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_ebpf_vesper__ebpf__verifier__Outcome_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for vesper__ebpf__verifier__Outcome {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("vesper__ebpf__verifier__Outcome { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for vesper__ebpf__verifier__Outcome {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for vesper__ebpf__verifier__Outcome {}
+
+/// A borrowed view of a Vesper `vesper__ebpf__verifier__Outcome` value, read in place.
+#[derive(Clone, Copy)]
+pub struct vesper__ebpf__verifier__OutcomeRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> vesper__ebpf__verifier__OutcomeRef<'a> {
+    pub fn words(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[0]) }
+    }
+    pub fn rule(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[1]) }
+    }
+    pub fn msg(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[2]) }
+    }
+    pub fn widenings(&self) -> u64 {
+        let w: &'a [u64] = self.words;
+        <u64 as Abi>::get(&w[3..])
+    }
+}
+
 const _: () = assert!(<Option<(crate::port::vesper__ebpf__scalar__Scalar, crate::port::vesper__ebpf__scalar__Scalar)> as Abi>::WORDS == 13);
 const _: () = assert!(<Option<crate::port::vesper__ebpf__program__MapKind> as Abi>::WORDS == 2);
 const _: () = assert!(<Option<crate::port::vesper__ebpf__program__ProgramType> as Abi>::WORDS == 2);
@@ -671,6 +736,7 @@ unsafe extern "C" {
     fn vesper_ebpf_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_ebpf_seq_free(seq: i64) -> i64;
     fn vesper_ebpf_live_allocations() -> i64;
+    fn vesper_ebpf_vesper__ebpf__verifier__Outcome_drop(value: *mut u64) -> i64;
     fn vesper_ebpf_callgraph_check_stack(ids: *mut u64, frames: *mut u64, calls: *mut u64, indirect: *mut u64, root: i64, limit: i64, max_frames: i64) -> i64;
     fn vesper_ebpf_helpers_allowed(prog_type: *mut u64, id: i64) -> i64;
     fn vesper_ebpf_helpers_gpl_compatible(license: *mut u64) -> i64;
@@ -727,6 +793,7 @@ unsafe extern "C" {
     fn vesper_ebpf_verifier_refine_jmp(result: *mut u64, op: *mut u64, wide: i64, a: *mut u64, b: *mut u64, holds: i64) -> i64;
     fn vesper_ebpf_verifier_scalar_alu(result: *mut u64, op: *mut u64, wide: i64, a: *mut u64, b: *mut u64) -> i64;
     fn vesper_ebpf_verifier_sext_imm(imm: i64, width: i64) -> i64;
+    fn vesper_ebpf_verifier_verify(result: *mut u64, slots: *mut u64, ptype: *mut u64, pt_regs: i64, gpl: i64, maps: *mut u64, kfuncs: *mut u64, text: *mut u64, max_insns: i64, max_states: i64, widen_loops: i64) -> i64;
     fn vesper_ebpf_wire_alert_decode(result: *mut u64, s: *mut u64, fail: *mut u64) -> i64;
     fn vesper_ebpf_wire_alert_encode(w: *mut u64) -> i64;
     fn vesper_ebpf_wire_eth_decode(result: *mut u64, s: *mut u64, fail: *mut u64) -> i64;
@@ -1425,6 +1492,18 @@ pub fn verifier_sext_imm(imm: i32, width: u32) -> u64 {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_ebpf_verifier_sext_imm(imm as i64, width as i64) };
     raw as u64
+}
+
+/// Calls `verifier_verify` of the Vesper library `ebpf` (`vesper_ebpf_verifier_verify`).
+pub fn verifier_verify(slots: &[crate::port::vesper__ebpf__insn__RawInsn], ptype: crate::port::vesper__ebpf__program__ProgramType, pt_regs: i64, gpl: bool, maps: &[u64], kfuncs: &[u64], text: &[u8], max_insns: u64, max_states: u64, widen_loops: bool) -> vesper__ebpf__verifier__Outcome {
+    let mut result = [0u64; 4];
+    let mut arg_ptype = [0u64; <crate::port::vesper__ebpf__program__ProgramType as Abi>::WORDS];
+    Abi::put(&ptype, &mut arg_ptype);
+    // SAFETY: `vesper_ebpf_verifier_verify` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(slots, |view_slots| vesper_port_abi::with_slice(maps, |view_maps| vesper_port_abi::with_slice(kfuncs, |view_kfuncs| vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_ebpf_verifier_verify(result.as_mut_ptr(), view_slots, arg_ptype.as_mut_ptr(), pt_regs as i64, gpl as i64, view_maps, view_kfuncs, view_text, max_insns as i64, max_states as i64, widen_loops as i64) }))));
+    unsafe { vesper__ebpf__verifier__Outcome::from_words(&result[0..]) }
 }
 
 /// Calls `wire_alert_decode` of the Vesper library `ebpf` (`vesper_ebpf_wire_alert_decode`).

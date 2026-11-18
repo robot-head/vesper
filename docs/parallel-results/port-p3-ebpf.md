@@ -1,17 +1,19 @@
 # Port wave P3a lane 6: vesper-ebpf (#1041)
 
-Status: **part 1 of 4** (this PR). Base `3c075a4`.
+Status: **part 2 of 4** (this PR; part 1 is #1048, merged as `5ff0c7a`).
+Part 1 base `3c075a4`, part 2 base `5ff0c7a`.
 
 The crate is 12.4k lines with 82 tests in 15 files, so the port lands in four
 parts, as Crucible's did:
 
-1. **This part:** the seed package, the instruction codec (`insn.rs`), the
+1. **Part 1 (#1048):** the seed package, the instruction codec (`insn.rs`), the
    wire structs (`wire.rs`), the tnum and interval domain (`scalar.rs`) with
    the verifier's domain functions (`scalar_alu`, `refine_jmp`, `sext_imm`),
    the concrete ALU, jump and byte-order semantics of `interp.rs`, the helper
    tables (`helpers.rs`), the map and program kinds and `MapDef::validate`
    (`program.rs`) and the stack bound (`callgraph.rs`).
-2. The verifier (`verifier.rs`).
+2. **Part 2 (this PR):** the verifier (`verifier.rs`), see
+   [Part 2: the verifier](#part-2-the-verifier).
 3. BTF parsing, BTF.ext and CO-RE (`btf.rs`, `btf_ext.rs`, `core.rs`).
 4. The interpreter, the mitigator and the builders and assembler
    (`interp.rs`, `mitigator.rs`, `builder.rs`, the `Asm` half of
@@ -107,7 +109,7 @@ default, as before.
 One edit per ported module (`EDITS` in `build.rs`, applied one at a time with
 `VESPER_EBPF_DIVERGENT`, mirrored in `BUILD.bazel`). `port/check.sh` asserts
 that each edit fails the named test while another test of the same file
-passes. All eight were observed failing:
+passes. All nine were observed failing:
 
 | # | Module | Edit | Caught by |
 | --- | --- | --- | --- |
@@ -119,8 +121,11 @@ passes. All eight were observed failing:
 | 5 | program | a 2048-byte ringbuf is valid | `port_surface::map_definitions_are_validated_rule_by_rule` |
 | 6 | callgraph | stack limit plus 8 bytes | `port_surface::stack_bound_reports_every_outcome` |
 | 7 | wire | source address read from the destination | `mitigator::wire_layouts_are_exact` |
+| 8 | verifier (part 2) | a packet access may end one byte past the checked range (unsound) | `verifier_rules::corpus_verdicts` (and `findings_use_the_contract_shape`), `soundness::accepted_random_programs_never_fault` (both tests), `kernel_diff`, `lean_model::bounds_model_verdicts_match_the_verifiers`, `verifier_port` |
 
-Edit 3 is the verifier divergence the soundness tests must catch.
+Edit 3 is the verifier divergence the soundness tests must catch in part 1
+(the domain functions); edit 8 is the one in the ported verifier itself, and
+the soundness tests catch it too.
 
 ## Performance (ABBA)
 
@@ -177,9 +182,80 @@ Each with a repro from this port:
   -p vesper-ebpf-seed` still builds it.
 - `tests/port_surface.rs` is new; the existing tests are unchanged.
 
-## Remaining (parts 2-4)
+## Part 2: the verifier
 
-The verifier, BTF/BTF.ext/CO-RE, the interpreter (its maps become owned
+`verifier.rs` (3.6k lines) is `vesper/src/verifier.ves` (4.4k lines), and
+`verify` forwards to it in the port build. The kprobe `PT_REGS` check and
+`MapDef::validate` stay in the Rust wrapper (they run before exploration and
+call code that is already ported). `src/port.rs` packs the maps (kernel
+type, sizes, name) and kfunc references (slot, kfunc code, name) over one
+text pool, calls `verifier_verify`, and rebuilds the `VerifyError` or
+`VerifyReport` from the outcome words. Rule names come back as text and are
+mapped to the crate's `&'static str` rules (`RULES`, 73 entries).
+
+Layout: a state is two flat sequences instead of `Vec<Frame>`, `Vec<Slot>`
+and the reference, packet-range and irq lists. `rs` holds 76 entries per
+frame (11 registers, 64 stack slots, the callback argument); `ws` holds an
+8-word header, 17 words per frame, then references, packet ranges and irq
+ids. Explored states are records in pools with per-instruction linked lists,
+pending paths are a work stack of packed copies (the leading empty stack
+slots are skipped, as Rust's stack only grows to the deepest slot used), and
+a rejection raises `Fail[VErr]` after writing the rule and message.
+
+Exactness: `tests/verifier_port.rs` (new) runs both builds on every corpus
+case (as is and retargeted to each of the 4 program types), every depth and
+kfunc case, and 400 random programs plus a retargeted copy each, under four
+policies (the default limits at a 200,000-instruction budget, the same
+without widening, 2,000 instructions with 2 states per instruction, and 300
+instructions), and compares the `Debug` output: verdict, rule, instruction,
+message and every count of the report. They agree on all of it. A corpus
+case that runs out of a large budget is compared retargeted under the small
+budgets only (it takes about a second per run in either build). The suite
+takes 63 s in release and 153 s in debug. All 88 earlier tests and the ABBA
+equality test also pass against the ported verifier.
+
+Memory: before packing pending paths, `accept/iter_num_nested` without
+widening at a 1,000,000-instruction budget peaked at 6.7 GB in the port
+against 0.84 GB in Rust (the work stack held full 64-slot frames of 88-byte
+entries). With packing it peaks at 1.55 GB and runs as fast as Rust (107 s
+against 110 s for the case retargeted to every type).
+
+### Performance (part 2)
+
+Same setup as above, `abba_verify` (the mitigator under the default policy,
+the whole verifier now ported):
+
+| Workload | Rust per op | Vesper per op | Wall ratio (median, min-max) | Instructions Rust | Instructions Vesper | Instruction ratio |
+| --- | --: | --: | --: | --: | --: | --: |
+| `verify` of the mitigator | 28.7 us | 132.5 us | 4.74 (3.56-5.47) | 465,001 | 1,428,700 | 3.07 |
+
+The ported verifier is about 3x Rust's instructions and 4.7x its time.
+Rust stays the default. The flat 88-byte entry (`R`) for every register and slot is this
+port's choice, not a compiler limit; a compact state is the first thing to
+try for parity. Where the time goes (callgrind, self cost):
+`memcpy` 24% (state copies: a fork copies the whole flat state, 6.7 KB per
+frame, and each record stores one, where Rust clones only the stack slots
+in use), the exploration loop 16%, state inclusion 11%, malloc and free 5%.
+
+### Compiler gaps (part 2)
+
+5. **`Option[E]` results of `handle` have no native layout** ("native
+   layout is not yet defined for _"): the verifier's sub-results return
+   `u64` codes instead. Repro: a `handle` block whose result type is
+   `Option[VErr]`.
+6. **Division, remainder and indexing raise `Fail[RuntimeError]`**, which
+   an `eff [Fail[VErr]]` function cannot pass through (E0400), so the port
+   uses shifts, masks, a `udiv` helper with its own `handle`, and
+   `try_get`/`try_set` with a default everywhere.
+7. **Nested reads inside an `inout` call's arguments are refused** (E0301):
+   `f(inout st, g(in st))` needs a local first, so `verifier.ves` hoists
+   such reads throughout.
+8. **No `continue`, `while` or `wrapping_neg`.** Loops are `loop` with
+   `if`/`break`; negation is `wrapping_sub(0, x)`.
+
+## Remaining (parts 3-4)
+
+BTF/BTF.ext/CO-RE, the interpreter (its maps become owned
 state threaded through the run, per the lane prompt), the mitigator and the
 builders. `tests/lean_model.rs` passes against both builds; locally its one
 Lean compile step is skipped without `VESPER_LEAN` (the other three tests

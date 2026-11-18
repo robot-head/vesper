@@ -74,4 +74,10 @@ const EDITS: &[(&str, &str)] = &[
         "        src_ipv4: wrapping_u32(be(in s, 26, 4)),\n",
         "        src_ipv4: wrapping_u32(be(in s, 30, 4)),\n",
     ),
+    // 8 verifier.rs (the exploration): a packet access may end one byte
+    // past the range established against data_end (unsound).
+    (
+        "            if p.var.smin < 0 || total < 0 || wrapping_add(total, ni) > range {\n",
+        "            if p.var.smin < 0 || total < 0 || wrapping_add(total, ni) > wrapping_add(range, 1) {\n",
+    ),
 ];
