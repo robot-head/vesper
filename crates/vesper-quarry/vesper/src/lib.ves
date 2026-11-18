@@ -13,9 +13,9 @@
 //
 // The library uses export ABI v3: `prepare` takes the catalog as in-place
 // slices of the `CTab` and `CCol` mirrors, which the Vesper build copies in
-// one block each instead of decoding a word stream. The directive is in
-// check.ves, because the compiler reads `@export` directives from the
-// package's first file in path order, not from this root module.
+// one block each instead of decoding a word stream.
+//
+// @export abi 3
 //
 // Errors are sticky: the first `fail` wins, and every step returns early
 // once `err` is set. Fail[E] cannot be used here, because an abortable

@@ -12,7 +12,6 @@ use self::util::{
     ex,
     fail,
     fail_name,
-    free_d,
     identifier,
     load_limits,
     new_d,
@@ -59,7 +58,6 @@ pub fn execute_q(in prog: Slice[u64], in text: Slice[u8]) -> Q {
     let mut q = new_q();
     let mut ds = new_d();
     execute_run(inout q, inout ds, in prog, in text);
-    free_d(ds);
     q
 }
 
@@ -218,7 +216,6 @@ pub fn set_rows_q(in prog: Slice[u64], in text: Slice[u8]) -> Q {
     let mut q = new_q();
     let mut ds = new_d();
     set_rows_run(inout q, inout ds, in prog, in text);
-    free_d(ds);
     q
 }
 

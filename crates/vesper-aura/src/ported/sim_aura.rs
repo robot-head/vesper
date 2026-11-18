@@ -22,7 +22,8 @@ pub fn encode_view_tree(
     if let Some(fault) = q.fault() {
         return Err(codec::view_error(fault));
     }
-    let items = q.items();
+    let view = q.as_ref();
+    let items = view.items().as_slice();
     let ops = items
         .as_chunks::<5>()
         .0
@@ -37,7 +38,7 @@ pub fn encode_view_tree(
         .collect();
     let mut values = Vec::new();
     let mut properties = Vec::new();
-    for w in q.values().as_chunks::<3>().0 {
+    for w in view.values().as_slice().as_chunks::<3>().0 {
         let property = codec::property_of(w[0]);
         properties.push(property);
         let value = (w[2] == 1)
@@ -61,7 +62,8 @@ pub fn audit_view_tree(tree: &ViewTree, limits: &Limits) -> Result<WcagReport, V
 
 fn report(q: &binding::Query, target: impl Fn(u64) -> AuditTarget) -> WcagReport {
     let (inspected, interactive) = q.counts();
-    let items = q.items();
+    let view = q.as_ref();
+    let items = view.items().as_slice();
     let violations = items
         .as_chunks::<3>()
         .0
@@ -150,8 +152,11 @@ impl SimAura {
         self.inner.check_thread(thread)?;
         let session = self.session();
         Ok(binding::sim_focusable(&self.inner.rec)
+            .as_ref()
             .items()
-            .into_iter()
+            .as_slice()
+            .iter()
+            .copied()
             .map(|serial| WidgetId { session, serial })
             .collect())
     }

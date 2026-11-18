@@ -1,8 +1,4 @@
 // Module check of @vesper/quarry (see lib.ves).
-//
-// The package's export ABI directive (see lib.ves): the compiler reads
-// `@export` directives from the first file in path order, which is this one.
-// @export abi 3
 use self::{
     BCol,
     Bind,

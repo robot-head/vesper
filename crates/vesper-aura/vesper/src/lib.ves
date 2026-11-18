@@ -18,10 +18,10 @@
 //   total text bytes, patches.
 //
 // Scratch sequences are locals: native code frees a function's own
-// `ChunkSeq` bindings on every exit (#945). A dropped local handle does not
-// free the sequences inside it yet, so each path builds only the handle it
-// returns, and a handle's sequences are sized when it is built (assigning a
-// new sequence to a handle's field would leak the old one).
+// `ChunkSeq` bindings on every exit (#945), and a dropped or replaced handle
+// frees the sequences inside it (#985).
+//
+// @export abi 3
 use self::apply::{
     do_recorder_apply
 };

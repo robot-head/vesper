@@ -60,15 +60,12 @@ pub fn do_reconciler_prepare(
     in words: Slice[u64],
     in text: Slice[u8]
 ) -> Prepared {
-    // Each path builds the one Prepared it returns (a dropped local handle
-    // does not free its sequences natively).
+    let mut p = prepared_empty(r.session, r.revision, r.serial);
     if r.close == 2 {
-        let mut p = prepared_empty(r.session, r.revision, r.serial);
         p.fault = Option::Some(ViewFault::Closed);
         return p;
     }
     if r.revision == max_u64() {
-        let mut p = prepared_empty(r.session, r.revision, r.serial);
         p.fault = Option::Some(ViewFault::IdentityExhausted);
         return p;
     }
@@ -76,23 +73,19 @@ pub fn do_reconciler_prepare(
         let mut tree = tree_sized(decode_cap(in words));
         decode(inout tree, in words);
         let fault = validate(inout tree, r.lim, in text);
-        let mut q = prepared_for(r.session, r.revision, r.serial, tree, text.len());
-        q.next = inc(r.revision);
+        p = prepared_for(r.session, r.revision, r.serial, tree, text.len());
         match fault {
             Option::Some(f) => {
-                q.fault = Option::Some(f);
-                return q;
+                p.next = inc(r.revision);
+                p.fault = Option::Some(f);
+                return p;
             },
             Option::None => (),
         }
-        plan(in r.m, inout q, true, in text, r.lim.patches);
-        q
-    } else {
-        let mut p = prepared_empty(r.session, r.revision, r.serial);
-        p.next = inc(r.revision);
-        plan(in r.m, inout p, false, in text, r.lim.patches);
-        p
     }
+    p.next = inc(r.revision);
+    plan(in r.m, inout p, has_tree, in text, r.lim.patches);
+    p
 }
 
 // Identities a plan reserved are never handed out again, whether or not

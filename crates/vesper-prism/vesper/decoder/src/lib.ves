@@ -18,7 +18,8 @@ use self::syntax::{
     decimal,
     push_range,
     push_token_lower,
-    connection_options
+    connection_options,
+    value_ok
 };
 
 copy struct Limits {
@@ -185,14 +186,8 @@ fn parse_head(in h: Slice[u8], limits: Limits) -> Result[Head, Error] {
         if colon >= hi || colon == at || !push_token_lower(inout head.names, in h, at, colon) {
             return bad(Error::InvalidHeader);
         }
-        for i in inc(colon)..hi {
-            let b = match h.try_get(i) {
-                Option::Some(b) => b,
-                Option::None => 0,
-            };
-            if (b < 32 && b != 9) || b == 127 {
-                return bad(Error::InvalidHeader);
-            }
+        if !value_ok(in h[inc(colon)..hi]) {
+            return bad(Error::InvalidHeader);
         }
         let v = trim_ows(in h, inc(colon), hi);
         // Each name is compared only with the literals of its length, so most
@@ -316,6 +311,10 @@ fn incomplete(inout d: DecoderCore, total: u64) -> Step {
     }
 }
 
+fn crlf(in s: Slice[u8]) -> Option[u64] {
+    s.find_either(13, 10)
+}
+
 fn first_or(in s: Slice[u8], b: u8, none: u64) -> u64 {
     match s.find_byte(b) {
         Option::Some(i) => i,
@@ -329,21 +328,10 @@ fn line_break(in s: Slice[u8], lo: u64, hi: u64) -> u64 {
     if lo >= hi {
         return hi;
     }
-    let n = wrapping_sub(hi, lo);
-    let cr = first_or(in s[lo..hi], 13, n);
-    let lf = if cr == 0 {
-        n
-    } else {
-        first_or(in s[lo..wrapping_add(lo, cr)], 10, cr)
-    };
-    wrapping_add(
-        lo,
-        if lf < cr {
-            lf
-        } else {
-            cr
-        }
-    )
+    match crlf(in s[lo..hi]) {
+        Option::Some(i) => wrapping_add(lo, i),
+        Option::None => hi,
+    }
 }
 
 // The incremental CRLF scan, every byte examined once. Outside a CR, the run

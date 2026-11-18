@@ -50,14 +50,12 @@ fn max(a: u64, b: u64) -> u64 {
 }
 
 // `x << s` and `x >> s`, 0 for `s >= 64` (every caller's amount is below
-// 64). A shift by a variable amount may raise `Fail[ArithOverflow]`, and a
-// handler would keep these out of the inliner, so they are written with
-// the total `rotate_left`/`rotate_right`: `rotate_left(1, s)` is
-// `2^s`, `x << s` is `x` rotated left with the `s` wrapped-around low bits
-// cleared, and `x >> s` is `x` with its low `s` bits cleared rotated right.
+// 64). `x << s` may raise `Fail[ArithOverflow]`, and a handler would keep
+// these out of the inliner, so the in-range case uses the total
+// `wrapping_shl_u64`/`wrapping_shr_u64`.
 fn shl(x: u64, s: u64) -> u64 {
     if s < 64 {
-        rotate_left(x, s) & wrapping_sub(0, rotate_left(1, s))
+        wrapping_shl_u64(x, wrapping_u32(s))
     } else {
         0
     }
@@ -65,7 +63,7 @@ fn shl(x: u64, s: u64) -> u64 {
 
 fn shr(x: u64, s: u64) -> u64 {
     if s < 64 {
-        rotate_right(x & wrapping_sub(0, rotate_left(1, s)), s)
+        wrapping_shr_u64(x, wrapping_u32(s))
     } else {
         0
     }
@@ -101,12 +99,6 @@ fn saturating_mul(a: u64, b: u64) -> u64 {
     } else {
         wrapping_mul(a, b)
     }
-}
-
-// The de Bruijn sequence behind `WheelCore::low_bit`: for `k < 64`, the top
-// six bits of `2^k * debruijn()` are distinct.
-fn debruijn() -> u64 {
-    285870213051386505
 }
 
 // A sequence of `n` copies of `v`, allocated once.

@@ -61,17 +61,6 @@ pub fn new_q_sized(pool: u64, words: u64, ex: u64, toks: u64, nodes: u64) -> Q {
     }
 }
 
-// Frees the sequences of a `D`. Native code frees the sequences a function
-// binds itself, but not the sequence fields of a struct it owns.
-pub fn free_d(sink ds: D) {
-    let rowset = ds.rowset;
-    let dtabs = ds.dtabs;
-    let decls = ds.decls;
-    let stats = ds.stats;
-    let vals = ds.vals;
-    let counts = ds.counts;
-}
-
 pub fn new_d() -> D {
     D {
         rowset: ChunkSeq::new[u64](),
@@ -468,6 +457,38 @@ pub fn load_limits(inout q: Q, in limits: Slice[u64]) -> bool {
         }
     }
     true
+}
+
+// The first byte of `w` that is not an ASCII letter, digit or `_`.
+pub fn word_end(in w: Slice[u8]) -> Option[u64] {
+    w.find_not_in(287948901175001088, 576460745995190270, false)
+}
+
+// `identifier` for the word `w`, a copy of `pool[off..off + w.len()]`:
+// a lowercase copy goes to the end of the pool only when `w` has an
+// uppercase byte.
+pub fn identifier_in(inout q: Q, in w: Slice[u8], off: u64) -> u64 {
+    let len = w.len();
+    let first = match w.try_get(0) {
+        Option::Some(c) => c,
+        Option::None => 48,
+    };
+    let word = match word_end(in w) {
+        Option::Some(i) => false,
+        Option::None => true,
+    };
+    if len > 128 || first < 65 || !word {
+        fail(inout q, 1, "expected ASCII identifier of at most 128 bytes");
+        return 0;
+    }
+    match w.find_not_in(18446744073709551615, 18446744073575333889, true) {
+        Option::Some(i) => {
+            let start = q.pool.len();
+            q.pool.extend_ascii_lowercase(in w);
+            start
+        },
+        Option::None => off,
+    }
 }
 
 // `identifier(pool[off..off+len])`: the offset of its lowercase form in the

@@ -111,8 +111,8 @@ impl Decoder {
     }
     fn head(&self) -> RequestHead {
         let view = self.core.as_ref().head();
-        let names = view.names().to_vec();
-        let values = view.values().to_vec();
+        let names = view.names().as_slice();
+        let values = view.values().as_slice();
         let mut headers = Vec::with_capacity(view.name_ends().len());
         let (mut name_at, mut value_at) = (0, 0);
         for (name_end, value_end) in view.name_ends().iter().zip(view.value_ends().iter()) {
@@ -124,8 +124,8 @@ impl Decoder {
             (name_at, value_at) = (name_end, value_end);
         }
         RequestHead {
-            method: ascii(&view.method().to_vec()),
-            target: ascii(&view.target().to_vec()),
+            method: ascii(view.method().as_slice()),
+            target: ascii(view.target().as_slice()),
             headers,
             content_length: view.content_length() as usize,
         }

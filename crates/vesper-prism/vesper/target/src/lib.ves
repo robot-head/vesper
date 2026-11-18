@@ -137,6 +137,10 @@ fn count(in s: Slice[u8], lo: u64, hi: u64, b: u8) -> u64 {
 }
 
 // The decoder's origin-form grammar (`valid_target` for a GET request).
+fn target_run(in t: Slice[u8]) -> Option[u64] {
+    t.find_not_in(12682136353106821120, 5188146764422578175, false)
+}
+
 fn valid_origin(in t: Slice[u8]) -> bool {
     let n = t.len();
     if n == 0 || byte(in t, 0) != 47 {
@@ -149,6 +153,14 @@ fn valid_origin(in t: Slice[u8]) -> bool {
     loop {
         if i >= n {
             break;
+        }
+        match target_run(in t[i..n]) {
+            Option::Some(j) => {
+                i = wrapping_add(i, j);
+            },
+            Option::None => {
+                return true;
+            },
         }
         let b = match t.try_get(i) {
             Option::Some(b) => b,

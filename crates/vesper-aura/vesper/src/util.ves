@@ -188,18 +188,7 @@ pub fn do_limits_valid(in limits: Slice[u64]) -> bool {
 pub fn remove_at(inout s: ChunkSeq[u64], i: u64) {
     let n = s.len();
     if i < n {
-        let mut j = i;
-        loop {
-            if inc(j) >= n {
-                break;
-            }
-            let v = match s.try_get(inc(j)) {
-                Option::Some(v) => v,
-                Option::None => 0,
-            };
-            s.try_set(j, v);
-            j = inc(j);
-        }
+        let _ = s.try_copy_within(inc(i), n, i);
         s.truncate(dec(n));
     }
 }
@@ -209,18 +198,7 @@ pub fn insert_at(inout s: ChunkSeq[u64], i: u64, v: u64) {
     let n = s.len();
     s.push(v);
     if i < n {
-        let mut j = n;
-        loop {
-            if j <= i {
-                break;
-            }
-            let w = match s.try_get(dec(j)) {
-                Option::Some(w) => w,
-                Option::None => 0,
-            };
-            s.try_set(j, w);
-            j = dec(j);
-        }
+        let _ = s.try_copy_within(i, n, inc(i));
         s.try_set(i, v);
     }
 }

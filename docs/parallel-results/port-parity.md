@@ -24,6 +24,27 @@ the median (96% for Quarry).
 | Ignis | 6, #981 | `examples/abba.rs` (new): build / plan / lower at 64 / 256 passes | 5-13x | build 4.30x / 4.43x, plan 5.21x / 4.53x, lower 4.42x / 3.73x | build **3.74x / 3.93x**, plan **2.41x / 1.12x**, lower **4.19x / 3.51x** | not met |
 | Quarry | 7, #976 | `examples/planner_abba.rs` | 4.3-4.9x | 2.87x wall, 2.54x instr. | **2.19x** wall (2.10-2.68; repeat 2.42x), **1.96x** instr. | not met |
 
+### After the port gaps wave (lane 9, #992)
+
+Measured by [port gaps lane 9](port-gaps-rescore.md) at `72209eb` (lanes
+1-8 of the [port gaps wave](../agent-prompts/port-gaps/README.md) merged),
+one machine and session. "Gaps wave" is that main with no port change; "with
+rewrites" adds the port changes of lane 9. Wall clock is the median of two
+ABBA runs; instructions are callgrind.
+
+| Port | After the parity wave | Gaps wave, wall | Gaps wave, instr. | With rewrites, wall | With rewrites, instr. | Parity bar |
+|---|---|---|---|---|---|---|
+| warp-wheel | 3.37x | 1.77x | | **1.73-1.77x** | | not met |
+| BBR | 5.3-5.5x | 2.3-3.1x (interval) | 2.25x | **2.3-2.9x** (interval) | **2.24x** | not met |
+| Prism decode / route / encode / connection | 2.14x / 3.43x / 3.43x / 2.42x | 1.35x / 2.58x / 2.01x / 1.55x | 1.37x | **1.18x / 2.65x / 1.79x / 1.36x** | **1.22x** | not met |
+| warp-tcp codec / transfer | 0.90x instr. / 2.59x | 0.89-1.23x / 1.45-2.02x (noise) | 0.72x / 1.47x | no change | 0.72x / 1.47x | not met (transfer) |
+| Aura one-text / reorder / encode-audit | 0.42x / 0.58x / 0.85x | 0.34x / 0.41x / 0.56x | 0.90x | **0.29x / 0.39x / 0.53x** | **0.86x** | **met** |
+| Ignis build, plan, lower at 64 / 256 | 3.74/3.93, 2.41/1.12, 4.19/3.51x | 2.5/2.5, 1.4/0.68, 3.1/2.7x | 1.43x | no change | 1.43x | not met |
+| Quarry | 2.19x (1.96x instr.) | 1.85x | 1.61x | **1.80x** | **1.59x** | not met |
+
+Rust stays the default build of every port but Aura. The remaining compiler
+gaps, with repros, are listed in the [lane 9 report](port-gaps-rescore.md#remaining-compiler-gaps).
+
 Instruction ratios (callgrind) where the lane gave them: warp-wheel 5.62x to
 3.88x, BBR 7.85x to 3.54x, Prism `tests/malformed.rs` 2.60x to 1.84x,
 Quarry 2.54x to 1.96x.

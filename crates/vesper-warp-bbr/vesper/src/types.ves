@@ -22,7 +22,7 @@
 // Export ABI v3 (#934): the Rust crate keeps `repr::Bbrv3`, the binding's
 // mirror of `Bbrv3`, as its storage in the Vesper build and lends it to
 // every call in place.
-// @export abi 3
+// @export abi 3 options
 
 // ---------------------------------------------------------------------
 // Types shared with the Rust crate (same names, fields and variants).

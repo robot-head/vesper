@@ -92,10 +92,10 @@ impl From<BbrFault> for BbrError {
 impl Bbrv3 {
     /// `OnInit()` at time `now_ns`.
     pub fn new(config: BbrConfig, now_ns: u64) -> Result<Self, BbrError> {
-        let value = port::bbrv3_new(&repr::BbrConfig::from_value(&config), now_ns)?;
-        Ok(Self {
-            m: repr::Bbrv3::from_value(&value),
-        })
+        let m = port::bbrv3_new(&repr::BbrConfig::from_value(&config), now_ns)
+            .get()
+            .map_err(|e| e.get())?;
+        Ok(Self { m })
     }
 
     /// `C.cwnd`, saturated to `u32` (contract window type).
@@ -139,19 +139,19 @@ impl Bbrv3 {
     /// `None` = Infinity.
     #[must_use]
     pub fn inflight_hi(&self) -> Option<u64> {
-        port::finite(self.m.inflight_longterm)
+        port::finite(self.m.inflight_longterm).get()
     }
 
     /// `BBR.inflight_shortterm` (formerly `inflight_lo`); `None` = Infinity.
     #[must_use]
     pub fn inflight_lo(&self) -> Option<u64> {
-        port::finite(self.m.inflight_shortterm)
+        port::finite(self.m.inflight_shortterm).get()
     }
 
     /// `BBR.bw_shortterm` (formerly `bw_lo`); `None` = Infinity.
     #[must_use]
     pub fn bw_lo(&self) -> Option<u64> {
-        port::finite(self.m.bw_shortterm)
+        port::finite(self.m.bw_shortterm).get()
     }
 
     /// Whether the connection is marked application-limited.
@@ -217,13 +217,15 @@ impl Bbrv3 {
             )?;
         }
         port::ack_check_totals(&progress, b.inflight, b.delivered)?;
+        let rtt: vesper_port_abi::OptionMirror<repr::RttSample> =
+            rtt.map(|r| repr::RttSample::from_value(&r)).into();
         let Some(last) = packets.len().checked_sub(1) else {
             port::bbrv3_ack_step(
                 b,
                 now_ns,
-                rtt,
+                &rtt,
                 &mut progress,
-                None,
+                &vesper_port_abi::OptionMirror::none(),
                 &repr::PacketDeliveryState::from_value(&NO_SNAPSHOT),
                 true,
                 true,
@@ -234,9 +236,9 @@ impl Bbrv3 {
             port::bbrv3_ack_step(
                 b,
                 now_ns,
-                rtt,
+                &rtt,
                 &mut progress,
-                Some(d.packet),
+                &vesper_port_abi::OptionMirror::some(repr::AckedPacket::from_value(&d.packet)),
                 &repr::PacketDeliveryState::from_value(&d.state),
                 i == 0,
                 i == last,

@@ -9,7 +9,6 @@ use self::util::{
     cw,
     ex,
     fail_name,
-    free_d,
     new_d,
     new_q,
     node,
@@ -108,7 +107,6 @@ pub fn access_paths_q(in prog: Slice[u64], in text: Slice[u8]) -> Q {
     let mut q = new_q();
     let mut ds = new_d();
     access_paths_run(inout q, inout ds, in prog, in text);
-    free_d(ds);
     q
 }
 

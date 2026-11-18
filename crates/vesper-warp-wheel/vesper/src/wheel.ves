@@ -19,8 +19,6 @@ struct WheelCore {
     // `l_span[l] = 2^((l + 1) * slot_bits)`, the first tick distance level
     // `l` cannot hold (see `place`).
     l_span: ChunkSeq[u64],
-    // `l_ctz[(2^k * debruijn()) >> 58] = k` (see `low_bit`).
-    l_ctz: ChunkSeq[u64],
     tick_ns: u64,
     slot_bits: u64,
     levels: u64,
@@ -74,11 +72,6 @@ fn build_wheel(config: WheelConfig) -> WheelCore {
         // (l + 1) * slot_bits <= levels * slot_bits <= 63.
         span.push(shl(1, wrapping_mul(wrapping_add(l, 1), slot_bits)));
     }
-    let bits: u64 = 64;
-    let mut ctz = filled(bits, 0);
-    for k in 0..bits {
-        ctz.try_set(wrapping_mul(shl(1, k), debruijn()) >> 58, k);
-    }
     WheelCore {
         e_deadline: filled(cap, 0),
         e_tick: filled(cap, 0),
@@ -91,7 +84,6 @@ fn build_wheel(config: WheelConfig) -> WheelCore {
         l_tail: filled(lists, nil()),
         occupied: filled(levels, 0),
         l_span: span,
-        l_ctz: ctz,
         tick_ns: config.tick_ns,
         slot_bits: slot_bits,
         levels: levels,
@@ -150,12 +142,9 @@ impl WheelCore {
         }
     }
 
-    // Index of the lowest set bit of a non-zero `x` (trailing_zeros), by a
-    // de Bruijn multiply: the lowest bit `2^k` times `debruijn()` has `k`'s
-    // unique pattern in its top six bits. The shift amount is a constant,
-    // so it cannot fail.
+    // Index of the lowest set bit of a non-zero `x`.
     fn low_bit(in self, x: u64) -> u64 {
-        at(in self.l_ctz, wrapping_mul(x & wrapping_sub(0, x), debruijn()) >> 58)
+        widen_u64(trailing_zeros_u64(x))
     }
 
     fn clear_occupied(inout self, list: u64) {

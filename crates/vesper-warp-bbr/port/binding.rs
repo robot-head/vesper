@@ -989,6 +989,15 @@ impl repr::WindowedMax {
     }
 }
 
+// `vesper_port_abi::OptionMirror<repr::AckedPacket>` has the Vesper layout of its value.
+const _: () = assert!(core::mem::size_of::<vesper_port_abi::OptionMirror<repr::AckedPacket>>() == 4 * 8 && <vesper_port_abi::OptionMirror<repr::AckedPacket> as vesper_port_abi::Mirror>::WORDS == 4);
+// `vesper_port_abi::OptionMirror<repr::RttSample>` has the Vesper layout of its value.
+const _: () = assert!(core::mem::size_of::<vesper_port_abi::OptionMirror<repr::RttSample>>() == 5 * 8 && <vesper_port_abi::OptionMirror<repr::RttSample> as vesper_port_abi::Mirror>::WORDS == 5);
+// `vesper_port_abi::OptionMirror<u64>` has the Vesper layout of its value.
+const _: () = assert!(core::mem::size_of::<vesper_port_abi::OptionMirror<u64>>() == 2 * 8 && <vesper_port_abi::OptionMirror<u64> as vesper_port_abi::Mirror>::WORDS == 2);
+// `vesper_port_abi::ResultMirror<repr::Bbrv3, vesper_port_abi::Words<crate::port_types::BbrFault, 3>>` has the Vesper layout of its value.
+const _: () = assert!(core::mem::size_of::<vesper_port_abi::ResultMirror<repr::Bbrv3, vesper_port_abi::Words<crate::port_types::BbrFault, 3>>>() == 106 * 8 && <vesper_port_abi::ResultMirror<repr::Bbrv3, vesper_port_abi::Words<crate::port_types::BbrFault, 3>> as vesper_port_abi::Mirror>::WORDS == 106);
+
 const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<(u64, u64) as Abi>::WORDS == 2);
 const _: () = assert!(<Option<u64> as Abi>::WORDS == 2);
@@ -1140,15 +1149,11 @@ pub fn bbr_state_is_probe_bw(s: crate::port_types::BbrState) -> bool {
 }
 
 /// Calls `bbrv3_ack_step` of the Vesper library `bbr` (`vesper_bbr_bbrv3_ack_step`).
-pub fn bbrv3_ack_step(b: &mut repr::Bbrv3, now_ns: u64, rtt: Option<crate::port_types::RttSample>, p: &mut repr::AckProgress, packet: Option<crate::port_types::AckedPacket>, snapshot: &repr::PacketDeliveryState, first: bool, last: bool) -> () {
-    let mut arg_rtt = [0u64; <Option<crate::port_types::RttSample> as Abi>::WORDS];
-    Abi::put(&rtt, &mut arg_rtt);
-    let mut arg_packet = [0u64; <Option<crate::port_types::AckedPacket> as Abi>::WORDS];
-    Abi::put(&packet, &mut arg_packet);
+pub fn bbrv3_ack_step(b: &mut repr::Bbrv3, now_ns: u64, rtt: &vesper_port_abi::OptionMirror<repr::RttSample>, p: &mut repr::AckProgress, packet: &vesper_port_abi::OptionMirror<repr::AckedPacket>, snapshot: &repr::PacketDeliveryState, first: bool, last: bool) -> () {
     // SAFETY: `vesper_bbr_bbrv3_ack_step` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_bbr_bbrv3_ack_step((b as *mut repr::Bbrv3).cast::<u64>(), now_ns as i64, arg_rtt.as_mut_ptr(), (p as *mut repr::AckProgress).cast::<u64>(), arg_packet.as_mut_ptr(), (snapshot as *const repr::PacketDeliveryState).cast_mut().cast::<u64>(), first as i64, last as i64) };
+    let raw = unsafe { vesper_bbr_bbrv3_ack_step((b as *mut repr::Bbrv3).cast::<u64>(), now_ns as i64, (rtt as *const vesper_port_abi::OptionMirror<repr::RttSample>).cast_mut().cast::<u64>(), (p as *mut repr::AckProgress).cast::<u64>(), (packet as *const vesper_port_abi::OptionMirror<repr::AckedPacket>).cast_mut().cast::<u64>(), (snapshot as *const repr::PacketDeliveryState).cast_mut().cast::<u64>(), first as i64, last as i64) };
     { let _ = raw; }
 }
 
@@ -1207,13 +1212,13 @@ pub fn bbrv3_is_time_to_go_down(b: &mut repr::Bbrv3) -> bool {
 }
 
 /// Calls `bbrv3_new` of the Vesper library `bbr` (`vesper_bbr_bbrv3_new`).
-pub fn bbrv3_new(config: &repr::BbrConfig, now_ns: u64) -> Result<crate::port_types::Bbrv3, crate::port_types::BbrFault> {
+pub fn bbrv3_new(config: &repr::BbrConfig, now_ns: u64) -> vesper_port_abi::ResultMirror<repr::Bbrv3, vesper_port_abi::Words<crate::port_types::BbrFault, 3>> {
     let mut result = [0u64; 106];
     // SAFETY: `vesper_bbr_bbrv3_new` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_bbr_bbrv3_new(result.as_mut_ptr(), (config as *const repr::BbrConfig).cast_mut().cast::<u64>(), now_ns as i64) };
-    <Result<crate::port_types::Bbrv3, crate::port_types::BbrFault> as Abi>::get(&result[0..])
+    vesper_port_abi::mirror_from_words::<vesper_port_abi::ResultMirror<repr::Bbrv3, vesper_port_abi::Words<crate::port_types::BbrFault, 3>>>(&result[0..])
 }
 
 /// Calls `bbrv3_on_app_limited` of the Vesper library `bbr` (`vesper_bbr_bbrv3_on_app_limited`).
@@ -1407,13 +1412,13 @@ pub fn edt_step(prev_next_ns: u64, now_ns: u64, delay_ns: u64) -> (u64, u64) {
 }
 
 /// Calls `finite` of the Vesper library `bbr` (`vesper_bbr_finite`).
-pub fn finite(x: u64) -> Option<u64> {
+pub fn finite(x: u64) -> vesper_port_abi::OptionMirror<u64> {
     let mut result = [0u64; 2];
     // SAFETY: `vesper_bbr_finite` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_bbr_finite(result.as_mut_ptr(), x as i64) };
-    <Option<u64> as Abi>::get(&result[0..])
+    vesper_port_abi::mirror_from_words::<vesper_port_abi::OptionMirror<u64>>(&result[0..])
 }
 
 /// Calls `inflight_at_loss` of the Vesper library `bbr` (`vesper_bbr_inflight_at_loss`).

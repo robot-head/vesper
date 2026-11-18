@@ -71,17 +71,33 @@ pub fn token(b: u8) -> bool {
 // The hot loops read with `try_get` directly: a call to `byte` is not
 // inlined, because the inliner skips functions with slice parameters.
 pub fn all_token(in s: Slice[u8], lo: u64, hi: u64) -> bool {
-    for i in lo..hi {
-        match s.try_get(i) {
-            Option::Some(b) => if !token(b) {
-                return false;
-            },
-            Option::None => {
-                return false;
-            },
-        }
+    if lo > hi || hi > s.len() {
+        return false;
     }
-    true
+    tokens(in s[lo..hi])
+}
+
+fn tokens(in s: Slice[u8]) -> bool {
+    match s.find_not_in(288068722172624896, 6341068274398134270, false) {
+        Option::Some(i) => false,
+        Option::None => true,
+    }
+}
+
+// No control byte but tab (field values; bytes >= 128 are obs-text).
+pub fn value_ok(in s: Slice[u8]) -> bool {
+    match s.find_not_in(18446744069414584832, 9223372036854775807, true) {
+        Option::Some(i) => false,
+        Option::None => true,
+    }
+}
+
+fn same_fold(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    a.eq_ignore_ascii_case(in b)
+}
+
+fn target_run(in t: Slice[u8]) -> Option[u64] {
+    t.find_not_in(12682136353106821120, 5188146764422578175, false)
 }
 
 fn same_bytes(in a: Slice[u8], in b: Slice[u8]) -> bool {
@@ -92,7 +108,10 @@ pub fn eq_lit(in s: Slice[u8], lo: u64, hi: u64, in lit: Str, fold: bool) -> boo
     if wrapping_sub(hi, lo) != lit.len() {
         return false;
     }
-    if !fold && lo <= hi && hi <= s.len() {
+    if lo <= hi && hi <= s.len() {
+        if fold {
+            return same_fold(in s[lo..hi], in lit.as_bytes());
+        }
         return same_bytes(in s[lo..hi], in lit.as_bytes());
     }
     for i in 0..lit.len() {
@@ -207,9 +226,20 @@ pub fn valid_target(options: bool, in t: Slice[u8], lo: u64, hi: u64) -> bool {
         return false;
     }
     let mut i = lo;
+    if hi > t.len() {
+        return false;
+    }
     loop {
         if i >= hi {
             break;
+        }
+        match target_run(in t[i..hi]) {
+            Option::Some(j) => {
+                i = wrapping_add(i, j);
+            },
+            Option::None => {
+                return true;
+            },
         }
         let b = match t.try_get(i) {
             Option::Some(b) => b,
@@ -493,6 +523,13 @@ pub fn push_range(inout out: ChunkSeq[u8], in s: Slice[u8], lo: u64, hi: u64) {
 // `all_token(in s, lo, hi)`, appending the lowercased bytes to `out` on
 // the way (one pass for the check and the copy of a field name).
 pub fn push_token_lower(inout out: ChunkSeq[u8], in s: Slice[u8], lo: u64, hi: u64) -> bool {
+    if lo <= hi && hi <= s.len() {
+        if !tokens(in s[lo..hi]) {
+            return false;
+        }
+        out.extend_ascii_lowercase(in s[lo..hi]);
+        return true;
+    }
     for i in lo..hi {
         match s.try_get(i) {
             Option::Some(b) => {

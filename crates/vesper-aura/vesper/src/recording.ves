@@ -283,25 +283,10 @@ pub fn move_target(in s: RState, parent: u64, at: u64, to: u64) -> u64 {
 // remove_edge(at) then insert_edge(dest) as one shift of the edges between.
 pub fn move_edge(inout s: RState, at: u64, dest: u64) {
     let e = redge(in s.edges, at);
-    let mut j = at;
     if dest > at {
-        loop {
-            if j >= dest {
-                break;
-            }
-            let moved = redge(in s.edges, inc(j));
-            s.edges.try_set(j, moved);
-            j = inc(j);
-        }
+        let _ = s.edges.try_copy_within(inc(at), inc(dest), at);
     } else {
-        loop {
-            if j <= dest {
-                break;
-            }
-            let moved = redge(in s.edges, dec(j));
-            s.edges.try_set(j, moved);
-            j = dec(j);
-        }
+        let _ = s.edges.try_copy_within(dest, at, inc(dest));
     }
     s.edges.try_set(dest, e);
 }
@@ -309,15 +294,7 @@ pub fn move_edge(inout s: RState, at: u64, dest: u64) {
 pub fn remove_edge(inout s: RState, at: u64) {
     let n = s.edges.len();
     if at < n {
-        let mut j = at;
-        loop {
-            if inc(j) >= n {
-                break;
-            }
-            let e = redge(in s.edges, inc(j));
-            s.edges.try_set(j, e);
-            j = inc(j);
-        }
+        let _ = s.edges.try_copy_within(inc(at), n, at);
         s.edges.truncate(dec(n));
     }
 }
@@ -326,15 +303,7 @@ pub fn insert_edge(inout s: RState, at: u64, e: Edge) {
     let n = s.edges.len();
     s.edges.push(e);
     if at < n {
-        let mut j = n;
-        loop {
-            if j <= at {
-                break;
-            }
-            let moved = redge(in s.edges, dec(j));
-            s.edges.try_set(j, moved);
-            j = dec(j);
-        }
+        let _ = s.edges.try_copy_within(at, n, inc(at));
         s.edges.try_set(at, e);
     }
 }

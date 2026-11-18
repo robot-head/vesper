@@ -96,6 +96,9 @@ fn token(b: u8) -> bool {
 }
 
 fn eq_fold(in s: Slice[u8], in lit: Str) -> bool {
+    if s.len() == lit.len() {
+        return s.eq_ignore_ascii_case(in lit.as_bytes());
+    }
     if s.len() != lit.len() {
         return false;
     }
@@ -351,23 +354,17 @@ pub fn response_plan_header(inout p: ResponsePlan, in name: Slice[u8], in value:
     if name.len() == 0 {
         return Option::Some(ResponseError::InvalidHeaderName);
     }
-    for i in 0..name.len() {
-        let b = match name.try_get(i) {
-            Option::Some(b) => b,
-            Option::None => 0,
-        };
-        if !token(b) {
+    match name.find_not_in(288068722172624896, 6341068274398134270, false) {
+        Option::Some(i) => {
             return Option::Some(ResponseError::InvalidHeaderName);
-        }
+        },
+        Option::None => (),
     }
-    for i in 0..value.len() {
-        let b = match value.try_get(i) {
-            Option::Some(b) => b,
-            Option::None => 0,
-        };
-        if b < 32 || b == 127 {
+    match value.find_not_in(18446744069414584320, 9223372036854775807, true) {
+        Option::Some(i) => {
             return Option::Some(ResponseError::InvalidHeaderValue);
-        }
+        },
+        Option::None => (),
     }
     if (name.len() == 17 && eq_fold(in name, "transfer-encoding"))
         || (name.len() == 7 && eq_fold(in name, "trailer"))
@@ -404,12 +401,7 @@ pub fn response_plan_header(inout p: ResponsePlan, in name: Slice[u8], in value:
         },
         Option::None => (),
     }
-    for i in 0..name.len() {
-        match name.try_get(i) {
-            Option::Some(b) => p.names.push(lower(b)),
-            Option::None => (),
-        }
-    }
+    p.names.extend_ascii_lowercase(in name);
     p.name_ends.push(p.names.len());
     p.values.extend(in value);
     p.value_ends.push(p.values.len());
