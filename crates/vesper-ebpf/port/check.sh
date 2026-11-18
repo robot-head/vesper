@@ -13,7 +13,7 @@ cargo test --locked -p vesper-ebpf --features vesper-port
 # come in groups that share one build: the edits of a group live in
 # different modules, and every check of a group still shows its own test
 # failing while another test of the same file passes.
-for group in 0,1,4,7,9 2,5,8,10 3,6,11; do
+for group in 0,1,4,7,9,12 2,5,8,10 3,6,11; do
     export VESPER_EBPF_DIVERGENT="$group"
     while read -r index module file failing passing; do
         case ",$group," in *",$index,"*) ;; *) continue ;; esac
@@ -32,6 +32,7 @@ for group in 0,1,4,7,9 2,5,8,10 3,6,11; do
 9 btf btf_port port_matches_rust_on_mutated_btf port_matches_rust_on_every_kind_and_split_btf
 10 core core_port port_matches_rust_on_random_relocations port_matches_rust_on_patch
 11 btf_ext ext_port port_matches_rust_on_objects_and_mutations port_matches_rust_on_local_types_of_host_btf
+12 interp_run interp_port port_matches_rust_on_chaos_programs port_matches_rust_on_pointer_lifetimes
 CHECKS
 done
 unset VESPER_EBPF_DIVERGENT

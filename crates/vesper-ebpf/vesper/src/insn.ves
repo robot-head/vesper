@@ -765,7 +765,7 @@ fn is_ld_imm64(i: Insn) -> bool {
 // Every instruction of the program, in order (the Rust wrapper adds the
 // `None` entry after each `LD_IMM64`).
 pub fn decode_all(in slots: Slice[RawInsn]) -> ChunkSeq[Insn] eff [Fail[DecodeError]] {
-    let mut out: ChunkSeq[Insn] = ChunkSeq::new[Insn]();
+    let mut out: ChunkSeq[Insn] = ChunkSeq::with_capacity[Insn](slots.len());
     let n = narrow_usize(slots.len());
     let mut pc: usize = 0;
     loop {
@@ -782,6 +782,33 @@ pub fn decode_all(in slots: Slice[RawInsn]) -> ChunkSeq[Insn] eff [Fail[DecodeEr
         }
     }
     out
+}
+
+// `decode_all` straight into the interpreter's per-slot tables: the second
+// slot of a wide load gets `Exit` and a false `start`.
+pub fn decode_slots(
+    in slots: Slice[RawInsn],
+    inout out: ChunkSeq[Insn],
+    inout start: ChunkSeq[bool]
+) eff [Fail[DecodeError]] {
+    let n = narrow_usize(slots.len());
+    let mut pc: usize = 0;
+    loop {
+        if !(pc < n) {
+            break;
+        }
+        let next = wrapping_add(pc, 1);
+        let i = decode_slot(pc, slot_at(in slots, pc), next < n, slot_at(in slots, next));
+        out.push(i);
+        start.push(true);
+        if is_ld_imm64(i) {
+            out.push(Insn::Exit);
+            start.push(false);
+            pc = wrapping_add(pc, 2);
+        } else {
+            pc = next;
+        }
+    }
 }
 
 fn one(r: RawInsn) -> Encoded {

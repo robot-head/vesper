@@ -102,4 +102,9 @@ const EDITS: &[(&str, &str)] = &[
         "        out.push(lc & 1023);\n",
         "        out.push(lc & 511);\n",
     ),
+    // 12 interp.rs (the run): the byte just before `data` is readable.
+    (
+        "    if kind == 1 && at < i.data_off {\n",
+        "    if kind == 1 && wrapping_add(at, 1) < i.data_off {\n",
+    ),
 ];

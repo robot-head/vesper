@@ -1,11 +1,12 @@
 # Port wave P3a lane 6: vesper-ebpf (#1041)
 
-Status: **part 3 of 4** (this PR; part 1 is #1048, merged as `5ff0c7a`;
-part 2 is #1056, merged as `f0a64be`). Part 1 base `3c075a4`, part 2 base
-`5ff0c7a`, part 3 base `f0a64be`.
+Status: **part 4 of 5** (this PR; part 1 is #1048, merged as `5ff0c7a`;
+part 2 is #1056, merged as `f0a64be`; part 3 is #1061). Part 1 base
+`3c075a4`, part 2 base `5ff0c7a`, part 3 base `f0a64be`, part 4 base: part 3.
 
-The crate is 12.4k lines with 82 tests in 15 files, so the port lands in four
-parts, as Crucible's did:
+The crate is 12.4k lines with 82 tests in 15 files, so the port lands in
+parts, as Crucible's did (four were planned; the interpreter took a part of
+its own):
 
 1. **Part 1 (#1048):** the seed package, the instruction codec (`insn.rs`), the
    wire structs (`wire.rs`), the tnum and interval domain (`scalar.rs`) with
@@ -15,11 +16,13 @@ parts, as Crucible's did:
    (`program.rs`) and the stack bound (`callgraph.rs`).
 2. **Part 2 (#1056):** the verifier (`verifier.rs`), see
    [Part 2: the verifier](#part-2-the-verifier).
-3. **Part 3 (this PR):** BTF parsing, BTF.ext and CO-RE (`btf.rs`,
+3. **Part 3 (#1061):** BTF parsing, BTF.ext and CO-RE (`btf.rs`,
    `btf_ext.rs`, `core.rs`), see [Part 3](#part-3-btf-btfext-and-co-re).
-4. The interpreter, the mitigator and the builders and assembler
-   (`interp.rs`, `mitigator.rs`, `builder.rs`, the `Asm` half of
-   `program.rs`).
+4. **Part 4 (this PR):** the interpreter (`interp.rs`), see
+   [Part 4](#part-4-the-interpreter).
+5. The mitigator and the builders and assembler (`mitigator.rs`,
+   `builder.rs`, the `Asm` half of `program.rs`) and the BTF and `.BTF.ext`
+   writers.
 
 Rust stays the default build, nothing is deleted and no dependent is
 switched (the owner's standing rule). `elf.rs` (the `object` crate) and
@@ -127,6 +130,7 @@ passes. All twelve were observed failing:
 | 9 | btf (part 3) | an unknown kind 20 is read as a pointer | `btf_port::port_matches_rust_on_mutated_btf` |
 | 10 | core (part 3) | members are not found through anonymous aggregates | `core_port::port_matches_rust_on_random_relocations` (not caught by `btf_core`) |
 | 11 | btf_ext (part 3) | line info keeps 9 bits of the column | `ext_port::port_matches_rust_on_objects_and_mutations` (not caught by `btf_core`) |
+| 12 | interp (part 4) | the byte just before `data` is readable | `interp_port::port_matches_rust_on_chaos_programs` |
 
 Edit 3 is the verifier divergence the soundness tests must catch in part 1
 (the domain functions); edit 8 is the one in the ported verifier itself, and
@@ -332,11 +336,108 @@ No new compiler gaps in part 3. The small results cross as a
 `ChunkSeq[u64]` per call (an allocation each); returning a copy struct
 through the export ABI instead is the next thing to try for CO-RE.
 
-## Remaining (part 4)
+## Part 4: the interpreter
 
-The interpreter (its maps become owned state threaded through the run,
-per the lane prompt), the mitigator, the builders and assembler, and the
-BTF and `.BTF.ext` writers. `tests/lean_model.rs` passes against both builds; locally its one
+| Rust | Vesper | Forwarding |
+| --- | --- | --- |
+| `interp.rs` (the run) | `interp.ves` | `run`, `run_xdp`, `run_skb`, `Env::new`, `Env::map_get`, `Env::map_keys`; `install_tail_call` validates in Rust and keeps the target's slots for the port |
+
+The whole run is in the port: decoding, the provenance and bounds checks of
+every load, store and atomic, the context layouts, every helper (maps with
+their flags and limits, ring buffers, sockets, `bpf_loop` frames, tail calls
+with the 33-call limit, the task helpers) and the kfuncs. The Rust side
+builds the inputs (the `__sk_buff` bytes of `SkbMeta`, the configuration
+words), formats the fault strings from codes and applies the ring writes.
+
+**State.** The export ABI has no `inout` parameters and no handles, so an
+environment cannot keep a Vesper value between calls. The port build's
+`Env` instead holds the interpreter's persistent state in the port's own
+layout (`interp.ves` header): one word sequence (map entry table, open
+addressing hash index, the map values' regions), the key bytes, the region
+bytes and one spill word per 8 bytes. A run borrows them (`in` slices),
+works on copies and returns the new state, which replaces the old. Only
+map values persist; at the end of a run every other region is dropped, the
+values still in a map are renumbered and every spilled pointer to a dropped
+region points at one dead region, so a pointer kept in a map value from an
+earlier run faults exactly as the Rust build's released region does. Ring
+buffers stay in Rust (`Env::ring_mut` hands out `&mut RingBuf`): a run gets
+each ring's size, producer and consumer and returns the new producers and a
+log of its writes, applied in order. The copies cost O(state) per run where
+Rust's `HashMap` is O(1) per operation, which is the price of the ABI; see
+the gaps below.
+
+`Env::map_keys` (sorted keys of a hash or array map) is new in both builds,
+so the comparison tests can check every entry.
+
+### Tests (part 4)
+
+`tests/interp_port.rs` runs both builds side by side over one pair of
+environments per program, several runs each so state carries over, and
+after every run compares the result or fault (`Debug`, so every detail
+string), every map key and value, the ring bytes, producer and consumer and
+the prandom state:
+
+- every corpus and depth case and 150 random programs, each also retargeted
+  to other program types (3,000 runs);
+- 1,500 "chaos" programs over six maps (hash, array, ring buffer, program
+  array, per-CPU array, LRU hash), clean (arguments that work, so state
+  builds up) or wild (any map, size, pointer or helper), with tail-call
+  targets installed and removed, and mutated copies (17,000 runs, every
+  fault kind);
+- pointer lifetimes: a frame pointer kept in a map value until the next
+  run, a hash value renumbered by deletes, socket fields, a double release,
+  `bpf_get_current_comm` into the context and a tail call from a
+  subprogram.
+
+No Rust-side panics occur in these runs (the test would skip such a case;
+Rust overflows on absurd helper sizes in debug builds). The existing
+interpreter tests (`interp_semantics`, `program_types`, `kfuncs_widening`,
+`mitigator`, `builders`, `soundness`, `kernel_diff` and the rest) pass
+against the port unchanged.
+
+Divergence check 12 (`interp.ves`): the byte just before `data` is
+readable. Caught by `interp_port::port_matches_rust_on_chaos_programs`;
+`port_matches_rust_on_pointer_lifetimes` still passes.
+
+### Performance (part 4)
+
+Workload `interp`: the mitigator run 256 times (256 SYN and ACK packets
+from 64 sources) in a fresh `Env`, with the ring buffer drained after each
+run. Instructions are one warm call, as in part 3.
+
+| Workload | Rust per op | Vesper per op | Wall ratio (median, min-max) | Instructions Rust | Instructions Vesper | Instruction ratio |
+| --- | --: | --: | --: | --: | --: | --: |
+| `run` of the mitigator, 256 packets | 1972.8 ns | 7867.1 ns | 3.94 (3.81-4.14) | 4,718,149 | 28,412,655 | 6.02 |
+
+The first build was 8.11x. Building the per-run zero and one buffers with
+bulk extends instead of 8,704 pushes took it to 5.36x; pre-sizing the
+state, output and table sequences to 4.14x; decoding straight into the
+interpreter's slot tables (`decode_slots`, no intermediate `ChunkSeq[Insn]`)
+to 3.94x.
+
+Where the 111 thousand instructions of a port run go: decoding the
+program 35 thousand (Rust decodes per run too, but the port's
+`decode_slot` costs about 390 instructions per slot), executing it 16.5
+thousand, reading the state in 13 thousand and writing it out 15 thousand,
+and the Rust side's word building and result formatting about 10 thousand.
+So the instructions themselves run at close to Rust speed; the gap is the
+per-run setup.
+
+Compiler gaps (part 4):
+
+- No handles or `inout` at the export boundary, so the whole interpreter
+  state (regions, map entries, the hash table, value bytes and spill
+  words) is copied into the run and back out on every call. A handle that
+  lives across export calls would remove about a quarter of a run.
+- `Insn` is a large enum passed and pushed by value; decode is dominated
+  by building and copying it.
+- No bulk fill or `resize` for `ChunkSeq`, and `extend` cannot read from
+  the sequence it writes (so buffers cannot double themselves).
+
+## Remaining (part 5)
+
+The mitigator, the builders and assembler, and the BTF and `.BTF.ext`
+writers. `tests/lean_model.rs` passes against both builds; locally its one
 Lean compile step is skipped without `VESPER_LEAN` (the other three tests
 check the emitted programs and the model text), and Bazel runs it with Lean
 against the Rust build.

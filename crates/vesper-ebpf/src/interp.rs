@@ -17,6 +17,8 @@
 //! Single-CPU model: per-CPU maps hold the value of CPU [`Env::cpu`].
 //! No real clock is read; `bpf_ktime_get_ns` returns [`Env::now_ns`].
 
+#![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
+
 use crate::helpers as h;
 use crate::insn::{
     AluOp, AtomicOp, CallTarget, Endian, Imm64, Insn, JmpOp, Operand, Reg, Size, decode_all,
@@ -638,6 +640,24 @@ pub struct Env {
     deferred: Vec<RegionId>,
     /// Offset of `data` inside the packet region (headroom before it).
     pkt_start: usize,
+    /// The port build's state: map values, entries and spills in the
+    /// port's words (the Rust fields above stay empty there).
+    #[cfg(vesper_port)]
+    port: crate::port::InterpState,
+    /// The port build's installed targets.
+    #[cfg(vesper_port)]
+    targets: std::collections::BTreeMap<(usize, u32), PortTarget>,
+}
+
+/// A tail-call target in the port build: its program type, slots, map
+/// indices in the environment and kfunc codes.
+#[cfg(vesper_port)]
+#[derive(Clone, Debug)]
+struct PortTarget {
+    prog_type: ProgramType,
+    slots: Vec<crate::insn::RawInsn>,
+    maps: Vec<usize>,
+    kfuncs: Vec<u64>,
 }
 
 /// The name this environment had when it ran XDP programs only.
@@ -661,6 +681,10 @@ impl Env {
             persistent: 0,
             deferred: Vec::new(),
             pkt_start: 0,
+            #[cfg(vesper_port)]
+            port: Default::default(),
+            #[cfg(vesper_port)]
+            targets: Default::default(),
         };
         for def in &prog.maps {
             let st = match def.kind {
@@ -672,6 +696,12 @@ impl Env {
             };
             env.maps.push(st);
         }
+        #[cfg(vesper_port)]
+        {
+            env.port = crate::port::interp_new_env(&port::map_words(&env));
+            return env;
+        }
+        #[allow(unreachable_code)]
         for m in 0..env.maps.len() {
             let MapState::Kv { def, .. } = &env.maps[m] else {
                 continue;
@@ -728,12 +758,33 @@ impl Env {
             maps.push(i);
         }
         let code = Code::new(target, maps).map_err(TailCallError::Decode)?;
-        self.tail.insert((map, index), Arc::new(code));
-        Ok(())
+        #[cfg(vesper_port)]
+        {
+            self.targets.insert(
+                (map, index),
+                PortTarget {
+                    prog_type: target.prog_type,
+                    slots: target.insns.clone(),
+                    maps: code.maps,
+                    kfuncs: port::kfunc_words(&target.kfuncs),
+                },
+            );
+            return Ok(());
+        }
+        #[allow(unreachable_code)]
+        {
+            self.tail.insert((map, index), Arc::new(code));
+            Ok(())
+        }
     }
 
     /// Empty slot `index` of program array `map` (`bpf_map_delete_elem`).
     pub fn remove_tail_call(&mut self, map: usize, index: u32) -> bool {
+        #[cfg(vesper_port)]
+        {
+            return self.targets.remove(&(map, index)).is_some();
+        }
+        #[allow(unreachable_code)]
         self.tail.remove(&(map, index)).is_some()
     }
 
@@ -754,12 +805,31 @@ impl Env {
 
     /// Value bytes stored under `key` in a hash or array map.
     pub fn map_get(&self, map: usize, key: &[u8]) -> Option<Vec<u8>> {
+        #[cfg(vesper_port)]
+        if let MapState::Kv { .. } = &self.maps[map] {
+            return port::map_get(&self.port, map, key);
+        }
         match &self.maps[map] {
             MapState::Kv { entries, .. } => entries
                 .get(key)
                 .map(|&r| self.regions[r as usize].bytes.clone()),
             MapState::Ring(_) => None,
         }
+    }
+
+    /// The keys stored in a hash or array map, sorted (empty for a ring
+    /// buffer).
+    pub fn map_keys(&self, map: usize) -> Vec<Vec<u8>> {
+        #[cfg(vesper_port)]
+        if let MapState::Kv { .. } = &self.maps[map] {
+            return port::map_keys(&self.port, map);
+        }
+        let mut keys: Vec<Vec<u8>> = match &self.maps[map] {
+            MapState::Kv { entries, .. } => entries.keys().cloned().collect(),
+            MapState::Ring(_) => Vec::new(),
+        };
+        keys.sort();
+        keys
     }
 
     pub fn ring(&self, map: usize) -> Option<&RingBuf> {
@@ -850,6 +920,20 @@ pub fn run_skb(
 }
 
 /// Execute `prog` once from `input`, which must match its program type.
+#[cfg(vesper_port)]
+pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult, InterpError> {
+    if input.prog_type() != prog.prog_type {
+        return Err(InterpError::BadInput(format!(
+            "a {:?} program cannot run on {:?} input",
+            prog.prog_type,
+            input.prog_type()
+        )));
+    }
+    port::run(prog, env, input)
+}
+
+/// Execute `prog` once from `input`, which must match its program type.
+#[cfg(not(vesper_port))]
 pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult, InterpError> {
     if input.prog_type() != prog.prog_type {
         return Err(InterpError::BadInput(format!(
@@ -1867,5 +1951,291 @@ fn call_helper(
             Ok(Value::scalar(0))
         }
         _ => Err(bad("unsupported helper")),
+    }
+}
+
+/// The port build's side of `run`: the environment and the input as the
+/// port's words (the header of `vesper/src/interp.ves`), and the results,
+/// faults and ring writes back.
+#[cfg(vesper_port)]
+mod port {
+    use super::*;
+    use crate::program::KfuncRef;
+
+    fn ptype_word(t: ProgramType) -> u64 {
+        match t {
+            ProgramType::Xdp => 0,
+            ProgramType::SchedCls => 1,
+            ProgramType::Tracepoint => 2,
+            ProgramType::Kprobe => 3,
+        }
+    }
+
+    fn ptype_of(w: u64) -> ProgramType {
+        match w {
+            0 => ProgramType::Xdp,
+            1 => ProgramType::SchedCls,
+            2 => ProgramType::Tracepoint,
+            _ => ProgramType::Kprobe,
+        }
+    }
+
+    /// (slot, code) pairs: the code is the name's index in
+    /// `helpers::KFUNCS`, 9 for another name.
+    pub(super) fn kfunc_words(kfuncs: &[KfuncRef]) -> Vec<u64> {
+        let mut w = Vec::with_capacity(kfuncs.len() * 2);
+        for k in kfuncs {
+            let code = h::KFUNCS
+                .iter()
+                .position(|n| *n == k.name)
+                .map_or(9, |i| i as u64);
+            w.extend([k.slot as u64, code]);
+        }
+        w
+    }
+
+    /// 7 words per map: kernel type, key size, value size, max entries,
+    /// and for a ring buffer its size, producer and consumer.
+    pub(super) fn map_words(env: &Env) -> Vec<u64> {
+        let mut w = Vec::with_capacity(env.defs.len() * 7);
+        for (d, st) in env.defs.iter().zip(&env.maps) {
+            w.extend([
+                u64::from(d.kind.kernel_type()),
+                u64::from(d.key_size),
+                u64::from(d.value_size),
+                u64::from(d.max_entries),
+            ]);
+            match st {
+                MapState::Ring(r) => w.extend([r.data.len() as u64, r.producer, r.consumer]),
+                MapState::Kv { .. } => w.extend([0, 0, 0]),
+            }
+        }
+        w
+    }
+
+    fn cfg_words(env: &Env) -> Vec<u64> {
+        let c = &env.task.comm;
+        let mut w = vec![
+            u64::from(env.cpu),
+            env.now_ns,
+            env.prandom_state,
+            env.insn_budget,
+            u64::from(env.task.pid),
+            u64::from(env.task.tgid),
+            u64::from(env.task.uid),
+            u64::from(env.task.gid),
+            u64::from_le_bytes(c[..8].try_into().expect("8 bytes")),
+            u64::from_le_bytes(c[8..].try_into().expect("8 bytes")),
+            PT_REGS_SIZE as u64,
+            env.sockets.len() as u64,
+        ];
+        for s in &env.sockets {
+            w.push(u64::from(u32::from_le_bytes(s.daddr)));
+            w.push(u64::from(u16::from_le_bytes(s.dport)));
+        }
+        w
+    }
+
+    fn tail_words(env: &Env) -> (Vec<u64>, Vec<crate::insn::RawInsn>, Vec<u64>) {
+        let mut w = vec![env.targets.len() as u64];
+        let mut slots = Vec::new();
+        let mut aux = Vec::new();
+        for (&(m, index), t) in &env.targets {
+            w.extend([
+                m as u64,
+                u64::from(index),
+                ptype_word(t.prog_type),
+                slots.len() as u64,
+                t.slots.len() as u64,
+                aux.len() as u64,
+                t.maps.len() as u64,
+            ]);
+            slots.extend_from_slice(&t.slots);
+            aux.extend(t.maps.iter().map(|&m| m as u64));
+            w.extend([aux.len() as u64, t.kfuncs.len() as u64 / 2]);
+            aux.extend_from_slice(&t.kfuncs);
+        }
+        (w, slots, aux)
+    }
+
+    /// `Env::map_keys` over the port's entries.
+    pub(super) fn map_keys(st: &crate::port::InterpState, map: usize) -> Vec<Vec<u8>> {
+        let w = &st.st;
+        let (nreg, nent, nmaps) = (w[1] as usize, w[2] as usize, w[4] as usize);
+        let eb = 5 + nmaps + 3 * nreg;
+        let mut keys: Vec<Vec<u8>> = w[eb..eb + 4 * nent]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|e| e[0] == map as u64)
+            .map(|e| st.keys[e[1] as usize..(e[1] + e[2]) as usize].to_vec())
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// `Env::map_get` over the port's entries.
+    pub(super) fn map_get(
+        st: &crate::port::InterpState,
+        map: usize,
+        key: &[u8],
+    ) -> Option<Vec<u8>> {
+        let w = &st.st;
+        let (nreg, nent, nmaps) = (w[1] as usize, w[2] as usize, w[4] as usize);
+        let rb = 5 + nmaps;
+        let eb = rb + 3 * nreg;
+        for e in w[eb..eb + 4 * nent].as_chunks::<4>().0 {
+            let (ko, kl) = (e[1] as usize, e[2] as usize);
+            if e[0] == map as u64 && &st.keys[ko..ko + kl] == key {
+                let r = rb + 3 * e[3] as usize;
+                let (off, len) = (w[r + 1] as usize, w[r + 2] as usize);
+                return Some(st.mem[off..off + len].to_vec());
+            }
+        }
+        None
+    }
+
+    fn access(d: u64, a: u64, b: u64, c: u64, t: ProgramType) -> String {
+        match d {
+            1 => format!("dereference of scalar {a:#x}"),
+            2 => "use of released or dead memory".into(),
+            3 => format!("access at {a} size {b} outside region of {c} bytes"),
+            4 => "packet access before data".into(),
+            5 => "socket fields".into(),
+            6 => format!("{t:?} ctx field {a} size {b}"),
+            7 => format!("{t:?} ctx write at {a} size {b}"),
+            8 => "partial pointer store".into(),
+            _ => "atomic on the context or packet".into(),
+        }
+    }
+
+    fn helper_arg(d: u64, a: u64, b: u64) -> String {
+        match d {
+            1 => return format!("map index {} out of range", a as i32),
+            5 => return format!("helper {} is not available to {:?}", a as i32, ptype_of(b)),
+            6 => return format!("{}: arg #0 is not on the stack", h::KFUNCS[a as usize]),
+            2 => "bpf_loop callback is not a function",
+            3 => "bpf_tail_call needs a program array",
+            4 => "tail call from a subprogram or callback",
+            7 => "not a map",
+            8 => "ringbuf map",
+            9 => "no packet",
+            10 => "not a ringbuf",
+            11 => "not a ringbuf record",
+            12 => "record not held",
+            13 => "record pointer with offset",
+            14 => "ring",
+            15 => "not a socket",
+            16 => "socket not held",
+            17 => "bpf_get_current_comm with size 0",
+            18 => "bpf_get_current_comm buffer",
+            _ => "unsupported helper",
+        }
+        .into()
+    }
+
+    fn fault(w: &[u64], t: ProgramType) -> InterpError {
+        let (pc, d, a, b, c) = (w[2] as usize, w[3], w[4], w[5], w[6]);
+        match w[1] {
+            1 => InterpError::UninitRegister { pc, reg: a as u8 },
+            2 => InterpError::InvalidAccess {
+                pc,
+                detail: access(d, a, b, c, t),
+            },
+            3 => InterpError::UninitStackRead { pc, off: a as i64 },
+            4 => InterpError::BadHelperArg {
+                pc,
+                detail: helper_arg(d, a, b),
+            },
+            5 => InterpError::UnsupportedInsn { pc },
+            6 => InterpError::ReferenceLeak {
+                pc,
+                count: a as usize,
+            },
+            7 => InterpError::InsnBudget,
+            8 => InterpError::CallDepth { pc },
+            _ => InterpError::PcOutOfRange { pc },
+        }
+    }
+
+    pub(super) fn run(
+        prog: &Program,
+        env: &mut Env,
+        input: Input<'_>,
+    ) -> Result<RunResult, InterpError> {
+        let skb_ctx;
+        let (kind, pkt, ctx): (u64, &[u8], &[u8]) = match input {
+            Input::Xdp(p) => (0, p, &[]),
+            Input::Skb { packet, meta } => {
+                skb_ctx = meta.to_ctx(packet.len() as u32);
+                (1, packet, &skb_ctx)
+            }
+            Input::Tracepoint(rec) => (2, &[], rec),
+            Input::Kprobe(regs) => (3, &[], regs),
+        };
+        let tails = tail_words(env);
+        let (w, bytes, state) = crate::port::interp_run(
+            &prog.insns,
+            &kfunc_words(&prog.kfuncs),
+            ptype_word(prog.prog_type),
+            kind,
+            pkt,
+            ctx,
+            &cfg_words(env),
+            &map_words(env),
+            prog.maps.len() as u64,
+            (&tails.0, &tails.1, &tails.2),
+            &env.port,
+        );
+        match w[0] {
+            2 => {
+                return Err(InterpError::Decode(
+                    crate::port::decode_error(w[1], w[2], w[3]).to_string(),
+                ));
+            }
+            3 => {
+                return Err(InterpError::BadInput(match w[1] {
+                    1 => format!(
+                        "tracepoint record of {} bytes exceeds {PERF_MAX_TRACE_SIZE}",
+                        w[2]
+                    ),
+                    2 => format!(
+                        "pt_regs must be {PT_REGS_SIZE} bytes on this architecture, got {}",
+                        w[2]
+                    ),
+                    _ => "packet too long".into(),
+                }));
+            }
+            _ => {}
+        }
+        env.port = state.expect("state after a run");
+        env.prandom_state = w[12];
+        let nmaps = w[13] as usize;
+        for (m, &prod) in w[14..14 + nmaps].iter().enumerate() {
+            if let MapState::Ring(r) = &mut env.maps[m] {
+                r.producer = prod;
+            }
+        }
+        let lb = 14 + nmaps;
+        for e in w[lb + 1..lb + 1 + 4 * w[lb] as usize].as_chunks::<4>().0 {
+            let (at, len, off) = (e[1] as usize, e[2] as usize, e[3] as usize);
+            if let MapState::Ring(r) = &mut env.maps[e[0] as usize] {
+                let n = r.data.len();
+                for (k, &b) in bytes[off..off + len].iter().enumerate() {
+                    r.data[(at + k) % n] = b;
+                }
+            }
+        }
+        if w[0] == 1 {
+            return Err(fault(&w, prog.prog_type));
+        }
+        let (plen, clen) = (w[10] as usize, w[11] as usize);
+        Ok(RunResult {
+            ret: w[7],
+            insns: w[8],
+            packet: bytes[..plen].to_vec(),
+            ctx: bytes[plen..plen + clen].to_vec(),
+            tail_calls: w[9] as u32,
+        })
     }
 }

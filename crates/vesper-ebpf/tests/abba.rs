@@ -18,6 +18,9 @@
 //!   (part 3).
 //! - `ext`: `parse_ext` of an object with 256 line-info records and 64
 //!   CO-RE relocations (part 3).
+//! - `interp`: the SYN-flood mitigator run over 256 packets (SYNs from 64
+//!   sources, and ACKs) in a fresh environment, the ring drained after
+//!   each run: the interpreter, with its map and ring state (part 4).
 //!
 //! The benchmarks are ignored by default; run them with
 //!
@@ -38,6 +41,7 @@ fn ops(name: &str) -> u64 {
         "scalar" => 4096,
         "concrete" => 4096,
         "core" => 512,
+        "interp" => 256,
         _ => 1,
     }
 }
@@ -366,6 +370,54 @@ macro_rules! workloads {
                 (::$krate::btf::Btf::parse(&o.btf).expect("parses"), o.ext)
             }
 
+            pub fn interp(_: &[u64]) -> u64 {
+                use ::$krate::interp::{Env, run_xdp};
+                use ::$krate::mitigator::{MitigatorConfig, build};
+                use ::$krate::wire::{ETH_P_IPV4, EthIpv4TcpWire, IPPROTO_TCP, WireFrame};
+                static INPUT: std::sync::OnceLock<(::$krate::Program, Vec<Vec<u8>>)> =
+                    std::sync::OnceLock::new();
+                let (p, packets) = INPUT.get_or_init(|| {
+                    let p = build(&MitigatorConfig {
+                        pps_threshold: 3,
+                        max_sources: 1024,
+                        ring_bytes: 4096,
+                    })
+                    .expect("mitigator builds");
+                    let packets = (0..256u32)
+                        .map(|i| {
+                            EthIpv4TcpWire {
+                                dst_mac: [2, 0, 0, 0, 0, 1],
+                                src_mac: [2, 0, 0, 0, 0, 2],
+                                ether_type: ETH_P_IPV4,
+                                ver_ihl: 0x45,
+                                total_len: 40,
+                                ttl: 64,
+                                proto: IPPROTO_TCP,
+                                src_ipv4: 0x0a00_0100 + i % 64,
+                                dst_ipv4: 0x0a00_0001,
+                                src_port: 40000,
+                                dst_port: 80,
+                                seq_num: i,
+                                data_offset_flags: (5 << 12) | if i % 5 == 4 { 0x10 } else { 0x02 },
+                                window_size: 1024,
+                                ..Default::default()
+                            }
+                            .encode()
+                        })
+                        .collect();
+                    (p, packets)
+                });
+                let mut env = Env::new(p);
+                let mut sum = 0u64;
+                for pkt in packets {
+                    let r = run_xdp(p, &mut env, pkt).expect("runs");
+                    sum = sum.wrapping_mul(31).wrapping_add(r.ret ^ r.insns);
+                    let ring = env.ring_mut(::$krate::mitigator::ALERTS_MAP).expect("ring");
+                    ring.consumer = ring.producer;
+                }
+                black_box(sum)
+            }
+
             pub fn ext(_: &[u64]) -> u64 {
                 static OBJ: std::sync::OnceLock<(::$krate::btf::Btf, Vec<u8>)> =
                     std::sync::OnceLock::new();
@@ -404,12 +456,13 @@ fn workload(name: &str) -> (Workload, Workload) {
         "btf" => (rust_build::btf, port_build::btf),
         "core" => (rust_build::core, port_build::core),
         "ext" => (rust_build::ext, port_build::ext),
+        "interp" => (rust_build::interp, port_build::interp),
         _ => unreachable!(),
     }
 }
 
-const WORKLOADS: [&str; 7] = [
-    "decode", "scalar", "concrete", "verify", "btf", "core", "ext",
+const WORKLOADS: [&str; 8] = [
+    "decode", "scalar", "concrete", "verify", "btf", "core", "ext", "interp",
 ];
 
 #[test]
@@ -537,4 +590,10 @@ fn abba_core() {
 #[ignore = "benchmark; run in release with --ignored --nocapture"]
 fn abba_ext() {
     abba("ext");
+}
+
+#[test]
+#[ignore = "benchmark; run in release with --ignored --nocapture"]
+fn abba_interp() {
+    abba("interp");
 }
