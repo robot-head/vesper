@@ -1,0 +1,230 @@
+//! Fixed-seed parity of the two builds (port P1 lane 18, #915): the Vesper
+//! port and the Rust seed copy must produce the same generator outputs, the
+//! same tapes, the same counterexample and the same shrink sequence. The
+//! expected values were recorded from the Rust build; both packages run
+//! this file, so a port that drifts from Rust fails it.
+
+use vesper_crucible::{
+    ChoiceTape, FuzzConfig, PropError, ShrinkConfig, ShrinkKey, Source, SplitMix64, fuzz, shrink,
+};
+
+/// FNV-1a over the words, as a compact fingerprint of a long sequence.
+fn fingerprint(words: impl IntoIterator<Item = u64>) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for w in words {
+        for b in w.to_le_bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    h
+}
+
+#[test]
+fn splitmix_outputs_match_the_rust_build() {
+    let mut rng = SplitMix64(42);
+    let raw: Vec<u64> = (0..4).map(|_| rng.next_u64()).collect();
+    let below: Vec<u64> = (0..4).map(|i| rng.below_inclusive(1000 + i)).collect();
+    let chance: Vec<bool> = (0..8).map(|_| rng.chance(256)).collect();
+    let full = rng.below_inclusive(u64::MAX);
+    let index = rng.index(7);
+    assert_eq!(
+        (raw, below, chance, full, index, rng.0),
+        golden_rng(),
+        "SplitMix64 outputs"
+    );
+}
+
+#[test]
+fn random_and_replayed_sources_match_the_rust_build() {
+    let mut src = Source::random(7);
+    let mut seen = Vec::new();
+    for i in 0..64u64 {
+        seen.push(src.draw_u64_bounded(i * 37).unwrap());
+    }
+    let bytes = src.draw_bytes(40).unwrap();
+    let run = src.draw_run_now().unwrap();
+    let v = src.draw_vec(16, |s| s.draw_range_i64(-5, 5)).unwrap();
+    assert_eq!(
+        (
+            fingerprint(seen),
+            bytes.len(),
+            run,
+            v.len(),
+            fingerprint(src.realized_values().iter().copied())
+        ),
+        GOLDEN_SOURCE,
+        "random source"
+    );
+
+    // Replay clamps to the bound and overruns at the end of the tape.
+    let mut replay = Source::replay(&ChoiceTape::new(vec![500, 3, u64::MAX]));
+    assert_eq!(replay.draw_u64_bounded(10), Ok(10));
+    assert_eq!(replay.draw_u8(), Ok(3));
+    assert_eq!(replay.draw_bool(), Ok(true));
+    assert!(replay.draw_u64().is_err());
+    assert_eq!(replay.realized_values(), &[10, 3, 1]);
+}
+
+#[test]
+fn tape_text_and_keys_match_the_rust_build() {
+    let tape = ChoiceTape::new(vec![0, 1, 0xabc_def0, u64::MAX, 16]);
+    assert_eq!(
+        tape.to_text(),
+        "vesper-crucible-tape/1\n0\n1\nabcdef0\nffffffffffffffff\n10\n"
+    );
+    // Unicode White_Space around values and the header is trimmed like
+    // `str::trim`; a no-break space inside a value is not.
+    let spaced = "\u{3000}vesper-crucible-tape/1\u{a0}\r\n\u{2009}ff\u{85}\n\n";
+    assert_eq!(ChoiceTape::from_text(spaced).unwrap().values, vec![0xff]);
+    assert!(ChoiceTape::from_text("vesper-crucible-tape/1\nf\u{a0}f\n").is_err());
+    let long = format!("  \u{2028}{}\n", "é".repeat(80));
+    match ChoiceTape::from_text(&long) {
+        Err(vesper_crucible::TapeError::UnknownHeader(shown)) => {
+            assert_eq!(shown, "é".repeat(64))
+        }
+        other => panic!("{other:?}"),
+    }
+    let big = ShrinkKey::of(&[u64::MAX, u64::MAX, 2]);
+    assert_eq!(big.sum, 2 * u128::from(u64::MAX) + 2);
+    assert!(ShrinkKey::of(&[5]).smaller_than(ShrinkKey::of(&[0, 0])));
+    assert!(ShrinkKey::of(&[1, 2]).smaller_than(big));
+    assert!(!big.smaller_than(big));
+}
+
+/// The README property: a 32-bit magic guard that the comparison solver
+/// pierces, so the counterexample and its shrink are fixed by the seed.
+fn magic(src: &mut Source) -> Result<(), PropError> {
+    let data = src.draw_bytes(64)?;
+    if data.len() >= 4 {
+        let word = u32::from_le_bytes(data[..4].try_into().unwrap());
+        if src.probe().eq(1, u64::from(word), 0xfeed_f00d) {
+            return Err(PropError::fail("magic", "reached"));
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn fuzz_counterexample_matches_the_rust_build() {
+    let report = fuzz(&FuzzConfig::default(), magic);
+    let cx = report.counterexample.expect("solver pierces the guard");
+    assert_eq!(
+        (
+            report.execs,
+            cx.tape.values.clone(),
+            cx.original.values.len(),
+            cx.shrink.runs,
+            cx.shrink.accepted
+        ),
+        golden_fuzz(),
+        "fuzz report"
+    );
+}
+
+#[test]
+fn shrink_sequence_matches_the_rust_build() {
+    // Every tape the shrinker runs, in order, is part of the contract.
+    let mut runs: Vec<Vec<u64>> = Vec::new();
+    let mut prop = |src: &mut Source| {
+        let v = src.draw_vec(64, |s| s.draw_u64_bounded(100))?;
+        let flag = src.draw_bool()?;
+        runs.push(src.realized_values().to_vec());
+        src.assume(v.len() != 3)?;
+        if v.iter().sum::<u64>() > 300 && (flag || v.len() > 5) {
+            Err(PropError::fail("sum", "too big"))
+        } else if v.contains(&77) {
+            Err(PropError::fail("other", "77"))
+        } else {
+            Ok(())
+        }
+    };
+    let mut rng = SplitMix64(11);
+    let mut tape = Vec::new();
+    for _ in 0..24 {
+        tape.push(1);
+        tape.push(rng.below_inclusive(100));
+    }
+    tape.extend([0, 1]);
+    let config = ShrinkConfig {
+        max_runs: 400,
+        ..ShrinkConfig::default()
+    };
+    let shrunk = shrink(&mut prop, &ChoiceTape::new(tape), &config).unwrap();
+    let sequence = fingerprint(
+        runs.iter()
+            .flat_map(|r| r.iter().copied().chain([u64::MAX])),
+    );
+    let s = &shrunk.stats;
+    assert_eq!(
+        (
+            runs.len(),
+            sequence,
+            shrunk.tape.values.clone(),
+            (s.runs, s.accepted, s.invalid, s.not_reproducing),
+            s.budget_exhausted
+        ),
+        golden_shrink(),
+        "shrink sequence"
+    );
+
+    // A budget small enough to run out mid-pass stops at the same place.
+    let mut count = 0u64;
+    let mut prop = |src: &mut Source| {
+        count += 1;
+        let v = src.draw_vec(64, |s| s.draw_u64_bounded(1000))?;
+        if v.iter().sum::<u64>() > 10 {
+            Err(PropError::fail("sum", "big"))
+        } else {
+            Ok(())
+        }
+    };
+    let tape: Vec<u64> = (0..30).flat_map(|i| [1, 900 - i]).chain([0]).collect();
+    let config = ShrinkConfig {
+        max_runs: 37,
+        ..ShrinkConfig::default()
+    };
+    let shrunk = shrink(&mut prop, &ChoiceTape::new(tape), &config).unwrap();
+    assert!(shrunk.stats.budget_exhausted);
+    assert_eq!(shrunk.stats.runs, 37);
+    assert_eq!(count, 37);
+    assert_eq!(
+        fingerprint(shrunk.tape.values.iter().copied()),
+        GOLDEN_BUDGET,
+        "budgeted shrink"
+    );
+}
+
+type RngOutputs = (Vec<u64>, Vec<u64>, Vec<bool>, u64, usize, u64);
+type ShrinkOutputs = (usize, u64, Vec<u64>, (u64, u64, u64, u64), bool);
+
+fn golden_rng() -> RngOutputs {
+    (
+        vec![
+            13679457532755275413,
+            2949826092126892291,
+            5139283748462763858,
+            6349198060258255764,
+        ],
+        vec![475, 942, 762, 568],
+        vec![false, false, false, true, false, false, false, false],
+        1910607418205583989,
+        4,
+        2298681937012504996,
+    )
+}
+const GOLDEN_SOURCE: (u64, usize, bool, usize, u64) =
+    (5480631544679405514, 38, true, 2, 1695556231656988067);
+fn golden_fuzz() -> (u64, Vec<u64>, usize, u64, u64) {
+    (65, vec![1, 13, 1, 240, 1, 237, 1, 254, 0], 25, 304, 2)
+}
+fn golden_shrink() -> ShrinkOutputs {
+    (
+        328,
+        1351420804930808777,
+        vec![1, 27, 1, 60, 1, 71, 1, 89, 1, 54, 1, 0, 0, 0],
+        (400, 8, 107, 284),
+        true,
+    )
+}
+const GOLDEN_BUDGET: u64 = 1411699998813427827;

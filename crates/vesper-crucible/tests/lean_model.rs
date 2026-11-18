@@ -22,7 +22,14 @@ const AUDITED_THEOREMS: usize = 8;
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
 
 fn lean_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lean")
+    // The port-backed package is crates/vesper-crucible and the seed copy
+    // crates/vesper-crucible/seed; both read the repository's lean/.
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest
+        .ancestors()
+        .map(|dir| dir.join("lean"))
+        .find(|dir| dir.join("CrucibleShrink.lean").is_file())
+        .unwrap_or_else(|| manifest.join("../../lean"))
 }
 
 /// Remove `--` line comments and nested `/- -/` block comments.

@@ -20,7 +20,9 @@
 //! minimal with respect to these passes only; no global minimality is
 //! claimed.
 
-use crate::exec::{Run, Verdict, execute};
+#[cfg(not(vesper_port))]
+use crate::exec::Run;
+use crate::exec::{Verdict, execute};
 use crate::source::{DEFAULT_MAX_DRAWS, Failure, PropError, Source};
 use crate::tape::{ChoiceTape, ShrinkKey};
 use std::fmt;
@@ -80,6 +82,7 @@ impl fmt::Display for DoesNotFail {
 
 impl std::error::Error for DoesNotFail {}
 
+#[cfg(not(vesper_port))]
 struct Reducer<'p, P> {
     prop: &'p mut P,
     config: ShrinkConfig,
@@ -89,6 +92,7 @@ struct Reducer<'p, P> {
     stats: ShrinkStats,
 }
 
+#[cfg(not(vesper_port))]
 impl<P> Reducer<'_, P>
 where
     P: FnMut(&mut Source) -> Result<(), PropError>,
@@ -257,37 +261,94 @@ where
         other => return Err(DoesNotFail(other)),
     };
     let initial = ShrinkKey::of(&first.values);
-    let mut reducer = Reducer {
-        prop,
-        config: config.clone(),
-        kind: failure.kind.clone(),
-        best: first.values,
-        failure,
-        stats: ShrinkStats {
-            runs: 1,
-            accepted: 0,
-            invalid: 0,
-            not_reproducing: 0,
-            initial,
-            shrunk: initial,
-            budget_exhausted: false,
-        },
-    };
-    loop {
-        let mut improved = reducer.delete_spans();
-        improved |= reducer.zero_spans();
-        improved |= reducer.lower_values();
-        improved |= reducer.lower_and_delete();
-        if !improved || reducer.out_of_budget() {
-            break;
+    #[cfg(vesper_port)]
+    {
+        Ok(reduce_port(prop, config, failure, first.values, initial))
+    }
+    #[cfg(not(vesper_port))]
+    {
+        let mut reducer = Reducer {
+            prop,
+            config: config.clone(),
+            kind: failure.kind.clone(),
+            best: first.values,
+            failure,
+            stats: ShrinkStats {
+                runs: 1,
+                accepted: 0,
+                invalid: 0,
+                not_reproducing: 0,
+                initial,
+                shrunk: initial,
+                budget_exhausted: false,
+            },
+        };
+        loop {
+            let mut improved = reducer.delete_spans();
+            improved |= reducer.zero_spans();
+            improved |= reducer.lower_values();
+            improved |= reducer.lower_and_delete();
+            if !improved || reducer.out_of_budget() {
+                break;
+            }
+        }
+        reducer.stats.shrunk = ShrinkKey::of(&reducer.best);
+        Ok(Shrunk {
+            tape: ChoiceTape::new(reducer.best),
+            failure: reducer.failure,
+            stats: reducer.stats,
+        })
+    }
+}
+
+/// The Vesper build of the reducer: the step machine in vesper/src/lib.ves
+/// (`Shrinker`) proposes every candidate and decides what to keep; this loop
+/// only runs the property closure on each candidate and reports the
+/// outcome back.
+#[cfg(vesper_port)]
+fn reduce_port<P>(
+    prop: &mut P,
+    config: &ShrinkConfig,
+    mut failure: Failure,
+    first: Vec<u64>,
+    initial: ShrinkKey,
+) -> Shrunk
+where
+    P: FnMut(&mut Source) -> Result<(), PropError>,
+{
+    let kind = failure.kind.clone();
+    let mut machine = crate::binding::Shrinker::new(first, config.max_runs);
+    while machine.next() {
+        let candidate = machine.candidate();
+        let run = execute(
+            prop,
+            Source::build_strict(candidate, config.max_draws),
+            config.catch_panics,
+        );
+        let (outcome, reproduced) = match run.verdict {
+            Verdict::Fail(f) if f.kind == kind => (0, Some(f)),
+            Verdict::Invalid(_) => (1, None),
+            _ => (2, None),
+        };
+        if machine.record(outcome, &run.values) {
+            failure = reproduced.expect("only a reproducing failure is accepted");
         }
     }
-    reducer.stats.shrunk = ShrinkKey::of(&reducer.best);
-    Ok(Shrunk {
-        tape: ChoiceTape::new(reducer.best),
-        failure: reducer.failure,
-        stats: reducer.stats,
-    })
+    let best = machine.best();
+    let stats = machine.stats();
+    Shrunk {
+        failure,
+        stats: ShrinkStats {
+            runs: stats.runs,
+            accepted: stats.accepted,
+            invalid: stats.invalid,
+            not_reproducing: stats.not_reproducing,
+            initial,
+            shrunk: ShrinkKey::of(&best),
+            budget_exhausted: stats.budget_exhausted.get(),
+        },
+        tape: ChoiceTape::new(best),
+    }
 }
 
 /// Replay `tape` strictly and return the verdict: deterministic reproduction

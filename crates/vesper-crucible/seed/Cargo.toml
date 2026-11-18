@@ -1,0 +1,76 @@
+[package]
+name = "vesper-crucible-seed"
+version = "0.1.0"
+edition = "2024"
+description = "Frozen Rust seed copy of vesper-crucible for the compiler's own dependency closure"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; this crate's port is lane 18,
+# #915): the compiler, and for now every other dependent, links this package,
+# the Rust build of ../src, under the library name `vesper_crucible`.
+# Dependents use
+# `vesper-crucible = { path = ".../seed", package = "vesper-crucible-seed" }`.
+# The port-backed package `vesper-crucible` is exercised by its own tests
+# until it reaches performance parity. The Rust code takes bug fixes only.
+[lib]
+name = "vesper_crucible"
+path = "../src/lib.rs"
+
+[dependencies]
+vesper-alloc = { path = "../../vesper-alloc/seed", package = "vesper-alloc-seed" }
+vesper-simpulse = { path = "../../vesper-simpulse/seed", package = "vesper-simpulse-seed" }
+
+[dev-dependencies]
+vesper-bench = { path = "../../vesper-bench" }
+
+[[test]]
+name = "api"
+path = "../tests/api.rs"
+
+[[test]]
+name = "arena"
+path = "../tests/arena.rs"
+
+[[test]]
+name = "arena_alloc"
+path = "../tests/arena_alloc.rs"
+
+[[test]]
+name = "dpor"
+path = "../tests/dpor.rs"
+
+[[test]]
+name = "dpor_rest"
+path = "../tests/dpor_rest.rs"
+
+[[test]]
+name = "explore"
+path = "../tests/explore.rs"
+
+[[test]]
+name = "fuzzing"
+path = "../tests/fuzzing.rs"
+
+[[test]]
+name = "lean_model"
+path = "../tests/lean_model.rs"
+
+[[test]]
+name = "parity"
+path = "../tests/parity.rs"
+
+[[test]]
+name = "shrinking"
+path = "../tests/shrinking.rs"
+
+[[example]]
+name = "abba"
+path = "../examples/abba.rs"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

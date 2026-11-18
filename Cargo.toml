@@ -70,6 +70,7 @@ members = [
     "crates/vesper-chrono",
     "crates/vesper-migrate",
     "crates/vesper-crucible",
+    "crates/vesper-crucible/seed",
     "crates/vesper-nexus",
     "crates/vesper-vault",
     "crates/vesper-kinetic",
@@ -156,6 +157,7 @@ default-members = [
     "crates/vesper-chrono",
     "crates/vesper-migrate",
     "crates/vesper-crucible",
+    "crates/vesper-crucible/seed",
     "crates/vesper-nexus",
     "crates/vesper-vault",
     "crates/vesper-kinetic",
@@ -249,7 +251,9 @@ vesper-pact-binding = { path = "crates/vesper-pact-binding" }
 # Integration B (#136): wave-five verifiers and tools wired into the CLI.
 vesper-aegis = { path = "crates/vesper-aegis" }
 vesper-chrono = { path = "crates/vesper-chrono" }
-vesper-crucible = { path = "crates/vesper-crucible" }
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-crucible (#915).
+vesper-crucible = { path = "crates/vesper-crucible/seed", package = "vesper-crucible-seed" }
 vesper-ebpf = { path = "crates/vesper-ebpf" }
 vesper-kinetic = { path = "crates/vesper-kinetic" }
 vesper-ffi = { path = "crates/vesper-ffi" }

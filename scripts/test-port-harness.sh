@@ -174,3 +174,4 @@ der der typed_set_of_sorts_complete_encodings_retains_duplicates_and_rejects_unt
 ipc ipc independent_arrow_values_and_versions hostile_schema_and_union_discriminants
 CHECKS
 . crates/vesper-simpulse/port/check.sh  # port P1 lane 5 (#902): vesper-simpulse, both builds and the divergence check
+. crates/vesper-crucible/port/check.sh  # port P1 lane 18 (#915): vesper-crucible, both builds and the divergence checks

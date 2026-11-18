@@ -5541,7 +5541,7 @@ dependencies = [
  "vesper-bench-pmu",
  "vesper-chrono",
  "vesper-core",
- "vesper-crucible",
+ "vesper-crucible-seed",
  "vesper-diagnostics",
  "vesper-doc",
  "vesper-ebpf",
@@ -5753,6 +5753,18 @@ name = "vesper-crucible"
 version = "0.1.0"
 dependencies = [
  "vesper-alloc-seed",
+ "vesper-bench",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-simpulse-seed",
+]
+
+[[package]]
+name = "vesper-crucible-seed"
+version = "0.1.0"
+dependencies = [
+ "vesper-alloc-seed",
+ "vesper-bench",
  "vesper-simpulse-seed",
 ]
 

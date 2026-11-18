@@ -4,9 +4,31 @@ version = "0.1.0"
 edition = "2024"
 description = "Vesper Crucible (design §29): choice-tape property testing, comparison-guided fuzzing, SimPulse schedule exploration and termination-checked shrinking"
 publish = false
+build = "build.rs"
+
+# This is the port-backed build: build.rs links the Vesper package in vesper/
+# and sets cfg(vesper_port). The compiler and every other dependent use the
+# frozen Rust seed copy, crates/vesper-crucible/seed (package
+# vesper-crucible-seed, same library name), until the port reaches
+# performance parity; see "Crates the compiler links" in
+# docs/maintenance/porting-a-crate.md and docs/parallel-results/port-p1-crucible.md.
+
+[features]
+# Deliberately wrong Vesper builds (EDITS in build.rs, one per ported area):
+# scripts/test-port-harness.sh asserts which test catches each.
+vesper-port-divergent = []
 
 [dependencies]
 vesper-alloc = { path = "../vesper-alloc/seed", package = "vesper-alloc-seed" }
 vesper-simpulse = { path = "../vesper-simpulse/seed", package = "vesper-simpulse-seed" }
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
+# The ABBA benchmark (examples/abba.rs).
+vesper-bench = { path = "../vesper-bench" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }
