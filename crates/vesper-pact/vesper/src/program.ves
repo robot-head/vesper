@@ -1,0 +1,1112 @@
+// Module program of @vesper/pact (see lib.ves): `program.rs`, decoding the
+// declaration DTOs and queries from words, and their validation.
+//
+// Input words (written by src/port.rs). A term is its node tag followed
+// by its fields in order, kids as a count and the kids:
+//
+//   type      1 ctor n arg* | 2 var | 3 trait_ref brand assoc
+//   mode      4 mode | 5 var
+//   row       6 n label* tail          (tail none() when closed)
+//   brand     7 | 8 model | 9 var
+//   cap arg   10 var
+//   label     11 effect n arg* | 12 var
+//   trait_ref trait self n arg*        (no tag)
+//   goal      14 trait_ref brand | 15 trait_ref brand assoc ty | 16 ty mode
+//
+// A program is the schema (major, minor), then the tables:
+//
+//   n pkg_id*
+//   n (id package kinds base joins)*                 type ctors
+//   n (id package kinds)*                            effects
+//   n (id package kinds n (mode n (trait n arg* brand)*)* coinductive)*
+//   n (id conformance)*                              impls
+//   n (id conformance)*                              models
+//
+// with `kinds` and `joins` a count and words, and a conformance
+// `package kinds trait_ref n goal* n ty*`. An environment is
+// `n (kind bound)* n goal* n (n model*)*`, bound none() when absent; a
+// query is `major minor env kinds goal`.
+use self::{
+    S
+};
+use self::term::{
+    add,
+    dec,
+    fa,
+    fb,
+    fc,
+    flags,
+    inc,
+    iw,
+    kid,
+    kind_of,
+    label_key,
+    mk,
+    mk0,
+    mk1,
+    mk2,
+    mkl,
+    nlen,
+    none,
+    push_kids,
+    snil,
+    sub,
+    sw,
+    tg,
+    vidx,
+    vkind
+};
+use self::render::{
+    byte,
+    d_label_key,
+    lit,
+    num,
+    r_arg,
+    r_id,
+    r_kind_debug,
+    r_row,
+    r_var
+};
+use self::diag::{
+    emit,
+    sort_diags
+};
+
+pub fn rd(inout s: S, in w: Slice[u64]) -> u64 {
+    let x = iw(in w, s.pos);
+    s.pos = inc(s.pos);
+    x
+}
+
+// An slist of n words read from w.
+pub fn rd_slist(inout s: S, in w: Slice[u64]) -> u64 {
+    let n = rd(inout s, in w);
+    let from = s.tmp.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let x = rd(inout s, in w);
+        s.tmp.push(x);
+        i = inc(i);
+    }
+    mkl(inout s, 28, 0, 0, 0, from)
+}
+
+fn rd_args(inout s: S, in w: Slice[u64]) -> u64 {
+    let n = rd(inout s, in w);
+    let from = s.tmp.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let x = rd_term(inout s, in w);
+        s.tmp.push(x);
+        i = inc(i);
+    }
+    from
+}
+
+pub fn rd_tref(inout s: S, in w: Slice[u64]) -> u64 {
+    let t = rd(inout s, in w);
+    let st = rd_term(inout s, in w);
+    let from = rd_args(inout s, in w);
+    mkl(inout s, 13, t, st, 0, from)
+}
+
+// A list node of n terms.
+pub fn rd_list(inout s: S, in w: Slice[u64]) -> u64 {
+    let from = rd_args(inout s, in w);
+    mkl(inout s, 27, 0, 0, 0, from)
+}
+
+pub fn rd_term(inout s: S, in w: Slice[u64]) -> u64 {
+    let tag = rd(inout s, in w);
+    if tag == 1 || tag == 11 {
+        let c = rd(inout s, in w);
+        let from = rd_args(inout s, in w);
+        mkl(inout s, tag, c, 0, 0, from)
+    } else if tag == 3 {
+        let tr = rd_tref(inout s, in w);
+        let b = rd_term(inout s, in w);
+        let a = rd(inout s, in w);
+        mk(inout s, 3, tr, b, a)
+    } else if tag == 6 {
+        let from = rd_args(inout s, in w);
+        let tail = rd(inout s, in w);
+        mkl(inout s, 6, tail, 0, 0, from)
+    } else if tag == 7 {
+        mk0(inout s, 7)
+    } else if tag == 14 {
+        let tr = rd_tref(inout s, in w);
+        let b = rd_term(inout s, in w);
+        mk2(inout s, 14, tr, b)
+    } else if tag == 15 {
+        let tr = rd_tref(inout s, in w);
+        let b = rd_term(inout s, in w);
+        let a = rd(inout s, in w);
+        let p = mk(inout s, 3, tr, b, a);
+        let ty = rd_term(inout s, in w);
+        mk2(inout s, 15, p, ty)
+    } else if tag == 16 {
+        let ty = rd_term(inout s, in w);
+        let m = rd_term(inout s, in w);
+        mk2(inout s, 16, ty, m)
+    } else {
+        let x = rd(inout s, in w);
+        mk1(inout s, tag, x)
+    }
+}
+
+// A derivation: `goal step n derivation*`, the step its node tag and
+// fields (18 source n arg*, 19/20/22 index, 21 source k n arg*, 23-26).
+pub fn rd_der(inout s: S, in w: Slice[u64]) -> u64 {
+    let g = rd_term(inout s, in w);
+    let t = rd(inout s, in w);
+    let st = if t == 18 {
+        let src = rd(inout s, in w);
+        let from = rd_args(inout s, in w);
+        mkl(inout s, 18, src, 0, 0, from)
+    } else if t == 21 {
+        let src = rd(inout s, in w);
+        let k = rd(inout s, in w);
+        let from = rd_args(inout s, in w);
+        mkl(inout s, 21, src, k, 0, from)
+    } else if t == 19 || t == 20 || t == 22 {
+        let x = rd(inout s, in w);
+        mk1(inout s, t, x)
+    } else {
+        mk0(inout s, t)
+    };
+    let n = rd(inout s, in w);
+    let from = s.tmp.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = rd_der(inout s, in w);
+        s.tmp.push(c);
+        i = inc(i);
+    }
+    mkl(inout s, 17, g, st, 0, from)
+}
+
+fn rd_conformance(inout s: S, in w: Slice[u64], id: u64) {
+    let pkg = rd(inout s, in w);
+    let params = rd_slist(inout s, in w);
+    let tr = rd_tref(inout s, in w);
+    let wh = rd_list(inout s, in w);
+    let vals = rd_list(inout s, in w);
+    s.cf_id.push(id);
+    s.cf_pkg.push(pkg);
+    s.cf_params.push(params);
+    s.cf_tref.push(tr);
+    s.cf_where.push(wh);
+    s.cf_vals.push(vals);
+}
+
+// Decodes a program (after the schema words, which go to s.smaj and
+// s.smin) into the declaration tables, and indexes impls by trait.
+pub fn rd_program(inout s: S, in w: Slice[u64]) {
+    s.smaj = rd(inout s, in w);
+    s.smin = rd(inout s, in w);
+    let np = rd(inout s, in w);
+    let mut i: u64 = 0;
+    loop {
+        if i >= np {
+            break;
+        }
+        let x = rd(inout s, in w);
+        s.pk_id.push(x);
+        i = inc(i);
+    }
+    let nc = rd(inout s, in w);
+    i = 0;
+    loop {
+        if i >= nc {
+            break;
+        }
+        let id = rd(inout s, in w);
+        let pkg = rd(inout s, in w);
+        let params = rd_slist(inout s, in w);
+        let base = rd(inout s, in w);
+        let joins = rd_slist(inout s, in w);
+        s.ct_id.push(id);
+        s.ct_pkg.push(pkg);
+        s.ct_params.push(params);
+        s.ct_base.push(base);
+        s.ct_joins.push(joins);
+        i = inc(i);
+    }
+    let ne = rd(inout s, in w);
+    i = 0;
+    loop {
+        if i >= ne {
+            break;
+        }
+        let id = rd(inout s, in w);
+        let pkg = rd(inout s, in w);
+        let params = rd_slist(inout s, in w);
+        s.ef_id.push(id);
+        s.ef_pkg.push(pkg);
+        s.ef_params.push(params);
+        i = inc(i);
+    }
+    let nt = rd(inout s, in w);
+    i = 0;
+    loop {
+        if i >= nt {
+            break;
+        }
+        let id = rd(inout s, in w);
+        let pkg = rd(inout s, in w);
+        let params = rd_slist(inout s, in w);
+        let na = rd(inout s, in w);
+        s.tr_id.push(id);
+        s.tr_pkg.push(pkg);
+        s.tr_params.push(params);
+        s.tr_as_at.push(s.as_mode.len());
+        s.tr_as_n.push(na);
+        let mut j: u64 = 0;
+        loop {
+            if j >= na {
+                break;
+            }
+            let m = rd_term(inout s, in w);
+            let nb = rd(inout s, in w);
+            s.as_mode.push(m);
+            s.as_bd_at.push(s.bd_trait.len());
+            s.as_bd_n.push(nb);
+            let mut k: u64 = 0;
+            loop {
+                if k >= nb {
+                    break;
+                }
+                let t = rd(inout s, in w);
+                let args = rd_list(inout s, in w);
+                let b = rd_term(inout s, in w);
+                s.bd_trait.push(t);
+                s.bd_args.push(args);
+                s.bd_brand.push(b);
+                k = inc(k);
+            }
+            j = inc(j);
+        }
+        let co = rd(inout s, in w);
+        s.tr_coind.push(co);
+        i = inc(i);
+    }
+    let ni = rd(inout s, in w);
+    i = 0;
+    loop {
+        if i >= ni {
+            break;
+        }
+        let id = rd(inout s, in w);
+        rd_conformance(inout s, in w, id);
+        i = inc(i);
+    }
+    s.nimpl = ni;
+    let nm = rd(inout s, in w);
+    i = 0;
+    loop {
+        if i >= nm {
+            break;
+        }
+        let id = rd(inout s, in w);
+        rd_conformance(inout s, in w, id);
+        i = inc(i);
+    }
+    s.nmodel = nm;
+}
+
+// impls_by_trait (only for a validated program).
+pub fn index_impls(inout s: S) {
+    let nt = s.tr_id.len();
+    let mut t: u64 = 0;
+    loop {
+        if t >= nt {
+            break;
+        }
+        s.ib_at.push(s.ib.len());
+        let mut i: u64 = 0;
+        loop {
+            if i >= s.nimpl {
+                break;
+            }
+            let tr = sw(in s.cf_tref, i);
+            if fa(in s, tr) == t {
+                s.ib.push(i);
+            }
+            i = inc(i);
+        }
+        s.ib_n.push(sub(s.ib.len(), sw(in s.ib_at, t)));
+        t = inc(t);
+    }
+}
+
+// An environment node: placeholders (a list of e_ph), assumptions (a list
+// of goals) and model scopes (a list of slists).
+pub fn rd_env(inout s: S, in w: Slice[u64]) -> u64 {
+    let np = rd(inout s, in w);
+    let from = s.tmp.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= np {
+            break;
+        }
+        let k = rd(inout s, in w);
+        let b = rd(inout s, in w);
+        let p = mk2(inout s, 54, k, b);
+        s.tmp.push(p);
+        i = inc(i);
+    }
+    let phs = mkl(inout s, 27, 0, 0, 0, from);
+    let asm = rd_list(inout s, in w);
+    let ns = rd(inout s, in w);
+    let from2 = s.tmp.len();
+    i = 0;
+    loop {
+        if i >= ns {
+            break;
+        }
+        let sc = rd_slist(inout s, in w);
+        s.tmp.push(sc);
+        i = inc(i);
+    }
+    let scopes = mkl(inout s, 27, 0, 0, 0, from2);
+    mk(inout s, 55, phs, asm, scopes)
+}
+
+// A query: s.qmaj, s.qmin, s.qenv, s.qbinders, s.qgoal.
+pub fn rd_query(inout s: S, in w: Slice[u64]) {
+    s.qmaj = rd(inout s, in w);
+    s.qmin = rd(inout s, in w);
+    s.qenv = rd_env(inout s, in w);
+    s.qbinders = rd_slist(inout s, in w);
+    s.qgoal = rd_term(inout s, in w);
+}
+
+// ---------------------------------------------------------------------------
+// Validation (`Validator`). The scope is s.sc_kind: 0 a template over the
+// kinds s.sc_params, 1 a query over the placeholders of s.sc_phs (a list of
+// e_ph) and the binder kinds s.sc_binders.
+
+fn begin(in s: S) -> u64 {
+    s.txt.len()
+}
+
+pub fn check_schema(inout s: S, maj: u64, min: u64) -> bool {
+    if maj != 0 || min > 1 {
+        let off = begin(in s);
+        lit(inout s, "unsupported schema ");
+        num(inout s, maj);
+        byte(inout s, 46);
+        num(inout s, min);
+        lit(inout s, " (this solver accepts 0.0..=0.1)");
+        emit(inout s, 0, 0, 0, 0, off);
+        return false;
+    }
+    true
+}
+
+fn dense(inout s: S, in what: Str, i: u64, in prefix: Str, id: u64) {
+    let off = begin(in s);
+    lit(inout s, what);
+    lit(inout s, " at ");
+    num(inout s, i);
+    lit(inout s, " has id ");
+    r_id(inout s, prefix, id);
+    emit(inout s, 1, 0, 0, 0, off);
+}
+
+fn unknown(inout s: S, in prefix: Str, id: u64, sv: u64, sa: u64, sb: u64) {
+    let off = begin(in s);
+    lit(inout s, "unknown ");
+    r_id(inout s, prefix, id);
+    emit(inout s, 2, sv, sa, sb, off);
+}
+
+fn v_package(inout s: S, p: u64, sv: u64, sa: u64) {
+    if p >= s.pk_id.len() {
+        unknown(inout s, "pkg", p, sv, sa, 0);
+    }
+}
+
+pub fn validate_program(inout s: S) {
+    let maj = s.smaj;
+    let min = s.smin;
+    if !check_schema(inout s, maj, min) {
+        return;
+    }
+    let np = s.pk_id.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= np {
+            break;
+        }
+        let id = sw(in s.pk_id, i);
+        if id != i {
+            dense(inout s, "package", i, "pkg", id);
+        }
+        i = inc(i);
+    }
+    let nc = s.ct_id.len();
+    i = 0;
+    loop {
+        if i >= nc {
+            break;
+        }
+        let id = sw(in s.ct_id, i);
+        if id != i {
+            dense(inout s, "type ctor", i, "type", id);
+        }
+        let pkg = sw(in s.ct_pkg, i);
+        v_package(inout s, pkg, 1, id);
+        let joins = sw(in s.ct_joins, i);
+        let params = sw(in s.ct_params, i);
+        let nj = nlen(in s, joins);
+        let mut j: u64 = 0;
+        loop {
+            if j >= nj {
+                break;
+            }
+            let x = kid(in s, joins, j);
+            if x >= nlen(in s, params) || kid(in s, params, x) != 0 {
+                let off = begin(in s);
+                lit(inout s, "mode join index ");
+                num(inout s, x);
+                lit(inout s, " is not a type parameter");
+                emit(inout s, 6, 1, id, 0, off);
+            }
+            j = inc(j);
+        }
+        i = inc(i);
+    }
+    let ne = s.ef_id.len();
+    i = 0;
+    loop {
+        if i >= ne {
+            break;
+        }
+        let id = sw(in s.ef_id, i);
+        if id != i {
+            dense(inout s, "effect", i, "effect", id);
+        }
+        let pkg = sw(in s.ef_pkg, i);
+        v_package(inout s, pkg, 2, id);
+        i = inc(i);
+    }
+    let nt = s.tr_id.len();
+    i = 0;
+    loop {
+        if i >= nt {
+            break;
+        }
+        let id = sw(in s.tr_id, i);
+        if id != i {
+            dense(inout s, "trait", i, "trait", id);
+        }
+        let pkg = sw(in s.tr_pkg, i);
+        v_package(inout s, pkg, 3, id);
+        // binder = [Type] ++ params
+        let params = sw(in s.tr_params, i);
+        let from = s.tmp.len();
+        s.tmp.push(0);
+        push_kids(inout s, params);
+        let binder = mkl(inout s, 28, 0, 0, 0, from);
+        s.sc_kind = 0;
+        s.sc_params = binder;
+        let at = sw(in s.tr_as_at, i);
+        let na = sw(in s.tr_as_n, i);
+        let mut ai: u64 = 0;
+        loop {
+            if ai >= na {
+                break;
+            }
+            let m = sw(in s.as_mode, add(at, ai));
+            v_mode(inout s, m, 3, id, 0);
+            let bat = sw(in s.as_bd_at, add(at, ai));
+            let bn = sw(in s.as_bd_n, add(at, ai));
+            let mut b: u64 = 0;
+            loop {
+                if b >= bn {
+                    break;
+                }
+                let bt = sw(in s.bd_trait, add(bat, b));
+                let bargs = sw(in s.bd_args, add(bat, b));
+                let bb = sw(in s.bd_brand, add(bat, b));
+                if v_trait_args(inout s, bt, bargs, 3, id, 0) {
+                    v_brand(inout s, bb, 3, id, 0);
+                    if tg(in s, bb) == 9 {
+                        let off = begin(in s);
+                        lit(inout s, "bound on ");
+                        r_id(inout s, "assoc", ai);
+                        lit(inout s, " must name an explicit brand");
+                        emit(inout s, 8, 3, id, 0, off);
+                    }
+                }
+                b = inc(b);
+            }
+            ai = inc(ai);
+        }
+        i = inc(i);
+    }
+    let ncf = s.cf_id.len();
+    i = 0;
+    loop {
+        if i >= ncf {
+            break;
+        }
+        let id = sw(in s.cf_id, i);
+        let is_impl = i < s.nimpl;
+        let pos = if is_impl {
+            i
+        } else {
+            sub(i, s.nimpl)
+        };
+        if id != pos {
+            if is_impl {
+                dense(inout s, "impl", pos, "impl", id);
+            } else {
+                dense(inout s, "model", pos, "model", id);
+            }
+        }
+        let sv: u64 = if is_impl {
+            4
+        } else {
+            6
+        };
+        v_conformance(inout s, i, sv, id);
+        i = inc(i);
+    }
+}
+
+fn v_conformance(inout s: S, ci: u64, sv: u64, sa: u64) {
+    let pkg = sw(in s.cf_pkg, ci);
+    v_package(inout s, pkg, sv, sa);
+    let params = sw(in s.cf_params, ci);
+    let np = nlen(in s, params);
+    let mut i: u64 = 0;
+    loop {
+        if i >= np {
+            break;
+        }
+        if kid(in s, params, i) == 4 {
+            let off = begin(in s);
+            lit(inout s, "capability parameters on impls/models are outside this fragment");
+            emit(inout s, 8, sv, sa, 0, off);
+            return;
+        }
+        i = inc(i);
+    }
+    s.sc_kind = 0;
+    s.sc_params = params;
+    let tr = sw(in s.cf_tref, ci);
+    if !v_trait_ref(inout s, tr, sv, sa, 0) {
+        return;
+    }
+    if (flags(in s, tr) & 8) != 0 {
+        let off = begin(in s);
+        lit(inout s, "associated-type projections in an impl/model head are outside this fragment");
+        emit(inout s, 8, sv, sa, 0, off);
+    }
+    let wh = sw(in s.cf_where, ci);
+    let nw = nlen(in s, wh);
+    i = 0;
+    loop {
+        if i >= nw {
+            break;
+        }
+        let g = kid(in s, wh, i);
+        v_goal(inout s, g, sv, sa, 0);
+        i = inc(i);
+    }
+    let t = fa(in s, tr);
+    let tid = sw(in s.tr_id, t);
+    let nas = sw(in s.tr_as_n, t);
+    let vals = sw(in s.cf_vals, ci);
+    let nv = nlen(in s, vals);
+    if nv != nas {
+        let off = begin(in s);
+        num(inout s, nv);
+        lit(inout s, " associated values supplied, ");
+        r_id(inout s, "trait", tid);
+        lit(inout s, " declares ");
+        num(inout s, nas);
+        emit(inout s, 3, sv, sa, 0, off);
+    }
+    i = 0;
+    loop {
+        if i >= nv {
+            break;
+        }
+        let v = kid(in s, vals, i);
+        v_ty(inout s, v, sv, sa, 0);
+        i = inc(i);
+    }
+    // Every parameter must occur in the head.
+    s.seen.clear();
+    i = 0;
+    loop {
+        if i >= np {
+            break;
+        }
+        s.seen.push(0);
+        i = inc(i);
+    }
+    let _ = mark_bound(inout s, tr);
+    i = 0;
+    loop {
+        if i >= np {
+            break;
+        }
+        if sw(in s.seen, i) == 0 {
+            let off = begin(in s);
+            lit(inout s, "parameter ^");
+            num(inout s, i);
+            lit(inout s, " does not occur in the head");
+            emit(inout s, 7, sv, sa, 0, off);
+        }
+        i = inc(i);
+    }
+}
+
+// Whether a row repeats a label key.
+pub fn row_dup(in s: S, r: u64) -> u64 {
+    let n = nlen(in s, r);
+    let mut best = none();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let k = label_key(in s, kid(in s, r, i));
+        let mut j = inc(i);
+        loop {
+            if j >= n {
+                break;
+            }
+            if label_key(in s, kid(in s, r, j)) == k && k < best {
+                best = k;
+            }
+            j = inc(j);
+        }
+        i = inc(i);
+    }
+    best
+}
+
+// `visit_goal_vars` over a trait ref, marking `^i` in s.seen; false when
+// the walk stopped at a row with a repeated label (the fold's error).
+fn mark_bound(inout s: S, n: u64) -> bool {
+    let t = tg(in s, n);
+    if t == 2 || t == 5 || t == 9 || t == 10 || t == 12 {
+        let v = fa(in s, n);
+        if vkind(v) == 0 && vidx(v) < s.seen.len() {
+            let _ = s.seen.try_set(vidx(v), 1);
+        }
+        return true;
+    }
+    if t == 6 {
+        let len = nlen(in s, n);
+        let mut i: u64 = 0;
+        loop {
+            if i >= len {
+                break;
+            }
+            let l = kid(in s, n, i);
+            if !mark_bound(inout s, l) {
+                return false;
+            }
+            i = inc(i);
+        }
+        let tail = fa(in s, n);
+        if tail != none() && vkind(tail) == 0 && vidx(tail) < s.seen.len() {
+            let _ = s.seen.try_set(vidx(tail), 1);
+        }
+        return row_dup(in s, n) == none();
+    }
+    if t == 3 {
+        let a = fa(in s, n);
+        if !mark_bound(inout s, a) {
+            return false;
+        }
+        let b = fb(in s, n);
+        return mark_bound(inout s, b);
+    }
+    if t == 13 {
+        let b = fb(in s, n);
+        if !mark_bound(inout s, b) {
+            return false;
+        }
+    }
+    if t == 1 || t == 11 || t == 13 {
+        let len = nlen(in s, n);
+        let mut i: u64 = 0;
+        loop {
+            if i >= len {
+                break;
+            }
+            let k = kid(in s, n, i);
+            if !mark_bound(inout s, k) {
+                return false;
+            }
+            i = inc(i);
+        }
+    }
+    true
+}
+
+pub fn v_trait_ref(inout s: S, tr: u64, sv: u64, sa: u64, sb: u64) -> bool {
+    let st = fb(in s, tr);
+    v_ty(inout s, st, sv, sa, sb);
+    let t = fa(in s, tr);
+    v_trait_args(inout s, t, tr, sv, sa, sb)
+}
+
+// Checks the kids of `args` against trait t's parameters.
+fn v_trait_args(inout s: S, t: u64, args: u64, sv: u64, sa: u64, sb: u64) -> bool {
+    if t >= s.tr_id.len() {
+        unknown(inout s, "trait", t, sv, sa, sb);
+        return false;
+    }
+    let params = sw(in s.tr_params, t);
+    v_args(inout s, params, args, sv, sa, sb, 0, t)
+}
+
+// `what` is 0 trait#x, 1 type#x, 2 effect#x.
+fn r_what(inout s: S, what: u64, x: u64) {
+    if what == 0 {
+        r_id(inout s, "trait", x);
+    } else if what == 1 {
+        r_id(inout s, "type", x);
+    } else {
+        r_id(inout s, "effect", x);
+    }
+}
+
+fn v_args(inout s: S, params: u64, args: u64, sv: u64, sa: u64, sb: u64, what: u64, x: u64)
+    -> bool {
+    let np = nlen(in s, params);
+    let na = nlen(in s, args);
+    if np != na {
+        let off = begin(in s);
+        r_what(inout s, what, x);
+        lit(inout s, " expects ");
+        num(inout s, np);
+        lit(inout s, " arguments, got ");
+        num(inout s, na);
+        emit(inout s, 3, sv, sa, sb, off);
+        return false;
+    }
+    let mut ok = true;
+    let mut i: u64 = 0;
+    loop {
+        if i >= np {
+            break;
+        }
+        let p = kid(in s, params, i);
+        let a = kid(in s, args, i);
+        if kind_of(tg(in s, a)) != p {
+            let off = begin(in s);
+            r_what(inout s, what, x);
+            lit(inout s, " expects a ");
+            r_kind_debug(inout s, p);
+            lit(inout s, " argument, got ");
+            r_arg(inout s, a);
+            emit(inout s, 4, sv, sa, sb, off);
+            ok = false;
+        } else {
+            v_arg(inout s, a, sv, sa, sb);
+        }
+        i = inc(i);
+    }
+    ok
+}
+
+pub fn v_goal(inout s: S, g: u64, sv: u64, sa: u64, sb: u64) {
+    let t = tg(in s, g);
+    let a = fa(in s, g);
+    let b = fb(in s, g);
+    if t == 14 {
+        let _ = v_trait_ref(inout s, a, sv, sa, sb);
+        v_brand(inout s, b, sv, sa, sb);
+    } else if t == 15 {
+        v_projection(inout s, a, sv, sa, sb);
+        v_ty(inout s, b, sv, sa, sb);
+    } else {
+        v_ty(inout s, a, sv, sa, sb);
+        v_mode(inout s, b, sv, sa, sb);
+    }
+}
+
+fn v_projection(inout s: S, p: u64, sv: u64, sa: u64, sb: u64) {
+    let tr = fa(in s, p);
+    if v_trait_ref(inout s, tr, sv, sa, sb) {
+        let t = fa(in s, tr);
+        let assoc = fc(in s, p);
+        if assoc >= sw(in s.tr_as_n, t) {
+            let off = begin(in s);
+            let h22 = sw(in s.tr_id, t);
+            r_id(inout s, "trait", h22);
+            lit(inout s, " has no ");
+            r_id(inout s, "assoc", assoc);
+            emit(inout s, 2, sv, sa, sb, off);
+        }
+    }
+    let b = fb(in s, p);
+    v_brand(inout s, b, sv, sa, sb);
+}
+
+pub fn v_ty(inout s: S, t: u64, sv: u64, sa: u64, sb: u64) {
+    let tag = tg(in s, t);
+    if tag == 1 {
+        let c = fa(in s, t);
+        if c >= s.ct_id.len() {
+            unknown(inout s, "type", c, sv, sa, sb);
+            return;
+        }
+        let params = sw(in s.ct_params, c);
+        let _ = v_args(inout s, params, t, sv, sa, sb, 1, c);
+    } else if tag == 2 {
+        let v = fa(in s, t);
+        v_var(inout s, v, 0, sv, sa, sb);
+    } else {
+        v_projection(inout s, t, sv, sa, sb);
+    }
+}
+
+pub fn v_arg(inout s: S, a: u64, sv: u64, sa: u64, sb: u64) {
+    let t = tg(in s, a);
+    if t <= 3 {
+        v_ty(inout s, a, sv, sa, sb);
+    } else if t <= 5 {
+        v_mode(inout s, a, sv, sa, sb);
+    } else if t == 6 {
+        v_row(inout s, a, sv, sa, sb);
+    } else if t <= 9 {
+        v_brand(inout s, a, sv, sa, sb);
+    } else {
+        let v = fa(in s, a);
+        v_cap(inout s, v, sv, sa, sb);
+    }
+}
+
+fn v_mode(inout s: S, m: u64, sv: u64, sa: u64, sb: u64) {
+    if tg(in s, m) == 5 {
+        let v = fa(in s, m);
+        v_var(inout s, v, 1, sv, sa, sb);
+    }
+}
+
+fn v_brand(inout s: S, b: u64, sv: u64, sa: u64, sb: u64) {
+    let t = tg(in s, b);
+    if t == 9 {
+        let v = fa(in s, b);
+        v_var(inout s, v, 3, sv, sa, sb);
+    } else if t == 8 {
+        let m = fa(in s, b);
+        if m >= s.nmodel {
+            unknown(inout s, "model", m, sv, sa, sb);
+        }
+    }
+}
+
+fn v_cap(inout s: S, v: u64, sv: u64, sa: u64, sb: u64) {
+    if vkind(v) == 2 {
+        let off = begin(in s);
+        lit(inout s, "capability inference variables are outside this fragment");
+        emit(inout s, 8, sv, sa, sb, off);
+        return;
+    }
+    v_var(inout s, v, 4, sv, sa, sb);
+}
+
+fn v_row(inout s: S, r: u64, sv: u64, sa: u64, sb: u64) {
+    let d = row_dup(in s, r);
+    if d != none() {
+        let off = begin(in s);
+        lit(inout s, "effect row repeats label ");
+        d_label_key(inout s, d);
+        lit(inout s, "; duplicate labels are outside this fragment");
+        emit(inout s, 8, sv, sa, sb, off);
+    }
+    let n = nlen(in s, r);
+    let mut sorted = true;
+    let mut i: u64 = 1;
+    loop {
+        if i >= n {
+            break;
+        }
+        if label_key(in s, kid(in s, r, dec(i))) > label_key(in s, kid(in s, r, i)) {
+            sorted = false;
+        }
+        i = inc(i);
+    }
+    if !sorted {
+        let off = begin(in s);
+        lit(inout s, "effect row ");
+        r_row(inout s, r);
+        lit(inout s, " is not sorted by label key");
+        emit(inout s, 6, sv, sa, sb, off);
+    }
+    i = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let l = kid(in s, r, i);
+        let e = fa(in s, l);
+        if tg(in s, l) == 11 {
+            if e >= s.ef_id.len() {
+                unknown(inout s, "effect", e, sv, sa, sb);
+            } else {
+                let params = sw(in s.ef_params, e);
+                let _ = v_args(inout s, params, l, sv, sa, sb, 2, e);
+            }
+        } else {
+            v_cap(inout s, e, sv, sa, sb);
+        }
+        i = inc(i);
+    }
+    let t = fa(in s, r);
+    if t != none() {
+        v_var(inout s, t, 2, sv, sa, sb);
+    }
+}
+
+fn v_var(inout s: S, v: u64, kind: u64, sv: u64, sa: u64, sb: u64) {
+    let vk = vkind(v);
+    let i = vidx(v);
+    let mut found = none();
+    let mut legal = true;
+    if s.sc_kind == 0 && vk == 0 {
+        if i < nlen(in s, s.sc_params) {
+            found = kid(in s, s.sc_params, i);
+        }
+    } else if s.sc_kind == 1 && vk == 1 {
+        let phs = s.sc_phs;
+        if i < nlen(in s, phs) {
+            found = fa(in s, kid(in s, phs, i));
+        }
+    } else if s.sc_kind == 1 && vk == 2 {
+        if i < nlen(in s, s.sc_binders) {
+            found = kid(in s, s.sc_binders, i);
+        }
+    } else {
+        legal = false;
+    }
+    if !legal {
+        let off = begin(in s);
+        lit(inout s, "variable ");
+        r_var(inout s, v);
+        lit(inout s, " is not legal here");
+        emit(inout s, 5, sv, sa, sb, off);
+        return;
+    }
+    if found == none() {
+        let off = begin(in s);
+        lit(inout s, "variable ");
+        r_var(inout s, v);
+        lit(inout s, " is unbound");
+        emit(inout s, 5, sv, sa, sb, off);
+    } else if found != kind {
+        let off = begin(in s);
+        lit(inout s, "variable ");
+        r_var(inout s, v);
+        lit(inout s, " has kind ");
+        r_kind_debug(inout s, found);
+        lit(inout s, ", used as ");
+        r_kind_debug(inout s, kind);
+        emit(inout s, 4, sv, sa, sb, off);
+    }
+}
+
+// `validate_query` of (maj, min, env, binders, goal): whether it passed;
+// the diagnostics are from s.dg base on, sorted.
+pub fn validate_query(inout s: S, maj: u64, min: u64, env: u64, binders: u64, goal: u64) -> bool {
+    let base = s.dg_code.len();
+    if !check_schema(inout s, maj, min) {
+        return false;
+    }
+    let phs = fa(in s, env);
+    let asm = fb(in s, env);
+    let scopes = fc(in s, env);
+    let np = nlen(in s, phs);
+    let mut i: u64 = 0;
+    loop {
+        if i >= np {
+            break;
+        }
+        let p = kid(in s, phs, i);
+        if fb(in s, p) != none() && fa(in s, p) != 0 {
+            let off = begin(in s);
+            lit(inout s, "mode bound on a non-type placeholder");
+            emit(inout s, 6, 7, 0, 0, off);
+        }
+        i = inc(i);
+    }
+    let snil = snil(inout s);
+    s.sc_kind = 1;
+    s.sc_phs = phs;
+    s.sc_binders = snil;
+    let na = nlen(in s, asm);
+    i = 0;
+    loop {
+        if i >= na {
+            break;
+        }
+        let a = kid(in s, asm, i);
+        let t = tg(in s, a);
+        if t == 16 {
+            let off = begin(in s);
+            lit(inout s, "mode assumptions must be placeholder mode bounds");
+            emit(inout s, 8, 7, 0, 0, off);
+        } else {
+            v_goal(inout s, a, 7, 0, 0);
+            let brand = if t == 14 {
+                fb(in s, a)
+            } else {
+                fb(in s, fa(in s, a))
+            };
+            if tg(in s, brand) == 9 && vkind(fa(in s, brand)) == 2 {
+                let off = begin(in s);
+                lit(inout s, "assumption brand must be explicit");
+                emit(inout s, 5, 7, 0, 0, off);
+            }
+        }
+        i = inc(i);
+    }
+    let ns = nlen(in s, scopes);
+    i = 0;
+    loop {
+        if i >= ns {
+            break;
+        }
+        let sc = kid(in s, scopes, i);
+        let n = nlen(in s, sc);
+        let mut j: u64 = 0;
+        loop {
+            if j >= n {
+                break;
+            }
+            let m = kid(in s, sc, j);
+            if m >= s.nmodel {
+                unknown(inout s, "model", m, 7, 0, 0);
+            }
+            j = inc(j);
+        }
+        i = inc(i);
+    }
+    s.sc_binders = binders;
+    v_goal(inout s, goal, 7, 0, 0);
+    if s.dg_code.len() == base {
+        return true;
+    }
+    sort_diags(inout s, base);
+    false
+}

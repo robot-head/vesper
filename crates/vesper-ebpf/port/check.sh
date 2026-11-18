@@ -21,5 +21,6 @@ done <<'CHECKS'
 5 program port_surface map_definitions_are_validated_rule_by_rule helper_table_matches_the_kernel_protos
 6 callgraph port_surface stack_bound_reports_every_outcome map_definitions_are_validated_rule_by_rule
 7 wire mitigator wire_layouts_are_exact verified_within_the_stack_budget
+8 explore verifier_rules corpus_verdicts every_rule_is_covered
 CHECKS
 unset VESPER_EBPF_DIVERGENT

@@ -302,6 +302,9 @@ pub struct Solver<'p> {
     stack: Vec<StackEntry>,
     steps: u64,
     stats: SolverStats,
+    /// The Vesper port's solver state (`crate::port`).
+    #[cfg(vesper_port)]
+    port: crate::port::PortSolver,
 }
 
 impl<'p> Solver<'p> {
@@ -319,20 +322,36 @@ impl<'p> Solver<'p> {
             stack: vec![],
             steps: 0,
             stats: SolverStats::default(),
+            #[cfg(vesper_port)]
+            port: crate::port::PortSolver::new(program, config),
         }
     }
 
     pub fn stats(&self) -> SolverStats {
+        #[cfg(vesper_port)]
+        return self.port.stats();
+        #[cfg(not(vesper_port))]
         self.stats
     }
 
     /// Number of tabled canonical answers.
     pub fn table_len(&self) -> usize {
+        #[cfg(vesper_port)]
+        return self.port.table_len();
+        #[cfg(not(vesper_port))]
         self.cache.len()
     }
 
     /// Solves one query. Invalid queries are rejected with sorted diagnostics.
     pub fn solve(&mut self, query: &QueryDto) -> Result<Outcome, Vec<Diagnostic>> {
+        #[cfg(vesper_port)]
+        return self.port.solve(query);
+        #[cfg(not(vesper_port))]
+        self.solve_rust(query)
+    }
+
+    #[cfg(not(vesper_port))]
+    fn solve_rust(&mut self, query: &QueryDto) -> Result<Outcome, Vec<Diagnostic>> {
         validate_query(self.program, query)?;
         self.steps = 0;
         let (env, goal, origin) = match canonicalize_placeholders(&query.env, &query.goal) {

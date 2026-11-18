@@ -1,0 +1,485 @@
+// Module coherence of @vesper/pact (see lib.ves): `coherence.rs`, the
+// orphan rule, overlap of canonical impl heads and well-formedness of
+// impls and models. Conformance c is row c of the cf_* tables: impls
+// first (c = impl id), then models (c = nimpl + model id).
+use self::{
+    S
+};
+use self::term::{
+    add,
+    bt,
+    fa,
+    fb,
+    inc,
+    kid,
+    mk,
+    mk2,
+    mkl,
+    nlen,
+    none,
+    sub,
+    sw,
+    tg,
+    vidx,
+    vkind
+};
+use self::fold::{
+    inst,
+    run
+};
+use self::infer::{
+    fresh_args,
+    unify_trait_ref
+};
+use self::render::{
+    byte,
+    d_label_key,
+    lit,
+    num,
+    r_failure,
+    r_goal,
+    r_id,
+    r_ty,
+    r_var
+};
+use self::diag::{
+    emit,
+    render_diags,
+    sort_diags,
+    truncate_diags
+};
+use self::query::{
+    reset_solver,
+    solve_query
+};
+
+// `check_orphan`: true when legal; otherwise the message is appended to
+// txt and false is returned.
+pub fn orphan(inout s: S, c: u64) -> bool {
+    let tr = sw(in s.cf_tref, c);
+    let t = fa(in s, tr);
+    let pkg = sw(in s.cf_pkg, c);
+    if sw(in s.tr_pkg, t) == pkg {
+        return true;
+    }
+    let n = nlen(in s, tr);
+    let mut pos: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        // Position 0 is Self; then the type arguments in order.
+        if i > n {
+            break;
+        }
+        let ty = if i == 0 {
+            fb(in s, tr)
+        } else {
+            kid(in s, tr, sub(i, 1))
+        };
+        i = inc(i);
+        let k = tg(in s, ty);
+        if k == 1 {
+            if sw(in s.ct_pkg, fa(in s, ty)) == pkg {
+                return true;
+            }
+            pos = inc(pos);
+        } else if k == 2 {
+            lit(inout s, "orphan canonical impl: uncovered parameter ");
+            let h1 = fa(in s, ty);
+            r_var(inout s, h1);
+            lit(inout s, " at type position ");
+            num(inout s, pos);
+            lit(inout s, " precedes any local type; declare a named `model` instead");
+            return false;
+        } else if k == 3 {
+            lit(inout s, "projection in impl head");
+            return false;
+        }
+    }
+    lit(inout s, "orphan canonical impl: neither ");
+    r_id(inout s, "trait", t);
+    lit(inout s, " nor any type argument is defined in ");
+    r_id(inout s, "pkg", pkg);
+    lit(inout s, "; declare a named `model` instead");
+    false
+}
+
+// `heads_unify`: 0 disjoint, 1 overlapping, 2 undecidable (the message
+// appended to txt).
+fn heads_unify(inout s: S, a: u64, b: u64) -> u64 {
+    let mut cx = ChunkSeq::new[u64]();
+    let pa = sw(in s.cf_params, a);
+    let pb = sw(in s.cf_params, b);
+    let aa = fresh_args(inout s, inout cx, pa);
+    let ba = fresh_args(inout s, inout cx, pb);
+    let ta = sw(in s.cf_tref, a);
+    let ha = inst(inout s, ta, aa);
+    if ha == 0 {
+        lit(inout s, "duplicate label ");
+        let k = s.dkey;
+        d_label_key(inout s, k);
+        return 2;
+    }
+    let tb = sw(in s.cf_tref, b);
+    let hb = inst(inout s, tb, ba);
+    if hb == 0 {
+        lit(inout s, "duplicate label ");
+        let k = s.dkey;
+        d_label_key(inout s, k);
+        return 2;
+    }
+    let r = unify_trait_ref(inout s, inout cx, ha, hb);
+    if r == 0 {
+        1
+    } else if r == 1 {
+        0
+    } else if r == 2 {
+        lit(inout s, "cannot decide overlap of projection heads");
+        2
+    } else {
+        lit(inout s, "cannot decide overlap: rows merge duplicate label ");
+        let k = s.dkey;
+        d_label_key(inout s, k);
+        2
+    }
+}
+
+// `conformance_env` of conformance c: an e_env node.
+pub fn conformance_env(inout s: S, c: u64) -> u64 {
+    let params = sw(in s.cf_params, c);
+    let np = nlen(in s, params);
+    let mut bounds = ChunkSeq::new[u64]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= np {
+            break;
+        }
+        bounds.push(none());
+        i = inc(i);
+    }
+    let wh = sw(in s.cf_where, c);
+    let nw = nlen(in s, wh);
+    let e = ChunkSeq::new[u64]();
+    let from = s.tmp.len();
+    i = 0;
+    loop {
+        if i >= nw {
+            break;
+        }
+        let w = kid(in s, wh, i);
+        if tg(in s, w) == 16 {
+            let ty = fa(in s, w);
+            let bd = fb(in s, w);
+            if tg(in s, ty) == 2 && vkind(fa(in s, ty)) == 0 && tg(in s, bd) == 4 {
+                let p = vidx(fa(in s, ty));
+                let m = fa(in s, bd);
+                let old = sw(in bounds, p);
+                let nb = if old == none() || m < old {
+                    m
+                } else {
+                    old
+                };
+                let _ = bounds.try_set(p, nb);
+            }
+        } else {
+            let g = run(inout s, in e, 5, w);
+            if g != 0 {
+                s.tmp.push(g);
+            }
+        }
+        i = inc(i);
+    }
+    let asm = mkl(inout s, 27, 0, 0, 0, from);
+    let f2 = s.tmp.len();
+    i = 0;
+    loop {
+        if i >= np {
+            break;
+        }
+        let k = kid(in s, params, i);
+        let b = sw(in bounds, i);
+        let p = mk2(inout s, 54, k, b);
+        s.tmp.push(p);
+        i = inc(i);
+    }
+    let phs = mkl(inout s, 27, 0, 0, 0, f2);
+    let f3 = s.tmp.len();
+    let scopes = mkl(inout s, 27, 0, 0, 0, f3);
+    mk(inout s, 55, phs, asm, scopes)
+}
+
+fn is_space(b: u8) -> bool {
+    b == 32 || (b >= 9 && b <= 13)
+}
+
+// `trim_end` of txt[off ..].
+fn trim_from(inout s: S, off: u64) {
+    loop {
+        let n = s.txt.len();
+        if n <= off {
+            return;
+        }
+        let b = bt(in s.txt, sub(n, 1));
+        if !is_space(b) {
+            return;
+        }
+        s.txt.truncate(sub(n, 1));
+    }
+}
+
+fn unsupported_begin(inout s: S) -> u64 {
+    let off = s.txt.len();
+    lit(inout s, "cannot check well-formedness: ");
+    off
+}
+
+fn unsupported_end(inout s: S, sv: u64, sa: u64, off: u64) {
+    lit(inout s, "; rejected rather than skipped");
+    emit(inout s, 8, sv, sa, 0, off);
+}
+
+fn assoc_idx(inout s: S, ai: u64) {
+    lit(inout s, "assoc#");
+    num(inout s, ai);
+}
+
+// Checks goal g of associated value ai (value `value`) under env.
+fn wf_goal(inout s: S, sv: u64, sa: u64, env: u64, ai: u64, value: u64, g: u64) {
+    let base = s.dg_code.len();
+    let f0 = s.tmp.len();
+    let binders = mkl(inout s, 28, 0, 0, 0, f0);
+    let o = solve_query(inout s, 0, 1, env, binders, g);
+    if o != 0 && tg(in s, o) == 29 {
+        return;
+    }
+    let off = s.txt.len();
+    lit(inout s, "associated value ");
+    assoc_idx(inout s, ai);
+    lit(inout s, " = ");
+    r_ty(inout s, value);
+    lit(inout s, " must satisfy `");
+    r_goal(inout s, g);
+    lit(inout s, "`: ");
+    if o == 0 {
+        let at = s.txt.len();
+        render_diags(inout s, base);
+        trim_from(inout s, at);
+        truncate_diags(inout s, base);
+    } else {
+        let t = tg(in s, o);
+        if t == 31 {
+            lit(inout s, "no-solution\n");
+            let at = s.txt.len();
+            let f = fa(in s, o);
+            r_failure(inout s, f, 0);
+            trim_from(inout s, at);
+        } else if t == 30 {
+            lit(inout s, "ambiguous");
+        } else if t == 32 {
+            lit(inout s, "unsupported");
+        } else {
+            lit(inout s, "overflow");
+        }
+    }
+    emit(inout s, 11, sv, sa, 0, off);
+}
+
+// `well_formed` of conformance c with subject (sv, sa).
+fn well_formed(inout s: S, c: u64, sv: u64, sa: u64) {
+    let env = conformance_env(inout s, c);
+    let e = ChunkSeq::new[u64]();
+    let tr0 = sw(in s.cf_tref, c);
+    let tr = run(inout s, in e, 5, tr0);
+    if tr == 0 {
+        let off = unsupported_begin(inout s);
+        lit(inout s, "head repeats an effect label");
+        unsupported_end(inout s, sv, sa, off);
+        return;
+    }
+    let t = fa(in s, tr);
+    let from = s.tmp.len();
+    let st = fb(in s, tr);
+    s.tmp.push(st);
+    let na = nlen(in s, tr);
+    let mut i: u64 = 0;
+    loop {
+        if i >= na {
+            break;
+        }
+        let a = kid(in s, tr, i);
+        s.tmp.push(a);
+        i = inc(i);
+    }
+    let binder = mkl(inout s, 27, 0, 0, 0, from);
+    reset_solver(inout s);
+    let vals = sw(in s.cf_vals, c);
+    let nv = nlen(in s, vals);
+    let nas = sw(in s.tr_as_n, t);
+    let at = sw(in s.tr_as_at, t);
+    let n = if nv < nas {
+        nv
+    } else {
+        nas
+    };
+    let mut ai: u64 = 0;
+    loop {
+        if ai >= n {
+            break;
+        }
+        let v0 = kid(in s, vals, ai);
+        let value = run(inout s, in e, 5, v0);
+        if value == 0 {
+            let off = unsupported_begin(inout s);
+            lit(inout s, "value of ");
+            assoc_idx(inout s, ai);
+            lit(inout s, " repeats an effect label");
+            unsupported_end(inout s, sv, sa, off);
+            ai = inc(ai);
+        } else {
+            let x = add(at, ai);
+            let gf = s.tmp.len();
+            let m0 = sw(in s.as_mode, x);
+            let m = inst(inout s, m0, binder);
+            let g0 = mk2(inout s, 16, value, m);
+            s.tmp.push(g0);
+            let nb = sw(in s.as_bd_n, x);
+            let bat = sw(in s.as_bd_at, x);
+            let mut bi: u64 = 0;
+            loop {
+                if bi >= nb {
+                    break;
+                }
+                let y = add(bat, bi);
+                let ba = sw(in s.bd_args, y);
+                let args = inst(inout s, ba, binder);
+                if args == 0 {
+                    let off = unsupported_begin(inout s);
+                    lit(inout s, "bound ");
+                    num(inout s, bi);
+                    lit(inout s, " of ");
+                    assoc_idx(inout s, ai);
+                    lit(inout s, " repeats an effect label after substitution");
+                    unsupported_end(inout s, sv, sa, off);
+                    bi = inc(bi);
+                } else {
+                    let bt = sw(in s.bd_trait, y);
+                    let af = s.tmp.len();
+                    let nargs = nlen(in s, args);
+                    let mut j: u64 = 0;
+                    loop {
+                        if j >= nargs {
+                            break;
+                        }
+                        let a = kid(in s, args, j);
+                        s.tmp.push(a);
+                        j = inc(j);
+                    }
+                    let tref = mkl(inout s, 13, bt, value, 0, af);
+                    let bb = sw(in s.bd_brand, y);
+                    let brand = inst(inout s, bb, binder);
+                    let g = mk2(inout s, 14, tref, brand);
+                    s.tmp.push(g);
+                    bi = inc(bi);
+                }
+            }
+            let goals = mkl(inout s, 27, 0, 0, 0, gf);
+            let ng = nlen(in s, goals);
+            let mut k: u64 = 0;
+            loop {
+                if k >= ng {
+                    break;
+                }
+                let g = kid(in s, goals, k);
+                wf_goal(inout s, sv, sa, env, ai, value, g);
+                k = inc(k);
+            }
+            ai = inc(ai);
+        }
+    }
+}
+
+// `check_coherence`: the sorted diagnostics from dg base on.
+pub fn check_coherence(inout s: S) {
+    let base = s.dg_code.len();
+    let md = s.max_depth;
+    let ms = s.max_steps;
+    let mf = s.max_fix;
+    s.max_depth = 48;
+    s.max_steps = 100000;
+    s.max_fix = 16;
+    let ni = s.nimpl;
+    let mut i: u64 = 0;
+    loop {
+        if i >= ni {
+            break;
+        }
+        let off = s.txt.len();
+        if !orphan(inout s, i) {
+            let id = sw(in s.cf_id, i);
+            emit(inout s, 9, 4, id, 0, off);
+        }
+        i = inc(i);
+    }
+    let nt = s.tr_id.len();
+    let mut t: u64 = 0;
+    loop {
+        if t >= nt {
+            break;
+        }
+        let at = sw(in s.ib_at, t);
+        let n = sw(in s.ib_n, t);
+        let mut x: u64 = 0;
+        loop {
+            if x >= n {
+                break;
+            }
+            let a = sw(in s.ib, add(at, x));
+            let mut y = inc(x);
+            loop {
+                if y >= n {
+                    break;
+                }
+                let b = sw(in s.ib, add(at, y));
+                let off = s.txt.len();
+                let r = heads_unify(inout s, a, b);
+                let ida = sw(in s.cf_id, a);
+                let idb = sw(in s.cf_id, b);
+                if r == 1 {
+                    lit(inout s, "canonical impls of ");
+                    let tid = sw(in s.tr_id, t);
+                    r_id(inout s, "trait", tid);
+                    lit(inout s, " overlap; declare one as a named `model`");
+                    emit(inout s, 10, 5, ida, idb, off);
+                } else if r == 2 {
+                    emit(inout s, 8, 5, ida, idb, off);
+                }
+                y = inc(y);
+            }
+            x = inc(x);
+        }
+        t = inc(t);
+    }
+    i = 0;
+    loop {
+        if i >= ni {
+            break;
+        }
+        let id = sw(in s.cf_id, i);
+        well_formed(inout s, i, 4, id);
+        i = inc(i);
+    }
+    let nm = s.nmodel;
+    i = 0;
+    loop {
+        if i >= nm {
+            break;
+        }
+        let c = add(ni, i);
+        let id = sw(in s.cf_id, c);
+        well_formed(inout s, c, 6, id);
+        i = inc(i);
+    }
+    s.max_depth = md;
+    s.max_steps = ms;
+    s.max_fix = mf;
+    sort_diags(inout s, base);
+}

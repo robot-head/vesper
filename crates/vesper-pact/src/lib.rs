@@ -26,6 +26,11 @@
 //! negative reasoning, specialization, duplicate effect labels, capability
 //! inference variables and projections in impl heads.
 
+// The Rust implementation stays compiled under `vesper-port` (types,
+// rendering, folds, and the stand-alone `check_orphan`, `conformance_env`
+// and `validate_query`); the engine paths it no longer calls are unused there.
+#![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
+
 pub mod canon;
 pub mod coherence;
 pub mod derivation;
@@ -45,3 +50,20 @@ pub use ids::*;
 pub use program::*;
 pub use solver::*;
 pub use term::*;
+
+// Generated and committed, but kept outside src/ so formatters, which
+// check every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+#[cfg(vesper_port)]
+mod port;
+#[cfg(vesper_port)]
+pub use port::live_allocations;
+
+/// Which build this is: `"vesper"` for the port-backed build of
+/// `vesper-pact` (feature `vesper-port`), `"rust"` otherwise and for the
+/// seed copy `vesper-pact-seed` that the compiler links.
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };

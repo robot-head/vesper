@@ -5,7 +5,8 @@
 //! and epoll on Linux, kqueue on macOS and I/O completion ports on Windows;
 //! [`select::open`] picks one at run time and reports which. [`pool::Pool`]
 //! runs fibers on several scheduler threads, one driver each, with
-//! seeded work stealing. The evaluator
+//! seeded work stealing over lock-free deques, either for one run or as a
+//! long-lived pool ([`pool::RunningPool`]). The evaluator
 //! embedding bridge stays in the vesper facade; native continuation lowering
 //! is still a separate integration milestone.
 #![deny(unsafe_code)]

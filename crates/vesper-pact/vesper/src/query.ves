@@ -1,0 +1,193 @@
+// Module query of @vesper/pact (see lib.ves): `Solver::solve`, one
+// top-level query, and mapping its outcome back to the caller's
+// placeholders (`restore_placeholders`).
+use self::{
+    S
+};
+use self::term::{
+    fa,
+    fb,
+    fc,
+    inc,
+    kid,
+    mk,
+    mk1,
+    mk2,
+    mkl,
+    nlen,
+    tg
+};
+use self::fold::{
+    run
+};
+use self::infer::{
+    fresh_args
+};
+use self::canon::{
+    canon_placeholders
+};
+use self::program::{
+    validate_query
+};
+use self::solver::{
+    drive,
+    make_response
+};
+
+// Resets the table, the stack and the statistics (a new `Solver`).
+pub fn reset_solver(inout s: S) {
+    let cap: u64 = 64;
+    s.ck_env.clear();
+    s.ck_goal.clear();
+    s.ck_val.clear();
+    let mut i: u64 = 0;
+    loop {
+        if i >= cap {
+            break;
+        }
+        s.ck_env.push(0);
+        s.ck_goal.push(0);
+        s.ck_val.push(0);
+        i = inc(i);
+    }
+    s.ck_mask = 63;
+    s.ck_count = 0;
+    s.sk_env.clear();
+    s.sk_goal.clear();
+    s.sk_co.clear();
+    s.sk_pco.clear();
+    s.sk_pind.clear();
+    s.sk_uco.clear();
+    s.sk_uind.clear();
+    s.sk_min.clear();
+    s.st_evals = 0;
+    s.st_hits = 0;
+    s.st_cocyc = 0;
+    s.st_indcyc = 0;
+    s.st_reruns = 0;
+}
+
+// Folds n with op 8 (placeholders restored through s.fsub), keeping n
+// when that fails (`unwrap_or_else(|_| g.clone())`).
+fn restore(inout s: S, n: u64) -> u64 {
+    let e = ChunkSeq::new[u64]();
+    let r = run(inout s, in e, 8, n);
+    if r == 0 {
+        n
+    } else {
+        r
+    }
+}
+
+fn restore_failure(inout s: S, f: u64) -> u64 {
+    let g = fa(in s, f);
+    let g2 = restore(inout s, g);
+    let r = fb(in s, f);
+    let t = tg(in s, r);
+    let r2 = if t == 45 {
+        let from = s.tmp.len();
+        let n = nlen(in s, r);
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let c = kid(in s, r, i);
+            let cause = fb(in s, c);
+            let cause2 = if tg(in s, cause) == 50 {
+                let inner = fa(in s, cause);
+                let inner2 = restore_failure(inout s, inner);
+                mk1(inout s, 50, inner2)
+            } else {
+                cause
+            };
+            let source = fa(in s, c);
+            let c2 = mk2(inout s, 49, source, cause2);
+            s.tmp.push(c2);
+            i = inc(i);
+        }
+        mkl(inout s, 45, 0, 0, 0, from)
+    } else if t == 46 {
+        let a = fa(in s, r);
+        let b = fb(in s, r);
+        let a2 = restore(inout s, a);
+        let b2 = restore(inout s, b);
+        mk2(inout s, 46, a2, b2)
+    } else {
+        r
+    };
+    mk2(inout s, 43, g2, r2)
+}
+
+fn restore_outcome(inout s: S, o: u64, origin: u64) -> u64 {
+    let saved = s.fsub;
+    s.fsub = origin;
+    let t = tg(in s, o);
+    let a = fa(in s, o);
+    let r = if t == 29 {
+        let vals = fb(in s, o);
+        let from = s.tmp.len();
+        let n = nlen(in s, vals);
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let v = kid(in s, vals, i);
+            let v2 = restore(inout s, v);
+            s.tmp.push(v2);
+            i = inc(i);
+        }
+        let vals2 = mkl(inout s, 27, 0, 0, 0, from);
+        let d = fc(in s, o);
+        let d2 = restore(inout s, d);
+        mk(inout s, 29, a, vals2, d2)
+    } else if t == 31 {
+        let f = restore_failure(inout s, a);
+        mk1(inout s, 31, f)
+    } else if t == 30 && tg(in s, a) == 39 {
+        let g = fa(in s, a);
+        let g2 = restore(inout s, g);
+        let am = mk1(inout s, 39, g2);
+        mk1(inout s, 30, am)
+    } else if t == 32 && tg(in s, a) == 41 {
+        let g = fa(in s, a);
+        let g2 = restore(inout s, g);
+        let un = mk1(inout s, 41, g2);
+        mk1(inout s, 32, un)
+    } else {
+        o
+    };
+    s.fsub = saved;
+    r
+}
+
+// Solves one query: the restored outcome (an answer node), or 0 when the
+// query is rejected (sorted diagnostics from the base it had on entry).
+pub fn solve_query(inout s: S, maj: u64, min: u64, env: u64, binders: u64, goal: u64) -> u64 {
+    if !validate_query(inout s, maj, min, env, binders, goal) {
+        return 0;
+    }
+    s.steps = 0;
+    if !canon_placeholders(inout s, env, goal) {
+        let k = s.dkey;
+        let r = mk1(inout s, 40, k);
+        return mk1(inout s, 32, r);
+    }
+    let cenv = s.cenv;
+    let cgoal = s.cgoal;
+    let origin = s.corigin;
+    let mut cx = ChunkSeq::new[u64]();
+    let vars = fresh_args(inout s, inout cx, binders);
+    let from = s.tmp.len();
+    s.tmp.push(cgoal);
+    let goals = mkl(inout s, 27, 0, 0, 0, from);
+    let r = drive(inout s, cenv, inout cx, goals);
+    let outcome = if tg(in s, r) == 27 {
+        let d = kid(in s, r, 0);
+        make_response(inout s, in cx, vars, d)
+    } else {
+        r
+    };
+    restore_outcome(inout s, outcome, origin)
+}

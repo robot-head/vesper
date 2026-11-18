@@ -1,0 +1,4460 @@
+// Module verifier of @vesper/ebpf (see lib.ves): src/verifier.rs, the
+// pre-flight abstract verifier. The Rust file is the model: the same CFG
+// pass, abstract types, state pruning, loop widening and rules, explored in
+// the same order, so both builds agree on every verdict, message and
+// report count.
+//
+// Layout. A register or stack slot is an `R`: `tag` names the `RegType`
+// variant (0 NotInit, 1 Scalar, 2 Ctx, 3 Func, 4 Packet, 5 PacketEnd,
+// 6 Stack, 7 MapPtr, 8 MapValue, 9 MapValueOrNull, 10 Mem, 11 MemOrNull,
+// 12 RdonlyMem, 13 Socket, 14 SocketOrNull) or, in a stack slot, the
+// `Slot` variant (16 Bytes, 17 Iter, 18 Irq; a tag below 16 is a spill of
+// that register type). The variant fields are
+//
+//   Func entry = x; Packet id = x, off, var; Stack frame = x, off;
+//   MapPtr map = x; MapValue map = x, off, var; MapValueOrNull map = x,
+//   id = y; Mem size = x, off, ref_id = z; MemOrNull size = x, id = y,
+//   ref_id = z; RdonlyMem size = x, off, iter = y; Socket ref_id = z;
+//   SocketOrNull id = y, ref_id = z; Bytes mask = x; Iter id = x,
+//   drained = y, depth = z; Irq id = x.
+//
+// A state (`St`) is two flat sequences. `rs` holds 76 entries per frame:
+// the 11 registers, the 64 stack slots and the callback argument. `ws`
+// holds an 8-word header (frames, next_id, preempt, rcu, cb_entry, refs,
+// packet ranges, irq flags), 17 words per frame (subprog, return pc or
+// NONE, has callback, callback pc, the 11 link ids, wide_regs,
+// wide_slots), then the references (id, kind, acquired_at, frame), the
+// packet ranges (id, range) sorted by id and the irq flag ids. Explored
+// states and pending paths are copies of these sequences in pools.
+//
+// A rejection raises `Fail[VErr]` after writing the rule and the message
+// into `V.rule` and `V.msg`.
+use self::common::{
+    bits,
+    checked_add_i64,
+    max_u64,
+    shl,
+    shr,
+    signed,
+    smin_i64,
+    umax
+};
+use self::insn::{
+    AluOp,
+    AtomicOp,
+    CallTarget,
+    DecodeError,
+    Endian,
+    Imm64,
+    Insn,
+    JmpOp,
+    Operand,
+    RawInsn,
+    Size,
+    decode_all
+};
+use self::scalar::{
+    Scalar,
+    refine_jmp,
+    scalar_add,
+    scalar_alu,
+    scalar_includes,
+    scalar_konst,
+    scalar_meet,
+    scalar_sext,
+    scalar_truncate,
+    scalar_unknown,
+    scalar_unknown_bits,
+    scalar_zext32
+};
+use self::concrete::{
+    endian
+};
+use self::helpers::{
+    allowed
+};
+use self::program::{
+    ProgramType
+};
+use self::callgraph::{
+    check_stack
+};
+
+pub copy struct R {
+    tag: u64,
+    x: u64,
+    y: u64,
+    z: u64,
+    off: i64,
+    var: Scalar
+}
+
+pub copy struct VErr {
+    insn: u64
+}
+
+pub struct St {
+    rs: ChunkSeq[R],
+    ws: ChunkSeq[u64]
+}
+
+pub struct Ids {
+    old: ChunkSeq[u64],
+    cur: ChunkSeq[u64]
+}
+
+pub copy enum Step {
+    Next(u64),
+    Fork(u64, u64),
+    Jump(u64),
+    Done
+}
+
+pub copy enum Target {
+    CtxData,
+    CtxDataEnd,
+    Scalar(Size),
+    Stack {
+        frame: u64,
+        at: u64
+    }
+}
+
+pub struct V {
+    ptype: ProgramType,
+    pt_regs: i64,
+    gpl: bool,
+    max_insns: u64,
+    max_states: u64,
+    n: u64,
+    insns: ChunkSeq[Insn],
+    start: ChunkSeq[bool],
+    // 6 words per map: kernel type, key size, value size, max entries,
+    // name offset and length in `text`.
+    maps: ChunkSeq[u64],
+    // 4 words per kfunc reference: slot, code (0..=8 the supported names
+    // in `kfunc`, 9 other), name offset and length in `text`.
+    kf: ChunkSeq[u64],
+    text: ChunkSeq[u8],
+    sub_start: ChunkSeq[u64],
+    sub_end: ChunkSeq[u64],
+    cb_entry: ChunkSeq[bool],
+    func_refs: ChunkSeq[u64],
+    prune: ChunkSeq[bool],
+    iter_next: ChunkSeq[bool],
+    widen: bool,
+    widenings: u64,
+    ex_head: ChunkSeq[u64],
+    ex_tail: ChunkSeq[u64],
+    ex_count: ChunkSeq[u64],
+    rec_next: ChunkSeq[u64],
+    rec_branches: ChunkSeq[u64],
+    rec_parent: ChunkSeq[u64],
+    rec_rs: ChunkSeq[u64],
+    rec_ws: ChunkSeq[u64],
+    rec_nws: ChunkSeq[u64],
+    prs: ChunkSeq[R],
+    pws: ChunkSeq[u64],
+    depth: ChunkSeq[u64],
+    processed: u64,
+    paths: u64,
+    pruned: u64,
+    // pending paths: pc, parent, rs offset, ws offset in wrs and wws
+    work: ChunkSeq[u64],
+    wrs: ChunkSeq[R],
+    wws: ChunkSeq[u64],
+    ids: Ids,
+    msg: ChunkSeq[u8],
+    rule: ChunkSeq[u8]
+}
+
+// ---------------------------------------------------------------------------
+// Words, messages and failures.
+
+fn none() -> u64 {
+    umax()
+}
+
+fn gw(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn gb(in s: Slice[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+fn gr(in s: Slice[R], i: u64) -> R {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => r_none(),
+    }
+}
+
+fn sq(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn sqb(in s: ChunkSeq[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+fn lit(inout m: ChunkSeq[u8], s: Str) {
+    m.extend(in s.as_bytes());
+}
+
+fn dec(inout m: ChunkSeq[u8], x: u64) {
+    let mut p: u64 = 1;
+    let mut digits: u64 = 1;
+    loop {
+        if !(digits < 20 && wrapping_mul(p, 10) <= x && wrapping_mul(p, 10) > p) {
+            break;
+        }
+        p = wrapping_mul(p, 10);
+        digits = wrapping_add(digits, 1);
+    }
+    let mut y = x;
+    loop {
+        let mut d: u64 = 0;
+        loop {
+            if !(y >= p) {
+                break;
+            }
+            y = wrapping_sub(y, p);
+            d = wrapping_add(d, 1);
+        }
+        m.push(wrapping_u8(wrapping_add(48, d)));
+        if p == 1 {
+            break;
+        }
+        p = tenth(p);
+    }
+}
+
+// `p / 10` for a power of ten `p >= 10`.
+fn tenth(p: u64) -> u64 {
+    let mut q: u64 = 1;
+    loop {
+        if !(wrapping_mul(q, 10) < p) {
+            break;
+        }
+        q = wrapping_mul(q, 10);
+    }
+    q
+}
+
+fn idec(inout m: ChunkSeq[u8], x: i64) {
+    if x < 0 {
+        m.push(45);
+        dec(inout m, wrapping_sub(0, bits(x)));
+    } else {
+        dec(inout m, bits(x));
+    }
+}
+
+fn begin(inout v: V, rule: Str) {
+    v.rule.clear();
+    lit(inout v.rule, rule);
+    v.msg.clear();
+}
+
+fn raise_at(pc: u64) -> Never eff [Fail[VErr]] {
+    Fail::raise(
+        VErr {
+            insn: pc
+        }
+    )
+}
+
+fn fail(inout v: V, pc: u64, rule: Str, msg: Str) -> Never eff [Fail[VErr]] {
+    begin(inout v, rule);
+    lit(inout v.msg, msg);
+    raise_at(pc)
+}
+
+fn reg_name(inout m: ChunkSeq[u8], r: u64) {
+    m.push(114);
+    dec(inout m, r);
+}
+
+fn type_name(inout m: ChunkSeq[u8], t: u64) {
+    match t {
+        0 => lit(inout m, "not initialized"),
+        1 => lit(inout m, "scalar"),
+        2 => lit(inout m, "ctx"),
+        3 => lit(inout m, "func"),
+        4 => lit(inout m, "pkt"),
+        5 => lit(inout m, "pkt_end"),
+        6 => lit(inout m, "fp"),
+        7 => lit(inout m, "map_ptr"),
+        8 => lit(inout m, "map_value"),
+        9 => lit(inout m, "map_value_or_null"),
+        10 => lit(inout m, "ringbuf_mem"),
+        11 => lit(inout m, "ringbuf_mem_or_null"),
+        12 => lit(inout m, "rdonly_mem"),
+        13 => lit(inout m, "sock"),
+        _ => lit(inout m, "sock_or_null"),
+    }
+}
+
+fn prog_name(inout m: ChunkSeq[u8], t: ProgramType) {
+    match t {
+        ProgramType::Xdp => lit(inout m, "Xdp"),
+        ProgramType::SchedCls => lit(inout m, "SchedCls"),
+        ProgramType::Tracepoint => lit(inout m, "Tracepoint"),
+        ProgramType::Kprobe => lit(inout m, "Kprobe"),
+    }
+}
+
+fn alu_name(inout m: ChunkSeq[u8], op: AluOp) {
+    match op {
+        AluOp::Add => lit(inout m, "Add"),
+        AluOp::Sub => lit(inout m, "Sub"),
+        AluOp::Mul => lit(inout m, "Mul"),
+        AluOp::Div => lit(inout m, "Div"),
+        AluOp::SDiv => lit(inout m, "SDiv"),
+        AluOp::Or => lit(inout m, "Or"),
+        AluOp::And => lit(inout m, "And"),
+        AluOp::Lsh => lit(inout m, "Lsh"),
+        AluOp::Rsh => lit(inout m, "Rsh"),
+        AluOp::Neg => lit(inout m, "Neg"),
+        AluOp::Mod => lit(inout m, "Mod"),
+        AluOp::SMod => lit(inout m, "SMod"),
+        AluOp::Xor => lit(inout m, "Xor"),
+        AluOp::Mov => lit(inout m, "Mov"),
+        AluOp::MovSx(b) => {
+            lit(inout m, "MovSx(");
+            dec(inout m, widen_u64(b));
+            lit(inout m, ")");
+        },
+        AluOp::Arsh => lit(inout m, "Arsh"),
+    }
+}
+
+// The kernel name of a supported helper (helpers::name); false for others.
+fn helper_name(inout m: ChunkSeq[u8], id: i32) -> bool {
+    match id {
+        1 => lit(inout m, "bpf_map_lookup_elem"),
+        2 => lit(inout m, "bpf_map_update_elem"),
+        3 => lit(inout m, "bpf_map_delete_elem"),
+        5 => lit(inout m, "bpf_ktime_get_ns"),
+        7 => lit(inout m, "bpf_get_prandom_u32"),
+        8 => lit(inout m, "bpf_get_smp_processor_id"),
+        12 => lit(inout m, "bpf_tail_call"),
+        14 => lit(inout m, "bpf_get_current_pid_tgid"),
+        15 => lit(inout m, "bpf_get_current_uid_gid"),
+        16 => lit(inout m, "bpf_get_current_comm"),
+        44 => lit(inout m, "bpf_xdp_adjust_head"),
+        84 => lit(inout m, "bpf_sk_lookup_tcp"),
+        86 => lit(inout m, "bpf_sk_release"),
+        130 => lit(inout m, "bpf_ringbuf_output"),
+        131 => lit(inout m, "bpf_ringbuf_reserve"),
+        132 => lit(inout m, "bpf_ringbuf_submit"),
+        133 => lit(inout m, "bpf_ringbuf_discard"),
+        181 => lit(inout m, "bpf_loop"),
+        _ => {
+            return false;
+        },
+    }
+    true
+}
+
+fn text_range(inout m: ChunkSeq[u8], in text: ChunkSeq[u8], off: u64, len: u64) {
+    for i in 0..len {
+        match text.try_get(wrapping_add(off, i)) {
+            Option::Some(b) => m.push(b),
+            Option::None => {},
+        }
+    }
+}
+
+fn map_name(inout v: V, map: u64) {
+    let off = sq(in v.maps, wrapping_add(wrapping_mul(map, 6), 4));
+    let len = sq(in v.maps, wrapping_add(wrapping_mul(map, 6), 5));
+    text_range(inout v.msg, in v.text, off, len);
+}
+
+// ---------------------------------------------------------------------------
+// Register types.
+
+fn mk(tag: u64, x: u64, y: u64, z: u64, off: i64, var: Scalar) -> R {
+    R {
+        tag: tag,
+        x: x,
+        y: y,
+        z: z,
+        off: off,
+        var: var
+    }
+}
+
+fn zs() -> Scalar {
+    scalar_konst(0)
+}
+
+fn r_none() -> R {
+    mk(0, 0, 0, 0, 0, zs())
+}
+
+fn r_scalar(s: Scalar) -> R {
+    mk(1, 0, 0, 0, 0, s)
+}
+
+fn r_unknown() -> R {
+    r_scalar(scalar_unknown())
+}
+
+fn r_tag(t: u64) -> R {
+    mk(t, 0, 0, 0, 0, zs())
+}
+
+fn r_bytes(mask: u64) -> R {
+    mk(16, mask, 0, 0, 0, zs())
+}
+
+fn is_pointer(r: R) -> bool {
+    r.tag != 0 && r.tag != 1
+}
+
+fn is_or_null(r: R) -> bool {
+    r.tag == 9 || r.tag == 11 || r.tag == 14
+}
+
+fn null_id(r: R) -> u64 {
+    if is_or_null(r) {
+        r.y
+    } else {
+        0
+    }
+}
+
+fn has_ref(r: R) -> bool {
+    r.tag == 10 || r.tag == 11 || r.tag == 13 || r.tag == 14
+}
+
+fn is_kfunc_object(s: R) -> bool {
+    s.tag == 17 || s.tag == 18
+}
+
+fn scalar_eq(a: Scalar, b: Scalar) -> bool {
+    a
+        .umin
+        == b
+        .umin
+        && a
+        .umax
+        == b
+        .umax
+        && a
+        .smin
+        == b
+        .smin
+        && a
+        .smax
+        == b
+        .smax
+        && a
+        .var
+        .value
+        == b
+        .var
+        .value
+        && a
+        .var
+        .mask
+        == b
+        .var
+        .mask
+}
+
+fn is_unknown(s: Scalar) -> bool {
+    scalar_eq(s, scalar_unknown())
+}
+
+fn is_const(s: Scalar) -> bool {
+    s.umin == s.umax
+}
+
+fn byte_mask(first: u64, n: u64) -> u64 {
+    shl(wrapping_sub(shl(1, n), 1), first) & 255
+}
+
+fn bit(i: u64) -> u64 {
+    shl(1, i)
+}
+
+fn size_bytes(s: Size) -> u64 {
+    match s {
+        Size::B => 1,
+        Size::H => 2,
+        Size::W => 4,
+        Size::DW => 8,
+    }
+}
+
+fn is_w(s: Size) -> bool {
+    match s {
+        Size::W => true,
+        _ => false,
+    }
+}
+
+fn is_dw(s: Size) -> bool {
+    match s {
+        Size::DW => true,
+        _ => false,
+    }
+}
+
+fn slots_of(i: Insn) -> u64 {
+    match i {
+        Insn::LdImm64 {
+            dst,
+            imm
+        }
+        => 2,
+        _ => 1,
+    }
+}
+
+fn swap_op(op: JmpOp) -> JmpOp {
+    match op {
+        JmpOp::Gt => JmpOp::Lt,
+        JmpOp::Lt => JmpOp::Gt,
+        JmpOp::Ge => JmpOp::Le,
+        JmpOp::Le => JmpOp::Ge,
+        JmpOp::SGt => JmpOp::SLt,
+        JmpOp::SLt => JmpOp::SGt,
+        JmpOp::SGe => JmpOp::SLe,
+        JmpOp::SLe => JmpOp::SGe,
+        other => other,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The state, read through slices (explored states live in pools).
+
+fn s_frames(in ws: Slice[u64]) -> u64 {
+    gw(in ws, 0)
+}
+
+fn s_meta(f: u64) -> u64 {
+    wrapping_add(8, wrapping_mul(f, 17))
+}
+
+fn s_reg(f: u64, r: u64) -> u64 {
+    wrapping_add(wrapping_mul(f, 76), r)
+}
+
+fn s_slot(f: u64, k: u64) -> u64 {
+    wrapping_add(wrapping_mul(f, 76), wrapping_add(11, k))
+}
+
+fn s_cbarg(f: u64) -> u64 {
+    wrapping_add(wrapping_mul(f, 76), 75)
+}
+
+fn s_tail(in ws: Slice[u64]) -> u64 {
+    s_meta(s_frames(in ws))
+}
+
+fn s_refs(in ws: Slice[u64]) -> u64 {
+    s_tail(in ws)
+}
+
+fn s_pkts(in ws: Slice[u64]) -> u64 {
+    wrapping_add(s_tail(in ws), wrapping_mul(gw(in ws, 5), 4))
+}
+
+fn s_irqs(in ws: Slice[u64]) -> u64 {
+    wrapping_add(s_pkts(in ws), wrapping_mul(gw(in ws, 6), 2))
+}
+
+// Accessible bytes of packet-pointer id `id`.
+fn s_range(in ws: Slice[u64], id: u64) -> u64 {
+    let at = s_pkts(in ws);
+    let n = gw(in ws, 6);
+    for i in 0..n {
+        let k = wrapping_add(at, wrapping_mul(i, 2));
+        if gw(in ws, k) == id {
+            return gw(in ws, wrapping_add(k, 1));
+        }
+    }
+    0
+}
+
+// The same accessors on the current state.
+
+fn rr(in st: St, i: u64) -> R {
+    gr(in st.rs.as_slice(), i)
+}
+
+fn ww(in st: St, i: u64) -> u64 {
+    gw(in st.ws.as_slice(), i)
+}
+
+fn setr(inout st: St, i: u64, r: R) {
+    st.rs.try_set(i, r);
+}
+
+fn setw(inout st: St, i: u64, x: u64) {
+    st.ws.try_set(i, x);
+}
+
+fn nframes(in st: St) -> u64 {
+    ww(in st, 0)
+}
+
+fn curf(in st: St) -> u64 {
+    wrapping_sub(nframes(in st), 1)
+}
+
+fn reg(in st: St, r: u64) -> R {
+    rr(in st, s_reg(curf(in st), r))
+}
+
+fn link_at(f: u64, r: u64) -> u64 {
+    wrapping_add(s_meta(f), wrapping_add(4, r))
+}
+
+fn wide_regs_at(f: u64) -> u64 {
+    wrapping_add(s_meta(f), 15)
+}
+
+fn wide_slots_at(f: u64) -> u64 {
+    wrapping_add(s_meta(f), 16)
+}
+
+fn subprog_at(f: u64) -> u64 {
+    s_meta(f)
+}
+
+fn set(inout st: St, r: u64, val: R) {
+    let f = curf(in st);
+    setr(inout st, s_reg(f, r), val);
+    setw(inout st, link_at(f, r), 0);
+    let w = ww(in st, wide_regs_at(f));
+    setw(inout st, wide_regs_at(f), w & ~bit(r));
+}
+
+fn tainted(in st: St, r: u64) -> bool {
+    ww(in st, wide_regs_at(curf(in st))) & bit(r) != 0
+}
+
+fn set_taint(inout st: St, r: u64, t: bool) {
+    let at = wide_regs_at(curf(in st));
+    let w = ww(in st, at);
+    if t {
+        setw(inout st, at, w | bit(r));
+    } else {
+        setw(inout st, at, w & ~bit(r));
+    }
+}
+
+fn fresh_id(inout st: St) -> u64 {
+    let id = wrapping_add(ww(in st, 1), 1);
+    setw(inout st, 1, id);
+    id
+}
+
+// `dst = src` for a scalar: both registers share a link id.
+fn copy_linked(inout st: St, dst: u64, src: u64) {
+    let f = curf(in st);
+    let mut id = ww(in st, link_at(f, src));
+    if id == 0 {
+        id = fresh_id(inout st);
+    }
+    let val = rr(in st, s_reg(f, src));
+    setr(inout st, s_reg(f, dst), val);
+    setw(inout st, link_at(f, src), id);
+    setw(inout st, link_at(f, dst), id);
+    let t = ww(in st, wide_regs_at(f)) & bit(src) != 0;
+    set_taint(inout st, dst, t);
+}
+
+// Narrow `r` to `val` and every register linked to it as well.
+fn set_narrowed(inout st: St, r: u64, val: Scalar) {
+    let f = curf(in st);
+    let id = ww(in st, link_at(f, r));
+    setr(inout st, s_reg(f, r), r_scalar(val));
+    if id != 0 {
+        let eleven: u64 = 11;
+        for i in 0..eleven {
+            if ww(in st, link_at(f, i)) == id {
+                let old = rr(in st, s_reg(f, i));
+                if old.tag == 1 {
+                    let m = match scalar_meet(old.var, val) {
+                        Option::Some(s) => s,
+                        Option::None => val,
+                    };
+                    setr(inout st, s_reg(f, i), r_scalar(m));
+                }
+            }
+        }
+    }
+}
+
+fn set_range(inout st: St, id: u64, r: u64) {
+    let at = s_pkts(in st.ws.as_slice());
+    let n = ww(in st, 6);
+    for i in 0..n {
+        let k = wrapping_add(at, wrapping_mul(i, 2));
+        if ww(in st, k) == id {
+            let old = ww(in st, wrapping_add(k, 1));
+            setw(inout st, wrapping_add(k, 1), max_u64(old, r));
+            return;
+        }
+    }
+    // insert in id order
+    let mut pos: u64 = 0;
+    loop {
+        if !(pos < n && ww(in st, wrapping_add(at, wrapping_mul(pos, 2))) < id) {
+            break;
+        }
+        pos = wrapping_add(pos, 1);
+    }
+    let k = wrapping_add(at, wrapping_mul(pos, 2));
+    insert_words(inout st, k, 2);
+    setw(inout st, k, id);
+    setw(inout st, wrapping_add(k, 1), r);
+    setw(inout st, 6, wrapping_add(n, 1));
+}
+
+fn clear_ranges(inout st: St) {
+    let at = s_pkts(in st.ws.as_slice());
+    let n = ww(in st, 6);
+    remove_words(inout st, at, wrapping_mul(n, 2));
+    setw(inout st, 6, 0);
+}
+
+fn insert_words(inout st: St, at: u64, k: u64) {
+    let len = st.ws.len();
+    for i in 0..k {
+        st.ws.push(0);
+    }
+    st.ws.try_copy_within(at, len, wrapping_add(at, k));
+    for i in 0..k {
+        setw(inout st, wrapping_add(at, i), 0);
+    }
+}
+
+fn remove_words(inout st: St, at: u64, k: u64) {
+    let len = st.ws.len();
+    st.ws.try_copy_within(wrapping_add(at, k), len, at);
+    st.ws.truncate(wrapping_sub(len, k));
+}
+
+fn push_ref(inout st: St, id: u64, kind: u64, pc: u64, frame: u64) {
+    let n = ww(in st, 5);
+    let at = wrapping_add(s_refs(in st.ws.as_slice()), wrapping_mul(n, 4));
+    insert_words(inout st, at, 4);
+    setw(inout st, at, id);
+    setw(inout st, wrapping_add(at, 1), kind);
+    setw(inout st, wrapping_add(at, 2), pc);
+    setw(inout st, wrapping_add(at, 3), frame);
+    setw(inout st, 5, wrapping_add(n, 1));
+}
+
+fn remove_ref(inout st: St, i: u64) {
+    let at = wrapping_add(s_refs(in st.ws.as_slice()), wrapping_mul(i, 4));
+    remove_words(inout st, at, 4);
+    let cnt = ww(in st, 5);
+    setw(inout st, 5, wrapping_sub(cnt, 1));
+}
+
+fn ref_word(in st: St, i: u64, k: u64) -> u64 {
+    ww(in st, wrapping_add(wrapping_add(s_refs(in st.ws.as_slice()), wrapping_mul(i, 4)), k))
+}
+
+fn push_frame(inout st: St, subprog: u64, return_pc: u64) {
+    let frame_no = nframes(in st);
+    let eleven: u64 = 11;
+    for i in 0..eleven {
+        if i == 10 {
+            st.rs.push(mk(6, frame_no, 0, 0, 0, zs()));
+        } else {
+            st.rs.push(r_none());
+        }
+    }
+    let slots: u64 = 64;
+    for k in 0..slots {
+        st.rs.push(r_bytes(0));
+    }
+    st.rs.push(r_none());
+    let at = s_tail(in st.ws.as_slice());
+    insert_words(inout st, at, 17);
+    setw(inout st, at, subprog);
+    setw(inout st, wrapping_add(at, 1), return_pc);
+    setw(inout st, 0, wrapping_add(frame_no, 1));
+}
+
+fn pop_frame(inout st: St) {
+    let f = curf(in st);
+    remove_words(inout st, s_meta(f), 17);
+    st.rs.truncate(wrapping_mul(f, 76));
+    setw(inout st, 0, f);
+}
+
+fn initial_state(inout st: St) {
+    st.rs.clear();
+    st.ws.clear();
+    let eight: u64 = 8;
+    for i in 0..eight {
+        st.ws.push(0);
+    }
+    push_frame(inout st, 0, none());
+    setr(inout st, 1, r_tag(2));
+}
+
+fn copy_state(inout dst: St, in src: St) {
+    dst.rs.clear();
+    dst.rs.extend(in src.rs.as_slice());
+    dst.ws.clear();
+    dst.ws.extend(in src.ws.as_slice());
+}
+
+fn new_st() -> St {
+    St {
+        rs: ChunkSeq::new[R](),
+        ws: ChunkSeq::new[u64]()
+    }
+}
+
+// Apply a change to every register and spilled register of every frame
+// (State::for_each_value): mode 0 invalidates the holders of reference
+// `a`, mode 1 every packet pointer, mode 2 resolves maybe-null pointers of
+// id `a` to NULL (`b` = 1) or non-NULL.
+fn for_each_value(inout st: St, mode: u64, a: u64, b: u64) {
+    let nf = nframes(in st);
+    for f in 0..nf {
+        let base = wrapping_mul(f, 76);
+        let n: u64 = 75;
+        for i in 0..n {
+            let at = wrapping_add(base, i);
+            let r = rr(in st, at);
+            if i < 11 || r.tag < 16 {
+                let nr = value_change(r, mode, a, b);
+                if i >= 11 && nr.tag == 0 {
+                    // an invalidated spill reads back as unknown bytes
+                    setr(inout st, at, r_bytes(255));
+                } else {
+                    setr(inout st, at, nr);
+                }
+            }
+        }
+    }
+}
+
+fn value_change(r: R, mode: u64, a: u64, b: u64) -> R {
+    if mode == 0 {
+        if has_ref(r) && r.z == a {
+            return r_none();
+        }
+        return r;
+    }
+    if mode == 1 {
+        if r.tag == 4 || r.tag == 5 {
+            return r_none();
+        }
+        return r;
+    }
+    if null_id(r) == a && is_or_null(r) {
+        if b == 1 {
+            return r_scalar(scalar_konst(0));
+        }
+        if r.tag == 9 {
+            return mk(8, r.x, 0, 0, 0, zs());
+        }
+        if r.tag == 11 {
+            return mk(10, r.x, 0, r.z, 0, zs());
+        }
+        return mk(13, 0, 0, r.z, 0, zs());
+    }
+    r
+}
+
+// ---------------------------------------------------------------------------
+// State inclusion.
+
+fn ids_reset(inout ids: Ids) {
+    ids.old.clear();
+    ids.cur.clear();
+}
+
+fn ids_fwd(in ids: Ids, old: u64) -> Option[u64] {
+    for i in 0..ids.old.len() {
+        if sq(in ids.old, i) == old {
+            return Option::Some(sq(in ids.cur, i));
+        }
+    }
+    Option::None
+}
+
+fn ids_check(inout ids: Ids, old: u64, cur: u64) -> bool {
+    if old == 0 || cur == 0 {
+        return old == cur;
+    }
+    match ids_fwd(in ids, old) {
+        Option::Some(c) => {
+            return c == cur;
+        },
+        Option::None => {},
+    }
+    for i in 0..ids.cur.len() {
+        if sq(in ids.cur, i) == cur {
+            return false;
+        }
+    }
+    ids.old.push(old);
+    ids.cur.push(cur);
+    true
+}
+
+fn reg_includes(o: R, c: R, in ows: Slice[u64], in cws: Slice[u64], inout ids: Ids) -> bool {
+    match o.tag {
+        0 => true,
+        1 => c.tag == 1 && scalar_includes(o.var, c.var),
+        2 => c.tag == 2,
+        5 => c.tag == 5,
+        3 => c.tag == 3 && o.x == c.x,
+        4 => c
+            .tag
+            == 4
+            && o
+            .off
+            == c
+            .off
+            && scalar_includes(o.var, c.var)
+            && scalar_includes(c.var, o.var)
+            && ids_check(inout ids, o.x, c.x)
+            && s_range(in ows, o.x)
+            <= s_range(in cws, c.x),
+        6 => c.tag == 6 && o.x == c.x && o.off == c.off,
+        7 => c.tag == 7 && o.x == c.x,
+        8 => c.tag == 8 && o.x == c.x && o.off == c.off && scalar_includes(o.var, c.var),
+        9 => c.tag == 9 && o.x == c.x && ids_check(inout ids, o.y, c.y),
+        10 => c.tag == 10 && o.x == c.x && o.off == c.off && ids_check(inout ids, o.z, c.z),
+        11 => c
+            .tag
+            == 11
+            && o
+            .x
+            == c
+            .x
+            && ids_check(inout ids, o.y, c.y)
+            && ids_check(inout ids, o.z, c.z),
+        13 => c.tag == 13 && ids_check(inout ids, o.z, c.z),
+        12 => c.tag == 12 && o.x == c.x && o.off == c.off && ids_check(inout ids, o.y, c.y),
+        14 => c.tag == 14 && ids_check(inout ids, o.y, c.y) && ids_check(inout ids, o.z, c.z),
+        _ => false,
+    }
+}
+
+fn slot_includes(so: R, sc: R, in ows: Slice[u64], in cws: Slice[u64], inout ids: Ids) -> bool {
+    if so.tag == 17 && sc.tag == 17 {
+        return so.y == sc.y && ids_check(inout ids, so.x, sc.x);
+    }
+    if so.tag == 18 && sc.tag == 18 {
+        return ids_check(inout ids, so.x, sc.x);
+    }
+    if is_kfunc_object(so) || is_kfunc_object(sc) {
+        return false;
+    }
+    if so.tag == 16 {
+        if so.x == 0 {
+            return true;
+        }
+        if sc.tag == 16 {
+            return so.x & ~sc.x == 0;
+        }
+        return sc.tag == 1;
+    }
+    if sc.tag == 16 {
+        return false;
+    }
+    reg_includes(so, sc, in ows, in cws, inout ids)
+}
+
+// `cur` is included in `old`: every behaviour of `cur` was covered by
+// exploring `old`.
+fn state_includes(
+    inout ids: Ids,
+    in ors: Slice[R],
+    in ows: Slice[u64],
+    in crs: Slice[R],
+    in cws: Slice[u64]
+) -> bool {
+    let nf = gw(in ows, 0);
+    if nf
+        != gw(in cws, 0)
+        || gw(in ows, 5)
+        != gw(in cws, 5)
+        || gw(in ows, 2)
+        != gw(in cws, 2)
+        || gw(in ows, 3)
+        != gw(in cws, 3)
+        || gw(in ows, 7)
+        != gw(in cws, 7) {
+        return false;
+    }
+    if s_range(in ows, 0) > s_range(in cws, 0) {
+        return false;
+    }
+    ids_reset(inout ids);
+    let eleven: u64 = 11;
+    let slots: u64 = 64;
+    for f in 0..nf {
+        let m = s_meta(f);
+        if gw(in ows, m)
+            != gw(in cws, m)
+            || gw(in ows, wrapping_add(m, 1))
+            != gw(in cws, wrapping_add(m, 1)) {
+            return false;
+        }
+        let ho = gw(in ows, wrapping_add(m, 2));
+        let hc = gw(in cws, wrapping_add(m, 2));
+        if ho != hc {
+            return false;
+        }
+        if ho == 1 {
+            if gw(in ows, wrapping_add(m, 3)) != gw(in cws, wrapping_add(m, 3)) {
+                return false;
+            }
+            if !reg_includes(
+                gr(in ors, s_cbarg(f)),
+                gr(in crs, s_cbarg(f)),
+                in ows,
+                in cws,
+                inout ids
+            ) {
+                return false;
+            }
+        }
+        for i in 0..eleven {
+            let li = gw(in ows, link_at(f, i));
+            let ci = gw(in cws, link_at(f, i));
+            for j in wrapping_add(i, 1)..eleven {
+                let lo = li != 0 && li == gw(in ows, link_at(f, j));
+                let lc = ci != 0 && ci == gw(in cws, link_at(f, j));
+                if lo && !lc {
+                    return false;
+                }
+            }
+        }
+        for i in 0..eleven {
+            if !reg_includes(
+                gr(in ors, s_reg(f, i)),
+                gr(in crs, s_reg(f, i)),
+                in ows,
+                in cws,
+                inout ids
+            ) {
+                return false;
+            }
+        }
+        for k in 0..slots {
+            if !slot_includes(
+                gr(in ors, s_slot(f, k)),
+                gr(in crs, s_slot(f, k)),
+                in ows,
+                in cws,
+                inout ids
+            ) {
+                return false;
+            }
+        }
+    }
+    // irq flags are restored in order: the same order on both sides
+    let oi = s_irqs(in ows);
+    let ci = s_irqs(in cws);
+    for i in 0..gw(in ows, 7) {
+        let a = gw(in ows, wrapping_add(oi, i));
+        let b = gw(in cws, wrapping_add(ci, i));
+        match ids_fwd(in ids, a) {
+            Option::Some(x) => {
+                if x != b {
+                    return false;
+                }
+            },
+            Option::None => {
+                return false;
+            },
+        }
+    }
+    // every live reference of the explored state corresponds to a live
+    // reference of the current state of the same kind
+    let orf = s_refs(in ows);
+    let crf = s_refs(in cws);
+    let ncr = gw(in cws, 5);
+    for i in 0..gw(in ows, 5) {
+        let at = wrapping_add(orf, wrapping_mul(i, 4));
+        let c = match ids_fwd(in ids, gw(in ows, at)) {
+            Option::Some(x) => x,
+            Option::None => {
+                return false;
+            },
+        };
+        let mut found = false;
+        for j in 0..ncr {
+            let cat = wrapping_add(crf, wrapping_mul(j, 4));
+            if !found && gw(in cws, cat) == c {
+                found = true;
+                if gw(in cws, wrapping_add(cat, 1)) != gw(in ows, wrapping_add(at, 1)) {
+                    return false;
+                }
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+// Whether some iterator present in both states advanced between them.
+fn iter_depths_differ(in ors: Slice[R], in ows: Slice[u64], in crs: Slice[R], in cws: Slice[u64])
+    -> bool {
+    let a = gw(in ows, 0);
+    let b = gw(in cws, 0);
+    let nf = if a < b {
+        a
+    } else {
+        b
+    };
+    let slots: u64 = 64;
+    for f in 0..nf {
+        for k in 0..slots {
+            let x = gr(in ors, s_slot(f, k));
+            let y = gr(in crs, s_slot(f, k));
+            if x.tag == 17 && y.tag == 17 && x.z != y.z {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// The widening step of a loop head (widen_scalars).
+fn widen_scalars(in prs: Slice[R], in pws: Slice[u64], inout cur: St) -> bool {
+    let nf = gw(in pws, 0);
+    if nf != nframes(in cur) {
+        return false;
+    }
+    let mut changed = false;
+    let eleven: u64 = 11;
+    let slots: u64 = 64;
+    for f in 0..nf {
+        if gw(in pws, subprog_at(f)) != ww(in cur, subprog_at(f)) {
+            return changed;
+        }
+        for i in 0..eleven {
+            let a = gr(in prs, s_reg(f, i));
+            let b = rr(in cur, s_reg(f, i));
+            if a.tag == 1 && b.tag == 1 && !scalar_eq(a.var, b.var) && !is_unknown(b.var) {
+                setr(inout cur, s_reg(f, i), r_unknown());
+                setw(inout cur, link_at(f, i), 0);
+                let w = ww(in cur, wide_regs_at(f));
+                setw(inout cur, wide_regs_at(f), w | bit(i));
+                changed = true;
+            }
+        }
+        for k in 0..slots {
+            let a = gr(in prs, s_slot(f, k));
+            let b = rr(in cur, s_slot(f, k));
+            if a.tag == 1 && b.tag == 1 && !scalar_eq(a.var, b.var) && !is_unknown(b.var) {
+                setr(inout cur, s_slot(f, k), r_unknown());
+                let w = ww(in cur, wide_slots_at(f));
+                setw(inout cur, wide_slots_at(f), w | bit(k));
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+// ---------------------------------------------------------------------------
+// The verifier: program data and the control-flow pass.
+
+fn bools(n: u64) -> ChunkSeq[bool] {
+    let mut s: ChunkSeq[bool] = ChunkSeq::new[bool]();
+    for i in 0..n {
+        s.push(false);
+    }
+    s
+}
+
+fn words(n: u64, x: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..n {
+        s.push(x);
+    }
+    s
+}
+
+fn udiv(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+fn insn_at(in v: V, pc: u64) -> Insn {
+    match v.insns.try_get(pc) {
+        Option::Some(i) => i,
+        Option::None => Insn::Exit,
+    }
+}
+
+fn is_start(in v: V, pc: u64) -> bool {
+    sqb(in v.start, pc)
+}
+
+fn map_word(in v: V, map: u64, k: u64) -> u64 {
+    sq(in v.maps, wrapping_add(wrapping_mul(map, 6), k))
+}
+
+fn nmaps(in v: V) -> u64 {
+    udiv(v.maps.len(), 6)
+}
+
+fn nsub(in v: V) -> u64 {
+    v.sub_start.len()
+}
+
+fn bump_depth(inout v: V, sp: u64, d: u64) {
+    let old = sq(in v.depth, sp);
+    if d > old {
+        v.depth.try_set(sp, d);
+    }
+}
+
+fn target(inout v: V, pc: u64, off: i64) -> u64 eff [Fail[VErr]] {
+    let t = wrapping_add(wrapping_add(signed(pc), 1), off);
+    if t < 0 || t >= signed(v.n) {
+        begin(inout v, "cfg.jump_out_of_range");
+        lit(inout v.msg, "jump to ");
+        idec(inout v.msg, t);
+        lit(inout v.msg, " out of range");
+        raise_at(pc);
+    }
+    let tu = bits(t);
+    if !is_start(in v, tu) {
+        begin(inout v, "cfg.jump_into_ld_imm64");
+        lit(inout v.msg, "jump to ");
+        dec(inout v.msg, tu);
+        lit(inout v.msg, ", the middle of ld_imm64");
+        raise_at(pc);
+    }
+    tu
+}
+
+fn subprog_of(in v: V, pc: u64) -> u64 {
+    let mut i = nsub(in v);
+    loop {
+        if i == 0 {
+            return 0;
+        }
+        i = wrapping_sub(i, 1);
+        if sq(in v.sub_start, i) <= pc {
+            return i;
+        }
+    }
+}
+
+fn set_prune(inout v: V, pc: u64) {
+    v.prune.try_set(pc, true);
+}
+
+fn check_cfg(inout v: V) eff [Fail[VErr]] {
+    let n = v.n;
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    starts.push(0);
+    for pc in 0..n {
+        if is_start(in v, pc) {
+            match insn_at(in v, pc) {
+                Insn::Call(CallTarget::Local(off)) => {
+                    let t = target(inout v, pc, widen_i64(off));
+                    starts.push(t);
+                },
+                Insn::LdImm64 {
+                    dst,
+                    imm
+                }
+                => match imm {
+                    Imm64::Pseudo {
+                        src,
+                        imm_lo,
+                        imm_hi
+                    }
+                    => {
+                        if src == 4 {
+                            if imm_hi != 0 {
+                                fail(
+                                    inout v,
+                                    pc,
+                                    "ld_imm64.bad_func",
+                                    "BPF_PSEUDO_FUNC with a non-zero upper immediate"
+                                );
+                            }
+                            let t = target(inout v, pc, widen_i64(imm_lo));
+                            if t == 0 {
+                                fail(
+                                    inout v,
+                                    pc,
+                                    "ld_imm64.bad_func",
+                                    "the main program cannot be a callback"
+                                );
+                            }
+                            v.cb_entry.try_set(t, true);
+                            v.func_refs.push(pc);
+                            v.func_refs.push(t);
+                            starts.push(t);
+                        }
+                    },
+                    _ => {},
+                },
+                _ => {},
+            }
+        }
+    }
+    // sort and deduplicate
+    let mut sorted: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..starts.len() {
+        let s = sq(in starts, i);
+        let mut at: u64 = 0;
+        let mut dup = false;
+        loop {
+            if !(at < sorted.len()) {
+                break;
+            }
+            let x = sq(in sorted, at);
+            if x == s {
+                dup = true;
+                break;
+            }
+            if x > s {
+                break;
+            }
+            at = wrapping_add(at, 1);
+        }
+        if !dup {
+            sorted.push(0);
+            let mut j = wrapping_sub(sorted.len(), 1);
+            loop {
+                if !(j > at) {
+                    break;
+                }
+                let prev = sq(in sorted, wrapping_sub(j, 1));
+                sorted.try_set(j, prev);
+                j = wrapping_sub(j, 1);
+            }
+            sorted.try_set(at, s);
+        }
+    }
+    let ns = sorted.len();
+    for i in 0..ns {
+        v.sub_start.push(sq(in sorted, i));
+        if wrapping_add(i, 1) < ns {
+            v.sub_end.push(sq(in sorted, wrapping_add(i, 1)));
+        } else {
+            v.sub_end.push(n);
+        }
+        v.depth.push(0);
+    }
+    for si in 0..ns {
+        let start = sq(in v.sub_start, si);
+        let end = sq(in v.sub_end, si);
+        // the last instruction must not fall through
+        let mut last = wrapping_sub(end, 1);
+        if !is_start(in v, last) {
+            last = wrapping_sub(last, 1);
+        }
+        let ends = match insn_at(in v, last) {
+            Insn::Exit => true,
+            Insn::Ja {
+                off
+            }
+            => true,
+            _ => false,
+        };
+        if !ends {
+            begin(inout v, "cfg.fallthrough");
+            lit(inout v.msg, "last insn of subprog ");
+            dec(inout v.msg, si);
+            lit(inout v.msg, " is not exit or jmp");
+            raise_at(last);
+        }
+        for pc in start..end {
+            if is_start(in v, pc) {
+                let i = insn_at(in v, pc);
+                let (has, off, cond) = match i {
+                    Insn::Ja {
+                        off
+                    }
+                    => (true, widen_i64(off), false),
+                    Insn::Jcond {
+                        wide,
+                        op,
+                        dst,
+                        src,
+                        off
+                    }
+                    => (true, widen_i64(off), true),
+                    _ => (false, 0, false),
+                };
+                if has {
+                    let t = target(inout v, pc, off);
+                    if t < start || t >= end {
+                        begin(inout v, "cfg.cross_subprog_jump");
+                        lit(inout v.msg, "jump from subprog ");
+                        dec(inout v.msg, si);
+                        lit(inout v.msg, " to ");
+                        dec(inout v.msg, t);
+                        lit(inout v.msg, " leaves it");
+                        raise_at(pc);
+                    }
+                    set_prune(inout v, t);
+                    if cond && wrapping_add(pc, 1) < n {
+                        set_prune(inout v, wrapping_add(pc, 1));
+                    }
+                }
+                let call = match i {
+                    Insn::Call(c) => true,
+                    _ => false,
+                };
+                if call && wrapping_add(pc, 1) < n {
+                    set_prune(inout v, wrapping_add(pc, 1));
+                }
+            }
+        }
+        set_prune(inout v, start);
+    }
+    // reachability from every subprogram entry
+    let mut seen: ChunkSeq[bool] = ChunkSeq::new[bool]();
+    for pc in 0..n {
+        seen.push(false);
+    }
+    let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..ns {
+        stack.push(sq(in v.sub_start, i));
+    }
+    loop {
+        if stack.len() == 0 {
+            break;
+        }
+        let pc = sq(in stack, wrapping_sub(stack.len(), 1));
+        stack.truncate(wrapping_sub(stack.len(), 1));
+        if !sqb(in seen, pc) {
+            seen.try_set(pc, true);
+            let i = insn_at(in v, pc);
+            let next = wrapping_add(pc, slots_of(i));
+            match i {
+                Insn::Exit => {},
+                Insn::Ja {
+                    off
+                }
+                => {
+                    let t = target(inout v, pc, widen_i64(off));
+                    stack.push(t);
+                },
+                Insn::Jcond {
+                    wide,
+                    op,
+                    dst,
+                    src,
+                    off
+                }
+                => {
+                    let t = target(inout v, pc, widen_i64(off));
+                    stack.push(t);
+                    if next < n {
+                        stack.push(next);
+                    }
+                },
+                _ => {
+                    if next < n {
+                        stack.push(next);
+                    }
+                },
+            }
+        }
+    }
+    for pc in 0..n {
+        if is_start(in v, pc) && !sqb(in seen, pc) {
+            fail(inout v, pc, "cfg.unreachable", "unreachable insn");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registers and operands.
+
+fn read(inout v: V, in st: St, pc: u64, r: u64) -> R eff [Fail[VErr]] {
+    let val = reg(in st, r);
+    if val.tag == 0 {
+        begin(inout v, "reg.uninit_read");
+        reg_name(inout v.msg, r);
+        lit(inout v.msg, " !read_ok");
+        raise_at(pc);
+    }
+    val
+}
+
+fn write_check(inout v: V, pc: u64, r: u64) eff [Fail[VErr]] {
+    if r == 10 {
+        fail(inout v, pc, "reg.write_fp", "frame pointer is read only");
+    }
+}
+
+fn operand(inout v: V, in st: St, pc: u64, wide: bool, src: Operand) -> R eff [Fail[VErr]] {
+    match src {
+        Operand::Imm(i) => {
+            let c = if wide {
+                wrapping_u64(widen_i64(i))
+            } else {
+                widen_u64(wrapping_u32(i))
+            };
+            r_scalar(scalar_konst(c))
+        },
+        Operand::Reg(r) => read(inout v, in st, pc, widen_u64(r)),
+    }
+}
+
+fn taint_slot(inout st: St, p: R, off: i16, size: Size, t: bool) {
+    if p.tag == 6 {
+        let at = shr(bits(wrapping_add(wrapping_add(p.off, widen_i64(off)), 512)), 3);
+        let f = p.x;
+        let w = ww(in st, wide_slots_at(f));
+        if t {
+            setw(inout st, wide_slots_at(f), w | bit(at));
+        } else if is_dw(size) {
+            setw(inout st, wide_slots_at(f), w & ~bit(at));
+        }
+    }
+}
+
+fn clobber_args(inout st: St) {
+    let f = curf(in st);
+    let six: u64 = 6;
+    for i in 1..six {
+        setr(inout st, s_reg(f, i), r_none());
+        setw(inout st, link_at(f, i), 0);
+    }
+}
+
+// r1-r5 are clobbered by a call, r0 is its result.
+fn clobber_call(inout st: St, r0: R) {
+    clobber_args(inout st);
+    set(inout st, 0, r0);
+}
+
+// ---------------------------------------------------------------------------
+// ALU.
+
+fn is_div(op: AluOp) -> bool {
+    match op {
+        AluOp::Div => true,
+        AluOp::Mod => true,
+        AluOp::SDiv => true,
+        AluOp::SMod => true,
+        _ => false,
+    }
+}
+
+fn is_shift(op: AluOp) -> bool {
+    match op {
+        AluOp::Lsh => true,
+        AluOp::Rsh => true,
+        AluOp::Arsh => true,
+        _ => false,
+    }
+}
+
+fn is_add(op: AluOp) -> bool {
+    match op {
+        AluOp::Add => true,
+        _ => false,
+    }
+}
+
+fn is_sub(op: AluOp) -> bool {
+    match op {
+        AluOp::Sub => true,
+        _ => false,
+    }
+}
+
+fn alu(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64, src: Operand) eff [
+    Fail[VErr]
+] {
+    let ts = match src {
+        Operand::Reg(r) => tainted(in st, widen_u64(r)),
+        Operand::Imm(i) => false,
+    };
+    let t = match op {
+        AluOp::Mov => ts,
+        AluOp::MovSx(b) => ts,
+        _ => ts || tainted(in st, dst),
+    };
+    if t && (is_add(op) || is_sub(op)) && wide {
+        let sp = match src {
+            Operand::Reg(r) => is_pointer(reg(in st, widen_u64(r))),
+            Operand::Imm(i) => false,
+        };
+        if is_pointer(reg(in st, dst)) || sp {
+            // pointer arithmetic: the kernel marks the scalar precise
+            fail(
+                inout v,
+                pc,
+                "loop.widened_precise",
+                "a widened loop scalar is used as a pointer offset"
+            );
+        }
+    }
+    alu_inner(inout v, inout st, pc, wide, op, dst, src);
+    if t && reg(in st, dst).tag == 1 {
+        set_taint(inout st, dst, true);
+    }
+}
+
+fn finish(wide: bool, s: Scalar) -> Scalar {
+    if wide {
+        s
+    } else {
+        scalar_zext32(s)
+    }
+}
+
+fn alu_inner(inout v: V, inout st: St, pc: u64, wide: bool, op: AluOp, dst: u64, src: Operand) eff [
+    Fail[VErr]
+] {
+    write_check(inout v, pc, dst);
+    let width: u64 = if wide {
+        64
+    } else {
+        32
+    };
+    match op {
+        AluOp::Mov => {
+            let val = operand(inout v, in st, pc, wide, src);
+            let res = if val.tag == 1 {
+                if wide {
+                    r_scalar(val.var)
+                } else {
+                    r_scalar(finish(wide, scalar_truncate(val.var, 32)))
+                }
+            } else if wide {
+                val
+            } else {
+                begin(inout v, "alu.pointer_arith");
+                lit(inout v.msg, "32-bit move of pointer (");
+                type_name(inout v.msg, val.tag);
+                lit(inout v.msg, ")");
+                raise_at(pc)
+            };
+            let linked = match src {
+                Operand::Reg(r) => wide && widen_u64(r) != dst && res.tag == 1,
+                Operand::Imm(i) => false,
+            };
+            if linked {
+                let r = match src {
+                    Operand::Reg(r) => widen_u64(r),
+                    Operand::Imm(i) => 0,
+                };
+                copy_linked(inout st, dst, r);
+            } else {
+                set(inout st, dst, res);
+            }
+            return;
+        },
+        AluOp::MovSx(from) => {
+            let val = operand(inout v, in st, pc, wide, src);
+            if val.tag != 1 {
+                fail(inout v, pc, "alu.pointer_arith", "sign-extending move of pointer");
+            }
+            let f = widen_u32(from);
+            let s = if wide {
+                scalar_sext(val.var, f)
+            } else {
+                scalar_zext32(scalar_sext(scalar_truncate(val.var, 32), f))
+            };
+            set(inout st, dst, r_scalar(finish(wide, s)));
+            return;
+        },
+        AluOp::Neg => {
+            let val = read(inout v, in st, pc, dst);
+            if val.tag != 1 {
+                fail(inout v, pc, "alu.pointer_arith", "negation of pointer");
+            }
+            let r = if is_const(val.var) {
+                scalar_konst(wrapping_sub(0, val.var.umin))
+            } else {
+                scalar_unknown()
+            };
+            set(inout st, dst, r_scalar(finish(wide, r)));
+            return;
+        },
+        _ => {},
+    }
+    let d = read(inout v, in st, pc, dst);
+    let s = operand(inout v, in st, pc, wide, src);
+    match src {
+        Operand::Imm(i) => {
+            if is_div(op) && i == 0 {
+                fail(inout v, pc, "alu.div_by_zero", "division by zero immediate");
+            }
+            if is_shift(op) && (i < 0 || widen_i64(i) >= signed(width)) {
+                begin(inout v, "alu.invalid_shift");
+                lit(inout v.msg, "invalid shift ");
+                idec(inout v.msg, widen_i64(i));
+                raise_at(pc);
+            }
+        },
+        Operand::Reg(r) => {},
+    }
+    if d.tag == 1 && s.tag == 1 {
+        let a = if wide {
+            d.var
+        } else {
+            scalar_truncate(d.var, 32)
+        };
+        let b = if wide {
+            s.var
+        } else {
+            scalar_truncate(s.var, 32)
+        };
+        // `is_safe_to_compute_dst_reg_range`
+        let untracked = is_div(op) || (is_shift(op) && !(is_const(b) && b.umin < width));
+        if untracked {
+            set(inout st, dst, r_unknown());
+            return;
+        }
+        let r = scalar_alu(op, wide, a, b);
+        set(inout st, dst, r_scalar(finish(wide, r)));
+        return;
+    }
+    if is_pointer(d) && s.tag == 1 {
+        if !wide {
+            fail(inout v, pc, "alu.pointer_arith", "32-bit pointer arithmetic");
+        }
+        let neg = if is_add(op) {
+            false
+        } else if is_sub(op) {
+            true
+        } else {
+            begin(inout v, "alu.pointer_arith");
+            alu_name(inout v.msg, op);
+            lit(inout v.msg, " on pointer (");
+            type_name(inout v.msg, d.tag);
+            lit(inout v.msg, ") prohibited");
+            raise_at(pc)
+        };
+        let r = ptr_add(inout v, inout st, pc, d, s.var, neg);
+        set(inout st, dst, r);
+        return;
+    }
+    if d.tag == 1 && is_pointer(s) && is_add(op) && wide {
+        let r = ptr_add(inout v, inout st, pc, s, d.var, false);
+        set(inout st, dst, r);
+        return;
+    }
+    if d.tag == 4 && s.tag == 4 && is_sub(op) && wide {
+        set(inout st, dst, r_unknown());
+        return;
+    }
+    begin(inout v, "alu.pointer_arith");
+    alu_name(inout v.msg, op);
+    lit(inout v.msg, " between ");
+    type_name(inout v.msg, d.tag);
+    lit(inout v.msg, " and ");
+    type_name(inout v.msg, s.tag);
+    lit(inout v.msg, " prohibited");
+    raise_at(pc);
+}
+
+// `off + (neg ? -c : c)` when it stays below MAX_VAR_OFF in magnitude.
+fn add_off(off: i64, c: i64, neg: bool) -> Option[i64] {
+    if neg && c == smin_i64() {
+        return Option::None;
+    }
+    let d = if neg {
+        wrapping_sub(0, c)
+    } else {
+        c
+    };
+    match checked_add_i64(off, d) {
+        Option::Some(r) => {
+            let mag = if r < 0 {
+                wrapping_sub(0, bits(r))
+            } else {
+                bits(r)
+            };
+            if mag < 536870912 {
+                Option::Some(r)
+            } else {
+                Option::None
+            }
+        },
+        Option::None => Option::None,
+    }
+}
+
+fn offset_or_fail(inout v: V, pc: u64, off: i64, c: i64, neg: bool) -> i64 eff [Fail[VErr]] {
+    match add_off(off, c, neg) {
+        Option::Some(r) => r,
+        Option::None => fail(inout v, pc, "alu.pointer_offset", "pointer offset out of range"),
+    }
+}
+
+fn ptr_add(inout v: V, inout st: St, pc: u64, p: R, b: Scalar, neg: bool) -> R eff [Fail[VErr]] {
+    let known = is_const(b);
+    let c = signed(b.umin);
+    match p.tag {
+        6 => {
+            if !known {
+                fail(
+                    inout v,
+                    pc,
+                    "alu.stack_var_offset",
+                    "variable offset stack pointers are not supported"
+                );
+            }
+            let o = offset_or_fail(inout v, pc, p.off, c, neg);
+            mk(6, p.x, 0, 0, o, zs())
+        },
+        10 => {
+            if !known {
+                fail(
+                    inout v,
+                    pc,
+                    "alu.pointer_arith",
+                    "variable offset into ringbuf memory is not supported"
+                );
+            }
+            let o = offset_or_fail(inout v, pc, p.off, c, neg);
+            mk(10, p.x, 0, p.z, o, zs())
+        },
+        4 => {
+            if known {
+                let o = offset_or_fail(inout v, pc, p.off, c, neg);
+                return mk(4, p.x, 0, 0, o, p.var);
+            }
+            if neg {
+                fail(
+                    inout v,
+                    pc,
+                    "alu.pointer_arith",
+                    "subtracting a variable from a packet pointer"
+                );
+            }
+            if b.umax > 65535 || b.smin < 0 {
+                begin(inout v, "alu.packet_var_too_large");
+                lit(inout v.msg, "variable packet offset up to ");
+                dec(inout v.msg, b.umax);
+                lit(inout v.msg, " exceeds 0xffff");
+                raise_at(pc);
+            }
+            let nvar = scalar_add(p.var, b);
+            if nvar.umax > 65535 {
+                fail(
+                    inout v,
+                    pc,
+                    "alu.packet_var_too_large",
+                    "accumulated variable packet offset exceeds 0xffff"
+                );
+            }
+            let id = fresh_id(inout st);
+            mk(4, id, 0, 0, p.off, nvar)
+        },
+        8 => {
+            if known {
+                let o = offset_or_fail(inout v, pc, p.off, c, neg);
+                return mk(8, p.x, 0, 0, o, p.var);
+            }
+            if neg || b.umax >= 536870912 || b.smin < 0 {
+                fail(
+                    inout v,
+                    pc,
+                    "alu.pointer_arith",
+                    "unbounded or negative variable map value offset"
+                );
+            }
+            mk(8, p.x, 0, 0, p.off, scalar_add(p.var, b))
+        },
+        _ => {
+            if is_or_null(p) {
+                begin(inout v, "mem.null_arith");
+                lit(inout v.msg, "arithmetic on ");
+                type_name(inout v.msg, p.tag);
+                lit(inout v.msg, " before null check");
+                raise_at(pc);
+            }
+            begin(inout v, "alu.pointer_arith");
+            lit(inout v.msg, "arithmetic on ");
+            type_name(inout v.msg, p.tag);
+            lit(inout v.msg, " prohibited");
+            raise_at(pc)
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Memory.
+
+fn frame_subprog(in st: St, f: u64) -> u64 {
+    ww(in st, subprog_at(f))
+}
+
+fn null_name_fail(inout v: V, pc: u64, rule: Str, pre: Str, p: R, post: Str)
+    -> Never eff [Fail[VErr]] {
+    begin(inout v, rule);
+    lit(inout v.msg, pre);
+    type_name(inout v.msg, p.tag);
+    lit(inout v.msg, post);
+    raise_at(pc)
+}
+
+fn bad_xdp(inout v: V, pc: u64, o: i64, n: u64) -> Never eff [Fail[VErr]] {
+    begin(inout v, "mem.ctx_invalid_access");
+    lit(inout v.msg, "invalid xdp_md access off=");
+    idec(inout v.msg, o);
+    lit(inout v.msg, " size=");
+    dec(inout v.msg, n);
+    raise_at(pc)
+}
+
+// Validate an access of `size` bytes at `p + off`; returns the kind of
+// target for loads and stores.
+fn access(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size, write: bool)
+    -> Target eff [Fail[VErr]] {
+    let n = size_bytes(size);
+    let ni = signed(n);
+    let o16 = widen_i64(off);
+    match p.tag {
+        2 => {
+            match v.ptype {
+                ProgramType::Xdp => {},
+                _ => {
+                    return ctx_access(inout v, pc, o16, size, write);
+                },
+            }
+            if write {
+                fail(inout v, pc, "mem.ctx_write", "cannot write into xdp_md");
+            }
+            if o16 < 0 || o16 >= 24 || bits(o16) & wrapping_sub(n, 1) != 0 {
+                bad_xdp(inout v, pc, o16, n);
+            }
+            let field = o16 & ~3;
+            if is_w(size) {
+                if field == 0 {
+                    return Target::CtxData;
+                }
+                if field == 4 {
+                    return Target::CtxDataEnd;
+                }
+                if field == 12 || field == 16 {
+                    return Target::Scalar(size);
+                }
+            }
+            bad_xdp(inout v, pc, o16, n)
+        },
+        4 => {
+            let total = wrapping_add(p.off, o16);
+            let range = signed(s_range(in st.ws.as_slice(), p.x));
+            if p.var.smin < 0 || total < 0 || wrapping_add(total, ni) > range {
+                begin(inout v, "mem.packet_out_of_range");
+                lit(inout v.msg, "invalid access to packet, off=");
+                idec(inout v.msg, total);
+                lit(inout v.msg, " size=");
+                dec(inout v.msg, n);
+                lit(inout v.msg, ", R range=");
+                idec(inout v.msg, range);
+                lit(inout v.msg, " (check against data_end first)");
+                raise_at(pc);
+            }
+            Target::Scalar(size)
+        },
+        6 => {
+            let total = wrapping_add(p.off, o16);
+            if total < -512 || wrapping_add(total, ni) > 0 {
+                begin(inout v, "mem.stack_out_of_bounds");
+                lit(inout v.msg, "invalid stack off=");
+                idec(inout v.msg, total);
+                lit(inout v.msg, " size=");
+                dec(inout v.msg, n);
+                raise_at(pc);
+            }
+            if bits(total) & wrapping_sub(n, 1) != 0 {
+                begin(inout v, "mem.stack_misaligned");
+                lit(inout v.msg, "misaligned stack access off=");
+                idec(inout v.msg, total);
+                lit(inout v.msg, " size=");
+                dec(inout v.msg, n);
+                raise_at(pc);
+            }
+            let sp = frame_subprog(in st, p.x);
+            bump_depth(inout v, sp, wrapping_sub(0, bits(total)) & 4294967295);
+            Target::Stack {
+                frame: p.x,
+                at: bits(wrapping_add(total, 512))
+            }
+        },
+        8 => {
+            let vs = map_word(in v, p.x, 2);
+            let lo = wrapping_add(p.off, o16);
+            let hi = wrapping_add(wrapping_add(lo, signed(p.var.umax)), ni);
+            if p.var.smin < 0 || lo < 0 || hi > signed(vs) {
+                begin(inout v, "mem.map_value_out_of_bounds");
+                lit(inout v.msg, "invalid access to map value, value_size=");
+                dec(inout v.msg, vs);
+                lit(inout v.msg, " off=");
+                idec(inout v.msg, lo);
+                lit(inout v.msg, " size=");
+                dec(inout v.msg, n);
+                raise_at(pc);
+            }
+            Target::Scalar(size)
+        },
+        10 => {
+            let lo = wrapping_add(p.off, o16);
+            if lo < 0 || wrapping_add(lo, ni) > signed(p.x) {
+                begin(inout v, "mem.ringbuf_out_of_bounds");
+                lit(inout v.msg, "invalid access to ringbuf record of ");
+                dec(inout v.msg, p.x);
+                lit(inout v.msg, " bytes, off=");
+                idec(inout v.msg, lo);
+                lit(inout v.msg, " size=");
+                dec(inout v.msg, n);
+                raise_at(pc);
+            }
+            Target::Scalar(size)
+        },
+        12 => {
+            if write {
+                fail(inout v, pc, "mem.rdonly_write", "write into read-only memory");
+            }
+            let lo = wrapping_add(p.off, o16);
+            if lo < 0 || wrapping_add(lo, ni) > signed(p.x) {
+                begin(inout v, "mem.rdonly_out_of_bounds");
+                lit(inout v.msg, "invalid access to ");
+                dec(inout v.msg, p.x);
+                lit(inout v.msg, "-byte read-only memory, off=");
+                idec(inout v.msg, lo);
+                lit(inout v.msg, " size=");
+                dec(inout v.msg, n);
+                raise_at(pc);
+            }
+            Target::Scalar(size)
+        },
+        13 => fail(
+            inout v,
+            pc,
+            "mem.unsupported_target",
+            "access to bpf_sock fields is not supported"
+        ),
+        0 => fail(inout v, pc, "reg.uninit_read", "uninitialized base"),
+        _ => {
+            if is_or_null(p) {
+                null_name_fail(
+                    inout v,
+                    pc,
+                    "mem.null_deref",
+                    "dereference of ",
+                    p,
+                    " before null check"
+                );
+            }
+            null_name_fail(inout v, pc, "mem.invalid_pointer", "invalid mem access through ", p, "")
+        },
+    }
+}
+
+fn load(inout v: V, in st: St, pc: u64, p: R, off: i16, size: Size) -> R eff [Fail[VErr]] {
+    match access(inout v, in st, pc, p, off, size, false) {
+        Target::CtxData => mk(4, 0, 0, 0, 0, scalar_konst(0)),
+        Target::CtxDataEnd => r_tag(5),
+        Target::Scalar(sz) => r_scalar(
+            scalar_unknown_bits(wrapping_u32(wrapping_mul(size_bytes(sz), 8)))
+        ),
+        Target::Stack {
+            frame,
+            at
+        }
+        => {
+            let slot = rr(in st, s_slot(frame, shr(at, 3)));
+            let n = size_bytes(size);
+            let first = (at & 7);
+            let nbits = wrapping_u32(wrapping_mul(n, 8));
+            if slot.tag < 16 {
+                if n == 8 {
+                    return slot;
+                }
+                if slot.tag == 1 {
+                    return r_scalar(scalar_unknown_bits(nbits));
+                }
+                fail(inout v, pc, "mem.pointer_partial_fill", "partial read of a spilled pointer");
+            }
+            if slot.tag != 16 {
+                fail(
+                    inout v,
+                    pc,
+                    "mem.kfunc_object",
+                    "direct read of an iterator or irq flag on the stack"
+                );
+            }
+            let need = byte_mask(first, n);
+            if slot.x & need != need {
+                begin(inout v, "mem.uninit_stack_read");
+                lit(inout v.msg, "invalid read from stack off=");
+                idec(inout v.msg, wrapping_sub(signed(at), 512));
+                lit(inout v.msg, " size=");
+                dec(inout v.msg, n);
+                raise_at(pc);
+            }
+            r_scalar(scalar_unknown_bits(nbits))
+        },
+    }
+}
+
+fn store(inout v: V, inout st: St, pc: u64, p: R, off: i16, size: Size, val: R) eff [Fail[VErr]] {
+    match access(inout v, in st, pc, p, off, size, true) {
+        Target::Stack {
+            frame,
+            at
+        }
+        => {
+            let n = size_bytes(size);
+            let k = s_slot(frame, shr(at, 3));
+            let slot = rr(in st, k);
+            if is_kfunc_object(slot) {
+                fail(
+                    inout v,
+                    pc,
+                    "mem.kfunc_object",
+                    "overwriting an iterator or irq flag on the stack"
+                );
+            }
+            if n == 8 {
+                setr(inout st, k, val);
+            } else {
+                if is_pointer(val) {
+                    fail(inout v, pc, "mem.pointer_partial_spill", "partial spill of a pointer");
+                }
+                let mask = if slot.tag == 16 {
+                    slot.x
+                } else {
+                    255
+                };
+                setr(inout st, k, r_bytes(mask | byte_mask((at & 7), n)));
+            }
+        },
+        Target::Scalar(sz) => {
+            if is_pointer(val) {
+                null_name_fail(
+                    inout v,
+                    pc,
+                    "mem.pointer_leak",
+                    "storing ",
+                    val,
+                    " into memory other than the stack"
+                );
+            }
+        },
+        Target::CtxData => {},
+        Target::CtxDataEnd => {},
+    }
+}
+
+fn fetches(op: AtomicOp) -> bool {
+    match op {
+        AtomicOp::Add {
+            fetch
+        }
+        => fetch,
+        AtomicOp::Or {
+            fetch
+        }
+        => fetch,
+        AtomicOp::And {
+            fetch
+        }
+        => fetch,
+        AtomicOp::Xor {
+            fetch
+        }
+        => fetch,
+        AtomicOp::Xchg => true,
+        AtomicOp::CmpXchg => true,
+    }
+}
+
+fn is_cmpxchg(op: AtomicOp) -> bool {
+    match op {
+        AtomicOp::CmpXchg => true,
+        _ => false,
+    }
+}
+
+fn atomic(
+    inout v: V,
+    inout st: St,
+    pc: u64,
+    size: Size,
+    op: AtomicOp,
+    dst: u64,
+    src: u64,
+    off: i16
+) eff [Fail[VErr]] {
+    let p = read(inout v, in st, pc, dst);
+    let val = read(inout v, in st, pc, src);
+    if is_pointer(val) {
+        fail(inout v, pc, "atomic.pointer_operand", "atomic operand must be a scalar");
+    }
+    if is_cmpxchg(op) {
+        let r0 = read(inout v, in st, pc, 0);
+        if is_pointer(r0) {
+            fail(inout v, pc, "atomic.pointer_operand", "cmpxchg R0 must be a scalar");
+        }
+    }
+    if !(is_w(size) || is_dw(size)) {
+        fail(inout v, pc, "atomic.invalid_target", "BPF_ATOMIC needs a 4- or 8-byte operand");
+    }
+    let n = size_bytes(size);
+    if p.tag == 8 {
+        // atomics are always strictly aligned (`check_ptr_alignment`)
+        let low = (p.var.var.value | p.var.var.mask) & wrapping_sub(n, 1);
+        let at = bits(wrapping_add(p.off, widen_i64(off)));
+        if at & wrapping_sub(n, 1) != 0 || low != 0 {
+            begin(inout v, "atomic.misaligned");
+            lit(inout v.msg, "misaligned atomic access to map value, size ");
+            dec(inout v.msg, n);
+            raise_at(pc);
+        }
+    } else if p.tag != 6 {
+        null_name_fail(
+            inout v,
+            pc,
+            "atomic.invalid_target",
+            "BPF_ATOMIC into ",
+            p,
+            " is not allowed"
+        );
+    }
+    // an atomic both reads and writes its target, which must hold a scalar
+    if is_pointer(load(inout v, in st, pc, p, off, size)) {
+        fail(inout v, pc, "atomic.pointer_operand", "atomic on a spilled pointer");
+    }
+    store(inout v, inout st, pc, p, off, size, r_unknown());
+    match access(inout v, in st, pc, p, off, size, true) {
+        Target::Stack {
+            frame,
+            at
+        }
+        => {
+            // the spill (if any) is now an unknown value
+            let k = s_slot(frame, shr(at, 3));
+            if rr(in st, k).tag < 16 {
+                setr(inout st, k, r_bytes(0));
+            }
+        },
+        _ => {},
+    }
+    let fetched = if is_w(size) {
+        r_scalar(scalar_unknown_bits(32))
+    } else {
+        r_unknown()
+    };
+    if is_cmpxchg(op) {
+        set(inout st, 0, fetched);
+    } else if fetches(op) {
+        write_check(inout v, pc, src);
+        set(inout st, src, fetched);
+    }
+}
+
+fn what_fail(inout v: V, pc: u64, rule: Str, what: Str, msg: Str) -> Never eff [Fail[VErr]] {
+    begin(inout v, rule);
+    lit(inout v.msg, what);
+    lit(inout v.msg, msg);
+    raise_at(pc)
+}
+
+fn indirect_bounds(inout v: V, pc: u64, what: Str, lo: i64, n: u64) eff [Fail[VErr]] {
+    let hi = wrapping_add(lo, signed(n));
+    if lo < -512 || hi > 0 {
+        begin(inout v, "mem.stack_out_of_bounds");
+        lit(inout v.msg, what);
+        lit(inout v.msg, ": invalid indirect stack access off=");
+        idec(inout v.msg, lo);
+        lit(inout v.msg, " size=");
+        dec(inout v.msg, n);
+        raise_at(pc);
+    }
+}
+
+// Bytes `[p, p + n)` must be readable (helper memory arguments).
+fn check_mem_read(inout v: V, in st: St, pc: u64, p: R, n: u64, what: Str) eff [Fail[VErr]] {
+    if n == 0 {
+        what_fail(inout v, pc, "call.arg_type", what, ": zero-sized memory");
+    }
+    if p.tag == 6 {
+        let lo = p.off;
+        indirect_bounds(inout v, pc, what, lo, n);
+        let sp = frame_subprog(in st, p.x);
+        bump_depth(inout v, sp, wrapping_sub(0, bits(lo)));
+        for i in 0..n {
+            let b = wrapping_add(lo, signed(i));
+            let at = bits(wrapping_add(b, 512));
+            let slot = rr(in st, s_slot(p.x, shr(at, 3)));
+            let ok = if slot.tag == 16 {
+                slot.x & bit((at & 7)) != 0
+            } else {
+                slot.tag == 1
+            };
+            if !ok {
+                begin(inout v, "mem.uninit_stack_read");
+                lit(inout v.msg, what);
+                lit(inout v.msg, ": invalid indirect read from stack off=");
+                idec(inout v.msg, b);
+                raise_at(pc);
+            }
+        }
+        return;
+    }
+    if p.tag == 4 || p.tag == 8 || p.tag == 10 || p.tag == 12 {
+        // check the first and last byte with the ordinary rules
+        if wrapping_sub(n, 1) > 32767 {
+            fail(inout v, pc, "call.arg_type", "size too large");
+        }
+        let last = wrapping_i16(wrapping_sub(n, 1));
+        let a = access(inout v, in st, pc, p, 0, Size::B, false);
+        let b = access(inout v, in st, pc, p, last, Size::B, false);
+        return;
+    }
+    begin(inout v, "call.arg_type");
+    lit(inout v.msg, what);
+    lit(inout v.msg, ": expected pointer to memory, got ");
+    type_name(inout v.msg, p.tag);
+    raise_at(pc);
+}
+
+// Bytes `[p, p + n)` are written by a helper (`ARG_PTR_TO_UNINIT_MEM`).
+fn check_mem_write(inout v: V, inout st: St, pc: u64, p: R, n: u64, what: Str) eff [Fail[VErr]] {
+    if n == 0 {
+        what_fail(inout v, pc, "call.arg_type", what, ": zero-sized memory");
+    }
+    if p.tag == 6 {
+        let lo = p.off;
+        indirect_bounds(inout v, pc, what, lo, n);
+        let sp = frame_subprog(in st, p.x);
+        bump_depth(inout v, sp, wrapping_sub(0, bits(lo)));
+        for i in 0..n {
+            let b = wrapping_add(lo, signed(i));
+            let at = bits(wrapping_add(b, 512));
+            let k = s_slot(p.x, shr(at, 3));
+            let slot = rr(in st, k);
+            let mask = if slot.tag == 16 {
+                slot.x | bit((at & 7))
+            } else if slot.tag < 16 {
+                // an overwritten spill becomes unknown bytes
+                255
+            } else {
+                what_fail(
+                    inout v,
+                    pc,
+                    "mem.kfunc_object",
+                    what,
+                    ": overwriting an iterator or irq flag"
+                )
+            };
+            setr(inout st, k, r_bytes(mask));
+        }
+        return;
+    }
+    if p.tag == 8 || p.tag == 10 {
+        if wrapping_sub(n, 1) > 32767 {
+            fail(inout v, pc, "call.arg_type", "size too large");
+        }
+        let last = wrapping_i16(wrapping_sub(n, 1));
+        let a = access(inout v, in st, pc, p, 0, Size::B, true);
+        let b = access(inout v, in st, pc, p, last, Size::B, true);
+        return;
+    }
+    begin(inout v, "call.arg_type");
+    lit(inout v.msg, what);
+    lit(inout v.msg, ": expected pointer to writable memory, got ");
+    type_name(inout v.msg, p.tag);
+    raise_at(pc);
+}
+
+// ---------------------------------------------------------------------------
+// Helper arguments and references.
+
+fn arg(inout v: V, in st: St, pc: u64, i: u64) -> R eff [Fail[VErr]] {
+    let val = reg(in st, i);
+    if val.tag == 0 {
+        begin(inout v, "reg.uninit_read");
+        lit(inout v.msg, "helper argument ");
+        reg_name(inout v.msg, i);
+        lit(inout v.msg, " !read_ok");
+        raise_at(pc);
+    }
+    val
+}
+
+fn arg_fail(inout v: V, pc: u64, i: u64, msg: Str, got: R) -> Never eff [Fail[VErr]] {
+    begin(inout v, "call.arg_type");
+    reg_name(inout v.msg, i);
+    lit(inout v.msg, msg);
+    type_name(inout v.msg, got.tag);
+    raise_at(pc)
+}
+
+fn map_arg(inout v: V, in st: St, pc: u64, i: u64) -> u64 eff [Fail[VErr]] {
+    let a = arg(inout v, in st, pc, i);
+    if a.tag != 7 {
+        arg_fail(inout v, pc, i, ": expected map pointer, got ", a);
+    }
+    a.x
+}
+
+fn scalar_arg(inout v: V, in st: St, pc: u64, i: u64) -> Scalar eff [Fail[VErr]] {
+    let a = arg(inout v, in st, pc, i);
+    if a.tag != 1 {
+        arg_fail(inout v, pc, i, ": expected scalar, got ", a);
+    }
+    a.var
+}
+
+fn const_arg(inout v: V, in st: St, pc: u64, i: u64) -> u64 eff [Fail[VErr]] {
+    if tainted(in st, i) {
+        fail(
+            inout v,
+            pc,
+            "loop.widened_precise",
+            "a widened loop scalar is used as a constant helper argument"
+        );
+    }
+    let s = scalar_arg(inout v, in st, pc, i);
+    if !is_const(s) {
+        begin(inout v, "call.arg_type");
+        reg_name(inout v.msg, i);
+        lit(inout v.msg, ": expected a known constant");
+        raise_at(pc);
+    }
+    s.umin
+}
+
+fn release(inout v: V, inout st: St, pc: u64, ref_id: u64) eff [Fail[VErr]] {
+    let n = ww(in st, 5);
+    let mut pos = none();
+    for i in 0..n {
+        if pos == none() && ref_word(in st, i, 0) == ref_id {
+            pos = i;
+        }
+    }
+    if pos == none() {
+        fail(inout v, pc, "ref.release_invalid", "release of a reference that is not held");
+    }
+    remove_ref(inout st, pos);
+    for_each_value(inout st, 0, ref_id, 0);
+}
+
+fn in_list(o: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64) -> bool {
+    o == a || o == b || o == c || o == d || o == e || o == f || o == g || o == h || o == i
+}
+
+fn skb_read(o: i64) -> bool {
+    in_list(o, 0, 4, 8, 12, 16, 24, 28, 32, 36) || in_list(o, 40, 44, 48, 52, 56, 60, 64, 68, 72)
+}
+
+fn skb_write(o: i64) -> bool {
+    in_list(o, 8, 32, 44, 48, 52, 56, 60, 64, 72)
+}
+
+fn ctx_bad(inout v: V, pc: u64, o: i64, n: u64, why: Str) -> Never eff [Fail[VErr]] {
+    begin(inout v, "mem.ctx_invalid_access");
+    lit(inout v.msg, "invalid ");
+    prog_name(inout v.msg, v.ptype);
+    lit(inout v.msg, " context access off=");
+    idec(inout v.msg, o);
+    lit(inout v.msg, " size=");
+    dec(inout v.msg, n);
+    lit(inout v.msg, ": ");
+    lit(inout v.msg, why);
+    raise_at(pc)
+}
+
+// Context access for the non-XDP program types.
+fn ctx_access(inout v: V, pc: u64, o: i64, size: Size, write: bool) -> Target eff [Fail[VErr]] {
+    let n = size_bytes(size);
+    if o < 0 || bits(o) & wrapping_sub(n, 1) != 0 {
+        ctx_bad(inout v, pc, o, n, "negative or misaligned");
+    }
+    match v.ptype {
+        ProgramType::SchedCls => {
+            if o >= 192 || !is_w(size) {
+                ctx_bad(inout v, pc, o, n, "only u32 fields of __sk_buff are supported");
+            }
+            if write {
+                if !skb_write(o) {
+                    begin(inout v, "mem.ctx_write");
+                    lit(inout v.msg, "__sk_buff field at ");
+                    idec(inout v.msg, o);
+                    lit(inout v.msg, " is not writable");
+                    raise_at(pc);
+                }
+                return Target::Scalar(size);
+            }
+            if o == 76 {
+                return Target::CtxData;
+            }
+            if o == 80 {
+                return Target::CtxDataEnd;
+            }
+            if skb_read(o) {
+                return Target::Scalar(size);
+            }
+            ctx_bad(inout v, pc, o, n, "field not supported")
+        },
+        _ => {
+            if write {
+                begin(inout v, "mem.ctx_write");
+                lit(inout v.msg, "the ");
+                prog_name(inout v.msg, v.ptype);
+                lit(inout v.msg, " context is read only");
+                raise_at(pc);
+            }
+            let tp = match v.ptype {
+                ProgramType::Tracepoint => true,
+                _ => false,
+            };
+            let lo: i64 = if tp {
+                8
+            } else {
+                0
+            };
+            let hi: i64 = if tp {
+                2048
+            } else {
+                v.pt_regs
+            };
+            if o < lo || wrapping_add(o, signed(n)) > hi {
+                ctx_bad(inout v, pc, o, n, "outside the record");
+            }
+            Target::Scalar(size)
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Calls.
+
+// Why the state cannot leave the program or the current function here, if
+// it cannot: 0 none, 1 preempt, 2 rcu, 3 irq flags, 4 a live iterator, for
+// the frames `from..`.
+fn kfunc_region(in st: St, from: u64) -> u64 {
+    if ww(in st, 2) > 0 {
+        return 1;
+    }
+    if ww(in st, 3) != 0 {
+        return 2;
+    }
+    let nf = nframes(in st);
+    let mut irq = false;
+    let mut iter = false;
+    let slots: u64 = 64;
+    for f in from..nf {
+        for k in 0..slots {
+            let t = rr(in st, s_slot(f, k)).tag;
+            if t == 18 {
+                irq = true;
+            }
+            if t == 17 {
+                iter = true;
+            }
+        }
+    }
+    if ww(in st, 7) != 0 || irq {
+        return 3;
+    }
+    if iter {
+        return 4;
+    }
+    0
+}
+
+fn region_name(inout m: ChunkSeq[u8], why: u64) {
+    match why {
+        1 => lit(inout m, "bpf_preempt_disable-ed region"),
+        2 => lit(inout m, "bpf_rcu_read_lock-ed region"),
+        3 => lit(inout m, "bpf_local_irq_save-ed region"),
+        _ => lit(inout m, "live bpf_iter_num (not destroyed)"),
+    }
+}
+
+fn region_fail(inout v: V, pc: u64, pre: Str, why: u64, post: Str) -> Never eff [Fail[VErr]] {
+    begin(inout v, "kfunc.region");
+    lit(inout v.msg, pre);
+    region_name(inout v.msg, why);
+    lit(inout v.msg, post);
+    raise_at(pc)
+}
+
+fn enter_callback(
+    inout v: V,
+    inout st: St,
+    pc: u64,
+    entry: u64,
+    ret_pc: u64,
+    cb_pc: u64,
+    cb_arg: R
+) eff [Fail[VErr]] {
+    let nf = nframes(in st);
+    if nf >= 8 {
+        fail(inout v, pc, "call.depth", "the call stack of 8 frames is too deep");
+    }
+    let sp = subprog_of(in v, entry);
+    for f in 0..nf {
+        if frame_subprog(in st, f) == sp {
+            fail(inout v, pc, "call.recursion", "recursive callback");
+        }
+    }
+    push_frame(inout st, sp, ret_pc);
+    let f = curf(in st);
+    // r1: the iteration index, r2: the context argument
+    setr(inout st, s_reg(f, 1), r_unknown());
+    setr(inout st, s_reg(f, 2), cb_arg);
+    setr(inout st, s_cbarg(f), cb_arg);
+    setw(inout st, wrapping_add(s_meta(f), 2), 1);
+    setw(inout st, wrapping_add(s_meta(f), 3), cb_pc);
+    setw(inout st, 4, 1);
+}
+
+// `bpf_loop(nr_loops, callback, callback_ctx, flags)`.
+fn bpf_loop(inout v: V, inout st: St, inout alt: St, pc: u64, next: u64) -> Step eff [Fail[VErr]] {
+    let a = scalar_arg(inout v, in st, pc, 1);
+    let cb = arg(inout v, in st, pc, 2);
+    if cb.tag != 3 {
+        arg_fail(inout v, pc, 2, ": expected a callback (BPF_PSEUDO_FUNC), got ", cb);
+    }
+    let entry = cb.x;
+    let a3 = arg(inout v, in st, pc, 3);
+    let ok3 = a3.tag == 6 || (a3.tag == 1 && is_const(a3.var) && a3.var.umin == 0);
+    if !ok3 {
+        arg_fail(inout v, pc, 3, ": expected a stack pointer or NULL, got ", a3);
+    }
+    if const_arg(inout v, in st, pc, 4) != 0 {
+        fail(inout v, pc, "call.arg_type", "bpf_loop flags must be 0");
+    }
+    if ww(in st, 2) > 0 {
+        fail(
+            inout v,
+            pc,
+            "kfunc.preempt_region",
+            "bpf_loop inside a bpf_preempt_disable region is not supported"
+        );
+    }
+    let why = kfunc_region(in st, nframes(in st));
+    if why != 0 {
+        region_fail(inout v, pc, "bpf_loop inside a ", why, " is not supported");
+    }
+    copy_state(inout alt, in st);
+    clobber_args(inout alt);
+    set(inout alt, 0, r_unknown());
+    enter_callback(inout v, inout st, pc, entry, next, pc, a3);
+    Step::Fork(next, entry)
+}
+
+fn kfunc_slot(inout v: V, in st: St, pc: u64, what: Str, creates: bool)
+    -> (u64, u64) eff [Fail[VErr]] {
+    let a = arg(inout v, in st, pc, 1);
+    if a.tag != 6 {
+        begin(inout v, "kfunc.arg_type");
+        lit(inout v.msg, what);
+        lit(inout v.msg, ": arg #0 must be a pointer to the stack");
+        raise_at(pc);
+    }
+    let off = a.off;
+    if wrapping_add(a.x, 1) != nframes(in st) || bits(off) & 7 != 0 || off < -512 || off > -8 {
+        begin(inout v, "kfunc.arg_type");
+        lit(inout v.msg, what);
+        lit(inout v.msg, ": arg #0 must be an aligned 8-byte slot of the current frame, got fp");
+        idec(inout v.msg, off);
+        raise_at(pc);
+    }
+    let sp = frame_subprog(in st, a.x);
+    bump_depth(inout v, sp, wrapping_sub(0, bits(off)));
+    let at = shr(bits(wrapping_add(off, 512)), 3);
+    if creates && is_kfunc_object(rr(in st, s_slot(a.x, at))) {
+        begin(inout v, "kfunc.slot_in_use");
+        lit(inout v.msg, what);
+        lit(inout v.msg, ": the slot already holds a live iterator or irq flag");
+        raise_at(pc);
+    }
+    (a.x, at)
+}
+
+fn kfunc_code(in v: V, pc: u64) -> u64 {
+    let n = shr(v.kf.len(), 2);
+    for i in 0..n {
+        if sq(in v.kf, wrapping_mul(i, 4)) == pc {
+            return i;
+        }
+    }
+    none()
+}
+
+// A kfunc call (`CALL` with `src = 2`), named by `Program::kfuncs`.
+fn kfunc(inout v: V, inout st: St, inout alt: St, pc: u64, next: u64) -> Step eff [Fail[VErr]] {
+    let k = kfunc_code(in v, pc);
+    if k == none() {
+        fail(inout v, pc, "call.kfunc_unknown", "kfunc call without a name (Program::kfuncs)");
+    }
+    if !v.gpl {
+        fail(inout v, pc, "kfunc.license", "kernel functions need a GPL-compatible license");
+    }
+    let code = sq(in v.kf, wrapping_add(wrapping_mul(k, 4), 1));
+    let mut ret = r_none();
+    match code {
+        0 => {
+            let p = ww(in st, 2);
+            if p == 4294967295 {
+                fail(inout v, pc, "kfunc.unbalanced", "bpf_preempt_disable nesting overflow");
+            }
+            setw(inout st, 2, wrapping_add(p, 1));
+        },
+        1 => {
+            let p = ww(in st, 2);
+            if p == 0 {
+                fail(
+                    inout v,
+                    pc,
+                    "kfunc.unbalanced",
+                    "unmatched attempt to enable preemption (bpf_preempt_enable without bpf_preempt_disable)"
+                );
+            }
+            setw(inout st, 2, wrapping_sub(p, 1));
+        },
+        2 => {
+            if ww(in st, 3) != 0 {
+                fail(
+                    inout v,
+                    pc,
+                    "kfunc.rcu_nested",
+                    "nested rcu read lock (kernel function bpf_rcu_read_lock)"
+                );
+            }
+            setw(inout st, 3, 1);
+        },
+        3 => {
+            if ww(in st, 3) == 0 {
+                fail(
+                    inout v,
+                    pc,
+                    "kfunc.unbalanced",
+                    "unmatched rcu read unlock (kernel function bpf_rcu_read_unlock)"
+                );
+            }
+            setw(inout st, 3, 0);
+        },
+        4 => {
+            let (frame, at) = kfunc_slot(inout v, in st, pc, "bpf_local_irq_save", true);
+            let id = fresh_id(inout st);
+            setr(inout st, s_slot(frame, at), mk(18, id, 0, 0, 0, zs()));
+            st.ws.push(id);
+            let cnt = ww(in st, 7);
+            setw(inout st, 7, wrapping_add(cnt, 1));
+        },
+        5 => {
+            let (frame, at) = kfunc_slot(inout v, in st, pc, "bpf_local_irq_restore", false);
+            let slot = rr(in st, s_slot(frame, at));
+            if slot.tag != 18 {
+                fail(
+                    inout v,
+                    pc,
+                    "kfunc.arg_type",
+                    "expected an irq flag saved by bpf_local_irq_save"
+                );
+            }
+            let nirq = ww(in st, 7);
+            let last = if nirq > 0 {
+                ww(in st, wrapping_sub(st.ws.len(), 1))
+            } else {
+                0
+            };
+            if nirq == 0 || last != slot.x {
+                fail(inout v, pc, "kfunc.irq_order", "cannot restore irq state out of order");
+            }
+            st.ws.truncate(wrapping_sub(st.ws.len(), 1));
+            setw(inout st, 7, wrapping_sub(nirq, 1));
+            setr(inout st, s_slot(frame, at), r_bytes(0));
+        },
+        6 => {
+            let (frame, at) = kfunc_slot(inout v, in st, pc, "bpf_iter_num_new", true);
+            let a = scalar_arg(inout v, in st, pc, 2);
+            let b = scalar_arg(inout v, in st, pc, 3);
+            let id = fresh_id(inout st);
+            setr(inout st, s_slot(frame, at), mk(17, id, 0, 0, 0, zs()));
+            // 0, -EINVAL or -E2BIG; the iterator is usable either way
+            ret = r_unknown();
+        },
+        7 => {
+            let (frame, at) = kfunc_slot(inout v, in st, pc, "bpf_iter_num_next", false);
+            let slot = rr(in st, s_slot(frame, at));
+            if slot.tag != 17 {
+                fail(inout v, pc, "kfunc.arg_type", "expected an initialized iter_num as arg #0");
+            }
+            // NULL and the iterator drained, or (while active) the current
+            // value; a drained iterator stays drained
+            copy_state(inout alt, in st);
+            setr(inout alt, s_slot(frame, at), mk(17, slot.x, 1, slot.z, 0, zs()));
+            clobber_call(inout alt, r_scalar(scalar_konst(0)));
+            if slot.y == 1 {
+                copy_state(inout st, in alt);
+                return Step::Next(next);
+            }
+            let depth = if slot.z >= 4294967295 {
+                4294967295
+            } else {
+                wrapping_add(slot.z, 1)
+            };
+            setr(inout st, s_slot(frame, at), mk(17, slot.x, 0, depth, 0, zs()));
+            clobber_call(inout st, mk(12, 4, slot.x, 0, 0, zs()));
+            return Step::Fork(next, next);
+        },
+        8 => {
+            let (frame, at) = kfunc_slot(inout v, in st, pc, "bpf_iter_num_destroy", false);
+            let slot = rr(in st, s_slot(frame, at));
+            if slot.tag != 17 {
+                fail(inout v, pc, "kfunc.arg_type", "expected an initialized iter_num as arg #0");
+            }
+            let id = slot.x;
+            setr(inout st, s_slot(frame, at), r_bytes(0));
+            // pointers into the destroyed iterator's state die with it
+            let nf = nframes(in st);
+            let eleven: u64 = 11;
+            let slots: u64 = 64;
+            for f in 0..nf {
+                for i in 0..eleven {
+                    let r = rr(in st, s_reg(f, i));
+                    if r.tag == 12 && r.y == id {
+                        setr(inout st, s_reg(f, i), r_none());
+                        setw(inout st, link_at(f, i), 0);
+                    }
+                }
+                for j in 0..slots {
+                    let s = rr(in st, s_slot(f, j));
+                    if s.tag == 12 && s.y == id {
+                        setr(inout st, s_slot(f, j), r_bytes(0));
+                    }
+                }
+            }
+        },
+        _ => {
+            begin(inout v, "call.kfunc_unsupported");
+            lit(inout v.msg, "kfunc ");
+            let off = sq(in v.kf, wrapping_add(wrapping_mul(k, 4), 2));
+            let len = sq(in v.kf, wrapping_add(wrapping_mul(k, 4), 3));
+            text_range(inout v.msg, in v.text, off, len);
+            lit(inout v.msg, " is not supported");
+            raise_at(pc);
+        },
+    }
+    clobber_call(inout st, ret);
+    Step::Next(next)
+}
+
+fn map_kind_fail(inout v: V, pc: u64, msg: Str) -> Never eff [Fail[VErr]] {
+    fail(inout v, pc, "call.arg_type", msg)
+}
+
+fn ctx_arg(inout v: V, in st: St, pc: u64, msg: Str) eff [Fail[VErr]] {
+    if arg(inout v, in st, pc, 1).tag != 2 {
+        fail(inout v, pc, "call.arg_type", msg);
+    }
+}
+
+fn helper(inout v: V, inout st: St, pc: u64, id: i32) eff [Fail[VErr]] {
+    let mut ret = r_unknown();
+    match id {
+        1 => {
+            let map = helper_map(inout v, in st, pc, id);
+            let key = arg(inout v, in st, pc, 2);
+            let size1 = map_word(in v, map, 1);
+            check_mem_read(inout v, in st, pc, key, size1, "map key");
+            let nid = fresh_id(inout st);
+            ret = mk(9, map, nid, 0, 0, zs());
+        },
+        2 => {
+            let map = helper_map(inout v, in st, pc, id);
+            let key = arg(inout v, in st, pc, 2);
+            let size1 = map_word(in v, map, 1);
+            check_mem_read(inout v, in st, pc, key, size1, "map key");
+            let val = arg(inout v, in st, pc, 3);
+            let size2 = map_word(in v, map, 2);
+            check_mem_read(inout v, in st, pc, val, size2, "map value");
+            let s = scalar_arg(inout v, in st, pc, 4);
+        },
+        3 => {
+            let map = helper_map(inout v, in st, pc, id);
+            let key = arg(inout v, in st, pc, 2);
+            let size1 = map_word(in v, map, 1);
+            check_mem_read(inout v, in st, pc, key, size1, "map key");
+            let t = map_word(in v, map, 0);
+            if t == 2 || t == 6 || t == 3 {
+                fail(inout v, pc, "call.arg_type", "bpf_map_delete_elem on an array map");
+            }
+        },
+        5 => {},
+        14 => {},
+        15 => {},
+        16 => {
+            let size = const_arg(inout v, in st, pc, 2);
+            if size > 4294967295 {
+                fail(inout v, pc, "call.arg_type", "comm buffer size too large");
+            }
+            let buf = arg(inout v, in st, pc, 1);
+            check_mem_write(inout v, inout st, pc, buf, size, "comm buffer");
+        },
+        12 => {
+            ctx_arg(inout v, in st, pc, "r1 must be the context");
+            let map = map_arg(inout v, in st, pc, 2);
+            if map_word(in v, map, 0) != 3 {
+                map_kind_fail(inout v, pc, "bpf_tail_call needs a program array");
+            }
+            let s = scalar_arg(inout v, in st, pc, 3);
+            if ww(in st, 5) > 0 {
+                begin(inout v, "call.tail_call_ref");
+                lit(inout v.msg, "tail_call would lead to reference leak (id=");
+                dec(inout v.msg, ref_word(in st, 0, 0));
+                lit(inout v.msg, " acquired at insn ");
+                dec(inout v.msg, ref_word(in st, 0, 2));
+                lit(inout v.msg, ")");
+                raise_at(pc);
+            }
+            if ww(in st, 2) > 0 {
+                fail(
+                    inout v,
+                    pc,
+                    "kfunc.preempt_region",
+                    "tail_call cannot be used inside a bpf_preempt_disable region"
+                );
+            }
+            let why = kfunc_region(in st, 0);
+            if why != 0 {
+                region_fail(inout v, pc, "tail_call cannot be used with a ", why, "");
+            }
+            if nsub(in v) > 1 {
+                fail(
+                    inout v,
+                    pc,
+                    "call.tail_call_subprogs",
+                    "tail calls in programs with subprograms or callbacks are not supported"
+                );
+            }
+            // on success control never returns; on failure execution
+            // continues with r0 unreadable (RET_VOID)
+            ret = r_none();
+        },
+        7 => {
+            ret = r_scalar(scalar_unknown_bits(32));
+        },
+        8 => {
+            ret = r_scalar(scalar_unknown_bits(32));
+        },
+        44 => {
+            ctx_arg(inout v, in st, pc, "r1 must be the xdp_md context");
+            let s = scalar_arg(inout v, in st, pc, 2);
+            // every packet pointer is invalidated (`clear_all_pkt_pointers`)
+            for_each_value(inout st, 1, 0, 0);
+            clear_ranges(inout st);
+        },
+        131 => {
+            let map = map_arg(inout v, in st, pc, 1);
+            if map_word(in v, map, 0) != 27 {
+                map_kind_fail(inout v, pc, "bpf_ringbuf_reserve needs a ringbuf map");
+            }
+            let size = const_arg(inout v, in st, pc, 2);
+            if size == 0 || size > shr(map_word(in v, map, 3), 1) {
+                begin(inout v, "call.arg_type");
+                lit(inout v.msg, "invalid ringbuf record size ");
+                dec(inout v.msg, size);
+                raise_at(pc);
+            }
+            if const_arg(inout v, in st, pc, 3) != 0 {
+                fail(inout v, pc, "call.arg_type", "bpf_ringbuf_reserve flags must be 0");
+            }
+            let ref_id = fresh_id(inout st);
+            let cf = curf(in st);
+            push_ref(inout st, ref_id, 0, pc, cf);
+            let nid = fresh_id(inout st);
+            ret = mk(11, size & 4294967295, nid, ref_id, 0, zs());
+        },
+        132 => {
+            ret = ringbuf_release(inout v, inout st, pc);
+        },
+        133 => {
+            ret = ringbuf_release(inout v, inout st, pc);
+        },
+        130 => {
+            let map = map_arg(inout v, in st, pc, 1);
+            if map_word(in v, map, 0) != 27 {
+                map_kind_fail(inout v, pc, "bpf_ringbuf_output needs a ringbuf map");
+            }
+            let size = const_arg(inout v, in st, pc, 3);
+            let data = arg(inout v, in st, pc, 2);
+            if size > 4294967295 {
+                fail(inout v, pc, "call.arg_type", "ringbuf output size too large");
+            }
+            check_mem_read(inout v, in st, pc, data, size, "ringbuf output data");
+            let s = scalar_arg(inout v, in st, pc, 4);
+        },
+        84 => {
+            ctx_arg(inout v, in st, pc, "r1 must be the xdp_md context");
+            let size = const_arg(inout v, in st, pc, 3);
+            if size != 12 && size != 36 {
+                begin(inout v, "call.arg_type");
+                lit(inout v.msg, "invalid tuple size ");
+                dec(inout v.msg, size);
+                raise_at(pc);
+            }
+            let tuple = arg(inout v, in st, pc, 2);
+            check_mem_read(inout v, in st, pc, tuple, size, "socket tuple");
+            let s = scalar_arg(inout v, in st, pc, 4);
+            if const_arg(inout v, in st, pc, 5) != 0 {
+                fail(inout v, pc, "call.arg_type", "bpf_sk_lookup_tcp flags must be 0");
+            }
+            let ref_id = fresh_id(inout st);
+            let cf = curf(in st);
+            push_ref(inout st, ref_id, 1, pc, cf);
+            let nid = fresh_id(inout st);
+            ret = mk(14, 0, nid, ref_id, 0, zs());
+        },
+        86 => {
+            let p = arg(inout v, in st, pc, 1);
+            if p.tag != 13 {
+                null_name_fail(
+                    inout v,
+                    pc,
+                    "ref.release_invalid",
+                    "r1 must be an acquired socket, got ",
+                    p,
+                    ""
+                );
+            }
+            release(inout v, inout st, pc, p.z);
+        },
+        _ => {
+            begin(inout v, "call.unknown_helper");
+            lit(inout v.msg, "helper ");
+            idec(inout v.msg, widen_i64(id));
+            lit(inout v.msg, " is not supported");
+            raise_at(pc);
+        },
+    }
+    // void helpers (ringbuf submit/discard) leave r0 unreadable, as the
+    // kernel's RET_VOID does
+    clobber_call(inout st, ret);
+}
+
+// The map argument of bpf_map_{lookup,update,delete}_elem.
+fn helper_map(inout v: V, in st: St, pc: u64, id: i32) -> u64 eff [Fail[VErr]] {
+    let map = map_arg(inout v, in st, pc, 1);
+    let t = map_word(in v, map, 0);
+    if t == 27 {
+        begin(inout v, "call.arg_type");
+        lit(inout v.msg, "helper ");
+        idec(inout v.msg, widen_i64(id));
+        lit(inout v.msg, " cannot be used with ringbuf map ");
+        map_name(inout v, map);
+        raise_at(pc);
+    }
+    if t == 3 {
+        begin(inout v, "call.arg_type");
+        lit(inout v.msg, "program array ");
+        map_name(inout v, map);
+        lit(inout v.msg, " is only usable with bpf_tail_call");
+        raise_at(pc);
+    }
+    map
+}
+
+fn ringbuf_release(inout v: V, inout st: St, pc: u64) -> R eff [Fail[VErr]] {
+    let p = arg(inout v, in st, pc, 1);
+    if p.tag != 10 {
+        null_name_fail(
+            inout v,
+            pc,
+            "ref.release_invalid",
+            "r1 must be a reserved ringbuf record, got ",
+            p,
+            ""
+        );
+    }
+    if p.off != 0 {
+        fail(
+            inout v,
+            pc,
+            "ref.release_offset",
+            "r1 must have zero offset when passed to release func"
+        );
+    }
+    let s = scalar_arg(inout v, in st, pc, 2);
+    release(inout v, inout st, pc, p.z);
+    r_none()
+}
+
+// ---------------------------------------------------------------------------
+// Exit and branches.
+
+fn points_into(r: R, dying: u64) -> bool {
+    r.tag == 6 && r.x == dying
+}
+
+fn exit(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr]] {
+    let r0 = read(inout v, in st, pc, 0);
+    let depth = curf(in st);
+    if depth == 0 {
+        if r0.tag != 1 {
+            null_name_fail(
+                inout v,
+                pc,
+                "exit.r0_not_scalar",
+                "R0 at program exit is ",
+                r0,
+                ", not a scalar"
+            );
+        }
+        if ww(in st, 5) > 0 {
+            begin(inout v, "ref.leak");
+            lit(inout v.msg, "Unreleased reference id=");
+            dec(inout v.msg, ref_word(in st, 0, 0));
+            if ref_word(in st, 0, 1) == 0 {
+                lit(inout v.msg, " (Ringbuf) acquired at insn ");
+            } else {
+                lit(inout v.msg, " (Socket) acquired at insn ");
+            }
+            dec(inout v.msg, ref_word(in st, 0, 2));
+            raise_at(pc);
+        }
+        if ww(in st, 2) > 0 {
+            fail(
+                inout v,
+                pc,
+                "kfunc.preempt_region",
+                "BPF_EXIT instruction in main prog cannot be used inside bpf_preempt_disable-ed region"
+            );
+        }
+        let why = kfunc_region(in st, 0);
+        if why != 0 {
+            region_fail(
+                inout v,
+                pc,
+                "BPF_EXIT instruction in main prog cannot be used with a ",
+                why,
+                ""
+            );
+        }
+        return Step::Done;
+    }
+    if ww(in st, 2) > 0 {
+        fail(
+            inout v,
+            pc,
+            "kfunc.preempt_region",
+            "returning from a subprogram inside a bpf_preempt_disable region is not supported"
+        );
+    }
+    let why = kfunc_region(in st, depth);
+    if why != 0 {
+        region_fail(inout v, pc, "returning from a subprogram with a ", why, " is not supported");
+    }
+    let nrefs = ww(in st, 5);
+    for i in 0..nrefs {
+        if ref_word(in st, i, 3) == depth {
+            begin(inout v, "ref.leak");
+            lit(inout v.msg, "reference id=");
+            dec(inout v.msg, ref_word(in st, i, 0));
+            lit(inout v.msg, " acquired at insn ");
+            dec(inout v.msg, ref_word(in st, i, 2));
+            lit(inout v.msg, " is still held when its subprogram returns");
+            raise_at(pc);
+        }
+    }
+    // nothing may keep pointing into the dying frame
+    if points_into(r0, depth) {
+        fail(inout v, pc, "exit.stack_ptr_escape", "returning a pointer to the callee stack");
+    }
+    let eleven: u64 = 11;
+    let slots: u64 = 64;
+    for f in 0..depth {
+        let mut bad = false;
+        for i in 0..eleven {
+            if points_into(rr(in st, s_reg(f, i)), depth) {
+                bad = true;
+            }
+        }
+        for k in 0..slots {
+            if points_into(rr(in st, s_slot(f, k)), depth) {
+                bad = true;
+            }
+        }
+        if bad {
+            fail(
+                inout v,
+                pc,
+                "exit.stack_ptr_escape",
+                "a caller holds a pointer to the callee stack"
+            );
+        }
+    }
+    let m = s_meta(depth);
+    let callee_sub = ww(in st, m);
+    let ret_pc = ww(in st, wrapping_add(m, 1));
+    let has_cb = ww(in st, wrapping_add(m, 2)) == 1;
+    let cb_pc = ww(in st, wrapping_add(m, 3));
+    let callee_wide = ww(in st, wide_regs_at(depth));
+    let cb_arg = rr(in st, s_cbarg(depth));
+    pop_frame(inout st);
+    let caller = curf(in st);
+    if has_cb {
+        if callee_wide & 1 != 0 {
+            fail(
+                inout v,
+                pc,
+                "loop.widened_precise",
+                "a widened loop scalar is a callback's return value"
+            );
+        }
+        if !(r0.tag == 1 && r0.var.umax <= 1) {
+            begin(inout v, "exit.callback_ret");
+            lit(inout v.msg, "bpf_loop callback must return 0 or 1, R0 is ");
+            if r0.tag == 1 {
+                lit(inout v.msg, "in [");
+                dec(inout v.msg, r0.var.umin);
+                lit(inout v.msg, ", ");
+                dec(inout v.msg, r0.var.umax);
+                lit(inout v.msg, "]");
+            } else {
+                type_name(inout v.msg, r0.tag);
+            }
+            raise_at(pc);
+        }
+        // another iteration, or back to the caller with r0 = the iteration
+        // count
+        copy_state(inout alt, in st);
+        let entry = sq(in v.sub_start, callee_sub);
+        enter_callback(inout v, inout alt, pc, entry, ret_pc, cb_pc, cb_arg);
+        setr(inout st, s_reg(caller, 0), r_unknown());
+        clear_call_regs(inout st, caller);
+        return Step::Fork(entry, ret_pc);
+    }
+    setr(inout st, s_reg(caller, 0), r0);
+    clear_call_regs(inout st, caller);
+    let w = ww(in st, wide_regs_at(caller));
+    setw(inout st, wide_regs_at(caller), (w & ~63) | (callee_wide & 1));
+    Step::Jump(ret_pc)
+}
+
+// r1-r5 become unreadable and r0-r5 lose their links.
+fn clear_call_regs(inout st: St, f: u64) {
+    let six: u64 = 6;
+    for i in 0..six {
+        if i > 0 {
+            setr(inout st, s_reg(f, i), r_none());
+        }
+        setw(inout st, link_at(f, i), 0);
+    }
+}
+
+// Resolve every copy of a maybe-null pointer (same id) on one branch.
+fn mark_null(inout st: St, p: R, is_null: bool) {
+    let id = null_id(p);
+    let b: u64 = if is_null {
+        1
+    } else {
+        0
+    };
+    for_each_value(inout st, 2, id, b);
+    if is_null && has_ref(p) {
+        // a failed acquire holds nothing (`release_reference_state`)
+        let rid = p.z;
+        let mut i: u64 = 0;
+        loop {
+            if !(i < ww(in st, 5)) {
+                break;
+            }
+            if ref_word(in st, i, 0) == rid {
+                remove_ref(inout st, i);
+            } else {
+                i = wrapping_add(i, 1);
+            }
+        }
+    }
+}
+
+fn narrow_pair(inout st: St, dst: u64, has_src: bool, src: u64, xy: (Scalar, Scalar)) {
+    let (x1, y1) = xy;
+    set_narrowed(inout st, dst, x1);
+    if has_src {
+        set_narrowed(inout st, src, y1);
+    }
+}
+
+fn is_eq_ne(op: JmpOp) -> bool {
+    match op {
+        JmpOp::Eq => true,
+        JmpOp::Ne => true,
+        _ => false,
+    }
+}
+
+fn is_eq(op: JmpOp) -> bool {
+    match op {
+        JmpOp::Eq => true,
+        _ => false,
+    }
+}
+
+fn is_zero(r: R) -> bool {
+    r.tag == 1 && is_const(r.var) && r.var.umin == 0
+}
+
+fn cond(
+    inout v: V,
+    inout st: St,
+    inout alt: St,
+    pc: u64,
+    wide: bool,
+    op: JmpOp,
+    dst: u64,
+    src: Operand,
+    target: u64,
+    fall: u64
+) -> Step eff [Fail[VErr]] {
+    let a = read(inout v, in st, pc, dst);
+    let b = operand(inout v, in st, pc, wide, src);
+    let (has_src, sr) = match src {
+        Operand::Reg(r) => (true, widen_u64(r)),
+        Operand::Imm(i) => (false, 0),
+    };
+    let taint = tainted(in st, dst) || (has_src && tainted(in st, sr));
+    if a.tag == 1 && b.tag == 1 {
+        let t = refine_jmp(op, wide, a.var, b.var, true);
+        let f = refine_jmp(op, wide, a.var, b.var, false);
+        let ht = match t {
+            Option::Some(p) => true,
+            Option::None => false,
+        };
+        let hf = match f {
+            Option::Some(p) => true,
+            Option::None => false,
+        };
+        // a decided branch makes the kernel mark both operands precise
+        if taint && (!ht || !hf) {
+            fail(inout v, pc, "loop.widened_precise", "a widened loop scalar decides a branch");
+        }
+        match t {
+            Option::Some(tp) => match f {
+                Option::Some(fp) => {
+                    copy_state(inout alt, in st);
+                    narrow_pair(inout alt, dst, has_src, sr, tp);
+                    narrow_pair(inout st, dst, has_src, sr, fp);
+                    return Step::Fork(target, fall);
+                },
+                Option::None => {
+                    narrow_pair(inout st, dst, has_src, sr, tp);
+                    return Step::Jump(target);
+                },
+            },
+            Option::None => match f {
+                Option::Some(fp) => {
+                    narrow_pair(inout st, dst, has_src, sr, fp);
+                    return Step::Next(fall);
+                },
+                Option::None => {
+                    fail(inout v, pc, "internal.no_successor", "both branches infeasible");
+                },
+            },
+        }
+    }
+    // (p, 0) or (0, p) with p maybe-null, Eq/Ne
+    let null_p = if is_or_null(a) && b.tag == 1 {
+        is_zero(b) && is_eq_ne(op)
+    } else if a.tag == 1 && is_or_null(b) {
+        is_zero(a) && is_eq_ne(op)
+    } else {
+        false
+    };
+    if null_p {
+        let p = if a.tag == 1 {
+            b
+        } else {
+            a
+        };
+        if !wide {
+            fail(inout v, pc, "jmp.pointer_compare", "32-bit null check of a pointer");
+        }
+        // taken: the null state for Eq, the non-null one for Ne
+        copy_state(inout alt, in st);
+        mark_null(inout alt, p, is_eq(op));
+        mark_null(inout st, p, !is_eq(op));
+        return Step::Fork(target, fall);
+    }
+    // a pointer known to be non-NULL compared with 0: the branch is decided
+    let rdonly = (a.tag == 12 && is_zero(b)) || (a.tag == 1 && is_zero(a) && b.tag == 12);
+    if rdonly && wide && is_eq_ne(op) {
+        if is_eq(op) {
+            return Step::Next(fall);
+        }
+        return Step::Jump(target);
+    }
+    if (a.tag == 4 && b.tag == 5) || (a.tag == 5 && b.tag == 4) {
+        if !wide {
+            fail(inout v, pc, "jmp.pointer_compare", "32-bit packet pointer comparison");
+        }
+        let p = if a.tag == 4 {
+            a
+        } else {
+            b
+        };
+        let o = if a.tag == 5 {
+            swap_op(op)
+        } else {
+            op
+        };
+        // `op` now reads `pkt op pkt_end`
+        // `find_good_pkt_pointers`: no range unless the whole variable plus
+        // constant offset stays within MAX_PACKET_OFF
+        let good = p
+            .off
+            >= 0
+            && p
+            .off
+            <= 65535
+            && p
+            .var
+            .umax
+            <= 65535
+            && wrapping_add(p.var.umax, bits(p.off))
+            <= 65535;
+        let kind = match o {
+            JmpOp::Gt => 1,
+            JmpOp::Ge => 1,
+            JmpOp::Lt => 2,
+            JmpOp::Le => 2,
+            JmpOp::Eq => 0,
+            JmpOp::Ne => 0,
+            _ => 3,
+        };
+        if kind == 3 {
+            fail(
+                inout v,
+                pc,
+                "jmp.pointer_compare",
+                "signed or bit-test comparison of packet pointers"
+            );
+        }
+        copy_state(inout alt, in st);
+        if good && kind == 1 {
+            set_range(inout st, p.x, bits(p.off));
+        }
+        if good && kind == 2 {
+            set_range(inout alt, p.x, bits(p.off));
+        }
+        return Step::Fork(target, fall);
+    }
+    begin(inout v, "jmp.pointer_compare");
+    lit(inout v.msg, "comparison between ");
+    type_name(inout v.msg, a.tag);
+    lit(inout v.msg, " and ");
+    type_name(inout v.msg, b.tag);
+    lit(inout v.msg, " prohibited");
+    raise_at(pc)
+}
+
+// ---------------------------------------------------------------------------
+// One instruction.
+
+fn step(inout v: V, inout st: St, inout alt: St, pc: u64) -> Step eff [Fail[VErr]] {
+    let insn = insn_at(in v, pc);
+    let next = wrapping_add(pc, slots_of(insn));
+    match insn {
+        Insn::Alu {
+            wide,
+            op,
+            dst,
+            src
+        }
+        => {
+            alu(inout v, inout st, pc, wide, op, widen_u64(dst), src);
+            Step::Next(next)
+        },
+        Insn::Endian {
+            kind,
+            bits,
+            dst
+        }
+        => {
+            let d = widen_u64(dst);
+            write_check(inout v, pc, d);
+            let s = read(inout v, in st, pc, d);
+            if s.tag != 1 {
+                begin(inout v, "alu.pointer_arith");
+                lit(inout v.msg, "byte swap on pointer ");
+                reg_name(inout v.msg, d);
+                raise_at(pc);
+            }
+            let width = widen_u32(bits);
+            let r = if is_const(s.var) {
+                scalar_konst(endian(kind, bits, s.var.umin))
+            } else {
+                match kind {
+                    Endian::ToLe => scalar_truncate(s.var, width),
+                    _ => scalar_unknown_bits(width),
+                }
+            };
+            set(inout st, d, r_scalar(r));
+            Step::Next(next)
+        },
+        Insn::Ja {
+            off
+        }
+        => Step::Jump(target(inout v, pc, widen_i64(off))),
+        Insn::Jcond {
+            wide,
+            op,
+            dst,
+            src,
+            off
+        }
+        => {
+            let t = target(inout v, pc, widen_i64(off));
+            cond(inout v, inout st, inout alt, pc, wide, op, widen_u64(dst), src, t, next)
+        },
+        Insn::Call(c) => match c {
+            CallTarget::Helper(id) => {
+                if !allowed(v.ptype, id) {
+                    begin(inout v, "call.helper_not_allowed");
+                    if helper_name(inout v.msg, id) {
+                        lit(inout v.msg, " is not allowed in ");
+                        prog_name(inout v.msg, v.ptype);
+                        lit(inout v.msg, " programs");
+                    } else {
+                        begin(inout v, "call.unknown_helper");
+                        lit(inout v.msg, "helper ");
+                        idec(inout v.msg, widen_i64(id));
+                        lit(inout v.msg, " is not supported");
+                    }
+                    raise_at(pc);
+                }
+                if id == 181 {
+                    return bpf_loop(inout v, inout st, inout alt, pc, next);
+                }
+                helper(inout v, inout st, pc, id);
+                Step::Next(next)
+            },
+            CallTarget::Local(off) => {
+                let t = target(inout v, pc, widen_i64(off));
+                let nf = nframes(in st);
+                if nf >= 8 {
+                    fail(inout v, pc, "call.depth", "the call stack of 8 frames is too deep");
+                }
+                let sp = subprog_of(in v, t);
+                for f in 0..nf {
+                    if frame_subprog(in st, f) == sp {
+                        fail(inout v, pc, "call.recursion", "recursive call");
+                    }
+                }
+                let caller = curf(in st);
+                let wide = ww(in st, wide_regs_at(caller));
+                push_frame(inout st, sp, next);
+                let callee = curf(in st);
+                let six: u64 = 6;
+                for i in 1..six {
+                    let r = rr(in st, s_reg(caller, i));
+                    setr(inout st, s_reg(callee, i), r);
+                }
+                setw(inout st, wide_regs_at(callee), wide & 62);
+                Step::Jump(t)
+            },
+            CallTarget::Kfunc(k) => kfunc(inout v, inout st, inout alt, pc, next),
+        },
+        Insn::Exit => exit(inout v, inout st, inout alt, pc),
+        Insn::LdImm64 {
+            dst,
+            imm
+        }
+        => {
+            let d = widen_u64(dst);
+            write_check(inout v, pc, d);
+            let val = match imm {
+                Imm64::Value(x) => r_scalar(scalar_konst(x)),
+                Imm64::MapFd(i) => {
+                    if i < 0 || widen_u64(wrapping_u32(i)) >= nmaps(in v) {
+                        begin(inout v, "ld_imm64.bad_map");
+                        lit(inout v.msg, "no map ");
+                        idec(inout v.msg, widen_i64(i));
+                        raise_at(pc);
+                    }
+                    mk(7, widen_u64(wrapping_u32(i)), 0, 0, 0, zs())
+                },
+                Imm64::Pseudo {
+                    src,
+                    imm_lo,
+                    imm_hi
+                }
+                => {
+                    if src != 4 {
+                        begin(inout v, "insn.unsupported");
+                        lit(inout v.msg, "ld_imm64 pseudo source ");
+                        dec(inout v.msg, widen_u64(src));
+                        lit(inout v.msg, " is not supported");
+                        raise_at(pc);
+                    }
+                    let e = wrapping_add(wrapping_add(signed(pc), 1), widen_i64(imm_lo));
+                    mk(3, bits(e) & 4294967295, 0, 0, 0, zs())
+                },
+            };
+            set(inout st, d, val);
+            Step::Next(next)
+        },
+        Insn::Ldx {
+            size,
+            dst,
+            src,
+            off,
+            sign_extend
+        }
+        => {
+            let d = widen_u64(dst);
+            write_check(inout v, pc, d);
+            let p = read(inout v, in st, pc, widen_u64(src));
+            let mut val = load(inout v, in st, pc, p, off, size);
+            if p.tag == 2 && val.tag == 4 {
+                // like the kernel, a fresh `ctx->data` has no range yet
+                let id = fresh_id(inout st);
+                val = mk(4, id, 0, 0, val.off, val.var);
+            }
+            if sign_extend {
+                if val.tag != 1 {
+                    fail(
+                        inout v,
+                        pc,
+                        "mem.pointer_partial_fill",
+                        "sign-extending load of a spilled pointer"
+                    );
+                }
+                val = r_scalar(
+                    scalar_sext(val.var, wrapping_u32(wrapping_mul(size_bytes(size), 8)))
+                );
+            }
+            set(inout st, d, val);
+            if p.tag == 6 {
+                let at = shr(bits(wrapping_add(wrapping_add(p.off, widen_i64(off)), 512)), 3);
+                let t = ww(in st, wide_slots_at(p.x)) & bit(at) != 0;
+                set_taint(inout st, d, t);
+            }
+            Step::Next(next)
+        },
+        Insn::St {
+            size,
+            dst,
+            off,
+            imm
+        }
+        => {
+            let p = read(inout v, in st, pc, widen_u64(dst));
+            let skb = match v.ptype {
+                ProgramType::SchedCls => true,
+                _ => false,
+            };
+            if p.tag == 2 && skb {
+                fail(
+                    inout v,
+                    pc,
+                    "mem.ctx_st_imm",
+                    "BPF_ST stores into the context are not allowed"
+                );
+            }
+            let val = r_scalar(scalar_konst(wrapping_u64(widen_i64(imm))));
+            store(inout v, inout st, pc, p, off, size, val);
+            taint_slot(inout st, p, off, size, false);
+            Step::Next(next)
+        },
+        Insn::Stx {
+            size,
+            dst,
+            src,
+            off
+        }
+        => {
+            let p = read(inout v, in st, pc, widen_u64(dst));
+            let val = read(inout v, in st, pc, widen_u64(src));
+            store(inout v, inout st, pc, p, off, size, val);
+            let t = tainted(in st, widen_u64(src));
+            taint_slot(inout st, p, off, size, t);
+            Step::Next(next)
+        },
+        Insn::Atomic {
+            size,
+            op,
+            dst,
+            src,
+            off
+        }
+        => {
+            atomic(inout v, inout st, pc, size, op, widen_u64(dst), widen_u64(src), off);
+            Step::Next(next)
+        },
+        Insn::LdLegacy {
+            size,
+            indirect,
+            src,
+            imm
+        }
+        => fail(inout v, pc, "insn.unsupported", "BPF_LD_ABS/BPF_LD_IND are not supported"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path exploration with state pruning.
+
+fn is_ancestor(in v: V, rec: u64, start: u64) -> bool {
+    let mut cur = start;
+    loop {
+        if cur == none() {
+            return false;
+        }
+        if cur == rec {
+            return true;
+        }
+        cur = sq(in v.rec_parent, cur);
+    }
+}
+
+fn finish_path(inout v: V, start: u64) {
+    v.paths = wrapping_add(v.paths, 1);
+    let mut cur = start;
+    loop {
+        if cur == none() {
+            break;
+        }
+        let b = wrapping_sub(sq(in v.rec_branches, cur), 1);
+        v.rec_branches.try_set(cur, b);
+        if b > 0 {
+            break;
+        }
+        cur = sq(in v.rec_parent, cur);
+    }
+}
+
+fn rec_rs_end(in v: V, rid: u64) -> u64 {
+    let nf = sq(in v.pws, sq(in v.rec_ws, rid));
+    wrapping_add(sq(in v.rec_rs, rid), wrapping_mul(nf, 76))
+}
+
+fn rec_ws_end(in v: V, rid: u64) -> u64 {
+    wrapping_add(sq(in v.rec_ws, rid), sq(in v.rec_nws, rid))
+}
+
+// `cur` included in record `rid`.
+fn rec_includes(inout v: V, rid: u64, in cur: St) -> bool {
+    let a = sq(in v.rec_rs, rid);
+    let b = rec_rs_end(in v, rid);
+    let c = sq(in v.rec_ws, rid);
+    let d = rec_ws_end(in v, rid);
+    state_includes(
+        inout v.ids,
+        in v.prs[a..b],
+        in v.pws[c..d],
+        in cur.rs.as_slice(),
+        in cur.ws.as_slice()
+    )
+}
+
+// Record `rid` included in `cur`.
+fn includes_rec(inout v: V, rid: u64, in cur: St) -> bool {
+    let a = sq(in v.rec_rs, rid);
+    let b = rec_rs_end(in v, rid);
+    let c = sq(in v.rec_ws, rid);
+    let d = rec_ws_end(in v, rid);
+    state_includes(
+        inout v.ids,
+        in cur.rs.as_slice(),
+        in cur.ws.as_slice(),
+        in v.prs[a..b],
+        in v.pws[c..d]
+    )
+}
+
+fn rec_iter_depths_differ(in v: V, rid: u64, in cur: St) -> bool {
+    let a = sq(in v.rec_rs, rid);
+    let b = rec_rs_end(in v, rid);
+    let c = sq(in v.rec_ws, rid);
+    let d = rec_ws_end(in v, rid);
+    iter_depths_differ(in v.prs[a..b], in v.pws[c..d], in cur.rs.as_slice(), in cur.ws.as_slice())
+}
+
+// Whether `st`, at a loop head (callback entry or `bpf_iter_num_next`
+// call), is an iteration whose count the kernel bounds at run time.
+fn bounded_iteration(in v: V, pc: u64, rid: u64, in st: St) -> bool {
+    let f = curf(in st);
+    if sqb(in v.cb_entry, pc) && ww(in st, 4) != 0 && ww(in st, wrapping_add(s_meta(f), 2)) == 1 {
+        return true;
+    }
+    if !sqb(in v.iter_next, pc) {
+        return false;
+    }
+    // only an active iterator, the same instance the earlier visit used
+    let r1 = reg(in st, 1);
+    if !(
+        r1
+            .tag
+            == 6
+            && wrapping_add(r1.x, 1)
+            == nframes(in st)
+            && bits(r1.off)
+            & 7
+            == 0
+            && r1
+            .off
+            >= -512
+            && r1
+            .off
+            < 0
+    ) {
+        return false;
+    }
+    let at = shr(bits(wrapping_add(r1.off, 512)), 3);
+    let s = rr(in st, s_slot(f, at));
+    if !(s.tag == 17 && s.y == 0) {
+        return false;
+    }
+    let base = sq(in v.rec_rs, rid);
+    let onf = sq(in v.pws, sq(in v.rec_ws, rid));
+    let of = wrapping_sub(onf, 1);
+    match v.prs.try_get(wrapping_add(base, s_slot(of, at))) {
+        Option::Some(o) => o.tag == 17 && o.x == s.x,
+        Option::None => false,
+    }
+}
+
+fn rec_widen(inout v: V, rid: u64, inout cur: St) -> bool {
+    let a = sq(in v.rec_rs, rid);
+    let b = rec_rs_end(in v, rid);
+    let c = sq(in v.rec_ws, rid);
+    let d = rec_ws_end(in v, rid);
+    widen_scalars(in v.prs[a..b], in v.pws[c..d], inout cur)
+}
+
+// (pruned, new parent)
+fn checkpoint(inout v: V, inout st: St, pc: u64, parent: u64) -> (bool, u64) eff [Fail[VErr]] {
+    let mut widen_from = none();
+    let mut rid = sq(in v.ex_head, pc);
+    loop {
+        if rid == none() {
+            break;
+        }
+        let br = sq(in v.rec_branches, rid);
+        if br == 0 {
+            if rec_includes(inout v, rid, in st) {
+                return (true, parent);
+            }
+        } else if is_ancestor(in v, rid, parent) && rec_includes(inout v, rid, in st) {
+            // a `bpf_loop` callback re-entered (or an active iterator's
+            // next() revisited) with a state its own in-progress earlier
+            // visit covers
+            if bounded_iteration(in v, pc, rid, in st) {
+                return (true, parent);
+            }
+            // the same state again, but an iterator advanced in between: a
+            // bounded loop, not an infinite one
+            if includes_rec(inout v, rid, in st) && !rec_iter_depths_differ(in v, rid, in st) {
+                fail(
+                    inout v,
+                    pc,
+                    "loop.unbounded",
+                    "infinite loop detected: back-edge reaches an identical state"
+                );
+            }
+        } else if v
+            .widen
+            && br
+            > 0
+            && is_ancestor(in v, rid, parent)
+            && bounded_iteration(in v, pc, rid, in st) {
+            widen_from = rid;
+        }
+        rid = sq(in v.rec_next, rid);
+    }
+    if widen_from != none() && rec_widen(inout v, widen_from, inout st) {
+        v.widenings = wrapping_add(v.widenings, 1);
+        let mut r = sq(in v.ex_head, pc);
+        loop {
+            if r == none() {
+                break;
+            }
+            if sq(in v.rec_branches, r)
+                > 0
+                && is_ancestor(in v, r, parent)
+                && rec_includes(inout v, r, in st) {
+                return (true, parent);
+            }
+            r = sq(in v.rec_next, r);
+        }
+    }
+    let count = sq(in v.ex_count, pc);
+    if count < v.max_states {
+        let id = v.rec_next.len();
+        v.rec_next.push(none());
+        v.rec_branches.push(1);
+        v.rec_parent.push(parent);
+        v.rec_rs.push(v.prs.len());
+        v.rec_ws.push(v.pws.len());
+        v.rec_nws.push(st.ws.len());
+        v.prs.extend(in st.rs.as_slice());
+        v.pws.extend(in st.ws.as_slice());
+        if count == 0 {
+            v.ex_head.try_set(pc, id);
+        } else {
+            v.rec_next.try_set(sq(in v.ex_tail, pc), id);
+        }
+        v.ex_tail.try_set(pc, id);
+        v.ex_count.try_set(pc, wrapping_add(count, 1));
+        return (false, id);
+    }
+    (false, parent)
+}
+
+fn round_stack(d: u64) -> u64 {
+    let x = if d < 1 {
+        1
+    } else {
+        d
+    };
+    shl(shr(wrapping_add(x, 31), 5), 5)
+}
+
+fn path_text(inout m: ChunkSeq[u8], in res: ChunkSeq[u64], extra: u64) {
+    lit(inout m, "[");
+    let n = res.len();
+    let two: u64 = 2;
+    for i in two..n {
+        if i > 2 {
+            lit(inout m, ", ");
+        }
+        lit(inout m, "FnId(");
+        dec(inout m, sq(in res, i));
+        lit(inout m, ")");
+    }
+    lit(inout m, "]");
+}
+
+// A pending path's registers, packed: per frame a header entry whose tag
+// is the number e of empty stack slots skipped (the slots below the
+// deepest initialised one; slot 63 is fp-8, so the empty ones come
+// first, as past the end of State's growable stack), then the 11
+// registers, the callback argument and slots e..64, so the work list
+// stays small.
+fn pack_regs(inout out: ChunkSeq[R], in st: St) {
+    let nf = nframes(in st);
+    for f in 0..nf {
+        let base = wrapping_mul(f, 76);
+        let lo = wrapping_add(base, 11);
+        let mut e: u64 = 0;
+        loop {
+            if e == 64 {
+                break;
+            }
+            let x = rr(in st, wrapping_add(lo, e));
+            if x.tag != 16 || x.x != 0 {
+                break;
+            }
+            e = wrapping_add(e, 1);
+        }
+        out.push(mk(e, 0, 0, 0, 0, zs()));
+        out.extend(in st.rs[base..lo]);
+        out.push(rr(in st, wrapping_add(base, 75)));
+        out.extend(in st.rs[wrapping_add(lo, e)..wrapping_add(lo, 64)]);
+    }
+}
+
+// The inverse of `pack_regs` for the packed entries from `at` on; the
+// frame count comes from `st.ws`, restored first.
+fn unpack_regs(inout st: St, in src: ChunkSeq[R], at: u64) {
+    st.rs.clear();
+    let nf = nframes(in st);
+    let mut i = at;
+    for f in 0..nf {
+        let e = gr(in src.as_slice(), i).tag;
+        let regs = wrapping_add(i, 1);
+        st.rs.extend(in src[regs..wrapping_add(regs, 11)]);
+        let cb = gr(in src.as_slice(), wrapping_add(regs, 11));
+        for j in 0..e {
+            st.rs.push(r_bytes(0));
+        }
+        let lo = wrapping_add(regs, 12);
+        let kept = wrapping_sub(64, e);
+        st.rs.extend(in src[lo..wrapping_add(lo, kept)]);
+        st.rs.push(cb);
+        i = wrapping_add(lo, kept);
+    }
+}
+
+fn run(inout v: V) -> u64 eff [Fail[VErr]] {
+    let mut st = new_st();
+    initial_state(inout st);
+    let mut alt = new_st();
+    let mut pc: u64 = 0;
+    let mut parent = none();
+    let mut have = true;
+    loop {
+        if !have {
+            let nw = v.work.len();
+            if nw == 0 {
+                break;
+            }
+            let at = wrapping_sub(nw, 4);
+            pc = sq(in v.work, at);
+            parent = sq(in v.work, wrapping_add(at, 1));
+            let rso = sq(in v.work, wrapping_add(at, 2));
+            let wso = sq(in v.work, wrapping_add(at, 3));
+            st.ws.clear();
+            st.ws.extend(in v.wws[wso..v.wws.len()]);
+            unpack_regs(inout st, in v.wrs, rso);
+            v.wrs.truncate(rso);
+            v.wws.truncate(wso);
+            v.work.truncate(at);
+        }
+        have = false;
+        loop {
+            if sqb(in v.prune, pc) {
+                let (pr, np) = checkpoint(inout v, inout st, pc, parent);
+                parent = np;
+                if pr {
+                    v.pruned = wrapping_add(v.pruned, 1);
+                    finish_path(inout v, parent);
+                    break;
+                }
+            }
+            setw(inout st, 4, 0);
+            v.processed = wrapping_add(v.processed, 1);
+            if v.processed > v.max_insns {
+                begin(inout v, "complexity.limit");
+                lit(inout v.msg, "processed more than ");
+                dec(inout v.msg, v.max_insns);
+                lit(inout v.msg, " insns (unbounded loop or path explosion)");
+                raise_at(pc);
+            }
+            match step(inout v, inout st, inout alt, pc) {
+                Step::Next(n) => {
+                    pc = n;
+                },
+                Step::Jump(n) => {
+                    pc = n;
+                },
+                Step::Fork(t, f) => {
+                    if parent != none() {
+                        let b = wrapping_add(sq(in v.rec_branches, parent), 1);
+                        v.rec_branches.try_set(parent, b);
+                    }
+                    v.work.push(t);
+                    v.work.push(parent);
+                    v.work.push(v.wrs.len());
+                    v.work.push(v.wws.len());
+                    pack_regs(inout v.wrs, in alt);
+                    v.wws.extend(in alt.ws.as_slice());
+                    pc = f;
+                },
+                Step::Done => {
+                    finish_path(inout v, parent);
+                    break;
+                },
+            }
+        }
+    }
+    // static stack check over the call graph
+    let ns = nsub(in v);
+    let mut ids: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut frames: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..ns {
+        ids.push(i);
+        frames.push(wrapping_u32(round_stack(sq(in v.depth, i))));
+    }
+    let mut calls: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for p in 0..v.n {
+        if is_start(in v, p) {
+            match insn_at(in v, p) {
+                Insn::Call(CallTarget::Local(off)) => {
+                    let t = bits(wrapping_add(wrapping_add(signed(p), 1), widen_i64(off)));
+                    calls.push(subprog_of(in v, p));
+                    calls.push(subprog_of(in v, t));
+                },
+                _ => {},
+            }
+        }
+    }
+    // a callback runs on top of the frame that passes it to bpf_loop
+    let nrefs = shr(v.func_refs.len(), 1);
+    for i in 0..nrefs {
+        let at = sq(in v.func_refs, wrapping_mul(i, 2));
+        let entry = sq(in v.func_refs, wrapping_add(wrapping_mul(i, 2), 1));
+        calls.push(subprog_of(in v, at));
+        calls.push(subprog_of(in v, entry));
+    }
+    let none_indirect: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let res = check_stack(
+        in ids.as_slice(),
+        in frames.as_slice(),
+        in calls.as_slice(),
+        in none_indirect.as_slice(),
+        0,
+        512,
+        8
+    );
+    let kind = sq(in res, 0);
+    if kind == 1 {
+        begin(inout v, "stack.limit");
+        lit(inout v.msg, "combined stack ");
+        dec(inout v.msg, sq(in res, 1));
+        lit(inout v.msg, " bytes over call path ");
+        path_text(inout v.msg, in res, 0);
+        lit(inout v.msg, " exceeds 512");
+        raise_at(none());
+    }
+    if kind == 2 {
+        begin(inout v, "call.recursion");
+        lit(inout v.msg, "recursive call path ");
+        path_text(inout v.msg, in res, 0);
+        raise_at(none());
+    }
+    if kind == 3 {
+        begin(inout v, "call.depth");
+        lit(inout v.msg, "call path ");
+        path_text(inout v.msg, in res, 0);
+        lit(inout v.msg, " exceeds 8 frames");
+        raise_at(none());
+    }
+    if kind != 0 {
+        begin(inout v, "call.graph");
+        lit(inout v.msg, "bad call graph node FnId(");
+        dec(inout v.msg, sq(in res, 1));
+        lit(inout v.msg, ")");
+        raise_at(none());
+    }
+    // report: worst stack, then the call edges for the Rust call graph
+    v.work.clear();
+    v.work.push(sq(in res, 1));
+    v.work.extend(in calls.as_slice());
+    sq(in res, 1)
+}
+
+// ---------------------------------------------------------------------------
+// Entry.
+
+pub struct Outcome {
+    // [0, processed, states, paths, pruned, widenings, worst stack,
+    //  subprograms, (entry, stack bytes)..., call edges as (from, to)...]
+    // on acceptance; [1, insn or u64::MAX] on a rejection with `rule` and
+    // `msg`; [2, variant, a, b] on a decode error (0 TruncatedProgram
+    // len, 1 BadRegister pc reg, 2 InvalidOpcode pc code,
+    // 3 ReservedFieldSet pc field, 4 BrokenLdImm64 pc).
+    words: ChunkSeq[u64],
+    rule: ChunkSeq[u8],
+    msg: ChunkSeq[u8],
+    widenings: u64
+}
+
+// A decode error as one word: variant | b << 4 | a << 12.
+fn decode_code(e: DecodeError) -> u64 {
+    match e {
+        DecodeError::TruncatedProgram {
+            len
+        }
+        => shl(widen_u64(len), 12),
+        DecodeError::BadRegister {
+            pc,
+            reg
+        }
+        => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
+        DecodeError::InvalidOpcode {
+            pc,
+            code
+        }
+        => 2 | shl(widen_u64(code), 4) | shl(widen_u64(pc), 12),
+        DecodeError::ReservedFieldSet {
+            pc,
+            field
+        }
+        => 3 | shl(widen_u64(field), 4) | shl(widen_u64(pc), 12),
+        DecodeError::BrokenLdImm64 {
+            pc
+        }
+        => 4 | shl(widen_u64(pc), 12),
+    }
+}
+
+fn decode_outcome(c: u64) -> Outcome {
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    w.push(2);
+    w.push(c & 15);
+    w.push(shr(c, 12));
+    w.push(shr(c, 4) & 255);
+    Outcome {
+        words: w,
+        rule: ChunkSeq::new[u8](),
+        msg: ChunkSeq::new[u8](),
+        widenings: 0
+    }
+}
+
+fn simple_outcome(rule: Str, msg: Str) -> Outcome {
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    w.push(1);
+    w.push(none());
+    let mut r: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    lit(inout r, rule);
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    lit(inout m, msg);
+    Outcome {
+        words: w,
+        rule: r,
+        msg: m,
+        widenings: 0
+    }
+}
+
+fn verify_one(
+    in slots: Slice[RawInsn],
+    ptype: ProgramType,
+    pt_regs: i64,
+    gpl: bool,
+    in maps: Slice[u64],
+    in kf: Slice[u64],
+    in text: Slice[u8],
+    max_insns: u64,
+    max_states: u64,
+    widen: bool
+) -> Outcome {
+    let mut decoded: ChunkSeq[Insn] = ChunkSeq::new[Insn]();
+    let derr: u64 = handle Fail[DecodeError] in {
+        decoded = decode_all(in slots);
+        none()
+    } with {
+        return x => x,
+        raise(e, k) => decode_code(e),
+    };
+    if derr != none() {
+        return decode_outcome(derr);
+    }
+    if decoded.len() == 0 {
+        return simple_outcome("cfg.empty", "empty program");
+    }
+    if slots.len() > 1000000 {
+        return simple_outcome("cfg.too_large", "program exceeds 1M instructions");
+    }
+    let mut insns: ChunkSeq[Insn] = ChunkSeq::new[Insn]();
+    let mut start: ChunkSeq[bool] = ChunkSeq::new[bool]();
+    for i in 0..decoded.len() {
+        match decoded.try_get(i) {
+            Option::Some(x) => {
+                insns.push(x);
+                start.push(true);
+                if slots_of(x) == 2 {
+                    insns.push(Insn::Exit);
+                    start.push(false);
+                }
+            },
+            Option::None => {},
+        }
+    }
+    let n = insns.len();
+    let mut mw: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    mw.extend(in maps);
+    let mut kw: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    kw.extend(in kf);
+    let mut tw: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    tw.extend(in text);
+    let mut v = V {
+        ptype: ptype,
+        pt_regs: pt_regs,
+        gpl: gpl,
+        max_insns: max_insns,
+        max_states: max_states,
+        n: n,
+        insns: insns,
+        start: start,
+        maps: mw,
+        kf: kw,
+        text: tw,
+        sub_start: ChunkSeq::new[u64](),
+        sub_end: ChunkSeq::new[u64](),
+        cb_entry: bools(n),
+        func_refs: ChunkSeq::new[u64](),
+        prune: bools(n),
+        iter_next: bools(n),
+        widen: widen,
+        widenings: 0,
+        ex_head: words(n, none()),
+        ex_tail: words(n, none()),
+        ex_count: words(n, 0),
+        rec_next: ChunkSeq::new[u64](),
+        rec_branches: ChunkSeq::new[u64](),
+        rec_parent: ChunkSeq::new[u64](),
+        rec_rs: ChunkSeq::new[u64](),
+        rec_ws: ChunkSeq::new[u64](),
+        rec_nws: ChunkSeq::new[u64](),
+        prs: ChunkSeq::new[R](),
+        pws: ChunkSeq::new[u64](),
+        depth: ChunkSeq::new[u64](),
+        processed: 0,
+        paths: 0,
+        pruned: 0,
+        work: ChunkSeq::new[u64](),
+        wrs: ChunkSeq::new[R](),
+        wws: ChunkSeq::new[u64](),
+        ids: Ids {
+            old: ChunkSeq::new[u64](),
+            cur: ChunkSeq::new[u64]()
+        },
+        msg: ChunkSeq::new[u8](),
+        rule: ChunkSeq::new[u8]()
+    };
+    let res: u64 = handle Fail[VErr] in {
+        check_cfg(inout v);
+        let nk = shr(v.kf.len(), 2);
+        for i in 0..nk {
+            let slot = sq(in v.kf, wrapping_mul(i, 4));
+            if sq(in v.kf, wrapping_add(wrapping_mul(i, 4), 1)) == 7 && slot < v.n {
+                v.iter_next.try_set(slot, true);
+                v.prune.try_set(slot, true);
+            }
+        }
+        let worst = run(inout v);
+        wrapping_sub(none(), 1)
+    } with {
+        return x => x,
+        raise(e, k) => e.insn,
+    };
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if res != wrapping_sub(none(), 1) {
+        w.push(1);
+        w.push(res);
+        return Outcome {
+            words: w,
+            rule: v.rule,
+            msg: v.msg,
+            widenings: v.widenings
+        };
+    }
+    w.push(0);
+    w.push(v.processed);
+    w.push(v.rec_next.len());
+    w.push(v.paths);
+    w.push(v.pruned);
+    w.push(v.widenings);
+    w.push(sq(in v.work, 0));
+    let ns = nsub(in v);
+    w.push(ns);
+    for i in 0..ns {
+        w.push(sq(in v.sub_start, i));
+        w.push(sq(in v.depth, i));
+    }
+    for i in 1..v.work.len() {
+        w.push(sq(in v.work, i));
+    }
+    Outcome {
+        words: w,
+        rule: v.rule,
+        msg: v.msg,
+        widenings: v.widenings
+    }
+}
+
+// verifier::verify after the Rust wrapper's program-type and map checks.
+pub fn verify_program(
+    in slots: Slice[RawInsn],
+    ptype: ProgramType,
+    pt_regs: i64,
+    gpl: bool,
+    in maps: Slice[u64],
+    in kf: Slice[u64],
+    in text: Slice[u8],
+    max_insns: u64,
+    max_states: u64,
+    widen_loops: bool
+) -> Outcome {
+    if !widen_loops {
+        return verify_one(
+            in slots,
+            ptype,
+            pt_regs,
+            gpl,
+            in maps,
+            in kf,
+            in text,
+            max_insns,
+            max_states,
+            false
+        );
+    }
+    let first = verify_one(
+        in slots,
+        ptype,
+        pt_regs,
+        gpl,
+        in maps,
+        in kf,
+        in text,
+        max_insns,
+        max_states,
+        true
+    );
+    if sq(in first.words, 0) == 0 || first.widenings == 0 {
+        return first;
+    }
+    let second = verify_one(
+        in slots,
+        ptype,
+        pt_regs,
+        gpl,
+        in maps,
+        in kf,
+        in text,
+        max_insns,
+        max_states,
+        false
+    );
+    if sq(in second.words, 0) == 0 {
+        return second;
+    }
+    if second
+        .rule
+        .eq(in "complexity.limit".as_bytes())
+        && sq(in first.words, 0)
+        == 1
+        && !first
+        .rule
+        .eq(in "loop.widened_precise".as_bytes()) {
+        return first;
+    }
+    second
+}

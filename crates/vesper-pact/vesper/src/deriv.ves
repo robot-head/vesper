@@ -1,0 +1,662 @@
+// Module deriv of @vesper/pact (see lib.ves): `derivation.rs`, the
+// independent structural checker of derivations (`check_derivation`).
+//
+// A failure records the child path (s.path, copied to s.de_path) and the
+// message (txt[s.de_off ..]); every check returns false once it failed.
+use self::{
+    S
+};
+use self::term::{
+    arg_kind,
+    add,
+    dec,
+    fa,
+    fb,
+    fc,
+    inc,
+    kid,
+    mk,
+    mk0,
+    mk1,
+    mk2,
+    mkl,
+    nlen,
+    none,
+    push_kids,
+    sub,
+    sw,
+    tg,
+    vkind
+};
+use self::fold::{
+    inst
+};
+use self::render::{
+    byte,
+    d_step,
+    lit,
+    num,
+    r_brand,
+    r_goal,
+    r_id,
+    r_trait_ref,
+    r_ty
+};
+use self::diag::{
+    render_diags,
+    truncate_diags
+};
+use self::program::{
+    v_arg,
+    v_goal,
+    validate_query
+};
+use self::canon::{
+    binders_slist,
+    canon_free
+};
+use self::mode::{
+    decide,
+    mode_atoms
+};
+
+fn begin_fail(inout s: S) {
+    s.de_failed = true;
+    s.de_path.clear();
+    let n = s.path.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let x = sw(in s.path, i);
+        s.de_path.push(x);
+        i = inc(i);
+    }
+    s.de_off = s.txt.len();
+}
+
+fn fail(inout s: S, in msg: Str) -> bool {
+    begin_fail(inout s);
+    lit(inout s, msg);
+    false
+}
+
+fn r_csource(inout s: S, source: u64) {
+    if (source & 1) == 0 {
+        r_id(inout s, "impl", source >> 1);
+    } else {
+        r_id(inout s, "model", source >> 1);
+    }
+}
+
+// The conformance index of a step source, or none() when unknown.
+fn conformance(in s: S, source: u64) -> u64 {
+    let x = source >> 1;
+    if (source & 1) == 0 {
+        if x < s.nimpl {
+            x
+        } else {
+            none()
+        }
+    } else if x < s.nmodel {
+        add(s.nimpl, x)
+    } else {
+        none()
+    }
+}
+
+fn kinds_match(in s: S, ci: u64, step: u64) -> bool {
+    let params = sw(in s.cf_params, ci);
+    let n = nlen(in s, params);
+    if n != nlen(in s, step) {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            return true;
+        }
+        if kid(in s, params, i) != arg_kind(in s, kid(in s, step, i)) {
+            return false;
+        }
+        i = inc(i);
+    }
+}
+
+fn args_list(inout s: S, step: u64) -> u64 {
+    let from = s.tmp.len();
+    push_kids(inout s, step);
+    mkl(inout s, 27, 0, 0, 0, from)
+}
+
+// The where-clause children d[from .. from + n] against ci's clauses.
+fn where_children(inout s: S, ci: u64, args: u64, d: u64) -> bool {
+    let wh = sw(in s.cf_where, ci);
+    let n = nlen(in s, wh);
+    let nc = nlen(in s, d);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n || i >= nc {
+            return true;
+        }
+        let w = kid(in s, wh, i);
+        let expected = inst(inout s, w, args);
+        if expected == 0 {
+            return fail(inout s, "ill-formed where-clause");
+        }
+        let c = kid(in s, d, i);
+        let cg = fa(in s, c);
+        if expected != cg {
+            begin_fail(inout s);
+            lit(inout s, "where-clause child proves `");
+            r_goal(inout s, cg);
+            lit(inout s, "`, expected `");
+            r_goal(inout s, expected);
+            byte(inout s, 96);
+            return false;
+        }
+        i = inc(i);
+    }
+}
+
+fn expected_brand(inout s: S, source: u64) -> u64 {
+    if (source & 1) == 0 {
+        mk0(inout s, 7)
+    } else {
+        mk1(inout s, 8, source >> 1)
+    }
+}
+
+fn single_trait_child(inout s: S, d: u64, p: u64) -> bool {
+    let tr = fa(in s, p);
+    let b = fb(in s, p);
+    let expected = mk2(inout s, 14, tr, b);
+    if nlen(in s, d) == 1 && fa(in s, kid(in s, d, 0)) == expected {
+        return true;
+    }
+    fail(inout s, "expected one child proving the projection's trait")
+}
+
+// ---------------------------------------------------------------------------
+// NormReplay over the derivations kid(s.rp_d, rp_next .. rp_end).
+
+fn rp_args(inout s: S, n: u64) -> u64 {
+    let from = s.tmp.len();
+    let len = nlen(in s, n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let a = kid(in s, n, i);
+        let x = rp_arg(inout s, a);
+        s.tmp.push(x);
+        i = inc(i);
+    }
+    from
+}
+
+fn rp_arg(inout s: S, a: u64) -> u64 {
+    let t = tg(in s, a);
+    if t <= 3 {
+        return rp_ty(inout s, a);
+    }
+    if t == 6 {
+        let from = s.tmp.len();
+        let len = nlen(in s, a);
+        let mut i: u64 = 0;
+        loop {
+            if i >= len {
+                break;
+            }
+            let l = kid(in s, a, i);
+            if tg(in s, l) == 11 {
+                let f2 = rp_args(inout s, l);
+                let e = fa(in s, l);
+                let x = mkl(inout s, 11, e, 0, 0, f2);
+                s.tmp.push(x);
+            } else {
+                s.tmp.push(l);
+            }
+            i = inc(i);
+        }
+        let tail = fa(in s, a);
+        return mkl(inout s, 6, tail, 0, 0, from);
+    }
+    a
+}
+
+fn rp_tref(inout s: S, tr: u64) -> u64 {
+    let st = fb(in s, tr);
+    let st2 = rp_ty(inout s, st);
+    let from = rp_args(inout s, tr);
+    let t = fa(in s, tr);
+    mkl(inout s, 13, t, st2, 0, from)
+}
+
+fn rp_ty(inout s: S, t: u64) -> u64 {
+    let tag = tg(in s, t);
+    if tag == 1 {
+        let from = rp_args(inout s, t);
+        let c = fa(in s, t);
+        return mkl(inout s, 1, c, 0, 0, from);
+    }
+    if tag == 3 {
+        let tr = fa(in s, t);
+        let tr2 = rp_tref(inout s, tr);
+        let b = fb(in s, t);
+        let assoc = fc(in s, t);
+        let inner = mk(inout s, 3, tr2, b, assoc);
+        if s.rp_next < s.rp_end {
+            let nd = kid(in s, s.rp_d, s.rp_next);
+            let g = fa(in s, nd);
+            if tg(in s, g) == 15 && fa(in s, g) == inner {
+                s.rp_next = inc(s.rp_next);
+                return fb(in s, g);
+            }
+        }
+        s.rp_ok = false;
+        return inner;
+    }
+    t
+}
+
+fn rp_goal(inout s: S, g: u64) -> u64 {
+    let t = tg(in s, g);
+    let a = fa(in s, g);
+    let b = fb(in s, g);
+    if t == 14 {
+        let tr = rp_tref(inout s, a);
+        mk2(inout s, 14, tr, b)
+    } else if t == 15 {
+        let tr = fa(in s, a);
+        let tr2 = rp_tref(inout s, tr);
+        let pb = fb(in s, a);
+        let assoc = fc(in s, a);
+        let p = mk(inout s, 3, tr2, pb, assoc);
+        let ty = rp_ty(inout s, b);
+        mk2(inout s, 15, p, ty)
+    } else {
+        let ty = rp_ty(inout s, a);
+        mk2(inout s, 16, ty, b)
+    }
+}
+
+fn rp_begin(inout s: S, d: u64, from: u64, to: u64) {
+    s.rp_d = d;
+    s.rp_next = from;
+    s.rp_end = to;
+    s.rp_ok = true;
+}
+
+// Alpha-normal form: inference variables renumbered by first occurrence.
+fn alpha(inout s: S, g: u64) -> u64 {
+    let r = canon_free(inout s, g);
+    if r == 0 {
+        g
+    } else {
+        r
+    }
+}
+
+// ---------------------------------------------------------------------------
+
+fn node(inout s: S, env: u64, d: u64) -> bool {
+    let st = fb(in s, d);
+    let g = fa(in s, d);
+    let stt = tg(in s, st);
+    let gt = tg(in s, g);
+    if stt == 18 && gt == 14 {
+        let source = fa(in s, st);
+        let ci = conformance(in s, source);
+        if ci == none() {
+            begin_fail(inout s);
+            lit(inout s, "unknown conformance ");
+            r_csource(inout s, source);
+            return false;
+        }
+        if !kinds_match(in s, ci, st) {
+            return fail(inout s, "conformance arguments do not match parameter kinds");
+        }
+        let eb = expected_brand(inout s, source);
+        let brand = fb(in s, g);
+        if brand != eb {
+            begin_fail(inout s);
+            lit(inout s, "brand ");
+            r_brand(inout s, brand);
+            lit(inout s, " does not match ");
+            r_csource(inout s, source);
+            return false;
+        }
+        let args = args_list(inout s, st);
+        let ctr = sw(in s.cf_tref, ci);
+        let head = inst(inout s, ctr, args);
+        if head == 0 {
+            return fail(inout s, "ill-formed head");
+        }
+        if head != fa(in s, g) {
+            begin_fail(inout s);
+            lit(inout s, "head `");
+            r_trait_ref(inout s, head);
+            lit(inout s, "` does not match goal");
+            return false;
+        }
+        if nlen(in s, d) != nlen(in s, sw(in s.cf_where, ci)) {
+            return fail(inout s, "wrong number of where-clause proofs");
+        }
+        return where_children(inout s, ci, args, d);
+    }
+    if (stt == 19 && gt == 14) || (stt == 22 && gt == 15) {
+        let index = fa(in s, st);
+        let asm = fb(in s, env);
+        if index >= nlen(in s, asm) || kid(in s, asm, index) != g {
+            begin_fail(inout s);
+            lit(inout s, "assumption ");
+            num(inout s, index);
+            lit(inout s, " does not state the goal");
+            return false;
+        }
+        if nlen(in s, d) != 0 {
+            return fail(inout s, "assumption has children");
+        }
+        return true;
+    }
+    if stt == 20 && gt == 14 {
+        let tr = fa(in s, g);
+        let p = fb(in s, tr);
+        if tg(in s, p) != 3 {
+            return fail(inout s, "alias bound on a non-projection self type");
+        }
+        let ptr = fa(in s, p);
+        let pt = fa(in s, ptr);
+        let at = add(sw(in s.tr_as_at, pt), fc(in s, p));
+        let bound = fa(in s, st);
+        if bound >= sw(in s.as_bd_n, at) {
+            return fail(inout s, "unknown alias bound");
+        }
+        let bi = add(sw(in s.as_bd_at, at), bound);
+        let from = s.tmp.len();
+        let pst = fb(in s, ptr);
+        s.tmp.push(pst);
+        push_kids(inout s, ptr);
+        let binder = mkl(inout s, 27, 0, 0, 0, from);
+        let bargs = sw(in s.bd_args, bi);
+        let args = inst(inout s, bargs, binder);
+        if args == 0 {
+            return fail(inout s, "ill-formed bound");
+        }
+        let targs = args_list(inout s, tr);
+        let bb = sw(in s.bd_brand, bi);
+        let ib = inst(inout s, bb, binder);
+        if sw(in s.bd_trait, bi) != fa(in s, tr) || args != targs || ib != fb(in s, g) {
+            return fail(inout s, "alias bound does not state the goal");
+        }
+        return single_trait_child(inout s, d, p);
+    }
+    if stt == 21 && gt == 15 {
+        let source = fa(in s, st);
+        let ci = conformance(in s, source);
+        if ci == none() {
+            begin_fail(inout s);
+            lit(inout s, "unknown conformance ");
+            r_csource(inout s, source);
+            return false;
+        }
+        if !kinds_match(in s, ci, st) {
+            return fail(inout s, "conformance arguments do not match parameter kinds");
+        }
+        let p = fa(in s, g);
+        let ty = fb(in s, g);
+        let eb = expected_brand(inout s, source);
+        if fb(in s, p) != eb {
+            return fail(inout s, "projection brand does not match source");
+        }
+        let args = args_list(inout s, st);
+        let ctr = sw(in s.cf_tref, ci);
+        let head = inst(inout s, ctr, args);
+        if head == 0 {
+            return fail(inout s, "ill-formed head");
+        }
+        if head != fa(in s, p) {
+            return fail(inout s, "head does not match projection");
+        }
+        let n = nlen(in s, sw(in s.cf_where, ci));
+        let k = fb(in s, st);
+        if nlen(in s, d) != add(n, k) {
+            return fail(inout s, "wrong number of children");
+        }
+        if !where_children(inout s, ci, args, d) {
+            return false;
+        }
+        let vals = sw(in s.cf_vals, ci);
+        let assoc = fc(in s, p);
+        if assoc >= nlen(in s, vals) {
+            return fail(inout s, "missing associated value");
+        }
+        let raw = kid(in s, vals, assoc);
+        let value = inst(inout s, raw, args);
+        if value == 0 {
+            return fail(inout s, "ill-formed value");
+        }
+        let h2 = nlen(in s, d);
+        rp_begin(inout s, d, n, h2);
+        let replayed = rp_ty(inout s, value);
+        if !s.rp_ok || s.rp_next != s.rp_end {
+            return fail(inout s, "value normalizations do not replay");
+        }
+        if replayed != ty {
+            begin_fail(inout s);
+            lit(inout s, "associated value `");
+            r_ty(inout s, replayed);
+            lit(inout s, "` does not match `");
+            r_ty(inout s, ty);
+            byte(inout s, 96);
+            return false;
+        }
+        return true;
+    }
+    if stt == 23 && gt == 15 {
+        let p = fa(in s, g);
+        let ty = fb(in s, g);
+        if ty != p {
+            return fail(inout s, "rigid projection must equal itself");
+        }
+        let pst = fb(in s, fa(in s, p));
+        let pt = tg(in s, pst);
+        if !((pt == 2 && vkind(fa(in s, pst)) == 1) || pt == 3) {
+            return fail(inout s, "rigid projection needs a rigid self type");
+        }
+        return single_trait_child(inout s, d, p);
+    }
+    if stt == 24 && gt == 16 {
+        let from = s.atoms.len();
+        let ty = fa(in s, g);
+        mode_atoms(inout s, env, ty);
+        let b = fb(in s, g);
+        let v = decide(inout s, from, b);
+        s.atoms.truncate(from);
+        if v != 0 {
+            return fail(inout s, "mode bound does not hold");
+        }
+        if nlen(in s, d) != 0 {
+            return fail(inout s, "mode step has children");
+        }
+        return true;
+    }
+    if stt == 25 {
+        let n = nlen(in s, d);
+        if n == 0 {
+            return fail(inout s, "normalization without a normalized goal");
+        }
+        let last = kid(in s, d, dec(n));
+        rp_begin(inout s, d, 0, dec(n));
+        let replayed = rp_goal(inout s, g);
+        if !s.rp_ok || s.rp_next != s.rp_end {
+            return fail(inout s, "normalizations do not replay");
+        }
+        let lg = fa(in s, last);
+        if replayed != lg {
+            begin_fail(inout s);
+            lit(inout s, "normalized goal `");
+            r_goal(inout s, lg);
+            lit(inout s, "` expected `");
+            r_goal(inout s, replayed);
+            byte(inout s, 96);
+            return false;
+        }
+        return true;
+    }
+    if stt == 26 {
+        if nlen(in s, d) != 0 {
+            return fail(inout s, "coinductive hypothesis has children");
+        }
+        let key = alpha(inout s, g);
+        let na = s.anc.len();
+        let mut pos = none();
+        let mut i = na;
+        loop {
+            if i == 0 {
+                break;
+            }
+            i = dec(i);
+            let a = sw(in s.anc, i);
+            if alpha(inout s, a) == key {
+                pos = i;
+                break;
+            }
+        }
+        if pos == none() {
+            return fail(inout s, "coinductive hypothesis without a matching ancestor");
+        }
+        let mut j = pos;
+        loop {
+            if j > na {
+                break;
+            }
+            let a = if j == na {
+                g
+            } else {
+                sw(in s.anc, j)
+            };
+            let ok = tg(in s, a) == 14 && sw(in s.tr_coind, fa(in s, fa(in s, a))) != 0;
+            if !ok {
+                begin_fail(inout s);
+                lit(inout s, "cycle passes through non-coinductive goal `");
+                r_goal(inout s, a);
+                byte(inout s, 96);
+                return false;
+            }
+            j = inc(j);
+        }
+        return true;
+    }
+    begin_fail(inout s);
+    lit(inout s, "step ");
+    d_step(inout s, st);
+    lit(inout s, " cannot prove `");
+    r_goal(inout s, g);
+    byte(inout s, 96);
+    false
+}
+
+fn check(inout s: S, env: u64, d: u64) -> bool {
+    if !node(inout s, env, d) {
+        return false;
+    }
+    if tg(in s, fb(in s, d)) == 26 {
+        return true;
+    }
+    let g = fa(in s, d);
+    s.anc.push(g);
+    let n = nlen(in s, d);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        s.path.push(i);
+        let c = kid(in s, d, i);
+        if !check(inout s, env, c) {
+            return false;
+        }
+        let k = dec(s.path.len());
+        s.path.truncate(k);
+        i = inc(i);
+    }
+    let k = dec(s.anc.len());
+    s.anc.truncate(k);
+    true
+}
+
+// Validates every goal and recorded instantiation before the structural
+// check.
+fn validate_nodes(inout s: S, env: u64, binders: u64, d: u64) -> bool {
+    let base = s.dg_code.len();
+    s.sc_kind = 1;
+    s.sc_phs = fa(in s, env);
+    s.sc_binders = binders;
+    let g = fa(in s, d);
+    v_goal(inout s, g, 7, 0, 0);
+    let st = fb(in s, d);
+    let stt = tg(in s, st);
+    if stt == 18 || stt == 21 {
+        let n = nlen(in s, st);
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let a = kid(in s, st, i);
+            v_arg(inout s, a, 7, 0, 0);
+            i = inc(i);
+        }
+    }
+    if s.dg_code.len() != base {
+        begin_fail(inout s);
+        render_diags(inout s, base);
+        truncate_diags(inout s, base);
+        return false;
+    }
+    let n = nlen(in s, d);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        s.path.push(i);
+        let c = kid(in s, d, i);
+        if !validate_nodes(inout s, env, binders, c) {
+            return false;
+        }
+        let k = dec(s.path.len());
+        s.path.truncate(k);
+        i = inc(i);
+    }
+    true
+}
+
+// `check_derivation`: true when the derivation checks; otherwise
+// s.de_path and txt[s.de_off ..] hold the error.
+pub fn check_derivation(inout s: S, env: u64, d: u64) -> bool {
+    s.de_failed = false;
+    s.path.clear();
+    s.anc.clear();
+    let c = canon_free(inout s, d);
+    if c == 0 {
+        return fail(inout s, "duplicate effect label in derivation");
+    }
+    let binders = binders_slist(inout s);
+    let base = s.dg_code.len();
+    let g = fa(in s, c);
+    if !validate_query(inout s, 0, 1, env, binders, g) {
+        begin_fail(inout s);
+        render_diags(inout s, base);
+        truncate_diags(inout s, base);
+        return false;
+    }
+    if !validate_nodes(inout s, env, binders, c) {
+        return false;
+    }
+    check(inout s, env, c)
+}

@@ -137,6 +137,16 @@ pub(crate) fn canonicalize_placeholders(
 pub fn canonicalize_query(
     query: &crate::program::QueryDto,
 ) -> Result<(Env, CanonicalGoal), DuplicateLabel> {
+    #[cfg(vesper_port)]
+    return crate::port::canonicalize_query(query);
+    #[cfg(not(vesper_port))]
+    canonicalize_query_rust(query)
+}
+
+#[cfg(not(vesper_port))]
+fn canonicalize_query_rust(
+    query: &crate::program::QueryDto,
+) -> Result<(Env, CanonicalGoal), DuplicateLabel> {
     let (env, goal, _) = canonicalize_placeholders(&query.env, &query.goal)?;
     let mut c = Canonicalizer::new(None);
     let goal = fold_goal(&goal, &mut c)?;

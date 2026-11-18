@@ -16,6 +16,14 @@ use crate::term::*;
 
 /// Runs orphan, overlap and well-formedness checks. The result is sorted.
 pub fn check_coherence(program: &Program) -> Vec<Diagnostic> {
+    #[cfg(vesper_port)]
+    return crate::port::check_coherence(program);
+    #[cfg(not(vesper_port))]
+    check_coherence_rust(program)
+}
+
+#[cfg(not(vesper_port))]
+fn check_coherence_rust(program: &Program) -> Vec<Diagnostic> {
     let mut diags = vec![];
     for im in &program.dto().impls {
         if let Err(msg) = check_orphan(program, &im.decl) {

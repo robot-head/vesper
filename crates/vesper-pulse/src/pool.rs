@@ -6,7 +6,9 @@
 //! workers may steal from, a pinned queue that is never stolen (the
 //! `spawn_local` half of §12.4) and a cache-hot LIFO slot for fibers spawned
 //! from inside a running fiber. Fibers that nobody spawned from a worker go
-//! to a shared injector queue.
+//! to a shared injector queue. The run queues are lock-free Chase-Lev
+//! deques and the injector a lock-free queue (`crossbeam-deque`); only the
+//! worker that owns a deque pushes onto it.
 //!
 //! * A fiber's I/O request is submitted to the driver of the worker that ran
 //!   it; when it completes, the continuation is queued on that worker, where
@@ -26,6 +28,10 @@
 //!   from whom) is a function of the seed and the spawned fibers, and is
 //!   returned as a [`TraceEntry`] list so a run can be replayed and compared.
 //!   With an OS driver, completion timing is the only nondeterminism left.
+//! * [`Pool::start`] runs the workers in the background and returns a
+//!   [`RunningPool`]: a long-lived pool that parks while idle, takes fibers
+//!   from any thread, and ends only at [`RunningPool::shutdown`].
+//! * [`PoolConfig::pin_cores`] pins worker *i* to the *i*-th core.
 //!
 //! Every continuation is resumed exactly once per event; the pool never
 //! drops one silently. Cancellation ([`Spawner::cancel`]) wraps every queued
@@ -39,6 +45,7 @@
 //! of the Vesper source typing rules for portable fibers.
 use crate::driver::{CompletionDriver, Request};
 use crate::scheduler::{Event, IoEvent, Resume, Step};
+use crossbeam_deque::{Injector, Steal, Stealer, Worker as Deque};
 use std::{
     cell::Cell,
     collections::VecDeque,
@@ -99,7 +106,19 @@ pub struct PoolConfig {
     /// that cannot read a pipe (test doubles); workers with in-flight I/O
     /// then poll every millisecond instead.
     pub driver_wakeup: bool,
+    /// Pin worker *i* to the *i*-th core the OS reports (round robin).
+    /// Best effort: [`WorkerStats::pinned_core`] says whether it took.
+    /// Only [`Pool::run`] and [`Pool::start`] pin; `run_seeded` runs on the
+    /// caller's thread.
+    pub pin_cores: bool,
+    /// Keep every fiber's result in [`PoolOutput`]. A long-lived pool whose
+    /// fibers report results themselves turns this off so its memory stays
+    /// bounded.
+    pub keep_results: bool,
 }
+
+/// The bit of `Shared::live` that holds a long-lived pool open.
+const OPEN: usize = 1 << (usize::BITS - 1);
 
 /// Upper bound on [`PoolConfig::workers`].
 pub const MAX_WORKERS: usize = 1024;
@@ -115,6 +134,8 @@ impl PoolConfig {
             seed: 0,
             lifo_slot: true,
             driver_wakeup: true,
+            pin_cores: false,
+            keep_results: true,
         }
     }
     pub fn seed(mut self, seed: u64) -> Self {
@@ -127,6 +148,14 @@ impl PoolConfig {
     }
     pub fn driver_wakeup(mut self, on: bool) -> Self {
         self.driver_wakeup = on;
+        self
+    }
+    pub fn pin_cores(mut self, on: bool) -> Self {
+        self.pin_cores = on;
+        self
+    }
+    pub fn keep_results(mut self, on: bool) -> Self {
+        self.keep_results = on;
         self
     }
 }
@@ -146,6 +175,9 @@ pub struct WorkerStats {
     pub steal_attempts: u64,
     pub submitted: u64,
     pub parked: u64,
+    /// The core this worker's thread was pinned to, when
+    /// [`PoolConfig::pin_cores`] asked for it and the OS accepted.
+    pub pinned_core: Option<usize>,
 }
 
 /// What resumed a fiber, in a [`TraceEntry`].
@@ -282,7 +314,15 @@ const PARKED_CV: u8 = 1;
 const PARKED_DRIVER: u8 = 2;
 
 struct WorkerShared<C> {
-    queue: Mutex<VecDeque<Ready<C>>>,
+    /// The thieves' end of this worker's run queue, a lock-free Chase-Lev
+    /// deque. Only the worker itself pushes and pops at the owner's end.
+    stealer: Stealer<Ready<C>>,
+    /// The owner's end while no run holds it.
+    owner: Mutex<Option<Deque<Ready<C>>>>,
+    /// Fibers spawned from inside a fiber that this worker is resuming and
+    /// that did not stay in the LIFO slot. The worker moves them onto its
+    /// deque when the resumption returns (only it can push there).
+    spill: Mutex<Vec<Ready<C>>>,
     pinned: Mutex<VecDeque<Ready<C>>>,
     lifo: Mutex<Option<Ready<C>>>,
     state: AtomicU8,
@@ -290,12 +330,65 @@ struct WorkerShared<C> {
     wake_armed: AtomicBool,
     /// Set (under the `pinned` lock) when this worker's driver failed.
     gone: AtomicBool,
+    /// Lengths of `spill`, `pinned` and `lifo`, updated under their locks,
+    /// so the worker's hot path skips empty side queues without locking.
+    /// The park/notify recheck ([`Shared::has_own`]) locks for real.
+    spill_len: AtomicUsize,
+    pinned_len: AtomicUsize,
+    lifo_full: AtomicBool,
+}
+
+impl<C> WorkerShared<C> {
+    fn take_lifo(&self) -> Option<Ready<C>> {
+        if !self.lifo_full.load(SeqCst) {
+            return None;
+        }
+        let mut slot = lock(&self.lifo);
+        self.lifo_full.store(false, SeqCst);
+        slot.take()
+    }
+    fn put_lifo(&self, ready: Ready<C>) -> Option<Ready<C>> {
+        let mut slot = lock(&self.lifo);
+        self.lifo_full.store(true, SeqCst);
+        slot.replace(ready)
+    }
+    fn push_spill(&self, ready: Ready<C>) {
+        let mut spill = lock(&self.spill);
+        spill.push(ready);
+        self.spill_len.store(spill.len(), SeqCst);
+    }
+    fn take_spill(&self) -> Vec<Ready<C>> {
+        if self.spill_len.load(SeqCst) == 0 {
+            return vec![];
+        }
+        let mut spill = lock(&self.spill);
+        self.spill_len.store(0, SeqCst);
+        std::mem::take(&mut *spill)
+    }
+    fn push_pinned(q: &mut VecDeque<Ready<C>>, len: &AtomicUsize, ready: Ready<C>) {
+        q.push_back(ready);
+        len.store(q.len(), SeqCst);
+    }
+    fn pop_pinned(&self) -> Option<Ready<C>> {
+        if self.pinned_len.load(SeqCst) == 0 {
+            return None;
+        }
+        let mut q = lock(&self.pinned);
+        let r = q.pop_front();
+        self.pinned_len.store(q.len(), SeqCst);
+        r
+    }
 }
 
 struct Shared<C> {
     workers: Vec<WorkerShared<C>>,
-    injector: Mutex<VecDeque<Ready<C>>>,
+    injector: Injector<Ready<C>>,
     lifo_slot: bool,
+    keep_results: bool,
+    /// Live fibers, plus the [`OPEN`] bit while a [`RunningPool`] holds the
+    /// pool open (an idle open pool keeps running and accepting spawns).
+    /// One word, so reserving the first slot and closing the pool are
+    /// ordered by the same compare-and-swap.
     live: AtomicUsize,
     active: AtomicUsize,
     next_id: AtomicU64,
@@ -314,6 +407,17 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     // the queue itself is still consistent (every operation is one push or
     // pop), and the panic is re-raised by `run`.
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Retry a lock-free steal until it settles.
+fn settle<T>(mut attempt: impl FnMut() -> Steal<T>) -> Option<T> {
+    loop {
+        match attempt() {
+            Steal::Success(t) => return Some(t),
+            Steal::Empty => return None,
+            Steal::Retry => std::hint::spin_loop(),
+        }
+    }
 }
 
 /// A one-shot startup barrier that can release the workers already created
@@ -373,7 +477,15 @@ impl<C> Shared<C> {
             .with(|c| c.get())
             .and_then(|(p, w)| (p == me).then_some(w))
     }
-    /// Reserve a live slot; fails once a started pool has drained.
+    /// Live fibers, without the [`OPEN`] bit.
+    fn live_count(&self) -> usize {
+        self.live.load(SeqCst) & !OPEN
+    }
+    fn set_open(&self) {
+        self.live.fetch_or(OPEN, SeqCst);
+    }
+    /// Reserve a live slot; fails once a started pool that is not held
+    /// open has drained.
     fn reserve(&self) -> bool {
         let mut n = self.live.load(SeqCst);
         loop {
@@ -390,25 +502,39 @@ impl<C> Shared<C> {
         self.finish(1);
     }
     fn finish(&self, n: usize) {
+        // `== n` only when the count reaches zero with the pool not open.
         if n > 0 && self.live.fetch_sub(n, SeqCst) == n {
             self.done.store(true, SeqCst);
             self.wake_all();
         }
     }
+    /// Close a long-lived pool: once no fiber is live the run ends. A
+    /// spawn racing with this either reserved first (and shutdown waits for
+    /// its fiber) or sees the closed, empty pool and is refused.
+    fn close_open(&self) {
+        let before = self.live.fetch_and(!OPEN, SeqCst);
+        if before == OPEN && self.started.load(SeqCst) {
+            self.done.store(true, SeqCst);
+            self.wake_all();
+        }
+    }
     fn push_injector(&self, ready: Ready<C>) {
-        lock(&self.injector).push_back(ready);
+        self.injector.push(ready);
         self.notify_one();
     }
     fn has_stealable(&self, me: usize) -> bool {
-        if !lock(&self.injector).is_empty() {
+        if !self.injector.is_empty() {
             return true;
         }
         let _ = me;
-        self.workers.iter().any(|w| !lock(&w.queue).is_empty())
+        self.workers.iter().any(|w| !w.stealer.is_empty())
     }
     fn has_own(&self, me: usize) -> bool {
         let w = &self.workers[me];
-        lock(&w.lifo).is_some() || !lock(&w.pinned).is_empty() || !lock(&w.queue).is_empty()
+        lock(&w.lifo).is_some()
+            || !lock(&w.pinned).is_empty()
+            || !w.stealer.is_empty()
+            || !lock(&w.spill).is_empty()
     }
     fn wake_worker(&self, i: usize) {
         let w = &self.workers[i];
@@ -476,11 +602,13 @@ impl<C> Shared<C> {
                 event: r.event,
             }))
         };
-        take(&mut lock(&self.injector));
+        take(&mut std::iter::from_fn(|| settle(|| self.injector.steal())).collect());
         for w in &self.workers {
-            take(&mut lock(&w.queue));
+            take(&mut std::iter::from_fn(|| settle(|| w.stealer.steal())).collect());
+            take(&mut w.take_spill().into());
             take(&mut lock(&w.pinned));
-            take(&mut lock(&w.lifo).take().into_iter().collect());
+            w.pinned_len.store(0, SeqCst);
+            take(&mut w.take_lifo().into_iter().collect());
         }
         out.sort_by_key(|s| s.id);
         out
@@ -492,10 +620,12 @@ impl<C> Drop for Shared<C> {
     /// still queued) discards their continuations: count them, like a
     /// dropped driver's, in [`crate::driver::abandoned_requests`].
     fn drop(&mut self) {
-        let mut n = lock(&self.injector).len();
+        let mut n = self.injector.len();
         for w in &self.workers {
-            n +=
-                lock(&w.queue).len() + lock(&w.pinned).len() + usize::from(lock(&w.lifo).is_some());
+            n += w.stealer.len()
+                + lock(&w.spill).len()
+                + lock(&w.pinned).len()
+                + usize::from(lock(&w.lifo).is_some());
         }
         crate::driver::note_abandoned(n);
     }
@@ -541,16 +671,11 @@ impl<C> Spawner<C> {
         match shared.current_worker() {
             Some(w) if shared.lifo_slot => {
                 let worker = &shared.workers[w];
-                let previous = lock(&worker.lifo).replace(ready);
-                if let Some(previous) = previous {
-                    lock(&worker.queue).push_back(previous);
-                    shared.notify_one();
+                if let Some(previous) = worker.put_lifo(ready) {
+                    worker.push_spill(previous);
                 }
             }
-            Some(w) => {
-                lock(&shared.workers[w].queue).push_back(ready);
-                shared.notify_one();
-            }
+            Some(w) => shared.workers[w].push_spill(ready),
             None => shared.push_injector(ready),
         }
         Ok(id)
@@ -570,12 +695,13 @@ impl<C> Spawner<C> {
             return Err((PoolError::Closed, continuation));
         }
         let id = FiberId(shared.next_id.fetch_add(1, SeqCst));
-        pinned.push_back(Ready {
+        let ready = Ready {
             id,
             home: Some(worker),
             continuation,
             event: Event::Start,
-        });
+        };
+        WorkerShared::push_pinned(&mut pinned, &shared.workers[worker].pinned_len, ready);
         drop(pinned);
         shared.wake_worker(worker);
         Ok(id)
@@ -611,21 +737,30 @@ impl<C> Pool<C> {
             return Err(PoolError::InvalidWorkers(config.workers));
         }
         let workers = (0..config.workers)
-            .map(|_| WorkerShared {
-                queue: Mutex::new(VecDeque::new()),
-                pinned: Mutex::new(VecDeque::new()),
-                lifo: Mutex::new(None),
-                state: AtomicU8::new(RUNNING),
-                wake: Mutex::new(None),
-                wake_armed: AtomicBool::new(false),
-                gone: AtomicBool::new(false),
+            .map(|_| {
+                let deque = Deque::new_fifo();
+                WorkerShared {
+                    stealer: deque.stealer(),
+                    owner: Mutex::new(Some(deque)),
+                    spill: Mutex::new(vec![]),
+                    pinned: Mutex::new(VecDeque::new()),
+                    lifo: Mutex::new(None),
+                    state: AtomicU8::new(RUNNING),
+                    wake: Mutex::new(None),
+                    wake_armed: AtomicBool::new(false),
+                    gone: AtomicBool::new(false),
+                    spill_len: AtomicUsize::new(0),
+                    pinned_len: AtomicUsize::new(0),
+                    lifo_full: AtomicBool::new(false),
+                }
             })
             .collect();
         Ok(Self {
             shared: Arc::new(Shared {
                 workers,
-                injector: Mutex::new(VecDeque::new()),
+                injector: Injector::new(),
                 lifo_slot: config.lifo_slot,
+                keep_results: config.keep_results,
                 live: AtomicUsize::new(0),
                 active: AtomicUsize::new(0),
                 next_id: AtomicU64::new(1),
@@ -686,6 +821,8 @@ impl Rng {
 struct Worker<C, D> {
     index: usize,
     driver: Option<D>,
+    /// The owner's end of this worker's run queue.
+    local: Option<Deque<Ready<C>>>,
     rng: Rng,
     ticks: u64,
     lifo_streak: u32,
@@ -714,10 +851,14 @@ struct WorkerResult {
 }
 
 impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
-    fn new(index: usize, driver: D, seed: u64, trace: bool) -> Self {
+    fn new(shared: &Shared<C>, index: usize, driver: D, seed: u64, trace: bool) -> Self {
+        let local = lock(&shared.workers[index].owner)
+            .take()
+            .expect("each worker's deque has one owner at a time");
         Self {
             index,
             driver: Some(driver),
+            local: Some(local),
             rng: Rng::new(seed, index as u64 + 1),
             ticks: 0,
             lifo_streak: 0,
@@ -733,6 +874,22 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
             abandoned: 0,
             _fibers: std::marker::PhantomData,
         }
+    }
+    fn local(&self) -> &Deque<Ready<C>> {
+        self.local
+            .as_ref()
+            .expect("a running worker owns its deque")
+    }
+    /// Move fibers spawned during the last resumption onto the deque.
+    fn flush_spill(&self, shared: &Shared<C>) {
+        let spill = shared.workers[self.index].take_spill();
+        if spill.is_empty() {
+            return;
+        }
+        for r in spill {
+            self.local().push(r);
+        }
+        shared.notify_one();
     }
     fn driver(&mut self) -> &mut D {
         self.driver
@@ -786,8 +943,11 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
     }
     fn place(&self, shared: &Shared<C>, ready: Ready<C>) {
         match ready.home {
-            Some(h) => lock(&shared.workers[h].pinned).push_back(ready),
-            None => lock(&shared.workers[self.index].queue).push_back(ready),
+            Some(h) => {
+                let w = &shared.workers[h];
+                WorkerShared::push_pinned(&mut lock(&w.pinned), &w.pinned_len, ready);
+            }
+            None => self.local().push(ready),
         }
     }
     fn harvest(&mut self, shared: &Shared<C>, wait: bool) {
@@ -862,8 +1022,9 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
         let lost = self.fiber_io();
         self.abandoned += lost;
         let me = &shared.workers[self.index];
-        let mut moved: Vec<Ready<C>> = lock(&me.queue).drain(..).collect();
-        moved.extend(lock(&me.lifo).take());
+        let mut moved: Vec<Ready<C>> = std::iter::from_fn(|| self.local().pop()).collect();
+        moved.extend(me.take_spill());
+        moved.extend(me.take_lifo());
         // Pinned fibers cannot move and nobody else may run them: they stay
         // queued, come back as stranded, and no longer count as live.
         let pinned = {
@@ -873,10 +1034,14 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
         };
         let others = shared.active.fetch_sub(1, SeqCst) > 1;
         if others {
-            lock(&shared.injector).extend(moved);
+            for r in moved {
+                shared.injector.push(r);
+            }
             shared.finish(lost + pinned);
         } else {
-            lock(&me.queue).extend(moved);
+            for r in moved {
+                self.local().push(r);
+            }
             // Nobody is left to run anything: end the run.
             shared.done.store(true, SeqCst);
         }
@@ -894,17 +1059,20 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
             if victim == self.index {
                 continue;
             }
-            let mut q = lock(&shared.workers[victim].queue);
-            if q.is_empty() {
+            // Takes about half of the victim's queue (at most 32), runs the
+            // first and keeps the rest on this worker's deque.
+            let before = self.local().len();
+            let Some(first) = settle(|| {
+                shared.workers[victim]
+                    .stealer
+                    .steal_batch_and_pop(self.local())
+            }) else {
                 continue;
-            }
-            let take = q.len().div_ceil(2);
-            let mut taken: VecDeque<Ready<C>> = q.drain(..take).collect();
-            drop(q);
-            let first = taken.pop_front().expect("took at least one");
-            self.stats.stolen += 1 + taken.len() as u64;
-            if !taken.is_empty() {
-                lock(&shared.workers[self.index].queue).extend(taken);
+            };
+            let extra = self.local().len().saturating_sub(before);
+            self.stats.stolen += 1 + extra as u64;
+            if extra > 0 {
+                shared.notify_one();
             }
             return Some((first, Some(victim)));
         }
@@ -916,28 +1084,28 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
         // Every 61st pick serves the injector first, so external spawns are
         // never starved by a busy local queue.
         if self.ticks.is_multiple_of(61)
-            && let Some(r) = lock(&shared.injector).pop_front()
+            && let Some(r) = settle(|| shared.injector.steal())
         {
             return Some((r, None));
         }
         if self.lifo_streak < MAX_LIFO_STREAK
-            && let Some(r) = lock(&me.lifo).take()
+            && let Some(r) = me.take_lifo()
         {
             self.lifo_streak += 1;
             return Some((r, None));
         }
         self.lifo_streak = 0;
-        let local = || lock(&me.queue).pop_front();
-        let pinned = || lock(&me.pinned).pop_front();
+        let local = || self.local().pop();
+        let pinned = || me.pop_pinned();
         let own = if self.ticks.is_multiple_of(2) {
             pinned().or_else(local)
         } else {
             local().or_else(pinned)
         };
-        if let Some(r) = own.or_else(|| lock(&me.lifo).take()) {
+        if let Some(r) = own.or_else(|| me.take_lifo()) {
             return Some((r, None));
         }
-        if let Some(r) = lock(&shared.injector).pop_front() {
+        if let Some(r) = settle(|| shared.injector.steal()) {
             return Some((r, None));
         }
         self.take_stolen(shared)
@@ -971,13 +1139,18 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
         CURRENT.with(|c| c.set(Some((shared.identity(), self.index))));
         let step = continuation.resume(event);
         CURRENT.with(|c| c.set(None));
+        self.flush_spill(shared);
         match step {
             Step::Complete(value) => {
-                self.completed.push((id, value));
+                if shared.keep_results {
+                    self.completed.push((id, value));
+                }
                 shared.finish_one();
             }
             Step::Failed(error) => {
-                self.failures.push((id, error));
+                if shared.keep_results {
+                    self.failures.push((id, error));
+                }
                 shared.finish_one();
             }
             Step::Yield(next) => {
@@ -990,7 +1163,7 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
                         event: Event::Yield,
                     },
                 );
-                if lock(&shared.workers[self.index].queue).len() > 1 {
+                if self.local().len() > 1 {
                     shared.notify_one();
                 }
             }
@@ -1119,6 +1292,7 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
     /// and keep only the results.
     fn close(mut self, shared: &Shared<C>) -> WorkerResult {
         *lock(&shared.workers[self.index].wake) = None;
+        *lock(&shared.workers[self.index].owner) = self.local.take();
         if let Some(driver) = self.driver.take() {
             self.release(driver);
         }
@@ -1150,6 +1324,14 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
             }
         }
     }
+}
+
+/// Pin the calling thread to the `i`-th core (round robin). Returns the
+/// core's ID when the OS accepted the request.
+fn pin_current_thread(i: usize) -> Option<usize> {
+    let cores = core_affinity::get_core_ids()?;
+    let core = *cores.get(i % cores.len().max(1))?;
+    core_affinity::set_for_current(core).then_some(core.id)
 }
 
 fn wake_pipe() -> io::Result<(File, File)> {
@@ -1227,10 +1409,25 @@ impl<C: Resume> Pool<C> {
         D: CompletionDriver<Task<C>>,
         F: Fn(usize) -> io::Result<D> + Sync,
     {
+        self.run_threads(factory, None)
+    }
+
+    /// `started`, if given, is told once whether every worker started.
+    fn run_threads<D, F>(
+        self,
+        factory: F,
+        started: Option<&(dyn Fn(bool) + Sync)>,
+    ) -> Result<PoolOutput, RunError<C>>
+    where
+        C: Send,
+        D: CompletionDriver<Task<C>>,
+        F: Fn(usize) -> io::Result<D> + Sync,
+    {
         let n = self.config.workers;
         let shared = &self.shared;
         let wakeup = self.config.driver_wakeup;
         let seed = self.config.seed;
+        let pin = self.config.pin_cores;
         let startup = StartupGate::new(n);
         let setup: Mutex<Option<(usize, io::Error)>> = Mutex::new(None);
         shared.active.store(n, SeqCst);
@@ -1275,8 +1472,13 @@ impl<C: Resume> Pool<C> {
                                 (None, Some(payload))
                             }
                         };
-                        let ready = startup.wait();
-                        if !ready || lock(setup).is_some() {
+                        let ready = startup.wait() && lock(setup).is_none();
+                        if i == 0
+                            && let Some(signal) = started
+                        {
+                            signal(ready);
+                        }
+                        if !ready {
                             *lock(&shared.workers[i].wake) = None;
                             drop(built);
                             if let Some(payload) = panicked {
@@ -1285,7 +1487,10 @@ impl<C: Resume> Pool<C> {
                             return None;
                         }
                         let (driver, reader) = built?;
-                        let mut worker = Worker::new(i, driver, seed, false);
+                        let mut worker = Worker::new(shared, i, driver, seed, false);
+                        if pin {
+                            worker.stats.pinned_core = pin_current_thread(i);
+                        }
                         worker.wake_reader = reader;
                         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
                             while !shared.done.load(SeqCst) && !worker.gave_up {
@@ -1330,6 +1535,8 @@ impl<C: Resume> Pool<C> {
             panic::resume_unwind(payload);
         }
         if let Some((worker, error)) = lock(&setup).take() {
+            // Workers that never ran left their deques in place; nothing was
+            // pushed onto them.
             shared.started.store(false, SeqCst);
             shared.done.store(false, SeqCst);
             return Err(RunError::Setup {
@@ -1352,11 +1559,14 @@ impl<C: Resume> Pool<C> {
         F: FnMut(usize) -> io::Result<D>,
     {
         let n = self.config.workers;
-        let mut workers = Vec::with_capacity(n);
+        let mut workers: Vec<Worker<C, D>> = Vec::with_capacity(n);
         for i in 0..n {
             match factory(i) {
-                Ok(d) => workers.push(Worker::new(i, d, self.config.seed, true)),
+                Ok(d) => workers.push(Worker::new(&self.shared, i, d, self.config.seed, true)),
                 Err(error) => {
+                    for mut w in workers {
+                        *lock(&self.shared.workers[w.index].owner) = w.local.take();
+                    }
                     return Err(RunError::Setup {
                         worker: i,
                         error,
@@ -1415,6 +1625,133 @@ impl<C: Resume> Pool<C> {
         let results = workers.into_iter().map(|w| w.close(&shared)).collect();
         let out = Self::output(results, false, Some(order));
         self.finish_run(out)
+    }
+}
+
+impl<C: Resume + Send + 'static> Pool<C> {
+    /// Start the workers on their own OS threads and return at once with a
+    /// handle to the running pool. Unlike [`run`](Pool::run), the pool does
+    /// not end when it runs out of fibers: idle workers park and wake for
+    /// fibers spawned later from any thread (through
+    /// [`RunningPool::spawner`]), until [`RunningPool::shutdown`].
+    ///
+    /// Returns once every worker's driver is built. If one cannot be, no
+    /// fiber has run and the error carries the pool back.
+    pub fn start<D, F>(self, factory: F) -> Result<RunningPool<C>, RunError<C>>
+    where
+        D: CompletionDriver<Task<C>> + 'static,
+        F: Fn(usize) -> io::Result<D> + Send + Sync + 'static,
+    {
+        let shared = Arc::clone(&self.shared);
+        let config = self.config.clone();
+        shared.set_open();
+        let (tx, rx) = std::sync::mpsc::channel::<bool>();
+        let supervisor = std::thread::Builder::new()
+            .name("pulse-pool".into())
+            .spawn(move || {
+                let signal = move |ok: bool| {
+                    let _ = tx.send(ok);
+                };
+                self.run_threads(factory, Some(&signal))
+            });
+        let supervisor = match supervisor {
+            Ok(handle) => handle,
+            Err(error) => {
+                shared.live.fetch_and(!OPEN, SeqCst);
+                let pool = Pool { config, shared };
+                return Err(RunError::Setup {
+                    worker: 0,
+                    error,
+                    pool,
+                });
+            }
+        };
+        let mut running = RunningPool {
+            spawner: Spawner {
+                shared: Arc::downgrade(&shared),
+            },
+            shared,
+            supervisor: Some(supervisor),
+        };
+        if rx.recv().unwrap_or(false) {
+            return Ok(running);
+        }
+        // Setup failed: the run ends without running anything.
+        match running.join() {
+            Err(RunError::Setup {
+                worker,
+                error,
+                pool,
+            }) => {
+                pool.shared.live.fetch_and(!OPEN, SeqCst);
+                Err(RunError::Setup {
+                    worker,
+                    error,
+                    pool,
+                })
+            }
+            Err(other) => Err(other),
+            Ok(_) => unreachable!("a pool whose setup failed cannot finish a run"),
+        }
+    }
+}
+
+/// A pool running on its own threads, from [`Pool::start`]. It stays alive
+/// while idle and takes fibers from any thread until
+/// [`shutdown`](RunningPool::shutdown); dropping it shuts it down too (and
+/// discards the output; a worker's panic is then lost).
+pub struct RunningPool<C> {
+    shared: Arc<Shared<C>>,
+    spawner: Spawner<C>,
+    supervisor: Option<std::thread::JoinHandle<Result<PoolOutput, RunError<C>>>>,
+}
+
+impl<C> RunningPool<C> {
+    /// A spawner that works from any thread, inside or outside the pool.
+    pub fn spawner(&self) -> Spawner<C> {
+        self.spawner.clone()
+    }
+    pub fn spawn(&self, continuation: C) -> Result<FiberId, (PoolError, C)> {
+        self.spawner.spawn(continuation)
+    }
+    pub fn spawn_pinned(&self, worker: usize, continuation: C) -> Result<FiberId, (PoolError, C)> {
+        self.spawner.spawn_pinned(worker, continuation)
+    }
+    pub fn cancel(&self) {
+        self.shared.cancel();
+    }
+    pub fn workers(&self) -> usize {
+        self.shared.workers.len()
+    }
+    /// Fibers spawned and not yet finished.
+    pub fn live(&self) -> usize {
+        self.shared.live_count()
+    }
+    /// Stop taking new work once the live fibers have finished, wait for
+    /// them (fibers may still spawn children until then), and return what
+    /// the run produced. A worker's panic is re-raised here.
+    pub fn shutdown(mut self) -> Result<PoolOutput, RunError<C>> {
+        self.join()
+    }
+    fn join(&mut self) -> Result<PoolOutput, RunError<C>> {
+        self.shared.close_open();
+        let handle = self
+            .supervisor
+            .take()
+            .expect("a running pool is joined once");
+        match handle.join() {
+            Ok(result) => result,
+            Err(payload) => panic::resume_unwind(payload),
+        }
+    }
+}
+
+impl<C> Drop for RunningPool<C> {
+    fn drop(&mut self) {
+        if let Some(handle) = self.supervisor.take() {
+            self.shared.close_open();
+            let _ = handle.join();
+        }
     }
 }
 

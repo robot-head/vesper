@@ -51,6 +51,7 @@ members = [
     "crates/vesper-aether",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
+    "crates/vesper-pact/seed",
     "crates/vesper-pact-bridge",
     "crates/vesper-pact-binding",
     "crates/vesper-loom-cas",
@@ -143,6 +144,7 @@ default-members = [
     "crates/vesper-aether",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
+    "crates/vesper-pact/seed",
     "crates/vesper-pact-bridge",
     "crates/vesper-pact-binding",
     "crates/vesper-loom-cas",
@@ -197,6 +199,8 @@ rowan = "0.16"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 io-uring = "0.7"
+crossbeam-deque = "=0.8.8"
+core_affinity = "=0.8.3"
 aes = { version = "=0.8.4", features = ["zeroize"] }
 aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes", "zeroize"] }
 chacha20 = { version = "=0.9.1", features = ["zeroize"] }
@@ -259,7 +263,7 @@ vesper-loom-admission = { path = "crates/vesper-loom-admission" }
 # The compiler links the frozen Rust seed copy of vesper-loom-audit (#1039).
 vesper-loom-audit = { path = "crates/vesper-loom-audit/seed", package = "vesper-loom-audit-seed" }
 vesper-loom-cas = { path = "crates/vesper-loom-cas" }
-vesper-pact = { path = "crates/vesper-pact" }
+vesper-pact = { path = "crates/vesper-pact/seed", package = "vesper-pact-seed" }
 vesper-pact-binding = { path = "crates/vesper-pact-binding" }
 # Integration B (#136): wave-five verifiers and tools wired into the CLI.
 vesper-aegis = { path = "crates/vesper-aegis" }

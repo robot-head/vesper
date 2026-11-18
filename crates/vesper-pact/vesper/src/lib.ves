@@ -1,0 +1,437 @@
+// @vesper/pact: Vesper port of vesper-pact (port wave P3a lane 3, #1038),
+// canonical trait goals and tabled trait resolution (design §16.2-16.3).
+//
+// All state lives in one handle `S`: a hash-consed node arena (term.ves),
+// the decoded program tables (program.ves), diagnostics with their text in
+// `txt` (diag.ves), the solver's answer table and stack (solver.ves) and
+// the result words `out` (out.ves). The Rust wrapper (src/port.rs) encodes
+// the DTOs as words, calls one entry point below and rebuilds its own types
+// from `out` and `txt`.
+//
+// Modules: term (arena), fold (folds and substitutions), infer
+// (unification), canon (canonicalization), mode (modal bounds), render
+// (Display and Debug text), diag (diagnostics), program (decoding and
+// validation), solver (resolution), query (`Solver::solve`), coherence,
+// deriv (`check_derivation`) and out (result words).
+use self::term::{
+    inc,
+    new_arena
+};
+use self::program::{
+    index_impls,
+    rd_der,
+    rd_env,
+    rd_program,
+    rd_query,
+    validate_program
+};
+use self::diag::{
+    sort_diags,
+    truncate_diags
+};
+use self::query::{
+    reset_solver,
+    solve_query
+};
+use self::coherence::{
+    check_coherence
+};
+use self::canon::{
+    binders_slist,
+    canon_free,
+    canon_placeholders
+};
+use self::deriv::{
+    check_derivation
+};
+use self::out::{
+    w,
+    w_diags,
+    w_env,
+    w_outcome,
+    w_slist,
+    w_term
+};
+
+pub struct S {
+    tg: ChunkSeq[u64],
+    fa: ChunkSeq[u64],
+    fb: ChunkSeq[u64],
+    fc: ChunkSeq[u64],
+    ls: ChunkSeq[u64],
+    ln: ChunkSeq[u64],
+    fl: ChunkSeq[u64],
+    hs: ChunkSeq[u64],
+    kids: ChunkSeq[u64],
+    ht: ChunkSeq[u64],
+    tmp: ChunkSeq[u64],
+    ford: ChunkSeq[u64],
+    cn_key: ChunkSeq[u64],
+    cn_val: ChunkSeq[u64],
+    cn_stamp: ChunkSeq[u64],
+    cn_binders: ChunkSeq[u64],
+    cn_origins: ChunkSeq[u64],
+    dg_code: ChunkSeq[u64],
+    dg_sv: ChunkSeq[u64],
+    dg_sa: ChunkSeq[u64],
+    dg_sb: ChunkSeq[u64],
+    dg_off: ChunkSeq[u64],
+    dg_len: ChunkSeq[u64],
+    pk_id: ChunkSeq[u64],
+    ct_id: ChunkSeq[u64],
+    ct_pkg: ChunkSeq[u64],
+    ct_params: ChunkSeq[u64],
+    ct_base: ChunkSeq[u64],
+    ct_joins: ChunkSeq[u64],
+    ef_id: ChunkSeq[u64],
+    ef_pkg: ChunkSeq[u64],
+    ef_params: ChunkSeq[u64],
+    tr_id: ChunkSeq[u64],
+    tr_pkg: ChunkSeq[u64],
+    tr_params: ChunkSeq[u64],
+    tr_as_at: ChunkSeq[u64],
+    tr_as_n: ChunkSeq[u64],
+    tr_coind: ChunkSeq[u64],
+    as_mode: ChunkSeq[u64],
+    as_bd_at: ChunkSeq[u64],
+    as_bd_n: ChunkSeq[u64],
+    bd_trait: ChunkSeq[u64],
+    bd_args: ChunkSeq[u64],
+    bd_brand: ChunkSeq[u64],
+    cf_id: ChunkSeq[u64],
+    cf_pkg: ChunkSeq[u64],
+    cf_params: ChunkSeq[u64],
+    cf_tref: ChunkSeq[u64],
+    cf_where: ChunkSeq[u64],
+    cf_vals: ChunkSeq[u64],
+    ib: ChunkSeq[u64],
+    ib_at: ChunkSeq[u64],
+    ib_n: ChunkSeq[u64],
+    seen: ChunkSeq[u64],
+    atoms: ChunkSeq[u64],
+    ck_env: ChunkSeq[u64],
+    ck_goal: ChunkSeq[u64],
+    ck_val: ChunkSeq[u64],
+    sk_env: ChunkSeq[u64],
+    sk_goal: ChunkSeq[u64],
+    sk_co: ChunkSeq[u64],
+    sk_pco: ChunkSeq[u64],
+    sk_pind: ChunkSeq[u64],
+    sk_uco: ChunkSeq[u64],
+    sk_uind: ChunkSeq[u64],
+    sk_min: ChunkSeq[u64],
+    ph_src: ChunkSeq[u64],
+    ph_val: ChunkSeq[u64],
+    de_path: ChunkSeq[u64],
+    path: ChunkSeq[u64],
+    anc: ChunkSeq[u64],
+    out: ChunkSeq[u64],
+    txt: ChunkSeq[u8],
+    hmask: u64,
+    hcount: u64,
+    ferr: u64,
+    rerr: u64,
+    dkey: u64,
+    fsub: u64,
+    cn_gen: u64,
+    cn_mask: u64,
+    nimpl: u64,
+    nmodel: u64,
+    smaj: u64,
+    smin: u64,
+    pos: u64,
+    sc_kind: u64,
+    sc_params: u64,
+    sc_phs: u64,
+    sc_binders: u64,
+    vatom: u64,
+    ck_mask: u64,
+    ck_count: u64,
+    st_evals: u64,
+    st_hits: u64,
+    st_cocyc: u64,
+    st_indcyc: u64,
+    st_reruns: u64,
+    max_depth: u64,
+    max_steps: u64,
+    max_fix: u64,
+    steps: u64,
+    cenv: u64,
+    cgoal: u64,
+    corigin: u64,
+    qmaj: u64,
+    qmin: u64,
+    qenv: u64,
+    qbinders: u64,
+    qgoal: u64,
+    de_off: u64,
+    rp_d: u64,
+    rp_next: u64,
+    rp_end: u64,
+    de_failed: bool,
+    oob: bool,
+    rp_ok: bool
+}
+
+fn new_s() -> S {
+    let mut s = S {
+        tg: ChunkSeq::new[u64](),
+        fa: ChunkSeq::new[u64](),
+        fb: ChunkSeq::new[u64](),
+        fc: ChunkSeq::new[u64](),
+        ls: ChunkSeq::new[u64](),
+        ln: ChunkSeq::new[u64](),
+        fl: ChunkSeq::new[u64](),
+        hs: ChunkSeq::new[u64](),
+        kids: ChunkSeq::new[u64](),
+        ht: ChunkSeq::new[u64](),
+        tmp: ChunkSeq::new[u64](),
+        ford: ChunkSeq::new[u64](),
+        cn_key: ChunkSeq::new[u64](),
+        cn_val: ChunkSeq::new[u64](),
+        cn_stamp: ChunkSeq::new[u64](),
+        cn_binders: ChunkSeq::new[u64](),
+        cn_origins: ChunkSeq::new[u64](),
+        dg_code: ChunkSeq::new[u64](),
+        dg_sv: ChunkSeq::new[u64](),
+        dg_sa: ChunkSeq::new[u64](),
+        dg_sb: ChunkSeq::new[u64](),
+        dg_off: ChunkSeq::new[u64](),
+        dg_len: ChunkSeq::new[u64](),
+        pk_id: ChunkSeq::new[u64](),
+        ct_id: ChunkSeq::new[u64](),
+        ct_pkg: ChunkSeq::new[u64](),
+        ct_params: ChunkSeq::new[u64](),
+        ct_base: ChunkSeq::new[u64](),
+        ct_joins: ChunkSeq::new[u64](),
+        ef_id: ChunkSeq::new[u64](),
+        ef_pkg: ChunkSeq::new[u64](),
+        ef_params: ChunkSeq::new[u64](),
+        tr_id: ChunkSeq::new[u64](),
+        tr_pkg: ChunkSeq::new[u64](),
+        tr_params: ChunkSeq::new[u64](),
+        tr_as_at: ChunkSeq::new[u64](),
+        tr_as_n: ChunkSeq::new[u64](),
+        tr_coind: ChunkSeq::new[u64](),
+        as_mode: ChunkSeq::new[u64](),
+        as_bd_at: ChunkSeq::new[u64](),
+        as_bd_n: ChunkSeq::new[u64](),
+        bd_trait: ChunkSeq::new[u64](),
+        bd_args: ChunkSeq::new[u64](),
+        bd_brand: ChunkSeq::new[u64](),
+        cf_id: ChunkSeq::new[u64](),
+        cf_pkg: ChunkSeq::new[u64](),
+        cf_params: ChunkSeq::new[u64](),
+        cf_tref: ChunkSeq::new[u64](),
+        cf_where: ChunkSeq::new[u64](),
+        cf_vals: ChunkSeq::new[u64](),
+        ib: ChunkSeq::new[u64](),
+        ib_at: ChunkSeq::new[u64](),
+        ib_n: ChunkSeq::new[u64](),
+        seen: ChunkSeq::new[u64](),
+        atoms: ChunkSeq::new[u64](),
+        ck_env: ChunkSeq::new[u64](),
+        ck_goal: ChunkSeq::new[u64](),
+        ck_val: ChunkSeq::new[u64](),
+        sk_env: ChunkSeq::new[u64](),
+        sk_goal: ChunkSeq::new[u64](),
+        sk_co: ChunkSeq::new[u64](),
+        sk_pco: ChunkSeq::new[u64](),
+        sk_pind: ChunkSeq::new[u64](),
+        sk_uco: ChunkSeq::new[u64](),
+        sk_uind: ChunkSeq::new[u64](),
+        sk_min: ChunkSeq::new[u64](),
+        ph_src: ChunkSeq::new[u64](),
+        ph_val: ChunkSeq::new[u64](),
+        de_path: ChunkSeq::new[u64](),
+        path: ChunkSeq::new[u64](),
+        anc: ChunkSeq::new[u64](),
+        out: ChunkSeq::new[u64](),
+        txt: ChunkSeq::new[u8](),
+        hmask: 0,
+        hcount: 0,
+        ferr: 18446744073709551615,
+        rerr: 18446744073709551615,
+        dkey: 0,
+        fsub: 0,
+        cn_gen: 0,
+        cn_mask: 0,
+        nimpl: 0,
+        nmodel: 0,
+        smaj: 0,
+        smin: 0,
+        pos: 0,
+        sc_kind: 0,
+        sc_params: 0,
+        sc_phs: 0,
+        sc_binders: 0,
+        vatom: 0,
+        ck_mask: 0,
+        ck_count: 0,
+        st_evals: 0,
+        st_hits: 0,
+        st_cocyc: 0,
+        st_indcyc: 0,
+        st_reruns: 0,
+        max_depth: 48,
+        max_steps: 100000,
+        max_fix: 16,
+        steps: 0,
+        cenv: 0,
+        cgoal: 0,
+        corigin: 0,
+        qmaj: 0,
+        qmin: 0,
+        qenv: 0,
+        qbinders: 0,
+        qgoal: 0,
+        de_off: 0,
+        rp_d: 0,
+        rp_next: 0,
+        rp_end: 0,
+        de_failed: false,
+        oob: false,
+        rp_ok: false
+    };
+    new_arena(inout s);
+    let mut i: u64 = 0;
+    loop {
+        if i >= 64 {
+            break;
+        }
+        s.cn_key.push(0);
+        s.cn_val.push(0);
+        s.cn_stamp.push(0);
+        i = inc(i);
+    }
+    s.cn_mask = 63;
+    s
+}
+
+// A validated program, decoded and indexed.
+fn load(in words: Slice[u64]) -> S {
+    let mut s = new_s();
+    rd_program(inout s, in words);
+    index_impls(inout s);
+    s
+}
+
+// `Program::new`: out is the sorted diagnostics (none when valid).
+pub fn program_check(in words: Slice[u64]) -> S {
+    let mut s = new_s();
+    rd_program(inout s, in words);
+    validate_program(inout s);
+    sort_diags(inout s, 0);
+    w_diags(inout s, 0);
+    s
+}
+
+// `check_coherence` of a validated program: out is the sorted diagnostics.
+pub fn coherence(in words: Slice[u64]) -> S {
+    let mut s = load(in words);
+    check_coherence(inout s);
+    w_diags(inout s, 0);
+    s
+}
+
+// `Solver::with_config` over a validated program.
+pub fn solver_new(in words: Slice[u64], max_depth: u64, max_steps: u64, max_fix: u64) -> S {
+    let mut s = load(in words);
+    s.max_depth = max_depth;
+    s.max_steps = max_steps;
+    s.max_fix = max_fix;
+    reset_solver(inout s);
+    s
+}
+
+// `Solver::solve`: out is `0 outcome`, `1 diagnostics`, or `2` when the
+// query names a placeholder the environment does not declare (the Rust
+// build panics there).
+pub fn s_solve(inout s: S, in query: Slice[u64]) {
+    s.out.clear();
+    s.txt.clear();
+    s.pos = 0;
+    rd_query(inout s, in query);
+    let base = s.dg_code.len();
+    let maj = s.qmaj;
+    let min = s.qmin;
+    let env = s.qenv;
+    let binders = s.qbinders;
+    let goal = s.qgoal;
+    s.oob = false;
+    let r = solve_query(inout s, maj, min, env, binders, goal);
+    if s.oob {
+        w(inout s, 2);
+    } else if r == 0 {
+        w(inout s, 1);
+        w_diags(inout s, base);
+    } else {
+        w(inout s, 0);
+        w_outcome(inout s, r);
+    }
+    truncate_diags(inout s, base);
+}
+
+// `canonicalize_query`: out is `0 env binders goal`, `1 key` on a
+// duplicate label, or `2` on an undeclared placeholder.
+pub fn canonicalize(in query: Slice[u64]) -> S {
+    let mut s = new_s();
+    rd_query(inout s, in query);
+    let env = s.qenv;
+    let goal = s.qgoal;
+    if !canon_placeholders(inout s, env, goal) {
+        w(inout s, 1);
+        let k = s.dkey;
+        w(inout s, k);
+        return s;
+    }
+    if s.oob {
+        w(inout s, 2);
+        return s;
+    }
+    let cg = s.cgoal;
+    let g = canon_free(inout s, cg);
+    if g == 0 {
+        w(inout s, 1);
+        let k = s.dkey;
+        w(inout s, k);
+        return s;
+    }
+    let b = binders_slist(inout s);
+    w(inout s, 0);
+    let ce = s.cenv;
+    w_env(inout s, ce);
+    w_slist(inout s, b);
+    w_term(inout s, g);
+    s
+}
+
+// `check_derivation`: the program, an environment and a derivation. out
+// is `0` when it checks, else `1 n index*` with the message in txt.
+pub fn derivation(in words: Slice[u64]) -> S {
+    let mut s = load(in words);
+    let env = rd_env(inout s, in words);
+    let d = rd_der(inout s, in words);
+    if check_derivation(inout s, env, d) {
+        w(inout s, 0);
+    } else {
+        w(inout s, 1);
+        let n = s.de_path.len();
+        w(inout s, n);
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let x = match s.de_path.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0
+            };
+            w(inout s, x);
+            i = inc(i);
+        }
+        let off = s.de_off;
+        w(inout s, off);
+    }
+    s
+}

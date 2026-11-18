@@ -1,0 +1,222 @@
+// Module canon of @vesper/pact (see lib.ves): `canon.rs`, canonical goals
+// and environments, and the variable visitor (`visit_goal_vars`).
+use self::{
+    S
+};
+use self::term::{
+    fa,
+    fb,
+    fc,
+    inc,
+    kid,
+    mk,
+    mkl,
+    nlen,
+    none,
+    sw,
+    tg,
+    vidx,
+    vkind
+};
+use self::fold::{
+    cn_begin,
+    run
+};
+use self::program::{
+    row_dup
+};
+
+fn on_var(inout s: S, v: u64, what: u64) {
+    if what == 0 {
+        if vkind(v) == 0 && vidx(v) < s.seen.len() {
+            let _ = s.seen.try_set(vidx(v), 1);
+        }
+    } else if vkind(v) == 1 {
+        let i = vidx(v);
+        let n = s.ford.len();
+        let mut j: u64 = 0;
+        loop {
+            if j >= n {
+                break;
+            }
+            if sw(in s.ford, j) == i {
+                return;
+            }
+            j = inc(j);
+        }
+        s.ford.push(i);
+    }
+}
+
+// Visits every variable of n in fold order: `what` 0 marks `^i` in
+// s.seen, 1 appends unseen placeholders to s.ford. Returns false where the
+// fold would stop (a row repeating a label), as the Rust visitor does.
+pub fn visit(inout s: S, n: u64, what: u64) -> bool {
+    let t = tg(in s, n);
+    if t == 2 || t == 5 || t == 9 || t == 10 || t == 12 {
+        let v = fa(in s, n);
+        on_var(inout s, v, what);
+        return true;
+    }
+    if t == 6 {
+        let len = nlen(in s, n);
+        let mut i: u64 = 0;
+        loop {
+            if i >= len {
+                break;
+            }
+            let l = kid(in s, n, i);
+            if !visit(inout s, l, what) {
+                return false;
+            }
+            i = inc(i);
+        }
+        let tail = fa(in s, n);
+        if tail != none() {
+            on_var(inout s, tail, what);
+        }
+        return row_dup(in s, n) == none();
+    }
+    if t == 3 || (t >= 14 && t <= 16) {
+        let a = fa(in s, n);
+        if !visit(inout s, a, what) {
+            return false;
+        }
+        let b = fb(in s, n);
+        return visit(inout s, b, what);
+    }
+    if t == 13 {
+        let b = fb(in s, n);
+        if !visit(inout s, b, what) {
+            return false;
+        }
+    }
+    if t == 1 || t == 11 || t == 13 {
+        let len = nlen(in s, n);
+        let mut i: u64 = 0;
+        loop {
+            if i >= len {
+                break;
+            }
+            let k = kid(in s, n, i);
+            if !visit(inout s, k, what) {
+                return false;
+            }
+            i = inc(i);
+        }
+    }
+    true
+}
+
+// `canonicalize_placeholders`: placeholders renumbered in first-occurrence
+// order (goal first, then assumptions), unused placeholders and empty model
+// scopes dropped. Sets s.cenv, s.cgoal and s.corigin (an slist); false on a
+// duplicate label (s.dkey). s.oob is set when a placeholder index is out
+// of range (the Rust build panics there).
+pub fn canon_placeholders(inout s: S, env: u64, goal: u64) -> bool {
+    s.ford.clear();
+    let _ = visit(inout s, goal, 1);
+    let asm = fb(in s, env);
+    let na = nlen(in s, asm);
+    let mut i: u64 = 0;
+    loop {
+        if i >= na {
+            break;
+        }
+        let a = kid(in s, asm, i);
+        let _ = visit(inout s, a, 1);
+        i = inc(i);
+    }
+    let e = ChunkSeq::new[u64]();
+    let g = run(inout s, in e, 6, goal);
+    if g == 0 {
+        return false;
+    }
+    let from = s.tmp.len();
+    i = 0;
+    loop {
+        if i >= na {
+            break;
+        }
+        let a = kid(in s, asm, i);
+        let x = run(inout s, in e, 6, a);
+        if x == 0 {
+            s.tmp.truncate(from);
+            return false;
+        }
+        s.tmp.push(x);
+        i = inc(i);
+    }
+    let asm2 = mkl(inout s, 27, 0, 0, 0, from);
+    let phs = fa(in s, env);
+    let nph = nlen(in s, phs);
+    let no = s.ford.len();
+    let f2 = s.tmp.len();
+    let mut j: u64 = 0;
+    loop {
+        if j >= no {
+            break;
+        }
+        let o = sw(in s.ford, j);
+        if o >= nph {
+            s.oob = true;
+        }
+        let p = kid(in s, phs, o);
+        s.tmp.push(p);
+        j = inc(j);
+    }
+    let phs2 = mkl(inout s, 27, 0, 0, 0, f2);
+    let scopes = fc(in s, env);
+    let ns = nlen(in s, scopes);
+    let f3 = s.tmp.len();
+    j = 0;
+    loop {
+        if j >= ns {
+            break;
+        }
+        let sc = kid(in s, scopes, j);
+        if nlen(in s, sc) > 0 {
+            s.tmp.push(sc);
+        }
+        j = inc(j);
+    }
+    let scopes2 = mkl(inout s, 27, 0, 0, 0, f3);
+    s.cenv = mk(inout s, 55, phs2, asm2, scopes2);
+    s.cgoal = g;
+    let f4 = s.tmp.len();
+    j = 0;
+    loop {
+        if j >= no {
+            break;
+        }
+        let o = sw(in s.ford, j);
+        s.tmp.push(o);
+        j = inc(j);
+    }
+    s.corigin = mkl(inout s, 28, 0, 0, 0, f4);
+    true
+}
+
+// Inference variables renumbered without a context (`Canonicalizer::new(
+// None)`): the canonical node, or 0 with s.dkey; binders in s.cn_binders.
+pub fn canon_free(inout s: S, n: u64) -> u64 {
+    cn_begin(inout s);
+    let e = ChunkSeq::new[u64]();
+    run(inout s, in e, 3, n)
+}
+
+// The binders of the last canonicalization as an slist.
+pub fn binders_slist(inout s: S) -> u64 {
+    let from = s.tmp.len();
+    let n = s.cn_binders.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let k = sw(in s.cn_binders, i);
+        s.tmp.push(k);
+        i = inc(i);
+    }
+    mkl(inout s, 28, 0, 0, 0, from)
+}

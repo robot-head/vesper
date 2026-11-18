@@ -1,0 +1,377 @@
+// Module infer of @vesper/pact (see lib.ves): `infer.rs`, the inference
+// context and first-order unification of types, modes, rows and brands.
+//
+// A context is a `ChunkSeq[u64]` of slots: `kind | (value + 1) << 3`, value
+// 0 meaning unbound. Cloning a context copies its words.
+//
+// Unification results: 0 success, 1 mismatch, 2 ambiguous (rigid
+// projections with inference variables), 3 duplicate label (key in
+// s.dkey).
+use self::{
+    S
+};
+use self::term::{
+    add,
+    dec,
+    fa,
+    fb,
+    flags,
+    inc,
+    is_inf,
+    kid,
+    kind_of,
+    label_key,
+    mk,
+    mkl,
+    nlen,
+    none,
+    setw,
+    sw,
+    tg,
+    var_arg,
+    vidx,
+    vinf
+};
+use self::fold::{
+    cx_val,
+    occurs,
+    resolve
+};
+
+pub fn new_var(inout cx: ChunkSeq[u64], kind: u64) -> u64 {
+    let i = cx.len();
+    cx.push(kind);
+    vinf(i)
+}
+
+pub fn clone_cx(in cx: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let mut c = ChunkSeq::with_capacity[u64](add(cx.len(), 4));
+    c.extend(in cx.as_slice());
+    c
+}
+
+// Fresh variables for the kinds in the slist `kinds`, as a list node.
+pub fn fresh_args(inout s: S, inout cx: ChunkSeq[u64], kinds: u64) -> u64 {
+    let n = nlen(in s, kinds);
+    let from = s.tmp.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let k = kid(in s, kinds, i);
+        let v = new_var(inout cx, k);
+        let a = var_arg(inout s, k, v);
+        s.tmp.push(a);
+        i = inc(i);
+    }
+    mkl(inout s, 27, 0, 0, 0, from)
+}
+
+fn bind(inout cx: ChunkSeq[u64], i: u64, value: u64) {
+    let w = sw(in cx, i);
+    setw(inout cx, i, (w & 7) | (inc(value) << 3));
+}
+
+pub fn unify_args(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
+    let n = nlen(in s, a);
+    if n != nlen(in s, b) {
+        return 1;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let x = kid(in s, a, i);
+        let y = kid(in s, b, i);
+        let r = unify_arg(inout s, inout cx, x, y);
+        if r != 0 {
+            return r;
+        }
+        i = inc(i);
+    }
+    0
+}
+
+// Kind classes of argument tags: 0 type, 1 mode, 2 row, 3 brand, 4 cap.
+fn class(tag: u64) -> u64 {
+    kind_of(tag)
+}
+
+pub fn unify_arg(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
+    let ka = class(tg(in s, a));
+    if ka != class(tg(in s, b)) {
+        return 1;
+    }
+    if ka == 0 {
+        unify_ty(inout s, inout cx, a, b)
+    } else if ka == 1 {
+        unify_mode(inout s, inout cx, a, b)
+    } else if ka == 2 {
+        unify_row(inout s, inout cx, a, b)
+    } else if ka == 3 {
+        unify_brand(inout s, inout cx, a, b)
+    } else if a == b {
+        0
+    } else {
+        1
+    }
+}
+
+pub fn unify_trait_ref(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
+    if fa(in s, a) != fa(in s, b) {
+        return 1;
+    }
+    let x = fb(in s, a);
+    let y = fb(in s, b);
+    let r = unify_ty(inout s, inout cx, x, y);
+    if r != 0 {
+        return r;
+    }
+    unify_args(inout s, inout cx, a, b)
+}
+
+fn shallow(in s: S, in cx: ChunkSeq[u64], t: u64) -> u64 {
+    let mut t = t;
+    loop {
+        if tg(in s, t) != 2 {
+            return t;
+        }
+        let v = cx_val(in cx, fa(in s, t));
+        if v == none() || tg(in s, v) > 3 {
+            return t;
+        }
+        t = v;
+    }
+}
+
+fn bind_ty(inout s: S, inout cx: ChunkSeq[u64], x: u64, other: u64) -> u64 {
+    let value = resolve(inout s, in cx, other);
+    if value == 0 {
+        return 3;
+    }
+    if occurs(in s, value, x) {
+        return 1;
+    }
+    bind(inout cx, x, value);
+    0
+}
+
+pub fn unify_ty(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
+    let a = shallow(in s, in cx, a);
+    let b = shallow(in s, in cx, b);
+    let ta = tg(in s, a);
+    let tb = tg(in s, b);
+    if ta == 2 && is_inf(fa(in s, a)) {
+        if tb == 2 && fa(in s, b) == fa(in s, a) {
+            return 0;
+        }
+        let x = vidx(fa(in s, a));
+        return bind_ty(inout s, inout cx, x, b);
+    }
+    if tb == 2 && is_inf(fa(in s, b)) {
+        let x = vidx(fa(in s, b));
+        return bind_ty(inout s, inout cx, x, a);
+    }
+    if ta == 2 && tb == 2 {
+        return if a == b {
+            0
+        } else {
+            1
+        };
+    }
+    if ta == 1 && tb == 1 {
+        if fa(in s, a) != fa(in s, b) {
+            return 1;
+        }
+        return unify_args(inout s, inout cx, a, b);
+    }
+    if ta == 3 && tb == 3 {
+        // Rigid projections are not injective: only identity succeeds.
+        let p1 = resolve(inout s, in cx, a);
+        if p1 == 0 {
+            return 3;
+        }
+        let p2 = resolve(inout s, in cx, b);
+        if p2 == 0 {
+            return 3;
+        }
+        if p1 == p2 {
+            return 0;
+        }
+        if ((flags(in s, p1) | flags(in s, p2)) & 4) != 0 {
+            return 2;
+        }
+        return 1;
+    }
+    1
+}
+
+fn unify_var_term(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64, vtag: u64) -> u64 {
+    let ra = resolve(inout s, in cx, a);
+    let rb = resolve(inout s, in cx, b);
+    if ra == rb {
+        return 0;
+    }
+    if tg(in s, ra) == vtag && is_inf(fa(in s, ra)) {
+        bind(inout cx, vidx(fa(in s, ra)), rb);
+        return 0;
+    }
+    if tg(in s, rb) == vtag && is_inf(fa(in s, rb)) {
+        bind(inout cx, vidx(fa(in s, rb)), ra);
+        return 0;
+    }
+    1
+}
+
+pub fn unify_mode(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
+    unify_var_term(inout s, inout cx, a, b, 5)
+}
+
+pub fn unify_brand(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
+    unify_var_term(inout s, inout cx, a, b, 9)
+}
+
+// Whether row r has a label with key k.
+fn has_key(in s: S, r: u64, k: u64) -> bool {
+    let n = nlen(in s, r);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            return false;
+        }
+        if label_key(in s, kid(in s, r, i)) == k {
+            return true;
+        }
+        i = inc(i);
+    }
+}
+
+// The labels of r whose keys are not in other, as a row with tail t.
+fn only(inout s: S, r: u64, other: u64, t: u64) -> u64 {
+    let from = s.tmp.len();
+    let n = nlen(in s, r);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let l = kid(in s, r, i);
+        if !has_key(in s, other, label_key(in s, l)) {
+            s.tmp.push(l);
+        }
+        i = inc(i);
+    }
+    mkl(inout s, 6, t, 0, 0, from)
+}
+
+fn bind_row(inout s: S, inout cx: ChunkSeq[u64], x: u64, row: u64) -> u64 {
+    let r = resolve(inout s, in cx, row);
+    if r == 0 {
+        return 3;
+    }
+    if occurs(in s, r, x) {
+        return 1;
+    }
+    bind(inout cx, x, r);
+    0
+}
+
+// Row unification keyed by effect identity; open rows are solved by
+// binding inference tails, sharing a fresh tail when both need extension.
+pub fn unify_row(inout s: S, inout cx: ChunkSeq[u64], a: u64, b: u64) -> u64 {
+    let a = resolve(inout s, in cx, a);
+    if a == 0 {
+        return 3;
+    }
+    let b = resolve(inout s, in cx, b);
+    if b == 0 {
+        return 3;
+    }
+    let na = nlen(in s, a);
+    let nb = nlen(in s, b);
+    let mut i: u64 = 0;
+    loop {
+        if i >= na {
+            break;
+        }
+        let la = kid(in s, a, i);
+        let k = label_key(in s, la);
+        let mut j: u64 = 0;
+        loop {
+            if j >= nb {
+                break;
+            }
+            let lb = kid(in s, b, j);
+            if label_key(in s, lb) == k {
+                if tg(in s, la) == 11 && tg(in s, lb) == 11 {
+                    let r = unify_args(inout s, inout cx, la, lb);
+                    if r != 0 {
+                        return r;
+                    }
+                }
+                break;
+            }
+            j = inc(j);
+        }
+        i = inc(i);
+    }
+    // Unifying label arguments may have bound a tail: start over.
+    let a2 = resolve(inout s, in cx, a);
+    if a2 == 0 {
+        return 3;
+    }
+    let b2 = resolve(inout s, in cx, b);
+    if b2 == 0 {
+        return 3;
+    }
+    if a2 != a || b2 != b {
+        return unify_row(inout s, inout cx, a2, b2);
+    }
+    let ta = fa(in s, a);
+    let tb = fa(in s, b);
+    let oa = only(inout s, a, b, none());
+    let ob = only(inout s, b, a, none());
+    let empty_a = nlen(in s, oa) == 0;
+    let empty_b = nlen(in s, ob) == 0;
+    if ta == none() && tb == none() {
+        return if empty_a && empty_b {
+            0
+        } else {
+            1
+        };
+    }
+    if ta != none() && ta == tb {
+        return if empty_a && empty_b {
+            0
+        } else {
+            1
+        };
+    }
+    let ia = ta != none() && is_inf(ta);
+    let ib = tb != none() && is_inf(tb);
+    if ia && (empty_a || ib) {
+        if empty_a {
+            let r = only(inout s, b, a, tb);
+            return bind_row(inout s, inout cx, vidx(ta), r);
+        }
+        if empty_b {
+            let r = only(inout s, a, b, ta);
+            return bind_row(inout s, inout cx, vidx(tb), r);
+        }
+        let fresh = new_var(inout cx, 2);
+        let rb = only(inout s, b, a, fresh);
+        let r1 = bind_row(inout s, inout cx, vidx(ta), rb);
+        if r1 != 0 {
+            return r1;
+        }
+        let ra = only(inout s, a, b, fresh);
+        return bind_row(inout s, inout cx, vidx(tb), ra);
+    }
+    if ib && empty_b {
+        let r = only(inout s, a, b, ta);
+        return bind_row(inout s, inout cx, vidx(tb), r);
+    }
+    1
+}

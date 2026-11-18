@@ -10,8 +10,8 @@
 //! - `concrete`: `alu_concrete` and `cmp_concrete` over every operation
 //!   (ported).
 //! - `verify`: `verify` of the SYN-flood mitigator, the largest program the
-//!   tests build. The verifier itself is still Rust in this part of the port,
-//!   so this measures what the ported domain and codec cost it.
+//!   tests build (built once, outside the timed call): the whole verifier,
+//!   ported in part 2.
 //!
 //! The benchmarks are ignored by default; run them with
 //!
@@ -228,13 +228,17 @@ macro_rules! workloads {
 
             pub fn verify(_: &[u64]) -> u64 {
                 use ::$krate::mitigator::{MitigatorConfig, build};
-                let p = build(&MitigatorConfig {
-                    pps_threshold: 3,
-                    max_sources: 1024,
-                    ring_bytes: 4096,
-                })
-                .expect("mitigator builds");
-                let r = ::$krate::verify(&p, &::$krate::VerifierPolicy::default())
+                // built once: the workload is the verifier alone
+                static PROGRAM: std::sync::OnceLock<::$krate::Program> = std::sync::OnceLock::new();
+                let p = PROGRAM.get_or_init(|| {
+                    build(&MitigatorConfig {
+                        pps_threshold: 3,
+                        max_sources: 1024,
+                        ring_bytes: 4096,
+                    })
+                    .expect("mitigator builds")
+                });
+                let r = ::$krate::verify(p, &::$krate::VerifierPolicy::default())
                     .expect("mitigator verifies");
                 black_box(r.worst_stack as u64 ^ r.insns_processed as u64)
             }

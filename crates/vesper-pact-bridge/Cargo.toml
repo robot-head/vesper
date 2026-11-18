@@ -8,6 +8,6 @@ publish = false
 
 [dependencies]
 vesper = { path = "../.." }
-vesper-pact = { path = "../vesper-pact" }
+vesper-pact = { path = "../vesper-pact/seed", package = "vesper-pact-seed" }
 vesper-pact-binding = { path = "../vesper-pact-binding" }
 serde_json = "1"

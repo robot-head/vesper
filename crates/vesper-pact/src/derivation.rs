@@ -169,6 +169,18 @@ pub fn check_derivation(
     env: &Env,
     d: &Derivation,
 ) -> Result<(), DerivationError> {
+    #[cfg(vesper_port)]
+    return crate::port::check_derivation(program, env, d);
+    #[cfg(not(vesper_port))]
+    check_derivation_rust(program, env, d)
+}
+
+#[cfg(not(vesper_port))]
+fn check_derivation_rust(
+    program: &Program,
+    env: &Env,
+    d: &Derivation,
+) -> Result<(), DerivationError> {
     // Certificates are public DTOs, not trusted solver internals. Rename
     // sparse inference ids densely before validation to avoid allocating by
     // an attacker-controlled id, while retaining sharing and kind checks.

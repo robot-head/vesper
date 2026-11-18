@@ -1,0 +1,574 @@
+// Module render of @vesper/pact (see lib.ves): the deterministic `Display`
+// renderings of `term.rs`, `solver.rs` and `diag.rs`, and the `Debug`
+// renderings that diagnostics quote, appended to `s.txt`.
+use self::{
+    S
+};
+use self::term::{
+    dec,
+    fa,
+    fb,
+    fc,
+    inc,
+    kid,
+    nlen,
+    none,
+    tg,
+    vidx,
+    vkind
+};
+
+pub fn lit(inout s: S, in t: Str) {
+    for i in 0..t.len() {
+        match t.try_byte_at(i) {
+            Option::Some(b) => s.txt.push(b),
+            Option::None => (),
+        }
+    }
+}
+
+pub fn byte(inout s: S, b: u8) {
+    s.txt.push(b);
+}
+
+pub fn num(inout s: S, x: u64) {
+    if x >= 10 {
+        num(inout s, x / 10);
+    }
+    let d = wrapping_sub(x, wrapping_mul(x / 10, 10));
+    s.txt.push(wrapping_u8(wrapping_add(d, 48)));
+}
+
+pub fn r_var(inout s: S, v: u64) {
+    let k = vkind(v);
+    if k == 0 {
+        byte(inout s, 94);
+    } else if k == 1 {
+        byte(inout s, 33);
+    } else {
+        byte(inout s, 63);
+    }
+    num(inout s, vidx(v));
+}
+
+pub fn r_mode_const(inout s: S, m: u64) {
+    if m == 0 {
+        lit(inout s, "copy");
+    } else if m == 1 {
+        lit(inout s, "affine");
+    } else {
+        lit(inout s, "linear");
+    }
+}
+
+pub fn r_kind_debug(inout s: S, k: u64) {
+    if k == 0 {
+        lit(inout s, "Type");
+    } else if k == 1 {
+        lit(inout s, "Mode");
+    } else if k == 2 {
+        lit(inout s, "Row");
+    } else if k == 3 {
+        lit(inout s, "Brand");
+    } else {
+        lit(inout s, "Capability");
+    }
+}
+
+pub fn r_id(inout s: S, in prefix: Str, x: u64) {
+    lit(inout s, prefix);
+    byte(inout s, 35);
+    num(inout s, x);
+}
+
+// Renders the kids of n from index `from` as a comma-separated argument
+// list.
+fn r_args_from(inout s: S, n: u64, from: u64) {
+    let len = nlen(in s, n);
+    let mut i = from;
+    loop {
+        if i >= len {
+            break;
+        }
+        if i > from {
+            lit(inout s, ", ");
+        }
+        let k = kid(in s, n, i);
+        r_arg(inout s, k);
+        i = inc(i);
+    }
+}
+
+// `[args]` when there are any.
+fn r_bracket_args(inout s: S, n: u64) {
+    if nlen(in s, n) > 0 {
+        byte(inout s, 91);
+        r_args_from(inout s, n, 0);
+        byte(inout s, 93);
+    }
+}
+
+pub fn r_mode(inout s: S, n: u64) {
+    if tg(in s, n) == 4 {
+        let h51 = fa(in s, n);
+        r_mode_const(inout s, h51);
+    } else {
+        let h50 = fa(in s, n);
+        r_var(inout s, h50);
+    }
+}
+
+pub fn r_brand(inout s: S, n: u64) {
+    let t = tg(in s, n);
+    if t == 7 {
+        lit(inout s, "canonical");
+    } else if t == 8 {
+        let h49 = fa(in s, n);
+        r_id(inout s, "model", h49);
+    } else {
+        let h48 = fa(in s, n);
+        r_var(inout s, h48);
+    }
+}
+
+pub fn r_label(inout s: S, l: u64) {
+    if tg(in s, l) == 11 {
+        let h47 = fa(in s, l);
+        r_id(inout s, "effect", h47);
+        r_bracket_args(inout s, l);
+    } else {
+        lit(inout s, "cap ");
+        let h46 = fa(in s, l);
+        r_var(inout s, h46);
+    }
+}
+
+pub fn r_row(inout s: S, n: u64) {
+    lit(inout s, "eff [");
+    let len = nlen(in s, n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        if i > 0 {
+            lit(inout s, ", ");
+        }
+        let l = kid(in s, n, i);
+        r_label(inout s, l);
+        i = inc(i);
+    }
+    let t = fa(in s, n);
+    if t != none() {
+        if len > 0 {
+            byte(inout s, 32);
+        }
+        lit(inout s, "| ");
+        r_var(inout s, t);
+    }
+    byte(inout s, 93);
+}
+
+pub fn r_trait_ref(inout s: S, n: u64) {
+    let st = fb(in s, n);
+    r_ty(inout s, st);
+    lit(inout s, ": ");
+    let h45 = fa(in s, n);
+    r_id(inout s, "trait", h45);
+    r_bracket_args(inout s, n);
+}
+
+pub fn r_proj(inout s: S, n: u64) {
+    byte(inout s, 60);
+    let t = fa(in s, n);
+    r_trait_ref(inout s, t);
+    lit(inout s, " via ");
+    let b = fb(in s, n);
+    r_brand(inout s, b);
+    lit(inout s, ">::");
+    let h44 = fc(in s, n);
+    r_id(inout s, "assoc", h44);
+}
+
+pub fn r_ty(inout s: S, n: u64) {
+    let t = tg(in s, n);
+    if t == 1 {
+        let h43 = fa(in s, n);
+        r_id(inout s, "type", h43);
+        r_bracket_args(inout s, n);
+    } else if t == 2 {
+        let h42 = fa(in s, n);
+        r_var(inout s, h42);
+    } else {
+        r_proj(inout s, n);
+    }
+}
+
+// `GenericArg` Display.
+pub fn r_arg(inout s: S, n: u64) {
+    let t = tg(in s, n);
+    if t <= 3 {
+        r_ty(inout s, n);
+    } else if t <= 5 {
+        lit(inout s, "mod ");
+        r_mode(inout s, n);
+    } else if t == 6 {
+        r_row(inout s, n);
+    } else if t <= 9 {
+        lit(inout s, "brand ");
+        r_brand(inout s, n);
+    } else {
+        lit(inout s, "cap ");
+        let h41 = fa(in s, n);
+        r_var(inout s, h41);
+    }
+}
+
+pub fn r_goal(inout s: S, n: u64) {
+    let t = tg(in s, n);
+    let a = fa(in s, n);
+    let b = fb(in s, n);
+    if t == 14 {
+        r_trait_ref(inout s, a);
+        lit(inout s, " via ");
+        r_brand(inout s, b);
+    } else if t == 15 {
+        r_proj(inout s, a);
+        lit(inout s, " == ");
+        r_ty(inout s, b);
+    } else {
+        lit(inout s, "mode(");
+        r_ty(inout s, a);
+        lit(inout s, ") <= ");
+        r_mode(inout s, b);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Debug renderings.
+
+pub fn d_var(inout s: S, v: u64) {
+    let k = vkind(v);
+    if k == 0 {
+        lit(inout s, "Bound(");
+    } else if k == 1 {
+        lit(inout s, "Placeholder(");
+    } else {
+        lit(inout s, "Infer(");
+    }
+    num(inout s, vidx(v));
+    byte(inout s, 41);
+}
+
+// `LabelKey` Debug.
+pub fn d_label_key(inout s: S, k: u64) {
+    if k < 17179869184 {
+        lit(inout s, "Effect(EffectId(");
+        num(inout s, k);
+        lit(inout s, "))");
+    } else {
+        lit(inout s, "Capability(");
+        let v = wrapping_sub(k, 17179869184);
+        d_var(inout s, v);
+        byte(inout s, 41);
+    }
+}
+
+fn d_list(inout s: S, n: u64) {
+    byte(inout s, 91);
+    let len = nlen(in s, n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        if i > 0 {
+            lit(inout s, ", ");
+        }
+        let k = kid(in s, n, i);
+        d_arg(inout s, k);
+        i = inc(i);
+    }
+    byte(inout s, 93);
+}
+
+fn d_mode_term(inout s: S, n: u64) {
+    if tg(in s, n) == 4 {
+        lit(inout s, "Const(");
+        let m = fa(in s, n);
+        if m == 0 {
+            lit(inout s, "Copy");
+        } else if m == 1 {
+            lit(inout s, "Affine");
+        } else {
+            lit(inout s, "Linear");
+        }
+        byte(inout s, 41);
+    } else {
+        lit(inout s, "Var(");
+        let h40 = fa(in s, n);
+        d_var(inout s, h40);
+        byte(inout s, 41);
+    }
+}
+
+fn d_brand(inout s: S, n: u64) {
+    let t = tg(in s, n);
+    if t == 7 {
+        lit(inout s, "Canonical");
+    } else if t == 8 {
+        lit(inout s, "Named(ModelId(");
+        let h39 = fa(in s, n);
+        num(inout s, h39);
+        lit(inout s, "))");
+    } else {
+        lit(inout s, "Var(");
+        let h38 = fa(in s, n);
+        d_var(inout s, h38);
+        byte(inout s, 41);
+    }
+}
+
+fn d_trait_ref(inout s: S, n: u64) {
+    lit(inout s, "TraitRef { trait_id: TraitId(");
+    let h37 = fa(in s, n);
+    num(inout s, h37);
+    lit(inout s, "), self_ty: ");
+    let st = fb(in s, n);
+    d_ty(inout s, st);
+    lit(inout s, ", args: ");
+    d_list(inout s, n);
+    lit(inout s, " }");
+}
+
+fn d_ty(inout s: S, n: u64) {
+    let t = tg(in s, n);
+    if t == 1 {
+        lit(inout s, "Ctor { ctor: TypeCtorId(");
+        let h36 = fa(in s, n);
+        num(inout s, h36);
+        lit(inout s, "), args: ");
+        d_list(inout s, n);
+        lit(inout s, " }");
+    } else if t == 2 {
+        lit(inout s, "Var(");
+        let h35 = fa(in s, n);
+        d_var(inout s, h35);
+        byte(inout s, 41);
+    } else {
+        lit(inout s, "Projection(Projection { trait_ref: ");
+        let tr = fa(in s, n);
+        d_trait_ref(inout s, tr);
+        lit(inout s, ", brand: ");
+        let b = fb(in s, n);
+        d_brand(inout s, b);
+        lit(inout s, ", assoc: AssocIdx(");
+        let h34 = fc(in s, n);
+        num(inout s, h34);
+        lit(inout s, ") })");
+    }
+}
+
+fn d_row(inout s: S, n: u64) {
+    lit(inout s, "EffectRow { labels: [");
+    let len = nlen(in s, n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        if i > 0 {
+            lit(inout s, ", ");
+        }
+        let l = kid(in s, n, i);
+        if tg(in s, l) == 11 {
+            lit(inout s, "Effect { effect: EffectId(");
+            let h33 = fa(in s, l);
+            num(inout s, h33);
+            lit(inout s, "), args: ");
+            d_list(inout s, l);
+            lit(inout s, " }");
+        } else {
+            lit(inout s, "Capability(");
+            let h32 = fa(in s, l);
+            d_var(inout s, h32);
+            byte(inout s, 41);
+        }
+        i = inc(i);
+    }
+    lit(inout s, "], tail: ");
+    let t = fa(in s, n);
+    if t == none() {
+        lit(inout s, "None");
+    } else {
+        lit(inout s, "Some(");
+        d_var(inout s, t);
+        byte(inout s, 41);
+    }
+    lit(inout s, " }");
+}
+
+// `GenericArg` Debug.
+pub fn d_arg(inout s: S, n: u64) {
+    let t = tg(in s, n);
+    if t <= 3 {
+        lit(inout s, "Ty(");
+        d_ty(inout s, n);
+    } else if t <= 5 {
+        lit(inout s, "Mode(");
+        d_mode_term(inout s, n);
+    } else if t == 6 {
+        lit(inout s, "Row(");
+        d_row(inout s, n);
+    } else if t <= 9 {
+        lit(inout s, "Brand(");
+        d_brand(inout s, n);
+    } else {
+        lit(inout s, "Capability(");
+        let h31 = fa(in s, n);
+        d_var(inout s, h31);
+    }
+    byte(inout s, 41);
+}
+
+fn d_source(inout s: S, src: u64) {
+    if (src & 1) == 0 {
+        lit(inout s, "Impl(ImplId(");
+    } else {
+        lit(inout s, "Model(ModelId(");
+    }
+    num(inout s, src >> 1);
+    lit(inout s, "))");
+}
+
+// `Step` Debug.
+pub fn d_step(inout s: S, n: u64) {
+    let t = tg(in s, n);
+    if t == 18 {
+        lit(inout s, "Conformance { source: ");
+        let h30 = fa(in s, n);
+        d_source(inout s, h30);
+        lit(inout s, ", args: ");
+        d_list(inout s, n);
+        lit(inout s, " }");
+    } else if t == 19 {
+        lit(inout s, "Assumption { index: ");
+        let h29 = fa(in s, n);
+        num(inout s, h29);
+        lit(inout s, " }");
+    } else if t == 20 {
+        lit(inout s, "AliasBound { bound: ");
+        let h28 = fa(in s, n);
+        num(inout s, h28);
+        lit(inout s, " }");
+    } else if t == 21 {
+        lit(inout s, "ProjectionConformance { source: ");
+        let h27 = fa(in s, n);
+        d_source(inout s, h27);
+        lit(inout s, ", args: ");
+        d_list(inout s, n);
+        lit(inout s, ", value_normalizations: ");
+        let h26 = fb(in s, n);
+        num(inout s, h26);
+        lit(inout s, " }");
+    } else if t == 22 {
+        lit(inout s, "ProjectionAssumption { index: ");
+        let h25 = fa(in s, n);
+        num(inout s, h25);
+        lit(inout s, " }");
+    } else if t == 23 {
+        lit(inout s, "RigidProjection");
+    } else if t == 24 {
+        lit(inout s, "Mode");
+    } else if t == 25 {
+        lit(inout s, "Normalize");
+    } else {
+        lit(inout s, "CoinductiveHypothesis");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Failure::render and Derivation::render, appended to txt.
+
+fn pad(inout s: S, depth: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= depth {
+            break;
+        }
+        lit(inout s, "  ");
+        i = inc(i);
+    }
+}
+
+pub fn r_source(inout s: S, c: u64) {
+    let v = c >> 32;
+    let x = c & 4294967295;
+    if v == 0 {
+        r_id(inout s, "impl", x);
+    } else if v == 1 {
+        r_id(inout s, "model", x);
+    } else if v == 2 {
+        lit(inout s, "assumption ");
+        num(inout s, x);
+    } else if v == 3 {
+        lit(inout s, "alias bound ");
+        num(inout s, x);
+    } else {
+        lit(inout s, "rigid projection");
+    }
+}
+
+fn goal_tick(inout s: S, depth: u64, g: u64) {
+    pad(inout s, depth);
+    byte(inout s, 96);
+    r_goal(inout s, g);
+    lit(inout s, "`: ");
+}
+
+pub fn r_failure(inout s: S, f: u64, depth: u64) {
+    let g = fa(in s, f);
+    let r = fb(in s, f);
+    let t = tg(in s, r);
+    goal_tick(inout s, depth, g);
+    if t == 44 {
+        lit(inout s, "no matching impl, model or assumption\n");
+    } else if t == 46 {
+        lit(inout s, "mode ");
+        let a = fa(in s, r);
+        r_mode(inout s, a);
+        lit(inout s, " is not below ");
+        let b = fb(in s, r);
+        r_mode(inout s, b);
+        byte(inout s, 10);
+    } else if t == 47 {
+        let h24 = fa(in s, r);
+        r_id(inout s, "model", h24);
+        lit(inout s, " does not model this trait\n");
+    } else if t == 48 {
+        lit(inout s, "inductive cycle without a base case\n");
+    } else {
+        lit(inout s, "every candidate failed\n");
+        let n = nlen(in s, r);
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let c = kid(in s, r, i);
+            let cause = fb(in s, c);
+            pad(inout s, depth);
+            lit(inout s, "  ");
+            let h23 = fa(in s, c);
+            r_source(inout s, h23);
+            if tg(in s, cause) == 50 {
+                lit(inout s, " requires\n");
+                let inner = fa(in s, cause);
+                r_failure(inout s, inner, wrapping_add(depth, 2));
+            } else {
+                lit(inout s, ": associated type differs\n");
+            }
+            i = inc(i);
+        }
+    }
+}

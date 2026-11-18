@@ -1,0 +1,657 @@
+// Module term of @vesper/pact (see lib.ves): the hash-consed term arena.
+//
+// Every term, goal, derivation, failure and answer is a node: a tag, three
+// fields `a`, `b`, `c` and a list of words `kids[ls .. ls + ln]`. Nodes are
+// interned, so two nodes are equal exactly when their ids are equal, and
+// every comparison the Rust build makes on whole terms is one word here.
+// `fl` caches which variable forms a node contains (bound, placeholder,
+// inference), whether it contains a projection, and whether it contains a
+// row whose labels are not strictly sorted by key; folds skip subterms
+// without the forms they rewrite.
+use self::{
+    S
+};
+
+pub fn none() -> u64 {
+    18446744073709551615
+}
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn dec(x: u64) -> u64 {
+    wrapping_sub(x, 1)
+}
+
+pub fn add(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b)
+}
+
+pub fn sub(a: u64, b: u64) -> u64 {
+    wrapping_sub(a, b)
+}
+
+pub fn sw(in q: ChunkSeq[u64], i: u64) -> u64 {
+    match q.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn setw(inout q: ChunkSeq[u64], i: u64, v: u64) {
+    let _ = q.try_set(i, v);
+}
+
+pub fn iw(in q: Slice[u64], i: u64) -> u64 {
+    match q.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn bt(in q: ChunkSeq[u8], i: u64) -> u8 {
+    match q.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tags. Type terms 1-3, mode terms 4-5, rows 6, brands 7-9, capability
+// arguments 10, row labels 11-12, trait refs 13, goals 14-16.
+
+pub fn t_ctor() -> u64 {
+    1
+}
+pub fn t_var() -> u64 {
+    2
+}
+pub fn t_proj() -> u64 {
+    3
+}
+pub fn m_const() -> u64 {
+    4
+}
+pub fn m_var() -> u64 {
+    5
+}
+pub fn g_row() -> u64 {
+    6
+}
+pub fn b_canon() -> u64 {
+    7
+}
+pub fn b_named() -> u64 {
+    8
+}
+pub fn b_var() -> u64 {
+    9
+}
+pub fn g_cap() -> u64 {
+    10
+}
+pub fn l_eff() -> u64 {
+    11
+}
+pub fn l_cap() -> u64 {
+    12
+}
+pub fn t_ref() -> u64 {
+    13
+}
+pub fn g_impl() -> u64 {
+    14
+}
+pub fn g_peq() -> u64 {
+    15
+}
+pub fn g_mode() -> u64 {
+    16
+}
+// Derivations: a = goal, b = step, kids = children.
+pub fn d_node() -> u64 {
+    17
+}
+// Steps. Conformance sources are `2 i` (impl i) or `2 m + 1` (model m).
+pub fn st_conf() -> u64 {
+    18
+}
+pub fn st_assume() -> u64 {
+    19
+}
+pub fn st_alias() -> u64 {
+    20
+}
+pub fn st_pconf() -> u64 {
+    21
+}
+pub fn st_passume() -> u64 {
+    22
+}
+pub fn st_rigid() -> u64 {
+    23
+}
+pub fn st_mode() -> u64 {
+    24
+}
+pub fn st_norm() -> u64 {
+    25
+}
+pub fn st_cohyp() -> u64 {
+    26
+}
+// A list of nodes, and a list of plain words.
+pub fn k_list() -> u64 {
+    27
+}
+pub fn k_slist() -> u64 {
+    28
+}
+// Answers (the Rust `QResult`); a = binders (slist), b = values (list),
+// c = derivation for q_proven. q_ambig, q_nosol, q_unsup and q_over are
+// also the nested errors of the obligation driver.
+pub fn q_proven() -> u64 {
+    29
+}
+pub fn q_ambig() -> u64 {
+    30
+}
+pub fn q_nosol() -> u64 {
+    31
+}
+pub fn q_unsup() -> u64 {
+    32
+}
+pub fn q_over() -> u64 {
+    33
+}
+// Ambiguities.
+pub fn am_self() -> u64 {
+    34
+}
+pub fn am_multi() -> u64 {
+    35
+}
+pub fn am_scoped() -> u64 {
+    36
+}
+pub fn am_mode() -> u64 {
+    37
+}
+pub fn am_noninj() -> u64 {
+    38
+}
+pub fn am_stalled() -> u64 {
+    39
+}
+// Unsupported reasons; un_internal a = message code, b = goal or none().
+pub fn un_dup() -> u64 {
+    40
+}
+pub fn un_mixed() -> u64 {
+    41
+}
+pub fn un_internal() -> u64 {
+    42
+}
+// Failures: a = goal, b = reason.
+pub fn f_node() -> u64 {
+    43
+}
+pub fn r_nocand() -> u64 {
+    44
+}
+pub fn r_cands() -> u64 {
+    45
+}
+pub fn r_mode() -> u64 {
+    46
+}
+pub fn r_modelmis() -> u64 {
+    47
+}
+pub fn r_indcyc() -> u64 {
+    48
+}
+// Candidate failure: a = candidate source, b = cause.
+pub fn cf_node() -> u64 {
+    49
+}
+pub fn c_nested() -> u64 {
+    50
+}
+pub fn c_value() -> u64 {
+    51
+}
+// Candidate errors that are not nested errors.
+pub fn ce_head() -> u64 {
+    52
+}
+pub fn ce_nosol() -> u64 {
+    53
+}
+// Placeholder declaration (a = kind, b = mode bound or none()) and
+// environment (a = placeholders, b = assumptions, c = model scopes, a list
+// of slists).
+pub fn e_ph() -> u64 {
+    54
+}
+pub fn e_env() -> u64 {
+    55
+}
+
+// Parameter kinds, in `ParamKind` order.
+pub fn kd_type() -> u64 {
+    0
+}
+pub fn kd_mode() -> u64 {
+    1
+}
+pub fn kd_row() -> u64 {
+    2
+}
+pub fn kd_brand() -> u64 {
+    3
+}
+pub fn kd_cap() -> u64 {
+    4
+}
+
+// Variables: `vk << 32 | index` with vk 0 bound, 1 placeholder, 2 inference.
+pub fn vbound(i: u64) -> u64 {
+    i
+}
+pub fn vph(i: u64) -> u64 {
+    4294967296 | i
+}
+pub fn vinf(i: u64) -> u64 {
+    8589934592 | i
+}
+pub fn vkind(v: u64) -> u64 {
+    v >> 32
+}
+pub fn vidx(v: u64) -> u64 {
+    v & 4294967295
+}
+pub fn is_inf(v: u64) -> bool {
+    (v >> 32) == 2
+}
+
+// Flags.
+pub fn fl_bound() -> u64 {
+    1
+}
+pub fn fl_ph() -> u64 {
+    2
+}
+pub fn fl_inf() -> u64 {
+    4
+}
+pub fn fl_proj() -> u64 {
+    8
+}
+pub fn fl_rowbad() -> u64 {
+    16
+}
+
+fn var_flag(v: u64) -> u64 {
+    let k = v >> 32;
+    if k == 0 {
+        1
+    } else if k == 1 {
+        2
+    } else {
+        4
+    }
+}
+
+// Which fields hold node ids: 1 = a, 2 = b, 4 = c, 8 = the kids. Var
+// fields are reported by `var_field`.
+pub fn refs(tag: u64) -> u64 {
+    if tag == 1 {
+        8
+    } else if tag == 3 {
+        3
+    } else if tag == 6 || tag == 11 {
+        8
+    } else if tag == 13 {
+        10
+    } else if tag >= 14 && tag <= 17 {
+        if tag == 17 {
+            11
+        } else {
+            3
+        }
+    } else if tag == 18 || tag == 21 || tag == 27 || tag == 45 {
+        8
+    } else if tag == 29 {
+        7
+    } else if tag >= 30 && tag <= 32 {
+        1
+    } else if tag == 39 || tag == 41 || tag == 43 || tag == 50 || tag == 53 {
+        if tag == 43 {
+            3
+        } else {
+            1
+        }
+    } else if tag == 42 || tag == 49 {
+        2
+    } else if tag == 46 {
+        3
+    } else if tag == 55 {
+        7
+    } else {
+        0
+    }
+}
+
+// Whether field `a` is a variable.
+pub fn var_field(tag: u64) -> bool {
+    tag == 2 || tag == 5 || tag == 9 || tag == 10 || tag == 12
+}
+
+// The parameter kind of an argument node.
+pub fn kind_of(tag: u64) -> u64 {
+    if tag <= 3 {
+        0
+    } else if tag <= 5 {
+        1
+    } else if tag == 6 {
+        2
+    } else if tag <= 9 {
+        3
+    } else {
+        4
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Accessors.
+
+pub fn tg(in s: S, n: u64) -> u64 {
+    sw(in s.tg, n)
+}
+pub fn fa(in s: S, n: u64) -> u64 {
+    sw(in s.fa, n)
+}
+pub fn fb(in s: S, n: u64) -> u64 {
+    sw(in s.fb, n)
+}
+pub fn fc(in s: S, n: u64) -> u64 {
+    sw(in s.fc, n)
+}
+pub fn nlen(in s: S, n: u64) -> u64 {
+    sw(in s.ln, n)
+}
+pub fn flags(in s: S, n: u64) -> u64 {
+    sw(in s.fl, n)
+}
+// Kid i of node n.
+pub fn kid(in s: S, n: u64, i: u64) -> u64 {
+    sw(in s.kids, add(sw(in s.ls, n), i))
+}
+
+// Label key: an effect id, or `1 << 34 | var` for a capability label.
+pub fn label_key(in s: S, l: u64) -> u64 {
+    if tg(in s, l) == 11 {
+        fa(in s, l)
+    } else {
+        17179869184 | fa(in s, l)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Interning.
+
+fn mix(h: u64, x: u64) -> u64 {
+    wrapping_mul(h ^ x, 1099511628211)
+}
+
+fn finish(h: u64) -> u64 {
+    let x = wrapping_mul(h ^ (h >> 29), 13787848793156543929);
+    x ^ (x >> 32)
+}
+
+fn node_flags(in s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
+    let r = refs(tag);
+    let mut f: u64 = 0;
+    if var_field(tag) {
+        f = var_flag(a);
+    }
+    if tag == 3 {
+        f = 8;
+    }
+    if tag == 6 && a != none() {
+        f = var_flag(a);
+    }
+    if (r & 1) != 0 {
+        f = f | flags(in s, a);
+    }
+    if (r & 2) != 0 {
+        f = f | flags(in s, b);
+    }
+    if (r & 4) != 0 {
+        f = f | flags(in s, c);
+    }
+    if (r & 8) != 0 {
+        let n = s.tmp.len();
+        let mut i = from;
+        let mut prev: u64 = 0;
+        let mut bad = false;
+        loop {
+            if i >= n {
+                break;
+            }
+            let k = sw(in s.tmp, i);
+            f = f | flags(in s, k);
+            if tag == 6 {
+                let key = label_key(in s, k);
+                if i > from && key <= prev {
+                    bad = true;
+                }
+                prev = key;
+            }
+            i = inc(i);
+        }
+        if bad {
+            f = f | 16;
+        }
+    }
+    f
+}
+
+fn grow(inout s: S) {
+    let cap = wrapping_mul(inc(s.hmask), 2);
+    s.ht.clear();
+    let mut i: u64 = 0;
+    loop {
+        if i >= cap {
+            break;
+        }
+        s.ht.push(0);
+        i = inc(i);
+    }
+    s.hmask = dec(cap);
+    let n = s.tg.len();
+    let mut j: u64 = 0;
+    loop {
+        if j >= n {
+            break;
+        }
+        let mut at = sw(in s.hs, j) & s.hmask;
+        loop {
+            if sw(in s.ht, at) == 0 {
+                setw(inout s.ht, at, inc(j));
+                break;
+            }
+            at = inc(at) & s.hmask;
+        }
+        j = inc(j);
+    }
+}
+
+// Interns the node (tag, a, b, c) whose kids are `tmp[from ..]`, and pops
+// the kids off `tmp`.
+pub fn mkl(inout s: S, tag: u64, a: u64, b: u64, c: u64, from: u64) -> u64 {
+    let n = s.tmp.len();
+    let len = sub(n, from);
+    let mut h = mix(mix(mix(mix(14695981039346656037, tag), a), b), c);
+    let mut i = from;
+    loop {
+        if i >= n {
+            break;
+        }
+        h = mix(h, sw(in s.tmp, i));
+        i = inc(i);
+    }
+    h = finish(h);
+    let mut at = h & s.hmask;
+    loop {
+        let e = sw(in s.ht, at);
+        if e == 0 {
+            break;
+        }
+        let m = dec(e);
+        if sw(in s.hs, m)
+            == h
+            && sw(in s.tg, m)
+            == tag
+            && sw(in s.fa, m)
+            == a
+            && sw(in s.fb, m)
+            == b
+            && sw(in s.fc, m)
+            == c
+            && sw(in s.ln, m)
+            == len {
+            let base = sw(in s.ls, m);
+            let mut same = true;
+            let mut j: u64 = 0;
+            loop {
+                if j >= len {
+                    break;
+                }
+                if sw(in s.kids, add(base, j)) != sw(in s.tmp, add(from, j)) {
+                    same = false;
+                    break;
+                }
+                j = inc(j);
+            }
+            if same {
+                s.tmp.truncate(from);
+                return m;
+            }
+        }
+        at = inc(at) & s.hmask;
+    }
+    let f = node_flags(in s, tag, a, b, c, from);
+    let id = s.tg.len();
+    s.tg.push(tag);
+    s.fa.push(a);
+    s.fb.push(b);
+    s.fc.push(c);
+    s.ls.push(s.kids.len());
+    s.ln.push(len);
+    s.fl.push(f);
+    s.hs.push(h);
+    let mut k = from;
+    loop {
+        if k >= n {
+            break;
+        }
+        let w = sw(in s.tmp, k);
+        s.kids.push(w);
+        k = inc(k);
+    }
+    s.tmp.truncate(from);
+    setw(inout s.ht, at, inc(id));
+    s.hcount = inc(s.hcount);
+    if wrapping_mul(s.hcount, 2) > s.hmask {
+        grow(inout s);
+    }
+    id
+}
+
+pub fn mk(inout s: S, tag: u64, a: u64, b: u64, c: u64) -> u64 {
+    let from = s.tmp.len();
+    mkl(inout s, tag, a, b, c, from)
+}
+
+pub fn mk0(inout s: S, tag: u64) -> u64 {
+    mk(inout s, tag, 0, 0, 0)
+}
+
+pub fn mk1(inout s: S, tag: u64, a: u64) -> u64 {
+    mk(inout s, tag, a, 0, 0)
+}
+
+pub fn mk2(inout s: S, tag: u64, a: u64, b: u64) -> u64 {
+    mk(inout s, tag, a, b, 0)
+}
+
+// Pushes the kids of n onto tmp.
+pub fn push_kids(inout s: S, n: u64) {
+    let len = nlen(in s, n);
+    let base = sw(in s.ls, n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let w = sw(in s.kids, add(base, i));
+        s.tmp.push(w);
+        i = inc(i);
+    }
+}
+
+// The empty list and slist.
+pub fn nil(inout s: S) -> u64 {
+    mk0(inout s, 27)
+}
+
+pub fn snil(inout s: S) -> u64 {
+    mk0(inout s, 28)
+}
+
+// The bare variable of a kind as an argument node.
+pub fn var_arg(inout s: S, kind: u64, v: u64) -> u64 {
+    if kind == 0 {
+        mk1(inout s, 2, v)
+    } else if kind == 1 {
+        mk1(inout s, 5, v)
+    } else if kind == 2 {
+        mk(inout s, 6, v, 0, 0)
+    } else if kind == 3 {
+        mk1(inout s, 9, v)
+    } else {
+        mk1(inout s, 10, v)
+    }
+}
+
+// The kind of an argument node.
+pub fn arg_kind(in s: S, n: u64) -> u64 {
+    kind_of(tg(in s, n))
+}
+
+pub fn goal_impl(inout s: S, tref: u64, brand: u64) -> u64 {
+    mk2(inout s, 14, tref, brand)
+}
+
+pub fn der_leaf(inout s: S, goal: u64, step: u64) -> u64 {
+    mk2(inout s, 17, goal, step)
+}
+
+pub fn new_arena(inout s: S) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= 1024 {
+            break;
+        }
+        s.ht.push(0);
+        i = inc(i);
+    }
+    s.hmask = 1023;
+    // Node 0 is a sentinel, so no real node has id 0.
+    let _ = mk(inout s, 0, 0, 0, 0);
+}

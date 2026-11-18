@@ -1,0 +1,243 @@
+// Module diag of @vesper/pact (see lib.ves): `diag.rs`, name-free
+// diagnostics. A diagnostic is (code, subject, message) with the message in
+// `txt[off .. off + len]`; lists are regions `dg_*[base ..]`, sorted by
+// (code, subject, message) and deduplicated as the Rust build does.
+//
+// Codes are `DiagCode` positions (0 SchemaVersion .. 11
+// ImplNotWellFormed); subjects are (variant, a, b) in `Subject` order:
+// 0 Program, 1 TypeCtor, 2 Effect, 3 Trait, 4 Impl, 5 ImplPair, 6 Model,
+// 7 Query.
+use self::{
+    S
+};
+use self::term::{
+    add,
+    bt,
+    dec,
+    inc,
+    setw,
+    sub,
+    sw
+};
+use self::render::{
+    byte,
+    lit,
+    num,
+    r_id
+};
+
+// Records the diagnostic whose message is txt[off ..].
+pub fn emit(inout s: S, code: u64, sv: u64, sa: u64, sb: u64, off: u64) {
+    let len = sub(s.txt.len(), off);
+    s.dg_code.push(code);
+    s.dg_sv.push(sv);
+    s.dg_sa.push(sa);
+    s.dg_sb.push(sb);
+    s.dg_off.push(off);
+    s.dg_len.push(len);
+}
+
+// Lexicographic comparison of two text ranges: 0 less, 1 equal, 2 greater.
+fn cmp_txt(in s: S, ao: u64, al: u64, bo: u64, bl: u64) -> u64 {
+    let mut i: u64 = 0;
+    loop {
+        if i >= al || i >= bl {
+            break;
+        }
+        let x = bt(in s.txt, add(ao, i));
+        let y = bt(in s.txt, add(bo, i));
+        if x < y {
+            return 0;
+        }
+        if x > y {
+            return 2;
+        }
+        i = inc(i);
+    }
+    if al < bl {
+        0
+    } else if al > bl {
+        2
+    } else {
+        1
+    }
+}
+
+fn cmp3(a: u64, b: u64) -> u64 {
+    if a < b {
+        0
+    } else if a > b {
+        2
+    } else {
+        1
+    }
+}
+
+// Compares diagnostics i and j.
+fn cmp_diag(in s: S, i: u64, j: u64) -> u64 {
+    let c = cmp3(sw(in s.dg_code, i), sw(in s.dg_code, j));
+    if c != 1 {
+        return c;
+    }
+    let c = cmp3(sw(in s.dg_sv, i), sw(in s.dg_sv, j));
+    if c != 1 {
+        return c;
+    }
+    let c = cmp3(sw(in s.dg_sa, i), sw(in s.dg_sa, j));
+    if c != 1 {
+        return c;
+    }
+    let c = cmp3(sw(in s.dg_sb, i), sw(in s.dg_sb, j));
+    if c != 1 {
+        return c;
+    }
+    cmp_txt(in s, sw(in s.dg_off, i), sw(in s.dg_len, i), sw(in s.dg_off, j), sw(in s.dg_len, j))
+}
+
+fn swap1(inout q: ChunkSeq[u64], i: u64, j: u64) {
+    let x = sw(in q, i);
+    let y = sw(in q, j);
+    setw(inout q, i, y);
+    setw(inout q, j, x);
+}
+
+fn swap_diag(inout s: S, i: u64, j: u64) {
+    swap1(inout s.dg_code, i, j);
+    swap1(inout s.dg_sv, i, j);
+    swap1(inout s.dg_sa, i, j);
+    swap1(inout s.dg_sb, i, j);
+    swap1(inout s.dg_off, i, j);
+    swap1(inout s.dg_len, i, j);
+}
+
+fn copy_diag(inout s: S, from: u64, to: u64) {
+    let x = sw(in s.dg_code, from);
+    setw(inout s.dg_code, to, x);
+    let x = sw(in s.dg_sv, from);
+    setw(inout s.dg_sv, to, x);
+    let x = sw(in s.dg_sa, from);
+    setw(inout s.dg_sa, to, x);
+    let x = sw(in s.dg_sb, from);
+    setw(inout s.dg_sb, to, x);
+    let x = sw(in s.dg_off, from);
+    setw(inout s.dg_off, to, x);
+    let x = sw(in s.dg_len, from);
+    setw(inout s.dg_len, to, x);
+}
+
+pub fn truncate_diags(inout s: S, n: u64) {
+    s.dg_code.truncate(n);
+    s.dg_sv.truncate(n);
+    s.dg_sa.truncate(n);
+    s.dg_sb.truncate(n);
+    s.dg_off.truncate(n);
+    s.dg_len.truncate(n);
+}
+
+// Sorts and deduplicates the diagnostics from base on.
+pub fn sort_diags(inout s: S, base: u64) {
+    let n = s.dg_code.len();
+    let mut i = inc(base);
+    loop {
+        if i >= n {
+            break;
+        }
+        let mut j = i;
+        loop {
+            if j <= base {
+                break;
+            }
+            if cmp_diag(in s, dec(j), j) != 2 {
+                break;
+            }
+            swap_diag(inout s, dec(j), j);
+            j = dec(j);
+        }
+        i = inc(i);
+    }
+    if n <= base {
+        return;
+    }
+    let mut w = inc(base);
+    let mut r = inc(base);
+    loop {
+        if r >= n {
+            break;
+        }
+        if cmp_diag(in s, dec(w), r) != 1 {
+            copy_diag(inout s, r, w);
+            w = inc(w);
+        }
+        r = inc(r);
+    }
+    truncate_diags(inout s, w);
+}
+
+fn code_str(inout s: S, c: u64) {
+    if c <= 8 {
+        lit(inout s, "PACT000");
+        num(inout s, inc(c));
+    } else {
+        lit(inout s, "PACT010");
+        num(inout s, sub(c, 8));
+    }
+}
+
+pub fn r_subject(inout s: S, v: u64, a: u64, b: u64) {
+    if v == 0 {
+        lit(inout s, "program");
+    } else if v == 1 {
+        r_id(inout s, "type", a);
+    } else if v == 2 {
+        r_id(inout s, "effect", a);
+    } else if v == 3 {
+        r_id(inout s, "trait", a);
+    } else if v == 4 {
+        r_id(inout s, "impl", a);
+    } else if v == 5 {
+        r_id(inout s, "impl", a);
+        lit(inout s, " & ");
+        r_id(inout s, "impl", b);
+    } else if v == 6 {
+        r_id(inout s, "model", a);
+    } else {
+        lit(inout s, "query");
+    }
+}
+
+// Copies txt[off .. off + len] to the end of txt.
+pub fn copy_txt(inout s: S, off: u64, len: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let b = bt(in s.txt, add(off, i));
+        s.txt.push(b);
+        i = inc(i);
+    }
+}
+
+// `diag::render` of the diagnostics from base on, appended to txt.
+pub fn render_diags(inout s: S, base: u64) {
+    let n = s.dg_code.len();
+    let mut i = base;
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = sw(in s.dg_code, i);
+        code_str(inout s, c);
+        lit(inout s, " [");
+        let v = sw(in s.dg_sv, i);
+        let a = sw(in s.dg_sa, i);
+        let b = sw(in s.dg_sb, i);
+        r_subject(inout s, v, a, b);
+        lit(inout s, "] ");
+        let off = sw(in s.dg_off, i);
+        let len = sw(in s.dg_len, i);
+        copy_txt(inout s, off, len);
+        byte(inout s, 10);
+        i = inc(i);
+    }
+}

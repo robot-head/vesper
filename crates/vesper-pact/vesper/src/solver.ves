@@ -1,0 +1,1620 @@
+// Module solver of @vesper/pact (see lib.ves): `solver.rs`, the tabled
+// canonical goal solver.
+//
+// Results are nodes. A canonical answer (`QResult`) is q_proven (the
+// response: binders, values, derivation), q_ambig, q_nosol, q_unsup or
+// q_over; the last four are also the driver's nested errors. Candidate
+// errors add ce_head and ce_nosol (with the cause).
+//
+// Candidates. The Rust build collects `(source, Result<(InferCtxt,
+// Derivation), CandErr>)` per candidate and builds each proof's canonical
+// response in `combine`. Building the response reads only that
+// candidate's context, so this port builds it as soon as the candidate
+// succeeds and keeps `(source, response or error)` on the phase stack
+// `ph_src`/`ph_val`, which needs no context per candidate. A duplicate
+// label met while building it becomes the candidate's q_unsup, which
+// `applies` and `combine` treat as the Rust build treats the proof whose
+// response fails (it applies; `combine` returns the error in order).
+//
+// Goal builders. The Rust build passes `goal_of: &dyn Fn(&InferCtxt) ->
+// Goal` closures that rebuild the goal with its brand resolved in the
+// candidate's context. All of them are one of two shapes, so a builder is
+// the goal node itself (`Implements` or `ProjectionEq`) and `goal_of`
+// resolves its brand (`goal_of` below).
+//
+// Candidate sources are `variant << 32 | x`: 0 impl, 1 model, 2
+// assumption, 3 alias bound, 4 rigid (the `CandidateSource` order).
+use self::{
+    S
+};
+use self::term::{
+    arg_kind,
+    add,
+    dec,
+    fa,
+    fb,
+    fc,
+    flags,
+    inc,
+    is_inf,
+    kid,
+    mk,
+    mk0,
+    mk1,
+    mk2,
+    mkl,
+    nlen,
+    none,
+    push_kids,
+    setw,
+    sub,
+    sw,
+    tg,
+    var_arg,
+    vidx,
+    vinf,
+    vkind
+};
+use self::fold::{
+    cn_begin,
+    inst,
+    resolve,
+    run
+};
+use self::infer::{
+    clone_cx,
+    fresh_args,
+    new_var,
+    unify_arg,
+    unify_args,
+    unify_brand,
+    unify_trait_ref,
+    unify_ty
+};
+use self::mode::{
+    decide,
+    mode_atoms
+};
+
+fn src(v: u64, x: u64) -> u64 {
+    (v << 32) | x
+}
+
+fn dup_err(inout s: S) -> u64 {
+    let k = s.dkey;
+    let r = mk1(inout s, 40, k);
+    mk1(inout s, 32, r)
+}
+
+// `unify_err`.
+fn unify_err(inout s: S, e: u64) -> u64 {
+    if e == 1 {
+        mk0(inout s, 52)
+    } else if e == 2 {
+        let a = mk0(inout s, 38);
+        mk1(inout s, 30, a)
+    } else {
+        dup_err(inout s)
+    }
+}
+
+// `From<NestedErr> for CandErr`.
+fn nested_to_cand(inout s: S, e: u64) -> u64 {
+    if tg(in s, e) == 31 {
+        let f = fa(in s, e);
+        let c = mk1(inout s, 50, f);
+        mk1(inout s, 53, c)
+    } else {
+        e
+    }
+}
+
+fn is_err(in s: S, n: u64) -> bool {
+    let t = tg(in s, n);
+    t >= 29 && t <= 33 || t == 52 || t == 53
+}
+
+fn bump(inout s: S) -> bool {
+    s.steps = inc(s.steps);
+    s.steps > s.max_steps
+}
+
+fn overflow(inout s: S, k: u64) -> u64 {
+    mk1(inout s, 33, k)
+}
+
+// The candidate's goal: the builder with its brand resolved in cx.
+fn goal_of(inout s: S, in cx: ChunkSeq[u64], g: u64) -> u64 {
+    if tg(in s, g) == 14 {
+        let tr = fa(in s, g);
+        let b = fb(in s, g);
+        let rb = resolve(inout s, in cx, b);
+        mk2(inout s, 14, tr, rb)
+    } else {
+        let p = fa(in s, g);
+        let ty = fb(in s, g);
+        let tr = fa(in s, p);
+        let b = fb(in s, p);
+        let assoc = fc(in s, p);
+        let rb = resolve(inout s, in cx, b);
+        let np = mk(inout s, 3, tr, rb, assoc);
+        mk2(inout s, 15, np, ty)
+    }
+}
+
+// The canonical response of a proof: the query variables' values, then the
+// derivation, sharing one renaming. q_proven, or q_unsup on a duplicate.
+pub fn make_response(inout s: S, in cx: ChunkSeq[u64], vars: u64, d: u64) -> u64 {
+    let base = s.tmp.len();
+    cn_begin(inout s);
+    let n = nlen(in s, vars);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let v = kid(in s, vars, i);
+        let r = resolve(inout s, in cx, v);
+        if r == 0 {
+            s.tmp.truncate(base);
+            return dup_err(inout s);
+        }
+        let c = run(inout s, in cx, 3, r);
+        if c == 0 {
+            s.tmp.truncate(base);
+            return dup_err(inout s);
+        }
+        s.tmp.push(c);
+        i = inc(i);
+    }
+    let resolved = run(inout s, in cx, 7, d);
+    if resolved == 0 {
+        s.tmp.truncate(base);
+        return dup_err(inout s);
+    }
+    let der = run(inout s, in cx, 3, resolved);
+    if der == 0 {
+        s.tmp.truncate(base);
+        return dup_err(inout s);
+    }
+    let values = mkl(inout s, 27, 0, 0, 0, base);
+    let from = s.tmp.len();
+    let nb = s.cn_binders.len();
+    let mut j: u64 = 0;
+    loop {
+        if j >= nb {
+            break;
+        }
+        let k = sw(in s.cn_binders, j);
+        s.tmp.push(k);
+        j = inc(j);
+    }
+    let binders = mkl(inout s, 28, 0, 0, 0, from);
+    mk(inout s, 29, binders, values, der)
+}
+
+// ---------------------------------------------------------------------------
+// Eager normalization: every projection (innermost first, left to right)
+// becomes a fresh variable `?v` with `ProjectionEq(p, ?v)` pushed onto out.
+
+fn norm_args(inout s: S, inout cx: ChunkSeq[u64], n: u64, inout out: ChunkSeq[u64]) -> u64 {
+    let from = s.tmp.len();
+    let len = nlen(in s, n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let a = kid(in s, n, i);
+        let x = norm_arg(inout s, inout cx, a, inout out);
+        s.tmp.push(x);
+        i = inc(i);
+    }
+    from
+}
+
+fn norm_arg(inout s: S, inout cx: ChunkSeq[u64], a: u64, inout out: ChunkSeq[u64]) -> u64 {
+    if (flags(in s, a) & 8) == 0 {
+        return a;
+    }
+    let t = tg(in s, a);
+    if t <= 3 {
+        return norm_ty(inout s, inout cx, a, inout out);
+    }
+    if t == 6 {
+        let from = s.tmp.len();
+        let len = nlen(in s, a);
+        let mut i: u64 = 0;
+        loop {
+            if i >= len {
+                break;
+            }
+            let l = kid(in s, a, i);
+            if tg(in s, l) == 11 {
+                let f2 = norm_args(inout s, inout cx, l, inout out);
+                let e = fa(in s, l);
+                let x = mkl(inout s, 11, e, 0, 0, f2);
+                s.tmp.push(x);
+            } else {
+                s.tmp.push(l);
+            }
+            i = inc(i);
+        }
+        let tail = fa(in s, a);
+        return mkl(inout s, 6, tail, 0, 0, from);
+    }
+    a
+}
+
+fn norm_tref(inout s: S, inout cx: ChunkSeq[u64], tr: u64, inout out: ChunkSeq[u64]) -> u64 {
+    if (flags(in s, tr) & 8) == 0 {
+        return tr;
+    }
+    let st = fb(in s, tr);
+    let st2 = norm_ty(inout s, inout cx, st, inout out);
+    let from = norm_args(inout s, inout cx, tr, inout out);
+    let t = fa(in s, tr);
+    mkl(inout s, 13, t, st2, 0, from)
+}
+
+pub fn norm_ty(inout s: S, inout cx: ChunkSeq[u64], t: u64, inout out: ChunkSeq[u64]) -> u64 {
+    if (flags(in s, t) & 8) == 0 {
+        return t;
+    }
+    let tag = tg(in s, t);
+    if tag == 1 {
+        let from = norm_args(inout s, inout cx, t, inout out);
+        let c = fa(in s, t);
+        return mkl(inout s, 1, c, 0, 0, from);
+    }
+    if tag == 3 {
+        let tr = fa(in s, t);
+        let tr2 = norm_tref(inout s, inout cx, tr, inout out);
+        let b = fb(in s, t);
+        let assoc = fc(in s, t);
+        let inner = mk(inout s, 3, tr2, b, assoc);
+        let v = new_var(inout cx, 0);
+        let tv = mk1(inout s, 2, v);
+        let g = mk2(inout s, 15, inner, tv);
+        out.push(g);
+        return tv;
+    }
+    t
+}
+
+// `normalize_goal`: 0 with s.dkey when resolving repeats a label.
+fn norm_goal(inout s: S, inout cx: ChunkSeq[u64], g: u64, inout out: ChunkSeq[u64]) -> u64 {
+    let g = resolve(inout s, in cx, g);
+    if g == 0 {
+        return 0;
+    }
+    if (flags(in s, g) & 8) == 0 {
+        return g;
+    }
+    let t = tg(in s, g);
+    let a = fa(in s, g);
+    let b = fb(in s, g);
+    if t == 14 {
+        let tr = norm_tref(inout s, inout cx, a, inout out);
+        mk2(inout s, 14, tr, b)
+    } else if t == 15 {
+        let tr = fa(in s, a);
+        let tr2 = norm_tref(inout s, inout cx, tr, inout out);
+        let pb = fb(in s, a);
+        let assoc = fc(in s, a);
+        let p = mk(inout s, 3, tr2, pb, assoc);
+        let ty = norm_ty(inout s, inout cx, b, inout out);
+        mk2(inout s, 15, p, ty)
+    } else {
+        let ty = norm_ty(inout s, inout cx, a, inout out);
+        mk2(inout s, 16, ty, b)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The obligation driver: proves the goals of the list node `goals` in cx;
+// a list of derivations, or a nested error.
+
+pub fn drive(inout s: S, env: u64, inout cx: ChunkSeq[u64], goals: u64) -> u64 {
+    let mut obl = ChunkSeq::new[u64]();
+    let mut roots = ChunkSeq::new[u64]();
+    let ng = nlen(in s, goals);
+    let mut i: u64 = 0;
+    loop {
+        if i >= ng {
+            break;
+        }
+        let g = kid(in s, goals, i);
+        let start = obl.len();
+        let normalized = norm_goal(inout s, inout cx, g, inout obl);
+        if normalized == 0 {
+            return dup_err(inout s);
+        }
+        roots.push(g);
+        roots.push(start);
+        roots.push(obl.len());
+        obl.push(normalized);
+        i = inc(i);
+    }
+    let n = obl.len();
+    let mut proofs = ChunkSeq::with_capacity[u64](n);
+    let mut pending = ChunkSeq::with_capacity[u64](n);
+    let mut j: u64 = 0;
+    loop {
+        if j >= n {
+            break;
+        }
+        proofs.push(0);
+        pending.push(j);
+        j = inc(j);
+    }
+    loop {
+        let mut progress = false;
+        let mut still = ChunkSeq::new[u64]();
+        let mut first = none();
+        let np = pending.len();
+        let mut k: u64 = 0;
+        loop {
+            if k >= np {
+                break;
+            }
+            let idx = sw(in pending, k);
+            let g = sw(in obl, idx);
+            let r = solve_nested(inout s, env, inout cx, g);
+            let t = tg(in s, r);
+            if t == 17 {
+                setw(inout proofs, idx, r);
+                progress = true;
+            } else if t == 30 {
+                if first == none() {
+                    first = fa(in s, r);
+                }
+                still.push(idx);
+            } else {
+                return r;
+            }
+            k = inc(k);
+        }
+        if still.len() == 0 {
+            break;
+        }
+        if !progress {
+            let g0 = sw(in obl, sw(in still, 0));
+            let g = resolve(inout s, in cx, g0);
+            if g == 0 {
+                return dup_err(inout s);
+            }
+            let amb = if tg(in s, first) == 39 {
+                first
+            } else if still.len() == 1 {
+                first
+            } else {
+                mk1(inout s, 39, g)
+            };
+            return mk1(inout s, 30, amb);
+        }
+        pending = still;
+    }
+    let from = s.tmp.len();
+    let nr = roots.len();
+    let mut r: u64 = 0;
+    loop {
+        if r >= nr {
+            break;
+        }
+        let orig = sw(in roots, r);
+        let start = sw(in roots, inc(r));
+        let main = sw(in roots, add(r, 2));
+        let mp = sw(in proofs, main);
+        if start == main {
+            s.tmp.push(mp);
+        } else {
+            let f2 = s.tmp.len();
+            let mut q = start;
+            loop {
+                if q >= main {
+                    break;
+                }
+                let p = sw(in proofs, q);
+                s.tmp.push(p);
+                q = inc(q);
+            }
+            s.tmp.push(mp);
+            let step = mk0(inout s, 25);
+            let d = mkl(inout s, 17, orig, step, 0, f2);
+            s.tmp.push(d);
+        }
+        r = add(r, 3);
+    }
+    mkl(inout s, 27, 0, 0, 0, from)
+}
+
+// Canonicalizes a goal of cx, answers it through the table, and applies
+// the answer back to cx: a derivation, or a nested error.
+fn solve_nested(inout s: S, env: u64, inout cx: ChunkSeq[u64], goal: u64) -> u64 {
+    let resolved = resolve(inout s, in cx, goal);
+    if resolved == 0 {
+        return dup_err(inout s);
+    }
+    cn_begin(inout s);
+    let canon = run(inout s, in cx, 3, resolved);
+    if canon == 0 {
+        return dup_err(inout s);
+    }
+    let from = s.tmp.len();
+    let nb = s.cn_binders.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= nb {
+            break;
+        }
+        let k = sw(in s.cn_binders, i);
+        s.tmp.push(k);
+        i = inc(i);
+    }
+    let binders = mkl(inout s, 28, 0, 0, 0, from);
+    let from2 = s.tmp.len();
+    i = 0;
+    loop {
+        if i >= nb {
+            break;
+        }
+        let o = sw(in s.cn_origins, i);
+        s.tmp.push(o);
+        i = inc(i);
+    }
+    let origins = mkl(inout s, 28, 0, 0, 0, from2);
+    let result = solve_key(inout s, env, canon, binders);
+    if tg(in s, result) != 29 {
+        return result;
+    }
+    let rb = fa(in s, result);
+    let values = fb(in s, result);
+    let der = fc(in s, result);
+    let fresh = fresh_args(inout s, inout cx, rb);
+    let nv = nlen(in s, values);
+    let mut j: u64 = 0;
+    loop {
+        if j >= nv {
+            break;
+        }
+        let value = kid(in s, values, j);
+        let saved = s.fsub;
+        s.fsub = fresh;
+        let v = run(inout s, in cx, 4, value);
+        s.fsub = saved;
+        if v == 0 {
+            return dup_err(inout s);
+        }
+        let kind = arg_kind(in s, v);
+        let o = kid(in s, origins, j);
+        let var = var_arg(inout s, kind, vinf(o));
+        let e = unify_arg(inout s, inout cx, var, v);
+        if e != 0 {
+            if e == 3 {
+                return dup_err(inout s);
+            }
+            let r = mk2(inout s, 42, 0, goal);
+            return mk1(inout s, 32, r);
+        }
+        j = inc(j);
+    }
+    let saved = s.fsub;
+    s.fsub = fresh;
+    let d = run(inout s, in cx, 4, der);
+    s.fsub = saved;
+    if d == 0 {
+        return dup_err(inout s);
+    }
+    d
+}
+
+// ---------------------------------------------------------------------------
+// Tabling and cycles.
+
+fn same_answer(in s: S, a: u64, b: u64) -> bool {
+    let ta = tg(in s, a);
+    let tb = tg(in s, b);
+    if ta == 29 && tb == 29 {
+        return fa(in s, a) == fa(in s, b) && fb(in s, a) == fb(in s, b);
+    }
+    ta == tb
+}
+
+fn ck_slot(in s: S, env: u64, goal: u64) -> u64 {
+    let h = wrapping_mul(wrapping_mul(env, 11400714819323198485) ^ goal, 13787848793156543929);
+    let mut at = (h >> 32) & s.ck_mask;
+    loop {
+        let g = sw(in s.ck_goal, at);
+        if g == 0 {
+            return at;
+        }
+        if g == goal && sw(in s.ck_env, at) == env {
+            return at;
+        }
+        at = inc(at) & s.ck_mask;
+    }
+}
+
+fn ck_grow(inout s: S) {
+    let cap = wrapping_mul(inc(s.ck_mask), 2);
+    let mut oe = ChunkSeq::with_capacity[u64](s.ck_count);
+    let mut og = ChunkSeq::with_capacity[u64](s.ck_count);
+    let mut ov = ChunkSeq::with_capacity[u64](s.ck_count);
+    let old = inc(s.ck_mask);
+    let mut i: u64 = 0;
+    loop {
+        if i >= old {
+            break;
+        }
+        let g = sw(in s.ck_goal, i);
+        if g != 0 {
+            oe.push(sw(in s.ck_env, i));
+            og.push(g);
+            ov.push(sw(in s.ck_val, i));
+        }
+        i = inc(i);
+    }
+    s.ck_env.clear();
+    s.ck_goal.clear();
+    s.ck_val.clear();
+    i = 0;
+    loop {
+        if i >= cap {
+            break;
+        }
+        s.ck_env.push(0);
+        s.ck_goal.push(0);
+        s.ck_val.push(0);
+        i = inc(i);
+    }
+    s.ck_mask = dec(cap);
+    let n = og.len();
+    i = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let e = sw(in oe, i);
+        let g = sw(in og, i);
+        let at = ck_slot(in s, e, g);
+        setw(inout s.ck_env, at, e);
+        setw(inout s.ck_goal, at, g);
+        setw(inout s.ck_val, at, sw(in ov, i));
+        i = inc(i);
+    }
+}
+
+fn ck_insert(inout s: S, env: u64, goal: u64, v: u64) {
+    let at = ck_slot(in s, env, goal);
+    if sw(in s.ck_goal, at) == 0 {
+        s.ck_count = inc(s.ck_count);
+    }
+    setw(inout s.ck_env, at, env);
+    setw(inout s.ck_goal, at, goal);
+    setw(inout s.ck_val, at, v);
+    if wrapping_mul(s.ck_count, 2) > s.ck_mask {
+        ck_grow(inout s);
+    }
+}
+
+fn cohyp_leaf(inout s: S, goal: u64) -> u64 {
+    let st = mk0(inout s, 26);
+    mk2(inout s, 17, goal, st)
+}
+
+pub fn solve_key(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
+    let at = ck_slot(in s, env, goal);
+    if sw(in s.ck_goal, at) != 0 {
+        s.st_hits = inc(s.st_hits);
+        return sw(in s.ck_val, at);
+    }
+    let depth = s.sk_env.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= depth {
+            break;
+        }
+        if sw(in s.sk_goal, i) == goal && sw(in s.sk_env, i) == env {
+            let mut co = true;
+            let mut j = i;
+            loop {
+                if j >= depth {
+                    break;
+                }
+                if sw(in s.sk_co, j) == 0 {
+                    co = false;
+                }
+                j = inc(j);
+            }
+            let top = dec(depth);
+            let m = sw(in s.sk_min, top);
+            if i < m {
+                setw(inout s.sk_min, top, i);
+            }
+            if co {
+                setw(inout s.sk_uco, i, 1);
+                s.st_cocyc = inc(s.st_cocyc);
+            } else {
+                setw(inout s.sk_uind, i, 1);
+                s.st_indcyc = inc(s.st_indcyc);
+            }
+            if sw(in s.sk_uco, i) != 0 && sw(in s.sk_uind, i) != 0 {
+                let r = mk1(inout s, 41, goal);
+                return mk1(inout s, 32, r);
+            }
+            return if co {
+                sw(in s.sk_pco, i)
+            } else {
+                sw(in s.sk_pind, i)
+            };
+        }
+        i = inc(i);
+    }
+    if depth >= s.max_depth {
+        return overflow(inout s, 0);
+    }
+    let mut coinductive = false;
+    if tg(in s, goal) == 14 {
+        let tr = fa(in s, goal);
+        coinductive = sw(in s.tr_coind, fa(in s, tr)) != 0;
+    }
+    // The identity response with a coinductive-hypothesis leaf.
+    let from = s.tmp.len();
+    let nb = nlen(in s, binders);
+    let mut b: u64 = 0;
+    loop {
+        if b >= nb {
+            break;
+        }
+        let k = kid(in s, binders, b);
+        let v = var_arg(inout s, k, vinf(b));
+        s.tmp.push(v);
+        b = inc(b);
+    }
+    let ids = mkl(inout s, 27, 0, 0, 0, from);
+    let leaf = cohyp_leaf(inout s, goal);
+    let identity = mk(inout s, 29, binders, ids, leaf);
+    let ic = mk0(inout s, 48);
+    let fl = mk2(inout s, 43, goal, ic);
+    let ind = mk1(inout s, 31, fl);
+    s.sk_env.push(env);
+    s.sk_goal.push(goal);
+    s
+        .sk_co
+        .push(
+        if coinductive {
+            1
+        } else {
+            0
+        }
+    );
+    s.sk_pco.push(identity);
+    s.sk_pind.push(ind);
+    s.sk_uco.push(0);
+    s.sk_uind.push(0);
+    s.sk_min.push(none());
+    let index = depth;
+    let mut iterations: u64 = 0;
+    let mut result: u64 = 0;
+    loop {
+        setw(inout s.sk_uco, index, 0);
+        setw(inout s.sk_uind, index, 0);
+        setw(inout s.sk_min, index, none());
+        let r = evaluate(inout s, env, goal, binders);
+        let uco = sw(in s.sk_uco, index) != 0;
+        let uind = sw(in s.sk_uind, index) != 0;
+        let mixed = tg(in s, r) == 32 && tg(in s, fa(in s, r)) == 41;
+        if mixed || (uco && uind) {
+            let m = mk1(inout s, 41, goal);
+            result = mk1(inout s, 32, m);
+            break;
+        }
+        let stable = (!uco || same_answer(in s, r, sw(in s.sk_pco, index)))
+            && (!uind || same_answer(in s, r, sw(in s.sk_pind, index)));
+        if stable {
+            result = r;
+            break;
+        }
+        iterations = inc(iterations);
+        if iterations >= s.max_fix {
+            result = overflow(inout s, 2);
+            break;
+        }
+        s.st_reruns = inc(s.st_reruns);
+        if uco {
+            let p = if tg(in s, r) == 29 {
+                let rb = fa(in s, r);
+                let rv = fb(in s, r);
+                let lf = cohyp_leaf(inout s, goal);
+                mk(inout s, 29, rb, rv, lf)
+            } else {
+                r
+            };
+            setw(inout s.sk_pco, index, p);
+        }
+        if uind {
+            setw(inout s.sk_pind, index, r);
+        }
+    }
+    let min = sw(in s.sk_min, index);
+    s.sk_env.truncate(index);
+    s.sk_goal.truncate(index);
+    s.sk_co.truncate(index);
+    s.sk_pco.truncate(index);
+    s.sk_pind.truncate(index);
+    s.sk_uco.truncate(index);
+    s.sk_uind.truncate(index);
+    s.sk_min.truncate(index);
+    if min < index {
+        if index > 0 {
+            let p = dec(index);
+            if min < sw(in s.sk_min, p) {
+                setw(inout s.sk_min, p, min);
+            }
+        }
+    } else if tg(in s, result) != 33 {
+        ck_insert(inout s, env, goal, result);
+    }
+    result
+}
+
+// ---------------------------------------------------------------------------
+// Evaluation.
+
+fn evaluate(inout s: S, env: u64, goal: u64, binders: u64) -> u64 {
+    s.st_evals = inc(s.st_evals);
+    if bump(inout s) {
+        return overflow(inout s, 1);
+    }
+    let mut cx = ChunkSeq::new[u64]();
+    let vars = fresh_args(inout s, inout cx, binders);
+    let t = tg(in s, goal);
+    let base = s.ph_src.len();
+    let st = if t == 14 {
+        let tr = fa(in s, goal);
+        let b = fb(in s, goal);
+        implements(inout s, env, in cx, tr, b, vars)
+    } else if t == 15 {
+        let p = fa(in s, goal);
+        let ty = fb(in s, goal);
+        projection_eq(inout s, env, in cx, p, ty, vars)
+    } else {
+        let ty = fa(in s, goal);
+        let b = fb(in s, goal);
+        return mode_bound(inout s, env, in cx, goal, ty, b, vars);
+    };
+    if st != 0 {
+        truncate_phase(inout s, base);
+        let tag = tg(in s, st);
+        if tag == 30 || tag == 32 || tag == 33 {
+            return st;
+        }
+        let reason = if tag == 47 {
+            st
+        } else {
+            mk0(inout s, 44)
+        };
+        let f = mk2(inout s, 43, goal, reason);
+        return mk1(inout s, 31, f);
+    }
+    let r = combine(inout s, goal, base);
+    truncate_phase(inout s, base);
+    r
+}
+
+fn truncate_phase(inout s: S, base: u64) {
+    s.ph_src.truncate(base);
+    s.ph_val.truncate(base);
+}
+
+fn push_phase(inout s: S, source: u64, v: u64) {
+    s.ph_src.push(source);
+    s.ph_val.push(v);
+}
+
+// `applies`: the head matched and the candidate did not definitely fail.
+fn applies_from(in s: S, base: u64, nosol_counts: bool) -> bool {
+    let n = s.ph_val.len();
+    let mut i = base;
+    loop {
+        if i >= n {
+            return false;
+        }
+        let t = tg(in s, sw(in s.ph_val, i));
+        if t != 52 && (t != 53 || nosol_counts) {
+            return true;
+        }
+        i = inc(i);
+    }
+}
+
+fn is_unresolved_infer(inout s: S, in cx: ChunkSeq[u64], t: u64) -> bool {
+    let r = resolve(inout s, in cx, t);
+    r != 0 && tg(in s, r) == 2 && is_inf(fa(in s, r))
+}
+
+// How a brand is resolved, binding implicit brands: b_canon, b_named or
+// b_var (a placeholder), or a candidate error.
+fn brand_mode(inout s: S, env: u64, inout cx: ChunkSeq[u64], tr: u64, brand: u64) -> u64 {
+    let rb = resolve(inout s, in cx, brand);
+    let t = tg(in s, rb);
+    if t == 7 || t == 8 {
+        return rb;
+    }
+    let v = fa(in s, rb);
+    if vkind(v) == 1 {
+        return rb;
+    }
+    if vkind(v) == 0 {
+        let r = mk2(inout s, 42, 1, none());
+        return mk1(inout s, 32, r);
+    }
+    let scopes = fc(in s, env);
+    let ns = nlen(in s, scopes);
+    let tid = fa(in s, tr);
+    let mut si = ns;
+    loop {
+        if si == 0 {
+            break;
+        }
+        si = dec(si);
+        let scope = kid(in s, scopes, si);
+        let n = nlen(in s, scope);
+        let mut matching = ChunkSeq::new[u64]();
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let m = kid(in s, scope, i);
+            let ci = add(s.nimpl, m);
+            let mtr = sw(in s.cf_tref, ci);
+            if fa(in s, mtr) == tid {
+                let mut probe = clone_cx(in cx);
+                let params = sw(in s.cf_params, ci);
+                let args = fresh_args(inout s, inout probe, params);
+                let head = inst(inout s, mtr, args);
+                if head == 0 {
+                    return dup_err(inout s);
+                }
+                let u = unify_trait_ref(inout s, inout probe, head, tr);
+                if u == 0 || u == 2 {
+                    matching.push(m);
+                } else if u == 3 {
+                    return dup_err(inout s);
+                }
+            }
+            i = inc(i);
+        }
+        // sort and dedup
+        let nm = matching.len();
+        let mut a: u64 = 1;
+        loop {
+            if a >= nm {
+                break;
+            }
+            let x = sw(in matching, a);
+            let mut j = a;
+            loop {
+                if j == 0 {
+                    break;
+                }
+                let y = sw(in matching, dec(j));
+                if y <= x {
+                    break;
+                }
+                setw(inout matching, j, y);
+                j = dec(j);
+            }
+            setw(inout matching, j, x);
+            a = inc(a);
+        }
+        let from = s.tmp.len();
+        let mut k: u64 = 0;
+        loop {
+            if k >= nm {
+                break;
+            }
+            let x = sw(in matching, k);
+            if k == 0 || x != sw(in matching, dec(k)) {
+                s.tmp.push(x);
+            }
+            k = inc(k);
+        }
+        let distinct = sub(s.tmp.len(), from);
+        if distinct == 0 {
+            s.tmp.truncate(from);
+        } else {
+            if distinct == 1 {
+                let m = sw(in s.tmp, from);
+                s.tmp.truncate(from);
+                let named = mk1(inout s, 8, m);
+                let u = unify_brand(inout s, inout cx, rb, named);
+                if u != 0 {
+                    return unify_err(inout s, u);
+                }
+                return named;
+            }
+            let l = mkl(inout s, 28, 0, 0, 0, from);
+            let am = mk1(inout s, 36, l);
+            return mk1(inout s, 30, am);
+        }
+    }
+    let canon = mk0(inout s, 7);
+    let u = unify_brand(inout s, inout cx, rb, canon);
+    if u != 0 {
+        return unify_err(inout s, u);
+    }
+    canon
+}
+
+// Phase of an `Implements` goal: 0 with the candidates on the phase stack,
+// r_modelmis for a model of another trait, or a candidate error.
+fn implements(inout s: S, env: u64, in cx0: ChunkSeq[u64], tr: u64, brand: u64, vars: u64) -> u64 {
+    let st = fb(in s, tr);
+    if is_unresolved_infer(inout s, in cx0, st) {
+        let a = mk0(inout s, 34);
+        return mk1(inout s, 30, a);
+    }
+    let mut cx = clone_cx(in cx0);
+    let mode = brand_mode(inout s, env, inout cx, tr, brand);
+    if is_err(in s, mode) {
+        return mode;
+    }
+    let rbrand = resolve(inout s, in cx, brand);
+    let builder = mk2(inout s, 14, tr, brand);
+    let tid = fa(in s, tr);
+    let base = s.ph_src.len();
+    let mt = tg(in s, mode);
+    if mt == 8 {
+        let m = fa(in s, mode);
+        let ci = add(s.nimpl, m);
+        if fa(in s, sw(in s.cf_tref, ci)) != tid {
+            return mk1(inout s, 47, m);
+        }
+        env_implements(inout s, env, in cx, tr, rbrand, builder, vars);
+        if applies_from(in s, base, false) {
+            return 0;
+        }
+        truncate_phase(inout s, base);
+        let r = try_conformance(
+            inout s,
+            env,
+            in cx,
+            ci,
+            inc(wrapping_mul(m, 2)),
+            tr,
+            builder,
+            vars
+        );
+        push_phase(inout s, src(1, m), r);
+        return 0;
+    }
+    env_implements(inout s, env, in cx, tr, rbrand, builder, vars);
+    if applies_from(in s, base, false) || mt == 9 {
+        return 0;
+    }
+    let at = sw(in s.ib_at, tid);
+    let n = sw(in s.ib_n, tid);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let ci = sw(in s.ib, add(at, i));
+        let r = try_conformance(inout s, env, in cx, ci, wrapping_mul(ci, 2), tr, builder, vars);
+        push_phase(inout s, src(0, ci), r);
+        i = inc(i);
+    }
+    0
+}
+
+// Environment candidates: assumptions and, for rigid projection self
+// types, bounds declared on the associated type.
+fn env_implements(
+    inout s: S,
+    env: u64,
+    in cx0: ChunkSeq[u64],
+    tr: u64,
+    brand: u64,
+    builder: u64,
+    vars: u64
+) {
+    let asm = fb(in s, env);
+    let na = nlen(in s, asm);
+    let tid = fa(in s, tr);
+    let mut k: u64 = 0;
+    loop {
+        if k >= na {
+            break;
+        }
+        let a = kid(in s, asm, k);
+        if tg(in s, a) == 14 && fa(in s, fa(in s, a)) == tid {
+            let mut cx = clone_cx(in cx0);
+            let atr = fa(in s, a);
+            let ab = fb(in s, a);
+            let mut u = unify_trait_ref(inout s, inout cx, atr, tr);
+            if u == 0 {
+                u = unify_brand(inout s, inout cx, ab, brand);
+            }
+            let v = if u != 0 {
+                unify_err(inout s, u)
+            } else {
+                let g = goal_of(inout s, in cx, builder);
+                let step = mk1(inout s, 19, k);
+                let d = mk2(inout s, 17, g, step);
+                make_response(inout s, in cx, vars, d)
+            };
+            push_phase(inout s, src(2, k), v);
+        }
+        k = inc(k);
+    }
+    let st = fb(in s, tr);
+    if tg(in s, st) != 3 {
+        return;
+    }
+    let ptr = fa(in s, st);
+    let pb = fb(in s, st);
+    let pt = fa(in s, ptr);
+    let at = add(sw(in s.tr_as_at, pt), fc(in s, st));
+    let bat = sw(in s.as_bd_at, at);
+    let bn = sw(in s.as_bd_n, at);
+    let from = s.tmp.len();
+    let pst = fb(in s, ptr);
+    s.tmp.push(pst);
+    push_kids(inout s, ptr);
+    let binder = mkl(inout s, 27, 0, 0, 0, from);
+    let mut bi: u64 = 0;
+    loop {
+        if bi >= bn {
+            break;
+        }
+        let bt = sw(in s.bd_trait, add(bat, bi));
+        if bt == tid {
+            let bargs = sw(in s.bd_args, add(bat, bi));
+            let bbrand = sw(in s.bd_brand, add(bat, bi));
+            let v = alias_bound(
+                inout s,
+                env,
+                in cx0,
+                tr,
+                brand,
+                builder,
+                vars,
+                binder,
+                bargs,
+                bbrand,
+                ptr,
+                pb,
+                bi
+            );
+            push_phase(inout s, src(3, bi), v);
+        }
+        bi = inc(bi);
+    }
+}
+
+fn alias_bound(
+    inout s: S,
+    env: u64,
+    in cx0: ChunkSeq[u64],
+    tr: u64,
+    brand: u64,
+    builder: u64,
+    vars: u64,
+    binder: u64,
+    bargs: u64,
+    bbrand: u64,
+    ptr: u64,
+    pb: u64,
+    bi: u64
+) -> u64 {
+    if bump(inout s) {
+        return overflow(inout s, 1);
+    }
+    let mut cx = clone_cx(in cx0);
+    let args = inst(inout s, bargs, binder);
+    if args == 0 {
+        return dup_err(inout s);
+    }
+    let u = unify_args(inout s, inout cx, args, tr);
+    if u != 0 {
+        return unify_err(inout s, u);
+    }
+    let ib = inst(inout s, bbrand, binder);
+    let u2 = unify_brand(inout s, inout cx, ib, brand);
+    if u2 != 0 {
+        return unify_err(inout s, u2);
+    }
+    let parent = mk2(inout s, 14, ptr, pb);
+    let from = s.tmp.len();
+    s.tmp.push(parent);
+    let goals = mkl(inout s, 27, 0, 0, 0, from);
+    let children = drive(inout s, env, inout cx, goals);
+    if tg(in s, children) != 27 {
+        return nested_to_cand(inout s, children);
+    }
+    let g = goal_of(inout s, in cx, builder);
+    let step = mk1(inout s, 20, bi);
+    let f2 = s.tmp.len();
+    push_kids(inout s, children);
+    let d = mkl(inout s, 17, g, step, 0, f2);
+    make_response(inout s, in cx, vars, d)
+}
+
+// Instantiates the where-clauses of conformance ci with args onto tmp
+// (from `from`); false on a duplicate label.
+fn where_goals(inout s: S, ci: u64, args: u64) -> bool {
+    let wh = sw(in s.cf_where, ci);
+    let n = nlen(in s, wh);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let w = kid(in s, wh, i);
+        let g = inst(inout s, w, args);
+        if g == 0 {
+            return false;
+        }
+        s.tmp.push(g);
+        i = inc(i);
+    }
+    true
+}
+
+fn try_conformance(
+    inout s: S,
+    env: u64,
+    in cx0: ChunkSeq[u64],
+    ci: u64,
+    source: u64,
+    tr: u64,
+    builder: u64,
+    vars: u64
+) -> u64 {
+    if bump(inout s) {
+        return overflow(inout s, 1);
+    }
+    let mut cx = clone_cx(in cx0);
+    let params = sw(in s.cf_params, ci);
+    let args = fresh_args(inout s, inout cx, params);
+    let ctr = sw(in s.cf_tref, ci);
+    let head = inst(inout s, ctr, args);
+    if head == 0 {
+        return dup_err(inout s);
+    }
+    let u = unify_trait_ref(inout s, inout cx, head, tr);
+    if u != 0 {
+        return unify_err(inout s, u);
+    }
+    let from = s.tmp.len();
+    if !where_goals(inout s, ci, args) {
+        s.tmp.truncate(from);
+        return dup_err(inout s);
+    }
+    let wcs = mkl(inout s, 27, 0, 0, 0, from);
+    let children = drive(inout s, env, inout cx, wcs);
+    if tg(in s, children) != 27 {
+        return nested_to_cand(inout s, children);
+    }
+    let g = goal_of(inout s, in cx, builder);
+    let f2 = s.tmp.len();
+    push_kids(inout s, args);
+    let step = mkl(inout s, 18, source, 0, 0, f2);
+    let f3 = s.tmp.len();
+    push_kids(inout s, children);
+    let d = mkl(inout s, 17, g, step, 0, f3);
+    make_response(inout s, in cx, vars, d)
+}
+
+fn projection_eq(inout s: S, env: u64, in cx0: ChunkSeq[u64], p: u64, ty: u64, vars: u64) -> u64 {
+    let tr = fa(in s, p);
+    let st = fb(in s, tr);
+    if is_unresolved_infer(inout s, in cx0, st) {
+        let a = mk0(inout s, 34);
+        return mk1(inout s, 30, a);
+    }
+    let mut cx = clone_cx(in cx0);
+    let pbrand = fb(in s, p);
+    let assoc = fc(in s, p);
+    let mode = brand_mode(inout s, env, inout cx, tr, pbrand);
+    if is_err(in s, mode) {
+        return mode;
+    }
+    let builder = mk2(inout s, 15, p, ty);
+    let tid = fa(in s, tr);
+    let mt = tg(in s, mode);
+    if mt == 8 {
+        let m = fa(in s, mode);
+        if fa(in s, sw(in s.cf_tref, add(s.nimpl, m))) != tid {
+            return mk1(inout s, 47, m);
+        }
+    }
+    let brand = resolve(inout s, in cx, pbrand);
+    let base = s.ph_src.len();
+    // 1. Explicit equality assumptions.
+    let asm = fb(in s, env);
+    let na = nlen(in s, asm);
+    let mut k: u64 = 0;
+    loop {
+        if k >= na {
+            break;
+        }
+        let a = kid(in s, asm, k);
+        if tg(in s, a) == 15 {
+            let ap = fa(in s, a);
+            let aty = fb(in s, a);
+            let atr = fa(in s, ap);
+            if fa(in s, atr) == tid && fc(in s, ap) == assoc {
+                let mut c = clone_cx(in cx);
+                let mut u = unify_trait_ref(inout s, inout c, atr, tr);
+                if u == 0 {
+                    let ab = fb(in s, ap);
+                    u = unify_brand(inout s, inout c, ab, brand);
+                }
+                let v = if u != 0 {
+                    unify_err(inout s, u)
+                } else {
+                    let u2 = unify_ty(inout s, inout c, aty, ty);
+                    if u2 == 1 {
+                        let cv = mk0(inout s, 51);
+                        mk1(inout s, 53, cv)
+                    } else if u2 != 0 {
+                        unify_err(inout s, u2)
+                    } else {
+                        let g = goal_of(inout s, in c, builder);
+                        let step = mk1(inout s, 22, k);
+                        let d = mk2(inout s, 17, g, step);
+                        make_response(inout s, in c, vars, d)
+                    }
+                };
+                push_phase(inout s, src(2, k), v);
+            }
+        }
+        k = inc(k);
+    }
+    if applies_from(in s, base, true) {
+        return 0;
+    }
+    // 2. The trait holds through the environment: rigid projection.
+    let tbuilder = mk2(inout s, 14, tr, brand);
+    let ebase = s.ph_src.len();
+    env_implements(inout s, env, in cx, tr, brand, tbuilder, vars);
+    let n = s.ph_val.len();
+    let mut env_applies = false;
+    let mut i = ebase;
+    loop {
+        if i >= n {
+            break;
+        }
+        if tg(in s, sw(in s.ph_val, i)) != 52 {
+            env_applies = true;
+        }
+        i = inc(i);
+    }
+    truncate_phase(inout s, ebase);
+    if env_applies || mt == 9 {
+        let stt = tg(in s, st);
+        let rigid = (stt == 2 && vkind(fa(in s, st)) == 1) || stt == 3;
+        let v = if !rigid {
+            let r = mk2(inout s, 42, 2, none());
+            mk1(inout s, 32, r)
+        } else {
+            rigid_projection(inout s, env, in cx, p, brand, ty, builder, vars)
+        };
+        truncate_phase(inout s, base);
+        push_phase(inout s, src(4, 0), v);
+        return 0;
+    }
+    // 3. The selected model's value, or canonical impls.
+    if mt == 8 {
+        let m = fa(in s, mode);
+        let ci = add(s.nimpl, m);
+        let v = try_proj_conformance(
+            inout s,
+            env,
+            in cx,
+            ci,
+            inc(wrapping_mul(m, 2)),
+            p,
+            ty,
+            builder,
+            vars
+        );
+        push_phase(inout s, src(1, m), v);
+        return 0;
+    }
+    let at = sw(in s.ib_at, tid);
+    let ni = sw(in s.ib_n, tid);
+    let mut j: u64 = 0;
+    loop {
+        if j >= ni {
+            break;
+        }
+        let ci = sw(in s.ib, add(at, j));
+        let v = try_proj_conformance(
+            inout s,
+            env,
+            in cx,
+            ci,
+            wrapping_mul(ci, 2),
+            p,
+            ty,
+            builder,
+            vars
+        );
+        push_phase(inout s, src(0, ci), v);
+        j = inc(j);
+    }
+    0
+}
+
+fn rigid_projection(
+    inout s: S,
+    env: u64,
+    in cx0: ChunkSeq[u64],
+    p: u64,
+    brand: u64,
+    ty: u64,
+    builder: u64,
+    vars: u64
+) -> u64 {
+    if bump(inout s) {
+        return overflow(inout s, 1);
+    }
+    let mut cx = clone_cx(in cx0);
+    let tr = fa(in s, p);
+    let assoc = fc(in s, p);
+    let pp = mk(inout s, 3, tr, brand, assoc);
+    let parent = mk2(inout s, 14, tr, brand);
+    let from = s.tmp.len();
+    s.tmp.push(parent);
+    let goals = mkl(inout s, 27, 0, 0, 0, from);
+    let children = drive(inout s, env, inout cx, goals);
+    if tg(in s, children) != 27 {
+        return nested_to_cand(inout s, children);
+    }
+    let u = unify_ty(inout s, inout cx, pp, ty);
+    if u == 1 {
+        let cv = mk0(inout s, 51);
+        return mk1(inout s, 53, cv);
+    }
+    if u != 0 {
+        return unify_err(inout s, u);
+    }
+    let g = goal_of(inout s, in cx, builder);
+    let step = mk0(inout s, 23);
+    let f2 = s.tmp.len();
+    push_kids(inout s, children);
+    let d = mkl(inout s, 17, g, step, 0, f2);
+    make_response(inout s, in cx, vars, d)
+}
+
+fn try_proj_conformance(
+    inout s: S,
+    env: u64,
+    in cx0: ChunkSeq[u64],
+    ci: u64,
+    source: u64,
+    p: u64,
+    ty: u64,
+    builder: u64,
+    vars: u64
+) -> u64 {
+    if bump(inout s) {
+        return overflow(inout s, 1);
+    }
+    let mut cx = clone_cx(in cx0);
+    let params = sw(in s.cf_params, ci);
+    let args = fresh_args(inout s, inout cx, params);
+    let ctr = sw(in s.cf_tref, ci);
+    let head = inst(inout s, ctr, args);
+    if head == 0 {
+        return dup_err(inout s);
+    }
+    let tr = fa(in s, p);
+    let u = unify_trait_ref(inout s, inout cx, head, tr);
+    if u != 0 {
+        return unify_err(inout s, u);
+    }
+    let vals = sw(in s.cf_vals, ci);
+    let raw = kid(in s, vals, fc(in s, p));
+    let value = inst(inout s, raw, args);
+    if value == 0 {
+        return dup_err(inout s);
+    }
+    let mut norms = ChunkSeq::new[u64]();
+    let value = norm_ty(inout s, inout cx, value, inout norms);
+    let u2 = unify_ty(inout s, inout cx, value, ty);
+    if u2 == 1 {
+        let cv = mk0(inout s, 51);
+        return mk1(inout s, 53, cv);
+    }
+    if u2 != 0 {
+        return unify_err(inout s, u2);
+    }
+    let from = s.tmp.len();
+    if !where_goals(inout s, ci, args) {
+        s.tmp.truncate(from);
+        return dup_err(inout s);
+    }
+    let k = norms.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        let g = sw(in norms, i);
+        s.tmp.push(g);
+        i = inc(i);
+    }
+    let goals = mkl(inout s, 27, 0, 0, 0, from);
+    let children = drive(inout s, env, inout cx, goals);
+    if tg(in s, children) != 27 {
+        return nested_to_cand(inout s, children);
+    }
+    let g = goal_of(inout s, in cx, builder);
+    let f2 = s.tmp.len();
+    push_kids(inout s, args);
+    let step = mkl(inout s, 21, source, k, 0, f2);
+    let f3 = s.tmp.len();
+    push_kids(inout s, children);
+    let d = mkl(inout s, 17, g, step, 0, f3);
+    make_response(inout s, in cx, vars, d)
+}
+
+fn mode_bound(inout s: S, env: u64, in cx: ChunkSeq[u64], goal: u64, ty: u64, bound: u64, vars: u64)
+    -> u64 {
+    let t = resolve(inout s, in cx, ty);
+    if t == 0 {
+        return dup_err(inout s);
+    }
+    let from = s.atoms.len();
+    mode_atoms(inout s, env, t);
+    let b = resolve(inout s, in cx, bound);
+    let v = decide(inout s, from, b);
+    s.atoms.truncate(from);
+    if v == 0 {
+        let step = mk0(inout s, 24);
+        let d = mk2(inout s, 17, goal, step);
+        return make_response(inout s, in cx, vars, d);
+    }
+    if v == 1 {
+        let atom = s.vatom;
+        let r = mk2(inout s, 46, atom, b);
+        let f = mk2(inout s, 43, goal, r);
+        return mk1(inout s, 31, f);
+    }
+    let a = mk0(inout s, 37);
+    mk1(inout s, 30, a)
+}
+
+// Combines the candidates of the phase stack from base on: any unsupported
+// or overflowing candidate decides; several distinct answers or a
+// remaining ambiguity are ambiguous.
+fn combine(inout s: S, goal: u64, base: u64) -> u64 {
+    let n = s.ph_val.len();
+    let mut proven = ChunkSeq::new[u64]();
+    let mut amb = ChunkSeq::new[u64]();
+    let from = s.tmp.len();
+    let mut i = base;
+    loop {
+        if i >= n {
+            break;
+        }
+        let v = sw(in s.ph_val, i);
+        let source = sw(in s.ph_src, i);
+        let t = tg(in s, v);
+        if t == 29 {
+            proven.push(i);
+        } else if t == 53 {
+            let cause = fa(in s, v);
+            let cf = mk2(inout s, 49, source, cause);
+            s.tmp.push(cf);
+        } else if t == 30 {
+            amb.push(i);
+        } else if t == 32 || t == 33 {
+            s.tmp.truncate(from);
+            return v;
+        }
+        i = inc(i);
+    }
+    let np = proven.len();
+    let mut distinct: u64 = 0;
+    let mut a: u64 = 0;
+    loop {
+        if a >= np {
+            break;
+        }
+        let pa = sw(in s.ph_val, sw(in proven, a));
+        let mut seen = false;
+        let mut b: u64 = 0;
+        loop {
+            if b >= a {
+                break;
+            }
+            let pb = sw(in s.ph_val, sw(in proven, b));
+            if fa(in s, pa) == fa(in s, pb) && fb(in s, pa) == fb(in s, pb) {
+                seen = true;
+                break;
+            }
+            b = inc(b);
+        }
+        if !seen {
+            distinct = inc(distinct);
+        }
+        a = inc(a);
+    }
+    if distinct > 1 || (distinct > 0 && amb.len() > 0) {
+        s.tmp.truncate(from);
+        let mut srcs = ChunkSeq::new[u64]();
+        let mut x: u64 = 0;
+        loop {
+            if x >= np {
+                break;
+            }
+            srcs.push(sw(in s.ph_src, sw(in proven, x)));
+            x = inc(x);
+        }
+        let na = amb.len();
+        x = 0;
+        loop {
+            if x >= na {
+                break;
+            }
+            srcs.push(sw(in s.ph_src, sw(in amb, x)));
+            x = inc(x);
+        }
+        let ns = srcs.len();
+        let mut q: u64 = 1;
+        loop {
+            if q >= ns {
+                break;
+            }
+            let y = sw(in srcs, q);
+            let mut j = q;
+            loop {
+                if j == 0 {
+                    break;
+                }
+                let z = sw(in srcs, dec(j));
+                if z <= y {
+                    break;
+                }
+                setw(inout srcs, j, z);
+                j = dec(j);
+            }
+            setw(inout srcs, j, y);
+            q = inc(q);
+        }
+        let f2 = s.tmp.len();
+        x = 0;
+        loop {
+            if x >= ns {
+                break;
+            }
+            s.tmp.push(sw(in srcs, x));
+            x = inc(x);
+        }
+        let l = mkl(inout s, 28, 0, 0, 0, f2);
+        let am = mk1(inout s, 35, l);
+        return mk1(inout s, 30, am);
+    }
+    if np > 0 {
+        s.tmp.truncate(from);
+        return sw(in s.ph_val, sw(in proven, 0));
+    }
+    if amb.len() > 0 {
+        s.tmp.truncate(from);
+        return sw(in s.ph_val, sw(in amb, 0));
+    }
+    let reason = if s.tmp.len() == from {
+        mk0(inout s, 44)
+    } else {
+        mkl(inout s, 45, 0, 0, 0, from)
+    };
+    let f = mk2(inout s, 43, goal, reason);
+    mk1(inout s, 31, f)
+}

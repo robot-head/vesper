@@ -134,22 +134,37 @@ impl Default for ProgramDto {
 pub struct Program {
     dto: ProgramDto,
     impls_by_trait: Vec<Vec<ImplId>>,
+    /// The program's input words for the Vesper port (`crate::port`).
+    #[cfg(vesper_port)]
+    words: Vec<u64>,
 }
 
 impl Program {
     /// Validates ids, arities, variable scoping and fragment restrictions.
     /// Diagnostics are sorted and deterministic.
     pub fn new(dto: ProgramDto) -> Result<Program, Vec<Diagnostic>> {
-        let mut diags = Vec::new();
-        Validator {
-            dto: &dto,
-            diags: &mut diags,
-        }
-        .run();
-        if !diags.is_empty() {
-            diags.sort();
-            diags.dedup();
-            return Err(diags);
+        #[cfg(vesper_port)]
+        let words = {
+            let words = crate::port::program_words(&dto);
+            let diags = crate::port::validate_program(&words);
+            if !diags.is_empty() {
+                return Err(diags);
+            }
+            words
+        };
+        #[cfg(not(vesper_port))]
+        {
+            let mut diags = Vec::new();
+            Validator {
+                dto: &dto,
+                diags: &mut diags,
+            }
+            .run();
+            if !diags.is_empty() {
+                diags.sort();
+                diags.dedup();
+                return Err(diags);
+            }
         }
         let mut impls_by_trait = vec![Vec::new(); dto.traits.len()];
         for i in &dto.impls {
@@ -158,7 +173,13 @@ impl Program {
         Ok(Program {
             dto,
             impls_by_trait,
+            #[cfg(vesper_port)]
+            words,
         })
+    }
+    #[cfg(vesper_port)]
+    pub(crate) fn port_words(&self) -> &[u64] {
+        &self.words
     }
     pub fn dto(&self) -> &ProgramDto {
         &self.dto

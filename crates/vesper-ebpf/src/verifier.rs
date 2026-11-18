@@ -38,6 +38,12 @@
 //! kernel is more permissive the verifier rejects (for example variable
 //! stack offsets, pointer comparisons other than packet/`data_end` and null
 //! checks, and every unsupported helper or instruction).
+//!
+//! The port build (`cfg(vesper_port)`) runs `verify` in the Vesper port
+//! (`vesper/src/verifier.ves`, port wave P3a lane 6, #1041); the Rust
+//! exploration below is then unused but still compiled, so both builds
+//! type-check the same model.
+#![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
 
 use crate::callgraph::{CallGraph, FnId, FnNode, StackError, check_stack};
 use crate::helpers as h;
@@ -781,6 +787,12 @@ enum Step {
 /// again without widening and accepts if either succeeds (both are sound
 /// over-approximations). A rejection reports the exact exploration's
 /// reason unless that one only ran out of budget.
+#[cfg(vesper_port)]
+pub fn verify(prog: &Program, policy: &VerifierPolicy) -> Result<VerifyReport, VerifyError> {
+    crate::port::verify(prog, policy)
+}
+
+#[cfg(not(vesper_port))]
 pub fn verify(prog: &Program, policy: &VerifierPolicy) -> Result<VerifyReport, VerifyError> {
     if !policy.widen_loops {
         return Verifier::new(prog, policy)?.run();

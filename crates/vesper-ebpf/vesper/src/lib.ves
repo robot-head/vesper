@@ -3,9 +3,10 @@
 // (src/wire.rs), the tnum and interval domain (src/scalar.rs) with the
 // verifier's domain functions, the concrete ALU semantics of
 // src/interp.rs, the helper tables (src/helpers.rs), the map and program
-// kinds of src/program.rs and the stack bound (src/callgraph.rs). The Rust
-// files are the model; the Rust wrappers (src/port.rs) convert registers,
-// error fields and MAC arrays.
+// kinds of src/program.rs and the stack bound (src/callgraph.rs). Part 2:
+// the verifier (src/verifier.rs, verifier.ves). The Rust files are the
+// model; the Rust wrappers (src/port.rs) convert registers, error fields,
+// MAC arrays and the verifier's input and outcome words.
 //
 // Every export is named `<module>_<rust fn>`.
 use self::insn::{
@@ -88,6 +89,10 @@ use self::program::{
 };
 use self::callgraph::{
     check_stack
+};
+use self::verifier::{
+    Outcome,
+    verify_program
 };
 use self::wire::{
     EthIpv4TcpWire,
@@ -353,6 +358,34 @@ pub fn callgraph_check_stack(
     max_frames: u64
 ) -> ChunkSeq[u64] {
     check_stack(in ids, in frames, in calls, in indirect, root, limit, max_frames)
+}
+
+// verifier.rs
+
+pub fn verifier_verify(
+    in slots: Slice[RawInsn],
+    ptype: ProgramType,
+    pt_regs: i64,
+    gpl: bool,
+    in maps: Slice[u64],
+    in kfuncs: Slice[u64],
+    in text: Slice[u8],
+    max_insns: u64,
+    max_states: u64,
+    widen_loops: bool
+) -> Outcome {
+    verify_program(
+        in slots,
+        ptype,
+        pt_regs,
+        gpl,
+        in maps,
+        in kfuncs,
+        in text,
+        max_insns,
+        max_states,
+        widen_loops
+    )
 }
 
 // wire.rs

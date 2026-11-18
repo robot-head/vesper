@@ -1,0 +1,352 @@
+// Module out of @vesper/pact (see lib.ves): result words for src/port.rs.
+//
+// Terms use the input encoding (program.ves). Then:
+//
+//   outcome     0 n kind* n arg* derivation coinductive | 1 ambiguity
+//               | 2 failure | 3 reason | 4 overflow_kind
+//   ambiguity   0 self | 1 n source* | 2 n model* | 3 mode | 4 noninjective
+//               | 5 goal (stalled)
+//   reason      0 label_key | 1 goal (mixed cycle) | 2 code has_goal [goal]
+//   failure     goal (0 | 1 n (source cause)* | 2 mode mode | 3 model | 4)
+//   cause       0 failure | 1
+//   derivation  goal step n derivation*
+//   step        0 source n arg* | 1 index | 2 bound | 3 source k n arg*
+//               | 4 index | 5 | 6 | 7 | 8
+//   diagnostics n (code sv sa sb off len)*     text in txt
+//   env         n (kind bound)* n goal* n (n model*)*
+use self::{
+    S
+};
+use self::term::{
+    fa,
+    fb,
+    fc,
+    inc,
+    kid,
+    nlen,
+    none,
+    sub,
+    sw,
+    tg
+};
+
+pub fn w(inout s: S, x: u64) {
+    s.out.push(x);
+}
+
+fn w_kids(inout s: S, n: u64) {
+    let len = nlen(in s, n);
+    w(inout s, len);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let k = kid(in s, n, i);
+        w_term(inout s, k);
+        i = inc(i);
+    }
+}
+
+pub fn w_slist(inout s: S, n: u64) {
+    let len = nlen(in s, n);
+    w(inout s, len);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let k = kid(in s, n, i);
+        w(inout s, k);
+        i = inc(i);
+    }
+}
+
+pub fn w_tref(inout s: S, n: u64) {
+    let h21 = fa(in s, n);
+    w(inout s, h21);
+    let st = fb(in s, n);
+    w_term(inout s, st);
+    w_kids(inout s, n);
+}
+
+pub fn w_term(inout s: S, n: u64) {
+    let t = tg(in s, n);
+    let a = fa(in s, n);
+    let b = fb(in s, n);
+    if t == 1 || t == 11 {
+        w(inout s, t);
+        w(inout s, a);
+        w_kids(inout s, n);
+    } else if t == 3 {
+        w(inout s, 3);
+        w_tref(inout s, a);
+        w_term(inout s, b);
+        let h20 = fc(in s, n);
+        w(inout s, h20);
+    } else if t == 6 {
+        w(inout s, 6);
+        w_kids(inout s, n);
+        w(inout s, a);
+    } else if t == 7 {
+        w(inout s, 7);
+    } else if t == 14 {
+        w(inout s, 14);
+        w_tref(inout s, a);
+        w_term(inout s, b);
+    } else if t == 15 {
+        w(inout s, 15);
+        let tr = fa(in s, a);
+        w_tref(inout s, tr);
+        let pb = fb(in s, a);
+        w_term(inout s, pb);
+        let h19 = fc(in s, a);
+        w(inout s, h19);
+        w_term(inout s, b);
+    } else if t == 16 {
+        w(inout s, 16);
+        w_term(inout s, a);
+        w_term(inout s, b);
+    } else {
+        w(inout s, t);
+        w(inout s, a);
+    }
+}
+
+pub fn w_der(inout s: S, d: u64) {
+    let g = fa(in s, d);
+    w_term(inout s, g);
+    let st = fb(in s, d);
+    let t = tg(in s, st);
+    if t == 18 {
+        w(inout s, 0);
+        let h18 = fa(in s, st);
+        w(inout s, h18);
+        w_kids(inout s, st);
+    } else if t == 21 {
+        w(inout s, 3);
+        let h17 = fa(in s, st);
+        w(inout s, h17);
+        let h16 = fb(in s, st);
+        w(inout s, h16);
+        w_kids(inout s, st);
+    } else if t == 19 || t == 20 || t == 22 {
+        let code: u64 = if t == 19 {
+            1
+        } else if t == 20 {
+            2
+        } else {
+            4
+        };
+        w(inout s, code);
+        let h15 = fa(in s, st);
+        w(inout s, h15);
+    } else {
+        w(inout s, sub(t, 18));
+    }
+    let len = nlen(in s, d);
+    w(inout s, len);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let c = kid(in s, d, i);
+        w_der(inout s, c);
+        i = inc(i);
+    }
+}
+
+pub fn w_failure(inout s: S, f: u64) {
+    let g = fa(in s, f);
+    w_term(inout s, g);
+    let r = fb(in s, f);
+    let t = tg(in s, r);
+    if t == 44 {
+        w(inout s, 0);
+    } else if t == 45 {
+        w(inout s, 1);
+        let n = nlen(in s, r);
+        w(inout s, n);
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let c = kid(in s, r, i);
+            let h14 = fa(in s, c);
+            w(inout s, h14);
+            let cause = fb(in s, c);
+            if tg(in s, cause) == 50 {
+                w(inout s, 0);
+                let inner = fa(in s, cause);
+                w_failure(inout s, inner);
+            } else {
+                w(inout s, 1);
+            }
+            i = inc(i);
+        }
+    } else if t == 46 {
+        w(inout s, 2);
+        let a = fa(in s, r);
+        w_term(inout s, a);
+        let b = fb(in s, r);
+        w_term(inout s, b);
+    } else if t == 47 {
+        w(inout s, 3);
+        let h13 = fa(in s, r);
+        w(inout s, h13);
+    } else {
+        w(inout s, 4);
+    }
+}
+
+// Whether a derivation closes a coinductive cycle.
+pub fn uses_coinduction(in s: S, d: u64) -> bool {
+    if tg(in s, fb(in s, d)) == 26 {
+        return true;
+    }
+    let n = nlen(in s, d);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            return false;
+        }
+        if uses_coinduction(in s, kid(in s, d, i)) {
+            return true;
+        }
+        i = inc(i);
+    }
+}
+
+// Writes an outcome (a restored answer node).
+pub fn w_outcome(inout s: S, o: u64) {
+    let t = tg(in s, o);
+    let a = fa(in s, o);
+    if t == 29 {
+        w(inout s, 0);
+        w_slist(inout s, a);
+        let vals = fb(in s, o);
+        w_kids(inout s, vals);
+        let d = fc(in s, o);
+        w_der(inout s, d);
+        let co: u64 = if uses_coinduction(in s, d) {
+            1
+        } else {
+            0
+        };
+        w(inout s, co);
+    } else if t == 30 {
+        w(inout s, 1);
+        let at = tg(in s, a);
+        if at == 34 {
+            w(inout s, 0);
+        } else if at == 35 || at == 36 {
+            w(
+                inout s,
+                if at == 35 {
+                    1
+                } else {
+                    2
+                }
+            );
+            let l = fa(in s, a);
+            w_slist(inout s, l);
+        } else if at == 37 {
+            w(inout s, 3);
+        } else if at == 38 {
+            w(inout s, 4);
+        } else {
+            w(inout s, 5);
+            let g = fa(in s, a);
+            w_term(inout s, g);
+        }
+    } else if t == 31 {
+        w(inout s, 2);
+        w_failure(inout s, a);
+    } else if t == 32 {
+        w(inout s, 3);
+        let rt = tg(in s, a);
+        if rt == 40 {
+            w(inout s, 0);
+            let h12 = fa(in s, a);
+            w(inout s, h12);
+        } else if rt == 41 {
+            w(inout s, 1);
+            let g = fa(in s, a);
+            w_term(inout s, g);
+        } else {
+            w(inout s, 2);
+            let h11 = fa(in s, a);
+            w(inout s, h11);
+            let g = fb(in s, a);
+            if g == none() {
+                w(inout s, 0);
+            } else {
+                w(inout s, 1);
+                w_term(inout s, g);
+            }
+        }
+    } else {
+        w(inout s, 4);
+        w(inout s, a);
+    }
+}
+
+// Writes the diagnostics from base on.
+pub fn w_diags(inout s: S, base: u64) {
+    let n = s.dg_code.len();
+    let cnt = sub(n, base);
+    w(inout s, cnt);
+    let mut i = base;
+    loop {
+        if i >= n {
+            break;
+        }
+        let h10 = sw(in s.dg_code, i);
+        w(inout s, h10);
+        let h9 = sw(in s.dg_sv, i);
+        w(inout s, h9);
+        let h8 = sw(in s.dg_sa, i);
+        w(inout s, h8);
+        let h7 = sw(in s.dg_sb, i);
+        w(inout s, h7);
+        let h6 = sw(in s.dg_off, i);
+        w(inout s, h6);
+        let h5 = sw(in s.dg_len, i);
+        w(inout s, h5);
+        i = inc(i);
+    }
+}
+
+pub fn w_env(inout s: S, e: u64) {
+    let phs = fa(in s, e);
+    let n = nlen(in s, phs);
+    w(inout s, n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let p = kid(in s, phs, i);
+        let h4 = fa(in s, p);
+        w(inout s, h4);
+        let h3 = fb(in s, p);
+        w(inout s, h3);
+        i = inc(i);
+    }
+    let asm = fb(in s, e);
+    w_kids(inout s, asm);
+    let sc = fc(in s, e);
+    let ns = nlen(in s, sc);
+    w(inout s, ns);
+    i = 0;
+    loop {
+        if i >= ns {
+            break;
+        }
+        let l = kid(in s, sc, i);
+        w_slist(inout s, l);
+        i = inc(i);
+    }
+}

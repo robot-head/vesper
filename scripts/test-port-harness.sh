@@ -185,6 +185,7 @@ done
 grep -q 'test documented_manifest_is_declarative_and_secure_by_default ... ok' "$log" || { cat "$log"; echo "the divergent loom-calculus port failed an unchanged test" >&2; exit 1; }
 echo "divergent loom-calculus port detected (one failure per ported module)"
 sh crates/vesper-loom-solver/port/test-port.sh  # port P1 lane 17 (#914): vesper-loom-solver, both builds and the divergence check
+sh crates/vesper-pact/port/test-port.sh  # port P3a lane 3 (#1038): vesper-pact, all builds and the divergence check
 # Port wave P1 lane 15 (#912): vesper-semver, both builds and the divergence check.
 sh crates/vesper-semver/port/test-port.sh
 # Port wave P1 lane 8 (#905): vesper-tensor and its Rust seed copy, and the

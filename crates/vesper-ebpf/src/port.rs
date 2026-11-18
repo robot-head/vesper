@@ -368,6 +368,20 @@ impl From<&insn::Insn> for PortInsn {
     }
 }
 
+impl PortDecodeError {
+    /// The port verifier's decode error words: variant (as declared), the
+    /// position or length, and the register, code or field number.
+    fn from_words(variant: u64, a: usize, b: u8) -> Self {
+        match variant {
+            0 => PortDecodeError::TruncatedProgram { len: a },
+            1 => PortDecodeError::BadRegister { pc: a, reg: b },
+            2 => PortDecodeError::InvalidOpcode { pc: a, code: b },
+            3 => PortDecodeError::ReservedFieldSet { pc: a, field: b },
+            _ => PortDecodeError::BrokenLdImm64 { pc: a },
+        }
+    }
+}
+
 impl From<PortDecodeError> for insn::DecodeError {
     fn from(e: PortDecodeError) -> Self {
         use insn::DecodeError as D;
@@ -547,5 +561,238 @@ pub(crate) fn check_stack(
         3 => Err(StackError::TooDeep { path: path() }),
         4 => Err(StackError::UnknownFunction(id(out[1]))),
         _ => Err(StackError::IndirectCall(id(out[1]))),
+    }
+}
+
+/// Every rule the verifier reports, so the port's rule text maps back to
+/// the crate's `&'static str`.
+const RULES: &[&str] = &[
+    "alu.div_by_zero",
+    "alu.invalid_shift",
+    "alu.packet_var_too_large",
+    "alu.pointer_arith",
+    "alu.pointer_offset",
+    "alu.stack_var_offset",
+    "atomic.invalid_target",
+    "atomic.misaligned",
+    "atomic.pointer_operand",
+    "call.arg_type",
+    "call.depth",
+    "call.graph",
+    "call.helper_not_allowed",
+    "call.kfunc_unknown",
+    "call.kfunc_unsupported",
+    "call.recursion",
+    "call.tail_call_ref",
+    "call.tail_call_subprogs",
+    "call.unknown_helper",
+    "cfg.cross_subprog_jump",
+    "cfg.empty",
+    "cfg.fallthrough",
+    "cfg.jump_into_ld_imm64",
+    "cfg.jump_out_of_range",
+    "cfg.too_large",
+    "cfg.unreachable",
+    "complexity.limit",
+    "decode.invalid",
+    "exit.callback_ret",
+    "exit.r0_not_scalar",
+    "exit.stack_ptr_escape",
+    "insn.unsupported",
+    "internal.no_successor",
+    "jmp.pointer_compare",
+    "kfunc.arg_type",
+    "kfunc.irq_order",
+    "kfunc.license",
+    "kfunc.preempt_region",
+    "kfunc.rcu_nested",
+    "kfunc.region",
+    "kfunc.slot_in_use",
+    "kfunc.unbalanced",
+    "ld_imm64.bad_func",
+    "ld_imm64.bad_map",
+    "loop.unbounded",
+    "loop.widened_precise",
+    "map.invalid",
+    "mem.ctx_invalid_access",
+    "mem.ctx_st_imm",
+    "mem.ctx_write",
+    "mem.invalid_pointer",
+    "mem.kfunc_object",
+    "mem.map_value_out_of_bounds",
+    "mem.null_arith",
+    "mem.null_deref",
+    "mem.packet_out_of_range",
+    "mem.pointer_leak",
+    "mem.pointer_partial_fill",
+    "mem.pointer_partial_spill",
+    "mem.rdonly_out_of_bounds",
+    "mem.rdonly_write",
+    "mem.ringbuf_out_of_bounds",
+    "mem.stack_misaligned",
+    "mem.stack_out_of_bounds",
+    "mem.uninit_stack_read",
+    "mem.unsupported_target",
+    "prog.unsupported_type",
+    "ref.leak",
+    "ref.release_invalid",
+    "ref.release_offset",
+    "reg.uninit_read",
+    "reg.write_fp",
+    "stack.limit",
+];
+
+/// The kfuncs the verifier models, by the code the port matches on.
+const VERIFIER_KFUNCS: &[&str] = &[
+    "bpf_preempt_disable",
+    "bpf_preempt_enable",
+    "bpf_rcu_read_lock",
+    "bpf_rcu_read_unlock",
+    "bpf_local_irq_save",
+    "bpf_local_irq_restore",
+    "bpf_iter_num_new",
+    "bpf_iter_num_next",
+    "bpf_iter_num_destroy",
+];
+
+fn rule(text: &[u8]) -> &'static str {
+    RULES
+        .iter()
+        .copied()
+        .find(|r| r.as_bytes() == text)
+        .unwrap_or_else(|| {
+            panic!(
+                "verifier rule {:?} is not in RULES",
+                String::from_utf8_lossy(text)
+            )
+        })
+}
+
+/// `verifier::verify`: the program-type and map checks of `Verifier::new`
+/// here, the rest in the port. The program crosses as its slots plus words
+/// for the maps (kernel type, key, value, max entries, name range) and
+/// kfunc references (slot, code, name range) over one text pool.
+pub(crate) fn verify(
+    prog: &crate::program::Program,
+    policy: &crate::verifier::VerifierPolicy,
+) -> Result<crate::verifier::VerifyReport, crate::verifier::VerifyError> {
+    use crate::callgraph::{CallGraph, FnId, FnNode};
+    use crate::verifier::{PT_REGS_SIZE, VerifyError, VerifyReport};
+
+    if prog.prog_type == crate::program::ProgramType::Kprobe && PT_REGS_SIZE == 0 {
+        return Err(VerifyError {
+            insn: None,
+            rule: "prog.unsupported_type",
+            message: "kprobe programs: the pt_regs layout of this architecture is unknown".into(),
+        });
+    }
+    for m in &prog.maps {
+        m.validate().map_err(|e| VerifyError {
+            insn: None,
+            rule: "map.invalid",
+            message: format!("map {}: {e}", m.name),
+        })?;
+    }
+    let mut text = Vec::new();
+    let mut maps = Vec::with_capacity(prog.maps.len() * 6);
+    for m in &prog.maps {
+        maps.extend([
+            u64::from(m.kind.kernel_type()),
+            u64::from(m.key_size),
+            u64::from(m.value_size),
+            u64::from(m.max_entries),
+            text.len() as u64,
+            m.name.len() as u64,
+        ]);
+        text.extend_from_slice(m.name.as_bytes());
+    }
+    let mut kfuncs = Vec::with_capacity(prog.kfuncs.len() * 4);
+    for k in &prog.kfuncs {
+        let code = VERIFIER_KFUNCS
+            .iter()
+            .position(|n| *n == k.name)
+            .unwrap_or(VERIFIER_KFUNCS.len());
+        kfuncs.extend([
+            k.slot as u64,
+            code as u64,
+            text.len() as u64,
+            k.name.len() as u64,
+        ]);
+        text.extend_from_slice(k.name.as_bytes());
+    }
+    let out = ffi::verifier_verify(
+        &prog.insns,
+        prog.prog_type,
+        i64::from(PT_REGS_SIZE),
+        crate::helpers::gpl_compatible(&prog.license),
+        &maps,
+        &kfuncs,
+        &text,
+        policy.max_insns_processed,
+        policy.max_states_per_insn as u64,
+        policy.widen_loops,
+    );
+    let out = out.as_ref();
+    let w = out.words().to_vec();
+    match w[0] {
+        1 => Err(VerifyError {
+            insn: (w[1] != u64::MAX).then_some(w[1] as usize),
+            rule: rule(&out.rule().to_vec()),
+            message: String::from_utf8(out.msg().to_vec()).expect("ASCII message"),
+        }),
+        2 => {
+            let e = PortDecodeError::from_words(w[1], w[2] as usize, w[3] as u8);
+            let pc = match e {
+                PortDecodeError::TruncatedProgram { .. } => None,
+                PortDecodeError::BadRegister { pc, .. }
+                | PortDecodeError::InvalidOpcode { pc, .. }
+                | PortDecodeError::ReservedFieldSet { pc, .. }
+                | PortDecodeError::BrokenLdImm64 { pc } => Some(pc),
+            };
+            Err(VerifyError {
+                insn: pc,
+                rule: "decode.invalid",
+                message: insn::DecodeError::from(e).to_string(),
+            })
+        }
+        _ => {
+            let nsub = w[7] as usize;
+            let subprog_stack: Vec<(usize, u32)> = (0..nsub)
+                .map(|i| (w[8 + 2 * i] as usize, w[9 + 2 * i] as u32))
+                .collect();
+            let mut graph = CallGraph::default();
+            for (i, &(start, depth)) in subprog_stack.iter().enumerate() {
+                let name = prog
+                    .functions
+                    .iter()
+                    .find(|(_, e)| *e == start)
+                    .map(|(n, _)| n.clone())
+                    .unwrap_or_else(|| {
+                        if i == 0 {
+                            prog.name.clone()
+                        } else {
+                            format!("subprog_{start}")
+                        }
+                    });
+                graph.functions.push(FnNode {
+                    id: FnId(i as u32),
+                    name,
+                    frame_bytes: depth.max(1).div_ceil(32) * 32,
+                });
+            }
+            for &[from, to] in w[8 + 2 * nsub..].as_chunks::<2>().0 {
+                graph.calls.push((FnId(from as u32), FnId(to as u32)));
+            }
+            Ok(VerifyReport {
+                insns_processed: w[1],
+                states_stored: w[2] as usize,
+                paths_completed: w[3],
+                pruned: w[4],
+                subprog_stack,
+                worst_stack: w[6] as u32,
+                call_graph: graph,
+                widenings: w[5],
+            })
+        }
     }
 }

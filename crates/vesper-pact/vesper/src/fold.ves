@@ -1,0 +1,491 @@
+// Module fold of @vesper/pact (see lib.ves): the generic traversal of
+// `term.rs` (`fold_goal` and friends) over interned nodes.
+//
+// The Rust build folds through `&mut dyn VarFolder`. Here the folder is a
+// closed set of operations, `op`:
+//
+// - 1 `BoundSubst`: `^i` becomes kid i of the list `s.fsub`;
+// - 2 `Resolver`: bound inference variables are replaced by their values
+//   in `cx`, recursively; a duplicate label found inside a value is
+//   recorded in `s.rerr` and the value is kept, as the Rust resolver does;
+// - 3 `Canonicalizer`: inference variables renumbered in first-occurrence
+//   order (state `cn_*`);
+// - 4 `InferSubst`: `?i` becomes kid i of `s.fsub`;
+// - 5 parameters to placeholders (`^i` becomes `!i`);
+// - 6 placeholder renaming: `!i` becomes `!j`, j the position of i in
+//   `s.ford`;
+// - 7 `ResolveIn`: each variable is resolved on its own, falling back to
+//   the variable when that fails;
+// - 8 placeholder restoring: `!i` becomes `!o`, o kid i of `s.fsub`.
+//
+// Every row that is folded is sorted by label key and checked for a
+// repeated key, which is the `DuplicateLabel` error: `s.ferr` holds the
+// key and every fold returns at once (the Rust `?`). A subterm whose flags
+// show neither a variable the operation rewrites nor an unsorted row folds
+// to itself, so it is returned without a walk.
+use self::{
+    S
+};
+use self::term::{
+    add,
+    dec,
+    fa,
+    fb,
+    fc,
+    flags,
+    inc,
+    is_inf,
+    kid,
+    label_key,
+    mk,
+    mk1,
+    mk2,
+    mkl,
+    nlen,
+    none,
+    refs,
+    setw,
+    sw,
+    tg,
+    var_arg,
+    vidx,
+    vinf,
+    vkind,
+    vph
+};
+
+pub fn op_mask(op: u64) -> u64 {
+    if op == 1 || op == 5 {
+        1
+    } else if op == 6 || op == 8 {
+        2
+    } else {
+        4
+    }
+}
+
+// The value of inference variable v in cx, or none().
+pub fn cx_val(in cx: ChunkSeq[u64], v: u64) -> u64 {
+    if !is_inf(v) {
+        return none();
+    }
+    let w = sw(in cx, vidx(v));
+    if (w >> 3) == 0 {
+        none()
+    } else {
+        dec(w >> 3)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Canonicalizer state: an open-addressing map from inference index to
+// canonical index (keys stamped with cn_gen), and the binders and origins.
+
+pub fn cn_begin(inout s: S) {
+    s.cn_gen = inc(s.cn_gen);
+    s.cn_binders.clear();
+    s.cn_origins.clear();
+}
+
+fn cn_slot(in s: S, i: u64) -> u64 {
+    let mut at = wrapping_mul(i, 11400714819323198485) >> 40;
+    at = at & s.cn_mask;
+    loop {
+        if sw(in s.cn_stamp, at) != s.cn_gen {
+            return at;
+        }
+        if sw(in s.cn_key, at) == i {
+            return at;
+        }
+        at = inc(at) & s.cn_mask;
+    }
+}
+
+fn cn_grow(inout s: S) {
+    let cap = wrapping_mul(inc(s.cn_mask), 2);
+    s.cn_key.clear();
+    s.cn_val.clear();
+    s.cn_stamp.clear();
+    let mut i: u64 = 0;
+    loop {
+        if i >= cap {
+            break;
+        }
+        s.cn_key.push(0);
+        s.cn_val.push(0);
+        s.cn_stamp.push(0);
+        i = inc(i);
+    }
+    s.cn_mask = dec(cap);
+    let n = s.cn_origins.len();
+    let mut j: u64 = 0;
+    loop {
+        if j >= n {
+            break;
+        }
+        let o = sw(in s.cn_origins, j);
+        let at = cn_slot(in s, o);
+        setw(inout s.cn_key, at, o);
+        setw(inout s.cn_val, at, j);
+        setw(inout s.cn_stamp, at, s.cn_gen);
+        j = inc(j);
+    }
+}
+
+fn cn_var(inout s: S, i: u64, kind: u64) -> u64 {
+    let at = cn_slot(in s, i);
+    if sw(in s.cn_stamp, at) == s.cn_gen {
+        return sw(in s.cn_val, at);
+    }
+    let j = s.cn_binders.len();
+    s.cn_binders.push(kind);
+    s.cn_origins.push(i);
+    setw(inout s.cn_key, at, i);
+    setw(inout s.cn_val, at, j);
+    setw(inout s.cn_stamp, at, s.cn_gen);
+    if wrapping_mul(s.cn_binders.len(), 2) > s.cn_mask {
+        cn_grow(inout s);
+    }
+    j
+}
+
+// ---------------------------------------------------------------------------
+
+fn ph_pos(in s: S, i: u64) -> u64 {
+    let n = s.ford.len();
+    let mut j: u64 = 0;
+    loop {
+        if j >= n {
+            return 0;
+        }
+        if sw(in s.ford, j) == i {
+            return j;
+        }
+        j = inc(j);
+    }
+}
+
+// The folder's answer for variable v of the given kind.
+fn fvar(inout s: S, in cx: ChunkSeq[u64], op: u64, v: u64, kind: u64) -> u64 {
+    let vk = vkind(v);
+    if op == 1 {
+        if vk == 0 {
+            let k = kid(in s, s.fsub, vidx(v));
+            return k;
+        }
+    } else if op == 2 {
+        let val = cx_val(in cx, v);
+        if val != none() {
+            let base = s.tmp.len();
+            let r = fold(inout s, in cx, 2, val);
+            if s.ferr != none() {
+                if s.rerr == none() {
+                    s.rerr = s.ferr;
+                }
+                s.ferr = none();
+                s.tmp.truncate(base);
+                return val;
+            }
+            return r;
+        }
+    } else if op == 3 {
+        if vk == 2 {
+            let j = cn_var(inout s, vidx(v), kind);
+            return var_arg(inout s, kind, vinf(j));
+        }
+    } else if op == 4 {
+        if vk == 2 {
+            let k = kid(in s, s.fsub, vidx(v));
+            return k;
+        }
+    } else if op == 5 {
+        if vk == 0 {
+            return var_arg(inout s, kind, vph(vidx(v)));
+        }
+    } else if op == 6 {
+        if vk == 1 {
+            let j = ph_pos(in s, vidx(v));
+            let r = var_arg(inout s, kind, vph(j));
+            return r;
+        }
+    } else if op == 7 {
+        let x = var_arg(inout s, kind, v);
+        let r = run(inout s, in cx, 2, x);
+        if r == 0 {
+            return x;
+        }
+        return r;
+    } else if op == 8 {
+        if vk == 1 {
+            let o = kid(in s, s.fsub, vidx(v));
+            return var_arg(inout s, kind, vph(o));
+        }
+    }
+    var_arg(inout s, kind, v)
+}
+
+fn fold_cap(inout s: S, in cx: ChunkSeq[u64], op: u64, v: u64) -> u64 {
+    let c = fvar(inout s, in cx, op, v, 4);
+    fa(in s, c)
+}
+
+// Folds the kids of n onto tmp; false after an error.
+fn fold_kids(inout s: S, in cx: ChunkSeq[u64], op: u64, n: u64) -> bool {
+    let len = nlen(in s, n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let k = kid(in s, n, i);
+        let x = fold(inout s, in cx, op, k);
+        if s.ferr != none() {
+            return false;
+        }
+        s.tmp.push(x);
+        i = inc(i);
+    }
+    true
+}
+
+// Sorts tmp[from ..] by label key (stably) and returns the first repeated
+// key, or none().
+pub fn sort_labels(inout s: S, from: u64) -> u64 {
+    let n = s.tmp.len();
+    let mut i = inc(from);
+    loop {
+        if i >= n {
+            break;
+        }
+        let x = sw(in s.tmp, i);
+        let kx = label_key(in s, x);
+        let mut j = i;
+        loop {
+            if j <= from {
+                break;
+            }
+            let y = sw(in s.tmp, dec(j));
+            if label_key(in s, y) <= kx {
+                break;
+            }
+            setw(inout s.tmp, j, y);
+            j = dec(j);
+        }
+        setw(inout s.tmp, j, x);
+        i = inc(i);
+    }
+    let mut k = inc(from);
+    loop {
+        if k >= n {
+            break;
+        }
+        let a = label_key(in s, sw(in s.tmp, dec(k)));
+        if a == label_key(in s, sw(in s.tmp, k)) {
+            return a;
+        }
+        k = inc(k);
+    }
+    none()
+}
+
+fn fold_row(inout s: S, in cx: ChunkSeq[u64], op: u64, n: u64) -> u64 {
+    let from = s.tmp.len();
+    let len = nlen(in s, n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= len {
+            break;
+        }
+        let l = kid(in s, n, i);
+        let la = fa(in s, l);
+        if tg(in s, l) == 11 {
+            let inner = s.tmp.len();
+            if !fold_kids(inout s, in cx, op, l) {
+                return 0;
+            }
+            let x = mkl(inout s, 11, la, 0, 0, inner);
+            s.tmp.push(x);
+        } else {
+            let v = fold_cap(inout s, in cx, op, la);
+            let x = mk1(inout s, 12, v);
+            s.tmp.push(x);
+        }
+        i = inc(i);
+    }
+    let mut tail = none();
+    let t = fa(in s, n);
+    if t != none() {
+        let r = fvar(inout s, in cx, op, t, 2);
+        if s.ferr != none() {
+            return 0;
+        }
+        let rl = nlen(in s, r);
+        let mut j: u64 = 0;
+        loop {
+            if j >= rl {
+                break;
+            }
+            let x = kid(in s, r, j);
+            s.tmp.push(x);
+            j = inc(j);
+        }
+        tail = fa(in s, r);
+    }
+    let d = sort_labels(inout s, from);
+    if d != none() {
+        s.ferr = d;
+        return 0;
+    }
+    mkl(inout s, 6, tail, 0, 0, from)
+}
+
+// Folds node n. After an error (s.ferr set) the result is meaningless.
+pub fn fold(inout s: S, in cx: ChunkSeq[u64], op: u64, n: u64) -> u64 {
+    if s.ferr != none() {
+        return 0;
+    }
+    if (flags(in s, n) & (op_mask(op) | 16)) == 0 {
+        return n;
+    }
+    let tag = tg(in s, n);
+    let na = fa(in s, n);
+    let nb = fb(in s, n);
+    let nc = fc(in s, n);
+    if tag == 1 {
+        let from = s.tmp.len();
+        if !fold_kids(inout s, in cx, op, n) {
+            return 0;
+        }
+        mkl(inout s, 1, na, 0, 0, from)
+    } else if tag == 2 {
+        fvar(inout s, in cx, op, na, 0)
+    } else if tag == 3 {
+        let t = fold(inout s, in cx, op, na);
+        let b = fold(inout s, in cx, op, nb);
+        if s.ferr != none() {
+            return 0;
+        }
+        mk(inout s, 3, t, b, nc)
+    } else if tag == 5 {
+        fvar(inout s, in cx, op, na, 1)
+    } else if tag == 6 {
+        fold_row(inout s, in cx, op, n)
+    } else if tag == 9 {
+        fvar(inout s, in cx, op, na, 3)
+    } else if tag == 10 {
+        let v = fold_cap(inout s, in cx, op, na);
+        mk1(inout s, 10, v)
+    } else if tag == 13 {
+        let st = fold(inout s, in cx, op, nb);
+        if s.ferr != none() {
+            return 0;
+        }
+        let from = s.tmp.len();
+        if !fold_kids(inout s, in cx, op, n) {
+            return 0;
+        }
+        mkl(inout s, 13, na, st, 0, from)
+    } else if tag >= 14 && tag <= 16 {
+        let x = fold(inout s, in cx, op, na);
+        let y = fold(inout s, in cx, op, nb);
+        if s.ferr != none() {
+            return 0;
+        }
+        mk2(inout s, tag, x, y)
+    } else if tag == 17 {
+        // Derivation::fold: the step's arguments, the goal, the children.
+        let st = fold(inout s, in cx, op, nb);
+        let g = fold(inout s, in cx, op, na);
+        if s.ferr != none() {
+            return 0;
+        }
+        let from = s.tmp.len();
+        if !fold_kids(inout s, in cx, op, n) {
+            return 0;
+        }
+        mkl(inout s, 17, g, st, 0, from)
+    } else if tag == 18 || tag == 21 || tag == 27 {
+        let from = s.tmp.len();
+        if !fold_kids(inout s, in cx, op, n) {
+            return 0;
+        }
+        mkl(inout s, tag, na, nb, 0, from)
+    } else {
+        n
+    }
+}
+
+// One `Resolver::run` (op 2) or plain fold: the folded node, or 0 with the
+// repeated label key in s.dkey. tmp is restored on error.
+pub fn run(inout s: S, in cx: ChunkSeq[u64], op: u64, n: u64) -> u64 {
+    let base = s.tmp.len();
+    let saved = s.rerr;
+    s.rerr = none();
+    let r = fold(inout s, in cx, op, n);
+    let mut e = s.ferr;
+    if e == none() {
+        e = s.rerr;
+    }
+    s.ferr = none();
+    s.rerr = saved;
+    if e != none() {
+        s.tmp.truncate(base);
+        s.dkey = e;
+        return 0;
+    }
+    r
+}
+
+// `instantiate_*`: substitutes `^i` with kid i of args (a list node).
+pub fn inst(inout s: S, n: u64, args: u64) -> u64 {
+    let saved = s.fsub;
+    s.fsub = args;
+    let e = ChunkSeq::new[u64]();
+    let r = run(inout s, in e, 1, n);
+    s.fsub = saved;
+    r
+}
+
+// Resolution through cx (`InferCtxt::resolve_*`): 0 with s.dkey on error.
+pub fn resolve(inout s: S, in cx: ChunkSeq[u64], n: u64) -> u64 {
+    if (flags(in s, n) & 20) == 0 {
+        return n;
+    }
+    run(inout s, in cx, 2, n)
+}
+
+// Whether inference variable x occurs in n.
+pub fn occurs(in s: S, n: u64, x: u64) -> bool {
+    if (flags(in s, n) & 4) == 0 {
+        return false;
+    }
+    let tag = tg(in s, n);
+    let v = vinf(x);
+    if (tag == 2 || tag == 5 || tag == 9 || tag == 10 || tag == 12) && fa(in s, n) == v {
+        return true;
+    }
+    if tag == 6 && fa(in s, n) == v {
+        return true;
+    }
+    let r = refs(tag);
+    if (r & 1) != 0 && occurs(in s, fa(in s, n), x) {
+        return true;
+    }
+    if (r & 2) != 0 && occurs(in s, fb(in s, n), x) {
+        return true;
+    }
+    if (r & 8) != 0 {
+        let len = nlen(in s, n);
+        let mut i: u64 = 0;
+        loop {
+            if i >= len {
+                break;
+            }
+            if occurs(in s, kid(in s, n, i), x) {
+                return true;
+            }
+            i = inc(i);
+        }
+    }
+    false
+}

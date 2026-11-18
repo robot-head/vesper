@@ -42,15 +42,32 @@ fn fold_source_query() -> QueryDto {
     )
 }
 
+/// A fixture path relative to the crate directory. The seed package
+/// (`seed/`, the compiler's Rust copy) runs these tests from its own
+/// directory, so its fixtures are one level up.
+fn fixture(path: &str) -> std::path::PathBuf {
+    let here = std::path::Path::new(path);
+    let up = std::path::Path::new("..").join(path);
+    if !here.exists() && up.exists() {
+        up
+    } else {
+        here.to_path_buf()
+    }
+}
+
 fn check_fixture(path: &str, actual: &str) {
+    let path = fixture(path);
+    let path = path.as_path();
     if std::env::var_os("PACT_BLESS").is_some() {
         std::fs::write(path, actual).unwrap();
     }
     let expected = std::fs::read_to_string(path)
-        .unwrap_or_else(|_| panic!("missing {path}; run with PACT_BLESS=1"));
+        .unwrap_or_else(|_| panic!("missing {}; run with PACT_BLESS=1", path.display()));
     assert_eq!(
-        actual, expected,
-        "{path} drifted: the boundary schema changed (bump SCHEMA_VERSION and re-bless)"
+        actual,
+        expected,
+        "{} drifted: the boundary schema changed (bump SCHEMA_VERSION and re-bless)",
+        path.display()
     );
 }
 
@@ -70,7 +87,7 @@ fn query_dto_from_fixture_solves() {
     let json = serde_json::to_string_pretty(&q).unwrap() + "\n";
     check_fixture(QUERY_FIXTURE, &json);
     let program: ProgramDto =
-        serde_json::from_str(&std::fs::read_to_string(WORLD_FIXTURE).unwrap()).unwrap();
+        serde_json::from_str(&std::fs::read_to_string(fixture(WORLD_FIXTURE)).unwrap()).unwrap();
     let program = Program::new(program).unwrap();
     let q: QueryDto = serde_json::from_str(&json).unwrap();
     let o = solve(&program, &q);
