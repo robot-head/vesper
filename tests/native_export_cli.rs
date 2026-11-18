@@ -227,3 +227,35 @@ fn item_directives_outside_lib_ves_are_refused() {
     assert!(stderr.contains("is outside the root module"), "{stderr}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// A port may repeat `// @export abi 3` in every file (Serde does). One line
+/// applies: the root module's, else the first in load order; the others are
+/// ignored instead of naming the ABI twice.
+#[test]
+fn a_repeated_abi_directive_applies_once() {
+    let line = "// @export abi 3\n";
+    let dir = ordered_package(
+        "everywhere",
+        &format!("{line}{ORDER_LIB}"),
+        &format!("{line}{ORDER_A}"),
+    );
+    let (out, json) = build_package(&dir, "order");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(json.contains("vesper.native.export-abi/3"), "{json}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+    std::fs::remove_dir_all(&dir).ok();
+    // Without one in lib.ves, the first other file's applies, with one warning.
+    let dir = ordered_package("others", ORDER_LIB, &format!("{line}{ORDER_A}"));
+    std::fs::write(
+        dir.join("src/b.ves"),
+        format!("{line}fn other() -> u64 {{\n    2\n}}\n"),
+    )
+    .unwrap();
+    let (out, json) = build_package(&dir, "order");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(json.contains("vesper.native.export-abi/3"), "{json}");
+    assert_eq!(stderr.matches("warning:").count(), 1, "{stderr}");
+    std::fs::remove_dir_all(&dir).ok();
+}

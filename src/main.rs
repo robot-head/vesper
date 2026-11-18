@@ -713,8 +713,9 @@ fn diagnostics(file: &str, source: &str, ds: &[Diagnostic], json: bool) {
 /// end still line up).
 ///
 /// `// @export abi N` names no item, so it is also read, with a warning,
-/// from the root package's other files: ports placed it in the file that
-/// sorted first while directives were read from file 0. `instance` and
+/// from the root package's other files when the root module has none: ports
+/// placed it in the file that sorted first while directives were read from
+/// file 0. Only the first such line applies; repeats are ignored. `instance` and
 /// `vsys` directives name items and are an error outside the root module.
 fn export_directives_source(p: &vesper::packages::Assembled) -> Result<String, String> {
     let root = p.root_module.unwrap_or(0);
@@ -724,6 +725,19 @@ fn export_directives_source(p: &vesper::packages::Assembled) -> Result<String, S
         .get(root)
         .map(|f| f.display.clone())
         .unwrap_or_default();
+    let abi_line = |line: &str| {
+        line.trim_start()
+            .strip_prefix("// @export")
+            .is_some_and(|rest| rest.trim().starts_with("abi"))
+    };
+    // One `abi` line applies: the root module's, else the first one in load
+    // order (file 0 used to be the only file read). Ports that repeat it in
+    // every file, so each file names its ABI, build as before (#991).
+    let mut abi_taken = p
+        .sources
+        .files
+        .get(root)
+        .is_some_and(|f| f.text.lines().any(abi_line));
     let mut out = String::new();
     for (i, f) in p.sources.files.iter().enumerate() {
         if i == root {
@@ -733,7 +747,12 @@ fn export_directives_source(p: &vesper::packages::Assembled) -> Result<String, S
                 let body = line.trim_end_matches(['\n', '\r']);
                 let directive = body.trim_start().strip_prefix("// @export");
                 match directive.map(str::trim) {
+                    Some(rest) if rest.starts_with("abi") && abi_taken => {
+                        out.push_str(&" ".repeat(body.len()));
+                        out.push_str(&line[body.len()..]);
+                    }
                     Some(rest) if rest.starts_with("abi") => {
+                        abi_taken = true;
                         eprintln!(
                             "warning: {}: `// @export {rest}` belongs in the root module {root_shown}; \
                              it is read from here for now",
