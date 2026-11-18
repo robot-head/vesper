@@ -357,7 +357,7 @@ SugarRule      ::= 'rule' '(' SugarAtom+ ')' '=>' Block ;
 SugarAtom      ::= LowerIdent | Keyword | Punct | SugarHole
                  | '(' SugarAtom* ')' | '[' SugarAtom* ']' | '{' SugarAtom* '}' ;
 SugarHole      ::= HolePass? '$' LowerIdent ':' HoleSort
-                 | '$' '..' LowerIdent ':' ( 'stmts' | 'args' | 'items' )
+                 | '$' '..' LowerIdent ':' ( 'stmts' | 'args' | 'items' | 'pats' )
                  | '$' '(' SugarAtom+ ')' Punct? ( '*' | '+' ) ;   (* repetition *)
 HolePass       ::= 'in' | 'inout' | 'out' | 'sink' ;   (* omitted defaults to 'in' *)
 HoleSort       ::= 'ident' | 'pat' | 'ty' | 'expr' | 'place' | 'block' ;
@@ -421,7 +421,7 @@ Expr           ::= HandleExpr | MatchExpr | IfExpr | LoopExpr | ForExpr
                  | GhostExpr | AssignExpr ;
 ClauseSugarExpr ::= LowerIdent PhraseHead* Block ( LowerIdent PhraseHead* Block )* ;
 PhraseHead     ::= 'let' Pat '=' Expr | PassMode PostfixExpr
-                 | '(' ArgList? ')' | Literal | LowerIdent | 'else' ;
+                 | '(' ArgList? ')' | '[' SugarToken* ']' | 'else' | Expr ;
 
 HandleExpr     ::= 'handle' ( LowerIdent ':' )? Path TypeArgs?
                    ( 'state' Pat '=' Expr )? 'in' Block
@@ -478,7 +478,7 @@ LowerIdent     ::= /[a-z_][A-Za-z0-9_]*/ ;
 
 *Loops and early exits.* `loop`, `for`, `break` and `return` are contextual keywords outside their statement positions, and a statement-position `loop`, `for`, `if` or `match` ending in `}` needs no `;`. `loop B` has the join of its `break` values as its type, or `Never` when it has no `break`; `for p in a..b B` and `a..=b` bind successive values of one integer type to the irrefutable pattern `p`, have type `()`, and accept `break` without a value only. The closed range leaves at its bound before incrementing, so `for b in 0..=255` over `u8` does not overflow. `return e` leaves the innermost function or closure, including from inside a handled block (skipping the handler's return clause), and is rejected inside handler clauses and region blocks (`E0213`). A linear value live at a `break` or `return` that would drop it is rejected (`E0302`), as is a linear value moved by one iteration and needed by the next (`E0312`). Assigning to a `let` binding, or passing it `inout`, requires `let mut` (`E0313`); parameters stay assignable, since `mut` is not part of parameter syntax. `for` over `Slice` and `ChunkSeq` waits for the port-readiness Slice lane.
 
-*Sugar slots.* `sugar` declarations (#link(<ch-6-sugar>)[Section 7.5]) never add productions; every user form must fit `TailSugarStmt`, `ClauseSugarExpr`, `PipeExpr`, `DottedBinOp`, or `TaggedDelimExpr`. `SugarToken` is any token except an unbalanced `}`, and `SymbolTail` continues an operator glyph sequence. A `TailSugarStmt` ending in `;` needs at least one head, and the first head may not be `'(' ArgList ')'`, so `x;` and `f(x);` stay expression statements. Two conflicts remain open in this draft. First, `LowerIdent '{'` starts both a clause form and a tagged literal, so Stage 1 needs one shared skeleton node that Stage 2 classifies from the bound `sugar` sort. Second, the same prefix appears where a condition or scrutinee ends before a block (`if ready { ... }`, `match state { ... }`), so those positions need a restriction like Rust's ban on struct literals in conditions. No LL(2) claim for the sugar slots follows until these are resolved.
+*Sugar slots.* `sugar` declarations (#link(<ch-6-sugar>)[Section 7.5]) never add productions; every user form must fit `TailSugarStmt`, `ClauseSugarExpr`, `PipeExpr`, `DottedBinOp`, or `TaggedDelimExpr`. `SugarToken` is any token except an unbalanced `}`, and `SymbolTail` continues an operator glyph sequence. A `TailSugarStmt` ending in `;` needs at least one head, and the first head may not be `'(' ArgList ')'`, so `x;` and `f(x);` stay expression statements. An `Expr` head ends at the first token that cannot continue the expression, such as a clause word (`else`, `invariant`, `decreases`) or `{`, so `while lo < hi invariant ...` splits into heads without lookahead beyond the skeleton. Two conflicts remain open in this draft. First, `LowerIdent '{'` starts both a clause form and a tagged literal, so Stage 1 needs one shared skeleton node that Stage 2 classifies from the bound `sugar` sort. Second, the same prefix appears where a condition or scrutinee ends before a block (`if ready { ... }`, `match state { ... }`), so those positions need a restriction like Rust's ban on struct literals in conditions. No LL(2) claim for the sugar slots follows until these are resolved.
 
 *Integer kinds.* The ten integer `PrimType`s are distinct types with no implicit conversions; `usize` and `isize` are 64 bits wide on every target. Under the checked-arithmetic contract `vesper.arith.checked/1`, `+`, `-`, `*`, negation and signed `MIN / -1` raise `Fail[ArithOverflow]`, and division by zero raises `Fail[RuntimeError]`. `&`, `|`, `^` and prefix `~` are total; `a << n` and `a >> n` accept an amount `n` of any integer kind and raise `Fail[ArithOverflow]` unless `0 <= n < bits(a)` (`>>` is arithmetic on signed kinds). Conversions are explicit calls named after the target kind `k`: `widen_k` (accepted only when lossless), `narrow_k` (checked, `Fail[ArithOverflow]`) and `wrapping_k` (modulo `2^bits(k)`). `rotate_left`/`rotate_right` and the byte-order functions `to_le_bytes_k`, `to_be_bytes_k`, `from_le_bytes_k`, `from_be_bytes_k` (over tuples of `u8`) are total. The reserved function `mul_wide(a: u64, b: u64) -> (u64, u64)` is the total full product of two `u64` values as `(low, high)` words, `a * b = high * 2^64 + low`; a module cannot define a function of that name.
 
@@ -1779,7 +1779,192 @@ let next_pos = pos .+ vel .* dt_splat;
 
 Once `std/control` and `std/pulse` ship in the standard prelude, several forms that now need dedicated HIR lowering could become library sugar: `for pat in iter { ... }` (as `loop` over `Iterator::next(inout iter)`), `if let pat = e { ... }`, `assert`, and the `|>` and `|?>` pipeline operators. That would shrink Stage 2 (`vesper-hir`) and the Lean extractor while `vesper fmt` and Chroma output stay the same, because both already work on the unexpanded skeleton. Today `for` is a core form over integer ranges (#link(<ch-2-2>)[Section 2.2]); moving it into `std` waits on `sugar` and an `Iterator` trait.
 
-=== 7.7 Trait Solver, Enforester, and Hygiene Engine (`crates/vesper-pact` and `crates/vesper-forge`)
+=== 7.7 Domain Sugar Catalog (`std/*` and Ecosystem Packages)
+<ch-6-domain-sugar>
+
+Beyond control flow and memory helpers, `sugar` can give Vesper's specialized subsystems domain-level notation: linear session protocols, opt-in transactional rollback of `inout` places, constant-time cryptography, `@fip` in-place ADT rewriting, W1C-safe MMIO batching, DBSP stream comprehensions, and checked loop invariants. Each form below expands to ordinary library calls under `[WF-SugarPass]` and `[T-SugarEffectHonesty]` (#link(<ch-6-sugar>)[Section 7.5]), so none needs a compiler special case. Like #link(<ch-6-std-sugar>)[Section 7.6], this catalog is a design proposal; the helper functions it names (`Chan::send`, `fip::unpack_reuse`, `RmwReg::read`, and so on) are part of the proposal and are not yet specified in their chapters.
+
+#figure(
+  table(
+    columns: (19%, 27%, 21%, 33%),
+    align: (left, left, left, left),
+    table.header([*Module and Sugar*], [*Call-Site Shape*], [*Skeleton Slot and Pass Floor*], [*Problem Solved Without a Compiler Special Case*]),
+    [`std/txn::transact`], [`transact inout bbr { ... }`], [`ClauseSugarExpr` (`inout $p:place`)], [Opt-in snapshot rollback on top of the default keep-writes behavior (#link(<ch-4-3>)[Section 4.3]) when `$p : copy`, with exact `Stack` accounting for the snapshot.],
+    [`std/chorus::send` / `recv`], [`send req on sink ch; recv ack from sink ch;`], [`TailSugarStmt` (`sink $ch:place`)], [Threads linear session-type transitions (`Send` to `Recv` to `End`) without manual `let ch = ...` rebinding.],
+    [`std/vault::ct_if`], [`ct_if mask { a } else { b }`], [`ClauseSugarExpr` (`eff [ConstTime]`)], [Writes a secret-dependent choice as `if`/`else` while expanding to branchless `SecMask` selection with no `brif`.],
+    [`std/fip::morph`], [`morph sink node { Black(l, r) => Red(l, r) }`], [`ClauseSugarExpr` (`sink $p:place`)], [Unpacks an owned heap or slab enum into a same-size `@fip` `ReuseSlot` token, so the rewrite allocates nothing.],
+    [`std/silicon::modify_reg`], [`modify_reg inout uart.cr { .txe = 1, .rxe = 1 };`], [`TailSugarStmt` (`inout $r:place`)], [Coalesces multi-field MMIO updates into one bus read, ALU masks, and one bus write; rejects `W1C` registers statically.],
+    [`std/aura::focus`], [`focus inout app.{ nav => ..., pane => ... }`], [`ClauseSugarExpr` (`inout $p:place`)], [Opens named disjoint `FieldTree` sub-borrows together under `[T-CallProj]` without repeating paths.],
+    [`std/flux::zset`], [`zset{ (r.k, r.v) => +1 | r in batch, r.ok }`], [`TaggedDelimExpr` (`@lean_notation`)], [Compiles relational comprehensions to pre-sized `TiledSeq` AoSoA loops, mirrored to `ZSet.filterMap`.],
+    [`std/verify::while_verified`], [`while c invariant phi decreases d { ... }`], [`ClauseSugarExpr` (`@lean_notation`)], [Expands to `loop` with `@0` ghost entry and step checks for Bitwuzla and `termination_by d` in Lean 4.],
+    [`std/pact::using`], [`using model ReverseOrd { map.insert(k, v) }`], [`ClauseSugarExpr`], [Confines a non-canonical Pact `model` override (#link(<ch-6-3>)[Section 7.3]) to one expression instead of a whole block.],
+    [`std/beacon::trace_span`], [`trace_span "wal.sync" [lsn = s] { ... }`], [`ClauseSugarExpr` (`emits eff [Trace]`)], [Stack-allocates a W3C TraceContext span, checks `@pii` redaction through `Telemetrable` (#link(<ch-31>)[Chapter 32]), and records unwinds.],
+  ),
+  kind: table,
+)
+
+==== Linear Session-Type Rebinding: `send`, `recv`, and `close` (`std/chorus`)
+
+Linear session channels (#link(<ch-14-4>)[Section 15.4] and #link(<ch-34>)[Chapter 35]) normally force repeated shadowing, as in `let ch = ch.send(m); let (ack, ch) = ch.recv(); ch.close();`, because every step consumes the old protocol typestate and produces the next. Block-tail `$..rest:stmts` splicing turns a multi-step protocol into flat code. `Mode::Linear` exhaustion still applies: forgetting `close` leaves a live linear channel at the end of the block, which is rejected (`E0302`). Because the expansion rebinds `$ch` with `let`, the hole must name a local binding rather than a field path.
+
+#figure(
+  {
+    let node(title, detail, fill: luma(96%), stroke: 0.5pt + _rule) = box(
+      inset: (x: 8pt, y: 6pt), radius: 10pt, fill: fill, stroke: stroke,
+      align(center, stack(dir: ttb, spacing: 4pt, text(size: 8.5pt, title), text(font: "DejaVu Sans Mono", size: 7.5pt, detail))),
+    )
+    let arrow(label) = align(center + horizon, text(size: 8pt, fill: _muted, label + " →"))
+    grid(
+      columns: (auto, auto, auto, auto, auto, auto, auto),
+      column-gutter: 6pt, align: center + horizon,
+      node([`Send[Req, …]`], [linear]),
+      arrow[`send`],
+      node([`Recv[Ack, End]`], [rebound], fill: luma(98%), stroke: 0.8pt + _accent),
+      arrow[`recv`],
+      node([`End`], [ack bound]),
+      arrow[`close`],
+      node([Discharged], [Theorem 2 holds]),
+    )
+  },
+  kind: image,
+  caption: [Each `send` or `recv` consumes the channel and rebinds the next protocol state for the rest of the block.],
+)
+
+#_compact-listing[
+```rust
+pub sugar send : stmt emits eff [Net] {
+    rule (send $msg:expr on sink $ch:place ; $..rest:stmts) => {
+        {
+            let $ch = @vesper-chorus/chan::Chan::send(sink $ch, $msg);
+            $..rest
+        }
+    }
+}
+
+pub sugar recv : stmt emits eff [Net] {
+    rule (recv $pat:pat from sink $ch:place ; $..rest:stmts) => {
+        {
+            let ($pat, $ch) = @vesper-chorus/chan::Chan::recv(sink $ch);
+            $..rest
+        }
+    }
+}
+
+// Usage: no rebinding noise; omitting `ch.close()` is still rejected (E0302).
+fn replicate_entry(sink ch: Chan[Send[AppendReq, Recv[AppendAck, End]]], in entry: LogEntry) -> AppendAck
+eff [Net] {
+    send AppendReq { entry } on sink ch;
+    recv ack from sink ch;
+    ch.close();
+    ack
+}
+```
+]
+
+==== Opt-In Rollback and Allocation-Free Tree Rewrites: `transact` (`std/txn`) and `morph` (`std/fip`)
+
+Keep-writes is Vesper's default for `inout` across an abort (#link(<ch-4-3>)[Section 4.3]): callee writes stay in the caller's place. `transact` lets a caller ask for rollback instead, with one word, whenever the state is `copy`; the snapshot `let __snap = $p` is what checks `$p : copy`. `morph` makes `@fip` in-place constructor reuse (#link(<ch-12-4>)[Section 13.4]) direct for balanced trees and AST passes. It relies on the repetition hole and a `$..xs:pats` sequence hole from #link(<ch-2-2>)[Section 2.2].
+
+#_compact-listing[
+```rust
+// 1. Opt-in rollback over keep-writes (`let __snap = $p` requires `$p : copy`):
+pub sugar transact : expr emits eff [Fail] {
+    rule (transact inout $p:place $body:block) => {
+        {
+            let __snap = $p;
+            errdefer(_) { $p = __snap; }
+            $body
+        }
+    }
+}
+
+// 2. Allocation-free `@fip` in-place variant rewrite:
+pub sugar morph : expr {
+    rule (morph sink $node:place { $( $Src:ident ( $..xs:pats ) => $Dst:ident ( $..ys:args ) ),* }) => {
+        match @vesper-alloc/fip::unpack_reuse(sink $node) {
+            $( ($Src($..xs), __slot) => @vesper-alloc/fip::place_in(sink __slot, $Dst($..ys)) ),*
+        }
+    }
+}
+
+// Usage:
+transact inout bbr_model {
+    bbr_model.advance_round(in sample)?;
+    bbr_model.probe_bw(in rtt)? // if `probe_bw` raises Fail, `bbr_model` is restored
+}
+```
+]
+
+==== Branchless Cryptography and Single-Write MMIO: `ct_if` (`std/vault`) and `modify_reg` (`std/silicon`)
+
+Constant-time cryptography (#link(<ch-27>)[Chapter 28]) and bare-metal drivers (#link(<ch-24>)[Chapter 25]) both suffer when safe primitives force unreadable bit manipulation. `ct_if` evaluates both arms unconditionally, as constant-time code must, so each arm's effects always happen; only the selected value depends on the mask. `modify_reg` reads the register once, applies each field setter, and writes once; a register whose access type is `W1C` has no read-modify-write combinator, so the expansion fails to type-check on it.
+
+#_compact-listing[
+```rust
+// 1. Branchless secret selection inside `eff [ConstTime]` (no `brif` instructions):
+@lean_notation
+pub sugar ct_if : expr emits eff [ConstTime] {
+    rule (ct_if $mask:expr $then_b:block else $else_b:block) => {
+        {
+            let __t = $then_b;
+            let __f = $else_b;
+            @vesper-vault/secret::ct_select($mask, __t, __f)
+        }
+    }
+}
+
+// 2. Coalesced single-read, single-write MMIO bitfield update (rejects `W1C` registers):
+pub sugar modify_reg : stmt {
+    rule (modify_reg inout $reg:place { $( . $field:ident = $val:expr ),* } ;) => {
+        {
+            let mut __word = @vesper-hw/mmio::RmwReg::read(in $reg);
+            $( __word = __word.$field($val); )*
+            @vesper-hw/mmio::RmwReg::write(inout $reg, __word);
+        }
+    }
+}
+
+// Usage:
+let tag_acc = ct_if mask_eq { acc ^ block_mac } else { acc ^ dummy_mac };
+modify_reg inout spi1.ctrl1 { .baud_div = 4, .master = 1, .spe = 1 };
+```
+]
+
+==== Checked Loop Invariants and Stream Comprehensions: `while ... invariant ... decreases` (`std/verify`) and `zset{...}` (`std/flux`)
+
+Loop invariants and differential DBSP comprehensions (#link(<ch-36>)[Chapter 37]) stay concise in `.ves` source while lowering to Bitwuzla verification conditions and Lean 4 `termination_by` proofs. `while` is not a core keyword (#link(<ch-2-2>)[Section 2.2]), so the library can define it. The ghost checks have `@0` presence and erase in Stage 5A.
+
+#_compact-listing[
+```rust
+// Checked loop invariant and strict well-founded variant:
+@lean_notation
+pub sugar while_verified : expr {
+    rule (while $cond:expr invariant $inv:expr decreases $v:expr $body:block) => {
+        {
+            let ghost _ = @std/verify::assert_ghost($inv);
+            loop {
+                if !($cond) { break; }
+                let ghost __v0: usize = $v;
+                $body;
+                let ghost _ = @std/verify::assert_ghost($inv);
+                let ghost _ = @std/verify::assert_lt_ghost($v, __v0);
+            }
+        }
+    }
+}
+
+// Usage: no runtime overhead once ghosts erase; termination is checked in Bitwuzla and `Funs.lean`:
+while lo < hi
+    invariant lo <= hi && hi <= table.len()
+    decreases hi - lo
+{
+    let mid = lo + (hi - lo) / 2;
+    if table[mid] < target { lo = mid + 1; } else { hi = mid; }
+}
+```
+]
+
+=== 7.8 Trait Solver, Enforester, and Hygiene Engine (`crates/vesper-pact` and `crates/vesper-forge`)
 <ch-6-5>
 
 ```rust
