@@ -277,7 +277,7 @@ The following are design intentions; the productions and examples do not yet est
 + *Subset and Pattern Refinements Without Expression Collisions:* Subset refinement types begin with `'{' LowerIdent ':'` in type position (`{ v: u64 | v != 0 }`), which never collides with nominal, tuple, or function types; ergonomic range/pattern refinements use `'is'` (`u64 is 1..=4096`).
 + *Four-Mode Place Projections and Strong Update Arrows:* Parameter projections explicitly state `in` (default), `inout`, `out`, or `sink` over nested field trees (`inout broker.{index, metrics}`) or slice intervals (`out pkt[0..mid]`), with strong postcondition type transitions written `'~>'` (`inout v: Vec[T, @n] ~> Vec[T, @(n + 1)]`), distinct from function return `'->'`.
 + *Moded, Capability-Labeled, and Resource-Graded Effects:* Effect declarations specify whether handlers may abort (`effect Fail[E]`, binding `affine` continuations) or must resume (`linear effect Storage`, binding `linear` continuations), while `eff [...]` clauses attach optional lexical labels and `@` pomonoid resource grades (`eff [scratch: Region @ <= 64 * count, Stack @ <= 512 | r]`).
-+ *Import-Free Phrase-Skeleton Slots for User Syntactic Sugar:* User-defined syntactic sugar (`sugar`, #link(<ch-6-sugar>)[Section 7.5]) extends surface notation without changing parser tables on `import`. Stage 1 parses three structured *Phrase Skeleton* slots whose two-token lookahead sets (`FIRST_2`) are meant to be disjoint from core expressions: (a) *clause and block-tail forms* (`LowerIdent` followed by `let`, a pass-mode keyword, a literal, another `LowerIdent`, or `'{'`, which avoids `PostfixOp`'s `'(' | '[' | '.' | '?'`), (b) *lexically tiered operators* (`'|>' | '|?>'` at pipeline precedence, and `.`-prefixed symbolic operators such as `.+`, `.*`, and `.==` that take their precedence from the glyph after the `.`), and (c) *tagged delimited literals* (`LowerIdent '"'` or `LowerIdent '{'`, distinct from `UpperIdent '{'` struct literals). The open conflicts are listed after the grammar.
++ *Import-Free Phrase-Skeleton Slots for User Syntactic Sugar:* User-defined syntactic sugar (`sugar`, #link(<ch-6-sugar>)[Section 7.5]) extends surface notation without changing parser tables on `import`. Stage 1 parses three structured *Phrase Skeleton* slots whose two-token lookahead sets (`FIRST_2`) are meant to be disjoint from core expressions: (a) *clause, block-tail, and item forms* (`LowerIdent` followed by `let`, a pass-mode keyword, a literal, another identifier, or a spaced `'{'`, which avoids `PostfixOp`'s `'(' | '[' | '.' | '?'`), (b) *lexically tiered operators* (`'|>' | '|?>'` at pipeline precedence, and `.`-prefixed symbolic operators such as `.+`, `.*`, and `.==` that take their precedence from the glyph after the `.`), and (c) *tagged delimited literals* (a `TagIdent`, a `LowerIdent` written directly against its `'"'` or `'{'` with no space, distinct from `UpperIdent '{'` struct literals). The disambiguation rules that make these slots deterministic follow the grammar.
 
 === 2.2 Proposed Surface Grammar (Incomplete EBNF)
 <ch-2-2>
@@ -295,7 +295,9 @@ Attr           ::= '@' LowerIdent ( '(' AttrArgs? ')' )?
 
 Item           ::= Vis? ( StructDecl | EnumDecl | QuotientDecl | TypeAliasDecl
                         | EffectDecl | TraitDecl | ImplDecl | ModelDecl
-                        | MeasureDecl | SugarDecl | MacroDecl | FnDecl ) ;
+                        | MeasureDecl | SugarDecl | MacroDecl | FnDecl )
+                 | ItemSugar ;
+ItemSugar      ::= LowerIdent PhraseHead* SugarGroup ;   (* `test "name" { ... }` *)
 Vis            ::= 'pub' ;
 
 (* ==================== 2. MODALITIES, GHOST & GENERIC BINDERS =========== *)
@@ -347,7 +349,7 @@ MeasureDecl    ::= 'ghost' 'measure' LowerIdent TypeParams?
                    '(' 'in' LowerIdent ':' Type ')' '->' BaseType Block ;
 SugarDecl      ::= 'sugar' LowerIdent ':' SugarSort SugarEmits?
                    '{' SugarRule+ '}' ;
-SugarSort      ::= 'stmt' | 'expr' | 'pat' | 'tag'
+SugarSort      ::= 'stmt' | 'expr' | 'pat' | 'tag' | 'item'
                  | 'infix' '(' CustomSym ',' PrecBand ',' Assoc ')' ;
 CustomSym      ::= '`' ( '|>' | '|?>' | DottedBinOp ) '`' ;
 PrecBand       ::= 'pipeline' | 'logical' | 'compare' | 'additive' | 'multiplicative' ;
@@ -357,10 +359,10 @@ SugarRule      ::= 'rule' '(' SugarAtom+ ')' '=>' Block ;
 SugarAtom      ::= LowerIdent | Keyword | Punct | SugarHole
                  | '(' SugarAtom* ')' | '[' SugarAtom* ']' | '{' SugarAtom* '}' ;
 SugarHole      ::= HolePass? '$' LowerIdent ':' HoleSort
-                 | '$' '..' LowerIdent ':' ( 'stmts' | 'args' | 'items' | 'pats' )
+                 | '$' '..' LowerIdent ':' ( 'stmts' | 'scope' | 'args' | 'items' | 'pats' )
                  | '$' '(' SugarAtom+ ')' Punct? ( '*' | '+' ) ;   (* repetition *)
 HolePass       ::= 'in' | 'inout' | 'out' | 'sink' ;   (* omitted defaults to 'in' *)
-HoleSort       ::= 'ident' | 'pat' | 'ty' | 'expr' | 'place' | 'block' ;
+HoleSort       ::= 'ident' | 'pat' | 'ty' | 'expr' | 'place' | 'block' | 'scope' ;
 MacroDecl      ::= 'macro' LowerIdent '{' MacroRule+ '}' ;
 
 (* ==================== 4. FUNCTIONS, PROJECTIONS & STRONG UPDATES ======= *)
@@ -413,15 +415,19 @@ GradeExpr      ::= ( '<=' | '==' ) RefineExpr | 'exact' ;
 Block          ::= '{' Stmt* Expr? '}' ;
 Stmt           ::= LetStmt | UseModelStmt | TailSugarStmt | Expr ';' ;
 LetStmt        ::= 'let' GhostMod? 'mut'? Pat ( ':' Type )? '=' Expr ';' ;
-TailSugarStmt  ::= LowerIdent PhraseHead* ( Block ';'? | ';' ) ;
+TailSugarStmt  ::= GhostMod? LowerIdent PhraseHead* ( SugarGroup ';'? | ';' ) ;
 UseModelStmt   ::= 'use' 'model' Path ';' ;
 
 Expr           ::= HandleExpr | MatchExpr | IfExpr | LoopExpr | ForExpr
                  | ClauseSugarExpr | ClosureExpr | ReturnExpr | BreakExpr
                  | GhostExpr | AssignExpr ;
-ClauseSugarExpr ::= LowerIdent PhraseHead* Block ( LowerIdent PhraseHead* Block )* ;
-PhraseHead     ::= 'let' Pat '=' Expr | PassMode PostfixExpr
-                 | '(' ArgList? ')' | '[' SugarToken* ']' | 'else' | Expr ;
+ClauseSugarExpr ::= GhostMod? LowerIdent PhraseHead* SugarGroup
+                    ( SameLine HeadWord PhraseHead* SugarGroup )* ;
+SugarGroup     ::= '{' SugarToken* '}' ;      (* token tree, enforested in Stage 2 *)
+PhraseHead     ::= 'let' Pat '=' HeaderExpr | PassMode PostfixExpr
+                 | '(' ArgList? ')' | '[' SugarToken* ']' | HeadWord | HeaderExpr ;
+HeadWord       ::= LowerIdent | 'else' | 'model' | 'where' ;
+HeaderExpr     ::= Expr ;   (* parsed in header mode: stops before '{' and HeadWord *)
 
 HandleExpr     ::= 'handle' ( LowerIdent ':' )? Path TypeArgs?
                    ( 'state' Pat '=' Expr )? 'in' Block
@@ -429,8 +435,8 @@ HandleExpr     ::= 'handle' ( LowerIdent ':' )? Path TypeArgs?
 ReturnClause   ::= 'return' Pat '=>' Expr ;
 OpClause       ::= LowerIdent '(' PatList? ')' '=>' Expr ','? ;
 
-MatchExpr      ::= 'match' Expr '{' ( Pat '=>' Expr ','? )* '}' ;
-IfExpr         ::= 'if' Expr Block ( 'else' ( IfExpr | Block ) )? ;
+MatchExpr      ::= 'match' HeaderExpr '{' ( Pat '=>' Expr ','? )* '}' ;
+IfExpr         ::= 'if' HeaderExpr Block ( 'else' ( IfExpr | Block ) )? ;
 LoopExpr       ::= 'loop' Block ;
 ForExpr        ::= 'for' Pat 'in' RangeExpr Block ;
 RangeExpr      ::= BinaryExpr ( '..' | '..=' ) BinaryExpr ;
@@ -462,7 +468,8 @@ Arg            ::= GhostMod? PassMode? Expr ;
 
 PrimaryExpr    ::= Literal | TaggedDelimExpr | LowerIdent | '(' ExprList? ')'
                  | Block | Path ( '{' FieldInitList? '}' )? ;
-TaggedDelimExpr ::= LowerIdent ( StringLit | '{' SugarToken* '}' ) ;
+TaggedDelimExpr ::= TagIdent ( StringLit | '{' SugarToken* '}' ) ;
+TagIdent       ::= LowerIdent ;   (* no trivia between it and the delimiter *)
 Path           ::= ( '@' LowerIdent ( '-' LowerIdent )* '/' LowerIdent '::' )?
                    UpperIdent ( '::' ( UpperIdent | LowerIdent ) )* ;
 
@@ -478,7 +485,18 @@ LowerIdent     ::= /[a-z_][A-Za-z0-9_]*/ ;
 
 *Loops and early exits.* `loop`, `for`, `break` and `return` are contextual keywords outside their statement positions, and a statement-position `loop`, `for`, `if` or `match` ending in `}` needs no `;`. `loop B` has the join of its `break` values as its type, or `Never` when it has no `break`; `for p in a..b B` and `a..=b` bind successive values of one integer type to the irrefutable pattern `p`, have type `()`, and accept `break` without a value only. The closed range leaves at its bound before incrementing, so `for b in 0..=255` over `u8` does not overflow. `return e` leaves the innermost function or closure, including from inside a handled block (skipping the handler's return clause), and is rejected inside handler clauses and region blocks (`E0213`). A linear value live at a `break` or `return` that would drop it is rejected (`E0302`), as is a linear value moved by one iteration and needed by the next (`E0312`). Assigning to a `let` binding, or passing it `inout`, requires `let mut` (`E0313`); parameters stay assignable, since `mut` is not part of parameter syntax. `for` over `Slice` and `ChunkSeq` waits for the port-readiness Slice lane.
 
-*Sugar slots.* `sugar` declarations (#link(<ch-6-sugar>)[Section 7.5]) never add productions; every user form must fit `TailSugarStmt`, `ClauseSugarExpr`, `PipeExpr`, `DottedBinOp`, or `TaggedDelimExpr`. `SugarToken` is any token except an unbalanced `}`, and `SymbolTail` continues an operator glyph sequence. A `TailSugarStmt` ending in `;` needs at least one head, and the first head may not be `'(' ArgList ')'`, so `x;` and `f(x);` stay expression statements. An `Expr` head ends at the first token that cannot continue the expression, such as a clause word (`else`, `invariant`, `decreases`) or `{`, so `while lo < hi invariant ...` splits into heads without lookahead beyond the skeleton. Two conflicts remain open in this draft. First, `LowerIdent '{'` starts both a clause form and a tagged literal, so Stage 1 needs one shared skeleton node that Stage 2 classifies from the bound `sugar` sort. Second, the same prefix appears where a condition or scrutinee ends before a block (`if ready { ... }`, `match state { ... }`), so those positions need a restriction like Rust's ban on struct literals in conditions. No LL(2) claim for the sugar slots follows until these are resolved.
+*Sugar disambiguation.* `sugar` declarations (#link(<ch-6-sugar>)[Section 7.5]) never add productions; every user form must fit `ItemSugar`, `TailSugarStmt`, `ClauseSugarExpr`, `PipeExpr`, `DottedBinOp`, or `TaggedDelimExpr`. `SugarToken` is any token except an unbalanced closing delimiter, and `SymbolTail` continues an operator glyph sequence. Eight rules make the choice between core syntax and a sugar slot deterministic, using only tokens and the lossless CST's trivia, never imports:
+
++ *Adjacent tags.* The lexer emits a `TagIdent` only when a `LowerIdent` touches a `'"'` or `'{'` with no whitespace or comment between them, as in `hex"dead beef"` or `bits{ ver: u4 = 4 }`. A spaced `name {` is never a tagged literal. Stylus never inserts or removes that space.
++ *Header mode.* The scrutinee of `match`, the condition of `if`, the range of `for`, and every `HeaderExpr` head of a sugar form parse in header mode: the expression ends before a `{` that follows a complete operand and before a `HeadWord`. A struct literal or clause sugar in those positions needs parentheses, as with Rust's restriction on struct literals in conditions. So `if ready { ... }`, `scratch tmp[256] { ... }`, and `decreases hi - lo { ... }` all end their header at the `{`, and `send (AppendReq { entry }) on sink ch;` parenthesizes its struct literal.
++ *Skeleton entry.* At an item or statement start, or where an expression starts, a `LowerIdent` (optionally after `ghost`) begins a skeleton when the next token is a spaced `{`, another identifier, a literal, `let`, `else`, or a pass-mode keyword; none of these can follow an identifier in core syntax. `ghost calc { ... }` is therefore a ghost `TailSugarStmt`, not a `GhostExpr`.
++ *Calls versus parenthesized heads.* `name(args)` is parsed as an argument list in either case. If the token after `)` is a spaced `{` or a skeleton-entry token, the form is a sugar head (`errdefer(e) { ... }`); otherwise it stays a call. So `x;` and `f(x);` remain expression statements without backtracking.
++ *Same-line continuation.* A continuation clause (`} else {`, `} on_error(e) {`, `} and {`) must start on the same line as the `}` it follows. A `HeadWord` on a new line after `}` starts a new statement. A statement-position sugar ending in `}` needs no `;`, like `loop` and `if`.
++ *Token-tree groups.* Stage 1 keeps every `SugarGroup` as a balanced token tree. Stage 2 re-parses it by the sort of the hole it binds (`$b:block` as a `Block`, `$( ... ),*` as a field or arm list), so `emplace out pkt { magic: 1, crc: c }` and `modify_reg inout r { .txe = 1 }` need no block-shaped contents. Stylus formats a group as a block when it parses as one, and as a token tree otherwise.
++ *No word operators.* A `LowerIdent` after a complete operand always ends a header; there are no infix word operators such as `x matches p`, because choosing them would require knowing which sugars are imported.
++ *Stage 2 classification.* Stage 2 resolves the skeleton's head word against in-scope `sugar` bindings. An unbound head raises `E0142` (`UnresolvedSugar`); a binding whose sort does not fit the slot (an `expr` sugar used as an item, or a `tag` sugar written spaced) raises `E0141` (`SugarSortMismatch`). Formatting and Chroma Tier 0 highlighting never depend on this step.
+
+With these rules every slot is chosen from at most two tokens after the head word plus the trivia flag on `TagIdent`, and the call case decides at the token after `)`. Inside a `PipeExpr` right-hand call, a bare `_` argument is the pipeline placeholder (`frame |> parse(_, in cfg)`); `_` is rejected as an expression elsewhere.
 
 *Integer kinds.* The ten integer `PrimType`s are distinct types with no implicit conversions; `usize` and `isize` are 64 bits wide on every target. Under the checked-arithmetic contract `vesper.arith.checked/1`, `+`, `-`, `*`, negation and signed `MIN / -1` raise `Fail[ArithOverflow]`, and division by zero raises `Fail[RuntimeError]`. `&`, `|`, `^` and prefix `~` are total; `a << n` and `a >> n` accept an amount `n` of any integer kind and raise `Fail[ArithOverflow]` unless `0 <= n < bits(a)` (`>>` is arithmetic on signed kinds). Conversions are explicit calls named after the target kind `k`: `widen_k` (accepted only when lossless), `narrow_k` (checked, `Fail[ArithOverflow]`) and `wrapping_k` (modulo `2^bits(k)`). `rotate_left`/`rotate_right` and the byte-order functions `to_le_bytes_k`, `to_be_bytes_k`, `from_le_bytes_k`, `from_be_bytes_k` (over tuples of `u8`) are total. The reserved function `mul_wide(a: u64, b: u64) -> (u64, u64)` is the total full product of two `u64` values as `(low, high)` words, `a * b = high * 2^64 + low`; a module cannot define a function of that name.
 
@@ -1418,7 +1436,7 @@ pub fn derive_wire_hash(in schema: AdtSchema) -> Result[CstItem, MacroDiag] {
 
 User-extensible syntax usually forces a trade-off that conflicts with verified systems programming. Unstructured token-tree macros (`macro_rules!`) preserve import-free lexing at the cost of mandatory `!` call-site sigils, opaque interiors where canonical formatters bail out, and silent mutation or consumption of caller variables (`my_macro!(x)` expanding to `&mut x` or `drop(x)`). Conversely, dynamic parser-table extensions (#link("https://arxiv.org/abs/2001.10490")[Lean 4 `syntax`], Agda mixfix) couple Stage 1 parsing to transitive module imports. That coupling defeats the import-free parsing goal (#link(<ch-2-1>)[Section 2.1]), the snippet-level *Chroma* Tier 0 highlighting target (#link(<ch-20>)[Chapter 21]), and comment-preserving *Stylus* formatting (#link(<ch-18>)[Chapter 19]).
 
-Vesper proposes to address both problems through *Skeletal Enforestation* (`sugar`, Tier 0 of Vesper Forge), adapting #link("https://gopiandcode.uk/pdfs/rhombus-oopsla23.pdf")[Rhombus Shrubbery enforestation] to Vesper's LL(2) grammar and four-mode place calculus. This section is a design proposal: neither `crates/vesper-forge` nor the self-hosted parser implements `sugar` yet, and the grammar conflicts listed in #link(<ch-2-2>)[Section 2.2] are unresolved. The table compares the intended properties:
+Vesper proposes to address both problems through *Skeletal Enforestation* (`sugar`, Tier 0 of Vesper Forge), adapting #link("https://gopiandcode.uk/pdfs/rhombus-oopsla23.pdf")[Rhombus Shrubbery enforestation] to Vesper's LL(2) grammar and four-mode place calculus. This section is a design proposal: neither `crates/vesper-forge` nor the self-hosted parser implements `sugar` yet, and its slots rely on the disambiguation rules in #link(<ch-2-2>)[Section 2.2]. The table compares the intended properties:
 
 #figure(
   table(
@@ -1506,11 +1524,11 @@ Four rules govern `sugar` well-formedness, block-tail continuation splicing, eff
 ```rust
 // 1. Block-tail `defer` and `guard let` defined in `std/sugar` (no compiler special case):
 pub sugar defer : stmt {
-    rule (defer $cleanup:block $..rest:stmts) => {
+    rule (defer $cleanup:block $..rest:scope) => {
         {
-            let __out = { $..rest };
+            let __exit = $..rest;   // Exit value: Normal(v), Return(r), Break(b), or Raise(e)
             $cleanup;
-            __out
+            __exit.resume()
         }
     }
 }
@@ -1571,7 +1589,7 @@ pub fn ingest_packet(
 ```
 ]
 
-The `defer` expansion above runs `$cleanup` only when `$..rest` falls through. A `return`, `break`, or unhandled `Fail` inside `$..rest` leaves the block without reaching it, so this `defer` suits affine cleanup on the normal path only, and a `linear` value it was meant to release fails the exhaustion check on the early exits. Cleanup on `Fail` needs the `handle Fail` shape of `errdefer` (#link(<ch-6-std-sugar>)[Section 7.6]); cleanup on `return` and `break` needs an exit-aware block form that this draft does not yet define.
+`defer` binds the rest of the block as a `scope` hole rather than `stmts`. A `scope` hole is the one exit-aware mechanism `sugar` needs from the compiler: Stage 2 runs the spliced statements so that a `return`, a `break` out of the hole, or an unhandled `Fail` produces an `Exit` value instead of leaving the expansion, and `Exit::resume` then performs that exit after the template's own code has run. The cleanup therefore runs on every exit path, and a `linear` value released in `$cleanup` passes the exhaustion check on early exits too. A `stmts` hole, by contrast, runs only on fallthrough.
 
 
 === 7.6 Standard Library Sugar Catalog (`std/*`)
@@ -1746,7 +1764,7 @@ fn stage_tx_ring(inout nic: NicRegs, out frame: ByteArray[1536], in payload: Byt
 
 ==== Proof and Vector Notation: `bits{...}`, `ghost calc`, and Elementwise Operators (`std/wire`, `std/verify`, and `std/vector`)
 
-Tagged literals and `@lean_notation` sugars connect low-level bit manipulation to Lean 4 proof automation (`bv_decide` and `calc`). The call `ghost calc { ... }` currently parses as a `GhostExpr` over a `TaggedDelimExpr`, so Stage 2 must route a ghost-prefixed tagged form to the statement rule below; the grammar does not yet say so.
+Tagged literals and `@lean_notation` sugars connect low-level bit manipulation to Lean 4 proof automation (`bv_decide` and `calc`). Because tags must touch their delimiter, the spaced call `ghost calc { ... }` is a ghost `TailSugarStmt` under the skeleton-entry rule (#link(<ch-2-2>)[Section 2.2]), not a `GhostExpr` over a tagged literal.
 
 #_compact-listing[
 ```rust
@@ -1856,7 +1874,7 @@ pub sugar recv : stmt emits eff [Net] {
 // Usage: no rebinding noise; omitting `ch.close()` is still rejected (E0302).
 fn replicate_entry(sink ch: Chan[Send[AppendReq, Recv[AppendAck, End]]], in entry: LogEntry) -> AppendAck
 eff [Net] {
-    send AppendReq { entry } on sink ch;
+    send (AppendReq { entry }) on sink ch;   // header mode: struct literal in parentheses
     recv ack from sink ch;
     ch.close();
     ack
@@ -1967,7 +1985,85 @@ while lo < hi
 ```
 ]
 
-=== 7.8 Trait Solver, Enforester, and Hygiene Engine (`crates/vesper-pact` and `crates/vesper-forge`)
+=== 7.8 Readability Sugar Catalog
+<ch-6-read-sugar>
+
+The sugars in this section target the places where Vesper code is noisiest: resource scopes, formatting, literal data, pipelines, waiting, retries, folds, typestate changes, tests, and proof steps. Each one fits a slot defined by the disambiguation rules in #link(<ch-2-2>)[Section 2.2], and each declares the effects it introduces. Like #link(<ch-6-std-sugar>)[Sections 7.6] and #link(<ch-6-domain-sugar>)[7.7], this catalog is a design proposal. Infix word operators such as `r matches Ok(v)` are deliberately absent: the no-word-operators rule keeps parsing independent of imports, so variant tests use `guard let` or `match`.
+
+#figure(
+  table(
+    columns: (19%, 30%, 18%, 33%),
+    align: (left, left, left, left),
+    table.header([*Module and Sugar*], [*Call-Site Shape*], [*Slot*], [*What It Replaces*]),
+    [`std/control::holding`], [`holding f = File::open(p)? { ... }`], [`ClauseSugarExpr` (`$body:scope`)], [Generalizes the `@ lifo` guard form of #link(<ch-6-std-sugar>)[Section 7.6] to any `Release` value, released on every exit path.],
+    [`std/fmt::fmt`, `std/beacon::log`], [`fmt"lsn={lsn} len={n:x}"`, `log"replayed {count} pages"`], [`TaggedDelimExpr`], [Hand-written `Writer` call chains; `log` also checks `@pii` fields through `Telemetrable`.],
+    [`std/lit::hex`, `bytes`, `dur`, `ip`, `re`], [`hex"dead beef"`, `bytes"4KiB"`, `dur"5ms"`, `ip"10.0.0.1"`, `re"[a-z]+"`], [`TaggedDelimExpr`], [Byte-array test vectors, magic size constants, and runtime parsing of configuration literals; each is validated during expansion and becomes a constant.],
+    [`std/control::|>` placeholder], [`frame |> parse(_, in cfg) |?> validate(_)`], [`PipeExpr`], [Temporary bindings when the piped value is not the first argument.],
+    [`std/pulse::race`], [`race { r = recv(in ch) => ..., timeout 5.ms() => ... }`], [`ClauseSugarExpr` (`emits eff [Scope, Clock]`)], [Manual `Pulse::race` closures; cancellation of the losing arms stays visible at the call site.],
+    [`std/pulse::retry`], [`retry 3 backoff 10.ms() { ... }`], [`ClauseSugarExpr` (`emits eff [Clock]`)], [Counter loops with sleeps and error bookkeeping.],
+    [`std/iter::sum`, `max`, `any`, `all`], [`sum{ x * w | (x, w) in zip(a, b) }`], [`TaggedDelimExpr`], [Accumulator loops; each expands to one counted loop with no allocation.],
+    [`std/vector::lanes`], [`lanes v in xs { ... }`], [`ClauseSugarExpr`], [`VVec` strip-mining with a separate remainder loop.],
+    [`std/control::update`], [`update cfg { port = 80, tls = true }`], [`ClauseSugarExpr`], [Copy-and-assign sequences for `copy` configuration structs.],
+    [`std/typestate::transition`], [`transition inout conn from Handshake to Open { ... }`], [`ClauseSugarExpr` (`inout $p:place`)], [Hand-threaded typestate rebinding in Prism and Warp connection machines.],
+    [`std/verify::assert`], [`assert len <= cap because lemma_bounded(in buf);`], [`TailSugarStmt` (`@lean_notation`)], [Unnamed assertions; the named lemma is passed to the solver and mirrors to Lean `by exact`.],
+    [`std/test::test`, `prop`], [`test "wal replay" { ... }`, `prop "roundtrip" for x: Frame { ... }`], [`ItemSugar`], [Test registration boilerplate; `prop` hooks into Crucible (#link(<ch-21>)[Chapter 22]) and Codex doctests (#link(<ch-19>)[Chapter 20]).],
+  ),
+  kind: table,
+)
+
+#_compact-listing[
+```rust
+// 1. Exit-aware resource scope over any `Release` value (`$body:scope`, Section 7.5):
+pub sugar holding : expr {
+    rule (holding $r:ident = $acquire:expr $body:scope) => {
+        {
+            let $r = $acquire;
+            let __exit = $body;
+            @std/control::Release::release(sink $r);
+            __exit.resume()
+        }
+    }
+}
+
+// 2. Bounded retry with backoff; the attempt count and delay stay at the call site:
+pub sugar retry : expr emits eff [Clock] {
+    rule (retry $n:expr backoff $delay:expr $body:block) => {
+        @std/pulse::retry_with_backoff($n, $delay, || $body)
+    }
+}
+
+// 3. A fold comprehension as a tagged literal (the tag touches its brace):
+pub sugar sum : tag {
+    rule (sum{ $e:expr | $p:pat in $src:expr }) => {
+        {
+            let mut __acc = 0;
+            for $p in $src { __acc += $e; }
+            __acc
+        }
+    }
+}
+
+// Usage:
+fn replay_segment(in path: Path, in cfg: WalCfg) -> u64 eff [Storage, Clock, Fail[IoErr]] {
+    holding f = File::open(in path)? {
+        let hdr = f.read_header()? |?> validate(_, in cfg);
+        assert hdr.len <= cfg.max_segment because lemma_segment_bounded(in hdr);
+        let pages = retry 3 backoff dur"10ms" { f.read_pages(in hdr) };
+        log"replayed {pages.len()} pages from {path}";
+        sum{ p.checksum | p in pages }
+    }
+}
+
+test "replay rejects truncated segments" {
+    let bytes = hex"5653 5031 0000 00ff";
+    assert replay_bytes(in bytes).is_err() because lemma_truncation_detected(in bytes);
+}
+```
+]
+
+The usage above shows how the rules keep these forms apart: `log"..."`, `hex"..."`, `dur"..."`, and `sum{` are tags because they touch their delimiters; `holding f = ... {` and `retry 3 backoff ... {` are clause forms whose headers end at the spaced `{`; `assert ... because ...;` is a tail statement whose header ends at the head word `because`; and `test "..." {` is an item because a `LowerIdent` cannot begin a core item.
+
+=== 7.9 Trait Solver, Enforester, and Hygiene Engine (`crates/vesper-pact` and `crates/vesper-forge`)
 <ch-6-5>
 
 ```rust
