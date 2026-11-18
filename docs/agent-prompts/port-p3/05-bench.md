@@ -49,7 +49,7 @@ Implement:
 2. `execution.rs` and `causal.rs`: port the pure planning and result folding; the clock reads, the `std::thread` sampling in `causal.rs` and the callback-driven run loop (`examples/paired_callbacks.rs`) stay in a Rust adapter that calls the port with the measured samples.
 3. The statistics must give bit-identical `f64` results to the Rust build on the existing tests; any difference is a divergence, not a tolerance.
 4. Seed pattern: `vesper-bench-seed` for the root and for every crate in the compiler closure. The other ports' ABBA benchmarks keep using the Rust build (owner rule).
-5. ABBA: the signed-rank confidence interval and Hodges-Lehmann on 10k and 100k paired samples.
+5. ABBA: both estimators accept at most 32 pairs (`MAX_HODGES_LEHMANN_PAIRS`, `MAX_SIGNED_RANK_CONFIDENCE_PAIRS`), so time many repeated evaluations of valid batches of up to 32 pairs (for example 10k batches at n = 8, 16 and 32), plus the statistics over a long sample series.
 
 Stays in Rust: Timers, threads, the causal profiler's sampling, the callback run loop, and the frozen seed copy.
 

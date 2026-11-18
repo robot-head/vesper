@@ -46,7 +46,7 @@ Dependencies: None.
 
 Implement:
 1. Port `dtb.rs`, `intc.rs`, `aia.rs`, `dma.rs`, `frames.rs`, `ccache.rs`, `ledger.rs`, and the model half of `irq.rs`.
-2. `irq.rs` and `intc.rs` store `Box<dyn FnMut>` handlers: the port computes the dispatch order and returns the events to run; a thin Rust adapter owns the handler table and calls them. Lane 1 does not cover stored closures, so this adapter stays.
+2. `irq.rs` and `intc.rs` store `Box<dyn FnMut>` handlers, and dispatch depends on what each handler does: `RiscvIntc::ensure_external` runs a handler before completing and claiming the next interrupt, and `install_local` rechecks the line level after each callback (`tests/intc.rs::qemu_virt_uart_through_the_plic_respects_the_irqguard` relies on the handler lowering the line). So the port must not compute a whole dispatch list up front. Use a resumable one-event-at-a-time protocol: the port returns the next event, the Rust adapter runs its handler and applies the handler's controller mutations through the port, then asks for the next event. If that protocol costs more than it saves, keep the dispatch loop in Rust and port only the controller state. Lane 1 does not cover stored closures, so the handler table stays in Rust either way.
 3. `svd.rs`: `svd-parser` stays Rust; port the model it builds and the queries over it. `pac.rs` code generation can port if its only `unsafe` is in emitted text; otherwise it stays.
 4. `stack.rs`, `prologue.rs`, `hazard.rs` and `atomic.rs` use `cranelift_codegen` and stay Rust. `mmio.rs` stays Rust (`unsafe` volatile access).
 5. Seed pattern: `vesper-silicon-seed` for the root.

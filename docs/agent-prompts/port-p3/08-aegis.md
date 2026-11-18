@@ -45,14 +45,14 @@ Exclusive ownership:
 Dependencies: None.
 
 Implement:
-1. Port `reader.rs`, `error.rs`, `sgx.rs`, `tdx.rs` and `snp.rs` (structure parsing), `cca.rs` and `corim.rs` (token and CBOR structure; COSE signature checks stay Rust), `claims.rs` (claim extraction; digest checks behind an extern), `gpa.rs`, `linear.rs`, `policy.rs` and `time.rs`.
+1. Port `reader.rs`, `error.rs`, `sgx.rs`, `tdx.rs` and `snp.rs` (structure parsing), `cca.rs` and `corim.rs` (token and CBOR structure; COSE signature checks stay Rust), `claims.rs` (claim extraction; digest checks behind an extern), `gpa.rs`, `policy.rs` and `time.rs`. `linear.rs` stays Rust: it allocates issuer identities from a global `AtomicU64` and keeps an `Arc<Ledger>` with atomic leak counters updated on `Obligation::drop`, which `gpa.rs` checks when merging and accepting ranges. Pass issuer identities to the port as values; moving the ledger waits for source atomics (lane 2).
 2. Every signature, certificate-chain and AEAD operation stays Rust behind `.vsys` externs: `chain.rs`, `roots.rs`, the `ring` calls in `tdx.rs`/`claims.rs`/`policy.rs`, `intel.rs` and `amd.rs` X.509 parsing, and the AEAD in `gate.rs`. No hand-rolled crypto in the port.
 3. `gate.rs` takes `&mut dyn FnMut` evaluator and observer callbacks: keep them in the Rust adapter and have the port return the request bytes and consume the reply.
 4. Parsing untrusted bytes: every malformed input is a typed error; `tests/parser_fuzz.rs` and `tests/zero_alloc.rs` run against both builds (the zero-alloc test may report the port's allocations as a gap rather than fail the lane, if it names the compiler cause).
 5. Seed pattern: `vesper-aegis-seed` for the root.
 6. ABBA: parse and evaluate the vendor sample quotes and reports.
 
-Stays in Rust: All signature, certificate and AEAD code, X.509 parsing, the gate callbacks, and the frozen seed copy.
+Stays in Rust: The `linear.rs` obligation ledger and issuer counter (until lane 2), all signature, certificate and AEAD code, X.509 parsing, the gate callbacks, and the frozen seed copy.
 
 Acceptance:
 - Both builds pass every test file and the translated in-crate tests on the four required checks, including the fuzzer and vendor samples.
