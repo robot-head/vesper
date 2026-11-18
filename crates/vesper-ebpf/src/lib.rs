@@ -13,6 +13,24 @@
 
 #![deny(unsafe_code)]
 
+// Under `vesper-port` (package vesper-ebpf only; the compiler links the
+// Rust seed copy, crates/vesper-ebpf/seed), the ported functions forward to
+// the Vesper port in vesper/ through the generated binding (port wave P3a
+// lane 6, #1041). The binding is committed outside src/ so formatters never
+// reflow it (see docs/maintenance/porting-a-crate.md).
+#[cfg(vesper_port)]
+#[allow(unsafe_code)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+#[cfg(vesper_port)]
+mod port;
+
+/// Which build this is: `"vesper"` when the ported functions run the
+/// Vesper port, `"rust"` for the Rust build (the default, and the seed copy
+/// `vesper-ebpf-seed` that the compiler links).
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
 pub mod btf;
 pub mod btf_ext;
 pub mod builder;

@@ -46,7 +46,9 @@ use crate::insn::{
     decode_all,
 };
 use crate::program::{MapKind, Program, ProgramType};
-use crate::scalar::{Scalar, Tnum, sext_const};
+use crate::scalar::Scalar;
+#[cfg(not(vesper_port))]
+use crate::scalar::{Tnum, sext_const};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -3441,6 +3443,12 @@ fn mark_null(
 }
 
 /// The abstract result of a scalar ALU op on already-truncated operands.
+#[cfg(vesper_port)]
+pub fn scalar_alu(op: AluOp, wide: bool, a: Scalar, b: Scalar) -> Scalar {
+    crate::port::ffi::verifier_scalar_alu(op, wide, a, b)
+}
+
+#[cfg(not(vesper_port))]
 pub fn scalar_alu(op: AluOp, wide: bool, a: Scalar, b: Scalar) -> Scalar {
     let bits = if wide { 64 } else { 32 };
     let shift = |b: Scalar| b.as_const().map(|c| (c & (bits - 1)) as u32);
@@ -3475,6 +3483,7 @@ pub fn scalar_alu(op: AluOp, wide: bool, a: Scalar, b: Scalar) -> Scalar {
     }
 }
 
+#[cfg(not(vesper_port))]
 fn exclude(s: Scalar, c: u64) -> Option<Scalar> {
     let mut s = s;
     if s.umin == c {
@@ -3495,6 +3504,18 @@ fn exclude(s: Scalar, c: u64) -> Option<Scalar> {
 
 /// Refine `(a, b)` assuming `a op b` holds (`holds = true`) or does not.
 /// `None` means that outcome is impossible.
+#[cfg(vesper_port)]
+pub fn refine_jmp(
+    op: JmpOp,
+    wide: bool,
+    a: Scalar,
+    b: Scalar,
+    holds: bool,
+) -> Option<(Scalar, Scalar)> {
+    crate::port::ffi::verifier_refine_jmp(op, wide, a, b, holds)
+}
+
+#[cfg(not(vesper_port))]
 pub fn refine_jmp(
     op: JmpOp,
     wide: bool,
@@ -3611,6 +3632,12 @@ pub fn refine_jmp(
 }
 
 /// Used by tests: the abstract value of a constant.
+#[cfg(vesper_port)]
+pub fn sext_imm(imm: i32, bits: u32) -> u64 {
+    crate::port::ffi::verifier_sext_imm(imm, bits)
+}
+
+#[cfg(not(vesper_port))]
 pub fn sext_imm(imm: i32, bits: u32) -> u64 {
     sext_const(imm as u32 as u64, bits)
 }

@@ -362,6 +362,8 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // Port P1 lane 18 (#915): a Loom package like the others;
                     // joins with them once #880 lands.
                     || path.ends_with("crates/vesper-crucible/vesper")
+                    // Port P3a lane 6 (#1041): the eBPF port uses `use` (#880).
+                    || path.ends_with("crates/vesper-ebpf/vesper")
                 {
                     continue;
                 }

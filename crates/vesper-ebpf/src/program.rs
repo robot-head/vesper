@@ -19,6 +19,12 @@ pub enum MapKind {
 }
 
 impl MapKind {
+    #[cfg(vesper_port)]
+    pub fn kernel_type(self) -> u32 {
+        crate::port::ffi::program_map_kernel_type(self)
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn kernel_type(self) -> u32 {
         match self {
             MapKind::Hash => 1,
@@ -31,6 +37,12 @@ impl MapKind {
         }
     }
 
+    #[cfg(vesper_port)]
+    pub fn from_kernel_type(t: u32) -> Option<MapKind> {
+        crate::port::ffi::program_map_from_kernel_type(t)
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn from_kernel_type(t: u32) -> Option<MapKind> {
         Some(match t {
             1 => MapKind::Hash,
@@ -44,6 +56,12 @@ impl MapKind {
         })
     }
 
+    #[cfg(vesper_port)]
+    pub fn is_array(self) -> bool {
+        crate::port::ffi::program_map_is_array(self)
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn is_array(self) -> bool {
         matches!(
             self,
@@ -93,6 +111,12 @@ impl MapDef {
     }
 
     /// Kernel `map_alloc_check` rules for the supported kinds.
+    #[cfg(vesper_port)]
+    pub fn validate(&self) -> Result<(), String> {
+        crate::port::map_validate(self)
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn validate(&self) -> Result<(), String> {
         if self.name.is_empty() || self.name.len() > 15 || !self.name.is_ascii() {
             return Err(format!(
@@ -155,6 +179,12 @@ impl ProgramType {
         ProgramType::Kprobe,
     ];
 
+    #[cfg(vesper_port)]
+    pub fn kernel_type(self) -> u32 {
+        crate::port::ffi::program_prog_kernel_type(self)
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn kernel_type(self) -> u32 {
         match self {
             ProgramType::Xdp => 6,
@@ -164,12 +194,24 @@ impl ProgramType {
         }
     }
 
+    #[cfg(vesper_port)]
+    pub fn from_kernel_type(t: u32) -> Option<ProgramType> {
+        crate::port::ffi::program_prog_from_kernel_type(t)
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn from_kernel_type(t: u32) -> Option<ProgramType> {
         ProgramType::ALL.into_iter().find(|p| p.kernel_type() == t)
     }
 
     /// Whether the program reads and writes packet bytes directly
     /// (`data`/`data_end` in its context).
+    #[cfg(vesper_port)]
+    pub fn has_packet(self) -> bool {
+        crate::port::ffi::program_has_packet(self)
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn has_packet(self) -> bool {
         matches!(self, ProgramType::Xdp | ProgramType::SchedCls)
     }
@@ -181,6 +223,12 @@ impl ProgramType {
 
     /// Tracing programs (kprobe, tracepoint) run in process context with
     /// the tracing helper set.
+    #[cfg(vesper_port)]
+    pub fn is_tracing(self) -> bool {
+        crate::port::ffi::program_is_tracing(self)
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn is_tracing(self) -> bool {
         matches!(self, ProgramType::Tracepoint | ProgramType::Kprobe)
     }

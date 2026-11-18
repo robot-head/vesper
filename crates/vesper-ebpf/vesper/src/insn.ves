@@ -1,0 +1,1000 @@
+// Module insn of @vesper/ebpf (see lib.ves): src/insn.rs, the instruction
+// codec. Registers are `u8` numbers in `0..=10` here; the Rust wrapper turns
+// them into `Reg`. `DecodeError.ReservedFieldSet.field` is 0 dst, 1 src,
+// 2 off, 3 imm.
+
+pub copy struct RawInsn {
+    code: u8,
+    dst: u8,
+    src: u8,
+    off: i16,
+    imm: i32
+}
+
+pub copy enum Operand {
+    Reg(u8),
+    Imm(i32)
+}
+
+pub copy enum AluOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    SDiv,
+    Or,
+    And,
+    Lsh,
+    Rsh,
+    Neg,
+    Mod,
+    SMod,
+    Xor,
+    Mov,
+    MovSx(u8),
+    Arsh
+}
+
+pub copy enum Endian {
+    ToLe,
+    ToBe,
+    Swap
+}
+
+pub copy enum JmpOp {
+    Eq,
+    Gt,
+    Ge,
+    Set,
+    Ne,
+    SGt,
+    SGe,
+    Lt,
+    Le,
+    SLt,
+    SLe
+}
+
+pub copy enum Size {
+    B,
+    H,
+    W,
+    DW
+}
+
+pub copy enum AtomicOp {
+    Add {
+        fetch: bool
+    },
+    Or {
+        fetch: bool
+    },
+    And {
+        fetch: bool
+    },
+    Xor {
+        fetch: bool
+    },
+    Xchg,
+    CmpXchg
+}
+
+pub copy enum Imm64 {
+    Value(u64),
+    MapFd(i32),
+    Pseudo {
+        src: u8,
+        imm_lo: i32,
+        imm_hi: i32
+    }
+}
+
+pub copy enum CallTarget {
+    Helper(i32),
+    Local(i32),
+    Kfunc(i32)
+}
+
+pub copy enum Insn {
+    Alu {
+        wide: bool,
+        op: AluOp,
+        dst: u8,
+        src: Operand
+    },
+    Endian {
+        kind: Endian,
+        bits: u8,
+        dst: u8
+    },
+    Ja {
+        off: i32
+    },
+    Jcond {
+        wide: bool,
+        op: JmpOp,
+        dst: u8,
+        src: Operand,
+        off: i16
+    },
+    Call(CallTarget),
+    Exit,
+    LdImm64 {
+        dst: u8,
+        imm: Imm64
+    },
+    Ldx {
+        size: Size,
+        dst: u8,
+        src: u8,
+        off: i16,
+        sign_extend: bool
+    },
+    St {
+        size: Size,
+        dst: u8,
+        off: i16,
+        imm: i32
+    },
+    Stx {
+        size: Size,
+        dst: u8,
+        src: u8,
+        off: i16
+    },
+    Atomic {
+        size: Size,
+        op: AtomicOp,
+        dst: u8,
+        src: u8,
+        off: i16
+    },
+    LdLegacy {
+        size: Size,
+        indirect: bool,
+        src: u8,
+        imm: i32
+    }
+}
+
+pub copy enum DecodeError {
+    TruncatedProgram {
+        len: usize
+    },
+    BadRegister {
+        pc: usize,
+        reg: u8
+    },
+    InvalidOpcode {
+        pc: usize,
+        code: u8
+    },
+    ReservedFieldSet {
+        pc: usize,
+        field: u8
+    },
+    BrokenLdImm64 {
+        pc: usize
+    }
+}
+
+// One or two encoded slots (`n` is 1 or 2).
+pub copy struct Encoded {
+    n: u64,
+    lo: RawInsn,
+    hi: RawInsn
+}
+
+fn raw(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> RawInsn {
+    RawInsn {
+        code: code,
+        dst: dst,
+        src: src,
+        off: off,
+        imm: imm
+    }
+}
+
+pub fn raw_zero() -> RawInsn {
+    raw(0, 0, 0, 0, 0)
+}
+
+fn bad(pc: usize, code: u8) -> Never eff [Fail[DecodeError]] {
+    Fail::raise(
+        DecodeError::InvalidOpcode {
+            pc: pc,
+            code: code
+        }
+    )
+}
+
+fn reserved(pc: usize, field: u8) -> Never eff [Fail[DecodeError]] {
+    Fail::raise(
+        DecodeError::ReservedFieldSet {
+            pc: pc,
+            field: field
+        }
+    )
+}
+
+fn broken(pc: usize) -> Never eff [Fail[DecodeError]] {
+    Fail::raise(
+        DecodeError::BrokenLdImm64 {
+            pc: pc
+        }
+    )
+}
+
+fn reg(pc: usize, n: u8) -> u8 eff [Fail[DecodeError]] {
+    if n > 10 {
+        Fail::raise(
+            DecodeError::BadRegister {
+                pc: pc,
+                reg: n
+            }
+        );
+    }
+    n
+}
+
+fn zero_u8(pc: usize, v: u8, field: u8) eff [Fail[DecodeError]] {
+    if v != 0 {
+        reserved(pc, field);
+    }
+}
+
+fn zero_i16(pc: usize, v: i16, field: u8) eff [Fail[DecodeError]] {
+    if v != 0 {
+        reserved(pc, field);
+    }
+}
+
+fn zero_i32(pc: usize, v: i32, field: u8) eff [Fail[DecodeError]] {
+    if v != 0 {
+        reserved(pc, field);
+    }
+}
+
+fn size_from_code(c: u8) -> Size {
+    let m = c & 24;
+    if m == 0 {
+        Size::W
+    } else if m == 8 {
+        Size::H
+    } else if m == 16 {
+        Size::B
+    } else {
+        Size::DW
+    }
+}
+
+fn size_code(s: Size) -> u8 {
+    match s {
+        Size::W => 0,
+        Size::H => 8,
+        Size::B => 16,
+        Size::DW => 24,
+    }
+}
+
+fn is_dw(s: Size) -> bool {
+    match s {
+        Size::DW => true,
+        _ => false,
+    }
+}
+
+fn jmp_from_code(op: u8) -> Option[JmpOp] {
+    match op {
+        16 => Option::Some(JmpOp::Eq),
+        32 => Option::Some(JmpOp::Gt),
+        48 => Option::Some(JmpOp::Ge),
+        64 => Option::Some(JmpOp::Set),
+        80 => Option::Some(JmpOp::Ne),
+        96 => Option::Some(JmpOp::SGt),
+        112 => Option::Some(JmpOp::SGe),
+        160 => Option::Some(JmpOp::Lt),
+        176 => Option::Some(JmpOp::Le),
+        192 => Option::Some(JmpOp::SLt),
+        208 => Option::Some(JmpOp::SLe),
+        _ => Option::None,
+    }
+}
+
+fn jmp_code(op: JmpOp) -> u8 {
+    match op {
+        JmpOp::Eq => 16,
+        JmpOp::Gt => 32,
+        JmpOp::Ge => 48,
+        JmpOp::Set => 64,
+        JmpOp::Ne => 80,
+        JmpOp::SGt => 96,
+        JmpOp::SGe => 112,
+        JmpOp::Lt => 160,
+        JmpOp::Le => 176,
+        JmpOp::SLt => 192,
+        JmpOp::SLe => 208,
+    }
+}
+
+// (opcode high nibble, off) of an ALU op.
+fn alu_code(op: AluOp) -> (u8, i16) {
+    match op {
+        AluOp::Add => (0, 0),
+        AluOp::Sub => (16, 0),
+        AluOp::Mul => (32, 0),
+        AluOp::Div => (48, 0),
+        AluOp::SDiv => (48, 1),
+        AluOp::Or => (64, 0),
+        AluOp::And => (80, 0),
+        AluOp::Lsh => (96, 0),
+        AluOp::Rsh => (112, 0),
+        AluOp::Neg => (128, 0),
+        AluOp::Mod => (144, 0),
+        AluOp::SMod => (144, 1),
+        AluOp::Xor => (160, 0),
+        AluOp::Mov => (176, 0),
+        AluOp::MovSx(b) => (176, widen_i16(b)),
+        AluOp::Arsh => (192, 0),
+    }
+}
+
+fn atomic_from_imm(imm: i32) -> Option[AtomicOp] {
+    match imm {
+        0 => Option::Some(
+            AtomicOp::Add {
+                fetch: false
+            }
+        ),
+        1 => Option::Some(
+            AtomicOp::Add {
+                fetch: true
+            }
+        ),
+        64 => Option::Some(
+            AtomicOp::Or {
+                fetch: false
+            }
+        ),
+        65 => Option::Some(
+            AtomicOp::Or {
+                fetch: true
+            }
+        ),
+        80 => Option::Some(
+            AtomicOp::And {
+                fetch: false
+            }
+        ),
+        81 => Option::Some(
+            AtomicOp::And {
+                fetch: true
+            }
+        ),
+        160 => Option::Some(
+            AtomicOp::Xor {
+                fetch: false
+            }
+        ),
+        161 => Option::Some(
+            AtomicOp::Xor {
+                fetch: true
+            }
+        ),
+        225 => Option::Some(AtomicOp::Xchg),
+        241 => Option::Some(AtomicOp::CmpXchg),
+        _ => Option::None,
+    }
+}
+
+fn fetch_bit(f: bool) -> i32 {
+    if f {
+        1
+    } else {
+        0
+    }
+}
+
+fn atomic_imm(op: AtomicOp) -> i32 {
+    match op {
+        AtomicOp::Add {
+            fetch
+        }
+        => fetch_bit(fetch),
+        AtomicOp::Or {
+            fetch
+        }
+        => 64 | fetch_bit(fetch),
+        AtomicOp::And {
+            fetch
+        }
+        => 80 | fetch_bit(fetch),
+        AtomicOp::Xor {
+            fetch
+        }
+        => 160 | fetch_bit(fetch),
+        AtomicOp::Xchg => 225,
+        AtomicOp::CmpXchg => 241,
+    }
+}
+
+// The ALU op of opcode nibble `opc` with offset `off` (ISA v4 signed and
+// sign-extending forms), or None.
+fn alu_op(opc: u8, off: i16, wide: bool) -> Option[AluOp] {
+    if off == 0 {
+        return match opc {
+            0 => Option::Some(AluOp::Add),
+            16 => Option::Some(AluOp::Sub),
+            32 => Option::Some(AluOp::Mul),
+            48 => Option::Some(AluOp::Div),
+            64 => Option::Some(AluOp::Or),
+            80 => Option::Some(AluOp::And),
+            96 => Option::Some(AluOp::Lsh),
+            112 => Option::Some(AluOp::Rsh),
+            128 => Option::Some(AluOp::Neg),
+            144 => Option::Some(AluOp::Mod),
+            160 => Option::Some(AluOp::Xor),
+            176 => Option::Some(AluOp::Mov),
+            192 => Option::Some(AluOp::Arsh),
+            _ => Option::None,
+        };
+    }
+    if off == 1 && opc == 48 {
+        return Option::Some(AluOp::SDiv);
+    }
+    if off == 1 && opc == 144 {
+        return Option::Some(AluOp::SMod);
+    }
+    if opc == 176 && (off == 8 || off == 16 || (off == 32 && wide)) {
+        return Option::Some(AluOp::MovSx(wrapping_u8(off)));
+    }
+    Option::None
+}
+
+fn decode_alu(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
+    let wide = (r.code & 7) == 7;
+    let x = r.code & 8 != 0;
+    let dst = reg(pc, r.dst);
+    let opc = r.code & 240;
+    if opc == 208 {
+        let kind = if !wide && !x {
+            Endian::ToLe
+        } else if !wide {
+            Endian::ToBe
+        } else if !x {
+            Endian::Swap
+        } else {
+            bad(pc, r.code)
+        };
+        zero_u8(pc, r.src, 1);
+        zero_i16(pc, r.off, 2);
+        let width: u8 = if r.imm == 16 {
+            16
+        } else if r.imm == 32 {
+            32
+        } else if r.imm == 64 {
+            64
+        } else {
+            bad(pc, r.code)
+        };
+        return Insn::Endian {
+            kind: kind,
+            bits: width,
+            dst: dst
+        };
+    }
+    let op = match alu_op(opc, r.off, wide) {
+        Option::Some(o) => o,
+        Option::None => if opc <= 192 {
+            reserved(pc, 2)
+        } else {
+            bad(pc, r.code)
+        },
+    };
+    let is_neg = match op {
+        AluOp::Neg => true,
+        _ => false,
+    };
+    let src = if is_neg {
+        if x {
+            bad(pc, r.code);
+        }
+        zero_u8(pc, r.src, 1);
+        zero_i32(pc, r.imm, 3);
+        Operand::Imm(0)
+    } else if x {
+        zero_i32(pc, r.imm, 3);
+        Operand::Reg(reg(pc, r.src))
+    } else {
+        zero_u8(pc, r.src, 1);
+        Operand::Imm(r.imm)
+    };
+    let is_movsx = match op {
+        AluOp::MovSx(b) => true,
+        _ => false,
+    };
+    if is_movsx && !x {
+        bad(pc, r.code);
+    }
+    Insn::Alu {
+        wide: wide,
+        op: op,
+        dst: dst,
+        src: src
+    }
+}
+
+fn decode_jmp(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
+    let wide = (r.code & 7) == 5;
+    let x = r.code & 8 != 0;
+    let opc = r.code & 240;
+    if opc == 0 {
+        if x {
+            bad(pc, r.code);
+        }
+        zero_u8(pc, r.dst, 0);
+        zero_u8(pc, r.src, 1);
+        if wide {
+            zero_i32(pc, r.imm, 3);
+            return Insn::Ja {
+                off: widen_i32(r.off)
+            };
+        }
+        zero_i16(pc, r.off, 2);
+        return Insn::Ja {
+            off: r.imm
+        };
+    }
+    if opc == 128 && wide {
+        if x {
+            bad(pc, r.code);
+        }
+        zero_u8(pc, r.dst, 0);
+        zero_i16(pc, r.off, 2);
+        let t = if r.src == 0 {
+            CallTarget::Helper(r.imm)
+        } else if r.src == 1 {
+            CallTarget::Local(r.imm)
+        } else if r.src == 2 {
+            CallTarget::Kfunc(r.imm)
+        } else {
+            bad(pc, r.code)
+        };
+        return Insn::Call(t);
+    }
+    if opc == 144 && wide {
+        if x {
+            bad(pc, r.code);
+        }
+        zero_u8(pc, r.dst, 0);
+        zero_u8(pc, r.src, 1);
+        zero_i16(pc, r.off, 2);
+        zero_i32(pc, r.imm, 3);
+        return Insn::Exit;
+    }
+    let op = match jmp_from_code(opc) {
+        Option::Some(o) => o,
+        Option::None => bad(pc, r.code),
+    };
+    let dst = reg(pc, r.dst);
+    let src = if x {
+        zero_i32(pc, r.imm, 3);
+        Operand::Reg(reg(pc, r.src))
+    } else {
+        zero_u8(pc, r.src, 1);
+        Operand::Imm(r.imm)
+    };
+    Insn::Jcond {
+        wide: wide,
+        op: op,
+        dst: dst,
+        src: src,
+        off: r.off
+    }
+}
+
+fn decode_ld(pc: usize, r: RawInsn, has_hi: bool, hi: RawInsn) -> Insn eff [Fail[DecodeError]] {
+    let size = size_from_code(r.code);
+    let mode = r.code & 224;
+    if mode == 0 && is_dw(size) {
+        let dst = reg(pc, r.dst);
+        zero_i16(pc, r.off, 2);
+        if !has_hi {
+            broken(pc);
+        }
+        if hi.code != 0 || hi.dst != 0 || hi.src != 0 || hi.off != 0 {
+            broken(pc);
+        }
+        let imm = if r.src == 0 {
+            let lo = widen_u64(wrapping_u32(r.imm));
+            let up = widen_u64(wrapping_u32(hi.imm));
+            Imm64::Value(lo | (up << 32))
+        } else if r.src == 1 {
+            if hi.imm != 0 {
+                broken(pc);
+            }
+            Imm64::MapFd(r.imm)
+        } else if r.src >= 2 && r.src <= 6 {
+            Imm64::Pseudo {
+                src: r.src,
+                imm_lo: r.imm,
+                imm_hi: hi.imm
+            }
+        } else {
+            bad(pc, r.code)
+        };
+        return Insn::LdImm64 {
+            dst: dst,
+            imm: imm
+        };
+    }
+    if (mode == 32 || mode == 64) && !is_dw(size) {
+        zero_u8(pc, r.dst, 0);
+        zero_i16(pc, r.off, 2);
+        let indirect = mode == 64;
+        let src = if indirect {
+            reg(pc, r.src)
+        } else {
+            zero_u8(pc, r.src, 1);
+            0
+        };
+        return Insn::LdLegacy {
+            size: size,
+            indirect: indirect,
+            src: src,
+            imm: r.imm
+        };
+    }
+    bad(pc, r.code)
+}
+
+fn decode_mem(pc: usize, r: RawInsn) -> Insn eff [Fail[DecodeError]] {
+    let cls = r.code & 7;
+    let size = size_from_code(r.code);
+    let mode = r.code & 224;
+    if cls == 1 {
+        let sign_extend = if mode == 96 {
+            false
+        } else if mode == 128 && !is_dw(size) {
+            true
+        } else {
+            bad(pc, r.code)
+        };
+        zero_i32(pc, r.imm, 3);
+        let dst = reg(pc, r.dst);
+        let src = reg(pc, r.src);
+        return Insn::Ldx {
+            size: size,
+            dst: dst,
+            src: src,
+            off: r.off,
+            sign_extend: sign_extend
+        };
+    }
+    if cls == 2 {
+        if mode != 96 {
+            bad(pc, r.code);
+        }
+        zero_u8(pc, r.src, 1);
+        return Insn::St {
+            size: size,
+            dst: reg(pc, r.dst),
+            off: r.off,
+            imm: r.imm
+        };
+    }
+    // STX
+    if mode == 96 {
+        zero_i32(pc, r.imm, 3);
+        let dst = reg(pc, r.dst);
+        let src = reg(pc, r.src);
+        return Insn::Stx {
+            size: size,
+            dst: dst,
+            src: src,
+            off: r.off
+        };
+    }
+    let atomic_size = match size {
+        Size::W => true,
+        Size::DW => true,
+        _ => false,
+    };
+    if mode == 192 && atomic_size {
+        let op = match atomic_from_imm(r.imm) {
+            Option::Some(o) => o,
+            Option::None => bad(pc, r.code),
+        };
+        let dst = reg(pc, r.dst);
+        let src = reg(pc, r.src);
+        return Insn::Atomic {
+            size: size,
+            op: op,
+            dst: dst,
+            src: src,
+            off: r.off
+        };
+    }
+    bad(pc, r.code)
+}
+
+// Decode the instruction at slot `pc` of a program of `len` slots; `lo` is
+// slot `pc` and `hi` slot `pc + 1` (zero when absent).
+pub fn decode(pc: usize, len: usize, lo: RawInsn, hi: RawInsn) -> Insn eff [Fail[DecodeError]] {
+    if pc >= len {
+        Fail::raise(
+            DecodeError::TruncatedProgram {
+                len: wrapping_mul(len, 8)
+            }
+        );
+    }
+    decode_slot(pc, lo, wrapping_add(pc, 1) < len, hi)
+}
+
+fn decode_slot(pc: usize, r: RawInsn, has_hi: bool, hi: RawInsn) -> Insn eff [Fail[DecodeError]] {
+    let cls = r.code & 7;
+    if cls == 4 || cls == 7 {
+        decode_alu(pc, r)
+    } else if cls == 5 || cls == 6 {
+        decode_jmp(pc, r)
+    } else if cls == 0 {
+        decode_ld(pc, r, has_hi, hi)
+    } else {
+        decode_mem(pc, r)
+    }
+}
+
+fn slot_at(in slots: Slice[RawInsn], i: usize) -> RawInsn {
+    match slots.try_get(widen_u64(i)) {
+        Option::Some(r) => r,
+        Option::None => raw_zero(),
+    }
+}
+
+fn is_ld_imm64(i: Insn) -> bool {
+    match i {
+        Insn::LdImm64 {
+            dst,
+            imm
+        }
+        => true,
+        _ => false,
+    }
+}
+
+// Every instruction of the program, in order (the Rust wrapper adds the
+// `None` entry after each `LD_IMM64`).
+pub fn decode_all(in slots: Slice[RawInsn]) -> ChunkSeq[Insn] eff [Fail[DecodeError]] {
+    let mut out: ChunkSeq[Insn] = ChunkSeq::new[Insn]();
+    let n = narrow_usize(slots.len());
+    let mut pc: usize = 0;
+    loop {
+        if !(pc < n) {
+            break;
+        }
+        let next = wrapping_add(pc, 1);
+        let i = decode_slot(pc, slot_at(in slots, pc), next < n, slot_at(in slots, next));
+        out.push(i);
+        if is_ld_imm64(i) {
+            pc = wrapping_add(pc, 2);
+        } else {
+            pc = next;
+        }
+    }
+    out
+}
+
+fn one(r: RawInsn) -> Encoded {
+    Encoded {
+        n: 1,
+        lo: r,
+        hi: raw_zero()
+    }
+}
+
+fn op_src(o: Operand) -> (u8, u8, i32) {
+    match o {
+        Operand::Imm(i) => (0, 0, i),
+        Operand::Reg(s) => (8, s, 0),
+    }
+}
+
+// Encode one instruction into one or two slots.
+pub fn encode(i: Insn) -> Encoded {
+    match i {
+        Insn::Alu {
+            wide,
+            op,
+            dst,
+            src
+        }
+        => {
+            let cls: u8 = if wide {
+                7
+            } else {
+                4
+            };
+            let (opc, off) = alu_code(op);
+            let (x, sreg, imm) = op_src(src);
+            one(raw(cls | opc | x, dst, sreg, off, imm))
+        },
+        Insn::Endian {
+            kind,
+            bits,
+            dst
+        }
+        => {
+            let code: u8 = match kind {
+                Endian::ToLe => 212,
+                Endian::ToBe => 220,
+                Endian::Swap => 215,
+            };
+            one(raw(code, dst, 0, 0, widen_i32(bits)))
+        },
+        Insn::Ja {
+            off
+        }
+        => if off >= -32768 && off <= 32767 {
+            one(raw(5, 0, 0, wrapping_i16(off), 0))
+        } else {
+            one(raw(6, 0, 0, 0, off))
+        },
+        Insn::Jcond {
+            wide,
+            op,
+            dst,
+            src,
+            off
+        }
+        => {
+            let cls: u8 = if wide {
+                5
+            } else {
+                6
+            };
+            let (x, sreg, imm) = op_src(src);
+            one(raw(cls | jmp_code(op) | x, dst, sreg, off, imm))
+        },
+        Insn::Call(t) => match t {
+            CallTarget::Helper(n) => one(raw(133, 0, 0, 0, n)),
+            CallTarget::Local(n) => one(raw(133, 0, 1, 0, n)),
+            CallTarget::Kfunc(n) => one(raw(133, 0, 2, 0, n)),
+        },
+        Insn::Exit => one(raw(149, 0, 0, 0, 0)),
+        Insn::LdImm64 {
+            dst,
+            imm
+        }
+        => {
+            let (src, lo, up): (u8, i32, i32) = match imm {
+                Imm64::Value(v) => (0, wrapping_i32(v), wrapping_i32(v >> 32)),
+                Imm64::MapFd(fd) => (1, fd, 0),
+                Imm64::Pseudo {
+                    src,
+                    imm_lo,
+                    imm_hi
+                }
+                => (src, imm_lo, imm_hi),
+            };
+            Encoded {
+                n: 2,
+                lo: raw(24, dst, src, 0, lo),
+                hi: raw(0, 0, 0, 0, up)
+            }
+        },
+        Insn::Ldx {
+            size,
+            dst,
+            src,
+            off,
+            sign_extend
+        }
+        => {
+            let mode: u8 = if sign_extend {
+                128
+            } else {
+                96
+            };
+            one(raw(1 | mode | size_code(size), dst, src, off, 0))
+        },
+        Insn::St {
+            size,
+            dst,
+            off,
+            imm
+        }
+        => one(raw(98 | size_code(size), dst, 0, off, imm)),
+        Insn::Stx {
+            size,
+            dst,
+            src,
+            off
+        }
+        => one(raw(99 | size_code(size), dst, src, off, 0)),
+        Insn::Atomic {
+            size,
+            op,
+            dst,
+            src,
+            off
+        }
+        => one(raw(195 | size_code(size), dst, src, off, atomic_imm(op))),
+        Insn::LdLegacy {
+            size,
+            indirect,
+            src,
+            imm
+        }
+        => {
+            let mode: u8 = if indirect {
+                64
+            } else {
+                32
+            };
+            let s: u8 = if indirect {
+                src
+            } else {
+                0
+            };
+            one(raw(mode | size_code(size), 0, s, 0, imm))
+        },
+    }
+}
+
+// Little-endian wire bytes of every slot (insn::slots_to_bytes).
+pub fn slots_to_bytes(in slots: Slice[RawInsn]) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    for i in 0..slots.len() {
+        let r = slot_at(in slots, narrow_usize(i));
+        let off = wrapping_u16(r.off);
+        let imm = wrapping_u32(r.imm);
+        out.push(r.code);
+        out.push((r.dst & 15) | ((r.src & 15) << 4));
+        out.push(wrapping_u8(off));
+        out.push(wrapping_u8(off >> 8));
+        out.push(wrapping_u8(imm));
+        out.push(wrapping_u8(imm >> 8));
+        out.push(wrapping_u8(imm >> 16));
+        out.push(wrapping_u8(imm >> 24));
+    }
+    out
+}
+
+fn byte(in b: Slice[u8], i: u64) -> u8 {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Slots of `bytes`, whose length must be a multiple of eight
+// (insn::slots_from_bytes).
+pub fn slots_from_bytes(in bytes: Slice[u8]) -> ChunkSeq[RawInsn] eff [Fail[DecodeError]] {
+    let n = bytes.len();
+    if n & 7 != 0 {
+        Fail::raise(
+            DecodeError::TruncatedProgram {
+                len: narrow_usize(n)
+            }
+        );
+    }
+    let mut out: ChunkSeq[RawInsn] = ChunkSeq::new[RawInsn]();
+    let mut at: u64 = 0;
+    loop {
+        if !(at < n) {
+            break;
+        }
+        let b1 = byte(in bytes, wrapping_add(at, 1));
+        let off = widen_u16(byte(in bytes, wrapping_add(at, 2))) | (
+            widen_u16(byte(in bytes, wrapping_add(at, 3))) << 8
+        );
+        let imm = widen_u32(byte(in bytes, wrapping_add(at, 4))) | (
+            widen_u32(byte(in bytes, wrapping_add(at, 5))) << 8
+        ) | (widen_u32(byte(in bytes, wrapping_add(at, 6))) << 16) | (
+            widen_u32(byte(in bytes, wrapping_add(at, 7))) << 24
+        );
+        out.push(raw(byte(in bytes, at), b1 & 15, b1 >> 4, wrapping_i16(off), wrapping_i32(imm)));
+        at = wrapping_add(at, 8);
+    }
+    out
+}

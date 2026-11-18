@@ -85,6 +85,13 @@ impl RawInsn {
 }
 
 /// Serialise slots to bytes.
+#[cfg(vesper_port)]
+pub fn slots_to_bytes(slots: &[RawInsn]) -> Vec<u8> {
+    crate::port::ffi::insn_slots_to_bytes(slots)
+}
+
+/// Serialise slots to bytes.
+#[cfg(not(vesper_port))]
 pub fn slots_to_bytes(slots: &[RawInsn]) -> Vec<u8> {
     let mut out = Vec::with_capacity(slots.len() * 8);
     for s in slots {
@@ -94,6 +101,13 @@ pub fn slots_to_bytes(slots: &[RawInsn]) -> Vec<u8> {
 }
 
 /// Parse bytes into slots. The length must be a multiple of eight.
+#[cfg(vesper_port)]
+pub fn slots_from_bytes(bytes: &[u8]) -> Result<Vec<RawInsn>, DecodeError> {
+    crate::port::slots_from_bytes(bytes)
+}
+
+/// Parse bytes into slots. The length must be a multiple of eight.
+#[cfg(not(vesper_port))]
 pub fn slots_from_bytes(bytes: &[u8]) -> Result<Vec<RawInsn>, DecodeError> {
     if !bytes.len().is_multiple_of(8) {
         return Err(DecodeError::TruncatedProgram { len: bytes.len() });
@@ -182,6 +196,7 @@ pub enum AluOp {
 }
 
 impl AluOp {
+    #[cfg(not(vesper_port))]
     fn code(self) -> (u8, i16) {
         match self {
             AluOp::Add => (0x00, 0),
@@ -231,6 +246,7 @@ pub enum JmpOp {
 }
 
 impl JmpOp {
+    #[cfg(not(vesper_port))]
     fn code(self) -> u8 {
         match self {
             JmpOp::Eq => 0x10,
@@ -247,6 +263,7 @@ impl JmpOp {
         }
     }
 
+    #[cfg(not(vesper_port))]
     fn from_code(op: u8) -> Option<JmpOp> {
         Some(match op {
             0x10 => JmpOp::Eq,
@@ -319,6 +336,7 @@ impl Size {
         }
     }
 
+    #[cfg(not(vesper_port))]
     fn code(self) -> u8 {
         match self {
             Size::W => 0x00,
@@ -328,6 +346,7 @@ impl Size {
         }
     }
 
+    #[cfg(not(vesper_port))]
     fn from_code(c: u8) -> Size {
         match c & 0x18 {
             0x00 => Size::W,
@@ -360,6 +379,7 @@ pub enum AtomicOp {
 }
 
 impl AtomicOp {
+    #[cfg(not(vesper_port))]
     fn imm(self) -> i32 {
         let f = |b: bool| if b { 0x01 } else { 0 };
         match self {
@@ -372,6 +392,7 @@ impl AtomicOp {
         }
     }
 
+    #[cfg(not(vesper_port))]
     fn from_imm(imm: i32) -> Option<AtomicOp> {
         Some(match imm {
             0x00 => AtomicOp::Add { fetch: false },
@@ -542,10 +563,12 @@ impl fmt::Display for DecodeError {
 
 impl std::error::Error for DecodeError {}
 
+#[cfg(not(vesper_port))]
 fn reg(pc: usize, n: u8) -> Result<Reg, DecodeError> {
     Reg::new(n).ok_or(DecodeError::BadRegister { pc, reg: n })
 }
 
+#[cfg(not(vesper_port))]
 fn zero<T: PartialEq + Default>(pc: usize, v: T, field: &'static str) -> Result<(), DecodeError> {
     if v == T::default() {
         Ok(())
@@ -555,6 +578,13 @@ fn zero<T: PartialEq + Default>(pc: usize, v: T, field: &'static str) -> Result<
 }
 
 /// Decode the instruction starting at slot `pc`.
+#[cfg(vesper_port)]
+pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
+    crate::port::decode(slots, pc)
+}
+
+/// Decode the instruction starting at slot `pc`.
+#[cfg(not(vesper_port))]
 pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
     let Some(&r) = slots.get(pc) else {
         return Err(DecodeError::TruncatedProgram {
@@ -800,6 +830,14 @@ pub fn decode(slots: &[RawInsn], pc: usize) -> Result<Insn, DecodeError> {
 
 /// Decode a whole program. Entry `i` is `Some` when an instruction starts at
 /// slot `i` and `None` for the second slot of an `LD_IMM64`.
+#[cfg(vesper_port)]
+pub fn decode_all(slots: &[RawInsn]) -> Result<Vec<Option<Insn>>, DecodeError> {
+    crate::port::decode_all(slots)
+}
+
+/// Decode a whole program. Entry `i` is `Some` when an instruction starts at
+/// slot `i` and `None` for the second slot of an `LD_IMM64`.
+#[cfg(not(vesper_port))]
 pub fn decode_all(slots: &[RawInsn]) -> Result<Vec<Option<Insn>>, DecodeError> {
     let mut out = Vec::with_capacity(slots.len());
     let mut pc = 0;
@@ -816,6 +854,13 @@ pub fn decode_all(slots: &[RawInsn]) -> Result<Vec<Option<Insn>>, DecodeError> {
 }
 
 /// Encode one typed instruction into one or two slots.
+#[cfg(vesper_port)]
+pub fn encode(insn: &Insn) -> Vec<RawInsn> {
+    crate::port::encode(insn)
+}
+
+/// Encode one typed instruction into one or two slots.
+#[cfg(not(vesper_port))]
 pub fn encode(insn: &Insn) -> Vec<RawInsn> {
     let r = |code, dst: Reg, src: u8, off, imm| RawInsn::new(code, dst.num(), src, off, imm);
     match *insn {

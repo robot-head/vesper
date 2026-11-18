@@ -1,0 +1,206 @@
+// Module concrete of @vesper/ebpf (see lib.ves): the concrete ALU, jump and
+// byte-order semantics of src/interp.rs (`alu_concrete`, `cmp_concrete`,
+// `endian`).
+use self::common::{
+    sar,
+    sext_const,
+    shl,
+    shr,
+    signed
+};
+use self::insn::{
+    AluOp,
+    Endian,
+    JmpOp
+};
+
+fn udiv(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+fn urem(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return a;
+    }
+    handle Fail[RuntimeError] in {
+        a % b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+// Signed division truncating toward zero, `MIN / -1 == MIN`, `x / 0 == 0`.
+fn sdiv(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return 0;
+    }
+    if b == -1 {
+        return signed(wrapping_sub(0, wrapping_u64(a)));
+    }
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            a / b
+        } with {
+            return v => v,
+            raise(e, k) => 0,
+        }
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+// Signed remainder with the dividend's sign, `x % -1 == 0`, `x % 0 == x`.
+fn srem(a: i64, b: i64) -> i64 {
+    if b == 0 {
+        return a;
+    }
+    if b == -1 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            a % b
+        } with {
+            return v => v,
+            raise(e, k) => 0,
+        }
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+fn low32(x: u64) -> u64 {
+    x & 4294967295
+}
+
+fn s32(x: u64) -> i64 {
+    widen_i64(wrapping_i32(x))
+}
+
+fn from_s32(x: i64) -> u64 {
+    widen_u64(wrapping_u32(x))
+}
+
+// Concrete eBPF ALU semantics, including the kernel's div/mod-by-zero rules.
+pub fn alu_concrete(op: AluOp, wide: bool, a: u64, b: u64) -> u64 {
+    if !wide {
+        let x = low32(a);
+        let y = low32(b);
+        return match op {
+            AluOp::Add => low32(wrapping_add(x, y)),
+            AluOp::Sub => low32(wrapping_sub(x, y)),
+            AluOp::Mul => low32(wrapping_mul(x, y)),
+            AluOp::Div => udiv(x, y),
+            AluOp::SDiv => from_s32(sdiv(s32(x), s32(y))),
+            AluOp::Mod => urem(x, y),
+            AluOp::SMod => from_s32(srem(s32(x), s32(y))),
+            AluOp::Or => x | y,
+            AluOp::And => x & y,
+            AluOp::Xor => x ^ y,
+            AluOp::Lsh => low32(shl(x, y & 31)),
+            AluOp::Rsh => shr(x, y & 31),
+            AluOp::Arsh => low32(sar(wrapping_u64(s32(x)), y & 31)),
+            AluOp::Neg => low32(wrapping_sub(0, x)),
+            AluOp::Mov => y,
+            AluOp::MovSx(w) => low32(sext_const(y, widen_u64(w))),
+        };
+    }
+    match op {
+        AluOp::Add => wrapping_add(a, b),
+        AluOp::Sub => wrapping_sub(a, b),
+        AluOp::Mul => wrapping_mul(a, b),
+        AluOp::Div => udiv(a, b),
+        AluOp::SDiv => wrapping_u64(sdiv(signed(a), signed(b))),
+        AluOp::Mod => urem(a, b),
+        AluOp::SMod => wrapping_u64(srem(signed(a), signed(b))),
+        AluOp::Or => a | b,
+        AluOp::And => a & b,
+        AluOp::Xor => a ^ b,
+        AluOp::Lsh => shl(a, b & 63),
+        AluOp::Rsh => shr(a, b & 63),
+        AluOp::Arsh => sar(a, b & 63),
+        AluOp::Neg => wrapping_sub(0, a),
+        AluOp::Mov => b,
+        AluOp::MovSx(w) => sext_const(b, widen_u64(w)),
+    }
+}
+
+// Concrete conditional-jump semantics.
+pub fn cmp_concrete(op: JmpOp, wide: bool, a0: u64, b0: u64) -> bool {
+    let a = if wide {
+        a0
+    } else {
+        low32(a0)
+    };
+    let b = if wide {
+        b0
+    } else {
+        low32(b0)
+    };
+    let sa = if wide {
+        signed(a)
+    } else {
+        s32(a)
+    };
+    let sb = if wide {
+        signed(b)
+    } else {
+        s32(b)
+    };
+    match op {
+        JmpOp::Eq => a == b,
+        JmpOp::Ne => a != b,
+        JmpOp::Gt => a > b,
+        JmpOp::Ge => a >= b,
+        JmpOp::Lt => a < b,
+        JmpOp::Le => a <= b,
+        JmpOp::Set => a & b != 0,
+        JmpOp::SGt => sa > sb,
+        JmpOp::SGe => sa >= sb,
+        JmpOp::SLt => sa < sb,
+        JmpOp::SLe => sa <= sb,
+    }
+}
+
+fn swap16(v: u64) -> u64 {
+    ((v & 255) << 8) | ((v >> 8) & 255)
+}
+
+fn swap32(v: u64) -> u64 {
+    (swap16(v & 65535) << 16) | swap16((v >> 16) & 65535)
+}
+
+fn swap64(v: u64) -> u64 {
+    (swap32(v & 4294967295) << 32) | swap32((v >> 32) & 4294967295)
+}
+
+// Concrete `BPF_END` semantics on a little-endian target.
+pub fn endian(kind: Endian, width: u8, v: u64) -> u64 {
+    match kind {
+        Endian::ToLe => if width == 16 {
+            v & 65535
+        } else if width == 32 {
+            v & 4294967295
+        } else {
+            v
+        },
+        _ => if width == 16 {
+            swap16(v)
+        } else if width == 32 {
+            swap32(v)
+        } else {
+            swap64(v)
+        },
+    }
+}

@@ -226,3 +226,4 @@ part 3 || exit 0
 . crates/vesper-simpulse/port/check.sh  # port P1 lane 5 (#902): vesper-simpulse, both builds and the divergence check
 . crates/vesper-crucible/port/check.sh  # port P1 lane 18 (#915): vesper-crucible, both builds and the divergence checks
 sh crates/vesper-serde/port/check.sh  # port P1 lane 19 (#916): vesper-serde, both builds and one divergence check per ported module
+. crates/vesper-ebpf/port/check.sh  # port P3a lane 6 (#1041): vesper-ebpf, both builds and one divergence check per ported module

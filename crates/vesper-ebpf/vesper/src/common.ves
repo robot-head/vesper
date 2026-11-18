@@ -1,0 +1,112 @@
+// Module common of @vesper/ebpf (see lib.ves): word helpers shared by the
+// modules. Signed values are handled as two's-complement `u64` words where
+// Rust uses `checked_*` on `i64`.
+
+pub fn umax() -> u64 {
+    18446744073709551615
+}
+
+pub fn smin_i64() -> i64 {
+    wrapping_i64(9223372036854775808)
+}
+
+pub fn smax_i64() -> i64 {
+    9223372036854775807
+}
+
+pub fn min_u64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+pub fn max_u64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+pub fn min_i64(a: i64, b: i64) -> i64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+pub fn max_i64(a: i64, b: i64) -> i64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// The bit pattern of `x`.
+pub fn bits(x: i64) -> u64 {
+    wrapping_u64(x)
+}
+
+pub fn signed(x: u64) -> i64 {
+    wrapping_i64(x)
+}
+
+// `a + b` on `i64`, or None on overflow (Rust `i64::checked_add`).
+pub fn checked_add_i64(a: i64, b: i64) -> Option[i64] {
+    let r = signed(wrapping_add(bits(a), bits(b)));
+    if (a < 0) == (b < 0) && (r < 0) != (a < 0) {
+        Option::None
+    } else {
+        Option::Some(r)
+    }
+}
+
+// `a - b` on `i64`, or None on overflow (Rust `i64::checked_sub`).
+pub fn checked_sub_i64(a: i64, b: i64) -> Option[i64] {
+    let r = signed(wrapping_sub(bits(a), bits(b)));
+    if (a < 0) != (b < 0) && (r < 0) != (a < 0) {
+        Option::None
+    } else {
+        Option::Some(r)
+    }
+}
+
+// Arithmetic right shift of `x` by `s` in `0..64`.
+pub fn sar(x: u64, s: u64) -> u64 {
+    wrapping_u64(wrapping_shr_i64(wrapping_i64(x), wrapping_u32(s)))
+}
+
+// Logical shifts by `s`, zero for `s >= 64`.
+pub fn shl(x: u64, s: u64) -> u64 {
+    if s >= 64 {
+        0
+    } else {
+        wrapping_shl_u64(x, wrapping_u32(s))
+    }
+}
+
+pub fn shr(x: u64, s: u64) -> u64 {
+    if s >= 64 {
+        0
+    } else {
+        wrapping_shr_u64(x, wrapping_u32(s))
+    }
+}
+
+// Sign-extend the low `b` bits of `c` for `b` in {8, 16, 32}; other widths
+// return `c` (scalar::sext_const).
+pub fn sext_const(c: u64, b: u64) -> u64 {
+    if b == 8 {
+        wrapping_u64(widen_i64(wrapping_i8(c)))
+    } else if b == 16 {
+        wrapping_u64(widen_i64(wrapping_i16(c)))
+    } else if b == 32 {
+        wrapping_u64(widen_i64(wrapping_i32(c)))
+    } else {
+        c
+    }
+}

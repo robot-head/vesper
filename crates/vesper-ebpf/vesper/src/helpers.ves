@@ -1,0 +1,59 @@
+// Module helpers of @vesper/ebpf (see lib.ves): src/helpers.rs, which helper
+// ids each program type may call and the GPL-compatible licenses. The id
+// constants, the `SUPPORTED` name table and `KFUNCS` stay Rust data.
+use self::program::{
+    ProgramType
+};
+
+// Whether `prog_type` may call helper `id` (helpers::allowed).
+pub fn allowed(prog_type: ProgramType, id: i32) -> bool {
+    let common = id
+        == 1
+        || id
+        == 2
+        || id
+        == 3
+        || id
+        == 5
+        || id
+        == 7
+        || id
+        == 8
+        || id
+        == 12
+        || id
+        == 130
+        || id
+        == 131
+        || id
+        == 132
+        || id
+        == 133
+        || id
+        == 181;
+    if common {
+        return true;
+    }
+    match prog_type {
+        ProgramType::Xdp => id == 44 || id == 84 || id == 86,
+        ProgramType::SchedCls => id == 84 || id == 86,
+        ProgramType::Tracepoint => id == 14 || id == 15 || id == 16,
+        ProgramType::Kprobe => id == 14 || id == 15 || id == 16,
+    }
+}
+
+// `license_is_gpl_compatible` (helpers::gpl_compatible).
+pub fn gpl_compatible(in license: Str) -> bool {
+    license
+        == "GPL"
+        || license
+        == "GPL v2"
+        || license
+        == "GPL and additional rights"
+        || license
+        == "Dual BSD/GPL"
+        || license
+        == "Dual MIT/GPL"
+        || license
+        == "Dual MPL/GPL"
+}

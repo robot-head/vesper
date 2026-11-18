@@ -1,0 +1,164 @@
+// Module wire of @vesper/ebpf (see lib.ves): src/wire.rs, the §27.2 wire
+// structs. The six-byte MAC addresses cross as the low 48 bits of a word,
+// first byte most significant.
+use self::common::{
+    shl,
+    shr
+};
+
+pub copy enum WireError {
+    Short {
+        need: usize,
+        got: usize
+    }
+}
+
+pub copy struct EthIpv4TcpWire {
+    dst_mac: u64,
+    src_mac: u64,
+    ether_type: u16,
+    ver_ihl: u8,
+    tos: u8,
+    total_len: u16,
+    ident: u16,
+    frag_off: u16,
+    ttl: u8,
+    proto: u8,
+    ip_checksum: u16,
+    src_ipv4: u32,
+    dst_ipv4: u32,
+    src_port: u16,
+    dst_port: u16,
+    seq_num: u32,
+    ack_num: u32,
+    data_offset_flags: u16,
+    window_size: u16,
+    tcp_checksum: u16,
+    urgent_ptr: u16
+}
+
+pub copy struct SynDropAlertWire {
+    src_ipv4: u32,
+    dst_port: u16,
+    tcp_flags: u16,
+    observed_pps: u64
+}
+
+fn put_be(inout out: ChunkSeq[u8], v: u64, n: u64) {
+    let mut i = n;
+    loop {
+        if !(i > 0) {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        out.push(wrapping_u8(shr(v, wrapping_mul(i, 8))));
+    }
+}
+
+fn b(in s: Slice[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn be(in s: Slice[u8], at: u64, n: u64) -> u64 {
+    let mut v: u64 = 0;
+    for i in 0..n {
+        v = (v << 8) | b(in s, wrapping_add(at, i));
+    }
+    v
+}
+
+fn short(need: u64, got: u64) -> Never eff [Fail[WireError]] {
+    Fail::raise(
+        WireError::Short {
+            need: narrow_usize(need),
+            got: narrow_usize(got)
+        }
+    )
+}
+
+pub fn eth_encode(w: EthIpv4TcpWire) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_be(inout out, w.dst_mac, 6);
+    put_be(inout out, w.src_mac, 6);
+    put_be(inout out, widen_u64(w.ether_type), 2);
+    out.push(w.ver_ihl);
+    out.push(w.tos);
+    put_be(inout out, widen_u64(w.total_len), 2);
+    put_be(inout out, widen_u64(w.ident), 2);
+    put_be(inout out, widen_u64(w.frag_off), 2);
+    out.push(w.ttl);
+    out.push(w.proto);
+    put_be(inout out, widen_u64(w.ip_checksum), 2);
+    put_be(inout out, widen_u64(w.src_ipv4), 4);
+    put_be(inout out, widen_u64(w.dst_ipv4), 4);
+    put_be(inout out, widen_u64(w.src_port), 2);
+    put_be(inout out, widen_u64(w.dst_port), 2);
+    put_be(inout out, widen_u64(w.seq_num), 4);
+    put_be(inout out, widen_u64(w.ack_num), 4);
+    put_be(inout out, widen_u64(w.data_offset_flags), 2);
+    put_be(inout out, widen_u64(w.window_size), 2);
+    put_be(inout out, widen_u64(w.tcp_checksum), 2);
+    put_be(inout out, widen_u64(w.urgent_ptr), 2);
+    out
+}
+
+pub fn eth_decode(in s: Slice[u8]) -> EthIpv4TcpWire eff [Fail[WireError]] {
+    if s.len() < 54 {
+        short(54, s.len());
+    }
+    EthIpv4TcpWire {
+        dst_mac: be(in s, 0, 6),
+        src_mac: be(in s, 6, 6),
+        ether_type: wrapping_u16(be(in s, 12, 2)),
+        ver_ihl: wrapping_u8(b(in s, 14)),
+        tos: wrapping_u8(b(in s, 15)),
+        total_len: wrapping_u16(be(in s, 16, 2)),
+        ident: wrapping_u16(be(in s, 18, 2)),
+        frag_off: wrapping_u16(be(in s, 20, 2)),
+        ttl: wrapping_u8(b(in s, 22)),
+        proto: wrapping_u8(b(in s, 23)),
+        ip_checksum: wrapping_u16(be(in s, 24, 2)),
+        src_ipv4: wrapping_u32(be(in s, 26, 4)),
+        dst_ipv4: wrapping_u32(be(in s, 30, 4)),
+        src_port: wrapping_u16(be(in s, 34, 2)),
+        dst_port: wrapping_u16(be(in s, 36, 2)),
+        seq_num: wrapping_u32(be(in s, 38, 4)),
+        ack_num: wrapping_u32(be(in s, 42, 4)),
+        data_offset_flags: wrapping_u16(be(in s, 46, 2)),
+        window_size: wrapping_u16(be(in s, 48, 2)),
+        tcp_checksum: wrapping_u16(be(in s, 50, 2)),
+        urgent_ptr: wrapping_u16(be(in s, 52, 2))
+    }
+}
+
+pub fn alert_encode(w: SynDropAlertWire) -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    put_be(inout out, widen_u64(w.src_ipv4), 4);
+    put_be(inout out, widen_u64(w.dst_port), 2);
+    put_be(inout out, widen_u64(w.tcp_flags), 2);
+    let eight: u64 = 8;
+    for i in 0..eight {
+        out.push(wrapping_u8(shr(w.observed_pps, wrapping_mul(i, 8))));
+    }
+    out
+}
+
+pub fn alert_decode(in s: Slice[u8]) -> SynDropAlertWire eff [Fail[WireError]] {
+    if s.len() < 16 {
+        short(16, s.len());
+    }
+    let mut pps: u64 = 0;
+    let eight: u64 = 8;
+    for i in 0..eight {
+        pps = pps | shl(b(in s, wrapping_add(8, i)), wrapping_mul(i, 8));
+    }
+    SynDropAlertWire {
+        src_ipv4: wrapping_u32(be(in s, 0, 4)),
+        dst_port: wrapping_u16(be(in s, 4, 2)),
+        tcp_flags: wrapping_u16(be(in s, 6, 2)),
+        observed_pps: pps
+    }
+}

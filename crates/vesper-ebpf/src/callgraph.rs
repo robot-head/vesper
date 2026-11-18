@@ -60,6 +60,17 @@ impl std::error::Error for StackError {}
 /// Maximum, over every call path from `root`, of the sum of frame sizes.
 /// Rejects recursion, paths longer than `max_frames` and totals above
 /// `limit`.
+#[cfg(vesper_port)]
+pub fn check_stack(
+    g: &CallGraph,
+    root: FnId,
+    limit: u32,
+    max_frames: usize,
+) -> Result<u32, StackError> {
+    crate::port::check_stack(g, root, limit, max_frames)
+}
+
+#[cfg(not(vesper_port))]
 pub fn check_stack(
     g: &CallGraph,
     root: FnId,

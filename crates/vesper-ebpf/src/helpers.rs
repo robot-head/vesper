@@ -46,6 +46,12 @@ pub const SUPPORTED: &[(i32, &str)] = &[
 
 /// Whether `prog_type` may call helper `id` (the kernel's per-type
 /// `get_func_proto`, restricted to [`SUPPORTED`]).
+#[cfg(vesper_port)]
+pub fn allowed(prog_type: ProgramType, id: i32) -> bool {
+    crate::port::ffi::helpers_allowed(prog_type, id)
+}
+
+#[cfg(not(vesper_port))]
 pub fn allowed(prog_type: ProgramType, id: i32) -> bool {
     let common = matches!(
         id,
@@ -88,6 +94,12 @@ pub const KFUNCS: &[&str] = &[
 ];
 
 /// `license_is_gpl_compatible`.
+#[cfg(vesper_port)]
+pub fn gpl_compatible(license: &str) -> bool {
+    crate::port::ffi::helpers_gpl_compatible(license)
+}
+
+#[cfg(not(vesper_port))]
 pub fn gpl_compatible(license: &str) -> bool {
     matches!(
         license,

@@ -1,0 +1,205 @@
+// Module callgraph of @vesper/ebpf (see lib.ves): src/callgraph.rs, the
+// worst-case stack over a static call graph, by the same explicit-stack
+// depth-first search over paths.
+//
+// Inputs: `ids` and `frames` are the functions' ids and frame sizes in
+// declaration order, `calls` the edges as (caller, callee) word pairs and
+// `indirect` the functions with indirect call sites. The result is a word
+// list: [0, worst] on success, or [kind, word, path...] for the error
+// `kind` 1 Exceeded (word = bytes), 2 Recursion, 3 TooDeep, 4
+// UnknownFunction (word = id), 5 IndirectCall (word = id).
+
+fn w(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn f32w(in s: Slice[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn cw(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Frame size of `id`, or None when no function has that id.
+fn frame(in ids: Slice[u64], in frames: Slice[u32], id: u64) -> Option[u32] {
+    for i in 0..ids.len() {
+        if w(in ids, i) == id {
+            return Option::Some(f32w(in frames, i));
+        }
+    }
+    Option::None
+}
+
+fn error(kind: u64, word: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(kind);
+    out.push(word);
+    out
+}
+
+// Error `kind` carrying the path `pool[start .. start + len]`, plus `extra`
+// when `with_extra`.
+fn path_error(
+    kind: u64,
+    word: u64,
+    in pool: ChunkSeq[u64],
+    start: u64,
+    len: u64,
+    with_extra: bool,
+    extra: u64
+) -> ChunkSeq[u64] {
+    let mut out = error(kind, word);
+    for i in 0..len {
+        out.push(cw(in pool, wrapping_add(start, i)));
+    }
+    if with_extra {
+        out.push(extra);
+    }
+    out
+}
+
+pub fn check_stack(
+    in ids: Slice[u64],
+    in frames: Slice[u32],
+    in calls: Slice[u64],
+    in indirect: Slice[u64],
+    root: u64,
+    limit: u32,
+    max_frames: u64
+) -> ChunkSeq[u64] {
+    if indirect.len() > 0 {
+        return error(5, w(in indirect, 0));
+    }
+    let ncalls = calls.len() >> 1;
+    for e in 0..ncalls {
+        let a = w(in calls, wrapping_mul(e, 2));
+        let b = w(in calls, wrapping_add(wrapping_mul(e, 2), 1));
+        match frame(in ids, in frames, a) {
+            Option::Some(f) => (),
+            Option::None => {
+                return error(4, a);
+            },
+        }
+        match frame(in ids, in frames, b) {
+            Option::Some(f) => (),
+            Option::None => {
+                return error(4, b);
+            },
+        }
+    }
+    let root_frame = match frame(in ids, in frames, root) {
+        Option::Some(f) => f,
+        Option::None => {
+            return error(4, root);
+        },
+    };
+    // The work stack holds paths in `pool`: entry k is (start, len, bytes)
+    // in `stack`. Paths are copied as Rust clones them.
+    let mut pool: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut stack: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    pool.push(root);
+    stack.push(0);
+    stack.push(1);
+    stack.push(widen_u64(root_frame));
+    let mut worst: u64 = 0;
+    let lim = widen_u64(limit);
+    let mut callees: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    loop {
+        if !(stack.len() > 0) {
+            break;
+        }
+        let top = wrapping_sub(stack.len(), 3);
+        let start = cw(in stack, top);
+        let len = cw(in stack, wrapping_add(top, 1));
+        let bytes = cw(in stack, wrapping_add(top, 2));
+        stack.truncate(top);
+        if bytes > lim {
+            return path_error(1, bytes, in pool, start, len, false, 0);
+        }
+        if len > max_frames {
+            return path_error(3, 0, in pool, start, len, false, 0);
+        }
+        if bytes > worst {
+            worst = bytes;
+        }
+        let last = cw(in pool, wrapping_add(start, wrapping_sub(len, 1)));
+        // sorted, deduplicated callees of `last`
+        callees.truncate(0);
+        for e in 0..ncalls {
+            if w(in calls, wrapping_mul(e, 2)) == last {
+                let c = w(in calls, wrapping_add(wrapping_mul(e, 2), 1));
+                let mut at: u64 = 0;
+                let mut dup = false;
+                loop {
+                    if !(at < callees.len()) {
+                        break;
+                    }
+                    let v = cw(in callees, at);
+                    if v == c {
+                        dup = true;
+                        break;
+                    }
+                    if v > c {
+                        break;
+                    }
+                    at = wrapping_add(at, 1);
+                }
+                if !dup {
+                    callees.push(0);
+                    let mut j = wrapping_sub(callees.len(), 1);
+                    loop {
+                        if !(j > at) {
+                            break;
+                        }
+                        let prev = cw(in callees, wrapping_sub(j, 1));
+                        callees.try_set(j, prev);
+                        j = wrapping_sub(j, 1);
+                    }
+                    callees.try_set(at, c);
+                }
+            }
+        }
+        for k in 0..callees.len() {
+            let c = cw(in callees, k);
+            let mut seen = false;
+            for i in 0..len {
+                if cw(in pool, wrapping_add(start, i)) == c {
+                    seen = true;
+                }
+            }
+            if seen {
+                return path_error(2, 0, in pool, start, len, true, c);
+            }
+            let f = match frame(in ids, in frames, c) {
+                Option::Some(x) => widen_u64(x),
+                Option::None => {
+                    return error(4, c);
+                },
+            };
+            let mut b = wrapping_add(bytes, f);
+            if b > 4294967295 {
+                b = 4294967295;
+            }
+            let nstart = pool.len();
+            for i in 0..len {
+                let v = cw(in pool, wrapping_add(start, i));
+                pool.push(v);
+            }
+            pool.push(c);
+            stack.push(nstart);
+            stack.push(wrapping_add(len, 1));
+            stack.push(b);
+        }
+    }
+    error(0, worst)
+}

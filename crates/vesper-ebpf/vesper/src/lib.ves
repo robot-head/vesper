@@ -1,0 +1,374 @@
+// @vesper/ebpf: Vesper port of vesper-ebpf (port wave P3a lane 6, #1041).
+// Part 1: the instruction codec (src/insn.rs), the wire structs
+// (src/wire.rs), the tnum and interval domain (src/scalar.rs) with the
+// verifier's domain functions, the concrete ALU semantics of
+// src/interp.rs, the helper tables (src/helpers.rs), the map and program
+// kinds of src/program.rs and the stack bound (src/callgraph.rs). The Rust
+// files are the model; the Rust wrappers (src/port.rs) convert registers,
+// error fields and MAC arrays.
+//
+// Every export is named `<module>_<rust fn>`.
+use self::insn::{
+    AluOp,
+    DecodeError,
+    Encoded,
+    Endian,
+    Insn,
+    JmpOp,
+    RawInsn,
+    decode,
+    decode_all,
+    encode,
+    slots_from_bytes,
+    slots_to_bytes
+};
+use self::scalar::{
+    Scalar,
+    Tnum,
+    refine_jmp,
+    scalar_add,
+    scalar_alu,
+    scalar_and,
+    scalar_arsh,
+    scalar_contains,
+    scalar_hull,
+    scalar_includes,
+    scalar_lsh,
+    scalar_meet,
+    scalar_mul,
+    scalar_normalize,
+    scalar_or,
+    scalar_rsh,
+    scalar_sext,
+    scalar_srange,
+    scalar_sub,
+    scalar_truncate,
+    scalar_unknown_bits,
+    scalar_urange,
+    scalar_xor,
+    scalar_zext32,
+    sext_imm,
+    tnum_add,
+    tnum_and,
+    tnum_arsh,
+    tnum_contains,
+    tnum_includes,
+    tnum_intersect,
+    tnum_lsh,
+    tnum_or,
+    tnum_range,
+    tnum_rsh,
+    tnum_sub,
+    tnum_truncate,
+    tnum_xor
+};
+use self::common::{
+    sext_const
+};
+use self::concrete::{
+    alu_concrete,
+    cmp_concrete,
+    endian
+};
+use self::helpers::{
+    allowed,
+    gpl_compatible
+};
+use self::program::{
+    MapKind,
+    ProgramType,
+    map_from_kernel_type,
+    map_is_array,
+    map_kernel_type,
+    map_validate,
+    prog_from_kernel_type,
+    prog_has_packet,
+    prog_is_tracing,
+    prog_kernel_type
+};
+use self::callgraph::{
+    check_stack
+};
+use self::wire::{
+    EthIpv4TcpWire,
+    SynDropAlertWire,
+    WireError,
+    alert_decode,
+    alert_encode,
+    eth_decode,
+    eth_encode
+};
+
+// insn.rs
+
+pub fn insn_decode(pc: usize, len: usize, lo: RawInsn, hi: RawInsn)
+    -> Insn eff [Fail[DecodeError]] {
+    decode(pc, len, lo, hi)
+}
+
+pub fn insn_decode_all(in slots: Slice[RawInsn]) -> ChunkSeq[Insn] eff [Fail[DecodeError]] {
+    decode_all(in slots)
+}
+
+pub fn insn_encode(i: Insn) -> Encoded {
+    encode(i)
+}
+
+pub fn insn_slots_to_bytes(in slots: Slice[RawInsn]) -> ChunkSeq[u8] {
+    slots_to_bytes(in slots)
+}
+
+pub fn insn_slots_from_bytes(in bytes: Slice[u8]) -> ChunkSeq[RawInsn] eff [Fail[DecodeError]] {
+    slots_from_bytes(in bytes)
+}
+
+// scalar.rs: Tnum
+
+pub fn tnum_range_of(min: u64, max: u64) -> Tnum {
+    tnum_range(min, max)
+}
+
+pub fn tnum_contains_value(t: Tnum, v: u64) -> bool {
+    tnum_contains(t, v)
+}
+
+pub fn tnum_includes_tnum(t: Tnum, other: Tnum) -> bool {
+    tnum_includes(t, other)
+}
+
+pub fn tnum_add_of(a: Tnum, b: Tnum) -> Tnum {
+    tnum_add(a, b)
+}
+
+pub fn tnum_sub_of(a: Tnum, b: Tnum) -> Tnum {
+    tnum_sub(a, b)
+}
+
+pub fn tnum_and_of(a: Tnum, b: Tnum) -> Tnum {
+    tnum_and(a, b)
+}
+
+pub fn tnum_or_of(a: Tnum, b: Tnum) -> Tnum {
+    tnum_or(a, b)
+}
+
+pub fn tnum_xor_of(a: Tnum, b: Tnum) -> Tnum {
+    tnum_xor(a, b)
+}
+
+pub fn tnum_lsh_of(a: Tnum, s: u32) -> Tnum {
+    tnum_lsh(a, s)
+}
+
+pub fn tnum_rsh_of(a: Tnum, s: u32) -> Tnum {
+    tnum_rsh(a, s)
+}
+
+pub fn tnum_arsh_of(a: Tnum, s: u32) -> Tnum {
+    tnum_arsh(a, s)
+}
+
+pub fn tnum_intersect_of(a: Tnum, b: Tnum) -> Option[Tnum] {
+    tnum_intersect(a, b)
+}
+
+pub fn tnum_truncate_of(a: Tnum, width: u32) -> Tnum {
+    tnum_truncate(a, width)
+}
+
+// scalar.rs: Scalar
+
+pub fn scalar_urange_of(min: u64, max: u64) -> Scalar {
+    scalar_urange(min, max)
+}
+
+pub fn scalar_srange_of(min: i64, max: i64) -> Scalar {
+    scalar_srange(min, max)
+}
+
+pub fn scalar_unknown_bits_of(width: u32) -> Scalar {
+    scalar_unknown_bits(width)
+}
+
+pub fn scalar_contains_value(s: Scalar, v: u64) -> bool {
+    scalar_contains(s, v)
+}
+
+pub fn scalar_includes_scalar(s: Scalar, other: Scalar) -> bool {
+    scalar_includes(s, other)
+}
+
+pub fn scalar_normalize_of(s: Scalar) -> Option[Scalar] {
+    scalar_normalize(s)
+}
+
+pub fn scalar_add_of(a: Scalar, b: Scalar) -> Scalar {
+    scalar_add(a, b)
+}
+
+pub fn scalar_sub_of(a: Scalar, b: Scalar) -> Scalar {
+    scalar_sub(a, b)
+}
+
+pub fn scalar_mul_of(a: Scalar, b: Scalar) -> Scalar {
+    scalar_mul(a, b)
+}
+
+pub fn scalar_and_of(a: Scalar, b: Scalar) -> Scalar {
+    scalar_and(a, b)
+}
+
+pub fn scalar_or_of(a: Scalar, b: Scalar) -> Scalar {
+    scalar_or(a, b)
+}
+
+pub fn scalar_xor_of(a: Scalar, b: Scalar) -> Scalar {
+    scalar_xor(a, b)
+}
+
+pub fn scalar_lsh_of(a: Scalar, s: u32) -> Scalar {
+    scalar_lsh(a, s)
+}
+
+pub fn scalar_rsh_of(a: Scalar, s: u32) -> Scalar {
+    scalar_rsh(a, s)
+}
+
+pub fn scalar_arsh_of(a: Scalar, s: u32) -> Scalar {
+    scalar_arsh(a, s)
+}
+
+pub fn scalar_zext32_of(a: Scalar) -> Scalar {
+    scalar_zext32(a)
+}
+
+pub fn scalar_truncate_of(a: Scalar, width: u32) -> Scalar {
+    scalar_truncate(a, width)
+}
+
+pub fn scalar_sext_of(a: Scalar, width: u32) -> Scalar {
+    scalar_sext(a, width)
+}
+
+pub fn scalar_hull_of(a: Scalar, b: Scalar) -> Scalar {
+    scalar_hull(a, b)
+}
+
+pub fn scalar_meet_of(a: Scalar, b: Scalar) -> Option[Scalar] {
+    scalar_meet(a, b)
+}
+
+pub fn scalar_sext_const(c: u64, width: u32) -> u64 {
+    sext_const(c, widen_u64(width))
+}
+
+// verifier.rs: the domain functions
+
+pub fn verifier_scalar_alu(op: AluOp, wide: bool, a: Scalar, b: Scalar) -> Scalar {
+    scalar_alu(op, wide, a, b)
+}
+
+pub fn verifier_refine_jmp(op: JmpOp, wide: bool, a: Scalar, b: Scalar, holds: bool)
+    -> Option[(Scalar, Scalar)] {
+    refine_jmp(op, wide, a, b, holds)
+}
+
+pub fn verifier_sext_imm(imm: i32, width: u32) -> u64 {
+    sext_imm(imm, width)
+}
+
+// interp.rs: concrete semantics
+
+pub fn interp_alu_concrete(op: AluOp, wide: bool, a: u64, b: u64) -> u64 {
+    alu_concrete(op, wide, a, b)
+}
+
+pub fn interp_cmp_concrete(op: JmpOp, wide: bool, a: u64, b: u64) -> bool {
+    cmp_concrete(op, wide, a, b)
+}
+
+pub fn interp_endian(kind: Endian, width: u8, v: u64) -> u64 {
+    endian(kind, width, v)
+}
+
+// helpers.rs
+
+pub fn helpers_allowed(prog_type: ProgramType, id: i32) -> bool {
+    allowed(prog_type, id)
+}
+
+pub fn helpers_gpl_compatible(in license: Str) -> bool {
+    gpl_compatible(in license)
+}
+
+// program.rs
+
+pub fn program_map_kernel_type(k: MapKind) -> u32 {
+    map_kernel_type(k)
+}
+
+pub fn program_map_from_kernel_type(t: u32) -> Option[MapKind] {
+    map_from_kernel_type(t)
+}
+
+pub fn program_map_is_array(k: MapKind) -> bool {
+    map_is_array(k)
+}
+
+pub fn program_prog_kernel_type(p: ProgramType) -> u32 {
+    prog_kernel_type(p)
+}
+
+pub fn program_prog_from_kernel_type(t: u32) -> Option[ProgramType] {
+    prog_from_kernel_type(t)
+}
+
+pub fn program_has_packet(p: ProgramType) -> bool {
+    prog_has_packet(p)
+}
+
+pub fn program_is_tracing(p: ProgramType) -> bool {
+    prog_is_tracing(p)
+}
+
+pub fn program_map_validate(
+    in name: Str,
+    kind: MapKind,
+    key_size: u32,
+    value_size: u32,
+    max_entries: u32
+) -> u64 {
+    map_validate(in name, kind, key_size, value_size, max_entries)
+}
+
+// callgraph.rs
+
+pub fn callgraph_check_stack(
+    in ids: Slice[u64],
+    in frames: Slice[u32],
+    in calls: Slice[u64],
+    in indirect: Slice[u64],
+    root: u64,
+    limit: u32,
+    max_frames: u64
+) -> ChunkSeq[u64] {
+    check_stack(in ids, in frames, in calls, in indirect, root, limit, max_frames)
+}
+
+// wire.rs
+
+pub fn wire_eth_encode(w: EthIpv4TcpWire) -> ChunkSeq[u8] {
+    eth_encode(w)
+}
+
+pub fn wire_eth_decode(in s: Slice[u8]) -> EthIpv4TcpWire eff [Fail[WireError]] {
+    eth_decode(in s)
+}
+
+pub fn wire_alert_encode(w: SynDropAlertWire) -> ChunkSeq[u8] {
+    alert_encode(w)
+}
+
+pub fn wire_alert_decode(in s: Slice[u8]) -> SynDropAlertWire eff [Fail[WireError]] {
+    alert_decode(in s)
+}

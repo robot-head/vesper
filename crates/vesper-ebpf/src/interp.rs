@@ -32,6 +32,12 @@ use std::sync::Arc;
 
 /// Concrete ALU semantics (RFC 9669 §4.1) on 64-bit register values; for
 /// 32-bit ops the operands are truncated and the result zero-extended.
+#[cfg(vesper_port)]
+pub fn alu_concrete(op: AluOp, wide: bool, a: u64, b: u64) -> u64 {
+    crate::port::ffi::interp_alu_concrete(op, wide, a, b)
+}
+
+#[cfg(not(vesper_port))]
 pub fn alu_concrete(op: AluOp, wide: bool, a: u64, b: u64) -> u64 {
     if !wide {
         let x = a as u32;
@@ -101,6 +107,12 @@ pub fn alu_concrete(op: AluOp, wide: bool, a: u64, b: u64) -> u64 {
 }
 
 /// Concrete conditional-jump semantics.
+#[cfg(vesper_port)]
+pub fn cmp_concrete(op: JmpOp, wide: bool, a: u64, b: u64) -> bool {
+    crate::port::ffi::interp_cmp_concrete(op, wide, a, b)
+}
+
+#[cfg(not(vesper_port))]
 pub fn cmp_concrete(op: JmpOp, wide: bool, a: u64, b: u64) -> bool {
     let (a, b) = if wide {
         (a, b)
@@ -128,6 +140,12 @@ pub fn cmp_concrete(op: JmpOp, wide: bool, a: u64, b: u64) -> bool {
 }
 
 /// Concrete `BPF_END` semantics on a little-endian target.
+#[cfg(vesper_port)]
+pub fn endian(kind: Endian, bits: u8, v: u64) -> u64 {
+    crate::port::ffi::interp_endian(kind, bits, v)
+}
+
+#[cfg(not(vesper_port))]
 pub fn endian(kind: Endian, bits: u8, v: u64) -> u64 {
     match (kind, bits) {
         (Endian::ToLe, 16) => v as u16 as u64,
