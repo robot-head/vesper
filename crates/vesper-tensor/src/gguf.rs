@@ -12,6 +12,7 @@
 //! truncation with typed errors, and never allocates more than the input can
 //! justify. Tensor bytes are not copied: [`Gguf::matrix`] borrows them from
 //! the mapping.
+#[cfg(not(vesper_port))]
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -190,10 +191,12 @@ pub struct Gguf {
     tensors: Vec<TensorInfo>,
 }
 
+#[cfg_attr(vesper_port, allow(dead_code))]
 struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
 }
+#[cfg_attr(vesper_port, allow(dead_code))]
 impl<'a> Reader<'a> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
         let end = self.at.checked_add(n).ok_or(Error::Overflow)?;
@@ -273,6 +276,7 @@ impl Gguf {
     pub fn from_vec(bytes: Vec<u8>) -> Result<Self, Error> {
         Self::parse(Mapping::from_vec(bytes))
     }
+    #[cfg(not(vesper_port))]
     pub fn parse(mapping: Arc<Mapping>) -> Result<Self, Error> {
         let bytes = mapping.bytes();
         let mut r = Reader { bytes, at: 0 };
@@ -382,6 +386,54 @@ impl Gguf {
             tensors,
         })
     }
+    /// The port-backed reader: `vesper/src/store.ves` checks the header and
+    /// writes it as a tape, which this turns into metadata and tensor infos.
+    /// The tape and the name table grow when the port asks for more room.
+    #[cfg(vesper_port)]
+    pub fn parse(mapping: Arc<Mapping>) -> Result<Self, Error> {
+        let bytes = mapping.bytes();
+        // Start the name table at the header's key and tensor counts, which
+        // each take at least 8 bytes of input, and the tape at a size most
+        // headers fit; either grows when the port asks.
+        let count = |at: usize| {
+            bytes
+                .get(at..at + 8)
+                .map_or(0, |b| u64::from_le_bytes(b.try_into().expect("8 bytes")))
+        };
+        // The counts are not checked yet, so the first sizes are also
+        // capped (a corrupt count must fail with the reader's error, not a
+        // huge allocation); a larger header makes the port ask for more.
+        const FIRST_ENTRIES: u64 = 1 << 12;
+        let entries = |at: usize| count(at).min(bytes.len() as u64 / 8).min(FIRST_ENTRIES) as usize;
+        let mut slots = (2 * (entries(8) + entries(16)) + 2).next_power_of_two();
+        // 6 words per metadata entry, 10 per tensor of rank 4, and 2 more
+        // of scratch per tensor.
+        let mut words = 4 + 6 * entries(16) + 12 * entries(8);
+        let tape = loop {
+            let mut tape = vec![0u64; words];
+            let mut names = vec![0u64; 2 * slots];
+            let mut status = [0u64; 3];
+            let r = crate::port::binding::parse_gguf(
+                bytes,
+                b"general.alignment",
+                &mut tape,
+                &mut names,
+                &mut status,
+            );
+            if r.is_err() && status[0] == 30 {
+                words *= 2;
+                continue;
+            }
+            if r.is_err() && status[0] == 31 {
+                slots *= 2;
+                continue;
+            }
+            let n = crate::port::check(r, |_| port_failure(status))?;
+            tape.truncate(n as usize);
+            break tape;
+        };
+        Ok(from_tape(mapping.clone(), &tape))
+    }
     pub fn version(&self) -> u32 {
         self.version
     }
@@ -438,6 +490,131 @@ impl Gguf {
             1.0,
         )?
         .to_f32()
+    }
+}
+
+/// The [`Error`] for a failure code of `vesper/src/store.ves`.
+#[cfg(vesper_port)]
+fn port_failure(status: [u64; 3]) -> Error {
+    let [code, a, b] = status;
+    match code {
+        2 => Error::Malformed("not a GGUF file"),
+        3 => Error::Unsupported(format!("GGUF version {a}")),
+        4 => Error::Limit("GGUF tensors"),
+        5 => Error::Limit("GGUF metadata entries"),
+        6 => Error::Limit("GGUF string length"),
+        7 => Error::Malformed("GGUF string is not UTF-8"),
+        8 => Error::Malformed("GGUF bool"),
+        9 => Error::Unsupported("nested GGUF arrays".into()),
+        10 => Error::Limit("GGUF array length"),
+        11 => Error::Malformed("truncated GGUF array"),
+        12 => Error::Malformed("unknown GGUF metadata type"),
+        13 => Error::Malformed("duplicate GGUF metadata key"),
+        14 => Error::Malformed("general.alignment"),
+        15 => Error::Malformed("GGUF tensor rank"),
+        16 => Error::Malformed("GGUF zero dimension"),
+        17 => Error::Malformed("duplicate GGUF tensor name"),
+        18 => Error::Unsupported(format!("GGML tensor type {a}")),
+        19 => Error::QuantBlockAlignment {
+            cols: a as usize,
+            block: b as usize,
+        },
+        20 => Error::Malformed("misaligned GGUF tensor"),
+        21 => Error::Malformed("GGUF tensor data outside the file"),
+        22 => Error::Malformed("overlapping GGUF tensors"),
+        _ => Error::Malformed("truncated GGUF"),
+    }
+}
+
+/// Builds the [`Gguf`] a checked tape describes (see `store.ves`).
+#[cfg(vesper_port)]
+fn from_tape(mapping: Arc<Mapping>, tape: &[u64]) -> Gguf {
+    let bytes = mapping.bytes();
+    let string = |at: usize| {
+        let len = (tape[at] >> 8) as usize;
+        let start = tape[at + 1] as usize;
+        String::from_utf8(bytes[start..start + len].to_vec()).expect("the port checked UTF-8")
+    };
+    let scalar = |ty: u64, v: u64| match ty {
+        0 => Value::U8(v as u8),
+        1 => Value::I8(v as u8 as i8),
+        2 => Value::U16(v as u16),
+        3 => Value::I16(v as u16 as i16),
+        4 => Value::U32(v as u32),
+        5 => Value::I32(v as u32 as i32),
+        6 => Value::F32(f32::from_bits(v as u32)),
+        7 => Value::Bool(v == 1),
+        10 => Value::U64(v),
+        11 => Value::I64(v as i64),
+        _ => Value::F64(f64::from_bits(v)),
+    };
+    let version = tape[0] as u32;
+    let alignment = tape[1] as usize;
+    let (kv_count, tensor_count) = (tape[2] as usize, tape[3] as usize);
+    let mut at = 4;
+    // Array elements, which the port checked in place: strings are a
+    // little-endian `u64` length and the bytes, scalars their width.
+    let element = |ty: u64, at: &mut usize| {
+        if ty == 8 {
+            let len = u64::from_le_bytes(bytes[*at..*at + 8].try_into().expect("8 bytes")) as usize;
+            let s = String::from_utf8(bytes[*at + 8..*at + 8 + len].to_vec())
+                .expect("the port checked UTF-8");
+            *at += 8 + len;
+            return Value::String(s);
+        }
+        let width = match ty {
+            0 | 1 | 7 => 1,
+            2 | 3 => 2,
+            4..=6 => 4,
+            _ => 8,
+        };
+        let mut word = [0u8; 8];
+        word[..width].copy_from_slice(&bytes[*at..*at + width]);
+        *at += width;
+        scalar(ty, u64::from_le_bytes(word))
+    };
+    let mut metadata = Vec::with_capacity(kv_count);
+    for _ in 0..kv_count {
+        let key = string(at);
+        at += 2;
+        let (tag, payload) = (tape[at], tape[at + 1]);
+        let value = match tag & 255 {
+            9 => {
+                let mut from = tape[at + 2] as usize;
+                at += 2;
+                Value::Array((0..payload).map(|_| element(tag >> 8, &mut from)).collect())
+            }
+            8 => Value::String(string(at)),
+            ty => scalar(ty, payload),
+        };
+        at += 2;
+        metadata.push((key, value));
+    }
+    let mut tensors = Vec::with_capacity(tensor_count);
+    for _ in 0..tensor_count {
+        let name = string(at);
+        let rank = tape[at + 2] as usize;
+        let ty = GgmlType(tape[at + 3] as u32);
+        let dims = tape[at + 4..at + 4 + rank]
+            .iter()
+            .map(|&d| d as usize)
+            .collect();
+        at += 4 + rank;
+        tensors.push(TensorInfo {
+            name,
+            dims,
+            ty,
+            offset: tape[at] as usize,
+            len: tape[at + 1] as usize,
+        });
+        at += 2;
+    }
+    Gguf {
+        mapping,
+        version,
+        alignment,
+        metadata,
+        tensors,
     }
 }
 

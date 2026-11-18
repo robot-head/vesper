@@ -1,5 +1,13 @@
 # Source interfaces and release-version policy
 
+> **Frozen (port wave P1 lane 15, [#912](https://github.com/robot-head/vesper/issues/912)).**
+> The Rust code takes bug fixes only. This package is the port-backed build:
+> `compare`, `Projection::is_subset_of` and `check_release` run the Vesper port
+> in `vesper/` (`@vesper/semver`). The compiler links the Rust seed copy
+> `seed/` (package `vesper-semver-seed`), which stays the default for every
+> dependent until the port reaches performance parity. See
+> [the lane report](../../docs/parallel-results/port-p1-semver.md).
+
 `compare(old, new)` conservatively classifies the supported source-interface fragment as patch, minor, major or unknown. Its compatibility result remains independent of package version numbers. See [package workflows](../../docs/package-workflows.md) for the interface fragment and its limits.
 
 Resolved interface DTOs can also represent an inclusive constant `i64` range as

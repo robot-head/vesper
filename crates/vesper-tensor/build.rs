@@ -43,6 +43,23 @@ const DIVERGENT: &[(&str, &str)] = &[
         "            last = i;\n            break;",
         "            last = if i > 0 { i - 1 } else { 0 };\n            break;",
     ),
+    // tokenizer.rs (vesper/src/tokens.ves): byte-fallback pieces are looked
+    // up as lowercase `<0xab>`; tokenizer_sampling
+    // encoder_matches_run_c_and_round_trips fails.
+    ("        55 + d\n", "        87 + d\n"),
+    // gguf.rs (vesper/src/store.ves): the default alignment is 16; abba
+    // both_builds_read_the_same_gguf_files fails.
+    (
+        "    let mut alignment: u64 = 32;",
+        "    let mut alignment: u64 = 16;",
+    ),
+    // json.rs (vesper/src/text.ves): a leading zero is accepted before two
+    // more digits only; abba both_builds_read_the_same_safetensors_headers
+    // fails.
+    (
+        "if at - start > 1 && b[start] == 48 {",
+        "if at - start > 2 && b[start] == 48 {",
+    ),
     // ops.rs (vesper/src/lib.ves): softmax divides by twice the sum;
     // inference_ops silu_swiglu_softmax_argmax fails.
     (

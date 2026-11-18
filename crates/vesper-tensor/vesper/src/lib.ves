@@ -12,7 +12,9 @@
 // binary16/BF16 (src/quant.rs, src/host.rs), Q4_K, MXFP4 and FP8
 // (src/formats.rs), Q8_0/Q4_0 and the row decoder of `Matrix`
 // (src/quant.rs), `run.c` sampling (src/sampling.rs) and the decoder kernels
-// softmax, argmax, RMSNorm, SwiGLU and residual add (src/ops.rs).
+// softmax, argmax, RMSNorm, SwiGLU and residual add (src/ops.rs), and the
+// llama2.c BPE prompt encoder (src/tokenizer.rs), the GGUF reader
+// (src/gguf.rs) and the safetensors header's JSON reader (src/json.rs).
 //
 // The export ABI has no f32, so an f32 crosses the boundary as its bit
 // pattern: a `u32` scalar, and `Slice[u32]` for `&[f32]`, which the Rust
@@ -53,6 +55,17 @@ use self::rows::{
     quantize_q4_0 as b_quantize_q4_0,
     quantize_q8_0 as b_quantize_q8_0
 };
+use self::store::{
+    parse_gguf as g_parse_gguf
+};
+use self::text::{
+    parse_json as j_parse_json
+};
+use self::tokens::{
+    build_table as t_build_table,
+    encode as t_encode,
+    lookup as t_lookup
+};
 use self::sampling::{
     add_assign as s_add_assign,
     argmax as s_argmax,
@@ -68,7 +81,10 @@ use self::sampling::{
 pub copy enum Fault {
     Shape,
     NonFinite,
-    Limit
+    Limit,
+    NoSpacePiece,
+    NoBytePiece,
+    Format
 }
 
 // binary16 / BF16 (src/quant.rs `encode_fp16`, `encode_bf16`,
@@ -249,6 +265,71 @@ pub fn decode_piece(format: u8, scale: u32, in raw: Slice[u8], inout out: Slice[
 pub fn finite_payload(format: u8, in raw: Slice[u8])
     -> bool eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     b_finite_payload(format, in raw)
+}
+
+// The GGUF reader (src/gguf.rs); see store.ves for the tape.
+pub fn parse_gguf(
+    in bytes: Slice[u8],
+    in alignment_key: Slice[u8],
+    inout tape: Slice[u64],
+    inout names: Slice[u64],
+    inout status: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+    g_parse_gguf(in bytes, in alignment_key, inout tape, inout names, inout status)
+}
+
+// The safetensors header reader (src/json.rs); see text.ves for the tape.
+pub fn parse_json(
+    in bytes: Slice[u8],
+    inout tape: Slice[u64],
+    inout keys: Slice[u64],
+    inout strs: Slice[u8],
+    inout levels: Slice[u64]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    j_parse_json(in bytes, inout tape, inout keys, inout strs, inout levels)
+}
+
+// Prompt encoding (src/tokenizer.rs); see tokens.ves for the layout.
+pub fn vocab_table(in bytes: Slice[u8], in offsets: Slice[u64], inout table: Slice[u32]) eff [
+    Fail[ArithOverflow],
+    Fail[RuntimeError]
+] {
+    t_build_table(in bytes, in offsets, inout table);
+}
+
+pub fn vocab_lookup(
+    in bytes: Slice[u8],
+    in offsets: Slice[u64],
+    in table: Slice[u32],
+    in piece: Slice[u8]
+) -> u32 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    t_lookup(in bytes, in offsets, in table, in piece, 0, piece.len())
+}
+
+pub fn encode_prompt(
+    in text: Slice[u8],
+    in bytes: Slice[u8],
+    in offsets: Slice[u64],
+    in scores: Slice[u32],
+    in table: Slice[u32],
+    bos: u32,
+    eos: u32,
+    inout out: Slice[u32],
+    inout work: Slice[u64],
+    inout key: Slice[u8]
+) -> u64 eff [Fail[ArithOverflow], Fail[RuntimeError], Fail[Fault]] {
+    t_encode(
+        in text,
+        in bytes,
+        in offsets,
+        in scores,
+        in table,
+        bos,
+        eos,
+        inout out,
+        inout work,
+        inout key
+    )
 }
 
 // Sampling (src/sampling.rs).

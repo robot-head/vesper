@@ -1,6 +1,6 @@
 # SimPulse deterministic kernel
 
-> **Frozen for the Vesper port** (port wave P1 lane 5, [#902](https://github.com/robot-head/vesper/issues/902)) since 2026-11-18: the Rust kernel takes bug fixes only. The package `vesper-simpulse` runs the Vesper port in `vesper/`; the compiler and every other dependent link the Rust seed copy `vesper-simpulse-seed` (`seed/`). See `docs/parallel-results/port-p1-simpulse.md`.
+> **Frozen for the Vesper port** (port wave P1 lane 5, [#902](https://github.com/robot-head/vesper/issues/902)) since 2026-11-18: the Rust kernel takes bug fixes only. The package `vesper-simpulse` runs the Vesper port in `vesper/`; the compiler and the crates it links use the Rust seed copy `vesper-simpulse-seed` (`seed/`). `vesper-chorus` and `vesper-flux` use the port. See `docs/parallel-results/port-p1-simpulse.md`.
 
 This crate supplies the first execution-model-independent part of [manuscript §14.6](../../docs/manuscript/README.md): seeded task selection, a virtual clock, completion ownership, cancellation requests, and versioned event replay. It executes no Vesper instructions or host system calls.
 

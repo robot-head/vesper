@@ -12,6 +12,23 @@ The native lanes run only host-specific coverage:
   executables built and run on Apple silicon.
 - Windows runs its direct-fiber and IOCP suites, Pulse's host-driver and pool
   tests against IOCP, and COFF executables linked with MSVC and run on Windows.
+- Both run the export ABI tier of `scripts/test-port-harness.sh`
+  (`VESPER_PORT_HARNESS_SCOPE=abi`): the port pilot's export ABI v2 kit and
+  v3 gauge against their Rust builds, their divergence and leak checks,
+  `vesper-port-build` package linking, and the port closure guard. These
+  link Vesper-compiled Mach-O or COFF objects into Rust, so they depend on the
+  host's object format and calling convention.
+
+The rest of the port harness, every ported crate's tests against both builds
+and its divergence checks, is platform-neutral once the ABI tier passes. It
+runs once, in the `Vesper ports (Linux)` job of the same workflow, on
+`ubuntu-latest` (#1010). Before that, macOS and Windows each ran the whole
+harness, which took 27 and 39 minutes of 34 and 50 minute jobs on main
+(November 2026). Some divergence assertions exist only in this Cargo run (the
+Bazel targets of those crates build the divergent objects but do not run
+them), so the Linux job is not a duplicate of BuildBuddy. `Platform
+validation complete` requires it. A new port appends its lines after the ABI
+tier, so it runs on Linux only.
 
 The native executable cases are shared with `scripts/test-native-host.sh`;
 `scripts/ci/test-native-executables.sh` runs them with the Cargo-built compiler.

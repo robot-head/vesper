@@ -1,0 +1,71 @@
+# The frozen Rust seed copy of vesper-crucible (package vesper-crucible-seed,
+# library vesper_crucible) that the compiler and every other dependent link:
+# ../src built without the port, so cfg(vesper_port) is off. Written by hand
+# because its sources live in the parent package; see "Crates the compiler
+# links" in docs/maintenance/porting-a-crate.md.
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test")
+
+_DEPS = [
+    "//crates/vesper-alloc/seed",
+    "//crates/vesper-simpulse/seed",
+]
+
+rust_library(
+    name = "seed",
+    srcs = ["//crates/vesper-crucible:rust_srcs"],
+    crate_name = "vesper_crucible",
+    crate_root = "//crates/vesper-crucible:src/lib.rs",
+    edition = "2024",
+    rustc_env = {
+        "CARGO_PKG_NAME": "vesper-crucible-seed",
+        "CARGO_PKG_VERSION": "0.1.0",
+    },
+    version = "0.1.0",
+    visibility = ["//visibility:public"],
+    deps = _DEPS,
+)
+
+rust_test(
+    name = "seed_unit_test",
+    crate = ":seed",
+    edition = "2024",
+)
+
+# Every integration test but tests/lean_model.rs, which reads lean/ through a
+# regular-file copy of the runfiles; it runs against the seed in Cargo
+# (scripts/test-port-harness.sh) and against the port here.
+[
+    rust_test(
+        name = "seed_test_" + t,
+        srcs = [
+            "//crates/vesper-crucible:tests/%s.rs" % t,
+            "//crates/vesper-crucible:test_common",
+        ],
+        crate_root = "//crates/vesper-crucible:tests/%s.rs" % t,
+        edition = "2024",
+        rustc_env = {"CARGO_PKG_NAME": "vesper-crucible-seed"},
+        deps = [":seed"] + _DEPS,
+    )
+    for t in [
+        "api",
+        "arena",
+        "arena_alloc",
+        "dpor",
+        "dpor_rest",
+        "explore",
+        "fuzzing",
+        "parity",
+        "shrinking",
+    ]
+]
+
+rust_clippy_test(
+    name = "clippy",
+    targets = [":seed"],
+    tags = [
+        "clippy",
+        "lint",
+    ],
+)

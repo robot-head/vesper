@@ -5,10 +5,15 @@
 //! Prerelease versions are outside this policy. Build metadata never increases
 //! precedence. Acceptance permits a declared release bump; it does not assert
 //! source compatibility, package provenance, or permission to publish.
-use crate::{Classification, Interface, Report, compare};
+#[cfg(not(vesper_port))]
+use crate::compare;
+use crate::{Classification, Interface, Report};
+#[cfg(not(vesper_port))]
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, fmt};
+#[cfg(not(vesper_port))]
+use std::cmp::Ordering;
+use std::fmt;
 
 /// Version of the release-report schema and its conservative bump policy.
 pub const RELEASE_POLICY_VERSION: u32 = 1;
@@ -92,6 +97,7 @@ impl fmt::Display for ReleaseVersionError {
 }
 impl std::error::Error for ReleaseVersionError {}
 
+#[cfg(not(vesper_port))]
 fn version(text: &str, side: ReleaseVersionSide) -> Result<Version, ReleaseVersionError> {
     Version::parse(text).map_err(|error| ReleaseVersionError {
         side,
@@ -106,6 +112,19 @@ fn version(text: &str, side: ReleaseVersionSide) -> Result<Version, ReleaseVersi
 /// may pass a major bump while the retained comparison remains incompatible and
 /// still lists required call adapters. Higher-than-required bumps are allowed.
 /// Pre-1.0 versions receive no automatic breaking-change exception under policy 1.
+///
+/// The port-backed package forwards to the Vesper port (`vesper/src/version.ves`).
+#[cfg(vesper_port)]
+pub fn check_release(
+    old: &Interface,
+    new: &Interface,
+    old_version: &str,
+    new_version: &str,
+) -> Result<ReleaseReport, ReleaseVersionError> {
+    crate::port::check_release(old, new, old_version, new_version)
+}
+
+#[cfg(not(vesper_port))]
 pub fn check_release(
     old: &Interface,
     new: &Interface,

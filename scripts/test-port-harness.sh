@@ -1,9 +1,15 @@
 #!/bin/sh
 # Port harness (port wave P0 lane 6, #878; build modes and the seed-copy rule
-# from port wave P1 lane 2, #899) under Cargo, for the macOS and Windows
-# checks; Linux runs the same checks as Bazel targets (BUILD.bazel of each
-# crate below). Every port is compiled by one prebuilt `vesper` executable,
-# VESPER_PORT_COMPILER (CI builds it first; this script builds it when unset).
+# from port wave P1 lane 2, #899) under Cargo. Every port is compiled by one
+# prebuilt `vesper` executable, VESPER_PORT_COMPILER (CI builds it first;
+# this script builds it when unset).
+#
+# Where it runs (#1010, docs/ci-platforms.md): the Linux job of the
+# Platforms workflow runs all of it. macOS and Windows set
+# VESPER_PORT_HARNESS_SCOPE=abi and stop after the export ABI tier below,
+# the part that depends on the host's object format and calling convention.
+# Bazel on Linux also builds every port and runs most of the same tests
+# (BUILD.bazel of each crate).
 #
 # - The pilot's API tests must pass against its Rust build and its Vesper
 #   build, and fail against a deliberately divergent Vesper build.
@@ -15,7 +21,8 @@
 #   closure guard (vesper-port-harness tests/closure_guard.rs) checks that no
 #   port-backed package is in the compiler's dependency closure.
 #
-# Ports append their own lines at the end.
+# Ports append their own lines at the end (after the ABI tier, so they run
+# on Linux only).
 set -eu
 cd "$(dirname "$0")/.."
 if [ -z "${VESPER_PORT_COMPILER:-}" ]; then
@@ -80,6 +87,12 @@ echo "divergent kit detected (one failure per form, and the leak)"
 cargo test --locked -p vesper-port-build
 divergent "package port" root_package_modules_are_linked dependency_modules_are_linked \
     -p vesper-port-build --features divergent --test package
+# End of the export ABI tier: the ports below are platform-neutral Rust
+# tests over objects the ABI checks above already cover.
+if [ "${VESPER_PORT_HARNESS_SCOPE:-all}" = abi ]; then
+    echo "export ABI tier done (VESPER_PORT_HARNESS_SCOPE=abi); ports run on Linux"
+    exit 0
+fi
 cargo test --locked -p vesper-beacon -p vesper-beacon-seed
 cargo test --locked -p vesper-beacon-arrow --test beacon_build
 # Port wave P1 lane 4 (#901): Beacon against its Vesper port, the Arrow
@@ -138,6 +151,8 @@ sh crates/vesper-ignis/port/check.sh  # port P1 lane 12 (#909): vesper-ignis, bo
 # crates/vesper-quarry/build.rs).
 cargo test --locked -p vesper-quarry --features vesper-port --test sql --test planner_spec --test vector --test vector_join --test port_memory
 for t in "sql outer_join_null_extension_and_filter_placement" "sql outer_join_pushdown_differential_for_many_predicates_and_null_inputs" "sql sql_null_three_valued_logic_exhaustive" "sql ddl_atomic_deterministic_and_stale_revision_or_content_rejected" "planner_spec front_end_transcript_matches_golden" "planner_spec planner_chooses_the_golden_access_paths"; do set -- $t; divergent "Quarry port ($2)" "$2" "$([ "$1" = sql ] && echo real_where_aliases_literals_and_typed_bindings || echo golden_results_equal_filtered_index_lookups)" -p vesper-quarry --features vesper-port-divergent --test "$1"; done
+# Port wave P1 lane 15 (#912): vesper-semver, both builds and the divergence check.
+sh crates/vesper-semver/port/test-port.sh
 # Port wave P1 lane 8 (#905): vesper-tensor and its Rust seed copy, and the
 # divergence check (one failing test per ported module).
 sh crates/vesper-tensor/port/test-port.sh
@@ -172,3 +187,4 @@ der der typed_set_of_sorts_complete_encodings_retains_duplicates_and_rejects_unt
 ipc ipc independent_arrow_values_and_versions hostile_schema_and_union_discriminants
 CHECKS
 . crates/vesper-simpulse/port/check.sh  # port P1 lane 5 (#902): vesper-simpulse, both builds and the divergence check
+. crates/vesper-crucible/port/check.sh  # port P1 lane 18 (#915): vesper-crucible, both builds and the divergence checks

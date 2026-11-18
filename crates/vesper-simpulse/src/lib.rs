@@ -14,8 +14,8 @@ use std::{
 const JOURNAL_VERSION: u32 = 1;
 static NEXT_SIMULATOR: AtomicU64 = AtomicU64::new(1);
 
-// The Rust build is the default (the seed package and every dependent use
-// it); the package `vesper-simpulse` is the port-backed build, whose build
+// The seed package builds the Rust code for the compiler's closure; the
+// package `vesper-simpulse` is the port-backed build, whose build
 // script links the Vesper port in vesper/ and sets cfg(vesper_port). See
 // "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
 #[cfg(not(vesper_port))]

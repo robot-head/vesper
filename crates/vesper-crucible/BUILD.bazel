@@ -1,8 +1,102 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
+
+# The port-backed package (seed-copy rule, docs/maintenance/porting-a-crate.md;
+# port wave P1 lane 18, #915): build.rs links the object built here from the
+# Loom package in vesper/ and checks port/binding.rs against the generated
+# binding. The compiler and every other dependent link the Rust seed copy,
+# //crates/vesper-crucible/seed, until the port reaches performance parity
+# (docs/parallel-results/port-p1-crucible.md).
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "crucible_vesper",
+    library = "crucible",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "crucible_vesper_binding",
+    srcs = [":crucible_vesper"],
+    output_group = "rust_binding",
+)
+
+# The divergent builds, one per ported area (the Cargo `vesper-port-divergent`
+# feature applies the same edits from build.rs, one at a time with
+# VESPER_CRUCIBLE_DIVERGENT): each must keep compiling, and
+# crates/vesper-crucible/port/check.sh asserts which parity test catches it.
+vesper_port_object(
+    name = "crucible_vesper_divergent_rng",
+    edit_src = "vesper/src/lib.ves",
+    edits = {"0x9e3779b97f4a7c15)": "0x9e3779b97f4a7c17)"},
+    library = "crucible",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "crucible_vesper_divergent_draws",
+    edit_src = "vesper/src/lib.ves",
+    edits = {"            value: min_u64(v, max)\n": "            value: v\n"},
+    library = "crucible",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "crucible_vesper_divergent_tape",
+    edit_src = "vesper/src/lib.ves",
+    edits = {"wrapping_u8(wrapping_add(d, 87))": "wrapping_u8(wrapping_add(d, 88))"},
+    library = "crucible",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "crucible_vesper_divergent_shrink",
+    edit_src = "vesper/src/lib.ves",
+    edits = {"    if outcome == 0 {\n": "    if outcome <= 1 {\n"},
+    library = "crucible",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
 
 vesper_crate(
+    build_script_data = [
+        ":crucible_vesper",
+        ":crucible_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :crucible_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :crucible_vesper_binding)",
+    },
     # Lean resolves symlinked runfiles to the source tree and then rejects
     # them as outside --root, so these run in a copy of regular files.
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
+)
+
+# The seed package (seed/) builds these same Rust sources without the port.
+exports_files(glob([
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "README.md",
+]))
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-crucible/seed:__pkg__"],
+)
+
+filegroup(
+    name = "test_common",
+    srcs = glob(["tests/common/**/*.rs"]),
+    visibility = ["//crates/vesper-crucible/seed:__pkg__"],
 )

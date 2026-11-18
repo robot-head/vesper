@@ -2,10 +2,33 @@
 name = "vesper-semver"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
+
+# This is the port-backed build: build.rs links the Vesper package in vesper/
+# and sets cfg(vesper_port). The compiler and every crate inside
+# `cargo tree -p vesper -e normal,build` use the frozen Rust seed copy,
+# crates/vesper-semver/seed (package vesper-semver-seed, same library name),
+# instead; see "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
+
+[features]
+# Build the port from an edited copy of the package (one divergence check per
+# ported module): the tests named in port/test-port.sh must then fail.
+vesper-port-divergent = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 semver = "1"
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
 serde_json = "1"
+# The frozen Rust seed copy, as the reference of tests/interface_differential.rs.
+semver-seed = { package = "vesper-semver-seed", path = "seed" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }
+
+[lints.rust]
+# cfg(vesper_port) is set by build.rs (the harness); the seed package has no
+# build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

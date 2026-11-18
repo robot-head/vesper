@@ -22,6 +22,7 @@
 //! Merging uses a priority queue with lazy invalidation, so the cost is
 //! `O(n log n)` lookups instead of `run.c`'s `O(n^2)`; the chosen merge at
 //! every step is the same.
+#![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, HashMap};
 
@@ -35,10 +36,99 @@ pub const MAX_PROMPT_BYTES: usize = 1 << 20;
 const NEVER_MERGE: f32 = -1e10;
 
 /// A vocabulary lookup table over a [`Tokenizer`].
+#[cfg(not(vesper_port))]
 #[derive(Debug)]
 pub struct Encoder<'t> {
     tokenizer: &'t Tokenizer,
     lookup: HashMap<&'t [u8], u32>,
+}
+
+/// A vocabulary lookup table over a [`Tokenizer`]: the vocabulary flattened
+/// for the Vesper port (`vesper/src/tokens.ves`), with its hash table.
+#[cfg(vesper_port)]
+#[derive(Debug)]
+pub struct Encoder<'t> {
+    tokenizer: &'t Tokenizer,
+    bytes: Vec<u8>,
+    offsets: Vec<u64>,
+    scores: Vec<u32>,
+    table: Vec<u32>,
+    key: usize,
+}
+
+#[cfg(vesper_port)]
+impl<'t> Encoder<'t> {
+    pub fn new(tokenizer: &'t Tokenizer) -> Self {
+        let vocab = tokenizer.vocab();
+        let mut bytes = Vec::new();
+        let mut offsets = Vec::with_capacity(vocab + 1);
+        let mut scores = Vec::with_capacity(vocab);
+        let mut longest = 0;
+        offsets.push(0);
+        for id in 0..vocab as u32 {
+            let piece = tokenizer.piece(id).expect("id below vocab");
+            bytes.extend_from_slice(piece);
+            offsets.push(bytes.len() as u64);
+            scores.push(tokenizer.score(id).expect("id below vocab").to_bits());
+            longest = longest.max(piece.len());
+        }
+        let mut table = vec![0; (2 * vocab).next_power_of_two().max(2)];
+        crate::port::must(crate::port::binding::vocab_table(
+            &bytes, &offsets, &mut table,
+        ));
+        Self {
+            tokenizer,
+            bytes,
+            offsets,
+            scores,
+            table,
+            key: (2 * longest).max(6),
+        }
+    }
+    /// The id of a vocabulary piece (lowest id on duplicates).
+    pub fn id(&self, piece: &[u8]) -> Option<u32> {
+        let e = crate::port::must(crate::port::binding::vocab_lookup(
+            &self.bytes,
+            &self.offsets,
+            &self.table,
+            piece,
+        ));
+        e.checked_sub(1)
+    }
+    /// Encodes `text` (see the module documentation).
+    pub fn encode(&self, text: &[u8], bos: bool, eos: bool) -> Result<Vec<u32>, Error> {
+        if text.len() > MAX_PROMPT_BYTES {
+            return Err(Error::Limit("prompt bytes"));
+        }
+        let mut out = vec![0; text.len() + 3];
+        let mut work = vec![0; 15 * (text.len() + 1) + 4];
+        let mut key = vec![0; self.key];
+        let n = crate::port::check(
+            crate::port::binding::encode_prompt(
+                text,
+                &self.bytes,
+                &self.offsets,
+                &self.scores,
+                &self.table,
+                bos as u32,
+                eos as u32,
+                &mut out,
+                &mut work,
+                &mut key,
+            ),
+            |fault| match fault {
+                crate::port::Fault::NoSpacePiece => {
+                    Error::Malformed("vocabulary lacks the \" \" piece")
+                }
+                crate::port::Fault::NoBytePiece => {
+                    Error::Malformed("vocabulary lacks a byte-fallback piece")
+                }
+                _ => Error::Limit("prompt bytes"),
+            },
+        )?;
+        out.truncate(n as usize);
+        Ok(out)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -64,6 +154,7 @@ struct Node {
     alive: bool,
 }
 
+#[cfg(not(vesper_port))]
 impl<'t> Encoder<'t> {
     pub fn new(tokenizer: &'t Tokenizer) -> Self {
         let mut lookup = HashMap::with_capacity(tokenizer.vocab());

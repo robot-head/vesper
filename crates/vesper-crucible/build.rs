@@ -1,0 +1,43 @@
+//! Link the Vesper port in vesper/ and set cfg(vesper_port); see "Crates
+//! the compiler links" in docs/maintenance/porting-a-crate.md. The seed
+//! package (seed/) has no build script, so it builds the Rust code.
+fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+    let port = vesper_port_harness::Port::new("crucible", "vesper").binding("port/binding.rs");
+    #[cfg(feature = "vesper-port-divergent")]
+    let port = {
+        // One edit at a time (an index into EDITS), so each check shows that
+        // its own edit is caught; unset applies every edit.
+        println!("cargo:rerun-if-env-changed=VESPER_CRUCIBLE_DIVERGENT");
+        let only = std::env::var("VESPER_CRUCIBLE_DIVERGENT").ok().map(|i| {
+            i.parse::<usize>()
+                .expect("VESPER_CRUCIBLE_DIVERGENT is an index")
+        });
+        EDITS
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| only.is_none_or(|only| only == *i))
+            .fold(port, |port, (_, (from, to))| port.edit(from, to))
+    };
+    port.build();
+}
+
+/// The divergence checks, one per ported area (mirrored in BUILD.bazel and
+/// asserted by scripts/test-port-harness.sh, crates/vesper-crucible/port/check.sh).
+#[cfg(feature = "vesper-port-divergent")]
+const EDITS: &[(&str, &str)] = &[
+    // rng.rs: a different SplitMix64 increment.
+    ("0x9e3779b97f4a7c15)", "0x9e3779b97f4a7c17)"),
+    // source.rs draws: replayed values are no longer clamped to the bound.
+    (
+        "            value: min_u64(v, max)\n",
+        "            value: v\n",
+    ),
+    // tape.rs text: hex digits a-f are written one letter off.
+    (
+        "wrapping_u8(wrapping_add(d, 87))",
+        "wrapping_u8(wrapping_add(d, 88))",
+    ),
+    // shrink.rs: invalid runs are accepted as reproducing failures.
+    ("    if outcome == 0 {\n", "    if outcome <= 1 {\n"),
+];

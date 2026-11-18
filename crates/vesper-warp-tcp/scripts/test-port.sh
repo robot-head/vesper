@@ -1,6 +1,6 @@
 #!/bin/sh
-# The vesper-warp-tcp port checks for Cargo (macOS and Windows CI run this
-# from scripts/test-port-harness.sh; Linux runs the Bazel targets in
+# The vesper-warp-tcp port checks for Cargo (the Linux Platforms job runs this
+# from scripts/test-port-harness.sh; BuildBuddy runs the Bazel targets in
 # crates/vesper-warp-tcp/BUILD.bazel). Every test must pass against the
 # Vesper build, and a build with one wrong line per ported module (see
 # DIVERGENT_EDITS in build.rs) must fail the tests that cover each module

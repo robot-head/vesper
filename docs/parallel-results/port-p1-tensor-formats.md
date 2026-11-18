@@ -50,8 +50,8 @@ ported yet, so both run unchanged in both packages.
 
 ## What was ported
 
-The Loom package `@vesper/tensor` (`crates/vesper-tensor/vesper`, 1,509
-lines, 36 exported functions):
+The Loom package `@vesper/tensor` (`crates/vesper-tensor/vesper`, 3,070
+lines, 41 exported functions; part 1 had 1,509 lines and 36 exports):
 
 | File | Rust source | Contents |
 |---|---|---|
@@ -105,6 +105,27 @@ Decisions:
   `sample_top_p` keeps its `&mut Vec<(f32, u32)>` parameter and borrows a
   word buffer per call.
 
+### Part 2: prompt encoding and the model file readers
+
+| File | Rust source | Contents |
+|---|---|---|
+| `tokens.ves` | `tokenizer.rs` | the llama2.c BPE encoder: UTF-8 units, byte fallback, and the merge heap with lazy invalidation, keyed by (score in `total_cmp` order, leftmost first) as in the Rust build; a 64-bit FNV-1a open-addressing table over the flattened vocabulary replaces the `HashMap` (lowest id on duplicates) |
+| `text.ves` | `json.rs` | the strict safetensors-header JSON reader: grammar, escapes, surrogate pairs, UTF-8 validation (`String::from_utf8` rules), integer limits, nesting and duplicate keys (a hash table per document, keyed by object) |
+| `store.ves` | `gguf.rs` | the GGUF v2/v3 reader: every count, length, string, bool, array, duplicate key and tensor name, `general.alignment`, tensor geometry, alignment, bounds and overlap check |
+
+The readers do not build Rust values. Each checks the whole input and
+writes a tape of words, and the Rust wrapper turns the tape into the same
+`Value`, `TensorInfo` and metadata types (`json::from_tape`,
+`gguf::from_tape`). GGUF arrays are checked in place and decoded by the
+wrapper from the file bytes, so the tape stays a few words per entry. The
+tape and the hash tables are sized from the input and grow when the port
+asks (a status code), and loading the stories260K model still allocates less
+than the Rust build (58,881 bytes against 66,672 in
+`steady_state_alloc_batch`). Failures come back as a code and up to two
+details, which the wrapper maps to the Rust build's error and message.
+`safetensors.rs` itself stays Rust: past the JSON it only interprets the
+`Value` tree.
+
 ## What stays in Rust
 
 | File | Reason | Unblocked by |
@@ -113,7 +134,9 @@ Decisions:
 | `src/mmap.rs` | the one `memmap2::Mmap::map` call | a `.vsys` mapping surface (second part) |
 | `src/host.rs` | outside the lane's exclusive boundary; `host::decode_fp16` stays Rust, the port has its own copy | the lane that owns `host.rs` |
 | `ops::rope`, `ops::rope_half` | `powf`, `sin`, `cos` from the platform library; Vesper's `sin`/`cos` lack Payne-Hanek reduction (#893) and would change bits | a `.vsys` import like `Libm`, or Vesper transcendentals the Rust build adopts |
-| `tokenizer`, `gguf`, `safetensors`, `json`, `kv`, `shape`, `attention`, `llama` | not ported yet | the second part of this lane |
+| `kv`, `shape`, `attention`, `llama` | not ported yet | a third part of this lane |
+| `safetensors.rs` past the JSON reader | interprets the parsed `Value` tree only | nothing; it could move with the tree builder |
+| `Value` tree building in `json.rs`, `gguf.rs` | the export ABI cannot return a recursive Rust enum; the port returns a checked tape | richer export types |
 | `seed/` | the compiler's copy | self-hosting Stage 2 |
 
 The crate's `unsafe` count is unchanged in the Rust build. The port-backed
@@ -130,9 +153,21 @@ one `#[unsafe(no_mangle)]` shim function; the Vesper source has none.
 - New: `tests/build_kind.rs` (which build each package is) and
   `tests/abba.rs` (the benchmarks, and a non-ignored check that both builds
   produce the same bytes and values).
+- Part 2 adds three differential tests to `tests/abba.rs`: the same 4 KiB
+  prompt encoded by both builds; 4,000 safetensors headers (mutations of a
+  valid header plus random token soup, UTF-8 edge cases, the nesting limit
+  and a 5,000-tensor header that makes the port grow its tape) whose results
+  and errors must match; and about 6,000 GGUF files (the two fixtures, two
+  written files with every metadata type, every header truncation and 6,000
+  single-byte edits) whose results and errors must match, reaching at least
+  12 distinct errors. `tokenizer_sampling` already compared the encoder with
+  a literal `run.c` transliteration.
 
 All 100 tests pass against both packages (`cargo test -p vesper-tensor -p
-vesper-tensor-seed`, Linux x86_64).
+vesper-tensor-seed`, Linux x86_64). After part 2, the port-backed package passes
+94 tests (8 ignored benchmarks) and the seed 90 (it does not build
+`tests/abba.rs`), Linux x86_64; `port/test-port.sh` passes with the eight
+divergent edits.
 
 ## Divergence checks
 
@@ -148,6 +183,13 @@ to fail and an unchanged test of the same file to pass:
 | `quant.rs` (`rows.ves`) | Q4_0 rounds with 8.25 | `q8_0_and_q4_0_weights_equal_gguf_py` | same |
 | `sampling.rs` (`sampling.ves`) | the crossing token leaves the nucleus | `sampling_follows_the_distribution_and_the_nucleus` | `rng_matches_run_c_xorshift` |
 | `ops.rs` (`lib.ves`) | softmax divides by twice the sum | `silu_swiglu_softmax_argmax` | `rope_matches_f64_rotation_and_rejects_odd_widths` |
+| `tokenizer.rs` (`tokens.ves`) | byte-fallback pieces looked up as lowercase `<0xab>` | `encoder_matches_run_c_and_round_trips` | `rng_matches_run_c_xorshift` |
+| `json.rs` (`text.ves`) | a leading zero is accepted before two more digits | `both_builds_read_the_same_safetensors_headers` | `both_builds_encode_the_same_prompt` |
+| `gguf.rs` (`store.ves`) | the default alignment is 16 | `both_builds_read_the_same_gguf_files` | same |
+
+A first tokenizer edit (equal-score merges take the rightmost pair) passed
+every test: `tok512` never offers two mergeable pairs with the same score, so
+the tie rule has no test. The lowercase edit replaced it.
 
 Checked locally: the divergent build fails exactly these and passes the
 controls. Bazel (Linux) builds the port and runs every test against both
@@ -169,6 +211,15 @@ port compiled by the in-tree `vesper` at 69c79b9 (Cranelift, inliner on).
 | matvec Q8_0 64x4096, scalar kernel | 193.8 us | 1146.1 us | 5.85x | [5.50, 6.10] |
 | quantize Q4_K 16x4096 | 5493.5 us | 22665.7 us | 4.13x | [4.09, 4.23] |
 | sample, T 0.8, top-p 0.9, vocab 32,000 | 392.5 us | 1748.4 us | 4.67x | [4.46, 4.78] |
+| BPE encode, 16 KiB prompt, `tok512` (part 2) | 1177.3 us | 3236.0 us | 2.75x | [2.69, 2.77] |
+| safetensors header, 5,000 tensors (part 2) | 4738.0 us | 11683.5 us | 2.47x | [2.43, 2.51] |
+| GGUF header, stories260K (part 2) | 65.5 us | 106.6 us | 1.63x | [1.57, 1.66] |
+
+The part 2 rows were measured on the same machine with the compiler at
+153f264. The safetensors and GGUF rows time the whole `from_vec`, so the
+Rust work both builds share (copying the file, building the values, and for
+safetensors the tensor table) dilutes the ratio; the GGUF reader is the only
+port inside the 2x rule.
 
 Every workload is past the plan's 2x stop rule. Under the owner's parity rule
 the port stays non-default and the Rust code stays. Where the time goes, from
@@ -191,6 +242,14 @@ benchmark in this part.
    typed `u64_zero()`.
 4. `Fail::raise` in a row with several `Fail` types raises the last one, so
    `Fault` is last in every row.
+5. `w.set(i, w[j])` on an `inout` slice fails E0410 (the read overlaps the
+   active loan of `w`); the port reads into a local first. Rust allows the
+   same statement for `Copy` elements.
+6. Exported fault enums carry no payload, so a failure that needs details
+   (the GGUF version, a tensor type, a block alignment) writes them to an
+   `inout` status slice before raising.
+7. The export ABI has no recursive or owned result types, so the readers
+   return a tape of words that Rust turns into values.
 
 ## Platforms run
 
@@ -199,12 +258,13 @@ Locally: Linux x86_64 (both packages, the divergence check, clippy 1.100,
 
 ## Was the Rust code deleted?
 
-No. The port is 3.7x to 5.9x slower than the Rust build, and the compiler
+No. The port is 1.6x to 5.9x slower than the Rust build, and the compiler
 links the seed until Stage 2.
 
-## Not ported yet (second part of the lane)
+## Not ported yet (third part of the lane)
 
-`tokenizer.rs` (BPE encode, `tokenizer.json`), `gguf.rs`, `safetensors.rs`
-and `json.rs` over byte slices, `kv.rs`, `shape.rs`, the pure tensor parts of
-`attention.rs` and `llama.rs`, the memory map as a `.vsys` surface, and the
-BPE ABBA benchmark.
+`kv.rs` (the paged K/V pool's bookkeeping; the storage and the borrowed
+views stay Rust), `shape.rs` (the symbolic dimension algebra, which needs
+symbols interned), the pure tensor parts of `attention.rs` and `llama.rs`,
+and the memory map as a `.vsys` surface. The crate has no `tokenizer.json`
+reader, so part 1's list naming one was wrong.

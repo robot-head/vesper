@@ -1,5 +1,5 @@
 # The frozen Rust seed copy of vesper-simpulse (package vesper-simpulse-seed,
-# library vesper_simpulse) that the compiler and every other dependent link:
+# library vesper_simpulse) that the compiler and the crates it links use:
 # ../src built without the port, so cfg(vesper_port) is off. Written by hand
 # because its sources live in the parent package; see "Crates the compiler
 # links" in docs/maintenance/porting-a-crate.md.

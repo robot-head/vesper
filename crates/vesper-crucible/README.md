@@ -1,5 +1,7 @@
 # vesper-crucible
 
+> Frozen for port wave P1 lane 18 ([#915](https://github.com/robot-head/vesper/issues/915)): the Rust code takes bug fixes only. This package is the port-backed build (tape, RNG, draws and the shrinker run in `vesper/`); the compiler and every dependent link the Rust seed copy, `seed/` (`vesper-crucible-seed`). See `docs/parallel-results/port-p1-crucible.md`.
+
 Vesper Crucible ([manuscript §21](../../docs/manuscript/README.md), excluding §21.3 `vesper migrate`): choice-tape
 property testing, coverage-guided fuzzing with a comparison-operand solver,
 SimPulse schedule exploration, `refute`, and a termination-checked shrinker.

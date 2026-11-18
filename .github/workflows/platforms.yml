@@ -34,7 +34,7 @@ on:
         required: true
     outputs:
       checked_sha:
-        description: Exact tested SHA, only emitted after both platforms succeed
+        description: Exact tested SHA, only emitted after every platform job succeeds
         value: ${{ jobs.complete.outputs.checked_sha }}
       validation_profile:
         description: Successful validation profile
@@ -125,10 +125,13 @@ jobs:
         run: |
           cargo build --locked --bin vesper
           VESPER_NATIVE_BINARY=target/debug/vesper scripts/ci/test-native-executables.sh
-      - name: Test the Vesper port harness
-        # Every port compiles with the vesper binary built above.
+      - name: Test the Vesper port export ABI
+        # Only the host-sensitive tier of the port harness: the pilot's export
+        # ABI v2/v3 libraries and divergence checks, package linking and the
+        # closure guard. The ported crates run once, in the Linux job below.
         env:
           VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper
+          VESPER_PORT_HARNESS_SCOPE: abi
         run: scripts/test-port-harness.sh
 
   windows:
@@ -165,15 +168,48 @@ jobs:
         run: |
           cargo build --locked --bin vesper
           VESPER_NATIVE_BINARY=target/debug/vesper.exe VESPER_NATIVE_SUFFIX=.exe scripts/ci/test-native-executables.sh
+      - name: Test the Vesper port export ABI
+        # Only the host-sensitive tier of the port harness: the pilot's export
+        # ABI v2/v3 libraries and divergence checks, package linking and the
+        # closure guard. The ported crates run once, in the Linux job below.
+        env:
+          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper.exe
+          VESPER_PORT_HARNESS_SCOPE: abi
+        run: scripts/test-port-harness.sh
+
+  # The ported crates' tests and divergence checks are platform-neutral, so
+  # they run once, here (#1010). Bazel on BuildBuddy builds the same ports.
+  ports:
+    needs: plan
+    if: ${{ always() && !cancelled() }}
+    name: Vesper ports (Linux)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Require successful profile planning
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+        run: test "$PLAN_RESULT" = success
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Verify exact checkout
+        env:
+          EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the compiler
+        run: cargo build --locked --bin vesper
       - name: Test the Vesper port harness
         # Every port compiles with the vesper binary built above.
         env:
-          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper.exe
+          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper
         run: scripts/test-port-harness.sh
 
   complete:
     name: Platform validation complete
-    needs: [plan, platform, windows]
+    needs: [plan, platform, windows, ports]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-latest
     outputs:
@@ -185,11 +221,13 @@ jobs:
           PLAN_RESULT: ${{ needs.plan.result }}
           MAC_RESULT: ${{ needs.platform.result }}
           WINDOWS_RESULT: ${{ needs.windows.result }}
+          PORTS_RESULT: ${{ needs.ports.result }}
           CHECKED_SHA: ${{ needs.plan.outputs.sha }}
           PROFILE: ${{ needs.plan.outputs.profile }}
         run: |
           test "$PLAN_RESULT" = success
           test "$MAC_RESULT" = success
           test "$WINDOWS_RESULT" = success
+          test "$PORTS_RESULT" = success
           echo "checked_sha=$CHECKED_SHA" >> "$GITHUB_OUTPUT"
           echo "validation_profile=$PROFILE" >> "$GITHUB_OUTPUT"

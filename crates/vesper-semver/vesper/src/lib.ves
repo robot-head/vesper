@@ -1,0 +1,73 @@
+// @vesper/semver: Vesper port of vesper-semver (port wave P1 lane 15, #912):
+// the source-interface compatibility checker (src/lib.rs `compare` and
+// `Projection::is_subset_of`), release policy 1 (src/release.rs
+// `check_release`), and the subset of the `semver` crate that the policy
+// uses (module version).
+//
+// The Rust wrapper (src/port.rs) encodes both interfaces as one flat word
+// stream plus a text pool and rebuilds the crate's own types from the
+// results. The encodings are documented in src/port.rs and check.ves.
+
+use self::check::{
+    compare_q,
+    subset_words
+};
+use self::version::{
+    release_q
+};
+
+// A parsed version, or the first parse error (module version).
+pub copy struct Ver {
+    err: u64,
+    pos: u64,
+    // Offset of the unexpected character.
+    at: u64,
+    major: u64,
+    minor: u64,
+    patch: u64,
+    pre_off: u64,
+    pre_len: u64,
+    build_off: u64,
+    build_len: u64
+}
+
+// The result of `release`.
+pub struct R {
+    err: u64,
+    words: ChunkSeq[u64],
+    pool: ChunkSeq[u8]
+}
+
+// The result of `compare`: the classification (Patch 0, Minor 1, Major 2,
+// Unknown 3), the issues and adapters as words over `pool` ranges, and the
+// checker's scratch state.
+pub struct Q {
+    class: u64,
+    // Per issue: kind (Breaking 0, Unsupported 1), then the
+    // (offset, length) pool ranges of path, rule, message and witness.
+    issues: ChunkSeq[u64],
+    // Per required adapter: function path range and parameter index.
+    adapters: ChunkSeq[u64],
+    pool: ChunkSeq[u8],
+    // Scratch: capability identities seen by one validation.
+    seen: ChunkSeq[u64],
+    // Scratch: issue path nodes, and the issues (8 words) and adapters
+    // (path node, parameter) found so far, before their paths are text.
+    paths: ChunkSeq[u64],
+    found: ChunkSeq[u64],
+    adapts: ChunkSeq[u64]
+}
+
+// The exported API.
+
+pub fn compare(in w: Slice[u64], in t: Slice[u8]) -> Q {
+    compare_q(in w, in t)
+}
+
+pub fn is_subset_of(in w: Slice[u64], new: u64, old: u64) -> bool {
+    subset_words(in w, new, old)
+}
+
+pub fn release(in old: Slice[u8], in new: Slice[u8], classification: u64) -> R {
+    release_q(in old, in new, classification)
+}

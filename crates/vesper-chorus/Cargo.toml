@@ -6,7 +6,7 @@ description = "Vesper Chorus: choreographies, endpoint projection, linear sessio
 publish = false
 
 [dependencies]
-vesper-simpulse = { path = "../vesper-simpulse/seed", package = "vesper-simpulse-seed" }
+vesper-simpulse = { path = "../vesper-simpulse" }
 # Wave six lane 17 (issue #259): session channels over Warp QUIC streams on
 # the software NIC. Read-only use of the Warp crates.
 vesper-warp = { path = "../vesper-warp" }

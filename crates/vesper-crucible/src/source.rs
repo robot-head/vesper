@@ -406,11 +406,48 @@ impl Source {
     }
 
     fn raw(&mut self, kind: DrawKind, generation: Gen) -> Result<u64, Invalid> {
+        let value = self.next_value(kind.max(), generation)?;
+        self.realized.push(value);
+        self.kinds.push(kind);
+        Ok(value)
+    }
+
+    /// The Vesper build's draw decision (vesper/src/lib.ves `source_draw`).
+    #[cfg(vesper_port)]
+    fn next_value(&mut self, max: u64, generation: Gen) -> Result<u64, Invalid> {
+        let (random, mut rng) = match &self.extend {
+            Extend::Strict => (false, crate::binding::repr::Rng { word: 0 }),
+            Extend::Random(rng) => (true, crate::binding::repr::Rng { word: rng.0 }),
+        };
+        let (bernoulli, n) = match generation {
+            Gen::Uniform => (false, 0),
+            Gen::Bernoulli(n) => (true, n),
+        };
+        let draw = crate::binding::source_draw(
+            &mut rng,
+            &self.prefix,
+            self.realized.len() as u64,
+            self.max_draws as u64,
+            max,
+            random,
+            bernoulli,
+            n,
+        );
+        if let Extend::Random(state) = &mut self.extend {
+            state.0 = rng.word;
+        }
+        match draw.code {
+            0 => Ok(draw.value),
+            _ => Err(Invalid::Overrun),
+        }
+    }
+
+    #[cfg(not(vesper_port))]
+    fn next_value(&mut self, max: u64, generation: Gen) -> Result<u64, Invalid> {
         let pos = self.realized.len();
         if pos >= self.max_draws {
             return Err(Invalid::Overrun);
         }
-        let max = kind.max();
         let value = match self.prefix.get(pos) {
             Some(&v) => v.min(max),
             None => match &mut self.extend {
@@ -421,8 +458,6 @@ impl Source {
                 },
             },
         };
-        self.realized.push(value);
-        self.kinds.push(kind);
         Ok(value)
     }
 
