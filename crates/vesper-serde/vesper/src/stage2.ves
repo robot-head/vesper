@@ -1,0 +1,711 @@
+// @export abi 3
+//
+// @vesper/serde: stage 2 of the two-stage parser (src/stage2.rs). It walks
+// the stage 1 structural index (built by the Rust SIMD kernels, which stay
+// in Rust until source `VVec`, #587) with an explicit bounded stack and
+// builds the same token tape, work total and errors as the scalar parser,
+// mapping each error through that parser's work frontier.
+use self::{
+    Doc,
+    Error,
+    ErrorKind,
+    Kind,
+    Limits,
+    Token
+};
+use self::index::{
+    at,
+    check_duplicate,
+    doc_reserve,
+    escape_body,
+    hard_depth,
+    index_plan,
+    raise,
+    tok,
+    utf8_len
+};
+
+fn none() -> u64 {
+    18446744073709551615
+}
+
+// The builder's state (`Builder`). `control` and `truncated` are none()
+// when absent.
+copy struct B {
+    len: u64,
+    s_len: u64,
+    control: u64,
+    truncated: u64,
+    capacity: u64,
+    dup: u64,
+    string_bytes: u64,
+    esc: u64,
+    lim: Limits
+}
+
+fn s_at(in s: Slice[u32], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(p) => widen_u64(p),
+        Option::None => none(),
+    }
+}
+
+// The first byte whose step would exceed `max_work`.
+fn frontier(in b: B) -> u64 {
+    let room = wrapping_sub(b.lim.max_work, b.len);
+    if room > b.dup {
+        wrapping_sub(room, b.dup)
+    } else {
+        0
+    }
+}
+
+// Where the scalar parser reports running out of work at byte `p`: past
+// the escape whose body contains `p`, else `p`.
+fn work_offset(in t: Slice[u8], in escapes: Slice[u32], p: u64) -> u64 {
+    // k = the number of escapes before `p` (a partition point).
+    let mut lo: u64 = 0;
+    let mut hi = escapes.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if s_at(in escapes, mid) < p {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    let k = lo;
+    let mut back: u64 = 2;
+    loop {
+        if back == 0 {
+            break;
+        }
+        if k >= back {
+            let e = s_at(in escapes, wrapping_sub(k, back));
+            let d = escape_body(in t, wrapping_add(e, 1), 0, 0);
+            if d.err == 0 && d.pos > p {
+                return d.pos;
+            }
+        }
+        back = wrapping_sub(back, 1);
+    }
+    p
+}
+
+// Raise `kind` at `at` as the scalar parser reports it, having stepped
+// every byte before `stepped` when detecting it.
+fn fail(
+    in b: B,
+    in t: Slice[u8],
+    in escapes: Slice[u32],
+    kind: ErrorKind,
+    at_pos: u64,
+    stepped: u64
+) -> Unit eff [Fail[Error]] {
+    let f = frontier(in b);
+    if f < stepped {
+        raise(ErrorKind::WorkLimit, work_offset(in t, in escapes, f));
+    }
+    raise(kind, at_pos);
+}
+
+fn err(in b: B, in t: Slice[u8], in escapes: Slice[u32], kind: ErrorKind, at_pos: u64)
+    -> Unit eff [Fail[Error]] {
+    fail(in b, in t, in escapes, kind, at_pos, at_pos)
+}
+
+fn check_frontier(in b: B, in t: Slice[u8], in escapes: Slice[u32], stepped: u64)
+    -> Unit eff [Fail[Error]] {
+    let f = frontier(in b);
+    if f < stepped {
+        raise(ErrorKind::WorkLimit, work_offset(in t, in escapes, f));
+    }
+}
+
+// Position of structural `i`; past the index, the truncation point or the
+// end of input.
+fn pos(in b: B, in s: Slice[u32], i: u64) -> u64 {
+    if i < b.s_len {
+        s_at(in s, i)
+    } else if b.truncated != none() {
+        b.truncated
+    } else {
+        b.len
+    }
+}
+
+// Byte at structural `i`, including the first entry cut by truncation;
+// 256 when there is none.
+fn byte(in b: B, in t: Slice[u8], in s: Slice[u32], i: u64) -> u64 {
+    if i < b.s_len {
+        at(in t, s_at(in s, i))
+    } else if i == b.s_len && b.truncated != none() {
+        at(in t, b.truncated)
+    } else {
+        256
+    }
+}
+
+// Charge structural `i`'s index entry: it fails exactly at truncation.
+fn entry(in b: B, in t: Slice[u8], in escapes: Slice[u32], i: u64) -> Unit eff [Fail[Error]] {
+    if i >= b.s_len && b.truncated != none() {
+        err(in b, in t, in escapes, ErrorKind::AllocationLimit, b.truncated);
+    }
+}
+
+fn syntax(in b: B, in t: Slice[u8], in s: Slice[u32], in escapes: Slice[u32], i: u64)
+    -> Unit eff [Fail[Error]] {
+    err(in b, in t, in escapes, ErrorKind::Syntax, pos(in b, in s, i))
+}
+
+fn op(in b: B, in t: Slice[u8], in s: Slice[u32], in escapes: Slice[u32], i: u64, c: u64)
+    -> Unit eff [Fail[Error]] {
+    if byte(in b, in t, in s, i) != c {
+        syntax(in b, in t, in s, in escapes, i);
+    }
+    entry(in b, in t, in escapes, i);
+}
+
+fn push(
+    in b: B,
+    inout toks: ChunkSeq[Token],
+    in t: Slice[u8],
+    in escapes: Slice[u32],
+    kind: Kind,
+    depth: u64,
+    start: u64
+) -> u64 eff [Fail[Error]] {
+    let n = toks.len();
+    if n >= b.lim.max_tokens {
+        err(in b, in t, in escapes, ErrorKind::TokenLimit, start);
+    }
+    if n >= b.capacity {
+        err(in b, in t, in escapes, ErrorKind::AllocationLimit, start);
+    }
+    toks
+        .push(
+        Token {
+            start: start,
+            end: 0,
+            next: wrapping_add(n, 1),
+            kind: kind,
+            decoded_len: 0,
+            escaped: false,
+            depth: depth
+        }
+    );
+    n
+}
+
+fn set_end(inout toks: ChunkSeq[Token], index: u64, end: u64) {
+    let mut tk = tok(in toks, index);
+    tk.end = end;
+    toks.try_set(index, tk);
+}
+
+fn close_container(inout toks: ChunkSeq[Token], index: u64, end: u64) {
+    let mut tk = tok(in toks, index);
+    tk.end = end;
+    tk.next = toks.len();
+    toks.try_set(index, tk);
+}
+
+// After the closing quote at `close`: the total string budget, then the
+// token's fields. Returns the structural after the string.
+fn finish_string(
+    inout b: B,
+    inout toks: ChunkSeq[Token],
+    in t: Slice[u8],
+    in escapes: Slice[u32],
+    token: u64,
+    close: u64,
+    decoded: u64,
+    escaped: bool,
+    i: u64
+) -> u64 eff [Fail[Error]] {
+    let after = wrapping_add(close, 1);
+    b.string_bytes = wrapping_add(b.string_bytes, decoded);
+    if b.string_bytes > b.lim.max_total_string_bytes {
+        err(in b, in t, in escapes, ErrorKind::StringLimit, after);
+    }
+    let mut tk = tok(in toks, token);
+    tk.end = after;
+    tk.decoded_len = decoded;
+    tk.escaped = escaped;
+    toks.try_set(token, tk);
+    wrapping_add(i, 2)
+}
+
+// A string at structural `i` (`Builder::string`).
+fn string(
+    inout b: B,
+    inout toks: ChunkSeq[Token],
+    in t: Slice[u8],
+    in s: Slice[u32],
+    in escapes: Slice[u32],
+    i: u64,
+    depth: u64
+) -> u64 eff [Fail[Error]] {
+    let open = pos(in b, in s, i);
+    let token = push(in b, inout toks, in t, in escapes, Kind::String, depth, open);
+    entry(in b, in t, in escapes, i);
+    let i1 = wrapping_add(i, 1);
+    let closed = byte(in b, in t, in s, i1) == 34 && i1 < b.s_len;
+    let bound = if closed {
+        pos(in b, in s, i1)
+    } else if b.truncated != none() {
+        b.truncated
+    } else {
+        b.len
+    };
+    let max = b.lim.max_string_bytes;
+    let control = if b.control != none() && b.control > open && b.control < bound {
+        b.control
+    } else {
+        none()
+    };
+    let first_escape = s_at(in escapes, b.esc);
+    let no_escape = first_escape == none() || first_escape >= bound;
+    let plain = wrapping_sub(wrapping_sub(bound, open), 1);
+    if closed && control == none() && no_escape && plain <= max {
+        // Common case: a closed string of ordinary bytes within limits.
+        return finish_string(inout b, inout toks, in t, in escapes, token, bound, plain, false, i);
+    }
+    let mut decoded: u64 = 0;
+    let mut escaped = false;
+    let mut here = wrapping_add(open, 1);
+    loop {
+        let mut next_escape = none();
+        loop {
+            let e = s_at(in escapes, b.esc);
+            if e == none() {
+                break;
+            }
+            if e < here {
+                // The low half of a pair, already decoded.
+                b.esc = wrapping_add(b.esc, 1);
+            } else {
+                if e < bound {
+                    next_escape = e;
+                }
+                break;
+            }
+        }
+        let event = min_or(next_escape, control, bound);
+        // Ordinary bytes up to the event.
+        let run = wrapping_sub(event, here);
+        if wrapping_add(decoded, run) > max {
+            let limit = wrapping_add(wrapping_add(here, wrapping_sub(max, decoded)), 1);
+            err(in b, in t, in escapes, ErrorKind::StringLimit, limit);
+        }
+        decoded = wrapping_add(decoded, run);
+        if event == bound {
+            break;
+        }
+        if event == control {
+            err(in b, in t, in escapes, ErrorKind::Syntax, event);
+        }
+        // An escape: its entry is present (it is before any truncation).
+        b.esc = wrapping_add(b.esc, 1);
+        escaped = true;
+        let body = wrapping_add(event, 1);
+        let d = escape_body(in t, body, 2, b.truncated);
+        if d.err == 1 {
+            fail(in b, in t, in escapes, ErrorKind::Escape, d.at, body);
+        } else if d.err == 2 {
+            fail(in b, in t, in escapes, ErrorKind::AllocationLimit, d.at, body);
+        }
+        decoded = wrapping_add(decoded, utf8_len(d.code));
+        here = d.pos;
+        if decoded > max {
+            err(in b, in t, in escapes, ErrorKind::StringLimit, here);
+        }
+    }
+    if !closed {
+        if b.truncated != none() {
+            err(in b, in t, in escapes, ErrorKind::AllocationLimit, b.truncated);
+        }
+        err(in b, in t, in escapes, ErrorKind::Syntax, b.len);
+    }
+    finish_string(inout b, inout toks, in t, in escapes, token, bound, decoded, escaped, i)
+}
+
+// The smallest of two optional positions, or `otherwise` when both are none.
+fn min_or(a: u64, c: u64, otherwise: u64) -> u64 {
+    if a == none() && c == none() {
+        otherwise
+    } else if a < c {
+        a
+    } else {
+        c
+    }
+}
+
+fn is_digit(c: u64) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn digits_end(in t: Slice[u8], p0: u64, end: u64) -> u64 {
+    let mut p = p0;
+    loop {
+        if p >= end || !is_digit(at(in t, p)) {
+            break;
+        }
+        p = wrapping_add(p, 1);
+    }
+    p
+}
+
+// The JSON number grammar over `t[start..end]`: (length of the longest
+// valid prefix, or the offset of the byte that broke it; ok).
+fn number(in t: Slice[u8], start: u64, end: u64) -> (u64, bool) {
+    let mut p = start;
+    if p < end && at(in t, p) == 45 {
+        p = wrapping_add(p, 1);
+    }
+    let first = if p < end {
+        at(in t, p)
+    } else {
+        256
+    };
+    if first == 48 {
+        p = wrapping_add(p, 1);
+    } else if first >= 49 && first <= 57 {
+        p = digits_end(in t, wrapping_add(p, 1), end);
+    } else {
+        return (wrapping_sub(p, start), false);
+    }
+    if p < end && at(in t, p) == 46 {
+        p = wrapping_add(p, 1);
+        if p >= end || !is_digit(at(in t, p)) {
+            return (wrapping_sub(p, start), false);
+        }
+        p = digits_end(in t, p, end);
+    }
+    if p < end && (at(in t, p) == 101 || at(in t, p) == 69) {
+        p = wrapping_add(p, 1);
+        if p < end && (at(in t, p) == 43 || at(in t, p) == 45) {
+            p = wrapping_add(p, 1);
+        }
+        if p >= end || !is_digit(at(in t, p)) {
+            return (wrapping_sub(p, start), false);
+        }
+        p = digits_end(in t, p, end);
+    }
+    (wrapping_sub(p, start), true)
+}
+
+// The first offset in `0..lit_len` where `t[start..end]` differs from the
+// literal `which` (0 null, 1 true, 2 false), or `lit_len`.
+fn literal_mismatch(in t: Slice[u8], start: u64, end: u64, which: u64) -> u64 {
+    let n: u64 = if which == 2 {
+        5
+    } else {
+        4
+    };
+    for k in 0..n {
+        let want: u64 = if which == 0 {
+            if k == 0 {
+                110
+            } else if k == 1 {
+                117
+            } else {
+                108
+            }
+        } else if which == 1 {
+            if k == 0 {
+                116
+            } else if k == 1 {
+                114
+            } else if k == 2 {
+                117
+            } else {
+                101
+            }
+        } else {
+            if k == 0 {
+                102
+            } else if k == 1 {
+                97
+            } else if k == 2 {
+                108
+            } else if k == 3 {
+                115
+            } else {
+                101
+            }
+        };
+        let q = wrapping_add(start, k);
+        if q >= end || at(in t, q) != want {
+            return k;
+        }
+    }
+    n
+}
+
+fn scalar(
+    in b: B,
+    inout toks: ChunkSeq[Token],
+    in t: Slice[u8],
+    in s: Slice[u32],
+    in escapes: Slice[u32],
+    i: u64,
+    depth: u64
+) -> u64 eff [Fail[Error]] {
+    let start = pos(in b, in s, i);
+    let token = push(in b, inout toks, in t, in escapes, Kind::Null, depth, start);
+    entry(in b, in t, in escapes, i);
+    let mut end = pos(in b, in s, wrapping_add(i, 1));
+    loop {
+        if end <= start {
+            break;
+        }
+        let c = at(in t, wrapping_sub(end, 1));
+        if c == 32 || c == 9 || c == 10 || c == 13 {
+            end = wrapping_sub(end, 1);
+        } else {
+            break;
+        }
+    }
+    let first = at(in t, start);
+    let mut kind = Kind::Number;
+    let mut len: u64 = 0;
+    if first == 110 || first == 116 || first == 102 {
+        let which: u64 = if first == 110 {
+            0
+        } else if first == 116 {
+            1
+        } else {
+            2
+        };
+        kind = if which == 0 {
+            Kind::Null
+        } else {
+            Kind::Bool
+        };
+        let lit_len: u64 = if which == 2 {
+            5
+        } else {
+            4
+        };
+        let k = literal_mismatch(in t, start, end, which);
+        if k < lit_len {
+            err(in b, in t, in escapes, ErrorKind::Syntax, wrapping_add(start, k));
+        }
+        len = lit_len;
+    } else {
+        let (n, ok) = number(in t, start, end);
+        if !ok {
+            err(in b, in t, in escapes, ErrorKind::Number, wrapping_add(start, n));
+        }
+        len = n;
+    }
+    if len != wrapping_sub(end, start) {
+        err(in b, in t, in escapes, ErrorKind::Syntax, wrapping_add(start, len));
+    }
+    let mut tk = tok(in toks, token);
+    tk.kind = kind;
+    tk.end = end;
+    toks.try_set(token, tk);
+    wrapping_add(i, 1)
+}
+
+// `"key" :` at `i` inside object token `object`; returns the structural of
+// the member value.
+fn key(
+    inout b: B,
+    inout toks: ChunkSeq[Token],
+    in t: Slice[u8],
+    in s: Slice[u32],
+    in escapes: Slice[u32],
+    i: u64,
+    object: u64,
+    depth: u64
+) -> u64 eff [Fail[Error]] {
+    if byte(in b, in t, in s, i) != 34 {
+        syntax(in b, in t, in s, in escapes, i);
+    }
+    let key_index = toks.len();
+    let next = string(inout b, inout toks, in t, in s, in escapes, i, depth);
+    let here = wrapping_add(pos(in b, in s, wrapping_sub(next, 1)), 1);
+    check_frontier(in b, in t, in escapes, here);
+    let before = wrapping_add(wrapping_add(b.len, here), b.dup);
+    let mut work = before;
+    check_duplicate(
+        in toks,
+        in t,
+        wrapping_add(object, 1),
+        key_index,
+        inout work,
+        b.lim.max_work,
+        here
+    );
+    b.dup = wrapping_add(b.dup, wrapping_sub(work, before));
+    op(in b, in t, in s, in escapes, next, 58);
+    wrapping_add(next, 1)
+}
+
+// Frames of the explicit stack: token index * 2, plus 1 for an object.
+fn frame_at(in stack: ChunkSeq[u64], d: u64) -> u64 {
+    match stack.try_get(d) {
+        Option::Some(f) => f,
+        Option::None => 0,
+    }
+}
+
+fn document(
+    inout b: B,
+    inout toks: ChunkSeq[Token],
+    in t: Slice[u8],
+    in s: Slice[u32],
+    in escapes: Slice[u32]
+) -> Unit eff [Fail[Error]] {
+    let mut stack: ChunkSeq[u64] = ChunkSeq::with_capacity(16);
+    let mut depth: u64 = 0;
+    let mut i: u64 = 0;
+    // `i` is at a value. Each pass parses one value, then unwinds closed
+    // containers until it reaches the next value or the end.
+    loop {
+        let c = byte(in b, in t, in s, i);
+        let mut opened = false;
+        if c == 123 || c == 91 {
+            let object = c == 123;
+            if depth >= b.lim.max_depth || depth >= hard_depth() {
+                err(in b, in t, in escapes, ErrorKind::DepthLimit, pos(in b, in s, i));
+            }
+            let kind = if object {
+                Kind::Object
+            } else {
+                Kind::Array
+            };
+            let start = pos(in b, in s, i);
+            let token = push(in b, inout toks, in t, in escapes, kind, depth, start);
+            entry(in b, in t, in escapes, i);
+            i = wrapping_add(i, 1);
+            let close: u64 = if object {
+                125
+            } else {
+                93
+            };
+            if byte(in b, in t, in s, i) == close {
+                entry(in b, in t, in escapes, i);
+                set_end(inout toks, token, wrapping_add(pos(in b, in s, i), 1));
+                i = wrapping_add(i, 1);
+            } else {
+                let frame = wrapping_add(
+                    wrapping_mul(token, 2),
+                    if object {
+                        1
+                    } else {
+                        0
+                    }
+                );
+                if stack.len() > depth {
+                    stack.try_set(depth, frame);
+                } else {
+                    stack.push(frame);
+                }
+                depth = wrapping_add(depth, 1);
+                if object {
+                    i = key(inout b, inout toks, in t, in s, in escapes, i, token, depth);
+                }
+                opened = true;
+            }
+        } else if c == 34 {
+            i = string(inout b, inout toks, in t, in s, in escapes, i, depth);
+        } else if c == 110 || c == 116 || c == 102 || c == 45 || is_digit(c) {
+            i = scalar(in b, inout toks, in t, in s, in escapes, i, depth);
+        } else {
+            syntax(in b, in t, in s, in escapes, i);
+        }
+        if !opened {
+            // A value just ended at structural `i`; close finished containers.
+            loop {
+                if depth == 0 {
+                    if i == b.s_len && b.truncated == none() {
+                        return ();
+                    }
+                    syntax(in b, in t, in s, in escapes, i);
+                }
+                let frame = frame_at(in stack, wrapping_sub(depth, 1));
+                let object = frame & 1 == 1;
+                let token = frame >> 1;
+                let close: u64 = if object {
+                    125
+                } else {
+                    93
+                };
+                let c2 = byte(in b, in t, in s, i);
+                if c2 == 44 {
+                    entry(in b, in t, in escapes, i);
+                    i = wrapping_add(i, 1);
+                    if object {
+                        i = key(inout b, inout toks, in t, in s, in escapes, i, token, depth);
+                    }
+                    break;
+                } else if c2 == close {
+                    entry(in b, in t, in escapes, i);
+                    close_container(inout toks, token, wrapping_add(pos(in b, in s, i), 1));
+                    depth = wrapping_sub(depth, 1);
+                    i = wrapping_add(i, 1);
+                } else {
+                    syntax(in b, in t, in s, in escapes, i);
+                }
+            }
+        }
+    }
+}
+
+// Admission (`admit`): the stage 1 entries `max_index_bytes` leaves after
+// the tape.
+pub fn stage2_admit(len: u64, lim: Limits) -> u64 eff [Fail[Error]] {
+    if len > lim.max_input_bytes {
+        raise(ErrorKind::InputLimit, 0);
+    }
+    if len > lim.max_work {
+        raise(ErrorKind::WorkLimit, 0);
+    }
+    let (_, entries) = index_plan(len, lim);
+    entries
+}
+
+// `build`: the tape of `input` from its stage 1 index (structurals `s`,
+// escape starts `escapes`, the first string control byte, the truncation
+// position, each none() when absent, and whether a string was left open).
+pub fn stage2_build(
+    inout doc: Doc,
+    in input: Slice[u8],
+    in s: Slice[u32],
+    in escapes: Slice[u32],
+    control: u64,
+    truncated: u64,
+    unclosed: bool,
+    lim: Limits
+) -> Unit eff [Fail[Error]] {
+    let n = input.len();
+    let (capacity, _) = index_plan(n, lim);
+    doc_reserve(inout doc, capacity);
+    let mut b = B {
+        len: n,
+        s_len: s.len(),
+        control: control,
+        truncated: truncated,
+        capacity: capacity,
+        dup: 0,
+        string_bytes: 0,
+        esc: 0,
+        lim: lim
+    };
+    document(inout b, inout doc.tokens, in input, in s, in escapes);
+    // A complete parse consumes every byte exactly once.
+    check_frontier(in b, in input, in escapes, n);
+    if truncated != none() || unclosed || (control != none() && control < n) {
+        // Unreachable for a successful walk; kept as a typed backstop.
+        raise(ErrorKind::Syntax, n);
+    }
+    doc.work = wrapping_add(wrapping_mul(n, 2), b.dup);
+    doc.entries = wrapping_add(s.len(), escapes.len());
+}

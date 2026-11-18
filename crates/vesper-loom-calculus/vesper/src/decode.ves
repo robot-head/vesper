@@ -1,0 +1,410 @@
+// Module decode of @vesper/loom-calculus (see lib.ves): the input word
+// stream (documented in src/port.rs) into the tables of `L`.
+use self::{
+    Change,
+    Cmp,
+    Dep,
+    Diag,
+    Feat,
+    GNode,
+    L,
+    Man,
+    Req,
+    Root,
+    SEdge,
+    Snap,
+    Sys,
+    SysSel,
+    Ver
+};
+use self::util::{
+    add,
+    bytes_ord,
+    inc,
+    sort,
+    sw
+};
+
+pub fn new_l(in words: Slice[u64], in text: Slice[u8]) -> L {
+    let mut l = L {
+        inw: ChunkSeq::new[u64](),
+        pos: 0,
+        pool: ChunkSeq::new[u8](),
+        out: ChunkSeq::new[u64](),
+        k: 0,
+        rank: ChunkSeq::new[u64](),
+        roff: ChunkSeq::new[u64](),
+        rlen: ChunkSeq::new[u64](),
+        rocc: ChunkSeq::new[u64](),
+        vers: ChunkSeq::new[Ver](),
+        cmps: ChunkSeq::new[Cmp](),
+        reqs: ChunkSeq::new[Req](),
+        ids: ChunkSeq::new[u64](),
+        mans: ChunkSeq::new[Man](),
+        feats: ChunkSeq::new[Feat](),
+        syss: ChunkSeq::new[Sys](),
+        deps: ChunkSeq::new[Dep](),
+        roots: ChunkSeq::new[Root](),
+        ssels: ChunkSeq::new[SysSel](),
+        schema: 0,
+        sel_at: 0,
+        sel_n: 0,
+        root_at: 0,
+        root_n: 0,
+        ss_at: 0,
+        ss_n: 0,
+        diags: ChunkSeq::new[Diag](),
+        dtmp: ChunkSeq::new[Diag](),
+        udiags: ChunkSeq::new[Diag](),
+        snaps: ChunkSeq::new[Snap](),
+        gn: ChunkSeq::new[GNode](),
+        gids: ChunkSeq::new[u64](),
+        ge: ChunkSeq::new[u64](),
+        gs: ChunkSeq::new[SEdge](),
+        gl: ChunkSeq::new[u64](),
+        changes: ChunkSeq::new[Change](),
+        cids: ChunkSeq::new[u64](),
+        np: 0,
+        nc: 0,
+        nf: 0,
+        cmap: ChunkSeq::new[u64](),
+        clist: ChunkSeq::new[u64](),
+        fmap: ChunkSeq::new[u64](),
+        flist: ChunkSeq::new[u64](),
+        pof: ChunkSeq::new[u64](),
+        sysof: ChunkSeq::new[u64](),
+        pname: ChunkSeq::new[u64](),
+        psel: ChunkSeq::new[u64](),
+        frow: ChunkSeq::new[bool](),
+        nrow: ChunkSeq::new[bool](),
+        rrow: ChunkSeq::new[bool](),
+        reach: ChunkSeq::new[bool](),
+        hasn: ChunkSeq::new[bool](),
+        queued: ChunkSeq::new[bool](),
+        nfirst: ChunkSeq::new[u64](),
+        mk: ChunkSeq::new[bool](),
+        rootf: ChunkSeq::new[bool](),
+        usedsys: ChunkSeq::new[bool](),
+        queue: ChunkSeq::new[u64](),
+        work: ChunkSeq::new[u64](),
+        idx: ChunkSeq::new[u64](),
+        tmp: ChunkSeq::new[u64](),
+        se: ChunkSeq::new[SEdge](),
+        pcount: ChunkSeq::new[u64](),
+        pstart: ChunkSeq::new[u64](),
+        plist: ChunkSeq::new[u64](),
+        sa: ChunkSeq::new[u64](),
+        sb: ChunkSeq::new[u64](),
+        ea: ChunkSeq::new[u64](),
+        eb: ChunkSeq::new[u64]()
+    };
+    for i in 0..words.len() {
+        match words.try_get(i) {
+            Option::Some(w) => l.inw.push(w),
+            Option::None => (),
+        }
+    }
+    for i in 0..text.len() {
+        match text.try_get(i) {
+            Option::Some(b) => l.pool.push(b),
+            Option::None => (),
+        }
+    }
+    l
+}
+
+pub fn rd(inout l: L) -> u64 {
+    let w = sw(in l.inw, l.pos);
+    l.pos = inc(l.pos);
+    w
+}
+
+pub fn rd_bool(inout l: L) -> bool {
+    rd(inout l) != 0
+}
+
+// A string occurrence, as its id.
+pub fn rd_str(inout l: L) -> u64 {
+    let occ = rd(inout l);
+    sw(in l.rank, occ)
+}
+
+// A set: a count, then string occurrences in ascending order. Returns its
+// start in `ids`.
+pub fn rd_set(inout l: L) -> (u64, u64) {
+    let n = rd(inout l);
+    let at = l.ids.len();
+    for i in 0..n {
+        let id = rd_str(inout l);
+        l.ids.push(id);
+    }
+    (at, n)
+}
+
+// The string table, the versions and the requirements:
+//   nocc, (off, len)*; nver, (major, minor, patch, pre, build, text)*;
+//   nreq, (text, ncmp, (op, major, minor, has_minor, patch, has_patch,
+//   pre)*)*.
+// Sorting the occurrences by their bytes gives each distinct string its
+// rank, which is its id.
+pub fn decode_tables(inout l: L) {
+    let nocc = rd(inout l);
+    l.idx.clear();
+    for i in 0..nocc {
+        l.idx.push(i);
+        l.rank.push(0);
+    }
+    sort(inout l, 0);
+    let mut k: u64 = 0;
+    for j in 0..nocc {
+        let occ = sw(in l.idx, j);
+        let base = add(1, add(occ, occ));
+        let off = sw(in l.inw, base);
+        let len = sw(in l.inw, inc(base));
+        let same = if j == 0 {
+            false
+        } else {
+            let prev = sw(in l.rocc, wrapping_sub(k, 1));
+            let pb = add(1, add(prev, prev));
+            bytes_ord(in l, sw(in l.inw, pb), sw(in l.inw, inc(pb)), off, len) == 1
+        };
+        if !same {
+            l.rocc.push(occ);
+            l.roff.push(off);
+            l.rlen.push(len);
+            k = inc(k);
+        }
+        l.rank.try_set(occ, wrapping_sub(k, 1));
+    }
+    l.k = k;
+    l.pos = add(1, add(nocc, nocc));
+    let nver = rd(inout l);
+    for i in 0..nver {
+        let major = rd(inout l);
+        let minor = rd(inout l);
+        let patch = rd(inout l);
+        let pre = rd_str(inout l);
+        let build = rd_str(inout l);
+        let text = rd_str(inout l);
+        l
+            .vers
+            .push(
+            Ver {
+                major: major,
+                minor: minor,
+                patch: patch,
+                pre: pre,
+                build: build,
+                text: text
+            }
+        );
+    }
+    let nreq = rd(inout l);
+    for i in 0..nreq {
+        let text = rd_str(inout l);
+        let n = rd(inout l);
+        let at = l.cmps.len();
+        for j in 0..n {
+            let op = rd(inout l);
+            let major = rd(inout l);
+            let minor = rd(inout l);
+            let has_minor = rd_bool(inout l);
+            let patch = rd(inout l);
+            let has_patch = rd_bool(inout l);
+            let pre = rd_str(inout l);
+            l
+                .cmps
+                .push(
+                Cmp {
+                    op: op,
+                    major: major,
+                    minor: minor,
+                    has_minor: has_minor,
+                    patch: patch,
+                    has_patch: has_patch,
+                    pre: pre
+                }
+            );
+        }
+        l
+            .reqs
+            .push(
+            Req {
+                at: at,
+                n: n,
+                text: text
+            }
+        );
+    }
+}
+
+// One manifest:
+//   name, version, ceiling set, forbid_unsafe_ffi,
+//   nfeat, (name, effects set, deps set, features set,
+//     nsys, (raw, ok, name, req)*)*,
+//   ndep, (name, req, effects set, optional, features set)*,
+//   has_sandbox, [allow_network, paths set (script first, then
+//     wasi_read_paths)].
+// Returns its index in `mans`. Feature and dependency names come in
+// ascending order.
+pub fn decode_manifest(inout l: L) -> u64 {
+    let name = rd_str(inout l);
+    let v = rd(inout l);
+    let (ceil_at, ceil_n) = rd_set(inout l);
+    let forbid = rd_bool(inout l);
+    let nfeat = rd(inout l);
+    let feat_at = l.feats.len();
+    for i in 0..nfeat {
+        let fname = rd_str(inout l);
+        let (eff_at, eff_n) = rd_set(inout l);
+        let (deps_at, deps_n) = rd_set(inout l);
+        let (sub_at, sub_n) = rd_set(inout l);
+        let nsys = rd(inout l);
+        let sys_at = l.syss.len();
+        for j in 0..nsys {
+            let raw = rd_str(inout l);
+            let ok = rd_bool(inout l);
+            let sname = rd_str(inout l);
+            let r = rd(inout l);
+            l
+                .syss
+                .push(
+                Sys {
+                    raw: raw,
+                    ok: ok,
+                    name: sname,
+                    req: r
+                }
+            );
+        }
+        l
+            .feats
+            .push(
+            Feat {
+                name: fname,
+                eff_at: eff_at,
+                eff_n: eff_n,
+                deps_at: deps_at,
+                deps_n: deps_n,
+                sub_at: sub_at,
+                sub_n: sub_n,
+                sys_at: sys_at,
+                sys_n: nsys
+            }
+        );
+    }
+    let ndep = rd(inout l);
+    let dep_at = l.deps.len();
+    for i in 0..ndep {
+        let dname = rd_str(inout l);
+        let r = rd(inout l);
+        let (eff_at, eff_n) = rd_set(inout l);
+        let opt = rd_bool(inout l);
+        let (fa, fan) = rd_set(inout l);
+        l
+            .deps
+            .push(
+            Dep {
+                name: dname,
+                req: r,
+                eff_at: eff_at,
+                eff_n: eff_n,
+                opt: opt,
+                feat_at: fa,
+                feat_n: fan
+            }
+        );
+    }
+    let sandbox = rd_bool(inout l);
+    let mut net = false;
+    let mut path_at = l.ids.len();
+    let mut path_n: u64 = 0;
+    if sandbox {
+        net = rd_bool(inout l);
+        let (pa, pn) = rd_set(inout l);
+        path_at = pa;
+        path_n = pn;
+    }
+    let at = l.mans.len();
+    l
+        .mans
+        .push(
+        Man {
+            name: name,
+            ver: v,
+            ceil_at: ceil_at,
+            ceil_n: ceil_n,
+            forbid: forbid,
+            feat_at: feat_at,
+            feat_n: nfeat,
+            dep_at: dep_at,
+            dep_n: ndep,
+            sandbox: sandbox,
+            net: net,
+            path_at: path_at,
+            path_n: path_n,
+            json: 0,
+            fs_at: 0,
+            fs_n: 0
+        }
+    );
+    at
+}
+
+// One solution:
+//   schema_version, nroots, (name, req, features set)*,
+//   nsel, (json, features set, manifest)*, nsys, (name, version)*.
+pub fn decode_solution(inout l: L) {
+    l.schema = rd(inout l);
+    let nroots = rd(inout l);
+    l.root_at = l.roots.len();
+    l.root_n = nroots;
+    for i in 0..nroots {
+        let name = rd_str(inout l);
+        let r = rd(inout l);
+        let (fa, fan) = rd_set(inout l);
+        l
+            .roots
+            .push(
+            Root {
+                name: name,
+                req: r,
+                feat_at: fa,
+                feat_n: fan
+            }
+        );
+    }
+    let nsel = rd(inout l);
+    l.sel_at = l.mans.len();
+    l.sel_n = nsel;
+    for i in 0..nsel {
+        let json = rd_str(inout l);
+        let (fa, fan) = rd_set(inout l);
+        let m = decode_manifest(inout l);
+        match l.mans.try_get(m) {
+            Option::Some(x) => {
+                let mut y = x;
+                y.json = json;
+                y.fs_at = fa;
+                y.fs_n = fan;
+                l.mans.try_set(m, y);
+            },
+            Option::None => (),
+        }
+    }
+    let nsys = rd(inout l);
+    l.ss_at = l.ssels.len();
+    l.ss_n = nsys;
+    for i in 0..nsys {
+        let name = rd_str(inout l);
+        let v = rd(inout l);
+        l
+            .ssels
+            .push(
+            SysSel {
+                name: name,
+                ver: v
+            }
+        );
+    }
+}

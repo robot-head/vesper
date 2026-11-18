@@ -1,8 +1,12 @@
-//! The port-backed package links the Vesper port, and every tape, parse and
-//! shrinker the port allocates is given back. (Port package only: the seed
-//! copy does not list this test.)
+//! The port-backed package links the Vesper port, and every tape, parse,
+//! shrinker, fuzzer and schedule search the port allocates is given back.
+//! (Port package only: the seed copy does not list this test.)
+mod common;
+
+use common::{build, cells_key, random_program_ext};
 use vesper_crucible::{
-    ChoiceTape, IMPLEMENTATION, PropError, ShrinkConfig, Source, port_live_allocations, shrink,
+    ChoiceTape, ExploreConfig, FuzzConfig, IMPLEMENTATION, PropError, Search, ShrinkConfig, Source,
+    explore_cached, explore_dpor, fuzz, port_live_allocations, shrink,
 };
 
 #[test]
@@ -11,7 +15,7 @@ fn the_port_backed_package_links_the_port() {
 }
 
 #[test]
-fn tapes_parses_and_shrinkers_release_every_port_allocation() {
+fn tapes_parses_shrinkers_and_searches_release_every_port_allocation() {
     let work = |seed: u64| {
         let tape = ChoiceTape::new((0..200).map(|i| i * seed).collect());
         let text = tape.to_text();
@@ -31,6 +35,31 @@ fn tapes_parses_and_shrinkers_release_every_port_allocation() {
             .chain([0])
             .collect();
         shrink(&mut prop, &ChoiceTape::new(start), &ShrinkConfig::default()).unwrap();
+        let config = FuzzConfig {
+            seed,
+            max_execs: 400,
+            ..FuzzConfig::default()
+        };
+        fuzz(&config, |src: &mut Source| {
+            let data = src.draw_bytes(16)?;
+            let p = src.probe();
+            p.edge(data.len() as u32);
+            if p.eq_bytes(1, &data[..data.len().min(2)], b"ok") && p.eq(2, data.len() as u64, 9) {
+                return Err(PropError::fail("ok", "found"));
+            }
+            Ok(())
+        });
+        let program = random_program_ext(seed, 2, 3);
+        let observe = |w: &common::Cells| Ok(w.clone());
+        for bound in [None, Some(1)] {
+            let cfg = ExploreConfig {
+                max_executions: 400,
+                preemption_bound: bound,
+                ..ExploreConfig::default()
+            };
+            let _ = explore_dpor(&cfg, || build(&program), observe);
+            let _ = explore_cached(Search::Dpor, &cfg, || build(&program), observe, cells_key);
+        }
     };
     work(3);
     let before = port_live_allocations();

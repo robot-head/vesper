@@ -2,9 +2,13 @@
 //!
 //! This compares already validated graphs, not actual compiler-body authority,
 //! package provenance, source identity, ABI compatibility or trust policy.
-use crate::{PackageGraph, PackageName, Solution, Validation, validate_solution};
+#[cfg(not(vesper_port))]
+use crate::{PackageGraph, Validation, validate_solution};
+use crate::{PackageName, Solution};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(not(vesper_port))]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 pub const UPGRADE_SCHEMA_VERSION: u32 = 1;
 
@@ -60,6 +64,7 @@ pub struct UpgradeReport {
     pub changes: Vec<AuthorityChange>,
 }
 
+#[cfg(not(vesper_port))]
 fn finish(
     mut diagnostics: Vec<UpgradeDiagnostic>,
     mut changes: Vec<AuthorityChange>,
@@ -76,6 +81,7 @@ fn finish(
     }
 }
 
+#[cfg(not(vesper_port))]
 fn validation_diagnostics(
     snapshot: UpgradeSnapshot,
     validation: &Validation,
@@ -101,6 +107,7 @@ fn validation_diagnostics(
     }
 }
 
+#[cfg(not(vesper_port))]
 fn sets(
     scope: AuthorityScope,
     package: &PackageName,
@@ -141,6 +148,7 @@ fn sets(
     });
 }
 
+#[cfg(not(vesper_port))]
 fn edge_ceilings(graph: &PackageGraph) -> BTreeMap<(PackageName, PackageName), &BTreeSet<String>> {
     graph
         .packages
@@ -163,6 +171,17 @@ fn edge_ceilings(graph: &PackageGraph) -> BTreeMap<(PackageName, PackageName), &
 /// Native-version changes alone are outside this guard. No compiler-body audit,
 /// signature check, provenance/trust validation or SemVer certification occurs.
 pub fn check_upgrade(baseline: &Solution, candidate: &Solution) -> UpgradeReport {
+    #[cfg(vesper_port)]
+    {
+        crate::port::check_upgrade(baseline, candidate)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_check_upgrade(baseline, candidate)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_check_upgrade(baseline: &Solution, candidate: &Solution) -> UpgradeReport {
     let before = validate_solution(baseline);
     let after = validate_solution(candidate);
     let mut diagnostics = vec![];

@@ -323,18 +323,37 @@ impl SwarKey {
     /// check and two word compares.
     #[inline]
     pub fn matches_raw(self, raw: &[u8]) -> bool {
-        raw.len() == self.len as usize && pack(raw) == self.words
+        #[cfg(vesper_port)]
+        {
+            crate::port::key_raw(self.words, self.len, raw)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            raw.len() == self.len as usize && pack(raw) == self.words
+        }
     }
     /// Whether a validated key is this key, decoding escaped spellings such
     /// as `"\\u0069d"` without allocating.
     pub fn matches(self, key: JsonString<'_>) -> bool {
-        if key.is_escaped() {
-            let bytes = unpack(self.words);
-            let name =
-                core::str::from_utf8(&bytes[..self.len as usize]).expect("compiled ASCII key");
-            key.equals(name)
-        } else {
-            self.matches_raw(key.raw_content().as_bytes())
+        #[cfg(vesper_port)]
+        {
+            crate::port::key_matches(
+                self.words,
+                self.len,
+                key.is_escaped(),
+                key.raw_content().as_bytes(),
+            )
+        }
+        #[cfg(not(vesper_port))]
+        {
+            if key.is_escaped() {
+                let bytes = unpack(self.words);
+                let name =
+                    core::str::from_utf8(&bytes[..self.len as usize]).expect("compiled ASCII key");
+                key.equals(name)
+            } else {
+                self.matches_raw(key.raw_content().as_bytes())
+            }
         }
     }
 }
@@ -393,6 +412,30 @@ fn field_slot(name: JsonString<'_>) -> Option<usize> {
         .position(|k| k.len as usize == raw.len() && k.words == words)
 }
 
+#[cfg(vesper_port)]
+fn decode(root: Node<'_, '_>) -> Result<TelemetryPoint, TileErrorKind> {
+    let field = |f: crate::port::Fault| FIELDS[f.detail as usize].1;
+    let p = crate::port::tile_decode(root.doc, root.index).map_err(|f| match f.code {
+        0 => TileErrorKind::NotObject,
+        1 => TileErrorKind::MissingField(field(f)),
+        2 => TileErrorKind::FieldType(field(f)),
+        _ => TileErrorKind::FieldRange(field(f)),
+    })?;
+    let mut bytes = [0u8; 32];
+    for (i, w) in [p.trace0, p.trace1, p.trace2, p.trace3].iter().enumerate() {
+        bytes[i * 8..i * 8 + 8].copy_from_slice(&w.to_le_bytes());
+    }
+    let trace = core::str::from_utf8(&bytes[..p.trace_len]).expect("decoded JSON string");
+    Ok(TelemetryPoint {
+        ts_unix_ms: p.ts_unix_ms,
+        latency_us: p.latency_us,
+        status_code: p.status_code,
+        flags: p.flags,
+        trace_id_hex: InlineStr32::new(trace).expect("at most 32 bytes"),
+    })
+}
+
+#[cfg(not(vesper_port))]
 fn decode(root: Node<'_, '_>) -> Result<TelemetryPoint, TileErrorKind> {
     let fields = root.fields().map_err(|_| TileErrorKind::NotObject)?;
     let mut found: [Option<Node<'_, '_>>; 5] = [None; 5];

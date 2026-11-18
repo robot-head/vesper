@@ -3,7 +3,41 @@
 #![doc = include_str!("../README.md")]
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(not(vesper_port))]
+use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet};
+
+// The port-backed build (package vesper-loom-calculus) runs the calculus in
+// the Vesper package in vesper/; the seed copy (vesper-loom-calculus-seed)
+// that the compiler links keeps this Rust code. See "Crates the compiler
+// links" in docs/maintenance/porting-a-crate.md.
+#[cfg(vesper_port)]
+mod port;
+// Generated and committed, but kept outside src/ so formatters, which check
+// every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code, clippy::all)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+
+/// Which build this is: `"vesper"` for the port-backed package
+/// `vesper-loom-calculus`, `"rust"` for the seed copy
+/// `vesper-loom-calculus-seed` that the compiler links.
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
+/// Live allocations of the Vesper build (always 0 for the Rust build), for
+/// leak tests.
+pub fn port_live_allocations() -> i64 {
+    #[cfg(vesper_port)]
+    {
+        port::live_allocations()
+    }
+    #[cfg(not(vesper_port))]
+    {
+        0
+    }
+}
 
 mod upgrade;
 pub use upgrade::{
@@ -20,9 +54,22 @@ impl PackageName {
     /// `std/name` is reserved for the standard platform; third parties use `@org/name`.
     pub fn parse(name: impl Into<String>) -> Result<Self, String> {
         let name = name.into();
+        #[cfg(vesper_port)]
+        let valid = port::name_valid(&name);
+        #[cfg(not(vesper_port))]
+        let valid = Self::rust_valid(&name);
+        if !valid {
+            return Err(format!(
+                "invalid package name '{name}'; use @org/name or reserved std/name"
+            ));
+        }
+        Ok(Self(name))
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_valid(name: &str) -> bool {
         let parts = name
             .strip_prefix('@')
-            .unwrap_or(&name)
+            .unwrap_or(name)
             .split('/')
             .collect::<Vec<_>>();
         let component = |s: &str| {
@@ -32,16 +79,10 @@ impl PackageName {
                 })
                 && s.as_bytes()[0].is_ascii_lowercase()
         };
-        if parts.len() != 2
+        !(parts.len() != 2
             || !component(parts[0])
             || !component(parts[1])
-            || (!name.starts_with('@') && parts[0] != "std")
-        {
-            return Err(format!(
-                "invalid package name '{name}'; use @org/name or reserved std/name"
-            ));
-        }
-        Ok(Self(name))
+            || (!name.starts_with('@') && parts[0] != "std"))
     }
     pub fn as_str(&self) -> &str {
         &self.0
@@ -166,6 +207,7 @@ pub struct Diagnostic {
     pub subject: String,
     pub message: String,
 }
+#[cfg(not(vesper_port))]
 fn emit(
     out: &mut Vec<Diagnostic>,
     code: Code,
@@ -180,6 +222,7 @@ fn emit(
         message: message.into(),
     });
 }
+#[cfg(not(vesper_port))]
 fn capability_valid(s: &str) -> bool {
     if s.is_empty() || !s.as_bytes()[0].is_ascii_uppercase() {
         return false;
@@ -201,11 +244,13 @@ fn capability_valid(s: &str) -> bool {
     }
     depth == 0 && !s.contains("[]")
 }
+#[cfg(not(vesper_port))]
 fn feature_valid(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
 }
+#[cfg(not(vesper_port))]
 fn check_caps(
     caps: &BTreeSet<String>,
     owner: &PackageName,
@@ -226,6 +271,17 @@ fn check_caps(
 }
 /// Structural validation also runs on programmatically constructed DTOs.
 pub fn validate_manifest(manifest: &Manifest) -> Vec<Diagnostic> {
+    #[cfg(vesper_port)]
+    {
+        port::validate_manifest(manifest)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_validate_manifest(manifest)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_validate_manifest(manifest: &Manifest) -> Vec<Diagnostic> {
     let mut out = vec![];
     let owner = &manifest.package.name;
     check_caps(
@@ -397,12 +453,14 @@ pub struct Validation {
     pub diagnostics: Vec<Diagnostic>,
     pub unused_selections: BTreeSet<PackageName>,
 }
+#[cfg(not(vesper_port))]
 fn system_name_valid(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'+'))
 }
+#[cfg(not(vesper_port))]
 fn parse_system_requirement(source: &str) -> Result<(String, VersionReq), ()> {
     let (name, requirement) = source.split_once(char::is_whitespace).ok_or(())?;
     if !system_name_valid(name) {
@@ -413,6 +471,7 @@ fn parse_system_requirement(source: &str) -> Result<(String, VersionReq), ()> {
         VersionReq::parse(requirement.trim()).map_err(|_| ())?,
     ))
 }
+#[cfg(not(vesper_port))]
 fn expand_features(
     manifest: &Manifest,
     initial: &BTreeSet<String>,
@@ -447,6 +506,17 @@ fn expand_features(
 /// discharge those rows. Capability arguments are opaque and compared exactly;
 /// no package/type alias resolution or kind checking is certified here.
 pub fn validate_solution(solution: &Solution) -> Validation {
+    #[cfg(vesper_port)]
+    {
+        port::validate_solution(solution)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_validate_solution(solution)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_validate_solution(solution: &Solution) -> Validation {
     let mut out = vec![];
     if solution.schema_version != SCHEMA_VERSION {
         emit(

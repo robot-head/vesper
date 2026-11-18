@@ -3833,15 +3833,18 @@ impl<M: Module> Codegen<'_, '_, M> {
             (None, fs.as_slice())
         };
         let ptr = if self.operands_only {
-            // Zero only the words no field (or the tag) overwrites: the
-            // unused payload of an enum variant. Every scalar is a word.
+            // Zero only the words no field (or the tag) overwrites whole:
+            // the unused payload of an enum variant, and the word of an
+            // `f32` field, whose store writes only its low half.
             let ptr = self.alloc_uninit(layout.size);
             let mut covered = BTreeSet::new();
             if tag.is_some() {
                 covered.insert(0);
             }
             for (n, _) in &fields {
-                if let Some(f) = fs.iter().find(|f| f.name == *n) {
+                if let Some(f) = fs.iter().find(|f| f.name == *n)
+                    && f.ty.name() != "f32"
+                {
                     let start = f.offset as u32;
                     covered.extend((start..start + f.layout.size).step_by(8));
                 }

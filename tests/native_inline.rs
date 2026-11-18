@@ -230,13 +230,15 @@ fn recursion_and_over_budget_callees_stay_calls() {
 }
 
 #[test]
-fn closures_and_generic_callees_stay_calls() {
+fn closures_stay_calls_and_generic_callees_inline() {
     let source = "fn id[T](sink x: T) -> T { x } \
         fn apply(x: i64) -> i64 { let f = |y: i64| wrapping_add(y, 1); f(x) } \
         fn main() -> i64 { wrapping_add(id(1), apply(2)) }";
     agree(source, "4");
     let (_, program) = inlined(source, &Budget::default());
-    assert_eq!(calls(&program, "main", "id"), 1, "generic");
+    // Generic callees inline as typed copies since #989
+    // (`tests/native_inline_reach.rs`).
+    assert_eq!(calls(&program, "main", "id"), 0, "generic");
     assert_eq!(calls(&program, "main", "apply"), 1, "closure body");
 }
 

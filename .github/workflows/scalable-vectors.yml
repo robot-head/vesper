@@ -96,7 +96,7 @@ jobs:
           var="CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')_LINKER"
           export "$var=$LINKER"
           cargo test --locked --release --target ${{ matrix.target }} -p vesper-simd --test vvec --no-run
-          cargo test --locked --release --target ${{ matrix.target }} -p vesper-serde --test simd_scalable --no-run
+          cargo test --locked --release --target ${{ matrix.target }} -p vesper-serde-seed --test simd_scalable --no-run
       - name: Run at every vector length
         env:
           LINKER: ${{ matrix.linker }}
@@ -110,7 +110,7 @@ jobs:
           run() {
             export "${prefix}_RUNNER=$QEMU -cpu $1"
             cargo test --locked --release --target ${{ matrix.target }} -p vesper-simd --test vvec -- --nocapture
-            cargo test --locked --release --target ${{ matrix.target }} -p vesper-serde --test simd_scalable -- --nocapture
+            cargo test --locked --release --target ${{ matrix.target }} -p vesper-serde-seed --test simd_scalable -- --nocapture
           }
           export "$REQUIRE=1"
           for cpu in $CPUS; do

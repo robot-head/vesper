@@ -1,0 +1,53 @@
+[package]
+name = "vesper-loom-solver-seed"
+version = "0.1.0"
+edition = "2024"
+description = "Frozen Rust seed copy of vesper-loom-solver for the compiler's own dependency closure"
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899): the compiler links this
+# package, the Rust build of ../src, under the library name
+# `vesper_loom_solver`. Crates inside `cargo tree -p vesper -e normal,build`
+# depend on it with
+# `vesper-loom-solver = { path = ".../seed", package = "vesper-loom-solver-seed" }`;
+# every other crate uses the port-backed package `vesper-loom-solver`. The
+# Rust code takes bug fixes only until self-hosting Stage 2.
+[lib]
+name = "vesper_loom_solver"
+path = "../src/lib.rs"
+
+[[test]]
+name = "locked"
+path = "../tests/locked.rs"
+
+[[test]]
+name = "optimize"
+path = "../tests/optimize.rs"
+
+[[test]]
+name = "resolve"
+path = "../tests/resolve.rs"
+
+[[test]]
+name = "differential"
+path = "../tests/differential.rs"
+
+[[example]]
+name = "solver_abba_rust"
+path = "../examples/solver_abba.rs"
+
+[dependencies]
+vesper-loom-calculus = { path = "../../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
+semver = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+vesper-bench = { path = "../../vesper-bench" }
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

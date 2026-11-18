@@ -20,29 +20,43 @@
 //!
 //! A direct [`Op::Call`] to a world function whose IR is in the program, when
 //!
-//! * the callee is not recursive (no cycle through it in the call graph), not
-//!   generic and not `fip`;
+//! * the callee is not recursive (no cycle through it in the call graph) and
+//!   not `fip`. Trait-bounded generics reach the IR monomorphized
+//!   (`f$mono$T`, ordinary functions). Any other generic callee is inlined
+//!   as a copy typed with the call's type arguments, when its body needs no
+//!   type the native backend would look up by source span (see
+//!   `generic_body_ok`);
 //! * its [`cost`] is at most [`Budget::small_callee`], or it has a
 //!   single call site in the program and is at most
 //!   [`Budget::single_site_callee`] instructions;
 //! * its effect row is empty, or it is exactly the caller's row and holds only
 //!   unlabeled `Fail[E]` instances. A raise in the inlined body then performs
 //!   the caller's `Fail[E]` capability, which is what the caller's re-raise
-//!   after the call did. Rows with labels, tails, handlers or capability
-//!   effects are not inlined, and callers whose row names a capability effect
+//!   after the call did. Rows with labels, tails or capability effects are
+//!   not inlined, and callers whose row names a capability effect
 //!   (`ConstTime`, `Realtime`, `DetFloat`) are left alone so the per-function
 //!   capability verifiers see the code they saw before, and so are callers
 //!   holding `Box` values, whose drops are placed per block;
-//! * its body has no closures, handlers, `?`, indirect calls, tiled or `Box`
+//! * its body has no closures, `?`, indirect calls, tiled or `Box`
 //!   operations, no type in it mentions `Box` or a function type, and no
 //!   slice parameter is `inout` or `sink` (an `in` slice is a view value: it
-//!   becomes the caller's slice local, or a bound copy of the view);
+//!   becomes the caller's slice local, or a bound copy of the view; an `in
+//!   Str` is a 24-byte view value and is bound or borrowed like any
+//!   aggregate);
+//! * a local `handle` in the body keeps its scope: the handled body and its
+//!   clauses are lowered from their own shared graphs, which reach the
+//!   enclosing function's locals only through the handle's `aliases`, so
+//!   the copy re-points those at the renamed locals (#989). A callee with a
+//!   `return` inside a handled body stays a call, since that `return` leaves
+//!   the callee itself;
 //! * every `inout` argument (and every borrowed aggregate or sequence `in`
-//!   argument) names a place rooted at one of the caller's locals.
+//!   argument) names a place rooted at one of the caller's locals, and a
+//!   callee with a handler borrows only whole caller locals.
 //!
-//! Recursive, generic, closure and indirect calls stay calls, and so does
-//! anything over budget. Growth is capped per caller
-//! ([`Budget::caller_growth`]) and per program ([`Budget::program_growth`]).
+//! Recursive, closure and indirect calls stay calls, and so does anything
+//! over budget. Growth is capped per caller ([`Budget::caller_growth`]) and
+//! per program ([`Budget::program_growth`]). [`Report::refused`] says why
+//! each remaining direct call stayed a call.
 //!
 //! # How a call is replaced
 //!
@@ -75,6 +89,11 @@ pub struct Budget {
     pub caller_growth: usize,
     /// Most instructions inlining may add to the whole program.
     pub program_growth: usize,
+    /// Most handles inlining may copy into one caller. The native backend
+    /// copies the enclosing scope's bindings at every handle, so a caller
+    /// with many inlined handles compiles slowly (`integer_widths` calls a
+    /// doubly handled helper dozens of times from one function).
+    pub caller_handles: usize,
 }
 
 impl Default for Budget {
@@ -84,6 +103,7 @@ impl Default for Budget {
             single_site_callee: 240,
             caller_growth: 2_000,
             program_growth: 40_000,
+            caller_handles: 8,
         }
     }
 }
@@ -96,6 +116,7 @@ impl Budget {
             single_site_callee: 0,
             caller_growth: 0,
             program_growth: 0,
+            caller_handles: 0,
         }
     }
 }
@@ -114,6 +135,27 @@ pub struct Report {
     /// per-function policy facts (for example declared realtime effects) to
     /// the code that holds the inlined copy (#959).
     pub inlined_into: BTreeMap<String, BTreeSet<String>>,
+    /// Call sites left as calls, per callee and reason (see [`Refusal`]).
+    /// Only direct calls of functions whose IR is in the program count.
+    pub refused: BTreeMap<String, BTreeMap<Refusal, usize>>,
+}
+
+/// Why a direct call stayed a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Refusal {
+    /// The callee calls itself, directly or through others.
+    Recursive,
+    /// A property of the callee's body or signature (see [`inlinable`]).
+    Callee(&'static str),
+    /// The caller is one whose code a per-function verifier inspects, or it
+    /// holds `Box` values.
+    Caller,
+    /// Over [`Budget::small_callee`] (or the single-site limit).
+    Size,
+    /// The caller's or the program's growth budget is spent.
+    Growth,
+    /// A property of this call site (see [`site_bindings`]).
+    Site(&'static str),
 }
 
 /// Inline small, non-recursive direct calls in `program`, bottom-up over the
@@ -135,6 +177,16 @@ pub fn inline(world: &World, program: &mut Program, budget: &Budget) -> Report {
                 *sites.entry(callee.clone()).or_default() += 1;
             }
         }
+        // A handled body and its clauses are lowered inside the function
+        // that holds the handle, so a call in them is a call of that
+        // function: without these edges a function that calls itself from a
+        // handled body looks non-recursive, gets inlined into its own
+        // handler graph, and the native backend expands that graph forever.
+        for nested in handler_graphs(f) {
+            if let Some((key, _)) = program.functions.get_key_value(&nested) {
+                graph.add_edge(name.as_str(), key.as_str(), ());
+            }
+        }
     }
     // Tarjan's algorithm yields strongly connected components callees-first.
     let components = petgraph::algo::tarjan_scc(&graph);
@@ -147,14 +199,32 @@ pub fn inline(world: &World, program: &mut Program, budget: &Budget) -> Report {
         order.extend(component.iter().map(|n| n.to_string()));
     }
     drop(graph);
-    let candidates: BTreeSet<String> = program
+    // Functions that a `return` in another graph leaves: a `return` inside
+    // a handled body is lowered in the handler's own graph as an exit to
+    // the enclosing function, which an inlined copy no longer is.
+    let exited_from_outside = program
         .functions
         .values()
-        .filter(|f| !recursive.contains(&f.name) && inlinable(world, f))
-        .map(|f| f.name.clone())
-        .collect();
-    if candidates.is_empty() {
-        return report;
+        .flat_map(|g| {
+            g.blocks
+                .iter()
+                .flat_map(|b| &b.instructions)
+                .filter_map(move |i| match &i.op {
+                    Op::Exit { owner, .. } if *owner != g.name => Some(owner.clone()),
+                    _ => None,
+                })
+        })
+        .collect::<BTreeSet<_>>();
+    let mut candidates = BTreeMap::<String, Result<(), Refusal>>::new();
+    for f in program.functions.values() {
+        let verdict = if recursive.contains(&f.name) {
+            Err(Refusal::Recursive)
+        } else if exited_from_outside.contains(&f.name) {
+            Err(Refusal::Callee("return inside a handler"))
+        } else {
+            inlinable(world, f).map_err(Refusal::Callee)
+        };
+        candidates.insert(f.name.clone(), verdict);
     }
     let mut serial = 0usize;
     for name in order {
@@ -175,6 +245,14 @@ pub fn inline(world: &World, program: &mut Program, budget: &Budget) -> Report {
                 &mut serial,
                 &mut report,
             );
+        } else {
+            for i in caller.blocks.iter().flat_map(|b| &b.instructions) {
+                if let Op::Call { callee, .. } = &i.op
+                    && candidates.contains_key(callee)
+                {
+                    report.refuse(callee, Refusal::Caller);
+                }
+            }
         }
         program.functions.insert(name, caller);
     }
@@ -184,28 +262,108 @@ pub fn inline(world: &World, program: &mut Program, budget: &Budget) -> Report {
     report
 }
 
+/// The shared graphs (`ir::nested_name`) the handles in `f` lower: each
+/// handled body and each clause.
+fn handler_graphs(f: &FunctionIr) -> Vec<String> {
+    let mut out = Vec::new();
+    for i in f.blocks.iter().flat_map(|b| &b.instructions) {
+        if let Op::Handle { expr, .. } = &i.op
+            && let ExprKind::Handle { body, ret, ops, .. } = &expr.kind
+        {
+            out.push(crate::ir::nested_name("handler_body", &body.span));
+            out.push(crate::ir::nested_name("handler_clause", &ret.body.span));
+            for op in ops {
+                out.push(crate::ir::nested_name("handler_clause", &op.body.span));
+            }
+        }
+    }
+    out
+}
+
+/// The handles in `f` and, transitively, in its handler graphs: what the
+/// native backend emits for each copy of `f`.
+fn handles(program: &Program, f: &FunctionIr) -> usize {
+    let own = |g: &FunctionIr| {
+        g.blocks
+            .iter()
+            .flat_map(|b| &b.instructions)
+            .filter(|i| matches!(i.op, Op::Handle { .. }))
+            .count()
+    };
+    let mut total = own(f);
+    let mut pending = handler_graphs(f);
+    let mut seen = BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        if seen.insert(name.clone())
+            && let Some(g) = program.functions.get(&name)
+        {
+            total += own(g);
+            pending.extend(handler_graphs(g));
+        }
+    }
+    total
+}
+
+/// [`cost`] of `f` plus that of every handler graph it holds (transitively):
+/// the native backend emits those graphs at each handle, so each inlined
+/// copy of a handled callee duplicates them.
+fn cost_with_handlers(world: &World, program: &Program, f: &FunctionIr) -> usize {
+    let mut total = cost(world, f);
+    let mut pending = handler_graphs(f);
+    let mut seen = BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        if let Some(g) = program.functions.get(&name) {
+            total += cost(world, g);
+            pending.extend(handler_graphs(g));
+        }
+    }
+    total
+}
+
 /// IR size: instructions plus one per block terminator.
 pub fn size(f: &FunctionIr) -> usize {
     f.blocks.iter().map(|b| b.instructions.len() + 1).sum()
 }
 
-/// The inlining cost of `f`: [`size`] without the instructions that lower to
-/// no machine code once locals live in registers (constants, unit values and
-/// whole-local reads). A short-circuit predicate such as
-/// `(b >= 48 && b <= 57) || ...` is mostly those, so its cost tracks its
-/// compares and blocks, not its operand reads.
-pub fn cost(f: &FunctionIr) -> usize {
+/// The inlining cost of `f`: [`size`] without what lowers to no machine
+/// code once locals live in registers and Cranelift folds jumps:
+///
+/// * constants, unit values, loop headers and whole-local reads;
+/// * nullary constructors of scalar enums (`Less`, `Option::None` of a
+///   scalar layout), which are constants;
+/// * a name binding of a scalar value (a register move);
+/// * a block that holds only those and ends in a jump. Inlined bodies end in
+///   chains of such forwarding blocks (each callee `return` becomes one), so
+///   without this a callee's cost grew with every callee inlined into it: a
+///   derived `Ord::cmp` over five `u64` fields cost 36 before its field
+///   compares were inlined and 106 after, over [`Budget::small_callee`].
+///
+/// A short-circuit predicate such as `(b >= 48 && b <= 57) || ...` is mostly
+/// operand reads, so its cost tracks its compares and branches.
+pub fn cost(world: &World, f: &FunctionIr) -> usize {
+    let scalar = |t: &Type| {
+        crate::layout::Layout::of(world, t).is_ok_and(|l| !l.aggregate())
+            && !crate::seq::holds_sequence(world, t)
+    };
+    let free = |i: &Instruction| match &i.op {
+        Op::Constant(_) | Op::Unit | Op::Loop => true,
+        Op::Read { path, .. } => path.is_empty(),
+        Op::Data(_, fields) => fields.is_empty() && scalar(&i.ty),
+        Op::Bind { pattern, value } => {
+            matches!(pattern.kind, PatternKind::Bind(_) | PatternKind::Wild)
+                && f.values.get(value).is_some_and(&scalar)
+        }
+        _ => false,
+    };
     f.blocks
         .iter()
         .map(|b| {
-            1 + b
-                .instructions
-                .iter()
-                .filter(|i| {
-                    !matches!(&i.op, Op::Constant(_) | Op::Unit | Op::Loop)
-                        && !matches!(&i.op, Op::Read { path, .. } if path.is_empty())
-                })
-                .count()
+            let work = b.instructions.iter().filter(|i| !free(i)).count();
+            let forward = work == 0 && matches!(b.terminator, Terminator::Jump { .. });
+            work + usize::from(!forward)
         })
         .sum()
 }
@@ -223,26 +381,33 @@ fn mentions_function(world: &World, t: &Type) -> bool {
 }
 
 /// Callee properties that do not depend on the call site.
-fn inlinable(world: &World, f: &FunctionIr) -> bool {
+fn inlinable(world: &World, f: &FunctionIr) -> Result<(), &'static str> {
     let Some(source) = world.functions.get(&f.name) else {
-        return false;
+        return Err("not a world function");
     };
-    if source.fip
-        || !source.generics.is_empty()
-        || !f.bounds.is_empty()
-        || !f.external_captures.is_empty()
-        || !fail_row_only(&f.effects)
-        || !f.fip_call_slots.is_empty()
-        || !f.fip_join_slots.is_empty()
-        || !f.box_drops_before_inst.is_empty()
-        || !f.box_drops_after_inst.is_empty()
-        || !f.box_drops_before_term.is_empty()
-        || f.result.name() == "Never"
-        || f.blocks.is_empty()
-        || !f.blocks[0].params.is_empty()
-    {
-        return false;
+    let refuse = |c: bool, why| if c { Err(why) } else { Ok(()) };
+    refuse(source.fip, "fip")?;
+    // Trait-bounded generics never get here: the front end monomorphizes
+    // them into ordinary `f$mono$T` functions. Any other generic callee is
+    // instantiated per call site (`instance`); see `generic_body_ok`.
+    if !source.generics.is_empty() {
+        generic_body_ok(world, f)?;
     }
+    refuse(!f.external_captures.is_empty(), "captures")?;
+    refuse(!fail_row_only(&f.effects), "effect row")?;
+    refuse(
+        !f.fip_call_slots.is_empty()
+            || !f.fip_join_slots.is_empty()
+            || !f.box_drops_before_inst.is_empty()
+            || !f.box_drops_after_inst.is_empty()
+            || !f.box_drops_before_term.is_empty(),
+        "fip slots or Box drops",
+    )?;
+    refuse(f.result.name() == "Never", "Never result")?;
+    refuse(
+        f.blocks.is_empty() || !f.blocks[0].params.is_empty(),
+        "entry block",
+    )?;
     let types = || {
         f.values
             .values()
@@ -250,26 +415,84 @@ fn inlinable(world: &World, f: &FunctionIr) -> bool {
             .chain(f.params.iter().map(|p| &p.ty))
             .chain(std::iter::once(&f.result))
     };
-    if types().any(|t| holds_box(world, t) || mentions_function(world, t))
-        || f.params
+    refuse(types().any(|t| holds_box(world, t)), "Box type")?;
+    refuse(
+        types().any(|t| mentions_function(world, t)),
+        "function type",
+    )?;
+    refuse(
+        f.params
             .iter()
-            .any(|p| p.pass != Pass::In && crate::seq::is_slice_type(&p.ty))
-    {
-        return false;
+            .any(|p| p.pass != Pass::In && crate::seq::is_slice_type(&p.ty)),
+        "inout or sink slice",
+    )?;
+    for i in f.blocks.iter().flat_map(|b| &b.instructions) {
+        match &i.op {
+            Op::Closure { .. } => return Err("closure"),
+            Op::Try(_) => return Err("try"),
+            Op::Indirect { .. } => return Err("indirect call"),
+            Op::Tiled { .. } | Op::Fip { .. } => return Err("tiled or fip op"),
+            Op::Exit { owner, .. } if *owner != f.name => return Err("foreign exit"),
+            _ => {}
+        }
     }
-    f.blocks
-        .iter()
-        .flat_map(|b| &b.instructions)
-        .all(|i| match &i.op {
-            Op::Closure { .. }
-            | Op::Handle { .. }
-            | Op::Try(_)
-            | Op::Indirect { .. }
-            | Op::Tiled { .. }
-            | Op::Fip { .. } => false,
-            Op::Exit { owner, .. } => *owner == f.name,
-            _ => true,
-        })
+    Ok(())
+}
+
+/// An unbounded generic callee is inlined as a copy with its type
+/// parameters replaced by the call's type arguments ([`instance`]). The
+/// native backend lowers most of the copy from its instruction and value
+/// types, which the copy carries substituted. What it would instead look up
+/// by source span with the enclosing function's type arguments, and so get
+/// wrong in a copy, stays out: calls with type arguments of their own
+/// (`World::calls` is keyed by span), handlers (their bodies are shared
+/// graphs typed with the enclosing function's type arguments), and every
+/// instruction typed by a bare type parameter whose native lowering asks the
+/// span for its type (operators, indexing and field projections).
+fn generic_body_ok(world: &World, f: &FunctionIr) -> Result<(), &'static str> {
+    for i in f.blocks.iter().flat_map(|b| &b.instructions) {
+        match &i.op {
+            Op::Handle { .. } => return Err("generic callee with a handler"),
+            Op::Call { types, .. } if !types.is_empty() => {
+                return Err("generic callee with explicit call types");
+            }
+            Op::Call { .. } | Op::Seq { .. }
+                if world
+                    .calls
+                    .get(&(i.span.start, i.span.end))
+                    .is_some_and(|vars| !vars.is_empty()) =>
+            {
+                return Err("generic callee calls a generic function");
+            }
+            Op::Unary(..) | Op::Binary(..) | Op::Index(..) | Op::Project(..) => {
+                return Err("generic callee with operators or projections");
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// The copy of the unbounded generic `callee` for the call at `span`, with
+/// the call's type arguments substituted, or `None` when the checker did not
+/// record them all.
+fn instance(world: &World, callee: &FunctionIr, span: &Span) -> Option<FunctionIr> {
+    let generics = &world.functions.get(&callee.name)?.generics;
+    let vars = world.calls.get(&(span.start, span.end))?;
+    if generics.iter().any(|g| !vars.contains_key(&g.name)) {
+        return None;
+    }
+    let mut f = callee.clone();
+    let sub = |t: &mut Type| *t = substitute(t, vars);
+    f.params.iter_mut().for_each(|p| sub(&mut p.ty));
+    sub(&mut f.result);
+    f.effects = substitute_effects(&f.effects, vars);
+    f.values.values_mut().for_each(sub);
+    f.locals.values_mut().for_each(sub);
+    for i in f.blocks.iter_mut().flat_map(|b| &mut b.instructions) {
+        sub(&mut i.ty);
+    }
+    Some(f)
 }
 
 /// Callers whose code a per-function verifier inspects, or that hold `Box`
@@ -349,12 +572,12 @@ fn site_bindings(
     callee: &FunctionIr,
     dest: ValueId,
     args: &[Argument],
-) -> Option<Vec<Binding>> {
-    if args.len() != callee.params.len()
-        || caller.values.get(&dest) != Some(&callee.result)
-        || (!callee.effects.instances.is_empty() && callee.effects != caller.effects)
-    {
-        return None;
+) -> Result<Vec<Binding>, &'static str> {
+    if args.len() != callee.params.len() || caller.values.get(&dest) != Some(&callee.result) {
+        return Err("signature");
+    }
+    if !callee.effects.instances.is_empty() && callee.effects != caller.effects {
+        return Err("effect row differs from the caller's");
     }
     if !caller.bounds.is_empty() {
         let generics = caller.bounds.keys().collect::<BTreeSet<_>>();
@@ -364,7 +587,7 @@ fn site_bindings(
             .chain(callee.locals.values())
             .any(|t| mentions_names(t, &generics))
         {
-            return None;
+            return Err("caller generics");
         }
     }
     let mut out = Vec::with_capacity(args.len());
@@ -392,14 +615,31 @@ fn site_bindings(
             continue;
         }
         out.push(match p.pass {
-            Pass::Inout => Binding::Place(local_place?.clone()),
+            Pass::Inout => Binding::Place(
+                local_place
+                    .ok_or("inout argument is not a local place")?
+                    .clone(),
+            ),
             Pass::In if aggregate || sequence => match local_place {
                 Some(place) => Binding::Place(place.clone()),
                 None if !sequence => Binding::Bind(a.value),
-                None => return None,
+                None => return Err("borrowed sequence argument is not a local place"),
             },
             Pass::In | Pass::Sink => Binding::Bind(a.value),
         });
+    }
+    let handles = callee
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .any(|i| matches!(i.op, Op::Handle { .. }));
+    if handles
+        && out
+            .iter()
+            .any(|b| matches!(b, Binding::Place(p) if !p.path.is_empty()))
+    {
+        // A handler names its captures as whole locals (`aliases`).
+        return Err("handled callee borrows a field place");
     }
     // A borrowed parameter is replaced by the caller's place, so the callee
     // must never re-bind its name.
@@ -423,10 +663,10 @@ fn site_bindings(
             }
         }
         if !bound.is_disjoint(&replaced) {
-            return None;
+            return Err("callee re-binds a borrowed parameter");
         }
     }
-    Some(out)
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -434,13 +674,14 @@ fn inline_into(
     world: &World,
     program: &Program,
     caller: &mut FunctionIr,
-    candidates: &BTreeSet<String>,
+    candidates: &BTreeMap<String, Result<(), Refusal>>,
     sites: &BTreeMap<String, usize>,
     budget: &Budget,
     serial: &mut usize,
     report: &mut Report,
 ) {
     let mut added = 0usize;
+    let mut handles_added = 0usize;
     // Blocks spliced in from a callee were already processed bottom-up.
     let mut spliced = BTreeSet::new();
     let mut b = 0;
@@ -462,38 +703,58 @@ fn inline_into(
                 i += 1;
                 continue;
             };
-            if !types.is_empty() || capability.is_some() {
-                i += 1;
-                continue;
-            }
-            let Some(target) = candidates
-                .contains(callee)
-                .then(|| program.functions.get(callee))
-                .flatten()
-                .filter(|t| t.name != caller.name)
-            else {
+            let Some(verdict) = candidates.get(callee) else {
                 i += 1;
                 continue;
             };
-            let cost = cost(target);
-            let fits = cost <= budget.small_callee
-                || (sites.get(callee) == Some(&1) && cost <= budget.single_site_callee);
-            if !fits
-                || added + cost > budget.caller_growth
-                || report.added + cost > budget.program_growth
-            {
-                i += 1;
-                continue;
-            }
-            let Some(bindings) = site_bindings(world, caller, target, inst.dest, args) else {
-                i += 1;
-                continue;
+            let decision = verdict.and_then(|()| {
+                let original = &program.functions[callee];
+                if !types.is_empty() || capability.is_some() || original.name == caller.name {
+                    return Err(Refusal::Site("explicit types or capability"));
+                }
+                let generic = world
+                    .functions
+                    .get(callee)
+                    .is_some_and(|s| !s.generics.is_empty());
+                let copy = if generic {
+                    Some(
+                        instance(world, original, &inst.span)
+                            .ok_or(Refusal::Site("type arguments not recorded"))?,
+                    )
+                } else {
+                    None
+                };
+                let target = copy.as_ref().unwrap_or(original);
+                let cost = cost_with_handlers(world, program, target);
+                if cost > budget.small_callee
+                    && (sites.get(callee) != Some(&1) || cost > budget.single_site_callee)
+                {
+                    return Err(Refusal::Size);
+                }
+                if added + cost > budget.caller_growth
+                    || report.added + cost > budget.program_growth
+                    || handles_added + handles(program, target) > budget.caller_handles
+                {
+                    return Err(Refusal::Growth);
+                }
+                let bindings =
+                    site_bindings(world, caller, target, inst.dest, args).map_err(Refusal::Site)?;
+                Ok((cost, bindings, copy))
+            });
+            let (cost, bindings, copy) = match decision {
+                Ok(d) => d,
+                Err(why) => {
+                    report.refuse(callee, why);
+                    i += 1;
+                    continue;
+                }
             };
-            let target = target.clone();
+            let target = copy.unwrap_or_else(|| program.functions[callee].clone());
             *serial += 1;
             let first = splice(caller, b, i, &target, &bindings, *serial);
             spliced.extend(first..caller.blocks.len());
             added += cost;
+            handles_added += handles(program, &target);
             report.added += cost;
             report.sites += 1;
             *report.callees.entry(target.name.clone()).or_default() += 1;
@@ -510,6 +771,17 @@ fn inline_into(
             break;
         }
         b += 1;
+    }
+}
+
+impl Report {
+    fn refuse(&mut self, callee: &str, why: Refusal) {
+        *self
+            .refused
+            .entry(callee.to_owned())
+            .or_default()
+            .entry(why)
+            .or_default() += 1;
     }
 }
 
@@ -597,8 +869,30 @@ impl Rename<'_> {
                 self.args(args);
             }
             Op::Exit { value, .. } => *value = self.value(*value),
+            // The handled body and its clauses are lowered from their own
+            // graphs (`ir::nested_name`), shared by every copy; they name
+            // the enclosing function's locals only through `aliases`, so the
+            // copy re-points those at the renamed (or the caller's) locals.
+            // `site_bindings` only replaces such a callee's borrowed
+            // parameters by whole caller locals.
+            Op::Handle {
+                state_value,
+                aliases,
+                moves,
+                ..
+            } => {
+                if let Some(v) = state_value {
+                    *v = self.value(*v);
+                }
+                for slot in aliases.values_mut() {
+                    *slot = self.root(slot, &[]).0;
+                }
+                for m in moves {
+                    *m = self.place(m);
+                }
+            }
             // Excluded by `inlinable`.
-            Op::Closure { .. } | Op::Handle { .. } => {}
+            Op::Closure { .. } => {}
         }
     }
 }

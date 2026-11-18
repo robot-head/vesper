@@ -43,6 +43,17 @@ impl Default for EncodeLimits {
 /// Checks all values, duplicate keys, limits and arithmetic without allocation.
 /// The deterministic work allowance covers both preflight and writing.
 pub fn encoded_size(value: &Value<'_>, limits: EncodeLimits) -> Result<usize, Error> {
+    #[cfg(vesper_port)]
+    {
+        crate::port::encoded_size(value, limits)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_encoded_size(value, limits)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_encoded_size(value: &Value<'_>, limits: EncodeLimits) -> Result<usize, Error> {
     let mut check = Check {
         limits,
         work: 0,
@@ -61,6 +72,21 @@ pub fn encoded_size(value: &Value<'_>, limits: EncodeLimits) -> Result<usize, Er
 /// output bytes unchanged, and the borrowed input value remains owned by caller.
 /// Bytes beyond the returned encoded length remain unchanged on success too.
 pub fn encode_into(
+    value: &Value<'_>,
+    output: &mut [u8],
+    limits: EncodeLimits,
+) -> Result<usize, Error> {
+    #[cfg(vesper_port)]
+    {
+        crate::port::encode_into(value, output, limits)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_encode_into(value, output, limits)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_encode_into(
     value: &Value<'_>,
     output: &mut [u8],
     limits: EncodeLimits,

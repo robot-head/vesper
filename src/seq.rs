@@ -34,7 +34,9 @@
 //! once ([`SeqOp::CopyFrom`], [`SeqOp::Fill`], [`SeqOp::Wide`]); native code
 //! lowers them in `src/seq/native_bytes.rs`. The byte scans `sum_be16`, `eq`
 //! and `find_byte` ([`SeqOp::SumBe16`], [`SeqOp::BytesEq`],
-//! [`SeqOp::FindByte`]) are total; optimized native code runs them 16 bytes
+//! [`SeqOp::FindByte`]) and the class and case scans `find_either`,
+//! `find_not_in`, `eq_ignore_ascii_case` and `extend_ascii_lowercase` (port
+//! gaps lane 4, #987) are total; optimized native code runs them 16 bytes
 //! at a time (`src/seq/native_bytes.rs`). An interval `s[a..b]` is evaluated while its sibling loans are
 //! live, so an interval outside `0 <= a <= b <= len` is a run-time fault
 //! like a `TiledSeq` bounds fault: the evaluator and the JIT report an error
@@ -129,6 +131,22 @@ pub enum SeqOp {
     /// `s.find_byte(b)` on a byte sequence or slice: the index of the first
     /// byte equal to `b`, as an `Option[u64]`. Total.
     FindByte,
+    /// `s.find_either(a, b)` on a byte sequence or slice: the index of the
+    /// first byte equal to `a` or to `b`, as an `Option[u64]`. Total.
+    FindEither,
+    /// `s.find_not_in(lo, hi, high)` on a byte sequence or slice: the index
+    /// of the first byte outside a byte class, as an `Option[u64]`. A byte
+    /// `x < 64` is in the class when bit `x` of `lo` is set, a byte
+    /// `64 <= x < 128` when bit `x - 64` of `hi` is set, and a byte
+    /// `x >= 128` when `high` holds. Total.
+    FindNotIn,
+    /// `s.eq_ignore_ascii_case(in other)` on a byte sequence or slice:
+    /// whether `other` has the same length and the same bytes once ASCII
+    /// `A..=Z` are mapped to `a..=z`. Total.
+    EqIgnoreAsciiCase,
+    /// `s.extend_ascii_lowercase(in src)` on a `ChunkSeq[u8]`: appends the
+    /// bytes of `src` with ASCII `A..=Z` mapped to `a..=z`. Total.
+    ExtendAsciiLowercase,
 }
 
 /// `read_u16_le`, `try_write_u64_be` and the other fixed-width accesses of a
@@ -239,10 +257,20 @@ impl Access {
 }
 
 impl SeqOp {
-    /// Whether the operation is a byte scan: `sum_be16`, `eq` or
-    /// `find_byte`, which need a `u8` element type.
+    /// Whether the operation is a byte scan: `sum_be16`, `eq`, `find_byte`,
+    /// `find_either`, `find_not_in`, `eq_ignore_ascii_case` or
+    /// `extend_ascii_lowercase`, which need a `u8` element type.
     pub fn byte_scan(self) -> bool {
-        matches!(self, Self::SumBe16 | Self::BytesEq | Self::FindByte)
+        matches!(
+            self,
+            Self::SumBe16
+                | Self::BytesEq
+                | Self::FindByte
+                | Self::FindEither
+                | Self::FindNotIn
+                | Self::EqIgnoreAsciiCase
+                | Self::ExtendAsciiLowercase
+        )
     }
     /// Whether the operation may raise `Fail[RuntimeError]`.
     pub fn fallible(self) -> bool {
@@ -274,6 +302,7 @@ impl SeqOp {
                 | Self::Clear
                 | Self::Truncate
                 | Self::Extend
+                | Self::ExtendAsciiLowercase
                 | Self::CopyFrom { .. }
                 | Self::Fill
                 | Self::Wide(Wide { write: true, .. })
@@ -321,6 +350,10 @@ impl SeqOp {
             Self::SumBe16 => "sum_be16",
             Self::BytesEq => "eq",
             Self::FindByte => "find_byte",
+            Self::FindEither => "find_either",
+            Self::FindNotIn => "find_not_in",
+            Self::EqIgnoreAsciiCase => "eq_ignore_ascii_case",
+            Self::ExtendAsciiLowercase => "extend_ascii_lowercase",
         }
     }
 }
@@ -493,6 +526,7 @@ pub fn fip_allocation(world: &World, callee: &Expr) -> Option<&'static str> {
             | SeqOp::WithCapacity
             | SeqOp::Push
             | SeqOp::Extend
+            | SeqOp::ExtendAsciiLowercase
             | SeqOp::Str(
                 crate::strings::StrOp::PushStr
                     | crate::strings::StrOp::PushChar
@@ -511,6 +545,9 @@ fn shared_method(method: &str) -> Option<SeqOp> {
         "sum_be16" => SeqOp::SumBe16,
         "eq" => SeqOp::BytesEq,
         "find_byte" => SeqOp::FindByte,
+        "find_either" => SeqOp::FindEither,
+        "find_not_in" => SeqOp::FindNotIn,
+        "eq_ignore_ascii_case" => SeqOp::EqIgnoreAsciiCase,
         _ => SeqOp::Wide(Wide::parse(method)?),
     })
 }
@@ -533,6 +570,7 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "clear" => SeqOp::Clear,
                 "truncate" => SeqOp::Truncate,
                 "extend" | "extend_from_slice" => SeqOp::Extend,
+                "extend_ascii_lowercase" => SeqOp::ExtendAsciiLowercase,
                 "as_slice" | "as_slice_mut" => SeqOp::AsSlice,
                 _ => return shared_method(method),
             });

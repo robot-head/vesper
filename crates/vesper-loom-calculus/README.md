@@ -56,3 +56,18 @@ metadata still fails snapshot validation. Native version changes alone do not
 imply FFI authority or native ABI compatibility. The result covers declared
 metadata only: it is not a compiler-body audit, version/SemVer approval, source
 identity, namespace/provenance authentication or resolver trust-policy check.
+
+## Seed copy and port
+
+Frozen since 2026-11-18 for port wave P1 lane 16 (#913): the Rust code takes
+bug fixes only. This crate is split into two packages built from the same
+sources. `vesper-loom-calculus` is the port-backed build: `build.rs` links the
+Vesper package in `vesper/` (`@vesper/loom-calculus`), which runs manifest
+validation, solution validation and the upgrade guard, including SemVer
+matching and ordering; TOML/JSON decoding and SemVer text parsing stay in the
+Rust wrapper (`src/port.rs`). The compiler and every crate in its dependency
+closure (the other Loom crates and `vesper-codegen-verified`) link
+`vesper-loom-calculus-seed` (`seed/`), the frozen Rust build, under the same
+library name. See "Crates the compiler links" in
+`docs/maintenance/porting-a-crate.md` and
+`docs/parallel-results/port-p1-loom-calculus.md`.

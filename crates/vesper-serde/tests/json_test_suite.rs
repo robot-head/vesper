@@ -4,7 +4,7 @@ mod common;
 
 use common::{Rng, document};
 use serde_json::Value;
-use std::path::Path;
+use std::path::PathBuf;
 use vesper_serde::simd::Isa;
 use vesper_serde::{ErrorKind, FloatLimits, IndexedJson, Kind, Limits, Node};
 
@@ -96,7 +96,7 @@ fn ours(input: &[u8], limits: Limits) -> Outcome {
 }
 
 fn corpus() -> Vec<(String, Vec<u8>)> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/JSONTestSuite/test_parsing");
+    let dir = crate_root().join("tests/data/JSONTestSuite/test_parsing");
     let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
         .map(|entry| {
@@ -191,5 +191,18 @@ fn random_documents_equal_serde_json() {
         let expected: Value = serde_json::from_slice(&doc).unwrap();
         let value = value.expect("generated numbers are finite");
         assert!(same(&value, &expected), "{value} vs {expected}");
+    }
+}
+
+/// The crate directory; the seed package (`seed/`) shares this crate's
+/// tests and data.
+fn crate_root() -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if dir.ends_with("seed") {
+        dir.parent()
+            .expect("seed/ is inside the crate")
+            .to_path_buf()
+    } else {
+        dir
     }
 }

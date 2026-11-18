@@ -69,14 +69,46 @@ impl Gen<'_> {
         rust_type(ty, &self.types_path)
     }
 
-    /// v3: the mirror of a mirrored struct, as seen from the binding.
+    /// v3: the mirror of a mirrored struct, or (`abi 3 options`) the
+    /// `OptionMirror`/`ResultMirror` of an `Option`/`Result`, as seen from
+    /// the binding.
     fn mirror(&self, ty: &AbiType) -> Option<String> {
         match ty {
             AbiType::Named { name, .. } if self.interface.mirrored(ty) => {
                 Some(format!("repr::{name}"))
             }
+            AbiType::Named { name, args } if self.interface.lent(ty) => {
+                let cells = args
+                    .iter()
+                    .map(|a| self.payload_cell(a))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Some(format!("vesper_port_abi::{name}Mirror<{cells}>"))
+            }
             _ => None,
         }
+    }
+
+    /// v3: the cell of an `Option`/`Result` payload outside `mod repr`.
+    fn payload_cell(&self, ty: &AbiType) -> String {
+        self.mirror(ty)
+            .unwrap_or_else(|| self.cell(ty, &self.types_path))
+    }
+
+    /// v3: every `OptionMirror`/`ResultMirror` type a wrapper uses, with
+    /// its Vesper size in words.
+    fn option_mirrors(&self) -> BTreeMap<String, u32> {
+        let mut out = BTreeMap::new();
+        for f in &self.interface.functions {
+            for ty in f.params.iter().map(|p| &p.ty).chain([&f.result]) {
+                if !self.interface.mirrored(ty)
+                    && let Some(m) = self.mirror(ty)
+                {
+                    out.insert(m, self.words(ty));
+                }
+            }
+        }
+        out
     }
 
     /// The Rust type a value of `ty` is handed out as.
@@ -863,6 +895,15 @@ pub(super) fn generate(interface: &LibraryInterface, options: &BindingOptions) -
     }
     if interface.is_v3() {
         g.mirrors(&mut out);
+        for (m, words) in g.option_mirrors() {
+            let _ = writeln!(
+                out,
+                "// `{m}` has the Vesper layout of its value.\nconst _: () = assert!(core::mem::size_of::<{m}>() == {words} * 8 && <{m} as vesper_port_abi::Mirror>::WORDS == {words});"
+            );
+        }
+        if interface.option_mirrors {
+            out.push('\n');
+        }
     }
     // Compile-time cross-check of every copy boundary type's word count.
     let mut checked = BTreeSet::new();

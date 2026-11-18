@@ -163,6 +163,12 @@ pub struct Assembled {
     pub manifest_errors: Vec<(String, Diagnostic)>,
     /// The root package's name.
     pub package: String,
+    /// The file of the root package's root module (`src/lib.ves` or
+    /// `src/main.ves`), when it has one. Files load in sorted path order,
+    /// so this is not file 0 whenever another source sorts first.
+    pub root_module: Option<usize>,
+    /// Every file of the root package (dependencies excluded).
+    pub root_package_files: Vec<usize>,
 }
 impl Assembled {
     pub fn ok(&self) -> bool {
@@ -202,6 +208,9 @@ pub fn load(dir: &Path) -> Result<Assembled, String> {
     let package = root
         .map(|i| loader.packages[i].name.as_str().to_owned())
         .unwrap_or_default();
+    let modules = root.map(|i| &loader.packages[i].modules[..]).unwrap_or(&[]);
+    let root_module = modules.iter().find(|m| m.path.is_empty()).map(|m| m.file);
+    let root_package_files: Vec<usize> = modules.iter().map(|m| m.file).collect();
     if !loader.manifest_errors.is_empty() || root.is_none() {
         return Ok(Assembled {
             module: Module::default(),
@@ -209,6 +218,8 @@ pub fn load(dir: &Path) -> Result<Assembled, String> {
             diagnostics: loader.diagnostics,
             manifest_errors: loader.manifest_errors,
             package,
+            root_module,
+            root_package_files,
         });
     }
     let module = loader.assemble(root.unwrap_or_default());
@@ -218,6 +229,8 @@ pub fn load(dir: &Path) -> Result<Assembled, String> {
         diagnostics: loader.diagnostics,
         manifest_errors: loader.manifest_errors,
         package,
+        root_module,
+        root_package_files,
     })
 }
 
@@ -396,7 +409,9 @@ impl Loader {
             ));
             return Ok(None);
         }
-        // Sources first, so the root package's root module is file 0.
+        // Sources first, so the root package's files come before its
+        // dependencies' (its root module is not file 0 when another source
+        // sorts first; see `Assembled::root_module`).
         let mut files = vec![];
         let src = dir.join("src");
         if src.is_dir() {

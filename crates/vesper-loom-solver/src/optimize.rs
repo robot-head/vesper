@@ -1,13 +1,16 @@
 //! Multi-objective Pareto/lexicographic dependency optimization (§10.2–§10.4).
 
-use crate::{
-    ResolveDiagnostic, ResolveError, ResolveRequest, closure, diagnostic, error, from_calculus,
-    inputs, solution,
-};
+#[cfg(not(vesper_port))]
+use crate::{ResolveDiagnostic, closure, diagnostic, error, from_calculus, inputs, solution};
+use crate::{ResolveError, ResolveRequest};
 use semver::Version;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
-use vesper_loom_calculus::{Manifest, PackageName, Solution, validate_solution};
+use std::collections::BTreeMap;
+#[cfg(not(vesper_port))]
+use std::collections::BTreeSet;
+#[cfg(not(vesper_port))]
+use vesper_loom_calculus::{Manifest, validate_solution};
+use vesper_loom_calculus::{PackageName, Solution};
 
 pub const OPTIMIZE_SCHEMA_VERSION: u32 = 1;
 
@@ -23,6 +26,12 @@ pub enum OptimizeObjective {
 
 impl OptimizeObjective {
     pub fn parse(raw: &str) -> Result<Self, String> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::objective(raw)
+                .ok_or_else(|| format!("unknown optimization objective '{raw}'"))
+        }
+        #[cfg(not(vesper_port))]
         match raw {
             "zero_cve" => Ok(Self::ZeroCve),
             "min_capability_surface" => Ok(Self::MinCapabilitySurface),
@@ -80,6 +89,7 @@ pub struct OptimizedResolution {
     pub objective_order: Vec<OptimizeObjective>,
 }
 
+#[cfg(not(vesper_port))]
 fn objective_requires_metadata(obj: OptimizeObjective) -> bool {
     matches!(
         obj,
@@ -89,6 +99,7 @@ fn objective_requires_metadata(obj: OptimizeObjective) -> bool {
     )
 }
 
+#[cfg(not(vesper_port))]
 fn active_objectives(request: &OptimizeRequest) -> Result<Vec<OptimizeObjective>, ResolveError> {
     if !request.objectives.is_empty() {
         return Ok(request.objectives.clone());
@@ -122,6 +133,7 @@ fn active_objectives(request: &OptimizeRequest) -> Result<Vec<OptimizeObjective>
     ])
 }
 
+#[cfg(not(vesper_port))]
 fn unsupported_dependency_policy(manifest: &Manifest) -> Option<ResolveDiagnostic> {
     let policy = &manifest.resolver.as_ref()?.policy;
     (!policy.optimize.is_empty()).then(|| {
@@ -137,6 +149,7 @@ fn unsupported_dependency_policy(manifest: &Manifest) -> Option<ResolveDiagnosti
     })
 }
 
+#[cfg(not(vesper_port))]
 fn candidate_satisfies_trust_policy(
     owner: &Manifest,
     candidate: &Manifest,
@@ -182,6 +195,7 @@ fn candidate_satisfies_trust_policy(
     Ok(())
 }
 
+#[cfg(not(vesper_port))]
 fn active_dependencies(
     manifest: &Manifest,
     active_features: Option<&BTreeSet<String>>,
@@ -200,6 +214,7 @@ fn active_dependencies(
     deps
 }
 
+#[cfg(not(vesper_port))]
 fn reachable_targets(
     owner: &PackageName,
     assigned: &BTreeMap<PackageName, &Manifest>,
@@ -228,6 +243,22 @@ fn reachable_targets(
 }
 
 pub fn compute_metrics(
+    sol: &Solution,
+    root: &PackageName,
+    metadata: &BTreeMap<(PackageName, Version), CandidateMetadata>,
+) -> SolutionMetrics {
+    #[cfg(vesper_port)]
+    {
+        crate::port::compute_metrics(sol, root, metadata)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        compute_metrics_rust(sol, root, metadata)
+    }
+}
+
+#[cfg(not(vesper_port))]
+fn compute_metrics_rust(
     sol: &Solution,
     root: &PackageName,
     metadata: &BTreeMap<(PackageName, Version), CandidateMetadata>,
@@ -295,9 +326,12 @@ pub fn compute_metrics(
     }
 }
 
+#[cfg(not(vesper_port))]
 type ScoreKey = Vec<(u64, u64)>;
+#[cfg(not(vesper_port))]
 type BestCandidate = (ScoreKey, Solution, SolutionMetrics);
 
+#[cfg(not(vesper_port))]
 fn score_key(metrics: &SolutionMetrics, order: &[OptimizeObjective]) -> ScoreKey {
     order
         .iter()
@@ -319,6 +353,18 @@ fn score_key(metrics: &SolutionMetrics, order: &[OptimizeObjective]) -> ScoreKey
 
 /// Searches valid dependency graphs and returns the lexicographically optimal solution.
 pub fn resolve_optimized(request: &OptimizeRequest) -> Result<OptimizedResolution, ResolveError> {
+    #[cfg(vesper_port)]
+    {
+        crate::port::resolve_optimized(request)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        resolve_optimized_rust(request)
+    }
+}
+
+#[cfg(not(vesper_port))]
+fn resolve_optimized_rust(request: &OptimizeRequest) -> Result<OptimizedResolution, ResolveError> {
     if request.max_solutions == 0 {
         return Err(error(
             crate::ErrorKind::InvalidInput,
@@ -567,7 +613,7 @@ pub fn resolve_optimized(request: &OptimizeRequest) -> Result<OptimizedResolutio
             && validation.unused_selections.is_empty()
         {
             evaluated_solutions += 1;
-            let metrics = compute_metrics(&candidate_sol, root, &request.metadata);
+            let metrics = compute_metrics_rust(&candidate_sol, root, &request.metadata);
             let key = score_key(&metrics, &objectives);
             let replace = best.as_ref().is_none_or(|(best_key, _, _)| key < *best_key);
             if replace {

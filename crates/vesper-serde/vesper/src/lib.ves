@@ -1,0 +1,550 @@
+// @export abi 3
+//
+// @vesper/serde: Vesper port of the vesper-serde scalar codecs (port wave P1
+// lane 19, #916). The Rust crate keeps its public types and borrowed views
+// (src/port.rs is the adapter); every function here is one entry point the
+// adapter calls. The modules mirror the Rust ones: lemire.ves and pow5.ves
+// (src/lemire.rs, src/pow5.rs), index.ves (src/index.rs), stage2.ves
+// (src/stage2.rs), and so on.
+//
+// Integers are u64 here where the Rust code uses usize; the binding
+// converts them through the crate's own types (`crate::port_types`).
+use self::index::{
+    decode_into,
+    doc_clear,
+    field_lookup,
+    parse_document,
+    strings_equal
+};
+use self::lemire::decode_bits;
+use self::stage2::{
+    stage2_admit,
+    stage2_build
+};
+use self::pow5::pow5_table;
+use self::records::{
+    event_check,
+    ndjson_account,
+    ndjson_admit,
+    ndjson_frame,
+    ndjson_validate,
+    node_i64,
+    node_u64,
+    tile_decode
+};
+use self::encode::{
+    encode_size,
+    encode_write
+};
+use self::helpers::{
+    bound_field,
+    bound_string,
+    escaped_mask,
+    swar_compile,
+    swar_key,
+    swar_key_matches,
+    swar_key_raw,
+    swar_window
+};
+use self::binary::{
+    archive_encode,
+    archive_size,
+    archive_validate,
+    archive_validation_bytes,
+    relptr_between,
+    relptr_resolve,
+    relslice_resolve,
+    vbyte_decode,
+    vbyte_encode,
+    vbyte_max_size,
+    vbyte_size
+};
+
+// A decoded binary64: `path` 0 when the text is not a JSON number, 1
+// Clinger, 2 Eisel-Lemire, 3 undecided (the caller falls back).
+pub copy struct Decoded {
+    path: u64,
+    bits: u64
+}
+
+// `crate::ErrorKind`, variant for variant.
+pub copy enum ErrorKind {
+    Syntax,
+    Utf8,
+    Escape,
+    Number,
+    DuplicateKey,
+    InputLimit,
+    DepthLimit,
+    TokenLimit,
+    StringLimit,
+    WorkLimit,
+    AllocationLimit,
+    AllocationFailed,
+    ScratchTooSmall,
+    OutputTooSmall,
+    OutputLimit,
+    Overflow,
+    Type,
+    End,
+    IsaUnavailable
+}
+
+// `crate::Error`.
+pub copy struct Error {
+    kind: ErrorKind,
+    offset: u64
+}
+
+// `crate::Kind`.
+pub copy enum Kind {
+    Null,
+    Bool,
+    Number,
+    String,
+    Array,
+    Object
+}
+
+// `crate::index::Token`: one tape entry.
+pub copy struct Token {
+    start: u64,
+    end: u64,
+    next: u64,
+    kind: Kind,
+    decoded_len: u64,
+    escaped: bool,
+    depth: u64
+}
+
+// `crate::Limits`.
+pub copy struct Limits {
+    max_input_bytes: u64,
+    max_depth: u64,
+    max_tokens: u64,
+    max_string_bytes: u64,
+    max_total_string_bytes: u64,
+    max_work: u64,
+    max_index_bytes: u64
+}
+
+// A validated document's token tape (`IndexedJson` without its input):
+// `capacity` tokens reserved, `work` units used, `entries` stage 1 entries
+// (structural and escape positions) counted.
+pub struct Doc {
+    tokens: ChunkSeq[Token],
+    capacity: u64,
+    work: u64,
+    entries: u64
+}
+
+// `EncodeLimits`.
+pub copy struct EncodeLimits {
+    max_output_bytes: u64,
+    max_depth: u64,
+    max_tokens: u64,
+    max_string_bytes: u64,
+    max_total_string_bytes: u64,
+    max_work: u64
+}
+
+// `SwarFieldMatcher`.
+pub copy struct Swar {
+    field_idx: u16,
+    word: u64,
+    mask: u64,
+    len: u8
+}
+
+// `JsonSizeBound` as (ceiling, dynamic).
+pub copy struct Bound {
+    n: u64,
+    dynamic: bool
+}
+
+// `binary::ErrorKind`, variant for variant with a `B` prefix (variants
+// share one namespace with `ErrorKind`).
+pub copy enum BinErrorKind {
+    BTruncated,
+    BTrailingBytes,
+    BOutputTooSmall,
+    BByteLimit,
+    BCountLimit,
+    BDepthLimit,
+    BStringLimit,
+    BWorkLimit,
+    BAllocationLimit,
+    BAllocationFailed,
+    BOverflow,
+    BMagic,
+    BVersion,
+    BSchema,
+    BAlignment,
+    BOffset,
+    BLayout,
+    BUtf8,
+    BTree
+}
+
+// `binary::Error`.
+pub copy struct BinError {
+    kind: BinErrorKind,
+    offset: u64
+}
+
+// `streamvbyte::Limits`.
+pub copy struct VbyteLimits {
+    max_values: u64,
+    max_bytes: u64,
+    max_work: u64
+}
+
+// `archive::Limits`.
+pub copy struct ArchiveLimits {
+    max_archive_bytes: u64,
+    max_nodes: u64,
+    max_children_per_node: u64,
+    max_edges: u64,
+    max_depth: u64,
+    max_label_bytes: u64,
+    max_total_label_bytes: u64,
+    max_validation_bytes: u64,
+    max_work: u64
+}
+
+// A resolved byte range.
+pub copy struct Span {
+    start: u64,
+    end: u64
+}
+
+// A record-level failure (vesper/src/records.ves): `code` and `detail`
+// in the failing module's terms, and the NDJSON position.
+pub copy struct Fault {
+    code: u64,
+    detail: u64,
+    offset: u64,
+    record: u64,
+    line: u64
+}
+
+// `TelemetryPoint` with its trace id as a length and four little-endian
+// words.
+pub copy struct TilePoint {
+    ts_unix_ms: i64,
+    latency_us: u32,
+    status_code: u16,
+    flags: u16,
+    trace_len: u64,
+    trace0: u64,
+    trace1: u64,
+    trace2: u64,
+    trace3: u64
+}
+
+// A checked EventEnvelope: the id, and the topic and raw_meta tokens.
+pub copy struct EventRow {
+    id: u64,
+    topic: u64,
+    raw_meta: u64
+}
+
+// `ndjson::BatchLimits` without its per-record `Limits`.
+pub copy struct BatchLimits {
+    max_input_bytes: u64,
+    max_records: u64,
+    max_tokens: u64,
+    max_index_bytes: u64,
+    max_metadata_bytes: u64,
+    max_work: u64
+}
+
+// NDJSON batch admission.
+pub copy struct NdPlan {
+    count: u64,
+    eof_line: u64,
+    metadata_bytes: u64,
+    work: u64
+}
+
+// The NDJSON frame cursor: the batch totals so far, the current frame and
+// the limits of its record.
+pub copy struct NdCursor {
+    start: u64,
+    ordinal: u64,
+    tokens: u64,
+    index_bytes: u64,
+    work: u64,
+    end: u64,
+    payload_end: u64,
+    remaining_tokens: u64,
+    remaining_index: u64,
+    remaining_work: u64,
+    max_input_bytes: u64,
+    max_tokens: u64,
+    max_index_bytes: u64,
+    max_work: u64
+}
+
+pub fn number_pow5() -> ChunkSeq[u64] {
+    pow5_table()
+}
+
+pub fn number_decode(in text: Slice[u8], in pow5: Slice[u64]) -> Decoded {
+    decode_bits(in text, in pow5)
+}
+
+pub fn doc_new() -> Doc {
+    Doc {
+        tokens: ChunkSeq::new(),
+        capacity: 0,
+        work: 0,
+        entries: 0
+    }
+}
+
+// `IndexedJson::parse`: validate `input` into `doc`, reusing its storage.
+pub fn doc_parse(inout doc: Doc, in input: Slice[u8], limits: Limits) -> Unit eff [Fail[Error]] {
+    parse_document(inout doc, in input, limits)
+}
+
+// Empty the tape, keeping its storage (a failed parse leaves it so too).
+pub fn doc_reset(inout doc: Doc) {
+    doc_clear(inout doc)
+}
+
+// `Node::field`: the value token of key `key` in the object at `index`.
+pub fn doc_field(in doc: Doc, in input: Slice[u8], index: u64, in key: Slice[u8], max_work: u64)
+    -> Option[u64] eff [Fail[Error]] {
+    field_lookup(in doc, in input, index, in key, max_work)
+}
+
+// `JsonString::decode` of validated escaped string content `raw`: the
+// decoded bytes go to `scratch`, which the caller checked holds them all.
+// Returns the decoded length.
+pub fn string_decode(in raw: Slice[u8], inout scratch: Slice[u8]) -> u64 {
+    decode_into(in raw, inout scratch)
+}
+
+// `JsonString::equals`: validated string content `raw` decodes to `text`.
+pub fn string_equals(in raw: Slice[u8], in text: Slice[u8]) -> bool {
+    strings_equal(in raw, in text)
+}
+
+// `admit` of src/stage2.rs: the stage 1 entries allowed for `len` bytes.
+pub fn doc_admit(len: u64, limits: Limits) -> u64 eff [Fail[Error]] {
+    stage2_admit(len, limits)
+}
+
+// Stage 2 over a stage 1 index (src/stage2.rs `build`); absent positions
+// are 2^64 - 1.
+pub fn doc_build(
+    inout doc: Doc,
+    in input: Slice[u8],
+    in structurals: Slice[u32],
+    in escapes: Slice[u32],
+    control: u64,
+    truncated: u64,
+    unclosed: bool,
+    limits: Limits
+) -> Unit eff [Fail[Error]] {
+    stage2_build(
+        inout doc,
+        in input,
+        in structurals,
+        in escapes,
+        control,
+        truncated,
+        unclosed,
+        limits
+    )
+}
+
+// `encode::encoded_size` over a flattened value (vesper/src/encode.ves).
+pub fn value_size(in words: Slice[u64], in pool: Slice[u8], limits: EncodeLimits)
+    -> u64 eff [Fail[Error]] {
+    encode_size(in words, in pool, limits)
+}
+
+// `encode::encode_into` over a flattened value.
+pub fn value_write(
+    in words: Slice[u64],
+    in pool: Slice[u8],
+    inout out: Slice[u8],
+    limits: EncodeLimits
+) -> u64 eff [Fail[Error]] {
+    encode_write(in words, in pool, inout out, limits)
+}
+
+// `SwarFieldMatcher::compile_key`.
+pub fn matcher_compile(field_idx: u16, in key: Slice[u8]) -> Option[Swar] {
+    swar_compile(field_idx, in key)
+}
+
+// `SwarFieldMatcher::matches_window`.
+pub fn matcher_window(m: Swar, in window: Slice[u8]) -> bool {
+    swar_window(m, in window)
+}
+
+// `SwarFieldMatcher::matches_key` on validated key content.
+pub fn matcher_key(m: Swar, in raw: Slice[u8]) -> bool {
+    swar_key(m, in raw)
+}
+
+// `compute_escaped_mask_64` as one record.
+pub copy struct Escaped {
+    mask: u64,
+    carry: bool
+}
+
+pub fn escape_mask(backslashes: u64, carry_in: bool) -> Escaped {
+    let (mask, carry) = escaped_mask(backslashes, carry_in);
+    Escaped {
+        mask: mask,
+        carry: carry
+    }
+}
+
+// `JsonSizeBound::string`.
+pub fn size_bound_string(max_utf8_bytes: u64) -> Bound eff [Fail[Error]] {
+    bound_string(max_utf8_bytes)
+}
+
+// `JsonSizeBound::combine_field`.
+pub fn size_bound_field(object: Bound, key_escaped_len: u64, field: Bound, first: bool)
+    -> Bound eff [Fail[Error]] {
+    bound_field(object, key_escaped_len, field, first)
+}
+
+// `SwarKey::matches_raw`.
+pub fn key_raw(w0: u64, w1: u64, len: u64, in raw: Slice[u8]) -> bool {
+    swar_key_raw(w0, w1, len, in raw)
+}
+
+// `SwarKey::matches`.
+pub fn key_matches(w0: u64, w1: u64, len: u64, escaped: bool, in raw: Slice[u8]) -> bool {
+    swar_key_matches(w0, w1, len, escaped, in raw)
+}
+
+// `streamvbyte::max_encoded_size`.
+pub fn svb_max_size(count: u64) -> u64 eff [Fail[BinError]] {
+    vbyte_max_size(count)
+}
+
+// `streamvbyte::encoded_size`.
+pub fn svb_size(in values: Slice[u32], limits: VbyteLimits) -> u64 eff [Fail[BinError]] {
+    vbyte_size(in values, limits)
+}
+
+// `streamvbyte::encode_into`.
+pub fn svb_encode(in values: Slice[u32], inout out: Slice[u8], limits: VbyteLimits)
+    -> u64 eff [Fail[BinError]] {
+    vbyte_encode(in values, inout out, limits)
+}
+
+// `streamvbyte::decode_into`.
+pub fn svb_decode(in input: Slice[u8], count: u64, inout out: Slice[u32], limits: VbyteLimits)
+    -> u64 eff [Fail[BinError]] {
+    vbyte_decode(in input, count, inout out, limits)
+}
+
+// `archive::validation_bytes`.
+pub fn vspa_validation_bytes(count: u64) -> u64 eff [Fail[BinError]] {
+    archive_validation_bytes(count)
+}
+
+// `RelPtr32::resolve`.
+pub fn vspa_resolve(offset: i32, field_offset: u64, size: u64, alignment: u64, archive_len: u64)
+    -> Span eff [Fail[BinError]] {
+    relptr_resolve(offset, field_offset, size, alignment, archive_len)
+}
+
+// `RelSlice32::resolve`.
+pub fn vspa_resolve_slice(
+    offset: i32,
+    count: u32,
+    field_offset: u64,
+    item_size: u64,
+    alignment: u64,
+    archive_len: u64
+) -> Span eff [Fail[BinError]] {
+    relslice_resolve(offset, count, field_offset, item_size, alignment, archive_len)
+}
+
+// `RelPtr32::between`.
+pub fn vspa_between(field_offset: u64, target_offset: u64) -> i32 eff [Fail[BinError]] {
+    relptr_between(field_offset, target_offset)
+}
+
+// `archive::encoded_size` over flattened nodes: five words per node (value,
+// label offset, label length, children offset, child count) into the label
+// and child pools.
+pub fn vspa_size(
+    in nodes: Slice[u64],
+    in labels: Slice[u8],
+    in children: Slice[u32],
+    limits: ArchiveLimits
+) -> u64 eff [Fail[BinError]] {
+    archive_size(in nodes, in labels, in children, limits)
+}
+
+// `archive::encode_into`.
+pub fn vspa_encode(
+    in nodes: Slice[u64],
+    in labels: Slice[u8],
+    in children: Slice[u32],
+    inout out: Slice[u8],
+    limits: ArchiveLimits
+) -> u64 eff [Fail[BinError]] {
+    archive_encode(in nodes, in labels, in children, inout out, limits)
+}
+
+// `Archive::validate`: the node count.
+pub fn vspa_validate(in bytes: Slice[u8], limits: ArchiveLimits) -> u64 eff [Fail[BinError]] {
+    archive_validate(in bytes, limits)
+}
+
+// `Node::as_u64`.
+pub fn doc_u64(in doc: Doc, in input: Slice[u8], index: u64) -> u64 eff [Fail[Error]] {
+    node_u64(in doc, in input, index)
+}
+
+// `Node::as_i64`.
+pub fn doc_i64(in doc: Doc, in input: Slice[u8], index: u64) -> i64 eff [Fail[Error]] {
+    node_i64(in doc, in input, index)
+}
+
+// The telemetry decode of src/tiles.rs.
+pub fn doc_tile(in doc: Doc, in input: Slice[u8], root: u64) -> TilePoint eff [Fail[Fault]] {
+    tile_decode(in doc, in input, root)
+}
+
+// `checked_event` of src/event_columns.rs, `passes` schema passes paid
+// from `remaining`.
+pub fn doc_event(in doc: Doc, in input: Slice[u8], root: u64, inout remaining: u64, passes: u64)
+    -> EventRow eff [Fail[Fault]] {
+    event_check(in doc, in input, root, inout remaining, passes)
+}
+
+// `BatchLimits::validate`.
+pub fn batch_validate(batch: BatchLimits, record: Limits) -> Unit eff [Fail[Fault]] {
+    ndjson_validate(batch, record)
+}
+
+// NDJSON batch admission.
+pub fn batch_admit(in input: Slice[u8], batch: BatchLimits, record_size: u64)
+    -> NdPlan eff [Fail[Fault]] {
+    ndjson_admit(in input, batch, record_size)
+}
+
+// The next NDJSON frame.
+pub fn batch_frame(in input: Slice[u8], inout cursor: NdCursor, batch: BatchLimits, record: Limits)
+    -> Unit eff [Fail[Fault]] {
+    ndjson_frame(in input, inout cursor, batch, record)
+}
+
+// One parsed NDJSON record's totals.
+pub fn batch_account(inout cursor: NdCursor, tokens: u64, index: u64, work: u64)
+    -> Unit eff [Fail[Fault]] {
+    ndjson_account(inout cursor, tokens, index, work)
+}

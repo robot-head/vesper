@@ -15,10 +15,19 @@
 //! - `shrink`: shrinking a 64-element "sum exceeds 1,000" counterexample.
 //! - `fuzz`: guided fuzzing until the README's 32-bit magic guard fails,
 //!   then shrinking the counterexample.
+//! - `dpor`: DPOR over a random three-fiber program of the exploration
+//!   tests (16 programs, by seed).
+//! - `cached`: DPOR with state caching and a preemption bound of one over a
+//!   random two-fiber program with spawns, cancellation and chosen I/O
+//!   results.
+#[path = "../tests/common/mod.rs"]
+mod common;
+
 use std::{process::Command, time::Instant};
 use vesper_bench::{PairedSample, analyze_pairs};
 use vesper_crucible::{
-    ChoiceTape, FuzzConfig, PropError, ShrinkConfig, Source, SplitMix64, fuzz, shrink,
+    ChoiceTape, ExploreConfig, FuzzConfig, PropError, Search, ShrinkConfig, Source, SplitMix64,
+    explore_cached, explore_dpor, fuzz, shrink,
 };
 
 fn draws(seed: u64) -> u64 {
@@ -78,13 +87,43 @@ fn fuzz_run(seed: u64) -> u64 {
     report.execs ^ report.counterexample.map_or(0, |cx| cx.tape.len() as u64)
 }
 
+fn search_config(bound: Option<u32>) -> ExploreConfig {
+    ExploreConfig {
+        max_executions: 3_000,
+        preemption_bound: bound,
+        ..ExploreConfig::default()
+    }
+}
+
+fn dpor_run(seed: u64) -> u64 {
+    let program = common::random_program(seed % 16, 3, 3);
+    let observe = |w: &common::Cells| Ok(w.clone());
+    explore_dpor(&search_config(None), || common::build(&program), observe)
+        .map_or(0, |e| e.executions ^ e.transitions)
+}
+
+fn cached_run(seed: u64) -> u64 {
+    let program = common::random_program_ext(seed % 16, 2, 3);
+    let observe = |w: &common::Cells| Ok(w.clone());
+    explore_cached(
+        Search::Dpor,
+        &search_config(Some(1)),
+        || common::build(&program),
+        observe,
+        common::cells_key,
+    )
+    .map_or(0, |e| e.executions ^ e.transitions)
+}
+
 type Workload = (&'static str, fn(u64) -> u64);
 
-const WORKLOADS: [Workload; 4] = [
+const WORKLOADS: [Workload; 6] = [
     ("draws", draws),
     ("tape-text", tape_text),
     ("shrink", shrink_run),
     ("fuzz", fuzz_run),
+    ("dpor", dpor_run),
+    ("cached", cached_run),
 ];
 
 /// Total nanoseconds for `ops` timed runs after `ops / 4` warm-up ones.

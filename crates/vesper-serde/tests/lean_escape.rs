@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn lean_file() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    crate_root()
         .join("lean/SimdJsonEscape.lean")
         .canonicalize()
         .expect("lean/SimdJsonEscape.lean")
@@ -51,4 +51,17 @@ fn lean_checks_escape_kernel_proof() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The crate directory; the seed package (`seed/`) shares this crate's
+/// tests and data.
+fn crate_root() -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if dir.ends_with("seed") {
+        dir.parent()
+            .expect("seed/ is inside the crate")
+            .to_path_buf()
+    } else {
+        dir
+    }
 }

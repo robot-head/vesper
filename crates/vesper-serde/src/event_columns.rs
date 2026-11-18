@@ -108,6 +108,50 @@ impl<'d, 'a> Fields<'d, 'a> {
     }
 }
 
+#[cfg(vesper_port)]
+fn checked_event<'d, 'a>(
+    record: RecordRef<'d, 'a>,
+    work: &mut Work,
+) -> Result<EventEnvelope<'d, 'a>, Error> {
+    let root = record.root();
+    let row = crate::port::event_check(root.doc, root.index, &mut work.remaining, work.passes)
+        .map_err(|f| match f.code {
+            6 => at(record, ErrorKind::WorkLimit),
+            12 => at(
+                record,
+                ErrorKind::MissingField(match f.detail {
+                    0 => EventField::Id,
+                    1 => EventField::Topic,
+                    _ => EventField::RawMeta,
+                }),
+            ),
+            13 => record.json_error(crate::Error::new(
+                if f.detail == 0 {
+                    crate::ErrorKind::Type
+                } else {
+                    crate::ErrorKind::Number
+                },
+                f.offset,
+            )),
+            _ => at(record, ErrorKind::Overflow),
+        })?;
+    Ok(event_row(root, row))
+}
+
+#[cfg(vesper_port)]
+fn event_row<'d, 'a>(root: Node<'d, 'a>, row: crate::port::EventRow) -> EventEnvelope<'d, 'a> {
+    let node = |index| Node {
+        doc: root.doc,
+        index,
+    };
+    EventEnvelope {
+        id: row.id,
+        topic: node(row.topic).string().expect("checked topic string"),
+        raw_meta: node(row.raw_meta),
+    }
+}
+
+#[cfg(not(vesper_port))]
 fn checked_event<'d, 'a>(
     record: RecordRef<'d, 'a>,
     work: &mut Work,
@@ -153,6 +197,17 @@ fn checked_event<'d, 'a>(
     })
 }
 
+#[cfg(vesper_port)]
+fn prepaid_event<'d, 'a>(record: RecordRef<'d, 'a>) -> EventEnvelope<'d, 'a> {
+    // Zero passes: the preflight already paid both.
+    let root = record.root();
+    let mut budget = usize::MAX;
+    let row = crate::port::event_check(root.doc, root.index, &mut budget, 0)
+        .expect("preflight checked the event schema");
+    event_row(root, row)
+}
+
+#[cfg(not(vesper_port))]
 fn prepaid_event<'d, 'a>(record: RecordRef<'d, 'a>) -> EventEnvelope<'d, 'a> {
     // Only project_into calls this after checking every immutable batch row and
     // paying both schema passes. There are no callbacks, fresh quota checks or

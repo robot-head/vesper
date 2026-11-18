@@ -242,6 +242,266 @@ impl<T, const N: usize> fmt::Debug for Words<T, N> {
     }
 }
 
+// A full word, a `Word` and `Words` are plain words: any bits are a value.
+macro_rules! word_mirrors {
+    ($($t:ty),*) => {$(
+        // SAFETY: one eight-byte, eight-byte-aligned word; any bits are valid.
+        unsafe impl Mirror for $t {
+            const WORDS: usize = 1;
+        }
+    )*};
+}
+word_mirrors!(u64, i64, usize, isize, f64);
+
+// SAFETY: `repr(transparent)` over one `u64`.
+unsafe impl<T: 'static> Mirror for Word<T> {
+    const WORDS: usize = 1;
+}
+
+// SAFETY: `repr(transparent)` over `[u64; N]`.
+unsafe impl<T: 'static, const N: usize> Mirror for Words<T, N> {
+    const WORDS: usize = N;
+}
+
+/// The mirror of a Vesper `Option[T]` (#991): the tag word (`0` is `None`,
+/// `1` is `Some`) and the payload cell, which is `T`'s mirror or word cell.
+/// A v3 library built with `// @export abi 3 options` lends `in`/`inout`
+/// `Option` parameters as this mirror and writes `Option` results into one,
+/// with no conversion.
+///
+/// The payload of a `None` is unspecified words (zero when Rust built it).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OptionMirror<T: Mirror> {
+    tag: u64,
+    value: T,
+}
+
+// SAFETY: `repr(C)` of a word and a mirror, so `1 + T::WORDS` words with no
+// padding, eight-byte aligned, and any bits are a value.
+unsafe impl<T: Mirror> Mirror for OptionMirror<T> {
+    const WORDS: usize = 1 + T::WORDS;
+}
+
+/// All-zero words of a mirror.
+fn zeroed<T: Mirror>() -> T {
+    // SAFETY: a `Mirror` is plain words (the trait's contract), so the zero
+    // bit pattern is a value of it.
+    unsafe { core::mem::zeroed() }
+}
+
+impl<T: Mirror> OptionMirror<T> {
+    /// `None`.
+    pub fn none() -> Self {
+        Self {
+            tag: 0,
+            value: zeroed(),
+        }
+    }
+
+    /// `Some(value)`.
+    pub fn some(value: T) -> Self {
+        Self { tag: 1, value }
+    }
+
+    /// The tag word as Vesper wrote it.
+    pub const fn tag(&self) -> u64 {
+        self.tag
+    }
+
+    pub fn is_some(&self) -> bool {
+        self.as_ref().is_some()
+    }
+
+    pub fn is_none(&self) -> bool {
+        !self.is_some()
+    }
+
+    /// The payload, borrowed in place.
+    ///
+    /// # Panics
+    /// When the tag is neither 0 nor 1 (not a value Vesper writes).
+    pub fn as_ref(&self) -> Option<&T> {
+        match self.tag {
+            0 => None,
+            1 => Some(&self.value),
+            tag => panic!("invalid Option tag {tag}"),
+        }
+    }
+
+    /// The payload, mutably borrowed in place.
+    pub fn as_mut(&mut self) -> Option<&mut T> {
+        match self.tag {
+            0 => None,
+            1 => Some(&mut self.value),
+            tag => panic!("invalid Option tag {tag}"),
+        }
+    }
+
+    /// The value as a Rust `Option`.
+    pub fn get(&self) -> Option<T> {
+        self.as_ref().copied()
+    }
+
+    /// Replace the value.
+    pub fn set(&mut self, value: Option<T>) {
+        *self = value.into();
+    }
+}
+
+impl<T: Mirror> From<Option<T>> for OptionMirror<T> {
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(v) => Self::some(v),
+            None => Self::none(),
+        }
+    }
+}
+
+impl<T: Mirror> From<OptionMirror<T>> for Option<T> {
+    fn from(value: OptionMirror<T>) -> Self {
+        value.get()
+    }
+}
+
+impl<T: Mirror> Default for OptionMirror<T> {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl<T: Mirror + PartialEq> PartialEq for OptionMirror<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl<T: Mirror + fmt::Debug> fmt::Debug for OptionMirror<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.as_ref(), f)
+    }
+}
+
+/// The payload words of a [`ResultMirror`]: either cell, as long as the
+/// longer one.
+#[repr(C)]
+#[derive(Clone, Copy)]
+union Payload<T: Copy, E: Copy> {
+    ok: T,
+    err: E,
+}
+
+/// The mirror of a Vesper `Result[T, E]` (#991): the tag word (`0` is `Ok`,
+/// `1` is `Err`) and the payload, `1 + max(T::WORDS, E::WORDS)` words in
+/// all. Both cells start right after the tag, as in the Vesper layout.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ResultMirror<T: Mirror, E: Mirror> {
+    tag: u64,
+    payload: Payload<T, E>,
+}
+
+// SAFETY: `repr(C)` of a word and a `repr(C)` union of two mirrors, so
+// `1 + max` words (both are whole words, eight-byte aligned) with no
+// padding. Rust-built values are zeroed before a cell is written, so every
+// word is initialized, and any bits are a value of either cell.
+unsafe impl<T: Mirror, E: Mirror> Mirror for ResultMirror<T, E> {
+    const WORDS: usize = 1 + if T::WORDS > E::WORDS {
+        T::WORDS
+    } else {
+        E::WORDS
+    };
+}
+
+impl<T: Mirror, E: Mirror> ResultMirror<T, E> {
+    /// All words zero, then `tag` and one cell written.
+    fn zeroed_with(tag: u64) -> Self {
+        let mut out: Self = zeroed();
+        out.tag = tag;
+        out
+    }
+
+    /// `Ok(value)`.
+    pub fn ok(value: T) -> Self {
+        let mut out = Self::zeroed_with(0);
+        out.payload.ok = value;
+        out
+    }
+
+    /// `Err(error)`.
+    pub fn err(error: E) -> Self {
+        let mut out = Self::zeroed_with(1);
+        out.payload.err = error;
+        out
+    }
+
+    /// The tag word as Vesper wrote it.
+    pub const fn tag(&self) -> u64 {
+        self.tag
+    }
+
+    pub fn is_ok(&self) -> bool {
+        self.as_ref().is_ok()
+    }
+
+    pub fn is_err(&self) -> bool {
+        !self.is_ok()
+    }
+
+    /// The payload, borrowed in place.
+    ///
+    /// # Panics
+    /// When the tag is neither 0 nor 1 (not a value Vesper writes).
+    pub fn as_ref(&self) -> Result<&T, &E> {
+        // SAFETY: both cells are plain words that start at the payload, so
+        // either reading is a value; the tag says which one Vesper wrote.
+        unsafe {
+            match self.tag {
+                0 => Ok(&self.payload.ok),
+                1 => Err(&self.payload.err),
+                tag => panic!("invalid Result tag {tag}"),
+            }
+        }
+    }
+
+    /// The value as a Rust `Result`.
+    pub fn get(&self) -> Result<T, E> {
+        self.as_ref().map(|t| *t).map_err(|e| *e)
+    }
+
+    /// Replace the value.
+    pub fn set(&mut self, value: Result<T, E>) {
+        *self = value.into();
+    }
+}
+
+impl<T: Mirror, E: Mirror> From<Result<T, E>> for ResultMirror<T, E> {
+    fn from(value: Result<T, E>) -> Self {
+        match value {
+            Ok(v) => Self::ok(v),
+            Err(e) => Self::err(e),
+        }
+    }
+}
+
+impl<T: Mirror, E: Mirror> From<ResultMirror<T, E>> for Result<T, E> {
+    fn from(value: ResultMirror<T, E>) -> Self {
+        value.get()
+    }
+}
+
+impl<T: Mirror + PartialEq, E: Mirror + PartialEq> PartialEq for ResultMirror<T, E> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_ref() == other.as_ref()
+    }
+}
+
+impl<T: Mirror + fmt::Debug, E: Mirror + fmt::Debug> fmt::Debug for ResultMirror<T, E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.as_ref(), f)
+    }
+}
+
 /// Lend `items` to Vesper as an `in Slice[T]` view, in place.
 pub fn with_mirror_slice<T: Mirror, R>(items: &[T], call: impl FnOnce(*mut u64) -> R) -> R {
     let len = items.len() as u64;
@@ -301,5 +561,46 @@ mod tests {
         let words = mirror_words(&p);
         assert_eq!(words, &[u64::MAX, (-3i64) as u64, 0, 0]);
         assert_eq!(mirror_from_words::<Probe>(words), p);
+    }
+
+    #[test]
+    fn option_and_result_mirrors_have_the_vesper_layout() {
+        type O = OptionMirror<Probe>;
+        assert_eq!(core::mem::size_of::<O>(), O::WORDS * 8);
+        assert_eq!(O::WORDS, 5);
+        let some = O::some(Probe {
+            a: 7,
+            b: Word::new(-1),
+            c: Words::new(Some(3)),
+        });
+        assert_eq!(mirror_words(&some), &[1, 7, u64::MAX, 1, 3]);
+        assert_eq!(mirror_words(&O::none()), &[0, 0, 0, 0, 0]);
+        assert_eq!(mirror_from_words::<O>(&[1, 7, u64::MAX, 1, 3]), some);
+        assert_eq!(some.get().map(|p| p.a), Some(7));
+        assert!(O::default().is_none());
+        let narrow: OptionMirror<Word<u8>> = Some(Word::new(200)).into();
+        assert_eq!(mirror_words(&narrow), &[1, 200]);
+
+        type R = ResultMirror<u64, Probe>;
+        assert_eq!(core::mem::size_of::<R>(), R::WORDS * 8);
+        assert_eq!(R::WORDS, 5);
+        let ok = R::ok(9);
+        assert_eq!(mirror_words(&ok), &[0, 9, 0, 0, 0]);
+        assert_eq!(ok.get().ok(), Some(9));
+        let err = R::err(Probe {
+            a: 1,
+            b: Word::new(2),
+            c: Words::new(None),
+        });
+        assert_eq!(mirror_words(&err), &[1, 1, 2, 0, 0]);
+        assert!(err.is_err());
+        let longer_ok = ResultMirror::<Probe, Word<bool>>::err(Word::new(true));
+        assert_eq!(mirror_words(&longer_ok), &[1, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid Option tag 2")]
+    fn invalid_tags_are_refused() {
+        let _ = mirror_from_words::<OptionMirror<u64>>(&[2, 0]).get();
     }
 }

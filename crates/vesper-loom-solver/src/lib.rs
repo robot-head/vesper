@@ -1,15 +1,52 @@
 //! Deterministic, bounded offline dependency search over supplied manifests.
 #![doc = include_str!("../README.md")]
 
+#[cfg(not(vesper_port))]
 use semver::VersionReq;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeSet;
+#[cfg(not(vesper_port))]
+use std::collections::{BTreeMap, VecDeque};
+#[cfg(not(vesper_port))]
 use vesper_loom_calculus::{
-    Diagnostic, Manifest, PackageName, RootRequirement, SCHEMA_VERSION, Selection, Solution,
-    SystemSelection, validate_manifest, validate_solution,
+    Diagnostic, RootRequirement, SCHEMA_VERSION, Selection, validate_manifest, validate_solution,
 };
+use vesper_loom_calculus::{Manifest, PackageName, Solution, SystemSelection};
 
 pub mod optimize;
+
+// The port-backed build (package vesper-loom-solver) runs resolution,
+// locked validation and optimization in the Vesper package in vesper/; the
+// seed copy (vesper-loom-solver-seed) that the compiler links keeps this
+// Rust code. See "Crates the compiler links" in
+// docs/maintenance/porting-a-crate.md.
+#[cfg(vesper_port)]
+mod port;
+// Generated and committed, but kept outside src/ so formatters, which check
+// every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code, clippy::all)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+
+/// Which build this is: `"vesper"` for the port-backed package
+/// `vesper-loom-solver`, `"rust"` for the seed copy
+/// `vesper-loom-solver-seed` that the compiler links.
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
+/// Live allocations of the Vesper build (always 0 for the Rust build), for
+/// leak tests.
+pub fn port_live_allocations() -> i64 {
+    #[cfg(vesper_port)]
+    {
+        port::live_allocations()
+    }
+    #[cfg(not(vesper_port))]
+    {
+        0
+    }
+}
 
 /// An untrusted local catalog. Alternative versions are candidates, not installations.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +112,7 @@ impl std::fmt::Display for ResolveError {
 }
 impl std::error::Error for ResolveError {}
 
+#[cfg(not(vesper_port))]
 pub(crate) fn diagnostic(
     code: &str,
     package: Option<&PackageName>,
@@ -88,6 +126,7 @@ pub(crate) fn diagnostic(
         message: message.into(),
     }
 }
+#[cfg(not(vesper_port))]
 pub(crate) fn from_calculus(d: Diagnostic) -> ResolveDiagnostic {
     ResolveDiagnostic {
         code: format!("{:?}", d.code),
@@ -110,22 +149,26 @@ pub(crate) fn error(
     }
 }
 
+#[cfg(not(vesper_port))]
 fn system_name_valid(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.' | b'+'))
 }
+#[cfg(not(vesper_port))]
 fn system_requirement(source: &str) -> Option<(String, VersionReq)> {
     let (name, requirement) = source.split_once(char::is_whitespace)?;
     system_name_valid(name).then_some(())?;
     Some((name.into(), VersionReq::parse(requirement.trim()).ok()?))
 }
 
+#[cfg(not(vesper_port))]
 pub(crate) struct Inputs<'a> {
     pub(crate) packages: BTreeMap<PackageName, Vec<&'a Manifest>>,
     pub(crate) systems: BTreeMap<String, Vec<&'a SystemSelection>>,
 }
+#[cfg(not(vesper_port))]
 pub(crate) fn inputs(request: &ResolveRequest) -> Result<Inputs<'_>, ResolveError> {
     let mut invalid = vec![];
     if request.catalog.schema_version != SCHEMA_VERSION {
@@ -200,6 +243,7 @@ pub(crate) fn inputs(request: &ResolveRequest) -> Result<Inputs<'_>, ResolveErro
     Ok(Inputs { packages, systems })
 }
 
+#[cfg(not(vesper_port))]
 fn unsupported_policy(manifest: &Manifest) -> Option<ResolveDiagnostic> {
     let policy = &manifest.resolver.as_ref()?.policy;
     (!policy.optimize.is_empty()
@@ -213,7 +257,9 @@ fn unsupported_policy(manifest: &Manifest) -> Option<ResolveDiagnostic> {
         ))
 }
 
+#[cfg(not(vesper_port))]
 type Assigned<'a> = BTreeMap<PackageName, &'a Manifest>;
+#[cfg(not(vesper_port))]
 #[derive(Default)]
 struct Closure {
     features: BTreeMap<PackageName, BTreeSet<String>>,
@@ -223,6 +269,7 @@ struct Closure {
 
 // Recompute after every decision: late features may activate edges on already
 // visited packages, including through cycles. The worklist is monotonic.
+#[cfg(not(vesper_port))]
 fn closure(
     request: &ResolveRequest,
     assigned: &Assigned<'_>,
@@ -312,6 +359,7 @@ fn closure(
     }
 }
 
+#[cfg(not(vesper_port))]
 pub(crate) fn solution(
     request: &ResolveRequest,
     assigned: &Assigned<'_>,
@@ -348,6 +396,18 @@ pub(crate) fn solution(
 /// This checks offline declaration consistency, not source identity, provenance,
 /// signatures, compiler authority or the availability of native installations.
 pub fn validate_locked(request: &ResolveRequest, locked: &Solution) -> Result<(), ResolveError> {
+    #[cfg(vesper_port)]
+    {
+        port::validate_locked(request, locked)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        validate_locked_rust(request, locked)
+    }
+}
+
+#[cfg(not(vesper_port))]
+fn validate_locked_rust(request: &ResolveRequest, locked: &Solution) -> Result<(), ResolveError> {
     let inputs = inputs(request)?;
     if let Some(policy) = unsupported_policy(&request.root) {
         return Err(error(ErrorKind::UnsupportedPolicy, 0, vec![policy]));
@@ -511,6 +571,18 @@ pub fn validate_locked(request: &ResolveRequest, locked: &Solution) -> Result<()
 /// Every successful result passes the calculus validator. No code is executed,
 /// network contacted, or package provenance/compiler authority inferred.
 pub fn resolve(request: &ResolveRequest) -> Result<Solution, ResolveError> {
+    #[cfg(vesper_port)]
+    {
+        port::resolve(request)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        resolve_rust(request)
+    }
+}
+
+#[cfg(not(vesper_port))]
+fn resolve_rust(request: &ResolveRequest) -> Result<Solution, ResolveError> {
     let inputs = inputs(request)?;
     if let Some(policy) = unsupported_policy(&request.root) {
         return Err(error(ErrorKind::UnsupportedPolicy, 0, vec![policy]));

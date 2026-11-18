@@ -49,8 +49,8 @@ impl IndexPlan {
     pub(crate) fn new(len: usize, limits: &Limits) -> Self {
         let capacity = len
             .min(limits.max_tokens)
-            .min(limits.max_index_bytes / size_of::<Token>());
-        let entries = (limits.max_index_bytes - capacity * size_of::<Token>()) / size_of::<u32>();
+            .min(limits.max_index_bytes / TOKEN_BYTES);
+        let entries = (limits.max_index_bytes - capacity * TOKEN_BYTES) / size_of::<u32>();
         Self { capacity, entries }
     }
 }
@@ -64,6 +64,12 @@ pub enum Kind {
     Array,
     Object,
 }
+
+/// Logical bytes of one tape token, in which `max_index_bytes`,
+/// `index_capacity_bytes` and `index_bytes` are stated: `size_of::<Token>()`
+/// of the Rust build on every 64-bit target, in both builds.
+pub(crate) const TOKEN_BYTES: usize = 48;
+const _: () = assert!(size_of::<Token>() == TOKEN_BYTES);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Token {
@@ -83,13 +89,29 @@ pub(crate) struct Token {
 pub struct IndexedJson<'a> {
     /// The whole input as validated UTF-8, so token views are O(1) slices.
     pub(crate) input: &'a str,
+    /// The token tape: a `Vec` in the Rust build, the port's tape handle in
+    /// the port-backed build (read through [`IndexedJson::token`]).
+    #[cfg(not(vesper_port))]
     pub(crate) tokens: Vec<Token>,
+    #[cfg(vesper_port)]
+    pub(crate) tokens: crate::port::Tape,
     pub(crate) work_used: usize,
     /// Stage 1 entries (structural and escape positions) the document has.
     pub(crate) index_entries: usize,
 }
 impl<'a> IndexedJson<'a> {
     pub fn parse(input: &'a [u8], limits: Limits) -> Result<Self, Error> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::parse(input, limits)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            Self::rust_parse(input, limits)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_parse(input: &'a [u8], limits: Limits) -> Result<Self, Error> {
         if input.len() > limits.max_input_bytes {
             return Err(Error::new(ErrorKind::InputLimit, 0));
         }
@@ -142,9 +164,20 @@ impl<'a> IndexedJson<'a> {
     pub fn token_count(&self) -> usize {
         self.tokens.len()
     }
+    /// Tape token `i` (in bounds).
+    pub(crate) fn token(&self, i: usize) -> Token {
+        #[cfg(not(vesper_port))]
+        {
+            self.tokens[i]
+        }
+        #[cfg(vesper_port)]
+        {
+            self.tokens.get(i)
+        }
+    }
     /// Bytes reserved for the token tape.
     pub fn index_capacity_bytes(&self) -> usize {
-        self.tokens.capacity() * size_of::<Token>()
+        self.tokens.capacity() * TOKEN_BYTES
     }
     /// Bytes charged against `max_index_bytes`: the tape's capacity plus 4
     /// per stage 1 entry (structural or escape position). Identical in
@@ -160,7 +193,8 @@ impl<'a> IndexedJson<'a> {
     /// as the scalar and SIMD parsers must on every accepted input.
     pub fn same_tape(&self, other: &IndexedJson<'_>) -> bool {
         self.input == other.input
-            && self.tokens == other.tokens
+            && self.tokens.len() == other.tokens.len()
+            && (0..self.tokens.len()).all(|i| self.token(i) == other.token(i))
             && self.work_used == other.work_used
             && self.index_entries == other.index_entries
     }
@@ -174,21 +208,23 @@ impl<'a> IndexedJson<'a> {
 /// from unvalidated bytes. Copying the view keeps input and index borrowed.
 #[derive(Clone, Copy, Debug)]
 pub struct Node<'d, 'a> {
-    doc: &'d IndexedJson<'a>,
-    index: usize,
+    pub(crate) doc: &'d IndexedJson<'a>,
+    pub(crate) index: usize,
 }
 impl<'d, 'a> Node<'d, 'a> {
     fn token(self) -> Token {
-        self.doc.tokens[self.index]
+        self.doc.token(self.index)
     }
     pub fn kind(self) -> Kind {
         self.token().kind
     }
     pub(crate) fn stats(self) -> impl Iterator<Item = (Kind, usize, usize)> + 'd {
         let root = self.token();
-        self.doc.tokens[self.index..root.next]
-            .iter()
-            .map(move |t| (t.kind, t.depth - root.depth, t.decoded_len))
+        let doc = self.doc;
+        (self.index..root.next).map(move |i| {
+            let t = doc.token(i);
+            (t.kind, t.depth - root.depth, t.decoded_len)
+        })
     }
     pub fn raw(self) -> &'a str {
         let t = self.token();
@@ -206,6 +242,17 @@ impl<'d, 'a> Node<'d, 'a> {
         })
     }
     pub fn as_u64(self) -> Result<u64, Error> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::node_u64(self.doc, self.index)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.rust_as_u64()
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_as_u64(self) -> Result<u64, Error> {
         if self.kind() != Kind::Number {
             return Err(Error::new(ErrorKind::Type, self.token().start));
         }
@@ -214,6 +261,17 @@ impl<'d, 'a> Node<'d, 'a> {
             .map_err(|_| Error::new(ErrorKind::Number, self.token().start))
     }
     pub fn as_i64(self) -> Result<i64, Error> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::node_i64(self.doc, self.index)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.rust_as_i64()
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_as_i64(self) -> Result<i64, Error> {
         if self.kind() != Kind::Number {
             return Err(Error::new(ErrorKind::Type, self.token().start));
         }
@@ -274,6 +332,22 @@ impl<'d, 'a> Node<'d, 'a> {
     /// Lookup has an explicit independent work allowance. Keys are compared in
     /// decoded Unicode form, with no allocation. Parsing already ruled out duplicates.
     pub fn field(self, key: &str, max_work: usize) -> Result<Option<Node<'d, 'a>>, Error> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::field(self.doc, self.index, key, max_work).map(|found| {
+                found.map(|index| Node {
+                    doc: self.doc,
+                    index,
+                })
+            })
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.rust_field(key, max_work)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_field(self, key: &str, max_work: usize) -> Result<Option<Node<'d, 'a>>, Error> {
         let mut work = max_work;
         for (name, value) in self.fields()? {
             let mut a = name.chars();
@@ -335,7 +409,7 @@ impl<'d, 'a> Cursor<'d, 'a> {
         if self.index >= self.end {
             return None;
         }
-        self.doc.tokens.get(self.index).map(|_| Node {
+        (self.index < self.doc.token_count()).then_some(Node {
             doc: self.doc,
             index: self.index,
         })
@@ -388,7 +462,14 @@ impl<'a> JsonString<'a> {
         self.escaped
     }
     pub fn equals(self, text: &str) -> bool {
-        self.chars().eq(text.chars())
+        #[cfg(vesper_port)]
+        {
+            crate::port::string_equals(self.raw, text)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.chars().eq(text.chars())
+        }
     }
     fn chars(self) -> DecodedChars<'a> {
         DecodedChars {
@@ -405,13 +486,19 @@ impl<'a> JsonString<'a> {
         if scratch.len() < self.decoded_len {
             return Err(Error::new(ErrorKind::ScratchTooSmall, 0));
         }
-        let mut pos = 0;
-        for ch in self.chars() {
-            let mut bytes = [0; 4];
-            let n = ch.encode_utf8(&mut bytes).len();
-            scratch[pos..pos + n].copy_from_slice(&bytes[..n]);
-            pos += n;
-        }
+        #[cfg(vesper_port)]
+        let pos = crate::port::string_decode(self.raw, scratch);
+        #[cfg(not(vesper_port))]
+        let pos = {
+            let mut pos = 0;
+            for ch in self.chars() {
+                let mut bytes = [0; 4];
+                let n = ch.encode_utf8(&mut bytes).len();
+                scratch[pos..pos + n].copy_from_slice(&bytes[..n]);
+                pos += n;
+            }
+            pos
+        };
         Ok(JsonStr::Scratch(
             core::str::from_utf8(&scratch[..pos]).expect("validated Unicode scalars"),
         ))

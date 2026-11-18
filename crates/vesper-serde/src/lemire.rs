@@ -282,6 +282,18 @@ fn assemble(negative: bool, (power2, mantissa): (i32, u64)) -> f64 {
 /// infinite or a signed zero), reporting the path taken. `None` if `text`
 /// is not a JSON number.
 pub fn decode_f64(text: &str) -> Option<(f64, DecodePath)> {
+    #[cfg(vesper_port)]
+    {
+        crate::port::decode_f64(text)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_decode_f64(text)
+    }
+}
+
+#[cfg(not(vesper_port))]
+fn rust_decode_f64(text: &str) -> Option<(f64, DecodePath)> {
     let d = decimal(text.as_bytes())?;
     let sign = |x: f64| if d.negative { -x } else { x };
     if d.w == 0 {

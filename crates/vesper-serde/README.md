@@ -290,3 +290,19 @@ checks run with `cargo test -p vesper-serde`. The self-checking binary example i
 ```sh
 cargo run -p vesper-serde --example binary_codecs
 ```
+
+## Seed copy and port
+
+Port wave P1 lane 19 ([#916](https://github.com/robot-head/vesper/issues/916))
+splits this crate into two packages built from the same sources.
+`vesper-serde` is the port-backed build: `build.rs` links the Vesper package
+in `vesper/`, which ports the scalar codecs (float decode and encode, the
+recursive-descent parser, stage 2, the schema helpers, NDJSON framing, event
+columns, tiles, StreamVByte and the VSPA archive); `src/port.rs` adapts the
+crate's public types to it. The stage 1 SIMD kernels in `src/simd/` stay
+Rust. The compiler, every crate in its dependency closure and, until the port
+reaches performance parity, every other dependent link `vesper-serde-seed`
+(`seed/`), the Rust build, under the same library name. **The Rust code is
+frozen for bug fixes only** until self-hosting Stage 2; see "Crates the
+compiler links" in `docs/maintenance/porting-a-crate.md` and the lane report
+`docs/parallel-results/port-p1-serde-scalar.md`.

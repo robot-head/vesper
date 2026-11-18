@@ -169,3 +169,70 @@ fn the_abi_directive_is_checked() {
     let lib = compile_source("t.ves", ok, &options("t")).unwrap();
     assert_eq!(lib.interface.abi, export::EXPORT_ABI_V3);
 }
+
+// Not a `.ves` file: the repository corpus of the self-hosted parser walks
+// every `.ves` source, and that parser has no `pub` items yet.
+const OPTIONS: &str = include_str!("fixtures/native_export/options.ves.in");
+
+/// `// @export abi 3 options` (#991): `Option`/`Result` parameters and
+/// results of copy payloads are lent as `OptionMirror`/`ResultMirror`.
+#[test]
+fn option_mirrors_lend_options_and_results_in_place() {
+    let lib = compile_source("options.ves", OPTIONS, &options("opts")).unwrap();
+    let i = &lib.interface;
+    assert_eq!(i.abi, export::EXPORT_ABI_V3);
+    assert!(i.option_mirrors);
+    let f = |name: &str| i.functions.iter().find(|f| f.name == name).unwrap();
+    assert!(f("state_observe").params.iter().all(|p| p.in_place));
+    assert!(f("rtt_of").result_in_place);
+    assert!(f("check").params[0].in_place && f("check").result_in_place);
+    assert!(f("bump").params[0].in_place);
+    assert!(f("kind_size").params.iter().all(|p| p.in_place));
+    let json = export::interface_json(i).unwrap();
+    assert!(json.contains("\"option_mirrors\": true"), "{json}");
+    let text = binding(i, "crate::opts");
+    for line in [
+        "pub fn state_observe(s: &mut repr::State, rtt: &vesper_port_abi::OptionMirror<repr::Rtt>) -> u64",
+        "pub fn rtt_of(s: &repr::State) -> vesper_port_abi::OptionMirror<repr::Rtt>",
+        "pub fn check(r: &vesper_port_abi::ResultMirror<u64, repr::Rtt>) -> vesper_port_abi::ResultMirror<repr::Rtt, vesper_port_abi::Word<u8>>",
+        "pub fn bump(o: &mut vesper_port_abi::OptionMirror<u64>) -> ()",
+        "n: &vesper_port_abi::OptionMirror<vesper_port_abi::OptionMirror<vesper_port_abi::Word<i32>>>",
+        "k: &vesper_port_abi::OptionMirror<vesper_port_abi::Words<crate::opts::Kind, 2>>",
+        "assert!(core::mem::size_of::<vesper_port_abi::ResultMirror<u64, repr::Rtt>>() == 4 * 8",
+    ] {
+        assert!(text.contains(line), "missing {line}\n{text}");
+    }
+    // No conversion: no word buffer is filled from an `Option` value.
+    assert!(!text.contains("Abi::put(&rtt"), "{text}");
+    assert!(!text.contains("arg_rtt"), "{text}");
+}
+
+/// The option is a binding change only: the object is the same, and
+/// without it (as in every committed v3 binding) `Option`/`Result` still
+/// convert.
+#[test]
+fn option_mirrors_change_only_the_binding() {
+    let with = compile_source("options.ves", OPTIONS, &options("opts")).unwrap();
+    let plain = OPTIONS.replace("// @export abi 3 options", "// @export abi 3");
+    let without = compile_source("options.ves", &plain, &options("opts")).unwrap();
+    assert_eq!(with.object, without.object);
+    assert!(!without.interface.option_mirrors);
+    let json = export::interface_json(&without.interface).unwrap();
+    assert!(!json.contains("option_mirrors"), "{json}");
+    let text = binding(&without.interface, "crate::opts");
+    assert!(!text.contains("OptionMirror") && !text.contains("ResultMirror"));
+    assert!(text.contains("rtt: Option<crate::opts::Rtt>"), "{text}");
+    for (directive, needle) in [
+        ("// @export abi 3 enums", "unknown option 'enums'"),
+        (
+            "// @export abi 3 options options",
+            "unknown option 'options'",
+        ),
+    ] {
+        let source = OPTIONS.replace("// @export abi 3 options", directive);
+        match compile_source("options.ves", &source, &options("opts")) {
+            Ok(_) => panic!("accepted {directive}"),
+            Err(e) => assert!(e.to_string().contains(needle), "{directive}: {e}"),
+        }
+    }
+}

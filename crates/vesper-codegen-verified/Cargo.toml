@@ -9,7 +9,7 @@ description = "Vesper §42.5 bootstrap fixed-point and diverse double-compiling 
 blake3 = "1.8"
 serde = { version = "1", features = ["derive"] }
 toml = "=0.8.23"
-vesper-loom-calculus = { path = "../vesper-loom-calculus" }
+vesper-loom-calculus = { path = "../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
 vesper-loom-cas = { path = "../vesper-loom-cas" }
 vesper-loom-trust = { path = "../vesper-loom-trust" }
 

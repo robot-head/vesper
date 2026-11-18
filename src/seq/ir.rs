@@ -62,6 +62,8 @@ impl Lower<'_> {
                             for (i, a) in args.iter().enumerate() {
                                 let pass = if op == SeqOp::Extend
                                     || op == SeqOp::BytesEq
+                                    || op == SeqOp::EqIgnoreAsciiCase
+                                    || op == SeqOp::ExtendAsciiLowercase
                                     || op == SeqOp::Str(crate::strings::StrOp::PushStr)
                                     || (matches!(op, SeqOp::CopyFrom { .. }) && i == 1)
                                 {

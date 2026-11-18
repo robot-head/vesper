@@ -1,0 +1,914 @@
+// @export abi 3
+//
+// @vesper/serde: the scalar recursive-descent JSON parser and tape helpers
+// of src/index.rs: UTF-8 validation, the parser with its work, entry and
+// limit accounting, duplicate-key checks, JSON escapes, decoded string
+// comparison and decoding, and schema-directed field lookup.
+use self::{
+    Doc,
+    Error,
+    ErrorKind,
+    Kind,
+    Limits,
+    Token
+};
+
+pub fn raise(kind: ErrorKind, offset: u64) -> Unit eff [Fail[Error]] {
+    Fail::raise(
+        Error {
+            kind: kind,
+            offset: offset
+        }
+    )
+}
+
+pub fn hard_depth() -> u64 {
+    128
+}
+
+// Logical bytes of one tape token: `size_of::<Token>()` in the Rust build,
+// which every limit and statistic is stated in.
+pub fn token_bytes() -> u64 {
+    48
+}
+
+pub fn min64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+// The byte at `p`, or 256 past the end.
+pub fn at(in t: Slice[u8], p: u64) -> u64 {
+    match t.try_get(p) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => 256,
+    }
+}
+
+pub fn tok(in toks: ChunkSeq[Token], i: u64) -> Token {
+    match toks.try_get(i) {
+        Option::Some(t) => t,
+        Option::None => Token {
+            start: 0,
+            end: 0,
+            next: 0,
+            kind: Kind::Null,
+            decoded_len: 0,
+            escaped: false,
+            depth: 0
+        },
+    }
+}
+
+// -------------------------------------------------------------------
+// UTF-8 (`core::str::from_utf8`): the offset of the first byte of the
+// first invalid sequence in `t[from..to]`, or `to`.
+// -------------------------------------------------------------------
+
+fn cont(in t: Slice[u8], p: u64, to: u64) -> bool {
+    p < to && at(in t, p) & 192 == 128
+}
+
+fn in_range(in t: Slice[u8], p: u64, to: u64, lo: u64, hi: u64) -> bool {
+    if p >= to {
+        return false;
+    }
+    let b = at(in t, p);
+    b >= lo && b <= hi
+}
+
+pub fn utf8_valid_up_to(in t: Slice[u8], from: u64, to: u64) -> u64 {
+    let mut p = from;
+    loop {
+        // Eight ASCII bytes at a time.
+        loop {
+            if wrapping_add(p, 8) > to {
+                break;
+            }
+            match t.try_read_u64_le(p) {
+                Option::Some(w) => {
+                    if w & 9259542123273814144 != 0 {
+                        break;
+                    }
+                    p = wrapping_add(p, 8);
+                },
+                Option::None => break,
+            }
+        }
+        if p >= to {
+            return to;
+        }
+        let b = at(in t, p);
+        if b < 128 {
+            p = wrapping_add(p, 1);
+        } else if b >= 194 && b <= 223 {
+            if !cont(in t, wrapping_add(p, 1), to) {
+                return p;
+            }
+            p = wrapping_add(p, 2);
+        } else if b >= 224 && b <= 239 {
+            let ok1 = if b == 224 {
+                in_range(in t, wrapping_add(p, 1), to, 160, 191)
+            } else if b == 237 {
+                in_range(in t, wrapping_add(p, 1), to, 128, 159)
+            } else {
+                cont(in t, wrapping_add(p, 1), to)
+            };
+            if !ok1 || !cont(in t, wrapping_add(p, 2), to) {
+                return p;
+            }
+            p = wrapping_add(p, 3);
+        } else if b >= 240 && b <= 244 {
+            let ok1 = if b == 240 {
+                in_range(in t, wrapping_add(p, 1), to, 144, 191)
+            } else if b == 244 {
+                in_range(in t, wrapping_add(p, 1), to, 128, 143)
+            } else {
+                cont(in t, wrapping_add(p, 1), to)
+            };
+            if !ok1 || !cont(in t, wrapping_add(p, 2), to) || !cont(in t, wrapping_add(p, 3), to) {
+                return p;
+            }
+            p = wrapping_add(p, 4);
+        } else {
+            return p;
+        }
+    }
+    to
+}
+
+// The Unicode scalar starting at `p` of valid UTF-8, and its length.
+pub fn utf8_char(in t: Slice[u8], p: u64) -> (u64, u64) {
+    let b = at(in t, p);
+    if b < 128 {
+        (b, 1)
+    } else if b < 224 {
+        (((b & 31) << 6) | (at(in t, wrapping_add(p, 1)) & 63), 2)
+    } else if b < 240 {
+        (
+            ((b & 15) << 12) | ((at(in t, wrapping_add(p, 1)) & 63) << 6) | (
+                at(in t, wrapping_add(p, 2)) & 63
+            ),
+            3
+        )
+    } else {
+        (
+            ((b & 7) << 18) | ((at(in t, wrapping_add(p, 1)) & 63) << 12) | (
+                (at(in t, wrapping_add(p, 2)) & 63) << 6
+            ) | (at(in t, wrapping_add(p, 3)) & 63),
+            4
+        )
+    }
+}
+
+pub fn utf8_len(c: u64) -> u64 {
+    if c < 128 {
+        1
+    } else if c < 2048 {
+        2
+    } else if c < 65536 {
+        3
+    } else {
+        4
+    }
+}
+
+// -------------------------------------------------------------------
+// Escapes (`escape_with`). The body after a backslash at `pos`; `err` is
+// 0 on success, else the error kind (1 Escape, 2 AllocationLimit) at `at`.
+// `mode` charges the backslash of a surrogate pair's low half: 0 not at
+// all, 1 against `budget` stage 1 entries (the scalar parser), 2 failing
+// when it is at or after the truncation position `budget` (stage 2).
+// -------------------------------------------------------------------
+
+pub copy struct Esc {
+    code: u64,
+    pos: u64,
+    err: u64,
+    at: u64,
+    budget: u64
+}
+
+fn esc_fail(kind: u64, at: u64, budget: u64) -> Esc {
+    Esc {
+        code: 0,
+        pos: 0,
+        err: kind,
+        at: at,
+        budget: budget
+    }
+}
+
+fn hex_digit(b: u64) -> u64 {
+    if b >= 48 && b <= 57 {
+        wrapping_sub(b, 48)
+    } else if b >= 97 && b <= 102 {
+        wrapping_sub(b, 87)
+    } else if b >= 65 && b <= 70 {
+        wrapping_sub(b, 55)
+    } else {
+        16
+    }
+}
+
+// Four hex digits at `p`: (value, error position or 2^64 - 1).
+fn hex4(in t: Slice[u8], p: u64) -> (u64, u64) {
+    let mut n: u64 = 0;
+    let four: u64 = 4;
+    for k in 0..four {
+        let q = wrapping_add(p, k);
+        let b = at(in t, q);
+        if b == 256 {
+            return (0, q);
+        }
+        let d = hex_digit(b);
+        if d == 16 {
+            return (0, q);
+        }
+        n = wrapping_add(wrapping_mul(n, 16), d);
+    }
+    (n, 18446744073709551615)
+}
+
+pub fn escape_body(in t: Slice[u8], pos0: u64, mode: u64, budget0: u64) -> Esc {
+    let mut budget = budget0;
+    let b = at(in t, pos0);
+    if b == 256 {
+        return esc_fail(1, pos0, budget);
+    }
+    let mut pos = wrapping_add(pos0, 1);
+    let code: u64 = if b == 34 {
+        34
+    } else if b == 92 {
+        92
+    } else if b == 47 {
+        47
+    } else if b == 98 {
+        8
+    } else if b == 102 {
+        12
+    } else if b == 110 {
+        10
+    } else if b == 114 {
+        13
+    } else if b == 116 {
+        9
+    } else if b == 117 {
+        let (hi, bad) = hex4(in t, pos);
+        if bad != 18446744073709551615 {
+            return esc_fail(1, bad, budget);
+        }
+        pos = wrapping_add(pos, 4);
+        if hi >= 55296 && hi <= 56319 {
+            if at(in t, pos) == 92 {
+                if mode == 1 {
+                    if budget == 0 {
+                        return esc_fail(2, pos, budget);
+                    }
+                    budget = wrapping_sub(budget, 1);
+                } else if mode == 2 && pos >= budget {
+                    return esc_fail(2, budget, budget);
+                }
+            }
+            if at(in t, pos) != 92 || at(in t, wrapping_add(pos, 1)) != 117 {
+                return esc_fail(1, pos, budget);
+            }
+            pos = wrapping_add(pos, 2);
+            let (lo, bad2) = hex4(in t, pos);
+            if bad2 != 18446744073709551615 {
+                return esc_fail(1, bad2, budget);
+            }
+            pos = wrapping_add(pos, 4);
+            if lo < 56320 || lo > 57343 {
+                return esc_fail(1, wrapping_sub(pos, 4), budget);
+            }
+            wrapping_sub(
+                wrapping_add(wrapping_add(65536, wrapping_sub(hi, 55296) << 10), lo),
+                56320
+            )
+        } else {
+            if hi >= 56320 && hi <= 57343 {
+                // A lone low surrogate is not a Unicode scalar.
+                return esc_fail(1, pos, budget);
+            }
+            hi
+        }
+    } else {
+        return esc_fail(1, pos0, budget);
+    };
+    Esc {
+        code: code,
+        pos: pos,
+        err: 0,
+        at: 0,
+        budget: budget
+    }
+}
+
+// The next decoded scalar of validated string content `t[pos..end]`, and
+// the position after it; scalar 1114112 at the end.
+pub fn next_decoded(in t: Slice[u8], pos: u64, end: u64) -> (u64, u64) {
+    if pos >= end {
+        return (1114112, pos);
+    }
+    let (c, n) = utf8_char(in t, pos);
+    let after = wrapping_add(pos, n);
+    if c != 92 {
+        return (c, after);
+    }
+    let e = escape_body(in t, after, 0, 0);
+    (e.code, e.pos)
+}
+
+// The next scalar of plain UTF-8 `t[pos..end]`; 1114112 at the end.
+pub fn next_plain(in t: Slice[u8], pos: u64, end: u64) -> (u64, u64) {
+    if pos >= end {
+        return (1114112, pos);
+    }
+    let (c, n) = utf8_char(in t, pos);
+    (c, wrapping_add(pos, n))
+}
+
+pub fn strings_equal(in raw: Slice[u8], in text: Slice[u8]) -> bool {
+    let n = raw.len();
+    let m = text.len();
+    let mut a: u64 = 0;
+    let mut b: u64 = 0;
+    loop {
+        let (x, a2) = next_decoded(in raw, a, n);
+        let (y, b2) = next_plain(in text, b, m);
+        if x != y {
+            return false;
+        }
+        if x == 1114112 {
+            return true;
+        }
+        a = a2;
+        b = b2;
+    }
+    true
+}
+
+// UTF-8 encode `c` at `scratch[pos..]`; returns the position after it.
+pub fn put_utf8(inout out: Slice[u8], pos: u64, c: u64) -> u64 {
+    if c < 128 {
+        out.try_set(pos, wrapping_u8(c));
+        wrapping_add(pos, 1)
+    } else if c < 2048 {
+        out.try_set(pos, wrapping_u8(192 | (c >> 6)));
+        out.try_set(wrapping_add(pos, 1), wrapping_u8(128 | (c & 63)));
+        wrapping_add(pos, 2)
+    } else if c < 65536 {
+        out.try_set(pos, wrapping_u8(224 | (c >> 12)));
+        out.try_set(wrapping_add(pos, 1), wrapping_u8(128 | ((c >> 6) & 63)));
+        out.try_set(wrapping_add(pos, 2), wrapping_u8(128 | (c & 63)));
+        wrapping_add(pos, 3)
+    } else {
+        out.try_set(pos, wrapping_u8(240 | (c >> 18)));
+        out.try_set(wrapping_add(pos, 1), wrapping_u8(128 | ((c >> 12) & 63)));
+        out.try_set(wrapping_add(pos, 2), wrapping_u8(128 | ((c >> 6) & 63)));
+        out.try_set(wrapping_add(pos, 3), wrapping_u8(128 | (c & 63)));
+        wrapping_add(pos, 4)
+    }
+}
+
+pub fn decode_into(in raw: Slice[u8], inout scratch: Slice[u8]) -> u64 {
+    let n = raw.len();
+    let mut a: u64 = 0;
+    let mut pos: u64 = 0;
+    loop {
+        let (c, a2) = next_decoded(in raw, a, n);
+        if c == 1114112 {
+            break;
+        }
+        pos = put_utf8(inout scratch, pos, c);
+        a = a2;
+    }
+    pos
+}
+
+// -------------------------------------------------------------------
+// Duplicate keys (`check_duplicate`, shared with stage 2).
+// -------------------------------------------------------------------
+
+fn work_tick(inout work: u64, amount: u64, max_work: u64, at: u64) -> Unit eff [Fail[Error]] {
+    if amount > wrapping_sub(18446744073709551615, work) {
+        raise(ErrorKind::WorkLimit, at);
+    }
+    work = wrapping_add(work, amount);
+    if work > max_work {
+        raise(ErrorKind::WorkLimit, at);
+    }
+}
+
+// Steps of the decoded comparison loop on two unescaped UTF-8 keys
+// `t[a0..a1]` and `t[b0..b1]`: one per equal scalar, plus one.
+fn raw_compare_steps(in t: Slice[u8], a0: u64, a1: u64, b0: u64, b1: u64) -> u64 {
+    let la = wrapping_sub(a1, a0);
+    let lb = wrapping_sub(b1, b0);
+    let shorter = min64(la, lb);
+    let mut k: u64 = 0;
+    loop {
+        if k >= shorter {
+            break;
+        }
+        if at(in t, wrapping_add(a0, k)) != at(in t, wrapping_add(b0, k)) {
+            break;
+        }
+        k = wrapping_add(k, 1);
+    }
+    let mut boundary = k;
+    loop {
+        if boundary == 0 || boundary >= shorter {
+            break;
+        }
+        if at(in t, wrapping_add(a0, boundary)) & 192 != 128 {
+            break;
+        }
+        boundary = wrapping_sub(boundary, 1);
+    }
+    let mut steps: u64 = 1;
+    for i in 0..boundary {
+        if at(in t, wrapping_add(a0, i)) & 192 != 128 {
+            steps = wrapping_add(steps, 1);
+        }
+    }
+    steps
+}
+
+pub fn check_duplicate(
+    in toks: ChunkSeq[Token],
+    in t: Slice[u8],
+    start: u64,
+    current: u64,
+    inout work: u64,
+    max_work: u64,
+    at_pos: u64
+) -> Unit eff [Fail[Error]] {
+    let y = tok(in toks, current);
+    let mut previous = start;
+    loop {
+        if previous >= current {
+            break;
+        }
+        work_tick(inout work, 1, max_work, at_pos);
+        let x = tok(in toks, previous);
+        if !x.escaped && !y.escaped {
+            let a0 = wrapping_add(x.start, 1);
+            let a1 = wrapping_sub(x.end, 1);
+            let b0 = wrapping_add(y.start, 1);
+            let b1 = wrapping_sub(y.end, 1);
+            let steps = raw_compare_steps(in t, a0, a1, b0, b1);
+            if steps > 768614336404564650 {
+                raise(ErrorKind::WorkLimit, at_pos);
+            }
+            let units = wrapping_mul(steps, 24);
+            if units > wrapping_sub(max_work, work) {
+                raise(ErrorKind::WorkLimit, at_pos);
+            }
+            work_tick(inout work, units, max_work, at_pos);
+            let la = wrapping_sub(a1, a0);
+            if la == wrapping_sub(b1, b0) {
+                // Equal lengths: equal exactly when the common prefix is all.
+                let mut same = true;
+                for k in 0..la {
+                    if at(in t, wrapping_add(a0, k)) != at(in t, wrapping_add(b0, k)) {
+                        same = false;
+                        break;
+                    }
+                }
+                if same {
+                    raise(ErrorKind::DuplicateKey, at_pos);
+                }
+            }
+        } else {
+            let ae = wrapping_sub(x.end, 1);
+            let be = wrapping_sub(y.end, 1);
+            let mut a = wrapping_add(x.start, 1);
+            let mut b = wrapping_add(y.start, 1);
+            let mut units: u64 = 0;
+            let mut equal = false;
+            loop {
+                units = wrapping_add(units, 24);
+                // Enforce while comparing, not after an unbounded key scan.
+                if units > wrapping_sub(max_work, work) {
+                    raise(ErrorKind::WorkLimit, at_pos);
+                }
+                let (p, a2) = next_decoded(in t, a, ae);
+                let (q, b2) = next_decoded(in t, b, be);
+                if p != q {
+                    break;
+                }
+                if p == 1114112 {
+                    equal = true;
+                    break;
+                }
+                a = a2;
+                b = b2;
+            }
+            work_tick(inout work, units, max_work, at_pos);
+            if equal {
+                raise(ErrorKind::DuplicateKey, at_pos);
+            }
+        }
+        previous = tok(in toks, wrapping_add(previous, 1)).next;
+    }
+}
+
+// -------------------------------------------------------------------
+// The recursive-descent parser (`Parser`).
+// -------------------------------------------------------------------
+
+copy struct P {
+    pos: u64,
+    capacity: u64,
+    work: u64,
+    string_bytes: u64,
+    entries_left: u64,
+    lim: Limits
+}
+
+fn perr(in p: P, kind: ErrorKind) -> Unit eff [Fail[Error]] {
+    raise(kind, p.pos)
+}
+
+// Charge one stage 1 entry at the current position.
+fn entry(inout p: P) -> Unit eff [Fail[Error]] {
+    if p.entries_left == 0 {
+        perr(in p, ErrorKind::AllocationLimit);
+    }
+    p.entries_left = wrapping_sub(p.entries_left, 1);
+}
+
+fn tick(inout p: P, amount: u64) -> Unit eff [Fail[Error]] {
+    if amount > wrapping_sub(18446744073709551615, p.work) {
+        perr(in p, ErrorKind::WorkLimit);
+    }
+    p.work = wrapping_add(p.work, amount);
+    if p.work > p.lim.max_work {
+        perr(in p, ErrorKind::WorkLimit);
+    }
+}
+
+fn step(inout p: P) -> Unit eff [Fail[Error]] {
+    tick(inout p, 1);
+    p.pos = wrapping_add(p.pos, 1);
+}
+
+fn expect(inout p: P, in t: Slice[u8], b: u64) -> Unit eff [Fail[Error]] {
+    if at(in t, p.pos) != b {
+        perr(in p, ErrorKind::Syntax);
+    }
+    step(inout p);
+}
+
+// An operator byte: syntax first, then its index entry, then the step.
+fn op(inout p: P, in t: Slice[u8], b: u64) -> Unit eff [Fail[Error]] {
+    if at(in t, p.pos) != b {
+        perr(in p, ErrorKind::Syntax);
+    }
+    entry(inout p);
+    step(inout p);
+}
+
+fn ws(inout p: P, in t: Slice[u8]) -> Unit eff [Fail[Error]] {
+    loop {
+        let b = at(in t, p.pos);
+        if b == 32 || b == 13 || b == 10 || b == 9 {
+            step(inout p);
+        } else {
+            break;
+        }
+    }
+}
+
+fn push(inout p: P, inout toks: ChunkSeq[Token], kind: Kind, depth: u64) -> u64 eff [Fail[Error]] {
+    let n = toks.len();
+    if n >= p.lim.max_tokens {
+        perr(in p, ErrorKind::TokenLimit);
+    }
+    if n >= p.capacity {
+        perr(in p, ErrorKind::AllocationLimit);
+    }
+    toks
+        .push(
+        Token {
+            start: p.pos,
+            end: 0,
+            next: wrapping_add(n, 1),
+            kind: kind,
+            decoded_len: 0,
+            escaped: false,
+            depth: depth
+        }
+    );
+    n
+}
+
+fn is_digit(b: u64) -> bool {
+    b >= 48 && b <= 57
+}
+
+fn digits(inout p: P, in t: Slice[u8]) -> Unit eff [Fail[Error]] {
+    loop {
+        if !is_digit(at(in t, p.pos)) {
+            break;
+        }
+        step(inout p);
+    }
+}
+
+fn number(inout p: P, in t: Slice[u8]) -> Unit eff [Fail[Error]] {
+    if at(in t, p.pos) == 45 {
+        step(inout p);
+    }
+    let b = at(in t, p.pos);
+    if b == 48 {
+        step(inout p);
+    } else if b >= 49 && b <= 57 {
+        step(inout p);
+        digits(inout p, in t);
+    } else {
+        perr(in p, ErrorKind::Number);
+    }
+    if at(in t, p.pos) == 46 {
+        step(inout p);
+        if !is_digit(at(in t, p.pos)) {
+            perr(in p, ErrorKind::Number);
+        }
+        digits(inout p, in t);
+    }
+    let e = at(in t, p.pos);
+    if e == 101 || e == 69 {
+        step(inout p);
+        let s = at(in t, p.pos);
+        if s == 43 || s == 45 {
+            step(inout p);
+        }
+        if !is_digit(at(in t, p.pos)) {
+            perr(in p, ErrorKind::Number);
+        }
+        digits(inout p, in t);
+    }
+}
+
+fn string(inout p: P, inout toks: ChunkSeq[Token], in t: Slice[u8], index: u64)
+    -> Unit eff [Fail[Error]] {
+    expect(inout p, in t, 34);
+    let mut decoded: u64 = 0;
+    let mut escaped = false;
+    loop {
+        let b = at(in t, p.pos);
+        if b == 34 {
+            entry(inout p);
+            step(inout p);
+            break;
+        } else if b == 92 {
+            escaped = true;
+            entry(inout p);
+            step(inout p);
+            let old = p.pos;
+            let e = escape_body(in t, p.pos, 1, p.entries_left);
+            if e.err == 1 {
+                raise(ErrorKind::Escape, e.at);
+            } else if e.err == 2 {
+                raise(ErrorKind::AllocationLimit, e.at);
+            }
+            p.entries_left = e.budget;
+            p.pos = e.pos;
+            let consumed = wrapping_sub(p.pos, old);
+            tick(inout p, consumed);
+            decoded = wrapping_add(decoded, utf8_len(e.code));
+        } else if b < 32 || b == 256 {
+            perr(in p, ErrorKind::Syntax);
+        } else {
+            step(inout p);
+            decoded = wrapping_add(decoded, 1);
+        }
+        if decoded > p.lim.max_string_bytes {
+            perr(in p, ErrorKind::StringLimit);
+        }
+    }
+    p.string_bytes = wrapping_add(p.string_bytes, decoded);
+    if p.string_bytes > p.lim.max_total_string_bytes {
+        perr(in p, ErrorKind::StringLimit);
+    }
+    let mut tk = tok(in toks, index);
+    tk.decoded_len = decoded;
+    tk.escaped = escaped;
+    toks.try_set(index, tk);
+}
+
+fn literal(inout p: P, in t: Slice[u8], kind: u64) -> Unit eff [Fail[Error]] {
+    if kind == 0 {
+        expect(inout p, in t, 110);
+        expect(inout p, in t, 117);
+        expect(inout p, in t, 108);
+        expect(inout p, in t, 108);
+    } else if kind == 1 {
+        expect(inout p, in t, 116);
+        expect(inout p, in t, 114);
+        expect(inout p, in t, 117);
+        expect(inout p, in t, 101);
+    } else {
+        expect(inout p, in t, 102);
+        expect(inout p, in t, 97);
+        expect(inout p, in t, 108);
+        expect(inout p, in t, 115);
+        expect(inout p, in t, 101);
+    }
+}
+
+fn container(
+    inout p: P,
+    inout toks: ChunkSeq[Token],
+    in t: Slice[u8],
+    index: u64,
+    depth: u64,
+    object: bool
+) -> Unit eff [Fail[Error]] {
+    step(inout p);
+    ws(inout p, in t);
+    let close: u64 = if object {
+        125
+    } else {
+        93
+    };
+    if at(in t, p.pos) == close {
+        op(inout p, in t, close);
+        return ();
+    }
+    loop {
+        if object {
+            if at(in t, p.pos) != 34 {
+                perr(in p, ErrorKind::Syntax);
+            }
+            let key = toks.len();
+            value(inout p, inout toks, in t, wrapping_add(depth, 1));
+            let here = p.pos;
+            let max_work = p.lim.max_work;
+            let mut work = p.work;
+            check_duplicate(in toks, in t, wrapping_add(index, 1), key, inout work, max_work, here);
+            p.work = work;
+            ws(inout p, in t);
+            op(inout p, in t, 58);
+            ws(inout p, in t);
+        }
+        value(inout p, inout toks, in t, wrapping_add(depth, 1));
+        ws(inout p, in t);
+        if at(in t, p.pos) == close {
+            op(inout p, in t, close);
+            return ();
+        }
+        op(inout p, in t, 44);
+        ws(inout p, in t);
+    }
+}
+
+fn value(inout p: P, inout toks: ChunkSeq[Token], in t: Slice[u8], depth: u64)
+    -> Unit eff [Fail[Error]] {
+    let b = at(in t, p.pos);
+    let kind = if b == 110 {
+        Kind::Null
+    } else if b == 116 || b == 102 {
+        Kind::Bool
+    } else if b == 45 || is_digit(b) {
+        Kind::Number
+    } else if b == 34 {
+        Kind::String
+    } else if b == 91 {
+        Kind::Array
+    } else if b == 123 {
+        Kind::Object
+    } else {
+        perr(in p, ErrorKind::Syntax);
+        Kind::Null
+    };
+    let nested = b == 91 || b == 123;
+    if nested && (depth >= p.lim.max_depth || depth >= hard_depth()) {
+        perr(in p, ErrorKind::DepthLimit);
+    }
+    let index = push(inout p, inout toks, kind, depth);
+    entry(inout p);
+    if b == 110 {
+        literal(inout p, in t, 0);
+    } else if b == 116 {
+        literal(inout p, in t, 1);
+    } else if b == 102 {
+        literal(inout p, in t, 2);
+    } else if b == 34 {
+        string(inout p, inout toks, in t, index);
+    } else if nested {
+        container(inout p, inout toks, in t, index, depth, b == 123);
+    } else {
+        number(inout p, in t);
+    }
+    let mut tk = tok(in toks, index);
+    tk.end = p.pos;
+    tk.next = toks.len();
+    toks.try_set(index, tk);
+}
+
+// `IndexPlan::new`: (tape capacity in tokens, stage 1 entries allowed).
+pub fn index_plan(len: u64, lim: Limits) -> (u64, u64) {
+    let capacity = min64(min64(len, lim.max_tokens), lim.max_index_bytes / 48);
+    let entries = wrapping_sub(lim.max_index_bytes, wrapping_mul(capacity, token_bytes())) / 4;
+    (capacity, entries)
+}
+
+pub fn doc_clear(inout doc: Doc) {
+    doc.tokens.clear();
+    doc.capacity = 0;
+    doc.work = 0;
+    doc.entries = 0;
+}
+
+// Make room for `capacity` tokens (`try_reserve_exact` on a cleared tape):
+// the tape's reserved capacity only grows.
+pub fn doc_reserve(inout doc: Doc, capacity: u64) {
+    doc.tokens.clear();
+    if doc.capacity < capacity {
+        doc.tokens = ChunkSeq::with_capacity(capacity);
+        doc.capacity = capacity;
+    }
+    doc.work = 0;
+    doc.entries = 0;
+}
+
+pub fn parse_document(inout doc: Doc, in input: Slice[u8], lim: Limits) -> Unit eff [Fail[Error]] {
+    let n = input.len();
+    if n > lim.max_input_bytes {
+        raise(ErrorKind::InputLimit, 0);
+    }
+    if n > lim.max_work {
+        raise(ErrorKind::WorkLimit, 0);
+    }
+    let valid = utf8_valid_up_to(in input, 0, n);
+    if valid != n {
+        raise(ErrorKind::Utf8, valid);
+    }
+    let (capacity, entries) = index_plan(n, lim);
+    doc_reserve(inout doc, capacity);
+    let mut p = P {
+        pos: 0,
+        capacity: capacity,
+        work: n,
+        string_bytes: 0,
+        entries_left: entries,
+        lim: lim
+    };
+    ws(inout p, in input);
+    value(inout p, inout doc.tokens, in input, 0);
+    ws(inout p, in input);
+    if p.pos != n {
+        perr(in p, ErrorKind::Syntax);
+    }
+    doc.work = p.work;
+    doc.entries = wrapping_sub(entries, p.entries_left);
+}
+
+// -------------------------------------------------------------------
+// `Node::field`: schema-directed lookup with its own work allowance.
+// -------------------------------------------------------------------
+
+pub fn field_lookup(in doc: Doc, in input: Slice[u8], index: u64, in key: Slice[u8], max_work: u64)
+    -> Option[u64] eff [Fail[Error]] {
+    let obj = tok(in doc.tokens, index);
+    if obj.kind != Kind::Object {
+        raise(ErrorKind::Type, obj.start);
+    }
+    let kn = key.len();
+    let mut work = max_work;
+    let mut i = wrapping_add(index, 1);
+    loop {
+        if i >= obj.next {
+            break;
+        }
+        let name = tok(in doc.tokens, i);
+        let value_index = wrapping_add(i, 1);
+        let end = wrapping_sub(name.end, 1);
+        let mut a = wrapping_add(name.start, 1);
+        let mut b: u64 = 0;
+        loop {
+            if work < 24 {
+                raise(ErrorKind::WorkLimit, obj.start);
+            }
+            work = wrapping_sub(work, 24);
+            let (x, a2) = next_decoded(in input, a, end);
+            let (y, b2) = next_plain(in key, b, kn);
+            if x == 1114112 && y == 1114112 {
+                return Option::Some(value_index);
+            }
+            if x != y || x == 1114112 || y == 1114112 {
+                break;
+            }
+            a = a2;
+            b = b2;
+        }
+        i = tok(in doc.tokens, value_index).next;
+    }
+    Option::None
+}

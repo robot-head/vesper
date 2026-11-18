@@ -595,3 +595,131 @@ int main(void) {
     assert!(out.status.success());
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "0 0 4800");
 }
+
+/// Struct locals that hold sequences in (nested) fields free them on the
+/// optimize path (#972): at every exit, on rebinding in a loop, on
+/// assignment, and not after a move.
+const FIELDS: &str = r#"
+struct W {
+    s: ChunkSeq[u64],
+    k: u64
+}
+
+struct O {
+    inner: W,
+    t: ChunkSeq[u64]
+}
+
+fn fill(n: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new();
+    for i in 0..n {
+        s.push(i);
+    }
+    s
+}
+
+fn raise_at(n: u64) -> u64 eff [Fail[RuntimeError]] {
+    if n == 0 {
+        Fail::raise(RuntimeError::DivisionByZero)
+    }
+    n
+}
+
+pub fn plain() -> u64 {
+    let w = W { s: fill(3), k: 4 };
+    wrapping_add(w.s.len(), w.k)
+}
+
+pub fn looped() -> u64 {
+    let mut total: u64 = 0;
+    let n: u64 = 4;
+    for i in 0..n {
+        let w = W { s: fill(i), k: i };
+        total = wrapping_add(total, w.s.len());
+    }
+    total
+}
+
+pub fn nested() -> u64 {
+    let o = O { inner: W { s: fill(2), k: 1 }, t: fill(5) };
+    wrapping_add(o.inner.s.len(), o.t.len())
+}
+
+pub fn assigned() -> u64 {
+    let mut w = W { s: fill(2), k: 0 };
+    w = W { s: fill(6), k: 1 };
+    w.s.len()
+}
+
+fn make(n: u64) -> W {
+    let w = W { s: fill(n), k: n };
+    w
+}
+
+pub fn moved_out() -> u64 {
+    let w = make(3);
+    wrapping_add(w.s.len(), w.k)
+}
+
+pub fn early() -> u64 {
+    let w = W { s: fill(3), k: 2 };
+    if w.k == 2 {
+        return w.s.len();
+    }
+    0
+}
+
+fn failing(n: u64) -> u64 eff [Fail[RuntimeError]] {
+    let w = W { s: fill(3), k: n };
+    raise_at(w.k)
+}
+
+pub fn failed() -> u64 {
+    handle Fail[RuntimeError] in {
+        failing(0)
+    } with {
+        return v => v,
+        raise(e, k) => 7,
+    }
+}
+"#;
+
+const FIELD_CALLS: [&str; 7] = [
+    "plain",
+    "looped",
+    "nested",
+    "assigned",
+    "moved_out",
+    "early",
+    "failed",
+];
+
+#[test]
+fn struct_fields_holding_sequences_are_freed() {
+    let main = format!(
+        "{FIELDS}\nfn main() -> u64 {{ wrapping_add(wrapping_add(wrapping_add(plain(), looped()), wrapping_add(nested(), assigned())), wrapping_add(wrapping_add(moved_out(), early()), failed())) }}\n"
+    );
+    let c = accepted(&main);
+    let evaluated = Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap()
+        .to_string();
+    assert_eq!(evaluated, "42");
+    // The unoptimized path keeps today's drops (these locals go to
+    // teardown); the optimize path frees them all, once.
+    for optimize in [true, false] {
+        let stray = native_runtime::stray_frees();
+        let jit = native::jit_with_options(&c.world, "main", optimize)
+            .unwrap()
+            .to_string();
+        assert_eq!(jit, evaluated, "optimize {optimize}");
+        let teardown = native_runtime::teardown_frees();
+        if optimize {
+            assert_eq!(teardown, 0, "struct fields left for teardown");
+        }
+        assert_eq!(native_runtime::stray_frees(), stray, "optimize {optimize}");
+    }
+    if let Some((before, after)) = library_live("fields", FIELDS, &FIELD_CALLS, 100) {
+        assert_eq!(before, after, "struct fields leaked in the library");
+    }
+}

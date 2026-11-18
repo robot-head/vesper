@@ -235,7 +235,11 @@ impl Generator<'_> {
             | SeqOp::Wide(_)
             | SeqOp::SumBe16
             | SeqOp::BytesEq
-            | SeqOp::FindByte => {
+            | SeqOp::FindByte
+            | SeqOp::FindEither
+            | SeqOp::FindNotIn
+            | SeqOp::EqIgnoreAsciiCase
+            | SeqOp::ExtendAsciiLowercase => {
                 unreachable!("refused above")
             }
         })

@@ -1,0 +1,666 @@
+// Module search of @vesper/loom-solver (see lib.ves): `resolve` (the
+// bounded newest-first depth-first search) and `resolve_optimized` (the
+// same search scoring every complete solution), which share one loop.
+//
+// The pending stack holds node indices; a node's assignment is its chain
+// to the root node. Nodes are allocated in push order, so when node n is
+// popped every node above n is dead and the node list is cut back to n.
+use @vesper/loom-calculus::util::{
+    add,
+    dep,
+    feat,
+    find_feat,
+    id_at,
+    inc,
+    man,
+    none,
+    sw,
+    ver
+};
+use self::{
+    Node,
+    S
+};
+use self::closure::{
+    all_reqs_match,
+    assigned,
+    closure,
+    has_entry,
+    matches_req
+};
+use self::diag::{
+    c_budget_exhausted,
+    c_insufficient_repro_attestations,
+    c_invalid_max_solutions,
+    c_missing_candidate_metadata,
+    c_no_candidate,
+    c_no_system_candidate,
+    c_unknown_optimize_objective,
+    c_unsupported_policy,
+    c_unvetted_namespace,
+    c_version_conflict,
+    did,
+    dlit,
+    dmark,
+    dnum,
+    dreq,
+    dver,
+    emit,
+    node,
+    setw,
+    subj_id,
+    subj_lit
+};
+use self::input::{
+    find_meta,
+    mxv
+};
+use self::metrics::{
+    metrics_of_current,
+    score_key
+};
+use self::output::{
+    objective_of_id,
+    out_error,
+    out_solution,
+    reset_diags,
+    solution_words,
+    table,
+    w
+};
+use self::snap::{
+    run_solve
+};
+
+// `unsupported_policy` (resolve) for manifest mi.
+pub fn unsupported(in s: S, mi: u64) -> bool {
+    let x = mxv(in s, mi);
+    x.resolver && (x.opt_n > 0 || (x.has_min && x.min > 0) || x.block)
+}
+
+pub fn emit_unsupported(inout s: S, mi: u64) {
+    let m = man(in s.l, mi);
+    let (so, sl, mo) = subj_lit(inout s, "resolver.policy");
+    dlit(
+        inout s,
+        "offline search cannot enforce optimization, namespace vetting, or reproducibility attestation policies for version "
+    );
+    dver(inout s, m.ver);
+    emit(inout s, c_unsupported_policy(), m.name, so, sl, mo);
+}
+
+// `unsupported_dependency_policy` (optimizer): emits and returns whether
+// manifest mi has one.
+fn dependency_policy(inout s: S, mi: u64) -> bool {
+    let x = mxv(in s, mi);
+    if !(x.resolver && x.opt_n > 0) {
+        return false;
+    }
+    let m = man(in s.l, mi);
+    let (so, sl, mo) = subj_lit(inout s, "resolver.policy");
+    dlit(inout s, "optimizer cannot enforce dependency-level optimization policy for version ");
+    dver(inout s, m.ver);
+    emit(inout s, c_unsupported_policy(), m.name, so, sl, mo);
+    true
+}
+
+// `candidate_satisfies_trust_policy(owner, candidate)`: emits and returns
+// false when the candidate fails the owner's policy.
+fn trust_ok(inout s: S, owner: u64, cand: u64) -> bool {
+    let x = mxv(in s, owner);
+    if !x.resolver {
+        return true;
+    }
+    let m = man(in s.l, cand);
+    let vt = ver(in s.l, m.ver).text;
+    let mi = find_meta(in s, m.name, vt);
+    let (repro, vetted) = match s.metas.try_get(mi) {
+        Option::Some(e) => (e.repro, e.vetted),
+        Option::None => (0, false),
+    };
+    if x.has_min && x.min > 0 && repro < x.min {
+        let (so, sl, mo) = subj_id(inout s, m.name);
+        dlit(inout s, "version ");
+        dver(inout s, m.ver);
+        dlit(inout s, " has ");
+        dnum(inout s, repro);
+        dlit(inout s, " reproducibility attestation(s), fewer than required ");
+        dnum(inout s, x.min);
+        emit(inout s, c_insufficient_repro_attestations(), m.name, so, sl, mo);
+        return false;
+    }
+    if x.block && !vetted {
+        let (so, sl, mo) = subj_id(inout s, m.name);
+        dlit(inout s, "version ");
+        dver(inout s, m.ver);
+        dlit(inout s, " is in an unvetted namespace blocked by resolver.policy");
+        emit(inout s, c_unvetted_namespace(), m.name, so, sl, mo);
+        return false;
+    }
+    true
+}
+
+// Push the `active_dependencies` of name x (manifest mi) onto bq.
+fn push_active(inout s: S, x: u64, mi: u64) {
+    let m = man(in s.l, mi);
+    for j in 0..m.dep_n {
+        let d = dep(in s.l, add(m.dep_at, j));
+        if !d.opt {
+            s.bq.push(d.name);
+        }
+    }
+    if has_entry(in s, x) {
+        let mut at = sw(in s.fhead, x);
+        loop {
+            if at == none() {
+                break;
+            }
+            let f = sw(in s.fl_id, at);
+            let fi = find_feat(in s.l, in m, f);
+            if fi != none() {
+                let ft = feat(in s.l, fi);
+                for j in 0..ft.deps_n {
+                    let d = id_at(in s.l, add(ft.deps_at, j));
+                    s.bq.push(d);
+                }
+            }
+            at = sw(in s.fl_next, at);
+        }
+    }
+}
+
+// `reachable_targets(owner)`: the visited names into vis, marked in vmk
+// with the returned mark.
+fn reachable(inout s: S, owner: u64) -> u64 {
+    s.mgen = inc(s.mgen);
+    let g = s.mgen;
+    s.vis.clear();
+    s.bq.clear();
+    let om = assigned(in s, owner);
+    if om == none() {
+        return g;
+    }
+    push_active(inout s, owner, om);
+    let mut head: u64 = 0;
+    loop {
+        if head >= s.bq.len() {
+            break;
+        }
+        let x = sw(in s.bq, head);
+        head = inc(head);
+        if x != owner && sw(in s.vmk, x) != g {
+            setw(inout s.vmk, x, g);
+            s.vis.push(x);
+            let mi = assigned(in s, x);
+            if mi != none() {
+                push_active(inout s, x, mi);
+            }
+        }
+    }
+    g
+}
+
+// "<prefix><r1> and <r2> ..." over the requirements of x.
+fn emit_none_satisfies(inout s: S, x: u64, systems: bool) {
+    let (so, sl, mo) = subj_id(inout s, x);
+    if systems {
+        dlit(inout s, "no local native version satisfies ");
+    } else {
+        dlit(inout s, "no local version satisfies ");
+    }
+    let mut at = if systems {
+        sw(in s.yhead, x)
+    } else {
+        sw(in s.rhead, x)
+    };
+    let mut first = true;
+    loop {
+        if at == none() {
+            break;
+        }
+        if !first {
+            dlit(inout s, " and ");
+        }
+        first = false;
+        let r = if systems {
+            sw(in s.yl_req, at)
+        } else {
+            sw(in s.rl_req, at)
+        };
+        dreq(inout s, r);
+        at = if systems {
+            sw(in s.yl_next, at)
+        } else {
+            sw(in s.rl_next, at)
+        };
+    }
+    if systems {
+        emit(inout s, c_no_system_candidate(), none(), so, sl, mo);
+    } else {
+        emit(inout s, c_no_candidate(), x, so, sl, mo);
+    }
+}
+
+// The objectives into objs; false (after writing the error) when the
+// root's policy names an unknown one.
+fn active_objectives(inout s: S) -> bool {
+    if s.objs.len() > 0 {
+        return true;
+    }
+    let x = mxv(in s, s.root);
+    if x.resolver && x.opt_n > 0 {
+        for i in 0..x.opt_n {
+            let raw = id_at(in s.l, add(x.opt_at, i));
+            let o = objective_of_id(in s, raw);
+            if o == 5 {
+                reset_diags(inout s);
+                let root = man(in s.l, s.root).name;
+                let (so, sl, mo) = subj_lit(inout s, "resolver.policy.optimize");
+                dlit(inout s, "unknown optimization objective '");
+                did(inout s, raw);
+                dlit(inout s, "'");
+                emit(inout s, c_unknown_optimize_objective(), root, so, sl, mo);
+                out_error(inout s, 1, 0);
+                return false;
+            }
+            s.objs.push(o);
+        }
+        return true;
+    }
+    s.objs.push(0);
+    s.objs.push(1);
+    s.objs.push(2);
+    s.objs.push(3);
+    true
+}
+
+// table, 0, best solution, metrics, evaluated, nobj, objective*.
+fn out_best(inout s: S, evaluated: u64) {
+    table(inout s);
+    w(inout s, 0);
+    for i in 0..s.bsel.len() {
+        let x = sw(in s.bsel, i);
+        w(inout s, x);
+    }
+    for i in 0..s.bm.len() {
+        let x = sw(in s.bm, i);
+        w(inout s, x);
+    }
+    w(inout s, evaluated);
+    let no = s.objs.len();
+    w(inout s, no);
+    for i in 0..no {
+        let x = sw(in s.objs, i);
+        w(inout s, x);
+    }
+}
+
+// Whether key < bkey (lexicographic; equal lengths).
+fn key_less(in s: S) -> bool {
+    for i in 0..s.key.len() {
+        let a = sw(in s.key, i);
+        let b = sw(in s.bkey, i);
+        if a < b {
+            return true;
+        }
+        if a > b {
+            return false;
+        }
+    }
+    false
+}
+
+// The assignment of node n into asg/anames.
+fn materialize(inout s: S, n: u64) {
+    s.agen = inc(s.agen);
+    s.anames.clear();
+    let mut at = n;
+    loop {
+        if at == none() {
+            break;
+        }
+        let x = node(in s, at);
+        setw(inout s.asg, x.name, x.man);
+        setw(inout s.ast, x.name, s.agen);
+        s.anames.push(x.name);
+        at = x.parent;
+    }
+}
+
+// Whether the optimizer may push candidate mi (emits why not).
+fn admit(inout s: S, mi: u64, needs_meta: bool) -> bool {
+    if dependency_policy(inout s, mi) {
+        s.sunsup = true;
+        return false;
+    }
+    if needs_meta {
+        let m = man(in s.l, mi);
+        let vt = ver(in s.l, m.ver).text;
+        if find_meta(in s, m.name, vt) == none() {
+            let (so, sl, mo) = subj_id(inout s, m.name);
+            dlit(inout s, "version ");
+            dver(inout s, m.ver);
+            dlit(inout s, " lacks required candidate metadata for active optimization objectives");
+            emit(inout s, c_missing_candidate_metadata(), m.name, so, sl, mo);
+            return false;
+        }
+    }
+    let mut ok = true;
+    for g in 0..s.gown.len() {
+        let om = sw(in s.gown, g);
+        if !trust_ok(inout s, om, mi) {
+            ok = false;
+        }
+    }
+    ok
+}
+
+// Branch on the next unassigned dependency `next` of node n.
+fn branch(inout s: S, n: u64, next: u64, opt: bool, needs_meta: bool) {
+    s.cbuf.clear();
+    let at = sw(in s.cstart, next);
+    let cn = sw(in s.ccount, next);
+    for j in 0..cn {
+        let mi = sw(in s.clist, add(at, j));
+        let vi = man(in s.l, mi).ver;
+        if all_reqs_match(in s, next, vi, false) {
+            s.cbuf.push(mi);
+        }
+    }
+    if s.cbuf.len() == 0 {
+        emit_none_satisfies(inout s, next, false);
+    }
+    s.gown.clear();
+    if opt {
+        for i in 0..s.anames.len() {
+            let owner = sw(in s.anames, i);
+            let om = assigned(in s, owner);
+            if mxv(in s, om).resolver {
+                let g = reachable(inout s, owner);
+                if sw(in s.vmk, next) == g {
+                    s.gown.push(om);
+                }
+            }
+        }
+    }
+    // Reverse insertion keeps newest-first order on the LIFO stack.
+    let mut j = s.cbuf.len();
+    loop {
+        if j == 0 {
+            break;
+        }
+        j = wrapping_sub(j, 1);
+        let mi = sw(in s.cbuf, j);
+        if !opt || admit(inout s, mi, needs_meta) {
+            let at = s.nodes.len();
+            s
+                .nodes
+                .push(
+                Node {
+                    parent: n,
+                    name: next,
+                    man: mi
+                }
+            );
+            s.stack.push(at);
+        }
+    }
+}
+
+// Whether the assignment breaks no trust policy of an assigned owner.
+fn policies_hold(inout s: S) -> bool {
+    let mut ok = true;
+    for i in 0..s.anames.len() {
+        let owner = sw(in s.anames, i);
+        let om = assigned(in s, owner);
+        if mxv(in s, om).resolver {
+            reachable(inout s, owner);
+            for j in 0..s.vis.len() {
+                let t = sw(in s.vis, j);
+                let tm = assigned(in s, t);
+                if tm != none() && !trust_ok(inout s, om, tm) {
+                    ok = false;
+                }
+            }
+        }
+    }
+    ok
+}
+
+// Version conflicts among the assigned packages; returns whether any.
+fn version_conflicts(inout s: S) -> bool {
+    let mut conflict = false;
+    for i in 0..s.rnames.len() {
+        let x = sw(in s.rnames, i);
+        let mi = assigned(in s, x);
+        if mi != none() {
+            let vi = man(in s.l, mi).ver;
+            let mut at = sw(in s.rhead, x);
+            loop {
+                if at == none() {
+                    break;
+                }
+                let r = sw(in s.rl_req, at);
+                if !matches_req(in s, r, vi) {
+                    let (so, sl, mo) = subj_id(inout s, x);
+                    dlit(inout s, "selected ");
+                    dver(inout s, vi);
+                    dlit(inout s, " does not satisfy ");
+                    dreq(inout s, r);
+                    emit(inout s, c_version_conflict(), x, so, sl, mo);
+                    conflict = true;
+                }
+                at = sw(in s.rl_next, at);
+            }
+        }
+    }
+    conflict
+}
+
+// The newest native candidates satisfying every native requirement into
+// ysel; returns false (after the diagnostics) when one has none.
+fn select_systems(inout s: S) -> bool {
+    s.ysel.clear();
+    let mut ok = true;
+    for i in 0..s.ynames.len() {
+        let x = sw(in s.ynames, i);
+        let at = sw(in s.ystart, x);
+        let cn = sw(in s.ycount, x);
+        let mut found = none();
+        for j in 0..cn {
+            let yi = sw(in s.ylist, add(at, j));
+            if found == none() {
+                let vi = match s.sys.try_get(yi) {
+                    Option::Some(y) => y.ver,
+                    Option::None => 0,
+                };
+                if all_reqs_match(in s, x, vi, true) {
+                    found = yi;
+                }
+            }
+        }
+        if found != none() {
+            s.ysel.push(found);
+        } else {
+            ok = false;
+            emit_none_satisfies(inout s, x, true);
+        }
+    }
+    ok
+}
+
+// Score a complete solution; returns whether the search should stop.
+fn score(inout s: S) -> bool {
+    s.seval = inc(s.seval);
+    metrics_of_current(inout s);
+    score_key(inout s);
+    if !s.has_best || key_less(in s) {
+        s.has_best = true;
+        s.bkey.clear();
+        for i in 0..s.key.len() {
+            let x = sw(in s.key, i);
+            s.bkey.push(x);
+        }
+        s.bm.clear();
+        for i in 0..s.met.len() {
+            let x = sw(in s.met, i);
+            s.bm.push(x);
+        }
+        solution_words(inout s, true);
+    }
+    s.seval >= s.max_solutions
+}
+
+// One popped node: 0 go on, 1 finished (out written), 2 stop searching.
+fn step(inout s: S, n: u64, opt: bool, needs_meta: bool) -> u64 {
+    let root = man(in s.l, s.root).name;
+    materialize(inout s, n);
+    if s.anames.len() > 1 {
+        if s.sdec == s.maxd {
+            if opt && s.has_best {
+                let e = s.seval;
+                out_best(inout s, e);
+                return 1;
+            }
+            reset_diags(inout s);
+            let (so, sl, mo) = subj_lit(inout s, "max_decisions");
+            dlit(inout s, "search budget exhausted; satisfiability is unknown");
+            emit(inout s, c_budget_exhausted(), none(), so, sl, mo);
+            let d = s.sdec;
+            out_error(inout s, 3, d);
+            return 1;
+        }
+        s.sdec = inc(s.sdec);
+    }
+    let mut blocked = false;
+    for i in 0..s.anames.len() {
+        let x = sw(in s.anames, i);
+        let mi = assigned(in s, x);
+        if opt {
+            if x != root && dependency_policy(inout s, mi) {
+                blocked = true;
+            }
+        } else if unsupported(in s, mi) {
+            emit_unsupported(inout s, mi);
+            blocked = true;
+        }
+    }
+    if blocked {
+        s.sunsup = true;
+        return 0;
+    }
+    if !closure(inout s) {
+        return 0;
+    }
+    if opt && !policies_hold(inout s) {
+        return 0;
+    }
+    let mut conflict = version_conflicts(inout s);
+    if run_solve(inout s, false, true) {
+        conflict = true;
+    }
+    if conflict {
+        return 0;
+    }
+    let mut next = none();
+    for i in 0..s.rnames.len() {
+        let x = sw(in s.rnames, i);
+        if next == none() && assigned(in s, x) == none() {
+            next = x;
+        }
+    }
+    if next != none() {
+        branch(inout s, n, next, opt, needs_meta);
+        return 0;
+    }
+    if !select_systems(inout s) {
+        return 0;
+    }
+    if run_solve(inout s, true, false) {
+        if !opt {
+            out_solution(inout s);
+            return 1;
+        }
+        if score(inout s) {
+            return 2;
+        }
+    }
+    0
+}
+
+pub fn search(inout s: S, opt: bool) {
+    if opt {
+        if s.max_solutions == 0 {
+            reset_diags(inout s);
+            let (so, sl, mo) = subj_lit(inout s, "max_solutions");
+            dlit(inout s, "max_solutions must be positive");
+            emit(inout s, c_invalid_max_solutions(), none(), so, sl, mo);
+            out_error(inout s, 0, 0);
+            return;
+        }
+        if !active_objectives(inout s) {
+            return;
+        }
+    }
+    if s.ds.len() > 0 {
+        out_error(inout s, 0, 0);
+        return;
+    }
+    let rm = s.root;
+    if !opt && unsupported(in s, rm) {
+        emit_unsupported(inout s, rm);
+        out_error(inout s, 1, 0);
+        return;
+    }
+    let mut needs_meta = false;
+    for i in 0..s.objs.len() {
+        let o = sw(in s.objs, i);
+        if o == 0 || o == 3 || o == 4 {
+            needs_meta = true;
+        }
+    }
+    let root = man(in s.l, s.root).name;
+    s.nodes.clear();
+    s.stack.clear();
+    s
+        .nodes
+        .push(
+        Node {
+            parent: none(),
+            name: root,
+            man: rm
+        }
+    );
+    s.stack.push(0);
+    s.sdec = 0;
+    s.sunsup = false;
+    s.seval = 0;
+    s.has_best = false;
+    loop {
+        let depth = s.stack.len();
+        if depth == 0 {
+            break;
+        }
+        let n = sw(in s.stack, wrapping_sub(depth, 1));
+        s.stack.truncate(wrapping_sub(depth, 1));
+        s.nodes.truncate(inc(n));
+        let r = step(inout s, n, opt, needs_meta);
+        if r == 1 {
+            return;
+        }
+        if r == 2 {
+            break;
+        }
+    }
+    if opt && s.has_best {
+        let e = s.seval;
+        out_best(inout s, e);
+        return;
+    }
+    let d = s.sdec;
+    if s.sunsup {
+        out_error(inout s, 1, d);
+    } else {
+        out_error(inout s, 2, d);
+    }
+}

@@ -34,6 +34,30 @@ pub(super) struct SeqDropSlot {
     /// A `let`-bound string's own storage: the slot is bound to it so that
     /// a later binding can free the string it replaces.
     storage: Option<ir::Value>,
+    /// [`crate::fip::SeqDrop::Fields`]: the byte offsets of the struct's
+    /// `ChunkSeq` handles.
+    fields: Vec<i32>,
+}
+
+/// The offsets of every `ChunkSeq` handle in a value of `layout`, when each
+/// one sits in a (nested) product field; `None` when a sequence or slice is
+/// reachable some other way (an enum payload, a string, a view).
+fn seq_field_offsets(world: &World, layout: &Layout, base: i32, out: &mut Vec<i32>) -> bool {
+    let LayoutKind::Product(fields) = &layout.kind else {
+        return false;
+    };
+    for f in fields {
+        if seq::is_seq_type(&f.ty) {
+            out.push(base + f.offset);
+        } else if !seq::holds_sequence(world, &f.ty) {
+            continue;
+        } else if seq::is_slice_type(&f.ty)
+            || !seq_field_offsets(world, &f.layout, base + f.offset, out)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 impl<M: Module> Codegen<'_, '_, M> {
@@ -88,6 +112,18 @@ impl<M: Module> Codegen<'_, '_, M> {
             let Some(&var) = self.vars.get(&name) else {
                 continue;
             };
+            let mut fields = vec![];
+            if kind == crate::fip::SeqDrop::Fields {
+                let ty =
+                    crate::numeric::default_type(&substitute(&f.locals[&name], &self.generic_vars));
+                let layout = Layout::of(self.world, &ty)?;
+                if !self.operands_only
+                    || !seq_field_offsets(self.world, &layout, 0, &mut fields)
+                    || fields.is_empty()
+                {
+                    continue;
+                }
+            }
             let storage = if kind == crate::fip::SeqDrop::Str && !param {
                 let storage = self.alloc(crate::seq::HEADER_BYTES as u32);
                 let zero = self.zero();
@@ -95,10 +131,22 @@ impl<M: Module> Codegen<'_, '_, M> {
                     self.seq_set_word(storage, offset, zero);
                 }
                 Some(storage)
+            } else if kind == crate::fip::SeqDrop::Fields {
+                // Its own storage, so that a binding in a loop (whose
+                // struct literal reuses one temporary) frees the struct it
+                // replaces, not the one it binds.
+                let ty =
+                    crate::numeric::default_type(&substitute(&f.locals[&name], &self.generic_vars));
+                Some(self.alloc(Layout::of(self.world, &ty)?.size))
             } else {
                 None
             };
-            slots.push(SeqDropSlot { var, kind, storage });
+            slots.push(SeqDropSlot {
+                var,
+                kind,
+                storage,
+                fields,
+            });
         }
         Ok(slots)
     }
@@ -116,10 +164,37 @@ impl<M: Module> Codegen<'_, '_, M> {
 
     /// Frees what drop `slot` holds now.
     fn seq_drop_free(&mut self, slot: &SeqDropSlot) -> Result<(), String> {
+        if slot.kind == crate::fip::SeqDrop::Fields {
+            // A struct local not bound yet is a null pointer; a moved one
+            // holds zero handles.
+            let ptr = self.use_var(slot.var);
+            let bound = self.b.ins().icmp_imm(IntCC::NotEqual, ptr, 0);
+            let fields = self.b.create_block();
+            let done = self.b.create_block();
+            self.branch(bound, fields, &[], done, &[]);
+            self.b.switch_to_block(fields);
+            for &offset in &slot.fields {
+                let handle = self.seq_word(ptr, offset);
+                let present = self.b.ins().icmp_imm(IntCC::NotEqual, handle, 0);
+                let free = self.b.create_block();
+                let next = self.b.create_block();
+                self.branch(present, free, &[], next, &[]);
+                self.b.switch_to_block(free);
+                self.seq_runtime_call("vesper_seq_free", &[handle])?;
+                let zero = self.zero();
+                self.seq_set_word(ptr, offset, zero);
+                self.jump(next, &[]);
+                self.b.switch_to_block(next);
+            }
+            self.jump(done, &[]);
+            self.b.switch_to_block(done);
+            return Ok(());
+        }
         let (value, function) = match (slot.kind, slot.storage) {
             (crate::fip::SeqDrop::Seq, _) => (self.use_var(slot.var), "vesper_seq_free"),
             (crate::fip::SeqDrop::Str, Some(storage)) => (storage, "vesper_str_release"),
             (crate::fip::SeqDrop::Str, None) => (self.use_var(slot.var), "vesper_str_release"),
+            (crate::fip::SeqDrop::Fields, _) => unreachable!("struct drops return above"),
         };
         // An empty slot (never bound, or moved from) holds 0.
         let present = self.b.ins().icmp_imm(IntCC::NotEqual, value, 0);
@@ -150,11 +225,31 @@ impl<M: Module> Codegen<'_, '_, M> {
 
     /// A sequence moved out of local `name` leaves its slot empty.
     pub(super) fn seq_drop_moved(&mut self, name: &str) {
-        if let Some(slot) = self.seq_drop_slot(name)
-            && slot.kind == crate::fip::SeqDrop::Seq
-        {
-            let zero = self.zero();
-            self.def_var(slot.var, zero);
+        let Some(slot) = self.seq_drop_slot(name) else {
+            return;
+        };
+        match slot.kind {
+            crate::fip::SeqDrop::Seq => {
+                let zero = self.zero();
+                self.def_var(slot.var, zero);
+            }
+            crate::fip::SeqDrop::Fields => {
+                // The move copied the struct out; its handles now belong to
+                // the copy. A local read before any binding has no storage.
+                let ptr = self.use_var(slot.var);
+                let bound = self.b.ins().icmp_imm(IntCC::NotEqual, ptr, 0);
+                let clear = self.b.create_block();
+                let done = self.b.create_block();
+                self.branch(bound, clear, &[], done, &[]);
+                self.b.switch_to_block(clear);
+                for &offset in &slot.fields {
+                    let zero = self.zero();
+                    self.seq_set_word(ptr, offset, zero);
+                }
+                self.jump(done, &[]);
+                self.b.switch_to_block(done);
+            }
+            crate::fip::SeqDrop::Str => {}
         }
     }
 
@@ -174,6 +269,16 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         self.seq_drop_free(&slot)?;
         Ok(match slot.storage {
+            Some(storage) if slot.kind == crate::fip::SeqDrop::Fields => {
+                let ty = self
+                    .local_types
+                    .get(name)
+                    .cloned()
+                    .ok_or("drop slot lacks type")?;
+                let size = Layout::of(self.world, &ty)?.size;
+                self.copy_bytes(value, storage, size);
+                storage
+            }
             Some(storage) => {
                 self.copy_bytes(value, storage, crate::seq::HEADER_BYTES as u32);
                 storage
@@ -515,7 +620,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             | SeqOp::Wide(_)
             | SeqOp::SumBe16
             | SeqOp::BytesEq
-            | SeqOp::FindByte => {
+            | SeqOp::FindByte
+            | SeqOp::FindEither
+            | SeqOp::FindNotIn
+            | SeqOp::EqIgnoreAsciiCase
+            | SeqOp::ExtendAsciiLowercase => {
                 unreachable!("string, hoisted and byte operations return above")
             }
             SeqOp::SubSlice => {
@@ -590,7 +699,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         let tag = self.b.ins().iconst(types::I64, some_tag as i64);
         self.seq_set_word(out, 0, tag);
         if lazy {
-            let end = payload as u32 + Layout::of(self.world, elem)?.size;
+            // An `f32` payload store writes only the low half of its word.
+            let end = if elem.name() == "f32" {
+                payload as u32
+            } else {
+                payload as u32 + Layout::of(self.world, elem)?.size
+            };
             for off in (8..layout.size).step_by(8) {
                 if off < payload as u32 || off >= end {
                     let zero = self.zero();

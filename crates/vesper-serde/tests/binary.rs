@@ -893,3 +893,54 @@ fn streamvbyte_every_width_boundary_and_all_control_bytes() {
         assert_eq!(encoded, bytes);
     }
 }
+
+#[test]
+fn oversized_trees_fail_on_their_limits_before_any_label_or_child_is_read() {
+    let limits = archive::Limits {
+        max_nodes: 3,
+        max_children_per_node: 2,
+        max_edges: 2,
+        max_label_bytes: 4,
+        max_total_label_bytes: 6,
+        ..archive::Limits::default()
+    };
+    let fails = |nodes: &[TreeNode<'_>], kind: ErrorKind| {
+        assert_eq!(archive::encoded_size(nodes, limits).unwrap_err().kind, kind);
+        let mut out = vec![0xab; 4096];
+        assert_eq!(
+            archive::encode_into(nodes, &mut out, limits)
+                .unwrap_err()
+                .kind,
+            kind
+        );
+        assert_eq!(out, vec![0xab; 4096]);
+    };
+    let node = |label, children| TreeNode {
+        value: 1,
+        label,
+        children,
+    };
+    let long = "x".repeat(1 << 20);
+    let many: Vec<u32> = (1..=4096).collect();
+    // Far more nodes than the limit, each with a large label.
+    let crowd: Vec<TreeNode<'_>> = (0..10_000).map(|_| node(&long, &[])).collect();
+    fails(&crowd, ErrorKind::CountLimit);
+    // One label longer than the per-label limit, then the total.
+    fails(
+        &[node("ab", &[1, 2]), node(&long, &[]), node("", &[])],
+        ErrorKind::StringLimit,
+    );
+    fails(
+        &[node("abcd", &[1, 2]), node("abc", &[]), node(&long, &[])],
+        ErrorKind::StringLimit,
+    );
+    // Children past the per-node limit, then past the edge total.
+    fails(
+        &[node("", &many), node("", &[]), node("", &[])],
+        ErrorKind::CountLimit,
+    );
+    fails(
+        &[node("", &[1]), node("", &[2, 2]), node("", &many)],
+        ErrorKind::CountLimit,
+    );
+}

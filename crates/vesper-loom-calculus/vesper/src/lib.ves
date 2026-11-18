@@ -1,0 +1,313 @@
+// @vesper/loom-calculus: Vesper port of vesper-loom-calculus (port wave P1
+// lane 16, #913): manifest validation (`validate_manifest`), solution
+// validation with the feature fixed point, capability ceilings and the
+// backwards authority worklist (`validate_solution`), the declared-authority
+// upgrade guard (`check_upgrade`), package-name checks and SemVer matching
+// and ordering.
+//
+// TOML/JSON decoding and SemVer text parsing stay in the Rust wrapper
+// (src/port.rs), which encodes the decoded DTOs as a word stream `words`
+// whose strings are `(offset, length)` ranges of `text`. Vesper sorts the
+// strings once and works on their ranks, so comparing two ids is comparing
+// the strings. Every entry point returns one `L` handle; `out` holds the
+// result words and `pool` the text (a copy of `text` followed by the
+// generated messages). The encodings are documented in src/port.rs.
+use self::decode::{
+    decode_manifest,
+    decode_solution,
+    decode_tables,
+    new_l
+};
+use self::check::{
+    check_manifest,
+    name_valid
+};
+use self::solve::{
+    solve
+};
+use self::upgrade::{
+    upgrade
+};
+use self::encode::{
+    encode_manifest_diags,
+    encode_upgrade,
+    encode_validation
+};
+
+// A SemVer version; pre, build and text are string ids.
+pub copy struct Ver {
+    major: u64,
+    minor: u64,
+    patch: u64,
+    pre: u64,
+    build: u64,
+    text: u64
+}
+
+// One comparator. op: Exact 0, Greater 1, GreaterEq 2, Less 3, LessEq 4,
+// Tilde 5, Caret 6, Wildcard 7.
+pub copy struct Cmp {
+    op: u64,
+    major: u64,
+    minor: u64,
+    has_minor: bool,
+    patch: u64,
+    has_patch: bool,
+    pre: u64
+}
+
+// A requirement: comparators cmps[at .. at + n] and its display text.
+pub copy struct Req {
+    at: u64,
+    n: u64,
+    text: u64
+}
+
+// A manifest. Ranges index `ids` (string ids, ascending) or the feature and
+// dependency tables. `fs` is the selection's own feature request and `json`
+// the selection's canonical JSON (the sort tie-break).
+pub copy struct Man {
+    name: u64,
+    ver: u64,
+    ceil_at: u64,
+    ceil_n: u64,
+    forbid: bool,
+    feat_at: u64,
+    feat_n: u64,
+    dep_at: u64,
+    dep_n: u64,
+    sandbox: bool,
+    net: bool,
+    path_at: u64,
+    path_n: u64,
+    json: u64,
+    fs_at: u64,
+    fs_n: u64
+}
+
+pub copy struct Feat {
+    name: u64,
+    eff_at: u64,
+    eff_n: u64,
+    deps_at: u64,
+    deps_n: u64,
+    sub_at: u64,
+    sub_n: u64,
+    sys_at: u64,
+    sys_n: u64
+}
+
+// A native requirement string. `ok` is false when the wrapper could not
+// split it into a name and a SemVer requirement.
+pub copy struct Sys {
+    raw: u64,
+    ok: bool,
+    name: u64,
+    req: u64
+}
+
+pub copy struct Dep {
+    name: u64,
+    req: u64,
+    eff_at: u64,
+    eff_n: u64,
+    opt: bool,
+    feat_at: u64,
+    feat_n: u64
+}
+
+pub copy struct Root {
+    name: u64,
+    req: u64,
+    feat_at: u64,
+    feat_n: u64
+}
+
+pub copy struct SysSel {
+    name: u64,
+    ver: u64
+}
+
+// A diagnostic. pkg and dep are string ids or none(); subject and message
+// are pool ranges. For upgrade diagnostics, snap is 0 (none), 1 (baseline)
+// or 2 (candidate) and code is the index of the code string.
+pub copy struct Diag {
+    snap: u64,
+    code: u64,
+    pkg: u64,
+    dep: u64,
+    so: u64,
+    sl: u64,
+    mo: u64,
+    ml: u64
+}
+
+// A graph node of one snapshot: required capabilities and features are
+// ranges of `gids`, edges a range of `ge` (dependency indices), native
+// edges a range of `gs`.
+pub copy struct GNode {
+    name: u64,
+    man: u64,
+    req_at: u64,
+    req_n: u64,
+    feat_at: u64,
+    feat_n: u64,
+    e_at: u64,
+    e_n: u64,
+    s_at: u64,
+    s_n: u64
+}
+
+pub copy struct SEdge {
+    name: u64,
+    text: u64,
+    req: u64
+}
+
+// One validated snapshot: ranges of gn, gl (roots, unused selections, used
+// native selections as name/version pairs) and diags.
+pub copy struct Snap {
+    node_at: u64,
+    node_n: u64,
+    root_at: u64,
+    root_n: u64,
+    unused_at: u64,
+    unused_n: u64,
+    sys_at: u64,
+    sys_n: u64,
+    diag_at: u64,
+    diag_n: u64,
+    graph: bool
+}
+
+// An authority change; sets are ranges of `cids`. bf/af: 0 none, 1 false,
+// 2 true.
+pub copy struct Change {
+    scope: u64,
+    pkg: u64,
+    dep: u64,
+    b_at: u64,
+    b_n: u64,
+    a_at: u64,
+    a_n: u64,
+    add_at: u64,
+    add_n: u64,
+    rem_at: u64,
+    rem_n: u64,
+    bf: u64,
+    af: u64,
+    relaxed: bool
+}
+
+// All state. Scratch sequences live here, so nothing function-local leaks.
+pub struct L {
+    inw: ChunkSeq[u64],
+    pos: u64,
+    pool: ChunkSeq[u8],
+    out: ChunkSeq[u64],
+    k: u64,
+    rank: ChunkSeq[u64],
+    roff: ChunkSeq[u64],
+    rlen: ChunkSeq[u64],
+    rocc: ChunkSeq[u64],
+    vers: ChunkSeq[Ver],
+    cmps: ChunkSeq[Cmp],
+    reqs: ChunkSeq[Req],
+    ids: ChunkSeq[u64],
+    mans: ChunkSeq[Man],
+    feats: ChunkSeq[Feat],
+    syss: ChunkSeq[Sys],
+    deps: ChunkSeq[Dep],
+    roots: ChunkSeq[Root],
+    ssels: ChunkSeq[SysSel],
+    schema: u64,
+    sel_at: u64,
+    sel_n: u64,
+    root_at: u64,
+    root_n: u64,
+    ss_at: u64,
+    ss_n: u64,
+    diags: ChunkSeq[Diag],
+    dtmp: ChunkSeq[Diag],
+    udiags: ChunkSeq[Diag],
+    snaps: ChunkSeq[Snap],
+    gn: ChunkSeq[GNode],
+    gids: ChunkSeq[u64],
+    ge: ChunkSeq[u64],
+    gs: ChunkSeq[SEdge],
+    gl: ChunkSeq[u64],
+    changes: ChunkSeq[Change],
+    cids: ChunkSeq[u64],
+    // Per-run scratch.
+    np: u64,
+    nc: u64,
+    nf: u64,
+    cmap: ChunkSeq[u64],
+    clist: ChunkSeq[u64],
+    fmap: ChunkSeq[u64],
+    flist: ChunkSeq[u64],
+    pof: ChunkSeq[u64],
+    sysof: ChunkSeq[u64],
+    pname: ChunkSeq[u64],
+    psel: ChunkSeq[u64],
+    frow: ChunkSeq[bool],
+    nrow: ChunkSeq[bool],
+    rrow: ChunkSeq[bool],
+    reach: ChunkSeq[bool],
+    hasn: ChunkSeq[bool],
+    queued: ChunkSeq[bool],
+    nfirst: ChunkSeq[u64],
+    mk: ChunkSeq[bool],
+    rootf: ChunkSeq[bool],
+    usedsys: ChunkSeq[bool],
+    queue: ChunkSeq[u64],
+    work: ChunkSeq[u64],
+    idx: ChunkSeq[u64],
+    tmp: ChunkSeq[u64],
+    se: ChunkSeq[SEdge],
+    pcount: ChunkSeq[u64],
+    pstart: ChunkSeq[u64],
+    plist: ChunkSeq[u64],
+    sa: ChunkSeq[u64],
+    sb: ChunkSeq[u64],
+    ea: ChunkSeq[u64],
+    eb: ChunkSeq[u64]
+}
+
+// `PackageName::parse`: `@org/name`, or the reserved `std/name`.
+pub fn package_name_valid(in s: Str) -> bool {
+    name_valid(in s)
+}
+
+// `validate_manifest`: tables, then one manifest.
+pub fn validate_manifest(in words: Slice[u64], in text: Slice[u8]) -> L {
+    let mut l = new_l(in words, in text);
+    decode_tables(inout l);
+    let m = decode_manifest(inout l);
+    check_manifest(inout l, m);
+    encode_manifest_diags(inout l);
+    l
+}
+
+// `validate_solution`: tables, then one solution.
+pub fn validate_solution(in words: Slice[u64], in text: Slice[u8]) -> L {
+    let mut l = new_l(in words, in text);
+    decode_tables(inout l);
+    decode_solution(inout l);
+    solve(inout l);
+    encode_validation(inout l, 0);
+    l
+}
+
+// `check_upgrade`: tables, then the baseline and the candidate solution.
+pub fn check_upgrade(in words: Slice[u64], in text: Slice[u8]) -> L {
+    let mut l = new_l(in words, in text);
+    decode_tables(inout l);
+    decode_solution(inout l);
+    solve(inout l);
+    decode_solution(inout l);
+    solve(inout l);
+    upgrade(inout l);
+    encode_upgrade(inout l);
+    l
+}

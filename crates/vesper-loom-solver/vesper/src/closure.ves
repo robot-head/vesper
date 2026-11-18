@@ -1,0 +1,325 @@
+// Module closure of @vesper/loom-solver (see lib.ves): `closure`, the
+// additive feature fixed point of the current assignment and the version
+// and native requirements derived once from it.
+//
+// Per name id (stamped with cgen): the feature list fl_id/fl_next from
+// fhead to ftail with fcnt entries, and pcnt, its size when the name was
+// last processed (none() before). The features of a name only grow, so a
+// name whose size equals pcnt is unchanged. Requirements: rl_req/rl_next
+// from rhead to rtail per dependency name (in owner name order), native
+// requirements yl_req/yl_next per native name; rnames and ynames list the
+// names that have any, ascending.
+use @vesper/loom-calculus::util::{
+    add,
+    dep,
+    feat,
+    find_feat,
+    id_at,
+    inc,
+    man,
+    none,
+    sw,
+    sys
+};
+use @vesper/loom-calculus::check::{
+    system_name_valid
+};
+use @vesper/loom-calculus::semver::{
+    matches
+};
+use self::{
+    S
+};
+use self::diag::{
+    c_unknown_feature,
+    dlit,
+    emit,
+    setw,
+    sort_values,
+    subj_id
+};
+
+// The manifest assigned to name id x in the current assignment, or none().
+pub fn assigned(in s: S, x: u64) -> u64 {
+    if sw(in s.ast, x) == s.agen {
+        sw(in s.asg, x)
+    } else {
+        none()
+    }
+}
+
+// Whether name x has a feature entry in the current closure.
+pub fn has_entry(in s: S, x: u64) -> bool {
+    sw(in s.cst, x) == s.cgen
+}
+
+fn entry(inout s: S, x: u64) {
+    if !has_entry(in s, x) {
+        setw(inout s.cst, x, s.cgen);
+        setw(inout s.fhead, x, none());
+        setw(inout s.ftail, x, none());
+        setw(inout s.fcnt, x, 0);
+        setw(inout s.pcnt, x, none());
+        s.cnames.push(x);
+    }
+}
+
+fn append_feature(inout s: S, x: u64, f: u64) {
+    let at = s.fl_id.len();
+    s.fl_id.push(f);
+    s.fl_next.push(none());
+    let tail = sw(in s.ftail, x);
+    if tail == none() {
+        setw(inout s.fhead, x, at);
+    } else {
+        setw(inout s.fl_next, tail, at);
+    }
+    setw(inout s.ftail, x, at);
+    let c = sw(in s.fcnt, x);
+    setw(inout s.fcnt, x, inc(c));
+}
+
+// Mark the features of name x in fmk; returns the mark.
+pub fn mark_features(inout s: S, x: u64) -> u64 {
+    s.mgen = inc(s.mgen);
+    let g = s.mgen;
+    if has_entry(in s, x) {
+        let mut at = sw(in s.fhead, x);
+        loop {
+            if at == none() {
+                break;
+            }
+            let f = sw(in s.fl_id, at);
+            setw(inout s.fmk, f, g);
+            at = sw(in s.fl_next, at);
+        }
+    }
+    g
+}
+
+// Add feature f to name x unless the mark g says it is there; returns
+// whether it was added.
+fn add_marked(inout s: S, x: u64, f: u64, g: u64) -> bool {
+    if sw(in s.fmk, f) == g {
+        return false;
+    }
+    setw(inout s.fmk, f, g);
+    append_feature(inout s, x, f);
+    true
+}
+
+// Mark in nmk (with a fresh mark, returned) the dependency names that the
+// declared, active features of name x (manifest mi) enable.
+pub fn mark_feature_deps(inout s: S, x: u64, mi: u64) -> u64 {
+    s.mgen = inc(s.mgen);
+    let g = s.mgen;
+    if !has_entry(in s, x) {
+        return g;
+    }
+    let m = man(in s.l, mi);
+    let mut at = sw(in s.fhead, x);
+    loop {
+        if at == none() {
+            break;
+        }
+        let f = sw(in s.fl_id, at);
+        let fi = find_feat(in s.l, in m, f);
+        if fi != none() {
+            let ft = feat(in s.l, fi);
+            for j in 0..ft.deps_n {
+                let d = id_at(in s.l, add(ft.deps_at, j));
+                setw(inout s.nmk, d, g);
+            }
+        }
+        at = sw(in s.fl_next, at);
+    }
+    g
+}
+
+fn push_req(inout s: S, x: u64, r: u64) {
+    if sw(in s.rst, x) != s.cgen {
+        setw(inout s.rst, x, s.cgen);
+        setw(inout s.rhead, x, none());
+        setw(inout s.rtail, x, none());
+        s.rnames.push(x);
+    }
+    let at = s.rl_req.len();
+    s.rl_req.push(r);
+    s.rl_next.push(none());
+    let tail = sw(in s.rtail, x);
+    if tail == none() {
+        setw(inout s.rhead, x, at);
+    } else {
+        setw(inout s.rl_next, tail, at);
+    }
+    setw(inout s.rtail, x, at);
+}
+
+fn push_sys(inout s: S, x: u64, r: u64) {
+    if sw(in s.yst, x) != s.cgen {
+        setw(inout s.yst, x, s.cgen);
+        setw(inout s.yhead, x, none());
+        setw(inout s.ytail, x, none());
+        s.ynames.push(x);
+    }
+    let at = s.yl_req.len();
+    s.yl_req.push(r);
+    s.yl_next.push(none());
+    let tail = sw(in s.ytail, x);
+    if tail == none() {
+        setw(inout s.yhead, x, at);
+    } else {
+        setw(inout s.yl_next, tail, at);
+    }
+    setw(inout s.ytail, x, at);
+}
+
+// The worklist step for name x with manifest mi.
+fn process(inout s: S, x: u64, mi: u64) {
+    let m = man(in s.l, mi);
+    // Expand in place: the list grows at its tail while it is walked.
+    let g = mark_features(inout s, x);
+    let mut at = sw(in s.fhead, x);
+    loop {
+        if at == none() {
+            break;
+        }
+        let f = sw(in s.fl_id, at);
+        let fi = find_feat(in s.l, in m, f);
+        if fi != none() {
+            let ft = feat(in s.l, fi);
+            for j in 0..ft.sub_n {
+                let sub = id_at(in s.l, add(ft.sub_at, j));
+                add_marked(inout s, x, sub, g);
+            }
+        } else {
+            let (so, sl, mo) = subj_id(inout s, f);
+            dlit(inout s, "requested feature is not declared by selected version");
+            emit(inout s, c_unknown_feature(), x, so, sl, mo);
+            s.cfail = true;
+        }
+        at = sw(in s.fl_next, at);
+    }
+    let cnt = sw(in s.fcnt, x);
+    if sw(in s.pcnt, x) == cnt {
+        return;
+    }
+    setw(inout s.pcnt, x, cnt);
+    let ng = mark_feature_deps(inout s, x, mi);
+    for j in 0..m.dep_n {
+        let d = dep(in s.l, add(m.dep_at, j));
+        if !d.opt || sw(in s.nmk, d.name) == ng {
+            entry(inout s, d.name);
+            let tg = mark_features(inout s, d.name);
+            let mut grew = false;
+            for i in 0..d.feat_n {
+                let f = id_at(in s.l, add(d.feat_at, i));
+                if add_marked(inout s, d.name, f, tg) {
+                    grew = true;
+                }
+            }
+            if sw(in s.pcnt, d.name) == none() || grew {
+                s.cq.push(d.name);
+            }
+        }
+    }
+}
+
+// `closure` of the current assignment. Unknown features go to ds; returns
+// false when there were any.
+pub fn closure(inout s: S) -> bool {
+    s.cgen = inc(s.cgen);
+    s.cfail = false;
+    s.cnames.clear();
+    s.cq.clear();
+    s.fl_id.clear();
+    s.fl_next.clear();
+    s.rnames.clear();
+    s.rl_req.clear();
+    s.rl_next.clear();
+    s.ynames.clear();
+    s.yl_req.clear();
+    s.yl_next.clear();
+    let root = man(in s.l, s.root).name;
+    entry(inout s, root);
+    let g = mark_features(inout s, root);
+    for i in 0..s.rf_n {
+        let f = id_at(in s.l, add(s.rf_at, i));
+        add_marked(inout s, root, f, g);
+    }
+    s.cq.push(root);
+    let mut head: u64 = 0;
+    loop {
+        if head >= s.cq.len() {
+            break;
+        }
+        let x = sw(in s.cq, head);
+        head = inc(head);
+        let mi = assigned(in s, x);
+        if mi != none() {
+            process(inout s, x, mi);
+        }
+    }
+    // Constraints, once, from the fixed point, in name order.
+    sort_values(inout s, 0);
+    for i in 0..s.cnames.len() {
+        let x = sw(in s.cnames, i);
+        let mi = assigned(in s, x);
+        if mi != none() {
+            let m = man(in s.l, mi);
+            let fg = mark_features(inout s, x);
+            for j in 0..m.feat_n {
+                let ft = feat(in s.l, add(m.feat_at, j));
+                if sw(in s.fmk, ft.name) == fg {
+                    for t in 0..ft.sys_n {
+                        let y = sys(in s.l, add(ft.sys_at, t));
+                        if y.ok && system_name_valid(in s.l, y.name) {
+                            push_sys(inout s, y.name, y.req);
+                        }
+                    }
+                }
+            }
+            let ng = mark_feature_deps(inout s, x, mi);
+            for j in 0..m.dep_n {
+                let d = dep(in s.l, add(m.dep_at, j));
+                if !d.opt || sw(in s.nmk, d.name) == ng {
+                    push_req(inout s, d.name, d.req);
+                }
+            }
+        }
+    }
+    sort_values(inout s, 1);
+    sort_values(inout s, 2);
+    !s.cfail
+}
+
+// Whether every requirement of dependency name x matches version vi.
+pub fn all_reqs_match(in s: S, x: u64, vi: u64, systems: bool) -> bool {
+    let mut at = if systems {
+        sw(in s.yhead, x)
+    } else {
+        sw(in s.rhead, x)
+    };
+    loop {
+        if at == none() {
+            return true;
+        }
+        let r = if systems {
+            sw(in s.yl_req, at)
+        } else {
+            sw(in s.rl_req, at)
+        };
+        if !matches_req(in s, r, vi) {
+            return false;
+        }
+        at = if systems {
+            sw(in s.yl_next, at)
+        } else {
+            sw(in s.rl_next, at)
+        };
+    }
+}
+
+pub fn matches_req(in s: S, r: u64, vi: u64) -> bool {
+    matches(in s.l, r, vi)
+}

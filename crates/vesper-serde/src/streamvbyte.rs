@@ -23,6 +23,17 @@ impl Default for Limits {
 
 /// Checked maximum, including controls. Usable without allocating an input.
 pub fn max_encoded_size(count: usize) -> Result<usize> {
+    #[cfg(vesper_port)]
+    {
+        crate::port::svb_max_size(count)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_max_encoded_size(count)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_max_encoded_size(count: usize) -> Result<usize> {
     add(controls(count)?, mul(count, 4)?)
 }
 fn controls(count: usize) -> Result<usize> {
@@ -34,6 +45,17 @@ fn width(value: u32) -> usize {
 
 /// Exact encoded length with resource checks, without writing or allocating.
 pub fn encoded_size(values: &[u32], limits: Limits) -> Result<usize> {
+    #[cfg(vesper_port)]
+    {
+        crate::port::svb_size(values, limits)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_encoded_size(values, limits)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_encoded_size(values: &[u32], limits: Limits) -> Result<usize> {
     bound(values.len(), limits.max_values, ErrorKind::CountLimit)?;
     let control = controls(values.len())?;
     let mut size = control;
@@ -52,6 +74,17 @@ pub fn encoded_size(values: &[u32], limits: Limits) -> Result<usize> {
 /// Every capacity/resource failure preserves the complete caller buffer.
 /// Successful writes touch exactly the returned prefix.
 pub fn encode_into(values: &[u32], output: &mut [u8], limits: Limits) -> Result<usize> {
+    #[cfg(vesper_port)]
+    {
+        crate::port::svb_encode(values, output, limits)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_encode_into(values, output, limits)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_encode_into(values: &[u32], output: &mut [u8], limits: Limits) -> Result<usize> {
     let size = encoded_size(values, limits)?;
     if output.len() < size {
         return Err(Error::new(ErrorKind::OutputTooSmall, 0));
@@ -73,6 +106,22 @@ pub fn encode_into(values: &[u32], output: &mut [u8], limits: Limits) -> Result<
 /// values), and non-minimal widths are accepted for raw-format interoperability.
 /// Extra data bytes are rejected; count is explicitly supplied by the caller.
 pub fn decode_into(
+    input: &[u8],
+    count: usize,
+    output: &mut [u32],
+    limits: Limits,
+) -> Result<usize> {
+    #[cfg(vesper_port)]
+    {
+        crate::port::svb_decode(input, count, output, limits)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_decode_into(input, count, output, limits)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_decode_into(
     input: &[u8],
     count: usize,
     output: &mut [u32],

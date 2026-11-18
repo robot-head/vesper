@@ -1,0 +1,524 @@
+// Module diag of @vesper/loom-solver (see lib.ves): diagnostic text in
+// `dp`, the diagnostic list `ds`, its deduplication and the merge sort.
+use @vesper/loom-calculus::{
+    Diag
+};
+use @vesper/loom-calculus::util::{
+    add,
+    diag,
+    gb,
+    inc,
+    min,
+    mul,
+    none,
+    okey,
+    ord,
+    req,
+    slen,
+    soff,
+    sw,
+    ver,
+    ver_ord
+};
+use self::{
+    Node,
+    S
+};
+
+// Diagnostic codes. 0 .. 15 are the calculus codes (`Code`, in order);
+// the solver's own codes follow (CODES in src/port.rs).
+pub fn c_unsupported_schema() -> u64 {
+    16
+}
+
+pub fn c_duplicate_candidate() -> u64 {
+    17
+}
+
+pub fn c_conflicting_root() -> u64 {
+    18
+}
+
+pub fn c_invalid_system_name() -> u64 {
+    19
+}
+
+pub fn c_duplicate_system_candidate() -> u64 {
+    20
+}
+
+pub fn c_unsupported_policy() -> u64 {
+    21
+}
+
+pub fn c_unknown_feature() -> u64 {
+    22
+}
+
+pub fn c_locked_root_mismatch() -> u64 {
+    23
+}
+
+pub fn c_locked_manifest_mismatch() -> u64 {
+    24
+}
+
+pub fn c_locked_candidate_missing() -> u64 {
+    25
+}
+
+pub fn c_locked_features_mismatch() -> u64 {
+    26
+}
+
+pub fn c_locked_unused_package() -> u64 {
+    27
+}
+
+pub fn c_locked_package_missing() -> u64 {
+    28
+}
+
+pub fn c_locked_system_missing() -> u64 {
+    29
+}
+
+pub fn c_locked_unused_system() -> u64 {
+    30
+}
+
+pub fn c_locked_system_candidate_missing() -> u64 {
+    31
+}
+
+pub fn c_budget_exhausted() -> u64 {
+    32
+}
+
+pub fn c_version_conflict() -> u64 {
+    33
+}
+
+pub fn c_no_candidate() -> u64 {
+    34
+}
+
+pub fn c_no_system_candidate() -> u64 {
+    35
+}
+
+pub fn c_invalid_max_solutions() -> u64 {
+    36
+}
+
+pub fn c_unknown_optimize_objective() -> u64 {
+    37
+}
+
+pub fn c_insufficient_repro_attestations() -> u64 {
+    38
+}
+
+pub fn c_unvetted_namespace() -> u64 {
+    39
+}
+
+pub fn c_missing_candidate_metadata() -> u64 {
+    40
+}
+
+// ---------------------------------------------------------------------
+// Text.
+
+pub fn dmark(in s: S) -> u64 {
+    s.dp.len()
+}
+
+pub fn dlit(inout s: S, in t: Str) {
+    for i in 0..t.len() {
+        match t.try_byte_at(i) {
+            Option::Some(b) => s.dp.push(b),
+            Option::None => (),
+        }
+    }
+}
+
+// The bytes of the calculus pool range [off, off + len).
+pub fn drange(inout s: S, off: u64, len: u64) {
+    for i in 0..len {
+        let b = gb(in s.l, add(off, i));
+        s.dp.push(b);
+    }
+}
+
+pub fn did(inout s: S, id: u64) {
+    let off = soff(in s.l, id);
+    let len = slen(in s.l, id);
+    drange(inout s, off, len);
+}
+
+// The display text of version vi.
+pub fn dver(inout s: S, vi: u64) {
+    let t = ver(in s.l, vi).text;
+    did(inout s, t);
+}
+
+// The display text of requirement ri.
+pub fn dreq(inout s: S, ri: u64) {
+    let t = req(in s.l, ri).text;
+    did(inout s, t);
+}
+
+// A u64 in decimal.
+pub fn dnum(inout s: S, x: u64) {
+    let at = s.dp.len();
+    let mut rest = x;
+    loop {
+        s.dp.push(wrapping_u8(wrapping_add(48, rest % 10)));
+        rest = rest / 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    // Reverse dp[at ..].
+    let mut i = at;
+    let mut j = wrapping_sub(s.dp.len(), 1);
+    loop {
+        if i >= j {
+            break;
+        }
+        let a = dbyte(in s, i);
+        let b = dbyte(in s, j);
+        s.dp.try_set(i, b);
+        s.dp.try_set(j, a);
+        i = inc(i);
+        j = wrapping_sub(j, 1);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Diagnostics.
+
+// Push a diagnostic whose subject is dp[so .. so + sl] and whose message
+// runs from mo to the end of dp.
+pub fn emit(inout s: S, code: u64, pkg: u64, so: u64, sl: u64, mo: u64) {
+    let ml = wrapping_sub(s.dp.len(), mo);
+    s
+        .ds
+        .push(
+        Diag {
+            snap: 0,
+            code: code,
+            pkg: pkg,
+            dep: none(),
+            so: so,
+            sl: sl,
+            mo: mo,
+            ml: ml
+        }
+    );
+    if s.ds.len() >= add(mul(s.dedup_n, 2), 4096) {
+        dedup(inout s);
+    }
+}
+
+// Start a diagnostic with a string-id subject; returns (so, sl, mo).
+pub fn subj_id(inout s: S, id: u64) -> (u64, u64, u64) {
+    let so = dmark(in s);
+    did(inout s, id);
+    let sl = wrapping_sub(dmark(in s), so);
+    (so, sl, dmark(in s))
+}
+
+// Start a diagnostic with a literal subject; returns (so, sl, mo).
+pub fn subj_lit(inout s: S, in t: Str) -> (u64, u64, u64) {
+    let so = dmark(in s);
+    dlit(inout s, t);
+    let sl = wrapping_sub(dmark(in s), so);
+    (so, sl, dmark(in s))
+}
+
+// Copy the calculus diagnostic l.diags[i] (code 0 .. 15).
+pub fn copy_calculus(inout s: S, i: u64) {
+    let d = diag(in s.l.diags, i);
+    let so = dmark(in s);
+    drange(inout s, d.so, d.sl);
+    let mo = dmark(in s);
+    drange(inout s, d.mo, d.ml);
+    emit(inout s, d.code, d.pkg, so, d.sl, mo);
+}
+
+fn dbyte(in s: S, i: u64) -> u8 {
+    match s.dp.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+fn dbytes_ord(in s: S, ao: u64, al: u64, bo: u64, bl: u64) -> u64 {
+    let n = min(al, bl);
+    for i in 0..n {
+        let x = dbyte(in s, add(ao, i));
+        let y = dbyte(in s, add(bo, i));
+        if x < y {
+            return 0;
+        }
+        if x > y {
+            return 2;
+        }
+    }
+    ord(al, bl)
+}
+
+// A total order on ds entries (code, package, subject, message); equal
+// means the same diagnostic.
+pub fn ds_ord(in s: S, a: u64, b: u64) -> u64 {
+    let x = diag(in s.ds, a);
+    let y = diag(in s.ds, b);
+    let o = ord(x.code, y.code);
+    if o != 1 {
+        return o;
+    }
+    let o = ord(okey(x.pkg), okey(y.pkg));
+    if o != 1 {
+        return o;
+    }
+    let o = dbytes_ord(in s, x.so, x.sl, y.so, y.sl);
+    if o != 1 {
+        return o;
+    }
+    dbytes_ord(in s, x.mo, x.ml, y.mo, y.ml)
+}
+
+// Sort ds, drop duplicates and compact dp.
+pub fn dedup(inout s: S) {
+    s.didx.clear();
+    for i in 0..s.idx.len() {
+        let x = sw(in s.idx, i);
+        s.didx.push(x);
+    }
+    s.idx.clear();
+    for i in 0..s.ds.len() {
+        s.idx.push(i);
+    }
+    msort(inout s, 4);
+    s.dt.clear();
+    s.dq.clear();
+    let mut last = none();
+    for j in 0..s.idx.len() {
+        let x = sw(in s.idx, j);
+        let dup = last != none() && ds_ord(in s, last, x) == 1;
+        if !dup {
+            last = x;
+            let d = diag(in s.ds, x);
+            let so = s.dq.len();
+            for i in 0..d.sl {
+                let b = dbyte(in s, add(d.so, i));
+                s.dq.push(b);
+            }
+            let mo = s.dq.len();
+            for i in 0..d.ml {
+                let b = dbyte(in s, add(d.mo, i));
+                s.dq.push(b);
+            }
+            let mut e = d;
+            e.so = so;
+            e.mo = mo;
+            s.dt.push(e);
+        }
+    }
+    s.dp.clear();
+    for i in 0..s.dq.len() {
+        match s.dq.try_get(i) {
+            Option::Some(b) => s.dp.push(b),
+            Option::None => (),
+        }
+    }
+    s.ds.clear();
+    for i in 0..s.dt.len() {
+        let d = diag(in s.dt, i);
+        s.ds.push(d);
+    }
+    s.dedup_n = s.ds.len();
+    s.idx.clear();
+    for i in 0..s.didx.len() {
+        let x = sw(in s.didx, i);
+        s.idx.push(x);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Sorting: `msort(s, kind)` sorts s.idx (bottom-up, stable) by
+// `sorder(s, kind, a, b)`. Kinds: 1 manifests by (name, version newest
+// first); 2 native candidates by (name, version newest first); 3 values
+// ascending; 4 diagnostics (ds_ord); 5 (pa, pc) pairs ascending.
+
+pub fn sorder(in s: S, kind: u64, a: u64, b: u64) -> u64 {
+    if kind == 1 {
+        let x = match s.l.mans.try_get(a) {
+            Option::Some(m) => m,
+            Option::None => return 1,
+        };
+        let y = match s.l.mans.try_get(b) {
+            Option::Some(m) => m,
+            Option::None => return 1,
+        };
+        let o = ord(x.name, y.name);
+        if o != 1 {
+            return o;
+        }
+        ver_ord(in s.l, y.ver, x.ver)
+    } else if kind == 2 {
+        let x = match s.sys.try_get(a) {
+            Option::Some(m) => m,
+            Option::None => return 1,
+        };
+        let y = match s.sys.try_get(b) {
+            Option::Some(m) => m,
+            Option::None => return 1,
+        };
+        let o = ord(x.name, y.name);
+        if o != 1 {
+            return o;
+        }
+        ver_ord(in s.l, y.ver, x.ver)
+    } else if kind == 3 {
+        ord(a, b)
+    } else if kind == 4 {
+        ds_ord(in s, a, b)
+    } else {
+        let o = ord(sw(in s.pa, a), sw(in s.pa, b));
+        if o != 1 {
+            return o;
+        }
+        ord(sw(in s.pc, a), sw(in s.pc, b))
+    }
+}
+
+pub fn msort(inout s: S, kind: u64) {
+    let n = s.idx.len();
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        s.tmp.clear();
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let mid = min(add(i, width), n);
+            let hi = min(add(i, mul(width, 2)), n);
+            let mut a = i;
+            let mut b = mid;
+            loop {
+                if a < mid {
+                    let xa = sw(in s.idx, a);
+                    if b < hi {
+                        let xb = sw(in s.idx, b);
+                        if sorder(in s, kind, xb, xa) == 0 {
+                            s.tmp.push(xb);
+                            b = inc(b);
+                        } else {
+                            s.tmp.push(xa);
+                            a = inc(a);
+                        }
+                    } else {
+                        s.tmp.push(xa);
+                        a = inc(a);
+                    }
+                } else if b < hi {
+                    let xb = sw(in s.idx, b);
+                    s.tmp.push(xb);
+                    b = inc(b);
+                } else {
+                    break;
+                }
+            }
+            i = hi;
+        }
+        s.idx.clear();
+        for j in 0..n {
+            let x = sw(in s.tmp, j);
+            s.idx.push(x);
+        }
+        width = mul(width, 2);
+    }
+}
+
+// Sort the values of seq `v` ascending (through s.idx).
+pub fn sort_values(inout s: S, which: u64) {
+    s.idx.clear();
+    if which == 0 {
+        for i in 0..s.cnames.len() {
+            let x = sw(in s.cnames, i);
+            s.idx.push(x);
+        }
+    } else if which == 1 {
+        for i in 0..s.rnames.len() {
+            let x = sw(in s.rnames, i);
+            s.idx.push(x);
+        }
+    } else {
+        for i in 0..s.ynames.len() {
+            let x = sw(in s.ynames, i);
+            s.idx.push(x);
+        }
+    }
+    msort(inout s, 3);
+    if which == 0 {
+        s.cnames.clear();
+        for i in 0..s.idx.len() {
+            let x = sw(in s.idx, i);
+            s.cnames.push(x);
+        }
+    } else if which == 1 {
+        s.rnames.clear();
+        for i in 0..s.idx.len() {
+            let x = sw(in s.idx, i);
+            s.rnames.push(x);
+        }
+    } else {
+        s.ynames.clear();
+        for i in 0..s.idx.len() {
+            let x = sw(in s.idx, i);
+            s.ynames.push(x);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Small helpers.
+
+pub fn node(in s: S, i: u64) -> Node {
+    match s.nodes.try_get(i) {
+        Option::Some(n) => n,
+        Option::None => Node {
+            parent: none(),
+            name: 0,
+            man: 0
+        },
+    }
+}
+
+pub fn setw(inout q: ChunkSeq[u64], i: u64, v: u64) {
+    q.try_set(i, v);
+}
+
+pub fn fillw(inout q: ChunkSeq[u64], n: u64, v: u64) {
+    q.clear();
+    for i in 0..n {
+        q.push(v);
+    }
+}
+
+// Saturating addition.
+pub fn sat(a: u64, b: u64) -> u64 {
+    let x = wrapping_add(a, b);
+    if x < a {
+        none()
+    } else {
+        x
+    }
+}

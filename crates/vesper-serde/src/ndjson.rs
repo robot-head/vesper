@@ -124,6 +124,17 @@ impl BatchLimits {
         },
     };
     pub fn validate(self) -> Result<(), Error> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::batch_validate(&self).map_err(fault)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.rust_validate()
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_validate(self) -> Result<(), Error> {
         let hard = Self::HARD;
         for (value, ceiling) in [
             (self.max_input_bytes, hard.max_input_bytes),
@@ -173,6 +184,28 @@ pub struct NdjsonBatch<'a> {
     stats: BatchStats,
 }
 
+/// A port `Fault` in `ndjson::ErrorKind` terms (vesper/src/records.ves).
+#[cfg(vesper_port)]
+fn fault(f: crate::port::Fault) -> Error {
+    let kind = match f.code {
+        0 => ErrorKind::InvalidLimits,
+        1 => ErrorKind::InputLimit,
+        2 => ErrorKind::RecordLimit,
+        3 => ErrorKind::TokenLimit,
+        4 => ErrorKind::IndexLimit,
+        5 => ErrorKind::MetadataLimit,
+        6 => ErrorKind::WorkLimit,
+        7 => ErrorKind::BlankLine,
+        _ => ErrorKind::Overflow,
+    };
+    Error {
+        kind,
+        offset: f.offset,
+        record: f.record,
+        line: f.line,
+    }
+}
+
 fn relocate(error: crate::Error, payload: &Range<usize>, record: usize, line: usize) -> Error {
     let Some(offset) = payload
         .start
@@ -201,6 +234,104 @@ impl<'a> NdjsonBatch<'a> {
     }
 
     pub fn parse_with(input: &'a [u8], limits: BatchLimits, engine: Engine) -> Result<Self, Error> {
+        #[cfg(vesper_port)]
+        {
+            Self::port_parse_with(input, limits, engine)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            Self::rust_parse_with(input, limits, engine)
+        }
+    }
+
+    /// The port's admission, framing and accounting around the per-record
+    /// parse (itself the port's).
+    #[cfg(vesper_port)]
+    fn port_parse_with(
+        input: &'a [u8],
+        limits: BatchLimits,
+        engine: Engine,
+    ) -> Result<Self, Error> {
+        crate::port::batch_validate(&limits).map_err(fault)?;
+        if let Engine::Simd(isa) = engine
+            && !isa.is_available()
+        {
+            return Err(initial(ErrorKind::Json(crate::ErrorKind::IsaUnavailable)));
+        }
+        let mut index = StructuralIndex::new();
+        let plan =
+            crate::port::batch_admit(input, &limits, size_of::<Record<'a>>()).map_err(fault)?;
+        let count = plan.count;
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(count)
+            .map_err(|_| initial(ErrorKind::AllocationFailed))?;
+        let mut cursor = crate::port::batch_cursor(plan.work);
+        while (cursor.start as usize) < input.len() {
+            crate::port::batch_frame(input, &mut cursor, &limits).map_err(fault)?;
+            let (ordinal, start) = (cursor.ordinal as usize, cursor.start as usize);
+            let line = ordinal + 1;
+            let span = start..cursor.payload_end as usize;
+            let payload = &input[span.clone()];
+            let record_limits = Limits {
+                max_input_bytes: cursor.max_input_bytes as usize,
+                max_tokens: cursor.max_tokens as usize,
+                max_index_bytes: cursor.max_index_bytes as usize,
+                max_work: cursor.max_work as usize,
+                ..limits.record
+            };
+            let json = match engine {
+                Engine::Scalar => IndexedJson::parse(payload, record_limits),
+                Engine::Simd(isa) => {
+                    IndexedJson::parse_with_index(payload, record_limits, isa, &mut index)
+                }
+            }
+            .map_err(|error| relocate(error, &span, ordinal, line))?;
+            crate::port::batch_account(
+                &mut cursor,
+                json.token_count(),
+                json.index_bytes(),
+                json.work_used(),
+            )
+            .map_err(fault)?;
+            if records.len() >= count {
+                return Err(Error {
+                    kind: ErrorKind::Overflow,
+                    offset: start,
+                    record: ordinal,
+                    line,
+                });
+            }
+            records.push(Record {
+                json,
+                payload: span,
+                line,
+            });
+        }
+        if records.len() != count || cursor.start as usize != input.len() {
+            return Err(initial(ErrorKind::Overflow));
+        }
+        let stats = BatchStats {
+            records: records.len(),
+            tokens: cursor.tokens as usize,
+            index_bytes: cursor.index_bytes as usize,
+            metadata_bytes: plan.metadata_bytes,
+            work: cursor.work as usize,
+        };
+        Ok(Self {
+            records,
+            input_len: input.len(),
+            eof_line: plan.eof_line,
+            stats,
+        })
+    }
+
+    #[cfg(not(vesper_port))]
+    fn rust_parse_with(
+        input: &'a [u8],
+        limits: BatchLimits,
+        engine: Engine,
+    ) -> Result<Self, Error> {
         limits.validate()?;
         if let Engine::Simd(isa) = engine
             && !isa.is_available()

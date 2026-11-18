@@ -1,0 +1,446 @@
+// @export abi 3
+//
+// @vesper/serde: the transactional JSON encoder of src/encode.rs. The Rust
+// wrapper flattens a borrowed `Value` tree into a word stream in prefix
+// order, with string bytes and raw node text in one byte pool:
+//
+//   0 Null | 1 Bool b | 2 U64 n | 3 I64 bits | 4 F64 bits
+//   5 String off len
+//   6 Array count, then `count` values
+//   7 Object count, then per field: key_off key_len, then the value
+//   8 Raw off len n, then n token records: kind tag (`Kind` order), depth
+//     relative to the raw root, decoded string bytes
+//
+// Preflight (`Check`) and writing (`Writer`) both walk the stream.
+use self::{
+    EncodeLimits,
+    Error,
+    ErrorKind,
+    Kind
+};
+use self::dragon::float_text;
+use self::index::raise;
+
+copy struct Check {
+    lim: EncodeLimits,
+    work: u64,
+    tokens: u64,
+    strings: u64,
+    // The stream cursor.
+    at: u64
+}
+
+fn fail(kind: ErrorKind) -> Unit eff [Fail[Error]] {
+    raise(kind, 0)
+}
+
+// `add`: checked, Overflow on wrap.
+fn add(a: u64, b: u64) -> u64 eff [Fail[Error]] {
+    if b > wrapping_sub(18446744073709551615, a) {
+        fail(ErrorKind::Overflow);
+    }
+    wrapping_add(a, b)
+}
+
+fn word(in w: Slice[u64], i: u64) -> u64 {
+    match w.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn byte(in pool: Slice[u8], i: u64) -> u64 {
+    match pool.try_get(i) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => 0,
+    }
+}
+
+fn next(inout c: Check, in w: Slice[u64]) -> u64 {
+    let v = word(in w, c.at);
+    c.at = wrapping_add(c.at, 1);
+    v
+}
+
+fn charge(inout c: Check, n: u64) -> Unit eff [Fail[Error]] {
+    c.work = add(c.work, n);
+    if c.work > c.lim.max_work {
+        fail(ErrorKind::WorkLimit);
+    }
+}
+
+fn token(inout c: Check) -> Unit eff [Fail[Error]] {
+    charge(inout c, 1);
+    c.tokens = add(c.tokens, 1);
+    if c.tokens > c.lim.max_tokens {
+        fail(ErrorKind::TokenLimit);
+    }
+}
+
+fn string_bytes(inout c: Check, n: u64) -> Unit eff [Fail[Error]] {
+    if n > c.lim.max_string_bytes {
+        fail(ErrorKind::StringLimit);
+    }
+    c.strings = add(c.strings, n);
+    if c.strings > c.lim.max_total_string_bytes {
+        fail(ErrorKind::StringLimit);
+    }
+}
+
+fn escaped_width(b: u64) -> u64 {
+    if b == 34 || b == 92 || b == 10 || b == 13 || b == 9 || b == 8 || b == 12 {
+        2
+    } else if b < 32 {
+        6
+    } else {
+        1
+    }
+}
+
+fn string(inout c: Check, in pool: Slice[u8], off: u64, len: u64) -> u64 eff [Fail[Error]] {
+    string_bytes(inout c, len);
+    charge(inout c, len);
+    let mut size: u64 = 2;
+    for i in 0..len {
+        size = add(size, escaped_width(byte(in pool, wrapping_add(off, i))));
+    }
+    size
+}
+
+fn depth_check(in c: Check, depth: u64) -> Unit eff [Fail[Error]] {
+    if depth >= c.lim.max_depth || depth >= 128 {
+        fail(ErrorKind::DepthLimit);
+    }
+}
+
+fn digits(n: u64) -> u64 {
+    let mut d: u64 = 1;
+    let mut x = n;
+    loop {
+        if x < 10 {
+            break;
+        }
+        d = wrapping_add(d, 1);
+        x = x / 10;
+    }
+    d
+}
+
+// The work of one bounded binary64 formatting pass (`FLOAT_FORMAT_PASS_WORK`).
+fn float_pass_work() -> u64 {
+    262656
+}
+
+fn same_bytes(in pool: Slice[u8], a: u64, b: u64, n: u64) -> bool {
+    for i in 0..n {
+        if byte(in pool, wrapping_add(a, i)) != byte(in pool, wrapping_add(b, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// `Check::value`: the encoded size of the value at the cursor.
+fn value(inout c: Check, in w: Slice[u64], in pool: Slice[u8], depth: u64)
+    -> u64 eff [Fail[Error]] {
+    let tag = next(inout c, in w);
+    if tag == 8 {
+        let _off = next(inout c, in w);
+        let len = next(inout c, in w);
+        let n = next(inout c, in w);
+        charge(inout c, len);
+        for _i in 0..n {
+            let kind = next(inout c, in w);
+            let relative = next(inout c, in w);
+            let bytes = next(inout c, in w);
+            token(inout c);
+            if kind == 4 || kind == 5 {
+                let d = add(depth, relative);
+                depth_check(in c, d);
+            }
+            if kind == 3 {
+                string_bytes(inout c, bytes);
+            }
+        }
+        return len;
+    }
+    token(inout c);
+    if tag == 0 {
+        4
+    } else if tag == 1 {
+        if next(inout c, in w) != 0 {
+            4
+        } else {
+            5
+        }
+    } else if tag == 2 {
+        digits(next(inout c, in w))
+    } else if tag == 3 {
+        let v = wrapping_i64(next(inout c, in w));
+        if v < 0 {
+            add(1, digits(wrapping_sub(0, wrapping_u64(v))))
+        } else {
+            digits(wrapping_u64(v))
+        }
+    } else if tag == 4 {
+        let bits = next(inout c, in w);
+        if (bits >> 52) & 2047 == 2047 {
+            fail(ErrorKind::Number);
+        }
+        charge(inout c, wrapping_mul(float_pass_work(), 2));
+        let text = float_text(bits);
+        if text.len() > 512 {
+            fail(ErrorKind::Number);
+        }
+        text.len()
+    } else if tag == 5 {
+        let off = next(inout c, in w);
+        let len = next(inout c, in w);
+        string(inout c, in pool, off, len)
+    } else if tag == 6 {
+        depth_check(in c, depth);
+        let count = next(inout c, in w);
+        let mut size: u64 = 2;
+        for i in 0..count {
+            if i != 0 {
+                size = add(size, 1);
+            }
+            let s = value(inout c, in w, in pool, wrapping_add(depth, 1));
+            size = add(size, s);
+        }
+        size
+    } else {
+        depth_check(in c, depth);
+        let count = next(inout c, in w);
+        let mut size: u64 = 2;
+        // Keys seen so far: (offset, length) pairs.
+        let mut keys: ChunkSeq[u64] = ChunkSeq::with_capacity(wrapping_mul(count, 2));
+        for i in 0..count {
+            let off = next(inout c, in w);
+            let len = next(inout c, in w);
+            // The object key is itself a string token.
+            token(inout c);
+            for j in 0..i {
+                let p_off = match keys.try_get(wrapping_mul(j, 2)) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+                let p_len = match keys.try_get(wrapping_add(wrapping_mul(j, 2), 1)) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+                let shorter = if p_len < len {
+                    p_len
+                } else {
+                    len
+                };
+                charge(inout c, add(1, shorter));
+                if p_len == len && same_bytes(in pool, p_off, off, len) {
+                    fail(ErrorKind::DuplicateKey);
+                }
+            }
+            keys.push(off);
+            keys.push(len);
+            if i != 0 {
+                size = add(size, 1);
+            }
+            let ks = string(inout c, in pool, off, len);
+            size = add(size, add(ks, 1));
+            let s = value(inout c, in w, in pool, wrapping_add(depth, 1));
+            size = add(size, s);
+        }
+        size
+    }
+}
+
+// `encoded_size`.
+pub fn encode_size(in w: Slice[u64], in pool: Slice[u8], lim: EncodeLimits)
+    -> u64 eff [Fail[Error]] {
+    let mut c = Check {
+        lim: lim,
+        work: 0,
+        tokens: 0,
+        strings: 0,
+        at: 0
+    };
+    let size = value(inout c, in w, in pool, 0);
+    // One additional unit per byte covers the write pass.
+    charge(inout c, size);
+    if size > lim.max_output_bytes {
+        fail(ErrorKind::OutputLimit);
+    }
+    size
+}
+
+// -------------------------------------------------------------------
+// `Writer`: after a successful preflight every write is in bounds.
+// -------------------------------------------------------------------
+
+copy struct W {
+    at: u64,
+    pos: u64
+}
+
+fn put(inout out: Slice[u8], inout wr: W, b: u64) {
+    out.try_set(wr.pos, wrapping_u8(b));
+    wr.pos = wrapping_add(wr.pos, 1);
+}
+
+fn take(inout wr: W, in w: Slice[u64]) -> u64 {
+    let v = word(in w, wr.at);
+    wr.at = wrapping_add(wr.at, 1);
+    v
+}
+
+fn put_integer(inout out: Slice[u8], inout wr: W, n: u64) {
+    let d = digits(n);
+    let mut x = n;
+    let mut i = d;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        out.try_set(wrapping_add(wr.pos, i), wrapping_u8(wrapping_add(48, x % 10)));
+        x = x / 10;
+    }
+    wr.pos = wrapping_add(wr.pos, d);
+}
+
+fn hex(n: u64) -> u64 {
+    if n < 10 {
+        wrapping_add(48, n)
+    } else {
+        wrapping_add(87, n)
+    }
+}
+
+fn put_string(inout out: Slice[u8], inout wr: W, in pool: Slice[u8], off: u64, len: u64) {
+    put(inout out, inout wr, 34);
+    for i in 0..len {
+        let b = byte(in pool, wrapping_add(off, i));
+        if b == 34 || b == 92 {
+            put(inout out, inout wr, 92);
+            put(inout out, inout wr, b);
+        } else if b == 10 {
+            put(inout out, inout wr, 92);
+            put(inout out, inout wr, 110);
+        } else if b == 13 {
+            put(inout out, inout wr, 92);
+            put(inout out, inout wr, 114);
+        } else if b == 9 {
+            put(inout out, inout wr, 92);
+            put(inout out, inout wr, 116);
+        } else if b == 8 {
+            put(inout out, inout wr, 92);
+            put(inout out, inout wr, 98);
+        } else if b == 12 {
+            put(inout out, inout wr, 92);
+            put(inout out, inout wr, 102);
+        } else if b < 32 {
+            put(inout out, inout wr, 92);
+            put(inout out, inout wr, 117);
+            put(inout out, inout wr, 48);
+            put(inout out, inout wr, 48);
+            put(inout out, inout wr, hex(b >> 4));
+            put(inout out, inout wr, hex(b & 15));
+        } else {
+            put(inout out, inout wr, b);
+        }
+    }
+    put(inout out, inout wr, 34);
+}
+
+fn write_value(inout out: Slice[u8], inout wr: W, in w: Slice[u64], in pool: Slice[u8]) {
+    let tag = take(inout wr, in w);
+    if tag == 0 {
+        put(inout out, inout wr, 110);
+        put(inout out, inout wr, 117);
+        put(inout out, inout wr, 108);
+        put(inout out, inout wr, 108);
+    } else if tag == 1 {
+        if take(inout wr, in w) != 0 {
+            put(inout out, inout wr, 116);
+            put(inout out, inout wr, 114);
+            put(inout out, inout wr, 117);
+            put(inout out, inout wr, 101);
+        } else {
+            put(inout out, inout wr, 102);
+            put(inout out, inout wr, 97);
+            put(inout out, inout wr, 108);
+            put(inout out, inout wr, 115);
+            put(inout out, inout wr, 101);
+        }
+    } else if tag == 2 {
+        let n = take(inout wr, in w);
+        put_integer(inout out, inout wr, n);
+    } else if tag == 3 {
+        let v = wrapping_i64(take(inout wr, in w));
+        if v < 0 {
+            put(inout out, inout wr, 45);
+            put_integer(inout out, inout wr, wrapping_sub(0, wrapping_u64(v)));
+        } else {
+            put_integer(inout out, inout wr, wrapping_u64(v));
+        }
+    } else if tag == 4 {
+        let text = float_text(take(inout wr, in w));
+        for i in 0..text.len() {
+            let b = match text.try_get(i) {
+                Option::Some(b) => widen_u64(b),
+                Option::None => 48,
+            };
+            put(inout out, inout wr, b);
+        }
+    } else if tag == 5 {
+        let off = take(inout wr, in w);
+        let len = take(inout wr, in w);
+        put_string(inout out, inout wr, in pool, off, len);
+    } else if tag == 8 {
+        let off = take(inout wr, in w);
+        let len = take(inout wr, in w);
+        let n = take(inout wr, in w);
+        wr.at = wrapping_add(wr.at, wrapping_mul(n, 3));
+        for i in 0..len {
+            put(inout out, inout wr, byte(in pool, wrapping_add(off, i)));
+        }
+    } else if tag == 6 {
+        let count = take(inout wr, in w);
+        put(inout out, inout wr, 91);
+        for i in 0..count {
+            if i != 0 {
+                put(inout out, inout wr, 44);
+            }
+            write_value(inout out, inout wr, in w, in pool);
+        }
+        put(inout out, inout wr, 93);
+    } else {
+        let count = take(inout wr, in w);
+        put(inout out, inout wr, 123);
+        for i in 0..count {
+            if i != 0 {
+                put(inout out, inout wr, 44);
+            }
+            let off = take(inout wr, in w);
+            let len = take(inout wr, in w);
+            put_string(inout out, inout wr, in pool, off, len);
+            put(inout out, inout wr, 58);
+            write_value(inout out, inout wr, in w, in pool);
+        }
+        put(inout out, inout wr, 125);
+    }
+}
+
+// `encode_into`: complete preflight, one capacity check, then the writes.
+pub fn encode_write(in w: Slice[u64], in pool: Slice[u8], inout out: Slice[u8], lim: EncodeLimits)
+    -> u64 eff [Fail[Error]] {
+    let size = encode_size(in w, in pool, lim);
+    if out.len() < size {
+        fail(ErrorKind::OutputTooSmall);
+    }
+    let mut wr = W {
+        at: 0,
+        pos: 0
+    };
+    write_value(inout out, inout wr, in w, in pool);
+    size
+}

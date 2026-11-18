@@ -1,0 +1,352 @@
+// Module input of @vesper/loom-solver (see lib.ves): the request words
+// (documented in src/port.rs) and `inputs`: catalog normalization and
+// validation.
+use @vesper/loom-calculus::{
+    SysSel
+};
+use @vesper/loom-calculus::decode::{
+    decode_manifest,
+    decode_tables,
+    rd,
+    rd_bool,
+    rd_set,
+    rd_str
+};
+use @vesper/loom-calculus::check::{
+    check_manifest,
+    system_name_valid
+};
+use @vesper/loom-calculus::util::{
+    add,
+    inc,
+    man,
+    none,
+    ssel,
+    sw,
+    ver
+};
+use self::{
+    Meta,
+    Mx,
+    S
+};
+use self::diag::{
+    c_conflicting_root,
+    c_duplicate_candidate,
+    c_duplicate_system_candidate,
+    c_invalid_system_name,
+    c_unsupported_schema,
+    copy_calculus,
+    dlit,
+    dver,
+    emit,
+    fillw,
+    msort,
+    subj_id,
+    subj_lit
+};
+
+pub fn mxv(in s: S, i: u64) -> Mx {
+    match s.mx.try_get(i) {
+        Option::Some(m) => m,
+        Option::None => Mx {
+            has_json: false,
+            json: 0,
+            resolver: false,
+            opt_at: 0,
+            opt_n: 0,
+            has_min: false,
+            min: 0,
+            block: false
+        },
+    }
+}
+
+pub fn sysv(in s: S, i: u64) -> SysSel {
+    match s.sys.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => SysSel {
+            name: 0,
+            ver: 0
+        },
+    }
+}
+
+// has_json, [json], has_resolver, [optimize set, has_min, min, block].
+fn read_extra(inout s: S) {
+    let has_json = rd_bool(inout s.l);
+    let mut json: u64 = 0;
+    if has_json {
+        json = rd_str(inout s.l);
+    }
+    let resolver = rd_bool(inout s.l);
+    let mut opt_at: u64 = 0;
+    let mut opt_n: u64 = 0;
+    let mut has_min = false;
+    let mut minv: u64 = 0;
+    let mut block = false;
+    if resolver {
+        let (a, n) = rd_set(inout s.l);
+        opt_at = a;
+        opt_n = n;
+        has_min = rd_bool(inout s.l);
+        minv = rd(inout s.l);
+        block = rd_bool(inout s.l);
+    }
+    s
+        .mx
+        .push(
+        Mx {
+            has_json: has_json,
+            json: json,
+            resolver: resolver,
+            opt_at: opt_at,
+            opt_n: opt_n,
+            has_min: has_min,
+            min: minv,
+            block: block
+        }
+    );
+}
+
+// tables; root manifest, extra; exact root requirement; requested
+// features; catalog schema; ncat, (manifest, extra)*; nsys, (name,
+// version)*; max_decisions.
+pub fn decode_request(inout s: S) {
+    decode_tables(inout s.l);
+    s.root = decode_manifest(inout s.l);
+    read_extra(inout s);
+    s.rexact = rd(inout s.l);
+    let (fa, fan) = rd_set(inout s.l);
+    s.rf_at = fa;
+    s.rf_n = fan;
+    s.cschema = rd(inout s.l);
+    let ncat = rd(inout s.l);
+    s.cat_at = s.l.mans.len();
+    s.cat_n = ncat;
+    for i in 0..ncat {
+        decode_manifest(inout s.l);
+        read_extra(inout s);
+    }
+    let nsys = rd(inout s.l);
+    for i in 0..nsys {
+        let name = rd_str(inout s.l);
+        let v = rd(inout s.l);
+        s
+            .sys
+            .push(
+            SysSel {
+                name: name,
+                ver: v
+            }
+        );
+    }
+    s.maxd = rd(inout s.l);
+}
+
+// The optimizer fields (with_limits) and the metadata:
+//   [max_solutions, nobj, objective*], nmeta, (name, version, cve,
+//   staleness, trust, repro, vetted)*.
+pub fn decode_metadata(inout s: S, with_limits: bool) {
+    if with_limits {
+        s.max_solutions = rd(inout s.l);
+        let nobj = rd(inout s.l);
+        for i in 0..nobj {
+            let o = rd(inout s.l);
+            s.objs.push(o);
+        }
+    }
+    let n = rd(inout s.l);
+    for i in 0..n {
+        let name = rd_str(inout s.l);
+        let v = rd(inout s.l);
+        let vt = ver(in s.l, v).text;
+        let cve = rd(inout s.l);
+        let stale = rd(inout s.l);
+        let trust = rd(inout s.l);
+        let repro = rd(inout s.l);
+        let vetted = rd_bool(inout s.l);
+        s
+            .metas
+            .push(
+            Meta {
+                name: name,
+                ver: vt,
+                cve: cve,
+                stale: stale,
+                trust: trust,
+                repro: repro,
+                vetted: vetted
+            }
+        );
+    }
+}
+
+// The k-sized tables keyed by string id, and the metadata index.
+pub fn alloc_tables(inout s: S) {
+    let k = s.l.k;
+    fillw(inout s.cstart, k, 0);
+    fillw(inout s.ccount, k, 0);
+    fillw(inout s.ystart, k, 0);
+    fillw(inout s.ycount, k, 0);
+    fillw(inout s.mstart, k, 0);
+    fillw(inout s.mcount, k, 0);
+    fillw(inout s.asg, k, none());
+    fillw(inout s.ast, k, 0);
+    fillw(inout s.cst, k, 0);
+    fillw(inout s.fhead, k, none());
+    fillw(inout s.ftail, k, none());
+    fillw(inout s.fcnt, k, 0);
+    fillw(inout s.pcnt, k, none());
+    fillw(inout s.rst, k, 0);
+    fillw(inout s.rhead, k, none());
+    fillw(inout s.rtail, k, none());
+    fillw(inout s.yst, k, 0);
+    fillw(inout s.yhead, k, none());
+    fillw(inout s.ytail, k, none());
+    fillw(inout s.fmk, k, 0);
+    fillw(inout s.nmk, k, 0);
+    fillw(inout s.vmk, k, 0);
+    // Metadata grouped by name id.
+    for i in 0..s.metas.len() {
+        let name = match s.metas.try_get(i) {
+            Option::Some(m) => m.name,
+            Option::None => 0,
+        };
+        let c = sw(in s.mcount, name);
+        s.mcount.try_set(name, inc(c));
+    }
+    let mut total: u64 = 0;
+    for id in 0..k {
+        s.mstart.try_set(id, total);
+        total = add(total, sw(in s.mcount, id));
+        s.mcount.try_set(id, 0);
+    }
+    fillw(inout s.mlist, total, 0);
+    for i in 0..s.metas.len() {
+        let name = match s.metas.try_get(i) {
+            Option::Some(m) => m.name,
+            Option::None => 0,
+        };
+        let at = add(sw(in s.mstart, name), sw(in s.mcount, name));
+        s.mlist.try_set(at, i);
+        let c = sw(in s.mcount, name);
+        s.mcount.try_set(name, inc(c));
+    }
+}
+
+// The metadata entry for (name, version text), or none(). The last entry
+// wins, as with the Rust map.
+pub fn find_meta(in s: S, name: u64, vt: u64) -> u64 {
+    let at = sw(in s.mstart, name);
+    let n = sw(in s.mcount, name);
+    let mut found = none();
+    for j in 0..n {
+        let i = sw(in s.mlist, add(at, j));
+        match s.metas.try_get(i) {
+            Option::Some(m) => {
+                if m.ver == vt {
+                    found = i;
+                }
+            },
+            Option::None => (),
+        }
+    }
+    found
+}
+
+// `inputs`: validation diagnostics into ds (the caller returns
+// InvalidInput when there are any), then the candidate lists by name,
+// newest first.
+pub fn index_inputs(inout s: S) {
+    alloc_tables(inout s);
+    if s.cschema != 1 {
+        let (so, sl, mo) = subj_lit(inout s, "catalog.schema_version");
+        dlit(inout s, "unsupported local catalog schema version");
+        emit(inout s, c_unsupported_schema(), none(), so, sl, mo);
+    }
+    let rm = man(in s.l, s.root);
+    let rvt = ver(in s.l, rm.ver).text;
+    let rjson = mxv(in s, s.root).json;
+    // Catalog manifests by (name, version newest first).
+    s.idx.clear();
+    for i in 0..s.cat_n {
+        s.idx.push(add(s.cat_at, i));
+    }
+    msort(inout s, 1);
+    let mut prev = none();
+    for j in 0..s.idx.len() {
+        let mi = sw(in s.idx, j);
+        s.clist.push(mi);
+        let m = man(in s.l, mi);
+        let vt = ver(in s.l, m.ver).text;
+        let c = sw(in s.ccount, m.name);
+        if c == 0 {
+            s.cstart.try_set(m.name, j);
+        }
+        s.ccount.try_set(m.name, inc(c));
+        if prev != none() {
+            let p = man(in s.l, prev);
+            if p.name == m.name && ver(in s.l, p.ver).text == vt {
+                let (so, sl, mo) = subj_id(inout s, m.name);
+                dlit(inout s, "duplicate candidate version ");
+                dver(inout s, m.ver);
+                emit(inout s, c_duplicate_candidate(), m.name, so, sl, mo);
+            }
+        }
+        prev = mi;
+        if m.name == rm.name && vt == rvt {
+            let x = mxv(in s, mi);
+            if !x.has_json || x.json != rjson {
+                let (so, sl, mo) = subj_id(inout s, m.name);
+                dlit(inout s, "catalog candidate contradicts supplied root at the same identity");
+                emit(inout s, c_conflicting_root(), m.name, so, sl, mo);
+            }
+        }
+    }
+    // validate_manifest for the root and every candidate.
+    let to = add(s.cat_at, s.cat_n);
+    for mi in 0..to {
+        if mi == s.root || mi >= s.cat_at {
+            let at = s.l.diags.len();
+            check_manifest(inout s.l, mi);
+            for i in at..s.l.diags.len() {
+                copy_calculus(inout s, i);
+            }
+            s.l.diags.truncate(at);
+        }
+    }
+    // Native candidates by (name, version newest first).
+    s.idx.clear();
+    for i in 0..s.sys.len() {
+        s.idx.push(i);
+    }
+    msort(inout s, 2);
+    let mut prev = none();
+    for j in 0..s.idx.len() {
+        let yi = sw(in s.idx, j);
+        s.ylist.push(yi);
+        let y = sysv(in s, yi);
+        let vt = ver(in s.l, y.ver).text;
+        if !system_name_valid(in s.l, y.name) {
+            let (so, sl, mo) = subj_id(inout s, y.name);
+            dlit(inout s, "native identities must use the calculus SemVer namespace");
+            emit(inout s, c_invalid_system_name(), none(), so, sl, mo);
+        }
+        let c = sw(in s.ycount, y.name);
+        if c == 0 {
+            s.ystart.try_set(y.name, j);
+        }
+        s.ycount.try_set(y.name, inc(c));
+        if prev != none() {
+            let p = sysv(in s, prev);
+            if p.name == y.name && ver(in s.l, p.ver).text == vt {
+                let (so, sl, mo) = subj_id(inout s, y.name);
+                dlit(inout s, "duplicate native candidate version ");
+                dver(inout s, y.ver);
+                emit(inout s, c_duplicate_system_candidate(), none(), so, sl, mo);
+            }
+        }
+        prev = yi;
+    }
+}

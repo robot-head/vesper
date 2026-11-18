@@ -538,6 +538,7 @@ pub(crate) enum Next {
     Timer,
 }
 
+#[cfg(not(vesper_port))]
 /// Dependence of two transitions: they may not commute, or one may enable
 /// or disable the other. A timer is dependent with everything: it is
 /// disabled by any ready fiber and by an earlier deadline, and it changes
@@ -558,6 +559,7 @@ pub(crate) fn dependent(a: (Proc, &Next), b: (Proc, &Next)) -> bool {
     }
 }
 
+#[cfg(not(vesper_port))]
 /// Whether two transitions can ever be enabled in the same state. A fiber
 /// step and a timer cannot (a timer fires only when every fiber is parked); a
 /// fiber's step and the delivery of its own pending I/O cannot (it is

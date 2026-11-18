@@ -56,10 +56,13 @@
 //!   completion is its own delivery process, and choosing one adds its
 //!   sibling results as backtracking points.
 
+#[cfg(vesper_port)]
+use crate::explore::Footprint;
 use crate::explore::{
-    ExploreConfig, ExploreError, Machine, MachineKey, Next, Proc, SimFiber, StepError, dependent,
-    failure_of, may_co_enable,
+    ExploreConfig, ExploreError, Machine, MachineKey, Next, Proc, SimFiber, StepError, failure_of,
 };
+#[cfg(not(vesper_port))]
+use crate::explore::{dependent, may_co_enable};
 use crate::source::{Failure, PropError};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -123,10 +126,12 @@ pub enum Search {
     Dpor,
 }
 
+#[cfg(not(vesper_port))]
 /// Clock vector: for each process, one plus the index of the latest event
 /// of that process known to happen before.
 type Clock = BTreeMap<Proc, usize>;
 
+#[cfg(not(vesper_port))]
 fn join(into: &mut Clock, other: &Clock) {
     for (&p, &v) in other {
         let e = into.entry(p).or_insert(0);
@@ -137,6 +142,7 @@ fn join(into: &mut Clock, other: &Clock) {
 /// Full identity of a state for caching.
 type StateKey<K> = (MachineKey, Vec<Failure>, Option<usize>, u32, K);
 
+#[cfg(not(vesper_port))]
 struct Cached {
     /// The sleep set the state was explored with.
     sleep: BTreeSet<Proc>,
@@ -144,6 +150,7 @@ struct Cached {
     summary: BTreeSet<(Proc, Next)>,
 }
 
+#[cfg(not(vesper_port))]
 struct Node<K> {
     enabled: Vec<Proc>,
     nexts: Vec<(Proc, Next)>,
@@ -164,6 +171,7 @@ struct Node<K> {
     summary: BTreeSet<(Proc, Next)>,
 }
 
+#[cfg(not(vesper_port))]
 impl<K> Node<K> {
     fn next_of(&self, p: Proc) -> Option<&Next> {
         self.nexts.iter().find(|(q, _)| *q == p).map(|(_, n)| n)
@@ -183,6 +191,7 @@ impl<K> Node<K> {
     }
 }
 
+#[cfg(not(vesper_port))]
 struct Event {
     proc: Proc,
     next: Next,
@@ -254,6 +263,7 @@ where
     explore(mode, config, setup, observe, Some(key))
 }
 
+#[cfg(not(vesper_port))]
 /// Add `p`'s backtracking points for a race at event `i`, at the state
 /// before event `at` (`at <= i`). FG05's candidate set `E` there is `p`
 /// itself if enabled, and every process enabled there that runs a later
@@ -300,6 +310,7 @@ fn add_at<K>(
     }
 }
 
+#[cfg(not(vesper_port))]
 /// FG05's backtracking step for one process `p` whose next transition is
 /// `next` and whose clock is `p_clock`: find the latest earlier event `i`
 /// that races with it (is dependent, can be co-enabled, and does not happen
@@ -347,6 +358,7 @@ fn backtrack_for<K>(
     }
 }
 
+#[cfg(not(vesper_port))]
 fn add_backtrack_points<K>(nodes: &mut [Node<K>], events: &[Event], bounded: bool) {
     let (head, tail) = nodes.split_at_mut(events.len());
     let current = &tail[0];
@@ -363,6 +375,7 @@ fn add_backtrack_points<K>(nodes: &mut [Node<K>], events: &[Event], bounded: boo
     }
 }
 
+#[cfg(not(vesper_port))]
 /// Race-check the transitions of a cached subtree against the prefix.
 fn add_summary_points<K>(
     nodes: &mut [Node<K>],
@@ -385,6 +398,7 @@ fn add_summary_points<K>(
     }
 }
 
+#[cfg(not(vesper_port))]
 /// Choosing a delivery with one declared result also schedules its sibling
 /// results here: they are alternative transitions of the same completion.
 fn add_siblings<K>(node: &mut Node<K>, p: Proc) {
@@ -397,6 +411,7 @@ fn add_siblings<K>(node: &mut Node<K>, p: Proc) {
     }
 }
 
+#[cfg(not(vesper_port))]
 fn new_node<W, F: SimFiber<W>, K>(
     m: &Machine<W, F>,
     proc_clocks: BTreeMap<Proc, Clock>,
@@ -424,6 +439,7 @@ fn new_node<W, F: SimFiber<W>, K>(
     node
 }
 
+#[cfg(not(vesper_port))]
 /// Pick the next unexplored, awake, allowed process at `node`, from its
 /// enabled list (exhaustive) or its backtrack set (DPOR). Processes the
 /// bound forbids are marked done and counted.
@@ -469,6 +485,7 @@ fn pick<K>(
     None
 }
 
+#[cfg(not(vesper_port))]
 fn explore<W, F, S, V, O, K, KF>(
     mode: Mode,
     config: &ExploreConfig,
@@ -716,6 +733,241 @@ where
                 }
             }
             events.truncate(nodes.len().saturating_sub(1));
+        }
+    }
+}
+
+/// The `none` word of the Vesper search machine (no running fiber, no key).
+#[cfg(vesper_port)]
+const NONE: u64 = u64::MAX;
+
+/// A process as the order-keeping word of the Vesper search machine.
+#[cfg(vesper_port)]
+fn encode_proc(p: Proc) -> u64 {
+    match p {
+        Proc::Task(i) => {
+            assert!(
+                i < 1 << 22,
+                "fiber index {i} too large for the Vesper search"
+            );
+            i as u64
+        }
+        Proc::Io { task, seq, choice } => {
+            assert!(
+                task < 1 << 22,
+                "fiber index {task} too large for the Vesper search"
+            );
+            1 << 62 | (task as u64) << 40 | u64::from(seq) << 8 | u64::from(choice)
+        }
+        Proc::Timer { task, seq } => {
+            assert!(
+                task < 1 << 30,
+                "fiber index {task} too large for the Vesper search"
+            );
+            2 << 62 | (task as u64) << 32 | u64::from(seq)
+        }
+    }
+}
+
+#[cfg(vesper_port)]
+fn decode_proc(w: u64) -> Proc {
+    match w >> 62 {
+        0 => Proc::Task(w as usize),
+        1 => Proc::Io {
+            task: ((w >> 40) & 0x3f_ffff) as usize,
+            seq: (w >> 8) as u32,
+            choice: w as u8,
+        },
+        _ => Proc::Timer {
+            task: ((w >> 32) & 0x3fff_ffff) as usize,
+            seq: w as u32,
+        },
+    }
+}
+
+/// The enabled processes and the `(process, transition)` words of a state.
+/// A fiber's transition is its footprint's id, registered on first sight.
+#[cfg(vesper_port)]
+fn encode_state<W, F: SimFiber<W>>(
+    search: &mut crate::binding::Search,
+    footprints: &mut BTreeMap<Footprint, u64>,
+    m: &Machine<W, F>,
+    enabled: &mut Vec<u64>,
+    nexts: &mut Vec<u64>,
+) {
+    enabled.clear();
+    enabled.extend(m.enabled().into_iter().map(encode_proc));
+    nexts.clear();
+    for (p, next) in m.nexts() {
+        let code = match next {
+            Next::Task(fp) => match footprints.get(&fp) {
+                Some(&id) => id,
+                None => {
+                    let cancels: Vec<u64> = fp.cancels().iter().map(|&t| t as u64).collect();
+                    let id = search.footprint(fp.reads(), fp.writes(), fp.spawns(), &cancels);
+                    footprints.insert(fp, id);
+                    id
+                }
+            },
+            Next::Io | Next::Timer => 0,
+        };
+        nexts.push(encode_proc(p));
+        nexts.push(code);
+    }
+}
+
+/// The search loop of the port build: the Vesper machine (`vesper/src/
+/// lib.ves`, "Systematic schedule search") makes every choice; this loop
+/// runs the SimPulse machine, the fibers and the observer.
+#[cfg(vesper_port)]
+fn explore<W, F, S, V, O, K, KF>(
+    mode: Mode,
+    config: &ExploreConfig,
+    mut setup: S,
+    mut observe: V,
+    mut key: Option<KF>,
+) -> Result<Exploration<O>, ExploreError>
+where
+    F: SimFiber<W>,
+    S: FnMut() -> (W, Vec<F>),
+    V: FnMut(&W) -> Result<O, PropError>,
+    O: Ord,
+    K: Ord,
+    KF: FnMut(&W, &[F]) -> K,
+{
+    let bound = config.preemption_bound;
+    let mut search = crate::binding::Search::new(
+        mode == Mode::Dpor,
+        bound.is_some(),
+        bound.map_or(0, u64::from),
+        key.is_some(),
+    );
+    let mut out = Exploration {
+        outcomes: BTreeMap::new(),
+        executions: 0,
+        sleep_blocked: 0,
+        transitions: 0,
+        cache_hits: 0,
+        bound_pruned: 0,
+    };
+    let mut footprints: BTreeMap<Footprint, u64> = BTreeMap::new();
+    let mut keys: BTreeMap<StateKey<K>, u64> = BTreeMap::new();
+    let mut state_key = |m: &Machine<W, F>,
+                         failures: &[Failure],
+                         running: Option<usize>,
+                         preemptions: u32|
+     -> Result<u64, ExploreError> {
+        let Some(user) = key.as_mut() else {
+            return Ok(NONE);
+        };
+        let mut failures = failures.to_vec();
+        failures.sort();
+        let (running, preemptions) = if bound.is_some() {
+            (running, preemptions)
+        } else {
+            (None, 0)
+        };
+        let k = (
+            m.key()?,
+            failures,
+            running,
+            preemptions,
+            user(&m.world, m.fibers()),
+        );
+        let fresh = keys.len() as u64;
+        Ok(*keys.entry(k).or_insert(fresh))
+    };
+    let (mut enabled, mut nexts) = (Vec::new(), Vec::new());
+    loop {
+        // Re-execute the recorded prefix.
+        let mut schedule: Vec<Proc> = search.prefix().into_iter().map(decode_proc).collect();
+        let (world, fibers) = setup();
+        let mut m = Machine::new(world, fibers, config.seed)?.with_max_fibers(config.max_fibers)?;
+        let mut failures: Vec<Failure> = Vec::new();
+        for &p in &schedule {
+            match m.execute(p) {
+                Ok(()) => {}
+                Err(StepError::Explore(err)) => return Err(err),
+                Err(StepError::Prop(p)) => failures.push(failure_of(p)?),
+            }
+            out.transitions += 1;
+        }
+        encode_state(&mut search, &mut footprints, &m, &mut enabled, &mut nexts);
+        if search.nodes() == 0 {
+            let k = state_key(&m, &failures, None, 0)?;
+            search.root(&enabled, &nexts, k);
+        } else if !search.same_enabled(&enabled) {
+            return Err(ExploreError::Nondeterministic(
+                "re-executed prefix reached a state with different enabled processes".into(),
+            ));
+        }
+        // Extend to a final state.
+        let leaf: Option<Outcome<O>> = loop {
+            if m.complete() {
+                if !failures.is_empty() {
+                    failures.sort();
+                    break Some(Err(std::mem::take(&mut failures)));
+                }
+                break Some(match observe(&m.world) {
+                    Ok(o) => Ok(o),
+                    Err(e) => Err(vec![failure_of(e)?]),
+                });
+            }
+            if schedule.len() >= config.max_depth {
+                return Err(ExploreError::DepthExceeded {
+                    limit: config.max_depth,
+                });
+            }
+            let choice = search.choose();
+            match choice.code {
+                0 => {}
+                1 => break None,
+                _ => {
+                    return Err(ExploreError::Nondeterministic(
+                        "machine quiesced with unfinished fibers".into(),
+                    ));
+                }
+            }
+            let p = decode_proc(choice.value);
+            let result = m.execute(p);
+            out.transitions += 1;
+            schedule.push(p);
+            match result {
+                Ok(()) => {}
+                Err(StepError::Explore(err)) => return Err(err),
+                Err(StepError::Prop(e)) => failures.push(failure_of(e)?),
+            }
+            // The fiber that just stepped stays "running" only if it
+            // yielded (is still ready).
+            let still_ready = match p {
+                Proc::Task(j) => m.enabled().contains(&Proc::Task(j)),
+                _ => false,
+            };
+            encode_state(&mut search, &mut footprints, &m, &mut enabled, &mut nexts);
+            search.child(still_ready, &enabled, &nexts);
+            let running = search.running();
+            let running = (running != NONE).then_some(running as usize);
+            let preemptions = search.preemptions() as u32;
+            let k = state_key(&m, &failures, running, preemptions)?;
+            if search.key(k) {
+                break None;
+            }
+        };
+        if let Some(outcome) = leaf {
+            out.executions += 1;
+            if out.executions > config.max_executions {
+                return Err(ExploreError::ExecutionLimit {
+                    limit: config.max_executions,
+                });
+            }
+            out.outcomes.entry(outcome).or_insert(schedule);
+        }
+        if !search.backtrack() {
+            let stats = search.stats();
+            out.sleep_blocked = stats.sleep_blocked;
+            out.cache_hits = stats.cache_hits;
+            out.bound_pruned = stats.bound_pruned;
+            return Ok(out);
         }
     }
 }

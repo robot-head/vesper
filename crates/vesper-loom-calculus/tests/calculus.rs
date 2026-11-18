@@ -156,6 +156,26 @@ fn every_edge_and_ancestor_must_cover_transitive_authority() {
 }
 
 #[test]
+fn authority_reaches_ancestors_that_sort_before_their_dependencies() {
+    // Names sort parent first (a, b, c), so one pass over the packages in
+    // name order is not enough: the backwards worklist must revisit `a`
+    // after `c`'s authority reaches `b` (#913 divergence check).
+    let mut a = manifest("@org/a", &[]);
+    let mut b = manifest("@org/b", &[]);
+    let c = manifest("@org/c", &["Net"]);
+    a.dependencies.insert(name("@org/b"), dep(&["Net"]));
+    b.dependencies.insert(name("@org/c"), dep(&["Net"]));
+    let checked = validate_solution(&solution("@org/a", vec![a, b, c]));
+    let escalated = checked
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == Code::CapabilityEscalation)
+        .map(|d| d.package.clone().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(escalated, vec![name("@org/a"), name("@org/b")]);
+}
+
+#[test]
 fn additive_features_activate_optional_dependencies_and_native_edges() {
     let mut root = manifest("@org/root", &["Storage"]);
     let leaf = manifest("@org/leaf", &["Storage"]);

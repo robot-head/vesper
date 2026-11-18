@@ -1,0 +1,304 @@
+// @vesper/loom-solver: Vesper port of vesper-loom-solver (port wave P1
+// lane 17, #914): input normalization, the bounded newest-first
+// depth-first search (`resolve`), locked-snapshot validation
+// (`validate_locked`), the lexicographic optimizer (`resolve_optimized`)
+// and its metrics (`compute_metrics`).
+//
+// The solver imports @vesper/loom-calculus and runs that package's
+// decoder, manifest check, SemVer matching and solution validator on the
+// calculus state `L` it holds. The Rust wrapper (src/port.rs) encodes the
+// request in the calculus word stream plus the solver's own fields, and
+// rebuilds the crate's types from `out`: the encodings are documented
+// there. Diagnostic text is built in `dp`.
+use @vesper/loom-calculus::{
+    Diag,
+    L,
+    SysSel
+};
+use @vesper/loom-calculus::decode::{
+    new_l
+};
+use self::input::{
+    decode_metadata,
+    decode_request,
+    index_inputs
+};
+use self::search::{
+    search
+};
+use self::locked::{
+    locked
+};
+use self::metrics::{
+    metrics_only
+};
+use self::output::{
+    objective_code_of
+};
+
+// One search node: an assignment is the chain of nodes from the top of
+// the stack up to the root node (parent none()).
+pub copy struct Node {
+    parent: u64,
+    name: u64,
+    man: u64
+}
+
+// Solver fields of one root or catalog manifest (indexed like l.mans).
+// json: the manifest's canonical JSON (string id) when has_json; resolver
+// policy: optimize strings in l.ids[opt_at .. opt_at + opt_n].
+pub copy struct Mx {
+    has_json: bool,
+    json: u64,
+    resolver: bool,
+    opt_at: u64,
+    opt_n: u64,
+    has_min: bool,
+    min: u64,
+    block: bool
+}
+
+// Caller-supplied candidate metadata for (name, version text).
+pub copy struct Meta {
+    name: u64,
+    ver: u64,
+    cve: u64,
+    stale: u64,
+    trust: u64,
+    repro: u64,
+    vetted: bool
+}
+
+// All state. Scratch sequences live here, so nothing function-local leaks.
+pub struct S {
+    l: L,
+    out: ChunkSeq[u64],
+    dp: ChunkSeq[u8],
+    dq: ChunkSeq[u8],
+    ds: ChunkSeq[Diag],
+    dt: ChunkSeq[Diag],
+    dedup_n: u64,
+    // The request.
+    root: u64,
+    rexact: u64,
+    rf_at: u64,
+    rf_n: u64,
+    cschema: u64,
+    cat_at: u64,
+    cat_n: u64,
+    maxd: u64,
+    mx: ChunkSeq[Mx],
+    sys: ChunkSeq[SysSel],
+    metas: ChunkSeq[Meta],
+    objs: ChunkSeq[u64],
+    max_solutions: u64,
+    // Candidates by name id: clist[cstart .. cstart + ccount], newest
+    // first (catalog manifests), and the same for native candidates.
+    cstart: ChunkSeq[u64],
+    ccount: ChunkSeq[u64],
+    clist: ChunkSeq[u64],
+    ystart: ChunkSeq[u64],
+    ycount: ChunkSeq[u64],
+    ylist: ChunkSeq[u64],
+    mstart: ChunkSeq[u64],
+    mcount: ChunkSeq[u64],
+    mlist: ChunkSeq[u64],
+    // Search.
+    nodes: ChunkSeq[Node],
+    stack: ChunkSeq[u64],
+    asg: ChunkSeq[u64],
+    ast: ChunkSeq[u64],
+    agen: u64,
+    anames: ChunkSeq[u64],
+    // Closure, keyed by name id and stamped with cgen.
+    cgen: u64,
+    cst: ChunkSeq[u64],
+    fhead: ChunkSeq[u64],
+    ftail: ChunkSeq[u64],
+    fcnt: ChunkSeq[u64],
+    pcnt: ChunkSeq[u64],
+    fl_id: ChunkSeq[u64],
+    fl_next: ChunkSeq[u64],
+    cnames: ChunkSeq[u64],
+    cq: ChunkSeq[u64],
+    cfail: bool,
+    rst: ChunkSeq[u64],
+    rhead: ChunkSeq[u64],
+    rtail: ChunkSeq[u64],
+    rl_req: ChunkSeq[u64],
+    rl_next: ChunkSeq[u64],
+    rnames: ChunkSeq[u64],
+    yst: ChunkSeq[u64],
+    yhead: ChunkSeq[u64],
+    ytail: ChunkSeq[u64],
+    yl_req: ChunkSeq[u64],
+    yl_next: ChunkSeq[u64],
+    ynames: ChunkSeq[u64],
+    // Marks keyed by string id, stamped with mgen.
+    mgen: u64,
+    fmk: ChunkSeq[u64],
+    nmk: ChunkSeq[u64],
+    vmk: ChunkSeq[u64],
+    bq: ChunkSeq[u64],
+    // Sorting.
+    idx: ChunkSeq[u64],
+    tmp: ChunkSeq[u64],
+    pa: ChunkSeq[u64],
+    pb: ChunkSeq[u64],
+    // Selected native candidates and the last solve's snapshot.
+    ysel: ChunkSeq[u64],
+    graph: bool,
+    unused: u64,
+    caps: ChunkSeq[u64],
+    // Optimizer.
+    has_best: bool,
+    bkey: ChunkSeq[u64],
+    key: ChunkSeq[u64],
+    bm: ChunkSeq[u64],
+    met: ChunkSeq[u64],
+    bsel: ChunkSeq[u64],
+    bfs: ChunkSeq[u64],
+    bsys: ChunkSeq[u64],
+    gown: ChunkSeq[u64],
+    cbuf: ChunkSeq[u64],
+    vis: ChunkSeq[u64],
+    marks: ChunkSeq[u64],
+    didx: ChunkSeq[u64],
+    pc: ChunkSeq[u64],
+    sdec: u64,
+    sunsup: bool,
+    seval: u64
+}
+
+fn new_s(in words: Slice[u64], in text: Slice[u8]) -> S {
+    S {
+        l: new_l(in words, in text),
+        out: ChunkSeq::new[u64](),
+        dp: ChunkSeq::new[u8](),
+        dq: ChunkSeq::new[u8](),
+        ds: ChunkSeq::new[Diag](),
+        dt: ChunkSeq::new[Diag](),
+        dedup_n: 0,
+        root: 0,
+        rexact: 0,
+        rf_at: 0,
+        rf_n: 0,
+        cschema: 0,
+        cat_at: 0,
+        cat_n: 0,
+        maxd: 0,
+        mx: ChunkSeq::new[Mx](),
+        sys: ChunkSeq::new[SysSel](),
+        metas: ChunkSeq::new[Meta](),
+        objs: ChunkSeq::new[u64](),
+        max_solutions: 0,
+        cstart: ChunkSeq::new[u64](),
+        ccount: ChunkSeq::new[u64](),
+        clist: ChunkSeq::new[u64](),
+        ystart: ChunkSeq::new[u64](),
+        ycount: ChunkSeq::new[u64](),
+        ylist: ChunkSeq::new[u64](),
+        mstart: ChunkSeq::new[u64](),
+        mcount: ChunkSeq::new[u64](),
+        mlist: ChunkSeq::new[u64](),
+        nodes: ChunkSeq::new[Node](),
+        stack: ChunkSeq::new[u64](),
+        asg: ChunkSeq::new[u64](),
+        ast: ChunkSeq::new[u64](),
+        agen: 0,
+        anames: ChunkSeq::new[u64](),
+        cgen: 0,
+        cst: ChunkSeq::new[u64](),
+        fhead: ChunkSeq::new[u64](),
+        ftail: ChunkSeq::new[u64](),
+        fcnt: ChunkSeq::new[u64](),
+        pcnt: ChunkSeq::new[u64](),
+        fl_id: ChunkSeq::new[u64](),
+        fl_next: ChunkSeq::new[u64](),
+        cnames: ChunkSeq::new[u64](),
+        cq: ChunkSeq::new[u64](),
+        cfail: false,
+        rst: ChunkSeq::new[u64](),
+        rhead: ChunkSeq::new[u64](),
+        rtail: ChunkSeq::new[u64](),
+        rl_req: ChunkSeq::new[u64](),
+        rl_next: ChunkSeq::new[u64](),
+        rnames: ChunkSeq::new[u64](),
+        yst: ChunkSeq::new[u64](),
+        yhead: ChunkSeq::new[u64](),
+        ytail: ChunkSeq::new[u64](),
+        yl_req: ChunkSeq::new[u64](),
+        yl_next: ChunkSeq::new[u64](),
+        ynames: ChunkSeq::new[u64](),
+        mgen: 0,
+        fmk: ChunkSeq::new[u64](),
+        nmk: ChunkSeq::new[u64](),
+        vmk: ChunkSeq::new[u64](),
+        bq: ChunkSeq::new[u64](),
+        idx: ChunkSeq::new[u64](),
+        tmp: ChunkSeq::new[u64](),
+        pa: ChunkSeq::new[u64](),
+        pb: ChunkSeq::new[u64](),
+        ysel: ChunkSeq::new[u64](),
+        graph: false,
+        unused: 0,
+        caps: ChunkSeq::new[u64](),
+        has_best: false,
+        bkey: ChunkSeq::new[u64](),
+        key: ChunkSeq::new[u64](),
+        bm: ChunkSeq::new[u64](),
+        met: ChunkSeq::new[u64](),
+        bsel: ChunkSeq::new[u64](),
+        bfs: ChunkSeq::new[u64](),
+        bsys: ChunkSeq::new[u64](),
+        gown: ChunkSeq::new[u64](),
+        cbuf: ChunkSeq::new[u64](),
+        vis: ChunkSeq::new[u64](),
+        marks: ChunkSeq::new[u64](),
+        didx: ChunkSeq::new[u64](),
+        pc: ChunkSeq::new[u64](),
+        sdec: 0,
+        sunsup: false,
+        seval: 0
+    }
+}
+
+// `resolve`: the request, then the search.
+pub fn resolve(in words: Slice[u64], in text: Slice[u8]) -> S {
+    let mut s = new_s(in words, in text);
+    decode_request(inout s);
+    index_inputs(inout s);
+    search(inout s, false);
+    s
+}
+
+// `validate_locked`: the request, then the snapshot.
+pub fn validate_locked(in words: Slice[u64], in text: Slice[u8]) -> S {
+    let mut s = new_s(in words, in text);
+    decode_request(inout s);
+    index_inputs(inout s);
+    locked(inout s);
+    s
+}
+
+// `resolve_optimized`: the request, then the optimizer fields.
+pub fn resolve_optimized(in words: Slice[u64], in text: Slice[u8]) -> S {
+    let mut s = new_s(in words, in text);
+    decode_request(inout s);
+    decode_metadata(inout s, true);
+    index_inputs(inout s);
+    search(inout s, true);
+    s
+}
+
+// `compute_metrics`: a solution, the root name and the metadata.
+pub fn compute_metrics(in words: Slice[u64], in text: Slice[u8]) -> S {
+    let mut s = new_s(in words, in text);
+    metrics_only(inout s);
+    s
+}
+
+// `OptimizeObjective::parse`: the objective's code, or 5 when unknown.
+pub fn objective_code(in raw: Str) -> u64 {
+    objective_code_of(in raw)
+}

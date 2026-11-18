@@ -2135,6 +2135,10 @@ pub enum SeqDrop {
     Seq,
     /// An inline `String` value: the buffer it owns (a literal owns none).
     Str,
+    /// A `let`-bound struct value: the `ChunkSeq` handles in its fields
+    /// (nested structs included). Native code plans it only on the optimize
+    /// path, and only when every sequence sits in a product field.
+    Fields,
 }
 
 /// The function-local `ChunkSeq` and `String` slots that native code frees
@@ -2169,6 +2173,11 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
             SeqDrop::Seq
         } else if crate::strings::is_string_type(ty) {
             SeqDrop::Str
+        } else if matches!(ty, Type::Named(n, _) if world.adts.contains_key(n))
+            && crate::seq::holds_sequence(world, ty)
+            && !f.params.iter().any(|p| &p.name == name)
+        {
+            SeqDrop::Fields
         } else {
             continue;
         };
@@ -2207,7 +2216,12 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
             Op::Read {
                 root, path, pass, ..
             } if *pass == Pass::Sink => {
-                if !path.is_empty() || plan.get(root) == Some(&SeqDrop::Str) {
+                // Reading a field that holds no sequence out of a struct
+                // copies it and leaves the struct's drops alone.
+                let copies_out = plan.get(root) == Some(&SeqDrop::Fields)
+                    && !crate::seq::holds_sequence(world, &inst.ty)
+                    && !crate::strings::is_string_type(&inst.ty);
+                if (!path.is_empty() && !copies_out) || plan.get(root) == Some(&SeqDrop::Str) {
                     refused.insert(root.clone());
                 }
             }

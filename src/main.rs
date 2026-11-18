@@ -344,25 +344,13 @@ fn cli() -> Result<(), String> {
             })
             .cloned()
             .collect();
-        // `@export` directives belong to the root module (file 0 of a
-        // package); other files are blanked so their directives, written
+        // `@export` directives belong to the root package's root module
+        // (`src/lib.ves`), which is not file 0 when another source sorts
+        // first. Other files are blanked so their directives, written
         // against their own names, do not apply. The length is kept, since
         // the export path places generated code past the end.
         let directives_source = match &loaded {
-            Some(p) => p
-                .sources
-                .files
-                .iter()
-                .enumerate()
-                .map(|(i, f)| {
-                    let text = if i == 0 {
-                        f.text.clone()
-                    } else {
-                        " ".repeat(f.text.len())
-                    };
-                    text + "\n"
-                })
-                .collect(),
+            Some(p) => export_directives_source(p)?,
             None => source.clone(),
         };
         return lib.build(
@@ -717,4 +705,78 @@ fn diagnostics(file: &str, source: &str, ds: &[Diagnostic], json: bool) {
             }
         }
     }
+}
+
+/// The package source the export path reads `@export` directives from:
+/// every file in load order, with the root package's root module kept and
+/// every other file blanked to spaces (lengths are kept, so offsets past the
+/// end still line up).
+///
+/// `// @export abi N` names no item, so it is also read, with a warning,
+/// from the root package's other files: ports placed it in the file that
+/// sorted first while directives were read from file 0. `instance` and
+/// `vsys` directives name items and are an error outside the root module.
+fn export_directives_source(p: &vesper::packages::Assembled) -> Result<String, String> {
+    let root = p.root_module.unwrap_or(0);
+    let root_shown = p
+        .sources
+        .files
+        .get(root)
+        .map(|f| f.display.clone())
+        .unwrap_or_default();
+    let is_abi = |line: &str| {
+        line.trim_start()
+            .strip_prefix("// @export")
+            .is_some_and(|rest| rest.trim().starts_with("abi"))
+    };
+    // Only one `abi` directive is forwarded: the root module's, else the
+    // first one found in another file (ports that named it in every file
+    // would otherwise name it twice).
+    let mut abi_seen = p
+        .sources
+        .files
+        .get(root)
+        .is_some_and(|f| f.text.lines().any(is_abi));
+    let mut out = String::new();
+    for (i, f) in p.sources.files.iter().enumerate() {
+        if i == root {
+            out.push_str(&f.text);
+        } else if p.root_package_files.contains(&i) {
+            for line in f.text.split_inclusive('\n') {
+                let body = line.trim_end_matches(['\n', '\r']);
+                let directive = body.trim_start().strip_prefix("// @export");
+                match directive.map(str::trim) {
+                    Some(rest) if rest.starts_with("abi") => {
+                        eprintln!(
+                            "warning: {}: `// @export {rest}` belongs in the root module {root_shown}; \
+                             it is read from here for now",
+                            f.display
+                        );
+                        if abi_seen {
+                            out.push_str(&" ".repeat(body.len()));
+                            out.push_str(&line[body.len()..]);
+                        } else {
+                            abi_seen = true;
+                            out.push_str(line);
+                        }
+                    }
+                    Some(rest) => {
+                        return Err(format!(
+                            "{}: `// @export {rest}` is outside the root module; \
+                             @export directives are read from {root_shown}",
+                            f.display
+                        ));
+                    }
+                    None => {
+                        out.push_str(&" ".repeat(body.len()));
+                        out.push_str(&line[body.len()..]);
+                    }
+                }
+            }
+        } else {
+            out.push_str(&" ".repeat(f.text.len()));
+        }
+        out.push('\n');
+    }
+    Ok(out)
 }

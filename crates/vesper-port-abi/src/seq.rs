@@ -275,10 +275,65 @@ impl<'a, T: Abi> SeqRef<'a, T> {
             unsafe { read_elem(this.data, i) }
         })
     }
-    pub fn to_vec(&self) -> Vec<T> {
+    pub fn to_vec(&self) -> Vec<T>
+    where
+        T: 'static,
+    {
+        if native::<T>() {
+            // SAFETY: `native` holds, so the buffer is `len` initialized `T`s
+            // in their Rust layout (as in `as_slice`), and `T` is a plain
+            // scalar, so a bitwise copy is a copy.
+            let items = unsafe { self.packed_slice() };
+            let mut out = Vec::with_capacity(items.len());
+            unsafe {
+                core::ptr::copy_nonoverlapping(items.as_ptr(), out.as_mut_ptr(), items.len());
+                out.set_len(items.len());
+            }
+            return out;
+        }
         self.iter().collect()
     }
+
+    /// # Safety
+    /// `native::<T>()` must hold.
+    unsafe fn packed_slice(&self) -> &'a [T] {
+        if self.len == 0 {
+            return &[];
+        }
+        // SAFETY: `len` packed elements are initialized and unchanged for
+        // `'a` (`from_handle`), the stride is `size_of::<T>()` (`native`),
+        // and Vesper aligns element buffers to eight bytes.
+        unsafe { core::slice::from_raw_parts(self.data.cast::<T>(), self.len) }
+    }
 }
+
+impl<'a, T: Packed> SeqRef<'a, T> {
+    /// The elements in place, as a Rust slice: no copy and no per-element
+    /// read (#991). Only packed scalars ([`Packed`]) have a Rust layout that
+    /// is the Vesper one.
+    pub fn as_slice(&self) -> &'a [T] {
+        debug_assert!(native::<T>());
+        // SAFETY: a `Packed` type is one of the `native` scalars.
+        unsafe { self.packed_slice() }
+    }
+}
+
+/// Element types whose Rust layout is the packed Vesper layout, so a
+/// [`SeqRef`] of them can be viewed as a `&[T]` ([`SeqRef::as_slice`]).
+/// Sealed: exactly the scalars that `with_slice` lends in place.
+pub trait Packed: Abi + Copy + 'static + sealed::Sealed {}
+
+mod sealed {
+    pub trait Sealed {}
+}
+
+macro_rules! packed {
+    ($($t:ty),*) => {$(
+        impl sealed::Sealed for $t {}
+        impl Packed for $t {}
+    )*};
+}
+packed!(u8, u32, u64, i64, usize, isize, f64);
 
 impl<T: Abi + core::fmt::Debug> core::fmt::Debug for SeqRef<'_, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -462,5 +517,35 @@ mod tests {
             assert_eq!(unsafe { *words.add(1) }, 0);
         });
         assert_eq!(unsafe { str_view(&[0, 0, 0]) }, "");
+    }
+
+    #[test]
+    fn packed_sequences_are_viewed_in_place() {
+        let bytes = *b"GET / HTTP/1.1";
+        let header = [
+            bytes.len() as u64,
+            bytes.len() as u64,
+            bytes.as_ptr() as usize as u64,
+        ];
+        // SAFETY: `header` is a live sequence of `bytes` for the test.
+        let seq = unsafe { SeqRef::<u8>::from_handle(header.as_ptr() as usize as u64) };
+        assert_eq!(seq.as_slice(), &bytes);
+        assert_eq!(seq.as_slice().as_ptr(), bytes.as_ptr());
+        assert_eq!(seq.to_vec(), bytes.to_vec());
+        let words = [3u64, u64::MAX];
+        let header = [2, 2, words.as_ptr() as usize as u64];
+        // SAFETY: as above.
+        let seq = unsafe { SeqRef::<u64>::from_handle(header.as_ptr() as usize as u64) };
+        assert_eq!(seq.as_slice(), &words);
+        let empty = [0u64, 0, 0];
+        // SAFETY: an empty sequence with no buffer.
+        let seq = unsafe { SeqRef::<u32>::from_handle(empty.as_ptr() as usize as u64) };
+        assert!(seq.as_slice().is_empty() && seq.to_vec().is_empty());
+        // Other elements still convert one at a time.
+        let narrow = [1u64, 0];
+        let header = [2, 2, narrow.as_ptr() as usize as u64];
+        // SAFETY: two one-byte `bool`s are in the first word.
+        let seq = unsafe { SeqRef::<bool>::from_handle(header.as_ptr() as usize as u64) };
+        assert_eq!(seq.to_vec(), [true, false]);
     }
 }

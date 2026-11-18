@@ -1,0 +1,179 @@
+// Module output of @vesper/loom-solver (see lib.ves): result words in
+// `out` (documented in src/port.rs).
+use @vesper/loom-calculus::util::{
+    add,
+    diag,
+    is_lit,
+    man,
+    none,
+    slen,
+    soff,
+    sw
+};
+use self::{
+    S
+};
+use self::closure::{
+    assigned,
+    has_entry
+};
+use self::diag::{
+    dedup,
+    msort
+};
+
+pub fn w(inout s: S, x: u64) {
+    s.out.push(x);
+}
+
+// k, then the representative occurrence of each string id.
+pub fn table(inout s: S) {
+    let k = s.l.k;
+    w(inout s, k);
+    for i in 0..k {
+        let occ = sw(in s.l.rocc, i);
+        w(inout s, occ);
+    }
+}
+
+// Clear the diagnostics, for an error that reports only its own.
+pub fn reset_diags(inout s: S) {
+    s.ds.clear();
+    s.dp.clear();
+    s.dedup_n = 0;
+}
+
+// table, 1, kind, decisions, ndiag, (code, package, subject off, len,
+// message off, len)*: texts index dp.
+pub fn out_error(inout s: S, kind: u64, decisions: u64) {
+    dedup(inout s);
+    table(inout s);
+    w(inout s, 1);
+    w(inout s, kind);
+    w(inout s, decisions);
+    let n = s.ds.len();
+    w(inout s, n);
+    for i in 0..n {
+        let d = diag(in s.ds, i);
+        w(inout s, d.code);
+        w(inout s, d.pkg);
+        w(inout s, d.so);
+        w(inout s, d.sl);
+        w(inout s, d.mo);
+        w(inout s, d.ml);
+    }
+}
+
+// The current solution: nsel, (manifest, nfeatures, feature*)* in name
+// order, nsys, native candidate*. A manifest is its catalog position, or
+// none() for the root. Into out, or into bsel when `best`.
+pub fn solution_words(inout s: S, best: bool) {
+    s.idx.clear();
+    for i in 0..s.anames.len() {
+        let x = sw(in s.anames, i);
+        s.idx.push(x);
+    }
+    msort(inout s, 3);
+    s.cbuf.clear();
+    let nsel = s.idx.len();
+    s.cbuf.push(nsel);
+    for i in 0..s.idx.len() {
+        let x = sw(in s.idx, i);
+        let mi = assigned(in s, x);
+        if mi == s.root {
+            s.cbuf.push(none());
+        } else {
+            s.cbuf.push(wrapping_sub(mi, s.cat_at));
+        }
+        let n_at = s.cbuf.len();
+        s.cbuf.push(0);
+        let mut n: u64 = 0;
+        if has_entry(in s, x) {
+            let mut at = sw(in s.fhead, x);
+            loop {
+                if at == none() {
+                    break;
+                }
+                let f = sw(in s.fl_id, at);
+                s.cbuf.push(f);
+                n = add(n, 1);
+                at = sw(in s.fl_next, at);
+            }
+        }
+        s.cbuf.try_set(n_at, n);
+    }
+    let nsys = s.ysel.len();
+    s.cbuf.push(nsys);
+    for i in 0..s.ysel.len() {
+        let y = sw(in s.ysel, i);
+        s.cbuf.push(y);
+    }
+    if best {
+        s.bsel.clear();
+        for i in 0..s.cbuf.len() {
+            let x = sw(in s.cbuf, i);
+            s.bsel.push(x);
+        }
+    } else {
+        for i in 0..s.cbuf.len() {
+            let x = sw(in s.cbuf, i);
+            s.out.push(x);
+        }
+    }
+}
+
+// table, 0, solution.
+pub fn out_solution(inout s: S) {
+    table(inout s);
+    w(inout s, 0);
+    solution_words(inout s, false);
+}
+
+fn str_is(in a: Str, in b: Str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    for i in 0..a.len() {
+        if a.try_byte_at(i) != b.try_byte_at(i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Objectives: ZeroCve 0, MinCapabilitySurface 1, MinDupMajors 2,
+// MinStaleness 3, MinTrustCost 4; unknown 5.
+pub fn objective_code_of(in raw: Str) -> u64 {
+    if str_is(in raw, "zero_cve") {
+        0
+    } else if str_is(in raw, "min_capability_surface") {
+        1
+    } else if str_is(in raw, "min_dup_majors") {
+        2
+    } else if str_is(in raw, "min_staleness") {
+        3
+    } else if str_is(in raw, "min_trust_cost") {
+        4
+    } else {
+        5
+    }
+}
+
+// The objective code of string id x.
+pub fn objective_of_id(in s: S, x: u64) -> u64 {
+    let off = soff(in s.l, x);
+    let len = slen(in s.l, x);
+    if is_lit(in s.l, off, len, "zero_cve") {
+        0
+    } else if is_lit(in s.l, off, len, "min_capability_surface") {
+        1
+    } else if is_lit(in s.l, off, len, "min_dup_majors") {
+        2
+    } else if is_lit(in s.l, off, len, "min_staleness") {
+        3
+    } else if is_lit(in s.l, off, len, "min_trust_cost") {
+        4
+    } else {
+        5
+    }
+}

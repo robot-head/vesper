@@ -1,0 +1,81 @@
+# The frozen Rust seed copy of vesper-serde (package vesper-serde-seed,
+# library vesper_serde) that the compiler links: ../src built without the
+# port, so cfg(vesper_port) is off. Written by hand because its sources live
+# in the parent package; see "Crates the compiler links" in
+# docs/maintenance/porting-a-crate.md (port wave P1 lane 19, #916).
+#
+# Cargo runs all of ../tests against both packages. Here the seed runs the
+# tests that need nothing but the crate; json_test_suite (serde_json and the
+# JSONTestSuite corpus) and the two Lean checks read package files at run
+# time and run against //crates/vesper-serde only.
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test")
+
+rust_library(
+    name = "seed",
+    srcs = ["//crates/vesper-serde:rust_srcs"],
+    # src/lib.rs takes its crate docs from the README.
+    compile_data = ["//crates/vesper-serde:README.md"],
+    crate_name = "vesper_serde",
+    crate_root = "//crates/vesper-serde:src/lib.rs",
+    edition = "2024",
+    rustc_env = {
+        "CARGO_PKG_NAME": "vesper-serde-seed",
+        "CARGO_PKG_VERSION": "0.1.0",
+    },
+    version = "0.1.0",
+    visibility = ["//visibility:public"],
+)
+
+rust_test(
+    name = "seed_unit_test",
+    crate = ":seed",
+    edition = "2024",
+)
+
+[
+    rust_test(
+        name = "seed_test_" + t,
+        srcs = ["//crates/vesper-serde:tests/%s.rs" % t] + (
+            ["//crates/vesper-serde:tests/common/mod.rs"] if t in [
+                "float_lemire",
+                "limits_differential",
+                "ndjson_engines",
+                "simd_stage2",
+            ] else []
+        ),
+        # float_lemire reads src/pow5.rs with include_str!.
+        compile_data = ["//crates/vesper-serde:rust_srcs"],
+        crate_root = "//crates/vesper-serde:tests/%s.rs" % t,
+        edition = "2024",
+        deps = [":seed"],
+    )
+    for t in [
+        "binary",
+        "event_columns",
+        "float_decode",
+        "float_encode",
+        "float_lemire",
+        "float_roundtrip",
+        "json",
+        "limits_differential",
+        "ndjson",
+        "ndjson_engines",
+        "ndjson_roundtrip",
+        "simd_scalable",
+        "simd_stage1",
+        "simd_stage2",
+        "tiles",
+        "tiles_alloc",
+    ]
+]
+
+rust_clippy_test(
+    name = "clippy",
+    targets = [":seed"],
+    tags = [
+        "clippy",
+        "lint",
+    ],
+)
