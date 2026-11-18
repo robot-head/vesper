@@ -142,7 +142,9 @@ Owner's decision needed: none. No port newly meets the bar.
 
 ## Remaining compiler gaps
 
-Each has a repro in the report named.
+Each has a repro in the report named. They are grouped into lanes of the
+next compiler wave in [`docs/agent-prompts/port-speed/`](../agent-prompts/port-speed/README.md)
+(claims #1021-#1028).
 
 | Gap | Ports | Report |
 |---|---|---|

@@ -18,7 +18,8 @@ The [port parity wave](port-parity/README.md) puts the merged
 [Stage 1 performance wave](stage1-perf/README.md) speedups into the ports and
 measures each port against its Rust build again. The
 [port gaps wave](port-gaps/README.md) closes the compiler gaps those ports
-measured.
+measured. The [port speed wave](port-speed/README.md) closes the gaps its
+re-score left.
 
 Earlier assignments retained as dependencies:
 
