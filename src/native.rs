@@ -425,10 +425,10 @@ fn register_locals(
                     place_roots(args, &mut memory);
                 }
             }
-            Op::Indirect { args, .. }
-            | Op::Seq { args, .. }
-            | Op::Tiled { args, .. }
-            | Op::Fip { args, .. } => place_roots(args, &mut memory),
+            // Sequence and `Box` operations take their operands as values.
+            Op::Indirect { args, .. } | Op::Tiled { args, .. } => {
+                place_roots(args, &mut memory)
+            }
             Op::Closure {
                 expr,
                 aliases,
@@ -4694,6 +4694,21 @@ impl<M: Module> Codegen<'_, '_, M> {
             && kind.bits() < 64
             && self.b.func.dfg.value_type(v) == types::I64
         {
+            if self.operands_only {
+                // A narrow move (`mov r32, r32`, `movzx`, `movsx`) instead of
+                // a mask the x86-64 encoder loads from the constant pool.
+                let narrow = match kind.bits() {
+                    8 => types::I8,
+                    16 => types::I16,
+                    _ => types::I32,
+                };
+                let low = self.b.ins().ireduce(narrow, v);
+                return if kind.unsigned() {
+                    self.b.ins().uextend(types::I64, low)
+                } else {
+                    self.b.ins().sextend(types::I64, low)
+                };
+            }
             if kind.unsigned() {
                 return self.b.ins().band_imm(v, kind.mask() as i64);
             }

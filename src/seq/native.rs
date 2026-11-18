@@ -221,10 +221,25 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.b.ins().iadd(data, offset)
     }
 
+    /// The element at `addr` for a store that copies it at once (an
+    /// `Option` payload): an aggregate element is copied straight from the
+    /// buffer on the optimize path, with no temporary.
+    fn seq_elem_for_store(&mut self, addr: ir::Value, elem: &Type) -> Result<ir::Value, String> {
+        if self.operands_only && Layout::of(self.world, elem)?.aggregate() {
+            return Ok(addr);
+        }
+        self.seq_load_elem(addr, elem)
+    }
+
     fn seq_load_elem(&mut self, addr: ir::Value, elem: &Type) -> Result<ir::Value, String> {
         let layout = Layout::of(self.world, elem)?;
         if layout.aggregate() {
-            let copy = self.alloc(layout.size);
+            // The copy writes every word.
+            let copy = if self.operands_only {
+                self.alloc_uninit(layout.size)
+            } else {
+                self.alloc(layout.size)
+            };
             self.copy_bytes(addr, copy, layout.size);
             return Ok(copy);
         }
@@ -408,7 +423,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     let last = this.b.ins().iadd_imm(len, -1);
                     let zero = this.zero();
                     let addr = this.seq_elem_addr(h, zero, last, stride);
-                    let value = this.seq_load_elem(addr, &elem)?;
+                    let value = this.seq_elem_for_store(addr, &elem)?;
                     this.seq_set_word(h, LEN, last);
                     Ok(value)
                 })?
@@ -447,7 +462,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     let option = Type::Named("Option".into(), vec![elem.clone()]);
                     self.seq_option(&option, &elem, valid, |this| {
                         let addr = this.seq_elem_addr(h, start, i, stride);
-                        this.seq_load_elem(addr, &elem)
+                        this.seq_elem_for_store(addr, &elem)
                     })?
                 }
             }
@@ -548,7 +563,14 @@ impl<M: Module> Codegen<'_, '_, M> {
             .map(|f| f.offset)
             .ok_or("native Option lacks a payload")?;
         let (none_tag, _) = layout.variant("None").ok_or("native Option lacks None")?;
-        let out = self.alloc(layout.size);
+        // The optimize path zeroes the payload only on the `None` edge;
+        // `Some` writes every word.
+        let lazy = self.operands_only;
+        let out = if lazy {
+            self.alloc_uninit(layout.size)
+        } else {
+            self.alloc(layout.size)
+        };
         let none = self.b.create_block();
         let some = self.b.create_block();
         let done = self.b.create_block();
@@ -556,11 +578,26 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.b.switch_to_block(none);
         let tag = self.b.ins().iconst(types::I64, none_tag as i64);
         self.seq_set_word(out, 0, tag);
+        if lazy {
+            for off in (8..layout.size).step_by(8) {
+                let zero = self.zero();
+                self.seq_set_word(out, off as i32, zero);
+            }
+        }
         self.jump(done, &[]);
         self.b.switch_to_block(some);
         let value = load(self)?;
         let tag = self.b.ins().iconst(types::I64, some_tag as i64);
         self.seq_set_word(out, 0, tag);
+        if lazy {
+            let end = payload as u32 + Layout::of(self.world, elem)?.size;
+            for off in (8..layout.size).step_by(8) {
+                if off < payload as u32 || off >= end {
+                    let zero = self.zero();
+                    self.seq_set_word(out, off as i32, zero);
+                }
+            }
+        }
         let slot = self.offset(out, payload);
         self.store(slot, value, elem)?;
         self.jump(done, &[]);

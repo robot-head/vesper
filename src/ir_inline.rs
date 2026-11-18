@@ -22,7 +22,7 @@
 //!
 //! * the callee is not recursive (no cycle through it in the call graph), not
 //!   generic and not `fip`;
-//! * its body is at most [`Budget::small_callee`] instructions, or it has a
+//! * its [`cost`] is at most [`Budget::small_callee`], or it has a
 //!   single call site in the program and is at most
 //!   [`Budget::single_site_callee`] instructions;
 //! * its effect row is empty, or it is exactly the caller's row and holds only
@@ -63,7 +63,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Size limits, counted in Place IR instructions plus one per block.
+/// Size limits, counted with [`cost`]: Place IR instructions that emit code, plus one per block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Budget {
     /// A callee of at most this size is inlined at every eligible site.
@@ -80,7 +80,7 @@ pub struct Budget {
 impl Default for Budget {
     fn default() -> Self {
         Self {
-            small_callee: 48,
+            small_callee: 96,
             single_site_callee: 240,
             caller_growth: 2_000,
             program_growth: 40_000,
@@ -187,6 +187,29 @@ pub fn inline(world: &World, program: &mut Program, budget: &Budget) -> Report {
 /// IR size: instructions plus one per block terminator.
 pub fn size(f: &FunctionIr) -> usize {
     f.blocks.iter().map(|b| b.instructions.len() + 1).sum()
+}
+
+/// The inlining cost of `f`: [`size`] without the instructions that lower to
+/// no machine code once locals live in registers (constants, unit values and
+/// whole-local reads). A short-circuit predicate such as
+/// `(b >= 48 && b <= 57) || ...` is mostly those, so its cost tracks its
+/// compares and blocks, not its operand reads.
+pub fn cost(f: &FunctionIr) -> usize {
+    f.blocks
+        .iter()
+        .map(|b| {
+            1 + b
+                .instructions
+                .iter()
+                .filter(|i| {
+                    !matches!(
+                        &i.op,
+                        Op::Constant(_) | Op::Unit | Op::Loop
+                    ) && !matches!(&i.op, Op::Read { path, .. } if path.is_empty())
+                })
+                .count()
+        })
+        .sum()
 }
 
 fn fail_row_only(effects: &Effects) -> bool {
@@ -454,7 +477,7 @@ fn inline_into(
                 i += 1;
                 continue;
             };
-            let cost = size(target);
+            let cost = cost(target);
             let fits = cost <= budget.small_callee
                 || (sites.get(callee) == Some(&1) && cost <= budget.single_site_callee);
             if !fits
