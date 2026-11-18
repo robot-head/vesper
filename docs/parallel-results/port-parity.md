@@ -18,7 +18,7 @@ the median (96% for Quarry).
 |---|---|---|---|---|---|---|
 | warp-wheel | 1, #963 | `tests/abba.rs` | 8.00x | 4.98x (4.87-5.02) | **3.37x** (3.32-3.42) | not met |
 | BBR | 2, #968 | `examples/ack_path_abba.rs` | 11-16x | 11.6x (10.3-11.8) | **5.3-5.5x** (two runs; 4.3-6.1) | not met |
-| Prism | 3, #973 | `examples/abba.rs` (new): decode / route / encode / connection | 4.5x | 5.28x / 5.26x / 6.55x / 5.30x | **2.01x / 3.42x / 3.04x / 2.29x** | not met |
+| Prism | 3, #973 | `examples/abba.rs` (new): decode / route / encode / connection | 4.5x | 5.28x / 5.26x / 6.55x / 5.30x | **2.14x / 3.43x / 3.43x / 2.42x** (1.99-2.17 / 3.40-3.50 / 3.36-3.55 / 2.38-2.47; the corrected benchmark, same run as the baseline) | not met |
 | warp-tcp | 4, #971 | `examples/abba.rs` codec / transfer | 10-14x | 7.63x / 5.36x (instructions) | codec **0.90x** instr., wall about 1.05x (0.73-1.50 across runs); transfer **2.59x** wall (2.47-2.66), 1.91x instr. | not met (transfer) |
 | Aura | 5, #977 | `examples/abba.rs` one-text / reorder / encode-audit | 3.8-5.2x | 1.54x / 1.94x / 1.47x | **0.42x / 0.58x / 0.85x** (0.39-0.46 / 0.52-0.64 / 0.80-1.00) | **met** |
 | Ignis | 6, #981 | `examples/abba.rs` (new): build / plan / lower at 64 / 256 passes | 5-13x | build 4.30x / 4.43x, plan 5.21x / 4.53x, lower 4.42x / 3.73x | build **3.74x / 3.93x**, plan **2.41x / 1.12x**, lower **4.19x / 3.51x** | not met |
@@ -54,7 +54,7 @@ Quarry 2.54x to 1.96x.
 | Export ABI v3, state as the mirror | BBR | 11.6x to 6.9x (instructions -49%) |
 | Export ABI v3, slices of mirrors | Quarry, Ignis | Quarry -3.5% instructions; Ignis within noise |
 | `sum_be16`, wide reads and writes, block copies | warp-tcp codec | 7.63x to 0.90x instructions |
-| `find_byte`, `extend`, slice `eq`, byte classes as masks | Prism | about 5.3x to 2.0-3.4x |
+| `find_byte`, `extend`, slice `eq`, byte classes as masks | Prism | about 5.3x to 2.1-3.4x |
 | Handler-free helpers (`div`, `pow2`, shifts by rotation) so they inline | warp-wheel, BBR | wheel 4.39x to 3.99x over three levers; BBR 6.9x to 6.5x |
 | Scratch moved from handle fields into locals | Quarry, Aura | Quarry -2.5% and -3.2%; Aura -1.3% (with ABI v3) |
 | Port algorithms (grouped edges, hazard index, merge-matched keys) | Aura, Ignis | Aura -43% instructions in one step; Ignis plan 256 4.53x to 1.15x |
