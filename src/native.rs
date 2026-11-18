@@ -394,6 +394,72 @@ pub fn closure_capabilities(f: &Function) -> BTreeSet<crate::capability_effects:
 /// specialized into their callers. That is the capability-passing ABI
 /// ([`CAPABILITY_ABI`]); rows without a capability effect compile exactly
 /// as before.
+/// The locals of `f` that the optimize path keeps in registers: numeric and
+/// `bool` locals that no closure or handler mentions and that are borrowed as
+/// places only by calls with an empty effect row. Such a call returns
+/// normally, so `call_function` restores the value from its scratch slot
+/// right after it; a call that may fail or perform an effect could leave
+/// through a handler first, so its places keep a home slot that the callee
+/// writes through.
+fn register_locals(
+    world: &World,
+    f: &crate::ir::FunctionIr,
+    generics: &BTreeMap<String, Type>,
+) -> BTreeSet<String> {
+    use crate::ir::Op;
+    let mut memory = BTreeSet::new();
+    let place_roots = |args: &[crate::ir::Argument], memory: &mut BTreeSet<String>| {
+        for a in args {
+            if let Some(p) = &a.place {
+                memory.insert(p.root.clone());
+            }
+        }
+    };
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        match &inst.op {
+            Op::Call { callee, args, .. } => {
+                let pure = world.functions.get(callee).is_some_and(|g| {
+                    g.effects.instances.is_empty() && g.effects.tail.is_none()
+                });
+                if !pure {
+                    place_roots(args, &mut memory);
+                }
+            }
+            Op::Indirect { args, .. }
+            | Op::Seq { args, .. }
+            | Op::Tiled { args, .. }
+            | Op::Fip { args, .. } => place_roots(args, &mut memory),
+            Op::Closure {
+                expr,
+                aliases,
+                moves,
+            }
+            | Op::Handle {
+                expr,
+                aliases,
+                moves,
+                ..
+            } => {
+                memory.extend(crate::check::free_names(expr));
+                memory.extend(aliases.keys().cloned());
+                memory.extend(aliases.values().cloned());
+                memory.extend(moves.iter().map(|p| p.root.clone()));
+            }
+            _ => {}
+        }
+    }
+    f.locals
+        .iter()
+        .filter(|(n, t)| {
+            let t = crate::numeric::default_type(&substitute(t, generics));
+            !memory.contains(*n)
+                && matches!(&t, Type::Named(name, args) if args.is_empty()
+                    && (crate::numeric::is_integer_name(name)
+                        || matches!(name.as_str(), "f32" | "f64" | "bool")))
+        })
+        .map(|(n, _)| n.clone())
+        .collect()
+}
 fn fail_only(world: &World, f: &Function) -> bool {
     f.effects.tail.is_none()
         && f.effects.instances.iter().any(|e| e.name == "Fail")
@@ -1124,6 +1190,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 }),
                 caller_slot,
                 reuse_slots: BTreeMap::new(),
+                register_locals: BTreeSet::new(),
                 current_call_slot: None,
                 in_fip_fn: f.fip,
                 trace_fail,
@@ -1840,6 +1907,9 @@ struct Codegen<'a, 'b, M: Module> {
     caller_slot: Option<ir::Value>,
     /// ReuseSlot pointers unpacked from `Op::Bind` (`(bind_dest, slot_index)` -> `Variable`).
     reuse_slots: BTreeMap<(crate::ir::ValueId, usize), Variable>,
+    /// Scalar locals kept in registers on the optimize path
+    /// ([`register_locals`]): a place use spills them to a scratch slot.
+    register_locals: BTreeSet<u32>,
     /// Selected caller-slot source for the active `Op::Call`, if optimized by Stage 4.
     current_call_slot: Option<crate::fip::CallSlot>,
     /// True while emitting code for an `@fip` function (prevents emitting non-FIP drops/frees).
@@ -2617,6 +2687,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Locals this graph declares itself (a nested graph, such as a
         // handled body, shares the names its caller already has).
         let mut fresh_locals = BTreeSet::new();
+        let registers_ok = if self.operands_only {
+            register_locals(self.world, f, &self.generic_vars)
+        } else {
+            BTreeSet::new()
+        };
         for (n, t) in &f.locals {
             let ty = crate::numeric::default_type(&substitute(t, &self.generic_vars));
             let layout = Layout::of(self.world, &ty)?;
@@ -2637,14 +2712,21 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.local_types.insert(n.clone(), ty.clone());
                 var
             };
-            // On the optimize path scalar locals stay frontend SSA
-            // variables (registers): a place argument spills the value to a
-            // scratch slot for that one use and the call site restores it
-            // (`Codegen::address`), so no local needs a home in memory. The
-            // unoptimized path keeps every scalar local in a zeroed slot.
-            if !self.operands_only
-                && !layout.aggregate()
+            // On the optimize path a numeric local that only pure calls
+            // borrow stays a frontend SSA variable (a register): a place
+            // argument spills it to a scratch slot for that one call, and
+            // the call site restores it ([`register_locals`]). Every other
+            // scalar local keeps a zeroed home slot.
+            // A function's own by-value parameters qualify too; a nested
+            // graph keeps whatever its enclosing graph chose for a shared
+            // name.
+            let owned = existing.is_none()
+                || (return_to.is_none() && !self.pointers.contains_key(&var.as_u32()));
+            if owned && registers_ok.contains(n) {
+                self.register_locals.insert(var.as_u32());
+            } else if !layout.aggregate()
                 && !self.pointers.contains_key(&var.as_u32())
+                && !self.register_locals.contains(&var.as_u32())
             {
                 let value = self.use_var(var);
                 let ptr = self.alloc(8);
@@ -3464,7 +3546,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     Ok(self.use_var(var))
                 } else if let Some(ptr) = self.pointer(var) {
                     Ok(ptr)
-                } else if self.operands_only {
+                } else if self.register_locals.contains(&var.as_u32()) {
                     // A scratch copy for this one use: the variable stays in
                     // a register, and a mutable use restores it from the
                     // slot afterwards (`call_function`, `perform`,
@@ -3738,26 +3820,70 @@ impl<M: Module> Codegen<'_, '_, M> {
         if !layout.aggregate() {
             return Ok(self.zero());
         }
-        let ptr = self.alloc(layout.size);
-        let fs = if let Some(name) = name {
+        let (tag, fs) = if let Some(name) = name {
             let (tag, fs) = layout.variant(name).ok_or("unknown native constructor")?;
-            if matches!(layout.kind, LayoutKind::Enum(_)) {
-                let tag = self.b.ins().iconst(types::I64, tag as i64);
-                self.b.ins().store(ir::MemFlags::new(), tag, ptr, 0);
-            }
-            fs
+            (
+                matches!(layout.kind, LayoutKind::Enum(_)).then_some(tag),
+                fs,
+            )
         } else {
             let LayoutKind::Product(fs) = &layout.kind else {
                 return Err("tuple requires product layout".into());
             };
-            fs.as_slice()
+            (None, fs.as_slice())
         };
+        let ptr = if self.operands_only {
+            // Zero only the words no field (or the tag) overwrites: the
+            // unused payload of an enum variant. Every scalar is a word.
+            let ptr = self.alloc_uninit(layout.size);
+            let mut covered = BTreeSet::new();
+            if tag.is_some() {
+                covered.insert(0);
+            }
+            for (n, _) in &fields {
+                if let Some(f) = fs.iter().find(|f| f.name == *n) {
+                    let start = f.offset as u32;
+                    covered.extend((start..start + f.layout.size).step_by(8));
+                }
+            }
+            for off in (0..layout.size.max(8)).step_by(8) {
+                if !covered.contains(&off) {
+                    let zero = self.zero();
+                    self.b
+                        .ins()
+                        .store(ir::MemFlags::new(), zero, ptr, off as i32);
+                }
+            }
+            ptr
+        } else {
+            self.alloc(layout.size)
+        };
+        if let Some(tag) = tag {
+            let tag = self.b.ins().iconst(types::I64, tag as i64);
+            self.b.ins().store(ir::MemFlags::new(), tag, ptr, 0);
+        }
         for (n, e) in fields {
             let f = fs
                 .iter()
                 .find(|f| f.name == n)
                 .ok_or("unknown native constructor field")?;
-            let value = self.expr(e)?;
+            // An aggregate local is copied straight into its field; reading
+            // it as an expression would first copy it into a temporary.
+            let direct = match &e.kind {
+                ExprKind::Name(local)
+                    if self.operands_only
+                        && f.layout.aggregate()
+                        && !self.world.functions.contains_key(local)
+                        && self.world.constructor(local).is_none() =>
+                {
+                    self.vars.get(local).copied()
+                }
+                _ => None,
+            };
+            let value = match direct {
+                Some(var) => self.use_var(var),
+                None => self.expr(e)?,
+            };
             let dest = self.offset(ptr, f.offset);
             self.store(dest, value, &f.ty)?;
         }
@@ -3814,7 +3940,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let ty = self.ty(e);
                 let layout = Layout::of(self.world, &ty)?;
                 if layout.aggregate() {
-                    let ptr = self.alloc(layout.size);
+                    // The copy writes every word, so the optimize path
+                    // does not zero it first.
+                    let ptr = if self.operands_only {
+                        self.alloc_uninit(layout.size)
+                    } else {
+                        self.alloc(layout.size)
+                    };
                     self.copy_bytes(value, ptr, layout.size);
                     ptr
                 } else if matches!(ty, Type::Function { .. }) {
