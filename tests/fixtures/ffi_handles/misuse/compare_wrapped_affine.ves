@@ -1,0 +1,8 @@
+// Nor does a struct or tuple that holds one.
+struct Held {
+    probe: Probe,
+}
+
+fn compare_wrapped_affine(in a: (u64, Held), in b: (u64, Held)) -> bool {
+    a == b
+}

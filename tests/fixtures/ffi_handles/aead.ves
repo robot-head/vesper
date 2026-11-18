@@ -187,3 +187,10 @@ pub fn seal_one() -> u64 eff [Ffi[Aead]] {
 pub fn seal_one_stateless() -> u64 eff [Ffi[Aead]] {
     seal_n_stateless(1)
 }
+
+// A never-grown sequence has no buffer, but the C callee still gets a
+// non-null pointer with length 0 (seal reports 2: shorter than a tag).
+pub fn empty() -> u64 eff [Ffi[Aead]] {
+    let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    widen_u64(Aead::aead_seal_once(5, inout p.as_slice_mut()))
+}

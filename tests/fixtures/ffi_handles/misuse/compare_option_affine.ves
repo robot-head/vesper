@@ -1,0 +1,4 @@
+// Wrapping an affine handle in Option does not make it comparable.
+fn compare_option_affine(in a: Option[Probe], in b: Option[Probe]) -> bool {
+    a == b
+}

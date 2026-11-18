@@ -741,15 +741,32 @@ impl Checker<'_> {
     /// Whether `t` is an opaque `.vsys` extern-type handle (§16.3), which
     /// `crate::ffi_lowering` generates as a struct whose one field no source
     /// identifier can spell.
+    /// Whether a value of `t` holds an opaque `.vsys` handle anywhere:
+    /// directly, or through type arguments, tuple items or ADT fields.
     fn extern_handle(&self, t: &Type) -> bool {
-        let Type::Named(n, args) = t else {
-            return false;
-        };
-        args.is_empty()
-            && self.world.adts.get(n).is_some_and(|a| {
-                matches!(a.variants.as_slice(), [v] if matches!(v.fields.as_slice(),
-                    [f] if f.name == crate::ffi_lowering::HANDLE_FIELD))
-            })
+        self.holds_extern_handle(t, &mut BTreeSet::new())
+    }
+    fn holds_extern_handle(&self, t: &Type, seen: &mut BTreeSet<String>) -> bool {
+        match t {
+            Type::Named(n, args) => {
+                if args.iter().any(|a| self.holds_extern_handle(a, seen)) {
+                    return true;
+                }
+                if !seen.insert(n.clone()) {
+                    return false;
+                }
+                self.world.adts.get(n).is_some_and(|a| {
+                    a.variants.iter().any(|v| {
+                        v.fields.iter().any(|f| {
+                            f.name == crate::ffi_lowering::HANDLE_FIELD
+                                || self.holds_extern_handle(&f.ty, seen)
+                        })
+                    })
+                })
+            }
+            Type::Tuple(items) => items.iter().any(|i| self.holds_extern_handle(i, seen)),
+            _ => false,
+        }
     }
     fn declarations(&mut self) {
         for a in self.world.adts.values() {

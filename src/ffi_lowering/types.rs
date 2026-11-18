@@ -255,15 +255,16 @@ impl Generated {
         for import in imports.libraries.values() {
             for t in import.descriptor.extern_types() {
                 let adt = handle_adt(t);
-                match g.handles.get(t.name()) {
-                    Some(existing) if existing != &adt => return Err(duplicate(t.name())),
-                    _ if g.structs.contains_key(t.name()) || g.enums.contains_key(t.name()) => {
-                        return Err(duplicate(t.name()));
-                    }
-                    _ => {
-                        g.handles.insert(t.name().to_owned(), adt);
-                    }
+                // A handle belongs to the one library that declares it: two
+                // libraries naming the same opaque type would let one
+                // library's handle reach the other's imports.
+                if g.handles.contains_key(t.name())
+                    || g.structs.contains_key(t.name())
+                    || g.enums.contains_key(t.name())
+                {
+                    return Err(duplicate(t.name()));
                 }
+                g.handles.insert(t.name().to_owned(), adt);
             }
         }
         for (name, import) in &imports.libraries {

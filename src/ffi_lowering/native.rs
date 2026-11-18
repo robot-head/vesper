@@ -127,7 +127,12 @@ impl<M: Module> Codegen<'_, '_, M> {
                     .ins()
                     .load(types::I64, ir::MemFlags::new(), handle, 16);
                 let offset = self.b.ins().imul_imm(start, element.size() as i64);
-                c_args.push(self.b.ins().iadd(data, offset));
+                let lent = self.b.ins().iadd(data, offset);
+                // A never-grown sequence has no buffer (data 0); a
+                // non-nullable CSlice still needs a valid aligned pointer.
+                let dummy = self.alloc(8);
+                let empty = self.b.ins().icmp_imm(IntCC::Equal, data, 0);
+                c_args.push(self.b.ins().select(empty, dummy, lent));
                 c_args.push(len);
                 continue;
             }

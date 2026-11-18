@@ -109,6 +109,9 @@ void aead_sealer_free(sealer *s) {
 }
 
 uint32_t aead_seal_once(uint64_t key, uint8_t *p, size_t n) {
+    if (p == NULL) {
+        return 77;
+    }
     sealer s;
     expand(&s, key);
     return seal(&s, p, n);

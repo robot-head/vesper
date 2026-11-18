@@ -171,6 +171,10 @@ extern "C" fn aead_sealer_free(s: *mut Schedule) {
     drop(unsafe { Box::from_raw(s) });
 }
 extern "C" fn aead_seal_once(key: u64, ptr: *mut u8, len: usize) -> u32 {
+    // A CSlice is never NULL, even when empty.
+    if ptr.is_null() {
+        return 77;
+    }
     // SAFETY: the packet is lent for the call.
     unsafe { seal(&expand(key), bytes(ptr, len)) }
 }
@@ -221,6 +225,7 @@ fn expected() -> BTreeMap<&'static str, u64> {
         ("churn", 0),
         ("seal_many", sealed_twenty_thousand),
         ("seal_many_stateless", sealed_twenty_thousand),
+        ("empty", 2),
     ])
 }
 
@@ -246,7 +251,7 @@ fn jit_drives_a_stateful_rust_aead_through_linear_handles() {
         let min = match entry {
             "churn" => 1000,
             "paths" => 3,
-            "seal_many_stateless" => 0,
+            "seal_many_stateless" | "empty" => 0,
             _ => 1,
         };
         assert!(made >= min, "{entry}: {made} sealers");
@@ -406,6 +411,8 @@ fn handle_misuse_is_a_typed_diagnostic() {
         ("copy", "E0303"),
         ("compare_linear", "E0302"),
         ("compare_affine", "E0200"),
+        ("compare_option_affine", "E0200"),
+        ("compare_wrapped_affine", "E0200"),
         ("live_across_fail", "E0402"),
     ] {
         let e = misuse(name);
@@ -482,6 +489,27 @@ fn vsys_handle_declarations_are_validated() {
     let plain = parse("fn f() -> ForeignVal[Unit];").unwrap();
     let with = parse("affine extern type H; fn f() -> ForeignVal[Unit];").unwrap();
     assert_ne!(plain.identity(), with.identity());
+}
+
+#[test]
+fn handle_types_belong_to_one_library() {
+    // Two libraries naming the same opaque type would let one library's
+    // handle reach the other's imports, so the import set is refused.
+    let lib = |name: &str| {
+        format!(
+            "sys library {name} (target = \"x86_64-unknown-linux-gnu\", abi = \"sysv64\", link = \"static\", name = \"{l}\", artifact = \"blake3:{ZERO}\") {{
+                affine extern type H;
+                fn {l}_h() -> ForeignVal[Option[H]];
+                fn {l}_use(in h: H) -> ForeignVal[u64];
+            }}",
+            l = name.to_lowercase()
+        )
+    };
+    let mut imports = Imports::new();
+    imports.add(&lib("A"), Handler::Direct).unwrap();
+    imports.add(&lib("B"), Handler::Direct).unwrap();
+    let e = ffi_lowering::check_source("fn f() -> u64 { 0 }", &imports).unwrap_err();
+    assert!(e.message.contains("'H'"), "{e}");
 }
 
 #[test]
@@ -568,7 +596,14 @@ fn objects_link_handles_with_a_c_library() {
         .unwrap();
     let checked = ffi_lowering::check_source(&fixture("aead.ves"), &imports).unwrap();
     let mut objects = vec![];
-    for entry in ["roundtrip", "tampered", "paths", "churn", "seal_many"] {
+    for entry in [
+        "roundtrip",
+        "tampered",
+        "paths",
+        "churn",
+        "seal_many",
+        "empty",
+    ] {
         let object = checked
             .object(entry, Some("x86_64-unknown-linux-gnu"))
             .unwrap_or_else(|e| panic!("{entry}: {e}"));
@@ -583,9 +618,16 @@ fn objects_link_handles_with_a_c_library() {
     // Each object exports its entry and its own copies of the helpers it
     // reaches, so link one object per program.
     let want = expected();
-    for (entry, object) in ["roundtrip", "tampered", "paths", "churn", "seal_many"]
-        .iter()
-        .zip(&objects)
+    for (entry, object) in [
+        "roundtrip",
+        "tampered",
+        "paths",
+        "churn",
+        "seal_many",
+        "empty",
+    ]
+    .iter()
+    .zip(&objects)
     {
         let exe = temp.0.join(entry);
         run(Command::new("cc")
@@ -606,7 +648,7 @@ fn objects_link_handles_with_a_c_library() {
         };
         assert_eq!(value, want[entry], "{entry}");
         assert_eq!(created, freed, "{entry}: every sealer is finalized once");
-        assert!(created >= 1, "{entry}");
+        assert!(created >= 1 || *entry == "empty", "{entry}");
     }
 }
 
