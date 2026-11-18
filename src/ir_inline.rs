@@ -202,10 +202,8 @@ pub fn cost(f: &FunctionIr) -> usize {
                 .instructions
                 .iter()
                 .filter(|i| {
-                    !matches!(
-                        &i.op,
-                        Op::Constant(_) | Op::Unit | Op::Loop
-                    ) && !matches!(&i.op, Op::Read { path, .. } if path.is_empty())
+                    !matches!(&i.op, Op::Constant(_) | Op::Unit | Op::Loop)
+                        && !matches!(&i.op, Op::Read { path, .. } if path.is_empty())
                 })
                 .count()
         })

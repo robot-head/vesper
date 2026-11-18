@@ -158,25 +158,26 @@ fn stack_rejects_recursion_and_budgets_and_accepts_a_bounded_root() {
     );
     let policy = tight.to_str().unwrap();
     for target in TARGETS {
-        // Unoptimized objects keep every call, so the path names the callee.
-        // Optimized objects inline `select` into `ct_main` (#959) and the
-        // verifier budgets the frame that ships.
-        for (flags, path) in [
-            (
-                &["--verify-stack", "--verify-policy", policy, "--no-opt"][..],
-                "(exceeded) via ct_main -> select",
-            ),
-            (
-                &["--verify-stack", "--verify-policy", policy][..],
-                "(exceeded) via ct_main\n",
-            ),
-        ] {
-            let (o, _) = emit(&temp, "ct_main", target, flags);
-            let t = text(&o);
-            assert!(!o.status.success(), "{t}");
-            assert!(t.contains("silicon.stack.budget_exceeded"), "{t}");
-            assert!(t.contains(path), "{flags:?}: {t}");
-        }
+        // Unoptimized objects keep every call and every local in a stack
+        // slot, so the path names the callee.
+        let flags = &["--verify-stack", "--verify-policy", policy, "--no-opt"][..];
+        let (o, _) = emit(&temp, "ct_main", target, flags);
+        let t = text(&o);
+        assert!(!o.status.success(), "{t}");
+        assert!(t.contains("silicon.stack.budget_exceeded"), "{t}");
+        assert!(
+            t.contains("(exceeded) via ct_main -> select"),
+            "{flags:?}: {t}"
+        );
+        // Optimized objects inline `select` into `ct_main` (#959) and keep
+        // its locals in registers (#972): the verifier budgets the frame that
+        // ships, which is at most the frame record (0 bytes on x86-64, 16 on
+        // AArch64), so only the path is target-neutral.
+        let flags = &["--verify-stack", "--verify-policy", policy][..];
+        let (o, _) = emit(&temp, "ct_main", target, flags);
+        let t = text(&o);
+        assert!(t.contains(") via ct_main\n"), "{flags:?}: {t}");
+        assert!(!t.contains("-> select"), "{flags:?}: {t}");
     }
     let roomy = temp.policy(
         "roomy.json",

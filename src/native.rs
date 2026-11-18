@@ -418,17 +418,16 @@ fn register_locals(
     for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
         match &inst.op {
             Op::Call { callee, args, .. } => {
-                let pure = world.functions.get(callee).is_some_and(|g| {
-                    g.effects.instances.is_empty() && g.effects.tail.is_none()
-                });
+                let pure = world
+                    .functions
+                    .get(callee)
+                    .is_some_and(|g| g.effects.instances.is_empty() && g.effects.tail.is_none());
                 if !pure {
                     place_roots(args, &mut memory);
                 }
             }
             // Sequence and `Box` operations take their operands as values.
-            Op::Indirect { args, .. } | Op::Tiled { args, .. } => {
-                place_roots(args, &mut memory)
-            }
+            Op::Indirect { args, .. } | Op::Tiled { args, .. } => place_roots(args, &mut memory),
             Op::Closure {
                 expr,
                 aliases,
