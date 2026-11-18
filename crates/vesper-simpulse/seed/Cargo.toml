@@ -7,13 +7,12 @@ autoexamples = false
 autobenches = false
 build = false
 
-# The seed-copy rule (port wave P1 lane 2, #899): the compiler, and for now
-# every other dependent, links this package, the Rust build of ../src, under
-# the library name `vesper_simpulse`. Dependents use
+# The seed-copy rule (port wave P1 lane 2, #899): every crate inside
+# `cargo tree -p vesper -e normal,build` links this package, the Rust build of
+# ../src, under the library name `vesper_simpulse`, with
 # `vesper-simpulse = { path = ".../seed", package = "vesper-simpulse-seed" }`.
-# The port-backed package `vesper-simpulse` (lane 5, #902) is exercised by
-# its own tests until it reaches performance parity. The Rust code takes bug
-# fixes only until self-hosting Stage 2.
+# Crates outside the closure use the port-backed package `vesper-simpulse`
+# (lane 5, #902). The Rust code takes bug fixes only until self-hosting Stage 2.
 [lib]
 name = "vesper_simpulse"
 path = "../src/lib.rs"

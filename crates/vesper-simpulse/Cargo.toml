@@ -5,10 +5,11 @@ edition = "2024"
 build = "build.rs"
 
 # This is the port-backed build: build.rs links the Vesper package in vesper/
-# and sets cfg(vesper_port). Every dependent, inside the compiler's closure
-# or not, uses the frozen Rust seed copy, crates/vesper-simpulse/seed
-# (package vesper-simpulse-seed, same library name), until the port reaches
-# performance parity; see "Crates the compiler links" in
+# and sets cfg(vesper_port). Crates inside the compiler's closure use the
+# frozen Rust seed copy, crates/vesper-simpulse/seed (package
+# vesper-simpulse-seed, same library name), and so does vesper-nexus, a
+# dev-dependency of the root package; vesper-chorus and vesper-flux use this
+# package. See "Crates the compiler links" in
 # docs/maintenance/porting-a-crate.md and docs/parallel-results/port-p1-simpulse.md.
 
 [features]

@@ -1,4 +1,8 @@
-use super::*;
+//! The in-crate unit tests of src/tests.rs, translated to the public API
+//! (port wave P1 lane 15, #912) so they run against both builds: the
+//! port-backed package `vesper-semver` and the seed `vesper-semver-seed`.
+use std::collections::BTreeMap;
+use vesper_semver::*;
 fn int() -> Type {
     Type::Primitive {
         name: Primitive::I64,
@@ -814,13 +818,30 @@ fn unsigned_range_witness_keeps_invariant_and_invalid_fallbacks() {
         .find(|i| i.message == "parameter type is incompatible")
         .unwrap();
     assert!(issue.caller_witness.contains("mutable places"));
-    assert_eq!(
-        u64_counterexample(&u64_range(1, 0), &u64_range(0, 10)),
-        None
-    );
-    assert_eq!(
-        u64_counterexample(&u64_range(1, 9), &u64_range(0, 10)),
-        None
+    // Translated from direct `u64_counterexample` calls: an invalid interval
+    // has no counterexample, so its incompatibility keeps the generic
+    // witness, and a contained interval is no incompatibility at all.
+    let mut old = function();
+    old.parameters[0].pass = Pass::In;
+    old.parameters[0].ty = u64_range(5, 0);
+    let mut new = old.clone();
+    new.parameters[0].ty = u64_range(6, 10);
+    let report = check(old, new);
+    let issue = report
+        .issues
+        .iter()
+        .find(|i| i.message == "parameter type is incompatible")
+        .unwrap();
+    assert!(issue.caller_witness.starts_with("Pass a value admitted"));
+    let mut old = function();
+    old.parameters[0].ty = u64_range(1, 9);
+    let mut new = old.clone();
+    new.parameters[0].ty = u64_range(0, 10);
+    assert!(
+        !check(old, new)
+            .issues
+            .iter()
+            .any(|i| i.message == "parameter type is incompatible")
     );
 }
 
@@ -879,9 +900,26 @@ fn range_witness_does_not_misrepresent_invariant_or_invalid_types() {
         .find(|i| i.message == "parameter type is incompatible")
         .unwrap();
     assert!(issue.caller_witness.contains("mutable places"));
-    assert_eq!(i64_counterexample(&i64_range(1, 0), &int()), None);
-    assert_eq!(
-        i64_counterexample(&i64_range(0, 10), &i64_range(-1, 11)),
-        None
+    // Translated from direct `i64_counterexample` calls (see the u64 case).
+    let mut old = function();
+    old.parameters[0].ty = i64_range(1, 0);
+    let mut new = old.clone();
+    new.parameters[0].ty = i64_range(2, 10);
+    let report = check(old, new);
+    let issue = report
+        .issues
+        .iter()
+        .find(|i| i.message == "parameter type is incompatible")
+        .unwrap();
+    assert!(issue.caller_witness.starts_with("Pass a value admitted"));
+    let mut old = function();
+    old.parameters[0].ty = i64_range(0, 10);
+    let mut new = old.clone();
+    new.parameters[0].ty = i64_range(-1, 11);
+    assert!(
+        !check(old, new)
+            .issues
+            .iter()
+            .any(|i| i.message == "parameter type is incompatible")
     );
 }

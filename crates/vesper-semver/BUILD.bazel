@@ -1,4 +1,75 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-# Pure Rust tests: no external tools or host services.
-vesper_crate(remote_tests = ["*"])
+# The port-backed package (seed-copy rule, docs/maintenance/porting-a-crate.md;
+# port wave P1 lane 15, #912): build.rs links the object built here from the
+# Loom package in vesper/ and checks port/binding.rs against the generated
+# binding. The compiler links the Rust seed copy, //crates/vesper-semver/seed,
+# instead.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "semver_vesper",
+    library = "semver",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "semver_vesper_binding",
+    srcs = [":semver_vesper"],
+    output_group = "rust_binding",
+)
+
+# The divergent builds, one per ported module: the same edits as the Cargo
+# feature `vesper-port-divergent` (build.rs). They must build; the Cargo run
+# in port/test-port.sh (scripts/test-port-harness.sh) asserts that the tests
+# catch each edit.
+vesper_port_object(
+    name = "semver_vesper_divergent_check",
+    edit_src = "vesper/src/check.ves",
+    edits = {"fn_result_mode(in w, b) > fn_result_mode(in w, a)": "fn_result_mode(in w, b) < fn_result_mode(in w, a)"},
+    library = "semver",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "semver_vesper_divergent_version",
+    edit_src = "vesper/src/version.ves",
+    edits = {"cmp_precedence(in new, after, in old, before) != 1": "cmp_precedence(in new, after, in old, before) == -1"},
+    library = "semver",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+# Pure Rust tests apart from the prebuilt port object: no external tools or
+# host services.
+vesper_crate(
+    build_script_data = [
+        ":semver_vesper",
+        ":semver_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :semver_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :semver_vesper_binding)",
+    },
+    remote_tests = ["*"],
+)
+
+# The seed package (seed/) builds these same Rust sources without the port.
+exports_files(glob([
+    "src/**/*.rs",
+    "tests/**/*.rs",
+]))
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-semver/seed:__pkg__"],
+)

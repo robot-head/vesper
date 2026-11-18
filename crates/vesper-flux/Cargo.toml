@@ -19,7 +19,7 @@ snap = "=1.1.1"
 zstd = { version = "=0.13.4", default-features = false }
 vesper-loom-cas = { path = "../vesper-loom-cas" }
 vesper-quarry = { path = "../vesper-quarry" }
-vesper-simpulse = { path = "../vesper-simpulse/seed", package = "vesper-simpulse-seed" }
+vesper-simpulse = { path = "../vesper-simpulse" }
 
 [dev-dependencies]
 rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "pem"] }

@@ -1,0 +1,127 @@
+// Module util of @vesper/semver (see lib.ves): word and byte access, and
+// text output into a byte pool.
+
+pub fn none() -> u64 {
+    18446744073709551615
+}
+
+// Word `i` of the input, or 0 past the end.
+pub fn sw(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// Byte `i` of the input, or 0 past the end.
+pub fn sb(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn cw(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn cb(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn put(inout m: ChunkSeq[u8], in s: Str) {
+    for i in 0..s.len() {
+        match s.try_byte_at(i) {
+            Option::Some(b) => m.push(b),
+            Option::None => (),
+        }
+    }
+}
+
+// Append `len` bytes of `t` from `off`.
+pub fn put_text(inout m: ChunkSeq[u8], in t: Slice[u8], off: u64, len: u64) {
+    for i in 0..len {
+        m.push(sb(in t, wrapping_add(off, i)));
+    }
+}
+
+// Append the pool's own range `off .. off + len` (a path prefix).
+pub fn put_self(inout m: ChunkSeq[u8], off: u64, len: u64) {
+    for i in 0..len {
+        let b = cb(in m, wrapping_add(off, i));
+        m.push(b);
+    }
+}
+
+// `(v / d, v % d)`, and `(0, 0)` when `d` is 0.
+pub fn div_rem(v: u64, d: u64) -> (u64, u64) {
+    if d == 0 {
+        return (0, 0);
+    }
+    handle Fail[RuntimeError] in {
+        (v / d, v % d)
+    } with {
+        return q => q,
+        raise(e, k) => (0, 0),
+    }
+}
+
+// 10^k for k <= 19.
+fn pow10(k: u64) -> u64 {
+    let mut p: u64 = 1;
+    for i in 0..k {
+        p = wrapping_mul(p, 10);
+    }
+    p
+}
+
+// Append the decimal digits of `x`, by repeated subtraction of powers of
+// ten (no division, so no handler on this hot path).
+pub fn put_u64(inout m: ChunkSeq[u8], x: u64) {
+    if x < 10 {
+        m.push(wrapping_u8(wrapping_add(x, 48)));
+        return;
+    }
+    // The number of digits after the first.
+    let mut k: u64 = 1;
+    loop {
+        if k == 19 || pow10(wrapping_add(k, 1)) > x {
+            break;
+        }
+        k = wrapping_add(k, 1);
+    }
+    let mut v = x;
+    loop {
+        let p = pow10(k);
+        let mut digit: u64 = 0;
+        loop {
+            if v < p {
+                break;
+            }
+            v = wrapping_sub(v, p);
+            digit = wrapping_add(digit, 1);
+        }
+        m.push(wrapping_u8(wrapping_add(digit, 48)));
+        if k == 0 {
+            break;
+        }
+        k = wrapping_sub(k, 1);
+    }
+}
+
+// Append the decimal form of the i64 whose two's-complement bits are `x`.
+pub fn put_i64(inout m: ChunkSeq[u8], x: u64) {
+    if wrapping_i64(x) < 0 {
+        m.push(45);
+        // The magnitude, also right for i64::MIN.
+        put_u64(inout m, wrapping_sub(0, x));
+    } else {
+        put_u64(inout m, x);
+    }
+}

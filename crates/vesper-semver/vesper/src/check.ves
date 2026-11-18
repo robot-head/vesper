@@ -1,0 +1,1622 @@
+// Module check of @vesper/semver (see lib.ves): the conservative
+// source-interface checker of src/lib.rs (`compare`, `Checker`,
+// `Projection::is_subset_of`, the range counterexamples, `resumption` and
+// `type_mode`), over the flat encoding that src/port.rs writes.
+//
+// Input words `w`: [old interface, new interface, string count n, string
+// table offset s, then the nodes], with the n (offset, length) ranges of `t`
+// at `s`. String ids follow Rust `String` order, so comparing ids compares
+// the strings. Every other value is a node offset into `w`. The encoder hash-conses nodes, so two nodes of the same class
+// are structurally equal exactly when their offsets are equal.
+//
+// Codes: Mode Copy 0, Affine 1, Linear 2. Resumption Affine 0, Linear 1.
+// Pass In 0, Inout 1, Sink 2. GradeRelation UpperBound 0, Exact 1.
+// Primitive Unit 0, Never 1, Bool 2, U8 3, U32 4, U64 5, I64 6, F64 7,
+// String 8. Generic: (kind, value) with Type 0 (bound mode) and Row 1
+// (minimum resumption).
+//
+// Nodes:
+//   interface  [schema, semantics, m, (name, declaration) * m,
+//               k, (name, arity, mode) * k]
+//   declaration Function [0, function], Struct [1, generics, mode, fields],
+//               Enum [2, generics, mode, open, m, (name, payload) * m],
+//               Effect [3, generics, sealed, resumption, m,
+//               (name, function) * m], Unsupported [4, description]
+//   fields     Closed [0], Public [1, m, (name, type) * m]
+//   payload    [m, type * m]
+//   generics   [m, (kind, value) * m]
+//   function   [generics, mode, result, result mode, effects, m,
+//               parameter * m]
+//   parameter  [pass, type, projection]
+//   projection All [0], Paths [1, m, path * m]; path [m, string * m]
+//   effects    [m, capability * m, r, row variable * r]
+//   capability [identity, effect, resumption, has ceiling, ceiling,
+//               grade relation, m, argument type * m]
+//   type       Primitive [0, name], I64Range [1, min, max], U64Range
+//              [2, min, max], Parameter [3, index], Named [4, name, m,
+//              argument * m], Tuple [5, m, element * m], Function
+//              [6, function], Unsupported [7, description]; a subtree
+//              cut by the encoder past 256 levels is [7, description, k]
+// Maps and sets are in Rust iteration order (sorted).
+use self::Q;
+use self::util::{
+    none,
+    put,
+    put_i64,
+    put_text,
+    put_u64
+};
+
+// SCHEMA_VERSION and SEMANTICS_VERSION of src/lib.rs.
+fn schema_version() -> u64 {
+    1
+}
+
+fn semantics_version() -> u64 {
+    2
+}
+
+// Word `i` of the input, or 0 past the end. The input is copied into a
+// `ChunkSeq` once, because functions with slice parameters are never
+// inlined, and these accessors run for every node read.
+fn word(in w: ChunkSeq[u64], i: u64) -> u64 {
+    match w.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn at(in w: ChunkSeq[u64], p: u64, k: u64) -> u64 {
+    word(in w, wrapping_add(p, k))
+}
+
+fn str_off(in w: ChunkSeq[u64], id: u64) -> u64 {
+    word(in w, wrapping_add(word(in w, 3), wrapping_mul(id, 2)))
+}
+
+fn str_len(in w: ChunkSeq[u64], id: u64) -> u64 {
+    word(in w, wrapping_add(wrapping_add(word(in w, 3), 1), wrapping_mul(id, 2)))
+}
+
+fn str_empty(in w: ChunkSeq[u64], id: u64) -> bool {
+    str_len(in w, id) == 0
+}
+
+fn max_mode(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// Signed comparison of two i64 bit patterns: a <= b.
+fn le_i64(a: u64, b: u64) -> bool {
+    wrapping_i64(a) <= wrapping_i64(b)
+}
+
+fn i64_min() -> u64 {
+    9223372036854775808
+}
+
+fn i64_max() -> u64 {
+    9223372036854775807
+}
+
+// Interfaces.
+
+fn export_count(in w: ChunkSeq[u64], i: u64) -> u64 {
+    at(in w, i, 2)
+}
+
+fn export_name(in w: ChunkSeq[u64], i: u64, k: u64) -> u64 {
+    at(in w, i, wrapping_add(3, wrapping_mul(k, 2)))
+}
+
+fn export_decl(in w: ChunkSeq[u64], i: u64, k: u64) -> u64 {
+    at(in w, i, wrapping_add(4, wrapping_mul(k, 2)))
+}
+
+fn ext_base(in w: ChunkSeq[u64], i: u64) -> u64 {
+    wrapping_add(wrapping_add(i, 3), wrapping_mul(export_count(in w, i), 2))
+}
+
+fn ext_count(in w: ChunkSeq[u64], i: u64) -> u64 {
+    word(in w, ext_base(in w, i))
+}
+
+fn ext_field(in w: ChunkSeq[u64], i: u64, k: u64, f: u64) -> u64 {
+    at(in w, ext_base(in w, i), wrapping_add(wrapping_add(1, wrapping_mul(k, 3)), f))
+}
+
+// Binary search of a sorted (name, value) list of `m` entries of `stride`
+// words at `base`: the entry index, or none.
+fn find_sorted(in w: ChunkSeq[u64], base: u64, m: u64, stride: u64, id: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = m;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, hi) >> 1;
+        let name = at(in w, base, wrapping_mul(mid, stride));
+        if name == id {
+            return mid;
+        }
+        if name < id {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    none()
+}
+
+// `exports.get(name)`: the declaration node, or none.
+fn find_export(in w: ChunkSeq[u64], i: u64, id: u64) -> u64 {
+    let k = find_sorted(in w, wrapping_add(i, 3), export_count(in w, i), 2, id);
+    if k == none() {
+        none()
+    } else {
+        export_decl(in w, i, k)
+    }
+}
+
+// `external_types.get(name)`: the entry index, or none.
+fn find_ext(in w: ChunkSeq[u64], i: u64, id: u64) -> u64 {
+    find_sorted(in w, wrapping_add(ext_base(in w, i), 1), ext_count(in w, i), 3, id)
+}
+
+// Generics.
+
+fn gen_count(in w: ChunkSeq[u64], g: u64) -> u64 {
+    word(in w, g)
+}
+
+fn gen_kind(in w: ChunkSeq[u64], g: u64, k: u64) -> u64 {
+    at(in w, g, wrapping_add(1, wrapping_mul(k, 2)))
+}
+
+fn gen_value(in w: ChunkSeq[u64], g: u64, k: u64) -> u64 {
+    at(in w, g, wrapping_add(2, wrapping_mul(k, 2)))
+}
+
+// `a.starts_with(b)` for generic lists.
+fn gen_starts_with(in w: ChunkSeq[u64], a: u64, b: u64) -> bool {
+    let n = gen_count(in w, b);
+    if gen_count(in w, a) < n {
+        return false;
+    }
+    for k in 0..n {
+        if gen_kind(in w, a, k)
+            != gen_kind(in w, b, k)
+            || gen_value(in w, a, k)
+            != gen_value(in w, b, k) {
+            return false;
+        }
+    }
+    true
+}
+
+// Functions, parameters, effects and capabilities.
+
+fn fn_generics(in w: ChunkSeq[u64], f: u64) -> u64 {
+    at(in w, f, 0)
+}
+
+fn fn_mode(in w: ChunkSeq[u64], f: u64) -> u64 {
+    at(in w, f, 1)
+}
+
+fn fn_result(in w: ChunkSeq[u64], f: u64) -> u64 {
+    at(in w, f, 2)
+}
+
+fn fn_result_mode(in w: ChunkSeq[u64], f: u64) -> u64 {
+    at(in w, f, 3)
+}
+
+fn fn_effects(in w: ChunkSeq[u64], f: u64) -> u64 {
+    at(in w, f, 4)
+}
+
+fn fn_param_count(in w: ChunkSeq[u64], f: u64) -> u64 {
+    at(in w, f, 5)
+}
+
+fn fn_param(in w: ChunkSeq[u64], f: u64, k: u64) -> u64 {
+    at(in w, f, wrapping_add(6, k))
+}
+
+fn cap_count(in w: ChunkSeq[u64], e: u64) -> u64 {
+    word(in w, e)
+}
+
+fn cap_at(in w: ChunkSeq[u64], e: u64, k: u64) -> u64 {
+    at(in w, e, wrapping_add(1, k))
+}
+
+fn row_base(in w: ChunkSeq[u64], e: u64) -> u64 {
+    wrapping_add(wrapping_add(e, 1), cap_count(in w, e))
+}
+
+fn row_count(in w: ChunkSeq[u64], e: u64) -> u64 {
+    word(in w, row_base(in w, e))
+}
+
+fn row_at(in w: ChunkSeq[u64], e: u64, k: u64) -> u64 {
+    at(in w, row_base(in w, e), wrapping_add(1, k))
+}
+
+fn cap_identity(in w: ChunkSeq[u64], c: u64) -> u64 {
+    at(in w, c, 0)
+}
+
+fn cap_effect(in w: ChunkSeq[u64], c: u64) -> u64 {
+    at(in w, c, 1)
+}
+
+fn cap_resumption(in w: ChunkSeq[u64], c: u64) -> u64 {
+    at(in w, c, 2)
+}
+
+fn cap_has_ceiling(in w: ChunkSeq[u64], c: u64) -> bool {
+    at(in w, c, 3) != 0
+}
+
+fn cap_ceiling(in w: ChunkSeq[u64], c: u64) -> u64 {
+    at(in w, c, 4)
+}
+
+fn cap_grade(in w: ChunkSeq[u64], c: u64) -> u64 {
+    at(in w, c, 5)
+}
+
+fn cap_arg_count(in w: ChunkSeq[u64], c: u64) -> u64 {
+    at(in w, c, 6)
+}
+
+fn cap_arg(in w: ChunkSeq[u64], c: u64, k: u64) -> u64 {
+    at(in w, c, wrapping_add(7, k))
+}
+
+// The same identity, effect and type arguments.
+fn same_capability(in w: ChunkSeq[u64], a: u64, b: u64) -> bool {
+    if cap_identity(in w, a)
+        != cap_identity(in w, b)
+        || cap_effect(in w, a)
+        != cap_effect(in w, b) {
+        return false;
+    }
+    let n = cap_arg_count(in w, a);
+    if cap_arg_count(in w, b) != n {
+        return false;
+    }
+    for k in 0..n {
+        if cap_arg(in w, a, k) != cap_arg(in w, b, k) {
+            return false;
+        }
+    }
+    true
+}
+
+// Projections.
+
+fn proj_full(in w: ChunkSeq[u64], p: u64) -> bool {
+    if at(in w, p, 0) == 0 {
+        return true;
+    }
+    let n = at(in w, p, 1);
+    if n == 0 {
+        return true;
+    }
+    for k in 0..n {
+        if word(in w, at(in w, p, wrapping_add(2, k))) == 0 {
+            return true;
+        }
+    }
+    false
+}
+
+// `path a` starts with `path b`.
+fn path_starts_with(in w: ChunkSeq[u64], a: u64, b: u64) -> bool {
+    let n = word(in w, b);
+    if word(in w, a) < n {
+        return false;
+    }
+    for k in 0..n {
+        if at(in w, a, wrapping_add(1, k)) != at(in w, b, wrapping_add(1, k)) {
+            return false;
+        }
+    }
+    true
+}
+
+// The exported `is_subset_of`.
+pub fn subset_words(in ws: Slice[u64], new: u64, old: u64) -> bool {
+    let mut w = ChunkSeq::new[u64]();
+    w.extend(in ws);
+    subset_q(in w, new, old)
+}
+
+// `Projection::is_subset_of(new, old)`.
+fn subset_q(in w: ChunkSeq[u64], new: u64, old: u64) -> bool {
+    if proj_full(in w, old) {
+        return true;
+    }
+    if proj_full(in w, new) {
+        return false;
+    }
+    let nn = at(in w, new, 1);
+    let on = at(in w, old, 1);
+    for i in 0..nn {
+        let np = at(in w, new, wrapping_add(2, i));
+        let mut found = false;
+        for j in 0..on {
+            if path_starts_with(in w, np, at(in w, old, wrapping_add(2, j))) {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+// Output: pool text and issues.
+
+// Issue paths are built lazily, as nodes (parent, kind, value) in
+// `q.paths`, and written as text only for the issues and adapters that use
+// them. Kinds: 0 a root string id, 1 the side ("old" 0, "new" 1),
+// 2 `.{string id}`, 3 `.parameter[{value}]`, 4 `.result`.
+fn path_node(inout q: Q, parent: u64, kind: u64, value: u64) -> u64 {
+    let at = q.paths.len();
+    q.paths.push(parent);
+    q.paths.push(kind);
+    q.paths.push(value);
+    at
+}
+
+fn path_word(in q: Q, p: u64, k: u64) -> u64 {
+    match q.paths.try_get(wrapping_add(p, k)) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn put_path(inout q: Q, in w: ChunkSeq[u64], in t: Slice[u8], p: u64) {
+    let parent = path_word(in q, p, 0);
+    let kind = path_word(in q, p, 1);
+    let value = path_word(in q, p, 2);
+    if parent != none() {
+        put_path(inout q, in w, in t, parent);
+    }
+    if kind == 0 {
+        put_text(inout q.pool, in t, str_off(in w, value), str_len(in w, value));
+    } else if kind == 1 {
+        if value == 0 {
+            put(inout q.pool, "old");
+        } else {
+            put(inout q.pool, "new");
+        }
+    } else if kind == 2 {
+        put(inout q.pool, ".");
+        put_text(inout q.pool, in t, str_off(in w, value), str_len(in w, value));
+    } else if kind == 3 {
+        put(inout q.pool, ".parameter[");
+        put_u64(inout q.pool, value);
+        put(inout q.pool, "]");
+    } else {
+        put(inout q.pool, ".result");
+    }
+}
+
+fn found_word(in q: Q, i: u64) -> u64 {
+    match q.found.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn adapt_word(in q: Q, i: u64) -> u64 {
+    match q.adapts.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// Writes the found issues and adapters into `issues` and `adapters` with
+// their paths as text ranges.
+fn finish_paths(inout q: Q, in w: ChunkSeq[u64], in t: Slice[u8]) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= q.found.len() {
+            break;
+        }
+        let o = q.pool.len();
+        let p = found_word(in q, wrapping_add(i, 1));
+        put_path(inout q, in w, in t, p);
+        let l = wrapping_sub(q.pool.len(), o);
+        let kind = found_word(in q, i);
+        q.issues.push(kind);
+        q.issues.push(o);
+        q.issues.push(l);
+        let mut k: u64 = 2;
+        loop {
+            if k >= 8 {
+                break;
+            }
+            let x = found_word(in q, wrapping_add(i, k));
+            k = wrapping_add(k, 1);
+            q.issues.push(x);
+        }
+        i = wrapping_add(i, 8);
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= q.adapts.len() {
+            break;
+        }
+        let o = q.pool.len();
+        let p = adapt_word(in q, i);
+        put_path(inout q, in w, in t, p);
+        let l = wrapping_sub(q.pool.len(), o);
+        q.adapters.push(o);
+        q.adapters.push(l);
+        let x = adapt_word(in q, wrapping_add(i, 1));
+        q.adapters.push(x);
+        i = wrapping_add(i, 2);
+    }
+}
+
+fn lit(inout q: Q, in s: Str) -> (u64, u64) {
+    let o = q.pool.len();
+    put(inout q.pool, s);
+    (o, s.len())
+}
+
+fn text_range(inout q: Q, in w: ChunkSeq[u64], in t: Slice[u8], id: u64) -> (u64, u64) {
+    let o = q.pool.len();
+    let n = str_len(in w, id);
+    put_text(inout q.pool, in t, str_off(in w, id), n);
+    (o, n)
+}
+
+fn push_issue(inout q: Q, kind: u64, path: u64, in rule: Str, mo: u64, ml: u64, wo: u64, wl: u64) {
+    let (ro, rl) = lit(inout q, rule);
+    // `finish_paths` writes the path node's text.
+    q.found.push(kind);
+    q.found.push(path);
+    q.found.push(ro);
+    q.found.push(rl);
+    q.found.push(mo);
+    q.found.push(ml);
+    q.found.push(wo);
+    q.found.push(wl);
+}
+
+fn breaking(inout q: Q, path: u64, in rule: Str, in message: Str, in witness: Str) {
+    let (mo, ml) = lit(inout q, message);
+    let (wo, wl) = lit(inout q, witness);
+    push_issue(inout q, 0, path, rule, mo, ml, wo, wl);
+}
+
+fn breaking_witness(inout q: Q, path: u64, in rule: Str, in message: Str, wo: u64, wl: u64) {
+    let (mo, ml) = lit(inout q, message);
+    push_issue(inout q, 0, path, rule, mo, ml, wo, wl);
+}
+
+fn unsupported_range(inout q: Q, path: u64, mo: u64, ml: u64) {
+    let (wo, wl) = lit(
+        inout q,
+        "The checker cannot certify substitutability for this interface feature."
+    );
+    push_issue(inout q, 1, path, "Unsupported", mo, ml, wo, wl);
+}
+
+fn unsupported(inout q: Q, path: u64, in message: Str) {
+    let (mo, ml) = lit(inout q, message);
+    unsupported_range(inout q, path, mo, ml);
+}
+
+// An unsupported issue whose message is the string `id` after `prefix`.
+fn unsupported_text(
+    inout q: Q,
+    in w: ChunkSeq[u64],
+    in t: Slice[u8],
+    path: u64,
+    in prefix: Str,
+    id: u64
+) {
+    let mo = q.pool.len();
+    put(inout q.pool, prefix);
+    put_text(inout q.pool, in t, str_off(in w, id), str_len(in w, id));
+    let ml = wrapping_sub(q.pool.len(), mo);
+    unsupported_range(inout q, path, mo, ml);
+}
+
+fn issue_count(in q: Q) -> u64 {
+    q.found.len()
+}
+
+fn has_unsupported(in q: Q) -> bool {
+    let n = q.found.len();
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        if found_word(in q, i) == 1 {
+            return true;
+        }
+        i = wrapping_add(i, 8);
+    }
+    false
+}
+
+// `type_mode`: the modal kind of a type, or none.
+fn type_mode(in w: ChunkSeq[u64], i: u64, ty: u64, g: u64, depth: u64) -> u64 {
+    if depth > 128 {
+        return none();
+    }
+    let tag = at(in w, ty, 0);
+    if tag == 0 {
+        if at(in w, ty, 1) == 8 {
+            1
+        } else {
+            0
+        }
+    } else if tag == 1 || tag == 2 {
+        0
+    } else if tag == 3 {
+        let index = at(in w, ty, 1);
+        if index < gen_count(in w, g) && gen_kind(in w, g, index) == 0 {
+            gen_value(in w, g, index)
+        } else {
+            none()
+        }
+    } else if tag == 6 {
+        fn_mode(in w, at(in w, ty, 1))
+    } else if tag == 5 {
+        let mut m: u64 = 0;
+        for k in 0..at(in w, ty, 1) {
+            let n = type_mode(in w, i, at(in w, ty, wrapping_add(2, k)), g, wrapping_add(depth, 1));
+            if n == none() {
+                return none();
+            }
+            m = max_mode(m, n);
+        }
+        m
+    } else if tag == 4 {
+        let name = at(in w, ty, 1);
+        let d = find_export(in w, i, name);
+        let mut m: u64 = 0;
+        if d != none() && (at(in w, d, 0) == 1 || at(in w, d, 0) == 2) {
+            m = at(in w, d, 2);
+        } else {
+            let e = find_ext(in w, i, name);
+            if e == none() {
+                return none();
+            }
+            m = ext_field(in w, i, e, 2);
+        }
+        for k in 0..at(in w, ty, 2) {
+            let n = type_mode(in w, i, at(in w, ty, wrapping_add(3, k)), g, wrapping_add(depth, 1));
+            if n == none() {
+                return none();
+            }
+            m = max_mode(m, n);
+        }
+        m
+    } else {
+        none()
+    }
+}
+
+// Validation (`Checker::validate`, `validate_function`, `validate_type`).
+
+fn validate_type(
+    inout q: Q,
+    in w: ChunkSeq[u64],
+    in t: Slice[u8],
+    i: u64,
+    ty: u64,
+    g: u64,
+    path: u64,
+    depth: u64
+) {
+    if depth > 128 {
+        unsupported(inout q, path, "type nesting exceeds 128 levels");
+        return;
+    }
+    let tag = at(in w, ty, 0);
+    if tag == 1 {
+        if !le_i64(at(in w, ty, 1), at(in w, ty, 2)) {
+            unsupported(inout q, path, "invalid i64 refinement range");
+        }
+    } else if tag == 2 {
+        if at(in w, ty, 1) > at(in w, ty, 2) {
+            unsupported(inout q, path, "invalid u64 refinement range");
+        }
+    } else if tag == 3 {
+        let index = at(in w, ty, 1);
+        if !(index < gen_count(in w, g) && gen_kind(in w, g, index) == 0) {
+            unsupported(inout q, path, "unbound or non-type generic parameter");
+        }
+    } else if tag == 4 {
+        let name = at(in w, ty, 1);
+        let n = at(in w, ty, 2);
+        let d = find_export(in w, i, name);
+        let nominal = d != none() && (at(in w, d, 0) == 1 || at(in w, d, 0) == 2);
+        let arity = if nominal {
+            gen_count(in w, at(in w, d, 1))
+        } else {
+            let e = find_ext(in w, i, name);
+            if e == none() {
+                none()
+            } else {
+                ext_field(in w, i, e, 1)
+            }
+        };
+        if arity != n {
+            unsupported_text(
+                inout q,
+                in w,
+                in t,
+                path,
+                "unknown nominal type or wrong arity: ",
+                name
+            );
+        }
+        if nominal {
+            let ps = at(in w, d, 1);
+            let pn = gen_count(in w, ps);
+            for k in 0..n {
+                if k >= pn {
+                    break;
+                }
+                let arg = at(in w, ty, wrapping_add(3, k));
+                if gen_kind(in w, ps, k) == 0 {
+                    let m = type_mode(in w, i, arg, g, 0);
+                    if m != none() && m > gen_value(in w, ps, k) {
+                        unsupported(inout q, path, "nominal type argument exceeds its modal bound");
+                    }
+                } else {
+                    unsupported(
+                        inout q,
+                        path,
+                        "nominal row arguments are not supported by this schema"
+                    );
+                }
+            }
+        }
+        for k in 0..n {
+            validate_type(
+                inout q,
+                in w,
+                in t,
+                i,
+                at(in w, ty, wrapping_add(3, k)),
+                g,
+                path,
+                wrapping_add(depth, 1)
+            );
+        }
+    } else if tag == 5 {
+        for k in 0..at(in w, ty, 1) {
+            validate_type(
+                inout q,
+                in w,
+                in t,
+                i,
+                at(in w, ty, wrapping_add(2, k)),
+                g,
+                path,
+                wrapping_add(depth, 1)
+            );
+        }
+    } else if tag == 6 {
+        validate_function(inout q, in w, in t, i, at(in w, ty, 1), path, wrapping_add(depth, 1));
+    } else if tag == 7 {
+        let (mo, ml) = text_range(inout q, in w, in t, at(in w, ty, 1));
+        unsupported_range(inout q, path, mo, ml);
+    }
+}
+
+fn validate_function(
+    inout q: Q,
+    in w: ChunkSeq[u64],
+    in t: Slice[u8],
+    i: u64,
+    f: u64,
+    path: u64,
+    depth: u64
+) {
+    if depth > 128 {
+        unsupported(inout q, path, "function type nesting exceeds 128 levels");
+        return;
+    }
+    let g = fn_generics(in w, f);
+    for k in 0..fn_param_count(in w, f) {
+        let p = fn_param(in w, f, k);
+        validate_type(inout q, in w, in t, i, at(in w, p, 1), g, path, wrapping_add(depth, 1));
+        let proj = at(in w, p, 2);
+        if at(in w, proj, 0) == 1 {
+            let n = at(in w, proj, 1);
+            let mut bad = n == 0;
+            for j in 0..n {
+                let path = at(in w, proj, wrapping_add(2, j));
+                let m = word(in w, path);
+                if m == 0 {
+                    bad = true;
+                }
+                for c in 0..m {
+                    if str_empty(in w, at(in w, path, wrapping_add(1, c))) {
+                        bad = true;
+                    }
+                }
+            }
+            if bad {
+                unsupported(inout q, path, "projection paths must have nonempty components");
+            }
+        }
+        if at(in w, p, 0) == 2 && at(in w, proj, 0) != 0 {
+            unsupported(
+                inout q,
+                path,
+                "sink projections are not supported by this interface schema"
+            );
+        }
+    }
+    validate_type(inout q, in w, in t, i, fn_result(in w, f), g, path, wrapping_add(depth, 1));
+    let kind = type_mode(in w, i, fn_result(in w, f), g, 0);
+    if kind != none() && kind > fn_result_mode(in w, f) {
+        unsupported(inout q, path, "exported return mode weakens the result type's modal kind");
+    }
+    // Capability identities of this function, above `base` in `seen`.
+    let base = q.seen.len();
+    let e = fn_effects(in w, f);
+    for k in 0..cap_count(in w, e) {
+        let c = cap_at(in w, e, k);
+        if cap_grade(in w, c) == 1 && !cap_has_ceiling(in w, c) {
+            unsupported(inout q, path, "an exact grade requires a constant value");
+        }
+        let id = cap_identity(in w, c);
+        let mut fresh = !str_empty(in w, id) && !str_empty(in w, cap_effect(in w, c));
+        if fresh {
+            for j in base..q.seen.len() {
+                match q.seen.try_get(j) {
+                    Option::Some(s) => {
+                        if s == id {
+                            fresh = false;
+                        }
+                    },
+                    Option::None => (),
+                }
+            }
+            if fresh {
+                q.seen.push(id);
+            }
+        }
+        if !fresh {
+            unsupported(inout q, path, "capability identities must be nonempty and unique");
+        }
+        let d = find_export(in w, i, cap_effect(in w, c));
+        if d != none() && at(in w, d, 0) == 3 {
+            if cap_resumption(in w, c)
+                != at(in w, d, 3)
+                || cap_arg_count(in w, c)
+                != gen_count(in w, at(in w, d, 1)) {
+                unsupported(
+                    inout q,
+                    path,
+                    "capability disagrees with its exported effect declaration"
+                );
+            }
+        }
+        for j in 0..cap_arg_count(in w, c) {
+            validate_type(
+                inout q,
+                in w,
+                in t,
+                i,
+                cap_arg(in w, c, j),
+                g,
+                path,
+                wrapping_add(depth, 1)
+            );
+        }
+    }
+    q.seen.truncate(base);
+    for k in 0..row_count(in w, e) {
+        let index = row_at(in w, e, k);
+        if !(index < gen_count(in w, g) && gen_kind(in w, g, index) == 1) {
+            unsupported(inout q, path, "unbound or non-row effect variable");
+        }
+    }
+}
+
+// `side` is 0 for "old" and 1 for "new".
+fn validate(inout q: Q, in w: ChunkSeq[u64], in t: Slice[u8], i: u64, side: u64) {
+    let spath = path_node(inout q, none(), 1, side);
+    if at(in w, i, 1) != semantics_version() {
+        unsupported(inout q, spath, "unsupported language-semantics version");
+    }
+    if at(in w, i, 0) != schema_version() {
+        unsupported(inout q, spath, "unsupported interface schema version");
+    }
+    for k in 0..ext_count(in w, i) {
+        let name = ext_field(in w, i, k, 0);
+        if str_empty(in w, name) || find_export(in w, i, name) != none() {
+            unsupported(inout q, spath, "invalid or conflicting external type identity");
+        }
+    }
+    for k in 0..export_count(in w, i) {
+        let name = export_name(in w, i, k);
+        if str_empty(in w, name) {
+            unsupported(inout q, spath, "empty export identity");
+        }
+        let path = path_node(inout q, spath, 2, name);
+        let d = export_decl(in w, i, k);
+        let tag = at(in w, d, 0);
+        if tag == 0 {
+            validate_function(inout q, in w, in t, i, at(in w, d, 1), path, 0);
+        } else if tag == 1 {
+            let g = at(in w, d, 1);
+            let fields = at(in w, d, 3);
+            if at(in w, fields, 0) == 1 {
+                for j in 0..at(in w, fields, 1) {
+                    let ty = at(in w, fields, wrapping_add(3, wrapping_mul(j, 2)));
+                    validate_type(inout q, in w, in t, i, ty, g, path, 0);
+                }
+            }
+        } else if tag == 2 {
+            let g = at(in w, d, 1);
+            for j in 0..at(in w, d, 4) {
+                let payload = at(in w, d, wrapping_add(6, wrapping_mul(j, 2)));
+                for x in 0..word(in w, payload) {
+                    validate_type(
+                        inout q,
+                        in w,
+                        in t,
+                        i,
+                        at(in w, payload, wrapping_add(1, x)),
+                        g,
+                        path,
+                        0
+                    );
+                }
+            }
+        } else if tag == 3 {
+            let g = at(in w, d, 1);
+            for j in 0..at(in w, d, 4) {
+                let op = at(in w, d, wrapping_add(6, wrapping_mul(j, 2)));
+                if !gen_starts_with(in w, fn_generics(in w, op), g) {
+                    unsupported(
+                        inout q,
+                        path,
+                        "operation generics must start with effect declaration binders"
+                    );
+                }
+                validate_function(inout q, in w, in t, i, op, path, 0);
+            }
+        } else {
+            let (mo, ml) = text_range(inout q, in w, in t, at(in w, d, 1));
+            unsupported_range(inout q, path, mo, ml);
+        }
+    }
+}
+
+// Comparison.
+
+fn generic_bounds(inout q: Q, in w: ChunkSeq[u64], path: u64, a: u64, b: u64) {
+    let n = gen_count(in w, a);
+    if n != gen_count(in w, b) {
+        breaking(
+            inout q,
+            path,
+            "SV-Fn",
+            "generic binder arity changed",
+            "A caller explicitly instantiates the old binder list."
+        );
+        return;
+    }
+    for k in 0..n {
+        let ka = gen_kind(in w, a, k);
+        let kb = gen_kind(in w, b, k);
+        let va = gen_value(in w, a, k);
+        let vb = gen_value(in w, b, k);
+        let safe = (ka == 0 && kb == 0 && va <= vb) || (ka == 1 && kb == 1 && vb <= va);
+        if !safe {
+            breaking(
+                inout q,
+                path,
+                "SV-Fn",
+                "generic constraint strengthened or binder kind changed",
+                "Instantiate the old interface with a type or row admitted by its original bound."
+            );
+        }
+    }
+}
+
+// The inclusive u64 bounds of a validated direct u64 interval: (ok, min, max).
+fn u64_bounds(in w: ChunkSeq[u64], ty: u64) -> (bool, u64, u64) {
+    let tag = at(in w, ty, 0);
+    if tag == 0 && at(in w, ty, 1) == 5 {
+        (true, 0, none())
+    } else if tag == 2 && at(in w, ty, 1) <= at(in w, ty, 2) {
+        (true, at(in w, ty, 1), at(in w, ty, 2))
+    } else {
+        (false, 0, 0)
+    }
+}
+
+fn i64_bounds(in w: ChunkSeq[u64], ty: u64) -> (bool, u64, u64) {
+    let tag = at(in w, ty, 0);
+    if tag == 0 && at(in w, ty, 1) == 6 {
+        (true, i64_min(), i64_max())
+    } else if tag == 1 && le_i64(at(in w, ty, 1), at(in w, ty, 2)) {
+        (true, at(in w, ty, 1), at(in w, ty, 2))
+    } else {
+        (false, 0, 0)
+    }
+}
+
+// `u64_counterexample(sub, sup)`: (found, value).
+fn u64_counterexample(in w: ChunkSeq[u64], sub: u64, sup: u64) -> (bool, u64) {
+    let (a, sub_min, sub_max) = u64_bounds(in w, sub);
+    let (b, sup_min, sup_max) = u64_bounds(in w, sup);
+    if !a || !b {
+        (false, 0)
+    } else if sub_min < sup_min {
+        (true, sub_min)
+    } else if sub_max > sup_max {
+        (true, sub_max)
+    } else {
+        (false, 0)
+    }
+}
+
+fn i64_counterexample(in w: ChunkSeq[u64], sub: u64, sup: u64) -> (bool, u64) {
+    let (a, sub_min, sub_max) = i64_bounds(in w, sub);
+    let (b, sup_min, sup_max) = i64_bounds(in w, sup);
+    if !a || !b {
+        (false, 0)
+    } else if !le_i64(sup_min, sub_min) {
+        (true, sub_min)
+    } else if !le_i64(sub_max, sup_max) {
+        (true, sub_max)
+    } else {
+        (false, 0)
+    }
+}
+
+// `resumption(effects, generics)`.
+fn resumption(in w: ChunkSeq[u64], e: u64, g: u64) -> u64 {
+    let mut r: u64 = 1;
+    for k in 0..cap_count(in w, e) {
+        let x = cap_resumption(in w, cap_at(in w, e, k));
+        if x < r {
+            r = x;
+        }
+    }
+    for k in 0..row_count(in w, e) {
+        let index = row_at(in w, e, k);
+        if index < gen_count(in w, g) && gen_kind(in w, g, index) == 1 {
+            let x = gen_value(in w, g, index);
+            if x < r {
+                r = x;
+            }
+        }
+    }
+    r
+}
+
+// `b.row_variables.is_subset(&a.row_variables)` over sorted sets.
+fn rows_subset(in w: ChunkSeq[u64], b: u64, a: u64) -> bool {
+    for k in 0..row_count(in w, b) {
+        let x = row_at(in w, b, k);
+        let mut found = false;
+        for j in 0..row_count(in w, a) {
+            if row_at(in w, a, j) == x {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            return false;
+        }
+    }
+    true
+}
+
+fn function(
+    inout q: Q,
+    in w: ChunkSeq[u64],
+    in t: Slice[u8],
+    path: u64,
+    a: u64,
+    b: u64,
+    depth: u64
+) {
+    if depth > 128 {
+        unsupported(inout q, path, "subtyping recursion exceeds 128 levels");
+        return;
+    }
+    generic_bounds(inout q, in w, path, fn_generics(in w, a), fn_generics(in w, b));
+    if fn_mode(in w, b) > fn_mode(in w, a) {
+        breaking(
+            inout q,
+            path,
+            "SV-Fn",
+            "function value became less reusable",
+            "A caller copies or drops the function value under its old mode."
+        );
+    }
+    let na = fn_param_count(in w, a);
+    let nb = fn_param_count(in w, b);
+    if na != nb {
+        breaking(
+            inout q,
+            path,
+            "SV-Fn",
+            "parameter arity changed",
+            "Call the function with the old argument list."
+        );
+    }
+    for index in 0..na {
+        if index >= nb {
+            break;
+        }
+        let old = fn_param(in w, a, index);
+        let new = fn_param(in w, b, index);
+        let xpath = path_node(inout q, path, 3, index);
+        let old_pass = at(in w, old, 0);
+        let new_pass = at(in w, new, 0);
+        let narrowed = subset_q(in w, at(in w, new, 2), at(in w, old, 2));
+        if !narrowed {
+            breaking(
+                inout q,
+                xpath,
+                "SV-Fn",
+                "borrowed projection widened",
+                "Borrow a newly selected field separately at the same call site."
+            );
+        }
+        if old_pass != new_pass {
+            if old_pass == 1 && new_pass == 0 && narrowed {
+                q.adapts.push(path);
+                q.adapts.push(index);
+                breaking(
+                    inout q,
+                    xpath,
+                    "SV-Pass",
+                    "inout-to-in requires an explicit compatibility adapter",
+                    "A caller uses explicit inout syntax; an old-signature wrapper must reborrow it as in."
+                );
+            } else {
+                breaking(
+                    inout q,
+                    xpath,
+                    "SV-Pass",
+                    "passing mode changed",
+                    "For sink-to-borrow, a caller relied on consuming a linear argument; for in-to-write/consume, it retains only shared access."
+                );
+            }
+        }
+        let old_ty = at(in w, old, 1);
+        let new_ty = at(in w, new, 1);
+        let ok = if old_pass == 1 {
+            old_ty == new_ty
+        } else {
+            subtype(inout q, in w, in t, old_ty, new_ty, xpath, wrapping_add(depth, 1))
+        };
+        if !ok {
+            let mut witnessed = false;
+            let wo = q.pool.len();
+            if old_pass == new_pass && old_pass != 1 {
+                let (fu, vu) = u64_counterexample(in w, old_ty, new_ty);
+                if fu {
+                    put(inout q.pool, "Pass ");
+                    put_u64(inout q.pool, vu);
+                    put(
+                        inout q.pool,
+                        ": u64; the old parameter admits this value but the new parameter rejects it."
+                    );
+                    witnessed = true;
+                } else {
+                    let (fi, vi) = i64_counterexample(in w, old_ty, new_ty);
+                    if fi {
+                        put(inout q.pool, "Pass ");
+                        put_i64(inout q.pool, vi);
+                        put(
+                            inout q.pool,
+                            ": i64; the old parameter admits this value but the new parameter rejects it."
+                        );
+                        witnessed = true;
+                    }
+                }
+            }
+            if !witnessed {
+                put(
+                    inout q.pool,
+                    "Pass a value admitted by the old parameter type; mutable places cannot change stored type."
+                );
+            }
+            let wl = wrapping_sub(q.pool.len(), wo);
+            breaking_witness(inout q, xpath, "SV-Fn", "parameter type is incompatible", wo, wl);
+        }
+    }
+    if fn_result_mode(in w, b) > fn_result_mode(in w, a) {
+        breaking(
+            inout q,
+            path,
+            "SV-Fn",
+            "return mode became stricter",
+            "Discard or duplicate a returned value as permitted by the old return mode."
+        );
+    }
+    let rpath = path_node(inout q, path, 4, 0);
+    let br = fn_result(in w, b);
+    let ar = fn_result(in w, a);
+    if !subtype(inout q, in w, in t, br, ar, rpath, wrapping_add(depth, 1)) {
+        let wo = q.pool.len();
+        let (fu, vu) = u64_counterexample(in w, br, ar);
+        if fu {
+            put(inout q.pool, "The new result admits ");
+            put_u64(inout q.pool, vu);
+            put(inout q.pool, ": u64, which the old result type rejects.");
+        } else {
+            let (fi, vi) = i64_counterexample(in w, br, ar);
+            if fi {
+                put(inout q.pool, "The new result admits ");
+                put_i64(inout q.pool, vi);
+                put(inout q.pool, ": i64, which the old result type rejects.");
+            } else {
+                put(inout q.pool, "Use the returned value at the old result type.");
+            }
+        }
+        let wl = wrapping_sub(q.pool.len(), wo);
+        breaking_witness(inout q, path, "SV-Fn", "return type is incompatible", wo, wl);
+    }
+    let ea = fn_effects(in w, a);
+    let eb = fn_effects(in w, b);
+    let mut subset = true;
+    for k in 0..cap_count(in w, eb) {
+        let n = cap_at(in w, eb, k);
+        let mut found = false;
+        for j in 0..cap_count(in w, ea) {
+            let o = cap_at(in w, ea, j);
+            if same_capability(in w, n, o) && cap_resumption(in w, n) >= cap_resumption(in w, o) {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            subset = false;
+            break;
+        }
+    }
+    if !subset || !rows_subset(in w, eb, ea) {
+        breaking(
+            inout q,
+            path,
+            "SV-EffRow",
+            "function requires new capabilities/rows or a weaker capability contract",
+            "A caller grants exactly the old capability ceiling."
+        );
+    }
+    for k in 0..cap_count(in w, ea) {
+        let o = cap_at(in w, ea, k);
+        if cap_grade(in w, o) == 1 {
+            let mut kept = false;
+            for j in 0..cap_count(in w, eb) {
+                if same_capability(in w, o, cap_at(in w, eb, j)) {
+                    kept = true;
+                    break;
+                }
+            }
+            if !kept {
+                breaking(
+                    inout q,
+                    path,
+                    "SV-Grade",
+                    "exact graded capability removed",
+                    "A caller relies on the old exact cost, not just an upper bound."
+                );
+            }
+        }
+    }
+    for k in 0..cap_count(in w, eb) {
+        let n = cap_at(in w, eb, k);
+        let mut o = none();
+        for j in 0..cap_count(in w, ea) {
+            let c = cap_at(in w, ea, j);
+            if same_capability(in w, c, n) {
+                o = c;
+                break;
+            }
+        }
+        if o != none() {
+            if cap_grade(in w, o) != cap_grade(in w, n) {
+                breaking(
+                    inout q,
+                    path,
+                    "SV-Grade",
+                    "grade relation changed",
+                    "An equality contract cannot be replaced by an upper-bound contract."
+                );
+            } else if cap_grade(in w, o) == 1 {
+                if cap_has_ceiling(in w, o)
+                    != cap_has_ceiling(in w, n)
+                    || cap_ceiling(in w, o)
+                    != cap_ceiling(in w, n) {
+                    breaking(
+                        inout q,
+                        path,
+                        "SV-Grade",
+                        "exact resource grade changed",
+                        "A caller relies on equality with the old published cost."
+                    );
+                }
+            } else {
+                let oh = cap_has_ceiling(in w, o);
+                let nh = cap_has_ceiling(in w, n);
+                if oh && nh {
+                    if cap_ceiling(in w, n) > cap_ceiling(in w, o) {
+                        breaking(
+                            inout q,
+                            path,
+                            "SV-Grade",
+                            "resource ceiling increased",
+                            "Call under the old resource ceiling."
+                        );
+                    }
+                } else if oh != nh {
+                    unsupported(
+                        inout q,
+                        path,
+                        "cannot compare a graded capability with an ungraded capability"
+                    );
+                }
+            }
+        }
+    }
+    if resumption(in w, eb, fn_generics(in w, b)) < resumption(in w, ea, fn_generics(in w, a)) {
+        breaking(
+            inout q,
+            path,
+            "SV-EffRow",
+            "resumption guarantee weakened",
+            "Hold a live linear obligation across a formerly guaranteed-resumptive call."
+        );
+    }
+}
+
+fn subtype(
+    inout q: Q,
+    in w: ChunkSeq[u64],
+    in t: Slice[u8],
+    sub: u64,
+    sup: u64,
+    path: u64,
+    depth: u64
+) -> bool {
+    if depth > 128 {
+        unsupported(inout q, path, "subtyping recursion exceeds 128 levels");
+        return false;
+    }
+    let a = at(in w, sub, 0);
+    let b = at(in w, sup, 0);
+    if a == 0 && at(in w, sub, 1) == 1 {
+        return true;
+    }
+    if a == 7 || b == 7 {
+        return false;
+    }
+    if a == 1 && b == 1 {
+        return le_i64(at(in w, sup, 1), at(in w, sub, 1))
+            && le_i64(at(in w, sub, 2), at(in w, sup, 2));
+    }
+    if a == 1 && b == 0 && at(in w, sup, 1) == 6 {
+        return true;
+    }
+    if a == 0 && at(in w, sub, 1) == 6 && b == 1 {
+        return at(in w, sup, 1) == i64_min() && at(in w, sup, 2) == i64_max();
+    }
+    if a == 2 && b == 2 {
+        return at(in w, sup, 1) <= at(in w, sub, 1) && at(in w, sub, 2) <= at(in w, sup, 2);
+    }
+    if a == 2 && b == 0 && at(in w, sup, 1) == 5 {
+        return true;
+    }
+    if a == 0 && at(in w, sub, 1) == 5 && b == 2 {
+        return at(in w, sup, 1) == 0 && at(in w, sup, 2) == none();
+    }
+    if a == 6 && b == 6 {
+        let before = issue_count(in q);
+        let adapters = q.adapts.len();
+        // A value of `sub` must be usable at `sup`, so `sub` is the candidate.
+        function(
+            inout q,
+            in w,
+            in t,
+            path,
+            at(in w, sup, 1),
+            at(in w, sub, 1),
+            wrapping_add(depth, 1)
+        );
+        return before == issue_count(in q) && adapters == q.adapts.len();
+    }
+    if a == 5 && b == 5 {
+        let n = at(in w, sub, 1);
+        if n != at(in w, sup, 1) {
+            return false;
+        }
+        for k in 0..n {
+            let x = at(in w, sub, wrapping_add(2, k));
+            let y = at(in w, sup, wrapping_add(2, k));
+            if !subtype(inout q, in w, in t, x, y, path, wrapping_add(depth, 1)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    sub == sup
+}
+
+// The (name, value) entry list of an enum or effect declaration at word 5.
+fn entry_count(in w: ChunkSeq[u64], d: u64) -> u64 {
+    at(in w, d, 4)
+}
+
+fn entry_name(in w: ChunkSeq[u64], d: u64, k: u64) -> u64 {
+    at(in w, d, wrapping_add(5, wrapping_mul(k, 2)))
+}
+
+fn entry_value(in w: ChunkSeq[u64], d: u64, k: u64) -> u64 {
+    at(in w, d, wrapping_add(6, wrapping_mul(k, 2)))
+}
+
+fn find_entry(in w: ChunkSeq[u64], d: u64, id: u64) -> u64 {
+    let k = find_sorted(in w, wrapping_add(d, 5), entry_count(in w, d), 2, id);
+    if k == none() {
+        none()
+    } else {
+        entry_value(in w, d, k)
+    }
+}
+
+fn declaration(
+    inout q: Q,
+    in w: ChunkSeq[u64],
+    in t: Slice[u8],
+    new_i: u64,
+    path: u64,
+    a: u64,
+    b: u64
+) {
+    let ta = at(in w, a, 0);
+    let tb = at(in w, b, 0);
+    if ta == 4 || tb == 4 {
+        return;
+    }
+    if ta != tb {
+        breaking(
+            inout q,
+            path,
+            "SV-Export",
+            "public declaration kind changed",
+            "A caller uses the declaration at its old syntactic and semantic kind."
+        );
+        return;
+    }
+    if ta == 0 {
+        function(inout q, in w, in t, path, at(in w, a, 1), at(in w, b, 1), 0);
+    } else if ta == 1 {
+        generic_bounds(inout q, in w, path, at(in w, a, 1), at(in w, b, 1));
+        if at(in w, b, 2) > at(in w, a, 2) {
+            breaking(
+                inout q,
+                path,
+                "SV-Adt-Closed",
+                "struct kind became stricter",
+                "A caller discards or copies a value under the old kind."
+            );
+        }
+        if at(in w, a, 3) != at(in w, b, 3) {
+            breaking(
+                inout q,
+                path,
+                "SV-Adt-Closed",
+                "public field contract or field visibility changed",
+                "A caller constructs, projects or destructures the old public field set."
+            );
+        }
+    } else if ta == 2 {
+        let ag = at(in w, a, 1);
+        let am = at(in w, a, 2);
+        let ao = at(in w, a, 3) != 0;
+        let bo = at(in w, b, 3) != 0;
+        generic_bounds(inout q, in w, path, ag, at(in w, b, 1));
+        if at(in w, b, 2) > am || ao != bo {
+            breaking(
+                inout q,
+                path,
+                "SV-Enum-Open",
+                "enum kind or openness changed incompatibly",
+                "A caller exhaustively matches a closed enum or discards unknown variants of an open enum."
+            );
+        }
+        for k in 0..entry_count(in w, a) {
+            let name = entry_name(in w, a, k);
+            if find_entry(in w, b, name) != entry_value(in w, a, k) {
+                breaking(
+                    inout q,
+                    path,
+                    "SV-Enum-Open",
+                    "existing variant removed or changed",
+                    "A caller constructs or pattern-matches this old variant payload."
+                );
+            }
+        }
+        for k in 0..entry_count(in w, b) {
+            let name = entry_name(in w, b, k);
+            if find_entry(in w, a, name) == none() {
+                if !ao {
+                    breaking(
+                        inout q,
+                        path,
+                        "SV-Enum-Open",
+                        "variant added to a closed enum",
+                        "An exhaustive old match has no arm for the added variant."
+                    );
+                }
+                let payload = entry_value(in w, b, k);
+                let mut m: u64 = 0;
+                for x in 0..word(in w, payload) {
+                    let n = type_mode(in w, new_i, at(in w, payload, wrapping_add(1, x)), ag, 0);
+                    if n == none() {
+                        m = none();
+                        break;
+                    }
+                    m = max_mode(m, n);
+                }
+                if m == none() {
+                    unsupported(inout q, path, "cannot establish the added payload's modal kind");
+                } else if m > am {
+                    let vpath = path_node(inout q, path, 2, name);
+                    breaking(
+                        inout q,
+                        vpath,
+                        "SV-Enum-Open",
+                        "added payload exceeds the old enum kind",
+                        "An old wildcard arm discards an unknown variant containing a linear obligation."
+                    );
+                }
+            }
+        }
+    } else if ta == 3 {
+        generic_bounds(inout q, in w, path, at(in w, a, 1), at(in w, b, 1));
+        let aseal = at(in w, a, 2) != 0;
+        let bseal = at(in w, b, 2) != 0;
+        let aq = at(in w, a, 3);
+        let bq = at(in w, b, 3);
+        if aseal != bseal || (!aseal && aq != bq) || (aseal && bq < aq) {
+            breaking(
+                inout q,
+                path,
+                "SV-Effect-Decl",
+                "effect openness or resumption contract changed",
+                "An external handler may discard an affine continuation, or a caller retains a linear frame across the old effect."
+            );
+        }
+        let n = entry_count(in w, a);
+        let mut same_keys = n == entry_count(in w, b);
+        if same_keys {
+            for k in 0..n {
+                if entry_name(in w, a, k) != entry_name(in w, b, k) {
+                    same_keys = false;
+                    break;
+                }
+            }
+        }
+        if !same_keys {
+            breaking(
+                inout q,
+                path,
+                "SV-Effect-Decl",
+                "effect operation set changed",
+                "An old handler implements exactly the old operation set."
+            );
+        }
+        // Even sealed operation signature changes are conservatively
+        // invariant until bidirectional handler/caller variance exists.
+        for k in 0..n {
+            let name = entry_name(in w, a, k);
+            let new = find_entry(in w, b, name);
+            if new != none() && new != entry_value(in w, a, k) {
+                let vpath = path_node(inout q, path, 2, name);
+                breaking(
+                    inout q,
+                    vpath,
+                    "SV-Effect-Decl",
+                    "effect operation signature changed",
+                    "Old callers and external handlers must agree on both sides of this operation signature."
+                );
+            }
+        }
+    }
+}
+
+fn new_q() -> Q {
+    Q {
+        class: 0,
+        issues: ChunkSeq::new[u64](),
+        adapters: ChunkSeq::new[u64](),
+        pool: ChunkSeq::new[u8](),
+        seen: ChunkSeq::new[u64](),
+        paths: ChunkSeq::new[u64](),
+        found: ChunkSeq::new[u64](),
+        adapts: ChunkSeq::new[u64]()
+    }
+}
+
+// `compare(old, new)`.
+pub fn compare_q(in ws: Slice[u64], in t: Slice[u8]) -> Q {
+    let mut q = new_q();
+    let mut w = ChunkSeq::new[u64]();
+    w.extend(in ws);
+    let old = word(in w, 0);
+    let new = word(in w, 1);
+    validate(inout q, in w, in t, old, 0);
+    validate(inout q, in w, in t, new, 1);
+    for k in 0..ext_count(in w, old) {
+        let name = ext_field(in w, old, k, 0);
+        let e = find_ext(in w, new, name);
+        if e != none() {
+            if ext_field(in w, new, e, 1)
+                != ext_field(in w, old, k, 1)
+                || ext_field(in w, new, e, 2)
+                > ext_field(in w, old, k, 2) {
+                let path = path_node(inout q, none(), 0, name);
+                breaking(
+                    inout q,
+                    path,
+                    "SV-Nominal",
+                    "referenced external type contract became stricter",
+                    "A caller relies on the old nominal type's arity or discard/copy permissions."
+                );
+            }
+        }
+    }
+    for k in 0..export_count(in w, old) {
+        let name = export_name(in w, old, k);
+        let path = path_node(inout q, none(), 0, name);
+        let after = find_export(in w, new, name);
+        if after != none() {
+            declaration(inout q, in w, in t, new, path, export_decl(in w, old, k), after);
+        } else {
+            breaking(
+                inout q,
+                path,
+                "SV-Export",
+                "public declaration removed",
+                "A caller still imports this public declaration."
+            );
+        }
+    }
+    q.class = if has_unsupported(in q) {
+        3
+    } else if q.found.len() != 0 || q.adapts.len() != 0 {
+        2
+    } else if old == new {
+        0
+    } else {
+        1
+    };
+    finish_paths(inout q, in w, in t);
+    q
+}
