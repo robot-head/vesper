@@ -5555,7 +5555,7 @@ dependencies = [
  "vesper-lean-syntax",
  "vesper-lint",
  "vesper-loom-admission",
- "vesper-loom-audit",
+ "vesper-loom-audit-seed",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
  "vesper-loom-solver-seed",
@@ -6023,6 +6023,21 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "vesper-bench",
+ "vesper-loom-calculus",
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
+
+[[package]]
+name = "vesper-loom-audit-seed"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "semver",
+ "serde",
+ "serde_json",
+ "vesper-bench",
  "vesper-loom-calculus-seed",
 ]
 

@@ -2,14 +2,52 @@
 #![doc = include_str!("../README.md")]
 
 mod input;
+#[cfg(not(vesper_port))]
 mod license;
+
+// The port-backed build (package vesper-loom-audit) runs catalog and policy
+// validation, the license expressions, the preflight, the dependency paths
+// and the findings in the Vesper package in vesper/; the seed copy
+// (vesper-loom-audit-seed) that the compiler links keeps this Rust code. See
+// "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
+#[cfg(vesper_port)]
+mod port;
+// Generated and committed, but kept outside src/ so formatters, which check
+// every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code, clippy::all)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
+#[cfg(not(vesper_port))]
 use std::cmp::Ordering;
+#[cfg(not(vesper_port))]
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use vesper_loom_calculus::{Diagnostic, PackageGraph, PackageName, Solution, validate_solution};
+use vesper_loom_calculus::{Diagnostic, PackageName, Solution};
+#[cfg(not(vesper_port))]
+use vesper_loom_calculus::{PackageGraph, validate_solution};
+
+/// Which build this is: `"vesper"` for the port-backed package
+/// `vesper-loom-audit`, `"rust"` for the seed copy `vesper-loom-audit-seed`
+/// that the compiler links.
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
+/// Live allocations of the Vesper build (always 0 for the Rust build), for
+/// leak tests.
+pub fn port_live_allocations() -> i64 {
+    #[cfg(vesper_port)]
+    {
+        port::live_allocations()
+    }
+    #[cfg(not(vesper_port))]
+    {
+        0
+    }
+}
 
 pub const SCHEMA_VERSION: u32 = 1;
 
@@ -125,6 +163,17 @@ fn required_optional_version<'de, D: serde::Deserializer<'de>>(
 }
 impl AffectedRange {
     pub fn contains(&self, version: &Version) -> bool {
+        #[cfg(vesper_port)]
+        {
+            port::range_contains(self, version)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.contains_rust(version)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn contains_rust(&self, version: &Version) -> bool {
         (self.include_prerelease || version.pre.is_empty())
             && version.cmp_precedence(&self.introduced) != Ordering::Less
             && self
@@ -216,6 +265,15 @@ pub struct AuditReport {
     pub findings: Vec<Finding>,
 }
 
+#[cfg(vesper_port)]
+fn validate_catalog(catalog: &Catalog, limits: &Limits) -> Result<(), Error> {
+    port::validate_catalog(catalog, limits)
+}
+#[cfg(vesper_port)]
+fn validate_policy(policy: &Policy, limits: &Limits) -> Result<(), Error> {
+    port::validate_policy(policy, limits)
+}
+
 pub fn parse_solution(bytes: &[u8], limits: &Limits) -> Result<Solution, Error> {
     input::parse(bytes, limits)
 }
@@ -230,9 +288,11 @@ pub fn parse_policy(bytes: &[u8], limits: &Limits) -> Result<Policy, Error> {
     Ok(policy)
 }
 
+#[cfg(not(vesper_port))]
 struct Work {
     remaining: usize,
 }
+#[cfg(not(vesper_port))]
 impl Work {
     fn spend(&mut self, amount: usize) -> Result<(), Error> {
         self.remaining = self
@@ -242,18 +302,21 @@ impl Work {
         Ok(())
     }
 }
+#[cfg(not(vesper_port))]
 fn native_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'))
 }
+#[cfg(not(vesper_port))]
 fn identity_valid(identity: &PackageIdentity) -> bool {
     match identity {
         PackageIdentity::Vesper { .. } => true,
         PackageIdentity::Native { name } => native_name(name),
     }
 }
+#[cfg(not(vesper_port))]
 fn validate_catalog(catalog: &Catalog, limits: &Limits) -> Result<(), Error> {
     input::check_size(catalog, limits)?;
     let bad = |s: &str| Error::InvalidCatalog(s.into());
@@ -322,6 +385,7 @@ fn validate_catalog(catalog: &Catalog, limits: &Limits) -> Result<(), Error> {
     }
     Ok(())
 }
+#[cfg(not(vesper_port))]
 fn validate_policy(policy: &Policy, limits: &Limits) -> Result<BTreeSet<String>, Error> {
     input::check_size(policy, limits)?;
     if policy.schema_version != SCHEMA_VERSION {
@@ -333,6 +397,7 @@ fn validate_policy(policy: &Policy, limits: &Limits) -> Result<BTreeSet<String>,
     license::allowlist(&policy.allowed_licenses, limits)
 }
 
+#[cfg(not(vesper_port))]
 /// Bound the existing calculus validator before invoking it: no audit result is
 /// returned for an invalid solution. The complexity estimate is conservative
 /// logical work, not wall-clock or instruction metering.
@@ -395,6 +460,23 @@ fn preflight(solution: &Solution, limits: &Limits, work: &mut Work) -> Result<()
 /// Audits only the graph validated from this exact Solution. Caller-created
 /// PackageGraph DTOs cannot bypass calculus validation by claiming validity.
 pub fn audit(
+    solution: &Solution,
+    catalog: &Catalog,
+    policy: &Policy,
+    limits: &Limits,
+) -> Result<AuditReport, Error> {
+    #[cfg(vesper_port)]
+    {
+        port::audit(solution, catalog, policy, limits)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        audit_rust(solution, catalog, policy, limits)
+    }
+}
+
+#[cfg(not(vesper_port))]
+fn audit_rust(
     solution: &Solution,
     catalog: &Catalog,
     policy: &Policy,
@@ -527,7 +609,7 @@ pub fn audit(
 }
 
 // A content context is an input binding, never feed/source authenticity.
-fn digest<T: Serialize>(domain: &'static str, value: &T) -> Result<String, Error> {
+pub(crate) fn digest<T: Serialize>(domain: &'static str, value: &T) -> Result<String, Error> {
     struct Sink(blake3::Hasher);
     impl std::io::Write for Sink {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -543,7 +625,9 @@ fn digest<T: Serialize>(domain: &'static str, value: &T) -> Result<String, Error
     Ok(sink.0.finalize().to_hex().to_string())
 }
 
+#[cfg(not(vesper_port))]
 type Paths = BTreeMap<SelectedPackage, Vec<Vec<SelectedPackage>>>;
+#[cfg(not(vesper_port))]
 fn dependency_paths(
     graph: &PackageGraph,
     limits: &Limits,

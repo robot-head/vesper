@@ -50,17 +50,21 @@ mod tests {
         ViewTree::new(Key(1), nodes)
     }
 
-    fn cycle<B: Backend + std::fmt::Debug>(ui: &UiThread, backend: B)
+    /// Runs 50 update rounds and a close, returning the most allocations
+    /// live after a commit.
+    fn cycle<B: Backend + std::fmt::Debug>(ui: &UiThread, backend: B) -> i64
     where
         B::Error: std::fmt::Debug,
     {
         let limits = Limits::default();
         let mut app = Session::new(ui, backend, limits.clone()).unwrap();
+        let mut peak = 0;
         for round in 0..50 {
             let update = app.prepare(ui, Some(tree(round))).unwrap();
             // A discarded alternative frees everything it reserved.
             drop(app.prepare(ui, Some(tree(round + 7))).unwrap());
             app.commit(ui, update).unwrap();
+            peak = peak.max(live_allocations());
             encode_view_tree(&tree(round), &limits).unwrap();
             audit_view_tree(&tree(round), &limits).unwrap();
         }
@@ -70,6 +74,7 @@ mod tests {
             Ok(CloseOutcome::Closed(_))
         ));
         drop(app.shutdown(ui).unwrap());
+        peak
     }
 
     // Native code does not free a dropped local sequence yet, so the port
@@ -81,8 +86,9 @@ mod tests {
         let ui = UiThread::claim_current();
         let before = live_allocations();
         let backend = RecordingBackend::new(&ui, Limits::default());
-        assert!(live_allocations() > before, "the counter does not count");
-        cycle(&ui, backend);
+        // Empty sequences allocate nothing (#1021), so the counter is
+        // checked once the session holds a committed tree.
+        assert!(cycle(&ui, backend) > before, "the counter does not count");
         let mut sim = SimAura::with_wcag_gate(&ui, Limits::default());
         sim.focus_next(&ui).unwrap_err();
         cycle(&ui, sim);

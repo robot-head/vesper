@@ -1,0 +1,228 @@
+// Module check of @vesper/loom-audit (see lib.ves): `Limits::validate`,
+// `validate_catalog`, `validate_policy` and the audit `preflight`.
+use @vesper/loom-calculus::check::{
+    system_name_valid
+};
+use @vesper/loom-calculus::util::{
+    dep,
+    feat,
+    man,
+    ver_ord
+};
+use self::{
+    A
+};
+use self::license::{
+    allowlist
+};
+use self::util::{
+    adv,
+    ascii_alnum,
+    byte,
+    e_catalog,
+    e_input,
+    e_limit,
+    e_policy,
+    fail,
+    fresh_marks,
+    mark_seen,
+    msort,
+    nat,
+    prec_ord,
+    rng,
+    sat_add,
+    sat_mul,
+    spend,
+    str_len,
+    str_off,
+    word
+};
+
+pub fn check_limits(inout s: A) {
+    if s.m_jdepth > 64 || s.m_ldepth > 64 || s.m_ltokens > 1024 {
+        fail(inout s, e_limit(), "unsafe parser depth/token limit (maximum 64/64/1024)");
+    }
+}
+
+// Advisory IDs: ASCII alphanumerics and `-_.:`.
+fn id_bytes(in s: A, id: u64) -> bool {
+    let off = str_off(in s, id);
+    for i in 0..str_len(in s, id) {
+        let c = byte(in s, wrapping_add(off, i));
+        if !(ascii_alnum(c) || c == 45 || c == 95 || c == 46 || c == 58) {
+            return false;
+        }
+    }
+    true
+}
+
+// The ranges of advisory a, sorted by introduced precedence, ordered and
+// disjoint.
+fn check_ranges(inout s: A, a: u64) {
+    let x = adv(in s, a);
+    s.idx.clear();
+    for j in 0..x.r_n {
+        s.idx.push(wrapping_add(x.r_at, j));
+    }
+    msort(inout s, 1);
+    let mut prev: u64 = 18446744073709551615;
+    for j in 0..s.idx.len() {
+        let ri = word(in s.idx, j);
+        let r = rng(in s, ri);
+        if r.has_fixed && prec_ord(in s.l, r.intro, r.fixed) != 0 {
+            fail(inout s, e_catalog(), "affected interval must be nonempty and increasing");
+            return;
+        }
+        if prev != 18446744073709551615 {
+            let p = rng(in s, prev);
+            if !p.has_fixed || prec_ord(in s.l, p.fixed, r.intro) == 2 {
+                fail(inout s, e_catalog(), "overlapping or duplicate affected intervals");
+                return;
+            }
+        }
+        prev = ri;
+    }
+}
+
+pub fn check_catalog(inout s: A) {
+    if !s.cat_ok {
+        fail(inout s, e_limit(), "programmatic input bytes");
+        return;
+    }
+    if s.cschema != 1 {
+        fail(inout s, e_catalog(), "unsupported schema version");
+        return;
+    }
+    let cl = str_len(in s, s.cid);
+    if cl == 0 || cl > s.m_string {
+        fail(inout s, e_catalog(), "invalid catalog identity");
+        return;
+    }
+    s.work = s.m_entries;
+    let na = s.advs.len();
+    if !spend(inout s, na) {
+        return;
+    }
+    let nn = s.nats.len();
+    if !spend(inout s, nn) {
+        return;
+    }
+    let k = s.l.k;
+    fresh_marks(inout s, k);
+    for a in 0..s.advs.len() {
+        let x = adv(in s, a);
+        let il = str_len(in s, x.id);
+        if il == 0 || il > s.m_string || !id_bytes(in s, x.id) || mark_seen(inout s, x.id) {
+            fail(inout s, e_catalog(), "empty, invalid or duplicate advisory ID");
+            return;
+        }
+        if x.kind == 1 && !system_name_valid(in s.l, x.name) {
+            fail(inout s, e_catalog(), "invalid package identity");
+            return;
+        }
+        if str_len(in s, x.sum) > s.m_string {
+            fail(inout s, e_catalog(), "advisory summary exceeds string limit");
+            return;
+        }
+        if x.r_n == 0 {
+            fail(inout s, e_catalog(), "advisory must have an affected range");
+            return;
+        }
+        if !spend(inout s, x.r_n) {
+            return;
+        }
+        check_ranges(inout s, a);
+        if s.err != 0 {
+            return;
+        }
+    }
+    // A claim is a duplicate when an earlier one has the same name and
+    // version: sort stably and stamp all but the first of each run.
+    s.idx.clear();
+    for i in 0..s.nats.len() {
+        s.idx.push(i);
+    }
+    msort(inout s, 0);
+    let n = s.nats.len();
+    fresh_marks(inout s, n);
+    for j in 1..s.idx.len() {
+        let a = word(in s.idx, wrapping_sub(j, 1));
+        let b = word(in s.idx, j);
+        let x = nat(in s, a);
+        let y = nat(in s, b);
+        if x.name == y.name && ver_ord(in s.l, x.ver, y.ver) == 1 {
+            mark_seen(inout s, b);
+        }
+    }
+    for i in 0..n {
+        let x = nat(in s, i);
+        let g = s.gen;
+        let dup = word(in s.mark, i) == g;
+        if !system_name_valid(in s.l, x.name) || dup {
+            fail(inout s, e_catalog(), "invalid or duplicate native license identity/version");
+            return;
+        }
+        if str_len(in s, x.expr) > s.m_string {
+            fail(inout s, e_catalog(), "native license exceeds string limit");
+            return;
+        }
+    }
+}
+
+pub fn check_policy(inout s: A) {
+    if !s.pol_ok {
+        fail(inout s, e_limit(), "programmatic input bytes");
+        return;
+    }
+    if s.pschema != 1 {
+        fail(inout s, e_policy(), "unsupported schema version");
+        return;
+    }
+    if s.allow.len() > s.m_entries {
+        fail(inout s, e_limit(), "license grants");
+        return;
+    }
+    allowlist(inout s);
+}
+
+// Bound the calculus validator before running it (`preflight`).
+pub fn preflight(inout s: A) {
+    if s.l.root_n == 0 {
+        fail(inout s, e_input(), "audit requires at least one declared root package");
+        return;
+    }
+    if !s.sol_ok {
+        fail(inout s, e_limit(), "programmatic input bytes");
+        return;
+    }
+    let np = s.l.sel_n;
+    if sat_add(np, s.l.ss_n) > s.m_packages || s.l.root_n > s.m_roots {
+        fail(inout s, e_limit(), "package/root count");
+        return;
+    }
+    let mut edges: u64 = 0;
+    let mut decl = sat_add(s.l.root_n, 1);
+    for i in 0..np {
+        let m = man(in s.l, wrapping_add(s.l.sel_at, i));
+        edges = sat_add(edges, m.dep_n);
+        decl = sat_add(sat_add(decl, m.ceil_n), m.fs_n);
+        for j in 0..m.feat_n {
+            let f = feat(in s.l, wrapping_add(m.feat_at, j));
+            edges = sat_add(sat_add(sat_add(edges, f.sys_n), f.deps_n), f.sub_n);
+            decl = sat_add(sat_add(decl, f.eff_n), 1);
+        }
+        for j in 0..m.dep_n {
+            let d = dep(in s.l, wrapping_add(m.dep_at, j));
+            decl = sat_add(sat_add(decl, d.eff_n), d.feat_n);
+        }
+    }
+    if edges > s.m_edges {
+        fail(inout s, e_limit(), "declared edge count");
+        return;
+    }
+    let complexity = sat_mul(
+        sat_mul(sat_add(np, 1), sat_add(decl, 1)),
+        sat_add(sat_add(sat_add(edges, decl), np), 1)
+    );
+    spend(inout s, complexity);
+}

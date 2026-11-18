@@ -164,6 +164,12 @@ pub enum SeqOp {
     /// `s.extend_ascii_lowercase(in src)` on a `ChunkSeq[u8]`: appends the
     /// bytes of `src` with ASCII `A..=Z` mapped to `a..=z`. Total.
     ExtendAsciiLowercase,
+    /// `s.make_ascii_lowercase(lo, hi)` (`try_make_ascii_lowercase` when
+    /// `total`) on a byte sequence or slice: maps ASCII `A..=Z` to `a..=z`
+    /// in `s[lo..hi]`, in place, with one bounds check. The checked form
+    /// raises `IndexOutOfBounds` and the total one yields `false` when
+    /// `lo <= hi <= len` fails; neither writes anything then.
+    MakeAsciiLowercase { total: bool },
 }
 
 /// `read_u16_le`, `try_write_u64_be` and the other fixed-width accesses of a
@@ -275,8 +281,9 @@ impl Access {
 
 impl SeqOp {
     /// Whether the operation is a byte scan: `sum_be16`, `eq`, `find_byte`,
-    /// `find_either`, `find_not_in`, `eq_ignore_ascii_case` or
-    /// `extend_ascii_lowercase`, which need a `u8` element type.
+    /// `find_either`, `find_not_in`, `eq_ignore_ascii_case`,
+    /// `extend_ascii_lowercase` or `make_ascii_lowercase`, which need a `u8`
+    /// element type.
     pub fn byte_scan(self) -> bool {
         matches!(
             self,
@@ -287,6 +294,7 @@ impl SeqOp {
                 | Self::FindNotIn
                 | Self::EqIgnoreAsciiCase
                 | Self::ExtendAsciiLowercase
+                | Self::MakeAsciiLowercase { .. }
         )
     }
     /// Whether the operation may raise `Fail[RuntimeError]`.
@@ -303,6 +311,7 @@ impl SeqOp {
                 | Self::SliceSet
                 | Self::CopyFrom { total: false }
                 | Self::CopyWithin { total: false }
+                | Self::MakeAsciiLowercase { total: false }
                 | Self::Wide(Wide { total: false, .. })
         )
     }
@@ -322,6 +331,7 @@ impl SeqOp {
                 | Self::Reserve
                 | Self::Extend
                 | Self::ExtendAsciiLowercase
+                | Self::MakeAsciiLowercase { .. }
                 | Self::CopyFrom { .. }
                 | Self::CopyWithin { .. }
                 | Self::Fill
@@ -384,6 +394,8 @@ impl SeqOp {
             Self::FindNotIn => "find_not_in",
             Self::EqIgnoreAsciiCase => "eq_ignore_ascii_case",
             Self::ExtendAsciiLowercase => "extend_ascii_lowercase",
+            Self::MakeAsciiLowercase { total: false } => "make_ascii_lowercase",
+            Self::MakeAsciiLowercase { total: true } => "try_make_ascii_lowercase",
         }
     }
 }
@@ -580,6 +592,8 @@ fn shared_method(method: &str) -> Option<SeqOp> {
         "find_either" => SeqOp::FindEither,
         "find_not_in" => SeqOp::FindNotIn,
         "eq_ignore_ascii_case" => SeqOp::EqIgnoreAsciiCase,
+        "make_ascii_lowercase" => SeqOp::MakeAsciiLowercase { total: false },
+        "try_make_ascii_lowercase" => SeqOp::MakeAsciiLowercase { total: true },
         _ => SeqOp::Wide(Wide::parse(method)?),
     })
 }

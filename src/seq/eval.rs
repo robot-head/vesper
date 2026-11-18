@@ -289,6 +289,34 @@ impl Runtime<'_> {
                 );
                 V(Value::Tuple(vec![]))
             }
+            SeqOp::MakeAsciiLowercase { total } => {
+                let (cell, start, len) = view(arg(0)?)?;
+                let lo = index(arg(1)?)?;
+                let hi = index(arg(2)?)?;
+                if lo > hi || hi > len as u64 {
+                    return Ok(if total {
+                        V(Value::Bool(false))
+                    } else {
+                        OutOfBounds
+                    });
+                }
+                for v in &mut cell.borrow_mut()[start + lo as usize..start + hi as usize] {
+                    match v {
+                        Value::UInt(b, _) if (u64::from(b'A')..=u64::from(b'Z')).contains(b) => {
+                            *b |= 0x20
+                        }
+                        Value::Int(b) if (i64::from(b'A')..=i64::from(b'Z')).contains(b) => {
+                            *b |= 0x20
+                        }
+                        _ => {}
+                    }
+                }
+                V(if total {
+                    Value::Bool(true)
+                } else {
+                    Value::Tuple(vec![])
+                })
+            }
             SeqOp::FindByte | SeqOp::FindEither | SeqOp::FindNotIn => {
                 let bytes = byte_view(arg(0)?)?;
                 let found = match op {

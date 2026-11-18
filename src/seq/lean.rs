@@ -253,7 +253,8 @@ impl Generator<'_> {
             | SeqOp::FindEither
             | SeqOp::FindNotIn
             | SeqOp::EqIgnoreAsciiCase
-            | SeqOp::ExtendAsciiLowercase => {
+            | SeqOp::ExtendAsciiLowercase
+            | SeqOp::MakeAsciiLowercase { .. } => {
                 unreachable!("refused above")
             }
         })

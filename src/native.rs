@@ -2745,7 +2745,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         // Where constructed aggregates are built (lane 7, #990).
         let homes = if self.operands_only && !self.in_fip_fn {
-            aggregates::plan(self.world, f, &self.generic_vars)
+            aggregates::plan(self.world, f, &self.generic_vars, return_to.is_some())
         } else {
             BTreeMap::new()
         };
@@ -2895,6 +2895,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             for id in &block.params {
                 self.def_var(registers[id], parameters[id]);
                 values.insert(*id, parameters[id]);
+                // Every value reaching a homed parameter was built in its
+                // home (`aggregates::plan`), so its consumer skips the copy.
+                if homes.contains_key(id) {
+                    self.home_pointer(*id, &homes, &mut home_pointers, sret)?;
+                }
             }
             self.drop_temporaries(&temporaries, f, i, crate::fip::AT_BLOCK_ENTRY, &values)?;
             if let Some(entries) = join_slot_params.get(&i) {
@@ -2959,6 +2964,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                     Op::Read { .. } if hoisted_reads.contains_key(&inst.dest) => {
                         hoisted_reads[&inst.dest]
                     }
+                    // The one read of a pass-through local yields the
+                    // storage its `let` bound (`aggregates::plan`).
+                    Op::Read { root, .. }
+                        if homes.contains_key(&inst.dest) && self.vars.contains_key(root) =>
+                    {
+                        self.home_pointer(inst.dest, &homes, &mut home_pointers, sret)?;
+                        let var = self.vars[root];
+                        self.use_var(var)
+                    }
                     Op::Read {
                         root, path, pass, ..
                     } => {
@@ -2998,6 +3012,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                         }
                         self.zero()
                     }
+                    // Built in the destination (`aggregates::drop_unsafe_places`
+                    // keeps the rule): the write is the construction itself.
+                    Op::Write { value, .. } if aggregates::placed(&home_pointers, *value) => {
+                        self.zero()
+                    }
                     Op::Write { place, op, value } => {
                         self.drop_replaced(place, op, (i, inst_idx))?;
                         self.seq_drop_overwrite(place)?;
@@ -3007,12 +3026,35 @@ impl<M: Module> Codegen<'_, '_, M> {
                             path: path.map(str::to_owned).collect(),
                         };
                         let left = ir_place_expr(&p, inst.span.clone());
-                        let right = self.ir_temp(*value, &values, &f.values)?;
-                        self.expr(&make(ExprKind::Assign(
-                            op.clone(),
-                            Box::new(left),
-                            Box::new(right),
-                        )))?
+                        let value_ty = f.values.get(value).map(|t| {
+                            crate::numeric::default_type(&substitute(t, &self.generic_vars))
+                        });
+                        if self.operands_only
+                            && op == "="
+                            && let Some(value_ty) = value_ty
+                            && Layout::of(self.world, &value_ty)?.aggregate()
+                            && self.vars.contains_key(&p.root)
+                        {
+                            // A whole aggregate is copied from its storage
+                            // into the destination once, not through a
+                            // temporary copy of the operand. Distinct places
+                            // of one type are equal or disjoint (a value
+                            // cannot contain itself without a `Box`), so the
+                            // forward word copy is exact.
+                            let source = *values
+                                .get(value)
+                                .ok_or_else(|| format!("undefined native IR value %{value}"))?;
+                            let destination = self.address(&left)?;
+                            self.store(destination, source, &value_ty)?;
+                            self.zero()
+                        } else {
+                            let right = self.ir_temp(*value, &values, &f.values)?;
+                            self.expr(&make(ExprKind::Assign(
+                                op.clone(),
+                                Box::new(left),
+                                Box::new(right),
+                            )))?
+                        }
                     }
                     Op::Unary(op, v) => {
                         let v = self.ir_temp(*v, &values, &f.values)?;
@@ -3240,7 +3282,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                                 &self.generic_vars,
                             )));
                         }
-                        self.seq_op(*op, &operands, &operand_types, &ty)?
+                        // A growing operation writes its new handle back to the
+                        // receiver's place (#1021).
+                        let receiver = args
+                            .first()
+                            .and_then(|a| a.place.as_ref())
+                            .filter(|_| op.has_receiver() && op.mutates())
+                            .map(|p| ir_place_expr(p, inst.span.clone()));
+                        self.seq_op(*op, &operands, &operand_types, &ty, receiver.as_ref())?
                     }
                     Op::Fip { op, args } => {
                         let operands = args

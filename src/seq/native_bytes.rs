@@ -17,6 +17,9 @@ use super::*;
 
 /// Bytes per vector step.
 const LANES: i64 = 16;
+/// The smallest page size of x86-64 and AArch64: a short scan's 16-byte
+/// over-read never crosses a boundary of this alignment.
+const PAGE: i64 = 4096;
 /// Vector steps one `sum_be16` block adds in 16-bit lanes before it widens
 /// them: 256 steps add at most `256 * 255 = 65_280` per lane.
 const SUM_BLOCK_STEPS: i64 = 256;
@@ -58,6 +61,46 @@ enum Splat {
     },
 }
 
+impl Splat {
+    fn values(self) -> Vec<ir::Value> {
+        match self {
+            Splat::One(n) => vec![n],
+            Splat::Either(x, y) => vec![x, y],
+            Splat::NotIn {
+                table,
+                bits,
+                sevens,
+                zeros,
+                high,
+            } => vec![table, bits, sevens, zeros, high],
+        }
+    }
+    /// The same kind of splat over `values`, in the order of
+    /// [`Splat::values`].
+    fn with(self, values: &[ir::Value]) -> Splat {
+        match self {
+            Splat::One(_) => Splat::One(values[0]),
+            Splat::Either(..) => Splat::Either(values[0], values[1]),
+            Splat::NotIn { .. } => Splat::NotIn {
+                table: values[0],
+                bits: values[1],
+                sevens: values[2],
+                zeros: values[3],
+                high: values[4],
+            },
+        }
+    }
+}
+
+/// The vectors of an ASCII lowercase step: `A`, `26` and `0x20` in every
+/// lane.
+#[derive(Clone, Copy)]
+struct Lower {
+    a: ir::Value,
+    span: ir::Value,
+    case_bit: ir::Value,
+}
+
 impl<M: Module> Codegen<'_, '_, M> {
     /// Lowers `op` when it is a block or fixed-width builtin, else `None`.
     pub(super) fn byte_seq_op(
@@ -65,9 +108,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         op: SeqOp,
         args: &[ir::Value],
         arg_types: &[Type],
+        receiver: Option<&Expr>,
     ) -> Result<Option<ir::Value>, String> {
         if op.byte_scan() {
-            return self.byte_scan_op(op, args, arg_types).map(Some);
+            return self.byte_scan_op(op, args, arg_types, receiver).map(Some);
         }
         if !matches!(
             op,
@@ -306,6 +350,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         op: SeqOp,
         args: &[ir::Value],
         arg_types: &[Type],
+        receiver: Option<&Expr>,
     ) -> Result<ir::Value, String> {
         let operand = |i: usize| {
             args.get(i)
@@ -365,13 +410,28 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let len = self.seq_word(h, LEN);
                 let (sh, sstart, slen) = self.seq_view(src, src_ty);
                 let needed = self.b.ins().iadd(len, slen);
-                self.seq_reserve(h, needed, 1)?;
-                // The data pointer may move when the sequence grows.
+                // The handle and data pointer may move when it grows (#1021).
+                let h = self.seq_reserve(h, needed, 1, receiver)?;
                 let dst = self.seq_elem_addr(h, zero, len, 1);
                 let src = self.seq_elem_addr(sh, sstart, zero, 1);
                 self.lowercase_copy(dst, src, slen, simd);
-                self.seq_set_word(h, LEN, needed);
+                let some = self.b.ins().icmp_imm(IntCC::NotEqual, slen, 0);
+                self.seq_set_len_if(h, some, needed);
                 zero
+            }
+            SeqOp::MakeAsciiLowercase { total } => {
+                // `lo <= hi <= len`, then lowercase `s[lo..hi]` where it is.
+                let (lo, _) = operand(1)?;
+                let (hi, _) = operand(2)?;
+                let ordered = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, lo, hi);
+                let inside = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, hi, len);
+                let valid = self.b.ins().band(ordered, inside);
+                self.seq_when(valid, total, |this| {
+                    let at = this.b.ins().iadd(p, lo);
+                    let n = this.b.ins().isub(hi, lo);
+                    this.lowercase_copy(at, at, n, simd);
+                    Ok(())
+                })?
             }
             _ => unreachable!("only byte scans reach here"),
         })
@@ -407,6 +467,88 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// `len` rounded down to a whole number of vector steps.
     fn vector_end(&mut self, len: ir::Value) -> ir::Value {
         self.b.ins().band_imm(len, -LANES)
+    }
+
+    /// Whether scans of fewer than 16 bytes run one vector step that reads
+    /// past the end of the bytes (see [`Self::short_load_safe`]): vectorized
+    /// scans in hosted code, where memory is mapped in whole pages. A
+    /// freestanding image may have no MMU and devices mapped next to RAM, so
+    /// it keeps the scalar loop.
+    fn short_scans(&self) -> bool {
+        self.byte_scans_vectorized()
+            && self.m.isa().triple().operating_system != target_lexicon::OperatingSystem::None_
+    }
+
+    /// Whether a 16-byte load from each of `ptrs` cannot fault, for a scan
+    /// of `len < 16` bytes from each: `len > 0` and no load crosses a
+    /// 4 KiB boundary. Memory protection is per page, and every page size
+    /// of x86-64 and AArch64 is a multiple of 4 KiB, so a load that stays
+    /// inside the 4 KiB block of its first byte (which belongs to the
+    /// sequence, so it is mapped and readable) touches only that page. The
+    /// bytes past `len` are read but masked off: they may belong to another
+    /// allocation, but no result depends on them. An empty view is never
+    /// read, since its data pointer may be null.
+    fn short_load_safe(&mut self, ptrs: &[ir::Value], len: ir::Value) -> ir::Value {
+        let mut safe = self.b.ins().icmp_imm(IntCC::NotEqual, len, 0);
+        for &p in ptrs {
+            let offset = self.b.ins().band_imm(p, PAGE - 1);
+            let inside =
+                self.b
+                    .ins()
+                    .icmp_imm(IntCC::UnsignedLessThanOrEqual, offset, PAGE - LANES);
+            safe = self.b.ins().band(safe, inside);
+        }
+        safe
+    }
+
+    /// `(1 << len) - 1` as an `i32`, for `len < 16`: the lanes of a short
+    /// step that hold the scanned bytes.
+    fn short_mask(&mut self, len: ir::Value) -> ir::Value {
+        let len = self.b.ins().ireduce(types::I32, len);
+        let one = self.b.ins().iconst(types::I32, 1);
+        let bit = self.b.ins().ishl(one, len);
+        self.b.ins().iadd_imm(bit, -1)
+    }
+
+    /// Makes `values` parameters of the loop header `head`, after its
+    /// existing ones, and returns them; every edge into `head` passes them
+    /// (see [`Self::carried`]). Cranelift's egraph rematerializes constants,
+    /// and the vector values built from them, next to each use, so a
+    /// vector constant used in a loop is rebuilt on every step (a table
+    /// load, a lane insert, a splat). A header parameter is not a constant:
+    /// the vectors are built once, before the loop, and stay in registers.
+    fn loop_invariants(&mut self, head: ir::Block, values: &[ir::Value]) -> Vec<ir::Value> {
+        values
+            .iter()
+            .map(|&v| {
+                let ty = self.b.func.dfg.value_type(v);
+                self.b.append_block_param(head, ty)
+            })
+            .collect()
+    }
+
+    /// The back-edge arguments of the header parameters `params`. Each is
+    /// `bor(v, v)`, which the egraph folds back to `v`, rather than `v`
+    /// itself: Cranelift removes a parameter whose every argument is one
+    /// value (or the parameter) before the egraph runs, which would make the
+    /// constants constants again.
+    fn carried(&mut self, params: &[ir::Value]) -> Vec<ir::BlockArg> {
+        params
+            .iter()
+            .map(|&v| self.b.ins().bor(v, v).into())
+            .collect()
+    }
+
+    fn lower_constants(&mut self) -> Lower {
+        let splat = |this: &mut Self, byte: u8| {
+            let c = this.b.ins().iconst(types::I8, i64::from(byte));
+            this.b.ins().splat(types::I8X16, c)
+        };
+        Lower {
+            a: splat(self, b'A'),
+            span: splat(self, 26),
+            case_bit: splat(self, 0x20),
+        }
     }
 
     /// The big-endian 16-bit words of `p[from..len]` added to `acc`, a byte
@@ -582,16 +724,56 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.branch(same_len, start, &[], done, &[no.into()]);
         self.b.switch_to_block(start);
         if simd {
-            let end = self.vector_end(len);
             let head = self.b.create_block();
             let body = self.b.create_block();
             self.b.append_block_param(head, types::I64);
             self.b.append_block_param(body, types::I64);
-            self.jump(head, &[zero.into()]);
+            if self.short_scans() {
+                // Under 16 bytes: one over-reading step of each side,
+                // compared on the lanes below `len`.
+                let short = self.b.create_block();
+                let long = self.b.create_block();
+                let under = self.b.ins().icmp_imm(IntCC::UnsignedLessThan, len, LANES);
+                self.branch(under, short, &[], long, &[]);
+
+                self.b.switch_to_block(short);
+                let safe = self.short_load_safe(&[p, q], len);
+                let vector = self.b.create_block();
+                self.branch(safe, vector, &[], scalar, &[zero.into()]);
+
+                self.b.switch_to_block(vector);
+                let mut a = self.b.ins().load(types::I8X16, little(), p, 0);
+                let mut b = self.b.ins().load(types::I8X16, little(), q, 0);
+                if fold {
+                    let c = self.lower_constants();
+                    a = self.lower_vector(c, a);
+                    b = self.lower_vector(c, b);
+                }
+                let same = self.b.ins().icmp(IntCC::Equal, a, b);
+                let bits = self.b.ins().vhigh_bits(types::I32, same);
+                let mask = self.short_mask(len);
+                let bits = self.b.ins().band(bits, mask);
+                let all = self.b.ins().icmp(IntCC::Equal, bits, mask);
+                let all = self.b.ins().uextend(types::I64, all);
+                self.jump(done, &[all.into()]);
+                self.b.switch_to_block(long);
+            }
+            // The loop's invariants, built once before it.
+            let end = self.vector_end(len);
+            let mut invariant = vec![end];
+            if fold {
+                let c = self.lower_constants();
+                invariant.extend([c.a, c.span, c.case_bit]);
+            }
+            let entry: Vec<ir::BlockArg> = std::iter::once(zero.into())
+                .chain(invariant.iter().map(|&v| v.into()))
+                .collect();
+            let carried = self.loop_invariants(head, &invariant);
+            self.jump(head, &entry);
 
             self.b.switch_to_block(head);
             let k = self.b.block_params(head)[0];
-            let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, end);
+            let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, carried[0]);
             self.vector_head_exit(more, k, len, body, scalar);
 
             self.b.switch_to_block(body);
@@ -601,14 +783,21 @@ impl<M: Module> Codegen<'_, '_, M> {
             let b = self.b.ins().iadd(q, k);
             let mut b = self.b.ins().load(types::I8X16, little(), b, 0);
             if fold {
-                a = self.lower_vector(a);
-                b = self.lower_vector(b);
+                let c = Lower {
+                    a: carried[1],
+                    span: carried[2],
+                    case_bit: carried[3],
+                };
+                a = self.lower_vector(c, a);
+                b = self.lower_vector(c, b);
             }
             let same = self.b.ins().icmp(IntCC::Equal, a, b);
             let bits = self.b.ins().vhigh_bits(types::I32, same);
             let all = self.b.ins().icmp_imm(IntCC::Equal, bits, 0xffff);
             let k2 = self.b.ins().iadd_imm(k, LANES);
-            self.branch(all, head, &[k2.into()], done, &[no.into()]);
+            let mut back: Vec<ir::BlockArg> = vec![k2.into()];
+            back.extend(self.carried(&carried));
+            self.branch(all, head, &back, done, &[no.into()]);
         } else {
             self.jump(scalar, &[zero.into()]);
         }
@@ -654,32 +843,69 @@ impl<M: Module> Codegen<'_, '_, M> {
         let no = self.b.ins().iconst(types::I64, 0);
         let yes = self.b.ins().iconst(types::I64, 1);
         if simd {
-            let end = self.vector_end(len);
-            let splat = self.needle_splat(needle);
             let head = self.b.create_block();
             let body = self.b.create_block();
             let next = self.b.create_block();
             let hit = self.b.create_block();
             self.b.append_block_param(head, types::I64);
             self.b.append_block_param(body, types::I64);
-            self.jump(head, &[zero.into()]);
+            if self.short_scans() {
+                // Under 16 bytes: one over-reading step, masked to `len`.
+                let short = self.b.create_block();
+                let short_hit = self.b.create_block();
+                let long = self.b.create_block();
+                let under = self.b.ins().icmp_imm(IntCC::UnsignedLessThan, len, LANES);
+                self.branch(under, short, &[], long, &[]);
+
+                self.b.switch_to_block(short);
+                let safe = self.short_load_safe(&[p], len);
+                let vector = self.b.create_block();
+                self.branch(safe, vector, &[], scalar, &[zero.into()]);
+
+                self.b.switch_to_block(vector);
+                let v = self.b.ins().load(types::I8X16, little(), p, 0);
+                let splat = self.needle_splat(needle);
+                let found = self.needle_vector(splat, v);
+                let bits = self.b.ins().vhigh_bits(types::I32, found);
+                let mask = self.short_mask(len);
+                let bits = self.b.ins().band(bits, mask);
+                self.branch(bits, short_hit, &[], done, &[no.into(), zero.into()]);
+
+                self.b.switch_to_block(short_hit);
+                let first = self.b.ins().ctz(bits);
+                let first = self.b.ins().uextend(types::I64, first);
+                self.jump(done, &[yes.into(), first.into()]);
+                self.b.switch_to_block(long);
+            }
+            // The loop's invariants, built once before it.
+            let end = self.vector_end(len);
+            let splat = self.needle_splat(needle);
+            let mut invariant = vec![end];
+            invariant.extend(splat.values());
+            let entry: Vec<ir::BlockArg> = std::iter::once(zero.into())
+                .chain(invariant.iter().map(|&v| v.into()))
+                .collect();
+            let carried = self.loop_invariants(head, &invariant);
+            self.jump(head, &entry);
 
             self.b.switch_to_block(head);
             let k = self.b.block_params(head)[0];
-            let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, end);
+            let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, carried[0]);
             self.vector_head_exit(more, k, len, body, scalar);
 
             self.b.switch_to_block(body);
             let k = self.b.block_params(body)[0];
             let at = self.b.ins().iadd(p, k);
             let v = self.b.ins().load(types::I8X16, little(), at, 0);
-            let found = self.needle_vector(splat, v);
+            let found = self.needle_vector(splat.with(&carried[1..]), v);
             let bits = self.b.ins().vhigh_bits(types::I32, found);
             self.branch(bits, hit, &[], next, &[]);
 
             self.b.switch_to_block(next);
             let k2 = self.b.ins().iadd_imm(k, LANES);
-            self.jump(head, &[k2.into()]);
+            let mut back: Vec<ir::BlockArg> = vec![k2.into()];
+            back.extend(self.carried(&carried));
+            self.jump(head, &back);
 
             self.b.switch_to_block(hit);
             let first = self.b.ins().ctz(bits);
@@ -817,21 +1043,84 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
 
     /// The lanes of `v` (an `i8x16`) with ASCII `A..=Z` mapped to `a..=z`.
-    fn lower_vector(&mut self, v: ir::Value) -> ir::Value {
-        let splat = |this: &mut Self, byte: u8| {
-            let c = this.b.ins().iconst(types::I8, i64::from(byte));
-            this.b.ins().splat(types::I8X16, c)
-        };
-        let a = splat(self, b'A');
-        let span = splat(self, 26);
-        let case_bit = splat(self, 0x20);
-        let from_a = self.b.ins().isub(v, a);
-        let upper = self.b.ins().icmp(IntCC::UnsignedLessThan, from_a, span);
-        let add = self.b.ins().band(upper, case_bit);
+    fn lower_vector(&mut self, c: Lower, v: ir::Value) -> ir::Value {
+        let from_a = self.b.ins().isub(v, c.a);
+        let upper = self.b.ins().icmp(IntCC::UnsignedLessThan, from_a, c.span);
+        let add = self.b.ins().band(upper, c.case_bit);
         self.b.ins().bor(v, add)
     }
 
-    /// Writes `src[..n]` lowercased to `dst[..n]`; the two do not overlap.
+    /// `n < 16` bytes of [`Self::lowercase_copy`]: `8 <= n` lowercases the
+    /// 8-byte words at 0 and `n - 8`, `4 <= n < 8` the 4-byte words at 0
+    /// and `n - 4`, and shorter runs continue at `scalar(0)`. The second
+    /// word overlaps the first when `n` is not twice the word; it is read
+    /// before the first is written, and the bytes both cover get the same
+    /// value from either.
+    fn lowercase_words(
+        &mut self,
+        dst: ir::Value,
+        src: ir::Value,
+        n: ir::Value,
+        scalar: ir::Block,
+        done: ir::Block,
+    ) {
+        let eight = self.b.create_block();
+        let below_eight = self.b.create_block();
+        let four = self.b.create_block();
+        let wide = self
+            .b
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, n, 8);
+        self.branch(wide, eight, &[], below_eight, &[]);
+        self.b.switch_to_block(below_eight);
+        let wide = self
+            .b
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, n, 4);
+        let zero = self.zero();
+        self.branch(wide, four, &[], scalar, &[zero.into()]);
+        for (block, ty) in [(eight, types::I64), (four, types::I32)] {
+            self.b.switch_to_block(block);
+            let width = i64::from(ty.bytes());
+            let back = self.b.ins().iadd_imm(n, -width);
+            let src2 = self.b.ins().iadd(src, back);
+            let dst2 = self.b.ins().iadd(dst, back);
+            let first = self.b.ins().load(ty, MemFlags::new(), src, 0);
+            let second = self.b.ins().load(ty, MemFlags::new(), src2, 0);
+            let first = self.lower_word(ty, first);
+            let second = self.lower_word(ty, second);
+            self.b.ins().store(MemFlags::new(), first, dst, 0);
+            self.b.ins().store(MemFlags::new(), second, dst2, 0);
+            self.jump(done, &[]);
+        }
+    }
+
+    /// The bytes of the word `w` with ASCII `A..=Z` mapped to `a..=z`, all
+    /// at once: with `h` a byte's low seven bits, `h + (0x80 - 'A')` sets
+    /// the byte's top bit when `h >= 'A'` and `h + (0x80 - 'Z' - 1)` when
+    /// `h > 'Z'`, and neither carries into the next byte (`h <= 0x7f`). A
+    /// byte is upper case when the first holds, the second does not and its
+    /// own top bit is clear (it is ASCII); its top bit, shifted down by
+    /// two, is the case bit `0x20`.
+    fn lower_word(&mut self, ty: ir::Type, w: ir::Value) -> ir::Value {
+        let rep = |byte: u8| -> i64 {
+            let r = u64::from_le_bytes([byte; 8]);
+            (if ty == types::I64 { r } else { r & 0xffff_ffff }) as i64
+        };
+        let low7 = self.b.ins().band_imm(w, rep(0x7f));
+        let at_least_a = self.b.ins().iadd_imm(low7, rep(0x80 - b'A'));
+        let past_z = self.b.ins().iadd_imm(low7, rep(0x80 - b'Z' - 1));
+        let upper = self.b.ins().band_not(at_least_a, past_z);
+        let upper = self.b.ins().band_not(upper, w);
+        let upper = self.b.ins().band_imm(upper, rep(0x80));
+        let case_bit = self.b.ins().ushr_imm(upper, 2);
+        self.b.ins().bor(w, case_bit)
+    }
+
+    /// Writes `src[..n]` lowercased to `dst[..n]`. The two do not overlap,
+    /// or are the same bytes (`make_ascii_lowercase`): lowercasing is
+    /// idempotent, so the overlapping last vector step may read bytes it has
+    /// already written.
     fn lowercase_copy(&mut self, dst: ir::Value, src: ir::Value, n: ir::Value, simd: bool) {
         let zero = self.zero();
         let scalar = self.b.create_block();
@@ -844,22 +1133,46 @@ impl<M: Module> Codegen<'_, '_, M> {
             let body = self.b.create_block();
             self.b.append_block_param(head, types::I64);
             self.b.append_block_param(body, types::I64);
-            self.jump(head, &[zero.into()]);
+            // Under 16 bytes: two overlapping 8- or 4-byte words, as SWAR,
+            // which never touch a byte outside `dst[..n]` (a write past
+            // the end could race with another owner of those bytes).
+            let short = self.b.create_block();
+            let long = self.b.create_block();
+            let under = self.b.ins().icmp_imm(IntCC::UnsignedLessThan, n, LANES);
+            self.branch(under, short, &[], long, &[]);
+            self.b.switch_to_block(short);
+            self.lowercase_words(dst, src, n, scalar, done);
+
+            self.b.switch_to_block(long);
+            let c = self.lower_constants();
+            let invariant = [end, c.a, c.span, c.case_bit];
+            let entry: Vec<ir::BlockArg> = std::iter::once(zero.into())
+                .chain(invariant.iter().map(|&v| v.into()))
+                .collect();
+            let carried = self.loop_invariants(head, &invariant);
+            self.jump(head, &entry);
 
             self.b.switch_to_block(head);
             let k = self.b.block_params(head)[0];
-            let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, end);
+            let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, carried[0]);
             self.vector_head_exit(more, k, n, body, scalar);
 
             self.b.switch_to_block(body);
             let k = self.b.block_params(body)[0];
             let from = self.b.ins().iadd(src, k);
             let v = self.b.ins().load(types::I8X16, little(), from, 0);
-            let v = self.lower_vector(v);
+            let c = Lower {
+                a: carried[1],
+                span: carried[2],
+                case_bit: carried[3],
+            };
+            let v = self.lower_vector(c, v);
             let to = self.b.ins().iadd(dst, k);
             self.b.ins().store(little(), v, to, 0);
             let k2 = self.b.ins().iadd_imm(k, LANES);
-            self.jump(head, &[k2.into()]);
+            let mut back: Vec<ir::BlockArg> = vec![k2.into()];
+            back.extend(self.carried(&carried));
+            self.jump(head, &back);
         } else {
             self.jump(scalar, &[zero.into()]);
         }

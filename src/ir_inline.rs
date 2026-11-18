@@ -77,6 +77,8 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod site;
+
 /// Size limits, counted with [`cost`]: Place IR instructions that emit code, plus one per block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Budget {
@@ -89,6 +91,10 @@ pub struct Budget {
     pub caller_growth: usize,
     /// Most instructions inlining may add to the whole program.
     pub program_growth: usize,
+    /// Most instructions the copies of one callee may add to the program.
+    /// It bounds the code a small, widely used callee (a derived `cmp` or
+    /// `eq` called from every sort and lookup) multiplies into.
+    pub callee_growth: usize,
     /// Most handles inlining may copy into one caller. The native backend
     /// copies the enclosing scope's bindings at every handle, so a caller
     /// with many inlined handles compiles slowly (`integer_widths` calls a
@@ -103,6 +109,7 @@ impl Default for Budget {
             single_site_callee: 240,
             caller_growth: 2_000,
             program_growth: 40_000,
+            callee_growth: 4_000,
             caller_handles: 8,
         }
     }
@@ -116,6 +123,7 @@ impl Budget {
             single_site_callee: 0,
             caller_growth: 0,
             program_growth: 0,
+            callee_growth: 0,
             caller_handles: 0,
         }
     }
@@ -138,6 +146,18 @@ pub struct Report {
     /// Call sites left as calls, per callee and reason (see [`Refusal`]).
     /// Only direct calls of functions whose IR is in the program count.
     pub refused: BTreeMap<String, BTreeMap<Refusal, usize>>,
+    /// Inlined call sites per callee that kept only the hot part of the
+    /// callee and call it on the cold side (partial inlining, #1025).
+    pub partial: BTreeMap<String, usize>,
+    /// Inlined call sites whose known arguments removed branches or blocks
+    /// from the copy.
+    pub folded: usize,
+    /// Instructions the copies of each callee added, including the copies
+    /// that arrived inside another inlined body.
+    pub growth: BTreeMap<String, usize>,
+    /// Function -> units of each callee body copied into it (directly or
+    /// nested), so inlining that function charges those callees again.
+    contents: BTreeMap<String, BTreeMap<String, usize>>,
 }
 
 /// Why a direct call stayed a call.
@@ -344,20 +364,7 @@ pub fn size(f: &FunctionIr) -> usize {
 /// A short-circuit predicate such as `(b >= 48 && b <= 57) || ...` is mostly
 /// operand reads, so its cost tracks its compares and branches.
 pub fn cost(world: &World, f: &FunctionIr) -> usize {
-    let scalar = |t: &Type| {
-        crate::layout::Layout::of(world, t).is_ok_and(|l| !l.aggregate())
-            && !crate::seq::holds_sequence(world, t)
-    };
-    let free = |i: &Instruction| match &i.op {
-        Op::Constant(_) | Op::Unit | Op::Loop => true,
-        Op::Read { path, .. } => path.is_empty(),
-        Op::Data(_, fields) => fields.is_empty() && scalar(&i.ty),
-        Op::Bind { pattern, value } => {
-            matches!(pattern.kind, PatternKind::Bind(_) | PatternKind::Wild)
-                && f.values.get(value).is_some_and(&scalar)
-        }
-        _ => false,
-    };
+    let free = cost_parts(world, f);
     f.blocks
         .iter()
         .map(|b| {
@@ -366,6 +373,24 @@ pub fn cost(world: &World, f: &FunctionIr) -> usize {
             work + usize::from(!forward)
         })
         .sum()
+}
+
+/// Whether an instruction of `f` is free in [`cost`].
+fn cost_parts<'a>(world: &'a World, f: &'a FunctionIr) -> impl Fn(&Instruction) -> bool + 'a {
+    let scalar = move |t: &Type| {
+        crate::layout::Layout::of(world, t).is_ok_and(|l| !l.aggregate())
+            && !crate::seq::holds_sequence(world, t)
+    };
+    move |i: &Instruction| match &i.op {
+        Op::Constant(_) | Op::Unit | Op::Loop => true,
+        Op::Read { path, .. } => path.is_empty(),
+        Op::Data(_, fields) => fields.is_empty() && scalar(&i.ty),
+        Op::Bind { pattern, value } => {
+            matches!(pattern.kind, PatternKind::Bind(_) | PatternKind::Wild)
+                && f.values.get(value).is_some_and(scalar)
+        }
+        _ => false,
+    }
 }
 
 fn fail_row_only(effects: &Effects) -> bool {
@@ -725,23 +750,59 @@ fn inline_into(
                     None
                 };
                 let target = copy.as_ref().unwrap_or(original);
-                let cost = cost_with_handlers(world, program, target);
-                if cost > budget.small_callee
-                    && (sites.get(callee) != Some(&1) || cost > budget.single_site_callee)
+                let bindings =
+                    site_bindings(world, caller, target, inst.dest, args).map_err(Refusal::Site)?;
+                let whole = cost_with_handlers(world, program, target);
+                let handlers = whole - cost(world, target);
+                let folded = site::fold(world, caller, target, &bindings)
+                    .unwrap_or_else(|| site::Folded::none(target));
+                let at_site = folded.cost(world, target) + handlers;
+                let fits = |c: usize| {
+                    c <= budget.small_callee
+                        || (sites.get(callee) == Some(&1) && c <= budget.single_site_callee)
+                };
+                let (cost, split) = if fits(at_site) {
+                    if !fits(whole) {
+                        log(format_args!(
+                            "full\t{}\t{callee}\t{whole}\t{at_site}",
+                            caller.name
+                        ));
+                    }
+                    (at_site, None)
+                } else if let Some(split) = (handlers == 0 && partial_ok(world, target, &bindings))
+                    .then(|| site::split(world, target, &folded, budget.small_callee))
+                    .flatten()
                 {
+                    log(format_args!(
+                        "partial\t{}\t{callee}\t{whole}\t{at_site}\t{}\t{}",
+                        caller.name, split.hot_cost, split.cold_cost
+                    ));
+                    (split.hot_cost, Some(split))
+                } else {
+                    log(format_args!(
+                        "size\t{}\t{callee}\t{whole}\t{at_site}",
+                        caller.name
+                    ));
                     return Err(Refusal::Size);
-                }
+                };
+                // The copy also duplicates every body already inlined into
+                // the callee: charge those callees' caps too.
+                let nested = report.contents.get(callee);
+                let over_cap = std::iter::once((callee, cost))
+                    .chain(nested.into_iter().flatten().map(|(n, u)| (n, *u)))
+                    .any(|(n, u)| {
+                        report.growth.get(n).copied().unwrap_or(0) + u > budget.callee_growth
+                    });
                 if added + cost > budget.caller_growth
                     || report.added + cost > budget.program_growth
+                    || over_cap
                     || handles_added + handles(program, target) > budget.caller_handles
                 {
                     return Err(Refusal::Growth);
                 }
-                let bindings =
-                    site_bindings(world, caller, target, inst.dest, args).map_err(Refusal::Site)?;
-                Ok((cost, bindings, copy))
+                Ok((cost, bindings, copy, folded, split))
             });
-            let (cost, bindings, copy) = match decision {
+            let (cost, bindings, copy, folded, split) = match decision {
                 Ok(d) => d,
                 Err(why) => {
                     report.refuse(callee, why);
@@ -751,13 +812,42 @@ fn inline_into(
             };
             let target = copy.unwrap_or_else(|| program.functions[callee].clone());
             *serial += 1;
-            let first = splice(caller, b, i, &target, &bindings, *serial);
+            let first = splice(
+                caller,
+                b,
+                i,
+                &target,
+                &bindings,
+                *serial,
+                &folded,
+                split.as_ref(),
+            );
             spliced.extend(first..caller.blocks.len());
             added += cost;
             handles_added += handles(program, &target);
             report.added += cost;
             report.sites += 1;
+            let nested = report
+                .contents
+                .get(&target.name)
+                .cloned()
+                .unwrap_or_default();
+            let holds = report.contents.entry(caller.name.clone()).or_default();
+            *holds.entry(target.name.clone()).or_default() += cost;
+            for (n, u) in &nested {
+                *holds.entry(n.clone()).or_default() += u;
+            }
+            *report.growth.entry(target.name.clone()).or_default() += cost;
+            for (n, u) in nested {
+                *report.growth.entry(n).or_default() += u;
+            }
             *report.callees.entry(target.name.clone()).or_default() += 1;
+            if split.is_some() {
+                *report.partial.entry(target.name.clone()).or_default() += 1;
+            }
+            if folded.decides() {
+                report.folded += 1;
+            }
             let nested = report
                 .inlined_into
                 .get(&target.name)
@@ -771,6 +861,32 @@ fn inline_into(
             break;
         }
         b += 1;
+    }
+}
+
+/// Partial inlining calls the callee again with the site's arguments, so
+/// every argument bound by value must be one it can pass twice: a value
+/// that owns nothing, or a slice view.
+fn partial_ok(world: &World, callee: &FunctionIr, bindings: &[Binding]) -> bool {
+    callee.params.iter().zip(bindings).all(|(p, b)| match b {
+        Binding::Place(_) => true,
+        Binding::Bind(_) => crate::seq::is_slice_type(&p.ty) || site::plain(world, &p.ty),
+    })
+}
+
+/// With `VESPER_INLINE_LOG` set to a path, append one line per decision
+/// on a callee over its budget before site folding: `full` (it fits after
+/// folding), `partial` (hot and cold cost) or `size` (it stays a call).
+/// The lane report's tables come from it.
+fn log(line: std::fmt::Arguments<'_>) {
+    use std::io::Write as _;
+    if let Some(path) = std::env::var_os("VESPER_INLINE_LOG")
+        && let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    {
+        let _ = writeln!(file, "{line}");
     }
 }
 
@@ -899,6 +1015,7 @@ impl Rename<'_> {
 
 /// Replace the call at `caller.blocks[b].instructions[i]` with `callee`'s
 /// body. Returns the index of the first block copied from the callee.
+#[allow(clippy::too_many_arguments)]
 fn splice(
     caller: &mut FunctionIr,
     b: usize,
@@ -906,6 +1023,8 @@ fn splice(
     callee: &FunctionIr,
     bindings: &[Binding],
     serial: usize,
+    folded: &site::Folded,
+    split: Option<&site::Split>,
 ) -> usize {
     let next_value = caller
         .values
@@ -1007,7 +1126,33 @@ fn splice(
         block: continuation,
         args: vec![v],
     };
-    for source in &callee.blocks {
+    // The cold side of a partial inlining: the original call, after the
+    // copied blocks.
+    let cold_block = first + callee.blocks.len();
+    let keep = |k: usize| match split {
+        Some(s) => s.hot[k],
+        None => folded.live[k],
+    };
+    for (k, source) in callee.blocks.iter().enumerate() {
+        if !keep(k) {
+            // Control never reaches this copy of the block.
+            caller.blocks.push(Block {
+                entry_token: 0,
+                incoming_tokens: vec![],
+                outgoing_token: 0,
+                params: source.params.iter().map(|v| rename.value(*v)).collect(),
+                instructions: vec![],
+                terminator: Terminator::Unreachable,
+            });
+            continue;
+        }
+        let target = |t: usize| {
+            if split.is_some_and(|s| s.block == k && s.cold == t) {
+                cold_block
+            } else {
+                t + rename.blocks
+            }
+        };
         let mut instructions = Vec::with_capacity(source.instructions.len());
         let mut terminator = None;
         for inst in &source.instructions {
@@ -1022,30 +1167,36 @@ fn splice(
             }
             instructions.push(inst);
         }
-        let terminator = terminator.unwrap_or_else(|| match &source.terminator {
-            Terminator::Return(v) => back(rename.value(*v)),
-            Terminator::Jump { block, args } => Terminator::Jump {
-                block: block + rename.blocks,
-                args: args.iter().map(|v| rename.value(*v)).collect(),
-            },
-            Terminator::Branch { condition, yes, no } => Terminator::Branch {
-                condition: rename.value(*condition),
-                yes: yes + rename.blocks,
-                no: no + rename.blocks,
-            },
-            Terminator::Match { value, arms } => Terminator::Match {
-                value: rename.value(*value),
-                arms: arms
-                    .iter()
-                    .map(|(p, t)| {
-                        let mut p = p.clone();
-                        rename.pattern(&mut p);
-                        (p, t + rename.blocks)
-                    })
-                    .collect(),
-            },
-            Terminator::Unreachable => Terminator::Unreachable,
+        let decided = folded.jumps.get(&k).map(|t| Terminator::Jump {
+            block: target(*t),
+            args: vec![],
         });
+        let terminator = terminator
+            .or(decided)
+            .unwrap_or_else(|| match &source.terminator {
+                Terminator::Return(v) => back(rename.value(*v)),
+                Terminator::Jump { block, args } => Terminator::Jump {
+                    block: target(*block),
+                    args: args.iter().map(|v| rename.value(*v)).collect(),
+                },
+                Terminator::Branch { condition, yes, no } => Terminator::Branch {
+                    condition: rename.value(*condition),
+                    yes: target(*yes),
+                    no: target(*no),
+                },
+                Terminator::Match { value, arms } => Terminator::Match {
+                    value: rename.value(*value),
+                    arms: arms
+                        .iter()
+                        .map(|(p, t)| {
+                            let mut p = p.clone();
+                            rename.pattern(&mut p);
+                            (p, target(*t))
+                        })
+                        .collect(),
+                },
+                Terminator::Unreachable => Terminator::Unreachable,
+            });
         caller.blocks.push(Block {
             entry_token: 0,
             incoming_tokens: vec![],
@@ -1053,6 +1204,21 @@ fn splice(
             params: source.params.iter().map(|v| rename.value(*v)).collect(),
             instructions,
             terminator,
+        });
+    }
+    if split.is_some() {
+        let dest = fresh;
+        caller.values.insert(dest, callee.result.clone());
+        let mut again = call.clone();
+        again.dest = dest;
+        again.token = None;
+        caller.blocks.push(Block {
+            entry_token: 0,
+            incoming_tokens: vec![],
+            outgoing_token: 0,
+            params: vec![],
+            instructions: vec![again],
+            terminator: back(dest),
         });
     }
     first

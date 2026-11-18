@@ -1,0 +1,128 @@
+// Module input of @vesper/loom-audit (see lib.ves): the audit's own words
+// after the calculus tables (documented in src/port.rs).
+use @vesper/loom-calculus::{
+    L
+};
+use @vesper/loom-calculus::decode::{
+    rd,
+    rd_bool,
+    rd_str
+};
+use @vesper/loom-calculus::util::{
+    none
+};
+use self::{
+    A,
+    Adv,
+    Nat,
+    Rng
+};
+
+// The limits (13 words, in field order) and the wrapper's three
+// serialized-size checks (catalog, policy, solution).
+pub fn decode_head(inout s: A) {
+    s.m_input = rd(inout s.l);
+    s.m_string = rd(inout s.l);
+    s.m_jdepth = rd(inout s.l);
+    s.m_jnodes = rd(inout s.l);
+    s.m_entries = rd(inout s.l);
+    s.m_packages = rd(inout s.l);
+    s.m_edges = rd(inout s.l);
+    s.m_roots = rd(inout s.l);
+    s.m_pdepth = rd(inout s.l);
+    s.m_pnodes = rd(inout s.l);
+    s.m_ldepth = rd(inout s.l);
+    s.m_ltokens = rd(inout s.l);
+    s.m_work = rd(inout s.l);
+    s.cat_ok = rd_bool(inout s.l);
+    s.pol_ok = rd_bool(inout s.l);
+    s.sol_ok = rd_bool(inout s.l);
+}
+
+// intro, has_fixed, fixed, include_prerelease.
+pub fn decode_range(inout l: L) -> Rng {
+    let intro = rd(inout l);
+    let has_fixed = rd_bool(inout l);
+    let fixed = rd(inout l);
+    let pre = rd_bool(inout l);
+    Rng {
+        intro: intro,
+        has_fixed: has_fixed,
+        fixed: fixed,
+        pre: pre
+    }
+}
+
+// schema, id, nadv, (id, kind, name, nrange, range*, severity, summary)*,
+// nnative, (name, version, expression)*.
+pub fn decode_catalog(inout s: A) {
+    s.cschema = rd(inout s.l);
+    s.cid = rd_str(inout s.l);
+    let nadv = rd(inout s.l);
+    for i in 0..nadv {
+        let id = rd_str(inout s.l);
+        let kind = rd(inout s.l);
+        let name = rd_str(inout s.l);
+        let nr = rd(inout s.l);
+        let r_at = s.rngs.len();
+        for j in 0..nr {
+            let r = decode_range(inout s.l);
+            s.rngs.push(r);
+        }
+        let sev = rd(inout s.l);
+        let sum = rd_str(inout s.l);
+        s
+            .advs
+            .push(
+            Adv {
+                id: id,
+                kind: kind,
+                name: name,
+                r_at: r_at,
+                r_n: nr,
+                sev: sev,
+                sum: sum
+            }
+        );
+    }
+    let nnat = rd(inout s.l);
+    for i in 0..nnat {
+        let name = rd_str(inout s.l);
+        let ver = rd(inout s.l);
+        let expr = rd_str(inout s.l);
+        s
+            .nats
+            .push(
+            Nat {
+                name: name,
+                ver: ver,
+                expr: expr
+            }
+        );
+    }
+}
+
+// schema, minimum severity, nallow, expression*.
+pub fn decode_policy(inout s: A) {
+    s.pschema = rd(inout s.l);
+    s.minsev = rd(inout s.l);
+    let n = rd(inout s.l);
+    for i in 0..n {
+        let x = rd_str(inout s.l);
+        s.allow.push(x);
+    }
+}
+
+// nsel, (has_license, [license])*, after the solution.
+pub fn decode_licenses(inout s: A) {
+    let n = rd(inout s.l);
+    for i in 0..n {
+        let has = rd_bool(inout s.l);
+        if has {
+            let x = rd_str(inout s.l);
+            s.slic.push(x);
+        } else {
+            s.slic.push(none());
+        }
+    }
+}

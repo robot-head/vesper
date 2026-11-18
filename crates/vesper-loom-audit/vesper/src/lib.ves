@@ -1,0 +1,319 @@
+// @vesper/loom-audit: Vesper port of vesper-loom-audit (port wave P3a
+// lane 4, #1039): catalog and policy validation, the SPDX-subset license
+// expressions, the audit preflight, the shortest dependency paths and the
+// findings of `audit`, and `AffectedRange::contains`.
+//
+// The audit imports @vesper/loom-calculus and runs that package's decoder
+// and solution validator on the calculus state `L` it holds. JSON parsing,
+// the serialized-size checks and the BLAKE3 context digests stay in the
+// Rust wrapper (src/port.rs), which encodes the inputs in the calculus word
+// stream plus the audit's own fields and rebuilds the crate's types from
+// `out`: the encodings are documented there. Messages are built in `dp`.
+use @vesper/loom-calculus::{
+    L
+};
+use @vesper/loom-calculus::decode::{
+    decode_solution,
+    decode_tables,
+    new_l,
+    rd
+};
+use @vesper/loom-calculus::solve::{
+    solve
+};
+use self::input::{
+    decode_catalog,
+    decode_head,
+    decode_licenses,
+    decode_policy,
+    decode_range
+};
+use self::check::{
+    check_catalog,
+    check_limits,
+    check_policy,
+    preflight
+};
+use self::paths::{
+    paths
+};
+use self::report::{
+    findings,
+    out_error,
+    out_ok,
+    range_holds
+};
+
+// One advisory: its ranges are rngs[r_at .. r_at + r_n]. kind is 0 for a
+// Vesper identity, 1 for a native one; id, name and sum are string ids.
+pub copy struct Adv {
+    id: u64,
+    kind: u64,
+    name: u64,
+    r_at: u64,
+    r_n: u64,
+    sev: u64,
+    sum: u64
+}
+
+// An affected interval: versions are table indices.
+pub copy struct Rng {
+    intro: u64,
+    has_fixed: bool,
+    fixed: u64,
+    pre: bool
+}
+
+// A native license claim: name and expression are string ids.
+pub copy struct Nat {
+    name: u64,
+    ver: u64,
+    expr: u64
+}
+
+// A license expression value: whether the policy grants it, and whether it
+// is one grant (license index * 4 + exception index + 1, or + 0).
+pub copy struct Val {
+    ok: bool,
+    single: bool,
+    grant: u64
+}
+
+// All state. Scratch sequences live here, so nothing function-local leaks.
+pub struct A {
+    l: L,
+    out: ChunkSeq[u64],
+    dp: ChunkSeq[u8],
+    // The first error: kind + 1 (0: none), message dp[emo .. emo + eml].
+    err: u64,
+    emo: u64,
+    eml: u64,
+    // License failure: 0 none, 1 unknown, 2 limit; message lmo, lml.
+    lf: u64,
+    lmo: u64,
+    lml: u64,
+    // Limits, in the order of the Rust struct.
+    m_input: u64,
+    m_string: u64,
+    m_jdepth: u64,
+    m_jnodes: u64,
+    m_entries: u64,
+    m_packages: u64,
+    m_edges: u64,
+    m_roots: u64,
+    m_pdepth: u64,
+    m_pnodes: u64,
+    m_ldepth: u64,
+    m_ltokens: u64,
+    m_work: u64,
+    // Serialized-size checks done by the wrapper.
+    cat_ok: bool,
+    pol_ok: bool,
+    sol_ok: bool,
+    work: u64,
+    // The catalog.
+    cschema: u64,
+    cid: u64,
+    advs: ChunkSeq[Adv],
+    rngs: ChunkSeq[Rng],
+    nats: ChunkSeq[Nat],
+    // The policy.
+    pschema: u64,
+    minsev: u64,
+    allow: ChunkSeq[u64],
+    grants: ChunkSeq[bool],
+    // The license of each selection (string id, or none()).
+    slic: ChunkSeq[u64],
+    // License tokens (pool ranges) and the parse position.
+    toff: ChunkSeq[u64],
+    tlen: ChunkSeq[u64],
+    tpos: u64,
+    // Scratch.
+    mark: ChunkSeq[u64],
+    gen: u64,
+    idx: ChunkSeq[u64],
+    tmp: ChunkSeq[u64],
+    // The validated graph: node of each name id, native selection of each
+    // name id (index into gl pairs), both none() when absent.
+    nn: u64,
+    ns: u64,
+    sys_at: u64,
+    nodeof: ChunkSeq[u64],
+    natof: ChunkSeq[u64],
+    // Paths: a path is pw[p_at .. p_at + p_n] of element refs (a node
+    // index, or nn + native index); each package key (node index, or nn +
+    // native index) has a list of path records linked through p_next.
+    pw: ChunkSeq[u64],
+    p_at: ChunkSeq[u64],
+    p_n: ChunkSeq[u64],
+    p_next: ChunkSeq[u64],
+    k_head: ChunkSeq[u64],
+    k_tail: ChunkSeq[u64],
+    k_nodes: ChunkSeq[u64],
+    parent: ChunkSeq[u64],
+    pstamp: ChunkSeq[u64],
+    queue: ChunkSeq[u64],
+    rev: ChunkSeq[u64],
+    deps: ChunkSeq[u64],
+    path_nodes: u64,
+    // Advisories of each identity: a list per (kind, name id) linked
+    // through a_next; the native claims of each name id through n_next.
+    av_head: ChunkSeq[u64],
+    av_tail: ChunkSeq[u64],
+    a_next: ChunkSeq[u64],
+    nl_head: ChunkSeq[u64],
+    nl_tail: ChunkSeq[u64],
+    n_next: ChunkSeq[u64],
+    hits: ChunkSeq[u64],
+    // Findings: issue words of the current package.
+    iw: ChunkSeq[u64],
+    fout: ChunkSeq[u64]
+}
+
+fn new_a(in words: Slice[u64], in text: Slice[u8]) -> A {
+    A {
+        l: new_l(in words, in text),
+        out: ChunkSeq::new[u64](),
+        dp: ChunkSeq::new[u8](),
+        err: 0,
+        emo: 0,
+        eml: 0,
+        lf: 0,
+        lmo: 0,
+        lml: 0,
+        m_input: 0,
+        m_string: 0,
+        m_jdepth: 0,
+        m_jnodes: 0,
+        m_entries: 0,
+        m_packages: 0,
+        m_edges: 0,
+        m_roots: 0,
+        m_pdepth: 0,
+        m_pnodes: 0,
+        m_ldepth: 0,
+        m_ltokens: 0,
+        m_work: 0,
+        cat_ok: true,
+        pol_ok: true,
+        sol_ok: true,
+        work: 0,
+        cschema: 0,
+        cid: 0,
+        advs: ChunkSeq::new[Adv](),
+        rngs: ChunkSeq::new[Rng](),
+        nats: ChunkSeq::new[Nat](),
+        pschema: 0,
+        minsev: 0,
+        allow: ChunkSeq::new[u64](),
+        grants: ChunkSeq::new[bool](),
+        slic: ChunkSeq::new[u64](),
+        toff: ChunkSeq::new[u64](),
+        tlen: ChunkSeq::new[u64](),
+        tpos: 0,
+        mark: ChunkSeq::new[u64](),
+        gen: 0,
+        idx: ChunkSeq::new[u64](),
+        tmp: ChunkSeq::new[u64](),
+        nn: 0,
+        ns: 0,
+        sys_at: 0,
+        nodeof: ChunkSeq::new[u64](),
+        natof: ChunkSeq::new[u64](),
+        pw: ChunkSeq::new[u64](),
+        p_at: ChunkSeq::new[u64](),
+        p_n: ChunkSeq::new[u64](),
+        p_next: ChunkSeq::new[u64](),
+        k_head: ChunkSeq::new[u64](),
+        k_tail: ChunkSeq::new[u64](),
+        k_nodes: ChunkSeq::new[u64](),
+        parent: ChunkSeq::new[u64](),
+        pstamp: ChunkSeq::new[u64](),
+        queue: ChunkSeq::new[u64](),
+        rev: ChunkSeq::new[u64](),
+        deps: ChunkSeq::new[u64](),
+        path_nodes: 0,
+        av_head: ChunkSeq::new[u64](),
+        av_tail: ChunkSeq::new[u64](),
+        a_next: ChunkSeq::new[u64](),
+        nl_head: ChunkSeq::new[u64](),
+        nl_tail: ChunkSeq::new[u64](),
+        n_next: ChunkSeq::new[u64](),
+        hits: ChunkSeq::new[u64](),
+        iw: ChunkSeq::new[u64](),
+        fout: ChunkSeq::new[u64]()
+    }
+}
+
+// `parse_catalog`'s validation: tables, limits, size check, catalog.
+pub fn validate_catalog(in words: Slice[u64], in text: Slice[u8]) -> A {
+    let mut s = new_a(in words, in text);
+    decode_tables(inout s.l);
+    decode_head(inout s);
+    decode_catalog(inout s);
+    check_catalog(inout s);
+    if s.err != 0 {
+        out_error(inout s);
+    } else {
+        out_ok(inout s);
+    }
+    s
+}
+
+// `parse_policy`'s validation: tables, limits, size check, policy.
+pub fn validate_policy(in words: Slice[u64], in text: Slice[u8]) -> A {
+    let mut s = new_a(in words, in text);
+    decode_tables(inout s.l);
+    decode_head(inout s);
+    decode_policy(inout s);
+    check_policy(inout s);
+    if s.err != 0 {
+        out_error(inout s);
+    } else {
+        out_ok(inout s);
+    }
+    s
+}
+
+// `audit`: tables, limits, size checks, catalog, policy, the solution and
+// each selection's license.
+pub fn audit(in words: Slice[u64], in text: Slice[u8]) -> A {
+    let mut s = new_a(in words, in text);
+    decode_tables(inout s.l);
+    decode_head(inout s);
+    decode_catalog(inout s);
+    decode_policy(inout s);
+    decode_solution(inout s.l);
+    decode_licenses(inout s);
+    check_limits(inout s);
+    if s.err == 0 {
+        check_catalog(inout s);
+    }
+    if s.err == 0 {
+        check_policy(inout s);
+    }
+    if s.err == 0 {
+        s.work = s.m_work;
+        preflight(inout s);
+    }
+    if s.err == 0 {
+        solve(inout s.l);
+        paths(inout s);
+    }
+    if s.err == 0 {
+        findings(inout s);
+    }
+    if s.err != 0 {
+        out_error(inout s);
+    }
+    s
+}
+
+// `AffectedRange::contains`: tables, then the range and the version.
+pub fn range_contains(in words: Slice[u64], in text: Slice[u8]) -> bool {
+    let mut s = new_a(in words, in text);
+    decode_tables(inout s.l);
+    let r = decode_range(inout s.l);
+    let v = rd(inout s.l);
+    range_holds(in s.l, in r, v)
+}

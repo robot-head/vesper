@@ -1,0 +1,397 @@
+// Module report of @vesper/loom-audit (see lib.ves): the findings of
+// `audit` per reachable package, the outcome, and the result words in `out`
+// (documented in src/port.rs).
+use @vesper/loom-calculus::{
+    L
+};
+use @vesper/loom-calculus::util::{
+    gnode,
+    none,
+    slen,
+    sw,
+    ver,
+    ver_ord
+};
+use self::{
+    A,
+    Rng
+};
+use self::license::{
+    parse
+};
+use self::paths::{
+    ref_name,
+    ref_ver
+};
+use self::util::{
+    adv,
+    e_limit,
+    fail,
+    lit,
+    nat,
+    prec_ord,
+    rng,
+    sat_add,
+    setw,
+    spend,
+    str_len,
+    word
+};
+
+// `AffectedRange::contains`.
+pub fn range_holds(in l: L, in r: Rng, v: u64) -> bool {
+    (r.pre || slen(in l, ver(in l, v).pre) == 0)
+        && prec_ord(in l, v, r.intro)
+        != 0
+        && (!r.has_fixed || prec_ord(in l, v, r.fixed) == 0)
+}
+
+fn w(inout s: A, x: u64) {
+    s.out.push(x);
+}
+
+pub fn out_ok(inout s: A) {
+    w(inout s, 0);
+}
+
+// 1, kind, message offset, length.
+pub fn out_error(inout s: A) {
+    s.out.clear();
+    let kind = wrapping_sub(s.err, 1);
+    let mo = s.emo;
+    let ml = s.eml;
+    s.out.push(1);
+    s.out.push(kind);
+    s.out.push(mo);
+    s.out.push(ml);
+}
+
+fn push_list(
+    inout head: ChunkSeq[u64],
+    inout tail: ChunkSeq[u64],
+    inout next: ChunkSeq[u64],
+    key: u64,
+    item: u64
+) {
+    let t = sw(in tail, key);
+    if t == none() {
+        head.try_set(key, item);
+    } else {
+        next.try_set(t, item);
+    }
+    tail.try_set(key, item);
+}
+
+// Advisories and native claims by package key (only keys in the graph).
+fn index_catalog(inout s: A) {
+    let nk = wrapping_add(s.nn, s.ns);
+    for i in 0..nk {
+        s.av_head.push(none());
+        s.av_tail.push(none());
+        s.nl_head.push(none());
+        s.nl_tail.push(none());
+    }
+    for a in 0..s.advs.len() {
+        s.a_next.push(none());
+        let x = adv(in s, a);
+        let key = if x.kind == 0 {
+            word(in s.nodeof, x.name)
+        } else {
+            let j = word(in s.natof, x.name);
+            if j == none() {
+                none()
+            } else {
+                wrapping_add(s.nn, j)
+            }
+        };
+        if key != none() {
+            push_list(inout s.av_head, inout s.av_tail, inout s.a_next, key, a);
+        }
+    }
+    for i in 0..s.nats.len() {
+        s.n_next.push(none());
+        let x = nat(in s, i);
+        let j = word(in s.natof, x.name);
+        if j != none() {
+            push_list(inout s.nl_head, inout s.nl_tail, inout s.n_next, wrapping_add(s.nn, j), i);
+        }
+    }
+}
+
+// Total path nodes of key.
+fn key_nodes(in s: A, key: u64) -> u64 {
+    let mut n: u64 = 0;
+    let mut p = word(in s.k_head, key);
+    loop {
+        if p == none() {
+            break;
+        }
+        n = sat_add(n, word(in s.p_n, p));
+        p = word(in s.p_next, p);
+    }
+    n
+}
+
+// Write the element ref r: kind, name id, version.
+fn elem(inout s: A, r: u64) {
+    let kind: u64 = if r < s.nn {
+        0
+    } else {
+        1
+    };
+    let name = ref_name(in s, r);
+    let v = ref_ver(in s, r);
+    s.fout.push(kind);
+    s.fout.push(name);
+    s.fout.push(v);
+}
+
+// Sort the hit advisories by ID (stable insertion sort; few hits).
+fn sort_hits(inout s: A) {
+    let n = s.hits.len();
+    for i in 1..n {
+        let v = word(in s.hits, i);
+        let vid = adv(in s, v).id;
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let u = word(in s.hits, wrapping_sub(j, 1));
+            if adv(in s, u).id <= vid {
+                break;
+            }
+            setw(inout s.hits, j, u);
+            j = wrapping_sub(j, 1);
+        }
+        setw(inout s.hits, j, v);
+    }
+}
+
+// One package's findings: package, npaths, (n, element*)*, nissues,
+// issue words (from iw).
+fn emit_group(inout s: A, key: u64, nissues: u64) {
+    elem(inout s, key);
+    let mut np: u64 = 0;
+    let mut p = word(in s.k_head, key);
+    loop {
+        if p == none() {
+            break;
+        }
+        np = wrapping_add(np, 1);
+        p = word(in s.p_next, p);
+    }
+    s.fout.push(np);
+    p = word(in s.k_head, key);
+    loop {
+        if p == none() {
+            break;
+        }
+        let at = word(in s.p_at, p);
+        let n = word(in s.p_n, p);
+        s.fout.push(n);
+        for i in 0..n {
+            let r = word(in s.pw, wrapping_add(at, i));
+            elem(inout s, r);
+        }
+        p = word(in s.p_next, p);
+    }
+    s.fout.push(nissues);
+    for i in 0..s.iw.len() {
+        let x = word(in s.iw, i);
+        s.fout.push(x);
+    }
+}
+
+// The findings, then the report words.
+pub fn findings(inout s: A) {
+    index_catalog(inout s);
+    let node_at = match s.l.snaps.try_get(0) {
+        Option::Some(x) => x.node_at,
+        Option::None => 0,
+    };
+    let nadv = s.advs.len();
+    let mut unknown = false;
+    let mut denied = false;
+    let mut nfind: u64 = 0;
+    let mut report_nodes: u64 = 0;
+    let mut ngroups: u64 = 0;
+    let k = s.l.k;
+    for pass in 0..2 {
+        for id in 0..k {
+            let j = if pass == 0 {
+                word(in s.nodeof, id)
+            } else {
+                word(in s.natof, id)
+            };
+            if j != none() {
+                let key = if pass == 0 {
+                    j
+                } else {
+                    wrapping_add(s.nn, j)
+                };
+                // Advisories: one unit per advisory, one per range of the
+                // advisories of this identity (as the Rust loop spends).
+                let mut cost = nadv;
+                s.hits.clear();
+                let v = ref_ver(in s, key);
+                let mut a = word(in s.av_head, key);
+                loop {
+                    if a == none() {
+                        break;
+                    }
+                    let x = adv(in s, a);
+                    cost = sat_add(cost, x.r_n);
+                    let mut affected = false;
+                    for r in 0..x.r_n {
+                        let rr = rng(in s, wrapping_add(x.r_at, r));
+                        if range_holds(in s.l, in rr, v) {
+                            affected = true;
+                        }
+                    }
+                    if affected && x.sev >= s.minsev {
+                        s.hits.push(a);
+                    }
+                    a = word(in s.a_next, a);
+                }
+                if !spend(inout s, cost) {
+                    return;
+                }
+                sort_hits(inout s);
+                s.iw.clear();
+                let mut nissues = s.hits.len();
+                for h in 0..s.hits.len() {
+                    denied = true;
+                    s.iw.push(0);
+                    s.iw.push(word(in s.hits, h));
+                }
+                // The license expression.
+                let mut src: u64 = 0;
+                let mut si: u64 = 0;
+                let mut eid = none();
+                if pass == 0 {
+                    let g = gnode(in s.l, wrapping_add(node_at, j));
+                    si = wrapping_sub(g.man, s.l.sel_at);
+                    eid = word(in s.slic, si);
+                    if eid != none() {
+                        src = 1;
+                    }
+                } else {
+                    let name = ref_name(in s, key);
+                    let mut c = word(in s.nl_head, key);
+                    loop {
+                        if c == none() {
+                            break;
+                        }
+                        let y = nat(in s, c);
+                        if y.name == name && ver_ord(in s.l, y.ver, v) == 1 {
+                            src = 2;
+                            si = c;
+                            eid = y.expr;
+                            break;
+                        }
+                        c = word(in s.n_next, c);
+                    }
+                }
+                let lc = if eid == none() {
+                    1
+                } else {
+                    str_len(in s, eid)
+                };
+                if !spend(inout s, lc) {
+                    return;
+                }
+                if eid == none() {
+                    unknown = true;
+                    nissues = wrapping_add(nissues, 1);
+                    let mo = s.dp.len();
+                    lit(inout s, "license declaration absent");
+                    s.iw.push(2);
+                    s.iw.push(0);
+                    s.iw.push(0);
+                    s.iw.push(mo);
+                    s.iw.push(wrapping_sub(s.dp.len(), mo));
+                } else {
+                    let val = parse(inout s, eid);
+                    if s.lf == 2 {
+                        s.err = wrapping_add(e_limit(), 1);
+                        s.emo = s.lmo;
+                        s.eml = s.lml;
+                        return;
+                    }
+                    if s.lf == 1 {
+                        nissues = wrapping_add(nissues, 1);
+                        unknown = true;
+                        s.iw.push(2);
+                        s.iw.push(src);
+                        s.iw.push(si);
+                        s.iw.push(s.lmo);
+                        s.iw.push(s.lml);
+                    } else if !val.ok {
+                        nissues = wrapping_add(nissues, 1);
+                        denied = true;
+                        s.iw.push(1);
+                        s.iw.push(src);
+                        s.iw.push(si);
+                    }
+                }
+                if nissues > 0 {
+                    let nodes = key_nodes(in s, key);
+                    for i in 0..nissues {
+                        if !spend(inout s, nodes) {
+                            return;
+                        }
+                        let t = wrapping_add(report_nodes, nodes);
+                        if t < nodes {
+                            fail(inout s, e_limit(), "report path nodes");
+                            return;
+                        }
+                        report_nodes = t;
+                        if report_nodes > s.m_pnodes || nfind >= s.m_entries {
+                            fail(inout s, e_limit(), "report path nodes/findings");
+                            return;
+                        }
+                        nfind = wrapping_add(nfind, 1);
+                    }
+                    emit_group(inout s, key, nissues);
+                    ngroups = wrapping_add(ngroups, 1);
+                }
+            }
+        }
+    }
+    // 0, k, occurrence*k, outcome, has_policy_violations, nvesper,
+    // nnative, ngroups, group*.
+    s.out.clear();
+    w(inout s, 0);
+    let k2 = s.l.k;
+    w(inout s, k2);
+    for i in 0..k2 {
+        let o = sw(in s.l.rocc, i);
+        w(inout s, o);
+    }
+    let outcome: u64 = if unknown {
+        2
+    } else if denied {
+        1
+    } else {
+        0
+    };
+    w(inout s, outcome);
+    w(
+        inout s,
+        if denied {
+            1
+        } else {
+            0
+        }
+    );
+    let nn = s.nn;
+    let ns = s.ns;
+    w(inout s, nn);
+    w(inout s, ns);
+    w(inout s, ngroups);
+    for i in 0..s.fout.len() {
+        let x = word(in s.fout, i);
+        s.out.push(x);
+    }
+}

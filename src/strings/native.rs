@@ -76,7 +76,7 @@ impl<M: Module> Codegen<'_, '_, M> {
     fn str_append(&mut self, h: ir::Value, src: ir::Value, n: ir::Value) -> Result<(), String> {
         let len = self.str_word(h, LEN);
         let needed = self.b.ins().iadd(len, n);
-        self.seq_reserve(h, needed, 1)?;
+        self.seq_reserve(h, needed, 1, None)?;
         let data = self.str_word(h, DATA);
         let dst = self.b.ins().iadd(data, len);
         self.seq_copy(dst, src, n);
@@ -180,7 +180,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let (needed, over) = self.b.ins().uadd_overflow(len, n);
                 let max = self.b.ins().iconst(types::I64, -1);
                 let needed = self.b.ins().select(over, max, needed);
-                self.seq_reserve(s, needed, 1)?;
+                self.seq_reserve(s, needed, 1, None)?;
                 self.zero()
             }
         })

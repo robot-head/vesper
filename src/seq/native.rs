@@ -64,7 +64,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         &mut self,
         name: &str,
         args: &[ir::Value],
-    ) -> Result<(), String> {
+    ) -> Result<ir::Value, String> {
         let jit = std::any::type_name::<M>().contains("JITModule");
         if !jit {
             if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
@@ -85,8 +85,32 @@ impl<M: Module> Codegen<'_, '_, M> {
             .declare_function(name, linkage, &signature)
             .map_err(|e| e.to_string())?;
         let reference = self.m.declare_func_in_func(id, self.b.func);
-        self.b.ins().call(reference, args);
-        Ok(())
+        let call = self.b.ins().call(reference, args);
+        Ok(self.b.inst_results(call)[0])
+    }
+
+    /// The address of the shared empty header (#1021): what `new` and
+    /// `with_capacity(0)` return. It is `{0, 0, null}`, freeing it is a
+    /// no-op and growing it allocates a fresh header, which generated code
+    /// writes back to the receiver's place ([`Self::seq_reserve`]).
+    fn seq_empty_header(&mut self) -> Result<ir::Value, String> {
+        if std::any::type_name::<M>().contains("JITModule") {
+            let address = crate::seq::native_runtime::empty_header();
+            return Ok(self.b.ins().iconst(types::I64, address as i64));
+        }
+        if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
+            return Err(
+                "ChunkSeq in a freestanding image needs an allocator; the generated one uses the C library".into(),
+            );
+        }
+        aot_runtime::define(self.m)?;
+        let Some(cranelift_module::FuncOrDataId::Data(id)) =
+            self.m.get_name(aot_runtime::EMPTY_HEADER)
+        else {
+            return Err("the sequence runtime lacks its empty header".into());
+        };
+        let data = self.m.declare_data_in_func(id, self.b.func);
+        Ok(self.b.ins().symbol_value(types::I64, data))
     }
 
     /// The drop slots of graph `f`, with their string storage allocated and
@@ -476,13 +500,17 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(())
     }
 
-    /// Grows `handle` to hold `needed` elements when its capacity is short.
+    /// Grows `handle` to hold `needed` elements when its capacity is short,
+    /// and returns the handle to use afterwards. Growing the shared empty
+    /// header makes a new one (#1021), which is written back to `receiver`,
+    /// the sequence's place; a string (`receiver` is `None`) grows in place.
     pub(super) fn seq_reserve(
         &mut self,
         handle: ir::Value,
         needed: ir::Value,
         stride: i64,
-    ) -> Result<(), String> {
+        receiver: Option<&Expr>,
+    ) -> Result<ir::Value, String> {
         let cap = self.seq_word(handle, CAP);
         let fits = self
             .b
@@ -490,12 +518,99 @@ impl<M: Module> Codegen<'_, '_, M> {
             .icmp(IntCC::UnsignedLessThanOrEqual, needed, cap);
         let grow = self.b.create_block();
         let done = self.b.create_block();
-        self.branch(fits, done, &[], grow, &[]);
+        let Some(receiver) = receiver else {
+            self.branch(fits, done, &[], grow, &[]);
+            self.b.switch_to_block(grow);
+            let stride = self.b.ins().iconst(types::I64, stride);
+            self.seq_runtime_call("vesper_seq_grow", &[handle, stride, needed])?;
+            self.jump(done, &[]);
+            self.b.switch_to_block(done);
+            return Ok(handle);
+        };
+        self.b.append_block_param(done, types::I64);
+        self.branch(fits, done, &[handle.into()], grow, &[]);
         self.b.switch_to_block(grow);
         let stride = self.b.ins().iconst(types::I64, stride);
-        self.seq_runtime_call("vesper_seq_grow", &[handle, stride, needed])?;
+        let grown = self.seq_runtime_call("vesper_seq_grow", &[handle, stride, needed])?;
+        self.seq_write_back(receiver, grown)?;
+        self.jump(done, &[grown.into()]);
+        self.b.switch_to_block(done);
+        Ok(self.b.block_params(done)[0])
+    }
+
+    /// [`Self::seq_reserve`] followed by `tail`, which writes through the
+    /// handle. `tail` is emitted on the fast path with `handle` and on the
+    /// growth path with the grown handle, so the fast path carries no block
+    /// parameter for a handle that did not change.
+    pub(super) fn seq_reserve_then(
+        &mut self,
+        handle: ir::Value,
+        needed: ir::Value,
+        stride: i64,
+        receiver: Option<&Expr>,
+        mut tail: impl FnMut(&mut Self, ir::Value) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let cap = self.seq_word(handle, CAP);
+        let fits = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, needed, cap);
+        let fast = self.b.create_block();
+        let grow = self.b.create_block();
+        let done = self.b.create_block();
+        self.branch(fits, fast, &[], grow, &[]);
+        self.b.switch_to_block(fast);
+        tail(self, handle)?;
+        self.jump(done, &[]);
+        self.b.switch_to_block(grow);
+        self.b.set_cold_block(grow);
+        let stride = self.b.ins().iconst(types::I64, stride);
+        let grown = self.seq_runtime_call("vesper_seq_grow", &[handle, stride, needed])?;
+        let grown = match receiver {
+            Some(place) => {
+                self.seq_write_back(place, grown)?;
+                grown
+            }
+            None => handle,
+        };
+        tail(self, grown)?;
         self.jump(done, &[]);
         self.b.switch_to_block(done);
+        Ok(())
+    }
+
+    /// Stores `len` as the length of `h` when `changed` holds. A length
+    /// that stays the same is not stored, so the shared empty header, which
+    /// threads use at once, is never written (#1021).
+    pub(super) fn seq_set_len_if(&mut self, h: ir::Value, changed: ir::Value, len: ir::Value) {
+        let store = self.b.create_block();
+        let done = self.b.create_block();
+        self.branch(changed, store, &[], done, &[]);
+        self.b.switch_to_block(store);
+        self.seq_set_word(h, LEN, len);
+        self.jump(done, &[]);
+        self.b.switch_to_block(done);
+    }
+
+    /// Stores a grown sequence handle into its place: a local (register or
+    /// `inout` pointer), or a field path through memory.
+    fn seq_write_back(&mut self, place: &Expr, handle: ir::Value) -> Result<(), String> {
+        let name = format!("$seq_grown{}", handle.as_u32());
+        let var = self.b.declare_var(types::I64);
+        self.def_var(var, handle);
+        self.vars.insert(name.clone(), var);
+        let ty = self.ty(place);
+        self.local_types.insert(name.clone(), ty);
+        let value = Expr {
+            kind: ExprKind::Name(name.clone()),
+            span: 0..0,
+        };
+        self.expr(&Expr {
+            kind: ExprKind::Assign("=".into(), Box::new(place.clone()), Box::new(value)),
+            span: place.span.clone(),
+        })?;
+        self.vars.remove(&name);
+        self.local_types.remove(&name);
         Ok(())
     }
 
@@ -527,6 +642,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         args: &[ir::Value],
         arg_types: &[Type],
         result: &Type,
+        receiver: Option<&Expr>,
     ) -> Result<ir::Value, String> {
         if let SeqOp::Str(op) = op {
             return self.str_op(op, args);
@@ -534,7 +650,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         if let Some(value) = self.hoisted_seq_op(op, args, arg_types)? {
             return Ok(value);
         }
-        if let Some(value) = self.byte_seq_op(op, args, arg_types)? {
+        // A growing operation on a sequence writes a new handle back to its
+        // place (#1021); a string grows in place.
+        let receiver =
+            receiver.filter(|_| op.mutates() && arg_types.first().is_some_and(seq::is_seq_type));
+        if let Some(value) = self.byte_seq_op(op, args, arg_types, receiver)? {
             return Ok(value);
         }
         if op == SeqOp::SubSlice && arg_types.first().is_some_and(crate::strings::is_text) {
@@ -555,16 +675,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .ok_or_else(|| format!("native ChunkSeq::{} lacks an operand", op.name()))
         };
         Ok(match op {
-            SeqOp::New | SeqOp::WithCapacity => {
-                // `new` keeps room for a few elements inline after the
-                // header, so the first pushes allocate nothing (#984).
-                let cap = if op == SeqOp::New {
-                    self.b
-                        .ins()
-                        .iconst(types::I64, crate::seq::native_runtime::new_capacity(stride))
-                } else {
-                    arg(0)?
-                };
+            SeqOp::New => {
+                // An empty sequence shares one static header and allocates
+                // on its first growth, as Rust's `Vec::new` (#1021).
+                self.seq_empty_header()?
+            }
+            SeqOp::WithCapacity => {
+                let cap = arg(0)?;
                 let stride = self.b.ins().iconst(types::I64, stride);
                 let mut signature = self.m.make_signature();
                 signature.params.push(AbiParam::new(types::I64));
@@ -596,11 +713,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let h = arg(0)?;
                 let len = self.seq_word(h, LEN);
                 let next = self.b.ins().iadd_imm(len, 1);
-                self.seq_reserve(h, next, stride)?;
-                let zero = self.zero();
-                let addr = self.seq_elem_addr(h, zero, len, stride);
-                self.seq_store_elem(addr, arg(1)?, &elem)?;
-                self.seq_set_word(h, LEN, next);
+                let value = arg(1)?;
+                self.seq_reserve_then(h, next, stride, receiver, |this, h| {
+                    let zero = this.zero();
+                    let addr = this.seq_elem_addr(h, zero, len, stride);
+                    this.seq_store_elem(addr, value, &elem)?;
+                    this.seq_set_word(h, LEN, next);
+                    Ok(())
+                })?;
                 self.zero()
             }
             SeqOp::Pop => {
@@ -666,7 +786,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let zero = self.zero();
                 let len = self.seq_word(h, LEN);
                 self.seq_drop_range(h, zero, len, stride, &elem)?;
-                self.seq_set_word(h, LEN, zero);
+                let some = self.b.ins().icmp_imm(IntCC::NotEqual, len, 0);
+                self.seq_set_len_if(h, some, zero);
                 zero
             }
             SeqOp::Truncate => {
@@ -677,7 +798,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let next = self.b.ins().select(shorter, n, len);
                 let removed = self.b.ins().isub(len, next);
                 self.seq_drop_range(h, next, removed, stride, &elem)?;
-                self.seq_set_word(h, LEN, next);
+                self.seq_set_len_if(h, shorter, next);
                 self.zero()
             }
             SeqOp::Reserve => {
@@ -688,7 +809,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let (needed, over) = self.b.ins().uadd_overflow(len, arg(1)?);
                 let max = self.b.ins().iconst(types::I64, -1);
                 let needed = self.b.ins().select(over, max, needed);
-                self.seq_reserve(h, needed, stride)?;
+                self.seq_reserve_then(h, needed, stride, receiver, |_, _| Ok(()))?;
                 self.zero()
             }
             SeqOp::Extend => {
@@ -696,13 +817,16 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let (sh, sstart, slen) = self.seq_view(arg(1)?, &arg_types[1]);
                 let len = self.seq_word(h, LEN);
                 let needed = self.b.ins().iadd(len, slen);
-                self.seq_reserve(h, needed, stride)?;
-                let zero = self.zero();
-                let dst = self.seq_elem_addr(h, zero, len, stride);
-                let src = self.seq_elem_addr(sh, sstart, zero, stride);
-                let bytes = self.b.ins().imul_imm(slen, stride);
-                self.seq_move(dst, src, bytes);
-                self.seq_set_word(h, LEN, needed);
+                self.seq_reserve_then(h, needed, stride, receiver, |this, h| {
+                    let zero = this.zero();
+                    let dst = this.seq_elem_addr(h, zero, len, stride);
+                    let src = this.seq_elem_addr(sh, sstart, zero, stride);
+                    let bytes = this.b.ins().imul_imm(slen, stride);
+                    this.seq_move(dst, src, bytes);
+                    let some = this.b.ins().icmp_imm(IntCC::NotEqual, slen, 0);
+                    this.seq_set_len_if(h, some, needed);
+                    Ok(())
+                })?;
                 self.zero()
             }
             SeqOp::Finish => {
@@ -731,7 +855,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             | SeqOp::FindEither
             | SeqOp::FindNotIn
             | SeqOp::EqIgnoreAsciiCase
-            | SeqOp::ExtendAsciiLowercase => {
+            | SeqOp::ExtendAsciiLowercase
+            | SeqOp::MakeAsciiLowercase { .. } => {
                 unreachable!("string, hoisted and byte operations return above")
             }
             SeqOp::Swap | SeqOp::Replace => {
@@ -953,6 +1078,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         if op.place_primitive() {
             return Some(self.seq_place_primitive(op, &operands, None));
         }
+        let receiver = operands
+            .first()
+            .map(|e| (*e).clone())
+            .filter(|_| op.has_receiver());
         Some((|| {
             let mut values = vec![];
             let mut types = vec![];
@@ -967,7 +1096,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 types.push(self.ty(o));
             }
             let result = self.ty(e);
-            self.seq_op(op, &values, &types, &result)
+            self.seq_op(op, &values, &types, &result, receiver.as_ref())
         })())
     }
 }

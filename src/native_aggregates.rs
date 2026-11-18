@@ -38,15 +38,279 @@ pub(super) enum Home {
         offset: i32,
         parent_ty: Type,
     },
+    /// The destination of the `place = value` write at instruction `at`
+    /// (block, index) of the graph (port speed lane 2, #1022).
+    Place { place: String, at: (usize, usize) },
+}
+
+/// How many joins (block parameters, pass-through locals) a value may pass
+/// through to its home. Joins outside loops form a DAG, so this only bounds
+/// the work of a long `else if` ladder.
+const MAX_DEPTH: usize = 64;
+
+/// The facts about graph `f` that [`plan`] consults.
+struct Graph<'a> {
+    world: &'a World,
+    f: &'a FunctionIr,
+    generics: &'a BTreeMap<String, Type>,
+    uses: BTreeMap<ValueId, usize>,
+    /// The defining instruction of each value: (block, index).
+    defs: BTreeMap<ValueId, (usize, usize)>,
+    /// The block whose parameter each block parameter is.
+    params: BTreeMap<ValueId, usize>,
+    /// The predecessors of each block, and whether every edge into it is a
+    /// `Jump` (which alone passes block arguments).
+    preds: BTreeMap<usize, Vec<usize>>,
+    only_jumps: BTreeSet<usize>,
+    /// Blocks on a cycle (a loop header or body).
+    cyclic: BTreeSet<usize>,
+    result: Type,
+    /// True when the graph is nested in another (a handled body or clause):
+    /// its locals may be the enclosing graph's.
+    nested: bool,
+    /// How often each local is named: bound, read, written, lent as a
+    /// place or captured.
+    mentions: BTreeMap<String, usize>,
+}
+
+impl Graph<'_> {
+    fn ty(&self, t: &Type) -> Type {
+        crate::numeric::default_type(&substitute(t, self.generics))
+    }
+    fn value_ty(&self, id: ValueId) -> Option<Type> {
+        self.f.values.get(&id).map(|t| self.ty(t))
+    }
+    /// A constructor or direct call: its storage is fresh unless it has a
+    /// home.
+    fn candidate(&self, op: &Op) -> bool {
+        match op {
+            Op::Data(..) | Op::Tuple(_) => true,
+            Op::Call { callee, .. } => self.world.functions.contains_key(callee),
+            _ => false,
+        }
+    }
+    fn op(&self, id: ValueId) -> Option<&Op> {
+        let (b, i) = self.defs.get(&id)?;
+        Some(&self.f.blocks[*b].instructions[*i].op)
+    }
+    /// The home of value `id` of type `own`, from its single consumer after
+    /// instruction `after` of block `block` (`None`: from the block's start,
+    /// for a block parameter).
+    fn consumer_home(
+        &self,
+        block: usize,
+        after: Option<usize>,
+        id: ValueId,
+        own: &Type,
+        depth: usize,
+    ) -> Option<Home> {
+        let b = &self.f.blocks[block];
+        let start = after.map_or(0, |a| a + 1);
+        let consumer = b.instructions[start..]
+            .iter()
+            .enumerate()
+            .find(|(_, later)| crate::ir_inline::operands(&later.op).contains(&id))
+            .map(|(k, later)| (start + k, later));
+        let world = self.world;
+        match consumer {
+            Some((_, later)) => match &later.op {
+                Op::Data(name, fields) => fields
+                    .iter()
+                    .find(|(_, v)| *v == id)
+                    .map(|(n, _)| n.clone())
+                    .filter(|n| {
+                        field_type(world, &self.ty(&later.ty), Some(name), n).as_ref() == Some(own)
+                    })
+                    .and_then(|n| {
+                        field_home(world, later.dest, &self.ty(&later.ty), Some(name), &n)
+                    }),
+                Op::Tuple(ids) => ids
+                    .iter()
+                    .position(|v| *v == id)
+                    .map(|i| i.to_string())
+                    .filter(|n| {
+                        field_type(world, &self.ty(&later.ty), None, n).as_ref() == Some(own)
+                    })
+                    .and_then(|n| field_home(world, later.dest, &self.ty(&later.ty), None, &n)),
+                Op::Exit { value, owner } => {
+                    (*value == id && *owner == self.f.name && *own == self.result)
+                        .then_some(Home::Result)
+                }
+                Op::Bind { pattern, value } if *value == id => {
+                    let (k, read) = self.pass_through(block, consumer.map(|(k, _)| k)?, pattern)?;
+                    (self.value_ty(read).as_ref() == Some(own) && self.uses.get(&read) == Some(&1))
+                        .then(|| self.consumer_home(block, Some(k), read, own, depth + 1))
+                        .flatten()
+                }
+                Op::Write { place, op, value } => {
+                    let at = (block, consumer.map(|(k, _)| k)?);
+                    (op == "=" && *value == id && self.place_type(place).as_ref() == Some(own))
+                        .then(|| Home::Place {
+                            place: place.clone(),
+                            at,
+                        })
+                        .filter(|_| drop_free(world, own))
+                }
+                _ => None,
+            },
+            None => match &b.terminator {
+                Terminator::Return(v) if *v == id => (*own == self.result).then_some(Home::Result),
+                Terminator::Jump {
+                    block: target,
+                    args,
+                } if args.iter().filter(|v| **v == id).count() == 1 => {
+                    let k = args.iter().position(|v| *v == id)?;
+                    self.param_home(*target, k, own, depth + 1)
+                }
+                _ => None,
+            },
+        }
+    }
+    /// The home of parameter `k` of block `target`, when every value that
+    /// reaches it is a single-use constructor or call of type `own` that can
+    /// be built there (through more single-use parameters, too).
+    fn param_home(&self, target: usize, k: usize, own: &Type, depth: usize) -> Option<Home> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        let p = *self.f.blocks[target].params.get(k)?;
+        if self.uses.get(&p) != Some(&1) || self.value_ty(p).as_ref() != Some(own) {
+            return None;
+        }
+        self.sources(p, depth)?;
+        self.consumer_home(target, None, p, own, depth)
+    }
+    /// The constructors and calls whose values reach block parameter `p`,
+    /// and the parameters they pass through (`p` included); `None` when some
+    /// value reaching `p` cannot be built in `p`'s home.
+    fn sources(&self, p: ValueId, depth: usize) -> Option<(Vec<ValueId>, Vec<ValueId>)> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        let target = *self.params.get(&p)?;
+        let k = self.f.blocks[target].params.iter().position(|v| *v == p)?;
+        if self.cyclic.contains(&target) || !self.only_jumps.contains(&target) {
+            return None;
+        }
+        let own = self.value_ty(p)?;
+        let mut built = vec![];
+        let mut through = vec![p];
+        for pred in self.preds.get(&target)? {
+            let Terminator::Jump { args, .. } = &self.f.blocks[*pred].terminator else {
+                return None;
+            };
+            let w = *args.get(k)?;
+            if self.value_ty(w).is_some_and(|t| t.name() == "Never") {
+                // The edge is never taken: control left before the jump.
+                continue;
+            }
+            if self.uses.get(&w) != Some(&1) || self.value_ty(w).as_ref() != Some(&own) {
+                return None;
+            }
+            match self.defs.get(&w) {
+                Some((b, _)) if *b == *pred && self.op(w).is_some_and(|op| self.candidate(op)) => {
+                    built.push(w)
+                }
+                Some(_) => return None,
+                None if self.params.get(&w) == Some(pred) => {
+                    let (more_built, more_through) = self.sources(w, depth + 1)?;
+                    built.extend(more_built);
+                    through.extend(more_through);
+                }
+                None => return None,
+            }
+        }
+        Some((built, through))
+    }
+    /// The one `Read` of the local that the `let` at instruction `at` of
+    /// `block` binds, when that local is a pass-through: bound once, read
+    /// once later in the same block as a whole move, and named nowhere
+    /// else, with a type that drops nothing. The read then yields the
+    /// bound storage itself, so the bound value can be built in the read's
+    /// home.
+    fn pass_through(&self, block: usize, at: usize, pattern: &Pattern) -> Option<(usize, ValueId)> {
+        let PatternKind::Bind(name) = &pattern.kind else {
+            return None;
+        };
+        if self.mentions.get(name) != Some(&2)
+            || self.f.params.iter().any(|p| &p.name == name)
+            || self.f.external_captures.contains(name)
+            || !self
+                .f
+                .locals
+                .get(name)
+                .is_some_and(|t| drop_free(self.world, &self.ty(t)))
+        {
+            return None;
+        }
+        self.f.blocks[block].instructions[at + 1..]
+            .iter()
+            .enumerate()
+            .find_map(|(k, inst)| match &inst.op {
+                Op::Read {
+                    root, path, pass, ..
+                } if root == name && path.is_empty() && *pass == Pass::Sink => {
+                    Some((at + 1 + k, inst.dest))
+                }
+                _ => None,
+            })
+    }
+    /// The type of place `a.b.c`, through struct fields.
+    fn place_type(&self, place: &str) -> Option<Type> {
+        let mut parts = place.split('.');
+        let mut ty = self.ty(self.f.locals.get(parts.next()?)?);
+        for field in parts {
+            let layout = Layout::of(self.world, &ty).ok()?;
+            let LayoutKind::Product(fields) = &layout.kind else {
+                return None;
+            };
+            ty = crate::numeric::default_type(&fields.iter().find(|f| f.name == field)?.ty);
+        }
+        Some(ty)
+    }
+    /// True when a fault (a `Fail` or an effect that does not resume)
+    /// between the first in-place store into `place` and its write could
+    /// leave the half-written destination visible: the root is a parameter
+    /// (an `inout` caller's place) or a local of an enclosing graph.
+    fn observable(&self, place: &str) -> bool {
+        let root = place.split('.').next().unwrap_or("");
+        self.nested
+            || !self.f.locals.contains_key(root)
+            || self.f.external_captures.contains(root)
+            || self.f.params.iter().any(|p| p.name == root)
+    }
+    /// True when a call of `callee` cannot leave a half-written destination
+    /// visible: the destination dies with the graph on a fault, or the
+    /// callee's effect row is empty, so nothing it does is handled by a
+    /// caller that could then read the destination.
+    fn quiet(&self, callee: &str, observable: bool) -> bool {
+        self.world.functions.get(callee).is_some_and(|c| {
+            !observable || (c.effects.instances.is_empty() && c.effects.tail.is_none())
+        })
+    }
+    /// A local whose value is a scalar: reading it loads its own variable or
+    /// slot, never the storage of an aggregate.
+    fn scalar_local(&self, name: &str) -> bool {
+        self.f.locals.get(name).is_some_and(|t| {
+            Layout::of(self.world, &self.ty(t)).is_ok_and(|l| !l.aggregate())
+                && !matches!(t, Type::Function { .. })
+        })
+    }
+    fn aggregate(&self, id: ValueId) -> bool {
+        self.value_ty(id)
+            .is_some_and(|t| Layout::of(self.world, &t).is_ok_and(|l| l.aggregate()))
+    }
 }
 
 /// The homes of the aggregate values of graph `f`: each value of a
-/// constructor or a direct call whose single use, later in its own block,
-/// copies it into the graph's result or into a field of a constructor.
+/// constructor or a direct call whose single use, later in its own block or
+/// through single-use block parameters, copies it into the graph's result, a
+/// field of a constructor, or the destination of a plain write.
 pub(super) fn plan(
     world: &World,
     f: &FunctionIr,
     generics: &BTreeMap<String, Type>,
+    nested: bool,
 ) -> BTreeMap<ValueId, Home> {
     let mut homes = BTreeMap::new();
     if f.values
@@ -56,10 +320,19 @@ pub(super) fn plan(
     {
         return homes;
     }
-    let ty = |t: &Type| crate::numeric::default_type(&substitute(t, generics));
     let mut uses: BTreeMap<ValueId, usize> = BTreeMap::new();
-    for block in &f.blocks {
-        for inst in &block.instructions {
+    let mut defs = BTreeMap::new();
+    let mut params = BTreeMap::new();
+    let mut preds: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut only_jumps: BTreeSet<usize> = (0..f.blocks.len()).collect();
+    let mut graph = petgraph::graphmap::DiGraphMap::<usize, ()>::new();
+    for (b, block) in f.blocks.iter().enumerate() {
+        graph.add_node(b);
+        for p in &block.params {
+            params.insert(*p, b);
+        }
+        for (i, inst) in block.instructions.iter().enumerate() {
+            defs.insert(inst.dest, (b, i));
             for id in crate::ir_inline::operands(&inst.op) {
                 *uses.entry(id).or_default() += 1;
             }
@@ -67,55 +340,322 @@ pub(super) fn plan(
         for id in crate::ir_inline::terminator_operands(&block.terminator) {
             *uses.entry(id).or_default() += 1;
         }
+        let (targets, jump) = match &block.terminator {
+            Terminator::Jump { block, .. } => (vec![*block], true),
+            Terminator::Branch { yes, no, .. } => (vec![*yes, *no], false),
+            Terminator::Match { arms, .. } => (arms.iter().map(|(_, b)| *b).collect(), false),
+            _ => (vec![], false),
+        };
+        for t in targets {
+            graph.add_edge(b, t, ());
+            preds.entry(t).or_default().push(b);
+            if !jump {
+                only_jumps.remove(&t);
+            }
+        }
     }
-    let result = ty(&f.result);
-    for block in &f.blocks {
+    let mut mentions: BTreeMap<String, usize> = BTreeMap::new();
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        let mut names: Vec<String> = vec![];
+        let places = |args: &[crate::ir::Argument]| {
+            args.iter()
+                .filter_map(|a| a.place.as_ref().map(|p| p.root.clone()))
+                .collect::<Vec<_>>()
+        };
+        match &inst.op {
+            Op::Read { root, .. } => names.push(root.clone()),
+            Op::Write { place, .. } => names.push(place.split('.').next().unwrap_or("").to_owned()),
+            Op::Bind { pattern, .. } => {
+                let mut bound = BTreeSet::new();
+                pattern_binds(pattern, &mut bound);
+                names.extend(bound);
+            }
+            Op::Call { args, .. }
+            | Op::Indirect { args, .. }
+            | Op::Seq { args, .. }
+            | Op::Fip { args, .. }
+            | Op::Tiled { args, .. } => names.extend(places(args)),
+            Op::Closure { aliases, moves, .. } => {
+                names.extend(aliases.keys().chain(aliases.values()).cloned());
+                names.extend(moves.iter().map(|p| p.root.clone()));
+            }
+            Op::Handle { aliases, .. } => {
+                names.extend(aliases.keys().chain(aliases.values()).cloned())
+            }
+            _ => {}
+        }
+        for n in names {
+            *mentions.entry(n).or_default() += 1;
+        }
+    }
+    let cyclic = petgraph::algo::tarjan_scc(&graph)
+        .into_iter()
+        .filter(|c| c.len() > 1 || graph.contains_edge(c[0], c[0]))
+        .flatten()
+        .collect();
+    let g = Graph {
+        world,
+        f,
+        generics,
+        uses,
+        defs,
+        params,
+        preds,
+        only_jumps,
+        cyclic,
+        result: crate::numeric::default_type(&substitute(&f.result, generics)),
+        nested,
+        mentions,
+    };
+    for (b, block) in f.blocks.iter().enumerate() {
         for (at, inst) in block.instructions.iter().enumerate() {
-            let candidate = match &inst.op {
-                Op::Data(..) | Op::Tuple(_) => true,
-                Op::Call { callee, .. } => world.functions.contains_key(callee),
-                _ => false,
-            };
-            let own = ty(&inst.ty);
-            if !candidate
-                || uses.get(&inst.dest) != Some(&1)
+            let own = g.ty(&inst.ty);
+            if !g.candidate(&inst.op)
+                || g.uses.get(&inst.dest) != Some(&1)
                 || !Layout::of(world, &own).is_ok_and(|l| l.aggregate())
             {
                 continue;
             }
-            let consumer = block.instructions[at + 1..]
-                .iter()
-                .find(|later| crate::ir_inline::operands(&later.op).contains(&inst.dest));
-            let home = match consumer.map(|later| (later, &later.op)) {
-                Some((later, Op::Data(name, fields))) => fields
+            // A value passed to a block parameter gets the parameter's home
+            // below, with every other value that reaches it.
+            let jumps = matches!(&block.terminator, Terminator::Jump { args, .. } if args.contains(&inst.dest))
+                && !block.instructions[at + 1..]
                     .iter()
-                    .find(|(_, id)| *id == inst.dest)
-                    .map(|(n, _)| n.clone())
-                    .filter(|n| {
-                        field_type(world, &ty(&later.ty), Some(name), n).as_ref() == Some(&own)
-                    })
-                    .and_then(|n| field_home(world, later.dest, &ty(&later.ty), Some(name), &n)),
-                Some((later, Op::Tuple(ids))) => ids
-                    .iter()
-                    .position(|id| *id == inst.dest)
-                    .map(|i| i.to_string())
-                    .filter(|n| field_type(world, &ty(&later.ty), None, n).as_ref() == Some(&own))
-                    .and_then(|n| field_home(world, later.dest, &ty(&later.ty), None, &n)),
-                Some((_, Op::Exit { value, owner })) => {
-                    (*value == inst.dest && *owner == f.name && own == result)
-                        .then_some(Home::Result)
-                }
-                Some(_) => None,
-                None => matches!(block.terminator, Terminator::Return(id) if id == inst.dest)
-                    .then_some(Home::Result)
-                    .filter(|_| own == result),
-            };
-            if let Some(home) = home {
+                    .any(|later| crate::ir_inline::operands(&later.op).contains(&inst.dest));
+            if jumps {
+                continue;
+            }
+            if let Some(home) = g.consumer_home(b, Some(at), inst.dest, &own, 0) {
                 homes.insert(inst.dest, home);
             }
         }
     }
+    // A block parameter shares the home of the values that reach it, and
+    // they get it together, so its consumer skips the copy exactly when all
+    // of them were built there.
+    for (b, block) in f.blocks.iter().enumerate() {
+        for (k, p) in block.params.iter().enumerate() {
+            let Some(own) = g.value_ty(*p) else { continue };
+            if !Layout::of(world, &own).is_ok_and(|l| l.aggregate()) {
+                continue;
+            }
+            if let Some(home) = g.param_home(b, k, &own, 0)
+                && let Some((built, through)) = g.sources(*p, 0)
+            {
+                for v in built.into_iter().chain(through) {
+                    homes.insert(v, home.clone());
+                }
+            }
+        }
+    }
+    // The read of a pass-through local shares the home of the value bound
+    // to it (`Graph::pass_through`).
+    for (b, block) in f.blocks.iter().enumerate() {
+        for (at, inst) in block.instructions.iter().enumerate() {
+            if let Op::Bind { pattern, value } = &inst.op
+                && let Some(home) = homes.get(value).cloned()
+                && let Some((_, read)) = g.pass_through(b, at, pattern)
+            {
+                homes.insert(read, home);
+            }
+        }
+    }
+    drop_unsafe_places(&g, &mut homes);
     homes
+}
+
+fn pattern_binds(p: &Pattern, out: &mut BTreeSet<String>) {
+    match &p.kind {
+        PatternKind::Bind(n) => {
+            out.insert(n.clone());
+        }
+        PatternKind::Tuple(ps) => ps.iter().for_each(|p| pattern_binds(p, out)),
+        PatternKind::Constructor { fields, .. } => {
+            fields.iter().for_each(|(_, p)| pattern_binds(p, out))
+        }
+        PatternKind::Wild | PatternKind::Literal(_) => {}
+    }
+}
+
+/// Removes each `Write` home whose in-place construction could be observed.
+///
+/// Building `place = T { .. }` in `place` itself is sound when nothing
+/// reads `place`, and nothing can fault visibly, between the first store
+/// into it and the write. Call the instructions from the first such store
+/// (the earliest constructor of the value's tree) to the write the window.
+/// The rule kept here, for every instruction in the window:
+///
+/// - A member of the tree (a constructor or call built in the destination)
+///   copies only fresh values: the scalars it stores are SSA values read
+///   before the window, and an aggregate operand is either another member
+///   (already in place, so skipped) or a fresh constructor or call result
+///   (its own stack storage, which cannot be the destination).
+/// - Any other instruction is a constant, a read of a scalar local (its own
+///   variable or slot), arithmetic that cannot raise, a constructor that
+///   copies only fresh values, or (when the destination dies with the graph
+///   on a fault) raising arithmetic or a direct call of scalar arguments.
+///   No other `Read`, no `Write`, place argument, effect or handler can run
+///   in the window, so no operand reads the destination after the first
+///   in-place store.
+/// - A member call writes its output into the destination; when that call
+///   can fault and the destination is observable after the fault (an
+///   `inout` parameter, a local of an enclosing graph), the temporary is
+///   kept, so a failing call never leaves a half-written `place`.
+///
+/// When the rule fails, the whole tree keeps its temporary (its members'
+/// field homes then live in a fresh parent), and the write copies as
+/// before.
+fn drop_unsafe_places(g: &Graph, homes: &mut BTreeMap<ValueId, Home>) {
+    // Each pass removes a home or a whole tree, so this ends.
+    while drop_unsafe_places_once(g, homes) {}
+}
+
+/// One pass of [`drop_unsafe_places`]; true when it should run again.
+fn drop_unsafe_places_once(g: &Graph, homes: &mut BTreeMap<ValueId, Home>) -> bool {
+    let mut retry = false;
+    let groups: BTreeSet<(String, (usize, usize))> = homes
+        .values()
+        .filter_map(|h| match h {
+            Home::Place { place, at } => Some((place.clone(), *at)),
+            _ => None,
+        })
+        .collect();
+    for (place, at) in groups {
+        let root = |h: &Home| matches!(h, Home::Place { at: a, .. } if *a == at);
+        // The tree: values homed in the destination, then fields of them.
+        let mut members: BTreeSet<ValueId> = homes
+            .iter()
+            .filter(|(_, h)| root(h))
+            .map(|(v, _)| *v)
+            .collect();
+        loop {
+            let more: Vec<ValueId> = homes
+                .iter()
+                .filter(|(v, h)| {
+                    !members.contains(v)
+                        && matches!(h, Home::Field { parent, .. } if members.contains(parent))
+                })
+                .map(|(v, _)| *v)
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            members.extend(more);
+        }
+        match window_ok(g, &place, at, &members) {
+            Ok(()) => {}
+            // A call that may fault visibly is built in a temporary of its
+            // own, before the window, and the rest of the tree stays.
+            // When the call reached its field through block parameters, the
+            // parameters and the other values reaching them share that very
+            // home: all of them lose it, or the join would skip the copy.
+            Err(Some(call)) if homes.get(&call).is_some_and(|h| !root(h)) => {
+                let home = homes[&call].clone();
+                homes.retain(|_, h| *h != home);
+                retry = true;
+            }
+            Err(_) => {
+                let drop: Vec<ValueId> = homes
+                    .iter()
+                    .filter(|(_, h)| root(h))
+                    .map(|(v, _)| *v)
+                    .collect();
+                for v in drop {
+                    homes.remove(&v);
+                }
+            }
+        }
+    }
+    retry
+}
+
+/// [`drop_unsafe_places`]'s rule for the window of the write at `at`.
+/// `Err(Some(call))` names a member call that broke the rule (it may fault
+/// visibly); `Err(None)` is any other break.
+fn window_ok(
+    g: &Graph,
+    place: &str,
+    at: (usize, usize),
+    members: &BTreeSet<ValueId>,
+) -> Result<(), Option<ValueId>> {
+    let observable = g.observable(place);
+    let fresh = |id: &ValueId| {
+        members.contains(id) || !g.aggregate(*id) || g.op(*id).is_some_and(|op| g.candidate(op))
+    };
+    let scalar_args = |args: &[crate::ir::Argument]| {
+        args.iter()
+            .all(|a| a.place.is_none() && a.pass != Pass::Inout && !g.aggregate(a.value))
+    };
+    // The window, block by block: (block, first index, end index).
+    let mut ranges: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+    for id in members {
+        if let Some((b, i)) = g.defs.get(id) {
+            let len = g.f.blocks[*b].instructions.len();
+            let end = if *b == at.0 { at.1 } else { len };
+            let e = ranges.entry(*b).or_insert((*i, end));
+            e.0 = e.0.min(*i);
+        } else if let Some(b) = g.params.get(id) {
+            // A parameter's block runs from its start to its jump (or to
+            // the write itself).
+            let len = g.f.blocks[*b].instructions.len();
+            let end = if *b == at.0 { at.1 } else { len };
+            ranges.insert(*b, (0, end));
+        }
+    }
+    if !ranges.contains_key(&at.0) {
+        return Err(None);
+    }
+    for (b, (from, to)) in ranges {
+        for inst in &g.f.blocks[b].instructions[from..to] {
+            let ok = match &inst.op {
+                Op::Constant(_) | Op::Unit => true,
+                // A pass-through local: the bind names the storage, and the
+                // read yields it without loading.
+                Op::Bind { value, .. } => members.contains(value),
+                Op::Read { root, path, .. } => {
+                    members.contains(&inst.dest) || (path.is_empty() && g.scalar_local(root))
+                }
+                Op::Data(_, fields) => fields.iter().all(|(_, v)| fresh(v)),
+                Op::Tuple(ids) => ids.iter().all(fresh),
+                Op::Call { callee, args, .. } if members.contains(&inst.dest) => {
+                    if !(g.quiet(callee, observable) && scalar_args(args)) {
+                        return Err(Some(inst.dest));
+                    }
+                    true
+                }
+                Op::Call { callee, args, .. } => {
+                    // Its result, if an aggregate, is its own fresh output.
+                    g.quiet(callee, observable) && scalar_args(args)
+                }
+                // Arithmetic that cannot raise runs anywhere; arithmetic
+                // that can only where a fault hides the destination.
+                Op::Binary(..) | Op::Unary(..) => !observable || !crate::ir::state_action(inst),
+                _ => false,
+            };
+            if !ok {
+                return Err(None);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// True when replacing a value of `ty` drops nothing: no sequence, string,
+/// box, handle or function word, so a write into it needs no drop first.
+fn drop_free(world: &World, ty: &Type) -> bool {
+    fn walk(layout: &Layout) -> bool {
+        if crate::strings::is_text(&layout.ty) {
+            return false;
+        }
+        match &layout.kind {
+            LayoutKind::Scalar => {
+                crate::numeric::is_scalar_name(layout.ty.name()) || layout.ty == Type::unit()
+            }
+            LayoutKind::Product(fs) => fs.iter().all(|f| walk(&f.layout)),
+            LayoutKind::Enum(vs) => vs.iter().all(|v| v.fields.iter().all(|f| walk(&f.layout))),
+        }
+    }
+    Layout::of(world, ty).is_ok_and(|l| walk(&l))
 }
 
 /// The type of field `field` of `ty` (of variant `variant` for an enum).
@@ -175,13 +715,32 @@ pub(super) fn plain_data(world: &World, ty: &Type) -> bool {
 }
 
 /// The storage chosen for the aggregate values of the graph being lowered:
-/// each pointer, and whether the value was built there by its home.
-pub(super) type HomePointers = BTreeMap<ValueId, (ir::Value, bool)>;
+/// the values built in their home, and the stack slot of each parent
+/// constructor that has no home of its own. Pointers are not cached: a home
+/// reached through a block parameter is resolved again in each block that
+/// builds into it, so every pointer dominates its uses.
+#[derive(Default)]
+pub(super) struct HomePointers {
+    placed: BTreeSet<ValueId>,
+    slots: BTreeMap<ValueId, ir::StackSlot>,
+    /// Every pointer derived to each slot so far. Pointer metadata
+    /// (`NativeInfo`: closure targets of stored fields) is keyed by SSA
+    /// value, so each new pointer to a slot starts from the merged metadata
+    /// of the earlier ones.
+    derived: BTreeMap<ValueId, Vec<ir::Value>>,
+}
+
+impl HomePointers {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+}
 
 impl<M: Module> Codegen<'_, '_, M> {
     /// The storage value `id` is built in, when [`plan`] gave it a home that
-    /// resolves here: the result buffer `sret`, or its field of a parent
-    /// constructor (whose storage is allocated now if it has no home).
+    /// resolves here: the result buffer `sret`, its field of a parent
+    /// constructor (whose storage is allocated now if it has no home), or
+    /// the destination of its write.
     pub(super) fn home_pointer(
         &mut self,
         id: ValueId,
@@ -189,38 +748,86 @@ impl<M: Module> Codegen<'_, '_, M> {
         pointers: &mut HomePointers,
         sret: Option<ir::Value>,
     ) -> Result<Option<ir::Value>, String> {
-        if let Some((ptr, _)) = pointers.get(&id) {
-            return Ok(Some(*ptr));
+        let slot = pointers.slots.contains_key(&id);
+        let ptr = self.resolve_home(id, homes, pointers, sret)?;
+        if ptr.is_some() && !slot && homes.contains_key(&id) {
+            pointers.placed.insert(id);
         }
-        let ptr = match homes.get(&id) {
+        Ok(ptr)
+    }
+    /// A new pointer to the stack slot of parent `id`, carrying the merged
+    /// metadata of every earlier pointer to it.
+    fn slot_pointer(
+        &mut self,
+        id: ValueId,
+        slot: ir::StackSlot,
+        pointers: &mut HomePointers,
+    ) -> ir::Value {
+        let ptr = self
+            .b
+            .ins()
+            .stack_addr(self.m.target_config().pointer_type(), slot, 0);
+        let earlier = pointers.derived.entry(id).or_default();
+        let mut info = NativeInfo::default();
+        for old in earlier.iter() {
+            info.merge(&self.info(*old));
+        }
+        earlier.push(ptr);
+        self.infos.insert(ptr, info);
+        ptr
+    }
+    fn resolve_home(
+        &mut self,
+        id: ValueId,
+        homes: &BTreeMap<ValueId, Home>,
+        pointers: &mut HomePointers,
+        sret: Option<ir::Value>,
+    ) -> Result<Option<ir::Value>, String> {
+        if let Some(slot) = pointers.slots.get(&id).copied() {
+            return Ok(Some(self.slot_pointer(id, slot, pointers)));
+        }
+        Ok(Some(match homes.get(&id) {
             None => return Ok(None),
             Some(Home::Result) => match sret {
                 Some(out) => out,
                 None => return Ok(None),
             },
+            Some(Home::Place { place, .. }) => {
+                let mut path = place.split('.');
+                let p = crate::check::Place {
+                    root: path.next().ok_or("empty IR place")?.into(),
+                    path: path.map(str::to_owned).collect(),
+                };
+                if !self.vars.contains_key(&p.root) {
+                    return Ok(None);
+                }
+                self.address(&ir_place_expr(&p, 0..0))?
+            }
             Some(Home::Field {
                 parent,
                 offset,
                 parent_ty,
             }) => {
-                let base = match self.home_pointer(*parent, homes, pointers, sret)? {
+                let base = match self.resolve_home(*parent, homes, pointers, sret)? {
                     Some(base) => base,
                     None => {
                         let size = Layout::of(self.world, parent_ty)?.size;
-                        let base = self.alloc_uninit(size);
-                        pointers.insert(*parent, (base, false));
-                        base
+                        let slot = self.b.create_sized_stack_slot(ir::StackSlotData::new(
+                            ir::StackSlotKind::ExplicitSlot,
+                            size.max(8),
+                            3,
+                        ));
+                        pointers.slots.insert(*parent, slot);
+                        self.slot_pointer(*parent, slot, pointers)
                     }
                 };
                 self.offset(base, *offset)
             }
-        };
-        pointers.insert(id, (ptr, true));
-        Ok(Some(ptr))
+        }))
     }
 }
 
 /// True when value `id` was built in its home: its consumer skips the copy.
 pub(super) fn placed(pointers: &HomePointers, id: ValueId) -> bool {
-    pointers.get(&id).is_some_and(|(_, placed)| *placed)
+    pointers.placed.contains(&id)
 }

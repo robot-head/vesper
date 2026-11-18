@@ -323,6 +323,7 @@ impl Checker<'_> {
             SeqOp::FindNotIn => 3,
             SeqOp::Wide(w) if !w.write => 1,
             SeqOp::CopyWithin { .. } => 3,
+            SeqOp::MakeAsciiLowercase { .. } => 2,
             _ => 2,
         };
         if args.len() != arity {
@@ -394,7 +395,8 @@ impl Checker<'_> {
                         | SeqOp::Wide(_),
                     0
                 )
-            ) || (matches!(op, SeqOp::CopyWithin { .. }) && i < 3);
+            ) || (matches!(op, SeqOp::CopyWithin { .. }) && i < 3)
+                || (matches!(op, SeqOp::MakeAsciiLowercase { .. }) && i < 2);
             let source_arg = matches!(
                 op,
                 SeqOp::Extend
@@ -463,6 +465,7 @@ impl Checker<'_> {
             SeqOp::TrySet
             | SeqOp::CopyFrom { total: true }
             | SeqOp::CopyWithin { total: true }
+            | SeqOp::MakeAsciiLowercase { total: true }
             | SeqOp::BytesEq
             | SeqOp::EqIgnoreAsciiCase => Type::named("bool"),
             SeqOp::SumBe16 => u64_ty,

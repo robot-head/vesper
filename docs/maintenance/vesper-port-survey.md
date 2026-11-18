@@ -179,6 +179,10 @@ F0, F1, F2, F3, F5, F6 and F8, plus the std library and harness below. Nothing p
 
 ### Wave P3: larger systems on top of earlier ports
 
+> 2026-11-18: wave P3 is split. [P3a](../agent-prompts/port-p3/README.md)
+> (#1036-#1043) ports Pact, Loom audit, Bench, eBPF, Silicon and Aegis and adds
+> F7b and F12; the rest waits for P3b.
+
 Needs F7, F9, F10 and, per crate, F11 or F12.
 
 - Networking: `vesper-warp` (crypto through `vesper-warp-crypto` and `vesper-warp-tls` behind extern), then `vesper-prism-h3` and `vesper-chorus`.

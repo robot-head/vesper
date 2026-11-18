@@ -406,6 +406,15 @@ struct MoveCause {
     path: Vec<String>,
     span: Span,
 }
+/// Inclusive bounds of an integer binding, tied to the write identity
+/// (`Binding::mutation`) they hold for: any write or invalidation renews that
+/// identity and so drops the range, as it drops exact facts.
+#[derive(Debug, Clone)]
+struct IntRange {
+    lo: i128,
+    hi: i128,
+    at: Arc<()>,
+}
 #[derive(Debug, Clone)]
 struct Binding {
     ty: Type,
@@ -416,6 +425,9 @@ struct Binding {
     span: Span,
     integer: Option<i128>,
     nonzero: bool,
+    /// Inclusive bounds from a dominating comparison or a write, valid only
+    /// while `mutation` is the identity they were taken under.
+    range: Option<IntRange>,
     // Identity changes on actual writes/invalidation, never on branch refinement.
     mutation: Arc<()>,
     /// Bound by `let` without `mut`: assignment and `inout` borrows are
@@ -1005,6 +1017,7 @@ impl Checker<'_> {
                         frozen: false,
                         integer: None,
                         nonzero: false,
+                        range: None,
                     },
                 )
                 .is_some()
@@ -1481,11 +1494,17 @@ impl Checker<'_> {
                             }
                             let fact = self.integer_fact(value, env);
                             let nonzero = self.nonzero(value, env);
+                            let bounds = self.integer_bounds(value, env);
                             self.bind(pat, &t, env);
                             if let PatternKind::Bind(n) = &pat.kind {
                                 let binding = env.bindings.get_mut(n).unwrap();
                                 binding.integer = fact;
                                 binding.nonzero = nonzero;
+                                binding.range = bounds.map(|(lo, hi)| IntRange {
+                                    lo,
+                                    hi,
+                                    at: Arc::clone(&binding.mutation),
+                                });
                             }
                             for n in pattern_names(pat) {
                                 if let Some(binding) = env.bindings.get_mut(&n) {
@@ -1585,6 +1604,7 @@ impl Checker<'_> {
                 // The dividend's fact is the value already evaluated: the right
                 // operand may reassign a binding the left one read.
                 let left_fact = self.integer_fact(l, env);
+                let left_bounds = self.integer_bounds(l, env);
                 let right_goal = if goal != Type::Infer {
                     goal
                 } else if float_math_rules::float_literal_tree(l) {
@@ -1655,6 +1675,7 @@ impl Checker<'_> {
                 if let Some(kind) = crate::numeric::IntegerKind::from_type(&common)
                     && crate::numeric::may_overflow(op, kind)
                     && !self.in_range(op, kind, left_fact, self.integer_fact(r, env))
+                    && !Self::quotient_in_range(op, kind, left_bounds, self.integer_bounds(r, env))
                 {
                     self.overflow_failure(env, e.span.clone());
                 }
@@ -1695,6 +1716,16 @@ impl Checker<'_> {
                         .and_then(|b| b.integer)
                 };
                 let before = target_fact(env);
+                let target_state = |env: &Env| {
+                    env.bindings
+                        .get(&p.root)
+                        .filter(|_| p.path.is_empty())
+                        .map(|b| Arc::clone(&b.mutation))
+                };
+                let state_before = target_state(env);
+                let bounds_before = state_before
+                    .as_ref()
+                    .and_then(|_| self.integer_bounds(l, env));
                 let actual = self.expr_expected(r, env, Usage::Own, &expected);
                 self.expect_type(&expected, &actual, r.span.clone());
                 if bound_capabilities(&expected) != bound_capabilities(&actual) {
@@ -1726,11 +1757,16 @@ impl Checker<'_> {
                 // the one combined, so only an unchanged fact is trusted.
                 let old = target_fact(env).filter(|_| target_fact(env) == before);
                 let value = self.integer_fact(r, env);
+                let value_bounds = self.integer_bounds(r, env);
+                let old_bounds = bounds_before.filter(|_| {
+                    matches!((&state_before, target_state(env)), (Some(a), Some(b)) if Arc::ptr_eq(a, &b))
+                });
                 let kind = crate::numeric::IntegerKind::from_type(&expected);
                 if let Some(kind) = kind
                     && op != "="
                     && crate::numeric::may_overflow(op, kind)
                     && !self.in_range(&op[..1], kind, old, value)
+                    && !Self::quotient_in_range(&op[..1], kind, old_bounds, value_bounds)
                 {
                     self.overflow_failure(env, e.span.clone());
                 }
@@ -1743,10 +1779,16 @@ impl Checker<'_> {
                 };
                 let nonzero = fact.is_some_and(|n| n != 0) || (op == "=" && self.nonzero(r, env));
                 // A write to a field never establishes a fact about its root.
+                let range = value_bounds.filter(|_| op == "=" && p.path.is_empty());
                 if let Some(binding) = env.bindings.get_mut(&p.root) {
                     binding.mutation = Arc::new(());
                     binding.integer = fact.filter(|_| p.path.is_empty());
                     binding.nonzero = nonzero && p.path.is_empty();
+                    binding.range = range.map(|(lo, hi)| IntRange {
+                        lo,
+                        hi,
+                        at: Arc::clone(&binding.mutation),
+                    });
                 }
                 Type::unit()
             }
@@ -1759,10 +1801,10 @@ impl Checker<'_> {
                 self.expect_type(&Type::named("bool"), &t, condition.span.clone());
                 let original = env.clone();
                 let mut left = env.clone();
-                Self::refine_condition(condition, &mut left, true);
+                self.refine_condition(condition, &mut left, true);
                 let a = self.expr_expected(then, &mut left, Usage::Own, expected);
                 let mut right = env.clone();
-                Self::refine_condition(condition, &mut right, false);
+                self.refine_condition(condition, &mut right, false);
                 let b = otherwise
                     .as_ref()
                     .map(|e| self.expr_expected(e, &mut right, Usage::Own, expected))
@@ -3306,6 +3348,16 @@ impl Checker<'_> {
                 } else {
                     Arc::new(())
                 };
+                // Each branch's bounds hold where it ends, so their hull
+                // holds after the join, under the joined identity.
+                binding.range = (x.span == y.span)
+                    .then(|| Self::binding_bounds(x).zip(Self::binding_bounds(y)))
+                    .flatten()
+                    .map(|((a, b), (c, d))| IntRange {
+                        lo: a.min(c),
+                        hi: b.max(d),
+                        at: Arc::clone(&binding.mutation),
+                    });
                 binding.integer = x.integer.filter(|n| Some(*n) == y.integer);
                 binding.nonzero = x.nonzero && y.nonzero;
             } else {
@@ -3442,6 +3494,9 @@ impl Checker<'_> {
     fn nonzero(&self, e: &Expr, env: &Env) -> bool {
         self.integer_fact(e, env).is_some_and(|n| n != 0)
             || matches!(&e.kind, ExprKind::Name(n) if env.bindings.get(n).is_some_and(|b| b.nonzero))
+            || self
+                .integer_bounds(e, env)
+                .is_some_and(|(lo, hi)| lo > 0 || hi < 0)
     }
     /// The exact value of a pure integer expression, under checked semantics:
     /// an operation that would overflow or fail has no fact.
@@ -3484,7 +3539,8 @@ impl Checker<'_> {
             _ => Some(n),
         }
     }
-    fn refine_condition(e: &Expr, env: &mut Env, truth: bool) {
+    fn refine_condition(&self, e: &Expr, env: &mut Env, truth: bool) {
+        self.refine_bounds(e, env, truth);
         if let ExprKind::Binary(op, a, b) = &e.kind {
             let n = match (&a.kind, &b.kind) {
                 (ExprKind::Name(n), ExprKind::Literal(Literal::Int(0)))
@@ -3502,6 +3558,166 @@ impl Checker<'_> {
                 }
             }
         }
+    }
+    /// Narrow the bounds of the integer names a branch condition compares,
+    /// on the side where the condition is `truth`. Only a condition built
+    /// from comparisons of pure operands, `&&`, `||` and `!` refines: no part
+    /// of it can write a name another part read.
+    fn refine_bounds(&self, e: &Expr, env: &mut Env, truth: bool) {
+        if Self::pure_condition(e) {
+            self.refine_pure(e, env, truth);
+        }
+    }
+    fn pure_condition(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Literal(Literal::Bool(_)) => true,
+            ExprKind::Unary(op, v) if op == "!" => Self::pure_condition(v),
+            ExprKind::Binary(op, a, b) if matches!(op.as_str(), "&&" | "||") => {
+                Self::pure_condition(a) && Self::pure_condition(b)
+            }
+            ExprKind::Binary(op, a, b) if crate::strings::is_comparison(op) => {
+                Self::pure_integer(a) && Self::pure_integer(b)
+            }
+            _ => false,
+        }
+    }
+    /// An integer expression that cannot write a name.
+    fn pure_integer(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::Literal(Literal::Int(_)) | ExprKind::Name(_) => true,
+            ExprKind::Unary(op, v) if matches!(op.as_str(), "-" | "~") => Self::pure_integer(v),
+            ExprKind::Binary(_, a, b) => Self::pure_integer(a) && Self::pure_integer(b),
+            _ => false,
+        }
+    }
+    fn refine_pure(&self, e: &Expr, env: &mut Env, truth: bool) {
+        let ExprKind::Binary(op, a, b) = &e.kind else {
+            if let ExprKind::Unary(op, v) = &e.kind
+                && op == "!"
+            {
+                self.refine_pure(v, env, !truth);
+            }
+            return;
+        };
+        match (op.as_str(), truth) {
+            ("&&", true) | ("||", false) => {
+                self.refine_pure(a, env, truth);
+                self.refine_pure(b, env, truth);
+                return;
+            }
+            ("&&" | "||", _) => return,
+            _ => (),
+        }
+        // `a op b` holds; normalize to `name op' bound`.
+        let op = if truth {
+            op.as_str()
+        } else {
+            match op.as_str() {
+                "<" => ">=",
+                "<=" => ">",
+                ">" => "<=",
+                ">=" => "<",
+                "==" => "!=",
+                "!=" => "==",
+                _ => return,
+            }
+        };
+        let flipped = match op {
+            "<" => ">",
+            "<=" => ">=",
+            ">" => "<",
+            ">=" => "<=",
+            other => other,
+        };
+        let (left, right) = (self.integer_bounds(a, env), self.integer_bounds(b, env));
+        for (name, op, other) in [(a, op, right), (b, flipped, left)] {
+            let (ExprKind::Name(n), Some((olo, ohi))) = (&name.kind, other) else {
+                continue;
+            };
+            let Some((mut lo, mut hi)) = self.integer_bounds(name, env) else {
+                continue;
+            };
+            match op {
+                "<" => hi = hi.min(ohi.saturating_sub(1)),
+                "<=" => hi = hi.min(ohi),
+                ">" => lo = lo.max(olo.saturating_add(1)),
+                ">=" => lo = lo.max(olo),
+                "==" => (lo, hi) = (lo.max(olo), hi.min(ohi)),
+                "!=" if olo == ohi => {
+                    if lo == olo {
+                        lo = lo.saturating_add(1);
+                    }
+                    if hi == olo {
+                        hi = hi.saturating_sub(1);
+                    }
+                }
+                _ => continue,
+            }
+            if let Some(binding) = env.bindings.get_mut(n) {
+                binding.range = Some(IntRange {
+                    lo,
+                    hi,
+                    at: Arc::clone(&binding.mutation),
+                });
+            }
+        }
+    }
+    /// The bounds a binding's range and kind give it, while the range is
+    /// current.
+    fn binding_bounds(b: &Binding) -> Option<(i128, i128)> {
+        let (mut lo, mut hi) = match &b.ty {
+            Type::IntLiteral(_) => (i128::MIN, i128::MAX),
+            t => {
+                let k = crate::numeric::IntegerKind::from_type(t)?;
+                (k.min(), k.max())
+            }
+        };
+        if let Some(r) = b.range.as_ref().filter(|r| Arc::ptr_eq(&r.at, &b.mutation)) {
+            lo = lo.max(r.lo);
+            hi = hi.min(r.hi);
+        }
+        Some((lo, hi))
+    }
+    /// Inclusive bounds of an integer expression: its exact fact, a name's
+    /// kind and current range, `x & m` with `m >= 0` in `0..=m`, and a
+    /// nonnegative `x % m` with `m > 0` in `0..m`.
+    fn integer_bounds(&self, e: &Expr, env: &Env) -> Option<(i128, i128)> {
+        if let Some(n) = self.integer_fact(e, env) {
+            return Some((n, n));
+        }
+        match &e.kind {
+            ExprKind::Name(n) => Self::binding_bounds(env.bindings.get(n)?),
+            ExprKind::Binary(op, a, b) if op == "&" && Self::pure_integer(e) => {
+                let mask = |x: &Expr| {
+                    self.integer_bounds(x, env)
+                        .filter(|(lo, _)| *lo >= 0)
+                        .map(|(_, hi)| hi)
+                };
+                let m = match (mask(a), mask(b)) {
+                    (Some(x), Some(y)) => x.min(y),
+                    (x, y) => x.or(y)?,
+                };
+                Some((0, m))
+            }
+            ExprKind::Binary(op, a, b) if op == "%" && Self::pure_integer(e) => {
+                let (alo, ahi) = self.integer_bounds(a, env)?;
+                let (blo, bhi) = self.integer_bounds(b, env)?;
+                (alo >= 0 && blo > 0).then(|| (0, ahi.min(bhi - 1)))
+            }
+            _ => None,
+        }
+    }
+    /// Bounds which prove a signed quotient in range: a divisor that cannot
+    /// be -1 or a dividend that cannot be the kind's minimum.
+    fn quotient_in_range(
+        op: &str,
+        kind: crate::numeric::IntegerKind,
+        a: Option<(i128, i128)>,
+        b: Option<(i128, i128)>,
+    ) -> bool {
+        op == "/"
+            && (b.is_some_and(|(lo, hi)| lo > -1 || hi < -1)
+                || a.is_some_and(|(lo, _)| lo > kind.min()))
     }
     fn bind(&mut self, p: &Pattern, ty: &Type, env: &mut Env) {
         self.bind_mode(p, ty, env, Pass::Sink);
@@ -3546,6 +3762,7 @@ impl Checker<'_> {
                         frozen: false,
                         integer: None,
                         nonzero: false,
+                        range: None,
                     },
                 );
             }
@@ -3720,6 +3937,7 @@ impl Checker<'_> {
                     frozen: false,
                     integer: None,
                     nonzero: false,
+                    range: None,
                 },
             );
         }
@@ -3914,6 +4132,7 @@ impl Checker<'_> {
                 {
                     b.integer = None;
                     b.nonzero = false;
+                    b.range = None;
                 }
             }
         }

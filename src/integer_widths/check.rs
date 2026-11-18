@@ -24,10 +24,11 @@ impl Checker<'_> {
         }
     }
     /// Typechecks a shift amount: any integer kind, an unsuffixed literal
-    /// being a `u32`. Returns its constant value when known.
-    fn shift_amount(&mut self, e: &Expr, env: &mut Env, what: &str) -> Option<i128> {
+    /// being a `u32`. Returns its bounds when known (a constant, or a range
+    /// from a dominating guard such as `if n < 64`).
+    fn shift_amount(&mut self, e: &Expr, env: &mut Env, what: &str) -> Option<(i128, i128)> {
         let t = self.expr_expected(e, env, Usage::Own, &Type::Infer);
-        let fact = self.integer_fact(e, env);
+        let fact = self.integer_bounds(e, env);
         if let Type::IntLiteral(n) = t
             && !IntegerKind::U32.fits(n)
         {
@@ -49,7 +50,8 @@ impl Checker<'_> {
     }
     /// `a << n` and `a >> n` (`vesper.arith.checked/1`): `a` of any integer
     /// kind, `n` of any integer kind; an amount not proven to be in
-    /// `0..bits` may raise `Fail[ArithOverflow]`.
+    /// `0..bits` (by a constant or a guard's range) may raise
+    /// `Fail[ArithOverflow]`.
     pub(super) fn shift_expr(
         &mut self,
         op: &str,
@@ -73,7 +75,7 @@ impl Checker<'_> {
             }
             return t;
         };
-        if !amount.is_some_and(|n| (0..i128::from(kind.bits())).contains(&n)) {
+        if !amount.is_some_and(|(lo, hi)| lo >= 0 && hi < i128::from(kind.bits())) {
             self.overflow_failure(env, span);
         }
         t
@@ -142,7 +144,7 @@ impl Checker<'_> {
             return to.ty();
         };
         let t = self.expr_expected(&a.expr, env, Usage::Own, &Type::Infer);
-        let fact = self.integer_fact(&a.expr, env);
+        let fact = self.integer_bounds(&a.expr, env);
         let t = match t {
             // An unsuffixed literal keeps its default kind, except that a
             // widening takes it at the target kind when it fits.
@@ -181,7 +183,7 @@ impl Checker<'_> {
                 a.expr.span.clone(),
             ),
             Conversion::Narrow
-                if !from.widens_to(to) && !fact.is_some_and(|n| to.fits(n)) =>
+                if !from.widens_to(to) && !fact.is_some_and(|(lo, hi)| to.fits(lo) && to.fits(hi)) =>
             {
                 self.overflow_failure(env, span)
             }

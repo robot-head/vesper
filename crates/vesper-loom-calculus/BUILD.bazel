@@ -10,8 +10,12 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
-    # @vesper/loom-solver imports this package (port wave P1 lane 17, #914).
-    visibility = ["//crates/vesper-loom-solver:__pkg__"],
+    # @vesper/loom-solver (port wave P1 lane 17, #914) and @vesper/loom-audit
+    # (port wave P3a lane 4, #1039) import this package.
+    visibility = [
+        "//crates/vesper-loom-audit:__pkg__",
+        "//crates/vesper-loom-solver:__pkg__",
+    ],
 )
 
 vesper_port_object(

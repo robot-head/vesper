@@ -336,8 +336,9 @@ fn strings_grow_and_free_through_the_runtime() {
 }
 
 /// Sequences moved into a struct and out of a function: the library's live
-/// allocation counter sees one allocation per sequence with inline room,
-/// two once a sequence has grown out of it, and none after the drop.
+/// allocation counter sees none for an empty sequence (#1021), one per
+/// sequence with inline room, two once a sequence has grown out of it, and
+/// none after the drop.
 const HANDLES: &str = r#"
 pub struct S { a: ChunkSeq[u64], b: ChunkSeq[u64], c: ChunkSeq[u64] }
 fn u(x: u64) -> u64 { x }
@@ -384,7 +385,7 @@ fn library_counts_and_frees_every_allocation() {
   int64_t start = live();
   S s;
   vesper_handles_make(&s);
-  check(live() == start + 3);
+  check(live() == start);
   check(vesper_handles_total(&s) == 0);
   vesper_handles_S_drop(&s);
   check(live() == start);

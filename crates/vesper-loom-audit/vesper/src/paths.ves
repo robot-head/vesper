@@ -1,0 +1,318 @@
+// Module paths of @vesper/loom-audit (see lib.ves): the validated graph
+// and `dependency_paths`, one shortest deterministic path from each
+// reaching root to every reachable Vesper and native package.
+use @vesper/loom-calculus::{
+    Snap
+};
+use @vesper/loom-calculus::util::{
+    dep,
+    gnode,
+    man,
+    none,
+    sedge,
+    sw
+};
+use self::{
+    A
+};
+use self::util::{
+    e_limit,
+    e_solution,
+    fail,
+    setw,
+    spend,
+    word
+};
+
+fn snap0(in s: A) -> Snap {
+    match s.l.snaps.try_get(0) {
+        Option::Some(x) => x,
+        Option::None => Snap {
+            node_at: 0,
+            node_n: 0,
+            root_at: 0,
+            root_n: 0,
+            unused_at: 0,
+            unused_n: 0,
+            sys_at: 0,
+            sys_n: 0,
+            diag_at: 0,
+            diag_n: 0,
+            graph: false
+        },
+    }
+}
+
+// The name id of element ref r (a node index, or nn + native index).
+pub fn ref_name(in s: A, r: u64) -> u64 {
+    if r < s.nn {
+        let x = snap0(in s);
+        gnode(in s.l, wrapping_add(x.node_at, r)).name
+    } else {
+        let j = wrapping_sub(r, s.nn);
+        sw(in s.l.gl, wrapping_add(s.sys_at, wrapping_add(j, j)))
+    }
+}
+
+// The version (table index) of element ref r.
+pub fn ref_ver(in s: A, r: u64) -> u64 {
+    if r < s.nn {
+        let x = snap0(in s);
+        let g = gnode(in s.l, wrapping_add(x.node_at, r));
+        man(in s.l, g.man).ver
+    } else {
+        let j = wrapping_sub(r, s.nn);
+        sw(in s.l.gl, wrapping_add(s.sys_at, wrapping_add(wrapping_add(j, j), 1)))
+    }
+}
+
+// Order of two element refs as `SelectedPackage`s: Vesper before native,
+// then by name (one version per identity in a graph).
+fn ref_ord(in s: A, a: u64, b: u64) -> u64 {
+    let ka = a >= s.nn;
+    let kb = b >= s.nn;
+    if ka != kb {
+        return if kb {
+            0
+        } else {
+            2
+        };
+    }
+    let x = ref_name(in s, a);
+    let y = ref_name(in s, b);
+    if x < y {
+        0
+    } else if x > y {
+        2
+    } else {
+        1
+    }
+}
+
+// Index the graph of the (only) snapshot; false and InvalidSolution when
+// validation produced no graph.
+fn index_graph(inout s: A) -> bool {
+    let x = snap0(in s);
+    if !x.graph {
+        fail(inout s, e_solution(), "");
+        return false;
+    }
+    let k = s.l.k;
+    s.nn = x.node_n;
+    s.ns = x.sys_n;
+    s.sys_at = x.sys_at;
+    s.nodeof.clear();
+    s.natof.clear();
+    for i in 0..k {
+        s.nodeof.push(none());
+        s.natof.push(none());
+    }
+    for i in 0..x.node_n {
+        let g = gnode(in s.l, wrapping_add(x.node_at, i));
+        setw(inout s.nodeof, g.name, i);
+    }
+    for j in 0..x.sys_n {
+        let name = sw(in s.l.gl, wrapping_add(x.sys_at, wrapping_add(j, j)));
+        setw(inout s.natof, name, j);
+    }
+    let nk = wrapping_add(s.nn, s.ns);
+    for i in 0..nk {
+        s.k_head.push(none());
+        s.k_tail.push(none());
+    }
+    for i in 0..s.nn {
+        s.parent.push(none());
+        s.pstamp.push(0);
+    }
+    true
+}
+
+// Append path record (at, n) to key's list.
+fn add_record(inout s: A, key: u64, at: u64, n: u64) {
+    let p = s.p_at.len();
+    s.p_at.push(at);
+    s.p_n.push(n);
+    s.p_next.push(none());
+    let t = word(in s.k_tail, key);
+    if t == none() {
+        setw(inout s.k_head, key, p);
+    } else {
+        setw(inout s.p_next, t, p);
+    }
+    setw(inout s.k_tail, key, p);
+}
+
+// Whether the path pw[at .. at + n] orders before record p, as
+// `(len, path) < (len, path)`.
+fn shorter(in s: A, at: u64, n: u64, p: u64) -> bool {
+    let qa = word(in s.p_at, p);
+    let qn = word(in s.p_n, p);
+    if n != qn {
+        return n < qn;
+    }
+    for i in 0..n {
+        let o = ref_ord(
+            in s,
+            word(in s.pw, wrapping_add(at, i)),
+            word(in s.pw, wrapping_add(qa, i))
+        );
+        if o != 1 {
+            return o == 0;
+        }
+    }
+    false
+}
+
+fn add_nodes(inout s: A, n: u64, in t: Str) -> bool {
+    let x = wrapping_add(s.path_nodes, n);
+    if x < n || x > s.m_pnodes {
+        fail(inout s, e_limit(), t);
+        return false;
+    }
+    s.path_nodes = x;
+    true
+}
+
+// The breadth-first search from one root node.
+fn from_root(inout s: A, root: u64, stamp: u64) -> bool {
+    s.queue.clear();
+    s.queue.push(root);
+    setw(inout s.pstamp, root, stamp);
+    setw(inout s.parent, root, none());
+    let x = snap0(in s);
+    let mut head: u64 = 0;
+    loop {
+        if head >= s.queue.len() {
+            break;
+        }
+        let node = word(in s.queue, head);
+        head = wrapping_add(head, 1);
+        if !spend(inout s, 1) {
+            return false;
+        }
+        s.rev.clear();
+        let mut cur = node;
+        loop {
+            if cur == none() {
+                break;
+            }
+            if !spend(inout s, 1) {
+                return false;
+            }
+            if s.rev.len() >= s.m_pdepth {
+                fail(inout s, e_limit(), "dependency path depth");
+                return false;
+            }
+            s.rev.push(cur);
+            cur = word(in s.parent, cur);
+        }
+        let rl = s.rev.len();
+        if !add_nodes(inout s, rl, "dependency path nodes") {
+            return false;
+        }
+        let at = s.pw.len();
+        for i in 0..rl {
+            let e = word(in s.rev, wrapping_sub(wrapping_sub(rl, 1), i));
+            s.pw.push(e);
+        }
+        add_record(inout s, node, at, rl);
+        let g = gnode(in s.l, wrapping_add(x.node_at, node));
+        for j in 0..g.s_n {
+            if !spend(inout s, 1) {
+                return false;
+            }
+            if rl >= s.m_pdepth {
+                fail(inout s, e_limit(), "native dependency path depth");
+                return false;
+            }
+            let e = sedge(in s.l.gs, wrapping_add(g.s_at, j));
+            let key = wrapping_add(s.nn, word(in s.natof, e.name));
+            if !spend(inout s, wrapping_add(rl, 1)) {
+                return false;
+            }
+            let nat_at = s.pw.len();
+            for i in 0..rl {
+                let v = word(in s.pw, wrapping_add(at, i));
+                s.pw.push(v);
+            }
+            s.pw.push(key);
+            let n = wrapping_add(rl, 1);
+            // The record of this root, if any.
+            let mut p = word(in s.k_head, key);
+            loop {
+                if p == none() {
+                    break;
+                }
+                if word(in s.pw, word(in s.p_at, p)) == root {
+                    break;
+                }
+                p = word(in s.p_next, p);
+            }
+            if p != none() {
+                if shorter(in s, nat_at, n, p) {
+                    setw(inout s.p_at, p, nat_at);
+                    setw(inout s.p_n, p, n);
+                }
+            } else {
+                if !add_nodes(inout s, n, "path nodes") {
+                    return false;
+                }
+                add_record(inout s, key, nat_at, n);
+            }
+        }
+        s.deps.clear();
+        for j in 0..g.e_n {
+            let d = dep(in s.l, sw(in s.l.ge, wrapping_add(g.e_at, j)));
+            s.deps.push(d.name);
+        }
+        sort_words(inout s);
+        for j in 0..s.deps.len() {
+            if !spend(inout s, 1) {
+                return false;
+            }
+            let t = word(in s.nodeof, word(in s.deps, j));
+            if t != none() && word(in s.pstamp, t) != stamp {
+                setw(inout s.pstamp, t, stamp);
+                setw(inout s.parent, t, node);
+                s.queue.push(t);
+            }
+        }
+    }
+    true
+}
+
+// Insertion sort of s.deps (a node's dependency names, few and distinct).
+fn sort_words(inout s: A) {
+    let n = s.deps.len();
+    for i in 1..n {
+        let v = word(in s.deps, i);
+        let mut j = i;
+        loop {
+            if j == 0 {
+                break;
+            }
+            let u = word(in s.deps, wrapping_sub(j, 1));
+            if u <= v {
+                break;
+            }
+            setw(inout s.deps, j, u);
+            j = wrapping_sub(j, 1);
+        }
+        setw(inout s.deps, j, v);
+    }
+}
+
+// `dependency_paths` over the validated graph.
+pub fn paths(inout s: A) {
+    if !index_graph(inout s) {
+        return;
+    }
+    let x = snap0(in s);
+    for i in 0..x.root_n {
+        let name = sw(in s.l.gl, wrapping_add(x.root_at, i));
+        let root = word(in s.nodeof, name);
+        if !from_root(inout s, root, wrapping_add(i, 1)) {
+            return;
+        }
+    }
+}

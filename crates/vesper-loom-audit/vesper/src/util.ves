@@ -1,0 +1,277 @@
+// Module util of @vesper/loom-audit (see lib.ves): errors and their text,
+// the logical work budget, saturating arithmetic and stamped marks.
+use @vesper/loom-calculus::{
+    L
+};
+use @vesper/loom-calculus::util::{
+    gb,
+    min,
+    none,
+    ord,
+    pre_ord,
+    slen,
+    soff,
+    sw,
+    ver,
+    ver_ord
+};
+use self::{
+    A,
+    Adv,
+    Nat,
+    Rng
+};
+
+// Error kinds, in the order of the Rust `Error` variants.
+pub fn e_input() -> u64 {
+    0
+}
+
+pub fn e_catalog() -> u64 {
+    1
+}
+
+pub fn e_policy() -> u64 {
+    2
+}
+
+pub fn e_solution() -> u64 {
+    3
+}
+
+pub fn e_limit() -> u64 {
+    4
+}
+
+// Append the literal t to dp.
+pub fn lit(inout s: A, in t: Str) {
+    for i in 0..t.len() {
+        match t.try_byte_at(i) {
+            Option::Some(b) => s.dp.push(b),
+            Option::None => (),
+        }
+    }
+}
+
+// Append the pool range [off, off + len) to dp.
+pub fn copy_range(inout s: A, off: u64, len: u64) {
+    for i in 0..len {
+        let b = gb(in s.l, wrapping_add(off, i));
+        s.dp.push(b);
+    }
+}
+
+// Record the first error, of kind `kind` with message t.
+pub fn fail(inout s: A, kind: u64, in t: Str) {
+    if s.err != 0 {
+        return;
+    }
+    let mo = s.dp.len();
+    lit(inout s, t);
+    s.err = wrapping_add(kind, 1);
+    s.emo = mo;
+    s.eml = wrapping_sub(s.dp.len(), mo);
+}
+
+// `Work::spend`: false (and a Limit error) when the budget is exhausted.
+pub fn spend(inout s: A, n: u64) -> bool {
+    if n > s.work {
+        fail(inout s, e_limit(), "logical work");
+        return false;
+    }
+    s.work = wrapping_sub(s.work, n);
+    true
+}
+
+pub fn sat_add(a: u64, b: u64) -> u64 {
+    let x = wrapping_add(a, b);
+    if x < a {
+        none()
+    } else {
+        x
+    }
+}
+
+pub fn sat_mul(a: u64, b: u64) -> u64 {
+    let (lo, hi) = mul_wide(a, b);
+    if hi != 0 {
+        none()
+    } else {
+        lo
+    }
+}
+
+pub fn str_off(in s: A, id: u64) -> u64 {
+    soff(in s.l, id)
+}
+
+pub fn str_len(in s: A, id: u64) -> u64 {
+    slen(in s.l, id)
+}
+
+pub fn byte(in s: A, i: u64) -> u8 {
+    gb(in s.l, i)
+}
+
+pub fn word(in v: ChunkSeq[u64], i: u64) -> u64 {
+    sw(in v, i)
+}
+
+pub fn setw(inout v: ChunkSeq[u64], i: u64, x: u64) {
+    v.try_set(i, x);
+}
+
+// Reset `mark` to n entries that no stamp matches, and start a new stamp.
+pub fn fresh_marks(inout s: A, n: u64) {
+    if s.mark.len() < n {
+        for i in s.mark.len()..n {
+            s.mark.push(0);
+        }
+    }
+    s.gen = wrapping_add(s.gen, 1);
+}
+
+// Whether id i carries the current stamp; marks it.
+pub fn mark_seen(inout s: A, i: u64) -> bool {
+    let g = s.gen;
+    if sw(in s.mark, i) == g {
+        return true;
+    }
+    s.mark.try_set(i, g);
+    false
+}
+
+pub fn ascii_alnum(c: u8) -> bool {
+    (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
+}
+
+// SemVer precedence (`Version::cmp_precedence`): build metadata ignored.
+// 0 less, 1 equal, 2 greater.
+pub fn prec_ord(in l: L, a: u64, b: u64) -> u64 {
+    let x = ver(in l, a);
+    let y = ver(in l, b);
+    let o = ord(x.major, y.major);
+    if o != 1 {
+        return o;
+    }
+    let o = ord(x.minor, y.minor);
+    if o != 1 {
+        return o;
+    }
+    let o = ord(x.patch, y.patch);
+    if o != 1 {
+        return o;
+    }
+    pre_ord(in l, x.pre, y.pre)
+}
+
+// Sort orders of `msort`. kind 0: native claims by (name, version);
+// 1: affected ranges by introduced precedence; 2: advisories by ID.
+fn order_of(in s: A, kind: u64, a: u64, b: u64) -> u64 {
+    if kind == 0 {
+        let x = nat(in s, a);
+        let y = nat(in s, b);
+        let o = ord(x.name, y.name);
+        if o != 1 {
+            return o;
+        }
+        ver_ord(in s.l, x.ver, y.ver)
+    } else if kind == 1 {
+        let x = rng(in s, a);
+        let y = rng(in s, b);
+        prec_ord(in s.l, x.intro, y.intro)
+    } else {
+        ord(adv(in s, a).id, adv(in s, b).id)
+    }
+}
+
+// A stable bottom-up merge sort of s.idx.
+pub fn msort(inout s: A, kind: u64) {
+    let n = s.idx.len();
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        s.tmp.clear();
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let mid = min(wrapping_add(i, width), n);
+            let hi = min(wrapping_add(i, wrapping_mul(width, 2)), n);
+            let mut a = i;
+            let mut b = mid;
+            loop {
+                if a < mid {
+                    let xa = sw(in s.idx, a);
+                    if b < hi {
+                        let xb = sw(in s.idx, b);
+                        if order_of(in s, kind, xb, xa) == 0 {
+                            s.tmp.push(xb);
+                            b = wrapping_add(b, 1);
+                        } else {
+                            s.tmp.push(xa);
+                            a = wrapping_add(a, 1);
+                        }
+                    } else {
+                        s.tmp.push(xa);
+                        a = wrapping_add(a, 1);
+                    }
+                } else if b < hi {
+                    let xb = sw(in s.idx, b);
+                    s.tmp.push(xb);
+                    b = wrapping_add(b, 1);
+                } else {
+                    break;
+                }
+            }
+            i = hi;
+        }
+        s.idx.clear();
+        for j in 0..n {
+            let x = sw(in s.tmp, j);
+            s.idx.push(x);
+        }
+        width = wrapping_mul(width, 2);
+    }
+}
+
+pub fn adv(in s: A, i: u64) -> Adv {
+    match s.advs.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Adv {
+            id: 0,
+            kind: 0,
+            name: 0,
+            r_at: 0,
+            r_n: 0,
+            sev: 0,
+            sum: 0
+        },
+    }
+}
+
+pub fn rng(in s: A, i: u64) -> Rng {
+    match s.rngs.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Rng {
+            intro: 0,
+            has_fixed: false,
+            fixed: 0,
+            pre: false
+        },
+    }
+}
+
+pub fn nat(in s: A, i: u64) -> Nat {
+    match s.nats.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Nat {
+            name: 0,
+            ver: 0,
+            expr: 0
+        },
+    }
+}

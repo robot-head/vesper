@@ -34,21 +34,23 @@ use std::ffi::c_void;
 /// The most element bytes a sequence keeps inline after its header.
 pub const INLINE_BYTES: i64 = 65536;
 
-/// Element bytes reserved inline by `ChunkSeq::new` (Rust's `Vec` starts at
-/// four 8-byte elements on its first push).
+/// Element bytes the first growth of an empty sequence reserves inline at
+/// least (Rust's `Vec` starts at four 8-byte elements on its first push).
 pub const NEW_INLINE_BYTES: i64 = 32;
 
 /// Bytes between the start of a separate buffer's `malloc` block and its
 /// elements.
 pub const BUFFER_PREFIX: i64 = 8;
 
-/// The inline capacity `ChunkSeq::new` gives elements of `stride` bytes.
-pub fn new_capacity(stride: i64) -> i64 {
-    if stride <= 0 {
-        0
-    } else {
-        NEW_INLINE_BYTES / stride
-    }
+/// The shared empty header `{0, 0, null}` of every JIT sequence that has
+/// never grown (#1021). Generated code only reads it: a length store is
+/// skipped when the length does not change, and growth replaces it. It is
+/// immutable, so a stray store would fault at once.
+static EMPTY: [u64; 3] = [0; 3];
+
+/// The address of the shared empty header, which `ChunkSeq::new` returns.
+pub fn empty_header() -> u64 {
+    EMPTY.as_ptr() as u64
 }
 
 const LEN: usize = 0;
@@ -183,17 +185,16 @@ pub extern "C" fn vesper_seq_new(cap: u64, stride: u64) -> u64 {
 /// Allocates a sequence with room for `cap` elements of `stride` bytes,
 /// inline after its header when they fit in [`INLINE_BYTES`].
 pub extern "C" fn vesper_seq_make(cap: u64, stride: u64) -> u64 {
+    if cap == 0 {
+        return empty_header();
+    }
     let n = bytes(cap, stride);
     if n > INLINE_BYTES as usize {
         return vesper_seq_new(cap, stride);
     }
     let header = allocate(HEADER + n).cast::<u64>();
     live(1);
-    let data = if n == 0 {
-        0
-    } else {
-        header as u64 + HEADER as u64
-    };
+    let data = header as u64 + HEADER as u64;
     // SAFETY: `header` is valid for three words.
     unsafe {
         header.add(LEN).write(0);
@@ -205,8 +206,14 @@ pub extern "C" fn vesper_seq_make(cap: u64, stride: u64) -> u64 {
 }
 
 /// Grows the buffer of `handle` to hold at least `needed` elements,
-/// doubling its capacity (at least four elements).
+/// doubling its capacity (at least four elements), and returns the header
+/// to use afterwards: `handle` itself, or for the shared empty header a
+/// fresh sequence that generated code writes back to its place (#1021).
 pub extern "C" fn vesper_seq_grow(handle: u64, stride: u64, needed: u64) -> u64 {
+    if handle == empty_header() {
+        let room = (NEW_INLINE_BYTES as u64) / stride.max(1);
+        return vesper_seq_make(needed.max(room.max(4)), stride);
+    }
     let header = handle as *mut u64;
     // SAFETY: generated code passes a live header or `String` value.
     let (len, cap, data) = unsafe {
@@ -217,7 +224,7 @@ pub extern "C" fn vesper_seq_grow(handle: u64, stride: u64, needed: u64) -> u64 
         )
     };
     if needed <= cap {
-        return 0;
+        return handle;
     }
     let new_cap = cap.saturating_mul(2).max(4).max(needed);
     let n = bytes(new_cap, stride);
@@ -253,7 +260,7 @@ pub extern "C" fn vesper_seq_grow(handle: u64, stride: u64, needed: u64) -> u64 
         header.add(CAP).write(new_cap);
         header.add(DATA).write(grown as u64);
     }
-    0
+    handle
 }
 
 /// Frees a header and the separate buffer it owns.
@@ -278,7 +285,7 @@ unsafe fn free_header(header: *mut u64) {
 /// handle that is not live is ignored (and counted in [`stray_frees`]), so
 /// a drop never frees twice.
 pub extern "C" fn vesper_seq_free(handle: u64) -> u64 {
-    if handle == 0 {
+    if handle == 0 || handle == empty_header() {
         return 0;
     }
     if !HEADERS.with(|h| h.borrow_mut().remove(&(handle as usize))) {

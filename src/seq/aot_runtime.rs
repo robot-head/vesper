@@ -23,6 +23,16 @@
 //! data marks borrowed bytes (a string literal or view), which nothing
 //! frees.
 //!
+//! An empty sequence (`ChunkSeq::new`, `with_capacity(0)`) is the address
+//! of one shared header [`EMPTY_HEADER`] `{0, 0, null}` and allocates
+//! nothing (#1021). Generated code only reads it, so threads may share it:
+//! `clear`, `truncate` and `extend` skip a length store that changes
+//! nothing. `vesper_seq_grow` returns the
+//! header to use afterwards: growing the empty header makes a fresh one
+//! (as `vesper_seq_make` does), which generated code writes back to the
+//! sequence's place; any other header or `String` value grows in place and
+//! is returned unchanged. `vesper_seq_free` of the empty header is a no-op.
+//!
 //! `vesper_seq_free` frees a header and its buffer and `vesper_str_release`
 //! the buffer of an inline `String` value (export ABI v2 calls them),
 //! and [`LIVE_COUNTER`] counts the live header and buffer allocations (a
@@ -44,6 +54,9 @@ const MESSAGES: [&str; 3] = [
 /// The local data word holding the number of live sequence allocations
 /// (headers plus separate element buffers).
 pub(crate) const LIVE_COUNTER: &str = "vesper_seq_live";
+
+/// The local data symbol of the shared empty header `{0, 0, null}`.
+pub(crate) const EMPTY_HEADER: &str = "vesper_seq_empty";
 
 pub fn defined<M: Module>(m: &M) -> bool {
     m.get_name("vesper_seq_fault").is_some()
@@ -89,6 +102,18 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
     zero_word.define_zeroinit(8);
     zero_word.set_align(8);
     m.define_data(live, &zero_word).map_err(e)?;
+    let empty = m
+        .declare_data(EMPTY_HEADER, Linkage::Local, false, false)
+        .map_err(e)?;
+    // Read-only: a store into the shared header would fault at once.
+    let mut empty_header = DataDescription::new();
+    empty_header.define(vec![0u8; crate::seq::HEADER_BYTES as usize].into_boxed_slice());
+    empty_header.set_align(8);
+    m.define_data(empty, &empty_header).map_err(e)?;
+    let empty_address = |b: &mut FunctionBuilder, m: &mut M| {
+        let data = m.declare_data_in_func(empty, b.func);
+        b.ins().symbol_value(types::I64, data)
+    };
     let im = Imports {
         malloc: import(m, "malloc", 1, true)?,
         realloc: import(m, "realloc", 2, true)?,
@@ -181,6 +206,15 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
     let make = local(m, "vesper_seq_make", 2)?;
     compile(m, make, 2, |b, m, args| {
         let (cap, stride) = (args[0], args[1]);
+        // No room: the shared empty header, which allocates nothing.
+        let none = b.ins().icmp_imm(IntCC::Equal, cap, 0);
+        let empty_block = b.create_block();
+        let some = b.create_block();
+        b.ins().brif(none, empty_block, &[], some, &[]);
+        b.switch_to_block(empty_block);
+        let shared = empty_address(b, m);
+        b.ins().return_(&[shared]);
+        b.switch_to_block(some);
         let bytes = checked_bytes(b, m, &im, cap, stride);
         let fits = b
             .ins()
@@ -194,10 +228,7 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         non_null(b, m, &im, header);
         count(b, m, &im, 1);
         let zero = b.ins().iconst(types::I64, 0);
-        let after = b.ins().iadd_imm(header, crate::seq::HEADER_BYTES);
-        let none = b.ins().icmp_imm(IntCC::Equal, bytes, 0);
-        // No room: an empty header with no buffer, as `vesper_seq_new`.
-        let data = b.ins().select(none, zero, after);
+        let data = b.ins().iadd_imm(header, crate::seq::HEADER_BYTES);
         b.ins().store(MemFlags::new(), zero, header, 0);
         b.ins().store(MemFlags::new(), cap, header, 8);
         b.ins().store(MemFlags::new(), data, header, 16);
@@ -212,6 +243,28 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
     let grow = local(m, "vesper_seq_grow", 3)?;
     compile(m, grow, 3, |b, m, args| {
         let (header, stride, needed) = (args[0], args[1], args[2]);
+        // The shared empty header: a fresh sequence with room for `needed`
+        // elements and at least what `new` once reserved inline.
+        let shared = empty_address(b, m);
+        let is_empty = b.ins().icmp(IntCC::Equal, header, shared);
+        let fresh_header = b.create_block();
+        let in_place = b.create_block();
+        b.ins().brif(is_empty, fresh_header, &[], in_place, &[]);
+        b.switch_to_block(fresh_header);
+        let one = b.ins().iconst(types::I64, 1);
+        let unit = b.ins().umax(stride, one);
+        let room = b
+            .ins()
+            .iconst(types::I64, crate::seq::native_runtime::NEW_INLINE_BYTES);
+        let room = b.ins().udiv(room, unit);
+        let four = b.ins().iconst(types::I64, 4);
+        let floor = b.ins().umax(room, four);
+        let first_cap = b.ins().umax(floor, needed);
+        let r = m.declare_func_in_func(make, b.func);
+        let inst = b.ins().call(r, &[first_cap, stride]);
+        let made = b.inst_results(inst)[0];
+        b.ins().return_(&[made]);
+        b.switch_to_block(in_place);
         let cap = b.ins().load(types::I64, MemFlags::new(), header, 8);
         let data = b.ins().load(types::I64, MemFlags::new(), header, 16);
         // new_cap = max(needed, max(4, cap * 2)), saturating.
@@ -223,7 +276,6 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         let floor = b.ins().umax(doubled, four);
         let new_cap = b.ins().umax(floor, needed);
         let bytes = checked_bytes(b, m, &im, new_cap, stride);
-        let zero = b.ins().iconst(types::I64, 0);
         let owned = separate_buffer(b, header, cap, data);
         let resize = b.create_block();
         let fresh_block = b.create_block();
@@ -257,13 +309,23 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         let grown = b.block_params(joined)[0];
         b.ins().store(MemFlags::new(), new_cap, header, 8);
         b.ins().store(MemFlags::new(), grown, header, 16);
-        b.ins().return_(&[zero]);
+        b.ins().return_(&[header]);
         Ok(())
     })?;
     // `vesper_seq_free(header)`: free a header and the buffer it owns.
     let release = local(m, "vesper_seq_free", 1)?;
     compile(m, release, 1, |b, m, args| {
         let header = args[0];
+        // The shared empty header is never freed.
+        let shared = empty_address(b, m);
+        let is_empty = b.ins().icmp(IntCC::Equal, header, shared);
+        let skip = b.create_block();
+        let owned_header = b.create_block();
+        b.ins().brif(is_empty, skip, &[], owned_header, &[]);
+        b.switch_to_block(skip);
+        let nothing = b.ins().iconst(types::I64, 0);
+        b.ins().return_(&[nothing]);
+        b.switch_to_block(owned_header);
         let cap = b.ins().load(types::I64, MemFlags::new(), header, 8);
         let data = b.ins().load(types::I64, MemFlags::new(), header, 16);
         let owned = separate_buffer(b, header, cap, data);
