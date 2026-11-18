@@ -2140,8 +2140,8 @@ pub enum SeqDrop {
     /// inside it ([`needs_drop`]).
     Owned,
     /// A `let`-bound struct value: what its fields own (nested structs
-    /// included). Native code plans it only on the optimize path, and only
-    /// when every sequence sits in a product field.
+    /// included). Native code plans it only when every sequence sits in a
+    /// product field (not an enum payload).
     Fields,
 }
 

@@ -116,8 +116,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let ty =
                     crate::numeric::default_type(&substitute(&f.locals[&name], &self.generic_vars));
                 let layout = Layout::of(self.world, &ty)?;
-                if !self.operands_only
-                    || !seq_field_offsets(self.world, &layout, 0, &mut fields)
+                if !seq_field_offsets(self.world, &layout, 0, &mut fields)
                     || fields.is_empty()
                 {
                     continue;

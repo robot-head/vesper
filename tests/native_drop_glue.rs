@@ -508,3 +508,52 @@ fn main() -> u64 { boxes() }
         assert_eq!(native_runtime::teardown_frees(), 0);
     }
 }
+
+/// A `let`-bound struct frees everything its fields own (#972 freed its
+/// sequences): strings, and the elements of the sequences in it.
+const LOCAL_STRUCTS: &str = r#"
+fn u(x: u64) -> u64 { x }
+struct Doc { title: String, lines: ChunkSeq[String], rows: ChunkSeq[ChunkSeq[u64]], n: u64 }
+fn word(n: u64) -> String {
+    let mut t = String::new();
+    for i in u(0)..n { t.push_str(in "word"); }
+    t
+}
+fn row(n: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in u(0)..n { s.push(i); }
+    s
+}
+fn doc(n: u64) -> Doc {
+    let mut lines: ChunkSeq[String] = ChunkSeq::new[String]();
+    let mut rows: ChunkSeq[ChunkSeq[u64]] = ChunkSeq::new[ChunkSeq[u64]]();
+    for i in u(0)..n { lines.push(word(i)); rows.push(row(i)); }
+    Doc { title: word(n), lines: lines, rows: rows, n: n }
+}
+pub fn dropped() -> u64 {
+    let d = doc(3);
+    wrapping_add(d.lines.len(), d.n)
+}
+pub fn rebound() -> u64 {
+    let mut total: u64 = 0;
+    for i in u(0)..u(4) {
+        let d = doc(i);
+        total = wrapping_add(total, d.rows.len());
+    }
+    total
+}
+pub fn field_replaced() -> u64 {
+    let mut d = doc(2);
+    d.title = word(5);
+    d.rows = ChunkSeq::new[ChunkSeq[u64]]();
+    d.title.len()
+}
+"#;
+
+#[test]
+fn local_structs_free_what_their_fields_own() {
+    assert_eq!(
+        no_leaks("local_structs", LOCAL_STRUCTS, &["dropped", "rebound", "field_replaced"]),
+        6 + 6 + 20
+    );
+}
