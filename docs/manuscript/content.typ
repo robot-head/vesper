@@ -1464,7 +1464,7 @@ Four rules govern `sugar` well-formedness, block-tail continuation splicing, eff
 
 + *Substructural Pass-Mode Transparency and Single Evaluation (`[WF-SugarPass]`):* Pattern holes separate rvalue expressions (`$e:expr`) from lvalue caller places (`mu_p $p:place` with explicit pass floor $mu_p in {upright("in"), upright("inout"), upright("out"), upright("sink")}$; omitted $mu_p$ defaults to `in`). Define the *pass-visibility relation* $mu_(upright("pat")) gt.closed.eq_(upright("vis")) mu_(upright("use"))$ by:
   $ upright("in") gt.closed.eq_(upright("vis")) upright("in"), quad upright("inout") gt.closed.eq_(upright("vis")) mu in {upright("in"), upright("inout")}, quad upright("out") gt.closed.eq_(upright("vis")) upright("out"), quad upright("sink") gt.closed.eq_(upright("vis")) mu in {upright("in"), upright("inout"), upright("sink")} $
-  Every rvalue `$e:expr` binds once via a hygienic `let __h = $e;` header (preventing duplicate side effects or `linear` temporary cloning and barring lvalue `inout`/`out` uses of `__h`), while every place hole `p` checks every template occurrence $mu_j$ against $mu_(upright("pat"))$:
+  Every rvalue `$e:expr` evaluates at most once on every path, and only on the paths where the template uses it. A hole that appears at most once on each control-flow path of $T$ is substituted in place, so `ensure ok else make_error();` calls `make_error()` only when `ok` is false. A hole that appears more than once on some path binds once through a hygienic `let __h = $e;` header placed at the nearest point that dominates those uses (preventing duplicate side effects or `linear` temporary cloning and barring lvalue `inout`/`out` uses of `__h`). Meanwhile every place hole `p` checks every template occurrence $mu_j$ against $mu_(upright("pat"))$:
 
 #_infer(
   "[WF-SugarPass]",
@@ -1570,6 +1570,9 @@ pub fn ingest_packet(
 }
 ```
 ]
+
+The `defer` expansion above runs `$cleanup` only when `$..rest` falls through. A `return`, `break`, or unhandled `Fail` inside `$..rest` leaves the block without reaching it, so this `defer` suits affine cleanup on the normal path only, and a `linear` value it was meant to release fails the exhaustion check on the early exits. Cleanup on `Fail` needs the `handle Fail` shape of `errdefer` (#link(<ch-6-std-sugar>)[Section 7.6]); cleanup on `return` and `break` needs an exit-aware block form that this draft does not yet define.
+
 
 === 7.6 Standard Library Sugar Catalog (`std/*`)
 <ch-6-std-sugar>
