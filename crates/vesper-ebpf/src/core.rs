@@ -29,6 +29,15 @@
 //! Candidates are searched in vmlinux first and, only when vmlinux has
 //! none, in the kernel modules' split BTF ([`apply_with_modules`],
 //! `/sys/kernel/btf/<module>`), as libbpf does.
+//!
+//! In the port build (`vesper-port`), local values, candidate filtering,
+//! the per-candidate matching, combining and [`patch`] run in Vesper
+//! (`vesper/src/core.ves`); the by-name lookup and the walk over modules
+//! stay here.
+
+// The port build forwards the matcher to `@vesper/ebpf` (module `core.ves`);
+// the Rust bodies it replaces stay for the default build.
+#![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
 
 use crate::btf::{Btf, BtfType};
 use crate::insn::{RawInsn, class};
@@ -464,6 +473,20 @@ impl CoreSpec {
     }
 
     /// [`Self::local_value`] with the root's id in the program's BTF.
+    #[cfg(vesper_port)]
+    pub fn local_value_with(&self, local_id: Option<u32>) -> Result<u64, CoreError> {
+        let (lt, _) = port::encode(&self.root);
+        let access: Vec<u64> = self.access.iter().map(|&a| a.into()).collect();
+        let w = crate::port::ffi::core_local_value(
+            self.kind.code().into(),
+            &lt,
+            &access,
+            local_id.map_or(u64::MAX, u64::from),
+        );
+        port::result(self, w[0], w[1], w[2])
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn local_value_with(&self, local_id: Option<u32>) -> Result<u64, CoreError> {
         if self.kind.needs_local_id() {
             return local_id.map(u64::from).ok_or_else(|| {
@@ -501,6 +524,26 @@ impl CoreSpec {
     /// Candidate ids for this relocation's root in `target`: same
     /// essential name, compatible kind. With `from`, only ids at or above
     /// it (the module's own types in a split BTF).
+    #[cfg(vesper_port)]
+    pub fn candidates(&self, target: &Btf, from: u32) -> Vec<u32> {
+        self.candidates_of(&port::encode(&self.root).0, target, from)
+    }
+
+    /// [`Self::candidates`] with the root already encoded.
+    #[cfg(vesper_port)]
+    fn candidates_of(&self, lt: &[u64], target: &Btf, from: u32) -> Vec<u32> {
+        let ids: Vec<u64> = target
+            .by_name(essential_name(self.root.name()))
+            .iter()
+            .map(|&i| i.into())
+            .collect();
+        crate::port::ffi::core_candidates(lt, &target.table, &target.index, &ids, from.into())
+            .into_iter()
+            .map(|i| i as u32)
+            .collect()
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn candidates(&self, target: &Btf, from: u32) -> Vec<u32> {
         target
             .by_name(essential_name(self.root.name()))
@@ -512,6 +555,40 @@ impl CoreSpec {
 
     /// The value for the target kernel described by `target`, matching
     /// only `cands`; `None` when no candidate gives a value.
+    #[cfg(vesper_port)]
+    fn value_over(&self, target: &Btf, cands: &[u32]) -> Result<Vec<u64>, CoreError> {
+        let (lt, text) = port::encode(&self.root);
+        self.value_over_of(&lt, &text, target, cands)
+    }
+
+    /// [`Self::value_over`] with the root already encoded.
+    #[cfg(vesper_port)]
+    fn value_over_of(
+        &self,
+        lt: &[u64],
+        text: &[u8],
+        target: &Btf,
+        cands: &[u32],
+    ) -> Result<Vec<u64>, CoreError> {
+        let access: Vec<u64> = self.access.iter().map(|&a| a.into()).collect();
+        let cands: Vec<u64> = cands.iter().map(|&c| c.into()).collect();
+        let w = crate::port::ffi::core_values(
+            self.kind.code().into(),
+            lt,
+            text,
+            &access,
+            &target.table,
+            &target.index,
+            target.strings(),
+            &cands,
+        );
+        if w[0] == 1 {
+            return port::result(self, w[1], 0, w[2]).map(|_| Vec::new());
+        }
+        Ok(w[1..].to_vec())
+    }
+
+    #[cfg(not(vesper_port))]
     fn value_over(&self, target: &Btf, cands: &[u32]) -> Result<Vec<u64>, CoreError> {
         let mut results = Vec::new();
         for &id in cands {
@@ -546,6 +623,13 @@ impl CoreSpec {
         Ok(results)
     }
 
+    #[cfg(vesper_port)]
+    fn combine(&self, results: Vec<u64>) -> Result<u64, CoreError> {
+        let w = crate::port::ffi::core_combine(self.kind.code().into(), &results);
+        port::result(self, w[0], w[1], 0)
+    }
+
+    #[cfg(not(vesper_port))]
     fn combine(&self, mut results: Vec<u64>) -> Result<u64, CoreError> {
         results.sort_unstable();
         results.dedup();
@@ -567,6 +651,32 @@ impl CoreSpec {
     /// The value for vmlinux `vmlinux`, searching `modules` (split BTF on
     /// top of `vmlinux`, see [`Btf::parse_split`]) only when vmlinux has no
     /// candidate. `local_id` is needed by `TYPE_ID_LOCAL`.
+    #[cfg(vesper_port)]
+    pub fn target_value_with(
+        &self,
+        vmlinux: &Btf,
+        modules: &[&Btf],
+        local_id: Option<u32>,
+    ) -> Result<u64, CoreError> {
+        if self.kind == CoreKind::TypeIdLocal {
+            return self.local_value_with(local_id);
+        }
+        // the root is encoded once for every call below
+        let (lt, text) = port::encode(&self.root);
+        let cands = self.candidates_of(&lt, vmlinux, 0);
+        if !cands.is_empty() || modules.is_empty() {
+            let r = self.value_over_of(&lt, &text, vmlinux, &cands)?;
+            return self.combine(r);
+        }
+        let mut all = Vec::new();
+        for m in modules {
+            let c = self.candidates_of(&lt, m, m.base_len());
+            all.extend(self.value_over_of(&lt, &text, m, &c)?);
+        }
+        self.combine(all)
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn target_value_with(
         &self,
         vmlinux: &Btf,
@@ -832,6 +942,59 @@ fn find_member(btf: &Btf, id: u32, name: &str, depth: u32) -> Option<(u32, u32, 
 /// Write `value` into the instruction at `slot` (the forms the kernel's
 /// `bpf_core_patch_insn` supports: ALU with an immediate, a load/store
 /// offset, `LD_IMM64`), after checking it holds `expected`.
+#[cfg(vesper_port)]
+pub fn patch(
+    insns: &mut [RawInsn],
+    slot: usize,
+    expected: u64,
+    value: u64,
+) -> Result<(), CoreError> {
+    let bad = |d: &str| CoreError::BadInstruction {
+        slot,
+        detail: d.to_owned(),
+    };
+    let i = insns
+        .get(slot)
+        .copied()
+        .unwrap_or(RawInsn::new(0, 0, 0, 0, 0));
+    let next = insns.get(slot + 1).map(|n| n.imm as u32 as u64);
+    let w = crate::port::ffi::core_patch(
+        slot < insns.len(),
+        i.code.into(),
+        i.imm as u32 as u64,
+        i.off as u16 as u64,
+        next.is_some(),
+        next.unwrap_or(0),
+        expected,
+        value,
+    );
+    match w[0] {
+        0 => {
+            if i.code & 0x07 == class::LD {
+                insns[slot].imm = w[1] as u32 as i32;
+                insns[slot + 1].imm = w[2] as u32 as i32;
+            } else if matches!(i.code & 0x07, class::LDX | class::ST | class::STX) {
+                insns[slot].off = w[1] as i16;
+            } else {
+                insns[slot].imm = w[1] as u32 as i32;
+            }
+            Ok(())
+        }
+        1 => Err(bad(match w[1] {
+            1 => "past the end",
+            2 => "value does not fit a 32-bit immediate",
+            3 => "offset does not fit 16 bits",
+            _ => "unsupported instruction for a CO-RE relocation",
+        })),
+        _ => Err(CoreError::LocalMismatch {
+            slot,
+            found: w[1],
+            expected,
+        }),
+    }
+}
+
+#[cfg(not(vesper_port))]
 pub fn patch(
     insns: &mut [RawInsn],
     slot: usize,
@@ -915,4 +1078,104 @@ pub fn apply_with_modules(
     }
     out.core_relos.clear();
     Ok(out)
+}
+
+/// The port build's encoding of local types and its error codes (see
+/// `vesper/src/core.ves`).
+#[cfg(vesper_port)]
+mod port {
+    use super::{CoreError, CoreSpec, LocalType};
+
+    /// `t` as the port's preorder word tree, with its names in a text pool.
+    pub(super) fn encode(t: &LocalType) -> (Vec<u64>, Vec<u8>) {
+        let mut w = Vec::with_capacity(64);
+        let mut text = Vec::with_capacity(64);
+        node(t, &mut w, &mut text);
+        (w, text)
+    }
+
+    fn name(n: &str, w: &mut Vec<u64>, text: &mut Vec<u8>) {
+        w.push(text.len() as u64);
+        w.push(n.len() as u64);
+        text.extend_from_slice(n.as_bytes());
+    }
+
+    fn node(t: &LocalType, w: &mut Vec<u64>, text: &mut Vec<u8>) {
+        match t {
+            LocalType::Void => w.extend([0, 0, 0, 0, 0, 0]),
+            LocalType::Int {
+                name: n,
+                size,
+                signed,
+            } => {
+                w.push(1);
+                name(n, w, text);
+                w.extend([(*size).into(), (*signed).into(), 0]);
+            }
+            LocalType::Ptr(to) => {
+                w.extend([2, 0, 0, 0, 0, 0]);
+                node(to, w, text);
+            }
+            LocalType::Array { elem, len } => {
+                w.extend([3, 0, 0, 0, 0, (*len).into()]);
+                node(elem, w, text);
+            }
+            LocalType::Struct {
+                name: n,
+                union,
+                size,
+                members,
+            } => {
+                w.push(4);
+                name(n, w, text);
+                w.extend([(*size).into(), (*union).into(), members.len() as u64]);
+                for m in members {
+                    name(&m.name, w, text);
+                    w.push(m.offset.into());
+                    match m.bitfield {
+                        Some(b) => w.extend([1, b.bit_offset.into(), b.bits.into()]),
+                        None => w.extend([0, 0, 0]),
+                    }
+                    node(&m.ty, w, text);
+                }
+            }
+            LocalType::Enum {
+                name: n,
+                size,
+                values,
+            } => {
+                w.push(5);
+                name(n, w, text);
+                w.extend([(*size).into(), 0, values.len() as u64]);
+                for (vn, v) in values {
+                    name(vn, w, text);
+                    w.push(*v as u64);
+                }
+            }
+        }
+    }
+
+    /// A port result code as the crate's result.
+    pub(super) fn result(
+        spec: &CoreSpec,
+        code: u64,
+        value: u64,
+        bad: u64,
+    ) -> Result<u64, CoreError> {
+        Err(match code {
+            0 => return Ok(value),
+            1 => CoreError::BadAccess("empty access".into()),
+            2 => CoreError::BadAccess(format!("member {bad}")),
+            3 => CoreError::BadAccess(spec.access_string()),
+            4 => CoreError::Bitfield(spec.describe()),
+            5 => CoreError::BadAccess("not an enum".into()),
+            6 => CoreError::BadAccess("enumerator index".into()),
+            7 => CoreError::BadAccess(format!(
+                "{:?} needs the local type id of the program BTF",
+                spec.kind
+            )),
+            8 => CoreError::NoMatch(spec.describe()),
+            _ => CoreError::Ambiguous(spec.describe()),
+        })
+    }
 }

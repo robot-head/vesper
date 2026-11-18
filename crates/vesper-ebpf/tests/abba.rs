@@ -12,6 +12,12 @@
 //! - `verify`: `verify` of the SYN-flood mitigator, the largest program the
 //!   tests build (built once, outside the timed call): the whole verifier,
 //!   ported in part 2.
+//! - `btf`: `Btf::parse` of a 4096-type synthetic blob (part 3).
+//! - `core`: 512 CO-RE target values against a synthetic target (field
+//!   offsets through anonymous members, sizes, existence, enumerators)
+//!   (part 3).
+//! - `ext`: `parse_ext` of an object with 256 line-info records and 64
+//!   CO-RE relocations (part 3).
 //!
 //! The benchmarks are ignored by default; run them with
 //!
@@ -31,6 +37,7 @@ fn ops(name: &str) -> u64 {
         "decode" => 4096,
         "scalar" => 4096,
         "concrete" => 4096,
+        "core" => 512,
         _ => 1,
     }
 }
@@ -242,6 +249,130 @@ macro_rules! workloads {
                     .expect("mitigator verifies");
                 black_box(r.worst_stack as u64 ^ r.insns_processed as u64)
             }
+
+            /// 4096 types: ints, enums, typedefs, pointers, structs with an
+            /// anonymous union member, function prototypes and functions.
+            fn synthetic_btf() -> Vec<u8> {
+                use ::$krate::btf::BtfBuilder;
+                let mut b = BtfBuilder::new();
+                let int = b.int("int", 4, true);
+                let long = b.int("long", 8, true);
+                let mut n = 2;
+                let mut i = 0;
+                while n < 4096 {
+                    let e = b.enumeration(&format!("e{i}"), 4, &[("A", 1), ("B", -2), ("C", 3)]);
+                    let anon = b.structure("", true, 8, &[("u0", long, 0), ("u1", int, 0)]);
+                    let s = b.structure(
+                        &format!("s{i}"),
+                        false,
+                        32,
+                        &[
+                            ("m0", int, 0),
+                            ("m1", long, 64),
+                            ("", anon, 128),
+                            ("m3", e, 192),
+                        ],
+                    );
+                    let p = b.ptr(s);
+                    let tn = b.str(&format!("t{i}"));
+                    let t = b.header(tn, ::$krate::btf::KIND_TYPEDEF, 0, false, p);
+                    let proto = b.func_proto(int, &[("ctx", t)]);
+                    b.func(&format!("f{i}"), proto, 1);
+                    n += 7;
+                    i += 1;
+                }
+                b.finish()
+            }
+
+            pub fn btf(_: &[u64]) -> u64 {
+                static BLOB: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+                let blob = BLOB.get_or_init(synthetic_btf);
+                let b = ::$krate::btf::Btf::parse(blob).expect("parses");
+                black_box(b.len() as u64)
+            }
+
+            fn specs() -> Vec<::$krate::core::CoreSpec> {
+                use ::$krate::core::{CoreKind, CoreSpec, LocalType};
+                let mut v = Vec::new();
+                for i in 0..128 {
+                    let local = LocalType::structure(
+                        &format!("s{}___local", i * 7 % 580),
+                        16,
+                        vec![
+                            ("m1", LocalType::int("long", 8, true), 0),
+                            ("u1", LocalType::int("int", 4, true), 8),
+                        ],
+                    );
+                    v.push(
+                        CoreSpec::field(CoreKind::FieldByteOffset, local.clone(), &["u1"]).unwrap(),
+                    );
+                    v.push(CoreSpec::field(CoreKind::FieldSigned, local.clone(), &["m1"]).unwrap());
+                    v.push(CoreSpec::of_type(CoreKind::TypeSize, local).unwrap());
+                    let e = LocalType::enumeration(&format!("e{i}"), 4, &[("B", -2)]);
+                    v.push(CoreSpec::enumval(CoreKind::EnumvalValue, e, "B").unwrap());
+                }
+                v
+            }
+
+            pub fn core(_: &[u64]) -> u64 {
+                static TARGET: std::sync::OnceLock<(
+                    ::$krate::btf::Btf,
+                    Vec<::$krate::core::CoreSpec>,
+                )> = std::sync::OnceLock::new();
+                let (t, specs) = TARGET.get_or_init(|| {
+                    (
+                        ::$krate::btf::Btf::parse(&synthetic_btf()).expect("parses"),
+                        specs(),
+                    )
+                });
+                let mut sum = 0u64;
+                for s in specs {
+                    sum = sum
+                        .wrapping_mul(31)
+                        .wrapping_add(s.target_value(t).expect("relocates"));
+                }
+                black_box(sum)
+            }
+
+            fn object() -> (::$krate::btf::Btf, Vec<u8>) {
+                use ::$krate::core::{CoreKind, CoreRelo, CoreSpec, LocalType};
+                let mut p = ::$krate::mitigator::build(&::$krate::mitigator::MitigatorConfig {
+                    pps_threshold: 3,
+                    max_sources: 1024,
+                    ring_bytes: 4096,
+                })
+                .expect("mitigator builds");
+                for i in 0..256 {
+                    p.lines.push(::$krate::LineInfo {
+                        slot: i % p.insns.len(),
+                        file: format!("src/f{}.ves", i % 8),
+                        text: format!("let x{i} = y + {i};"),
+                        line: i as u32,
+                        col: (i % 80) as u32,
+                    });
+                }
+                for i in 0..64 {
+                    let local = LocalType::structure(
+                        &format!("s{i}"),
+                        16,
+                        vec![("m1", LocalType::int("long", 8, true), 8)],
+                    );
+                    p.core_relos.push(CoreRelo {
+                        slot: i,
+                        spec: CoreSpec::field(CoreKind::FieldByteOffset, local, &["m1"]).unwrap(),
+                    });
+                }
+                let o = ::$krate::btf_ext::build(&p, "xdp").expect("builds");
+                (::$krate::btf::Btf::parse(&o.btf).expect("parses"), o.ext)
+            }
+
+            pub fn ext(_: &[u64]) -> u64 {
+                static OBJ: std::sync::OnceLock<(::$krate::btf::Btf, Vec<u8>)> =
+                    std::sync::OnceLock::new();
+                let (b, ext) = OBJ.get_or_init(object);
+                let e = ::$krate::btf_ext::parse_ext(b, ext, "xdp").expect("parses");
+                black_box((e.lines.len() + e.core_relos.len()) as u64)
+            }
         }
     };
 }
@@ -270,11 +401,16 @@ fn workload(name: &str) -> (Workload, Workload) {
         "scalar" => (rust_build::scalar, port_build::scalar),
         "concrete" => (rust_build::concrete, port_build::concrete),
         "verify" => (rust_build::verify, port_build::verify),
+        "btf" => (rust_build::btf, port_build::btf),
+        "core" => (rust_build::core, port_build::core),
+        "ext" => (rust_build::ext, port_build::ext),
         _ => unreachable!(),
     }
 }
 
-const WORKLOADS: [&str; 4] = ["decode", "scalar", "concrete", "verify"];
+const WORKLOADS: [&str; 7] = [
+    "decode", "scalar", "concrete", "verify", "btf", "core", "ext",
+];
 
 #[test]
 fn both_builds_compute_the_same_workloads() {
@@ -377,5 +513,28 @@ fn callgrind_one_workload() {
         _ => port,
     };
     let w = words(8192);
-    black_box(run(&w));
+    // EBPF_ABBA_CALLS=2 runs the workload twice: the difference from one
+    // run is one warm call (without building the workload's fixed input)
+    let calls: usize = std::env::var("EBPF_ABBA_CALLS").map_or(1, |c| c.parse().unwrap());
+    for _ in 0..calls {
+        black_box(run(&w));
+    }
+}
+
+#[test]
+#[ignore = "benchmark; run in release with --ignored --nocapture"]
+fn abba_btf() {
+    abba("btf");
+}
+
+#[test]
+#[ignore = "benchmark; run in release with --ignored --nocapture"]
+fn abba_core() {
+    abba("core");
+}
+
+#[test]
+#[ignore = "benchmark; run in release with --ignored --nocapture"]
+fn abba_ext() {
+    abba("ext");
 }

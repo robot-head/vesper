@@ -80,4 +80,19 @@ const EDITS: &[(&str, &str)] = &[
         "            if p.var.smin < 0 || total < 0 || wrapping_add(total, ni) > range {\n",
         "            if p.var.smin < 0 || total < 0 || wrapping_add(total, ni) > wrapping_add(range, 1) {\n",
     ),
+    // 9 btf.rs: an unknown kind 20 is read as a pointer.
+    (
+        "        if kind == 0 || kind > 19 {\n",
+        "        if kind == 0 || kind > 20 {\n",
+    ),
+    // 10 core.rs: members are not found through anonymous aggregates.
+    (
+        "        if slen(in strs, mname) == 0 {\n",
+        "        if slen(in strs, mname) == 99 {\n",
+    ),
+    // 11 btf_ext.rs: line info keeps 9 bits of the column, not 10.
+    (
+        "        out.push(lc & 1023);\n",
+        "        out.push(lc & 511);\n",
+    ),
 ];

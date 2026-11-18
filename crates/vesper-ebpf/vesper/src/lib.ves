@@ -4,7 +4,9 @@
 // verifier's domain functions, the concrete ALU semantics of
 // src/interp.rs, the helper tables (src/helpers.rs), the map and program
 // kinds of src/program.rs and the stack bound (src/callgraph.rs). Part 2:
-// the verifier (src/verifier.rs, verifier.ves). The Rust files are the
+// the verifier (src/verifier.rs, verifier.ves). Part 3: the BTF reader
+// (src/btf.rs, btf.ves), the CO-RE matcher (src/core.rs, core.ves) and
+// the .BTF.ext readers (src/btf_ext.rs, btf_ext.ves). The Rust files are the
 // model; the Rust wrappers (src/port.rs) convert registers, error fields,
 // MAC arrays and the verifier's input and outcome words.
 //
@@ -86,6 +88,19 @@ use self::program::{
     prog_has_packet,
     prog_is_tracing,
     prog_kernel_type
+};
+use self::btf::parse_btf;
+use self::btf_ext::{
+    local_type_words,
+    maps_from_btf,
+    parse_ext
+};
+use self::core::{
+    combine,
+    filter_candidates,
+    local_value,
+    patch_insn,
+    values_over
 };
 use self::callgraph::{
     check_stack
@@ -404,4 +419,91 @@ pub fn wire_alert_encode(w: SynDropAlertWire) -> ChunkSeq[u8] {
 
 pub fn wire_alert_decode(in s: Slice[u8]) -> SynDropAlertWire eff [Fail[WireError]] {
     alert_decode(in s)
+}
+
+// btf.rs
+
+pub fn btf_parse(in btf: Slice[u8], split: bool, base_types: u64, in base_strings: Slice[u8])
+    -> ChunkSeq[u64] {
+    parse_btf(in btf, split, base_types, in base_strings)
+}
+
+// core.rs
+
+pub fn core_local_value(kind: u64, in lt: Slice[u64], in access: Slice[u64], local_id: u64)
+    -> ChunkSeq[u64] {
+    let mut out: u64 = 0;
+    let mut bad: u64 = 0;
+    let code = local_value(kind, in lt, in access, local_id, inout out, inout bad);
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    w.push(code);
+    w.push(out);
+    w.push(bad);
+    w
+}
+
+pub fn core_candidates(
+    in lt: Slice[u64],
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in ids: Slice[u64],
+    from: u64
+) -> ChunkSeq[u64] {
+    filter_candidates(in lt, in tab, in idx, in ids, from)
+}
+
+pub fn core_values(
+    kind: u64,
+    in lt: Slice[u64],
+    in ltext: Slice[u8],
+    in access: Slice[u64],
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in strs: Slice[u8],
+    in cands: Slice[u64]
+) -> ChunkSeq[u64] {
+    values_over(kind, in lt, in ltext, in access, in tab, in idx, in strs, in cands)
+}
+
+pub fn core_combine(kind: u64, in values: Slice[u64]) -> ChunkSeq[u64] {
+    let mut out: u64 = 0;
+    let code = combine(kind, in values, inout out);
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    w.push(code);
+    w.push(out);
+    w
+}
+
+pub fn core_patch(
+    present: bool,
+    code: u64,
+    imm: u64,
+    off: u64,
+    has_next: bool,
+    next_imm: u64,
+    expected: u64,
+    value: u64
+) -> ChunkSeq[u64] {
+    patch_insn(present, code, imm, off, has_next, next_imm, expected, value)
+}
+
+// btf_ext.rs
+
+pub fn btf_ext_parse(
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in strs: Slice[u8],
+    in ext: Slice[u8],
+    in section: Slice[u8]
+) -> ChunkSeq[u64] {
+    parse_ext(in tab, in idx, in strs, in ext, in section)
+}
+
+pub fn btf_ext_local_type(in tab: Slice[u64], in idx: Slice[u64], id: u64) -> ChunkSeq[u64] {
+    local_type_words(in tab, in idx, id)
+}
+
+pub fn btf_ext_maps_from_btf(in tab: Slice[u64], in idx: Slice[u64], in strs: Slice[u8])
+    -> ChunkSeq[u64] {
+    maps_from_btf(in tab, in idx, in strs)
 }

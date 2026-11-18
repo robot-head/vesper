@@ -10,6 +10,13 @@
 //! subsection is a record size followed by one block per program section
 //! (section name offset into the `.BTF` strings, record count, records).
 //! Instruction offsets in the records are in bytes.
+//!
+//! In the port build (`vesper-port`), [`parse_ext`], [`local_type`] and
+//! [`maps_from_btf`] run in Vesper (`vesper/src/btf_ext.ves`); the writer
+//! ([`build`]) stays here with the BTF builder.
+
+// the Rust readers the port build replaces stay for the default build
+#![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
 
 use crate::btf::{
     BTF_MAGIC, Btf, BtfBuilder, BtfError, BtfType, FUNC_EXTERN, FuncInfo, INT_SIGNED,
@@ -339,6 +346,60 @@ fn slot_of(byte_off: u32) -> Result<usize, BtfError> {
 }
 
 /// Parse the `.BTF.ext` records of `section` against the object's `.BTF`.
+#[cfg(vesper_port)]
+pub fn parse_ext(btf: &Btf, ext: &[u8], section: &str) -> Result<ObjectExt, BtfError> {
+    let w = crate::port::ffi::btf_ext_parse(
+        &btf.table,
+        &btf.index,
+        btf.strings(),
+        ext,
+        section.as_bytes(),
+    );
+    if w[0] == 1 {
+        return Err(port::error(btf, &w));
+    }
+    let mut out = ObjectExt::default();
+    let mut r = 1;
+    let mut next = || {
+        r += 1;
+        w[r - 1]
+    };
+    for _ in 0..next() {
+        let name = btf.name(next() as u32).to_owned();
+        out.functions.push((name, next() as usize));
+    }
+    for _ in 0..next() {
+        let slot = next() as usize;
+        let file = btf.name(next() as u32).to_owned();
+        let text = btf.name(next() as u32).to_owned();
+        let line = next() as u32;
+        let col = next() as u32;
+        out.lines.push(LineInfo {
+            slot,
+            file,
+            text,
+            line,
+            col,
+        });
+    }
+    for _ in 0..next() {
+        let slot = next() as usize;
+        let kind = CoreKind::from_code(next() as u32).expect("the port checked the kind");
+        let access = (0..next()).map(|_| next() as u32).collect();
+        let tree: Vec<u64> = (0..next()).map(|_| next()).collect();
+        out.core_relos.push(CoreRelo {
+            slot,
+            spec: CoreSpec {
+                kind,
+                root: port::local(btf, &tree, &mut 0),
+                access,
+            },
+        });
+    }
+    Ok(out)
+}
+
+#[cfg(not(vesper_port))]
 pub fn parse_ext(btf: &Btf, ext: &[u8], section: &str) -> Result<ObjectExt, BtfError> {
     if ext.len() < 8 || u16::from_le_bytes([ext[0], ext[1]]) != BTF_MAGIC || ext[2] != 1 {
         return Err(bad(".BTF.ext: bad header"));
@@ -405,6 +466,16 @@ pub fn parse_ext(btf: &Btf, ext: &[u8], section: &str) -> Result<ObjectExt, BtfE
 }
 
 /// Convert an object BTF type back into a [`LocalType`].
+#[cfg(vesper_port)]
+pub fn local_type(btf: &Btf, id: u32) -> Result<LocalType, BtfError> {
+    let w = crate::port::ffi::btf_ext_local_type(&btf.table, &btf.index, id.into());
+    if w[0] == 1 {
+        return Err(port::error(btf, &w));
+    }
+    Ok(port::local(btf, &w[1..], &mut 0))
+}
+
+#[cfg(not(vesper_port))]
 pub fn local_type(btf: &Btf, id: u32) -> Result<LocalType, BtfError> {
     local_depth(btf, id, 0)
 }
@@ -448,8 +519,10 @@ fn local_depth(btf: &Btf, id: u32, depth: u32) -> Result<LocalType, BtfError> {
                             m.bitfield_size
                         } else {
                             // a non-kind_flag member at a bit offset: the
-                            // whole underlying integer
-                            btf.size_of(m.ty).map_or(0, |s| s as u32 * 8)
+                            // whole underlying integer (wider than 8 bytes is
+                            // refused below; no overflow on malformed sizes)
+                            btf.size_of(m.ty)
+                                .map_or(0, |s| if s > 8 { u32::MAX } else { s as u32 * 8 })
                         },
                     },
                 );
@@ -485,6 +558,38 @@ fn local_depth(btf: &Btf, id: u32, depth: u32) -> Result<LocalType, BtfError> {
 }
 
 /// Map definitions (offset in `.maps`, definition) from an object's BTF.
+#[cfg(vesper_port)]
+pub fn maps_from_btf(btf: &Btf) -> Result<Vec<(u64, MapDef)>, BtfError> {
+    let w = crate::port::ffi::btf_ext_maps_from_btf(&btf.table, &btf.index, btf.strings());
+    if w[0] == 1 {
+        return Err(match w[1] {
+            1 => bad(".maps entry is not a VAR"),
+            2 => bad("map is not a struct"),
+            3 => bad("map member is not __uint()"),
+            4 => bad(format!("unsupported map type {}", w[2])),
+            5 => bad(format!("unsupported map member {}", btf.name(w[2] as u32))),
+            _ => bad("map without type"),
+        });
+    }
+    Ok(w[2..]
+        .as_chunks::<7>()
+        .0
+        .iter()
+        .map(|m| {
+            let mut def = MapDef::new(
+                btf.name(m[1] as u32),
+                MapKind::from_kernel_type(m[2] as u32).expect("the port checked the type"),
+                m[3] as u32,
+                m[4] as u32,
+                m[5] as u32,
+            );
+            def.flags = m[6] as u32;
+            (m[0], def)
+        })
+        .collect())
+}
+
+#[cfg(not(vesper_port))]
 pub fn maps_from_btf(btf: &Btf) -> Result<Vec<(u64, MapDef)>, BtfError> {
     let mut out = Vec::new();
     for t in &btf.types {
@@ -529,4 +634,97 @@ pub fn maps_from_btf(btf: &Btf) -> Result<Vec<(u64, MapDef)>, BtfError> {
         }
     }
     Ok(out)
+}
+
+/// The port build's decoding of `@vesper/ebpf` results (module
+/// `btf_ext.ves`).
+#[cfg(vesper_port)]
+mod port {
+    use super::bad;
+    use crate::btf::{Btf, BtfError};
+    use crate::core::{Bitfield, LocalMember, LocalType};
+
+    /// The local type tree at `w[*at..]` (names are offsets into `btf`).
+    pub(super) fn local(btf: &Btf, w: &[u64], at: &mut usize) -> LocalType {
+        let n = &w[*at..*at + 6];
+        *at += 6;
+        let name = btf.name(n[1] as u32).to_owned();
+        match n[0] {
+            0 => LocalType::Void,
+            1 => LocalType::Int {
+                name,
+                size: n[3] as u32,
+                signed: n[4] != 0,
+            },
+            2 => LocalType::Ptr(Box::new(local(btf, w, at))),
+            3 => LocalType::Array {
+                len: n[5] as u32,
+                elem: Box::new(local(btf, w, at)),
+            },
+            4 => {
+                let mut members = Vec::with_capacity(n[5] as usize);
+                for _ in 0..n[5] {
+                    let m = &w[*at..*at + 6];
+                    *at += 6;
+                    members.push(LocalMember {
+                        name: btf.name(m[0] as u32).to_owned(),
+                        offset: m[2] as u32,
+                        bitfield: (m[3] != 0).then_some(Bitfield {
+                            bit_offset: m[4] as u32,
+                            bits: m[5] as u32,
+                        }),
+                        ty: local(btf, w, at),
+                    });
+                }
+                LocalType::Struct {
+                    name,
+                    union: n[4] != 0,
+                    size: n[3] as u32,
+                    members,
+                }
+            }
+            _ => {
+                let values = w[*at..*at + 3 * n[5] as usize]
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|v| (btf.name(v[0] as u32).to_owned(), v[2] as i64))
+                    .collect();
+                *at += 3 * n[5] as usize;
+                LocalType::Enum {
+                    name,
+                    size: n[3] as u32,
+                    values,
+                }
+            }
+        }
+    }
+
+    /// An error result `[1, code, x, y]` as the crate's error.
+    pub(super) fn error(btf: &Btf, w: &[u64]) -> BtfError {
+        let (x, y) = (w[2], w[3]);
+        match w[1] {
+            1 => bad(".BTF.ext: bad header"),
+            2 => bad(".BTF.ext header too short"),
+            3 => bad(".BTF.ext subsection out of range"),
+            4 => bad(".BTF.ext truncated"),
+            5 => bad(format!(".BTF.ext record size {x}")),
+            6 => bad(".BTF.ext records past the end"),
+            7 => bad(format!("instruction offset {x} is not a slot")),
+            8 => bad(format!("func info type {x} is not a FUNC")),
+            9 => bad(format!("unsupported CO-RE relocation kind {x}")),
+            10 => {
+                let p = &btf.strings()[x as usize..(x + y) as usize];
+                let p = std::str::from_utf8(p).expect("a valid name");
+                bad(format!("CO-RE access string {p:?}"))
+            }
+            11 => bad("CO-RE local type nests too deeply"),
+            12 => bad(format!("no type {x}")),
+            13 => bad("bad bitfield member in a CO-RE local type"),
+            _ => bad(format!(
+                "unsupported CO-RE local type {:?}",
+                btf.get(x as u32).expect("the port found the type")
+            )),
+        }
+    }
 }

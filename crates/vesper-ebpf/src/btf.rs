@@ -179,6 +179,14 @@ pub struct Btf {
     /// Number of types (including `void`) that came from the base BTF of
     /// split BTF; 0 for a standalone blob.
     base_len: usize,
+    /// The port build: every type as the port's record words (see
+    /// `vesper/src/btf.ves`, `void` included), for the ported CO-RE matcher
+    /// and `.BTF.ext` reader.
+    #[cfg(vesper_port)]
+    pub(crate) table: Vec<u64>,
+    /// The port build: each type id's record offset in `table`.
+    #[cfg(vesper_port)]
+    pub(crate) index: Vec<u64>,
 }
 
 fn rd32(b: &[u8], at: usize) -> Result<u32, BtfError> {
@@ -211,6 +219,170 @@ impl Btf {
         self.base_len as u32
     }
 
+    /// The port build: `@vesper/ebpf` `btf_parse` decodes and validates the
+    /// blob (module `btf.ves`); this builds the type table and the by-name
+    /// index from its words.
+    #[cfg(vesper_port)]
+    fn parse_with(btf: &[u8], base: Option<&Btf>) -> Result<Btf, BtfError> {
+        let (base_types, base_strings) =
+            base.map_or((1, &[][..]), |b| (b.types.len() as u64, &b.strings[..]));
+        let w = crate::port::ffi::btf_parse(btf, base.is_some(), base_types, base_strings);
+        if w[0] == 1 {
+            return Err(match w[1] {
+                0 => bad("bad header"),
+                1 => bad(format!("unsupported version {}", w[2])),
+                2 => bad("header too short"),
+                3 => bad("section out of range"),
+                4 => bad("string section must start and end with NUL"),
+                5 => bad("truncated"),
+                6 => bad(format!("unknown kind {}", w[2])),
+                7 => bad(format!("type {} refers past the type table", w[2])),
+                8 => bad("name offset out of range"),
+                9 => bad("unterminated name"),
+                _ => bad("non-UTF-8 name"),
+            });
+        }
+        // the string section is the one span the port accepted
+        let hdr_len = rd32(btf, 4)? as usize;
+        let str_off = hdr_len + rd32(btf, 16)? as usize;
+        let own = &btf[str_off..str_off + rd32(btf, 20)? as usize];
+        let mut strings = base.map_or_else(Vec::new, |b| b.strings.clone());
+        strings.extend_from_slice(own);
+        let mut types = base.map_or_else(|| vec![BtfType::Void], |b| b.types.clone());
+        let first_own = if base.is_some() { types.len() } else { 0 };
+        let count = w[1] as usize;
+        types.reserve(count);
+        let (mut table, mut index) = base.map_or_else(
+            || (vec![0; 7], vec![0]),
+            |b| (b.table.clone(), b.index.clone()),
+        );
+        let table_base = table.len() as u64;
+        table.extend_from_slice(&w[2..]);
+        let mut r = 2;
+        for _ in 0..count {
+            index.push(table_base + r as u64 - 2);
+            let (kind, name, a, b, c, d, n) = (
+                w[r] as u32,
+                w[r + 1] as u32,
+                w[r + 2] as u32,
+                w[r + 3] as u32,
+                w[r + 4] as u32,
+                w[r + 5] as u32,
+                w[r + 6] as usize,
+            );
+            r += 7;
+            let mut take = |k: usize| {
+                let e = &w[r..r + k * n];
+                r += k * n;
+                e
+            };
+            types.push(match kind {
+                KIND_INT => BtfType::Int {
+                    name,
+                    size: a,
+                    encoding: b,
+                    offset: c,
+                    bits: d,
+                },
+                KIND_PTR => BtfType::Ptr { ty: a },
+                KIND_ARRAY => BtfType::Array {
+                    elem: a,
+                    index: b,
+                    len: c,
+                },
+                KIND_STRUCT | KIND_UNION => BtfType::Struct {
+                    name,
+                    size: a,
+                    union: kind == KIND_UNION,
+                    members: take(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|m| Member {
+                            name: m[0] as u32,
+                            ty: m[1] as u32,
+                            bit_offset: m[2] as u32,
+                            bitfield_size: m[3] as u32,
+                        })
+                        .collect(),
+                },
+                KIND_ENUM | KIND_ENUM64 => BtfType::Enum {
+                    name,
+                    size: a,
+                    signed: b != 0,
+                    values: take(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|v| (v[0] as u32, v[1] as i64))
+                        .collect(),
+                },
+                KIND_FWD => BtfType::Fwd {
+                    name,
+                    union: a != 0,
+                },
+                KIND_TYPEDEF => BtfType::Typedef { name, ty: a },
+                KIND_VOLATILE => BtfType::Volatile { ty: a },
+                KIND_CONST => BtfType::Const { ty: a },
+                KIND_RESTRICT => BtfType::Restrict { ty: a },
+                KIND_FUNC => BtfType::Func {
+                    name,
+                    proto: a,
+                    linkage: b,
+                },
+                KIND_FUNC_PROTO => BtfType::FuncProto {
+                    ret: a,
+                    params: take(2)
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|p| (p[0] as u32, p[1] as u32))
+                        .collect(),
+                },
+                KIND_VAR => BtfType::Var {
+                    name,
+                    ty: a,
+                    linkage: b,
+                },
+                KIND_DATASEC => BtfType::Datasec {
+                    name,
+                    size: a,
+                    vars: take(3)
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .map(|v| (v[0] as u32, v[1] as u32, v[2] as u32))
+                        .collect(),
+                },
+                KIND_FLOAT => BtfType::Float { name, size: a },
+                KIND_DECL_TAG => BtfType::DeclTag {
+                    name,
+                    ty: a,
+                    component: b as i32,
+                },
+                _ => BtfType::TypeTag { name, ty: a },
+            });
+        }
+        let mut b = Btf {
+            types,
+            strings,
+            by_name: base.map_or_else(HashMap::new, |b| b.by_name.clone()),
+            base_len: first_own,
+            table,
+            index,
+        };
+        let mut by_name = std::mem::take(&mut b.by_name);
+        for (id, t) in b.types.iter().enumerate().skip(first_own) {
+            let name = b.name(t.name_off());
+            if !name.is_empty() {
+                by_name.entry(name.to_owned()).or_default().push(id as u32);
+            }
+        }
+        b.by_name = by_name;
+        Ok(b)
+    }
+
+    #[cfg(not(vesper_port))]
     fn parse_with(btf: &[u8], base: Option<&Btf>) -> Result<Btf, BtfError> {
         if btf.len() < 24 || u16::from_le_bytes([btf[0], btf[1]]) != BTF_MAGIC {
             return Err(bad("bad header"));
@@ -421,6 +593,12 @@ impl Btf {
         }
         b.by_name = by_name;
         Ok(b)
+    }
+
+    /// The string section (the base's first for split BTF).
+    #[cfg(vesper_port)]
+    pub(crate) fn strings(&self) -> &[u8] {
+        &self.strings
     }
 
     fn str_at(&self, off: u32) -> Result<&str, BtfError> {

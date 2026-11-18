@@ -1,0 +1,972 @@
+// Module core of @vesper/ebpf (see lib.ves): the CO-RE matcher of
+// src/core.rs: local values, candidate filtering, the per-candidate target
+// values (members through anonymous aggregates, array elements, libbpf's
+// field loads and shifts, `TYPE_MATCHES`), combining them, and patching
+// an instruction. The Rust wrapper looks candidates up by name and walks
+// the kernel modules.
+//
+// A local type is a preorder word tree: every node is six words (tag,
+// name offset, name length, size, flag, count) with the name in a text
+// pool. Tags: 0 void, 1 int (flag signed), 2 ptr (child follows), 3 array
+// (count = len, element follows), 4 struct (flag union; count members,
+// each six words: name offset, name length, byte offset, has bitfield,
+// bitfield bit offset, bitfield bits, then the member's type), 5 enum
+// (count values of three words: name offset, name length, value bits).
+//
+// A target BTF is the table of module btf: one record per type id (kind,
+// name, a, b, c, d, n, entries; see btf.ves), `idx` holding each id's
+// record offset, and the string section.
+//
+// Results: 0 a value, 100 no value from this candidate; errors: 1 empty
+// access, 2 member (value), 3 bad access path, 4 bitfield, 5 not an enum,
+// 6 enumerator index, 7 needs the local type id, 8 no match, 9 candidates
+// disagree.
+
+fn wd(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn bt(in s: Slice[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn udiv(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+fn umod(a: u64, b: u64) -> u64 {
+    wrapping_sub(a, wrapping_mul(udiv(a, b), b))
+}
+
+// ---- the local type tree
+
+fn ltag(in lt: Slice[u64], p: u64) -> u64 {
+    wd(in lt, p)
+}
+
+fn lsize(in lt: Slice[u64], p: u64) -> u64 {
+    let tag = ltag(in lt, p);
+    if tag == 0 {
+        0
+    } else if tag == 2 {
+        8
+    } else if tag == 3 {
+        wrapping_mul(lsize(in lt, wrapping_add(p, 6)), wd(in lt, wrapping_add(p, 5)))
+    } else {
+        wd(in lt, wrapping_add(p, 3))
+    }
+}
+
+// The offset just past the node at `p`.
+fn lend(in lt: Slice[u64], p: u64) -> u64 {
+    let tag = ltag(in lt, p);
+    let n = wd(in lt, wrapping_add(p, 5));
+    let body = wrapping_add(p, 6);
+    if tag == 2 || tag == 3 {
+        lend(in lt, body)
+    } else if tag == 4 {
+        let mut q = body;
+        for i in 0..n {
+            q = lend(in lt, wrapping_add(q, 6));
+        }
+        q
+    } else if tag == 5 {
+        wrapping_add(body, wrapping_mul(n, 3))
+    } else {
+        body
+    }
+}
+
+// The offset of member `i` of the struct at `p` (its six-word header).
+fn lmember(in lt: Slice[u64], p: u64, i: u64) -> u64 {
+    let mut q = wrapping_add(p, 6);
+    for j in 0..i {
+        q = lend(in lt, wrapping_add(q, 6));
+    }
+    q
+}
+
+fn lsigned(in lt: Slice[u64], p: u64) -> bool {
+    let tag = ltag(in lt, p);
+    if tag == 1 {
+        return wd(in lt, wrapping_add(p, 4)) != 0;
+    }
+    if tag == 5 {
+        let n = wd(in lt, wrapping_add(p, 5));
+        for i in 0..n {
+            let v = wd(
+                in lt,
+                wrapping_add(wrapping_add(p, 6), wrapping_add(wrapping_mul(i, 3), 2))
+            );
+            if v >> 63 != 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ---- the target table
+
+pub fn rec(in idx: Slice[u64], id: u64) -> u64 {
+    wd(in idx, id)
+}
+
+pub fn has(in idx: Slice[u64], id: u64) -> bool {
+    id < idx.len()
+}
+
+// The kind of type `id`, enum64 as enum; 99 when there is no such type.
+pub fn tkind(in tab: Slice[u64], in idx: Slice[u64], id: u64) -> u64 {
+    if !has(in idx, id) {
+        return 99;
+    }
+    let k = wd(in tab, rec(in idx, id));
+    if k == 19 {
+        6
+    } else {
+        k
+    }
+}
+
+pub fn tf(in tab: Slice[u64], in idx: Slice[u64], id: u64, field: u64) -> u64 {
+    wd(in tab, wrapping_add(rec(in idx, id), field))
+}
+
+// Entry word `w` of entry `i` (entries of `k` words) of type `id`.
+pub fn te(in tab: Slice[u64], in idx: Slice[u64], id: u64, k: u64, i: u64, w: u64) -> u64 {
+    wd(in tab, wrapping_add(wrapping_add(rec(in idx, id), 7), wrapping_add(wrapping_mul(i, k), w)))
+}
+
+// `Btf::skip_mods`.
+pub fn skip_mods(in tab: Slice[u64], in idx: Slice[u64], id0: u64) -> u64 {
+    let mut id = id0;
+    let n: u64 = 64;
+    for i in 0..n {
+        let k = tkind(in tab, in idx, id);
+        if k == 8 || k == 9 || k == 10 || k == 11 || k == 18 {
+            id = tf(in tab, in idx, id, 2);
+        } else {
+            return id;
+        }
+    }
+    id
+}
+
+// `Btf::size_of`: (false, _) for None.
+pub fn size_of(in tab: Slice[u64], in idx: Slice[u64], id: u64, depth: u64) -> (bool, u64) {
+    if depth > 64 {
+        return (false, 0);
+    }
+    let t = skip_mods(in tab, in idx, id);
+    let k = tkind(in tab, in idx, t);
+    if k == 1 || k == 4 || k == 5 || k == 6 || k == 16 || k == 15 {
+        return (true, tf(in tab, in idx, t, 2));
+    }
+    if k == 2 {
+        return (true, 8);
+    }
+    if k == 3 {
+        let (ok, es) = size_of(in tab, in idx, tf(in tab, in idx, t, 2), wrapping_add(depth, 1));
+        if !ok {
+            return (false, 0);
+        }
+        let len = tf(in tab, in idx, t, 4);
+        if es != 0 && udiv(wrapping_mul(es, len), es) != len {
+            return (false, 0);
+        }
+        return (true, wrapping_mul(es, len));
+    }
+    (false, 0)
+}
+
+// ---- names
+
+// The length of the string at `off` (up to its NUL).
+fn slen(in strs: Slice[u8], off: u64) -> u64 {
+    if off == 0 {
+        return 0;
+    }
+    let mut e = off;
+    loop {
+        if e >= strs.len() || bt(in strs, e) == 0 {
+            break;
+        }
+        e = wrapping_add(e, 1);
+    }
+    wrapping_sub(e, off)
+}
+
+// The length of `essential_name` of `n` bytes at `at` of `s`.
+fn essential_len(in s: Slice[u8], at: u64, n: u64) -> u64 {
+    if n < 3 {
+        return n;
+    }
+    let last = wrapping_sub(n, 2);
+    for i in 0..last {
+        let j = wrapping_add(at, i);
+        if bt(in s, j)
+            == 95
+            && bt(in s, wrapping_add(j, 1))
+            == 95
+            && bt(in s, wrapping_add(j, 2))
+            == 95 {
+            return i;
+        }
+    }
+    n
+}
+
+fn same_bytes(in a: Slice[u8], at: u64, in b: Slice[u8], bt0: u64, n: u64) -> bool {
+    for i in 0..n {
+        if bt(in a, wrapping_add(at, i)) != bt(in b, wrapping_add(bt0, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// `names_match` of a local name and the target name at `toff`.
+fn names_match(in ltext: Slice[u8], loff: u64, llen: u64, in strs: Slice[u8], toff: u64) -> bool {
+    let tlen = slen(in strs, toff);
+    if tlen == 0 {
+        return llen == 0;
+    }
+    let le = essential_len(in ltext, loff, llen);
+    let tes = essential_len(in strs, toff, tlen);
+    le == tes && same_bytes(in ltext, loff, in strs, toff, le)
+}
+
+// The local name equals the target name at `toff` exactly.
+fn name_is(in ltext: Slice[u8], loff: u64, llen: u64, in strs: Slice[u8], toff: u64) -> bool {
+    slen(in strs, toff) == llen && same_bytes(in ltext, loff, in strs, toff, llen)
+}
+
+fn lname_off(in lt: Slice[u64], p: u64) -> u64 {
+    let tag = ltag(in lt, p);
+    if tag == 1 || tag == 4 || tag == 5 {
+        wd(in lt, wrapping_add(p, 1))
+    } else {
+        0
+    }
+}
+
+fn lname_len(in lt: Slice[u64], p: u64) -> u64 {
+    let tag = ltag(in lt, p);
+    if tag == 1 || tag == 4 || tag == 5 {
+        wd(in lt, wrapping_add(p, 2))
+    } else {
+        0
+    }
+}
+
+// ---- matching
+
+fn kind_compatible(in lt: Slice[u64], p: u64, in tab: Slice[u64], in idx: Slice[u64], id: u64)
+    -> bool {
+    let t = skip_mods(in tab, in idx, id);
+    let k = tkind(in tab, in idx, t);
+    let tag = ltag(in lt, p);
+    if tag == 4 {
+        return (k == 4 && wd(in lt, wrapping_add(p, 4)) == 0)
+            || (k == 5 && wd(in lt, wrapping_add(p, 4)) != 0);
+    }
+    if tag == 1 || tag == 5 {
+        return k == 1 || k == 6;
+    }
+    if tag == 2 {
+        return k == 2;
+    }
+    if tag == 3 {
+        return k == 3;
+    }
+    tag == 0 && k == 0
+}
+
+// `find_member`: (found, member type, bit offset, bitfield size).
+fn find_member(
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in strs: Slice[u8],
+    id: u64,
+    in ltext: Slice[u8],
+    loff: u64,
+    llen: u64,
+    depth: u64
+) -> (bool, u64, u64, u64) {
+    if depth > 32 {
+        return (false, 0, 0, 0);
+    }
+    let t = skip_mods(in tab, in idx, id);
+    let k = tkind(in tab, in idx, t);
+    if k != 4 && k != 5 {
+        return (false, 0, 0, 0);
+    }
+    let n = tf(in tab, in idx, t, 6);
+    for i in 0..n {
+        let mname = te(in tab, in idx, t, 4, i, 0);
+        let mty = te(in tab, in idx, t, 4, i, 1);
+        let moff = te(in tab, in idx, t, 4, i, 2);
+        let mbf = te(in tab, in idx, t, 4, i, 3);
+        if name_is(in ltext, loff, llen, in strs, mname) {
+            return (true, mty, moff, mbf);
+        }
+        if slen(in strs, mname) == 0 {
+            let (f, ty, off, bf) = find_member(
+                in tab,
+                in idx,
+                in strs,
+                mty,
+                in ltext,
+                loff,
+                llen,
+                wrapping_add(depth, 1)
+            );
+            if f {
+                return (true, ty, wrapping_u32_add(moff, off), bf);
+            }
+        }
+    }
+    (false, 0, 0, 0)
+}
+
+fn wrapping_u32_add(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b) & 4294967295
+}
+
+// libbpf's `__bpf_core_types_match`.
+fn types_match(
+    in lt: Slice[u64],
+    in ltext: Slice[u8],
+    p: u64,
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in strs: Slice[u8],
+    id: u64,
+    behind_ptr: bool,
+    depth: u64
+) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    let tid = skip_mods(in tab, in idx, id);
+    if !has(in idx, tid) {
+        return false;
+    }
+    let k = tkind(in tab, in idx, tid);
+    let tname = tf(in tab, in idx, tid, 1);
+    if !names_match(in ltext, lname_off(in lt, p), lname_len(in lt, p), in strs, tname) {
+        return false;
+    }
+    let tag = ltag(in lt, p);
+    let d1 = wrapping_add(depth, 1);
+    if tag == 0 {
+        return k == 0;
+    }
+    if tag == 1 {
+        return k
+            == 1
+            && wd(in lt, wrapping_add(p, 3))
+            == tf(in tab, in idx, tid, 2)
+            && (wd(in lt, wrapping_add(p, 4)) != 0)
+            == ((tf(in tab, in idx, tid, 3) & 1) != 0);
+    }
+    if tag == 5 {
+        if k != 6 {
+            return false;
+        }
+        let n = wd(in lt, wrapping_add(p, 5));
+        let tn = tf(in tab, in idx, tid, 6);
+        if wd(in lt, wrapping_add(p, 3)) != tf(in tab, in idx, tid, 2) || n > tn {
+            return false;
+        }
+        for i in 0..n {
+            let v = wrapping_add(wrapping_add(p, 6), wrapping_mul(i, 3));
+            let vo = wd(in lt, v);
+            let vl = wd(in lt, wrapping_add(v, 1));
+            let mut any = false;
+            for j in 0..tn {
+                if !any
+                    && names_match(in ltext, vo, vl, in strs, te(in tab, in idx, tid, 2, j, 0)) {
+                    any = true;
+                }
+            }
+            if !any {
+                return false;
+            }
+        }
+        return true;
+    }
+    if tag == 2 {
+        return k
+            == 2
+            && types_match(
+            in lt,
+            in ltext,
+            wrapping_add(p, 6),
+            in tab,
+            in idx,
+            in strs,
+            tf(in tab, in idx, tid, 2),
+            true,
+            d1
+        );
+    }
+    if tag == 3 {
+        return k
+            == 3
+            && wd(in lt, wrapping_add(p, 5))
+            == tf(in tab, in idx, tid, 4)
+            && types_match(
+            in lt,
+            in ltext,
+            wrapping_add(p, 6),
+            in tab,
+            in idx,
+            in strs,
+            tf(in tab, in idx, tid, 2),
+            behind_ptr,
+            d1
+        );
+    }
+    // a struct or union
+    let union = wd(in lt, wrapping_add(p, 4)) != 0;
+    if k == 7 {
+        return behind_ptr && union == (tf(in tab, in idx, tid, 2) != 0);
+    }
+    if k != 4 && k != 5 {
+        return false;
+    }
+    if union != (k == 5) {
+        return false;
+    }
+    if behind_ptr {
+        return true;
+    }
+    let n = wd(in lt, wrapping_add(p, 5));
+    let tn = tf(in tab, in idx, tid, 6);
+    if n > tn {
+        return false;
+    }
+    let mut m = wrapping_add(p, 6);
+    for i in 0..n {
+        let mo = wd(in lt, m);
+        let ml = wd(in lt, wrapping_add(m, 1));
+        let child = wrapping_add(m, 6);
+        let mut any = false;
+        for j in 0..tn {
+            if !any
+                && names_match(in ltext, mo, ml, in strs, te(in tab, in idx, tid, 4, j, 0))
+                && types_match(
+                in lt,
+                in ltext,
+                child,
+                in tab,
+                in idx,
+                in strs,
+                te(in tab, in idx, tid, 4, j, 1),
+                false,
+                d1
+            ) {
+                any = true;
+            }
+        }
+        if !any {
+            return false;
+        }
+        m = lend(in lt, child);
+    }
+    true
+}
+
+// libbpf's `bpf_core_calc_field_relo`: 0 with the value in `out`, or 4.
+fn field_value(kind: u64, bits: u64, width: u64, size: u64, signed: bool, inout out: u64) -> u64 {
+    let mut byte_off: u64 = 0;
+    let mut byte_sz: u64 = 0;
+    let mut bit_sz: u64 = 0;
+    if width == 0 {
+        if bits & 7 != 0 {
+            return 4;
+        }
+        byte_off = bits >> 3;
+        byte_sz = size;
+        bit_sz = wrapping_mul(size, 8);
+    } else {
+        let mut sz: u64 = if size < 1 {
+            1
+        } else {
+            size
+        };
+        let mut off = wrapping_mul(udiv(bits >> 3, sz), sz);
+        loop {
+            if wrapping_sub(wrapping_add(bits, width), wrapping_mul(off, 8))
+                <= wrapping_mul(sz, 8) {
+                break;
+            }
+            if sz >= 8 {
+                return 4;
+            }
+            sz = wrapping_mul(sz, 2);
+            off = wrapping_mul(udiv(bits >> 3, sz), sz);
+        }
+        byte_off = off;
+        byte_sz = sz;
+        bit_sz = width;
+    }
+    if kind == 0 {
+        out = byte_off;
+    } else if kind == 1 {
+        out = byte_sz;
+    } else if kind == 2 {
+        out = 1;
+    } else if kind == 3 {
+        out = if signed {
+            1
+        } else {
+            0
+        };
+    } else {
+        if byte_sz > 8 {
+            return 4;
+        }
+        if kind == 4 {
+            out = wrapping_sub(
+                64,
+                wrapping_sub(wrapping_add(bits, bit_sz), wrapping_mul(byte_off, 8))
+            );
+        } else {
+            out = wrapping_sub(64, bit_sz);
+        }
+    }
+    0
+}
+
+fn is_field(kind: u64) -> bool {
+    kind <= 5
+}
+
+// `CoreSpec::local_field`: (code, bits, width, node).
+fn local_field(in lt: Slice[u64], in access: Slice[u64], inout bad: u64) -> (u64, u64, u64, u64) {
+    let na = access.len();
+    if na == 0 {
+        return (1, 0, 0, 0);
+    }
+    let mut bits = wrapping_mul(wrapping_mul(wd(in access, 0), lsize(in lt, 0)), 8);
+    let mut width: u64 = 0;
+    let mut cur: u64 = 0;
+    for j in 1..na {
+        let i = wd(in access, j);
+        let tag = ltag(in lt, cur);
+        if tag == 4 {
+            if i >= wd(in lt, wrapping_add(cur, 5)) {
+                bad = i;
+                return (2, 0, 0, 0);
+            }
+            let m = lmember(in lt, cur, i);
+            if wd(in lt, wrapping_add(m, 3)) != 0 {
+                bits = wrapping_add(bits, wd(in lt, wrapping_add(m, 4)));
+                width = wd(in lt, wrapping_add(m, 5));
+            } else {
+                bits = wrapping_add(bits, wrapping_mul(wd(in lt, wrapping_add(m, 2)), 8));
+            }
+            cur = wrapping_add(m, 6);
+        } else if tag == 3 && i < wd(in lt, wrapping_add(cur, 5)) {
+            let elem = wrapping_add(cur, 6);
+            bits = wrapping_add(bits, wrapping_mul(wrapping_mul(i, lsize(in lt, elem)), 8));
+            cur = elem;
+        } else {
+            return (3, 0, 0, 0);
+        }
+    }
+    (0, bits, width, cur)
+}
+
+// `CoreSpec::local_value_with` (`local_id` u64::MAX for None).
+pub fn local_value(
+    kind: u64,
+    in lt: Slice[u64],
+    in access: Slice[u64],
+    local_id: u64,
+    inout out: u64,
+    inout bad: u64
+) -> u64 {
+    if kind == 6 || kind == 7 {
+        if local_id == 18446744073709551615 {
+            return 7;
+        }
+        out = local_id;
+        return 0;
+    }
+    if is_field(kind) {
+        let (c, bits, width, ty) = local_field(in lt, in access, inout bad);
+        if c != 0 {
+            return c;
+        }
+        return field_value(kind, bits, width, lsize(in lt, ty), lsigned(in lt, ty), inout out);
+    }
+    if kind == 8 || kind == 10 || kind == 12 {
+        out = 1;
+        return 0;
+    }
+    if kind == 9 {
+        out = lsize(in lt, 0);
+        return 0;
+    }
+    // EnumvalValue
+    if ltag(in lt, 0) != 5 {
+        return 5;
+    }
+    let i = wd(in access, 0);
+    if access.len() == 0 || i >= wd(in lt, 5) {
+        return 6;
+    }
+    out = wd(in lt, wrapping_add(6, wrapping_add(wrapping_mul(i, 3), 2)));
+    0
+}
+
+// `CoreSpec::target_field` for candidate `cand`.
+fn target_field(
+    kind: u64,
+    in lt: Slice[u64],
+    in ltext: Slice[u8],
+    in access: Slice[u64],
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in strs: Slice[u8],
+    cand: u64,
+    inout out: u64,
+    inout bad: u64
+) -> u64 {
+    let na = access.len();
+    if na == 0 {
+        return 1;
+    }
+    let (rok, root_size) = size_of(in tab, in idx, cand, 0);
+    if !rok {
+        return 100;
+    }
+    let mut bits = wrapping_mul(wrapping_mul(wd(in access, 0), root_size), 8);
+    let mut width: u64 = 0;
+    let mut local: u64 = 0;
+    let mut cur = cand;
+    for j in 1..na {
+        let i = wd(in access, j);
+        let tag = ltag(in lt, local);
+        if tag == 4 {
+            if i >= wd(in lt, wrapping_add(local, 5)) {
+                bad = i;
+                return 2;
+            }
+            let m = lmember(in lt, local, i);
+            let (f, ty, off, bf) = find_member(
+                in tab,
+                in idx,
+                in strs,
+                cur,
+                in ltext,
+                wd(in lt, m),
+                wd(in lt, wrapping_add(m, 1)),
+                0
+            );
+            if !f {
+                return 100;
+            }
+            let child = wrapping_add(m, 6);
+            if !kind_compatible(in lt, child, in tab, in idx, ty) {
+                return 100;
+            }
+            bits = wrapping_add(bits, off);
+            width = bf;
+            local = child;
+            cur = ty;
+        } else if tag == 3 {
+            let t = skip_mods(in tab, in idx, cur);
+            if tkind(in tab, in idx, t) != 3 {
+                return 100;
+            }
+            let telem = tf(in tab, in idx, t, 2);
+            if i >= tf(in tab, in idx, t, 4) {
+                return 100;
+            }
+            let (eok, es) = size_of(in tab, in idx, telem, 0);
+            if !eok {
+                return 100;
+            }
+            bits = wrapping_add(bits, wrapping_mul(wrapping_mul(i, es), 8));
+            width = 0;
+            local = wrapping_add(local, 6);
+            cur = telem;
+        } else {
+            return 3;
+        }
+    }
+    let (sok, size) = size_of(in tab, in idx, cur, 0);
+    if !sok {
+        return 100;
+    }
+    let t = skip_mods(in tab, in idx, cur);
+    let k = tkind(in tab, in idx, t);
+    let signed = if k == 1 {
+        (tf(in tab, in idx, t, 3) & 1) != 0
+    } else if k == 6 {
+        tf(in tab, in idx, t, 3) != 0
+    } else {
+        false
+    };
+    field_value(kind, bits, width, size, signed, inout out)
+}
+
+// `CoreSpec::candidates` after the by-name lookup: the ids at or above
+// `from` of a compatible kind.
+pub fn filter_candidates(
+    in lt: Slice[u64],
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in ids: Slice[u64],
+    from: u64
+) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n = ids.len();
+    for i in 0..n {
+        let id = wd(in ids, i);
+        if id >= from && kind_compatible(in lt, 0, in tab, in idx, id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+// `CoreSpec::value_over`: [0, values...] or [1, code, value].
+pub fn values_over(
+    kind: u64,
+    in lt: Slice[u64],
+    in ltext: Slice[u8],
+    in access: Slice[u64],
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in strs: Slice[u8],
+    in cands: Slice[u64]
+) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(0);
+    let n = cands.len();
+    for c in 0..n {
+        let id = wd(in cands, c);
+        let mut v: u64 = 0;
+        let mut bad: u64 = 0;
+        let mut code: u64 = 0;
+        if kind == 8 {
+            v = 1;
+        } else if kind == 7 {
+            v = id;
+        } else if kind == 12 {
+            v = if types_match(in lt, in ltext, 0, in tab, in idx, in strs, id, false, 0) {
+                1
+            } else {
+                0
+            };
+        } else if kind == 9 {
+            let (ok, s) = size_of(in tab, in idx, id, 0);
+            v = s;
+            if !ok {
+                code = 100;
+            }
+        } else if kind == 10 || kind == 11 {
+            if ltag(in lt, 0) != 5 {
+                code = 5;
+            } else {
+                let i = wd(in access, 0);
+                if access.len() == 0 || i >= wd(in lt, 5) {
+                    code = 6;
+                } else if tkind(in tab, in idx, id) != 6 {
+                    code = 100;
+                } else {
+                    let at = wrapping_add(6, wrapping_mul(i, 3));
+                    let wo = wd(in lt, at);
+                    let wl = wd(in lt, wrapping_add(at, 1));
+                    let tn = tf(in tab, in idx, id, 6);
+                    code = 100;
+                    for j in 0..tn {
+                        if code
+                            == 100
+                            && name_is(in ltext, wo, wl, in strs, te(in tab, in idx, id, 2, j, 0)) {
+                            code = 0;
+                            v = if kind == 11 {
+                                te(in tab, in idx, id, 2, j, 1)
+                            } else {
+                                1
+                            };
+                        }
+                    }
+                }
+            }
+        } else {
+            code = target_field(
+                kind,
+                in lt,
+                in ltext,
+                in access,
+                in tab,
+                in idx,
+                in strs,
+                id,
+                inout v,
+                inout bad
+            );
+        }
+        if code == 0 {
+            out.push(v);
+        } else if code != 100 {
+            let mut e: ChunkSeq[u64] = ChunkSeq::new[u64]();
+            e.push(1);
+            e.push(code);
+            e.push(bad);
+            return e;
+        }
+    }
+    out
+}
+
+fn is_exists(kind: u64) -> bool {
+    kind == 2 || kind == 8 || kind == 10 || kind == 12
+}
+
+// `CoreSpec::combine`: 0 with the value in `out`, 8 no match, 9 disagree.
+pub fn combine(kind: u64, in values: Slice[u64], inout out: u64) -> u64 {
+    let n = values.len();
+    if n == 0 {
+        if is_exists(kind) {
+            out = 0;
+            return 0;
+        }
+        return 8;
+    }
+    let first = wd(in values, 0);
+    let mut same = true;
+    for i in 1..n {
+        if wd(in values, i) != first {
+            same = false;
+        }
+    }
+    if same {
+        out = first;
+        return 0;
+    }
+    if is_exists(kind) {
+        out = 1;
+        return 0;
+    }
+    9
+}
+
+fn sext32(v: u64) -> u64 {
+    if v & 2147483648 != 0 {
+        v | 18446744069414584320
+    } else {
+        v
+    }
+}
+
+fn sext16(v: u64) -> u64 {
+    if v & 32768 != 0 {
+        v | 18446744073709486080
+    } else {
+        v
+    }
+}
+
+// `patch` on one instruction (and the next slot of an `LD_IMM64`):
+// [0, new imm or off, new next imm], [1, detail] (1 past the end, 2 imm,
+// 3 offset, 4 unsupported) or [2, found].
+pub fn patch_insn(
+    present: bool,
+    code: u64,
+    imm: u64,
+    off: u64,
+    has_next: bool,
+    next_imm: u64,
+    expected: u64,
+    value: u64
+) -> ChunkSeq[u64] {
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if !present {
+        o.push(1);
+        o.push(1);
+        return o;
+    }
+    let class = code & 7;
+    let imm32 = imm & 4294967295;
+    if (class == 4 || class == 7) && code & 8 == 0 {
+        if imm32 != expected && sext32(imm32) != expected {
+            o.push(2);
+            o.push(imm32);
+            return o;
+        }
+        let sv = signed(value);
+        if sv >= -2147483648 && sv <= 2147483647 {
+            o.push(0);
+            o.push(value & 4294967295);
+            o.push(0);
+            return o;
+        }
+        if value <= 4294967295 {
+            o.push(0);
+            o.push(value);
+            o.push(0);
+            return o;
+        }
+        o.push(1);
+        o.push(2);
+        return o;
+    }
+    if class == 1 || class == 2 || class == 3 {
+        let found = sext16(off & 65535);
+        if found != expected {
+            o.push(2);
+            o.push(found);
+            return o;
+        }
+        if value > 32767 {
+            o.push(1);
+            o.push(3);
+            return o;
+        }
+        o.push(0);
+        o.push(value);
+        o.push(0);
+        return o;
+    }
+    if class == 0 && code == 24 && has_next {
+        let found = imm32 | ((next_imm & 4294967295) << 32);
+        if found != expected {
+            o.push(2);
+            o.push(found);
+            return o;
+        }
+        o.push(0);
+        o.push(value & 4294967295);
+        o.push(value >> 32);
+        return o;
+    }
+    o.push(1);
+    o.push(4);
+    o
+}
+
+fn signed(x: u64) -> i64 {
+    wrapping_i64(x)
+}
