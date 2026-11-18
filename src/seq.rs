@@ -81,6 +81,9 @@ pub enum SeqOp {
     Clear,
     /// `s.truncate(n)`.
     Truncate,
+    /// `s.reserve(n)`: room for `n` more elements. A capacity hint only:
+    /// total, and no other operation observes it.
+    Reserve,
     /// `s.extend(in slice)`.
     Extend,
     /// `ChunkSeq::finish(s)`: consume an empty sequence.
@@ -273,6 +276,7 @@ impl SeqOp {
                 | Self::TrySet
                 | Self::Clear
                 | Self::Truncate
+                | Self::Reserve
                 | Self::Extend
                 | Self::CopyFrom { .. }
                 | Self::Fill
@@ -307,6 +311,7 @@ impl SeqOp {
             Self::TrySet => "try_set",
             Self::Clear => "clear",
             Self::Truncate => "truncate",
+            Self::Reserve => "reserve",
             Self::Extend => "extend",
             Self::Finish => "finish",
             Self::AsSlice => "as_slice",
@@ -532,6 +537,7 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "try_set" => SeqOp::TrySet,
                 "clear" => SeqOp::Clear,
                 "truncate" => SeqOp::Truncate,
+                "reserve" => SeqOp::Reserve,
                 "extend" | "extend_from_slice" => SeqOp::Extend,
                 "as_slice" | "as_slice_mut" => SeqOp::AsSlice,
                 _ => return shared_method(method),

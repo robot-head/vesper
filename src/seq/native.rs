@@ -3,7 +3,7 @@
 //! A sequence is a handle to a `{len, cap, data}` header; elements live at
 //! `data + i * stride` with the packed stride of [`seq::elem_bytes`]. A slice
 //! is a 24-byte value `{handle, start, len}`. Only allocation and growth call
-//! the runtime (`vesper_seq_new`, `vesper_seq_grow`); every other operation,
+//! the runtime (`vesper_seq_make`, `vesper_seq_grow`); every other operation,
 //! including bounds checks that raise `Fail[RuntimeError]`, is inline.
 //!
 //! Drops: the slots of [`crate::fip::seq_drop_plan`] are freed on every exit
@@ -371,8 +371,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         Ok(match op {
             SeqOp::New | SeqOp::WithCapacity => {
+                // `new` keeps room for a few elements inline after the
+                // header, so the first pushes allocate nothing (#984).
                 let cap = if op == SeqOp::New {
-                    self.zero()
+                    self.b
+                        .ins()
+                        .iconst(types::I64, crate::seq::native_runtime::new_capacity(stride))
                 } else {
                     arg(0)?
                 };
@@ -395,7 +399,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let linkage = if jit { Linkage::Import } else { Linkage::Local };
                 let id = self
                     .m
-                    .declare_function("vesper_seq_new", linkage, &signature)
+                    .declare_function("vesper_seq_make", linkage, &signature)
                     .map_err(|e| e.to_string())?;
                 let reference = self.m.declare_func_in_func(id, self.b.func);
                 let call = self.b.ins().call(reference, &[cap, stride]);
@@ -478,6 +482,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let shorter = self.b.ins().icmp(IntCC::UnsignedLessThan, n, len);
                 let next = self.b.ins().select(shorter, n, len);
                 self.seq_set_word(h, LEN, next);
+                self.zero()
+            }
+            SeqOp::Reserve => {
+                let h = arg(0)?;
+                let len = self.seq_word(h, LEN);
+                // A request past the address space saturates; growth then
+                // faults as an out-of-memory sequence does.
+                let (needed, over) = self.b.ins().uadd_overflow(len, arg(1)?);
+                let max = self.b.ins().iconst(types::I64, -1);
+                let needed = self.b.ins().select(over, max, needed);
+                self.seq_reserve(h, needed, stride)?;
                 self.zero()
             }
             SeqOp::Extend => {

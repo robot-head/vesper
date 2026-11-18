@@ -212,6 +212,8 @@ impl Generator<'_> {
                 self.seq_update(es[0], value, out)?;
                 crate::lean_nodes::unit()
             }
+            // A capacity hint leaves the modelled array unchanged.
+            SeqOp::Reserve => crate::lean_nodes::unit(),
             SeqOp::Extend => {
                 let value = Term::app(global(&["Array", "append"]), [at(0), at(1)]);
                 self.seq_update(es[0], value, out)?;

@@ -1,15 +1,34 @@
 //! Generated Cranelift AOT runtime for `ChunkSeq[T]` (§13).
 //!
-//! Defines `vesper_seq_new` and `vesper_seq_grow` locally in AOT objects, with
-//! the semantics of the JIT runtime (`src/seq/native_runtime.rs`), so linked
-//! executables need only `malloc`, `realloc` and `exit` from the C library
-//! (plus `write` for the fault message off Windows). An allocation that fails
-//! or overflows exits with [`crate::seq::FAULT_STATUS`].
+//! Defines the sequence runtime locally in AOT objects, with the semantics
+//! of the JIT runtime (`src/seq/native_runtime.rs`), so linked executables
+//! need only `malloc`, `realloc`, `free`, `memcpy` and `exit` from the C
+//! library (plus `write` for the fault message off Windows). An allocation
+//! that fails or overflows exits with [`crate::seq::FAULT_STATUS`].
+//!
+//! A sequence is a three-word header `{len, cap, data}`. Generated code
+//! makes one with `vesper_seq_make(cap, stride)`: a single `malloc` block
+//! holding the header and, right after it, room for `cap` elements when they
+//! fit in [`INLINE_BYTES`] (port gaps lane 1, #984). Growth moves the
+//! elements to a separate buffer and leaves the inline room unused until the
+//! header is freed. `vesper_seq_new(cap, stride)` (the export ABI's
+//! constructor, whose buffer a caller may take over) always makes a bare
+//! header and a separate buffer.
+//!
+//! A separate buffer starts [`BUFFER_PREFIX`] bytes into its `malloc` block.
+//! So no other object's header can end where a separate buffer starts, and
+//! `data == header + 24` (with a non-zero capacity) tells inline elements
+//! apart from a separate buffer without any bookkeeping: inline elements are
+//! freed with their header, a separate buffer on its own. Capacity 0 with
+//! data marks borrowed bytes (a string literal or view), which nothing
+//! frees.
 //!
 //! `vesper_seq_free` frees a header and its buffer and `vesper_str_release`
 //! the buffer of an inline `String` value (export ABI v2 calls them),
-//! and [`LIVE_COUNTER`] counts the live header and buffer allocations so
-//! that leak tests can see allocations a Rust allocator never sees (#898).
+//! and [`LIVE_COUNTER`] counts the live header and buffer allocations (a
+//! header with inline elements counts once) so that leak tests can see
+//! allocations a Rust allocator never sees (#898).
+use crate::seq::native_runtime::{BUFFER_PREFIX, INLINE_BYTES};
 use cranelift_codegen::ir::{
     self, AbiParam, AtomicRmwOp, InstBuilder, MemFlags, condcodes::IntCC, types,
 };
@@ -23,7 +42,7 @@ const MESSAGES: [&str; 3] = [
 ];
 
 /// The local data word holding the number of live sequence allocations
-/// (headers plus element buffers).
+/// (headers plus separate element buffers).
 pub(crate) const LIVE_COUNTER: &str = "vesper_seq_live";
 
 pub fn defined<M: Module>(m: &M) -> bool {
@@ -125,6 +144,14 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         b.ins().trap(ir::TrapCode::unwrap_user(1));
         Ok(())
     })?;
+    let memcpy = import(m, "memcpy", 3, true)?;
+    let free = {
+        let mut s = m.make_signature();
+        s.params.push(AbiParam::new(types::I64));
+        m.declare_function("free", Linkage::Import, &s).map_err(e)?
+    };
+    // `vesper_seq_new(cap, stride)`: the export ABI's sequence, a bare
+    // header and (for `cap > 0`) a separate buffer.
     let new = local(m, "vesper_seq_new", 2)?;
     compile(m, new, 2, |b, m, args| {
         let (cap, stride) = (args[0], args[1]);
@@ -142,12 +169,43 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         b.ins().brif(empty, done, &[], alloc, &[]);
         b.switch_to_block(alloc);
         let bytes = checked_bytes(b, m, &im, cap, stride);
-        let data = call(b, m, im.malloc, &[bytes])[0];
-        non_null(b, m, &im, data);
-        count(b, m, &im, 1);
+        let data = buffer(b, m, &im, bytes);
         b.ins().store(MemFlags::new(), data, header, 16);
         b.ins().jump(done, &[]);
         b.switch_to_block(done);
+        b.ins().return_(&[header]);
+        Ok(())
+    })?;
+    // `vesper_seq_make(cap, stride)`: generated code's sequence, one block
+    // holding the header and, up to `INLINE_BYTES`, the elements.
+    let make = local(m, "vesper_seq_make", 2)?;
+    compile(m, make, 2, |b, m, args| {
+        let (cap, stride) = (args[0], args[1]);
+        let bytes = checked_bytes(b, m, &im, cap, stride);
+        let fits = b
+            .ins()
+            .icmp_imm(IntCC::UnsignedLessThanOrEqual, bytes, INLINE_BYTES);
+        let inline = b.create_block();
+        let split = b.create_block();
+        b.ins().brif(fits, inline, &[], split, &[]);
+        b.switch_to_block(inline);
+        let total = b.ins().iadd_imm(bytes, crate::seq::HEADER_BYTES);
+        let header = call(b, m, im.malloc, &[total])[0];
+        non_null(b, m, &im, header);
+        count(b, m, &im, 1);
+        let zero = b.ins().iconst(types::I64, 0);
+        let after = b.ins().iadd_imm(header, crate::seq::HEADER_BYTES);
+        let none = b.ins().icmp_imm(IntCC::Equal, bytes, 0);
+        // No room: an empty header with no buffer, as `vesper_seq_new`.
+        let data = b.ins().select(none, zero, after);
+        b.ins().store(MemFlags::new(), zero, header, 0);
+        b.ins().store(MemFlags::new(), cap, header, 8);
+        b.ins().store(MemFlags::new(), data, header, 16);
+        b.ins().return_(&[header]);
+        b.switch_to_block(split);
+        let r = m.declare_func_in_func(new, b.func);
+        let inst = b.ins().call(r, &[cap, stride]);
+        let header = b.inst_results(inst)[0];
         b.ins().return_(&[header]);
         Ok(())
     })?;
@@ -165,49 +223,36 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         let floor = b.ins().umax(doubled, four);
         let new_cap = b.ins().umax(floor, needed);
         let bytes = checked_bytes(b, m, &im, new_cap, stride);
-        // Capacity 0 with data marks borrowed bytes (a string literal or
-        // view, §13 strings): copy them into a fresh buffer.
         let zero = b.ins().iconst(types::I64, 0);
-        let empty = b.ins().icmp_imm(IntCC::Equal, cap, 0);
-        let has_data = b.ins().icmp_imm(IntCC::NotEqual, data, 0);
-        let borrowed = b.ins().band(empty, has_data);
-        let copy = b.create_block();
+        let owned = separate_buffer(b, header, cap, data);
         let resize = b.create_block();
+        let fresh_block = b.create_block();
         let joined = b.create_block();
         b.append_block_param(joined, types::I64);
-        b.ins().brif(borrowed, copy, &[], resize, &[]);
-        b.switch_to_block(copy);
-        let fresh = call(b, m, im.malloc, &[bytes])[0];
-        non_null(b, m, &im, fresh);
-        // The copy is a buffer the sequence now owns.
-        count(b, m, &im, 1);
+        b.ins().brif(owned, resize, &[], fresh_block, &[]);
+        // A separate buffer this runtime allocated: resize it in place.
+        b.switch_to_block(resize);
+        let base = b.ins().iadd_imm(data, -BUFFER_PREFIX);
+        let total = b.ins().iadd_imm(bytes, BUFFER_PREFIX);
+        let resized = call(b, m, im.realloc, &[base, total])[0];
+        non_null(b, m, &im, resized);
+        let resized = b.ins().iadd_imm(resized, BUFFER_PREFIX);
+        b.ins().jump(joined, &[resized.into()]);
+        // No buffer, the header's inline elements, or borrowed bytes
+        // (capacity 0 with data: a string literal or view, §13 strings):
+        // a fresh buffer, with the old elements copied over.
+        b.switch_to_block(fresh_block);
+        let fresh = buffer(b, m, &im, bytes);
         let len = b.ins().load(types::I64, MemFlags::new(), header, 0);
         let one = b.ins().iconst(types::I64, 1);
         let unit = b.ins().umax(stride, one);
-        let count = b.ins().imul(len, unit);
-        let head = b.create_block();
-        let body = b.create_block();
-        b.append_block_param(head, types::I64);
-        b.ins().jump(head, &[zero.into()]);
-        b.switch_to_block(head);
-        let k = b.block_params(head)[0];
-        let more = b.ins().icmp(IntCC::UnsignedLessThan, k, count);
-        b.ins().brif(more, body, &[], joined, &[fresh.into()]);
-        b.switch_to_block(body);
-        let from = b.ins().iadd(data, k);
-        let byte = b.ins().uload8(types::I64, MemFlags::new(), from, 0);
-        let to = b.ins().iadd(fresh, k);
-        b.ins().istore8(MemFlags::new(), byte, to, 0);
-        let next = b.ins().iadd_imm(k, 1);
-        b.ins().jump(head, &[next.into()]);
-        b.switch_to_block(resize);
-        let resized = call(b, m, im.realloc, &[data, bytes])[0];
-        non_null(b, m, &im, resized);
-        // `realloc(NULL, n)` is a fresh buffer.
-        let was_null = b.ins().icmp_imm(IntCC::Equal, data, 0);
-        let added = b.ins().uextend(types::I64, was_null);
-        count_value(b, m, &im, added);
-        b.ins().jump(joined, &[resized.into()]);
+        let used = b.ins().imul(len, unit);
+        let has_data = b.ins().icmp_imm(IntCC::NotEqual, data, 0);
+        let copy = b.create_block();
+        b.ins().brif(has_data, copy, &[], joined, &[fresh.into()]);
+        b.switch_to_block(copy);
+        call(b, m, memcpy, &[fresh, data, used]);
+        b.ins().jump(joined, &[fresh.into()]);
         b.switch_to_block(joined);
         let grown = b.block_params(joined)[0];
         b.ins().store(MemFlags::new(), new_cap, header, 8);
@@ -215,26 +260,19 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         b.ins().return_(&[zero]);
         Ok(())
     })?;
-    let free = {
-        let mut s = m.make_signature();
-        s.params.push(AbiParam::new(types::I64));
-        m.declare_function("free", Linkage::Import, &s).map_err(e)?
-    };
+    // `vesper_seq_free(header)`: free a header and the buffer it owns.
     let release = local(m, "vesper_seq_free", 1)?;
     compile(m, release, 1, |b, m, args| {
         let header = args[0];
-        let data = b.ins().load(types::I64, MemFlags::new(), header, 16);
-        // Capacity 0 with data is borrowed bytes (a string literal or view),
-        // which the sequence does not own.
         let cap = b.ins().load(types::I64, MemFlags::new(), header, 8);
-        let present = b.ins().icmp_imm(IntCC::NotEqual, data, 0);
-        let owned = b.ins().icmp_imm(IntCC::NotEqual, cap, 0);
-        let has_data = b.ins().band(present, owned);
+        let data = b.ins().load(types::I64, MemFlags::new(), header, 16);
+        let owned = separate_buffer(b, header, cap, data);
         let free_data = b.create_block();
         let done = b.create_block();
-        b.ins().brif(has_data, free_data, &[], done, &[]);
+        b.ins().brif(owned, free_data, &[], done, &[]);
         b.switch_to_block(free_data);
-        call(b, m, free, &[data]);
+        let base = b.ins().iadd_imm(data, -BUFFER_PREFIX);
+        call(b, m, free, &[base]);
         count(b, m, &im, -1);
         b.ins().jump(done, &[]);
         b.switch_to_block(done);
@@ -245,7 +283,8 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         Ok(())
     })?;
     // `vesper_str_release(value)`: free the buffer a `String` value (stored
-    // inline, not behind a header pointer) owns; borrowed bytes stay.
+    // inline, not behind a header pointer) owns; borrowed bytes stay. A
+    // string's bytes are never inline elements.
     let release_str = local(m, "vesper_str_release", 1)?;
     compile(m, release_str, 1, |b, m, args| {
         let value = args[0];
@@ -258,7 +297,8 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         let done = b.create_block();
         b.ins().brif(has_data, free_data, &[], done, &[]);
         b.switch_to_block(free_data);
-        call(b, m, free, &[data]);
+        let base = b.ins().iadd_imm(data, -BUFFER_PREFIX);
+        call(b, m, free, &[base]);
         count(b, m, &im, -1);
         b.ins().jump(done, &[]);
         b.switch_to_block(done);
@@ -267,6 +307,38 @@ pub fn define<M: Module>(m: &mut M) -> Result<(), String> {
         Ok(())
     })?;
     Ok(())
+}
+
+/// A separate element buffer of `bytes` bytes: [`BUFFER_PREFIX`] bytes
+/// past the start of a `malloc` block, counted as one live allocation.
+fn buffer<M: Module>(
+    b: &mut FunctionBuilder,
+    m: &mut M,
+    im: &Imports,
+    bytes: ir::Value,
+) -> ir::Value {
+    let total = b.ins().iadd_imm(bytes, BUFFER_PREFIX);
+    let block = call(b, m, im.malloc, &[total])[0];
+    non_null(b, m, im, block);
+    count(b, m, im, 1);
+    b.ins().iadd_imm(block, BUFFER_PREFIX)
+}
+
+/// Whether `{cap, data}` of the header at `header` is a separate buffer
+/// this runtime owns: not borrowed (capacity 0), not absent, and not the
+/// header's own inline elements (`data == header + 24`).
+fn separate_buffer(
+    b: &mut FunctionBuilder,
+    header: ir::Value,
+    cap: ir::Value,
+    data: ir::Value,
+) -> ir::Value {
+    let present = b.ins().icmp_imm(IntCC::NotEqual, data, 0);
+    let owned = b.ins().icmp_imm(IntCC::NotEqual, cap, 0);
+    let after = b.ins().iadd_imm(header, crate::seq::HEADER_BYTES);
+    let apart = b.ins().icmp(IntCC::NotEqual, data, after);
+    let both = b.ins().band(present, owned);
+    b.ins().band(both, apart)
 }
 
 /// Add `delta` to the live-allocation counter.

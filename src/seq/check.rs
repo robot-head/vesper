@@ -178,6 +178,7 @@ impl Checker<'_> {
             | SeqOp::SliceGet
             | SeqOp::TryGet
             | SeqOp::Truncate
+            | SeqOp::Reserve
             | SeqOp::Extend
             | SeqOp::Fill
             | SeqOp::BytesEq
@@ -247,6 +248,7 @@ impl Checker<'_> {
                         | SeqOp::TryGet
                         | SeqOp::TrySet
                         | SeqOp::Truncate
+                        | SeqOp::Reserve
                         | SeqOp::CopyFrom { .. }
                         | SeqOp::Wide(_),
                     0

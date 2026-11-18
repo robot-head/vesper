@@ -186,6 +186,12 @@ impl Runtime<'_> {
                 seq(arg(0)?)?.borrow_mut().truncate(n);
                 V(Value::Tuple(vec![]))
             }
+            SeqOp::Reserve => {
+                // A capacity hint: the evaluator's vector grows on demand.
+                index(arg(1)?)?;
+                seq(arg(0)?)?;
+                V(Value::Tuple(vec![]))
+            }
             SeqOp::Extend => {
                 let (src, start, len) = view(arg(1)?)?;
                 let items = src.borrow()[start..start + len].to_vec();
