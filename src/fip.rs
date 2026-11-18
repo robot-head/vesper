@@ -2131,10 +2131,92 @@ pub fn elaborate_non_fip_drops(world: &World, program: &mut crate::ir::Program) 
 /// What a native sequence drop frees ([`seq_drop_plan`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SeqDrop {
-    /// A `ChunkSeq[T]` handle: its header and the buffer it owns.
+    /// A `ChunkSeq[T]` handle: its header, the buffer it owns and the
+    /// elements still in it ([`needs_drop`]).
     Seq,
     /// An inline `String` value: the buffer it owns (a literal owns none).
     Str,
+    /// A by-value (`sink`) aggregate parameter: the sequences and strings
+    /// inside it ([`needs_drop`]).
+    Owned,
+}
+
+/// Whether dropping a value of `ty` frees memory that native code owns: a
+/// `ChunkSeq`, a `String`, or a tuple, struct or enum holding one in a
+/// field (§13). A `Box` is not: Box drops are elaborated by
+/// [`elaborate_non_fip_drops`]; only the elements of a dropped sequence free
+/// the boxes they hold. Views, `Str`, tiled sequences and region handles
+/// own nothing.
+pub fn needs_drop(world: &World, ty: &Type) -> bool {
+    drop_visit(world, ty, &mut BTreeSet::new(), false)
+}
+
+/// [`needs_drop`], counting a type it cannot see into (a generic parameter
+/// of an instance not yet substituted) as one that may own something.
+pub fn may_need_drop(world: &World, ty: &Type) -> bool {
+    drop_visit(world, ty, &mut BTreeSet::new(), true)
+}
+
+fn drop_visit(world: &World, ty: &Type, seen: &mut BTreeSet<String>, unknown: bool) -> bool {
+    {
+        let visit = |world: &World, ty: &Type, seen: &mut BTreeSet<String>| {
+            drop_visit(world, ty, seen, unknown)
+        };
+        let ty = crate::numeric::default_type(ty);
+        if crate::seq::is_seq_type(&ty) || crate::strings::is_string_type(&ty) {
+            return true;
+        }
+        match &ty {
+            Type::Tuple(ts) => ts.iter().any(|t| visit(world, t, seen)),
+            Type::Named(n, args) => {
+                if is_box_type(world, &ty)
+                    || crate::seq::is_slice_type(&ty)
+                    || crate::tiled::is_seq_type(&ty)
+                    || crate::regions::is_handle_type(&ty)
+                {
+                    return false;
+                }
+                let Some(a) = world.adts.get(n) else {
+                    // Not a data type: a scalar, a vector, `Str`, or a
+                    // generic parameter not yet substituted.
+                    return unknown
+                        && !crate::numeric::is_scalar_name(n)
+                        && n != "Never"
+                        && !crate::strings::is_text(&ty)
+                        && crate::vector::layout_words(&ty).is_none();
+                };
+                if a.generics.len() != args.len() {
+                    return unknown;
+                }
+                let key = ty.to_string();
+                if !seen.insert(key.clone()) {
+                    return false;
+                }
+                let vars: BTreeMap<String, Type> = a
+                    .generics
+                    .iter()
+                    .zip(args)
+                    .map(|(g, t)| (g.name.clone(), t.clone()))
+                    .collect();
+                let found = a.variants.iter().any(|v| {
+                    v.fields
+                        .iter()
+                        .any(|f| visit(world, &substitute(&f.ty, &vars), seen))
+                });
+                seen.remove(&key);
+                found
+            }
+            Type::Infer => unknown,
+            _ => false,
+        }
+    }
+}
+
+/// Whether an element of a `ChunkSeq[ty]` owns something its sequence
+/// frees when it is dropped, cleared, truncated or overwritten: what
+/// [`needs_drop`] names, and boxes (no Box drop tracks a sequence buffer).
+pub fn elem_needs_drop(world: &World, ty: &Type) -> bool {
+    needs_drop(world, ty) || type_contains_box(world, &crate::numeric::default_type(ty))
 }
 
 /// The function-local `ChunkSeq` and `String` slots that native code frees
@@ -2150,14 +2232,21 @@ pub enum SeqDrop {
 /// holds. A sequence is therefore freed once, by its last owner.
 ///
 /// A string slot cannot be emptied that way (its value lives inline in the
-/// frame), so a string is only planned when its slot is never moved from,
-/// assigned or captured: its last owner is then the function. Elements are
-/// not freed: a `ChunkSeq` of sequences or strings frees its own buffer only.
+/// frame), so a string is only planned when its slot is never moved from
+/// or captured (and, for a parameter, never assigned): its last owner is
+/// then the function. A `let`-bound string has its own storage, which an
+/// assignment overwrites after freeing what it held. A dropped
+/// sequence also drops the elements still in it ([`elem_needs_drop`]).
+///
+/// Bindings inside a destructuring `let` own what they bind, as a plain
+/// binding does. A by-value (`sink`) parameter of an aggregate type that
+/// [`needs_drop`] is planned as [`SeqDrop::Owned`] unless part of it is moved
+/// out. A `let`-bound aggregate is not planned yet (the #972 follow-up).
 ///
 /// Slots a closure names (by alias or move) or a handler captures by move,
-/// external captures, partial moves and bindings inside a destructuring
-/// pattern are never planned; they keep today's behavior (freed at JIT teardown, never in
-/// executables). `@fip` functions are never planned.
+/// external captures, partial moves, match-arm bindings and bindings under a
+/// `Box` pattern are never planned; they keep today's behavior (freed at JIT
+/// teardown, never in executables). `@fip` functions are never planned.
 pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<String, SeqDrop> {
     use crate::ir::Op;
     let mut plan = BTreeMap::new();
@@ -2165,19 +2254,20 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
         return plan;
     }
     for (name, ty) in &f.locals {
+        let param = f.params.iter().find(|p| &p.name == name);
         let kind = if crate::seq::is_seq_type(ty) {
             SeqDrop::Seq
         } else if crate::strings::is_string_type(ty) {
             SeqDrop::Str
+        } else if param.is_some() && needs_drop(world, ty) {
+            SeqDrop::Owned
         } else {
             continue;
         };
         if f.external_captures.contains(name) {
             continue;
         }
-        if let Some(p) = f.params.iter().find(|p| &p.name == name)
-            && p.pass != Pass::Sink
-        {
+        if param.is_some_and(|p| p.pass != Pass::Sink) {
             continue;
         }
         plan.insert(name.clone(), kind);
@@ -2192,6 +2282,16 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
         .flat_map(|b| &b.instructions)
         .map(|i| (i.dest, &i.op))
         .collect();
+    fn pattern_has_box(world: &World, p: &Pattern) -> bool {
+        is_box_pattern(world, p)
+            || match &p.kind {
+                PatternKind::Tuple(ps) => ps.iter().any(|p| pattern_has_box(world, p)),
+                PatternKind::Constructor { fields, .. } => {
+                    fields.iter().any(|(_, p)| pattern_has_box(world, p))
+                }
+                _ => false,
+            }
+    }
     fn pattern_names(p: &Pattern, out: &mut Vec<String>) {
         match &p.kind {
             PatternKind::Bind(n) => out.push(n.clone()),
@@ -2207,26 +2307,36 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
             Op::Read {
                 root, path, pass, ..
             } if *pass == Pass::Sink => {
-                if !path.is_empty() || plan.get(root) == Some(&SeqDrop::Str) {
+                // Reading a field that owns nothing moves nothing out.
+                if (!path.is_empty() && may_need_drop(world, &inst.ty))
+                    || plan.get(root) == Some(&SeqDrop::Str)
+                {
                     refused.insert(root.clone());
                 }
             }
             Op::Write { place, op, .. } => {
+                // A field of an owned aggregate may be replaced: the write
+                // frees the value it replaces ([`replace_drops`]). A
+                // `let`-bound string is assigned into its own storage; a
+                // string parameter has none.
                 let root = place.split('.').next().unwrap_or("");
-                if place != root || op != "=" || plan.get(root) == Some(&SeqDrop::Str) {
+                if (place != root && plan.get(root) != Some(&SeqDrop::Owned))
+                    || op != "="
+                    || (plan.get(root) == Some(&SeqDrop::Str)
+                        && f.params.iter().any(|p| p.name == root))
+                {
                     refused.insert(root.to_owned());
                 }
             }
             Op::Bind { pattern, value } => {
-                if let PatternKind::Bind(n) = &pattern.kind {
-                    // A binding owns its value unless the value is a borrow.
-                    if matches!(defs.get(value), Some(Op::Read { pass, .. }) if *pass != Pass::Sink)
-                    {
-                        refused.insert(n.clone());
-                    }
-                } else {
-                    let mut names = vec![];
-                    pattern_names(pattern, &mut names);
+                let mut names = vec![];
+                pattern_names(pattern, &mut names);
+                // A binding owns its value unless the value is a borrow; a
+                // `Box` pattern frees its box as it binds.
+                if matches!(defs.get(value), Some(Op::Read { pass, .. }) if *pass != Pass::Sink)
+                    || (!matches!(pattern.kind, PatternKind::Bind(_))
+                        && pattern_has_box(world, pattern))
+                {
                     refused.extend(names);
                 }
             }
@@ -2263,4 +2373,351 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
     }
     plan.retain(|name, _| !refused.contains(name));
     plan
+}
+
+/// Where a native graph drops an owned temporary ([`temporary_drops`]).
+pub const AT_BLOCK_ENTRY: usize = usize::MAX;
+
+/// Owned values that a native graph never binds, moves or returns, keyed by
+/// where they are dropped: after the instruction of their last use, after
+/// their definition when nothing uses them, or at the entry of the block
+/// whose parameter receives them ([`AT_BLOCK_ENTRY`]) when that parameter
+/// is unused (§13, port gaps lane 2). A value is owned when a call
+/// (`Call`, `Indirect`) or a sequence constructor produces it, when it
+/// moves a [`seq_drop_plan`] slot out (`Read` by value: the slot is then
+/// empty), or when it is a block parameter that every incoming jump passes
+/// such a value used nowhere else (the result of an inlined call). It is a
+/// temporary when every other use is an `in` or `inout` argument of a call
+/// in its own block: `f(in make())`, or a discarded `make();`. Callers keep
+/// only the values whose type [`needs_drop`]. Any other use (a binding, a
+/// sink argument, a builtin operand, a projection, a terminator) owns or
+/// forwards the value.
+pub fn temporary_drops(
+    world: &World,
+    f: &crate::ir::FunctionIr,
+) -> BTreeMap<(usize, usize), Vec<ValueId>> {
+    use crate::ir::{Op, Terminator};
+    use crate::seq::SeqOp;
+    #[derive(Default, Clone)]
+    struct Uses {
+        /// Call borrows, as (block, instruction).
+        borrows: Vec<(usize, usize)>,
+        /// Jumps that pass the value, as (target block, parameter index).
+        jumps: Vec<(usize, usize)>,
+        /// Any other use.
+        other: bool,
+    }
+    let plan = seq_drop_plan(world, f);
+    // Locals bound to a borrow own nothing.
+    let value_defs: BTreeMap<ValueId, &Op> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .map(|i| (i.dest, &i.op))
+        .collect();
+    let mut borrow_bound = BTreeSet::new();
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        if let Op::Bind { pattern, value } = &inst.op
+            && let PatternKind::Bind(n) = &pattern.kind
+            && matches!(value_defs.get(value), Some(Op::Read { pass, .. }) if *pass != Pass::Sink)
+        {
+            borrow_bound.insert(n.clone());
+        }
+    }
+    let mut uses: BTreeMap<ValueId, Uses> = BTreeMap::new();
+    // Where each value is defined: (block, instruction), or the block entry.
+    let mut defs: BTreeMap<ValueId, (usize, usize)> = BTreeMap::new();
+    let mut produced = BTreeSet::new();
+    for (b, block) in f.blocks.iter().enumerate() {
+        for p in &block.params {
+            defs.insert(*p, (b, AT_BLOCK_ENTRY));
+        }
+        for (i, inst) in block.instructions.iter().enumerate() {
+            defs.insert(inst.dest, (b, i));
+            let owned = match &inst.op {
+                Op::Call { .. } | Op::Indirect { .. } => {
+                    !f.fip_call_slots.contains_key(&inst.dest)
+                }
+                Op::Seq { op, .. } => matches!(op, SeqOp::New | SeqOp::WithCapacity),
+                Op::Read {
+                    root, path, pass, ..
+                } => {
+                    *pass == Pass::Sink
+                        && path.is_empty()
+                        && match plan.get(root) {
+                            Some(SeqDrop::Seq | SeqDrop::Owned) => true,
+                            // A string slot is never planned once it is
+                            // moved from; the move hands its buffer on.
+                            None => {
+                                f.locals.get(root).is_some_and(crate::strings::is_string_type)
+                                    && !f.params.iter().any(|p| &p.name == root)
+                                    && !borrow_bound.contains(root)
+                            }
+                            _ => false,
+                        }
+                }
+                _ => false,
+            };
+            if owned {
+                produced.insert(inst.dest);
+            }
+            let borrows: Vec<ValueId> = match &inst.op {
+                Op::Call { args, .. } | Op::Indirect { args, .. } => args
+                    .iter()
+                    .filter(|a| a.pass != Pass::Sink && a.place.is_none())
+                    .map(|a| a.value)
+                    .collect(),
+                _ => vec![],
+            };
+            let mut owning = crate::ir_inline::operands(&inst.op);
+            for v in &borrows {
+                if let Some(at) = owning.iter().position(|o| o == v) {
+                    owning.remove(at);
+                }
+            }
+            for v in borrows {
+                uses.entry(v).or_default().borrows.push((b, i));
+            }
+            for v in owning {
+                uses.entry(v).or_default().other = true;
+            }
+        }
+        match &block.terminator {
+            Terminator::Jump { block: target, args } => {
+                for (k, v) in args.iter().enumerate() {
+                    uses.entry(*v).or_default().jumps.push((*target, k));
+                }
+            }
+            t => {
+                for v in crate::ir_inline::terminator_operands(t) {
+                    uses.entry(v).or_default().other = true;
+                }
+            }
+        }
+    }
+    // Block parameters that receive only owned values used nowhere else.
+    let mut incoming: BTreeMap<(usize, usize), Vec<ValueId>> = BTreeMap::new();
+    for (v, u) in &uses {
+        for &j in &u.jumps {
+            incoming.entry(j).or_default().push(*v);
+        }
+    }
+    let sole_jump = |u: Option<&Uses>| {
+        u.is_some_and(|u| !u.other && u.borrows.is_empty() && u.jumps.len() == 1)
+    };
+    loop {
+        let mut grew = false;
+        for (b, block) in f.blocks.iter().enumerate() {
+            for (k, p) in block.params.iter().enumerate() {
+                if produced.contains(p) {
+                    continue;
+                }
+                let Some(senders) = incoming.get(&(b, k)) else {
+                    continue;
+                };
+                if senders
+                    .iter()
+                    .all(|v| produced.contains(v) && sole_jump(uses.get(v)))
+                {
+                    produced.insert(*p);
+                    grew = true;
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    // A value forwarded to an owned parameter is dropped there instead.
+    let forwarded: BTreeSet<ValueId> = f
+        .blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(b, block)| {
+            block
+                .params
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| produced.contains(*p))
+                .map(move |(k, _)| (b, k))
+        })
+        .filter_map(|j: (usize, usize)| incoming.get(&j))
+        .flatten()
+        .copied()
+        .collect();
+    let mut drops: BTreeMap<(usize, usize), Vec<ValueId>> = BTreeMap::new();
+    for v in &produced {
+        if forwarded.contains(v) {
+            continue;
+        }
+        let Some(&(b, i)) = defs.get(v) else {
+            continue;
+        };
+        let u = uses.get(v).cloned().unwrap_or_default();
+        if u.other
+            || !u.jumps.is_empty()
+            || u
+                .borrows
+                .iter()
+                .any(|&(ub, ui)| ub != b || (i != AT_BLOCK_ENTRY && ui <= i))
+        {
+            continue;
+        }
+        let last = u.borrows.iter().map(|&(_, ui)| ui).max().unwrap_or(i);
+        drops.entry((b, last)).or_default().push(*v);
+    }
+    drops
+}
+
+/// The writes in graph `f` that free the value they replace, as (block,
+/// instruction) positions (§13, port gaps lane 2): `h.s = v` frees the old
+/// `h.s`, and `h = v` frees the old `h`, when the place holds a value it
+/// owns. Through an `inout` parameter it always does: nothing can be moved
+/// out through one. A local or a `sink` parameter does when no closure or
+/// handler names it and, on every path to the write, nothing of it was
+/// moved out since it was last bound or assigned whole (a forward "maybe
+/// moved" analysis over the graph's blocks). `fresh`, for a graph nested in
+/// another (a handled body), limits the locals to those it declares itself;
+/// the enclosing function's parameters are then out of reach. Callers apply
+/// it only to places whose type [`needs_drop`], and leave whole writes of
+/// [`seq_drop_plan`] slots to that plan.
+pub fn replace_drops(
+    world: &World,
+    f: &crate::ir::FunctionIr,
+    fresh: Option<&BTreeSet<String>>,
+) -> BTreeSet<(usize, usize)> {
+    use crate::ir::{Op, Terminator};
+    let mut out = BTreeSet::new();
+    if world.functions.get(&f.name).is_some_and(|src| src.fip) {
+        return out;
+    }
+    let mut borrowed = BTreeSet::new();
+    let mut candidates = BTreeSet::new();
+    for name in f.locals.keys() {
+        if f.external_captures.contains(name) {
+            continue;
+        }
+        match f.params.iter().find(|p| &p.name == name) {
+            Some(p) if p.pass == Pass::Inout && fresh.is_none() => {
+                borrowed.insert(name.clone());
+            }
+            Some(p) if p.pass == Pass::Sink && fresh.is_none() => {
+                candidates.insert(name.clone());
+            }
+            Some(_) => {}
+            None if fresh.is_none_or(|names| names.contains(name)) => {
+                candidates.insert(name.clone());
+            }
+            None => {}
+        }
+    }
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        if let Op::Closure { aliases, moves, .. } | Op::Handle { aliases, moves, .. } = &inst.op {
+            for name in aliases
+                .keys()
+                .chain(aliases.values())
+                .chain(moves.iter().map(|p| &p.root))
+            {
+                candidates.remove(name);
+            }
+        }
+    }
+    // What one instruction does to the set of maybe-moved roots.
+    let step = |op: &Op, moved: &mut BTreeSet<String>| match op {
+        Op::Read {
+            root, path, pass, ..
+        } if *pass == Pass::Sink && candidates.contains(root) => {
+            moved.insert(root.clone());
+        }
+        Op::Write { place, op, .. } if op == "=" && !place.contains('.') => {
+            moved.remove(place);
+        }
+        Op::Bind { pattern, .. } => {
+            let mut names = vec![];
+            fn collect(p: &Pattern, out: &mut Vec<String>) {
+                match &p.kind {
+                    PatternKind::Bind(n) => out.push(n.clone()),
+                    PatternKind::Tuple(ps) => ps.iter().for_each(|p| collect(p, out)),
+                    PatternKind::Constructor { fields, .. } => {
+                        fields.iter().for_each(|(_, p)| collect(p, out));
+                    }
+                    PatternKind::Wild | PatternKind::Literal(_) => {}
+                }
+            }
+            collect(pattern, &mut names);
+            for n in names {
+                moved.remove(&n);
+            }
+        }
+        _ => {}
+    };
+    // A read of a field that owns nothing moves nothing out.
+    let moves = |inst: &crate::ir::Instruction| match &inst.op {
+        Op::Read { path, pass, .. } if *pass == Pass::Sink && !path.is_empty() => {
+            may_need_drop(world, &inst.ty)
+        }
+        _ => true,
+    };
+    let n = f.blocks.len();
+    let mut preds: Vec<Vec<usize>> = vec![vec![]; n];
+    for (b, block) in f.blocks.iter().enumerate() {
+        let succs: Vec<usize> = match &block.terminator {
+            Terminator::Jump { block, .. } => vec![*block],
+            Terminator::Branch { yes, no, .. } => vec![*yes, *no],
+            Terminator::Match { arms, .. } => arms.iter().map(|(_, t)| *t).collect(),
+            Terminator::Return(_) | Terminator::Unreachable => vec![],
+        };
+        for t in succs {
+            if t < n {
+                preds[t].push(b);
+            }
+        }
+    }
+    let mut exit: Vec<Option<BTreeSet<String>>> = vec![None; n];
+    let entry_state = |b: usize, exit: &Vec<Option<BTreeSet<String>>>| {
+        let mut state = BTreeSet::new();
+        for &p in &preds[b] {
+            if let Some(s) = &exit[p] {
+                state.extend(s.iter().cloned());
+            }
+        }
+        state
+    };
+    loop {
+        let mut changed = false;
+        for (b, block) in f.blocks.iter().enumerate() {
+            let mut state = entry_state(b, &exit);
+            for inst in &block.instructions {
+                if moves(inst) {
+                    step(&inst.op, &mut state);
+                }
+            }
+            if exit[b].as_ref() != Some(&state) {
+                exit[b] = Some(state);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for (b, block) in f.blocks.iter().enumerate() {
+        let mut state = entry_state(b, &exit);
+        for (i, inst) in block.instructions.iter().enumerate() {
+            if let Op::Write { place, op, .. } = &inst.op
+                && op == "="
+            {
+                let root = place.split('.').next().unwrap_or("");
+                if borrowed.contains(root)
+                    || (candidates.contains(root) && !state.contains(root))
+                {
+                    out.insert((b, i));
+                }
+            }
+            if moves(inst) {
+                step(&inst.op, &mut state);
+            }
+        }
+    }
+    out
 }

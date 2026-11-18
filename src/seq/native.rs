@@ -31,6 +31,8 @@ const DATA: i32 = 16;
 pub(super) struct SeqDropSlot {
     var: Variable,
     kind: crate::fip::SeqDrop,
+    /// The slot's type: what a sequence's elements or an aggregate own.
+    ty: Type,
     /// A `let`-bound string's own storage: the slot is bound to it so that
     /// a later binding can free the string it replaces.
     storage: Option<ir::Value>,
@@ -98,7 +100,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             } else {
                 None
             };
-            slots.push(SeqDropSlot { var, kind, storage });
+            let ty = f.locals.get(&name).cloned().unwrap_or(Type::Infer);
+            slots.push(SeqDropSlot {
+                var,
+                kind,
+                ty,
+                storage,
+            });
         }
         Ok(slots)
     }
@@ -114,12 +122,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             .cloned()
     }
 
-    /// Frees what drop `slot` holds now.
+    /// Frees what drop `slot` holds now: a sequence with the elements still
+    /// in it, a string's buffer, or what an owned aggregate holds.
     fn seq_drop_free(&mut self, slot: &SeqDropSlot) -> Result<(), String> {
-        let (value, function) = match (slot.kind, slot.storage) {
-            (crate::fip::SeqDrop::Seq, _) => (self.use_var(slot.var), "vesper_seq_free"),
-            (crate::fip::SeqDrop::Str, Some(storage)) => (storage, "vesper_str_release"),
-            (crate::fip::SeqDrop::Str, None) => (self.use_var(slot.var), "vesper_str_release"),
+        let value = match (slot.kind, slot.storage) {
+            (crate::fip::SeqDrop::Str, Some(storage)) => storage,
+            _ => self.use_var(slot.var),
         };
         // An empty slot (never bound, or moved from) holds 0.
         let present = self.b.ins().icmp_imm(IntCC::NotEqual, value, 0);
@@ -127,7 +135,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         let done = self.b.create_block();
         self.branch(present, free, &[], done, &[]);
         self.b.switch_to_block(free);
-        self.seq_runtime_call(function, &[value])?;
+        let ty = match slot.kind {
+            crate::fip::SeqDrop::Str => Type::named(crate::strings::STRING_TYPE),
+            _ => slot.ty.clone(),
+        };
+        self.drop_value(value, &ty)?;
         self.jump(done, &[]);
         self.b.switch_to_block(done);
         Ok(())
@@ -148,10 +160,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(())
     }
 
-    /// A sequence moved out of local `name` leaves its slot empty.
+    /// A sequence or owned aggregate moved out of local `name` leaves its
+    /// slot empty.
     pub(super) fn seq_drop_moved(&mut self, name: &str) {
         if let Some(slot) = self.seq_drop_slot(name)
-            && slot.kind == crate::fip::SeqDrop::Seq
+            && slot.kind != crate::fip::SeqDrop::Str
         {
             let zero = self.zero();
             self.def_var(slot.var, zero);
@@ -167,6 +180,15 @@ impl<M: Module> Codegen<'_, '_, M> {
         value: ir::Value,
     ) -> Result<ir::Value, String> {
         let PatternKind::Bind(name) = &pattern.kind else {
+            // A destructuring binding frees what its names held; their new
+            // values are stored by [`Self::seq_drop_bound`].
+            let mut names = vec![];
+            pattern_bind_names(pattern, &mut names);
+            for name in names {
+                if let Some(slot) = self.seq_drop_slot(&name) {
+                    self.seq_drop_free(&slot)?;
+                }
+            }
             return Ok(value);
         };
         let Some(slot) = self.seq_drop_slot(name) else {
@@ -182,12 +204,58 @@ impl<M: Module> Codegen<'_, '_, M> {
         })
     }
 
+    /// After a destructuring binding: each string it bound into a drop slot
+    /// moves into the slot's own storage, as a plain binding's does.
+    pub(super) fn seq_drop_bound(&mut self, pattern: &Pattern) {
+        if matches!(pattern.kind, PatternKind::Bind(_)) {
+            return;
+        }
+        let mut names = vec![];
+        pattern_bind_names(pattern, &mut names);
+        for name in names {
+            if let Some(slot) = self.seq_drop_slot(&name)
+                && let Some(storage) = slot.storage
+            {
+                let value = self.use_var(slot.var);
+                self.copy_bytes(value, storage, crate::seq::HEADER_BYTES as u32);
+                self.def_var(slot.var, storage);
+            }
+        }
+    }
+
     /// Assigning a whole drop slot frees what it held.
     pub(super) fn seq_drop_overwrite(&mut self, place: &str) -> Result<(), String> {
         if let Some(slot) = self.seq_drop_slot(place) {
             self.seq_drop_free(&slot)?;
         }
         Ok(())
+    }
+
+    /// Drops the element at `addr` that a `set` overwrites.
+    fn seq_drop_elem(&mut self, addr: ir::Value, elem: &Type) -> Result<(), String> {
+        if !self.drops_enabled() || !crate::fip::elem_needs_drop(self.world, elem) {
+            return Ok(());
+        }
+        let value = helper_load(&mut self.b, self.world, addr, elem)?;
+        emit_drop_glue(&mut self.b, self.m, self.world, value, elem, true)
+    }
+
+    /// Drops the `count` elements of `h` from index `from` that `clear` or
+    /// `truncate` removes.
+    fn seq_drop_range(
+        &mut self,
+        h: ir::Value,
+        from: ir::Value,
+        count: ir::Value,
+        stride: i64,
+        elem: &Type,
+    ) -> Result<(), String> {
+        if !self.drops_enabled() || !crate::fip::elem_needs_drop(self.world, elem) {
+            return Ok(());
+        }
+        let zero = self.zero();
+        let data = self.seq_elem_addr(h, zero, from, stride);
+        emit_drop_elements(&mut self.b, self.m, self.world, data, count, elem)
     }
 
     fn seq_word(&mut self, ptr: ir::Value, offset: i32) -> ir::Value {
@@ -437,6 +505,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 if matches!(op, SeqOp::Get | SeqOp::SliceGet) {
                     self.seq_load_elem(addr, &elem)?
                 } else {
+                    self.seq_drop_elem(addr, &elem)?;
                     self.seq_store_elem(addr, arg(2)?, &elem)?;
                     self.zero()
                 }
@@ -452,9 +521,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                     self.branch(valid, yes, &[], no, &[]);
                     self.b.switch_to_block(yes);
                     let addr = self.seq_elem_addr(h, start, i, stride);
+                    self.seq_drop_elem(addr, &elem)?;
                     self.seq_store_elem(addr, arg(2)?, &elem)?;
                     self.jump(done, &[]);
                     self.b.switch_to_block(no);
+                    // The element moved in but not stored is dropped.
+                    if self.drops_enabled() && crate::fip::elem_needs_drop(self.world, &elem) {
+                        emit_drop_glue(&mut self.b, self.m, self.world, arg(2)?, &elem, true)?;
+                    }
                     self.jump(done, &[]);
                     self.b.switch_to_block(done);
                     self.b.ins().uextend(types::I64, valid)
@@ -467,8 +541,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
             SeqOp::Clear => {
+                let h = arg(0)?;
                 let zero = self.zero();
-                self.seq_set_word(arg(0)?, LEN, zero);
+                let len = self.seq_word(h, LEN);
+                self.seq_drop_range(h, zero, len, stride, &elem)?;
+                self.seq_set_word(h, LEN, zero);
                 zero
             }
             SeqOp::Truncate => {
@@ -477,6 +554,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let len = self.seq_word(h, LEN);
                 let shorter = self.b.ins().icmp(IntCC::UnsignedLessThan, n, len);
                 let next = self.b.ins().select(shorter, n, len);
+                let removed = self.b.ins().isub(len, next);
+                self.seq_drop_range(h, next, removed, stride, &elem)?;
                 self.seq_set_word(h, LEN, next);
                 self.zero()
             }
@@ -844,5 +923,318 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.bind_ir(dest, &mut slot_index, false, inner, element, &read.elem)?;
         }
         Ok(true)
+    }
+}
+
+/// Calls a sequence runtime function (`vesper_seq_free`, `vesper_str_release`)
+/// from a generated drop helper, as [`Codegen::seq_runtime_call`] does.
+fn glue_runtime_call<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    name: &str,
+    args: &[ir::Value],
+) -> Result<(), String> {
+    let jit = std::any::type_name::<M>().contains("JITModule");
+    if !jit {
+        aot_runtime::define(m)?;
+    }
+    let mut signature = m.make_signature();
+    signature
+        .params
+        .extend(args.iter().map(|_| AbiParam::new(types::I64)));
+    signature.returns.push(AbiParam::new(types::I64));
+    let linkage = if jit { Linkage::Import } else { Linkage::Local };
+    let id = m
+        .declare_function(name, linkage, &signature)
+        .map_err(|e| e.to_string())?;
+    let reference = m.declare_func_in_func(id, b.func);
+    b.ins().call(reference, args);
+    Ok(())
+}
+
+/// Drops `value` of type `ty` (§13, port gaps lane 2): a sequence frees the
+/// elements still in it, then its header and buffer; a `String` frees its
+/// buffer; a tuple, struct or enum drops the fields of its live variant
+/// that own something. `value` is a sequence handle (0 is empty), or the
+/// address of an aggregate. `elements` is set for an element of a dropped
+/// sequence, which also frees the boxes it holds (no Box drop tracks a
+/// sequence buffer); elsewhere boxes are left to the Box drop elaboration.
+pub(super) fn emit_drop_glue<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    world: &World,
+    value: ir::Value,
+    ty: &Type,
+    elements: bool,
+) -> Result<(), String> {
+    let ty = crate::numeric::default_type(ty);
+    let owns = |t: &Type| {
+        if elements {
+            crate::fip::elem_needs_drop(world, t)
+        } else {
+            crate::fip::needs_drop(world, t)
+        }
+    };
+    if !owns(&ty) {
+        return Ok(());
+    }
+    if seq::is_seq_type(&ty) {
+        let elem = seq::elem(&ty).ok_or("ChunkSeq without an element type")?.clone();
+        if crate::fip::elem_needs_drop(world, &elem) {
+            let present = b.ins().icmp_imm(IntCC::NotEqual, value, 0);
+            let drop = b.create_block();
+            let done = b.create_block();
+            b.ins().brif(present, drop, &[], done, &[]);
+            b.switch_to_block(drop);
+            let len = b.ins().load(types::I64, MemFlags::new(), value, LEN);
+            let data = b.ins().load(types::I64, MemFlags::new(), value, DATA);
+            emit_drop_elements(b, m, world, data, len, &elem)?;
+            b.ins().jump(done, &[]);
+            b.switch_to_block(done);
+        }
+        return glue_runtime_call(b, m, "vesper_seq_free", &[value]);
+    }
+    if crate::strings::is_string_type(&ty) {
+        return glue_runtime_call(b, m, "vesper_str_release", &[value]);
+    }
+    if crate::fip::is_box_type(world, &ty) {
+        return emit_drop_box_value(b, m, world, value, &ty);
+    }
+    let layout = Layout::of(world, &ty)?;
+    match layout.kind {
+        LayoutKind::Scalar => Ok(()),
+        LayoutKind::Product(fields) => {
+            for field in fields.into_iter().filter(|f| owns(&f.ty)) {
+                let ptr = b.ins().iadd_imm(value, i64::from(field.offset));
+                let v = helper_load(b, world, ptr, &field.ty)?;
+                emit_drop_glue(b, m, world, v, &field.ty, elements)?;
+            }
+            Ok(())
+        }
+        LayoutKind::Enum(variants) => {
+            let owning: Vec<(usize, Vec<LayoutField>)> = variants
+                .into_iter()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    let fields: Vec<LayoutField> =
+                        v.fields.into_iter().filter(|f| owns(&f.ty)).collect();
+                    (!fields.is_empty()).then_some((i, fields))
+                })
+                .collect();
+            let tag = b.ins().load(types::I64, MemFlags::new(), value, 0);
+            let done = b.create_block();
+            for (tag_index, fields) in owning {
+                let this = b.create_block();
+                let next = b.create_block();
+                let is = b.ins().icmp_imm(IntCC::Equal, tag, tag_index as i64);
+                b.ins().brif(is, this, &[], next, &[]);
+                b.switch_to_block(this);
+                for field in fields {
+                    let ptr = b.ins().iadd_imm(value, i64::from(field.offset));
+                    let v = helper_load(b, world, ptr, &field.ty)?;
+                    emit_drop_glue(b, m, world, v, &field.ty, elements)?;
+                }
+                b.ins().jump(done, &[]);
+                b.switch_to_block(next);
+            }
+            b.ins().jump(done, &[]);
+            b.switch_to_block(done);
+            Ok(())
+        }
+    }
+}
+
+/// Drops the `count` elements of type `elem` stored from `data` on, through
+/// one generated helper per element type (`__vesper_drop_elems_*`), which
+/// also serves element types that hold sequences of themselves.
+pub(super) fn emit_drop_elements<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    world: &World,
+    data: ir::Value,
+    count: ir::Value,
+    elem: &Type,
+) -> Result<(), String> {
+    let elem = crate::numeric::default_type(elem);
+    let sym = format!("__vesper_drop_elems_{:016x}", fnv1a64(&elem.to_string()));
+    let id = match m.get_name(&sym) {
+        Some(cranelift_module::FuncOrDataId::Func(id)) => id,
+        Some(_) => return Err(format!("{sym} collides with a data symbol")),
+        None => {
+            let stride = seq::elem_bytes(world, &elem)?;
+            let mut sig = m.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            sig.params.push(AbiParam::new(types::I64));
+            let jit = std::any::type_name::<M>().contains("JITModule");
+            let linkage = if jit {
+                Linkage::Preemptible
+            } else {
+                Linkage::Local
+            };
+            let id = m
+                .declare_function(&sym, linkage, &sig)
+                .map_err(|e| e.to_string())?;
+            let mut ctx = m.make_context();
+            ctx.func.signature = sig;
+            let mut fb_ctx = FunctionBuilderContext::new();
+            {
+                let mut h = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
+                let entry = h.create_block();
+                h.append_block_params_for_function_params(entry);
+                h.switch_to_block(entry);
+                let data = h.block_params(entry)[0];
+                let count = h.block_params(entry)[1];
+                let head = h.create_block();
+                h.append_block_param(head, types::I64);
+                let body = h.create_block();
+                let exit = h.create_block();
+                let zero = h.ins().iconst(types::I64, 0);
+                h.ins().jump(head, &[zero.into()]);
+                h.switch_to_block(head);
+                let i = h.block_params(head)[0];
+                let more = h.ins().icmp(IntCC::UnsignedLessThan, i, count);
+                h.ins().brif(more, body, &[], exit, &[]);
+                h.switch_to_block(body);
+                let offset = h.ins().imul_imm(i, stride);
+                let ptr = h.ins().iadd(data, offset);
+                let v = helper_load(&mut h, world, ptr, &elem)?;
+                emit_drop_glue(&mut h, m, world, v, &elem, true)?;
+                let next = h.ins().iadd_imm(i, 1);
+                h.ins().jump(head, &[next.into()]);
+                h.switch_to_block(exit);
+                h.ins().return_(&[]);
+                h.seal_all_blocks();
+                h.finalize();
+            }
+            if jit {
+                DefinitionLinkage::Jit.normalize_references(&mut ctx.func);
+            }
+            m.define_function(id, &mut ctx)
+                .map_err(|e| e.to_string())?;
+            m.clear_context(&mut ctx);
+            id
+        }
+    };
+    let reference = m.declare_func_in_func(id, b.func);
+    b.ins().call(reference, &[data, count]);
+    Ok(())
+}
+
+impl<M: Module> Codegen<'_, '_, M> {
+    /// Whether this function frees what it drops: not in `@fip` code, and
+    /// not in a freestanding image, which has no allocator to return to.
+    pub(super) fn drops_enabled(&self) -> bool {
+        let jit = std::any::type_name::<M>().contains("JITModule");
+        !self.in_fip_fn
+            && (jit
+                || self.m.isa().triple().operating_system
+                    != target_lexicon::OperatingSystem::None_)
+    }
+
+    /// Drops `value` of type `ty` ([`emit_drop_glue`]).
+    pub(super) fn drop_value(&mut self, value: ir::Value, ty: &Type) -> Result<(), String> {
+        let ty = crate::numeric::default_type(&substitute(ty, &self.generic_vars));
+        emit_drop_glue(&mut self.b, self.m, self.world, value, &ty, false)
+    }
+
+    /// Whether dropping a value of `ty` frees anything ([`crate::fip::needs_drop`]).
+    pub(super) fn needs_drop(&self, ty: &Type) -> bool {
+        let ty = crate::numeric::default_type(&substitute(ty, &self.generic_vars));
+        crate::fip::needs_drop(self.world, &ty)
+    }
+
+    /// Drops the value of type `ty` stored at `addr`.
+    pub(super) fn drop_in_place(&mut self, addr: ir::Value, ty: &Type) -> Result<(), String> {
+        let ty = crate::numeric::default_type(&substitute(ty, &self.generic_vars));
+        let value = helper_load(&mut self.b, self.world, addr, &ty)?;
+        emit_drop_glue(&mut self.b, self.m, self.world, value, &ty, false)
+    }
+
+    /// Before a write `place = v` replaces an owned value: frees what the
+    /// place holds ([`crate::fip::replace_drops`]). Whole writes of a drop
+    /// slot are freed by [`Self::seq_drop_overwrite`] instead.
+    pub(super) fn drop_replaced(
+        &mut self,
+        place: &str,
+        op: &str,
+        at: (usize, usize),
+    ) -> Result<(), String> {
+        if op != "=" || !self.drops_enabled() {
+            return Ok(());
+        }
+        if !self
+            .exits
+            .last()
+            .is_some_and(|t| t.replace.contains(&at))
+        {
+            return Ok(());
+        }
+        let mut parts = place.split('.');
+        let root = parts.next().unwrap_or("");
+        let path: Vec<String> = parts.map(str::to_owned).collect();
+        if path.is_empty() && self.seq_drop_slot(root).is_some() {
+            return Ok(());
+        }
+        let Some(mut ty) = self.local_types.get(root).cloned() else {
+            return Ok(());
+        };
+        for field in &path {
+            let layout = Layout::of(self.world, &substitute(&ty, &self.generic_vars))?;
+            let LayoutKind::Product(fields) = layout.kind else {
+                return Ok(());
+            };
+            let Some(f) = fields.into_iter().find(|f| &f.name == field) else {
+                return Ok(());
+            };
+            ty = f.ty;
+        }
+        if !self.needs_drop(&ty) {
+            return Ok(());
+        }
+        let e = ir_place_expr(
+            &crate::check::Place {
+                root: root.into(),
+                path,
+            },
+            0..0,
+        );
+        let addr = self.address(&e)?;
+        self.drop_in_place(addr, &ty)
+    }
+
+    /// Drops the owned temporaries of `f` whose last use is instruction
+    /// `inst` of `block` ([`crate::fip::temporary_drops`]).
+    pub(super) fn drop_temporaries(
+        &mut self,
+        temps: &BTreeMap<(usize, usize), Vec<crate::ir::ValueId>>,
+        f: &crate::ir::FunctionIr,
+        block: usize,
+        inst: usize,
+        values: &BTreeMap<crate::ir::ValueId, ir::Value>,
+    ) -> Result<(), String> {
+        let Some(ids) = temps.get(&(block, inst)) else {
+            return Ok(());
+        };
+        for id in ids {
+            let ty = f.values.get(id).cloned().unwrap_or(Type::Infer);
+            if let Some(&value) = values.get(id)
+                && self.needs_drop(&ty)
+            {
+                self.drop_value(value, &ty)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The names a pattern binds.
+fn pattern_bind_names(p: &Pattern, out: &mut Vec<String>) {
+    match &p.kind {
+        PatternKind::Bind(n) => out.push(n.clone()),
+        PatternKind::Tuple(ps) => ps.iter().for_each(|p| pattern_bind_names(p, out)),
+        PatternKind::Constructor { fields, .. } => {
+            fields.iter().for_each(|(_, p)| pattern_bind_names(p, out));
+        }
+        PatternKind::Wild | PatternKind::Literal(_) => {}
     }
 }
