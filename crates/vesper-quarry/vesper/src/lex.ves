@@ -75,7 +75,11 @@ pub fn lex(inout q: Q, in sql: Slice[u8]) {
                     Option::None => n,
                 };
                 let len = wrapping_sub(i, word_start);
-                let off = identifier_in(inout q, in sql[word_start..i], wrapping_add(base, word_start));
+                let off = identifier_in(
+                    inout q,
+                    in sql[word_start..i],
+                    wrapping_add(base, word_start)
+                );
                 if q.err != 0 {
                     return;
                 }
