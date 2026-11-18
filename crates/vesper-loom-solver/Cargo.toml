@@ -2,11 +2,32 @@
 name = "vesper-loom-solver"
 version = "0.1.0"
 edition = "2024"
+build = "build.rs"
+
+# This is the port-backed build: build.rs links the Vesper package in vesper/
+# and sets cfg(vesper_port). The compiler and every crate inside
+# `cargo tree -p vesper -e normal,build` use the frozen Rust seed copy,
+# crates/vesper-loom-solver/seed (package vesper-loom-solver-seed, same
+# library name), instead; see "Crates the compiler links" in
+# docs/maintenance/porting-a-crate.md.
+
+[features]
+# Build the port from a copy of vesper/ with one deliberate bug per ported
+# module (DIVERGENT in build.rs); scripts/test-port-harness.sh asserts which
+# test catches each.
+vesper-port-divergent = []
 
 [dependencies]
-vesper-loom-calculus = { path = "../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
+# The port-backed calculus: this package is outside the compiler closure.
+vesper-loom-calculus = { path = "../vesper-loom-calculus" }
 semver = { version = "1", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
 serde_json = "1"
+vesper-bench = { path = "../vesper-bench" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }

@@ -1,0 +1,284 @@
+// Module locked of @vesper/loom-solver (see lib.ves): `validate_locked`.
+//
+// After the request comes the snapshot in the calculus solution encoding,
+// then nsel, (manifest JSON)*: each selection's manifest alone, for the
+// metadata comparison.
+use @vesper/loom-calculus::decode::{
+    decode_solution,
+    rd,
+    rd_str
+};
+use @vesper/loom-calculus::solve::{
+    solve
+};
+use @vesper/loom-calculus::util::{
+    add,
+    id_at,
+    inc,
+    man,
+    none,
+    req,
+    root,
+    ssel,
+    sw,
+    ver
+};
+use self::{
+    S
+};
+use self::closure::{
+    closure,
+    has_entry,
+    mark_features
+};
+use self::diag::{
+    c_locked_candidate_missing,
+    c_locked_features_mismatch,
+    c_locked_manifest_mismatch,
+    c_locked_package_missing,
+    c_locked_root_mismatch,
+    c_locked_system_candidate_missing,
+    c_locked_system_missing,
+    c_locked_unused_package,
+    c_locked_unused_system,
+    copy_calculus,
+    dlit,
+    dver,
+    emit,
+    setw,
+    subj_id,
+    subj_lit
+};
+use self::input::{
+    mxv,
+    sysv
+};
+use self::output::{
+    out_error,
+    table,
+    w
+};
+use self::search::{
+    emit_unsupported,
+    unsupported
+};
+use self::snap::{
+    last_snap
+};
+
+// The root or catalog manifest named x at version text vt, or none().
+fn expected(in s: S, x: u64, vt: u64) -> u64 {
+    let rm = man(in s.l, s.root);
+    if x == rm.name {
+        return s.root;
+    }
+    let at = sw(in s.cstart, x);
+    let n = sw(in s.ccount, x);
+    for j in 0..n {
+        let mi = sw(in s.clist, add(at, j));
+        if ver(in s.l, man(in s.l, mi).ver).text == vt {
+            return mi;
+        }
+    }
+    none()
+}
+
+pub fn locked(inout s: S) {
+    if s.ds.len() > 0 {
+        out_error(inout s, 0, 0);
+        return;
+    }
+    let rm = s.root;
+    if unsupported(in s, rm) {
+        emit_unsupported(inout s, rm);
+        out_error(inout s, 1, 0);
+        return;
+    }
+    let rname = man(in s.l, s.root).name;
+    decode_solution(inout s.l);
+    let sel_at = s.l.sel_at;
+    let sel_n = s.l.sel_n;
+    let nj = rd(inout s.l);
+    s.cbuf.clear();
+    for i in 0..nj {
+        let j = rd_str(inout s.l);
+        s.cbuf.push(j);
+    }
+    // Unsupported policies of the expected manifests come first.
+    let mut policies = false;
+    for i in 0..sel_n {
+        let m = man(in s.l, add(sel_at, i));
+        let vt = ver(in s.l, m.ver).text;
+        let e = expected(in s, m.name, vt);
+        if e != none() && unsupported(in s, e) {
+            emit_unsupported(inout s, e);
+            policies = true;
+        }
+    }
+    if policies {
+        out_error(inout s, 1, 0);
+        return;
+    }
+    // Exactly one root: the request's name, exact version and features.
+    let mut root_ok = s.l.root_n == 1;
+    if root_ok {
+        let r = root(in s.l, s.l.root_at);
+        root_ok = r
+            .name
+            == rname
+            && req(in s.l, r.req)
+            .text
+            == req(in s.l, s.rexact)
+            .text
+            && r
+            .feat_n
+            == s
+            .rf_n;
+        if root_ok {
+            for i in 0..s.rf_n {
+                if id_at(in s.l, add(r.feat_at, i)) != id_at(in s.l, add(s.rf_at, i)) {
+                    root_ok = false;
+                }
+            }
+        }
+    }
+    if !root_ok {
+        let (so, sl, mo) = subj_lit(inout s, "roots");
+        dlit(
+            inout s,
+            "snapshot must contain one exact root requirement with the requested features"
+        );
+        emit(inout s, c_locked_root_mismatch(), rname, so, sl, mo);
+    }
+    // validate_solution(locked).
+    let pool_n = s.l.pool.len();
+    let diags_n = s.l.diags.len();
+    solve(inout s.l);
+    let x = last_snap(in s);
+    for i in 0..x.diag_n {
+        copy_calculus(inout s, add(x.diag_at, i));
+    }
+    s.l.diags.truncate(diags_n);
+    s.l.pool.truncate(pool_n);
+    // The assignment: the root, then each selection's expected manifest.
+    s.agen = inc(s.agen);
+    s.anames.clear();
+    setw(inout s.asg, rname, s.root);
+    setw(inout s.ast, rname, s.agen);
+    s.anames.push(rname);
+    for i in 0..sel_n {
+        let m = man(in s.l, add(sel_at, i));
+        let vt = ver(in s.l, m.ver).text;
+        let e = expected(in s, m.name, vt);
+        if e != none() {
+            let ex = mxv(in s, e);
+            let json = sw(in s.cbuf, i);
+            if !ex.has_json || ex.json != json {
+                let (so, sl, mo) = subj_id(inout s, m.name);
+                dlit(inout s, "snapshot manifest differs from the current root/catalog metadata");
+                emit(inout s, c_locked_manifest_mismatch(), m.name, so, sl, mo);
+            }
+            if sw(in s.ast, m.name) != s.agen {
+                s.anames.push(m.name);
+            }
+            setw(inout s.asg, m.name, e);
+            setw(inout s.ast, m.name, s.agen);
+        } else {
+            let (so, sl, mo) = subj_id(inout s, m.name);
+            dlit(inout s, "snapshot version ");
+            dver(inout s, m.ver);
+            dlit(inout s, " is absent from the current local catalog");
+            emit(inout s, c_locked_candidate_missing(), m.name, so, sl, mo);
+        }
+    }
+    if closure(inout s) {
+        // Selected features against the closure.
+        s.mgen = inc(s.mgen);
+        let sg = s.mgen;
+        for i in 0..sel_n {
+            let m = man(in s.l, add(sel_at, i));
+            setw(inout s.nmk, m.name, sg);
+            if has_entry(in s, m.name) {
+                let fg = mark_features(inout s, m.name);
+                let mut same = sw(in s.fcnt, m.name) == m.fs_n;
+                for j in 0..m.fs_n {
+                    if sw(in s.fmk, id_at(in s.l, add(m.fs_at, j))) != fg {
+                        same = false;
+                    }
+                }
+                if !same {
+                    let (so, sl, mo) = subj_lit(inout s, "features");
+                    dlit(
+                        inout s,
+                        "snapshot features differ from the request's transitive feature closure"
+                    );
+                    emit(inout s, c_locked_features_mismatch(), m.name, so, sl, mo);
+                }
+            } else {
+                let (so, sl, mo) = subj_id(inout s, m.name);
+                dlit(
+                    inout s,
+                    "snapshot selects a package outside the request's dependency closure"
+                );
+                emit(inout s, c_locked_unused_package(), m.name, so, sl, mo);
+            }
+        }
+        for i in 0..s.cnames.len() {
+            let x = sw(in s.cnames, i);
+            if sw(in s.nmk, x) != sg {
+                let (so, sl, mo) = subj_id(inout s, x);
+                dlit(inout s, "snapshot is missing a package required by the request");
+                emit(inout s, c_locked_package_missing(), x, so, sl, mo);
+            }
+        }
+        s.mgen = inc(s.mgen);
+        let yg = s.mgen;
+        for i in 0..s.l.ss_n {
+            let y = ssel(in s.l, add(s.l.ss_at, i));
+            setw(inout s.nmk, y.name, yg);
+        }
+        for i in 0..s.ynames.len() {
+            let x = sw(in s.ynames, i);
+            if sw(in s.nmk, x) != yg {
+                let (so, sl, mo) = subj_id(inout s, x);
+                dlit(inout s, "snapshot is missing a native package required by the request");
+                emit(inout s, c_locked_system_missing(), none(), so, sl, mo);
+            }
+        }
+        for i in 0..s.l.ss_n {
+            let y = ssel(in s.l, add(s.l.ss_at, i));
+            if sw(in s.yst, y.name) != s.cgen {
+                let (so, sl, mo) = subj_id(inout s, y.name);
+                dlit(inout s, "snapshot selects a native package outside the request's closure");
+                emit(inout s, c_locked_unused_system(), none(), so, sl, mo);
+            }
+        }
+    }
+    // Every selected native version must be a catalog candidate.
+    for i in 0..s.l.ss_n {
+        let y = ssel(in s.l, add(s.l.ss_at, i));
+        let vt = ver(in s.l, y.ver).text;
+        let at = sw(in s.ystart, y.name);
+        let n = sw(in s.ycount, y.name);
+        let mut found = false;
+        for j in 0..n {
+            let c = sysv(in s, sw(in s.ylist, add(at, j)));
+            if ver(in s.l, c.ver).text == vt {
+                found = true;
+            }
+        }
+        if !found {
+            let (so, sl, mo) = subj_id(inout s, y.name);
+            dlit(inout s, "snapshot native version ");
+            dver(inout s, y.ver);
+            dlit(inout s, " is absent from the current local catalog");
+            emit(inout s, c_locked_system_candidate_missing(), none(), so, sl, mo);
+        }
+    }
+    if s.ds.len() > 0 {
+        out_error(inout s, 4, 0);
+    } else {
+        table(inout s);
+        w(inout s, 0);
+    }
+}

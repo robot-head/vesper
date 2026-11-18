@@ -30,6 +30,7 @@ members = [
     "crates/vesper-semver",
     "crates/vesper-semver/seed",
     "crates/vesper-loom-solver",
+    "crates/vesper-loom-solver/seed",
     "crates/vesper-loom-trust",
     "crates/vesper-loom-admission",
     "crates/vesper-loom-audit",
@@ -119,6 +120,7 @@ default-members = [
     "crates/vesper-semver",
     "crates/vesper-semver/seed",
     "crates/vesper-loom-solver",
+    "crates/vesper-loom-solver/seed",
     "crates/vesper-loom-trust",
     "crates/vesper-loom-admission",
     "crates/vesper-loom-audit",
@@ -246,7 +248,8 @@ vesper-fiber-abi = { path = "crates/vesper-fiber-abi" }
 vesper-semver = { path = "crates/vesper-semver/seed", package = "vesper-semver-seed" }
 # The compiler links the frozen Rust seed copy of vesper-loom-calculus (#913).
 vesper-loom-calculus = { path = "crates/vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
-vesper-loom-solver = { path = "crates/vesper-loom-solver" }
+# The compiler links the frozen Rust seed copy of vesper-loom-solver (#914).
+vesper-loom-solver = { path = "crates/vesper-loom-solver/seed", package = "vesper-loom-solver-seed" }
 vesper-loom-trust = { path = "crates/vesper-loom-trust" }
 vesper-loom-admission = { path = "crates/vesper-loom-admission" }
 vesper-loom-audit = { path = "crates/vesper-loom-audit" }

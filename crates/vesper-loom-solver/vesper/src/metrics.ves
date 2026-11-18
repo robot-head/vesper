@@ -1,0 +1,198 @@
+// Module metrics of @vesper/loom-solver (see lib.ves): `compute_metrics`
+// and `score_key`.
+//
+// met: total_cves, capability_surface, duplicate_majors,
+// total_staleness_secs, total_trust_cost, unknown_metadata_candidates.
+use @vesper/loom-calculus::decode::{
+    decode_solution,
+    decode_tables,
+    rd_str
+};
+use @vesper/loom-calculus::solve::{
+    solve
+};
+use @vesper/loom-calculus::util::{
+    add,
+    feat,
+    find_feat,
+    id_at,
+    inc,
+    man,
+    none,
+    sw,
+    ver
+};
+use self::{
+    S
+};
+use self::closure::{
+    assigned
+};
+use self::diag::{
+    msort,
+    sat,
+    setw
+};
+use self::input::{
+    alloc_tables,
+    decode_metadata,
+    find_meta
+};
+use self::snap::{
+    collect_caps,
+    last_snap
+};
+
+// The metrics of the selections (pa: name, pb: version) with the
+// capabilities in caps, into met.
+fn metrics_core(inout s: S, root: u64) {
+    let mut cves: u64 = 0;
+    let mut stale: u64 = 0;
+    let mut trust: u64 = 0;
+    let mut unknown: u64 = 0;
+    s.mgen = inc(s.mgen);
+    let g = s.mgen;
+    let mut surface: u64 = 0;
+    for i in 0..s.caps.len() {
+        let c = sw(in s.caps, i);
+        if sw(in s.vmk, c) != g {
+            setw(inout s.vmk, c, g);
+            surface = inc(surface);
+        }
+    }
+    s.pc.clear();
+    for i in 0..s.pa.len() {
+        let name = sw(in s.pa, i);
+        let vi = sw(in s.pb, i);
+        let v = ver(in s.l, vi);
+        s.pc.push(v.major);
+        if name != root {
+            let mi = find_meta(in s, name, v.text);
+            match s.metas.try_get(mi) {
+                Option::Some(m) => {
+                    cves = sat(cves, m.cve);
+                    stale = sat(stale, m.stale);
+                    trust = sat(trust, m.trust);
+                },
+                Option::None => {
+                    unknown = sat(unknown, 1);
+                },
+            }
+        }
+    }
+    // Distinct majors per name: sorted (name, major) pairs.
+    s.idx.clear();
+    for i in 0..s.pa.len() {
+        s.idx.push(i);
+    }
+    msort(inout s, 5);
+    let mut dup: u64 = 0;
+    for j in 1..s.idx.len() {
+        let a = sw(in s.idx, wrapping_sub(j, 1));
+        let b = sw(in s.idx, j);
+        if sw(in s.pa, a) == sw(in s.pa, b) && sw(in s.pc, a) != sw(in s.pc, b) {
+            dup = inc(dup);
+        }
+    }
+    s.met.clear();
+    s.met.push(cves);
+    s.met.push(surface);
+    s.met.push(dup);
+    s.met.push(stale);
+    s.met.push(trust);
+    s.met.push(unknown);
+}
+
+// The metrics of the complete current assignment, whose final validation
+// left the capabilities in caps.
+pub fn metrics_of_current(inout s: S) {
+    let root = man(in s.l, s.root).name;
+    s.pa.clear();
+    s.pb.clear();
+    for i in 0..s.anames.len() {
+        let x = sw(in s.anames, i);
+        let mi = assigned(in s, x);
+        s.pa.push(x);
+        s.pb.push(man(in s.l, mi).ver);
+    }
+    metrics_core(inout s, root);
+}
+
+// `score_key`: two words per objective into key.
+pub fn score_key(inout s: S) {
+    s.key.clear();
+    let cves = sw(in s.met, 0);
+    let surface = sw(in s.met, 1);
+    let dup = sw(in s.met, 2);
+    let stale = sw(in s.met, 3);
+    let trust = sw(in s.met, 4);
+    let unknown = sw(in s.met, 5);
+    for i in 0..s.objs.len() {
+        let o = sw(in s.objs, i);
+        if o == 0 {
+            s.key.push(unknown);
+            s.key.push(cves);
+        } else if o == 1 {
+            s.key.push(0);
+            s.key.push(surface);
+        } else if o == 2 {
+            s.key.push(0);
+            s.key.push(dup);
+        } else if o == 3 {
+            s.key.push(unknown);
+            s.key.push(stale);
+        } else {
+            s.key.push(unknown);
+            s.key.push(trust);
+        }
+    }
+}
+
+// The public `compute_metrics`: tables, a solution, the root name and the
+// metadata; out holds the six metrics.
+pub fn metrics_only(inout s: S) {
+    decode_tables(inout s.l);
+    decode_solution(inout s.l);
+    let root = rd_str(inout s.l);
+    decode_metadata(inout s, false);
+    alloc_tables(inout s);
+    solve(inout s.l);
+    let x = last_snap(in s);
+    s.caps.clear();
+    if x.graph {
+        collect_caps(inout s, in x, root);
+    } else {
+        for i in 0..s.l.sel_n {
+            let m = man(in s.l, add(s.l.sel_at, i));
+            if m.name != root {
+                for j in 0..m.ceil_n {
+                    let c = id_at(in s.l, add(m.ceil_at, j));
+                    s.caps.push(c);
+                }
+                for j in 0..m.fs_n {
+                    let f = id_at(in s.l, add(m.fs_at, j));
+                    let fi = find_feat(in s.l, in m, f);
+                    if fi != none() {
+                        let ft = feat(in s.l, fi);
+                        for t in 0..ft.eff_n {
+                            let c = id_at(in s.l, add(ft.eff_at, t));
+                            s.caps.push(c);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    s.pa.clear();
+    s.pb.clear();
+    for i in 0..s.l.sel_n {
+        let m = man(in s.l, add(s.l.sel_at, i));
+        s.pa.push(m.name);
+        s.pb.push(m.ver);
+    }
+    metrics_core(inout s, root);
+    for i in 0..s.met.len() {
+        let v = sw(in s.met, i);
+        s.out.push(v);
+    }
+}

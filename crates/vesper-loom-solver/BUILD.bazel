@@ -1,3 +1,77 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-vesper_crate()
+# The port-backed package (seed-copy rule, docs/maintenance/porting-a-crate.md):
+# build.rs links the object built here from the Loom package in vesper/ and
+# checks port/binding.rs against the generated binding. The compiler links
+# the Rust seed copy, //crates/vesper-loom-solver/seed, instead (port wave P1
+# lane 17, #914).
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+    deps = ["//crates/vesper-loom-calculus:port_package"],
+)
+
+vesper_port_object(
+    name = "loom_solver_vesper",
+    library = "loom_solver",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "loom_solver_vesper_binding",
+    srcs = [":loom_solver_vesper"],
+    output_group = "rust_binding",
+)
+
+# The divergent builds, one per ported module (the Cargo
+# `vesper-port-divergent` feature applies the same edits, DIVERGENT in
+# build.rs): each must build from a copy of the package with its edit
+# applied. The Cargo run in scripts/test-port-harness.sh asserts which test
+# catches each one.
+[
+    vesper_port_object(
+        name = "loom_solver_vesper_divergent_" + module,
+        edit_src = "vesper/src/%s.ves" % module,
+        edits = {old: new},
+        library = "loom_solver",
+        package = ":port_package",
+        target = VESPER_TARGET,
+    )
+    for module, old, new in [
+        ("input", "if s.cschema != 1 {", "if s.cschema == 0 {"),
+        ("closure", "if sw(in s.pcnt, d.name) == none() || grew {", "if sw(in s.pcnt, d.name) == none() {"),
+        ("search", "if s.sdec == s.maxd {", "if s.sdec > s.maxd {"),
+        ("snap", "if d.code != 10 && d.code != 11 {", "if d.code != 10 {"),
+        ("locked", "if !ex.has_json || ex.json != json {", "if !ex.has_json {"),
+        ("metrics", "cves = sat(cves, m.cve);", "cves = sat(cves, 0);"),
+        ("diag", "let t = ver(in s.l, vi).text;", "let t = ver(in s.l, vi).pre;"),
+        ("output", "    w(inout s, decisions);", "    w(inout s, 0);"),
+    ]
+]
+
+vesper_crate(
+    build_script_data = [
+        ":loom_solver_vesper",
+        ":loom_solver_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :loom_solver_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :loom_solver_vesper_binding)",
+    },
+)
+
+# The seed package (seed/) builds these same Rust sources without the port.
+exports_files(glob([
+    "src/**/*.rs",
+    "tests/**/*.rs",
+]) + ["README.md"])
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-loom-solver/seed:__pkg__"],
+)

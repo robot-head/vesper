@@ -212,6 +212,24 @@ fn the_abi_directive_outside_lib_ves_applies_with_a_warning() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A port that names the ABI in every file (the serde port does) still
+/// builds: the root module's directive is the one read, and the copies in
+/// other files only warn instead of naming the ABI twice.
+#[test]
+fn the_abi_directive_in_every_file_is_read_once() {
+    let dir = ordered_package(
+        "every",
+        &format!("// @export abi 3\n{ORDER_LIB}"),
+        &format!("// @export abi 3\n{ORDER_A}"),
+    );
+    let (out, json) = build_package(&dir, "order");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(json.contains("vesper.native.export-abi/3"), "{json}");
+    assert!(!stderr.contains("named twice"), "{stderr}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// `instance` and `vsys` directives name items, so outside the root module
 /// they are an error instead of being ignored.
 #[test]

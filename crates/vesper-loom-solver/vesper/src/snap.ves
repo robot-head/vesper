@@ -1,0 +1,184 @@
+// Module snap of @vesper/loom-solver (see lib.ves): the calculus
+// validator on the current assignment, and putting the calculus state
+// back afterwards.
+use @vesper/loom-calculus::{
+    Root,
+    Snap
+};
+use @vesper/loom-calculus::solve::{
+    solve
+};
+use @vesper/loom-calculus::util::{
+    add,
+    diag,
+    gnode,
+    man,
+    none,
+    sw
+};
+use self::{
+    S
+};
+use self::closure::{
+    assigned,
+    has_entry
+};
+use self::diag::{
+    copy_calculus
+};
+use self::input::{
+    sysv
+};
+
+// Lengths of the calculus sequences before a solve.
+fn save(inout s: S) {
+    s.marks.clear();
+    s.marks.push(s.l.mans.len());
+    s.marks.push(s.l.ids.len());
+    s.marks.push(s.l.roots.len());
+    s.marks.push(s.l.ssels.len());
+    s.marks.push(s.l.diags.len());
+    s.marks.push(s.l.gn.len());
+    s.marks.push(s.l.gids.len());
+    s.marks.push(s.l.ge.len());
+    s.marks.push(s.l.gs.len());
+    s.marks.push(s.l.gl.len());
+    s.marks.push(s.l.snaps.len());
+    s.marks.push(s.l.pool.len());
+}
+
+pub fn restore(inout s: S) {
+    s.l.mans.truncate(sw(in s.marks, 0));
+    s.l.ids.truncate(sw(in s.marks, 1));
+    s.l.roots.truncate(sw(in s.marks, 2));
+    s.l.ssels.truncate(sw(in s.marks, 3));
+    s.l.diags.truncate(sw(in s.marks, 4));
+    s.l.gn.truncate(sw(in s.marks, 5));
+    s.l.gids.truncate(sw(in s.marks, 6));
+    s.l.ge.truncate(sw(in s.marks, 7));
+    s.l.gs.truncate(sw(in s.marks, 8));
+    s.l.gl.truncate(sw(in s.marks, 9));
+    s.l.snaps.truncate(sw(in s.marks, 10));
+    s.l.pool.truncate(sw(in s.marks, 11));
+}
+
+// The last snapshot.
+pub fn last_snap(in s: S) -> Snap {
+    match s.l.snaps.try_get(wrapping_sub(s.l.snaps.len(), 1)) {
+        Option::Some(x) => x,
+        Option::None => Snap {
+            node_at: 0,
+            node_n: 0,
+            root_at: 0,
+            root_n: 0,
+            unused_at: 0,
+            unused_n: 0,
+            sys_at: 0,
+            sys_n: 0,
+            diag_at: 0,
+            diag_n: 0,
+            graph: false
+        },
+    }
+}
+
+// Required capabilities of the non-root nodes of snapshot x into caps.
+pub fn collect_caps(inout s: S, in x: Snap, root: u64) {
+    s.caps.clear();
+    for i in 0..x.node_n {
+        let g = gnode(in s.l, add(x.node_at, i));
+        if g.name != root {
+            for j in 0..g.req_n {
+                let c = sw(in s.l.gids, add(g.req_at, j));
+                s.caps.push(c);
+            }
+        }
+    }
+}
+
+// Validate `solution(request, assigned, closure, systems)`, with the
+// selected native candidates ysel when `with_systems`. A partial run
+// copies every diagnostic but MissingDependency (10) and
+// MissingSystemPackage (11) to ds and returns whether there were any; a
+// full run returns whether the solution is complete (a graph, no
+// diagnostics, no unused selection) and otherwise copies the
+// diagnostics. Sets graph, unused and caps.
+pub fn run_solve(inout s: S, with_systems: bool, partial: bool) -> bool {
+    save(inout s);
+    let sel_at = s.l.mans.len();
+    for i in 0..s.anames.len() {
+        let x = sw(in s.anames, i);
+        let mi = assigned(in s, x);
+        let m = man(in s.l, mi);
+        let fs_at = s.l.ids.len();
+        if has_entry(in s, x) {
+            let mut at = sw(in s.fhead, x);
+            loop {
+                if at == none() {
+                    break;
+                }
+                let f = sw(in s.fl_id, at);
+                s.l.ids.push(f);
+                at = sw(in s.fl_next, at);
+            }
+        }
+        let fs_n = wrapping_sub(s.l.ids.len(), fs_at);
+        let mut y = m;
+        y.json = 0;
+        y.fs_at = fs_at;
+        y.fs_n = fs_n;
+        s.l.mans.push(y);
+    }
+    s.l.sel_at = sel_at;
+    s.l.sel_n = s.anames.len();
+    let root = man(in s.l, s.root).name;
+    s.l.root_at = s.l.roots.len();
+    s.l.root_n = 1;
+    s
+        .l
+        .roots
+        .push(
+        Root {
+            name: root,
+            req: s.rexact,
+            feat_at: s.rf_at,
+            feat_n: s.rf_n
+        }
+    );
+    s.l.ss_at = s.l.ssels.len();
+    s.l.ss_n = 0;
+    if with_systems {
+        for i in 0..s.ysel.len() {
+            let y = sysv(in s, sw(in s.ysel, i));
+            s.l.ssels.push(y);
+        }
+        s.l.ss_n = s.ysel.len();
+    }
+    s.l.schema = 1;
+    solve(inout s.l);
+    let x = last_snap(in s);
+    s.graph = x.graph;
+    s.unused = x.unused_n;
+    if x.graph {
+        collect_caps(inout s, in x, root);
+    }
+    let mut result = false;
+    if partial {
+        for i in 0..x.diag_n {
+            let d = diag(in s.l.diags, add(x.diag_at, i));
+            if d.code != 10 && d.code != 11 {
+                copy_calculus(inout s, add(x.diag_at, i));
+                result = true;
+            }
+        }
+    } else {
+        result = x.graph && x.diag_n == 0 && x.unused_n == 0;
+        if !result {
+            for i in 0..x.diag_n {
+                copy_calculus(inout s, add(x.diag_at, i));
+            }
+        }
+    }
+    restore(inout s);
+    result
+}

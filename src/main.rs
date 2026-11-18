@@ -724,6 +724,19 @@ fn export_directives_source(p: &vesper::packages::Assembled) -> Result<String, S
         .get(root)
         .map(|f| f.display.clone())
         .unwrap_or_default();
+    let is_abi = |line: &str| {
+        line.trim_start()
+            .strip_prefix("// @export")
+            .is_some_and(|rest| rest.trim().starts_with("abi"))
+    };
+    // Only one `abi` directive is forwarded: the root module's, else the
+    // first one found in another file (ports that named it in every file
+    // would otherwise name it twice).
+    let mut abi_seen = p
+        .sources
+        .files
+        .get(root)
+        .is_some_and(|f| f.text.lines().any(is_abi));
     let mut out = String::new();
     for (i, f) in p.sources.files.iter().enumerate() {
         if i == root {
@@ -739,7 +752,13 @@ fn export_directives_source(p: &vesper::packages::Assembled) -> Result<String, S
                              it is read from here for now",
                             f.display
                         );
-                        out.push_str(line);
+                        if abi_seen {
+                            out.push_str(&" ".repeat(body.len()));
+                            out.push_str(&line[body.len()..]);
+                        } else {
+                            abi_seen = true;
+                            out.push_str(line);
+                        }
                     }
                     Some(rest) => {
                         return Err(format!(
