@@ -531,11 +531,22 @@ impl Checker<'_> {
             return None;
         }
         let elem_ty = elem(&base_ty).cloned().unwrap_or(Type::Infer);
-        self.expr(base, env, Usage::Borrow(Pass::In));
+        // A boxed object (§7.3) element may be lent to a call, which borrows
+        // the sequence as it borrows the element.
+        let lend_boxed = crate::dyn_trait::is_boxed(&elem_ty) && matches!(usage, Usage::Borrow(_));
+        self.expr(
+            base,
+            env,
+            if lend_boxed {
+                usage
+            } else {
+                Usage::Borrow(Pass::In)
+            },
+        );
         let u64_ty = Type::named("u64");
         let t = self.expr_expected(index, env, Usage::Own, &u64_ty);
         self.expect_type(&u64_ty, &t, index.span.clone());
-        if elem_ty != Type::Infer && self.mode(&elem_ty) != Mode::Copy {
+        if elem_ty != Type::Infer && self.mode(&elem_ty) != Mode::Copy && !lend_boxed {
             self.error(
                 "E1522",
                 format!(

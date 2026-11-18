@@ -798,6 +798,21 @@ fn instances_for_entry(
                             .filter(|n| world.functions.contains_key(n)),
                         _ => None,
                     };
+                    // A boxed object (§7.3) needs its vtable's methods.
+                    if let ExprKind::Call { args, .. } = &e.kind
+                        && matches!(&callee.kind, ExprKind::Name(n) if n == crate::fip::BOX_NEW)
+                        && let Some(ty) = world.types.get(&(e.span.start, e.span.end))
+                        && let Some(object) = crate::dyn_trait::boxed_object(&substitute(ty, &vars))
+                        && let Some(arg) = args.first()
+                        && let Some(actual) =
+                            world.types.get(&(arg.expr.span.start, arg.expr.span.end))
+                        && let Some(vtable) =
+                            world.dyn_objects.vtable(object, &substitute(actual, &vars))
+                    {
+                        for (method, vars) in vtable.methods.clone() {
+                            todo.push((method, vars));
+                        }
+                    }
                     if let Some(name) = target {
                         let mut instance = call_vars(world, e, &vars);
                         if let ExprKind::Call { args, .. } = &e.kind
@@ -3085,6 +3100,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .values()
                 .chain(f.locals.values())
                 .any(|t| crate::fip::mentions_box(self.world, t))
+            && !crate::fip::loop_boxes_reclaimed(self.world, f)
         {
             return Err(format!(
                 "native '{}': {}",
@@ -3367,11 +3383,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let es = args
                             .iter()
                             .map(|a| {
-                                // A slice view argument is a value, not a place.
+                                // A slice view argument is a value, not a place,
+                                // and so is a boxed object lent from a
+                                // sequence element (§7.3).
                                 let view = a.place.is_none()
-                                    && f.values
-                                        .get(&a.value)
-                                        .is_some_and(crate::seq::is_slice_type);
+                                    && f.values.get(&a.value).is_some_and(|t| {
+                                        crate::seq::is_slice_type(t)
+                                            || crate::dyn_trait::is_boxed(t)
+                                    });
                                 let expr = if !view
                                     && (a.pass == Pass::Inout
                                         || (a.pass == Pass::In
@@ -3536,7 +3555,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                                 })
                             })
                             .collect::<Result<Vec<_>, String>>()?;
-                        self.fip_op(op, &operands, &ty)?
+                        let actual = args.first().and_then(|a| f.values.get(&a.value)).map(|t| {
+                            crate::numeric::default_type(&substitute(t, &self.generic_vars))
+                        });
+                        self.fip_op(op, &operands, &ty, actual.as_ref())?
                     }
                     Op::Closure { expr, aliases, .. } | Op::Handle { expr, aliases, .. } => {
                         let old_vars = self.vars.clone();
@@ -4899,7 +4921,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                         } else {
                             crate::fip::FipOp::BoxNewInCaller
                         };
-                        return self.fip_op(&fip_op, &[val], &self.ty(e));
+                        let actual = self.ty(&args[0].expr);
+                        return self.fip_op(&fip_op, &[val], &self.ty(e), Some(&actual));
                     }
                     if self.world.constructor(n).is_some() {
                         self.data(
@@ -5806,6 +5829,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let result_layout = Layout::of(self.world, &f.result)?;
         let mut values = vec![];
         let mut restores = vec![];
+        let mut sink_blocks = vec![];
         let declared = self.world.functions[name].params.clone();
         for ((arg, param), declared) in args.iter().zip(&f.params).zip(&declared) {
             let layout = Layout::of(self.world, &param.ty)?;
@@ -5814,8 +5838,23 @@ impl<M: Module> Codegen<'_, '_, M> {
                 && let Some(actual) = raw_vars.get(g)
                 && !crate::dyn_trait::is_object(actual)
             {
-                let pair = self.dyn_coerce(arg, param.pass, actual, &param.ty, &mut restores)?;
+                let pair = if crate::dyn_trait::is_boxed(actual) {
+                    let (pair, block) = self.dyn_lend_boxed(arg, param.pass)?;
+                    if param.pass == Pass::Sink {
+                        sink_blocks.push(block);
+                    }
+                    pair
+                } else {
+                    self.dyn_coerce(arg, param.pass, actual, &param.ty, &mut restores)?
+                };
                 values.push(pair);
+            } else if dyn_slot.is_some()
+                && values.is_empty()
+                && crate::dyn_trait::is_boxed(&param.ty)
+            {
+                // A boxed receiver (§7.3) is its block, whatever the pass:
+                // the call mutates or consumes the object, never the box.
+                values.push(self.expr(&arg.expr)?);
             } else if param.pass == Pass::Inout && crate::seq::is_slice_type(&param.ty) {
                 // A slice view is passed as the address of its value.
                 values.push(self.expr(&arg.expr)?);
@@ -5879,9 +5918,29 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.current_call_slot = None;
             None
         };
-        // A vtable stub is called through the receiver's slot.
+        // A vtable stub is called through the receiver's slot. A boxed
+        // receiver (§7.3) is reached through its header; one consumed by a
+        // `sink self` method leaves its block to free after the call.
+        let mut f = f;
+        let mut boxed_free = None;
         let dyn_target = match dyn_slot {
-            Some(slot) => Some(self.dyn_dispatch(&mut values, slot)?),
+            Some(slot) => {
+                let receiver = f.params.first().cloned();
+                match receiver {
+                    Some(p) if crate::dyn_trait::is_boxed(&p.ty) => {
+                        let object = crate::dyn_trait::boxed_object(&p.ty)
+                            .cloned()
+                            .unwrap_or(Type::Infer);
+                        f.params[0].ty = object;
+                        let (target, block) = self.dyn_dispatch_boxed(&mut values, slot)?;
+                        if p.pass == Pass::Sink {
+                            boxed_free = Some(block);
+                        }
+                        Some(target)
+                    }
+                    _ => Some(self.dyn_dispatch(&mut values, slot)?),
+                }
+            }
             None => None,
         };
         let call_key = instance_key(name, &vars);
@@ -6108,6 +6167,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             result
         };
+        // The callee owns a `sink` object's value, not the block of the
+        // box it was lent from.
+        for block in boxed_free.into_iter().chain(sink_blocks) {
+            self.fip_box_free(block)?;
+        }
         for (var, ptr, ty) in restores {
             let value = self.load(ptr, &ty)?;
             self.def_var(var, value);
@@ -6214,10 +6278,20 @@ impl<M: Module> Codegen<'_, '_, M> {
         op: &crate::fip::FipOp,
         operands: &[ir::Value],
         ty: &Type,
+        actual: Option<&Type>,
     ) -> Result<ir::Value, String> {
         let [value] = operands else {
             return Err("Box constructor expects exactly one argument".into());
         };
+        if let Some(object) = crate::dyn_trait::boxed_object(ty)
+            && let Some(actual) = actual.filter(|t| !crate::dyn_trait::is_object(t))
+        {
+            if !matches!(op, crate::fip::FipOp::BoxNew) {
+                return Err(format!("a boxed object `{ty}` is built by `Box::new` only"));
+            }
+            let object = object.clone();
+            return self.dyn_box_new(*value, actual, &object);
+        }
         let inner = crate::fip::box_inner(self.world, ty)
             .ok_or_else(|| format!("Box constructor expects Box[T], got {ty}"))?;
         let inner_layout = Layout::of(self.world, inner)?;
@@ -6939,6 +7013,9 @@ fn emit_drop_box_value<M: Module>(
     ty: &Type,
 ) -> Result<(), String> {
     let ty = crate::numeric::default_type(ty);
+    if crate::dyn_trait::is_boxed(&ty) {
+        return dyn_native::emit_drop_boxed(b, m, val);
+    }
     if !crate::fip::type_contains_box(world, &ty) {
         return Ok(());
     }
@@ -6960,6 +7037,9 @@ fn emit_drop_box_inline<M: Module>(
 ) -> Result<(), String> {
     if !crate::fip::type_contains_box(world, ty) {
         return Ok(());
+    }
+    if crate::dyn_trait::is_boxed(ty) {
+        return dyn_native::emit_drop_boxed(b, m, val);
     }
     if crate::fip::is_box_type(world, ty) {
         let inner =

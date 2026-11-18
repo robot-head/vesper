@@ -272,6 +272,10 @@ impl World {
                     if n == crate::strings::STRING_TYPE || n == crate::strings::STR_TYPE {
                         return Mode::Affine;
                     }
+                    // A trait object owns an affine value (§7.3).
+                    if n == crate::ast::DYN_TYPE {
+                        return Mode::Affine;
+                    }
                     // RegionBox[r, T] has the mode of T (§15.2).
                     if n == crate::regions::BOX_TYPE {
                         return args
@@ -812,6 +816,15 @@ impl Checker<'_> {
                 if n == crate::seq::CHUNK_SEQ_TYPE || n == crate::seq::SLICE_TYPE =>
             {
                 self.valid_seq_type(n, args, g, span);
+            }
+            // `dyn Trait[args]`, admitted by the frontend only as
+            // `Box[dyn Trait[args]]` (§7.3); the trait is resolved there.
+            Type::Named(n, args) if n == crate::ast::DYN_TYPE => {
+                if let Some(Type::Named(_, targs)) = args.first() {
+                    for a in targs {
+                        self.valid_type(a, g, span.clone());
+                    }
+                }
             }
             Type::Named(n, args) if n == crate::tiled::TILED_SEQ_TYPE => {
                 if !matches!(args.len(), 1 | 2) {
@@ -2435,7 +2448,35 @@ impl Checker<'_> {
         } else {
             Type::Infer
         };
-        let actual = self.expr_expected(&arg.expr, env, Usage::Own, &inner_expected);
+        let boxing_object =
+            crate::dyn_trait::is_object(&inner_expected) && name == crate::fip::BOX_NEW;
+        let value_expected = if boxing_object {
+            Type::Infer
+        } else {
+            inner_expected.clone()
+        };
+        let actual = self.expr_expected(&arg.expr, env, Usage::Own, &value_expected);
+        if boxing_object {
+            // A boxed trait object (§7.3): the box holds the concrete value,
+            // whose conformance the frontend selects at this call.
+            let actual = crate::numeric::default_type(&actual);
+            if crate::dyn_trait::is_object(&actual)
+                || matches!(&actual, Type::Named(g, a) if a.is_empty() && crate::dyn_trait::is_dyn_generic(g))
+            {
+                self.error(
+                    "E0631",
+                    format!("cannot box a `dyn` value as {inner_expected}: box the concrete value"),
+                    arg.expr.span.clone(),
+                );
+            } else if self.mode(&actual) > Mode::Affine {
+                self.error(
+                    "E0205",
+                    format!("cannot box the linear type {actual} as {inner_expected}: a trait object may be dropped, so its type must be at most affine"),
+                    arg.expr.span.clone(),
+                );
+            }
+            return Type::Named(crate::fip::BOX_TYPE.into(), vec![inner_expected]);
+        }
         let inner = if inner_expected != Type::Infer {
             self.expect_type(&inner_expected, &actual, arg.expr.span.clone());
             refine_annotation(&inner_expected, &actual)
@@ -2444,6 +2485,24 @@ impl Checker<'_> {
         };
         self.constrain_literals(&arg.expr, &inner);
         Type::Named(crate::fip::BOX_TYPE.into(), vec![inner])
+    }
+    /// The place an `inout` boxed object (§7.3) held by a sequence
+    /// element `s[i]` lends: the whole sequence `s`. The element's box
+    /// itself is only read; the call mutates the object it points to.
+    fn boxed_element_place(&mut self, e: &Expr, env: &Env, param: &Param) -> Option<Place> {
+        let ExprKind::Index(base, index) = &e.kind else {
+            return None;
+        };
+        if matches!(index.kind, ExprKind::Range { .. }) {
+            return None;
+        }
+        let element = self.receiver_type(e, env);
+        if !(crate::dyn_trait::is_boxed(&element)
+            || (crate::dyn_trait::is_boxed(&param.ty) && element == param.ty))
+        {
+            return None;
+        }
+        Place::from_expr(base)
     }
     /// Resolves a trait call through the frontend. `None`: not a trait call.
     /// `Some(None)`: a trait call that failed (diagnosed). `Some(Some(f))`:
@@ -2467,8 +2526,19 @@ impl Checker<'_> {
             return t.clone();
         }
         // Receivers that are not places: calls and struct literals have a
-        // declared type.
+        // declared type, and a sequence element its sequence's.
         match &e.kind {
+            ExprKind::Index(base, index) if !matches!(index.kind, ExprKind::Range { .. }) => {
+                match self.receiver_type(base, env) {
+                    Type::Named(n, args)
+                        if (n == crate::seq::CHUNK_SEQ_TYPE || n == crate::seq::SLICE_TYPE)
+                            && args.len() == 1 =>
+                    {
+                        args[0].clone()
+                    }
+                    _ => Type::Infer,
+                }
+            }
             ExprKind::Call { callee, .. } => match &callee.kind {
                 ExprKind::Name(n) if !env.bindings.contains_key(n) => self
                     .world
@@ -2781,7 +2851,9 @@ impl Checker<'_> {
                     expr.span.clone(),
                 );
             }
-            let place = Place::from_expr(expr).or_else(|| self.seq_view_place(expr));
+            let place = Place::from_expr(expr)
+                .or_else(|| self.seq_view_place(expr))
+                .or_else(|| self.boxed_element_place(expr, env, param));
             if param.pass == Pass::Inout && place.is_none() {
                 self.error(
                     "E0300",
@@ -3809,6 +3881,14 @@ impl Checker<'_> {
                 }
             }
             PatternKind::Constructor { name, fields, .. } => {
+                if crate::dyn_trait::is_boxed(ty) {
+                    self.error(
+                        "E0631",
+                        format!("cannot unpack the boxed object {ty}: its value's type is known only to its vtable; call its methods or lend it to a `dyn` parameter"),
+                        p.span.clone(),
+                    );
+                    return;
+                }
                 let Some((a, v)) = self.world.constructor(name) else {
                     self.error(
                         "E0211",

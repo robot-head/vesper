@@ -2288,6 +2288,8 @@ impl Parser<'_> {
                             let i = self.index(1);
                             let text = &self.source[self.tokens[i].span.clone()];
                             text == "fn"
+                                // `Box::new[dyn Trait](x)` (§7.3)
+                                || (text == DYN_TYPE && self.nth(2) == K::Upper)
                                 || (vesper_core::numeric::is_scalar_name(text)
                                     && !matches!(text, "Unit" | "Never"))
                         };

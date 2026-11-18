@@ -101,6 +101,12 @@ pub enum Value {
     TiledSeq(Rc<RefCell<tiled::TiledSeqState>>),
     /// A `ChunkSeq[T]` (§13).
     Seq(seq::SeqCell),
+    /// A boxed trait object `Box[dyn Trait]` (§7.3): its value, in a cell a
+    /// call through it mutates in place, and its vtable.
+    Object {
+        value: Rc<RefCell<Value>>,
+        vtable: Rc<Value>,
+    },
     /// A `Slice[T]` view `[start, start + len)` of a sequence (§13).
     Slice {
         seq: seq::SeqCell,
@@ -191,6 +197,7 @@ impl fmt::Display for Value {
                 write!(f, "<TiledSeq[{}] len={}>", state.adt, state.rows.len())
             }
             Self::Seq(cell) => write!(f, "<ChunkSeq len={}>", cell.borrow().len()),
+            Self::Object { value, .. } => write!(f, "Box({})", value.borrow()),
             Self::Slice { start, len, .. } => write!(f, "<Slice {start}..{}>", start + len),
         }
     }
@@ -1285,17 +1292,39 @@ impl<'a> Runtime<'a> {
                 }
             }
             Op::Fip { args, .. } => {
+                // A boxed object (§7.3) carries its vtable beside its value.
+                let vtable = match (
+                    crate::dyn_trait::boxed_object(&instruction.ty),
+                    args.first()
+                        .and_then(|a| self.program.functions[&state.function].values.get(&a.value)),
+                ) {
+                    (Some(object), Some(actual)) if !crate::dyn_trait::is_object(actual) => {
+                        let vtable = self
+                            .world
+                            .dyn_objects
+                            .vtable(object, actual)
+                            .ok_or_else(|| format!("no vtable of {actual} as `{object}`"))?;
+                        Some(vtable_value(vtable))
+                    }
+                    _ => None,
+                };
                 let inner = args
                     .into_iter()
                     .next()
                     .map(|a| get(a.value))
                     .transpose()?
                     .ok_or("Box constructor requires 1 argument")?;
-                Value::Data {
-                    ty: crate::fip::BOX_TYPE.into(),
-                    constructor: crate::fip::BOX_TYPE.into(),
-                    fields: BTreeMap::from([("0".into(), inner)]),
-                    resource_identity: None,
+                match vtable {
+                    Some(vtable) => Value::Object {
+                        value: Rc::new(RefCell::new(inner)),
+                        vtable: Rc::new(vtable),
+                    },
+                    None => Value::Data {
+                        ty: crate::fip::BOX_TYPE.into(),
+                        constructor: crate::fip::BOX_TYPE.into(),
+                        fields: BTreeMap::from([("0".into(), inner)]),
+                        resource_identity: None,
+                    },
                 }
             }
             Op::Data(name, fields) => {
@@ -2136,8 +2165,36 @@ impl<'a> Runtime<'a> {
                 Ok(Control::Return(atomic_call(op, &args)?))
             }
             Value::Function(name) if self.world.dyn_objects.stubs.contains_key(&name) => {
-                // A vtable stub: the receiver's slot function (§7.1).
-                let slot = self.dyn_slot(&name, caller)?;
+                // A vtable stub: the receiver's slot function (§7.1). A
+                // boxed receiver (§7.3) is called with its value, through
+                // its own vtable; an `inout` one by a reference into its box.
+                let mut args = args;
+                let mut refs = refs;
+                let receiver_ref = refs.first().cloned().flatten();
+                let receiver = match &receiver_ref {
+                    Some(r) => Some(r.get()?),
+                    None => args.first().cloned(),
+                };
+                let Some((inner, table, cell)) = receiver.as_ref().and_then(boxed_parts) else {
+                    let slot = self.dyn_slot(&name, caller)?;
+                    return self.invoke_scoped(Value::Function(slot), args, refs, caller);
+                };
+                self.call_site = None;
+                let (_, index) = self.world.dyn_objects.stubs[&name].clone();
+                let slot = match &table {
+                    Value::Tuple(slots) => match slots.get(index) {
+                        Some(Value::Function(f)) => f.clone(),
+                        _ => return Err("a vtable lacks a slot".into()),
+                    },
+                    _ => return Err("a vtable is not a table".into()),
+                };
+                if let Some(a) = args.first_mut() {
+                    *a = inner;
+                }
+                if refs.is_empty() {
+                    refs.push(None);
+                }
+                refs[0] = Some(cell);
                 self.invoke_scoped(Value::Function(slot), args, refs, caller)
             }
             Value::Function(name) => {
@@ -2209,6 +2266,24 @@ impl<'a> Runtime<'a> {
                                 .cloned()
                                 .ok_or("a forwarded `dyn` argument lacks its vtable")?
                         }
+                        Some(actual) if crate::dyn_trait::is_boxed(actual) => {
+                            // A lent boxed object (§7.3): its own vtable.
+                            let index = f
+                                .params
+                                .iter()
+                                .position(|p| matches!(&p.ty, Type::Named(n, a) if a.is_empty() && n == g))
+                                .ok_or("a `dyn` parameter is missing")?;
+                            let value = match refs.get(index).cloned().flatten() {
+                                Some(r) => r.get()?,
+                                None => args
+                                    .get(index)
+                                    .cloned()
+                                    .ok_or("a `dyn` argument is missing")?,
+                            };
+                            let (_, table, _) = boxed_parts(&value)
+                                .ok_or("a lent boxed object lacks its vtable")?;
+                            Slot::new(table)
+                        }
                         Some(actual) => {
                             let object = crate::dyn_trait::object(substitute(tr, &vars));
                             let vtable =
@@ -2232,8 +2307,11 @@ impl<'a> Runtime<'a> {
                     let slot = if p.pass == Pass::Inout {
                         match refs.get(i).cloned().flatten() {
                             Some(slot) => slot,
-                            // A slice view shares its sequence's cell.
-                            None if matches!(v, Value::Slice { .. }) => Slot::new(v),
+                            // A slice view shares its sequence's cell, and a
+                            // lent boxed object its value's (§7.3).
+                            None if matches!(v, Value::Slice { .. } | Value::Object { .. }) => {
+                                Slot::new(v)
+                            }
                             None => return Err("inout argument requires place".into()),
                         }
                     } else {
@@ -2279,8 +2357,11 @@ impl<'a> Runtime<'a> {
                     let slot = if p.pass == Pass::Inout {
                         match refs.get(i).cloned().flatten() {
                             Some(slot) => slot,
-                            // A slice view shares its sequence's cell.
-                            None if matches!(v, Value::Slice { .. }) => Slot::new(v),
+                            // A slice view shares its sequence's cell, and a
+                            // lent boxed object its value's (§7.3).
+                            None if matches!(v, Value::Slice { .. } | Value::Object { .. }) => {
+                                Slot::new(v)
+                            }
                             None => return Err("inout argument requires place".into()),
                         }
                     } else {
@@ -3215,6 +3296,30 @@ fn capability(env: &Env, key: &str) -> Option<u64> {
             None
         }
     })
+}
+/// A vtable as an evaluator value: its slot functions.
+fn vtable_value(vtable: &crate::dyn_trait::VTable) -> Value {
+    Value::Tuple(
+        vtable
+            .methods
+            .iter()
+            .map(|(m, _)| Value::Function(m.clone()))
+            .collect(),
+    )
+}
+/// The value, vtable and value cell of a boxed object (§7.3).
+fn boxed_parts(v: &Value) -> Option<(Value, Value, Slot)> {
+    match v {
+        Value::Object { value, vtable } => Some((
+            value.borrow().clone(),
+            (**vtable).clone(),
+            Slot {
+                cell: value.clone(),
+                path: vec![],
+            },
+        )),
+        _ => None,
+    }
 }
 /// The environment entry holding the vtable of the `dyn` parameter whose
 /// hidden type parameter is `generic` (passed on like static evidence).

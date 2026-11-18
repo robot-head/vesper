@@ -3,7 +3,7 @@
 //! coercion builds on the caller's stack, the vtable data objects, the
 //! indirect slot call, and the drop of an unconsumed `sink dyn` parameter.
 use super::*;
-use crate::dyn_trait::{VTABLE_HEADER, VTable};
+use crate::dyn_trait::{BOXED_HEADER, VTABLE_HEADER, VTable};
 use cranelift_codegen::ir::{self, AbiParam, InstBuilder, MemFlags, condcodes::IntCC, types};
 use cranelift_module::{DataDescription, FuncOrDataId, Linkage, Module};
 
@@ -77,6 +77,68 @@ impl<M: Module> Codegen<'_, '_, M> {
             table,
             offset,
         ))
+    }
+
+    /// A call through slot `slot` on a boxed receiver (§7.3): replaces the
+    /// receiver (the box's block, whatever the method's pass) by the
+    /// value's address and returns the slot's function and the block.
+    pub(super) fn dyn_dispatch_boxed(
+        &mut self,
+        values: &mut [ir::Value],
+        slot: usize,
+    ) -> Result<(ir::Value, ir::Value), String> {
+        let block = *values.first().ok_or("a vtable call lacks its receiver")?;
+        let table = self.b.ins().load(types::I64, MemFlags::trusted(), block, 0);
+        values[0] = self.b.ins().iadd_imm(block, BOXED_HEADER);
+        let offset = VTABLE_HEADER + 8 * i32::try_from(slot).map_err(|e| e.to_string())?;
+        let target = self.b.ins().load(
+            types::I64,
+            MemFlags::trusted().with_readonly(),
+            table,
+            offset,
+        );
+        Ok((target, block))
+    }
+
+    /// The object pair a boxed object `arg` lends to a `dyn` parameter
+    /// (§7.3): `{value address, vtable}` on the caller's stack, and the
+    /// box's block. Nothing is allocated.
+    pub(super) fn dyn_lend_boxed(
+        &mut self,
+        arg: &Arg,
+        _pass: Pass,
+    ) -> Result<(ir::Value, ir::Value), String> {
+        let block = self.expr(&arg.expr)?;
+        let table = self.b.ins().load(types::I64, MemFlags::trusted(), block, 0);
+        let data = self.b.ins().iadd_imm(block, BOXED_HEADER);
+        let pair = self.alloc_uninit(16);
+        self.b.ins().store(MemFlags::new(), data, pair, 0);
+        self.b.ins().store(MemFlags::new(), table, pair, 8);
+        Ok((pair, block))
+    }
+
+    /// `Box::new(value)` typed `Box[dyn Trait]` (§7.3): one heap block
+    /// holding the vtable address and then the value of type `actual`.
+    pub(super) fn dyn_box_new(
+        &mut self,
+        value: ir::Value,
+        actual: &Type,
+        object: &Type,
+    ) -> Result<ir::Value, String> {
+        let actual = crate::numeric::default_type(actual);
+        let vtable = self
+            .world
+            .dyn_objects
+            .vtable(object, &actual)
+            .cloned()
+            .ok_or_else(|| format!("no vtable of {actual} as `{object}`"))?;
+        let layout = Layout::of(self.world, &actual)?;
+        let block = self.fip_box_alloc(layout.size + BOXED_HEADER as u32)?;
+        let table = self.dyn_vtable(&vtable)?;
+        self.b.ins().store(MemFlags::new(), table, block, 0);
+        let data = self.b.ins().iadd_imm(block, BOXED_HEADER);
+        self.store(data, value, &actual)?;
+        Ok(block)
     }
 
     /// The address of `vtable`'s data object, emitted once per compilation
@@ -277,6 +339,41 @@ pub(super) fn emit_drop_object<M: Module>(
     sig.params.push(AbiParam::new(types::I64));
     let sig = b.import_signature(sig);
     b.ins().call_indirect(sig, drop, &[data]);
+    b.ins().jump(done, &[]);
+    b.switch_to_block(done);
+    Ok(())
+}
+
+/// Drops the boxed object (§7.3) whose block is `block`: the value through
+/// its vtable's drop word, then the block. A null block (moved from) drops
+/// nothing.
+pub(super) fn emit_drop_boxed<M: Module>(
+    b: &mut FunctionBuilder<'_>,
+    m: &mut M,
+    block: ir::Value,
+) -> Result<(), String> {
+    let live = b.ins().icmp_imm(IntCC::NotEqual, block, 0);
+    let load_drop = b.create_block();
+    let call = b.create_block();
+    let free = b.create_block();
+    let done = b.create_block();
+    b.ins().brif(live, load_drop, &[], done, &[]);
+    b.switch_to_block(load_drop);
+    let table = b.ins().load(types::I64, MemFlags::trusted(), block, 0);
+    let drop = b
+        .ins()
+        .load(types::I64, MemFlags::trusted().with_readonly(), table, 0);
+    let has_drop = b.ins().icmp_imm(IntCC::NotEqual, drop, 0);
+    b.ins().brif(has_drop, call, &[], free, &[]);
+    b.switch_to_block(call);
+    let data = b.ins().iadd_imm(block, BOXED_HEADER);
+    let mut sig = m.make_signature();
+    sig.params.push(AbiParam::new(types::I64));
+    let sig = b.import_signature(sig);
+    b.ins().call_indirect(sig, drop, &[data]);
+    b.ins().jump(free, &[]);
+    b.switch_to_block(free);
+    emit_fip_box_free(b, m, block)?;
     b.ins().jump(done, &[]);
     b.switch_to_block(done);
     Ok(())

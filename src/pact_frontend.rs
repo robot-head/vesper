@@ -32,6 +32,7 @@
 //! rejected before a World is accepted.
 mod builtin_traits;
 mod mono;
+pub(crate) use mono::each_expr;
 
 use crate::ast::*;
 use crate::check::{self, Checked, TraitCall, TraitCalls, World};
@@ -159,6 +160,7 @@ pub fn check_package_with(
             module: Module::default(),
             params: BTreeMap::new(),
             forwards: vec![],
+            boxed: BTreeSet::new(),
         };
         module
     };
@@ -218,6 +220,7 @@ pub fn check_package_with(
         spans,
         instances: RefCell::new(BTreeMap::new()),
         dyn_params: dyn_lowered.params.clone(),
+        dyn_boxed: dyn_lowered.boxed.clone(),
         dyn_vtables: RefCell::new(vec![]),
         dyn_instance_params: RefCell::new(BTreeMap::new()),
         dyn_thunks: RefCell::new(vec![]),
@@ -1722,6 +1725,8 @@ struct Elaborator {
     instances: RefCell<BTreeMap<String, String>>,
     /// `dyn` parameters by function ([`crate::dyn_trait`]).
     dyn_params: BTreeMap<String, BTreeMap<String, Type>>,
+    /// Traits used as boxed objects (`Box[dyn Trait]`).
+    dyn_boxed: BTreeSet<String>,
     /// Vtables selected by monomorphization.
     dyn_vtables: RefCell<Vec<crate::dyn_trait::VTable>>,
     /// `dyn` parameters of each monomorphized instance, its type arguments
@@ -2378,6 +2383,19 @@ impl TraitCalls for Elaborator {
                 format!("trait '{}' has no method '{method}'", keys[0].1),
                 span,
             )));
+        }
+        if let Some(Type::Named(object_trait, _)) = crate::dyn_trait::boxed_trait(&receiver) {
+            // A call on a boxed trait object (§7.3): its vtable stub.
+            return Some(match keys.iter().find(|k| &k.1 == object_trait) {
+                Some(key) if brand.is_none() => self
+                    .bound_stub(key, method, span)
+                    .map(|_| crate::dyn_trait::stub_name(&key.1, method)),
+                _ => Err(d(
+                    "E0608",
+                    format!("{receiver} has no method '{method}': its trait is '{object_trait}'"),
+                    span,
+                )),
+            });
         }
         let mut found = vec![];
         let mut failures = vec![];

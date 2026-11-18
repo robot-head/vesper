@@ -245,7 +245,7 @@ impl SpanMap {
 
 /// Visits every expression of `e` in pre-order, children after the parent
 /// (so a visitor may rewrite a node before its children are visited).
-fn each_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
+pub(crate) fn each_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
     f(e);
     match &mut e.kind {
         ExprKind::Literal(_) | ExprKind::Name(_) => {}
@@ -465,6 +465,12 @@ impl Elaborator {
             .flatten()
             .filter(|b| is_dyn_bound(b))
             .map(|b| &b.key)
+            .chain(
+                self.fe
+                    .traits
+                    .keys()
+                    .filter(|k| self.dyn_boxed.contains(&k.1)),
+            )
             .filter(|k| k.0 == self.fe.identity)
             .collect();
         self.stub_declarations(keys, |key, method| {
@@ -551,7 +557,8 @@ impl Elaborator {
                 _ => {}
             }
         }
-        if self.fe.bounds.is_empty() && self.fe.type_bounds.is_empty() {
+        if self.fe.bounds.is_empty() && self.fe.type_bounds.is_empty() && self.dyn_boxed.is_empty()
+        {
             return Ok(self.prune(module));
         }
         let mut m = Mono {
@@ -785,7 +792,7 @@ impl Elaborator {
     /// code specializes such a function into each caller, so no slot could
     /// hold it.
     pub(super) fn dyn_metadata(&self, world: &mut World) -> Vec<Diagnostic> {
-        if self.dyn_params.is_empty() {
+        if self.dyn_params.is_empty() && self.dyn_boxed.is_empty() {
             return vec![];
         }
         let mut objects = crate::dyn_trait::DynObjects::default();
@@ -1295,6 +1302,11 @@ impl Mono<'_> {
                 rewrites.push((span, target));
             }
         }
+        for (span, ty, tr) in self.box_coercions_in(&origin) {
+            let ty = crate::numeric::default_type(&substitute(&ty, &cx.vars));
+            let tr = crate::numeric::default_type(&substitute(&tr, &cx.vars));
+            self.dyn_vtable(cx, ty, tr, &span);
+        }
         if rewrites.is_empty() {
             return;
         }
@@ -1385,88 +1397,145 @@ impl Mono<'_> {
                 }
                 continue;
             }
-            let origin_generics = &self.funcs[&cx.origin].generics;
-            let open = !closed(&ty)
-                || !closed(&tr)
-                || origin_generics
-                    .iter()
-                    .filter(|g| !cx.vars.contains_key(&g.name))
-                    .any(|g| mentions(&ty, &g.name) || mentions(&tr, &g.name));
-            if open {
-                self.errors.push(d(
-                    "E0633",
-                    format!(
-                        "cannot build the vtable of {ty} as `dyn {tr}` here: the type is not known before instantiation; bound the type parameter by the trait so the function is monomorphized"
-                    ),
-                    span,
-                ));
-                continue;
-            }
-            let Type::Named(trait_name, args) = &tr else {
-                continue;
-            };
-            let key = (self.el.fe.identity.clone(), trait_name.clone());
-            let Some(decl) = self.el.fe.traits.get(&key).map(|t| t.decl.clone()) else {
-                continue;
-            };
-            let object = crate::dyn_trait::object(tr.clone());
-            let Some(index) = self.evidence(cx, &key, &ty, args, span) else {
-                continue;
-            };
-            let existing = self
-                .el
-                .dyn_vtables
-                .borrow()
-                .iter()
-                .find(|v| v.object == object && v.self_ty == ty)
-                .map(|v| v.conformance);
-            if let Some(selected) = existing {
-                if selected != index {
+            if let Some(source) = crate::dyn_trait::boxed_trait(&ty) {
+                // Lending a boxed object: it carries its own vtable, which
+                // fits only the same instantiated trait.
+                if crate::numeric::default_type(source) != tr {
                     self.errors.push(d(
-                        "E0633",
+                        "E0608",
                         format!(
-                            "cannot build a second vtable of {ty} as `dyn {tr}` under another model: a program has one vtable per object type and type"
+                            "cannot pass {ty} as `dyn {tr}`: a boxed object keeps its vtable, so the traits must be the same"
                         ),
                         span,
                     ));
                 }
                 continue;
             }
-            let c = self.el.fe.confs[index].clone();
-            let mut cvars = BTreeMap::new();
-            match_type(&c.decl.self_ty, &ty, &c.decl.generics, &mut cvars);
-            for (pattern, actual) in c.decl.trait_ref.args.iter().zip(args) {
-                match_type(pattern, actual, &c.decl.generics, &mut cvars);
-            }
-            let mut methods = vec![];
-            for m in &decl.methods {
-                let generated = match self.el.conformance_function(index, &m.name, span) {
-                    Ok(g) => g,
-                    Err(e) => {
-                        self.errors.push(e);
-                        return;
-                    }
-                };
-                let target = if self.bounded.contains(&generated) {
-                    let evidence = self.callee_evidence(cx, &generated, &cvars, span);
-                    self.instance(&generated, cvars.clone(), evidence, cx.depth + 1, span)
-                } else {
-                    generated
-                };
-                let thunk = self.el.dyn_thunk(&decl, m, args, &ty, &target);
-                methods.push((thunk, BTreeMap::new()));
-            }
-            self.el
-                .dyn_vtables
-                .borrow_mut()
-                .push(crate::dyn_trait::VTable {
-                    object,
-                    self_ty: ty,
-                    methods,
-                    conformance: index,
-                    span: span.clone(),
-                });
+            self.dyn_vtable(cx, ty, tr, span);
         }
+    }
+
+    /// The boxed-object coercions of `f`'s body (§7.3): each `Box::new`
+    /// call typed `Box[dyn Trait]` whose argument is a concrete value, as
+    /// (call span, value type, trait).
+    fn box_coercions_in(&self, f: &Function) -> Vec<(Span, Type, Type)> {
+        let mut out = vec![];
+        let mut f = f.clone();
+        each_body_expr(&mut f, &mut |e| {
+            let ExprKind::Call { callee, args, .. } = &e.kind else {
+                return;
+            };
+            if !matches!(&callee.kind, ExprKind::Name(n) if n == crate::fip::BOX_NEW) {
+                return;
+            }
+            let Some(tr) = self
+                .world
+                .types
+                .get(&(e.span.start, e.span.end))
+                .and_then(crate::dyn_trait::boxed_trait)
+            else {
+                return;
+            };
+            let Some(arg) = args.first() else { return };
+            let Some(actual) = self
+                .world
+                .types
+                .get(&(arg.expr.span.start, arg.expr.span.end))
+            else {
+                return;
+            };
+            if crate::dyn_trait::is_object(actual) {
+                return;
+            }
+            out.push((e.span.clone(), actual.clone(), tr.clone()));
+        });
+        out
+    }
+
+    /// Selects the vtable of `ty` as `dyn tr` with the conformance chosen in
+    /// `cx` at `span`, and instantiates its methods (once per program).
+    fn dyn_vtable(&mut self, cx: &Ctx, ty: Type, tr: Type, span: &Span) {
+        let origin_generics = &self.funcs[&cx.origin].generics;
+        let open = !closed(&ty)
+            || !closed(&tr)
+            || origin_generics
+                .iter()
+                .filter(|g| !cx.vars.contains_key(&g.name))
+                .any(|g| mentions(&ty, &g.name) || mentions(&tr, &g.name));
+        if open {
+            self.errors.push(d(
+                "E0633",
+                format!(
+                    "cannot build the vtable of {ty} as `dyn {tr}` here: the type is not known before instantiation; bound the type parameter by the trait so the function is monomorphized"
+                ),
+                span,
+            ));
+            return;
+        }
+        let Type::Named(trait_name, args) = &tr else {
+            return;
+        };
+        let key = (self.el.fe.identity.clone(), trait_name.clone());
+        let Some(decl) = self.el.fe.traits.get(&key).map(|t| t.decl.clone()) else {
+            return;
+        };
+        let object = crate::dyn_trait::object(tr.clone());
+        let Some(index) = self.evidence(cx, &key, &ty, args, span) else {
+            return;
+        };
+        let existing = self
+            .el
+            .dyn_vtables
+            .borrow()
+            .iter()
+            .find(|v| v.object == object && v.self_ty == ty)
+            .map(|v| v.conformance);
+        if let Some(selected) = existing {
+            if selected != index {
+                self.errors.push(d(
+                    "E0633",
+                    format!(
+                        "cannot build a second vtable of {ty} as `dyn {tr}` under another model: a program has one vtable per object type and type"
+                    ),
+                    span,
+                ));
+            }
+            return;
+        }
+        let c = self.el.fe.confs[index].clone();
+        let mut cvars = BTreeMap::new();
+        match_type(&c.decl.self_ty, &ty, &c.decl.generics, &mut cvars);
+        for (pattern, actual) in c.decl.trait_ref.args.iter().zip(args) {
+            match_type(pattern, actual, &c.decl.generics, &mut cvars);
+        }
+        let mut methods = vec![];
+        for m in &decl.methods {
+            let generated = match self.el.conformance_function(index, &m.name, span) {
+                Ok(g) => g,
+                Err(e) => {
+                    self.errors.push(e);
+                    return;
+                }
+            };
+            let target = if self.bounded.contains(&generated) {
+                let evidence = self.callee_evidence(cx, &generated, &cvars, span);
+                self.instance(&generated, cvars.clone(), evidence, cx.depth + 1, span)
+            } else {
+                generated
+            };
+            let thunk = self.el.dyn_thunk(&decl, m, args, &ty, &target);
+            methods.push((thunk, BTreeMap::new()));
+        }
+        self.el
+            .dyn_vtables
+            .borrow_mut()
+            .push(crate::dyn_trait::VTable {
+                object,
+                self_ty: ty,
+                methods,
+                conformance: index,
+                span: span.clone(),
+            });
     }
 
     /// Evidence for each bound of `callee` instantiated at `vars`.

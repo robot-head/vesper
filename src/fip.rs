@@ -182,6 +182,103 @@ pub fn mentions_box(world: &World, ty: &Type) -> bool {
     active(world) && type_mentions_box(ty)
 }
 
+/// Whether a function with loops or early exits, whose `Box` drops are not
+/// elaborated ([`elaborate_non_fip_drops`] needs an acyclic graph), still
+/// frees every box it owns: no owned slot (local, or `inout` or `sink`
+/// parameter) has a type naming `Box` outside a sequence (sequences free
+/// their elements), every box-typed sequence element it reads is only lent
+/// to a call (boxed objects, §7.3), and every other box-typed value is
+/// consumed once, by a `sink` argument, a constructor field or the result.
+pub fn loop_boxes_reclaimed(world: &World, f: &crate::ir::FunctionIr) -> bool {
+    use crate::ir::{Op, Terminator};
+    let boxy = |t: &Type| active(world) && mentions_box_outside_seq(t);
+    // Parameters are locals too; an `in` parameter only lends its box.
+    let owned_local = f.locals.iter().any(|(name, t)| {
+        boxy(t)
+            && f.params
+                .iter()
+                .find(|p| &p.name == name)
+                .is_none_or(|p| p.pass != Pass::In)
+    });
+    if owned_local {
+        return false;
+    }
+    // Each box-typed value's uses: (owning use, count).
+    let mut uses: BTreeMap<ValueId, (usize, usize)> = BTreeMap::new();
+    let mut note = |v: ValueId, owning: bool| {
+        let e = uses.entry(v).or_default();
+        e.0 += usize::from(owning);
+        e.1 += 1;
+    };
+    for b in &f.blocks {
+        for i in &b.instructions {
+            match &i.op {
+                Op::Call { args, .. }
+                | Op::Indirect { args, .. }
+                | Op::Seq { args, .. }
+                | Op::Tiled { args, .. }
+                | Op::Fip { args, .. } => {
+                    for a in args {
+                        note(a.value, a.pass == Pass::Sink);
+                    }
+                }
+                Op::Data(_, fields) => fields.iter().for_each(|(_, v)| note(*v, true)),
+                Op::Tuple(vs) => vs.iter().for_each(|v| note(*v, true)),
+                Op::Exit { value, .. } => note(*value, true),
+                Op::Bind { value, .. }
+                | Op::Write { value, .. }
+                | Op::Unary(_, value)
+                | Op::Project(value, _)
+                | Op::Try(value) => note(*value, false),
+                Op::Binary(_, a, b) | Op::Index(a, b) => {
+                    note(*a, false);
+                    note(*b, false);
+                }
+                Op::Vector { args, .. } => args.iter().for_each(|v| note(*v, false)),
+                _ => {}
+            }
+        }
+        match &b.terminator {
+            Terminator::Return(v) => note(*v, true),
+            Terminator::Jump { args, .. } => args.iter().for_each(|v| note(*v, false)),
+            Terminator::Branch { condition, .. } => note(*condition, false),
+            Terminator::Match { value, .. } => note(*value, false),
+            Terminator::Unreachable => {}
+        }
+    }
+    for b in &f.blocks {
+        for i in &b.instructions {
+            if !boxy(&i.ty) {
+                continue;
+            }
+            let (owning, count) = uses.get(&i.dest).copied().unwrap_or_default();
+            let ok = match &i.op {
+                // A place read: what the place owns stays owned there.
+                Op::Read { pass, .. } => *pass != Pass::Sink,
+                Op::Seq {
+                    op: crate::seq::SeqOp::Get | crate::seq::SeqOp::SliceGet,
+                    ..
+                } => crate::dyn_trait::is_boxed(&i.ty) && owning == 0,
+                _ => owning == 1 && count == 1,
+            };
+            if !ok {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Whether `t` names `Box` other than inside a `ChunkSeq` or `Slice`.
+fn mentions_box_outside_seq(t: &Type) -> bool {
+    match t {
+        Type::Named(..) if crate::seq::is_seq_type(t) || crate::seq::is_slice_type(t) => false,
+        Type::Named(n, args) => n == BOX_TYPE || args.iter().any(mentions_box_outside_seq),
+        Type::Tuple(ts) => ts.iter().any(mentions_box_outside_seq),
+        _ => type_mentions_box(t),
+    }
+}
+
 fn type_mentions_box(t: &Type) -> bool {
     match t {
         Type::Named(n, args) => n == BOX_TYPE || args.iter().any(type_mentions_box),

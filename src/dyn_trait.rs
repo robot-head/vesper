@@ -54,6 +54,19 @@
 //! adapter that loads it. A `sink dyn` parameter the callee does not
 //! consume is dropped through word 0 once; consuming it (a `sink self`
 //! method or a `sink dyn` argument) empties the parameter.
+//!
+//! # Boxed objects
+//!
+//! `Box[dyn Trait[args]]` (manuscript §7.3, #1057) is a first-class owned
+//! type, allowed wherever a type is written. `Box::new(value)` expecting it
+//! (or `Box::new[dyn Trait](value)`) is the coercion: the frontend records
+//! one vtable per (object type, value type) exactly as for a `dyn` argument.
+//! Calls on a boxed receiver resolve to the vtable stubs; lending one to a
+//! `dyn` parameter reuses its vtable. Natively the box is one word, the
+//! address of a block `{vtable, value}` ([`BOXED_HEADER`]); a call passes
+//! the value's address to the slot, and a drop calls the vtable's drop word
+//! and frees the block. The evaluator keeps the value in a shared cell
+//! beside its vtable (`runtime::Value::Object`).
 use crate::ast::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -63,6 +76,8 @@ pub const DYN_GENERIC: &str = "__dyn__";
 pub const VTABLE_STUB: &str = "vtable$";
 /// Bytes of the vtable header (drop, move, size, align) before the methods.
 pub const VTABLE_HEADER: i32 = 32;
+/// Bytes of a boxed object's block before its value: the vtable address.
+pub const BOXED_HEADER: i64 = 8;
 
 /// Whether `name` is the hidden type parameter of a `dyn` parameter.
 pub fn is_dyn_generic(name: &str) -> bool {
@@ -120,7 +135,7 @@ pub struct VTable {
 
 impl DynObjects {
     pub fn is_empty(&self) -> bool {
-        self.params.is_empty() && self.stubs.is_empty()
+        self.params.is_empty() && self.stubs.is_empty() && self.vtables.is_empty()
     }
 
     /// The vtable of `self_ty` as `object`.
@@ -195,6 +210,88 @@ fn mentions_dyn(t: &Type) -> bool {
     }
 }
 
+/// The trait of a boxed object type `Box[dyn Trait[args]]`.
+pub fn boxed_trait(t: &Type) -> Option<&Type> {
+    match t {
+        Type::Named(n, a) if n == crate::fip::BOX_TYPE && a.len() == 1 => object_trait(&a[0]),
+        _ => None,
+    }
+}
+
+/// Whether `t` is a boxed object type `Box[dyn Trait[args]]`.
+pub fn is_boxed(t: &Type) -> bool {
+    boxed_trait(t).is_some()
+}
+
+/// The object type `dyn Trait[args]` of a boxed object type.
+pub fn boxed_object(t: &Type) -> Option<&Type> {
+    match t {
+        Type::Named(n, a) if n == crate::fip::BOX_TYPE && a.len() == 1 && is_object(&a[0]) => {
+            Some(&a[0])
+        }
+        _ => None,
+    }
+}
+
+/// Whether `t` mentions `dyn` other than as a boxed object `Box[dyn
+/// Trait[args]]` (whose trait arguments mention no `dyn`).
+fn mentions_bare_dyn(t: &Type) -> bool {
+    if let Some(Type::Named(_, args)) = boxed_trait(t) {
+        return args.iter().any(mentions_dyn);
+    }
+    match t {
+        Type::Named(n, a) => n == DYN_TYPE || a.iter().any(mentions_bare_dyn),
+        Type::Tuple(ts) => ts.iter().any(mentions_bare_dyn),
+        Type::Function {
+            params,
+            result,
+            effects,
+            ..
+        } => {
+            params.iter().any(|(_, t)| mentions_bare_dyn(t))
+                || mentions_bare_dyn(result)
+                || effects
+                    .instances
+                    .iter()
+                    .any(|e| e.args.iter().any(mentions_bare_dyn))
+        }
+        Type::Row(e) => e
+            .instances
+            .iter()
+            .any(|e| e.args.iter().any(mentions_bare_dyn)),
+        _ => false,
+    }
+}
+
+/// The traits `Trait[args]` of every boxed object type in `t`.
+fn boxed_traits(t: &Type, out: &mut Vec<Type>) {
+    if let Some(tr) = boxed_trait(t) {
+        out.push(tr.clone());
+        return;
+    }
+    match t {
+        Type::Named(_, a) | Type::Tuple(a) => a.iter().for_each(|t| boxed_traits(t, out)),
+        Type::Function {
+            params,
+            result,
+            effects,
+            ..
+        } => {
+            params.iter().for_each(|(_, t)| boxed_traits(t, out));
+            boxed_traits(result, out);
+            for e in &effects.instances {
+                e.args.iter().for_each(|t| boxed_traits(t, out));
+            }
+        }
+        Type::Row(e) => {
+            for e in &e.instances {
+                e.args.iter().for_each(|t| boxed_traits(t, out));
+            }
+        }
+        _ => {}
+    }
+}
+
 fn mentions(t: &Type, name: &str) -> bool {
     match t {
         Type::Named(n, a) => n == name || a.iter().any(|t| mentions(t, name)),
@@ -228,6 +325,26 @@ fn function_types(f: &Function) -> Vec<(Type, Span)> {
         out.push((t.clone(), s.clone()));
     });
     out
+}
+
+/// A type written in `f` that mentions `dyn` other than as a boxed object
+/// or the object type `Box::new[dyn Trait](x)` boxes (§7.3).
+fn bare_dyn_type(f: &Function) -> Option<(Type, Span)> {
+    let mut probe = f.clone();
+    if let Some(body) = &mut probe.body {
+        crate::pact_frontend::each_expr(body, &mut |e| {
+            if let ExprKind::Call { callee, types, .. } = &mut e.kind
+                && matches!(&callee.kind, ExprKind::Name(n) if n == crate::fip::BOX_NEW)
+                && let [t] = types.as_slice()
+                && object_trait(t).is_some_and(|tr| !mentions_dyn(tr))
+            {
+                types.clear();
+            }
+        });
+    }
+    function_types(&probe)
+        .into_iter()
+        .find(|(t, _)| mentions_bare_dyn(t))
 }
 
 /// Whether the module writes `dyn` anywhere.
@@ -276,6 +393,8 @@ pub(crate) struct Lowered {
     /// Hidden type parameter to trait, by owning function (World name).
     pub params: BTreeMap<String, BTreeMap<String, Type>>,
     pub forwards: Vec<Forward>,
+    /// Traits used as boxed objects (`Box[dyn Trait]`) anywhere.
+    pub boxed: BTreeSet<String>,
 }
 
 /// Lowers `dyn` parameters to hidden bounded type parameters and checks
@@ -305,6 +424,50 @@ pub(crate) fn lower(module: &Module) -> Result<Lowered, Vec<Diagnostic>> {
         )
     };
     let mut bounds = vec![];
+    let mut boxed = BTreeSet::new();
+    {
+        let mut found: Vec<(Type, Span)> = vec![];
+        let mut types = |t: &Type, s: &Span| {
+            let mut ts = vec![];
+            // `Box::new[dyn Trait](x)` names the object type alone.
+            if let Some(tr) = object_trait(t) {
+                ts.push(tr.clone());
+            }
+            boxed_traits(t, &mut ts);
+            found.extend(ts.into_iter().map(|t| (t, s.clone())));
+        };
+        for item in &module.items {
+            let fns: Vec<&Function> = match item {
+                Item::Function(f) => vec![&**f],
+                Item::Impl { methods, .. } => methods.iter().collect(),
+                Item::Trait(t) => t.methods.iter().collect(),
+                Item::Conformance(c) => c.methods.iter().collect(),
+                Item::Effect(e) => e.ops.iter().collect(),
+                Item::Adt(a) => {
+                    for f in a.variants.iter().flat_map(|v| &v.fields) {
+                        types(&f.ty, &a.span);
+                    }
+                    vec![]
+                }
+            };
+            for f in fns {
+                for (t, s) in function_types(f) {
+                    types(&t, &s);
+                }
+            }
+        }
+        for (tr, span) in found {
+            let Type::Named(trait_name, args) = &tr else {
+                continue;
+            };
+            if let Some(decl) = traits.get(trait_name) {
+                if checked_objects.insert(tr.to_string()) {
+                    errors.extend(object_safety(decl, args, &span));
+                }
+                boxed.insert(trait_name.clone());
+            }
+        }
+    }
     for item in &mut out.items {
         match item {
             Item::Function(f) => {
@@ -341,7 +504,7 @@ pub(crate) fn lower(module: &Module) -> Result<Lowered, Vec<Diagnostic>> {
             }
             Item::Trait(t) => {
                 for f in &t.methods {
-                    if let Some((_, s)) = function_types(f).iter().find(|(t, _)| mentions_dyn(t)) {
+                    if let Some((_, ref s)) = bare_dyn_type(f) {
                         errors.push(elsewhere("in a trait method signature", s));
                     }
                 }
@@ -351,21 +514,21 @@ pub(crate) fn lower(module: &Module) -> Result<Lowered, Vec<Diagnostic>> {
                     errors.push(elsewhere("a conformance self type", &c.span));
                 }
                 for f in &c.methods {
-                    if let Some((_, s)) = function_types(f).iter().find(|(t, _)| mentions_dyn(t)) {
+                    if let Some((_, ref s)) = bare_dyn_type(f) {
                         errors.push(elsewhere("in a conformance method", s));
                     }
                 }
             }
             Item::Effect(e) => {
                 for f in &e.ops {
-                    if let Some((_, s)) = function_types(f).iter().find(|(t, _)| mentions_dyn(t)) {
+                    if let Some((_, ref s)) = bare_dyn_type(f) {
                         errors.push(elsewhere("in an effect operation", s));
                     }
                 }
             }
             Item::Adt(a) => {
                 for f in a.variants.iter().flat_map(|v| &v.fields) {
-                    if mentions_dyn(&f.ty) {
+                    if mentions_bare_dyn(&f.ty) {
                         errors.push(elsewhere("the type of a field", &a.span));
                     }
                 }
@@ -378,6 +541,7 @@ pub(crate) fn lower(module: &Module) -> Result<Lowered, Vec<Diagnostic>> {
             module: out,
             params,
             forwards,
+            boxed,
         })
     } else {
         Err(errors)
@@ -459,10 +623,10 @@ fn lower_function(
         names.insert(p.name.clone());
         own.insert(g, tr);
     }
-    if let Some((_, s)) = function_types(f).iter().find(|(t, _)| mentions_dyn(t)) {
+    if let Some((_, ref s)) = bare_dyn_type(f) {
         errors.push(d(
             "E0632",
-            "`dyn Trait` is second-class: it may only be the whole type of an `in`, `inout` or `sink` parameter, not a result, a `let` annotation, a type argument, a closure parameter or part of another type",
+            "`dyn Trait` is second-class unless boxed: it may only be the whole type of an `in`, `inout` or `sink` parameter or the argument of `Box[dyn Trait]`, not a result, a `let` annotation, a type argument, a closure parameter or part of another type",
             s,
         ));
     }
@@ -757,19 +921,30 @@ pub fn refuse(world: &crate::check::World, backend: &str) -> Result<(), Diagnost
     if world.dyn_objects.is_empty() {
         return Ok(());
     }
-    let (name, span) = world
+    let param = world
         .dyn_objects
         .params
         .keys()
         .next()
         .and_then(|n| world.functions.get(n))
-        .map(|f| (f.name.clone(), f.span.clone()))
-        .unwrap_or_default();
+        .map(|f| (f.name.clone(), f.span.clone()));
+    let (what, span) = match (param, world.dyn_objects.vtables.first()) {
+        (Some((name, span)), _) => (
+            format!("`dyn Trait` parameters yet ('{name}' takes one)"),
+            span,
+        ),
+        (None, Some(v)) => (
+            format!(
+                "boxed trait objects yet (`Box[{}]` holds {})",
+                v.object, v.self_ty
+            ),
+            v.span.clone(),
+        ),
+        (None, None) => ("`dyn Trait` yet".to_owned(), 0..0),
+    };
     Err(d(
         "E0634",
-        format!(
-            "the {backend} does not support `dyn Trait` parameters yet ('{name}' takes one); use the native backend or the JIT"
-        ),
+        format!("the {backend} does not support {what}; use the native backend or the JIT"),
         &span,
     ))
 }
