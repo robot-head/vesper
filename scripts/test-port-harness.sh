@@ -23,6 +23,13 @@
 #
 # Ports append their own lines at the end (after the ABI tier, so they run
 # on Linux only).
+#
+# Shards (#1019): the Linux job runs the ports in three parallel shards,
+# VESPER_PORT_HARNESS_SHARD=1, 2 or 3 (unset runs all of them). Shard 1 is
+# the ABI tier and the ports up to Ignis, shard 2 Quarry through Grammar,
+# shard 3 everything after, including lines new ports append. Keep each
+# shard near a third of the total: on main in November 2026 the shards
+# took about 18, 19 and 13 minutes after a 3 minute compiler build.
 set -eu
 cd "$(dirname "$0")/.."
 if [ -z "${VESPER_PORT_COMPILER:-}" ]; then
@@ -33,6 +40,12 @@ if [ -z "${VESPER_PORT_COMPILER:-}" ]; then
 fi
 export VESPER_PORT_COMPILER
 echo "compiling ports with $VESPER_PORT_COMPILER"
+shard=${VESPER_PORT_HARNESS_SHARD:-}
+case "$shard" in "" | 1 | 2 | 3) ;; *) echo "VESPER_PORT_HARNESS_SHARD must be 1, 2 or 3" >&2; exit 1 ;; esac
+[ "${VESPER_PORT_HARNESS_SCOPE:-all}" = abi ] && [ -n "$shard" ] && { echo "VESPER_PORT_HARNESS_SCOPE=abi takes no shard" >&2; exit 1; }
+# part <n>: whether this run includes shard n.
+part() { [ -z "$shard" ] || [ "$shard" = "$1" ]; }
+[ -n "$shard" ] && echo "port harness shard $shard of 3"
 
 # divergent <description> <expected failing test> <expected passing test> <cargo test args...>
 divergent() {
@@ -55,13 +68,15 @@ divergent() {
     echo "divergent $what detected ($failing failed, $passing agreed)"
 }
 
+log=$(mktemp)
+trap 'rm -f "$log"' EXIT HUP INT TERM
+# Shard 1: the export ABI tier and the ports through Ignis.
+if part 1; then
 cargo test --locked -p vesper-port-abi -p vesper-port-harness
 cargo test --locked -p vesper-port-pilot
 cargo test --locked -p vesper-port-pilot --features vesper-port
 divergent "Vesper port of the pilot" bytes_and_booleans gcd_matches_euclid \
     -p vesper-port-pilot --features vesper-port-divergent --test api
-log=$(mktemp)
-trap 'rm -f "$log"' EXIT HUP INT TERM
 # The kit (export ABI v2, #898): one failing test per form, and the leak
 # check fails on the build that omits one Vesper-side free.
 if cargo test --locked -p vesper-port-pilot --features vesper-port-divergent --test kit -- --test-threads=1 >"$log" 2>&1; then
@@ -146,6 +161,9 @@ crates/vesper-warp-tcp/scripts/test-port.sh
 # Port wave P1 lane 3 (#900): vesper-warp-wheel.
 sh crates/vesper-warp-wheel/port/test-port.sh
 sh crates/vesper-ignis/port/check.sh  # port P1 lane 12 (#909): vesper-ignis, both builds and the divergence check
+fi
+# Shard 2: Quarry through Grammar.
+if part 2; then
 # Quarry planner port (port wave P1 lane 7, #904): the port's tests, and one
 # failing test per ported module on the divergent build (DIVERGENT in
 # crates/vesper-quarry/build.rs).
@@ -202,6 +220,9 @@ protobuf protobuf signed_twos_complement_varints_are_canonical_in_singular_and_p
 der der typed_set_of_sorts_complete_encodings_retains_duplicates_and_rejects_untyped_set utf8_string_is_strict_borrowed_and_transactional
 ipc ipc independent_arrow_values_and_versions hostile_schema_and_union_discriminants
 CHECKS
+fi
+# Shard 3: every later port. New ports append their lines below.
+part 3 || exit 0
 . crates/vesper-simpulse/port/check.sh  # port P1 lane 5 (#902): vesper-simpulse, both builds and the divergence check
 . crates/vesper-crucible/port/check.sh  # port P1 lane 18 (#915): vesper-crucible, both builds and the divergence checks
 sh crates/vesper-serde/port/check.sh  # port P1 lane 19 (#916): vesper-serde, both builds and one divergence check per ported module

@@ -68,15 +68,25 @@ class PlatformWorkflowTests(unittest.TestCase):
         self.assertEqual(ports["steps"][0]["run"], 'test "$PLAN_RESULT" = success')
         step = next(s for s in ports["steps"] if "test-port-harness.sh" in s.get("run", ""))
         self.assertNotIn("VESPER_PORT_HARNESS_SCOPE", step.get("env", {}))
+        # Three shards (#1019), each running its own part of the harness.
+        self.assertEqual(ports["strategy"]["matrix"]["shard"], ["1", "2", "3"])
+        self.assertEqual(ports["strategy"]["fail-fast"], "false")
+        self.assertEqual(step["env"]["VESPER_PORT_HARNESS_SHARD"], "${{ matrix.shard }}")
         self.assertIn("ports", jobs["complete"]["needs"])
         script = (ROOT / "scripts/test-port-harness.sh").read_text()
-        tier_end = script.index('"${VESPER_PORT_HARNESS_SCOPE:-all}" = abi')
+        tier_end = script.index('echo "export ABI tier done')
         abi_tier = script[:tier_end]
         for check in ("-p vesper-port-abi", "-p vesper-port-harness", "--test kit",
                       "--test kit_memory", "-p vesper-port-pilot --features vesper-port",
                       "-p vesper-port-build --features divergent"):
             self.assertIn(check, abi_tier)
         self.assertNotIn("vesper-beacon", abi_tier.split("set -eu", 1)[1])
+        # Every shard is reached, and later ports land in the last one.
+        for n in ("1", "2"):
+            self.assertIn(f"if part {n}; then", script)
+        self.assertIn("part 3 || exit 0", script)
+        tail = script.split("part 3 || exit 0", 1)[1]
+        self.assertNotIn("\nfi\n", tail.replace("\n    fi", ""))
 
     def test_plan_failure_fails_required_jobs(self):
         for result in ("failure", "cancelled", "skipped", ""):

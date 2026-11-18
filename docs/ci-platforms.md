@@ -21,7 +21,7 @@ The native lanes run only host-specific coverage:
 
 The rest of the port harness, every ported crate's tests against both builds
 and its divergence checks, is platform-neutral once the ABI tier passes. It
-runs once, in the `Vesper ports (Linux)` job of the same workflow, on
+runs once, in the `Vesper ports (Linux n/3)` jobs of the same workflow, on
 `ubuntu-latest` (#1010). Before that, macOS and Windows each ran the whole
 harness, which took 27 and 39 minutes of 34 and 50 minute jobs on main
 (November 2026). Some divergence assertions exist only in this Cargo run (the
@@ -29,6 +29,13 @@ Bazel targets of those crates build the divergent objects but do not run
 them), so the Linux job is not a duplicate of BuildBuddy. `Platform
 validation complete` requires it. A new port appends its lines after the ABI
 tier, so it runs on Linux only.
+
+The Linux job runs as three parallel shards, `Vesper ports (Linux 1/3)` to
+`(Linux 3/3)` (`VESPER_PORT_HARNESS_SHARD`, #1019): one run took 52 minutes
+and others hit the 60 minute limit once Loom, Crucible and serde landed.
+Shard 1 is the ABI tier through Ignis, shard 2 Quarry through Grammar, and
+shard 3 the rest, where new ports append. When a shard passes about 30
+minutes, move a port's block to a lighter shard in the script.
 
 The native executable cases are shared with `scripts/test-native-host.sh`;
 `scripts/ci/test-native-executables.sh` runs them with the Cargo-built compiler.

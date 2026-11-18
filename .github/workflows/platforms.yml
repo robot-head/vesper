@@ -179,10 +179,15 @@ jobs:
 
   # The ported crates' tests and divergence checks are platform-neutral, so
   # they run once, here (#1010). Bazel on BuildBuddy builds the same ports.
+  # Three parallel shards of the harness (#1019) keep each under ~25 min.
   ports:
     needs: plan
     if: ${{ always() && !cancelled() }}
-    name: Vesper ports (Linux)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
+    name: Vesper ports (Linux ${{ matrix.shard }}/3)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -199,12 +204,15 @@ jobs:
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ports-${{ matrix.shard }}
       - name: Build the compiler
         run: cargo build --locked --bin vesper
       - name: Test the Vesper port harness
         # Every port compiles with the vesper binary built above.
         env:
           VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper
+          VESPER_PORT_HARNESS_SHARD: ${{ matrix.shard }}
         run: scripts/test-port-harness.sh
 
   complete:
