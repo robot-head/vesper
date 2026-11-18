@@ -35,13 +35,14 @@ functions 59.
 - **Growth copies with `memcpy`.** Growth out of inline or borrowed bytes
   copied byte by byte before. It now calls `memcpy`, and executables import
   `memcpy` and `free` too.
-- **JIT runtime: the same layout, on the C allocator, with no map outside
-  leak-check builds.** The JIT now calls `malloc`/`realloc`/`free` like
-  executables do. It keeps a thread-local live counter that
-  `live_allocations()` reads. Builds with `debug_assertions` (every test
-  build) also record live headers and string buffers. Those builds keep
-  `finish()` teardown and `stray_frees()` double-free detection. Release
-  builds keep only the counter.
+- **JIT runtime: the same layout, on the C allocator.** The JIT now calls
+  `malloc`/`realloc`/`free` like executables do, and `live_allocations()`
+  reads a thread-local counter. The JIT keeps its sets of live headers and
+  string buffers in every build. `finish()` frees a sequence or string that
+  a JIT entry returns (it is copied out first), and `stray_frees()` catches
+  double frees. An earlier revision kept the sets only under
+  `debug_assertions`, which leaked returned values in release JIT runs
+  (Codex review). The ports never use the JIT, so this costs them nothing.
 - **`s.reserve(n)` on `ChunkSeq` (§13, manuscript change flagged).** It is a
   capacity hint only. It changes no element or length and raises nothing.
   Like any growth, it ends an executable with status 71 only when the

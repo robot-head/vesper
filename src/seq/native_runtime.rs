@@ -16,12 +16,12 @@
 //! counts the live headers and separate buffers of this thread, as the
 //! executable's `vesper_seq_live` counter does.
 //!
-//! Leak-check builds (`debug_assertions`, which every test build has) also
-//! record each live header and string buffer, so that [`finish`] frees what
-//! generated code left and [`stray_frees`] counts drops of something that is
-//! not live, which would be a double free in an executable. Other builds keep
-//! only the counter: [`finish`] then reports what was left but cannot free
-//! it, and a double free is one, as in an executable.
+//! The JIT also records each live header and string buffer, so that
+//! [`finish`] frees what generated code left (a sequence or string a JIT
+//! entry returns is copied out and then freed there) and [`stray_frees`]
+//! counts drops of something that is not live, which would be a double free
+//! in an executable. Executables and libraries, which the ports measure,
+//! keep only their counter.
 //!
 //! An allocation that cannot be satisfied (including a capacity whose size
 //! overflows) ends the process with a message, as an executable exits with
@@ -57,9 +57,6 @@ const DATA: usize = 2;
 const HEADER: usize = crate::seq::HEADER_BYTES as usize;
 const PREFIX: usize = BUFFER_PREFIX as usize;
 
-/// Whether this build records live allocations (see the module docs).
-const LEAK_CHECK: bool = cfg!(debug_assertions);
-
 // The C library allocator, which executables use too.
 unsafe extern "C" {
     #[link_name = "malloc"]
@@ -88,9 +85,9 @@ unsafe fn free(ptr: *mut u8) {
 thread_local! {
     /// Live headers and separate buffers of this thread.
     static LIVE: Cell<usize> = const { Cell::new(0) };
-    /// Leak-check builds: live headers.
+    /// Live headers.
     static HEADERS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
-    /// Leak-check builds: separate buffers grown for values this runtime did
+    /// Separate buffers grown for values this runtime did
     /// not allocate (native strings, §13), by data address.
     static BUFFERS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
     static FAULT: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -160,9 +157,7 @@ fn separate(header: *const u64, cap: u64, data: u64) -> bool {
 }
 
 fn record(header: *mut u64) {
-    if LEAK_CHECK {
-        HEADERS.with(|h| h.borrow_mut().insert(header as usize));
-    }
+    HEADERS.with(|h| h.borrow_mut().insert(header as usize));
 }
 
 /// Allocates a bare header, and for `cap > 0` a separate buffer for `cap`
@@ -246,7 +241,7 @@ pub extern "C" fn vesper_seq_grow(handle: u64, stride: u64, needed: u64) -> u64 
         }
         fresh
     };
-    if LEAK_CHECK && !HEADERS.with(|h| h.borrow().contains(&(header as usize))) {
+    if !HEADERS.with(|h| h.borrow().contains(&(header as usize))) {
         BUFFERS.with(|b| {
             let mut b = b.borrow_mut();
             b.remove(&(data as usize));
@@ -280,25 +275,24 @@ unsafe fn free_header(header: *mut u64) {
 }
 
 /// Frees a sequence that generated code drops: its header and buffer. A
-/// leak-check build ignores (and counts in [`stray_frees`]) a handle that is
-/// not live, so a drop never frees twice there.
+/// handle that is not live is ignored (and counted in [`stray_frees`]), so
+/// a drop never frees twice.
 pub extern "C" fn vesper_seq_free(handle: u64) -> u64 {
     if handle == 0 {
         return 0;
     }
-    if LEAK_CHECK && !HEADERS.with(|h| h.borrow_mut().remove(&(handle as usize))) {
+    if !HEADERS.with(|h| h.borrow_mut().remove(&(handle as usize))) {
         STRAY.with(|s| s.set(s.get() + 1));
         return 0;
     }
-    // SAFETY: generated code drops each live header once (checked above in
-    // leak-check builds).
+    // SAFETY: the header was live and is now unrecorded, so it is freed once.
     unsafe { free_header(handle as *mut u64) };
     0
 }
 
 /// Frees the buffer an inline `String` value at `value` owns (borrowed
-/// literal bytes, capacity 0, are not owned). A leak-check build ignores a
-/// buffer this runtime did not grow.
+/// literal bytes, capacity 0, are not owned). A buffer this runtime did not
+/// grow is ignored.
 pub extern "C" fn vesper_str_release(value: u64) -> u64 {
     if value == 0 {
         return 0;
@@ -309,7 +303,7 @@ pub extern "C" fn vesper_str_release(value: u64) -> u64 {
     if cap == 0 || data == 0 {
         return 0;
     }
-    if LEAK_CHECK && !BUFFERS.with(|b| b.borrow_mut().remove(&(data as usize))) {
+    if !BUFFERS.with(|b| b.borrow_mut().remove(&(data as usize))) {
         STRAY.with(|s| s.set(s.get() + 1));
         return 0;
     }
@@ -345,30 +339,26 @@ pub fn teardown_frees() -> usize {
 }
 
 /// Drops on this thread of a sequence or string buffer that was not live,
-/// which would be a double free in an executable (leak-check builds only;
-/// always 0 otherwise). The count only grows: compare it before and after a
-/// run.
+/// which would be a double free in an executable. The count only grows:
+/// compare it before and after a run.
 pub fn stray_frees() -> usize {
     STRAY.with(Cell::get)
 }
 
-/// Ends a JIT run on this thread: frees (in leak-check builds) every
-/// sequence generated code did not drop, and returns the first recorded
-/// fault.
+/// Ends a JIT run on this thread: frees every sequence and string buffer
+/// generated code did not drop, and returns the first recorded fault.
 pub fn finish() -> Result<(), String> {
     TEARDOWN.with(|t| t.set(live_allocations()));
-    if LEAK_CHECK {
-        let headers: Vec<usize> = HEADERS.with(|h| h.borrow_mut().drain().collect());
-        for header in headers {
-            // SAFETY: each recorded header is live and is freed once.
-            unsafe { free_header(header as *mut u64) };
-        }
-        let buffers: Vec<usize> = BUFFERS.with(|b| b.borrow_mut().drain().collect());
-        for data in buffers {
-            // SAFETY: each recorded buffer came from `vesper_seq_grow` and
-            // is freed once.
-            unsafe { free((data as *mut u8).sub(PREFIX)) };
-        }
+    let headers: Vec<usize> = HEADERS.with(|h| h.borrow_mut().drain().collect());
+    for header in headers {
+        // SAFETY: each recorded header is live and is freed once.
+        unsafe { free_header(header as *mut u64) };
+    }
+    let buffers: Vec<usize> = BUFFERS.with(|b| b.borrow_mut().drain().collect());
+    for data in buffers {
+        // SAFETY: each recorded buffer came from `vesper_seq_grow` and
+        // is freed once.
+        unsafe { free((data as *mut u8).sub(PREFIX)) };
     }
     LIVE.with(|l| l.set(0));
     FAULT.with(|f| f.borrow_mut().take()).map_or(Ok(()), Err)
