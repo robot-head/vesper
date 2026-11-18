@@ -113,13 +113,13 @@ released is `linear`. A drop import for affine types is a follow-up.
   arguments, writes `inout` slices (`slice_bytes`, `write_slice_bytes`) and
   builds handles (`handle_value`, `handle_word`).
 
-## Tests (`tests/ffi_handles.rs`, 9 tests + 1 ignored timing)
+## Tests (`tests/ffi_handles.rs`, 10 tests + 1 ignored timing)
 
 The worked example `tests/fixtures/ffi_handles/aead.ves` drives a toy stateful
 AEAD (a 256-byte key schedule, a keystream XOR and a 16-byte tag) through a
 linear `Sealer` and an affine `Probe`: a round trip, a wrong-key open whose
 `Fail[AuthError]` is handled while the sealers stay live, early returns,
-`NULL` results as `None` and as `Err`, 1,000 create/seal/free iterations, and
+`NULL` results as `None` and as `Err`, an empty never-grown packet (lent as a non-null pointer), 1,000 create/seal/free iterations, and
 the measured loops.
 
 - `jit_drives_a_stateful_rust_aead_through_linear_handles`: the Rust shim in
@@ -132,10 +132,10 @@ the measured loops.
 - `handle_misuse_is_a_typed_diagnostic`: one fixture per misuse in
   `tests/fixtures/ffi_handles/misuse/`: leak `E0302`, leak on a branch
   `E0309`, double finalize, use after finalize and copy `E0303`, comparing a
-  linear handle `E0302`, comparing an affine one `E0200`, a live handle across
+  linear handle `E0302`, comparing an affine one (bare, in an `Option`, a tuple or a struct) `E0200`, a live handle across
   an unhandled `Fail` `E0402`; constructing (struct literal or call) or
   destructuring is `FfiErrorKind::HandleMisuse`.
-- `vsys_handle_declarations_are_validated`, `source_slices_only_for_packed_elements`,
+- `vsys_handle_declarations_are_validated`, `handle_types_belong_to_one_library` (two libraries may not share a handle name), `source_slices_only_for_packed_elements`,
   `export_libraries_keep_handles_inside`, `jit_refuses_unbound_foreign_symbols`,
   `verified_backend_and_wasm_refuse_foreign_handles`.
 
