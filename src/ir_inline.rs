@@ -34,8 +34,9 @@
 //!   capability verifiers see the code they saw before, and so are callers
 //!   holding `Box` values, whose drops are placed per block;
 //! * its body has no closures, handlers, `?`, indirect calls, tiled or `Box`
-//!   operations, and no type in it mentions `Box`, a function type or a slice
-//!   parameter;
+//!   operations, no type in it mentions `Box` or a function type, and no
+//!   slice parameter is `inout` or `sink` (an `in` slice is a view value: it
+//!   becomes the caller's slice local, or a bound copy of the view);
 //! * every `inout` argument (and every borrowed aggregate or sequence `in`
 //!   argument) names a place rooted at one of the caller's locals.
 //!
@@ -229,7 +230,9 @@ fn inlinable(world: &World, f: &FunctionIr) -> bool {
             .chain(std::iter::once(&f.result))
     };
     if types().any(|t| holds_box(world, t) || mentions_function(world, t))
-        || f.params.iter().any(|p| crate::seq::is_slice_type(&p.ty))
+        || f.params
+            .iter()
+            .any(|p| p.pass != Pass::In && crate::seq::is_slice_type(&p.ty))
     {
         return false;
     }
@@ -353,6 +356,20 @@ fn site_bindings(
             .map(|l| l.aggregate())
             .unwrap_or(true);
         let sequence = crate::seq::holds_sequence(world, &p.ty);
+        if crate::seq::is_slice_type(&p.ty) {
+            // A borrowed slice view is a value (pointer and length): the
+            // callee's reads go through the caller's own slice local when the
+            // argument names one, and through a bound copy of the view
+            // otherwise (a sub-range `s[lo..hi]`, or `q.as_slice()`).
+            let same_view = local_place.filter(|place| {
+                place.path.is_empty() && caller.locals.get(&place.root) == Some(&p.ty)
+            });
+            out.push(match same_view {
+                Some(place) => Binding::Place(place.clone()),
+                None => Binding::Bind(a.value),
+            });
+            continue;
+        }
         out.push(match p.pass {
             Pass::Inout => Binding::Place(local_place?.clone()),
             Pass::In if aggregate || sequence => match local_place {

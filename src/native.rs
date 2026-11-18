@@ -2620,8 +2620,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         for (n, t) in &f.locals {
             let ty = crate::numeric::default_type(&substitute(t, &self.generic_vars));
             let layout = Layout::of(self.world, &ty)?;
-            let var = if let Some(var) = self.vars.get(n) {
-                *var
+            let existing = self.vars.get(n).copied();
+            let var = if let Some(var) = existing {
+                var
             } else {
                 fresh_locals.insert(n.clone());
                 let native_ty = if layout.aggregate() {
@@ -2636,7 +2637,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.local_types.insert(n.clone(), ty.clone());
                 var
             };
-            if !layout.aggregate() && !self.pointers.contains_key(&var.as_u32()) {
+            // On the optimize path scalar locals stay frontend SSA
+            // variables (registers): a place argument spills the value to a
+            // scratch slot for that one use and the call site restores it
+            // (`Codegen::address`), so no local needs a home in memory. The
+            // unoptimized path keeps every scalar local in a zeroed slot.
+            if !self.operands_only
+                && !layout.aggregate()
+                && !self.pointers.contains_key(&var.as_u32())
+            {
                 let value = self.use_var(var);
                 let ptr = self.alloc(8);
                 self.store(ptr, value, &ty)?;
@@ -3454,6 +3463,16 @@ impl<M: Module> Codegen<'_, '_, M> {
                 if Layout::of(self.world, t)?.aggregate() {
                     Ok(self.use_var(var))
                 } else if let Some(ptr) = self.pointer(var) {
+                    Ok(ptr)
+                } else if self.operands_only {
+                    // A scratch copy for this one use: the variable stays in
+                    // a register, and a mutable use restores it from the
+                    // slot afterwards (`call_function`, `perform`,
+                    // `invoke_closure_body`).
+                    let value = self.use_var(var);
+                    let ptr = self.alloc_uninit(8);
+                    self.b.ins().store(ir::MemFlags::new(), value, ptr, 0);
+                    self.write_info(ptr, self.info(value));
                     Ok(ptr)
                 } else {
                     let value = self.use_var(var);
