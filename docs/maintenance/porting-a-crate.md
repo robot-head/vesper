@@ -327,9 +327,11 @@ act (`transport.send(..)`), Vesper returns the actions as a sequence of a
        `port/binding.rs` in `srcs`) and `rust_test` targets from
        `crates/vesper-port-pilot/BUILD.bazel`.
      Run `python3 tools/bazel/sync_build_files.py` for a new crate.
-   - macOS and Windows: append the crate's lines to
-     `scripts/test-port-harness.sh`. CI passes the prebuilt compiler in
-     `VESPER_PORT_COMPILER`.
+   - Cargo: append the crate's lines to the end of
+     `scripts/test-port-harness.sh`. The Linux job of the Platforms workflow
+     runs them, with the prebuilt compiler in `VESPER_PORT_COMPILER`. macOS
+     and Windows stop after the export ABI tier at the top of the script,
+     so a port's lines run there only if they test the export ABI itself.
    - Add the port's `vesper/` directory to the skip predicate in `fixtures()`
      in `tests/fixtures/self_host/driver.rs` while the self-hosted parser
      cannot parse `use` (#880).
@@ -370,7 +372,9 @@ CI asserts that the API tests fail on exactly the changed function and pass on
 the rest:
 
 - Bazel: `//crates/vesper-port-pilot:port_divergence_detected`.
-- macOS and Windows: `scripts/test-port-harness.sh`.
+- Cargo: `scripts/test-port-harness.sh` (the Linux Platforms job for
+  ports; macOS and Windows run its export ABI tier, which includes the
+  pilot's checks).
 
 Larger ports should add one such divergence check per module they port.
 

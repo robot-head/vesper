@@ -1,6 +1,6 @@
 #!/bin/sh
 # vesper-tensor port checks under Cargo (port wave P1 lane 8, #905), run by
-# scripts/test-port-harness.sh on macOS and Windows; Linux runs the same
+# scripts/test-port-harness.sh in the Linux Platforms job; Bazel runs the same
 # checks as Bazel targets (crates/vesper-tensor/BUILD.bazel).
 #
 # - The port-backed package (vesper-tensor) and the compiler's Rust seed
