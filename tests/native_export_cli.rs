@@ -148,3 +148,82 @@ fn package_builds_read_directives_from_the_root_module_only() {
     assert!(!json.contains("id__u64"), "{json}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Builds the package at `dir` as library `name` and returns the output and
+/// the interface text (empty when the build failed).
+fn build_package(dir: &std::path::Path, name: &str) -> (std::process::Output, String) {
+    let interface = dir.join(format!("{name}.json"));
+    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        .args(["build", "--lib", "--lib-name", name])
+        .arg(dir)
+        .arg("-o")
+        .arg(dir.join(format!("{name}.o")))
+        .arg("--interface")
+        .arg(&interface)
+        .output()
+        .unwrap();
+    let json = std::fs::read_to_string(&interface).unwrap_or_default();
+    (out, json)
+}
+
+fn ordered_package(tag: &str, lib: &str, a: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("vesper-lib-order-{tag}-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(
+        dir.join("Loom.toml"),
+        "[package]\nname = \"@demo/order\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("src/lib.ves"), lib).unwrap();
+    // `a.ves` sorts before `lib.ves`, so it is file 0 of the package.
+    std::fs::write(dir.join("src/a.ves"), a).unwrap();
+    dir
+}
+
+const ORDER_LIB: &str = "pub copy struct P {\n    a: u64,\n    b: u64\n}\n\npub fn get(in p: P) -> u64 {\n    p.a ^ p.b\n}\n";
+const ORDER_A: &str = "fn helper() -> u64 {\n    1\n}\n";
+
+/// `// @export abi 3` in `lib.ves` applies even when another file sorts
+/// first (#991: it was read from file 0 and silently ignored).
+#[test]
+fn the_abi_directive_is_read_from_lib_ves_when_another_file_sorts_first() {
+    let dir = ordered_package("root", &format!("// @export abi 3\n{ORDER_LIB}"), ORDER_A);
+    let (out, json) = build_package(&dir, "order");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(json.contains("vesper.native.export-abi/3"), "{json}");
+    assert!(!stderr.contains("warning"), "{stderr}");
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The directive in another file of the package still applies, as it did
+/// for the ports that moved it to file 0, but with a warning.
+#[test]
+fn the_abi_directive_outside_lib_ves_applies_with_a_warning() {
+    let dir = ordered_package("moved", ORDER_LIB, &format!("// @export abi 3\n{ORDER_A}"));
+    let (out, json) = build_package(&dir, "order");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    assert!(json.contains("vesper.native.export-abi/3"), "{json}");
+    assert!(
+        stderr.contains("warning:") && stderr.contains("belongs in the root module"),
+        "{stderr}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `instance` and `vsys` directives name items, so outside the root module
+/// they are an error instead of being ignored.
+#[test]
+fn item_directives_outside_lib_ves_are_refused() {
+    let dir = ordered_package(
+        "instance",
+        ORDER_LIB,
+        &format!("// @export instance get_u64 = get[u64]\n{ORDER_A}"),
+    );
+    let (out, _) = build_package(&dir, "order");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stderr}");
+    assert!(stderr.contains("is outside the root module"), "{stderr}");
+    std::fs::remove_dir_all(&dir).ok();
+}

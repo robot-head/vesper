@@ -1,4 +1,4 @@
-# Port P1 lane 18: vesper-crucible (part 1)
+# Port P1 lane 18: vesper-crucible (parts 1 and 2a)
 
 Claim: [#915](https://github.com/robot-head/vesper/issues/915). Base: Simpulse
 port PR #964 at `382f11a` (which merges `main` at `153f264`), because the owner
@@ -27,7 +27,7 @@ dependent uses until the port matches Rust in speed.
   `[workspace.dependencies]` entry points at it, so the compiler and all of
   its dependents get the Rust build.
 - `port/binding.rs` is the checked-in generated binding.
-  `port/check.sh` is the Cargo harness check on macOS and Windows.
+  `port/check.sh` is the Cargo harness check (the Linux Platforms job since #1011).
 - `tests/parity.rs` is new and runs against both packages.
   `tests/port_memory.rs` is new and runs against the port package only.
 - `examples/abba.rs` and `bench-abba.sh` are the ABBA benchmark.
@@ -46,7 +46,7 @@ re-export list in `src/lib.rs`:
 | `source.rs` | `Source` and its draws, `Probe`, `Arbitrary`, `Failure`, `Invalid`, `PropError`, `DrawKind`, `CmpKind`, `CmpOperands`, `CmpRecord`, `check`, limits | **draw decision ported** (`Source::raw`: replay, clamping, overrun, fresh values); buffers, `Probe` and `Arbitrary` stay Rust |
 | `shrink.rs` | `shrink`, `replay`, `ShrinkConfig`, `ShrinkStats`, `Shrunk`, `DoesNotFail` | **ported** as a step machine; the closure loop stays Rust |
 | `exec.rs` | `Verdict`, `PANIC_KIND` | stays Rust (runs the closure, catches panics) |
-| `fuzz.rs` | `fuzz`, `FuzzConfig`, `FuzzReport`, `Counterexample`, `Strategy`, `NONDETERMINISTIC_KIND` | part 2 |
+| `fuzz.rs` | `fuzz`, `FuzzConfig`, `FuzzReport`, `Counterexample`, `Strategy`, `NONDETERMINISTIC_KIND` | **ported in part 2a** as a step machine (corpus, mutators, novelty, comparison solver); the closure call, replay checks and shrinking hand-off stay Rust |
 | `refute.rs` | `refute`, `Refutation`, `REFUTED_KIND` | stays Rust (generic `T: Debug` closures over `fuzz`) |
 | `sim.rs` | `run_fibers`, `replay_fibers`, `Fiber`, `FiberStep`, `SimConfig`, `SimRun` | part 2 |
 | `explore.rs` | `explore_random`, `replay_schedule`, `format_schedule`, `SimFiber`, `StepCx`, `ExploreConfig`, footprints, I/O requests | part 2 |
@@ -95,7 +95,7 @@ and a hidden `port_live_allocations()`.
 | `src/exec.rs`, the loop in `shrink.rs` | Properties are Rust closures (`FnMut(&mut Source)`), and `catch_unwind` is how panics become failures. The lane prompt keeps the closure loop in Rust. | not planned (by design) |
 | `src/source.rs` (`Source` buffers, `Probe`, `Arbitrary`) | `Source` stays a Rust handle (lane prompt). `realized_values()` returns a borrowed `&[u64]`, which the binding cannot lend out of a Vesper sequence (`SeqRef` has no slice view). `Probe` is per-comparison bookkeeping that the property calls in Rust. | part 2 can move `Probe`'s maps behind a handle |
 | `src/arena.rs` | `ArbitraryIn` stays a Rust trait (lane prompt). `VirtualArena` wraps the Strata `Region` type, which crates outside the closure get as the Rust seed (the Strata port is non-default). | the Strata port becoming default |
-| `src/fuzz.rs`, `src/refute.rs` | Part 2. The corpus, mutators and comparison solver are portable with the same inversion as the shrinker. `refute` stays a Rust adapter over generic `T: Debug` closures. | part 2 of this lane |
+| `src/refute.rs`, the closure loop in `fuzz.rs` | `refute` is a Rust adapter over generic `T: Debug` closures, and the fuzz loop runs Rust property closures (see `exec.rs`). | not planned (by design) |
 | `src/sim.rs`, `src/explore.rs`, `src/dpor.rs` | Part 2. Fibers are `Box<dyn SimFiber<W>>` over a caller-chosen world type `W`, and cache keys come from caller `Hash` values. This needs the token-slab and command-plan patterns over about 1,900 lines. There is no `dyn Trait` (F7b). | part 2 of this lane |
 | `seed/` | The frozen seed copy that the compiler links (seed-copy rule) | self-hosting Stage 2 |
 
@@ -140,8 +140,10 @@ binding module only (Grammar and Beacon do the same).
   Bazel builds each divergent object to check that it still compiles.
 - **CI.** Linux runs through Bazel: `vesper_port_object` plus the crate's
   tests against the port, and the seed's `rust_test`s for every test file
-  except `lean_model`, which runs against the seed in Cargo. macOS and Windows
-  run through `scripts/test-port-harness.sh`, which sources `port/check.sh`.
+  except `lean_model`, which runs against the seed in Cargo. The Linux
+  Platforms job runs `scripts/test-port-harness.sh`, which sources
+  `port/check.sh` (since #1011, macOS and Windows stop after the export ABI
+  tier).
 - `cargo +1.100.0 clippy --all-targets -- -D warnings` is clean for both
   packages and for the divergent feature. `cargo fmt --check` and
   `vesper fmt` are clean.
@@ -183,9 +185,65 @@ The Rust build stays the default.
 - Each draw, generator step and key comparison is an FFI call. Rust inlines
   these, and the port cannot inline across the boundary.
 
-## Part 2 (remaining in this lane)
+## Part 2a: the fuzzer
 
-Port `fuzz.rs` (corpus, mutators, comparison solver) as a second step
-machine, then `sim.rs`, `explore.rs` and `dpor.rs` with a token slab for the
-fibers and a command plan for their steps, and finally `arena.rs` once
+The fuzz campaign is now a second Vesper step machine, `Fuzzer` (lib.ves
+grows from 869 to 1,645 lines). `fuzz()` keeps its signature. Under
+`cfg(vesper_port)` it calls `campaign_port`, which loops: `fuzzer_next` picks
+the next input (a seed, a fresh random tape, a mutation of a corpus entry,
+or a solver candidate), Rust runs the property on it, and `fuzzer_observe`
+gets the verdict and the run's features. When the machine answers "keep",
+Rust sends the realized tape, its draw kinds and its comparisons with
+`fuzzer_keep`. The counterexample, replay and shrink steps after a failure
+are the Rust code both builds share.
+
+- **Features** are flattened to words that keep the Rust `BTreeSet` order:
+  edges `id << 9 | bucket`, comparisons `1 << 62 | site << 9 | taken << 8 |
+  bucket`, and closeness `2 << 62 | site` with the distance as a second
+  word. The machine keeps the seen set as a sorted sequence.
+- **The corpus** lives in flat sequences with offsets (values, kind tags,
+  kind bounds, comparison records, solved flags), because a sequence of
+  handles that own sequences cannot be returned or nested yet.
+- **The comparison solver** builds the same integer and byte-replacement
+  candidates, in the same order, from encoded comparison records
+  (`0, kind, lhs, rhs` or `1, len_l, len_r, bytes..`).
+- **Parity.** `fuzz_campaigns_match_the_rust_build` runs five campaigns and
+  compares a report string recorded from the Rust build: executions, invalid
+  runs, corpus size and an FNV fingerprint of every corpus tape, feature
+  count, solver runs and hits, and the counterexample. The campaigns cover a
+  layered guard that needs four solver steps, a budget that runs out, the
+  magic guard, and a hashed target with 573 invalid runs and 63 corpus
+  entries. The port matches all five exactly.
+- **Divergence.** A fifth edit makes the zero mutation write 1, and
+  `port/check.sh` asserts that `fuzz_campaigns_match_the_rust_build` fails
+  while the tape test passes. All five edits were caught locally.
+- `tests/port_memory.rs` runs a fuzz campaign in its leak loop, and every
+  allocation comes back.
+- All 59 tests and the 6 parity tests pass on both packages. Clippy 1.100
+  (both packages and the divergent feature) and `cargo fmt --check` are
+  clean.
+
+### Benchmarks after part 2a
+
+Same script, machine and settings as above, on `main` at `d5750af` (which
+has the newer compiler work), 2026-11-18:
+
+| Workload | Rust ns/run | Port ns/run | Port/Rust (median) | Range |
+|---|---:|---:|---:|---|
+| `draws` | 40,083 | 59,798 | 1.54x | 1.35x-2.16x |
+| `tape-text` | 342,539 | 685,841 | 2.03x | 1.38x-2.15x |
+| `shrink` | 1,106,754 | 2,751,637 | 2.47x | 1.33x-2.87x |
+| `fuzz` (now the ported fuzzer) | 214,231 | 541,115 | 2.47x | 1.35x-3.39x |
+
+The port is 1.5x to 2.5x slower than Rust, so the Rust build stays the
+default. Even with the whole campaign loop ported, `fuzz` is faster than
+in part 1. Most of its cost is still one call per draw and the copies of
+each candidate and kept tape across the binding.
+
+## Part 2b and later (remaining in this lane)
+
+Port the search core of `dpor.rs` (backtrack and sleep sets, clock vectors,
+the preemption bound and the state cache) as a step machine. `sim.rs` and
+`explore.rs` stay Rust adapters, because their fibers are
+`Box<dyn SimFiber<W>>` driving the SimPulse seed. `arena.rs` waits until
 `VirtualArena` can sit on the Strata port.

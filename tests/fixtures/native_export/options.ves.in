@@ -1,0 +1,92 @@
+// Export ABI v3 `options` (#991): `Option` and `Result` parameters and
+// results of copy payloads cross as `OptionMirror`/`ResultMirror`, lent in
+// place. Payload cells: a mirrored struct, full words, a narrow `Word`, a
+// converted enum in `Words`, and a nested `Option`.
+//
+// @export abi 3 options
+
+copy enum Kind {
+    Small,
+    Large(u64)
+}
+
+copy struct Rtt {
+    sample_ns: u64,
+    min_ns: u64,
+    acked: bool
+}
+
+copy struct State {
+    count: u64,
+    best: u64
+}
+
+// An `in Option` of a mirrored struct and an `inout` mirror.
+pub fn state_observe(inout s: State, rtt: Option[Rtt]) -> u64 {
+    match rtt {
+        Option::Some(r) => {
+            s.count = wrapping_add(s.count, 1);
+            if s.best == 0 || r.min_ns < s.best {
+                s.best = r.min_ns;
+            }
+        }
+        Option::None => (),
+    }
+    s.count
+}
+
+// An `Option` result of a mirrored struct.
+pub fn rtt_of(in s: State) -> Option[Rtt] {
+    if s.count == 0 {
+        Option::None
+    } else {
+        Option::Some(
+            Rtt {
+                sample_ns: s.best,
+                min_ns: s.best,
+                acked: true
+            }
+        )
+    }
+}
+
+// A `Result` with payloads of different sizes, in and out.
+pub fn check(r: Result[u64, Rtt]) -> Result[Rtt, u8] {
+    match r {
+        Result::Ok(x) => if x > 255 {
+            Result::Err(255)
+        } else {
+            Result::Ok(
+                Rtt {
+                    sample_ns: x,
+                    min_ns: x,
+                    acked: false
+                }
+            )
+        },
+        Result::Err(rtt) => Result::Ok(rtt),
+    }
+}
+
+// `inout Option` of a full word, updated in place.
+pub fn bump(inout o: Option[u64]) {
+    o = match o {
+        Option::Some(x) => Option::Some(wrapping_add(x, 1)),
+        Option::None => Option::Some(0),
+    };
+}
+
+// A converted enum payload and a nested `Option`.
+pub fn kind_size(k: Option[Kind], n: Option[Option[i32]]) -> u64 {
+    let a = match k {
+        Option::Some(Kind::Large(x)) => x,
+        Option::Some(Kind::Small) => 1,
+        Option::None => 0,
+    };
+    let b = match n {
+        Option::Some(Option::Some(v)) => widen_u64(wrapping_u32(widen_i64(v))),
+        Option::Some(Option::None) => 7,
+        Option::None => 0,
+    };
+    wrapping_add(a, b)
+}

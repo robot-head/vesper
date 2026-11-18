@@ -5556,7 +5556,7 @@ dependencies = [
  "vesper-lint",
  "vesper-loom-admission",
  "vesper-loom-audit",
- "vesper-loom-calculus",
+ "vesper-loom-calculus-seed",
  "vesper-loom-cas",
  "vesper-loom-solver",
  "vesper-loom-trust",
@@ -5568,7 +5568,7 @@ dependencies = [
  "vesper-pulse",
  "vesper-resonance",
  "vesper-semver-seed",
- "vesper-serde",
+ "vesper-serde-seed",
  "vesper-silicon",
  "vesper-simd",
  "vesper-span",
@@ -5735,7 +5735,7 @@ dependencies = [
  "ed25519-dalek",
  "serde",
  "toml 0.8.23",
- "vesper-loom-calculus",
+ "vesper-loom-calculus-seed",
  "vesper-loom-cas",
  "vesper-loom-trust",
 ]
@@ -5998,7 +5998,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "vesper-loom-calculus",
+ "vesper-loom-calculus-seed",
  "vesper-loom-cas",
  "vesper-loom-trust",
 ]
@@ -6011,7 +6011,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "vesper-loom-calculus",
+ "vesper-loom-calculus-seed",
 ]
 
 [[package]]
@@ -6036,6 +6036,20 @@ dependencies = [
  "serde",
  "serde_json",
  "toml 0.8.23",
+ "vesper-bench",
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
+
+[[package]]
+name = "vesper-loom-calculus-seed"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
+ "vesper-bench",
 ]
 
 [[package]]
@@ -6072,7 +6086,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "vesper-loom-calculus",
+ "vesper-loom-calculus-seed",
 ]
 
 [[package]]
@@ -6084,7 +6098,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
- "vesper-loom-calculus",
+ "vesper-loom-calculus-seed",
  "vesper-loom-cas",
 ]
 
@@ -6113,7 +6127,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "vesper-serde",
+ "vesper-serde-seed",
  "vesper-span",
 ]
 
@@ -6275,6 +6289,17 @@ name = "vesper-serde"
 version = "0.1.0"
 dependencies = [
  "serde_json",
+ "vesper-bench",
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
+
+[[package]]
+name = "vesper-serde-seed"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "vesper-bench",
 ]
 
 [[package]]

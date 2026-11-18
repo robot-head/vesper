@@ -228,3 +228,118 @@ fn golden_shrink() -> ShrinkOutputs {
     )
 }
 const GOLDEN_BUDGET: u64 = 1411699998813427827;
+
+/// Everything a campaign reports, with the corpus as a fingerprint.
+fn campaign(config: &FuzzConfig, prop: impl FnMut(&mut Source) -> Result<(), PropError>) -> String {
+    let r = fuzz(config, prop);
+    let corpus = fingerprint(
+        r.corpus
+            .iter()
+            .flat_map(|t| t.values.iter().copied().chain([u64::MAX])),
+    );
+    let cx = r.counterexample.map(|c| {
+        (
+            c.found_after_execs,
+            fingerprint(c.original.values),
+            c.tape.values,
+            c.failure.kind,
+        )
+    });
+    format!(
+        "execs={} invalid={} corpus={}/{corpus:x} features={} solver={}/{} cx={cx:?}",
+        r.execs,
+        r.invalid_runs,
+        r.corpus.len(),
+        r.features,
+        r.solver_runs,
+        r.solver_hits
+    )
+}
+
+/// A target with byte-string, ordering and nested integer guards, rejected
+/// inputs, and no failure reachable within the budget unless the solver and
+/// mutators find all three guards.
+fn layered(src: &mut Source) -> Result<(), PropError> {
+    let data = src.draw_bytes(48)?;
+    let n = src.draw_u64_bounded(5000)?;
+    src.assume(n != 13)?;
+    let p = src.probe();
+    p.edge(u32::try_from(data.len().min(9)).unwrap());
+    if p.eq_bytes(1, &data[..data.len().min(4)], b"CRU1") {
+        p.edge(100);
+        if p.cmp(2, vesper_crucible::CmpKind::Gt, n, 4321) {
+            p.edge(101);
+            let tail = data
+                .get(4..6)
+                .map_or(0, |b| u16::from_be_bytes([b[0], b[1]]));
+            if p.eq(3, u64::from(tail), 0xbeef) {
+                return Err(PropError::fail("layered", "all guards"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// No guard the solver can copy: coverage comes from mutation alone, a
+/// quarter of the runs are rejected, and the budget runs out.
+fn hashed(src: &mut Source) -> Result<(), PropError> {
+    let data = src.draw_bytes(32)?;
+    let n = src.draw_u64_bounded(1000)?;
+    src.assume(n % 4 != 0)?;
+    let h = fingerprint(data.iter().map(|&b| u64::from(b)).chain([n]));
+    let p = src.probe();
+    p.edge((h % 61) as u32);
+    p.cmp(7, vesper_crucible::CmpKind::Lt, h % 1000, n);
+    if h % 100_003 == 17 {
+        return Err(PropError::fail("hash", "hit"));
+    }
+    Ok(())
+}
+
+#[test]
+fn fuzz_campaigns_match_the_rust_build() {
+    let guided = FuzzConfig {
+        max_execs: 20_000,
+        ..FuzzConfig::default()
+    };
+    let random = FuzzConfig {
+        strategy: vesper_crucible::Strategy::Random,
+        max_execs: 3_000,
+        seed: 5,
+        ..FuzzConfig::default()
+    };
+    let plain = FuzzConfig {
+        value_profile: false,
+        max_execs: 4_000,
+        max_solver_candidates: 7,
+        seed: 99,
+        ..FuzzConfig::default()
+    };
+    let got = [
+        campaign(&guided, layered),
+        campaign(&random, layered),
+        campaign(&plain, layered),
+        campaign(&plain, magic),
+        campaign(&guided_short(), hashed),
+    ];
+    assert_eq!(got, golden_campaigns(), "fuzz campaigns");
+}
+
+fn guided_short() -> FuzzConfig {
+    FuzzConfig {
+        max_execs: 3_000,
+        seed: 21,
+        ..FuzzConfig::default()
+    }
+}
+
+fn golden_campaigns() -> [String; 5] {
+    [
+        "execs=80 invalid=0 corpus=12/e9770354c81ec860 features=19 solver=16/4 cx=Some((80, 9725649468902132467, [1, 67, 1, 82, 1, 85, 1, 49, 1, 190, 1, 239, 0, 4322], \"layered\"))",
+        "execs=3000 invalid=0 corpus=0/cbf29ce484222325 features=0 solver=0/0 cx=None",
+        "execs=79 invalid=0 corpus=11/7fae6aaabbadf1b9 features=16 solver=15/3 cx=Some((79, 18409858763161512801, [1, 67, 1, 82, 1, 85, 1, 49, 1, 190, 1, 239, 0, 4322], \"layered\"))",
+        "execs=65 invalid=0 corpus=1/f4d72741092f0448 features=1 solver=1/1 cx=Some((65, 7814649910919464463, [1, 13, 1, 240, 1, 237, 1, 254, 0], \"magic\"))",
+        "execs=3000 invalid=573 corpus=63/a7b140b0e63b5c3a features=64 solver=188/26 cx=None",
+    ]
+    .map(String::from)
+}

@@ -1,0 +1,541 @@
+// Module upgrade of @vesper/loom-calculus (see lib.ves): `check_upgrade`
+// over the two committed snapshots (baseline 0, candidate 1).
+//
+// Upgrade diagnostic codes are the indices of their code strings in byte
+// order: capability_escalation 0, invalid_snapshot 1, root_mismatch 2,
+// unsafe_ffi_policy_relaxed 3. AuthorityScope: RequiredCapabilities 0,
+// CapabilityCeiling 1, DependencyCeiling 2, UnsafeFfiPolicy 3.
+use self::{
+    Change,
+    Diag,
+    GNode,
+    L,
+    Snap
+};
+use self::util::{
+    add,
+    dep,
+    diag,
+    gnode,
+    id_at,
+    inc,
+    man,
+    mul,
+    none,
+    ord,
+    put,
+    put_id,
+    put_range,
+    sort,
+    sw,
+    udiag_ord
+};
+use self::check::{
+    mark,
+    since
+};
+
+fn snap(in l: L, i: u64) -> Snap {
+    match l.snaps.try_get(i) {
+        Option::Some(s) => s,
+        Option::None => Snap {
+            node_at: 0,
+            node_n: 0,
+            root_at: 0,
+            root_n: 0,
+            unused_at: 0,
+            unused_n: 0,
+            sys_at: 0,
+            sys_n: 0,
+            diag_at: 0,
+            diag_n: 0,
+            graph: false
+        },
+    }
+}
+
+// `{:?}` of `Code`.
+fn put_code(inout l: L, code: u64) {
+    if code == 0 {
+        put(inout l, "ManifestSyntax");
+    } else if code == 1 {
+        put(inout l, "InvalidCapability");
+    } else if code == 2 {
+        put(inout l, "UnsupportedBuildPolicy");
+    } else if code == 3 {
+        put(inout l, "InvalidFeature");
+    } else if code == 4 {
+        put(inout l, "UnknownFeature");
+    } else if code == 5 {
+        put(inout l, "UnknownDependency");
+    } else if code == 6 {
+        put(inout l, "InvalidSystemRequirement");
+    } else if code == 7 {
+        put(inout l, "DuplicatePackage");
+    } else if code == 8 {
+        put(inout l, "DuplicateSystemPackage");
+    } else if code == 9 {
+        put(inout l, "MissingRoot");
+    } else if code == 10 {
+        put(inout l, "MissingDependency");
+    } else if code == 11 {
+        put(inout l, "MissingSystemPackage");
+    } else if code == 12 {
+        put(inout l, "VersionMismatch");
+    } else if code == 13 {
+        put(inout l, "CapabilityEscalation");
+    } else if code == 14 {
+        put(inout l, "EdgeCapabilityEscalation");
+    } else {
+        put(inout l, "UnsafeFfiForbidden");
+    }
+}
+
+// `{:?}` of `AuthorityScope`.
+fn put_scope(inout l: L, scope: u64) {
+    if scope == 0 {
+        put(inout l, "RequiredCapabilities");
+    } else if scope == 1 {
+        put(inout l, "CapabilityCeiling");
+    } else if scope == 2 {
+        put(inout l, "DependencyCeiling");
+    } else {
+        put(inout l, "UnsafeFfiPolicy");
+    }
+}
+
+// Push an upgrade diagnostic whose message is the pool from mo to the end.
+fn udiag_at(inout l: L, code: u64, pkg: u64, dep: u64, snap: u64, mo: u64) {
+    let ml = since(in l, mo);
+    l
+        .udiags
+        .push(
+        Diag {
+            snap: snap,
+            code: code,
+            pkg: pkg,
+            dep: dep,
+            so: 0,
+            sl: 0,
+            mo: mo,
+            ml: ml
+        }
+    );
+}
+
+fn udiag(inout l: L, code: u64, pkg: u64, dep: u64, snap: u64, in msg: Str) {
+    let mo = mark(in l);
+    put(inout l, msg);
+    udiag_at(inout l, code, pkg, dep, snap, mo);
+}
+
+fn validation_diagnostics(inout l: L, si: u64, tag: u64) {
+    let s = snap(in l, si);
+    for i in 0..s.diag_n {
+        let d = diag(in l.diags, add(s.diag_at, i));
+        let mo = mark(in l);
+        put_code(inout l, d.code);
+        put(inout l, " at ");
+        put_range(inout l, d.so, d.sl);
+        put(inout l, ": ");
+        put_range(inout l, d.mo, d.ml);
+        udiag_at(inout l, 1, d.pkg, none(), tag, mo);
+    }
+    if !s.graph && s.diag_n == 0 {
+        udiag(inout l, 1, none(), none(), tag, "snapshot validation produced no graph");
+    }
+}
+
+// Copy ids[at .. at + n] (from = 0) or gids[at .. at + n] (from = 1) into
+// l.sa (to = 0) or l.sb (to = 1).
+fn load(inout l: L, to: u64, from: u64, at: u64, n: u64) {
+    if to == 0 {
+        l.sa.clear();
+    } else {
+        l.sb.clear();
+    }
+    for i in 0..n {
+        let x = if from == 0 {
+            id_at(in l, add(at, i))
+        } else {
+            sw(in l.gids, add(at, i))
+        };
+        if to == 0 {
+            l.sa.push(x);
+        } else {
+            l.sb.push(x);
+        }
+    }
+}
+
+// Push the ids of `a` not in `b` (both ascending) to cids; returns the
+// count.
+fn difference(inout l: L, b_is_sa: bool) -> u64 {
+    let na = if b_is_sa {
+        l.sb.len()
+    } else {
+        l.sa.len()
+    };
+    let nb = if b_is_sa {
+        l.sa.len()
+    } else {
+        l.sb.len()
+    };
+    let mut i: u64 = 0;
+    let mut j: u64 = 0;
+    let mut n: u64 = 0;
+    loop {
+        if i >= na {
+            break;
+        }
+        let x = if b_is_sa {
+            sw(in l.sb, i)
+        } else {
+            sw(in l.sa, i)
+        };
+        let y = if j < nb {
+            if b_is_sa {
+                sw(in l.sa, j)
+            } else {
+                sw(in l.sb, j)
+            }
+        } else {
+            none()
+        };
+        if j < nb && y < x {
+            j = inc(j);
+        } else if j < nb && y == x {
+            i = inc(i);
+            j = inc(j);
+        } else {
+            l.cids.push(x);
+            n = inc(n);
+            i = inc(i);
+        }
+    }
+    n
+}
+
+// `sets`: compare l.sa (before) with l.sb (after).
+fn sets(inout l: L, scope: u64, pkg: u64, dep: u64) {
+    let mut same = l.sa.len() == l.sb.len();
+    if same {
+        for i in 0..l.sa.len() {
+            if sw(in l.sa, i) != sw(in l.sb, i) {
+                same = false;
+                break;
+            }
+        }
+    }
+    if same {
+        return;
+    }
+    let b_at = l.cids.len();
+    for i in 0..l.sa.len() {
+        let x = sw(in l.sa, i);
+        l.cids.push(x);
+    }
+    let a_at = l.cids.len();
+    for i in 0..l.sb.len() {
+        let x = sw(in l.sb, i);
+        l.cids.push(x);
+    }
+    let add_at = l.cids.len();
+    let add_n = difference(inout l, true);
+    let rem_at = l.cids.len();
+    let rem_n = difference(inout l, false);
+    if add_n > 0 {
+        let mo = mark(in l);
+        put_scope(inout l, scope);
+        put(inout l, " adds declared capabilities: ");
+        for i in 0..add_n {
+            if i > 0 {
+                put(inout l, ", ");
+            }
+            let c = sw(in l.cids, add(add_at, i));
+            put_id(inout l, c);
+        }
+        udiag_at(inout l, 0, pkg, dep, 0, mo);
+    }
+    l
+        .changes
+        .push(
+        Change {
+            scope: scope,
+            pkg: pkg,
+            dep: dep,
+            b_at: b_at,
+            b_n: l.sa.len(),
+            a_at: a_at,
+            a_n: l.sb.len(),
+            add_at: add_at,
+            add_n: add_n,
+            rem_at: rem_at,
+            rem_n: rem_n,
+            bf: 0,
+            af: 0,
+            relaxed: false
+        }
+    );
+}
+
+fn node_sets(inout l: L, has_a: bool, in a: GNode, has_b: bool, in b: GNode, name: u64) {
+    if has_a {
+        load(inout l, 0, 1, a.req_at, a.req_n);
+    } else {
+        l.sa.clear();
+    }
+    if has_b {
+        load(inout l, 1, 1, b.req_at, b.req_n);
+    } else {
+        l.sb.clear();
+    }
+    sets(inout l, 0, name, none());
+    if has_a {
+        let m = man(in l, a.man);
+        load(inout l, 0, 0, m.ceil_at, m.ceil_n);
+    } else {
+        l.sa.clear();
+    }
+    if has_b {
+        let m = man(in l, b.man);
+        load(inout l, 1, 0, m.ceil_at, m.ceil_n);
+    } else {
+        l.sb.clear();
+    }
+    sets(inout l, 1, name, none());
+    if has_b {
+        let old_forbid = if has_a {
+            man(in l, a.man).forbid
+        } else {
+            true
+        };
+        let new_forbid = man(in l, b.man).forbid;
+        if old_forbid != new_forbid {
+            let relaxed = !new_forbid;
+            let at = l.cids.len();
+            l
+                .changes
+                .push(
+                Change {
+                    scope: 3,
+                    pkg: name,
+                    dep: none(),
+                    b_at: at,
+                    b_n: 0,
+                    a_at: at,
+                    a_n: 0,
+                    add_at: at,
+                    add_n: 0,
+                    rem_at: at,
+                    rem_n: 0,
+                    bf: if old_forbid {
+                        2
+                    } else {
+                        1
+                    },
+                    af: if new_forbid {
+                        2
+                    } else {
+                        1
+                    },
+                    relaxed: relaxed
+                }
+            );
+            if relaxed {
+                udiag(
+                    inout l,
+                    3,
+                    name,
+                    none(),
+                    0,
+                    "candidate no longer forbids unsafe FFI for this package"
+                );
+            }
+        }
+    }
+}
+
+// The edges of snapshot si as (parent, child, dependency) triples in
+// (parent, child) order, into l.ea (to = 0) or l.eb (to = 1).
+fn edges(inout l: L, si: u64, to: u64) -> u64 {
+    let mut count: u64 = 0;
+    let s = snap(in l, si);
+    if to == 0 {
+        l.ea.clear();
+    } else {
+        l.eb.clear();
+    }
+    for i in 0..s.node_n {
+        let g = gnode(in l, add(s.node_at, i));
+        for e in 0..g.e_n {
+            let di = sw(in l.ge, add(g.e_at, e));
+            let child = dep(in l, di).name;
+            if to == 0 {
+                l.ea.push(g.name);
+                l.ea.push(child);
+                l.ea.push(di);
+            } else {
+                l.eb.push(g.name);
+                l.eb.push(child);
+                l.eb.push(di);
+            }
+            count = inc(count);
+        }
+    }
+    count
+}
+
+fn finish(inout l: L) {
+    // Sorted, deduplicated diagnostics go to l.tmp as indices; changes
+    // to l.work.
+    l.idx.clear();
+    for i in 0..l.udiags.len() {
+        l.idx.push(i);
+    }
+    sort(inout l, 4);
+    l.work.clear();
+    let mut last = none();
+    for j in 0..l.idx.len() {
+        let x = sw(in l.idx, j);
+        let dup = last != none() && udiag_ord(in l, last, x) == 1;
+        if !dup {
+            last = x;
+            l.work.push(x);
+        }
+    }
+    l.queue.clear();
+    for j in 0..l.work.len() {
+        let x = sw(in l.work, j);
+        l.queue.push(x);
+    }
+    l.idx.clear();
+    for i in 0..l.changes.len() {
+        l.idx.push(i);
+    }
+    sort(inout l, 5);
+}
+
+pub fn upgrade(inout l: L) {
+    l.udiags.clear();
+    l.changes.clear();
+    validation_diagnostics(inout l, 0, 1);
+    validation_diagnostics(inout l, 1, 2);
+    if l.udiags.len() > 0 {
+        finish(inout l);
+        return;
+    }
+    let sa = snap(in l, 0);
+    let sb = snap(in l, 1);
+    if !sa.graph || !sb.graph {
+        udiag(
+            inout l,
+            1,
+            none(),
+            none(),
+            0,
+            "snapshot validation did not produce both comparison graphs"
+        );
+        finish(inout l);
+        return;
+    }
+    let mut same_roots = sa.root_n > 0 && sa.root_n == sb.root_n;
+    if same_roots {
+        for i in 0..sa.root_n {
+            if sw(in l.gl, add(sa.root_at, i)) != sw(in l.gl, add(sb.root_at, i)) {
+                same_roots = false;
+                break;
+            }
+        }
+    }
+    if !same_roots {
+        udiag(
+            inout l,
+            2,
+            none(),
+            none(),
+            0,
+            "baseline and candidate must have the same nonempty root identities"
+        );
+        finish(inout l);
+        return;
+    }
+    let mut i: u64 = 0;
+    let mut j: u64 = 0;
+    loop {
+        if i >= sa.node_n && j >= sb.node_n {
+            break;
+        }
+        let a = gnode(in l, add(sa.node_at, i));
+        let b = gnode(in l, add(sb.node_at, j));
+        let o = if i >= sa.node_n {
+            2
+        } else if j >= sb.node_n {
+            0
+        } else {
+            ord(a.name, b.name)
+        };
+        if o == 0 {
+            node_sets(inout l, true, in a, false, in b, a.name);
+            i = inc(i);
+        } else if o == 2 {
+            node_sets(inout l, false, in a, true, in b, b.name);
+            j = inc(j);
+        } else {
+            node_sets(inout l, true, in a, true, in b, a.name);
+            i = inc(i);
+            j = inc(j);
+        }
+    }
+    let na = edges(inout l, 0, 0);
+    let nb = edges(inout l, 1, 1);
+    let mut i: u64 = 0;
+    let mut j: u64 = 0;
+    loop {
+        if i >= na && j >= nb {
+            break;
+        }
+        let ap = sw(in l.ea, mul(i, 3));
+        let ac = sw(in l.ea, inc(mul(i, 3)));
+        let ad = sw(in l.ea, add(mul(i, 3), 2));
+        let bp = sw(in l.eb, mul(j, 3));
+        let bc = sw(in l.eb, inc(mul(j, 3)));
+        let bd = sw(in l.eb, add(mul(j, 3), 2));
+        let o = if i >= na {
+            2
+        } else if j >= nb {
+            0
+        } else {
+            let o1 = ord(ap, bp);
+            if o1 != 1 {
+                o1
+            } else {
+                ord(ac, bc)
+            }
+        };
+        if o == 0 || o == 1 {
+            let d = dep(in l, ad);
+            load(inout l, 0, 0, d.eff_at, d.eff_n);
+        } else {
+            l.sa.clear();
+        }
+        if o == 2 || o == 1 {
+            let d = dep(in l, bd);
+            load(inout l, 1, 0, d.eff_at, d.eff_n);
+        } else {
+            l.sb.clear();
+        }
+        if o == 0 {
+            sets(inout l, 2, ap, ac);
+            i = inc(i);
+        } else if o == 2 {
+            sets(inout l, 2, bp, bc);
+            j = inc(j);
+        } else {
+            sets(inout l, 2, ap, ac);
+            i = inc(i);
+            j = inc(j);
+        }
+    }
+    finish(inout l);
+}

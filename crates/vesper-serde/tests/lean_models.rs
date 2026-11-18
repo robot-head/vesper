@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn crate_file(path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    crate_root()
         .join(path)
         .canonicalize()
         .unwrap_or_else(|e| panic!("{path}: {e}"))
@@ -127,4 +127,17 @@ fn lean_checks_quote_parity_and_classification_proofs() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The crate directory; the seed package (`seed/`) shares this crate's
+/// tests and data.
+fn crate_root() -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if dir.ends_with("seed") {
+        dir.parent()
+            .expect("seed/ is inside the crate")
+            .to_path_buf()
+    } else {
+        dir
+    }
 }

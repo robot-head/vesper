@@ -4,13 +4,24 @@ use crate::{Error, ErrorKind, JsonString, add};
 /// Private constants prevent callers from supplying inconsistent masks.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SwarFieldMatcher {
-    field_idx: u16,
-    word: u64,
-    mask: u64,
-    len: u8,
+    pub(crate) field_idx: u16,
+    pub(crate) word: u64,
+    pub(crate) mask: u64,
+    pub(crate) len: u8,
 }
 impl SwarFieldMatcher {
     pub fn compile_key(field_idx: u16, key: &str) -> Option<Self> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::matcher_compile(field_idx, key)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            Self::rust_compile_key(field_idx, key)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_compile_key(field_idx: u16, key: &str) -> Option<Self> {
         if key.len() > 7
             || !key
                 .bytes()
@@ -39,6 +50,17 @@ impl SwarFieldMatcher {
     /// quote. A short slice is safe and returns false; no padded over-read.
     /// This is lexical dispatch only; JSON syntax must be validated separately.
     pub fn matches_window(self, window: &[u8]) -> bool {
+        #[cfg(vesper_port)]
+        {
+            crate::port::matcher_window(self, window)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.rust_matches_window(window)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_matches_window(self, window: &[u8]) -> bool {
         let count = self.key_len() + 1;
         let Some(prefix) = window.get(..count) else {
             return false;
@@ -50,6 +72,17 @@ impl SwarFieldMatcher {
     /// Semantic dispatch for a validated key, with an allocation-free fallback
     /// for escaped-equivalent spellings such as `"id"` and `"\\u0069d"`.
     pub fn matches_key(self, key: JsonString<'_>) -> bool {
+        #[cfg(vesper_port)]
+        {
+            crate::port::matcher_key(self, key.raw_content())
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.rust_matches_key(key)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_matches_key(self, key: JsonString<'_>) -> bool {
         let bytes = self.word.to_le_bytes();
         let name = core::str::from_utf8(&bytes[..self.key_len()]).expect("compiled ASCII key");
         key.equals(name)
@@ -63,6 +96,17 @@ impl SwarFieldMatcher {
 /// byte zero of the next block. A bit marks any escaped byte, including a
 /// backslash. This deliberately makes no SIMD or throughput claim.
 pub fn compute_escaped_mask_64(backslashes: u64, carry_in: bool) -> (u64, bool) {
+    #[cfg(vesper_port)]
+    {
+        crate::port::escaped_mask(backslashes, carry_in)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_compute_escaped_mask_64(backslashes, carry_in)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_compute_escaped_mask_64(backslashes: u64, carry_in: bool) -> (u64, bool) {
     let mut escaped = 0;
     let mut carry = carry_in;
     for i in 0..64 {
@@ -95,6 +139,17 @@ impl JsonSizeBound {
     /// Conservative quoted-string ceiling for at most `max_utf8_bytes` input
     /// bytes. Each control byte may need six output bytes (`\\u00xx`).
     pub fn string(max_utf8_bytes: usize) -> Result<Self, Error> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::bound_string(max_utf8_bytes)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            Self::rust_string(max_utf8_bytes)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_string(max_utf8_bytes: usize) -> Result<Self, Error> {
         let escaped = max_utf8_bytes
             .checked_mul(6)
             .ok_or(Error::new(ErrorKind::Overflow, 0))?;
@@ -102,6 +157,22 @@ impl JsonSizeBound {
     }
     /// `key_escaped_len` excludes the quotes. Arithmetic never wraps.
     pub fn combine_field(
+        self,
+        key_escaped_len: usize,
+        field: Self,
+        first: bool,
+    ) -> Result<Self, Error> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::bound_field(self, key_escaped_len, field, first)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.rust_combine_field(key_escaped_len, field, first)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_combine_field(
         self,
         key_escaped_len: usize,
         field: Self,
@@ -117,7 +188,7 @@ impl JsonSizeBound {
             Self::Bounded(n)
         })
     }
-    fn parts(self) -> (usize, bool) {
+    pub(crate) fn parts(self) -> (usize, bool) {
         match self {
             Self::Bounded(n) => (n, false),
             Self::Dynamic { static_ceiling } => (static_ceiling, true),

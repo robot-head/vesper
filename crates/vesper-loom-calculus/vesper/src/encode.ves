@@ -1,0 +1,189 @@
+// Module encode of @vesper/loom-calculus (see lib.ves): results into
+// l.out (documented in src/port.rs).
+use self::{
+    L
+};
+use self::util::{
+    add,
+    dep,
+    diag,
+    gnode,
+    id_at,
+    man,
+    none,
+    sedge,
+    sw
+};
+use self::solve::{
+    sort_diags
+};
+
+fn w(inout l: L, x: u64) {
+    l.out.push(x);
+}
+
+// The string table: k, then the representative occurrence of each id.
+fn table(inout l: L) {
+    let k = l.k;
+    w(inout l, k);
+    for i in 0..k {
+        let occ = sw(in l.rocc, i);
+        w(inout l, occ);
+    }
+}
+
+fn diags(inout l: L, at: u64, n: u64) {
+    w(inout l, n);
+    for i in 0..n {
+        let d = diag(in l.diags, add(at, i));
+        w(inout l, d.code);
+        w(inout l, d.pkg);
+        w(inout l, d.so);
+        w(inout l, d.sl);
+        w(inout l, d.mo);
+        w(inout l, d.ml);
+    }
+}
+
+// table, ndiag, (code, package or none, subject off, len, message off,
+// len)*.
+pub fn encode_manifest_diags(inout l: L) {
+    let n = sort_diags(inout l, 0);
+    table(inout l);
+    diags(inout l, 0, n);
+}
+
+fn ids(inout l: L, from_gids: bool, at: u64, n: u64) {
+    w(inout l, n);
+    for i in 0..n {
+        let x = if from_gids {
+            sw(in l.gids, add(at, i))
+        } else {
+            id_at(in l, add(at, i))
+        };
+        w(inout l, x);
+    }
+}
+
+// table, diagnostics, nunused, ids, has_graph, [nroots, ids,
+// npackages, (name, version, features, ceiling, required, forbid,
+// nedges, dependency*, nsys, (name, text)*)*, nnative, (name, version)*].
+pub fn encode_validation(inout l: L, si: u64) {
+    table(inout l);
+    let s = match l.snaps.try_get(si) {
+        Option::Some(s) => s,
+        Option::None => return,
+    };
+    diags(inout l, s.diag_at, s.diag_n);
+    w(inout l, s.unused_n);
+    for i in 0..s.unused_n {
+        let x = sw(in l.gl, add(s.unused_at, i));
+        w(inout l, x);
+    }
+    if !s.graph {
+        w(inout l, 0);
+        return;
+    }
+    w(inout l, 1);
+    w(inout l, s.root_n);
+    for i in 0..s.root_n {
+        let x = sw(in l.gl, add(s.root_at, i));
+        w(inout l, x);
+    }
+    w(inout l, s.node_n);
+    for i in 0..s.node_n {
+        let g = gnode(in l, add(s.node_at, i));
+        let m = man(in l, g.man);
+        w(inout l, g.name);
+        w(inout l, m.ver);
+        ids(inout l, true, g.feat_at, g.feat_n);
+        ids(inout l, false, m.ceil_at, m.ceil_n);
+        ids(inout l, true, g.req_at, g.req_n);
+        w(
+            inout l,
+            if m.forbid {
+                1
+            } else {
+                0
+            }
+        );
+        w(inout l, g.e_n);
+        for e in 0..g.e_n {
+            let x = sw(in l.ge, add(g.e_at, e));
+            w(inout l, x);
+        }
+        w(inout l, g.s_n);
+        for j in 0..g.s_n {
+            let e = sedge(in l.gs, add(g.s_at, j));
+            w(inout l, e.name);
+            w(inout l, e.text);
+        }
+    }
+    w(inout l, s.sys_n);
+    for i in 0..s.sys_n {
+        let b = add(s.sys_at, add(i, i));
+        let name = sw(in l.gl, b);
+        let v = sw(in l.gl, add(b, 1));
+        w(inout l, name);
+        w(inout l, v);
+    }
+}
+
+// table, allowed, ndiag, (code, package, dependency, snapshot, message
+// off, len)*, nchanges, (scope, package, dependency, before, after, added,
+// removed, before_forbid, after_forbid, relaxed)*. Absent ids are none().
+pub fn encode_upgrade(inout l: L) {
+    table(inout l);
+    let n = l.queue.len();
+    w(
+        inout l,
+        if n == 0 {
+            1
+        } else {
+            0
+        }
+    );
+    w(inout l, n);
+    for i in 0..n {
+        let d = diag(in l.udiags, sw(in l.queue, i));
+        w(inout l, d.code);
+        w(inout l, d.pkg);
+        w(inout l, d.dep);
+        w(inout l, d.snap);
+        w(inout l, d.mo);
+        w(inout l, d.ml);
+    }
+    let nc = l.idx.len();
+    w(inout l, nc);
+    for i in 0..nc {
+        let c = match l.changes.try_get(sw(in l.idx, i)) {
+            Option::Some(c) => c,
+            Option::None => return,
+        };
+        w(inout l, c.scope);
+        w(inout l, c.pkg);
+        w(inout l, c.dep);
+        cid_list(inout l, c.b_at, c.b_n);
+        cid_list(inout l, c.a_at, c.a_n);
+        cid_list(inout l, c.add_at, c.add_n);
+        cid_list(inout l, c.rem_at, c.rem_n);
+        w(inout l, c.bf);
+        w(inout l, c.af);
+        w(
+            inout l,
+            if c.relaxed {
+                1
+            } else {
+                0
+            }
+        );
+    }
+}
+
+fn cid_list(inout l: L, at: u64, n: u64) {
+    w(inout l, n);
+    for i in 0..n {
+        let x = sw(in l.cids, add(at, i));
+        w(inout l, x);
+    }
+}

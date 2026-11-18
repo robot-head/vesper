@@ -94,6 +94,15 @@
 //! * Copy enums and tuples have no fixed Rust layout (payload validity,
 //!   tuple layout), so they keep the v2 conversion; the interface says so
 //!   ([`Mirror::Converted`]).
+//! * With `// @export abi 3 options` (#991), an `Option[T]`/`Result[T, E]`
+//!   of copy payloads is lent the same way as a mirrored struct, as a
+//!   `vesper_port_abi::OptionMirror`/`ResultMirror`: the tag word followed
+//!   by the payload's cell (its mirror, a word, a `Word` or a `Words`), so
+//!   any bits are a value and no conversion runs. The interface marks it
+//!   `"option_mirrors": true`. Struct fields of those types stay `Words`.
+//!
+//! Directives come from the root package's root module (`src/lib.ves`),
+//! wherever it sorts among the package's files (`src/main.rs`).
 //!
 //! The machine-readable [`LibraryInterface`] describes every symbol; the
 //! Rust binding generator ([`rust_binding`]) turns it into `extern "C"`
@@ -374,6 +383,10 @@ pub struct LibraryInterface {
     /// v2: imported `.vsys` libraries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub foreign: Vec<ForeignLibrary>,
+    /// v3 with `// @export abi 3 options`: `Option`/`Result` values of copy
+    /// payloads cross as `OptionMirror`/`ResultMirror` (#991).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub option_mirrors: bool,
 }
 
 impl LibraryInterface {
@@ -391,6 +404,12 @@ impl LibraryInterface {
     /// Whether `ty` is a copy struct with a `#[repr(C)]` mirror.
     pub fn mirrored(&self, ty: &AbiType) -> bool {
         mirrored(ty, &self.types)
+    }
+
+    /// Whether a value of `ty` crosses as a mirror: a mirrored struct, or
+    /// (with `option_mirrors`) an `Option`/`Result` of copy payloads.
+    pub fn lent(&self, ty: &AbiType) -> bool {
+        lent(ty, &self.types, self.option_mirrors)
     }
 }
 
@@ -488,6 +507,7 @@ pub fn plan_with(
         return Err(errors);
     }
     let v3 = directives.abi == Some(3);
+    let options = v3 && directives.option_mirrors;
     let v2 = v3 || planner.v2 || !directives.vsys.is_empty() || !directives.instances.is_empty();
     if v3 {
         mark_mirrors(&mut planner.types);
@@ -495,11 +515,11 @@ pub fn plan_with(
             for p in &mut f.params {
                 p.in_place = match (&p.ty, p.pass()) {
                     (AbiType::Slice { elem }, _) => mirrored(elem, &planner.types),
-                    (ty, "in" | "inout") => mirrored(ty, &planner.types),
+                    (ty, "in" | "inout") => lent(ty, &planner.types, options),
                     _ => false,
                 };
             }
-            f.result_in_place = mirrored(&f.result, &planner.types);
+            f.result_in_place = lent(&f.result, &planner.types, options);
         }
     }
     if v2 {
@@ -537,6 +557,7 @@ pub fn plan_with(
             live_allocations: format!("vesper_{library}_live_allocations"),
         }),
         foreign,
+        option_mirrors: options,
     })
 }
 
@@ -929,6 +950,18 @@ fn mark_mirrors(types: &mut BTreeMap<String, TypeDecl>) {
 pub(crate) fn mirrored(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
     matches!(ty, AbiType::Named { name, .. }
         if types.get(name).is_some_and(|d| d.mirror == Some(Mirror::ReprC)))
+}
+
+/// Whether `ty` crosses as a mirror (v3): a mirrored struct or, when the
+/// library opted in (`abi 3 options`), an `Option[T]`/`Result[T, E]` whose
+/// payloads are copy values. A payload cell is a nested mirror, a word, a
+/// `Word` or a `Words`, so every copy payload has one.
+pub(crate) fn lent(ty: &AbiType, types: &BTreeMap<String, TypeDecl>, options: bool) -> bool {
+    mirrored(ty, types)
+        || options
+            && matches!(ty, AbiType::Named { name, args }
+                if matches!(name.as_str(), "Option" | "Result") && !owning(ty, types)
+                    && args.len() == if name == "Option" { 1 } else { 2 })
 }
 
 fn holds_sequence(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {

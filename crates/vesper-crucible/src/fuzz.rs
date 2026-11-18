@@ -15,7 +15,10 @@
 //! not used because neither builds from crates.io on all three CI platforms
 //! without a system library.
 
-use crate::exec::{Run, Verdict, execute};
+#[cfg(not(vesper_port))]
+use crate::exec::Run;
+use crate::exec::{Verdict, execute};
+#[cfg(not(vesper_port))]
 use crate::rng::SplitMix64;
 use crate::shrink::{ShrinkConfig, ShrinkStats, shrink};
 use crate::source::{
@@ -23,6 +26,7 @@ use crate::source::{
     Source,
 };
 use crate::tape::ChoiceTape;
+#[cfg(not(vesper_port))]
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Failure kind of a counterexample whose failure did not reproduce under
@@ -100,6 +104,7 @@ pub struct FuzzReport {
     pub counterexample: Option<Counterexample>,
 }
 
+#[cfg(not(vesper_port))]
 struct Entry {
     values: Vec<u64>,
     kinds: Vec<DrawKind>,
@@ -107,6 +112,7 @@ struct Entry {
     solved: bool,
 }
 
+#[cfg(not(vesper_port))]
 struct Fuzzer<'p, P> {
     prop: &'p mut P,
     config: FuzzConfig,
@@ -118,6 +124,7 @@ struct Fuzzer<'p, P> {
     found: Option<(Vec<u64>, Failure, u64)>,
 }
 
+#[cfg(not(vesper_port))]
 impl<P> Fuzzer<'_, P>
 where
     P: FnMut(&mut Source) -> Result<(), PropError>,
@@ -259,6 +266,7 @@ where
     }
 }
 
+#[cfg(not(vesper_port))]
 /// Bounded input-to-state candidates for one corpus entry.
 fn solver_candidates(entry: &Entry, limit: usize) -> Vec<Vec<u64>> {
     let lane: Vec<usize> = entry
@@ -352,6 +360,7 @@ fn solver_candidates(entry: &Entry, limit: usize) -> Vec<Vec<u64>> {
     out.into_iter().collect()
 }
 
+#[cfg(not(vesper_port))]
 /// Little- and big-endian encodings of `value` in `width` bytes, if it fits.
 fn encode(value: u64, width: usize) -> Option<(Vec<u8>, Vec<u8>)> {
     if width < 8 && value >> (8 * width) != 0 {
@@ -363,6 +372,7 @@ fn encode(value: u64, width: usize) -> Option<(Vec<u8>, Vec<u8>)> {
     Some((le, be))
 }
 
+#[cfg(not(vesper_port))]
 /// Start offsets (into the byte lane) where `needle` occurs. Capped so a
 /// one-byte needle in a long buffer cannot flood the candidate set.
 fn find_in_lane(entry: &Entry, lane: &[usize], needle: &[u8]) -> Vec<usize> {
@@ -380,6 +390,7 @@ fn find_in_lane(entry: &Entry, lane: &[usize], needle: &[u8]) -> Vec<usize> {
         .collect()
 }
 
+#[cfg(not(vesper_port))]
 fn replace_in_lane(entry: &Entry, lane: &[usize], start: usize, bytes: &[u8]) -> Vec<u64> {
     let mut c = entry.values.clone();
     for (k, &b) in bytes.iter().enumerate() {
@@ -396,33 +407,39 @@ pub fn fuzz<P>(config: &FuzzConfig, mut prop: P) -> FuzzReport
 where
     P: FnMut(&mut Source) -> Result<(), PropError>,
 {
-    let mut fuzzer = Fuzzer {
-        prop: &mut prop,
-        config: config.clone(),
-        rng: SplitMix64(config.seed),
-        corpus: Vec::new(),
-        seen: BTreeSet::new(),
-        closeness: BTreeMap::new(),
-        report: FuzzReport {
-            execs: 0,
-            invalid_runs: 0,
+    #[cfg(vesper_port)]
+    let (mut report, found) = campaign_port(config, &mut prop);
+    #[cfg(not(vesper_port))]
+    let (mut report, found) = {
+        let mut fuzzer = Fuzzer {
+            prop: &mut prop,
+            config: config.clone(),
+            rng: SplitMix64(config.seed),
             corpus: Vec::new(),
-            features: 0,
-            solver_runs: 0,
-            solver_hits: 0,
-            counterexample: None,
-        },
-        found: None,
+            seen: BTreeSet::new(),
+            closeness: BTreeMap::new(),
+            report: FuzzReport {
+                execs: 0,
+                invalid_runs: 0,
+                corpus: Vec::new(),
+                features: 0,
+                solver_runs: 0,
+                solver_hits: 0,
+                counterexample: None,
+            },
+            found: None,
+        };
+        fuzzer.campaign();
+        let mut report = fuzzer.report;
+        report.features = fuzzer.seen.len() + fuzzer.closeness.len();
+        report.corpus = fuzzer
+            .corpus
+            .into_iter()
+            .map(|e| ChoiceTape::new(e.values))
+            .collect();
+        (report, fuzzer.found)
     };
-    fuzzer.campaign();
-    let mut report = fuzzer.report;
-    report.features = fuzzer.seen.len() + fuzzer.closeness.len();
-    report.corpus = fuzzer
-        .corpus
-        .into_iter()
-        .map(|e| ChoiceTape::new(e.values))
-        .collect();
-    if let Some((values, failure, at)) = fuzzer.found {
+    if let Some((values, failure, at)) = found {
         let original = ChoiceTape::new(values);
         let mut shrink_config = config.shrink.clone();
         shrink_config.catch_panics = config.catch_panics;
@@ -457,4 +474,128 @@ where
         });
     }
     report
+}
+
+/// The Vesper build of the campaign: the step machine in vesper/src/lib.ves
+/// (`Fuzzer`) chooses every run (random, solver candidate or mutation) and
+/// its source seed, tracks coverage and owns the corpus; this loop runs the
+/// property closure and reports each verdict, its features and, for a kept
+/// run, its draw kinds and comparisons.
+#[cfg(vesper_port)]
+fn campaign_port<P>(
+    config: &FuzzConfig,
+    prop: &mut P,
+) -> (FuzzReport, Option<(Vec<u64>, Failure, u64)>)
+where
+    P: FnMut(&mut Source) -> Result<(), PropError>,
+{
+    let random = config.strategy == Strategy::Random;
+    let mut machine = crate::binding::Fuzzer::new(
+        config.seed,
+        config.max_execs,
+        random,
+        config.initial_random,
+        config.max_solver_candidates as u64,
+    );
+    let mut found = None;
+    let mut features = Vec::new();
+    while machine.next() {
+        let src = Source::build_random(machine.candidate(), machine.seed(), config.max_draws);
+        let run = execute(prop, src, config.catch_panics);
+        features.clear();
+        let verdict = match &run.verdict {
+            Verdict::Pass => {
+                if !random {
+                    encode_features(&run.probe.features(config.value_profile), &mut features);
+                }
+                0
+            }
+            Verdict::Fail(_) => 1,
+            Verdict::Invalid(_) => 2,
+        };
+        match machine.observe(verdict, &features) {
+            1 => {
+                let tags: Vec<u64> = run.kinds.iter().map(|k| kind_tag(*k)).collect();
+                let maxes: Vec<u64> = run.kinds.iter().map(|k| k.max()).collect();
+                let cmps = encode_cmps(run.probe.comparisons());
+                machine.keep(&run.values, &tags, &maxes, &cmps);
+            }
+            2 => {
+                let Verdict::Fail(failure) = run.verdict else {
+                    unreachable!("only a failing run ends the campaign")
+                };
+                found = Some((run.values, failure, machine.stats().execs));
+            }
+            _ => {}
+        }
+    }
+    let stats = machine.stats();
+    let corpus = (0..crate::binding::fuzzer_corpus_len(&machine))
+        .map(|e| ChoiceTape::new(crate::binding::fuzzer_corpus_entry(&machine, e)))
+        .collect();
+    let report = FuzzReport {
+        execs: stats.execs,
+        invalid_runs: stats.invalid,
+        corpus,
+        features: stats.features as usize,
+        solver_runs: stats.solver_runs,
+        solver_hits: stats.solver_hits,
+        counterexample: None,
+    };
+    (report, found)
+}
+
+/// Feature words for `fuzzer_observe`: `(key, value)` pairs, tag in the
+/// key's top two bits.
+#[cfg(vesper_port)]
+fn encode_features(features: &[Feature], out: &mut Vec<u64>) {
+    for feature in features {
+        let (key, value) = match *feature {
+            Feature::Edge(id, bucket) => ((u64::from(id) << 9) | u64::from(bucket), 0),
+            Feature::Cmp(site, taken, bucket) => (
+                (1 << 62) | (u64::from(site) << 9) | (u64::from(taken) << 8) | u64::from(bucket),
+                0,
+            ),
+            Feature::Closeness(site, close) => ((2 << 62) | u64::from(site), u64::from(close)),
+        };
+        out.push(key);
+        out.push(value);
+    }
+}
+
+#[cfg(vesper_port)]
+fn kind_tag(kind: DrawKind) -> u64 {
+    match kind {
+        DrawKind::Value { .. } => 0,
+        DrawKind::Byte => 1,
+        DrawKind::Flag => 2,
+        DrawKind::Schedule => 3,
+    }
+}
+
+/// Comparison words for `fuzzer_keep` (the solver's input).
+#[cfg(vesper_port)]
+fn encode_cmps(records: &[CmpRecord]) -> Vec<u64> {
+    let mut out = Vec::new();
+    for record in records {
+        match &record.operands {
+            CmpOperands::Int { kind, lhs, rhs } => {
+                let kind = match kind {
+                    CmpKind::Eq => 0,
+                    CmpKind::Ne => 1,
+                    CmpKind::Lt => 2,
+                    CmpKind::Le => 3,
+                    CmpKind::Gt => 4,
+                    CmpKind::Ge => 5,
+                };
+                out.extend([0, kind, *lhs, *rhs]);
+            }
+            CmpOperands::Bytes { lhs, rhs } => {
+                out.extend([1, lhs.len() as u64, rhs.len() as u64]);
+                out.extend(lhs.iter().map(|&b| u64::from(b)));
+                out.extend(rhs.iter().map(|&b| u64::from(b)));
+            }
+        }
+    }
+    out
 }

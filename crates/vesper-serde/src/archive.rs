@@ -20,6 +20,17 @@ pub struct RelPtr32 {
 }
 impl RelPtr32 {
     pub fn between(field_offset: usize, target_offset: usize) -> Result<Self> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::vspa_between(field_offset, target_offset)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            Self::rust_between(field_offset, target_offset)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_between(field_offset: usize, target_offset: usize) -> Result<Self> {
         let offset = if target_offset >= field_offset {
             i32::try_from(target_offset - field_offset)
                 .map_err(|_| error(ErrorKind::Overflow, field_offset))?
@@ -34,6 +45,23 @@ impl RelPtr32 {
         Ok(Self { offset })
     }
     pub fn resolve(
+        self,
+        field_offset: usize,
+        size: usize,
+        alignment: usize,
+        archive_len: usize,
+    ) -> Result<Range<usize>> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::vspa_resolve(self, field_offset, size, alignment, archive_len)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.rust_resolve(field_offset, size, alignment, archive_len)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_resolve(
         self,
         field_offset: usize,
         size: usize,
@@ -67,6 +95,23 @@ pub struct RelSlice32 {
 }
 impl RelSlice32 {
     pub fn resolve(
+        self,
+        field_offset: usize,
+        item_size: usize,
+        alignment: usize,
+        archive_len: usize,
+    ) -> Result<Range<usize>> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::vspa_resolve_slice(self, field_offset, item_size, alignment, archive_len)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.rust_resolve(field_offset, item_size, alignment, archive_len)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_resolve(
         self,
         field_offset: usize,
         item_size: usize,
@@ -177,6 +222,17 @@ pub struct TreeNode<'a> {
 /// Requested metadata payload for encoding preflight or validation. This does
 /// not include allocator bookkeeping. No memory is allocated by this calculator.
 pub fn validation_bytes(count: usize) -> Result<usize> {
+    #[cfg(vesper_port)]
+    {
+        crate::port::vspa_validation_bytes(count)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_validation_bytes(count)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_validation_bytes(count: usize) -> Result<usize> {
     mul(count, size_of::<Meta>())
 }
 
@@ -267,6 +323,17 @@ impl Check {
 /// Full preflight, including schema/tree/limits; no caller buffer is modified.
 /// One bounded, fallible temporary metadata allocation is made and then dropped.
 pub fn encoded_size(nodes: &[TreeNode<'_>], limits: Limits) -> Result<usize> {
+    #[cfg(vesper_port)]
+    {
+        crate::port::vspa_size(nodes, limits)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_encoded_size(nodes, limits)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_encoded_size(nodes: &[TreeNode<'_>], limits: Limits) -> Result<usize> {
     let mut check = Check::new(nodes.len(), limits)?;
     let mut cursor = node_offset(nodes.len())?;
     check.size(cursor)?;
@@ -288,6 +355,17 @@ pub fn encoded_size(nodes: &[TreeNode<'_>], limits: Limits) -> Result<usize> {
 /// Writes the canonical V1/tree archive only after complete preflight and one
 /// output capacity check. All Result failures preserve every output byte.
 pub fn encode_into(nodes: &[TreeNode<'_>], output: &mut [u8], limits: Limits) -> Result<usize> {
+    #[cfg(vesper_port)]
+    {
+        crate::port::vspa_encode(nodes, output, limits)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        rust_encode_into(nodes, output, limits)
+    }
+}
+#[cfg(not(vesper_port))]
+fn rust_encode_into(nodes: &[TreeNode<'_>], output: &mut [u8], limits: Limits) -> Result<usize> {
     let size = encoded_size(nodes, limits)?;
     if output.len() < size {
         return Err(error(ErrorKind::OutputTooSmall, 0));
@@ -344,11 +422,22 @@ fn put_relative(output: &mut [u8], field: usize, target: usize) {
 /// byte slice without successful validation. The temporary index is not retained.
 #[derive(Clone, Copy, Debug)]
 pub struct Archive<'a> {
-    bytes: &'a [u8],
-    count: usize,
+    pub(crate) bytes: &'a [u8],
+    pub(crate) count: usize,
 }
 impl<'a> Archive<'a> {
     pub fn validate(bytes: &'a [u8], limits: Limits) -> Result<Self> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::vspa_validate(bytes, limits)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            Self::rust_validate(bytes, limits)
+        }
+    }
+    #[cfg(not(vesper_port))]
+    fn rust_validate(bytes: &'a [u8], limits: Limits) -> Result<Self> {
         bound(bytes.len(), limits.max_archive_bytes, ErrorKind::ByteLimit)?;
         bound(bytes.len(), i32::MAX as usize, ErrorKind::Overflow)?;
         if bytes.len() < HEADER_LEN {

@@ -52,6 +52,23 @@ impl<'a> IndexedJson<'a> {
         isa: Isa,
         index: &mut StructuralIndex,
     ) -> Result<Self, Error> {
+        #[cfg(vesper_port)]
+        {
+            crate::port::parse_with_index(input, limits, isa, index)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            Self::rust_parse_with_index(input, limits, isa, index)
+        }
+    }
+
+    #[cfg(not(vesper_port))]
+    fn rust_parse_with_index(
+        input: &'a [u8],
+        limits: Limits,
+        isa: Isa,
+        index: &mut StructuralIndex,
+    ) -> Result<Self, Error> {
         let (plan, index_limits) = admit(input, &limits)?;
         index.build(input, isa, index_limits)?;
         let mut tokens = Vec::new();
@@ -82,7 +99,11 @@ fn whole_str(input: &[u8]) -> Result<&str, Error> {
 pub struct SimdParser {
     isa: Isa,
     index: StructuralIndex,
+    #[cfg(not(vesper_port))]
     tokens: Vec<Token>,
+    /// The port's reusable tape (taken by each document, then returned).
+    #[cfg(vesper_port)]
+    tokens: Option<crate::port::Tape>,
 }
 
 impl SimdParser {
@@ -91,7 +112,7 @@ impl SimdParser {
         Self {
             isa: Isa::detect(),
             index: StructuralIndex::new(),
-            tokens: Vec::new(),
+            tokens: Default::default(),
         }
     }
     /// A parser on an explicit path, if this CPU can run it.
@@ -102,7 +123,7 @@ impl SimdParser {
         Ok(Self {
             isa,
             index: StructuralIndex::new(),
-            tokens: Vec::new(),
+            tokens: Default::default(),
         })
     }
     pub fn isa(&self) -> Isa {
@@ -110,12 +131,35 @@ impl SimdParser {
     }
     /// Retained structural-index and tape capacity in bytes.
     pub fn retained_bytes(&self) -> usize {
-        self.index.capacity_bytes() + self.tokens.capacity() * size_of::<Token>()
+        #[cfg(not(vesper_port))]
+        let tape = self.tokens.capacity();
+        #[cfg(vesper_port)]
+        let tape = self.tokens.as_ref().map_or(0, |t| t.capacity());
+        self.index.capacity_bytes() + tape * crate::index::TOKEN_BYTES
     }
 
     /// Validate `input` and lend the document to `f`. Views cannot outlive
     /// the call; borrowed `&'a str` values from the input can.
     pub fn parse<'a, R>(
+        &mut self,
+        input: &'a [u8],
+        limits: Limits,
+        f: impl FnOnce(&IndexedJson<'a>) -> R,
+    ) -> Result<R, Error> {
+        #[cfg(vesper_port)]
+        {
+            let (index_limits, tape) = (crate::port::admit(input, &limits)?, &mut self.tokens);
+            self.index.build(input, self.isa, index_limits)?;
+            crate::port::parse_reusing(input, limits, &self.index, tape, f)
+        }
+        #[cfg(not(vesper_port))]
+        {
+            self.rust_parse(input, limits, f)
+        }
+    }
+
+    #[cfg(not(vesper_port))]
+    fn rust_parse<'a, R>(
         &mut self,
         input: &'a [u8],
         limits: Limits,

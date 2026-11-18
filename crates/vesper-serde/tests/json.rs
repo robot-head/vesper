@@ -854,3 +854,48 @@ fn schema_dynamic_static_ceiling_is_never_claimed_as_a_total_lower_bound() {
         ErrorKind::Overflow
     );
 }
+
+#[test]
+fn shared_and_deep_value_trees_fail_on_their_limits_without_expanding() {
+    // Each level holds its child twice: 2^48 nodes behind 48 small slices.
+    let mut level: &'static [Value<'static>] = Box::leak(Box::new([Value::Null, Value::Null]));
+    for _ in 0..48 {
+        let child = Value::Array(level);
+        level = Box::leak(Box::new([child, child]));
+    }
+    let shared = Value::Array(level);
+    let err = encoded_size(&shared, EncodeLimits::default()).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::TokenLimit);
+    let mut out = [7u8; 16];
+    let err = encode_into(&shared, &mut out, EncodeLimits::default()).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::TokenLimit);
+    assert_eq!(out, [7u8; 16]);
+    // A chain far deeper than any stack-safe recursion.
+    let mut deep: &'static [Value<'static>] = &[];
+    for _ in 0..200_000 {
+        deep = Box::leak(Box::new([Value::Array(deep)]));
+    }
+    let err = encoded_size(&Value::Array(deep), EncodeLimits::default()).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DepthLimit);
+}
+
+#[test]
+fn raw_text_past_the_work_limit_fails_before_it_is_read() {
+    let text = format!("[{}]", vec!["\"abcdefgh\""; 10_000].join(","));
+    let raw = parse(text.as_bytes());
+    let value = Value::Raw(raw.root());
+    let limits = EncodeLimits {
+        max_work: text.len() - 1,
+        ..EncodeLimits::default()
+    };
+    assert_eq!(
+        encoded_size(&value, limits).unwrap_err().kind,
+        ErrorKind::WorkLimit
+    );
+    let mut out = vec![0xab; 64];
+    assert_eq!(
+        encode_into(&value, &mut out, limits).unwrap_err().kind,
+        ErrorKind::WorkLimit
+    );
+    assert_eq!(out, [0xab; 64]);
+}

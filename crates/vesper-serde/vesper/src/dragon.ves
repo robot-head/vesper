@@ -1,0 +1,393 @@
+// @export abi 3
+//
+// @vesper/serde: shortest round-trip binary64 to decimal text, as Rust's
+// `{}` (`Display`) formats an `f64`, which the encoder of src/encode.rs
+// writes. The digits come from Rust's own shortest algorithm
+// (`core::num::flt2dec::strategy::dragon::format_shortest`, the exact
+// fallback that Grisu agrees with whenever it succeeds), over 1,280-bit
+// numbers held as 40 little-endian 32-bit limbs; the layout is
+// `flt2dec::digits_to_dec_str` with no fractional digits requested.
+
+// At most 40 limbs (Rust's `Big32x40`); a value uses only those its
+// exponent can reach (`limbs_for`), so the loops run over `b.len()`.
+fn limbs_for(exp: i64) -> u64 {
+    let e = if exp < 0 {
+        wrapping_u64(wrapping_sub(0, exp))
+    } else {
+        wrapping_u64(exp)
+    };
+    let n = wrapping_add(e, 192) / 32;
+    if n > 40 {
+        40
+    } else {
+        n
+    }
+}
+
+fn mask32() -> u64 {
+    4294967295
+}
+
+fn big_zero(n: u64) -> ChunkSeq[u64] {
+    let mut b: ChunkSeq[u64] = ChunkSeq::with_capacity(n);
+    for _i in 0..n {
+        b.push(0);
+    }
+    b
+}
+
+fn limb(in b: ChunkSeq[u64], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn big_from(v: u64, n: u64) -> ChunkSeq[u64] {
+    let mut b = big_zero(n);
+    b.try_set(0, v & mask32());
+    b.try_set(1, v >> 32);
+    b
+}
+
+fn big_copy(in a: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let n = a.len();
+    let mut b: ChunkSeq[u64] = ChunkSeq::with_capacity(n);
+    for i in 0..n {
+        b.push(limb(in a, i));
+    }
+    b
+}
+
+fn mul_small(inout b: ChunkSeq[u64], m: u64) {
+    let size = b.len();
+    let mut carry: u64 = 0;
+    for i in 0..size {
+        let v = wrapping_add(wrapping_mul(limb(in b, i), m), carry);
+        b.try_set(i, v & mask32());
+        carry = v >> 32;
+    }
+}
+
+fn mul_pow2(inout b: ChunkSeq[u64], n: u64) {
+    let size = b.len();
+    let words = n / 32;
+    let bits = n % 32;
+    if words > 0 {
+        let mut i = size;
+        loop {
+            if i == 0 {
+                break;
+            }
+            i = wrapping_sub(i, 1);
+            let v = if i >= words {
+                limb(in b, wrapping_sub(i, words))
+            } else {
+                0
+            };
+            b.try_set(i, v);
+        }
+    }
+    if bits > 0 {
+        let mut carry: u64 = 0;
+        for i in 0..size {
+            let v = bit_shl(limb(in b, i), bits) | carry;
+            b.try_set(i, v & mask32());
+            carry = v >> 32;
+        }
+    }
+}
+
+fn mul_pow10(inout b: ChunkSeq[u64], n: u64) {
+    let mut left = n;
+    loop {
+        if left < 9 {
+            break;
+        }
+        mul_small(inout b, 1000000000);
+        left = wrapping_sub(left, 9);
+    }
+    let mut m: u64 = 1;
+    for _i in 0..left {
+        m = wrapping_mul(m, 10);
+    }
+    if m > 1 {
+        mul_small(inout b, m);
+    }
+}
+
+// -1, 0 or 1 as a < b, a == b, a > b.
+fn big_cmp(in a: ChunkSeq[u64], in b: ChunkSeq[u64]) -> i64 {
+    let size = a.len();
+    let mut i = size;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        let x = limb(in a, i);
+        let y = limb(in b, i);
+        if x < y {
+            return -1;
+        }
+        if x > y {
+            return 1;
+        }
+    }
+    0
+}
+
+// `a + b` compared with `c`.
+fn sum_cmp(in a: ChunkSeq[u64], in b: ChunkSeq[u64], in c: ChunkSeq[u64]) -> i64 {
+    let mut s = big_copy(in a);
+    big_add(inout s, in b);
+    big_cmp(in c, in s)
+}
+
+fn big_add(inout a: ChunkSeq[u64], in b: ChunkSeq[u64]) {
+    let size = a.len();
+    let mut carry: u64 = 0;
+    for i in 0..size {
+        let v = wrapping_add(wrapping_add(limb(in a, i), limb(in b, i)), carry);
+        a.try_set(i, v & mask32());
+        carry = v >> 32;
+    }
+}
+
+// `a -= b` for `a >= b`.
+fn big_sub(inout a: ChunkSeq[u64], in b: ChunkSeq[u64]) {
+    let size = a.len();
+    let mut borrow: u64 = 0;
+    for i in 0..size {
+        let x = limb(in a, i);
+        let y = wrapping_add(limb(in b, i), borrow);
+        if x >= y {
+            a.try_set(i, wrapping_sub(x, y));
+            borrow = 0;
+        } else {
+            a.try_set(i, wrapping_sub(wrapping_add(x, 4294967296), y));
+            borrow = 1;
+        }
+    }
+}
+
+fn clz(v: u64) -> u64 {
+    if v == 0 {
+        return 64;
+    }
+    let mut n: u64 = 0;
+    let mut x = v;
+    loop {
+        if x >> 63 == 1 {
+            break;
+        }
+        x = x << 1;
+        n = wrapping_add(n, 1);
+    }
+    n
+}
+
+// `flt2dec::estimate_scaling_factor`.
+fn estimate_scaling_factor(mant: u64, exp: i64) -> i64 {
+    let nbits = wrapping_i64(wrapping_sub(64, clz(wrapping_sub(mant, 1))));
+    wrapping_mul(wrapping_add(nbits, exp), 1292913986) >> 32
+}
+
+// Shortest digits of `mant * 2^exp`, with neighbors `minus` and `plus`
+// (in units of 2^exp) and `inclusive` interval ends: returns the decimal
+// exponent `k` (the value is 0.d1 d2 ... times 10^k); digits go to `out`.
+fn format_shortest(
+    mant0: u64,
+    minus0: u64,
+    plus0: u64,
+    exp: i64,
+    inclusive: bool,
+    inout out: ChunkSeq[u8]
+) -> i64 {
+    // `a.cmp(b) < rounding` is `a <= b` when inclusive, else `a < b`.
+    let rounding: i64 = if inclusive {
+        1
+    } else {
+        0
+    };
+    let mut k = estimate_scaling_factor(wrapping_add(mant0, plus0), exp);
+    let size = limbs_for(exp);
+    let mut mant = big_from(mant0, size);
+    let mut minus = big_from(minus0, size);
+    let mut plus = big_from(plus0, size);
+    let mut scale = big_from(1, size);
+    if exp < 0 {
+        mul_pow2(inout scale, wrapping_u64(wrapping_sub(0, exp)));
+    } else {
+        mul_pow2(inout mant, wrapping_u64(exp));
+        mul_pow2(inout minus, wrapping_u64(exp));
+        mul_pow2(inout plus, wrapping_u64(exp));
+    }
+    if k >= 0 {
+        mul_pow10(inout scale, wrapping_u64(k));
+    } else {
+        let n = wrapping_u64(wrapping_sub(0, k));
+        mul_pow10(inout mant, n);
+        mul_pow10(inout minus, n);
+        mul_pow10(inout plus, n);
+    }
+    if sum_cmp(in mant, in plus, in scale) < rounding {
+        k = wrapping_add(k, 1);
+    } else {
+        mul_small(inout mant, 10);
+        mul_small(inout minus, 10);
+        mul_small(inout plus, 10);
+    }
+    let mut scale2 = big_copy(in scale);
+    mul_pow2(inout scale2, 1);
+    let mut scale4 = big_copy(in scale);
+    mul_pow2(inout scale4, 2);
+    let mut scale8 = big_copy(in scale);
+    mul_pow2(inout scale8, 3);
+    let mut down = false;
+    let mut up = false;
+    loop {
+        let mut d: u64 = 0;
+        if big_cmp(in mant, in scale8) >= 0 {
+            big_sub(inout mant, in scale8);
+            d = wrapping_add(d, 8);
+        }
+        if big_cmp(in mant, in scale4) >= 0 {
+            big_sub(inout mant, in scale4);
+            d = wrapping_add(d, 4);
+        }
+        if big_cmp(in mant, in scale2) >= 0 {
+            big_sub(inout mant, in scale2);
+            d = wrapping_add(d, 2);
+        }
+        if big_cmp(in mant, in scale) >= 0 {
+            big_sub(inout mant, in scale);
+            d = wrapping_add(d, 1);
+        }
+        out.push(wrapping_u8(wrapping_add(48, d)));
+        down = big_cmp(in mant, in minus) < rounding;
+        up = sum_cmp(in mant, in plus, in scale) < rounding;
+        if down || up {
+            break;
+        }
+        mul_small(inout mant, 10);
+        mul_small(inout minus, 10);
+        mul_small(inout plus, 10);
+    }
+    if up {
+        let mut round = !down;
+        if !round {
+            let mut twice = big_copy(in mant);
+            mul_pow2(inout twice, 1);
+            round = big_cmp(in twice, in scale) >= 0;
+        }
+        if round {
+            // `round_up`: propagate the carry; all nines become 1000...
+            let n = out.len();
+            let mut i = n;
+            let mut done = false;
+            loop {
+                if i == 0 {
+                    break;
+                }
+                i = wrapping_sub(i, 1);
+                let c = match out.try_get(i) {
+                    Option::Some(c) => c,
+                    Option::None => 48,
+                };
+                if c == 57 {
+                    out.try_set(i, 48);
+                } else {
+                    out.try_set(i, wrapping_add(c, 1));
+                    done = true;
+                    break;
+                }
+            }
+            if !done {
+                // Every digit was a nine: 1 followed by zeros, one longer.
+                out.try_set(0, 49);
+                out.push(48);
+                k = wrapping_add(k, 1);
+            }
+        }
+    }
+    k
+}
+
+// Rust's `format!("{}", f64::from_bits(bits))` for a finite value.
+pub fn float_text(bits: u64) -> ChunkSeq[u8] {
+    let mut text: ChunkSeq[u8] = ChunkSeq::with_capacity(32);
+    if bits >> 63 == 1 {
+        text.push(45);
+    }
+    let biased = (bits >> 52) & 2047;
+    let frac = bits & 4503599627370495;
+    if biased == 0 && frac == 0 {
+        text.push(48);
+        return text;
+    }
+    // `integer_decode` then `flt2dec::decode`.
+    let mut mant = frac;
+    let mut exp: i64 = -1075;
+    if biased != 0 {
+        mant = frac | 4503599627370496;
+        exp = wrapping_sub(wrapping_i64(biased), 1075);
+    } else {
+        mant = frac << 1;
+    }
+    let even = mant & 1 == 0;
+    let mut digits: ChunkSeq[u8] = ChunkSeq::with_capacity(20);
+    let k = if biased == 0 {
+        format_shortest(mant, 1, 1, exp, even, inout digits)
+    } else if mant == 4503599627370496 {
+        format_shortest(mant << 2, 1, 2, wrapping_sub(exp, 2), even, inout digits)
+    } else {
+        format_shortest(mant << 1, 1, 1, wrapping_sub(exp, 1), even, inout digits)
+    };
+    // `digits_to_dec_str(digits, k, 0)`.
+    let n = digits.len();
+    if k <= 0 {
+        text.push(48);
+        text.push(46);
+        for _i in 0..wrapping_u64(wrapping_sub(0, k)) {
+            text.push(48);
+        }
+        for i in 0..n {
+            text
+                .push(
+                match digits.try_get(i) {
+                    Option::Some(c) => c,
+                    Option::None => 48,
+                }
+            );
+        }
+    } else if wrapping_u64(k) < n {
+        let point = wrapping_u64(k);
+        for i in 0..n {
+            if i == point {
+                text.push(46);
+            }
+            text
+                .push(
+                match digits.try_get(i) {
+                    Option::Some(c) => c,
+                    Option::None => 48,
+                }
+            );
+        }
+    } else {
+        for i in 0..n {
+            text
+                .push(
+                match digits.try_get(i) {
+                    Option::Some(c) => c,
+                    Option::None => 48,
+                }
+            );
+        }
+        for _i in n..wrapping_u64(k) {
+            text.push(48);
+        }
+    }
+    text
+}

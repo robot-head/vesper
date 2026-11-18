@@ -2,7 +2,8 @@
 //! shrinker the port allocates is given back. (Port package only: the seed
 //! copy does not list this test.)
 use vesper_crucible::{
-    ChoiceTape, IMPLEMENTATION, PropError, ShrinkConfig, Source, port_live_allocations, shrink,
+    ChoiceTape, FuzzConfig, IMPLEMENTATION, PropError, ShrinkConfig, Source, fuzz,
+    port_live_allocations, shrink,
 };
 
 #[test]
@@ -31,6 +32,20 @@ fn tapes_parses_and_shrinkers_release_every_port_allocation() {
             .chain([0])
             .collect();
         shrink(&mut prop, &ChoiceTape::new(start), &ShrinkConfig::default()).unwrap();
+        let config = FuzzConfig {
+            seed,
+            max_execs: 400,
+            ..FuzzConfig::default()
+        };
+        fuzz(&config, |src: &mut Source| {
+            let data = src.draw_bytes(16)?;
+            let p = src.probe();
+            p.edge(data.len() as u32);
+            if p.eq_bytes(1, &data[..data.len().min(2)], b"ok") && p.eq(2, data.len() as u64, 9) {
+                return Err(PropError::fail("ok", "found"));
+            }
+            Ok(())
+        });
     };
     work(3);
     let before = port_live_allocations();

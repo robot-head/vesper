@@ -7,6 +7,8 @@ description = "Bounded LSP transport and transactional UTF-16 in-memory document
 
 [dependencies]
 vesper-span = { path = "../vesper-span" }
-vesper-serde = { path = "../vesper-serde" }
+# The compiler links vesper-lsp, so it uses the frozen Rust seed copy
+# (seed-copy rule, docs/maintenance/porting-a-crate.md).
+vesper-serde = { path = "../vesper-serde/seed", package = "vesper-serde-seed" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

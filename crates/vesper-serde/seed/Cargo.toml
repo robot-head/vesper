@@ -1,0 +1,112 @@
+[package]
+name = "vesper-serde-seed"
+version = "0.1.0"
+edition = "2024"
+description = "Frozen Rust seed copy of vesper-serde for the compiler's own dependency closure"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; lane 19, #916): the compiler
+# links this package, the Rust build of ../src, under the library name
+# `vesper_serde`. Crates inside `cargo tree -p vesper -e normal,build` depend
+# on it with
+# `vesper-serde = { path = ".../seed", package = "vesper-serde-seed" }`, and
+# so, until the Vesper port reaches performance parity, does every other
+# dependent. The port-backed package `vesper-serde` runs the same tests
+# against the port. The Rust code takes bug fixes only until self-hosting
+# Stage 2.
+[lib]
+name = "vesper_serde"
+path = "../src/lib.rs"
+
+[dev-dependencies]
+serde_json = { workspace = true }
+vesper-bench = { path = "../../vesper-bench" }
+
+# The Rust arm of the ABBA benchmark (the port package's serde_abba).
+[[example]]
+name = "serde_abba_rust"
+path = "../examples/serde_abba.rs"
+
+[[test]]
+name = "binary"
+path = "../tests/binary.rs"
+
+[[test]]
+name = "event_columns"
+path = "../tests/event_columns.rs"
+
+[[test]]
+name = "float_decode"
+path = "../tests/float_decode.rs"
+
+[[test]]
+name = "float_encode"
+path = "../tests/float_encode.rs"
+
+[[test]]
+name = "float_lemire"
+path = "../tests/float_lemire.rs"
+
+[[test]]
+name = "float_roundtrip"
+path = "../tests/float_roundtrip.rs"
+
+[[test]]
+name = "json"
+path = "../tests/json.rs"
+
+[[test]]
+name = "json_test_suite"
+path = "../tests/json_test_suite.rs"
+
+[[test]]
+name = "lean_escape"
+path = "../tests/lean_escape.rs"
+
+[[test]]
+name = "lean_models"
+path = "../tests/lean_models.rs"
+
+[[test]]
+name = "limits_differential"
+path = "../tests/limits_differential.rs"
+
+[[test]]
+name = "ndjson"
+path = "../tests/ndjson.rs"
+
+[[test]]
+name = "ndjson_engines"
+path = "../tests/ndjson_engines.rs"
+
+[[test]]
+name = "ndjson_roundtrip"
+path = "../tests/ndjson_roundtrip.rs"
+
+[[test]]
+name = "simd_scalable"
+path = "../tests/simd_scalable.rs"
+
+[[test]]
+name = "simd_stage1"
+path = "../tests/simd_stage1.rs"
+
+[[test]]
+name = "simd_stage2"
+path = "../tests/simd_stage2.rs"
+
+[[test]]
+name = "tiles"
+path = "../tests/tiles.rs"
+
+[[test]]
+name = "tiles_alloc"
+path = "../tests/tiles_alloc.rs"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

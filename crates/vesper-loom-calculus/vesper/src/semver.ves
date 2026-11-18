@@ -1,0 +1,175 @@
+// Module semver of @vesper/loom-calculus (see lib.ves): `VersionReq::matches`
+// of the semver crate, over the decoded comparators.
+use self::{
+    Cmp,
+    L,
+    Ver
+};
+use self::util::{
+    add,
+    cmp,
+    pre_ord,
+    req,
+    slen,
+    ver
+};
+
+fn exact(in l: L, in c: Cmp, in v: Ver) -> bool {
+    if v.major != c.major {
+        return false;
+    }
+    if c.has_minor && v.minor != c.minor {
+        return false;
+    }
+    if c.has_patch && v.patch != c.patch {
+        return false;
+    }
+    v.pre == c.pre
+}
+
+fn greater(in l: L, in c: Cmp, in v: Ver) -> bool {
+    if v.major != c.major {
+        return v.major > c.major;
+    }
+    if !c.has_minor {
+        return false;
+    }
+    if v.minor != c.minor {
+        return v.minor > c.minor;
+    }
+    if !c.has_patch {
+        return false;
+    }
+    if v.patch != c.patch {
+        return v.patch > c.patch;
+    }
+    pre_ord(in l, v.pre, c.pre) == 2
+}
+
+fn less(in l: L, in c: Cmp, in v: Ver) -> bool {
+    if v.major != c.major {
+        return v.major < c.major;
+    }
+    if !c.has_minor {
+        return false;
+    }
+    if v.minor != c.minor {
+        return v.minor < c.minor;
+    }
+    if !c.has_patch {
+        return false;
+    }
+    if v.patch != c.patch {
+        return v.patch < c.patch;
+    }
+    pre_ord(in l, v.pre, c.pre) == 0
+}
+
+fn tilde(in l: L, in c: Cmp, in v: Ver) -> bool {
+    if v.major != c.major {
+        return false;
+    }
+    if c.has_minor && v.minor != c.minor {
+        return false;
+    }
+    if c.has_patch && v.patch != c.patch {
+        return v.patch > c.patch;
+    }
+    pre_ord(in l, v.pre, c.pre) != 0
+}
+
+fn caret(in l: L, in c: Cmp, in v: Ver) -> bool {
+    if v.major != c.major {
+        return false;
+    }
+    if !c.has_minor {
+        return true;
+    }
+    if !c.has_patch {
+        if c.major > 0 {
+            return v.minor >= c.minor;
+        }
+        return v.minor == c.minor;
+    }
+    if c.major > 0 {
+        if v.minor != c.minor {
+            return v.minor > c.minor;
+        }
+        if v.patch != c.patch {
+            return v.patch > c.patch;
+        }
+    } else if c.minor > 0 {
+        if v.minor != c.minor {
+            return false;
+        }
+        if v.patch != c.patch {
+            return v.patch > c.patch;
+        }
+    } else if v.minor != c.minor || v.patch != c.patch {
+        return false;
+    }
+    pre_ord(in l, v.pre, c.pre) != 0
+}
+
+fn matches_impl(in l: L, in c: Cmp, in v: Ver) -> bool {
+    if c.op == 0 || c.op == 7 {
+        exact(in l, in c, in v)
+    } else if c.op == 1 {
+        greater(in l, in c, in v)
+    } else if c.op == 2 {
+        exact(in l, in c, in v) || greater(in l, in c, in v)
+    } else if c.op == 3 {
+        less(in l, in c, in v)
+    } else if c.op == 4 {
+        exact(in l, in c, in v) || less(in l, in c, in v)
+    } else if c.op == 5 {
+        tilde(in l, in c, in v)
+    } else if c.op == 6 {
+        caret(in l, in c, in v)
+    } else {
+        false
+    }
+}
+
+fn pre_compatible(in l: L, in c: Cmp, in v: Ver) -> bool {
+    c
+        .major
+        == v
+        .major
+        && c
+        .has_minor
+        && c
+        .minor
+        == v
+        .minor
+        && c
+        .has_patch
+        && c
+        .patch
+        == v
+        .patch
+        && slen(in l, c.pre)
+        != 0
+}
+
+// Whether version vi satisfies requirement ri.
+pub fn matches(in l: L, ri: u64, vi: u64) -> bool {
+    let r = req(in l, ri);
+    let v = ver(in l, vi);
+    for i in 0..r.n {
+        let c = cmp(in l, add(r.at, i));
+        if !matches_impl(in l, in c, in v) {
+            return false;
+        }
+    }
+    if slen(in l, v.pre) == 0 {
+        return true;
+    }
+    for i in 0..r.n {
+        let c = cmp(in l, add(r.at, i));
+        if pre_compatible(in l, in c, in v) {
+            return true;
+        }
+    }
+    false
+}

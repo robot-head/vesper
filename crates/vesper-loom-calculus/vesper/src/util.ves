@@ -1,0 +1,720 @@
+// Module util of @vesper/loom-calculus (see lib.ves): accessors, pool text,
+// byte order and the merge sort.
+use self::{
+    Cmp,
+    Dep,
+    Diag,
+    Feat,
+    GNode,
+    L,
+    Man,
+    Req,
+    Root,
+    SEdge,
+    Sys,
+    SysSel,
+    Ver
+};
+
+pub fn none() -> u64 {
+    18446744073709551615
+}
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn add(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b)
+}
+
+pub fn mul(a: u64, b: u64) -> u64 {
+    wrapping_mul(a, b)
+}
+
+pub fn min(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+// Order results: 0 less, 1 equal, 2 greater.
+pub fn ord(a: u64, b: u64) -> u64 {
+    if a < b {
+        0
+    } else if a > b {
+        2
+    } else {
+        1
+    }
+}
+
+// An optional id as an order key: none sorts first.
+pub fn okey(x: u64) -> u64 {
+    if x == none() {
+        0
+    } else {
+        inc(x)
+    }
+}
+
+pub fn sw(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn sbool(in s: ChunkSeq[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => false,
+    }
+}
+
+pub fn gb(in l: L, i: u64) -> u8 {
+    match l.pool.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn id_at(in l: L, i: u64) -> u64 {
+    sw(in l.ids, i)
+}
+
+pub fn soff(in l: L, id: u64) -> u64 {
+    sw(in l.roff, id)
+}
+
+pub fn slen(in l: L, id: u64) -> u64 {
+    sw(in l.rlen, id)
+}
+
+pub fn ver(in l: L, i: u64) -> Ver {
+    match l.vers.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => Ver {
+            major: 0,
+            minor: 0,
+            patch: 0,
+            pre: 0,
+            build: 0,
+            text: 0
+        },
+    }
+}
+
+pub fn cmp(in l: L, i: u64) -> Cmp {
+    match l.cmps.try_get(i) {
+        Option::Some(c) => c,
+        Option::None => Cmp {
+            op: 8,
+            major: 0,
+            minor: 0,
+            has_minor: false,
+            patch: 0,
+            has_patch: false,
+            pre: 0
+        },
+    }
+}
+
+pub fn req(in l: L, i: u64) -> Req {
+    match l.reqs.try_get(i) {
+        Option::Some(r) => r,
+        Option::None => Req {
+            at: 0,
+            n: 0,
+            text: 0
+        },
+    }
+}
+
+pub fn man(in l: L, i: u64) -> Man {
+    match l.mans.try_get(i) {
+        Option::Some(m) => m,
+        Option::None => Man {
+            name: 0,
+            ver: 0,
+            ceil_at: 0,
+            ceil_n: 0,
+            forbid: true,
+            feat_at: 0,
+            feat_n: 0,
+            dep_at: 0,
+            dep_n: 0,
+            sandbox: false,
+            net: false,
+            path_at: 0,
+            path_n: 0,
+            json: 0,
+            fs_at: 0,
+            fs_n: 0
+        },
+    }
+}
+
+pub fn feat(in l: L, i: u64) -> Feat {
+    match l.feats.try_get(i) {
+        Option::Some(f) => f,
+        Option::None => Feat {
+            name: 0,
+            eff_at: 0,
+            eff_n: 0,
+            deps_at: 0,
+            deps_n: 0,
+            sub_at: 0,
+            sub_n: 0,
+            sys_at: 0,
+            sys_n: 0
+        },
+    }
+}
+
+pub fn sys(in l: L, i: u64) -> Sys {
+    match l.syss.try_get(i) {
+        Option::Some(s) => s,
+        Option::None => Sys {
+            raw: 0,
+            ok: false,
+            name: 0,
+            req: 0
+        },
+    }
+}
+
+pub fn dep(in l: L, i: u64) -> Dep {
+    match l.deps.try_get(i) {
+        Option::Some(d) => d,
+        Option::None => Dep {
+            name: 0,
+            req: 0,
+            eff_at: 0,
+            eff_n: 0,
+            opt: false,
+            feat_at: 0,
+            feat_n: 0
+        },
+    }
+}
+
+pub fn root(in l: L, i: u64) -> Root {
+    match l.roots.try_get(i) {
+        Option::Some(r) => r,
+        Option::None => Root {
+            name: 0,
+            req: 0,
+            feat_at: 0,
+            feat_n: 0
+        },
+    }
+}
+
+pub fn ssel(in l: L, i: u64) -> SysSel {
+    match l.ssels.try_get(i) {
+        Option::Some(s) => s,
+        Option::None => SysSel {
+            name: 0,
+            ver: 0
+        },
+    }
+}
+
+pub fn empty_diag() -> Diag {
+    Diag {
+        snap: 0,
+        code: 0,
+        pkg: 0,
+        dep: 0,
+        so: 0,
+        sl: 0,
+        mo: 0,
+        ml: 0
+    }
+}
+
+pub fn diag(in s: ChunkSeq[Diag], i: u64) -> Diag {
+    match s.try_get(i) {
+        Option::Some(d) => d,
+        Option::None => empty_diag(),
+    }
+}
+
+pub fn gnode(in l: L, i: u64) -> GNode {
+    match l.gn.try_get(i) {
+        Option::Some(g) => g,
+        Option::None => GNode {
+            name: 0,
+            man: 0,
+            req_at: 0,
+            req_n: 0,
+            feat_at: 0,
+            feat_n: 0,
+            e_at: 0,
+            e_n: 0,
+            s_at: 0,
+            s_n: 0
+        },
+    }
+}
+
+pub fn sedge(in s: ChunkSeq[SEdge], i: u64) -> SEdge {
+    match s.try_get(i) {
+        Option::Some(e) => e,
+        Option::None => SEdge {
+            name: 0,
+            text: 0,
+            req: 0
+        },
+    }
+}
+
+// Whether the ascending id range ids[at .. at + n] holds x (binary search).
+pub fn has_id(in l: L, at: u64, n: u64, x: u64) -> bool {
+    let mut lo: u64 = 0;
+    let mut hi = n;
+    loop {
+        if lo >= hi {
+            return false;
+        }
+        let mid = add(lo, wrapping_sub(hi, lo) >> 1);
+        let v = id_at(in l, add(at, mid));
+        if v == x {
+            return true;
+        }
+        if v < x {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// The index of the feature of manifest m named x, or none().
+pub fn find_feat(in l: L, in m: Man, x: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = m.feat_n;
+    loop {
+        if lo >= hi {
+            return none();
+        }
+        let mid = add(lo, wrapping_sub(hi, lo) >> 1);
+        let i = add(m.feat_at, mid);
+        let v = feat(in l, i).name;
+        if v == x {
+            return i;
+        }
+        if v < x {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// The index of the dependency of manifest m named x, or none().
+pub fn find_dep(in l: L, in m: Man, x: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = m.dep_n;
+    loop {
+        if lo >= hi {
+            return none();
+        }
+        let mid = add(lo, wrapping_sub(hi, lo) >> 1);
+        let i = add(m.dep_at, mid);
+        let v = dep(in l, i).name;
+        if v == x {
+            return i;
+        }
+        if v < x {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Pool text.
+
+pub fn put(inout l: L, in s: Str) {
+    for i in 0..s.len() {
+        match s.try_byte_at(i) {
+            Option::Some(b) => l.pool.push(b),
+            Option::None => (),
+        }
+    }
+}
+
+// Append the pool range [off, off + len).
+pub fn put_range(inout l: L, off: u64, len: u64) {
+    for i in 0..len {
+        let b = gb(in l, add(off, i));
+        l.pool.push(b);
+    }
+}
+
+pub fn put_id(inout l: L, id: u64) {
+    let off = soff(in l, id);
+    let len = slen(in l, id);
+    put_range(inout l, off, len);
+}
+
+// Append the ids of `list` joined by ", ".
+pub fn put_join(inout l: L, in list: ChunkSeq[u64]) {
+    for i in 0..list.len() {
+        if i > 0 {
+            put(inout l, ", ");
+        }
+        put_id(inout l, sw(in list, i));
+    }
+}
+
+// Byte order of two pool ranges.
+pub fn bytes_ord(in l: L, ao: u64, al: u64, bo: u64, bl: u64) -> u64 {
+    let n = min(al, bl);
+    for i in 0..n {
+        let x = gb(in l, add(ao, i));
+        let y = gb(in l, add(bo, i));
+        if x < y {
+            return 0;
+        }
+        if x > y {
+            return 2;
+        }
+    }
+    ord(al, bl)
+}
+
+// Whether the pool range holds the literal s.
+pub fn is_lit(in l: L, off: u64, len: u64, in s: Str) -> bool {
+    if len != s.len() {
+        return false;
+    }
+    for i in 0..len {
+        let b = match s.try_byte_at(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        if gb(in l, add(off, i)) != b {
+            return false;
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------
+// Sorting. `sort(l, kind)` sorts l.idx (a bottom-up, stable merge sort)
+// with the order `less(l, kind, a, b)`; the order of each kind is defined in
+// the module that uses it (order.ves).
+
+pub fn sort(inout l: L, kind: u64) {
+    let n = l.idx.len();
+    let mut width: u64 = 1;
+    loop {
+        if width >= n {
+            break;
+        }
+        l.tmp.clear();
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let mid = min(add(i, width), n);
+            let hi = min(add(i, mul(width, 2)), n);
+            let mut a = i;
+            let mut b = mid;
+            loop {
+                if a < mid {
+                    let xa = sw(in l.idx, a);
+                    if b < hi {
+                        let xb = sw(in l.idx, b);
+                        if before(in l, kind, xb, xa) {
+                            l.tmp.push(xb);
+                            b = inc(b);
+                        } else {
+                            l.tmp.push(xa);
+                            a = inc(a);
+                        }
+                    } else {
+                        l.tmp.push(xa);
+                        a = inc(a);
+                    }
+                } else if b < hi {
+                    let xb = sw(in l.idx, b);
+                    l.tmp.push(xb);
+                    b = inc(b);
+                } else {
+                    break;
+                }
+            }
+            i = hi;
+        }
+        l.idx.clear();
+        for j in 0..n {
+            let x = sw(in l.tmp, j);
+            l.idx.push(x);
+        }
+        width = mul(width, 2);
+    }
+}
+
+// Version order (`Ord for Version`).
+pub fn ver_ord(in l: L, a: u64, b: u64) -> u64 {
+    let x = ver(in l, a);
+    let y = ver(in l, b);
+    let o = ord(x.major, y.major);
+    if o != 1 {
+        return o;
+    }
+    let o = ord(x.minor, y.minor);
+    if o != 1 {
+        return o;
+    }
+    let o = ord(x.patch, y.patch);
+    if o != 1 {
+        return o;
+    }
+    let o = pre_ord(in l, x.pre, y.pre);
+    if o != 1 {
+        return o;
+    }
+    ident_ord(in l, x.build, y.build, true)
+}
+
+// `Ord for Prerelease`: a release (empty) sorts after every prerelease.
+pub fn pre_ord(in l: L, a: u64, b: u64) -> u64 {
+    if a == b {
+        return 1;
+    }
+    if slen(in l, a) == 0 {
+        return 2;
+    }
+    if slen(in l, b) == 0 {
+        return 0;
+    }
+    ident_ord(in l, a, b, false)
+}
+
+fn all_digits(in l: L, off: u64, len: u64) -> bool {
+    for i in 0..len {
+        let c = gb(in l, add(off, i));
+        if c < 48 || c > 57 {
+            return false;
+        }
+    }
+    true
+}
+
+// The end of the dot-separated segment of [off, end) starting at p.
+fn seg_end(in l: L, p: u64, end: u64) -> u64 {
+    let mut i = p;
+    loop {
+        if i >= end || gb(in l, i) == 46 {
+            return i;
+        }
+        i = inc(i);
+    }
+}
+
+fn skip_zeros(in l: L, p: u64, end: u64) -> u64 {
+    let mut i = p;
+    loop {
+        if i >= end || gb(in l, i) != 48 {
+            return i;
+        }
+        i = inc(i);
+    }
+}
+
+// Dot-separated identifier order of the prerelease (build = false) or
+// build metadata (build = true) strings a and b, as the semver crate
+// compares them.
+pub fn ident_ord(in l: L, a: u64, b: u64, build: bool) -> u64 {
+    if a == b {
+        return 1;
+    }
+    let ao = soff(in l, a);
+    let ae = add(ao, slen(in l, a));
+    let bo = soff(in l, b);
+    let be = add(bo, slen(in l, b));
+    let mut pa = ao;
+    let mut pb = bo;
+    let mut b_done = false;
+    loop {
+        let ea = seg_end(in l, pa, ae);
+        if b_done {
+            return 2;
+        }
+        let eb = seg_end(in l, pb, be);
+        let da = all_digits(in l, pa, wrapping_sub(ea, pa));
+        let db = all_digits(in l, pb, wrapping_sub(eb, pb));
+        let o = if da && db {
+            if build {
+                let ta = skip_zeros(in l, pa, ea);
+                let tb = skip_zeros(in l, pb, eb);
+                let o1 = ord(wrapping_sub(ea, ta), wrapping_sub(eb, tb));
+                if o1 != 1 {
+                    o1
+                } else {
+                    let o2 = bytes_ord(in l, ta, wrapping_sub(ea, ta), tb, wrapping_sub(eb, tb));
+                    if o2 != 1 {
+                        o2
+                    } else {
+                        ord(wrapping_sub(ea, pa), wrapping_sub(eb, pb))
+                    }
+                }
+            } else {
+                let o1 = ord(wrapping_sub(ea, pa), wrapping_sub(eb, pb));
+                if o1 != 1 {
+                    o1
+                } else {
+                    bytes_ord(in l, pa, wrapping_sub(ea, pa), pb, wrapping_sub(eb, pb))
+                }
+            }
+        } else if da {
+            0
+        } else if db {
+            2
+        } else {
+            bytes_ord(in l, pa, wrapping_sub(ea, pa), pb, wrapping_sub(eb, pb))
+        };
+        if o != 1 {
+            return o;
+        }
+        if eb >= be {
+            b_done = true;
+        } else {
+            pb = inc(eb);
+        }
+        if ea >= ae {
+            break;
+        }
+        pa = inc(ea);
+    }
+    if b_done {
+        1
+    } else {
+        0
+    }
+}
+
+// Sort orders. kind 0: string occurrences by bytes; 1: selections by
+// (name, version, canonical JSON); 2: native selections by (name,
+// version); 3: validation diagnostics; 4: upgrade diagnostics; 5: authority
+// changes by (scope, package, dependency); 6: native edges in l.se by
+// (name, text).
+pub fn before(in l: L, kind: u64, a: u64, b: u64) -> bool {
+    order_of(in l, kind, a, b) == 0
+}
+
+pub fn order_of(in l: L, kind: u64, a: u64, b: u64) -> u64 {
+    if kind == 0 {
+        let ia = mul(a, 2);
+        let ib = mul(b, 2);
+        bytes_ord(
+            in l,
+            sw(in l.inw, inc(ia)),
+            sw(in l.inw, add(ia, 2)),
+            sw(in l.inw, inc(ib)),
+            sw(in l.inw, add(ib, 2))
+        )
+    } else if kind == 1 {
+        let x = man(in l, a);
+        let y = man(in l, b);
+        let o = ord(x.name, y.name);
+        if o != 1 {
+            return o;
+        }
+        let o = ver_ord(in l, x.ver, y.ver);
+        if o != 1 {
+            return o;
+        }
+        ord(x.json, y.json)
+    } else if kind == 2 {
+        let x = ssel(in l, a);
+        let y = ssel(in l, b);
+        let o = ord(x.name, y.name);
+        if o != 1 {
+            return o;
+        }
+        ver_ord(in l, x.ver, y.ver)
+    } else if kind == 3 {
+        diag_ord(in l, in l.diags, a, b)
+    } else if kind == 4 {
+        udiag_ord(in l, a, b)
+    } else if kind == 5 {
+        let x = match l.changes.try_get(a) {
+            Option::Some(c) => c,
+            Option::None => return 1,
+        };
+        let y = match l.changes.try_get(b) {
+            Option::Some(c) => c,
+            Option::None => return 1,
+        };
+        let o = ord(x.scope, y.scope);
+        if o != 1 {
+            return o;
+        }
+        let o = ord(x.pkg, y.pkg);
+        if o != 1 {
+            return o;
+        }
+        ord(okey(x.dep), okey(y.dep))
+    } else {
+        let x = sedge(in l.se, a);
+        let y = sedge(in l.se, b);
+        let o = ord(x.name, y.name);
+        if o != 1 {
+            return o;
+        }
+        ord(x.text, y.text)
+    }
+}
+
+// `Ord for Diagnostic`: (code, package, subject, message).
+pub fn diag_ord(in l: L, in s: ChunkSeq[Diag], a: u64, b: u64) -> u64 {
+    let x = diag(in s, a);
+    let y = diag(in s, b);
+    let o = ord(x.code, y.code);
+    if o != 1 {
+        return o;
+    }
+    let o = ord(okey(x.pkg), okey(y.pkg));
+    if o != 1 {
+        return o;
+    }
+    let o = bytes_ord(in l, x.so, x.sl, y.so, y.sl);
+    if o != 1 {
+        return o;
+    }
+    bytes_ord(in l, x.mo, x.ml, y.mo, y.ml)
+}
+
+// `Ord for UpgradeDiagnostic`: (code, package, dependency, snapshot,
+// message).
+pub fn udiag_ord(in l: L, a: u64, b: u64) -> u64 {
+    let x = diag(in l.udiags, a);
+    let y = diag(in l.udiags, b);
+    let o = ord(x.code, y.code);
+    if o != 1 {
+        return o;
+    }
+    let o = ord(okey(x.pkg), okey(y.pkg));
+    if o != 1 {
+        return o;
+    }
+    let o = ord(okey(x.dep), okey(y.dep));
+    if o != 1 {
+        return o;
+    }
+    let o = ord(x.snap, y.snap);
+    if o != 1 {
+        return o;
+    }
+    bytes_ord(in l, x.mo, x.ml, y.mo, y.ml)
+}

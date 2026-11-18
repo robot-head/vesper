@@ -1,0 +1,377 @@
+// Module check of @vesper/loom-calculus (see lib.ves): names, capability
+// spellings, diagnostics and `validate_manifest`.
+use self::{
+    Diag,
+    L,
+    Man
+};
+use self::util::{
+    add,
+    dep,
+    feat,
+    find_dep,
+    find_feat,
+    gb,
+    id_at,
+    inc,
+    man,
+    none,
+    put,
+    put_id,
+    slen,
+    soff,
+    sys
+};
+
+// Diagnostic codes, in the order of `Code`.
+pub fn code_manifest_syntax() -> u64 {
+    0
+}
+
+pub fn lower(c: u8) -> bool {
+    c >= 97 && c <= 122
+}
+
+pub fn upper(c: u8) -> bool {
+    c >= 65 && c <= 90
+}
+
+pub fn digit(c: u8) -> bool {
+    c >= 48 && c <= 57
+}
+
+pub fn alnum(c: u8) -> bool {
+    lower(c) || upper(c) || digit(c)
+}
+
+fn str_byte(in s: Str, i: u64) -> u8 {
+    match s.try_byte_at(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+// One component of a package name: nonempty, lowercase ASCII, digits, `-`
+// and `_`, starting with a lowercase letter.
+fn component(in s: Str, from: u64, to: u64) -> bool {
+    if from >= to || !lower(str_byte(in s, from)) {
+        return false;
+    }
+    for i in from..to {
+        let c = str_byte(in s, i);
+        if !(lower(c) || digit(c) || c == 45 || c == 95) {
+            return false;
+        }
+    }
+    true
+}
+
+// `PackageName::parse`.
+pub fn name_valid(in s: Str) -> bool {
+    let n = s.len();
+    let at = n > 0 && str_byte(in s, 0) == 64;
+    let start: u64 = if at {
+        1
+    } else {
+        0
+    };
+    let mut slash = none();
+    for i in start..n {
+        if str_byte(in s, i) == 47 {
+            if slash != none() {
+                return false;
+            }
+            slash = i;
+        }
+    }
+    if slash == none() {
+        return false;
+    }
+    if !component(in s, start, slash) || !component(in s, inc(slash), n) {
+        return false;
+    }
+    if at {
+        return true;
+    }
+    slash == 3 && str_byte(in s, 0) == 115 && str_byte(in s, 1) == 116 && str_byte(in s, 2) == 100
+}
+
+// `capability_valid`: an uppercase head, balanced brackets with no empty
+// argument list, and identifier punctuation.
+pub fn capability_valid(in l: L, id: u64) -> bool {
+    let off = soff(in l, id);
+    let n = slen(in l, id);
+    if n == 0 || !upper(gb(in l, off)) {
+        return false;
+    }
+    let mut depth: u64 = 0;
+    let mut prev: u8 = 0;
+    for i in 0..n {
+        let c = gb(in l, add(off, i));
+        if c == 91 {
+            depth = inc(depth);
+        } else if c == 93 {
+            if depth == 0 {
+                return false;
+            }
+            if prev == 91 {
+                return false;
+            }
+            depth = wrapping_sub(depth, 1);
+        } else if !(
+            alnum(c) || c == 95 || c == 44 || c == 58 || c == 45 || c == 47 || c == 64 || c == 46
+        ) {
+            return false;
+        }
+        prev = c;
+    }
+    depth == 0
+}
+
+// `feature_valid`.
+pub fn feature_valid(in l: L, id: u64) -> bool {
+    let off = soff(in l, id);
+    let n = slen(in l, id);
+    if n == 0 {
+        return false;
+    }
+    for i in 0..n {
+        let c = gb(in l, add(off, i));
+        if !(alnum(c) || c == 95 || c == 45) {
+            return false;
+        }
+    }
+    true
+}
+
+// `system_name_valid`.
+pub fn system_name_valid(in l: L, id: u64) -> bool {
+    let off = soff(in l, id);
+    let n = slen(in l, id);
+    if n == 0 {
+        return false;
+    }
+    for i in 0..n {
+        let c = gb(in l, add(off, i));
+        if !(alnum(c) || c == 45 || c == 95 || c == 46 || c == 43) {
+            return false;
+        }
+    }
+    true
+}
+
+// A build input path: nonempty, not absolute, without `\`, `:` or NUL, and
+// with no `..` component.
+fn relative(in l: L, id: u64) -> bool {
+    let off = soff(in l, id);
+    let n = slen(in l, id);
+    if n == 0 || gb(in l, off) == 47 {
+        return false;
+    }
+    let mut part: u64 = 0;
+    for i in 0..n {
+        let c = gb(in l, add(off, i));
+        if c == 92 || c == 58 || c == 0 {
+            return false;
+        }
+        if c == 47 {
+            if wrapping_sub(i, part)
+                == 2
+                && gb(in l, add(off, part))
+                == 46
+                && gb(in l, add(off, inc(part)))
+                == 46 {
+                return false;
+            }
+            part = inc(i);
+        }
+    }
+    !(
+        wrapping_sub(n, part)
+            == 2
+            && gb(in l, add(off, part))
+            == 46
+            && gb(in l, add(off, inc(part)))
+            == 46
+    )
+}
+
+// ---------------------------------------------------------------------
+// Emitting. The subject and the message are built at the end of the pool.
+
+// Start a pool string; returns its offset.
+pub fn mark(in l: L) -> u64 {
+    l.pool.len()
+}
+
+// The pool range from `from` to the end.
+pub fn since(in l: L, from: u64) -> u64 {
+    wrapping_sub(l.pool.len(), from)
+}
+
+// Emit a diagnostic whose subject is the pool range (so, sl) and whose
+// message is the range from `mo` to the end of the pool.
+pub fn emit_at(inout l: L, code: u64, pkg: u64, so: u64, sl: u64, mo: u64) {
+    let ml = since(in l, mo);
+    l
+        .diags
+        .push(
+        Diag {
+            snap: 0,
+            code: code,
+            pkg: pkg,
+            dep: none(),
+            so: so,
+            sl: sl,
+            mo: mo,
+            ml: ml
+        }
+    );
+}
+
+// Emit with a string-id subject and a literal message.
+pub fn emit_id(inout l: L, code: u64, pkg: u64, subject: u64, in msg: Str) {
+    let mo = mark(in l);
+    put(inout l, msg);
+    let so = soff(in l, subject);
+    let sl = slen(in l, subject);
+    emit_at(inout l, code, pkg, so, sl, mo);
+}
+
+// Emit with a literal subject and a literal message.
+pub fn emit_lit(inout l: L, code: u64, pkg: u64, in subject: Str, in msg: Str) {
+    let so = mark(in l);
+    put(inout l, subject);
+    let sl = since(in l, so);
+    let mo = mark(in l);
+    put(inout l, msg);
+    emit_at(inout l, code, pkg, so, sl, mo);
+}
+
+// Literal subject (so, sl) already in the pool, message `prefix` id
+// `suffix`.
+fn emit_quoted(
+    inout l: L,
+    code: u64,
+    pkg: u64,
+    so: u64,
+    sl: u64,
+    in prefix: Str,
+    id: u64,
+    in suffix: Str
+) {
+    let mo = mark(in l);
+    put(inout l, prefix);
+    put_id(inout l, id);
+    put(inout l, suffix);
+    emit_at(inout l, code, pkg, so, sl, mo);
+}
+
+// `check_caps`: every capability of ids[at .. at + n] must be canonical.
+fn check_caps(inout l: L, at: u64, n: u64, owner: u64, so: u64, sl: u64) {
+    for i in 0..n {
+        let cap = id_at(in l, add(at, i));
+        if !capability_valid(in l, cap) {
+            emit_quoted(inout l, 1, owner, so, sl, "non-canonical capability '", cap, "'");
+        }
+    }
+}
+
+// `validate_manifest` without the final sort (the caller sorts).
+pub fn check_manifest(inout l: L, mi: u64) {
+    let m = man(in l, mi);
+    let owner = m.name;
+    let so = mark(in l);
+    put(inout l, "package.capability_ceiling");
+    let sl = since(in l, so);
+    check_caps(inout l, m.ceil_at, m.ceil_n, owner, so, sl);
+    if m.sandbox {
+        if m.net {
+            emit_lit(
+                inout l,
+                2,
+                owner,
+                "build-sandbox.allow_network",
+                "Loom build components have no network authority"
+            );
+        }
+        let so = mark(in l);
+        put(inout l, "build-sandbox");
+        let sl = since(in l, so);
+        for i in 0..m.path_n {
+            let path = id_at(in l, add(m.path_at, i));
+            if !relative(in l, path) {
+                emit_quoted(
+                    inout l,
+                    2,
+                    owner,
+                    so,
+                    sl,
+                    "build input path must be relative and traversal-free: '",
+                    path,
+                    "'"
+                );
+            }
+        }
+    }
+    for i in 0..m.dep_n {
+        let d = dep(in l, add(m.dep_at, i));
+        let dso = soff(in l, d.name);
+        let dsl = slen(in l, d.name);
+        check_caps(inout l, d.eff_at, d.eff_n, owner, dso, dsl);
+    }
+    for i in 0..m.feat_n {
+        let f = feat(in l, add(m.feat_at, i));
+        let so = soff(in l, f.name);
+        let sl = slen(in l, f.name);
+        if !feature_valid(in l, f.name) {
+            emit_id(inout l, 3, owner, f.name, "invalid feature name");
+        }
+        check_caps(inout l, f.eff_at, f.eff_n, owner, so, sl);
+        for j in 0..f.deps_n {
+            let d = id_at(in l, add(f.deps_at, j));
+            if find_dep(in l, in m, d) == none() {
+                emit_quoted(
+                    inout l,
+                    5,
+                    owner,
+                    so,
+                    sl,
+                    "feature refers to undeclared dependency ",
+                    d,
+                    ""
+                );
+            }
+        }
+        for j in 0..f.sub_n {
+            let nested = id_at(in l, add(f.sub_at, j));
+            if find_feat(in l, in m, nested) == none() {
+                emit_quoted(
+                    inout l,
+                    4,
+                    owner,
+                    so,
+                    sl,
+                    "feature refers to unknown feature '",
+                    nested,
+                    "'"
+                );
+            }
+        }
+        for j in 0..f.sys_n {
+            let s = sys(in l, add(f.sys_at, j));
+            if !s.ok || !system_name_valid(in l, s.name) {
+                emit_quoted(
+                    inout l,
+                    6,
+                    owner,
+                    so,
+                    sl,
+                    "expected native name followed by a SemVer requirement: '",
+                    s.raw,
+                    "'"
+                );
+            }
+        }
+    }
+}

@@ -66,6 +66,15 @@ vesper_port_object(
     target = VESPER_TARGET,
 )
 
+vesper_port_object(
+    name = "crucible_vesper_divergent_fuzz",
+    edit_src = "vesper/src/lib.ves",
+    edits = {"self.cur.try_set(pos, 0);": "self.cur.try_set(pos, 1);"},
+    library = "crucible",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
 vesper_crate(
     build_script_data = [
         ":crucible_vesper",

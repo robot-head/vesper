@@ -2,8 +2,32 @@
 name = "vesper-serde"
 version = "0.1.0"
 edition = "2024"
-description = "Bounded scalar host JSON indexing, cursors, and transactional slice encoding"
+description = "Bounded scalar host JSON indexing, cursors, and transactional slice encoding (port-backed build)"
 publish = false
+build = "build.rs"
+
+# This is the port-backed build: build.rs links the Vesper package in vesper/
+# and sets cfg(vesper_port). The compiler and every crate inside
+# `cargo tree -p vesper -e normal,build` use the frozen Rust seed copy,
+# crates/vesper-serde/seed (package vesper-serde-seed, same library name),
+# instead; see "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
+# Every other dependent also stays on the seed until the port reaches
+# performance parity (the owner's rule for port wave P1).
+
+[dependencies]
+vesper-port-abi = { path = "../vesper-port-abi" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+vesper-bench = { path = "../vesper-bench" }
+
+[features]
+# A deliberately divergent port build (one wrong edit per ported module,
+# chosen with VESPER_SERDE_DIVERGE); the tests must fail on it.
+vesper-port-divergent = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

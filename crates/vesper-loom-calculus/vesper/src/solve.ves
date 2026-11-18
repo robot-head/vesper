@@ -1,0 +1,869 @@
+// Module solve of @vesper/loom-calculus (see lib.ves): `validate_solution`
+// for the solution decoded last, committed as one snapshot.
+//
+// Selected packages get dense indices p in name order (pname, psel). The
+// capability and feature strings of the solution get dense indices too
+// (cmap/clist, fmap/flist, ascending with the id), and sets are rows of
+// flags over them: frow (requested features) and nrow (the node's expanded
+// features) have nf flags per package, rrow (required capabilities) nc. nfirst holds four
+// words per node: its edges ea[at .. at + n] (dependency indices) and its
+// native edges eb[at .. at + 3n] (name, text, requirement).
+use self::{
+    GNode,
+    L,
+    SEdge,
+    Snap
+};
+use self::util::{
+    add,
+    dep,
+    diag,
+    diag_ord,
+    feat,
+    find_feat,
+    gb,
+    id_at,
+    inc,
+    is_lit,
+    man,
+    mul,
+    none,
+    put,
+    put_id,
+    put_join,
+    req,
+    root,
+    sbool,
+    sedge,
+    slen,
+    soff,
+    sort,
+    ssel,
+    sw,
+    sys,
+    ver
+};
+use self::check::{
+    check_manifest,
+    emit_at,
+    emit_id,
+    emit_lit,
+    mark,
+    system_name_valid
+};
+use self::semver::{
+    matches
+};
+
+fn setb(inout s: ChunkSeq[bool], i: u64, v: bool) {
+    s.try_set(i, v);
+}
+
+fn setw(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    s.try_set(i, v);
+}
+
+fn fill_bool(inout s: ChunkSeq[bool], n: u64) {
+    s.clear();
+    for i in 0..n {
+        s.push(false);
+    }
+}
+
+fn fill_word(inout s: ChunkSeq[u64], n: u64, v: u64) {
+    s.clear();
+    for i in 0..n {
+        s.push(v);
+    }
+}
+
+// "<version> does not satisfy <requirement>" (with `prefix` first).
+fn emit_mismatch(inout l: L, pkg: u64, subject: u64, in prefix: Str, vi: u64, text: u64) {
+    let mo = mark(in l);
+    put(inout l, prefix);
+    let vt = ver(in l, vi).text;
+    put_id(inout l, vt);
+    put(inout l, " does not satisfy ");
+    put_id(inout l, text);
+    let so = soff(in l, subject);
+    let sl = slen(in l, subject);
+    emit_at(inout l, 12, pkg, so, sl, mo);
+}
+
+// Whether the capability's head (the text before the first `[`) is
+// `UnsafeFfi` or `Ffi`.
+fn foreign(in l: L, id: u64) -> bool {
+    let off = soff(in l, id);
+    let n = slen(in l, id);
+    let mut h = n;
+    for i in 0..n {
+        if gb(in l, add(off, i)) == 91 {
+            h = i;
+            break;
+        }
+    }
+    is_lit(in l, off, h, "UnsafeFfi") || is_lit(in l, off, h, "Ffi")
+}
+
+// Emit `prefix` + the ids of l.work joined by ", ", when l.work is not
+// empty.
+fn emit_excess(inout l: L, code: u64, pkg: u64, so: u64, sl: u64, in prefix: Str) {
+    if l.work.len() == 0 {
+        return;
+    }
+    let mo = mark(in l);
+    put(inout l, prefix);
+    let mut i: u64 = 0;
+    loop {
+        if i >= l.work.len() {
+            break;
+        }
+        if i > 0 {
+            put(inout l, ", ");
+        }
+        let c = sw(in l.work, i);
+        put_id(inout l, c);
+        i = inc(i);
+    }
+    emit_at(inout l, code, pkg, so, sl, mo);
+}
+
+fn cx(in l: L, id: u64) -> u64 {
+    sw(in l.cmap, id)
+}
+
+fn fx(in l: L, id: u64) -> u64 {
+    sw(in l.fmap, id)
+}
+
+fn mark_range(inout l: L, at: u64, n: u64) {
+    for i in 0..n {
+        let id = id_at(in l, add(at, i));
+        setb(inout l.mk, id, true);
+    }
+}
+
+// Mark the capability (caps = true) or feature strings of the solution in
+// l.mk.
+fn mark_universe(inout l: L, caps: bool) {
+    for i in 0..l.sel_n {
+        let m = man(in l, add(l.sel_at, i));
+        if caps {
+            mark_range(inout l, m.ceil_at, m.ceil_n);
+        } else {
+            mark_range(inout l, m.fs_at, m.fs_n);
+        }
+        for j in 0..m.dep_n {
+            let d = dep(in l, add(m.dep_at, j));
+            if caps {
+                mark_range(inout l, d.eff_at, d.eff_n);
+            } else {
+                mark_range(inout l, d.feat_at, d.feat_n);
+            }
+        }
+        for j in 0..m.feat_n {
+            let f = feat(in l, add(m.feat_at, j));
+            if caps {
+                mark_range(inout l, f.eff_at, f.eff_n);
+            } else {
+                setb(inout l.mk, f.name, true);
+                mark_range(inout l, f.sub_at, f.sub_n);
+            }
+        }
+    }
+    if !caps {
+        for i in 0..l.root_n {
+            let r = root(in l, add(l.root_at, i));
+            mark_range(inout l, r.feat_at, r.feat_n);
+        }
+    }
+}
+
+// Dense indices of the marked ids, in id order; clears the marks.
+fn dense(inout l: L, caps: bool) -> u64 {
+    let k = l.k;
+    let mut n: u64 = 0;
+    for id in 0..k {
+        if sbool(in l.mk, id) {
+            setb(inout l.mk, id, false);
+            if caps {
+                setw(inout l.cmap, id, n);
+                l.clist.push(id);
+            } else {
+                setw(inout l.fmap, id, n);
+                l.flist.push(id);
+            }
+            n = inc(n);
+        }
+    }
+    n
+}
+
+pub fn solve(inout l: L) {
+    let diag_at = l.diags.len();
+    let k = l.k;
+    if l.schema != 1 {
+        emit_lit(inout l, 0, none(), "schema_version", "unsupported solution schema version");
+    }
+    fill_word(inout l.pof, k, none());
+    fill_word(inout l.sysof, k, none());
+    fill_bool(inout l.rootf, k);
+    fill_bool(inout l.mk, k);
+    fill_bool(inout l.usedsys, k);
+    // Selections in (name, version, JSON) order; the last one of a name
+    // wins, as with `BTreeMap::insert`.
+    l.idx.clear();
+    for i in 0..l.sel_n {
+        l.idx.push(add(l.sel_at, i));
+    }
+    sort(inout l, 1);
+    l.work.clear();
+    for i in 0..l.idx.len() {
+        let x = sw(in l.idx, i);
+        l.work.push(x);
+    }
+    for j in 0..l.work.len() {
+        let mi = sw(in l.work, j);
+        check_manifest(inout l, mi);
+        let name = man(in l, mi).name;
+        if sw(in l.pof, name) != none() {
+            emit_id(
+                inout l,
+                7,
+                name,
+                name,
+                "version uniqueness requires one selection per package name"
+            );
+        }
+        setw(inout l.pof, name, mi);
+    }
+    l.pname.clear();
+    l.psel.clear();
+    let mut np: u64 = 0;
+    for id in 0..k {
+        let mi = sw(in l.pof, id);
+        if mi != none() {
+            l.pname.push(id);
+            l.psel.push(mi);
+            setw(inout l.pof, id, np);
+            np = inc(np);
+        }
+    }
+    l.np = np;
+    // Native selections in (name, version) order.
+    l.idx.clear();
+    for i in 0..l.ss_n {
+        l.idx.push(add(l.ss_at, i));
+    }
+    sort(inout l, 2);
+    for j in 0..l.idx.len() {
+        let s = ssel(in l, sw(in l.idx, j));
+        if !system_name_valid(in l, s.name) {
+            emit_id(inout l, 6, none(), s.name, "invalid native package name");
+        }
+        if sw(in l.sysof, s.name) != none() {
+            emit_id(
+                inout l,
+                8,
+                none(),
+                s.name,
+                "native version uniqueness requires one selection per name"
+            );
+        }
+        setw(inout l.sysof, s.name, s.ver);
+    }
+    fill_word(inout l.cmap, k, none());
+    fill_word(inout l.fmap, k, none());
+    l.clist.clear();
+    l.flist.clear();
+    mark_universe(inout l, true);
+    l.nc = dense(inout l, true);
+    mark_universe(inout l, false);
+    l.nf = dense(inout l, false);
+    fill_bool(inout l.frow, mul(np, l.nf));
+    fill_bool(inout l.nrow, mul(np, l.nf));
+    fill_bool(inout l.rrow, mul(np, l.nc));
+    fill_bool(inout l.reach, np);
+    fill_bool(inout l.hasn, np);
+    fill_bool(inout l.queued, np);
+    fill_word(inout l.nfirst, mul(np, 4), 0);
+    l.ea.clear();
+    l.eb.clear();
+    l.queue.clear();
+    // Roots.
+    for i in 0..l.root_n {
+        let r = root(in l, add(l.root_at, i));
+        setb(inout l.rootf, r.name, true);
+        let p = sw(in l.pof, r.name);
+        if p != none() {
+            let mv = man(in l, sw(in l.psel, p)).ver;
+            if !matches(in l, r.req, mv) {
+                let so = mark(in l);
+                put(inout l, "root");
+                let mo = mark(in l);
+                let vt = ver(in l, mv).text;
+                put_id(inout l, vt);
+                put(inout l, " does not satisfy ");
+                let rt = req(in l, r.req).text;
+                put_id(inout l, rt);
+                emit_at(inout l, 12, r.name, so, 4, mo);
+            }
+            let base = mul(p, l.nf);
+            for j in 0..r.feat_n {
+                let f = fx(in l, id_at(in l, add(r.feat_at, j)));
+                setb(inout l.frow, add(base, f), true);
+            }
+            l.queue.push(p);
+        } else {
+            emit_lit(inout l, 9, r.name, "root", "root inclusion requires a selected package");
+        }
+    }
+    // The additive fixed point over features and the active closure.
+    let mut head: u64 = 0;
+    loop {
+        if head >= l.queue.len() {
+            break;
+        }
+        let p = sw(in l.queue, head);
+        head = inc(head);
+        visit(inout l, p);
+    }
+    propagate(inout l);
+    final_checks(inout l);
+    finish_snapshot(inout l, diag_at);
+}
+
+// One worklist step for package p.
+fn visit(inout l: L, p: u64) {
+    let nf = l.nf;
+    let nc = l.nc;
+    let mi = sw(in l.psel, p);
+    let m = man(in l, mi);
+    let name = m.name;
+    let base = mul(p, nf);
+    let cbase = mul(p, nc);
+    let first = !sbool(in l.reach, p);
+    setb(inout l.reach, p, true);
+    for j in 0..m.fs_n {
+        let f = fx(in l, id_at(in l, add(m.fs_at, j)));
+        setb(inout l.frow, add(base, f), true);
+    }
+    l.work.clear();
+    for c in 0..nf {
+        if sbool(in l.frow, add(base, c)) {
+            let id = sw(in l.flist, c);
+            l.work.push(id);
+        }
+    }
+    let mut wi: u64 = 0;
+    loop {
+        if wi >= l.work.len() {
+            break;
+        }
+        let f = sw(in l.work, wi);
+        wi = inc(wi);
+        let fi = find_feat(in l, in m, f);
+        if fi != none() {
+            let ft = feat(in l, fi);
+            for j in 0..ft.sub_n {
+                let sub = id_at(in l, add(ft.sub_at, j));
+                let sx = fx(in l, sub);
+                if !sbool(in l.frow, add(base, sx)) {
+                    setb(inout l.frow, add(base, sx), true);
+                    l.work.push(sub);
+                }
+            }
+        } else {
+            emit_id(inout l, 4, name, f, "requested feature is not declared");
+        }
+    }
+    if !first && sbool(in l.hasn, p) {
+        let mut same = true;
+        for c in 0..nf {
+            if sbool(in l.frow, add(base, c)) != sbool(in l.nrow, add(base, c)) {
+                same = false;
+                break;
+            }
+        }
+        if same {
+            return;
+        }
+    }
+    for c in 0..nf {
+        let v = sbool(in l.frow, add(base, c));
+        setb(inout l.nrow, add(base, c), v);
+    }
+    for c in 0..nc {
+        setb(inout l.rrow, add(cbase, c), false);
+    }
+    for j in 0..m.ceil_n {
+        let c = cx(in l, id_at(in l, add(m.ceil_at, j)));
+        setb(inout l.rrow, add(cbase, c), true);
+    }
+    l.se.clear();
+    for i in 0..m.feat_n {
+        let ft = feat(in l, add(m.feat_at, i));
+        if sbool(in l.nrow, add(base, fx(in l, ft.name))) {
+            for j in 0..ft.deps_n {
+                let d = id_at(in l, add(ft.deps_at, j));
+                setb(inout l.mk, d, true);
+            }
+            for j in 0..ft.eff_n {
+                let e = cx(in l, id_at(in l, add(ft.eff_at, j)));
+                setb(inout l.rrow, add(cbase, e), true);
+            }
+            for j in 0..ft.sys_n {
+                let s = sys(in l, add(ft.sys_at, j));
+                if s.ok && system_name_valid(in l, s.name) {
+                    let rt = req(in l, s.req).text;
+                    l
+                        .se
+                        .push(
+                        SEdge {
+                            name: s.name,
+                            text: rt,
+                            req: s.req
+                        }
+                    );
+                }
+            }
+        }
+    }
+    let e_at = l.ea.len();
+    for i in 0..m.dep_n {
+        let di = add(m.dep_at, i);
+        let d = dep(in l, di);
+        if !d.opt || sbool(in l.mk, d.name) {
+            l.ea.push(di);
+            let tp = sw(in l.pof, d.name);
+            if tp != none() {
+                let tv = man(in l, sw(in l.psel, tp)).ver;
+                if !matches(in l, d.req, tv) {
+                    let rt = req(in l, d.req).text;
+                    emit_mismatch(inout l, name, d.name, "", tv, rt);
+                }
+                let tbase = mul(tp, nf);
+                let mut grew = false;
+                for j in 0..d.feat_n {
+                    let f = fx(in l, id_at(in l, add(d.feat_at, j)));
+                    if !sbool(in l.frow, add(tbase, f)) {
+                        setb(inout l.frow, add(tbase, f), true);
+                        grew = true;
+                    }
+                }
+                if !sbool(in l.reach, tp) || grew {
+                    l.queue.push(tp);
+                }
+            } else {
+                emit_id(
+                    inout l,
+                    10,
+                    name,
+                    d.name,
+                    "dependency closure requires a selected package"
+                );
+            }
+        }
+    }
+    for i in 0..m.feat_n {
+        let ft = feat(in l, add(m.feat_at, i));
+        for j in 0..ft.deps_n {
+            let d = id_at(in l, add(ft.deps_at, j));
+            setb(inout l.mk, d, false);
+        }
+    }
+    let e_n = wrapping_sub(l.ea.len(), e_at);
+    // Native edges: a set ordered by (name, requirement text).
+    l.idx.clear();
+    for i in 0..l.se.len() {
+        l.idx.push(i);
+    }
+    sort(inout l, 6);
+    let s_at = l.eb.len();
+    let mut s_n: u64 = 0;
+    let mut last = none();
+    for j in 0..l.idx.len() {
+        let x = sw(in l.idx, j);
+        let e = sedge(in l.se, x);
+        let dup = if last != none() {
+            let pe = sedge(in l.se, last);
+            pe.name == e.name && pe.text == e.text
+        } else {
+            false
+        };
+        if !dup {
+            last = x;
+            l.eb.push(e.name);
+            l.eb.push(e.text);
+            l.eb.push(e.req);
+            s_n = inc(s_n);
+        }
+    }
+    for j in 0..s_n {
+        let at = add(s_at, mul(j, 3));
+        let sname = sw(in l.eb, at);
+        let text = sw(in l.eb, inc(at));
+        let r = sw(in l.eb, add(at, 2));
+        let sv = sw(in l.sysof, sname);
+        if sv != none() {
+            if !matches(in l, r, sv) {
+                emit_mismatch(inout l, name, sname, "native version ", sv, text);
+            }
+        } else {
+            emit_id(inout l, 11, name, sname, "active feature requires a native package selection");
+        }
+    }
+    setb(inout l.hasn, p, true);
+    let nb = mul(p, 4);
+    setw(inout l.nfirst, nb, e_at);
+    setw(inout l.nfirst, inc(nb), e_n);
+    setw(inout l.nfirst, add(nb, 2), s_at);
+    setw(inout l.nfirst, add(nb, 3), s_n);
+}
+
+// The node of the active edge ea[e], or none().
+fn edge_target(in l: L, e: u64) -> u64 {
+    let d = dep(in l, sw(in l.ea, e));
+    let tp = sw(in l.pof, d.name);
+    if tp != none() && sbool(in l.hasn, tp) {
+        tp
+    } else {
+        none()
+    }
+}
+
+// Propagate required capabilities backwards over active edges.
+fn propagate(inout l: L) {
+    let nc = l.nc;
+    let np = l.np;
+    fill_word(inout l.pcount, np, 0);
+    for p in 0..np {
+        if sbool(in l.hasn, p) {
+            let nb = mul(p, 4);
+            let at = sw(in l.nfirst, nb);
+            let n = sw(in l.nfirst, inc(nb));
+            for e in 0..n {
+                let tp = edge_target(in l, add(at, e));
+                if tp != none() {
+                    let c = sw(in l.pcount, tp);
+                    setw(inout l.pcount, tp, inc(c));
+                }
+            }
+        }
+    }
+    l.pstart.clear();
+    let mut total: u64 = 0;
+    for p in 0..np {
+        l.pstart.push(total);
+        total = add(total, sw(in l.pcount, p));
+    }
+    l.pstart.push(total);
+    fill_word(inout l.plist, total, 0);
+    for p in 0..np {
+        let s = sw(in l.pstart, p);
+        setw(inout l.pcount, p, s);
+    }
+    for p in 0..np {
+        if sbool(in l.hasn, p) {
+            let nb = mul(p, 4);
+            let at = sw(in l.nfirst, nb);
+            let n = sw(in l.nfirst, inc(nb));
+            for e in 0..n {
+                let tp = edge_target(in l, add(at, e));
+                if tp != none() {
+                    let c = sw(in l.pcount, tp);
+                    setw(inout l.plist, c, p);
+                    setw(inout l.pcount, tp, inc(c));
+                }
+            }
+        }
+    }
+    l.queue.clear();
+    for p in 0..np {
+        if sbool(in l.hasn, p) {
+            l.queue.push(p);
+            setb(inout l.queued, p, true);
+        }
+    }
+    let mut head: u64 = 0;
+    loop {
+        if head >= l.queue.len() {
+            break;
+        }
+        let child = sw(in l.queue, head);
+        head = inc(head);
+        setb(inout l.queued, child, false);
+        let cb = mul(child, nc);
+        let from = sw(in l.pstart, child);
+        let to = sw(in l.pstart, inc(child));
+        for j in from..to {
+            let parent = sw(in l.plist, j);
+            let pb = mul(parent, nc);
+            let mut grew = false;
+            for c in 0..nc {
+                if sbool(in l.rrow, add(cb, c)) && !sbool(in l.rrow, add(pb, c)) {
+                    setb(inout l.rrow, add(pb, c), true);
+                    grew = true;
+                }
+            }
+            if grew && !sbool(in l.queued, parent) {
+                setb(inout l.queued, parent, true);
+                l.queue.push(parent);
+            }
+        }
+    }
+}
+
+// Ceilings, the unsafe-FFI policy and edge budgets, in package order.
+fn final_checks(inout l: L) {
+    for p in 0..l.np {
+        check_node(inout l, p);
+    }
+}
+
+fn check_node(inout l: L, p: u64) {
+    let nc = l.nc;
+    if !sbool(in l.hasn, p) {
+        return;
+    }
+    {
+        let m = man(in l, sw(in l.psel, p));
+        let name = m.name;
+        let base = mul(p, nc);
+        for j in 0..m.ceil_n {
+            let c = id_at(in l, add(m.ceil_at, j));
+            setb(inout l.mk, c, true);
+        }
+        l.work.clear();
+        for c in 0..nc {
+            let id = sw(in l.clist, c);
+            if sbool(in l.rrow, add(base, c)) && !sbool(in l.mk, id) {
+                l.work.push(id);
+            }
+        }
+        for j in 0..m.ceil_n {
+            let c = id_at(in l, add(m.ceil_at, j));
+            setb(inout l.mk, c, false);
+        }
+        let so = mark(in l);
+        put(inout l, "package.capability_ceiling");
+        emit_excess(inout l, 13, name, so, 26, "required capabilities exceed package ceiling: ");
+        if m.forbid {
+            for c in 0..nc {
+                if sbool(in l.rrow, add(base, c)) && foreign(in l, sw(in l.clist, c)) {
+                    emit_lit(
+                        inout l,
+                        15,
+                        name,
+                        "package.forbid_unsafe_ffi",
+                        "reachable package requires foreign authority"
+                    );
+                    break;
+                }
+            }
+        }
+        let nb = mul(p, 4);
+        let at = sw(in l.nfirst, nb);
+        let n = sw(in l.nfirst, inc(nb));
+        for e in 0..n {
+            check_edge(inout l, name, add(at, e));
+        }
+    }
+}
+
+// The budget of the active edge ea[e] of package `name`.
+fn check_edge(inout l: L, name: u64, e: u64) {
+    let nc = l.nc;
+    let tp = edge_target(in l, e);
+    if tp == none() {
+        return;
+    }
+    {
+        {
+            let d = dep(in l, sw(in l.ea, e));
+            for j in 0..d.eff_n {
+                let c = id_at(in l, add(d.eff_at, j));
+                setb(inout l.mk, c, true);
+            }
+            let tb = mul(tp, nc);
+            l.work.clear();
+            for c in 0..nc {
+                let id = sw(in l.clist, c);
+                if sbool(in l.rrow, add(tb, c)) && !sbool(in l.mk, id) {
+                    l.work.push(id);
+                }
+            }
+            for j in 0..d.eff_n {
+                let c = id_at(in l, add(d.eff_at, j));
+                setb(inout l.mk, c, false);
+            }
+            let dso = soff(in l, d.name);
+            let dsl = slen(in l, d.name);
+            emit_excess(
+                inout l,
+                14,
+                name,
+                dso,
+                dsl,
+                "dependency exceeds edge capability ceiling: "
+            );
+        }
+    }
+}
+
+// Sort and deduplicate this snapshot's diagnostics, and commit its graph.
+fn finish_snapshot(inout l: L, diag_at: u64) {
+    let diag_n = sort_diags(inout l, diag_at);
+    commit(inout l, diag_at, diag_n);
+}
+
+// Sort and deduplicate diags[diag_at ..]; returns how many remain.
+pub fn sort_diags(inout l: L, diag_at: u64) -> u64 {
+    l.idx.clear();
+    for i in diag_at..l.diags.len() {
+        l.idx.push(i);
+    }
+    sort(inout l, 3);
+    l.dtmp.clear();
+    let mut last = none();
+    for j in 0..l.idx.len() {
+        let x = sw(in l.idx, j);
+        let dup = last != none() && diag_ord(in l, in l.diags, last, x) == 1;
+        if !dup {
+            last = x;
+            let d = diag(in l.diags, x);
+            l.dtmp.push(d);
+        }
+    }
+    l.diags.truncate(diag_at);
+    for j in 0..l.dtmp.len() {
+        let d = diag(in l.dtmp, j);
+        l.diags.push(d);
+    }
+    l.dtmp.len()
+}
+
+fn commit(inout l: L, diag_at: u64, diag_n: u64) {
+    let k = l.k;
+    let node_at = l.gn.len();
+    for p in 0..l.np {
+        commit_node(inout l, p);
+    }
+    commit_rest(inout l, diag_at, diag_n, node_at);
+}
+
+fn commit_node(inout l: L, p: u64) {
+    if !sbool(in l.hasn, p) {
+        return;
+    }
+    {
+        let base = mul(p, l.nc);
+        let req_at = l.gids.len();
+        for c in 0..l.nc {
+            if sbool(in l.rrow, add(base, c)) {
+                let id = sw(in l.clist, c);
+                l.gids.push(id);
+            }
+        }
+        let req_n = wrapping_sub(l.gids.len(), req_at);
+        let feat_at = l.gids.len();
+        let fbase = mul(p, l.nf);
+        for c in 0..l.nf {
+            if sbool(in l.nrow, add(fbase, c)) {
+                let id = sw(in l.flist, c);
+                l.gids.push(id);
+            }
+        }
+        let feat_n = wrapping_sub(l.gids.len(), feat_at);
+        let nb = mul(p, 4);
+        let at = sw(in l.nfirst, nb);
+        let n = sw(in l.nfirst, inc(nb));
+        let s_at = sw(in l.nfirst, add(nb, 2));
+        let s_n = sw(in l.nfirst, add(nb, 3));
+        let e_at = l.ge.len();
+        for e in 0..n {
+            let x = sw(in l.ea, add(at, e));
+            l.ge.push(x);
+        }
+        let gs_at = l.gs.len();
+        for j in 0..s_n {
+            let b = add(s_at, mul(j, 3));
+            let sname = sw(in l.eb, b);
+            let text = sw(in l.eb, inc(b));
+            let r = sw(in l.eb, add(b, 2));
+            setb(inout l.usedsys, sname, true);
+            l
+                .gs
+                .push(
+                SEdge {
+                    name: sname,
+                    text: text,
+                    req: r
+                }
+            );
+        }
+        l
+            .gn
+            .push(
+            GNode {
+                name: sw(in l.pname, p),
+                man: sw(in l.psel, p),
+                req_at: req_at,
+                req_n: req_n,
+                feat_at: feat_at,
+                feat_n: feat_n,
+                e_at: e_at,
+                e_n: n,
+                s_at: gs_at,
+                s_n: s_n
+            }
+        );
+    }
+}
+
+fn commit_rest(inout l: L, diag_at: u64, diag_n: u64, node_at: u64) {
+    let k = l.k;
+    let node_n = wrapping_sub(l.gn.len(), node_at);
+    let root_at = l.gl.len();
+    for id in 0..k {
+        if sbool(in l.rootf, id) {
+            l.gl.push(id);
+        }
+    }
+    let root_n = wrapping_sub(l.gl.len(), root_at);
+    let unused_at = l.gl.len();
+    for p in 0..l.np {
+        if !sbool(in l.reach, p) {
+            let x = sw(in l.pname, p);
+            l.gl.push(x);
+        }
+    }
+    let unused_n = wrapping_sub(l.gl.len(), unused_at);
+    let sys_at = l.gl.len();
+    let mut sys_n: u64 = 0;
+    for id in 0..k {
+        let v = sw(in l.sysof, id);
+        if v != none() && sbool(in l.usedsys, id) {
+            l.gl.push(id);
+            l.gl.push(v);
+            sys_n = inc(sys_n);
+        }
+    }
+    l
+        .snaps
+        .push(
+        Snap {
+            node_at: node_at,
+            node_n: node_n,
+            root_at: root_at,
+            root_n: root_n,
+            unused_at: unused_at,
+            unused_n: unused_n,
+            sys_at: sys_at,
+            sys_n: sys_n,
+            diag_at: diag_at,
+            diag_n: diag_n,
+            graph: diag_n == 0
+        }
+    );
+}

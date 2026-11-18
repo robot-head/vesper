@@ -1,3 +1,126 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-vesper_crate()
+# The port-backed package (seed-copy rule, docs/maintenance/porting-a-crate.md;
+# port wave P1 lane 19, #916): build.rs links the object built here from the
+# Loom package in vesper/ and checks port/binding.rs against the generated
+# binding. The compiler and every other dependent link the Rust seed copy,
+# //crates/vesper-serde/seed, instead.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "serde_vesper",
+    library = "serde",
+    rust_types = "crate::port_types",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "serde_vesper_binding",
+    srcs = [":serde_vesper"],
+    output_group = "rust_binding",
+)
+
+# The divergent builds, one per ported module (the Cargo
+# `vesper-port-divergent` feature applies the same edits from build.rs, one
+# module at a time with VESPER_SERDE_DIVERGE): each must build from a copy of
+# the package with its edit applied. port/check.sh, run by
+# scripts/test-port-harness.sh, asserts which test catches each one.
+vesper_port_object(
+    name = "serde_vesper_divergent_lemire",
+    edit_src = "vesper/src/lemire.ves",
+    edits = {"f.mantissa | sign": "(f.mantissa ^ 1) | sign"},
+    library = "serde",
+    rust_types = "crate::port_types",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "serde_vesper_divergent_index",
+    edit_src = "vesper/src/index.ves",
+    edits = {"if s == 43 || s == 45 {": "if s == 45 {"},
+    library = "serde",
+    rust_types = "crate::port_types",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "serde_vesper_divergent_stage2",
+    edit_src = "vesper/src/stage2.ves",
+    edits = {"if p < end && at(in t, p) == 46 {": "if p < end && at(in t, p) == 47 {"},
+    library = "serde",
+    rust_types = "crate::port_types",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "serde_vesper_divergent_encode",
+    edit_src = "vesper/src/dragon.ves",
+    edits = {"text.push(45);": "text.push(43);"},
+    library = "serde",
+    rust_types = "crate::port_types",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "serde_vesper_divergent_helpers",
+    edit_src = "vesper/src/helpers.ves",
+    edits = {"carry = backslashes & bit != 0 && !carry;": "carry = backslashes & bit != 0;"},
+    library = "serde",
+    rust_types = "crate::port_types",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "serde_vesper_divergent_binary",
+    edit_src = "vesper/src/binary.ves",
+    edits = {"let tag = bit_shl(wrapping_sub(w, 1), shift);": "let tag = bit_shl(w, shift);"},
+    library = "serde",
+    rust_types = "crate::port_types",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_port_object(
+    name = "serde_vesper_divergent_records",
+    edit_src = "vesper/src/records.ves",
+    edits = {"status_code: wrapping_u16(status),": "status_code: wrapping_u16(flags),"},
+    library = "serde",
+    rust_types = "crate::port_types",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+vesper_crate(
+    build_script_data = [
+        ":serde_vesper",
+        ":serde_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :serde_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :serde_vesper_binding)",
+    },
+)
+
+# The seed package (seed/) builds these same Rust sources without the port.
+exports_files(glob([
+    "src/**/*.rs",
+    "tests/**/*.rs",
+]) + ["README.md"])
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-serde/seed:__pkg__"],
+)

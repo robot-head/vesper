@@ -151,6 +151,21 @@ sh crates/vesper-ignis/port/check.sh  # port P1 lane 12 (#909): vesper-ignis, bo
 # crates/vesper-quarry/build.rs).
 cargo test --locked -p vesper-quarry --features vesper-port --test sql --test planner_spec --test vector --test vector_join --test port_memory
 for t in "sql outer_join_null_extension_and_filter_placement" "sql outer_join_pushdown_differential_for_many_predicates_and_null_inputs" "sql sql_null_three_valued_logic_exhaustive" "sql ddl_atomic_deterministic_and_stale_revision_or_content_rejected" "planner_spec front_end_transcript_matches_golden" "planner_spec planner_chooses_the_golden_access_paths"; do set -- $t; divergent "Quarry port ($2)" "$2" "$([ "$1" = sql ] && echo real_where_aliases_literals_and_typed_bindings || echo golden_results_equal_filtered_index_lookups)" -p vesper-quarry --features vesper-port-divergent --test "$1"; done
+# vesper-loom-calculus (port wave P1 lane 16, #913): the port-backed package
+# and the compiler's Rust seed copy pass the same tests (including the
+# differential corpus digest), and one divergent edit per ported module
+# (DIVERGENT in crates/vesper-loom-calculus/build.rs) fails a test.
+cargo test --locked -p vesper-loom-calculus -p vesper-loom-calculus-seed
+if cargo test --locked -p vesper-loom-calculus --features vesper-port-divergent --no-fail-fast --tests -- --test-threads=1 >"$log" 2>&1; then
+    cat "$log"
+    echo "the divergent loom-calculus port passed its tests" >&2
+    exit 1
+fi
+for t in manifest_corpus_matches_the_rust_build semver_matrix_matches_the_rust_build authority_reaches_ancestors_that_sort_before_their_dependencies unsafe_ffi_policy_relaxation_is_rejected_for_existing_and_new_packages; do
+    grep -q "test $t ... FAILED" "$log" || { cat "$log"; echo "the divergent loom-calculus port did not fail $t" >&2; exit 1; }
+done
+grep -q 'test documented_manifest_is_declarative_and_secure_by_default ... ok' "$log" || { cat "$log"; echo "the divergent loom-calculus port failed an unchanged test" >&2; exit 1; }
+echo "divergent loom-calculus port detected (one failure per ported module)"
 # Port wave P1 lane 15 (#912): vesper-semver, both builds and the divergence check.
 sh crates/vesper-semver/port/test-port.sh
 # Port wave P1 lane 8 (#905): vesper-tensor and its Rust seed copy, and the
@@ -188,3 +203,4 @@ ipc ipc independent_arrow_values_and_versions hostile_schema_and_union_discrimin
 CHECKS
 . crates/vesper-simpulse/port/check.sh  # port P1 lane 5 (#902): vesper-simpulse, both builds and the divergence check
 . crates/vesper-crucible/port/check.sh  # port P1 lane 18 (#915): vesper-crucible, both builds and the divergence checks
+sh crates/vesper-serde/port/check.sh  # port P1 lane 19 (#916): vesper-serde, both builds and one divergence check per ported module

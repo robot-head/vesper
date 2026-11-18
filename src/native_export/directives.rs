@@ -6,7 +6,7 @@
 //! the Bazel rule) reads the same ones from the same file.
 //!
 //! ```text
-//! // @export abi 3
+//! // @export abi 3 options
 //! // @export instance largest_u64 = largest[u64]
 //! // @export instance largest[i32]
 //! // @export vsys direct rust=crate::shim
@@ -18,7 +18,8 @@
 //!
 //! * `abi 3` makes the library an export ABI v3 library: copy structs get
 //!   `#[repr(C)]` mirrors that cross in place (see the module docs of
-//!   `native::export`).
+//!   `native::export`). `abi 3 options` also lends `Option` and `Result`
+//!   parameters and results as `OptionMirror`/`ResultMirror`.
 //! * `instance [name =] f[T1, ..]` exports that monomorphic instance of the
 //!   generic `pub fn f` as `vesper_<lib>_<name>`. Without a name the symbol
 //!   is the stable mangling `f__t1__t2` (type names lowercased, type
@@ -40,6 +41,10 @@ pub struct Directives {
     /// `abi 3`: the export ABI version the library opts into (v3 is the
     /// only one a source names; v1 and v2 follow from the forms used).
     pub abi: Option<u32>,
+    /// `abi 3 options`: `Option` and `Result` parameters and results of
+    /// copy payloads cross as `OptionMirror`/`ResultMirror`, lent in place
+    /// (#991). Opt-in, so existing v3 bindings stay byte for byte.
+    pub option_mirrors: bool,
 }
 
 /// One generic instance to export.
@@ -194,7 +199,19 @@ impl Directives {
             };
             let rest = rest.trim();
             if let Some(spec) = rest.strip_prefix("abi") {
-                match spec.trim() {
+                let mut words = spec.split_whitespace();
+                let version = words.next().unwrap_or_default();
+                for w in words {
+                    match w {
+                        "options" if !out.option_mirrors => out.option_mirrors = true,
+                        other => {
+                            return Err(ExportError::Directive(format!(
+                                "@export abi: unknown option '{other}' (expected options)"
+                            )));
+                        }
+                    }
+                }
+                match version {
                     "3" if out.abi.is_none() => out.abi = Some(3),
                     "3" => {
                         return Err(ExportError::Directive(

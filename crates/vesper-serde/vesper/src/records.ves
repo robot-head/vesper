@@ -1,0 +1,686 @@
+// @export abi 3
+//
+// @vesper/serde: the record-level scalar paths over a validated tape:
+// `Node::as_u64`/`as_i64` (src/index.rs), the telemetry decode of
+// src/tiles.rs, the EventEnvelope schema check of src/event_columns.rs,
+// and the NDJSON batch admission, framing and accounting of src/ndjson.rs.
+// Failures are a `Fault` whose code the Rust adapter maps to the module's
+// own error type.
+use self::{
+    BatchLimits,
+    Doc,
+    Error,
+    ErrorKind,
+    EventRow,
+    Fault,
+    Kind,
+    Limits,
+    NdCursor,
+    NdPlan,
+    TilePoint,
+    Token
+};
+use self::index::{
+    at,
+    min64,
+    next_decoded,
+    raise,
+    strings_equal,
+    tok
+};
+
+fn max64() -> u64 {
+    18446744073709551615
+}
+
+fn none() -> u64 {
+    18446744073709551615
+}
+
+fn fault(code: u64, detail: u64, offset: u64, record: u64, line: u64) -> Unit eff [Fail[Fault]] {
+    Fail::raise(
+        Fault {
+            code: code,
+            detail: detail,
+            offset: offset,
+            record: record,
+            line: line
+        }
+    )
+}
+
+// -------------------------------------------------------------------
+// Integers (`str::parse` of validated JSON number text `t[s..e]`).
+// -------------------------------------------------------------------
+
+// Decimal digits only; `none()` marks a non-digit, `max64()` with `ok`
+// false an overflow.
+fn digits_u64(in t: Slice[u8], s: u64, e: u64) -> Option[u64] {
+    if s >= e {
+        return Option::None;
+    }
+    let mut v: u64 = 0;
+    let mut i = s;
+    loop {
+        if i >= e {
+            break;
+        }
+        let b = at(in t, i);
+        if b < 48 || b > 57 {
+            return Option::None;
+        }
+        let (lo, hi) = mul_wide(v, 10);
+        let d = wrapping_sub(b, 48);
+        if hi != 0 || d > wrapping_sub(max64(), lo) {
+            return Option::None;
+        }
+        v = wrapping_add(lo, d);
+        i = wrapping_add(i, 1);
+    }
+    Option::Some(v)
+}
+
+fn parse_u64(in t: Slice[u8], s: u64, e: u64) -> Option[u64] {
+    digits_u64(in t, s, e)
+}
+
+// (negative, magnitude) of an `i64`.
+fn parse_i64(in t: Slice[u8], s: u64, e: u64) -> Option[(bool, u64)] {
+    let neg = at(in t, s) == 45;
+    let from = if neg {
+        wrapping_add(s, 1)
+    } else {
+        s
+    };
+    match digits_u64(in t, from, e) {
+        Option::Some(m) => {
+            if neg {
+                if m > 9223372036854775808 {
+                    Option::None
+                } else {
+                    Option::Some((m != 0, m))
+                }
+            } else if m > 9223372036854775807 {
+                Option::None
+            } else {
+                Option::Some((false, m))
+            }
+        },
+        Option::None => Option::None,
+    }
+}
+
+fn number_token(in doc: Doc, index: u64) -> Token eff [Fail[Error]] {
+    let t = tok(in doc.tokens, index);
+    if t.kind != Kind::Number {
+        raise(ErrorKind::Type, t.start);
+    }
+    t
+}
+
+// `Node::as_u64`.
+pub fn node_u64(in doc: Doc, in input: Slice[u8], index: u64) -> u64 eff [Fail[Error]] {
+    let t = number_token(in doc, index);
+    match parse_u64(in input, t.start, t.end) {
+        Option::Some(v) => v,
+        Option::None => {
+            raise(ErrorKind::Number, t.start);
+            0
+        },
+    }
+}
+
+// `Node::as_i64`.
+pub fn node_i64(in doc: Doc, in input: Slice[u8], index: u64) -> i64 eff [Fail[Error]] {
+    let t = number_token(in doc, index);
+    match parse_i64(in input, t.start, t.end) {
+        Option::Some((neg, m)) => {
+            if neg {
+                wrapping_i64(wrapping_sub(0, m))
+            } else {
+                wrapping_i64(m)
+            }
+        },
+        Option::None => {
+            raise(ErrorKind::Number, t.start);
+            0
+        },
+    }
+}
+
+// -------------------------------------------------------------------
+// Telemetry decode (src/tiles.rs `decode`). Fault codes: 0 NotObject,
+// 1 MissingField, 2 FieldType, 3 FieldRange; `detail` is the field
+// (`TelemetryField` order).
+// -------------------------------------------------------------------
+
+fn tile_fault(code: u64, field: u64) -> Unit eff [Fail[Fault]] {
+    fault(code, field, 0, 0, 0)
+}
+
+// Whether the key token `name` is `key` (decoded comparison when escaped,
+// bytes otherwise, as `SwarKey` decides).
+fn key_is(in input: Slice[u8], name: Token, in key: Slice[u8]) -> bool {
+    let s = wrapping_add(name.start, 1);
+    let e = wrapping_sub(name.end, 1);
+    if name.escaped {
+        strings_equal(in input[s..e], in key)
+    } else {
+        wrapping_sub(e, s) == key.len() && bytes_eq(in input[s..e], in key)
+    }
+}
+
+fn bytes_eq(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    a.eq(in b)
+}
+
+fn tile_slot(in input: Slice[u8], name: Token) -> u64 {
+    if key_is(in input, name, in "ts_unix_ms".as_bytes()) {
+        0
+    } else if key_is(in input, name, in "latency_us".as_bytes()) {
+        1
+    } else if key_is(in input, name, in "status_code".as_bytes()) {
+        2
+    } else if key_is(in input, name, in "flags".as_bytes()) {
+        3
+    } else if key_is(in input, name, in "trace_id_hex".as_bytes()) {
+        4
+    } else {
+        5
+    }
+}
+
+// The field's integer as (negative, magnitude): `as_i64`, else `as_u64`.
+fn tile_int(in input: Slice[u8], t: Token, field: u64) -> (bool, u64) eff [Fail[Fault]] {
+    if t.kind != Kind::Number {
+        tile_fault(2, field);
+    }
+    match parse_i64(in input, t.start, t.end) {
+        Option::Some(v) => v,
+        Option::None => match parse_u64(in input, t.start, t.end) {
+            Option::Some(m) => (false, m),
+            Option::None => {
+                tile_fault(3, field);
+                (false, 0)
+            },
+        },
+    }
+}
+
+fn tile_unsigned(in input: Slice[u8], t: Token, field: u64, max: u64) -> u64 eff [Fail[Fault]] {
+    let (neg, m) = tile_int(in input, t, field);
+    if neg || m > max {
+        tile_fault(3, field);
+    }
+    m
+}
+
+pub fn tile_decode(in doc: Doc, in input: Slice[u8], root: u64) -> TilePoint eff [Fail[Fault]] {
+    let r = tok(in doc.tokens, root);
+    if r.kind != Kind::Object {
+        tile_fault(0, 0);
+    }
+    let mut found0 = none();
+    let mut found1 = none();
+    let mut found2 = none();
+    let mut found3 = none();
+    let mut found4 = none();
+    let mut i = wrapping_add(root, 1);
+    loop {
+        if i >= r.next {
+            break;
+        }
+        let name = tok(in doc.tokens, i);
+        let v = wrapping_add(i, 1);
+        let slot = tile_slot(in input, name);
+        if slot == 0 {
+            found0 = v;
+        } else if slot == 1 {
+            found1 = v;
+        } else if slot == 2 {
+            found2 = v;
+        } else if slot == 3 {
+            found3 = v;
+        } else if slot == 4 {
+            found4 = v;
+        }
+        i = tok(in doc.tokens, v).next;
+    }
+    if found0 == none() {
+        tile_fault(1, 0);
+    }
+    if found1 == none() {
+        tile_fault(1, 1);
+    }
+    if found2 == none() {
+        tile_fault(1, 2);
+    }
+    if found3 == none() {
+        tile_fault(1, 3);
+    }
+    if found4 == none() {
+        tile_fault(1, 4);
+    }
+    let (neg, m) = tile_int(in input, tok(in doc.tokens, found0), 0);
+    if !neg && m > 9223372036854775807 {
+        tile_fault(3, 0);
+    }
+    let ts = if neg {
+        wrapping_i64(wrapping_sub(0, m))
+    } else {
+        wrapping_i64(m)
+    };
+    let latency = tile_unsigned(in input, tok(in doc.tokens, found1), 1, 4294967295);
+    let status = tile_unsigned(in input, tok(in doc.tokens, found2), 2, 65535);
+    let flags = tile_unsigned(in input, tok(in doc.tokens, found3), 3, 65535);
+    let trace = tok(in doc.tokens, found4);
+    if trace.kind != Kind::String {
+        tile_fault(2, 4);
+    }
+    if trace.decoded_len > 32 {
+        tile_fault(3, 4);
+    }
+    // The decoded trace id, little-endian into four words.
+    let mut w0: u64 = 0;
+    let mut w1: u64 = 0;
+    let mut w2: u64 = 0;
+    let mut w3: u64 = 0;
+    let s = wrapping_add(trace.start, 1);
+    let e = wrapping_sub(trace.end, 1);
+    let mut n: u64 = 0;
+    if trace.escaped {
+        let mut a = s;
+        loop {
+            let (c, a2) = next_decoded(in input, a, e);
+            if c == 1114112 {
+                break;
+            }
+            let (len, b) = utf8_bytes(c);
+            for k in 0..len {
+                let byte = bit_shr(b, wrapping_mul(k, 8)) & 255;
+                put_word(inout w0, inout w1, inout w2, inout w3, n, byte);
+                n = wrapping_add(n, 1);
+            }
+            a = a2;
+        }
+    } else {
+        let mut p = s;
+        loop {
+            if p >= e {
+                break;
+            }
+            put_word(inout w0, inout w1, inout w2, inout w3, n, at(in input, p));
+            n = wrapping_add(n, 1);
+            p = wrapping_add(p, 1);
+        }
+    }
+    TilePoint {
+        ts_unix_ms: ts,
+        latency_us: wrapping_u32(latency),
+        status_code: wrapping_u16(status),
+        flags: wrapping_u16(flags),
+        trace_len: n,
+        trace0: w0,
+        trace1: w1,
+        trace2: w2,
+        trace3: w3
+    }
+}
+
+// The UTF-8 bytes of scalar `c`, packed low byte first, and their count.
+fn utf8_bytes(c: u64) -> (u64, u64) {
+    if c < 128 {
+        (1, c)
+    } else if c < 2048 {
+        (2, (192 | (c >> 6)) | bit_shl(128 | (c & 63), 8))
+    } else if c < 65536 {
+        (3, (224 | (c >> 12)) | bit_shl(128 | ((c >> 6) & 63), 8) | bit_shl(128 | (c & 63), 16))
+    } else {
+        (
+            4,
+            (240 | (c >> 18)) | bit_shl(128 | ((c >> 12) & 63), 8) | bit_shl(
+                128 | ((c >> 6) & 63),
+                16
+            ) | bit_shl(128 | (c & 63), 24)
+        )
+    }
+}
+
+fn put_word(inout w0: u64, inout w1: u64, inout w2: u64, inout w3: u64, n: u64, byte: u64) {
+    let shifted = bit_shl(byte, wrapping_mul(n % 8, 8));
+    let q = n / 8;
+    if q == 0 {
+        w0 = w0 | shifted;
+    } else if q == 1 {
+        w1 = w1 | shifted;
+    } else if q == 2 {
+        w2 = w2 | shifted;
+    } else if q == 3 {
+        w3 = w3 | shifted;
+    }
+}
+
+// -------------------------------------------------------------------
+// EventEnvelope (src/event_columns.rs `checked_event`). Fault codes:
+// 6 WorkLimit, 9 Overflow, 12 MissingField (`detail` 0 id, 1 topic,
+// 2 raw_meta), 13 a JSON error at offset `offset` of the record (`detail`
+// 0 Type, 1 Number); the adapter places each at its record.
+// -------------------------------------------------------------------
+
+fn charge(inout remaining: u64, units: u64, passes: u64) -> Unit eff [Fail[Fault]] {
+    let (lo, hi) = mul_wide(units, passes);
+    if hi != 0 {
+        fault(9, 0, 0, 0, 0);
+    }
+    if lo > remaining {
+        fault(6, 0, 0, 0, 0);
+    }
+    remaining = wrapping_sub(remaining, lo);
+}
+
+fn checked_mul(a: u64, b: u64) -> u64 eff [Fail[Fault]] {
+    let (lo, hi) = mul_wide(a, b);
+    if hi != 0 {
+        fault(9, 0, 0, 0, 0);
+    }
+    lo
+}
+
+fn checked_add(a: u64, b: u64) -> u64 eff [Fail[Fault]] {
+    if b > wrapping_sub(max64(), a) {
+        fault(9, 0, 0, 0, 0);
+    }
+    wrapping_add(a, b)
+}
+
+fn name_is(in input: Slice[u8], name: Token, in key: Slice[u8]) -> bool {
+    let s = wrapping_add(name.start, 1);
+    let e = wrapping_sub(name.end, 1);
+    strings_equal(in input[s..e], in key)
+}
+
+pub fn event_check(in doc: Doc, in input: Slice[u8], root: u64, inout remaining: u64, passes: u64)
+    -> EventRow eff [Fail[Fault]] {
+    charge(inout remaining, 1, passes);
+    let r = tok(in doc.tokens, root);
+    if r.kind != Kind::Object {
+        fault(13, 0, r.start, 0, 0);
+    }
+    let mut id = none();
+    let mut topic = none();
+    let mut meta = none();
+    let mut i = wrapping_add(root, 1);
+    loop {
+        if i >= r.next {
+            break;
+        }
+        let name = tok(in doc.tokens, i);
+        let v = wrapping_add(i, 1);
+        let raw_len = wrapping_sub(wrapping_sub(name.end, name.start), 2);
+        let comparisons = checked_add(checked_mul(checked_mul(checked_add(raw_len, 1), 24), 3), 1);
+        charge(inout remaining, comparisons, passes);
+        // The same three comparisons for every name.
+        let is_id = name_is(in input, name, in "id".as_bytes());
+        let is_topic = name_is(in input, name, in "topic".as_bytes());
+        let is_meta = name_is(in input, name, in "raw_meta".as_bytes());
+        if is_id {
+            id = v;
+        }
+        if is_topic {
+            topic = v;
+        }
+        if is_meta {
+            meta = v;
+        }
+        i = tok(in doc.tokens, v).next;
+    }
+    if id == none() {
+        fault(12, 0, 0, 0, 0);
+    }
+    if topic == none() {
+        fault(12, 1, 0, 0, 0);
+    }
+    if meta == none() {
+        fault(12, 2, 0, 0, 0);
+    }
+    let id_tok = tok(in doc.tokens, id);
+    charge(inout remaining, checked_add(wrapping_sub(id_tok.end, id_tok.start), 1), passes);
+    if id_tok.kind != Kind::Number {
+        fault(13, 0, id_tok.start, 0, 0);
+    }
+    let value = match parse_u64(in input, id_tok.start, id_tok.end) {
+        Option::Some(v) => v,
+        Option::None => {
+            fault(13, 1, id_tok.start, 0, 0);
+            0
+        },
+    };
+    charge(inout remaining, 1, passes);
+    let topic_tok = tok(in doc.tokens, topic);
+    if topic_tok.kind != Kind::String {
+        fault(13, 0, topic_tok.start, 0, 0);
+    }
+    EventRow {
+        id: value,
+        topic: topic,
+        raw_meta: meta
+    }
+}
+
+// -------------------------------------------------------------------
+// NDJSON batches (src/ndjson.rs `parse_with`). Fault codes follow
+// `ndjson::ErrorKind`: 0 InvalidLimits, 1 InputLimit, 2 RecordLimit,
+// 3 TokenLimit, 4 IndexLimit, 5 MetadataLimit, 6 WorkLimit, 7 BlankLine,
+// 9 Overflow.
+// -------------------------------------------------------------------
+
+fn initial(code: u64) -> Unit eff [Fail[Fault]] {
+    fault(code, 0, 0, 0, 1)
+}
+
+fn within(value: u64, ceiling: u64) -> Unit eff [Fail[Fault]] {
+    if value == 0 || value > ceiling {
+        initial(0);
+    }
+}
+
+// `BatchLimits::validate` against `BatchLimits::HARD`.
+pub fn ndjson_validate(b: BatchLimits, r: Limits) -> Unit eff [Fail[Fault]] {
+    within(b.max_input_bytes, 16777216);
+    within(b.max_records, 16384);
+    within(b.max_tokens, 1048576);
+    within(b.max_index_bytes, 67108864);
+    within(b.max_metadata_bytes, 4194304);
+    within(b.max_work, 536870912);
+    within(r.max_input_bytes, 1048576);
+    within(r.max_depth, 128);
+    within(r.max_tokens, 1048576);
+    within(r.max_string_bytes, 1048576);
+    within(r.max_total_string_bytes, 1048576);
+    within(r.max_work, 536870912);
+    within(r.max_index_bytes, 67108864);
+}
+
+fn initial_mul(a: u64, b: u64) -> u64 eff [Fail[Fault]] {
+    let (lo, hi) = mul_wide(a, b);
+    if hi != 0 {
+        initial(9);
+    }
+    lo
+}
+
+fn initial_add(a: u64, b: u64) -> u64 eff [Fail[Fault]] {
+    if b > wrapping_sub(max64(), a) {
+        initial(9);
+    }
+    wrapping_add(a, b)
+}
+
+fn find_newline(in s: Slice[u8]) -> Option[u64] {
+    s.find_byte(10)
+}
+
+// Batch admission before any record: the record count, EOF line, record
+// metadata bytes (`record_size` per record) and the work charged so far.
+pub fn ndjson_admit(in input: Slice[u8], b: BatchLimits, record_size: u64)
+    -> NdPlan eff [Fail[Fault]] {
+    let len = input.len();
+    if len > b.max_input_bytes {
+        initial(1);
+    }
+    let mut work = initial_mul(len, 3);
+    if work > b.max_work {
+        initial(6);
+    }
+    let mut newlines: u64 = 0;
+    let mut p: u64 = 0;
+    loop {
+        if p >= len {
+            break;
+        }
+        match find_newline(in input[p..len]) {
+            Option::Some(k) => {
+                newlines = wrapping_add(newlines, 1);
+                p = wrapping_add(wrapping_add(p, k), 1);
+            },
+            Option::None => {
+                p = len;
+            },
+        }
+    }
+    let count = if len == 0 {
+        0
+    } else if at(in input, wrapping_sub(len, 1)) != 10 {
+        initial_add(newlines, 1)
+    } else {
+        newlines
+    };
+    if count > b.max_records {
+        initial(2);
+    }
+    let eof_line = initial_add(newlines, 1);
+    let metadata_bytes = initial_mul(count, record_size);
+    if metadata_bytes > b.max_metadata_bytes {
+        initial(5);
+    }
+    work = initial_add(initial_add(work, initial_mul(count, 32)), metadata_bytes);
+    if work > b.max_work {
+        initial(6);
+    }
+    NdPlan {
+        count: count,
+        eof_line: eof_line,
+        metadata_bytes: metadata_bytes,
+        work: work
+    }
+}
+
+fn here(in c: NdCursor, code: u64) -> Unit eff [Fail[Fault]] {
+    fault(code, 0, c.start, c.ordinal, wrapping_add(c.ordinal, 1))
+}
+
+fn blank(b: u64) -> bool {
+    b == 32 || b == 9 || b == 13
+}
+
+// The frame at `c.start`: its end, payload end and the record's limits
+// (`c.max_*`), with the checks before its parse.
+pub fn ndjson_frame(in input: Slice[u8], inout c: NdCursor, b: BatchLimits, r: Limits)
+    -> Unit eff [Fail[Fault]] {
+    let len = input.len();
+    let start = c.start;
+    let (end, body_end) = match find_newline(in input[start..len]) {
+        Option::Some(k) => {
+            let nl = wrapping_add(start, k);
+            (wrapping_add(nl, 1), nl)
+        },
+        Option::None => (len, len),
+    };
+    let payload_end = if body_end
+        < end
+        && body_end
+        > start
+        && at(in input, wrapping_sub(body_end, 1))
+        == 13 {
+        wrapping_sub(body_end, 1)
+    } else {
+        body_end
+    };
+    c.end = end;
+    c.payload_end = payload_end;
+    let mut all_blank = true;
+    let mut p = start;
+    loop {
+        if p >= payload_end {
+            break;
+        }
+        if !blank(at(in input, p)) {
+            all_blank = false;
+            break;
+        }
+        p = wrapping_add(p, 1);
+    }
+    if all_blank {
+        here(in c, 7);
+    }
+    let payload = wrapping_sub(payload_end, start);
+    if payload > r.max_input_bytes {
+        here(in c, 1);
+    }
+    if c.tokens > b.max_tokens {
+        here(in c, 3);
+    }
+    let remaining_tokens = wrapping_sub(b.max_tokens, c.tokens);
+    if c.index_bytes > b.max_index_bytes {
+        here(in c, 4);
+    }
+    let remaining_index = wrapping_sub(b.max_index_bytes, c.index_bytes);
+    if c.work > b.max_work {
+        here(in c, 6);
+    }
+    let remaining_work = wrapping_sub(b.max_work, c.work);
+    if remaining_tokens == 0 {
+        here(in c, 3);
+    }
+    if remaining_index == 0 {
+        here(in c, 4);
+    }
+    if payload > remaining_work {
+        here(in c, 6);
+    }
+    c.remaining_tokens = remaining_tokens;
+    c.remaining_index = remaining_index;
+    c.remaining_work = remaining_work;
+    c.max_input_bytes = min64(min64(r.max_input_bytes, b.max_input_bytes), payload);
+    c.max_tokens = min64(r.max_tokens, remaining_tokens);
+    c.max_index_bytes = min64(r.max_index_bytes, remaining_index);
+    c.max_work = min64(r.max_work, remaining_work);
+}
+
+// After the record parsed: its totals against the batch, then the cursor
+// moves to the next frame.
+pub fn ndjson_account(inout c: NdCursor, tokens: u64, index: u64, work: u64)
+    -> Unit eff [Fail[Fault]] {
+    if tokens > c.remaining_tokens {
+        here(in c, 3);
+    }
+    if index > c.remaining_index || index > c.max_index_bytes {
+        here(in c, 4);
+    }
+    if work > c.remaining_work {
+        here(in c, 6);
+    }
+    if tokens
+        > wrapping_sub(max64(), c.tokens)
+        || index
+        > wrapping_sub(max64(), c.index_bytes)
+        || work
+        > wrapping_sub(max64(), c.work) {
+        here(in c, 9);
+    }
+    c.tokens = wrapping_add(c.tokens, tokens);
+    c.index_bytes = wrapping_add(c.index_bytes, index);
+    c.work = wrapping_add(c.work, work);
+    c.start = c.end;
+    c.ordinal = wrapping_add(c.ordinal, 1);
+}

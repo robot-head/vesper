@@ -31,6 +31,13 @@ fn at(in s: Slice[u64], i: u64) -> u64 {
     }
 }
 
+fn atb(in s: Slice[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
 fn byte(in s: Slice[u8], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => widen_u64(v),
@@ -866,4 +873,773 @@ pub fn shrinker_stats(in s: Shrinker) -> Stats {
 
 pub fn shrinker_best(in s: Shrinker) -> ChunkSeq[u64] {
     copy_of(in s.best.as_slice())
+}
+
+// ---------------------------------------------------------------------------
+// The fuzzer (src/fuzz.rs `Fuzzer`) as a step machine. `fuzzer_next` picks
+// the next run (a fresh random run, a solver candidate or a mutation of a
+// corpus entry) and its source seed; the wrapper runs the property with
+// `Source::build_random(candidate, seed, ..)` and reports the verdict and
+// the run's coverage features (`fuzzer_observe`), and, for a run that
+// joins the corpus, its tape, draw kinds and comparisons (`fuzzer_keep`).
+//
+// Feature words come in pairs `(key, value)`: key tag 0 an edge, 1 a
+// comparison outcome (both with value 0), 2 operand closeness of site
+// `key & 0xffffffff` with the closeness in `value`.
+// Draw kind tags: 0 value, 1 byte, 2 flag, 3 schedule.
+// Comparison words: `0, kind, lhs, rhs` for integers (kind 0 Eq, 1 Ne,
+// 2-5 orderings), `1, nl, nr, lhs bytes.., rhs bytes..` for byte strings.
+
+pub copy struct FuzzStats {
+    execs: u64,
+    invalid: u64,
+    solver_runs: u64,
+    solver_hits: u64,
+    features: u64
+}
+
+pub struct Fuzzer {
+    rng: Rng,
+    max_execs: u64,
+    random: bool,
+    initial_random: u64,
+    max_solver: u64,
+    stats: FuzzStats,
+    found: bool,
+    seen: ChunkSeq[u64],
+    close_site: ChunkSeq[u64],
+    close_val: ChunkSeq[u64],
+    // Corpus entry `e` is `c_vals[c_off[e]..c_off[e + 1]]`, with its draw
+    // kinds at the same positions, and its comparison words at
+    // `c_cmps[c_cmp_off[e]..c_cmp_off[e + 1]]`.
+    c_off: ChunkSeq[u64],
+    c_vals: ChunkSeq[u64],
+    c_max: ChunkSeq[u64],
+    c_tag: ChunkSeq[u64],
+    c_cmp_off: ChunkSeq[u64],
+    c_cmps: ChunkSeq[u64],
+    c_solved: ChunkSeq[bool],
+    // Solver candidates of the entry in progress: rows of `width` choices,
+    // kept sorted and unique through `order`, run in that order from `k`.
+    in_solver: bool,
+    width: u64,
+    cands: ChunkSeq[u64],
+    order: ChunkSeq[u64],
+    k: u64,
+    full: bool,
+    lane: ChunkSeq[u64],
+    scratch: ChunkSeq[u64],
+    // The run handed out by `fuzzer_next`.
+    cur: ChunkSeq[u64],
+    seed: u64,
+    solver_run: bool
+}
+
+pub fn fuzzer_new(seed: u64, max_execs: u64, random: bool, initial_random: u64, max_solver: u64)
+    -> Fuzzer {
+    let mut c_off: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    c_off.push(0);
+    let mut c_cmp_off: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    c_cmp_off.push(0);
+    Fuzzer {
+        rng: Rng {
+            word: seed
+        },
+        max_execs: max_execs,
+        random: random,
+        initial_random: initial_random,
+        max_solver: max_solver,
+        stats: FuzzStats {
+            execs: 0,
+            invalid: 0,
+            solver_runs: 0,
+            solver_hits: 0,
+            features: 0
+        },
+        found: false,
+        seen: ChunkSeq::new[u64](),
+        close_site: ChunkSeq::new[u64](),
+        close_val: ChunkSeq::new[u64](),
+        c_off: c_off,
+        c_vals: ChunkSeq::new[u64](),
+        c_max: ChunkSeq::new[u64](),
+        c_tag: ChunkSeq::new[u64](),
+        c_cmp_off: c_cmp_off,
+        c_cmps: ChunkSeq::new[u64](),
+        c_solved: ChunkSeq::new[bool](),
+        in_solver: false,
+        width: 0,
+        cands: ChunkSeq::new[u64](),
+        order: ChunkSeq::new[u64](),
+        k: 0,
+        full: false,
+        lane: ChunkSeq::new[u64](),
+        scratch: ChunkSeq::new[u64](),
+        cur: ChunkSeq::new[u64](),
+        seed: 0,
+        solver_run: false
+    }
+}
+
+// The first position of `in s` (sorted) not below `x`.
+fn lower_bound(in s: Slice[u64], x: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = s.len();
+    loop {
+        if lo >= hi {
+            break lo;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if at(in s, mid) < x {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// Insert `x` into the sorted `s`; true when it was not there.
+fn set_insert(inout s: ChunkSeq[u64], x: u64) -> bool {
+    let pos = lower_bound(in s.as_slice(), x);
+    if pos < s.len() && at(in s.as_slice(), pos) == x {
+        return false;
+    }
+    s.push(0);
+    let mut j = wrapping_sub(s.len(), 1);
+    loop {
+        if j <= pos {
+            break;
+        }
+        let prev = at(in s.as_slice(), wrapping_sub(j, 1));
+        s.try_set(j, prev);
+        j = wrapping_sub(j, 1);
+    }
+    s.try_set(pos, x);
+    true
+}
+
+// Insert `x` at `pos` of `s`, moving the tail up.
+fn insert_at(inout s: ChunkSeq[u64], pos: u64, x: u64) {
+    s.push(0);
+    let mut j = wrapping_sub(s.len(), 1);
+    loop {
+        if j <= pos {
+            break;
+        }
+        let prev = at(in s.as_slice(), wrapping_sub(j, 1));
+        s.try_set(j, prev);
+        j = wrapping_sub(j, 1);
+    }
+    s.try_set(pos, x);
+}
+
+fn sat_add(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        max_u64()
+    } else {
+        s
+    }
+}
+
+fn sat_sub(a: u64, b: u64) -> u64 {
+    if b > a {
+        0
+    } else {
+        wrapping_sub(a, b)
+    }
+}
+
+// `1 << bit` for `bit < 64`.
+fn bit_of(bit: u64) -> u64 {
+    let mut v: u64 = 1;
+    for i in 0..bit {
+        v = wrapping_add(v, v);
+    }
+    v
+}
+
+fn rng_index(inout r: Rng, len: u64) -> u64 {
+    rng_below_inclusive(inout r, wrapping_sub(len, 1))
+}
+
+impl Fuzzer {
+    fn corpus_len(in self) -> u64 {
+        wrapping_sub(self.c_off.len(), 1)
+    }
+
+    fn entry_start(in self, e: u64) -> u64 {
+        at(in self.c_off.as_slice(), e)
+    }
+
+    fn entry_end(in self, e: u64) -> u64 {
+        at(in self.c_off.as_slice(), inc(e))
+    }
+
+    fn budget_left(in self) -> bool {
+        !self.found && self.stats.execs < self.max_execs
+    }
+
+    fn hand_out(inout self, solver: bool) {
+        self.solver_run = solver;
+        self.seed = rng_next(inout self.rng);
+        self.stats.execs = inc(self.stats.execs);
+    }
+
+    // `cur` = a mutation of a random corpus entry (src/fuzz.rs `mutate`).
+    fn mutate(inout self) {
+        let n = self.corpus_len();
+        let index = rng_index(inout self.rng, n);
+        let start = self.entry_start(index);
+        let end = self.entry_end(index);
+        let klen = wrapping_sub(end, start);
+        self.cur.clear();
+        for j in start..end {
+            self.cur.push(at(in self.c_vals.as_slice(), j));
+        }
+        let rounds = inc(rng_index(inout self.rng, 4));
+        for r in 0..rounds {
+            self.mutate_once(start, klen, n);
+        }
+    }
+
+    fn mutate_once(inout self, kstart: u64, klen: u64, n: u64) {
+        let len = self.cur.len();
+        if len == 0 {
+            let v = rng_next(inout self.rng);
+            self.cur.push(v);
+            return;
+        }
+        let pos = rng_index(inout self.rng, len);
+        let max = if pos < klen {
+            at(in self.c_max.as_slice(), wrapping_add(kstart, pos))
+        } else {
+            max_u64()
+        };
+        let op = rng_index(inout self.rng, 10);
+        let v = at(in self.cur.as_slice(), pos);
+        if op == 0 {
+            let x = rng_below_inclusive(inout self.rng, max);
+            self.cur.try_set(pos, x);
+        } else if op == 1 {
+            self.cur.try_set(pos, 0);
+        } else if op == 2 {
+            self.cur.try_set(pos, max);
+        } else if op == 3 {
+            let delta = inc(rng_below_inclusive(inout self.rng, 15));
+            self.cur.try_set(pos, min_u64(sat_add(v, delta), max));
+        } else if op == 4 {
+            let delta = inc(rng_below_inclusive(inout self.rng, 15));
+            self.cur.try_set(pos, sat_sub(v, delta));
+        } else {
+            self.mutate_span(op, pos, len, max, v, n);
+        }
+    }
+
+    fn mutate_span(inout self, op: u64, pos: u64, len: u64, max: u64, v: u64, n: u64) {
+        if op == 5 {
+            let span = min_u64(inc(rng_index(inout self.rng, 8)), wrapping_sub(len, pos));
+            self.scratch.clear();
+            for j in 0..len {
+                if j < pos || j >= wrapping_add(pos, span) {
+                    self.scratch.push(at(in self.cur.as_slice(), j));
+                }
+            }
+            self.take_scratch();
+        } else if op == 6 {
+            let span = min_u64(inc(rng_index(inout self.rng, 8)), wrapping_sub(len, pos));
+            let at_pos = rng_index(inout self.rng, inc(len));
+            self.scratch.clear();
+            for j in 0..at_pos {
+                self.scratch.push(at(in self.cur.as_slice(), j));
+            }
+            for j in pos..wrapping_add(pos, span) {
+                self.scratch.push(at(in self.cur.as_slice(), j));
+            }
+            for j in at_pos..len {
+                self.scratch.push(at(in self.cur.as_slice(), j));
+            }
+            self.take_scratch();
+        } else if op == 7 {
+            self.cur.truncate(pos);
+        } else if op == 8 {
+            let other = rng_index(inout self.rng, n);
+            let dstart = self.entry_start(other);
+            let dend = self.entry_end(other);
+            let cut = rng_index(inout self.rng, inc(wrapping_sub(dend, dstart)));
+            self.cur.truncate(pos);
+            for j in wrapping_add(dstart, cut)..dend {
+                self.cur.push(at(in self.c_vals.as_slice(), j));
+            }
+        } else {
+            let bit = rng_below_inclusive(inout self.rng, 63);
+            self.cur.try_set(pos, min_u64(v ^ bit_of(bit), max));
+        }
+    }
+
+    fn take_scratch(inout self) {
+        self.cur.clear();
+        for j in 0..self.scratch.len() {
+            self.cur.push(at(in self.scratch.as_slice(), j));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The comparison solver (src/fuzz.rs `solver_candidates`): bounded
+// input-to-state replacement over one corpus entry. Candidates are rows of
+// the entry's length; `order` keeps them sorted and unique, the order the
+// Rust build's `BTreeSet<Vec<u64>>` runs them in.
+
+impl Fuzzer {
+    fn row_at(in self, row: u64, j: u64) -> u64 {
+        at(in self.cands.as_slice(), wrapping_add(wrapping_mul(row, self.width), j))
+    }
+
+    // Compare `scratch` with candidate row `row`: 0 less, 1 equal, 2 greater.
+    fn cmp_row(in self, row: u64) -> u64 {
+        let mut j: u64 = 0;
+        loop {
+            if j >= self.width {
+                break 1;
+            }
+            let a = at(in self.scratch.as_slice(), j);
+            let b = self.row_at(row, j);
+            if a != b {
+                break if a < b {
+                    0
+                } else {
+                    2
+                };
+            }
+            j = inc(j);
+        }
+    }
+
+    // `push` of the Rust build: false stops the whole candidate search.
+    // `scratch` holds the candidate, built by the caller.
+    fn push_scratch(inout self, estart: u64) -> bool {
+        if self.order.len() >= self.max_solver {
+            self.full = true;
+            return false;
+        }
+        let mut same = true;
+        for j in 0..self.width {
+            if at(in self.scratch.as_slice(), j)
+                != at(in self.c_vals.as_slice(), wrapping_add(estart, j)) {
+                same = false;
+            }
+        }
+        if !same {
+            let mut lo: u64 = 0;
+            let mut hi = self.order.len();
+            let mut dup = false;
+            loop {
+                if lo >= hi {
+                    break;
+                }
+                let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+                let c = self.cmp_row(at(in self.order.as_slice(), mid));
+                if c == 1 {
+                    dup = true;
+                    break;
+                }
+                if c == 2 {
+                    lo = inc(mid);
+                } else {
+                    hi = mid;
+                }
+            }
+            if !dup {
+                // Rows are appended, so the new row's number is the count.
+                let row = self.order.len();
+                for j in 0..self.width {
+                    self.cands.push(at(in self.scratch.as_slice(), j));
+                }
+                insert_at(inout self.order, lo, row);
+            }
+        }
+        if self.order.len() >= self.max_solver {
+            self.full = true;
+            return false;
+        }
+        true
+    }
+
+    fn scratch_from_entry(inout self, estart: u64) {
+        self.scratch.clear();
+        for j in 0..self.width {
+            self.scratch.push(at(in self.c_vals.as_slice(), wrapping_add(estart, j)));
+        }
+    }
+
+    // Byte-lane start offsets where `needle` occurs, at most 8.
+    fn find_in_lane(in self, estart: u64, in needle: Slice[u64]) -> ChunkSeq[u64] {
+        let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let nl = needle.len();
+        let ll = self.lane.len();
+        if nl == 0 || nl > ll {
+            return out;
+        }
+        let last = wrapping_sub(ll, nl);
+        let mut start: u64 = 0;
+        loop {
+            if start > last || out.len() >= 8 {
+                break;
+            }
+            let mut all = true;
+            for k in 0..nl {
+                let pos = at(in self.lane.as_slice(), wrapping_add(start, k));
+                if at(in self.c_vals.as_slice(), wrapping_add(estart, pos)) != at(in needle, k) {
+                    all = false;
+                }
+            }
+            if all {
+                out.push(start);
+            }
+            start = inc(start);
+        }
+        out
+    }
+
+    // Push `entry` with the byte lane from `start` replaced by `bytes`.
+    fn push_lane(inout self, estart: u64, start: u64, in bytes: Slice[u64]) -> bool {
+        self.scratch_from_entry(estart);
+        let ll = self.lane.len();
+        for k in 0..bytes.len() {
+            let li = wrapping_add(start, k);
+            if li < ll {
+                let pos = at(in self.lane.as_slice(), li);
+                self.scratch.try_set(pos, at(in bytes, k));
+            }
+        }
+        self.push_scratch(estart)
+    }
+
+    // Every start of `needle` in the lane, replaced by `repl`.
+    fn push_lane_all(inout self, estart: u64, in needle: Slice[u64], in repl: Slice[u64]) {
+        let starts = self.find_in_lane(estart, in needle);
+        for s in 0..starts.len() {
+            if self.full {
+                break;
+            }
+            let start = at(in starts.as_slice(), s);
+            self.push_lane(estart, start, in repl);
+        }
+    }
+
+    fn solve_int(inout self, estart: u64, kind: u64, needle: u64, target: u64) {
+        self.solve_repl(estart, needle, target);
+        if kind >= 2 {
+            if target != max_u64() && !self.full {
+                self.solve_repl(estart, needle, inc(target));
+            }
+            if target != 0 && !self.full {
+                self.solve_repl(estart, needle, wrapping_sub(target, 1));
+            }
+        }
+    }
+
+    fn solve_repl(inout self, estart: u64, needle: u64, repl: u64) {
+        // Whole drawn values.
+        for i in 0..self.width {
+            if self.full {
+                return;
+            }
+            let pos = wrapping_add(estart, i);
+            if at(in self.c_vals.as_slice(), pos)
+                == needle
+                && at(in self.c_tag.as_slice(), pos)
+                == 0
+                && repl
+                <= at(in self.c_max.as_slice(), pos) {
+                self.scratch_from_entry(estart);
+                self.scratch.try_set(i, repl);
+                self.push_scratch(estart);
+            }
+        }
+        // Byte-lane encodings, widths 2, 4, 8, 1.
+        for wi in 0..4 {
+            if self.full {
+                return;
+            }
+            let w: u64 = if wi == 0 {
+                2
+            } else if wi == 1 {
+                4
+            } else if wi == 2 {
+                8
+            } else {
+                1
+            };
+            if fits(needle, w) && fits(repl, w) {
+                let nle = le_bytes(needle, w);
+                let rle = le_bytes(repl, w);
+                self.push_lane_all(estart, in nle.as_slice(), in rle.as_slice());
+                if !self.full {
+                    let nbe = be_bytes(needle, w);
+                    let rbe = be_bytes(repl, w);
+                    self.push_lane_all(estart, in nbe.as_slice(), in rbe.as_slice());
+                }
+            }
+        }
+    }
+
+    // Build the sorted candidate list of entry `e`.
+    fn solve(inout self, e: u64) {
+        let estart = self.entry_start(e);
+        let eend = self.entry_end(e);
+        self.width = wrapping_sub(eend, estart);
+        self.cands.clear();
+        self.order.clear();
+        self.k = 0;
+        self.full = false;
+        self.lane.clear();
+        for i in 0..self.width {
+            if at(in self.c_tag.as_slice(), wrapping_add(estart, i)) == 1 {
+                self.lane.push(i);
+            }
+        }
+        let mut p = at(in self.c_cmp_off.as_slice(), e);
+        let cend = at(in self.c_cmp_off.as_slice(), inc(e));
+        loop {
+            if p >= cend || self.full || self.order.len() >= self.max_solver {
+                break;
+            }
+            let tag = at(in self.c_cmps.as_slice(), p);
+            if tag == 0 {
+                let kind = at(in self.c_cmps.as_slice(), inc(p));
+                let lhs = at(in self.c_cmps.as_slice(), wrapping_add(p, 2));
+                let rhs = at(in self.c_cmps.as_slice(), wrapping_add(p, 3));
+                self.solve_int(estart, kind, lhs, rhs);
+                if !self.full {
+                    self.solve_int(estart, kind, rhs, lhs);
+                }
+                p = wrapping_add(p, 4);
+            } else {
+                let nl = at(in self.c_cmps.as_slice(), inc(p));
+                let nr = at(in self.c_cmps.as_slice(), wrapping_add(p, 2));
+                let ls = wrapping_add(p, 3);
+                let rs = wrapping_add(ls, nl);
+                self.solve_bytes(estart, ls, nl, rs, nr);
+                if !self.full {
+                    self.solve_bytes(estart, rs, nr, ls, nl);
+                }
+                p = wrapping_add(rs, nr);
+            }
+        }
+    }
+
+    // Byte-string comparison: replace `needle` (at `ns`, `nl` words of
+    // `c_cmps`) by the first `min(nl, tl)` bytes of the target.
+    fn solve_bytes(inout self, estart: u64, ns: u64, nl: u64, ts: u64, tl: u64) {
+        if nl == 0 {
+            return;
+        }
+        let width = min_u64(nl, tl);
+        if width == 0 {
+            return;
+        }
+        let mut needle: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in 0..nl {
+            needle.push(at(in self.c_cmps.as_slice(), wrapping_add(ns, k)));
+        }
+        let mut repl: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        for k in 0..width {
+            repl.push(at(in self.c_cmps.as_slice(), wrapping_add(ts, k)));
+        }
+        self.push_lane_all(estart, in needle.as_slice(), in repl.as_slice());
+    }
+}
+
+// `value` fits in `w` bytes.
+fn fits(value: u64, w: u64) -> bool {
+    if w >= 8 {
+        return true;
+    }
+    let mut v = value;
+    for i in 0..w {
+        v = v >> 8;
+    }
+    v == 0
+}
+
+fn le_bytes(value: u64, w: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut v = value;
+    for i in 0..w {
+        out.push(v & 255);
+        v = v >> 8;
+    }
+    out
+}
+
+fn be_bytes(value: u64, w: u64) -> ChunkSeq[u64] {
+    let le = le_bytes(value, w);
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut j = le.len();
+    loop {
+        if j == 0 {
+            break;
+        }
+        j = wrapping_sub(j, 1);
+        out.push(at(in le.as_slice(), j));
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// The campaign loop (src/fuzz.rs `campaign`, `observe`).
+
+// Pick the next run: true with `fuzzer_candidate` and `fuzzer_seed` set,
+// false when the campaign is over (a failure was found or the budget spent).
+pub fn fuzzer_next(inout f: Fuzzer) -> bool {
+    loop {
+        if !f.budget_left() {
+            break false;
+        }
+        if f.in_solver {
+            if f.k < f.order.len() {
+                let row = at(in f.order.as_slice(), f.k);
+                f.k = inc(f.k);
+                f.cur.clear();
+                for j in 0..f.width {
+                    let v = f.row_at(row, j);
+                    f.cur.push(v);
+                }
+                f.stats.solver_runs = inc(f.stats.solver_runs);
+                f.hand_out(true);
+                break true;
+            }
+            f.in_solver = false;
+        } else {
+            let n = f.corpus_len();
+            if f.random || n == 0 || f.stats.execs < f.initial_random {
+                f.cur.clear();
+                f.hand_out(false);
+                break true;
+            }
+            let mut unsolved = n;
+            for e in 0..n {
+                if unsolved == n && !atb(in f.c_solved.as_slice(), e) {
+                    unsolved = e;
+                }
+            }
+            if unsolved < n {
+                f.c_solved.try_set(unsolved, true);
+                f.solve(unsolved);
+                f.in_solver = true;
+            } else {
+                f.mutate();
+                f.hand_out(false);
+                break true;
+            }
+        }
+    }
+}
+
+pub fn fuzzer_candidate(in f: Fuzzer) -> ChunkSeq[u64] {
+    copy_of(in f.cur.as_slice())
+}
+
+pub fn fuzzer_seed(in f: Fuzzer) -> u64 {
+    f.seed
+}
+
+// Report the run's verdict (0 pass, 1 fail, 2 invalid) and, for a pass,
+// its features. Returns 0 (nothing new), 1 (new coverage: call
+// `fuzzer_keep` with the run) or 2 (the failure that ends the campaign).
+pub fn fuzzer_observe(inout f: Fuzzer, verdict: u64, in features: Slice[u64]) -> u64 {
+    let code = if verdict == 1 {
+        f.found = true;
+        2
+    } else if verdict == 2 {
+        f.stats.invalid = inc(f.stats.invalid);
+        0
+    } else if f.random {
+        0
+    } else {
+        f.novelty(in features)
+    };
+    if f.solver_run && code != 0 {
+        f.stats.solver_hits = inc(f.stats.solver_hits);
+    }
+    code
+}
+
+impl Fuzzer {
+    fn novelty(inout self, in features: Slice[u64]) -> u64 {
+        let mut novel = false;
+        let pairs = features.len() >> 1;
+        for i in 0..pairs {
+            let key = at(in features, wrapping_add(i, i));
+            let value = at(in features, inc(wrapping_add(i, i)));
+            if (key >> 62) == 2 {
+                let site = key & 0xffffffff;
+                let pos = lower_bound(in self.close_site.as_slice(), site);
+                if pos < self.close_site.len() && at(in self.close_site.as_slice(), pos) == site {
+                    if value > at(in self.close_val.as_slice(), pos) {
+                        self.close_val.try_set(pos, value);
+                        novel = true;
+                    }
+                } else {
+                    insert_at(inout self.close_site, pos, site);
+                    insert_at(inout self.close_val, pos, value);
+                    if value > 0 {
+                        novel = true;
+                    }
+                }
+            } else if set_insert(inout self.seen, key) {
+                novel = true;
+            }
+        }
+        if novel {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+// Add the run just observed (code 1) to the corpus.
+pub fn fuzzer_keep(
+    inout f: Fuzzer,
+    in values: Slice[u64],
+    in kind_tag: Slice[u64],
+    in kind_max: Slice[u64],
+    in cmps: Slice[u64]
+) {
+    for i in 0..values.len() {
+        f.c_vals.push(at(in values, i));
+        f.c_tag.push(at(in kind_tag, i));
+        f.c_max.push(at(in kind_max, i));
+    }
+    let end = f.c_vals.len();
+    f.c_off.push(end);
+    for i in 0..cmps.len() {
+        f.c_cmps.push(at(in cmps, i));
+    }
+    let cend = f.c_cmps.len();
+    f.c_cmp_off.push(cend);
+    f.c_solved.push(false);
+}
+
+pub fn fuzzer_stats(in f: Fuzzer) -> FuzzStats {
+    let mut s = f.stats;
+    s.features = wrapping_add(f.seen.len(), f.close_site.len());
+    s
+}
+
+pub fn fuzzer_corpus_len(in f: Fuzzer) -> u64 {
+    f.corpus_len()
+}
+
+pub fn fuzzer_corpus_entry(in f: Fuzzer, e: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let start = f.entry_start(e);
+    let end = f.entry_end(e);
+    for j in start..end {
+        out.push(at(in f.c_vals.as_slice(), j));
+    }
+    out
 }

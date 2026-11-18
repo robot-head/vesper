@@ -1,3 +1,72 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
-vesper_crate()
+# The port-backed package (seed-copy rule, docs/maintenance/porting-a-crate.md):
+# build.rs links the object built here from the Loom package in vesper/ and
+# checks port/binding.rs against the generated binding. The compiler and the
+# other Loom crates link the Rust seed copy, //crates/vesper-loom-calculus/seed,
+# instead (port wave P1 lane 16, #913).
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "loom_calculus_vesper",
+    library = "loom_calculus",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "loom_calculus_vesper_binding",
+    srcs = [":loom_calculus_vesper"],
+    output_group = "rust_binding",
+)
+
+# The divergent builds, one per ported module (the Cargo
+# `vesper-port-divergent` feature applies the same edits, DIVERGENT in
+# build.rs): each
+# must build from a copy of the package with its edit applied. The Cargo run
+# in scripts/test-port-harness.sh asserts which test catches each one.
+[
+    vesper_port_object(
+        name = "loom_calculus_vesper_divergent_" + module,
+        edit_src = "vesper/src/%s.ves" % module,
+        edits = {old: new},
+        library = "loom_calculus",
+        package = ":port_package",
+        target = VESPER_TARGET,
+    )
+    for module, old, new in [
+        ("check", "if c == 92 || c == 58 || c == 0 {", "if c == 92 || c == 0 {"),
+        ("semver", "return v.minor >= c.minor;", "return v.minor > c.minor;"),
+        ("solve", "if grew && !sbool(in l.queued, parent) {", "if false && grew {"),
+        ("upgrade", "let relaxed = !new_forbid;", "let relaxed = false;"),
+    ]
+]
+
+vesper_crate(
+    build_script_data = [
+        ":loom_calculus_vesper",
+        ":loom_calculus_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :loom_calculus_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :loom_calculus_vesper_binding)",
+    },
+)
+
+# The seed package (seed/) builds these same Rust sources without the port.
+exports_files(glob([
+    "src/**/*.rs",
+    "tests/**/*.rs",
+]) + ["README.md"])
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-loom-calculus/seed:__pkg__"],
+)

@@ -1,0 +1,436 @@
+// @export abi 3
+//
+// @vesper/serde: decimal to binary64 conversion for validated JSON numbers
+// (src/lemire.rs). Clinger's fast path, then Eisel-Lemire over the 128-bit
+// power-of-five table (pow5.ves). When Eisel-Lemire cannot decide, the
+// result says so and the Rust wrapper asks `str::parse`, which is the
+// Fallback path of the Rust build too.
+use self::Decoded;
+
+// A decimal `w * 10^q`; `truncated` when digits beyond the first 19
+// significant ones were dropped from `w`; `ok` is false when the text is
+// not a JSON number.
+copy struct Decimal {
+    ok: bool,
+    negative: bool,
+    w: u64,
+    q: i64,
+    truncated: bool
+}
+
+// Biased binary exponent and 52-bit mantissa; `ok` is false when
+// Eisel-Lemire cannot decide the rounding.
+copy struct Fp {
+    ok: bool,
+    power2: i64,
+    mantissa: u64
+}
+
+// Exponent magnitudes are clamped to 2^62 (see src/lemire.rs).
+fn exp_cap() -> i64 {
+    4611686018427387904
+}
+
+fn mantissa_bits() -> u64 {
+    52
+}
+
+// The digit value of the byte at `p`, or 10 when it is not a digit or `p`
+// is past the end.
+fn digit_at(in text: Slice[u8], p: u64) -> u64 {
+    match text.try_get(p) {
+        Option::Some(c) => {
+            let d = wrapping_sub(widen_u64(c), 48);
+            if d < 10 {
+                d
+            } else {
+                10
+            }
+        },
+        Option::None => 10,
+    }
+}
+
+fn byte_at(in text: Slice[u8], p: u64) -> u64 {
+    match text.try_get(p) {
+        Option::Some(c) => widen_u64(c),
+        Option::None => 256,
+    }
+}
+
+// Fold runs of eight ASCII digits into `w` a word at a time (SWAR, as in
+// fast_float); returns the new position and significand.
+fn eight_digits(in text: Slice[u8], p0: u64, w0: u64) -> (u64, u64) {
+    let mut p = p0;
+    let mut w = w0;
+    loop {
+        match text.try_read_u64_le(p) {
+            Option::Some(v) => {
+                let hi = 17361641481138401520;
+                let all = (v & hi) | ((wrapping_add(v, 434041037028460038) & hi) >> 4);
+                if all != 3689348814741910323 {
+                    break;
+                }
+                let a = wrapping_mul(v & 1085102592571150095, 2561) >> 8;
+                let b = wrapping_mul(a & 71777214294589695, 6553601) >> 16;
+                let c = wrapping_mul(b & 281470681808895, 42949672960001) >> 32;
+                w = wrapping_add(wrapping_mul(w, 100000000), c);
+                p = wrapping_add(p, 8);
+            },
+            Option::None => break,
+        }
+    }
+    (p, w)
+}
+
+fn digits_from(in text: Slice[u8], p0: u64, w0: u64) -> (u64, u64) {
+    let (p1, w1) = eight_digits(in text, p0, w0);
+    let mut p = p1;
+    let mut w = w1;
+    loop {
+        let d = digit_at(in text, p);
+        if d == 10 {
+            break;
+        }
+        w = wrapping_add(wrapping_mul(w, 10), d);
+        p = wrapping_add(p, 1);
+    }
+    (p, w)
+}
+
+fn not_number() -> Decimal {
+    Decimal {
+        ok: false,
+        negative: false,
+        w: 0,
+        q: 0,
+        truncated: false
+    }
+}
+
+// The JSON number grammar and its significand (src/lemire.rs `decimal`).
+fn decimal(in text: Slice[u8]) -> Decimal {
+    let n = text.len();
+    let mut p: u64 = 0;
+    let negative = byte_at(in text, 0) == 45;
+    if negative {
+        p = 1;
+    }
+    let int_start = p;
+    let (p1, w1) = digits_from(in text, p, 0);
+    p = p1;
+    let mut w = w1;
+    let int_end = p;
+    if int_end == int_start {
+        return not_number();
+    }
+    if wrapping_sub(int_end, int_start) > 1 && byte_at(in text, int_start) == 48 {
+        return not_number();
+    }
+    let mut frac_start = p;
+    let mut frac_end = p;
+    if byte_at(in text, p) == 46 {
+        p = wrapping_add(p, 1);
+        frac_start = p;
+        let (p2, w2) = digits_from(in text, p, w);
+        p = p2;
+        w = w2;
+        frac_end = p;
+        if frac_end == frac_start {
+            return not_number();
+        }
+    }
+    let mut e: i64 = 0;
+    let c = byte_at(in text, p);
+    if c == 101 || c == 69 {
+        p = wrapping_add(p, 1);
+        let mut exp_negative = false;
+        let s = byte_at(in text, p);
+        if s == 45 {
+            p = wrapping_add(p, 1);
+            exp_negative = true;
+        } else if s == 43 {
+            p = wrapping_add(p, 1);
+        }
+        let exp_start = p;
+        loop {
+            let d = digit_at(in text, p);
+            if d == 10 {
+                break;
+            }
+            // Saturate far beyond any digit count a slice can hold.
+            if e > 461168601842738790 {
+                e = exp_cap();
+            } else {
+                e = wrapping_add(wrapping_mul(e, 10), wrapping_i64(d));
+                if e > exp_cap() {
+                    e = exp_cap();
+                }
+            }
+            p = wrapping_add(p, 1);
+        }
+        if p == exp_start {
+            return not_number();
+        }
+        if exp_negative {
+            e = wrapping_sub(0, e);
+        }
+    }
+    if p != n {
+        return not_number();
+    }
+    let int_len = wrapping_sub(int_end, int_start);
+    let frac_len = wrapping_sub(frac_end, frac_start);
+    let digits = wrapping_add(int_len, frac_len);
+    let mut d = Decimal {
+        ok: true,
+        negative: negative,
+        w: w,
+        q: wrapping_sub(e, wrapping_i64(frac_len)),
+        truncated: false
+    };
+    if digits > 19 {
+        // Leading zeros do not count; re-read when there are too many
+        // significant digits for `w` to be exact.
+        let mut zeros: u64 = 0;
+        let mut seen = false;
+        let mut kept: u64 = 0;
+        let mut w3: u64 = 0;
+        let mut truncated = false;
+        for k in 0..digits {
+            let at = if k < int_len {
+                wrapping_add(int_start, k)
+            } else {
+                wrapping_add(frac_start, wrapping_sub(k, int_len))
+            };
+            let dv = digit_at(in text, at);
+            if !seen && dv == 0 {
+                zeros = wrapping_add(zeros, 1);
+            } else {
+                seen = true;
+                if kept < 19 {
+                    w3 = wrapping_add(wrapping_mul(w3, 10), dv);
+                    kept = wrapping_add(kept, 1);
+                } else if dv != 0 {
+                    truncated = true;
+                }
+            }
+        }
+        let significant = wrapping_sub(digits, zeros);
+        if significant > 19 {
+            d.w = w3;
+            // Every significant digit past the 19th moves the scale by one.
+            d.q = wrapping_add(d.q, wrapping_i64(wrapping_sub(significant, 19)));
+            d.truncated = truncated;
+        }
+    }
+    d
+}
+
+// Leading zero bits of `v` (64 for zero).
+pub fn clz64(v: u64) -> u64 {
+    if v == 0 {
+        return 64;
+    }
+    let mut x = v;
+    let mut n: u64 = 0;
+    if x >> 32 == 0 {
+        n = wrapping_add(n, 32);
+        x = x << 32;
+    }
+    if x >> 48 == 0 {
+        n = wrapping_add(n, 16);
+        x = x << 16;
+    }
+    if x >> 56 == 0 {
+        n = wrapping_add(n, 8);
+        x = x << 8;
+    }
+    if x >> 60 == 0 {
+        n = wrapping_add(n, 4);
+        x = x << 4;
+    }
+    if x >> 62 == 0 {
+        n = wrapping_add(n, 2);
+        x = x << 2;
+    }
+    if x >> 63 == 0 {
+        n = wrapping_add(n, 1);
+    }
+    n
+}
+
+fn fp(power2: i64, mantissa: u64) -> Fp {
+    Fp {
+        ok: true,
+        power2: power2,
+        mantissa: mantissa
+    }
+}
+
+// floor(log2(10^q)) + 63.
+fn power(q: i64) -> i64 {
+    wrapping_add(wrapping_mul(q, 217706) >> 16, 63)
+}
+
+// (src/lemire.rs `eisel_lemire`.)
+fn eisel_lemire(q: i64, w: u64, in pow5: Slice[u64]) -> Fp {
+    if w == 0 || q < -342 {
+        return fp(0, 0);
+    }
+    if q > 308 {
+        return fp(2047, 0);
+    }
+    let lz = clz64(w);
+    let wn = bit_shl(w, lz);
+    // The high 128 bits of `wn * 5^q` to 55 bits (`product_approx`).
+    let mask: u64 = 511;
+    let index = wrapping_u64(wrapping_add(q, 342));
+    let hi5 = match pow5.try_get(wrapping_mul(index, 2)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let lo5 = match pow5.try_get(wrapping_add(wrapping_mul(index, 2), 1)) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let (first_lo0, first_hi0) = mul_wide(wn, hi5);
+    let mut lo = first_lo0;
+    let mut hi = first_hi0;
+    if hi & mask == mask {
+        let (_, second_hi) = mul_wide(wn, lo5);
+        lo = wrapping_add(lo, second_hi);
+        if second_hi > lo {
+            hi = wrapping_add(hi, 1);
+        }
+    }
+    if lo == 18446744073709551615 {
+        // The truncated low half may hide a carry into the bits we keep;
+        // Lemire shows this cannot change the result for q in -27..=55.
+        if q < -27 || q > 55 {
+            return Fp {
+                ok: false,
+                power2: 0,
+                mantissa: 0
+            };
+        }
+    }
+    let upperbit = hi >> 63;
+    let shift = wrapping_add(upperbit, 9);
+    let mut mantissa = bit_shr(hi, shift);
+    let mut power2 = wrapping_add(
+        wrapping_sub(wrapping_add(power(q), wrapping_i64(upperbit)), wrapping_i64(lz)),
+        1023
+    );
+    if power2 <= 0 {
+        // Subnormal (or zero) result.
+        let s = wrapping_add(wrapping_sub(0, power2), 1);
+        if s >= 64 {
+            return fp(0, 0);
+        }
+        mantissa = bit_shr(mantissa, wrapping_u64(s));
+        mantissa = wrapping_add(mantissa, mantissa & 1);
+        mantissa = mantissa >> 1;
+        let p2: i64 = if mantissa >= 4503599627370496 {
+            1
+        } else {
+            0
+        };
+        return fp(p2, mantissa & 4503599627370495);
+    }
+    // A product exactly halfway between two doubles: round to even.
+    if lo <= 1 && q >= -4 && q <= 23 && mantissa & 3 == 1 && bit_shl(mantissa, shift) == hi {
+        mantissa = mantissa & 18446744073709551614;
+    }
+    mantissa = wrapping_add(mantissa, mantissa & 1);
+    mantissa = mantissa >> 1;
+    if mantissa >= 9007199254740992 {
+        mantissa = 4503599627370496;
+        power2 = wrapping_add(power2, 1);
+    }
+    mantissa = mantissa & 18442240474082181119;
+    if power2 >= 2047 {
+        return fp(2047, 0);
+    }
+    fp(power2, mantissa)
+}
+
+fn assemble(negative: bool, f: Fp) -> u64 {
+    let sign: u64 = if negative {
+        9223372036854775808
+    } else {
+        0
+    };
+    (wrapping_u64(f.power2) << 52) | f.mantissa | sign
+}
+
+// 10^k for k in 0..=22, exactly.
+fn pow10(k: i64) -> f64 {
+    let mut v = 1.0;
+    let mut i: i64 = 0;
+    loop {
+        if i >= k {
+            break;
+        }
+        v = v * 10.0;
+        i = wrapping_add(i, 1);
+    }
+    v
+}
+
+// Convert a JSON number (src/lemire.rs `decode_f64`). `path`: 0 not a JSON
+// number, 1 Clinger, 2 Eisel-Lemire, 3 undecided (the caller falls back).
+pub fn decode_bits(in text: Slice[u8], in pow5: Slice[u64]) -> Decoded {
+    let d = decimal(in text);
+    if !d.ok {
+        return Decoded {
+            path: 0,
+            bits: 0
+        };
+    }
+    let sign: u64 = if d.negative {
+        9223372036854775808
+    } else {
+        0
+    };
+    if d.w == 0 {
+        return Decoded {
+            path: 1,
+            bits: sign
+        };
+    }
+    if !d.truncated && d.w <= 9007199254740992 && d.q >= -22 && d.q <= 22 {
+        let w = nearest_f64(d.w);
+        let value = if d.q < 0 {
+            w / pow10(wrapping_sub(0, d.q))
+        } else {
+            w * pow10(d.q)
+        };
+        return Decoded {
+            path: 1,
+            bits: to_bits_f64(value) | sign
+        };
+    }
+    let f = eisel_lemire(d.q, d.w, in pow5);
+    if f.ok {
+        if d.truncated {
+            // The true significand lies in (w, w + 1): both ends must agree.
+            let up = eisel_lemire(d.q, wrapping_add(d.w, 1), in pow5);
+            if up.ok && up.power2 == f.power2 && up.mantissa == f.mantissa {
+                return Decoded {
+                    path: 2,
+                    bits: assemble(d.negative, f)
+                };
+            }
+        } else {
+            return Decoded {
+                path: 2,
+                bits: assemble(d.negative, f)
+            };
+        }
+    }
+    Decoded {
+        path: 3,
+        bits: 0
+    }
+}
