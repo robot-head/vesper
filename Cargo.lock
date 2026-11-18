@@ -5544,7 +5544,7 @@ dependencies = [
  "vesper-crucible-seed",
  "vesper-diagnostics",
  "vesper-doc",
- "vesper-ebpf",
+ "vesper-ebpf-seed",
  "vesper-ffi",
  "vesper-fiber-abi",
  "vesper-fmt",
@@ -5795,6 +5795,18 @@ name = "vesper-ebpf"
 version = "0.1.0"
 dependencies = [
  "aya-obj",
+ "libc",
+ "object 0.37.3",
+ "vesper-bench",
+ "vesper-ebpf-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
+
+[[package]]
+name = "vesper-ebpf-seed"
+version = "0.1.0"
+dependencies = [
  "libc",
  "object 0.37.3",
 ]

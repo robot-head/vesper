@@ -1,0 +1,37 @@
+# The frozen Rust seed copy of vesper-ebpf (package vesper-ebpf-seed,
+# library vesper_ebpf) that the compiler links: ../src built without the
+# port, so cfg(vesper_port) is off. Written by hand because its sources live
+# in the parent package; see "Crates the compiler links" in
+# docs/maintenance/porting-a-crate.md. Its tests are the parent package's
+# default (Rust) build, which compiles the same sources.
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs/private:all_crate_deps.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test")
+load("@vesper_cargo//:packages.bzl", "PACKAGES")
+
+# object, and libc on Linux, from this package's own Cargo metadata.
+_CRATE_DATA = PACKAGES["crates/vesper-ebpf/seed"].crate_data()
+
+rust_library(
+    name = "seed",
+    srcs = ["//crates/vesper-ebpf:rust_srcs"],
+    crate_name = "vesper_ebpf",
+    crate_root = "//crates/vesper-ebpf:src/lib.rs",
+    edition = "2024",
+    rustc_env = {
+        "CARGO_PKG_NAME": "vesper-ebpf-seed",
+        "CARGO_PKG_VERSION": "0.1.0",
+    },
+    version = "0.1.0",
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(_CRATE_DATA, normal = True, platforms = _CRATE_DATA["platforms"]),
+)
+
+rust_clippy_test(
+    name = "clippy",
+    targets = [":seed"],
+    tags = [
+        "clippy",
+        "lint",
+    ],
+)

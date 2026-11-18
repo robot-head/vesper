@@ -70,6 +70,7 @@ members = [
     "crates/vesper-warp-tls",
     "crates/vesper-silicon",
     "crates/vesper-ebpf",
+    "crates/vesper-ebpf/seed",
     "crates/vesper-chrono",
     "crates/vesper-migrate",
     "crates/vesper-crucible",
@@ -160,6 +161,7 @@ default-members = [
     "crates/vesper-warp-tls",
     "crates/vesper-silicon",
     "crates/vesper-ebpf",
+    "crates/vesper-ebpf/seed",
     "crates/vesper-chrono",
     "crates/vesper-migrate",
     "crates/vesper-crucible",
@@ -262,7 +264,9 @@ vesper-chrono = { path = "crates/vesper-chrono" }
 # The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
 # port is the package crates/vesper-crucible (#915).
 vesper-crucible = { path = "crates/vesper-crucible/seed", package = "vesper-crucible-seed" }
-vesper-ebpf = { path = "crates/vesper-ebpf" }
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-ebpf (#1041).
+vesper-ebpf = { path = "crates/vesper-ebpf/seed", package = "vesper-ebpf-seed" }
 vesper-kinetic = { path = "crates/vesper-kinetic" }
 vesper-ffi = { path = "crates/vesper-ffi" }
 vesper-migrate = { path = "crates/vesper-migrate" }

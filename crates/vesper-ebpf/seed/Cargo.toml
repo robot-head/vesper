@@ -1,0 +1,34 @@
+[package]
+name = "vesper-ebpf-seed"
+version = "0.1.0"
+edition = "2024"
+description = "Frozen Rust seed copy of vesper-ebpf for the compiler's own dependency closure"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899): the compiler links this
+# package, the Rust build of ../src, under the library name `vesper_ebpf`.
+# Crates inside `cargo tree -p vesper -e normal,build` depend on it with
+# `vesper-ebpf = { path = ".../seed", package = "vesper-ebpf-seed" }`;
+# every other crate uses the port-backed package `vesper-ebpf`. The Rust
+# code takes bug fixes only until self-hosting Stage 2.
+[lib]
+name = "vesper_ebpf"
+path = "../src/lib.rs"
+
+[dependencies]
+object = { version = "=0.37.3", default-features = false, features = ["write_core", "elf", "std", "read_core"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.177"
+
+# The crate's tests are not repeated here: the default build of the
+# port-backed package vesper-ebpf is this same Rust code, and CI runs every
+# test file against it and against the port (--features vesper-port).
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }
