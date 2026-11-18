@@ -46,6 +46,15 @@ Claim: #1057. Follow-up to port wave P3a lane 1 (#1036, PR #1051, second-class
   boxed sequence elements only to lend them, and consumes every other
   box-typed value once (`fip::loop_boxes_reclaimed`). That covers a loop over
   a sequence of processors held by a local sequence or an `inout self`.
+- **Review fixes.** A call through `Box[dyn Trait[args]]` binds the vtable
+  stub's trait parameters to `args` before checking
+  (`mono::specialize_boxed_stub`), so a generic trait's result cannot be
+  inferred as another type. The loop rule expands aggregate fields (a local
+  struct owning a box is refused). A box consumed by a `sink` call is freed
+  right after the call instruction, before a `Fail` status can leave the
+  caller; a `sink` lend to a handler-specialized (inlined) callee is refused
+  natively. A sequence element is lent `inout` only to a stub receiver or an
+  `inout dyn` parameter, never to `inout b: Box[dyn Trait]` (E0300).
 - **Evaluator** (`src/runtime.rs`). A boxed object is `Value::Object`: its
   value in a shared cell and its vtable. A stub call on one jumps to its
   slot with the value (an `inout self` gets a reference to the cell), so
@@ -123,6 +132,8 @@ No file under `src/verified_codegen/**`, `lean/**`, `bootstrap/**` or
   warp and prism, sources performing `Net`/`Storage` effects in flux).
 - Associated types (`dyn Source[Item = u8]`), several models per (object,
   type) pair, and package-qualified traits.
+- Lending a boxed object `sink` to a function whose handler effects are
+  specialized at the call (native).
 - A function with a loop still cannot own a box (a `let` holding a boxed
   object, or a `sink` parameter); move the loop into a function that borrows
   it. Plain `Box[T]` keeps the old rule.

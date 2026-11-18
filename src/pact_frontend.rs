@@ -32,7 +32,7 @@
 //! rejected before a World is accepted.
 mod builtin_traits;
 mod mono;
-pub(crate) use mono::each_expr;
+pub(crate) use mono::{each_expr, specialize_boxed_stub};
 
 use crate::ast::*;
 use crate::check::{self, Checked, TraitCall, TraitCalls, World};

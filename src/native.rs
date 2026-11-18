@@ -5959,6 +5959,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             && !direct_trace
             && dyn_target.is_none()
         {
+            if !sink_blocks.is_empty() {
+                // The inlined body reads the object in its block, and an
+                // abort through a handler would skip the free after it.
+                return Err(format!(
+                    "native: a boxed object lent `sink` to '{name}', whose effects are specialized at the call, is not supported in Stage 1; lend it to a function without handler effects"
+                ));
+            }
             if self.inline_depth >= 64 {
                 return Err("recursive effect specialization exceeds 64 inline frames".into());
             }
@@ -6135,6 +6142,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 (None, Some(target)) => self.b.ins().call_indirect(sig, target, &values),
                 (None, None) => return Err("native call lacks a callee".into()),
             };
+            // The callee owns a `sink` object's value, not the block of the
+            // box it was lent from. Free the blocks before a failure status
+            // can leave this continuation (through `fail_exit` or a
+            // handler's dispatch block).
+            for block in boxed_free.take().into_iter().chain(sink_blocks.drain(..)) {
+                self.fip_box_free(block)?;
+            }
             let result = if let Some(words) = callee_abi.result_words {
                 let buffer = match into {
                     Some(out) => out,
@@ -6167,11 +6181,6 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             result
         };
-        // The callee owns a `sink` object's value, not the block of the
-        // box it was lent from.
-        for block in boxed_free.into_iter().chain(sink_blocks) {
-            self.fip_box_free(block)?;
-        }
         for (var, ptr, ty) in restores {
             let value = self.load(ptr, &ty)?;
             self.def_var(var, value);

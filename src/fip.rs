@@ -192,13 +192,16 @@ pub fn mentions_box(world: &World, ty: &Type) -> bool {
 pub fn loop_boxes_reclaimed(world: &World, f: &crate::ir::FunctionIr) -> bool {
     use crate::ir::{Op, Terminator};
     let boxy = |t: &Type| active(world) && mentions_box_outside_seq(t);
-    // Parameters are locals too; an `in` parameter only lends its box.
+    // Parameters are locals too; an `in` parameter only lends its box, and
+    // an `inout` one stays owned by the caller (a fresh box written into it
+    // is refused below). Any other local owning a box, directly or through
+    // an aggregate's fields, would need the acyclic drop elaboration.
     let owned_local = f.locals.iter().any(|(name, t)| {
-        boxy(t)
-            && f.params
-                .iter()
-                .find(|p| &p.name == name)
-                .is_none_or(|p| p.pass != Pass::In)
+        match f.params.iter().find(|p| &p.name == name).map(|p| p.pass) {
+            Some(Pass::In) => false,
+            Some(Pass::Inout) => boxy(t),
+            _ => active(world) && owns_box_outside_seq(world, t),
+        }
     });
     if owned_local {
         return false;
@@ -248,7 +251,7 @@ pub fn loop_boxes_reclaimed(world: &World, f: &crate::ir::FunctionIr) -> bool {
     }
     for b in &f.blocks {
         for i in &b.instructions {
-            if !boxy(&i.ty) {
+            if !(active(world) && owns_box_outside_seq(world, &i.ty)) {
                 continue;
             }
             let (owning, count) = uses.get(&i.dest).copied().unwrap_or_default();
@@ -267,6 +270,49 @@ pub fn loop_boxes_reclaimed(world: &World, f: &crate::ir::FunctionIr) -> bool {
         }
     }
     true
+}
+
+/// Whether a value of type `t` owns a `Box` directly or through the fields
+/// of its aggregates, other than inside a `ChunkSeq` or `Slice` (whose drop
+/// plan reclaims boxed elements).
+fn owns_box_outside_seq(world: &World, t: &Type) -> bool {
+    fn visit(world: &World, ty: &Type, seen: &mut BTreeSet<String>) -> bool {
+        if crate::seq::is_seq_type(ty) || crate::seq::is_slice_type(ty) {
+            return false;
+        }
+        if is_box_type(world, ty) {
+            return true;
+        }
+        match ty {
+            Type::Tuple(ts) => ts.iter().any(|t| visit(world, t, seen)),
+            Type::Named(n, args) => {
+                if args.iter().any(|a| visit(world, a, seen)) {
+                    return true;
+                }
+                let Some(a) = world.adts.get(n) else {
+                    return false;
+                };
+                if !seen.insert(n.clone()) {
+                    return false;
+                }
+                let vars: BTreeMap<String, Type> = a
+                    .generics
+                    .iter()
+                    .zip(args)
+                    .map(|(g, t)| (g.name.clone(), t.clone()))
+                    .collect();
+                let found = a.variants.iter().any(|v| {
+                    v.fields
+                        .iter()
+                        .any(|f| visit(world, &substitute(&f.ty, &vars), seen))
+                });
+                seen.remove(n);
+                found
+            }
+            _ => mentions_box_outside_seq(ty),
+        }
+    }
+    visit(world, t, &mut BTreeSet::new())
 }
 
 /// Whether `t` names `Box` other than inside a `ChunkSeq` or `Slice`.

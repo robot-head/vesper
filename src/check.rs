@@ -2497,8 +2497,15 @@ impl Checker<'_> {
             return None;
         }
         let element = self.receiver_type(e, env);
-        if !(crate::dyn_trait::is_boxed(&element)
-            || (crate::dyn_trait::is_boxed(&param.ty) && element == param.ty))
+        if !crate::dyn_trait::is_boxed(&element) {
+            return None;
+        }
+        // An `inout` lend may only reach the object: a vtable stub's
+        // receiver or a `dyn` parameter. A callee taking the box itself
+        // `inout` could replace it, and the element is not a place.
+        if param.pass == Pass::Inout
+            && !matches!(&param.ty, Type::Named(g, a)
+                if a.is_empty() && (g == "$Self" || crate::dyn_trait::is_dyn_generic(g)))
         {
             return None;
         }
@@ -2567,7 +2574,14 @@ impl Checker<'_> {
                                 span: e.span.clone(),
                             };
                             match traits.resolve(&call)? {
-                                Ok(name) => self.world.functions.get(&name).cloned(),
+                                Ok(name) => {
+                                    self.world.functions.get(&name).cloned().map(|mut f| {
+                                        crate::pact_frontend::specialize_boxed_stub(
+                                            &mut f, &base_ty,
+                                        );
+                                        f
+                                    })
+                                }
                                 Err(_) => None,
                             }
                         }),
@@ -2615,7 +2629,7 @@ impl Checker<'_> {
         let call = TraitCall {
             callee,
             path,
-            receiver,
+            receiver: receiver.clone(),
             generics: &generics,
             function: &current,
             span: span.clone(),
@@ -2624,7 +2638,9 @@ impl Checker<'_> {
             Ok(name) => match self.world.functions.get(&name) {
                 Some(f) => {
                     self.resolved.insert((span.start, span.end), name);
-                    Some(Some(f.clone()))
+                    let mut f = f.clone();
+                    crate::pact_frontend::specialize_boxed_stub(&mut f, &receiver);
+                    Some(Some(f))
                 }
                 None => {
                     self.error(

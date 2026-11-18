@@ -341,6 +341,31 @@ fn closed(t: &Type) -> bool {
     !has_infer(t) && !matches!(t, Type::IntLiteral(_))
 }
 
+/// Binds a vtable stub's trait parameters to the trait arguments of a
+/// boxed receiver `Box[dyn Trait[args]]` (§7.3): the stored vtable was made
+/// for those arguments, so a call through the box may not infer others.
+pub(crate) fn specialize_boxed_stub(f: &mut Function, receiver: &Type) {
+    let Some(Type::Named(tr, args)) = crate::dyn_trait::boxed_trait(receiver) else {
+        return;
+    };
+    if args.is_empty()
+        || f.body.is_some()
+        || !f
+            .name
+            .strip_prefix(&crate::dyn_trait::stub_name(tr, ""))
+            .is_some_and(|m| !m.is_empty())
+        || f.generics.first().is_none_or(|g| g.name != "$Self")
+    {
+        return;
+    }
+    let vars: BTreeMap<String, Type> = f.generics[1..]
+        .iter()
+        .zip(args)
+        .map(|(g, a)| (g.name.clone(), a.clone()))
+        .collect();
+    substitute_function(f, &vars);
+}
+
 fn substitute_function(f: &mut Function, vars: &BTreeMap<String, Type>) {
     walk_function(f, &mut |t| *t = substitute(t, vars));
     f.effects = substitute_effects(&f.effects, vars);

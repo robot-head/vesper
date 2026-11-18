@@ -484,3 +484,85 @@ fn main() -> i64 {{
     // (2*1+3) = 5, (2*5+3) = 13; the counter's fifth ID is 5.
     assert_eq!(execute(&src), (1300 + 5).to_string());
 }
+
+/// A call through `Box[dyn Factory[i64]]` is typed at the box's trait
+/// arguments, which the stored vtable was made for.
+#[test]
+fn boxed_calls_use_the_boxed_trait_arguments() {
+    let base = "struct Seven { k: i64 }
+trait Factory[T] { fn make(in self) -> T; }
+impl Factory[i64] for Seven { fn make(in self) -> i64 { wrapping_add(self.k, 7) } }
+";
+    let ok = format!(
+        "{base}fn main() -> i64 {{
+    let b: Box[dyn Factory[i64]] = Box::new(Seven {{ k: 1 }});
+    b.make()
+}}
+"
+    );
+    assert_eq!(execute(&ok), "8");
+    rejects(
+        &format!(
+            "{base}fn main() -> i64 {{
+    let b: Box[dyn Factory[i64]] = Box::new(Seven {{ k: 1 }});
+    let p: (i64, i64) = b.make();
+    0
+}}
+"
+        ),
+        "E0200",
+    );
+}
+
+/// A loop function may not own a box through an aggregate's fields: the
+/// drop elaboration that would reclaim it needs an acyclic graph.
+#[test]
+fn loops_refuse_aggregates_owning_boxes() {
+    let src = format!(
+        "{TRAITS}struct Holder {{ object: Box[dyn Shape] }}
+fn make() -> Box[dyn Shape] {{ Box::new(P {{ x: 3 }}) }}
+fn run(n: u64) -> i64 {{
+    let holder = Holder {{ object: make() }};
+    let mut t: i64 = 0;
+    for i in 0..n {{ t = wrapping_add(t, holder.object.area()); }}
+    t
+}}
+fn main() -> i64 {{ run(4) }}
+"
+    );
+    let w = world(&src);
+    let e = native::jit_with_options(&w, "main", true).unwrap_err();
+    assert!(e.contains("not reclaimed natively"), "{e}");
+}
+
+/// A `sink self` call that fails frees the consumed box's block before
+/// the failure leaves the caller.
+#[test]
+fn failing_sink_calls_free_the_box() {
+    let src = "struct P { x: i64 }
+trait Eat { fn eat(sink self) -> i64 eff [Fail[RuntimeError]]; }
+impl Eat for P { fn eat(sink self) -> i64 eff [Fail[RuntimeError]] { wrapping_add(84 / wrapping_sub(self.x, 1), 1) } }
+fn go(sink b: Box[dyn Eat]) -> i64 eff [Fail[RuntimeError]] { b.eat() }
+fn main() -> i64 {
+    let b: Box[dyn Eat] = Box::new(P { x: 1 });
+    handle Fail[RuntimeError] in { go(b) } with { return x => x, raise(e, k) => -1, }
+}
+";
+    assert_eq!(execute(src), "-1");
+}
+
+/// A sequence element is not a place, so it may be lent `inout` only to
+/// reach its object, never to a callee that could replace the box.
+#[test]
+fn elements_are_not_lent_to_replace_their_box() {
+    let src = format!("{TRAITS}fn reset(inout b: Box[dyn Shape]) {{ b = Box::new[dyn Shape](P {{ x: 9 }}); }}
+fn run() -> i64 eff [Fail[RuntimeError]] {{
+    let mut s: ChunkSeq[Box[dyn Shape]] = ChunkSeq::new[Box[dyn Shape]]();
+    s.push(Box::new[dyn Shape](P {{ x: 1 }}));
+    reset(inout s[0]);
+    s[0].area()
+}}
+fn main() -> i64 {{ handle Fail[RuntimeError] in {{ run() }} with {{ return x => x, raise(e, k) => -1, }} }}
+");
+    rejects(&src, "E0300");
+}
