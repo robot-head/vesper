@@ -204,6 +204,40 @@ theorem uncompacted_zset_eq_compacted :
   unfold ZWeightEquiv
   decide
 
+-- ==================== 8. SKELETAL SUGAR PASS-MODE TRANSPARENCY =============
+inductive SugarPass where
+  | sharedIn | mutInout | initOut | moveSink
+  deriving DecidableEq, Repr
+
+def passPermitsUse (patHole templateUse : SugarPass) : Bool :=
+  match patHole, templateUse with
+  | .sharedIn, .sharedIn => true
+  | .mutInout, .sharedIn | .mutInout, .mutInout => true
+  | .initOut,  .initOut  => true
+  | .moveSink, .sharedIn | .moveSink, .mutInout | .moveSink, .moveSink => true
+  | _, _ => false
+
+def isMutatingOrConsuming (u : SugarPass) : Bool :=
+  match u with
+  | .sharedIn => false
+  | .mutInout | .initOut | .moveSink => true
+
+theorem sugar_shared_hole_forbids_hidden_mutation
+    (u : SugarPass)
+    (h_wf : passPermitsUse .sharedIn u = true) :
+    isMutatingOrConsuming u = false := by
+  cases u <;> first | rfl | cases h_wf
+
+theorem sugar_pass_permits_refl (p : SugarPass) :
+    passPermitsUse p p = true := by
+  cases p <;> rfl
+
+theorem sugar_out_hole_disjoint_from_reads
+    (u : SugarPass)
+    (h_wf : passPermitsUse .initOut u = true) :
+    u = .initOut := by
+  cases u <;> first | rfl | cases h_wf
+
 end Vesper.UnifiedTypeTheory
 
 #print axioms Vesper.UnifiedTypeTheory.modevec_le_trans
@@ -214,6 +248,9 @@ end Vesper.UnifiedTypeTheory
 #print axioms Vesper.UnifiedTypeTheory.semver_refinement_variance_sound
 #print axioms Vesper.UnifiedTypeTheory.graded_region_loop_elides_limit_checks
 #print axioms Vesper.UnifiedTypeTheory.uncompacted_zset_eq_compacted
+#print axioms Vesper.UnifiedTypeTheory.sugar_shared_hole_forbids_hidden_mutation
+#print axioms Vesper.UnifiedTypeTheory.sugar_pass_permits_refl
+#print axioms Vesper.UnifiedTypeTheory.sugar_out_hole_disjoint_from_reads
 
 #print axioms Vesper.UnifiedTypeTheory.capsule_rejects_thread_affinity
 #print axioms Vesper.UnifiedTypeTheory.capsule_rejects_outer_capability
