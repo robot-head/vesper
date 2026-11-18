@@ -780,17 +780,50 @@ impl Elaborator {
     }
 
     /// The `dyn` metadata native code needs ([`crate::dyn_trait::DynObjects`]).
-    pub(super) fn dyn_metadata(&self, world: &mut World) {
+    ///
+    /// Refuses a vtable whose slot passes a function value (E0630): native
+    /// code specializes such a function into each caller, so no slot could
+    /// hold it.
+    pub(super) fn dyn_metadata(&self, world: &mut World) -> Vec<Diagnostic> {
         if self.dyn_params.is_empty() {
-            return;
+            return vec![];
         }
         let mut objects = crate::dyn_trait::DynObjects::default();
         let instances = self.instances.borrow();
+        let instance_params = self.dyn_instance_params.borrow();
         for name in world.functions.keys() {
+            if let Some(p) = instance_params.get(name) {
+                objects.params.insert(name.clone(), p.clone());
+                continue;
+            }
             let origin = instances.get(name).unwrap_or(name);
             if let Some(p) = self.dyn_params.get(origin) {
                 objects.params.insert(name.clone(), p.clone());
             }
+        }
+        let mut errors = vec![];
+        for v in self.dyn_vtables.borrow().iter() {
+            let carries_function = v.methods.iter().any(|(slot, _)| {
+                world.functions.get(slot).is_some_and(|f| {
+                    crate::native::contains_function(world, &f.result)
+                        || f.params
+                            .iter()
+                            .any(|p| crate::native::contains_function(world, &p.ty))
+                })
+            });
+            if carries_function {
+                errors.push(d(
+                    "E0630",
+                    format!(
+                        "cannot build the vtable of {} as `{}`: a method passes a function value (in `self` or another parameter or its result), which a vtable slot cannot carry yet",
+                        v.self_ty, v.object
+                    ),
+                    &v.span,
+                ));
+            }
+        }
+        if !errors.is_empty() {
+            return errors;
         }
         for (key, t) in &self.fe.traits {
             for (slot, m) in t.decl.methods.iter().enumerate() {
@@ -802,6 +835,7 @@ impl Elaborator {
         }
         objects.vtables = self.dyn_vtables.borrow().clone();
         world.dyn_objects = objects;
+        vec![]
     }
 
     /// Records each instance as a private generated function.
@@ -1156,6 +1190,21 @@ impl Mono<'_> {
         }
         self.names.insert(name.clone());
         self.instances.insert(key, name.clone());
+        if let Some(params) = self.el.dyn_params_of(origin) {
+            let params = params
+                .iter()
+                .map(|(g, t)| {
+                    (
+                        g.clone(),
+                        crate::numeric::default_type(&substitute(t, &vars)),
+                    )
+                })
+                .collect();
+            self.el
+                .dyn_instance_params
+                .borrow_mut()
+                .insert(name.clone(), params);
+        }
         let mut clone = f;
         substitute_function(&mut clone, &vars);
         clone.name = name.clone();
@@ -1312,12 +1361,30 @@ impl Mono<'_> {
             let Some(ty) = vars.get(g).cloned() else {
                 continue;
             };
-            if matches!(&ty, Type::Named(n, a) if a.is_empty() && crate::dyn_trait::is_dyn_generic(n))
+            let tr = crate::numeric::default_type(&substitute(tr, vars));
+            if let Type::Named(n, a) = &ty
+                && a.is_empty()
+                && crate::dyn_trait::is_dyn_generic(n)
             {
-                // Forwarding a `dyn` parameter: its caller chose the vtable.
+                // Forwarding a `dyn` parameter: its caller chose the vtable,
+                // which fits only the same instantiated trait.
+                let source = self
+                    .el
+                    .dyn_params_of(&cx.origin)
+                    .and_then(|p| p.get(n))
+                    .map(|t| crate::numeric::default_type(&substitute(t, &cx.vars)));
+                if source.as_ref() != Some(&tr) {
+                    let source = source.map_or_else(|| "?".to_owned(), |t| t.to_string());
+                    self.errors.push(d(
+                        "E0608",
+                        format!(
+                            "cannot pass `dyn {source}` as `dyn {tr}`: a forwarded object keeps its vtable, so the traits must be the same"
+                        ),
+                        span,
+                    ));
+                }
                 continue;
             }
-            let tr = crate::numeric::default_type(&substitute(tr, vars));
             let origin_generics = &self.funcs[&cx.origin].generics;
             let open = !closed(&ty)
                 || !closed(&tr)
@@ -1343,18 +1410,28 @@ impl Mono<'_> {
                 continue;
             };
             let object = crate::dyn_trait::object(tr.clone());
-            if self
+            let Some(index) = self.evidence(cx, &key, &ty, args, span) else {
+                continue;
+            };
+            let existing = self
                 .el
                 .dyn_vtables
                 .borrow()
                 .iter()
-                .any(|v| v.object == object && v.self_ty == ty)
-            {
+                .find(|v| v.object == object && v.self_ty == ty)
+                .map(|v| v.conformance);
+            if let Some(selected) = existing {
+                if selected != index {
+                    self.errors.push(d(
+                        "E0633",
+                        format!(
+                            "cannot build a second vtable of {ty} as `dyn {tr}` under another model: a program has one vtable per object type and type"
+                        ),
+                        span,
+                    ));
+                }
                 continue;
             }
-            let Some(index) = self.evidence(cx, &key, &ty, args, span) else {
-                continue;
-            };
             let c = self.el.fe.confs[index].clone();
             let mut cvars = BTreeMap::new();
             match_type(&c.decl.self_ty, &ty, &c.decl.generics, &mut cvars);
@@ -1386,6 +1463,8 @@ impl Mono<'_> {
                     object,
                     self_ty: ty,
                     methods,
+                    conformance: index,
+                    span: span.clone(),
                 });
         }
     }

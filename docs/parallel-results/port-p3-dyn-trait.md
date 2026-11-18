@@ -57,6 +57,15 @@ Decisions the manuscript left open:
   call, or a direct argument for another `dyn` parameter. Nothing else.
 - `dyn` is not allowed in trait method signatures, conformance methods or
   effect operations yet.
+- One vtable per (object type, implementing type) per program: a second
+  coercion of the same type under another `use model` conformance is
+  refused (E0633) rather than given a second vtable, and a forwarded object
+  must be forwarded as the same instantiated trait (E0608).
+- A slot that would pass a function value (a function parameter or result,
+  or a `self` type holding one) is refused (E0630), because native code
+  specializes such functions into their callers.
+- The vtable drop frees the boxes the object owns (the Box drop elaboration
+  cannot see through the erased parameter).
 
 ## Vtable layout
 
@@ -102,6 +111,11 @@ objects. The JIT must free every sequence itself and nothing twice.
   generic method, no receiver, `Self` argument and result, associated type
   and handler effect (E0630); a missing conformance (E0608); a generic type
   coerced before instantiation (E0633); a refusing backend (E0634)
+- review follow-ups: an unconsumed `sink dyn` object frees its boxes
+  (counted by the Box runtime); a `dyn Read[T]` parameter of a bounded
+  generic instance finds the `Read[i64]` vtable; forwarding `dyn A` as
+  `dyn B` (E0608); a second model for the same pair (E0633); function values
+  in a slot or `self` (E0630)
 
 The CI's four required checks run these on Linux, macOS (AArch64) and
 Windows.
@@ -152,7 +166,9 @@ bootstrap-stage1 workflow on this branch is the evidence (see the PR).
   for those positions, an escape analysis replacing the syntactic second-class
   rule, and drops of stored objects.
 - Handler effects in slots: passing the caller's evidence vector to the slot
-  instead of specializing it.
+  instead of specializing it. Function values in slots need the same.
+- Several models of one (object, type) pair: the selected conformance in the
+  vtable identity and in each call's metadata.
 - Associated types: per-object projection types (`dyn Source[Item = u8]`).
 - `dyn` in trait methods and effect operations, and package-qualified traits.
 - Verified backend, WebAssembly and export ABI support for the pair.

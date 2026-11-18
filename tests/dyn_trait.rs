@@ -495,3 +495,113 @@ fn main() -> u64 {{
         );
     }
 }
+
+/// An unconsumed `sink dyn` object frees the boxes it owns, alone or in an
+/// aggregate, exactly once.
+#[test]
+fn sink_dyn_drops_owned_boxes() {
+    let src = "struct N { v: u64 }
+struct Pair { a: Box[N], b: Box[N], n: u64 }
+trait Size { fn size(in self) -> u64; }
+impl Size for Pair { fn size(in self) -> u64 { self.n } }
+struct One { b: Box[N] }
+impl Size for One { fn size(in self) -> u64 { 1 } }
+fn peek(sink x: dyn Size) -> u64 { x.size() }
+fn main() -> u64 {
+    let p = Pair { a: Box::new(N { v: 1 }), b: Box::new(N { v: 2 }), n: 5 };
+    let one = One { b: Box::new(N { v: 3 }) };
+    wrapping_add(peek(sink p), peek(sink one))
+}
+";
+    let w = world(src);
+    for optimize in [true, false] {
+        vesper::fip::native_runtime::reset_counts();
+        let value = native::jit_with_options(&w, "main", optimize)
+            .unwrap()
+            .to_string();
+        assert_eq!(value, "6");
+        assert_eq!(vesper::fip::native_runtime::alloc_count(), 3);
+        assert_eq!(
+            vesper::fip::native_runtime::free_count(),
+            3,
+            "optimize {optimize}: boxes freed wrongly"
+        );
+    }
+    assert_eq!(execute(src), "6");
+}
+
+/// A bounded generic instance records its `dyn` parameters at its type
+/// arguments, so a trait argument naming a type parameter finds its vtable.
+#[test]
+fn dyn_trait_arguments_follow_instantiation() {
+    let src = "struct S { k: i64 }
+trait Tag { fn tag(in self) -> i64; }
+impl Tag for i64 { fn tag(in self) -> i64 { self } }
+trait Read[T] { fn get(in self, in v: T) -> i64; }
+impl Read[i64] for S { fn get(in self, in v: i64) -> i64 { wrapping_mul(self.k, v) } }
+fn take[T: Tag](in m: T, in x: dyn Read[T]) -> i64 { wrapping_add(m.tag(), x.get(in m)) }
+fn main() -> i64 {
+    let s = S { k: 10 };
+    take(in 4, in s)
+}
+";
+    assert_eq!(execute(src), "44");
+}
+
+/// A forwarded object keeps its vtable, so it may only be forwarded as the
+/// same trait.
+#[test]
+fn forwarding_needs_the_same_trait() {
+    let src = "trait A { fn a(in self) -> i64; }
+trait B { fn b(in self) -> i64; }
+impl A for i64 { fn a(in self) -> i64 { 1 } }
+impl B for i64 { fn b(in self) -> i64 { 2 } }
+fn f(in x: dyn B) -> i64 { x.b() }
+fn g(in x: dyn A) -> i64 { f(in x) }
+fn main() -> i64 { g(in 3) }
+";
+    rejects(src, "E0608");
+}
+
+/// One program has one vtable per (object, type): a second coercion under
+/// another model is refused rather than dispatched to the first.
+#[test]
+fn coercions_under_other_models_are_refused() {
+    let src = "struct K { v: i64 }
+trait R { fn r(in self) -> i64; }
+impl R for K { fn r(in self) -> i64 { 1 } }
+model M2: R for K { fn r(in self) -> i64 { 2 } }
+fn f(in x: dyn R) -> i64 { x.r() }
+fn main() -> i64 {
+    let k = K { v: 0 };
+    wrapping_add(f(in k), { use model M2; f(in k) })
+}
+";
+    rejects(src, "E0633");
+    // The same model twice shares one vtable.
+    assert_eq!(
+        execute(&src.replace("{ use model M2; f(in k) }", "f(in k)")),
+        "2"
+    );
+}
+
+/// A slot cannot carry a function value (native code specializes such
+/// functions into their callers), in `self` or another parameter.
+#[test]
+fn function_values_in_slots_are_refused() {
+    for src in [
+        "trait Apply { fn apply(in self, sink f: fn(i64) -> i64) -> i64; }
+impl Apply for i64 { fn apply(in self, sink f: fn(i64) -> i64) -> i64 { f(self) } }
+fn run(in a: dyn Apply) -> i64 { a.apply(|x| x) }
+fn main() -> i64 { run(in 3) }
+",
+        "struct F { f: fn(i64) -> i64 }
+trait Go { fn go(in self) -> i64; }
+impl Go for F { fn go(in self) -> i64 { 0 } }
+fn run(in a: dyn Go) -> i64 { a.go() }
+fn main() -> i64 { run(in F { f: |x| x }) }
+",
+    ] {
+        rejects(src, "E0630");
+    }
+}

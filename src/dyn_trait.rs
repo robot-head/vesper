@@ -110,6 +110,12 @@ pub struct VTable {
     /// The conformance function of each method, in slot order, with the
     /// type arguments it is called at.
     pub methods: Vec<(String, BTreeMap<String, Type>)>,
+    /// The selected conformance (an index into the frontend's
+    /// conformances): one program has one vtable per (object, type), so a
+    /// second coercion selecting another model is refused (E0633).
+    pub conformance: usize,
+    /// The first coercion that built this vtable.
+    pub span: Span,
 }
 
 impl DynObjects {

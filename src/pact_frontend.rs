@@ -219,6 +219,7 @@ pub fn check_package_with(
         instances: RefCell::new(BTreeMap::new()),
         dyn_params: dyn_lowered.params.clone(),
         dyn_vtables: RefCell::new(vec![]),
+        dyn_instance_params: RefCell::new(BTreeMap::new()),
         dyn_thunks: RefCell::new(vec![]),
         fe,
         session,
@@ -282,7 +283,8 @@ pub fn check_package_with(
     if checked.diagnostics.is_empty() {
         checked.world.elaboration = fe.metadata(&revision);
         fe.instance_metadata(&mut checked.world);
-        fe.dyn_metadata(&mut checked.world);
+        let refused = fe.dyn_metadata(&mut checked.world);
+        checked.diagnostics.extend(refused);
     }
     let Elaborator {
         fe,
@@ -1722,6 +1724,9 @@ struct Elaborator {
     dyn_params: BTreeMap<String, BTreeMap<String, Type>>,
     /// Vtables selected by monomorphization.
     dyn_vtables: RefCell<Vec<crate::dyn_trait::VTable>>,
+    /// `dyn` parameters of each monomorphized instance, its type arguments
+    /// substituted.
+    dyn_instance_params: RefCell<BTreeMap<String, BTreeMap<String, Type>>>,
     /// Vtable slot functions to add to the module ([`mono`]).
     dyn_thunks: RefCell<Vec<Function>>,
     fe: Frontend,

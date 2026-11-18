@@ -98,7 +98,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let mut description = DataDescription::new();
                 description.define(bytes.into_boxed_slice());
                 description.set_align(8);
-                if crate::fip::needs_drop(self.world, &vtable.self_ty) {
+                if crate::fip::elem_needs_drop(self.world, &vtable.self_ty) {
                     let drop = dyn_drop_helper(self.m, self.world, &vtable.self_ty)?;
                     let reference = self.m.declare_func_in_data(drop, &mut description);
                     description.write_function_addr(0, reference);
@@ -236,7 +236,9 @@ fn dyn_drop_helper<M: Module>(m: &mut M, world: &World, ty: &Type) -> Result<Fun
         h.switch_to_block(entry);
         let data = h.block_params(entry)[0];
         let value = helper_load(&mut h, world, data, ty)?;
-        seq_native::emit_drop_glue(&mut h, m, world, value, ty, false)?;
+        // `elements`: the Box drop elaboration cannot see through the erased
+        // parameter, so the vtable drop frees the boxes too.
+        seq_native::emit_drop_glue(&mut h, m, world, value, ty, true)?;
         h.ins().return_(&[]);
         h.seal_all_blocks();
         h.finalize();
