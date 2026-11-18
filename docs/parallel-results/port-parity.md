@@ -79,5 +79,5 @@ are grouped into lanes of the next compiler wave in
 | Fused `try_get` compares twice; sequence header reloaded per element through `inout` | every element read; Quarry `identifier` + `lex` 4.3 M | wheel 3, Quarry 6 | lane 7 |
 | `@export` directives read from the first file by name, not the root module | Aura, Quarry (silent v2) | Aura 1, Quarry 4 | lane 8 |
 | `Option`/`Result` arguments convert at the boundary; `SeqRef` has no slice view | BBR 8.5% glue; Aura under 1% | BBR 4, Aura 6 | lane 8 |
-| Receiver loan blocks reading the same sequence in arguments (`E0410`) | none at run time | Aura 5 | deferred: language decision (two-phase borrows) |
+| Receiver loan blocks reading the same sequence in arguments (`E0410`) | none at run time | Aura 5 | lane 3 (two-phase borrows, approved by the owner 2026-11-18) |
 | Wider vectors (AVX2) | Prism, warp-tcp scans | stage1-perf-simd-bytes | deferred: Cranelift 0.125 has no 256-bit types |

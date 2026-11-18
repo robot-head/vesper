@@ -1,4 +1,4 @@
-# Disjoint field paths in E0301, `copy_within`, and `swap`/`replace` through `inout`
+# Disjoint field paths in E0301, `copy_within`, `swap`/`replace` through `inout`, and two-phase borrows
 
 > Port gaps wave, lane 3. The [manuscript](../../manuscript/README.md) is the sole
 > specification. Rules for every lane are in the [wave plan](README.md). Confirm
@@ -6,7 +6,7 @@
 
 Suggested branch: `port-gaps/in-place-borrows`. Claim issue: #986.
 
-`q.a.extend(in q.b[0..1])` is refused with E0301 although `a` and `b` are different fields; call arguments already treat distinct field paths as disjoint (Quarry gap 3). `s.copy_from(0, in s[1..n])` is refused, so inserts and removes shift element by element (Aura gap 3). A non-copy field cannot be moved, swapped or replaced through `inout` (E0305), so Aura's recorder copies its whole staged state on every commit (Aura gap 2).
+`q.a.extend(in q.b[0..1])` is refused with E0301 although `a` and `b` are different fields; call arguments already treat distinct field paths as disjoint (Quarry gap 3). `s.copy_from(0, in s[1..n])` is refused, so inserts and removes shift element by element (Aura gap 3). A non-copy field cannot be moved, swapped or replaced through `inout` (E0305), so Aura's recorder copies its whole staged state on every commit (Aura gap 2). And a receiver loan blocks reading the same sequence in the call's arguments (E0410, Aura gap 5): `s.try_set(i, wrapping_add(get(in s, i), 1))` needs a `let` first.
 
 Ports to re-measure: Aura (insert/remove shifts, state publish), Quarry (code only).
 
@@ -34,14 +34,15 @@ Delivery and coordination:
 - Do not start overlapping subagents, edit website/**, publish packages, or message third parties.
 - Commit and push YOUR branch only. Open a ready-for-review PR against main that closes #986. The owner has authorized merging once the four required checks (`Test all targets`, `Native and acceptance scripts (BuildBuddy)`, `macOS (AArch64)`, `Windows (x86_64 MSVC)`) are green and review comments are addressed. If main is red and your PR fixes it, cancel the other in-progress Actions runs and merge the fix first. Return base/commit/PR, what changed, the Stage 1 guard evidence, the repro and port numbers before and after, decisions and remaining gaps.
 
-Assignment: Disjoint field paths in E0301, `copy_within`, and `swap`/`replace` through `inout`.
+Assignment: Disjoint field paths in E0301, `copy_within`, `swap`/`replace` through `inout`, and two-phase borrows.
 
 Exclusive ownership:
 - the E0301 checks for builtin receivers and their sources in src/seq/check.rs and src/strings/check.rs (the field-path disjointness test)
 - the E0305 rule for `swap`/`replace` in src/check.rs (only that hunk)
 - `copy_within`, `swap` and `replace`: typing in src/seq/check.rs, reference semantics in src/seq/eval.rs and src/runtime.rs, native lowering in src/seq/native_bytes.rs (a `memmove`)
 - the manuscript §13 hunks for the new builtins
-- tests/borrow_paths*.rs, tests/native_copy_within*.rs
+- the E0410 receiver-loan rule in src/ir_check.rs (two-phase reservation) and its manuscript hunk
+- tests/borrow_paths*.rs, tests/two_phase_borrows*.rs, tests/native_copy_within*.rs
 - docs/parallel-results/port-gaps-in-place-borrows.md
 
 Implement:
@@ -49,7 +50,7 @@ Implement:
 2. Add `s.copy_within(from: Interval, to: u64)` (total `try_` form plus the checked form, `memmove` semantics) to §13.
 3. Add `swap(inout a: T, inout b: T)` and `replace(inout a: T, v: T) -> T` for non-copy `T` (or the field forms the manuscript prefers), so a staged state can be published without a copy. Write the smallest manuscript change and flag it.
 4. Differential tests through the interpreter, JIT and AOT native; leak tests for `swap`/`replace` of sequences.
-5. Not this lane: two-phase borrows for E0410 (Aura gap 5). That is a language decision for the owner; list it in the report.
+5. Two-phase borrows (owner approved 2026-11-18): a mutable receiver loan of a method call or builtin is reserved while its arguments are evaluated and activated only at the call, so arguments may read (not write, move or borrow mutably) the receiver's place. `s.try_set(i, f(get(in s, i)))` is accepted; `s.push(s.pop())`-style writes in arguments stay refused. Write the rule into the manuscript's borrow section, flag it in the PR, and keep the interpreter, JIT, AOT native and Lean extraction in agreement (the argument reads see the value before the call). The self-hosted checker may stay stricter. Tests: accepted and refused shapes, and differential results through all paths.
 
 Acceptance:
 - Tests pass on all four platforms and the Stage 1 guard holds.

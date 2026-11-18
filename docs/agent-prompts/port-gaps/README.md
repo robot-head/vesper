@@ -29,7 +29,7 @@ Claims are #984-#992 (lane n is issue 983+n).
 |---|---|---|---|---|---|---|
 | 1 | [Sequence runtime](01-seq-runtime.md) | #984 | two allocations and a thread-local map entry per sequence | Quarry 21%, Prism, Aura, Ignis | now | `src/seq/native_runtime.rs`, `src/seq/aot_runtime.rs`, `reserve` hunks, `tests/native_seq_runtime*.rs` |
 | 2 | [Drops](02-drops.md) | #985 | dropped handles, replaced fields, nested sequences, temporaries leak | Aura, Quarry | now (fip.rs); native hunks after #983 | drop elaboration in `src/fip.rs`, drop hunks of `src/native.rs` and `src/seq/native.rs`, `tests/native_drop*.rs` |
-| 3 | [In-place borrows](03-in-place-borrows.md) | #986 | E0301 on disjoint fields; no `copy_within`; no `swap`/`replace` through `inout` | Aura, Quarry | now | E0301 builtin-receiver checks in `src/seq/check.rs`/`src/strings/check.rs`, the E0305 hunk of `src/check.rs`, the new builtins, `tests/borrow_paths*.rs`, `tests/native_copy_within*.rs` |
+| 3 | [In-place borrows](03-in-place-borrows.md) | #986 | E0301 on disjoint fields; no `copy_within`; no `swap`/`replace` through `inout`; two-phase borrows (E0410) | Aura, Quarry | now | E0301 builtin-receiver checks in `src/seq/check.rs`/`src/strings/check.rs`, the E0305 hunk of `src/check.rs`, the E0410 receiver-loan rule in `src/ir_check.rs`, the new builtins, `tests/borrow_paths*.rs`, `tests/two_phase_borrows*.rs`, `tests/native_copy_within*.rs` |
 | 4 | [Byte classes](04-byte-classes.md) | #987 | no class scan, ASCII case fold, or two-needle find | Prism about 30%, Quarry | now | new builtins beside `find_byte` in `src/seq/{check,eval,native_bytes}.rs`, byte hunks of `src/native_vector.rs`, `tests/native_byte_classes*.rs` |
 | 5 | [Bit builtins](05-bit-builtins.md) | #988 | no `leading_zeros`/`trailing_zeros`/`count_ones`; variable shifts raise | warp-wheel, BBR, Beacon | now (spec, typing); native after #983 | new integer builtin hunks in `src/integer_widths/check.rs`, `src/check.rs`, `src/runtime.rs`, `src/native.rs`, `tests/bit_builtins*.rs` |
 | 6 | [Inliner reach](06-inliner-reach.md) | #989 | generic, handled and `Str`-parameter callees stay calls | Ignis, BBR, Quarry, warp-wheel | after #983 | `src/ir_inline.rs`, `src/ir_inline/**`, `tests/native_inline*.rs` |
@@ -44,9 +44,6 @@ Claims are #984-#992 (lane n is issue 983+n).
 ### Not in this wave
 
 - Anything #972 owns (above).
-- Two-phase borrows (Aura gap 5, E0410 when a receiver loan overlaps a read
-  of the same sequence in an argument). It has no run-time cost and is a
-  language decision for the owner.
 - Wider vectors (AVX2): Cranelift 0.125 has no 256-bit types.
 - Inlining into `vesper build` executable objects (verifier policies, #944).
 - The self-hosted Stage 1 checker (`packages/vesper-compiler`). Lane 3 makes
@@ -54,6 +51,9 @@ Claims are #984-#992 (lane n is issue 983+n).
   stricter and is out of scope under the Stage 1 guard.
 - Re-recording `bootstrap/stage1.lock`.
 - Changing any port's default build or deleting Rust code.
+
+(Decided 2026-11-18.) The owner approved two-phase borrows; lane 3's prompt
+has the rule.
 
 ## Rules for every lane
 
