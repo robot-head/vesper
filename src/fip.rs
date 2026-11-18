@@ -2610,8 +2610,10 @@ pub fn replace_drops(
     }
     let mut borrowed = BTreeSet::new();
     let mut candidates = BTreeSet::new();
-    for name in f.locals.keys() {
-        if f.external_captures.contains(name) {
+    // Only a place that may own something can free what it holds; leaving
+    // scalars out keeps the dataflow below small on large graphs.
+    for (name, ty) in &f.locals {
+        if f.external_captures.contains(name) || !may_need_drop(world, ty) {
             continue;
         }
         match f.params.iter().find(|p| &p.name == name) {
@@ -2638,6 +2640,9 @@ pub fn replace_drops(
                 candidates.remove(name);
             }
         }
+    }
+    if candidates.is_empty() && borrowed.is_empty() {
+        return out;
     }
     // What one instruction does to the set of maybe-moved roots.
     let step = |op: &Op, moved: &mut BTreeSet<String>| match op {
