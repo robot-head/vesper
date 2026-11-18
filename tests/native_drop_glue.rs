@@ -430,6 +430,18 @@ pub fn record() -> u64 {
     let P { a, b } = make_p();
     wrapping_add(a.len(), b.len())
 }
+struct Four { a: ChunkSeq[u64], b: ChunkSeq[u64], c: ChunkSeq[u64], d: ChunkSeq[u64] }
+fn four_and(n: u64) -> (Four, u64) {
+    (Four { a: row(1), b: row(2), c: row(3), d: row(n) }, n)
+}
+pub fn struct_in_tuple() -> u64 {
+    let mut total: u64 = 0;
+    for i in u(0)..u(3) {
+        let (f, n) = four_and(i);
+        total = wrapping_add(total, wrapping_add(f.d.len(), n));
+    }
+    total
+}
 pub fn in_a_loop() -> u64 {
     let mut total: u64 = 0;
     for i in u(0)..u(5) {
@@ -446,9 +458,9 @@ fn destructured_bindings_are_freed() {
         no_leaks(
             "destructured",
             DESTRUCTURED,
-            &["tuple", "record", "in_a_loop"]
+            &["tuple", "record", "struct_in_tuple", "in_a_loop"]
         ),
-        3 + 26 + 15
+        3 + 26 + 6 + 15
     );
 }
 

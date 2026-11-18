@@ -275,11 +275,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         })
     }
 
-    /// After a destructuring binding: each string it bound into a drop slot
-    /// moves into the slot's own storage, as a plain binding's does.
-    pub(super) fn seq_drop_bound(&mut self, pattern: &Pattern) {
+    /// After a destructuring binding: each string or struct it bound into a
+    /// drop slot moves into the slot's own storage, as a plain binding's
+    /// does.
+    pub(super) fn seq_drop_bound(&mut self, pattern: &Pattern) -> Result<(), String> {
         if matches!(pattern.kind, PatternKind::Bind(_)) {
-            return;
+            return Ok(());
         }
         let mut names = vec![];
         pattern_bind_names(pattern, &mut names);
@@ -287,11 +288,20 @@ impl<M: Module> Codegen<'_, '_, M> {
             if let Some(slot) = self.seq_drop_slot(&name)
                 && let Some(storage) = slot.storage
             {
+                let size = match slot.kind {
+                    crate::fip::SeqDrop::Str => crate::seq::HEADER_BYTES as u32,
+                    _ => {
+                        let ty =
+                            crate::numeric::default_type(&substitute(&slot.ty, &self.generic_vars));
+                        Layout::of(self.world, &ty)?.size
+                    }
+                };
                 let value = self.use_var(slot.var);
-                self.copy_bytes(value, storage, crate::seq::HEADER_BYTES as u32);
+                self.copy_bytes(value, storage, size);
                 self.def_var(slot.var, storage);
             }
         }
+        Ok(())
     }
 
     /// Assigning a whole drop slot frees what it held.

@@ -2968,7 +2968,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         if !self.seq_fused_bind(inst.dest, pattern, *value)? {
                             let bound = self.seq_drop_rebind(pattern, values[value])?;
                             self.bind_ir(inst.dest, &mut slot_index, false, pattern, bound, &t)?;
-                            self.seq_drop_bound(pattern);
+                            self.seq_drop_bound(pattern)?;
                         }
                         self.zero()
                     }
