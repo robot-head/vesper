@@ -13,17 +13,24 @@ fn main() {
             .rust_types("crate::port");
         #[cfg(feature = "vesper-port-divergent")]
         let port = {
-            // One edit at a time (an index into EDITS), so each check shows
-            // that its own edit is caught; unset applies every edit.
+            // The edits in VESPER_EBPF_DIVERGENT (comma-separated indices
+            // into EDITS; port/check.sh groups edits that no test sees
+            // together, so each group is one build); unset applies every
+            // edit.
             println!("cargo:rerun-if-env-changed=VESPER_EBPF_DIVERGENT");
-            let only = std::env::var("VESPER_EBPF_DIVERGENT").ok().map(|i| {
-                i.parse::<usize>()
-                    .expect("VESPER_EBPF_DIVERGENT is an index")
+            let only: Option<Vec<usize>> = std::env::var("VESPER_EBPF_DIVERGENT").ok().map(|v| {
+                v.split(',')
+                    .map(|i| {
+                        i.trim()
+                            .parse::<usize>()
+                            .expect("VESPER_EBPF_DIVERGENT is a list of indices")
+                    })
+                    .collect()
             });
             EDITS
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| only.is_none_or(|only| only == *i))
+                .filter(|(i, _)| only.as_ref().is_none_or(|only| only.contains(i)))
                 .fold(port, |port, (_, (from, to))| port.edit(from, to))
         };
         port.build();
