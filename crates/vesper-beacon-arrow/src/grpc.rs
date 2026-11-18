@@ -413,9 +413,13 @@ impl OtapStream {
             .await;
         if sent.is_err() {
             self.pending.remove(&id);
-            // The call ended; surface its status if there is one.
-            return Err(match self.statuses.try_recv() {
-                Ok(Err(status)) => GrpcError::Status(status),
+            // The call ended; surface its status if there is one. Tonic can
+            // drop the request stream before the background task has posted
+            // the call's status, so wait for that task to post it or exit
+            // (which closes the channel) instead of polling once.
+            let next = tokio::time::timeout(self.config.status_timeout, self.statuses.recv()).await;
+            return Err(match next {
+                Ok(Some(Err(status))) => GrpcError::Status(status),
                 _ => GrpcError::StreamClosed,
             });
         }
