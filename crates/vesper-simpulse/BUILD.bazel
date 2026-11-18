@@ -3,9 +3,11 @@ load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper
 
 # The port-backed package (seed-copy rule, docs/maintenance/porting-a-crate.md):
 # build.rs links the object built here from the Loom package in vesper/ and
-# checks port/binding.rs against the generated binding. Every dependent links
-# the Rust seed copy, //crates/vesper-simpulse/seed, until the port reaches
-# performance parity (docs/parallel-results/port-p1-simpulse.md).
+# checks port/binding.rs against the generated binding. Crates the compiler
+# links (and vesper-nexus, a dev-dependency of //:vesper) use the Rust seed
+# copy, //crates/vesper-simpulse/seed; vesper-chorus and vesper-flux link
+# this port
+# (docs/parallel-results/port-p1-simpulse.md).
 vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),

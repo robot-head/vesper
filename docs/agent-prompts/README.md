@@ -16,7 +16,9 @@ Vesper source; its lanes start after the owner approves the plan.
 
 The [port parity wave](port-parity/README.md) puts the merged
 [Stage 1 performance wave](stage1-perf/README.md) speedups into the ports and
-measures each port against its Rust build again.
+measures each port against its Rust build again. The
+[port gaps wave](port-gaps/README.md) closes the compiler gaps those ports
+measured.
 
 Earlier assignments retained as dependencies:
 

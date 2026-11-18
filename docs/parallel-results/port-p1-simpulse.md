@@ -8,9 +8,10 @@ needed no manuscript change.
 (`crates/vesper-simpulse/vesper/src/lib.ves`). Both builds pass the crate's
 18 kernel tests and a new stress test with byte-identical journals. The port
 runs at 0.3x to 1.1x of the Rust build's time (table below). Following the
-owner's parity rule and the compiler's seed-copy rule, **the Rust code stays,
-and every dependent keeps the Rust build**; the port-backed package is
-exercised by its own tests and benchmark.
+compiler's seed-copy rule, **the Rust code stays** and the four dependents
+the compiler links keep the Rust build. At parity, the owner chose to move
+the dependents outside the compiler to the port (follow-up #996):
+`vesper-chorus` and `vesper-flux` now link it.
 
 ## API inventory (re-measured)
 
@@ -91,11 +92,15 @@ and the owner's rule keeps Rust as the default.
   `vesper_simpulse`) builds the same `src/` without the port. Its
   `BUILD.bazel` is hand-written and reads its serde deps from the Cargo
   metadata (`PACKAGES`).
-- All seven dependents depend on the seed by rename, in their own commit:
-  `vesper-sim-session`, `vesper-doc`, `vesper-chrono` and `vesper-crucible`
-  (inside the compiler closure), and `vesper-chorus`, `vesper-flux` and
-  `vesper-nexus` (outside it). The plan's default would move the last three to
-  the port. The owner's parity rule overrides that default.
+- `vesper-sim-session`, `vesper-doc`, `vesper-chrono` and `vesper-crucible`
+  (inside the compiler closure) depend on the seed by rename.
+  `vesper-chorus`, `vesper-flux` and `vesper-nexus` (outside it) first stayed
+  on the seed too, under the owner's parity rule. Since the follow-up (#996),
+  `vesper-chorus` and `vesper-flux` link the port, which the owner approved
+  once the benchmarks reached parity. Their tests pass against it.
+  `vesper-nexus` stays on the seed: the root package lists it as a
+  dev-dependency, and Bazel's `//:vesper` targets take dev-dependencies, so
+  the port there made a dependency cycle through `//:bin/vesper`.
 - Crucible (lane 18) can import the port as `@vesper/simpulse` (one module,
   as the Rust crate has one).
 
@@ -158,8 +163,6 @@ Windows x86_64 MSVC.
 
 ## Remaining gaps
 
-- Moving `vesper-chorus`, `vesper-flux` and `vesper-nexus` to the port is the
-  owner's call, now that the benchmarks are at parity.
 - `@vesper-std` `CacheBTree` should reclaim empty leaves so that ports with
   growing keys can use it.
 - Per-completion records are never reclaimed (about 34 bytes per completion

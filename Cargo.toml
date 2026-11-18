@@ -27,6 +27,7 @@ members = [
     "crates/vesper-sim-session",
     "crates/vesper-simd",
     "crates/vesper-semver",
+    "crates/vesper-semver/seed",
     "crates/vesper-loom-solver",
     "crates/vesper-loom-trust",
     "crates/vesper-loom-admission",
@@ -112,6 +113,7 @@ default-members = [
     "crates/vesper-sim-session",
     "crates/vesper-simd",
     "crates/vesper-semver",
+    "crates/vesper-semver/seed",
     "crates/vesper-loom-solver",
     "crates/vesper-loom-trust",
     "crates/vesper-loom-admission",
@@ -235,7 +237,7 @@ vesper-beacon = { path = "crates/vesper-beacon/seed", package = "vesper-beacon-s
 vesper-serde = { path = "crates/vesper-serde" }
 vesper-pulse = { path = "crates/vesper-pulse" }
 vesper-fiber-abi = { path = "crates/vesper-fiber-abi" }
-vesper-semver = { path = "crates/vesper-semver" }
+vesper-semver = { path = "crates/vesper-semver/seed", package = "vesper-semver-seed" }
 vesper-loom-calculus = { path = "crates/vesper-loom-calculus" }
 vesper-loom-solver = { path = "crates/vesper-loom-solver" }
 vesper-loom-trust = { path = "crates/vesper-loom-trust" }

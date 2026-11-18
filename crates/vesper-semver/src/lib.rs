@@ -9,6 +9,34 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 mod release;
+// The port-backed package `vesper-semver` forwards `compare`,
+// `Projection::is_subset_of` and `check_release` to the Vesper port in
+// vesper/ through src/port.rs; the seed package `vesper-semver-seed` (the
+// compiler's copy) keeps the Rust code below.
+#[cfg(vesper_port)]
+mod port;
+// Generated and committed, but kept outside src/ so formatters, which
+// check every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+
+/// Which build this is: `"vesper"` for the port-backed package
+/// `vesper-semver`, `"rust"` for the seed copy `vesper-semver-seed` that the
+/// compiler links.
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
+/// Live sequence allocations of the Vesper port (for leak tests); always 0
+/// in the Rust build.
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    #[cfg(vesper_port)]
+    return port_binding::live_allocations();
+    #[cfg(not(vesper_port))]
+    0
+}
+
 pub use release::{
     RELEASE_POLICY_VERSION, ReleaseBump, ReleaseIssue, ReleaseIssueCode, ReleaseReport,
     ReleaseVersionError, ReleaseVersionSide, check_release,
@@ -138,6 +166,11 @@ pub enum Projection {
     },
 }
 impl Projection {
+    #[cfg(vesper_port)]
+    pub fn is_subset_of(&self, old: &Self) -> bool {
+        port::is_subset_of(self, old)
+    }
+    #[cfg(not(vesper_port))]
     pub fn is_subset_of(&self, old: &Self) -> bool {
         let full = |p: &Self| {
             matches!(p, Self::All)
@@ -324,6 +357,12 @@ impl Report {
     }
 }
 
+#[cfg(vesper_port)]
+pub fn compare(old: &Interface, new: &Interface) -> Report {
+    port::compare(old, new)
+}
+
+#[cfg(not(vesper_port))]
 pub fn compare(old: &Interface, new: &Interface) -> Report {
     let mut checker = Checker {
         new,
@@ -376,11 +415,13 @@ pub fn compare(old: &Interface, new: &Interface) -> Report {
     }
 }
 
+#[cfg(not(vesper_port))]
 struct Checker<'a> {
     new: &'a Interface,
     issues: Vec<Issue>,
     adapters: Vec<ReborrowAdapter>,
 }
+#[cfg(not(vesper_port))]
 impl Checker<'_> {
     fn breaking(&mut self, path: &str, rule: &str, message: &str, witness: &str) {
         self.issues.push(Issue {
@@ -993,6 +1034,7 @@ impl Checker<'_> {
         }
     }
 }
+#[cfg(not(vesper_port))]
 /// A value in `sub` but outside `sup`, for validated direct u64 intervals.
 fn u64_counterexample(sub: &Type, sup: &Type) -> Option<u64> {
     fn bounds(ty: &Type) -> Option<(u64, u64)> {
@@ -1014,6 +1056,7 @@ fn u64_counterexample(sub: &Type, sup: &Type) -> Option<u64> {
         None
     }
 }
+#[cfg(not(vesper_port))]
 /// A value in `sub` but outside `sup`, for validated direct i64 intervals.
 fn i64_counterexample(sub: &Type, sup: &Type) -> Option<i64> {
     fn bounds(ty: &Type) -> Option<(i64, i64)> {
@@ -1035,6 +1078,7 @@ fn i64_counterexample(sub: &Type, sup: &Type) -> Option<i64> {
         None
     }
 }
+#[cfg(not(vesper_port))]
 fn resumption(effects: &Effects, generics: &[Generic]) -> Resumption {
     effects
         .capabilities
@@ -1052,9 +1096,11 @@ fn resumption(effects: &Effects, generics: &[Generic]) -> Resumption {
         .min()
         .unwrap_or(Resumption::Linear)
 }
+#[cfg(not(vesper_port))]
 fn type_mode(interface: &Interface, ty: &Type, generics: &[Generic]) -> Option<Mode> {
     type_mode_at(interface, ty, generics, 0)
 }
+#[cfg(not(vesper_port))]
 fn type_mode_at(
     interface: &Interface,
     ty: &Type,
@@ -1089,6 +1135,3 @@ fn type_mode_at(
         Type::Unsupported { .. } => None,
     }
 }
-
-#[cfg(test)]
-mod tests;
