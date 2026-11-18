@@ -1,0 +1,50 @@
+# Ignis gets a committed ABBA benchmark and adopts the Stage 1 speedups
+
+> Port parity wave, lane 6. The [manuscript](../../manuscript/README.md) is the sole
+> specification. Rules for every lane are in the [wave plan](README.md). Confirm
+> live ownership on the issue board before acting.
+
+Suggested branch: `port-parity/ignis`. Claim issue: #954.
+
+Ignis was 5-13x slower than Rust in P1. The #945 report measured it at 4.2-8.2x (plan 6.9x/8.2x, build 4.2x/5.2x, lower 4.5x/8.1x at 64/256 passes), but with a local driver: Ignis has no committed benchmark. The ratios grow with the pass count, which points at work that is superlinear in the Vesper build only.
+
+~~~text
+Specification authority: docs/manuscript/ (Typst) is the sole specification. This lane changes no language, builtin or ABI; it uses what the manuscript already specifies (§13 byte builtins and scans, the export ABI v3 directive).
+
+You are bringing a Vesper port of https://github.com/robot-head/vesper closer to its Rust build's speed, using compiler work that has already merged.
+
+Start from a fresh origin/main in a NEW cloud checkout or a dedicated git worktree. Require baseline 69c79b9 or a descendant; record the actual SHA. Development happens on `main`; open your PR against `main`. Before editing, read docs/agent-prompts/port-parity/README.md (the wave plan and the rules for every lane), the port's P1 report docs/parallel-results/port-p1-ignis.md, and the Stage 1 reports docs/parallel-results/stage1-perf-*.md (above all the sections that measured this port).
+
+Claim: GitHub issue #954 claims this work. Before you start, check the open issues and PRs in robot-head/vesper for overlapping work by other agents; if something overlaps, stop and report instead of duplicating it. Link the claim from your PR ("Closes #954").
+
+Delivery and coordination:
+- Follow every rule in "Rules for every lane" in docs/agent-prompts/port-parity/README.md.
+- Standing owner rule: Rust stays the default build of every port and is never deleted until the Vesper build matches it in both functionality and performance. Keep `vesper-port` non-default. Delete no Rust code.
+- Port only: edit only the exclusive paths below. Never edit src/**, crates/vesper-port-abi/**, crates/vesper-port-harness/**, crates/vesper-port-build/**, packages/**, lean/** or bootstrap/**. A gap only the compiler can close goes in your report as a compiler gap with a minimal .ves repro and its measured share of the run.
+- Bazel: Linux CI runs `bazel test //...` on BuildBuddy with Rust 1.100 (`cargo +1.100.0 clippy` before pushing). Files a test reads from outside its crate must be declared in BUILD.bazel. Windows and macOS CI use Cargo.
+- Use an isolated target directory. Use CARGO_BUILD_JOBS=2, CARGO_PROFILE_DEV_DEBUG=0, CARGO_PROFILE_TEST_DEBUG=0 and CARGO_INCREMENTAL=0 where space is limited. Long runs go to GitHub CI from your pushed branch.
+- Do not start overlapping subagents, edit website/**, publish packages, or message third parties.
+- Commit and push YOUR branch only. Open a ready-for-review PR against main that closes #954. The owner has authorized merging once the four required checks (`Test all targets`, `Native and acceptance scripts (BuildBuddy)`, `macOS (AArch64)`, `Windows (x86_64 MSVC)`) are green and review comments are addressed. If main is red and your PR fixes it, cancel the other in-progress Actions runs and merge the fix first. Return base/commit/PR, what changed, the ratio before and after each lever, the profile of what is left, the compiler gaps and whether the port meets the parity bar.
+
+Assignment: Ignis gets a committed ABBA benchmark and adopts the Stage 1 speedups.
+
+Exclusive ownership:
+- crates/vesper-ignis/** (the Vesper sources in vesper/, the port glue, examples, tests, BUILD.bazel)
+- the crate's dev-dependency on vesper-bench (crates/vesper-ignis/Cargo.toml and the regenerated Cargo.lock, serialized with other root changes)
+- docs/parallel-results/port-parity-ignis.md
+
+Implement:
+1. Commit an ABBA benchmark (an example, like the other ports') for plan, build and lower at 64 and 256 passes, both builds in one process. Measure main with it.
+2. Find why the ratio grows with the pass count. Profile plan at 64 and 256 passes and compare the two profiles. Fix it in the port if it is the port's data structure; record it as a compiler gap with a repro if it is the compiler (a copy that grows with a sequence, a missing drop).
+3. Adopt `// @export abi 3` for copy structs that cross per call (pass descriptors, ranges, barriers).
+4. Move scratch held in handle fields back into locals where #945 now frees them.
+5. `fill`/`copy_from` for barrier and slot tables.
+6. Re-measure after each step.
+
+Acceptance:
+- Every port test, divergence test and leak test passes with and without `--features vesper-port` on all four platforms. The default build is unchanged.
+- The report gives the Vesper/Rust ratio on `main` before the lane and after each lever, measured in one ABBA run per step on the same machine, with the 95% interval and the setup.
+- Ignis has a committed ABBA benchmark.
+- The report names the top remaining Vesper costs from a profile, says for each whether it is a port or a compiler gap, gives a repro for each compiler gap, and says whether the port meets the parity bar in the wave plan.
+- Report: docs/parallel-results/port-parity-ignis.md.
+~~~

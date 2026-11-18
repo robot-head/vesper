@@ -14,6 +14,10 @@ platform requirements.
 The [port wave P1 plan](port-p1/README.md) moves the port-first crates to
 Vesper source; its lanes start after the owner approves the plan.
 
+The [port parity wave](port-parity/README.md) puts the merged
+[Stage 1 performance wave](stage1-perf/README.md) speedups into the ports and
+measures each port against its Rust build again.
+
 Earlier assignments retained as dependencies:
 
 - [06-source-simulation](next-wave/06-source-simulation.md)
