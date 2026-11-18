@@ -5,8 +5,9 @@
 > specification; this lane needs no language change (§13 already says a
 > dropped sequence or string frees what it owns).
 
-Base: `main` at `07e7d4e` (after #983), with `origin/main` (`2e5e941`) and
-PR #1001 (the #972 follow-up: `let`-bound struct locals) merged in.
+Base: `main` at `07e7d4e` (after #983), with `main` merged in up to
+`9c4e6fa` (which includes #1001, the #972 follow-up for `let`-bound struct
+locals). The "main" numbers below were measured at `2e5e941`, before #1001.
 
 ## What changed
 
