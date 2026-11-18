@@ -1,6 +1,6 @@
 #!/bin/sh
 # The Vesper port of vesper-semver (port wave P1 lane 15, #912) under Cargo,
-# for the macOS and Windows checks; Linux runs the same checks as Bazel
+# for the Linux Platforms job; Bazel runs the same checks as its own
 # targets (crates/vesper-semver/BUILD.bazel). The crate's tests must pass
 # against the port-backed package and the Rust seed copy, and the divergent
 # port (one edit in each ported module, see build.rs) must fail that

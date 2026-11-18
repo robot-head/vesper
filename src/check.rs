@@ -149,7 +149,8 @@ impl World {
                 }
                 Item::Function(f) => {
                     if crate::numeric::wrapping_intrinsic(&f.name).is_some()
-                        || (f.name == crate::integer_widths::MUL_WIDE
+                        || ((f.name == crate::integer_widths::MUL_WIDE
+                            || crate::integer_widths::bit_builtin(&f.name).is_some())
                             && (builtin_count..builtin_count + module.items.len()).contains(&index))
                     {
                         errors.push(Diagnostic::new(

@@ -1,6 +1,6 @@
 #!/bin/sh
 # vesper-ignis port checks under Cargo (port wave P1 lane 12, #909), run by
-# scripts/test-port-harness.sh on macOS and Windows; Linux runs the same
+# scripts/test-port-harness.sh in the Linux Platforms job; Bazel runs the same
 # checks as Bazel targets (crates/vesper-ignis/BUILD.bazel). Every test must
 # pass against the Rust build and the Vesper build, and the divergent Vesper
 # build (one edit per ported module, EDITS in build.rs) must fail the test

@@ -55,6 +55,29 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertIn("--test drivers", commands)
             self.assertIn("--test pool", commands)
 
+    def test_port_harness_runs_once_on_linux(self):
+        # macOS and Windows run only the export ABI tier; the ported crates
+        # are platform-neutral and run once in the Linux job (#1010).
+        jobs = self.platforms["jobs"]
+        for job in (jobs["platform"], jobs["windows"]):
+            step = next(s for s in job["steps"] if "test-port-harness.sh" in s.get("run", ""))
+            self.assertEqual(step["env"]["VESPER_PORT_HARNESS_SCOPE"], "abi")
+        ports = jobs["ports"]
+        self.assertEqual(ports["runs-on"], "ubuntu-latest")
+        self.assertEqual(ports["needs"], "plan")
+        self.assertEqual(ports["steps"][0]["run"], 'test "$PLAN_RESULT" = success')
+        step = next(s for s in ports["steps"] if "test-port-harness.sh" in s.get("run", ""))
+        self.assertNotIn("VESPER_PORT_HARNESS_SCOPE", step.get("env", {}))
+        self.assertIn("ports", jobs["complete"]["needs"])
+        script = (ROOT / "scripts/test-port-harness.sh").read_text()
+        tier_end = script.index('"${VESPER_PORT_HARNESS_SCOPE:-all}" = abi')
+        abi_tier = script[:tier_end]
+        for check in ("-p vesper-port-abi", "-p vesper-port-harness", "--test kit",
+                      "--test kit_memory", "-p vesper-port-pilot --features vesper-port",
+                      "-p vesper-port-build --features divergent"):
+            self.assertIn(check, abi_tier)
+        self.assertNotIn("vesper-beacon", abi_tier.split("set -eu", 1)[1])
+
     def test_plan_failure_fails_required_jobs(self):
         for result in ("failure", "cancelled", "skipped", ""):
             command = self.platforms["jobs"]["windows"]["steps"][0]["run"]
@@ -68,12 +91,14 @@ class PlatformWorkflowTests(unittest.TestCase):
         for result in ("failure", "skipped", "cancelled"):
             with tempfile.TemporaryDirectory() as temp:
                 output = Path(temp) / "outputs"
-                env = {**os.environ, "PLAN_RESULT": "success", "MAC_RESULT": "success",
-                       "WINDOWS_RESULT": result, "CHECKED_SHA": "a" * 40, "PROFILE": "full",
-                       "GITHUB_OUTPUT": str(output)}
-                completed = subprocess.run(["bash", "-e", "-c", run], env=env)
-                self.assertNotEqual(completed.returncode, 0)
-                self.assertFalse(output.exists())
+                for failed in ("WINDOWS_RESULT", "PORTS_RESULT"):
+                    env = {**os.environ, "PLAN_RESULT": "success", "MAC_RESULT": "success",
+                           "WINDOWS_RESULT": "success", "PORTS_RESULT": "success",
+                           "CHECKED_SHA": "a" * 40, "PROFILE": "full",
+                           "GITHUB_OUTPUT": str(output), failed: result}
+                    completed = subprocess.run(["bash", "-e", "-c", run], env=env)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertFalse(output.exists())
 
     def test_dedup_retains_distinct_features_and_moves_stdio_checks(self):
         source = workflow("source-macros.yml")
