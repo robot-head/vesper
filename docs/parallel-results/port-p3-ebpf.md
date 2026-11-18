@@ -1,8 +1,8 @@
 # Port wave P3a lane 6: vesper-ebpf (#1041)
 
 Status: **part 4 of 5** (this PR; part 1 is #1048, merged as `5ff0c7a`;
-part 2 is #1056, merged as `f0a64be`; part 3 is #1061). Part 1 base
-`3c075a4`, part 2 base `5ff0c7a`, part 3 base `f0a64be`, part 4 base: part 3.
+part 2 is #1056, merged as `f0a64be`; part 3 is #1061, merged as `322ca4a`). Part 1 base
+`3c075a4`, part 2 base `5ff0c7a`, part 3 base `f0a64be`, part 4 base `322ca4a`.
 
 The crate is 12.4k lines with 82 tests in 15 files, so the port lands in
 parts, as Crucible's did (four were planned; the interpreter took a part of
