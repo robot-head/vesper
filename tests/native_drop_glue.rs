@@ -180,9 +180,9 @@ fn library_live(name: &str, source: &str, calls: &[&str], rounds: u32) -> Option
 /// Runs `source` everywhere through `main` (which calls every function of
 /// `calls`) and from C `rounds` times; returns `main`'s value.
 fn no_leaks(name: &str, source: &str, calls: &[&str]) -> u64 {
-    let sum = calls
-        .iter()
-        .fold(String::from("0"), |acc, f| format!("wrapping_add({acc}, {f}())"));
+    let sum = calls.iter().fold(String::from("0"), |acc, f| {
+        format!("wrapping_add({acc}, {f}())")
+    });
     let value = differential(name, &format!("{source}\nfn main() -> u64 {{ {sum} }}\n"));
     if let Some((before, after)) = library_live(name, source, calls, 50) {
         assert_eq!(before, after, "{name}: the library leaked allocations");
@@ -344,7 +344,11 @@ fn replaced_fields_and_sink_handles_are_freed() {
         no_leaks(
             "replaced",
             REPLACED,
-            &["field_replaced", "nested_field_replaced", "sink_handle_dropped"]
+            &[
+                "field_replaced",
+                "nested_field_replaced",
+                "sink_handle_dropped"
+            ]
         ),
         4 + 7 + 2
     );
@@ -394,7 +398,11 @@ pub fn in_a_loop() -> u64 {
 #[test]
 fn unbound_temporaries_are_freed() {
     assert_eq!(
-        no_leaks("temporaries", TEMPORARIES, &["discarded", "passed_in", "in_a_loop"]),
+        no_leaks(
+            "temporaries",
+            TEMPORARIES,
+            &["discarded", "passed_in", "in_a_loop"]
+        ),
         1 + 3 + 6 + 4 + 45
     );
 }
@@ -435,7 +443,11 @@ pub fn in_a_loop() -> u64 {
 #[test]
 fn destructured_bindings_are_freed() {
     assert_eq!(
-        no_leaks("destructured", DESTRUCTURED, &["tuple", "record", "in_a_loop"]),
+        no_leaks(
+            "destructured",
+            DESTRUCTURED,
+            &["tuple", "record", "in_a_loop"]
+        ),
         3 + 26 + 15
     );
 }
@@ -472,7 +484,11 @@ pub fn string_replaced() -> u64 {
 #[test]
 fn whole_values_replaced_through_inout_are_freed() {
     assert_eq!(
-        no_leaks("inout_whole", INOUT_WHOLE, &["seq_replaced", "string_replaced"]),
+        no_leaks(
+            "inout_whole",
+            INOUT_WHOLE,
+            &["seq_replaced", "string_replaced"]
+        ),
         2 + 32
     );
 }
@@ -553,7 +569,11 @@ pub fn field_replaced() -> u64 {
 #[test]
 fn local_structs_free_what_their_fields_own() {
     assert_eq!(
-        no_leaks("local_structs", LOCAL_STRUCTS, &["dropped", "rebound", "field_replaced"]),
+        no_leaks(
+            "local_structs",
+            LOCAL_STRUCTS,
+            &["dropped", "rebound", "field_replaced"]
+        ),
         6 + 6 + 20
     );
 }

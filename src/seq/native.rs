@@ -116,9 +116,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let ty =
                     crate::numeric::default_type(&substitute(&f.locals[&name], &self.generic_vars));
                 let layout = Layout::of(self.world, &ty)?;
-                if !seq_field_offsets(self.world, &layout, 0, &mut fields)
-                    || fields.is_empty()
-                {
+                if !seq_field_offsets(self.world, &layout, 0, &mut fields) || fields.is_empty() {
                     continue;
                 }
             }
@@ -1059,7 +1057,9 @@ pub(super) fn emit_drop_glue<M: Module>(
     if seq::is_seq_type(&ty) {
         // An empty slot or a moved-from field holds handle 0, which the
         // executable runtime does not accept.
-        let elem = seq::elem(&ty).ok_or("ChunkSeq without an element type")?.clone();
+        let elem = seq::elem(&ty)
+            .ok_or("ChunkSeq without an element type")?
+            .clone();
         let present = b.ins().icmp_imm(IntCC::NotEqual, value, 0);
         let drop = b.create_block();
         let done = b.create_block();
@@ -1190,8 +1190,7 @@ pub(super) fn emit_drop_elements<M: Module>(
             if jit {
                 DefinitionLinkage::Jit.normalize_references(&mut ctx.func);
             }
-            m.define_function(id, &mut ctx)
-                .map_err(|e| e.to_string())?;
+            m.define_function(id, &mut ctx).map_err(|e| e.to_string())?;
             m.clear_context(&mut ctx);
             id
         }
@@ -1208,8 +1207,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let jit = std::any::type_name::<M>().contains("JITModule");
         !self.in_fip_fn
             && (jit
-                || self.m.isa().triple().operating_system
-                    != target_lexicon::OperatingSystem::None_)
+                || self.m.isa().triple().operating_system != target_lexicon::OperatingSystem::None_)
     }
 
     /// Drops `value` of type `ty` ([`emit_drop_glue`]).
@@ -1243,11 +1241,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         if op != "=" || !self.drops_enabled() {
             return Ok(());
         }
-        if !self
-            .exits
-            .last()
-            .is_some_and(|t| t.replace.contains(&at))
-        {
+        if !self.exits.last().is_some_and(|t| t.replace.contains(&at)) {
             return Ok(());
         }
         let mut parts = place.split('.');

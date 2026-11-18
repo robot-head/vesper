@@ -2448,9 +2448,7 @@ pub fn temporary_drops(
         for (i, inst) in block.instructions.iter().enumerate() {
             defs.insert(inst.dest, (b, i));
             let owned = match &inst.op {
-                Op::Call { .. } | Op::Indirect { .. } => {
-                    !f.fip_call_slots.contains_key(&inst.dest)
-                }
+                Op::Call { .. } | Op::Indirect { .. } => !f.fip_call_slots.contains_key(&inst.dest),
                 Op::Seq { op, .. } => matches!(op, SeqOp::New | SeqOp::WithCapacity),
                 Op::Read {
                     root, path, pass, ..
@@ -2464,7 +2462,9 @@ pub fn temporary_drops(
                             // A string slot is never planned once it is
                             // moved from; the move hands its buffer on.
                             None => {
-                                f.locals.get(root).is_some_and(crate::strings::is_string_type)
+                                f.locals
+                                    .get(root)
+                                    .is_some_and(crate::strings::is_string_type)
                                     && !f.params.iter().any(|p| &p.name == root)
                                     && !borrow_bound.contains(root)
                             }
@@ -2498,7 +2498,10 @@ pub fn temporary_drops(
             }
         }
         match &block.terminator {
-            Terminator::Jump { block: target, args } => {
+            Terminator::Jump {
+                block: target,
+                args,
+            } => {
                 for (k, v) in args.iter().enumerate() {
                     uses.entry(*v).or_default().jumps.push((*target, k));
                 }
@@ -2571,8 +2574,7 @@ pub fn temporary_drops(
         let u = uses.get(v).cloned().unwrap_or_default();
         if u.other
             || !u.jumps.is_empty()
-            || u
-                .borrows
+            || u.borrows
                 .iter()
                 .any(|&(ub, ui)| ub != b || (i != AT_BLOCK_ENTRY && ui <= i))
         {
@@ -2723,9 +2725,7 @@ pub fn replace_drops(
                 && op == "="
             {
                 let root = place.split('.').next().unwrap_or("");
-                if borrowed.contains(root)
-                    || (candidates.contains(root) && !state.contains(root))
-                {
+                if borrowed.contains(root) || (candidates.contains(root) && !state.contains(root)) {
                     out.insert((b, i));
                 }
             }
