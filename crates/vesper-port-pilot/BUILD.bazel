@@ -47,7 +47,7 @@ vesper_port_object(
         "Tree::Leaf(v) => v,": "Tree::Leaf(v) => wrapping_add(v, 1),",
         "Greater => {": "Less => {",
         "wrapping_add(base, Clock::pilot_clock_ticks())": "wrapping_sub(base, Clock::pilot_clock_ticks())",
-        "c.hits.clear();": "c.hits = ChunkSeq::new[u64]();",
+        "c.hits.clear();": "let parked = Box::new(ChunkSeq::with_capacity[u64](4));\n    c.hits.clear();",
     },
     library = "kit",
     target = VESPER_TARGET,

@@ -125,6 +125,10 @@ compiler built at `main` or at this branch. No port change is committed
 
 - Elements of a sequence inside a `Box`, and the payload of a dropped `Box`
   that holds a sequence or string (Box drops free boxes only).
+  The port pilot's divergent kit (`crates/vesper-port-pilot/build.rs`,
+  mirrored in its `BUILD.bazel`) leaks through this gap: its old leak, a
+  replaced `inout` field, is now freed. Whoever frees `Box` payloads moves it
+  again.
 - Partial moves: a value with a field moved out is not freed (the rest of it
   leaks); a write into a place that may have been moved from does not free.
 - Locals named by a closure or a handler (alias or move), external

@@ -13,8 +13,8 @@ fn main() {
         let port = port.edit("c >= 48 && c <= 57", "c >= 48 && c <= 58");
         port.build();
         // The export ABI v2 library (#898). Its divergent build changes one
-        // thing per exported form, plus one Vesper-side free (the old
-        // sequence is dropped instead of cleared); tests/kit.rs and
+        // thing per exported form, plus one Vesper-side free (a sequence
+        // parked in a dropped `Box` is never freed); tests/kit.rs and
         // tests/kit_memory.rs must each catch theirs.
         let kit = vesper_port_harness::Port::new("kit", "vesper/kit.ves")
             .binding("port/kit.rs")
@@ -64,6 +64,11 @@ const KIT_EDITS: &[(&str, &str)] = &[
         "wrapping_add(base, Clock::pilot_clock_ticks())",
         "wrapping_sub(base, Clock::pilot_clock_ticks())",
     ),
-    // One Vesper-side free omitted: tests/kit_memory.rs fails.
-    ("c.hits.clear();", "c.hits = ChunkSeq::new[u64]();"),
+    // One Vesper-side free omitted: tests/kit_memory.rs fails. The reset
+    // parks a fresh sequence in a dropped `Box`, whose payload native code
+    // does not free yet (#985's "what is left").
+    (
+        "c.hits.clear();",
+        "let parked = Box::new(ChunkSeq::with_capacity[u64](4));\n    c.hits.clear();",
+    ),
 ];
