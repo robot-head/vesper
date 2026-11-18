@@ -1632,6 +1632,7 @@ pub(crate) fn register_jit_runtime_symbols(builder: &mut JITBuilder, trace_host:
     builder.symbols(crate::tiled::native_runtime::symbols());
     builder.symbols(crate::seq::native_runtime::symbols());
     builder.symbols(crate::fip::native_runtime::symbols());
+    builder.symbols(crate::atomics::workers::symbols());
     builder.symbols(crate::ffi_lowering::jit_symbols());
 }
 fn jit_run_entry(
@@ -5297,6 +5298,85 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.ins().uextend(types::I64, r)
         })
     }
+    /// `parallel_for(in data, n, body)` on the JIT: hands the compiled
+    /// `body` (`fn(data: u64, i: u64) -> u64`) to the Pulse pool runtime
+    /// `vesper_parallel_for`, which returns once every iteration has run.
+    /// `None` when the body or data does not fit that word ABI, so the call
+    /// falls back to the prelude's sequential loop.
+    fn parallel_for_call(
+        &mut self,
+        args: &[Arg],
+        site: &Expr,
+    ) -> Result<Option<ir::Value>, String> {
+        // The body is a top-level function value without captures (the
+        // optimize path hands it over as a renamed operand, so resolve the
+        // value rather than the name).
+        let body = self.expr(&args[2].expr)?;
+        let info = self.info(body);
+        let [target] = info.targets.iter().copied().collect::<Vec<_>>()[..] else {
+            return Ok(None);
+        };
+        let Some(closure) = target.checked_sub(1).and_then(|i| self.closures.get(i)) else {
+            return Ok(None);
+        };
+        let ClosureTarget::Function(function) = &closure.target else {
+            return Ok(None);
+        };
+        if !closure.captures.is_empty() {
+            return Ok(None);
+        }
+        let Some(f) = self.world.functions.get(function) else {
+            return Ok(None);
+        };
+        if !f.generics.is_empty() || !f.effects.instances.is_empty() || f.effects.tail.is_some() {
+            return Ok(None);
+        }
+        let Some(&id) = self.ids.get(&instance_key(function, &BTreeMap::new())) else {
+            return Ok(None);
+        };
+        let vars = call_vars(self.world, site, &self.generic_vars);
+        let Some(data_ty) = vars.get("A") else {
+            return Ok(None);
+        };
+        if matches!(data_ty, Type::Named(n, a) if a.is_empty() && (n == "f64" || n == "f32"))
+            || crate::atomics::thread_affine(self.world, function, data_ty)
+        {
+            return Ok(None);
+        }
+        let layout = Layout::of(self.world, data_ty)?;
+        let fun = self.m.declare_func_in_func(id, self.b.func);
+        let sig = &self.b.func.dfg.signatures[self.b.func.dfg.ext_funcs[fun].signature];
+        let word = AbiParam::new(types::I64);
+        if sig.params != [word, word]
+            || sig.returns.len() > 1
+            || sig.returns.iter().any(|r| *r != word)
+        {
+            return Ok(None);
+        }
+        // From here on the call is committed: `data` and `n` are evaluated
+        // once, in order.
+        let data = if layout.aggregate() && crate::check::Place::from_expr(&args[0].expr).is_some()
+        {
+            self.address(&args[0].expr)?
+        } else {
+            self.expr(&args[0].expr)?
+        };
+        if self.b.func.dfg.value_type(data) != types::I64 {
+            return Err("native parallel_for data is not one word".into());
+        }
+        let n = self.expr(&args[1].expr)?;
+        let pointer = self.b.ins().func_addr(types::I64, fun);
+        let mut runtime = self.m.make_signature();
+        runtime.params.extend([word, word, word]);
+        runtime.returns.push(word);
+        let runtime = self
+            .m
+            .declare_function("vesper_parallel_for", Linkage::Import, &runtime)
+            .map_err(|e| e.to_string())?;
+        let runtime = self.m.declare_func_in_func(runtime, self.b.func);
+        self.b.ins().call(runtime, &[pointer, data, n]);
+        Ok(Some(self.zero()))
+    }
     /// An atomic operation of `atomics` on the one element of the receiver's
     /// cell (`args[0]`, an `Atomic[T]`): one `atomic_load`, `atomic_store`,
     /// `atomic_rmw` or `atomic_cas` at the width of `T` (`bool` and `u8` are
@@ -5803,6 +5883,15 @@ impl<M: Module> Codegen<'_, '_, M> {
         if let Some(op) = crate::atomics::intercepted(self.world, name) {
             // An atomic operation (`atomics`): one Cranelift atomic.
             return self.atomic_call(op, args, site, into);
+        }
+        if name == crate::atomics::PARALLEL_FOR
+            && self.world.workers_prelude
+            && args.len() == 3
+            && std::any::type_name::<M>().contains("JITModule")
+            && let Some(done) = self.parallel_for_call(args, site)?
+        {
+            // A fork-join loop (`atomics` scoped workers) on the Pulse pool.
+            return Ok(done);
         }
         if let Some((op, _)) = crate::integer_widths::bit_builtin(name)
             && args.len() == op.arity()

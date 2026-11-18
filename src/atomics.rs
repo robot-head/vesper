@@ -43,7 +43,29 @@
 //!   consistent, which satisfies every weaker order;
 //! * the verified backend refuses the cell's `ChunkSeq` type with its
 //!   typed `Unsupported::Type` diagnostic.
+//!
+//! # Scoped workers
+//!
+//! `parallel_for(in data, n, body)` runs `body(in data, i)` for every `i` in
+//! `0..n` and returns after the last one (fork-join). The workers share
+//! `data` only through an `in` borrow, so the only state they can update
+//! together is an `Atomic` cell inside it; a body that takes `data` by
+//! `inout` (`E0824`), and a body that is not a named function with an empty
+//! effect row (`E0823`), are refused. The scope cannot leak a worker: the
+//! call joins every iteration before it returns, so no worker outlives the
+//! borrow.
+//!
+//! The prelude body is the sequential loop, which is a valid schedule of the
+//! fork-join call, so the evaluator, executables and the verified backend's
+//! refusal need nothing new. The JIT intercepts the call and hands the
+//! compiled body to a process-wide Pulse pool ([`workers`]); a nested
+//! `parallel_for` inside a worker runs on that worker.
 use crate::{ast::*, check::World, numeric::IntegerKind};
+
+pub mod workers;
+
+/// The builtin fork-join loop over the Pulse pool (scoped workers).
+pub const PARALLEL_FOR: &str = "parallel_for";
 
 /// The builtin atomic cell type `Atomic[T]`.
 pub const ATOMIC_TYPE: &str = "Atomic";
@@ -298,6 +320,41 @@ pub fn needs_prelude(module: &Module) -> bool {
         })
 }
 
+/// Whether `module` calls `parallel_for` without declaring it.
+pub fn needs_workers(module: &Module) -> bool {
+    let declares = module
+        .items
+        .iter()
+        .any(|i| matches!(i, Item::Function(f) if f.name == PARALLEL_FOR));
+    !declares
+        && module.items.iter().any(|item| {
+            let calls = |f: &Function| {
+                f.body.as_ref().is_some_and(|b| {
+                    let mut found = false;
+                    walk(b, &mut |x| {
+                        found |= matches!(&x.kind, ExprKind::Name(n) if n == PARALLEL_FOR);
+                    });
+                    found
+                })
+            };
+            match item {
+                Item::Function(f) => calls(f),
+                Item::Impl { methods, .. } => methods.iter().any(calls),
+                Item::Conformance(c) => c.methods.iter().any(calls),
+                _ => false,
+            }
+        })
+}
+
+/// The scoped-worker prelude: the sequential schedule of the fork-join
+/// loop. It takes a function value, so native code specializes it into its
+/// callers, and the JIT intercepts the call before that ([`workers`]).
+pub const WORKERS_PRELUDE: &str = "\
+fn parallel_for[A](in data: A, n: u64, body: fn @copy(in A, u64)) {
+    for i in 0..n { body(in data, i); }
+}
+";
+
 /// The prelude source: the cell type, the orders and the operations. A
 /// method body only types the call. Every operation that updates the cell
 /// recurses instead, so no inliner copies a body in place of the
@@ -348,14 +405,18 @@ impl [T: mod copy] Atomic[T] {
 }
 ";
 
-/// The atomic prelude for `module` (empty unless [`needs_prelude`]), with
+/// The atomic and worker preludes for `module` (empty unless
+/// [`needs_prelude`] or [`needs_workers`]), with
 /// every span after `after`.
 pub(crate) fn prelude(module: &Module, after: usize) -> Module {
-    if !needs_prelude(module) {
-        return Module::default();
-    }
+    let source = match (needs_prelude(module), needs_workers(module)) {
+        (false, false) => return Module::default(),
+        (true, false) => PRELUDE.to_string(),
+        (false, true) => WORKERS_PRELUDE.to_string(),
+        (true, true) => format!("{PRELUDE}{WORKERS_PRELUDE}"),
+    };
     let end = after.max(crate::integer_widths::module_end(module));
-    let parsed = crate::parser::parse(&format!("{}{PRELUDE}", " ".repeat(end + 1)));
+    let parsed = crate::parser::parse(&format!("{}{source}", " ".repeat(end + 1)));
     debug_assert!(
         parsed.diagnostics.is_empty(),
         "atomic prelude: {:?}",
@@ -366,10 +427,11 @@ pub(crate) fn prelude(module: &Module, after: usize) -> Module {
 
 /// Whether `name` is a function of the atomic prelude in `world`.
 pub fn is_prelude_function(world: &World, name: &str) -> bool {
-    world.atomic_prelude
-        && name
-            .strip_prefix("Atomic::")
-            .is_some_and(|m| matches!(m, "new" | "into_inner") || AtomicOp::of_method(m).is_some())
+    (world.workers_prelude && name == PARALLEL_FOR)
+        || world.atomic_prelude
+            && name.strip_prefix("Atomic::").is_some_and(|m| {
+                matches!(m, "new" | "into_inner") || AtomicOp::of_method(m).is_some()
+            })
 }
 
 /// Whether the call `callee` in `world` is an intercepted atomic operation.
@@ -398,7 +460,7 @@ fn order_name(e: &Expr) -> Option<&str> {
 /// the private cell (module docs).
 pub fn check_world(world: &World) -> Vec<Diagnostic> {
     let mut out = vec![];
-    if !world.atomic_prelude {
+    if !world.atomic_prelude && !world.workers_prelude {
         return out;
     }
     for f in world.functions.values() {
@@ -406,10 +468,169 @@ pub fn check_world(world: &World) -> Vec<Diagnostic> {
             continue;
         }
         if let Some(body) = &f.body {
-            walk(body, &mut |e| check_expr(&world.types, e, &mut out));
+            walk(body, &mut |e| {
+                if world.atomic_prelude {
+                    check_expr(&world.types, e, &mut out);
+                }
+                if world.workers_prelude {
+                    check_workers(world, e, &mut out);
+                }
+            });
         }
     }
     out
+}
+
+/// The named function a `parallel_for` call runs on its workers, if `body`
+/// is one the JIT can hand to the pool: a top-level, non-generic function
+/// with an empty effect row (`E0823` otherwise).
+pub fn worker_body<'w>(world: &'w World, body: &Expr) -> Option<&'w Function> {
+    let ExprKind::Name(n) = &body.kind else {
+        return None;
+    };
+    world.functions.get(n).filter(|f| {
+        f.generics.is_empty()
+            && f.effects.instances.is_empty()
+            && f.effects.tail.is_none()
+            && !is_prelude_function(world, &f.name)
+    })
+}
+
+/// Types whose JIT runtime state is per thread (`TiledSeq` handles, `Box`
+/// and region allocations): a worker on another thread would not find the
+/// caller's values.
+const THREAD_AFFINE: [&str; 4] = [
+    crate::tiled::TILED_SEQ_TYPE,
+    crate::fip::BOX_TYPE,
+    crate::regions::BOX_TYPE,
+    crate::regions::WATERMARK_TYPE,
+];
+
+fn affine_type(world: &World, t: &Type, seen: &mut std::collections::BTreeSet<String>) -> bool {
+    match t {
+        Type::Tuple(ts) => ts.iter().any(|t| affine_type(world, t, seen)),
+        Type::Function { .. } => false,
+        Type::Named(n, args) => {
+            if THREAD_AFFINE.contains(&n.as_str()) {
+                return true;
+            }
+            if args.iter().any(|t| affine_type(world, t, seen)) {
+                return true;
+            }
+            if !seen.insert(n.clone()) {
+                return false;
+            }
+            world.adts.get(n).is_some_and(|a| {
+                a.variants
+                    .iter()
+                    .flat_map(|v| &v.fields)
+                    .any(|f| affine_type(world, &f.ty, seen))
+            })
+        }
+        _ => false,
+    }
+}
+
+/// Whether a `parallel_for` over `data` and `body` touches state the JIT
+/// runtime keeps per thread: the data type, or any type in a function the
+/// body reaches by name or method call. The JIT then runs the loop on the
+/// calling thread.
+pub fn thread_affine(world: &World, body: &str, data: &Type) -> bool {
+    let mut seen_types = std::collections::BTreeSet::new();
+    if affine_type(world, data, &mut seen_types) {
+        return true;
+    }
+    let mut stack = vec![body.to_string()];
+    let mut seen = std::collections::BTreeSet::new();
+    while let Some(name) = stack.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(f) = world.functions.get(&name) else {
+            continue;
+        };
+        let affine = |t: &Type| affine_type(world, t, &mut std::collections::BTreeSet::new());
+        if f.params.iter().any(|p| affine(&p.ty)) || affine(&f.result) {
+            return true;
+        }
+        let Some(b) = &f.body else {
+            continue;
+        };
+        let (lo, hi) = (b.span.start, b.span.end);
+        if world
+            .types
+            .range((lo, 0)..(hi + 1, 0))
+            .any(|((_, end), t)| *end <= hi && affine(t))
+        {
+            return true;
+        }
+        walk(b, &mut |e| match &e.kind {
+            ExprKind::Name(n) if world.functions.contains_key(n) => stack.push(n.clone()),
+            ExprKind::Call { callee, .. } => {
+                if let ExprKind::Field(base, m) = &callee.kind
+                    && let Some(Type::Named(head, _)) =
+                        world.types.get(&(base.span.start, base.span.end))
+                {
+                    let method = format!("{head}::{m}");
+                    if world.functions.contains_key(&method) {
+                        stack.push(method);
+                    }
+                }
+            }
+            _ => {}
+        });
+    }
+    false
+}
+
+/// The scoped-worker rules (module docs): workers share `data` only by
+/// `in`, and each body is a named function with an empty effect row.
+fn check_workers(world: &World, e: &Expr, out: &mut Vec<Diagnostic>) {
+    let ExprKind::Call { callee, args, .. } = &e.kind else {
+        return;
+    };
+    if !matches!(&callee.kind, ExprKind::Name(n) if n == PARALLEL_FOR) || args.len() != 3 {
+        return;
+    }
+    let shared_inout = args[0].pass == Pass::Inout;
+    let body = &args[2].expr;
+    let body_inout = match &body.kind {
+        ExprKind::Name(n) => world
+            .functions
+            .get(n)
+            .and_then(|f| f.params.first())
+            .is_some_and(|p| p.pass != Pass::In),
+        _ => false,
+    };
+    if shared_inout || body_inout {
+        let at = if shared_inout {
+            &args[0].expr.span
+        } else {
+            &body.span
+        };
+        out.push(
+            diagnostic(
+                "E0824",
+                "workers of 'parallel_for' share their data only by 'in'".into(),
+                at,
+            )
+            .with_help(
+                "pass the data as `in data` and update shared state through an `Atomic` cell inside it",
+            ),
+        );
+        return;
+    }
+    if worker_body(world, body).is_none() {
+        out.push(
+            diagnostic(
+                "E0823",
+                "the body of 'parallel_for' must be a named function with an empty effect row"
+                    .into(),
+                &body.span,
+            )
+            .with_help("declare `fn body(in data: A, i: u64)` and pass `body`"),
+        );
+    }
 }
 
 fn check_expr(types: &TypeMap, e: &Expr, out: &mut Vec<Diagnostic>) {

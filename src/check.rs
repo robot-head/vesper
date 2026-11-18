@@ -50,6 +50,9 @@ pub struct World {
     /// Whether the module received the atomic prelude (`Atomic[T]`,
     /// `MemoryOrder`; [`crate::atomics`]).
     pub atomic_prelude: bool,
+    /// Whether the module received the scoped-worker prelude
+    /// (`parallel_for`; [`crate::atomics`]).
+    pub workers_prelude: bool,
     /// Second-class trait objects: `dyn` parameters, vtable stubs and the
     /// vtables the program needs (empty without `dyn`; §7.1).
     pub dyn_objects: crate::dyn_trait::DynObjects,
@@ -94,7 +97,14 @@ impl World {
                 .max(crate::integer_widths::module_end(&float_prelude))
                 .max(crate::integer_widths::module_end(&string_prelude)),
         );
-        w.atomic_prelude = !atomic_prelude.items.is_empty();
+        w.atomic_prelude = atomic_prelude
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Adt(a) if a.name == crate::atomics::ATOMIC_TYPE));
+        w.workers_prelude = atomic_prelude
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::Function(f) if f.name == crate::atomics::PARALLEL_FOR));
         w.string_prelude = crate::strings::prelude_function_names(&string_prelude);
         w.float_prelude = float_prelude
             .items

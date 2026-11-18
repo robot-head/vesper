@@ -1,0 +1,36 @@
+// A 4-way parallel sum: each iteration adds one slice of `xs` into the
+// shared `Atomic[u64]`, and `parallel_for` returns after every iteration.
+struct Job {
+    xs: ChunkSeq[u64],
+    chunk: u64,
+    total: Atomic[u64]
+}
+
+fn sum_chunk(in job: Job, i: u64) {
+    let mut s: u64 = 0;
+    let lo: u64 = wrapping_mul(i, job.chunk);
+    for k in 0..job.chunk {
+        match job.xs.try_get(wrapping_add(lo, k)) {
+            Option::Some(v) => {
+                s = wrapping_add(s, v);
+            },
+            Option::None => {},
+        }
+    }
+    job.total.fetch_add(s, MemoryOrder::Relaxed);
+}
+
+fn main() -> u64 {
+    let mut xs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let n: u64 = 4000;
+    for i in 0..n {
+        xs.push(i);
+    }
+    let job = Job {
+        xs: xs,
+        chunk: 1000,
+        total: Atomic::new(0)
+    };
+    parallel_for(in job, 4, sum_chunk);
+    job.total.load(MemoryOrder::SeqCst)
+}

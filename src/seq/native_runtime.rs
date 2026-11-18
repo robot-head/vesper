@@ -120,6 +120,20 @@ pub extern "C" fn vesper_seq_fault(code: u64) -> u64 {
     0
 }
 
+/// Takes this thread's recorded fault: a scoped worker
+/// ([`crate::atomics::workers`]) hands it to the thread that runs the JIT
+/// entry, whose [`finish`] reports it.
+pub(crate) fn take_fault() -> Option<String> {
+    FAULT.with(|f| f.borrow_mut().take())
+}
+
+/// Records `message` as this thread's fault unless one is already recorded.
+pub(crate) fn record_fault(message: String) {
+    FAULT.with(|f| {
+        f.borrow_mut().get_or_insert(message);
+    });
+}
+
 fn fault(message: &str) -> ! {
     eprintln!("vesper: ChunkSeq {message}");
     std::process::abort()

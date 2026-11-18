@@ -3903,6 +3903,37 @@ fn record(in hits: Atomic[u64], in done: Atomic[bool], n: u64) -> u64 {
 }
 ```
 
+==== Scoped Workers (`parallel_for`)
+<ch-14-4-workers>
+`parallel_for(in data, n, body)` is the fork-join loop of source code: it runs `body(in data, i)` once for every `i` in `0..n`, in any order and on any number of workers, and returns only after the last iteration has finished. Its signature is `fn parallel_for[A](in data: A, n: u64, body: fn @copy(in A, u64))`; a module that declares its own `parallel_for` keeps it.
+
+- *Sharing:* the workers share `data` only through an `in` borrow, so by the borrow rules above no worker writes a place another worker reads, and the only state they update together is an `Atomic[T]` cell inside `data` (#link(<ch-14-4-atomics>)[Source Atomics]). Data passed by `inout`, and a body whose first parameter is `inout` or `sink`, are refused (`E0824`).
+- *Bodies:* `body` is a named top-level function that is not generic and has an empty effect row (`E0823`), so each worker runs it on its own with no handler, capability or capture from the caller. A body that needs to report failure records it in an atomic cell.
+- *Scope:* the call joins every iteration before it returns, so no worker outlives the borrow of `data`, and the call has no effect of its own. A `parallel_for` inside a worker runs on that worker, so nested loops never wait on a pool whose workers are all waiting.
+- *Backends:* the sequential loop is one valid schedule, and the evaluator and executables run it. The JIT hands the compiled body to a process-wide Pulse pool (#link(<ch-14-5>)[§15.5]), split into at most four chunks per worker, with the calling thread running the last chunk; a loop that reaches a value whose runtime state is per thread (`TiledSeq`, `Box`, regions) runs on the calling thread. The verified backend refuses the atomic cells the body would update.
+
+```
+struct Job { xs: ChunkSeq[u64], chunk: u64, total: Atomic[u64] }
+
+// One iteration sums one slice and publishes it into the shared cell.
+fn sum_chunk(in job: Job, i: u64) {
+    let mut s: u64 = 0;
+    let lo: u64 = wrapping_mul(i, job.chunk);
+    for k in 0..job.chunk {
+        match job.xs.try_get(wrapping_add(lo, k)) {
+            Option::Some(v) => { s = wrapping_add(s, v); },
+            Option::None => {},
+        }
+    }
+    job.total.fetch_add(s, MemoryOrder::Relaxed);
+}
+
+fn total(in job: Job) -> u64 {
+    parallel_for(in job, 4, sum_chunk);
+    job.total.load(MemoryOrder::SeqCst)
+}
+```
+
 === 15.5 Cranelift Stack-Switching Fiber ABI and Evidence-Passing Lowering
 <ch-14-5>
 `vesper-opt-egglog` (Stage 4) and `vesper-codegen-clif` (Stage 5) compile Pulse capabilities without state-machine bloat using a three-tier lowering strategy:

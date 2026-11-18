@@ -1,0 +1,18 @@
+// Scoped workers share their data only by `in` (E0824): a plain counter
+// passed by `inout` to every worker would race, so it is refused. The fix is
+// an `Atomic[u64]` inside the shared data.
+struct Tally {
+    count: u64
+}
+
+fn count_one(inout tally: Tally, i: u64) {
+    tally.count = wrapping_add(tally.count, i);
+}
+
+fn main() -> u64 {
+    let mut tally = Tally {
+        count: 0
+    };
+    parallel_for(inout tally, 8, count_one);
+    tally.count
+}
