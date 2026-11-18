@@ -2139,6 +2139,10 @@ pub enum SeqDrop {
     /// A by-value (`sink`) aggregate parameter: the sequences and strings
     /// inside it ([`needs_drop`]).
     Owned,
+    /// A `let`-bound struct value: what its fields own (nested structs
+    /// included). Native code plans it only on the optimize path, and only
+    /// when every sequence sits in a product field.
+    Fields,
 }
 
 /// Whether dropping a value of `ty` frees memory that native code owns: a
@@ -2241,7 +2245,9 @@ pub fn elem_needs_drop(world: &World, ty: &Type) -> bool {
 /// Bindings inside a destructuring `let` own what they bind, as a plain
 /// binding does. A by-value (`sink`) parameter of an aggregate type that
 /// [`needs_drop`] is planned as [`SeqDrop::Owned`] unless part of it is moved
-/// out. A `let`-bound aggregate is not planned yet (the #972 follow-up).
+/// out; a `let`-bound struct holding a sequence is planned as
+/// [`SeqDrop::Fields`] (#972). Both free everything their value owns, and a
+/// field of either may be replaced ([`replace_drops`]).
 ///
 /// Slots a closure names (by alias or move) or a handler captures by move,
 /// external captures, partial moves, match-arm bindings and bindings under a
@@ -2261,6 +2267,11 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
             SeqDrop::Str
         } else if param.is_some() && needs_drop(world, ty) {
             SeqDrop::Owned
+        } else if matches!(ty, Type::Named(n, _) if world.adts.contains_key(n))
+            && crate::seq::holds_sequence(world, ty)
+            && param.is_none()
+        {
+            SeqDrop::Fields
         } else {
             continue;
         };
@@ -2307,7 +2318,8 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
             Op::Read {
                 root, path, pass, ..
             } if *pass == Pass::Sink => {
-                // Reading a field that owns nothing moves nothing out.
+                // Reading a field that owns nothing (such as `w.k`) copies
+                // it out and leaves the struct's drops alone.
                 if (!path.is_empty() && may_need_drop(world, &inst.ty))
                     || plan.get(root) == Some(&SeqDrop::Str)
                 {
@@ -2320,7 +2332,8 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
                 // `let`-bound string is assigned into its own storage; a
                 // string parameter has none.
                 let root = place.split('.').next().unwrap_or("");
-                if (place != root && plan.get(root) != Some(&SeqDrop::Owned))
+                if (place != root
+                    && !matches!(plan.get(root), Some(SeqDrop::Owned | SeqDrop::Fields)))
                     || op != "="
                     || (plan.get(root) == Some(&SeqDrop::Str)
                         && f.params.iter().any(|p| p.name == root))
@@ -2445,7 +2458,9 @@ pub fn temporary_drops(
                     *pass == Pass::Sink
                         && path.is_empty()
                         && match plan.get(root) {
-                            Some(SeqDrop::Seq | SeqDrop::Owned) => true,
+                            // A move out of an aggregate copies it and
+                            // empties the source.
+                            Some(SeqDrop::Seq | SeqDrop::Owned | SeqDrop::Fields) => true,
                             // A string slot is never planned once it is
                             // moved from; the move hands its buffer on.
                             None => {

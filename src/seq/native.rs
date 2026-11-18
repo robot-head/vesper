@@ -33,9 +33,30 @@ pub(super) struct SeqDropSlot {
     kind: crate::fip::SeqDrop,
     /// The slot's type: what a sequence's elements or an aggregate own.
     ty: Type,
-    /// A `let`-bound string's own storage: the slot is bound to it so that
-    /// a later binding can free the string it replaces.
+    /// A `let`-bound string's or struct's own storage: the slot is bound to
+    /// it so that a later binding can free the value it replaces.
     storage: Option<ir::Value>,
+}
+
+/// The offsets of every `ChunkSeq` handle in a value of `layout`, when each
+/// one sits in a (nested) product field; `None` when a sequence or slice is
+/// reachable some other way (an enum payload, a string, a view).
+fn seq_field_offsets(world: &World, layout: &Layout, base: i32, out: &mut Vec<i32>) -> bool {
+    let LayoutKind::Product(fields) = &layout.kind else {
+        return false;
+    };
+    for f in fields {
+        if seq::is_seq_type(&f.ty) {
+            out.push(base + f.offset);
+        } else if !seq::holds_sequence(world, &f.ty) {
+            continue;
+        } else if seq::is_slice_type(&f.ty)
+            || !seq_field_offsets(world, &f.layout, base + f.offset, out)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 impl<M: Module> Codegen<'_, '_, M> {
@@ -90,6 +111,18 @@ impl<M: Module> Codegen<'_, '_, M> {
             let Some(&var) = self.vars.get(&name) else {
                 continue;
             };
+            if kind == crate::fip::SeqDrop::Fields {
+                let mut fields = vec![];
+                let ty =
+                    crate::numeric::default_type(&substitute(&f.locals[&name], &self.generic_vars));
+                let layout = Layout::of(self.world, &ty)?;
+                if !self.operands_only
+                    || !seq_field_offsets(self.world, &layout, 0, &mut fields)
+                    || fields.is_empty()
+                {
+                    continue;
+                }
+            }
             let storage = if kind == crate::fip::SeqDrop::Str && !param {
                 let storage = self.alloc(crate::seq::HEADER_BYTES as u32);
                 let zero = self.zero();
@@ -97,6 +130,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                     self.seq_set_word(storage, offset, zero);
                 }
                 Some(storage)
+            } else if kind == crate::fip::SeqDrop::Fields {
+                // Its own storage, so that a binding in a loop (whose
+                // struct literal reuses one temporary) frees the struct it
+                // replaces, not the one it binds.
+                let ty =
+                    crate::numeric::default_type(&substitute(&f.locals[&name], &self.generic_vars));
+                Some(self.alloc(Layout::of(self.world, &ty)?.size))
             } else {
                 None
             };
@@ -163,11 +203,35 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// A sequence or owned aggregate moved out of local `name` leaves its
     /// slot empty.
     pub(super) fn seq_drop_moved(&mut self, name: &str) {
-        if let Some(slot) = self.seq_drop_slot(name)
-            && slot.kind != crate::fip::SeqDrop::Str
-        {
-            let zero = self.zero();
-            self.def_var(slot.var, zero);
+        let Some(slot) = self.seq_drop_slot(name) else {
+            return;
+        };
+        match slot.kind {
+            crate::fip::SeqDrop::Seq => {
+                let zero = self.zero();
+                self.def_var(slot.var, zero);
+            }
+            crate::fip::SeqDrop::Owned | crate::fip::SeqDrop::Fields => {
+                // The move copied the value out; what it owns now belongs
+                // to the copy, so the source is zeroed (an empty sequence,
+                // a borrowed-nothing string, no handles). A local read
+                // before any binding has no storage.
+                let ptr = self.use_var(slot.var);
+                let bound = self.b.ins().icmp_imm(IntCC::NotEqual, ptr, 0);
+                let clear = self.b.create_block();
+                let done = self.b.create_block();
+                self.branch(bound, clear, &[], done, &[]);
+                self.b.switch_to_block(clear);
+                let ty = crate::numeric::default_type(&substitute(&slot.ty, &self.generic_vars));
+                let size = Layout::of(self.world, &ty).map_or(0, |l| l.size);
+                for offset in (0..size).step_by(8) {
+                    let zero = self.zero();
+                    self.seq_set_word(ptr, offset as i32, zero);
+                }
+                self.jump(done, &[]);
+                self.b.switch_to_block(done);
+            }
+            crate::fip::SeqDrop::Str => {}
         }
     }
 
@@ -196,6 +260,16 @@ impl<M: Module> Codegen<'_, '_, M> {
         };
         self.seq_drop_free(&slot)?;
         Ok(match slot.storage {
+            Some(storage) if slot.kind == crate::fip::SeqDrop::Fields => {
+                let ty = self
+                    .local_types
+                    .get(name)
+                    .cloned()
+                    .ok_or("drop slot lacks type")?;
+                let size = Layout::of(self.world, &ty)?.size;
+                self.copy_bytes(value, storage, size);
+                storage
+            }
             Some(storage) => {
                 self.copy_bytes(value, storage, crate::seq::HEADER_BYTES as u32);
                 storage
@@ -669,7 +743,12 @@ impl<M: Module> Codegen<'_, '_, M> {
         let tag = self.b.ins().iconst(types::I64, some_tag as i64);
         self.seq_set_word(out, 0, tag);
         if lazy {
-            let end = payload as u32 + Layout::of(self.world, elem)?.size;
+            // An `f32` payload store writes only the low half of its word.
+            let end = if elem.name() == "f32" {
+                payload as u32
+            } else {
+                payload as u32 + Layout::of(self.world, elem)?.size
+            };
             for off in (8..layout.size).step_by(8) {
                 if off < payload as u32 || off >= end {
                     let zero = self.zero();
@@ -979,20 +1058,23 @@ pub(super) fn emit_drop_glue<M: Module>(
         return Ok(());
     }
     if seq::is_seq_type(&ty) {
+        // An empty slot or a moved-from field holds handle 0, which the
+        // executable runtime does not accept.
         let elem = seq::elem(&ty).ok_or("ChunkSeq without an element type")?.clone();
+        let present = b.ins().icmp_imm(IntCC::NotEqual, value, 0);
+        let drop = b.create_block();
+        let done = b.create_block();
+        b.ins().brif(present, drop, &[], done, &[]);
+        b.switch_to_block(drop);
         if crate::fip::elem_needs_drop(world, &elem) {
-            let present = b.ins().icmp_imm(IntCC::NotEqual, value, 0);
-            let drop = b.create_block();
-            let done = b.create_block();
-            b.ins().brif(present, drop, &[], done, &[]);
-            b.switch_to_block(drop);
             let len = b.ins().load(types::I64, MemFlags::new(), value, LEN);
             let data = b.ins().load(types::I64, MemFlags::new(), value, DATA);
             emit_drop_elements(b, m, world, data, len, &elem)?;
-            b.ins().jump(done, &[]);
-            b.switch_to_block(done);
         }
-        return glue_runtime_call(b, m, "vesper_seq_free", &[value]);
+        glue_runtime_call(b, m, "vesper_seq_free", &[value])?;
+        b.ins().jump(done, &[]);
+        b.switch_to_block(done);
+        return Ok(());
     }
     if crate::strings::is_string_type(&ty) {
         return glue_runtime_call(b, m, "vesper_str_release", &[value]);
