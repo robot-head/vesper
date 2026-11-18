@@ -1,0 +1,4 @@
+// Handles cannot be compared.
+fn compare_linear(in a: Sealer, in b: Sealer) -> bool {
+    a == b
+}

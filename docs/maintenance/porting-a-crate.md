@@ -101,7 +101,19 @@ it to `vesper.native.export-abi/2` (#898), which adds:
   (`eff [Ffi[Lib]]`) that the Rust crate itself provides at `<path>`. Write
   `target = "@TARGET@", abi = "@ABI@"`; the compiler fills them in for the
   object's target. The binding references the shim symbols, so the linker
-  keeps them.
+  keeps them. Rust state the port must keep between calls (an expanded key
+  schedule, a TLS session, a buffer pool) is an opaque handle (#1065):
+  declare `linear extern type Sealer;` in the library, return it from a
+  constructor as `ForeignVal[Option[Sealer]]` (the shim returns
+  `Box::into_raw`, or null), take it `in s: Sealer` / `inout s: Sealer`, and
+  free it in one `sink s: Sealer` import (`Box::from_raw`). The checker then
+  makes every Vesper path finalize the handle exactly once. A
+  `nocapture inout p: CSlice[u8]` parameter takes the port's
+  `inout p: Slice[u8]` in place, as `(*mut u8, usize)`, so the shim works on
+  the packet buffer itself. Handles stay inside the Vesper library: an
+  exported function cannot take or return one. The worked example is
+  `tests/fixtures/ffi_handles/aead.ves` with the Rust shim in
+  `tests/ffi_handles.rs`.
 
 ### Export ABI v3: state lent in place
 

@@ -766,6 +766,22 @@ impl Planner<'_> {
             reason: reason.into(),
         };
         let world = self.world;
+        // An opaque `.vsys` extern-type handle (#1065) stays inside Vesper:
+        // its library, not the export binding, owns and finalizes it.
+        if let Type::Named(n, args) = ty
+            && args.is_empty()
+            && world.adts.get(n).is_some_and(|a| {
+                a.variants.iter().any(|v| {
+                    v.fields
+                        .iter()
+                        .any(|f| f.name == crate::ffi_lowering::HANDLE_FIELD)
+                })
+            })
+        {
+            return Err(refuse(
+                "is an opaque .vsys extern-type handle; keep it inside the Vesper library (a handle crosses only to its own imports)",
+            ));
+        }
         match ty {
             Type::Tuple(items) if items.is_empty() => Ok(AbiType::Scalar {
                 name: "Unit".into(),

@@ -1,0 +1,4 @@
+// The constructor is not a function either.
+fn construct_positional() -> Sealer {
+    Sealer(7)
+}

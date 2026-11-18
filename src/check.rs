@@ -728,6 +728,19 @@ impl Checker<'_> {
     fn mode(&self, t: &Type) -> Mode {
         self.world.mode(t, &self.bounds)
     }
+    /// Whether `t` is an opaque `.vsys` extern-type handle (§16.3), which
+    /// `crate::ffi_lowering` generates as a struct whose one field no source
+    /// identifier can spell.
+    fn extern_handle(&self, t: &Type) -> bool {
+        let Type::Named(n, args) = t else {
+            return false;
+        };
+        args.is_empty()
+            && self.world.adts.get(n).is_some_and(|a| {
+                matches!(a.variants.as_slice(), [v] if matches!(v.fields.as_slice(),
+                    [f] if f.name == crate::ffi_lowering::HANDLE_FIELD))
+            })
+    }
     fn declarations(&mut self) {
         for a in self.world.adts.values() {
             self.valid_generics(&a.generics, a.span.clone());
@@ -1697,6 +1710,12 @@ impl Checker<'_> {
                 }
                 if matches!(op.as_str(), "==" | "!=") && self.mode(&common) == Mode::Linear {
                     self.error("E0302","equality cannot discharge linear obligations; compare copy fields and explicitly consume their owners",e.span.clone());
+                } else if matches!(op.as_str(), "==" | "!=") && self.extern_handle(&common) {
+                    self.error(
+                        "E0200",
+                        "extern type handles are opaque and cannot be compared; ask their library",
+                        e.span.clone(),
+                    );
                 }
                 if matches!(op.as_str(), "/" | "%") && integer(&common) && !self.nonzero(r, env) {
                     self.primitive_failure(env, e.span.clone());

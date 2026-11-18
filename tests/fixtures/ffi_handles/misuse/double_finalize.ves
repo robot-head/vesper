@@ -1,0 +1,5 @@
+// Two finalizers for one handle.
+fn double_finalize(sink s: Sealer) eff [Ffi[Aead]] {
+    Aead::aead_sealer_free(s);
+    Aead::aead_sealer_free(s);
+}

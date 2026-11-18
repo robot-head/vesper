@@ -192,7 +192,9 @@ impl FunctionDescriptor {
         let returns_pointer = matches!(self.result, ValueType::Address { .. });
         for (i, p) in self.parameters.iter().enumerate() {
             let list: &[(Assumption, Checkability)] = match &p.ty {
-                ParameterType::Value(_) => &[(ValidBits, BeforeCall)],
+                ParameterType::Value(_) | ParameterType::Handle { .. } => {
+                    &[(ValidBits, BeforeCall)]
+                }
                 ParameterType::Slice { .. } => &[
                     (NonNull, BeforeCall),
                     (Aligned, BeforeCall),
@@ -225,13 +227,16 @@ impl FunctionDescriptor {
             }
         }
         match &self.result {
-            ValueType::Unit | ValueType::Scalar(_) | ValueType::Bool | ValueType::Enum(_) => out
-                .push(DeclaredAssumption {
-                    position: Position::Return,
-                    parameter: None,
-                    assumption: ValidBits,
-                    checkability: AfterReturn,
-                }),
+            ValueType::Unit
+            | ValueType::Scalar(_)
+            | ValueType::Bool
+            | ValueType::Enum(_)
+            | ValueType::Handle { .. } => out.push(DeclaredAssumption {
+                position: Position::Return,
+                parameter: None,
+                assumption: ValidBits,
+                checkability: AfterReturn,
+            }),
             ValueType::Address { nullable, .. } => {
                 if !nullable {
                     out.push(DeclaredAssumption {
@@ -294,7 +299,7 @@ impl FunctionDescriptor {
             let assumption = match p.ty {
                 ParameterType::Slice { .. } => Assumption::WithinLength,
                 ParameterType::Pointer { .. } => Assumption::SingleElement,
-                ParameterType::Value(_) => continue,
+                ParameterType::Value(_) | ParameterType::Handle { .. } => continue,
             };
             let borrowed = borrows.iter().any(|b| b.argument == i);
             let mut mine = guards.iter().filter(|g| g.argument == i);
@@ -339,7 +344,7 @@ impl FunctionDescriptor {
         };
         let returns_pointer = matches!(self.result, ValueType::Address { .. });
         for (i, p) in self.parameters.iter().enumerate() {
-            if matches!(p.ty, ParameterType::Value(_)) {
+            if matches!(p.ty, ParameterType::Value(_) | ParameterType::Handle { .. }) {
                 continue;
             }
             if returns_pointer {
@@ -403,6 +408,21 @@ impl FunctionDescriptor {
                         name,
                         ValidBits,
                         match validate(t, *bits) {
+                            Ok(_) => Outcome::Held,
+                            Err(e) => Outcome::Violated(e),
+                        },
+                    );
+                }
+                (ParameterType::Handle { handle, .. }, RawArgument::Bits(bits)) => {
+                    let contract = ValueType::Handle {
+                        handle: handle.clone(),
+                        nullable: false,
+                    };
+                    report.push(
+                        at,
+                        name,
+                        ValidBits,
+                        match validate(&contract, *bits) {
                             Ok(_) => Outcome::Held,
                             Err(e) => Outcome::Violated(e),
                         },

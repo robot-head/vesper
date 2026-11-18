@@ -1632,6 +1632,7 @@ pub(crate) fn register_jit_runtime_symbols(builder: &mut JITBuilder, trace_host:
     builder.symbols(crate::tiled::native_runtime::symbols());
     builder.symbols(crate::seq::native_runtime::symbols());
     builder.symbols(crate::fip::native_runtime::symbols());
+    builder.symbols(crate::ffi_lowering::jit_symbols());
 }
 fn jit_run_entry(
     world: &World,

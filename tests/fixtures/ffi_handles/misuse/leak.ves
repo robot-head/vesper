@@ -1,0 +1,7 @@
+// A linear sealer that is never finalized.
+fn leak() -> u64 eff [Ffi[Aead]] {
+    match Aead::aead_sealer_new(1) {
+        Some(s) => 1,
+        None => 0,
+    }
+}

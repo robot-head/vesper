@@ -1,0 +1,6 @@
+// A handle cannot be copied: binding it moves it.
+fn copied(sink s: Sealer) eff [Ffi[Aead]] {
+    let t = s;
+    Aead::aead_sealer_free(t);
+    Aead::aead_sealer_free(s);
+}

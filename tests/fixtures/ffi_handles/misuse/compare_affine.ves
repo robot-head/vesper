@@ -1,0 +1,4 @@
+// Affine handles cannot be compared either.
+fn compare_affine(in a: Probe, in b: Probe) -> bool {
+    a == b
+}

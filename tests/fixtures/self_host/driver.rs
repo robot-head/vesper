@@ -372,6 +372,8 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     || path.ends_with("crates/vesper-ebpf/vesper")
                     // Port P3a lane 7 (#1042): the Silicon port uses `use` (#880).
                     || path.ends_with("crates/vesper-silicon/vesper")
+                    // P3b lane 3 (#1065): `.vsys` handle fixtures (slice intervals).
+                    || path.ends_with("tests/fixtures/ffi_handles")
                 {
                     continue;
                 }

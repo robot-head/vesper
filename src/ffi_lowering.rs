@@ -102,6 +102,13 @@ pub const CAPABILITY: &str = "Ffi";
 pub const INVALID_TYPE: &str = "ForeignInvalid";
 /// Largest slice (tuple arity) a foreign call may pass.
 pub const MAX_SLICE_ELEMENTS: usize = 4096;
+/// The one field of a generated extern-type handle struct: the C handle
+/// word. `$` is not a source identifier character, so source code can
+/// never name, read, build or destructure it.
+pub const HANDLE_FIELD: &str = "$handle";
+/// Slice-length marker of a `CSlice` argument that is a source `Slice[T]`
+/// lent in place as `(ptr, len)` (its length is a run-time value).
+pub(crate) const SOURCE_SLICE: usize = usize::MAX;
 /// Trap code of a call through an `isolated(mpk)` trampoline whose
 /// protection-key mask was never configured (or would revoke key 0).
 pub const ISOLATION_TRAP: u8 = 5;
@@ -149,6 +156,9 @@ pub enum FfiErrorKind {
     MalformedCapability,
     /// A foreign function used as a value instead of being called.
     ForeignValue,
+    /// Source code builds, destructures or compares an extern-type handle,
+    /// which only its library can create and inspect.
+    HandleMisuse,
     /// `Realtime` code may not call foreign code (§32.2).
     Realtime,
     /// The ordinary checker rejected the elaborated module.
@@ -297,6 +307,9 @@ pub(crate) struct OpPlan {
     pub function: FunctionDescriptor,
 }
 thread_local! {
+    /// Host functions bound to foreign symbols while [`ForeignChecked::jit`]
+    /// compiles (read by `native::register_jit_runtime_symbols`).
+    static JIT_SYMBOLS: RefCell<Vec<(String, usize)>> = const { RefCell::new(Vec::new()) };
     static PLAN: RefCell<Option<Rc<Plan>>> = const { RefCell::new(None) };
     /// Libraries whose calls the backend actually emitted.
     static USED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
@@ -311,6 +324,103 @@ impl Drop for PlanGuard {
         FAULT.with(|f| *f.borrow_mut() = None);
     }
 }
+/// The foreign symbols [`ForeignChecked::jit`] binds for the JIT module
+/// being built on this thread (empty otherwise).
+pub(crate) fn jit_symbols() -> Vec<(String, *const u8)> {
+    JIT_SYMBOLS.with(|s| {
+        s.borrow()
+            .iter()
+            .map(|(n, a)| (n.clone(), *a as *const u8))
+            .collect()
+    })
+}
+struct JitGuard;
+impl Drop for JitGuard {
+    fn drop(&mut self) {
+        JIT_SYMBOLS.with(|s| s.borrow_mut().clear());
+    }
+}
+
+/// The source value of extern-type handle `ty` holding the C word `word`,
+/// for an evaluator host ([`ForeignChecked::evaluate`]).
+pub fn handle_value(ty: &str, word: u64) -> crate::runtime::Value {
+    crate::runtime::Value::Data {
+        ty: ty.into(),
+        constructor: ty.into(),
+        fields: BTreeMap::from([(
+            HANDLE_FIELD.to_owned(),
+            crate::runtime::Value::UInt(word, 64),
+        )]),
+        resource_identity: None,
+    }
+}
+/// The C word of an extern-type handle value.
+pub fn handle_word(v: &crate::runtime::Value) -> Option<u64> {
+    match v {
+        crate::runtime::Value::Data { fields, .. } => match fields.get(HANDLE_FIELD)? {
+            crate::runtime::Value::UInt(w, _) => Some(*w),
+            crate::runtime::Value::Int(w) => Some(*w as u64),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+/// The bytes of a `Slice[u8]` argument (evaluator host).
+pub fn slice_bytes(v: &crate::runtime::Value) -> Option<Vec<u8>> {
+    let crate::runtime::Value::Slice { seq, start, len } = v else {
+        return None;
+    };
+    let cell = seq.borrow();
+    cell.get(*start..start + len)?
+        .iter()
+        .map(|b| match b {
+            crate::runtime::Value::UInt(b, _) => u8::try_from(*b).ok(),
+            crate::runtime::Value::Int(b) => u8::try_from(*b).ok(),
+            _ => None,
+        })
+        .collect()
+}
+/// Write `bytes` over an `inout Slice[u8]` argument (evaluator host); the
+/// lengths must agree.
+pub fn write_slice_bytes(v: &crate::runtime::Value, bytes: &[u8]) -> Result<(), String> {
+    let crate::runtime::Value::Slice { seq, start, len } = v else {
+        return Err("not a slice".into());
+    };
+    if bytes.len() != *len {
+        return Err("slice length differs".into());
+    }
+    let mut cell = seq.borrow_mut();
+    let elements = cell
+        .get_mut(*start..start + len)
+        .ok_or("slice out of bounds")?;
+    for (e, b) in elements.iter_mut().zip(bytes) {
+        *e = crate::runtime::Value::UInt(u64::from(*b), 8);
+    }
+    Ok(())
+}
+
+/// One foreign call the evaluator hands its host ([`ForeignChecked::evaluate`]).
+pub struct EvalCall<'s, 'w> {
+    pub library: String,
+    pub symbol: String,
+    suspension: &'s mut crate::runtime::Suspension<'w>,
+}
+impl EvalCall<'_, '_> {
+    /// The call's arguments, in parameter order (a `Slice` argument shares
+    /// its elements with the caller's sequence).
+    pub fn arguments(&self) -> &[crate::runtime::Value] {
+        &self.suspension.request().arguments
+    }
+    /// Replace an `inout` scalar or struct argument before the call returns.
+    pub fn write_argument(
+        &mut self,
+        index: usize,
+        value: crate::runtime::Value,
+    ) -> Result<(), String> {
+        self.suspension.write_argument(index, value)
+    }
+}
+
 /// The plan of foreign operation `op` of effect `effect`, while
 /// [`ForeignChecked::object`] is compiling.
 pub(crate) fn op_plan(effect: &str, op: &str) -> Result<OpPlan, String> {
@@ -455,6 +565,98 @@ impl ForeignChecked {
                 .unwrap_or_else(|| codegen(m))
         })
     }
+    /// JIT-compile and run the argument-free `entry` on this host, binding
+    /// each foreign symbol the module calls to the host function in
+    /// `symbols` (an `extern "C"` function with the `.vsys` ABI signature).
+    /// A called symbol without a binding is an error before any code runs:
+    /// the JIT never resolves foreign symbols from the process.
+    /// `isolated(mpk)` libraries are object-only.
+    pub fn jit(
+        &self,
+        entry: &str,
+        symbols: &[(&str, *const u8)],
+    ) -> Result<crate::runtime::Value, FfiError> {
+        for call in &self.calls {
+            if self.plan.libraries[&effect_name(&call.library)].handler != Handler::Direct {
+                return Err(FfiError::new(
+                    FfiErrorKind::IsolationUnavailable,
+                    format!(
+                        "{}::{} is isolated(mpk); its trampolines are emitted in objects only",
+                        call.library, call.symbol
+                    ),
+                    Some(call.span.clone()),
+                ));
+            }
+            if !symbols.iter().any(|(n, _)| *n == call.symbol) {
+                return Err(FfiError::new(
+                    FfiErrorKind::UnknownForeignFunction,
+                    format!(
+                        "the JIT host binds no function for {}::{}",
+                        call.library, call.symbol
+                    ),
+                    Some(call.span.clone()),
+                ));
+            }
+        }
+        JIT_SYMBOLS.with(|s| {
+            *s.borrow_mut() = symbols
+                .iter()
+                .map(|(n, a)| ((*n).to_owned(), *a as usize))
+                .collect()
+        });
+        let _guard = JitGuard;
+        self.with_lowering(None, |world| crate::native::jit(world, entry))
+    }
+    /// Run the argument-free `entry` in the evaluator (`vesper run`'s
+    /// machine), with `host` standing in for every foreign call: it gets the
+    /// library, the `.vsys` symbol and the arguments, may update `inout`
+    /// arguments and slices, and returns the call's source value (a handle
+    /// from [`handle_value`], `Unit` as an empty tuple). The entry's row may
+    /// hold only `Ffi[..]` capabilities.
+    pub fn evaluate(
+        &self,
+        entry: &str,
+        mut host: impl FnMut(&mut EvalCall<'_, '_>) -> Result<crate::runtime::Value, String>,
+    ) -> Result<crate::runtime::Value, FfiError> {
+        let fail = |m: String| FfiError::new(FfiErrorKind::Codegen, m, None);
+        // Foreign operations resume exactly once, so the evaluator can hand
+        // them to the host as one-shot external effects.
+        let mut world = self.checked.world.clone();
+        for (name, effect) in world.effects.iter_mut() {
+            if is_foreign_effect(name) {
+                effect.linear = true;
+            }
+        }
+        let mut state = crate::runtime::Runtime::new(&world)
+            .begin_external(entry, vec![])
+            .map_err(fail)?;
+        loop {
+            match state {
+                crate::runtime::Execution::Complete(v) => return Ok(v),
+                crate::runtime::Execution::Suspended(mut suspension) => {
+                    let request = suspension.request();
+                    let library = request
+                        .effect
+                        .name
+                        .strip_prefix(EFFECT_PREFIX)
+                        .ok_or_else(|| fail(format!("unhandled effect {}", request.effect.name)))?
+                        .to_owned();
+                    let symbol = request
+                        .operation
+                        .split_once('$')
+                        .map_or(request.operation.as_str(), |(s, _)| s)
+                        .to_owned();
+                    let mut call = EvalCall {
+                        library,
+                        symbol,
+                        suspension: &mut suspension,
+                    };
+                    let value = host(&mut call).map_err(fail)?;
+                    state = suspension.resume(value).map_err(fail)?;
+                }
+            }
+        }
+    }
     /// Compile `entry` (exported under its own name) to an object for
     /// `target` (default: the host).
     pub fn object(&self, entry: &str, target: Option<&str>) -> Result<ForeignObject, FfiError> {
@@ -575,9 +777,9 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
         let probe = check::check(&first);
         for site in &sites {
             let mut lengths = vec![];
-            for (span, element, nullable) in &site.slices {
+            for (span, element, nullable, in_place) in &site.slices {
                 let ty = probe.expression_types.get(&(span.start, span.end));
-                lengths.push(slice_length(ty, element, *nullable, span)?);
+                lengths.push(slice_length(ty, element, *nullable, *in_place, span)?);
             }
             arities.insert((site.call.start, site.call.end), lengths);
         }
@@ -630,8 +832,25 @@ fn slice_length(
     ty: Option<&Type>,
     element: &Type,
     nullable: bool,
+    in_place: bool,
     span: &Span,
 ) -> Result<usize, FfiError> {
+    if let Some(Type::Named(n, args)) = ty
+        && n == crate::seq::SLICE_TYPE
+    {
+        return if in_place && !nullable && args.len() == 1 && &args[0] == element {
+            Ok(SOURCE_SLICE)
+        } else {
+            Err(FfiError::new(
+                FfiErrorKind::SliceArgument,
+                format!(
+                    "a CSlice[{element}] argument may be a Slice[{element}] only when it is not nullable and {element} is u8, u32, u64, i64 or usize; found {}",
+                    ty.map_or_else(String::new, ToString::to_string)
+                ),
+                Some(span.clone()),
+            ))
+        };
+    }
     let wanted = if nullable {
         format!("Option[({element}, ...)]")
     } else {
@@ -671,8 +890,9 @@ type Instances = BTreeMap<(String, String), BTreeSet<Vec<usize>>>;
 
 struct SliceSite {
     call: Span,
-    /// Argument span, element source type, nullability.
-    slices: Vec<(Span, Type, bool)>,
+    /// Argument span, element source type, nullability, and whether a
+    /// source `Slice` may be lent in place.
+    slices: Vec<(Span, Type, bool, bool)>,
 }
 
 /// Rewrites `Ffi[Lib]` rows to the library effect and `Lib::f` calls to its
@@ -852,6 +1072,8 @@ impl<'a> Rewriter<'a> {
                     let message =
                         format!("foreign function {library}::{symbol} can only be called");
                     self.error(FfiErrorKind::ForeignValue, message, &span);
+                } else if self.generated.is_handle(n) {
+                    self.handle_misuse(n, "constructed", &span);
                 }
             }
             ExprKind::Call {
@@ -885,7 +1107,11 @@ impl<'a> Rewriter<'a> {
                     self.expr(e);
                 }
             }
-            ExprKind::Struct { fields, .. } => {
+            ExprKind::Struct { name, fields } => {
+                if self.generated.is_handle(name) {
+                    let name = name.clone();
+                    self.handle_misuse(&name, "constructed", &span);
+                }
                 for (_, e) in fields {
                     self.expr(e);
                 }
@@ -893,7 +1119,8 @@ impl<'a> Rewriter<'a> {
             ExprKind::Block { statements, tail } => {
                 for s in statements {
                     match s {
-                        Statement::Let { ty, value, .. } => {
+                        Statement::Let { pat, ty, value, .. } => {
+                            self.pattern(pat);
                             self.ty(ty, &span);
                             self.expr(value);
                         }
@@ -922,7 +1149,8 @@ impl<'a> Rewriter<'a> {
             }
             ExprKind::Match { value, arms } => {
                 self.expr(value);
-                for (_, a) in arms {
+                for (p, a) in arms {
+                    self.pattern(p);
                     self.expr(a);
                 }
             }
@@ -970,11 +1198,44 @@ impl<'a> Rewriter<'a> {
                     self.expr(s);
                 }
                 self.expr(body);
+                for p in &ret.pats {
+                    self.pattern(p);
+                }
                 self.expr(&mut ret.body);
                 for c in ops {
+                    for p in &c.pats {
+                        self.pattern(p);
+                    }
                     self.expr(&mut c.body);
                 }
             }
+        }
+    }
+    fn handle_misuse(&mut self, name: &str, what: &str, span: &Span) {
+        self.error(
+            FfiErrorKind::HandleMisuse,
+            format!(
+                "extern type {name} is an opaque foreign handle: it cannot be {what} in source; only its library's imports create, use and finalize it"
+            ),
+            span,
+        );
+    }
+    fn pattern(&mut self, p: &Pattern) {
+        match &p.kind {
+            PatternKind::Constructor { name, fields, .. } => {
+                if self.generated.is_handle(name) {
+                    self.handle_misuse(name, "destructured", &p.span);
+                }
+                for (_, f) in fields {
+                    self.pattern(f);
+                }
+            }
+            PatternKind::Tuple(ps) => {
+                for p in ps {
+                    self.pattern(p);
+                }
+            }
+            PatternKind::Wild | PatternKind::Bind(_) | PatternKind::Literal(_) => {}
         }
     }
     /// The operation name `Lib::symbol` resolves to, or `None` on error.
@@ -1003,14 +1264,16 @@ impl<'a> Rewriter<'a> {
         let handler = import.handler;
         let Some(arities) = self.arities else {
             if args.len() == shape.params.len() {
-                let slices: Vec<(Span, Type, bool)> = shape
+                let slices: Vec<(Span, Type, bool, bool)> = shape
                     .params
                     .iter()
                     .zip(args)
                     .filter_map(|(p, a)| match &p.kind {
-                        ParamKind::Slice { element, nullable } => {
-                            Some((a.expr.span.clone(), element.clone(), *nullable))
-                        }
+                        ParamKind::Slice {
+                            element,
+                            nullable,
+                            in_place,
+                        } => Some((a.expr.span.clone(), element.clone(), *nullable, *in_place)),
                         ParamKind::Value(_) => None,
                     })
                     .collect();
@@ -1054,6 +1317,9 @@ impl<'a> Rewriter<'a> {
 /// Source-facing description of a foreign parameter, for tooling.
 pub fn describe_parameter(p: &ParameterType) -> String {
     match p {
+        ParameterType::Handle { handle, access } => {
+            format!("{} {}", access.keyword(), handle.name())
+        }
         ParameterType::Value(v) => describe_value(v),
         ParameterType::Pointer {
             pointee,
@@ -1094,5 +1360,10 @@ fn describe_value(v: &ValueType) -> String {
         ValueType::Bool => "bool".into(),
         ValueType::Enum(e) => e.name().into(),
         ValueType::Address { pointee, .. } => format!("Ptr[{}]", pointee.name()),
+        ValueType::Handle {
+            handle,
+            nullable: true,
+        } => format!("Option[{}]", handle.name()),
+        ValueType::Handle { handle, .. } => handle.name().into(),
     }
 }

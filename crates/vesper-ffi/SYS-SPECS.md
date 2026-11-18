@@ -143,10 +143,22 @@ Layouts compile through `vesper_ffi::Registry`: implicit padding, `usize`,
 most 1 MiB. At most 64 wire structs with 256 fields each are accepted.
 
 Every return explicitly uses `ForeignVal[T]`, where T is a supported scalar,
-`bool`, declared enum, `Unit` (C void), `Ptr[integer]`, or `NullablePtr[integer]`.
+`bool`, declared enum, `Unit` (C void), `Ptr[integer]`, `NullablePtr[integer]`,
+an extern type `H`, or `Option[H]`.
+
+`linear extern type H;` and `affine extern type H;` declare opaque handles
+(#1065): one pointer-sized word the library owns. A handle parameter is
+`in h: H`, `inout h: H` or `sink h: H` (no `nocapture`: the callee receives
+the word itself, `AbiType::Pointer`); `sink` marks a finalizer, and a linear
+type without one is rejected. A handle result is `ForeignVal[H]` (null is
+invalid) or `ForeignVal[Option[H]]` (null is none); `validate` yields
+`ValidatedValue::Handle`. Extern type names share one namespace with enums and
+wire structs. The descriptor records the contract only; the source checker
+(`vesper::ffi_lowering`) enforces exactly-once finalization.
+
 Capturing raw-pointer parameters, structs/unions by value, arrays by value, callbacks, floats,
-platform-dependent C `char/long`, variadics, opaque handles/finalizers, nullable
-handle options and nested pointer layouts are unsupported and rejected.
+platform-dependent C `char/long`, variadics, `out` handles and nested pointer
+layouts are unsupported and rejected.
 
 ## Raw returns and owned failures
 
@@ -170,7 +182,8 @@ Both success and failure return ownership of the caller-supplied `owner`.
 `InvalidForeignValue::into_parts()` returns the validation error and original
 `ForeignValue`; its `into_parts()` returns unchanged raw bits and owner. No
 foreign handle finalizer is run implicitly. These Rust APIs permit ordinary
-Drop and do not establish source-language linear exhaustion.
+Drop and do not establish source-language linear exhaustion; a handle
+argument is `RawArgument::Bits(word)` and must be non-null.
 
 `function.prepare_call(raw_arguments, owner)` validates argument shape/scalar
 bits, slice nullability, integer element alignment, checked byte lengths,

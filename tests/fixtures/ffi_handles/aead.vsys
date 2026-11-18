@@ -1,0 +1,18 @@
+sys library Aead (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_aead", artifact = "blake3:@DIGEST@"
+) {
+    // A sealer owns an expanded key schedule: create it once, seal and open
+    // many packets in place, finalize it exactly once.
+    linear extern type Sealer;
+    // A borrowed view of the library's counters: dropping it is fine.
+    affine extern type Probe;
+    fn aead_sealer_new(key: u64) -> ForeignVal[Option[Sealer]];
+    fn aead_sealer_must(key: u64) -> ForeignVal[Sealer];
+    fn aead_seal(inout s: Sealer, nocapture inout packet: CSlice[u8]) -> ForeignVal[u32];
+    fn aead_open(in s: Sealer, nocapture inout packet: CSlice[u8]) -> ForeignVal[u32];
+    fn aead_sealer_free(sink s: Sealer) -> ForeignVal[Unit];
+    fn aead_seal_once(key: u64, nocapture inout packet: CSlice[u8]) -> ForeignVal[u32];
+    fn aead_probe() -> ForeignVal[Option[Probe]];
+    fn aead_probe_live(in p: Probe) -> ForeignVal[u64];
+}

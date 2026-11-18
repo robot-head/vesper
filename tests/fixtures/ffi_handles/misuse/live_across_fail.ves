@@ -1,0 +1,28 @@
+// An owned linear handle may not stay live across an unhandled Fail exit:
+// the failure would discard it without its finalizer.
+copy struct E {
+    code: u64,
+}
+
+fn may(x: u64) -> u64 eff [Fail[E]] {
+    if x == 0 {
+        Fail::raise(
+            E {
+                code: 1
+            }
+        )
+    } else {
+        x
+    }
+}
+
+fn live_across_fail(x: u64) -> u64 eff [Ffi[Aead], Fail[E]] {
+    match Aead::aead_sealer_new(1) {
+        Some(s) => {
+            let y = may(x);
+            Aead::aead_sealer_free(s);
+            y
+        },
+        None => 0,
+    }
+}
