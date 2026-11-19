@@ -292,7 +292,7 @@ fn run() -> u64 eff [Fail[RuntimeError]] {
             acc = mix(acc, u64::from(ok));
             acc = mix(acc, hash(&b));
             let mut w = vec![2u64; n];
-            let ok = lo <= hi && hi <= n - 1;
+            let ok = lo <= hi && hi < n;
             if ok {
                 w[1 + lo..1 + hi].fill(hi as u64);
             }
