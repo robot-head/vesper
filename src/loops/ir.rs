@@ -4,7 +4,9 @@
 //! jumps back to it; `break v` jumps to the exit block with `v` as the exit's
 //! block parameter. `for p in a..b { body }` binds hidden index and bound
 //! slots, tests `index < bound` (`<=` for `a..=b`) in the header, and
-//! increments the index in a latch block; a closed range leaves before an
+//! increments the index in a latch block; `continue` jumps to the header of
+//! a `loop`, and in a `for` to a step block before the latch (which tests a
+//! closed range's bound first); a closed range leaves before an
 //! increment past its bound, so the increment never overflows. `return v`
 //! is [`Op::Exit`] followed by an `Unreachable` terminator. Code after a jump
 //! is lowered into a fresh block without predecessors.
@@ -16,6 +18,12 @@ pub(super) struct LoopTarget {
     exit: usize,
     /// The exit block takes the `break` value as its parameter (`loop`).
     value: bool,
+    /// Where `continue` jumps: the header of a `loop`; `None` in a `for`,
+    /// whose step block is made after its body.
+    next: Option<usize>,
+    /// The blocks a `continue` in a `for` body ends, patched to jump to the
+    /// step block once it exists.
+    continues: Vec<usize>,
 }
 
 impl Lower<'_> {
@@ -65,7 +73,12 @@ impl Lower<'_> {
                 };
                 self.current = header;
                 self.emit_at(Op::Loop, e.span.clone(), Type::unit());
-                self.loops.push(LoopTarget { exit, value: true });
+                self.loops.push(LoopTarget {
+                    exit,
+                    value: true,
+                    next: Some(header),
+                    continues: vec![],
+                });
                 let outer = self.names.clone();
                 self.expr(body);
                 self.names = outer;
@@ -152,10 +165,29 @@ impl Lower<'_> {
                     pat.span.clone(),
                     Type::unit(),
                 );
-                self.loops.push(LoopTarget { exit, value: false });
+                self.loops.push(LoopTarget {
+                    exit,
+                    value: false,
+                    next: None,
+                    continues: vec![],
+                });
                 self.expr(body);
-                self.loops.pop();
+                let continues = self.loops.pop().map(|t| t.continues).unwrap_or_default();
                 self.names = outer;
+                if !continues.is_empty() {
+                    // Every `continue` and the body's end meet in one step
+                    // block, which tests the bound of a closed range and
+                    // increments. Without a `continue` the body's end is the
+                    // step block, so loops without one lower as before.
+                    let step = self.new_block();
+                    for block in continues.into_iter().chain([self.current]) {
+                        self.blocks[block].terminator = Terminator::Jump {
+                            block: step,
+                            args: vec![],
+                        };
+                    }
+                    self.current = step;
+                }
                 let latch = self.new_block();
                 if *inclusive {
                     // Leave at the bound instead of incrementing past it.
@@ -210,6 +242,24 @@ impl Lower<'_> {
                 self.blocks[self.current].terminator = Terminator::Jump {
                     block: target.exit,
                     args: if target.value { vec![v] } else { vec![] },
+                };
+                self.after_jump(e)
+            }
+            ExprKind::Continue => {
+                let Some(target) = self.loops.last_mut() else {
+                    return self.emit(Op::Unit, e, false);
+                };
+                let block = match target.next {
+                    Some(header) => header,
+                    None => {
+                        target.continues.push(self.current);
+                        // Patched to the step block after the body.
+                        self.current
+                    }
+                };
+                self.blocks[self.current].terminator = Terminator::Jump {
+                    block,
+                    args: vec![],
                 };
                 self.after_jump(e)
             }

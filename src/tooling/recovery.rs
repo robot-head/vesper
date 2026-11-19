@@ -952,6 +952,7 @@ impl<'a> Walk<'a, '_, '_> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_) => {
                 return Ok(Err(UnavailableReason::UnsupportedFunction));
             }

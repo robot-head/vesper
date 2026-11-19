@@ -10,9 +10,8 @@
 //! This is executable evidence for a particular choreography under the
 //! stated bounds, not a proof of the projection theorem.
 
-use crate::chor::{Choreography, RoleId};
-use crate::project::{LocalType, ProjectionError, project_all};
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use crate::chor::Choreography;
+use crate::project::{LocalType, ProjectionError};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug)]
@@ -75,16 +74,12 @@ impl fmt::Display for ExploreError {
 
 impl std::error::Error for ExploreError {}
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct State {
-    roles: Vec<LocalType>,
-    queues: BTreeMap<(RoleId, RoleId), VecDeque<(String, String)>>,
-}
-
 /// Explore every reachable state of the projected system.
+///
+/// Projection and the explorer are the Vesper library's
+/// (`vesper/src/explore.ves`, port wave P3b lane 6, #1068).
 pub fn explore(chor: &Choreography, limits: ExploreLimits) -> Result<ExploreReport, ExploreError> {
-    let locals = project_all(chor).map_err(ExploreError::Projection)?;
-    explore_locals(chor, locals, limits)
+    crate::port::explore(chor, None, limits)
 }
 
 /// Explore an explicit set of local types (one per role, in declaration
@@ -95,150 +90,5 @@ pub fn explore_locals(
     locals: Vec<LocalType>,
     limits: ExploreLimits,
 ) -> Result<ExploreReport, ExploreError> {
-    let name = |r: RoleId| chor.role_name(r).unwrap_or("?").to_owned();
-    let start = State {
-        roles: locals.iter().map(LocalType::unfold).collect(),
-        queues: BTreeMap::new(),
-    };
-    let mut seen: HashSet<State> = HashSet::new();
-    let mut work = vec![start.clone()];
-    seen.insert(start);
-    let mut report = ExploreReport {
-        states: 0,
-        completed: 0,
-        queue_bound_hit: false,
-    };
-    while let Some(st) = work.pop() {
-        report.states += 1;
-        if report.states > limits.max_states {
-            return Err(ExploreError::StateBudgetExceeded {
-                states: report.states,
-            });
-        }
-        let mut succ: Vec<State> = Vec::new();
-        let mut cut = false;
-        for (i, t) in st.roles.iter().enumerate() {
-            let me = RoleId(i as u16);
-            match t {
-                LocalType::End | LocalType::Var(_) | LocalType::Rec { .. } => {}
-                LocalType::Action { next, .. } => {
-                    let mut s = st.clone();
-                    s.roles[i] = next.unfold();
-                    succ.push(s);
-                }
-                LocalType::Send {
-                    peer,
-                    label,
-                    payload,
-                    next,
-                } => {
-                    let q = st.queues.get(&(me, *peer)).map_or(0, VecDeque::len);
-                    if q >= limits.max_queue {
-                        cut = true;
-                        continue;
-                    }
-                    let mut s = st.clone();
-                    s.queues
-                        .entry((me, *peer))
-                        .or_default()
-                        .push_back((label.clone(), payload.clone()));
-                    s.roles[i] = next.unfold();
-                    succ.push(s);
-                }
-                LocalType::Select { peer, branches } => {
-                    let q = st.queues.get(&(me, *peer)).map_or(0, VecDeque::len);
-                    if q >= limits.max_queue {
-                        cut = true;
-                        continue;
-                    }
-                    for b in branches {
-                        let mut s = st.clone();
-                        s.queues
-                            .entry((me, *peer))
-                            .or_default()
-                            .push_back((b.label.clone(), b.payload.clone()));
-                        s.roles[i] = b.next.unfold();
-                        succ.push(s);
-                    }
-                }
-                LocalType::Recv { peer, .. } | LocalType::Offer { peer, .. } => {
-                    let Some(head) = st.queues.get(&(*peer, me)).and_then(|q| q.front()) else {
-                        continue;
-                    };
-                    let accepted: Vec<(&str, &str, &LocalType)> = match t {
-                        LocalType::Recv {
-                            label,
-                            payload,
-                            next,
-                            ..
-                        } => vec![(label, payload, next)],
-                        LocalType::Offer { branches, .. } => branches
-                            .iter()
-                            .map(|b| (b.label.as_str(), b.payload.as_str(), &b.next))
-                            .collect(),
-                        _ => unreachable!(),
-                    };
-                    match accepted
-                        .iter()
-                        .find(|(l, p, _)| *l == head.0 && *p == head.1)
-                    {
-                        Some((_, _, next)) => {
-                            let mut s = st.clone();
-                            let q = s.queues.get_mut(&(*peer, me)).expect("queue exists");
-                            q.pop_front();
-                            if q.is_empty() {
-                                s.queues.remove(&(*peer, me));
-                            }
-                            s.roles[i] = next.unfold();
-                            succ.push(s);
-                        }
-                        None => {
-                            return Err(ExploreError::UnexpectedMessage {
-                                role: name(me),
-                                peer: name(*peer),
-                                expected: accepted
-                                    .iter()
-                                    .map(|(l, p, _)| format!("{l}({p})"))
-                                    .collect(),
-                                found: format!("{}({})", head.0, head.1),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        report.queue_bound_hit |= cut;
-        if succ.is_empty() && !cut {
-            let all_end = st.roles.iter().all(|t| *t == LocalType::End);
-            if all_end && st.queues.is_empty() {
-                report.completed += 1;
-            } else if all_end {
-                return Err(ExploreError::Orphans {
-                    messages: st
-                        .queues
-                        .iter()
-                        .flat_map(|((f, t), q)| {
-                            q.iter().map(move |(l, _)| (name(*f), name(*t), l.clone()))
-                        })
-                        .collect(),
-                });
-            } else {
-                return Err(ExploreError::Deadlock {
-                    waiting: st
-                        .roles
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, t)| **t != LocalType::End)
-                        .map(|(i, t)| (name(RoleId(i as u16)), t.head_summary(chor)))
-                        .collect(),
-                });
-            }
-        }
-        for s in succ {
-            if seen.insert(s.clone()) {
-                work.push(s);
-            }
-        }
-    }
-    Ok(report)
+    crate::port::explore(chor, Some(&locals), limits)
 }

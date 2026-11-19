@@ -9,6 +9,9 @@
 //!   `Unit`, and a `break` inside it takes no value.
 //! * `break` and `break value` leave the innermost loop of the enclosing
 //!   function, closure or handled body.
+//! * `continue` starts the next iteration of the innermost loop: a `loop`
+//!   jumps to its header, a `for` steps its index (and leaves a closed range
+//!   at its bound) first.
 //! * `return` and `return value` leave the enclosing function or closure,
 //!   including from inside a handled body (which abandons the handler).
 //! * `let mut` declares an assignable binding.
@@ -27,9 +30,11 @@ pub const LEAN_REFUSAL: &str = "Lean extraction does not model loop, for, break 
     write the iteration as a tail-recursive function";
 
 /// The native backends' typed refusal for `Box[T]` values in a function
-/// with loops or early exits, whose drops are not elaborated yet.
-pub const BOX_REFUSAL: &str = "Box values in a function with loop, for, break or return \
-    are not reclaimed natively yet; move the loop into a function without boxes";
+/// with loops or early exits whose drops the elaboration could not plan
+/// ([`crate::fip::loop_drops_elaborated`]): an `@fip` function, or a reuse
+/// slot on a branch edge that needs a drop.
+pub const BOX_REFUSAL: &str = "Box values in this function with loop, for, break or return \
+    are not reclaimed natively; move the loop into a function without boxes";
 
 /// The Wasm backend's typed refusal ([`crate::wasm_backend::Unsupported::Operation`]).
 pub const WASM_REFUSAL: &str = "loop, for, break and return are not lowered to Wasm yet; \
@@ -54,6 +59,7 @@ pub fn uses_loop_syntax(module: &crate::ast::Module) -> bool {
                 | ExprKind::For { .. }
                 | ExprKind::Range { .. }
                 | ExprKind::Break(_)
+                | ExprKind::Continue
                 | ExprKind::Return(_) => found = true,
                 ExprKind::Block { statements, .. }
                     if statements

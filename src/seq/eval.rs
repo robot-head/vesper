@@ -276,6 +276,70 @@ impl Runtime<'_> {
                 cell.borrow_mut()[start..start + len].fill(value);
                 V(Value::Tuple(vec![]))
             }
+            SeqOp::Resize => {
+                let n = usize::try_from(index(arg(1)?)?)
+                    .map_err(|_| "ChunkSeq::resize overflows the address space")?;
+                let value = arg(2)?.clone();
+                let cell = seq(arg(0)?)?;
+                let mut items = cell.borrow_mut();
+                let len = items.len();
+                if n > len {
+                    items.try_reserve(n - len).map_err(
+                        |_| "ChunkSeq out of memory: resize overflows the address space",
+                    )?;
+                }
+                items.resize(n, value);
+                V(Value::Tuple(vec![]))
+            }
+            SeqOp::FillRange { total } => {
+                let (cell, start, len) = view(arg(0)?)?;
+                let lo = index(arg(1)?)?;
+                let hi = index(arg(2)?)?;
+                if lo > hi || hi > len as u64 {
+                    return Ok(if total {
+                        V(Value::Bool(false))
+                    } else {
+                        OutOfBounds
+                    });
+                }
+                let value = arg(3)?.clone();
+                cell.borrow_mut()[start + lo as usize..start + hi as usize].fill(value);
+                V(if total {
+                    Value::Bool(true)
+                } else {
+                    Value::Tuple(vec![])
+                })
+            }
+            SeqOp::ExtendFromWithin { total } => {
+                let cell = seq(arg(0)?)?;
+                let lo = index(arg(1)?)?;
+                let hi = index(arg(2)?)?;
+                let len = cell.borrow().len();
+                if lo > hi || hi > len as u64 {
+                    return Ok(if total {
+                        V(Value::Bool(false))
+                    } else {
+                        OutOfBounds
+                    });
+                }
+                cell.borrow_mut()
+                    .extend_from_within(lo as usize..hi as usize);
+                V(if total {
+                    Value::Bool(true)
+                } else {
+                    Value::Tuple(vec![])
+                })
+            }
+            SeqOp::ExtendReversed => {
+                let (src, start, len) = view(arg(1)?)?;
+                let items: Vec<Value> = src.borrow()[start..start + len]
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .collect();
+                seq(arg(0)?)?.borrow_mut().extend(items);
+                V(Value::Tuple(vec![]))
+            }
             SeqOp::Wide(wide) => return self.wide_op(wide, &args, site),
             SeqOp::SumBe16 => {
                 let bytes = byte_view(arg(0)?)?;

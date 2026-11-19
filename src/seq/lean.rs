@@ -100,7 +100,7 @@ impl Generator<'_> {
                 }
                 ExprKind::Field(base, method) => {
                     let t = self.type_of(base)?;
-                    let op = seq::resolve(method, Some(&t))?;
+                    let op = seq::resolve(method, Some(&t))?.with_arity(args.len());
                     let mut operands = vec![base.as_ref()];
                     operands.extend(args.iter().map(|a| &a.expr));
                     (op, operands)
@@ -121,6 +121,10 @@ impl Generator<'_> {
             SeqOp::CopyFrom { .. }
                 | SeqOp::CopyWithin { .. }
                 | SeqOp::Fill
+                | SeqOp::Resize
+                | SeqOp::FillRange { .. }
+                | SeqOp::ExtendFromWithin { .. }
+                | SeqOp::ExtendReversed
                 | SeqOp::Wide(_)
                 | SeqOp::Swap
                 | SeqOp::Replace
@@ -247,6 +251,10 @@ impl Generator<'_> {
             | SeqOp::Swap
             | SeqOp::Replace
             | SeqOp::Fill
+            | SeqOp::Resize
+            | SeqOp::FillRange { .. }
+            | SeqOp::ExtendFromWithin { .. }
+            | SeqOp::ExtendReversed
             | SeqOp::Wide(_)
             | SeqOp::SumBe16
             | SeqOp::BytesEq

@@ -303,6 +303,7 @@ fn visit(e: &Expr, callback: &mut impl FnMut(&Expr)) {
         | ExprKind::For { .. }
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_)) => {
             for c in k.control_children().into_iter().flatten() {
                 visit(c, callback)
@@ -1334,6 +1335,9 @@ fn define_instances_observed_with_trace<M: Module>(
                 handlers: vec![],
                 exits: vec![],
                 inline_depth: 0,
+                cycle_depth: 0,
+                tail_call: false,
+                sink_blocks: vec![],
                 fail_record: fail_record.map(|record| {
                     (
                         record,
@@ -2085,6 +2089,11 @@ struct HandlerControl {
     selector: Variable,
     dispatch: ir::Block,
     returns: Rc<RefCell<Vec<ir::Block>>>,
+    /// [`Codegen::cycle_depth`] where the `handle` is installed.
+    cycle_depth: usize,
+    /// How many graphs enclose the `handle`: its handled body and what is
+    /// inlined into it are the graphs from this depth on.
+    exits_depth: usize,
 }
 #[derive(Clone, Default)]
 struct NativeInfo {
@@ -2120,6 +2129,25 @@ enum ClosureTarget {
         control: HandlerControl,
     },
 }
+/// A boxed object lent `sink` to a callee inlined for its handler effects
+/// (§7.3): the inlined body reads the object in its box's block, so the
+/// block lives until the call returns, or until a handler installed outside
+/// the call (below `depth`, the handler count at the call) aborts it.
+#[derive(Clone, Copy)]
+struct LentSinkBlock {
+    depth: usize,
+    /// The box's block; 0 once freed.
+    block: Variable,
+    /// The `{data, vtable}` pair lent to the callee; its vtable word is 0
+    /// once the callee consumed the object.
+    pair: Variable,
+}
+/// A graph's variables, local types and generic substitution.
+type GraphScope = (
+    BTreeMap<String, Variable>,
+    BTreeMap<String, Type>,
+    BTreeMap<String, Type>,
+);
 /// Where a `return` from a graph's owner continues: its caller's join block
 /// (an inlined graph) or the Cranelift return, through `sret` when present.
 #[derive(Clone)]
@@ -2140,6 +2168,15 @@ struct ExitTarget {
     /// Header words of sequences read once before a loop that keeps them
     /// ([`crate::bounds_hoist::header_hoists`]), by handle and offset.
     header_words: BTreeMap<(ir::Value, i32), ir::Value>,
+    /// The boxes this graph owns at each instruction that can abort it
+    /// ([`crate::fip::fail_exit_drops`]), dropped when a `Fail` leaves it.
+    fail_drops: Rc<BTreeMap<(usize, usize), Vec<crate::fip::FipDrop>>>,
+    /// The (block, instruction) being emitted.
+    at: Option<(usize, usize)>,
+    /// The graph's value registers and its scope, to emit those drops from
+    /// a callee inlined into it.
+    registers: Rc<BTreeMap<crate::ir::ValueId, Variable>>,
+    scope: Rc<GraphScope>,
 }
 struct Codegen<'a, 'b, M: Module> {
     b: FunctionBuilder<'a>,
@@ -2162,6 +2199,17 @@ struct Codegen<'a, 'b, M: Module> {
     /// ([`crate::ir::Op::Exit`]) by lowered function or closure name.
     exits: Vec<ExitTarget>,
     inline_depth: usize,
+    /// How many loops of the graphs being emitted enclose the current
+    /// block. A handler records its own depth; an operation performed at a
+    /// greater depth can run again before its earlier resumption returns.
+    cycle_depth: usize,
+    /// The `Op::Indirect` being lowered is a handler clause's tail call
+    /// (`emit(v, k) => k(v)`): a resumption there returns the clause's
+    /// result unchanged ([`Codegen::invoke_continuation`]).
+    tail_call: bool,
+    /// Boxed objects lent `sink` to callees inlined for their handler
+    /// effects ([`LentSinkBlock`]), innermost call last.
+    sink_blocks: Vec<LentSinkBlock>,
     /// The failure-record pointer of a `fail_only` function being compiled,
     /// with the error type of each of its `Fail` instances.
     fail_record: Option<(ir::Value, Vec<Type>)>,
@@ -2534,6 +2582,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         args: &[Arg],
         site: &Expr,
     ) -> Result<ir::Value, String> {
+        let tail = std::mem::take(&mut self.tail_call);
         let normalized = crate::numeric::default_type(ty);
         let ty = &normalized;
         if self.inline_depth >= 64 {
@@ -2604,7 +2653,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     self.invoke_closure_body(&closure, name, params, &prepared)
                 }
                 ClosureTarget::Continuation { entry, control } => {
-                    self.invoke_continuation(*entry, control, result, &prepared)
+                    self.invoke_continuation(*entry, control, result, &prepared, tail)
                 }
             };
             self.inline_depth -= 1;
@@ -2630,11 +2679,43 @@ impl<M: Module> Codegen<'_, '_, M> {
         control: &HandlerControl,
         result: &Type,
         args: &[Arg],
+        tail: bool,
     ) -> Result<ir::Value, String> {
         let values = args
             .iter()
             .map(|a| self.expr(&a.expr))
             .collect::<Result<Vec<_>, _>>()?;
+        let layout = Layout::of(self.world, result)?;
+        let result_type = if layout.aggregate() {
+            self.m.target_config().pointer_type()
+        } else {
+            scalar(result, &[])?
+        };
+        if tail {
+            // `k(v)` is the clause's result, which is the value of the rest
+            // of the `handle`: resume with the clause's own return selector,
+            // so the rest returns straight to whoever the clause returns to.
+            // Nothing is saved, so the operation may run again (from a loop
+            // of the handled body) before this resumption returns.
+            self.jump(
+                entry,
+                &values
+                    .into_iter()
+                    .map(ir::BlockArg::from)
+                    .collect::<Vec<_>>(),
+            );
+            let unreachable = self.b.create_block();
+            self.b.append_block_param(unreachable, result_type);
+            self.b.switch_to_block(unreachable);
+            return Ok(self.b.block_params(unreachable)[0]);
+        }
+        if self.cycle_depth > control.cycle_depth {
+            // The return point and the clause's locals below live in one
+            // frame slot per operation site; a nested resumption from the
+            // next loop iteration would overwrite them before this one
+            // returns.
+            return Err(crate::native_handlers::LOOP_RESUME_REFUSAL.into());
+        }
         let saved = self.b.create_sized_stack_slot(ir::StackSlotData::new(
             ir::StackSlotKind::ExplicitSlot,
             8,
@@ -2643,15 +2724,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let selector = self.use_var(control.selector);
         self.b.ins().stack_store(selector, saved, 0);
         let returned = self.b.create_block();
-        let layout = Layout::of(self.world, result)?;
-        self.b.append_block_param(
-            returned,
-            if layout.aggregate() {
-                self.m.target_config().pointer_type()
-            } else {
-                scalar(result, &[])?
-            },
-        );
+        self.b.append_block_param(returned, result_type);
         let index = control.returns.borrow().len();
         control.returns.borrow_mut().push(returned);
         let selected = self.b.ins().iconst(types::I64, index as i64);
@@ -3098,8 +3171,17 @@ impl<M: Module> Codegen<'_, '_, M> {
             postorder
         });
         order.extend(unreached);
-        // Box drop elaboration (`fip::elaborate_non_fip_drops`) assumes a
-        // forward-only graph without early exits; refuse rather than leak.
+        // Blocks on a cycle of this graph (a loop body): an operation there
+        // can be performed again before its earlier resumption returns.
+        let cyclic = petgraph::algo::tarjan_scc(&live)
+            .into_iter()
+            .filter(|c| c.len() > 1 || live.contains_edge(c[0], c[0]))
+            .flatten()
+            .collect::<BTreeSet<_>>();
+        let base_cycle_depth = self.cycle_depth;
+        // Box drop elaboration (`fip::elaborate_non_fip_drops`) solves
+        // loops and early exits; refuse a graph it could not plan rather
+        // than leak.
         if f.blocks
             .iter()
             .flat_map(|b| &b.instructions)
@@ -3108,7 +3190,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .values()
                 .chain(f.locals.values())
                 .any(|t| crate::fip::mentions_box(self.world, t))
-            && !crate::fip::loop_boxes_reclaimed(self.world, f)
+            && !crate::fip::loop_drops_elaborated(self.world, f)
         {
             return Err(format!(
                 "native '{}': {}",
@@ -3125,7 +3207,32 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else if return_to.is_none() {
             self.seq_drop_slots(f, None)?
         } else {
-            self.seq_drop_slots(f, Some(&fresh_locals))?
+            // A function inlined for its handler effects owns its `sink`
+            // parameters as a separately compiled callee does; a handled
+            // body or clause shares its parameters with its function.
+            let inlined_function = !f.name.starts_with('$');
+            let owned = fresh_locals
+                .iter()
+                .filter(|n| !f.params.iter().any(|p| &p.name == *n))
+                .cloned()
+                .chain(
+                    f.params
+                        .iter()
+                        .filter(|p| {
+                            // A `dyn` object lent `sink` stays the caller's
+                            // to free ([`LentSinkBlock`]).
+                            let dyn_param = matches!(&p.ty, Type::Named(g, _)
+                                if crate::dyn_trait::is_dyn_generic(g))
+                                || crate::dyn_trait::is_object(&substitute(
+                                    &p.ty,
+                                    &self.generic_vars,
+                                ));
+                            inlined_function && p.pass == Pass::Sink && !dyn_param
+                        })
+                        .map(|p| p.name.clone()),
+                )
+                .collect::<BTreeSet<_>>();
+            self.seq_drop_slots(f, Some(&owned))?
         };
         // Writes that free what they replace, and temporaries never bound.
         let (replace, temporaries) = if self.drops_enabled() {
@@ -3146,9 +3253,22 @@ impl<M: Module> Codegen<'_, '_, M> {
             replace,
             fused: seq_native::fused_reads(f),
             header_words: BTreeMap::new(),
+            fail_drops: Rc::new(if self.in_fip_fn || !self.drops_enabled() {
+                BTreeMap::new()
+            } else {
+                crate::fip::fail_exit_drops(self.world, f)
+            }),
+            at: None,
+            registers: Rc::new(registers.clone()),
+            scope: Rc::new((
+                self.vars.clone(),
+                self.local_types.clone(),
+                self.generic_vars.clone(),
+            )),
         });
         for i in order {
             let block = &f.blocks[i];
+            self.cycle_depth = base_cycle_depth + usize::from(cyclic.contains(&i));
             if self.b.current_block() != Some(blocks[i]) {
                 self.b.switch_to_block(blocks[i]);
             }
@@ -3195,6 +3315,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
                 if inst.span.end != 0 {
                     self.set_location(inst.span.start);
+                }
+                if let Some(exit) = self.exits.last_mut() {
+                    exit.at = Some((i, inst_idx));
                 }
                 let ty = crate::numeric::default_type(&substitute(&inst.ty, &self.generic_vars));
                 let make = |kind| Expr {
@@ -3460,6 +3583,18 @@ impl<M: Module> Codegen<'_, '_, M> {
                             })
                             .collect::<Result<Vec<_>, String>>()?;
                         let callable = substitute(&f.values[callee], &self.generic_vars);
+                        // A handler clause that ends in this call returns its
+                        // value unchanged, and drops nothing after it.
+                        self.tail_call = f.name.starts_with("$handler_clause_")
+                            && inst_idx + 1 == block.instructions.len()
+                            && returns_unchanged(f, &block.terminator, inst.dest)
+                            && f.box_drops_after_inst.is_empty()
+                            && f.box_drops_before_inst.is_empty()
+                            && self
+                                .exits
+                                .last()
+                                .is_some_and(|x| x.drops.is_empty() && x.replace.is_empty())
+                            && temporaries.is_empty();
                         self.invoke_tag(
                             values[callee],
                             &callable,
@@ -3791,6 +3926,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
         }
         self.exits.pop();
+        self.cycle_depth = base_cycle_depth;
         Ok(())
     }
     /// `return value` from the graph lowered as `owner` (`Op::Exit`).
@@ -5020,6 +5156,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_) => {
                 return Err("native loops and early exits are lowered from Place IR".into());
             }
@@ -5054,6 +5191,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                         selector,
                         dispatch,
                         returns: Rc::new(RefCell::new(vec![exit])),
+                        cycle_depth: self.cycle_depth,
+                        exits_depth: self.exits.len(),
                     }
                 };
                 let captured = self.vars.clone();
@@ -5285,6 +5424,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             BitOp::LeadingZeros => (self.b.ins().clz(x), false),
             BitOp::TrailingZeros => (self.b.ins().ctz(x), false),
             BitOp::CountOnes => (self.b.ins().popcnt(x), false),
+            BitOp::WrappingNeg => (self.b.ins().ineg(x), kind.signed()),
             BitOp::WrappingShl | BitOp::WrappingShr => {
                 // Cranelift shifts take the amount modulo the width of `x`.
                 let n = n.ok_or("native bit shift without an amount")?;
@@ -5947,7 +6087,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let pair = if crate::dyn_trait::is_boxed(actual) {
                     let (pair, block) = self.dyn_lend_boxed(arg, param.pass)?;
                     if param.pass == Pass::Sink {
-                        sink_blocks.push(block);
+                        sink_blocks.push((pair, block));
                     }
                     pair
                 } else {
@@ -6065,12 +6205,20 @@ impl<M: Module> Codegen<'_, '_, M> {
             && !direct_trace
             && dyn_target.is_none()
         {
-            if !sink_blocks.is_empty() {
-                // The inlined body reads the object in its block, and an
-                // abort through a handler would skip the free after it.
-                return Err(format!(
-                    "native: a boxed object lent `sink` to '{name}', whose effects are specialized at the call, is not supported in Stage 1; lend it to a function without handler effects"
-                ));
+            // The inlined body reads the object in its block, so the block
+            // lives until the body returns or a handler outside it aborts.
+            let lent = self.sink_blocks.len();
+            for (pair, block) in sink_blocks.drain(..) {
+                let pointer = self.m.target_config().pointer_type();
+                let block_var = self.b.declare_var(pointer);
+                self.def_var(block_var, block);
+                let pair_var = self.b.declare_var(pointer);
+                self.def_var(pair_var, pair);
+                self.sink_blocks.push(LentSinkBlock {
+                    depth: self.handlers.len(),
+                    block: block_var,
+                    pair: pair_var,
+                });
             }
             if self.inline_depth >= 64 {
                 return Err("recursive effect specialization exceeds 64 inline frames".into());
@@ -6149,6 +6297,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.in_fip_fn = fip_scope;
             self.capabilities = capability_scope;
             let result = result?;
+            for lent in self.sink_blocks.split_off(lent) {
+                self.free_sink_block(lent)?;
+            }
             match into {
                 Some(out) if result_layout.aggregate() => {
                     self.copy_bytes(result, out, result_layout.size);
@@ -6252,7 +6403,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             // box it was lent from. Free the blocks before a failure status
             // can leave this continuation (through `fail_exit` or a
             // handler's dispatch block).
-            for block in boxed_free.take().into_iter().chain(sink_blocks.drain(..)) {
+            for block in boxed_free
+                .take()
+                .into_iter()
+                .chain(sink_blocks.drain(..).map(|(_, block)| block))
+            {
                 self.fip_box_free(block)?;
             }
             let result = if let Some(words) = callee_abi.result_words {
@@ -6323,6 +6478,77 @@ impl<M: Module> Codegen<'_, '_, M> {
     }
     fn fip_box_free(&mut self, ptr: ir::Value) -> Result<(), String> {
         emit_fip_box_free(&mut self.b, self.m, ptr)
+    }
+    /// Drops a lent `sink` object the inlined callee left unconsumed (its
+    /// pair still names a vtable) and frees its box's block, unless that
+    /// was done already (the block variable holds 0), then empties it.
+    fn free_sink_block(&mut self, lent: LentSinkBlock) -> Result<(), String> {
+        let block = self.use_var(lent.block);
+        let live = self.b.ins().icmp_imm(IntCC::NotEqual, block, 0);
+        let free = self.b.create_block();
+        let done = self.b.create_block();
+        self.branch(live, free, &[], done, &[]);
+        self.b.switch_to_block(free);
+        let pair = self.use_var(lent.pair);
+        dyn_native::emit_drop_object(&mut self.b, self.m, pair)?;
+        self.fip_box_free(block)?;
+        self.jump(done, &[]);
+        self.b.switch_to_block(done);
+        let zero = self.zero();
+        self.def_var(lent.block, zero);
+        Ok(())
+    }
+    /// Frees the lent `sink` objects of calls made inside the handler at
+    /// index `handler`, or of every call when the whole function is left
+    /// (`None`): control is leaving their bodies.
+    /// Drops the boxes the graphs from `depth` outward own where they are
+    /// (each at the instruction it is emitting), for a `Fail` that leaves
+    /// them ([`crate::fip::fail_exit_drops`]).
+    fn box_drop_abort(&mut self, depth: usize) -> Result<(), String> {
+        let exits: Vec<_> = self
+            .exits
+            .iter()
+            .skip(depth)
+            .filter_map(|x| {
+                let at = x.at?;
+                let drops = x.fail_drops.get(&at)?.clone();
+                Some((drops, x.registers.clone(), x.scope.clone()))
+            })
+            .collect();
+        if exits.is_empty() {
+            return Ok(());
+        }
+        let saved = (
+            self.vars.clone(),
+            self.local_types.clone(),
+            self.generic_vars.clone(),
+        );
+        for (drops, registers, scope) in exits {
+            self.vars = scope.0.clone();
+            self.local_types = scope.1.clone();
+            self.generic_vars = scope.2.clone();
+            let values = registers
+                .iter()
+                .map(|(id, var)| (*id, self.use_var(*var)))
+                .collect::<BTreeMap<_, _>>();
+            for drop in &drops {
+                self.emit_fip_drop(drop, &values, Span::default())?;
+            }
+        }
+        (self.vars, self.local_types, self.generic_vars) = saved;
+        Ok(())
+    }
+    fn free_sink_blocks_within(&mut self, handler: Option<usize>) -> Result<(), String> {
+        let lent: Vec<LentSinkBlock> = self
+            .sink_blocks
+            .iter()
+            .filter(|l| handler.is_none_or(|h| l.depth > h))
+            .copied()
+            .collect();
+        for l in lent {
+            self.free_sink_block(l)?;
+        }
+        Ok(())
     }
     fn drop_box_value(&mut self, value: ir::Value, ty: &Type) -> Result<(), String> {
         emit_drop_box_value(&mut self.b, self.m, self.world, value, ty)
@@ -6500,7 +6726,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         let payload = self.offset(record, 8);
         self.store(payload, values[0], &ty)?;
+        self.box_drop_abort(0)?;
         self.seq_drop_exit(0)?;
+        self.free_sink_blocks_within(None)?;
         let returns = self.b.func.signature.returns[0].value_type;
         let placeholder = if is_float_type(returns) {
             self.float_const(returns, 0.0)
@@ -6625,6 +6853,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             .find(|c| c.name == op)
             .ok_or("missing native handler clause")?;
         let continuation_pattern = clause.pats.last().ok_or("missing continuation")?;
+        if effect == "Fail" {
+            // `raise` never resumes: the handled body ends here, so what it
+            // owns at the failing instruction is dropped.
+            self.box_drop_abort(h.control.exits_depth)?;
+        }
         let captures = self.copy_bindings(&h.captured, &h.captured_types)?;
         let old_vars = std::mem::replace(&mut self.vars, captures);
         let old_types = std::mem::replace(&mut self.local_types, h.captured_types.clone());
@@ -6717,6 +6950,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         let saved = self.handlers.split_off(index);
         let output = self.shared_control("handler_clause", &clause.body)?;
         let output = self.coerce(output, Some(&h.output_type));
+        // Leaving the handled body frees the blocks lent inside it (a
+        // resumed body has freed them already).
+        self.free_sink_blocks_within(Some(index))?;
         self.jump(h.control.dispatch, &[output.into()]);
         self.b.switch_to_block(entry);
         if let Some(state) = h.state {
@@ -6733,6 +6969,7 @@ impl<M: Module> Codegen<'_, '_, M> {
     fn return_trace_placeholder(&mut self) {
         // A trace failure leaves the whole function; it cannot fail here.
         let _ = self.seq_drop_exit(0);
+        let _ = self.free_sink_blocks_within(None);
         let returns = self.b.func.signature.returns[0].value_type;
         let placeholder = if is_float_type(returns) {
             self.float_const(returns, 0.0)
@@ -7748,4 +7985,33 @@ mod far_call_tests {
             ));
         }
     }
+}
+
+/// `terminator` returns `value` from the graph `f` unchanged: directly, or
+/// through blocks that only pass their one parameter on (the join of an `if`
+/// or `match` whose arm ends in the value).
+fn returns_unchanged(
+    f: &crate::ir::FunctionIr,
+    terminator: &crate::ir::Terminator,
+    value: crate::ir::ValueId,
+) -> bool {
+    use crate::ir::Terminator;
+    let (mut terminator, mut value) = (terminator, value);
+    for _ in 0..=f.blocks.len() {
+        match terminator {
+            Terminator::Return(r) => return *r == value,
+            Terminator::Jump { block, args } => {
+                let target = &f.blocks[*block];
+                if args.as_slice() != [value]
+                    || target.params.len() != 1
+                    || !target.instructions.is_empty()
+                {
+                    return false;
+                }
+                (terminator, value) = (&target.terminator, target.params[0]);
+            }
+            _ => return false,
+        }
+    }
+    false
 }

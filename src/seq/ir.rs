@@ -103,7 +103,7 @@ impl Lower<'_> {
                         }
                         ExprKind::Field(base, method) => {
                             let t = self.seq_type_of(base);
-                            let op = resolve(method, Some(&t))?;
+                            let op = resolve(method, Some(&t))?.with_arity(args.len());
                             let pass = op.receiver_pass();
                             let mut operands: Vec<Argument> =
                                 vec![self.argument(base, pass, vec![])];
@@ -112,6 +112,7 @@ impl Lower<'_> {
                                     || op == SeqOp::BytesEq
                                     || op == SeqOp::EqIgnoreAsciiCase
                                     || op == SeqOp::ExtendAsciiLowercase
+                                    || op == SeqOp::ExtendReversed
                                     || op == SeqOp::Str(crate::strings::StrOp::PushStr)
                                     || (matches!(op, SeqOp::CopyFrom { .. }) && i == 1)
                                 {

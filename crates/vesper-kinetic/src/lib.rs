@@ -55,6 +55,32 @@ pub mod soft;
 pub mod tile;
 pub mod world;
 
+// The Rust build is the default: the seed package (seed/) and every
+// dependent use it. The package `vesper-kinetic` is the port-backed build,
+// whose build script links the Vesper port in vesper/ and sets
+// cfg(vesper_port); the ported modules then forward to it. See "Crates the
+// compiler links" in docs/maintenance/porting-a-crate.md and
+// docs/parallel-results/port-p3b-kinetic.md.
+#[cfg(vesper_port)]
+mod port;
+
+/// Which build this is: `"vesper"` for the port, `"rust"` for the seed.
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
+/// Sequences the Vesper library holds now (leak tests only; 0 in the Rust
+/// build).
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    #[cfg(vesper_port)]
+    {
+        port::live_allocations()
+    }
+    #[cfg(not(vesper_port))]
+    {
+        0
+    }
+}
+
 pub use articulation::{
     Articulation, ArticulationConfig, ArticulationDrive, ArticulationError, ArticulationJoint,
     ArticulationLink,

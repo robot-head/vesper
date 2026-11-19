@@ -1,9 +1,117 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
+
+# The port-backed package (seed-copy rule, docs/maintenance/porting-a-crate.md;
+# port wave P3b lane 8, #1070): build.rs links the object built here from the
+# Loom package in vesper/ and checks port/binding.rs against the generated
+# binding. The compiler and every other dependent link the Rust seed copy,
+# //crates/vesper-kinetic/seed, until the port reaches performance parity
+# (docs/parallel-results/port-p3b-kinetic.md).
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "kinetic_vesper",
+    library = "kinetic",
+    package = ":port_package",
+    rust_types = "crate::port",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "kinetic_vesper_binding",
+    srcs = [":kinetic_vesper"],
+    output_group = "rust_binding",
+)
+
+# The divergent builds, one per ported module (the Cargo
+# `vesper-port-divergent` feature applies the same edits from build.rs, one
+# at a time with VESPER_KINETIC_DIVERGENT): each must keep compiling, and
+# crates/vesper-kinetic/port/check.sh asserts which test catches it.
+[
+    vesper_port_object(
+        name = "kinetic_vesper_divergent_" + module,
+        edit_src = "vesper/src/%s.ves" % src,
+        edits = {old: new},
+        library = "kinetic",
+        package = ":port_package",
+        rust_types = "crate::port",
+        target = VESPER_TARGET,
+    )
+    for module, src, old, new in [
+        (
+            "morton",
+            "lib",
+            "if (code & 0xc0000000) != 0 {",
+            "if (code & 0x80000000) != 0 {",
+        ),
+        (
+            "fastmath",
+            "fastmath",
+            "w2 + (((1.0 - w2) - hz) + (z * r - x * y))",
+            "w2 + (((1.0 - w2) - hz) + (z * r + x * y))",
+        ),
+        (
+            "coloring",
+            "coloring",
+            "masks.try_set(ca, g64(in masks, ca) | bit);",
+            "masks.try_set(ca, g64(in masks, ca));",
+        ),
+        (
+            "lbvh",
+            "lbvh",
+            "if q > p && boxes_overlap(in leaf, p, in leaf, q) {",
+            "if q > inc(p) && boxes_overlap(in leaf, p, in leaf, q) {",
+        ),
+        (
+            "sap",
+            "sap",
+            "if (bits >> 31) == 1 {",
+            "if (bits >> 31) == 0 {",
+        ),
+    ]
+]
 
 vesper_crate(
+    build_script_data = [
+        ":kinetic_vesper",
+        ":kinetic_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :kinetic_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :kinetic_vesper_binding)",
+    },
     # Lean resolves symlinked runfiles to the source tree and then rejects
     # them as outside --root, so the Lean model test runs in a copy of
     # regular files.
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
+)
+
+# The seed package (seed/) builds these same Rust sources without the port.
+exports_files(glob([
+    "src/**/*.rs",
+    "tests/**/*.rs",
+]))
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-kinetic/seed:__pkg__"],
+)
+
+filegroup(
+    name = "test_common",
+    srcs = glob(["tests/common/**/*.rs"]),
+    visibility = ["//crates/vesper-kinetic/seed:__pkg__"],
+)
+
+filegroup(
+    name = "test_data",
+    srcs = glob(["tests/data/**"]),
+    visibility = ["//crates/vesper-kinetic/seed:__pkg__"],
 )

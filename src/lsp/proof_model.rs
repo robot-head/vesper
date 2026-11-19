@@ -497,7 +497,9 @@ impl Builder<'_> {
             ExprKind::Loop(_) | ExprKind::For { .. } | ExprKind::Range { .. } => {
                 unsupported("a loop")
             }
-            ExprKind::Break(_) | ExprKind::Return(_) => unsupported("an early exit"),
+            ExprKind::Break(_) | ExprKind::Continue | ExprKind::Return(_) => {
+                unsupported("an early exit")
+            }
             ExprKind::Struct { .. } | ExprKind::Tuple(_) => unsupported("an aggregate value"),
             ExprKind::Field(..) | ExprKind::Index(..) => unsupported("a projection"),
             ExprKind::Try(_) => unsupported("'?'"),

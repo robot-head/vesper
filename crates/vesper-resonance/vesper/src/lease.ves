@@ -1,0 +1,60 @@
+// Module lease of @vesper/resonance (see lib.ves): the frame discipline of
+// src/lease.rs. The Rust wrapper keeps the linear ownership (a lease is a
+// non-Clone `#[must_use]` value, and the port's auditor counts drops), the
+// period buffers and the atomic counters; the checks and the sample
+// movement are here.
+use self::{
+    LeaseFault
+};
+use self::util::{
+    finite_bits
+};
+
+// `RtBufferLease::write_frame`: the checks, then frame `frame` of `samples`
+// into the interleaved period `data`. Returns the new written count.
+pub fn l_write(
+    inout data: Slice[u32],
+    written: u64,
+    frames: u64,
+    channels: u64,
+    frame: u64,
+    in samples: Slice[u32]
+) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[LeaseFault]] {
+    if written >= frames {
+        Fail::raise(LeaseFault::Full);
+    }
+    if frame != written {
+        Fail::raise(LeaseFault::OutOfOrder(written, frame));
+    }
+    if samples.len() != channels {
+        Fail::raise(LeaseFault::ChannelCount(channels, samples.len()));
+    }
+    for c in 0..channels {
+        if !finite_bits(samples[c]) {
+            Fail::raise(LeaseFault::NonFinite);
+        }
+    }
+    data.copy_from(frame * channels, in samples);
+    written + 1
+}
+
+// `RtOutputPort::emergency_silence_and_commit`: zero every sample after
+// the first `written` frames.
+pub fn l_silence(inout data: Slice[u32], written: u64, channels: u64) eff [
+    Fail[RuntimeError],
+    Fail[ArithOverflow]
+] {
+    for i in written * channels..data.len() {
+        data.set(i, 0);
+    }
+}
+
+// Whether a lease may be committed as rendered (`RtOutputPort::commit`).
+pub fn l_complete(written: u64, frames: u64) -> bool {
+    written == frames
+}
+
+// Whether the driver may take a period into `out` (`RtOutputPort::complete`).
+pub fn l_takes(committed: u64, out_len: u64, channels: u64, frames: u64) -> bool {
+    committed > 0 && out_len == wrapping_mul(channels, frames)
+}

@@ -1042,7 +1042,7 @@ impl RigidWorld {
         }
         let n = bodies.len();
         let mut sap = SweepAndPrune::with_capacity(0);
-        let lbvh = match config.broadphase {
+        let mut lbvh = match config.broadphase {
             RigidBroadphase::Lbvh => Lbvh::with_capacity(n),
             RigidBroadphase::SweepAndPrune => {
                 sap = SweepAndPrune::with_capacity(n);
@@ -1050,8 +1050,9 @@ impl RigidWorld {
             }
         };
         let max_pairs = config.max_manifolds.saturating_mul(4).saturating_add(n);
-        if config.broadphase == RigidBroadphase::SweepAndPrune {
-            sap.reserve_pairs(max_pairs);
+        match config.broadphase {
+            RigidBroadphase::SweepAndPrune => sap.reserve_pairs(max_pairs),
+            RigidBroadphase::Lbvh => lbvh.reserve_pairs(max_pairs),
         }
         Ok(Self {
             config,

@@ -521,7 +521,7 @@ fn classify(src: &str, toks: &[Tok], token_mode: bool) -> Vec<HighlightSpan> {
     spans
 }
 
-/// `loop`, `for`, `break` and `let mut` are contextual words (they stay valid
+/// `loop`, `for`, `break`, `continue` and `let mut` are contextual words (they stay valid
 /// names elsewhere), classified as keywords where the parser reads them so.
 fn is_loop_keyword(word: &str, before: Option<K>, after: Option<K>) -> bool {
     let statement_start =
@@ -534,6 +534,13 @@ fn is_loop_keyword(word: &str, before: Option<K>, after: Option<K>) -> bool {
                 && !matches!(
                     after,
                     Some(K::Eq | K::Dot | K::Colon | K::ColonColon | K::Comma)
+                )
+        }
+        "continue" => {
+            statement_start
+                && matches!(
+                    after,
+                    None | Some(K::Semi | K::RBrace | K::RParen | K::RBracket | K::Comma)
                 )
         }
         "mut" => before == Some(K::Let),
@@ -556,10 +563,11 @@ mod tests {
 
     #[test]
     fn loop_words_are_keywords_where_they_parse_so() {
-        let src = "fn f() { let mut i = 0; loop { break; } for j in 0..3 { } let loop = 1; }";
+        let src =
+            "fn f() { let mut i = 0; loop { break; } for j in 0..3 { continue; } let loop = 1; }";
         let spans = highlight_tier0_tokens(src).unwrap();
         let class = |at: usize| spans.iter().find(|s| s.start == at).unwrap().class;
-        for word in ["mut", "loop {", "break", "for"] {
+        for word in ["mut", "loop {", "break", "for", "continue"] {
             let at = src.find(word).unwrap();
             assert_eq!(class(at), C::KeywordControl, "{word}");
         }

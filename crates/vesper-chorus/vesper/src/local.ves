@@ -1,0 +1,760 @@
+// Module local of @vesper/chorus (see lib.ves): the hash-consed arena of
+// local types (`project::LocalType`) and the operations on them.
+//
+// Node `n` has tag `lt[n]` and fields `la` .. `ld`:
+//   1 Send / 2 Recv: peer, label, payload, next.
+//   3 Select / 4 Offer: peer; branches are `(label, payload, next)`
+//     triples at `lk[lks[n] ..]`, `lkn[n]` of them.
+//   5 Action: name, next.   6 Rec: var, body.   7 Var: var.   8 End.
+// Nodes are interned, so two local types are equal exactly when their ids
+// are equal: `==` on `LocalType` and the explorer's state set compare
+// words.
+use self::{
+    C
+};
+use self::util::{
+    add,
+    inc,
+    intern_slice,
+    intern_str,
+    intern_tb,
+    iw,
+    none,
+    role_sym,
+    setw,
+    sw,
+    sym_cmp,
+    tb_str,
+    tb_sym,
+    tb_u64
+};
+
+pub fn lt(in c: C, n: u64) -> u64 {
+    sw(in c.lt, n)
+}
+pub fn la(in c: C, n: u64) -> u64 {
+    sw(in c.la, n)
+}
+pub fn lb(in c: C, n: u64) -> u64 {
+    sw(in c.lb, n)
+}
+pub fn lc(in c: C, n: u64) -> u64 {
+    sw(in c.lc, n)
+}
+pub fn ld(in c: C, n: u64) -> u64 {
+    sw(in c.ld, n)
+}
+pub fn lkn(in c: C, n: u64) -> u64 {
+    sw(in c.lkn, n)
+}
+// Field `f` (0 label, 1 payload, 2 next) of branch `i` of node `n`.
+pub fn lbr(in c: C, n: u64, i: u64, f: u64) -> u64 {
+    sw(in c.lk, add(add(sw(in c.lks, n), wrapping_mul(i, 3)), f))
+}
+
+// The continuation of a Send, Recv or Action node.
+pub fn lnext(in c: C, n: u64) -> u64 {
+    if lt(in c, n) == 5 {
+        lb(in c, n)
+    } else {
+        ld(in c, n)
+    }
+}
+
+fn mix(h: u64, x: u64) -> u64 {
+    wrapping_mul(h ^ x, 1099511628211)
+}
+
+fn grow(inout c: C) {
+    let cap = if c.l_mask == 0 {
+        256
+    } else {
+        wrapping_mul(inc(c.l_mask), 2)
+    };
+    c.lht.clear();
+    for _ in 0..cap {
+        c.lht.push(0);
+    }
+    c.l_mask = wrapping_sub(cap, 1);
+    for j in 0..c.lt.len() {
+        let mut at = sw(in c.lh, j) & c.l_mask;
+        loop {
+            if sw(in c.lht, at) == 0 {
+                setw(inout c.lht, at, inc(j));
+                break;
+            }
+            at = inc(at) & c.l_mask;
+        }
+    }
+}
+
+fn same_kids(in c: C, m: u64, from: u64) -> bool {
+    let len = wrapping_sub(c.tmp.len(), from);
+    if wrapping_mul(sw(in c.lkn, m), 3) != len {
+        return false;
+    }
+    let base = sw(in c.lks, m);
+    for i in 0..len {
+        if sw(in c.lk, add(base, i)) != sw(in c.tmp, add(from, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// Interns (tag, a, b, cc, d) with the branch triples `tmp[from ..]`, which
+// are popped.
+pub fn mkl(inout c: C, tag: u64, a: u64, b: u64, cc: u64, d: u64, from: u64) -> u64 {
+    if wrapping_mul(inc(c.lt.len()), 2) > c.l_mask {
+        grow(inout c);
+    }
+    let n = c.tmp.len();
+    let mut h = mix(mix(mix(mix(mix(14695981039346656037, tag), a), b), cc), d);
+    let mut i = from;
+    loop {
+        if i >= n {
+            break;
+        }
+        h = mix(h, sw(in c.tmp, i));
+        i = inc(i);
+    }
+    h = h ^ (h >> 29);
+    let mut at = h & c.l_mask;
+    loop {
+        let e = sw(in c.lht, at);
+        if e == 0 {
+            break;
+        }
+        let m = wrapping_sub(e, 1);
+        if sw(in c.lh, m)
+            == h
+            && sw(in c.lt, m)
+            == tag
+            && sw(in c.la, m)
+            == a
+            && sw(in c.lb, m)
+            == b
+            && sw(in c.lc, m)
+            == cc
+            && sw(in c.ld, m)
+            == d
+            && same_kids(in c, m, from) {
+            c.tmp.truncate(from);
+            return m;
+        }
+        at = inc(at) & c.l_mask;
+    }
+    let id = c.lt.len();
+    c.lt.push(tag);
+    c.la.push(a);
+    c.lb.push(b);
+    c.lc.push(cc);
+    c.ld.push(d);
+    c.lh.push(h);
+    let h25 = c.lk.len();
+    c.lks.push(h25);
+    c.lkn.push(wrapping_sub(n, from) / 3);
+    c.lu.push(none());
+    i = from;
+    loop {
+        if i >= n {
+            break;
+        }
+        let h26 = sw(in c.tmp, i);
+        c.lk.push(h26);
+        i = inc(i);
+    }
+    c.tmp.truncate(from);
+    setw(inout c.lht, at, inc(id));
+    id
+}
+
+pub fn l_init(inout c: C) {
+    let f = c.tmp.len();
+    c.l_end = mkl(inout c, 8, 0, 0, 0, 0, f);
+}
+
+pub fn l_msg(inout c: C, send: bool, peer: u64, label: u64, payload: u64, next: u64) -> u64 {
+    let f = c.tmp.len();
+    let tag: u64 = if send {
+        1
+    } else {
+        2
+    };
+    mkl(inout c, tag, peer, label, payload, next, f)
+}
+
+pub fn l_action(inout c: C, name: u64, next: u64) -> u64 {
+    let f = c.tmp.len();
+    mkl(inout c, 5, name, next, 0, 0, f)
+}
+
+pub fn l_rec(inout c: C, var: u64, body: u64) -> u64 {
+    let f = c.tmp.len();
+    mkl(inout c, 6, var, body, 0, 0, f)
+}
+
+pub fn l_var(inout c: C, var: u64) -> u64 {
+    let f = c.tmp.len();
+    mkl(inout c, 7, var, 0, 0, 0, f)
+}
+
+fn copy_triple(inout c: C, dst: u64, src: u64) {
+    let three: u64 = 3;
+    for k in 0..three {
+        let v = sw(in c.tmp, add(src, k));
+        setw(inout c.tmp, add(dst, k), v);
+    }
+}
+
+// One bottom-up merge pass: runs of `w` triples at `src` merge into `dst`.
+// Ties take the left run, so the sort is stable.
+fn merge_pass(inout c: C, src: u64, dst: u64, n: u64, w: u64) {
+    let mut lo: u64 = 0;
+    loop {
+        if lo >= n {
+            break;
+        }
+        let mid = if add(lo, w) < n {
+            add(lo, w)
+        } else {
+            n
+        };
+        let hi = if add(mid, w) < n {
+            add(mid, w)
+        } else {
+            n
+        };
+        let mut i = lo;
+        let mut j = mid;
+        let mut k = lo;
+        loop {
+            if k >= hi {
+                break;
+            }
+            let take_right = if i >= mid {
+                true
+            } else if j >= hi {
+                false
+            } else {
+                let x = sw(in c.tmp, add(src, wrapping_mul(i, 3)));
+                let y = sw(in c.tmp, add(src, wrapping_mul(j, 3)));
+                sym_cmp(in c, y, x) == 0
+            };
+            let to = add(dst, wrapping_mul(k, 3));
+            if take_right {
+                let at = add(src, wrapping_mul(j, 3));
+                copy_triple(inout c, to, at);
+                j = inc(j);
+            } else {
+                let at = add(src, wrapping_mul(i, 3));
+                copy_triple(inout c, to, at);
+                i = inc(i);
+            }
+            k = inc(k);
+        }
+        lo = hi;
+    }
+}
+
+// Sorts the `n` triples at `from` by label (stable, O(n log n)), using
+// `3 n` scratch words past them.
+fn sort_triples(inout c: C, from: u64, n: u64) {
+    let words = wrapping_mul(n, 3);
+    let buf = add(from, words);
+    for _k in 0..words {
+        c.tmp.push(0);
+    }
+    let mut src = from;
+    let mut dst = buf;
+    let mut w: u64 = 1;
+    loop {
+        if w >= n {
+            break;
+        }
+        merge_pass(inout c, src, dst, n, w);
+        let t = src;
+        src = dst;
+        dst = t;
+        w = wrapping_mul(w, 2);
+    }
+    if src != from {
+        for k in 0..words {
+            let v = sw(in c.tmp, add(src, k));
+            setw(inout c.tmp, add(from, k), v);
+        }
+    }
+    c.tmp.truncate(buf);
+}
+
+// `LocalType::choice`: the branch triples `tmp[from ..]` (popped) become a
+// Send/Recv when there is one, else a Select/Offer sorted by label
+// (stable).
+pub fn choice(inout c: C, send: bool, peer: u64, from: u64) -> u64 {
+    let n = wrapping_sub(c.tmp.len(), from) / 3;
+    if n == 1 {
+        let l = sw(in c.tmp, from);
+        let p = sw(in c.tmp, inc(from));
+        let nx = sw(in c.tmp, add(from, 2));
+        c.tmp.truncate(from);
+        return l_msg(inout c, send, peer, l, p, nx);
+    }
+    sort_triples(inout c, from, n);
+    let tag: u64 = if send {
+        3
+    } else {
+        4
+    };
+    mkl(inout c, tag, peer, 0, 0, 0, from)
+}
+
+// `LocalType::mentions`: whether `var` occurs free in `t`.
+pub fn mentions(in c: C, t: u64, var: u64) -> bool {
+    let tag = lt(in c, t);
+    if tag == 7 {
+        la(in c, t) == var
+    } else if tag == 8 {
+        false
+    } else if tag == 1 || tag == 2 {
+        mentions(in c, ld(in c, t), var)
+    } else if tag == 5 {
+        mentions(in c, lb(in c, t), var)
+    } else if tag == 6 {
+        la(in c, t) != var && mentions(in c, lb(in c, t), var)
+    } else {
+        for i in 0..lkn(in c, t) {
+            if mentions(in c, lbr(in c, t, i, 2), var) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+// `LocalType::subst`: `wv` for the free occurrences of `var` in `t`.
+pub fn subst(inout c: C, t: u64, var: u64, wv: u64) -> u64 {
+    let tag = lt(in c, t);
+    if tag == 7 {
+        if la(in c, t) == var {
+            wv
+        } else {
+            t
+        }
+    } else if tag == 8 {
+        t
+    } else if tag == 1 || tag == 2 {
+        let h27 = ld(in c, t);
+        let nx = subst(inout c, h27, var, wv);
+        let f = c.tmp.len();
+        let h28 = la(in c, t);
+        let h29 = lb(in c, t);
+        let h30 = lc(in c, t);
+        mkl(inout c, tag, h28, h29, h30, nx, f)
+    } else if tag == 5 {
+        let h31 = lb(in c, t);
+        let nx = subst(inout c, h31, var, wv);
+        let h32 = la(in c, t);
+        l_action(inout c, h32, nx)
+    } else if tag == 6 {
+        if la(in c, t) == var {
+            t
+        } else {
+            let h33 = lb(in c, t);
+            let b = subst(inout c, h33, var, wv);
+            let h34 = la(in c, t);
+            l_rec(inout c, h34, b)
+        }
+    } else {
+        let f = c.tmp.len();
+        let n = lkn(in c, t);
+        for i in 0..n {
+            let h35 = lbr(in c, t, i, 0);
+            c.tmp.push(h35);
+            let h36 = lbr(in c, t, i, 1);
+            c.tmp.push(h36);
+            c.tmp.push(0);
+        }
+        for i in 0..n {
+            let h37 = lbr(in c, t, i, 2);
+            let nx = subst(inout c, h37, var, wv);
+            setw(inout c.tmp, add(add(f, wrapping_mul(i, 3)), 2), nx);
+        }
+        let h38 = la(in c, t);
+        mkl(inout c, tag, h38, 0, 0, 0, f)
+    }
+}
+
+// `LocalType::unfold` (memoized per node).
+pub fn unfold(inout c: C, t: u64) -> u64 {
+    let m = sw(in c.lu, t);
+    if m != none() {
+        return m;
+    }
+    let mut x = t;
+    for _ in 0..64 {
+        if lt(in c, x) != 6 {
+            setw(inout c.lu, t, x);
+            return x;
+        }
+        let h39 = lb(in c, x);
+        let h40 = la(in c, x);
+        x = subst(inout c, h39, h40, x);
+    }
+    setw(inout c.lu, t, x);
+    x
+}
+
+// The de Bruijn form of `t` under the binders on `dbe`.
+fn de_bruijn(inout c: C, t: u64) -> u64 {
+    let tag = lt(in c, t);
+    if tag == 7 {
+        let v = la(in c, t);
+        let n = c.dbe.len();
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            if sw(in c.dbe, wrapping_sub(wrapping_sub(n, 1), i)) == v {
+                c.tb.clear();
+                tb_str(inout c, "#");
+                tb_u64(inout c, i);
+                let y = intern_tb(inout c);
+                return l_var(inout c, y);
+            }
+            i = inc(i);
+        }
+        c.tb.clear();
+        tb_str(inout c, "free:");
+        tb_sym(inout c, v);
+        let y = intern_tb(inout c);
+        l_var(inout c, y)
+    } else if tag == 6 {
+        let h41 = la(in c, t);
+        c.dbe.push(h41);
+        let h42 = lb(in c, t);
+        let b = de_bruijn(inout c, h42);
+        let _ = c.dbe.pop();
+        let e = intern_str(inout c, "");
+        l_rec(inout c, e, b)
+    } else if tag == 8 {
+        t
+    } else if tag == 1 || tag == 2 {
+        let h43 = ld(in c, t);
+        let nx = de_bruijn(inout c, h43);
+        let f = c.tmp.len();
+        let h44 = la(in c, t);
+        let h45 = lb(in c, t);
+        let h46 = lc(in c, t);
+        mkl(inout c, tag, h44, h45, h46, nx, f)
+    } else if tag == 5 {
+        let h47 = lb(in c, t);
+        let nx = de_bruijn(inout c, h47);
+        let h48 = la(in c, t);
+        l_action(inout c, h48, nx)
+    } else {
+        let f = c.tmp.len();
+        let n = lkn(in c, t);
+        for i in 0..n {
+            let h49 = lbr(in c, t, i, 0);
+            c.tmp.push(h49);
+            let h50 = lbr(in c, t, i, 1);
+            c.tmp.push(h50);
+            c.tmp.push(0);
+        }
+        for i in 0..n {
+            let h51 = lbr(in c, t, i, 2);
+            let nx = de_bruijn(inout c, h51);
+            setw(inout c.tmp, add(add(f, wrapping_mul(i, 3)), 2), nx);
+        }
+        let h52 = la(in c, t);
+        mkl(inout c, tag, h52, 0, 0, 0, f)
+    }
+}
+
+// `LocalType::alpha_eq`.
+pub fn alpha_eq(inout c: C, a: u64, b: u64) -> bool {
+    c.dbe.clear();
+    let x = de_bruijn(inout c, a);
+    c.dbe.clear();
+    let y = de_bruijn(inout c, b);
+    x == y
+}
+
+fn labels(inout c: C, t: u64) {
+    for i in 0..lkn(in c, t) {
+        if i > 0 {
+            tb_str(inout c, "|");
+        }
+        let h53 = lbr(in c, t, i, 0);
+        tb_sym(inout c, h53);
+    }
+}
+
+// `LocalType::head_summary`, as a symbol.
+pub fn summary(inout c: C, t: u64) -> u64 {
+    let tag = lt(in c, t);
+    let h54 = la(in c, t);
+    let peer = role_sym(inout c, h54);
+    c.tb.clear();
+    if tag == 1 {
+        tb_str(inout c, "send ");
+        let h55 = lb(in c, t);
+        tb_sym(inout c, h55);
+        tb_str(inout c, " to ");
+        tb_sym(inout c, peer);
+    } else if tag == 2 {
+        tb_str(inout c, "receive ");
+        let h56 = lb(in c, t);
+        tb_sym(inout c, h56);
+        tb_str(inout c, " from ");
+        tb_sym(inout c, peer);
+    } else if tag == 3 {
+        tb_str(inout c, "select ");
+        labels(inout c, t);
+        tb_str(inout c, " with ");
+        tb_sym(inout c, peer);
+    } else if tag == 4 {
+        tb_str(inout c, "offer ");
+        labels(inout c, t);
+        tb_str(inout c, " from ");
+        tb_sym(inout c, peer);
+    } else if tag == 5 {
+        tb_str(inout c, "local action ");
+        let h57 = la(in c, t);
+        tb_sym(inout c, h57);
+    } else if tag == 6 {
+        tb_str(inout c, "loop ");
+        let h58 = la(in c, t);
+        tb_sym(inout c, h58);
+    } else if tag == 7 {
+        tb_str(inout c, "continue ");
+        let h59 = la(in c, t);
+        tb_sym(inout c, h59);
+    } else {
+        tb_str(inout c, "end");
+    }
+    intern_tb(inout c)
+}
+
+// Writes `t` in postorder to `out`.
+pub fn emit_l(inout c: C, t: u64) {
+    let tag = lt(in c, t);
+    if tag == 1 || tag == 2 {
+        let h60 = ld(in c, t);
+        emit_l(inout c, h60);
+        c.out.push(tag);
+        let h61 = la(in c, t);
+        c.out.push(h61);
+        let h62 = lb(in c, t);
+        c.out.push(h62);
+        let h63 = lc(in c, t);
+        c.out.push(h63);
+    } else if tag == 3 || tag == 4 {
+        let n = lkn(in c, t);
+        for i in 0..n {
+            let h64 = lbr(in c, t, i, 2);
+            emit_l(inout c, h64);
+        }
+        c.out.push(tag);
+        let h65 = la(in c, t);
+        c.out.push(h65);
+        c.out.push(n);
+        for i in 0..n {
+            let h66 = lbr(in c, t, i, 0);
+            c.out.push(h66);
+            let h67 = lbr(in c, t, i, 1);
+            c.out.push(h67);
+        }
+    } else if tag == 5 || tag == 6 {
+        let h68 = lb(in c, t);
+        emit_l(inout c, h68);
+        c.out.push(tag);
+        let h69 = la(in c, t);
+        c.out.push(h69);
+    } else if tag == 7 {
+        c.out.push(7);
+        let h70 = la(in c, t);
+        c.out.push(h70);
+    } else {
+        c.out.push(8);
+    }
+}
+
+fn str_at(inout c: C, in w: Slice[u64], in t: Slice[u8], at: u64) -> u64 {
+    intern_slice(inout c, in t, iw(in w, at), iw(in w, inc(at)))
+}
+
+fn pop_vs(inout c: C) -> u64 {
+    match c.vs.pop() {
+        Option::Some(x) => x,
+        Option::None => c.l_end,
+    }
+}
+
+// Reads a local type of `len` words at `at` (postorder, see lib.ves).
+pub fn read_local(inout c: C, in w: Slice[u64], in t: Slice[u8], at: u64, len: u64) -> u64 {
+    let end = add(at, len);
+    let base = c.vs.len();
+    let mut i = at;
+    loop {
+        if i >= end {
+            break;
+        }
+        let tag = iw(in w, i);
+        if tag == 8 {
+            let h71 = c.l_end;
+            c.vs.push(h71);
+            i = inc(i);
+        } else if tag == 7 {
+            let y = str_at(inout c, in w, in t, inc(i));
+            let n = l_var(inout c, y);
+            c.vs.push(n);
+            i = add(i, 3);
+        } else if tag == 5 || tag == 6 {
+            let y = str_at(inout c, in w, in t, inc(i));
+            let nx = pop_vs(inout c);
+            let f = c.tmp.len();
+            let n = mkl(inout c, tag, y, nx, 0, 0, f);
+            c.vs.push(n);
+            i = add(i, 3);
+        } else if tag == 1 || tag == 2 {
+            let peer = iw(in w, inc(i));
+            let l = str_at(inout c, in w, in t, add(i, 2));
+            let p = str_at(inout c, in w, in t, add(i, 4));
+            let nx = pop_vs(inout c);
+            let f = c.tmp.len();
+            let n = mkl(inout c, tag, peer, l, p, nx, f);
+            c.vs.push(n);
+            i = add(i, 6);
+        } else {
+            let peer = iw(in w, inc(i));
+            let nb = iw(in w, add(i, 2));
+            let vl = c.vs.len();
+            let b0 = if nb > wrapping_sub(vl, base) {
+                base
+            } else {
+                wrapping_sub(vl, nb)
+            };
+            let f = c.tmp.len();
+            let mut q = add(i, 3);
+            for k in 0..nb {
+                let l = str_at(inout c, in w, in t, q);
+                let p = str_at(inout c, in w, in t, add(q, 2));
+                c.tmp.push(l);
+                c.tmp.push(p);
+                let x = if add(b0, k) < vl {
+                    sw(in c.vs, add(b0, k))
+                } else {
+                    c.l_end
+                };
+                c.tmp.push(x);
+                q = add(q, 4);
+            }
+            c.vs.truncate(b0);
+            let n = mkl(inout c, tag, peer, 0, 0, 0, f);
+            c.vs.push(n);
+            i = q;
+        }
+    }
+    let r = if c.vs.len() > base {
+        pop_vs(inout c)
+    } else {
+        c.l_end
+    };
+    c.vs.truncate(base);
+    r
+}
+
+// ---------------------------------------------------------------------------
+// `are_dual`, with the binder pairs on `dvx`/`dvy`.
+
+fn var_pair(in c: C, x: u64, y: u64) -> bool {
+    let n = c.dvx.len();
+    let mut i = n;
+    loop {
+        if i == 0 {
+            return false;
+        }
+        i = wrapping_sub(i, 1);
+        if sw(in c.dvx, i) == x {
+            return sw(in c.dvy, i) == y;
+        }
+    }
+}
+
+pub fn are_dual(inout c: C, a: u64, x: u64, b: u64, y: u64) -> bool {
+    c.dvx.clear();
+    c.dvy.clear();
+    dual_in(inout c, a, x, b, y)
+}
+
+fn dual_in(inout c: C, a: u64, x: u64, b: u64, y: u64) -> bool {
+    let tx = lt(in c, x);
+    let ty = lt(in c, y);
+    if tx == 8 && ty == 8 {
+        return true;
+    }
+    if tx == 7 && ty == 7 {
+        return var_pair(in c, la(in c, x), la(in c, y));
+    }
+    if tx == 6 && ty == 6 {
+        let h72 = la(in c, x);
+        c.dvx.push(h72);
+        let h73 = la(in c, y);
+        c.dvy.push(h73);
+        let h74 = lb(in c, x);
+        let h75 = lb(in c, y);
+        let r = dual_in(inout c, a, h74, b, h75);
+        let _ = c.dvx.pop();
+        let _ = c.dvy.pop();
+        return r;
+    }
+    if (tx == 1 && ty == 2) || (tx == 2 && ty == 1) {
+        if la(in c, x)
+            != b
+            || la(in c, y)
+            != a
+            || lb(in c, x)
+            != lb(in c, y)
+            || lc(in c, x)
+            != lc(in c, y) {
+            return false;
+        }
+        let h76 = ld(in c, x);
+        let h77 = ld(in c, y);
+        return dual_in(inout c, a, h76, b, h77);
+    }
+    if (tx == 3 && ty == 4) || (tx == 4 && ty == 3) {
+        if la(in c, x) != b || la(in c, y) != a {
+            return false;
+        }
+        let n = lkn(in c, x);
+        if n != lkn(in c, y) {
+            return false;
+        }
+        for i in 0..n {
+            if lbr(in c, x, i, 0)
+                != lbr(in c, y, i, 0)
+                || lbr(in c, x, i, 1)
+                != lbr(in c, y, i, 1) {
+                return false;
+            }
+            let h78 = lbr(in c, x, i, 2);
+            let h79 = lbr(in c, y, i, 2);
+            if !dual_in(inout c, a, h78, b, h79) {
+                return false;
+            }
+        }
+        return true;
+    }
+    if tx == 5 {
+        let h80 = lb(in c, x);
+        return dual_in(inout c, a, h80, b, y);
+    }
+    if ty == 5 {
+        let h81 = lb(in c, y);
+        return dual_in(inout c, a, x, b, h81);
+    }
+    false
+}

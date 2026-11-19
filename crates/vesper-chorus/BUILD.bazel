@@ -1,8 +1,67 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
+
+# The Vesper library is the only build of the choreography front end
+# (parsing, well-formedness, projection, duality, exploration; port wave
+# P3b lane 6, #1068): build.rs links the object built here from the Loom
+# package in vesper/ and checks port/binding.rs against the generated
+# binding, as for vesper-aura. The crate is outside the compiler's closure,
+# so there is no seed package.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "chorus_vesper",
+    library = "chorus",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "chorus_vesper_binding",
+    srcs = [":chorus_vesper"],
+    output_group = "rust_binding",
+)
 
 vesper_crate(
+    build_script_data = [
+        ":chorus_vesper",
+        ":chorus_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :chorus_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :chorus_vesper_binding)",
+    },
     # Lean resolves symlinked runfiles to the source tree and then rejects
     # them as outside --root, so these run in a copy of regular files.
     copy_test_cwd = ["test/lean"],
     extra_test_data = ["//:lean"],
 )
+
+# The divergent builds, one per ported module (the Cargo
+# `vesper-port-divergent` feature applies the same edits, DIVERGENT in
+# build.rs): each must build from a copy of the package with its edit
+# applied, and crates/vesper-chorus/port/test-port.sh asserts which test
+# catches each one.
+[
+    vesper_port_object(
+        name = "chorus_vesper_divergent_" + module,
+        edit_src = "vesper/src/%s.ves" % module,
+        edits = {old: new},
+        library = "chorus",
+        package = ":port_package",
+        target = VESPER_TARGET,
+    )
+    for module, old, new in [
+        ("util", "                return 0;\n            }\n            return 2;", "                return 2;\n            }\n            return 0;"),
+        ("tree", "    if nr > 1 {", "    if nr > 99 {"),
+        ("local", "    if n == 1 {", "    if n == 0 {"),
+        ("project", "        if !involves(in c, body, c.target) {", "        if involves(in c, body, c.target) {"),
+        ("explore", "            bound_hit = true;", "            bound_hit = false;"),
+        ("parse", "    if depth > 64 {", "    if depth > 100000 {"),
+    ]
+]

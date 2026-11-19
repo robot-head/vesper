@@ -157,6 +157,9 @@ impl Checker<'_> {
             }
             t => t,
         };
+        // A conversion accepts any kind: it does not type an open literal
+        // binding (`literal_typing`).
+        self.literal_unconstrained(&a.expr);
         if let Some(from) = crate::numeric::FloatKind::from_type(&t) {
             self.float_to_integer(name, conversion, from, a, env, span);
             return to.ty();

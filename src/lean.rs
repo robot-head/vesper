@@ -1717,6 +1717,7 @@ fn visit_expr<'e>(e: &'e Expr, f: &mut dyn FnMut(&'e Expr)) {
         | ExprKind::For { .. }
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_)) => k.control_children().into_iter().flatten().for_each(go),
         ExprKind::Closure { body, .. } => go(body),
         ExprKind::Handle {
@@ -3084,6 +3085,7 @@ impl Generator<'_> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_) => return Err(crate::loops::LEAN_REFUSAL.into()),
             ExprKind::Closure { params, body, .. } => self.closure(e, params, body, out)?,
             ExprKind::Handle {

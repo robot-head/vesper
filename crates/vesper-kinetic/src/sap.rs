@@ -32,6 +32,11 @@
 //! Executing these kernels on a GPU (Ignis) is deferred: there is no GPU on
 //! CI or on the development host, so nothing here claims GPU execution.
 
+// The port-backed build forwards SweepAndPrune::build and
+// SweepAndPrune::overlapping_pairs to the Vesper port (vesper/src/sap.ves);
+// the Rust kernels stay for the seed.
+#![cfg_attr(vesper_port, allow(dead_code))]
+
 use crate::lbvh::Aabb;
 
 /// Items per workgroup.
@@ -81,8 +86,15 @@ pub fn dispatch(n: usize, mut kernel: impl FnMut(usize, std::ops::Range<usize>))
 /// below `+0.0`).
 #[inline]
 pub fn sortable(x: f32) -> u32 {
-    let b = x.to_bits();
-    if b >> 31 == 1 { !b } else { b | 0x8000_0000 }
+    #[cfg(vesper_port)]
+    {
+        crate::port::sap_sortable(x.to_bits())
+    }
+    #[cfg(not(vesper_port))]
+    {
+        let b = x.to_bits();
+        if b >> 31 == 1 { !b } else { b | 0x8000_0000 }
+    }
 }
 
 /// Exclusive prefix sum in place as a blocked scan (block sums, a scan of
@@ -221,6 +233,38 @@ pub struct SweepAndPrune {
     counts: Vec<u32>,
     pair_keys: Vec<u64>,
     sort: SortScratch,
+    #[cfg(vesper_port)]
+    port: SapPort,
+}
+
+/// The port-backed build's buffers, lent to the Vesper port: boxes as six
+/// f32 bit patterns, the sorted bounds as three lanes each, radix-sort
+/// scratch and the packed pairs `(a << 32) | b`.
+#[cfg(vesper_port)]
+#[derive(Debug, Default)]
+struct SapPort {
+    boxes: Vec<u32>,
+    smin: Vec<u32>,
+    smax: Vec<u32>,
+    tk: Vec<u64>,
+    tv: Vec<u32>,
+    hist: Vec<u32>,
+    out: Vec<u64>,
+}
+
+#[cfg(vesper_port)]
+impl SapPort {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            boxes: Vec::with_capacity(6 * n),
+            smin: Vec::with_capacity(3 * n),
+            smax: Vec::with_capacity(3 * n),
+            tk: Vec::with_capacity(n),
+            tv: Vec::with_capacity(n),
+            hist: vec![0; RADIX],
+            out: Vec::new(),
+        }
+    }
 }
 
 impl SweepAndPrune {
@@ -237,6 +281,8 @@ impl SweepAndPrune {
             counts: Vec::with_capacity(capacity),
             pair_keys: Vec::new(),
             sort: SortScratch::with_capacity(capacity),
+            #[cfg(vesper_port)]
+            port: SapPort::with_capacity(capacity),
         }
     }
 
@@ -249,6 +295,12 @@ impl SweepAndPrune {
             .keys_tmp
             .reserve(max_pairs.saturating_sub(self.sort.keys_tmp.len()));
         self.sort.reserve(max_pairs);
+        #[cfg(vesper_port)]
+        {
+            let p = &mut self.port;
+            p.out.reserve(max_pairs.saturating_sub(p.out.len()));
+            p.tk.reserve(max_pairs.saturating_sub(p.tk.len()));
+        }
     }
 
     /// Boxes reserved for.
@@ -275,69 +327,98 @@ impl SweepAndPrune {
                 capacity: self.capacity,
             });
         }
-        // 1. Validate (reduction to the smallest bad index).
-        let mut bad = usize::MAX;
-        dispatch(n, |_, r| {
-            for i in r {
-                let b = &boxes[i];
-                let ok = (0..3)
-                    .all(|a| b.min[a].is_finite() && b.max[a].is_finite() && b.min[a] <= b.max[a]);
-                if !ok && i < bad {
-                    bad = i;
-                }
-            }
-        });
-        if bad != usize::MAX {
-            return Err(SapError::InvalidBox { index: bad });
+        #[cfg(vesper_port)]
+        {
+            let p = &mut self.port;
+            crate::lbvh::box_bits(boxes, &mut p.boxes);
+            self.keys.resize(n, 0);
+            self.order.resize(n, 0);
+            p.smin.resize(3 * n, 0);
+            p.smax.resize(3 * n, 0);
+            p.tk.resize(n, 0);
+            p.tv.resize(n, 0);
+            self.axis = 0;
+            self.order.clear();
+            self.order.resize(n, 0);
+            self.axis = crate::port::sap_build(
+                &p.boxes,
+                &mut self.keys,
+                &mut self.order,
+                &mut p.smin,
+                &mut p.smax,
+                &mut p.tk,
+                &mut p.tv,
+                &mut p.hist,
+            )? as usize;
+            Ok(())
         }
-        // 2. Axis of largest centroid extent (min/max reduction).
-        let mut lo = [f32::INFINITY; 3];
-        let mut hi = [f32::NEG_INFINITY; 3];
-        dispatch(n, |_, r| {
-            for i in r {
-                for a in 0..3 {
-                    let c = (boxes[i].min[a] + boxes[i].max[a]) * 0.5;
-                    if c < lo[a] {
-                        lo[a] = c;
+        #[cfg(not(vesper_port))]
+        {
+            // 1. Validate (reduction to the smallest bad index).
+            let mut bad = usize::MAX;
+            dispatch(n, |_, r| {
+                for i in r {
+                    let b = &boxes[i];
+                    let ok = (0..3).all(|a| {
+                        b.min[a].is_finite() && b.max[a].is_finite() && b.min[a] <= b.max[a]
+                    });
+                    if !ok && i < bad {
+                        bad = i;
                     }
-                    if c > hi[a] {
-                        hi[a] = c;
+                }
+            });
+            if bad != usize::MAX {
+                return Err(SapError::InvalidBox { index: bad });
+            }
+            // 2. Axis of largest centroid extent (min/max reduction).
+            let mut lo = [f32::INFINITY; 3];
+            let mut hi = [f32::NEG_INFINITY; 3];
+            dispatch(n, |_, r| {
+                for i in r {
+                    for a in 0..3 {
+                        let c = (boxes[i].min[a] + boxes[i].max[a]) * 0.5;
+                        if c < lo[a] {
+                            lo[a] = c;
+                        }
+                        if c > hi[a] {
+                            hi[a] = c;
+                        }
+                    }
+                }
+            });
+            self.axis = 0;
+            if n > 0 {
+                let extent = |a: usize| f64::from(hi[a]) - f64::from(lo[a]);
+                for a in 1..3 {
+                    if extent(a) > extent(self.axis) {
+                        self.axis = a;
                     }
                 }
             }
-        });
-        self.axis = 0;
-        if n > 0 {
-            let extent = |a: usize| f64::from(hi[a]) - f64::from(lo[a]);
-            for a in 1..3 {
-                if extent(a) > extent(self.axis) {
-                    self.axis = a;
+            let axis = self.axis;
+            // 3. Keys.
+            self.keys.clear();
+            self.order.clear();
+            dispatch(n, |_, r| {
+                for i in r {
+                    self.keys.push(u64::from(sortable(boxes[i].min[axis])));
+                    self.order.push(i as u32);
                 }
-            }
+            });
+            // 4. Stable radix sort by key (initial order is by index).
+            radix_sort(&mut self.keys, Some(&mut self.order), 4, &mut self.sort);
+            // 5. Gather bounds in sweep order.
+            self.min.clear();
+            self.max.clear();
+            dispatch(n, |_, r| {
+                for s in r {
+                    let b = &boxes[self.order[s] as usize];
+                    self.min.push(b.min);
+                    self.max.push(b.max);
+                }
+            });
+            Ok(())
         }
-        let axis = self.axis;
-        // 3. Keys.
-        self.keys.clear();
-        self.order.clear();
-        dispatch(n, |_, r| {
-            for i in r {
-                self.keys.push(u64::from(sortable(boxes[i].min[axis])));
-                self.order.push(i as u32);
-            }
-        });
-        // 4. Stable radix sort by key (initial order is by index).
-        radix_sort(&mut self.keys, Some(&mut self.order), 4, &mut self.sort);
-        // 5. Gather bounds in sweep order.
-        self.min.clear();
-        self.max.clear();
-        dispatch(n, |_, r| {
-            for s in r {
-                let b = &boxes[self.order[s] as usize];
-                self.min.push(b.min);
-                self.max.push(b.max);
-            }
-        });
-        Ok(())
     }
 
     /// Kernels 6–9: every pair `(a, b)`, `a < b`, of boxes from the last
@@ -350,75 +431,111 @@ impl SweepAndPrune {
         max_pairs: usize,
     ) -> Result<(), SapError> {
         out.clear();
-        let n = self.order.len();
-        let axis = self.axis;
-        let (min, max, order) = (&self.min, &self.max, &self.order);
-        let overlaps =
-            |s: usize, t: usize| (0..3).all(|a| min[s][a] <= max[t][a] && min[t][a] <= max[s][a]);
-        // 6. Count.
-        self.counts.clear();
-        self.counts.resize(n, 0);
+        #[cfg(vesper_port)]
         {
-            let counts = &mut self.counts;
-            dispatch(n, |_, r| {
-                for s in r {
-                    let mut c = 0u32;
-                    let mut t = s + 1;
-                    while t < n && min[t][axis] <= max[s][axis] {
-                        if overlaps(s, t) {
-                            c = c.saturating_add(1);
-                        }
-                        t += 1;
-                    }
-                    counts[s] = c;
-                }
-            });
-        }
-        // 7. Scan to output offsets.
-        let total = match exclusive_scan(&mut self.counts, &mut self.sort.block_sums) {
-            Some(t) if t <= max_pairs as u64 => t as usize,
-            _ => {
+            let p = &mut self.port;
+            self.counts.clear();
+            self.counts.resize(self.order.len(), 0);
+            let total =
+                crate::port::sap_pair_total(&p.smin, &p.smax, self.axis as u64, &mut self.counts);
+            if total > max_pairs as u64 || total > u64::from(u32::MAX) {
                 return Err(SapError::PairOverflow {
                     capacity: max_pairs,
                 });
             }
-        };
-        // 8. Write pair keys at their offsets.
-        self.pair_keys.clear();
-        self.pair_keys.resize(total, 0);
-        let (counts, pair_keys) = (&self.counts, &mut self.pair_keys);
-        dispatch(n, |_, r| {
-            for s in r {
-                let mut at = counts[s] as usize;
-                let mut t = s + 1;
-                while t < n && min[t][axis] <= max[s][axis] {
-                    if overlaps(s, t) {
-                        let (a, b) = (order[s], order[t]);
-                        pair_keys[at] = (u64::from(a.min(b)) << 32) | u64::from(a.max(b));
-                        at += 1;
+            let total = total as usize;
+            p.out.clear();
+            p.out.resize(total, 0);
+            p.tk.clear();
+            p.tk.resize(total, 0);
+            crate::port::sap_write_pairs(
+                &self.order,
+                &p.smin,
+                &p.smax,
+                self.axis as u64,
+                &self.counts,
+                &mut p.out,
+                &mut p.tk,
+                &mut [],
+                &mut [],
+                &mut p.hist,
+            );
+            out.extend(p.out.iter().map(|&k| ((k >> 32) as u32, k as u32)));
+            Ok(())
+        }
+        #[cfg(not(vesper_port))]
+        {
+            let n = self.order.len();
+            let axis = self.axis;
+            let (min, max, order) = (&self.min, &self.max, &self.order);
+            let overlaps = |s: usize, t: usize| {
+                (0..3).all(|a| min[s][a] <= max[t][a] && min[t][a] <= max[s][a])
+            };
+            // 6. Count.
+            self.counts.clear();
+            self.counts.resize(n, 0);
+            {
+                let counts = &mut self.counts;
+                dispatch(n, |_, r| {
+                    for s in r {
+                        let mut c = 0u32;
+                        let mut t = s + 1;
+                        while t < n && min[t][axis] <= max[s][axis] {
+                            if overlaps(s, t) {
+                                c = c.saturating_add(1);
+                            }
+                            t += 1;
+                        }
+                        counts[s] = c;
                     }
-                    t += 1;
+                });
+            }
+            // 7. Scan to output offsets.
+            let total = match exclusive_scan(&mut self.counts, &mut self.sort.block_sums) {
+                Some(t) if t <= max_pairs as u64 => t as usize,
+                _ => {
+                    return Err(SapError::PairOverflow {
+                        capacity: max_pairs,
+                    });
+                }
+            };
+            // 8. Write pair keys at their offsets.
+            self.pair_keys.clear();
+            self.pair_keys.resize(total, 0);
+            let (counts, pair_keys) = (&self.counts, &mut self.pair_keys);
+            dispatch(n, |_, r| {
+                for s in r {
+                    let mut at = counts[s] as usize;
+                    let mut t = s + 1;
+                    while t < n && min[t][axis] <= max[s][axis] {
+                        if overlaps(s, t) {
+                            let (a, b) = (order[s], order[t]);
+                            pair_keys[at] = (u64::from(a.min(b)) << 32) | u64::from(a.max(b));
+                            at += 1;
+                        }
+                        t += 1;
+                    }
+                }
+            });
+            // 9. Sort the pair keys.
+            let passes = if n <= 1 << 16 { 4 } else { 8 };
+            if passes == 4 {
+                // Indices fit in 16 bits: compress each key to 32 bits so four
+                // passes sort it.
+                for k in &mut self.pair_keys {
+                    *k = ((*k >> 32) << 16) | (*k & 0xffff);
                 }
             }
-        });
-        // 9. Sort the pair keys.
-        let passes = if n <= 1 << 16 { 4 } else { 8 };
-        if passes == 4 {
-            // Indices fit in 16 bits: compress each key to 32 bits so four
-            // passes sort it.
-            for k in &mut self.pair_keys {
-                *k = ((*k >> 32) << 16) | (*k & 0xffff);
+            radix_sort(&mut self.pair_keys, None, passes, &mut self.sort);
+            for &k in &self.pair_keys {
+                let (a, b) = if passes == 4 {
+                    ((k >> 16) as u32, (k & 0xffff) as u32)
+                } else {
+                    ((k >> 32) as u32, k as u32)
+                };
+                out.push((a, b));
             }
+            Ok(())
         }
-        radix_sort(&mut self.pair_keys, None, passes, &mut self.sort);
-        for &k in &self.pair_keys {
-            let (a, b) = if passes == 4 {
-                ((k >> 16) as u32, (k & 0xffff) as u32)
-            } else {
-                ((k >> 32) as u32, k as u32)
-            };
-            out.push((a, b));
-        }
-        Ok(())
     }
 }

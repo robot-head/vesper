@@ -10,6 +10,8 @@ pub use vesper_port_abi::{ArithOverflow, RuntimeError};
 
 pub mod gauge;
 pub mod kit;
+#[cfg(feature = "vesper-port")]
+pub mod widen;
 
 /// A point on the integer grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

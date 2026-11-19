@@ -1,0 +1,142 @@
+// Module seqs of @vesper/resonance (see lib.ves): total sequence access, a
+// min-heap of words (the `BTreeSet::pop_first` of the Rust build) and a
+// heap sort.
+
+pub fn get(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn at(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn set(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    s.try_set(i, v);
+}
+
+// A sequence of `n` copies of `v`.
+pub fn filled(n: u64, v: u64) -> ChunkSeq[u64] {
+    let mut s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        s.push(v);
+    }
+    s
+}
+
+pub fn heap_push(inout h: ChunkSeq[u64], v: u64) {
+    let mut i = h.len();
+    h.push(v);
+    loop {
+        if i == 0 {
+            break;
+        }
+        let p = wrapping_sub(i, 1) / 2;
+        let pv = get(in h, p);
+        if pv <= v {
+            break;
+        }
+        set(inout h, i, pv);
+        set(inout h, p, v);
+        i = p;
+    }
+}
+
+// The smallest word, removed; `None` when the heap is empty.
+pub fn heap_pop(inout h: ChunkSeq[u64]) -> Option[u64] {
+    let n = h.len();
+    if n == 0 {
+        return Option::None;
+    }
+    let top = get(in h, 0);
+    let last = get(in h, wrapping_sub(n, 1));
+    h.truncate(wrapping_sub(n, 1));
+    let m = wrapping_sub(n, 1);
+    if m > 0 {
+        set(inout h, 0, last);
+        sift(inout h, 0, m);
+    }
+    Option::Some(top)
+}
+
+// Restores the min-heap order below `root` in the first `n` words.
+fn sift(inout h: ChunkSeq[u64], start: u64, n: u64) {
+    let mut root = start;
+    loop {
+        let left = wrapping_add(wrapping_mul(root, 2), 1);
+        if left >= n {
+            break;
+        }
+        let mut child = left;
+        let right = wrapping_add(left, 1);
+        if right < n && get(in h, right) < get(in h, left) {
+            child = right;
+        }
+        let r = get(in h, root);
+        let c = get(in h, child);
+        if c < r {
+            set(inout h, root, c);
+            set(inout h, child, r);
+            root = child;
+        } else {
+            break;
+        }
+    }
+}
+
+// Sorts `s` ascending (a max-heap sort; equal words are indistinguishable).
+pub fn sort(inout s: ChunkSeq[u64]) {
+    let n = s.len();
+    if n < 2 {
+        return;
+    }
+    let mut i = n / 2;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        sift_max(inout s, i, n);
+    }
+    let mut end = n;
+    loop {
+        if end < 2 {
+            break;
+        }
+        end = wrapping_sub(end, 1);
+        let a = get(in s, 0);
+        let b = get(in s, end);
+        set(inout s, 0, b);
+        set(inout s, end, a);
+        sift_max(inout s, 0, end);
+    }
+}
+
+fn sift_max(inout s: ChunkSeq[u64], start: u64, n: u64) {
+    let mut root = start;
+    loop {
+        let left = wrapping_add(wrapping_mul(root, 2), 1);
+        if left >= n {
+            break;
+        }
+        let mut child = left;
+        let right = wrapping_add(left, 1);
+        if right < n && get(in s, left) < get(in s, right) {
+            child = right;
+        }
+        let r = get(in s, root);
+        let c = get(in s, child);
+        if r < c {
+            set(inout s, root, c);
+            set(inout s, child, r);
+            root = child;
+        } else {
+            break;
+        }
+    }
+}

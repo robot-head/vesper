@@ -15,8 +15,14 @@ mod integer_widths_rules;
 #[path = "tiled/check.rs"]
 mod tiled_rules;
 
+#[path = "integer_widths/literal_typing.rs"]
+mod literal_typing;
 #[path = "loops/check.rs"]
 mod loop_rules;
+#[path = "loops/try_option.rs"]
+mod try_option;
+
+const TRY_OPERAND: &str = "'?' requires Result[T, E], or Option[T] in a function returning Option";
 #[path = "seq/check.rs"]
 mod seq_rules;
 #[path = "strings/check.rs"]
@@ -574,6 +580,7 @@ pub(crate) fn check_core(
     let mut resolved;
     let mut diagnostics = vec![];
     let mut iteration = 0;
+    let mut option_tries: BTreeSet<(usize, usize)>;
     loop {
         iteration += 1;
         let mut c = Checker {
@@ -605,10 +612,12 @@ pub(crate) fn check_core(
             resolved: BTreeMap::new(),
             control: vec![],
             shadowed: vec![],
+            literals: Default::default(),
+            option_tries: BTreeSet::new(),
         };
         c.declarations();
         for f in world.functions.values() {
-            c.function(f);
+            c.function_with_literal_typing(f);
         }
         let Checker {
             diagnostics: errors,
@@ -621,8 +630,10 @@ pub(crate) fn check_core(
             overflow_ops,
             string_capacity,
             resolved: trait_calls,
+            option_tries: tries,
             ..
         } = c;
+        option_tries = tries;
         resolved = trait_calls;
         let changed = world.function_results != results || world.handler_effects != handler_effects;
         world.types = types;
@@ -641,6 +652,18 @@ pub(crate) fn check_core(
             diagnostics.push(Diagnostic::new("E0408","capability and continuation effect inference did not converge; add explicit type/effect annotations",0..0));
             break;
         }
+    }
+    if !option_tries.is_empty() {
+        // Check the early exits `?` on `Option` means instead (`try_option`).
+        let after = world
+            .functions
+            .values()
+            .map(|f| f.span.end)
+            .chain(world.types.keys().map(|k| k.1))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        return check_core(&try_option::desugar(module, &option_tries, after), traits);
     }
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::capability_effects::check_world(&world));
@@ -674,6 +697,7 @@ pub(crate) fn check_core(
         resolved,
     )
 }
+#[derive(Clone)]
 struct Checker<'a> {
     world: &'a World,
     diagnostics: Vec<Diagnostic>,
@@ -713,6 +737,10 @@ struct Checker<'a> {
     control: Vec<loop_rules::ControlFrame>,
     /// Bindings each enclosing block has shadowed, innermost last.
     shadowed: Vec<BTreeMap<String, Binding>>,
+    /// Literal-initialized bindings typed from their uses.
+    literals: literal_typing::LiteralTyping,
+    /// Spans of `?` on `Option` ([`try_option`]), rewritten after checking.
+    option_tries: BTreeSet<(usize, usize)>,
 }
 impl Checker<'_> {
     fn error(&mut self, code: &str, msg: impl Into<String>, span: Span) {
@@ -1009,7 +1037,7 @@ impl Checker<'_> {
             }
         }
     }
-    fn function(&mut self, f: &Function) {
+    fn function_body(&mut self, f: &Function) {
         self.current = f.name.clone();
         self.bounds = f
             .generics
@@ -1379,7 +1407,7 @@ impl Checker<'_> {
             }
             ExprKind::Name(n) => {
                 if env.bindings.contains_key(n) {
-                    self.place(
+                    let t = self.place(
                         &Place {
                             root: n.clone(),
                             path: vec![],
@@ -1387,7 +1415,8 @@ impl Checker<'_> {
                         env,
                         usage,
                         e.span.clone(),
-                    )
+                    );
+                    self.literal_use(n, &e.span, env, expected, t)
                 } else if let Some(f) = self.world.functions.get(n) {
                     function_value_type(f, self.world.function_results.get(&f.name))
                 } else if let Some((a, v)) = self.world.constructor(n) {
@@ -1533,15 +1562,31 @@ impl Checker<'_> {
                             mutable,
                             ..
                         } => {
-                            let ty = &self.region_annotation(ty);
+                            let hinted = if *ty == Type::Infer {
+                                self.literal_annotation(pat)
+                            } else {
+                                None
+                            };
+                            let ty = &self.region_annotation(hinted.as_ref().unwrap_or(ty));
                             self.valid_type(ty, &self.generics.clone(), value.span.clone());
                             let actual = self.expr_expected(value, env, Usage::Own, ty);
                             self.expect_type(ty, &actual, value.span.clone());
                             let t = if *ty == Type::Infer {
                                 crate::numeric::default_type(&actual)
+                            } else if hinted.is_some() {
+                                let t =
+                                    crate::numeric::default_type(&refine_annotation(ty, &actual));
+                                // The value has the binding's type (later passes
+                                // annotate unannotated lets from it).
+                                self.types
+                                    .insert((value.span.start, value.span.end), t.clone());
+                                t
                             } else {
                                 refine_annotation(ty, &actual)
                             };
+                            if *ty == Type::Infer {
+                                self.open_literal_bindings(pat, &actual);
+                            }
                             if unresolved(&t) {
                                 self.error("E0208", "cannot infer an ownership-relevant type; add a type annotation", value.span.clone());
                             }
@@ -1801,7 +1846,8 @@ impl Checker<'_> {
                 let bounds_before = state_before
                     .as_ref()
                     .and_then(|_| self.integer_bounds(l, env));
-                let actual = self.expr_expected(r, env, Usage::Own, &expected);
+                let goal = self.literal_assignment(&p, r, env, &expected);
+                let actual = self.expr_expected(r, env, Usage::Own, &goal);
                 self.expect_type(&expected, &actual, r.span.clone());
                 if bound_capabilities(&expected) != bound_capabilities(&actual) {
                     self.error(
@@ -1975,6 +2021,12 @@ impl Checker<'_> {
                     Type::Infer
                 };
                 let t = self.expr_expected(value, env, Usage::Own, &target);
+                if let Type::Named(n, args) = &t
+                    && n == "Option"
+                    && args.len() == 1
+                {
+                    return self.try_option(e, &args[0]);
+                }
                 if let Type::Named(n, args) = t {
                     if n == "Result" && args.len() == 2 {
                         self.require_effect(
@@ -1988,11 +2040,11 @@ impl Checker<'_> {
                         );
                         args[0].clone()
                     } else {
-                        self.error("E0200", "'?' requires Result[T, E]", e.span.clone());
+                        self.error("E0200", TRY_OPERAND, e.span.clone());
                         Type::Infer
                     }
                 } else {
-                    self.error("E0200", "'?' requires Result[T, E]", e.span.clone());
+                    self.error("E0200", TRY_OPERAND, e.span.clone());
                     Type::Infer
                 }
             }
@@ -2046,6 +2098,7 @@ impl Checker<'_> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_) => self
                 .control_expr(e, env, expected)
                 .expect("loop-family expression"),
@@ -4709,6 +4762,7 @@ pub fn free_names(e: &Expr) -> BTreeSet<String> {
             k @ (ExprKind::Loop(_)
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_)) => {
                 for c in k.control_children().into_iter().flatten() {
                     walk(c, out)

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Vesper Chorus: choreographies, endpoint projection, linear session channels (in memory and over Warp QUIC streams), simulated quorum replication and a software RDMA model (design section 25)"
 publish = false
+build = "build.rs"
 
 [dependencies]
 vesper-simpulse = { path = "../vesper-simpulse" }
@@ -13,3 +14,20 @@ vesper-warp = { path = "../vesper-warp" }
 vesper-warp-crypto = { path = "../vesper-warp-crypto" }
 vesper-warp-shard = { path = "../vesper-warp-shard" }
 vesper-warp-umem = { path = "../vesper-warp-umem" }
+# Port wave P3b lane 6 (#1068): parsing, well-formedness, projection,
+# duality and exploration are the Vesper library in vesper/, linked by
+# build.rs (docs/maintenance/porting-a-crate.md). It replaced the Rust
+# implementation once it matched it in tests and beat it on ABBA. The crate
+# is outside `cargo tree -p vesper -e normal,build`, so it needs no seed.
+vesper-port-abi = { path = "../vesper-port-abi" }
+
+[features]
+# A deliberately wrong Vesper build, one change per ported module: the port
+# test runs must fail (port/test-port.sh and Bazel assert it).
+vesper-port-divergent = []
+
+[dev-dependencies]
+vesper-bench = { path = "../vesper-bench" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }

@@ -1,0 +1,303 @@
+// Module util of @vesper/chorus (see lib.ves): word helpers, symbols and
+// per-symbol flags.
+//
+// Every piece of text the port handles (role names, labels, payload
+// types, recursion variables, actions, and the messages it formats) is a
+// symbol: an interned byte string. Equal strings are equal ids, so every
+// string comparison of the Rust build is one word here. The wrapper reads
+// a symbol's bytes from `sy_txt[sy_off[i] ..][.. sy_len[i]]`.
+use self::{
+    C
+};
+
+pub fn none() -> u64 {
+    18446744073709551615
+}
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn dec(x: u64) -> u64 {
+    wrapping_sub(x, 1)
+}
+
+pub fn add(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b)
+}
+
+pub fn sub(a: u64, b: u64) -> u64 {
+    wrapping_sub(a, b)
+}
+
+// `a + b`, saturating.
+pub fn sat_add(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        none()
+    } else {
+        s
+    }
+}
+
+// `a * b`, saturating.
+pub fn sat_mul(a: u64, b: u64) -> u64 {
+    if a == 0 || b == 0 {
+        0
+    } else if a > none() / b {
+        none()
+    } else {
+        wrapping_mul(a, b)
+    }
+}
+
+pub fn sw(in q: ChunkSeq[u64], i: u64) -> u64 {
+    match q.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn setw(inout q: ChunkSeq[u64], i: u64, v: u64) {
+    let _ = q.try_set(i, v);
+}
+
+pub fn iw(in q: Slice[u64], i: u64) -> u64 {
+    match q.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn ib(in q: Slice[u8], i: u64) -> u64 {
+    match q.try_get(i) {
+        Option::Some(x) => widen_u64(x),
+        Option::None => 0,
+    }
+}
+
+pub fn bt(in q: ChunkSeq[u8], i: u64) -> u64 {
+    match q.try_get(i) {
+        Option::Some(x) => widen_u64(x),
+        Option::None => 0,
+    }
+}
+
+// Appends the bytes `t[off .. off + len]` to `c.tb`.
+pub fn tb_slice(inout c: C, in t: Slice[u8], off: u64, len: u64) {
+    for i in 0..len {
+        c.tb.push(wrapping_u8(ib(in t, add(off, i))));
+    }
+}
+
+// Appends the ASCII text `s` to `c.tb`.
+pub fn tb_str(inout c: C, in s: Str) {
+    tb_bytes(inout c, in s.as_bytes());
+}
+
+fn tb_bytes(inout c: C, in b: Slice[u8]) {
+    for i in 0..b.len() {
+        c.tb.push(wrapping_u8(ib(in b, i)));
+    }
+}
+
+// Appends the bytes of symbol `y` to `c.tb`.
+pub fn tb_sym(inout c: C, y: u64) {
+    let off = sw(in c.sy_off, y);
+    let len = sw(in c.sy_len, y);
+    for i in 0..len {
+        let b = bt(in c.sy_txt, add(off, i));
+        c.tb.push(wrapping_u8(b));
+    }
+}
+
+// Appends `x` in decimal to `c.tb`.
+pub fn tb_u64(inout c: C, x: u64) {
+    if x >= 10 {
+        tb_u64(inout c, x / 10);
+    }
+    c.tb.push(wrapping_u8(add(48, x % 10)));
+}
+
+pub fn sym_len(in c: C, y: u64) -> u64 {
+    sw(in c.sy_len, y)
+}
+
+pub fn sym_byte(in c: C, y: u64, i: u64) -> u64 {
+    bt(in c.sy_txt, add(sw(in c.sy_off, y), i))
+}
+
+// Byte-wise order of two symbols (the order of Rust's `String`): 0 less,
+// 1 equal, 2 greater.
+pub fn sym_cmp(in c: C, x: u64, y: u64) -> u64 {
+    if x == y {
+        return 1;
+    }
+    let lx = sym_len(in c, x);
+    let ly = sym_len(in c, y);
+    let n = if lx < ly {
+        lx
+    } else {
+        ly
+    };
+    let ox = sw(in c.sy_off, x);
+    let oy = sw(in c.sy_off, y);
+    for i in 0..n {
+        let a = bt(in c.sy_txt, add(ox, i));
+        let b = bt(in c.sy_txt, add(oy, i));
+        if a != b {
+            if a < b {
+                return 0;
+            }
+            return 2;
+        }
+    }
+    if lx < ly {
+        0
+    } else if lx > ly {
+        2
+    } else {
+        1
+    }
+}
+
+fn hash_tb(in c: C) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for i in 0..c.tb.len() {
+        h = wrapping_mul(h ^ bt(in c.tb, i), 1099511628211);
+    }
+    h
+}
+
+fn sym_grow(inout c: C) {
+    let cap = if c.sy_mask == 0 {
+        64
+    } else {
+        wrapping_mul(inc(c.sy_mask), 2)
+    };
+    c.sy_ht.clear();
+    for _ in 0..cap {
+        c.sy_ht.push(0);
+    }
+    c.sy_mask = dec(cap);
+    let n = c.sy_off.len();
+    for j in 0..n {
+        let mut at = sw(in c.sy_hash, j) & c.sy_mask;
+        loop {
+            if sw(in c.sy_ht, at) == 0 {
+                setw(inout c.sy_ht, at, inc(j));
+                break;
+            }
+            at = inc(at) & c.sy_mask;
+        }
+    }
+}
+
+fn tb_is(in c: C, y: u64) -> bool {
+    let len = c.tb.len();
+    if sw(in c.sy_len, y) != len {
+        return false;
+    }
+    let off = sw(in c.sy_off, y);
+    for i in 0..len {
+        if bt(in c.sy_txt, add(off, i)) != bt(in c.tb, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Interns the bytes in `c.tb` and clears it.
+pub fn intern_tb(inout c: C) -> u64 {
+    if wrapping_mul(inc(c.sy_off.len()), 2) > c.sy_mask {
+        sym_grow(inout c);
+    }
+    let h = hash_tb(in c);
+    let mut at = h & c.sy_mask;
+    loop {
+        let e = sw(in c.sy_ht, at);
+        if e == 0 {
+            break;
+        }
+        let y = dec(e);
+        if sw(in c.sy_hash, y) == h && tb_is(in c, y) {
+            c.tb.clear();
+            return y;
+        }
+        at = inc(at) & c.sy_mask;
+    }
+    let y = c.sy_off.len();
+    let h1 = c.sy_txt.len();
+    c.sy_off.push(h1);
+    let h2 = c.tb.len();
+    c.sy_len.push(h2);
+    c.sy_hash.push(h);
+    for i in 0..c.tb.len() {
+        let h3 = wrapping_u8(bt(in c.tb, i));
+        c.sy_txt.push(h3);
+    }
+    c.sy_flag.push(0);
+    setw(inout c.sy_ht, at, inc(y));
+    c.tb.clear();
+    y
+}
+
+// Interns `t[off .. off + len]`.
+pub fn intern_slice(inout c: C, in t: Slice[u8], off: u64, len: u64) -> u64 {
+    c.tb.clear();
+    tb_slice(inout c, in t, off, len);
+    intern_tb(inout c)
+}
+
+// Interns the ASCII text `s`.
+pub fn intern_str(inout c: C, in s: Str) -> u64 {
+    c.tb.clear();
+    tb_str(inout c, in s);
+    intern_tb(inout c)
+}
+
+pub fn flag(in c: C, y: u64) -> u64 {
+    sw(in c.sy_flag, y)
+}
+
+pub fn set_flag(inout c: C, y: u64, v: u64) {
+    setw(inout c.sy_flag, y, v);
+}
+
+fn is_alpha(b: u64) -> bool {
+    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+}
+
+pub fn is_ident_start(b: u64) -> bool {
+    is_alpha(b) || b == 95
+}
+
+pub fn is_ident_byte(b: u64) -> bool {
+    is_alpha(b) || (b >= 48 && b <= 57) || b == 95
+}
+
+// `chor::valid_ident`: an ASCII identifier of at most `MAX_IDENT` bytes.
+pub fn valid_ident(in c: C, y: u64) -> bool {
+    let len = sym_len(in c, y);
+    if len == 0 || len > 128 {
+        return false;
+    }
+    if !is_ident_start(sym_byte(in c, y, 0)) {
+        return false;
+    }
+    for i in 1..len {
+        if !is_ident_byte(sym_byte(in c, y, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// The name of role `r`, or `?` when it is not declared.
+pub fn role_sym(inout c: C, r: u64) -> u64 {
+    if r < c.ro.len() {
+        sw(in c.ro, r)
+    } else {
+        intern_str(inout c, "?")
+    }
+}

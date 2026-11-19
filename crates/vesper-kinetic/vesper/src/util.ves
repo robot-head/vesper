@@ -1,0 +1,263 @@
+// Module util of @vesper/kinetic (see lib.ves): total element access and
+// in-place sorting over lent slices. Reads past the end give 0 (or the
+// stated sentinel), which no caller reaches, so the exported functions raise
+// only their crate's own errors.
+
+pub fn g32(in s: Slice[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn g64(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn g8(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn inc(a: u64) -> u64 {
+    wrapping_add(a, 1)
+}
+
+pub fn dec(a: u64) -> u64 {
+    wrapping_sub(a, 1)
+}
+
+// Whether visiting entry `x` of the order sorts before entry `y`: by the
+// packed key `keys[i]`, then by the index `i` itself (a strict total order,
+// so any correct sort gives the Rust build's `sort_unstable_by_key` order).
+fn before(in keys: Slice[u64], x: u32, y: u32) -> bool {
+    let kx = g64(in keys, widen_u64(x));
+    let ky = g64(in keys, widen_u64(y));
+    kx < ky || (kx == ky && x < y)
+}
+
+fn sift(in keys: Slice[u64], inout order: Slice[u32], start: u64, n: u64) {
+    let mut root = start;
+    loop {
+        let left = inc(wrapping_mul(root, 2));
+        if left >= n {
+            break;
+        }
+        let mut child = left;
+        let right = inc(left);
+        if right < n && before(in keys, g32(in order, left), g32(in order, right)) {
+            child = right;
+        }
+        let r = g32(in order, root);
+        let c = g32(in order, child);
+        if before(in keys, r, c) {
+            order.try_set(root, c);
+            order.try_set(child, r);
+            root = child;
+        } else {
+            break;
+        }
+    }
+}
+
+// Heap sort of the first `n` indices of `order` by (`keys[i]`, `i`).
+pub fn sort_by_key(in keys: Slice[u64], inout order: Slice[u32], n: u64) {
+    if n < 2 {
+        return;
+    }
+    let mut i = n / 2;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = dec(i);
+        sift(in keys, inout order, i, n);
+    }
+    let mut end = n;
+    loop {
+        if end < 2 {
+            break;
+        }
+        end = dec(end);
+        let a = g32(in order, 0);
+        let b = g32(in order, end);
+        order.try_set(0, b);
+        order.try_set(end, a);
+        sift(in keys, inout order, 0, end);
+    }
+}
+
+fn sift_u64(inout s: Slice[u64], start: u64, n: u64) {
+    let mut root = start;
+    loop {
+        let left = inc(wrapping_mul(root, 2));
+        if left >= n {
+            break;
+        }
+        let mut child = left;
+        let right = inc(left);
+        if right < n && g64(in s, left) < g64(in s, right) {
+            child = right;
+        }
+        let r = g64(in s, root);
+        let c = g64(in s, child);
+        if r < c {
+            s.try_set(root, c);
+            s.try_set(child, r);
+            root = child;
+        } else {
+            break;
+        }
+    }
+}
+
+// Heap sort of the first `n` values of `s`, ascending.
+pub fn sort_u64(inout s: Slice[u64], n: u64) {
+    if n < 2 {
+        return;
+    }
+    let mut i = n / 2;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = dec(i);
+        sift_u64(inout s, i, n);
+    }
+    let mut end = n;
+    loop {
+        if end < 2 {
+            break;
+        }
+        end = dec(end);
+        let a = g64(in s, 0);
+        let b = g64(in s, end);
+        s.try_set(0, b);
+        s.try_set(end, a);
+        sift_u64(inout s, 0, end);
+    }
+}
+
+fn pair_before(in keys: Slice[u64], in vals: Slice[u32], x: u64, y: u64) -> bool {
+    let kx = g64(in keys, x);
+    let ky = g64(in keys, y);
+    kx < ky || (kx == ky && g32(in vals, x) < g32(in vals, y))
+}
+
+fn swap_pair(inout keys: Slice[u64], inout vals: Slice[u32], x: u64, y: u64) {
+    let kx = g64(in keys, x);
+    let vx = g32(in vals, x);
+    keys.try_set(x, g64(in keys, y));
+    vals.try_set(x, g32(in vals, y));
+    keys.try_set(y, kx);
+    vals.try_set(y, vx);
+}
+
+fn sift_pairs(inout keys: Slice[u64], inout vals: Slice[u32], start: u64, n: u64) {
+    let mut root = start;
+    loop {
+        let left = inc(wrapping_mul(root, 2));
+        if left >= n {
+            break;
+        }
+        let mut child = left;
+        let right = inc(left);
+        if right < n && pair_before(in keys, in vals, left, right) {
+            child = right;
+        }
+        if pair_before(in keys, in vals, root, child) {
+            swap_pair(inout keys, inout vals, root, child);
+            root = child;
+        } else {
+            break;
+        }
+    }
+}
+
+// Heap sort of the first `n` (`keys[i]`, `vals[i]`) pairs, ascending.
+pub fn sort_pairs(inout keys: Slice[u64], inout vals: Slice[u32], n: u64) {
+    if n < 2 {
+        return;
+    }
+    let mut i = n / 2;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = dec(i);
+        sift_pairs(inout keys, inout vals, i, n);
+    }
+    let mut end = n;
+    loop {
+        if end < 2 {
+            break;
+        }
+        end = dec(end);
+        swap_pair(inout keys, inout vals, 0, end);
+        sift_pairs(inout keys, inout vals, 0, end);
+    }
+}
+
+// f32 lane `i` of a lent bit-pattern column.
+pub fn gf(in s: Slice[u32], i: u64) -> f32 {
+    from_bits_f32(g32(in s, i))
+}
+
+pub fn f32_finite(x: f32) -> bool {
+    (to_bits_f32(x) & 0x7f800000) != 0x7f800000
+}
+
+// Whether box `i` of `boxes` (six f32 lanes each: min x, y, z, max x, y,
+// z) is finite and not inverted.
+pub fn box_valid(in boxes: Slice[u32], i: u64) -> bool {
+    let base = wrapping_mul(i, 6);
+    for a in 0..u(3) {
+        let lo = gf(in boxes, wrapping_add(base, a));
+        let hi = gf(in boxes, wrapping_add(base, wrapping_add(a, 3)));
+        if !(f32_finite(lo) && f32_finite(hi) && lo <= hi) {
+            return false;
+        }
+    }
+    true
+}
+
+// Aabb::overlaps of box `i` of `s` and box `j` of `t` (closed boxes).
+pub fn boxes_overlap(in s: Slice[u32], i: u64, in t: Slice[u32], j: u64) -> bool {
+    let bi = wrapping_mul(i, 6);
+    let bj = wrapping_mul(j, 6);
+    for a in 0..u(3) {
+        let smin = gf(in s, wrapping_add(bi, a));
+        let smax = gf(in s, wrapping_add(bi, wrapping_add(a, 3)));
+        let tmin = gf(in t, wrapping_add(bj, a));
+        let tmax = gf(in t, wrapping_add(bj, wrapping_add(a, 3)));
+        if !(smin <= tmax && tmin <= smax) {
+            return false;
+        }
+    }
+    true
+}
+
+// `n` as a u64 loop bound (a literal range bound would be i64).
+pub fn u(n: u64) -> u64 {
+    n
+}
+
+// `wrapping_shr_i64` behind a call: a bit builtin applied directly to a
+// mutable local that is assigned later fails the optimizer's IR ownership
+// validation (E0410, reported in the lane report), and a call avoids it.
+pub fn shr_i64(x: i64, k: u32) -> i64 {
+    wrapping_shr_i64(x, k)
+}
+
+pub fn shr_u64(x: u64, k: u32) -> u64 {
+    wrapping_shr_u64(x, k)
+}
+
+pub fn shl_u64(x: u64, k: u32) -> u64 {
+    wrapping_shl_u64(x, k)
+}

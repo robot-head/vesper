@@ -400,6 +400,7 @@ fn surface_expansion(module: &ast::Module) -> Result<(), String> {
                     | ast::ExprKind::For { .. }
                     | ast::ExprKind::Range { .. }
                     | ast::ExprKind::Break(_)
+                    | ast::ExprKind::Continue
                     | ast::ExprKind::Return(_)) => {
                         stack.extend(k.control_children().into_iter().flatten());
                     }

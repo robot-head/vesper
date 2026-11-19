@@ -1,0 +1,155 @@
+[package]
+name = "vesper-kinetic-seed"
+version = "0.1.0"
+edition = "2024"
+description = "Frozen Rust seed copy of vesper-kinetic for the compiler's own dependency closure"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; this crate's port is port
+# wave P3b lane 8, #1070): the compiler, and for now every other dependent,
+# links this package, the Rust build of ../src, under the library name
+# `vesper_kinetic`. Dependents use
+# `vesper-kinetic = { path = ".../seed", package = "vesper-kinetic-seed" }`.
+# The port-backed package `vesper-kinetic` is exercised by its own tests
+# until it reaches performance parity. The Rust code takes bug fixes only.
+[lib]
+name = "vesper_kinetic"
+path = "../src/lib.rs"
+
+[dependencies]
+blake3 = "1.8"
+bytemuck = "=1.25.2"
+cranelift-codegen = "0.125"
+num-bigint = "=0.4.8"
+num-traits = "=0.2.19"
+sha2 = { workspace = true }
+vesper-alloc = { path = "../../vesper-alloc/seed", package = "vesper-alloc-seed" }
+vesper-tensor = { path = "../../vesper-tensor/seed", package = "vesper-tensor-seed" }
+
+[dev-dependencies]
+cranelift-frontend = "0.125"
+target-lexicon = "0.13"
+
+[[test]]
+name = "alloc"
+path = "../tests/alloc.rs"
+
+[[test]]
+name = "alloc_arena"
+path = "../tests/alloc_arena.rs"
+
+[[test]]
+name = "articulation"
+path = "../tests/articulation.rs"
+
+[[test]]
+name = "batches"
+path = "../tests/batches.rs"
+
+[[test]]
+name = "bench_batches"
+path = "../tests/bench_batches.rs"
+
+[[test]]
+name = "coloring"
+path = "../tests/coloring.rs"
+
+[[test]]
+name = "contacts"
+path = "../tests/contacts.rs"
+
+[[test]]
+name = "couple"
+path = "../tests/couple.rs"
+
+[[test]]
+name = "crmath"
+path = "../tests/crmath.rs"
+
+[[test]]
+name = "detfloat"
+path = "../tests/detfloat.rs"
+
+[[test]]
+name = "diff"
+path = "../tests/diff.rs"
+
+[[test]]
+name = "diff_contacts"
+path = "../tests/diff_contacts.rs"
+
+[[test]]
+name = "diff_rigid"
+path = "../tests/diff_rigid.rs"
+
+[[test]]
+name = "fastmath"
+path = "../tests/fastmath.rs"
+
+[[test]]
+name = "gjk"
+path = "../tests/gjk.rs"
+
+[[test]]
+name = "golden"
+path = "../tests/golden.rs"
+
+[[test]]
+name = "joint_drives"
+path = "../tests/joint_drives.rs"
+
+[[test]]
+name = "joints"
+path = "../tests/joints.rs"
+
+[[test]]
+name = "lbvh"
+path = "../tests/lbvh.rs"
+
+[[test]]
+name = "lean_model"
+path = "../tests/lean_model.rs"
+
+[[test]]
+name = "morton"
+path = "../tests/morton.rs"
+
+[[test]]
+name = "pair_backend"
+path = "../tests/pair_backend.rs"
+
+[[test]]
+name = "rigid"
+path = "../tests/rigid.rs"
+
+[[test]]
+name = "rigid_features"
+path = "../tests/rigid_features.rs"
+
+[[test]]
+name = "rollback"
+path = "../tests/rollback.rs"
+
+[[test]]
+name = "sap"
+path = "../tests/sap.rs"
+
+[[test]]
+name = "sleep_ccd"
+path = "../tests/sleep_ccd.rs"
+
+[[test]]
+name = "soft"
+path = "../tests/soft.rs"
+
+[[test]]
+name = "world"
+path = "../tests/world.rs"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

@@ -77,6 +77,7 @@ fn rust_type(ty: &AbiType, types_path: &str) -> String {
         AbiType::Box { inner } => format!("Box<{}>", rust_type(inner, types_path)),
         AbiType::Str { owned: true } => "String".into(),
         AbiType::Str { owned: false } => "str".into(),
+        AbiType::Object { .. } => "vesper_port_abi::OpaqueObject<'static>".into(),
     }
 }
 
@@ -128,13 +129,7 @@ pub fn rust_binding(interface: &LibraryInterface, options: &BindingOptions) -> S
         if f.fail_record_words.is_some() {
             params.push("fail: *mut u64".into());
         }
-        let ret = if !f.result_pointer
-            && matches!(&f.result, AbiType::Scalar { name } if name == "f64")
-        {
-            "f64"
-        } else {
-            "i64"
-        };
+        let ret = result_c_type(f);
         let _ = writeln!(out, "    fn {}({}) -> {ret};", f.symbol, params.join(", "));
     }
     out.push_str("}\n");
@@ -370,6 +365,7 @@ fn error_variant(ty: &AbiType) -> String {
         AbiType::Box { inner } => format!("Box{}", error_variant(inner)),
         AbiType::Str { owned: true } => "String".into(),
         AbiType::Str { owned: false } => "Str".into(),
+        AbiType::Object { .. } => "Object".into(),
     }
 }
 
@@ -457,19 +453,36 @@ fn construct(v: &VariantDecl, _types_path: &str) -> String {
     }
 }
 
+/// A float scalar's Rust type: floats travel in float registers (the
+/// platform C ABI), every other scalar as one integer word.
+fn float(ty: &AbiType) -> Option<&'static str> {
+    match ty {
+        AbiType::Scalar { name } if name == "f64" => Some("f64"),
+        AbiType::Scalar { name } if name == "f32" => Some("f32"),
+        _ => None,
+    }
+}
+
 fn c_type(ty: &AbiType, pointer: bool) -> &'static str {
     if pointer {
         "*mut u64"
-    } else if matches!(ty, AbiType::Scalar { name } if name == "f64") {
-        "f64"
     } else {
+        float(ty).unwrap_or("i64")
+    }
+}
+
+/// The C return type of `f`'s symbol.
+pub(super) fn result_c_type(f: &ExportedFunction) -> &'static str {
+    if f.result_pointer {
         "i64"
+    } else {
+        float(&f.result).unwrap_or("i64")
     }
 }
 
 fn scalar_in(name: &str, ty: &AbiType) -> String {
     match ty {
-        AbiType::Scalar { name: s } if s == "f64" => name.into(),
+        ty if float(ty).is_some() => name.into(),
         AbiType::Scalar { name: s } if s == "Unit" => {
             format!("{{ let () = {name}; 0 }}")
         }
@@ -480,7 +493,7 @@ fn scalar_in(name: &str, ty: &AbiType) -> String {
 fn scalar_out(raw: &str, ty: &AbiType) -> String {
     match ty {
         AbiType::Scalar { name } => match name.as_str() {
-            "f64" | "i64" => raw.into(),
+            "f64" | "f32" | "i64" => raw.into(),
             "bool" => format!("{raw} != 0"),
             "Unit" => format!("{{ let _ = {raw}; }}"),
             other => format!("{raw} as {other}"),

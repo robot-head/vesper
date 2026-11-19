@@ -1,0 +1,488 @@
+// Module explore of @vesper/chorus (see lib.ves): `check::explore_locals`,
+// the bounded exhaustive run of the endpoints under asynchronous FIFO
+// semantics.
+//
+// A global state is a run of words: one local-type id per role, then one
+// segment per non-empty queue in `(from, to)` order, `key n (label
+// payload)*n` with `key = from << 16 | to`. Local types are interned, so
+// equal states are equal words, and the visited set is a hash table over
+// the runs stored in `xw`. States are explored in the order of the Rust
+// build (a stack, successors in role and branch order), so the reported
+// counts and the first error found are the same.
+//
+// `out` is `0 states completed cut` or `1 kind ..`:
+//   2 Deadlock: n (role summary)*n; 3 UnexpectedMessage: role peer n
+//   expected.. found; 4 Orphans: n (from to label)*n; 5 StateBudgetExceeded:
+//   states. (Kind 1, Projection, is written by lib.ves.)
+use self::{
+    C
+};
+use self::util::{
+    add,
+    inc,
+    intern_tb,
+    none,
+    role_sym,
+    setw,
+    sw,
+    tb_str,
+    tb_sym
+};
+use self::local::{
+    la,
+    lb,
+    lbr,
+    lc,
+    ld,
+    lkn,
+    lt,
+    summary,
+    unfold
+};
+
+fn mix(h: u64, x: u64) -> u64 {
+    wrapping_mul(h ^ x, 1099511628211)
+}
+
+fn xword(in c: C, s: u64, i: u64) -> u64 {
+    sw(in c.xw, add(sw(in c.xoff, s), i))
+}
+
+fn grow(inout c: C) {
+    let cap = if c.x_mask == 0 {
+        1024
+    } else {
+        wrapping_mul(inc(c.x_mask), 2)
+    };
+    c.xht.clear();
+    for _ in 0..cap {
+        c.xht.push(0);
+    }
+    c.x_mask = wrapping_sub(cap, 1);
+    for j in 0..c.xoff.len() {
+        let mut at = sw(in c.xh, j) & c.x_mask;
+        loop {
+            if sw(in c.xht, at) == 0 {
+                setw(inout c.xht, at, inc(j));
+                break;
+            }
+            at = inc(at) & c.x_mask;
+        }
+    }
+}
+
+fn same_state(in c: C, s: u64) -> bool {
+    let n = c.sb.len();
+    if sw(in c.xlen, s) != n {
+        return false;
+    }
+    let off = sw(in c.xoff, s);
+    for i in 0..n {
+        if sw(in c.xw, add(off, i)) != sw(in c.sb, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// Interns the state in `sb`: `2 id + 1` when it is new, else `2 id`.
+fn intern_state(inout c: C) -> u64 {
+    if wrapping_mul(inc(c.xoff.len()), 2) > c.x_mask {
+        grow(inout c);
+    }
+    let mut h: u64 = 14695981039346656037;
+    for i in 0..c.sb.len() {
+        h = mix(h, sw(in c.sb, i));
+    }
+    h = h ^ (h >> 29);
+    let mut at = h & c.x_mask;
+    loop {
+        let e = sw(in c.xht, at);
+        if e == 0 {
+            break;
+        }
+        let m = wrapping_sub(e, 1);
+        if sw(in c.xh, m) == h && same_state(in c, m) {
+            return wrapping_mul(m, 2);
+        }
+        at = inc(at) & c.x_mask;
+    }
+    let id = c.xoff.len();
+    let h115 = c.xw.len();
+    c.xoff.push(h115);
+    let h116 = c.sb.len();
+    c.xlen.push(h116);
+    c.xh.push(h);
+    for i in 0..c.sb.len() {
+        let h117 = sw(in c.sb, i);
+        c.xw.push(h117);
+    }
+    setw(inout c.xht, at, inc(id));
+    inc(wrapping_mul(id, 2))
+}
+
+// Position of the segment `key` in state `s` (after the `k` roles), or of
+// the first segment with a larger key, and whether it was found.
+fn seg(in c: C, s: u64, k: u64, key: u64) -> (u64, bool) {
+    let len = sw(in c.xlen, s);
+    let mut i = k;
+    loop {
+        if i >= len {
+            return (i, false);
+        }
+        let kk = xword(in c, s, i);
+        if kk == key {
+            return (i, true);
+        }
+        if kk > key {
+            return (i, false);
+        }
+        i = add(i, add(2, wrapping_mul(xword(in c, s, inc(i)), 2)));
+    }
+}
+
+fn qlen(in c: C, s: u64, k: u64, key: u64) -> u64 {
+    let (at, found) = seg(in c, s, k, key);
+    if found {
+        xword(in c, s, inc(at))
+    } else {
+        0
+    }
+}
+
+// Writes the successor of `s` with role `i` at `t` into `sb`: `op` 1
+// appends `(l, p)` to queue `key`, 2 pops the head of queue `key`.
+fn build(inout c: C, s: u64, k: u64, i: u64, t: u64, op: u64, key: u64, l: u64, p: u64) {
+    c.sb.clear();
+    for j in 0..k {
+        let w = if j == i {
+            t
+        } else {
+            xword(in c, s, j)
+        };
+        c.sb.push(w);
+    }
+    let len = sw(in c.xlen, s);
+    if op == 0 {
+        let mut j = k;
+        loop {
+            if j >= len {
+                break;
+            }
+            let w = xword(in c, s, j);
+            c.sb.push(w);
+            j = inc(j);
+        }
+        return;
+    }
+    let (at, found) = seg(in c, s, k, key);
+    let mut j = k;
+    loop {
+        if j >= at {
+            break;
+        }
+        let w = xword(in c, s, j);
+        c.sb.push(w);
+        j = inc(j);
+    }
+    if op == 1 {
+        if found {
+            let n = xword(in c, s, inc(at));
+            c.sb.push(key);
+            c.sb.push(inc(n));
+            let mut q: u64 = 0;
+            loop {
+                if q >= wrapping_mul(n, 2) {
+                    break;
+                }
+                let w = xword(in c, s, add(add(at, 2), q));
+                c.sb.push(w);
+                q = inc(q);
+            }
+            c.sb.push(l);
+            c.sb.push(p);
+            j = add(add(at, 2), wrapping_mul(n, 2));
+        } else {
+            c.sb.push(key);
+            c.sb.push(1);
+            c.sb.push(l);
+            c.sb.push(p);
+            j = at;
+        }
+    } else {
+        let n = xword(in c, s, inc(at));
+        if n > 1 {
+            c.sb.push(key);
+            c.sb.push(wrapping_sub(n, 1));
+            let mut q: u64 = 2;
+            loop {
+                if q >= wrapping_mul(n, 2) {
+                    break;
+                }
+                let w = xword(in c, s, add(add(at, 2), q));
+                c.sb.push(w);
+                q = inc(q);
+            }
+        }
+        j = add(add(at, 2), wrapping_mul(n, 2));
+    }
+    loop {
+        if j >= len {
+            break;
+        }
+        let w = xword(in c, s, j);
+        c.sb.push(w);
+        j = inc(j);
+    }
+}
+
+// Interns the successor in `sb` and keeps it when it is new.
+fn succ(inout c: C) {
+    let r = intern_state(inout c);
+    if (r & 1) == 1 {
+        c.nw.push(r >> 1);
+    }
+}
+
+fn msg_sym(inout c: C, l: u64, p: u64) -> u64 {
+    c.tb.clear();
+    tb_sym(inout c, l);
+    tb_str(inout c, "(");
+    tb_sym(inout c, p);
+    tb_str(inout c, ")");
+    intern_tb(inout c)
+}
+
+fn unexpected(inout c: C, me: u64, peer: u64, t: u64, hl: u64, hp: u64) {
+    let rs = role_sym(inout c, me);
+    let ps = role_sym(inout c, peer);
+    let mut ex: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if lt(in c, t) == 2 {
+        let h118 = lb(in c, t);
+        let h119 = lc(in c, t);
+        let y = msg_sym(inout c, h118, h119);
+        ex.push(y);
+    } else {
+        for b in 0..lkn(in c, t) {
+            let h120 = lbr(in c, t, b, 0);
+            let h121 = lbr(in c, t, b, 1);
+            let y = msg_sym(inout c, h120, h121);
+            ex.push(y);
+        }
+    }
+    let found = msg_sym(inout c, hl, hp);
+    c.out.clear();
+    c.out.push(1);
+    c.out.push(3);
+    c.out.push(rs);
+    c.out.push(ps);
+    c.out.push(ex.len());
+    for i in 0..ex.len() {
+        let y = match ex.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        c.out.push(y);
+    }
+    c.out.push(found);
+}
+
+// Explores from the local types `locals` (one per role) within the
+// bounds.
+pub fn explore_run(inout c: C, in locals: ChunkSeq[u64], max_states: u64, max_queue: u64) {
+    let k = locals.len();
+    c.sb.clear();
+    for i in 0..k {
+        let l = match locals.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => c.l_end,
+        };
+        let u = unfold(inout c, l);
+        c.sb.push(u);
+    }
+    let first = intern_state(inout c);
+    c.work.clear();
+    c.work.push(first >> 1);
+    let mut states: u64 = 0;
+    let mut completed: u64 = 0;
+    let mut bound_hit = false;
+    loop {
+        let s = match c.work.pop() {
+            Option::Some(v) => v,
+            Option::None => break,
+        };
+        states = inc(states);
+        if states > max_states {
+            c.out.clear();
+            c.out.push(1);
+            c.out.push(5);
+            c.out.push(states);
+            return;
+        }
+        c.nw.clear();
+        let mut nsucc: u64 = 0;
+        let mut cut = false;
+        for i in 0..k {
+            let t = xword(in c, s, i);
+            let tag = lt(in c, t);
+            if tag == 5 {
+                let h122 = lb(in c, t);
+                let u = unfold(inout c, h122);
+                build(inout c, s, k, i, u, 0, 0, 0, 0);
+                succ(inout c);
+                nsucc = inc(nsucc);
+            } else if tag == 1 || tag == 3 {
+                let peer = la(in c, t);
+                let key = (i << 16) | peer;
+                if qlen(in c, s, k, key) >= max_queue {
+                    cut = true;
+                } else if tag == 1 {
+                    let h123 = ld(in c, t);
+                    let u = unfold(inout c, h123);
+                    let h124 = lb(in c, t);
+                    let h125 = lc(in c, t);
+                    build(inout c, s, k, i, u, 1, key, h124, h125);
+                    succ(inout c);
+                    nsucc = inc(nsucc);
+                } else {
+                    for b in 0..lkn(in c, t) {
+                        let h126 = lbr(in c, t, b, 2);
+                        let u = unfold(inout c, h126);
+                        let h127 = lbr(in c, t, b, 0);
+                        let h128 = lbr(in c, t, b, 1);
+                        build(inout c, s, k, i, u, 1, key, h127, h128);
+                        succ(inout c);
+                        nsucc = inc(nsucc);
+                    }
+                }
+            } else if tag == 2 || tag == 4 {
+                let peer = la(in c, t);
+                let key = (peer << 16) | i;
+                let (at, found) = seg(in c, s, k, key);
+                if found {
+                    let hl = xword(in c, s, add(at, 2));
+                    let hp = xword(in c, s, add(at, 3));
+                    let mut next = none();
+                    if tag == 2 {
+                        if lb(in c, t) == hl && lc(in c, t) == hp {
+                            next = ld(in c, t);
+                        }
+                    } else {
+                        for b in 0..lkn(in c, t) {
+                            if next
+                                == none()
+                                && lbr(in c, t, b, 0)
+                                == hl
+                                && lbr(in c, t, b, 1)
+                                == hp {
+                                next = lbr(in c, t, b, 2);
+                            }
+                        }
+                    }
+                    if next == none() {
+                        unexpected(inout c, i, peer, t, hl, hp);
+                        return;
+                    }
+                    let u = unfold(inout c, next);
+                    build(inout c, s, k, i, u, 2, key, 0, 0);
+                    succ(inout c);
+                    nsucc = inc(nsucc);
+                }
+            }
+        }
+        if cut {
+            bound_hit = true;
+        }
+        if nsucc == 0 && !cut {
+            let mut all_end = true;
+            for i in 0..k {
+                if xword(in c, s, i) != c.l_end {
+                    all_end = false;
+                }
+            }
+            let len = sw(in c.xlen, s);
+            if all_end && len == k {
+                completed = inc(completed);
+            } else if all_end {
+                orphans(inout c, s, k);
+                return;
+            } else {
+                deadlock(inout c, s, k);
+                return;
+            }
+        }
+        for j in 0..c.nw.len() {
+            let x = sw(in c.nw, j);
+            c.work.push(x);
+        }
+    }
+    c.out.clear();
+    c.out.push(0);
+    c.out.push(states);
+    c.out.push(completed);
+    c
+        .out
+        .push(
+        if bound_hit {
+            1
+        } else {
+            0
+        }
+    );
+}
+
+fn orphans(inout c: C, s: u64, k: u64) {
+    let len = sw(in c.xlen, s);
+    let mut ms: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut i = k;
+    loop {
+        if i >= len {
+            break;
+        }
+        let key = xword(in c, s, i);
+        let n = xword(in c, s, inc(i));
+        let f = role_sym(inout c, key >> 16);
+        let t = role_sym(inout c, key & 65535);
+        for q in 0..n {
+            ms.push(f);
+            ms.push(t);
+            ms.push(xword(in c, s, add(add(i, 2), wrapping_mul(q, 2))));
+        }
+        i = add(add(i, 2), wrapping_mul(n, 2));
+    }
+    c.out.clear();
+    c.out.push(1);
+    c.out.push(4);
+    c.out.push(ms.len() / 3);
+    for j in 0..ms.len() {
+        let y = match ms.try_get(j) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        c.out.push(y);
+    }
+}
+
+fn deadlock(inout c: C, s: u64, k: u64) {
+    let mut ws: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..k {
+        let t = xword(in c, s, i);
+        if t != c.l_end {
+            let r = role_sym(inout c, i);
+            let y = summary(inout c, t);
+            ws.push(r);
+            ws.push(y);
+        }
+    }
+    c.out.clear();
+    c.out.push(1);
+    c.out.push(2);
+    c.out.push(ws.len() / 2);
+    for j in 0..ws.len() {
+        let y = match ws.try_get(j) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        c.out.push(y);
+    }
+}

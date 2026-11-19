@@ -4,6 +4,22 @@ version = "0.1.0"
 edition = "2024"
 description = "Vesper Kinetic (design section 36): DetFloat auditing over Cranelift IR, Morton codes, deterministic constraint colouring, AoSoA XPBD and rollback rings"
 publish = false
+build = "build.rs"
+
+# This is the port-backed build: build.rs links the Vesper package in vesper/
+# and sets cfg(vesper_port), and the ported modules forward to it. The
+# compiler and every other dependent (vesper-gpu-compute, vesper-kinetic-gpu)
+# use the frozen Rust seed copy, crates/vesper-kinetic/seed (package
+# vesper-kinetic-seed, same library name), until the port reaches
+# performance parity; see "Crates the compiler links" in
+# docs/maintenance/porting-a-crate.md and
+# docs/parallel-results/port-p3b-kinetic.md (port wave P3b lane 8, #1070).
+
+[features]
+# Deliberately wrong Vesper builds (EDITS in build.rs, one per ported
+# module): crates/vesper-kinetic/port/check.sh asserts which test catches
+# each.
+vesper-port-divergent = []
 
 [dependencies]
 blake3 = "1.8"
@@ -16,7 +32,18 @@ vesper-alloc = { path = "../vesper-alloc/seed", package = "vesper-alloc-seed" }
 # The Rust seed copy: the Vesper port of vesper-tensor stays non-default
 # until it reaches performance parity (port wave P1 lane 8, #905).
 vesper-tensor = { path = "../vesper-tensor/seed", package = "vesper-tensor-seed" }
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
 cranelift-frontend = "0.125"
 target-lexicon = "0.13"
+# The ABBA benchmark (examples/abba.rs) runs the frozen Rust build next to
+# the port.
+vesper-bench = { path = "../vesper-bench" }
+vesper-kinetic-rust = { path = "seed", package = "vesper-kinetic-seed" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

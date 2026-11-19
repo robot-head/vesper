@@ -1,0 +1,353 @@
+// @vesper/chorus: Vesper port of the choreography front end of
+// vesper-chorus (port wave P3b lane 6, #1068): parsing, well-formedness,
+// endpoint projection with merging, binary duality and the bounded
+// asynchronous explorer (design section 25.1, 25.5).
+//
+// All state lives in one handle `C`: the symbol table (util.ves), the
+// global tree arena (tree.ves), the hash-consed local-type arena
+// (local.ves), the projector (project.ves), the explorer (explore.ves) and
+// the parser (parse.ves). The Rust wrapper (src/port.rs) encodes its
+// inputs as words and text, calls one entry point below and rebuilds its
+// own types from `out` and the symbol table.
+//
+// Input words. A string is two words, `(offset, length)` into the text
+// argument. A choreography is `nroles, role strings.., ntree, tree..`; a
+// tree is in postorder (children first):
+//   End `5`; Var `4 s`; Rec `body.. 3 s`; Local `next.. 2 role s`;
+//   Comm `next_1.. next_n 1 from to n (label payload)*n`.
+// A local type is in postorder too:
+//   End `8`; Var `7 s`; Rec `body.. 6 s`; Action `next.. 5 s`;
+//   Send/Recv `next.. 1|2 peer label payload`;
+//   Select/Offer `next_1.. next_n 3|4 peer n (label payload)*n`.
+// Output words use the same forms with one word, a symbol id, per string.
+use self::util::{
+    inc,
+    none,
+    iw
+};
+use self::tree::{
+    read_chor,
+    read_roles,
+    validate
+};
+use self::local::{
+    are_dual,
+    emit_l,
+    l_init,
+    read_local
+};
+use self::project::{
+    project_role
+};
+use self::explore::{
+    explore_run
+};
+use self::parse::{
+    parse_src
+};
+
+pub struct C {
+    sy_off: ChunkSeq[u64],
+    sy_len: ChunkSeq[u64],
+    sy_hash: ChunkSeq[u64],
+    sy_ht: ChunkSeq[u64],
+    sy_flag: ChunkSeq[u64],
+    sy_txt: ChunkSeq[u8],
+    tb: ChunkSeq[u8],
+    ro: ChunkSeq[u64],
+    gt: ChunkSeq[u64],
+    ga: ChunkSeq[u64],
+    gb: ChunkSeq[u64],
+    gc: ChunkSeq[u64],
+    gsz: ChunkSeq[u64],
+    gks: ChunkSeq[u64],
+    gk: ChunkSeq[u64],
+    lt: ChunkSeq[u64],
+    la: ChunkSeq[u64],
+    lb: ChunkSeq[u64],
+    lc: ChunkSeq[u64],
+    ld: ChunkSeq[u64],
+    lks: ChunkSeq[u64],
+    lkn: ChunkSeq[u64],
+    lh: ChunkSeq[u64],
+    lht: ChunkSeq[u64],
+    lk: ChunkSeq[u64],
+    lu: ChunkSeq[u64],
+    tmp: ChunkSeq[u64],
+    vs: ChunkSeq[u64],
+    bnd: ChunkSeq[u64],
+    ugs: ChunkSeq[u64],
+    used: ChunkSeq[u64],
+    path: ChunkSeq[u64],
+    dbe: ChunkSeq[u64],
+    dvx: ChunkSeq[u64],
+    dvy: ChunkSeq[u64],
+    xw: ChunkSeq[u64],
+    xoff: ChunkSeq[u64],
+    xlen: ChunkSeq[u64],
+    xh: ChunkSeq[u64],
+    xht: ChunkSeq[u64],
+    work: ChunkSeq[u64],
+    nw: ChunkSeq[u64],
+    sb: ChunkSeq[u64],
+    tk_kind: ChunkSeq[u64],
+    tk_sym: ChunkSeq[u64],
+    tk_line: ChunkSeq[u64],
+    tk_col: ChunkSeq[u64],
+    sc_src: ChunkSeq[u64],
+    sc_uni: ChunkSeq[u64],
+    s_kind: ChunkSeq[u64],
+    s_a: ChunkSeq[u64],
+    s_b: ChunkSeq[u64],
+    s_c: ChunkSeq[u64],
+    s_d: ChunkSeq[u64],
+    s_line: ChunkSeq[u64],
+    s_col: ChunkSeq[u64],
+    sk: ChunkSeq[u64],
+    bstk: ChunkSeq[u64],
+    out: ChunkSeq[u64],
+    ew: ChunkSeq[u64],
+    sy_mask: u64,
+    l_mask: u64,
+    x_mask: u64,
+    ug_base: u64,
+    stamp: u64,
+    target: u64,
+    root: u64,
+    l_end: u64,
+    mf_kind: u64,
+    mf_a: u64,
+    mf_b: u64,
+    mf_peer: u64,
+    mf_label: u64,
+    pos: u64,
+    end_line: u64,
+    end_col: u64,
+    nodes: u64,
+    bd: u64,
+    lp: u64,
+    kw_roles: u64,
+    kw_rec: u64,
+    kw_continue: u64,
+    kw_end: u64,
+    failed: bool
+}
+
+fn new_c() -> C {
+    let mut c = C {
+        sy_off: ChunkSeq::new[u64](),
+        sy_len: ChunkSeq::new[u64](),
+        sy_hash: ChunkSeq::new[u64](),
+        sy_ht: ChunkSeq::new[u64](),
+        sy_flag: ChunkSeq::new[u64](),
+        sy_txt: ChunkSeq::new[u8](),
+        tb: ChunkSeq::new[u8](),
+        ro: ChunkSeq::new[u64](),
+        gt: ChunkSeq::new[u64](),
+        ga: ChunkSeq::new[u64](),
+        gb: ChunkSeq::new[u64](),
+        gc: ChunkSeq::new[u64](),
+        gsz: ChunkSeq::new[u64](),
+        gks: ChunkSeq::new[u64](),
+        gk: ChunkSeq::new[u64](),
+        lt: ChunkSeq::new[u64](),
+        la: ChunkSeq::new[u64](),
+        lb: ChunkSeq::new[u64](),
+        lc: ChunkSeq::new[u64](),
+        ld: ChunkSeq::new[u64](),
+        lks: ChunkSeq::new[u64](),
+        lkn: ChunkSeq::new[u64](),
+        lh: ChunkSeq::new[u64](),
+        lht: ChunkSeq::new[u64](),
+        lk: ChunkSeq::new[u64](),
+        lu: ChunkSeq::new[u64](),
+        tmp: ChunkSeq::new[u64](),
+        vs: ChunkSeq::new[u64](),
+        bnd: ChunkSeq::new[u64](),
+        ugs: ChunkSeq::new[u64](),
+        used: ChunkSeq::new[u64](),
+        path: ChunkSeq::new[u64](),
+        dbe: ChunkSeq::new[u64](),
+        dvx: ChunkSeq::new[u64](),
+        dvy: ChunkSeq::new[u64](),
+        xw: ChunkSeq::new[u64](),
+        xoff: ChunkSeq::new[u64](),
+        xlen: ChunkSeq::new[u64](),
+        xh: ChunkSeq::new[u64](),
+        xht: ChunkSeq::new[u64](),
+        work: ChunkSeq::new[u64](),
+        nw: ChunkSeq::new[u64](),
+        sb: ChunkSeq::new[u64](),
+        tk_kind: ChunkSeq::new[u64](),
+        tk_sym: ChunkSeq::new[u64](),
+        tk_line: ChunkSeq::new[u64](),
+        tk_col: ChunkSeq::new[u64](),
+        sc_src: ChunkSeq::new[u64](),
+        sc_uni: ChunkSeq::new[u64](),
+        s_kind: ChunkSeq::new[u64](),
+        s_a: ChunkSeq::new[u64](),
+        s_b: ChunkSeq::new[u64](),
+        s_c: ChunkSeq::new[u64](),
+        s_d: ChunkSeq::new[u64](),
+        s_line: ChunkSeq::new[u64](),
+        s_col: ChunkSeq::new[u64](),
+        sk: ChunkSeq::new[u64](),
+        bstk: ChunkSeq::new[u64](),
+        out: ChunkSeq::new[u64](),
+        ew: ChunkSeq::new[u64](),
+        sy_mask: 0,
+        l_mask: 0,
+        x_mask: 0,
+        ug_base: 0,
+        stamp: 0,
+        target: 0,
+        root: 0,
+        l_end: 0,
+        mf_kind: 0,
+        mf_a: 0,
+        mf_b: 0,
+        mf_peer: 0,
+        mf_label: 0,
+        pos: 0,
+        end_line: 0,
+        end_col: 0,
+        nodes: 0,
+        bd: 0,
+        lp: 0,
+        kw_roles: 0,
+        kw_rec: 0,
+        kw_continue: 0,
+        kw_end: 0,
+        failed: false
+    };
+    l_init(inout c);
+    c
+}
+
+// `parse_choreography`: `out` is `0 nroles roles.. tree..` or
+// `1 line col kind payload..` (see parse.ves).
+pub fn parse(in src: Str) -> C {
+    let mut c = new_c();
+    parse_src(inout c, in src.as_bytes());
+    c
+}
+
+// `Choreography::new`: `out` is `0`, or `1` and the error words
+// (tree.ves).
+pub fn check_chor(in w: Slice[u64], in t: Slice[u8]) -> C {
+    let mut c = new_c();
+    let _ = read_chor(inout c, in w, in t, 0);
+    let root = c.root;
+    if validate(inout c, root) {
+        c.out.push(0);
+    } else {
+        c.out.push(1);
+        for i in 0..c.ew.len() {
+            let x = match c.ew.try_get(i) {
+                Option::Some(v) => v,
+                Option::None => 0,
+            };
+            c.out.push(x);
+        }
+    }
+    c
+}
+
+// `project_role` for role `role`, or `project_all` when `role` is
+// `none()`: `out` is `0 n (len local..)*n` or `1` and the error words
+// (project.ves).
+pub fn project(in w: Slice[u64], in t: Slice[u8], role: u64) -> C {
+    let mut c = new_c();
+    let _ = read_chor(inout c, in w, in t, 0);
+    let n = c.ro.len();
+    let (lo, hi) = if role == none() {
+        (0, n)
+    } else {
+        (role, inc(role))
+    };
+    let mut locals: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for r in lo..hi {
+        let l = project_role(inout c, r);
+        if c.failed {
+            c.out.clear();
+            c.out.push(1);
+            for i in 0..c.ew.len() {
+                let x = match c.ew.try_get(i) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+                c.out.push(x);
+            }
+            return c;
+        }
+        locals.push(l);
+    }
+    c.out.push(0);
+    c.out.push(locals.len());
+    for i in 0..locals.len() {
+        let l = match locals.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let at = c.out.len();
+        c.out.push(0);
+        emit_l_into_out(inout c, l, at);
+    }
+    c
+}
+
+fn emit_l_into_out(inout c: C, l: u64, at: u64) {
+    emit_l(inout c, l);
+    let len = wrapping_sub(wrapping_sub(c.out.len(), at), 1);
+    let _ = c.out.try_set(at, len);
+}
+
+// `check::explore` (locals projected here) when `nlocals` is `none()`,
+// else `check::explore_locals` over the `nlocals` local types that follow
+// the role list. `out` is `0 states completed cut` or `1` and the error
+// words (explore.ves).
+pub fn explore(in w: Slice[u64], in t: Slice[u8], nlocals: u64, max_states: u64, max_queue: u64)
+    -> C {
+    let mut c = new_c();
+    let mut locals: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    if nlocals == none() {
+        let _ = read_chor(inout c, in w, in t, 0);
+        for r in 0..c.ro.len() {
+            let l = project_role(inout c, r);
+            if c.failed {
+                c.out.push(1);
+                c.out.push(1);
+                for i in 0..c.ew.len() {
+                    let x = match c.ew.try_get(i) {
+                        Option::Some(v) => v,
+                        Option::None => 0,
+                    };
+                    c.out.push(x);
+                }
+                return c;
+            }
+            locals.push(l);
+        }
+    } else {
+        let mut at = read_roles(inout c, in w, in t, 0);
+        for _ in 0..nlocals {
+            let len = iw(in w, at);
+            let l = read_local(inout c, in w, in t, inc(at), len);
+            locals.push(l);
+            at = wrapping_add(at, inc(len));
+        }
+    }
+    explore_run(inout c, in locals, max_states, max_queue);
+    c
+}
+
+// `are_dual(a, s_a, b, s_b)`: the words are `len s_a.. len s_b..`.
+pub fn dual(in w: Slice[u64], in t: Slice[u8], a: u64, b: u64) -> bool {
+    let mut c = new_c();
+    let la = iw(in w, 0);
+    let x = read_local(inout c, in w, in t, 1, la);
+    let at = inc(la);
+    let lb = iw(in w, at);
+    let y = read_local(inout c, in w, in t, inc(at), lb);
+    are_dual(inout c, a, x, b, y)
+}

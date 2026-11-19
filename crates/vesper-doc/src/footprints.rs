@@ -372,6 +372,7 @@ impl<'a> Walk<'a> {
                     self.expr(v, Ctx::Value, depth + 1)?;
                 }
             }
+            ExprKind::Continue => {}
             ExprKind::Handle {
                 effect,
                 state,

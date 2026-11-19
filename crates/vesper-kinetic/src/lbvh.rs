@@ -14,6 +14,10 @@
 //! Every buffer is reserved by [`Lbvh::with_capacity`]; rebuilding and
 //! querying with at most that many primitives does not allocate.
 
+// The port-backed build forwards Lbvh::build and Lbvh::overlapping_pairs to
+// the Vesper port (vesper/src/lbvh.ves); the Rust helpers stay for the seed.
+#![cfg_attr(vesper_port, allow(dead_code))]
+
 use crate::world::det;
 
 /// Bits per axis of a 64-bit Morton code.
@@ -24,31 +28,52 @@ pub const MORTON64_AXIS_MAX: u32 = (1 << MORTON64_AXIS_BITS) - 1;
 /// Spread the low 21 bits of `v` so bit `i` lands on bit `3i`.
 #[inline]
 pub fn spread21(v: u32) -> u64 {
-    let mut x = u64::from(v & MORTON64_AXIS_MAX);
-    x = (x | (x << 32)) & 0x001f_0000_0000_ffff;
-    x = (x | (x << 16)) & 0x001f_0000_ff00_00ff;
-    x = (x | (x << 8)) & 0x100f_00f0_0f00_f00f;
-    x = (x | (x << 4)) & 0x10c3_0c30_c30c_30c3;
-    x = (x | (x << 2)) & 0x1249_2492_4924_9249;
-    x
+    #[cfg(vesper_port)]
+    {
+        crate::port::lbvh_spread21(v)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        let mut x = u64::from(v & MORTON64_AXIS_MAX);
+        x = (x | (x << 32)) & 0x001f_0000_0000_ffff;
+        x = (x | (x << 16)) & 0x001f_0000_ff00_00ff;
+        x = (x | (x << 8)) & 0x100f_00f0_0f00_f00f;
+        x = (x | (x << 4)) & 0x10c3_0c30_c30c_30c3;
+        x = (x | (x << 2)) & 0x1249_2492_4924_9249;
+        x
+    }
 }
 
 /// Inverse of [`spread21`].
 #[inline]
 pub fn compact21(code: u64) -> u32 {
-    let mut x = code & 0x1249_2492_4924_9249;
-    x = (x | (x >> 2)) & 0x10c3_0c30_c30c_30c3;
-    x = (x | (x >> 4)) & 0x100f_00f0_0f00_f00f;
-    x = (x | (x >> 8)) & 0x001f_0000_ff00_00ff;
-    x = (x | (x >> 16)) & 0x001f_0000_0000_ffff;
-    x = (x | (x >> 32)) & 0x0000_0000_001f_ffff;
-    x as u32
+    #[cfg(vesper_port)]
+    {
+        crate::port::lbvh_compact21(code)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        let mut x = code & 0x1249_2492_4924_9249;
+        x = (x | (x >> 2)) & 0x10c3_0c30_c30c_30c3;
+        x = (x | (x >> 4)) & 0x100f_00f0_0f00_f00f;
+        x = (x | (x >> 8)) & 0x001f_0000_ff00_00ff;
+        x = (x | (x >> 16)) & 0x001f_0000_0000_ffff;
+        x = (x | (x >> 32)) & 0x0000_0000_001f_ffff;
+        x as u32
+    }
 }
 
 /// 63-bit Morton code of three 21-bit coordinates (`x` on bit 0).
 #[inline]
 pub fn morton64(x: u32, y: u32, z: u32) -> u64 {
-    spread21(x) | (spread21(y) << 1) | (spread21(z) << 2)
+    #[cfg(vesper_port)]
+    {
+        crate::port::lbvh_morton64(x, y, z)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        spread21(x) | (spread21(y) << 1) | (spread21(z) << 2)
+    }
 }
 
 /// Decode a [`morton64`] code.
@@ -160,6 +185,64 @@ pub struct Lbvh {
     node_bounds: Vec<Aabb>,
     order: Vec<u32>,
     stack: Vec<Child>,
+    #[cfg(vesper_port)]
+    port: LbvhPort,
+}
+
+/// The port-backed build's buffers, lent to the Vesper port: boxes as six
+/// f32 bit patterns (min x, y, z, max x, y, z), the sorted codes and
+/// primitives, child words (`2^32 + i` for leaf `i`, `k` for node `k`) and
+/// packed pairs `(a << 32) | b`.
+#[cfg(vesper_port)]
+#[derive(Debug, Clone, Default)]
+struct LbvhPort {
+    boxes: Vec<u32>,
+    codes: Vec<u64>,
+    prims: Vec<u32>,
+    leaf: Vec<u32>,
+    left: Vec<u64>,
+    right: Vec<u64>,
+    node_box: Vec<u32>,
+    order: Vec<u32>,
+    stack: Vec<u64>,
+    pairs: Vec<u64>,
+}
+
+#[cfg(vesper_port)]
+impl LbvhPort {
+    fn with_capacity(n: usize) -> Self {
+        let inner = n.saturating_sub(1);
+        Self {
+            boxes: Vec::with_capacity(6 * n),
+            codes: Vec::with_capacity(n),
+            prims: Vec::with_capacity(n),
+            leaf: Vec::with_capacity(6 * n),
+            left: Vec::with_capacity(inner),
+            right: Vec::with_capacity(inner),
+            node_box: Vec::with_capacity(6 * inner),
+            order: Vec::with_capacity(n),
+            stack: Vec::with_capacity(n + 1),
+            pairs: Vec::with_capacity(4 * n),
+        }
+    }
+}
+
+/// Flatten `boxes` into six f32 bit patterns each.
+#[cfg(vesper_port)]
+pub(crate) fn box_bits(boxes: &[Aabb], out: &mut Vec<u32>) {
+    out.clear();
+    for b in boxes {
+        out.extend(b.min.iter().chain(&b.max).map(|v| v.to_bits()));
+    }
+}
+
+#[cfg(vesper_port)]
+fn child_of(word: u64) -> Child {
+    if word >> 32 == 1 {
+        Child::Leaf(word as u32)
+    } else {
+        Child::Internal(word as u32)
+    }
 }
 
 const EMPTY_BOX: Aabb = Aabb {
@@ -180,7 +263,21 @@ impl Lbvh {
             // A root-to-leaf path is at most n − 1 internal nodes deep, and
             // the traversal keeps at most one sibling per level.
             stack: Vec::with_capacity(capacity + 1),
+            #[cfg(vesper_port)]
+            port: LbvhPort::with_capacity(capacity),
         }
+    }
+
+    /// Reserve pair storage for `max_pairs` pairs, so later queries with
+    /// that bound do not allocate (the Rust build needs no pair scratch).
+    pub fn reserve_pairs(&mut self, max_pairs: usize) {
+        #[cfg(vesper_port)]
+        {
+            let p = &mut self.port;
+            p.pairs.reserve(max_pairs.saturating_sub(p.pairs.len()));
+        }
+        #[cfg(not(vesper_port))]
+        let _ = max_pairs;
     }
 
     /// Primitives reserved for.
@@ -222,12 +319,62 @@ impl Lbvh {
                 capacity: self.capacity,
             });
         }
-        if let Some(index) = boxes.iter().position(|b| !b.is_valid()) {
-            return Err(LbvhError::InvalidBox { index });
+        #[cfg(vesper_port)]
+        {
+            self.build_port(boxes)
         }
-        if boxes.is_empty() {
-            return Ok(());
+        #[cfg(not(vesper_port))]
+        {
+            if let Some(index) = boxes.iter().position(|b| !b.is_valid()) {
+                return Err(LbvhError::InvalidBox { index });
+            }
+            if boxes.is_empty() {
+                return Ok(());
+            }
+            self.build_rust(boxes);
+            Ok(())
         }
+    }
+
+    /// The port-backed build of [`Lbvh::build`] after the capacity check
+    /// (which sizes the buffers): the port validates and builds.
+    #[cfg(vesper_port)]
+    fn build_port(&mut self, boxes: &[Aabb]) -> Result<(), LbvhError> {
+        let n = boxes.len();
+        let inner = n.saturating_sub(1);
+        let p = &mut self.port;
+        box_bits(boxes, &mut p.boxes);
+        p.codes.resize(n, 0);
+        p.prims.resize(n, 0);
+        p.leaf.resize(6 * n, 0);
+        p.left.resize(inner, 0);
+        p.right.resize(inner, 0);
+        p.node_box.resize(6 * inner, 0);
+        p.order.resize(n, 0);
+        p.stack.resize(n + 1, 0);
+        crate::port::lbvh_build(
+            &p.boxes,
+            &mut p.codes,
+            &mut p.prims,
+            &mut p.leaf,
+            &mut p.left,
+            &mut p.right,
+            &mut p.node_box,
+            &mut p.order,
+            &mut p.stack,
+        )?;
+        self.keys
+            .extend(p.codes.iter().copied().zip(p.prims.iter().copied()));
+        self.nodes
+            .extend(p.left.iter().zip(&p.right).map(|(&l, &r)| Node {
+                left: child_of(l),
+                right: child_of(r),
+            }));
+        Ok(())
+    }
+
+    #[cfg(not(vesper_port))]
+    fn build_rust(&mut self, boxes: &[Aabb]) {
         // Centroid bounds.
         let centroid = |b: &Aabb, a: usize| det::mul(det::add(b.min[a], b.max[a]), 0.5);
         let mut lo = [f32::INFINITY; 3];
@@ -288,7 +435,6 @@ impl Lbvh {
                 self.node_bounds[k] = l.union(&r);
             }
         }
-        Ok(())
     }
 
     fn bounds_of(&self, c: Child) -> Aabb {
@@ -374,38 +520,82 @@ impl Lbvh {
         if n < 2 {
             return Ok(());
         }
-        for p in 0..n {
-            let mine = self.leaf_bounds[p];
-            self.stack.clear();
-            self.stack.push(Child::Internal(0));
-            while let Some(c) = self.stack.pop() {
-                match c {
-                    Child::Leaf(q) => {
-                        let q = q as usize;
-                        // Report each pair once, from its lower sorted leaf.
-                        if q > p && mine.overlaps(&self.leaf_bounds[q]) {
-                            if out.len() == max_pairs {
-                                out.clear();
-                                return Err(LbvhError::PairOverflow {
-                                    capacity: max_pairs,
-                                });
+        #[cfg(vesper_port)]
+        {
+            let p = &mut self.port;
+            let max = max_pairs.min(u64::MAX as usize - 1) as u64;
+            // Use the scratch already reserved (`4 * capacity` by
+            // `with_capacity`, more by `reserve_pairs`), so queries do not
+            // allocate; only more pairs than that grow this buffer.
+            let room = p.pairs.capacity().min(max_pairs).max(1);
+            if p.pairs.len() < room {
+                p.pairs.resize(room, 0);
+            }
+            loop {
+                let got = crate::port::lbvh_pairs(
+                    &p.codes,
+                    &p.prims,
+                    &p.leaf,
+                    &p.left,
+                    &p.right,
+                    &p.node_box,
+                    &mut p.stack,
+                    &mut p.pairs,
+                    max,
+                );
+                if got == max + 1 {
+                    return Err(LbvhError::PairOverflow {
+                        capacity: max_pairs,
+                    });
+                }
+                if got as usize > p.pairs.len() {
+                    let grow = (2 * p.pairs.len()).min(max_pairs);
+                    p.pairs.resize(grow, 0);
+                    continue;
+                }
+                out.extend(
+                    p.pairs[..got as usize]
+                        .iter()
+                        .map(|&k| ((k >> 32) as u32, k as u32)),
+                );
+                return Ok(());
+            }
+        }
+        #[cfg(not(vesper_port))]
+        {
+            for p in 0..n {
+                let mine = self.leaf_bounds[p];
+                self.stack.clear();
+                self.stack.push(Child::Internal(0));
+                while let Some(c) = self.stack.pop() {
+                    match c {
+                        Child::Leaf(q) => {
+                            let q = q as usize;
+                            // Report each pair once, from its lower sorted leaf.
+                            if q > p && mine.overlaps(&self.leaf_bounds[q]) {
+                                if out.len() == max_pairs {
+                                    out.clear();
+                                    return Err(LbvhError::PairOverflow {
+                                        capacity: max_pairs,
+                                    });
+                                }
+                                let (a, b) = (self.keys[p].1, self.keys[q].1);
+                                out.push((a.min(b), a.max(b)));
                             }
-                            let (a, b) = (self.keys[p].1, self.keys[q].1);
-                            out.push((a.min(b), a.max(b)));
                         }
-                    }
-                    Child::Internal(k) => {
-                        if mine.overlaps(&self.node_bounds[k as usize]) {
-                            let node = self.nodes[k as usize];
-                            self.stack.push(node.right);
-                            self.stack.push(node.left);
+                        Child::Internal(k) => {
+                            if mine.overlaps(&self.node_bounds[k as usize]) {
+                                let node = self.nodes[k as usize];
+                                self.stack.push(node.right);
+                                self.stack.push(node.left);
+                            }
                         }
                     }
                 }
             }
+            out.sort_unstable();
+            Ok(())
         }
-        out.sort_unstable();
-        Ok(())
     }
 }
 

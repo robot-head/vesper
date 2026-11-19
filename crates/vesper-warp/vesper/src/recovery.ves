@@ -1,0 +1,957 @@
+// Module recovery of @vesper/warp (see lib.ves): RFC 9002 loss detection
+// and RTT estimation (recovery.rs). The Rust wrapper owns three buffers
+// sized at construction and lends them: `spaces` (one `RecSpace` per
+// packet-number space, Initial, Handshake, ApplicationData), `ents` (each
+// space's ring of `cap` sent-packet records, space `i` at `ents[i * cap..]`)
+// and `evs` (the congestion events of one call, which the wrapper replays
+// to the caller's sink in order; `st.n_events` of them are live). The ring
+// holds `len` records from `head`: ascending packet numbers, acknowledged
+// and lost ones being tombstones until they reach the front.
+use self::{
+    AckOut,
+    AckRange,
+    PtoOut,
+    RecEntry,
+    RecErr,
+    RecEvent,
+    RecSpace,
+    RecState,
+    Rtt,
+    TimeoutOut
+};
+use self::frame::{
+    fr_wire_next
+};
+use self::pn::{
+    pn_limit
+};
+use self::varint::{
+    sat_add
+};
+
+fn u64_max() -> u64 {
+    18446744073709551615
+}
+
+fn granularity_ns() -> u64 {
+    1000000
+}
+
+// Entry states.
+fn in_flight_st() -> u8 {
+    0
+}
+
+fn newly_acked_st() -> u8 {
+    1
+}
+
+fn acked_st() -> u8 {
+    2
+}
+
+fn lost_st() -> u8 {
+    3
+}
+
+// Event kinds, replayed by the wrapper as `CongestionEvent`s.
+fn ev_acked() -> u8 {
+    0
+}
+
+fn ev_lost() -> u8 {
+    1
+}
+
+fn ev_ecn_ce() -> u8 {
+    2
+}
+
+fn ev_persistent() -> u8 {
+    3
+}
+
+fn spaces_n() -> u64 {
+    3
+}
+
+fn app_space() -> u64 {
+    2
+}
+
+// `x * k` saturating, for the constant factors recovery uses.
+fn sat_mul3(x: u64) -> u64 {
+    if x > u64_max() / 3 {
+        u64_max()
+    } else {
+        wrapping_mul(x, 3)
+    }
+}
+
+fn sat_mul4(x: u64) -> u64 {
+    if x > u64_max() / 4 {
+        u64_max()
+    } else {
+        wrapping_mul(x, 4)
+    }
+}
+
+fn sat_mul1000(x: u64) -> u64 {
+    if x > u64_max() / 1000 {
+        u64_max()
+    } else {
+        wrapping_mul(x, 1000)
+    }
+}
+
+fn sat_sub(a: u64, b: u64) -> u64 {
+    if b > a {
+        0
+    } else {
+        wrapping_sub(a, b)
+    }
+}
+
+fn max64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn min64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn rem(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        0
+    } else {
+        a % b
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RttEstimator
+
+pub fn rtt_new(initial_rtt_ns: u64) -> Rtt {
+    Rtt {
+        latest: 0,
+        min: 0,
+        smoothed: initial_rtt_ns,
+        rttvar: initial_rtt_ns / 2,
+        has_sample: false
+    }
+}
+
+// `(3a + b) / 4` and `(7a + b) / 8` exactly, without a wider type.
+fn three_quarters(a: u64, b: u64) -> u64 {
+    let lo = wrapping_add(wrapping_mul(a % 4, 3), b % 4) / 4;
+    wrapping_add(wrapping_add(wrapping_mul(a / 4, 3), b / 4), lo)
+}
+
+fn seven_eighths(a: u64, b: u64) -> u64 {
+    let lo = wrapping_add(wrapping_mul(a % 8, 7), b % 8) / 8;
+    wrapping_add(wrapping_add(wrapping_mul(a / 8, 7), b / 8), lo)
+}
+
+pub fn rtt_update(inout r: Rtt, latest_ns: u64, ack_delay_ns: u64) {
+    r.latest = latest_ns;
+    if !r.has_sample {
+        r.has_sample = true;
+        r.min = latest_ns;
+        r.smoothed = latest_ns;
+        r.rttvar = latest_ns / 2;
+        return;
+    }
+    r.min = min64(r.min, latest_ns);
+    let adjusted = if latest_ns >= sat_add(r.min, ack_delay_ns) {
+        wrapping_sub(latest_ns, ack_delay_ns)
+    } else {
+        latest_ns
+    };
+    let diff = if r.smoothed > adjusted {
+        wrapping_sub(r.smoothed, adjusted)
+    } else {
+        wrapping_sub(adjusted, r.smoothed)
+    };
+    r.rttvar = three_quarters(r.rttvar, diff);
+    r.smoothed = seven_eighths(r.smoothed, adjusted);
+}
+
+pub fn rtt_pto_base_ns(in r: Rtt) -> u64 {
+    sat_add(r.smoothed, max64(sat_mul4(r.rttvar), granularity_ns()))
+}
+
+// `max(9/8 · max(smoothed, latest), kGranularity)`; 9b/8 = b + b/8.
+pub fn rtt_loss_delay_ns(in r: Rtt) -> u64 {
+    let base = max64(r.smoothed, r.latest);
+    max64(sat_add(base, base / 8), granularity_ns())
+}
+
+// RFC 9000 §19.3: the encoded ACK Delay in nanoseconds, saturating.
+pub fn rec_ack_delay_ns(encoded: u64, exponent: u8) -> u64 eff [Fail[RecErr]] {
+    if exponent > 20 {
+        Fail::raise(
+            RecErr::BadAckDelayExponent {
+                exponent: exponent
+            }
+        );
+    }
+    let e = widen_u32(exponent);
+    let shifted = wrapping_shl_u64(encoded, e);
+    let us = if wrapping_shr_u64(shifted, e) == encoded {
+        shifted
+    } else {
+        u64_max()
+    };
+    sat_mul1000(us)
+}
+
+// ---------------------------------------------------------------------------
+// LossRecovery state
+
+pub fn rec_new(
+    max_ack_delay_ns: u64,
+    initial_rtt_ns: u64,
+    cap: u64,
+    confirmed: bool,
+    pcav: bool,
+    keys: bool,
+    amp: bool,
+) -> RecState {
+    RecState {
+        max_ack_delay_ns: max_ack_delay_ns,
+        initial_rtt_ns: initial_rtt_ns,
+        cap: cap,
+        pto_count: 0,
+        bytes_in_flight: 0,
+        confirmed: confirmed,
+        pcav: pcav,
+        has_handshake_keys: keys,
+        at_amplification_limit: amp,
+        has_first_sample: false,
+        first_sample_ns: 0,
+        last_sent_ns: 0,
+        has_timer: false,
+        timer_deadline_ns: 0,
+        timer_pto: false,
+        timer_space: 0,
+        n_events: 0
+    }
+}
+
+pub fn rec_space_new() -> RecSpace {
+    RecSpace {
+        head: 0,
+        len: 0,
+        has_largest_acked: false,
+        largest_acked: 0,
+        has_last_sent: false,
+        last_sent_pn: 0,
+        has_last_ack_eliciting: false,
+        last_ack_eliciting_ns: 0,
+        has_loss_time: false,
+        loss_time: 0,
+        ack_eliciting_in_flight: 0,
+        ecn_ce: 0,
+        discarded: false
+    }
+}
+
+fn no_entry() -> RecEntry {
+    RecEntry {
+        pn: 0,
+        sent_ns: 0,
+        bytes: 0,
+        ack_eliciting: false,
+        in_flight: false,
+        status: 0
+    }
+}
+
+fn sp_get(in spaces: Slice[RecSpace], i: u64) -> RecSpace {
+    match spaces.try_get(i) {
+        Option::Some(s) => s,
+        Option::None => rec_space_new(),
+    }
+}
+
+fn sp_set(inout spaces: Slice[RecSpace], i: u64, s: RecSpace) {
+    spaces.try_set(i, s);
+}
+
+// The slot of record `k` of space `i`.
+fn slot(in st: RecState, in s: RecSpace, i: u64, k: u64) -> u64 {
+    wrapping_add(wrapping_mul(i, st.cap), rem(wrapping_add(s.head, k), st.cap))
+}
+
+fn ent_get(in ents: Slice[RecEntry], at: u64) -> RecEntry {
+    match ents.try_get(at) {
+        Option::Some(e) => e,
+        Option::None => no_entry(),
+    }
+}
+
+fn emit(inout st: RecState, inout evs: Slice[RecEvent], kind: u8, e: RecEntry, count: u64) {
+    evs
+        .try_set(
+        st.n_events,
+        RecEvent {
+            kind: kind,
+            pn: e.pn,
+            sent_ns: e.sent_ns,
+            bytes: e.bytes,
+            count: count
+        }
+    );
+    st.n_events = wrapping_add(st.n_events, 1);
+}
+
+fn pop_tombstones(in st: RecState, inout s: RecSpace, in ents: Slice[RecEntry], i: u64) {
+    loop {
+        if s.len == 0 {
+            break;
+        }
+        let e = ent_get(in ents, slot(in st, in s, i, 0));
+        if e.status != acked_st() && e.status != lost_st() {
+            break;
+        }
+        s.head = rem(wrapping_add(s.head, 1), st.cap);
+        s.len = wrapping_sub(s.len, 1);
+    }
+}
+
+fn idle(in spaces: Slice[RecSpace]) -> bool {
+    let mut n: u32 = 0;
+    for i in 0..spaces_n() {
+        n = n | sp_get(in spaces, i).ack_eliciting_in_flight;
+    }
+    n == 0
+}
+
+// §7.6.1: `(smoothed + max(4·rttvar, kGranularity) + max_ack_delay) × 3`.
+pub fn rec_pc_duration_ns(in st: RecState, in r: Rtt) -> u64 {
+    sat_mul3(sat_add(rtt_pto_base_ns(in r), st.max_ack_delay_ns))
+}
+
+fn backoff(in st: RecState, d: u64) -> u64 {
+    if st.pto_count >= 64 {
+        return u64_max();
+    }
+    let shifted = wrapping_shl_u64(d, st.pto_count);
+    if wrapping_shr_u64(shifted, st.pto_count) == d {
+        shifted
+    } else {
+        u64_max()
+    }
+}
+
+fn probe_space(in st: RecState) -> u8 {
+    if st.has_handshake_keys {
+        1
+    } else {
+        0
+    }
+}
+
+// The earliest loss time (the first space on a tie) and A.8
+// `GetPtoTimeAndSpace`, in one pass over the spaces. ApplicationData comes
+// last, so the RFC's early return there skips just that space.
+copy struct Scan {
+    loss: PtoOut,
+    pto: PtoOut
+}
+
+fn none_at() -> PtoOut {
+    PtoOut {
+        has: false,
+        t: 0,
+        space: 0
+    }
+}
+
+fn scan(in st: RecState, in r: Rtt, in spaces: Slice[RecSpace], now_ns: u64) -> Scan {
+    // Scalar locals (register-allocated) rather than `PtoOut` values.
+    let duration = backoff(in st, rtt_pto_base_ns(in r));
+    let mut has_loss = false;
+    let mut loss_t: u64 = 0;
+    let mut loss_space: u64 = 0;
+    let mut has_pto = false;
+    let mut pto_t: u64 = 0;
+    let mut pto_space: u64 = 0;
+    let mut idle = true;
+    for i in 0..spaces_n() {
+        let s = sp_get(in spaces, i);
+        if s.has_loss_time && (!has_loss || s.loss_time < loss_t) {
+            has_loss = true;
+            loss_t = s.loss_time;
+            loss_space = i;
+        }
+        if s.ack_eliciting_in_flight != 0 {
+            idle = false;
+            let app = i == app_space();
+            if s.has_last_ack_eliciting && (!app || st.confirmed) {
+                let mut d = duration;
+                if app {
+                    d = sat_add(d, backoff(in st, st.max_ack_delay_ns));
+                }
+                let t = sat_add(s.last_ack_eliciting_ns, d);
+                if !has_pto || t < pto_t {
+                    has_pto = true;
+                    pto_t = t;
+                    pto_space = i;
+                }
+            }
+        }
+    }
+    if idle {
+        has_pto = !st.pcav;
+        pto_t = if has_pto {
+            sat_add(now_ns, duration)
+        } else {
+            0
+        };
+        pto_space = if has_pto {
+            widen_u64(probe_space(in st))
+        } else {
+            0
+        };
+    }
+    Scan {
+        loss: PtoOut {
+            has: has_loss,
+            t: loss_t,
+            space: wrapping_u8(loss_space)
+        },
+        pto: PtoOut {
+            has: has_pto,
+            t: pto_t,
+            space: wrapping_u8(pto_space)
+        }
+    }
+}
+
+pub fn rec_pto_time_and_space(in st: RecState, in r: Rtt, in spaces: Slice[RecSpace], now_ns: u64)
+    -> PtoOut {
+    scan(in st, in r, in spaces, now_ns).pto
+}
+
+// A.8 `SetLossDetectionTimer`.
+fn set_timer(inout st: RecState, in r: Rtt, in spaces: Slice[RecSpace], now_ns: u64) {
+    let sc = scan(in st, in r, in spaces, now_ns);
+    if sc.loss.has {
+        st.has_timer = true;
+        st.timer_deadline_ns = sc.loss.t;
+        st.timer_pto = false;
+        st.timer_space = sc.loss.space;
+    } else if st.at_amplification_limit {
+        st.has_timer = false;
+    } else {
+        st.has_timer = sc.pto.has;
+        st.timer_deadline_ns = sc.pto.t;
+        st.timer_pto = true;
+        st.timer_space = sc.pto.space;
+    }
+}
+
+pub fn rec_set_timer(inout st: RecState, in r: Rtt, in spaces: Slice[RecSpace], now_ns: u64) {
+    set_timer(inout st, in r, in spaces, now_ns);
+}
+
+// Forgets every record of space `i`; returns the in-flight bytes removed.
+// `discard` also marks the space discarded (§6.4).
+pub fn rec_clear_space(
+    inout st: RecState,
+    in r: Rtt,
+    inout spaces: Slice[RecSpace],
+    in ents: Slice[RecEntry],
+    i: u64,
+    discard: bool,
+    now_ns: u64,
+) -> u64 {
+    let mut s = sp_get(in spaces, i);
+    let mut removed: u64 = 0;
+    for k in 0..s.len {
+        let e = ent_get(in ents, slot(in st, in s, i, k));
+        if e.status == in_flight_st() && e.in_flight {
+            removed = wrapping_add(removed, widen_u64(e.bytes));
+        }
+    }
+    s.head = 0;
+    s.len = 0;
+    if discard {
+        s.discarded = true;
+    }
+    s.has_loss_time = false;
+    s.has_last_ack_eliciting = false;
+    s.ack_eliciting_in_flight = 0;
+    sp_set(inout spaces, i, s);
+    st.bytes_in_flight = wrapping_sub(st.bytes_in_flight, removed);
+    st.pto_count = 0;
+    set_timer(inout st, in r, in spaces, now_ns);
+    removed
+}
+
+// A.5 `OnPacketSent`.
+pub fn rec_on_packet_sent(
+    inout st: RecState,
+    in r: Rtt,
+    inout spaces: Slice[RecSpace],
+    inout ents: Slice[RecEntry],
+    i: u64,
+    pkt: RecEntry,
+) eff [Fail[RecErr]] {
+    let mut s = sp_get(in spaces, i);
+    if s.discarded {
+        Fail::raise(
+            RecErr::SpaceDiscarded {
+                space: wrapping_u8(i)
+            }
+        );
+    }
+    if pkt.pn >= pn_limit() {
+        Fail::raise(
+            RecErr::PnOutOfRange {
+                pn: pkt.pn
+            }
+        );
+    }
+    if s.has_last_sent && pkt.pn <= s.last_sent_pn {
+        Fail::raise(
+            RecErr::NonIncreasingPn {
+                pn: pkt.pn,
+                last: s.last_sent_pn
+            }
+        );
+    }
+    if pkt.sent_ns < st.last_sent_ns {
+        Fail::raise(RecErr::ClockWentBackwards);
+    }
+    if !pkt.in_flight {
+        // ACK-only packets are not recorded (see recovery.rs).
+        s.has_last_sent = true;
+        s.last_sent_pn = pkt.pn;
+        sp_set(inout spaces, i, s);
+        st.last_sent_ns = pkt.sent_ns;
+        return;
+    }
+    pop_tombstones(in st, inout s, in ents, i);
+    if s.len >= st.cap {
+        sp_set(inout spaces, i, s);
+        Fail::raise(RecErr::TooManyTracked);
+    }
+    s.has_last_sent = true;
+    s.last_sent_pn = pkt.pn;
+    st.last_sent_ns = pkt.sent_ns;
+    let at = slot(in st, in s, i, s.len);
+    ents
+        .try_set(
+        at,
+        RecEntry {
+            pn: pkt.pn,
+            sent_ns: pkt.sent_ns,
+            bytes: pkt.bytes,
+            ack_eliciting: pkt.ack_eliciting,
+            in_flight: true,
+            status: in_flight_st()
+        }
+    );
+    s.len = wrapping_add(s.len, 1);
+    if pkt.ack_eliciting {
+        s.has_last_ack_eliciting = true;
+        s.last_ack_eliciting_ns = pkt.sent_ns;
+        s.ack_eliciting_in_flight = wrapping_add(s.ack_eliciting_in_flight, 1);
+    }
+    sp_set(inout spaces, i, s);
+    st.bytes_in_flight = wrapping_add(st.bytes_in_flight, widen_u64(pkt.bytes));
+    set_timer(inout st, in r, in spaces, pkt.sent_ns);
+}
+
+// The first record of space `i` with `pn >= smallest` (binary search).
+fn partition_point(in st: RecState, in s: RecSpace, in ents: Slice[RecEntry], i: u64, smallest: u64)
+    -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = s.len;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+        if ent_get(in ents, slot(in st, in s, i, mid)).pn < smallest {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// What marking one ACK range found.
+copy struct Marked {
+    lo: u64,
+    hi: u64,
+    newly_acked: u32,
+    newly_acked_bytes: u64,
+    any_ack_eliciting: bool,
+    has_largest: bool,
+    largest_pn: u64,
+    largest_sent_ns: u64
+}
+
+fn mark_range(
+    in st: RecState,
+    in s: RecSpace,
+    inout ents: Slice[RecEntry],
+    i: u64,
+    smallest: u64,
+    largest: u64,
+    inout m: Marked,
+) {
+    let mut j = partition_point(in st, in s, in ents, i, smallest);
+    loop {
+        if j >= s.len {
+            break;
+        }
+        let at = slot(in st, in s, i, j);
+        let mut e = ent_get(in ents, at);
+        if e.pn > largest {
+            break;
+        }
+        if e.status == in_flight_st() {
+            e.status = newly_acked_st();
+            ents.try_set(at, e);
+            m.lo = min64(m.lo, j);
+            m.hi = max64(m.hi, j);
+            m.newly_acked = wrapping_add(m.newly_acked, 1);
+            m.newly_acked_bytes = wrapping_add(m.newly_acked_bytes, widen_u64(e.bytes));
+            if e.ack_eliciting {
+                m.any_ack_eliciting = true;
+            }
+            if !m.has_largest || e.pn > m.largest_pn {
+                m.has_largest = true;
+                m.largest_pn = e.pn;
+                m.largest_sent_ns = e.sent_ns;
+            }
+        }
+        j = wrapping_add(j, 1);
+    }
+}
+
+// What one loss pass found.
+copy struct Batch {
+    lost: u32,
+    lost_bytes: u64,
+    persistent_congestion: bool
+}
+
+// A.10 `DetectAndRemoveLostPackets` plus §7.6 persistent congestion.
+fn detect_lost(
+    inout st: RecState,
+    in r: Rtt,
+    inout spaces: Slice[RecSpace],
+    inout ents: Slice[RecEntry],
+    inout evs: Slice[RecEvent],
+    i: u64,
+    now_ns: u64,
+) -> Batch {
+    let loss_delay = rtt_loss_delay_ns(in r);
+    let pc_duration = rec_pc_duration_ns(in st, in r);
+    let mut s = sp_get(in spaces, i);
+    let mut batch = Batch {
+        lost: 0,
+        lost_bytes: 0,
+        persistent_congestion: false
+    };
+    s.has_loss_time = false;
+    if !s.has_largest_acked {
+        sp_set(inout spaces, i, s);
+        return batch;
+    }
+    let largest_acked = s.largest_acked;
+    let has_lost_send_time = now_ns >= loss_delay;
+    let lost_send_time = wrapping_sub(now_ns, loss_delay);
+    let mut has_streak = false;
+    let mut streak_start: u64 = 0;
+    for k in 0..s.len {
+        let at = slot(in st, in s, i, k);
+        let mut e = ent_get(in ents, at);
+        if e.pn > largest_acked {
+            break;
+        }
+        if e.status == acked_st() || e.status == newly_acked_st() {
+            has_streak = false;
+        } else if e.status == in_flight_st() {
+            let by_time = has_lost_send_time && e.sent_ns <= lost_send_time;
+            let by_count = largest_acked >= sat_add(e.pn, 3);
+            if by_time || by_count {
+                e.status = lost_st();
+                ents.try_set(at, e);
+                batch.lost = wrapping_add(batch.lost, 1);
+                if e.in_flight {
+                    batch.lost_bytes = wrapping_add(batch.lost_bytes, widen_u64(e.bytes));
+                    st.bytes_in_flight = wrapping_sub(st.bytes_in_flight, widen_u64(e.bytes));
+                    if e.ack_eliciting {
+                        s.ack_eliciting_in_flight = wrapping_sub(s.ack_eliciting_in_flight, 1);
+                    }
+                    emit(inout st, inout evs, ev_lost(), e, 0);
+                }
+                if e.ack_eliciting && st.has_first_sample && e.sent_ns > st.first_sample_ns {
+                    if !has_streak {
+                        has_streak = true;
+                        streak_start = e.sent_ns;
+                    }
+                    if wrapping_sub(e.sent_ns, streak_start) >= pc_duration {
+                        batch.persistent_congestion = true;
+                    }
+                }
+            } else {
+                let t = sat_add(e.sent_ns, loss_delay);
+                if !s.has_loss_time || t < s.loss_time {
+                    s.has_loss_time = true;
+                    s.loss_time = t;
+                }
+            }
+        }
+    }
+    sp_set(inout spaces, i, s);
+    if batch.persistent_congestion {
+        emit(inout st, inout evs, ev_persistent(), no_entry(), 0);
+    }
+    batch
+}
+
+fn no_ack_out() -> AckOut {
+    AckOut {
+        newly_acked: 0,
+        newly_acked_bytes: 0,
+        lost: 0,
+        lost_bytes: 0,
+        has_rtt: false,
+        rtt_latest_ns: 0,
+        rtt_min_ns: 0,
+        rtt_smoothed_ns: 0,
+        rtt_ack_delay_ns: 0,
+        ecn_ce_increase: 0,
+        persistent_congestion: false
+    }
+}
+
+// A.7 `OnAckReceived` for an ACK frame whose ranges are either the wire
+// form (`first_range`, `count` more gap/length pairs in `pairs`) or, when
+// `decoded`, the descending `ranges`.
+pub fn rec_on_ack_received(
+    inout st: RecState,
+    inout r: Rtt,
+    inout spaces: Slice[RecSpace],
+    inout ents: Slice[RecEntry],
+    inout evs: Slice[RecEvent],
+    i: u64,
+    largest: u64,
+    decoded: bool,
+    first_range: u64,
+    count: u64,
+    in pairs: Slice[u8],
+    in ranges: Slice[AckRange],
+    has_ecn: bool,
+    ecn_ce: u64,
+    ack_delay_ns: u64,
+    now_ns: u64,
+) -> AckOut eff [Fail[RecErr]] {
+    st.n_events = 0;
+    let mut s = sp_get(in spaces, i);
+    if s.discarded {
+        Fail::raise(
+            RecErr::SpaceDiscarded {
+                space: wrapping_u8(i)
+            }
+        );
+    }
+    if !s.has_last_sent || largest > s.last_sent_pn {
+        Fail::raise(
+            RecErr::AckOfUnsentPacket {
+                largest_acked: largest
+            }
+        );
+    }
+    if !s.has_largest_acked || largest > s.largest_acked {
+        s.has_largest_acked = true;
+        s.largest_acked = largest;
+    }
+    sp_set(inout spaces, i, s);
+
+    // DetectAndRemoveAckedPackets: mark, remembering the touched span.
+    let mut m = Marked {
+        lo: u64_max(),
+        hi: 0,
+        newly_acked: 0,
+        newly_acked_bytes: 0,
+        any_ack_eliciting: false,
+        has_largest: false,
+        largest_pn: 0,
+        largest_sent_ns: 0
+    };
+    if decoded {
+        for k in 0..ranges.len() {
+            match ranges.try_get(k) {
+                Option::Some(rg) => mark_range(
+                    in st,
+                    in s,
+                    inout ents,
+                    i,
+                    rg.smallest,
+                    rg.largest,
+                    inout m
+                ),
+                Option::None => (),
+            }
+        }
+    } else if first_range <= largest {
+        let mut smallest = wrapping_sub(largest, first_range);
+        mark_range(in st, in s, inout ents, i, smallest, largest, inout m);
+        let mut at: u64 = 0;
+        for k in 0..count {
+            match fr_wire_next(in pairs, at, smallest) {
+                Option::Some(step) => {
+                    mark_range(in st, in s, inout ents, i, step.smallest, step.largest, inout m);
+                    smallest = step.smallest;
+                    at = step.next;
+                },
+                Option::None => break,
+            }
+        }
+    }
+    let mut out = no_ack_out();
+    out.newly_acked = m.newly_acked;
+    out.newly_acked_bytes = m.newly_acked_bytes;
+    if !m.has_largest {
+        return out;
+    }
+
+    if m.largest_pn == largest && m.any_ack_eliciting {
+        let latest = sat_sub(now_ns, m.largest_sent_ns);
+        let delay = if i == 0 {
+            0
+        } else if st.confirmed {
+            min64(ack_delay_ns, st.max_ack_delay_ns)
+        } else {
+            ack_delay_ns
+        };
+        rtt_update(inout r, latest, delay);
+        if !st.has_first_sample {
+            st.has_first_sample = true;
+            st.first_sample_ns = now_ns;
+        }
+        out.has_rtt = true;
+        out.rtt_latest_ns = latest;
+        out.rtt_min_ns = r.min;
+        out.rtt_smoothed_ns = r.smoothed;
+        out.rtt_ack_delay_ns = delay;
+    }
+
+    if has_ecn {
+        let mut s2 = sp_get(in spaces, i);
+        if ecn_ce > s2.ecn_ce {
+            out.ecn_ce_increase = wrapping_sub(ecn_ce, s2.ecn_ce);
+            s2.ecn_ce = ecn_ce;
+            sp_set(inout spaces, i, s2);
+            emit(inout st, inout evs, ev_ecn_ce(), no_entry(), out.ecn_ce_increase);
+        }
+    }
+
+    let batch = detect_lost(inout st, in r, inout spaces, inout ents, inout evs, i, now_ns);
+    out.lost = batch.lost;
+    out.lost_bytes = batch.lost_bytes;
+    out.persistent_congestion = batch.persistent_congestion;
+
+    // OnPacketsAcked.
+    let mut s3 = sp_get(in spaces, i);
+    let mut j = m.lo;
+    loop {
+        if j > m.hi {
+            break;
+        }
+        let at = slot(in st, in s3, i, j);
+        let mut e = ent_get(in ents, at);
+        if e.status == newly_acked_st() {
+            e.status = acked_st();
+            ents.try_set(at, e);
+            if e.in_flight {
+                st.bytes_in_flight = wrapping_sub(st.bytes_in_flight, widen_u64(e.bytes));
+                if e.ack_eliciting {
+                    s3.ack_eliciting_in_flight = wrapping_sub(s3.ack_eliciting_in_flight, 1);
+                }
+                emit(inout st, inout evs, ev_acked(), e, 0);
+            }
+        }
+        j = wrapping_add(j, 1);
+    }
+    pop_tombstones(in st, inout s3, in ents, i);
+    sp_set(inout spaces, i, s3);
+
+    if st.pcav {
+        st.pto_count = 0;
+    }
+    set_timer(inout st, in r, in spaces, now_ns);
+    out
+}
+
+// A.9 `OnLossDetectionTimeout`. `kind` 0 is no action, 1 a loss pass in
+// `space`, 2 a probe.
+pub fn rec_on_timeout(
+    inout st: RecState,
+    in r: Rtt,
+    inout spaces: Slice[RecSpace],
+    inout ents: Slice[RecEntry],
+    inout evs: Slice[RecEvent],
+    now_ns: u64,
+) -> TimeoutOut {
+    st.n_events = 0;
+    let mut out = TimeoutOut {
+        kind: 0,
+        space: 0,
+        lost: 0,
+        packets: 0,
+        anti_deadlock: false
+    };
+    if !st.has_timer || now_ns < st.timer_deadline_ns {
+        return out;
+    }
+    let sc = scan(in st, in r, in spaces, now_ns);
+    let loss = sc.loss;
+    if loss.has {
+        let i = widen_u64(loss.space);
+        let batch = detect_lost(inout st, in r, inout spaces, inout ents, inout evs, i, now_ns);
+        let mut s = sp_get(in spaces, i);
+        pop_tombstones(in st, inout s, in ents, i);
+        sp_set(inout spaces, i, s);
+        set_timer(inout st, in r, in spaces, now_ns);
+        out.kind = 1;
+        out.space = loss.space;
+        out.lost = batch.lost;
+        return out;
+    }
+    out.kind = 2;
+    if idle(in spaces) {
+        out.space = probe_space(in st);
+        out.packets = 1;
+        out.anti_deadlock = true;
+    } else {
+        out.space = if sc.pto.has {
+            sc.pto.space
+        } else {
+            0
+        };
+        out.packets = 2;
+    }
+    if st.pto_count != 4294967295 {
+        st.pto_count = wrapping_add(st.pto_count, 1);
+    }
+    set_timer(inout st, in r, in spaces, now_ns);
+    out
+}

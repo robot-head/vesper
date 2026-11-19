@@ -9,7 +9,7 @@ publish = false
 bytemuck = "=1.25.2"
 ash = { version = "=0.38.0", default-features = false, features = ["loaded", "std"] }
 naga = { version = "=30.0.2", default-features = false, features = ["wgsl-in", "spv-out"] }
-vesper-kinetic = { path = "../vesper-kinetic" }
+vesper-kinetic = { path = "../vesper-kinetic/seed", package = "vesper-kinetic-seed" }
 # The Rust seed copy: the Vesper port of vesper-tensor stays non-default
 # until it reaches performance parity (port wave P1 lane 8, #905).
 vesper-tensor = { path = "../vesper-tensor/seed", package = "vesper-tensor-seed" }

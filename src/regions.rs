@@ -295,6 +295,7 @@ pub fn visit_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         | ExprKind::For { .. }
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_)) => {
             for c in k.control_children().into_iter().flatten() {
                 visit_expr(c, f);
