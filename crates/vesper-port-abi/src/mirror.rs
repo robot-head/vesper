@@ -269,6 +269,13 @@ macro_rules! word_mirrors {
 }
 word_mirrors!(u64, i64, usize, isize, f64);
 
+// SAFETY: `N` mirrors back to back, so `N * T::WORDS` aligned words, and
+// any bits of each element are a value. A Vesper array field `[T; N]`
+// (#1091) is its element cells in order.
+unsafe impl<T: Mirror, const N: usize> Mirror for [T; N] {
+    const WORDS: usize = N * T::WORDS;
+}
+
 // SAFETY: `repr(transparent)` over one `u64`.
 unsafe impl<T: 'static> Mirror for Word<T> {
     const WORDS: usize = 1;
@@ -552,6 +559,19 @@ mod tests {
     }
     const _: () = assert!(core::mem::size_of::<Probe>() == 32);
     const _: () = assert!(core::mem::offset_of!(Probe, c) == 16);
+
+    #[test]
+    fn array_cells_are_their_elements_in_order() {
+        // A Vesper `[i8; 3]` field and a `[Probe; 2]` field (#1091).
+        assert_eq!(<[Word<i8>; 3] as Mirror>::WORDS, 3);
+        assert_eq!(<[Probe; 2] as Mirror>::WORDS, 8);
+        let cells = [Word::new(-1i8), Word::new(2), Word::new(-3)];
+        assert_eq!(mirror_words(&cells), &[u64::MAX, 2, (-3i64) as u64]);
+        let probes = mirror_from_words::<[Probe; 2]>(&[1, 2, 0, 0, 3, u64::MAX, 1, 9]);
+        assert_eq!(probes[1].a, 3);
+        assert_eq!(probes[1].b.get(), -1);
+        assert_eq!(probes[1].c.get(), Some(9));
+    }
 
     #[test]
     fn words_are_canonical() {

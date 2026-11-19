@@ -1897,6 +1897,7 @@ impl Checker<'_> {
                     && crate::numeric::may_overflow(op, kind)
                     && !self.in_range(op, kind, left_fact, self.integer_fact(r, env))
                     && !Self::quotient_in_range(op, kind, left_bounds, self.integer_bounds(r, env))
+                    && !Self::bounds_in_range(op, kind, left_bounds, self.integer_bounds(r, env))
                 {
                     self.overflow_failure(env, e.span.clone());
                 }
@@ -3747,6 +3748,28 @@ impl Checker<'_> {
             _ if op == "/" => b.is_some_and(|b| b != -1) || a.is_some_and(|a| a != kind.min()),
             _ => false,
         }
+    }
+    /// Bounds which prove `+`, `-` or `*` in range: every corner of the
+    /// operands' bounds fits the kind, such as `i + 1` for a `for i in 0..n`
+    /// index with a constant `n` (#1091).
+    fn bounds_in_range(
+        op: &str,
+        kind: crate::numeric::IntegerKind,
+        a: Option<(i128, i128)>,
+        b: Option<(i128, i128)>,
+    ) -> bool {
+        let (Some((alo, ahi)), Some((blo, bhi))) = (a, b) else {
+            return false;
+        };
+        let f = match op {
+            "+" => i128::checked_add,
+            "-" => i128::checked_sub,
+            "*" => i128::checked_mul,
+            _ => return false,
+        };
+        [(alo, blo), (alo, bhi), (ahi, blo), (ahi, bhi)]
+            .into_iter()
+            .all(|(x, y)| f(x, y).is_some_and(|v| v >= kind.min() && v <= kind.max()))
     }
     /// Typecheck `wrapping_add`, `wrapping_sub` or `wrapping_mul`: two
     /// by-value operands of one integer kind, with contextual literal typing.

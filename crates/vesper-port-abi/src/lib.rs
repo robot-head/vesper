@@ -166,6 +166,25 @@ macro_rules! tuple {
         }
     };
 }
+/// A Vesper array `[T; N]` (#1091) is the homogeneous tuple: `N` values of
+/// `T` in order. Bindings name an array of more than [`MAX_TUPLE`] elements
+/// `[T; N]` and any shorter one as a Rust tuple.
+impl<T: Abi, const N: usize> Abi for [T; N] {
+    const WORDS: usize = max(1, N * T::WORDS);
+    fn put(&self, out: &mut [u64]) {
+        for (i, v) in self.iter().enumerate() {
+            v.put(&mut out[i * T::WORDS..]);
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        core::array::from_fn(|i| T::get(&words[i * T::WORDS..]))
+    }
+}
+
+/// The longest tuple with an [`Abi`] impl; a longer homogeneous tuple (a
+/// Vesper array) crosses as a Rust array.
+pub const MAX_TUPLE: usize = 8;
+
 tuple!(A 0);
 tuple!(A 0, B 1);
 tuple!(A 0, B 1, C 2);
@@ -297,6 +316,19 @@ mod tests {
         round_trip(Err::<u64, RuntimeError>(RuntimeError::IndexOutOfBounds));
         round_trip(Ok::<u64, RuntimeError>(u64::MAX));
         round_trip((i8::MIN, -1i16, i32::MIN, isize::MAX, u16::MAX, usize::MAX));
+    }
+
+    #[test]
+    fn arrays_are_their_elements_in_order() {
+        assert_eq!(<[u8; 32] as Abi>::WORDS, 32);
+        assert_eq!(<[(u64, bool); 3] as Abi>::WORDS, 6);
+        assert_eq!(<[u64; 0] as Abi>::WORDS, 1);
+        round_trip([(1u64, true), (u64::MAX, false), (7, true)]);
+        round_trip(core::array::from_fn::<i8, 12, _>(|i| i as i8 - 6));
+        let mut words = [0u64; 9];
+        core::array::from_fn::<u8, 9, _>(|i| 250 + i as u8 / 2).put(&mut words);
+        assert_eq!(words, [250, 250, 251, 251, 252, 252, 253, 253, 254]);
+        round_trip([[1u16, 2], [3, 4], [5, 6]]);
     }
 
     #[test]

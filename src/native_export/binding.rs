@@ -44,12 +44,29 @@ fn camel(name: &str) -> String {
         .collect()
 }
 
+/// The longest tuple `vesper_port_abi::Abi` implements
+/// (`vesper_port_abi::MAX_TUPLE`).
+const MAX_TUPLE: usize = 8;
+
+/// A Vesper array `[T; N]` (#1091) is the homogeneous `N`-tuple, so the
+/// binding cannot tell `[u8; 2]` from `(u8, u8)`. It names a homogeneous
+/// tuple of more than [`MAX_TUPLE`] elements, which no Rust tuple impl
+/// carries, `[T; N]`; shorter ones stay tuples, as before.
+fn array(items: &[AbiType]) -> Option<(&AbiType, usize)> {
+    let first = items.first()?;
+    (items.len() > MAX_TUPLE && items.iter().all(|t| t == first)).then_some((first, items.len()))
+}
+
 fn rust_type(ty: &AbiType, types_path: &str) -> String {
     match ty {
         AbiType::Scalar { name } => match name.as_str() {
             "Unit" => "()".into(),
             other => other.into(),
         },
+        AbiType::Tuple { items } if array(items).is_some() => {
+            let (elem, n) = array(items).expect("array");
+            format!("[{}; {n}]", rust_type(elem, types_path))
+        }
         AbiType::Tuple { items } if items.len() == 1 => {
             format!("({},)", rust_type(&items[0], types_path))
         }
@@ -356,6 +373,10 @@ fn error_variant(ty: &AbiType) -> String {
             args.iter().map(error_variant).collect::<String>()
         ),
         AbiType::Scalar { name } => camel(name),
+        AbiType::Tuple { items } if array(items).is_some() => {
+            let (elem, n) = array(items).expect("array");
+            format!("Array{n}{}", error_variant(elem))
+        }
         AbiType::Tuple { items } => format!(
             "Tuple{}",
             items.iter().map(error_variant).collect::<String>()

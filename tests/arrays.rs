@@ -348,6 +348,65 @@ fn main() -> u64 {
 }
 
 #[test]
+fn loop_index_arithmetic_is_total() {
+    // `i + 1`, `i - 1` and `15 - i` of a constant loop range neither
+    // overflow nor leave the array: no `Fail` at all in these rows.
+    differential(
+        "loop_arith",
+        "fn shifted(in a: [u64; 16]) -> u64 {
+    let mut b = a;
+    for i in 0..15 {
+        b[i] = b[i + 1];
+    }
+    for i in 1..16 {
+        b[i] = wrapping_add(b[i], b[i - 1]);
+    }
+    b[15]
+}
+fn reversed(in a: [u64; 16]) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..16 {
+        s = wrapping_add(wrapping_mul(s, 3), a[15 - i]);
+    }
+    s
+}
+fn main() -> u64 {
+    let mut a: [u64; 16] = [0; 16];
+    for i in 0..16 {
+        a[i] = wrapping_add(wrapping_mul(i, 2), 1);
+    }
+    wrapping_add(shifted(a), reversed(a))
+}",
+        {
+            let a: Vec<u64> = (0..16).map(|i| i * 2 + 1).collect();
+            let mut b = a.clone();
+            for i in 0..15 {
+                b[i] = b[i + 1];
+            }
+            for i in 1..16 {
+                b[i] = b[i].wrapping_add(b[i - 1]);
+            }
+            let r = (0..16).fold(0u64, |s, i| s.wrapping_mul(3).wrapping_add(a[15 - i]));
+            b[15].wrapping_add(r)
+        },
+    );
+    // One past the range overflows the array or the kind.
+    for body in [
+        "for i in 0..16 { s = wrapping_add(s, a[i + 1]); }",
+        "for i in 0..16 { s = wrapping_add(s, a[16 - i]); }",
+        "for i in 0..=17 { s = wrapping_add(s, 16 - i); }",
+        "for i in 0..16 { s = wrapping_add(s, i - 1); }",
+    ] {
+        rejects(
+            &format!(
+                "fn f(in a: [u64; 16]) -> u64 {{ let mut s: u64 = 0; {body} s }} fn main() -> u64 {{ 0 }}"
+            ),
+            "E0401",
+        );
+    }
+}
+
+#[test]
 fn writes_need_mutable_array_places() {
     rejects(
         "fn f() -> u64 { let a: [u64; 2] = [1, 2]; a[0] = 3; a[0] } fn main() -> u64 { 0 }",

@@ -14,9 +14,9 @@ impl Checker<'_> {
             .is_some_and(|(lo, hi)| lo >= 0 && hi < n as i128)
     }
 
-    /// The checker's bounds of `index`, through `+` and `-` of a constant
-    /// (`a[i - 1]`, `a[i + 1]`), which raise on overflow and so cannot wrap,
-    /// and through a mask `x & m` of any `x`.
+    /// The checker's bounds of `index`, through `+` and `-` of bounded
+    /// operands (`a[i - 1]`, `a[i + 1]`, `a[15 - i]`), which raise on
+    /// overflow and so cannot wrap, and through a mask `x & m` of any `x`.
     fn array_index_bounds(&self, index: &Expr, env: &Env, depth: usize) -> Option<(i128, i128)> {
         if let Some(bounds) = self.integer_bounds(index, env) {
             return Some(bounds);
@@ -44,12 +44,12 @@ impl Checker<'_> {
         if !matches!(op.as_str(), "+" | "-") {
             return None;
         }
-        let (lo, hi) = self.array_index_bounds(a, env, depth + 1)?;
-        let c = self.integer_fact(b, env)?;
+        let (alo, ahi) = self.array_index_bounds(a, env, depth + 1)?;
+        let (blo, bhi) = self.array_index_bounds(b, env, depth + 1)?;
         Some(if op == "+" {
-            (lo + c, hi + c)
+            (alo + blo, ahi + bhi)
         } else {
-            (lo - c, hi - c)
+            (alo - bhi, ahi - blo)
         })
     }
 
