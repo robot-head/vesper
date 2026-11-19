@@ -390,6 +390,12 @@ fn main() -> u64 {
             b[15].wrapping_add(r)
         },
     );
+    // Outside a loop index, overflow still needs exact facts, as in the
+    // Lean reference checker (tests/lockstep.rs): `v * 0` keeps its `Fail`.
+    rejects(
+        "fn f(v: i64) -> i64 { (v * 0) / 7 } fn main() -> i64 { 0 }",
+        "E0401",
+    );
     // One past the range overflows the array or the kind.
     for body in [
         "for i in 0..16 { s = wrapping_add(s, a[i + 1]); }",

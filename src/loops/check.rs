@@ -201,6 +201,7 @@ impl Checker<'_> {
                     lo,
                     hi,
                     at: std::sync::Arc::clone(&b.mutation),
+                    looped: true,
                 });
             }
         }

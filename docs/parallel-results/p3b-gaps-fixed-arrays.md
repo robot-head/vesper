@@ -196,11 +196,14 @@ See part 2 below.
 - **`vesper-port-abi`.** `Abi for [T; N]` (elements in order) and
   `Mirror for [T; N]` (`N * T::WORDS` words).
 - **Checker.** Part 1 proved `a[i + 1]` in bounds but still required
-  `Fail[ArithOverflow]` for the `+`. Now `+`, `-` and `*` cannot overflow
-  when every corner of the operands' bounds fits the kind
-  (`src/check.rs`), and index bounds go through `+` and `-` of any bounded
-  operands, so `a[15 - i]` is proved too (`src/arrays/check.rs`). Both are
-  needed for the scoreboard shifts below.
+  `Fail[ArithOverflow]` for the `+`. Now `+`, `-` and `*` with a `for`
+  loop index as an operand cannot overflow when every corner of the
+  operands' bounds fits the kind (`src/check.rs`). Elsewhere overflow
+  still needs exact facts, which keeps `tests/lockstep.rs` in agreement
+  with the Lean reference checker, which has no loops. Index bounds go
+  through `+` and `-` of bounded operands when the right operand is pure,
+  so `a[15 - i]` is proved too (`src/arrays/check.rs`). Both are needed
+  for the scoreboard shifts below.
 - **Manuscript.** Two sentences in the §2.2 arrays paragraph: the loop
   arithmetic rule and the export rule.
 
