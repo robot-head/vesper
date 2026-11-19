@@ -521,6 +521,49 @@ impl Abi for PktType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlainErr {
+    TooLarge { len: u64 },
+    Empty,
+}
+
+impl Abi for PlainErr {
+    const WORDS: usize = 2;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            PlainErr::TooLarge { len: f0 } => {
+                out[0] = 0;
+                Abi::put(f0, &mut out[1..]);
+            }
+            PlainErr::Empty => {
+                out[0] = 1;
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => PlainErr::TooLarge { len: Abi::get(&words[1..]) },
+            1 => PlainErr::Empty,
+            tag => panic!("invalid PlainErr tag {tag} from Vesper"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlainOut { pub plain_len: u64, pub header_len: u64, pub has_ack: bool }
+
+impl Abi for PlainOut {
+    const WORDS: usize = 3;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.plain_len, &mut out[0..]);
+        Abi::put(&self.header_len, &mut out[1..]);
+        Abi::put(&self.has_ack, &mut out[2..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        PlainOut { plain_len: Abi::get(&words[0..]), header_len: Abi::get(&words[1..]), has_ack: Abi::get(&words[2..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PnErr {
     InvalidBits { bits: u32 },
     TruncatedTooWide { truncated: u64, nbits: u32 },
@@ -1037,6 +1080,15 @@ pub mod repr {
         pub len: u64,
     }
 
+    /// Mirror of the Vesper copy struct `PlainOut` (3 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct PlainOut {
+        pub plain_len: u64,
+        pub header_len: u64,
+        pub has_ack: vesper_port_abi::Word<bool>,
+    }
+
     /// Mirror of the Vesper copy struct `Prot` (13 words).
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1367,6 +1419,35 @@ impl repr::LostRange {
     /// The Rust value of the mirror.
     pub fn to_value(&self) -> LostRange {
         <LostRange as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
+// The mirror of `PlainOut` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::PlainOut>() == 3 * 8);
+    assert!(core::mem::align_of::<repr::PlainOut>() == 8);
+    assert!(core::mem::offset_of!(repr::PlainOut, plain_len) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::PlainOut, header_len) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::PlainOut, has_ack) == 2 * 8);
+};
+
+// SAFETY: `repr::PlainOut` is `#[repr(C)]`, 3 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::PlainOut {
+    const WORDS: usize = 3;
+}
+
+impl repr::PlainOut {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &PlainOut) -> Self {
+        let mut words = [0u64; 3];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> PlainOut {
+        <PlainOut as Abi>::get(vesper_port_abi::mirror_words(self))
     }
 }
 
@@ -1934,6 +2015,8 @@ const _: () = assert!(<Option<u32> as Abi>::WORDS == 2);
 const _: () = assert!(<Option<u64> as Abi>::WORDS == 2);
 const _: () = assert!(<Parsed as Abi>::WORDS == 14);
 const _: () = assert!(<PktType as Abi>::WORDS == 1);
+const _: () = assert!(<PlainErr as Abi>::WORDS == 2);
+const _: () = assert!(<PlainOut as Abi>::WORDS == 3);
 const _: () = assert!(<PnErr as Abi>::WORDS == 3);
 const _: () = assert!(<Prot as Abi>::WORDS == 13);
 const _: () = assert!(<PtoOut as Abi>::WORDS == 3);
@@ -1985,6 +2068,7 @@ unsafe extern "C" {
     fn vesper_warp_header_write_short(out: *mut u64, dcid: *mut u64, dcid_len: i64, spin: i64, key_phase: i64, full_pn: i64, pn_len: i64, fail: *mut u64) -> i64;
     fn vesper_warp_header_write_short_to_peer(out: *mut u64, dcid: *mut u64, dcid_len: i64, spin: i64, key_phase: i64, full_pn: i64, pn_len: i64, fail: *mut u64) -> i64;
     fn vesper_warp_header_write_version_negotiation(out: *mut u64, unused: i64, dcid: *mut u64, scid: *mut u64, versions: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_warp_packet_short_plain(result: *mut u64, scratch: *mut u64, rx: *mut u64, ranges: *mut u64, with_ack: i64, now_ns: i64, exponent: i64, app: *mut u64, pn: i64, largest_acked: *mut u64, dcid: *mut u64, dcid_len: i64, key_phase: i64, max_datagram: i64, fail: *mut u64) -> i64;
     fn vesper_warp_pn_decode(largest: *mut u64, truncated: i64, nbits: i64, fail: *mut u64) -> i64;
     fn vesper_warp_pn_len_for(full_pn: i64, largest_acked: *mut u64, fail: *mut u64) -> i64;
     fn vesper_warp_pn_read(result: *mut u64, len: i64, bytes: *mut u64) -> i64;
@@ -2317,6 +2401,37 @@ pub fn header_write_version_negotiation(out: &mut [u8], unused: u8, dcid: &[u8],
         0 => Ok(raw as u64),
         1 => Err(<HdrErr as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_warp_header_write_version_negotiation"),
+    }
+}
+
+/// The errors `packet_short_plain` can raise, in status order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PacketShortPlainError {
+    AckErr(AckErr),
+    FrameErr(FrameErr),
+    HdrErr(HdrErr),
+    PnErr(PnErr),
+    PlainErr(PlainErr),
+}
+
+/// Calls `packet_short_plain` of the Vesper library `warp` (`vesper_warp_packet_short_plain`).
+pub fn packet_short_plain(scratch: &mut [u8], rx: &repr::RxState, ranges: &[repr::AckRange], with_ack: bool, now_ns: u64, exponent: u8, app: &[u8], pn: u64, largest_acked: Option<u64>, dcid: &[u8], dcid_len: u64, key_phase: bool, max_datagram: u64) -> Result<repr::PlainOut, PacketShortPlainError> {
+    let mut result = [0u64; 3];
+    let mut arg_largest_acked = [0u64; <Option<u64> as Abi>::WORDS];
+    Abi::put(&largest_acked, &mut arg_largest_acked);
+    let mut fail = [0u64; 5];
+    // SAFETY: `vesper_warp_packet_short_plain` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(scratch, |view_scratch| vesper_port_abi::with_mirror_slice(ranges, |view_ranges| vesper_port_abi::with_slice(app, |view_app| vesper_port_abi::with_slice(dcid, |view_dcid| unsafe { vesper_warp_packet_short_plain(result.as_mut_ptr(), view_scratch, (rx as *const repr::RxState).cast_mut().cast::<u64>(), view_ranges, with_ack as i64, now_ns as i64, exponent as i64, view_app, pn as i64, arg_largest_acked.as_mut_ptr(), view_dcid, dcid_len as i64, key_phase as i64, max_datagram as i64, fail.as_mut_ptr()) }))));
+    match fail[0] {
+        0 => Ok(vesper_port_abi::mirror_from_words::<repr::PlainOut>(&result[0..])),
+        1 => Err(PacketShortPlainError::AckErr(<AckErr as Abi>::get(&fail[1..]))),
+        2 => Err(PacketShortPlainError::FrameErr(<FrameErr as Abi>::get(&fail[1..]))),
+        3 => Err(PacketShortPlainError::HdrErr(<HdrErr as Abi>::get(&fail[1..]))),
+        4 => Err(PacketShortPlainError::PnErr(<PnErr as Abi>::get(&fail[1..]))),
+        5 => Err(PacketShortPlainError::PlainErr(<PlainErr as Abi>::get(&fail[1..]))),
+        status => panic!("invalid failure status {status} from vesper_warp_packet_short_plain"),
     }
 }
 

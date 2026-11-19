@@ -572,30 +572,38 @@ impl Loader {
     }
 
     fn assemble(&mut self, root: usize) -> Module {
-        // Top-level names of every module: (package, module path) -> names.
-        let mut tables: BTreeMap<ModuleKey, (BTreeSet<String>, BTreeSet<String>)> = BTreeMap::new();
-        for (p, package) in self.packages.iter().enumerate() {
-            for m in &package.modules {
-                let names = m.parsed.items.iter().filter_map(item_name).collect();
-                let public = m.parsed.public_items.iter().cloned().collect();
-                tables.insert((p, m.path.clone()), (names, public));
-            }
+        let packages = std::mem::take(&mut self.packages);
+        let mut resolver = Resolver::new(&packages, root);
+        resolver.reexports();
+        let mut diagnostics = vec![];
+        resolver.overrides(&mut diagnostics);
+        for (file, d) in diagnostics {
+            self.diagnostics.push(PackageDiagnostic {
+                file: Some(file),
+                diagnostic: d,
+            });
         }
-        let root_items: BTreeSet<String> = tables
-            .get(&(root, vec![]))
-            .map(|(n, _)| n.clone())
-            .unwrap_or_default();
+        // Root-module names (own items and re-exports) other modules must
+        // not reach unimported: they keep their plain names in the output.
+        let mut hidden: BTreeMap<String, Kind> = BTreeMap::new();
+        if let Some(t) = resolver.tables.get(&(root, vec![])) {
+            hidden.extend(t.items.iter().map(|(n, k)| (n.clone(), *k)));
+        }
+        if let Some(r) = resolver.reexported.get(&(root, vec![])) {
+            hidden.extend(r.iter().map(|(n, (_, k))| (n.clone(), *k)));
+        }
         // Enum variants keep their names; record each one's owning enum so a
         // module may use it only when it declares or imports that enum.
         let mut variants: BTreeMap<String, (String, String)> = BTreeMap::new();
-        for (p, package) in self.packages.iter().enumerate() {
+        for (p, package) in packages.iter().enumerate() {
             for m in &package.modules {
                 for item in &m.parsed.items {
                     if let Item::Adt(a) = item
                         && a.is_enum
                     {
-                        let owner = self.mangle_in(&self.packages, root, p, &m.path, &a.name);
-                        let shown = self.qualified_in(&self.packages, p, &m.path, &a.name);
+                        let key = (p, m.path.clone(), a.name.clone());
+                        let owner = resolver.name_of(&key);
+                        let shown = resolver.shown(&key);
                         for v in &a.variants {
                             variants
                                 .entry(v.name.clone())
@@ -608,98 +616,58 @@ impl Loader {
         let mut out = Module::default();
         // Variant and operation names stay global; record their owners.
         let mut globals: BTreeMap<String, (String, usize, Span)> = BTreeMap::new();
-        let packages = std::mem::take(&mut self.packages);
         for (p, package) in packages.iter().enumerate() {
             for m in &package.modules {
                 let file = m.file;
                 let base = self.sources.files[file].base;
                 // Names this module binds: its own items, then its imports.
-                let mut names: BTreeMap<String, String> = BTreeMap::new();
-                let own = &tables[&(p, m.path.clone())].0;
-                for n in own {
-                    let mangled = self.mangle_in(&packages, root, p, &m.path, n);
-                    if mangled != *n {
+                let mut names: BTreeMap<String, (String, Kind)> = BTreeMap::new();
+                let own = &resolver.tables[&(p, m.path.clone())].items;
+                for (n, kind) in own {
+                    let key = (p, m.path.clone(), n.clone());
+                    let mangled = resolver.name_of(&key);
+                    if mangled != *n && !resolver.renamed.contains_key(&key) {
                         self.sources
                             .qualified
-                            .insert(mangled.clone(), self.qualified_in(&packages, p, &m.path, n));
+                            .insert(mangled.clone(), resolver.shown(&key));
                     }
-                    names.insert(n.clone(), mangled);
+                    names.insert(n.clone(), (mangled, *kind));
                 }
+                let mut exported = vec![];
                 for u in &m.parsed.uses {
-                    let target_pkg = match &u.package {
-                        None => p,
-                        Some(dep) => match package.deps.get(dep) {
-                            Some(&d) => d,
-                            None => {
-                                let optional = package
-                                    .manifest
-                                    .dependencies
-                                    .iter()
-                                    .any(|(n, d)| n.as_str() == dep && d.optional);
-                                self.error(
-                                    file,
-                                    UNKNOWN_IMPORT,
-                                    if optional {
-                                        format!(
-                                            "{dep} is an optional dependency of {}, and package checking does not enable optional dependencies yet",
-                                            package.name.as_str()
-                                        )
-                                    } else {
-                                        format!(
-                                            "{dep} is not a dependency of {}; add it to [dependencies] in Loom.toml",
-                                            package.name.as_str()
-                                        )
-                                    },
-                                    u.span.clone(),
-                                );
+                    let (target_pkg, target_path, module_shown) =
+                        match resolver.use_module(p, &m.path, u) {
+                            Ok(t) => t,
+                            Err(d) => {
+                                self.diagnostics.push(PackageDiagnostic {
+                                    file: Some(file),
+                                    diagnostic: d,
+                                });
                                 continue;
                             }
-                        },
-                    };
-                    let shown_pkg = if u.package.is_some() {
-                        packages[target_pkg].name.as_str().to_owned()
-                    } else {
-                        "self".to_owned()
-                    };
-                    let module_shown = std::iter::once(shown_pkg)
-                        .chain(u.path.iter().cloned())
-                        .collect::<Vec<_>>()
-                        .join("::");
-                    let Some((items, public)) = tables.get(&(target_pkg, u.path.clone())) else {
-                        self.error(
-                            file,
-                            UNKNOWN_IMPORT,
-                            format!("no module {module_shown}"),
-                            u.span.clone(),
-                        );
-                        continue;
-                    };
-                    let same_module = target_pkg == p && u.path == m.path;
+                        };
+                    let same_module = target_pkg == p && target_path == m.path;
                     for n in &u.names {
-                        if !items.contains(&n.name) {
-                            self.error(
-                                file,
-                                UNKNOWN_IMPORT,
-                                format!("module {module_shown} has no item '{}'", n.name),
-                                n.span.clone(),
-                            );
-                            continue;
-                        }
-                        if !same_module && !public.contains(&n.name) {
-                            self.diagnostics.push(PackageDiagnostic {
-                                file: Some(file),
-                                diagnostic: Diagnostic::new(
-                                    PRIVATE_ITEM,
-                                    format!("'{}' is private to module {module_shown}", n.name),
-                                    n.span.clone(),
-                                )
-                                .with_help("mark the item `pub` to export it"),
-                            });
-                            continue;
-                        }
-                        let target = self.mangle_in(&packages, root, target_pkg, &u.path, &n.name);
+                        let (key, kind) = match resolver.lookup(
+                            target_pkg,
+                            &target_path,
+                            &n.name,
+                            same_module,
+                            &module_shown,
+                            n.span.clone(),
+                        ) {
+                            Ok(found) => found,
+                            Err(d) => {
+                                self.diagnostics.push(PackageDiagnostic {
+                                    file: Some(file),
+                                    diagnostic: d,
+                                });
+                                continue;
+                            }
+                        };
+                        let target = resolver.name_of(&key);
                         let local = n.local().to_owned();
-                        if own.contains(&local) {
+                        if own.contains_key(&local) {
                             self.error(
                                 file,
                                 AMBIGUOUS,
@@ -709,7 +677,7 @@ impl Loader {
                             continue;
                         }
                         match names.get(&local) {
-                            Some(existing) if *existing != target => {
+                            Some((existing, _)) if *existing != target => {
                                 self.error(
                                     file,
                                     AMBIGUOUS,
@@ -718,7 +686,10 @@ impl Loader {
                                 );
                             }
                             _ => {
-                                names.insert(local, target);
+                                if u.public {
+                                    exported.push(target.clone());
+                                }
+                                names.insert(local, (target, kind));
                             }
                         }
                     }
@@ -726,12 +697,11 @@ impl Loader {
                 let is_root_module = p == root && m.path.is_empty();
                 let mut renamer = Renamer {
                     names: &names,
-                    hidden: if is_root_module {
-                        None
-                    } else {
-                        Some(&root_items)
-                    },
+                    hidden: if is_root_module { None } else { Some(&hidden) },
                     variants: &variants,
+                    resolver: &resolver,
+                    package: p,
+                    module: &m.path,
                     shift: base,
                     values: vec![],
                     types: vec![],
@@ -793,34 +763,102 @@ impl Loader {
                     m.parsed
                         .public_items
                         .iter()
-                        .filter_map(|n| names.get(n).cloned()),
+                        .filter_map(|n| names.get(n).map(|(t, _)| t.clone())),
                 );
+                // A root module's `pub use` names are its exports too
+                // (manuscript ch 11.3, "Re-exports").
+                if is_root_module {
+                    out.public_items.extend(exported);
+                }
             }
         }
         self.packages = packages;
         out
     }
-    fn mangle_in(
-        &self,
-        packages: &[Package],
-        root: usize,
-        pkg: usize,
-        path: &[String],
-        item: &str,
-    ) -> String {
-        if pkg == root && path.is_empty() {
-            return item.to_owned();
+}
+
+/// Which namespaces an item's name lives in. Functions are values, effects
+/// are types, and a struct or enum is both (its name is a type and, for a
+/// struct, its constructor; `E::V` paths start at the type). A function
+/// import never shadows a type of the same spelling (`use self::r::u64`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Value,
+    Type,
+    Both,
+}
+impl Kind {
+    fn of(item: &Item) -> Option<(String, Kind)> {
+        match item {
+            Item::Adt(a) => Some((a.name.clone(), Kind::Both)),
+            Item::Function(f) => Some((f.name.clone(), Kind::Value)),
+            Item::Effect(e) => Some((e.name.clone(), Kind::Type)),
+            Item::Impl { .. } | Item::Trait(_) | Item::Conformance(_) => None,
         }
-        mangled(packages[pkg].name.as_str(), path, item)
     }
-    fn qualified_in(
-        &self,
-        packages: &[Package],
-        pkg: usize,
-        path: &[String],
-        item: &str,
-    ) -> String {
-        let mut out = packages[pkg].name.as_str().to_owned();
+    fn has(self, ns: Kind) -> bool {
+        self == Kind::Both || self == ns
+    }
+}
+
+/// One module's declared names.
+struct Table {
+    items: BTreeMap<String, Kind>,
+    public: BTreeSet<String>,
+}
+
+/// (package index, module path, item name).
+type ItemKey = (usize, Vec<String>, String);
+
+/// Module and item lookup over the whole package graph: `use` targets,
+/// qualified paths, re-exports and the internal name of every item.
+struct Resolver<'a> {
+    packages: &'a [Package],
+    root: usize,
+    tables: BTreeMap<ModuleKey, Table>,
+    /// `pub use` names of each module: local name -> the original item.
+    reexported: BTreeMap<ModuleKey, BTreeMap<String, (ItemKey, Kind)>>,
+    /// Items the root module re-exports, renamed to the root's local name
+    /// so the export path sees them as root items (`pub use self::m::f;`).
+    renamed: BTreeMap<ItemKey, String>,
+}
+impl<'a> Resolver<'a> {
+    fn new(packages: &'a [Package], root: usize) -> Self {
+        let mut tables = BTreeMap::new();
+        for (p, package) in packages.iter().enumerate() {
+            for m in &package.modules {
+                tables.insert(
+                    (p, m.path.clone()),
+                    Table {
+                        items: m.parsed.items.iter().filter_map(Kind::of).collect(),
+                        public: m.parsed.public_items.iter().cloned().collect(),
+                    },
+                );
+            }
+        }
+        Resolver {
+            packages,
+            root,
+            tables,
+            reexported: BTreeMap::new(),
+            renamed: BTreeMap::new(),
+        }
+    }
+    /// The internal name of an item: its root re-export name, its plain
+    /// name in the root package's root module, else the mangled name.
+    fn name_of(&self, key: &ItemKey) -> String {
+        if let Some(n) = self.renamed.get(key) {
+            return n.clone();
+        }
+        let (pkg, path, item) = key;
+        if *pkg == self.root && path.is_empty() {
+            return item.clone();
+        }
+        mangled(self.packages[*pkg].name.as_str(), path, item)
+    }
+    /// The display name `@scope/name::m::item`.
+    fn shown(&self, (pkg, path, item): &ItemKey) -> String {
+        let mut out = self.packages[*pkg].name.as_str().to_owned();
         for segment in path {
             out.push_str("::");
             out.push_str(segment);
@@ -829,16 +867,308 @@ impl Loader {
         out.push_str(item);
         out
     }
+    /// The module a `use` names: (package, module path, display name).
+    fn use_module(
+        &self,
+        p: usize,
+        current: &[String],
+        u: &UseDecl,
+    ) -> Result<(usize, Vec<String>, String), Diagnostic> {
+        let (target_pkg, base, shown) =
+            self.root_of(p, current, u.package.as_deref(), u.supers, u.span.clone())?;
+        let mut path = base;
+        path.extend(u.path.iter().cloned());
+        let module_shown = std::iter::once(shown)
+            .chain(u.path.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("::");
+        if !self.tables.contains_key(&(target_pkg, path.clone())) {
+            return Err(Diagnostic::new(
+                UNKNOWN_IMPORT,
+                format!("no module {module_shown}"),
+                u.span.clone(),
+            ));
+        }
+        Ok((target_pkg, path, module_shown))
+    }
+    /// A path root: `self` (the package root), `super` repeated `supers`
+    /// times (ancestors of `current`) or a dependency `@scope/name`.
+    fn root_of(
+        &self,
+        p: usize,
+        current: &[String],
+        package: Option<&str>,
+        supers: usize,
+        span: Span,
+    ) -> Result<(usize, Vec<String>, String), Diagnostic> {
+        if let Some(dep) = package {
+            let owner = &self.packages[p];
+            return match owner.deps.get(dep) {
+                Some(&d) => Ok((d, vec![], self.packages[d].name.as_str().to_owned())),
+                None => {
+                    let optional = owner
+                        .manifest
+                        .dependencies
+                        .iter()
+                        .any(|(n, d)| n.as_str() == dep && d.optional);
+                    Err(Diagnostic::new(
+                        UNKNOWN_IMPORT,
+                        if optional {
+                            format!(
+                                "{dep} is an optional dependency of {}, and package checking does not enable optional dependencies yet",
+                                owner.name.as_str()
+                            )
+                        } else {
+                            format!(
+                                "{dep} is not a dependency of {}; add it to [dependencies] in Loom.toml",
+                                owner.name.as_str()
+                            )
+                        },
+                        span,
+                    ))
+                }
+            };
+        }
+        if supers == 0 {
+            return Ok((p, vec![], "self".to_owned()));
+        }
+        if supers > current.len() {
+            return Err(Diagnostic::new(
+                UNKNOWN_IMPORT,
+                format!(
+                    "`super` goes above the package root: module {} has {} ancestor module(s)",
+                    if current.is_empty() {
+                        "self".to_owned()
+                    } else {
+                        format!("self::{}", current.join("::"))
+                    },
+                    current.len()
+                ),
+                span,
+            ));
+        }
+        let base = current[..current.len() - supers].to_vec();
+        let shown = std::iter::once("self".to_owned())
+            .chain(base.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("::");
+        Ok((p, base, shown))
+    }
+    /// Item `name` of a module: declared there (and `pub`, unless the
+    /// lookup comes from that module), or one of its `pub use` names.
+    fn lookup(
+        &self,
+        pkg: usize,
+        path: &[String],
+        name: &str,
+        same_module: bool,
+        module_shown: &str,
+        span: Span,
+    ) -> Result<(ItemKey, Kind), Diagnostic> {
+        let key = (pkg, path.to_vec());
+        if let Some(table) = self.tables.get(&key)
+            && let Some(&kind) = table.items.get(name)
+        {
+            if !same_module && !table.public.contains(name) {
+                return Err(Diagnostic::new(
+                    PRIVATE_ITEM,
+                    format!("'{name}' is private to module {module_shown}"),
+                    span,
+                )
+                .with_help("mark the item `pub` to export it"));
+            }
+            return Ok(((pkg, path.to_vec(), name.to_owned()), kind));
+        }
+        if let Some((target, kind)) = self.reexported.get(&key).and_then(|r| r.get(name)) {
+            return Ok((target.clone(), *kind));
+        }
+        let d = Diagnostic::new(
+            UNKNOWN_IMPORT,
+            format!("module {module_shown} has no item '{name}'"),
+            span,
+        );
+        Err(
+            if name.starts_with(|c: char| c.is_ascii_uppercase()) && path.is_empty() {
+                d.with_help(
+                    "a `.vsys` library is not an item: every module names it directly, as `Lib::f(..)` and `eff [Ffi[Lib]]`, with no import",
+                )
+            } else {
+                d
+            },
+        )
+    }
+    /// Resolve every module's `pub use` names to the items they re-export,
+    /// following chains of re-exports to a fixed point. Names that do not
+    /// resolve are reported when the module's imports are bound.
+    fn reexports(&mut self) {
+        loop {
+            let mut changed = false;
+            for (p, package) in self.packages.iter().enumerate() {
+                for m in &package.modules {
+                    for u in m.parsed.uses.iter().filter(|u| u.public) {
+                        let Ok((tp, tpath, shown)) = self.use_module(p, &m.path, u) else {
+                            continue;
+                        };
+                        let same = tp == p && tpath == m.path;
+                        for n in &u.names {
+                            let key = (p, m.path.clone());
+                            if self
+                                .reexported
+                                .get(&key)
+                                .is_some_and(|r| r.contains_key(n.local()))
+                            {
+                                continue;
+                            }
+                            if let Ok(found) =
+                                self.lookup(tp, &tpath, &n.name, same, &shown, n.span.clone())
+                            {
+                                self.reexported
+                                    .entry(key)
+                                    .or_default()
+                                    .insert(n.local().to_owned(), found);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    /// Rename the items the root package's root module re-exports to their
+    /// root names: `pub use self::m::f as g;` exports `m::f` as `g`.
+    fn overrides(&mut self, diagnostics: &mut Vec<(usize, Diagnostic)>) {
+        let key = (self.root, vec![]);
+        let Some(reexported) = self.reexported.get(&key) else {
+            return;
+        };
+        let file = self.packages[self.root]
+            .modules
+            .iter()
+            .find(|m| m.path.is_empty())
+            .map(|m| m.file)
+            .unwrap_or(0);
+        let mut renamed: BTreeMap<ItemKey, String> = BTreeMap::new();
+        for (local, (item, _)) in reexported {
+            // `pub use self::f;` in the root module re-exports a root item
+            // under its own name: nothing to rename. `pub use self::f as g;`
+            // renames the root item `f` to `g` like any other re-export.
+            if item.0 == self.root && item.1.is_empty() && item.2 == *local {
+                continue;
+            }
+            if let Some(first) = renamed.get(item) {
+                let span = self.packages[self.root]
+                    .modules
+                    .iter()
+                    .find(|m| m.path.is_empty())
+                    .and_then(|m| {
+                        m.parsed
+                            .uses
+                            .iter()
+                            .flat_map(|u| &u.names)
+                            .find(|n| n.local() == local)
+                    })
+                    .map(|n| n.span.clone())
+                    .unwrap_or(0..0);
+                diagnostics.push((
+                    file,
+                    Diagnostic::new(
+                        AMBIGUOUS,
+                        format!(
+                            "{} is re-exported by the root module as both '{first}' and '{local}'",
+                            self.shown(item)
+                        ),
+                        span,
+                    )
+                    .with_help("an item has one exported name; keep one `pub use`"),
+                ));
+                continue;
+            }
+            renamed.insert(item.clone(), local.clone());
+        }
+        self.renamed = renamed;
+    }
+    /// A qualified path `self::m::f`, `super::m::T::new` or
+    /// `@scope/name::m::E::V`: its root, the longest module path that
+    /// leaves an item, the item, then any `::rest` (an associated name or
+    /// variant), as the item's internal name followed by `::rest`.
+    fn qualified(
+        &self,
+        p: usize,
+        current: &[String],
+        path: &str,
+        span: Span,
+    ) -> Result<String, Diagnostic> {
+        let segments: Vec<&str> = path.split("::").collect();
+        let (package, supers, rest) = if segments[0].starts_with('@') {
+            (Some(segments[0]), 0, &segments[1..])
+        } else if segments[0] == "super" {
+            let n = segments.iter().take_while(|s| **s == "super").count();
+            (None, n, &segments[n..])
+        } else {
+            (None, 0, &segments[1..])
+        };
+        let (pkg, base, shown) = self.root_of(p, current, package, supers, span.clone())?;
+        if rest.is_empty() {
+            return Err(Diagnostic::new(
+                UNKNOWN_IMPORT,
+                format!("the path `{path}` names a module, not an item"),
+                span,
+            ));
+        }
+        // The longest prefix of `rest` that is a module, leaving an item.
+        let mut split = None;
+        for j in (0..rest.len()).rev() {
+            let mut module = base.clone();
+            module.extend(rest[..j].iter().map(|s| (*s).to_owned()));
+            if self.tables.contains_key(&(pkg, module.clone())) {
+                split = Some((j, module));
+                break;
+            }
+        }
+        let Some((j, module)) = split else {
+            return Err(Diagnostic::new(
+                UNKNOWN_IMPORT,
+                format!("no module {shown}"),
+                span,
+            ));
+        };
+        let module_shown = std::iter::once(shown)
+            .chain(rest[..j].iter().map(|s| (*s).to_owned()))
+            .collect::<Vec<_>>()
+            .join("::");
+        let same = pkg == p && module == current;
+        let found = self.lookup(pkg, &module, rest[j], same, &module_shown, span.clone());
+        let (key, _) = match found {
+            // `self::nope::f`: a lower-case segment followed by more is a
+            // module the path names, not a missing item.
+            Err(d)
+                if d.code == UNKNOWN_IMPORT
+                    && j + 1 < rest.len()
+                    && rest[j].starts_with(|c: char| c.is_ascii_lowercase()) =>
+            {
+                return Err(Diagnostic::new(
+                    UNKNOWN_IMPORT,
+                    format!("no module {module_shown}::{}", rest[j]),
+                    span,
+                ));
+            }
+            other => other?,
+        };
+        let mut out = self.name_of(&key);
+        for r in &rest[j + 1..] {
+            out.push_str("::");
+            out.push_str(r);
+        }
+        Ok(out)
+    }
 }
 
-/// The importable name an item declares.
-fn item_name(item: &Item) -> Option<String> {
-    match item {
-        Item::Adt(a) => Some(a.name.clone()),
-        Item::Function(f) => Some(f.name.clone()),
-        Item::Effect(e) => Some(e.name.clone()),
-        Item::Impl { .. } | Item::Trait(_) | Item::Conformance(_) => None,
-    }
+/// A qualified path written in source: `self::..`, `super::..`, `@scope/name::..`.
+fn is_qualified(name: &str) -> bool {
+    name.starts_with("self::") || name.starts_with("super::") || name.starts_with('@')
 }
 
 /// The generic parameters in scope for each trait-bound owner of a module,
@@ -899,12 +1229,17 @@ fn global_names(item: &Item) -> Vec<(String, Span)> {
 /// Renames a module's references to their internal names and shifts its
 /// spans to the module's base offset.
 struct Renamer<'a> {
-    /// Names bound by the module: own items and imports.
-    names: &'a BTreeMap<String, String>,
+    /// Names bound by the module: own items and imports, with the
+    /// namespaces each one lives in.
+    names: &'a BTreeMap<String, (String, Kind)>,
     /// Root-module names this module must not see unimported.
-    hidden: Option<&'a BTreeSet<String>>,
+    hidden: Option<&'a BTreeMap<String, Kind>>,
     /// Enum variant -> (owning enum's internal name, its display name).
     variants: &'a BTreeMap<String, (String, String)>,
+    /// Qualified paths resolve against the whole package graph.
+    resolver: &'a Resolver<'a>,
+    package: usize,
+    module: &'a [String],
     shift: usize,
     /// Value bindings in scope.
     values: Vec<String>,
@@ -916,14 +1251,17 @@ impl Renamer<'_> {
     fn span(&self, s: &mut Span) {
         *s = s.start + self.shift..s.end + self.shift;
     }
-    /// A free name: imported/own item, else left for the checker. A root
-    /// module item reached without an import is reported (local span).
-    fn resolve(&mut self, n: &str, span: &Span) -> Option<String> {
-        if let Some(t) = self.names.get(n) {
+    /// A free name in namespace `ns`: imported/own item, else left for the
+    /// checker. A root module item reached without an import is reported
+    /// (local span).
+    fn resolve(&mut self, n: &str, span: &Span, ns: Kind) -> Option<String> {
+        if let Some((t, kind)) = self.names.get(n)
+            && kind.has(ns)
+        {
             return Some(t.clone());
         }
         if let Some((owner, shown)) = self.variants.get(n)
-            && !self.names.values().any(|t| t == owner)
+            && !self.names.values().any(|(t, _)| t == owner)
         {
             self.diagnostics.push(
                 Diagnostic::new(
@@ -935,7 +1273,10 @@ impl Renamer<'_> {
             );
             return None;
         }
-        if self.hidden.is_some_and(|h| h.contains(n)) {
+        if self
+            .hidden
+            .is_some_and(|h| h.get(n).is_some_and(|k| k.has(ns)))
+        {
             self.diagnostics.push(
                 Diagnostic::new(
                     UNKNOWN_IMPORT,
@@ -943,14 +1284,28 @@ impl Renamer<'_> {
                     span.clone(),
                 )
                 .with_help(format!(
-                    "items of other modules need an import such as `use self::{n};`"
+                    "items of other modules need an import such as `use self::{n};` or a path such as `self::{n}`"
                 )),
             );
         }
         None
     }
+    /// A qualified path, resolved to its internal name (or reported).
+    fn qualified(&mut self, n: &mut String, span: &Span) {
+        match self
+            .resolver
+            .qualified(self.package, self.module, n, span.clone())
+        {
+            Ok(t) => *n = t,
+            Err(d) => self.diagnostics.push(d),
+        }
+    }
     /// A path name `Head::rest` or plain type/effect name.
     fn type_name(&mut self, n: &mut String, span: &Span) {
+        if is_qualified(n) {
+            self.qualified(n, span);
+            return;
+        }
         let (head, rest) = match n.split_once("::") {
             Some((h, r)) => (h.to_owned(), Some(r.to_owned())),
             None => (n.clone(), None),
@@ -958,7 +1313,7 @@ impl Renamer<'_> {
         if self.types.contains(&head) {
             return;
         }
-        if let Some(t) = self.resolve(&head, span) {
+        if let Some(t) = self.resolve(&head, span, Kind::Type) {
             *n = match rest {
                 Some(r) => format!("{t}::{r}"),
                 None => t,
@@ -969,7 +1324,7 @@ impl Renamer<'_> {
         if n.contains("::") {
             self.type_name(n, span);
         } else if !self.values.contains(n)
-            && let Some(t) = self.resolve(n, span)
+            && let Some(t) = self.resolve(n, span, Kind::Value)
         {
             *n = t;
         }
@@ -1033,7 +1388,7 @@ impl Renamer<'_> {
             Item::Adt(a) => {
                 let span = a.span.clone();
                 let old = a.name.clone();
-                if let Some(t) = self.names.get(&old) {
+                if let Some((t, _)) = self.names.get(&old) {
                     a.name = t.clone();
                 }
                 let mark = self.types.len();
@@ -1050,13 +1405,13 @@ impl Renamer<'_> {
                 self.span(&mut a.span);
             }
             Item::Function(f) => {
-                if let Some(t) = self.names.get(&f.name) {
+                if let Some((t, _)) = self.names.get(&f.name) {
                     f.name = t.clone();
                 }
                 self.function(f, &[]);
             }
             Item::Effect(e) => {
-                if let Some(t) = self.names.get(&e.name) {
+                if let Some((t, _)) = self.names.get(&e.name) {
                     e.name = t.clone();
                 }
                 let mark = self.types.len();
@@ -1136,7 +1491,7 @@ impl Renamer<'_> {
             Some((h, r)) => (h, Some(r)),
             None => (owner, None),
         };
-        let Some(t) = self.names.get(head) else {
+        let Some((t, _)) = self.names.get(head) else {
             return owner.to_owned();
         };
         match rest {

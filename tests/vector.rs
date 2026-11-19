@@ -469,6 +469,14 @@ fn lane_values(elem: vector::Elem, n: usize, seed: u64) -> Vec<String> {
                         format!("{:?}", (x % 20_000) as f64 / 8.0 - 1250.0)
                     }
                 }
+                vector::Elem::F32 => {
+                    let special = [0.0, -0.0, 1.5e30, -2.25, 1.0, -7.0e-30];
+                    if i % 3 == 0 {
+                        format!("{:?}", special[(x % special.len() as u64) as usize])
+                    } else {
+                        format!("{:?}", (x % 20_000) as f64 / 8.0 - 1250.0)
+                    }
+                }
                 vector::Elem::I64 => match i % 4 {
                     0 => "-9223372036854775807".into(),
                     1 => ((x as i64) >> 1).to_string(),
@@ -528,6 +536,21 @@ fn shape_program(elem: vector::Elem, n: usize, profile: &str) -> String {
         if Intrinsic::Binary(op).lane_error(elem).is_none() {
             push(lanes_ty.clone(), lanes(&format!("Vec::{name}(a(), b())")));
         }
+    }
+    if elem.is_float() {
+        // Float lane operations (#1086); `sqrt` of negative lanes is NaN.
+        for f in [
+            "sqrt(Vec::abs(a()))",
+            "abs(b())",
+            "neg(a())",
+            "mul_add(a(), b(), a())",
+        ] {
+            push(lanes_ty.clone(), lanes(&format!("Vec::{f}")));
+        }
+        push(
+            elem.bits_elem().name().into(),
+            "Vec::reduce_xor(Vec::to_bits(Vec::neg(a())))".into(),
+        );
     }
     if !elem.is_float() {
         push(lanes_ty.clone(), lanes("Vec::not(a())"));

@@ -50,4 +50,16 @@ const EDITS: &[(&str, &str)] = &[
     ),
     // sap.rs: sortable keys flip the sign test.
     ("if (bits >> 31) == 1 {", "if (bits >> 31) == 0 {"),
+    // crmath.rs: the sine of the third quadrant keeps its sign.
+    ("        quadrant >= 2\n", "        quadrant >= 3\n"),
+    // crmath.rs (bignum): a magnitude's low word drops its upper limb (binary64 mantissas break).
+    (
+        "widen_u64(g32(in a.mag.as_slice(), 0)) | (widen_u64(g32(in a.mag.as_slice(), 1)) << 32)",
+        "widen_u64(g32(in a.mag.as_slice(), 0))",
+    ),
+    // gjk.rs: a separated distance subtracts only the first radius.
+    (
+        "            gd0 - radii,\n            normal,\n",
+        "            gd0 - ra,\n            normal,\n",
+    ),
 ];

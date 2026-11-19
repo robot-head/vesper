@@ -18,9 +18,13 @@ use self::util::{
     gf,
     inc,
     shr_i64,
-    u,
-    sort_pairs,
-    sort_u64
+    u
+};
+use @vesper-std/sort::keyed::{
+    sort_by_key
+};
+use @vesper-std/sort::unstable::{
+    sort
 };
 
 fn leaf_bit() -> u64 {
@@ -206,10 +210,15 @@ pub fn build(
             lo2,
             e2
         );
-        codes.try_set(i, morton64(q0, q1, q2));
+        // Unsorted codes go to the traversal stack, free until a query.
+        stack.try_set(i, morton64(q0, q1, q2));
         prims.try_set(i, wrapping_u32(i));
     }
-    sort_pairs(inout codes, inout prims, n);
+    // Order the primitives by (code, primitive), then gather the codes.
+    sort_by_key(in stack[0..n], inout prims[0..n]);
+    for i in 0..n {
+        codes.try_set(i, g64(in stack, widen_u64(g32(in prims, i))));
+    }
     for i in 0..n {
         let p = wrapping_mul(widen_u64(g32(in prims, i)), 6);
         let at = wrapping_mul(i, 6);
@@ -338,6 +347,6 @@ pub fn pairs(
             }
         }
     }
-    sort_u64(inout out, len);
+    sort(inout out[0..len]);
     len
 }

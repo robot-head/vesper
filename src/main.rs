@@ -353,7 +353,9 @@ fn cli() -> Result<(), String> {
             Some(p) => export_directives_source(p)?,
             None => source.clone(),
         };
-        return lib.build(
+        let foreign = loaded.is_some() && lib.needs_module(&source);
+        let module = foreign.then(|| parsed.module.clone());
+        let built = lib.build(
             &command,
             parsed.module,
             &public,
@@ -365,6 +367,19 @@ fn cli() -> Result<(), String> {
             json,
             !verifiers.is_empty() || verifier_policy.is_some() || tee_measure || codegen.is_some(),
         );
+        // A package that imports `.vsys` libraries is checked by the export
+        // path, whose errors carry offsets into the combined sources. On
+        // failure, check it again through the Bridge lowering to report each
+        // diagnostic at its own file and line.
+        if built.is_err()
+            && let (Some(p), Some(module)) = (&loaded, module)
+            && let Some(ds) =
+                foreign_package_diagnostics(p, &module, &directives_source, target.as_deref())
+        {
+            package_diagnostics(p, &ds, json);
+            return Err(format!("{} semantic error(s)", ds.len()));
+        }
+        return built;
     }
     if command == "check" {
         if json {
@@ -709,6 +724,36 @@ fn diagnostics(file: &str, source: &str, ds: &[Diagnostic], json: bool) {
             }
         }
     }
+}
+
+/// The Bridge lowering's diagnostics for a package that imports `.vsys`
+/// libraries, mapped to their files; `None` when the failure was not a
+/// located source error (the export path's own message stands).
+fn foreign_package_diagnostics(
+    p: &vesper::packages::Assembled,
+    module: &vesper::ast::Module,
+    directives_source: &str,
+    target: Option<&str>,
+) -> Option<Vec<vesper::packages::PackageDiagnostic>> {
+    let directives = vesper::native::export::Directives::parse(directives_source, target).ok()?;
+    let mut imports = vesper::ffi_lowering::Imports::new();
+    for v in &directives.vsys {
+        imports.add(&v.source, v.handler).ok()?;
+    }
+    let error = vesper::ffi_lowering::check_module(module, &imports).err()?;
+    let mut ds: Vec<Diagnostic> = error.diagnostics.clone();
+    if let Some(span) = &error.span {
+        // Bridge errors have a kind, not a diagnostic code.
+        ds.push(Diagnostic::new(
+            "bridge",
+            format!("{:?}: {}", error.kind, error.message),
+            span.clone(),
+        ));
+    }
+    if ds.is_empty() {
+        return None;
+    }
+    Some(ds.iter().map(|d| p.sources.localize(d)).collect())
 }
 
 /// The package source the export path reads `@export` directives from:

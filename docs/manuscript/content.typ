@@ -285,9 +285,10 @@ The following are design intentions; the productions and examples do not yet est
 ```text
 (* ==================== 1. MODULES & TOP-LEVEL DECLARATIONS ============== *)
 Module         ::= ( UseDecl | Attr* Item )* ;
-UseDecl        ::= 'use' UseRoot ( '::' LowerIdent )* '::' UseTarget ';' ;
+UseDecl        ::= Vis? 'use' UseRoot ( '::' LowerIdent )* '::' UseTarget ';' ;
 UseRoot        ::= '@' LowerIdent ( '-' LowerIdent )* '/' LowerIdent  (* dependency *)
-                 | 'self' ;                            (* this package's root *)
+                 | 'self'                              (* this package's root *)
+                 | 'super' ( '::' 'super' )* ;         (* an ancestor module *)
 UseTarget      ::= UseName | '{' UseName ( ',' UseName )* ','? '}' ;
 UseName        ::= ( UpperIdent | LowerIdent ) ( 'as' ( UpperIdent | LowerIdent ) )? ;
 Attr           ::= '@' LowerIdent ( '(' AttrArgs? ')' )?
@@ -379,7 +380,7 @@ PassMode       ::= 'in' | 'inout' | 'out' | 'sink' ;   (* omitted defaults to 'i
 
 PlaceTree      ::= LowerIdent ( '.' PlaceTree )?
                  | '{' PlaceTree ( ',' PlaceTree )* ','? '}' ;
-IndexSel       ::= Expr ( ',' Expr )* | Expr '..' Expr ;
+IndexSel       ::= Expr ( ',' Expr )* | Expr? '..' Expr? ;
 
 WhereClause    ::= 'where' Constraint ( ',' Constraint )* ','? ;
 Constraint     ::= UpperIdent ':' ParamBounds | RefinePred ;
@@ -471,8 +472,9 @@ PrimaryExpr    ::= Literal | TaggedDelimExpr | LowerIdent | '(' ExprList? ')'
                  | Block | Path ( '{' FieldInitList? '}' )? ;
 TaggedDelimExpr ::= TagIdent ( StringLit | '{' SugarToken* '}' ) ;
 TagIdent       ::= LowerIdent ;   (* no trivia between it and the delimiter *)
-Path           ::= ( '@' LowerIdent ( '-' LowerIdent )* '/' LowerIdent '::' )?
-                   UpperIdent ( '::' ( UpperIdent | LowerIdent ) )* ;
+Path           ::= PathRoot? UpperIdent ( '::' ( UpperIdent | LowerIdent ) )*
+                 | PathRoot LowerIdent ;               (* a function of a module *)
+PathRoot       ::= UseRoot '::' ( LowerIdent '::' )* ;  (* qualified path, ch 11.3 *)
 
 (* ==================== 7. PATTERNS & LEXICAL TOKENS ===================== *)
 Pat            ::= '_' | LowerIdent | Literal | '(' PatList? ')'
@@ -483,6 +485,8 @@ FieldPatList   ::= ( LowerIdent ( ':' Pat )? ) ( ',' FieldPatList )? ;
 UpperIdent     ::= /[A-Z][A-Za-z0-9_]*/ ;
 LowerIdent     ::= /[a-z_][A-Za-z0-9_]*/ ;
 ```
+
+*Contextual names.* `state`, `linear` and `with` are keywords only where their forms start (`handle E state p = e in`, `linear struct`, `} with {`); wherever a `LowerIdent` is expected (a binding, parameter, field, member or expression name) they are ordinary names, so `fn f(state: u64)` and `let with = ..` parse. The other keywords cannot be names, and a diagnostic names the keyword it found. *Open intervals.* In `p[a..b]` either bound may be omitted: `p[..b]` is `p[0..b]`, and `p[a..]` and `p[..]` read `p.len()` for the upper bound, so `p` must then be a place path (a name followed by fields).
 
 *Loops and early exits.* `loop`, `for`, `break`, `continue` and `return` are contextual keywords outside their statement positions, and a statement-position `loop`, `for`, `if` or `match` ending in `}` needs no `;`. `loop B` has the join of its `break` values as its type, or `Never` when it has no `break`; `for p in a..b B` and `a..=b` bind successive values of one integer type to the irrefutable pattern `p`, have type `()`, and accept `break` without a value only. `continue` starts the next iteration of the innermost `loop` or `for`: a `for` steps its value first, and the closed range leaves at its bound before incrementing, so `for b in 0..=255` over `u8` does not overflow, with or without `continue`. Like `break`, `continue` cannot leave a closure, handled block or handler clause (`E0213`). In a function or closure whose result is `Option[U]`, `e?` with `e: Option[T]` has type `T`: it continues with the payload of `Some` and returns `None` on `None`, under the rules of `return` (`?` on `Result[T, E]` performs `Fail[E]` as before; `?` on `Option` elsewhere is `E0200`). `return e` leaves the innermost function or closure, including from inside a handled block (skipping the handler's return clause), and is rejected inside handler clauses and region blocks (`E0213`). A linear value live at a `break`, `continue` or `return` that would drop it is rejected (`E0302`), as is a linear value moved by one iteration and needed by the next (`E0312`). An affine value live at a `break`, `continue` or `return`, or bound by an iteration that ends, is dropped there exactly once (boxes, §7.3). Assigning to a `let` binding, or passing it `inout`, requires `let mut` (`E0313`); parameters stay assignable, since `mut` is not part of parameter syntax. `for` over `Slice` and `ChunkSeq` waits for the port-readiness Slice lane.
 
@@ -3115,7 +3119,13 @@ use @demo/geometry::shapes::{Shape, area as shape_area};
 use self::util::clamp;
 ```
 
-Only `Vis`-marked (`pub`) functions, types and effects can be imported; every other item is private to its file. Importing an enum or effect makes its variants or operations usable; variant and operation names share one namespace per program, so two modules may not declare the same one. Trait and named-model names are global in the same way and are never imported: a `trait`, a canonical `impl Trait for Type`, a `model`, a trait bound and a `use model` scope may each appear in any module, and a conformance applies wherever its type is visible. Inherent `impl` blocks for one type may be split across the modules that import the type. Importing a name that is also declared or already imported in the module is an ambiguity error, and an unimported item of another module is not in scope. `pub use` re-exports, imports of whole modules and inline qualified paths such as `geometry::area(x)` are not part of this revision. A `UseDecl` in a file checked on its own (outside a package) is an error.
+Only `Vis`-marked (`pub`) functions, types and effects can be imported; every other item is private to its file. Importing an enum or effect makes its variants or operations usable; variant and operation names share one namespace per program, so two modules may not declare the same one. Trait and named-model names are global in the same way and are never imported: a `trait`, a canonical `impl Trait for Type`, a `model`, a trait bound and a `use model` scope may each appear in any module, and a conformance applies wherever its type is visible. Inherent `impl` blocks for one type may be split across the modules that import the type. Importing a name that is also declared or already imported in the module is an ambiguity error, and an unimported item of another module is not in scope. Imports of whole modules (`use self::m;`) are not part of this revision. A `UseDecl` or a qualified path in a file checked on its own (outside a package) is an error (`E0110`).
+
+*Namespaces.* A function lives in the value namespace, an effect in the type namespace, and a struct or enum in both (its name is a type, a struct's name is also its constructor, and `E::V` starts at the type). An import binds its name only in the namespaces of the item it names, so `use self::reader::u64;` makes `u64(x)` the imported function while `u64` in a type is still the scalar type.
+
+*Qualified paths.* Wherever an item name may appear, in an expression, a struct literal, a type, an effect row or a pattern, a `Path` may start with a `PathRoot`: `self::` (the package root), `super::` (the parent of the current module, repeatable) or `@scope/name::` (a dependency). The longest prefix of the following segments that is a module selects the module, the next segment is the item, and any further segments are an associated function or variant of it, as in `self::codec::shape::Point::new(3)` and `self::codec::shape::Tag::Small(n)`. A path needs no `use`, and it follows the import rules: the item must be `pub` unless the path names the current module (`E0112`), and an unknown module or item is `E0111`. `super` above the package root is `E0111`. A `.vsys` library is not an item: every module of the package names it directly (`Lib::f(..)`, `eff [Ffi[Lib]]`), with no import.
+
+*Re-exports.* `pub use` binds its names like `use` and also makes them items of the importing module that other modules may import or reach by path; a chain of re-exports resolves to the original item. A library package's exports are the `pub` functions of its root module, so the root module exports a submodule's or a dependency's function by re-exporting it: `pub use self::frontier::{advance, merge as frontier_merge};` exports `vesper_<library>_advance` and `vesper_<library>_frontier_merge`. A re-exported item takes its root name everywhere, so one item has one exported name: re-exporting it twice from the root module is an ambiguity error (`E0113`). Submodule items that are not re-exported stay internal, under the collision-free internal names above.
 
 Every resolved node in `Loom.lock` records four cryptographic anchors: `source_blake3` (unpacked source Merkle digest), `interface_mif` (`mif:blake3:...` digest of exported types, `ModeVec` bounds, projections, refinements, and effect rows), `effective_capabilities` (verified transitive effect set), and `provenance` (Sigstore Rekor index, `Lila` builder signatures, and `.olean` certificate digest).
 
@@ -3639,6 +3649,8 @@ Vesper Vector exposes two interoperable layers lowered through Cranelift SSA IR:
 + *Fixed-Width Portable Vectors (`copy struct Vec[T: SimdElem, N]`):*
   - Supports lane scalars `u8, i8, u16, i16, u32, i32, u64, i64, f32, f64` at `128`, `256`, and `512` bits.
   - Provides total lane-wise arithmetic (`wrapping_add`, `saturating_sub`, `mul_add`), typed masks `Mask[T, N]`, compile-time checked `swizzle`, horizontal reductions (`reduce_add`, `reduce_xor`, `bitmask`), and bounds-checked loads/stores on `ByteSlice` and `AlignedSlice[T, 64]`.
+  - The implemented subset (`src/vector.rs`) has lanes `u8, u32, u64, i64, f32, f64`. Float lanes are IEEE binary32 or binary64 at their own width: `add`, `sub`, `mul`, `div`, `min`, `max`, `sqrt`, `abs`, `neg` and `mul_add(a, b, c)`, which computes `a * b + c` with one rounding on every backend (a fused instruction where the ISA has one, the correctly rounded C `fmaf`/`fma` otherwise). Lane conversions keep the lane count: `to_bits` (`f32` to `u32`, `f64` to `u64`), `from_bits`, `widen_f64` (exact) and `nearest_f32` (round to nearest even); a conversion whose result is wider than its operand needs the profile of the result's width.
+  - Slice loads and stores move a whole vector between lanes and a `Slice[T]` or `ChunkSeq[T]` of the lane type: `Vec::load[T, N](in s, at)` and `Vec::store(inout s, at, v)` check `at + N <= s.len()` once and raise `Fail[RuntimeError]` (`IndexOutOfBounds`) otherwise, writing nothing; `Vec::load_masked[T, N](in s, at)` and `Vec::store_masked(inout s, at, v)` are total, with the tail mask `Mask::active[T, N](at, s.len())`: inactive lanes load zero and are not stored.
 + *Length-Agnostic Predicated Strip-Mining (`VVec[P, T]` and `VMask[P, T]`):*
   - `P::active_mask[T](offset, total_len)` computes a hardware predicate mask covering `min(VL_lanes, total_len - offset)` active lanes.
   - `VVec::load_masked(in slice, offset, mask, passthru)` and `VVec::store_masked(inout slice, offset, mask, vec)` lower directly to fault-suppressing predicated instructions (`whilelo` + `ld1b` on Arm SVE2; `vsetvli` + `vle8.v` on RISC-V RVV 1.0; `k1` opmask `vmovdqu8` on AVX-512; unrolled vector body + synthesized masked tail on AVX2/NEON):
@@ -4195,7 +4207,7 @@ pub fn verify_wire_struct_layout(
 
 === 16.6 Exporting Vesper Libraries (`vesper build --lib`)
 <ch-15-6>
-Bridge imports foreign code. The export direction lets Rust and C link compiled Vesper, which is how crates are ported one at a time (`docs/maintenance/porting-a-crate.md`). `vesper build --lib` emits one object in which every `pub fn` of the module is the C-ABI symbol `vesper_<library>_<fn>`, with the target's C calling convention. ABI `vesper.native.export-abi/1` fixes the rest:
+Bridge imports foreign code. The export direction lets Rust and C link compiled Vesper, which is how crates are ported one at a time (`docs/maintenance/porting-a-crate.md`). `vesper build --lib` emits one object in which every `pub fn` of the module (for a package, of its root module, including the functions it re-exports with `pub use`; #link(<ch-10-3>)[Section 11.3]) is the C-ABI symbol `vesper_<library>_<fn>`, with the target's C calling convention. ABI `vesper.native.export-abi/1` fixes the rest:
 
 - *Values* are the eight-byte-word layouts of the native backend: a scalar is one word, products are their fields in order, enums are a tag word (the variant index) followed by the variant's fields, padded to the largest variant. The words past the active variant's fields are its *inactive payload*: their contents are unspecified (a value built through a wider variant may leave its words there), and no operation observes them. Equality, ordering, hashing, `match`, drops and every conversion at the boundary read the tag first and then only the active variant's fields, and a copy may carry the inactive words along unchanged. Scalars pass by value (`f64` as a double and `f32` as a single-precision float, both in the platform's float registers; inside an aggregate or a sequence buffer an `f32` is the low half of its word, and the high half is unspecified); aggregates pass as a pointer to a scratch copy of their words, and an aggregate result is written through a leading result pointer.
 - *`Fail[E1], ..., Fail[En]`* adds a trailing failure-record pointer. Its first word is the status: the caller stores 0; on return 0 means success and `k` means the `k`-th `Fail` of the row was raised, with the error value in the following words.

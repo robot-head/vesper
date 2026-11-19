@@ -2,7 +2,8 @@
 # Port P3b lane 4 (#1066), sourced by scripts/test-port-harness.sh (which
 # defines `divergent`): vesper-warp's tests pass against its Rust build (the
 # default) and against the Vesper port of varint, packet_number, header,
-# frame, ack, recovery, the stream buffers and the lifecycle tokens, and each divergent edit
+# frame, ack, recovery, the stream buffers, the lifecycle tokens and the
+# endpoint's packet assembly, and each divergent edit
 # (DIVERGENT_EDITS in crates/vesper-warp/build.rs, applied one at a time)
 # fails a test of its module while another test of the same file still
 # passes.
@@ -23,5 +24,6 @@ ack --test=ack_tracking delayed_ack_policy merges_ranges_and_detects_duplicates
 recovery --test=recovery packet_threshold_then_time_threshold rtt_estimator_and_ack_delay_rules
 stream --lib stream::tests::recv_buf_reassembles_with_wrap stream::tests::send_buf_retransmits_only_unacked_lost_bytes
 lifecycle --lib lifecycle::tests::tokens_round_trip_and_refuse_what_they_must lifecycle::tests::reset_tokens_are_keyed_and_compared_whole
+packet --test=review_fixes explicit_key_update_is_accepted_by_the_peer a_full_launch_queue_backpressures_instead_of_sending_early
 CHECKS
 unset VESPER_WARP_DIVERGE

@@ -11,6 +11,7 @@ vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
     manifest = "vesper/Loom.toml",
+    deps = ["//:std_sort_package"],
 )
 
 vesper_port_object(
@@ -71,6 +72,24 @@ filegroup(
             "sap",
             "if (bits >> 31) == 1 {",
             "if (bits >> 31) == 0 {",
+        ),
+        (
+            "crmath",
+            "crmath",
+            "        quadrant >= 2\n",
+            "        quadrant >= 3\n",
+        ),
+        (
+            "bignum",
+            "bignum",
+            "widen_u64(g32(in a.mag.as_slice(), 0)) | (widen_u64(g32(in a.mag.as_slice(), 1)) << 32)",
+            "widen_u64(g32(in a.mag.as_slice(), 0))",
+        ),
+        (
+            "gjk",
+            "gjk",
+            "            gd0 - radii,\n            normal,\n",
+            "            gd0 - ra,\n            normal,\n",
         ),
     ]
 ]

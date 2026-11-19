@@ -57,4 +57,6 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "in token[41..wrapping_add(41, len)]",
         "in token[40..wrapping_add(40, len)]",
     ),
+    // packet.ves (endpoint.rs): 1-RTT packets always carry key phase 0.
+    ("packet", "let phase = key_phase;", "let phase = false;"),
 ];
