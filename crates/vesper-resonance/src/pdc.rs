@@ -29,6 +29,7 @@
 //! per-sample evaluation, which this slice does not provide.
 
 use crate::slab::{DelaySlab, SlabError, SlabRead, TiledSlab};
+#[cfg(not(vesper_port))]
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -210,7 +211,114 @@ impl fmt::Display for PdcError {
 
 impl std::error::Error for PdcError {}
 
+/// The graph as the port reads it (vesper/src/pdc.ves).
+#[cfg(vesper_port)]
+fn graph_words(nodes: &[NodeSpec]) -> Vec<u64> {
+    let inputs: usize = nodes.iter().map(|n| n.inputs.len()).sum();
+    let mut g = Vec::with_capacity(4 * nodes.len() + 3 * inputs);
+    let mut first = 0u64;
+    for node in nodes {
+        let count = node.inputs.len() as u64;
+        g.extend_from_slice(&[u64::from(node.id.0), u64::from(node.latency), first, count]);
+        first += count;
+    }
+    for node in nodes {
+        for input in &node.inputs {
+            g.extend_from_slice(&match *input {
+                Input::Forward(src) => [0, u64::from(src.0), 0],
+                Input::Feedback { from, delay } => [1, u64::from(from.0), u64::from(delay)],
+            });
+        }
+    }
+    g
+}
+
 /// Compile `nodes` into a delay-compensated schedule.
+#[cfg(vesper_port)]
+pub fn compile_schedule(nodes: &[NodeSpec]) -> Result<Schedule, PdcError> {
+    let g = graph_words(nodes);
+    let w = crate::port::compile_schedule(&g, nodes.len() as u64);
+    let id = |k: usize| NodeId(w[k] as u32);
+    match w[0] {
+        0 => {}
+        1 => return Err(PdcError::DuplicateNode(id(1))),
+        2 => return Err(PdcError::UnknownNode(id(1))),
+        3 => {
+            return Err(PdcError::CycleWithoutDelay {
+                nodes: (0..w[1] as usize).map(|k| id(2 + k)).collect(),
+            });
+        }
+        4 => {
+            return Err(PdcError::ZeroDelayFeedback {
+                from: id(1),
+                to: id(2),
+            });
+        }
+        5 => return Err(PdcError::LatencyOverflow(id(1))),
+        code => panic!("the Vesper port of vesper-resonance returned schedule status {code}"),
+    }
+    let buffer_count = w[1] as usize;
+    let (nops, nlines) = (w[2] as usize, w[3] as usize);
+    let mut k = 4;
+    let mut ops = Vec::with_capacity(nops);
+    for _ in 0..nops {
+        let header = &w[k..k + 6];
+        k += 6;
+        let mut inputs = Vec::with_capacity(header[5] as usize);
+        for _ in 0..header[5] {
+            let i = &w[k..k + 7];
+            k += 7;
+            inputs.push(if i[0] == 0 {
+                InputSource::Forward {
+                    from: NodeId(i[1] as u32),
+                    compensation: i[2] as u32,
+                    buffer: i[3] as usize,
+                    line: (i[4] == 1).then_some((i[5] as usize, i[6] as usize)),
+                }
+            } else {
+                InputSource::Feedback {
+                    from: NodeId(i[1] as u32),
+                    delay: i[2] as u32,
+                    line: i[5] as usize,
+                    buffer: i[6] as usize,
+                }
+            });
+        }
+        let nfeeds = w[k] as usize;
+        let feeds = w[k + 1..k + 1 + nfeeds]
+            .iter()
+            .map(|&l| l as usize)
+            .collect();
+        k += 1 + nfeeds;
+        ops.push(ScheduledOp {
+            node: NodeId(header[0] as u32),
+            spec_index: header[1] as usize,
+            inputs,
+            output: header[2] as usize,
+            feeds,
+            arrival_latency: header[3],
+            output_latency: header[4],
+        });
+    }
+    let lines = w[k..k + 3 * nlines]
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|l| LineSpec {
+            from: NodeId(l[0] as u32),
+            delay: l[1] as u32,
+            feedback: l[2] == 1,
+        })
+        .collect();
+    Ok(Schedule {
+        ops,
+        lines,
+        buffer_count,
+    })
+}
+
+/// Compile `nodes` into a delay-compensated schedule.
+#[cfg(not(vesper_port))]
 pub fn compile_schedule(nodes: &[NodeSpec]) -> Result<Schedule, PdcError> {
     let n = nodes.len();
     let mut index_of = std::collections::BTreeMap::new();
@@ -410,6 +518,60 @@ pub struct DelayLine {
     head: usize,
 }
 
+#[cfg(vesper_port)]
+impl DelayLine {
+    /// A silent line of `delay` samples for blocks of `block` samples.
+    pub fn new(delay: u32, block: usize) -> Result<Self, PdcError> {
+        let len = crate::port::line_len(u64::from(delay), block as u64).map_err(PdcError::from)?;
+        Ok(DelayLine {
+            buf: vec![0.0; len as usize],
+            delay: delay as usize,
+            head: 0,
+        })
+    }
+
+    /// Write this block's input samples.
+    pub fn write(&mut self, input: &[f32]) {
+        use crate::port::{bits, bits_mut};
+        crate::port::ok(crate::port::line_write(
+            bits_mut(&mut self.buf),
+            self.head as u64,
+            bits(input),
+        ));
+    }
+
+    /// Read this block's delayed samples.
+    pub fn read(&self, out: &mut [f32]) {
+        use crate::port::{bits, bits_mut};
+        crate::port::ok(crate::port::line_read(
+            bits(&self.buf),
+            self.head as u64,
+            self.delay as u64,
+            bits_mut(out),
+        ));
+    }
+
+    /// Advance by one block.
+    pub fn advance(&mut self, block: usize) {
+        self.head = crate::port::ok(crate::port::line_advance(
+            self.head as u64,
+            block as u64,
+            self.buf.len() as u64,
+        )) as usize;
+    }
+}
+
+#[cfg(vesper_port)]
+impl From<crate::port::PdcFault> for PdcError {
+    fn from(f: crate::port::PdcFault) -> Self {
+        match f {
+            crate::port::PdcFault::DelayTooLong(d) => PdcError::DelayTooLong(d as u32),
+            crate::port::PdcFault::BadBlockLength(b) => PdcError::BadBlockLength(b as usize),
+        }
+    }
+}
+
+#[cfg(not(vesper_port))]
 impl DelayLine {
     /// A silent line of `delay` samples for blocks of `block` samples.
     pub fn new(delay: u32, block: usize) -> Result<Self, PdcError> {
@@ -516,36 +678,7 @@ impl CompiledGraph {
             });
         }
         let schedule = compile_schedule(nodes)?;
-        for node in nodes {
-            for input in &node.inputs {
-                if let Input::Feedback { from, delay } = *input
-                    && (delay as usize) < block
-                {
-                    return Err(PdcError::FeedbackShorterThanBlock {
-                        from,
-                        to: node.id,
-                        delay,
-                        block,
-                    });
-                }
-            }
-        }
-        let mut line_delays = Vec::with_capacity(schedule.lines.len());
-        for l in &schedule.lines {
-            if l.delay > MAX_DELAY_SAMPLES {
-                return Err(PdcError::DelayTooLong(l.delay));
-            }
-            line_delays.push(l.delay);
-        }
-        for op in &schedule.ops {
-            let aliased = op.inputs.iter().any(|i| {
-                i.read_buffer() == op.output
-                    || matches!(*i, InputSource::Forward { buffer, line: Some(_), .. } if buffer == op.output)
-            });
-            if aliased {
-                return Err(PdcError::OutputAliasesInput(op.node));
-            }
-        }
+        let line_delays = check_graph(nodes, &schedule, block)?;
         let buffers = TiledSlab::new(schedule.buffer_count, block).map_err(PdcError::Slab)?;
         let lines = DelaySlab::new(&line_delays, block).map_err(PdcError::Slab)?;
         Ok(CompiledGraph {
@@ -627,10 +760,64 @@ impl CompiledGraph {
     }
 }
 
+/// The checks `CompiledGraph::new` makes after compiling the schedule; the
+/// delay of every line.
+fn check_graph(
+    nodes: &[NodeSpec],
+    schedule: &Schedule,
+    block: usize,
+) -> Result<Vec<u32>, PdcError> {
+    for node in nodes {
+        for input in &node.inputs {
+            if let Input::Feedback { from, delay } = *input
+                && (delay as usize) < block
+            {
+                return Err(PdcError::FeedbackShorterThanBlock {
+                    from,
+                    to: node.id,
+                    delay,
+                    block,
+                });
+            }
+        }
+    }
+    let mut line_delays = Vec::with_capacity(schedule.lines.len());
+    for l in &schedule.lines {
+        if l.delay > MAX_DELAY_SAMPLES {
+            return Err(PdcError::DelayTooLong(l.delay));
+        }
+        line_delays.push(l.delay);
+    }
+    for op in &schedule.ops {
+        let aliased = op.inputs.iter().any(|i| {
+            i.read_buffer() == op.output
+                || matches!(*i, InputSource::Forward { buffer, line: Some(_), .. } if buffer == op.output)
+        });
+        if aliased {
+            return Err(PdcError::OutputAliasesInput(op.node));
+        }
+    }
+    Ok(line_delays)
+}
+
 /// Sums all inputs, then applies a gain.
 #[derive(Clone, Copy, Debug)]
 pub struct MixGain(pub f32);
 
+#[cfg(vesper_port)]
+impl DspProcessor for MixGain {
+    fn process(&mut self, inputs: &Inputs<'_>, output: &mut [f32]) {
+        use crate::port::{bits, bits_mut, ok};
+        let out = bits_mut(output);
+        ok(crate::port::zero(out));
+        for k in 0..inputs.len() {
+            ok(crate::port::accumulate(out, bits(inputs.get(k))));
+        }
+        ok(crate::port::scale(out, self.0.to_bits()));
+    }
+}
+
+#[cfg(not(vesper_port))]
 impl DspProcessor for MixGain {
     fn process(&mut self, inputs: &Inputs<'_>, output: &mut [f32]) {
         output.fill(0.0);
@@ -667,6 +854,31 @@ impl LatentMix {
     }
 }
 
+#[cfg(vesper_port)]
+impl DspProcessor for LatentMix {
+    fn process(&mut self, inputs: &Inputs<'_>, output: &mut [f32]) {
+        use crate::port::{bits, bits_mut, ok};
+        let n = output.len().min(self.scratch.len());
+        let sum = &mut self.scratch[..n];
+        ok(crate::port::zero(bits_mut(sum)));
+        for k in 0..inputs.len() {
+            ok(crate::port::accumulate(bits_mut(sum), bits(inputs.get(k))));
+        }
+        match &mut self.line {
+            None => ok(crate::port::copy_samples(
+                bits_mut(&mut output[..n]),
+                bits(sum),
+            )),
+            Some(line) => {
+                line.write(sum);
+                line.read(&mut output[..n]);
+                line.advance(n);
+            }
+        }
+    }
+}
+
+#[cfg(not(vesper_port))]
 impl DspProcessor for LatentMix {
     fn process(&mut self, inputs: &Inputs<'_>, output: &mut [f32]) {
         let n = output.len().min(self.scratch.len());
@@ -685,5 +897,126 @@ impl DspProcessor for LatentMix {
                 line.advance(n);
             }
         }
+    }
+}
+
+/// A built-in processor for [`render_builtin_graph`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BuiltinKind {
+    /// The deterministic test source: sample `t` is
+    /// `((t * 7919 + seed * 31) % 97) / 97 - 0.5`; it ignores its inputs.
+    Source(u32),
+    /// [`LatentMix`] with the node's latency.
+    Latent,
+    /// [`MixGain`] with this gain.
+    Gain(f32),
+}
+
+/// The deterministic source of [`BuiltinKind::Source`].
+#[cfg(not(vesper_port))]
+struct BuiltinSource {
+    seed: u64,
+    t: u64,
+}
+
+#[cfg(not(vesper_port))]
+impl DspProcessor for BuiltinSource {
+    fn process(&mut self, _inputs: &Inputs<'_>, output: &mut [f32]) {
+        for y in output.iter_mut() {
+            let x = self
+                .t
+                .wrapping_mul(7919)
+                .wrapping_add(self.seed.wrapping_mul(31))
+                % 97;
+            *y = x as f32 / 97.0 - 0.5;
+            self.t += 1;
+        }
+    }
+}
+
+/// Run `blocks` blocks of a graph of built-in processors (one per node, in
+/// spec order) and return the last block of node `sink` (a sink node).
+///
+/// The Rust build runs a [`CompiledGraph`] of `Box<dyn DspProcessor>`; the
+/// port build runs the whole graph in Vesper, with its processors as
+/// `Box[dyn DspProcessor]` objects in one sequence (vesper/src/graph.ves).
+/// Both give the same samples bit for bit.
+pub fn render_builtin_graph(
+    nodes: &[NodeSpec],
+    kinds: &[BuiltinKind],
+    block: usize,
+    blocks: usize,
+    sink: NodeId,
+) -> Result<Vec<f32>, PdcError> {
+    if kinds.len() != nodes.len() {
+        return Err(PdcError::ProcessorCount {
+            nodes: nodes.len(),
+            processors: kinds.len(),
+        });
+    }
+    #[cfg(vesper_port)]
+    {
+        // The checks of `LatentMix::new` (in node order, as the Rust build
+        // builds the processors) and `CompiledGraph::new`, then the Vesper run.
+        for (n, k) in nodes.iter().zip(kinds) {
+            if matches!(k, BuiltinKind::Latent) && n.latency > 0 {
+                if n.latency > MAX_DELAY_SAMPLES {
+                    return Err(PdcError::DelayTooLong(n.latency));
+                }
+                if block == 0 || block > MAX_DELAY_SAMPLES as usize {
+                    return Err(PdcError::BadBlockLength(block));
+                }
+            }
+        }
+        if block == 0 || block > MAX_DELAY_SAMPLES as usize {
+            return Err(PdcError::BadBlockLength(block));
+        }
+        let schedule = compile_schedule(nodes)?;
+        let line_delays = check_graph(nodes, &schedule, block)?;
+        TiledSlab::new(schedule.buffer_count, block).map_err(PdcError::Slab)?;
+        DelaySlab::new(&line_delays, block).map_err(PdcError::Slab)?;
+        let Some(sink_index) = nodes.iter().position(|n| n.id == sink) else {
+            return Err(PdcError::UnknownNode(sink));
+        };
+        let g = graph_words(nodes);
+        let k: Vec<u64> = kinds
+            .iter()
+            .flat_map(|k| match *k {
+                BuiltinKind::Source(seed) => [0, u64::from(seed)],
+                BuiltinKind::Latent => [1, 0],
+                BuiltinKind::Gain(gain) => [2, u64::from(gain.to_bits())],
+            })
+            .collect();
+        let w = crate::port::ok(crate::port::render_graph(
+            &g,
+            nodes.len() as u64,
+            &k,
+            block as u64,
+            blocks as u64,
+            sink_index as u64,
+        ));
+        Ok(w[1..].iter().map(|&b| f32::from_bits(b as u32)).collect())
+    }
+    #[cfg(not(vesper_port))]
+    {
+        let mut processors: Vec<Box<dyn DspProcessor>> = Vec::with_capacity(nodes.len());
+        for (n, k) in nodes.iter().zip(kinds) {
+            processors.push(match *k {
+                BuiltinKind::Source(seed) => Box::new(BuiltinSource {
+                    seed: u64::from(seed),
+                    t: 0,
+                }),
+                BuiltinKind::Latent => Box::new(LatentMix::new(n.latency, block)?),
+                BuiltinKind::Gain(g) => Box::new(MixGain(g)),
+            });
+        }
+        let mut graph = CompiledGraph::new(nodes, processors, block)?;
+        for _ in 0..blocks {
+            graph.process_block();
+        }
+        graph
+            .output(sink)
+            .map(<[f32]>::to_vec)
+            .ok_or(PdcError::UnknownNode(sink))
     }
 }

@@ -1,0 +1,71 @@
+[package]
+name = "vesper-resonance-seed"
+version = "0.1.0"
+edition = "2024"
+description = "Frozen Rust seed copy of vesper-resonance for the compiler's own dependency closure"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; port wave P3b lane 9,
+# #1071): the compiler links this package, the Rust build of ../src, under
+# the library name `vesper_resonance`. Crates inside
+# `cargo tree -p vesper -e normal,build` depend on it with
+# `vesper-resonance = { path = ".../seed", package = "vesper-resonance-seed" }`.
+# The Rust code takes bug fixes only until self-hosting Stage 2.
+[lib]
+name = "vesper_resonance"
+path = "../src/lib.rs"
+
+[dependencies]
+cranelift-codegen = { version = "0.125", features = ["arm64", "x86"] }
+rtrb = "=0.4.1"
+
+[dev-dependencies]
+cranelift-frontend = "0.125"
+
+[[test]]
+name = "alloc"
+path = "../tests/alloc.rs"
+
+[[test]]
+name = "confinement"
+path = "../tests/confinement.rs"
+
+[[test]]
+name = "cranelift"
+path = "../tests/cranelift.rs"
+
+[[test]]
+name = "denorm"
+path = "../tests/denorm.rs"
+
+[[test]]
+name = "pdc"
+path = "../tests/pdc.rs"
+
+[[test]]
+name = "realtime"
+path = "../tests/realtime.rs"
+
+[[test]]
+name = "simd"
+path = "../tests/simd.rs"
+
+[[test]]
+name = "slab"
+path = "../tests/slab.rs"
+
+[[test]]
+name = "spsc_stress"
+path = "../tests/spsc_stress.rs"
+
+[[test]]
+name = "stability"
+path = "../tests/stability.rs"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

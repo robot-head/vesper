@@ -66,7 +66,7 @@ These are spec changes in `docs/manuscript/content.typ` (§2.2 grammar and the p
 
 | File | What |
 |---|---|
-| `tests/continue.rs` (7) | `loop`/`for`/nested/match-arm `continue`; a closed `u8` range continuing at 255; loop-local `ChunkSeq` drops on the continue path (no teardown frees); contextual names; E0213/E0312/E0302; fmt round trip |
+| `tests/continue.rs` (8) | `loop`/`for`/nested/match-arm `continue`; a closed `u8` range continuing at 255; loop-local `ChunkSeq` drops on the continue path (no teardown frees); loop-local and loop-carried `Box` values with `continue` after #1076 (allocations equal frees); contextual names; E0213/E0312/E0302; fmt round trip |
 | `tests/literal_typing.rs` (4) | range indexing a `Slice[u64]`, range bound from an open `let`, closed `u8` literal range, `if` branches, a tuple used as `u8`, a `let mut` accumulator and a chain of literal lets, the `i64` default, conflicting uses, E0209 for a hinted kind that does not fit, `wrapping_neg_k` for all ten kinds over edge values against `IntegerKind::wrap(-v)` |
 | `tests/try_option.rs` (3) | `Some` continues and `None` returns, `?` inside a `for` loop, E0200 outside an `Option` function and on a non-`Option`/`Result` operand |
 
@@ -93,11 +93,12 @@ These are typing and control-flow forms, so the code generated for existing prog
 - `src/verified_codegen/**`, `lean/**`, `bootstrap/**`, `packages/vesper-compiler/**` and `ir_opt::optimize` are not edited.
 - `src/ir.rs` gets the one approved dispatch line, and no Place IR type changes.
 - The Stage 1 lock corpus uses none of these forms (the verified backend refuses loops).
-- The `bootstrap-stage1` workflow result on this branch is in the PR.
+- `bootstrap-stage1` on this branch ([run 44441389103](https://github.com/robot-head/vesper/actions/runs/44441389103)): success. Its two clean builds give byte-identical locks.
+- Every `programs.verified.artifact` digest in its fresh lock equals the one from the same workflow on lane 1's branch (run 44439934250, P3b gaps lane 1, also based on current main). So this PR changes no verified artifact.
+- Both runs differ from the committed `bootstrap/stage1.lock` (recorded 2026-11-16) in the same way: 10 of the 11 verified digests and the Cranelift digests. That drift came before this lane; the ratchet passes because every program still builds.
 
 ## Left
 
 - `continue` and `break` take no labels, because `break` has none.
 - Literal typing is per function and flows only through bindings: a literal passed to a generic parameter still defaults to `i64` unless the call site constrains it. The result of `a + b` over two open bindings is `i64` (unchanged).
-- `?` on `Option` inside a function that holds `Box` values is refused natively, like any `return` (`loops::BOX_REFUSAL`), until #1076 lands.
 - The self-hosted Stage 1 checker does not accept any of these forms.

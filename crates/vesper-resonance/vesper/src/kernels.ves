@@ -1,0 +1,256 @@
+// Module kernels of @vesper/resonance (see lib.ves): the §32.3 voice bank
+// (src/kernels.rs `SvfBank::render` and `render_reference`, and the scalar
+// tick of src/simd.rs) and the PID torque controller.
+//
+// An `f32` crosses the export ABI as its bit pattern, so every sample and
+// coefficient here is a `u32` word read with `from_bits_f32` and written with
+// `to_bits_f32`. Every expression is the Rust build's single-precision
+// expression in the Rust order, with no fused multiply-add, so the samples
+// are bit for bit the Rust build's.
+//
+// A voice tile is five lane slices of 16 words (ic1eq, ic2eq, g_coeff,
+// k_damping, gain), and the pan weights two (left, right). A parameter-ramp bank is one slice of 3 * 64 words: ramp
+// p (0 gain, 1 g, 2 k) is current, target, step and remaining, 16 words
+// each, from word 64 p.
+use self::{
+    PidFault
+};
+use self::util::{
+    is_finite
+};
+
+pub fn lanes() -> u64 {
+    16
+}
+
+fn six() -> u64 {
+    6
+}
+
+pub fn f(in s: Slice[u32], i: u64) -> f32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    from_bits_f32(s[i])
+}
+
+pub fn put(inout s: Slice[u32], i: u64, v: f32) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    s.set(i, to_bits_f32(v));
+}
+
+// `RampTile::advance_lane_scalar` for lane `lane` of the ramp at word `base`.
+pub fn ramp_lane(inout ramps: Slice[u32], base: u64, lane: u64)
+    -> f32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let cur = base + lane;
+    let rem = ramps[base + 48 + lane];
+    if rem > 0 {
+        let next = rem - 1;
+        ramps.set(base + 48 + lane, next);
+        if next == 0 {
+            ramps.set(cur, ramps[base + 16 + lane]);
+        } else {
+            let v = f(in ramps, cur) + f(in ramps, base + 32 + lane);
+            put(inout ramps, cur, v);
+        }
+    }
+    f(in ramps, cur)
+}
+
+// Whether any lane of the ramp at word `base` has samples remaining.
+fn ramping(in ramps: Slice[u32], base: u64) -> bool eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut any = false;
+    for v in 0..lanes() {
+        if ramps[base + 48 + v] != 0 {
+            any = true;
+        }
+    }
+    any
+}
+
+// `SvfBank::pan`: the stereo weights of voice `v`.
+pub fn pan(v: u64) -> (f32, f32) {
+    let p = nearest_f32(v) / 15.0;
+    (1.0 - p, p)
+}
+
+// `SvfBank::render` on the scalar path: per frame, advance the three ramps
+// (`ramp_tick`), load their values into the tile, advance every voice
+// (`tick_scalar`) and sum the panned voices in voice order (`LaneOut::sum`).
+pub fn k_render(
+    inout ic1: Slice[u32],
+    inout ic2: Slice[u32],
+    inout gc: Slice[u32],
+    inout kd: Slice[u32],
+    inout gn: Slice[u32],
+    inout ramps: Slice[u32],
+    in pan_l: Slice[u32],
+    in pan_r: Slice[u32],
+    in input: Slice[u32],
+    inout left: Slice[u32],
+    inout right: Slice[u32],
+    start: u64,
+    end: u64
+) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    // A ramp lane with no samples remaining keeps its value, so the tile
+    // takes the ramps' values once and then only the lanes still ramping
+    // (the Rust build copies all of them every frame, to the same values).
+    if start < end {
+        for v in 0..lanes() {
+            let gain = f(in ramps, v);
+            let g = f(in ramps, 64 + v);
+            let k = f(in ramps, 128 + v);
+            gn.set(v, to_bits_f32(gain));
+            gc.set(v, to_bits_f32(g));
+            kd.set(v, to_bits_f32(k));
+        }
+    }
+    for i in start..end {
+        if ramping(in ramps, 0) {
+            for v in 0..lanes() {
+                let gain = ramp_lane(inout ramps, 0, v);
+                gn.set(v, to_bits_f32(gain));
+            }
+        }
+        if ramping(in ramps, 64) {
+            for v in 0..lanes() {
+                let g = ramp_lane(inout ramps, 64, v);
+                gc.set(v, to_bits_f32(g));
+            }
+        }
+        if ramping(in ramps, 128) {
+            for v in 0..lanes() {
+                let k = ramp_lane(inout ramps, 128, v);
+                kd.set(v, to_bits_f32(k));
+            }
+        }
+        let v0 = f(in input, i);
+        let mut l: f32 = 0.0;
+        let mut r: f32 = 0.0;
+        for v in 0..lanes() {
+            let g = f(in gc, v);
+            let k = f(in kd, v);
+            let a1 = 1.0 / (1.0 + g * (g + k));
+            let a2 = g * a1;
+            let a3 = g * a2;
+            let c1 = f(in ic1, v);
+            let c2 = f(in ic2, v);
+            let v3 = v0 - c2;
+            let v1 = a1 * c1 + a2 * v3;
+            let v2 = c2 + a2 * c1 + a3 * v3;
+            ic1.set(v, to_bits_f32(2.0 * v1 - c1));
+            ic2.set(v, to_bits_f32(2.0 * v2 - c2));
+            let y = f(in gn, v) * v2;
+            l = l + y * f(in pan_l, v);
+            r = r + y * f(in pan_r, v);
+        }
+        left.set(i, to_bits_f32(l));
+        right.set(i, to_bits_f32(r));
+    }
+}
+
+// `SvfBank::render_reference`: the fused scalar loop, advancing each voice's
+// ramps lane by lane.
+pub fn k_render_reference(
+    inout ic1: Slice[u32],
+    inout ic2: Slice[u32],
+    inout gc: Slice[u32],
+    inout kd: Slice[u32],
+    inout gn: Slice[u32],
+    inout ramps: Slice[u32],
+    in input: Slice[u32],
+    inout left: Slice[u32],
+    inout right: Slice[u32],
+    start: u64,
+    end: u64
+) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    for i in start..end {
+        let v0 = f(in input, i);
+        let mut l: f32 = 0.0;
+        let mut r: f32 = 0.0;
+        for v in 0..lanes() {
+            let gain = ramp_lane(inout ramps, 0, v);
+            let g = ramp_lane(inout ramps, 64, v);
+            let k = ramp_lane(inout ramps, 128, v);
+            gn.set(v, to_bits_f32(gain));
+            gc.set(v, to_bits_f32(g));
+            kd.set(v, to_bits_f32(k));
+            let a1 = 1.0 / (1.0 + g * (g + k));
+            let a2 = g * a1;
+            let a3 = g * a2;
+            let c1 = f(in ic1, v);
+            let c2 = f(in ic2, v);
+            let v3 = v0 - c2;
+            let v1 = a1 * c1 + a2 * v3;
+            let v2 = c2 + a2 * c1 + a3 * v3;
+            ic1.set(v, to_bits_f32(2.0 * v1 - c1));
+            ic2.set(v, to_bits_f32(2.0 * v2 - c2));
+            let y = gain * v2;
+            let (pl, pr) = pan(v);
+            l = l + y * pl;
+            r = r + y * pr;
+        }
+        left.set(i, to_bits_f32(l));
+        right.set(i, to_bits_f32(r));
+    }
+}
+
+// `f32::clamp(lo, hi)` for `lo <= hi` (a NaN stays NaN).
+fn clamp(x: f32, lo: f32, hi: f32) -> f32 {
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+fn bad_gain(g: f32) -> bool {
+    !is_finite(g) || g < 0.0
+}
+
+// `PidController::new`: the gains check (kp, ki, kd, dt, torque_limit,
+// integral_limit as bits).
+pub fn k_pid_check(in gains: Slice[u32]) eff [
+    Fail[RuntimeError],
+    Fail[ArithOverflow],
+    Fail[PidFault]
+] {
+    for i in 0..six() {
+        if bad_gain(f(in gains, i)) {
+            Fail::raise(PidFault::BadGains);
+        }
+    }
+    if f(in gains, 3) <= 0.0 {
+        Fail::raise(PidFault::BadGains);
+    }
+}
+
+// `PidController::step`. `state` is the integral, whether there is a
+// previous measurement (0 or 1) and that measurement, as words; it changes
+// only when the step succeeds.
+pub fn k_pid_step(in gains: Slice[u32], inout st: Slice[u32], setpoint: u32, measurement: u32)
+    -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[PidFault]] {
+    let sp = from_bits_f32(setpoint);
+    let m = from_bits_f32(measurement);
+    if !is_finite(sp) || !is_finite(m) {
+        Fail::raise(PidFault::NonFiniteInput);
+    }
+    let kp = f(in gains, 0);
+    let ki = f(in gains, 1);
+    let kdg = f(in gains, 2);
+    let dt = f(in gains, 3);
+    let tl = f(in gains, 4);
+    let il = f(in gains, 5);
+    let error = sp - m;
+    let integral = clamp(f(in st, 0) + ki * error * dt, -il, il);
+    let mut derivative: f32 = 0.0;
+    if st[1] == 1 {
+        derivative = -(m - f(in st, 2)) / dt;
+    }
+    let u = kp * error + integral + kdg * derivative;
+    if !is_finite(error) || !is_finite(integral) || !is_finite(derivative) || !is_finite(u) {
+        Fail::raise(PidFault::NonFiniteIntermediate);
+    }
+    put(inout st, 0, integral);
+    st.set(1, 1);
+    st.set(2, measurement);
+    to_bits_f32(clamp(u, -tl, tl))
+}

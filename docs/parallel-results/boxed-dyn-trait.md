@@ -132,9 +132,9 @@ No file under `src/verified_codegen/**`, `lean/**`, `bootstrap/**` or
   warp and prism, sources performing `Net`/`Storage` effects in flux).
 - Associated types (`dyn Source[Item = u8]`), several models per (object,
   type) pair, and package-qualified traits.
-- Lending a boxed object `sink` to a function whose handler effects are
-  specialized at the call (native).
-- A function with a loop still cannot own a box (a `let` holding a boxed
-  object, or a `sink` parameter); move the loop into a function that borrows
-  it. Plain `Box[T]` keeps the old rule.
+- ~~Lending a boxed object `sink` to a function whose handler effects are
+  specialized at the call (native).~~ Done in #1064
+  (port-p3b-loop-owned-boxes.md).
+- ~~A function with a loop still cannot own a box.~~ Done in #1064: loop
+  functions own boxes in locals, `sink` parameters and aggregates.
 - `Rc<dyn Trait>`/`Arc<dyn Trait>` (shared objects) are not covered.

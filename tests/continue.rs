@@ -335,3 +335,38 @@ fn continue_formats_and_highlights() {
     let formatted = vesper_fmt::format_source(squeezed, vesper_fmt::Limits::default()).unwrap();
     assert_eq!(formatted.output, source);
 }
+
+#[test]
+fn continue_drops_loop_local_boxes() {
+    // A box made in the body is dropped on the `continue` path, and a box
+    // owned across the loop is replaced and dropped exactly once.
+    let source = "struct Counter { n: i64 }
+        fn main() -> i64 {
+            let mut c: Box[Counter] = Box::new(Counter { n: 0 });
+            let mut s = 0;
+            for i in 0..20 {
+                let b: Box[Counter] = Box::new(Counter { n: i });
+                if i % 3 == 0 { continue; }
+                c = Box::new(Counter { n: i });
+                let Box(Counter { n }) = b;
+                s = wrapping_add(s, n);
+            }
+            let Box(Counter { n }) = c;
+            wrapping_add(wrapping_mul(s, 100), n)
+        }";
+    let c = accepted(source);
+    for optimize in [true, false] {
+        vesper::fip::native_runtime::reset_counts();
+        let jit = native::jit_with_options(&c.world, "main", optimize)
+            .unwrap_or_else(|e| panic!("JIT (optimize {optimize}) failed: {e}"))
+            .to_string();
+        assert_eq!(
+            vesper::fip::native_runtime::alloc_count(),
+            vesper::fip::native_runtime::free_count(),
+            "optimize {optimize}: boxes leaked or freed twice"
+        );
+        // 1..20 without multiples of 3 sums to 190 - 63 = 127; the last is 19.
+        assert_eq!(jit, "12719", "JIT (optimize {optimize})");
+    }
+    differential("boxes", source, 12719);
+}

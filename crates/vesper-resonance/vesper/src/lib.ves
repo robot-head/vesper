@@ -1,0 +1,672 @@
+// @vesper/resonance: Vesper port of vesper-resonance (port wave P3b lane 9,
+// #1071).
+//
+// @export abi 3
+use self::events::{
+    e_check,
+    e_decode,
+    e_encode,
+    e_frames,
+    e_ramp_next,
+    e_ramp_set,
+    e_tile_advance,
+    e_tile_next,
+    e_tile_set
+};
+use self::pdc::{
+    p_accumulate,
+    p_compile,
+    p_copy,
+    p_line_advance,
+    p_line_len,
+    p_line_read,
+    p_line_write,
+    p_mix_lr,
+    p_scale,
+    p_zero
+};
+use self::confine::{
+    c_verify
+};
+use self::graph::{
+    g_render
+};
+use self::lease::{
+    l_complete,
+    l_silence,
+    l_takes,
+    l_write
+};
+use self::slab::{
+    s_advance,
+    s_delays,
+    s_read,
+    s_tiled,
+    s_write
+};
+use self::kernels::{
+    k_pid_check,
+    k_pid_step,
+    k_render,
+    k_render_reference
+};
+
+// events::RtParamEvent with the target as its f32 bits.
+pub copy struct Wire {
+    sample_offset: u16,
+    node_id: u16,
+    param_id: u32,
+    target: u32,
+    ramp_samples: u32
+}
+
+// events::ParamRamp with current, target and step as f32 bits.
+pub copy struct Ramp {
+    current: u32,
+    target: u32,
+    step: u32,
+    remaining: u32
+}
+
+// events::EventError (UnknownParam is decided by the Rust parameter table).
+pub copy enum EventFault {
+    TrailingBytes(u64),
+    OverBudget(u64),
+    NonFiniteTarget,
+    OffsetOutOfBlock(u16, u64),
+    Unsorted(u64)
+}
+
+// kernels::PidFault.
+pub copy enum PidFault {
+    NonFiniteInput,
+    NonFiniteIntermediate,
+    BadGains
+}
+
+// pdc::PdcError raised by the delay line (the schedule errors are words).
+pub copy enum PdcFault {
+    DelayTooLong(u64),
+    BadBlockLength(u64)
+}
+
+// slab::SlabError (Unalignable is decided by the Rust allocation).
+pub copy enum SlabFault {
+    TooLarge(u64, u64)
+}
+
+// lease::LeaseError.
+pub copy enum LeaseFault {
+    OutOfOrder(u64, u64),
+    ChannelCount(u64, u64),
+    Full,
+    NonFinite
+}
+
+// ----- kernels ---------------------------------------------------------------
+
+pub fn svf_render(
+    inout ic1: Slice[u32],
+    inout ic2: Slice[u32],
+    inout gc: Slice[u32],
+    inout kd: Slice[u32],
+    inout gn: Slice[u32],
+    inout ramps: Slice[u32],
+    in pan_l: Slice[u32],
+    in pan_r: Slice[u32],
+    in input: Slice[u32],
+    inout left: Slice[u32],
+    inout right: Slice[u32],
+    start: u64,
+    end: u64
+) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    k_render(
+        inout ic1,
+        inout ic2,
+        inout gc,
+        inout kd,
+        inout gn,
+        inout ramps,
+        in pan_l,
+        in pan_r,
+        in input,
+        inout left,
+        inout right,
+        start,
+        end
+    );
+}
+
+pub fn svf_render_reference(
+    inout ic1: Slice[u32],
+    inout ic2: Slice[u32],
+    inout gc: Slice[u32],
+    inout kd: Slice[u32],
+    inout gn: Slice[u32],
+    inout ramps: Slice[u32],
+    in input: Slice[u32],
+    inout left: Slice[u32],
+    inout right: Slice[u32],
+    start: u64,
+    end: u64
+) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    k_render_reference(
+        inout ic1,
+        inout ic2,
+        inout gc,
+        inout kd,
+        inout gn,
+        inout ramps,
+        in input,
+        inout left,
+        inout right,
+        start,
+        end
+    );
+}
+
+pub fn pid_check(in gains: Slice[u32]) eff [
+    Fail[RuntimeError],
+    Fail[ArithOverflow],
+    Fail[PidFault]
+] {
+    k_pid_check(in gains);
+}
+
+pub fn pid_step(in gains: Slice[u32], inout st: Slice[u32], setpoint: u32, measurement: u32)
+    -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[PidFault]] {
+    k_pid_step(in gains, inout st, setpoint, measurement)
+}
+
+// ----- events ----------------------------------------------------------------
+
+pub fn event_encode(in w: Wire, inout out: Slice[u8]) eff [
+    Fail[RuntimeError],
+    Fail[ArithOverflow]
+] {
+    e_encode(in w, inout out);
+}
+
+pub fn event_decode(in b: Slice[u8], at: u64)
+    -> Wire eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
+    e_decode(in b, at)
+}
+
+pub fn event_frames(len: u64, budget: u64)
+    -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
+    e_frames(len, budget)
+}
+
+pub fn event_check(offset: u16, target: u32, prev: u16, index: u64, block: u64) eff [
+    Fail[EventFault]
+] {
+    e_check(offset, target, prev, index, block);
+}
+
+pub fn ramp_set(inout r: Ramp, target: u32, samples: u32) {
+    e_ramp_set(inout r, target, samples);
+}
+
+pub fn ramp_next(inout r: Ramp) -> u32 eff [Fail[ArithOverflow]] {
+    e_ramp_next(inout r)
+}
+
+pub fn tile_set_lane(
+    inout current: Slice[u32],
+    inout target: Slice[u32],
+    inout step: Slice[u32],
+    inout remaining: Slice[u32],
+    lane: u64,
+    value: u32,
+    samples: u32
+) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    e_tile_set(inout current, inout target, inout step, inout remaining, lane, value, samples);
+}
+
+pub fn tile_advance_lane(
+    inout current: Slice[u32],
+    in target: Slice[u32],
+    in step: Slice[u32],
+    inout remaining: Slice[u32],
+    lane: u64
+) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    e_tile_advance(inout current, in target, in step, inout remaining, lane)
+}
+
+pub fn tile_next(
+    inout current: Slice[u32],
+    in target: Slice[u32],
+    in step: Slice[u32],
+    inout remaining: Slice[u32]
+) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    e_tile_next(inout current, in target, in step, inout remaining);
+}
+
+// ----- pdc -------------------------------------------------------------------
+
+pub fn compile_schedule(in g: Slice[u64], n: u64) -> ChunkSeq[u64] {
+    p_compile(in g, n)
+}
+
+pub fn line_len(delay: u64, block: u64) -> u64 eff [Fail[PdcFault]] {
+    p_line_len(delay, block)
+}
+
+pub fn line_write(inout buf: Slice[u32], head: u64, in input: Slice[u32]) eff [
+    Fail[RuntimeError],
+    Fail[ArithOverflow]
+] {
+    p_line_write(inout buf, head, in input);
+}
+
+pub fn line_read(in buf: Slice[u32], head: u64, delay: u64, inout out: Slice[u32]) eff [
+    Fail[RuntimeError],
+    Fail[ArithOverflow]
+] {
+    p_line_read(in buf, head, delay, inout out);
+}
+
+pub fn line_advance(head: u64, block: u64, len: u64)
+    -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    p_line_advance(head, block, len)
+}
+
+pub fn zero(inout out: Slice[u32]) eff [Fail[RuntimeError]] {
+    p_zero(inout out);
+}
+
+pub fn accumulate(inout out: Slice[u32], in x: Slice[u32]) eff [Fail[RuntimeError]] {
+    p_accumulate(inout out, in x);
+}
+
+pub fn scale(inout out: Slice[u32], gain: u32) eff [Fail[RuntimeError]] {
+    p_scale(inout out, gain);
+}
+
+pub fn mix_lr(inout out: Slice[u32], in left: Slice[u32], in right: Slice[u32], n: u64) eff [
+    Fail[RuntimeError]
+] {
+    p_mix_lr(inout out, in left, in right, n);
+}
+
+pub fn copy_samples(inout out: Slice[u32], in src: Slice[u32]) eff [Fail[RuntimeError]] {
+    p_copy(inout out, in src);
+}
+
+// ----- slab ------------------------------------------------------------------
+
+pub fn tiled_geometry(buffers: u64, block: u64)
+    -> (u64, u64) eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
+    s_tiled(buffers, block)
+}
+
+pub fn delay_layout(in delays: Slice[u32], block: u64)
+    -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
+    s_delays(in delays, block)
+}
+
+pub fn delay_write(
+    inout data: Slice[u32],
+    base: u64,
+    in slots: Slice[u64],
+    line: u64,
+    in input: Slice[u32]
+) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    s_write(inout data, base, in slots, line, in input);
+}
+
+pub fn delay_read(
+    in data: Slice[u32],
+    base: u64,
+    in slots: Slice[u64],
+    line: u64,
+    inout out: Slice[u32]
+) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    s_read(in data, base, in slots, line, inout out);
+}
+
+pub fn delay_advance(inout slots: Slice[u64], block: u64) eff [
+    Fail[RuntimeError],
+    Fail[ArithOverflow]
+] {
+    s_advance(inout slots, block);
+}
+
+// ----- lease -----------------------------------------------------------------
+
+pub fn lease_write(
+    inout data: Slice[u32],
+    written: u64,
+    frames: u64,
+    channels: u64,
+    frame: u64,
+    in samples: Slice[u32]
+) -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[LeaseFault]] {
+    l_write(inout data, written, frames, channels, frame, in samples)
+}
+
+pub fn lease_silence(inout data: Slice[u32], written: u64, channels: u64) eff [
+    Fail[RuntimeError],
+    Fail[ArithOverflow]
+] {
+    l_silence(inout data, written, channels);
+}
+
+pub fn lease_complete(written: u64, frames: u64) -> bool {
+    l_complete(written, frames)
+}
+
+pub fn lease_takes(committed: u64, out_len: u64, channels: u64, frames: u64) -> bool {
+    l_takes(committed, out_len, channels, frames)
+}
+
+// ----- confine ---------------------------------------------------------------
+
+pub fn verify_realtime(
+    in fns: Slice[u64],
+    in pool: Slice[u64],
+    in calls: Slice[u64],
+    in indirect: Slice[u64],
+    in entries: Slice[u64],
+    in roots: Slice[u64],
+    in allowed: Slice[u64],
+    reject_unbounded: bool,
+    has_max: bool,
+    max_loops: u64
+) -> ChunkSeq[u64] {
+    c_verify(
+        in fns,
+        in pool,
+        in calls,
+        in indirect,
+        in entries,
+        in roots,
+        in allowed,
+        reject_unbounded,
+        has_max,
+        max_loops
+    )
+}
+
+// ----- graph -----------------------------------------------------------------
+
+pub fn render_graph(
+    in g: Slice[u64],
+    n: u64,
+    in kinds: Slice[u64],
+    block: u64,
+    blocks: u64,
+    sink_node: u64
+) -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
+    g_render(in g, n, in kinds, block, blocks, sink_node)
+}
+
+// ----- realtime roots ----------------------------------------------------------
+//
+// One entry per audio-path export, with its failures handled, for the native
+// realtime verifier: port/test-port.sh emits each as an object with
+// `--verify-realtime` and port/realtime-policy.json, which rejects any call
+// the verifier cannot prove allocation-free, lock-free and non-blocking
+// (an allocator or sequence-growth call is an unknown callee). The loops run
+// over the lent slices, whose lengths the caller bounds (the block length),
+// so the policy does not reject loops.
+
+fn rt_svf_render(
+    inout ic1: Slice[u32],
+    inout ic2: Slice[u32],
+    inout gc: Slice[u32],
+    inout kd: Slice[u32],
+    inout gn: Slice[u32],
+    inout ramps: Slice[u32],
+    in pan_l: Slice[u32],
+    in pan_r: Slice[u32],
+    in input: Slice[u32],
+    inout left: Slice[u32],
+    inout right: Slice[u32],
+    start: u64,
+    end: u64
+) -> u64 {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            svf_render(
+                inout ic1,
+                inout ic2,
+                inout gc,
+                inout kd,
+                inout gn,
+                inout ramps,
+                in pan_l,
+                in pan_r,
+                in input,
+                inout left,
+                inout right,
+                start,
+                end
+            );
+            0
+        } with {
+            return v => v,
+            raise(e, k) => 1,
+        }
+    } with {
+        return v => v,
+        raise(e, k) => 1,
+    }
+}
+
+fn rt_svf_render_reference(
+    inout ic1: Slice[u32],
+    inout ic2: Slice[u32],
+    inout gc: Slice[u32],
+    inout kd: Slice[u32],
+    inout gn: Slice[u32],
+    inout ramps: Slice[u32],
+    in input: Slice[u32],
+    inout left: Slice[u32],
+    inout right: Slice[u32],
+    start: u64,
+    end: u64
+) -> u64 {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            svf_render_reference(
+                inout ic1,
+                inout ic2,
+                inout gc,
+                inout kd,
+                inout gn,
+                inout ramps,
+                in input,
+                inout left,
+                inout right,
+                start,
+                end
+            );
+            0
+        } with {
+            return v => v,
+            raise(e, k) => 1,
+        }
+    } with {
+        return v => v,
+        raise(e, k) => 1,
+    }
+}
+
+fn rt_pid_step(in gains: Slice[u32], inout st: Slice[u32], setpoint: u32, measurement: u32) -> u32 {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            handle Fail[PidFault] in {
+                pid_step(in gains, inout st, setpoint, measurement)
+            } with {
+                return v => v,
+                raise(e, k) => 0,
+            }
+        } with {
+            return v => v,
+            raise(e, k) => 0,
+        }
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+fn rt_events(in b: Slice[u8], at: u64, offset: u16, target: u32, prev: u16, block: u64) -> u64 {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            handle Fail[EventFault] in {
+                let n = event_frames(b.len(), 32);
+                let w = event_decode(in b, at);
+                event_check(offset, target, prev, 0, block);
+                n + widen_u64(w.node_id)
+            } with {
+                return v => v,
+                raise(e, k) => 0,
+            }
+        } with {
+            return v => v,
+            raise(e, k) => 0,
+        }
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+fn rt_ramps(
+    inout current: Slice[u32],
+    inout target: Slice[u32],
+    inout step: Slice[u32],
+    inout remaining: Slice[u32],
+    inout r: Ramp
+) -> u64 {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            tile_set_lane(
+                inout current,
+                inout target,
+                inout step,
+                inout remaining,
+                3,
+                1065353216,
+                8
+            );
+            tile_next(inout current, in target, in step, inout remaining);
+            ramp_set(inout r, 1065353216, 4);
+            widen_u64(ramp_next(inout r))
+        } with {
+            return v => v,
+            raise(e, k) => 0,
+        }
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+fn rt_graph_block(
+    inout data: Slice[u32],
+    inout slots: Slice[u64],
+    inout buf: Slice[u32],
+    inout out: Slice[u32],
+    in x: Slice[u32],
+    block: u64
+) -> u64 {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            delay_write(inout data, 0, in slots, 0, in x);
+            delay_read(in data, 0, in slots, 0, inout out);
+            delay_advance(inout slots, block);
+            line_write(inout buf, 0, in x);
+            line_read(in buf, 0, 4, inout out);
+            zero(inout out);
+            accumulate(inout out, in x);
+            scale(inout out, 1065353216);
+            mix_lr(inout out, in x, in x, block);
+            copy_samples(inout out, in x);
+            line_advance(0, block, buf.len())
+        } with {
+            return v => v,
+            raise(e, k) => 0,
+        }
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+fn rt_lease(inout data: Slice[u32], in samples: Slice[u32]) -> u64 {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            handle Fail[LeaseFault] in {
+                let w = lease_write(inout data, 0, 64, 2, 0, in samples);
+                lease_silence(inout data, w, 2);
+                w
+            } with {
+                return v => v,
+                raise(e, k) => 0,
+            }
+        } with {
+            return v => v,
+            raise(e, k) => 0,
+        }
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+// Every realtime root above, so one object covers the whole audio path.
+fn rt_audio(
+    inout a: Slice[u32],
+    inout b: Slice[u32],
+    inout c: Slice[u32],
+    inout d: Slice[u32],
+    inout e: Slice[u32],
+    inout f: Slice[u32],
+    in g: Slice[u32],
+    inout h: Slice[u32],
+    inout i: Slice[u32],
+    inout slots: Slice[u64],
+    in bytes: Slice[u8],
+    inout r: Ramp,
+    block: u64
+) -> u64 {
+    let mut n = rt_svf_render(
+        inout a,
+        inout b,
+        inout c,
+        inout d,
+        inout e,
+        inout f,
+        in g,
+        in g,
+        in g,
+        inout h,
+        inout i,
+        0,
+        block
+    );
+    n = wrapping_add(
+        n,
+        rt_svf_render_reference(
+            inout a,
+            inout b,
+            inout c,
+            inout d,
+            inout e,
+            inout f,
+            in g,
+            inout h,
+            inout i,
+            0,
+            block
+        )
+    );
+    n = wrapping_add(n, widen_u64(rt_pid_step(in g, inout h, 0, 0)));
+    n = wrapping_add(n, rt_events(in bytes, 0, 0, 0, 0, block));
+    n = wrapping_add(n, rt_ramps(inout a, inout b, inout c, inout d, inout r));
+    n = wrapping_add(n, rt_graph_block(inout a, inout slots, inout b, inout c, in g, block));
+    wrapping_add(n, rt_lease(inout a, in g))
+}

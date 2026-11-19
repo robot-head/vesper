@@ -1,0 +1,331 @@
+// Module graph of @vesper/resonance (see lib.ves): a compiled graph whose
+// processors are `Box[dyn DspProcessor]` objects in one sequence, run block
+// by block as `CompiledGraph::process_block` runs them (src/pdc.rs).
+//
+// A `Box[dyn Trait]` cannot cross the export ABI (it has no fixed word
+// layout), so the Rust `CompiledGraph`, whose processors are Rust trait
+// objects, stays a Rust loop over the ported kernels. This module runs the
+// built-in processors (a deterministic source, `MixGain` and `LatentMix`)
+// entirely in Vesper, for the differential test and the ABBA benchmark.
+use self::pdc::{
+    p_compile
+};
+use self::seqs::{
+    at,
+    get
+};
+use self::slab::{
+    s_advance,
+    s_delays,
+    s_read,
+    s_write
+};
+use self::{
+    SlabFault
+};
+
+// `DspProcessor`: one block from the input buffers `ins` of `slab` (each
+// `block` samples at `buffer * block`) into `out`.
+trait DspProcessor {
+    fn process(
+        inout self,
+        in slab: ChunkSeq[u32],
+        in ins: ChunkSeq[u64],
+        block: u64,
+        inout out: ChunkSeq[u32]
+    ) eff [Fail[RuntimeError], Fail[ArithOverflow]];
+}
+
+// The test graphs' deterministic source (tests/pdc.rs `Generator`).
+struct Source {
+    seed: u64,
+    t: u64
+}
+
+impl DspProcessor for Source {
+    fn process(
+        inout self,
+        in slab: ChunkSeq[u32],
+        in ins: ChunkSeq[u64],
+        block: u64,
+        inout out: ChunkSeq[u32]
+    ) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+        for k in 0..block {
+            let x = wrapping_add(wrapping_mul(self.t, 7919), wrapping_mul(self.seed, 31)) % 97;
+            out.set(k, to_bits_f32(nearest_f32(x) / 97.0 - 0.5));
+            self.t = wrapping_add(self.t, 1);
+        }
+    }
+}
+
+// `MixGain`: the sum of the inputs, times the gain.
+struct Gain {
+    gain: f32
+}
+
+fn sum_inputs(
+    in slab: ChunkSeq[u32],
+    in ins: ChunkSeq[u64],
+    block: u64,
+    inout out: ChunkSeq[u32]
+) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    for k in 0..block {
+        out.set(k, 0);
+    }
+    for i in 0..ins.len() {
+        let base = ins[i] * block;
+        for k in 0..block {
+            let v = from_bits_f32(out[k]) + from_bits_f32(slab[base + k]);
+            out.set(k, to_bits_f32(v));
+        }
+    }
+}
+
+impl DspProcessor for Gain {
+    fn process(
+        inout self,
+        in slab: ChunkSeq[u32],
+        in ins: ChunkSeq[u64],
+        block: u64,
+        inout out: ChunkSeq[u32]
+    ) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+        sum_inputs(in slab, in ins, block, inout out);
+        for k in 0..block {
+            let v = from_bits_f32(out[k]) * self.gain;
+            out.set(k, to_bits_f32(v));
+        }
+    }
+}
+
+// `LatentMix`: the sum of the inputs, delayed by the node's latency
+// (`DelayLine`: a ring of `delay + block` samples).
+struct Latent {
+    ring: ChunkSeq[u32],
+    delay: u64,
+    head: u64,
+    sum: ChunkSeq[u32]
+}
+
+impl DspProcessor for Latent {
+    fn process(
+        inout self,
+        in slab: ChunkSeq[u32],
+        in ins: ChunkSeq[u64],
+        block: u64,
+        inout out: ChunkSeq[u32]
+    ) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+        if self.delay == 0 {
+            sum_inputs(in slab, in ins, block, inout out);
+            return;
+        }
+        sum_inputs(in slab, in ins, block, inout self.sum);
+        let len = self.ring.len();
+        for k in 0..block {
+            self.ring.set((self.head + k) % len, self.sum[k]);
+        }
+        let start = self.head + len - self.delay;
+        for k in 0..block {
+            out.set(k, self.ring[(start + k) % len]);
+        }
+        self.head = (self.head + block) % len;
+    }
+}
+
+fn zeros(n: u64) -> ChunkSeq[u32] {
+    let mut s: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    for i in 0..n {
+        s.push(0);
+    }
+    s
+}
+
+// One processor per node: `kinds` holds two words per node, the kind (0
+// source with seed, 1 latent with the node's latency, 2 gain with f32 bits)
+// and its parameter.
+fn processors(in kinds: Slice[u64], in g: Slice[u64], n: u64, block: u64)
+    -> ChunkSeq[Box[dyn DspProcessor]] eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let mut procs: ChunkSeq[Box[dyn DspProcessor]] = ChunkSeq::new();
+    for i in 0..n {
+        let kind = at(in kinds, i * 2);
+        let p = at(in kinds, i * 2 + 1);
+        if kind == 0 {
+            procs
+                .push(
+                Box::new[dyn DspProcessor](
+                    Source {
+                        seed: p,
+                        t: 0
+                    }
+                )
+            );
+        } else if kind == 1 {
+            let delay = at(in g, i * 4 + 1);
+            procs
+                .push(
+                Box::new[dyn DspProcessor](
+                    Latent {
+                        ring: zeros(delay + block),
+                        delay: delay,
+                        head: 0,
+                        sum: zeros(block)
+                    }
+                )
+            );
+        } else {
+            procs
+                .push(
+                Box::new[dyn DspProcessor](
+                    Gain {
+                        gain: from_bits_f32(narrow_u32(p))
+                    }
+                )
+            );
+        }
+    }
+    procs
+}
+
+// The run state: the schedule words, the block buffers and the packed delay
+// lines (the layout of `DelaySlab`, metadata five words per line).
+struct Run {
+    sched: ChunkSeq[u64],
+    slab: ChunkSeq[u32],
+    lines: ChunkSeq[u32],
+    slots: ChunkSeq[u64],
+    ins: ChunkSeq[u64],
+    out: ChunkSeq[u32],
+    scratch: ChunkSeq[u32],
+    block: u64
+}
+
+// One block: `CompiledGraph::process_block`.
+fn run_block(inout r: Run, inout procs: ChunkSeq[Box[dyn DspProcessor]]) eff [
+    Fail[RuntimeError],
+    Fail[ArithOverflow]
+] {
+    let block = r.block;
+    let nops = get(in r.sched, 2);
+    let mut k: u64 = 4;
+    for o in 0..nops {
+        let spec = get(in r.sched, k + 1);
+        let output = get(in r.sched, k + 2);
+        let count = get(in r.sched, k + 5);
+        k = k + 6;
+        r.ins.clear();
+        for j in 0..count {
+            let kind = get(in r.sched, k);
+            let buffer = get(in r.sched, k + 3);
+            let has_line = get(in r.sched, k + 4);
+            let line = get(in r.sched, k + 5);
+            let scratch = get(in r.sched, k + 6);
+            if kind == 0 && has_line == 1 {
+                s_write(
+                    inout r.lines.as_slice(),
+                    0,
+                    in r.slots.as_slice(),
+                    line,
+                    in r.slab[buffer * block..buffer * block + block]
+                );
+                s_read(
+                    in r.lines.as_slice(),
+                    0,
+                    in r.slots.as_slice(),
+                    line,
+                    inout r.scratch.as_slice()
+                );
+                r.slab.copy_from(scratch * block, in r.scratch.as_slice());
+                r.ins.push(scratch);
+            } else if kind == 1 {
+                s_read(
+                    in r.lines.as_slice(),
+                    0,
+                    in r.slots.as_slice(),
+                    line,
+                    inout r.scratch.as_slice()
+                );
+                r.slab.copy_from(scratch * block, in r.scratch.as_slice());
+                r.ins.push(scratch);
+            } else {
+                r.ins.push(buffer);
+            }
+            k = k + 7;
+        }
+        procs[spec].process(in r.slab, in r.ins, block, inout r.out);
+        r.slab.copy_from(output * block, in r.out.as_slice());
+        let nfeeds = get(in r.sched, k);
+        for f in 0..nfeeds {
+            let line = get(in r.sched, k + 1 + f);
+            s_write(inout r.lines.as_slice(), 0, in r.slots.as_slice(), line, in r.out.as_slice());
+        }
+        k = k + 1 + nfeeds;
+    }
+    s_advance(inout r.slots.as_slice(), block);
+}
+
+fn run_blocks(inout r: Run, inout procs: ChunkSeq[Box[dyn DspProcessor]], blocks: u64) eff [
+    Fail[RuntimeError],
+    Fail[ArithOverflow]
+] {
+    for b in 0..blocks {
+        run_block(inout r, inout procs);
+    }
+}
+
+// Runs `blocks` blocks of the graph and returns the schedule status, then
+// (when it is 0) the output block of node `sink` (the spec index) of the
+// last block, as f32 bits. Feedback edges must be at least one block long,
+// as `CompiledGraph::new` requires.
+pub fn g_render(
+    in g: Slice[u64],
+    n: u64,
+    in kinds: Slice[u64],
+    block: u64,
+    blocks: u64,
+    sink_node: u64
+) -> ChunkSeq[u64] eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[SlabFault]] {
+    let sched = p_compile(in g, n);
+    let mut result: ChunkSeq[u64] = ChunkSeq::new();
+    if get(in sched, 0) != 0 {
+        result.push(get(in sched, 0));
+        return result;
+    }
+    let buffers = get(in sched, 1);
+    let nlines = get(in sched, 3);
+    let mut delays: ChunkSeq[u32] = ChunkSeq::new();
+    // Lines follow the ops; find the op of the sink on the way.
+    let mut k: u64 = 4;
+    let mut sink_buffer: u64 = 0;
+    for o in 0..get(in sched, 2) {
+        if get(in sched, k + 1) == sink_node {
+            sink_buffer = get(in sched, k + 2);
+        }
+        k = k + 6 + get(in sched, k + 5) * 7;
+        k = k + 1 + get(in sched, k);
+    }
+    for l in 0..nlines {
+        delays.push(narrow_u32(get(in sched, k + l * 3 + 1)));
+    }
+    let layout = s_delays(in delays.as_slice(), block);
+    let mut slots: ChunkSeq[u64] = ChunkSeq::new();
+    let meta = nlines * 5;
+    for w in 0..meta {
+        slots.push(get(in layout, w));
+    }
+    let mut r = Run {
+        sched: sched,
+        slab: zeros(buffers * block),
+        lines: zeros(get(in layout, nlines * 5 + 1)),
+        slots: slots,
+        ins: ChunkSeq::new(),
+        out: zeros(block),
+        scratch: zeros(block),
+        block: block
+    };
+    let mut procs = processors(in kinds, in g, n, block);
+    run_blocks(inout r, inout procs, blocks);
+    result.push(0);
+    for i in 0..block {
+        result.push(widen_u64(r.slab[sink_buffer * block + i]));
+    }
+    result
+}

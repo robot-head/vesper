@@ -18,11 +18,13 @@
 //! The tile is the §32.3 AoSoA layout: one 64-byte line per hot field
 //! across 16 lanes.
 
-use crate::events::{
-    EventError, ParamTable, RampTile, RtParamEvent, decode_events, process_with_events,
-};
+#[cfg(not(vesper_port))]
+use crate::events::RampTile;
+use crate::events::{EventError, ParamTable, RtParamEvent, decode_events, process_with_events};
 use crate::lease::{RtBufferLease, RtOutputPort};
-use crate::simd::{LaneOut, PanLanes, SimdUnavailable, SvfLanes, ramp_tick, svf_tick};
+#[cfg(not(vesper_port))]
+use crate::simd::{LaneOut, ramp_tick, svf_tick};
+use crate::simd::{PanLanes, SimdUnavailable, SvfLanes};
 use crate::spsc::{MailboxReceiver, RtRetirementSink, SwapOutcome};
 
 /// Voices per tile.
@@ -89,9 +91,15 @@ pub struct VoicePatchBank {
 pub struct SvfBank {
     /// Filter state.
     pub tile: SvfVoiceTile,
+    #[cfg(not(vesper_port))]
     ramps: [RampTile; 3],
+    /// The port build keeps the three ramp tiles as the words the port
+    /// reads: tile `p` is current, target, step and remaining (16 each).
+    #[cfg(vesper_port)]
+    ramps: [[u32; 4 * LANES]; 3],
     lanes: SvfLanes,
     pan: PanLanes,
+    #[cfg(not(vesper_port))]
     scratch: LaneOut,
 }
 
@@ -136,9 +144,14 @@ impl SvfBank {
                 gain: [patch.gain; LANES],
                 patch_id: [patch.patch_id; LANES],
             },
+            #[cfg(not(vesper_port))]
             ramps: [RampTile::splat(0.0); 3],
+            // `RampTile::splat(0.0)`: every word of a resting zero ramp is 0.
+            #[cfg(vesper_port)]
+            ramps: [[0; 4 * LANES]; 3],
             lanes,
             pan,
+            #[cfg(not(vesper_port))]
             scratch: LaneOut::ZERO,
         };
         bank.apply_patch(&VoicePatchBank {
@@ -150,14 +163,36 @@ impl SvfBank {
     /// Load a patch bank (jumps every parameter; filter state is kept).
     pub fn apply_patch(&mut self, bank: &VoicePatchBank) {
         for (v, p) in bank.voices.iter().enumerate() {
-            self.ramps[param::GAIN as usize].set_lane(v, p.gain, 0);
-            self.ramps[param::G as usize].set_lane(v, p.g, 0);
-            self.ramps[param::K as usize].set_lane(v, p.k, 0);
+            self.set_ramp_lane(param::GAIN as usize, v, p.gain, 0);
+            self.set_ramp_lane(param::G as usize, v, p.g, 0);
+            self.set_ramp_lane(param::K as usize, v, p.k, 0);
             self.tile.gain[v] = p.gain;
             self.tile.g_coeff[v] = p.g;
             self.tile.k_damping[v] = p.k;
             self.tile.patch_id[v] = p.patch_id;
         }
+    }
+
+    /// `RampTile::set_lane` on ramp tile `param`.
+    #[cfg(not(vesper_port))]
+    fn set_ramp_lane(&mut self, param: usize, lane: usize, target: f32, ramp_samples: u32) {
+        self.ramps[param].set_lane(lane, target, ramp_samples);
+    }
+
+    #[cfg(vesper_port)]
+    fn set_ramp_lane(&mut self, param: usize, lane: usize, target: f32, ramp_samples: u32) {
+        let (current, rest) = self.ramps[param].split_at_mut(LANES);
+        let (target_lanes, rest) = rest.split_at_mut(LANES);
+        let (step, remaining) = rest.split_at_mut(LANES);
+        crate::port::ok(crate::port::tile_set_lane(
+            current,
+            target_lanes,
+            step,
+            remaining,
+            lane as u64,
+            target.to_bits(),
+            ramp_samples,
+        ));
     }
 
     /// Stereo pan of voice `v` (left weight, right weight).
@@ -167,7 +202,67 @@ impl SvfBank {
     }
 
     /// Render frames `[start, end)` of `input` into `left`/`right` with the
+    /// selected lane path. (The port build runs the Vesper kernel, which is
+    /// bit-identical to every lane path.)
+    #[cfg(vesper_port)]
+    pub fn render(
+        &mut self,
+        input: &[f32],
+        left: &mut [f32],
+        right: &mut [f32],
+        start: usize,
+        end: usize,
+    ) {
+        use crate::port::{bits, bits_mut};
+        let t = &mut self.tile;
+        crate::port::ok(crate::port::svf_render(
+            bits_mut(&mut t.ic1eq),
+            bits_mut(&mut t.ic2eq),
+            bits_mut(&mut t.g_coeff),
+            bits_mut(&mut t.k_damping),
+            bits_mut(&mut t.gain),
+            self.ramps.as_flattened_mut(),
+            bits(&self.pan.left),
+            bits(&self.pan.right),
+            bits(input),
+            bits_mut(left),
+            bits_mut(right),
+            start as u64,
+            end as u64,
+        ));
+    }
+
+    /// The original fused scalar loop (wave five), kept as the reference
+    /// every lane path is tested against bit for bit.
+    #[cfg(vesper_port)]
+    pub fn render_reference(
+        &mut self,
+        input: &[f32],
+        left: &mut [f32],
+        right: &mut [f32],
+        start: usize,
+        end: usize,
+    ) {
+        use crate::port::{bits, bits_mut};
+        let t = &mut self.tile;
+        crate::port::ok(crate::port::svf_render_reference(
+            bits_mut(&mut t.ic1eq),
+            bits_mut(&mut t.ic2eq),
+            bits_mut(&mut t.g_coeff),
+            bits_mut(&mut t.k_damping),
+            bits_mut(&mut t.gain),
+            self.ramps.as_flattened_mut(),
+            bits(input),
+            bits_mut(left),
+            bits_mut(right),
+            start as u64,
+            end as u64,
+        ));
+    }
+
+    /// Render frames `[start, end)` of `input` into `left`/`right` with the
     /// selected lane path.
+    #[cfg(not(vesper_port))]
     pub fn render(
         &mut self,
         input: &[f32],
@@ -196,6 +291,7 @@ impl SvfBank {
 
     /// The original fused scalar loop (wave five), kept as the reference
     /// every lane path is tested against bit for bit.
+    #[cfg(not(vesper_port))]
     pub fn render_reference(
         &mut self,
         input: &[f32],
@@ -248,7 +344,7 @@ impl ParamTable for SvfBank {
         if lane >= LANES || param >= 3 {
             return false;
         }
-        self.ramps[param].set_lane(lane, target, ramp_samples);
+        self.set_ramp_lane(param, lane, target, ramp_samples);
         true
     }
 }
@@ -403,6 +499,17 @@ impl crate::pdc::DspProcessor for SvfNode {
         let n = input.len();
         self.bank
             .render(input, &mut self.left, &mut self.right, 0, n);
+        #[cfg(vesper_port)]
+        {
+            use crate::port::{bits, bits_mut};
+            crate::port::ok(crate::port::mix_lr(
+                bits_mut(output),
+                bits(&self.left),
+                bits(&self.right),
+                n as u64,
+            ));
+        }
+        #[cfg(not(vesper_port))]
         for (i, y) in output[..n].iter_mut().enumerate() {
             *y = self.left[i] + self.right[i];
         }
@@ -444,6 +551,33 @@ pub struct PidGains {
     pub integral_limit: f32,
 }
 
+#[cfg(vesper_port)]
+impl PidGains {
+    /// The gains as the port reads them: kp, ki, kd, dt, torque_limit,
+    /// integral_limit, as bits.
+    fn words(&self) -> [u32; 6] {
+        [
+            self.kp.to_bits(),
+            self.ki.to_bits(),
+            self.kd.to_bits(),
+            self.dt.to_bits(),
+            self.torque_limit.to_bits(),
+            self.integral_limit.to_bits(),
+        ]
+    }
+}
+
+#[cfg(vesper_port)]
+impl From<crate::port::PidFault> for PidFault {
+    fn from(f: crate::port::PidFault) -> Self {
+        match f {
+            crate::port::PidFault::NonFiniteInput => PidFault::NonFiniteInput,
+            crate::port::PidFault::NonFiniteIntermediate => PidFault::NonFiniteIntermediate,
+            crate::port::PidFault::BadGains => PidFault::BadGains,
+        }
+    }
+}
+
 /// Controller faults; the caller must command safe torque (0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PidFault {
@@ -465,6 +599,47 @@ pub struct PidController {
 
 impl PidController {
     /// A controller at rest.
+    #[cfg(vesper_port)]
+    pub fn new(gains: PidGains) -> Result<Self, PidFault> {
+        use crate::port::PidCheckError as E;
+        match crate::port::pid_check(&gains.words()) {
+            Ok(()) => Ok(PidController {
+                gains,
+                integral: 0.0,
+                prev_measurement: None,
+            }),
+            Err(E::PidFault(f)) => Err(f.into()),
+            Err(e) => panic!("the Vesper port of vesper-resonance failed: {e:?}"),
+        }
+    }
+
+    /// One control period: torque command for `setpoint` given `measurement`.
+    #[cfg(vesper_port)]
+    pub fn step(&mut self, setpoint: f32, measurement: f32) -> Result<f32, PidFault> {
+        use crate::port::PidStepError as E;
+        let mut state = [
+            self.integral.to_bits(),
+            u32::from(self.prev_measurement.is_some()),
+            self.prev_measurement.unwrap_or(0.0).to_bits(),
+        ];
+        match crate::port::pid_step(
+            &self.gains.words(),
+            &mut state,
+            setpoint.to_bits(),
+            measurement.to_bits(),
+        ) {
+            Ok(u) => {
+                self.integral = f32::from_bits(state[0]);
+                self.prev_measurement = Some(f32::from_bits(state[2]));
+                Ok(f32::from_bits(u))
+            }
+            Err(E::PidFault(f)) => Err(f.into()),
+            Err(e) => panic!("the Vesper port of vesper-resonance failed: {e:?}"),
+        }
+    }
+
+    /// A controller at rest.
+    #[cfg(not(vesper_port))]
     pub fn new(gains: PidGains) -> Result<Self, PidFault> {
         let all = [
             gains.kp,
@@ -485,6 +660,7 @@ impl PidController {
     }
 
     /// One control period: torque command for `setpoint` given `measurement`.
+    #[cfg(not(vesper_port))]
     pub fn step(&mut self, setpoint: f32, measurement: f32) -> Result<f32, PidFault> {
         if !setpoint.is_finite() || !measurement.is_finite() {
             return Err(PidFault::NonFiniteInput);

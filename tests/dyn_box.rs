@@ -243,7 +243,6 @@ fn words(n: u64) -> ChunkSeq[u64] {
     }
     words
 }
-// A function with a loop cannot own a box yet.
 fn note(n: u64, tag: u64) -> Box[dyn Consume] {
     Box::new(Note { words: words(n), inner: Box::new(N { v: n }), tag: tag })
 }
@@ -411,7 +410,7 @@ impl Step for Acc {{ fn step(in self, x: u64) -> u64 {{ wrapping_add(wrapping_mu
 fn by_dyn(in s: dyn Step, x: u64) -> u64 {{ s.step(x) }}
 fn by_mono[T: Step](in s: T, x: u64) -> u64 {{ s.step(x) }}
 fn by_box(in s: Box[dyn Step], x: u64) -> u64 {{ s.step(x) }}
-// A function with a loop may borrow a boxed object, not own one.
+// The loop borrows the boxed object; tests/loop_boxes.rs measures owning it.
 fn run(in a: Acc, in b: Box[dyn Step]) -> u64 {{
     let mut x: u64 = 0;
     for i in 0..{N} {{ x = {call}; }}
@@ -514,10 +513,10 @@ impl Factory[i64] for Seven { fn make(in self) -> i64 { wrapping_add(self.k, 7) 
     );
 }
 
-/// A loop function may not own a box through an aggregate's fields: the
-/// drop elaboration that would reclaim it needs an acyclic graph.
+/// A loop function may own a box through an aggregate's fields: the drop
+/// elaboration solves loops (#1064, tests/loop_boxes.rs).
 #[test]
-fn loops_refuse_aggregates_owning_boxes() {
+fn loops_own_aggregates_owning_boxes() {
     let src = format!(
         "{TRAITS}struct Holder {{ object: Box[dyn Shape] }}
 fn make() -> Box[dyn Shape] {{ Box::new(P {{ x: 3 }}) }}
@@ -530,9 +529,7 @@ fn run(n: u64) -> i64 {{
 fn main() -> i64 {{ run(4) }}
 "
     );
-    let w = world(&src);
-    let e = native::jit_with_options(&w, "main", true).unwrap_err();
-    assert!(e.contains("not reclaimed natively"), "{e}");
+    assert_eq!(execute(&src), "12");
 }
 
 /// A `sink self` call that fails frees the consumed box's block before

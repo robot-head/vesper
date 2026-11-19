@@ -281,4 +281,6 @@ skip_port vesper-silicon || . crates/vesper-silicon/port/check.sh  # port P3a la
 fi
 # Shard 7: every later port. New ports append their lines below.
 part 7 || exit 0
+skip_port vesper-warp || . crates/vesper-warp/port/check.sh  # port P3b lane 4 (#1066): vesper-warp, both builds and one divergence check per ported module
 skip_port vesper-prism-h3 || sh crates/vesper-prism-h3/port/check.sh  # port P3b lane 5 (#1067): vesper-prism-h3, both builds and one divergence check per ported module
+skip_port vesper-resonance || sh crates/vesper-resonance/port/test-port.sh  # port P3b lane 9 (#1071): vesper-resonance, both builds, one divergence check per ported module and the realtime verifier proof
