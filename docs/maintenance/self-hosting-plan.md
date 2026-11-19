@@ -1,9 +1,24 @@
 # Self-hosting plan
 
-> Written 2026-11-19 against `main` at `9e801e7` (claim #1122). The
+> Written 2026-11-19 against `main` at `9e801e7` (claim #1122). Updated
+> 2026-11-19 at `b35b515` with the SH0 results and the SH1 plan (part of
+> #1130). The
 > [manuscript](../manuscript/README.md) is the sole specification; §10
 > ("Verified Bootstrap") defines Stage 0 to Stage 2. This plan orders the work
 > to get there. Confirm live ownership on the issue board before acting.
+
+## Status (2026-11-19)
+
+SH0 has merged except two pieces, both carried into SH1: the
+`vesper-diagnostics` port (#1128 part 2, SH1 lane 1) and the checker and IR
+census that plans SH2 (#1130, SH1 lane 15). Merged: the hybrid Stage 2 build
+(#1136), the tool split (#1133), std fs/process/env (#1139), the Cranelift
+shim (#1135), std graph/intern/arena/hash (#1140), the span and lean-syntax
+pilots (#1138) and front end v2 (#1141). Their reports are
+`docs/parallel-results/self-host-*.md`; the gaps they found are S12-S19
+below. SH1 is planned in
+[self-host-sh1](../agent-prompts/self-host-sh1/README.md) (#1128, #1145-#1157,
+#1130).
 
 ## Where we are
 
@@ -99,13 +114,13 @@ Lines are the seed's `src/`.
 
 | Seed | Lines | Used by (in `src/`) | Kind | Leaves the compiler when |
 |---|--:|---|---|---|
-| `vesper-aegis-seed` | 10,000 | `tee_commands` | tool only | SH0-2 (tool split) |
-| `vesper-bench-seed` | 4,200 | `bench_commands`, via `vesper-bench-pmu` | tool only | SH0-2 |
+| `vesper-aegis-seed` | 10,000 | `tee_commands` | tool only | out since #1133 (`vesper-tee`) |
+| `vesper-bench-seed` | 4,200 | `bench_commands`, via `vesper-bench-pmu` | tool only | out since #1133 |
 | `vesper-crucible-seed` | 4,700 | `crucible_commands`, `native_coverage` | mostly tool | SH0-2 (coverage hook stays until SH4) |
-| `vesper-grammar-seed` | 6,400 | `grammar_commands` | tool only | SH0-2 |
+| `vesper-grammar-seed` | 6,400 | `grammar_commands` | tool only | out since #1133 |
 | `vesper-serde-seed` | 8,600 | `grammar_commands`, `json_commands`, `vesper-lsp` | tool + LSP | SH0-2, then SH5 |
-| `vesper-loom-audit-seed` | 1,700 | `audit_commands`, `publish_commands` | tool only | SH0-2 |
-| `vesper-loom-solver-seed` | 1,200 | `package_commands` | package tool | SH0-2 |
+| `vesper-loom-audit-seed` | 1,700 | `audit_commands`, `publish_commands` | tool only | out since #1133 |
+| `vesper-loom-solver-seed` | 1,200 | `package_commands` | package tool | out since #1133 |
 | `vesper-semver-seed` | 2,100 | `publish_commands`, `package_commands`, `tooling/lint` | package tool + lint | SH0-2, lint part in SH1 |
 | `vesper-loom-calculus-seed` | 1,700 | `packages`, `package_graph`, `interface`, LSP, `forge_frontend` | compiler semantics (manifests) | Stage 2 (SH6) |
 | `vesper-pact-seed` | 2,700 | `pact_frontend` | compiler semantics (trait resolution) | SH2: the Vesper checker calls `@vesper/pact` directly |
@@ -152,15 +167,23 @@ measures them on compiler code before SH1 and SH2 are claimed.
 | S8 | **Incremental queries.** `database/` and the LSP use salsa | SH5 | memo tables in Vesper; the batch compiler does not need them |
 | S9 | **Wasm encoding.** `wasm_backend` uses wasm-encoder and wit-component | SH4 | the encoder ports; WIT component wrapping may stay extern |
 | S10 | **Verified backend breadth.** §10.1 builds `@vesper-lang/compiler` with the verified backend, which still refuses closures, strings, sequences, heap memory, resuming handlers and macOS/Windows | the DDC part of Stage 2 | separate track (SH6b); does not block a Cranelift-built Stage 2 |
-| S11 | **Ergonomics found by ports.** Two-phase arguments (#1094), qualified paths (#1093), `continue` (#1092, merged), fixed arrays (#1091) | all compiler code | P3b gaps wave, in flight |
+| S11 | **Ergonomics found by ports.** Two-phase arguments (#1094), qualified paths (#1093), `continue` (#1092), fixed arrays (#1091) | all compiler code | merged (P3b gaps wave) |
+| S12 | **Leaks on early exits.** `Fail::raise`, field returns and early returns leak a local struct's owned fields | every compiler module | SH1-2 (#1145) |
+| S13 | **Byte loops.** Per-byte `try_get` keeps its bounds check (span lookup, the v2 lexer at 7.1x Ir); slice headers reloaded; guards do not reach loop bodies | front end speed (S6) | SH1-3 (#1146) |
+| S14 | **String and binding costs.** Byte-by-byte `push_str`, UTF-8 re-validation and a `Vec` per aggregate result in bindings | every swap | SH1-4 (#1147) |
+| S15 | **Small language gaps.** Or-patterns, `Str` literals, bound literal views, `cmp_bytes`, `checked_add_k`, fmt DepthLimit | all compiler code | SH1-5 (#1148) |
+| S16 | **Compiler data across the ABI.** `World` and `ast::Type` cannot cross export ABI v3; `in` `Box` trees cannot be matched | every coarse swap (SH1-12 onward) | SH1-6 (#1149) |
+| S17 | **`.vsys` in packages.** Imports only from the root module of a library; no `bool`, no `CStr` | the driver (SH5), Cranelift users (SH4) | SH1-7 (#1150) |
+| S18 | **Compile time of large functions.** Superlinear `--no-opt` JIT, shared values rematerialized | compile-speed parity (S6) | SH1-8 (#1151) |
+| S19 | **Checker and IR shapes.** Not yet measured on compiler code | SH2 | SH1-15 census (#1130) |
 
 ## Waves
 
 | Wave | What | Size (Rust lines replaced) | Starts |
 |---|---|--:|---|
-| **SH0** | Groundwork: hybrid build, tool split, std I/O, Cranelift shim, std data, toolchain pilots, front end v2, census | ~3k (pilots) | now ([plan](../agent-prompts/self-host-sh0/README.md), #1123-#1130) |
-| **SH1** | Front end: `vesper-syntax`, `vesper-core`, `vesper-span`, `vesper-diagnostics`, `vesper-fmt`, `vesper-lint`, lexical `vesper-highlight`, `vesper-forge` + `forge_frontend` (sugar and macro expansion; the wasm macro host stays extern) | ~36k | after SH0-1, SH0-7 and SH0-8 |
-| **SH2** | Checker: name resolution and packages, core typing and modes, effects and handlers, regions, sequences and strings, `dyn`, `fip`, layout; trait resolution through the Pact port | ~40k | after SH1's AST lane |
+| **SH0** | Groundwork: hybrid build, tool split, std I/O, Cranelift shim, std data, toolchain pilots, front end v2, census | ~3k (pilots) | merged except #1128 part 2 and #1130, which moved into SH1 ([plan](../agent-prompts/self-host-sh0/README.md)) |
+| **SH1** | Front end: `vesper-diagnostics`, the `vesper-core` AST, front end v2 speed and editor mode, `vesper-fmt`, lexical `vesper-highlight`, `vesper-lint`, `vesper-forge` + `forge_frontend` (the wasm macro host stays extern), the parser swap into the hybrid build; seven gap lanes for S12-S18; the census that plans SH2 | ~36k | now ([plan](../agent-prompts/self-host-sh1/README.md), #1128, #1145-#1157, #1130) |
+| **SH2** | Checker: name resolution and packages, core typing and modes, effects and handlers, regions, sequences and strings, `dyn`, `fip`, layout; trait resolution through the Pact port | ~40k | after SH1's AST lane (9) and tree ABI lane (6); planned by SH1 lane 15 |
 | **SH3** | Place IR lowering, IR check, inliner, optimizer, bounds hoisting, e-graph rules | ~10k | after SH2's core typing lane |
 | **SH4** | Backends: native lowering through the shim (split by file family into about six lanes), export ABI, FFI lowering, freestanding, wasm, eBPF, backend verifiers | ~49k | after SH3 and SH0-4 |
 | **SH5** | Driver and tools: CLI, test runner, doctests, docs, LSP, Lean extraction, sim-session | ~50k | the driver lane after SH4; the rest in parallel |
