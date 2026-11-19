@@ -674,6 +674,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .copied()
                 .ok_or_else(|| format!("native ChunkSeq::{} lacks an operand", op.name()))
         };
+        if let SeqOp::Vector(io) = op {
+            let (h, start, len) = self.seq_view(arg(0)?, &arg_types[0]);
+            let zero = self.zero();
+            let base = self.seq_elem_addr(h, start, zero, stride);
+            let value = if io.store { Some(arg(2)?) } else { None };
+            return self.vector_slice_io(io, base, len, arg(1)?, value, stride);
+        }
         Ok(match op {
             SeqOp::New => {
                 // An empty sequence shares one static header and allocates
@@ -856,8 +863,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             | SeqOp::FindNotIn
             | SeqOp::EqIgnoreAsciiCase
             | SeqOp::ExtendAsciiLowercase
-            | SeqOp::MakeAsciiLowercase { .. } => {
-                unreachable!("string, hoisted and byte operations return above")
+            | SeqOp::MakeAsciiLowercase { .. }
+            | SeqOp::Vector(_) => {
+                unreachable!("string, hoisted, byte and vector operations return above")
             }
             SeqOp::Swap | SeqOp::Replace => {
                 return Err(format!(

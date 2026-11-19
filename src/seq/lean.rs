@@ -124,6 +124,7 @@ impl Generator<'_> {
                 | SeqOp::Wide(_)
                 | SeqOp::Swap
                 | SeqOp::Replace
+                | SeqOp::Vector(_)
         ) || op.byte_scan()
         {
             return Err(format!(
@@ -254,7 +255,8 @@ impl Generator<'_> {
             | SeqOp::FindNotIn
             | SeqOp::EqIgnoreAsciiCase
             | SeqOp::ExtendAsciiLowercase
-            | SeqOp::MakeAsciiLowercase { .. } => {
+            | SeqOp::MakeAsciiLowercase { .. }
+            | SeqOp::Vector(_) => {
                 unreachable!("refused above")
             }
         })

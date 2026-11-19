@@ -4,7 +4,7 @@
 //!
 //! * **Types.** `Vec[T, N]` holds `N` lanes of `T` and `Mask[T, N]` holds one
 //!   boolean per lane of the same shape. `T` is one of the scalar types the
-//!   language has (`u8`, `u32`, `u64`, `i64`, `f64`) and the vector is 128,
+//!   language has (`u8`, `u32`, `u64`, `i64`, `f32`, `f64`) and the vector is 128,
 //!   256 or 512 bits wide. Both are `copy` and have no source fields.
 //! * **Operations** are reserved path intrinsics (`Vec::add`, `Mask::count`,
 //!   `Isa::supported`, ...; see [`Intrinsic`]). They take their operands by
@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 
 #[path = "vector/eval.rs"]
 mod eval;
-pub use eval::evaluate;
+pub use eval::{evaluate, slice_io};
 
 /// The reserved ISA capability effect.
 pub const ISA: &str = "Isa";
@@ -52,10 +52,18 @@ pub enum Elem {
     U32,
     U64,
     I64,
+    F32,
     F64,
 }
 impl Elem {
-    pub const ALL: [Elem; 5] = [Elem::U8, Elem::U32, Elem::U64, Elem::I64, Elem::F64];
+    pub const ALL: [Elem; 6] = [
+        Elem::U8,
+        Elem::U32,
+        Elem::U64,
+        Elem::I64,
+        Elem::F32,
+        Elem::F64,
+    ];
     pub fn from_type(t: &Type) -> Option<Self> {
         match t {
             Type::Named(n, a) if a.is_empty() => Self::from_name(n),
@@ -68,6 +76,7 @@ impl Elem {
             "u32" => Self::U32,
             "u64" => Self::U64,
             "i64" => Self::I64,
+            "f32" => Self::F32,
             "f64" => Self::F64,
             _ => return None,
         })
@@ -78,18 +87,27 @@ impl Elem {
             Self::U32 => "u32",
             Self::U64 => "u64",
             Self::I64 => "i64",
+            Self::F32 => "f32",
             Self::F64 => "f64",
         }
     }
     pub fn bits(self) -> u32 {
         match self {
             Self::U8 => 8,
-            Self::U32 => 32,
+            Self::U32 | Self::F32 => 32,
             _ => 64,
         }
     }
     pub fn is_float(self) -> bool {
-        self == Self::F64
+        matches!(self, Self::F32 | Self::F64)
+    }
+    /// The unsigned lane of the same width (`to_bits`/`from_bits`).
+    pub fn bits_elem(self) -> Self {
+        match self {
+            Self::F32 => Self::U32,
+            Self::F64 => Self::U64,
+            e => e,
+        }
     }
     pub fn is_signed(self) -> bool {
         self == Self::I64
@@ -214,7 +232,7 @@ pub fn type_error(t: &Type) -> Option<String> {
     };
     Some(if Elem::from_type(&args[0]).is_none() {
         format!(
-            "{n} lanes must be u8, u32, u64, i64 or f64, found {}",
+            "{n} lanes must be u8, u32, u64, i64, f32 or f64, found {}",
             args[0]
         )
     } else {
@@ -415,6 +433,113 @@ pub enum ReduceOp {
     Max,
 }
 
+/// Lane-wise unary float operations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum UnaryOp {
+    Sqrt,
+    Abs,
+    Neg,
+}
+/// Lane conversions: the lane count stays, the lane type changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub enum Conv {
+    /// `Vec::to_bits(v)`: float lanes as the unsigned lanes of their bits.
+    ToBits,
+    /// `Vec::from_bits(v)`: `u32`/`u64` lanes reinterpreted as `f32`/`f64`.
+    FromBits,
+    /// `Vec::widen_f64(v)`: `f32` lanes to `f64`, exactly.
+    Widen,
+    /// `Vec::nearest_f32(v)`: `f64` lanes to the nearest `f32`.
+    Narrow,
+}
+impl Conv {
+    /// The lane type this conversion accepts.
+    pub fn accepts(self, elem: Elem) -> bool {
+        match self {
+            Self::ToBits => elem.is_float(),
+            Self::FromBits => matches!(elem, Elem::U32 | Elem::U64),
+            Self::Widen => elem == Elem::F32,
+            Self::Narrow => elem == Elem::F64,
+        }
+    }
+    /// The lane type of the result.
+    pub fn target(self, elem: Elem) -> Elem {
+        match (self, elem) {
+            (Self::ToBits, e) => e.bits_elem(),
+            (Self::FromBits, Elem::U32) | (Self::Narrow, _) => Elem::F32,
+            (Self::FromBits, _) | (Self::Widen, _) => Elem::F64,
+        }
+    }
+    /// The result shape of converting a vector of `shape`, if it is a valid
+    /// 128-, 256- or 512-bit shape.
+    pub fn result(self, shape: Shape) -> Option<Shape> {
+        Shape::new(self.target(shape.elem), shape.lanes)
+    }
+}
+
+/// A slice load or store (`Vec::load`, `Vec::store`, `Vec::load_masked`
+/// and `Vec::store_masked` on a `Slice[T]` or `ChunkSeq[T]`). It reads or
+/// writes its sequence in place, so the Place IR carries it as a sequence
+/// operation (`SeqOp::Vector`) rather than as a total `Op::Vector`. The
+/// unmasked forms check `at + N <= len` once and raise `Fail[RuntimeError]`
+/// (`IndexOutOfBounds`) otherwise; the masked forms are total: lanes past
+/// the end read zero and are not written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct SliceIo {
+    pub shape: Shape,
+    pub store: bool,
+    pub masked: bool,
+}
+impl SliceIo {
+    pub fn name(self) -> &'static str {
+        match (self.store, self.masked) {
+            (false, false) => "Vec::load",
+            (false, true) => "Vec::load_masked",
+            (true, false) => "Vec::store",
+            (true, true) => "Vec::store_masked",
+        }
+    }
+    /// Whether a call of `name` whose first argument has type `first` is a
+    /// slice load or store.
+    pub fn applies(name: &str, first: Option<&Type>) -> bool {
+        match Intrinsic::lookup(name) {
+            Some(Ok(Intrinsic::Load | Intrinsic::Store | Intrinsic::StoreMasked)) => true,
+            Some(Ok(Intrinsic::LoadMasked)) => first.is_some_and(crate::seq::is_seq_or_slice),
+            _ => false,
+        }
+    }
+    /// Resolve a checked call of a slice load or store: `types` are its
+    /// explicit type arguments, `arg_types` the checked types of its
+    /// arguments and `result` its type.
+    pub fn resolve(name: &str, types: &[Type], arg_types: &[Type], result: &Type) -> Option<Self> {
+        if !Self::applies(name, arg_types.first()) {
+            return None;
+        }
+        let intrinsic = Intrinsic::lookup(name)?.ok()?;
+        let store = matches!(intrinsic, Intrinsic::Store | Intrinsic::StoreMasked);
+        let masked = matches!(intrinsic, Intrinsic::LoadMasked | Intrinsic::StoreMasked);
+        let shape = if store {
+            shape_of(arg_types.get(2)?)?.1
+        } else {
+            shape_of(result)
+                .map(|(_, s)| s)
+                .or_else(|| explicit_shape(types))?
+        };
+        Some(Self {
+            shape,
+            store,
+            masked,
+        })
+    }
+}
+/// The shape of explicit `[T, N]` type arguments.
+fn explicit_shape(types: &[Type]) -> Option<Shape> {
+    match types {
+        [elem, Type::Named(n, _)] => Shape::new(Elem::from_type(elem)?, n.parse().ok()?),
+        _ => None,
+    }
+}
+
 /// A reserved vector intrinsic, before its shape is known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum Intrinsic {
@@ -426,6 +551,12 @@ pub enum Intrinsic {
     Binary(BinOp),
     /// `Vec::not(a)` (integer lanes).
     Not,
+    /// `Vec::sqrt(a)`, `Vec::abs(a)`, `Vec::neg(a)` (float lanes).
+    Unary(UnaryOp),
+    /// `Vec::mul_add(a, b, c)`: `a * b + c` with one rounding (float lanes).
+    MulAdd,
+    /// `Vec::to_bits(v)` and the other lane conversions.
+    Convert(Conv),
     /// `Vec::shl(a, k)`, `Vec::shr(a, k)`: `k: u64` modulo the lane width.
     Shift(ShiftOp),
     /// `Vec::eq(a, b)` ...: a `Mask`.
@@ -452,9 +583,17 @@ pub enum Intrinsic {
     Replace,
     /// `Vec::shuffle(v, i0, ..., i(N-1))`: compile-time checked swizzle.
     Shuffle,
-    /// `Vec::load_masked[u8, N](s, offset)`: bytes of `s` from `offset`,
-    /// zero past its end.
+    /// `Vec::load_masked[u8, N](s, offset)`: bytes of the string `s` from
+    /// `offset`, zero past its end. On a `Slice[T]` or `ChunkSeq[T]`
+    /// argument it is the masked slice load of [`SliceIo`].
     LoadMasked,
+    /// `Vec::load[T, N](in s, at)`: a [`SliceIo`] load.
+    Load,
+    /// `Vec::store(inout s, at, v)`: a [`SliceIo`] store.
+    Store,
+    /// `Vec::store_masked(inout s, at, v)`: a [`SliceIo`] store of the
+    /// lanes inside `s`.
+    StoreMasked,
     /// `Mask::in_bounds[u8, N](s, offset)`: lanes `load_masked` reads from `s`.
     InBounds,
     /// `Mask::active[T, N](offset, len)`: lane `i` is set iff
@@ -484,6 +623,17 @@ impl Intrinsic {
             ("Vec", "saturating_add") => I::Binary(BinOp::SaturatingAdd),
             ("Vec", "saturating_sub") => I::Binary(BinOp::SaturatingSub),
             ("Vec", "not") => I::Not,
+            ("Vec", "sqrt") => I::Unary(UnaryOp::Sqrt),
+            ("Vec", "abs") => I::Unary(UnaryOp::Abs),
+            ("Vec", "neg") => I::Unary(UnaryOp::Neg),
+            ("Vec", "mul_add") => I::MulAdd,
+            ("Vec", "to_bits") => I::Convert(Conv::ToBits),
+            ("Vec", "from_bits") => I::Convert(Conv::FromBits),
+            ("Vec", "widen_f64") => I::Convert(Conv::Widen),
+            ("Vec", "nearest_f32") => I::Convert(Conv::Narrow),
+            ("Vec", "load") => I::Load,
+            ("Vec", "store") => I::Store,
+            ("Vec", "store_masked") => I::StoreMasked,
             ("Vec", "shl") => I::Shift(ShiftOp::Shl),
             ("Vec", "shr") => I::Shift(ShiftOp::Shr),
             ("Vec", "eq") => I::Compare(CmpOp::Eq),
@@ -522,7 +672,12 @@ impl Intrinsic {
     pub fn takes_shape_arguments(self) -> bool {
         matches!(
             self,
-            Self::Splat | Self::From | Self::LoadMasked | Self::InBounds | Self::Active
+            Self::Splat
+                | Self::From
+                | Self::LoadMasked
+                | Self::Load
+                | Self::InBounds
+                | Self::Active
         )
     }
     /// Argument positions that must be integer literals (lane indices).
@@ -561,8 +716,17 @@ impl Intrinsic {
                 Some("Vec::mul is not defined for u8 lanes")
             }
             I::Binary(BinOp::Div) if !elem.is_float() => {
-                Some("Vec::div is defined for f64 lanes only")
+                Some("Vec::div is defined for f32 and f64 lanes only")
             }
+            I::Unary(_) | I::MulAdd if !elem.is_float() => Some(
+                "Vec::sqrt, Vec::abs, Vec::neg and Vec::mul_add are defined for f32 and f64 lanes only",
+            ),
+            I::Convert(c) if !c.accepts(elem) => Some(match c {
+                Conv::ToBits => "Vec::to_bits takes f32 or f64 lanes",
+                Conv::FromBits => "Vec::from_bits takes u32 or u64 lanes",
+                Conv::Widen => "Vec::widen_f64 takes f32 lanes",
+                Conv::Narrow => "Vec::nearest_f32 takes f64 lanes",
+            }),
             I::Binary(BinOp::SaturatingAdd | BinOp::SaturatingSub) if elem != Elem::U8 => {
                 Some("saturating lane arithmetic is defined for u8 lanes only")
             }
@@ -572,7 +736,7 @@ impl Intrinsic {
             | I::Reduce(ReduceOp::And | ReduceOp::Or | ReduceOp::Xor)
                 if elem.is_float() =>
             {
-                Some("bitwise lane operations are not defined for f64 lanes")
+                Some("bitwise lane operations are not defined for float lanes")
             }
             I::LoadMasked | I::InBounds if elem != Elem::U8 => {
                 Some("string loads produce u8 lanes")
@@ -616,15 +780,25 @@ impl VectorOp {
                 .flatten()
                 .map(Self::IsaSupported);
         }
-        let shape = shape_of(result)
-            .or_else(|| arg_types.first().and_then(shape_of))
-            .or_else(|| match types {
-                [elem, Type::Named(n, _)] => {
-                    Shape::new(Elem::from_type(elem)?, n.parse().ok()?).map(|s| (Kind::Vec, s))
-                }
-                _ => None,
-            })?
-            .1;
+        if let Some(io) = SliceIo::resolve(name, types, arg_types, result) {
+            // The width checks of `check_world` see a slice access at the
+            // shape it moves; the IR lowers it as `SeqOp::Vector`.
+            return Some(Self::Lanes {
+                intrinsic,
+                shape: io.shape,
+                constants: vec![],
+            });
+        }
+        // A conversion has the shape of its operand.
+        let operand = arg_types.first().and_then(shape_of);
+        let shape = if matches!(intrinsic, Intrinsic::Convert(_)) {
+            operand
+        } else {
+            shape_of(result)
+                .or(operand)
+                .or_else(|| explicit_shape(types).map(|s| (Kind::Vec, s)))
+        }?
+        .1;
         let constants = args[intrinsic.constant_positions(args.len())]
             .iter()
             .map(|e| match &e.kind {
@@ -796,6 +970,13 @@ impl IsaWalker<'_> {
                                     .and_then(|op| op.shape())
                             {
                                 self.vector_width(shape, available, n, e.span.clone());
+                                // A widening conversion's result is wider
+                                // than its operand.
+                                if let Some((_, r)) = shape_of(&self.ty(e))
+                                    && r.bits() > shape.bits()
+                                {
+                                    self.vector_width(r, available, n, e.span.clone());
+                                }
                             }
                         }
                     } else if n == "TiledSeq::load_tile_vec" {
@@ -993,6 +1174,7 @@ pub fn decode(t: &Type, bytes: &[u8]) -> Option<Value> {
         Kind::Vec => lanes
             .map(|l| match shape.elem {
                 Elem::F64 => Value::Float(f64::from_bits(l)),
+                Elem::F32 => Value::Float32(f32::from_bits(l as u32)),
                 Elem::I64 => Value::Int(l as i64),
                 e => Value::UInt(l, e.bits()),
             })

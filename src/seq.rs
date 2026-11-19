@@ -170,6 +170,10 @@ pub enum SeqOp {
     /// raises `IndexOutOfBounds` and the total one yields `false` when
     /// `lo <= hi <= len` fails; neither writes anything then.
     MakeAsciiLowercase { total: bool },
+    /// `Vec::load[T, N](in s, at)`, `Vec::store(inout s, at, v)` and their
+    /// masked forms (§14.3): a whole vector moved between lanes and a
+    /// sequence or slice with one bounds check ([`crate::vector::SliceIo`]).
+    Vector(crate::vector::SliceIo),
 }
 
 /// `read_u16_le`, `try_write_u64_be` and the other fixed-width accesses of a
@@ -313,6 +317,7 @@ impl SeqOp {
                 | Self::CopyWithin { total: false }
                 | Self::MakeAsciiLowercase { total: false }
                 | Self::Wide(Wide { total: false, .. })
+                | Self::Vector(crate::vector::SliceIo { masked: false, .. })
         )
     }
     /// Whether the operation mutates its receiver (argument 0) in place.
@@ -336,6 +341,7 @@ impl SeqOp {
                 | Self::CopyWithin { .. }
                 | Self::Fill
                 | Self::Wide(Wide { write: true, .. })
+                | Self::Vector(crate::vector::SliceIo { store: true, .. })
         )
     }
     /// Whether the operation is a place primitive (`swap`, `replace`) whose
@@ -396,6 +402,7 @@ impl SeqOp {
             Self::ExtendAsciiLowercase => "extend_ascii_lowercase",
             Self::MakeAsciiLowercase { total: false } => "make_ascii_lowercase",
             Self::MakeAsciiLowercase { total: true } => "try_make_ascii_lowercase",
+            Self::Vector(io) => io.name(),
         }
     }
 }

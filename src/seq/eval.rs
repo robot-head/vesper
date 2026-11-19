@@ -213,6 +213,16 @@ impl Runtime<'_> {
                     len,
                 })
             }
+            SeqOp::Vector(io) => {
+                let (cell, start, len) = view(arg(0)?)?;
+                let at = index(arg(1)?)?;
+                let mut items = cell.borrow_mut();
+                match crate::vector::slice_io(io, &mut items[start..start + len], at, args.get(2))?
+                {
+                    Some(v) => V(v),
+                    None => OutOfBounds,
+                }
+            }
             SeqOp::CopyFrom { total } => {
                 let (cell, start, len) = view(arg(0)?)?;
                 let at = index(arg(1)?)?;
