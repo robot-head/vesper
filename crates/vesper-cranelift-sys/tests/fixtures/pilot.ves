@@ -131,7 +131,7 @@ fn table_bytes() -> ChunkSeq[u8] {
 pub fn pilot() -> u64 eff [Ffi[Cranelift]] {
     let mut m = match module_new(
         in "".as_bytes(),
-        in "opt_level=speed".as_bytes(),
+        in "opt_level=speed;is_pic=true".as_bytes(),
         in "pilot".as_bytes()
     ) {
         Some(m) => m,

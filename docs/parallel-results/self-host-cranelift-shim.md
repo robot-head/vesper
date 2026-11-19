@@ -106,7 +106,7 @@ needs (Linux runs it under Bazel).
 ## The pilot
 
 `tests/fixtures/pilot.ves` builds, for the host target with
-`opt_level=speed`, an object with:
+`opt_level=speed;is_pic=true`, an object with:
 
 - `pilot_arith(a, b) = (a + b) * 3 - (a ^ b)`, through an 8-byte stack slot;
 - `pilot_sum(n)`, a loop whose header takes block params `(i, acc)` and
@@ -121,6 +121,13 @@ Linux and macOS, `rustc` with `pilot_main.rs` on Windows, so `link.exe`
 links the COFF object) and checks the program's output against a Rust model
 on seven inputs. Every module, builder, data and object handle is counted:
 the live counts are equal before and after each scenario.
+
+`is_pic=true` matches the compiler's own object path (`src/native.rs`). It
+is required on AArch64 Mach-O: without it Cranelift takes a data address
+with `adrp`/`add` (`Aarch64AdrPrelPgHi21`), which `cranelift-object` 0.125
+does not implement for Mach-O, so the first macOS CI run failed there. With
+it, AArch64 takes every address through the GOT. The shim keeps Cranelift's
+defaults, so a Stage 2 caller must pass the flag as the compiler does.
 
 ## The compared family: checked arithmetic
 
