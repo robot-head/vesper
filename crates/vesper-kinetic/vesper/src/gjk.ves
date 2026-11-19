@@ -312,7 +312,7 @@ fn affine_closest(in pts: ChunkSeq[Sp], mask: u64, inout lam: ChunkSeq[f64], ino
             let ej = sub(sp_at(in pts, nth_bit(mask, inc(j))).w, y0);
             gset(inout g, i, j, dot(ei, ej));
         }
-        gset(inout g, i, 3, 0.0 - dot(ei, y0));
+        gset(inout g, i, 3, -dot(ei, y0));
     }
     let mut scale_ref: f64 = 0.0;
     for i in 0..m {
@@ -591,7 +591,7 @@ fn make_face(in pts: ChunkSeq[Sp], i: u64, j: u64, k: u64, inside: V3, inout out
 // `|(w - a0) x (a1 - a0)|`, 2 `|(w - a0) . plane|`.
 fn far(in cand: ChunkSeq[Sp], mode: u64, a0: V3, a1: V3, plane: V3) -> u64 {
     let mut best: u64 = 0;
-    let mut best_v = 0.0 - inf();
+    let mut best_v = -inf();
     for i in 0..cand.len() {
         let w = sp_at(in cand, i).w;
         let v = if mode == 0 {
@@ -636,7 +636,7 @@ fn epa_result(in pts: ChunkSeq[Sp], face: Face, inout res: ChunkSeq[f64]) {
     let point_a = add(add(scale(a.a, wu), scale(b.a, wv)), scale(c.a, ww));
     let point_b = add(add(scale(a.b, wu), scale(b.b, wv)), scale(c.b, ww));
     res.clear();
-    res.push(0.0 - face.dist);
+    res.push(-face.dist);
     put3(inout res, face.n);
     put3(inout res, point_a);
     put3(inout res, point_b);
@@ -854,7 +854,7 @@ pub fn separation(ka: u32, in da: Slice[f64], kb: u32, in db: Slice[f64], inout 
             return degenerate();
         }
         let n = res3(in er, 1);
-        write_sep(inout out, 0.0 - radii, n, add(gpa, scale(n, ra)), sub(gpb, scale(n, rb)));
+        write_sep(inout out, -radii, n, add(gpa, scale(n, ra)), sub(gpb, scale(n, rb)));
         return ok();
     }
     e
