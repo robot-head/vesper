@@ -21,8 +21,8 @@
 
 use self::lex::{
     lex,
-    max_source_bytes,
-    max_diagnostics
+    lex_raw,
+    max_source_bytes
 };
 use self::diag::{
     diags_new,
@@ -58,6 +58,8 @@ pub struct Tokens {
     slots: ChunkSeq[u32],
     sym_start: ChunkSeq[u32],
     sym_end: ChunkSeq[u32],
+    // The contextual word of each symbol.
+    sym_word: ChunkSeq[u8],
     // The lexer stopped at a token or diagnostic limit.
     limited: bool
 }
@@ -159,7 +161,11 @@ pub fn parse_tables(in source: Str) -> ChunkSeq[u64] {
 
 fn report_oversized(retained: u64, in d: Diags) -> ChunkSeq[u64] {
     let mut out = ChunkSeq::new[u64]();
-    let leaves: u64 = if retained == 0 { 0 } else { 1 };
+    let leaves: u64 = if retained == 0 {
+        0
+    } else {
+        1
+    };
     out.push(leaves);
     out.push(1);
     out.push(1);
@@ -178,10 +184,13 @@ fn report_oversized(retained: u64, in d: Diags) -> ChunkSeq[u64] {
     out.push(retained);
     out.push(d.text.len());
     for i in 0..d.text.len() {
-        out.push(match d.text.try_get(i) {
-            Option::Some(c) => widen_u64(c),
-            Option::None => 0,
-        });
+        out
+            .push(
+            match d.text.try_get(i) {
+                Option::Some(c) => widen_u64(c),
+                Option::None => 0,
+            }
+        );
     }
     out
 }
@@ -209,6 +218,17 @@ pub fn lex_count(in source: Str) -> u64 {
     }
     let mut d = diags_new();
     let t = lex(in b, inout d);
-    let _ = max_diagnostics();
+    t.kind.len()
+}
+
+// Lexes `source` without classifying identifiers (no contextual words or
+// symbols) and returns the token count, for benchmarks.
+pub fn lex_raw_count(in source: Str) -> u64 {
+    let b = source.as_bytes();
+    if b.len() > max_source_bytes() {
+        return 0;
+    }
+    let mut d = diags_new();
+    let t = lex_raw(in b, inout d);
     t.kind.len()
 }

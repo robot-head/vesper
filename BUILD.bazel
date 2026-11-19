@@ -94,6 +94,14 @@ vesper_crate(
         ],
         # @vesper-std/sort, core and bytes (#1096) as a driver's dependencies.
         "test/std_sort": [":files"],
+        # Self-hosting SH0 lane 7 (#1129): the front end v2 against the Rust
+        # parser on the root package's `.ves` files and the parser test suites.
+        "test/self_host_front_v2": glob([
+            "**/*.ves",
+            "packages/vesper-front/**",
+            "tests/self_host_parse.rs",
+            "tests/self_host_front_end.rs",
+        ]) + ["//crates/vesper-syntax:files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
         "test/self_host_front_end": glob([
@@ -388,6 +396,8 @@ vesper_crate(
         # Runs the Vesper-source front end on every repository source; about
         # 2.5 min on a 4-core Linux host, over 300 s on the macOS runner.
         "test/self_host_front_end": "long",
+        # The front end v2 differential (#1129) takes about 140 s unoptimized.
+        "test/self_host_front_v2": "long",
         # The Vesper-source checker corpus and JIT checks exceed 300 s on macOS.
         "test/self_host_check": "long",
     },

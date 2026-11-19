@@ -348,7 +348,11 @@ fn walk(dir: &Path, paths: &mut Vec<PathBuf>) {
         let path = entry.unwrap().path();
         // `use` imports (lane F0, #873; follow-up #880) are not in the self-hosted front end
         // yet; package fixtures and @vesper-std (#897) join this corpus once it parses them.
-        if path.ends_with("tests/fixtures/packages") || path.ends_with("packages/vesper-std") {
+        // The front end v2 (#1129) is such a package too.
+        if path.ends_with("tests/fixtures/packages")
+            || path.ends_with("packages/vesper-std")
+            || path.ends_with("packages/vesper-front")
+        {
             continue;
         }
         if path.is_dir() {

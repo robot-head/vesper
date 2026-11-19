@@ -70,8 +70,12 @@ fn rust_tables(source: &str) -> Tables {
             "E0003" => 3,
             other => panic!("unexpected parser code {other}"),
         };
-        t.diagnostics
-            .push((code, d.span.start as u64, d.span.end as u64, d.message.clone()));
+        t.diagnostics.push((
+            code,
+            d.span.start as u64,
+            d.span.end as u64,
+            d.message.clone(),
+        ));
     }
     t
 }
@@ -160,12 +164,21 @@ fn vesper_tables(source: &str) -> Tables {
         t.nodes.push(row());
     }
     for _ in 0..diags {
-        let (code, start, end, len) = (words[at], words[at + 1], words[at + 2], words[at + 3] as usize);
+        let (code, start, end, len) = (
+            words[at],
+            words[at + 1],
+            words[at + 2],
+            words[at + 3] as usize,
+        );
         at += 4;
         let bytes: Vec<u8> = words[at..at + len].iter().map(|&b| b as u8).collect();
         at += len;
-        t.diagnostics
-            .push((code, start, end, String::from_utf8(bytes).expect("UTF-8 message")));
+        t.diagnostics.push((
+            code,
+            start,
+            end,
+            String::from_utf8(bytes).expect("UTF-8 message"),
+        ));
     }
     assert_eq!(at, words.len(), "trailing result words");
     t
@@ -211,7 +224,10 @@ fn first_difference(source: &str, rust: &Tables, vesper: &Tables) -> String {
     }
     for (i, (r, v)) in rust.diagnostics.iter().zip(&vesper.diagnostics).enumerate() {
         if r != v {
-            return format!("diagnostic {i}: rust {r:?}, vesper {v:?} near {}", around(r.1));
+            return format!(
+                "diagnostic {i}: rust {r:?}, vesper {v:?} near {}",
+                around(r.1)
+            );
         }
     }
     format!(
@@ -225,12 +241,6 @@ fn compare(source: &str) -> Option<String> {
     let rust = rust_tables(source);
     let vesper = vesper_tables(source);
     (rust != vesper).then(|| first_difference(source, &rust, &vesper))
-}
-
-fn assert_same(name: &str, source: &str) {
-    if let Some(d) = compare(source) {
-        panic!("{name}: {d}");
-    }
 }
 
 /// Every `.ves` file under the repository root, sorted.
@@ -312,16 +322,19 @@ fn rust_string_literals(text: &str) -> Vec<String> {
                 i += 3;
                 continue;
             }
-            if bytes.get(i + 1) == Some(&b'\\') {
-                if let Some(end) = text[i + 2..].find('\'') {
-                    i += end + 3;
-                    continue;
-                }
+            if bytes.get(i + 1) == Some(&b'\\')
+                && let Some(end) = text[i + 2..].find('\'')
+            {
+                i += end + 3;
+                continue;
             }
             i += 1;
             continue;
         }
-        if c == b'r' && matches!(bytes.get(i + 1), Some(b'#' | b'"')) && !bytes[i.saturating_sub(1)].is_ascii_alphanumeric() {
+        if c == b'r'
+            && matches!(bytes.get(i + 1), Some(b'#' | b'"'))
+            && !bytes[i.saturating_sub(1)].is_ascii_alphanumeric()
+        {
             let mut j = i + 1;
             let mut hashes = 0;
             while bytes.get(j) == Some(&b'#') {
@@ -363,7 +376,9 @@ fn rust_string_literals(text: &str) -> Vec<String> {
                         b'u' => {
                             let end = text[j..].find('}').map(|e| j + e);
                             match end.and_then(|e| {
-                                u32::from_str_radix(&text[j + 1..e], 16).ok().map(|v| (e, v))
+                                u32::from_str_radix(&text[j + 1..e], 16)
+                                    .ok()
+                                    .map(|v| (e, v))
                             }) {
                                 Some((e, v)) => {
                                     match char::from_u32(v) {
@@ -400,9 +415,11 @@ fn rust_string_literals(text: &str) -> Vec<String> {
     }
     out.retain(|s| {
         s.len() >= 6
-            && ["fn ", "struct ", "enum ", "trait ", "use ", "impl ", "effect ", "model "]
-                .iter()
-                .any(|k| s.contains(k))
+            && [
+                "fn ", "struct ", "enum ", "trait ", "use ", "impl ", "effect ", "model ",
+            ]
+            .iter()
+            .any(|k| s.contains(k))
     });
     out
 }
@@ -509,8 +526,16 @@ fn edge_cases_and_limits_match_the_rust_parser() {
     for n in [60, 63, 64, 65, 126, 127, 128, 129, 130, 200] {
         cases.push(format!("fn f() {{ {}1{} }}", "(".repeat(n), ")".repeat(n)));
         cases.push(format!("fn f() {}{}", "{".repeat(n), "}".repeat(n)));
-        cases.push(format!("fn f() -> {}i64{} {{}}", "(".repeat(n), ")".repeat(n)));
-        cases.push(format!("fn f() {{ let {}x{} = 1; }}", "(".repeat(n), ")".repeat(n)));
+        cases.push(format!(
+            "fn f() -> {}i64{} {{}}",
+            "(".repeat(n),
+            ")".repeat(n)
+        ));
+        cases.push(format!(
+            "fn f() {{ let {}x{} = 1; }}",
+            "(".repeat(n),
+            ")".repeat(n)
+        ));
         cases.push(format!("fn f() {{ {}x }}", "-".repeat(n)));
         cases.push(format!("fn f() {{ {}1 }}", "-".repeat(n)));
         cases.push(format!("fn f() {{ x{} }}", ".y".repeat(n)));
@@ -518,22 +543,34 @@ fn edge_cases_and_limits_match_the_rust_parser() {
         cases.push(format!("fn f() {{ x{} }}", " + y".repeat(n)));
         cases.push(format!("fn f() {{ x{} }}", " = y".repeat(n)));
         cases.push(format!("fn f() {{ {}x }}", "|a| ".repeat(n)));
-        cases.push(format!("fn f() {{ {}1{} }}", "if a { ".repeat(n), " }".repeat(n)));
+        cases.push(format!(
+            "fn f() {{ {}1{} }}",
+            "if a { ".repeat(n),
+            " }".repeat(n)
+        ));
         cases.push(format!("fn f(a.{}b) {{}}", "a.".repeat(n)));
-        cases.push(format!("fn f() -> A{}{} {{}}", "[A".repeat(n), "]".repeat(n)));
+        cases.push(format!(
+            "fn f() -> A{}{} {{}}",
+            "[A".repeat(n),
+            "]".repeat(n)
+        ));
     }
     // Heights: a parenthesized chain resets the depth but not the AST
     // height, so these reach the height limit (`record_expr`) first. The
     // atoms cover literal folding (`-1` is one literal, `-x` a unary).
     for n in [60, 62, 63, 64, 65, 66, 70] {
-        for atom in ["x", "-1", "- -1", "-x", "x.y", "f(x)", "x?", "{ x }", "-1.5"] {
+        for atom in [
+            "x", "-1", "- -1", "-x", "x.y", "f(x)", "x?", "{ x }", "-1.5",
+        ] {
             let inner = vec![atom; n].join(" + ");
             let outer = format!(" + {atom}").repeat(n);
             cases.push(format!("fn f() {{ ({inner}){outer} }}"));
             cases.push(format!("fn f() {{ ({inner}).y{} }}", ".y".repeat(n)));
             cases.push(format!("fn f() {{ (({inner}) + {atom}){outer} }}"));
             cases.push(format!("fn f() {{ {{ ({inner}) }}{outer}; }}"));
-            cases.push(format!("fn f() {{ match ({inner}) {{ _ => ({inner}){outer} }} }}"));
+            cases.push(format!(
+                "fn f() {{ match ({inner}) {{ _ => ({inner}){outer} }} }}"
+            ));
         }
     }
     // Diagnostics: past 128 lexical and parse errors.
@@ -582,16 +619,127 @@ impl Rng {
 /// Fragments the fuzzer inserts: every token kind, every keyword and
 /// contextual word, broken literals and comments, and non-ASCII text.
 const FRAGMENTS: &[&str] = &[
-    "fn", "let", "struct", "enum", "effect", "impl", "copy", "affine", "linear", "mod", "eff",
-    "in", "inout", "sink", "self", "handle", "state", "with", "return", "match", "if", "else",
-    "true", "false", "use", "model", "pub", "@fip", "trait", "tiled(8)", "wire", "for", "where",
-    "as", "type", "dim", "dyn", "hot", "cold", "mut", "region", "loop", "break", "continue", "_",
-    "TiledSeq", "load_tile_vec", "u8", "i64", "bool", "Unit", "(", ")", "{", "}", "[", "]", ",",
-    ";", ":", "::", ".", "..", "..=", "?", "@", "@@", "->", "=>", "=", "+=", "-=", "*=", "/=",
-    "%=", "|=", "&=", "+", "-", "*", "/", "%", "==", "!=", "<", "<=", ">", ">=", "<<", ">>",
-    "&&", "||", "!", "|", "&", "^", "~", "$", "x", "Y", "0", "1.5", "2e3", "0x1f", "0x_",
-    "18446744073709551616", "\"s\"", "\"\\q\"", "\"\\uD800\"", "\"", "\\", "/*", "*/", "//",
-    "é", "`", "#", "'", "\n", " ", "\t",
+    "fn",
+    "let",
+    "struct",
+    "enum",
+    "effect",
+    "impl",
+    "copy",
+    "affine",
+    "linear",
+    "mod",
+    "eff",
+    "in",
+    "inout",
+    "sink",
+    "self",
+    "handle",
+    "state",
+    "with",
+    "return",
+    "match",
+    "if",
+    "else",
+    "true",
+    "false",
+    "use",
+    "model",
+    "pub",
+    "@fip",
+    "trait",
+    "tiled(8)",
+    "wire",
+    "for",
+    "where",
+    "as",
+    "type",
+    "dim",
+    "dyn",
+    "hot",
+    "cold",
+    "mut",
+    "region",
+    "loop",
+    "break",
+    "continue",
+    "_",
+    "TiledSeq",
+    "load_tile_vec",
+    "u8",
+    "i64",
+    "bool",
+    "Unit",
+    "(",
+    ")",
+    "{",
+    "}",
+    "[",
+    "]",
+    ",",
+    ";",
+    ":",
+    "::",
+    ".",
+    "..",
+    "..=",
+    "?",
+    "@",
+    "@@",
+    "->",
+    "=>",
+    "=",
+    "+=",
+    "-=",
+    "*=",
+    "/=",
+    "%=",
+    "|=",
+    "&=",
+    "+",
+    "-",
+    "*",
+    "/",
+    "%",
+    "==",
+    "!=",
+    "<",
+    "<=",
+    ">",
+    ">=",
+    "<<",
+    ">>",
+    "&&",
+    "||",
+    "!",
+    "|",
+    "&",
+    "^",
+    "~",
+    "$",
+    "x",
+    "Y",
+    "0",
+    "1.5",
+    "2e3",
+    "0x1f",
+    "0x_",
+    "18446744073709551616",
+    "\"s\"",
+    "\"\\q\"",
+    "\"\\uD800\"",
+    "\"",
+    "\\",
+    "/*",
+    "*/",
+    "//",
+    "é",
+    "`",
+    "#",
+    "'",
+    "\n",
+    " ",
+    "\t",
 ];
 
 fn mutate(rng: &mut Rng, source: &str) -> String {
@@ -682,4 +830,146 @@ fn parsing_frees_its_tables() {
     let tokens = call(&f.lex, &source);
     assert_eq!(tokens, counts >> 32);
     assert_eq!(vesper::seq::native_runtime::live_allocations(), after);
+}
+
+// ---------------------------------------------------------------- backends
+
+fn mix(acc: u64, v: u64) -> u64 {
+    acc.wrapping_mul(1099511628211).wrapping_add(v)
+}
+
+/// The fold `DIGEST_DRIVER` computes over the result rows of one parse.
+fn rows_digest(t: &Tables) -> u64 {
+    let mut words = vec![
+        t.tokens.len() as u64,
+        t.nodes.len() as u64,
+        t.diagnostics.len() as u64,
+    ];
+    for r in t.tokens.iter().chain(&t.nodes) {
+        words.extend_from_slice(r);
+    }
+    for (code, start, end, message) in &t.diagnostics {
+        words.extend_from_slice(&[*code, *start, *end, message.len() as u64]);
+        words.extend(message.bytes().map(u64::from));
+    }
+    words.into_iter().fold(7, mix)
+}
+
+/// A driver package that folds the result rows of `parse_tables` over the
+/// sources into one digest (`main`), depending on the front end by path.
+fn digest_driver(sources: &[&str]) -> (Temp, u64) {
+    let temp = Temp::new();
+    let front = std::fs::canonicalize(root().join(PACKAGE)).unwrap();
+    let manifest = format!(
+        "[package]\nname = \"@local/front-driver\"\nversion = \"0.1.0\"\nedition = \"2026\"\ncapability_ceiling = [\"Fail\"]\n\n[dependencies]\n\"@vesper/front\" = {{ version = \"^0.1\", path = \"{}\" }}\n",
+        front.display().to_string().replace('\\', "/")
+    );
+    let mut main = String::from(
+        "use @vesper/front::{parse_tables};\n\nfn mix(acc: u64, v: u64) -> u64 {\n    wrapping_add(wrapping_mul(acc, 1099511628211), v)\n}\n\nfn digest(in s: Str) -> u64 {\n    let rows = parse_tables(in s);\n    let mut acc: u64 = 7;\n    for i in 0..rows.len() {\n        acc = match rows.try_get(i) {\n            Option::Some(v) => mix(acc, v),\n            Option::None => acc,\n        };\n    }\n    acc\n}\n\nfn main() -> u64 {\n    let mut acc: u64 = 1;\n",
+    );
+    let mut expected = 1u64;
+    for s in sources {
+        main.push_str(&format!(
+            "    acc = mix(acc, digest(in {}));\n",
+            serde_json::to_string(s).unwrap()
+        ));
+        expected = mix(expected, rows_digest(&rust_tables(s)));
+    }
+    main.push_str("    acc\n}\n");
+    std::fs::write(temp.0.join("Loom.toml"), manifest).unwrap();
+    std::fs::create_dir_all(temp.0.join("src")).unwrap();
+    std::fs::write(temp.0.join("src/main.ves"), main).unwrap();
+    (temp, expected)
+}
+
+static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+struct Temp(PathBuf);
+impl Temp {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "vesper-front-v2-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Self(dir)
+    }
+}
+impl Drop for Temp {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn load_driver(dir: &Path) -> check::Checked {
+    let assembled = packages::load(dir).unwrap();
+    assert!(
+        assembled.ok(),
+        "{:?} {:?}",
+        assembled.diagnostics,
+        assembled.manifest_errors
+    );
+    let checked = check::check(&assembled.module);
+    let shown: Vec<_> = checked
+        .diagnostics
+        .iter()
+        .map(|d| assembled.sources.localize(d))
+        .collect();
+    assert!(checked.diagnostics.is_empty(), "{shown:?}");
+    checked
+}
+
+/// Small sources that reach every parser path the evaluator can afford.
+const SMALL: &[&str] = &[
+    "",
+    "fn f() -> u64 { 0x_ + 18446744073709551616 } /* open",
+    "use @a/b::{c as d}; pub fn f[T: Ord, e: eff](in x: T) -> T eff [e] where T: Ord { let y = x; y }",
+    "struct S { pub x: i64, hot y: u8 } enum E { A, B(i64), C { x: u8 } } impl S { fn f(in self) {} }",
+    "trait T[A: Tr] { type X: mod copy; fn f(in self); } model M: T for X { type X = i64; fn f(in self) {} }",
+    "fn f() { match x { -1 => 0, S { a, b: _ } => 1, (c, D(e)) => 2 } handle E state s = 0 in { op() } with { return v => v, op(k) => k(1) } }",
+    "fn f() { for i in 0..n { if a { continue; } else { break; } } loop {} region r(16) { x[a..b]; f[u8](1); |y| y + 1 } }",
+    "fn f() { \"\\uD800\" ` é let = ; }",
+];
+
+/// The JIT without optimization, the evaluator and an executable agree
+/// with the Rust parser (the optimized JIT is the rest of this file).
+#[test]
+fn backends_agree_on_small_sources() {
+    let (dir, expected) = digest_driver(SMALL);
+    let c = load_driver(&dir.0);
+    for optimize in [false, true] {
+        let got = native::jit_with_options(&c.world, "main", optimize)
+            .unwrap_or_else(|e| panic!("JIT (optimize {optimize}): {e}"))
+            .to_string();
+        assert_eq!(got, expected.to_string(), "JIT (optimize {optimize})");
+    }
+    let mut runtime = vesper::runtime::Runtime::new(&c.world);
+    runtime.optimize = false;
+    runtime.fuel = 4_000_000_000;
+    let got = runtime.run("main", vec![]).unwrap().to_string();
+    assert_eq!(got, expected.to_string(), "evaluator");
+    let links = cfg!(unix)
+        && std::process::Command::new("cc")
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success());
+    if links {
+        let exe = dir.0.join("driver");
+        let built = std::process::Command::new(env!("CARGO_BIN_EXE_vesper"))
+            .arg("build")
+            .arg(&dir.0)
+            .arg("-o")
+            .arg(&exe)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "vesper build failed\n{}{}",
+            String::from_utf8_lossy(&built.stdout),
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let status = std::process::Command::new(&exe).output().unwrap().status;
+        assert_eq!(status.code(), Some((expected & 0xff) as i32), "executable");
+    }
 }

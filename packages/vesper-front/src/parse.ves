@@ -472,7 +472,14 @@ fn enter(inout p: P) -> bool {
 
 fn placeholder(in p: P) -> Ex {
     let s = narrow(cur_start(in p));
-    Ex { k: x_tuple(), start: s, end: s, h: 1, sym: 0, tiled: false }
+    Ex {
+        k: x_tuple(),
+        start: s,
+        end: s,
+        h: 1,
+        sym: 0,
+        tiled: false
+    }
 }
 
 // `Parser::record_expr`.
@@ -488,7 +495,14 @@ fn record(inout p: P, e: Ex) -> Ex {
 }
 
 fn ex(k: u8, start: u64, end: u64, children: u32) -> Ex {
-    Ex { k: k, start: narrow(start), end: narrow(end), h: wrapping_add(children, 1), sym: 0, tiled: false }
+    Ex {
+        k: k,
+        start: narrow(start),
+        end: narrow(end),
+        h: wrapping_add(children, 1),
+        sym: 0,
+        tiled: false
+    }
 }
 
 fn hmax(a: u32, b: u32) -> u32 {
@@ -512,7 +526,15 @@ fn bound(in p: P, sym: u32) -> bool {
 fn bump_count(inout counts: ChunkSeq[u32], sym: u32, up: bool) {
     let i = widen_u64(sym);
     let c = u32_at(in counts, i);
-    counts.try_set(i, if up { wrapping_add(c, 1) } else { wrapping_sub(c, 1) });
+    counts
+        .try_set(
+        i,
+        if up {
+            wrapping_add(c, 1)
+        } else {
+            wrapping_sub(c, 1)
+        }
+    );
 }
 
 fn val_insert(inout p: P, sym: u32) {
@@ -592,7 +614,11 @@ fn int_value(in p: P, i: u64) -> (bool, u64) {
     let src = p.src.as_slice();
     let x = byte(in src, inc(s));
     let hex = wrapping_sub(e, s) >= 2 && byte(in src, s) == 48 && (x == 120 || x == 88);
-    let from = if hex { add(s, 2) } else { s };
+    let from = if hex {
+        add(s, 2)
+    } else {
+        s
+    };
     let mut v: u64 = 0;
     let mut digits: u64 = 0;
     for j in from..e {
@@ -670,7 +696,22 @@ fn json_string(in p: P, i: u64) -> bool {
         }
         if c == 92 {
             let d = byte(in src, inc(j));
-            if d == 34 || d == 92 || d == 47 || d == 98 || d == 102 || d == 110 || d == 114 || d == 116 {
+            if d
+                == 34
+                || d
+                == 92
+                || d
+                == 47
+                || d
+                == 98
+                || d
+                == 102
+                || d
+                == 110
+                || d
+                == 114
+                || d
+                == 116 {
                 j = add(j, 2);
             } else if d == 117 {
                 let v = hex4(in src, add(j, 2), end);
@@ -833,10 +874,16 @@ fn fields(inout p: P) {
             break;
         }
         if at_word(in p, 0, w_pub())
-            && ((nth(in p, 1) == k_lower() && nth(in p, 2) == k_colon())
-                || ((at_word(in p, 1, w_hot()) || at_word(in p, 1, w_cold()))
-                    && nth(in p, 2) == k_lower()
-                    && nth(in p, 3) == k_colon())) {
+            && (
+            (nth(in p, 1) == k_lower() && nth(in p, 2) == k_colon())
+                || (
+                (at_word(in p, 1, w_hot()) || at_word(in p, 1, w_cold()))
+                    && nth(in p, 2)
+                    == k_lower()
+                    && nth(in p, 3)
+                    == k_colon()
+            )
+        ) {
             bump(inout p);
         }
         if at_word(in p, 0, w_hot()) && nth(in p, 1) == k_lower() {
@@ -912,12 +959,17 @@ fn declaration(inout p: P) -> bool {
     }
     let mut fip = fip_attr(inout p);
     let public = at_word(in p, 0, w_pub())
-        && (at_word(in p, 1, w_trait())
+        && (
+        at_word(in p, 1, w_trait())
             || at_word(in p, 1, w_model())
-            || nth(in p, 1) == k_fn()
+            || nth(in p, 1)
+            == k_fn()
             || is_type_decl_kind(nth(in p, 1))
             || (is_mode_kind(nth(in p, 1)) && is_type_decl_kind(nth(in p, 2)))
-            || (!fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()) && nth(in p, 3) == k_fn()));
+            || (
+            !fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()) && nth(in p, 3) == k_fn()
+        )
+    );
     if public {
         bump(inout p);
     }
@@ -1084,14 +1136,19 @@ fn function_header(inout p: P) {
 
 fn at_method(in p: P) -> bool {
     at(in p, k_fn())
-        || (at_word(in p, 0, w_pub()) && (nth(in p, 1) == k_fn() || (nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()))))
+        || (
+        at_word(in p, 0, w_pub())
+            && (nth(in p, 1) == k_fn() || (nth(in p, 1) == k_at() && at_word(in p, 2, w_fip())))
+    )
         || (at(in p, k_at()) && at_word(in p, 1, w_fip()))
 }
 
 fn method(inout p: P) {
     let mut fip = fip_attr(inout p);
     let public = at_word(in p, 0, w_pub())
-        && (nth(in p, 1) == k_fn() || (!fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip())));
+        && (
+        nth(in p, 1) == k_fn() || (!fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()))
+    );
     if public {
         bump(inout p);
     }
@@ -1281,7 +1338,9 @@ fn package_name(inout p: P) {
     bump(inout p);
     loop {
         let k = kind(in p);
-        if !(k == k_lower() || k == k_minus() || k == k_slash() || k == k_int()) || cur_start(in p) != last_end(in p) {
+        if !(k == k_lower() || k == k_minus() || k == k_slash() || k == k_int())
+            || cur_start(in p)
+            != last_end(in p) {
             return;
         }
         bump(inout p);
@@ -1389,7 +1448,12 @@ fn trait_decl(inout p: P) {
         let s = w32(in p.pending, b);
         let e = w32(in p.pending, inc(b));
         if diag_open(inout p, s, e) {
-            p.d.text.extend(in "trait parameters take modal or row bounds, not trait bounds".as_bytes());
+            p
+                .d
+                .text
+                .extend(
+                in "trait parameters take modal or row bounds, not trait bounds".as_bytes()
+            );
         }
         b = add(b, 2);
     }
@@ -1491,7 +1555,8 @@ fn type_args_inner(inout p: P) {
             break;
         }
         let cur = idx(in p, 0);
-        if tk(in p, cur) == k_lower()
+        if tk(in p, cur)
+            == k_lower()
             && !is_primitive_word(tword(in p, cur))
             && !(tword(in p, cur) == w_dyn() && nth(in p, 1) == k_upper()) {
             bump(inout p);
@@ -1636,17 +1701,36 @@ fn expr(inout p: P) -> Ex {
 }
 
 fn jump_end(k: u8) -> bool {
-    k == k_semi() || k == k_r_brace() || k == k_r_paren() || k == k_r_bracket() || k == k_comma() || k == k_eof()
+    k
+        == k_semi()
+        || k
+        == k_r_brace()
+        || k
+        == k_r_paren()
+        || k
+        == k_r_bracket()
+        || k
+        == k_comma()
+        || k
+        == k_eof()
 }
 
 fn expr_inner(inout p: P) -> Ex {
     start_node(inout p, n_expr());
     let cur = idx(in p, 0);
     let k = tk(in p, cur);
-    let w = if k == k_lower() { tword(in p, cur) } else { 0 };
+    let w = if k == k_lower() {
+        tword(in p, cur)
+    } else {
+        0
+    };
     let e = if k == k_handle() {
         handle_expr(inout p)
-    } else if w == w_region() && nth(in p, 1) == k_lower() && (nth(in p, 2) == k_l_brace() || nth(in p, 2) == k_l_paren()) {
+    } else if w
+        == w_region()
+        && nth(in p, 1)
+        == k_lower()
+        && (nth(in p, 2) == k_l_brace() || nth(in p, 2) == k_l_paren()) {
         region(inout p)
     } else if k == k_match() {
         match_expr(inout p)
@@ -1683,7 +1767,20 @@ fn loop_expr(inout p: P) -> Ex {
 fn for_header(in p: P, cur: u64) -> bool {
     let n = nth(in p, 1);
     !bound(in p, tsym(in p, cur))
-        && (n == k_lower() || n == k_upper() || n == k_l_paren() || n == k_int() || n == k_true() || n == k_false())
+        && (
+        n
+            == k_lower()
+            || n
+            == k_upper()
+            || n
+            == k_l_paren()
+            || n
+            == k_int()
+            || n
+            == k_true()
+            || n
+            == k_false()
+    )
 }
 
 fn for_expr(inout p: P) -> Ex {
@@ -1721,7 +1818,16 @@ fn jump_expr(inout p: P, ret: bool) -> Ex {
         let v = expr(inout p);
         v.h
     };
-    ex(if ret { x_return() } else { x_break() }, start, last_end(in p), h)
+    ex(
+        if ret {
+            x_return()
+        } else {
+            x_break()
+        },
+        start,
+        last_end(in p),
+        h
+    )
 }
 
 fn restricted(inout p: P) -> Ex {
@@ -1891,30 +1997,32 @@ fn binary(inout p: P, min: u64) -> Ex {
 
 // Precedence of a binary operator kind (0 for none); assignments are 1.
 fn precedence(k: u8) -> u64 {
-    if k == k_eq() || k == k_plus_eq() || k == k_minus_eq() || k == k_star_eq() || k == k_slash_eq() || k == k_percent_eq() {
-        1
-    } else if k == k_or() {
-        2
-    } else if k == k_and() {
-        3
-    } else if k == k_eq_eq() || k == k_ne() {
-        4
-    } else if k == k_lt() || k == k_le() || k == k_gt() || k == k_ge() {
-        5
-    } else if k == k_pipe() {
-        6
-    } else if k == k_caret() {
-        7
-    } else if k == k_amp() {
-        8
-    } else if k == k_shl() || k == k_shr() {
-        9
-    } else if k == k_plus() || k == k_minus() {
-        10
-    } else if k == k_star() || k == k_slash() || k == k_percent() {
-        11
-    } else {
-        0
+    match k {
+        48 => 1,
+        49 => 1,
+        50 => 1,
+        51 => 1,
+        52 => 1,
+        53 => 1,
+        66 => 2,
+        65 => 3,
+        59 => 4,
+        60 => 4,
+        61 => 5,
+        62 => 5,
+        63 => 5,
+        64 => 5,
+        68 => 6,
+        78 => 7,
+        77 => 8,
+        79 => 9,
+        80 => 9,
+        54 => 10,
+        55 => 10,
+        56 => 11,
+        57 => 11,
+        58 => 11,
+        _ => 0,
     }
 }
 
@@ -1950,7 +2058,16 @@ fn binary_inner(inout p: P, min: u64) -> Ex {
         } else {
             binary(inout p, inc(prec))
         };
-        let e = ex(if prec == 1 { x_assign() } else { x_binary() }, widen_u64(lhs.start), widen_u64(rhs.end), hmax(lhs.h, rhs.h));
+        let e = ex(
+            if prec == 1 {
+                x_assign()
+            } else {
+                x_binary()
+            },
+            widen_u64(lhs.start),
+            widen_u64(rhs.end),
+            hmax(lhs.h, rhs.h)
+        );
         lhs = record(inout p, e);
     }
     lhs
@@ -1983,8 +2100,12 @@ fn generic_call(in p: P, e: Ex) -> bool {
     if n1 == k_upper() || n1 == k_l_bracket() || n1 == k_fn() {
         return true;
     }
-    n1 == k_lower()
-        && ((tword(in p, t1) == w_dyn() && nth(in p, 2) == k_upper()) || is_primitive_word(tword(in p, t1)))
+    n1
+        == k_lower()
+        && (
+        (tword(in p, t1) == w_dyn() && nth(in p, 2) == k_upper())
+            || is_primitive_word(tword(in p, t1))
+    )
 }
 
 fn postfix_inner(inout p: P) -> Ex {
@@ -2020,7 +2141,12 @@ fn postfix_inner(inout p: P) -> Ex {
                 if at(in p, k_dot_dot()) {
                     bump(inout p);
                     let hi = expr(inout p);
-                    let b = ex(x_binary(), widen_u64(index.start), widen_u64(hi.end), hmax(index.h, hi.h));
+                    let b = ex(
+                        x_binary(),
+                        widen_u64(index.start),
+                        widen_u64(hi.end),
+                        hmax(index.h, hi.h)
+                    );
                     index = record(inout p, b);
                 }
                 expect(inout p, k_r_bracket());
@@ -2029,7 +2155,11 @@ fn postfix_inner(inout p: P) -> Ex {
         } else if k == k_dot() {
             bump(inout p);
             let m = lower(inout p);
-            let w = if tk(in p, m) == k_lower() { tword(in p, m) } else { 0 };
+            let w = if tk(in p, m) == k_lower() {
+                tword(in p, m)
+            } else {
+                0
+            };
             let mut f = ex(x_field(), start, last_end(in p), e.h);
             f.tiled = w >= w_load_tile_vec() && w <= w_col_set();
             f
@@ -2072,7 +2202,16 @@ fn primary_inner(inout p: P) -> Ex {
     let start = cur_start(in p);
     let (lit, _) = literal(inout p);
     if lit != 0 {
-        return ex(if lit == l_int() { x_int() } else { x_literal() }, start, last_end(in p), 0);
+        return ex(
+            if lit == l_int() {
+                x_int()
+            } else {
+                x_literal()
+            },
+            start,
+            last_end(in p),
+            0
+        );
     }
     let k = kind(in p);
     if k == k_lower() || k == k_self_kw() {
@@ -2120,10 +2259,15 @@ fn primary_inner(inout p: P) -> Ex {
         if segments == 1 {
             e.sym = tsym(in p, first);
         }
-        e.tiled = segments == 2
-            && tword(in p, first) == w_TiledSeq()
-            && second >= w_load_tile_vec()
-            && second <= w_col_set();
+        e
+            .tiled = segments
+            == 2
+            && tword(in p, first)
+            == w_TiledSeq()
+            && second
+            >= w_load_tile_vec()
+            && second
+            <= w_col_set();
         return e;
     }
     if k == k_l_paren() {

@@ -78,7 +78,14 @@ pub fn report(in tree: Tree, in p: P) -> ChunkSeq[u64] {
     for i in 0..nodes {
         out.push(widen_u64(u8_at(in tree.node_kind, i)));
         let parent = w32(in tree.node_parent, i);
-        out.push(if parent == 4294967295 { nodes } else { parent });
+        out
+            .push(
+            if parent == 4294967295 {
+                nodes
+            } else {
+                parent
+            }
+        );
         out.push(w32(in tree.node_start, i));
         out.push(w32(in tree.node_end, i));
     }
@@ -87,7 +94,11 @@ pub fn report(in tree: Tree, in p: P) -> ChunkSeq[u64] {
         out.push(w32(in p.d.start, i));
         out.push(w32(in p.d.end, i));
         let from = w32(in p.d.at, i);
-        let to = if add(i, 1) < diags { w32(in p.d.at, add(i, 1)) } else { p.d.text.len() };
+        let to = if add(i, 1) < diags {
+            w32(in p.d.at, add(i, 1))
+        } else {
+            p.d.text.len()
+        };
         out.push(wrapping_sub(to, from));
         for j in from..to {
             out.push(widen_u64(u8_at(in p.d.text, j)));

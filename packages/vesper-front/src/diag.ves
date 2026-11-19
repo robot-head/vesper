@@ -28,7 +28,14 @@ pub fn diag_push(inout d: Diags, code: u8, start: u64, end: u64, in message: Sli
 }
 
 // `push_limit`: the limit diagnostic replaces the last one when full.
-pub fn diag_push_limit(inout d: Diags, code: u8, start: u64, end: u64, in message: Slice[u8], max: u64) {
+pub fn diag_push_limit(
+    inout d: Diags,
+    code: u8,
+    start: u64,
+    end: u64,
+    in message: Slice[u8],
+    max: u64
+) {
     if d.code.len() >= max {
         let last = wrapping_sub(d.code.len(), 1);
         let at = w32(in d.at, last);
@@ -47,7 +54,13 @@ pub fn limit_message(inout m: ChunkSeq[u8], kind: u64, limit: u64, retained: u64
     limit_message_observed(inout m, kind, limit, wrapping_add(limit, 1), retained);
 }
 
-pub fn limit_message_observed(inout m: ChunkSeq[u8], kind: u64, limit: u64, observed: u64, retained: u64) {
+pub fn limit_message_observed(
+    inout m: ChunkSeq[u8],
+    kind: u64,
+    limit: u64,
+    observed: u64,
+    retained: u64
+) {
     if kind == 0 {
         m.extend(in "SourceBytes".as_bytes());
     } else if kind == 1 {
