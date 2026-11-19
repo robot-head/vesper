@@ -53,6 +53,17 @@ vesper_port_object(
     ]
 ]
 
+# lifecycle.rs's tokens live in lib.ves (the root module, where the `.vsys`
+# library `WarpKeys` is visible).
+vesper_port_object(
+    name = "warp_vesper_divergent_lifecycle",
+    edit_src = "vesper/src/lib.ves",
+    edits = {"in token[41..wrapping_add(41, len)]": "in token[40..wrapping_add(40, len)]"},
+    library = "warp",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
 # The Vesper build: the same sources with the `vesper-port` feature,
 # forwarding to the port through the committed binding (which the Cargo
 # build checks against the generated one). The object is linked into each
@@ -73,9 +84,9 @@ rust_library(
     ),
 )
 
-# The in-crate unit tests (varint, packet_number, stream) of the port build,
-# compiled from the same sources as :port (a `crate = ":port"` test does
-# not find the crate root here).
+# The in-crate unit tests (varint, packet_number, stream, lifecycle) of the
+# port build, compiled from the same sources as :port (a `crate = ":port"`
+# test does not find the crate root here).
 rust_test(
     name = "port_unit_test",
     srcs = glob(["src/**/*.rs"]) + ["port/binding.rs"],

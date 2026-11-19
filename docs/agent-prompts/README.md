@@ -34,6 +34,13 @@ P3b ports measured: `f32` vectors, bounds checks, `inout` slice inlining,
 fixed arrays, `continue`, two-phase arguments, the export boundary,
 std sort and five correctness fixes.
 
+The [self-hosting wave SH0](self-host-sh0/README.md) lays the groundwork for a
+Vesper compiler: a hybrid build that links Vesper objects into the compiler,
+std I/O and compiler data structures, Cranelift through a C-ABI shim, the
+toolchain pilots and a real self-hosted front end. The crate-by-crate plan and
+the later waves are in
+[self-hosting-plan.md](../maintenance/self-hosting-plan.md).
+
 Earlier assignments retained as dependencies:
 
 - [06-source-simulation](next-wave/06-source-simulation.md)

@@ -406,7 +406,7 @@ impl<'a> Runtime<'a> {
         Self {
             world,
             stack: vec![],
-            program: crate::ir::lower_world(world),
+            program: crate::ffi_lowering::drops::lower_world(world),
             next_capability: 1,
             fuel: 10_000_000,
             optimize: true,

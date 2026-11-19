@@ -312,7 +312,8 @@ impl Parser {
             _ => None,
         }
     }
-    /// `linear extern type Name;` or `affine extern type Name;`.
+    /// `linear extern type Name;`, `affine extern type Name;` or
+    /// `affine extern type Name drop symbol;`.
     fn extern_type(&mut self) -> Result<ExternTypeDescriptor, Error> {
         let linearity = if self.is_word("linear") {
             Linearity::Linear
@@ -324,8 +325,24 @@ impl Parser {
         self.keyword("type")?;
         let name = self.word()?;
         reject_reserved_type(&name)?;
+        let drop = if self.is_word("drop") {
+            if linearity == Linearity::Linear {
+                return Err(self.error(
+                    ErrorKind::Type,
+                    "only an affine extern type declares a drop import; a linear handle is finalized explicitly",
+                ));
+            }
+            self.bump();
+            Some(self.word()?)
+        } else {
+            None
+        };
         self.expect(b';')?;
-        Ok(ExternTypeDescriptor { name, linearity })
+        Ok(ExternTypeDescriptor {
+            name,
+            linearity,
+            drop,
+        })
     }
     fn peek_word(&self, offset: usize) -> Option<&str> {
         match &self.tokens.get(self.at + offset)?.kind {
@@ -1091,6 +1108,31 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         });
     }
     functions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    // A drop import takes exactly the handle, `sink`, and returns
+    // `ForeignVal[Unit]`: dropping cannot fail or return anything.
+    for t in &extern_types {
+        let Some(symbol) = t.drop_import() else {
+            continue;
+        };
+        let ok = functions.iter().find(|f| f.symbol == symbol).is_some_and(|f| {
+            matches!(f.result, ValueType::Unit)
+                && matches!(
+                    f.parameters.as_slice(),
+                    [p] if matches!(&p.ty, ParameterType::Handle { handle, access: HandleAccess::Sink } if handle.name() == t.name())
+                )
+        });
+        if !ok {
+            return Err(Error::new(
+                ErrorKind::Type,
+                0..0,
+                format!(
+                    "drop import `{symbol}` of `{}` must be declared as `fn {symbol}(sink h: {}) -> ForeignVal[Unit];`",
+                    t.name(),
+                    t.name()
+                ),
+            ));
+        }
+    }
     // A linear handle must have a way out: at least one finalizer.
     for t in &extern_types {
         let finalized = functions.iter().any(|f| {

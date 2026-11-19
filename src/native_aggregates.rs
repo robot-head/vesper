@@ -71,6 +71,9 @@ struct Graph<'a> {
     /// How often each local is named: bound, read, written, lent as a
     /// place or captured.
     mentions: BTreeMap<String, usize>,
+    /// Locals split into word variables ([`Split`]): they have no storage
+    /// to build in or to yield.
+    split: &'a BTreeMap<String, Vec<Vec<String>>>,
 }
 
 impl Graph<'_> {
@@ -150,6 +153,11 @@ impl Graph<'_> {
                             at,
                         })
                         .filter(|_| drop_free(world, own))
+                        .filter(|_| {
+                            !self
+                                .split
+                                .contains_key(place.split('.').next().unwrap_or(""))
+                        })
                 }
                 _ => None,
             },
@@ -233,6 +241,7 @@ impl Graph<'_> {
             return None;
         };
         if self.mentions.get(name) != Some(&2)
+            || self.split.contains_key(name)
             || self.f.params.iter().any(|p| &p.name == name)
             || self.f.external_captures.contains(name)
             || !self
@@ -311,6 +320,7 @@ pub(super) fn plan(
     f: &FunctionIr,
     generics: &BTreeMap<String, Type>,
     nested: bool,
+    split: &BTreeMap<String, Vec<Vec<String>>>,
 ) -> BTreeMap<ValueId, Home> {
     let mut homes = BTreeMap::new();
     if f.values
@@ -406,6 +416,7 @@ pub(super) fn plan(
         result: crate::numeric::default_type(&substitute(&f.result, generics)),
         nested,
         mentions,
+        split,
     };
     for (b, block) in f.blocks.iter().enumerate() {
         for (at, inst) in block.instructions.iter().enumerate() {
@@ -461,7 +472,49 @@ pub(super) fn plan(
         }
     }
     drop_unsafe_places(&g, &mut homes);
+    // A single-use aggregate read of a split local stores its words straight
+    // into the result or a field of a later constructor (#1090). The words
+    // are SSA values read at the read itself, so a later write to the local
+    // cannot change them; a home inside a write's destination is left out,
+    // since that write's window rule does not cover these stores.
+    for (b, block) in f.blocks.iter().enumerate() {
+        for (at, inst) in block.instructions.iter().enumerate() {
+            let Op::Read { root, .. } = &inst.op else {
+                continue;
+            };
+            let own = g.ty(&inst.ty);
+            if !split.contains_key(root)
+                || g.uses.get(&inst.dest) != Some(&1)
+                || !Layout::of(world, &own).is_ok_and(|l| l.aggregate())
+            {
+                continue;
+            }
+            let home = match g.consumer_home(b, Some(at), inst.dest, &own, 0) {
+                Some(home @ Home::Result) => home,
+                Some(home @ Home::Field { .. }) if !in_place(&homes, &home) => home,
+                _ => continue,
+            };
+            homes.insert(inst.dest, home);
+        }
+    }
     homes
+}
+
+/// True when `home` lies inside the destination of a write
+/// ([`Home::Place`]), through its parents.
+fn in_place(homes: &BTreeMap<ValueId, Home>, home: &Home) -> bool {
+    let mut home = home;
+    for _ in 0..=homes.len() {
+        match home {
+            Home::Place { .. } => return true,
+            Home::Result => return false,
+            Home::Field { parent, .. } => match homes.get(parent) {
+                Some(h) => home = h,
+                None => return false,
+            },
+        }
+    }
+    true
 }
 
 fn pattern_binds(p: &Pattern, out: &mut BTreeSet<String>) {
@@ -830,4 +883,522 @@ impl<M: Module> Codegen<'_, '_, M> {
 /// True when value `id` was built in its home: its consumer skips the copy.
 pub(super) fn placed(pointers: &HomePointers, id: ValueId) -> bool {
     pointers.placed.contains(&id)
+}
+
+/// Copy-struct locals in registers (P3b gaps lane 5, #1090).
+///
+/// A local whose type is a struct or tuple of scalar words (nested
+/// structs and tuples included) is kept as one Cranelift variable per word
+/// on the optimize path instead of a stack slot that every field use loads
+/// and stores. Its words are written by the `let` that binds it, by writes
+/// to it or its fields, and read by reads of it. A read of a scalar field
+/// is its variable; a read of the whole local or of an aggregate field
+/// stores the words into fresh storage (the read's home when [`plan`] gave
+/// it one, such as the result buffer or a field of `Option::Some(s)`).
+///
+/// A local that a call lends `inout`, that a sequence, `Box` or tiled
+/// operation names as a place, or that a closure or handler mentions keeps
+/// its storage: those uses write through an address.
+#[derive(Clone, Debug)]
+pub(super) struct Split {
+    pub(super) ty: Type,
+    pub(super) leaves: Vec<SplitLeaf>,
+}
+
+/// One scalar word of a split local: its field path, its byte offset in
+/// the local's layout, its type and its variable.
+#[derive(Clone, Debug)]
+pub(super) struct SplitLeaf {
+    pub(super) path: Vec<String>,
+    pub(super) offset: i32,
+    pub(super) ty: Type,
+    pub(super) var: Variable,
+    /// Whether any use reads this word: a `let` loads only live words.
+    pub(super) live: bool,
+}
+
+/// The most words a split local may have.
+const MAX_SPLIT_WORDS: usize = 16;
+
+/// The scalar words of `ty` (path, offset, type) when it is a struct or
+/// tuple of scalars that may be split ([`Split`]).
+pub(super) fn split_words(world: &World, ty: &Type) -> Option<Vec<(Vec<String>, i32, Type)>> {
+    fn product(world: &World, ty: &Type) -> bool {
+        (matches!(ty, Type::Tuple(_))
+            || matches!(ty, Type::Named(n, _) if world.adts.contains_key(n)))
+            && !crate::seq::is_slice_type(ty)
+            && !crate::dyn_trait::is_object(ty)
+            && !crate::strings::is_text(ty)
+            && crate::vector::layout_words(ty).is_none()
+    }
+    fn walk(
+        world: &World,
+        layout: &Layout,
+        path: &mut Vec<String>,
+        base: i32,
+        out: &mut Vec<(Vec<String>, i32, Type)>,
+    ) -> bool {
+        match &layout.kind {
+            LayoutKind::Scalar => {
+                // A unit field has no word to keep, so its reads and writes
+                // would have nothing to name: such aggregates stay in memory.
+                let ty = crate::numeric::default_type(&layout.ty);
+                let name = ty.name();
+                let word = matches!(&ty, Type::Named(_, args) if args.is_empty())
+                    && (crate::numeric::is_integer_name(name)
+                        || matches!(name, "f32" | "f64" | "bool"));
+                if word {
+                    out.push((path.clone(), base, ty));
+                }
+                word
+            }
+            LayoutKind::Product(fs) => {
+                product(world, &layout.ty)
+                    && fs.iter().all(|f| {
+                        path.push(f.name.clone());
+                        let ok = walk(world, &f.layout, path, base + f.offset, out);
+                        path.pop();
+                        ok
+                    })
+            }
+            LayoutKind::Enum(_) => false,
+        }
+    }
+    let layout = Layout::of(world, ty).ok()?;
+    if !layout.aggregate() || !matches!(layout.kind, LayoutKind::Product(_)) {
+        return None;
+    }
+    let mut out = vec![];
+    (walk(world, &layout, &mut vec![], 0, &mut out)
+        && !out.is_empty()
+        && out.len() <= MAX_SPLIT_WORDS)
+        .then_some(out)
+}
+
+/// The locals of `f` that are split into word variables ([`Split`]), with
+/// the field paths their uses read (an empty path reads them whole).
+///
+/// A local qualifies when it is a struct or tuple of scalar words that no
+/// use writes through an address. It is split when that is cheaper by a
+/// simple count, weighting uses in loops by [`LOOP_WEIGHT`]: in memory,
+/// each field read or write is a load or store, and a `Some(h)` binding of
+/// a sequence element copies the element; split, each `let` loads the
+/// words some use reads, and each read of an aggregate field or of the
+/// whole local that is not built in place (a call argument, a binding of a
+/// local kept in memory) stores its words into fresh storage. A local
+/// that no use names a field of is never split: it is cheaper as the
+/// storage it was bound to.
+pub(super) fn split_locals(
+    world: &World,
+    f: &FunctionIr,
+    generics: &BTreeMap<String, Type>,
+) -> BTreeMap<String, Vec<Vec<String>>> {
+    let ty = |t: &Type| crate::numeric::default_type(&substitute(t, generics));
+    let mut memory = BTreeSet::new();
+    let mut reads: BTreeMap<String, Vec<Vec<String>>> = BTreeMap::new();
+    let mut fields = BTreeSet::new();
+    for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        match &inst.op {
+            Op::Read { root, path, .. } => {
+                reads.entry(root.clone()).or_default().push(path.clone());
+                if !path.is_empty() {
+                    fields.insert(root.clone());
+                }
+            }
+            Op::Write { place, op, .. } => {
+                let mut parts = place.split('.');
+                let root = parts.next().unwrap_or("").to_owned();
+                let path: Vec<String> = parts.map(str::to_owned).collect();
+                if !path.is_empty() {
+                    fields.insert(root.clone());
+                }
+                // A compound assignment reads the word it writes.
+                if op != "=" {
+                    reads.entry(root).or_default().push(path);
+                }
+            }
+            // A call reads an `in` or `sink` place argument as a value (a
+            // direct call) or through a fresh copy (`Codegen::address`);
+            // only `inout` writes through the place.
+            Op::Call { args, .. } | Op::Indirect { args, .. } => {
+                for a in args {
+                    if a.pass == Pass::Inout
+                        && let Some(p) = &a.place
+                    {
+                        memory.insert(p.root.clone());
+                    }
+                }
+            }
+            Op::Seq { args, .. } | Op::Fip { args, .. } | Op::Tiled { args, .. } => memory.extend(
+                args.iter()
+                    .filter_map(|a| a.place.as_ref())
+                    .map(|p| p.root.clone()),
+            ),
+            Op::Closure {
+                expr,
+                aliases,
+                moves,
+            }
+            | Op::Handle {
+                expr,
+                aliases,
+                moves,
+                ..
+            } => {
+                memory.extend(crate::check::free_names(expr));
+                memory.extend(aliases.keys().cloned());
+                memory.extend(aliases.values().cloned());
+                memory.extend(moves.iter().map(|p| p.root.clone()));
+            }
+            _ => {}
+        }
+    }
+    let candidates: BTreeMap<String, Vec<(Vec<String>, i32, Type)>> = f
+        .locals
+        .iter()
+        .filter(|(n, _)| {
+            !memory.contains(*n)
+                && fields.contains(*n)
+                && !f.params.iter().any(|p| &p.name == *n)
+                && !f.external_captures.contains(*n)
+        })
+        .filter_map(|(n, t)| Some((n.clone(), split_words(world, &ty(t))?)))
+        .collect();
+    let live = |n: &str| -> usize {
+        let paths = reads.get(n).map(Vec::as_slice).unwrap_or_default();
+        candidates[n]
+            .iter()
+            .filter(|(path, _, _)| {
+                paths
+                    .iter()
+                    .any(|r| path.starts_with(r) || r.starts_with(path))
+            })
+            .count()
+    };
+    let words_under = |n: &str, path: &[String]| -> usize {
+        candidates[n]
+            .iter()
+            .filter(|(p, _, _)| p.starts_with(path))
+            .count()
+    };
+    let cyclic = cyclic_blocks(f);
+    let elements: BTreeSet<ValueId> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter(|i| {
+            matches!(
+                &i.op,
+                Op::Seq {
+                    op: crate::seq::SeqOp::TryGet
+                        | crate::seq::SeqOp::Hoisted(crate::seq::Access::TryGet),
+                    ..
+                }
+            )
+        })
+        .map(|i| i.dest)
+        .collect();
+    let mut in_memory: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut split: BTreeMap<&str, usize> = BTreeMap::new();
+    for (b, block) in f.blocks.iter().enumerate() {
+        let weight = if cyclic.contains(&b) { LOOP_WEIGHT } else { 1 };
+        for (at, inst) in block.instructions.iter().enumerate() {
+            match &inst.op {
+                Op::Read { root, path, .. } if candidates.contains_key(root) => {
+                    let aggregate = Layout::of(world, &ty(&inst.ty)).is_ok_and(|l| l.aggregate());
+                    if !aggregate {
+                        *in_memory.entry(root).or_default() += weight;
+                        continue;
+                    }
+                    let consumer = block.instructions[at + 1..]
+                        .iter()
+                        .find(|later| crate::ir_inline::operands(&later.op).contains(&inst.dest));
+                    let built_in_place = match consumer {
+                        Some(later) => match &later.op {
+                            Op::Data(..) | Op::Tuple(_) | Op::Exit { .. } => true,
+                            Op::Bind { pattern, .. } => matches!(
+                                &pattern.kind,
+                                PatternKind::Bind(n) if candidates.contains_key(n)
+                            ),
+                            _ => false,
+                        },
+                        None => {
+                            matches!(&block.terminator, Terminator::Return(v) if *v == inst.dest)
+                        }
+                    };
+                    if !built_in_place {
+                        *split.entry(root).or_default() += weight * words_under(root, path);
+                    }
+                }
+                Op::Write { place, .. } => {
+                    let root = place.split('.').next().unwrap_or("");
+                    if let Some((name, _)) = candidates.get_key_value(root)
+                        && place.contains('.')
+                    {
+                        *in_memory.entry(name).or_default() += weight;
+                    }
+                }
+                Op::Bind { pattern, value } => {
+                    let mut bound = BTreeSet::new();
+                    pattern_binds(pattern, &mut bound);
+                    // A sequence element bound by `Some(h)` is copied out of
+                    // the buffer when `h` is kept in memory.
+                    let element = elements.contains(value);
+                    for n in bound {
+                        if let Some((name, words)) = candidates.get_key_value(&n) {
+                            *split.entry(name).or_default() += weight * live(&n);
+                            if element {
+                                *in_memory.entry(name).or_default() += weight * words.len();
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    candidates
+        .keys()
+        .filter(|n| {
+            split.get(n.as_str()).copied().unwrap_or(0)
+                <= in_memory.get(n.as_str()).copied().unwrap_or(0)
+        })
+        .map(|n| (n.clone(), reads.get(n).cloned().unwrap_or_default()))
+        .collect()
+}
+
+/// How much more a use inside a loop counts than one outside
+/// ([`split_locals`]).
+const LOOP_WEIGHT: usize = 8;
+
+/// The blocks of `f` on a cycle: loop headers and bodies.
+fn cyclic_blocks(f: &FunctionIr) -> BTreeSet<usize> {
+    let mut graph = petgraph::graphmap::DiGraphMap::<usize, ()>::new();
+    for (b, block) in f.blocks.iter().enumerate() {
+        graph.add_node(b);
+        let targets: Vec<usize> = match &block.terminator {
+            Terminator::Jump { block, .. } => vec![*block],
+            Terminator::Branch { yes, no, .. } => vec![*yes, *no],
+            Terminator::Match { arms, .. } => arms.iter().map(|(_, b)| *b).collect(),
+            _ => vec![],
+        };
+        for t in targets {
+            graph.add_edge(b, t, ());
+        }
+    }
+    petgraph::algo::tarjan_scc(&graph)
+        .into_iter()
+        .filter(|c| c.len() > 1 || graph.contains_edge(c[0], c[0]))
+        .flatten()
+        .collect()
+}
+
+impl<M: Module> Codegen<'_, '_, M> {
+    /// Declares the word variables of the split local whose own variable is
+    /// `base`, of type `ty`, all zero ([`Split`]).
+    pub(super) fn split_declare(
+        &mut self,
+        ty: &Type,
+        base: Variable,
+        reads: &[Vec<String>],
+    ) -> Result<(), String> {
+        let words = split_words(self.world, ty).ok_or("native split local lacks words")?;
+        let mut leaves = Vec::with_capacity(words.len());
+        for (path, offset, ty) in words {
+            let live = reads
+                .iter()
+                .any(|r| path.starts_with(r) || r.starts_with(&path));
+            let native = scalar(&ty, &[])?;
+            let var = self.b.declare_var(native);
+            let zero = self.scalar_zero(native);
+            self.def_var(var, zero);
+            leaves.push(SplitLeaf {
+                path,
+                offset,
+                ty,
+                var,
+                live,
+            });
+        }
+        self.split.insert(
+            base.as_u32(),
+            Split {
+                ty: ty.clone(),
+                leaves,
+            },
+        );
+        Ok(())
+    }
+    /// The split local `name`, when the name still denotes it.
+    pub(super) fn split_of(&self, name: &str) -> Option<&Split> {
+        self.split.get(&self.vars.get(name)?.as_u32())
+    }
+    /// The root and field path of place expression `e` when its root is a
+    /// split local.
+    pub(super) fn split_place(&self, e: &Expr) -> Option<(String, Vec<String>)> {
+        let p = crate::check::Place::from_expr(e)?;
+        self.split_of(&p.root)?;
+        Some((p.root, p.path))
+    }
+    /// The words of split local `root` under field path `path`, with their
+    /// offsets relative to that field, and the field's type.
+    #[allow(clippy::type_complexity)]
+    fn split_subtree(
+        &self,
+        root: &str,
+        path: &[String],
+    ) -> Result<(Type, Vec<(i32, Type, Variable, bool)>), String> {
+        let s = self.split_of(root).ok_or("native split local is unknown")?;
+        let mut ty = s.ty.clone();
+        let mut base = 0;
+        for field in path {
+            let layout = Layout::of(self.world, &ty)?;
+            let f = layout
+                .field(field)
+                .ok_or_else(|| format!("unknown native field '{field}' in {ty}"))?;
+            base += f.offset;
+            ty = crate::numeric::default_type(&f.ty);
+        }
+        let words = s
+            .leaves
+            .iter()
+            .filter(|l| l.path.starts_with(path))
+            .map(|l| (l.offset - base, l.ty.clone(), l.var, l.live))
+            .collect();
+        Ok((ty, words))
+    }
+    /// Reads field `path` of split local `root`: a scalar field's variable,
+    /// or the words of an aggregate field stored into `into` (fresh storage
+    /// when `None`).
+    pub(super) fn split_read(
+        &mut self,
+        root: &str,
+        path: &[String],
+        into: Option<ir::Value>,
+    ) -> Result<ir::Value, String> {
+        let (ty, words) = self.split_subtree(root, path)?;
+        let layout = Layout::of(self.world, &ty)?;
+        if !layout.aggregate() {
+            let (_, _, var, _) = words.first().ok_or("native split field lacks a word")?;
+            return Ok(self.use_var(*var));
+        }
+        let ptr = match into {
+            Some(ptr) => ptr,
+            // Every word is written when the words cover the layout with
+            // full-width stores; an `f32` or narrow store writes part of
+            // its word, so such storage is zeroed first.
+            None if plain_data(self.world, &ty)
+                && words.len() as u32 * 8 == layout.size
+                && words
+                    .iter()
+                    .all(|(_, t, _, _)| scalar(t, &[]).is_ok_and(|n| n.bytes() == 8)) =>
+            {
+                self.alloc_uninit(layout.size)
+            }
+            None => self.alloc(layout.size),
+        };
+        for (offset, ty, var, _) in words {
+            let value = self.use_var(var);
+            let at = self.offset(ptr, offset);
+            self.store(at, value, &ty)?;
+        }
+        Ok(ptr)
+    }
+    /// Writes `value` (a scalar, or the address of an aggregate) to field
+    /// `path` of split local `root`.
+    pub(super) fn split_write(
+        &mut self,
+        root: &str,
+        path: &[String],
+        value: ir::Value,
+    ) -> Result<(), String> {
+        let (ty, words) = self.split_subtree(root, path)?;
+        if !Layout::of(self.world, &ty)?.aggregate() {
+            let (_, ty, var, _) = words.first().ok_or("native split field lacks a word")?;
+            let value = self.coerce(value, Some(ty));
+            self.def_var(*var, value);
+            return Ok(());
+        }
+        // `value` addresses a whole aggregate (a binding's value, a
+        // sequence element after its bounds check, a fresh copy), so the
+        // loads cannot trap. A word no use reads is not loaded: its
+        // variable is only ever written before it is read again.
+        for (offset, ty, var, live) in words {
+            if !live {
+                continue;
+            }
+            let word = self
+                .b
+                .ins()
+                .load(scalar(&ty, &[])?, ir::MemFlags::trusted(), value, offset);
+            self.def_var(var, word);
+        }
+        Ok(())
+    }
+    /// Binds split local `to` to a copy of split local `from` (of the same
+    /// type) word by word, with no storage between them. False when the
+    /// two are not both split locals of one type.
+    pub(super) fn split_copy(
+        &mut self,
+        from: &str,
+        path: &[String],
+        to: &str,
+    ) -> Result<bool, String> {
+        let (Some(_), Some(target)) = (self.split_of(from), self.split_of(to)) else {
+            return Ok(false);
+        };
+        let target = target.clone();
+        let (ty, words) = self.split_subtree(from, path)?;
+        if ty != target.ty || words.len() != target.leaves.len() {
+            return Ok(false);
+        }
+        for ((_, _, source, _), leaf) in words.into_iter().zip(&target.leaves) {
+            let value = self.use_var(source);
+            self.def_var(leaf.var, value);
+        }
+        Ok(true)
+    }
+    /// The variable and type of the scalar field `path` of split local
+    /// `root`, when that field is one word.
+    pub(super) fn split_word(&self, root: &str, path: &[String]) -> Option<(Variable, Type)> {
+        let s = self.split_of(root)?;
+        s.leaves
+            .iter()
+            .find(|l| l.path == path)
+            .map(|l| (l.var, l.ty.clone()))
+    }
+}
+
+/// The aggregate reads of `f` whose value the next instruction binds to a
+/// split local: the `let` loads the words at once, so the read lends the
+/// source's storage instead of copying it first.
+pub(super) fn split_sources(
+    f: &FunctionIr,
+    split: &BTreeMap<String, Vec<Vec<String>>>,
+) -> BTreeMap<ValueId, String> {
+    let mut uses: BTreeMap<ValueId, usize> = BTreeMap::new();
+    for block in &f.blocks {
+        for inst in &block.instructions {
+            for id in crate::ir_inline::operands(&inst.op) {
+                *uses.entry(id).or_default() += 1;
+            }
+        }
+        for id in crate::ir_inline::terminator_operands(&block.terminator) {
+            *uses.entry(id).or_default() += 1;
+        }
+    }
+    let mut out = BTreeMap::new();
+    for block in &f.blocks {
+        for pair in block.instructions.windows(2) {
+            if let (Op::Read { .. }, Op::Bind { pattern, value }) = (&pair[0].op, &pair[1].op)
+                && *value == pair[0].dest
+                && uses.get(value) == Some(&1)
+                && let PatternKind::Bind(n) = &pattern.kind
+                && split.contains_key(n)
+            {
+                out.insert(pair[0].dest, n.clone());
+            }
+        }
+    }
+    out
 }

@@ -676,6 +676,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .copied()
                 .ok_or_else(|| format!("native ChunkSeq::{} lacks an operand", op.name()))
         };
+        if let SeqOp::Vector(io) = op {
+            let (h, start, len) = self.seq_view(arg(0)?, &arg_types[0]);
+            let zero = self.zero();
+            let base = self.seq_elem_addr(h, start, zero, stride);
+            let value = if io.store { Some(arg(2)?) } else { None };
+            return self.vector_slice_io(io, base, len, arg(1)?, value, stride);
+        }
         Ok(match op {
             SeqOp::New => {
                 // An empty sequence shares one static header and allocates
@@ -925,8 +932,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             | SeqOp::FindNotIn
             | SeqOp::EqIgnoreAsciiCase
             | SeqOp::ExtendAsciiLowercase
-            | SeqOp::MakeAsciiLowercase { .. } => {
-                unreachable!("string, hoisted and byte operations return above")
+            | SeqOp::MakeAsciiLowercase { .. }
+            | SeqOp::Vector(_) => {
+                unreachable!("string, hoisted, byte and vector operations return above")
             }
             SeqOp::Swap | SeqOp::Replace => {
                 return Err(format!(
@@ -1417,12 +1425,19 @@ impl<M: Module> Codegen<'_, '_, M> {
             && let Some((
                 _,
                 inner @ Pattern {
-                    kind: PatternKind::Bind(_),
+                    kind: PatternKind::Bind(bound),
                     ..
                 },
             )) = fields.first()
         {
             let addr = self.b.use_var(read.addr);
+            // A split local (#1090) loads its words from the element
+            // itself, not from a copy of it: the words no later use reads
+            // are dead loads, so `Some(h) => h.f` is one load.
+            if self.split_of(bound).is_some() {
+                self.split_write(bound, &[], addr)?;
+                return Ok(true);
+            }
             let element = self.seq_load_elem(addr, &read.elem)?;
             let mut slot_index = 0;
             self.bind_ir(dest, &mut slot_index, false, inner, element, &read.elem)?;

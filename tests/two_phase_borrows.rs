@@ -225,11 +225,11 @@ fn f(inout p: P) { p.add(in p); }",
             "E0301",
             "overlapping arguments",
         ),
-        // Only receivers are reserved: an `inout` argument of a plain call
-        // still excludes reads of its place in the other arguments.
+        // Every `inout` argument is reserved (#1094), so a plain call
+        // still refuses writes of its place in the other arguments.
         (
             "fn put(inout s: ChunkSeq[u64], v: u64) { s.push(v); }
-fn f(inout s: ChunkSeq[u64]) { put(inout s, s.len()); }",
+fn f(inout s: ChunkSeq[u64]) { put(inout s, { s.clear(); 1 }); }",
             "E0301",
             "conflicts with active argument loan",
         ),

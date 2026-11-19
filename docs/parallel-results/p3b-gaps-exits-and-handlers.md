@@ -7,8 +7,8 @@ origin/main `31f81b9` (#1076) before merging.
 
 Parts 1 and 2 merged in PR #1105 (`c9bd17a`; the bootstrap-stage1
 workflow passed on that branch). Part 3 (Box drops on `Fail` exits,
-specialized `sink` leaks) is the next PR, based on `c9bd17a`. Part 4
-(affine extern-type drop imports) follows and extends this report.
+specialized `sink` leaks) merged in PR #1114 (`3a8d446`). Part 4 (affine
+extern-type drop imports) is the last PR and closes #1095.
 
 ## Part 1: bit builtins on a reassigned `let mut`
 
@@ -159,6 +159,100 @@ They cover an acyclic and a loop function, a box taken `sink` by the failing
 callee, boxes in struct fields and a `Box[dyn Trait]`, a handled body inside
 a loop, and unconsumed `sink` sequences, boxes and sequence-holding structs.
 
+**Review follow-up (in the part 4 PR).** After a local `Fail` handler
+drops what the handled body owns, the body's graphs no longer report an
+abort position, so a failure the clause raises again cannot drop those
+boxes twice. Three more tests in `tests/native_fail_exit_drops.rs` cover a
+re-raising clause and a box moved into a `Log` body that fails before and
+after consuming it (each freed exactly once).
+
+## Part 4: drop imports for affine extern handles
+
+**Decision (user, 2026-11-19): drops perform `Ffi[Lib]`.** A drop import
+runs at every implicit drop, and code that can drop such a handle needs
+the library's capability in its row.
+
+**Syntax.** `affine extern type Probe drop res_release;` in a `.vsys`
+names the import that releases a dropped `Probe`. It must be declared
+`fn res_release(sink p: Probe) -> ForeignVal[Unit];`; a `linear` type with
+`drop` is refused (it is finalized explicitly). The canonical `.vsys`
+bytes gain a `drop-imports` section only when some type declares one, so
+existing libraries keep their digests.
+
+**Lowering.** The front end (`src/ffi_lowering/drops.rs`) generates two
+source functions per droppable type, `$drop$Probe(sink h: Probe)` and
+`$drop$Option$Probe(sink o: Option[Probe])`, each calling the import
+(parsed at offsets past the module so their expression spans never meet
+the source's). After `lower_world`, `drops::insert` places a call of the
+right one at each point a graph drops such a value. The points come from
+the `Box` drop elaboration of #1076 (`fip::handle_drop_plan`, with the
+handle types standing in for `Box[T]` under a thread-local override), so
+scope ends, overwrites, discarded results, branch edges, early returns,
+loop iterations, `sink` parameters, struct fields and destructured tuple
+items all release exactly once. The inserted call is an ordinary foreign
+call, so the JIT, objects and the evaluator (which runs Place IR) all run
+it without backend changes; native instance discovery adds the drop
+functions a graph calls (`drops::drop_callees`).
+
+**Checks.**
+
+- A function that may drop a droppable handle without `Ffi[Lib]` in its
+  row is refused (`E0401`, "add Ffi[Res] to its effect row").
+- A droppable handle live across an unhandled abortable effect is
+  refused (`E0402`), as a linear one is, because an abort would skip the
+  drop. (Checked arithmetic counts: use `wrapping_add` or finalize first.)
+- Dropping another aggregate that holds such a handle as a whole
+  temporary (a discarded `Result[Probe, ForeignInvalid]`) is refused with
+  a typed error; bound aggregates release field by field.
+- A handle consumed inside a handled body that may abort before consuming
+  it is refused (`E0402`, as for a linear value). A struct whose handle
+  fields were all closed may cross a checkpoint.
+- `let _ = h` releases `h`. A handle discarded by `_` inside a
+  destructuring pattern, or moved into a closure (an unused closure would
+  not release it), is refused with a typed error.
+
+**Review follow-up (also fixes Boxes).** A temporary used in a later
+block (`take(open(1), if flag { 2 } else { 3 })`) was dropped right after
+its definition, before the branch, so the call received a released handle.
+The same was true of Boxes since #1076: the JIT read freed memory. The
+elaboration now leaves a value used outside its block to that use
+(`a_box_argument_before_a_branching_argument_is_the_callees`).
+
+The IR checker now lets a plain assignment re-initialize a moved place
+(the overwrite drop moves the old handle into the import first). Source
+programs never produced that shape before, so no existing diagnostic
+changes (`ir_diagnostic_causes`, `two_phase_borrows`,
+`runtime_resource_trace`, `bit_builtin_mut` pass).
+
+**Tests.** `tests/ffi_affine_drops.rs` (11): twelve scenarios (scope end,
+explicit close, branch, 10-iteration loop, overwrite, discarded result,
+`Option` values and a matched handle, struct field and tuple item, early
+return, `sink` callee, `let _`, a handle argument before a branching
+argument) count opens, explicit closes and drop-import calls.
+The JIT (Rust library), the evaluator (Rust stand-in) and, on Linux
+x86-64, objects linked with a C library and run as executables all give
+the expected value and release count, with opens = closes + releases.
+x86-64 and AArch64 objects build for every entry. Diagnostics: the
+missing row (and that `in` lends need none), `E0402` (and that closing
+first is fine), the whole-aggregate refusal, and the `.vsys` declaration
+checks (linear `drop`, wrong mode, wrong result, unknown symbol, plain
+affine types still dropping silently). `ffi_handles`, `ffi_lowering` and
+`vesper-ffi` tests pass unchanged.
+
+**Manuscript.** The §16.3 "Opaque Extern-Type Handles" bullet now
+describes `drop` (flagged in the PR).
+
+**Gaps.**
+
+- A handle dropped inside generic code (`fn keep[T](sink x: T)` with
+  `T = Probe`) is not released: the drop plan runs on the generic graph,
+  before instantiation.
+- Only `H` and `Option[H]` temporaries are released whole; other enums
+  holding a handle must be matched first.
+- `@fip` functions are not given handle drops.
+- Rows with only a tail variable do not satisfy the row check; the
+  capability must be named.
+
 ## Before and after (parts 1 and 2)
 
 | Repro | Before | After |
@@ -186,7 +280,9 @@ instruction count to compare.
 ## Stage 1 guard
 
 No file under `src/verified_codegen/**`, `lean/**`, `bootstrap/**` or
-`packages/vesper-compiler/**` changed, nor `src/ir.rs` or `ir_opt::optimize`.
+`packages/vesper-compiler/**` changed, nor `src/ir.rs` or `ir_opt::optimize`
+(part 4 calls `ir::lower_world` and `ir::thread_tokens` unchanged; with no
+droppable handle in the world the inserted pass is a no-op).
 The bootstrap-stage1 workflow was dispatched on the branch; its result is in
 the PR.
 

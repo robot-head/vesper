@@ -158,3 +158,64 @@ fn a_box_owned_in_a_handled_body_is_freed_when_its_handler_aborts() {
     // x = 2..5 give 2x; x = 6, 7 abort: 4 + 6 + 8 + 10 + 200.
     assert_eq!(execute(&src), "228");
 }
+
+#[test]
+fn a_box_moved_into_a_handled_body_is_freed_once_when_the_body_fails() {
+    // The `Log` body consumes the outer box and then fails past its
+    // handler: the enclosing function no longer owns the box.
+    let src = caught(
+        "effect Log { fn log(v: i64) -> i64; }
+fn held(x: i64) -> i64 eff [Fail[RuntimeError]] {
+    let b = Box::new(P { v: x });
+    handle Log in {
+        let Box(p) = b;
+        let r = risky(x);
+        wrapping_add(r, Log::log(p.v))
+    } with { return v => v, log(v, k) => k(v), }
+}",
+    );
+    assert_eq!(execute(&src), "11006");
+}
+
+#[test]
+fn a_fail_clause_that_raises_again_frees_the_body_box_once() {
+    let src = caught(
+        "fn held(x: i64) -> i64 eff [Fail[RuntimeError]] {
+    handle Fail[i64] in {
+        let b = Box::new(P { v: x });
+        let r = if x > 5 { Fail::raise(x) } else { x };
+        let Box(p) = b;
+        wrapping_add(r, p.v)
+    } with { return v => v, raise(e, k) => risky(e), }
+}",
+    );
+    assert_eq!(execute(&src), "11006");
+}
+
+#[test]
+fn a_box_moved_into_a_handled_body_is_freed_when_the_body_fails_first() {
+    // The `Log` body fails before it consumes the outer box.
+    let src = caught(
+        "effect Log { fn log(v: i64) -> i64; }
+fn held(x: i64) -> i64 eff [Fail[RuntimeError]] {
+    let b = Box::new(P { v: x });
+    handle Log in {
+        let r = risky(x);
+        let Box(p) = b;
+        wrapping_add(r, Log::log(p.v))
+    } with { return v => v, log(v, k) => k(v), }
+}",
+    );
+    assert_eq!(execute(&src), "11006");
+}
+
+#[test]
+fn a_box_argument_before_a_branching_argument_is_the_callees() {
+    let src = format!(
+        "{P}fn take(sink b: Box[P], n: i64) -> i64 {{ let Box(p) = b; wrapping_add(p.v, n) }}
+fn pick(flag: bool) -> i64 {{ take(Box::new(P {{ v: 10 }}), if flag {{ 2 }} else {{ 3 }}) }}
+fn main() -> i64 {{ wrapping_add(pick(true), pick(false)) }}
+"
+    );
+    assert_eq!(execute(&src), "25");
+}

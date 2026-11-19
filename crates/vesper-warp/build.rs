@@ -51,4 +51,10 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     ("recovery", "sat_add(e.pn, 3)", "sat_add(e.pn, 4)"),
     // stream.ves: an in-order insert no longer advances the readable prefix.
     ("stream", "if start <= s.contig {", "if start < s.contig {"),
+    // lib.ves (lifecycle.rs): a Retry token's ODCID is read one byte early.
+    (
+        "lifecycle",
+        "in token[41..wrapping_add(41, len)]",
+        "in token[40..wrapping_add(40, len)]",
+    ),
 ];

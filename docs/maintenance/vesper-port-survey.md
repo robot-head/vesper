@@ -196,6 +196,11 @@ Needs F7, F9, F10 and, per crate, F11 or F12.
 
 ### Wave P4: toolchain crates with self-hosting Stage 2
 
+> 2026-11-19: wave P4 is replaced by the
+> [self-hosting plan](self-hosting-plan.md) (#1122), which covers these crates
+> and the root compiler together, starting with wave
+> [SH0](../agent-prompts/self-host-sh0/README.md) (#1123-#1130).
+
 `vesper-core`, `vesper-syntax`, `vesper-span`, `vesper-diagnostics`, `vesper-fmt`, `vesper-lint`, `vesper-lsp`, `vesper-doc`, `vesper-highlight` (lexical part), `vesper-lean-syntax`, `vesper-pact-binding`, `vesper-forge`, `vesper-sim-session` and `vesper-pact-bridge`. They move as the compiler moves, and the front end in `packages/vesper-compiler` is where `vesper-syntax` and the checker's share of `vesper-core` go.
 
 ### Stays in Rust behind `extern`

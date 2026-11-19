@@ -1,8 +1,27 @@
+// @export vsys direct rust=crate::imp::lifecycle::keys
+// | sys library WarpKeys (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_warp_keys",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     fn vesper_warp_keys_random(nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_warp_keys_seal(nocapture inout token: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vesper_warp_keys_open(nocapture inout token: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vesper_warp_keys_hmac16(
+// |         nocapture in key: CSlice[u8],
+// |         nocapture in msg: CSlice[u8],
+// |         nocapture inout out: CSlice[u8]
+// |     ) -> ForeignVal[Unit];
+// | }
+//
 // @vesper/warp: Vesper port of the vesper-warp QUIC core (port wave P3b
 // lane 4, #1066), part 1: varints (varint.rs), packet numbers
 // (packet_number.rs), long and short headers (header.rs), frames
 // (frame.rs), received-packet tracking (ack.rs), loss recovery
-// (recovery.rs) and the stream byte buffers (stream.rs).
+// (recovery.rs) and the stream byte buffers (stream.rs); part 2: the
+// keyed tokens of lifecycle.rs. AES-256-GCM, HMAC-SHA-256 and the CSPRNG
+// stay Rust, behind the `.vsys` library `WarpKeys` above, which the
+// wrapper (src/ported/lifecycle.rs) provides.
 //
 // The Rust crate keeps its public types and the parts the export ABI cannot
 // carry: borrowed byte views (a parsed header or frame names its byte
@@ -998,4 +1017,164 @@ pub fn recv_buf_read(
 
 pub fn recv_buf_reset_for_reuse(inout s: RecvSt, inout have: Slice[u64]) {
     rb_reset_for_reuse(inout s, inout have)
+}
+
+// ---------------------------------------------------------------------------
+// Keyed tokens (lifecycle.rs). A `.vsys` library is visible only in this
+// root module, so they live here.
+//
+// An address-validation token: the kind byte (also the AEAD's associated
+// data), a 12-byte random nonce, the sealed plain text (issued_ns as 8
+// big-endian bytes, the 19 address bytes, the ODCID length and the ODCID)
+// and the 16-byte tag.
+
+// The outcome of `token_open`: `code` 0 is a Retry token whose ODCID is
+// `len` bytes, 1 a NEW_TOKEN token, 2 invalid, 3 expired, 4 issued to
+// another address.
+copy struct TokenOpened {
+    code: u64,
+    len: u64
+}
+
+fn tk_byte(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(x) => widen_u64(x),
+        Option::None => 0,
+    }
+}
+
+fn tk_put_be64(inout b: Slice[u8], at: u64, v: u64) {
+    let mut i: u64 = 0;
+    loop {
+        if i >= 8 {
+            break;
+        }
+        b
+            .try_set(
+            wrapping_add(at, i),
+            wrapping_u8(wrapping_shr_u64(v, wrapping_u32(wrapping_mul(wrapping_sub(7, i), 8))))
+        );
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn tk_get_be64(in b: Slice[u8], at: u64) -> u64 {
+    let mut v: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= 8 {
+            break;
+        }
+        v = v << 8 | tk_byte(in b, wrapping_add(at, i));
+        i = wrapping_add(i, 1);
+    }
+    v
+}
+
+// Equal lengths and bytes, reading every byte (no early exit).
+fn ct_eq(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= a.len() {
+            break;
+        }
+        acc = acc | tk_byte(in a, i) ^ tk_byte(in b, i);
+        i = wrapping_add(i, 1);
+    }
+    acc == 0
+}
+
+fn tk_opened(code: u64, len: u64) -> TokenOpened {
+    TokenOpened {
+        code: code,
+        len: len
+    }
+}
+
+// Seals a token of `kind` (1 Retry, 2 NEW_TOKEN) for the 19 address bytes
+// `addr` into `out`; returns its length, or 0 when the arguments do not fit.
+pub fn token_seal(
+    kind: u8,
+    in odcid: Slice[u8],
+    in addr: Slice[u8],
+    now_ns: u64,
+    inout out: Slice[u8]
+) -> u64 eff [Ffi[WarpKeys]] {
+    let n = odcid.len();
+    let total = wrapping_add(57, n);
+    if n > 20 || addr.len() != 19 || out.len() < total {
+        return 0;
+    }
+    out.try_set(0, kind);
+    WarpKeys::vesper_warp_keys_random(inout out[1..13]);
+    tk_put_be64(inout out, 13, now_ns);
+    let _a = out.try_copy_from(21, in addr);
+    out.try_set(40, wrapping_u8(n));
+    let _o = out.try_copy_from(41, in odcid);
+    if WarpKeys::vesper_warp_keys_seal(inout out[0..total]) != 0 {
+        return 0;
+    }
+    total
+}
+
+// Opens `token` (decrypting it in place) received from the 19 address
+// bytes `addr` at `now_ns`; a Retry token's ODCID goes to `odcid`.
+pub fn token_open(
+    inout token: Slice[u8],
+    in addr: Slice[u8],
+    now_ns: u64,
+    retry_lifetime_ns: u64,
+    new_lifetime_ns: u64,
+    inout odcid: Slice[u8]
+) -> TokenOpened eff [Ffi[WarpKeys]] {
+    let t = token.len();
+    if t < 57 || t > 77 {
+        return tk_opened(2, 0);
+    }
+    let kind = tk_byte(in token, 0);
+    if kind != 1 && kind != 2 {
+        return tk_opened(2, 0);
+    }
+    if WarpKeys::vesper_warp_keys_open(inout token[0..t]) != 0 {
+        return tk_opened(2, 0);
+    }
+    let issued = tk_get_be64(in token, 13);
+    let lifetime = if kind == 1 {
+        retry_lifetime_ns
+    } else {
+        new_lifetime_ns
+    };
+    if now_ns < issued || wrapping_sub(now_ns, issued) > lifetime {
+        return tk_opened(3, 0);
+    }
+    if !ct_eq(in token[21..40], in addr) {
+        return tk_opened(4, 0);
+    }
+    let len = tk_byte(in token, 40);
+    if wrapping_add(len, 57) != t || len > 20 {
+        return tk_opened(2, 0);
+    }
+    if kind == 2 {
+        if len == 0 {
+            return tk_opened(1, 0);
+        }
+        return tk_opened(2, 0);
+    }
+    let _c = odcid.try_copy_from(0, in token[41..wrapping_add(41, len)]);
+    tk_opened(0, len)
+}
+
+// The stateless reset token of one of our connection IDs: HMAC-SHA-256
+// under `key`, truncated to the 16 bytes of `out`.
+pub fn reset_token(in key: Slice[u8], in cid: Slice[u8], inout out: Slice[u8]) eff [Ffi[WarpKeys]] {
+    WarpKeys::vesper_warp_keys_hmac16(in key, in cid, inout out);
+}
+
+// A received stateless reset token against one of ours, in constant time.
+pub fn reset_token_eq(in ours: Slice[u8], in theirs: Slice[u8]) -> bool {
+    theirs.len() == 16 && ct_eq(in ours, in theirs)
 }

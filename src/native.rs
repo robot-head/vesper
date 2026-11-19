@@ -740,7 +740,7 @@ fn instances_for_entry(
     entry: &str,
     include_entry: bool,
 ) -> Result<InstanceMap, String> {
-    let program = crate::ir::lower_world(world);
+    let program = crate::ffi_lowering::drops::lower_world(world);
     let references = program
         .functions
         .values()
@@ -776,6 +776,10 @@ fn instances_for_entry(
             || !function_arguments(&vars).is_empty()
         {
             result.insert(key, (name.clone(), vars.clone()));
+        }
+        // Handle drops (§16.3) are calls the source body never names.
+        for callee in crate::ffi_lowering::drops::drop_callees(world, &program, &name) {
+            todo.push((callee, BTreeMap::new()));
         }
         if let Some(body) = &f.body {
             visit(body, &mut |e| {
@@ -975,7 +979,7 @@ fn compile_entry<M: Module>(
         return Err("native entry cannot expose specialized closure values; invoke them within the entry function".into());
     }
     let instances = instances_for_entry(world, entry, trace_ok)?;
-    let mut program = crate::ir::lower_world(world);
+    let mut program = crate::ffi_lowering::drops::lower_world(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
     let mut inlined_into = BTreeMap::new();
     if optimize {
@@ -1350,6 +1354,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 caller_slot,
                 reuse_slots: BTreeMap::new(),
                 register_locals: BTreeSet::new(),
+                split: BTreeMap::new(),
                 current_call_slot: None,
                 in_fip_fn: f.fip,
                 trace_fail,
@@ -2224,6 +2229,11 @@ struct Codegen<'a, 'b, M: Module> {
     /// Scalar locals kept in registers on the optimize path
     /// ([`register_locals`]): a place use spills them to a scratch slot.
     register_locals: BTreeSet<u32>,
+    /// Copy-struct locals kept as one variable per word on the optimize
+    /// path ([`aggregates::Split`]).
+    /// Keyed by the local's own variable, so a specialized callee's local
+    /// of the same name is a different entry.
+    split: BTreeMap<u32, aggregates::Split>,
     /// Selected caller-slot source for the active `Op::Call`, if optimized by Stage 4.
     current_call_slot: Option<crate::fip::CallSlot>,
     /// True while emitting code for an `@fip` function (prevents emitting non-FIP drops/frees).
@@ -2917,6 +2927,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             return Ok(());
         }
         match &p.kind {
+            PatternKind::Bind(n) if self.split_of(n).is_some() => {
+                // The words are loaded now, so the binding is a copy.
+                self.split_write(n, &[], value)
+            }
             PatternKind::Bind(n) => {
                 let var = *self.vars.get(n).ok_or("IR binding lacks a declared slot")?;
                 let bound_value = if inside_box {
@@ -3036,6 +3050,14 @@ impl<M: Module> Codegen<'_, '_, M> {
         } else {
             BTreeSet::new()
         };
+        // Copy-struct locals split into word variables (#1090). A nested
+        // graph shares its enclosing graph's locals, so only a graph that
+        // declares a local itself splits it.
+        let mut split_ok = if self.operands_only && !self.in_fip_fn && return_to.is_none() {
+            aggregates::split_locals(self.world, f, &self.generic_vars)
+        } else {
+            BTreeMap::new()
+        };
         for (n, t) in &f.locals {
             let ty = crate::numeric::default_type(&substitute(t, &self.generic_vars));
             let layout = Layout::of(self.world, &ty)?;
@@ -3054,8 +3076,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.def_var(var, zero);
                 self.vars.insert(n.clone(), var);
                 self.local_types.insert(n.clone(), ty.clone());
+                if let Some(reads) = split_ok.get(n) {
+                    self.split_declare(&ty, var, reads)?;
+                }
                 var
             };
+            if existing.is_some() {
+                split_ok.remove(n);
+            }
             // On the optimize path a numeric local that only pure calls
             // borrow stays a frontend SSA variable (a register): a place
             // argument spills it to a scratch slot for that one call, and
@@ -3080,11 +3108,20 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         // Where constructed aggregates are built (lane 7, #990).
         let homes = if self.operands_only && !self.in_fip_fn {
-            aggregates::plan(self.world, f, &self.generic_vars, return_to.is_some())
+            aggregates::plan(
+                self.world,
+                f,
+                &self.generic_vars,
+                return_to.is_some(),
+                &split_ok,
+            )
         } else {
             BTreeMap::new()
         };
         let mut home_pointers = aggregates::HomePointers::new();
+        let split_sources = aggregates::split_sources(f, &split_ok);
+        // Reads whose split target the read itself bound (`split_copy`).
+        let mut bound_early = BTreeSet::new();
         // Sequence headers read once before the loops that keep them.
         let header_hoists = if self.operands_only && !self.in_fip_fn {
             crate::bounds_hoist::header_hoists(f)
@@ -3350,6 +3387,20 @@ impl<M: Module> Codegen<'_, '_, M> {
                     Op::Read { .. } if hoisted_reads.contains_key(&inst.dest) => {
                         hoisted_reads[&inst.dest]
                     }
+                    // A split local's field is its variable; an aggregate
+                    // read stores the words in its home or fresh storage.
+                    Op::Read { root, path, .. } if self.split_of(root).is_some() => {
+                        if let Some(target) = split_sources.get(&inst.dest)
+                            && self.split_copy(root, path, target)?
+                        {
+                            bound_early.insert(inst.dest);
+                            self.zero()
+                        } else {
+                            let into =
+                                self.home_pointer(inst.dest, &homes, &mut home_pointers, sret)?;
+                            self.split_read(root, path, into)?
+                        }
+                    }
                     // The one read of a pass-through local yields the
                     // storage its `let` bound (`aggregates::plan`).
                     Op::Read { root, .. }
@@ -3384,7 +3435,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                             && !self.vars.contains_key(root)
                         {
                             self.function_tag(root, &ty)?
-                        } else if *pass != Pass::Sink
+                        } else if (*pass != Pass::Sink || split_sources.contains_key(&inst.dest))
                             && (Layout::of(self.world, &ty)?.aggregate()
                                 || matches!(ty, Type::Function { .. }))
                         {
@@ -3397,6 +3448,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                             value
                         }
                     }
+                    Op::Bind { value, .. } if bound_early.contains(value) => self.zero(),
                     Op::Bind { pattern, value } => {
                         let t = crate::numeric::default_type(&substitute(
                             &f.values[value],
@@ -3463,6 +3515,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                             && let Some(value_ty) = value_ty
                             && Layout::of(self.world, &value_ty)?.aggregate()
                             && self.vars.contains_key(&p.root)
+                            && self.split_of(&p.root).is_none()
                         {
                             // A whole aggregate is copied from its storage
                             // into the destination once, not through a
@@ -4164,6 +4217,19 @@ impl<M: Module> Codegen<'_, '_, M> {
         field
     }
     fn address(&mut self, e: &Expr) -> Result<ir::Value, String> {
+        // A split local has no storage: a use that needs an address reads
+        // a fresh copy (no use that writes through it reaches here,
+        // `aggregates::split_locals`).
+        if let Some((root, path)) = self.split_place(e) {
+            let ty = self.ty(e);
+            if Layout::of(self.world, &ty)?.aggregate() {
+                return self.split_read(&root, &path, None);
+            }
+            let value = self.split_read(&root, &path, None)?;
+            let ptr = self.alloc(8);
+            self.store(ptr, value, &ty)?;
+            return Ok(ptr);
+        }
         match &e.kind {
             ExprKind::Name(n) => {
                 let var = *self.vars.get(n).ok_or("unknown native place")?;
@@ -4213,6 +4279,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         ty: &Type,
     ) -> Result<(), String> {
         match &p.kind {
+            PatternKind::Bind(n) if self.split_of(n).is_some() => self.split_write(n, &[], value),
             PatternKind::Bind(n) => {
                 let bound_value = if inside_box {
                     let layout = Layout::of(self.world, ty)?;
@@ -4584,6 +4651,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 Literal::Bool(b) => self.b.ins().iconst(types::I64, i64::from(*b)),
                 Literal::String(s) => self.string(s)?,
             },
+            ExprKind::Name(n) if self.split_of(n).is_some() => self.split_read(n, &[], None)?,
             ExprKind::Name(n) => {
                 if self.world.functions.contains_key(n) && !self.vars.contains_key(n) {
                     return self.function_tag(n, &self.ty(e));
@@ -4627,6 +4695,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                 fields.iter().map(|(n, e)| (n.clone(), e)).collect(),
                 &self.ty(e),
             )?,
+            ExprKind::Field(..) if let Some((root, path)) = self.split_place(e) => {
+                self.split_read(&root, &path, None)?
+            }
             ExprKind::Field(base, field) => {
                 let ptr = if crate::check::Place::from_expr(e).is_some() {
                     self.address(e)?
@@ -4914,7 +4985,33 @@ impl<M: Module> Codegen<'_, '_, M> {
                         .overflow_ops
                         .contains(&(e.span.start, e.span.end))
                 });
-                if let ExprKind::Name(n) = &l.kind {
+                let split = self.split_place(l);
+                if let Some((root, path)) = split
+                    && (op == "=" || self.split_word(&root, &path).is_some())
+                {
+                    // A split local's word is its variable (#1090).
+                    let value = if op == "=" {
+                        value
+                    } else {
+                        let (var, _) = self
+                            .split_word(&root, &path)
+                            .ok_or("native split field lacks a word")?;
+                        let old = self.use_var(var);
+                        let unsigned = crate::numeric::IntegerKind::from_type(&ty)
+                            .is_some_and(|k| k.unsigned());
+                        let v = if let Some(kind) = checked {
+                            self.checked_arithmetic(&op[..1], kind, old, value)?
+                        } else {
+                            let flush = self.flushes(&e.span);
+                            let old = self.flush(flush, old);
+                            let value = self.flush(flush, value);
+                            let r = self.binary(&op[..1], old, value, unsigned)?;
+                            self.flush(flush, r)
+                        };
+                        self.coerce(v, Some(&ty))
+                    };
+                    self.split_write(&root, &path, value)?;
+                } else if let ExprKind::Name(n) = &l.kind {
                     let var = *self.vars.get(n).ok_or("unknown native local")?;
                     let value = if op == "=" {
                         value
@@ -6926,6 +7023,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             // `raise` never resumes: the handled body ends here, so what it
             // owns at the failing instruction is dropped.
             self.box_drop_abort(h.control.exits_depth)?;
+            // Those graphs are unwound: a failure the clause raises must not
+            // drop their boxes again. Each graph sets its position again at
+            // its next instruction.
+            for exit in self.exits.iter_mut().skip(h.control.exits_depth) {
+                exit.at = None;
+            }
         }
         let captures = self.copy_bindings(&h.captured, &h.captured_types)?;
         let old_vars = std::mem::replace(&mut self.vars, captures);

@@ -2,7 +2,8 @@
 
 Claim: #1066 (it lands in several PRs, and the last one closes it). Part
 1a (PR #1079) ported the wire modules, part 1b (PR #1108) loss recovery,
-and part 1c the stream byte buffers. Lane prompt:
+part 1c (PR #1116) the stream byte buffers, and part 2a the keyed tokens
+of `lifecycle.rs`. Lane prompt:
 `docs/agent-prompts/port-p3b/04-warp.md` (plan PR #1072).
 
 ## Summary
@@ -23,8 +24,10 @@ and part 1c the stream byte buffers. Lane prompt:
   frames 2.35x / 2.29x, ack 1.86x / 2.03x, and a whole-connection echo
   transfer 1.15x / 1.11x. The port is not at parity, so Rust stays the
   default.
-- Part 2 adds recovery and cc, reusing the warp-wheel and BBR ports, and
-  then stream. The endpoint waits on opaque handles (lane 3, #1065).
+- Later parts added recovery (1b), the stream buffers (1c) and the
+  lifecycle tokens (2a, the first `.vsys` imports: AES-256-GCM, HMAC and
+  the CSPRNG stay Rust). `cc` stays Rust (see below). The handshake and
+  the endpoint come next.
 
 ## API inventory
 
@@ -38,7 +41,8 @@ and part 1c the stream byte buffers. Lane prompt:
 | `recovery` | `ack_delay_ns`, `RttEstimator::new`/`update`/`pto_base_ns`/`loss_delay_ns`, `LossRecovery::new`, `on_packet_sent`, `on_ack_received`, `on_timeout`, `pto_time_and_space`, `persistent_congestion_duration_ns`, `set_max_ack_delay_ns`, `set_handshake_status`, `reset_space`, `discard_space`, and the timer it arms | The buffers (three `RecSpace`s, the sent-packet rings and one call's events), lent in place; replaying the events to the caller's sink; the getters |
 | `cc` | Nothing yet (see below) | The BBR adapters |
 | `stream` | `SendBuf` (`write`, `next_lost`, `take_new`, `copy_out`, `on_ack`, `on_lost`, `discard`, `reset_for_reuse`, `free_space`), `RecvBuf` (`insert`, `read`, `reset_for_reuse`), and the ring bitmaps and ring copies under them | The rings and bitmaps (owned by the wrapper, lent in place); the offset getters; the stream state machines, `CryptoStream`, `StreamSet` (packet building, flow control, the sent-frame record), which call the ported buffers |
-| endpoint, handshake, lifecycle, TLS glue | Not yet (part 2) | Everything |
+| `lifecycle` | `TokenKey::seal`/`open` (the Retry and NEW_TOKEN token layout and every check: length, kind, lifetime, address, ODCID length), `ResetKey::token`, the constant-time reset-token comparison (`token_eq`) | AES-256-GCM, HMAC-SHA-256 and the CSPRNG behind the `.vsys` library `WarpKeys` (`src/ported/lifecycle.rs`, module `keys`); the address encoding (`std::net` types); `LifecycleConfig`, `Cids`, `Path`, `PathProbe` and the preferred-address helpers, which move with the endpoint |
+| endpoint, handshake, TLS glue | Not yet (part 2b on) | Everything |
 
 Borrowed slices cross the ABI as spans `(start, len)` into the caller's
 buffer, and the Rust side converts them back into slices. That keeps
@@ -62,7 +66,21 @@ const context.
   has no `unsafe` code. The crate keeps `forbid(unsafe_code)` on the Rust
   build. The port build uses `deny(unsafe_code)`, with one `allow` on the
   generated binding module, so the hand-written forwarding layer has no
-  `unsafe` code either.
+  `unsafe` code either, with one exception from part 2a: the `WarpKeys`
+  shim (`src/ported/lifecycle.rs`, module `keys`). Its four
+  `#[unsafe(no_mangle)] extern "C"` functions receive each `nocapture`
+  `CSlice[u8]` as a pointer and a length, and two `unsafe` blocks turn
+  those into slices for the call. Each has an `allow(unsafe_code)` and a
+  SAFETY note. The Vesper package itself still has no `unsafe` code.
+- `.vsys` imports (part 2a). A `.vsys` library is visible only in the root
+  module, so the token code is in `lib.ves`. Export ABI v3 refuses handles
+  in exported signatures, and the token key lives in the Rust wrapper
+  between calls. So the shim does not use a handle: the wrapper lends its
+  `Arc<Aes256Gcm>` to the one synchronous call through a per-thread slot
+  (vesper-tensor's `WeightFile` pattern). The Vesper code writes the
+  layout and the random nonce (an import), and the shim seals or opens the
+  token in place. `TokenKey::open` opens a copy, so the caller's bytes stay
+  as received.
 - Export ABI v3 (`// @export abi 3` in `lib.ves`). `FrameW` is a
   20-variant word enum that converts as `Words<FrameW, 12>`. `RxState` is a
   copy struct lent `inout`.
@@ -101,9 +119,12 @@ const context.
 ## Unit tests
 
 - The integration suites (`tests/*.rs`) run unchanged on both builds.
-- The unit tests in `src/varint.rs`, `src/packet_number.rs` and
-  `src/stream.rs` (the send and receive buffer tests) exercise only the
-  public API, so they also run on both builds.
+- The unit tests in `src/varint.rs`, `src/packet_number.rs`,
+  `src/stream.rs` (the send and receive buffer tests) and
+  `src/lifecycle.rs` exercise only the crate's API, so they also run on
+  both builds. `src/lifecycle.rs` gained two in part 2a: token round
+  trips and every refusal (expired, wrong address, wrong key, a flipped tag
+  bit, a truncated token, an empty one), and reset tokens.
 - The unit tests in `src/reference/` cover reference internals and run only
   on the Rust build. One example is `bits_find_and_wrap`, a test of the
   reference bitmap type.
@@ -126,6 +147,7 @@ Bazel build has one divergent object per module.
 | ack | delayed-ACK threshold `>= 2` to `>= 3` | `ack_tracking::delayed_ack_policy` | `ack_tracking::merges_ranges_and_detects_duplicates` |
 | recovery | packet threshold 3 to 4 | `recovery::packet_threshold_then_time_threshold` | `recovery::rtt_estimator_and_ack_delay_rules` |
 | stream | an in-order insert no longer advances the readable prefix (`start <= contig` to `<`) | `stream::tests::recv_buf_reassembles_with_wrap` | `stream::tests::send_buf_retransmits_only_unacked_lost_bytes` |
+| lifecycle (in `lib.ves`) | a Retry token's ODCID is read one byte early (`token[41..]` to `token[40..]`) | `lifecycle::tests::tokens_round_trip_and_refuse_what_they_must` | `lifecycle::tests::reset_tokens_are_keyed_and_compared_whole` |
 
 ## Speed against Rust
 
@@ -148,6 +170,23 @@ stream buffers ported too. Part 1a measured 3.46M (1.11x) and part 1b
 Wall-clock runs for part 1b were noisy, because other jobs shared the
 machine: recovery measured 3.60x and 6.60x in two later runs. The
 callgrind ratio is the reliable figure.
+
+Tokens (part 2a) are measured by the ignored unit test
+`lifecycle::tests::measure_tokens` (`cargo test --release --lib --
+--ignored --nocapture measure_tokens`, with and without `vesper-port`).
+Each iteration seals and opens one Retry token, then derives and compares
+one reset token, 100,000 times, best of 7. Two runs each:
+
+| Operation | Rust | Vesper | Wall ratio |
+|---|---|---|---|
+| Retry token seal + open | 863-890 ns | 951-960 ns | 1.08-1.10x |
+| reset token + comparison | 270-279 ns | 262-270 ns | 0.97x |
+
+Callgrind over the whole test (both loops, 7 rounds): 14.29G instructions
+for Rust and 15.38G for Vesper (1.08x), about 20,400 and 22,000 per
+iteration. AES-GCM and HMAC dominate and are the same Rust code in both
+builds. The port adds the copy of the token, the slot and the byte-wise
+layout code.
 
 Profile of the frames workload, with functions named: `fr_encode` 17.8%,
 `fr_parse_at` 13.9%, `w_vi` 9%, `parse_ack` 8.3%, `vi_put` 4.2% and
@@ -228,6 +267,13 @@ struct temporaries through the stack. Gaps 4 and 5 below cover this.
 8. **`state` cannot be a field name.** It is a keyword. `vesper check`
    says "expected a lower-case identifier", but `vesper fmt` reports only
    `Syntax { offset: N }`. The record field is `status`.
+9. **`vesper check` does not read `// @export vsys` directives.** Only
+   `vesper build --lib` does, so `vesper check` on the package reports
+   `unknown effect 'Ffi'` and `unknown name 'WarpKeys::...'` for code that
+   builds. Also, an import named like an export symbol
+   (`vesper_warp_token_open` against the exported `token_open`) is a codegen
+   error. It is a clear one, but `vesper check` misses it too. The imports
+   are named `vesper_warp_keys_*`.
 
 ## Platforms
 
@@ -241,7 +287,8 @@ first run.
 
 - `crates/vesper-warp/vesper/`: `Loom.toml`, `src/{lib,varint,pn,header,frame,ack,recovery,stream}.ves`
 - `crates/vesper-warp/src/reference/`: the frozen Rust implementations
-- `crates/vesper-warp/src/ported/`: the forwarding layer
+- `crates/vesper-warp/src/ported/`: the forwarding layer and the `WarpKeys`
+  shim
 - `crates/vesper-warp/port/`: `binding.rs` (generated), `check.sh`, `bench.sh`
 - `crates/vesper-warp/build.rs`, `examples/abba.rs`, `BUILD.bazel`, `Cargo.toml`
 - One line each: `scripts/test-port-harness.sh`, `tests/fixtures/self_host/driver.rs`

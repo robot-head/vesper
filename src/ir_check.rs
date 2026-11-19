@@ -478,6 +478,7 @@ impl Flow<'_> {
             };
             for b in args {
                 let Some(ValueState {
+                    ty,
                     loan: Some((loans, Pass::In)),
                     consumed: false,
                     ..
@@ -485,6 +486,13 @@ impl Flow<'_> {
                 else {
                     continue;
                 };
+                // A scalar is read into its parameter's word before the call
+                // runs (two-phase argument loans, §4.3), so it does not alias
+                // the activated `inout` place. Copy aggregates may be lent by
+                // address and stay refused.
+                if b.pass != Pass::Inout && crate::check::is_scalar_type(ty) {
+                    continue;
+                }
                 if let Some(q) = loans
                     .iter()
                     .find(|q| places.iter().any(|p| self.graph.overlaps(p, q)))
@@ -664,13 +672,21 @@ impl Flow<'_> {
                 self.consume(s, *value, &i.span);
                 self.bind(s, pattern, &t, *value);
             }
-            Op::Write { place, value, .. } => {
+            Op::Write { place, op, value } => {
                 self.consume(s, *value, &i.span);
                 let mut path = place.split('.');
                 let p = Place {
                     root: path.next().unwrap_or("").into(),
                     path: path.map(str::to_owned).collect(),
                 };
+                // A plain assignment re-initializes a place whose old value
+                // was moved out (the drop of an overwritten `.vsys` handle
+                // moves it into its drop import first, §16.3).
+                if op == "="
+                    && let Some(slot) = s.slots.get_mut(&p.root)
+                {
+                    slot.moved.retain(|q| !q.starts_with(&p.path));
+                }
                 self.access(s, &p, Pass::Inout, &i.span);
                 if let Some(slot) = s.slots.get(&p.root) {
                     let t = self.world.field(&slot.ty, &p.path).unwrap_or(Type::Infer);

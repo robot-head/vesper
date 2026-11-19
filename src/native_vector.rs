@@ -3,14 +3,24 @@
 //!
 //! A vector or mask is an aggregate: a pointer to its packed lane bytes
 //! (see [`crate::vector::layout_words`]). Operations load it as one, two or
-//! four 128-bit Cranelift vectors (`i8x16`, `i32x4`, `i64x2`, `f64x2`),
+//! four 128-bit Cranelift vectors (`i8x16`, `i32x4`, `i64x2`, `f32x4`,
+//! `f64x2`),
 //! compute chunk by chunk and store the result into a fresh stack slot.
 //! Cranelift 0.125 has no 256- or 512-bit vector types, so wider shapes are
 //! chunked 128-bit code under every profile. Mask lanes are all ones or all
 //! zeros in the lane width. Scalars follow the backend's convention: integers
-//! and bools are zero-extended `i64`, floats are `f64`.
+//! and bools are zero-extended `i64`, an `f32` is `f32` and an `f64` is `f64`.
+//!
+//! Slice loads and stores (`SeqOp::Vector`) move whole chunks between the
+//! vector and the sequence's packed elements. A `ChunkSeq[f32]` keeps each
+//! element in the low half of an eight-byte word (`seq::elem_bytes`), so
+//! `f32` lanes are gathered from and scattered to that stride with one byte
+//! shuffle per chunk; every other lane type's stride is its lane width.
 use super::Codegen;
-use crate::vector::{BinOp, CmpOp, Elem, Intrinsic, MaskOp, ReduceOp, Shape, ShiftOp, VectorOp};
+use crate::vector::{
+    BinOp, CmpOp, Conv, Elem, Intrinsic, MaskOp, ReduceOp, Shape, ShiftOp, SliceIo, UnaryOp,
+    VectorOp,
+};
 use cranelift_codegen::ir::{
     self, ConstantData, InstBuilder, MemFlags,
     condcodes::{FloatCC, IntCC},
@@ -23,12 +33,14 @@ fn chunk_type(elem: Elem) -> ir::Type {
         Elem::U8 => types::I8X16,
         Elem::U32 => types::I32X4,
         Elem::U64 | Elem::I64 => types::I64X2,
+        Elem::F32 => types::F32X4,
         Elem::F64 => types::F64X2,
     }
 }
 /// The integer chunk type masks of `elem` use.
 fn mask_type(elem: Elem) -> ir::Type {
     match elem {
+        Elem::F32 => types::I32X4,
         Elem::F64 => types::I64X2,
         e => chunk_type(e),
     }
@@ -38,6 +50,7 @@ fn lane_type(elem: Elem) -> ir::Type {
         Elem::U8 => types::I8,
         Elem::U32 => types::I32,
         Elem::U64 | Elem::I64 => types::I64,
+        Elem::F32 => types::F32,
         Elem::F64 => types::F64,
     }
 }
@@ -141,6 +154,38 @@ impl<M: Module> Codegen<'_, '_, M> {
                     .collect::<Vec<_>>();
                 self.store_chunks(shape, &out)
             }
+            I::Unary(op) => {
+                let a = self.load_chunks(arg(0)?, shape, false);
+                let out = a
+                    .into_iter()
+                    .map(|x| match op {
+                        UnaryOp::Sqrt => self.b.ins().sqrt(x),
+                        UnaryOp::Abs => self.b.ins().fabs(x),
+                        UnaryOp::Neg => self.b.ins().fneg(x),
+                    })
+                    .collect::<Vec<_>>();
+                self.store_chunks(shape, &out)
+            }
+            I::MulAdd => {
+                // Cranelift emits `vfmadd` with FMA and NEON `fmla`, and
+                // otherwise calls the correctly rounded `fmaf`/`fma` per lane,
+                // so every backend rounds once like the evaluator.
+                let a = self.load_chunks(arg(0)?, shape, false);
+                let b = self.load_chunks(arg(1)?, shape, false);
+                let c = self.load_chunks(arg(2)?, shape, false);
+                let out = (0..shape.chunks())
+                    .map(|i| self.b.ins().fma(a[i], b[i], c[i]))
+                    .collect::<Vec<_>>();
+                self.store_chunks(shape, &out)
+            }
+            I::Convert(conv) => {
+                let target = conv
+                    .result(shape)
+                    .ok_or("native vector conversion has no valid result shape")?;
+                let a = self.load_chunks(arg(0)?, shape, false);
+                let out = self.convert_chunks(conv, target, &a);
+                self.store_chunks(target, &out)
+            }
             I::Shift(op) => {
                 let a = self.load_chunks(arg(0)?, shape, false);
                 // Cranelift masks a vector shift amount to the lane width.
@@ -178,7 +223,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let out = (0..shape.chunks())
                     .map(|c| {
                         let mask = if elem.is_float() {
-                            self.b.ins().bitcast(types::F64X2, little(), m[c])
+                            self.b.ins().bitcast(chunk_type(elem), little(), m[c])
                         } else {
                             m[c]
                         };
@@ -295,7 +340,206 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             I::Active => self.active(arg(0)?, arg(1)?, shape),
             I::IsaSupported => return Err("native Isa::supported has no shape".into()),
+            I::Load | I::Store | I::StoreMasked => {
+                return Err(format!(
+                    "native {intrinsic:?} is a sequence operation (SeqOp::Vector)"
+                ));
+            }
         })
+    }
+    /// The chunks of a converted vector of shape `target`.
+    fn convert_chunks(&mut self, conv: Conv, target: Shape, a: &[ir::Value]) -> Vec<ir::Value> {
+        let ty = chunk_type(target.elem);
+        match conv {
+            Conv::ToBits | Conv::FromBits => a
+                .iter()
+                .map(|x| self.b.ins().bitcast(ty, little(), *x))
+                .collect(),
+            // Each f32x4 chunk widens to two f64x2 chunks.
+            Conv::Widen => a
+                .iter()
+                .flat_map(|x| [*x, *x].into_iter().zip([false, true]))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|(x, high)| {
+                    let x = if high {
+                        let bytes = self.b.ins().bitcast(types::I8X16, little(), x);
+                        let upper: Vec<u8> = (8..16).chain(8..16).collect();
+                        let upper = self.b.func.dfg.immediates.push(ConstantData::from(upper));
+                        let moved = self.b.ins().shuffle(bytes, bytes, upper);
+                        self.b.ins().bitcast(types::F32X4, little(), moved)
+                    } else {
+                        x
+                    };
+                    self.b.ins().fvpromote_low(x)
+                })
+                .collect(),
+            // Two f64x2 chunks narrow to one f32x4 chunk.
+            Conv::Narrow => a
+                .chunks(2)
+                .map(|pair| {
+                    let lo = self.b.ins().fvdemote(pair[0]);
+                    let hi = self.b.ins().fvdemote(pair[1]);
+                    let lo = self.b.ins().bitcast(types::I8X16, little(), lo);
+                    let hi = self.b.ins().bitcast(types::I8X16, little(), hi);
+                    let joined: Vec<u8> = (0..8).chain(16..24).collect();
+                    let joined = self.b.func.dfg.immediates.push(ConstantData::from(joined));
+                    let both = self.b.ins().shuffle(lo, hi, joined);
+                    self.b.ins().bitcast(types::F32X4, little(), both)
+                })
+                .collect(),
+        }
+    }
+    /// `Vec::load`, `Vec::store` and their masked forms on the elements
+    /// from `base` (the first element of the view) of a view of `len`
+    /// elements packed at `stride` bytes.
+    pub(super) fn vector_slice_io(
+        &mut self,
+        io: SliceIo,
+        base: ir::Value,
+        len: ir::Value,
+        at: ir::Value,
+        value: Option<ir::Value>,
+        stride: i64,
+    ) -> Result<ir::Value, String> {
+        let shape = io.shape;
+        let lanes = i64::from(shape.lanes);
+        let available = self.available(at, len);
+        let full = self
+            .b
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, available, lanes);
+        if !io.masked {
+            // One check for the whole interval `at..at + N`.
+            self.seq_guard(full)?;
+        }
+        let offset = self.b.ins().imul_imm(at, stride);
+        let start = self.b.ins().iadd(base, offset);
+        // A masked load's lanes past the end stay zero; an unmasked load
+        // writes every byte.
+        let result = match (io.store, io.masked) {
+            (true, _) => None,
+            (false, true) => Some(self.alloc(shape.bytes())),
+            (false, false) => Some(self.alloc_uninit(shape.bytes())),
+        };
+        // A masked access takes the whole-vector path when every lane is
+        // inside the view.
+        let (slow, join) = if io.masked {
+            let fast = self.b.create_block();
+            let slow = self.b.create_block();
+            let join = self.b.create_block();
+            self.branch(full, fast, &[], slow, &[]);
+            self.b.switch_to_block(fast);
+            (Some(slow), Some(join))
+        } else {
+            (None, None)
+        };
+        // The whole vector: chunk by chunk.
+        match (io.store, value) {
+            (true, Some(v)) => self.store_lanes_at(shape, v, start, stride),
+            _ => {
+                let r = result.ok_or("native vector load lacks its result")?;
+                self.load_lanes_at(shape, start, stride, r);
+            }
+        }
+        if let (Some(slow), Some(join)) = (slow, join) {
+            self.jump(join, &[]);
+            // The lanes inside the view, one at a time; a load's other
+            // lanes stay zero.
+            self.b.switch_to_block(slow);
+            let width = i64::from(shape.elem.bits() / 8);
+            let lane_ty = lane_type(shape.elem);
+            let head = self.b.create_block();
+            let body = self.b.create_block();
+            self.b.append_block_param(head, types::I64);
+            let zero = self.zero();
+            self.jump(head, &[zero.into()]);
+            self.b.switch_to_block(head);
+            let k = self.b.block_params(head)[0];
+            let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, available);
+            self.branch(more, body, &[], join, &[]);
+            self.b.switch_to_block(body);
+            let element = self.b.ins().imul_imm(k, stride);
+            let element = self.b.ins().iadd(start, element);
+            let lane = self.b.ins().imul_imm(k, width);
+            let vector = match (io.store, value) {
+                (true, Some(v)) => v,
+                _ => result.ok_or("native vector load lacks its result")?,
+            };
+            let lane = self.b.ins().iadd(vector, lane);
+            let (from, to) = if io.store {
+                (lane, element)
+            } else {
+                (element, lane)
+            };
+            let x = self.b.ins().load(lane_ty, MemFlags::new(), from, 0);
+            self.b.ins().store(MemFlags::new(), x, to, 0);
+            let next = self.b.ins().iadd_imm(k, 1);
+            self.jump(head, &[next.into()]);
+            self.b.switch_to_block(join);
+        }
+        Ok(match result {
+            Some(r) => r,
+            None => self.zero(),
+        })
+    }
+    /// Loads every lane of `shape` from elements at `start` into the
+    /// vector buffer `out`.
+    fn load_lanes_at(&mut self, shape: Shape, start: ir::Value, stride: i64, out: ir::Value) {
+        let width = i64::from(shape.elem.bits() / 8);
+        for c in 0..shape.chunks() {
+            let chunk = if stride == width {
+                self.b
+                    .ins()
+                    .load(types::I8X16, little(), start, (c * 16) as i32)
+            } else {
+                // f32 lanes in eight-byte elements: the low halves of two
+                // chunks of elements.
+                let at = (c * 32) as i32;
+                let lo = self.b.ins().load(types::I8X16, little(), start, at);
+                let hi = self.b.ins().load(types::I8X16, little(), start, at + 16);
+                let low_halves: Vec<u8> = (0..4u8)
+                    .flat_map(|j| (0..4u8).map(move |b| j * 8 + b))
+                    .collect();
+                let low_halves = self
+                    .b
+                    .func
+                    .dfg
+                    .immediates
+                    .push(ConstantData::from(low_halves));
+                self.b.ins().shuffle(lo, hi, low_halves)
+            };
+            self.b.ins().store(little(), chunk, out, (c * 16) as i32);
+        }
+    }
+    /// Stores every lane of the vector at `v` to elements at `start`.
+    fn store_lanes_at(&mut self, shape: Shape, v: ir::Value, start: ir::Value, stride: i64) {
+        let width = i64::from(shape.elem.bits() / 8);
+        for c in 0..shape.chunks() {
+            let chunk = self
+                .b
+                .ins()
+                .load(types::I8X16, little(), v, (c * 16) as i32);
+            if stride == width {
+                self.b.ins().store(little(), chunk, start, (c * 16) as i32);
+            } else {
+                // Spread the four f32 lanes over four eight-byte elements,
+                // zeroing their high halves.
+                let zero = self.zero_chunk(types::I8X16);
+                for half in 0..2u8 {
+                    let spread: Vec<u8> = (0..2u8)
+                        .flat_map(|j| {
+                            let lane = half * 2 + j;
+                            (0..4u8).map(move |b| lane * 4 + b).chain([16; 4])
+                        })
+                        .collect();
+                    let spread = self.b.func.dfg.immediates.push(ConstantData::from(spread));
+                    let words = self.b.ins().shuffle(chunk, zero, spread);
+                    let at = (c * 32) as i32 + i32::from(half) * 16;
+                    self.b.ins().store(little(), words, start, at);
+                }
+            }
+        }
     }
     fn zero_chunk(&mut self, ty: ir::Type) -> ir::Value {
         let zero = self
@@ -317,7 +561,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             .collect()
     }
     fn store_chunks(&mut self, shape: Shape, chunks: &[ir::Value]) -> ir::Value {
-        let ptr = self.alloc(shape.bytes());
+        // The chunks write every byte of the vector.
+        let ptr = self.alloc_uninit(shape.bytes());
         for (c, chunk) in chunks.iter().enumerate() {
             self.b.ins().store(little(), *chunk, ptr, (c * 16) as i32);
         }

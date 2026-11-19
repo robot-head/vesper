@@ -4,6 +4,7 @@
 pub(crate) mod ack;
 pub(crate) mod frame;
 pub(crate) mod header;
+pub(crate) mod lifecycle;
 pub(crate) mod packet_number;
 pub(crate) mod recovery;
 pub(crate) mod stream;

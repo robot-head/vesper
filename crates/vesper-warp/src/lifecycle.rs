@@ -17,13 +17,6 @@
 
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use aes_gcm::aead::{AeadInPlace, KeyInit};
-use aes_gcm::{Aes256Gcm, Nonce};
-use hkdf::hmac::{Hmac, Mac};
-use sha2::Sha256;
-use subtle::ConstantTimeEq;
-use zeroize::Zeroizing;
-
 use crate::frame::RESET_TOKEN_LEN;
 
 /// A peer's UDP address, supplied by the caller's driver.
@@ -163,12 +156,12 @@ impl Default for LifecycleConfig {
 /// Largest `active_connection_id_limit` we store CIDs for.
 pub const MAX_ACTIVE_CIDS: usize = 8;
 
-const TOKEN_RETRY: u8 = 1;
-const TOKEN_NEW: u8 = 2;
-const NONCE_LEN: usize = 12;
-const TAG_LEN: usize = 16;
+pub(crate) const TOKEN_RETRY: u8 = 1;
+pub(crate) const TOKEN_NEW: u8 = 2;
+pub(crate) const NONCE_LEN: usize = 12;
+pub(crate) const TAG_LEN: usize = 16;
 /// kind, issued_ns, address (family, 16 address bytes, port), odcid.
-const TOKEN_PLAIN_MAX: usize = 8 + 1 + 16 + 2 + 1 + 20;
+pub(crate) const TOKEN_PLAIN_MAX: usize = 8 + 1 + 16 + 2 + 1 + 20;
 /// Longest token this endpoint issues.
 pub const MAX_TOKEN_LEN: usize = 1 + NONCE_LEN + TOKEN_PLAIN_MAX + TAG_LEN;
 
@@ -198,185 +191,27 @@ pub enum TokenError {
     WrongAddress,
 }
 
-/// Seals and opens address-validation tokens (AES-256-GCM, random
-/// 96-bit nonces). Every endpoint that should accept another's tokens
-/// must share the key ([`TokenKey::from_bytes`]).
-pub struct TokenKey {
-    aead: Aes256Gcm,
-}
-
-impl std::fmt::Debug for TokenKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("TokenKey(..)")
-    }
-}
-
-impl TokenKey {
-    pub fn random() -> Self {
-        let mut k = Zeroizing::new([0u8; 32]);
-        random(&mut k[..]);
-        Self::from_bytes(&k)
-    }
-
-    pub fn from_bytes(key: &[u8; 32]) -> Self {
-        Self {
-            aead: Aes256Gcm::new(key.into()),
-        }
-    }
-
-    fn encode_addr(addr: Option<PeerAddr>, out: &mut [u8; 19]) {
-        out.fill(0);
-        if let Some(a) = addr {
-            match a.ip() {
-                IpAddr::V4(ip) => {
-                    out[0] = 4;
-                    out[1..5].copy_from_slice(&ip.octets());
-                }
-                IpAddr::V6(ip) => {
-                    out[0] = 6;
-                    out[1..17].copy_from_slice(&ip.octets());
-                }
+/// The 19 address bytes a token binds: family (4, 6 or 0 for none), the
+/// address and the port.
+pub(crate) fn encode_addr(addr: Option<PeerAddr>, out: &mut [u8; 19]) {
+    out.fill(0);
+    if let Some(a) = addr {
+        match a.ip() {
+            IpAddr::V4(ip) => {
+                out[0] = 4;
+                out[1..5].copy_from_slice(&ip.octets());
             }
-            out[17..19].copy_from_slice(&a.port().to_be_bytes());
+            IpAddr::V6(ip) => {
+                out[0] = 6;
+                out[1..17].copy_from_slice(&ip.octets());
+            }
         }
-    }
-
-    /// Writes a token into `out`; returns its length.
-    pub(crate) fn seal(
-        &self,
-        kind: TokenKind,
-        addr: Option<PeerAddr>,
-        now_ns: u64,
-        out: &mut [u8; MAX_TOKEN_LEN],
-    ) -> usize {
-        let (k, odcid): (u8, &[u8]) = match &kind {
-            TokenKind::Retry { odcid, len } => (TOKEN_RETRY, &odcid[..usize::from(*len)]),
-            TokenKind::NewToken => (TOKEN_NEW, &[]),
-        };
-        out[0] = k;
-        random(&mut out[1..1 + NONCE_LEN]);
-        let mut plain = [0u8; TOKEN_PLAIN_MAX];
-        plain[..8].copy_from_slice(&now_ns.to_be_bytes());
-        let mut a = [0u8; 19];
-        Self::encode_addr(addr, &mut a);
-        plain[8..27].copy_from_slice(&a);
-        plain[27] = odcid.len() as u8;
-        plain[28..28 + odcid.len()].copy_from_slice(odcid);
-        let plain_len = 28 + odcid.len();
-        let start = 1 + NONCE_LEN;
-        out[start..start + plain_len].copy_from_slice(&plain[..plain_len]);
-        let (head, body) = out.split_at_mut(start);
-        let nonce = Nonce::from_slice(&head[1..]);
-        // Only fails for multi-GiB payloads.
-        let tag = self
-            .aead
-            .encrypt_in_place_detached(nonce, &head[..1], &mut body[..plain_len])
-            .expect("short token");
-        body[plain_len..plain_len + TAG_LEN].copy_from_slice(&tag);
-        start + plain_len + TAG_LEN
-    }
-
-    /// Opens and checks a token received from `addr` at `now_ns`.
-    pub(crate) fn open(
-        &self,
-        token: &[u8],
-        addr: Option<PeerAddr>,
-        now_ns: u64,
-        lifetimes: (u64, u64),
-    ) -> Result<TokenKind, TokenError> {
-        let start = 1 + NONCE_LEN;
-        if token.len() < start + 28 + TAG_LEN || token.len() > MAX_TOKEN_LEN {
-            return Err(TokenError::Invalid);
-        }
-        let kind = token[0];
-        if kind != TOKEN_RETRY && kind != TOKEN_NEW {
-            return Err(TokenError::Invalid);
-        }
-        let plain_len = token.len() - start - TAG_LEN;
-        let mut plain = [0u8; TOKEN_PLAIN_MAX];
-        plain[..plain_len].copy_from_slice(&token[start..start + plain_len]);
-        let tag = aes_gcm::Tag::from_slice(&token[start + plain_len..]);
-        self.aead
-            .decrypt_in_place_detached(
-                Nonce::from_slice(&token[1..start]),
-                &token[..1],
-                &mut plain[..plain_len],
-                tag,
-            )
-            .map_err(|_| TokenError::Invalid)?;
-        let issued = u64::from_be_bytes(plain[..8].try_into().expect("8 bytes"));
-        let lifetime = if kind == TOKEN_RETRY {
-            lifetimes.0
-        } else {
-            lifetimes.1
-        };
-        if now_ns < issued || now_ns - issued > lifetime {
-            return Err(TokenError::Expired);
-        }
-        let mut a = [0u8; 19];
-        Self::encode_addr(addr, &mut a);
-        if !bool::from(plain[8..27].ct_eq(&a)) {
-            return Err(TokenError::WrongAddress);
-        }
-        let len = plain[27];
-        if usize::from(len) + 28 != plain_len || len > 20 {
-            return Err(TokenError::Invalid);
-        }
-        if kind == TOKEN_NEW {
-            return if len == 0 {
-                Ok(TokenKind::NewToken)
-            } else {
-                Err(TokenError::Invalid)
-            };
-        }
-        let mut odcid = [0u8; 20];
-        odcid[..usize::from(len)].copy_from_slice(&plain[28..28 + usize::from(len)]);
-        Ok(TokenKind::Retry { odcid, len })
+        out[17..19].copy_from_slice(&a.port().to_be_bytes());
     }
 }
 
-/// Derives stateless reset tokens: HMAC-SHA-256(key, connection ID),
-/// truncated to 16 bytes (RFC 9000 §10.3.2). Endpoints behind one
-/// address must share the key so any of them can reset for the others.
-pub struct ResetKey {
-    key: Zeroizing<[u8; 32]>,
-}
-
-impl std::fmt::Debug for ResetKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("ResetKey(..)")
-    }
-}
-
-impl ResetKey {
-    pub fn random() -> Self {
-        let mut k = Zeroizing::new([0u8; 32]);
-        random(&mut k[..]);
-        Self { key: k }
-    }
-
-    pub fn from_bytes(key: &[u8; 32]) -> Self {
-        Self {
-            key: Zeroizing::new(*key),
-        }
-    }
-
-    /// The reset token for one of our connection IDs.
-    pub fn token(&self, cid: &[u8]) -> [u8; RESET_TOKEN_LEN] {
-        let mut mac =
-            <Hmac<Sha256> as Mac>::new_from_slice(&self.key[..]).expect("HMAC takes any key");
-        mac.update(cid);
-        let full = mac.finalize().into_bytes();
-        let mut t = [0u8; RESET_TOKEN_LEN];
-        t.copy_from_slice(&full[..RESET_TOKEN_LEN]);
-        t
-    }
-}
-
-/// Constant-time token comparison.
-pub(crate) fn token_eq(a: &[u8; RESET_TOKEN_LEN], b: &[u8]) -> bool {
-    b.len() == RESET_TOKEN_LEN && bool::from(a[..].ct_eq(b))
-}
+pub(crate) use crate::imp::lifecycle::token_eq;
+pub use crate::imp::lifecycle::{ResetKey, TokenKey};
 
 /// Smallest stateless reset we send, and smallest datagram we treat as a
 /// possible reset (RFC 9000 §10.3: 5 unpredictable bytes and the token).
@@ -562,4 +397,114 @@ impl Path {
 /// §9.4 then lets the congestion controller and RTT estimate be kept.
 pub(crate) fn port_only_change(a: Option<PeerAddr>, b: Option<PeerAddr>) -> bool {
     matches!((a, b), (Some(a), Some(b)) if a.ip() == b.ip())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(port: u16) -> Option<PeerAddr> {
+        Some(SocketAddr::from(([192, 0, 2, 1], port)))
+    }
+
+    #[test]
+    fn tokens_round_trip_and_refuse_what_they_must() {
+        let key = TokenKey::from_bytes(&[7; 32]);
+        let mut odcid = [0u8; 20];
+        odcid[..8].copy_from_slice(b"original");
+        let kind = TokenKind::Retry { odcid, len: 8 };
+        let mut t = [0u8; MAX_TOKEN_LEN];
+        let n = key.seal(kind, addr(4433), 1_000, &mut t);
+        assert_eq!(n, 1 + NONCE_LEN + 28 + 8 + TAG_LEN);
+        assert!(is_retry_token(&t[..n]));
+        let life = (10_000, 20_000);
+        assert_eq!(key.open(&t[..n], addr(4433), 5_000, life), Ok(kind));
+        assert_eq!(
+            key.open(&t[..n], addr(4433), 11_001, life),
+            Err(TokenError::Expired)
+        );
+        assert_eq!(
+            key.open(&t[..n], addr(4434), 5_000, life),
+            Err(TokenError::WrongAddress)
+        );
+        let other = TokenKey::from_bytes(&[8; 32]);
+        assert_eq!(
+            other.open(&t[..n], addr(4433), 5_000, life),
+            Err(TokenError::Invalid)
+        );
+        let mut forged = t;
+        forged[n - 1] ^= 1;
+        assert_eq!(
+            key.open(&forged[..n], addr(4433), 5_000, life),
+            Err(TokenError::Invalid)
+        );
+        assert_eq!(
+            key.open(&t[..n - 1], addr(4433), 5_000, life),
+            Err(TokenError::Invalid)
+        );
+
+        let n = key.seal(TokenKind::NewToken, None, 1_000, &mut t);
+        assert_eq!(n, 1 + NONCE_LEN + 28 + TAG_LEN);
+        assert!(!is_retry_token(&t[..n]));
+        assert_eq!(
+            key.open(&t[..n], None, 20_999, life),
+            Ok(TokenKind::NewToken)
+        );
+        assert_eq!(
+            key.open(&t[..n], None, 21_001, life),
+            Err(TokenError::Expired)
+        );
+        assert_eq!(key.open(&[], None, 0, life), Err(TokenError::Invalid));
+    }
+
+    #[test]
+    fn reset_tokens_are_keyed_and_compared_whole() {
+        let a = ResetKey::from_bytes(&[1; 32]);
+        let b = ResetKey::from_bytes(&[2; 32]);
+        let t = a.token(b"cid-one");
+        assert_eq!(t, a.token(b"cid-one"));
+        assert_ne!(t, a.token(b"cid-two"));
+        assert_ne!(t, b.token(b"cid-one"));
+        assert!(token_eq(&t, &t));
+        assert!(!token_eq(&t, &t[..15]));
+        let mut u = t;
+        u[15] ^= 0x80;
+        assert!(!token_eq(&t, &u));
+    }
+
+    /// `cargo test --release --lib -- --ignored --nocapture measure_tokens`
+    /// (with and without `vesper-port`): one Retry token sealed and opened,
+    /// and one reset token derived and compared, per iteration.
+    #[test]
+    #[ignore]
+    fn measure_tokens() {
+        let key = TokenKey::from_bytes(&[7; 32]);
+        let reset = ResetKey::from_bytes(&[1; 32]);
+        let kind = TokenKind::Retry {
+            odcid: [9; 20],
+            len: 20,
+        };
+        let mut t = [0u8; MAX_TOKEN_LEN];
+        let iterations = 100_000u32;
+        let mut best = [f64::MAX; 2];
+        for _ in 0..7 {
+            let start = std::time::Instant::now();
+            for i in 0..iterations {
+                let n = key.seal(kind, addr(4433), u64::from(i), &mut t);
+                let opened = key.open(&t[..n], addr(4433), u64::from(i), (10, 10));
+                assert_eq!(opened, Ok(kind));
+            }
+            best[0] = best[0].min(start.elapsed().as_nanos() as f64 / f64::from(iterations));
+            let start = std::time::Instant::now();
+            for i in 0..iterations {
+                let r = reset.token(&i.to_be_bytes());
+                assert!(token_eq(&r, &r));
+            }
+            best[1] = best[1].min(start.elapsed().as_nanos() as f64 / f64::from(iterations));
+        }
+        println!(
+            "retry token seal+open {:.0} ns, reset token+compare {:.0} ns",
+            best[0], best[1]
+        );
+    }
 }

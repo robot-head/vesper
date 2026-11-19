@@ -87,6 +87,7 @@ use vesper_ffi::sys::{
     ValueType,
 };
 
+pub mod drops;
 #[path = "ffi_lowering/types.rs"]
 mod types;
 use types::ParamKind;
@@ -765,6 +766,16 @@ pub fn check_source(source: &str, imports: &Imports) -> Result<ForeignChecked, F
 pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked, FfiError> {
     let generated = types::Generated::new(imports)?;
     generated.check_collisions(module)?;
+    // The release functions of affine handles with drop imports, called
+    // like source code so both passes record their foreign calls.
+    let mut module = module.clone();
+    let mut base = drops::span_base(&module);
+    for (name, import) in &imports.libraries {
+        let (items, next) = drops::generated(name, &import.descriptor, base);
+        module.items.extend(items);
+        base = next;
+    }
+    let module = &module;
     // Pass 1: slice parameters open, to read each slice argument's tuple.
     let mut first = module.clone();
     let mut rewriter = Rewriter::new(imports, &generated, None);
@@ -810,6 +821,7 @@ pub fn check_module(module: &Module, imports: &Imports) -> Result<ForeignChecked
             .collect();
         return Err(e);
     }
+    drops::check_rows(&checked.world)?;
     let mut plan = Plan::default();
     for (name, import) in &imports.libraries {
         plan.libraries.insert(

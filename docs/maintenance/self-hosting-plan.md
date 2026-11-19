@@ -1,0 +1,201 @@
+# Self-hosting plan
+
+> Written 2026-11-19 against `main` at `9e801e7` (claim #1122). The
+> [manuscript](../manuscript/README.md) is the sole specification; §10
+> ("Verified Bootstrap") defines Stage 0 to Stage 2. This plan orders the work
+> to get there. Confirm live ownership on the issue board before acting.
+
+## Where we are
+
+Vesper is about 4% of the way to a self-hosted compiler, measured in lines.
+
+- **The compiler is Rust.** The root `vesper` package is about 157k lines of
+  non-test Rust in `src/`. The 12 toolchain crates it links add about 42k more.
+  So about 200k lines of Rust make up the compiler and its own tools.
+- **The Vesper compiler package is a Stage 1 front end.**
+  `packages/vesper-compiler` is 8.4k lines: a lexer, a parser and part of a
+  checker. It was written before sequences and strings existed, so it reads
+  its input through `source_byte(i)` and folds the CST into a digest. The
+  Stage 1 lock (`bootstrap/stage1.lock`, #891) freezes it, and the verified
+  backend compiles it.
+- **The libraries are mostly ported.** 28 library crates have Vesper ports
+  on `main`. Aura, Simpulse, Pact, the Loom solver and Chorus's front end are
+  Vesper-only. The rest keep Rust as the default until they reach parity, under
+  the owner's standing rule.
+- **The compiler links 18 frozen Rust seed copies** of ported crates (about
+  113k lines). It links them because a Rust compiler cannot link a Vesper
+  object that it would need itself to build (the seed-copy rule in
+  [porting-a-crate.md](porting-a-crate.md)). Eight of them are used only by
+  tool subcommands, so they can leave the compiler binary before Stage 2
+  (lane SH0-2).
+
+"Fully self-hosted" in this plan means three things:
+
+1. The compiler that builds `main` is a Vesper program. It was built by an
+   earlier Vesper compiler, and it rebuilds itself to a bit-identical fixed
+   point (Stage 2 in §10.2).
+2. The only Rust left in the compiler's closure is behind an `extern`
+   boundary, in the class this repository already accepts: vetted crypto,
+   OS drivers, wasmtime hosts and the DDC auditor (`vesper-codegen-verified`,
+   which stays Rust on purpose as the diverse path).
+3. Cranelift is in that class too. **Owner decision, 2026-11-19:** Stage 2
+   drives Cranelift through a C-ABI shim (lane SH0-4). A Vesper-native
+   backend is a later wave (SH7) and replaces Cranelift only once it matches
+   Cranelift.
+
+The standing rule applies throughout: no Rust code is deleted, and no
+default build changes, until the Vesper build matches it in both function
+and performance.
+
+## The root compiler, by phase
+
+Non-test lines in `src/` (code above the first `#[cfg(test)]`, without
+`tests.rs` files), grouped by the phase the self-hosted compiler needs.
+
+| Phase | Lines | Modules | External Rust it uses | Wave |
+|---|--:|---|---|---|
+| Native lowering (Cranelift) | 38,400 | `native*`, `seq/`, `vector`, `tiled`, `ffi_lowering`, `freestanding`, `native_export` | cranelift-*, target-lexicon, object | SH4 |
+| Checker and elaboration | 28,100 | `check`, `capability_effects`, `trace_effects`, `regions`, `integer_widths`, `strings`, `dyn_trait`, `atomics`, `tensor_types`, `loops`, `float_math`, `fip`, `stack_bound`, `layout`, `io_session` | petgraph | SH2 |
+| Editor and test tooling | 17,100 | `lsp`, `tooling`, `doctest`, `test_runner` | salsa | SH5 |
+| Package and front-end glue | 12,200 | `packages`, `package_graph`, `interface`, `database`, `pact_frontend`, `forge_frontend` | salsa, serde_json | SH1/SH2 |
+| CLI commands | 12,200 | `*_commands`, `main`, `lib` | serde_json | SH0-2, SH5 |
+| Test oracles | 11,700 | `src/bin/*42` | logos | stays Rust (diverse oracles) |
+| IR and optimizer | 10,200 | `ir`, `ir_check`, `ir_opt`, `ir_inline`, `optimize`, `bounds_hoist` | egg, egglog | SH3 |
+| Other backends | 9,500 | `wasm_backend`, `ebpf_backend` | wasm-encoder, wit-component | SH4 |
+| Verified backend | 9,200 | `verified_codegen` | none | SH6 (see below) |
+| Lean extraction and proofs | 8,700 | `lean*`, `verify_commands`, `proof_commands` | none | SH5 |
+| Runtime traces | 1,300 | `runtime` | none | SH4 |
+
+Generated runtime: the AOT sequence runtime (`src/seq/aot_runtime.rs`) is
+emitted as Cranelift IR into each object, so compiled programs already link
+only the C library. That part needs no Rust runtime port.
+
+## Toolchain crates the compiler links
+
+Non-test lines in `src/`. "Dependents" are workspace crates with a normal
+dependency on it.
+
+| Crate | Lines | External deps | Dependents | Blocking gaps | Wave |
+|---|--:|---|---|---|---|
+| `vesper-syntax` | 6,800 | logos, rowan, blake3, serde_json | vesper, doc, fmt, forge, highlight | lossless CST on `ChunkSeq`; parse speed vs logos | SH0-7, SH1 |
+| `vesper-core` | 5,800 | serde | vesper, diagnostics, doc, lint, pact-binding, syntax | recursive AST enums with `Box`, interning (SH0-5) | SH1 |
+| `vesper-forge` | 5,600 | serde, serde_json | vesper, forge-runner | macro hygiene sets; wasm macro host stays extern | SH1 |
+| `vesper-doc` | 7,400 | serde, serde_json | vesper | JSON out via the serde port; fs (SH0-3) | SH5 |
+| `vesper-highlight` | 4,500 | rowan, tiny-skia, rustybuzz, png, ttf-parser | vesper | lexical part ports; rasterizing stays extern | SH1 (lexical) |
+| `vesper-pact-binding` | 3,400 | serde, sha2 | vesper, pact-bridge | DTOs disappear once the checker calls the Pact port directly | SH2 |
+| `vesper-fmt` | 2,300 | blake3 | vesper | needs the new CST (SH0-7) | SH1 |
+| `vesper-lsp` | 1,700 | serde, serde_json | vesper | JSON-RPC framing; stdio loop | SH5 |
+| `vesper-lean-syntax` | 1,500 | none | vesper, fmt | none known | SH0-6 pilot |
+| `vesper-lint` | 1,300 | serde, toml | vesper | TOML config via the loom-calculus port | SH1 |
+| `vesper-span` | 600 | none | vesper, diagnostics, lsp | none known | SH0-6 pilot |
+| `vesper-diagnostics` | 600 | ariadne, serde_json | vesper | ariadne-compatible rendering | SH0-6 pilot |
+| `vesper-pact-bridge` | 200 | serde_json | (depends on vesper) | goes away with the Rust checker | SH2 |
+| `vesper-sim-session` | 9,500 | serde, sha2 | (depends on vesper) | drives the compiler; ports after SH5 | SH5 |
+
+## Seed copies the compiler links
+
+Each is the Rust implementation of a crate whose Vesper port already exists.
+Lines are the seed's `src/`.
+
+| Seed | Lines | Used by (in `src/`) | Kind | Leaves the compiler when |
+|---|--:|---|---|---|
+| `vesper-aegis-seed` | 10,000 | `tee_commands` | tool only | SH0-2 (tool split) |
+| `vesper-bench-seed` | 4,200 | `bench_commands`, via `vesper-bench-pmu` | tool only | SH0-2 |
+| `vesper-crucible-seed` | 4,700 | `crucible_commands`, `native_coverage` | mostly tool | SH0-2 (coverage hook stays until SH4) |
+| `vesper-grammar-seed` | 6,400 | `grammar_commands` | tool only | SH0-2 |
+| `vesper-serde-seed` | 8,600 | `grammar_commands`, `json_commands`, `vesper-lsp` | tool + LSP | SH0-2, then SH5 |
+| `vesper-loom-audit-seed` | 1,700 | `audit_commands`, `publish_commands` | tool only | SH0-2 |
+| `vesper-loom-solver-seed` | 1,200 | `package_commands` | package tool | SH0-2 |
+| `vesper-semver-seed` | 2,100 | `publish_commands`, `package_commands`, `tooling/lint` | package tool + lint | SH0-2, lint part in SH1 |
+| `vesper-loom-calculus-seed` | 1,700 | `packages`, `package_graph`, `interface`, LSP, `forge_frontend` | compiler semantics (manifests) | Stage 2 (SH6) |
+| `vesper-pact-seed` | 2,700 | `pact_frontend` | compiler semantics (trait resolution) | SH2: the Vesper checker calls `@vesper/pact` directly |
+| `vesper-alloc-seed` | 9,500 | `regions` (evaluator, native runtime) | compiler semantics | SH2/SH4 |
+| `vesper-tensor-seed` | 8,900 | `tensor_types` (evaluator, wire) | compiler semantics | SH2 |
+| `vesper-beacon-seed` | 1,800 | `trace_effects`, `trace_commands` | compiler semantics | SH2 |
+| `vesper-ebpf-seed` | 14,300 | `ebpf_backend`, `ebpf_commands`, `stack_bound` | backend | SH4 |
+| `vesper-silicon-seed` | 13,500 | `native_verifiers`, `freestanding`, `stack_bound` | backend verifiers | SH4 |
+| `vesper-kinetic-seed` | 16,400 | `native_verifiers` | backend verifiers | SH4 |
+| `vesper-resonance-seed` | 5,300 | `native_verifiers` | backend verifiers | SH4 |
+| `vesper-simpulse-seed` | 500 | via chrono, doc, crucible | indirect | SH5 |
+
+Once the compiler is a Vesper program (SH6), it links each `@vesper/<crate>`
+package directly, because the earlier-stage compiler builds both. The seed
+copies then have no user left. Each one is deleted only when its port is at
+parity, under the standing rule.
+
+## Stays in Rust behind `extern`
+
+In the compiler's closure today, and not ported by this plan: `vesper-ffi`,
+`vesper-pulse` (drivers), `vesper-fiber-abi`, `vesper-chrono`, `vesper-simd`,
+`vesper-vault`, `vesper-loom-cas`, `vesper-loom-trust`, `vesper-loom-admission`,
+`vesper-loom-sandbox`, `vesper-migrate` (lang-c/syn lifter), `vesper-bench-pmu`,
+`vesper-codegen-verified`, and Cranelift itself. The survey
+([vesper-port-survey.md](vesper-port-survey.md), "Stays in Rust behind
+`extern`") gives the reasons. The compiler reaches each through `.vsys`
+imports with linear handles (#1077). A thin C-ABI shim is needed where the
+crate has only a Rust API (Cranelift in SH0-4, BLAKE3 in SH0-5).
+
+## Gaps that block the compiler
+
+Known from the library ports and the compiler's own source. Lane SH0-8
+measures them on compiler code before SH1 and SH2 are claimed.
+
+| # | Gap | Blocks | Status |
+|---|---|---|---|
+| S1 | **Module swap-in build.** A second compiler build where a module is a Vesper object, built by the default `vesper` binary, with no Cargo cycle | every later wave | SH0-1 |
+| S2 | **std I/O.** Files, directories, processes, args, env | the driver, packages, linker calls, LSP | SH0-3 |
+| S3 | **Cranelift from Vesper.** A C-ABI shim over the builder, module and object APIs | SH4 (38k lines) | SH0-4 |
+| S4 | **Compiler data.** Graphs (SCC, dominators, toposort), interning, typed index arenas, BLAKE3 | checker, PCG, IR, packages | SH0-5 |
+| S5 | **Real CST.** A lossless front end over `Str` into sequences, matching `vesper-syntax` | SH1, fmt, LSP | SH0-7 |
+| S6 | **Compile speed.** Library ports run 0.3x to 5x of Rust. A compiler that is 3x slower fails the parity rule. Allocation per AST node, map lookups and string building are the likely hot spots | every wave's parity bar | measured per lane; scoreboard in SH0-8 |
+| S7 | **E-graphs.** `optimize` uses egg and egglog | SH3 | port a small e-graph in Vesper (preferred) or extern; decided in SH3 |
+| S8 | **Incremental queries.** `database/` and the LSP use salsa | SH5 | memo tables in Vesper; the batch compiler does not need them |
+| S9 | **Wasm encoding.** `wasm_backend` uses wasm-encoder and wit-component | SH4 | the encoder ports; WIT component wrapping may stay extern |
+| S10 | **Verified backend breadth.** §10.1 builds `@vesper-lang/compiler` with the verified backend, which still refuses closures, strings, sequences, heap memory, resuming handlers and macOS/Windows | the DDC part of Stage 2 | separate track (SH6b); does not block a Cranelift-built Stage 2 |
+| S11 | **Ergonomics found by ports.** Two-phase arguments (#1094), qualified paths (#1093), `continue` (#1092, merged), fixed arrays (#1091) | all compiler code | P3b gaps wave, in flight |
+
+## Waves
+
+| Wave | What | Size (Rust lines replaced) | Starts |
+|---|---|--:|---|
+| **SH0** | Groundwork: hybrid build, tool split, std I/O, Cranelift shim, std data, toolchain pilots, front end v2, census | ~3k (pilots) | now ([plan](../agent-prompts/self-host-sh0/README.md), #1123-#1130) |
+| **SH1** | Front end: `vesper-syntax`, `vesper-core`, `vesper-span`, `vesper-diagnostics`, `vesper-fmt`, `vesper-lint`, lexical `vesper-highlight`, `vesper-forge` + `forge_frontend` (sugar and macro expansion; the wasm macro host stays extern) | ~36k | after SH0-1, SH0-7 and SH0-8 |
+| **SH2** | Checker: name resolution and packages, core typing and modes, effects and handlers, regions, sequences and strings, `dyn`, `fip`, layout; trait resolution through the Pact port | ~40k | after SH1's AST lane |
+| **SH3** | Place IR lowering, IR check, inliner, optimizer, bounds hoisting, e-graph rules | ~10k | after SH2's core typing lane |
+| **SH4** | Backends: native lowering through the shim (split by file family into about six lanes), export ABI, FFI lowering, freestanding, wasm, eBPF, backend verifiers | ~49k | after SH3 and SH0-4 |
+| **SH5** | Driver and tools: CLI, test runner, doctests, docs, LSP, Lean extraction, sim-session | ~50k | the driver lane after SH4; the rest in parallel |
+| **SH6** | Stage 2: the Vesper compiler built by the Rust compiler (Stage 1) rebuilds itself; stage 2 and stage 3 are bit-identical; `bootstrap/stage2.lock` and a CI gate; compile-time parity scoreboard against the Rust compiler; seed copies lose their users. SH6b: widen the verified backend to the compiler for the DDC check of §10.2 | none new | after SH5's driver lane |
+| **SH7** | Vesper-native backend (register allocation, instruction selection and encoding for x86-64, AArch64, RV64), growing out of the verified emitter's design. Replaces Cranelift only at parity | new code | after SH6 (owner decision 2026-11-19) |
+
+**Order inside the compiler.** Each wave swaps modules into the hybrid build
+(SH0-1) one at a time, front to back. A swapped module runs differentially
+against the Rust module over the whole test suite and the bootstrap corpus.
+The Rust module stays the default until the Vesper one matches it in
+function and compile speed. This repeats the library port pattern
+(non-default `vesper-port` builds) for the compiler.
+
+**What "done" looks like for each wave.** Every module of the wave is
+swapped into the hybrid build. The hybrid compiler passes the full test
+suite on all four required platforms. Its compile-time scoreboard row is
+recorded. Deleting the Rust module is a separate owner call per module, made
+only at parity.
+
+## Estimates
+
+These are rough. They come from the port waves so far, where one lane ported
+about 2k to 6k lines of Rust in a day, including the gap reports.
+
+- SH0: 8 lanes, about one day with lanes in parallel.
+- SH1 to SH5: about 180k lines, or 40 to 60 lanes. At the P1 to P3 pace of
+  about 8 to 12 parallel lanes a wave, that is five to seven waves of ports,
+  plus the compiler-gap waves that each port wave has needed so far (one per
+  port wave).
+- SH6 starts when SH5's driver lane lands. Parity of compile speed is the
+  long pole: no port at parity got there without at least one gap wave.
+
+## Not in this plan
+
+- Deleting any Rust module or seed copy. Each is an owner call at parity.
+- Porting the stays-Rust crates.
+- The test oracles in `src/bin/*42`: they are diverse oracles, like
+  `vesper-codegen-verified`, and keep their value by staying Rust.

@@ -355,6 +355,9 @@ impl Linearity {
 pub struct ExternTypeDescriptor {
     name: String,
     linearity: Linearity,
+    /// `affine extern type H drop f;`: the import `f(sink h: H) ->
+    /// ForeignVal[Unit]` runs whenever a handle is dropped.
+    drop: Option<String>,
 }
 impl ExternTypeDescriptor {
     pub fn name(&self) -> &str {
@@ -362,6 +365,10 @@ impl ExternTypeDescriptor {
     }
     pub fn linearity(&self) -> Linearity {
         self.linearity
+    }
+    /// The drop import of an affine type, if it declares one.
+    pub fn drop_import(&self) -> Option<&str> {
+        self.drop.as_deref()
     }
 }
 /// How a handle parameter is passed. The C callee always receives the
@@ -917,6 +924,14 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
         for t in &library.extern_types {
             e.text(t.name())?;
             e.text(t.linearity().keyword())?;
+        }
+        // Appended only when declared, so libraries without drop imports
+        // keep their canonical bytes.
+        if library.extern_types.iter().any(|t| t.drop.is_some()) {
+            e.text("drop-imports")?;
+            for t in &library.extern_types {
+                e.text(t.drop.as_deref().unwrap_or(""))?;
+            }
         }
     }
     Ok(e.bytes)

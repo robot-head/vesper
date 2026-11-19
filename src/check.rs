@@ -550,6 +550,13 @@ pub fn check(module: &Module) -> Checked {
     checked
 }
 
+/// Whether `t` is a builtin scalar (an integer, float, `bool` or `Unit`),
+/// which every backend passes as one word by value. Two-phase argument
+/// loans (§4.3) let such a value be read from a reserved `inout` place.
+pub(crate) fn is_scalar_type(t: &Type) -> bool {
+    matches!(crate::numeric::default_type(t), Type::Named(n, a) if a.is_empty() && crate::numeric::is_scalar_name(&n))
+}
+
 /// Static resolution of trait method calls during the frontend's first
 /// checking pass. Implemented by `pact_frontend`.
 pub(crate) trait TraitCalls {
@@ -608,7 +615,7 @@ pub(crate) fn check_core(
             caps: vec![],
             cap_aliases: BTreeMap::new(),
             loans: vec![],
-            reserved_receivers: BTreeSet::new(),
+            reserved_loans: BTreeSet::new(),
             handler_frames: vec![],
             slice_args: BTreeMap::new(),
             effect_inference: vec![],
@@ -728,10 +735,11 @@ struct Checker<'a> {
     caps: Vec<Effect>,
     cap_aliases: BTreeMap<String, String>,
     loans: Vec<(Place, Pass, Span)>,
-    /// Origin spans of the `inout` receiver loans in `loans`: two-phase
-    /// borrows (§4) reserve them while the call's other arguments are
-    /// evaluated, so those arguments may read the receiver's place.
-    reserved_receivers: BTreeSet<(usize, usize)>,
+    /// Origin spans of the `inout` argument loans in `loans` (receivers and
+    /// plain arguments): two-phase borrows (§4.3) reserve them while the
+    /// call's other arguments are evaluated, so those arguments may read the
+    /// loaned place.
+    reserved_loans: BTreeSet<(usize, usize)>,
     /// Lexical handlers being checked: the capability index each installs,
     /// the declaration span of every binding declared outside it, and the
     /// outer linear bindings that were live at an abortable checkpoint this
@@ -783,6 +791,73 @@ impl Checker<'_> {
     /// directly, or through type arguments, tuple items or ADT fields.
     fn extern_handle(&self, t: &Type) -> bool {
         self.holds_extern_handle(t, &mut BTreeSet::new())
+    }
+    /// Whether a value of `t` holds an affine `.vsys` handle whose type
+    /// declares a drop import (`crate::ffi_lowering::drops`).
+    fn droppable_handle(&self, t: &Type) -> bool {
+        fn visit(c: &Checker, t: &Type, seen: &mut BTreeSet<String>) -> bool {
+            match t {
+                Type::Named(n, args) => {
+                    if args.iter().any(|a| visit(c, a, seen)) {
+                        return true;
+                    }
+                    if !seen.insert(n.clone()) {
+                        return false;
+                    }
+                    if c.world
+                        .functions
+                        .contains_key(&format!("{}{n}", crate::ffi_lowering::drops::DROP_PREFIX))
+                    {
+                        return true;
+                    }
+                    c.world.adts.get(n).is_some_and(|a| {
+                        a.variants
+                            .iter()
+                            .any(|v| v.fields.iter().any(|f| visit(c, &f.ty, seen)))
+                    })
+                }
+                Type::Tuple(items) => items.iter().any(|i| visit(c, i, seen)),
+                _ => false,
+            }
+        }
+        visit(self, t, &mut BTreeSet::new())
+    }
+    /// [`Self::droppable_handle`] for the parts of a binding of `t` at
+    /// `path` that `moved` has not moved out.
+    fn droppable_remaining(&self, t: &Type, path: &mut Vec<String>, moved: &[Vec<String>]) -> bool {
+        if moved.iter().any(|m| path.starts_with(m)) {
+            return false;
+        }
+        if !moved.iter().any(|m| m.starts_with(path)) {
+            return self.droppable_handle(t);
+        }
+        match t {
+            Type::Tuple(items) => items.iter().enumerate().any(|(i, item)| {
+                path.push(i.to_string());
+                let found = self.droppable_remaining(item, path, moved);
+                path.pop();
+                found
+            }),
+            Type::Named(n, args) => match self.world.adts.get(n) {
+                Some(a) if !a.is_enum && a.variants.len() == 1 => {
+                    let vars: BTreeMap<String, Type> = a
+                        .generics
+                        .iter()
+                        .zip(args)
+                        .map(|(g, t)| (g.name.clone(), t.clone()))
+                        .collect();
+                    a.variants[0].fields.iter().any(|f| {
+                        path.push(f.name.clone());
+                        let found =
+                            self.droppable_remaining(&substitute(&f.ty, &vars), path, moved);
+                        path.pop();
+                        found
+                    })
+                }
+                _ => self.droppable_handle(t),
+            },
+            _ => false,
+        }
     }
     fn holds_extern_handle(&self, t: &Type, seen: &mut BTreeSet<String>) -> bool {
         match t {
@@ -1081,7 +1156,7 @@ impl Checker<'_> {
             })
             .collect();
         self.loans.clear();
-        self.reserved_receivers.clear();
+        self.reserved_loans.clear();
         self.valid_type(&f.result, &f.generics, f.span.clone());
         let mut env = Env::default();
         for p in &f.params {
@@ -1304,10 +1379,8 @@ impl Checker<'_> {
             Type::Infer
         });
         for (loan, mode, origin) in self.loans.clone() {
-            let reserved = mode == Pass::Inout
-                && self
-                    .reserved_receivers
-                    .contains(&(origin.start, origin.end));
+            let reserved =
+                mode == Pass::Inout && self.reserved_loans.contains(&(origin.start, origin.end));
             let exclusive = (mode != Pass::In && !reserved)
                 || matches!(usage, Usage::Borrow(Pass::Inout))
                 || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy);
@@ -1445,6 +1518,16 @@ impl Checker<'_> {
                         self.error("E0203", "constructor requires arguments", e.span.clone());
                         Type::Infer
                     }
+                } else if n.starts_with("self::") || n.starts_with("super::") || n.starts_with('@')
+                {
+                    // Qualified paths resolve only through the package
+                    // loader (`crate::packages`), like `use` imports.
+                    self.error(
+                        crate::packages::USE_OUTSIDE_PACKAGE,
+                        format!("the qualified path '{n}' needs a package; check the package directory instead of one file"),
+                        e.span.clone(),
+                    );
+                    Type::Infer
                 } else {
                     self.error("E0201", format!("unknown name '{n}'"), e.span.clone());
                     Type::Infer
@@ -1580,6 +1663,9 @@ impl Checker<'_> {
                             };
                             let ty = &self.region_annotation(hinted.as_ref().unwrap_or(ty));
                             self.valid_type(ty, &self.generics.clone(), value.span.clone());
+                            let bound_view = !*mutable
+                                && matches!(pat.kind, PatternKind::Bind(_))
+                                && self.bind_view(value, env);
                             let actual = self.expr_expected(value, env, Usage::Own, ty);
                             self.expect_type(ty, &actual, value.span.clone());
                             let t = if *ty == Type::Infer {
@@ -1623,6 +1709,10 @@ impl Checker<'_> {
                             self.bind(pat, &t, env);
                             if let PatternKind::Bind(n) = &pat.kind {
                                 let binding = env.bindings.get_mut(n).unwrap();
+                                if bound_view {
+                                    // A bound view shares its source.
+                                    binding.pass = Pass::In;
+                                }
                                 binding.integer = fact;
                                 binding.nonzero = nonzero;
                                 binding.range = bounds.map(|(lo, hi)| IntRange {
@@ -2963,11 +3053,12 @@ impl Checker<'_> {
                 .collect::<Vec<_>>(),
             env,
         );
-        let has_receiver = receiver.is_some();
-        for (index, ((expr, explicit), param)) in actuals.into_iter().zip(&f.params).enumerate() {
-            if index == 0 && has_receiver && param.pass == Pass::Inout {
-                self.reserved_receivers
-                    .insert((expr.span.start, expr.span.end));
+        for ((expr, explicit), param) in actuals.into_iter().zip(&f.params) {
+            // Two-phase argument loans (§4.3): every `inout` argument, not
+            // only the receiver, is reserved while the call's other
+            // arguments are evaluated.
+            if param.pass == Pass::Inout {
+                self.reserved_loans.insert((expr.span.start, expr.span.end));
             }
             if let Some(pass) = explicit
                 && pass != param.pass
@@ -3005,9 +3096,22 @@ impl Checker<'_> {
                         })
                         .collect()
                 };
+                // A scalar passed to an `in` or by-value parameter is read
+                // into a word before the call, so it may read the place of a
+                // reserved `inout` argument loan (two-phase borrows, §4.3).
+                // Copy aggregates may be lent by address and stay refused.
+                let copied = param.pass != Pass::Inout
+                    && param.projections.is_empty()
+                    && is_scalar_type(&self.peek_type(expr, env));
                 for p in paths {
                     for (old, mode, origin) in &loans {
-                        if p.overlaps(old) && !(param.pass == Pass::In && *mode == Pass::In) {
+                        let reserved = *mode == Pass::Inout
+                            && copied
+                            && self.reserved_loans.contains(&(origin.start, origin.end));
+                        if p.overlaps(old)
+                            && !reserved
+                            && !(param.pass == Pass::In && *mode == Pass::In)
+                        {
                             self.error("E0301",format!("overlapping arguments '{}' and '{}' violate alias XOR mutability",old.display(),p.display()),expr.span.clone());
                             self.related(
                                 origin.clone(),
@@ -3491,8 +3595,14 @@ impl Checker<'_> {
         // checks afterwards that the body did not consume them.
         let catcher = target.and_then(|t| self.handler_frames.iter().rposition(|h| h.cap == t));
         for (n, b) in &env.bindings {
+            // An abort skips the drop of an affine `.vsys` handle with a
+            // drop import (§16.3), so such a handle is kept off abortable
+            // checkpoints as a linear value is.
+            let droppable = b.pass == Pass::Sink
+                && !b.moved.iter().any(Vec::is_empty)
+                && self.droppable_remaining(&b.ty, &mut vec![], &b.moved);
             if b.pass == Pass::Sink
-                && self.mode(&b.ty) == Mode::Linear
+                && (self.mode(&b.ty) == Mode::Linear || droppable)
                 && !b.moved.iter().any(Vec::is_empty)
                 && let Some(frame) = catcher
                 && self.handler_frames[frame].outer.get(n) == Some(&b.span)
@@ -3510,6 +3620,11 @@ impl Checker<'_> {
                 self.error("E0402",format!("potentially abortable effect '{effect}' may discard live linear value '{n}'"),span.clone());
                 self.related(b.span.clone(), "live linear binding introduced here");
                 self.help("An abortable checkpoint may discard a continuation that still owns this linear binding.");
+            }
+            if droppable && self.mode(&b.ty) != Mode::Linear {
+                self.error("E0402",format!("potentially abortable effect '{effect}' may skip the drop import of live handle '{n}'"),span.clone());
+                self.related(b.span.clone(), "live handle binding introduced here");
+                self.help("A handle whose type declares a drop import is released when it is dropped; an abort would skip that call. Finalize or move the handle before the checkpoint, or catch the abort in this function.");
             }
             if b.pass == Pass::Inout && !b.moved.is_empty() {
                 self.error("E0402",format!("potentially abortable effect '{effect}' crosses inout parameter '{n}' while part of it is moved out"),span.clone());
@@ -4312,7 +4427,10 @@ impl Checker<'_> {
             {
                 self.error(
                     "E0402",
-                    format!("linear value '{n}' is consumed inside a handled body that may abort before consuming it"),
+                    format!(
+                        "{} '{n}' is consumed inside a handled body that may abort before consuming it",
+                        if self.mode(&before.ty) == Mode::Linear { "linear value" } else { "handle" }
+                    ),
                     checkpoint,
                 );
                 self.related(before.span.clone(), "live linear binding introduced here");

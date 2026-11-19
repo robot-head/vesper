@@ -319,12 +319,12 @@ fn rejected(source: &str, code: &str, needle: &str) {
 #[test]
 fn views_are_second_class() {
     rejected(
-        "fn f(in s: String) -> u64 { let v = s.as_str(); 0 }",
+        "fn f(inout s: String) -> u64 { let v = s.as_str(); 0 }",
         "E1531",
         "second-class",
     );
     rejected(
-        "fn f(in s: String) -> u64 { let v = s[0..1]; 0 }",
+        "fn f(inout s: String) -> u64 { let v = s[0..1]; 0 }",
         "E1531",
         "second-class",
     );

@@ -1,4 +1,5 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "vesper_package")
 load("//tools/bazel/tests:ci_analysis_test.bzl", "compile_inputs_test", "environment_test", "runfiles_test")
 
 exports_files([
@@ -407,6 +408,15 @@ filegroup(
 )
 
 # Narrow slices of the root package for members that read them.
+# @vesper-std/sort (#1096) as a path dependency of port packages
+# (packages/ has no BUILD.bazel of its own).
+vesper_package(
+    name = "std_sort_package",
+    srcs = glob(["packages/vesper-std/sort/src/**/*.ves"]),
+    manifest = "packages/vesper-std/sort/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "examples",
     srcs = glob(["examples/**"]),
