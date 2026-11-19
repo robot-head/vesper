@@ -19,7 +19,7 @@
 //! copy struct, with compile-time layout asserts, `from_value`/`to_value`
 //! conversions and `vesper_port_abi::Mirror`. Its `in`/`inout` parameters,
 //! slices and results of mirrored structs take and return the mirrors, lent
-//! in place.
+//! in place, and an `in` handle is lent as the caller's own words (#1087).
 use super::*;
 use std::fmt::Write as _;
 
@@ -238,6 +238,15 @@ impl Gen<'_> {
             );
         }
         match ty {
+            // Elements Rust does not read (#1087): only the length.
+            AbiType::Seq { elem } if self.owning(elem) => (
+                "vesper_port_abi::OpaqueSeq<'a>".into(),
+                format!("unsafe {{ vesper_port_abi::OpaqueSeq::from_handle({base}[{offset}]) }}"),
+            ),
+            AbiType::Box { inner } if matches!(**inner, AbiType::Object { .. }) => (
+                "vesper_port_abi::OpaqueObject<'a>".into(),
+                format!("vesper_port_abi::OpaqueObject::from_word({base}[{offset}])"),
+            ),
             AbiType::Seq { elem } => (
                 format!("vesper_port_abi::SeqRef<'a, {}>", self.copy_type(elem)),
                 format!("unsafe {{ vesper_port_abi::SeqRef::from_handle({base}[{offset}]) }}"),
@@ -569,6 +578,10 @@ impl Gen<'_> {
                     args.push(format!("{seq} as i64"));
                 }
                 ty if self.handle(ty).is_some() => match p.pass() {
+                    // v3 (#1087): lent as the caller's own words.
+                    "in" if p.in_place => {
+                        args.push(format!("{n}.words.as_ptr().cast_mut()"));
+                    }
                     "in" => {
                         let _ = writeln!(out, "    let mut {arg} = {n}.words;");
                         args.push(format!("{arg}.as_mut_ptr()"));
@@ -947,13 +960,7 @@ pub(super) fn generate(interface: &LibraryInterface, options: &BindingOptions) -
         if f.fail_record_words.is_some() {
             params.push("fail: *mut u64".into());
         }
-        let ret = if !f.result_pointer
-            && matches!(&f.result, AbiType::Scalar { name } if name == "f64")
-        {
-            "f64"
-        } else {
-            "i64"
-        };
+        let ret = result_c_type(f);
         let _ = writeln!(out, "    fn {}({}) -> {ret};", f.symbol, params.join(", "));
     }
     out.push_str("}\n\n");

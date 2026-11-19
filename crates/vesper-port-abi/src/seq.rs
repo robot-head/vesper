@@ -335,6 +335,72 @@ macro_rules! packed {
 }
 packed!(u8, u32, u64, i64, usize, isize, f64);
 
+/// A borrowed view of a sequence a handle owns whose elements Rust cannot
+/// read (other handles, boxed trait objects): only its length.
+#[derive(Clone, Copy)]
+pub struct OpaqueSeq<'a> {
+    len: usize,
+    _owner: PhantomData<&'a ()>,
+}
+
+impl OpaqueSeq<'_> {
+    /// # Safety
+    /// `handle` must be 0 (an empty slot) or a live sequence handle that
+    /// stays alive and unchanged for the view's lifetime.
+    pub unsafe fn from_handle(handle: u64) -> Self {
+        let len = if handle == 0 {
+            0
+        } else {
+            // SAFETY: forwarded from the caller.
+            unsafe { header(handle).0 }
+        };
+        Self {
+            len,
+            _owner: PhantomData,
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl core::fmt::Debug for OpaqueSeq<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "OpaqueSeq(len {})", self.len)
+    }
+}
+
+/// A borrowed view of a boxed trait object (`Box[dyn Trait]`) a handle
+/// owns. Rust cannot call it; only Vesper code can.
+#[derive(Clone, Copy)]
+pub struct OpaqueObject<'a> {
+    block: u64,
+    _owner: PhantomData<&'a ()>,
+}
+
+impl OpaqueObject<'_> {
+    /// A view of the box word `block` (its `{vtable, value}` block).
+    pub fn from_word(block: u64) -> Self {
+        Self {
+            block,
+            _owner: PhantomData,
+        }
+    }
+    /// Whether the slot holds an object (a moved-from slot holds none).
+    pub fn is_present(&self) -> bool {
+        self.block != 0
+    }
+}
+
+impl core::fmt::Debug for OpaqueObject<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("OpaqueObject { .. }")
+    }
+}
+
 impl<T: Abi + core::fmt::Debug> core::fmt::Debug for SeqRef<'_, T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_list().entries(self.iter()).finish()

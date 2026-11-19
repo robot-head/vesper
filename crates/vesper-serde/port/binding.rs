@@ -1471,14 +1471,13 @@ pub fn doc_build(doc: &mut Doc, input: &[u8], structurals: &[u32], escapes: &[u3
 /// Calls `doc_event` of the Vesper library `serde` (`vesper_serde_doc_event`).
 pub fn doc_event(doc: &Doc, input: &[u8], root: u64, remaining: &mut u64, passes: u64) -> Result<repr::EventRow, crate::port_types::Fault> {
     let mut result = [0u64; 3];
-    let mut arg_doc = doc.words;
     let mut arg_remaining = [0u64; <u64 as Abi>::WORDS];
     Abi::put(&*remaining, &mut arg_remaining);
     let mut fail = [0u64; 6];
     // SAFETY: `vesper_serde_doc_event` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_serde_doc_event(result.as_mut_ptr(), arg_doc.as_mut_ptr(), view_input, root as i64, arg_remaining.as_mut_ptr(), passes as i64, fail.as_mut_ptr()) });
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_serde_doc_event(result.as_mut_ptr(), doc.words.as_ptr().cast_mut(), view_input, root as i64, arg_remaining.as_mut_ptr(), passes as i64, fail.as_mut_ptr()) });
     *remaining = <u64 as Abi>::get(&arg_remaining);
     match fail[0] {
         0 => Ok(vesper_port_abi::mirror_from_words::<repr::EventRow>(&result[0..])),
@@ -1490,12 +1489,11 @@ pub fn doc_event(doc: &Doc, input: &[u8], root: u64, remaining: &mut u64, passes
 /// Calls `doc_field` of the Vesper library `serde` (`vesper_serde_doc_field`).
 pub fn doc_field(doc: &Doc, input: &[u8], index: u64, key: &[u8], max_work: u64) -> Result<Option<u64>, crate::port_types::Error> {
     let mut result = [0u64; 2];
-    let mut arg_doc = doc.words;
     let mut fail = [0u64; 3];
     // SAFETY: `vesper_serde_doc_field` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(input, |view_input| vesper_port_abi::with_slice(key, |view_key| unsafe { vesper_serde_doc_field(result.as_mut_ptr(), arg_doc.as_mut_ptr(), view_input, index as i64, view_key, max_work as i64, fail.as_mut_ptr()) }));
+    let raw = vesper_port_abi::with_slice(input, |view_input| vesper_port_abi::with_slice(key, |view_key| unsafe { vesper_serde_doc_field(result.as_mut_ptr(), doc.words.as_ptr().cast_mut(), view_input, index as i64, view_key, max_work as i64, fail.as_mut_ptr()) }));
     match fail[0] {
         0 => Ok(<Option<u64> as Abi>::get(&result[0..])),
         1 => Err(<crate::port_types::Error as Abi>::get(&fail[1..])),
@@ -1505,12 +1503,11 @@ pub fn doc_field(doc: &Doc, input: &[u8], index: u64, key: &[u8], max_work: u64)
 
 /// Calls `doc_i64` of the Vesper library `serde` (`vesper_serde_doc_i64`).
 pub fn doc_i64(doc: &Doc, input: &[u8], index: u64) -> Result<i64, crate::port_types::Error> {
-    let mut arg_doc = doc.words;
     let mut fail = [0u64; 3];
     // SAFETY: `vesper_serde_doc_i64` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_serde_doc_i64(arg_doc.as_mut_ptr(), view_input, index as i64, fail.as_mut_ptr()) });
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_serde_doc_i64(doc.words.as_ptr().cast_mut(), view_input, index as i64, fail.as_mut_ptr()) });
     match fail[0] {
         0 => Ok(raw),
         1 => Err(<crate::port_types::Error as Abi>::get(&fail[1..])),
@@ -1554,12 +1551,11 @@ pub fn doc_reset(doc: &mut Doc) -> () {
 /// Calls `doc_tile` of the Vesper library `serde` (`vesper_serde_doc_tile`).
 pub fn doc_tile(doc: &Doc, input: &[u8], root: u64) -> Result<repr::TilePoint, crate::port_types::Fault> {
     let mut result = [0u64; 9];
-    let mut arg_doc = doc.words;
     let mut fail = [0u64; 6];
     // SAFETY: `vesper_serde_doc_tile` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_serde_doc_tile(result.as_mut_ptr(), arg_doc.as_mut_ptr(), view_input, root as i64, fail.as_mut_ptr()) });
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_serde_doc_tile(result.as_mut_ptr(), doc.words.as_ptr().cast_mut(), view_input, root as i64, fail.as_mut_ptr()) });
     match fail[0] {
         0 => Ok(vesper_port_abi::mirror_from_words::<repr::TilePoint>(&result[0..])),
         1 => Err(<crate::port_types::Fault as Abi>::get(&fail[1..])),
@@ -1569,12 +1565,11 @@ pub fn doc_tile(doc: &Doc, input: &[u8], root: u64) -> Result<repr::TilePoint, c
 
 /// Calls `doc_u64` of the Vesper library `serde` (`vesper_serde_doc_u64`).
 pub fn doc_u64(doc: &Doc, input: &[u8], index: u64) -> Result<u64, crate::port_types::Error> {
-    let mut arg_doc = doc.words;
     let mut fail = [0u64; 3];
     // SAFETY: `vesper_serde_doc_u64` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_serde_doc_u64(arg_doc.as_mut_ptr(), view_input, index as i64, fail.as_mut_ptr()) });
+    let raw = vesper_port_abi::with_slice(input, |view_input| unsafe { vesper_serde_doc_u64(doc.words.as_ptr().cast_mut(), view_input, index as i64, fail.as_mut_ptr()) });
     match fail[0] {
         0 => Ok(raw as u64),
         1 => Err(<crate::port_types::Error as Abi>::get(&fail[1..])),

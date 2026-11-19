@@ -2786,11 +2786,10 @@ pub fn graph_add_texture(g: &mut Graph, mips: u32, slices: u32, planes: u32, ini
 
 /// Calls `graph_is_texture` of the Vesper library `ignis` (`vesper_ignis_graph_is_texture`).
 pub fn graph_is_texture(g: &Graph, index: u64) -> bool {
-    let mut arg_g = g.words;
     // SAFETY: `vesper_ignis_graph_is_texture` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_graph_is_texture(arg_g.as_mut_ptr(), index as i64) };
+    let raw = unsafe { vesper_ignis_graph_is_texture(g.words.as_ptr().cast_mut(), index as i64) };
     raw != 0
 }
 
@@ -2806,53 +2805,48 @@ pub fn graph_new() -> Graph {
 
 /// Calls `graph_pass_count` of the Vesper library `ignis` (`vesper_ignis_graph_pass_count`).
 pub fn graph_pass_count(g: &Graph) -> u64 {
-    let mut arg_g = g.words;
     // SAFETY: `vesper_ignis_graph_pass_count` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_graph_pass_count(arg_g.as_mut_ptr()) };
+    let raw = unsafe { vesper_ignis_graph_pass_count(g.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
 /// Calls `graph_plan` of the Vesper library `ignis` (`vesper_ignis_graph_plan`).
 pub fn graph_plan(g: &Graph, split_barriers: bool) -> PlanOut {
     let mut result = [0u64; 11];
-    let mut arg_g = g.words;
     // SAFETY: `vesper_ignis_graph_plan` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_graph_plan(result.as_mut_ptr(), arg_g.as_mut_ptr(), split_barriers as i64) };
+    let raw = unsafe { vesper_ignis_graph_plan(result.as_mut_ptr(), g.words.as_ptr().cast_mut(), split_barriers as i64) };
     unsafe { PlanOut::from_words(&result[0..]) }
 }
 
 /// Calls `graph_queue_count` of the Vesper library `ignis` (`vesper_ignis_graph_queue_count`).
 pub fn graph_queue_count(g: &Graph) -> u64 {
-    let mut arg_g = g.words;
     // SAFETY: `vesper_ignis_graph_queue_count` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_graph_queue_count(arg_g.as_mut_ptr()) };
+    let raw = unsafe { vesper_ignis_graph_queue_count(g.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
 /// Calls `graph_queue_kind` of the Vesper library `ignis` (`vesper_ignis_graph_queue_kind`).
 pub fn graph_queue_kind(g: &Graph, index: u64) -> Option<crate::port::ffi::QueueKind> {
     let mut result = [0u64; 2];
-    let mut arg_g = g.words;
     // SAFETY: `vesper_ignis_graph_queue_kind` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_graph_queue_kind(result.as_mut_ptr(), arg_g.as_mut_ptr(), index as i64) };
+    let raw = unsafe { vesper_ignis_graph_queue_kind(result.as_mut_ptr(), g.words.as_ptr().cast_mut(), index as i64) };
     <Option<crate::port::ffi::QueueKind> as Abi>::get(&result[0..])
 }
 
 /// Calls `graph_resource_count` of the Vesper library `ignis` (`vesper_ignis_graph_resource_count`).
 pub fn graph_resource_count(g: &Graph) -> u64 {
-    let mut arg_g = g.words;
     // SAFETY: `vesper_ignis_graph_resource_count` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_graph_resource_count(arg_g.as_mut_ptr()) };
+    let raw = unsafe { vesper_ignis_graph_resource_count(g.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
@@ -2892,11 +2886,10 @@ pub fn layout_raw(layout: crate::port::ffi::Layout) -> u32 {
 /// Calls `lifecycle_check_completion` of the Vesper library `ignis` (`vesper_ignis_lifecycle_check_completion`).
 pub fn lifecycle_check_completion(l: &Lifecycle, runtime: u64, index: u64, value: u64) -> crate::port::ffi::LifeError {
     let mut result = [0u64; 4];
-    let mut arg_l = l.words;
     // SAFETY: `vesper_ignis_lifecycle_check_completion` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_lifecycle_check_completion(result.as_mut_ptr(), arg_l.as_mut_ptr(), runtime as i64, index as i64, value as i64) };
+    let raw = unsafe { vesper_ignis_lifecycle_check_completion(result.as_mut_ptr(), l.words.as_ptr().cast_mut(), runtime as i64, index as i64, value as i64) };
     <crate::port::ffi::LifeError as Abi>::get(&result[0..])
 }
 
@@ -2921,31 +2914,28 @@ pub fn lifecycle_complete(l: &mut Lifecycle, index: u64, value: u64) -> Vec<u64>
 
 /// Calls `lifecycle_drain_allowed` of the Vesper library `ignis` (`vesper_ignis_lifecycle_drain_allowed`).
 pub fn lifecycle_drain_allowed(l: &Lifecycle, polls: u64) -> bool {
-    let mut arg_l = l.words;
     // SAFETY: `vesper_ignis_lifecycle_drain_allowed` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_lifecycle_drain_allowed(arg_l.as_mut_ptr(), polls as i64) };
+    let raw = unsafe { vesper_ignis_lifecycle_drain_allowed(l.words.as_ptr().cast_mut(), polls as i64) };
     raw != 0
 }
 
 /// Calls `lifecycle_inflight` of the Vesper library `ignis` (`vesper_ignis_lifecycle_inflight`).
 pub fn lifecycle_inflight(l: &Lifecycle) -> u64 {
-    let mut arg_l = l.words;
     // SAFETY: `vesper_ignis_lifecycle_inflight` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_lifecycle_inflight(arg_l.as_mut_ptr()) };
+    let raw = unsafe { vesper_ignis_lifecycle_inflight(l.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
 /// Calls `lifecycle_max_scratch` of the Vesper library `ignis` (`vesper_ignis_lifecycle_max_scratch`).
 pub fn lifecycle_max_scratch(l: &Lifecycle) -> u64 {
-    let mut arg_l = l.words;
     // SAFETY: `vesper_ignis_lifecycle_max_scratch` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_lifecycle_max_scratch(arg_l.as_mut_ptr()) };
+    let raw = unsafe { vesper_ignis_lifecycle_max_scratch(l.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
@@ -2961,51 +2951,46 @@ pub fn lifecycle_new(id: u64, limits: &repr::Limits, kinds: &[crate::port::ffi::
 
 /// Calls `lifecycle_observed` of the Vesper library `ignis` (`vesper_ignis_lifecycle_observed`).
 pub fn lifecycle_observed(l: &Lifecycle, runtime: u64, index: u64) -> u64 {
-    let mut arg_l = l.words;
     // SAFETY: `vesper_ignis_lifecycle_observed` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_lifecycle_observed(arg_l.as_mut_ptr(), runtime as i64, index as i64) };
+    let raw = unsafe { vesper_ignis_lifecycle_observed(l.words.as_ptr().cast_mut(), runtime as i64, index as i64) };
     raw as u64
 }
 
 /// Calls `lifecycle_owns` of the Vesper library `ignis` (`vesper_ignis_lifecycle_owns`).
 pub fn lifecycle_owns(l: &Lifecycle, runtime: u64, index: u64) -> bool {
-    let mut arg_l = l.words;
     // SAFETY: `vesper_ignis_lifecycle_owns` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_lifecycle_owns(arg_l.as_mut_ptr(), runtime as i64, index as i64) };
+    let raw = unsafe { vesper_ignis_lifecycle_owns(l.words.as_ptr().cast_mut(), runtime as i64, index as i64) };
     raw != 0
 }
 
 /// Calls `lifecycle_pending` of the Vesper library `ignis` (`vesper_ignis_lifecycle_pending`).
 pub fn lifecycle_pending(l: &Lifecycle) -> Vec<u64> {
-    let mut arg_l = l.words;
     // SAFETY: `vesper_ignis_lifecycle_pending` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_lifecycle_pending(arg_l.as_mut_ptr()) };
+    let raw = unsafe { vesper_ignis_lifecycle_pending(l.words.as_ptr().cast_mut()) };
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 
 /// Calls `lifecycle_poll_allowed` of the Vesper library `ignis` (`vesper_ignis_lifecycle_poll_allowed`).
 pub fn lifecycle_poll_allowed(l: &Lifecycle, max_events: u64) -> bool {
-    let mut arg_l = l.words;
     // SAFETY: `vesper_ignis_lifecycle_poll_allowed` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_lifecycle_poll_allowed(arg_l.as_mut_ptr(), max_events as i64) };
+    let raw = unsafe { vesper_ignis_lifecycle_poll_allowed(l.words.as_ptr().cast_mut(), max_events as i64) };
     raw != 0
 }
 
 /// Calls `lifecycle_queue_count` of the Vesper library `ignis` (`vesper_ignis_lifecycle_queue_count`).
 pub fn lifecycle_queue_count(l: &Lifecycle) -> u64 {
-    let mut arg_l = l.words;
     // SAFETY: `vesper_ignis_lifecycle_queue_count` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_ignis_lifecycle_queue_count(arg_l.as_mut_ptr()) };
+    let raw = unsafe { vesper_ignis_lifecycle_queue_count(l.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
@@ -3031,11 +3016,10 @@ pub fn lifecycle_submit(l: &mut Lifecycle, batch_runtime: u64, streams: &[repr::
 /// Calls `lifecycle_validate` of the Vesper library `ignis` (`vesper_ignis_lifecycle_validate`).
 pub fn lifecycle_validate(l: &Lifecycle, streams: &[repr::StreamInfo], bindings: &[repr::BindingRec], allocators: u64) -> crate::port::ffi::LifeError {
     let mut result = [0u64; 4];
-    let mut arg_l = l.words;
     // SAFETY: `vesper_ignis_lifecycle_validate` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_mirror_slice(streams, |view_streams| vesper_port_abi::with_mirror_slice(bindings, |view_bindings| unsafe { vesper_ignis_lifecycle_validate(result.as_mut_ptr(), arg_l.as_mut_ptr(), view_streams, view_bindings, allocators as i64) }));
+    let raw = vesper_port_abi::with_mirror_slice(streams, |view_streams| vesper_port_abi::with_mirror_slice(bindings, |view_bindings| unsafe { vesper_ignis_lifecycle_validate(result.as_mut_ptr(), l.words.as_ptr().cast_mut(), view_streams, view_bindings, allocators as i64) }));
     <crate::port::ffi::LifeError as Abi>::get(&result[0..])
 }
 

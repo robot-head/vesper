@@ -1,0 +1,218 @@
+// @export abi 3
+// The pilot's export ABI widening library (P3b gaps lane 2, #1087): `f32`
+// across the boundary, `in` handles lent in place, and handle types that
+// own sequences of other handles and boxed trait objects.
+
+// f32 scalars, slices, sequences and mirror fields.
+pub copy struct Pt {
+    x: f32,
+    y: f32,
+    tag: u64
+}
+
+pub fn scale(x: f32, k: f32) -> f32 {
+    x * k + 0.5
+}
+
+pub fn halve(x: f32) -> Option[f32] {
+    if x == 0.0 {
+        Option::None
+    } else {
+        Option::Some(x / 2.0)
+    }
+}
+
+pub fn total(in xs: Slice[f32]) -> f32 {
+    let mut t: f32 = 0.0;
+    for i in 0..xs.len() {
+        let v = match xs.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => t,
+        };
+        t = t + v;
+    }
+    t
+}
+
+pub fn ramp(n: u64, step: f32) -> ChunkSeq[f32] {
+    let mut out = ChunkSeq::with_capacity[f32](n);
+    let mut v: f32 = 0.0;
+    for i in 0..n {
+        out.push(v);
+        v = v + step;
+    }
+    out
+}
+
+pub fn pt_norm1(in p: Pt) -> f32 {
+    let x = if p.x < 0.0 { 0.0 - p.x } else { p.x };
+    let y = if p.y < 0.0 { 0.0 - p.y } else { p.y };
+    x + y
+}
+
+pub fn pt_nudge(inout p: Pt, by: f32) {
+    p.x = p.x + by;
+    p.y = p.y - by;
+    p.tag = wrapping_add(p.tag, 1);
+}
+
+// A handle lent in place: `in` reads the caller's own words.
+pub struct Bank {
+    base: u64,
+    regs: ChunkSeq[u64]
+}
+
+pub fn bank_new(base: u64, n: u64) -> Bank {
+    let mut regs = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        regs.push(wrapping_add(base, i));
+    }
+    Bank { base: base, regs: regs }
+}
+
+impl Bank {
+    fn read(in self, i: u64) -> u64 {
+        match self.regs.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => self.base,
+        }
+    }
+
+    fn write(inout self, i: u64, v: u64) {
+        let _ = self.regs.try_set(i, v);
+    }
+}
+
+pub fn bank_read(in b: Bank, i: u64) -> u64 {
+    b.read(i)
+}
+
+pub fn bank_write(inout b: Bank, i: u64, v: u64) {
+    b.write(i, v);
+}
+
+// A handle that owns a sequence of handles.
+pub struct Fabric {
+    files: ChunkSeq[Bank],
+    names: ChunkSeq[String]
+}
+
+fn name(i: u64) -> String {
+    let mut s = String::new();
+    s.push_str(in "file");
+    s.push_char(if i == 0 { 48 } else { 49 });
+    s
+}
+
+pub fn fabric_new(files: u64, regs: u64) -> Fabric {
+    let mut f = Fabric {
+        files: ChunkSeq::with_capacity[Bank](files),
+        names: ChunkSeq::with_capacity[String](files)
+    };
+    for i in 0..files {
+        f.files.push(bank_new(wrapping_mul(i, 100), regs));
+        f.names.push(name(i));
+    }
+    f
+}
+
+pub fn fabric_len(in f: Fabric) -> u64 {
+    f.files.len()
+}
+
+// Vesper code cannot borrow a non-copy element in place yet (E1522), so a
+// file is taken out whole.
+pub fn fabric_pop(inout f: Fabric) -> Option[Bank] {
+    f.files.pop()
+}
+
+// A handle that owns boxed trait objects: a processing graph that lives in
+// Vesper across calls.
+trait Proc {
+    fn step(inout self, x: i64) -> i64;
+}
+
+struct Gain {
+    k: i64
+}
+
+struct Delay {
+    line: ChunkSeq[i64],
+    at: u64
+}
+
+impl Proc for Gain {
+    fn step(inout self, x: i64) -> i64 {
+        wrapping_mul(x, self.k)
+    }
+}
+
+impl Proc for Delay {
+    fn step(inout self, x: i64) -> i64 {
+        let n = self.line.len();
+        if n == 0 {
+            return x;
+        }
+        let i = self.at;
+        let y = match self.line.try_get(i) {
+            Option::Some(y) => y,
+            Option::None => 0,
+        };
+        let _ = self.line.try_set(i, x);
+        self.at = if wrapping_add(i, 1) == n { 0 } else { wrapping_add(i, 1) };
+        y
+    }
+}
+
+pub struct Graph {
+    procs: ChunkSeq[Box[dyn Proc]],
+    // Held only, so that dropping the graph from Rust drops it too.
+    tail: Option[Box[dyn Proc]],
+    runs: u64
+}
+
+fn zeros(n: u64) -> ChunkSeq[i64] {
+    let mut line = ChunkSeq::with_capacity[i64](n);
+    for i in 0..n {
+        line.push(0);
+    }
+    line
+}
+
+fn gain(k: i64) -> Box[dyn Proc] {
+    Box::new(Gain { k: k })
+}
+
+fn delay(n: u64) -> Box[dyn Proc] {
+    Box::new(Delay { line: zeros(n), at: 0 })
+}
+
+// gain(k) -> delay(n) -> gain(3), then an optional delay(1) tail.
+pub fn graph_new(k: i64, n: u64, tail: bool) -> Graph {
+    let mut procs = ChunkSeq::with_capacity[Box[dyn Proc]](3);
+    procs.push(gain(k));
+    procs.push(delay(n));
+    procs.push(gain(3));
+    let t = if tail { Option::Some(delay(1)) } else { Option::None };
+    Graph { procs: procs, tail: t, runs: 0 }
+}
+
+// Recursion, not a loop: native code does not reclaim boxes in an
+// optimized function with a loop yet.
+fn run_from(inout g: Graph, i: u64, v: i64) -> i64 eff [Fail[RuntimeError]] {
+    if i < g.procs.len() {
+        let w = g.procs[i].step(v);
+        run_from(inout g, wrapping_add(i, 1), w)
+    } else {
+        v
+    }
+}
+
+pub fn graph_run(inout g: Graph, x: i64) -> i64 eff [Fail[RuntimeError]] {
+    g.runs = wrapping_add(g.runs, 1);
+    run_from(inout g, 0, x)
+}
+
+pub fn graph_runs(in g: Graph) -> u64 {
+    g.runs
+}
