@@ -246,7 +246,8 @@ This lane touches none of `src/verified_codegen/**`, `src/ir.rs`,
 files plus the workspace member line and one CI step). The bootstrap-stage1
 workflow ran `bootstrap/run.sh stage1 --reproduce --outcome` on this branch:
 [run 44459669923](https://github.com/robot-head/vesper/actions/runs/44459669923)
-(result in the PR).
+succeeded (2026-11-19, 18 minutes) on `f3dbef3`. The later commits change
+only the shim crate, its tests, the report and merges from `main`.
 
 ## Compiler gaps
 
