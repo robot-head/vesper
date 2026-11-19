@@ -114,6 +114,7 @@ use self::words::{
     w_load_tile_vec,
     w_col_set,
     w_super,
+    w_const,
     w_TiledSeq,
     is_primitive_word
 };
@@ -480,7 +481,9 @@ fn placeholder(in p: P) -> Ex {
         h: 1,
         sym: 0,
         tiled: false,
-        path: 0
+        path: 0,
+        leaves: 1,
+        pure: false
     }
 }
 
@@ -504,7 +507,9 @@ fn ex(k: u8, start: u64, end: u64, children: u32) -> Ex {
         h: wrapping_add(children, 1),
         sym: 0,
         tiled: false,
-        path: 0
+        path: 0,
+        leaves: 1,
+        pure: false
     }
 }
 
@@ -1085,6 +1090,7 @@ fn declaration(inout p: P) -> bool {
     let public = at_word(in p, 0, w_pub())
         && (
         at_word(in p, 1, w_trait())
+            || (at_word(in p, 1, w_const()) && nth(in p, 2) == k_upper())
             || at_word(in p, 1, w_model())
             || nth(in p, 1)
             == k_fn()
@@ -1102,6 +1108,10 @@ fn declaration(inout p: P) -> bool {
     }
     if fip && !at(in p, k_fn()) {
         err(inout p, in "@fip may only annotate a fn declaration");
+    }
+    if at_word(in p, 0, w_const()) && nth(in p, 1) == k_upper() {
+        const_item(inout p);
+        return true;
     }
     if at_word(in p, 0, w_trait()) {
         trait_decl(inout p);
@@ -1285,6 +1295,17 @@ fn method(inout p: P) {
     function(inout p, false);
 }
 
+// `Parser::const_item`: `const NAME: T = expr;`.
+fn const_item(inout p: P) {
+    bump(inout p);
+    upper(inout p);
+    expect(inout p, k_colon());
+    ty(inout p);
+    expect(inout p, k_eq());
+    expr(inout p);
+    expect(inout p, k_semi());
+}
+
 fn function(inout p: P, op: bool) {
     let rows = p.rows_trail.len();
     let vals = p.vals_trail.len();
@@ -1350,6 +1371,7 @@ fn place_tree(inout p: P) {
 fn ty(inout p: P) -> u8 {
     let previous = p.depth;
     if !enter(inout p) {
+        p.leaves = 1;
         return t_infer();
     }
     let shape = ty_inner(inout p);
@@ -1357,8 +1379,53 @@ fn ty(inout p: P) -> u8 {
     shape
 }
 
+// `Parser::array_type_ahead`: whether the `[` at the cursor opens `[T; N]`,
+// a `;` at bracket depth one before the matching `]`.
+fn array_type_ahead(in p: P) -> bool {
+    let mut depth: u64 = 0;
+    for i in p.pos..p.ntok {
+        let k = tk(in p, i);
+        if k == k_l_bracket() || k == k_l_paren() || k == k_l_brace() {
+            depth = inc(depth);
+        } else if k == k_r_bracket() || k == k_r_paren() || k == k_r_brace() {
+            if depth > 0 {
+                depth = wrapping_sub(depth, 1);
+            }
+            if depth == 0 {
+                return false;
+            }
+        } else if k == k_semi() && depth == 1 {
+            return true;
+        } else if k == k_eof() {
+            return false;
+        }
+    }
+    false
+}
+
+fn max_array_length() -> u64 {
+    65536
+}
+
+// `Parser::array_length`: the decimal or hex literal `N` of `[T; N]` and
+// `[x; N]`, 0 after an error.
+fn array_length(inout p: P) -> u64 {
+    if !at(in p, k_int()) {
+        err(inout p, in "expected an integer literal array length");
+        return 0;
+    }
+    let i = bump(inout p);
+    let (ok, n) = int_value(in p, i);
+    if ok && n <= max_array_length() {
+        return n;
+    }
+    err(inout p, in "array length exceeds the limit of 65536 elements");
+    0
+}
+
 fn ty_inner(inout p: P) -> u8 {
     start_node(inout p, n_type());
+    let mut leaves: u64 = 1;
     let shape = if eat(inout p, k_fn()) {
         if eat(inout p, k_at()) {
             mode(inout p);
@@ -1381,16 +1448,33 @@ fn ty_inner(inout p: P) -> u8 {
         effects(inout p);
         t_function()
     } else if eat(inout p, k_l_paren()) {
+        let mut sum: u64 = 0;
         loop {
             if at(in p, k_r_paren()) || at(in p, k_eof()) {
                 break;
             }
             ty(inout p);
+            sum = add(sum, p.leaves);
             if !eat(inout p, k_comma()) {
                 break;
             }
         }
         expect(inout p, k_r_paren());
+        leaves = max64(sum, 1);
+        t_tuple()
+    } else if at(in p, k_l_bracket()) && array_type_ahead(in p) {
+        // A fixed-size array `[T; N]`: the homogeneous `N`-tuple.
+        bump(inout p);
+        ty(inout p);
+        let element = p.leaves;
+        expect(inout p, k_semi());
+        let mut n = array_length(inout p);
+        expect(inout p, k_r_bracket());
+        if wrapping_mul(element, n) > max_array_length() {
+            err(inout p, in "a nested array type holds more than 65536 elements in all");
+            n = 0;
+        }
+        leaves = max64(wrapping_mul(element, n), 1);
         t_tuple()
     } else if eat(inout p, k_l_bracket()) {
         loop {
@@ -1439,6 +1523,7 @@ fn ty_inner(inout p: P) -> u8 {
         t_named()
     };
     finish_node(inout p);
+    p.leaves = leaves;
     shape
 }
 
@@ -1790,6 +1875,7 @@ fn block_inner(inout p: P) -> Ex {
     let start = cur_start(in p);
     expect(inout p, k_l_brace());
     let mut h: u32 = 0;
+    let mut tail: u64 = 1;
     loop {
         if at(in p, k_r_brace()) || at(in p, k_eof()) {
             break;
@@ -1824,6 +1910,7 @@ fn block_inner(inout p: P) -> Ex {
                 && !at(in p, k_eof()) {
                 // A block-like statement needs no `;`.
             } else {
+                tail = e.leaves;
                 break;
             }
         }
@@ -1833,7 +1920,9 @@ fn block_inner(inout p: P) -> Ex {
     }
     expect(inout p, k_r_brace());
     vals_restore(inout p, outer);
-    ex(x_block(), start, last_end(in p), h)
+    let mut b = ex(x_block(), start, last_end(in p), h);
+    b.leaves = tail;
+    b
 }
 
 // ---------------------------------------------------------------- expressions
@@ -2184,11 +2273,13 @@ fn binary_inner(inout p: P, min: u64) -> Ex {
         let start = cur_start(in p);
         bump(inout p);
         let v = binary(inout p, 12);
-        if k0 == k_minus() && v.k == x_int() {
+        let mut u = if k0 == k_minus() && v.k == x_int() {
             ex(x_int(), start, last_end(in p), 0)
         } else {
             ex(x_unary(), start, last_end(in p), v.h)
-        }
+        };
+        u.pure = v.k == x_int() || v.pure;
+        u
     } else {
         postfix(inout p)
     };
@@ -2210,7 +2301,7 @@ fn binary_inner(inout p: P, min: u64) -> Ex {
         } else {
             binary(inout p, inc(prec))
         };
-        let e = ex(
+        let mut e = ex(
             if prec == 1 {
                 x_assign()
             } else {
@@ -2220,6 +2311,7 @@ fn binary_inner(inout p: P, min: u64) -> Ex {
             widen_u64(rhs.end),
             hmax(lhs.h, rhs.h)
         );
+        e.pure = prec != 1 && lhs.pure && rhs.pure;
         lhs = record(inout p, e);
     }
     lhs
@@ -2409,7 +2501,7 @@ fn primary_inner(inout p: P) -> Ex {
     let start = cur_start(in p);
     let (lit, _) = literal(inout p);
     if lit != 0 {
-        return ex(
+        let mut l = ex(
             if lit == l_int() {
                 x_int()
             } else {
@@ -2419,6 +2511,8 @@ fn primary_inner(inout p: P) -> Ex {
             last_end(in p),
             0
         );
+        l.pure = true;
+        return l;
     }
     if at_path_root(in p) {
         // `self::m::f`, `super::m::T { .. }`, `@scope/name::m::E::V`.
@@ -2428,6 +2522,7 @@ fn primary_inner(inout p: P) -> Ex {
         }
         let mut e = ex(x_name(), start, last_end(in p), 0);
         e.path = 1;
+        e.pure = true;
         return e;
     }
     let k = kind(in p);
@@ -2436,6 +2531,7 @@ fn primary_inner(inout p: P) -> Ex {
         let mut e = ex(x_name(), start, last_end(in p), 0);
         e.sym = tsym(in p, i);
         e.path = 1;
+        e.pure = true;
         return e;
     }
     if k == k_upper() {
@@ -2457,6 +2553,7 @@ fn primary_inner(inout p: P) -> Ex {
         }
         let mut e = ex(x_name(), start, last_end(in p), 0);
         e.path = 1;
+        e.pure = true;
         if segments == 1 {
             e.sym = tsym(in p, first);
         }
@@ -2477,6 +2574,7 @@ fn primary_inner(inout p: P) -> Ex {
         let mut comma = false;
         let mut h: u32 = 0;
         let mut only = placeholder(in p);
+        let mut sum: u64 = 0;
         loop {
             if at(in p, k_r_paren()) || at(in p, k_eof()) {
                 break;
@@ -2487,6 +2585,7 @@ fn primary_inner(inout p: P) -> Ex {
                 only = v;
             }
             h = hmax(h, v.h);
+            sum = add(sum, v.leaves);
             comma = eat(inout p, k_comma());
             if !comma {
                 break;
@@ -2496,7 +2595,12 @@ fn primary_inner(inout p: P) -> Ex {
         if values == 1 && !comma {
             return only;
         }
-        return ex(x_tuple(), start, last_end(in p), h);
+        let mut t = ex(x_tuple(), start, last_end(in p), h);
+        t.leaves = max64(sum, 1);
+        return t;
+    }
+    if k == k_l_bracket() {
+        return array_literal(inout p, start);
     }
     if k == k_l_brace() {
         return block(inout p);
@@ -2506,6 +2610,58 @@ fn primary_inner(inout p: P) -> Ex {
         bump(inout p);
     }
     ex(x_tuple(), start, last_end(in p), 0)
+}
+
+// `Parser::array_literal`: `[a, b, c]` or `[x; N]`, both the tuple of
+// their elements. A repeated operand that is not pure is a block that
+// binds it once (`splat`), whose tail has a height of 1.
+fn array_literal(inout p: P, start: u64) -> Ex {
+    expect(inout p, k_l_bracket());
+    let mut values: u64 = 0;
+    let mut h: u32 = 0;
+    let mut sum: u64 = 0;
+    loop {
+        if at(in p, k_r_bracket()) || at(in p, k_eof()) {
+            break;
+        }
+        let v = expr(inout p);
+        if values == 0 && eat(inout p, k_semi()) {
+            let mut n = array_length(inout p);
+            expect(inout p, k_r_bracket());
+            if wrapping_mul(v.leaves, n) > max_array_length() {
+                err(inout p, in "a nested array literal holds more than 65536 elements in all");
+                n = 0;
+            }
+            let end = last_end(in p);
+            if v.pure {
+                let mut t = ex(
+                    x_tuple(),
+                    start,
+                    end,
+                    if n == 0 {
+                        0
+                    } else {
+                        v.h
+                    }
+                );
+                t.leaves = max64(wrapping_mul(v.leaves, n), 1);
+                return t;
+            }
+            let mut b = ex(x_block(), start, end, hmax(v.h, 1));
+            b.leaves = max64(n, 1);
+            return b;
+        }
+        values = inc(values);
+        h = hmax(h, v.h);
+        sum = add(sum, v.leaves);
+        if !eat(inout p, k_comma()) {
+            break;
+        }
+    }
+    expect(inout p, k_r_bracket());
+    let mut t = ex(x_tuple(), start, last_end(in p), h);
+    t.leaves = max64(sum, 1);
+    t
 }
 
 // `Parser::struct_literal`: `Name { field: value, field }` at `{`.
@@ -2650,6 +2806,7 @@ pub fn parse_tokens(in source: Slice[u8], sink t: Tokens, sink d: Diags) -> P {
         binds: ChunkSeq::new[u32](),
         pending: ChunkSeq::new[u32](),
         depth: 0,
+        leaves: 1,
         halted: false
     };
     p.src.extend(in source);

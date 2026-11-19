@@ -3,7 +3,7 @@
 > The [manuscript](../manuscript/README.md) is the sole specification.
 > Confirm live ownership on the issue board before acting.
 
-Claim: #1129. Base: `main` at `b71ac81` (plan PR #1131), merged up to `798bef4`. Lane prompt:
+Claim: #1129. Base: `main` at `b71ac81` (plan PR #1131), merged up to `fd52047`. Lane prompt:
 `docs/agent-prompts/self-host-sh0/07-front-end-v2.md`.
 
 ## Summary
@@ -47,9 +47,10 @@ while this lane was open (merged into this branch and mirrored): qualified
 `self::`, `super::` and `@scope/name::` paths in expressions, types,
 patterns, effect rows, handlers and type arguments, `pub use` and `use super`,
 `state`/`linear`/`with` as names, the keyword-name message of `lower`, and
-open slice intervals `s[..]`, `s[a..]`, `s[..b]`. Fixed arrays and `const`
-items (P3b gaps lane 6, PR #1115) are not on `main` yet; when they land, the
-differential test fails on their fixtures until the same change is made here.
+open slice intervals `s[..]`, `s[a..]`, `s[..b]`; and what PR #1115 added:
+fixed-size array types `[T; N]` and literals `[a, b]`/`[x; N]` (with the
+length and element-count limits and the splat's AST height) and `const`
+items.
 
 ## Differential test
 
@@ -166,7 +167,8 @@ equal `bootstrap/stage1.lock`.
 
 3. **No module constants.** Token kinds, node kinds and contextual words are
    functions (`fn k_l_paren() -> u8 { 32 }`), and `match` arms must use the
-   bare numbers. P3b gaps lane 6 (PR #1115) adds `const` items.
+   bare numbers. PR #1115 added `const` items after this package was
+   written; it can move to them now.
 
 4. **Byte loops cost a bounds check and an `Option` per byte.** Scanning with
    `s.try_get(i)` and a `match` is what keeps the lexer behind logos; the
@@ -201,8 +203,8 @@ equal `bootstrap/stage1.lock`.
 
 ## What is left
 
-- Mirror PR #1115 (fixed arrays, `const`) when it merges; the differential
-  test catches it.
+- Mirror every later change to `crates/vesper-syntax/src/parser.rs`; the
+  differential test fails until it is made here.
 - The editor mode (`BLOCK`, `ERROR_NODE`, `INCOMPLETE` nodes, recovery sites,
   header notes) and macro sources are not ported; batch parsing never produces
   them.

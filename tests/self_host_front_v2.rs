@@ -470,6 +470,13 @@ fn edge_cases_and_limits_match_the_rust_parser() {
         "fn f() { @a /b::c; @a/b; self::; super::1 }",
         "fn f(let: u8, if: u8) { x.match; s.impl }",
         "fn f[r](x: T[self::m::U, r]) {}",
+        // Fixed-size arrays and module constants (#1115).
+        "const A: u8 = 1; pub const B: [u8; 2] = [1; 2]; const c: u8 = 1; pub const; const A u8 = ;",
+        "fn f(a: [[u8; 300]; 300], b: [(u8, u8); 40000], c: [T; ], d: [u8; x], e: [u8; 0x10], g: [u8; 1_0], h: [u8; 99999999999999999999]) {}",
+        "fn f(a: [u8, (x; 1)], b: [[u8; 2]], c: [(u8; 2)], d: [u8; 2) {}",
+        "fn f() { [0; 70000]; [[1, 2]; 40000]; [f(); 0]; [(1, 2); 3]; [x; y]; [1; 0x10]; [-x; 2]; [a + b * c; 2]; [x = 1; 2] }",
+        "fn f() { [{ (1, 2) }; 40000]; [{ 1; }; 70000]; [(1, (2, 3)); 30000]; []; [1, 2, 3,]; [1; 2, 3]; [1, 2; 3]; [; 2] }",
+        "fn f() { [[[1; 300]; 300]; 0]; [(); 70000]; [f(); 70000]; [f(); 0]; ((1, 2), [3; 4]) }",
         "",
         " ",
         "fn",

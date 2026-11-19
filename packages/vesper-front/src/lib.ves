@@ -114,13 +114,17 @@ pub struct P {
     // declaration has taken yet (`pending_bounds`), as start/end pairs.
     pending: ChunkSeq[u32],
     depth: u64,
+    // Scalar elements of the type `ty` read last (`type_leaves`).
+    leaves: u64,
     halted: bool
 }
 
 // What the parser keeps of a parsed expression: its kind (parse.ves
 // `x_*`), span, height (the Rust parser's `expr_heights`), the symbol of a
-// one-segment name, whether it names a tiled column accessor, and for a
-// place path (a name and fields) its number of nodes, else 0.
+// one-segment name, whether it names a tiled column accessor, for a
+// place path (a name and fields) its number of nodes, else 0, its scalar
+// elements through tuples and block tails (`expr_leaves`), and whether it
+// is built from literals and names by operators only (`pure_operand`).
 pub copy struct Ex {
     k: u8,
     start: u32,
@@ -128,7 +132,9 @@ pub copy struct Ex {
     h: u32,
     sym: u32,
     tiled: bool,
-    path: u32
+    path: u32,
+    leaves: u64,
+    pure: bool
 }
 
 // Parses `source` (`vesper_syntax::parser::parse`) into the token, node and

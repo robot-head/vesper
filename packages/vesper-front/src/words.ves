@@ -123,6 +123,10 @@ pub fn w_super() -> u8 {
     25
 }
 
+pub fn w_const() -> u8 {
+    26
+}
+
 pub fn w_TiledSeq() -> u8 {
     50
 }
@@ -330,6 +334,9 @@ pub fn lower_word(in b: Slice[u8], s: u64, n: u64) -> u8 {
         }
         if is(in b, s, in "super".as_bytes()) {
             return 25;
+        }
+        if is(in b, s, in "const".as_bytes()) {
+            return 26;
         }
         0
     } else if n == 6 {
