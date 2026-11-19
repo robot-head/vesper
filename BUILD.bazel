@@ -99,8 +99,14 @@ vesper_crate(
         "test/std_sort": [":files"],
         # Self-hosting SH0 lane 7 (#1129): the front end v2 against the Rust
         # parser on the root package's `.ves` files and the parser test suites.
+        # Anchored globs: a root `**` glob without the vesper_crate `_NEVER`
+        # excludes walks the bazel-* convenience symlinks an earlier CI step
+        # leaves behind (~245k output files; analysis never finished).
         "test/self_host_front_v2": glob([
-            "**/*.ves",
+            "examples/**/*.ves",
+            "packages/**/*.ves",
+            "src/**/*.ves",
+            "tests/**/*.ves",
             "packages/vesper-front/**",
             "tests/self_host_parse.rs",
             "tests/self_host_front_end.rs",
