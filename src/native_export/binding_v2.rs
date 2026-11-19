@@ -802,6 +802,11 @@ unsafe impl vesper_port_abi::Mirror for repr::{name} {{
             }
             AbiType::Scalar { .. } => format!("vesper_port_abi::Word<{}>", rust_type(ty, path)),
             AbiType::Named { name, .. } if self.interface.mirrored(ty) => name.clone(),
+            // An array field (#1091) is its element cells in place.
+            AbiType::Tuple { items } if super::array(items).is_some() => {
+                let (elem, n) = super::array(items).expect("array");
+                format!("[{}; {n}]", self.cell(elem, path))
+            }
             ty if self.words(ty) == 1 => {
                 format!("vesper_port_abi::Word<{}>", rust_type(ty, path))
             }

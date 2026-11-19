@@ -1,0 +1,975 @@
+// @export vsys direct rust=vesper_cranelift_sys
+// | sys library Cranelift (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_cranelift_sys",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type Module;
+// |     linear extern type Builder;
+// |     linear extern type Data;
+// |     linear extern type Object;
+// |     fn vcl_module_new(nocapture in triple: CSlice[u8], nocapture in flags: CSlice[u8], nocapture in name: CSlice[u8]) -> ForeignVal[Option[Module]];
+// |     fn vcl_new_error(nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vcl_module_free(sink m: Module) -> ForeignVal[Unit];
+// |     fn vcl_module_error(in m: Module, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vcl_module_pointer_type(in m: Module) -> ForeignVal[u32];
+// |     fn vcl_module_keep_clif(inout m: Module, keep: u32) -> ForeignVal[Unit];
+// |     fn vcl_module_code_bytes(in m: Module) -> ForeignVal[u64];
+// |     fn vcl_module_clif(in m: Module, offset: u64, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vcl_sig_new(inout m: Module, call_conv: u32) -> ForeignVal[u32];
+// |     fn vcl_sig_param(inout m: Module, sig: u32, ty: u32) -> ForeignVal[u32];
+// |     fn vcl_sig_return(inout m: Module, sig: u32, ty: u32) -> ForeignVal[u32];
+// |     fn vcl_declare_function(inout m: Module, nocapture in name: CSlice[u8], linkage: u32, sig: u32) -> ForeignVal[u32];
+// |     fn vcl_declare_data(inout m: Module, nocapture in name: CSlice[u8], linkage: u32, writable: u32, tls: u32) -> ForeignVal[u32];
+// |     fn vcl_define_function(inout m: Module, func: u32, sink b: Builder) -> ForeignVal[u32];
+// |     fn vcl_define_data(inout m: Module, data: u32, sink d: Data) -> ForeignVal[u32];
+// |     fn vcl_module_finish(sink m: Module) -> ForeignVal[Option[Object]];
+// |     fn vcl_object_len(in o: Object) -> ForeignVal[u64];
+// |     fn vcl_object_read(in o: Object, offset: u64, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vcl_object_publish(sink o: Object) -> ForeignVal[u64];
+// |     fn vcl_object_free(sink o: Object) -> ForeignVal[Unit];
+// |     fn vcl_data_new() -> ForeignVal[Option[Data]];
+// |     fn vcl_data_free(sink d: Data) -> ForeignVal[Unit];
+// |     fn vcl_data_define(inout d: Data, nocapture in bytes: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vcl_data_zeroinit(inout d: Data, size: u64) -> ForeignVal[Unit];
+// |     fn vcl_data_align(inout d: Data, align: u64) -> ForeignVal[Unit];
+// |     fn vcl_data_func_addr(inout d: Data, in m: Module, offset: u32, func: u32) -> ForeignVal[Unit];
+// |     fn vcl_data_data_addr(inout d: Data, in m: Module, offset: u32, data: u32, addend: i64) -> ForeignVal[Unit];
+// |     fn vcl_builder_new(in m: Module, sig: u32) -> ForeignVal[Option[Builder]];
+// |     fn vcl_builder_free(sink b: Builder) -> ForeignVal[Unit];
+// |     fn vcl_builder_error(in b: Builder, nocapture inout out: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vcl_import_function(inout b: Builder, inout m: Module, func: u32) -> ForeignVal[u32];
+// |     fn vcl_import_signature(inout b: Builder, in m: Module, sig: u32) -> ForeignVal[u32];
+// |     fn vcl_import_data(inout b: Builder, in m: Module, data: u32) -> ForeignVal[u32];
+// |     fn vcl_create_block(inout b: Builder) -> ForeignVal[u32];
+// |     fn vcl_append_block_param(inout b: Builder, blk: u32, ty: u32) -> ForeignVal[u32];
+// |     fn vcl_append_block_params_for_function_params(inout b: Builder, blk: u32) -> ForeignVal[u32];
+// |     fn vcl_block_param(inout b: Builder, blk: u32, i: u32) -> ForeignVal[u32];
+// |     fn vcl_switch_to_block(inout b: Builder, blk: u32) -> ForeignVal[Unit];
+// |     fn vcl_seal_block(inout b: Builder, blk: u32) -> ForeignVal[Unit];
+// |     fn vcl_seal_all_blocks(inout b: Builder) -> ForeignVal[Unit];
+// |     fn vcl_declare_var(inout b: Builder, ty: u32) -> ForeignVal[u32];
+// |     fn vcl_def_var(inout b: Builder, var: u32, v: u32) -> ForeignVal[Unit];
+// |     fn vcl_use_var(inout b: Builder, var: u32) -> ForeignVal[u32];
+// |     fn vcl_stack_slot(inout b: Builder, size: u32, align_shift: u32) -> ForeignVal[u32];
+// |     fn vcl_inst_result(inout b: Builder, i: u32) -> ForeignVal[u32];
+// |     fn vcl_value_type(inout b: Builder, v: u32) -> ForeignVal[u32];
+// |     fn vcl_iconst(inout b: Builder, ty: u32, imm: i64) -> ForeignVal[u32];
+// |     fn vcl_f32const(inout b: Builder, bits: u32) -> ForeignVal[u32];
+// |     fn vcl_f64const(inout b: Builder, bits: u64) -> ForeignVal[u32];
+// |     fn vcl_binary(inout b: Builder, op: u32, x: u32, y: u32) -> ForeignVal[u32];
+// |     fn vcl_binary_imm(inout b: Builder, op: u32, x: u32, imm: i64) -> ForeignVal[u32];
+// |     fn vcl_unary(inout b: Builder, op: u32, x: u32) -> ForeignVal[u32];
+// |     fn vcl_convert(inout b: Builder, op: u32, ty: u32, x: u32) -> ForeignVal[u32];
+// |     fn vcl_ternary(inout b: Builder, op: u32, x: u32, y: u32, z: u32) -> ForeignVal[u32];
+// |     fn vcl_overflow(inout b: Builder, op: u32, x: u32, y: u32) -> ForeignVal[u32];
+// |     fn vcl_icmp(inout b: Builder, cc: u32, x: u32, y: u32) -> ForeignVal[u32];
+// |     fn vcl_icmp_imm(inout b: Builder, cc: u32, x: u32, imm: i64) -> ForeignVal[u32];
+// |     fn vcl_fcmp(inout b: Builder, cc: u32, x: u32, y: u32) -> ForeignVal[u32];
+// |     fn vcl_load(inout b: Builder, op: u32, ty: u32, flags: u32, addr: u32, offset: i32) -> ForeignVal[u32];
+// |     fn vcl_store(inout b: Builder, op: u32, flags: u32, x: u32, addr: u32, offset: i32) -> ForeignVal[Unit];
+// |     fn vcl_stack_addr(inout b: Builder, ty: u32, slot: u32, offset: i32) -> ForeignVal[u32];
+// |     fn vcl_stack_load(inout b: Builder, ty: u32, slot: u32, offset: i32) -> ForeignVal[u32];
+// |     fn vcl_stack_store(inout b: Builder, x: u32, slot: u32, offset: i32) -> ForeignVal[Unit];
+// |     fn vcl_extractlane(inout b: Builder, x: u32, lane: u32) -> ForeignVal[u32];
+// |     fn vcl_insertlane(inout b: Builder, x: u32, y: u32, lane: u32) -> ForeignVal[u32];
+// |     fn vcl_vconst(inout b: Builder, ty: u32, nocapture in bytes: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcl_shuffle(inout b: Builder, x: u32, y: u32, nocapture in mask: CSlice[u8]) -> ForeignVal[u32];
+// |     fn vcl_atomic_rmw(inout b: Builder, op: u32, ty: u32, flags: u32, addr: u32, x: u32) -> ForeignVal[u32];
+// |     fn vcl_atomic_load(inout b: Builder, ty: u32, flags: u32, addr: u32) -> ForeignVal[u32];
+// |     fn vcl_atomic_store(inout b: Builder, flags: u32, x: u32, addr: u32) -> ForeignVal[Unit];
+// |     fn vcl_func_addr(inout b: Builder, ty: u32, fref: u32) -> ForeignVal[u32];
+// |     fn vcl_symbol_value(inout b: Builder, ty: u32, gv: u32) -> ForeignVal[u32];
+// |     fn vcl_global_value(inout b: Builder, ty: u32, gv: u32) -> ForeignVal[u32];
+// |     fn vcl_get_stack_pointer(inout b: Builder, ty: u32) -> ForeignVal[u32];
+// |     fn vcl_call(inout b: Builder, fref: u32, nocapture in args: CSlice[u32]) -> ForeignVal[u32];
+// |     fn vcl_call_indirect(inout b: Builder, sigref: u32, callee: u32, nocapture in args: CSlice[u32]) -> ForeignVal[u32];
+// |     fn vcl_return_call(inout b: Builder, fref: u32, nocapture in args: CSlice[u32]) -> ForeignVal[Unit];
+// |     fn vcl_jump(inout b: Builder, blk: u32, nocapture in args: CSlice[u32]) -> ForeignVal[Unit];
+// |     fn vcl_brif(inout b: Builder, c: u32, then_blk: u32, nocapture in then_args: CSlice[u32], else_blk: u32, nocapture in else_args: CSlice[u32]) -> ForeignVal[Unit];
+// |     fn vcl_return(inout b: Builder, nocapture in vals: CSlice[u32]) -> ForeignVal[Unit];
+// |     fn vcl_trap(inout b: Builder, code: u32) -> ForeignVal[Unit];
+// |     fn vcl_trap_if(inout b: Builder, c: u32, if_nonzero: u32, code: u32) -> ForeignVal[Unit];
+// |     fn vcl_emit(inout b: Builder, nocapture in code: CSlice[u64], nocapture inout out: CSlice[u32]) -> ForeignVal[u32];
+// | }
+//
+// @vesper/cranelift: Cranelift 0.125 from Vesper (self-hosting wave SH0,
+// lane 4, #1126). Cranelift stays a vetted external library behind the C
+// shim crates/vesper-cranelift-sys (owner decision, 2026-11-19); this
+// package is the `.vsys` library above and typed wrappers that read like
+// the compiler's Rust lowering:
+//
+//     let x = block_param(inout b, entry, 0);
+//     let y = ins_iadd_imm(inout b, x, 1);
+//     ins_return1(inout b, y);
+//
+// Handles: `Module`, `Builder`, `Data` and `Object` are linear, so the
+// checker makes every path finalize each one exactly once: a builder is
+// consumed by `define_function` (or `builder_free`), a data description by
+// `define_data`, a module by `module_finish` (or `module_free`) and an
+// object by `object_publish`, `object_free` or the caller's copy.
+//
+// Everything else is a copy struct around Cranelift's own entity number or
+// the shim's code (crates/vesper-cranelift-sys/src/codes.rs), so values and
+// blocks are numbered the same as in a Rust lowering. A failed call returns
+// the invalid number (`is_invalid`) and records a sticky error on the
+// builder or module; `define_function` then reports it.
+
+pub copy struct Value {
+    id: u32,
+}
+pub copy struct Block {
+    id: u32,
+}
+pub copy struct Ty {
+    code: u32,
+}
+pub copy struct Var {
+    id: u32,
+}
+pub copy struct Slot {
+    id: u32,
+}
+pub copy struct FuncRef {
+    id: u32,
+}
+pub copy struct SigRef {
+    id: u32,
+}
+pub copy struct GlobalValue {
+    id: u32,
+}
+pub copy struct FuncId {
+    id: u32,
+}
+pub copy struct DataId {
+    id: u32,
+}
+pub copy struct SigId {
+    id: u32,
+}
+
+pub fn invalid() -> u32 {
+    4294967295
+}
+pub fn is_invalid(v: Value) -> bool {
+    v.id == invalid()
+}
+
+// ---------------------------------------------------------------------------
+// Types (`lane | log2(lanes) << 8`).
+
+pub fn ty_i8() -> Ty {
+    Ty {
+        code: 1
+    }
+}
+pub fn ty_i16() -> Ty {
+    Ty {
+        code: 2
+    }
+}
+pub fn ty_i32() -> Ty {
+    Ty {
+        code: 3
+    }
+}
+pub fn ty_i64() -> Ty {
+    Ty {
+        code: 4
+    }
+}
+pub fn ty_i128() -> Ty {
+    Ty {
+        code: 5
+    }
+}
+pub fn ty_f32() -> Ty {
+    Ty {
+        code: 6
+    }
+}
+pub fn ty_f64() -> Ty {
+    Ty {
+        code: 7
+    }
+}
+// `lanes_log2` of 4 makes I8X16 from I8.
+pub fn ty_vector(lane: Ty, lanes_log2: u32) -> Ty {
+    Ty {
+        code: lane.code | (lanes_log2 << 8)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Linkage, calling conventions, condition codes, memory flags, traps.
+
+pub fn linkage_import() -> u32 {
+    0
+}
+pub fn linkage_local() -> u32 {
+    1
+}
+pub fn linkage_preemptible() -> u32 {
+    2
+}
+pub fn linkage_hidden() -> u32 {
+    3
+}
+pub fn linkage_export() -> u32 {
+    4
+}
+pub fn call_conv_default() -> u32 {
+    0
+}
+pub fn call_conv_system_v() -> u32 {
+    1
+}
+pub fn call_conv_windows_fastcall() -> u32 {
+    2
+}
+pub fn call_conv_apple_aarch64() -> u32 {
+    3
+}
+pub fn call_conv_tail() -> u32 {
+    4
+}
+
+pub fn cc_eq() -> u32 {
+    0
+}
+pub fn cc_ne() -> u32 {
+    1
+}
+pub fn cc_slt() -> u32 {
+    2
+}
+pub fn cc_sge() -> u32 {
+    3
+}
+pub fn cc_sgt() -> u32 {
+    4
+}
+pub fn cc_sle() -> u32 {
+    5
+}
+pub fn cc_ult() -> u32 {
+    6
+}
+pub fn cc_uge() -> u32 {
+    7
+}
+pub fn cc_ugt() -> u32 {
+    8
+}
+pub fn cc_ule() -> u32 {
+    9
+}
+
+pub fn mem_notrap() -> u32 {
+    1
+}
+pub fn mem_aligned() -> u32 {
+    2
+}
+pub fn mem_readonly() -> u32 {
+    4
+}
+// `MemFlags::trusted()`: notrap and aligned.
+pub fn mem_trusted() -> u32 {
+    3
+}
+
+pub fn trap_stack_overflow() -> u32 {
+    1
+}
+pub fn trap_integer_overflow() -> u32 {
+    2
+}
+pub fn trap_heap_out_of_bounds() -> u32 {
+    3
+}
+pub fn trap_integer_division_by_zero() -> u32 {
+    4
+}
+// `TrapCode::user(n)`.
+pub fn trap_user(n: u32) -> u32 {
+    wrapping_add(16, n)
+}
+
+// ---------------------------------------------------------------------------
+// Modules.
+
+// An object module for `triple` (empty: the host) with Cranelift flags
+// (`key=value` separated by `;`), or None (`new_error_len` says why).
+pub fn module_new(in triple: Slice[u8], in flags: Slice[u8], in name: Slice[u8])
+    -> Option[Module] eff [Ffi[Cranelift]] {
+    Cranelift::vcl_module_new(in triple, in flags, in name)
+}
+pub fn new_error_len() -> u64 eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    Cranelift::vcl_new_error(inout none.as_slice_mut())
+}
+pub fn module_free(sink m: Module) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_module_free(m);
+}
+pub fn module_error_len(in m: Module) -> u64 eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    Cranelift::vcl_module_error(in m, inout none.as_slice_mut())
+}
+pub fn module_pointer_type(in m: Module) -> Ty eff [Ffi[Cranelift]] {
+    Ty {
+        code: Cranelift::vcl_module_pointer_type(in m)
+    }
+}
+pub fn module_keep_clif(inout m: Module, keep: bool) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_module_keep_clif(
+        inout m,
+        if keep {
+            1
+        } else {
+            0
+        }
+    );
+}
+pub fn module_code_bytes(in m: Module) -> u64 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_module_code_bytes(in m)
+}
+pub fn sig_new(inout m: Module, call_conv: u32) -> SigId eff [Ffi[Cranelift]] {
+    SigId {
+        id: Cranelift::vcl_sig_new(inout m, call_conv)
+    }
+}
+pub fn sig_param(inout m: Module, sig: SigId, ty: Ty) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_sig_param(inout m, sig.id, ty.code);
+}
+pub fn sig_return(inout m: Module, sig: SigId, ty: Ty) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_sig_return(inout m, sig.id, ty.code);
+}
+pub fn declare_function(inout m: Module, in name: Slice[u8], linkage: u32, sig: SigId)
+    -> FuncId eff [Ffi[Cranelift]] {
+    FuncId {
+        id: Cranelift::vcl_declare_function(inout m, in name, linkage, sig.id)
+    }
+}
+pub fn declare_data(inout m: Module, in name: Slice[u8], linkage: u32, writable: bool)
+    -> DataId eff [Ffi[Cranelift]] {
+    DataId {
+        id: Cranelift::vcl_declare_data(
+            inout m,
+            in name,
+            linkage,
+            if writable {
+                1
+            } else {
+                0
+            },
+            0
+        )
+    }
+}
+// Compile and define `func` from `b`; false if it failed
+// (`module_error_len`).
+pub fn define_function(inout m: Module, func: FuncId, sink b: Builder)
+    -> bool eff [Ffi[Cranelift]] {
+    Cranelift::vcl_define_function(inout m, func.id, b) == 0
+}
+pub fn define_data(inout m: Module, data: DataId, sink d: Data) -> bool eff [Ffi[Cranelift]] {
+    Cranelift::vcl_define_data(inout m, data.id, d) == 0
+}
+// Emit the object, or None (`new_error_len`).
+pub fn module_finish(sink m: Module) -> Option[Object] eff [Ffi[Cranelift]] {
+    Cranelift::vcl_module_finish(m)
+}
+
+// ---------------------------------------------------------------------------
+// Objects.
+
+pub fn object_len(in o: Object) -> u64 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_object_len(in o)
+}
+// The object's bytes, copied into a sequence; the object is freed.
+pub fn object_bytes(sink o: Object) -> ChunkSeq[u8] eff [Ffi[Cranelift]] {
+    let n = Cranelift::vcl_object_len(in o);
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    for _ in 0..n {
+        out.push(0);
+    }
+    Cranelift::vcl_object_read(in o, 0, inout out.as_slice_mut());
+    Cranelift::vcl_object_free(o);
+    out
+}
+// Hand the object to the Rust host (`vesper_cranelift_sys::take_published`).
+pub fn object_publish(sink o: Object) -> u64 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_object_publish(o)
+}
+pub fn object_free(sink o: Object) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_object_free(o);
+}
+
+// ---------------------------------------------------------------------------
+// Data descriptions.
+
+pub fn data_new() -> Option[Data] eff [Ffi[Cranelift]] {
+    Cranelift::vcl_data_new()
+}
+pub fn data_free(sink d: Data) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_data_free(d);
+}
+pub fn data_define(inout d: Data, in bytes: Slice[u8]) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_data_define(inout d, in bytes);
+}
+pub fn data_zeroinit(inout d: Data, size: u64) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_data_zeroinit(inout d, size);
+}
+pub fn data_align(inout d: Data, align: u64) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_data_align(inout d, align);
+}
+pub fn data_func_addr(inout d: Data, in m: Module, offset: u32, func: FuncId) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_data_func_addr(inout d, in m, offset, func.id);
+}
+pub fn data_data_addr(inout d: Data, in m: Module, offset: u32, data: DataId, addend: i64) eff [
+    Ffi[Cranelift]
+] {
+    Cranelift::vcl_data_data_addr(inout d, in m, offset, data.id, addend);
+}
+
+// ---------------------------------------------------------------------------
+// Builders.
+
+pub fn builder_new(in m: Module, sig: SigId) -> Option[Builder] eff [Ffi[Cranelift]] {
+    Cranelift::vcl_builder_new(in m, sig.id)
+}
+pub fn builder_free(sink b: Builder) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_builder_free(b);
+}
+pub fn builder_error_len(in b: Builder) -> u64 eff [Ffi[Cranelift]] {
+    let mut none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    Cranelift::vcl_builder_error(in b, inout none.as_slice_mut())
+}
+pub fn import_function(inout b: Builder, inout m: Module, func: FuncId)
+    -> FuncRef eff [Ffi[Cranelift]] {
+    FuncRef {
+        id: Cranelift::vcl_import_function(inout b, inout m, func.id)
+    }
+}
+pub fn import_signature(inout b: Builder, in m: Module, sig: SigId) -> SigRef eff [Ffi[Cranelift]] {
+    SigRef {
+        id: Cranelift::vcl_import_signature(inout b, in m, sig.id)
+    }
+}
+pub fn import_data(inout b: Builder, in m: Module, data: DataId)
+    -> GlobalValue eff [Ffi[Cranelift]] {
+    GlobalValue {
+        id: Cranelift::vcl_import_data(inout b, in m, data.id)
+    }
+}
+pub fn create_block(inout b: Builder) -> Block eff [Ffi[Cranelift]] {
+    Block {
+        id: Cranelift::vcl_create_block(inout b)
+    }
+}
+pub fn append_block_param(inout b: Builder, blk: Block, ty: Ty) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_append_block_param(inout b, blk.id, ty.code)
+    }
+}
+pub fn append_block_params_for_function_params(inout b: Builder, blk: Block)
+    -> u32 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_append_block_params_for_function_params(inout b, blk.id)
+}
+pub fn block_param(inout b: Builder, blk: Block, i: u32) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_block_param(inout b, blk.id, i)
+    }
+}
+pub fn switch_to_block(inout b: Builder, blk: Block) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_switch_to_block(inout b, blk.id);
+}
+pub fn seal_block(inout b: Builder, blk: Block) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_seal_block(inout b, blk.id);
+}
+pub fn seal_all_blocks(inout b: Builder) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_seal_all_blocks(inout b);
+}
+pub fn declare_var(inout b: Builder, ty: Ty) -> Var eff [Ffi[Cranelift]] {
+    Var {
+        id: Cranelift::vcl_declare_var(inout b, ty.code)
+    }
+}
+pub fn def_var(inout b: Builder, var: Var, v: Value) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_def_var(inout b, var.id, v.id);
+}
+pub fn use_var(inout b: Builder, var: Var) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_use_var(inout b, var.id)
+    }
+}
+pub fn create_stack_slot(inout b: Builder, size: u32, align_shift: u32)
+    -> Slot eff [Ffi[Cranelift]] {
+    Slot {
+        id: Cranelift::vcl_stack_slot(inout b, size, align_shift)
+    }
+}
+// Result `i` of the last instruction emitted (the overflow flag of
+// `ins_uadd_overflow` is result 1).
+pub fn inst_result(inout b: Builder, i: u32) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_inst_result(inout b, i)
+    }
+}
+pub fn value_type(inout b: Builder, v: Value) -> Ty eff [Ffi[Cranelift]] {
+    Ty {
+        code: Cranelift::vcl_value_type(inout b, v.id)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Instructions, by shape. `binary`/`binary_imm`/`unary`/`convert` take the
+// opcode codes of codes.rs; the named wrappers below cover the compiler's
+// instruction set (the inventory in
+// docs/parallel-results/self-host-cranelift-shim.md).
+
+pub fn ins_binary(inout b: Builder, op: u32, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_binary(inout b, op, x.id, y.id)
+    }
+}
+pub fn ins_binary_imm(inout b: Builder, op: u32, x: Value, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_binary_imm(inout b, op, x.id, imm)
+    }
+}
+pub fn ins_unary(inout b: Builder, op: u32, x: Value) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_unary(inout b, op, x.id)
+    }
+}
+pub fn ins_convert(inout b: Builder, op: u32, ty: Ty, x: Value) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_convert(inout b, op, ty.code, x.id)
+    }
+}
+pub fn ins_overflow(inout b: Builder, op: u32, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_overflow(inout b, op, x.id, y.id)
+    }
+}
+
+pub fn ins_iconst(inout b: Builder, ty: Ty, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_iconst(inout b, ty.code, imm)
+    }
+}
+pub fn ins_f32const(inout b: Builder, bits: u32) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_f32const(inout b, bits)
+    }
+}
+pub fn ins_f64const(inout b: Builder, bits: u64) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_f64const(inout b, bits)
+    }
+}
+pub fn ins_iadd(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 1, x, y)
+}
+pub fn ins_isub(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 2, x, y)
+}
+pub fn ins_imul(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 3, x, y)
+}
+pub fn ins_udiv(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 4, x, y)
+}
+pub fn ins_sdiv(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 5, x, y)
+}
+pub fn ins_urem(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 6, x, y)
+}
+pub fn ins_srem(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 7, x, y)
+}
+pub fn ins_umulhi(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 8, x, y)
+}
+pub fn ins_smulhi(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 9, x, y)
+}
+pub fn ins_band(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 10, x, y)
+}
+pub fn ins_bor(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 11, x, y)
+}
+pub fn ins_bxor(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 12, x, y)
+}
+pub fn ins_band_not(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 13, x, y)
+}
+pub fn ins_ishl(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 16, x, y)
+}
+pub fn ins_ushr(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 17, x, y)
+}
+pub fn ins_sshr(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 18, x, y)
+}
+pub fn ins_rotl(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 19, x, y)
+}
+pub fn ins_rotr(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 20, x, y)
+}
+pub fn ins_umin(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 21, x, y)
+}
+pub fn ins_umax(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 22, x, y)
+}
+pub fn ins_smin(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 23, x, y)
+}
+pub fn ins_smax(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 24, x, y)
+}
+pub fn ins_fadd(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 25, x, y)
+}
+pub fn ins_fsub(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 26, x, y)
+}
+pub fn ins_fmul(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 27, x, y)
+}
+pub fn ins_fdiv(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_binary(inout b, 28, x, y)
+}
+pub fn ins_iadd_imm(inout b: Builder, x: Value, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    ins_binary_imm(inout b, 1, x, imm)
+}
+pub fn ins_imul_imm(inout b: Builder, x: Value, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    ins_binary_imm(inout b, 2, x, imm)
+}
+pub fn ins_band_imm(inout b: Builder, x: Value, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    ins_binary_imm(inout b, 10, x, imm)
+}
+pub fn ins_bor_imm(inout b: Builder, x: Value, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    ins_binary_imm(inout b, 11, x, imm)
+}
+pub fn ins_bxor_imm(inout b: Builder, x: Value, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    ins_binary_imm(inout b, 12, x, imm)
+}
+pub fn ins_ishl_imm(inout b: Builder, x: Value, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    ins_binary_imm(inout b, 16, x, imm)
+}
+pub fn ins_ushr_imm(inout b: Builder, x: Value, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    ins_binary_imm(inout b, 17, x, imm)
+}
+pub fn ins_sshr_imm(inout b: Builder, x: Value, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    ins_binary_imm(inout b, 18, x, imm)
+}
+pub fn ins_ineg(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 1, x)
+}
+pub fn ins_bnot(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 2, x)
+}
+pub fn ins_clz(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 3, x)
+}
+pub fn ins_ctz(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 4, x)
+}
+pub fn ins_popcnt(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 5, x)
+}
+pub fn ins_bswap(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 6, x)
+}
+pub fn ins_fneg(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 10, x)
+}
+pub fn ins_fabs(inout b: Builder, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_unary(inout b, 11, x)
+}
+pub fn ins_uextend(inout b: Builder, ty: Ty, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_convert(inout b, 1, ty, x)
+}
+pub fn ins_sextend(inout b: Builder, ty: Ty, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_convert(inout b, 2, ty, x)
+}
+pub fn ins_ireduce(inout b: Builder, ty: Ty, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_convert(inout b, 3, ty, x)
+}
+pub fn ins_bitcast(inout b: Builder, ty: Ty, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_convert(inout b, 4, ty, x)
+}
+pub fn ins_uadd_overflow(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_overflow(inout b, 1, x, y)
+}
+pub fn ins_smul_overflow(inout b: Builder, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_overflow(inout b, 6, x, y)
+}
+pub fn ins_icmp(inout b: Builder, cc: u32, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_icmp(inout b, cc, x.id, y.id)
+    }
+}
+pub fn ins_icmp_imm(inout b: Builder, cc: u32, x: Value, imm: i64) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_icmp_imm(inout b, cc, x.id, imm)
+    }
+}
+pub fn ins_fcmp(inout b: Builder, cc: u32, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_fcmp(inout b, cc, x.id, y.id)
+    }
+}
+pub fn ins_select(inout b: Builder, c: Value, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_ternary(inout b, 1, c.id, x.id, y.id)
+    }
+}
+pub fn ins_bitselect(inout b: Builder, c: Value, x: Value, y: Value) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_ternary(inout b, 2, c.id, x.id, y.id)
+    }
+}
+
+// Memory. `op` 1 is `load`; 2-7 are uload8, sload8, uload16, sload16,
+// uload32, sload32. Stores: 1 store, 2 istore8, 3 istore16, 4 istore32.
+pub fn ins_load(inout b: Builder, ty: Ty, flags: u32, addr: Value, offset: i32)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_load(inout b, 1, ty.code, flags, addr.id, offset)
+    }
+}
+pub fn ins_uload8(inout b: Builder, ty: Ty, flags: u32, addr: Value, offset: i32)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_load(inout b, 2, ty.code, flags, addr.id, offset)
+    }
+}
+pub fn ins_uload32(inout b: Builder, flags: u32, addr: Value, offset: i32)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_load(inout b, 6, 4, flags, addr.id, offset)
+    }
+}
+pub fn ins_store(inout b: Builder, flags: u32, x: Value, addr: Value, offset: i32) eff [
+    Ffi[Cranelift]
+] {
+    Cranelift::vcl_store(inout b, 1, flags, x.id, addr.id, offset);
+}
+pub fn ins_istore8(inout b: Builder, flags: u32, x: Value, addr: Value, offset: i32) eff [
+    Ffi[Cranelift]
+] {
+    Cranelift::vcl_store(inout b, 2, flags, x.id, addr.id, offset);
+}
+pub fn ins_istore32(inout b: Builder, flags: u32, x: Value, addr: Value, offset: i32) eff [
+    Ffi[Cranelift]
+] {
+    Cranelift::vcl_store(inout b, 4, flags, x.id, addr.id, offset);
+}
+pub fn ins_stack_addr(inout b: Builder, ty: Ty, slot: Slot, offset: i32)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_stack_addr(inout b, ty.code, slot.id, offset)
+    }
+}
+pub fn ins_stack_load(inout b: Builder, ty: Ty, slot: Slot, offset: i32)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_stack_load(inout b, ty.code, slot.id, offset)
+    }
+}
+pub fn ins_stack_store(inout b: Builder, x: Value, slot: Slot, offset: i32) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_stack_store(inout b, x.id, slot.id, offset);
+}
+pub fn ins_extractlane(inout b: Builder, x: Value, lane: u32) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_extractlane(inout b, x.id, lane)
+    }
+}
+pub fn ins_insertlane(inout b: Builder, x: Value, y: Value, lane: u32)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_insertlane(inout b, x.id, y.id, lane)
+    }
+}
+pub fn ins_splat(inout b: Builder, ty: Ty, x: Value) -> Value eff [Ffi[Cranelift]] {
+    ins_convert(inout b, 13, ty, x)
+}
+pub fn ins_vconst(inout b: Builder, ty: Ty, in bytes: Slice[u8]) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_vconst(inout b, ty.code, in bytes)
+    }
+}
+pub fn ins_shuffle(inout b: Builder, x: Value, y: Value, in mask: Slice[u8])
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_shuffle(inout b, x.id, y.id, in mask)
+    }
+}
+// `op` 1 add, 2 sub, 3 and, 4 nand, 5 or, 6 xor, 7 xchg, 8 umin, 9 umax,
+// 10 smin, 11 smax.
+pub fn ins_atomic_rmw(inout b: Builder, op: u32, ty: Ty, flags: u32, addr: Value, x: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_atomic_rmw(inout b, op, ty.code, flags, addr.id, x.id)
+    }
+}
+pub fn ins_atomic_load(inout b: Builder, ty: Ty, flags: u32, addr: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_atomic_load(inout b, ty.code, flags, addr.id)
+    }
+}
+pub fn ins_atomic_store(inout b: Builder, flags: u32, x: Value, addr: Value) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_atomic_store(inout b, flags, x.id, addr.id);
+}
+pub fn ins_func_addr(inout b: Builder, ty: Ty, f: FuncRef) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_func_addr(inout b, ty.code, f.id)
+    }
+}
+pub fn ins_symbol_value(inout b: Builder, ty: Ty, gv: GlobalValue) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_symbol_value(inout b, ty.code, gv.id)
+    }
+}
+pub fn ins_global_value(inout b: Builder, ty: Ty, gv: GlobalValue) -> Value eff [Ffi[Cranelift]] {
+    Value {
+        id: Cranelift::vcl_global_value(inout b, ty.code, gv.id)
+    }
+}
+
+// Control flow. Argument lists are sequences of value numbers (`vals`
+// builds one); the 0-3 argument forms need none.
+pub fn vals1(a: Value) -> ChunkSeq[u32] {
+    let mut s = ChunkSeq::with_capacity[u32](1);
+    s.push(a.id);
+    s
+}
+pub fn vals2(a: Value, c: Value) -> ChunkSeq[u32] {
+    let mut s = ChunkSeq::with_capacity[u32](2);
+    s.push(a.id);
+    s.push(c.id);
+    s
+}
+pub fn vals3(a: Value, c: Value, d: Value) -> ChunkSeq[u32] {
+    let mut s = ChunkSeq::with_capacity[u32](3);
+    s.push(a.id);
+    s.push(c.id);
+    s.push(d.id);
+    s
+}
+pub fn ins_call(inout b: Builder, f: FuncRef, in args: Slice[u32]) -> u32 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_call(inout b, f.id, in args)
+}
+// A call with one result.
+pub fn ins_call1(inout b: Builder, f: FuncRef, in args: Slice[u32]) -> Value eff [Ffi[Cranelift]] {
+    Cranelift::vcl_call(inout b, f.id, in args);
+    inst_result(inout b, 0)
+}
+pub fn ins_call_indirect(inout b: Builder, sig: SigRef, callee: Value, in args: Slice[u32])
+    -> u32 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_call_indirect(inout b, sig.id, callee.id, in args)
+}
+pub fn ins_jump(inout b: Builder, blk: Block, in args: Slice[u32]) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_jump(inout b, blk.id, in args);
+}
+pub fn ins_jump0(inout b: Builder, blk: Block) eff [Ffi[Cranelift]] {
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    Cranelift::vcl_jump(inout b, blk.id, in none.as_slice());
+}
+pub fn ins_brif(
+    inout b: Builder,
+    c: Value,
+    yes: Block,
+    in yes_args: Slice[u32],
+    no: Block,
+    in no_args: Slice[u32]
+) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_brif(inout b, c.id, yes.id, in yes_args, no.id, in no_args);
+}
+pub fn ins_brif0(inout b: Builder, c: Value, yes: Block, no: Block) eff [Ffi[Cranelift]] {
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    Cranelift::vcl_brif(inout b, c.id, yes.id, in none.as_slice(), no.id, in none.as_slice());
+}
+pub fn ins_return(inout b: Builder, in vals: Slice[u32]) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_return(inout b, in vals);
+}
+pub fn ins_return1(inout b: Builder, v: Value) eff [Ffi[Cranelift]] {
+    let vs = vals1(v);
+    Cranelift::vcl_return(inout b, in vs.as_slice());
+}
+pub fn ins_trap(inout b: Builder, code: u32) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_trap(inout b, code);
+}
+pub fn ins_trapnz(inout b: Builder, c: Value, code: u32) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_trap_if(inout b, c.id, 1, code);
+}
+pub fn ins_trapz(inout b: Builder, c: Value, code: u32) eff [Ffi[Cranelift]] {
+    Cranelift::vcl_trap_if(inout b, c.id, 0, code);
+}
+
+// ---------------------------------------------------------------------------
+// Batches: many instructions in one call. Push instructions with the
+// `batch_*` helpers, then `emit`; operand `batch_ref(i)` names the result of
+// the batch's instruction `i`. Kinds are `batch` in crates/vesper-cranelift-sys.
+
+pub fn batch_ref(i: u32) -> u64 {
+    9223372036854775808 | widen_u64(i)
+}
+pub fn batch_value(v: Value) -> u64 {
+    widen_u64(v.id)
+}
+fn head(kind: u64, op: u32, ty: u32) -> u64 {
+    kind | (widen_u64(op) << 8) | (widen_u64(ty) << 32)
+}
+pub fn batch_iconst(inout code: ChunkSeq[u64], ty: Ty, imm: i64) {
+    code.push(head(1, 0, ty.code));
+    code.push(wrapping_u64(imm));
+}
+pub fn batch_binary(inout code: ChunkSeq[u64], op: u32, x: u64, y: u64) {
+    code.push(head(2, op, 0));
+    code.push(x);
+    code.push(y);
+}
+pub fn batch_binary_imm(inout code: ChunkSeq[u64], op: u32, x: u64, imm: i64) {
+    code.push(head(3, op, 0));
+    code.push(x);
+    code.push(wrapping_u64(imm));
+}
+pub fn batch_unary(inout code: ChunkSeq[u64], op: u32, x: u64) {
+    code.push(head(4, op, 0));
+    code.push(x);
+}
+pub fn batch_icmp(inout code: ChunkSeq[u64], cc: u32, x: u64, y: u64) {
+    code.push(head(5, cc, 0));
+    code.push(x);
+    code.push(y);
+}
+pub fn batch_icmp_imm(inout code: ChunkSeq[u64], cc: u32, x: u64, imm: i64) {
+    code.push(head(6, cc, 0));
+    code.push(x);
+    code.push(wrapping_u64(imm));
+}
+pub fn batch_select(inout code: ChunkSeq[u64], c: u64, x: u64, y: u64) {
+    code.push(head(8, 1, 0));
+    code.push(c);
+    code.push(x);
+    code.push(y);
+}
+// Emit `code`; `out` gets one value number per instruction. Returns how
+// many were emitted, or `invalid()`.
+pub fn emit(inout b: Builder, in code: Slice[u64], inout out: Slice[u32])
+    -> u32 eff [Ffi[Cranelift]] {
+    Cranelift::vcl_emit(inout b, in code, inout out)
+}

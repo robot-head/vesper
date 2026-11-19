@@ -1,8 +1,9 @@
 # P3b gaps lane 6: fixed-size arrays and constant tables (#1091)
 
-Part 1 of #1091. Base `9305b24`, with `origin/main` merged at `96b110e`.
-Part 2, which adds `[u8; N]` fields to ABI v3 mirrors, follows in its own PR.
-Lane 2 (#1107) has merged, so part 2 is unblocked.
+#1091 in two parts. Part 1 (#1115, base `9305b24`) added arrays and
+constants. Part 2 (base `b8c6046`) adds array fields to ABI v3 mirrors and
+measures the Warp and warp-tcp rewrites; it is described under
+[Part 2](#part-2-array-fields-in-export-abi-v3-mirrors).
 
 ## What changed
 
@@ -141,13 +142,9 @@ Counts are from `scripts/bench.sh` with `CALLGRIND=1`, over 5 batches:
 | decode | 175.61M | 175.19M | 160.21M | 1.00x -> 0.91x |
 | encode | 63.67M | 79.13M | 73.05M | 1.24x -> 1.15x |
 
-### Warp ACK ranges: not measured, deferred to part 2
+### Warp and warp-tcp
 
-- Warp's ACK ranges are Rust's `ReceivedPackets`.
-- The SACK slots of warp-tcp (`Opts.b0..b3`) are fields of a copy struct
-  that crosses the v3 export boundary.
-- Both rewrites need `[T; N]` fields in ABI v3 mirrors, which is part 2.
-  Part 2 will measure them against warp-tcp's `abba drive codec`.
+See part 2 below.
 
 ## Stage 1 guard
 
@@ -167,7 +164,8 @@ Counts are from `scripts/bench.sh` with `CALLGRIND=1`, over 5 batches:
 
   A view needs either packed array storage or a copy-in/copy-out
   boundary.
-- Packed element storage: `[u8; N]` takes `8 * N` bytes.
+- Packed element storage: `[u8; N]` takes `8 * N` bytes, in memory and in
+  an export mirror.
 - Writes to a nested element: `a[i][j] = v` and `a[i].f = v`.
 - Importing a constant across modules or packages with `use`, and
   constant names as lengths (`[0; LEN]`).
@@ -179,3 +177,103 @@ Counts are from `scripts/bench.sh` with `CALLGRIND=1`, over 5 batches:
   is not bounded until checking.
 - Array element writes of function values are refused (E1540): native
   call-target tracking does not follow dynamic element stores.
+
+## Part 2: array fields in export ABI v3 mirrors
+
+### What changed
+
+- **Bindings** (`src/native_export/binding.rs`, `binding_v2.rs`). The
+  interface cannot tell `[u8; 2]` from `(u8, u8)`, because an array is the
+  homogeneous tuple. So the binding names a homogeneous tuple of more than
+  eight elements, the longest Rust tuple with an `Abi` impl, as the Rust
+  array `[T; N]`. A shorter one stays a Rust tuple, so every committed
+  binding is unchanged (none of the 50 has a longer homogeneous tuple).
+- **Mirror cells.** An array field of a copy struct is its element cells
+  in order, so the struct stays `#[repr(C)]` and is lent in place:
+  `[u8; 32]` is `[Word<u8>; 32]`, `[u64; 16]` is `[u64; 16]`, and an array
+  of mirrored structs is an array of their mirrors. A short array is the
+  tuple's `Words` cell, as before.
+- **`vesper-port-abi`.** `Abi for [T; N]` (elements in order) and
+  `Mirror for [T; N]` (`N * T::WORDS` words).
+- **Checker.** Part 1 proved `a[i + 1]` in bounds but still required
+  `Fail[ArithOverflow]` for the `+`. Now `+`, `-` and `*` with a `for`
+  loop index as an operand cannot overflow when every corner of the
+  operands' bounds fits the kind (`src/check.rs`). Elsewhere overflow
+  still needs exact facts, which keeps `tests/lockstep.rs` in agreement
+  with the Lean reference checker, which has no loops. Index bounds go
+  through `+` and `-` of bounded operands when the right operand is pure,
+  so `a[15 - i]` is proved too (`src/arrays/check.rs`). Both are needed
+  for the scoreboard shifts below.
+- **Manuscript.** Two sentences in the §2.2 arrays paragraph: the loop
+  arithmetic rule and the export rule.
+
+### Tests
+
+- `tests/arrays_export.rs` (5 tests): the interface marks the structs
+  `repr_c`, the committed pilot binding is what the compiler writes, the
+  cells and Rust types (nested arrays, `types_path`), and an 8-element
+  array keeps its tuple binding.
+- `tests/arrays.rs` gains `loop_index_arithmetic_is_total`, differential
+  on every backend, with four near misses that still need `Fail`.
+- `vesper-port-abi` unit tests for both impls.
+- The pilot's new `arrays` library (`crates/vesper-port-pilot`, flagged
+  in the PR as outside the lane's paths): `vesper/arrays.ves`, the
+  committed `port/arrays.rs`, and `tests/arrays.rs` (5 tests) under
+  `vesper-port`. It has a record with `[u8; 32]`, `[u64; 16]` and
+  `[u8; 2]` fields, written in place, an `IndexOutOfBounds` raise through
+  `set`, whole arrays as parameter and result, and a 16-block SACK-style
+  scoreboard checked against a Rust model over 200 random blocks.
+  `build.rs` and `BUILD.bazel` gain the library next to `widen`.
+- Still passing: `arrays`, `const_items`, `native_export_v2`, `_v3`,
+  `_cli`, `_f32`, `_handle_seqs`, `_lent_handles`, `loops`, `numeric`,
+  `range_facts`, `integer_widths`, `effect_optimization`, and the pilot's
+  `gauge` and `widen` tests.
+
+### Port measurements (local rewrites, not committed)
+
+Callgrind `Ir` on this Linux x86_64 container, release builds of each
+crate's `abba` example. Each before/after pair gives the same digest. The
+rewrite diffs are kept with the project's files, not in the repository.
+
+**Warp ACK ranges.** The rewrite gives `ReceivedPackets` a mirror
+`AckRanges { r: [AckRange; 32] }` in place of the lent `[AckRange; N]`
+slice. In `ack.ves`, each checked `try_get`/`try_set` becomes
+`ranges.r[i & 31]`. The ranges are live below `len <= 32`, so the mask
+changes nothing.
+
+| Workload (`abba once`, 20 batches) | Rust | Port before | Port after | Ratio before -> after |
+|---|---:|---:|---:|---|
+| ack | 111.2M | 181.5M | 166.0M | 1.63x -> 1.49x |
+| transfer | 498.4M | 510.6M | 510.4M | 1.02x -> 1.02x |
+
+The rewrite only works for `N = 32`. `ReceivedPackets<N>` is generic in
+`N`, and a Vesper array length must be a literal, so the tests that use
+`ReceivedPackets::<4>` and `::<8>` hit the rewrite's `N == 32` assert
+(6 of `ack_tracking`'s tests). Adopting it needs const-generic lengths
+or one Vesper struct per `N` that is used.
+
+**warp-tcp SACK slots.** The rewrite replaces `Opts.b0..b3` with
+`sack: [Blk; 4]`, and the `if k == 0 ... else` chains in
+`opts_blk`/`opts_set_blk` with `o.sack[k & 3]`. Four elements is below
+the array threshold, so the field still crosses as a tuple and part 1
+alone was enough.
+
+| Workload (`abba worker`, 64 batches) | Rust | Port before | Port after | Ratio before -> after |
+|---|---:|---:|---:|---|
+| codec | 33.94M | 21.82M | 21.95M | 0.64x -> 0.65x |
+| transfer | 131.2M | 185.6M | 186.1M | 1.41x -> 1.42x |
+
+There is no gain here. The four-way branch on a by-value `Opts` is
+already as cheap as the indexed read, which copies the element out of the
+by-value struct. With `min64(k, 3) & 3` instead of `k & 3`, the codec
+count is +1.7%.
+
+### Remaining gaps (part 2)
+
+- Array lengths cannot be const generics, so a Rust `[T; N]` generic in
+  `N` has no single Vesper mirror (Warp's `ReceivedPackets<N>`).
+- `[u8; N]` fields take a word per byte in the mirror, like every narrow
+  field. A packed mirror would need packed array storage (part 1 gap).
+- An array of up to eight elements crosses as a Rust tuple.
+- `integer_bounds` does not yet bound `+`, `-` or `*` results, so a
+  nested sum like `i * 2 + 1` still needs `Fail[ArithOverflow]`.

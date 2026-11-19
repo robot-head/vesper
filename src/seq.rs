@@ -64,6 +64,15 @@ pub const FAULT_STATUS: i64 = 71;
 /// Header words of a native sequence: length, capacity, data pointer.
 pub const HEADER_BYTES: i64 = 24;
 
+/// The shape of the index a [`SeqOp::BoundsGuard`] checks: the loop index,
+/// negated or not, plus `plus` and minus `minus` loop-invariant terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct IndexForm {
+    pub negated: bool,
+    pub plus: u8,
+    pub minus: u8,
+}
+
 /// A sequence or slice operation in Place IR (`Op::Seq`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum SeqOp {
@@ -114,12 +123,14 @@ pub enum SeqOp {
     /// hoisting pass ([`crate::bounds_hoist`]) creates it, in the fast copy
     /// of a counted loop; its operands are those of the access it replaces.
     Hoisted(Access),
-    /// `[lo, hi, s1, c1, .., sn, cn]`: whether the range `lo..hi` (`lo..=hi`
-    /// when `inclusive`) is empty, or `c_k + i` is in bounds of `s_k` for
-    /// every index `i` of the range and every `k` (`c_k + hi` fits the
-    /// length without overflow). A `bool`; total. Created by
-    /// [`crate::bounds_hoist`].
-    BoundsGuard { inclusive: bool },
+    /// `[lo, hi, s, p1, .., pm, n1, .., nk, ok?]`: whether `ok` (when given)
+    /// holds and either the range `lo..hi` (`lo..=hi` when `inclusive`) is empty or
+    /// the index `form` describes is in bounds of `s` for every index `i` of
+    /// the range: `i + p1 + .. + pm - n1 - .. - nk` (`p1 + .. - i - n1 -
+    /// ..` when the form is negated), evaluated exactly, so that a sum that
+    /// does not fit 64 bits makes the guard false. A `bool`; total. Created
+    /// by [`crate::bounds_hoist`].
+    BoundsGuard { inclusive: bool, form: IndexForm },
     /// `s.copy_from(at, in src)` (`try_copy_from` when `total`): copies every
     /// element of `src` to `s[at..at + src.len()]` with one bounds check.
     /// The checked form raises `IndexOutOfBounds` and the total one yields

@@ -1,0 +1,7 @@
+# @vesper/cranelift (#1126): the `.vsys` library and wrappers that
+# crates/vesper-cranelift-sys's tests load.
+filegroup(
+    name = "files",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+    visibility = ["//visibility:public"],
+)

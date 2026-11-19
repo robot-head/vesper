@@ -36,6 +36,11 @@ fn main() {
         vesper_port_harness::Port::new("widen", "vesper/widen.ves")
             .binding("port/widen.rs")
             .build();
+        // The fixed-size array library (#1091): `[T; N]` fields of copy
+        // structs lent in place. It has no Rust build either.
+        vesper_port_harness::Port::new("arrays", "vesper/arrays.ves")
+            .binding("port/arrays.rs")
+            .build();
     }
 }
 

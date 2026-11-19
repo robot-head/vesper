@@ -1,0 +1,443 @@
+// @vesper-std/hash::blake3: BLAKE3 in portable Vesper.
+//
+// A port of the BLAKE3 reference implementation (one chunk state, a stack
+// of chaining values, the 7-round compression in `compress`): `hash`,
+// keyed hashing and key derivation, one-shot and incremental, with
+// extendable output. It is the portable fallback and the reference for
+// evaluator and executable builds; code linked into a Rust host should use
+// `@vesper-std/hash-sys`, which calls the vetted `blake3` crate through
+// `.vsys`. Both produce the official test vectors.
+use self::compress::compress;
+
+fn chunk_start() -> u32 {
+    1
+}
+
+fn chunk_end() -> u32 {
+    2
+}
+
+fn parent_flag() -> u32 {
+    4
+}
+
+fn root_flag() -> u32 {
+    8
+}
+
+fn keyed_flag() -> u32 {
+    16
+}
+
+fn context_flag() -> u32 {
+    32
+}
+
+fn material_flag() -> u32 {
+    64
+}
+
+// A 32-byte digest as four little-endian words: byte `i` is bits
+// `8 * (i % 8)..` of word `i / 8`. Digests compare, order and hash by value.
+pub copy struct Digest {
+    w0: u64,
+    w1: u64,
+    w2: u64,
+    w3: u64
+}
+
+impl Eq for Digest {}
+
+impl Ord for Digest {}
+
+impl Hash for Digest {}
+
+// An incremental BLAKE3 hasher.
+pub struct Blake3 {
+    key: ChunkSeq[u32],
+    cv: ChunkSeq[u32],
+    block: ChunkSeq[u8],
+    words: ChunkSeq[u32],
+    out: ChunkSeq[u32],
+    stack: ChunkSeq[u32],
+    block_len: u64,
+    blocks: u64,
+    chunk: u64,
+    flags: u32
+}
+
+fn iv_words() -> ChunkSeq[u32] {
+    let mut k: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](8);
+    k.push(1779033703);
+    k.push(3144134277);
+    k.push(1013904242);
+    k.push(2773480762);
+    k.push(1359893119);
+    k.push(2600822924);
+    k.push(528734635);
+    k.push(1541459225);
+    k
+}
+
+fn zeros_u32(n: u64) -> ChunkSeq[u32] {
+    let mut s: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    s.resize(n, 0);
+    s
+}
+
+fn zeros_u8(n: u64) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    s.resize(n, 0);
+    s
+}
+
+fn with_key(sink key: ChunkSeq[u32], flags: u32) -> Blake3 {
+    let mut cv: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](8);
+    cv.extend(in key.as_slice());
+    Blake3 {
+        key: key,
+        cv: cv,
+        block: zeros_u8(64),
+        words: zeros_u32(16),
+        out: zeros_u32(16),
+        stack: ChunkSeq::new[u32](),
+        block_len: 0,
+        blocks: 0,
+        chunk: 0,
+        flags: flags
+    }
+}
+
+// A hasher for the default (unkeyed) mode.
+pub fn blake3_new() -> Blake3 {
+    with_key(iv_words(), 0)
+}
+
+// Little-endian words of the first `8 * n` bytes of `b` (missing bytes are 0).
+fn le_words(in b: Slice[u8], n: u64) -> ChunkSeq[u32] {
+    let mut w: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let x = match b.try_read_u32_le(wrapping_mul(i, 4)) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        w.push(x);
+        i = wrapping_add(i, 1);
+    }
+    w
+}
+
+// A keyed hasher: `None` unless `key` is exactly 32 bytes.
+pub fn blake3_new_keyed(in key: Slice[u8]) -> Option[Blake3] {
+    if key.len() != 32 {
+        Option::None
+    } else {
+        Option::Some(with_key(le_words(in key, 8), keyed_flag()))
+    }
+}
+
+// A key-derivation hasher for the context string `context`: feed it the key
+// material, then finalize.
+pub fn blake3_new_derive_key(in context: Str) -> Blake3 {
+    let mut h = with_key(iv_words(), context_flag());
+    h.update(in context.as_bytes());
+    let mut ck: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](32);
+    h.finalize_xof(32, inout ck);
+    with_key(le_words(in ck.as_slice(), 8), material_flag())
+}
+
+fn digest_of(in b: Slice[u8]) -> Digest {
+    Digest {
+        w0: read_word(in b, 0),
+        w1: read_word(in b, 8),
+        w2: read_word(in b, 16),
+        w3: read_word(in b, 24)
+    }
+}
+
+fn read_word(in b: Slice[u8], at: u64) -> u64 {
+    match b.try_read_u64_le(at) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+impl Blake3 {
+    // Bytes hashed so far.
+    pub fn count(in self) -> u64 {
+        wrapping_add(
+            wrapping_mul(self.chunk, 1024),
+            wrapping_add(wrapping_mul(self.blocks, 64), self.block_len)
+        )
+    }
+
+    fn start_flag(in self) -> u32 {
+        if self.blocks == 0 {
+            chunk_start()
+        } else {
+            0
+        }
+    }
+
+    // Load the buffered block into `words`.
+    fn load_block(inout self) {
+        let mut i: u64 = 0;
+        loop {
+            if i >= 16 {
+                break;
+            }
+            let x = match self.block.try_read_u32_le(wrapping_mul(i, 4)) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            self.words.try_set(i, x);
+            i = wrapping_add(i, 1);
+        }
+    }
+
+    // Compress the full buffered block into the chunk's chaining value.
+    fn compress_block(inout self) {
+        self.load_block();
+        let f = self.flags | self.start_flag();
+        compress(
+            in self.cv.as_slice(),
+            in self.words.as_slice(),
+            self.chunk,
+            64,
+            f,
+            inout self.out.as_slice_mut()
+        );
+        self.cv.try_copy_from(0, in self.out[0..8]);
+        self.blocks = wrapping_add(self.blocks, 1);
+        self.block_len = 0;
+        self.block.try_fill(0, 64, 0);
+    }
+
+    // Close the full chunk, merge its chaining value into the stack and
+    // start the next chunk.
+    fn finish_chunk(inout self) {
+        self.load_block();
+        let f = self.flags | self.start_flag() | chunk_end();
+        let bl = wrapping_u32(self.block_len);
+        compress(
+            in self.cv.as_slice(),
+            in self.words.as_slice(),
+            self.chunk,
+            bl,
+            f,
+            inout self.out.as_slice_mut()
+        );
+        let mut total = wrapping_add(self.chunk, 1);
+        // `out[0..8]` is the new chaining value; merge completed subtrees.
+        loop {
+            if (total & 1) != 0 {
+                break;
+            }
+            let top = self.stack.len();
+            if top < 8 {
+                break;
+            }
+            let at = wrapping_sub(top, 8);
+            self.words.try_copy_from(0, in self.stack[at..top]);
+            self.words.try_copy_from(8, in self.out[0..8]);
+            compress(
+                in self.key.as_slice(),
+                in self.words.as_slice(),
+                0,
+                64,
+                self.flags | parent_flag(),
+                inout self.out.as_slice_mut()
+            );
+            self.stack.truncate(at);
+            total = total >> 1;
+        }
+        self.stack.extend(in self.out[0..8]);
+        self.cv.try_copy_from(0, in self.key.as_slice());
+        self.chunk = wrapping_add(self.chunk, 1);
+        self.blocks = 0;
+        self.block_len = 0;
+        self.block.try_fill(0, 64, 0);
+    }
+
+    // Absorb `input`.
+    pub fn update(inout self, in input: Slice[u8]) {
+        let n = input.len();
+        let mut pos: u64 = 0;
+        loop {
+            if pos >= n {
+                break;
+            }
+            if self.block_len == 64 {
+                if self.blocks == 15 {
+                    self.finish_chunk();
+                } else {
+                    self.compress_block();
+                }
+            }
+            let room = wrapping_sub(64, self.block_len);
+            let left = wrapping_sub(n, pos);
+            let take = if left < room {
+                left
+            } else {
+                room
+            };
+            let end = wrapping_add(pos, take);
+            self.block.try_copy_from(self.block_len, in input[pos..end]);
+            self.block_len = wrapping_add(self.block_len, take);
+            pos = end;
+        }
+    }
+
+    // Append `n` bytes of extendable output to `out`. The first 32 are the
+    // digest; the hasher is unchanged, so more input may follow.
+    pub fn finalize_xof(in self, n: u64, inout out: ChunkSeq[u8]) {
+        let mut cv: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](8);
+        cv.extend(in self.cv.as_slice());
+        let mut m = le_words(in self.block.as_slice(), 16);
+        let mut counter = self.chunk;
+        let mut blen = wrapping_u32(self.block_len);
+        let mut f = self.flags | self.start_flag() | chunk_end();
+        let mut words = zeros_u32(16);
+        let mut top = self.stack.len();
+        loop {
+            if top < 8 {
+                break;
+            }
+            compress(
+                in cv.as_slice(),
+                in m.as_slice(),
+                counter,
+                blen,
+                f,
+                inout words.as_slice_mut()
+            );
+            let at = wrapping_sub(top, 8);
+            m.try_copy_from(0, in self.stack[at..top]);
+            m.try_copy_from(8, in words[0..8]);
+            cv.try_copy_from(0, in self.key.as_slice());
+            counter = 0;
+            blen = 64;
+            f = self.flags | parent_flag();
+            top = at;
+        }
+        let mut block: u64 = 0;
+        let mut done: u64 = 0;
+        loop {
+            if done >= n {
+                break;
+            }
+            compress(
+                in cv.as_slice(),
+                in m.as_slice(),
+                block,
+                blen,
+                f | root_flag(),
+                inout words.as_slice_mut()
+            );
+            let mut i: u64 = 0;
+            loop {
+                if i >= 16 || done >= n {
+                    break;
+                }
+                let w = match words.try_get(i) {
+                    Option::Some(x) => x,
+                    Option::None => 0,
+                };
+                let mut b: u32 = 0;
+                loop {
+                    if b >= 32 || done >= n {
+                        break;
+                    }
+                    out.push(wrapping_u8(wrapping_shr_u32(w, b)));
+                    done = wrapping_add(done, 1);
+                    b = wrapping_add(b, 8);
+                }
+                i = wrapping_add(i, 1);
+            }
+            block = wrapping_add(block, 1);
+        }
+    }
+
+    // The 32-byte digest of the input so far.
+    pub fn finalize(in self) -> Digest {
+        let mut b: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](32);
+        self.finalize_xof(32, inout b);
+        digest_of(in b.as_slice())
+    }
+}
+
+// The BLAKE3 digest of `data`.
+pub fn blake3(in data: Slice[u8]) -> Digest {
+    let mut h = blake3_new();
+    h.update(in data);
+    h.finalize()
+}
+
+// The keyed BLAKE3 digest of `data`; `None` unless `key` is 32 bytes.
+pub fn blake3_keyed(in key: Slice[u8], in data: Slice[u8]) -> Option[Digest] {
+    match blake3_new_keyed(in key) {
+        Option::Some(h0) => {
+            let mut h = h0;
+            h.update(in data);
+            Option::Some(h.finalize())
+        },
+        Option::None => Option::None,
+    }
+}
+
+// The 32-byte key BLAKE3 derives from `material` under `context`.
+pub fn blake3_derive_key(in context: Str, in material: Slice[u8]) -> Digest {
+    let mut h = blake3_new_derive_key(in context);
+    h.update(in material);
+    h.finalize()
+}
+
+// Append the 32 bytes of `d` to `out`.
+pub fn digest_bytes(d: Digest, inout out: ChunkSeq[u8]) {
+    push_le(d.w0, inout out);
+    push_le(d.w1, inout out);
+    push_le(d.w2, inout out);
+    push_le(d.w3, inout out);
+}
+
+fn push_le(w: u64, inout out: ChunkSeq[u8]) {
+    let mut b: u32 = 0;
+    loop {
+        if b >= 64 {
+            break;
+        }
+        out.push(wrapping_u8(wrapping_shr_u64(w, b)));
+        b = wrapping_add(b, 8);
+    }
+}
+
+fn hex_digit(v: u8) -> u32 {
+    if v < 10 {
+        wrapping_add(widen_u32(v), 48)
+    } else {
+        wrapping_add(widen_u32(v), 87)
+    }
+}
+
+// Append the 64 lowercase hex digits of `d` to `out`.
+pub fn digest_hex(d: Digest, inout out: String) {
+    let mut b: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](32);
+    digest_bytes(d, inout b);
+    let mut i: u64 = 0;
+    loop {
+        if i >= 32 {
+            break;
+        }
+        let x = match b.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        out.push_char(hex_digit(x >> 4));
+        out.push_char(hex_digit(x & 15));
+        i = wrapping_add(i, 1);
+    }
+}

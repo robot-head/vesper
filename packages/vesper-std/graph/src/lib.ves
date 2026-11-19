@@ -1,0 +1,266 @@
+// @vesper-std/graph: compact directed index graphs (self-hosting SH0
+// lane 5, #1127).
+//
+// Nodes are `u32` ids `0..n`. A `GraphBuilder` collects edges; `build`
+// freezes them into a `Graph` with successor and predecessor lists in
+// compressed sparse row form, each list in edge insertion order. Every
+// algorithm visits nodes in id order and edges in list order, so every
+// result is a function of the edges added and their order.
+//
+// Modules:
+// - `scc`: Tarjan's strongly connected components (iterative), with
+//   components numbered in completion order, which is a reverse
+//   topological order of the condensation.
+// - `topo`: Kahn's topological order with a cycle report (one cycle, as a
+//   node path) when the graph is not a DAG.
+// - `dom`: Cooper-Harvey-Kennedy immediate dominators from a root.
+// - `reach`: reachability, postorder and reverse postorder from roots.
+//
+// Every function is total: out-of-range ids are refused (`add_edge` returns
+// `false`) or answered as absent (`none()` / `Option::None`).
+use self::util::{
+    get32,
+    get64
+};
+
+// The id that names no node (`u32::MAX`).
+pub fn none() -> u32 {
+    4294967295
+}
+
+pub struct GraphBuilder {
+    n: u64,
+    src: ChunkSeq[u32],
+    dst: ChunkSeq[u32]
+}
+
+// A builder with `n` nodes and no edges.
+pub fn graph_builder(n: u32) -> GraphBuilder {
+    GraphBuilder {
+        n: widen_u64(n),
+        src: ChunkSeq::new[u32](),
+        dst: ChunkSeq::new[u32]()
+    }
+}
+
+impl GraphBuilder {
+    pub fn node_count(in self) -> u64 {
+        self.n
+    }
+
+    pub fn edge_count(in self) -> u64 {
+        self.src.len()
+    }
+
+    // Add a node and return its id (`none()` once 2^32 - 1 nodes exist).
+    pub fn add_node(inout self) -> u32 {
+        if self.n >= 4294967295 {
+            none()
+        } else {
+            let id = wrapping_u32(self.n);
+            self.n = wrapping_add(self.n, 1);
+            id
+        }
+    }
+
+    // Add the edge `a -> b`; `false` (nothing added) unless both are nodes.
+    // Parallel edges and self-loops are kept.
+    pub fn add_edge(inout self, a: u32, b: u32) -> bool {
+        if widen_u64(a) >= self.n || widen_u64(b) >= self.n {
+            false
+        } else {
+            self.src.push(a);
+            self.dst.push(b);
+            true
+        }
+    }
+
+    // Freeze the edges into a `Graph`.
+    pub fn build(in self) -> Graph {
+        let n = self.n;
+        let fwd = csr(n, in self.src.as_slice(), in self.dst.as_slice());
+        let bwd = csr(n, in self.dst.as_slice(), in self.src.as_slice());
+        let (s_start, s_list) = fwd;
+        let (p_start, p_list) = bwd;
+        Graph {
+            n: n,
+            succ_start: s_start,
+            succ: s_list,
+            pred_start: p_start,
+            pred: p_list
+        }
+    }
+}
+
+// Compressed rows of `to` grouped by `from`, stable in edge order.
+fn csr(n: u64, in from: Slice[u32], in to: Slice[u32]) -> (ChunkSeq[u64], ChunkSeq[u32]) {
+    let m = from.len();
+    let mut start: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_add(n, 1));
+    start.resize(wrapping_add(n, 1), 0);
+    let mut e: u64 = 0;
+    loop {
+        if e >= m {
+            break;
+        }
+        let a = widen_u64(get32(in from, e, 0));
+        let k = wrapping_add(a, 1);
+        let c = get64(in start.as_slice(), k, 0);
+        start.try_set(k, wrapping_add(c, 1));
+        e = wrapping_add(e, 1);
+    }
+    let mut v: u64 = 0;
+    let mut acc: u64 = 0;
+    loop {
+        if v > n {
+            break;
+        }
+        acc = wrapping_add(acc, get64(in start.as_slice(), v, 0));
+        start.try_set(v, acc);
+        v = wrapping_add(v, 1);
+    }
+    // start[v] is now the end of row v - 1; fill with a moving cursor.
+    let mut cursor: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+    cursor.extend(in start[0..n]);
+    let mut list: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](m);
+    list.resize(m, 0);
+    e = 0;
+    loop {
+        if e >= m {
+            break;
+        }
+        let a = widen_u64(get32(in from, e, 0));
+        let at = get64(in cursor.as_slice(), a, 0);
+        list.try_set(at, get32(in to, e, 0));
+        cursor.try_set(a, wrapping_add(at, 1));
+        e = wrapping_add(e, 1);
+    }
+    (start, list)
+}
+
+// A frozen directed graph.
+pub struct Graph {
+    n: u64,
+    succ_start: ChunkSeq[u64],
+    succ: ChunkSeq[u32],
+    pred_start: ChunkSeq[u64],
+    pred: ChunkSeq[u32]
+}
+
+impl Graph {
+    pub fn node_count(in self) -> u64 {
+        self.n
+    }
+
+    pub fn edge_count(in self) -> u64 {
+        self.succ.len()
+    }
+
+    // The number of edges leaving `v` (0 for a non-node).
+    pub fn succ_len(in self, v: u32) -> u64 {
+        let k = widen_u64(v);
+        if k >= self.n {
+            0
+        } else {
+            let a = get64(in self.succ_start.as_slice(), k, 0);
+            let b = get64(in self.succ_start.as_slice(), wrapping_add(k, 1), a);
+            wrapping_sub(b, a)
+        }
+    }
+
+    // The target of the `i`th edge leaving `v`, or `none()`.
+    pub fn succ_at(in self, v: u32, i: u64) -> u32 {
+        let k = widen_u64(v);
+        if k >= self.n {
+            none()
+        } else {
+            let a = get64(in self.succ_start.as_slice(), k, 0);
+            let b = get64(in self.succ_start.as_slice(), wrapping_add(k, 1), a);
+            if i >= wrapping_sub(b, a) {
+                none()
+            } else {
+                get32(in self.succ.as_slice(), wrapping_add(a, i), none())
+            }
+        }
+    }
+
+    // The number of edges entering `v` (0 for a non-node).
+    pub fn pred_len(in self, v: u32) -> u64 {
+        let k = widen_u64(v);
+        if k >= self.n {
+            0
+        } else {
+            let a = get64(in self.pred_start.as_slice(), k, 0);
+            let b = get64(in self.pred_start.as_slice(), wrapping_add(k, 1), a);
+            wrapping_sub(b, a)
+        }
+    }
+
+    // The source of the `i`th edge entering `v`, or `none()`.
+    pub fn pred_at(in self, v: u32, i: u64) -> u32 {
+        let k = widen_u64(v);
+        if k >= self.n {
+            none()
+        } else {
+            let a = get64(in self.pred_start.as_slice(), k, 0);
+            let b = get64(in self.pred_start.as_slice(), wrapping_add(k, 1), a);
+            if i >= wrapping_sub(b, a) {
+                none()
+            } else {
+                get32(in self.pred.as_slice(), wrapping_add(a, i), none())
+            }
+        }
+    }
+
+    // The range `lo..hi` of `v`'s successors in edge order, for walking
+    // them with `succ_edge` (empty for a non-node).
+    pub fn succ_range(in self, v: u32) -> (u64, u64) {
+        let k = widen_u64(v);
+        if k >= self.n {
+            (0, 0)
+        } else {
+            let a = get64(in self.succ_start.as_slice(), k, 0);
+            (a, get64(in self.succ_start.as_slice(), wrapping_add(k, 1), a))
+        }
+    }
+
+    // The range `lo..hi` of `v`'s predecessors in edge order.
+    pub fn pred_range(in self, v: u32) -> (u64, u64) {
+        let k = widen_u64(v);
+        if k >= self.n {
+            (0, 0)
+        } else {
+            let a = get64(in self.pred_start.as_slice(), k, 0);
+            (a, get64(in self.pred_start.as_slice(), wrapping_add(k, 1), a))
+        }
+    }
+
+    // The target of edge `e` in successor order (see `succ_range`).
+    pub fn succ_edge(in self, e: u64) -> u32 {
+        get32(in self.succ.as_slice(), e, none())
+    }
+
+    // The source of edge `e` in predecessor order (see `pred_range`).
+    pub fn pred_edge(in self, e: u64) -> u32 {
+        get32(in self.pred.as_slice(), e, none())
+    }
+
+    // Whether the edge `a -> b` exists.
+    pub fn has_edge(in self, a: u32, b: u32) -> bool {
+        let k = widen_u64(a);
+        if k >= self.n {
+            false
+        } else {
+            let (lo, end) = self.succ_range(a);
+            let mut e = lo;
+            loop {
+                if e >= end {
+                    break false;
+                }
+                if self.succ_edge(e) == b {
+                    break true;
+                }
+                e = wrapping_add(e, 1);
+            }
+        }
+    }
+}

@@ -452,6 +452,9 @@ struct IntRange {
     lo: i128,
     hi: i128,
     at: Arc<()>,
+    /// The range of a `for` loop index (#1091), whose arithmetic may use
+    /// its bounds to rule out overflow.
+    looped: bool,
 }
 #[derive(Debug, Clone)]
 struct Binding {
@@ -1719,6 +1722,7 @@ impl Checker<'_> {
                                     lo,
                                     hi,
                                     at: Arc::clone(&binding.mutation),
+                                    looped: false,
                                 });
                             }
                             for n in pattern_names(pat) {
@@ -1820,6 +1824,7 @@ impl Checker<'_> {
                 // operand may reassign a binding the left one read.
                 let left_fact = self.integer_fact(l, env);
                 let left_bounds = self.integer_bounds(l, env);
+                let left_index = Self::loop_index(l, env);
                 let right_goal = if goal != Type::Infer {
                     goal
                 } else if float_math_rules::float_literal_tree(l) {
@@ -1897,6 +1902,13 @@ impl Checker<'_> {
                     && crate::numeric::may_overflow(op, kind)
                     && !self.in_range(op, kind, left_fact, self.integer_fact(r, env))
                     && !Self::quotient_in_range(op, kind, left_bounds, self.integer_bounds(r, env))
+                    && !((left_index || Self::loop_index(r, env))
+                        && Self::bounds_in_range(
+                            op,
+                            kind,
+                            left_bounds,
+                            self.integer_bounds(r, env),
+                        ))
                 {
                     self.overflow_failure(env, e.span.clone());
                 }
@@ -2011,6 +2023,7 @@ impl Checker<'_> {
                         lo,
                         hi,
                         at: Arc::clone(&binding.mutation),
+                        looped: false,
                     });
                 }
                 Type::unit()
@@ -3683,6 +3696,7 @@ impl Checker<'_> {
                 };
                 // Each branch's bounds hold where it ends, so their hull
                 // holds after the join, under the joined identity.
+                let looped = Self::loop_range(x) && Self::loop_range(y);
                 binding.range = (x.span == y.span)
                     .then(|| Self::binding_bounds(x).zip(Self::binding_bounds(y)))
                     .flatten()
@@ -3690,6 +3704,7 @@ impl Checker<'_> {
                         lo: a.min(c),
                         hi: b.max(d),
                         at: Arc::clone(&binding.mutation),
+                        looped,
                     });
                 binding.integer = x.integer.filter(|n| Some(*n) == y.integer);
                 binding.nonzero = x.nonzero && y.nonzero;
@@ -3747,6 +3762,31 @@ impl Checker<'_> {
             _ if op == "/" => b.is_some_and(|b| b != -1) || a.is_some_and(|a| a != kind.min()),
             _ => false,
         }
+    }
+    /// Bounds which prove `+`, `-` or `*` in range: every corner of the
+    /// operands' bounds fits the kind, such as `i + 1` for a `for i in 0..n`
+    /// index with a constant `n` (#1091). The caller applies it only where
+    /// an operand is a loop index: the Lean reference checker of
+    /// tests/lockstep.rs has no loops, so loop-free programs keep its
+    /// exact-fact overflow rule.
+    fn bounds_in_range(
+        op: &str,
+        kind: crate::numeric::IntegerKind,
+        a: Option<(i128, i128)>,
+        b: Option<(i128, i128)>,
+    ) -> bool {
+        let (Some((alo, ahi)), Some((blo, bhi))) = (a, b) else {
+            return false;
+        };
+        let f = match op {
+            "+" => i128::checked_add,
+            "-" => i128::checked_sub,
+            "*" => i128::checked_mul,
+            _ => return false,
+        };
+        [(alo, blo), (alo, bhi), (ahi, blo), (ahi, bhi)]
+            .into_iter()
+            .all(|(x, y)| f(x, y).is_some_and(|v| v >= kind.min() && v <= kind.max()))
     }
     /// Typecheck `wrapping_add`, `wrapping_sub` or `wrapping_mul`: two
     /// by-value operands of one integer kind, with contextual literal typing.
@@ -3987,16 +4027,28 @@ impl Checker<'_> {
                 _ => continue,
             }
             if let Some(binding) = env.bindings.get_mut(n) {
+                let looped = Self::loop_range(binding);
                 binding.range = Some(IntRange {
                     lo,
                     hi,
                     at: Arc::clone(&binding.mutation),
+                    looped,
                 });
             }
         }
     }
     /// The bounds a binding's range and kind give it, while the range is
     /// current.
+    /// Whether `b` holds a `for` loop index's current range.
+    fn loop_range(b: &Binding) -> bool {
+        b.range
+            .as_ref()
+            .is_some_and(|r| r.looped && Arc::ptr_eq(&r.at, &b.mutation))
+    }
+    /// Whether `e` names a `for` loop index in its range.
+    fn loop_index(e: &Expr, env: &Env) -> bool {
+        matches!(&e.kind, ExprKind::Name(n) if env.bindings.get(n).is_some_and(Self::loop_range))
+    }
     fn binding_bounds(b: &Binding) -> Option<(i128, i128)> {
         let (mut lo, mut hi) = match &b.ty {
             Type::IntLiteral(_) => (i128::MIN, i128::MAX),

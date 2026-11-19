@@ -5813,6 +5813,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-cranelift-sys"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "cranelift-module",
+ "cranelift-native 0.125.4",
+ "cranelift-object",
+ "target-lexicon",
+ "vesper",
+ "vesper-ffi",
+]
+
+[[package]]
 name = "vesper-crucible"
 version = "0.1.0"
 dependencies = [

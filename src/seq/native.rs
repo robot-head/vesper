@@ -373,6 +373,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         {
             return *word;
         }
+        if self.invariant_headers.contains(&ptr) {
+            return self.invariant_word(ptr, offset);
+        }
         self.b.ins().load(types::I64, MemFlags::new(), ptr, offset)
     }
 
@@ -427,6 +430,15 @@ impl<M: Module> Codegen<'_, '_, M> {
         stride: i64,
     ) -> ir::Value {
         let data = self.seq_word(handle, DATA);
+        if self.invariant_headers.contains(&handle) {
+            // `data + start * stride` is invariant for the whole call
+            // (`crate::bounds_hoist::stable_views`), so Cranelift computes
+            // it once, out of every loop.
+            let first = self.b.ins().imul_imm(start, stride);
+            let base = self.b.ins().iadd(data, first);
+            let offset = self.b.ins().imul_imm(i, stride);
+            return self.b.ins().iadd(base, offset);
+        }
         let at = self.b.ins().iadd(start, i);
         let offset = self.b.ins().imul_imm(at, stride);
         self.b.ins().iadd(data, offset)
@@ -623,6 +635,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             (value, self.zero(), len)
         } else {
             let h = self.seq_word(value, 0);
+            if self.invariant_headers.contains(&value) {
+                self.invariant_headers.insert(h);
+            }
             let start = self.seq_word(value, 8);
             let len = self.seq_word(value, 16);
             (h, start, len)
@@ -1262,6 +1277,8 @@ pub(super) struct FusedRead {
     valid: Variable,
     addr: Variable,
     elem: Type,
+    /// The read is hoisted out of its loop's bounds checks: always `Some`.
+    always: bool,
 }
 
 fn fused_pattern(p: &Pattern) -> bool {
@@ -1308,7 +1325,12 @@ pub(super) fn fused_reads(
             let terminator_ok = match &b.terminator {
                 Terminator::Return(v) | Terminator::Branch { condition: v, .. } => v != value,
                 Terminator::Jump { args, .. } => !args.contains(value),
-                Terminator::Match { value: v, .. } => v != value || std::ptr::eq(b, block),
+                // The fast copy of a versioned loop (`crate::bounds_hoist`)
+                // keeps the value ids of its instructions, so its own read
+                // and match of the same value fuse too.
+                Terminator::Match { value: v, .. } => {
+                    v != value || b.instructions.iter().any(|i| i.dest == *value)
+                }
                 Terminator::Unreachable => true,
             };
             terminator_ok
@@ -1368,6 +1390,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     valid: valid_var,
                     addr: addr_var,
                     elem,
+                    always: !checked,
                 }),
             );
         }
@@ -1382,14 +1405,16 @@ impl<M: Module> Codegen<'_, '_, M> {
         value: crate::ir::ValueId,
         seen: &[&Pattern],
     ) -> bool {
-        if !matches!(self.seq_fused(value), Some(Some(_))) {
+        let Some(Some(read)) = self.seq_fused(value) else {
             return false;
-        }
+        };
         let some = |p: &&Pattern| matches!(&p.kind, PatternKind::Constructor { name, .. } if name.ends_with("Some"));
         let none = |p: &&Pattern| matches!(&p.kind, PatternKind::Constructor { name, .. } if !name.ends_with("Some"));
         seen.last()
             .is_some_and(|p| matches!(p.kind, PatternKind::Wild))
             || (seen.iter().any(some) && seen.iter().any(none))
+            // A hoisted read is `Some`: its first `Some` arm is taken.
+            || (read.always && seen.last().is_some_and(some))
     }
 
     /// The condition of match arm `p` on fused read `value`.

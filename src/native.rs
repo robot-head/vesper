@@ -1329,6 +1329,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 world,
                 ids,
                 program,
+                invariant_headers: BTreeSet::new(),
                 capabilities: BTreeMap::new(),
                 next_capability: 0,
                 closures: vec![],
@@ -2192,6 +2193,9 @@ struct Codegen<'a, 'b, M: Module> {
     world: &'b World,
     ids: &'b BTreeMap<String, FuncId>,
     program: &'b crate::ir::Program,
+    /// View and handle pointers of borrowed parameters whose header words
+    /// are invariant for the whole call ([`crate::bounds_hoist::stable_views`]).
+    invariant_headers: BTreeSet<ir::Value>,
     capabilities: BTreeMap<String, String>,
     next_capability: u64,
     closures: Vec<NativeClosure>,
@@ -3123,12 +3127,17 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Reads whose split target the read itself bound (`split_copy`).
         let mut bound_early = BTreeSet::new();
         // Sequence headers read once before the loops that keep them.
-        let header_hoists = if self.operands_only && !self.in_fip_fn {
+        let mut header_hoists = if self.operands_only && !self.in_fip_fn {
             crate::bounds_hoist::header_hoists(f)
         } else {
             vec![]
         };
+        // Only a function's own graph has its parameters.
+        if return_to.is_some() {
+            header_hoists.retain(|h| !h.entry);
+        }
         let mut hoisted_reads = BTreeMap::new();
+        let mut entry_reads = BTreeMap::new();
         let mut values = BTreeMap::new();
         // A resumption can return through a shared handler dispatcher. Keep
         // virtual registers in frontend SSA variables so return edges receive
@@ -3322,6 +3331,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
             self.drop_temporaries(&temporaries, f, i, crate::fip::AT_BLOCK_ENTRY, &values)?;
+            // Borrowed parameters the function never changes are read once,
+            // here, in the block that dominates every other.
+            if i == 0 {
+                for hoist in header_hoists.iter().filter(|h| h.entry) {
+                    let receiver = self.seq_entry_view(&hoist.place, &hoist.ty)?;
+                    for read in &hoist.reads {
+                        hoisted_reads.insert(*read, receiver);
+                        entry_reads.insert(*read, receiver);
+                    }
+                }
+            }
             if let Some(entries) = join_slot_params.get(&i) {
                 for &(dest_slot, param) in entries {
                     let var = self.b.declare_var(ptr_ty);
@@ -3342,6 +3362,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                         if let Some(register) = registers.get(&id) {
                             values.insert(id, self.use_var(*register));
                         }
+                    }
+                }
+                // A read of an invariant parameter is its entry value in
+                // every block, not a copy through a block parameter, so
+                // its header words are recognized as invariant everywhere.
+                for id in crate::ir_inline::operands(&inst.op) {
+                    if let Some(receiver) = entry_reads.get(&id) {
+                        values.insert(id, *receiver);
                     }
                 }
                 if !self.in_fip_fn
@@ -3890,7 +3918,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                     self.emit_fip_drop(drop, &values, Span::default())?;
                 }
             }
-            for hoist in header_hoists.iter().filter(|h| h.preheader == i) {
+            for hoist in header_hoists
+                .iter()
+                .filter(|h| h.preheader == i && !h.entry)
+            {
                 let receiver = self.seq_hoist_header(&hoist.place, &hoist.ty)?;
                 for read in &hoist.reads {
                     hoisted_reads.insert(*read, receiver);

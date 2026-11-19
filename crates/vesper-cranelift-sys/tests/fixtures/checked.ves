@@ -1,0 +1,381 @@
+// One real compiler function family emitted from Vesper: the checked
+// integer arithmetic of src/native.rs (`checked_arithmetic`, `binary` and
+// `check_overflow`), one function `checked_<op>_<kind>(a, b) -> i64` per
+// operator and integer kind. tests/checked_family.rs builds the same module
+// with the Rust lowering and compares the object bytes. The one difference
+// from the compiler: the overflow block traps instead of performing
+// `Fail::raise` (that is the effect lowering, which is not this family).
+
+// op: 0 `+`, 1 `-`, 2 `*`, 3 `/`.
+fn op_name(op: u32) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if op == 0 {
+        s.extend(in "add".as_bytes());
+    } else if op == 1 {
+        s.extend(in "sub".as_bytes());
+    } else if op == 2 {
+        s.extend(in "mul".as_bytes());
+    } else {
+        s.extend(in "div".as_bytes());
+    }
+    s
+}
+
+// kind k: 0-3 are i8, i16, i32, i64; 4-7 are u8, u16, u32, u64.
+fn kind_unsigned(k: u32) -> bool {
+    k >= 4
+}
+fn kind_bits(k: u32) -> u32 {
+    wrapping_shl_u32(8, k % 4)
+}
+fn kind_min(k: u32) -> i64 {
+    let b = kind_bits(k);
+    if b == 8 {
+        -128
+    } else if b == 16 {
+        -32768
+    } else if b == 32 {
+        -2147483648
+    } else {
+        -9223372036854775807 - 1
+    }
+}
+fn kind_mask(k: u32) -> i64 {
+    let b = kind_bits(k);
+    if b == 8 {
+        255
+    } else if b == 16 {
+        65535
+    } else if b == 32 {
+        4294967295
+    } else {
+        -1
+    }
+}
+fn kind_name(k: u32) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if kind_unsigned(k) {
+        s.push(117);
+    } else {
+        s.push(105);
+    }
+    let b = kind_bits(k);
+    if b == 8 {
+        s.push(56);
+    } else if b == 16 {
+        s.extend(in "16".as_bytes());
+    } else if b == 32 {
+        s.extend(in "32".as_bytes());
+    } else {
+        s.extend(in "64".as_bytes());
+    }
+    s
+}
+
+// `check_overflow`: branch to a block that leaves when `overflow` is set.
+fn check_overflow(inout b: Builder, overflow: Value) eff [Ffi[Cranelift]] {
+    let good = create_block(inout b);
+    let bad = create_block(inout b);
+    ins_brif0(inout b, overflow, bad, good);
+    switch_to_block(inout b, bad);
+    ins_trap(inout b, trap_integer_overflow());
+    switch_to_block(inout b, good);
+}
+
+fn add_sub_mul(inout b: Builder, op: u32, a: Value, c: Value) -> Value eff [Ffi[Cranelift]] {
+    if op == 0 {
+        ins_iadd(inout b, a, c)
+    } else if op == 1 {
+        ins_isub(inout b, a, c)
+    } else {
+        ins_imul(inout b, a, c)
+    }
+}
+
+// `binary` for the four operators.
+fn binary(inout b: Builder, op: u32, a: Value, c: Value, unsigned: bool)
+    -> Value eff [Ffi[Cranelift]] {
+    if op <= 2 {
+        return add_sub_mul(inout b, op, a, c);
+    }
+    if unsigned {
+        return ins_udiv(inout b, a, c);
+    }
+    let min = ins_icmp_imm(inout b, cc_eq(), a, -9223372036854775807 - 1);
+    let minus_one = ins_icmp_imm(inout b, cc_eq(), c, -1);
+    let overflow = ins_band(inout b, min, minus_one);
+    let wrap = create_block(inout b);
+    let divide = create_block(inout b);
+    let join = create_block(inout b);
+    append_block_param(inout b, join, ty_i64());
+    ins_brif0(inout b, overflow, wrap, divide);
+    switch_to_block(inout b, wrap);
+    let pass = vals1(a);
+    ins_jump(inout b, join, in pass.as_slice());
+    switch_to_block(inout b, divide);
+    let result = ins_sdiv(inout b, a, c);
+    let quotient = vals1(result);
+    ins_jump(inout b, join, in quotient.as_slice());
+    switch_to_block(inout b, join);
+    block_param(inout b, join, 0)
+}
+
+// `checked_arithmetic`: the overflow test of each (operator, kind) pair,
+// then the operation.
+fn checked_arithmetic(inout b: Builder, op: u32, k: u32, a: Value, c: Value)
+    -> Value eff [Ffi[Cranelift]] {
+    let unsigned = kind_unsigned(k);
+    let narrow = kind_bits(k) < 64;
+    if !unsigned && narrow && op <= 2 {
+        // Exact in 64 bits; overflow iff the result leaves the kind.
+        let r = add_sub_mul(inout b, op, a, c);
+        let up: i64 = widen_i64(wrapping_sub(64, kind_bits(k)));
+        let high = ins_ishl_imm(inout b, r, up);
+        let canonical = ins_sshr_imm(inout b, high, up);
+        let o = ins_icmp(inout b, cc_ne(), canonical, r);
+        check_overflow(inout b, o);
+    } else if !unsigned && op == 3 {
+        let min = ins_icmp_imm(inout b, cc_eq(), a, kind_min(k));
+        let minus_one = ins_icmp_imm(inout b, cc_eq(), c, -1);
+        let o = ins_band(inout b, min, minus_one);
+        check_overflow(inout b, o);
+    } else if unsigned && narrow && (op == 0 || op == 2) {
+        let r = add_sub_mul(inout b, op, a, c);
+        let o = ins_icmp_imm(inout b, cc_ugt(), r, kind_mask(k));
+        check_overflow(inout b, o);
+    } else if unsigned && op == 1 {
+        let o = ins_icmp(inout b, cc_ult(), a, c);
+        check_overflow(inout b, o);
+    } else if unsigned && op == 0 {
+        let r = ins_iadd(inout b, a, c);
+        let o = ins_icmp(inout b, cc_ult(), r, a);
+        check_overflow(inout b, o);
+    } else if unsigned && op == 2 {
+        let high = ins_umulhi(inout b, a, c);
+        let o = ins_icmp_imm(inout b, cc_ne(), high, 0);
+        check_overflow(inout b, o);
+    } else if !unsigned && op <= 1 {
+        let r = add_sub_mul(inout b, op, a, c);
+        // Signed overflow iff the result's sign differs from both addends
+        // (addition) or from the minuend while the operand signs differ
+        // (subtraction).
+        let x = ins_bxor(inout b, a, r);
+        let y = if op == 0 {
+            ins_bxor(inout b, c, r)
+        } else {
+            ins_bxor(inout b, a, c)
+        };
+        let both = ins_band(inout b, x, y);
+        let o = ins_icmp_imm(inout b, cc_slt(), both, 0);
+        check_overflow(inout b, o);
+    } else if !unsigned && op == 2 {
+        let r = ins_imul(inout b, a, c);
+        let high = ins_smulhi(inout b, a, c);
+        let sign = ins_sshr_imm(inout b, r, 63);
+        let o = ins_icmp(inout b, cc_ne(), high, sign);
+        check_overflow(inout b, o);
+    }
+    binary(inout b, op, a, c, unsigned)
+}
+
+fn define_checked(inout m: Module, sig: SigId, op: u32, k: u32) -> bool eff [Ffi[Cranelift]] {
+    let mut name: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    name.extend(in "checked_".as_bytes());
+    let o = op_name(op);
+    name.extend(in o.as_slice());
+    name.push(95);
+    let kn = kind_name(k);
+    name.extend(in kn.as_slice());
+    let f = declare_function(inout m, in name.as_slice(), linkage_export(), sig);
+    let mut b = match builder_new(in m, sig) {
+        Some(b) => b,
+        None => return false,
+    };
+    let entry = create_block(inout b);
+    append_block_params_for_function_params(inout b, entry);
+    switch_to_block(inout b, entry);
+    let a = block_param(inout b, entry, 0);
+    let c = block_param(inout b, entry, 1);
+    let r = checked_arithmetic(inout b, op, k, a, c);
+    ins_return1(inout b, r);
+    seal_all_blocks(inout b);
+    define_function(inout m, f, b)
+}
+
+fn checked_family(in flags: Slice[u8], in triple: Slice[u8]) -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(in triple, in flags, in "checked".as_bytes()) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let sig = sig_new(inout m, call_conv_default());
+    sig_param(inout m, sig, ty_i64());
+    sig_param(inout m, sig, ty_i64());
+    sig_return(inout m, sig, ty_i64());
+    let mut ok = true;
+    for k in 0..8 {
+        for op in 0..4 {
+            if ok {
+                ok = define_checked(inout m, sig, op, k);
+            }
+        }
+    }
+    if !ok {
+        module_free(m);
+        return 0;
+    }
+    match module_finish(m) {
+        Some(o) => object_publish(o),
+        None => 0,
+    }
+}
+
+pub fn checked_none() -> u64 eff [Ffi[Cranelift]] {
+    checked_family(in "".as_bytes(), in "".as_bytes())
+}
+pub fn checked_speed() -> u64 eff [Ffi[Cranelift]] {
+    checked_family(in "opt_level=speed".as_bytes(), in "".as_bytes())
+}
+// Cross targets: the same family for the other three hosts.
+pub fn checked_aarch64_linux() -> u64 eff [Ffi[Cranelift]] {
+    checked_family(in "opt_level=speed".as_bytes(), in "aarch64-unknown-linux-gnu".as_bytes())
+}
+pub fn checked_aarch64_macos() -> u64 eff [Ffi[Cranelift]] {
+    checked_family(in "opt_level=speed".as_bytes(), in "aarch64-apple-darwin".as_bytes())
+}
+pub fn checked_x64_windows() -> u64 eff [Ffi[Cranelift]] {
+    checked_family(in "opt_level=speed".as_bytes(), in "x86_64-pc-windows-msvc".as_bytes())
+}
+pub fn checked_x64_linux() -> u64 eff [Ffi[Cranelift]] {
+    checked_family(in "opt_level=speed".as_bytes(), in "x86_64-unknown-linux-gnu".as_bytes())
+}
+
+// ---------------------------------------------------------------------------
+// Emission overhead: `n` iadds through the typed wrappers, through the raw
+// import, or in batches of 512; the builder is then freed (no compile).
+
+fn bench_builder(inout m: Module) -> Option[Builder] eff [Ffi[Cranelift]] {
+    let sig = sig_new(inout m, call_conv_default());
+    sig_param(inout m, sig, ty_i64());
+    sig_return(inout m, sig, ty_i64());
+    builder_new(in m, sig)
+}
+
+fn emit_wrapped(n: u64) -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(in "".as_bytes(), in "".as_bytes(), in "bench".as_bytes()) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let mut b = match bench_builder(inout m) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let entry = create_block(inout b);
+    let x = append_block_param(inout b, entry, ty_i64());
+    switch_to_block(inout b, entry);
+    let mut v = x;
+    for _ in 0..n {
+        v = ins_iadd(inout b, v, x);
+    }
+    builder_free(b);
+    module_free(m);
+    widen_u64(v.id)
+}
+
+fn emit_raw(n: u64) -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(in "".as_bytes(), in "".as_bytes(), in "bench".as_bytes()) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let mut b = match bench_builder(inout m) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let entry = Cranelift::vcl_create_block(inout b);
+    let x = Cranelift::vcl_append_block_param(inout b, entry, 4);
+    Cranelift::vcl_switch_to_block(inout b, entry);
+    let mut v = x;
+    for _ in 0..n {
+        v = Cranelift::vcl_binary(inout b, 1, v, x);
+    }
+    builder_free(b);
+    module_free(m);
+    widen_u64(v)
+}
+
+fn emit_batched(n: u64) -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(in "".as_bytes(), in "".as_bytes(), in "bench".as_bytes()) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let mut b = match bench_builder(inout m) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let entry = create_block(inout b);
+    let x = append_block_param(inout b, entry, ty_i64());
+    switch_to_block(inout b, entry);
+    let mut out: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](512);
+    for _ in 0..512 {
+        out.push(0);
+    }
+    let mut last: u64 = batch_value(x);
+    let mut done: u64 = 0;
+    let mut code: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](1536);
+    while_batches(inout b, inout code, inout out, n, x, inout last, inout done);
+    builder_free(b);
+    module_free(m);
+    last
+}
+
+// The batch loop: 512 chained iadds per call of `emit`.
+fn while_batches(
+    inout b: Builder,
+    inout code: ChunkSeq[u64],
+    inout out: ChunkSeq[u32],
+    n: u64,
+    x: Value,
+    inout last: u64,
+    inout done: u64
+) eff [Ffi[Cranelift]] {
+    let xv = batch_value(x);
+    let rounds = wrapping_add(
+        n / 512,
+        if n % 512 == 0 {
+            0
+        } else {
+            1
+        }
+    );
+    for _ in 0..rounds {
+        code.clear();
+        let left = wrapping_sub(n, done);
+        let count: u64 = if left < 512 {
+            left
+        } else {
+            512
+        };
+        let mut prev = last;
+        for i in 0..count {
+            batch_binary(inout code, 1, prev, xv);
+            prev = batch_ref(wrapping_u32(i));
+        }
+        let emitted = emit(inout b, in code.as_slice(), inout out.as_slice_mut());
+        if emitted == invalid() {
+            return;
+        }
+        last = match out.try_get(wrapping_u64(wrapping_sub(emitted, 1))) {
+            Some(v) => widen_u64(v),
+            None => return,
+        };
+        done = wrapping_add(done, count);
+    }
+}
