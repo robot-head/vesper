@@ -48,6 +48,7 @@ vesper_port_object(
         ("header", "let pn_offset = wrapping_add(dcid_len, 1);", "let pn_offset = wrapping_add(dcid_len, 2);"),
         ("frame", "fin: ty & stream_fin() != 0,", "fin: ty & stream_fin() == 0,"),
         ("ack", "s.unacked_ack_eliciting >= 2", "s.unacked_ack_eliciting >= 3"),
+        ("recovery", "sat_add(e.pn, 3)", "sat_add(e.pn, 4)"),
     ]
 ]
 

@@ -8,6 +8,7 @@ pub(crate) mod ack;
 pub(crate) mod frame;
 pub(crate) mod header;
 pub(crate) mod packet_number;
+pub(crate) mod recovery;
 pub(crate) mod varint;
 
 // Generated and committed, but kept outside src/ so formatters, which

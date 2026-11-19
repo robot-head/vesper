@@ -1,6 +1,7 @@
-# Port P3b lane 4, part 1: Warp's pure QUIC modules in Vesper
+# Port P3b lane 4: Warp's QUIC core in Vesper
 
-Claim: #1066 (this is part 1; the last part closes it). Lane prompt:
+Claim: #1066 (it lands in several PRs, and the last one closes it). Part
+1a (PR #1079) ported the wire modules, and part 1b adds loss recovery. Lane prompt:
 `docs/agent-prompts/port-p3b/04-warp.md` (plan PR #1072).
 
 ## Summary
@@ -33,7 +34,9 @@ Claim: #1066 (this is part 1; the last part closes it). Lane prompt:
 | `header` | `HeaderParser::parse`, `ParsedPacket::check_reserved_bits`/`first_byte_mask`/`packet_number_field`, `VersionNegotiation::versions`, `write_short`, `write_short_to_peer`, `write_long`, `write_retry`, `write_version_negotiation` | `HeaderParser::new` and its field layouts, `Span` to slice conversion, `sample`, `dcid`/`scid`/`token` |
 | `frame` | `parse_frame`, `allowed`, `Frame::encode`/`frame_type`/`is_ack_eliciting`/`is_probing`, `AckFrame::from_ranges` checks, ACK wire-range iteration, `encode_stream_header`, `encode_crypto_header`, `stream_header_len`, `crypto_header_len` | The `Frames` iterator and `scan_payload` plumbing (they call the ported `parse_frame`), `range_count`/`ranges`/`smallest` |
 | `ack` | `ReceivedPackets::new`, `check`, `on_packet_received`, `ack_frame` (delay), `on_ack_sent`, `on_ack_of_ack` | Range storage (`[AckRange; N]`, lent in place), `largest`/`ranges`/`ecn_counts`/`ack_deadline` getters |
-| recovery, cc, stream, endpoint, handshake, lifecycle, TLS glue | Not yet (later parts) | Everything |
+| `recovery` | `ack_delay_ns`, `RttEstimator::new`/`update`/`pto_base_ns`/`loss_delay_ns`, `LossRecovery::new`, `on_packet_sent`, `on_ack_received`, `on_timeout`, `pto_time_and_space`, `persistent_congestion_duration_ns`, `set_max_ack_delay_ns`, `set_handshake_status`, `reset_space`, `discard_space`, and the timer it arms | The buffers (three `RecSpace`s, the sent-packet rings and one call's events), lent in place; replaying the events to the caller's sink; the getters |
+| `cc` | Nothing yet (see below) | The BBR adapters |
+| stream, endpoint, handshake, lifecycle, TLS glue | Not yet (later parts) | Everything |
 
 Borrowed slices cross the ABI as spans `(start, len)` into the caller's
 buffer, and the Rust side converts them back into slices. That keeps
@@ -61,6 +64,22 @@ const context.
 - Export ABI v3 (`// @export abi 3` in `lib.ves`). `FrameW` is a
   20-variant word enum that converts as `Words<FrameW, 12>`. `RxState` is a
   copy struct lent `inout`.
+- Recovery keeps Rust's design: per-space rings of sent-packet records,
+  sized at construction, with acknowledged and lost records as tombstones.
+  `vesper/src/recovery.ves` indexes the rings itself. The congestion events
+  of a call go into a buffer of `capacity + 2` records, and the wrapper
+  replays them to the caller's sink afterwards. That keeps the RFC order
+  (ECN-CE, losses, persistent congestion, then acknowledgements). The sink
+  cannot observe recovery during the call, because `on_ack_received`
+  borrows it mutably, so replaying afterwards is equivalent. The `u128`
+  RTT arithmetic becomes exact `u64` forms: `(3a + b) / 4` and
+  `(7a + b) / 8` split into quotients and remainders, and `9b / 8` is
+  `b + b / 8`.
+- `cc` stays Rust in this part. Its adapters wrap `vesper-warp-bbr`, whose
+  port is one concatenated compilation unit without `use` imports, so it
+  cannot be a Loom dependency of `@vesper/warp` without changing that
+  crate, which is outside this lane. Making it importable is a small
+  follow-up for the BBR crate. The lane can then move the adapters.
 - The frame predicates take the frame kind (one word) instead of the whole
   frame. `Frame::frame_type()` is called once per frame on the hot path, and
   passing the kind cut frames from 2.86x to 2.29x instructions.
@@ -92,6 +111,7 @@ Bazel build has one divergent object per module.
 | header | short-header PN offset `dcid_len + 1` to `+ 2` | `headers::configured_dcid_lengths` | `headers::long_headers_roundtrip_and_coalesce` |
 | frame | STREAM FIN bit `!= 0` to `== 0` | `frames::stream_without_length_runs_to_end_and_all_type_bits` | `frames::ack_wire_ranges_decode` |
 | ack | delayed-ACK threshold `>= 2` to `>= 3` | `ack_tracking::delayed_ack_policy` | `ack_tracking::merges_ranges_and_detects_duplicates` |
+| recovery | packet threshold 3 to 4 | `recovery::packet_threshold_then_time_threshold` | `recovery::rtt_estimator_and_ack_delay_rules` |
 
 ## Speed against Rust
 
@@ -104,7 +124,14 @@ startup. The frames digests match Rust (`0ec977800e561b4d` for 3 batches).
 |---|---|---|---|---|---|---|---|
 | frames | encode and parse 1,024 packets of mixed frames (ACK with ranges, STREAM, CRYPTO, flow control, close) | 251 ns/packet | 586 ns/packet | 2.35x (2.33-2.38) | 4.18M | 9.57M | 2.29x |
 | ack | 8,192 received packets with gaps, ACK frames built and encoded | 41 ns/packet | 76 ns/packet | 1.86x (1.84-1.88) | 5.54M | 11.23M | 2.03x |
-| transfer | 16 echo rounds on a loopback connection pair (endpoint, TLS and crypto stay Rust) | 22.7 µs/round | 26.0 µs/round | 1.15x (1.12-1.17) | 3.13M | 3.46M | 1.11x |
+| recovery | 4,096 sends with an ACK every eighth and a loss every fortieth, loss timer polled per send | 59 ns/packet | 222 ns/packet | 5.39x (4.92-5.48) | 1.78M | 7.41M | 4.16x |
+| transfer | 16 echo rounds on a loopback connection pair (endpoint, TLS and crypto stay Rust) | 22.7 µs/round | 26.0 µs/round | 1.15x (1.12-1.17) | 3.13M | 3.60M | 1.15x |
+
+The transfer instruction count is from part 1b, with recovery ported too
+(part 1a measured 3.46M, or 1.11x). Its wall-clock numbers are from part 1a.
+Wall-clock runs for part 1b were noisy, because other jobs shared the
+machine: recovery measured 3.60x and 6.60x in two later runs. The
+callgrind ratio is the reliable figure.
 
 Profile of the frames workload, with functions named: `fr_encode` 17.8%,
 `fr_parse_at` 13.9%, `w_vi` 9%, `parse_ack` 8.3%, `vi_put` 4.2% and
@@ -112,6 +139,14 @@ Profile of the frames workload, with functions named: `fr_encode` 17.8%,
 conversion and `with_slice_mut`.
 
 ## Compiler gaps
+
+Recovery profile (callgrind with functions named): `scan` (the timer's
+pass over the three spaces) 22%, `rec_on_packet_sent` 15%,
+`rec_on_ack_received` 14%, `mark_range` 9%, `detect_lost` 6% and
+`sp_set` 5%. The Rust wrappers and the ABI boundary account for about 12%.
+Rust's `set_timer` reads two fields of each space in place. The port
+copies each 13-word `RecSpace` out of the slice (`try_get`) and moves
+struct temporaries through the stack. Gaps 4 and 5 below cover this.
 
 1. **Helpers that take an `inout` slice are not inlined.** `w_vi` (9%) and
    `vi_put` (4%) stay calls inside `fr_encode`, as do the other `w_*`
@@ -155,7 +190,24 @@ conversion and `with_slice_mut`.
    N]`, lent as a slice), and the four SACK-like slots are `b0..b3` fields
    with `if` ladders (see `opts_blk` in warp-tcp). A `[T; N]` value type
    with indexing would let `ReceivedPackets` be one Vesper struct.
-4. **std candidate: `saturating_add_u64`.** `varint.ves` defines `sat_add`.
+4. **Reading a struct element of a slice copies the whole struct.**
+   `match spaces.try_get(i) { Option::Some(s) => s.ack_eliciting_in_flight, .. }`
+   copies all 13 words of the `RecSpace` to the stack before reading one
+   field. There is no projection like `spaces[i].field` that cannot fail.
+   This is most of `scan`'s cost.
+5. **Copy-struct locals and results live in stack memory.** In `scan`,
+   the `PtoOut` and `Scan` values are built in stack slots and copied
+   twice on return. Rewriting the locals as scalars did not change the
+   instruction count, because the copies come from the `RecSpace` reads
+   and the struct result.
+6. **No saturating or checked multiply.** `saturating_add` and
+   `saturating_sub` exist only for vectors. Recovery writes `sat_mul3`,
+   `sat_mul4` and `sat_mul1000` with constant divisors, because dividing
+   by a variable needs a `Fail` row. std candidates: `saturating_add_u64`
+   (`varint.ves` defines `sat_add`) and `saturating_mul_u64`.
+7. **`state` cannot be a field name.** It is a keyword. `vesper check`
+   says "expected a lower-case identifier", but `vesper fmt` reports only
+   `Syntax { offset: N }`. The record field is `status`.
 
 ## Platforms
 
@@ -167,7 +219,7 @@ first run.
 
 ## Files
 
-- `crates/vesper-warp/vesper/`: `Loom.toml`, `src/{lib,varint,pn,header,frame,ack}.ves`
+- `crates/vesper-warp/vesper/`: `Loom.toml`, `src/{lib,varint,pn,header,frame,ack,recovery}.ves`
 - `crates/vesper-warp/src/reference/`: the frozen Rust implementations
 - `crates/vesper-warp/src/ported/`: the forwarding layer
 - `crates/vesper-warp/port/`: `binding.rs` (generated), `check.sh`, `bench.sh`

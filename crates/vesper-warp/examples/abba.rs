@@ -1,5 +1,6 @@
 //! ABBA benchmark of the Rust and Vesper builds of the ported modules (port
 //! wave P3b lane 4, #1066): packet and frame encode/decode, ACK tracking,
+//! loss recovery,
 //! and a loopback stream echo over two endpoints (whose packet path calls
 //! the ported header, frame, packet-number and ACK code).
 //!
@@ -13,9 +14,9 @@
 //!
 //! ```text
 //! crates/vesper-warp/port/bench.sh                 # builds both, runs every workload
-//! abba worker <frames|ack|transfer>                # one arm
-//! abba drive <frames|ack|transfer> <rust-worker> <vesper-worker>
-//! abba once <frames|ack|transfer> <batches>        # for callgrind
+//! abba worker <frames|ack|recovery|transfer>                # one arm
+//! abba drive <frames|ack|recovery|transfer> <rust-worker> <vesper-worker>
+//! abba once <frames|ack|recovery|transfer> <batches>        # for callgrind
 //! ```
 #[path = "../tests/support/mod.rs"]
 mod support;
@@ -29,12 +30,17 @@ use vesper_warp::endpoint::{Discard, EndpointConfig};
 use vesper_warp::frame::{AckFrame, AckRange, EcnCounts, Frame, StreamFrame, scan_payload};
 use vesper_warp::header::{HeaderParser, ParsedPacket};
 use vesper_warp::packet_number::encoded_len;
+use vesper_warp::recovery::{
+    CongestionEvent, HandshakeStatus, LossRecovery, RecoveryConfig, SentPacket,
+};
 use vesper_warp::{PacketType, PnSpace};
 
 /// Packets built and parsed per frames batch.
 const FRAME_PACKETS: u64 = 1024;
 /// Packets received per ACK batch.
 const ACK_PACKETS: u64 = 8192;
+/// Packets sent per recovery batch.
+const RECOVERY_PACKETS: u64 = 4096;
 /// Echo rounds (2 KiB each way) per transfer batch.
 const TRANSFER_ROUNDS: u64 = 16;
 const DCID: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -167,6 +173,92 @@ fn ack_batch(base: u64) -> u64 {
     digest
 }
 
+/// Loss recovery on a sender: packets go out 100 µs apart; every eighth one
+/// an ACK arrives for the last eight with one of them missing every fifth
+/// ACK (declared lost by packet threshold once later ones are acknowledged),
+/// and the loss timer is polled.
+fn recovery_batch(base: u64) -> u64 {
+    let status = HandshakeStatus {
+        confirmed: true,
+        peer_completed_address_validation: true,
+        has_handshake_keys: true,
+        at_amplification_limit: false,
+    };
+    let mut r = LossRecovery::new(RecoveryConfig::default(), status);
+    let mut digest = 0xcbf2_9ce4_8422_2325;
+    let mut events = 0xcbf2_9ce4_8422_2325u64;
+    let mut sink = |e: CongestionEvent| {
+        events = mix(
+            events,
+            match e {
+                CongestionEvent::Acked { packet } => packet.pn,
+                CongestionEvent::Lost { packet } => packet.pn << 1,
+                CongestionEvent::EcnCe { count } => count << 2,
+                _ => 3,
+            },
+        );
+    };
+    let mut acks = 0u64;
+    for i in 0..RECOVERY_PACKETS {
+        let pn = base + i;
+        let now = (base + i) * 100_000;
+        let sent = SentPacket {
+            pn,
+            sent_ns: now,
+            bytes: 1200,
+            ack_eliciting: true,
+            in_flight: true,
+        };
+        r.on_packet_sent(PnSpace::ApplicationData, sent)
+            .expect("sent");
+        if i % 8 == 7 {
+            acks += 1;
+            let lo = pn - 7;
+            let ranges: &[AckRange] = &if acks % 5 == 0 {
+                [
+                    AckRange {
+                        smallest: lo + 4,
+                        largest: pn,
+                    },
+                    AckRange {
+                        smallest: lo,
+                        largest: lo + 2,
+                    },
+                ]
+            } else {
+                [
+                    AckRange {
+                        smallest: lo,
+                        largest: pn,
+                    },
+                    AckRange {
+                        smallest: lo,
+                        largest: lo,
+                    },
+                ]
+            };
+            let ranges = if acks % 5 == 0 { ranges } else { &ranges[..1] };
+            let ack = AckFrame::from_ranges(ranges, 3, None).expect("ack");
+            let out = r
+                .on_ack_received(
+                    PnSpace::ApplicationData,
+                    &ack,
+                    2_000,
+                    now + 30_000_000,
+                    &mut sink,
+                )
+                .expect("ack");
+            digest = mix(
+                digest,
+                u64::from(out.newly_acked) | u64::from(out.lost) << 16,
+            );
+        }
+        let _ = r.on_timeout(now, &mut sink);
+        digest = mix(digest, r.bytes_in_flight());
+    }
+    mix(digest, events)
+}
+
 /// The stream echo of tests/stream_zero_alloc.rs: the client writes 2 KiB,
 /// the server echoes what it reads, and the client reads the echo back.
 struct Transfer {
@@ -283,6 +375,7 @@ impl Worker {
                 n * FRAME_PACKETS,
             ),
             "ack" => ack_batch(n * ACK_PACKETS),
+            "recovery" => recovery_batch(n * RECOVERY_PACKETS),
             "transfer" => self.transfer.as_mut().expect("transfer").batch(),
             other => panic!("unknown workload {other}"),
         }
@@ -368,6 +461,7 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
     let (operations, per_batch, unit) = match workload {
         "frames" => (32, FRAME_PACKETS, "packet"),
         "ack" => (16, ACK_PACKETS, "packet"),
+        "recovery" => (16, RECOVERY_PACKETS, "packet"),
         "transfer" => (8, TRANSFER_ROUNDS, "round"),
         other => panic!("unknown workload {other}"),
     };
@@ -451,7 +545,7 @@ fn main() {
         ["once", workload, batches] => once(workload, batches.parse().expect("batches")),
         _ => {
             eprintln!(
-                "usage: abba worker <frames|ack|transfer> | abba drive <workload> <rust-worker> <vesper-worker> | abba once <workload> <batches>"
+                "usage: abba worker <frames|ack|recovery|transfer> | abba drive <workload> <rust-worker> <vesper-worker> | abba once <workload> <batches>"
             );
             std::process::exit(2);
         }

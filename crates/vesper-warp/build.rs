@@ -47,4 +47,6 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "s.unacked_ack_eliciting >= 2",
         "s.unacked_ack_eliciting >= 3",
     ),
+    // recovery.ves: kPacketThreshold becomes 4.
+    ("recovery", "sat_add(e.pn, 3)", "sat_add(e.pn, 4)"),
 ];

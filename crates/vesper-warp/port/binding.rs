@@ -52,6 +52,29 @@ impl Abi for AckErr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AckOut { pub newly_acked: u32, pub newly_acked_bytes: u64, pub lost: u32, pub lost_bytes: u64, pub has_rtt: bool, pub rtt_latest_ns: u64, pub rtt_min_ns: u64, pub rtt_smoothed_ns: u64, pub rtt_ack_delay_ns: u64, pub ecn_ce_increase: u64, pub persistent_congestion: bool }
+
+impl Abi for AckOut {
+    const WORDS: usize = 11;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.newly_acked, &mut out[0..]);
+        Abi::put(&self.newly_acked_bytes, &mut out[1..]);
+        Abi::put(&self.lost, &mut out[2..]);
+        Abi::put(&self.lost_bytes, &mut out[3..]);
+        Abi::put(&self.has_rtt, &mut out[4..]);
+        Abi::put(&self.rtt_latest_ns, &mut out[5..]);
+        Abi::put(&self.rtt_min_ns, &mut out[6..]);
+        Abi::put(&self.rtt_smoothed_ns, &mut out[7..]);
+        Abi::put(&self.rtt_ack_delay_ns, &mut out[8..]);
+        Abi::put(&self.ecn_ce_increase, &mut out[9..]);
+        Abi::put(&self.persistent_congestion, &mut out[10..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        AckOut { newly_acked: Abi::get(&words[0..]), newly_acked_bytes: Abi::get(&words[1..]), lost: Abi::get(&words[2..]), lost_bytes: Abi::get(&words[3..]), has_rtt: Abi::get(&words[4..]), rtt_latest_ns: Abi::get(&words[5..]), rtt_min_ns: Abi::get(&words[6..]), rtt_smoothed_ns: Abi::get(&words[7..]), rtt_ack_delay_ns: Abi::get(&words[8..]), ecn_ce_increase: Abi::get(&words[9..]), persistent_congestion: Abi::get(&words[10..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AckRange { pub smallest: u64, pub largest: u64 }
 
 impl Abi for AckRange {
@@ -564,6 +587,168 @@ impl Abi for Prot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PtoOut { pub has: bool, pub t: u64, pub space: u8 }
+
+impl Abi for PtoOut {
+    const WORDS: usize = 3;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.has, &mut out[0..]);
+        Abi::put(&self.t, &mut out[1..]);
+        Abi::put(&self.space, &mut out[2..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        PtoOut { has: Abi::get(&words[0..]), t: Abi::get(&words[1..]), space: Abi::get(&words[2..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecEntry { pub pn: u64, pub sent_ns: u64, pub bytes: u32, pub ack_eliciting: bool, pub in_flight: bool, pub status: u8 }
+
+impl Abi for RecEntry {
+    const WORDS: usize = 6;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.pn, &mut out[0..]);
+        Abi::put(&self.sent_ns, &mut out[1..]);
+        Abi::put(&self.bytes, &mut out[2..]);
+        Abi::put(&self.ack_eliciting, &mut out[3..]);
+        Abi::put(&self.in_flight, &mut out[4..]);
+        Abi::put(&self.status, &mut out[5..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        RecEntry { pn: Abi::get(&words[0..]), sent_ns: Abi::get(&words[1..]), bytes: Abi::get(&words[2..]), ack_eliciting: Abi::get(&words[3..]), in_flight: Abi::get(&words[4..]), status: Abi::get(&words[5..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RecErr {
+    PnOutOfRange { pn: u64 },
+    NonIncreasingPn { pn: u64, last: u64 },
+    ClockWentBackwards,
+    TooManyTracked,
+    AckOfUnsentPacket { largest_acked: u64 },
+    SpaceDiscarded { space: u8 },
+    BadAckDelayExponent { exponent: u8 },
+}
+
+impl Abi for RecErr {
+    const WORDS: usize = 3;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            RecErr::PnOutOfRange { pn: f0 } => {
+                out[0] = 0;
+                Abi::put(f0, &mut out[1..]);
+            }
+            RecErr::NonIncreasingPn { pn: f0, last: f1 } => {
+                out[0] = 1;
+                Abi::put(f0, &mut out[1..]);
+                Abi::put(f1, &mut out[2..]);
+            }
+            RecErr::ClockWentBackwards => {
+                out[0] = 2;
+            }
+            RecErr::TooManyTracked => {
+                out[0] = 3;
+            }
+            RecErr::AckOfUnsentPacket { largest_acked: f0 } => {
+                out[0] = 4;
+                Abi::put(f0, &mut out[1..]);
+            }
+            RecErr::SpaceDiscarded { space: f0 } => {
+                out[0] = 5;
+                Abi::put(f0, &mut out[1..]);
+            }
+            RecErr::BadAckDelayExponent { exponent: f0 } => {
+                out[0] = 6;
+                Abi::put(f0, &mut out[1..]);
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => RecErr::PnOutOfRange { pn: Abi::get(&words[1..]) },
+            1 => RecErr::NonIncreasingPn { pn: Abi::get(&words[1..]), last: Abi::get(&words[2..]) },
+            2 => RecErr::ClockWentBackwards,
+            3 => RecErr::TooManyTracked,
+            4 => RecErr::AckOfUnsentPacket { largest_acked: Abi::get(&words[1..]) },
+            5 => RecErr::SpaceDiscarded { space: Abi::get(&words[1..]) },
+            6 => RecErr::BadAckDelayExponent { exponent: Abi::get(&words[1..]) },
+            tag => panic!("invalid RecErr tag {tag} from Vesper"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecEvent { pub kind: u8, pub pn: u64, pub sent_ns: u64, pub bytes: u32, pub count: u64 }
+
+impl Abi for RecEvent {
+    const WORDS: usize = 5;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.kind, &mut out[0..]);
+        Abi::put(&self.pn, &mut out[1..]);
+        Abi::put(&self.sent_ns, &mut out[2..]);
+        Abi::put(&self.bytes, &mut out[3..]);
+        Abi::put(&self.count, &mut out[4..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        RecEvent { kind: Abi::get(&words[0..]), pn: Abi::get(&words[1..]), sent_ns: Abi::get(&words[2..]), bytes: Abi::get(&words[3..]), count: Abi::get(&words[4..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecSpace { pub head: u64, pub len: u64, pub has_largest_acked: bool, pub largest_acked: u64, pub has_last_sent: bool, pub last_sent_pn: u64, pub has_last_ack_eliciting: bool, pub last_ack_eliciting_ns: u64, pub has_loss_time: bool, pub loss_time: u64, pub ack_eliciting_in_flight: u32, pub ecn_ce: u64, pub discarded: bool }
+
+impl Abi for RecSpace {
+    const WORDS: usize = 13;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.head, &mut out[0..]);
+        Abi::put(&self.len, &mut out[1..]);
+        Abi::put(&self.has_largest_acked, &mut out[2..]);
+        Abi::put(&self.largest_acked, &mut out[3..]);
+        Abi::put(&self.has_last_sent, &mut out[4..]);
+        Abi::put(&self.last_sent_pn, &mut out[5..]);
+        Abi::put(&self.has_last_ack_eliciting, &mut out[6..]);
+        Abi::put(&self.last_ack_eliciting_ns, &mut out[7..]);
+        Abi::put(&self.has_loss_time, &mut out[8..]);
+        Abi::put(&self.loss_time, &mut out[9..]);
+        Abi::put(&self.ack_eliciting_in_flight, &mut out[10..]);
+        Abi::put(&self.ecn_ce, &mut out[11..]);
+        Abi::put(&self.discarded, &mut out[12..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        RecSpace { head: Abi::get(&words[0..]), len: Abi::get(&words[1..]), has_largest_acked: Abi::get(&words[2..]), largest_acked: Abi::get(&words[3..]), has_last_sent: Abi::get(&words[4..]), last_sent_pn: Abi::get(&words[5..]), has_last_ack_eliciting: Abi::get(&words[6..]), last_ack_eliciting_ns: Abi::get(&words[7..]), has_loss_time: Abi::get(&words[8..]), loss_time: Abi::get(&words[9..]), ack_eliciting_in_flight: Abi::get(&words[10..]), ecn_ce: Abi::get(&words[11..]), discarded: Abi::get(&words[12..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecState { pub max_ack_delay_ns: u64, pub initial_rtt_ns: u64, pub cap: u64, pub pto_count: u32, pub bytes_in_flight: u64, pub confirmed: bool, pub pcav: bool, pub has_handshake_keys: bool, pub at_amplification_limit: bool, pub has_first_sample: bool, pub first_sample_ns: u64, pub last_sent_ns: u64, pub has_timer: bool, pub timer_deadline_ns: u64, pub timer_pto: bool, pub timer_space: u8, pub n_events: u64 }
+
+impl Abi for RecState {
+    const WORDS: usize = 17;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.max_ack_delay_ns, &mut out[0..]);
+        Abi::put(&self.initial_rtt_ns, &mut out[1..]);
+        Abi::put(&self.cap, &mut out[2..]);
+        Abi::put(&self.pto_count, &mut out[3..]);
+        Abi::put(&self.bytes_in_flight, &mut out[4..]);
+        Abi::put(&self.confirmed, &mut out[5..]);
+        Abi::put(&self.pcav, &mut out[6..]);
+        Abi::put(&self.has_handshake_keys, &mut out[7..]);
+        Abi::put(&self.at_amplification_limit, &mut out[8..]);
+        Abi::put(&self.has_first_sample, &mut out[9..]);
+        Abi::put(&self.first_sample_ns, &mut out[10..]);
+        Abi::put(&self.last_sent_ns, &mut out[11..]);
+        Abi::put(&self.has_timer, &mut out[12..]);
+        Abi::put(&self.timer_deadline_ns, &mut out[13..]);
+        Abi::put(&self.timer_pto, &mut out[14..]);
+        Abi::put(&self.timer_space, &mut out[15..]);
+        Abi::put(&self.n_events, &mut out[16..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        RecState { max_ack_delay_ns: Abi::get(&words[0..]), initial_rtt_ns: Abi::get(&words[1..]), cap: Abi::get(&words[2..]), pto_count: Abi::get(&words[3..]), bytes_in_flight: Abi::get(&words[4..]), confirmed: Abi::get(&words[5..]), pcav: Abi::get(&words[6..]), has_handshake_keys: Abi::get(&words[7..]), at_amplification_limit: Abi::get(&words[8..]), has_first_sample: Abi::get(&words[9..]), first_sample_ns: Abi::get(&words[10..]), last_sent_ns: Abi::get(&words[11..]), has_timer: Abi::get(&words[12..]), timer_deadline_ns: Abi::get(&words[13..]), timer_pto: Abi::get(&words[14..]), timer_space: Abi::get(&words[15..]), n_events: Abi::get(&words[16..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Received { pub largest: bool, pub out_of_order: bool }
 
 impl Abi for Received {
@@ -574,6 +759,23 @@ impl Abi for Received {
     }
     fn get(words: &[u64]) -> Self {
         Received { largest: Abi::get(&words[0..]), out_of_order: Abi::get(&words[1..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rtt { pub latest: u64, pub min: u64, pub smoothed: u64, pub rttvar: u64, pub has_sample: bool }
+
+impl Abi for Rtt {
+    const WORDS: usize = 5;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.latest, &mut out[0..]);
+        Abi::put(&self.min, &mut out[1..]);
+        Abi::put(&self.smoothed, &mut out[2..]);
+        Abi::put(&self.rttvar, &mut out[3..]);
+        Abi::put(&self.has_sample, &mut out[4..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        Rtt { latest: Abi::get(&words[0..]), min: Abi::get(&words[1..]), smoothed: Abi::get(&words[2..]), rttvar: Abi::get(&words[3..]), has_sample: Abi::get(&words[4..]) }
     }
 }
 
@@ -615,6 +817,23 @@ impl Abi for Sp {
     }
     fn get(words: &[u64]) -> Self {
         Sp { start: Abi::get(&words[0..]), len: Abi::get(&words[1..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimeoutOut { pub kind: u8, pub space: u8, pub lost: u32, pub packets: u8, pub anti_deadlock: bool }
+
+impl Abi for TimeoutOut {
+    const WORDS: usize = 5;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.kind, &mut out[0..]);
+        Abi::put(&self.space, &mut out[1..]);
+        Abi::put(&self.lost, &mut out[2..]);
+        Abi::put(&self.packets, &mut out[3..]);
+        Abi::put(&self.anti_deadlock, &mut out[4..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        TimeoutOut { kind: Abi::get(&words[0..]), space: Abi::get(&words[1..]), lost: Abi::get(&words[2..]), packets: Abi::get(&words[3..]), anti_deadlock: Abi::get(&words[4..]) }
     }
 }
 
@@ -714,6 +933,23 @@ impl Abi for WrittenLong {
 /// layout (export ABI v3): `in`/`inout` parameters and slices of them are
 /// lent to Vesper in place.
 pub mod repr {
+    /// Mirror of the Vesper copy struct `AckOut` (11 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct AckOut {
+        pub newly_acked: vesper_port_abi::Word<u32>,
+        pub newly_acked_bytes: u64,
+        pub lost: vesper_port_abi::Word<u32>,
+        pub lost_bytes: u64,
+        pub has_rtt: vesper_port_abi::Word<bool>,
+        pub rtt_latest_ns: u64,
+        pub rtt_min_ns: u64,
+        pub rtt_smoothed_ns: u64,
+        pub rtt_ack_delay_ns: u64,
+        pub ecn_ce_increase: u64,
+        pub persistent_congestion: vesper_port_abi::Word<bool>,
+    }
+
     /// Mirror of the Vesper copy struct `AckRange` (2 words).
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -746,12 +982,97 @@ pub mod repr {
         pub packet_end: u64,
     }
 
+    /// Mirror of the Vesper copy struct `PtoOut` (3 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct PtoOut {
+        pub has: vesper_port_abi::Word<bool>,
+        pub t: u64,
+        pub space: vesper_port_abi::Word<u8>,
+    }
+
+    /// Mirror of the Vesper copy struct `RecEntry` (6 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct RecEntry {
+        pub pn: u64,
+        pub sent_ns: u64,
+        pub bytes: vesper_port_abi::Word<u32>,
+        pub ack_eliciting: vesper_port_abi::Word<bool>,
+        pub in_flight: vesper_port_abi::Word<bool>,
+        pub status: vesper_port_abi::Word<u8>,
+    }
+
+    /// Mirror of the Vesper copy struct `RecEvent` (5 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct RecEvent {
+        pub kind: vesper_port_abi::Word<u8>,
+        pub pn: u64,
+        pub sent_ns: u64,
+        pub bytes: vesper_port_abi::Word<u32>,
+        pub count: u64,
+    }
+
+    /// Mirror of the Vesper copy struct `RecSpace` (13 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct RecSpace {
+        pub head: u64,
+        pub len: u64,
+        pub has_largest_acked: vesper_port_abi::Word<bool>,
+        pub largest_acked: u64,
+        pub has_last_sent: vesper_port_abi::Word<bool>,
+        pub last_sent_pn: u64,
+        pub has_last_ack_eliciting: vesper_port_abi::Word<bool>,
+        pub last_ack_eliciting_ns: u64,
+        pub has_loss_time: vesper_port_abi::Word<bool>,
+        pub loss_time: u64,
+        pub ack_eliciting_in_flight: vesper_port_abi::Word<u32>,
+        pub ecn_ce: u64,
+        pub discarded: vesper_port_abi::Word<bool>,
+    }
+
+    /// Mirror of the Vesper copy struct `RecState` (17 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct RecState {
+        pub max_ack_delay_ns: u64,
+        pub initial_rtt_ns: u64,
+        pub cap: u64,
+        pub pto_count: vesper_port_abi::Word<u32>,
+        pub bytes_in_flight: u64,
+        pub confirmed: vesper_port_abi::Word<bool>,
+        pub pcav: vesper_port_abi::Word<bool>,
+        pub has_handshake_keys: vesper_port_abi::Word<bool>,
+        pub at_amplification_limit: vesper_port_abi::Word<bool>,
+        pub has_first_sample: vesper_port_abi::Word<bool>,
+        pub first_sample_ns: u64,
+        pub last_sent_ns: u64,
+        pub has_timer: vesper_port_abi::Word<bool>,
+        pub timer_deadline_ns: u64,
+        pub timer_pto: vesper_port_abi::Word<bool>,
+        pub timer_space: vesper_port_abi::Word<u8>,
+        pub n_events: u64,
+    }
+
     /// Mirror of the Vesper copy struct `Received` (2 words).
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct Received {
         pub largest: vesper_port_abi::Word<bool>,
         pub out_of_order: vesper_port_abi::Word<bool>,
+    }
+
+    /// Mirror of the Vesper copy struct `Rtt` (5 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Rtt {
+        pub latest: u64,
+        pub min: u64,
+        pub smoothed: u64,
+        pub rttvar: u64,
+        pub has_sample: vesper_port_abi::Word<bool>,
     }
 
     /// Mirror of the Vesper copy struct `RxState` (15 words).
@@ -781,6 +1102,17 @@ pub mod repr {
     pub struct Sp {
         pub start: u64,
         pub len: u64,
+    }
+
+    /// Mirror of the Vesper copy struct `TimeoutOut` (5 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct TimeoutOut {
+        pub kind: vesper_port_abi::Word<u8>,
+        pub space: vesper_port_abi::Word<u8>,
+        pub lost: vesper_port_abi::Word<u32>,
+        pub packets: vesper_port_abi::Word<u8>,
+        pub anti_deadlock: vesper_port_abi::Word<bool>,
     }
 
     /// Mirror of the Vesper copy struct `Unprot` (8 words).
@@ -814,6 +1146,43 @@ pub mod repr {
         pub packet_len: u64,
     }
 
+}
+
+// The mirror of `AckOut` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::AckOut>() == 11 * 8);
+    assert!(core::mem::align_of::<repr::AckOut>() == 8);
+    assert!(core::mem::offset_of!(repr::AckOut, newly_acked) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::AckOut, newly_acked_bytes) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::AckOut, lost) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::AckOut, lost_bytes) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::AckOut, has_rtt) == 4 * 8);
+    assert!(core::mem::offset_of!(repr::AckOut, rtt_latest_ns) == 5 * 8);
+    assert!(core::mem::offset_of!(repr::AckOut, rtt_min_ns) == 6 * 8);
+    assert!(core::mem::offset_of!(repr::AckOut, rtt_smoothed_ns) == 7 * 8);
+    assert!(core::mem::offset_of!(repr::AckOut, rtt_ack_delay_ns) == 8 * 8);
+    assert!(core::mem::offset_of!(repr::AckOut, ecn_ce_increase) == 9 * 8);
+    assert!(core::mem::offset_of!(repr::AckOut, persistent_congestion) == 10 * 8);
+};
+
+// SAFETY: `repr::AckOut` is `#[repr(C)]`, 11 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::AckOut {
+    const WORDS: usize = 11;
+}
+
+impl repr::AckOut {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &AckOut) -> Self {
+        let mut words = [0u64; 11];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> AckOut {
+        <AckOut as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
 }
 
 // The mirror of `AckRange` has exactly the Vesper layout.
@@ -908,6 +1277,180 @@ impl repr::Prot {
     }
 }
 
+// The mirror of `PtoOut` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::PtoOut>() == 3 * 8);
+    assert!(core::mem::align_of::<repr::PtoOut>() == 8);
+    assert!(core::mem::offset_of!(repr::PtoOut, has) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::PtoOut, t) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::PtoOut, space) == 2 * 8);
+};
+
+// SAFETY: `repr::PtoOut` is `#[repr(C)]`, 3 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::PtoOut {
+    const WORDS: usize = 3;
+}
+
+impl repr::PtoOut {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &PtoOut) -> Self {
+        let mut words = [0u64; 3];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> PtoOut {
+        <PtoOut as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
+// The mirror of `RecEntry` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::RecEntry>() == 6 * 8);
+    assert!(core::mem::align_of::<repr::RecEntry>() == 8);
+    assert!(core::mem::offset_of!(repr::RecEntry, pn) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::RecEntry, sent_ns) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::RecEntry, bytes) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::RecEntry, ack_eliciting) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::RecEntry, in_flight) == 4 * 8);
+    assert!(core::mem::offset_of!(repr::RecEntry, status) == 5 * 8);
+};
+
+// SAFETY: `repr::RecEntry` is `#[repr(C)]`, 6 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::RecEntry {
+    const WORDS: usize = 6;
+}
+
+impl repr::RecEntry {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &RecEntry) -> Self {
+        let mut words = [0u64; 6];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> RecEntry {
+        <RecEntry as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
+// The mirror of `RecEvent` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::RecEvent>() == 5 * 8);
+    assert!(core::mem::align_of::<repr::RecEvent>() == 8);
+    assert!(core::mem::offset_of!(repr::RecEvent, kind) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::RecEvent, pn) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::RecEvent, sent_ns) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::RecEvent, bytes) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::RecEvent, count) == 4 * 8);
+};
+
+// SAFETY: `repr::RecEvent` is `#[repr(C)]`, 5 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::RecEvent {
+    const WORDS: usize = 5;
+}
+
+impl repr::RecEvent {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &RecEvent) -> Self {
+        let mut words = [0u64; 5];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> RecEvent {
+        <RecEvent as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
+// The mirror of `RecSpace` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::RecSpace>() == 13 * 8);
+    assert!(core::mem::align_of::<repr::RecSpace>() == 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, head) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, len) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, has_largest_acked) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, largest_acked) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, has_last_sent) == 4 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, last_sent_pn) == 5 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, has_last_ack_eliciting) == 6 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, last_ack_eliciting_ns) == 7 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, has_loss_time) == 8 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, loss_time) == 9 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, ack_eliciting_in_flight) == 10 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, ecn_ce) == 11 * 8);
+    assert!(core::mem::offset_of!(repr::RecSpace, discarded) == 12 * 8);
+};
+
+// SAFETY: `repr::RecSpace` is `#[repr(C)]`, 13 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::RecSpace {
+    const WORDS: usize = 13;
+}
+
+impl repr::RecSpace {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &RecSpace) -> Self {
+        let mut words = [0u64; 13];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> RecSpace {
+        <RecSpace as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
+// The mirror of `RecState` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::RecState>() == 17 * 8);
+    assert!(core::mem::align_of::<repr::RecState>() == 8);
+    assert!(core::mem::offset_of!(repr::RecState, max_ack_delay_ns) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, initial_rtt_ns) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, cap) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, pto_count) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, bytes_in_flight) == 4 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, confirmed) == 5 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, pcav) == 6 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, has_handshake_keys) == 7 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, at_amplification_limit) == 8 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, has_first_sample) == 9 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, first_sample_ns) == 10 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, last_sent_ns) == 11 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, has_timer) == 12 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, timer_deadline_ns) == 13 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, timer_pto) == 14 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, timer_space) == 15 * 8);
+    assert!(core::mem::offset_of!(repr::RecState, n_events) == 16 * 8);
+};
+
+// SAFETY: `repr::RecState` is `#[repr(C)]`, 17 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::RecState {
+    const WORDS: usize = 17;
+}
+
+impl repr::RecState {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &RecState) -> Self {
+        let mut words = [0u64; 17];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> RecState {
+        <RecState as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
 // The mirror of `Received` has exactly the Vesper layout.
 const _: () = {
     assert!(core::mem::size_of::<repr::Received>() == 2 * 8);
@@ -933,6 +1476,37 @@ impl repr::Received {
     /// The Rust value of the mirror.
     pub fn to_value(&self) -> Received {
         <Received as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
+// The mirror of `Rtt` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::Rtt>() == 5 * 8);
+    assert!(core::mem::align_of::<repr::Rtt>() == 8);
+    assert!(core::mem::offset_of!(repr::Rtt, latest) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::Rtt, min) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::Rtt, smoothed) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::Rtt, rttvar) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::Rtt, has_sample) == 4 * 8);
+};
+
+// SAFETY: `repr::Rtt` is `#[repr(C)]`, 5 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::Rtt {
+    const WORDS: usize = 5;
+}
+
+impl repr::Rtt {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &Rtt) -> Self {
+        let mut words = [0u64; 5];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> Rtt {
+        <Rtt as Abi>::get(vesper_port_abi::mirror_words(self))
     }
 }
 
@@ -1002,6 +1576,37 @@ impl repr::Sp {
     /// The Rust value of the mirror.
     pub fn to_value(&self) -> Sp {
         <Sp as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
+// The mirror of `TimeoutOut` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::TimeoutOut>() == 5 * 8);
+    assert!(core::mem::align_of::<repr::TimeoutOut>() == 8);
+    assert!(core::mem::offset_of!(repr::TimeoutOut, kind) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::TimeoutOut, space) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::TimeoutOut, lost) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::TimeoutOut, packets) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::TimeoutOut, anti_deadlock) == 4 * 8);
+};
+
+// SAFETY: `repr::TimeoutOut` is `#[repr(C)]`, 5 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::TimeoutOut {
+    const WORDS: usize = 5;
+}
+
+impl repr::TimeoutOut {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &TimeoutOut) -> Self {
+        let mut words = [0u64; 5];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> TimeoutOut {
+        <TimeoutOut as Abi>::get(vesper_port_abi::mirror_words(self))
     }
 }
 
@@ -1099,6 +1704,7 @@ impl repr::WrittenLong {
 const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<(u64, u64) as Abi>::WORDS == 2);
 const _: () = assert!(<AckErr as Abi>::WORDS == 2);
+const _: () = assert!(<AckOut as Abi>::WORDS == 11);
 const _: () = assert!(<AckRange as Abi>::WORDS == 2);
 const _: () = assert!(<FrameAt as Abi>::WORDS == 13);
 const _: () = assert!(<FrameErr as Abi>::WORDS == 3);
@@ -1111,9 +1717,17 @@ const _: () = assert!(<Parsed as Abi>::WORDS == 14);
 const _: () = assert!(<PktType as Abi>::WORDS == 1);
 const _: () = assert!(<PnErr as Abi>::WORDS == 3);
 const _: () = assert!(<Prot as Abi>::WORDS == 13);
+const _: () = assert!(<PtoOut as Abi>::WORDS == 3);
+const _: () = assert!(<RecEntry as Abi>::WORDS == 6);
+const _: () = assert!(<RecErr as Abi>::WORDS == 3);
+const _: () = assert!(<RecEvent as Abi>::WORDS == 5);
+const _: () = assert!(<RecSpace as Abi>::WORDS == 13);
+const _: () = assert!(<RecState as Abi>::WORDS == 17);
 const _: () = assert!(<Received as Abi>::WORDS == 2);
+const _: () = assert!(<Rtt as Abi>::WORDS == 5);
 const _: () = assert!(<RxState as Abi>::WORDS == 15);
 const _: () = assert!(<Sp as Abi>::WORDS == 2);
+const _: () = assert!(<TimeoutOut as Abi>::WORDS == 5);
 const _: () = assert!(<Unprot as Abi>::WORDS == 8);
 const _: () = assert!(<VarIntErr as Abi>::WORDS == 3);
 const _: () = assert!(<WireStep as Abi>::WORDS == 3);
@@ -1159,6 +1773,20 @@ unsafe extern "C" {
     fn vesper_warp_received_on_ack_of_ack(s: *mut u64, ranges: *mut u64, x: i64) -> i64;
     fn vesper_warp_received_on_ack_sent(s: *mut u64) -> i64;
     fn vesper_warp_received_on_packet(result: *mut u64, s: *mut u64, ranges: *mut u64, pn: i64, now_ns: i64, ack_eliciting: i64, ecn: i64, fail: *mut u64) -> i64;
+    fn vesper_warp_recovery_ack_delay_ns(encoded: i64, exponent: i64, fail: *mut u64) -> i64;
+    fn vesper_warp_recovery_clear_space(st: *mut u64, r: *mut u64, spaces: *mut u64, ents: *mut u64, space: i64, discard: i64, now_ns: i64) -> i64;
+    fn vesper_warp_recovery_new(result: *mut u64, max_ack_delay_ns: i64, initial_rtt_ns: i64, cap: i64, confirmed: i64, pcav: i64, keys: i64, amp: i64) -> i64;
+    fn vesper_warp_recovery_on_ack_received(result: *mut u64, st: *mut u64, r: *mut u64, spaces: *mut u64, ents: *mut u64, evs: *mut u64, space: i64, largest: i64, decoded: i64, first_range: i64, count: i64, pairs: *mut u64, ranges: *mut u64, has_ecn: i64, ecn_ce: i64, ack_delay_ns: i64, now_ns: i64, fail: *mut u64) -> i64;
+    fn vesper_warp_recovery_on_packet_sent(st: *mut u64, r: *mut u64, spaces: *mut u64, ents: *mut u64, space: i64, pkt: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_warp_recovery_on_timeout(result: *mut u64, st: *mut u64, r: *mut u64, spaces: *mut u64, ents: *mut u64, evs: *mut u64, now_ns: i64) -> i64;
+    fn vesper_warp_recovery_pc_duration_ns(st: *mut u64, r: *mut u64) -> i64;
+    fn vesper_warp_recovery_pto_time_and_space(result: *mut u64, st: *mut u64, r: *mut u64, spaces: *mut u64, now_ns: i64) -> i64;
+    fn vesper_warp_recovery_rtt_loss_delay_ns(r: *mut u64) -> i64;
+    fn vesper_warp_recovery_rtt_new(result: *mut u64, initial_rtt_ns: i64) -> i64;
+    fn vesper_warp_recovery_rtt_pto_base_ns(r: *mut u64) -> i64;
+    fn vesper_warp_recovery_rtt_update(r: *mut u64, latest_ns: i64, ack_delay_ns: i64) -> i64;
+    fn vesper_warp_recovery_set_timer(st: *mut u64, r: *mut u64, spaces: *mut u64, now_ns: i64) -> i64;
+    fn vesper_warp_recovery_space_new(result: *mut u64) -> i64;
     fn vesper_warp_varint_decode(result: *mut u64, buf: *mut u64, fail: *mut u64) -> i64;
     fn vesper_warp_varint_encode(value: i64, out: *mut u64, fail: *mut u64) -> i64;
     fn vesper_warp_varint_encode_with_len(value: i64, len: i64, out: *mut u64, fail: *mut u64) -> i64;
@@ -1578,6 +2206,153 @@ pub fn received_on_packet(s: &mut repr::RxState, ranges: &mut [repr::AckRange], 
         1 => Err(<AckErr as Abi>::get(&fail[1..])),
         status => panic!("invalid failure status {status} from vesper_warp_received_on_packet"),
     }
+}
+
+/// Calls `recovery_ack_delay_ns` of the Vesper library `warp` (`vesper_warp_recovery_ack_delay_ns`).
+pub fn recovery_ack_delay_ns(encoded: u64, exponent: u8) -> Result<u64, RecErr> {
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_warp_recovery_ack_delay_ns` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_recovery_ack_delay_ns(encoded as i64, exponent as i64, fail.as_mut_ptr()) };
+    match fail[0] {
+        0 => Ok(raw as u64),
+        1 => Err(<RecErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_warp_recovery_ack_delay_ns"),
+    }
+}
+
+/// Calls `recovery_clear_space` of the Vesper library `warp` (`vesper_warp_recovery_clear_space`).
+pub fn recovery_clear_space(st: &mut repr::RecState, r: &repr::Rtt, spaces: &mut [repr::RecSpace], ents: &[repr::RecEntry], space: u64, discard: bool, now_ns: u64) -> u64 {
+    // SAFETY: `vesper_warp_recovery_clear_space` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_mirror_slice_mut(spaces, |view_spaces| vesper_port_abi::with_mirror_slice(ents, |view_ents| unsafe { vesper_warp_recovery_clear_space((st as *mut repr::RecState).cast::<u64>(), (r as *const repr::Rtt).cast_mut().cast::<u64>(), view_spaces, view_ents, space as i64, discard as i64, now_ns as i64) }));
+    raw as u64
+}
+
+/// Calls `recovery_new` of the Vesper library `warp` (`vesper_warp_recovery_new`).
+pub fn recovery_new(max_ack_delay_ns: u64, initial_rtt_ns: u64, cap: u64, confirmed: bool, pcav: bool, keys: bool, amp: bool) -> repr::RecState {
+    let mut result = [0u64; 17];
+    // SAFETY: `vesper_warp_recovery_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_recovery_new(result.as_mut_ptr(), max_ack_delay_ns as i64, initial_rtt_ns as i64, cap as i64, confirmed as i64, pcav as i64, keys as i64, amp as i64) };
+    vesper_port_abi::mirror_from_words::<repr::RecState>(&result[0..])
+}
+
+/// Calls `recovery_on_ack_received` of the Vesper library `warp` (`vesper_warp_recovery_on_ack_received`).
+pub fn recovery_on_ack_received(st: &mut repr::RecState, r: &mut repr::Rtt, spaces: &mut [repr::RecSpace], ents: &mut [repr::RecEntry], evs: &mut [repr::RecEvent], space: u64, largest: u64, decoded: bool, first_range: u64, count: u64, pairs: &[u8], ranges: &[repr::AckRange], has_ecn: bool, ecn_ce: u64, ack_delay_ns: u64, now_ns: u64) -> Result<repr::AckOut, RecErr> {
+    let mut result = [0u64; 11];
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_warp_recovery_on_ack_received` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_mirror_slice_mut(spaces, |view_spaces| vesper_port_abi::with_mirror_slice_mut(ents, |view_ents| vesper_port_abi::with_mirror_slice_mut(evs, |view_evs| vesper_port_abi::with_slice(pairs, |view_pairs| vesper_port_abi::with_mirror_slice(ranges, |view_ranges| unsafe { vesper_warp_recovery_on_ack_received(result.as_mut_ptr(), (st as *mut repr::RecState).cast::<u64>(), (r as *mut repr::Rtt).cast::<u64>(), view_spaces, view_ents, view_evs, space as i64, largest as i64, decoded as i64, first_range as i64, count as i64, view_pairs, view_ranges, has_ecn as i64, ecn_ce as i64, ack_delay_ns as i64, now_ns as i64, fail.as_mut_ptr()) })))));
+    match fail[0] {
+        0 => Ok(vesper_port_abi::mirror_from_words::<repr::AckOut>(&result[0..])),
+        1 => Err(<RecErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_warp_recovery_on_ack_received"),
+    }
+}
+
+/// Calls `recovery_on_packet_sent` of the Vesper library `warp` (`vesper_warp_recovery_on_packet_sent`).
+pub fn recovery_on_packet_sent(st: &mut repr::RecState, r: &repr::Rtt, spaces: &mut [repr::RecSpace], ents: &mut [repr::RecEntry], space: u64, pkt: &repr::RecEntry) -> Result<(), RecErr> {
+    let mut fail = [0u64; 4];
+    // SAFETY: `vesper_warp_recovery_on_packet_sent` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_mirror_slice_mut(spaces, |view_spaces| vesper_port_abi::with_mirror_slice_mut(ents, |view_ents| unsafe { vesper_warp_recovery_on_packet_sent((st as *mut repr::RecState).cast::<u64>(), (r as *const repr::Rtt).cast_mut().cast::<u64>(), view_spaces, view_ents, space as i64, (pkt as *const repr::RecEntry).cast_mut().cast::<u64>(), fail.as_mut_ptr()) }));
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<RecErr as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_warp_recovery_on_packet_sent"),
+    }
+}
+
+/// Calls `recovery_on_timeout` of the Vesper library `warp` (`vesper_warp_recovery_on_timeout`).
+pub fn recovery_on_timeout(st: &mut repr::RecState, r: &repr::Rtt, spaces: &mut [repr::RecSpace], ents: &mut [repr::RecEntry], evs: &mut [repr::RecEvent], now_ns: u64) -> repr::TimeoutOut {
+    let mut result = [0u64; 5];
+    // SAFETY: `vesper_warp_recovery_on_timeout` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_mirror_slice_mut(spaces, |view_spaces| vesper_port_abi::with_mirror_slice_mut(ents, |view_ents| vesper_port_abi::with_mirror_slice_mut(evs, |view_evs| unsafe { vesper_warp_recovery_on_timeout(result.as_mut_ptr(), (st as *mut repr::RecState).cast::<u64>(), (r as *const repr::Rtt).cast_mut().cast::<u64>(), view_spaces, view_ents, view_evs, now_ns as i64) })));
+    vesper_port_abi::mirror_from_words::<repr::TimeoutOut>(&result[0..])
+}
+
+/// Calls `recovery_pc_duration_ns` of the Vesper library `warp` (`vesper_warp_recovery_pc_duration_ns`).
+pub fn recovery_pc_duration_ns(st: &repr::RecState, r: &repr::Rtt) -> u64 {
+    // SAFETY: `vesper_warp_recovery_pc_duration_ns` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_recovery_pc_duration_ns((st as *const repr::RecState).cast_mut().cast::<u64>(), (r as *const repr::Rtt).cast_mut().cast::<u64>()) };
+    raw as u64
+}
+
+/// Calls `recovery_pto_time_and_space` of the Vesper library `warp` (`vesper_warp_recovery_pto_time_and_space`).
+pub fn recovery_pto_time_and_space(st: &repr::RecState, r: &repr::Rtt, spaces: &[repr::RecSpace], now_ns: u64) -> repr::PtoOut {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_warp_recovery_pto_time_and_space` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_mirror_slice(spaces, |view_spaces| unsafe { vesper_warp_recovery_pto_time_and_space(result.as_mut_ptr(), (st as *const repr::RecState).cast_mut().cast::<u64>(), (r as *const repr::Rtt).cast_mut().cast::<u64>(), view_spaces, now_ns as i64) });
+    vesper_port_abi::mirror_from_words::<repr::PtoOut>(&result[0..])
+}
+
+/// Calls `recovery_rtt_loss_delay_ns` of the Vesper library `warp` (`vesper_warp_recovery_rtt_loss_delay_ns`).
+pub fn recovery_rtt_loss_delay_ns(r: &repr::Rtt) -> u64 {
+    // SAFETY: `vesper_warp_recovery_rtt_loss_delay_ns` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_recovery_rtt_loss_delay_ns((r as *const repr::Rtt).cast_mut().cast::<u64>()) };
+    raw as u64
+}
+
+/// Calls `recovery_rtt_new` of the Vesper library `warp` (`vesper_warp_recovery_rtt_new`).
+pub fn recovery_rtt_new(initial_rtt_ns: u64) -> repr::Rtt {
+    let mut result = [0u64; 5];
+    // SAFETY: `vesper_warp_recovery_rtt_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_recovery_rtt_new(result.as_mut_ptr(), initial_rtt_ns as i64) };
+    vesper_port_abi::mirror_from_words::<repr::Rtt>(&result[0..])
+}
+
+/// Calls `recovery_rtt_pto_base_ns` of the Vesper library `warp` (`vesper_warp_recovery_rtt_pto_base_ns`).
+pub fn recovery_rtt_pto_base_ns(r: &repr::Rtt) -> u64 {
+    // SAFETY: `vesper_warp_recovery_rtt_pto_base_ns` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_recovery_rtt_pto_base_ns((r as *const repr::Rtt).cast_mut().cast::<u64>()) };
+    raw as u64
+}
+
+/// Calls `recovery_rtt_update` of the Vesper library `warp` (`vesper_warp_recovery_rtt_update`).
+pub fn recovery_rtt_update(r: &mut repr::Rtt, latest_ns: u64, ack_delay_ns: u64) -> () {
+    // SAFETY: `vesper_warp_recovery_rtt_update` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_recovery_rtt_update((r as *mut repr::Rtt).cast::<u64>(), latest_ns as i64, ack_delay_ns as i64) };
+    { let _ = raw; }
+}
+
+/// Calls `recovery_set_timer` of the Vesper library `warp` (`vesper_warp_recovery_set_timer`).
+pub fn recovery_set_timer(st: &mut repr::RecState, r: &repr::Rtt, spaces: &[repr::RecSpace], now_ns: u64) -> () {
+    // SAFETY: `vesper_warp_recovery_set_timer` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_mirror_slice(spaces, |view_spaces| unsafe { vesper_warp_recovery_set_timer((st as *mut repr::RecState).cast::<u64>(), (r as *const repr::Rtt).cast_mut().cast::<u64>(), view_spaces, now_ns as i64) });
+    { let _ = raw; }
+}
+
+/// Calls `recovery_space_new` of the Vesper library `warp` (`vesper_warp_recovery_space_new`).
+pub fn recovery_space_new() -> repr::RecSpace {
+    let mut result = [0u64; 13];
+    // SAFETY: `vesper_warp_recovery_space_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_recovery_space_new(result.as_mut_ptr()) };
+    vesper_port_abi::mirror_from_words::<repr::RecSpace>(&result[0..])
 }
 
 /// Calls `varint_decode` of the Vesper library `warp` (`vesper_warp_varint_decode`).
