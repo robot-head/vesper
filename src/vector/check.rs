@@ -34,7 +34,16 @@ impl Checker<'_> {
                 return Some(Type::Infer);
             }
         };
-        let first = args.first().map(|a| self.peek_type(&a.expr, env));
+        // A slice view argument (`s[a..b]`, `s.as_slice()`) has no type yet:
+        // it selects the slice form like any `Slice[T]` operand.
+        let first = args.first().map(|a| {
+            if crate::seq::interval(&a.expr).is_some() || crate::seq::whole_view(&a.expr).is_some()
+            {
+                crate::seq::slice_of(Type::Infer)
+            } else {
+                self.peek_type(&a.expr, env)
+            }
+        });
         if SliceIo::applies(name, first.as_ref()) {
             return Some(self.vector_slice_io(name, intrinsic, types, args, env, span, expected));
         }
@@ -316,6 +325,15 @@ impl Checker<'_> {
             }
             _ => self.expr(&s.expr, env, Usage::Borrow(pass)),
         };
+        // The sequence stays loaned while the offset and the stored vector
+        // are evaluated, as for an ordinary call's arguments.
+        let loan_base = self.loans.len();
+        if let Some(place) = self
+            .seq_view_place(&s.expr)
+            .or_else(|| Place::from_expr(&s.expr))
+        {
+            self.loans.push((place, pass, s.expr.span.clone()));
+        }
         let elem_ty = crate::seq::elem(&seq_ty).map(crate::numeric::default_type);
         if elem_ty.is_none() && seq_ty != Type::Infer {
             self.error(
@@ -415,6 +433,7 @@ impl Checker<'_> {
                 span.clone(),
             );
         }
+        self.loans.truncate(loan_base);
         if !masked {
             self.primitive_failure(env, span);
         }

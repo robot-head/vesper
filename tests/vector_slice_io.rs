@@ -381,6 +381,28 @@ fn slice_access_typing() {
         "E1403",
         "requires 'eff [Isa[Avx2]]'",
     );
+    // The sequence stays loaned while later operands are evaluated.
+    rejected(
+        &format!(
+            "fn f() -> u64 {isa} {{ let mut s = ChunkSeq::with_capacity[u32](8); let v = Vec::load_masked[u32, 4](in s, {{ ChunkSeq::finish(sink s); 0 }}); 0 }}"
+        ),
+        "E0301",
+        "conflicts with active argument loan",
+    );
+    rejected(
+        &format!(
+            "fn f(inout s: ChunkSeq[u32]) {isa} {{ Vec::store(inout s, {{ s.push(1); 0 }}, Vec::splat[u32, 4](1)) }}"
+        ),
+        "E0301",
+        "conflicts with active argument loan",
+    );
+    // Slice views select the slice form directly.
+    accepted(&format!(
+        "fn f(in s: ChunkSeq[u32]) -> Vec[u32, 4] {isa} {{ Vec::add(Vec::load_masked[u32, 4](in s.as_slice(), 0), Vec::load_masked[u32, 4](in s[0..4], 1)) }}"
+    ));
+    accepted(&format!(
+        "fn f(inout s: ChunkSeq[u32]) {isa} {{ Vec::store_masked(inout s[1..3], 0, Vec::splat[u32, 4](1)) }}"
+    ));
     // The expected type gives the shape; the string form still works.
     accepted(&format!(
         "fn f(in s: Slice[f32]) -> Vec[f32, 4] {isa} {{ Vec::load(in s, 0) }}"
