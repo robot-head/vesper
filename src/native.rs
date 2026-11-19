@@ -303,6 +303,7 @@ fn visit(e: &Expr, callback: &mut impl FnMut(&Expr)) {
         | ExprKind::For { .. }
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_)) => {
             for c in k.control_children().into_iter().flatten() {
                 visit(c, callback)
@@ -5020,6 +5021,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_) => {
                 return Err("native loops and early exits are lowered from Place IR".into());
             }
@@ -5285,6 +5287,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             BitOp::LeadingZeros => (self.b.ins().clz(x), false),
             BitOp::TrailingZeros => (self.b.ins().ctz(x), false),
             BitOp::CountOnes => (self.b.ins().popcnt(x), false),
+            BitOp::WrappingNeg => (self.b.ins().ineg(x), kind.signed()),
             BitOp::WrappingShl | BitOp::WrappingShr => {
                 // Cranelift shifts take the amount modulo the width of `x`.
                 let n = n.ok_or("native bit shift without an amount")?;

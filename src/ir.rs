@@ -1374,6 +1374,7 @@ impl Lower<'_> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_) => self.control(e),
             ExprKind::Handle { .. } => self.emit(
                 Op::Handle {

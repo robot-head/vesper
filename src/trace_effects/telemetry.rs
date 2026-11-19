@@ -156,6 +156,7 @@ fn children(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         | ExprKind::For { .. }
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_)) => k.control_children().into_iter().flatten().for_each(f),
         ExprKind::Handle {
             state,

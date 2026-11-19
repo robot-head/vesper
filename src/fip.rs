@@ -409,6 +409,7 @@ fn expr_uses_box(e: &Expr) -> bool {
         | ExprKind::For { .. }
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_)) => k
             .control_children()
             .into_iter()
@@ -1350,6 +1351,7 @@ impl<'a> FipChecker<'a> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_) => {
                 // Loops and early exits leave the FIP ownership model (P0 lane 4).
                 self.diagnostics.push(Diagnostic::new(

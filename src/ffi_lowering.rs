@@ -1158,6 +1158,7 @@ impl<'a> Rewriter<'a> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_)) => {
                 for c in k.control_children_mut().into_iter().flatten() {
                     self.expr(c);

@@ -714,6 +714,7 @@ fn collect_mutants_in_fn(
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_)) => {
                 let mut children = k.control_children().unwrap_or_default();
                 children.reverse();

@@ -914,6 +914,7 @@ impl<'a> Admission<'a> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_) => return Err(UNCERTAIN.into()),
             ExprKind::Unary(_, e) => {
                 v = self.expr_in(e, expected)?;

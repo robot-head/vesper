@@ -311,6 +311,7 @@ pub(crate) fn each_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
         | ExprKind::For { .. }
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_) => {
             for c in e.kind.control_children_mut().into_iter().flatten() {
                 each_expr(c, f);

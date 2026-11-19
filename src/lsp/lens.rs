@@ -1259,6 +1259,7 @@ impl Walker<'_> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_) => return Err(Unavailable::OpaqueDeclaration),
             ExprKind::Closure { params, body, .. } => {
                 self.scopes.push(Vec::new());

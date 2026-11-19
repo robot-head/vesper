@@ -2046,6 +2046,7 @@ impl Checker<'_> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_) => self
                 .control_expr(e, env, expected)
                 .expect("loop-family expression"),
@@ -4709,6 +4710,7 @@ pub fn free_names(e: &Expr) -> BTreeSet<String> {
             k @ (ExprKind::Loop(_)
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_)) => {
                 for c in k.control_children().into_iter().flatten() {
                     walk(c, out)

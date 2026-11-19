@@ -1,4 +1,5 @@
-//! Typing and mode rules for `loop`, `for`, `break`, `return` and ranges
+//! Typing and mode rules for `loop`, `for`, `break`, `continue`, `return`
+//! and ranges
 //! (see [`crate::loops`]).
 //!
 //! * A loop body is checked once, from the loop-entry environment with every
@@ -9,7 +10,10 @@
 //!   binding it would drop is rejected (E0302), as at a block end. Each
 //!   `break` records its environment; the environment after the loop is the
 //!   merge of them (E0309 when they disagree on a linear value).
-//! * `break` stays inside its function, closure or handled body (E0213). A
+//! * `continue` checks like a `break` whose environment flows to the back
+//!   edge: loop-local linear bindings must be consumed, and nothing live at
+//!   loop entry may have been moved on its path (E0312).
+//! * `break` and `continue` stay inside its function, closure or handled body (E0213). A
 //!   `return` may leave a handled body (abandoning its handler) but not a
 //!   handler clause or a `region` block, and not a handler with linear state
 //!   or an active `inout` argument loan (E0402).
@@ -48,6 +52,7 @@ pub(super) struct LoopFrame {
 }
 
 const BREAK_OUTSIDE: &str = "'break' outside of a loop";
+const CONTINUE_OUTSIDE: &str = "'continue' outside of a loop";
 
 impl Checker<'_> {
     /// Checks a loop-family expression. Returns `None` for any other kind.
@@ -74,6 +79,7 @@ impl Checker<'_> {
                 Type::Infer
             }
             ExprKind::Break(value) => self.break_expr(value.as_deref(), env, e.span.clone()),
+            ExprKind::Continue => self.continue_expr(env, e.span.clone()),
             ExprKind::Return(value) => self.return_expr(value.as_deref(), env, e.span.clone()),
             _ => return None,
         })
@@ -408,6 +414,44 @@ impl Checker<'_> {
         if let ControlFrame::Loop(frame) = &mut self.control[index] {
             frame.result = joined;
         }
+        Type::named("Never")
+    }
+
+    /// `continue`: jumps to the next iteration of the innermost loop. It
+    /// consumes nothing, like `break`; loop-local linear bindings must be
+    /// consumed, and the environment reaching the next iteration must not
+    /// have moved a binding that was live at loop entry (E0312).
+    fn continue_expr(&mut self, env: &mut Env, span: Span) -> Type {
+        let index = match self.control.last() {
+            Some(ControlFrame::Loop(_)) => self.control.len() - 1,
+            _ => {
+                let target = self
+                    .control
+                    .iter()
+                    .rposition(|f| !matches!(f, ControlFrame::Loop(_)));
+                let message = match target.map(|i| &self.control[i]) {
+                    Some(ControlFrame::HandledBody { .. }) if self.inside_loop() => {
+                        "'continue' cannot leave a handled body"
+                    }
+                    Some(ControlFrame::Clause) if self.inside_loop() => {
+                        "'continue' cannot leave a handler clause"
+                    }
+                    Some(ControlFrame::Function { .. }) if self.inside_loop() => {
+                        "'continue' cannot leave a closure"
+                    }
+                    _ => CONTINUE_OUTSIDE,
+                };
+                self.error("E0213", message, span);
+                return Type::named("Never");
+            }
+        };
+        self.jump_loans("continue", &span);
+        let next = self.loop_exit(env, index, &span);
+        let ControlFrame::Loop(frame) = &self.control[index] else {
+            unreachable!()
+        };
+        let entry = frame.entry.clone();
+        self.back_edge(&entry, &next, &span);
         Type::named("Never")
     }
 
