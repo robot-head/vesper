@@ -1,0 +1,237 @@
+// @vesper-std/sort::unstable: in-place introsort and `is_sorted`.
+//
+// Element reads use `try_get`, whose `None` arm no index here reaches, so
+// the functions are total and raise nothing.
+
+// Whether `a` sorts before `b`.
+pub fn lt[T: mod copy + Ord](a: T, b: T) -> bool {
+    match a.cmp(b) {
+        Less => true,
+        _ => false,
+    }
+}
+
+// Whether `s[i] < s[j]`.
+fn lt_at[T: mod copy + Ord](in s: Slice[T], i: u64, j: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(a) => match s.try_get(j) {
+            Option::Some(b) => lt(a, b),
+            Option::None => false,
+        },
+        Option::None => false,
+    }
+}
+
+// Exchanges `s[i]` and `s[j]`.
+pub fn swap_at[T: mod copy](inout s: Slice[T], i: u64, j: u64) {
+    match s.try_get(i) {
+        Option::Some(a) => match s.try_get(j) {
+            Option::Some(b) => {
+                s.try_set(i, b);
+                s.try_set(j, a);
+            },
+            Option::None => {},
+        },
+        Option::None => {},
+    }
+}
+
+// Whether no element of `s` is smaller than the one before it.
+pub fn is_sorted[T: mod copy + Ord](in s: Slice[T]) -> bool {
+    let n = s.len();
+    let mut i: u64 = 1;
+    let mut sorted = true;
+    loop {
+        if i >= n || !sorted {
+            break;
+        }
+        sorted = !lt_at(in s, i, wrapping_sub(i, 1));
+        i = wrapping_add(i, 1);
+    }
+    sorted
+}
+
+// Insertion sort of `s[lo..hi]`.
+pub fn insertion[T: mod copy + Ord](inout s: Slice[T], lo: u64, hi: u64) {
+    let mut i = wrapping_add(lo, 1);
+    loop {
+        if i >= hi {
+            break;
+        }
+        match s.try_get(i) {
+            Option::Some(x) => {
+                let mut j = i;
+                loop {
+                    if j <= lo {
+                        break;
+                    }
+                    let k = wrapping_sub(j, 1);
+                    let y = match s.try_get(k) {
+                        Option::Some(y) => y,
+                        Option::None => x,
+                    };
+                    if !lt(x, y) {
+                        break;
+                    }
+                    s.try_set(j, y);
+                    j = k;
+                }
+                s.try_set(j, x);
+            },
+            Option::None => {},
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+// Restores the max-heap below `root` of the heap `s[lo..lo + n]`.
+fn sift[T: mod copy + Ord](inout s: Slice[T], lo: u64, start: u64, n: u64) {
+    let mut root = start;
+    loop {
+        let left = wrapping_add(wrapping_mul(root, 2), 1);
+        if left >= n {
+            break;
+        }
+        let mut child = left;
+        let right = wrapping_add(left, 1);
+        if right < n && lt_at(in s, wrapping_add(lo, left), wrapping_add(lo, right)) {
+            child = right;
+        }
+        if !lt_at(in s, wrapping_add(lo, root), wrapping_add(lo, child)) {
+            break;
+        }
+        swap_at(inout s, wrapping_add(lo, root), wrapping_add(lo, child));
+        root = child;
+    }
+}
+
+// Heapsort of `s[lo..hi]`: the introsort fallback.
+pub fn heapsort[T: mod copy + Ord](inout s: Slice[T], lo: u64, hi: u64) {
+    let n = wrapping_sub(hi, lo);
+    let mut i = n >> 1;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        sift(inout s, lo, i, n);
+    }
+    let mut end = n;
+    loop {
+        if end < 2 {
+            break;
+        }
+        end = wrapping_sub(end, 1);
+        swap_at(inout s, lo, wrapping_add(lo, end));
+        sift(inout s, lo, 0, end);
+    }
+}
+
+// Orders `s[a]`, `s[b]` and `s[c]`, so that `s[b]` is their median.
+fn median3[T: mod copy + Ord](inout s: Slice[T], a: u64, b: u64, c: u64) {
+    if lt_at(in s, b, a) {
+        swap_at(inout s, a, b);
+    }
+    if lt_at(in s, c, b) {
+        swap_at(inout s, b, c);
+        if lt_at(in s, b, a) {
+            swap_at(inout s, a, b);
+        }
+    }
+}
+
+// Partitions `s[lo..hi]` around the pivot `p == s[lo]` and returns the
+// pivot's final index `j`: `s[lo..j] <= p <= s[j + 1..hi]`. Both scans stop
+// at elements equal to the pivot, so runs of equal keys split evenly. The
+// median-of-three leaves an element `>= p` at `hi - 1`, which stops the
+// left scan.
+fn partition_at[T: mod copy + Ord](inout s: Slice[T], lo: u64, hi: u64, p: T) -> u64 {
+    let last = wrapping_sub(hi, 1);
+    let mut i = lo;
+    let mut j = hi;
+    let mut xi = p;
+    let mut xj = p;
+    loop {
+        loop {
+            i = wrapping_add(i, 1);
+            if i >= last {
+                break;
+            }
+            xi = match s.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => p,
+            };
+            if !lt(xi, p) {
+                break;
+            }
+        }
+        loop {
+            j = wrapping_sub(j, 1);
+            xj = match s.try_get(j) {
+                Option::Some(x) => x,
+                Option::None => p,
+            };
+            if !lt(p, xj) {
+                break;
+            }
+        }
+        if i >= j {
+            break;
+        }
+        s.try_set(i, xj);
+        s.try_set(j, xi);
+    }
+    s.try_set(lo, xj);
+    s.try_set(j, p);
+    j
+}
+
+// Introsort of `s[lo..hi]` with `limit` partitions left before heapsort.
+// The smaller side recurses and the larger one loops, so the recursion is
+// at most log2 n deep.
+fn quick[T: mod copy + Ord](inout s: Slice[T], lo0: u64, hi0: u64, limit0: u64) {
+    let mut lo = lo0;
+    let mut hi = hi0;
+    let mut limit = limit0;
+    loop {
+        if wrapping_sub(hi, lo) <= 16 {
+            insertion(inout s, lo, hi);
+            break;
+        }
+        if limit == 0 {
+            heapsort(inout s, lo, hi);
+            break;
+        }
+        limit = wrapping_sub(limit, 1);
+        let last = wrapping_sub(hi, 1);
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        median3(inout s, lo, mid, last);
+        swap_at(inout s, lo, mid);
+        let p = match s.try_get(lo) {
+            Option::Some(v) => partition_at(inout s, lo, hi, v),
+            Option::None => lo,
+        };
+        let after = wrapping_add(p, 1);
+        if wrapping_sub(p, lo) < wrapping_sub(hi, after) {
+            quick(inout s, lo, p, limit);
+            lo = after;
+        } else {
+            quick(inout s, after, hi, limit);
+            hi = p;
+        }
+    }
+}
+
+// Twice the bit length of `n`: the introsort depth limit.
+pub fn depth_limit(n: u64) -> u64 {
+    wrapping_mul(widen_u64(wrapping_sub(64, leading_zeros_u64(n))), 2)
+}
+
+// Sorts `s` in place, ascending; equal elements may change order. O(n log n)
+// comparisons on every input, no allocation.
+pub fn sort[T: mod copy + Ord](inout s: Slice[T]) {
+    let n = s.len();
+    if n >= 2 {
+        quick(inout s, 0, n, depth_limit(n));
+    }
+}

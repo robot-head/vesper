@@ -1,0 +1,125 @@
+// @vesper-std/sort::stable: a stable bottom-up merge sort.
+use self::unstable::{
+    lt,
+    insertion
+};
+
+// Merges the sorted runs `src[lo..mid]` and `src[mid..hi]` into
+// `dst[lo..hi]`. On equal elements the left run's comes first. Once one run
+// is used up, the rest of the other is copied in one block.
+fn merge[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], lo: u64, mid: u64, hi: u64) {
+    let mut i = lo;
+    let mut j = mid;
+    let mut k = lo;
+    loop {
+        if i >= mid || j >= hi {
+            break;
+        }
+        match src.try_get(i) {
+            Option::Some(a) => match src.try_get(j) {
+                Option::Some(b) => {
+                    if lt(b, a) {
+                        dst.try_set(k, b);
+                        j = wrapping_add(j, 1);
+                    } else {
+                        dst.try_set(k, a);
+                        i = wrapping_add(i, 1);
+                    }
+                    k = wrapping_add(k, 1);
+                },
+                Option::None => {
+                    j = hi;
+                },
+            },
+            Option::None => {
+                i = mid;
+            },
+        }
+    }
+    if i < mid {
+        dst.try_copy_from(k, in src[i..mid]);
+    } else if j < hi {
+        dst.try_copy_from(k, in src[j..hi]);
+    }
+}
+
+// One merge pass of runs of `width` from `src` into `dst` (both of length
+// `n`); a last run without a partner is copied.
+fn pass[T: mod copy + Ord](in src: Slice[T], inout dst: Slice[T], n: u64, width: u64) {
+    let mut lo: u64 = 0;
+    loop {
+        if lo >= n {
+            break;
+        }
+        let mid0 = wrapping_add(lo, width);
+        let mid = if mid0 < n {
+            mid0
+        } else {
+            n
+        };
+        let hi0 = wrapping_add(mid, width);
+        let hi = if hi0 < n && hi0 > mid {
+            hi0
+        } else {
+            n
+        };
+        merge(in src, inout dst, lo, mid, hi);
+        lo = hi;
+    }
+}
+
+// Sorts `s` in place, ascending, keeping equal elements in their order.
+// Runs of 16 are insertion sorted in place, then merged in passes between
+// `s` and one scratch sequence of `s.len()` elements.
+pub fn stable_sort[T: mod copy + Ord](inout s: Slice[T]) {
+    let n = s.len();
+    if n < 2 {
+        return;
+    }
+    let run: u64 = 16;
+    let mut lo: u64 = 0;
+    loop {
+        if lo >= n {
+            break;
+        }
+        let hi0 = wrapping_add(lo, run);
+        let hi = if hi0 < n {
+            hi0
+        } else {
+            n
+        };
+        insertion(inout s, lo, hi);
+        lo = hi;
+    }
+    if n <= run {
+        return;
+    }
+    match s.try_get(0) {
+        Option::Some(first) => merge_runs(inout s, n, run, first),
+        Option::None => {},
+    }
+}
+
+// The merge passes of `stable_sort` over runs of `run` sorted elements;
+// `first` fills the scratch sequence before the first pass.
+fn merge_runs[T: mod copy + Ord](inout s: Slice[T], n: u64, run: u64, first: T) {
+    let mut scratch: ChunkSeq[T] = ChunkSeq::with_capacity[T](n);
+    scratch.resize(n, first);
+    let mut width = run;
+    let mut in_scratch = false;
+    loop {
+        if width >= n {
+            break;
+        }
+        if in_scratch {
+            pass(in scratch.as_slice(), inout s, n, width);
+        } else {
+            pass(in s, inout scratch.as_slice_mut(), n, width);
+        }
+        in_scratch = !in_scratch;
+        width = wrapping_mul(width, 2);
+    }
+    if in_scratch {
+        s.try_copy_from(0, in scratch.as_slice());
+    }
+}

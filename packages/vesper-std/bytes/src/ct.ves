@@ -1,0 +1,49 @@
+// @vesper-std/bytes::ct: whole-buffer byte predicates (P3b gaps lane 11,
+// #1096).
+
+// Whether every byte of `s` is zero (reserved fields, padding). Runs of
+// zeros are skipped 16 bytes per step on every native target.
+pub fn all_zero(in s: Slice[u8]) -> bool {
+    match s.find_not_in(1, 0, false) {
+        Option::Some(_i) => false,
+        Option::None => true,
+    }
+}
+
+// Whether `a` and `b` hold the same bytes, in time that depends only on
+// their lengths: every byte pair is read and folded with XOR and OR, with
+// no early exit and no branch on the data. Slices of different lengths
+// are unequal at once (lengths are public). For MACs, tags and keys.
+// It does not carry `eff [ConstTime]` yet: a ConstTime body cannot call
+// sequence builtins (E0709), so the verifier cannot check this one.
+pub fn ct_eq(in a: Slice[u8], in b: Slice[u8]) -> bool {
+    let n = a.len();
+    let same_len = n == b.len();
+    let words = n >> 3;
+    let mut acc: u64 = 0;
+    for w in 0..words {
+        let at = w << 3;
+        let x = match a.try_read_u64_le(at) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let y = match b.try_read_u64_le(at) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        acc = acc | (x ^ y);
+    }
+    let tail = words << 3;
+    for i in tail..n {
+        let x = match a.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        let y = match b.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        };
+        acc = acc | widen_u64(x ^ y);
+    }
+    same_len && acc == 0
+}

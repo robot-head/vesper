@@ -1,0 +1,381 @@
+// @vesper-std/sort::keyed: sorting by a parallel key slice.
+use self::unstable::{
+    lt,
+    swap_at,
+    depth_limit
+};
+
+// Whether index `x` sorts before `y`: by key, then by the index itself.
+// Indices past the end of `keys` sort after every key, by index.
+fn before[K: mod copy + Ord](in keys: Slice[K], x: u32, y: u32) -> bool {
+    match keys.try_get(widen_u64(x)) {
+        Option::Some(kx) => match keys.try_get(widen_u64(y)) {
+            Option::Some(ky) => match kx.cmp(ky) {
+                Less => true,
+                Greater => false,
+                Equal => x < y,
+            },
+            Option::None => true,
+        },
+        Option::None => match keys.try_get(widen_u64(y)) {
+            Option::Some(_k) => false,
+            Option::None => x < y,
+        },
+    }
+}
+
+fn before_at[K: mod copy + Ord](in keys: Slice[K], in order: Slice[u32], i: u64, j: u64) -> bool {
+    match order.try_get(i) {
+        Option::Some(x) => match order.try_get(j) {
+            Option::Some(y) => before(in keys, x, y),
+            Option::None => false,
+        },
+        Option::None => false,
+    }
+}
+
+fn insertion_by[K: mod copy + Ord](in keys: Slice[K], inout order: Slice[u32], lo: u64, hi: u64) {
+    let mut i = wrapping_add(lo, 1);
+    loop {
+        if i >= hi {
+            break;
+        }
+        match order.try_get(i) {
+            Option::Some(x) => {
+                let mut j = i;
+                loop {
+                    if j <= lo {
+                        break;
+                    }
+                    let k = wrapping_sub(j, 1);
+                    let y = match order.try_get(k) {
+                        Option::Some(y) => y,
+                        Option::None => x,
+                    };
+                    if !before(in keys, x, y) {
+                        break;
+                    }
+                    order.try_set(j, y);
+                    j = k;
+                }
+                order.try_set(j, x);
+            },
+            Option::None => {},
+        }
+        i = wrapping_add(i, 1);
+    }
+}
+
+fn sift_by[K: mod copy + Ord](
+    in keys: Slice[K],
+    inout order: Slice[u32],
+    lo: u64,
+    start: u64,
+    n: u64
+) {
+    let mut root = start;
+    loop {
+        let left = wrapping_add(wrapping_mul(root, 2), 1);
+        if left >= n {
+            break;
+        }
+        let mut child = left;
+        let right = wrapping_add(left, 1);
+        if right
+            < n
+            && before_at(in keys, in order, wrapping_add(lo, left), wrapping_add(lo, right)) {
+            child = right;
+        }
+        if !before_at(in keys, in order, wrapping_add(lo, root), wrapping_add(lo, child)) {
+            break;
+        }
+        swap_at(inout order, wrapping_add(lo, root), wrapping_add(lo, child));
+        root = child;
+    }
+}
+
+fn heapsort_by[K: mod copy + Ord](in keys: Slice[K], inout order: Slice[u32], lo: u64, hi: u64) {
+    let n = wrapping_sub(hi, lo);
+    let mut i = n >> 1;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = wrapping_sub(i, 1);
+        sift_by(in keys, inout order, lo, i, n);
+    }
+    let mut end = n;
+    loop {
+        if end < 2 {
+            break;
+        }
+        end = wrapping_sub(end, 1);
+        swap_at(inout order, lo, wrapping_add(lo, end));
+        sift_by(in keys, inout order, lo, 0, end);
+    }
+}
+
+fn median3_by[K: mod copy + Ord](
+    in keys: Slice[K],
+    inout order: Slice[u32],
+    a: u64,
+    b: u64,
+    c: u64
+) {
+    if before_at(in keys, in order, b, a) {
+        swap_at(inout order, a, b);
+    }
+    if before_at(in keys, in order, c, b) {
+        swap_at(inout order, b, c);
+        if before_at(in keys, in order, b, a) {
+            swap_at(inout order, a, b);
+        }
+    }
+}
+
+fn partition_by[K: mod copy + Ord](
+    in keys: Slice[K],
+    inout order: Slice[u32],
+    lo: u64,
+    hi: u64,
+    p: u32
+) -> u64 {
+    let last = wrapping_sub(hi, 1);
+    let mut i = lo;
+    let mut j = hi;
+    let mut xi = p;
+    let mut xj = p;
+    loop {
+        loop {
+            i = wrapping_add(i, 1);
+            if i >= last {
+                break;
+            }
+            xi = match order.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => p,
+            };
+            if !before(in keys, xi, p) {
+                break;
+            }
+        }
+        loop {
+            j = wrapping_sub(j, 1);
+            xj = match order.try_get(j) {
+                Option::Some(x) => x,
+                Option::None => p,
+            };
+            if !before(in keys, p, xj) {
+                break;
+            }
+        }
+        if i >= j {
+            break;
+        }
+        order.try_set(i, xj);
+        order.try_set(j, xi);
+    }
+    order.try_set(lo, xj);
+    order.try_set(j, p);
+    j
+}
+
+fn quick_by[K: mod copy + Ord](
+    in keys: Slice[K],
+    inout order: Slice[u32],
+    lo0: u64,
+    hi0: u64,
+    limit0: u64
+) {
+    let mut lo = lo0;
+    let mut hi = hi0;
+    let mut limit = limit0;
+    loop {
+        if wrapping_sub(hi, lo) <= 16 {
+            insertion_by(in keys, inout order, lo, hi);
+            break;
+        }
+        if limit == 0 {
+            heapsort_by(in keys, inout order, lo, hi);
+            break;
+        }
+        limit = wrapping_sub(limit, 1);
+        let last = wrapping_sub(hi, 1);
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        median3_by(in keys, inout order, lo, mid, last);
+        swap_at(inout order, lo, mid);
+        let p = match order.try_get(lo) {
+            Option::Some(v) => partition_by(in keys, inout order, lo, hi, v),
+            Option::None => lo,
+        };
+        let after = wrapping_add(p, 1);
+        if wrapping_sub(p, lo) < wrapping_sub(hi, after) {
+            quick_by(in keys, inout order, lo, p, limit);
+            lo = after;
+        } else {
+            quick_by(in keys, inout order, after, hi, limit);
+            hi = p;
+        }
+    }
+}
+
+// Sorts the indices in `order` by `keys[i]`, ties by the index `i`: a
+// strict total order, so the result does not depend on the algorithm, and
+// an identity `order` ends as Rust's stable `sort_by_key` of it. Indices
+// past the end of `keys` sort last, by index. Introsort: O(n log n), no
+// allocation.
+pub fn sort_by_key[K: mod copy + Ord](in keys: Slice[K], inout order: Slice[u32]) {
+    let n = order.len();
+    if n >= 2 {
+        quick_by(in keys, inout order, 0, n, depth_limit(n));
+    }
+}
+
+// Merges the runs `[lo, mid)` and `[mid, hi)` of `(ka, va)` into `(kb, vb)`
+// by key, the left run first on equal keys; the rest of the run that is
+// left over is copied in one block.
+fn merge_pairs[K: mod copy + Ord, V: mod copy](
+    in ka: Slice[K],
+    in va: Slice[V],
+    inout kb: Slice[K],
+    inout vb: Slice[V],
+    lo: u64,
+    mid: u64,
+    hi: u64
+) {
+    let mut i = lo;
+    let mut j = mid;
+    let mut k = lo;
+    loop {
+        if i >= mid || j >= hi {
+            break;
+        }
+        match ka.try_get(i) {
+            Option::Some(a) => match ka.try_get(j) {
+                Option::Some(b) => {
+                    let from = if lt(b, a) {
+                        j
+                    } else {
+                        i
+                    };
+                    match va.try_get(from) {
+                        Option::Some(v) => {
+                            vb.try_set(k, v);
+                        },
+                        Option::None => {},
+                    }
+                    if from == j {
+                        kb.try_set(k, b);
+                        j = wrapping_add(j, 1);
+                    } else {
+                        kb.try_set(k, a);
+                        i = wrapping_add(i, 1);
+                    }
+                    k = wrapping_add(k, 1);
+                },
+                Option::None => {
+                    j = hi;
+                },
+            },
+            Option::None => {
+                i = mid;
+            },
+        }
+    }
+    if i < mid {
+        kb.try_copy_from(k, in ka[i..mid]);
+        vb.try_copy_from(k, in va[i..mid]);
+    } else if j < hi {
+        kb.try_copy_from(k, in ka[j..hi]);
+        vb.try_copy_from(k, in va[j..hi]);
+    }
+}
+
+fn pass_pairs[K: mod copy + Ord, V: mod copy](
+    in ka: Slice[K],
+    in va: Slice[V],
+    inout kb: Slice[K],
+    inout vb: Slice[V],
+    n: u64,
+    width: u64
+) {
+    let mut lo: u64 = 0;
+    loop {
+        if lo >= n {
+            break;
+        }
+        let mid0 = wrapping_add(lo, width);
+        let mid = if mid0 < n {
+            mid0
+        } else {
+            n
+        };
+        let hi0 = wrapping_add(mid, width);
+        let hi = if hi0 < n && hi0 > mid {
+            hi0
+        } else {
+            n
+        };
+        merge_pairs(in ka, in va, inout kb, inout vb, lo, mid, hi);
+        lo = hi;
+    }
+}
+
+// Sorts the pairs `(keys[i], vals[i])` of the first `min(keys.len(),
+// vals.len())` indices by key, stably: pairs with equal keys keep their
+// order. A bottom-up merge sort with one scratch sequence per slice.
+pub fn sort_pairs[K: mod copy + Ord, V: mod copy](inout keys: Slice[K], inout vals: Slice[V]) {
+    let n = if keys.len() < vals.len() {
+        keys.len()
+    } else {
+        vals.len()
+    };
+    if n < 2 {
+        return;
+    }
+    match keys.try_get(0) {
+        Option::Some(k0) => match vals.try_get(0) {
+            Option::Some(v0) => merge_pair_runs(inout keys, inout vals, n, k0, v0),
+            Option::None => {},
+        },
+        Option::None => {},
+    }
+}
+
+fn merge_pair_runs[K: mod copy + Ord, V: mod copy](
+    inout keys: Slice[K],
+    inout vals: Slice[V],
+    n: u64,
+    k0: K,
+    v0: V
+) {
+    let mut ks: ChunkSeq[K] = ChunkSeq::with_capacity[K](n);
+    ks.resize(n, k0);
+    let mut vs: ChunkSeq[V] = ChunkSeq::with_capacity[V](n);
+    vs.resize(n, v0);
+    let mut width: u64 = 1;
+    let mut in_scratch = false;
+    loop {
+        if width >= n {
+            break;
+        }
+        if in_scratch {
+            pass_pairs(in ks.as_slice(), in vs.as_slice(), inout keys, inout vals, n, width);
+        } else {
+            pass_pairs(
+                in keys,
+                in vals,
+                inout ks.as_slice_mut(),
+                inout vs.as_slice_mut(),
+                n,
+                width
+            );
+        }
+        in_scratch = !in_scratch;
+        width = wrapping_mul(width, 2);
+    }
+    if in_scratch {
+        keys.try_copy_from(0, in ks.as_slice());
+        vals.try_copy_from(0, in vs.as_slice());
+    }
+}

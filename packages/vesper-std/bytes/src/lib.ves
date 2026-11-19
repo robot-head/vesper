@@ -10,9 +10,7 @@
 // Append `width` zero bytes and return where they start.
 fn grow(inout out: ChunkSeq[u8], width: u64) -> u64 {
     let at = out.len();
-    for _i in 0..width {
-        out.push(0);
-    }
+    out.resize(wrapping_add(at, width), 0);
     at
 }
 
