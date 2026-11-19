@@ -391,7 +391,7 @@ mod imp {
                 PAGE_NOACCESS,
             )
         };
-        let p = NonNull::new(p.cast()).ok_or(VirtualArenaError::ReserveFailed)?;
+        let p = NonNull::new(p.cast::<u8>()).ok_or(VirtualArenaError::ReserveFailed)?;
         if guard_page {
             // SAFETY: `[len, len + VIRTUAL_PAGE)` is the trailing guard page
             // inside our owned reservation. Commit and explicitly mark it
