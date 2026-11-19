@@ -575,6 +575,10 @@ fn sequence<'a>(
             });
         let spacing = if previous_unary || package {
             Gap::None
+        } else if list && previous.is_some_and(|p| p.kind == K::Semi) {
+            // `[T; N]` and `[x; N]` (§5): a `;` inside brackets is a
+            // separator within one line, not the end of a statement.
+            Gap::Soft
         } else {
             previous.map_or(Gap::None, |p| gap(p, current, block, previous_block))
         };

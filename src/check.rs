@@ -15,6 +15,8 @@ mod integer_widths_rules;
 #[path = "tiled/check.rs"]
 mod tiled_rules;
 
+#[path = "arrays/check.rs"]
+mod array_rules;
 #[path = "integer_widths/literal_typing.rs"]
 mod literal_typing;
 #[path = "loops/check.rs"]
@@ -583,6 +585,9 @@ pub(crate) fn check_core(
     module: &Module,
     traits: Option<&dyn TraitCalls>,
 ) -> (Checked, BTreeMap<(usize, usize), String>) {
+    // Module constants (§2.2): every use is a call of the constant.
+    let with_consts = crate::arrays::lower_consts(module);
+    let module = with_consts.as_ref().unwrap_or(module);
     let (mut world, collection_errors) = World::collect(module);
     let mut resolved;
     let mut diagnostics = vec![];
@@ -686,6 +691,11 @@ pub(crate) fn check_core(
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::regions::check_world(&world));
         diagnostics.extend(crate::fip::check_world(&world));
+    }
+    if traits.is_none() {
+        diagnostics.extend(crate::arrays::check_world(&world));
+        // Array writes and `len` in the forms Place IR carries (§5).
+        crate::arrays::lower_world(&mut world);
     }
     if diagnostics.is_empty() && traits.is_none() {
         let program = crate::ir::lower_world(&world);
@@ -1603,6 +1613,7 @@ impl Checker<'_> {
                         if !self
                             .integer_fact(index, env)
                             .is_some_and(|n| n >= 0 && n < ts.len() as i128)
+                            && !self.array_index_total(index, env, ts.len())
                         {
                             self.primitive_failure(env, e.span.clone());
                         }
@@ -1898,6 +1909,7 @@ impl Checker<'_> {
                     common
                 }
             }
+            ExprKind::Assign(op, l, r) if let Some(t) = self.array_assign(e, op, l, r, env) => t,
             ExprKind::Assign(op, l, r) => {
                 let Some(p) = Place::from_expr(l) else {
                     self.error("E0300", "assignment requires a place", l.span.clone());
@@ -2532,6 +2544,9 @@ impl Checker<'_> {
                 return t;
             }
             if let Some(t) = self.seq_method_call(base, method, types, args, env, span.clone()) {
+                return t;
+            }
+            if let Some(t) = self.array_method_call(base, method, args, env, span.clone()) {
                 return t;
             }
             let mut t = self.peek_type(base, env);

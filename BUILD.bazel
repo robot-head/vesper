@@ -95,6 +95,11 @@ vesper_crate(
         ],
         # @vesper-std/sort, core and bytes (#1096) as a driver's dependencies.
         "test/std_sort": [":files"],
+        # @vesper-std/fs, process and env (#1125): drivers over the packages
+        # and their .vsys imports.
+        "test/std_env": [":files"],
+        "test/std_fs": [":files"],
+        "test/std_process": [":files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
         "test/self_host_front_end": glob([

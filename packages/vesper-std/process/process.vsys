@@ -1,0 +1,27 @@
+// @vesper-std/process's import (self-hosting SH0 lane 3, #1125). The
+// functions are the C-ABI host shim in crates/vesper-std-host
+// (src/process.rs).
+sys library StdProcess (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_std_host",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    linear extern type ProcCommand;
+    linear extern type ProcChild;
+    wire struct ProcStatus { code: i64, signal: u32, exited: u32 }
+    fn vstd_proc_command(nocapture in program: CSlice[u8]) -> ForeignVal[ProcCommand];
+    fn vstd_proc_arg(inout c: ProcCommand, nocapture in arg: CSlice[u8]) -> ForeignVal[Unit];
+    fn vstd_proc_env(inout c: ProcCommand, nocapture in key: CSlice[u8], nocapture in value: CSlice[u8]) -> ForeignVal[Unit];
+    fn vstd_proc_env_remove(inout c: ProcCommand, nocapture in key: CSlice[u8]) -> ForeignVal[Unit];
+    fn vstd_proc_env_clear(inout c: ProcCommand) -> ForeignVal[Unit];
+    fn vstd_proc_cwd(inout c: ProcCommand, nocapture in dir: CSlice[u8]) -> ForeignVal[Unit];
+    fn vstd_proc_stdio(inout c: ProcCommand, which: u32, mode: u32) -> ForeignVal[Unit];
+    fn vstd_proc_spawn(sink c: ProcCommand, nocapture inout err: u64) -> ForeignVal[Option[ProcChild]];
+    fn vstd_proc_command_free(sink c: ProcCommand) -> ForeignVal[Unit];
+    fn vstd_proc_wait(inout ch: ProcChild, nocapture inout status: ProcStatus, nocapture inout err: u64) -> ForeignVal[u32];
+    fn vstd_proc_output(in ch: ProcChild, which: u32, nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+    fn vstd_proc_child_id(in ch: ProcChild) -> ForeignVal[u64];
+    fn vstd_proc_free(sink ch: ProcChild) -> ForeignVal[Unit];
+    fn vstd_proc_exit(code: i64) -> ForeignVal[Unit];
+    fn vstd_proc_id() -> ForeignVal[u64];
+}
