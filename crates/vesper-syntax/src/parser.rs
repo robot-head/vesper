@@ -210,6 +210,7 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
     if p.halted {
         module = Module::default();
     }
+    lower_const_uses(&mut module);
     Ok(Parse {
         module,
         green: p.builder.finish(),
@@ -2801,4 +2802,141 @@ fn splat(value: Expr, n: usize, span: Span) -> ExprKind {
             span,
         })),
     }
+}
+
+/// Turns every use `NAME` of a constant this module declares into a call of
+/// its function [`CONST_PREFIX`]`NAME`, before a package loader renames the
+/// module's items. Returns whether the module declares a constant.
+pub fn lower_const_uses(module: &mut Module) -> bool {
+    let consts = module
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Function(f) if f.name.starts_with(CONST_PREFIX) => {
+                Some(f.name[CONST_PREFIX.len()..].to_owned())
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if consts.is_empty() {
+        return false;
+    }
+    let mut rewrite = |e: &mut Expr| {
+        if let ExprKind::Name(n) = &e.kind
+            && consts.contains(n)
+        {
+            // The callee has an empty span of its own: a callee whose span
+            // has a type is a function value, and the call's span has one.
+            e.kind = ExprKind::Call {
+                callee: Box::new(Expr {
+                    kind: ExprKind::Name(format!("{CONST_PREFIX}{n}")),
+                    span: e.span.start..e.span.start,
+                }),
+                types: vec![],
+                args: vec![],
+            };
+        }
+    };
+    for item in &mut module.items {
+        match item {
+            Item::Function(f) => function_exprs(f, &mut rewrite),
+            Item::Impl { methods, .. } => {
+                for f in methods {
+                    function_exprs(f, &mut rewrite);
+                }
+            }
+            Item::Conformance(c) => {
+                for f in &mut c.methods {
+                    function_exprs(f, &mut rewrite);
+                }
+            }
+            Item::Trait(t) => {
+                for f in &mut t.methods {
+                    function_exprs(f, &mut rewrite);
+                }
+            }
+            Item::Adt(_) | Item::Effect(_) => {}
+        }
+    }
+    true
+}
+
+fn function_exprs(f: &mut Function, g: &mut dyn FnMut(&mut Expr)) {
+    if let Some(body) = &mut f.body {
+        walk_exprs(body, g);
+    }
+}
+
+/// Applies `g` to every expression of `e`, children first.
+pub fn walk_exprs(e: &mut Expr, g: &mut dyn FnMut(&mut Expr)) {
+    match &mut e.kind {
+        ExprKind::Literal(_) | ExprKind::Name(_) => {}
+        ExprKind::Tuple(es) => es.iter_mut().for_each(|e| walk_exprs(e, g)),
+        ExprKind::Struct { fields, .. } => fields.iter_mut().for_each(|(_, e)| walk_exprs(e, g)),
+        ExprKind::Block { statements, tail } => {
+            for s in statements {
+                match s {
+                    Statement::Let { value, .. } | Statement::Expr(value) => walk_exprs(value, g),
+                }
+            }
+            if let Some(t) = tail {
+                walk_exprs(t, g);
+            }
+        }
+        ExprKind::Call { callee, args, .. } => {
+            walk_exprs(callee, g);
+            for a in args {
+                walk_exprs(&mut a.expr, g);
+            }
+        }
+        ExprKind::Field(b, _) | ExprKind::Try(b) | ExprKind::Unary(_, b) => walk_exprs(b, g),
+        ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) => {
+            walk_exprs(a, g);
+            walk_exprs(b, g);
+        }
+        ExprKind::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            walk_exprs(condition, g);
+            walk_exprs(then, g);
+            if let Some(o) = otherwise {
+                walk_exprs(o, g);
+            }
+        }
+        ExprKind::Match { value, arms } => {
+            walk_exprs(value, g);
+            for (_, a) in arms {
+                walk_exprs(a, g);
+            }
+        }
+        ExprKind::Closure { body, .. } => walk_exprs(body, g),
+        ExprKind::Handle {
+            state,
+            body,
+            ret,
+            ops,
+            ..
+        } => {
+            if let Some((_, s)) = state {
+                walk_exprs(s, g);
+            }
+            walk_exprs(body, g);
+            walk_exprs(&mut ret.body, g);
+            for op in ops {
+                walk_exprs(&mut op.body, g);
+            }
+        }
+        k @ (ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_)) => {
+            for c in k.control_children_mut().into_iter().flatten() {
+                walk_exprs(c, g);
+            }
+        }
+    }
+    g(e);
 }

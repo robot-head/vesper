@@ -230,3 +230,42 @@ fn initializers_must_be_constant_and_names_unique() {
         "E0300",
     );
 }
+
+#[test]
+fn constants_of_a_non_root_package_module_are_read_in_place() {
+    let temp = Temp::new();
+    let dir = &temp.0;
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("Loom.toml"),
+        "[package]\nname = \"@demo/consts\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/main.ves"),
+        "use self::tables::look;\nconst BASE: u64 = 1000;\nfn main() -> u64 { wrapping_add(BASE, look(2)) }\n",
+    )
+    .unwrap();
+    // The module's constants get the package's qualified names.
+    fs::write(
+        dir.join("src/tables.ves"),
+        "const TABLE: [u64; 4] = [3, 5, 7, 11];\nconst BASE: u64 = 20;\npub fn look(i: u64) -> u64 { if i < 4 { wrapping_add(TABLE[i], BASE) } else { 0 } }\n",
+    )
+    .unwrap();
+    let assembled = vesper::packages::load(dir).unwrap();
+    assert!(assembled.ok(), "{:?}", assembled.diagnostics);
+    let c = check::check(&assembled.module);
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    let expected = (1000 + 7 + 20).to_string();
+    for optimize in [true, false] {
+        let mut runtime = Runtime::new(&c.world);
+        runtime.optimize = optimize;
+        assert_eq!(runtime.run("main", vec![]).unwrap().to_string(), expected);
+        assert_eq!(
+            native::jit_with_options(&c.world, "main", optimize)
+                .unwrap()
+                .to_string(),
+            expected
+        );
+    }
+}

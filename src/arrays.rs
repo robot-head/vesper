@@ -57,148 +57,28 @@ pub fn element(ty: &Type) -> Option<(&Type, usize)> {
 
 /// Whether `name` is the function of a module constant.
 pub fn is_const_function(name: &str) -> bool {
-    name.starts_with(CONST_PREFIX)
+    // A package renames a constant of a module other than its root to
+    // `{scope}__{package}__{module}__const$NAME` (`crate::packages`).
+    name.starts_with(CONST_PREFIX) || name.contains(&format!("__{CONST_PREFIX}"))
 }
 
 /// The source name of a constant's function.
 pub fn const_name(function: &str) -> &str {
-    function.strip_prefix(CONST_PREFIX).unwrap_or(function)
+    function
+        .rsplit_once(CONST_PREFIX)
+        .map_or(function, |(_, name)| name)
 }
 
 /// The module with every use of a constant turned into a call of its
-/// function, or `None` when the module declares no constant.
+/// function, or `None` when the module declares no constant. The parser
+/// already does this ([`crate::parser::lower_const_uses`]); this covers
+/// modules built or expanded after parsing.
 pub fn lower_consts(module: &Module) -> Option<Module> {
-    let consts = module
-        .items
-        .iter()
-        .filter_map(|i| match i {
-            Item::Function(f) if is_const_function(&f.name) => Some(const_name(&f.name).to_owned()),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
-    if consts.is_empty() {
-        return None;
-    }
     let mut module = module.clone();
-    let mut rewrite = |e: &mut Expr| {
-        if let ExprKind::Name(n) = &e.kind
-            && consts.contains(n)
-        {
-            // The callee has an empty span of its own: a callee whose span
-            // has a type is a function value, and the call's span has one.
-            e.kind = ExprKind::Call {
-                callee: Box::new(Expr {
-                    kind: ExprKind::Name(format!("{CONST_PREFIX}{n}")),
-                    span: e.span.start..e.span.start,
-                }),
-                types: vec![],
-                args: vec![],
-            };
-        }
-    };
-    for item in &mut module.items {
-        match item {
-            Item::Function(f) => function_exprs(f, &mut rewrite),
-            Item::Impl { methods, .. } => {
-                for f in methods {
-                    function_exprs(f, &mut rewrite);
-                }
-            }
-            Item::Conformance(c) => {
-                for f in &mut c.methods {
-                    function_exprs(f, &mut rewrite);
-                }
-            }
-            Item::Trait(t) => {
-                for f in &mut t.methods {
-                    function_exprs(f, &mut rewrite);
-                }
-            }
-            Item::Adt(_) | Item::Effect(_) => {}
-        }
-    }
-    Some(module)
+    crate::parser::lower_const_uses(&mut module).then_some(module)
 }
 
-fn function_exprs(f: &mut Function, g: &mut dyn FnMut(&mut Expr)) {
-    if let Some(body) = &mut f.body {
-        walk(body, g);
-    }
-}
-
-/// Applies `g` to every expression of `e`, children first.
-pub fn walk(e: &mut Expr, g: &mut dyn FnMut(&mut Expr)) {
-    match &mut e.kind {
-        ExprKind::Literal(_) | ExprKind::Name(_) => {}
-        ExprKind::Tuple(es) => es.iter_mut().for_each(|e| walk(e, g)),
-        ExprKind::Struct { fields, .. } => fields.iter_mut().for_each(|(_, e)| walk(e, g)),
-        ExprKind::Block { statements, tail } => {
-            for s in statements {
-                match s {
-                    Statement::Let { value, .. } | Statement::Expr(value) => walk(value, g),
-                }
-            }
-            if let Some(t) = tail {
-                walk(t, g);
-            }
-        }
-        ExprKind::Call { callee, args, .. } => {
-            walk(callee, g);
-            for a in args {
-                walk(&mut a.expr, g);
-            }
-        }
-        ExprKind::Field(b, _) | ExprKind::Try(b) | ExprKind::Unary(_, b) => walk(b, g),
-        ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) => {
-            walk(a, g);
-            walk(b, g);
-        }
-        ExprKind::If {
-            condition,
-            then,
-            otherwise,
-        } => {
-            walk(condition, g);
-            walk(then, g);
-            if let Some(o) = otherwise {
-                walk(o, g);
-            }
-        }
-        ExprKind::Match { value, arms } => {
-            walk(value, g);
-            for (_, a) in arms {
-                walk(a, g);
-            }
-        }
-        ExprKind::Closure { body, .. } => walk(body, g),
-        ExprKind::Handle {
-            state,
-            body,
-            ret,
-            ops,
-            ..
-        } => {
-            if let Some((_, s)) = state {
-                walk(s, g);
-            }
-            walk(body, g);
-            walk(&mut ret.body, g);
-            for op in ops {
-                walk(&mut op.body, g);
-            }
-        }
-        k @ (ExprKind::Loop(_)
-        | ExprKind::For { .. }
-        | ExprKind::Range { .. }
-        | ExprKind::Break(_)
-        | ExprKind::Return(_)) => {
-            for c in k.control_children_mut().into_iter().flatten() {
-                walk(c, g);
-            }
-        }
-    }
-    g(e);
-}
+pub use crate::parser::walk_exprs as walk;
 
 /// Rewrites the checked array operations of every function into the forms
 /// Place IR carries (see the module docs). Runs before IR lowering.
@@ -225,7 +105,7 @@ pub fn lower_world(world: &mut World) {
                     && let ExprKind::Name(n) = &mut callee.kind
                     && tables.contains(n.as_str())
                 {
-                    *n = format!("{TABLE_PREFIX}{}", const_name(n));
+                    *n = format!("{TABLE_PREFIX}{n}");
                 }
             });
         }
@@ -234,16 +114,14 @@ pub fn lower_world(world: &mut World) {
 }
 
 /// The callee of a use of a constant aggregate after [`lower_world`]:
-/// `$table$NAME`. It is not a function of the World, so no pass inlines
-/// it; the evaluator calls [`CONST_PREFIX`]`NAME` and native code reads the
-/// constant's read-only data.
+/// `$table$` followed by the constant function's name. It is not a function
+/// of the World, so no pass inlines it; the evaluator calls the constant's
+/// function and native code reads the constant's read-only data.
 pub const TABLE_PREFIX: &str = "$table$";
 
-/// The constant function a table read `$table$NAME` stands for.
+/// The constant function a table read (`$table$` + its name) stands for.
 pub fn table_function(callee: &str) -> Option<String> {
-    callee
-        .strip_prefix(TABLE_PREFIX)
-        .map(|n| format!("{CONST_PREFIX}{n}"))
+    callee.strip_prefix(TABLE_PREFIX).map(str::to_owned)
 }
 
 fn type_at<'a>(types: &'a TypeMap, e: &Expr) -> Option<&'a Type> {
@@ -352,9 +230,10 @@ pub fn check_world(world: &World) -> Vec<Diagnostic> {
             continue;
         }
         let source = const_name(name);
-        if world.adts.contains_key(source)
-            || world.effects.contains_key(source)
-            || world.constructor(source).is_some()
+        if name.starts_with(CONST_PREFIX)
+            && (world.adts.contains_key(source)
+                || world.effects.contains_key(source)
+                || world.constructor(source).is_some())
         {
             out.push(Diagnostic::new(
                 CONST_NAME,

@@ -306,6 +306,8 @@ fn constant_and_guarded_indices_are_total() {
         "total",
         "fn first(in a: [u64; 4]) -> u64 { a[0] }
 fn guarded(in a: [u64; 4], i: u64) -> u64 { if i < 4 { a[i] } else { 0 } }
+fn id(x: u64) -> u64 { x }
+fn masked(in a: [u64; 4], i: u64) -> u64 { a[id(i) & 3] }
 fn looped(in a: [u64; 4]) -> u64 {
     let mut s: u64 = 0;
     for i in 0..4 {
@@ -326,9 +328,9 @@ fn writes() -> u64 eff [Fail[ArithOverflow]] {
 fn main() -> u64 {
     let a: [u64; 4] = [1, 2, 3, 4];
     let w = handle Fail[ArithOverflow] in { writes() } with { return x => x, raise(e, k) => 0, };
-    wrapping_add(wrapping_add(first(a), guarded(a, 2)), wrapping_add(looped(a), w))
+    wrapping_add(wrapping_add(first(a), guarded(a, 2)), wrapping_add(looped(a), wrapping_add(w, masked(a, 5))))
 }",
-        1 + 3 + 20 + 14,
+        1 + 3 + 20 + 14 + 2,
     );
     // An index the checker cannot bound needs `Fail[RuntimeError]`.
     rejects(

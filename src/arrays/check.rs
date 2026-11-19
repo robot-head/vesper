@@ -15,7 +15,8 @@ impl Checker<'_> {
     }
 
     /// The checker's bounds of `index`, through `+` and `-` of a constant
-    /// (`a[i - 1]`, `a[i + 1]`), which raise on overflow and so cannot wrap.
+    /// (`a[i - 1]`, `a[i + 1]`), which raise on overflow and so cannot wrap,
+    /// and through a mask `x & m` of any `x`.
     fn array_index_bounds(&self, index: &Expr, env: &Env, depth: usize) -> Option<(i128, i128)> {
         if let Some(bounds) = self.integer_bounds(index, env) {
             return Some(bounds);
@@ -23,7 +24,24 @@ impl Checker<'_> {
         let ExprKind::Binary(op, a, b) = &index.kind else {
             return None;
         };
-        if depth > 8 || !matches!(op.as_str(), "+" | "-") {
+        if depth > 8 {
+            return None;
+        }
+        if op == "&" {
+            // `x & m` with `m >= 0` is in `0..=m` whatever `x` computes,
+            // calls included (an index is evaluated once).
+            let mask = |x: &Expr| {
+                self.array_index_bounds(x, env, depth + 1)
+                    .filter(|(lo, _)| *lo >= 0)
+                    .map(|(_, hi)| hi)
+            };
+            let m = match (mask(a), mask(b)) {
+                (Some(x), Some(y)) => x.min(y),
+                (x, y) => x.or(y)?,
+            };
+            return Some((0, m));
+        }
+        if !matches!(op.as_str(), "+" | "-") {
             return None;
         }
         let (lo, hi) = self.array_index_bounds(a, env, depth + 1)?;
