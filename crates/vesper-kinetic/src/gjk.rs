@@ -363,6 +363,53 @@ fn gjk_cores(sa: &Shape, sb: &Shape) -> Result<GjkOutcome, GjkError> {
 /// Distance between `a` and `b` (GJK), or penetration depth (EPA) as a
 /// negative distance, with the contact normal and witness points.
 pub fn separation(a: &Shape, b: &Shape) -> Result<Separation, GjkError> {
+    #[cfg(vesper_port)]
+    {
+        separation_port(a, b)
+    }
+    #[cfg(not(vesper_port))]
+    {
+        separation_rust(a, b)
+    }
+}
+
+/// A shape as the port lends it: kind and numbers (see the port's module
+/// gjk). Spheres and capsules use `buf`; a polytope lends its vertices.
+#[cfg(vesper_port)]
+fn port_shape<'a>(s: &'a Shape, buf: &'a mut [f64; 7]) -> (u32, &'a [f64]) {
+    match *s {
+        Shape::Sphere { center, radius } => {
+            buf[..3].copy_from_slice(&center);
+            buf[3] = radius;
+            (0, &buf[..4])
+        }
+        Shape::Capsule { a, b, radius } => {
+            buf[..3].copy_from_slice(&a);
+            buf[3..6].copy_from_slice(&b);
+            buf[6] = radius;
+            (1, &buf[..])
+        }
+        Shape::Polytope { vertices } => (2, vertices.as_flattened()),
+    }
+}
+
+#[cfg(vesper_port)]
+fn separation_port(a: &Shape, b: &Shape) -> Result<Separation, GjkError> {
+    let (mut ba, mut bb) = ([0.0; 7], [0.0; 7]);
+    let (ka, da) = port_shape(a, &mut ba);
+    let (kb, db) = port_shape(b, &mut bb);
+    let mut out = [0.0; 10];
+    crate::port::gjk_separation(ka, da, kb, db, &mut out)?;
+    Ok(Separation {
+        distance: out[0],
+        normal: [out[1], out[2], out[3]],
+        point_a: [out[4], out[5], out[6]],
+        point_b: [out[7], out[8], out[9]],
+    })
+}
+
+#[cfg_attr(vesper_port, allow(dead_code))]
+fn separation_rust(a: &Shape, b: &Shape) -> Result<Separation, GjkError> {
     a.validate()?;
     b.validate()?;
     let g = gjk_cores(a, b)?;

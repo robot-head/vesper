@@ -1,16 +1,7 @@
-// @export vsys direct rust=crate::port::shim
-// | sys library Crmath (
-// |     target = "@TARGET@", abi = "@ABI@",
-// |     link = "static", name = "vesper_kinetic_shim",
-// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
-// | ) {
-// |     fn vesper_kinetic_crmath_sin(bits: u64) -> ForeignVal[u64];
-// |     fn vesper_kinetic_crmath_cos(bits: u64) -> ForeignVal[u64];
-// | }
-//
 // @vesper/kinetic: Vesper port of vesper-kinetic (port wave P3b lane 8,
-// #1070), part 1: Morton codes (src/morton.rs, the 63-bit codes of
-// src/lbvh.rs) and the fdlibm fast path (src/fastmath.rs).
+// #1070): Morton codes (src/morton.rs, the 63-bit codes of src/lbvh.rs),
+// the fdlibm fast path (src/fastmath.rs), the correctly rounded
+// src/crmath.rs (modules crmath and bignum), colouring and both broadphases.
 //
 // The export ABI has no f32, so an f32 crosses the boundary as its bit
 // pattern (a `u32`), as in @vesper/tensor.
@@ -35,6 +26,15 @@ use self::sap::{
     pair_total as s_pair_total,
     sortable as s_sortable,
     write_pairs as s_write_pairs
+};
+use self::crmath::{
+    atan2_bits as c_atan2_bits,
+    exp_bits as c_exp_bits,
+    log_bits as c_log_bits,
+    sin_cos_bits as c_sin_cos_bits
+};
+use self::gjk::{
+    separation as g_separation
 };
 use self::fastmath::{
     atan2 as f_atan2,
@@ -138,16 +138,22 @@ pub fn fastmath_log(x: f64) -> f64 {
     f_log(x)
 }
 
-pub fn fastmath_sin(x: f64) -> f64 eff [Ffi[Crmath]] {
+pub fn fastmath_sin(x: f64) -> f64 {
     if needs_crmath(x) {
-        return from_bits_f64(Crmath::vesper_kinetic_crmath_sin(to_bits_f64(x)));
+        let mut cache: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        return from_bits_f64(
+            c_sin_cos_bits(inout cache.as_slice_mut(), to_bits_f64(x), true, false)
+        );
     }
     f_sin(x)
 }
 
-pub fn fastmath_cos(x: f64) -> f64 eff [Ffi[Crmath]] {
+pub fn fastmath_cos(x: f64) -> f64 {
     if needs_crmath(x) {
-        return from_bits_f64(Crmath::vesper_kinetic_crmath_cos(to_bits_f64(x)));
+        let mut cache: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        return from_bits_f64(
+            c_sin_cos_bits(inout cache.as_slice_mut(), to_bits_f64(x), true, true)
+        );
     }
     f_cos(x)
 }
@@ -164,16 +170,66 @@ pub fn fastmath_logf(x: u32) -> u32 {
     to_bits_f32(f_logf(from_bits_f32(x)))
 }
 
-pub fn fastmath_sinf(x: u32) -> u32 eff [Ffi[Crmath]] {
+pub fn fastmath_sinf(x: u32) -> u32 {
     to_bits_f32(nearest_f32(fastmath_sin(widen_f64(from_bits_f32(x)))))
 }
 
-pub fn fastmath_cosf(x: u32) -> u32 eff [Ffi[Crmath]] {
+pub fn fastmath_cosf(x: u32) -> u32 {
     to_bits_f32(nearest_f32(fastmath_cos(widen_f64(from_bits_f32(x)))))
 }
 
 pub fn fastmath_atan2f(y: u32, x: u32) -> u32 {
     to_bits_f32(f_atan2f(from_bits_f32(y), from_bits_f32(x)))
+}
+
+// ---------------------------------------------------------------------------
+// crmath.rs: binary64 functions take and return f64; binary32 ones take and
+// return f32 bit patterns (evaluated from the exact f64 widening). `cache`
+// is the caller's pi / ln 2 cache (see crmath.ves `constant`); the fast
+// path's fallback above passes an empty one, which is never filled.
+
+pub fn crmath_sin(x: f64, inout cache: Slice[u32]) -> f64 {
+    from_bits_f64(c_sin_cos_bits(inout cache, to_bits_f64(x), true, false))
+}
+
+pub fn crmath_cos(x: f64, inout cache: Slice[u32]) -> f64 {
+    from_bits_f64(c_sin_cos_bits(inout cache, to_bits_f64(x), true, true))
+}
+
+pub fn crmath_exp(x: f64, inout cache: Slice[u32]) -> f64 {
+    from_bits_f64(c_exp_bits(inout cache, to_bits_f64(x), true))
+}
+
+pub fn crmath_log(x: f64, inout cache: Slice[u32]) -> f64 {
+    from_bits_f64(c_log_bits(inout cache, to_bits_f64(x), true))
+}
+
+pub fn crmath_atan2(y: f64, x: f64, inout cache: Slice[u32]) -> f64 {
+    from_bits_f64(c_atan2_bits(inout cache, to_bits_f64(y), to_bits_f64(x), true))
+}
+
+fn wide_bits(x: u32) -> u64 {
+    to_bits_f64(widen_f64(from_bits_f32(x)))
+}
+
+pub fn crmath_sinf(x: u32, inout cache: Slice[u32]) -> u32 {
+    wrapping_u32(c_sin_cos_bits(inout cache, wide_bits(x), false, false))
+}
+
+pub fn crmath_cosf(x: u32, inout cache: Slice[u32]) -> u32 {
+    wrapping_u32(c_sin_cos_bits(inout cache, wide_bits(x), false, true))
+}
+
+pub fn crmath_expf(x: u32, inout cache: Slice[u32]) -> u32 {
+    wrapping_u32(c_exp_bits(inout cache, wide_bits(x), false))
+}
+
+pub fn crmath_logf(x: u32, inout cache: Slice[u32]) -> u32 {
+    wrapping_u32(c_log_bits(inout cache, wide_bits(x), false))
+}
+
+pub fn crmath_atan2f(y: u32, x: u32, inout cache: Slice[u32]) -> u32 {
+    wrapping_u32(c_atan2_bits(inout cache, wide_bits(y), wide_bits(x), false))
 }
 
 // ---------------------------------------------------------------------------
@@ -392,4 +448,33 @@ pub fn sap_write_pairs(
 
 pub fn sap_sortable(bits: u32) -> u32 {
     s_sortable(bits)
+}
+
+// ---------------------------------------------------------------------------
+// gjk.rs. A shape is a kind (0 sphere, 1 capsule, 2 polytope) and its
+// numbers (see module gjk); `out` gets distance, normal, point a, point b.
+
+pub copy enum GjkError {
+    InvalidShape,
+    NoConvergence,
+    Degenerate
+}
+
+pub fn gjk_separation(
+    ka: u32,
+    in da: Slice[f64],
+    kb: u32,
+    in db: Slice[f64],
+    inout out: Slice[f64]
+) eff [Fail[GjkError]] {
+    let status = g_separation(ka, in da, kb, in db, inout out);
+    if status == 1 {
+        Fail::raise(GjkError::InvalidShape);
+    }
+    if status == 2 {
+        Fail::raise(GjkError::NoConvergence);
+    }
+    if status == 3 {
+        Fail::raise(GjkError::Degenerate);
+    }
 }

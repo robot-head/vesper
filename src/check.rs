@@ -1508,6 +1508,16 @@ impl Checker<'_> {
                         self.error("E0203", "constructor requires arguments", e.span.clone());
                         Type::Infer
                     }
+                } else if n.starts_with("self::") || n.starts_with("super::") || n.starts_with('@')
+                {
+                    // Qualified paths resolve only through the package
+                    // loader (`crate::packages`), like `use` imports.
+                    self.error(
+                        crate::packages::USE_OUTSIDE_PACKAGE,
+                        format!("the qualified path '{n}' needs a package; check the package directory instead of one file"),
+                        e.span.clone(),
+                    );
+                    Type::Infer
                 } else {
                     self.error("E0201", format!("unknown name '{n}'"), e.span.clone());
                     Type::Infer

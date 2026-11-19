@@ -10,7 +10,9 @@ use self::util::{
     g64,
     g8,
     inc,
-    shl_u64,
+    shl_u64
+};
+use @vesper-std/sort::keyed::{
     sort_by_key
 };
 
@@ -110,7 +112,7 @@ pub fn color_pairs(
     for i in 0..bodies {
         masks.try_set(i, 0);
     }
-    sort_by_key(in keys, inout order, n);
+    sort_by_key(in keys[0..n], inout order[0..n]);
     let mut used: u64 = 0;
     for k in 0..n {
         let i = g32(in order, k);
@@ -224,7 +226,7 @@ pub fn color_sets(
     for i in 0..n {
         masks.try_set(i, 0);
     }
-    sort_by_key(in keys, inout order, count);
+    sort_by_key(in keys, inout order[0..count]);
     let mut used: u64 = 0;
     for k in 0..count {
         let i = widen_u64(g32(in order, k));

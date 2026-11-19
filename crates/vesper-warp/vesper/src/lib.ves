@@ -19,8 +19,9 @@
 // (packet_number.rs), long and short headers (header.rs), frames
 // (frame.rs), received-packet tracking (ack.rs), loss recovery
 // (recovery.rs) and the stream byte buffers (stream.rs); part 2: the
-// keyed tokens of lifecycle.rs. AES-256-GCM, HMAC-SHA-256 and the CSPRNG
-// stay Rust, behind the `.vsys` library `WarpKeys` above, which the
+// keyed tokens of lifecycle.rs and the 1-RTT packet assembly of
+// endpoint.rs (packet.ves; the endpoint driver stays Rust). AES-256-GCM,
+// HMAC-SHA-256 and the CSPRNG stay Rust, behind the `.vsys` library `WarpKeys` above, which the
 // wrapper (src/ported/lifecycle.rs) provides.
 //
 // The Rust crate keeps its public types and the parts the export ABI cannot
@@ -32,6 +33,9 @@
 // port-only records here, converted by the wrappers.
 //
 // @export abi 3
+use self::packet::{
+    pk_short_plain
+};
 use self::varint::{
     vi_decode,
     vi_encode,
@@ -1177,4 +1181,54 @@ pub fn reset_token(in key: Slice[u8], in cid: Slice[u8], inout out: Slice[u8]) e
 // A received stateless reset token against one of ours, in constant time.
 pub fn reset_token_eq(in ours: Slice[u8], in theirs: Slice[u8]) -> bool {
     theirs.len() == 16 && ct_eq(in ours, in theirs)
+}
+
+// ---------------------------------------------------------------------------
+// endpoint.rs: per-packet assembly (the endpoint's driver stays Rust).
+
+// `WarpEndpoint::write_plaintext`'s own failures; the rest are the module
+// errors it calls.
+pub copy enum PlainErr {
+    TooLarge {
+        len: u64
+    },
+    Empty
+}
+
+pub copy struct PlainOut {
+    plain_len: u64,
+    header_len: u64,
+    has_ack: bool
+}
+
+pub fn packet_short_plain(
+    inout scratch: Slice[u8],
+    in rx: RxState,
+    in ranges: Slice[AckRange],
+    with_ack: bool,
+    now_ns: u64,
+    exponent: u8,
+    in app: Slice[u8],
+    pn: u64,
+    largest_acked: Option[u64],
+    in dcid: Slice[u8],
+    dcid_len: u64,
+    key_phase: bool,
+    max_datagram: u64
+) -> PlainOut eff [Fail[AckErr], Fail[FrameErr], Fail[HdrErr], Fail[PnErr], Fail[PlainErr]] {
+    pk_short_plain(
+        inout scratch,
+        in rx,
+        in ranges,
+        with_ack,
+        now_ns,
+        exponent,
+        in app,
+        pn,
+        largest_acked,
+        in dcid,
+        dcid_len,
+        key_phase,
+        max_datagram
+    )
 }
