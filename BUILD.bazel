@@ -97,6 +97,11 @@ vesper_crate(
         ],
         # @vesper-std/sort, core and bytes (#1096) as a driver's dependencies.
         "test/std_sort": [":files"],
+        # @vesper-std/fs, process and env (#1125): drivers over the packages
+        # and their .vsys imports.
+        "test/std_env": [":files"],
+        "test/std_fs": [":files"],
+        "test/std_process": [":files"],
         # @vesper-std graph, intern, arena and hash (#1127) as a driver's dependencies.
         "test/std_arena": [":files"],
         "test/std_graph": [":files"],

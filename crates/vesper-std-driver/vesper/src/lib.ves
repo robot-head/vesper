@@ -1,0 +1,238 @@
+// @export vsys direct rust=crate::fs
+// | sys library StdFs (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_std_host",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type FsFile;
+// |     linear extern type FsDir;
+// |     wire struct FsMeta { size: u64, mtime_s: i64, mtime_ns: u32, kind: u32 }
+// |     fn vstd_fs_open(nocapture in path: CSlice[u8], mode: u32, nocapture inout err: u64) -> ForeignVal[Option[FsFile]];
+// |     fn vstd_fs_file_len(in f: FsFile) -> ForeignVal[u64];
+// |     fn vstd_fs_read(inout f: FsFile, nocapture inout buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u64];
+// |     fn vstd_fs_write(inout f: FsFile, nocapture in buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn vstd_fs_sync(inout f: FsFile, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn vstd_fs_close(sink f: FsFile) -> ForeignVal[Unit];
+// |     fn vstd_fs_rename(nocapture in from: CSlice[u8], nocapture in to: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn vstd_fs_remove_file(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn vstd_fs_remove_dir(nocapture in path: CSlice[u8], recursive: bool, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn vstd_fs_create_dir(nocapture in path: CSlice[u8], recursive: bool, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn vstd_fs_metadata(nocapture in path: CSlice[u8], follow: bool, nocapture inout meta: FsMeta, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn vstd_fs_sync_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn vstd_fs_unique() -> ForeignVal[u64];
+// |     fn vstd_fs_parent_len(nocapture in path: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vstd_fs_read_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[Option[FsDir]];
+// |     fn vstd_fs_dir_next(inout d: FsDir, nocapture inout name: CSlice[u8], nocapture inout kind: u32) -> ForeignVal[i64];
+// |     fn vstd_fs_dir_close(sink d: FsDir) -> ForeignVal[Unit];
+// | }
+// @export vsys direct rust=crate::process
+// | sys library StdProcess (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_std_host",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type ProcCommand;
+// |     linear extern type ProcChild;
+// |     wire struct ProcStatus { code: i64, signal: u32, exited: u32 }
+// |     fn vstd_proc_command(nocapture in program: CSlice[u8]) -> ForeignVal[ProcCommand];
+// |     fn vstd_proc_arg(inout c: ProcCommand, nocapture in arg: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vstd_proc_env(inout c: ProcCommand, nocapture in key: CSlice[u8], nocapture in value: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vstd_proc_env_remove(inout c: ProcCommand, nocapture in key: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vstd_proc_env_clear(inout c: ProcCommand) -> ForeignVal[Unit];
+// |     fn vstd_proc_cwd(inout c: ProcCommand, nocapture in dir: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vstd_proc_stdio(inout c: ProcCommand, which: u32, mode: u32) -> ForeignVal[Unit];
+// |     fn vstd_proc_spawn(sink c: ProcCommand, nocapture inout err: u64) -> ForeignVal[Option[ProcChild]];
+// |     fn vstd_proc_command_free(sink c: ProcCommand) -> ForeignVal[Unit];
+// |     fn vstd_proc_wait(inout ch: ProcChild, nocapture inout status: ProcStatus, nocapture inout err: u64) -> ForeignVal[u32];
+// |     fn vstd_proc_output(in ch: ProcChild, which: u32, nocapture inout buf: CSlice[u8]) -> ForeignVal[u64];
+// |     fn vstd_proc_child_id(in ch: ProcChild) -> ForeignVal[u64];
+// |     fn vstd_proc_free(sink ch: ProcChild) -> ForeignVal[Unit];
+// |     fn vstd_proc_exit(code: i64) -> ForeignVal[Unit];
+// |     fn vstd_proc_id() -> ForeignVal[u64];
+// | }
+// @export vsys direct rust=crate::env
+// | sys library StdEnv (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_std_host",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     fn vstd_env_arg_count() -> ForeignVal[u64];
+// |     fn vstd_env_arg(index: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
+// |     fn vstd_env_var(nocapture in key: CSlice[u8], nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
+// |     fn vstd_env_var_count() -> ForeignVal[u64];
+// |     fn vstd_env_var_at(index: u64, nocapture inout buf: CSlice[u8]) -> ForeignVal[i64];
+// |     fn vstd_env_current_dir(nocapture inout buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[i64];
+// |     fn vstd_env_os() -> ForeignVal[u32];
+// | }
+//
+// The sample driver of self-hosting SH0 lane 3 (#1125): the I/O a Vesper
+// compiler driver does, through @vesper-std/fs, process and env. It reads
+// its settings from the environment, walks a package's `src/**`, reads
+// every `.ves` file, spawns a compiler (`cc --version` by default) and
+// writes a report atomically:
+//
+//     file <relative path> <size> <FNV-1a 64 of the contents, hex>
+//     ...
+//     files <count>
+//     bytes <total size>
+//     cc <exit code> <first line of stdout>      (or: cc error <kind>)
+//
+// The three `.vsys` libraries above are copies of
+// packages/vesper-std/{fs,process,env}/*.vsys (tests/driver.rs checks that
+// they stay equal); this crate provides their symbols.
+use @vesper-std/fs::{
+    IoError,
+    read_path,
+    replace_path,
+    metadata_path,
+    kind_file
+};
+use @vesper-std/fs::walk::{
+    walk_path,
+    entry_count,
+    entry_start,
+    entry_end,
+    entry_kind,
+    entry_join
+};
+use @vesper-std/process::{
+    command_path,
+    arg,
+    output
+};
+use @vesper-std/env::var_bytes;
+use @vesper-std/fmt::{
+    write_u64,
+    write_i64,
+    write_hex_u64
+};
+
+fn fnv(in s: Slice[u8]) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for i in 0..s.len() {
+        let b = match s.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        h = wrapping_mul(h ^ widen_u64(b), 1099511628211);
+    }
+    h
+}
+
+// Byte `i` of `s` (0 past the end).
+fn at(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// Whether `bytes[a..b]` ends in `.ves`.
+fn is_ves(in bytes: Slice[u8], a: u64, b: u64) -> bool {
+    if wrapping_sub(b, a) < 4 || b < 4 {
+        return false;
+    }
+    let s = wrapping_sub(b, 4);
+    let dot = at(in bytes, s) == 46;
+    let v = at(in bytes, wrapping_add(s, 1)) == 118;
+    let e = at(in bytes, wrapping_add(s, 2)) == 101;
+    let x = at(in bytes, wrapping_add(s, 3)) == 115;
+    dot && v && e && x
+}
+
+fn setting(in name: Str, in fallback: Str) -> ChunkSeq[u8] eff [Ffi[StdEnv]] {
+    match var_bytes(in name) {
+        Option::Some(b) => b,
+        Option::None => {
+            let mut b: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            b.extend(in fallback.as_bytes());
+            b
+        },
+    }
+}
+
+fn first_line(in s: Slice[u8]) -> u64 {
+    let mut n = s.len();
+    for i in 0..s.len() {
+        let b = match s.try_get(i) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        if (b == 10 || b == 13) && n == s.len() {
+            n = i;
+        }
+    }
+    n
+}
+
+fn compiler(in cc: Slice[u8], inout report: ChunkSeq[u8]) eff [Ffi[StdProcess]] {
+    report.extend(in "cc ".as_bytes());
+    let failed = handle Fail[IoError] in {
+        let mut c = command_path(in cc);
+        arg(inout c, in "--version");
+        let out = output(c);
+        write_i64(inout report, out.status.code);
+        report.push(32);
+        let n = first_line(in out.stdout.as_slice());
+        report.extend(in out.stdout[0..n]);
+        0
+    } with {
+        return v => v,
+        raise(e, _) => wrapping_add(1000, widen_u64(e.kind)),
+    };
+    if failed != 0 {
+        report.extend(in "error ".as_bytes());
+        write_u64(inout report, wrapping_sub(failed, 1000));
+    }
+    report.push(10);
+}
+
+fn drive() -> u64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv], Fail[IoError]] {
+    let root = setting(in "VESPER_STD_DRIVER_ROOT", in ".");
+    let out = setting(in "VESPER_STD_DRIVER_OUT", in "io-driver-report.txt");
+    let cc = setting(in "VESPER_STD_DRIVER_CC", in "cc");
+    let mut src: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    src.extend(in root.as_slice());
+    src.extend(in "/src".as_bytes());
+    let e = walk_path(in src.as_slice());
+    let mut report: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut files: u64 = 0;
+    let mut total: u64 = 0;
+    for i in 0..entry_count(in e) {
+        let a = entry_start(in e, i);
+        let b = entry_end(in e, i);
+        if entry_kind(in e, i) == kind_file() && is_ves(in e.bytes.as_slice(), a, b) {
+            let path = entry_join(in src.as_slice(), in e, i);
+            let size = metadata_path(in path.as_slice()).size;
+            let text = read_path(in path.as_slice());
+            report.extend(in "file ".as_bytes());
+            report.extend(in e.bytes[a..b]);
+            report.push(32);
+            write_u64(inout report, size);
+            report.push(32);
+            write_hex_u64(inout report, fnv(in text.as_slice()), 16);
+            report.push(10);
+            files = wrapping_add(files, 1);
+            total = wrapping_add(total, size);
+        }
+    }
+    report.extend(in "files ".as_bytes());
+    write_u64(inout report, files);
+    report.extend(in "\nbytes ".as_bytes());
+    write_u64(inout report, total);
+    report.push(10);
+    compiler(in cc.as_slice(), inout report);
+    replace_path(in out.as_slice(), in report.as_slice());
+    files
+}
+
+// Run the driver: the number of `.ves` files reported, or 1,000,000 plus
+// the IoError kind when the walk, a read or the write failed.
+pub fn run() -> u64 eff [Ffi[StdFs], Ffi[StdProcess], Ffi[StdEnv]] {
+    handle Fail[IoError] in {
+        drive()
+    } with {
+        return v => v,
+        raise(e, _) => wrapping_add(1000000, widen_u64(e.kind)),
+    }
+}

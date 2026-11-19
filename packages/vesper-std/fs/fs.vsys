@@ -1,0 +1,31 @@
+// @vesper-std/fs's import (self-hosting SH0 lane 3, #1125). The functions
+// are the C-ABI host shim in crates/vesper-std-host (src/fs.rs). `@TARGET@`
+// and `@ABI@` stand for the object target, as in `// @export vsys`.
+// Errors come back through `err`: the IoError kind in the low 8 bits and
+// the raw OS error in the high 32.
+sys library StdFs (
+    target = "@TARGET@", abi = "@ABI@",
+    link = "static", name = "vesper_std_host",
+    artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+) {
+    linear extern type FsFile;
+    linear extern type FsDir;
+    wire struct FsMeta { size: u64, mtime_s: i64, mtime_ns: u32, kind: u32 }
+    fn vstd_fs_open(nocapture in path: CSlice[u8], mode: u32, nocapture inout err: u64) -> ForeignVal[Option[FsFile]];
+    fn vstd_fs_file_len(in f: FsFile) -> ForeignVal[u64];
+    fn vstd_fs_read(inout f: FsFile, nocapture inout buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u64];
+    fn vstd_fs_write(inout f: FsFile, nocapture in buf: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+    fn vstd_fs_sync(inout f: FsFile, nocapture inout err: u64) -> ForeignVal[u32];
+    fn vstd_fs_close(sink f: FsFile) -> ForeignVal[Unit];
+    fn vstd_fs_rename(nocapture in from: CSlice[u8], nocapture in to: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+    fn vstd_fs_remove_file(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+    fn vstd_fs_remove_dir(nocapture in path: CSlice[u8], recursive: bool, nocapture inout err: u64) -> ForeignVal[u32];
+    fn vstd_fs_create_dir(nocapture in path: CSlice[u8], recursive: bool, nocapture inout err: u64) -> ForeignVal[u32];
+    fn vstd_fs_metadata(nocapture in path: CSlice[u8], follow: bool, nocapture inout meta: FsMeta, nocapture inout err: u64) -> ForeignVal[u32];
+    fn vstd_fs_sync_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[u32];
+    fn vstd_fs_unique() -> ForeignVal[u64];
+    fn vstd_fs_parent_len(nocapture in path: CSlice[u8]) -> ForeignVal[u64];
+    fn vstd_fs_read_dir(nocapture in path: CSlice[u8], nocapture inout err: u64) -> ForeignVal[Option[FsDir]];
+    fn vstd_fs_dir_next(inout d: FsDir, nocapture inout name: CSlice[u8], nocapture inout kind: u32) -> ForeignVal[i64];
+    fn vstd_fs_dir_close(sink d: FsDir) -> ForeignVal[Unit];
+}

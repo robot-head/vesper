@@ -97,6 +97,8 @@ members = [
     "crates/vesper-port-harness",
     "crates/vesper-port-build",
     "crates/vesper-port-pilot",
+    "crates/vesper-std-driver",
+    "crates/vesper-std-host",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -195,6 +197,8 @@ default-members = [
     "crates/vesper-port-harness",
     "crates/vesper-port-build",
     "crates/vesper-port-pilot",
+    "crates/vesper-std-driver",
+    "crates/vesper-std-host",
     "experiments/native-pulse",
 ]
 
@@ -327,6 +331,9 @@ wit-parser = "=0.261.0"
 
 [dev-dependencies]
 vesper-nexus = { path = "crates/vesper-nexus" }
+# The host shim of @vesper-std/fs, process and env (#1125), bound into the
+# JIT by tests/std_fs.rs, std_process.rs and std_env.rs.
+vesper-std-host = { path = "crates/vesper-std-host" }
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 

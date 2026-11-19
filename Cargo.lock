@@ -5599,6 +5599,7 @@ dependencies = [
  "vesper-silicon-seed",
  "vesper-simd",
  "vesper-span",
+ "vesper-std-host",
  "vesper-syntax",
  "vesper-tensor-seed",
  "vesper-vault",
@@ -6526,6 +6527,19 @@ dependencies = [
 
 [[package]]
 name = "vesper-span"
+version = "0.1.0"
+
+[[package]]
+name = "vesper-std-driver"
+version = "0.1.0"
+dependencies = [
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-std-host",
+]
+
+[[package]]
+name = "vesper-std-host"
 version = "0.1.0"
 
 [[package]]
