@@ -174,3 +174,8 @@ Counts are from `scripts/bench.sh` with `CALLGRIND=1`, over 5 batches:
 - `f32` and enum constants are not placed in read-only data. They are
   built at each use instead.
 - Guards are not hoisted: `add_rank` still pays a compare per access.
+- The parser bounds nested array types and literals to 2^16 elements in
+  all. A type alias or a large constant repeated by name (`[BIG; 65536]`)
+  is not bounded until checking.
+- Array element writes of function values are refused (E1540): native
+  call-target tracking does not follow dynamic element stores.
