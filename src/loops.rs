@@ -27,9 +27,11 @@ pub const LEAN_REFUSAL: &str = "Lean extraction does not model loop, for, break 
     write the iteration as a tail-recursive function";
 
 /// The native backends' typed refusal for `Box[T]` values in a function
-/// with loops or early exits, whose drops are not elaborated yet.
-pub const BOX_REFUSAL: &str = "Box values in a function with loop, for, break or return \
-    are not reclaimed natively yet; move the loop into a function without boxes";
+/// with loops or early exits whose drops the elaboration could not plan
+/// ([`crate::fip::loop_drops_elaborated`]): an `@fip` function, or a reuse
+/// slot on a branch edge that needs a drop.
+pub const BOX_REFUSAL: &str = "Box values in this function with loop, for, break or return \
+    are not reclaimed natively; move the loop into a function without boxes";
 
 /// The Wasm backend's typed refusal ([`crate::wasm_backend::Unsupported::Operation`]).
 pub const WASM_REFUSAL: &str = "loop, for, break and return are not lowered to Wasm yet; \

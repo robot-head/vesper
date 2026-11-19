@@ -5593,7 +5593,7 @@ dependencies = [
  "vesper-pact-binding",
  "vesper-pact-seed",
  "vesper-pulse",
- "vesper-resonance",
+ "vesper-resonance-seed",
  "vesper-semver-seed",
  "vesper-serde-seed",
  "vesper-silicon-seed",
@@ -5957,7 +5957,7 @@ name = "vesper-fusion"
 version = "0.1.0"
 dependencies = [
  "egglog",
- "vesper-resonance",
+ "vesper-resonance-seed",
  "vesper-tensor-seed",
 ]
 
@@ -6374,6 +6374,19 @@ dependencies = [
 
 [[package]]
 name = "vesper-resonance"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "rtrb",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-resonance-seed",
+]
+
+[[package]]
+name = "vesper-resonance-seed"
 version = "0.1.0"
 dependencies = [
  "cranelift-codegen 0.125.4",

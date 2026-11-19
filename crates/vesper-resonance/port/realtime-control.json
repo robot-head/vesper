@@ -1,0 +1,19 @@
+{
+  "schema": "vesper.native-verifiers/1",
+  "realtime": {
+    "roots": {
+      "compile_schedule": null
+    },
+    "symbols": {
+      "Memmove": {
+        "effects": [],
+        "frame_bytes": 0
+      },
+      "vesper_seq_fault": {
+        "effects": [],
+        "frame_bytes": 0
+      }
+    },
+    "reject_unbounded_loops": false
+  }
+}
