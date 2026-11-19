@@ -206,6 +206,55 @@ stays the default. The LBVH gap that is left is the per-query traversal
 (two `try_get`s per box lane) and the 2.7-4.3x of std sort against Rust's
 `sort_unstable` reported in #1110.
 
+## Part 3: crmath
+
+Part 3 ports `crmath.rs`, the correctly rounded `sin`, `cos`, `exp`, `log`
+and `atan2`, with the arbitrary-precision integers it needs
+(`vesper/src/bignum.ves`, 32-bit limbs, standing in for `num-bigint`). Its
+shifts round toward negative infinity and its division truncates, as
+`num-bigint`'s do, so every fixed-point intermediate is the Rust build's.
+Long division is Knuth's algorithm D, and square roots use Newton's
+iteration. With the port in place, the fast path's out-of-range `sin` and
+`cos` call it directly. The `.vsys` shim of part 1 is gone, and the
+package's capability ceiling drops `Ffi`.
+
+pi and ln 2 come from a cache that Rust lends (`inout Slice[u32]`, one per
+thread, in `src/crmath.rs`), as the Rust build caches them per thread. The
+cache holds the constants at the widest width seen so far, so its contents
+depend on earlier calls. Every result is still correctly rounded, so
+results never depend on call history. The fast path's fallback lends an
+empty cache, which is never filled. The port does not count
+`precision_cap_hits`.
+
+Both packages pass every test. That includes the 400-bit `mpmath`
+references bit for bit and the committed cross-architecture sweep hash.
+Two divergence checks were added:
+
+- **crmath:** the third-quadrant sine keeps its sign. `crmath` fails
+  `matches_mpmath_references_bit_for_bit`, and `annex_f_special_values`
+  still passes.
+- **bignum:** a magnitude's low word drops its upper limb. `fastmath` fails
+  `binary64_functions_stay_within_the_documented_ulp_bound`, and the
+  binary32 bound still passes.
+
+A first try broke long division instead. That divergence never settles: the
+reduced argument grows, so the series does not end. It was dropped as a
+check, because a check has to fail rather than hang.
+
+| Workload | Rust ns/run | Port ns/run | Wall ratio (range) | Rust instr | Port instr | Instr ratio |
+|---|--:|--:|--:|--:|--:|--:|
+| `crmath` (64 x 5 calls), constants recomputed per evaluation | 1,415,386 | 8,084,111 | 6.02x (5.55-7.22) | 16.04M | 109.21M | 6.81x |
+| `crmath`, lent cache (committed) | 1,420,882 | 3,587,424 | 2.51x (2.45-2.71) | 16.04M | 45.23M | 2.82x |
+
+Not parity, so Rust stays the default. The rest of the gap:
+
+- **Allocation.** Every bignum operation returns a fresh `ChunkSeq`, and
+  `malloc`/`free`/`vesper_seq_make` were 27% of the uncached profile. In
+  place, `inout` arithmetic would avoid most of it.
+- **32-bit limbs.** These cost four times the limb products of
+  `num-bigint`'s 64-bit limbs. There is no `u128`, and there is no 128 by 64
+  division for algorithm D's estimate. `mul_wide` covers the product half.
+
 ## Compiler gaps (with repros)
 
 1. **Bit builtin on a reassigned mutable local fails IR validation.**
@@ -239,13 +288,18 @@ stays the default. The LBVH gap that is left is the per-query traversal
    instead; known since the Tensor port).
 5. **`.vsys` imports are visible only in the root module.** `fastmath.ves`
    cannot name `Crmath` (`E0111 module self has no item 'Crmath'`), so the
-   crmath fallback sits in `lib.ves`.
+   crmath fallback sat in `lib.ves` (moot since part 3 removed the shim).
+6. **No 128-bit integers** (part 3): bignum limbs are 32 bits because
+   algorithm D needs a double-word by single-word division.
+7. **A divergent edit that never terminates** (part 3) is not a usable
+   check, and nothing in the harness bounds it; the check list avoids such
+   edits.
 
 Std candidates: the total slice getters in `util.ves`.
 
 ## Not ported yet (later parts)
 
-`crmath.rs` (bignum), `gjk.rs` (its local `&dyn Fn` becomes a generic
+`gjk.rs` (its local `&dyn Fn` becomes a generic
 parameter), `tile.rs` with `world.rs` (the step, Morton cells, batching),
 `rigid.rs` and `rigid/**`, `soft.rs` (their `std::thread::scope` fan-out
 becomes `parallel_for` from PR #1062, merged 2026-11-18, with 1/2/4-worker

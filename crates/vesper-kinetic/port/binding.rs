@@ -143,6 +143,16 @@ unsafe extern "C" {
     fn vesper_kinetic_seq_free(seq: i64) -> i64;
     fn vesper_kinetic_live_allocations() -> i64;
     fn vesper_kinetic_colorer_color(a: *mut u64, b: *mut u64, capacity: i64, masks: *mut u64, keys: *mut u64, order: *mut u64, colors: *mut u64, offsets: *mut u64, sorted: *mut u64, fail: *mut u64) -> i64;
+    fn vesper_kinetic_crmath_atan2(y: f64, x: f64, cache: *mut u64) -> f64;
+    fn vesper_kinetic_crmath_atan2f(y: i64, x: i64, cache: *mut u64) -> i64;
+    fn vesper_kinetic_crmath_cos(x: f64, cache: *mut u64) -> f64;
+    fn vesper_kinetic_crmath_cosf(x: i64, cache: *mut u64) -> i64;
+    fn vesper_kinetic_crmath_exp(x: f64, cache: *mut u64) -> f64;
+    fn vesper_kinetic_crmath_expf(x: i64, cache: *mut u64) -> i64;
+    fn vesper_kinetic_crmath_log(x: f64, cache: *mut u64) -> f64;
+    fn vesper_kinetic_crmath_logf(x: i64, cache: *mut u64) -> i64;
+    fn vesper_kinetic_crmath_sin(x: f64, cache: *mut u64) -> f64;
+    fn vesper_kinetic_crmath_sinf(x: i64, cache: *mut u64) -> i64;
     fn vesper_kinetic_fastmath_atan2(y: f64, x: f64) -> f64;
     fn vesper_kinetic_fastmath_atan2f(y: i64, x: i64) -> i64;
     fn vesper_kinetic_fastmath_cos(x: f64) -> f64;
@@ -197,6 +207,96 @@ pub fn colorer_color(a: &[u32], b: &[u64], capacity: u64, masks: &mut [u64], key
     }
 }
 
+/// Calls `crmath_atan2` of the Vesper library `kinetic` (`vesper_kinetic_crmath_atan2`).
+pub fn crmath_atan2(y: f64, x: f64, cache: &mut [u32]) -> f64 {
+    // SAFETY: `vesper_kinetic_crmath_atan2` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(cache, |view_cache| unsafe { vesper_kinetic_crmath_atan2(y, x, view_cache) });
+    raw
+}
+
+/// Calls `crmath_atan2f` of the Vesper library `kinetic` (`vesper_kinetic_crmath_atan2f`).
+pub fn crmath_atan2f(y: u32, x: u32, cache: &mut [u32]) -> u32 {
+    // SAFETY: `vesper_kinetic_crmath_atan2f` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(cache, |view_cache| unsafe { vesper_kinetic_crmath_atan2f(y as i64, x as i64, view_cache) });
+    raw as u32
+}
+
+/// Calls `crmath_cos` of the Vesper library `kinetic` (`vesper_kinetic_crmath_cos`).
+pub fn crmath_cos(x: f64, cache: &mut [u32]) -> f64 {
+    // SAFETY: `vesper_kinetic_crmath_cos` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(cache, |view_cache| unsafe { vesper_kinetic_crmath_cos(x, view_cache) });
+    raw
+}
+
+/// Calls `crmath_cosf` of the Vesper library `kinetic` (`vesper_kinetic_crmath_cosf`).
+pub fn crmath_cosf(x: u32, cache: &mut [u32]) -> u32 {
+    // SAFETY: `vesper_kinetic_crmath_cosf` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(cache, |view_cache| unsafe { vesper_kinetic_crmath_cosf(x as i64, view_cache) });
+    raw as u32
+}
+
+/// Calls `crmath_exp` of the Vesper library `kinetic` (`vesper_kinetic_crmath_exp`).
+pub fn crmath_exp(x: f64, cache: &mut [u32]) -> f64 {
+    // SAFETY: `vesper_kinetic_crmath_exp` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(cache, |view_cache| unsafe { vesper_kinetic_crmath_exp(x, view_cache) });
+    raw
+}
+
+/// Calls `crmath_expf` of the Vesper library `kinetic` (`vesper_kinetic_crmath_expf`).
+pub fn crmath_expf(x: u32, cache: &mut [u32]) -> u32 {
+    // SAFETY: `vesper_kinetic_crmath_expf` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(cache, |view_cache| unsafe { vesper_kinetic_crmath_expf(x as i64, view_cache) });
+    raw as u32
+}
+
+/// Calls `crmath_log` of the Vesper library `kinetic` (`vesper_kinetic_crmath_log`).
+pub fn crmath_log(x: f64, cache: &mut [u32]) -> f64 {
+    // SAFETY: `vesper_kinetic_crmath_log` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(cache, |view_cache| unsafe { vesper_kinetic_crmath_log(x, view_cache) });
+    raw
+}
+
+/// Calls `crmath_logf` of the Vesper library `kinetic` (`vesper_kinetic_crmath_logf`).
+pub fn crmath_logf(x: u32, cache: &mut [u32]) -> u32 {
+    // SAFETY: `vesper_kinetic_crmath_logf` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(cache, |view_cache| unsafe { vesper_kinetic_crmath_logf(x as i64, view_cache) });
+    raw as u32
+}
+
+/// Calls `crmath_sin` of the Vesper library `kinetic` (`vesper_kinetic_crmath_sin`).
+pub fn crmath_sin(x: f64, cache: &mut [u32]) -> f64 {
+    // SAFETY: `vesper_kinetic_crmath_sin` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(cache, |view_cache| unsafe { vesper_kinetic_crmath_sin(x, view_cache) });
+    raw
+}
+
+/// Calls `crmath_sinf` of the Vesper library `kinetic` (`vesper_kinetic_crmath_sinf`).
+pub fn crmath_sinf(x: u32, cache: &mut [u32]) -> u32 {
+    // SAFETY: `vesper_kinetic_crmath_sinf` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(cache, |view_cache| unsafe { vesper_kinetic_crmath_sinf(x as i64, view_cache) });
+    raw as u32
+}
+
 /// Calls `fastmath_atan2` of the Vesper library `kinetic` (`vesper_kinetic_fastmath_atan2`).
 pub fn fastmath_atan2(y: f64, x: f64) -> f64 {
     // SAFETY: `vesper_kinetic_fastmath_atan2` has exactly this signature in the export ABI; every
@@ -217,8 +317,6 @@ pub fn fastmath_atan2f(y: u32, x: u32) -> u32 {
 
 /// Calls `fastmath_cos` of the Vesper library `kinetic` (`vesper_kinetic_fastmath_cos`).
 pub fn fastmath_cos(x: f64) -> f64 {
-    // Keep the crate's `Crmath` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::port::shim::vesper_kinetic_crmath_cos as *const (), crate::port::shim::vesper_kinetic_crmath_sin as *const ()]);
     // SAFETY: `vesper_kinetic_fastmath_cos` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
@@ -228,8 +326,6 @@ pub fn fastmath_cos(x: f64) -> f64 {
 
 /// Calls `fastmath_cosf` of the Vesper library `kinetic` (`vesper_kinetic_fastmath_cosf`).
 pub fn fastmath_cosf(x: u32) -> u32 {
-    // Keep the crate's `Crmath` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::port::shim::vesper_kinetic_crmath_cos as *const (), crate::port::shim::vesper_kinetic_crmath_sin as *const ()]);
     // SAFETY: `vesper_kinetic_fastmath_cosf` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
@@ -275,8 +371,6 @@ pub fn fastmath_logf(x: u32) -> u32 {
 
 /// Calls `fastmath_sin` of the Vesper library `kinetic` (`vesper_kinetic_fastmath_sin`).
 pub fn fastmath_sin(x: f64) -> f64 {
-    // Keep the crate's `Crmath` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::port::shim::vesper_kinetic_crmath_cos as *const (), crate::port::shim::vesper_kinetic_crmath_sin as *const ()]);
     // SAFETY: `vesper_kinetic_fastmath_sin` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
@@ -286,8 +380,6 @@ pub fn fastmath_sin(x: f64) -> f64 {
 
 /// Calls `fastmath_sinf` of the Vesper library `kinetic` (`vesper_kinetic_fastmath_sinf`).
 pub fn fastmath_sinf(x: u32) -> u32 {
-    // Keep the crate's `Crmath` symbols linked: the Vesper object calls them.
-    let _ = core::hint::black_box([crate::port::shim::vesper_kinetic_crmath_cos as *const (), crate::port::shim::vesper_kinetic_crmath_sin as *const ()]);
     // SAFETY: `vesper_kinetic_fastmath_sinf` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.

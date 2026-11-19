@@ -29,6 +29,10 @@
 //! timings. Tests compare against 400-bit `mpmath` references and pin a
 //! cross-architecture output hash.
 
+// The port-backed build forwards the public functions to the port; the
+// evaluator stays for the seed build and this module's unit tests.
+#![cfg_attr(vesper_port, allow(dead_code))]
+
 use num_bigint::{BigInt, Sign};
 use num_traits::{One, Signed, Zero};
 use std::cell::RefCell;
@@ -712,21 +716,58 @@ fn pi_multiple_bits(quarters: u32, fmt: Format) -> u64 {
 
 // ----- public API ---------------------------------------------------------
 
+// Port wave P3b lane 8 (#1070): with cfg(vesper_port) every function below
+// forwards to the Vesper port (vesper/src/crmath.ves); the seed build keeps
+// the Rust evaluator. The port keeps pi and ln 2 in a per-thread cache this
+// module lends it (the layout is crmath.ves `constant`'s), and does not
+// count `precision_cap_hits`.
+#[cfg(vesper_port)]
+thread_local! {
+    // 3 header words, then pi and ln 2 at up to 1,100 limbs each: enough for
+    // the widest reduction at MAX_PRECISION (a 32,768-bit constant).
+    static PORT_CACHE: RefCell<Vec<u32>> = RefCell::new(vec![0; 3 + 2 * 1100]);
+}
+
+#[cfg(vesper_port)]
+fn with_cache<T>(f: impl FnOnce(&mut [u32]) -> T) -> T {
+    PORT_CACHE.with(|c| f(&mut c.borrow_mut()))
+}
 macro_rules! pair {
-    ($f64name:ident, $f32name:ident, $bits:ident, $doc:literal) => {
+    ($f64name:ident, $f32name:ident, $bits:ident, $port64:ident, $port32:ident, $doc:literal) => {
         #[doc = concat!("Correctly rounded ", $doc, " (binary64).")]
         pub fn $f64name(x: f64) -> f64 {
-            f64::from_bits($bits(x, Format::F64))
+            #[cfg(vesper_port)]
+            {
+                with_cache(|c| crate::port::$port64(x, c))
+            }
+            #[cfg(not(vesper_port))]
+            {
+                f64::from_bits($bits(x, Format::F64))
+            }
         }
         #[doc = concat!("Correctly rounded ", $doc, " (binary32).")]
         pub fn $f32name(x: f32) -> f32 {
-            f32::from_bits($bits(f64::from(x), Format::F32) as u32)
+            #[cfg(vesper_port)]
+            {
+                f32::from_bits(with_cache(|c| crate::port::$port32(x.to_bits(), c)))
+            }
+            #[cfg(not(vesper_port))]
+            {
+                f32::from_bits($bits(f64::from(x), Format::F32) as u32)
+            }
         }
     };
 }
 
-pair!(exp, expf, exp_bits, "`e^x`");
-pair!(log, logf, log_bits, "natural logarithm");
+pair!(exp, expf, exp_bits, crmath_exp, crmath_expf, "`e^x`");
+pair!(
+    log,
+    logf,
+    log_bits,
+    crmath_log,
+    crmath_logf,
+    "natural logarithm"
+);
 
 fn sin_bits(x: f64, fmt: Format) -> u64 {
     sin_cos_bits(x, fmt, false)
@@ -734,17 +775,33 @@ fn sin_bits(x: f64, fmt: Format) -> u64 {
 fn cos_bits(x: f64, fmt: Format) -> u64 {
     sin_cos_bits(x, fmt, true)
 }
-pair!(sin, sinf, sin_bits, "sine");
-pair!(cos, cosf, cos_bits, "cosine");
+pair!(sin, sinf, sin_bits, crmath_sin, crmath_sinf, "sine");
+pair!(cos, cosf, cos_bits, crmath_cos, crmath_cosf, "cosine");
 
 /// Correctly rounded `atan2(y, x)` (binary64), C99 Annex F special values.
 pub fn atan2(y: f64, x: f64) -> f64 {
-    f64::from_bits(atan2_bits(y, x, Format::F64))
+    #[cfg(vesper_port)]
+    {
+        with_cache(|c| crate::port::crmath_atan2(y, x, c))
+    }
+    #[cfg(not(vesper_port))]
+    {
+        f64::from_bits(atan2_bits(y, x, Format::F64))
+    }
 }
 
 /// Correctly rounded `atan2(y, x)` (binary32), C99 Annex F special values.
 pub fn atan2f(y: f32, x: f32) -> f32 {
-    f32::from_bits(atan2_bits(f64::from(y), f64::from(x), Format::F32) as u32)
+    #[cfg(vesper_port)]
+    {
+        f32::from_bits(with_cache(|c| {
+            crate::port::crmath_atan2f(y.to_bits(), x.to_bits(), c)
+        }))
+    }
+    #[cfg(not(vesper_port))]
+    {
+        f32::from_bits(atan2_bits(f64::from(y), f64::from(x), Format::F32) as u32)
+    }
 }
 
 #[cfg(test)]
