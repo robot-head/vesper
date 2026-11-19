@@ -1,0 +1,415 @@
+// Token kinds of crates/vesper-syntax/src/lexer.rs, by discriminant (the
+// rowan raw kind), generated from the Rust enum. The differential test
+// (tests/self_host_front_v2.rs) checks every kind against the logos lexer.
+
+pub fn k_whitespace() -> u8 {
+    0
+}
+
+pub fn k_comment() -> u8 {
+    1
+}
+
+pub fn k_block_comment() -> u8 {
+    2
+}
+
+pub fn k_upper() -> u8 {
+    3
+}
+
+pub fn k_lower() -> u8 {
+    4
+}
+
+pub fn k_float() -> u8 {
+    5
+}
+
+pub fn k_int() -> u8 {
+    6
+}
+
+pub fn k_string() -> u8 {
+    7
+}
+
+pub fn k_struct() -> u8 {
+    8
+}
+
+pub fn k_enum() -> u8 {
+    9
+}
+
+pub fn k_effect() -> u8 {
+    10
+}
+
+pub fn k_impl() -> u8 {
+    11
+}
+
+pub fn k_fn() -> u8 {
+    12
+}
+
+pub fn k_let() -> u8 {
+    13
+}
+
+pub fn k_copy() -> u8 {
+    14
+}
+
+pub fn k_affine() -> u8 {
+    15
+}
+
+pub fn k_linear() -> u8 {
+    16
+}
+
+pub fn k_mod() -> u8 {
+    17
+}
+
+pub fn k_eff() -> u8 {
+    18
+}
+
+pub fn k_in() -> u8 {
+    19
+}
+
+pub fn k_inout() -> u8 {
+    20
+}
+
+pub fn k_sink() -> u8 {
+    21
+}
+
+pub fn k_self_kw() -> u8 {
+    22
+}
+
+pub fn k_handle() -> u8 {
+    23
+}
+
+pub fn k_state() -> u8 {
+    24
+}
+
+pub fn k_with() -> u8 {
+    25
+}
+
+pub fn k_return() -> u8 {
+    26
+}
+
+pub fn k_match() -> u8 {
+    27
+}
+
+pub fn k_if() -> u8 {
+    28
+}
+
+pub fn k_else() -> u8 {
+    29
+}
+
+pub fn k_true() -> u8 {
+    30
+}
+
+pub fn k_false() -> u8 {
+    31
+}
+
+pub fn k_l_paren() -> u8 {
+    32
+}
+
+pub fn k_r_paren() -> u8 {
+    33
+}
+
+pub fn k_l_brace() -> u8 {
+    34
+}
+
+pub fn k_r_brace() -> u8 {
+    35
+}
+
+pub fn k_l_bracket() -> u8 {
+    36
+}
+
+pub fn k_r_bracket() -> u8 {
+    37
+}
+
+pub fn k_comma() -> u8 {
+    38
+}
+
+pub fn k_semi() -> u8 {
+    39
+}
+
+pub fn k_colon() -> u8 {
+    40
+}
+
+pub fn k_colon_colon() -> u8 {
+    41
+}
+
+pub fn k_dot() -> u8 {
+    42
+}
+
+pub fn k_question() -> u8 {
+    43
+}
+
+pub fn k_at() -> u8 {
+    44
+}
+
+pub fn k_at_at() -> u8 {
+    45
+}
+
+pub fn k_arrow() -> u8 {
+    46
+}
+
+pub fn k_fat_arrow() -> u8 {
+    47
+}
+
+pub fn k_eq() -> u8 {
+    48
+}
+
+pub fn k_plus_eq() -> u8 {
+    49
+}
+
+pub fn k_star_eq() -> u8 {
+    50
+}
+
+pub fn k_slash_eq() -> u8 {
+    51
+}
+
+pub fn k_percent_eq() -> u8 {
+    52
+}
+
+pub fn k_minus_eq() -> u8 {
+    53
+}
+
+pub fn k_plus() -> u8 {
+    54
+}
+
+pub fn k_minus() -> u8 {
+    55
+}
+
+pub fn k_star() -> u8 {
+    56
+}
+
+pub fn k_slash() -> u8 {
+    57
+}
+
+pub fn k_percent() -> u8 {
+    58
+}
+
+pub fn k_eq_eq() -> u8 {
+    59
+}
+
+pub fn k_ne() -> u8 {
+    60
+}
+
+pub fn k_lt() -> u8 {
+    61
+}
+
+pub fn k_le() -> u8 {
+    62
+}
+
+pub fn k_gt() -> u8 {
+    63
+}
+
+pub fn k_ge() -> u8 {
+    64
+}
+
+pub fn k_and() -> u8 {
+    65
+}
+
+pub fn k_or() -> u8 {
+    66
+}
+
+pub fn k_bang() -> u8 {
+    67
+}
+
+pub fn k_pipe() -> u8 {
+    68
+}
+
+pub fn k_error() -> u8 {
+    69
+}
+
+pub fn k_eof() -> u8 {
+    70
+}
+
+pub fn k_dollar() -> u8 {
+    71
+}
+
+pub fn k_tilde() -> u8 {
+    72
+}
+
+pub fn k_pipe_eq() -> u8 {
+    73
+}
+
+pub fn k_amp_eq() -> u8 {
+    74
+}
+
+pub fn k_dot_dot() -> u8 {
+    75
+}
+
+pub fn k_dot_dot_eq() -> u8 {
+    76
+}
+
+pub fn k_amp() -> u8 {
+    77
+}
+
+pub fn k_caret() -> u8 {
+    78
+}
+
+pub fn k_shl() -> u8 {
+    79
+}
+
+pub fn k_shr() -> u8 {
+    80
+}
+
+// The Debug name of kind `k`, which `expected {k:?}, found {:?}` prints.
+pub fn kind_name(k: u8) -> String {
+    match k {
+        0 => "Whitespace",
+        1 => "Comment",
+        2 => "BlockComment",
+        3 => "Upper",
+        4 => "Lower",
+        5 => "Float",
+        6 => "Int",
+        7 => "String",
+        8 => "Struct",
+        9 => "Enum",
+        10 => "Effect",
+        11 => "Impl",
+        12 => "Fn",
+        13 => "Let",
+        14 => "Copy",
+        15 => "Affine",
+        16 => "Linear",
+        17 => "Mod",
+        18 => "Eff",
+        19 => "In",
+        20 => "Inout",
+        21 => "Sink",
+        22 => "SelfKw",
+        23 => "Handle",
+        24 => "State",
+        25 => "With",
+        26 => "Return",
+        27 => "Match",
+        28 => "If",
+        29 => "Else",
+        30 => "True",
+        31 => "False",
+        32 => "LParen",
+        33 => "RParen",
+        34 => "LBrace",
+        35 => "RBrace",
+        36 => "LBracket",
+        37 => "RBracket",
+        38 => "Comma",
+        39 => "Semi",
+        40 => "Colon",
+        41 => "ColonColon",
+        42 => "Dot",
+        43 => "Question",
+        44 => "At",
+        45 => "AtAt",
+        46 => "Arrow",
+        47 => "FatArrow",
+        48 => "Eq",
+        49 => "PlusEq",
+        50 => "StarEq",
+        51 => "SlashEq",
+        52 => "PercentEq",
+        53 => "MinusEq",
+        54 => "Plus",
+        55 => "Minus",
+        56 => "Star",
+        57 => "Slash",
+        58 => "Percent",
+        59 => "EqEq",
+        60 => "Ne",
+        61 => "Lt",
+        62 => "Le",
+        63 => "Gt",
+        64 => "Ge",
+        65 => "And",
+        66 => "Or",
+        67 => "Bang",
+        68 => "Pipe",
+        69 => "Error",
+        70 => "Eof",
+        71 => "Dollar",
+        72 => "Tilde",
+        73 => "PipeEq",
+        74 => "AmpEq",
+        75 => "DotDot",
+        76 => "DotDotEq",
+        77 => "Amp",
+        78 => "Caret",
+        79 => "Shl",
+        80 => "Shr",
+        _ => "Error",
+    }
+}

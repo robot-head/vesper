@@ -1,0 +1,6 @@
+[package]
+name = "@vesper/front"
+version = "0.1.0"
+edition = "2026"
+# The front end only computes: no I/O, clock or network (design §42.3).
+capability_ceiling = ["Fail"]

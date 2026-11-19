@@ -1,0 +1,366 @@
+// Keywords and contextual words, by spelling. `keyword` gives the token kind
+// of a lower-case identifier (crates/vesper-syntax/src/lexer.rs `#[token]`
+// rules); `lower_word` and `upper_word` give the parser's contextual-word
+// number of an identifier token (0 for none), so the parser compares
+// numbers instead of text (`Parser::at_word` and the name checks of
+// crates/vesper-syntax/src/parser.rs).
+
+use self::util::{
+    add,
+    byte
+};
+
+fn is(in b: Slice[u8], s: u64, in w: Slice[u8]) -> bool {
+    for i in 0..w.len() {
+        let c = match w.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if byte(in b, add(s, i)) != c {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn w_use() -> u8 {
+    1
+}
+
+pub fn w_model() -> u8 {
+    2
+}
+
+pub fn w_pub() -> u8 {
+    3
+}
+
+pub fn w_fip() -> u8 {
+    4
+}
+
+pub fn w_trait() -> u8 {
+    5
+}
+
+pub fn w_tiled() -> u8 {
+    6
+}
+
+pub fn w_wire() -> u8 {
+    7
+}
+
+pub fn w_for() -> u8 {
+    8
+}
+
+pub fn w_where() -> u8 {
+    9
+}
+
+pub fn w_as() -> u8 {
+    10
+}
+
+pub fn w_type() -> u8 {
+    11
+}
+
+pub fn w_dim() -> u8 {
+    12
+}
+
+pub fn w_dyn() -> u8 {
+    13
+}
+
+pub fn w_hot() -> u8 {
+    14
+}
+
+pub fn w_cold() -> u8 {
+    15
+}
+
+pub fn w_mut() -> u8 {
+    16
+}
+
+pub fn w_region() -> u8 {
+    17
+}
+
+pub fn w_loop() -> u8 {
+    18
+}
+
+pub fn w_break() -> u8 {
+    19
+}
+
+pub fn w_continue() -> u8 {
+    20
+}
+
+pub fn w_underscore() -> u8 {
+    21
+}
+
+pub fn w_load_tile_vec() -> u8 {
+    22
+}
+
+pub fn w_col_get() -> u8 {
+    23
+}
+
+pub fn w_col_set() -> u8 {
+    24
+}
+
+pub fn w_TiledSeq() -> u8 {
+    50
+}
+
+// Builtin scalar names (`is_scalar_name` without `Unit` and `Never`).
+pub fn is_primitive_word(w: u8) -> bool {
+    w >= 30 && w <= 42
+}
+
+// The kind of the lower-case identifier `b[s..s + n]`: a keyword or Lower (4).
+pub fn keyword(in b: Slice[u8], s: u64, n: u64) -> u8 {
+    if n == 2 {
+        if is(in b, s, in "fn".as_bytes()) {
+            return 12;
+        }
+        if is(in b, s, in "in".as_bytes()) {
+            return 19;
+        }
+        if is(in b, s, in "if".as_bytes()) {
+            return 28;
+        }
+        4
+    } else if n == 3 {
+        if is(in b, s, in "let".as_bytes()) {
+            return 13;
+        }
+        if is(in b, s, in "mod".as_bytes()) {
+            return 17;
+        }
+        if is(in b, s, in "eff".as_bytes()) {
+            return 18;
+        }
+        4
+    } else if n == 4 {
+        if is(in b, s, in "enum".as_bytes()) {
+            return 9;
+        }
+        if is(in b, s, in "impl".as_bytes()) {
+            return 11;
+        }
+        if is(in b, s, in "copy".as_bytes()) {
+            return 14;
+        }
+        if is(in b, s, in "sink".as_bytes()) {
+            return 21;
+        }
+        if is(in b, s, in "self".as_bytes()) {
+            return 22;
+        }
+        if is(in b, s, in "with".as_bytes()) {
+            return 25;
+        }
+        if is(in b, s, in "else".as_bytes()) {
+            return 29;
+        }
+        if is(in b, s, in "true".as_bytes()) {
+            return 30;
+        }
+        4
+    } else if n == 5 {
+        if is(in b, s, in "inout".as_bytes()) {
+            return 20;
+        }
+        if is(in b, s, in "state".as_bytes()) {
+            return 24;
+        }
+        if is(in b, s, in "match".as_bytes()) {
+            return 27;
+        }
+        if is(in b, s, in "false".as_bytes()) {
+            return 31;
+        }
+        4
+    } else if n == 6 {
+        if is(in b, s, in "struct".as_bytes()) {
+            return 8;
+        }
+        if is(in b, s, in "effect".as_bytes()) {
+            return 10;
+        }
+        if is(in b, s, in "affine".as_bytes()) {
+            return 15;
+        }
+        if is(in b, s, in "linear".as_bytes()) {
+            return 16;
+        }
+        if is(in b, s, in "handle".as_bytes()) {
+            return 23;
+        }
+        if is(in b, s, in "return".as_bytes()) {
+            return 26;
+        }
+        4
+    } else {
+        4
+    }
+}
+
+// The contextual word of a Lower token.
+pub fn lower_word(in b: Slice[u8], s: u64, n: u64) -> u8 {
+    if n == 1 {
+        if is(in b, s, in "_".as_bytes()) {
+            return 21;
+        }
+        0
+    } else if n == 2 {
+        if is(in b, s, in "as".as_bytes()) {
+            return 10;
+        }
+        if is(in b, s, in "u8".as_bytes()) {
+            return 30;
+        }
+        if is(in b, s, in "i8".as_bytes()) {
+            return 35;
+        }
+        0
+    } else if n == 3 {
+        if is(in b, s, in "use".as_bytes()) {
+            return 1;
+        }
+        if is(in b, s, in "pub".as_bytes()) {
+            return 3;
+        }
+        if is(in b, s, in "fip".as_bytes()) {
+            return 4;
+        }
+        if is(in b, s, in "for".as_bytes()) {
+            return 8;
+        }
+        if is(in b, s, in "dim".as_bytes()) {
+            return 12;
+        }
+        if is(in b, s, in "dyn".as_bytes()) {
+            return 13;
+        }
+        if is(in b, s, in "hot".as_bytes()) {
+            return 14;
+        }
+        if is(in b, s, in "mut".as_bytes()) {
+            return 16;
+        }
+        if is(in b, s, in "u16".as_bytes()) {
+            return 31;
+        }
+        if is(in b, s, in "u32".as_bytes()) {
+            return 32;
+        }
+        if is(in b, s, in "u64".as_bytes()) {
+            return 33;
+        }
+        if is(in b, s, in "i16".as_bytes()) {
+            return 36;
+        }
+        if is(in b, s, in "i32".as_bytes()) {
+            return 37;
+        }
+        if is(in b, s, in "i64".as_bytes()) {
+            return 38;
+        }
+        if is(in b, s, in "f32".as_bytes()) {
+            return 40;
+        }
+        if is(in b, s, in "f64".as_bytes()) {
+            return 41;
+        }
+        0
+    } else if n == 4 {
+        if is(in b, s, in "wire".as_bytes()) {
+            return 7;
+        }
+        if is(in b, s, in "type".as_bytes()) {
+            return 11;
+        }
+        if is(in b, s, in "cold".as_bytes()) {
+            return 15;
+        }
+        if is(in b, s, in "loop".as_bytes()) {
+            return 18;
+        }
+        if is(in b, s, in "bool".as_bytes()) {
+            return 42;
+        }
+        0
+    } else if n == 5 {
+        if is(in b, s, in "model".as_bytes()) {
+            return 2;
+        }
+        if is(in b, s, in "trait".as_bytes()) {
+            return 5;
+        }
+        if is(in b, s, in "tiled".as_bytes()) {
+            return 6;
+        }
+        if is(in b, s, in "where".as_bytes()) {
+            return 9;
+        }
+        if is(in b, s, in "break".as_bytes()) {
+            return 19;
+        }
+        if is(in b, s, in "usize".as_bytes()) {
+            return 34;
+        }
+        if is(in b, s, in "isize".as_bytes()) {
+            return 39;
+        }
+        0
+    } else if n == 6 {
+        if is(in b, s, in "region".as_bytes()) {
+            return 17;
+        }
+        0
+    } else if n == 7 {
+        if is(in b, s, in "col_get".as_bytes()) {
+            return 23;
+        }
+        if is(in b, s, in "col_set".as_bytes()) {
+            return 24;
+        }
+        0
+    } else if n == 8 {
+        if is(in b, s, in "continue".as_bytes()) {
+            return 20;
+        }
+        0
+    } else if n == 13 {
+        if is(in b, s, in "load_tile_vec".as_bytes()) {
+            return 22;
+        }
+        0
+    } else {
+        0
+    }
+}
+
+// The contextual word of an Upper token.
+pub fn upper_word(in b: Slice[u8], s: u64, n: u64) -> u8 {
+    if n == 8 {
+        if is(in b, s, in "TiledSeq".as_bytes()) {
+            return 50;
+        }
+        0
+    } else {
+        0
+    }
+}

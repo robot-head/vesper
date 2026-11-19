@@ -1,0 +1,214 @@
+// @vesper/front: the self-hosted front end v2 (self-hosting wave SH0 lane 7,
+// #1129). A lexer over `Str` into a token table and a lossless CST parser
+// into node and token tables, with the token kinds, node kinds, text ranges
+// and diagnostics (codes, messages and spans) of `vesper_syntax::parser::parse`
+// (crates/vesper-syntax). tests/self_host_front_v2.rs checks them against
+// the Rust parser on every `.ves` file of the repository, the parser test
+// corpus and a fuzzed corpus.
+//
+// The frozen Stage 1 front end in packages/vesper-compiler is unchanged:
+// it reads `source_byte(i)` and folds its CST into a digest (bootstrap/
+// stage1.lock). This package is the front end the self-hosted compiler
+// will read, beside the Rust one, which stays the default.
+//
+// Layout of the result of `parse_tables` (one u64 per field):
+//   [tokens, nodes, diagnostics]
+//   tokens rows:      kind, start, end, parent node   (CST leaf order)
+//   node rows:        kind, parent (node count for the root), start, end
+//                     (preorder)
+//   diagnostic rows:  code (1, 2 or 3 for E000n), start, end, message
+//                     length, then the message bytes, one per word
+
+use self::lex::{
+    lex,
+    max_source_bytes,
+    max_diagnostics
+};
+use self::diag::{
+    diags_new,
+    diag_push,
+    limit_message_observed
+};
+use self::parse::{
+    parse_tokens
+};
+use self::tree::{
+    tree_new,
+    build_tree,
+    report
+};
+use self::util::{
+    byte,
+    shl
+};
+
+// The token table of one source: parallel rows.
+pub struct Tokens {
+    // Kind of each token (discriminant of `TokenKind`).
+    kind: ChunkSeq[u8],
+    // Byte range of each token.
+    start: ChunkSeq[u32],
+    end: ChunkSeq[u32],
+    // Contextual word of an identifier (words.ves), else 0.
+    word: ChunkSeq[u8],
+    // Interned symbol of an identifier (from 1), else 0.
+    sym: ChunkSeq[u32],
+    // The interner: open addressing over symbol numbers, and each symbol's
+    // first spelling.
+    slots: ChunkSeq[u32],
+    sym_start: ChunkSeq[u32],
+    sym_end: ChunkSeq[u32],
+    // The lexer stopped at a token or diagnostic limit.
+    limited: bool
+}
+
+// Diagnostics, in order.
+pub struct Diags {
+    code: ChunkSeq[u8],
+    start: ChunkSeq[u32],
+    end: ChunkSeq[u32],
+    // Start of each message in `text`.
+    at: ChunkSeq[u32],
+    text: ChunkSeq[u8]
+}
+
+// The CST: nodes in preorder and tokens in text order, each with its
+// parent node.
+pub struct Tree {
+    node_kind: ChunkSeq[u8],
+    node_parent: ChunkSeq[u32],
+    node_start: ChunkSeq[u32],
+    node_end: ChunkSeq[u32],
+    leaf_token: ChunkSeq[u32],
+    leaf_parent: ChunkSeq[u32]
+}
+
+// Parser state (crates/vesper-syntax/src/parser.rs `Parser`, batch mode).
+pub struct P {
+    t: Tokens,
+    d: Diags,
+    // Source bytes (the `}` check of block-like statements).
+    src: ChunkSeq[u8],
+    // Indices of the non-trivia tokens, and for each token the number of
+    // non-trivia tokens before it.
+    sig: ChunkSeq[u32],
+    rank: ChunkSeq[u32],
+    ntok: u64,
+    pos: u64,
+    // CST builder events: a token index, a node start (2^31 + kind) or a
+    // node finish (2^32 - 1).
+    ev: ChunkSeq[u32],
+    no_struct: bool,
+    // Scoped name sets (`row_names`, `bound_values`): a live count per
+    // symbol and an undo trail.
+    rows: ChunkSeq[u32],
+    rows_trail: ChunkSeq[u32],
+    vals: ChunkSeq[u32],
+    vals_trail: ChunkSeq[u32],
+    // Scratch stack of symbols: pattern bindings, parameter names and row
+    // generics, popped by whoever pushed them.
+    binds: ChunkSeq[u32],
+    // Spans of the trait bounds read by the latest `generics` call that no
+    // declaration has taken yet (`pending_bounds`), as start/end pairs.
+    pending: ChunkSeq[u32],
+    depth: u64,
+    halted: bool
+}
+
+// What the parser keeps of a parsed expression: its kind (parse.ves
+// `x_*`), span, height (the Rust parser's `expr_heights`), the symbol of a
+// one-segment name, and whether it names a tiled column accessor.
+pub copy struct Ex {
+    k: u8,
+    start: u32,
+    end: u32,
+    h: u32,
+    sym: u32,
+    tiled: bool
+}
+
+// Parses `source` (`vesper_syntax::parser::parse`) into the token, node and
+// diagnostic tables described above.
+pub fn parse_tables(in source: Str) -> ChunkSeq[u64] {
+    let b = source.as_bytes();
+    let n = b.len();
+    let mut tree = tree_new();
+    if n > max_source_bytes() {
+        // `parse`'s fallback: one Error token over the longest UTF-8 prefix
+        // within the byte budget, and E0003.
+        let mut retained = max_source_bytes();
+        loop {
+            let c = byte(in b, retained);
+            if retained == 0 || c < 128 || c >= 192 {
+                break;
+            }
+            retained = wrapping_sub(retained, 1);
+        }
+        let mut d = diags_new();
+        let mut m = ChunkSeq::new[u8]();
+        limit_message_observed(inout m, 0, max_source_bytes(), n, retained);
+        diag_push(inout d, 3, retained, retained, in m.as_slice());
+        return report_oversized(retained, in d);
+    }
+    let mut d = diags_new();
+    let t = lex(in b, inout d);
+    let p = parse_tokens(in b, t, d);
+    build_tree(inout tree, in p);
+    report(in tree, in p)
+}
+
+fn report_oversized(retained: u64, in d: Diags) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    let leaves: u64 = if retained == 0 { 0 } else { 1 };
+    out.push(leaves);
+    out.push(1);
+    out.push(1);
+    if retained != 0 {
+        out.push(69);
+        out.push(0);
+        out.push(retained);
+        out.push(0);
+    }
+    out.push(200);
+    out.push(1);
+    out.push(0);
+    out.push(retained);
+    out.push(3);
+    out.push(retained);
+    out.push(retained);
+    out.push(d.text.len());
+    for i in 0..d.text.len() {
+        out.push(match d.text.try_get(i) {
+            Option::Some(c) => widen_u64(c),
+            Option::None => 0,
+        });
+    }
+    out
+}
+
+// Parses `source` and returns tokens * 2^32 + nodes, for benchmarks: the
+// same work as `parse_tables` without building the result rows.
+pub fn parse_counts(in source: Str) -> u64 {
+    let b = source.as_bytes();
+    if b.len() > max_source_bytes() {
+        return 0;
+    }
+    let mut d = diags_new();
+    let t = lex(in b, inout d);
+    let p = parse_tokens(in b, t, d);
+    let mut tree = tree_new();
+    build_tree(inout tree, in p);
+    wrapping_add(shl(p.t.kind.len(), 32), tree.node_kind.len())
+}
+
+// Lexes `source` only and returns the token count, for benchmarks.
+pub fn lex_count(in source: Str) -> u64 {
+    let b = source.as_bytes();
+    if b.len() > max_source_bytes() {
+        return 0;
+    }
+    let mut d = diags_new();
+    let t = lex(in b, inout d);
+    let _ = max_diagnostics();
+    t.kind.len()
+}
