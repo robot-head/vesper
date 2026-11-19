@@ -886,6 +886,20 @@ impl Abi for TimeoutOut {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TokenOpened { pub code: u64, pub len: u64 }
+
+impl Abi for TokenOpened {
+    const WORDS: usize = 2;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.code, &mut out[0..]);
+        Abi::put(&self.len, &mut out[1..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        TokenOpened { code: Abi::get(&words[0..]), len: Abi::get(&words[1..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Unprot { pub first_byte: u8, pub pn_len: u64, pub pn: u32, pub has_key_phase: bool, pub key_phase: bool, pub header_len: u64, pub payload: Sp }
 
 impl Abi for Unprot {
@@ -1191,6 +1205,14 @@ pub mod repr {
         pub lost: vesper_port_abi::Word<u32>,
         pub packets: vesper_port_abi::Word<u8>,
         pub anti_deadlock: vesper_port_abi::Word<bool>,
+    }
+
+    /// Mirror of the Vesper copy struct `TokenOpened` (2 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct TokenOpened {
+        pub code: u64,
+        pub len: u64,
     }
 
     /// Mirror of the Vesper copy struct `Unprot` (8 words).
@@ -1778,6 +1800,34 @@ impl repr::TimeoutOut {
     }
 }
 
+// The mirror of `TokenOpened` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::TokenOpened>() == 2 * 8);
+    assert!(core::mem::align_of::<repr::TokenOpened>() == 8);
+    assert!(core::mem::offset_of!(repr::TokenOpened, code) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::TokenOpened, len) == 1 * 8);
+};
+
+// SAFETY: `repr::TokenOpened` is `#[repr(C)]`, 2 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::TokenOpened {
+    const WORDS: usize = 2;
+}
+
+impl repr::TokenOpened {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &TokenOpened) -> Self {
+        let mut words = [0u64; 2];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> TokenOpened {
+        <TokenOpened as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
 // The mirror of `Unprot` has exactly the Vesper layout.
 const _: () = {
     assert!(core::mem::size_of::<repr::Unprot>() == 8 * 8);
@@ -1899,6 +1949,7 @@ const _: () = assert!(<RxState as Abi>::WORDS == 15);
 const _: () = assert!(<SendSt as Abi>::WORDS == 5);
 const _: () = assert!(<Sp as Abi>::WORDS == 2);
 const _: () = assert!(<TimeoutOut as Abi>::WORDS == 5);
+const _: () = assert!(<TokenOpened as Abi>::WORDS == 2);
 const _: () = assert!(<Unprot as Abi>::WORDS == 8);
 const _: () = assert!(<VarIntErr as Abi>::WORDS == 3);
 const _: () = assert!(<WireStep as Abi>::WORDS == 3);
@@ -1962,6 +2013,8 @@ unsafe extern "C" {
     fn vesper_warp_recv_buf_new(result: *mut u64, cap: i64) -> i64;
     fn vesper_warp_recv_buf_read(s: *mut u64, data: *mut u64, have: *mut u64, out: *mut u64) -> i64;
     fn vesper_warp_recv_buf_reset_for_reuse(s: *mut u64, have: *mut u64) -> i64;
+    fn vesper_warp_reset_token(key: *mut u64, cid: *mut u64, out: *mut u64) -> i64;
+    fn vesper_warp_reset_token_eq(ours: *mut u64, theirs: *mut u64) -> i64;
     fn vesper_warp_send_buf_copy_out(data: *mut u64, off: i64, out: *mut u64) -> i64;
     fn vesper_warp_send_buf_discard(s: *mut u64, acked: *mut u64, lost: *mut u64) -> i64;
     fn vesper_warp_send_buf_free_space(s: *mut u64) -> i64;
@@ -1972,6 +2025,8 @@ unsafe extern "C" {
     fn vesper_warp_send_buf_reset_for_reuse(s: *mut u64, acked: *mut u64, lost: *mut u64) -> i64;
     fn vesper_warp_send_buf_take_new(result: *mut u64, s: *mut u64, max: i64) -> i64;
     fn vesper_warp_send_buf_write(s: *mut u64, data: *mut u64, src: *mut u64) -> i64;
+    fn vesper_warp_token_open(result: *mut u64, token: *mut u64, addr: *mut u64, now_ns: i64, retry_lifetime_ns: i64, new_lifetime_ns: i64, odcid: *mut u64) -> i64;
+    fn vesper_warp_token_seal(kind: i64, odcid: *mut u64, addr: *mut u64, now_ns: i64, out: *mut u64) -> i64;
     fn vesper_warp_varint_decode(result: *mut u64, buf: *mut u64, fail: *mut u64) -> i64;
     fn vesper_warp_varint_encode(value: i64, out: *mut u64, fail: *mut u64) -> i64;
     fn vesper_warp_varint_encode_with_len(value: i64, len: i64, out: *mut u64, fail: *mut u64) -> i64;
@@ -2577,6 +2632,26 @@ pub fn recv_buf_reset_for_reuse(s: &mut repr::RecvSt, have: &mut [u64]) -> () {
     { let _ = raw; }
 }
 
+/// Calls `reset_token` of the Vesper library `warp` (`vesper_warp_reset_token`).
+pub fn reset_token(key: &[u8], cid: &[u8], out: &mut [u8]) -> () {
+    // Keep the crate's `WarpKeys` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::imp::lifecycle::keys::vesper_warp_keys_hmac16 as *const (), crate::imp::lifecycle::keys::vesper_warp_keys_open as *const (), crate::imp::lifecycle::keys::vesper_warp_keys_random as *const (), crate::imp::lifecycle::keys::vesper_warp_keys_seal as *const ()]);
+    // SAFETY: `vesper_warp_reset_token` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(key, |view_key| vesper_port_abi::with_slice(cid, |view_cid| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_warp_reset_token(view_key, view_cid, view_out) })));
+    { let _ = raw; }
+}
+
+/// Calls `reset_token_eq` of the Vesper library `warp` (`vesper_warp_reset_token_eq`).
+pub fn reset_token_eq(ours: &[u8], theirs: &[u8]) -> bool {
+    // SAFETY: `vesper_warp_reset_token_eq` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(ours, |view_ours| vesper_port_abi::with_slice(theirs, |view_theirs| unsafe { vesper_warp_reset_token_eq(view_ours, view_theirs) }));
+    raw != 0
+}
+
 /// Calls `send_buf_copy_out` of the Vesper library `warp` (`vesper_warp_send_buf_copy_out`).
 pub fn send_buf_copy_out(data: &[u8], off: u64, out: &mut [u8]) -> () {
     // SAFETY: `vesper_warp_send_buf_copy_out` has exactly this signature in the export ABI; every
@@ -2667,6 +2742,29 @@ pub fn send_buf_write(s: &mut repr::SendSt, data: &mut [u8], src: &[u8]) -> u64 
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice_mut(data, |view_data| vesper_port_abi::with_slice(src, |view_src| unsafe { vesper_warp_send_buf_write((s as *mut repr::SendSt).cast::<u64>(), view_data, view_src) }));
+    raw as u64
+}
+
+/// Calls `token_open` of the Vesper library `warp` (`vesper_warp_token_open`).
+pub fn token_open(token: &mut [u8], addr: &[u8], now_ns: u64, retry_lifetime_ns: u64, new_lifetime_ns: u64, odcid: &mut [u8]) -> repr::TokenOpened {
+    // Keep the crate's `WarpKeys` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::imp::lifecycle::keys::vesper_warp_keys_hmac16 as *const (), crate::imp::lifecycle::keys::vesper_warp_keys_open as *const (), crate::imp::lifecycle::keys::vesper_warp_keys_random as *const (), crate::imp::lifecycle::keys::vesper_warp_keys_seal as *const ()]);
+    let mut result = [0u64; 2];
+    // SAFETY: `vesper_warp_token_open` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(token, |view_token| vesper_port_abi::with_slice(addr, |view_addr| vesper_port_abi::with_slice_mut(odcid, |view_odcid| unsafe { vesper_warp_token_open(result.as_mut_ptr(), view_token, view_addr, now_ns as i64, retry_lifetime_ns as i64, new_lifetime_ns as i64, view_odcid) })));
+    vesper_port_abi::mirror_from_words::<repr::TokenOpened>(&result[0..])
+}
+
+/// Calls `token_seal` of the Vesper library `warp` (`vesper_warp_token_seal`).
+pub fn token_seal(kind: u8, odcid: &[u8], addr: &[u8], now_ns: u64, out: &mut [u8]) -> u64 {
+    // Keep the crate's `WarpKeys` symbols linked: the Vesper object calls them.
+    let _ = core::hint::black_box([crate::imp::lifecycle::keys::vesper_warp_keys_hmac16 as *const (), crate::imp::lifecycle::keys::vesper_warp_keys_open as *const (), crate::imp::lifecycle::keys::vesper_warp_keys_random as *const (), crate::imp::lifecycle::keys::vesper_warp_keys_seal as *const ()]);
+    // SAFETY: `vesper_warp_token_seal` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(odcid, |view_odcid| vesper_port_abi::with_slice(addr, |view_addr| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_warp_token_seal(kind as i64, view_odcid, view_addr, now_ns as i64, view_out) })));
     raw as u64
 }
 
