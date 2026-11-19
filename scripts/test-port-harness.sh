@@ -161,6 +161,7 @@ crates/vesper-warp-tcp/scripts/test-port.sh
 # Port wave P1 lane 3 (#900): vesper-warp-wheel.
 sh crates/vesper-warp-wheel/port/test-port.sh
 sh crates/vesper-ignis/port/check.sh  # port P1 lane 12 (#909): vesper-ignis, both builds and the divergence check
+. crates/vesper-ebpf/port/check.sh  # port P3a lane 6 (#1041): vesper-ebpf, both builds and one divergence check per ported module (in shard 1, the shortest, since it takes about 40 minutes)
 fi
 # Shard 2: Quarry through Grammar.
 if part 2; then
@@ -230,5 +231,4 @@ sh crates/vesper-serde/port/check.sh  # port P1 lane 19 (#916): vesper-serde, bo
 sh crates/vesper-aegis/port/check.sh  # port P3a lane 8 (#1043): vesper-aegis, both builds and one divergence check per ported module
 sh crates/vesper-loom-audit/port/test-port.sh  # port wave P3a lane 4 (#1039): vesper-loom-audit, both builds and the divergence check
 sh crates/vesper-bench/port/check.sh  # port P3a lane 5 (#1040): vesper-bench, both builds and one divergence check per ported module
-. crates/vesper-ebpf/port/check.sh  # port P3a lane 6 (#1041): vesper-ebpf, both builds and one divergence check per ported module
 . crates/vesper-silicon/port/check.sh  # port P3a lane 7 (#1042): vesper-silicon, both builds and one divergence check per ported module
