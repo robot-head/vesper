@@ -1491,8 +1491,9 @@ pub unsafe extern "C" fn vcl_call(
     args: *const u32,
     args_len: usize,
 ) -> u32 {
-    let args = values(args, args_len);
     with_builder(b, INVALID, |b| {
+        // Converted inside the panic boundary: an invalid number panics.
+        let args = values(args, args_len);
         let i = b.fb().ins().call(ir::FuncRef::from_u32(fref), &args);
         placed(b, i);
         Ok(b.fb().inst_results(i).len() as u32)
@@ -1506,8 +1507,9 @@ pub unsafe extern "C" fn vcl_call_indirect(
     args: *const u32,
     args_len: usize,
 ) -> u32 {
-    let args = values(args, args_len);
     with_builder(b, INVALID, |b| {
+        // Converted inside the panic boundary: an invalid number panics.
+        let args = values(args, args_len);
         let i = b
             .fb()
             .ins()
@@ -1523,8 +1525,9 @@ pub unsafe extern "C" fn vcl_return_call(
     args: *const u32,
     args_len: usize,
 ) {
-    let args = values(args, args_len);
     with_builder(b, (), |b| {
+        // Converted inside the panic boundary: an invalid number panics.
+        let args = values(args, args_len);
         let i = b.fb().ins().return_call(ir::FuncRef::from_u32(fref), &args);
         placed(b, i);
         Ok(())
@@ -1532,8 +1535,9 @@ pub unsafe extern "C" fn vcl_return_call(
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcl_jump(b: *mut Builder, blk: u32, args: *const u32, args_len: usize) {
-    let args = block_args(args, args_len);
     with_builder(b, (), |b| {
+        // Converted inside the panic boundary: an invalid number panics.
+        let args = block_args(args, args_len);
         let i = b.fb().ins().jump(block(blk), &args);
         placed(b, i);
         Ok(())
@@ -1550,9 +1554,10 @@ pub unsafe extern "C" fn vcl_brif(
     else_args: *const u32,
     else_len: usize,
 ) {
-    let t = block_args(then_args, then_len);
-    let e = block_args(else_args, else_len);
     with_builder(b, (), |b| {
+        // Converted inside the panic boundary: an invalid number panics.
+        let t = block_args(then_args, then_len);
+        let e = block_args(else_args, else_len);
         let i = b
             .fb()
             .ins()
@@ -1563,8 +1568,9 @@ pub unsafe extern "C" fn vcl_brif(
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn vcl_return(b: *mut Builder, vals: *const u32, len: usize) {
-    let vals = values(vals, len);
     with_builder(b, (), |b| {
+        // Converted inside the panic boundary: an invalid number panics.
+        let vals = values(vals, len);
         let i = b.fb().ins().return_(&vals);
         placed(b, i);
         Ok(())

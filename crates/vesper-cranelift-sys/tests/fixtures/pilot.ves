@@ -217,6 +217,8 @@ pub fn poisoned_builder() -> u64 eff [Ffi[Cranelift]] {
     let x = block_param(inout b, entry, 0);
     let bad = ins_binary(inout b, 999, x, x);
     let after = ins_iadd(inout b, x, x);
+    // The invalid number reaches an argument list: refused, not a crash.
+    ins_return1(inout b, bad);
     let err = builder_error_len(in b);
     builder_free(b);
     module_free(m);
@@ -319,4 +321,32 @@ pub fn vectors_and_atomics() -> u64 eff [Ffi[Cranelift]] {
     } else {
         0
     }
+}
+
+// An invalid value number in an argument list of a healthy builder: the
+// conversion panics inside the shim's boundary and poisons the builder.
+pub fn invalid_argument() -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(in "".as_bytes(), in "".as_bytes(), in "bad".as_bytes()) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let s = sig_ints(inout m, 1);
+    let mut b = match builder_new(in m, s) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    entry_block(inout b);
+    ins_return1(
+        inout b,
+        Value {
+            id: invalid()
+        }
+    );
+    let err = builder_error_len(in b);
+    builder_free(b);
+    module_free(m);
+    err
 }

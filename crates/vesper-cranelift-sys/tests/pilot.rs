@@ -129,6 +129,9 @@ fn errors_are_reported_and_handles_never_leak() {
     // An unknown opcode poisons the builder; later calls are refused.
     let err = jit(&checked, "poisoned_builder");
     assert!(err > 0, "poisoned builder: {err}");
+    // An invalid value in an argument list is an error, not an abort.
+    let err = jit(&checked, "invalid_argument");
+    assert!(err > 0, "invalid argument: {err}");
     // A bad triple: no module, a message.
     let err = jit(&checked, "bad_triple");
     assert!(err > 0, "bad triple: {err}");
