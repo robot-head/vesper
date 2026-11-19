@@ -1,0 +1,518 @@
+// The lexer: crates/vesper-syntax/src/lexer.rs (`lex_with_limits` with the
+// default limits) over the bytes of a `Str`, into a token table. Tokens are
+// rows of the parallel sequences `kind`, `start` and `end`; trivia
+// (whitespace and both comment forms) stays in the table, so concatenating
+// every token's bytes gives the source back. The logos rules are written
+// out by hand: longest match, keywords over identifiers, and logos's error
+// tokens (one character, or an unterminated string or block comment).
+//
+// Each identifier row also gets `word`, a contextual-word number (see
+// words.ves), and `sym`, an interned symbol number (0 for other kinds), so
+// the parser never compares text.
+
+use self::{
+    Tokens,
+    Diags
+};
+use self::kinds::{
+    k_whitespace,
+    k_comment,
+    k_block_comment,
+    k_upper,
+    k_lower,
+    k_float,
+    k_int,
+    k_string,
+    k_error,
+    k_eof,
+    k_self_kw,
+    k_state,
+    k_linear,
+    k_with
+};
+use self::util::{
+    inc,
+    add,
+    byte,
+    u32_at,
+    narrow,
+    shl
+};
+use self::words::{
+    keyword,
+    lower_word,
+    upper_word
+};
+use self::diag::{
+    diag_push,
+    diag_push_limit,
+    limit_message
+};
+
+fn is_digit(c: u8) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn is_space(c: u8) -> bool {
+    c == 32 || c == 9 || c == 13 || c == 10 || c == 12
+}
+
+// Bytes of the UTF-8 character whose lead byte is `c`.
+fn char_len(c: u8) -> u64 {
+    if c < 128 {
+        1
+    } else if c < 224 {
+        2
+    } else if c < 240 {
+        3
+    } else {
+        4
+    }
+}
+
+// The end of the run of class bytes from `at` (`find_not_in` over the rest).
+fn run_end(in b: Slice[u8], at: u64, lo: u64, hi: u64) -> u64 {
+    let n = b.len();
+    if at >= n {
+        return n;
+    }
+    match b[at..n].find_not_in(lo, hi, false) {
+        Option::Some(j) => add(at, j),
+        Option::None => n,
+    }
+}
+
+fn digit_class() -> u64 {
+    287948901175001088
+}
+
+fn ident_class_hi() -> u64 {
+    576460745995190270
+}
+
+fn space_class() -> u64 {
+    4294981120
+}
+
+fn scan_digits(in b: Slice[u8], from: u64) -> u64 {
+    run_end(in b, from, digit_class(), 0)
+}
+
+// `[eE][+-]?[0-9]+` at `at`: its end, or `at` when absent.
+fn exponent(in b: Slice[u8], at: u64) -> u64 {
+    let c = byte(in b, at);
+    if at >= b.len() || (c != 101 && c != 69) {
+        return at;
+    }
+    let mut j = inc(at);
+    let s = byte(in b, j);
+    if j < b.len() && (s == 43 || s == 45) {
+        j = inc(j);
+    }
+    if j < b.len() && is_digit(byte(in b, j)) {
+        scan_digits(in b, j)
+    } else {
+        at
+    }
+}
+
+// A token that starts with a digit: (kind, end).
+fn number(in b: Slice[u8], at: u64) -> (u8, u64) {
+    let n = b.len();
+    let digits = scan_digits(in b, at);
+    // Int: `0[xX][0-9a-fA-F_]+` or `[0-9][0-9_]*`.
+    let mut int_end = run_end(in b, inc(at), digit_class(), 2147483648);
+    let x = byte(in b, inc(at));
+    if byte(in b, at) == 48 && inc(at) < n && (x == 120 || x == 88) {
+        let h = run_end(in b, add(at, 2), digit_class(), 543313363070);
+        if h > add(at, 2) && h > int_end {
+            int_end = h;
+        }
+    }
+    // Float: `[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?` or `[0-9]+[eE][+-]?[0-9]+`.
+    let mut float_end = at;
+    if digits
+        < n
+        && byte(in b, digits)
+        == 46
+        && inc(digits)
+        < n
+        && is_digit(byte(in b, inc(digits))) {
+        float_end = exponent(in b, scan_digits(in b, inc(digits)));
+    } else {
+        let e = exponent(in b, digits);
+        if e > digits {
+            float_end = e;
+        }
+    }
+    if float_end > int_end {
+        (k_float(), float_end)
+    } else {
+        (k_int(), int_end)
+    }
+}
+
+// A token that starts with `"`: (kind, end). logos stops an unterminated
+// string before an escape it cannot finish, and at the end of input.
+fn string(in b: Slice[u8], at: u64) -> (u8, u64) {
+    let n = b.len();
+    let mut i = inc(at);
+    loop {
+        if i >= n {
+            return (k_error(), n);
+        }
+        i = match b[i..n].find_either(34, 92) {
+            Option::Some(j) => add(i, j),
+            Option::None => return (k_error(), n),
+        };
+        if byte(in b, i) == 34 {
+            return (k_string(), inc(i));
+        }
+        if inc(i) < n && byte(in b, inc(i)) != 10 {
+            i = add(i, 2);
+        } else {
+            return (k_error(), i);
+        }
+    }
+}
+
+// A nested block comment at `/*`: (kind, end).
+fn block_comment(in b: Slice[u8], at: u64) -> (u8, u64) {
+    let n = b.len();
+    let mut depth: u64 = 1;
+    let mut i = add(at, 2);
+    loop {
+        if inc(i) >= n {
+            return (k_error(), n);
+        }
+        let c = byte(in b, i);
+        let d = byte(in b, inc(i));
+        if c == 47 && d == 42 {
+            depth = inc(depth);
+            i = add(i, 2);
+        } else if c == 42 && d == 47 {
+            depth = wrapping_sub(depth, 1);
+            i = add(i, 2);
+            if depth == 0 {
+                return (k_block_comment(), i);
+            }
+        } else {
+            i = inc(i);
+        }
+    }
+}
+
+// One punctuation token at `at` whose first byte is `c`: (kind, length),
+// or length 0 when `c` starts no token.
+fn punct(in b: Slice[u8], at: u64, c: u8) -> (u8, u64) {
+    let d = if inc(at) < b.len() {
+        byte(in b, inc(at))
+    } else {
+        0
+    };
+    let e = if add(at, 2) < b.len() {
+        byte(in b, add(at, 2))
+    } else {
+        0
+    };
+    match c {
+        40 => (32, 1),
+        41 => (33, 1),
+        123 => (34, 1),
+        125 => (35, 1),
+        91 => (36, 1),
+        93 => (37, 1),
+        44 => (38, 1),
+        59 => (39, 1),
+        58 => pair(d, 58, 41, 40),
+        46 => dots(d, e),
+        63 => (43, 1),
+        64 => pair(d, 64, 45, 44),
+        45 => triple(d, 62, 46, 61, 53, 55),
+        61 => triple(d, 62, 47, 61, 59, 48),
+        43 => pair(d, 61, 49, 54),
+        42 => pair(d, 61, 50, 56),
+        47 => pair(d, 61, 51, 57),
+        37 => pair(d, 61, 52, 58),
+        33 => pair(d, 61, 60, 67),
+        60 => triple(d, 61, 62, 60, 79, 61),
+        62 => triple(d, 61, 64, 62, 80, 63),
+        38 => triple(d, 38, 65, 61, 74, 77),
+        124 => triple(d, 124, 66, 61, 73, 68),
+        36 => (71, 1),
+        126 => (72, 1),
+        94 => (78, 1),
+        _ => (69, 0),
+    }
+}
+
+// A one- or two-byte token: `two` when the next byte is `next`.
+fn pair(d: u8, next: u8, two: u8, one: u8) -> (u8, u64) {
+    if d == next {
+        (two, 2)
+    } else {
+        (one, 1)
+    }
+}
+
+// A one-byte token or one of two two-byte tokens.
+fn triple(d: u8, a: u8, ka: u8, b: u8, kb: u8, one: u8) -> (u8, u64) {
+    if d == a {
+        (ka, 2)
+    } else if d == b {
+        (kb, 2)
+    } else {
+        (one, 1)
+    }
+}
+
+// `.`, `..` or `..=`.
+fn dots(d: u8, e: u8) -> (u8, u64) {
+    if d != 46 {
+        (42, 1)
+    } else if e == 61 {
+        (76, 3)
+    } else {
+        (75, 2)
+    }
+}
+
+// The next token at `at` (which is below the input length): (kind, end).
+fn next_token(in b: Slice[u8], at: u64) -> (u8, u64) {
+    let n = b.len();
+    let c = byte(in b, at);
+    if is_space(c) {
+        return (k_whitespace(), run_end(in b, inc(at), space_class(), 0));
+    }
+    if c == 47 && inc(at) < n {
+        let d = byte(in b, inc(at));
+        if d == 47 {
+            let rest = b[add(at, 2)..n];
+            return match rest.find_byte(10) {
+                Option::Some(j) => (k_comment(), add(add(at, 2), j)),
+                Option::None => (k_comment(), n),
+            };
+        }
+        if d == 42 {
+            return block_comment(in b, at);
+        }
+    }
+    if (c >= 97 && c <= 122) || c == 95 || (c >= 65 && c <= 90) {
+        let i = run_end(in b, inc(at), digit_class(), ident_class_hi());
+        if c >= 65 && c <= 90 {
+            return (k_upper(), i);
+        }
+        return (keyword(in b, at, wrapping_sub(i, at)), i);
+    }
+    if is_digit(c) {
+        return number(in b, at);
+    }
+    if c == 34 {
+        return string(in b, at);
+    }
+    let (k, len) = punct(in b, at, c);
+    if len == 0 {
+        let l = char_len(c);
+        let e = add(at, l);
+        (
+            k_error(),
+            if e > n {
+                n
+            } else {
+                e
+            }
+        )
+    } else {
+        (k, add(at, len))
+    }
+}
+
+fn push_token(inout t: Tokens, kind: u8, start: u64, end: u64) {
+    t.kind.push(kind);
+    t.start.push(narrow(start));
+    t.end.push(narrow(end));
+}
+
+// FNV-1a of `b[s..e]`.
+fn hash(in b: Slice[u8], s: u64, e: u64) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for i in s..e {
+        h = wrapping_mul(h ^ widen_u64(byte(in b, i)), 1099511628211);
+    }
+    h
+}
+
+fn same_text(in b: Slice[u8], s1: u64, e1: u64, s2: u64, e2: u64) -> bool {
+    let n = wrapping_sub(e1, s1);
+    if n != wrapping_sub(e2, s2) {
+        return false;
+    }
+    for i in 0..n {
+        if byte(in b, add(s1, i)) != byte(in b, add(s2, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// The symbol of the identifier `b[s..e]`, interning it on first sight.
+// Symbols count from 1; `t.slots` is an open-addressing table of symbol
+// numbers whose size is a power of two at least twice the symbol count.
+fn intern(inout t: Tokens, in b: Slice[u8], s: u64, e: u64, kind: u8) -> u32 {
+    let mask = wrapping_sub(t.slots.len(), 1);
+    let mut i = hash(in b, s, e) & mask;
+    loop {
+        let sym = u32_at(in t.slots, i);
+        if sym == 0 {
+            let fresh = narrow(inc(t.sym_start.len()));
+            t.sym_start.push(narrow(s));
+            t.sym_end.push(narrow(e));
+            t.slots.try_set(i, fresh);
+            let n = wrapping_sub(e, s);
+            let w = if kind == k_lower() {
+                lower_word(in b, s, n)
+            } else if kind == k_upper() {
+                upper_word(in b, s, n)
+            } else {
+                0
+            };
+            t.sym_word.push(w);
+            return fresh;
+        }
+        let k = widen_u64(wrapping_sub(sym, 1));
+        if same_text(
+            in b,
+            widen_u64(u32_at(in t.sym_start, k)),
+            widen_u64(u32_at(in t.sym_end, k)),
+            s,
+            e
+        ) {
+            return sym;
+        }
+        i = inc(i) & mask;
+    }
+}
+
+pub fn tokens_new(len: u64) -> Tokens {
+    let mut slots_len: u64 = 256;
+    loop {
+        if slots_len >= len {
+            break;
+        }
+        slots_len = shl(slots_len, 1);
+    }
+    let mut slots = ChunkSeq::new[u32]();
+    slots.resize(slots_len, 0);
+    let cap = inc(len >> 2);
+    Tokens {
+        kind: ChunkSeq::with_capacity[u8](cap),
+        start: ChunkSeq::with_capacity[u32](cap),
+        end: ChunkSeq::with_capacity[u32](cap),
+        word: ChunkSeq::with_capacity[u8](cap),
+        sym: ChunkSeq::with_capacity[u32](cap),
+        slots: slots,
+        sym_start: ChunkSeq::new[u32](),
+        sym_end: ChunkSeq::new[u32](),
+        sym_word: ChunkSeq::new[u8](),
+        limited: false
+    }
+}
+
+// Logical limits of `LexLimits::default()`.
+pub fn max_source_bytes() -> u64 {
+    1048576
+}
+
+pub fn max_tokens() -> u64 {
+    65536
+}
+
+pub fn max_diagnostics() -> u64 {
+    128
+}
+
+// `lex_with_limits(source, LexLimits::default())` for a source within the
+// byte budget. A token or diagnostic overflow ends the stream with one
+// opaque Error tail and E0003 and sets `limited`.
+pub fn lex_raw(in b: Slice[u8], inout d: Diags) -> Tokens {
+    let n = b.len();
+    let mut t = tokens_new(n);
+    let mut at: u64 = 0;
+    loop {
+        if at >= n {
+            break;
+        }
+        let (kind, end) = next_token(in b, at);
+        if t.kind.len() >= max_tokens() {
+            let last = wrapping_sub(t.kind.len(), 1);
+            t.kind.try_set(last, k_error());
+            t.end.try_set(last, narrow(n));
+            let mut m = ChunkSeq::new[u8]();
+            limit_message(inout m, 1, max_tokens(), n);
+            diag_push_limit(inout d, 3, at, at, in m.as_slice(), max_diagnostics());
+            t.limited = true;
+            break;
+        }
+        if kind == k_error() {
+            if d.code.len() >= max_diagnostics() {
+                let mut m = ChunkSeq::new[u8]();
+                limit_message(inout m, 2, max_diagnostics(), n);
+                diag_push_limit(inout d, 3, at, at, in m.as_slice(), max_diagnostics());
+                push_token(inout t, k_error(), at, n);
+                t.limited = true;
+                break;
+            }
+            diag_push(inout d, 1, at, end, in "invalid token or unterminated comment".as_bytes());
+        }
+        push_token(inout t, kind, at, end);
+        at = end;
+    }
+    push_token(inout t, k_eof(), n, n);
+    t
+}
+
+pub fn lex(in b: Slice[u8], inout d: Diags) -> Tokens {
+    let mut t = lex_raw(in b, inout d);
+    classify(inout t, in b);
+    t
+}
+
+// Words and symbols of identifiers.
+fn classify(inout t: Tokens, in b: Slice[u8]) {
+    for i in 0..t.kind.len() {
+        let k = match t.kind.try_get(i) {
+            Option::Some(k) => k,
+            Option::None => 0,
+        };
+        if k
+            == k_lower()
+            || k
+            == k_upper()
+            || k
+            == k_self_kw()
+            || k
+            == k_state()
+            || k
+            == k_linear()
+            || k
+            == k_with() {
+            let s = widen_u64(u32_at(in t.start, i));
+            let e = widen_u64(u32_at(in t.end, i));
+            let sym = intern(inout t, in b, s, e, k);
+            let w = match t.sym_word.try_get(widen_u64(wrapping_sub(sym, 1))) {
+                Option::Some(w) => w,
+                Option::None => 0,
+            };
+            t.word.push(w);
+            t.sym.push(sym);
+        } else {
+            t.word.push(0);
+            t.sym.push(0);
+        }
+    }
+}
+
+// Trivia kinds: whitespace, line and block comments.
+pub fn trivia_kind(k: u8) -> bool {
+    k <= 2
+}

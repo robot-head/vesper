@@ -1,0 +1,730 @@
+// @export abi 3
+// @vesper/flux: Vesper port of the vesper-flux Z-set kernels and frontier
+// (port wave P3b lane 7, #1069).
+//
+// A Z-set crosses the boundary as one flat sequence of cells: each row is
+// `width` i64 columns followed by its i64 weight (stride width + 1), rows
+// strictly ascending in lexicographic order, weights nonzero. The Rust
+// wrapper (src/port.rs) lends those cells in place and keeps each result
+// sequence as the new set.
+//
+// Every kernel reproduces the Rust accumulator exactly: the same work
+// charges (`budget` is the remaining work, updated in place), the same
+// `rows` limit (counted over distinct rows in insertion order, including
+// rows whose weights later cancel), and the same order of errors. The
+// Rust code inserts rows into a BTreeMap one at a time; the kernels merge
+// sorted inputs or sort once, and find the first failing entry only when
+// a limit is known to fail.
+use self::util::{
+    affordable,
+    cell,
+    cmp_rows,
+    contains,
+    push_row,
+    word
+};
+use self::sort::{
+    sort_rows,
+    sort_by_column,
+    sort_u64
+};
+use self::wide::{
+    Acc,
+    acc_add,
+    acc_fits,
+    acc_is_zero,
+    acc_value,
+    acc_zero,
+    mul_fits
+};
+
+pub copy enum ZErr {
+    Work,
+    Rows,
+    Overflow,
+    Product,
+    Columns,
+    InputEntries
+}
+
+// `Accumulator::new`: the width must fit the column limit.
+fn check_columns(width: u64, max_columns: u64) eff [Fail[ZErr]] {
+    if width > max_columns {
+        Fail::raise(ZErr::Columns);
+    }
+}
+
+// ---------------------------------------------------------------------
+// union (zset.rs `union`, circuit.rs `copy` and `Sum3`)
+
+// The error of a union that fails: replay the insertion order (a, then b,
+// then c), charging `stride` per entry and counting rows not seen before.
+fn union_error(
+    width: u64,
+    in a: Slice[i64],
+    na: u64,
+    in b: Slice[i64],
+    nb: u64,
+    in c: Slice[i64],
+    nc: u64,
+    max_rows: u64,
+    budget: u64
+) -> ZErr {
+    let stride = wrapping_add(width, 1);
+    let mut left = budget;
+    let mut count: u64 = 0;
+    for e in 0..na {
+        if left < stride {
+            return ZErr::Work;
+        }
+        left = wrapping_sub(left, stride);
+        count = wrapping_add(count, 1);
+        if count > max_rows {
+            return ZErr::Rows;
+        }
+    }
+    for e in 0..nb {
+        if left < stride {
+            return ZErr::Work;
+        }
+        left = wrapping_sub(left, stride);
+        if !contains(in a, na, width, in b, wrapping_mul(e, stride)) {
+            count = wrapping_add(count, 1);
+            if count > max_rows {
+                return ZErr::Rows;
+            }
+        }
+    }
+    for e in 0..nc {
+        if left < stride {
+            return ZErr::Work;
+        }
+        left = wrapping_sub(left, stride);
+        let at = wrapping_mul(e, stride);
+        if !contains(in a, na, width, in c, at) && !contains(in b, nb, width, in c, at) {
+            count = wrapping_add(count, 1);
+            if count > max_rows {
+                return ZErr::Rows;
+            }
+        }
+    }
+    ZErr::Work
+}
+
+// The sum of up to three canonical sets of one width, in one merge pass.
+pub fn zs_union3(
+    width: u64,
+    in a: Slice[i64],
+    na: u64,
+    in b: Slice[i64],
+    nb: u64,
+    in c: Slice[i64],
+    nc: u64,
+    max_columns: u64,
+    max_rows: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[ZErr]] {
+    check_columns(width, max_columns);
+    let stride = wrapping_add(width, 1);
+    let n = wrapping_add(wrapping_add(na, nb), nc);
+    let total = wrapping_mul(n, stride);
+    let mut out = ChunkSeq::new[i64]();
+    if total > budget {
+        Fail::raise(union_error(width, in a, na, in b, nb, in c, nc, max_rows, budget));
+    }
+    let mut i: u64 = 0;
+    let mut j: u64 = 0;
+    let mut k: u64 = 0;
+    let mut distinct: u64 = 0;
+    let mut overflow = false;
+    loop {
+        let ha = i < na;
+        let hb = j < nb;
+        let hc = k < nc;
+        if !ha && !hb && !hc {
+            break;
+        }
+        let ai = wrapping_mul(i, stride);
+        let bj = wrapping_mul(j, stride);
+        let ck = wrapping_mul(k, stride);
+        // Which heads hold the smallest row: bit 1 a, 2 b, 4 c.
+        let mut pick: u64 = 0;
+        if ha {
+            pick = 1;
+        }
+        if hb {
+            if pick == 0 {
+                pick = 2;
+            } else {
+                let o = cmp_rows(in b, bj, in a, ai, width);
+                if o < 0 {
+                    pick = 2;
+                } else if o == 0 {
+                    pick = 3;
+                }
+            }
+        }
+        if hc {
+            if pick == 0 {
+                pick = 4;
+            } else {
+                let o = if (pick & 1) == 1 {
+                    cmp_rows(in c, ck, in a, ai, width)
+                } else {
+                    cmp_rows(in c, ck, in b, bj, width)
+                };
+                if o < 0 {
+                    pick = 4;
+                } else if o == 0 {
+                    pick = pick | 4;
+                }
+            }
+        }
+        distinct = wrapping_add(distinct, 1);
+        if distinct > max_rows {
+            Fail::raise(union_error(width, in a, na, in b, nb, in c, nc, max_rows, budget));
+        }
+        let mut acc = acc_zero();
+        if (pick & 1) == 1 {
+            acc = acc_add(acc, cell(in a, wrapping_add(ai, width)));
+        }
+        if (pick & 2) == 2 {
+            acc = acc_add(acc, cell(in b, wrapping_add(bj, width)));
+        }
+        if (pick & 4) == 4 {
+            acc = acc_add(acc, cell(in c, wrapping_add(ck, width)));
+        }
+        if !acc_is_zero(acc) {
+            if !acc_fits(acc) {
+                overflow = true;
+            }
+            if (pick & 1) == 1 {
+                push_row(inout out, in a, ai, width);
+            } else if (pick & 2) == 2 {
+                push_row(inout out, in b, bj, width);
+            } else {
+                push_row(inout out, in c, ck, width);
+            }
+            out.push(acc_value(acc));
+        }
+        if (pick & 1) == 1 {
+            i = wrapping_add(i, 1);
+        }
+        if (pick & 2) == 2 {
+            j = wrapping_add(j, 1);
+        }
+        if (pick & 4) == 4 {
+            k = wrapping_add(k, 1);
+        }
+    }
+    if overflow {
+        Fail::raise(ZErr::Overflow);
+    }
+    budget = wrapping_sub(budget, total);
+    out
+}
+
+// The charges and limits of copying one canonical set (`copy`): the Rust
+// wrapper copies the cells itself when this passes.
+pub fn zs_copy_check(width: u64, n: u64, max_columns: u64, max_rows: u64, inout budget: u64) eff [
+    Fail[ZErr]
+] {
+    check_columns(width, max_columns);
+    let stride = wrapping_add(width, 1);
+    let total = wrapping_mul(n, stride);
+    // Entry kw is the first that cannot pay; entry kr is the first row over
+    // the limit (each row of a canonical set is new).
+    let kw = if total > budget {
+        affordable(budget, stride, n)
+    } else {
+        n
+    };
+    let kr = if n > max_rows {
+        max_rows
+    } else {
+        n
+    };
+    if kw < n && kw <= kr {
+        Fail::raise(ZErr::Work);
+    }
+    if kr < n {
+        Fail::raise(ZErr::Rows);
+    }
+    budget = wrapping_sub(budget, total);
+}
+
+// ---------------------------------------------------------------------
+// consolidation (zset.rs `ZSet::consolidate`, the `Map` operator)
+
+// Whether entries e and f of `cells` (stride width + 1) hold one row.
+fn same_row(in cells: Slice[i64], e: u64, f: u64, width: u64) -> bool {
+    let stride = wrapping_add(width, 1);
+    cmp_rows(in cells, wrapping_mul(e, stride), in cells, wrapping_mul(f, stride), width) == 0
+}
+
+// Consolidates n unsorted entries of `width` columns and a weight (zero
+// weights allowed, rows repeated), charging `charge` per entry as the
+// Rust loop does before each insertion.
+fn consolidate_core(
+    width: u64,
+    in cells: Slice[i64],
+    n: u64,
+    charge: u64,
+    max_rows: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[ZErr]] {
+    let stride = wrapping_add(width, 1);
+    let order = sort_rows(in cells, n, width);
+    let total = wrapping_mul(n, charge);
+    let mut out = ChunkSeq::new[i64]();
+    // Distinct inserted rows: groups with a nonzero weight.
+    let mut distinct: u64 = 0;
+    let mut g: u64 = 0;
+    loop {
+        if g >= n {
+            break;
+        }
+        let first = word(in order, g);
+        let mut h = wrapping_add(g, 1);
+        let mut inserted = cell(in cells, wrapping_add(wrapping_mul(first, stride), width)) != 0;
+        loop {
+            if h >= n {
+                break;
+            }
+            let e = word(in order, h);
+            if !same_row(in cells, e, first, width) {
+                break;
+            }
+            if cell(in cells, wrapping_add(wrapping_mul(e, stride), width)) != 0 {
+                inserted = true;
+            }
+            h = wrapping_add(h, 1);
+        }
+        if inserted {
+            distinct = wrapping_add(distinct, 1);
+        }
+        g = h;
+    }
+    if total > budget || distinct > max_rows {
+        // The first failing entry: work fails at entry kw, rows at the
+        // insertion of the (max_rows + 1)-th distinct row.
+        let kw = affordable(budget, charge, n);
+        if distinct <= max_rows {
+            Fail::raise(ZErr::Work);
+        }
+        let mut times = ChunkSeq::new[u64]();
+        let mut g2: u64 = 0;
+        loop {
+            if g2 >= n {
+                break;
+            }
+            let first = word(in order, g2);
+            let mut h = g2;
+            let mut t: u64 = n;
+            loop {
+                if h >= n {
+                    break;
+                }
+                let e = word(in order, h);
+                if !same_row(in cells, e, first, width) {
+                    break;
+                }
+                // Stable order: the first nonzero entry of a group is its
+                // insertion.
+                if t == n && cell(in cells, wrapping_add(wrapping_mul(e, stride), width)) != 0 {
+                    t = e;
+                }
+                h = wrapping_add(h, 1);
+            }
+            if t != n {
+                times.push(t);
+            }
+            g2 = h;
+        }
+        sort_u64(inout times);
+        let kr = word(in times, max_rows);
+        if kw < n && kw <= kr {
+            Fail::raise(ZErr::Work);
+        }
+        Fail::raise(ZErr::Rows);
+    }
+    let mut overflow = false;
+    let mut g3: u64 = 0;
+    loop {
+        if g3 >= n {
+            break;
+        }
+        let first = word(in order, g3);
+        let fat = wrapping_mul(first, stride);
+        let mut acc = acc_zero();
+        let mut h = g3;
+        loop {
+            if h >= n {
+                break;
+            }
+            let e = word(in order, h);
+            let at = wrapping_mul(e, stride);
+            if h != g3 && cmp_rows(in cells, at, in cells, fat, width) != 0 {
+                break;
+            }
+            acc = acc_add(acc, cell(in cells, wrapping_add(at, width)));
+            h = wrapping_add(h, 1);
+        }
+        if !acc_is_zero(acc) {
+            if !acc_fits(acc) {
+                overflow = true;
+            }
+            push_row(inout out, in cells, fat, width);
+            out.push(acc_value(acc));
+        }
+        g3 = h;
+    }
+    if overflow {
+        Fail::raise(ZErr::Overflow);
+    }
+    budget = wrapping_sub(budget, total);
+    out
+}
+
+// `ZSet::consolidate` over n entries of `width` columns (every row of the
+// right width; the wrapper stops at the first row that is not) and a
+// weight each.
+pub fn zs_consolidate(
+    width: u64,
+    in cells: Slice[i64],
+    n: u64,
+    max_columns: u64,
+    max_rows: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[ZErr]] {
+    check_columns(width, max_columns);
+    consolidate_core(width, in cells, n, wrapping_add(width, 1), max_rows, inout budget)
+}
+
+// ---------------------------------------------------------------------
+// operators (circuit.rs `apply`)
+
+// `Filter`: kind 0 is `Equal`, 1 is `AtLeast`.
+pub fn zs_filter(
+    width: u64,
+    in a: Slice[i64],
+    n: u64,
+    kind: u64,
+    column: u64,
+    value: i64,
+    max_columns: u64,
+    max_rows: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[ZErr]] {
+    check_columns(width, max_columns);
+    let stride = wrapping_add(width, 1);
+    let mut out = ChunkSeq::new[i64]();
+    let mut count: u64 = 0;
+    for e in 0..n {
+        if budget < 1 {
+            Fail::raise(ZErr::Work);
+        }
+        budget = wrapping_sub(budget, 1);
+        let at = wrapping_mul(e, stride);
+        let x = cell(in a, wrapping_add(at, column));
+        let pass = if kind == 0 {
+            x == value
+        } else {
+            x >= value
+        };
+        if pass {
+            if budget < stride {
+                Fail::raise(ZErr::Work);
+            }
+            budget = wrapping_sub(budget, stride);
+            count = wrapping_add(count, 1);
+            if count > max_rows {
+                Fail::raise(ZErr::Rows);
+            }
+            push_row(inout out, in a, at, width);
+            out.push(cell(in a, wrapping_add(at, width)));
+        }
+    }
+    out
+}
+
+// `Map`: `fields` holds a (kind, value) pair per output column; kind 0 is
+// `Column(value)`, 1 is `Constant(value)`.
+pub fn zs_map(
+    width: u64,
+    in a: Slice[i64],
+    n: u64,
+    in fields: Slice[i64],
+    nf: u64,
+    max_columns: u64,
+    max_rows: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[ZErr]] {
+    check_columns(nf, max_columns);
+    let stride = wrapping_add(width, 1);
+    // The Rust loop charges nf, then 1 + nf on insertion.
+    let charge = wrapping_add(wrapping_add(nf, nf), 1);
+    let mut mapped = ChunkSeq::new[i64]();
+    for e in 0..n {
+        let at = wrapping_mul(e, stride);
+        for f in 0..nf {
+            let fk = wrapping_add(f, f);
+            let v = cell(in fields, wrapping_add(fk, 1));
+            if cell(in fields, fk) == 0 {
+                mapped.push(cell(in a, wrapping_add(at, wrapping_u64(v))));
+            } else {
+                mapped.push(v);
+            }
+        }
+        mapped.push(cell(in a, wrapping_add(at, width)));
+    }
+    consolidate_core(nf, in mapped.as_slice(), n, charge, max_rows, inout budget)
+}
+
+// `Join`: rows of a and b whose key columns are equal, concatenated, with
+// the product of their weights. The output is ascending as built (a's
+// rows ascend and, per a row, the matching b rows ascend), so it needs no
+// sort; b is indexed by its key so that only matching pairs are visited.
+pub fn zs_join(
+    wa: u64,
+    in a: Slice[i64],
+    na: u64,
+    wb: u64,
+    in b: Slice[i64],
+    nb: u64,
+    ka: u64,
+    kb: u64,
+    max_columns: u64,
+    max_product: u64,
+    max_rows: u64,
+    inout budget: u64
+) -> ChunkSeq[i64] eff [Fail[ZErr]] {
+    let (product, high) = mul_wide(na, nb);
+    if high != 0 {
+        Fail::raise(ZErr::Overflow);
+    }
+    if product > max_product {
+        Fail::raise(ZErr::Product);
+    }
+    if product > budget {
+        Fail::raise(ZErr::Work);
+    }
+    budget = wrapping_sub(budget, product);
+    let width = wrapping_add(wa, wb);
+    check_columns(width, max_columns);
+    let sa = wrapping_add(wa, 1);
+    let sb = wrapping_add(wb, 1);
+    // Per match: `wa + wb`, then `1 + wa + wb` on insertion.
+    let charge = wrapping_add(wrapping_add(width, width), 1);
+    let order = sort_by_column(in b, nb, sb, kb);
+    let mut out = ChunkSeq::new[i64]();
+    let mut count: u64 = 0;
+    let mut overflow = false;
+    for e in 0..na {
+        let at = wrapping_mul(e, sa);
+        let key = cell(in a, wrapping_add(at, ka));
+        // First position in `order` whose key is >= key.
+        let mut lo: u64 = 0;
+        let mut hi = nb;
+        loop {
+            if lo >= hi {
+                break;
+            }
+            let mid = wrapping_add(lo, (wrapping_sub(hi, lo)) >> 1);
+            let m = word(in order, mid);
+            if cell(in b, wrapping_add(wrapping_mul(m, sb), kb)) < key {
+                lo = wrapping_add(mid, 1);
+            } else {
+                hi = mid;
+            }
+        }
+        let aw = cell(in a, wrapping_add(at, wa));
+        let mut p = lo;
+        loop {
+            if p >= nb {
+                break;
+            }
+            let m = word(in order, p);
+            let bt = wrapping_mul(m, sb);
+            if cell(in b, wrapping_add(bt, kb)) != key {
+                break;
+            }
+            if budget < charge {
+                Fail::raise(ZErr::Work);
+            }
+            budget = wrapping_sub(budget, charge);
+            count = wrapping_add(count, 1);
+            if count > max_rows {
+                Fail::raise(ZErr::Rows);
+            }
+            let bw = cell(in b, wrapping_add(bt, wb));
+            if !mul_fits(aw, bw) {
+                overflow = true;
+            }
+            push_row(inout out, in a, at, wa);
+            push_row(inout out, in b, bt, wb);
+            out.push(wrapping_mul(aw, bw));
+            p = wrapping_add(p, 1);
+        }
+    }
+    if overflow {
+        Fail::raise(ZErr::Overflow);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------
+// frontier.rs: the hold table. Slot i is (gens[i], holds[i], live[i]);
+// live 1 means the slot holds holds[i]. The Rust wrapper keeps the
+// tracker's origin and checks it first (a foreign ticket), so these
+// functions see only tickets of their own table.
+
+pub copy enum FrErr {
+    Regression,
+    Holds,
+    Exhausted,
+    Stale
+}
+
+fn hold_at(in holds: ChunkSeq[i64], i: u64) -> i64 {
+    match holds.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn is_live(in live: ChunkSeq[u8], i: u64) -> bool {
+    match live.try_get(i) {
+        Option::Some(v) => v != 0,
+        Option::None => false,
+    }
+}
+
+fn max_word() -> u64 {
+    18446744073709551615
+}
+
+// The watermark after a change: the least live hold, or the old bound.
+fn publish(in holds: ChunkSeq[i64], in live: ChunkSeq[u8], watermark: i64) -> i64 {
+    let mut found = false;
+    let mut min = watermark;
+    for i in 0..live.len() {
+        if is_live(in live, i) {
+            let h = hold_at(in holds, i);
+            if !found || h < min {
+                min = h;
+                found = true;
+            }
+        }
+    }
+    min
+}
+
+pub fn frontier_live_holds(in live: ChunkSeq[u8]) -> u64 {
+    let mut n: u64 = 0;
+    for i in 0..live.len() {
+        if is_live(in live, i) {
+            n = wrapping_add(n, 1);
+        }
+    }
+    n
+}
+
+// `Frontier::acquire`: the slot of the new hold (its generation is
+// gens[slot]).
+pub fn frontier_acquire(
+    inout gens: ChunkSeq[u64],
+    inout holds: ChunkSeq[i64],
+    inout live: ChunkSeq[u8],
+    capacity: u64,
+    inout watermark: i64,
+    timestamp: i64
+) -> u64 eff [Fail[FrErr]] {
+    if timestamp < watermark {
+        Fail::raise(FrErr::Regression);
+    }
+    let mut index = live.len();
+    for i in 0..live.len() {
+        if !is_live(in live, i) && word(in gens, i) < max_word() {
+            index = i;
+            break;
+        }
+    }
+    if index == live.len() {
+        if live.len() >= capacity {
+            Fail::raise(FrErr::Holds);
+        }
+        gens.push(0);
+        holds.push(0);
+        live.push(0);
+    }
+    let g = word(in gens, index);
+    if g == max_word() {
+        Fail::raise(FrErr::Exhausted);
+    }
+    gens.try_set(index, wrapping_add(g, 1));
+    holds.try_set(index, timestamp);
+    live.try_set(index, 1);
+    watermark = publish(in holds, in live, watermark);
+    index
+}
+
+// The stale-ticket check of `Frontier::validate`.
+pub fn frontier_valid(
+    in gens: ChunkSeq[u64],
+    in holds: ChunkSeq[i64],
+    in live: ChunkSeq[u8],
+    slot: u64,
+    generation: u64,
+    timestamp: i64
+) -> bool {
+    if slot >= live.len() || !is_live(in live, slot) {
+        return false;
+    }
+    word(in gens, slot) == generation && hold_at(in holds, slot) == timestamp
+}
+
+// `Frontier::advance`: the ticket's new generation.
+pub fn frontier_advance(
+    inout gens: ChunkSeq[u64],
+    inout holds: ChunkSeq[i64],
+    in live: ChunkSeq[u8],
+    inout watermark: i64,
+    slot: u64,
+    generation: u64,
+    timestamp: i64,
+    next: i64
+) -> u64 eff [Fail[FrErr]] {
+    if !frontier_valid(in gens, in holds, in live, slot, generation, timestamp) {
+        Fail::raise(FrErr::Stale);
+    }
+    if next < timestamp {
+        Fail::raise(FrErr::Regression);
+    }
+    let g = word(in gens, slot);
+    if g == max_word() {
+        Fail::raise(FrErr::Exhausted);
+    }
+    let ng = wrapping_add(g, 1);
+    gens.try_set(slot, ng);
+    holds.try_set(slot, next);
+    watermark = publish(in holds, in live, watermark);
+    ng
+}
+
+// `Frontier::retire`.
+pub fn frontier_retire(
+    in gens: ChunkSeq[u64],
+    in holds: ChunkSeq[i64],
+    inout live: ChunkSeq[u8],
+    inout watermark: i64,
+    slot: u64,
+    generation: u64,
+    timestamp: i64
+) eff [Fail[FrErr]] {
+    if !frontier_valid(in gens, in holds, in live, slot, generation, timestamp) {
+        Fail::raise(FrErr::Stale);
+    }
+    live.try_set(slot, 0);
+    watermark = publish(in holds, in live, watermark);
+}

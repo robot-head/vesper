@@ -1,0 +1,31 @@
+load("//tools/bazel:vesper_hybrid.bzl", "vesper_hybrid")
+
+# The hybrid Stage 2 compiler (self-hosting SH0 lane 1, #1123): the default
+# CLI with swapped modules linked from Vesper objects that //:bin/vesper
+# builds. It is never the default compiler. Keep `modules` and `divergent`
+# in step with MODULES and DIVERGENT_EDIT in build.rs.
+vesper_hybrid(
+    divergent = {
+        "hybrid_layout": {
+            "edit_src": "modules/layout/src/lib.ves",
+            "edits": {"        8\n    } else {\n        0\n": "        16\n    } else {\n        0\n"},
+        },
+    },
+    # The included CLI sources (src/main.rs and its command modules) and
+    # what they embed.
+    extra_compile_data = ["//:files"],
+    # The differential harness runs the default compiler beside the hybrid
+    # over the bootstrap corpus, examples/ and tests/.
+    extra_test_data = [
+        "//:files",
+        "//bootstrap:files",
+    ],
+    modules = {"hybrid_layout": "modules/layout"},
+    test_env = {"VESPER_DEFAULT_COMPILER": "vesper"},
+    test_path_binaries = {
+        "test/differential": [
+            ":bin/vesper-hybrid",
+            "//:bin/vesper",
+        ],
+    },
+)

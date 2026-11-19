@@ -255,6 +255,38 @@ Not parity, so Rust stays the default. The rest of the gap:
   `num-bigint`'s 64-bit limbs. There is no `u128`, and there is no 128 by 64
   division for algorithm D's estimate. `mul_wide` covers the product half.
 
+## Part 4: GJK and EPA
+
+Part 4 ports `gjk.rs`, the narrowphase (`vesper/src/gjk.ves`): GJK on the
+shapes' cores with Johnson's sub-simplex search, EPA on the cores'
+Minkowski difference, and the flat-difference fallback. Every binary64
+operation keeps the Rust order with no fused multiply-add, so the port's
+results are the Rust build's bits. The Rust `Shape` crosses the boundary as
+a kind and its numbers: a sphere is `[centre, radius]`, a capsule
+`[a, b, radius]` and a polytope its vertices (`as_flattened`, lent without
+a copy). The support function that `gjk.rs` passes as `&dyn Fn` becomes a
+match on the kind. Internal functions return a status, and the
+`gjk_separation` export raises `Fail[GjkError]`, which the binding maps to
+the crate's `GjkError`.
+
+Both packages pass every test, including the contact, rigid-body and golden
+scene hashes that run through the narrowphase. One divergence check was
+added:
+
+- **gjk:** a separated distance subtracts only the first radius. `gjk`
+  fails `sphere_pairs_match_closed_form`, and
+  `malformed_shapes_are_typed_errors` still passes.
+
+| Workload | Rust ns/run | Port ns/run | Wall ratio (range) | Rust instr | Port instr | Instr ratio |
+|---|--:|--:|--:|--:|--:|--:|
+| `gjk` (256 random sphere, capsule and box pairs) | 267,351 | 448,359 | 1.69x (1.62-1.78) | 116.7M | 217.2M | 1.86x |
+
+Not parity, so Rust stays the default. The simplex search runs on
+`ChunkSeq` scratch (the 4 x 4 elimination matrix, the weights and the
+simplex) where Rust uses stack arrays, so each access is a checked
+`try_get`/`try_set` through a seq header. Fixed-size local arrays would
+close most of it (the same gap as the bench port's subset-sum loop).
+
 ## Compiler gaps (with repros)
 
 1. **Bit builtin on a reassigned mutable local fails IR validation.**
@@ -294,13 +326,18 @@ Not parity, so Rust stays the default. The rest of the gap:
 7. **A divergent edit that never terminates** (part 3) is not a usable
    check, and nothing in the harness bounds it; the check list avoids such
    edits.
+8. **A read of an `inout` argument in a sibling argument is refused**
+   (part 4): `gset(inout g, i, c, gm(in g, j, c))` fails `E0301` even
+   though the read finishes before the call. Workaround: bind the read to a
+   `let` first.
+9. **No fixed-size local arrays** (part 4): small scratch matrices live in
+   `ChunkSeq`s, with a bounds check and header load per access.
 
 Std candidates: the total slice getters in `util.ves`.
 
 ## Not ported yet (later parts)
 
-`gjk.rs` (its local `&dyn Fn` becomes a generic
-parameter), `tile.rs` with `world.rs` (the step, Morton cells, batching),
+`tile.rs` with `world.rs` (the step, Morton cells, batching),
 `rigid.rs` and `rigid/**`, `soft.rs` (their `std::thread::scope` fan-out
 becomes `parallel_for` from PR #1062, merged 2026-11-18, with 1/2/4-worker
 bit identity), `articulation.rs`, `couple.rs`, `diff.rs`, `rigid_diff.rs`,
@@ -308,7 +345,7 @@ bit identity), `articulation.rs`, `couple.rs`, `diff.rs`, `rigid_diff.rs`,
 
 ## Platforms
 
-Local: Linux x86_64 (Cargo, both packages, every test; the five divergence
+Local: Linux x86_64 (Cargo, both packages, every test; the eight divergence
 checks; `cargo +1.100.0 clippy --all-targets -D warnings` on
 `vesper-kinetic`, `vesper-kinetic-seed`, `vesper-kinetic-gpu` and
 `vesper-gpu-compute`). CI: Bazel on BuildBuddy, macOS AArch64 and Windows

@@ -8,10 +8,13 @@
 //! Errors are transactional; tick input is borrowed and all prior integrals survive.
 //! Representable accepted computations obey integer arithmetic. Intermediate budget
 //! or range failures can reject a computation whose final mathematical result fits.
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 mod circuit;
 mod frontier;
+/// The adapters to the Vesper library `flux` (vesper/), where the Z-set
+/// kernels and the frontier run.
+mod port;
 mod zset;
 
 pub use circuit::{

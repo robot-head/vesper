@@ -36,10 +36,7 @@ pub use log::{InputLog, LogLimits, LogRecovery};
 mod sink;
 pub use sink::{CommitRecord, CommitSink, CrashMedium, MemorySink, QuarrySink, SinkRecovery};
 
-use crate::{
-    Budget, Error, Limits, Row, ZSet, identity,
-    zset::{Accumulator, union},
-};
+use crate::{Budget, Error, Limits, ZSet, identity, zset::union};
 
 /// Typed, total row expressions. Columns are validated when building the DAG.
 #[derive(Clone, Debug)]
@@ -51,12 +48,6 @@ impl Predicate {
     fn column(&self) -> usize {
         match self {
             Self::Equal { column, .. } | Self::AtLeast { column, .. } => *column,
-        }
-    }
-    fn test(&self, row: &Row) -> bool {
-        match self {
-            Self::Equal { column, value } => row[*column] == *value,
-            Self::AtLeast { column, value } => row[*column] >= *value,
         }
     }
 }
@@ -528,10 +519,7 @@ impl Circuit {
         let prior = self
             .nodes
             .iter()
-            .map(|n| ZSet {
-                width: n.width,
-                rows: Default::default(),
-            })
+            .map(|n| ZSet::from_rows(n.width, Default::default()))
             .collect();
         let versions = vec![0; self.nodes.len()];
         Executor {
@@ -724,61 +712,30 @@ fn copy(set: &ZSet, limits: Limits, budget: &mut Budget) -> Result<ZSet, Error> 
     union(&[set], limits, budget)
 }
 fn apply(op: &Op, values: &[ZSet], limits: Limits, budget: &mut Budget) -> Result<ZSet, Error> {
+    // The operators run in the Vesper kernels (src/port.rs).
     match op {
         Op::Input(_) => Err(Error::InvalidNode),
         Op::Union(a, b) => union(&[&values[*a], &values[*b]], limits, budget),
         Op::Exchange { a, .. } => copy(&values[*a], limits, budget),
         Op::Filter(a, p) => {
-            let mut out = Accumulator::new(values[*a].width, limits)?;
-            for (row, w) in values[*a].entries() {
-                budget.charge(1)?;
-                if p.test(row) {
-                    out.add(row, i128::from(w), budget)?;
-                }
-            }
-            out.finish()
+            let (at_least, column, value) = match *p {
+                Predicate::Equal { column, value } => (false, column, value),
+                Predicate::AtLeast { column, value } => (true, column, value),
+            };
+            crate::port::filter(&values[*a], at_least, column, value, limits, budget)
         }
         Op::Map(a, fields) => {
-            let mut out = Accumulator::new(fields.len(), limits)?;
-            for (row, w) in values[*a].entries() {
-                budget.charge(fields.len())?;
-                let mapped = fields
-                    .iter()
-                    .map(|f| match f {
-                        Field::Column(c) => row[*c],
-                        Field::Constant(v) => *v,
-                    })
-                    .collect();
-                out.add(&mapped, i128::from(w), budget)?;
-            }
-            out.finish()
-        }
-        Op::Join { a, b, ka, kb } => {
-            let (a, b) = (&values[*a], &values[*b]);
-            let product = a.len().checked_mul(b.len()).ok_or(Error::Overflow)?;
-            if product > limits.max_product {
-                return Err(Error::Limit("join product"));
-            }
-            budget.charge(product)?;
-            let mut out =
-                Accumulator::new(a.width.checked_add(b.width).ok_or(Error::Overflow)?, limits)?;
-            for (ar, aw) in a.entries() {
-                for (br, bw) in b.entries() {
-                    if ar[*ka] == br[*kb] {
-                        budget.charge(ar.len().checked_add(br.len()).ok_or(Error::Overflow)?)?;
-                        let mut row = ar.clone();
-                        row.extend_from_slice(br);
-                        out.add(
-                            &row,
-                            i128::from(aw)
-                                .checked_mul(i128::from(bw))
-                                .ok_or(Error::Overflow)?,
-                            budget,
-                        )?;
-                    }
+            let mut pairs = Vec::with_capacity(fields.len() * 2);
+            for f in fields {
+                match f {
+                    Field::Column(c) => pairs.extend([0, *c as i64]),
+                    Field::Constant(v) => pairs.extend([1, *v]),
                 }
             }
-            out.finish()
+            crate::port::map(&values[*a], &pairs, limits, budget)
+        }
+        Op::Join { a, b, ka, kb } => {
+            crate::port::join(&values[*a], &values[*b], *ka, *kb, limits, budget)
         }
     }
 }

@@ -392,3 +392,17 @@ fn gjk_terminates_on_nearly_aligned_stacked_boxes() {
     assert!(sep.distance.abs() < 1e-3, "{sep:?}");
     assert!(sep.normal[1] > 0.99, "{sep:?}");
 }
+
+#[test]
+fn touching_boxes_report_negative_zero_depth() {
+    // EPA negates the face distance, so an exact touch is -0.0 (sign bit
+    // set) in both builds; `0.0 - d` would give +0.0.
+    let a = boxv([0.0; 3], [1.0; 3]);
+    let b = boxv([1.0, 0.0, 0.0], [2.0, 1.0, 1.0]);
+    let s = separation(
+        &Shape::Polytope { vertices: &a },
+        &Shape::Polytope { vertices: &b },
+    )
+    .unwrap();
+    assert_eq!(s.distance.to_bits(), (-0.0f64).to_bits(), "{s:?}");
+}

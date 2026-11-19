@@ -1,0 +1,69 @@
+// Module wide of @vesper/flux: the i128 accumulator of zset.rs as a
+// two-word value, and the i64 product check of the join.
+
+// A signed 128-bit value: hi:lo in two's complement.
+pub copy struct Acc {
+    hi: i64,
+    lo: u64
+}
+
+pub fn acc_zero() -> Acc {
+    Acc {
+        hi: 0,
+        lo: 0
+    }
+}
+
+pub fn acc_add(a: Acc, v: i64) -> Acc {
+    let lo = wrapping_add(a.lo, wrapping_u64(v));
+    let carry: i64 = if lo < a.lo {
+        1
+    } else {
+        0
+    };
+    let sign: i64 = if v < 0 {
+        -1
+    } else {
+        0
+    };
+    Acc {
+        hi: wrapping_add(wrapping_add(a.hi, sign), carry),
+        lo: lo
+    }
+}
+
+pub fn acc_is_zero(a: Acc) -> bool {
+    a.hi == 0 && a.lo == 0
+}
+
+// Whether the value is an i64 (`i64::try_from` succeeds).
+pub fn acc_fits(a: Acc) -> bool {
+    let top: u64 = 9223372036854775808;
+    (a.hi == 0 && a.lo < top) || (a.hi == -1 && a.lo >= top)
+}
+
+pub fn acc_value(a: Acc) -> i64 {
+    wrapping_i64(a.lo)
+}
+
+fn magnitude(x: i64) -> u64 {
+    if x < 0 {
+        wrapping_sub(0, wrapping_u64(x))
+    } else {
+        wrapping_u64(x)
+    }
+}
+
+// Whether x * y is an i64.
+pub fn mul_fits(x: i64, y: i64) -> bool {
+    let (lo, hi) = mul_wide(magnitude(x), magnitude(y));
+    if hi != 0 {
+        return false;
+    }
+    let top: u64 = 9223372036854775808;
+    if (x < 0) != (y < 0) {
+        lo <= top
+    } else {
+        lo < top
+    }
+}

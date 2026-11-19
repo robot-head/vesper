@@ -1722,8 +1722,9 @@ fn execute(args: Vec<String>) -> Result<Option<Outcome>, String> {
     if let Some(layouts) = options.layouts {
         let exe = std::env::current_exe().map_err(|e| format!("current executable: {e}"))?;
         return randomize_layouts(&options, layouts, |plan| {
+            // `exe` is `vesper-bench` itself, which takes the bench arguments
+            // directly (`vesper bench ARGS` runs `vesper-bench ARGS`).
             let output = std::process::Command::new(&exe)
-                .arg("bench")
                 .args(&options.forwarded)
                 .args(["--json", "--layout-run"])
                 .arg(format!("{}:{}", plan.seed, plan.run))

@@ -4,9 +4,34 @@
 //! There is no raw-source node. Call Lean to elaborate/check the resulting module.
 //! This library deliberately leaves checked/wrapping arithmetic to its caller.
 #![doc = include_str!("../README.md")]
-#![forbid(unsafe_code)]
+// The seed build (the compiler's copy) stays safe. The port-backed build
+// links the Vesper port through the generated binding, which calls the C ABI.
+#![cfg_attr(not(vesper_port), forbid(unsafe_code))]
+#![cfg_attr(vesper_port, deny(unsafe_code))]
 
 use std::fmt;
+
+// Generated and committed, but kept outside src/ so formatters, which check
+// every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+#[cfg(vesper_port)]
+mod port;
+
+/// Which build this is: `"vesper"` for the port-backed package
+/// `vesper-lean-syntax`, `"rust"` for the seed copy `vesper-lean-syntax-seed`
+/// that the compiler links.
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
+/// Live allocations of the port's runtime, for leak tests.
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    port::live_allocations()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error(pub String);
@@ -24,15 +49,18 @@ pub struct Ident(String);
 impl Ident {
     pub fn new(value: impl Into<String>) -> Result<Self, Error> {
         let value = value.into();
-        if value.is_empty()
+        #[cfg(vesper_port)]
+        let invalid = !port::valid_ident(&value);
+        #[cfg(not(vesper_port))]
+        let invalid = value.is_empty()
             || value == "_root_"
             || value.chars().any(|c| {
                 c.is_control()
                     || matches!(c,
             '«' | '»' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' |
             '\u{2066}'..='\u{2069}' | '\u{feff}')
-            })
-        {
+            });
+        if invalid {
             return Err(Error(
                 "identifier is empty, reserved _root_, or contains an unsupported delimiter/control".into(),
             ));
@@ -82,11 +110,15 @@ pub struct ModuleName(Vec<String>);
 impl ModuleName {
     pub fn new(value: &str) -> Result<Self, Error> {
         let components = value.split('.').map(str::to_owned).collect::<Vec<_>>();
-        if components.iter().any(|part| {
+        #[cfg(vesper_port)]
+        let invalid = !port::valid_module(value);
+        #[cfg(not(vesper_port))]
+        let invalid = components.iter().any(|part| {
             part.is_empty()
                 || !part.as_bytes()[0].is_ascii_alphabetic()
                 || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-        }) {
+        });
+        if invalid {
             return Err(Error("invalid ASCII Lean module path".into()));
         }
         Ok(Self(components))
@@ -98,10 +130,13 @@ impl ModuleName {
 pub struct NatLiteral(String);
 impl NatLiteral {
     pub fn decimal(value: &str) -> Result<Self, Error> {
-        if value.is_empty()
+        #[cfg(vesper_port)]
+        let invalid = !port::valid_decimal(value);
+        #[cfg(not(vesper_port))]
+        let invalid = value.is_empty()
             || !value.bytes().all(|b| b.is_ascii_digit())
-            || (value.len() > 1 && value.starts_with('0'))
-        {
+            || (value.len() > 1 && value.starts_with('0'));
+        if invalid {
             return Err(Error(
                 "expected a canonical nonnegative decimal literal".into(),
             ));
@@ -176,6 +211,7 @@ pub enum BinaryOp {
     Iff,
 }
 impl BinaryOp {
+    #[cfg_attr(vesper_port, allow(dead_code))]
     fn text(self) -> &'static str {
         match self {
             Self::Add => "+",
@@ -358,8 +394,15 @@ impl Term {
             right: Box::new(right),
         }
     }
+    #[cfg(not(vesper_port))]
     pub fn render(&self) -> Result<String, Error> {
         Printer::term(self)
+    }
+    #[cfg(vesper_port)]
+    pub fn render(&self) -> Result<String, Error> {
+        let mut enc = port::Enc::default();
+        enc.term(self);
+        port::render_term(&enc.words, &enc.pool).map_err(port::error)
     }
 }
 
@@ -367,6 +410,17 @@ impl Term {
 /// are not bound by its parameters or by a binder, pattern, `let` or `do`
 /// binding in scope. A bound name shadows only single, unrooted components.
 impl Term {
+    #[cfg(vesper_port)]
+    pub fn free_references(parameters: &[Binder], body: &Term) -> std::collections::BTreeSet<Name> {
+        let mut enc = port::Enc::default();
+        enc.binders(parameters);
+        enc.term(body);
+        port::free_references(&enc.words, &enc.pool)
+            .into_iter()
+            .map(|at| enc.decode_name(at as usize))
+            .collect()
+    }
+    #[cfg(not(vesper_port))]
     pub fn free_references(parameters: &[Binder], body: &Term) -> std::collections::BTreeSet<Name> {
         let mut out = std::collections::BTreeSet::new();
         let mut scope = vec![];
@@ -377,6 +431,7 @@ impl Term {
         body.free(&mut scope, &mut out);
         out
     }
+    #[cfg(not(vesper_port))]
     fn free(&self, scope: &mut Vec<Ident>, out: &mut std::collections::BTreeSet<Name>) {
         fn bound(p: &Pattern, scope: &mut Vec<Ident>) {
             match p {
@@ -557,11 +612,22 @@ impl Term {
 /// types, patterns' constructor names excluded). Local binders are not
 /// removed, so callers compare against names they know to be global.
 impl Term {
+    #[cfg(vesper_port)]
+    pub fn references(&self) -> std::collections::BTreeSet<Name> {
+        let mut enc = port::Enc::default();
+        enc.term(self);
+        port::references(&enc.words, &enc.pool)
+            .into_iter()
+            .map(|at| enc.decode_name(at as usize))
+            .collect()
+    }
+    #[cfg(not(vesper_port))]
     pub fn references(&self) -> std::collections::BTreeSet<Name> {
         let mut out = std::collections::BTreeSet::new();
         self.collect_references(&mut out);
         out
     }
+    #[cfg(not(vesper_port))]
     fn collect_references(&self, out: &mut std::collections::BTreeSet<Name>) {
         fn binders(bs: &[Binder], out: &mut std::collections::BTreeSet<Name>) {
             for b in bs {
@@ -798,6 +864,13 @@ pub struct Module {
     pub declarations: Vec<Declaration>,
 }
 impl Module {
+    #[cfg(vesper_port)]
+    pub fn render(&self) -> Result<String, Error> {
+        let mut enc = port::Enc::default();
+        enc.module(self);
+        port::render_module(&enc.words, &enc.pool).map_err(port::error)
+    }
+    #[cfg(not(vesper_port))]
     pub fn render(&self) -> Result<String, Error> {
         let mut out = String::new();
         for import in &self.imports {
@@ -823,7 +896,9 @@ impl Module {
     }
 }
 
+#[cfg_attr(vesper_port, allow(dead_code))]
 struct Printer;
+#[cfg_attr(vesper_port, allow(dead_code))]
 impl Printer {
     fn ident(value: &Ident) -> String {
         format!("«{}»", value.0)

@@ -96,6 +96,7 @@ def _strip_rs(src):
 def vesper_crate(
         compile_data = None,
         binary_compile_data = [],
+        binary_data = {},
         test_data = None,
         integration_compile_data = None,
         test_data_by_target = {},
@@ -108,6 +109,7 @@ def vesper_crate(
         test_env_inherit = {},
         test_shards = {},
         test_path_binaries = {},
+        extra_test_path_binaries = [],
         test_exec_properties = {},
         remote_tests = [],
         test_tags = {},
@@ -120,6 +122,8 @@ def vesper_crate(
     Args:
       compile_data: globs of files `include_str!`/`include_bytes!` may read.
         Defaults to package files outside tests/, examples/ and benches/.
+      binary_data: binary name to run-time data labels built with it (the
+        root's `vesper-<tool>` binaries, which `vesper <tool>` runs).
       binary_compile_data: extra compile-time globs for binaries, in addition
         to compile_data (e.g. the checker's embedded source manifests).
       test_data: globs of files tests may read at run time. Defaults to every
@@ -135,7 +139,10 @@ def vesper_crate(
       test_exec_properties: target name to remote execution platform properties.
       test_shards: target name to shard count; the test must implement Bazel sharding.
       test_path_binaries: target name to binary labels needed at runtime.
-        Defaults to every binary of the package.
+        Defaults to every binary of the package plus extra_test_path_binaries.
+      extra_test_path_binaries: binaries of other packages that every
+        integration test without a test_path_binaries entry finds on PATH
+        (the root package's `vesper-<tool>` binaries, SH0 lane 2).
       remote_tests: audited target names (or "*") allowed to execute remotely.
         Other Rust tests keep no-remote-exec, including when RBE is enabled.
       extra_compile_data: labels of files outside the package read at compile
@@ -332,6 +339,7 @@ def vesper_crate(
             crate_root = b["src"],
             edition = b["edition"],
             compile_data = binary_files,
+            data = binary_data.get(b["name"], []),
             deps = normal + build_deps + lib_dep,
             rustc_env = pkg_env,
             visibility = ["//visibility:public"],
@@ -357,7 +365,7 @@ def vesper_crate(
             continue
         wrapped_test(
             "test/" + t["name"],
-            path_binaries = test_path_binaries.get("test/" + t["name"], bin_labels),
+            path_binaries = test_path_binaries.get("test/" + t["name"], bin_labels + extra_test_path_binaries),
             crate_name = t["name"].replace("-", "_"),
             srcs = test_srcs + [t["src"]],
             crate_root = t["src"],

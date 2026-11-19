@@ -46,6 +46,31 @@ impl Abi for crate::port::ColoringError {
     }
 }
 
+impl Abi for crate::port::GjkError {
+    const WORDS: usize = 1;
+    fn put(&self, out: &mut [u64]) {
+        match self {
+            crate::port::GjkError::InvalidShape => {
+                out[0] = 0;
+            }
+            crate::port::GjkError::NoConvergence => {
+                out[0] = 1;
+            }
+            crate::port::GjkError::Degenerate => {
+                out[0] = 2;
+            }
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        match words[0] {
+            0 => crate::port::GjkError::InvalidShape,
+            1 => crate::port::GjkError::NoConvergence,
+            2 => crate::port::GjkError::Degenerate,
+            tag => panic!("invalid GjkError tag {tag} from Vesper"),
+        }
+    }
+}
+
 impl Abi for crate::port::LbvhError {
     const WORDS: usize = 3;
     fn put(&self, out: &mut [u64]) {
@@ -131,6 +156,7 @@ impl Abi for crate::port::SapError {
 const _: () = assert!(<() as Abi>::WORDS == 1);
 const _: () = assert!(<(u16, u16, u16) as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port::ColoringError as Abi>::WORDS == 3);
+const _: () = assert!(<crate::port::GjkError as Abi>::WORDS == 1);
 const _: () = assert!(<crate::port::LbvhError as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port::MortonError as Abi>::WORDS == 3);
 const _: () = assert!(<crate::port::SapError as Abi>::WORDS == 3);
@@ -163,6 +189,7 @@ unsafe extern "C" {
     fn vesper_kinetic_fastmath_logf(x: i64) -> i64;
     fn vesper_kinetic_fastmath_sin(x: f64) -> f64;
     fn vesper_kinetic_fastmath_sinf(x: i64) -> i64;
+    fn vesper_kinetic_gjk_separation(ka: i64, da: *mut u64, kb: i64, db: *mut u64, out: *mut u64, fail: *mut u64) -> i64;
     fn vesper_kinetic_lbvh_build(boxes: *mut u64, codes: *mut u64, prims: *mut u64, leaf: *mut u64, left: *mut u64, right: *mut u64, node_box: *mut u64, order: *mut u64, stack: *mut u64, fail: *mut u64) -> i64;
     fn vesper_kinetic_lbvh_compact21(code: i64) -> i64;
     fn vesper_kinetic_lbvh_morton64(x: i64, y: i64, z: i64) -> i64;
@@ -385,6 +412,20 @@ pub fn fastmath_sinf(x: u32) -> u32 {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_kinetic_fastmath_sinf(x as i64) };
     raw as u32
+}
+
+/// Calls `gjk_separation` of the Vesper library `kinetic` (`vesper_kinetic_gjk_separation`).
+pub fn gjk_separation(ka: u32, da: &[f64], kb: u32, db: &[f64], out: &mut [f64]) -> Result<(), crate::port::GjkError> {
+    let mut fail = [0u64; 2];
+    // SAFETY: `vesper_kinetic_gjk_separation` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(da, |view_da| vesper_port_abi::with_slice(db, |view_db| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_kinetic_gjk_separation(ka as i64, view_da, kb as i64, view_db, view_out, fail.as_mut_ptr()) })));
+    match fail[0] {
+        0 => Ok({ let _ = raw; }),
+        1 => Err(<crate::port::GjkError as Abi>::get(&fail[1..])),
+        status => panic!("invalid failure status {status} from vesper_kinetic_gjk_separation"),
+    }
 }
 
 /// Calls `lbvh_build` of the Vesper library `kinetic` (`vesper_kinetic_lbvh_build`).

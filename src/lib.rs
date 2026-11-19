@@ -13,12 +13,15 @@ pub use vesper_syntax::{lexer, parser, test_attrs};
 pub mod anvil_hash;
 pub mod anvil_jit;
 pub mod anvil_sim;
+pub mod arrays;
+pub mod atomic_file;
 pub mod atomics;
 pub mod bounds_hoist;
 pub mod capability_effects;
 pub mod check;
 pub mod database;
 pub mod doctest;
+pub mod dyn_fn;
 pub mod dyn_trait;
 pub mod ebpf_backend;
 pub mod ffi_lowering;
@@ -46,6 +49,9 @@ pub mod native_verifiers;
 pub mod optimize;
 pub mod packages;
 pub mod pact_frontend;
+/// `vesper proof-audit` and the Lean replay shared with `verify` and the
+/// `vesper-publish` tool (crates/vesper-tools).
+pub mod proof_commands;
 pub mod regions;
 pub mod runtime;
 pub mod seq;

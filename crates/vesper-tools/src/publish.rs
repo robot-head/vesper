@@ -234,7 +234,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             }
             "--allow-axiom" => {
                 let v = it.next().ok_or("--allow-axiom requires an axiom name")?;
-                if crate::proof_commands::forbidden_axiom(&v) {
+                if vesper::proof_commands::forbidden_axiom(&v) {
                     return Err(format!("{v} cannot be allowed by publish proof policy"));
                 }
                 opts.allowed_axioms.push(v);
@@ -537,7 +537,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                 None,
             );
         }
-        let sbom = crate::sbom_commands::build(&solution)?;
+        let sbom = crate::sbom::build(&solution)?;
         let audit_report = if let (Some(adv_path), Some(pol_path)) =
             (opts.advisories.as_deref(), opts.audit_policy.as_deref())
         {
@@ -578,7 +578,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     let proof_gate = if let (Some(root), Some(module)) =
         (opts.olean_root.as_deref(), opts.olean_module.as_deref())
     {
-        let (accepted, report) = crate::proof_commands::audit_policy(
+        let (accepted, report) = vesper::proof_commands::audit_policy(
             root,
             module,
             &opts.theorems,
@@ -736,7 +736,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
 
     if let Some(out_path) = opts.output.as_deref() {
         let receipt_bytes = serde_json::to_vec_pretty(&receipt).map_err(|e| e.to_string())?;
-        crate::package_commands::atomic_write(out_path, &receipt_bytes)?;
+        vesper::atomic_file::atomic_write(out_path, &receipt_bytes)?;
     }
 
     if opts.json {

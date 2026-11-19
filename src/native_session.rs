@@ -914,6 +914,7 @@ fn compile_session_with_linkage<M: Module>(
             world,
             ids: &ids,
             program: &program,
+            invariant_headers: Default::default(),
             capabilities,
             next_capability: 0,
             closures: vec![],

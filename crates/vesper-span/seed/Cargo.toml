@@ -1,0 +1,33 @@
+[package]
+name = "vesper-span-seed"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Frozen Rust seed copy of vesper-span for the compiler's own dependency closure"
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; self-hosting SH0 lane 6,
+# #1128): the compiler links this package, the Rust build of ../src, under
+# the library name `vesper_span`. Crates inside
+# `cargo tree -p vesper -e normal,build` depend on it with
+# `vesper-span = { path = ".../seed", package = "vesper-span-seed" }`; every
+# other crate uses the port-backed package `vesper-span`. The Rust code takes
+# bug fixes only until self-hosting Stage 2.
+[lib]
+name = "vesper_span"
+path = "../src/lib.rs"
+
+[[test]]
+name = "span"
+path = "../tests/span.rs"
+
+[[test]]
+name = "port_memory"
+path = "../tests/port_memory.rs"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

@@ -639,6 +639,79 @@ impl Abi for crate::port::vesper__ebpf__wire__WireError {
     }
 }
 
+/// Owned handle of a Vesper `vesper__ebpf__interp__RunOut` value: its words, which own the Vesper
+/// allocations they point to. Dropping it calls `vesper_ebpf_vesper__ebpf__interp__RunOut_drop`.
+pub struct vesper__ebpf__interp__RunOut {
+    words: [u64; 6],
+}
+
+impl vesper__ebpf__interp__RunOut {
+    /// # Safety
+    /// `words` must hold a `vesper__ebpf__interp__RunOut` value of this library that the caller owns.
+    unsafe fn from_words(words: &[u64]) -> Self {
+        let mut owned = [0u64; 6];
+        owned.copy_from_slice(&words[..6]);
+        Self { words: owned }
+    }
+
+    /// A borrowed view of the value.
+    pub fn as_ref(&self) -> vesper__ebpf__interp__RunOutRef<'_> {
+        vesper__ebpf__interp__RunOutRef { words: &self.words }
+    }
+}
+
+impl Drop for vesper__ebpf__interp__RunOut {
+    fn drop(&mut self) {
+        // SAFETY: the handle owns its words and is dropped once.
+        unsafe { vesper_ebpf_vesper__ebpf__interp__RunOut_drop(self.words.as_mut_ptr()) };
+    }
+}
+
+impl core::fmt::Debug for vesper__ebpf__interp__RunOut {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("vesper__ebpf__interp__RunOut { .. }")
+    }
+}
+
+// SAFETY: the handle owns its Vesper allocations exclusively (no Vesper
+// code keeps a reference to them), and they are plain heap memory.
+unsafe impl Send for vesper__ebpf__interp__RunOut {}
+// SAFETY: shared access only reads the words and the memory they own.
+unsafe impl Sync for vesper__ebpf__interp__RunOut {}
+
+/// A borrowed view of a Vesper `vesper__ebpf__interp__RunOut` value, read in place.
+#[derive(Clone, Copy)]
+pub struct vesper__ebpf__interp__RunOutRef<'a> {
+    words: &'a [u64],
+}
+
+impl<'a> vesper__ebpf__interp__RunOutRef<'a> {
+    pub fn words(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[0]) }
+    }
+    pub fn bytes(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[1]) }
+    }
+    pub fn st(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[2]) }
+    }
+    pub fn keys(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[3]) }
+    }
+    pub fn mem(&self) -> vesper_port_abi::SeqRef<'a, u8> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[4]) }
+    }
+    pub fn spill(&self) -> vesper_port_abi::SeqRef<'a, u64> {
+        let w: &'a [u64] = self.words;
+        unsafe { vesper_port_abi::SeqRef::from_handle(w[5]) }
+    }
+}
+
 /// Owned handle of a Vesper `vesper__ebpf__verifier__Outcome` value: its words, which own the Vesper
 /// allocations they point to. Dropping it calls `vesper_ebpf_vesper__ebpf__verifier__Outcome_drop`.
 pub struct vesper__ebpf__verifier__Outcome {
@@ -736,6 +809,7 @@ unsafe extern "C" {
     fn vesper_ebpf_seq_new(capacity: i64, stride: i64) -> i64;
     fn vesper_ebpf_seq_free(seq: i64) -> i64;
     fn vesper_ebpf_live_allocations() -> i64;
+    fn vesper_ebpf_vesper__ebpf__interp__RunOut_drop(value: *mut u64) -> i64;
     fn vesper_ebpf_vesper__ebpf__verifier__Outcome_drop(value: *mut u64) -> i64;
     fn vesper_ebpf_btf_ext_local_type(tab: *mut u64, idx: *mut u64, id: i64) -> i64;
     fn vesper_ebpf_btf_ext_maps_from_btf(tab: *mut u64, idx: *mut u64, strs: *mut u64) -> i64;
@@ -757,6 +831,8 @@ unsafe extern "C" {
     fn vesper_ebpf_interp_alu_concrete(op: *mut u64, wide: i64, a: i64, b: i64) -> i64;
     fn vesper_ebpf_interp_cmp_concrete(op: *mut u64, wide: i64, a: i64, b: i64) -> i64;
     fn vesper_ebpf_interp_endian(kind: *mut u64, width: i64, v: i64) -> i64;
+    fn vesper_ebpf_interp_new_env(result: *mut u64, maps: *mut u64) -> i64;
+    fn vesper_ebpf_interp_run(result: *mut u64, slots: *mut u64, kf: *mut u64, ptype: i64, input: i64, pkt: *mut u64, ctx: *mut u64, cfg: *mut u64, maps: *mut u64, nmain: i64, tails: *mut u64, tslots: *mut u64, taux: *mut u64, st: *mut u64, keys: *mut u64, mem: *mut u64, spill: *mut u64) -> i64;
     fn vesper_ebpf_program_has_packet(p: *mut u64) -> i64;
     fn vesper_ebpf_program_is_tracing(p: *mut u64) -> i64;
     fn vesper_ebpf_program_map_from_kernel_type(result: *mut u64, t: i64) -> i64;
@@ -1030,6 +1106,26 @@ pub fn interp_endian(kind: crate::port::vesper__ebpf__insn__Endian, width: u8, v
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_ebpf_interp_endian(arg_kind.as_mut_ptr(), width as i64, v as i64) };
     raw as u64
+}
+
+/// Calls `interp_new_env` of the Vesper library `ebpf` (`vesper_ebpf_interp_new_env`).
+pub fn interp_new_env(maps: &[u64]) -> vesper__ebpf__interp__RunOut {
+    let mut result = [0u64; 6];
+    // SAFETY: `vesper_ebpf_interp_new_env` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(maps, |view_maps| unsafe { vesper_ebpf_interp_new_env(result.as_mut_ptr(), view_maps) });
+    unsafe { vesper__ebpf__interp__RunOut::from_words(&result[0..]) }
+}
+
+/// Calls `interp_run` of the Vesper library `ebpf` (`vesper_ebpf_interp_run`).
+pub fn interp_run(slots: &[crate::port::vesper__ebpf__insn__RawInsn], kf: &[u64], ptype: u64, input: u64, pkt: &[u8], ctx: &[u8], cfg: &[u64], maps: &[u64], nmain: u64, tails: &[u64], tslots: &[crate::port::vesper__ebpf__insn__RawInsn], taux: &[u64], st: &[u64], keys: &[u8], mem: &[u8], spill: &[u64]) -> vesper__ebpf__interp__RunOut {
+    let mut result = [0u64; 6];
+    // SAFETY: `vesper_ebpf_interp_run` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(slots, |view_slots| vesper_port_abi::with_slice(kf, |view_kf| vesper_port_abi::with_slice(pkt, |view_pkt| vesper_port_abi::with_slice(ctx, |view_ctx| vesper_port_abi::with_slice(cfg, |view_cfg| vesper_port_abi::with_slice(maps, |view_maps| vesper_port_abi::with_slice(tails, |view_tails| vesper_port_abi::with_slice(tslots, |view_tslots| vesper_port_abi::with_slice(taux, |view_taux| vesper_port_abi::with_slice(st, |view_st| vesper_port_abi::with_slice(keys, |view_keys| vesper_port_abi::with_slice(mem, |view_mem| vesper_port_abi::with_slice(spill, |view_spill| unsafe { vesper_ebpf_interp_run(result.as_mut_ptr(), view_slots, view_kf, ptype as i64, input as i64, view_pkt, view_ctx, view_cfg, view_maps, nmain as i64, view_tails, view_tslots, view_taux, view_st, view_keys, view_mem, view_spill) })))))))))))));
+    unsafe { vesper__ebpf__interp__RunOut::from_words(&result[0..]) }
 }
 
 /// Calls `program_has_packet` of the Vesper library `ebpf` (`vesper_ebpf_program_has_packet`).

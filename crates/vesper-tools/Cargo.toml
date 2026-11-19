@@ -1,0 +1,68 @@
+[package]
+name = "vesper-tools"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Vesper tool subcommands outside the compiler binary: `vesper <tool>` runs `vesper-<tool>` (self-hosting SH0 lane 2)"
+
+# One binary per tool; `vesper <tool>` finds it beside `vesper` or on PATH.
+[[bin]]
+name = "vesper-audit"
+path = "src/bin/vesper-audit.rs"
+
+[[bin]]
+name = "vesper-bench"
+path = "src/bin/vesper-bench.rs"
+
+[[bin]]
+name = "vesper-grammar"
+path = "src/bin/vesper-grammar.rs"
+
+[[bin]]
+name = "vesper-json"
+path = "src/bin/vesper-json.rs"
+
+[[bin]]
+name = "vesper-publish"
+path = "src/bin/vesper-publish.rs"
+
+[[bin]]
+name = "vesper-resolve"
+path = "src/bin/vesper-resolve.rs"
+
+[[bin]]
+name = "vesper-sbom"
+path = "src/bin/vesper-sbom.rs"
+
+[[bin]]
+name = "vesper-tee"
+path = "src/bin/vesper-tee.rs"
+
+[dependencies]
+# Compiler services (checking, native batches, interfaces, proof replay).
+vesper = { path = "../.." }
+blake3 = "1.8"
+cranelift-codegen = { version = "0.125", features = ["arm64", "riscv64"] }
+cranelift-native = "0.125"
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The tools link the frozen Rust seed copies the compiler linked before the
+# split. Every package below except vesper-bench always builds its Vesper
+# port, which the owner's parity rule keeps non-default; vesper-bench's normal
+# package is Rust by default, but vesper-bench-pmu implements the seed's
+# observer traits, so bench keeps the seed too (see the lane report).
+vesper-bench = { path = "../vesper-bench/seed", package = "vesper-bench-seed" }
+vesper-bench-pmu = { path = "../vesper-bench-pmu" }
+vesper-aegis = { path = "../vesper-aegis/seed", package = "vesper-aegis-seed" }
+vesper-grammar = { path = "../vesper-grammar/seed", package = "vesper-grammar-seed" }
+vesper-serde = { path = "../vesper-serde/seed", package = "vesper-serde-seed" }
+vesper-loom-audit = { path = "../vesper-loom-audit/seed", package = "vesper-loom-audit-seed" }
+vesper-loom-solver = { path = "../vesper-loom-solver/seed", package = "vesper-loom-solver-seed" }
+# Shared with the compiler, which still links them.
+vesper-loom-calculus = { path = "../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
+vesper-semver = { path = "../vesper-semver/seed", package = "vesper-semver-seed" }
+vesper-loom-cas = { path = "../vesper-loom-cas" }
+vesper-loom-trust = { path = "../vesper-loom-trust" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

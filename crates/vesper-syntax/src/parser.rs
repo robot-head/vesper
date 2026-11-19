@@ -210,6 +210,7 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
     if p.halted {
         module = Module::default();
     }
+    lower_const_uses(&mut module);
     Ok(Parse {
         module,
         green: p.builder.finish(),
@@ -852,6 +853,7 @@ impl Parser<'_> {
             if !public
                 && self.at_word(0, "pub")
                 && (self.at_word(1, "trait")
+                    || (self.at_word(1, "const") && self.nth(2) == K::Upper)
                     || self.at_word(1, "model")
                     || matches!(self.nth(1), K::Fn | K::Struct | K::Enum | K::Effect)
                     || (matches!(self.nth(1), K::Copy | K::Affine | K::Linear)
@@ -872,6 +874,9 @@ impl Parser<'_> {
         }
         if has_test_attr && !self.at(K::Fn) {
             self.error("@test and @test_case may only annotate a fn declaration");
+        }
+        if self.at_word(0, "const") && self.nth(1) == K::Upper {
+            return Some((Item::Function(Box::new(self.const_item(start))), public));
         }
         if self.at_word(0, "trait") {
             return Some((Item::Trait(self.trait_decl(start, public)), public));
@@ -1207,6 +1212,35 @@ impl Parser<'_> {
             span: start..self.end(),
         }
     }
+    /// `const NAME: T = expr;` (§2.2 `ConstDecl`): the parameterless
+    /// function [`CONST_PREFIX`]`NAME`, whose every use the checker reads
+    /// as a call (`vesper::arrays`).
+    fn const_item(&mut self, start: usize) -> Function {
+        self.bump();
+        let name = self.upper();
+        self.expect(K::Colon);
+        let result = self.ty();
+        self.expect(K::Eq);
+        let value = self.expr();
+        self.expect(K::Semi);
+        let span = start..self.end();
+        Function {
+            name: format!("{CONST_PREFIX}{name}"),
+            fip: false,
+            generics: vec![],
+            params: vec![],
+            result,
+            effects: Effects::default(),
+            body: Some(Expr {
+                span: value.span.clone(),
+                kind: ExprKind::Block {
+                    statements: vec![],
+                    tail: Some(Box::new(value)),
+                },
+            }),
+            span,
+        }
+    }
     fn params(&mut self, end: K) -> Vec<Param> {
         let mut out = vec![];
         while !self.at(end) && !self.at(K::Eof) {
@@ -1280,6 +1314,79 @@ impl Parser<'_> {
         self.depth = previous;
         result
     }
+    /// `(pass T, ..) -> R eff [E]` after `fn` (and its mode) or a
+    /// function-object trait name.
+    fn function_signature(&mut self, mode: Mode) -> Type {
+        self.expect(K::LParen);
+        let mut params = vec![];
+        while !self.at(K::RParen) && !self.at(K::Eof) {
+            let (p, _) = self.pass();
+            params.push((p, self.ty()));
+            if !self.eat(K::Comma) {
+                break;
+            }
+        }
+        self.expect(K::RParen);
+        let result = if self.eat(K::Arrow) {
+            self.ty()
+        } else {
+            Type::unit()
+        };
+        let effects = self.effects();
+        Type::Function {
+            params,
+            result: Box::new(result),
+            effects,
+            mode,
+        }
+    }
+    /// Whether the `[` at the cursor opens an array type `[T; N]`: a `;`
+    /// at bracket depth one before the matching `]`. A tensor shape
+    /// `[M, N]` has none.
+    fn array_type_ahead(&self) -> bool {
+        let mut depth = 0usize;
+        for token in &self.tokens[self.pos..] {
+            let k = token.kind;
+            if k.trivia() {
+                continue;
+            }
+            match k {
+                K::LBracket | K::LParen | K::LBrace => depth += 1,
+                K::RBracket | K::RParen | K::RBrace => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                K::Semi if depth == 1 => return true,
+                K::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+    /// The length `N` of `[T; N]` or `[x; N]`: a decimal or hex literal.
+    fn array_length(&mut self) -> usize {
+        if !self.at(K::Int) {
+            self.error("expected an integer literal array length");
+            return 0;
+        }
+        let text = self.bump().replace('_', "");
+        let n = if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+            usize::from_str_radix(hex, 16).ok()
+        } else {
+            text.parse().ok()
+        };
+        match n.filter(|n| *n <= MAX_ARRAY_LENGTH) {
+            Some(n) => n,
+            None => {
+                self.error(format!(
+                    "array length exceeds the limit of {MAX_ARRAY_LENGTH} elements"
+                ));
+                0
+            }
+        }
+    }
     fn ty_inner(&mut self) -> Type {
         self.builder.start_node(TYPE);
         let result = if self.eat(K::Fn) {
@@ -1288,28 +1395,7 @@ impl Parser<'_> {
             } else {
                 Mode::Affine
             };
-            self.expect(K::LParen);
-            let mut params = vec![];
-            while !self.at(K::RParen) && !self.at(K::Eof) {
-                let (p, _) = self.pass();
-                params.push((p, self.ty()));
-                if !self.eat(K::Comma) {
-                    break;
-                }
-            }
-            self.expect(K::RParen);
-            let result = if self.eat(K::Arrow) {
-                self.ty()
-            } else {
-                Type::unit()
-            };
-            let effects = self.effects();
-            Type::Function {
-                params,
-                result: Box::new(result),
-                effects,
-                mode,
-            }
+            self.function_signature(mode)
         } else if self.eat(K::LParen) {
             let mut args = vec![];
             while !self.at(K::RParen) && !self.at(K::Eof) {
@@ -1320,6 +1406,20 @@ impl Parser<'_> {
             }
             self.expect(K::RParen);
             Type::Tuple(args)
+        } else if self.at(K::LBracket) && self.array_type_ahead() {
+            // A fixed-size array `[T; N]` (§5): the homogeneous `N`-tuple.
+            self.bump();
+            let element = self.ty();
+            self.expect(K::Semi);
+            let mut n = self.array_length();
+            self.expect(K::RBracket);
+            if type_leaves(&element).saturating_mul(n) > MAX_ARRAY_LENGTH {
+                self.error(format!(
+                    "a nested array type holds more than {MAX_ARRAY_LENGTH} elements in all"
+                ));
+                n = 0;
+            }
+            Type::Tuple(vec![element; n])
         } else if self.eat(K::LBracket) {
             // A tensor shape `[M, N * K, 128]` (§28.2), encoded as the
             // unspellable `[]` type over its dimensions (see SHAPE_TYPE).
@@ -1351,8 +1451,14 @@ impl Parser<'_> {
             // `dyn Trait[args]` (manuscript §5 `DynType`, §7.1).
             self.bump();
             let name = self.upper();
-            let args = self.type_args();
-            Type::Named(DYN_TYPE.into(), vec![Type::Named(name, args)])
+            if matches!(name.as_str(), "Fn" | "FnMut" | "FnOnce") && self.at(K::LParen) {
+                // A function object `dyn FnMut(A) -> R eff [E]` (§7.3).
+                let signature = self.function_signature(Mode::Affine);
+                Type::Named(DYN_TYPE.into(), vec![Type::Named(name, vec![signature])])
+            } else {
+                let args = self.type_args();
+                Type::Named(DYN_TYPE.into(), vec![Type::Named(name, args)])
+            }
         } else if self.at_path_root() {
             // `self::m::T[args]`, `super::m::T`, `@scope/name::m::T`.
             let name = self.qualified_path();
@@ -2669,6 +2775,7 @@ impl Parser<'_> {
                     }
                     ExprKind::Tuple(values)
                 }
+                K::LBracket => self.array_literal(start),
                 K::LBrace => return self.block(),
                 _ => {
                     self.error("expected expression");
@@ -2707,6 +2814,33 @@ impl Parser<'_> {
             kind,
             span: start..self.end(),
         }
+    }
+    /// `[a, b, c]` or `[x; N]` (§5 fixed-size arrays), both the tuple of
+    /// their elements. A repeated operand that is not a literal or a name
+    /// is evaluated once into a hidden binding.
+    fn array_literal(&mut self, start: usize) -> ExprKind {
+        self.expect(K::LBracket);
+        let mut values = vec![];
+        while !self.at(K::RBracket) && !self.at(K::Eof) {
+            let value = self.expr();
+            if values.is_empty() && self.eat(K::Semi) {
+                let mut n = self.array_length();
+                self.expect(K::RBracket);
+                if expr_leaves(&value).saturating_mul(n) > MAX_ARRAY_LENGTH {
+                    self.error(format!(
+                        "a nested array literal holds more than {MAX_ARRAY_LENGTH} elements in all"
+                    ));
+                    n = 0;
+                }
+                return splat(value, n, start..self.end());
+            }
+            values.push(value);
+            if !self.eat(K::Comma) {
+                break;
+            }
+        }
+        self.expect(K::RBracket);
+        ExprKind::Tuple(values)
     }
     /// An interval with an open end at `..` inside `p[`: `p[..]`, `p[..b]`
     /// and `p[a..]` mean `p[0..p.len()]`, `p[0..b]` and `p[a..p.len()]`
@@ -2951,4 +3085,210 @@ pub(crate) fn contextual_item_names(
         previous = Some(t.kind);
     }
     names
+}
+
+/// The function name prefix of a module constant `const NAME: T = e;`.
+pub const CONST_PREFIX: &str = "const$";
+/// The largest `N` of an array type `[T; N]` or literal `[x; N]`.
+pub const MAX_ARRAY_LENGTH: usize = 1 << 16;
+/// The binding a repeated array operand `[f(); N]` is evaluated into.
+pub const ARRAY_SPLAT_BINDING: &str = "$splat";
+
+/// The scalar elements of a value of type `t`, through nested tuples.
+fn type_leaves(t: &Type) -> usize {
+    match t {
+        Type::Tuple(ts) => ts
+            .iter()
+            .fold(0usize, |n, t| n.saturating_add(type_leaves(t)))
+            .max(1),
+        _ => 1,
+    }
+}
+
+/// The scalar elements of an array literal operand, through nested tuples
+/// and the tails of blocks.
+fn expr_leaves(e: &Expr) -> usize {
+    match &e.kind {
+        ExprKind::Tuple(es) => es
+            .iter()
+            .fold(0usize, |n, e| n.saturating_add(expr_leaves(e)))
+            .max(1),
+        ExprKind::Block { tail: Some(t), .. } => expr_leaves(t),
+        _ => 1,
+    }
+}
+
+/// Whether `e` is built from literals and names by operators only, so a
+/// copy of it evaluates to the same value and keeps its contextual type
+/// (`[-1.0; 2]` as `[f32; 2]`).
+fn pure_operand(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Literal(_) | ExprKind::Name(_) => true,
+        ExprKind::Unary(_, v) => pure_operand(v),
+        ExprKind::Binary(_, a, b) => pure_operand(a) && pure_operand(b),
+        _ => false,
+    }
+}
+
+/// `[value; n]` as the `n`-tuple of `value`.
+fn splat(value: Expr, n: usize, span: Span) -> ExprKind {
+    if pure_operand(&value) {
+        return ExprKind::Tuple(vec![value; n]);
+    }
+    let name = Expr {
+        kind: ExprKind::Name(ARRAY_SPLAT_BINDING.into()),
+        span: value.span.clone(),
+    };
+    ExprKind::Block {
+        statements: vec![Statement::Let {
+            pat: Pattern {
+                kind: PatternKind::Bind(ARRAY_SPLAT_BINDING.into()),
+                span: value.span.clone(),
+            },
+            ty: Type::Infer,
+            value,
+            mutable: false,
+        }],
+        tail: Some(Box::new(Expr {
+            kind: ExprKind::Tuple(vec![name; n]),
+            span,
+        })),
+    }
+}
+
+/// Turns every use `NAME` of a constant this module declares into a call of
+/// its function [`CONST_PREFIX`]`NAME`, before a package loader renames the
+/// module's items. Returns whether the module declares a constant.
+pub fn lower_const_uses(module: &mut Module) -> bool {
+    let consts = module
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Function(f) if f.name.starts_with(CONST_PREFIX) => {
+                Some(f.name[CONST_PREFIX.len()..].to_owned())
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if consts.is_empty() {
+        return false;
+    }
+    let mut rewrite = |e: &mut Expr| {
+        if let ExprKind::Name(n) = &e.kind
+            && consts.contains(n)
+        {
+            // The callee has an empty span of its own: a callee whose span
+            // has a type is a function value, and the call's span has one.
+            e.kind = ExprKind::Call {
+                callee: Box::new(Expr {
+                    kind: ExprKind::Name(format!("{CONST_PREFIX}{n}")),
+                    span: e.span.start..e.span.start,
+                }),
+                types: vec![],
+                args: vec![],
+            };
+        }
+    };
+    for item in &mut module.items {
+        match item {
+            Item::Function(f) => function_exprs(f, &mut rewrite),
+            Item::Impl { methods, .. } => {
+                for f in methods {
+                    function_exprs(f, &mut rewrite);
+                }
+            }
+            Item::Conformance(c) => {
+                for f in &mut c.methods {
+                    function_exprs(f, &mut rewrite);
+                }
+            }
+            Item::Trait(t) => {
+                for f in &mut t.methods {
+                    function_exprs(f, &mut rewrite);
+                }
+            }
+            Item::Adt(_) | Item::Effect(_) => {}
+        }
+    }
+    true
+}
+
+fn function_exprs(f: &mut Function, g: &mut dyn FnMut(&mut Expr)) {
+    if let Some(body) = &mut f.body {
+        walk_exprs(body, g);
+    }
+}
+
+/// Applies `g` to every expression of `e`, children first.
+pub fn walk_exprs(e: &mut Expr, g: &mut dyn FnMut(&mut Expr)) {
+    match &mut e.kind {
+        ExprKind::Literal(_) | ExprKind::Name(_) | ExprKind::Continue => {}
+        ExprKind::Tuple(es) => es.iter_mut().for_each(|e| walk_exprs(e, g)),
+        ExprKind::Struct { fields, .. } => fields.iter_mut().for_each(|(_, e)| walk_exprs(e, g)),
+        ExprKind::Block { statements, tail } => {
+            for s in statements {
+                match s {
+                    Statement::Let { value, .. } | Statement::Expr(value) => walk_exprs(value, g),
+                }
+            }
+            if let Some(t) = tail {
+                walk_exprs(t, g);
+            }
+        }
+        ExprKind::Call { callee, args, .. } => {
+            walk_exprs(callee, g);
+            for a in args {
+                walk_exprs(&mut a.expr, g);
+            }
+        }
+        ExprKind::Field(b, _) | ExprKind::Try(b) | ExprKind::Unary(_, b) => walk_exprs(b, g),
+        ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) => {
+            walk_exprs(a, g);
+            walk_exprs(b, g);
+        }
+        ExprKind::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            walk_exprs(condition, g);
+            walk_exprs(then, g);
+            if let Some(o) = otherwise {
+                walk_exprs(o, g);
+            }
+        }
+        ExprKind::Match { value, arms } => {
+            walk_exprs(value, g);
+            for (_, a) in arms {
+                walk_exprs(a, g);
+            }
+        }
+        ExprKind::Closure { body, .. } => walk_exprs(body, g),
+        ExprKind::Handle {
+            state,
+            body,
+            ret,
+            ops,
+            ..
+        } => {
+            if let Some((_, s)) = state {
+                walk_exprs(s, g);
+            }
+            walk_exprs(body, g);
+            walk_exprs(&mut ret.body, g);
+            for op in ops {
+                walk_exprs(&mut op.body, g);
+            }
+        }
+        k @ (ExprKind::Loop(_)
+        | ExprKind::For { .. }
+        | ExprKind::Range { .. }
+        | ExprKind::Break(_)
+        | ExprKind::Return(_)) => {
+            for c in k.control_children_mut().into_iter().flatten() {
+                walk_exprs(c, g);
+            }
+        }
+    }
+    g(e);
 }

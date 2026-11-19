@@ -1,0 +1,155 @@
+// @vesper-std/graph::topo: topological order with a cycle report.
+use self::Graph;
+use self::util::{
+    get32,
+    get_bool,
+    filled32,
+    filled_bool
+};
+
+// The result of `toposort`: the nodes in a topological order when the graph
+// is a DAG; otherwise the nodes that could be ordered (those no cycle
+// reaches) and one cycle.
+pub struct Topo {
+    order: ChunkSeq[u32],
+    cycle: ChunkSeq[u32]
+}
+
+impl Topo {
+    // Whether the graph has no cycle (every node is in `order`).
+    pub fn is_dag(in self) -> bool {
+        self.cycle.len() == 0
+    }
+
+    pub fn order_len(in self) -> u64 {
+        self.order.len()
+    }
+
+    // The `i`th node of the order, or `none()`.
+    pub fn order_at(in self, i: u64) -> u32 {
+        get32(in self.order.as_slice(), i, 4294967295)
+    }
+
+    // The length of the reported cycle (0 for a DAG).
+    pub fn cycle_len(in self) -> u64 {
+        self.cycle.len()
+    }
+
+    // The `i`th node of the cycle: there is an edge from node `i` to node
+    // `i + 1`, and from the last back to the first.
+    pub fn cycle_at(in self, i: u64) -> u32 {
+        get32(in self.cycle.as_slice(), i, 4294967295)
+    }
+}
+
+// Kahn's algorithm: sources are taken first-in first-out, starting in node
+// order, and successors are released in edge order. When nodes remain, the
+// cycle is found by walking predecessors among them from the lowest
+// remaining id, so it too is deterministic.
+pub fn toposort(in g: Graph) -> Topo {
+    let n = g.node_count();
+    let mut indeg = filled32(n, 0);
+    let mut v: u64 = 0;
+    loop {
+        if v >= n {
+            break;
+        }
+        indeg.try_set(v, wrapping_u32(g.pred_len(wrapping_u32(v))));
+        v = wrapping_add(v, 1);
+    }
+    let mut order: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    v = 0;
+    loop {
+        if v >= n {
+            break;
+        }
+        if get32(in indeg.as_slice(), v, 1) == 0 {
+            order.push(wrapping_u32(v));
+        }
+        v = wrapping_add(v, 1);
+    }
+    let mut head: u64 = 0;
+    loop {
+        if head >= order.len() {
+            break;
+        }
+        let u = get32(in order.as_slice(), head, 0);
+        head = wrapping_add(head, 1);
+        let (lo, hi) = g.succ_range(u);
+        let mut e = lo;
+        loop {
+            if e >= hi {
+                break;
+            }
+            let w = g.succ_edge(e);
+            let wk = widen_u64(w);
+            let d = wrapping_sub(get32(in indeg.as_slice(), wk, 1), 1);
+            indeg.try_set(wk, d);
+            if d == 0 {
+                order.push(w);
+            }
+            e = wrapping_add(e, 1);
+        }
+    }
+    let mut cycle: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    if order.len() < n {
+        let mut placed = filled_bool(n, false);
+        let mut i: u64 = 0;
+        loop {
+            if i >= order.len() {
+                break;
+            }
+            placed.try_set(widen_u64(get32(in order.as_slice(), i, 0)), true);
+            i = wrapping_add(i, 1);
+        }
+        // The first unplaced node.
+        let mut start: u64 = 0;
+        loop {
+            if start >= n || !get_bool(in placed.as_slice(), start) {
+                break;
+            }
+            start = wrapping_add(start, 1);
+        }
+        // Walk to an unplaced predecessor until a node repeats. step[v] is
+        // the walk position of v plus one (0 = not on the walk).
+        let mut step = filled32(n, 0);
+        let mut walk: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut cur = wrapping_u32(start);
+        loop {
+            let ck = widen_u64(cur);
+            let s = get32(in step.as_slice(), ck, 0);
+            if s != 0 {
+                // walk[s - 1..] is a cycle followed backwards.
+                let from = widen_u64(wrapping_sub(s, 1));
+                cycle.extend_reversed(in walk[from..walk.len()]);
+                break;
+            }
+            walk.push(cur);
+            step.try_set(ck, wrapping_u32(walk.len()));
+            let (lo, hi) = g.pred_range(cur);
+            let mut e = lo;
+            let mut next: u32 = 4294967295;
+            loop {
+                if e >= hi {
+                    break;
+                }
+                let p = g.pred_edge(e);
+                if !get_bool(in placed.as_slice(), widen_u64(p)) {
+                    next = p;
+                    break;
+                }
+                e = wrapping_add(e, 1);
+            }
+            if next == 4294967295 {
+                // Unreachable: an unplaced node always has an unplaced
+                // predecessor.
+                break;
+            }
+            cur = next;
+        }
+    }
+    Topo {
+        order: order,
+        cycle: cycle
+    }
+}

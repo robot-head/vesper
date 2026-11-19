@@ -1,0 +1,330 @@
+// @vesper-std/intern: string interning (self-hosting SH0 lane 5, #1127).
+//
+// An `Interner` maps each distinct string to a `Symbol`, a dense 32-bit id,
+// and back. Ids are given in first-insertion order starting at 0, so the
+// ids of a program's names are a function of the order they were interned
+// in, never of hash values or capacity. Both directions are O(1): `intern`
+// and `lookup` probe an open-addressing index of FNV-1a hashes; `resolve`,
+// `symbol_len` and `symbol_eq` read the symbol's range in one shared text
+// buffer.
+//
+// All interned text lives in one `String`, so interning allocates only when
+// that buffer, the offset table or the index grows.
+
+// An interned string's id.
+pub copy struct Symbol {
+    id: u32
+}
+
+impl Eq for Symbol {}
+
+impl Ord for Symbol {}
+
+impl Hash for Symbol {}
+
+// The symbol with id `id` (as stored elsewhere); `resolve` checks it.
+pub fn symbol_from_id(id: u32) -> Symbol {
+    Symbol {
+        id: id
+    }
+}
+
+impl Symbol {
+    pub fn id(self) -> u32 {
+        self.id
+    }
+
+    pub fn index(self) -> u64 {
+        widen_u64(self.id)
+    }
+}
+
+pub struct Interner {
+    text: String,
+    // starts[i]..starts[i + 1] is symbol i's range of `text`.
+    starts: ChunkSeq[u64],
+    hashes: ChunkSeq[u64],
+    // 0 is empty, otherwise symbol id + 1.
+    slots: ChunkSeq[u32],
+    mask: u64
+}
+
+// The hash `intern` uses (FNV-1a over 8-byte words and the tail, then
+// mixed), so callers can key side tables by text the same way.
+pub fn hash_str(in s: Str) -> u64 {
+    let b = s.as_bytes();
+    let n = b.len();
+    let mut h: u64 = 14695981039346656037;
+    let mut i: u64 = 0;
+    // Eight bytes at a time, then the tail: FNV-1a over words, mixed.
+    loop {
+        if wrapping_add(i, 8) > n {
+            break;
+        }
+        let w = match b.try_read_u64_le(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        h = wrapping_mul(h ^ w, 1099511628211);
+        i = wrapping_add(i, 8);
+    }
+    loop {
+        if i >= n {
+            break;
+        }
+        let x = match b.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        h = wrapping_mul(h ^ widen_u64(x), 1099511628211);
+        i = wrapping_add(i, 1);
+    }
+    let a = wrapping_mul(h ^ (h >> 32), 13787848793156543929);
+    a ^ (a >> 29)
+}
+
+fn empty_slots(n: u64) -> ChunkSeq[u32] {
+    let mut s: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    s.resize(n, 0);
+    s
+}
+
+// An empty interner.
+pub fn interner_new() -> Interner {
+    interner_with_capacity(0)
+}
+
+// An empty interner with room for `n` symbols before its index grows.
+pub fn interner_with_capacity(n: u64) -> Interner {
+    let mut cap: u64 = 16;
+    loop {
+        if cap >= wrapping_mul(n, 2) || cap >= 2147483648 {
+            break;
+        }
+        cap = wrapping_mul(cap, 2);
+    }
+    let mut starts: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](wrapping_add(n, 1));
+    starts.push(0);
+    Interner {
+        text: String::new(),
+        starts: starts,
+        hashes: ChunkSeq::with_capacity[u64](n),
+        slots: empty_slots(cap),
+        mask: wrapping_sub(cap, 1)
+    }
+}
+
+impl Interner {
+    // The number of distinct symbols.
+    pub fn len(in self) -> u64 {
+        self.hashes.len()
+    }
+
+    pub fn is_empty(in self) -> bool {
+        self.hashes.len() == 0
+    }
+
+    fn range(in self, id: u64) -> (u64, u64) {
+        let a = match self.starts.try_get(id) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let b = match self.starts.try_get(wrapping_add(id, 1)) {
+            Option::Some(x) => x,
+            Option::None => a,
+        };
+        (a, b)
+    }
+
+    // Whether symbol `id` spells `s`.
+    fn spells(in self, id: u64, in s: Str) -> bool {
+        let (a, b) = self.range(id);
+        if wrapping_sub(b, a) != s.len() {
+            false
+        } else {
+            let t = self.text.as_bytes();
+            let q = s.as_bytes();
+            let mut i: u64 = 0;
+            let n = s.len();
+            loop {
+                if wrapping_add(i, 8) > n {
+                    break;
+                }
+                let x = match t.try_read_u64_le(wrapping_add(a, i)) {
+                    Option::Some(v) => v,
+                    Option::None => 0,
+                };
+                let y = match q.try_read_u64_le(i) {
+                    Option::Some(v) => v,
+                    Option::None => 1,
+                };
+                if x != y {
+                    break;
+                }
+                i = wrapping_add(i, 8);
+            }
+            loop {
+                if i >= n {
+                    break true;
+                }
+                let x = match t.try_get(wrapping_add(a, i)) {
+                    Option::Some(v) => widen_u32(v),
+                    Option::None => 256,
+                };
+                let y = match q.try_get(i) {
+                    Option::Some(v) => widen_u32(v),
+                    Option::None => 257,
+                };
+                if x != y {
+                    break false;
+                }
+                i = wrapping_add(i, 1);
+            }
+        }
+    }
+
+    // The slot for `s` with hash `h`: the slot holding its symbol, or the
+    // empty slot where it would go.
+    fn probe(in self, in s: Str, h: u64) -> u64 {
+        let mut i = h & self.mask;
+        loop {
+            let v = match self.slots.try_get(i) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            if v == 0 {
+                break i;
+            }
+            let id = widen_u64(wrapping_sub(v, 1));
+            let same_hash = match self.hashes.try_get(id) {
+                Option::Some(x) => x == h,
+                Option::None => false,
+            };
+            if same_hash && self.spells(id, in s) {
+                break i;
+            }
+            i = wrapping_add(i, 1) & self.mask;
+        }
+    }
+
+    // The symbol for `s`, if it was interned.
+    pub fn lookup(in self, in s: Str) -> Option[Symbol] {
+        let h = hash_str(in s);
+        let i = self.probe(in s, h);
+        match self.slots.try_get(i) {
+            Option::Some(v) => if v == 0 {
+                Option::None
+            } else {
+                Option::Some(
+                    Symbol {
+                        id: wrapping_sub(v, 1)
+                    }
+                )
+            },
+            Option::None => Option::None,
+        }
+    }
+
+    fn grow(inout self) {
+        let cap = wrapping_mul(self.slots.len(), 2);
+        let mask = wrapping_sub(cap, 1);
+        self.slots.clear();
+        self.slots.resize(cap, 0);
+        self.mask = mask;
+        let n = self.hashes.len();
+        let mut id: u64 = 0;
+        loop {
+            if id >= n {
+                break;
+            }
+            let h = match self.hashes.try_get(id) {
+                Option::Some(x) => x,
+                Option::None => 0,
+            };
+            let mut i = h & mask;
+            loop {
+                let v = match self.slots.try_get(i) {
+                    Option::Some(x) => x,
+                    Option::None => 1,
+                };
+                if v == 0 {
+                    break;
+                }
+                i = wrapping_add(i, 1) & mask;
+            }
+            self.slots.try_set(i, wrapping_add(wrapping_u32(id), 1));
+            id = wrapping_add(id, 1);
+        }
+    }
+
+    // The symbol for `s`, interning it if it is new.
+    pub fn intern(inout self, in s: Str) -> Symbol {
+        let h = hash_str(in s);
+        let i = self.probe(in s, h);
+        let v = match self.slots.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        if v != 0 {
+            Symbol {
+                id: wrapping_sub(v, 1)
+            }
+        } else {
+            let id = self.hashes.len();
+            self.text.push_str(in s);
+            let end = self.text.len();
+            self.starts.push(end);
+            self.hashes.push(h);
+            self.slots.try_set(i, wrapping_add(wrapping_u32(id), 1));
+            // Keep the load factor at most 1/2.
+            if wrapping_mul(self.hashes.len(), 2) > self.slots.len() {
+                self.grow();
+            }
+            Symbol {
+                id: wrapping_u32(id)
+            }
+        }
+    }
+
+    // The byte length of `sym`'s text (0 for an unknown symbol).
+    pub fn symbol_len(in self, sym: Symbol) -> u64 {
+        let (a, b) = self.range(widen_u64(sym.id));
+        wrapping_sub(b, a)
+    }
+
+    // Whether `sym` was handed out by this interner.
+    pub fn contains(in self, sym: Symbol) -> bool {
+        widen_u64(sym.id) < self.hashes.len()
+    }
+
+    // Whether `sym` spells `s`.
+    pub fn symbol_eq(in self, sym: Symbol, in s: Str) -> bool {
+        if widen_u64(sym.id) >= self.hashes.len() {
+            false
+        } else {
+            self.spells(widen_u64(sym.id), in s)
+        }
+    }
+
+    // Append `sym`'s text to `out`; `false` (nothing appended) for a symbol
+    // this interner did not hand out.
+    pub fn resolve_into(in self, sym: Symbol, inout out: String) -> bool {
+        if widen_u64(sym.id) >= self.hashes.len() {
+            false
+        } else {
+            let (a, b) = self.range(widen_u64(sym.id));
+            out.push_str(in self.text[a..b]);
+            true
+        }
+    }
+
+    // The byte range of `sym` in `text_bytes`, for reading it in place.
+    pub fn span(in self, sym: Symbol) -> (u64, u64) {
+        self.range(widen_u64(sym.id))
+    }
+
+    // The byte at offset `i` of the shared text (see `span`).
+    pub fn text_byte(in self, i: u64) -> Option[u8] {
+        self.text.try_byte_at(i)
+    }
+}

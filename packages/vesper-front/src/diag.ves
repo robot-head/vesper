@@ -1,0 +1,80 @@
+// Diagnostics: rows of `code` (1 for E0001, 2 for E0002, 3 for E0003),
+// `start` and `end`, with each message's bytes in `text` from `at`. The
+// messages are the Rust parser's, byte for byte.
+
+use self::Diags;
+use self::util::{
+    narrow,
+    w32,
+    push_decimal
+};
+
+pub fn diags_new() -> Diags {
+    Diags {
+        code: ChunkSeq::new[u8](),
+        start: ChunkSeq::new[u32](),
+        end: ChunkSeq::new[u32](),
+        at: ChunkSeq::new[u32](),
+        text: ChunkSeq::new[u8]()
+    }
+}
+
+pub fn diag_push(inout d: Diags, code: u8, start: u64, end: u64, in message: Slice[u8]) {
+    d.code.push(code);
+    d.start.push(narrow(start));
+    d.end.push(narrow(end));
+    d.at.push(narrow(d.text.len()));
+    d.text.extend(in message);
+}
+
+// `push_limit`: the limit diagnostic replaces the last one when full.
+pub fn diag_push_limit(
+    inout d: Diags,
+    code: u8,
+    start: u64,
+    end: u64,
+    in message: Slice[u8],
+    max: u64
+) {
+    if d.code.len() >= max {
+        let last = wrapping_sub(d.code.len(), 1);
+        let at = w32(in d.at, last);
+        d.code.truncate(last);
+        d.start.truncate(last);
+        d.end.truncate(last);
+        d.at.truncate(last);
+        d.text.truncate(at);
+    }
+    diag_push(inout d, code, start, end, in message);
+}
+
+// `LexLimit` as Display prints it. Kinds: 0 SourceBytes, 1 Tokens,
+// 2 Diagnostics, 3 Depth.
+pub fn limit_message(inout m: ChunkSeq[u8], kind: u64, limit: u64, retained: u64) {
+    limit_message_observed(inout m, kind, limit, wrapping_add(limit, 1), retained);
+}
+
+pub fn limit_message_observed(
+    inout m: ChunkSeq[u8],
+    kind: u64,
+    limit: u64,
+    observed: u64,
+    retained: u64
+) {
+    if kind == 0 {
+        m.extend(in "SourceBytes".as_bytes());
+    } else if kind == 1 {
+        m.extend(in "Tokens".as_bytes());
+    } else if kind == 2 {
+        m.extend(in "Diagnostics".as_bytes());
+    } else {
+        m.extend(in "Depth".as_bytes());
+    }
+    m.extend(in " limit ".as_bytes());
+    push_decimal(inout m, limit);
+    m.extend(in "; observed ".as_bytes());
+    push_decimal(inout m, observed);
+    m.extend(in "; retained ".as_bytes());
+    push_decimal(inout m, retained);
+    m.extend(in " bytes".as_bytes());
+}

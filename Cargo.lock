@@ -5564,7 +5564,6 @@ dependencies = [
  "vesper-aegis-seed",
  "vesper-alloc-seed",
  "vesper-beacon-seed",
- "vesper-bench-pmu",
  "vesper-bench-seed",
  "vesper-chrono",
  "vesper-core",
@@ -5576,16 +5575,13 @@ dependencies = [
  "vesper-fiber-abi",
  "vesper-fmt",
  "vesper-forge",
- "vesper-grammar-seed",
  "vesper-highlight",
  "vesper-kinetic-seed",
- "vesper-lean-syntax",
+ "vesper-lean-syntax-seed",
  "vesper-lint",
  "vesper-loom-admission",
- "vesper-loom-audit-seed",
  "vesper-loom-calculus-seed",
  "vesper-loom-cas",
- "vesper-loom-solver-seed",
  "vesper-loom-trust",
  "vesper-lsp",
  "vesper-migrate",
@@ -5598,7 +5594,8 @@ dependencies = [
  "vesper-serde-seed",
  "vesper-silicon-seed",
  "vesper-simd",
- "vesper-span",
+ "vesper-span-seed",
+ "vesper-std-host",
  "vesper-syntax",
  "vesper-tensor-seed",
  "vesper-test",
@@ -5813,6 +5810,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-cranelift-sys"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "cranelift-module",
+ "cranelift-native 0.125.4",
+ "cranelift-object",
+ "target-lexicon",
+ "vesper",
+ "vesper-ffi",
+]
+
+[[package]]
 name = "vesper-crucible"
 version = "0.1.0"
 dependencies = [
@@ -5839,7 +5850,7 @@ dependencies = [
  "ariadne",
  "serde_json",
  "vesper-core",
- "vesper-span",
+ "vesper-span-seed",
 ]
 
 [[package]]
@@ -5915,7 +5926,10 @@ dependencies = [
  "snap",
  "tempfile",
  "tokio",
+ "vesper-bench",
  "vesper-loom-cas",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-quarry",
  "vesper-simpulse",
  "zstd 0.13.4",
@@ -5926,7 +5940,7 @@ name = "vesper-fmt"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "vesper-lean-syntax",
+ "vesper-lean-syntax-seed",
  "vesper-syntax",
 ]
 
@@ -6008,6 +6022,77 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-hybrid"
+version = "0.1.0"
+dependencies = [
+ "ariadne",
+ "blake3",
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native 0.125.4",
+ "cranelift-object",
+ "egg",
+ "egglog",
+ "find-msvc-tools",
+ "getrandom 0.4.3",
+ "libc",
+ "object 0.37.3",
+ "petgraph",
+ "salsa",
+ "serde",
+ "serde_json",
+ "target-lexicon",
+ "vesper",
+ "vesper-aegis-seed",
+ "vesper-alloc-seed",
+ "vesper-beacon-seed",
+ "vesper-bench-pmu",
+ "vesper-bench-seed",
+ "vesper-chrono",
+ "vesper-core",
+ "vesper-crucible-seed",
+ "vesper-diagnostics",
+ "vesper-doc",
+ "vesper-ebpf-seed",
+ "vesper-ffi",
+ "vesper-fiber-abi",
+ "vesper-fmt",
+ "vesper-forge",
+ "vesper-grammar-seed",
+ "vesper-highlight",
+ "vesper-kinetic-seed",
+ "vesper-lean-syntax-seed",
+ "vesper-lint",
+ "vesper-loom-admission",
+ "vesper-loom-audit-seed",
+ "vesper-loom-calculus-seed",
+ "vesper-loom-cas",
+ "vesper-loom-solver-seed",
+ "vesper-loom-trust",
+ "vesper-lsp",
+ "vesper-migrate",
+ "vesper-pact-binding",
+ "vesper-pact-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-pulse",
+ "vesper-resonance-seed",
+ "vesper-semver-seed",
+ "vesper-serde-seed",
+ "vesper-silicon-seed",
+ "vesper-simd",
+ "vesper-span-seed",
+ "vesper-syntax",
+ "vesper-tensor-seed",
+ "vesper-vault",
+ "wasm-encoder 0.261.0",
+ "wit-component",
+ "wit-parser",
+]
+
+[[package]]
 name = "vesper-ignis"
 version = "0.1.0"
 dependencies = [
@@ -6073,6 +6158,16 @@ dependencies = [
 
 [[package]]
 name = "vesper-lean-syntax"
+version = "0.1.0"
+dependencies = [
+ "vesper-bench",
+ "vesper-lean-syntax-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
+]
+
+[[package]]
+name = "vesper-lean-syntax-seed"
 version = "0.1.0"
 
 [[package]]
@@ -6253,7 +6348,7 @@ dependencies = [
  "serde",
  "serde_json",
  "vesper-serde-seed",
- "vesper-span",
+ "vesper-span-seed",
 ]
 
 [[package]]
@@ -6528,6 +6623,29 @@ dependencies = [
 [[package]]
 name = "vesper-span"
 version = "0.1.0"
+dependencies = [
+ "vesper-bench",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-span-seed",
+]
+
+[[package]]
+name = "vesper-span-seed"
+version = "0.1.0"
+
+[[package]]
+name = "vesper-std-driver"
+version = "0.1.0"
+dependencies = [
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-std-host",
+]
+
+[[package]]
+name = "vesper-std-host"
+version = "0.1.0"
 
 [[package]]
 name = "vesper-syntax"
@@ -6567,6 +6685,30 @@ dependencies = [
  "serde",
  "serde_json",
  "vesper-vault",
+]
+
+[[package]]
+name = "vesper-tools"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "cranelift-codegen 0.125.4",
+ "cranelift-native 0.125.4",
+ "libc",
+ "serde",
+ "serde_json",
+ "vesper",
+ "vesper-aegis-seed",
+ "vesper-bench-pmu",
+ "vesper-bench-seed",
+ "vesper-grammar-seed",
+ "vesper-loom-audit-seed",
+ "vesper-loom-calculus-seed",
+ "vesper-loom-cas",
+ "vesper-loom-solver-seed",
+ "vesper-loom-trust",
+ "vesper-semver-seed",
+ "vesper-serde-seed",
 ]
 
 [[package]]

@@ -1,0 +1,149 @@
+// @export abi 3
+// The pilot's fixed-size array library (P3b gaps lane 6 part 2, #1091):
+// array fields of copy structs cross in place as their element cells, so a
+// `[u8; 32]` field is 32 narrow word cells and a `[u64; 16]` field is 16
+// plain words. Arrays of more than eight elements are Rust arrays; shorter
+// ones are Rust tuples, as every homogeneous tuple was before.
+
+// A record with a digest, a word table and a short pair.
+pub copy struct Report {
+    id: u64,
+    hash: [u8; 32],
+    words: [u64; 16],
+    pair: [u8; 2]
+}
+
+// One SACK-style block, and a scoreboard of sixteen of them.
+pub copy struct Block {
+    lo: u64,
+    hi: u64
+}
+
+pub copy struct Board {
+    len: u64,
+    blocks: [Block; 16]
+}
+
+pub fn report_new(id: u64, seed: u8) -> Report {
+    let mut r = Report {
+        id: id,
+        hash: [seed; 32],
+        words: [0; 16],
+        pair: [1, 2]
+    };
+    for i in 0..32 {
+        r.hash[i] = wrapping_u8(wrapping_add(widen_u64(seed), i));
+    }
+    for i in 0..16 {
+        r.words[i] = wrapping_mul(id, i);
+    }
+    r
+}
+
+pub fn report_sum(in r: Report) -> u64 {
+    let mut s = r.id;
+    for i in 0..32 {
+        s = wrapping_add(s, widen_u64(r.hash[i]));
+    }
+    for i in 0..r.words.len() {
+        s = wrapping_add(s, r.words[i]);
+    }
+    wrapping_add(s, wrapping_add(widen_u64(r.pair[0]), widen_u64(r.pair[1])))
+}
+
+// Masked indices are proved in bounds; `at` is not, so `set` may raise.
+pub fn report_bump(inout r: Report, at: u64) {
+    r.words[at & 15] = wrapping_add(r.words[at & 15], 1);
+    r.hash[at & 31] = 255;
+    r.pair[0] = wrapping_u8(wrapping_add(widen_u64(r.pair[0]), 1));
+}
+
+pub fn report_set(inout r: Report, at: u64, v: u64) eff [Fail[RuntimeError]] {
+    r.words.set(at, v);
+}
+
+// A whole array as a parameter and a result.
+pub fn words_total(in xs: [u64; 16]) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..16 {
+        s = wrapping_add(s, xs[i]);
+    }
+    s
+}
+
+pub fn words_reversed(in xs: [u64; 16]) -> [u64; 16] {
+    let mut out: [u64; 16] = [0; 16];
+    for i in 0..16 {
+        out[i] = xs[15 - i];
+    }
+    out
+}
+
+pub fn board_new() -> Board {
+    Board {
+        len: 0,
+        blocks: [
+            Block {
+                lo: 0,
+                hi: 0
+            }; 16
+        ]
+    }
+}
+
+// Adds a block, merging with an overlapping one; a full board drops the
+// lowest block. Returns the number of blocks.
+pub fn board_add(inout b: Board, lo: u64, hi: u64) -> u64 {
+    let mut merged = false;
+    for i in 0..16 {
+        if !merged && i < b.len {
+            let x = b.blocks[i];
+            if lo <= x.hi && x.lo <= hi {
+                let nlo = if lo < x.lo {
+                    lo
+                } else {
+                    x.lo
+                };
+                let nhi = if hi > x.hi {
+                    hi
+                } else {
+                    x.hi
+                };
+                b.blocks[i] = Block {
+                    lo: nlo,
+                    hi: nhi
+                };
+                merged = true;
+            }
+        }
+    }
+    if !merged {
+        if b.len < 16 {
+            b.blocks[b.len & 15] = Block {
+                lo: lo,
+                hi: hi
+            };
+            b.len = wrapping_add(b.len, 1);
+        } else {
+            for i in 0..15 {
+                b.blocks[i] = b.blocks[i + 1];
+            }
+            b.blocks[15] = Block {
+                lo: lo,
+                hi: hi
+            };
+        }
+    }
+    b.len
+}
+
+pub fn board_covered(in b: Board) -> u64 {
+    let mut s: u64 = 0;
+    for i in 0..16 {
+        if i < b.len {
+            let x = b.blocks[i];
+            s = wrapping_add(s, wrapping_sub(x.hi, x.lo));
+        }
+    }
+    s
+}

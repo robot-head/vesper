@@ -1,0 +1,64 @@
+// Integer and table helpers. Front-end arithmetic stays far below 2^32
+// (sources are at most 1 MiB), so it is `wrapping_*`; reads past the end of
+// a table give 0, which no caller relies on.
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn add(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b)
+}
+
+pub fn max64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+pub fn narrow(x: u64) -> u32 {
+    wrapping_u32(x)
+}
+
+pub fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+pub fn u8_at(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn w32(in s: ChunkSeq[u32], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+// Appends the decimal digits of `v`.
+pub fn push_decimal(inout out: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        push_decimal(inout out, v / 10);
+    }
+    out.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+// `x << s` for `s < 64`.
+pub fn shl(x: u64, s: u32) -> u64 {
+    wrapping_shl_u64(x, s)
+}

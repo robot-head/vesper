@@ -239,6 +239,51 @@ fn effectful_sink_slots_consume_once() {
 }
 
 #[test]
+fn aborting_handler_frees_a_consumed_box() {
+    // The `sink self` value leaves the box before the call, so a handler
+    // that never resumes leaks no block (`execute` counts them).
+    let src = "effect Stop { fn stop(v: i64) -> i64; }
+struct Order { id: i64, qty: i64 }
+trait Settle { fn settle(sink self) -> i64 eff [Stop]; }
+impl Settle for Order {
+    fn settle(sink self) -> i64 eff [Stop] {
+        let Order { id, qty } = self;
+        wrapping_add(Stop::stop(wrapping_add(id, qty)), 1000)
+    }
+}
+fn main() -> i64 {
+    let boxed: Box[dyn Settle] = Box::new(Order { id: 3, qty: 2 });
+    handle Stop in { boxed.settle() } with {
+        return x => x,
+        stop(v, k) => wrapping_add(v, 100),
+    }
+}
+";
+    assert_eq!(execute(src), "105");
+}
+
+#[test]
+fn dispatch_skips_vtables_the_program_never_builds() {
+    // `unused` boxes a `Count`, so its vtable is in the world, but nothing
+    // reachable from `main` compiles `Count`'s slots.
+    let src = format!(
+        "{NET}fn unused() -> i64 {{
+    let b: Box[dyn Transport] = Box::new(Count {{ n: 0 }});
+    b.peek()
+}}
+fn main() -> i64 {{
+    let mut b: Box[dyn Transport] = Box::new(Echo {{ k: 2 }});
+    handle Net in {{ b.send(5) }} with {{
+        return x => x,
+        emit(v, k) => k(wrapping_mul(v, 3)),
+    }}
+}}
+"
+    );
+    assert_eq!(execute(&src), "21");
+}
+
+#[test]
 fn slot_effects_reach_the_callers_row() {
     // The trait method's handler effect flows to the caller as for a static
     // call: a caller without `Net` in its row is refused.

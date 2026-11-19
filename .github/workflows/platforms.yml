@@ -137,6 +137,10 @@ jobs:
         run: |
           cargo build --locked --bin vesper
           VESPER_NATIVE_BINARY=target/debug/vesper scripts/ci/test-native-executables.sh
+      - name: Test the Cranelift C-ABI shim
+        # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
+        # crates/vesper-cranelift-sys, links the object it builds and runs it.
+        run: cargo test --locked -p vesper-cranelift-sys
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the
@@ -180,6 +184,10 @@ jobs:
         run: |
           cargo build --locked --bin vesper
           VESPER_NATIVE_BINARY=target/debug/vesper.exe VESPER_NATIVE_SUFFIX=.exe scripts/ci/test-native-executables.sh
+      - name: Test the Cranelift C-ABI shim
+        # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
+        # crates/vesper-cranelift-sys, links the object it builds and runs it.
+        run: cargo test --locked -p vesper-cranelift-sys
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the

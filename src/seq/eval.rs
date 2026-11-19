@@ -83,20 +83,39 @@ impl Runtime<'_> {
                 outcome => Ok(outcome),
             };
         }
-        if let SeqOp::BoundsGuard { inclusive } = op {
-            let lo = index(arg(0)?)?;
-            let hi = index(arg(1)?)?;
-            let mut inside = true;
-            for pair in args.get(2..).unwrap_or_default().chunks(2) {
-                let [s, offset] = pair else {
-                    return Err("bounds guard needs a sequence and an offset".into());
-                };
-                let len = u128::from(view(s)?.2 as u64);
-                let end = u128::from(index(offset)?) + u128::from(hi);
-                inside &= if inclusive { end < len } else { end <= len };
-            }
+        if let SeqOp::BoundsGuard { inclusive, form } = op {
+            let lo = u128::from(index(arg(0)?)?);
+            let hi = u128::from(index(arg(1)?)?);
+            let len = u128::from(view(arg(2)?)?.2 as u64);
+            let (plus, minus) = (usize::from(form.plus), usize::from(form.minus));
+            let terms = args
+                .get(3..3 + plus + minus)
+                .ok_or("bounds guard lacks an index term")?;
+            let ok = match args.get(3 + plus + minus) {
+                Some(Value::Bool(ok)) => *ok,
+                Some(_) => return Err("bounds guard needs a bool".into()),
+                None => true,
+            };
+            let (plus, minus) = terms.split_at(plus);
+            let sum = |vs: &[Value]| -> Result<u128, String> {
+                vs.iter()
+                    .try_fold(0u128, |acc, v| Ok(acc + u128::from(index(v)?)))
+            };
+            let (plus, minus) = (sum(plus)?, sum(minus)?);
             let empty = if inclusive { lo > hi } else { lo >= hi };
-            return Ok(V(Value::Bool(empty || inside)));
+            let last = if inclusive { hi } else { hi.saturating_sub(1) };
+            // The index at both ends of the range, exactly; a sum that does
+            // not fit 64 bits fails the guard, as the native guard's
+            // overflow tests do.
+            let fits = |i: u128| {
+                let (p, n) = if form.negated {
+                    (plus, minus + i)
+                } else {
+                    (plus + i, minus)
+                };
+                p <= u128::from(u64::MAX) && n <= u128::from(u64::MAX) && p >= n && p - n < len
+            };
+            return Ok(V(Value::Bool(ok && (empty || (fits(lo) && fits(last))))));
         }
         Ok(match op {
             SeqOp::New => V(Value::Seq(Rc::new(RefCell::new(Vec::new())))),

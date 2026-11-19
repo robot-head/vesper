@@ -129,7 +129,17 @@ fn main() -> u64 {{
         read("x", "a"),
         read("y", "b")
     );
-    assert!(hoisted_places(&source, "walk").is_empty());
+    // Neither is hoisted before the loop; both are borrowed parameters the
+    // function never changes, read once at entry instead, whose header
+    // words Cranelift loads as read-only memory (#1088).
+    let c = accepted(&source);
+    let mut program = ir::lower_world(&c.world);
+    ir_opt::optimize(&c.world, &mut program).unwrap();
+    vesper::fip::elaborate_non_fip_drops(&c.world, &mut program);
+    vesper::bounds_hoist::run(&mut program);
+    let hoists = vesper::bounds_hoist::header_hoists(&program.functions["walk"]);
+    assert!(hoists.iter().all(|h| h.entry), "no loop hoist");
+    assert_eq!(hoisted_places(&source, "walk"), vec!["a", "b"]);
     assert_eq!(agree("two", &source), (8 * 36 + 2 * 9).to_string());
 }
 

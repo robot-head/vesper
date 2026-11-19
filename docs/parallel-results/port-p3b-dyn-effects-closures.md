@@ -4,10 +4,9 @@ Claim: #1063 (port wave P3b lane 1). Baseline: `main` at `8212ddf`.
 Follow-up to second-class `dyn` (#1036, PR #1051) and boxed objects
 (#1057, PR #1060).
 
-The lane lands in two parts. Part 1 (this report's first section) lets trait
-methods that perform handler and `Ffi[Lib]` effects be called through every
-object form. Part 2 adds function objects (`in dyn Fn`, `inout dyn FnMut`,
-`Box[dyn FnMut]`, `Box[dyn FnOnce]`).
+Part 1 lets trait methods that perform handler and `Ffi[Lib]` effects be
+called through every object form. Part 2 adds function objects (`in dyn Fn`,
+`inout dyn FnMut`, `Box[dyn FnMut]`, `Box[dyn FnOnce]`).
 
 ## Part 1: effectful slots
 
@@ -32,7 +31,11 @@ object form. Part 2 adds function objects (`in dyn Fn`, `inout dyn FnMut`,
   backend already uses for closures (a switch over the statically known
   targets of a function value). The receiver may be an `in`/`inout`/`sink`
   `dyn` parameter, a boxed local or field, or a boxed sequence element; a
-  `sink self` method on a boxed receiver frees the block after the call.
+  `sink self` method on a boxed receiver moves the value to the stack and
+  frees the block before the call, so a handler that never resumes leaks
+  nothing. The switch covers only vtables whose slot functions the program
+  compiles (a vtable built only in unreachable code is skipped). Both points
+  were review findings on #1080, fixed in #1084.
   Slots whose methods perform only `Fail`, capability or `Ffi[Lib]` effects
   keep the compiled slot function and the indirect call.
 - **Evaluator** (`src/runtime.rs`): no change needed. It dispatches through
@@ -109,7 +112,115 @@ The dispatch adds one load and compare per vtable of the object type.
   sequence leaks the sequence natively, on `main` too and called
   statically. The `sink self` test uses a value without a sequence.
 
-### Stage 1 guard
+## Stage 1 guard
 
 No file under `src/verified_codegen/**`, `lean/**`, `bootstrap/**` or
 `packages/vesper-compiler/**` changed, nor `src/ir.rs` or `ir_opt::optimize`.
+
+## Part 2: function objects
+
+### What changed
+
+- **Syntax** (`crates/vesper-syntax`): `dyn Fn(A, ..) -> R eff [E]`,
+  `dyn FnMut(..)` and `dyn FnOnce(..)` parse wherever `dyn Trait` does,
+  including `Box[..]` and `Box::new[dyn FnMut(..)](..)`. The function-type
+  tail is shared with `fn(..)` types.
+- **Lowering** (NEW `src/dyn_fn.rs`, run first in
+  `pact_frontend::check_package_with`): each distinct function-object type
+  becomes a hidden object-safe trait `__FnObject{Kind}_{hash}` with one
+  method `call` (`in self` for `Fn`, `inout self` for `FnMut`, `sink self`
+  for `FnOnce`). A closure literal where a function object is expected
+  becomes a hidden struct of its captures plus a conformance whose `call`
+  body is the closure body reading captures from `self` (a `FnOnce` body
+  destructures `self` instead, so it consumes the object whole). Calls
+  `f(x)` on function-object names, fields and sequence elements become
+  `f.call(x)`. An `inout` lend of a closure literal binds the object to a
+  local of the call's block. Everything after that is the existing object
+  machinery, so the native backend, the JIT and the evaluator needed no new
+  code, and effectful closures go through Part 1's dispatch. Diagnostics in
+  generated code are reported at the closure or call they came from.
+- **Box drop elaboration** (`src/fip.rs`): a bounds-hoisted `s[i]`
+  (`SeqOp::Hoisted(Get)`) of a boxed element is treated like a checked one,
+  both by the loop rule and by Part 1's lend fix, so a loop over a field
+  holding `ChunkSeq[Box[dyn ..]]` compiles after hoisting.
+
+### Coercion sites (Stage 1)
+
+The lowering runs before type checking, so it finds the expected type
+syntactically: a call argument whose declared parameter is a function object
+(functions, `Type::method` paths, and method calls by receiver type, or by
+name when every candidate agrees), `Box::new(closure)` expecting a boxed one
+(`let` annotation, call parameter, struct field, function result, `return`,
+`if`/`match` branches, `s.push(..)` on a sequence of them), and an explicit
+`Box::new[dyn FnMut(..)](closure)`. Capture types come from the binding's
+annotation or an evident initializer (literal, struct literal, call of a
+declared non-generic function, `Box::new[T]`, `X::new[T]`); otherwise E0102
+asks for an annotation. Closures whose captures or signature mention the
+enclosing function's type parameters are refused (E0633). Captures move
+into the object (`[T-Abs]`), so a `FnMut` object's state persists across
+its own calls, not in the caller's locals.
+
+### Manuscript change
+
+§7.3 gains the item "Function Objects (`dyn Fn`, `dyn FnMut`, `dyn
+FnOnce`)": the type forms, that they are trait objects with one `call`
+method, the coercion sites, the no-allocation lend and one-block box, `FnMut`
+state, `FnOnce` consumption, linear captures (E0310, E0205), call syntax and
+the Stage 1 annotation and generics limits.
+
+### Tests
+
+`tests/dyn_fn.rs` (same harness as Part 1):
+
+- closures lent as `in dyn Fn` (nested too) and `inout dyn FnMut` (state
+  persists across calls within one lend)
+- `ChunkSeq[Box[dyn FnMut]]` callbacks in a struct field, called in a loop,
+  from helper functions returning boxed closures and from an explicit
+  `Box::new[dyn FnMut(..)]`
+- `Box[dyn FnOnce]` called, passed on `sink` and called, and dropped
+  uncalled, each capturing a sequence (free counts checked)
+- `in dyn Fn`/`inout dyn FnMut` lends allocate nothing (allocation counter)
+- effectful closures: `inout dyn FnMut(..) eff [Log]` and a boxed `FnMut`
+  performing `Log` under a stateful handler
+- rejections: mutating a `Fn` capture (E0307, reported in the source), an
+  unannotated capture (E0102), a second-class escape (E0631), a missing
+  effect in the caller (E0401), arity (E0207), linear captures (E0310,
+  E0205), generic captures (E0633)
+
+### Benchmark
+
+`cargo test --test dyn_fn -- --ignored --nocapture bench`, 50 million calls,
+optimized JIT:
+
+| call | ns per call |
+|---|---|
+| `in Box[dyn Fn(u64) -> u64]` | 4.8 |
+| `in dyn Fn(u64) -> u64` (closure literal lent per call) | 5.3 |
+| `fn(u64) -> u64` value (specialized at the call) | 3.2 |
+| direct call | 3.5 |
+
+### What this unblocks
+
+- Chorus: `Box<dyn Transport>` over effectful transports (Part 1) and
+  callback boxes (Part 2).
+- Flux: sources and sinks performing storage effects through `in dyn` /
+  `inout dyn` (Part 1).
+- Kinetic: the `dyn FnMut` contact pass as `inout dyn FnMut(..)` (Part 2;
+  its state lives in the object, so a pass that accumulates into the
+  caller's locals should return or hold the accumulator).
+- P3a workarounds: Pact, Silicon and Aegis enum dispatch can move to
+  closures where the closures capture concrete types.
+
+### Remaining gaps
+
+- Run-time evidence for compiled slots (open-world objects, separately
+  compiled code): needs the handler-ABI backend's fibers and records.
+- Closures capturing generic values, and coercion sites only the checker
+  could find (for example a closure bound by `let` and passed later); a
+  type-directed lowering would need the coercion inside the checker.
+- Borrowing captures (`&mut` capture of a caller local) for lent `FnMut`.
+- `inout` box parameters in functions with loops (lane 2, #1064).
+- Associated types on objects, several models per (object, type) pair and
+  `Rc`/`Arc` of objects: these need, respectively, projection types in the
+  object type, the conformance in the vtable identity, and a shared block
+  with a count word before the vtable.

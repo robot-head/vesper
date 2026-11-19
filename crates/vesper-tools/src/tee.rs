@@ -40,3 +40,17 @@ pub fn measure_executable(path: &Path) -> Result<(), String> {
     println!("tee measurement {} (RTMR {})", out.display(), hex(&rtmr));
     Ok(())
 }
+
+/// `vesper-tee measure <executable>`: what `vesper build --tee` runs.
+pub fn run(args: Vec<String>) -> Result<(), String> {
+    match args.as_slice() {
+        [help] if help == "--help" || help == "-h" => {
+            println!(
+                "Usage: vesper-tee measure <executable>\n  Write <executable>.tee.json: the TDX RTMR / CCA REM single-extend values\n  (vesper build --tee runs this after linking)"
+            );
+            Ok(())
+        }
+        [measure, path] if measure == "measure" => measure_executable(Path::new(path)),
+        _ => Err("usage: vesper-tee measure <executable>".into()),
+    }
+}

@@ -1,0 +1,1756 @@
+// @vesper/lean-syntax: Vesper port of vesper-lean-syntax (self-hosting
+// wave SH0 lane 6, #1128): the printer (`Term::render`, `Module::render`),
+// the name and literal checks (`Ident::new`, `NatLiteral::decimal`,
+// `ModuleName::new`) and the reference walks (`Term::free_references`,
+// `Term::references`).
+//
+// The Rust wrapper (src/port.rs) encodes a syntax tree as one prefix-order
+// word stream over a text pool (`encode_*` there documents every node). A
+// text is two words: its offset and length in the pool. The printer appends
+// to one `String`; an error stops it with the code of the first error in the
+// Rust printer's evaluation order (see `App`).
+
+// The error codes, mapped to the Rust messages by src/port.rs.
+pub copy enum LeanError {
+    // 1: "Lean has no one-element tuple syntax"
+    OneTuple,
+    // 2: "lambda/forall requires at least one binder"
+    NoBinders,
+    // 3: "product type needs at least two elements"
+    ShortProduct,
+    // 4: "empty match syntax is unsupported"
+    EmptyMatch,
+    // 5: "record update needs at least one field"
+    EmptyUpdate,
+    // 6: "mutable do bindings require one local identifier"
+    MutablePattern,
+    // 7: "empty statement match is unsupported; use nomatch"
+    EmptyStatementMatch,
+    // 8: "option value has the wrong fixed type"
+    OptionType,
+    // 9: "empty mutual group"
+    EmptyMutual,
+    // 10: "root-qualified namespace commands are unsupported"
+    RootedNamespace
+}
+
+// The printer state: the output and the first error code (0 while none).
+struct P {
+    out: String,
+    err: u64
+}
+
+fn w(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// Read the next word and advance.
+fn take(in s: Slice[u64], inout at: u64) -> u64 {
+    let x = w(in s, at);
+    at = wrapping_add(at, 1);
+    x
+}
+
+fn fail(inout p: P, code: u64) {
+    if p.err == 0 {
+        p.err = code;
+    }
+}
+
+// Decimal digits of `x`.
+fn put_u64(inout out: String, x: u64) {
+    if x < 10 {
+        let ok = out.push_char(wrapping_add(wrapping_u32(x), 48));
+        return;
+    }
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new();
+    let mut v = x;
+    loop {
+        if v == 0 {
+            break;
+        }
+        let q = v / 10;
+        digits.push(wrapping_u8(wrapping_sub(v, wrapping_mul(q, 10))));
+        v = q;
+    }
+    let n = digits.len();
+    for i in 0..n {
+        let d = match digits.try_get(wrapping_sub(wrapping_sub(n, 1), i)) {
+            Option::Some(d) => d,
+            Option::None => 0,
+        };
+        let ok = out.push_char(wrapping_add(widen_u32(d), 48));
+    }
+}
+
+// The decimal form of the i128 whose two's-complement words are (lo, hi).
+fn put_i128(inout out: String, lo: u64, hi: u64) {
+    let mut l = lo;
+    let mut h = hi;
+    if (hi >> 63) == 1 {
+        out.push_str("-");
+        // The magnitude: two's complement negation (right for i128::MIN).
+        l = wrapping_sub(0, lo);
+        h = if lo == 0 {
+            wrapping_sub(0, hi)
+        } else {
+            wrapping_sub(18446744073709551615, hi)
+        };
+    }
+    if h == 0 {
+        put_u64(inout out, l);
+        return;
+    }
+    let mut digits: ChunkSeq[u8] = ChunkSeq::new();
+    loop {
+        if h == 0 && l == 0 {
+            break;
+        }
+        // (h, l) / 10 by 32-bit limbs.
+        let qh = h / 10;
+        let r = wrapping_sub(h, wrapping_mul(qh, 10));
+        let x = (r << 32) | (l >> 32);
+        let q1 = x / 10;
+        let r1 = wrapping_sub(x, wrapping_mul(q1, 10));
+        let y = (r1 << 32) | (l & 4294967295);
+        let q0 = y / 10;
+        let r0 = wrapping_sub(y, wrapping_mul(q0, 10));
+        digits.push(wrapping_u8(r0));
+        h = qh;
+        l = (q1 << 32) | q0;
+    }
+    let n = digits.len();
+    for i in 0..n {
+        let d = match digits.try_get(wrapping_sub(wrapping_sub(n, 1), i)) {
+            Option::Some(d) => d,
+            Option::None => 0,
+        };
+        let ok = out.push_char(wrapping_add(widen_u32(d), 48));
+    }
+}
+
+// Pool text `off .. off + len`.
+fn text(inout p: P, in pool: Str, off: u64, len: u64) {
+    p.out.push_str(pool[off..wrapping_add(off, len)]);
+}
+
+// `Printer::ident`: «name».
+fn ident(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let off = take(in s, inout at);
+    let len = take(in s, inout at);
+    p.out.push_str("«");
+    text(inout p, in pool, off, len);
+    p.out.push_str("»");
+}
+
+// `Printer::name`: rooted flag, component count, components.
+fn name(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let rooted = take(in s, inout at);
+    let n = take(in s, inout at);
+    if rooted == 1 {
+        p.out.push_str("_root_.");
+    }
+    for i in 0..n {
+        if i > 0 {
+            p.out.push_str(".");
+        }
+        ident(inout p, in s, in pool, inout at);
+    }
+}
+
+fn is_control(c: u32) -> bool {
+    c < 32 || (c >= 127 && c <= 159)
+}
+
+fn hex_digit(d: u32) -> u32 {
+    if d < 10 {
+        wrapping_add(d, 48)
+    } else {
+        wrapping_add(d, 87)
+    }
+}
+
+// `Printer::quoted`: the pool text between `delimiter`s, escaped.
+fn quoted(inout p: P, in pool: Str, off: u64, len: u64, delimiter: u32) {
+    let ok = p.out.push_char(delimiter);
+    let end = wrapping_add(off, len);
+    let mut i = off;
+    // The start of the run of chars copied unchanged.
+    let mut run = off;
+    loop {
+        if i >= end {
+            break;
+        }
+        let (c, next) = match pool.next_char(i) {
+            Option::Some(d) => d,
+            Option::None => (0, end),
+        };
+        let plain = !(
+            c
+                == 92
+                || c
+                == 10
+                || c
+                == 13
+                || c
+                == 9
+                || c
+                == delimiter
+                || (is_control(c) && c <= 255)
+                || c
+                == 8232
+                || c
+                == 8233
+        );
+        if !plain {
+            p.out.push_str(pool[run..i]);
+            if c == 92 {
+                p.out.push_str("\\\\");
+            } else if c == 10 {
+                p.out.push_str("\\n");
+            } else if c == 13 {
+                p.out.push_str("\\r");
+            } else if c == 9 {
+                p.out.push_str("\\t");
+            } else if c == delimiter {
+                p.out.push_str("\\");
+                let ok = p.out.push_char(c);
+            } else if c == 8232 {
+                p.out.push_str("\\u2028");
+            } else if c == 8233 {
+                p.out.push_str("\\u2029");
+            } else {
+                p.out.push_str("\\x");
+                let ok = p.out.push_char(hex_digit(c >> 4));
+                let ok = p.out.push_char(hex_digit(c & 15));
+            }
+            run = next;
+        }
+        i = next;
+    }
+    p.out.push_str(pool[run..end]);
+    let ok = p.out.push_char(delimiter);
+}
+
+// A text node: offset and length.
+fn quoted_at(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64, delimiter: u32) {
+    let off = take(in s, inout at);
+    let len = take(in s, inout at);
+    quoted(inout p, in pool, off, len, delimiter);
+}
+
+fn literal(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let off = take(in s, inout at);
+    let len = take(in s, inout at);
+    text(inout p, in pool, off, len);
+}
+
+fn bool_text(inout p: P, b: u64) {
+    if b == 1 {
+        p.out.push_str("true");
+    } else {
+        p.out.push_str("false");
+    }
+}
+
+// `Printer::binder`: kind (0 explicit, 1 implicit, 2 instance), has name,
+// [name], type.
+fn binder(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let kind = take(in s, inout at);
+    let named = take(in s, inout at);
+    if kind == 0 {
+        p.out.push_str("(");
+    } else if kind == 1 {
+        p.out.push_str("{");
+    } else {
+        p.out.push_str("[");
+    }
+    if named == 1 {
+        ident(inout p, in s, in pool, inout at);
+        p.out.push_str(" : ");
+    } else if kind != 2 {
+        p.out.push_str("_ : ");
+    }
+    term(inout p, in s, in pool, inout at);
+    if kind == 0 {
+        p.out.push_str(")");
+    } else if kind == 1 {
+        p.out.push_str("}");
+    } else {
+        p.out.push_str("]");
+    }
+}
+
+// `Printer::binders`: count, binders, joined by spaces.
+fn binders(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let n = take(in s, inout at);
+    for i in 0..n {
+        if i > 0 {
+            p.out.push_str(" ");
+        }
+        binder(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+    }
+}
+
+// `Printer::pattern`.
+fn pattern(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let tag = take(in s, inout at);
+    if tag == 0 {
+        p.out.push_str("_");
+    } else if tag == 1 {
+        ident(inout p, in s, in pool, inout at);
+    } else if tag == 2 {
+        // Constructor: name, count, arguments.
+        let start = at;
+        let rooted = take(in s, inout at);
+        let comps = take(in s, inout at);
+        at = wrapping_add(at, wrapping_mul(comps, 2));
+        let n = take(in s, inout at);
+        let after = at;
+        if n > 0 {
+            p.out.push_str("(");
+        }
+        at = start;
+        name(inout p, in s, in pool, inout at);
+        at = after;
+        for i in 0..n {
+            p.out.push_str(" ");
+            pattern(inout p, in s, in pool, inout at);
+            if p.err != 0 {
+                return;
+            }
+        }
+        if n > 0 {
+            p.out.push_str(")");
+        }
+    } else if tag == 3 {
+        let n = take(in s, inout at);
+        if n == 1 {
+            fail(inout p, 1);
+            return;
+        }
+        p.out.push_str("(");
+        for i in 0..n {
+            if i > 0 {
+                p.out.push_str(", ");
+            }
+            pattern(inout p, in s, in pool, inout at);
+            if p.err != 0 {
+                return;
+            }
+        }
+        p.out.push_str(")");
+    } else if tag == 4 {
+        literal(inout p, in s, in pool, inout at);
+    } else if tag == 5 {
+        let b = take(in s, inout at);
+        bool_text(inout p, b);
+    } else if tag == 6 {
+        quoted_at(inout p, in s, in pool, inout at, 34);
+    } else if tag == 7 {
+        quoted_at(inout p, in s, in pool, inout at, 39);
+    } else if tag == 8 {
+        let lo = take(in s, inout at);
+        let hi = take(in s, inout at);
+        put_i128(inout p.out, lo, hi);
+    } else {
+        // Record: count, (field, pattern) pairs.
+        let n = take(in s, inout at);
+        p.out.push_str("{ ");
+        for i in 0..n {
+            if i > 0 {
+                p.out.push_str(", ");
+            }
+            ident(inout p, in s, in pool, inout at);
+            p.out.push_str(" := ");
+            pattern(inout p, in s, in pool, inout at);
+            if p.err != 0 {
+                return;
+            }
+        }
+        p.out.push_str(" }");
+    }
+}
+
+// `Printer::binding`: pattern, has type, [type], value.
+fn binding(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    pattern(inout p, in s, in pool, inout at);
+    if p.err != 0 {
+        return;
+    }
+    let typed = take(in s, inout at);
+    if typed == 1 {
+        p.out.push_str(" : ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+    }
+    p.out.push_str(" := ");
+    term(inout p, in s, in pool, inout at);
+}
+
+// `Printer::fields`: count, (field, term) pairs.
+fn fields_with(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64, n: u64) {
+    for i in 0..n {
+        if i > 0 {
+            p.out.push_str(", ");
+        }
+        ident(inout p, in s, in pool, inout at);
+        p.out.push_str(" := ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+    }
+}
+
+// Terms separated by `sep`.
+fn terms(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64, n: u64, in sep: Str) {
+    for i in 0..n {
+        if i > 0 {
+            p.out.push_str(sep);
+        }
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+    }
+}
+
+fn binary_op(inout p: P, op: u64) {
+    if op == 0 {
+        p.out.push_str("+");
+    } else if op == 1 {
+        p.out.push_str("-");
+    } else if op == 2 {
+        p.out.push_str("*");
+    } else if op == 3 {
+        p.out.push_str("/");
+    } else if op == 4 {
+        p.out.push_str("%");
+    } else if op == 5 {
+        p.out.push_str("=");
+    } else if op == 6 {
+        p.out.push_str("≠");
+    } else if op == 7 {
+        p.out.push_str("==");
+    } else if op == 8 {
+        p.out.push_str("!=");
+    } else if op == 9 {
+        p.out.push_str("<");
+    } else if op == 10 {
+        p.out.push_str("≤");
+    } else if op == 11 {
+        p.out.push_str(">");
+    } else if op == 12 {
+        p.out.push_str("≥");
+    } else if op == 13 {
+        p.out.push_str("∧");
+    } else if op == 14 {
+        p.out.push_str("∨");
+    } else if op == 15 {
+        p.out.push_str("&&");
+    } else if op == 16 {
+        p.out.push_str("||");
+    } else {
+        p.out.push_str("↔");
+    }
+}
+
+// `Printer::term`. Tags are listed in src/port.rs (`encode_term`).
+fn term(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let tag = take(in s, inout at);
+    if tag == 0 {
+        p.out.push_str("_");
+    } else if tag == 1 {
+        name(inout p, in s, in pool, inout at);
+    } else if tag == 2 {
+        p.out.push_str("Prop");
+    } else if tag == 3 {
+        let level = take(in s, inout at);
+        if level == 0 {
+            p.out.push_str("Type");
+        } else {
+            p.out.push_str("(Type ");
+            put_u64(inout p.out, level);
+            p.out.push_str(")");
+        }
+    } else if tag == 4 {
+        literal(inout p, in s, in pool, inout at);
+    } else if tag == 5 {
+        let b = take(in s, inout at);
+        bool_text(inout p, b);
+    } else if tag == 6 {
+        quoted_at(inout p, in s, in pool, inout at, 34);
+    } else if tag == 7 {
+        quoted_at(inout p, in s, in pool, inout at, 39);
+    } else if tag == 8 {
+        app(inout p, in s, in pool, inout at);
+    } else if tag == 9 || tag == 10 {
+        // Lambda / Forall: binders, body.
+        let n = w(in s, at);
+        if n == 0 {
+            fail(inout p, 2);
+            return;
+        }
+        if tag == 9 {
+            p.out.push_str("(fun ");
+        } else {
+            p.out.push_str("(∀ ");
+        }
+        binders(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        if tag == 9 {
+            p.out.push_str(" => ");
+        } else {
+            p.out.push_str(" , ");
+        }
+        term(inout p, in s, in pool, inout at);
+        p.out.push_str(")");
+    } else if tag == 11 {
+        p.out.push_str("(");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" → ");
+        term(inout p, in s, in pool, inout at);
+        p.out.push_str(")");
+    } else if tag == 12 {
+        let n = take(in s, inout at);
+        if n < 2 {
+            fail(inout p, 3);
+            return;
+        }
+        p.out.push_str("(");
+        terms(inout p, in s, in pool, inout at, n, " × ");
+        p.out.push_str(")");
+    } else if tag == 13 {
+        let n = take(in s, inout at);
+        if n == 1 {
+            fail(inout p, 1);
+            return;
+        }
+        p.out.push_str("(");
+        terms(inout p, in s, in pool, inout at, n, ", ");
+        p.out.push_str(")");
+    } else {
+        term_rest(inout p, in s, in pool, inout at, tag);
+    }
+}
+
+// The rest of `term`, split off to keep each tag chain within the
+// formatter's chain limit.
+fn term_rest(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64, tag: u64) {
+    if tag == 14 {
+        let n = take(in s, inout at);
+        p.out.push_str("[");
+        terms(inout p, in s, in pool, inout at, n, ", ");
+        p.out.push_str("]");
+    } else if tag == 15 {
+        p.out.push_str("(let ");
+        binding(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str("; ");
+        term(inout p, in s, in pool, inout at);
+        p.out.push_str(")");
+    } else if tag == 16 {
+        p.out.push_str("(if ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" then ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" else ");
+        term(inout p, in s, in pool, inout at);
+        p.out.push_str(")");
+    } else if tag == 17 {
+        let n = take(in s, inout at);
+        if n == 0 {
+            fail(inout p, 4);
+            return;
+        }
+        p.out.push_str("(match ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" with ");
+        for i in 0..n {
+            if i > 0 {
+                p.out.push_str(" ");
+            }
+            p.out.push_str("| ");
+            pattern(inout p, in s, in pool, inout at);
+            if p.err != 0 {
+                return;
+            }
+            p.out.push_str(" => ");
+            term(inout p, in s, in pool, inout at);
+            if p.err != 0 {
+                return;
+            }
+        }
+        p.out.push_str(")");
+    } else if tag == 18 {
+        // Project: base, then 0 and a field or 1 and a tuple index.
+        p.out.push_str("(");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(").");
+        let kind = take(in s, inout at);
+        if kind == 0 {
+            ident(inout p, in s, in pool, inout at);
+        } else {
+            let index = take(in s, inout at);
+            put_u64(inout p.out, index);
+        }
+    } else if tag == 19 {
+        p.out.push_str("(");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" : ");
+        term(inout p, in s, in pool, inout at);
+        p.out.push_str(")");
+    } else if tag == 20 {
+        let op = take(in s, inout at);
+        if op == 0 {
+            p.out.push_str("(-");
+        } else if op == 1 {
+            p.out.push_str("(¬ ");
+        } else {
+            p.out.push_str("(!");
+        }
+        term(inout p, in s, in pool, inout at);
+        p.out.push_str(")");
+    } else if tag == 21 {
+        let op = take(in s, inout at);
+        p.out.push_str("(");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" ");
+        binary_op(inout p, op);
+        p.out.push_str(" ");
+        term(inout p, in s, in pool, inout at);
+        p.out.push_str(")");
+    } else if tag == 22 {
+        let n = take(in s, inout at);
+        p.out.push_str("{ ");
+        fields_with(inout p, in s, in pool, inout at, n);
+        p.out.push_str(" }");
+    } else if tag == 23 {
+        // Update: field count, base, fields.
+        let n = take(in s, inout at);
+        if n == 0 {
+            fail(inout p, 5);
+            return;
+        }
+        p.out.push_str("{ ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" with ");
+        fields_with(inout p, in s, in pool, inout at, n);
+        p.out.push_str(" }");
+    } else if tag == 24 {
+        p.out.push_str("(do ");
+        do_body(inout p, in s, in pool, inout at);
+        p.out.push_str(")");
+    } else if tag == 25 {
+        p.out.push_str("rfl");
+    } else if tag == 26 {
+        p.out.push_str("(by decide)");
+    } else {
+        p.out.push_str("(nomatch ");
+        term(inout p, in s, in pool, inout at);
+        p.out.push_str(")");
+    }
+}
+
+// App: argument count, the function's word count, the function, the
+// arguments (0 and a term, or 1, a name and a term). The Rust printer
+// renders the arguments before the function, so an argument's error wins
+// over the function's: on a function error, print the arguments into a
+// scratch state and keep their error if they have one.
+fn app(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let n = take(in s, inout at);
+    let size = take(in s, inout at);
+    if n == 0 {
+        term(inout p, in s, in pool, inout at);
+        return;
+    }
+    p.out.push_str("(");
+    let function = at;
+    term(inout p, in s, in pool, inout at);
+    if p.err != 0 {
+        at = wrapping_add(function, size);
+        let first = args_error(in s, in pool, inout at, n);
+        if first != 0 {
+            p.err = first;
+        }
+        return;
+    }
+    args(inout p, in s, in pool, inout at, n);
+    p.out.push_str(")");
+}
+
+// The first error of the arguments, printed into a scratch state.
+fn args_error(in s: Slice[u64], in pool: Str, inout at: u64, n: u64) -> u64 {
+    let mut scratch = P {
+        out: String::new(),
+        err: 0
+    };
+    args(inout scratch, in s, in pool, inout at, n);
+    let P {
+        out,
+        err
+    }
+    = scratch;
+    err
+}
+
+fn args(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64, n: u64) {
+    for i in 0..n {
+        p.out.push_str(" ");
+        let named = take(in s, inout at);
+        if named == 1 {
+            p.out.push_str("(");
+            ident(inout p, in s, in pool, inout at);
+            p.out.push_str(" := ");
+            term(inout p, in s, in pool, inout at);
+            p.out.push_str(")");
+        } else {
+            term(inout p, in s, in pool, inout at);
+        }
+        if p.err != 0 {
+            return;
+        }
+    }
+}
+
+// `Printer::do_action`: `if`, `match` and `do` keep the do elaborator's
+// context; every other term prints as a term.
+fn do_action(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let tag = w(in s, at);
+    if tag == 16 {
+        at = wrapping_add(at, 1);
+        p.out.push_str("if ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" then ");
+        do_branch(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" else ");
+        do_branch(inout p, in s, in pool, inout at);
+    } else if tag == 17 {
+        at = wrapping_add(at, 1);
+        let n = take(in s, inout at);
+        if n == 0 {
+            fail(inout p, 4);
+            return;
+        }
+        p.out.push_str("match ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" with ");
+        for i in 0..n {
+            if i > 0 {
+                p.out.push_str(" ");
+            }
+            p.out.push_str("| ");
+            pattern(inout p, in s, in pool, inout at);
+            if p.err != 0 {
+                return;
+            }
+            p.out.push_str(" => ");
+            do_branch(inout p, in s, in pool, inout at);
+            if p.err != 0 {
+                return;
+            }
+        }
+    } else if tag == 24 {
+        at = wrapping_add(at, 1);
+        p.out.push_str("do ");
+        do_body(inout p, in s, in pool, inout at);
+    } else {
+        term(inout p, in s, in pool, inout at);
+    }
+}
+
+fn do_branch(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    if w(in s, at) == 24 {
+        at = wrapping_add(at, 1);
+        do_body(inout p, in s, in pool, inout at);
+    } else {
+        p.out.push_str("{ ");
+        do_action(inout p, in s, in pool, inout at);
+        p.out.push_str(" }");
+    }
+}
+
+// Do: statement count, statements, result.
+fn do_body(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let n = take(in s, inout at);
+    p.out.push_str("{ ");
+    for i in 0..n {
+        do_statement(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str("; ");
+    }
+    do_action(inout p, in s, in pool, inout at);
+    p.out.push_str(" }");
+}
+
+// Count, statements; `pure ()` when empty.
+fn do_sequence(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let n = take(in s, inout at);
+    p.out.push_str("{ ");
+    if n == 0 {
+        p.out.push_str("pure ()");
+    }
+    for i in 0..n {
+        if i > 0 {
+            p.out.push_str("; ");
+        }
+        do_statement(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+    }
+    p.out.push_str(" }");
+}
+
+// `Printer::do_statement`. Tags: 0 let (mutable, binding), 1 bind
+// (pattern, action), 2 assign (local, value), 3 expression, 4 typed bind
+// (pattern, type, action), 5 letI (has name, [name], type, value), 6 if
+// (condition, yes, has else, [no]), 7 match (count, scrutinee,
+// (pattern, statements) arms).
+fn do_statement(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let tag = take(in s, inout at);
+    if tag == 0 {
+        let mutable = take(in s, inout at);
+        if mutable == 1 && w(in s, at) != 1 {
+            fail(inout p, 6);
+            return;
+        }
+        p.out.push_str("let ");
+        if mutable == 1 {
+            p.out.push_str("mut ");
+        }
+        binding(inout p, in s, in pool, inout at);
+    } else if tag == 1 {
+        p.out.push_str("let ");
+        pattern(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" ← ");
+        do_action(inout p, in s, in pool, inout at);
+    } else if tag == 2 {
+        ident(inout p, in s, in pool, inout at);
+        p.out.push_str(" := ");
+        term(inout p, in s, in pool, inout at);
+    } else if tag == 3 {
+        do_action(inout p, in s, in pool, inout at);
+    } else if tag == 4 {
+        p.out.push_str("let (");
+        pattern(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" : ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(") ← ");
+        do_action(inout p, in s, in pool, inout at);
+    } else if tag == 5 {
+        p.out.push_str("letI ");
+        let named = take(in s, inout at);
+        if named == 1 {
+            ident(inout p, in s, in pool, inout at);
+            p.out.push_str(" ");
+        }
+        p.out.push_str(": ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" := ");
+        term(inout p, in s, in pool, inout at);
+    } else if tag == 6 {
+        p.out.push_str("if ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" then ");
+        do_sequence(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        let has_else = take(in s, inout at);
+        if has_else == 1 {
+            p.out.push_str(" else ");
+            do_sequence(inout p, in s, in pool, inout at);
+        }
+    } else {
+        let n = take(in s, inout at);
+        if n == 0 {
+            fail(inout p, 7);
+            return;
+        }
+        p.out.push_str("match ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" with ");
+        for i in 0..n {
+            if i > 0 {
+                p.out.push_str(" ");
+            }
+            p.out.push_str("| ");
+            pattern(inout p, in s, in pool, inout at);
+            if p.err != 0 {
+                return;
+            }
+            p.out.push_str(" => ");
+            do_sequence(inout p, in s, in pool, inout at);
+            if p.err != 0 {
+                return;
+            }
+        }
+    }
+}
+
+// Declarations.
+
+fn indent(inout p: P, n: u64) {
+    for i in 0..n {
+        p.out.push_str(" ");
+    }
+}
+
+fn end_line(inout p: P) {
+    p.out.push_str("\n");
+}
+
+// Definition: kind, name, binders, result, body.
+fn definition(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64, ind: u64) {
+    let kind = take(in s, inout at);
+    indent(inout p, ind);
+    if kind == 0 {
+        p.out.push_str("def ");
+    } else if kind == 1 {
+        p.out.push_str("noncomputable def ");
+    } else if kind == 2 {
+        p.out.push_str("partial def ");
+    } else if kind == 3 {
+        p.out.push_str("abbrev ");
+    } else {
+        p.out.push_str("@[simp] def ");
+    }
+    name(inout p, in s, in pool, inout at);
+    p.out.push_str(" ");
+    binders(inout p, in s, in pool, inout at);
+    if p.err != 0 {
+        return;
+    }
+    p.out.push_str(" : ");
+    term(inout p, in s, in pool, inout at);
+    if p.err != 0 {
+        return;
+    }
+    p.out.push_str(" := ");
+    term(inout p, in s, in pool, inout at);
+    end_line(inout p);
+}
+
+// Fields: count, (field, type, has default, [default]).
+fn field_lines(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64, ind: u64) {
+    let n = take(in s, inout at);
+    for i in 0..n {
+        indent(inout p, ind);
+        ident(inout p, in s, in pool, inout at);
+        p.out.push_str(" : ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        let has_default = take(in s, inout at);
+        if has_default == 1 {
+            p.out.push_str(" := ");
+            term(inout p, in s, in pool, inout at);
+            if p.err != 0 {
+                return;
+            }
+        }
+        end_line(inout p);
+    }
+}
+
+// Count, names joined by ", ".
+fn deriving(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64, ind: u64) {
+    let n = take(in s, inout at);
+    if n == 0 {
+        return;
+    }
+    indent(inout p, ind);
+    p.out.push_str("deriving ");
+    for i in 0..n {
+        if i > 0 {
+            p.out.push_str(", ");
+        }
+        name(inout p, in s, in pool, inout at);
+    }
+    end_line(inout p);
+}
+
+// Type declarations: 0 class (name, parameters, fields), 1 inductive
+// (name, parameters, sort, constructors, deriving), 2 structure (name,
+// parameters, fields, deriving).
+fn type_declaration(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64, ind: u64) {
+    let tag = take(in s, inout at);
+    indent(inout p, ind);
+    if tag == 0 {
+        p.out.push_str("class ");
+    } else if tag == 1 {
+        p.out.push_str("inductive ");
+    } else {
+        p.out.push_str("structure ");
+    }
+    name(inout p, in s, in pool, inout at);
+    p.out.push_str(" ");
+    binders(inout p, in s, in pool, inout at);
+    if p.err != 0 {
+        return;
+    }
+    if tag == 1 {
+        p.out.push_str(" : ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+    }
+    p.out.push_str(" where");
+    end_line(inout p);
+    if tag == 1 {
+        // Constructors: count, (name, binders, has result, [result]).
+        let n = take(in s, inout at);
+        for i in 0..n {
+            indent(inout p, wrapping_add(ind, 2));
+            p.out.push_str("| ");
+            ident(inout p, in s, in pool, inout at);
+            p.out.push_str(" ");
+            binders(inout p, in s, in pool, inout at);
+            if p.err != 0 {
+                return;
+            }
+            let has_result = take(in s, inout at);
+            if has_result == 1 {
+                p.out.push_str(" : ");
+                term(inout p, in s, in pool, inout at);
+                if p.err != 0 {
+                    return;
+                }
+            }
+            end_line(inout p);
+        }
+    } else {
+        field_lines(inout p, in s, in pool, inout at, wrapping_add(ind, 2));
+        if p.err != 0 {
+            return;
+        }
+    }
+    if tag != 0 {
+        deriving(inout p, in s, in pool, inout at, wrapping_add(ind, 2));
+    }
+}
+
+// Declarations: 0 instance (has name, [name], binders, type, body), 1
+// set_option (option, value kind, value), 2 definition, 3 type, 4 mutual
+// definitions (count, ..), 5 mutual types (count, ..), 6 namespace (name,
+// count, declarations), 7 theorem (name, binders, proposition, proof), 8
+// example (binders, proposition, proof), 9 #eval, 10 #check.
+fn declaration(inout p: P, in s: Slice[u64], in pool: Str, inout at: u64, ind: u64) {
+    let tag = take(in s, inout at);
+    if tag == 0 {
+        indent(inout p, ind);
+        p.out.push_str("instance ");
+        let named = take(in s, inout at);
+        if named == 1 {
+            name(inout p, in s, in pool, inout at);
+        }
+        p.out.push_str(" ");
+        binders(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" : ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" := ");
+        term(inout p, in s, in pool, inout at);
+        end_line(inout p);
+    } else if tag == 1 {
+        // Option: 0 linter.unusedVariables (bool), 1 maxRecDepth, 2
+        // maxHeartbeats (nat); value kind 0 bool, 1 nat.
+        let option = take(in s, inout at);
+        let kind = take(in s, inout at);
+        let value = take(in s, inout at);
+        if (option == 0) != (kind == 0) {
+            fail(inout p, 8);
+            return;
+        }
+        indent(inout p, ind);
+        p.out.push_str("set_option ");
+        if option == 0 {
+            p.out.push_str("linter.unusedVariables ");
+            bool_text(inout p, value);
+        } else {
+            if option == 1 {
+                p.out.push_str("maxRecDepth ");
+            } else {
+                p.out.push_str("maxHeartbeats ");
+            }
+            put_u64(inout p.out, value);
+        }
+        end_line(inout p);
+    } else if tag == 2 {
+        definition(inout p, in s, in pool, inout at, ind);
+    } else if tag == 3 {
+        type_declaration(inout p, in s, in pool, inout at, ind);
+    } else if tag == 4 || tag == 5 {
+        let n = take(in s, inout at);
+        if n == 0 {
+            fail(inout p, 9);
+            return;
+        }
+        indent(inout p, ind);
+        p.out.push_str("mutual\n");
+        for i in 0..n {
+            if tag == 4 {
+                definition(inout p, in s, in pool, inout at, wrapping_add(ind, 2));
+            } else {
+                type_declaration(inout p, in s, in pool, inout at, wrapping_add(ind, 2));
+            }
+            if p.err != 0 {
+                return;
+            }
+        }
+        indent(inout p, ind);
+        p.out.push_str("end\n");
+    } else if tag == 6 {
+        let start = at;
+        if w(in s, at) == 1 {
+            fail(inout p, 10);
+            return;
+        }
+        indent(inout p, ind);
+        p.out.push_str("namespace ");
+        name(inout p, in s, in pool, inout at);
+        end_line(inout p);
+        let n = take(in s, inout at);
+        for i in 0..n {
+            declaration(inout p, in s, in pool, inout at, ind);
+            if p.err != 0 {
+                return;
+            }
+        }
+        indent(inout p, ind);
+        p.out.push_str("end ");
+        let mut again = start;
+        name(inout p, in s, in pool, inout again);
+        end_line(inout p);
+    } else if tag == 7 || tag == 8 {
+        indent(inout p, ind);
+        if tag == 7 {
+            p.out.push_str("theorem ");
+            name(inout p, in s, in pool, inout at);
+            p.out.push_str(" ");
+        } else {
+            p.out.push_str("example ");
+        }
+        binders(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" : ");
+        term(inout p, in s, in pool, inout at);
+        if p.err != 0 {
+            return;
+        }
+        p.out.push_str(" := ");
+        term(inout p, in s, in pool, inout at);
+        end_line(inout p);
+    } else {
+        indent(inout p, ind);
+        if tag == 9 {
+            p.out.push_str("#eval ");
+        } else {
+            p.out.push_str("#check ");
+        }
+        term(inout p, in s, in pool, inout at);
+        end_line(inout p);
+    }
+}
+
+fn code_error(code: u64) -> LeanError {
+    if code == 1 {
+        LeanError::OneTuple
+    } else if code == 2 {
+        LeanError::NoBinders
+    } else if code == 3 {
+        LeanError::ShortProduct
+    } else if code == 4 {
+        LeanError::EmptyMatch
+    } else if code == 5 {
+        LeanError::EmptyUpdate
+    } else if code == 6 {
+        LeanError::MutablePattern
+    } else if code == 7 {
+        LeanError::EmptyStatementMatch
+    } else if code == 8 {
+        LeanError::OptionType
+    } else if code == 9 {
+        LeanError::EmptyMutual
+    } else {
+        LeanError::RootedNamespace
+    }
+}
+
+// `Term::render`.
+pub fn render_term(in s: Slice[u64], in pool: Str) -> String eff [Fail[LeanError]] {
+    let mut p = P {
+        out: String::with_capacity(wrapping_mul(pool.len(), 2)),
+        err: 0
+    };
+    let mut at: u64 = 0;
+    term(inout p, in s, in pool, inout at);
+    if p.err != 0 {
+        // Free the partial output first: raising does not drop it (see the
+        // report's compiler gaps).
+        p.out = String::new();
+        Fail::raise(code_error(p.err));
+    }
+    p.out
+}
+
+// `Module::render`: import count, imports (component count, components),
+// declaration count, declarations.
+pub fn render_module(in s: Slice[u64], in pool: Str) -> String eff [Fail[LeanError]] {
+    let mut p = P {
+        out: String::with_capacity(wrapping_mul(pool.len(), 2)),
+        err: 0
+    };
+    let mut at: u64 = 0;
+    let imports = take(in s, inout at);
+    for i in 0..imports {
+        p.out.push_str("import ");
+        let n = take(in s, inout at);
+        for j in 0..n {
+            if j > 0 {
+                p.out.push_str(".");
+            }
+            ident(inout p, in s, in pool, inout at);
+        }
+        end_line(inout p);
+    }
+    if imports > 0 {
+        end_line(inout p);
+    }
+    let n = take(in s, inout at);
+    for i in 0..n {
+        declaration(inout p, in s, in pool, inout at, 0);
+        if p.err != 0 {
+            p.out = String::new();
+            Fail::raise(code_error(p.err));
+        }
+        end_line(inout p);
+    }
+    p.out
+}
+
+// Checks.
+
+// `Ident::new`: not empty, not `_root_`, and no control or delimiter char.
+pub fn valid_ident(in v: Str) -> bool {
+    let n = v.len();
+    if n == 0 || v == "_root_" {
+        return false;
+    }
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let (c, next) = match v.next_char(i) {
+            Option::Some(d) => d,
+            Option::None => (0, n),
+        };
+        if is_control(c)
+            || c
+            == 171
+            || c
+            == 187
+            || c
+            == 8232
+            || c
+            == 8233
+            || (c >= 8234 && c <= 8238)
+            || (c >= 8294 && c <= 8297)
+            || c
+            == 65279 {
+            return false;
+        }
+        i = next;
+    }
+    true
+}
+
+fn is_digit(b: u8) -> bool {
+    b >= 48 && b <= 57
+}
+
+fn is_alpha(b: u8) -> bool {
+    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+}
+
+fn byte(in v: Str, i: u64) -> u8 {
+    match v.try_byte_at(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+// `NatLiteral::decimal`: canonical nonnegative decimal digits.
+pub fn valid_decimal(in v: Str) -> bool {
+    let n = v.len();
+    if n == 0 || (n > 1 && byte(in v, 0) == 48) {
+        return false;
+    }
+    for i in 0..n {
+        if !is_digit(byte(in v, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// `ModuleName::new`: dot-separated ASCII components, each a letter followed
+// by letters, digits and underscores.
+pub fn valid_module(in v: Str) -> bool {
+    let n = v.len();
+    let mut start = true;
+    for i in 0..n {
+        let b = byte(in v, i);
+        if b == 46 {
+            if start {
+                return false;
+            }
+            start = true;
+        } else if start {
+            if !is_alpha(b) {
+                return false;
+            }
+            start = false;
+        } else if !(is_alpha(b) || is_digit(b) || b == 95) {
+            return false;
+        }
+    }
+    ! start
+}
+
+// References.
+//
+// The walks return the word offsets of the `Ref` names they collect; the
+// wrapper decodes those names into the result set.
+
+struct R {
+    // The offsets of the collected names.
+    found: ChunkSeq[u64],
+    // Bound identifiers in scope, as (pool offset, length) pairs.
+    scope: ChunkSeq[u64],
+    // 1: collect every reference; 0: only free ones.
+    all: bool
+}
+
+fn same_text(in pool: Str, a_off: u64, a_len: u64, b_off: u64, b_len: u64) -> bool {
+    if a_len != b_len {
+        return false;
+    }
+    let bytes = pool.as_bytes();
+    for i in 0..a_len {
+        let x = match bytes.try_get(wrapping_add(a_off, i)) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        let y = match bytes.try_get(wrapping_add(b_off, i)) {
+            Option::Some(b) => b,
+            Option::None => 0,
+        };
+        if x != y {
+            return false;
+        }
+    }
+    true
+}
+
+fn in_scope(inout r: R, in pool: Str, off: u64, len: u64) -> bool {
+    let n = r.scope.len() / 2;
+    for i in 0..n {
+        let k = wrapping_mul(i, 2);
+        let o = match r.scope.try_get(k) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        let l = match r.scope.try_get(wrapping_add(k, 1)) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        if same_text(in pool, o, l, off, len) {
+            return true;
+        }
+    }
+    false
+}
+
+fn bind(inout r: R, in s: Slice[u64], inout at: u64) {
+    let off = take(in s, inout at);
+    let len = take(in s, inout at);
+    if !r.all {
+        r.scope.push(off);
+        r.scope.push(len);
+    }
+}
+
+fn skip_ident(inout at: u64) {
+    at = wrapping_add(at, 2);
+}
+
+fn skip_name(in s: Slice[u64], inout at: u64) {
+    let rooted = take(in s, inout at);
+    let n = take(in s, inout at);
+    at = wrapping_add(at, wrapping_mul(n, 2));
+}
+
+fn truncate_scope(inout r: R, depth: u64) {
+    loop {
+        if r.scope.len() <= depth {
+            break;
+        }
+        let x = r.scope.pop();
+    }
+}
+
+// A pattern: its binds enter the scope (free walk); nothing is collected.
+fn ref_pattern(inout r: R, in s: Slice[u64], inout at: u64) {
+    let tag = take(in s, inout at);
+    if tag == 1 {
+        bind(inout r, in s, inout at);
+    } else if tag == 2 {
+        skip_name(in s, inout at);
+        let n = take(in s, inout at);
+        for i in 0..n {
+            ref_pattern(inout r, in s, inout at);
+        }
+    } else if tag == 3 {
+        let n = take(in s, inout at);
+        for i in 0..n {
+            ref_pattern(inout r, in s, inout at);
+        }
+    } else if tag == 4 || tag == 6 || tag == 7 || tag == 8 {
+        at = wrapping_add(at, 2);
+    } else if tag == 5 {
+        at = wrapping_add(at, 1);
+    } else if tag == 9 {
+        let n = take(in s, inout at);
+        for i in 0..n {
+            skip_ident(inout at);
+            ref_pattern(inout r, in s, inout at);
+        }
+    }
+}
+
+// Binders: each type is walked before its name enters the scope.
+fn ref_binders(inout r: R, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let n = take(in s, inout at);
+    for i in 0..n {
+        let kind = take(in s, inout at);
+        let named = take(in s, inout at);
+        let mut name_at = at;
+        if named == 1 {
+            at = wrapping_add(at, 2);
+        }
+        ref_term(inout r, in s, in pool, inout at);
+        if named == 1 {
+            bind(inout r, in s, inout name_at);
+        }
+    }
+}
+
+fn ref_terms(inout r: R, in s: Slice[u64], in pool: Str, inout at: u64, n: u64) {
+    for i in 0..n {
+        ref_term(inout r, in s, in pool, inout at);
+    }
+}
+
+fn ref_term(inout r: R, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let tag = take(in s, inout at);
+    if tag == 1 {
+        let start = at;
+        let rooted = take(in s, inout at);
+        let n = take(in s, inout at);
+        let off = w(in s, at);
+        let len = w(in s, wrapping_add(at, 1));
+        at = wrapping_add(at, wrapping_mul(n, 2));
+        let local = !r.all && n == 1 && rooted == 0 && in_scope(inout r, in pool, off, len);
+        if !local {
+            r.found.push(start);
+        }
+    } else if tag == 3 || tag == 5 {
+        at = wrapping_add(at, 1);
+    } else if tag == 4 || tag == 6 || tag == 7 {
+        at = wrapping_add(at, 2);
+    } else if tag == 8 {
+        let n = take(in s, inout at);
+        let size = take(in s, inout at);
+        ref_term(inout r, in s, in pool, inout at);
+        for i in 0..n {
+            let named = take(in s, inout at);
+            if named == 1 {
+                skip_ident(inout at);
+            }
+            ref_term(inout r, in s, in pool, inout at);
+        }
+    } else if tag == 9 || tag == 10 {
+        let depth = r.scope.len();
+        ref_binders(inout r, in s, in pool, inout at);
+        ref_term(inout r, in s, in pool, inout at);
+        truncate_scope(inout r, depth);
+    } else if tag == 11 || tag == 19 {
+        ref_term(inout r, in s, in pool, inout at);
+        ref_term(inout r, in s, in pool, inout at);
+    } else if tag == 12 || tag == 13 || tag == 14 {
+        let n = take(in s, inout at);
+        ref_terms(inout r, in s, in pool, inout at, n);
+    } else if tag == 15 {
+        // Let: the pattern binds in the body only.
+        let pattern_at = at;
+        let depth = r.scope.len();
+        ref_pattern(inout r, in s, inout at);
+        truncate_scope(inout r, depth);
+        let typed = take(in s, inout at);
+        if typed == 1 {
+            ref_term(inout r, in s, in pool, inout at);
+        }
+        ref_term(inout r, in s, in pool, inout at);
+        let mut again = pattern_at;
+        ref_pattern(inout r, in s, inout again);
+        ref_term(inout r, in s, in pool, inout at);
+        truncate_scope(inout r, depth);
+    } else {
+        ref_term_rest(inout r, in s, in pool, inout at, tag);
+    }
+}
+
+// The rest of `ref_term`, split off to keep each tag chain within the
+// formatter's chain limit.
+fn ref_term_rest(inout r: R, in s: Slice[u64], in pool: Str, inout at: u64, tag: u64) {
+    if tag == 16 {
+        ref_terms(inout r, in s, in pool, inout at, 3);
+    } else if tag == 17 {
+        let n = take(in s, inout at);
+        ref_term(inout r, in s, in pool, inout at);
+        for i in 0..n {
+            let depth = r.scope.len();
+            ref_pattern(inout r, in s, inout at);
+            ref_term(inout r, in s, in pool, inout at);
+            truncate_scope(inout r, depth);
+        }
+    } else if tag == 18 {
+        ref_term(inout r, in s, in pool, inout at);
+        let kind = take(in s, inout at);
+        if kind == 0 {
+            skip_ident(inout at);
+        } else {
+            at = wrapping_add(at, 1);
+        }
+    } else if tag == 20 {
+        at = wrapping_add(at, 1);
+        ref_term(inout r, in s, in pool, inout at);
+    } else if tag == 21 {
+        at = wrapping_add(at, 1);
+        ref_term(inout r, in s, in pool, inout at);
+        ref_term(inout r, in s, in pool, inout at);
+    } else if tag == 22 {
+        let n = take(in s, inout at);
+        for i in 0..n {
+            skip_ident(inout at);
+            ref_term(inout r, in s, in pool, inout at);
+        }
+    } else if tag == 23 {
+        let n = take(in s, inout at);
+        ref_term(inout r, in s, in pool, inout at);
+        for i in 0..n {
+            skip_ident(inout at);
+            ref_term(inout r, in s, in pool, inout at);
+        }
+    } else if tag == 24 {
+        let depth = r.scope.len();
+        ref_statements(inout r, in s, in pool, inout at);
+        ref_term(inout r, in s, in pool, inout at);
+        truncate_scope(inout r, depth);
+    } else if tag == 27 {
+        ref_term(inout r, in s, in pool, inout at);
+    }
+}
+
+// Count, statements; the bindings of each statement scope over the rest.
+fn ref_statements(inout r: R, in s: Slice[u64], in pool: Str, inout at: u64) {
+    let n = take(in s, inout at);
+    for i in 0..n {
+        let tag = take(in s, inout at);
+        if tag == 0 {
+            at = wrapping_add(at, 1);
+            // binding: pattern, has type, [type], value; the pattern binds
+            // after the type and value.
+            let pattern_at = at;
+            let depth = r.scope.len();
+            ref_pattern(inout r, in s, inout at);
+            truncate_scope(inout r, depth);
+            let typed = take(in s, inout at);
+            if typed == 1 {
+                ref_term(inout r, in s, in pool, inout at);
+            }
+            ref_term(inout r, in s, in pool, inout at);
+            let mut again = pattern_at;
+            ref_pattern(inout r, in s, inout again);
+        } else if tag == 1 {
+            let pattern_at = at;
+            let depth = r.scope.len();
+            ref_pattern(inout r, in s, inout at);
+            truncate_scope(inout r, depth);
+            ref_term(inout r, in s, in pool, inout at);
+            let mut again = pattern_at;
+            ref_pattern(inout r, in s, inout again);
+        } else if tag == 2 {
+            skip_ident(inout at);
+            ref_term(inout r, in s, in pool, inout at);
+        } else if tag == 3 {
+            ref_term(inout r, in s, in pool, inout at);
+        } else if tag == 4 {
+            let pattern_at = at;
+            let depth = r.scope.len();
+            ref_pattern(inout r, in s, inout at);
+            truncate_scope(inout r, depth);
+            ref_term(inout r, in s, in pool, inout at);
+            ref_term(inout r, in s, in pool, inout at);
+            let mut again = pattern_at;
+            ref_pattern(inout r, in s, inout again);
+        } else if tag == 5 {
+            let named = take(in s, inout at);
+            let mut name_at = at;
+            if named == 1 {
+                at = wrapping_add(at, 2);
+            }
+            ref_term(inout r, in s, in pool, inout at);
+            ref_term(inout r, in s, in pool, inout at);
+            if named == 1 {
+                bind(inout r, in s, inout name_at);
+            }
+        } else if tag == 6 {
+            ref_term(inout r, in s, in pool, inout at);
+            let depth = r.scope.len();
+            ref_statements(inout r, in s, in pool, inout at);
+            truncate_scope(inout r, depth);
+            let has_else = take(in s, inout at);
+            if has_else == 1 {
+                ref_statements(inout r, in s, in pool, inout at);
+                truncate_scope(inout r, depth);
+            }
+        } else {
+            let arms = take(in s, inout at);
+            ref_term(inout r, in s, in pool, inout at);
+            for a in 0..arms {
+                let depth = r.scope.len();
+                ref_pattern(inout r, in s, inout at);
+                ref_statements(inout r, in s, in pool, inout at);
+                truncate_scope(inout r, depth);
+            }
+        }
+    }
+}
+
+// `Term::free_references`: parameter binders, then the body.
+pub fn free_references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
+    let mut r = R {
+        found: ChunkSeq::new(),
+        scope: ChunkSeq::new(),
+        all: false
+    };
+    let mut at: u64 = 0;
+    ref_binders(inout r, in s, in pool, inout at);
+    ref_term(inout r, in s, in pool, inout at);
+    // Destructure, so the scope is dropped (returning `r.found` leaks it).
+    let R {
+        found,
+        scope,
+        all
+    }
+    = r;
+    found
+}
+
+// `Term::references`: every `Ref` name, binders included.
+pub fn references(in s: Slice[u64], in pool: Str) -> ChunkSeq[u64] {
+    let mut r = R {
+        found: ChunkSeq::new(),
+        scope: ChunkSeq::new(),
+        all: true
+    };
+    let mut at: u64 = 0;
+    ref_term(inout r, in s, in pool, inout at);
+    // Destructure, so the scope is dropped (returning `r.found` leaks it).
+    let R {
+        found,
+        scope,
+        all
+    }
+    = r;
+    found
+}

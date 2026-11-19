@@ -7,6 +7,18 @@ exports_files([
     "Cargo.toml",
 ])
 
+# The `vesper-<tool>` binaries (crates/vesper-tools, self-hosting SH0 lane 2).
+_TOOLS = [
+    "//crates/vesper-tools:bin/vesper-audit",
+    "//crates/vesper-tools:bin/vesper-bench",
+    "//crates/vesper-tools:bin/vesper-grammar",
+    "//crates/vesper-tools:bin/vesper-json",
+    "//crates/vesper-tools:bin/vesper-publish",
+    "//crates/vesper-tools:bin/vesper-resolve",
+    "//crates/vesper-tools:bin/vesper-sbom",
+    "//crates/vesper-tools:bin/vesper-tee",
+]
+
 # The root package also owns docs/, examples/, lean/, scripts/ and tools/
 # (directories without their own BUILD.bazel), which the CLI and its tests read.
 vesper_crate(
@@ -72,7 +84,15 @@ vesper_crate(
         "tools/resource-model42/KernelSnapshot.lean",
         "docs/rfcs/resource-model42-source-manifest.json",
         "lean/**",
+        # tests/std_hash.rs includes the Rust side of @vesper-std/hash-sys.
+        "packages/vesper-std/hash/sys/shim.rs",
     ],
+    # `vesper <tool>` runs `vesper-<tool>` (crates/vesper-tools, self-hosting
+    # SH0 lane 2, #1124). Building //:bin/vesper builds them beside it at
+    # crates/vesper-tools/bin/, where the dispatcher looks, so every script
+    # and test that runs vesper gets them; tests also find them on PATH.
+    extra_test_path_binaries = _TOOLS,
+    binary_data = {"vesper": _TOOLS},
     remote_tests = ["test/self_host_front_end"],
     test_data_by_target = {
         "test/lean4lean_foundations42": [":proof_packet_data"],
@@ -95,6 +115,30 @@ vesper_crate(
         ],
         # @vesper-std/sort, core and bytes (#1096) as a driver's dependencies.
         "test/std_sort": [":files"],
+        # Self-hosting SH0 lane 7 (#1129): the front end v2 against the Rust
+        # parser on the root package's `.ves` files and the parser test suites.
+        # Anchored globs: a root `**` glob without the vesper_crate `_NEVER`
+        # excludes walks the bazel-* convenience symlinks an earlier CI step
+        # leaves behind (~245k output files; analysis never finished).
+        "test/self_host_front_v2": glob([
+            "examples/**/*.ves",
+            "packages/**/*.ves",
+            "src/**/*.ves",
+            "tests/**/*.ves",
+            "packages/vesper-front/**",
+            "tests/self_host_parse.rs",
+            "tests/self_host_front_end.rs",
+        ]) + ["//crates/vesper-syntax:files"],
+        # @vesper-std/fs, process and env (#1125): drivers over the packages
+        # and their .vsys imports.
+        "test/std_env": [":files"],
+        "test/std_fs": [":files"],
+        "test/std_process": [":files"],
+        # @vesper-std graph, intern, arena and hash (#1127) as a driver's dependencies.
+        "test/std_arena": [":files"],
+        "test/std_graph": [":files"],
+        "test/std_hash": [":files"],
+        "test/std_intern": [":files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
         "test/self_host_front_end": glob([
@@ -389,6 +433,8 @@ vesper_crate(
         # Runs the Vesper-source front end on every repository source; about
         # 2.5 min on a 4-core Linux host, over 300 s on the macOS runner.
         "test/self_host_front_end": "long",
+        # The front end v2 differential (#1129) takes about 140 s unoptimized.
+        "test/self_host_front_v2": "long",
         # The Vesper-source checker corpus and JIT checks exceed 300 s on macOS.
         "test/self_host_check": "long",
     },

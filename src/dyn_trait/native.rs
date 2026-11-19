@@ -238,6 +238,24 @@ impl<M: Module> Codegen<'_, '_, M> {
             .filter(|v| crate::numeric::default_type(&v.object) == object)
             .cloned()
             .collect::<Vec<_>>();
+        // Only vtables this program builds can reach the receiver: one whose
+        // slot functions were never discovered from the entry is skipped.
+        let mut reachable = vec![];
+        for vtable in vtables {
+            let mut built = true;
+            for (name, vars) in &vtable.methods {
+                if !specialized_function(self.world, &concrete(self.world, name, vars)?)
+                    && !self.ids.contains_key(&instance_key(name, vars))
+                {
+                    built = false;
+                    break;
+                }
+            }
+            if built {
+                reachable.push(vtable);
+            }
+        }
+        let vtables = reachable;
         let scope = self.vars.clone();
         let types_scope = self.local_types.clone();
         for vtable in &vtables {
@@ -254,12 +272,25 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.switch_to_block(yes);
             let self_ty = crate::numeric::default_type(&vtable.self_ty);
             let name = format!("$dyn_self{}", data.as_u32());
+            let mut value_at = data;
+            if let Some(block) = block
+                && receiver.pass == Pass::Sink
+            {
+                // `sink self` moves the value out of the box, and the block
+                // is freed before the call: a handler that never resumes
+                // leaves nothing behind.
+                let size = Layout::of(self.world, &self_ty)?.size.div_ceil(8) * 8;
+                let copy = self.alloc_uninit(size);
+                self.copy_bytes(data, copy, size);
+                self.fip_box_free(block)?;
+                value_at = copy;
+            }
             self.bind_alias(
                 &Pattern {
                     kind: PatternKind::Bind(name.clone()),
                     span: 0..0,
                 },
-                data,
+                value_at,
                 &self_ty,
             )?;
             self.local_types.insert(name.clone(), self_ty);
@@ -284,12 +315,6 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.b.ins().trap(ir::TrapCode::unwrap_user(3));
         self.b.switch_to_block(join);
         let result = self.b.block_params(join)[0];
-        if let Some(block) = block
-            && receiver.pass == Pass::Sink
-        {
-            // `sink self` consumed the boxed value; the block goes too.
-            self.fip_box_free(block)?;
-        }
         Ok(match into {
             Some(out) if result_layout.aggregate() => {
                 self.copy_bytes(result, out, result_layout.size);

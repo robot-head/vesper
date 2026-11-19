@@ -1,8 +1,33 @@
 //! Safe bounded source coordinates. Labels are supplied data, not proof of causality.
 //! No I/O, compiler execution, or clamping is performed.
-#![forbid(unsafe_code)]
+// The seed build (the compiler's copy) stays safe. The port-backed build
+// links the Vesper port through the generated binding, which calls the C ABI.
+#![cfg_attr(not(vesper_port), forbid(unsafe_code))]
+#![cfg_attr(vesper_port, deny(unsafe_code))]
 
 use std::{fmt, mem::size_of, sync::Arc};
+
+// Generated and committed, but kept outside src/ so formatters, which check
+// every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+#[cfg(vesper_port)]
+mod port;
+
+/// Which build this is: `"vesper"` for the port-backed package
+/// `vesper-span`, `"rust"` for the seed copy `vesper-span-seed` that the
+/// compiler links.
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
+/// Live allocations of the port's runtime, for leak tests.
+#[cfg(vesper_port)]
+#[doc(hidden)]
+pub fn port_live_allocations() -> i64 {
+    port::live_allocations()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Position {
@@ -130,6 +155,7 @@ impl Limits {
         Ok(())
     }
 }
+#[cfg_attr(vesper_port, allow(dead_code))]
 fn bound(n: usize, cap: usize, resource: Resource) -> Result<(), Error> {
     if n > cap {
         Err(Error::Budget(resource))
@@ -137,16 +163,20 @@ fn bound(n: usize, cap: usize, resource: Resource) -> Result<(), Error> {
         Ok(())
     }
 }
+#[cfg_attr(vesper_port, allow(dead_code))]
 fn add(a: usize, b: usize, r: Resource) -> Result<usize, Error> {
     a.checked_add(b).ok_or(Error::Budget(r))
 }
+#[cfg_attr(vesper_port, allow(dead_code))]
 fn mul(a: usize, b: usize, r: Resource) -> Result<usize, Error> {
     a.checked_mul(b).ok_or(Error::Budget(r))
 }
+#[cfg_attr(vesper_port, allow(dead_code))]
 struct Work {
     used: usize,
     cap: usize,
 }
+#[cfg_attr(vesper_port, allow(dead_code))]
 impl Work {
     fn charge(&mut self, n: usize) -> Result<(), Error> {
         self.used = add(self.used, n, Resource::Work)?;
@@ -154,6 +184,7 @@ impl Work {
     }
 }
 #[derive(Debug)]
+#[cfg_attr(vesper_port, allow(dead_code))]
 struct Line {
     start: usize,
     end: usize,
@@ -165,9 +196,40 @@ struct Line {
 #[derive(Debug)]
 pub struct LineIndex {
     text: Arc<str>,
+    #[cfg(not(vesper_port))]
     lines: Vec<Line>,
+    /// The port's line table: start and content end of each line.
+    #[cfg(vesper_port)]
+    lines: Vec<u64>,
     limits: Limits,
 }
+#[cfg(vesper_port)]
+impl LineIndex {
+    pub fn new(text: Arc<str>, limits: Limits) -> Result<Self, Error> {
+        let lines = port::line_table(&text, limits, size_of::<Line>())?;
+        Ok(Self {
+            text,
+            lines,
+            limits,
+        })
+    }
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    pub fn offset(&self, p: Position) -> Result<usize, Error> {
+        port::offset(&self.text, &self.lines, self.limits.max_work, p)
+    }
+    pub fn position(&self, offset: usize) -> Result<Position, Error> {
+        port::position(&self.text, &self.lines, self.limits.max_work, offset)
+    }
+    pub fn range(&self, span: ByteSpan) -> Result<Range, Error> {
+        port::range(&self.text, &self.lines, self.limits.max_work, span)
+    }
+    pub fn span(&self, range: Range) -> Result<ByteSpan, Error> {
+        port::span(&self.text, &self.lines, self.limits.max_work, range)
+    }
+}
+#[cfg(not(vesper_port))]
 impl LineIndex {
     pub fn new(text: Arc<str>, limits: Limits) -> Result<Self, Error> {
         limits.validate()?;
@@ -301,6 +363,7 @@ impl LineIndex {
         })
     }
 }
+#[cfg(not(vesper_port))]
 fn scan_lines(
     text: &str,
     work: &mut Work,
@@ -345,8 +408,13 @@ pub struct SourceEdits {
     source: Arc<str>,
     edits: Vec<SourceEdit>,
     output_bytes: usize,
+    /// The port's replacement list (span start, end, replacement length per
+    /// edit, in span order) and the replacements in that order.
+    #[cfg(vesper_port)]
+    replace: (Vec<u64>, String),
 }
 impl SourceEdits {
+    #[cfg(not(vesper_port))]
     pub fn new(index: &LineIndex, edits: &[SourceEdit], limits: Limits) -> Result<Self, Error> {
         limits.validate()?;
         let mut work = Work {
@@ -361,12 +429,49 @@ impl SourceEdits {
             output_bytes,
         })
     }
+    #[cfg(vesper_port)]
+    pub fn new(index: &LineIndex, edits: &[SourceEdit], limits: Limits) -> Result<Self, Error> {
+        // The checks that come before any edit is read, so that a rejected
+        // batch is not encoded first.
+        limits.validate()?;
+        bound(index.text.len(), limits.max_source_bytes, Resource::Source)?;
+        bound(edits.len(), limits.max_edits, Resource::Edits)?;
+        let (words, pool) = port::encode_edits(index.text.len(), edits, limits);
+        let output_bytes = port::edits_check(
+            &index.text,
+            &index.lines,
+            &words,
+            pool.as_bytes(),
+            limits,
+            size_of::<SourceEdit>(),
+        )?;
+        let owned = copy_edits(edits)?;
+        let replace = port::encode_replacements(&owned);
+        Ok(Self {
+            source: Arc::clone(&index.text),
+            edits: owned,
+            output_bytes,
+            replace,
+        })
+    }
     pub fn source(&self) -> &str {
         &self.source
     }
     pub fn edits(&self) -> &[SourceEdit] {
         &self.edits
     }
+    #[cfg(vesper_port)]
+    pub fn apply(&self) -> Result<String, Error> {
+        // Whole edits of valid UTF-8 at char boundaries: the bytes are UTF-8.
+        String::from_utf8(port::edits_apply(
+            self.source.as_bytes(),
+            &self.replace.0,
+            self.replace.1.as_bytes(),
+            self.output_bytes,
+        ))
+        .map_err(|_| Error::Utf8Boundary)
+    }
+    #[cfg(not(vesper_port))]
     pub fn apply(&self) -> Result<String, Error> {
         let mut out = String::new();
         out.try_reserve_exact(self.output_bytes)
@@ -407,6 +512,7 @@ fn copy_edits(edits: &[SourceEdit]) -> Result<Vec<SourceEdit>, Error> {
     owned.sort_unstable_by_key(|e| (e.span.start, e.span.end));
     Ok(owned)
 }
+#[cfg(not(vesper_port))]
 fn validate_edits(
     index: &LineIndex,
     edits: &[SourceEdit],
@@ -507,6 +613,74 @@ pub struct Diagnostics {
 }
 impl Diagnostics {
     pub fn new(index: &LineIndex, data: &[DiagnosticData], limits: Limits) -> Result<Self, Error> {
+        Self::check(index, data, limits)?;
+        // All checks precede clones; fallible bounded copies preserve the input.
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(data.len())
+            .map_err(|_| Error::Allocation)?;
+        for d in data {
+            let mut ls = Vec::new();
+            ls.try_reserve_exact(d.labels.len())
+                .map_err(|_| Error::Allocation)?;
+            for l in &d.labels {
+                ls.push(Label {
+                    span: l.span,
+                    message: copy_string(&l.message)?,
+                    primary: l.primary,
+                });
+            }
+            let mut fs = Vec::new();
+            fs.try_reserve_exact(d.fixes.len())
+                .map_err(|_| Error::Allocation)?;
+            for f in &d.fixes {
+                let edits = copy_edits(&f.edits)?;
+                fs.push(Fix {
+                    id: copy_string(&f.id)?,
+                    title: copy_string(&f.title)?,
+                    edits,
+                });
+            }
+            owned.push(DiagnosticData {
+                code: copy_string(&d.code)?,
+                message: copy_string(&d.message)?,
+                severity: d.severity,
+                labels: ls,
+                help: d.help.as_deref().map(copy_string).transpose()?,
+                fixes: fs,
+            });
+        }
+        Ok(Self {
+            source: Arc::clone(&index.text),
+            data: owned,
+        })
+    }
+    #[cfg(vesper_port)]
+    fn check(index: &LineIndex, data: &[DiagnosticData], limits: Limits) -> Result<(), Error> {
+        // The checks that come before any diagnostic is read, so that a
+        // rejected set is not encoded first.
+        limits.validate()?;
+        bound(index.text.len(), limits.max_source_bytes, Resource::Source)?;
+        bound(data.len(), limits.max_diagnostics, Resource::Diagnostics)?;
+        let (words, pool) = port::encode_diagnostics(index.text.len(), data, limits);
+        port::diagnostics_check(
+            &index.text,
+            &index.lines,
+            &words,
+            data.len() as u64,
+            pool.as_bytes(),
+            limits,
+            port::Sizes {
+                line: size_of::<Line>(),
+                edit: size_of::<SourceEdit>(),
+                label: size_of::<Label>(),
+                fix: size_of::<Fix>(),
+                diagnostic: size_of::<DiagnosticData>(),
+            },
+        )
+    }
+    #[cfg(not(vesper_port))]
+    fn check(index: &LineIndex, data: &[DiagnosticData], limits: Limits) -> Result<(), Error> {
         limits.validate()?;
         bound(index.text.len(), limits.max_source_bytes, Resource::Source)?;
         bound(data.len(), limits.max_diagnostics, Resource::Diagnostics)?;
@@ -579,47 +753,7 @@ impl Diagnostics {
             add(metadata, text, Resource::Metadata)?,
             limits.max_metadata_bytes,
             Resource::Metadata,
-        )?;
-        // All checks precede clones; fallible bounded copies preserve the input.
-        let mut owned = Vec::new();
-        owned
-            .try_reserve_exact(data.len())
-            .map_err(|_| Error::Allocation)?;
-        for d in data {
-            let mut ls = Vec::new();
-            ls.try_reserve_exact(d.labels.len())
-                .map_err(|_| Error::Allocation)?;
-            for l in &d.labels {
-                ls.push(Label {
-                    span: l.span,
-                    message: copy_string(&l.message)?,
-                    primary: l.primary,
-                });
-            }
-            let mut fs = Vec::new();
-            fs.try_reserve_exact(d.fixes.len())
-                .map_err(|_| Error::Allocation)?;
-            for f in &d.fixes {
-                let edits = copy_edits(&f.edits)?;
-                fs.push(Fix {
-                    id: copy_string(&f.id)?,
-                    title: copy_string(&f.title)?,
-                    edits,
-                });
-            }
-            owned.push(DiagnosticData {
-                code: copy_string(&d.code)?,
-                message: copy_string(&d.message)?,
-                severity: d.severity,
-                labels: ls,
-                help: d.help.as_deref().map(copy_string).transpose()?,
-                fixes: fs,
-            });
-        }
-        Ok(Self {
-            source: Arc::clone(&index.text),
-            data: owned,
-        })
+        )
     }
     pub fn source(&self) -> &str {
         &self.source

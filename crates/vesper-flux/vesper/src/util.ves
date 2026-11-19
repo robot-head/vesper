@@ -1,0 +1,77 @@
+// Module util of @vesper/flux: cell reads, row comparison and search.
+
+pub fn cell(in s: Slice[i64], i: u64) -> i64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn word(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Lexicographic comparison of the `width` cells at a[ia..] and b[ib..].
+pub fn cmp_rows(in a: Slice[i64], ia: u64, in b: Slice[i64], ib: u64, width: u64) -> i64 {
+    for k in 0..width {
+        let x = cell(in a, wrapping_add(ia, k));
+        let y = cell(in b, wrapping_add(ib, k));
+        if x < y {
+            return -1;
+        }
+        if x > y {
+            return 1;
+        }
+    }
+    0
+}
+
+pub fn push_row(inout out: ChunkSeq[i64], in src: Slice[i64], at: u64, width: u64) {
+    for k in 0..width {
+        out.push(cell(in src, wrapping_add(at, k)));
+    }
+}
+
+// Whether the row at key[at..] is one of the n rows of the canonical set s.
+pub fn contains(in s: Slice[i64], n: u64, width: u64, in key: Slice[i64], at: u64) -> bool {
+    let stride = wrapping_add(width, 1);
+    let mut lo: u64 = 0;
+    let mut hi = n;
+    loop {
+        if lo >= hi {
+            return false;
+        }
+        let mid = wrapping_add(lo, (wrapping_sub(hi, lo)) >> 1);
+        let c = cmp_rows(in s, wrapping_mul(mid, stride), in key, at, width);
+        if c == 0 {
+            return true;
+        }
+        if c < 0 {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+}
+
+// The number of whole charges of `charge` that `budget` pays for.
+pub fn affordable(budget: u64, charge: u64, n: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = n;
+    // Largest k <= n with k * charge <= budget (k * charge cannot wrap:
+    // n * charge counts cells that exist).
+    loop {
+        if lo >= hi {
+            return lo;
+        }
+        let mid = wrapping_add(lo, wrapping_add(wrapping_sub(hi, lo), 1) >> 1);
+        if wrapping_mul(mid, charge) <= budget {
+            lo = mid;
+        } else {
+            hi = wrapping_sub(mid, 1);
+        }
+    }
+}

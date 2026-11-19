@@ -113,7 +113,10 @@ pub struct FrontendChecked {
 
 /// [`check::check`]: elaborate under [`DEFAULT_PACKAGE`].
 pub fn check_module(module: &Module) -> Checked {
-    if !has_frontend_syntax(module) && !builtin_traits::wanted(module) {
+    if !has_frontend_syntax(module)
+        && !builtin_traits::wanted(module)
+        && !crate::dyn_fn::uses_fn_objects(module)
+    {
         return check::check_core(module, None).0;
     }
     check_package(module, &default_identity()).checked
@@ -128,6 +131,35 @@ pub fn check_package(module: &Module, identity: &PackageIdentity) -> FrontendChe
 }
 
 pub fn check_package_with(
+    module: &Module,
+    identity: &PackageIdentity,
+    options: &FrontendOptions,
+) -> FrontendChecked {
+    if !crate::dyn_fn::uses_fn_objects(module) {
+        return check_lowered_package(module, identity, options);
+    }
+    // Function objects become hidden traits and closure structs (§7.3).
+    match crate::dyn_fn::lower(module) {
+        Ok(lowered) => {
+            let mut out = check_lowered_package(&lowered.module, identity, options);
+            lowered.relocate(&mut out.checked.diagnostics);
+            out
+        }
+        Err(diagnostics) => FrontendChecked {
+            checked: Checked {
+                world: World::default(),
+                diagnostics,
+                expression_types: TypeMap::new(),
+            },
+            bindings: BindingsDto::empty(identity.clone()),
+            session: None,
+            revision: None,
+            evidence: vec![],
+        },
+    }
+}
+
+fn check_lowered_package(
     module: &Module,
     identity: &PackageIdentity,
     options: &FrontendOptions,

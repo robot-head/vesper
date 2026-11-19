@@ -1,0 +1,108 @@
+// The CST: the parser's builder events folded into node and token tables
+// (what rowan's `GreenNodeBuilder` builds), and the flat result rows of
+// `parse_tables`. A node's text range runs from the text offset at its
+// start event to the offset at its finish event, as in rowan.
+
+use self::{
+    P,
+    Tree
+};
+use self::util::{
+    add,
+    narrow,
+    w32,
+    u8_at,
+    u32_at
+};
+
+pub fn tree_new() -> Tree {
+    Tree {
+        node_kind: ChunkSeq::new[u8](),
+        node_parent: ChunkSeq::new[u32](),
+        node_start: ChunkSeq::new[u32](),
+        node_end: ChunkSeq::new[u32](),
+        leaf_token: ChunkSeq::new[u32](),
+        leaf_parent: ChunkSeq::new[u32]()
+    }
+}
+
+pub fn build_tree(inout tree: Tree, in p: P) {
+    let mut open = ChunkSeq::new[u32]();
+    let mut offset: u64 = 0;
+    tree.node_kind.reserve(p.ev.len() >> 2);
+    tree.leaf_token.reserve(p.t.kind.len());
+    for i in 0..p.ev.len() {
+        let e = u32_at(in p.ev, i);
+        if e == 4294967295 {
+            let last = wrapping_sub(open.len(), 1);
+            let node = w32(in open, last);
+            open.truncate(last);
+            tree.node_end.try_set(node, narrow(offset));
+        } else if e >= 2147483648 {
+            let parent = if open.len() == 0 {
+                // The root's parent is the node count, fixed up below.
+                4294967295
+            } else {
+                u32_at(in open, wrapping_sub(open.len(), 1))
+            };
+            let node = narrow(tree.node_kind.len());
+            tree.node_kind.push(wrapping_u8(wrapping_sub(e, 2147483648)));
+            tree.node_parent.push(parent);
+            tree.node_start.push(narrow(offset));
+            tree.node_end.push(narrow(offset));
+            open.push(node);
+        } else {
+            let t = widen_u64(e);
+            offset = add(offset, wrapping_sub(w32(in p.t.end, t), w32(in p.t.start, t)));
+            tree.leaf_token.push(e);
+            tree.leaf_parent.push(u32_at(in open, wrapping_sub(open.len(), 1)));
+        }
+    }
+}
+
+pub fn report(in tree: Tree, in p: P) -> ChunkSeq[u64] {
+    let leaves = tree.leaf_token.len();
+    let nodes = tree.node_kind.len();
+    let diags = p.d.code.len();
+    let mut out = ChunkSeq::with_capacity[u64](add(add(3, leaves << 2), nodes << 2));
+    out.push(leaves);
+    out.push(nodes);
+    out.push(diags);
+    for i in 0..leaves {
+        let t = w32(in tree.leaf_token, i);
+        out.push(widen_u64(u8_at(in p.t.kind, t)));
+        out.push(w32(in p.t.start, t));
+        out.push(w32(in p.t.end, t));
+        out.push(w32(in tree.leaf_parent, i));
+    }
+    for i in 0..nodes {
+        out.push(widen_u64(u8_at(in tree.node_kind, i)));
+        let parent = w32(in tree.node_parent, i);
+        out
+            .push(
+            if parent == 4294967295 {
+                nodes
+            } else {
+                parent
+            }
+        );
+        out.push(w32(in tree.node_start, i));
+        out.push(w32(in tree.node_end, i));
+    }
+    for i in 0..diags {
+        out.push(widen_u64(u8_at(in p.d.code, i)));
+        out.push(w32(in p.d.start, i));
+        out.push(w32(in p.d.end, i));
+        let from = w32(in p.d.at, i);
+        let to = if add(i, 1) < diags {
+            w32(in p.d.at, add(i, 1))
+        } else {
+            p.d.text.len()
+        };
+        out.push(wrapping_sub(to, from));
+        for j in from..to {
+            out.push(widen_u64(u8_at(in p.d.text, j)));
+        }
+    }
+    out
+}

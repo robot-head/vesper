@@ -1,0 +1,693 @@
+// @vesper/span: Vesper port of vesper-span (self-hosting wave SH0 lane 6,
+// #1128): the line table and UTF-16 coordinate conversions of `LineIndex`,
+// the checks and application of `SourceEdits`, and the checks of
+// `Diagnostics::new`.
+//
+// The Rust wrapper (src/port.rs) keeps the shared source text (`Arc<str>`)
+// and the owned public records, and lends the text, the line table and flat
+// word encodings of the edits and diagnostics to these functions. The line
+// table is one `u64` pair per line: the byte offset of its first byte and of
+// its content end (before the terminator).
+
+// The budgets and errors of src/lib.rs, with the same names, so the binding
+// uses the crate's own types.
+pub copy enum Resource {
+    Source,
+    Lines,
+    Metadata,
+    Work,
+    Edits,
+    Output,
+    Diagnostics,
+    Labels,
+    Fixes,
+    Text
+}
+
+pub copy enum Error {
+    InvalidLimits,
+    Budget(Resource),
+    LineOutOfBounds,
+    CharacterOutOfBounds,
+    ByteOutOfBounds,
+    Utf8Boundary,
+    SurrogateInterior,
+    LineEndingInterior,
+    ReversedRange,
+    OverlappingEdits,
+    SourceMismatch,
+    InvalidDiagnostic,
+    Allocation
+}
+
+pub copy struct Limits {
+    max_source_bytes: usize,
+    max_lines: usize,
+    max_metadata_bytes: usize,
+    max_work: usize,
+    max_edits: usize,
+    max_output_bytes: usize,
+    max_diagnostics: usize,
+    max_labels: usize,
+    max_fixes: usize,
+    max_text_bytes: usize
+}
+
+pub copy struct Position {
+    line: u32,
+    character: u32
+}
+
+pub copy struct Range {
+    start: Position,
+    end: Position
+}
+
+pub copy struct ByteSpan {
+    start: usize,
+    end: usize
+}
+
+// The measured edits: the output length and the metadata bytes charged.
+pub copy struct EditTotals {
+    output: usize,
+    metadata: usize
+}
+
+// `size_of` of the Rust records the budgets charge, passed in by the
+// wrapper so the totals match the Rust build on every target.
+pub copy struct Sizes {
+    line: usize,
+    edit: usize,
+    label: usize,
+    fix: usize,
+    diagnostic: usize
+}
+
+// Checked arithmetic and budgets.
+
+fn u(x: usize) -> u64 {
+    widen_u64(x)
+}
+
+fn add(a: u64, b: u64, r: Resource) -> u64 eff [Fail[Error]] {
+    if a > wrapping_sub(18446744073709551615, b) {
+        Fail::raise(Error::Budget(r));
+    }
+    wrapping_add(a, b)
+}
+
+fn mul(a: u64, b: u64, r: Resource) -> u64 eff [Fail[Error]] {
+    let (lo, hi) = mul_wide(a, b);
+    if hi != 0 {
+        Fail::raise(Error::Budget(r));
+    }
+    lo
+}
+
+fn bound(n: u64, cap: usize, r: Resource) -> Unit eff [Fail[Error]] {
+    if n > u(cap) {
+        Fail::raise(Error::Budget(r));
+    }
+}
+
+// `Work::charge`: add `n` to the running total and check it.
+fn charge(used: u64, n: u64, cap: usize) -> u64 eff [Fail[Error]] {
+    let total = add(used, n, Resource::Work);
+    bound(total, cap, Resource::Work);
+    total
+}
+
+fn hard() -> Limits {
+    Limits {
+        max_source_bytes: 1048576,
+        max_lines: 262145,
+        max_metadata_bytes: 16777216,
+        max_work: 67108864,
+        max_edits: 4096,
+        max_output_bytes: 2097152,
+        max_diagnostics: 4096,
+        max_labels: 16384,
+        max_fixes: 4096,
+        max_text_bytes: 2097152
+    }
+}
+
+// `Limits::validate`.
+pub fn validate(in l: Limits) -> Unit eff [Fail[Error]] {
+    let h = hard();
+    if l
+        .max_source_bytes
+        > h
+        .max_source_bytes
+        || l
+        .max_lines
+        > h
+        .max_lines
+        || l
+        .max_metadata_bytes
+        > h
+        .max_metadata_bytes
+        || l
+        .max_work
+        > h
+        .max_work
+        || l
+        .max_edits
+        > h
+        .max_edits
+        || l
+        .max_output_bytes
+        > h
+        .max_output_bytes
+        || l
+        .max_diagnostics
+        > h
+        .max_diagnostics
+        || l
+        .max_labels
+        > h
+        .max_labels
+        || l
+        .max_fixes
+        > h
+        .max_fixes
+        || l
+        .max_text_bytes
+        > h
+        .max_text_bytes {
+        Fail::raise(Error::InvalidLimits);
+    }
+}
+
+// Byte and word access.
+
+fn byte(in t: Slice[u8], i: u64) -> u8 {
+    match t.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn word(in w: Slice[u64], i: u64) -> u64 {
+    match w.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// The UTF-8 length of the char whose first byte is `b`.
+fn utf8_len(b: u8) -> u64 {
+    if b < 128 {
+        1
+    } else if b < 224 {
+        2
+    } else if b < 240 {
+        3
+    } else {
+        4
+    }
+}
+
+fn is_continuation(b: u8) -> bool {
+    b >= 128 && b < 192
+}
+
+// The line table.
+
+// `LineIndex::new`: the line table of `text`, or the first budget error in
+// the Rust order. Each of the two Rust scans charges one unit of work per
+// byte (the LF of a CRLF included), and `2 * len <= max_work` is checked
+// first, so neither scan can exceed the work budget.
+pub fn line_table(in text: Str, in limits: Limits, line_size: usize)
+    -> ChunkSeq[u64] eff [Fail[Error]] {
+    validate(in limits);
+    let bytes = text.as_bytes();
+    let n = text.len();
+    bound(n, limits.max_source_bytes, Resource::Source);
+    bound(mul(n, 2, Resource::Work), limits.max_work, Resource::Work);
+    let mut table: ChunkSeq[u64] = ChunkSeq::new();
+    let mut count: u64 = 1;
+    let mut start: u64 = 0;
+    let mut i: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let at = match bytes[i..n].find_either(13, 10) {
+            Option::Some(k) => wrapping_add(i, k),
+            Option::None => n,
+        };
+        if at >= n {
+            break;
+        }
+        table.push(start);
+        table.push(at);
+        i = wrapping_add(at, 1);
+        if byte(in bytes, at) == 13 && i < n && byte(in bytes, i) == 10 {
+            i = wrapping_add(i, 1);
+        }
+        start = i;
+        count = wrapping_add(count, 1);
+    }
+    bound(count, limits.max_lines, Resource::Lines);
+    bound(
+        mul(count, u(line_size), Resource::Metadata),
+        limits.max_metadata_bytes,
+        Resource::Metadata
+    );
+    table.push(start);
+    table.push(n);
+    table
+}
+
+// `LineIndex::offset`: the byte offset of a UTF-16 position.
+pub fn offset(in text: Str, in lines: Slice[u64], max_work: usize, p: Position)
+    -> usize eff [Fail[Error]] {
+    let line = widen_u64(p.line);
+    let count = lines.len() / 2;
+    if line >= count {
+        Fail::raise(Error::LineOutOfBounds);
+    }
+    let at = wrapping_add(line, line);
+    let start = word(in lines, at);
+    let end = word(in lines, wrapping_add(at, 1));
+    let bytes = text.as_bytes();
+    let target = widen_u64(p.character);
+    let cap = u(max_work);
+    let mut utf16: u64 = 0;
+    let mut used: u64 = 0;
+    let mut i = start;
+    loop {
+        if i >= end {
+            break;
+        }
+        let len = utf8_len(byte(in bytes, i));
+        used = wrapping_add(used, len);
+        if used > cap {
+            Fail::raise(Error::Budget(Resource::Work));
+        }
+        if utf16 == target {
+            return narrow_usize(i);
+        }
+        let next = if len == 4 {
+            wrapping_add(utf16, 2)
+        } else {
+            wrapping_add(utf16, 1)
+        };
+        if next > 4294967295 {
+            Fail::raise(Error::CharacterOutOfBounds);
+        }
+        if target < next {
+            Fail::raise(Error::SurrogateInterior);
+        }
+        utf16 = next;
+        i = wrapping_add(i, len);
+    }
+    if utf16 == target {
+        narrow_usize(end)
+    } else {
+        Fail::raise(Error::CharacterOutOfBounds)
+    }
+}
+
+// The number of lines whose start is at most `offset` (`partition_point`).
+fn lines_through(in lines: Slice[u64], offset: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = lines.len() / 2;
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) >> 1);
+        if word(in lines, wrapping_add(mid, mid)) <= offset {
+            lo = wrapping_add(mid, 1);
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+// `LineIndex::position`: the UTF-16 position of a byte offset.
+pub fn position(in text: Str, in lines: Slice[u64], max_work: usize, offset: usize)
+    -> Position eff [Fail[Error]] {
+    let at = u(offset);
+    let bytes = text.as_bytes();
+    let n = text.len();
+    if at > n {
+        Fail::raise(Error::ByteOutOfBounds);
+    }
+    if at < n && is_continuation(byte(in bytes, at)) {
+        Fail::raise(Error::Utf8Boundary);
+    }
+    let through = lines_through(in lines, at);
+    if through == 0 {
+        Fail::raise(Error::ByteOutOfBounds);
+    }
+    let line = wrapping_sub(through, 1);
+    let start = word(in lines, wrapping_add(line, line));
+    let end = word(in lines, wrapping_add(wrapping_add(line, line), 1));
+    if at > end {
+        Fail::raise(Error::LineEndingInterior);
+    }
+    bound(wrapping_sub(at, start), max_work, Resource::Work);
+    // UTF-16 units: one per char start, plus one more per 4-byte char.
+    let mut character: u64 = 0;
+    for i in start..at {
+        let b = byte(in bytes, i);
+        if !is_continuation(b) {
+            character = if b >= 240 {
+                wrapping_add(character, 2)
+            } else {
+                wrapping_add(character, 1)
+            };
+        }
+    }
+    if character > 4294967295 {
+        Fail::raise(Error::CharacterOutOfBounds);
+    }
+    if line > 4294967295 {
+        Fail::raise(Error::LineOutOfBounds);
+    }
+    Position {
+        line: wrapping_u32(line),
+        character: wrapping_u32(character)
+    }
+}
+
+// `LineIndex::range`.
+pub fn range(in text: Str, in lines: Slice[u64], max_work: usize, span: ByteSpan)
+    -> Range eff [Fail[Error]] {
+    if span.start > span.end {
+        Fail::raise(Error::ReversedRange);
+    }
+    let start = position(in text, in lines, max_work, span.start);
+    let end = position(in text, in lines, max_work, span.end);
+    Range {
+        start: start,
+        end: end
+    }
+}
+
+// `LineIndex::span`.
+pub fn span(in text: Str, in lines: Slice[u64], max_work: usize, r: Range)
+    -> ByteSpan eff [Fail[Error]] {
+    if r
+        .start
+        .line
+        > r
+        .end
+        .line
+        || (r.start.line == r.end.line && r.start.character > r.end.character) {
+        Fail::raise(Error::ReversedRange);
+    }
+    let start = offset(in text, in lines, max_work, r.start);
+    let end = offset(in text, in lines, max_work, r.end);
+    ByteSpan {
+        start: start,
+        end: end
+    }
+}
+
+// Edits.
+//
+// An edit list is five words per edit: span start, span end, the offset and
+// length of its expected text in the pool, and the length of its
+// replacement.
+
+// Whether the source bytes `start .. end` equal the pool bytes from `off`.
+fn same_bytes(in text: Slice[u8], start: u64, end: u64, in pool: Slice[u8], off: u64, len: u64)
+    -> bool {
+    if wrapping_sub(end, start) != len {
+        return false;
+    }
+    for i in 0..len {
+        if byte(in text, wrapping_add(start, i)) != byte(in pool, wrapping_add(off, i)) {
+            return false;
+        }
+    }
+    true
+}
+
+// `validate_edits`, charging `work` in place. Returns the output length and
+// the metadata bytes.
+fn check_edits(
+    in text: Str,
+    in lines: Slice[u64],
+    in edits: Slice[u64],
+    from: u64,
+    count: u64,
+    in pool: Slice[u8],
+    in limits: Limits,
+    edit_size: usize,
+    inout work: u64
+) -> EditTotals eff [Fail[Error]] {
+    let n = text.len();
+    let bytes = text.as_bytes();
+    let cap = limits.max_work;
+    bound(n, limits.max_source_bytes, Resource::Source);
+    bound(count, limits.max_edits, Resource::Edits);
+    let mut total_text: u64 = 0;
+    let mut removed: u64 = 0;
+    let mut inserted: u64 = 0;
+    for i in 0..count {
+        let at = wrapping_add(from, wrapping_mul(i, 5));
+        let start = word(in edits, at);
+        let end = word(in edits, wrapping_add(at, 1));
+        let exp_off = word(in edits, wrapping_add(at, 2));
+        let exp_len = word(in edits, wrapping_add(at, 3));
+        let rep_len = word(in edits, wrapping_add(at, 4));
+        work = charge(work, add(exp_len, rep_len, Resource::Work), cap);
+        work = charge(work, mul(n, 2, Resource::Work), cap);
+        let checked = range(
+            in text,
+            in lines,
+            cap,
+            ByteSpan {
+                start: narrow_usize(start),
+                end: narrow_usize(end)
+            }
+        );
+        if !same_bytes(in bytes, start, end, in pool, exp_off, exp_len) {
+            Fail::raise(Error::SourceMismatch);
+        }
+        total_text = add(total_text, add(exp_len, rep_len, Resource::Text), Resource::Text);
+        removed = add(removed, wrapping_sub(end, start), Resource::Output);
+        inserted = add(inserted, rep_len, Resource::Output);
+        for j in 0..i {
+            work = charge(work, 1, cap);
+            let other = wrapping_add(from, wrapping_mul(j, 5));
+            let b_start = word(in edits, other);
+            let b_end = word(in edits, wrapping_add(other, 1));
+            // Adjacent nonempty edits are allowed; insertions at a shared
+            // boundary are not.
+            if start
+                == b_start
+                || (start < b_end && b_start < end)
+                || (start == end && start == b_end)
+                || (b_start == b_end && b_start == end) {
+                Fail::raise(Error::OverlappingEdits);
+            }
+        }
+    }
+    bound(total_text, limits.max_text_bytes, Resource::Text);
+    let metadata = add(
+        mul(count, u(edit_size), Resource::Metadata),
+        total_text,
+        Resource::Metadata
+    );
+    bound(metadata, limits.max_metadata_bytes, Resource::Metadata);
+    if removed > n {
+        Fail::raise(Error::OverlappingEdits);
+    }
+    let output = add(wrapping_sub(n, removed), inserted, Resource::Output);
+    bound(output, limits.max_output_bytes, Resource::Output);
+    work = charge(work, add(n, output, Resource::Work), cap);
+    work = charge(work, total_text, cap);
+    work = charge(work, mul(count, count, Resource::Work), cap);
+    EditTotals {
+        output: narrow_usize(output),
+        metadata: narrow_usize(metadata)
+    }
+}
+
+// `SourceEdits::new` after `Limits::validate`: the output length.
+pub fn edits_check(
+    in text: Str,
+    in lines: Slice[u64],
+    in edits: Slice[u64],
+    in pool: Slice[u8],
+    in limits: Limits,
+    edit_size: usize
+) -> usize eff [Fail[Error]] {
+    validate(in limits);
+    let mut work: u64 = 0;
+    let totals = check_edits(
+        in text,
+        in lines,
+        in edits,
+        0,
+        edits.len() / 5,
+        in pool,
+        in limits,
+        edit_size,
+        inout work
+    );
+    totals.output
+}
+
+// `SourceEdits::apply`: `replace` is three words per edit in span order
+// (span start, span end, replacement length); the replacements follow each
+// other in `pool`. The result is UTF-8 bytes: `extend` copies a slice in one
+// block, while `String::push_str` copies a byte at a time (see the report).
+pub fn edits_apply(in text: Slice[u8], in replace: Slice[u64], in pool: Slice[u8], output: usize)
+    -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity(u(output));
+    let mut cursor: u64 = 0;
+    let mut at: u64 = 0;
+    let count = replace.len() / 3;
+    for i in 0..count {
+        let w = wrapping_mul(i, 3);
+        let start = word(in replace, w);
+        let end = word(in replace, wrapping_add(w, 1));
+        let len = word(in replace, wrapping_add(w, 2));
+        out.extend(text[cursor..start]);
+        out.extend(pool[at..wrapping_add(at, len)]);
+        at = wrapping_add(at, len);
+        cursor = end;
+    }
+    out.extend(text[cursor..text.len()]);
+    out
+}
+
+// Diagnostics.
+//
+// `data` holds, per diagnostic: code length, message length, help (1 when
+// present), help length, label count and fix count; then three words per
+// label (span start, span end, message length; primary labels set bit 63 of
+// the message length); then per fix: id length, title length and edit
+// count, followed by its edits in the edit encoding. `pool` holds the
+// expected texts of the edits.
+
+fn primary_bit() -> u64 {
+    9223372036854775808
+}
+
+// `Diagnostics::new` before the copies.
+pub fn diagnostics_check(
+    in text: Str,
+    in lines: Slice[u64],
+    in data: Slice[u64],
+    count: u64,
+    in pool: Slice[u8],
+    in limits: Limits,
+    in sizes: Sizes
+) -> Unit eff [Fail[Error]] {
+    validate(in limits);
+    let n = text.len();
+    let cap = limits.max_work;
+    bound(n, limits.max_source_bytes, Resource::Source);
+    bound(count, limits.max_diagnostics, Resource::Diagnostics);
+    let mut labels: u64 = 0;
+    let mut fixes: u64 = 0;
+    let mut edit_count: u64 = 0;
+    let mut total_text: u64 = 0;
+    let mut metadata = mul(count, u(sizes.diagnostic), Resource::Metadata);
+    let mut work: u64 = 0;
+    let mut at: u64 = 0;
+    for d in 0..count {
+        let code_len = word(in data, at);
+        let message_len = word(in data, wrapping_add(at, 1));
+        let help_len = word(in data, wrapping_add(at, 3));
+        let label_count = word(in data, wrapping_add(at, 4));
+        let fix_count = word(in data, wrapping_add(at, 5));
+        at = wrapping_add(at, 6);
+        if code_len == 0 || message_len == 0 || label_count == 0 {
+            Fail::raise(Error::InvalidDiagnostic);
+        }
+        labels = add(labels, label_count, Resource::Labels);
+        bound(labels, limits.max_labels, Resource::Labels);
+        let mut primary = false;
+        for l in 0..label_count {
+            if (
+                word(in data, wrapping_add(at, wrapping_add(wrapping_mul(l, 3), 2))) & primary_bit()
+            )
+                != 0 {
+                primary = true;
+            }
+        }
+        if !primary {
+            Fail::raise(Error::InvalidDiagnostic);
+        }
+        fixes = add(fixes, fix_count, Resource::Fixes);
+        bound(fixes, limits.max_fixes, Resource::Fixes);
+        total_text = add(total_text, add(code_len, message_len, Resource::Text), Resource::Text);
+        total_text = add(total_text, help_len, Resource::Text);
+        metadata = add(
+            metadata,
+            mul(label_count, u(sizes.label), Resource::Metadata),
+            Resource::Metadata
+        );
+        metadata = add(
+            metadata,
+            mul(fix_count, u(sizes.fix), Resource::Metadata),
+            Resource::Metadata
+        );
+        for l in 0..label_count {
+            work = charge(work, mul(n, 2, Resource::Work), cap);
+            let start = word(in data, at);
+            let end = word(in data, wrapping_add(at, 1));
+            let message = word(in data, wrapping_add(at, 2)) & wrapping_sub(primary_bit(), 1);
+            at = wrapping_add(at, 3);
+            let checked = range(
+                in text,
+                in lines,
+                cap,
+                ByteSpan {
+                    start: narrow_usize(start),
+                    end: narrow_usize(end)
+                }
+            );
+            total_text = add(total_text, message, Resource::Text);
+        }
+        for f in 0..fix_count {
+            let id_len = word(in data, at);
+            let title_len = word(in data, wrapping_add(at, 1));
+            let edits = word(in data, wrapping_add(at, 2));
+            at = wrapping_add(at, 3);
+            if id_len == 0 || title_len == 0 || edits == 0 {
+                Fail::raise(Error::InvalidDiagnostic);
+            }
+            edit_count = add(edit_count, edits, Resource::Edits);
+            bound(edit_count, limits.max_edits, Resource::Edits);
+            let totals = check_edits(
+                in text,
+                in lines,
+                in data,
+                at,
+                edits,
+                in pool,
+                in limits,
+                sizes.edit,
+                inout work
+            );
+            metadata = add(metadata, u(totals.metadata), Resource::Metadata);
+            total_text = add(total_text, add(id_len, title_len, Resource::Text), Resource::Text);
+            for e in 0..edits {
+                let w = wrapping_add(at, wrapping_mul(e, 5));
+                let exp_len = word(in data, wrapping_add(w, 3));
+                let rep_len = word(in data, wrapping_add(w, 4));
+                total_text = add(total_text, add(exp_len, rep_len, Resource::Text), Resource::Text);
+            }
+            at = wrapping_add(at, wrapping_mul(edits, 5));
+        }
+    }
+    bound(total_text, limits.max_text_bytes, Resource::Text);
+    work = charge(work, total_text, cap);
+    bound(
+        add(metadata, total_text, Resource::Metadata),
+        limits.max_metadata_bytes,
+        Resource::Metadata
+    );
+}

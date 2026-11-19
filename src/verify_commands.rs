@@ -1,6 +1,5 @@
 //! Explicit Lean verification for formatter document models (`--format`) and
 //! extracted Vesper source programs (`--extract`).
-use crate::proof_commands::{self, LeanToolchain, Stage};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -11,6 +10,7 @@ use std::{
     process::Command,
     time::Duration,
 };
+use vesper::proof_commands::{self, LeanToolchain, Stage};
 use vesper::{check, lean, parser};
 use vesper_fmt::{Limits, ProofLimits, format_for_verification};
 use vesper_loom_cas::{DerivationInputs, Domain, Store, blob_id};

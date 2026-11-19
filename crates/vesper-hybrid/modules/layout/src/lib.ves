@@ -1,0 +1,59 @@
+// The word arithmetic of src/layout.rs (`WordLayout`, `RUST_WORD_LAYOUT`) in
+// Vesper: the pilot module of the hybrid Stage 2 build (self-hosting SH0
+// lane 1, #1123). `vesper build --lib` exports every `pub fn` as
+// `vesper_hybrid_layout_<name>`, and crates/vesper-hybrid installs them as
+// the compiler's `WordLayout` table. Each function is total and matches its
+// Rust counterpart bit for bit.
+
+// The result of `next_offset` when the field does not fit in an `i32`
+// (Rust: `checked_add` returns `None`). Every fitting offset is an `i32`, so
+// no fitting result equals it.
+pub fn no_fit() -> i64 {
+    4294967296
+}
+
+// Offset of the first field: after the tag word of an enum, else 0.
+pub fn first_offset(is_enum: bool) -> i32 {
+    if is_enum {
+        8
+    } else {
+        0
+    }
+}
+
+// Offset after a field of `size` bytes placed at `offset`. Rust computes
+// `offset.checked_add(size as i32)`: the size is reinterpreted as an `i32`,
+// and the sum must fit in an `i32`. Two `i32`s cannot overflow an `i64`.
+pub fn next_offset(offset: i32, size: u32) -> i64 {
+    let next = wrapping_add(widen_i64(offset), widen_i64(wrapping_i32(size)));
+    if next > 2147483647 || next < -2147483648 {
+        no_fit()
+    } else {
+        next
+    }
+}
+
+// Size of a product whose last field ends at `end`: at least one word.
+pub fn product_size(end: i32) -> u32 {
+    let e = wrapping_u32(end);
+    if e < 8 {
+        8
+    } else {
+        e
+    }
+}
+
+// Size of an enum so far (`size`) after a variant ending at `end`.
+pub fn enum_size(size: u32, end: i32) -> u32 {
+    let e = wrapping_u32(end);
+    if e > size {
+        e
+    } else {
+        size
+    }
+}
+
+// Offset of word `index` of a packed run of words.
+pub fn word_offset(index: u32) -> i32 {
+    wrapping_i32(wrapping_mul(index, 8))
+}

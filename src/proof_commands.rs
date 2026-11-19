@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use vesper::forge_frontend::provenance::{self, ProvenanceTable};
+use crate::forge_frontend::provenance::{self, ProvenanceTable};
 
 const AUDITOR: &str = include_str!("../tools/proof-audit/Audit.lean");
 const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
@@ -34,7 +34,7 @@ struct Options {
     macro_provenance: Option<PathBuf>,
 }
 
-pub(crate) fn name_valid(name: &str) -> bool {
+pub fn name_valid(name: &str) -> bool {
     name.len() <= 1024
         && name.split('.').all(|part| {
             !part.is_empty()
@@ -47,7 +47,7 @@ pub(crate) fn name_valid(name: &str) -> bool {
 
 /// These axioms bypass kernel justification of the claimed result. Explicit
 /// policies may admit mathematical assumptions, but never proof/compiler escapes.
-pub(crate) fn forbidden_axiom(name: &str) -> bool {
+pub fn forbidden_axiom(name: &str) -> bool {
     matches!(name, "sorryAx" | "Lean.ofReduceBool" | "Lean.trustCompiler")
         // Lean 4.35's Meta.nativeEqTrue creates per-theorem axioms under
         // `_native ++ tacticName ++ ax`; see Lean/Meta/Native.lean.
@@ -197,9 +197,9 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     }
 }
 
-pub(crate) struct Stage(pub(crate) PathBuf);
+pub struct Stage(pub PathBuf);
 impl Stage {
-    pub(crate) fn new() -> Result<Self, String> {
+    pub fn new() -> Result<Self, String> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         for _ in 0..64 {
             let path = env::temp_dir().join(format!(
@@ -322,7 +322,7 @@ fn capture(mut reader: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
     Ok((saved, truncated))
 }
 
-pub(crate) fn execute(command: &mut Command, timeout: Duration) -> Result<Output, String> {
+pub fn execute(command: &mut Command, timeout: Duration) -> Result<Output, String> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -461,12 +461,12 @@ fn digest_file(path: &Path, relative: &Path) -> Result<FileDigest, String> {
     })
 }
 
-pub(crate) struct LeanToolchain {
-    pub(crate) prefix: PathBuf,
-    pub(crate) binary: PathBuf,
-    pub(crate) version: String,
+pub struct LeanToolchain {
+    pub prefix: PathBuf,
+    pub binary: PathBuf,
+    pub version: String,
 }
-pub(crate) fn lean_toolchain(launcher: &str) -> Result<LeanToolchain, String> {
+pub fn lean_toolchain(launcher: &str) -> Result<LeanToolchain, String> {
     let prefix = execute(
         Command::new(launcher).arg("--print-prefix"),
         Duration::from_secs(30),
@@ -501,7 +501,7 @@ pub(crate) fn lean_toolchain(launcher: &str) -> Result<LeanToolchain, String> {
 
 /// Reuse the normal kernel replay with an empty axiom policy. The caller owns
 /// freshly generated artifacts; source strings and reported flags never approve.
-pub(crate) fn audit_generated(
+pub fn audit_generated(
     root: &Path,
     module: &str,
     theorems: &[&str],
@@ -513,7 +513,7 @@ pub(crate) fn audit_generated(
 
 /// Kernel-replay a freshly generated module under an explicit allowed-axiom
 /// whitelist. `sorryAx` and compiler-trust escapes are always forbidden.
-pub(crate) fn audit_generated_with_policy(
+pub fn audit_generated_with_policy(
     root: &Path,
     module: &str,
     theorems: &[&str],
@@ -534,7 +534,7 @@ pub(crate) fn audit_generated_with_policy(
 
 /// Additionally require designated wrapper theorems to have exactly the closed
 /// constant type emitted for their source contract, with no extra hypotheses.
-pub(crate) fn audit_generated_with_types(
+pub fn audit_generated_with_types(
     root: &Path,
     module: &str,
     theorems: &[&str],
@@ -585,7 +585,7 @@ pub(crate) fn audit_generated_with_types(
 
 /// Replay local Lean artifacts under an explicit allowed-axiom whitelist for
 /// package publication gates (`vesper publish`), always rejecting proof/compiler escape axioms.
-pub(crate) fn audit_policy(
+pub fn audit_policy(
     root: &Path,
     module: &str,
     theorems: &[String],

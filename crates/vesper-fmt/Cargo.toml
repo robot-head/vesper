@@ -7,5 +7,6 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 blake3 = "1.8"
-vesper-lean-syntax = { path = "../vesper-lean-syntax" }
+# The frozen Rust seed copy (seed-copy rule, #1128).
+vesper-lean-syntax = { path = "../vesper-lean-syntax/seed", package = "vesper-lean-syntax-seed" }
 vesper-syntax = { path = "../vesper-syntax" }

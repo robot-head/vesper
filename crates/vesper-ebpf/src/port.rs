@@ -796,3 +796,76 @@ pub(crate) fn verify(
         }
     }
 }
+
+/// The interpreter's persistent state in the port's layout (the header of
+/// `vesper/src/interp.ves`): words, key bytes, region bytes and spill words.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InterpState {
+    pub st: Vec<u64>,
+    pub keys: Vec<u8>,
+    pub mem: Vec<u8>,
+    pub spill: Vec<u64>,
+}
+
+impl InterpState {
+    fn from_out(out: &ffi::vesper__ebpf__interp__RunOutRef<'_>) -> Self {
+        InterpState {
+            st: out.st().to_vec(),
+            keys: out.keys().to_vec(),
+            mem: out.mem().to_vec(),
+            spill: out.spill().to_vec(),
+        }
+    }
+}
+
+/// `interp::Env::new`: the state for maps of 7 words each.
+pub(crate) fn interp_new_env(maps: &[u64]) -> InterpState {
+    let out = ffi::interp_new_env(maps);
+    InterpState::from_out(&out.as_ref())
+}
+
+/// One `interp::run` in the port: the result words and bytes, and the new
+/// state (none after a decode error or a bad input, which leave it as it
+/// was).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn interp_run(
+    slots: &[RawInsn],
+    kfuncs: &[u64],
+    ptype: u64,
+    input: u64,
+    pkt: &[u8],
+    ctx: &[u8],
+    cfg: &[u64],
+    maps: &[u64],
+    nmain: u64,
+    tails: (&[u64], &[RawInsn], &[u64]),
+    state: &InterpState,
+) -> (Vec<u64>, Vec<u8>, Option<InterpState>) {
+    let out = ffi::interp_run(
+        slots,
+        kfuncs,
+        ptype,
+        input,
+        pkt,
+        ctx,
+        cfg,
+        maps,
+        nmain,
+        tails.0,
+        tails.1,
+        tails.2,
+        &state.st,
+        &state.keys,
+        &state.mem,
+        &state.spill,
+    );
+    let out = out.as_ref();
+    let words = out.words().to_vec();
+    let next = (words[0] <= 1).then(|| InterpState::from_out(&out));
+    (words, out.bytes().to_vec(), next)
+}
+
+/// The decode error of the port's words (variant, position, field).
+pub(crate) fn decode_error(variant: u64, a: u64, b: u64) -> insn::DecodeError {
+    insn::DecodeError::from(PortDecodeError::from_words(variant, a as usize, b as u8))
+}

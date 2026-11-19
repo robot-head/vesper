@@ -326,11 +326,17 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     || path.ends_with("tests/fixtures/seq")
                     || path.ends_with("tests/fixtures/strings")
                     || path.ends_with("packages/vesper-std")
+                    // The front end v2 (#1129) is a package that imports
+                    // with `use` (#880).
+                    || path.ends_with("packages/vesper-front")
                     // The Quarry port (#904) uses `use`-free syntax the
                     // Stage 1 parser lacks (#880); it joins with the others.
                     || path.ends_with("crates/vesper-quarry/vesper")
                     || path.ends_with("crates/vesper-port-build/vesper")
                     || path.ends_with("crates/vesper-beacon/vesper")
+                    // Self-hosting SH0 lane 6 (#1128): `p[a..b]` string intervals (#887).
+                    || path.ends_with("crates/vesper-span/vesper")
+                    || path.ends_with("crates/vesper-lean-syntax/vesper")
                     // Port P1 lane 16 (#913): `use` (#880).
                     || path.ends_with("crates/vesper-loom-calculus/vesper")
                     // Port P1 lane 17 (#914): `use` (#880).
@@ -379,12 +385,18 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     || path.ends_with("crates/vesper-silicon/vesper")
                     // Port P3b lane 4 (#1066): the Warp port uses `use` (#880).
                     || path.ends_with("crates/vesper-warp/vesper")
+                    // Port P3b lane 7 (#1069): the Flux port uses `use` (#880).
+                    || path.ends_with("crates/vesper-flux/vesper")
                     // P3b lane 3 (#1065): `.vsys` handle fixtures (slice intervals).
                     || path.ends_with("tests/fixtures/ffi_handles")
                     // Port P3b lane 5 (#1067): the prism-h3 port uses `use` (#880).
                     || path.ends_with("crates/vesper-prism-h3/vesper")
                     // Port P3b lane 8 (#1070): the Kinetic port uses `use` (#880).
                     || path.ends_with("crates/vesper-kinetic/vesper")
+                    // SH0 lane 1 (#1123): the hybrid compiler's swapped
+                    // modules export with `pub fn`, which the Stage 1
+                    // parser lacks (node counts differ).
+                    || path.ends_with("crates/vesper-hybrid/modules")
                 {
                     continue;
                 }

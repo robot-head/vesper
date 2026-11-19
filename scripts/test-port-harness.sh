@@ -125,6 +125,12 @@ cargo test --locked -p vesper-port-build
 divergent "package port" root_package_modules_are_linked dependency_modules_are_linked \
     -p vesper-port-build --features divergent --test package
 fi
+# Self-hosting SH0 lane 3 (#1125): the std I/O sample driver, an object
+# that walks, reads, spawns and writes through @vesper-std/fs, process and
+# env; host-sensitive (paths, processes, the OS's calling convention).
+if ported vesper-std-driver vesper-std-host; then
+cargo test --locked -p vesper-std-driver --features vesper-port
+fi
 # End of the export ABI tier: the ports below are platform-neutral Rust
 # tests over objects the ABI checks above already cover.
 if [ "${VESPER_PORT_HARNESS_SCOPE:-all}" = abi ]; then
@@ -286,3 +292,6 @@ skip_port vesper-prism-h3 || sh crates/vesper-prism-h3/port/check.sh  # port P3b
 skip_port vesper-chorus || sh crates/vesper-chorus/port/test-port.sh  # port P3b lane 6 (#1068): vesper-chorus (the Vesper library is its only build) and one divergence check per ported module
 skip_port vesper-resonance || sh crates/vesper-resonance/port/test-port.sh  # port P3b lane 9 (#1071): vesper-resonance, both builds, one divergence check per ported module and the realtime verifier proof
 skip_port vesper-kinetic || . crates/vesper-kinetic/port/check.sh  # port P3b lane 8 (#1070): vesper-kinetic, both builds and one divergence check per ported module
+skip_port vesper-flux || . crates/vesper-flux/port/check.sh  # port P3b lane 7 (#1069): vesper-flux on its Vesper kernels and one divergence check per ported kernel
+skip_port vesper-span || sh crates/vesper-span/port/test-port.sh  # self-hosting SH0 lane 6 (#1128): vesper-span, both builds, the differential test and one divergence check per ported area
+skip_port vesper-lean-syntax || sh crates/vesper-lean-syntax/port/test-port.sh  # self-hosting SH0 lane 6 (#1128): vesper-lean-syntax, both builds, the differential test and one divergence check per ported area

@@ -18,5 +18,6 @@ done <<'CHECKS'
 4 sap sap sortable_keys_preserve_float_order malformed_inputs_are_typed_errors
 5 crmath crmath matches_mpmath_references_bit_for_bit annex_f_special_values
 6 bignum fastmath binary64_functions_stay_within_the_documented_ulp_bound binary32_functions_stay_within_the_documented_ulp_bound
+7 gjk gjk sphere_pairs_match_closed_form malformed_shapes_are_typed_errors
 CHECKS
 unset VESPER_KINETIC_DIVERGENT

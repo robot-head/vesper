@@ -23,6 +23,9 @@ use std::{cell::RefCell, rc::Rc};
 /// `vesper build --lib`: C-ABI library objects (port P0 lane 6, #878).
 #[path = "native_aggregates.rs"]
 mod aggregates;
+/// Fixed-size array writes and constant tables (§5, #1091).
+#[path = "native_arrays.rs"]
+mod native_arrays;
 
 #[path = "dyn_trait/native.rs"]
 mod dyn_native;
@@ -1326,6 +1329,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 world,
                 ids,
                 program,
+                invariant_headers: BTreeSet::new(),
                 capabilities: BTreeMap::new(),
                 next_capability: 0,
                 closures: vec![],
@@ -2189,6 +2193,9 @@ struct Codegen<'a, 'b, M: Module> {
     world: &'b World,
     ids: &'b BTreeMap<String, FuncId>,
     program: &'b crate::ir::Program,
+    /// View and handle pointers of borrowed parameters whose header words
+    /// are invariant for the whole call ([`crate::bounds_hoist::stable_views`]).
+    invariant_headers: BTreeSet<ir::Value>,
     capabilities: BTreeMap<String, String>,
     next_capability: u64,
     closures: Vec<NativeClosure>,
@@ -3120,12 +3127,17 @@ impl<M: Module> Codegen<'_, '_, M> {
         // Reads whose split target the read itself bound (`split_copy`).
         let mut bound_early = BTreeSet::new();
         // Sequence headers read once before the loops that keep them.
-        let header_hoists = if self.operands_only && !self.in_fip_fn {
+        let mut header_hoists = if self.operands_only && !self.in_fip_fn {
             crate::bounds_hoist::header_hoists(f)
         } else {
             vec![]
         };
+        // Only a function's own graph has its parameters.
+        if return_to.is_some() {
+            header_hoists.retain(|h| !h.entry);
+        }
         let mut hoisted_reads = BTreeMap::new();
+        let mut entry_reads = BTreeMap::new();
         let mut values = BTreeMap::new();
         // A resumption can return through a shared handler dispatcher. Keep
         // virtual registers in frontend SSA variables so return edges receive
@@ -3319,6 +3331,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
             }
             self.drop_temporaries(&temporaries, f, i, crate::fip::AT_BLOCK_ENTRY, &values)?;
+            // Borrowed parameters the function never changes are read once,
+            // here, in the block that dominates every other.
+            if i == 0 {
+                for hoist in header_hoists.iter().filter(|h| h.entry) {
+                    let receiver = self.seq_entry_view(&hoist.place, &hoist.ty)?;
+                    for read in &hoist.reads {
+                        hoisted_reads.insert(*read, receiver);
+                        entry_reads.insert(*read, receiver);
+                    }
+                }
+            }
             if let Some(entries) = join_slot_params.get(&i) {
                 for &(dest_slot, param) in entries {
                     let var = self.b.declare_var(ptr_ty);
@@ -3339,6 +3362,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                         if let Some(register) = registers.get(&id) {
                             values.insert(id, self.use_var(*register));
                         }
+                    }
+                }
+                // A read of an invariant parameter is its entry value in
+                // every block, not a copy through a block parameter, so
+                // its header words are recognized as invariant everywhere.
+                for id in crate::ir_inline::operands(&inst.op) {
+                    if let Some(receiver) = entry_reads.get(&id) {
+                        values.insert(id, *receiver);
                     }
                 }
                 if !self.in_fip_fn
@@ -3407,6 +3438,18 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let var = self.vars[root];
                         self.use_var(var)
                     }
+                    // An array read only indexed right away (§5): the
+                    // element is read from the place, not from a copy.
+                    Op::Read { root, path, .. }
+                        if native_arrays::read_in_place(f, i, inst_idx)
+                            && Layout::of(self.world, &ty).is_ok_and(|l| l.aggregate()) =>
+                    {
+                        let p = crate::check::Place {
+                            root: root.clone(),
+                            path: path.clone(),
+                        };
+                        self.address(&ir_place_expr(&p, inst.span.clone()))?
+                    }
                     Op::Read {
                         root, path, pass, ..
                     } => {
@@ -3451,6 +3494,37 @@ impl<M: Module> Codegen<'_, '_, M> {
                     // keeps the rule): the write is the construction itself.
                     Op::Write { value, .. } if aggregates::placed(&home_pointers, *value) => {
                         self.zero()
+                    }
+                    // An array element write (§5) takes its index and value
+                    // straight from the pair built only for it.
+                    Op::Write { place, op, value }
+                        if op.starts_with(crate::arrays::WRITE_PREFIX)
+                            && native_arrays::written_pair(f, *value).is_some() =>
+                    {
+                        let (index, element) = native_arrays::written_pair(f, *value).unwrap();
+                        let mut path = place.split('.');
+                        let p = crate::check::Place {
+                            root: path.next().ok_or("empty IR place")?.into(),
+                            path: path.map(str::to_owned).collect(),
+                        };
+                        let left = ir_place_expr(&p, inst.span.clone());
+                        let index = *values
+                            .get(&index)
+                            .ok_or_else(|| format!("undefined native IR value %{index}"))?;
+                        let element = *values
+                            .get(&element)
+                            .ok_or_else(|| format!("undefined native IR value %{element}"))?;
+                        let element_ty = match f.values.get(value) {
+                            Some(Type::Tuple(pair)) if pair.len() == 2 => {
+                                substitute(&pair[1], &self.generic_vars)
+                            }
+                            _ => {
+                                return Err(
+                                    "native array write requires an (index, value) pair".into()
+                                );
+                            }
+                        };
+                        self.array_store(&inst.span, op, &left, index, element, &element_ty)?
                     }
                     Op::Write { place, op, value } => {
                         self.drop_replaced(place, op, (i, inst_idx))?;
@@ -3504,6 +3578,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                             Box::new(a),
                             Box::new(b),
                         )))?
+                    }
+                    // Built only for an array element write, which reads
+                    // its operands directly (`native_arrays::written_pair`).
+                    Op::Tuple(_) if native_arrays::written_pair(f, inst.dest).is_some() => {
+                        self.zero()
                     }
                     Op::Tuple(ids) => {
                         let es = ids
@@ -3598,7 +3677,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                             })
                             .collect::<Result<Vec<_>, String>>()?;
                         let site = make(ExprKind::Tuple(vec![]));
-                        if self.world.functions.contains_key(callee) {
+                        if let Some(table) = self.constant_table(callee, f, inst.dest)? {
+                            table
+                        } else if self.world.functions.contains_key(callee) {
                             self.current_call_slot = f.fip_call_slots.get(&inst.dest).cloned();
                             let into =
                                 self.home_pointer(inst.dest, &homes, &mut home_pointers, sret)?;
@@ -3837,7 +3918,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                     self.emit_fip_drop(drop, &values, Span::default())?;
                 }
             }
-            for hoist in header_hoists.iter().filter(|h| h.preheader == i) {
+            for hoist in header_hoists
+                .iter()
+                .filter(|h| h.preheader == i && !h.entry)
+            {
                 let receiver = self.seq_hoist_header(&hoist.place, &hoist.ty)?;
                 for read in &hoist.reads {
                     hoisted_reads.insert(*read, receiver);
@@ -4673,7 +4757,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let LayoutKind::Product(fs) = layout.kind else {
                     return Err("native indexing requires tuple".into());
                 };
-                let ptr = self.expr(base)?;
+                // An element of an array place (§5) is read where it lies,
+                // without copying the whole array first.
+                let ptr = if crate::check::Place::from_expr(base).is_some() {
+                    self.address(base)?
+                } else {
+                    self.expr(base)?
+                };
                 let index = self.expr(index)?;
                 let valid = self
                     .b
@@ -4698,7 +4788,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                     info.merge(field);
                 }
                 self.write_info(address, info);
-                self.load(address, &f.ty)?
+                let value = self.load(address, &f.ty)?;
+                if f.layout.aggregate() {
+                    let copy = self.alloc_uninit(f.layout.size);
+                    self.copy_bytes(value, copy, f.layout.size);
+                    copy
+                } else {
+                    value
+                }
             }
             ExprKind::Block { statements, tail } => {
                 let scope = self.vars.clone();
@@ -4900,6 +4997,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                         Ok(self.flush(flush, r))
                     }?
                 }
+            }
+            ExprKind::Assign(op, l, r) if op.starts_with(crate::arrays::WRITE_PREFIX) => {
+                self.array_write(e, op, l, r)?
             }
             ExprKind::Assign(op, l, r) => {
                 let ty = self.ty(l);

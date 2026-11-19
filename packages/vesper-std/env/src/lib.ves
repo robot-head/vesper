@@ -1,0 +1,149 @@
+// @vesper-std/env: the process's arguments, environment variables and
+// current directory (self-hosting SH0 lane 3, #1125), over the `.vsys`
+// library `StdEnv` (env.vsys; the host side is crates/vesper-std-host).
+// Every operation performs `Ffi[StdEnv]`. Text comes back as `String` when
+// it is UTF-8 and as bytes from the `*_bytes` variants (Unix allows any
+// bytes; Windows text is UTF-16 converted to UTF-8).
+use @vesper-std/fs::{
+    IoError,
+    raise_io
+};
+
+// The host's copy-out protocol: a call returns the length `n` (negative
+// for none) and copies only when `buf` is big enough. Whether `buf` had to
+// grow, so the call must be repeated; otherwise `buf` is cut to `n`.
+fn grown(n: i64, inout buf: ChunkSeq[u8]) -> bool {
+    if n < 0 {
+        return false;
+    }
+    let len = wrapping_u64(n);
+    if len > buf.len() {
+        buf.resize(len, 0);
+        return true;
+    }
+    buf.truncate(len);
+    false
+}
+
+// The number of arguments, the program name (argument 0) included.
+pub fn arg_count() -> u64 eff [Ffi[StdEnv]] {
+    StdEnv::vstd_env_arg_count()
+}
+
+// Argument `i` as bytes, `None` past the last.
+pub fn arg_bytes(i: u64) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(64, 0);
+    loop {
+        let n = StdEnv::vstd_env_arg(i, inout buf.as_slice_mut());
+        if n < 0 {
+            return Option::None;
+        }
+        if !grown(n, inout buf) {
+            break;
+        }
+    }
+    Option::Some(buf)
+}
+
+// Argument `i` as text, `None` past the last or when it is not UTF-8.
+pub fn arg(i: u64) -> Option[String] eff [Ffi[StdEnv]] {
+    match arg_bytes(i) {
+        Option::Some(b) => String::from_utf8(in b.as_slice()),
+        Option::None => Option::None,
+    }
+}
+
+// Variable `key` as bytes, `None` when it is unset.
+pub fn var_bytes(in key: Str) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(64, 0);
+    loop {
+        let n = StdEnv::vstd_env_var(in key.as_bytes(), inout buf.as_slice_mut());
+        if n < 0 {
+            return Option::None;
+        }
+        if !grown(n, inout buf) {
+            break;
+        }
+    }
+    Option::Some(buf)
+}
+
+// Variable `key` as text, `None` when it is unset or not UTF-8.
+pub fn var(in key: Str) -> Option[String] eff [Ffi[StdEnv]] {
+    match var_bytes(in key) {
+        Option::Some(b) => String::from_utf8(in b.as_slice()),
+        Option::None => Option::None,
+    }
+}
+
+// The number of environment variables.
+pub fn var_count() -> u64 eff [Ffi[StdEnv]] {
+    StdEnv::vstd_env_var_count()
+}
+
+// Variable `i` as `KEY=VALUE` bytes, `None` past the last.
+pub fn var_at_bytes(i: u64) -> Option[ChunkSeq[u8]] eff [Ffi[StdEnv]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(128, 0);
+    loop {
+        let n = StdEnv::vstd_env_var_at(i, inout buf.as_slice_mut());
+        if n < 0 {
+            return Option::None;
+        }
+        if !grown(n, inout buf) {
+            break;
+        }
+    }
+    Option::Some(buf)
+}
+
+// The current directory as path bytes.
+pub fn current_dir_bytes() -> ChunkSeq[u8] eff [Ffi[StdEnv], Fail[IoError]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    buf.resize(256, 0);
+    loop {
+        let mut err: u64 = 0;
+        let n = StdEnv::vstd_env_current_dir(inout buf.as_slice_mut(), inout err);
+        if n < 0 {
+            return raise_io(err);
+        }
+        if !grown(n, inout buf) {
+            break;
+        }
+    }
+    buf
+}
+
+// The current directory as text (an `invalid_input()` error when it is
+// not UTF-8).
+pub fn current_dir() -> String eff [Ffi[StdEnv], Fail[IoError]] {
+    let b = current_dir_bytes();
+    match String::from_utf8(in b.as_slice()) {
+        Option::Some(s) => s,
+        Option::None => Fail::raise(
+            IoError {
+                kind: 7,
+                os: 0,
+            }
+        ),
+    }
+}
+
+// The platform: `os_linux()`, `os_macos()`, `os_windows()`, or 0.
+pub fn os() -> u32 eff [Ffi[StdEnv]] {
+    StdEnv::vstd_env_os()
+}
+
+pub fn os_linux() -> u32 {
+    1
+}
+
+pub fn os_macos() -> u32 {
+    2
+}
+
+pub fn os_windows() -> u32 {
+    3
+}

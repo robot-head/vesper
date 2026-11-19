@@ -1,0 +1,2863 @@
+// The parser: crates/vesper-syntax/src/parser.rs (`parse_with_limits` with
+// the default limits, batch mode), transliterated function by function so
+// that the CST events, diagnostics and limit behaviour are the same. The
+// Rust parser also builds an AST; this one keeps only what steers parsing:
+// each expression's kind, span and height (`Ex`), each type's shape, the
+// scoped name sets (`row_names`, `bound_values`) and the pending trait
+// bound spans.
+
+use self::{
+    Tokens,
+    Diags,
+    P,
+    Ex
+};
+use self::kinds::{
+    k_upper,
+    k_lower,
+    k_float,
+    k_int,
+    k_string,
+    k_struct,
+    k_enum,
+    k_effect,
+    k_impl,
+    k_fn,
+    k_let,
+    k_copy,
+    k_affine,
+    k_linear,
+    k_mod,
+    k_eff,
+    k_in,
+    k_inout,
+    k_sink,
+    k_self_kw,
+    k_handle,
+    k_state,
+    k_with,
+    k_return,
+    k_match,
+    k_if,
+    k_else,
+    k_true,
+    k_false,
+    k_l_paren,
+    k_r_paren,
+    k_l_brace,
+    k_r_brace,
+    k_l_bracket,
+    k_r_bracket,
+    k_comma,
+    k_semi,
+    k_colon,
+    k_colon_colon,
+    k_dot,
+    k_question,
+    k_at,
+    k_at_at,
+    k_arrow,
+    k_fat_arrow,
+    k_eq,
+    k_plus_eq,
+    k_star_eq,
+    k_slash_eq,
+    k_percent_eq,
+    k_minus_eq,
+    k_plus,
+    k_minus,
+    k_star,
+    k_slash,
+    k_percent,
+    k_eq_eq,
+    k_ne,
+    k_lt,
+    k_le,
+    k_gt,
+    k_ge,
+    k_and,
+    k_or,
+    k_bang,
+    k_pipe,
+    k_eof,
+    k_tilde,
+    k_dot_dot,
+    k_dot_dot_eq,
+    k_amp,
+    k_caret,
+    k_shl,
+    k_shr,
+    kind_name
+};
+use self::words::{
+    w_use,
+    w_model,
+    w_pub,
+    w_fip,
+    w_trait,
+    w_tiled,
+    w_wire,
+    w_for,
+    w_where,
+    w_as,
+    w_type,
+    w_dim,
+    w_dyn,
+    w_hot,
+    w_cold,
+    w_mut,
+    w_region,
+    w_loop,
+    w_break,
+    w_continue,
+    w_underscore,
+    w_load_tile_vec,
+    w_col_set,
+    w_super,
+    w_const,
+    w_TiledSeq,
+    is_primitive_word
+};
+use self::util::{
+    inc,
+    add,
+    max64,
+    narrow,
+    byte,
+    u8_at,
+    u32_at,
+    w32,
+    shl
+};
+use self::diag::{
+    diag_push_limit,
+    limit_message
+};
+use self::lex::{
+    trivia_kind,
+    max_diagnostics
+};
+
+// ---------------------------------------------------------------- kinds
+
+fn n_module() -> u32 {
+    200
+}
+
+fn n_item() -> u32 {
+    201
+}
+
+fn n_expr() -> u32 {
+    202
+}
+
+fn n_pattern() -> u32 {
+    203
+}
+
+fn n_type() -> u32 {
+    204
+}
+
+fn max_depth() -> u64 {
+    128
+}
+
+// Expression kinds (`ExprKind`; literals split into Int and the rest).
+fn x_tuple() -> u8 {
+    0
+}
+
+fn x_int() -> u8 {
+    1
+}
+
+fn x_literal() -> u8 {
+    2
+}
+
+fn x_name() -> u8 {
+    3
+}
+
+fn x_struct() -> u8 {
+    4
+}
+
+fn x_block() -> u8 {
+    5
+}
+
+fn x_call() -> u8 {
+    6
+}
+
+fn x_field() -> u8 {
+    7
+}
+
+fn x_try() -> u8 {
+    8
+}
+
+fn x_unary() -> u8 {
+    9
+}
+
+fn x_index() -> u8 {
+    10
+}
+
+fn x_binary() -> u8 {
+    11
+}
+
+fn x_assign() -> u8 {
+    12
+}
+
+fn x_if() -> u8 {
+    13
+}
+
+fn x_match() -> u8 {
+    14
+}
+
+fn x_closure() -> u8 {
+    15
+}
+
+fn x_loop() -> u8 {
+    16
+}
+
+fn x_for() -> u8 {
+    17
+}
+
+fn x_range() -> u8 {
+    18
+}
+
+fn x_break() -> u8 {
+    19
+}
+
+fn x_return() -> u8 {
+    20
+}
+
+fn x_continue() -> u8 {
+    21
+}
+
+fn x_handle() -> u8 {
+    22
+}
+
+// Type shapes (`Type`), as far as the parser looks at them.
+fn t_infer() -> u8 {
+    0
+}
+
+fn t_named() -> u8 {
+    1
+}
+
+fn t_function() -> u8 {
+    2
+}
+
+fn t_tuple() -> u8 {
+    3
+}
+
+// Literal classes (`Literal`): 0 for none.
+fn l_int() -> u8 {
+    1
+}
+
+fn l_float() -> u8 {
+    2
+}
+
+fn l_bool() -> u8 {
+    3
+}
+
+fn l_string() -> u8 {
+    4
+}
+
+// ---------------------------------------------------------------- cursor
+
+fn tk(in p: P, i: u64) -> u8 {
+    match p.t.kind.try_get(i) {
+        Option::Some(k) => k,
+        Option::None => k_eof(),
+    }
+}
+
+fn tword(in p: P, i: u64) -> u8 {
+    u8_at(in p.t.word, i)
+}
+
+fn tsym(in p: P, i: u64) -> u32 {
+    u32_at(in p.t.sym, i)
+}
+
+fn tstart(in p: P, i: u64) -> u64 {
+    w32(in p.t.start, i)
+}
+
+fn tend(in p: P, i: u64) -> u64 {
+    w32(in p.t.end, i)
+}
+
+// `Parser::index`: the token index of the `n`th upcoming non-trivia token.
+fn idx(in p: P, n: u64) -> u64 {
+    let j = add(w32(in p.rank, p.pos), n);
+    if j < p.sig.len() {
+        w32(in p.sig, j)
+    } else {
+        wrapping_sub(p.ntok, 1)
+    }
+}
+
+fn kind(in p: P) -> u8 {
+    tk(in p, idx(in p, 0))
+}
+
+fn nth(in p: P, n: u64) -> u8 {
+    tk(in p, idx(in p, n))
+}
+
+fn at(in p: P, k: u8) -> bool {
+    kind(in p) == k
+}
+
+fn at_word(in p: P, n: u64, w: u8) -> bool {
+    let i = idx(in p, n);
+    tk(in p, i) == k_lower() && tword(in p, i) == w
+}
+
+fn cur_start(in p: P) -> u64 {
+    tstart(in p, idx(in p, 0))
+}
+
+// `Parser::end`: the end of the last consumed token.
+fn last_end(in p: P) -> u64 {
+    if p.pos == 0 {
+        0
+    } else {
+        tend(in p, wrapping_sub(p.pos, 1))
+    }
+}
+
+fn start_node(inout p: P, kind: u32) {
+    p.ev.push(wrapping_add(2147483648, kind));
+}
+
+fn finish_node(inout p: P) {
+    p.ev.push(4294967295);
+}
+
+fn trivia(inout p: P) {
+    loop {
+        if p.pos >= p.ntok || !trivia_kind(tk(in p, p.pos)) {
+            return;
+        }
+        p.ev.push(narrow(p.pos));
+        p.pos = inc(p.pos);
+    }
+}
+
+// `Parser::bump`: the index of the consumed token (the Eof token, which is
+// never consumed, at the end).
+fn bump(inout p: P) -> u64 {
+    trivia(inout p);
+    let i = p.pos;
+    if tk(in p, i) != k_eof() {
+        p.ev.push(narrow(i));
+        p.pos = inc(p.pos);
+    }
+    i
+}
+
+fn eat(inout p: P, k: u8) -> bool {
+    if at(in p, k) {
+        bump(inout p);
+        true
+    } else {
+        false
+    }
+}
+
+// ---------------------------------------------------------------- errors
+
+// `Parser::exhaust`: E0003 and the rest of the tokens as CST leaves.
+// Kinds: 2 Diagnostics, 3 Depth.
+fn exhaust(inout p: P, kind: u64, limit: u64) {
+    if p.halted {
+        return;
+    }
+    let at = cur_start(in p);
+    p.halted = true;
+    let mut m = ChunkSeq::new[u8]();
+    limit_message(inout m, kind, limit, p.src.len());
+    diag_push_limit(inout p.d, 3, at, at, in m.as_slice(), max_diagnostics());
+    loop {
+        if p.pos >= p.ntok || tk(in p, p.pos) == k_eof() {
+            return;
+        }
+        p.ev.push(narrow(p.pos));
+        p.pos = inc(p.pos);
+    }
+}
+
+// Starts an E0002 at `start..end` and returns whether its message should
+// follow (`Parser::diagnostic`).
+fn diag_open(inout p: P, start: u64, end: u64) -> bool {
+    if p.halted {
+        return false;
+    }
+    if p.d.code.len() >= max_diagnostics() {
+        exhaust(inout p, 2, max_diagnostics());
+        return false;
+    }
+    p.d.code.push(2);
+    p.d.start.push(narrow(start));
+    p.d.end.push(narrow(end));
+    p.d.at.push(narrow(p.d.text.len()));
+    true
+}
+
+// `Parser::error`: an E0002 at the current token.
+fn err_open(inout p: P) -> bool {
+    let i = idx(in p, 0);
+    let s = tstart(in p, i);
+    let e = tend(in p, i);
+    diag_open(inout p, s, e)
+}
+
+fn err(inout p: P, in m: String) {
+    if err_open(inout p) {
+        p.d.text.extend(in m.as_bytes());
+    }
+}
+
+fn expect(inout p: P, k: u8) {
+    if !eat(inout p, k) {
+        let found = kind(in p);
+        if err_open(inout p) {
+            p.d.text.extend(in "expected ".as_bytes());
+            p.d.text.extend(in kind_name(k).as_bytes());
+            p.d.text.extend(in ", found ".as_bytes());
+            p.d.text.extend(in kind_name(found).as_bytes());
+        }
+    }
+}
+
+fn enter(inout p: P) -> bool {
+    if p.halted {
+        return false;
+    }
+    if p.depth >= max_depth() {
+        exhaust(inout p, 3, max_depth());
+        return false;
+    }
+    p.depth = inc(p.depth);
+    true
+}
+
+fn placeholder(in p: P) -> Ex {
+    let s = narrow(cur_start(in p));
+    Ex {
+        k: x_tuple(),
+        start: s,
+        end: s,
+        h: 1,
+        sym: 0,
+        tiled: false,
+        path: 0,
+        leaves: 1,
+        pure: false
+    }
+}
+
+// `Parser::record_expr`.
+fn record(inout p: P, e: Ex) -> Ex {
+    if p.halted {
+        return placeholder(in p);
+    }
+    if widen_u64(e.h) > max_depth() {
+        exhaust(inout p, 3, max_depth());
+        return placeholder(in p);
+    }
+    e
+}
+
+fn ex(k: u8, start: u64, end: u64, children: u32) -> Ex {
+    Ex {
+        k: k,
+        start: narrow(start),
+        end: narrow(end),
+        h: wrapping_add(children, 1),
+        sym: 0,
+        tiled: false,
+        path: 0,
+        leaves: 1,
+        pure: false
+    }
+}
+
+fn hmax(a: u32, b: u32) -> u32 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// ---------------------------------------------------------------- scopes
+
+fn scope_has(in counts: ChunkSeq[u32], sym: u32) -> bool {
+    sym != 0 && u32_at(in counts, widen_u64(sym)) != 0
+}
+
+fn bound(in p: P, sym: u32) -> bool {
+    scope_has(in p.vals, sym)
+}
+
+fn bump_count(inout counts: ChunkSeq[u32], sym: u32, up: bool) {
+    let i = widen_u64(sym);
+    let c = u32_at(in counts, i);
+    counts
+        .try_set(
+        i,
+        if up {
+            wrapping_add(c, 1)
+        } else {
+            wrapping_sub(c, 1)
+        }
+    );
+}
+
+fn val_insert(inout p: P, sym: u32) {
+    if sym != 0 {
+        bump_count(inout p.vals, sym, true);
+        p.vals_trail.push(sym);
+    }
+}
+
+fn row_insert(inout p: P, sym: u32) {
+    if sym != 0 {
+        bump_count(inout p.rows, sym, true);
+        p.rows_trail.push(sym);
+    }
+}
+
+fn vals_restore(inout p: P, mark: u64) {
+    loop {
+        if p.vals_trail.len() <= mark {
+            return;
+        }
+        let last = wrapping_sub(p.vals_trail.len(), 1);
+        let sym = u32_at(in p.vals_trail, last);
+        p.vals_trail.truncate(last);
+        bump_count(inout p.vals, sym, false);
+    }
+}
+
+fn rows_restore(inout p: P, mark: u64) {
+    loop {
+        if p.rows_trail.len() <= mark {
+            return;
+        }
+        let last = wrapping_sub(p.rows_trail.len(), 1);
+        let sym = u32_at(in p.rows_trail, last);
+        p.rows_trail.truncate(last);
+        bump_count(inout p.rows, sym, false);
+    }
+}
+
+// Moves the symbols pushed on `binds` since `mark` into `bound_values`.
+fn bind_values(inout p: P, mark: u64) {
+    for i in mark..p.binds.len() {
+        let sym = u32_at(in p.binds, i);
+        val_insert(inout p, sym);
+    }
+    p.binds.truncate(mark);
+}
+
+fn bind_rows(inout p: P, mark: u64) {
+    for i in mark..p.binds.len() {
+        let sym = u32_at(in p.binds, i);
+        row_insert(inout p, sym);
+    }
+    p.binds.truncate(mark);
+}
+
+// ---------------------------------------------------------------- literals
+
+fn hex_value(c: u8) -> u64 {
+    if c >= 48 && c <= 57 {
+        widen_u64(wrapping_sub(c, 48))
+    } else if c >= 97 && c <= 102 {
+        widen_u64(wrapping_sub(c, 87))
+    } else if c >= 65 && c <= 70 {
+        widen_u64(wrapping_sub(c, 55))
+    } else {
+        16
+    }
+}
+
+// The value of the Int token `i` (`_` removed), and whether it is at most
+// `u64::MAX` (otherwise `literal` reports E0002 and uses 0).
+fn int_value(in p: P, i: u64) -> (bool, u64) {
+    let s = tstart(in p, i);
+    let e = tend(in p, i);
+    let src = p.src.as_slice();
+    let x = byte(in src, inc(s));
+    let hex = wrapping_sub(e, s) >= 2 && byte(in src, s) == 48 && (x == 120 || x == 88);
+    let from = if hex {
+        add(s, 2)
+    } else {
+        s
+    };
+    let mut v: u64 = 0;
+    let mut digits: u64 = 0;
+    for j in from..e {
+        let c = byte(in src, j);
+        if c != 95 {
+            let d = hex_value(c);
+            if hex {
+                if v > 1152921504606846975 {
+                    return (false, 0);
+                }
+                v = wrapping_add(shl(v, 4), d);
+            } else {
+                if v > 1844674407370955161 || (v == 1844674407370955161 && d > 5) {
+                    return (false, 0);
+                }
+                v = wrapping_add(wrapping_mul(v, 10), d);
+            }
+            digits = inc(digits);
+        }
+    }
+    if digits == 0 {
+        return (false, 0);
+    }
+    (true, v)
+}
+
+// Whether the text of Int token `i` parses as a `u32` (`str::parse`).
+fn parses_u32(in p: P, i: u64) -> bool {
+    let s = tstart(in p, i);
+    let e = tend(in p, i);
+    let src = p.src.as_slice();
+    let mut v: u64 = 0;
+    for j in s..e {
+        let c = byte(in src, j);
+        if c < 48 || c > 57 {
+            return false;
+        }
+        v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
+        if v > 4294967295 {
+            return false;
+        }
+    }
+    true
+}
+
+fn hex4(in src: Slice[u8], at: u64, end: u64) -> u64 {
+    if add(at, 4) > end {
+        return 65536;
+    }
+    let mut v: u64 = 0;
+    for j in at..add(at, 4) {
+        let d = hex_value(byte(in src, j));
+        if d == 16 {
+            return 65536;
+        }
+        v = wrapping_add(shl(v, 4), d);
+    }
+    v
+}
+
+// Whether String token `i` is a JSON string (`serde_json::from_str`):
+// JSON escapes only, no raw control characters, surrogates in pairs.
+fn json_string(in p: P, i: u64) -> bool {
+    let s = tstart(in p, i);
+    let end = wrapping_sub(tend(in p, i), 1);
+    let src = p.src.as_slice();
+    let mut j = inc(s);
+    loop {
+        if j >= end {
+            return true;
+        }
+        let c = byte(in src, j);
+        if c < 32 {
+            return false;
+        }
+        if c == 92 {
+            let d = byte(in src, inc(j));
+            if d
+                == 34
+                || d
+                == 92
+                || d
+                == 47
+                || d
+                == 98
+                || d
+                == 102
+                || d
+                == 110
+                || d
+                == 114
+                || d
+                == 116 {
+                j = add(j, 2);
+            } else if d == 117 {
+                let v = hex4(in src, add(j, 2), end);
+                if v == 65536 {
+                    return false;
+                }
+                j = add(j, 6);
+                if v >= 55296 && v <= 56319 {
+                    if byte(in src, j) != 92 || byte(in src, inc(j)) != 117 {
+                        return false;
+                    }
+                    let w = hex4(in src, add(j, 2), end);
+                    if w < 56320 || w > 57343 {
+                        return false;
+                    }
+                    j = add(j, 6);
+                } else if v >= 56320 && v <= 57343 {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        } else {
+            j = inc(j);
+        }
+    }
+}
+
+// `Parser::literal`: the literal class (0 for none) and an Int's value.
+fn literal(inout p: P) -> (u8, u64) {
+    let k = kind(in p);
+    if k == k_int() {
+        let i = bump(inout p);
+        let (ok, v) = int_value(in p, i);
+        if !ok {
+            err(inout p, in "integer literal exceeds u64 range");
+        }
+        (l_int(), v)
+    } else if k == k_float() {
+        bump(inout p);
+        (l_float(), 0)
+    } else if k == k_true() || k == k_false() {
+        bump(inout p);
+        (l_bool(), 0)
+    } else if k == k_string() {
+        let i = bump(inout p);
+        if !json_string(in p, i) {
+            err(inout p, in "invalid string escape");
+        }
+        (l_string(), 0)
+    } else {
+        (0, 0)
+    }
+}
+
+// ---------------------------------------------------------------- names
+
+fn ident(inout p: P) -> u64 {
+    let k = kind(in p);
+    if k == k_lower() || k == k_upper() || k == k_self_kw() {
+        bump(inout p)
+    } else {
+        err(inout p, in "expected identifier");
+        if !at(in p, k_eof()) {
+            bump(inout p)
+        } else {
+            idx(in p, 0)
+        }
+    }
+}
+
+fn lower(inout p: P) -> u64 {
+    if at_contextual_name(in p) {
+        return bump(inout p);
+    }
+    let k = kind(in p);
+    if k != k_lower() && k != k_self_kw() {
+        if reserved_word(k) {
+            let i = idx(in p, 0);
+            if err_open(inout p) {
+                p
+                    .d
+                    .text
+                    .extend(in "expected a lower-case identifier, found the keyword `".as_bytes());
+                for j in tstart(in p, i)..tend(in p, i) {
+                    let c = u8_at(in p.src, j);
+                    p.d.text.push(c);
+                }
+                p.d.text.extend(in "`, which cannot be a name".as_bytes());
+            }
+        } else {
+            err(inout p, in "expected a lower-case identifier");
+        }
+    }
+    ident(inout p)
+}
+
+// The keywords `lower` names in its message: never a name anywhere.
+fn reserved_word(k: u8) -> bool {
+    k
+        == k_copy()
+        || k
+        == k_affine()
+        || k
+        == k_mod()
+        || k
+        == k_eff()
+        || k
+        == k_in()
+        || k
+        == k_inout()
+        || k
+        == k_sink()
+        || k
+        == k_handle()
+        || k
+        == k_return()
+        || k
+        == k_match()
+        || k
+        == k_if()
+        || k
+        == k_else()
+        || k
+        == k_let()
+        || k
+        == k_fn()
+        || k
+        == k_struct()
+        || k
+        == k_enum()
+        || k
+        == k_effect()
+        || k
+        == k_impl()
+}
+
+// `state`, `linear` and `with` are keywords only where their forms start;
+// wherever a name is expected they are names (`at_contextual_name`).
+fn contextual_name(k: u8) -> bool {
+    k == k_state() || k == k_linear() || k == k_with()
+}
+
+fn at_contextual_name(in p: P) -> bool {
+    contextual_name(kind(in p))
+}
+
+// `Parser::at_path_root`: at `self::`, `super::` or `@scope/name::`.
+fn at_path_root(in p: P) -> bool {
+    let k = kind(in p);
+    if k == k_self_kw() {
+        return nth(in p, 1) == k_colon_colon();
+    }
+    if k == k_lower() {
+        return at_word(in p, 0, w_super()) && nth(in p, 1) == k_colon_colon();
+    }
+    if k != k_at() {
+        return false;
+    }
+    let mut end = tend(in p, idx(in p, 0));
+    let mut n: u64 = 1;
+    loop {
+        let kn = nth(in p, n);
+        if !(kn == k_lower() || kn == k_minus() || kn == k_slash() || kn == k_int())
+            || tstart(in p, idx(in p, n))
+            != end {
+            break;
+        }
+        end = tend(in p, idx(in p, n));
+        n = inc(n);
+    }
+    n > 1 && nth(in p, n) == k_colon_colon()
+}
+
+// `Parser::qualified_path` at `at_path_root`: whether its last segment is
+// an upper-case name.
+fn qualified_path(inout p: P) -> bool {
+    if at(in p, k_at()) {
+        package_name(inout p);
+    } else {
+        bump(inout p);
+    }
+    let mut upper_last = false;
+    loop {
+        let n1 = nth(in p, 1);
+        if !at(in p, k_colon_colon())
+            || !(n1 == k_lower() || n1 == k_upper() || contextual_name(n1)) {
+            return upper_last;
+        }
+        bump(inout p);
+        let i = bump(inout p);
+        upper_last = tk(in p, i) == k_upper();
+    }
+    upper_last
+}
+
+fn upper(inout p: P) -> u64 {
+    if !at(in p, k_upper()) {
+        err(inout p, in "expected an upper-case identifier");
+    }
+    ident(inout p)
+}
+
+fn mode(inout p: P) -> bool {
+    let k = kind(in p);
+    if k == k_copy() || k == k_affine() || k == k_linear() {
+        bump(inout p);
+        true
+    } else {
+        false
+    }
+}
+
+fn pass(inout p: P) {
+    let k = kind(in p);
+    if k == k_in() || k == k_inout() || k == k_sink() {
+        bump(inout p);
+    }
+}
+
+// ---------------------------------------------------------------- items
+
+// `Parser::generics`. Pushes the symbol of each row parameter on `binds`.
+fn generics(inout p: P) {
+    if !eat(inout p, k_l_bracket()) {
+        return;
+    }
+    loop {
+        if at(in p, k_r_bracket()) || at(in p, k_eof()) {
+            break;
+        }
+        let before = p.pos;
+        let row = at(in p, k_lower());
+        let name = ident(inout p);
+        if eat(inout p, k_colon()) {
+            if row {
+                expect(inout p, k_eff());
+            } else if at_word(in p, 0, w_dim()) {
+                bump(inout p);
+            } else {
+                loop {
+                    if at(in p, k_upper()) {
+                        let start = cur_start(in p);
+                        trait_ref(inout p);
+                        let end = last_end(in p);
+                        p.pending.push(narrow(start));
+                        p.pending.push(narrow(end));
+                    } else {
+                        expect(inout p, k_mod());
+                        if !mode(inout p) {
+                            err(inout p, in "expected modal bound");
+                        }
+                    }
+                    if !eat(inout p, k_plus()) {
+                        break;
+                    }
+                }
+            }
+        } else if row {
+            err(inout p, in "effect row parameters require ': eff'");
+        }
+        if row {
+            let sym = tsym(in p, name);
+            p.binds.push(sym);
+        }
+        if !eat(inout p, k_comma()) || p.pos == before {
+            break;
+        }
+    }
+    expect(inout p, k_r_bracket());
+}
+
+fn fields(inout p: P) {
+    expect(inout p, k_l_brace());
+    loop {
+        if at(in p, k_r_brace()) || at(in p, k_eof()) {
+            break;
+        }
+        if at_word(in p, 0, w_pub())
+            && (
+            (nth(in p, 1) == k_lower() && nth(in p, 2) == k_colon())
+                || (
+                (at_word(in p, 1, w_hot()) || at_word(in p, 1, w_cold()))
+                    && nth(in p, 2)
+                    == k_lower()
+                    && nth(in p, 3)
+                    == k_colon()
+            )
+        ) {
+            bump(inout p);
+        }
+        if at_word(in p, 0, w_hot()) && nth(in p, 1) == k_lower() {
+            bump(inout p);
+        } else if at_word(in p, 0, w_cold()) && nth(in p, 1) == k_lower() {
+            bump(inout p);
+        }
+        lower(inout p);
+        expect(inout p, k_colon());
+        ty(inout p);
+        if eat(inout p, k_at_at()) {
+            if !mode(inout p) {
+                err(inout p, in "expected field modality");
+            }
+        }
+        if !eat(inout p, k_comma()) {
+            break;
+        }
+    }
+    expect(inout p, k_r_brace());
+}
+
+fn fip_attr(inout p: P) -> bool {
+    if at(in p, k_at()) && at_word(in p, 1, w_fip()) {
+        bump(inout p);
+        bump(inout p);
+        true
+    } else {
+        false
+    }
+}
+
+fn is_mode_kind(k: u8) -> bool {
+    k == k_copy() || k == k_affine() || k == k_linear()
+}
+
+fn is_type_decl_kind(k: u8) -> bool {
+    k == k_struct() || k == k_enum() || k == k_effect()
+}
+
+// Whether the `n`th upcoming token starts an import path: `@`, `self` or
+// `super`.
+fn import_root(in p: P, n: u64) -> bool {
+    let k = nth(in p, n);
+    k == k_at() || k == k_self_kw() || at_word(in p, n, w_super())
+}
+
+// `Parser::declaration`: whether it produced an item.
+fn declaration(inout p: P) -> bool {
+    if at_word(in p, 0, w_use()) && at_word(in p, 1, w_model()) {
+        use_model(inout p);
+        return false;
+    }
+    if at_word(in p, 0, w_use()) && import_root(in p, 1) {
+        use_item(inout p);
+        return false;
+    }
+    if at_word(in p, 0, w_pub()) && at_word(in p, 1, w_use()) && import_root(in p, 2) {
+        bump(inout p);
+        use_item(inout p);
+        return false;
+    }
+    if at_word(in p, 0, w_use()) && nth(in p, 1) == k_lower() && nth(in p, 2) == k_colon_colon() {
+        err(inout p, in "an import path starts with `@scope/package`, `self` or `super`");
+        bump(inout p);
+        bump(inout p);
+        loop {
+            if !eat(inout p, k_colon_colon()) {
+                break;
+            }
+            if !eat(inout p, k_lower()) && !eat(inout p, k_upper()) {
+                break;
+            }
+        }
+        eat(inout p, k_semi());
+        return false;
+    }
+    let mut fip = fip_attr(inout p);
+    let public = at_word(in p, 0, w_pub())
+        && (
+        at_word(in p, 1, w_trait())
+            || (at_word(in p, 1, w_const()) && nth(in p, 2) == k_upper())
+            || at_word(in p, 1, w_model())
+            || nth(in p, 1)
+            == k_fn()
+            || is_type_decl_kind(nth(in p, 1))
+            || (is_mode_kind(nth(in p, 1)) && is_type_decl_kind(nth(in p, 2)))
+            || (
+            !fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()) && nth(in p, 3) == k_fn()
+        )
+    );
+    if public {
+        bump(inout p);
+    }
+    if !fip {
+        fip = fip_attr(inout p);
+    }
+    if fip && !at(in p, k_fn()) {
+        err(inout p, in "@fip may only annotate a fn declaration");
+    }
+    if at_word(in p, 0, w_const()) && nth(in p, 1) == k_upper() {
+        const_item(inout p);
+        return true;
+    }
+    if at_word(in p, 0, w_trait()) {
+        trait_decl(inout p);
+        return true;
+    }
+    if at_word(in p, 0, w_model()) {
+        model_decl(inout p);
+        return true;
+    }
+    let mut tiled = false;
+    if at_word(in p, 0, w_tiled()) && nth(in p, 1) == k_l_paren() {
+        bump(inout p);
+        expect(inout p, k_l_paren());
+        if at(in p, k_int()) {
+            let digits = bump(inout p);
+            if !parses_u32(in p, digits) {
+                err(inout p, in "tile width overflows u32");
+            }
+        } else {
+            err(inout p, in "expected integer tile width (8, 16, 32, or 64)");
+        }
+        expect(inout p, k_r_paren());
+        tiled = true;
+    }
+    if at_word(in p, 0, w_wire()) && nth(in p, 1) == k_struct() {
+        bump(inout p);
+    } else {
+        mode(inout p);
+    }
+    if tiled && !at(in p, k_struct()) {
+        err(inout p, in "tiled(N) may only annotate a struct declaration");
+    }
+    let k = kind(in p);
+    if k == k_struct() {
+        bump(inout p);
+        upper(inout p);
+        let mark = p.binds.len();
+        generics(inout p);
+        p.binds.truncate(mark);
+        p.pending.clear();
+        fields(inout p);
+        true
+    } else if k == k_enum() {
+        bump(inout p);
+        upper(inout p);
+        let mark = p.binds.len();
+        generics(inout p);
+        p.binds.truncate(mark);
+        p.pending.clear();
+        expect(inout p, k_l_brace());
+        loop {
+            if at(in p, k_r_brace()) || at(in p, k_eof()) {
+                break;
+            }
+            upper(inout p);
+            if at(in p, k_l_brace()) {
+                fields(inout p);
+            } else if eat(inout p, k_l_paren()) {
+                loop {
+                    if at(in p, k_r_paren()) || at(in p, k_eof()) {
+                        break;
+                    }
+                    ty(inout p);
+                    if !eat(inout p, k_comma()) {
+                        break;
+                    }
+                }
+                expect(inout p, k_r_paren());
+            }
+            if !eat(inout p, k_comma()) {
+                break;
+            }
+        }
+        expect(inout p, k_r_brace());
+        true
+    } else if k == k_effect() {
+        bump(inout p);
+        upper(inout p);
+        let mark = p.binds.len();
+        generics(inout p);
+        p.binds.truncate(mark);
+        expect(inout p, k_l_brace());
+        loop {
+            if !at(in p, k_fn()) {
+                break;
+            }
+            function(inout p, true);
+        }
+        expect(inout p, k_r_brace());
+        true
+    } else if k == k_fn() {
+        function(inout p, false);
+        true
+    } else if k == k_impl() {
+        bump(inout p);
+        let mark = p.binds.len();
+        generics(inout p);
+        p.pending.clear();
+        let rows = p.rows_trail.len();
+        bind_rows(inout p, mark);
+        if at(in p, k_at()) {
+            trait_ref(inout p);
+            if at_word(in p, 0, w_for()) {
+                bump(inout p);
+            } else {
+                err(inout p, in "expected 'for' after the impl's trait");
+            }
+            conformance_rest(inout p);
+            rows_restore(inout p, rows);
+            return true;
+        }
+        let shape = ty(inout p);
+        if at_word(in p, 0, w_for()) {
+            bump(inout p);
+            if shape != t_named() {
+                err(inout p, in "expected a trait name before 'for'");
+            }
+            conformance_rest(inout p);
+            rows_restore(inout p, rows);
+            return true;
+        }
+        expect(inout p, k_l_brace());
+        loop {
+            if !at_method(in p) {
+                break;
+            }
+            method(inout p);
+        }
+        expect(inout p, k_r_brace());
+        rows_restore(inout p, rows);
+        true
+    } else {
+        false
+    }
+}
+
+fn function_header(inout p: P) {
+    expect(inout p, k_fn());
+    lower(inout p);
+    let mark = p.binds.len();
+    generics(inout p);
+    p.pending.clear();
+    bind_rows(inout p, mark);
+    expect(inout p, k_l_paren());
+    params(inout p, k_r_paren());
+    bind_values(inout p, mark);
+    expect(inout p, k_r_paren());
+    if eat(inout p, k_arrow()) {
+        ty(inout p);
+    }
+    effects(inout p);
+    if at_word(in p, 0, w_where()) {
+        where_clauses(inout p);
+    }
+}
+
+fn at_method(in p: P) -> bool {
+    at(in p, k_fn())
+        || (
+        at_word(in p, 0, w_pub())
+            && (nth(in p, 1) == k_fn() || (nth(in p, 1) == k_at() && at_word(in p, 2, w_fip())))
+    )
+        || (at(in p, k_at()) && at_word(in p, 1, w_fip()))
+}
+
+fn method(inout p: P) {
+    let mut fip = fip_attr(inout p);
+    let public = at_word(in p, 0, w_pub())
+        && (
+        nth(in p, 1) == k_fn() || (!fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()))
+    );
+    if public {
+        bump(inout p);
+    }
+    if !fip {
+        fip = fip_attr(inout p);
+    }
+    if fip && !at(in p, k_fn()) {
+        err(inout p, in "@fip may only annotate a fn declaration");
+    }
+    function(inout p, false);
+}
+
+// `Parser::const_item`: `const NAME: T = expr;`.
+fn const_item(inout p: P) {
+    bump(inout p);
+    upper(inout p);
+    expect(inout p, k_colon());
+    ty(inout p);
+    expect(inout p, k_eq());
+    expr(inout p);
+    expect(inout p, k_semi());
+}
+
+fn function(inout p: P, op: bool) {
+    let rows = p.rows_trail.len();
+    let vals = p.vals_trail.len();
+    function_header(inout p);
+    if op {
+        expect(inout p, k_semi());
+    } else {
+        block(inout p);
+    }
+    rows_restore(inout p, rows);
+    vals_restore(inout p, vals);
+}
+
+// `Parser::params`. Pushes each parameter's name symbol on `binds`.
+fn params(inout p: P, end: u8) {
+    loop {
+        if at(in p, end) || at(in p, k_eof()) {
+            return;
+        }
+        pass(inout p);
+        let name = lower(inout p);
+        let sym = tsym(in p, name);
+        p.binds.push(sym);
+        if eat(inout p, k_dot()) {
+            place_tree(inout p);
+        }
+        if eat(inout p, k_colon()) {
+            ty(inout p);
+        }
+        if !eat(inout p, k_comma()) {
+            return;
+        }
+    }
+}
+
+fn place_tree(inout p: P) {
+    let previous = p.depth;
+    if !enter(inout p) {
+        return;
+    }
+    if eat(inout p, k_l_brace()) {
+        loop {
+            if at(in p, k_r_brace()) || at(in p, k_eof()) {
+                break;
+            }
+            place_tree(inout p);
+            if !eat(inout p, k_comma()) {
+                break;
+            }
+        }
+        expect(inout p, k_r_brace());
+    } else {
+        lower(inout p);
+        if eat(inout p, k_dot()) {
+            place_tree(inout p);
+        }
+    }
+    p.depth = previous;
+}
+
+// ---------------------------------------------------------------- types
+
+fn ty(inout p: P) -> u8 {
+    let previous = p.depth;
+    if !enter(inout p) {
+        p.leaves = 1;
+        return t_infer();
+    }
+    let shape = ty_inner(inout p);
+    p.depth = previous;
+    shape
+}
+
+// `Parser::array_type_ahead`: whether the `[` at the cursor opens `[T; N]`,
+// a `;` at bracket depth one before the matching `]`.
+fn array_type_ahead(in p: P) -> bool {
+    let mut depth: u64 = 0;
+    for i in p.pos..p.ntok {
+        let k = tk(in p, i);
+        if k == k_l_bracket() || k == k_l_paren() || k == k_l_brace() {
+            depth = inc(depth);
+        } else if k == k_r_bracket() || k == k_r_paren() || k == k_r_brace() {
+            if depth > 0 {
+                depth = wrapping_sub(depth, 1);
+            }
+            if depth == 0 {
+                return false;
+            }
+        } else if k == k_semi() && depth == 1 {
+            return true;
+        } else if k == k_eof() {
+            return false;
+        }
+    }
+    false
+}
+
+fn max_array_length() -> u64 {
+    65536
+}
+
+// `Parser::array_length`: the decimal or hex literal `N` of `[T; N]` and
+// `[x; N]`, 0 after an error.
+fn array_length(inout p: P) -> u64 {
+    if !at(in p, k_int()) {
+        err(inout p, in "expected an integer literal array length");
+        return 0;
+    }
+    let i = bump(inout p);
+    let (ok, n) = int_value(in p, i);
+    if ok && n <= max_array_length() {
+        return n;
+    }
+    err(inout p, in "array length exceeds the limit of 65536 elements");
+    0
+}
+
+fn ty_inner(inout p: P) -> u8 {
+    start_node(inout p, n_type());
+    let mut leaves: u64 = 1;
+    let shape = if eat(inout p, k_fn()) {
+        if eat(inout p, k_at()) {
+            mode(inout p);
+        }
+        expect(inout p, k_l_paren());
+        loop {
+            if at(in p, k_r_paren()) || at(in p, k_eof()) {
+                break;
+            }
+            pass(inout p);
+            ty(inout p);
+            if !eat(inout p, k_comma()) {
+                break;
+            }
+        }
+        expect(inout p, k_r_paren());
+        if eat(inout p, k_arrow()) {
+            ty(inout p);
+        }
+        effects(inout p);
+        t_function()
+    } else if eat(inout p, k_l_paren()) {
+        let mut sum: u64 = 0;
+        loop {
+            if at(in p, k_r_paren()) || at(in p, k_eof()) {
+                break;
+            }
+            ty(inout p);
+            sum = add(sum, p.leaves);
+            if !eat(inout p, k_comma()) {
+                break;
+            }
+        }
+        expect(inout p, k_r_paren());
+        leaves = max64(sum, 1);
+        t_tuple()
+    } else if at(in p, k_l_bracket()) && array_type_ahead(in p) {
+        // A fixed-size array `[T; N]`: the homogeneous `N`-tuple.
+        bump(inout p);
+        ty(inout p);
+        let element = p.leaves;
+        expect(inout p, k_semi());
+        let mut n = array_length(inout p);
+        expect(inout p, k_r_bracket());
+        if wrapping_mul(element, n) > max_array_length() {
+            err(inout p, in "a nested array type holds more than 65536 elements in all");
+            n = 0;
+        }
+        leaves = max64(wrapping_mul(element, n), 1);
+        t_tuple()
+    } else if eat(inout p, k_l_bracket()) {
+        loop {
+            if at(in p, k_r_bracket()) || at(in p, k_eof()) {
+                break;
+            }
+            let before = p.pos;
+            dimension(inout p);
+            if !eat(inout p, k_comma()) || p.pos == before {
+                break;
+            }
+        }
+        expect(inout p, k_r_bracket());
+        t_named()
+    } else if eat(inout p, k_lt()) {
+        ty(inout p);
+        if at_word(in p, 0, w_as()) {
+            bump(inout p);
+        } else {
+            err(inout p, in "expected 'as' in a qualified projection");
+        }
+        upper(inout p);
+        type_args(inout p);
+        expect(inout p, k_gt());
+        expect(inout p, k_colon_colon());
+        upper(inout p);
+        t_named()
+    } else if at_word(in p, 0, w_dyn()) && nth(in p, 1) == k_upper() {
+        bump(inout p);
+        upper(inout p);
+        type_args(inout p);
+        t_named()
+    } else if at_path_root(in p) {
+        // `self::m::T[args]`, `super::m::T`, `@scope/name::m::T`.
+        qualified_path(inout p);
+        type_args(inout p);
+        t_named()
+    } else {
+        ident(inout p);
+        if at(in p, k_colon_colon()) && nth(in p, 1) == k_upper() {
+            bump(inout p);
+            upper(inout p);
+        } else {
+            type_args(inout p);
+        }
+        t_named()
+    };
+    finish_node(inout p);
+    p.leaves = leaves;
+    shape
+}
+
+fn dimension(inout p: P) {
+    dimension_factor(inout p);
+    loop {
+        if !eat(inout p, k_star()) {
+            return;
+        }
+        dimension_factor(inout p);
+    }
+}
+
+fn dimension_factor(inout p: P) {
+    if at(in p, k_int()) {
+        start_node(inout p, n_type());
+        bump(inout p);
+        finish_node(inout p);
+    } else {
+        ty(inout p);
+    }
+}
+
+// `@scope/name` at `@`: the adjacent tokens of a package name.
+fn package_name(inout p: P) {
+    bump(inout p);
+    loop {
+        let k = kind(in p);
+        if !(k == k_lower() || k == k_minus() || k == k_slash() || k == k_int())
+            || cur_start(in p)
+            != last_end(in p) {
+            return;
+        }
+        bump(inout p);
+    }
+}
+
+// `pub? use (@scope/name | self | super (:: super)*) (:: segment)* ::
+// (item (as alias)? | { list });` at `use`; a `pub` before it has been
+// consumed.
+fn use_item(inout p: P) {
+    bump(inout p);
+    if at(in p, k_at()) {
+        package_name(inout p);
+    } else if at_word(in p, 0, w_super()) {
+        bump(inout p);
+        loop {
+            if !at(in p, k_colon_colon()) || !at_word(in p, 1, w_super()) {
+                break;
+            }
+            bump(inout p);
+            bump(inout p);
+        }
+    } else {
+        bump(inout p);
+    }
+    loop {
+        if !eat(inout p, k_colon_colon()) {
+            err(inout p, in "expected `::` and an imported item");
+            break;
+        }
+        if at(in p, k_l_brace()) {
+            bump(inout p);
+            let mut names: u64 = 0;
+            loop {
+                if at(in p, k_r_brace()) || at(in p, k_eof()) {
+                    break;
+                }
+                let before = p.pos;
+                use_name(inout p);
+                names = inc(names);
+                if !eat(inout p, k_comma()) || p.pos == before {
+                    break;
+                }
+            }
+            expect(inout p, k_r_brace());
+            if names == 0 {
+                err(inout p, in "an import list names at least one item");
+            }
+            break;
+        }
+        if (at(in p, k_lower()) || at_contextual_name(in p)) && nth(in p, 1) == k_colon_colon() {
+            bump(inout p);
+            continue;
+        }
+        use_name(inout p);
+        break;
+    }
+    expect(inout p, k_semi());
+}
+
+fn use_name(inout p: P) {
+    let k = kind(in p);
+    if k == k_lower() || k == k_upper() || contextual_name(k) {
+        bump(inout p);
+    } else {
+        err(inout p, in "expected an imported item name");
+    }
+    if at_word(in p, 0, w_as()) {
+        bump(inout p);
+        let k2 = kind(in p);
+        if k2 == k_lower() || k2 == k_upper() || contextual_name(k2) {
+            bump(inout p);
+        } else {
+            err(inout p, in "expected a name after `as`");
+        }
+    }
+}
+
+fn trait_ref(inout p: P) {
+    if at(in p, k_at()) {
+        package_name(inout p);
+        expect(inout p, k_colon_colon());
+    }
+    upper(inout p);
+    type_args(inout p);
+}
+
+fn where_clauses(inout p: P) {
+    bump(inout p);
+    loop {
+        ty(inout p);
+        expect(inout p, k_colon());
+        trait_ref(inout p);
+        if !eat(inout p, k_comma()) || at(in p, k_l_brace()) || at(in p, k_semi()) {
+            return;
+        }
+    }
+}
+
+fn use_model(inout p: P) {
+    bump(inout p);
+    bump(inout p);
+    upper(inout p);
+    expect(inout p, k_semi());
+}
+
+fn trait_decl(inout p: P) {
+    bump(inout p);
+    upper(inout p);
+    let mark = p.binds.len();
+    generics(inout p);
+    let mut b: u64 = 0;
+    loop {
+        if inc(b) >= p.pending.len() {
+            break;
+        }
+        let s = w32(in p.pending, b);
+        let e = w32(in p.pending, inc(b));
+        if diag_open(inout p, s, e) {
+            p
+                .d
+                .text
+                .extend(
+                in "trait parameters take modal or row bounds, not trait bounds".as_bytes()
+            );
+        }
+        b = add(b, 2);
+    }
+    p.pending.clear();
+    let rows = p.rows_trail.len();
+    bind_rows(inout p, mark);
+    expect(inout p, k_l_brace());
+    loop {
+        if at(in p, k_r_brace()) || at(in p, k_eof()) {
+            break;
+        }
+        let before = p.pos;
+        if at_word(in p, 0, w_type()) {
+            bump(inout p);
+            upper(inout p);
+            if eat(inout p, k_colon()) {
+                expect(inout p, k_mod());
+                if !mode(inout p) {
+                    err(inout p, in "expected modal bound");
+                }
+            }
+            expect(inout p, k_semi());
+        } else if at(in p, k_fn()) {
+            function(inout p, true);
+        } else {
+            err(inout p, in "expected 'type' or 'fn' in a trait");
+        }
+        if p.pos == before {
+            bump(inout p);
+        }
+    }
+    expect(inout p, k_r_brace());
+    rows_restore(inout p, rows);
+}
+
+fn model_decl(inout p: P) {
+    bump(inout p);
+    upper(inout p);
+    let mark = p.binds.len();
+    generics(inout p);
+    p.pending.clear();
+    let rows = p.rows_trail.len();
+    bind_rows(inout p, mark);
+    expect(inout p, k_colon());
+    trait_ref(inout p);
+    if at_word(in p, 0, w_for()) {
+        bump(inout p);
+    } else {
+        err(inout p, in "expected 'for' after the model's trait");
+    }
+    conformance_rest(inout p);
+    rows_restore(inout p, rows);
+}
+
+fn conformance_rest(inout p: P) {
+    ty(inout p);
+    if at_word(in p, 0, w_where()) {
+        where_clauses(inout p);
+    }
+    expect(inout p, k_l_brace());
+    loop {
+        if at(in p, k_r_brace()) || at(in p, k_eof()) {
+            break;
+        }
+        let before = p.pos;
+        if at_word(in p, 0, w_type()) {
+            bump(inout p);
+            upper(inout p);
+            expect(inout p, k_eq());
+            ty(inout p);
+            expect(inout p, k_semi());
+        } else if at_method(in p) {
+            method(inout p);
+        } else {
+            err(inout p, in "expected 'type' or 'fn' in an impl or model");
+        }
+        if p.pos == before {
+            bump(inout p);
+        }
+    }
+    expect(inout p, k_r_brace());
+}
+
+fn type_args(inout p: P) {
+    let previous = p.depth;
+    if !enter(inout p) {
+        return;
+    }
+    type_args_inner(inout p);
+    p.depth = previous;
+}
+
+fn type_args_inner(inout p: P) {
+    if !eat(inout p, k_l_bracket()) {
+        return;
+    }
+    loop {
+        if at(in p, k_r_bracket()) || at(in p, k_eof()) {
+            break;
+        }
+        let cur = idx(in p, 0);
+        if tk(in p, cur)
+            == k_lower()
+            && !is_primitive_word(tword(in p, cur))
+            && !at_path_root(in p)
+            && !(tword(in p, cur) == w_dyn() && nth(in p, 1) == k_upper()) {
+            bump(inout p);
+            if eat(inout p, k_colon()) {
+                upper(inout p);
+                type_args(inout p);
+                if eat(inout p, k_pipe()) {
+                    lower(inout p);
+                }
+            }
+        } else if at(in p, k_int()) {
+            start_node(inout p, n_type());
+            bump(inout p);
+            finish_node(inout p);
+        } else {
+            let shape = ty(inout p);
+            if eat(inout p, k_pipe()) {
+                lower(inout p);
+                if shape != t_named() {
+                    err(inout p, in "an effect row requires an effect name");
+                }
+            }
+        }
+        if !eat(inout p, k_comma()) {
+            break;
+        }
+    }
+    expect(inout p, k_r_bracket());
+}
+
+fn effects(inout p: P) {
+    if !eat(inout p, k_eff()) {
+        return;
+    }
+    expect(inout p, k_l_bracket());
+    loop {
+        if at(in p, k_r_bracket()) || at(in p, k_eof()) {
+            break;
+        }
+        if eat(inout p, k_pipe()) {
+            lower(inout p);
+            break;
+        }
+        let root = at_path_root(in p);
+        if at(in p, k_lower()) && nth(in p, 1) != k_colon() && !root {
+            lower(inout p);
+            break;
+        }
+        if at(in p, k_lower()) && !root {
+            lower(inout p);
+            expect(inout p, k_colon());
+        }
+        // `eff [self::m::E]`: a qualified effect name.
+        if at_path_root(in p) {
+            qualified_path(inout p);
+        } else {
+            upper(inout p);
+        }
+        type_args(inout p);
+        if !eat(inout p, k_comma()) && !at(in p, k_pipe()) {
+            break;
+        }
+    }
+    expect(inout p, k_r_bracket());
+}
+
+// ---------------------------------------------------------------- blocks
+
+fn block(inout p: P) -> Ex {
+    let previous = p.depth;
+    if !enter(inout p) {
+        return placeholder(in p);
+    }
+    let e = block_inner(inout p);
+    p.depth = previous;
+    record(inout p, e)
+}
+
+fn block_like(k: u8) -> bool {
+    k == x_loop() || k == x_for() || k == x_if() || k == x_match()
+}
+
+fn ends_with_brace(in p: P, end: u32) -> bool {
+    end != 0 && byte(in p.src.as_slice(), widen_u64(wrapping_sub(end, 1))) == 125
+}
+
+fn block_inner(inout p: P) -> Ex {
+    let outer = p.vals_trail.len();
+    let start = cur_start(in p);
+    expect(inout p, k_l_brace());
+    let mut h: u32 = 0;
+    let mut tail: u64 = 1;
+    loop {
+        if at(in p, k_r_brace()) || at(in p, k_eof()) {
+            break;
+        }
+        let before = p.pos;
+        if at_word(in p, 0, w_use()) && at_word(in p, 1, w_model()) {
+            use_model(inout p);
+            continue;
+        }
+        if eat(inout p, k_let()) {
+            if at_word(in p, 0, w_mut()) && nth(in p, 1) != k_colon() {
+                bump(inout p);
+            }
+            let mark = p.binds.len();
+            pattern(inout p);
+            if eat(inout p, k_colon()) {
+                ty(inout p);
+            }
+            expect(inout p, k_eq());
+            let value = expr(inout p);
+            h = hmax(h, value.h);
+            expect(inout p, k_semi());
+            bind_values(inout p, mark);
+        } else {
+            let e = expr(inout p);
+            h = hmax(h, e.h);
+            if eat(inout p, k_semi()) {
+                // A statement.
+            } else if block_like(e.k)
+                && ends_with_brace(in p, e.end)
+                && !at(in p, k_r_brace())
+                && !at(in p, k_eof()) {
+                // A block-like statement needs no `;`.
+            } else {
+                tail = e.leaves;
+                break;
+            }
+        }
+        if before == p.pos {
+            bump(inout p);
+        }
+    }
+    expect(inout p, k_r_brace());
+    vals_restore(inout p, outer);
+    let mut b = ex(x_block(), start, last_end(in p), h);
+    b.leaves = tail;
+    b
+}
+
+// ---------------------------------------------------------------- expressions
+
+fn expr(inout p: P) -> Ex {
+    let previous = p.depth;
+    if !enter(inout p) {
+        return placeholder(in p);
+    }
+    let e = expr_inner(inout p);
+    p.depth = previous;
+    record(inout p, e)
+}
+
+fn jump_end(k: u8) -> bool {
+    k
+        == k_semi()
+        || k
+        == k_r_brace()
+        || k
+        == k_r_paren()
+        || k
+        == k_r_bracket()
+        || k
+        == k_comma()
+        || k
+        == k_eof()
+}
+
+fn expr_inner(inout p: P) -> Ex {
+    start_node(inout p, n_expr());
+    let cur = idx(in p, 0);
+    let k = tk(in p, cur);
+    let w = if k == k_lower() {
+        tword(in p, cur)
+    } else {
+        0
+    };
+    let e = if k == k_handle() {
+        handle_expr(inout p)
+    } else if w
+        == w_region()
+        && nth(in p, 1)
+        == k_lower()
+        && (nth(in p, 2) == k_l_brace() || nth(in p, 2) == k_l_paren()) {
+        region(inout p)
+    } else if k == k_match() {
+        match_expr(inout p)
+    } else if k == k_if() {
+        if_expr(inout p)
+    } else if w == w_loop() && nth(in p, 1) == k_l_brace() {
+        loop_expr(inout p)
+    } else if w == w_for() && for_header(in p, cur) {
+        for_expr(inout p)
+    } else if w == w_break() && !bound(in p, tsym(in p, cur)) {
+        jump_expr(inout p, false)
+    } else if w == w_continue() && !bound(in p, tsym(in p, cur)) && jump_end(nth(in p, 1)) {
+        let start = cur_start(in p);
+        bump(inout p);
+        ex(x_continue(), start, last_end(in p), 0)
+    } else if k == k_return() {
+        jump_expr(inout p, true)
+    } else if k == k_pipe() || k == k_or() {
+        closure(inout p)
+    } else {
+        binary(inout p, 0)
+    };
+    finish_node(inout p);
+    e
+}
+
+fn loop_expr(inout p: P) -> Ex {
+    let start = cur_start(in p);
+    bump(inout p);
+    let body = block(inout p);
+    ex(x_loop(), start, last_end(in p), body.h)
+}
+
+fn for_header(in p: P, cur: u64) -> bool {
+    let n = nth(in p, 1);
+    !bound(in p, tsym(in p, cur))
+        && (
+        n
+            == k_lower()
+            || n
+            == k_upper()
+            || n
+            == k_l_paren()
+            || n
+            == k_int()
+            || n
+            == k_true()
+            || n
+            == k_false()
+    )
+}
+
+fn for_expr(inout p: P) -> Ex {
+    let start = cur_start(in p);
+    bump(inout p);
+    let mark = p.binds.len();
+    pattern(inout p);
+    expect(inout p, k_in());
+    let old = p.no_struct;
+    p.no_struct = true;
+    let first = binary(inout p, 2);
+    let k = kind(in p);
+    let iter = if k == k_dot_dot() || k == k_dot_dot_eq() {
+        bump(inout p);
+        let end = binary(inout p, 2);
+        let r = ex(x_range(), widen_u64(first.start), widen_u64(end.end), hmax(first.h, end.h));
+        record(inout p, r)
+    } else {
+        first
+    };
+    p.no_struct = old;
+    let outer = p.vals_trail.len();
+    bind_values(inout p, mark);
+    let body = block(inout p);
+    vals_restore(inout p, outer);
+    ex(x_for(), start, last_end(in p), hmax(iter.h, body.h))
+}
+
+fn jump_expr(inout p: P, ret: bool) -> Ex {
+    let start = cur_start(in p);
+    bump(inout p);
+    let h = if jump_end(kind(in p)) {
+        0
+    } else {
+        let v = expr(inout p);
+        v.h
+    };
+    ex(
+        if ret {
+            x_return()
+        } else {
+            x_break()
+        },
+        start,
+        last_end(in p),
+        h
+    )
+}
+
+fn restricted(inout p: P) -> Ex {
+    let old = p.no_struct;
+    p.no_struct = true;
+    let e = expr(inout p);
+    p.no_struct = old;
+    e
+}
+
+fn if_expr(inout p: P) -> Ex {
+    let previous = p.depth;
+    if !enter(inout p) {
+        return placeholder(in p);
+    }
+    let start = cur_start(in p);
+    expect(inout p, k_if());
+    let condition = restricted(inout p);
+    let then = block(inout p);
+    let mut h = hmax(condition.h, then.h);
+    if eat(inout p, k_else()) {
+        let otherwise = if at(in p, k_if()) {
+            if_expr(inout p)
+        } else {
+            block(inout p)
+        };
+        h = hmax(h, otherwise.h);
+    }
+    let e = ex(x_if(), start, last_end(in p), h);
+    p.depth = previous;
+    record(inout p, e)
+}
+
+fn match_expr(inout p: P) -> Ex {
+    let start = cur_start(in p);
+    expect(inout p, k_match());
+    let value = restricted(inout p);
+    let mut h = value.h;
+    expect(inout p, k_l_brace());
+    loop {
+        if at(in p, k_r_brace()) || at(in p, k_eof()) {
+            break;
+        }
+        let before = p.pos;
+        let mark = p.binds.len();
+        pattern(inout p);
+        expect(inout p, k_fat_arrow());
+        let outer = p.vals_trail.len();
+        bind_values(inout p, mark);
+        let body = expr(inout p);
+        vals_restore(inout p, outer);
+        h = hmax(h, body.h);
+        let block_body = body.k == x_block();
+        if !eat(inout p, k_comma()) && !at(in p, k_r_brace()) && !(block_body && p.pos > before) {
+            err(inout p, in "expected ',' between match arms");
+            break;
+        }
+    }
+    expect(inout p, k_r_brace());
+    ex(x_match(), start, last_end(in p), h)
+}
+
+fn closure(inout p: P) -> Ex {
+    let start = cur_start(in p);
+    let mark = p.binds.len();
+    if !eat(inout p, k_or()) {
+        expect(inout p, k_pipe());
+        params(inout p, k_pipe());
+        expect(inout p, k_pipe());
+    }
+    if eat(inout p, k_at()) {
+        mode(inout p);
+    }
+    if eat(inout p, k_arrow()) {
+        ty(inout p);
+    }
+    effects(inout p);
+    let outer = p.vals_trail.len();
+    bind_values(inout p, mark);
+    let body = expr(inout p);
+    vals_restore(inout p, outer);
+    ex(x_closure(), start, last_end(in p), body.h)
+}
+
+fn handle_expr(inout p: P) -> Ex {
+    let start = cur_start(in p);
+    expect(inout p, k_handle());
+    if at(in p, k_lower()) {
+        lower(inout p);
+        expect(inout p, k_colon());
+    }
+    if at_path_root(in p) {
+        qualified_path(inout p);
+    } else {
+        upper(inout p);
+    }
+    type_args(inout p);
+    let mut h: u32 = 0;
+    if eat(inout p, k_state()) {
+        let mark = p.binds.len();
+        pattern(inout p);
+        p.binds.truncate(mark);
+        expect(inout p, k_eq());
+        let s = expr(inout p);
+        h = s.h;
+    }
+    expect(inout p, k_in());
+    let body = block(inout p);
+    h = hmax(h, body.h);
+    expect(inout p, k_with());
+    expect(inout p, k_l_brace());
+    expect(inout p, k_return());
+    let mark = p.binds.len();
+    pattern(inout p);
+    expect(inout p, k_fat_arrow());
+    let outer = p.vals_trail.len();
+    bind_values(inout p, mark);
+    let ret = expr(inout p);
+    vals_restore(inout p, outer);
+    h = hmax(h, ret.h);
+    eat(inout p, k_comma());
+    loop {
+        if at(in p, k_r_brace()) || at(in p, k_eof()) {
+            break;
+        }
+        lower(inout p);
+        expect(inout p, k_l_paren());
+        let m = p.binds.len();
+        pattern_list(inout p, k_r_paren());
+        expect(inout p, k_r_paren());
+        expect(inout p, k_fat_arrow());
+        let o = p.vals_trail.len();
+        bind_values(inout p, m);
+        let b = expr(inout p);
+        vals_restore(inout p, o);
+        h = hmax(h, b.h);
+        eat(inout p, k_comma());
+    }
+    expect(inout p, k_r_brace());
+    ex(x_handle(), start, last_end(in p), h)
+}
+
+fn region(inout p: P) -> Ex {
+    let start = cur_start(in p);
+    bump(inout p);
+    lower(inout p);
+    if eat(inout p, k_l_paren()) {
+        if at(in p, k_int()) {
+            let (_, v) = literal(inout p);
+            if v == 0 || v > 1073741824 {
+                err(inout p, in "region capacity must be between 1 byte and 1 GiB");
+            }
+        } else {
+            err(inout p, in "expected an integer region capacity in bytes");
+        }
+        expect(inout p, k_r_paren());
+    }
+    let body = block(inout p);
+    ex(x_handle(), start, last_end(in p), hmax(body.h, 1))
+}
+
+fn binary(inout p: P, min: u64) -> Ex {
+    let previous = p.depth;
+    if !enter(inout p) {
+        return placeholder(in p);
+    }
+    let e = binary_inner(inout p, min);
+    p.depth = previous;
+    record(inout p, e)
+}
+
+// Precedence of a binary operator kind (0 for none); assignments are 1.
+fn precedence(k: u8) -> u64 {
+    match k {
+        48 => 1,
+        49 => 1,
+        50 => 1,
+        51 => 1,
+        52 => 1,
+        53 => 1,
+        66 => 2,
+        65 => 3,
+        59 => 4,
+        60 => 4,
+        61 => 5,
+        62 => 5,
+        63 => 5,
+        64 => 5,
+        68 => 6,
+        78 => 7,
+        77 => 8,
+        79 => 9,
+        80 => 9,
+        54 => 10,
+        55 => 10,
+        56 => 11,
+        57 => 11,
+        58 => 11,
+        _ => 0,
+    }
+}
+
+fn binary_inner(inout p: P, min: u64) -> Ex {
+    let k0 = kind(in p);
+    let mut lhs = if k0 == k_minus() || k0 == k_bang() || k0 == k_tilde() {
+        let start = cur_start(in p);
+        bump(inout p);
+        let v = binary(inout p, 12);
+        let mut u = if k0 == k_minus() && v.k == x_int() {
+            ex(x_int(), start, last_end(in p), 0)
+        } else {
+            ex(x_unary(), start, last_end(in p), v.h)
+        };
+        u.pure = v.k == x_int() || v.pure;
+        u
+    } else {
+        postfix(inout p)
+    };
+    loop {
+        let prec = precedence(kind(in p));
+        if prec == 0 || prec < min {
+            break;
+        }
+        if widen_u64(lhs.h) >= max_depth() {
+            exhaust(inout p, 3, max_depth());
+            break;
+        }
+        if !enter(inout p) {
+            break;
+        }
+        bump(inout p);
+        let rhs = if prec == 1 {
+            expr(inout p)
+        } else {
+            binary(inout p, inc(prec))
+        };
+        let mut e = ex(
+            if prec == 1 {
+                x_assign()
+            } else {
+                x_binary()
+            },
+            widen_u64(lhs.start),
+            widen_u64(rhs.end),
+            hmax(lhs.h, rhs.h)
+        );
+        e.pure = prec != 1 && lhs.pure && rhs.pure;
+        lhs = record(inout p, e);
+    }
+    lhs
+}
+
+fn postfix(inout p: P) -> Ex {
+    let previous = p.depth;
+    if !enter(inout p) {
+        return placeholder(in p);
+    }
+    let e = postfix_inner(inout p);
+    p.depth = previous;
+    record(inout p, e)
+}
+
+// Whether `[` after `e` opens explicit type arguments of a call rather
+// than an index (`Parser::postfix_inner`).
+fn generic_call(in p: P, e: Ex) -> bool {
+    let n1 = nth(in p, 1);
+    if n1 == k_lower() && nth(in p, 2) == k_colon() {
+        return true;
+    }
+    if e.tiled && n1 == k_lower() && nth(in p, 2) == k_r_bracket() && nth(in p, 3) == k_l_paren() {
+        return true;
+    }
+    let t1 = idx(in p, 1);
+    if scope_has(in p.rows, tsym(in p, t1)) && !(e.k == x_name() && bound(in p, e.sym)) {
+        return true;
+    }
+    if n1 == k_upper() || n1 == k_l_bracket() || n1 == k_fn() || n1 == k_at() {
+        return true;
+    }
+    // `f[self::m::T](x)`, `f[super::T](x)`: a qualified type argument.
+    if (n1 == k_self_kw() || at_word(in p, 1, w_super())) && nth(in p, 2) == k_colon_colon() {
+        return true;
+    }
+    n1
+        == k_lower()
+        && (
+        (tword(in p, t1) == w_dyn() && nth(in p, 2) == k_upper())
+            || is_primitive_word(tword(in p, t1))
+    )
+}
+
+fn postfix_inner(inout p: P) -> Ex {
+    let mut e = primary(inout p);
+    loop {
+        let k = kind(in p);
+        if !(k == k_l_paren() || k == k_l_bracket() || k == k_dot() || k == k_question()) {
+            break;
+        }
+        if widen_u64(e.h) >= max_depth() {
+            exhaust(inout p, 3, max_depth());
+            break;
+        }
+        if !enter(inout p) {
+            break;
+        }
+        let start = widen_u64(e.start);
+        let next = if k == k_l_paren() {
+            bump(inout p);
+            let a = args(inout p);
+            expect(inout p, k_r_paren());
+            ex(x_call(), start, last_end(in p), hmax(e.h, a))
+        } else if k == k_l_bracket() {
+            if generic_call(in p, e) {
+                type_args(inout p);
+                expect(inout p, k_l_paren());
+                let a = args(inout p);
+                expect(inout p, k_r_paren());
+                ex(x_call(), start, last_end(in p), hmax(e.h, a))
+            } else {
+                bump(inout p);
+                let index = if at(in p, k_dot_dot()) {
+                    // `p[..]` and `p[..b]`.
+                    let none = placeholder(in p);
+                    open_interval(inout p, e, false, none)
+                } else {
+                    let lo = expr(inout p);
+                    if !at(in p, k_dot_dot()) {
+                        lo
+                    } else if nth(in p, 1) == k_r_bracket() {
+                        open_interval(inout p, e, true, lo)
+                    } else {
+                        bump(inout p);
+                        let hi = expr(inout p);
+                        let b = ex(
+                            x_binary(),
+                            widen_u64(lo.start),
+                            widen_u64(hi.end),
+                            hmax(lo.h, hi.h)
+                        );
+                        record(inout p, b)
+                    }
+                };
+                expect(inout p, k_r_bracket());
+                ex(x_index(), start, last_end(in p), hmax(e.h, index.h))
+            }
+        } else if k == k_dot() {
+            bump(inout p);
+            let m = lower(inout p);
+            let w = if tk(in p, m) == k_lower() {
+                tword(in p, m)
+            } else {
+                0
+            };
+            let mut f = ex(x_field(), start, last_end(in p), e.h);
+            f.tiled = w >= w_load_tile_vec() && w <= w_col_set();
+            if e.path != 0 {
+                f.path = wrapping_add(e.path, 1);
+            }
+            f
+        } else {
+            bump(inout p);
+            ex(x_try(), start, last_end(in p), e.h)
+        };
+        e = record(inout p, next);
+    }
+    e
+}
+
+// `Parser::open_interval` at `..` inside `base[`: `p[..]`, `p[..b]` and
+// `p[a..]`. An open upper bound reads `base.len()`, so `base` must be a
+// place path; its copy and the `len()` call get synthetic spans that start
+// inside the `..` token, so their heights are 1.
+fn open_interval(inout p: P, base: Ex, has_lo: bool, lo: Ex) -> Ex {
+    let dots = cur_start(in p);
+    let dots_end = tend(in p, idx(in p, 0));
+    bump(inout p);
+    let (lo_start, lo_h) = if has_lo {
+        (widen_u64(lo.start), lo.h)
+    } else {
+        (dots, 1)
+    };
+    let (hi_end, hi_h) = if at(in p, k_r_bracket()) {
+        if base.path != 0 {
+            // The copied path (`path` nodes), `.len` and the call.
+            (add(dots, add(widen_u64(base.path), 2)), 1)
+        } else {
+            err(
+                inout p,
+                in "an interval without an upper bound needs a named sequence (`s[a..]`); bind the value to a name first"
+            );
+            let ph = placeholder(in p);
+            (widen_u64(ph.end), 1)
+        }
+    } else {
+        let hi = expr(inout p);
+        (widen_u64(hi.end), hi.h)
+    };
+    let start = if lo_start < dots {
+        lo_start
+    } else {
+        dots
+    };
+    let b = ex(x_binary(), start, max64(hi_end, dots_end), hmax(lo_h, hi_h));
+    record(inout p, b)
+}
+
+// `Parser::args`: the height of the highest argument (0 for none).
+fn args(inout p: P) -> u32 {
+    let mut h: u32 = 0;
+    loop {
+        if at(in p, k_r_paren()) || at(in p, k_eof()) {
+            return h;
+        }
+        pass(inout p);
+        let a = expr(inout p);
+        h = hmax(h, a.h);
+        if !eat(inout p, k_comma()) {
+            return h;
+        }
+    }
+}
+
+fn primary(inout p: P) -> Ex {
+    let previous = p.depth;
+    if !enter(inout p) {
+        return placeholder(in p);
+    }
+    let e = primary_inner(inout p);
+    p.depth = previous;
+    record(inout p, e)
+}
+
+fn primary_inner(inout p: P) -> Ex {
+    let start = cur_start(in p);
+    let (lit, _) = literal(inout p);
+    if lit != 0 {
+        let mut l = ex(
+            if lit == l_int() {
+                x_int()
+            } else {
+                x_literal()
+            },
+            start,
+            last_end(in p),
+            0
+        );
+        l.pure = true;
+        return l;
+    }
+    if at_path_root(in p) {
+        // `self::m::f`, `super::m::T { .. }`, `@scope/name::m::E::V`.
+        let upper_last = qualified_path(inout p);
+        if upper_last && at(in p, k_l_brace()) && !p.no_struct {
+            return struct_literal(inout p, start);
+        }
+        let mut e = ex(x_name(), start, last_end(in p), 0);
+        e.path = 1;
+        e.pure = true;
+        return e;
+    }
+    let k = kind(in p);
+    if k == k_lower() || k == k_self_kw() || contextual_name(k) {
+        let i = bump(inout p);
+        let mut e = ex(x_name(), start, last_end(in p), 0);
+        e.sym = tsym(in p, i);
+        e.path = 1;
+        e.pure = true;
+        return e;
+    }
+    if k == k_upper() {
+        let first = bump(inout p);
+        let mut segments: u64 = 1;
+        let mut second: u8 = 0;
+        loop {
+            if !eat(inout p, k_colon_colon()) {
+                break;
+            }
+            let j = ident(inout p);
+            segments = inc(segments);
+            if segments == 2 && tk(in p, j) == k_lower() {
+                second = tword(in p, j);
+            }
+        }
+        if at(in p, k_l_brace()) && !p.no_struct {
+            return struct_literal(inout p, start);
+        }
+        let mut e = ex(x_name(), start, last_end(in p), 0);
+        e.path = 1;
+        e.pure = true;
+        if segments == 1 {
+            e.sym = tsym(in p, first);
+        }
+        e
+            .tiled = segments
+            == 2
+            && tword(in p, first)
+            == w_TiledSeq()
+            && second
+            >= w_load_tile_vec()
+            && second
+            <= w_col_set();
+        return e;
+    }
+    if k == k_l_paren() {
+        bump(inout p);
+        let mut values: u64 = 0;
+        let mut comma = false;
+        let mut h: u32 = 0;
+        let mut only = placeholder(in p);
+        let mut sum: u64 = 0;
+        loop {
+            if at(in p, k_r_paren()) || at(in p, k_eof()) {
+                break;
+            }
+            let v = expr(inout p);
+            values = inc(values);
+            if values == 1 {
+                only = v;
+            }
+            h = hmax(h, v.h);
+            sum = add(sum, v.leaves);
+            comma = eat(inout p, k_comma());
+            if !comma {
+                break;
+            }
+        }
+        expect(inout p, k_r_paren());
+        if values == 1 && !comma {
+            return only;
+        }
+        let mut t = ex(x_tuple(), start, last_end(in p), h);
+        t.leaves = max64(sum, 1);
+        return t;
+    }
+    if k == k_l_bracket() {
+        return array_literal(inout p, start);
+    }
+    if k == k_l_brace() {
+        return block(inout p);
+    }
+    err(inout p, in "expected expression");
+    if !at(in p, k_eof()) {
+        bump(inout p);
+    }
+    ex(x_tuple(), start, last_end(in p), 0)
+}
+
+// `Parser::array_literal`: `[a, b, c]` or `[x; N]`, both the tuple of
+// their elements. A repeated operand that is not pure is a block that
+// binds it once (`splat`), whose tail has a height of 1.
+fn array_literal(inout p: P, start: u64) -> Ex {
+    expect(inout p, k_l_bracket());
+    let mut values: u64 = 0;
+    let mut h: u32 = 0;
+    let mut sum: u64 = 0;
+    loop {
+        if at(in p, k_r_bracket()) || at(in p, k_eof()) {
+            break;
+        }
+        let v = expr(inout p);
+        if values == 0 && eat(inout p, k_semi()) {
+            let mut n = array_length(inout p);
+            expect(inout p, k_r_bracket());
+            if wrapping_mul(v.leaves, n) > max_array_length() {
+                err(inout p, in "a nested array literal holds more than 65536 elements in all");
+                n = 0;
+            }
+            let end = last_end(in p);
+            if v.pure {
+                let mut t = ex(
+                    x_tuple(),
+                    start,
+                    end,
+                    if n == 0 {
+                        0
+                    } else {
+                        v.h
+                    }
+                );
+                t.leaves = max64(wrapping_mul(v.leaves, n), 1);
+                return t;
+            }
+            let mut b = ex(x_block(), start, end, hmax(v.h, 1));
+            b.leaves = max64(n, 1);
+            return b;
+        }
+        values = inc(values);
+        h = hmax(h, v.h);
+        sum = add(sum, v.leaves);
+        if !eat(inout p, k_comma()) {
+            break;
+        }
+    }
+    expect(inout p, k_r_bracket());
+    let mut t = ex(x_tuple(), start, last_end(in p), h);
+    t.leaves = max64(sum, 1);
+    t
+}
+
+// `Parser::struct_literal`: `Name { field: value, field }` at `{`.
+fn struct_literal(inout p: P, start: u64) -> Ex {
+    bump(inout p);
+    let mut h: u32 = 0;
+    loop {
+        if at(in p, k_r_brace()) || at(in p, k_eof()) {
+            break;
+        }
+        lower(inout p);
+        if eat(inout p, k_colon()) {
+            let v = expr(inout p);
+            h = hmax(h, v.h);
+        } else {
+            h = hmax(h, 1);
+        }
+        if !eat(inout p, k_comma()) {
+            break;
+        }
+    }
+    expect(inout p, k_r_brace());
+    ex(x_struct(), start, last_end(in p), h)
+}
+
+// ---------------------------------------------------------------- patterns
+
+fn pattern_list(inout p: P, end: u8) {
+    loop {
+        if at(in p, end) || at(in p, k_eof()) {
+            return;
+        }
+        pattern(inout p);
+        if !eat(inout p, k_comma()) {
+            return;
+        }
+    }
+}
+
+// `Parser::pattern`. Pushes the symbol of each binding on `binds`.
+fn pattern(inout p: P) {
+    let previous = p.depth;
+    if !enter(inout p) {
+        return;
+    }
+    pattern_inner(inout p);
+    p.depth = previous;
+}
+
+fn pattern_inner(inout p: P) {
+    start_node(inout p, n_pattern());
+    let negative = eat(inout p, k_minus());
+    let (lit, _) = literal(inout p);
+    if lit != 0 {
+        if negative && lit != l_int() && lit != l_float() {
+            err(inout p, in "only numeric patterns can be negative");
+        }
+    } else {
+        if negative {
+            err(inout p, in "only numeric patterns can be negative");
+        }
+        let k = kind(in p);
+        if at_path_root(in p) {
+            qualified_path(inout p);
+            constructor_pattern(inout p);
+        } else if k == k_lower() || contextual_name(k) {
+            let i = bump(inout p);
+            if tword(in p, i) != w_underscore() {
+                let sym = tsym(in p, i);
+                p.binds.push(sym);
+            }
+        } else if k == k_upper() {
+            upper(inout p);
+            loop {
+                if !eat(inout p, k_colon_colon()) {
+                    break;
+                }
+                upper(inout p);
+            }
+            constructor_pattern(inout p);
+        } else if k == k_l_paren() {
+            bump(inout p);
+            pattern_list(inout p, k_r_paren());
+            expect(inout p, k_r_paren());
+        } else {
+            err(inout p, in "expected pattern");
+            if !at(in p, k_eof()) {
+                bump(inout p);
+            }
+        }
+    }
+    finish_node(inout p);
+}
+
+// `Parser::constructor_pattern`: the fields after a constructor's name,
+// `(p, ..)`, `{ f: p, f }` or none.
+fn constructor_pattern(inout p: P) {
+    if eat(inout p, k_l_paren()) {
+        pattern_list(inout p, k_r_paren());
+        expect(inout p, k_r_paren());
+    } else if eat(inout p, k_l_brace()) {
+        loop {
+            if at(in p, k_r_brace()) || at(in p, k_eof()) {
+                break;
+            }
+            let field = lower(inout p);
+            if eat(inout p, k_colon()) {
+                pattern(inout p);
+            } else {
+                let sym = tsym(in p, field);
+                p.binds.push(sym);
+            }
+            if !eat(inout p, k_comma()) {
+                break;
+            }
+        }
+        expect(inout p, k_r_brace());
+    }
+}
+
+// ---------------------------------------------------------------- module
+
+// `parse_with_limits` after lexing: the module, or for a limited token
+// stream the flat module of every token.
+pub fn parse_tokens(in source: Slice[u8], sink t: Tokens, sink d: Diags) -> P {
+    let ntok = t.kind.len();
+    let nsyms = inc(t.sym_start.len());
+    let mut p = P {
+        t: t,
+        d: d,
+        src: ChunkSeq::with_capacity[u8](source.len()),
+        sig: ChunkSeq::with_capacity[u32](ntok),
+        rank: ChunkSeq::with_capacity[u32](inc(ntok)),
+        ntok: ntok,
+        pos: 0,
+        ev: ChunkSeq::with_capacity[u32](add(ntok, ntok >> 1)),
+        no_struct: false,
+        rows: ChunkSeq::new[u32](),
+        rows_trail: ChunkSeq::new[u32](),
+        vals: ChunkSeq::new[u32](),
+        vals_trail: ChunkSeq::new[u32](),
+        binds: ChunkSeq::new[u32](),
+        pending: ChunkSeq::new[u32](),
+        depth: 0,
+        leaves: 1,
+        halted: false
+    };
+    p.src.extend(in source);
+    p.rows.resize(nsyms, 0);
+    p.vals.resize(nsyms, 0);
+    for i in 0..ntok {
+        p.rank.push(narrow(p.sig.len()));
+        if !trivia_kind(tk(in p, i)) {
+            p.sig.push(narrow(i));
+        }
+    }
+    p.rank.push(narrow(p.sig.len()));
+    start_node(inout p, n_module());
+    if p.t.limited {
+        for i in 0..wrapping_sub(ntok, 1) {
+            p.ev.push(narrow(i));
+        }
+        p.pos = wrapping_sub(ntok, 1);
+        finish_node(inout p);
+        return p;
+    }
+    // `contextual_item_names`: `fn break()` and friends keep the word a name.
+    let mut previous: u8 = 255;
+    for j in 0..p.sig.len() {
+        let i = w32(in p.sig, j);
+        let k = tk(in p, i);
+        if previous == k_fn() && k == k_lower() {
+            let w = tword(in p, i);
+            if w == w_break() || w == w_continue() || w == w_for() || w == w_loop() {
+                let sym = tsym(in p, i);
+                if !bound(in p, sym) {
+                    val_insert(inout p, sym);
+                }
+            }
+        }
+        previous = k;
+    }
+    loop {
+        if at(in p, k_eof()) {
+            break;
+        }
+        let before = p.pos;
+        start_node(inout p, n_item());
+        declaration(inout p);
+        finish_node(inout p);
+        if p.pos == before {
+            err(inout p, in "expected a declaration");
+            bump(inout p);
+        }
+    }
+    trivia(inout p);
+    finish_node(inout p);
+    p
+}

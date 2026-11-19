@@ -22,6 +22,10 @@ use crate::ast::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// A `for` binding: its pattern, its type, whether it is nonzero, and its
+/// known integer range.
+type LoopBinding<'a> = (&'a Pattern, &'a Type, bool, Option<(i128, i128)>);
+
 /// A lexical control boundary, innermost last.
 #[derive(Debug, Clone)]
 pub(super) enum ControlFrame {
@@ -162,7 +166,7 @@ impl Checker<'_> {
         env: &mut Env,
         expected: &Type,
         value: bool,
-        bind: Option<(&Pattern, &Type, bool)>,
+        bind: Option<LoopBinding<'_>>,
         span: Span,
     ) -> Type {
         self.havoc(body, env);
@@ -178,7 +182,7 @@ impl Checker<'_> {
         })));
         let mut shadowed = BTreeMap::new();
         let mut names = vec![];
-        if let Some((pat, ty, nonzero)) = bind {
+        if let Some((pat, ty, nonzero, range)) = bind {
             for n in super::pattern_names(pat) {
                 if let Some(old) = env.bindings.get(&n) {
                     shadowed.insert(n.clone(), old.clone());
@@ -190,6 +194,15 @@ impl Checker<'_> {
                 && let Some(b) = env.bindings.get_mut(n)
             {
                 b.nonzero = nonzero;
+                // The index stays in its range (which proves array indices
+                // in bounds, §5): the bound is evaluated once and the index
+                // is not assignable.
+                b.range = range.map(|(lo, hi)| super::IntRange {
+                    lo,
+                    hi,
+                    at: std::sync::Arc::clone(&b.mutation),
+                    looped: true,
+                });
             }
         }
         let t = self.expr(body, env, Usage::Own);
@@ -294,7 +307,12 @@ impl Checker<'_> {
         env: &mut Env,
         span: Span,
     ) -> Type {
-        let ExprKind::Range { start, end, .. } = &iter.kind else {
+        let ExprKind::Range {
+            start,
+            end,
+            inclusive,
+        } = &iter.kind
+        else {
             self.error(
                 "E0213",
                 "'for' iterates an integer range 'a..b' or 'a..=b'",
@@ -351,12 +369,20 @@ impl Checker<'_> {
             );
         }
         let nonzero = self.integer_fact(start, env).is_some_and(|n| n > 0);
+        let range = self
+            .integer_bounds(start, env)
+            .zip(
+                self.integer_bounds(end, env)
+                    .or_else(|| self.array_len_bounds(end, env)),
+            )
+            .map(|((lo, _), (_, hi))| (lo, if *inclusive { hi } else { hi - 1 }))
+            .filter(|(lo, hi)| lo <= hi);
         self.loop_body(
             body,
             env,
             &Type::unit(),
             false,
-            Some((pat, &element, nonzero)),
+            Some((pat, &element, nonzero, range)),
             span,
         )
     }

@@ -1,0 +1,2292 @@
+// Module interp of @vesper/ebpf (see lib.ves): src/interp.rs, the concrete
+// interpreter. The Rust file is the model: the same provenance checks,
+// helpers, kfuncs, tail calls and `bpf_loop` frames, in the same order, so
+// both builds give the same results, errors and map, ring and context
+// contents.
+//
+// Layout. The environment's persistent state crosses the boundary as four
+// sequences, which a run copies, changes and returns:
+//
+//   st     next_base, regions, entries, table size, maps, then one count
+//          per map, 3 words per region (base, offset in mem, length), 4
+//          words per entry (map, key offset in keys, key length, region)
+//          and the hash table (0 empty, 1 deleted, entry + 2);
+//   keys   the entries' key bytes;
+//   mem    the regions' bytes, each region at an 8-byte aligned offset;
+//   spill  one word per 8 bytes of mem: the provenance of a pointer
+//          spilled there plus 1, or 0.
+//
+// Persistent regions are the map values; region 0 is a dead region that
+// stands for every pointer whose region a run released. During a run every
+// region has 8 words in `I.rt`: kind (0 context, 1 packet, 2 stack, 3 map
+// value, 4 ring-buffer record, 5 socket, 6 dead), base, offset in mem,
+// length, live, and for a ring record its map, payload and header offsets.
+// Bytes past the persistent ones carry an init flag in `I.ini` (only stack
+// bytes start uninitialised). A value is a word and a provenance: a region
+// id, or NONE for a scalar. At the end of a run the map values still in a
+// map are renumbered from 1 and everything else is dropped.
+//
+// Ring buffers stay with the caller: a run gets each ring's size, producer
+// and consumer and returns the new producers and a log of the bytes it
+// wrote (map, position, length, offset in the output bytes), which the
+// caller applies in order, wrapping at the end of the data area.
+use self::common::{
+    sext_const,
+    shl,
+    shr,
+    umax
+};
+use self::concrete::{
+    alu_concrete,
+    cmp_concrete,
+    endian
+};
+use self::helpers::{
+    allowed
+};
+use self::insn::{
+    AluOp,
+    AtomicOp,
+    CallTarget,
+    DecodeError,
+    Imm64,
+    Insn,
+    Operand,
+    RawInsn,
+    Size,
+    decode_slots
+};
+use self::program::{
+    ProgramType
+};
+
+pub copy struct IErr {
+    code: u64,
+    pc: u64,
+    d: u64,
+    a: u64,
+    b: u64,
+    c: u64
+}
+
+pub copy struct Val {
+    v: u64,
+    p: u64
+}
+
+pub struct RunOut {
+    words: ChunkSeq[u64],
+    bytes: ChunkSeq[u8],
+    st: ChunkSeq[u64],
+    keys: ChunkSeq[u8],
+    mem: ChunkSeq[u8],
+    spill: ChunkSeq[u64]
+}
+
+pub struct I {
+    insns: ChunkSeq[Insn],
+    start: ChunkSeq[bool],
+    // (slot, code) pairs: code is the index in helpers::KFUNCS, 9 for
+    // another name
+    kf: ChunkSeq[u64],
+    cmaps: ChunkSeq[u64],
+    cptype: u64,
+    ptype: u64,
+    rt: ChunkSeq[u64],
+    mem: ChunkSeq[u8],
+    ini: ChunkSeq[u8],
+    spill: ChunkSeq[u64],
+    pbytes: u64,
+    np: u64,
+    ptrans: ChunkSeq[u64],
+    next_base: u64,
+    pkt: u64,
+    ctx: u64,
+    data_off: u64,
+    // 7 words per map: kernel type, key size, value size, max entries,
+    // ring size, producer, consumer
+    maps: ChunkSeq[u64],
+    nmaps: u64,
+    counts: ChunkSeq[u64],
+    ent: ChunkSeq[u64],
+    keys: ChunkSeq[u8],
+    tab: ChunkSeq[u64],
+    used: u64,
+    changed: bool,
+    rlog: ChunkSeq[u64],
+    rbytes: ChunkSeq[u8],
+    held: ChunkSeq[u64],
+    cfg: ChunkSeq[u64],
+    prandom: u64,
+    budget: u64,
+    count: u64,
+    tail_calls: u64,
+    tail_taken: u64,
+    rv: ChunkSeq[u64],
+    rp: ChunkSeq[u64],
+    ri: ChunkSeq[bool],
+    // 17 words per frame: r6..r9 values and provenances, r10 value and
+    // provenance, return pc, loop flag, entry, index, count, argument value
+    // and provenance
+    frames: ChunkSeq[u64],
+    zeros: ChunkSeq[u8],
+    ones: ChunkSeq[u8],
+    zwords: ChunkSeq[u64]
+}
+
+// ---------------------------------------------------------------------------
+// Words and failures.
+
+fn none() -> u64 {
+    umax()
+}
+
+// `Val.p` of a context field that reads as plain bytes (`ctx_read` None).
+fn plain() -> u64 {
+    wrapping_sub(umax(), 1)
+}
+
+fn map_tag() -> u64 {
+    13542324079503081472
+}
+
+fn func_tag() -> u64 {
+    13542605554479792128
+}
+
+fn high32() -> u64 {
+    18446744069414584320
+}
+
+fn low32() -> u64 {
+    4294967295
+}
+
+fn gw(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn sw(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn gb(in s: ChunkSeq[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+fn gbyte(in s: ChunkSeq[u8], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+fn w64(x: u64) -> u64 {
+    x
+}
+
+fn add(a: u64, b: u64) -> u64 {
+    wrapping_add(a, b)
+}
+
+fn sub(a: u64, b: u64) -> u64 {
+    wrapping_sub(a, b)
+}
+
+fn mul(a: u64, b: u64) -> u64 {
+    wrapping_mul(a, b)
+}
+
+fn neg(a: u64) -> u64 {
+    wrapping_sub(0, a)
+}
+
+fn raise(code: u64, pc: u64, d: u64, a: u64, b: u64, c: u64) -> Never eff [Fail[IErr]] {
+    Fail::raise(
+        IErr {
+            code: code,
+            pc: pc,
+            d: d,
+            a: a,
+            b: b,
+            c: c
+        }
+    )
+}
+
+// InvalidAccess (code 2) and BadHelperArg (code 4) with detail `d`.
+fn access(pc: u64, d: u64, a: u64, b: u64, c: u64) -> Never eff [Fail[IErr]] {
+    raise(2, pc, d, a, b, c)
+}
+
+fn bad(pc: u64, d: u64) -> Never eff [Fail[IErr]] {
+    raise(4, pc, d, 0, 0, 0)
+}
+
+fn scalar(v: u64) -> Val {
+    Val {
+        v: v,
+        p: none()
+    }
+}
+
+fn size_bytes(s: Size) -> u64 {
+    match s {
+        Size::B => 1,
+        Size::H => 2,
+        Size::W => 4,
+        Size::DW => 8,
+    }
+}
+
+fn slots_of(i: Insn) -> u64 {
+    match i {
+        Insn::LdImm64 {
+            dst,
+            imm
+        }
+        => 2,
+        _ => 1,
+    }
+}
+
+fn reg(r: u8) -> u64 {
+    widen_u64(r)
+}
+
+fn off16(o: i16) -> u64 {
+    wrapping_u64(widen_i64(o))
+}
+
+fn imm_bits(x: i32) -> u64 {
+    wrapping_u64(widen_i64(x))
+}
+
+fn jump(pc: u64, off: u64) -> u64 {
+    add(add(pc, 1), off)
+}
+
+fn ptype_of(t: u64) -> ProgramType {
+    if t == 0 {
+        ProgramType::Xdp
+    } else if t == 1 {
+        ProgramType::SchedCls
+    } else if t == 2 {
+        ProgramType::Tracepoint
+    } else {
+        ProgramType::Kprobe
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Registers.
+
+fn get(in i: I, pc: u64, r: u64) -> Val eff [Fail[IErr]] {
+    if !gb(in i.ri, r) {
+        raise(1, pc, 0, r, 0, 0);
+    }
+    Val {
+        v: gw(in i.rv, r),
+        p: gw(in i.rp, r)
+    }
+}
+
+// The register without the init check (helper arguments).
+fn peek(in i: I, r: u64) -> Val {
+    Val {
+        v: gw(in i.rv, r),
+        p: gw(in i.rp, r)
+    }
+}
+
+fn set(inout i: I, r: u64, x: Val) {
+    i.rv.try_set(r, x.v);
+    i.rp.try_set(r, x.p);
+    i.ri.try_set(r, true);
+}
+
+fn uninit(inout i: I, lo: u64, hi: u64) {
+    for r in lo..add(hi, 1) {
+        i.ri.try_set(r, false);
+    }
+}
+
+fn init_all(inout i: I, v: bool) {
+    for r in w64(0)..w64(11) {
+        i.ri.try_set(r, v);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regions.
+
+fn rt(in i: I, r: u64, f: u64) -> u64 {
+    gw(in i.rt, add(mul(r, 8), f))
+}
+
+fn set_rt(inout i: I, r: u64, f: u64, v: u64) {
+    i.rt.try_set(add(mul(r, 8), f), v);
+}
+
+fn pad8(n: u64) -> u64 {
+    add(n, 7) & (umax() ^ 7)
+}
+
+fn grow(inout i: I, n: u64, init: bool) {
+    let mut left = n;
+    loop {
+        if left == 0 {
+            break;
+        }
+        let k = if left > 4096 {
+            4096
+        } else {
+            left
+        };
+        i.mem.extend(in i.zeros[0..k]);
+        if init {
+            i.ini.extend(in i.ones[0..k]);
+        } else {
+            i.ini.extend(in i.zeros[0..k]);
+        }
+        i.spill.extend(in i.zwords[0..shr(k, 3)]);
+        left = sub(left, k);
+    }
+}
+
+// `Env::alloc`: a region of `len` zero bytes.
+fn alloc(inout i: I, kind: u64, len: u64, init: bool) -> u64 {
+    let base = i.next_base;
+    i.next_base = add(base, add(mul(shr(add(add(len, 4096), 4095), 12), 4096), 4096));
+    let off = i.mem.len();
+    grow(inout i, pad8(len), init);
+    let id = shr(i.rt.len(), 3);
+    i.rt.push(kind);
+    i.rt.push(base);
+    i.rt.push(off);
+    i.rt.push(len);
+    i.rt.push(1);
+    i.rt.push(0);
+    i.rt.push(0);
+    i.rt.push(0);
+    id
+}
+
+fn is_init(in i: I, at: u64) -> bool {
+    if at < i.pbytes {
+        return true;
+    }
+    gbyte(in i.ini, sub(at, i.pbytes)) != 0
+}
+
+fn mark_init(inout i: I, at: u64, n: u64) {
+    if add(at, n) <= i.pbytes {
+        return;
+    }
+    for k in 0..n {
+        let x = add(at, k);
+        if x >= i.pbytes {
+            i.ini.try_set(sub(x, i.pbytes), 1);
+        }
+    }
+}
+
+fn read_n(in i: I, at: u64, n: u64) -> u64 {
+    if n == 1 {
+        gbyte(in i.mem, at)
+    } else if n == 2 {
+        match i.mem.try_read_u16_le(at) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        }
+    } else if n == 4 {
+        match i.mem.try_read_u32_le(at) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        }
+    } else {
+        match i.mem.try_read_u64_le(at) {
+            Option::Some(v) => v,
+            Option::None => 0,
+        }
+    }
+}
+
+fn write_n(inout i: I, at: u64, n: u64, v: u64) {
+    if n == 1 {
+        i.mem.try_set(at, wrapping_u8(v));
+    } else if n == 2 {
+        i.mem.try_write_u16_le(at, wrapping_u16(v));
+    } else if n == 4 {
+        i.mem.try_write_u32_le(at, wrapping_u32(v));
+    } else {
+        i.mem.try_write_u64_le(at, v);
+    }
+}
+
+fn set_spill(inout i: I, idx: u64, p: u64) {
+    if p == none() {
+        i.spill.try_set(idx, 0);
+    } else {
+        i.spill.try_set(idx, add(p, 1));
+        if p >= i.np && idx < shr(i.pbytes, 3) {
+            i.ptrans.push(idx);
+        }
+    }
+}
+
+// `resolve`: the offset of `[v + off, v + off + n)` in region `p`.
+fn resolve(in i: I, pc: u64, x: Val, off: u64, n: u64) -> u64 eff [Fail[IErr]] {
+    let p = x.p;
+    if p == none() {
+        access(pc, 1, x.v, 0, 0);
+    }
+    if rt(in i, p, 4) == 0 {
+        access(pc, 2, 0, 0, 0);
+    }
+    let at = sub(add(x.v, off), rt(in i, p, 1));
+    let len = rt(in i, p, 3);
+    if at > len || n > sub(len, at) {
+        access(pc, 3, at, n, len);
+    }
+    let kind = rt(in i, p, 0);
+    if kind == 1 && at < i.data_off {
+        access(pc, 4, 0, 0, 0);
+    }
+    if kind == 5 {
+        access(pc, 5, 0, 0, 0);
+    }
+    at
+}
+
+fn read_mem(inout i: I, pc: u64, x: Val, n: u64) -> ChunkSeq[u8] eff [Fail[IErr]] {
+    let at = resolve(in i, pc, x, 0, n);
+    let m = add(rt(in i, x.p, 2), at);
+    for k in 0..n {
+        if !is_init(in i, add(m, k)) {
+            raise(3, pc, 0, at, 0, 0);
+        }
+    }
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    out.extend(in i.mem[m..add(m, n)]);
+    out
+}
+
+fn pkt_ptr(in i: I, end: bool) -> Val {
+    let p = i.pkt;
+    Val {
+        v: add(
+            rt(in i, p, 1),
+            if end {
+                rt(in i, p, 3)
+            } else {
+                i.data_off
+            }
+        ),
+        p: p
+    }
+}
+
+// `ctx_read`: a pointer or constant field, or `plain()` for bytes read
+// from the context.
+fn ctx_read(in i: I, pc: u64, at: u64, n: u64) -> Val eff [Fail[IErr]] {
+    let t = i.ptype;
+    if t == 0 {
+        if at == 0 {
+            return pkt_ptr(in i, false);
+        }
+        if at == 4 {
+            return pkt_ptr(in i, true);
+        }
+        if at == 12 {
+            return scalar(1);
+        }
+        if at == 16 {
+            return scalar(0);
+        }
+        access(pc, 6, at, n, 0);
+    }
+    if t == 1 {
+        if at == 76 && n == 4 {
+            return pkt_ptr(in i, false);
+        }
+        if at == 80 && n == 4 {
+            return pkt_ptr(in i, true);
+        }
+        if at < 76 {
+            return Val {
+                v: 0,
+                p: plain()
+            };
+        }
+        access(pc, 6, at, n, 0);
+    }
+    if t == 2 && at < 8 {
+        access(pc, 6, at, n, 0);
+    }
+    Val {
+        v: 0,
+        p: plain()
+    }
+}
+
+fn skb_writable(at: u64) -> bool {
+    at
+        == 8
+        || at
+        == 32
+        || at
+        == 44
+        || at
+        == 48
+        || at
+        == 52
+        || at
+        == 56
+        || at
+        == 60
+        || at
+        == 64
+        || at
+        == 72
+}
+
+fn store(inout i: I, pc: u64, x: Val, off: u64, n: u64, v: Val) eff [Fail[IErr]] {
+    let at = resolve(in i, pc, x, off, n);
+    let p = x.p;
+    if rt(in i, p, 0) == 0 {
+        let writable = i.ptype == 1 && n == 4 && skb_writable(at) && v.p == none();
+        if !writable {
+            access(pc, 7, at, n, 0);
+        }
+    }
+    let m = add(rt(in i, p, 2), at);
+    write_n(inout i, m, n, v.v);
+    mark_init(inout i, m, n);
+    let idx = shr(m, 3);
+    i.spill.try_set(idx, 0);
+    if n == 8 && (at & 7) == 0 {
+        if v.p != none() {
+            set_spill(inout i, idx, v.p);
+        }
+    } else if v.p != none() {
+        access(pc, 8, 0, 0, 0);
+    }
+}
+
+fn new_stack(inout i: I) -> Val {
+    let r = alloc(inout i, 2, 512, false);
+    Val {
+        v: add(rt(in i, r, 1), 512),
+        p: r
+    }
+}
+
+fn kill(inout i: I, x: Val) {
+    if x.p != none() {
+        set_rt(inout i, x.p, 4, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Maps.
+
+fn mword(in i: I, m: u64, f: u64) -> u64 {
+    gw(in i.maps, add(mul(m, 7), f))
+}
+
+fn is_array_kind(t: u64) -> bool {
+    t == 2 || t == 6 || t == 3
+}
+
+fn map_of(in i: I, pc: u64, x: Val) -> u64 eff [Fail[IErr]] {
+    if x.p == none() && (x.v & high32()) == map_tag() {
+        let m = x.v & low32();
+        if m < i.nmaps {
+            return m;
+        }
+    }
+    bad(pc, 7)
+}
+
+fn khash(m: u64, in key: ChunkSeq[u8]) -> u64 {
+    let mut h = 14695981039346656037 ^ m;
+    h = mul(h, 1099511628211);
+    for k in 0..key.len() {
+        h = mul(h ^ gbyte(in key, k), 1099511628211);
+    }
+    h ^ shr(h, 29)
+}
+
+fn same_key(in i: I, e: u64, m: u64, in key: ChunkSeq[u8]) -> bool {
+    let b = mul(e, 4);
+    if gw(in i.ent, b) != m || gw(in i.ent, add(b, 2)) != key.len() {
+        return false;
+    }
+    let ko = gw(in i.ent, add(b, 1));
+    for k in 0..key.len() {
+        if gbyte(in i.keys, add(ko, k)) != gbyte(in key, k) {
+            return false;
+        }
+    }
+    true
+}
+
+// The table slot of `key` in map `m`, or NONE.
+fn find(in i: I, m: u64, in key: ChunkSeq[u8]) -> u64 {
+    let size = i.tab.len();
+    if size == 0 {
+        return none();
+    }
+    let mask = sub(size, 1);
+    let mut at = khash(m, in key) & mask;
+    loop {
+        let w = gw(in i.tab, at);
+        if w == 0 {
+            return none();
+        }
+        if w > 1 && same_key(in i, sub(w, 2), m, in key) {
+            return at;
+        }
+        at = add(at, 1) & mask;
+    }
+    none()
+}
+
+fn tab_put(inout i: I, e: u64, h: u64) {
+    let mask = sub(i.tab.len(), 1);
+    let mut at = h & mask;
+    loop {
+        if gw(in i.tab, at) == 0 {
+            i.tab.try_set(at, add(e, 2));
+            return;
+        }
+        at = add(at, 1) & mask;
+    }
+}
+
+fn entry_key(in i: I, e: u64) -> ChunkSeq[u8] {
+    let b = mul(e, 4);
+    let ko = gw(in i.ent, add(b, 1));
+    let kl = gw(in i.ent, add(b, 2));
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](kl);
+    out.extend(in i.keys[ko..add(ko, kl)]);
+    out
+}
+
+// Rebuild the table with room for `live` entries.
+fn rebuild(inout i: I, live: u64) {
+    let mut size: u64 = 8;
+    loop {
+        if size >= mul(live, 4) {
+            break;
+        }
+        size = mul(size, 2);
+    }
+    i.tab.clear();
+    for k in 0..size {
+        i.tab.push(0);
+    }
+    i.used = 0;
+    let n = shr(i.ent.len(), 2);
+    for e in 0..n {
+        if gw(in i.ent, add(mul(e, 4), 3)) != none() {
+            let key = entry_key(in i, e);
+            let h = khash(gw(in i.ent, mul(e, 4)), in key);
+            tab_put(inout i, e, h);
+            i.used = add(i.used, 1);
+        }
+    }
+}
+
+fn live_entries(in i: I) -> u64 {
+    let mut n: u64 = 0;
+    for m in 0..i.counts.len() {
+        n = add(n, gw(in i.counts, m));
+    }
+    n
+}
+
+fn insert(inout i: I, m: u64, in key: ChunkSeq[u8], r: u64) {
+    if mul(add(i.used, 1), 2) > i.tab.len() {
+        let live = live_entries(in i);
+        rebuild(inout i, add(live, 1));
+    }
+    let e = shr(i.ent.len(), 2);
+    i.ent.push(m);
+    i.ent.push(i.keys.len());
+    i.ent.push(key.len());
+    i.ent.push(r);
+    i.keys.extend(in key.as_slice());
+    tab_put(inout i, e, khash(m, in key));
+    i.used = add(i.used, 1);
+    i.counts.try_set(m, add(gw(in i.counts, m), 1));
+    i.changed = true;
+}
+
+fn remove(inout i: I, m: u64, slot: u64) {
+    let e = sub(gw(in i.tab, slot), 2);
+    i.ent.try_set(add(mul(e, 4), 3), none());
+    i.tab.try_set(slot, 1);
+    i.counts.try_set(m, sub(gw(in i.counts, m), 1));
+    i.changed = true;
+}
+
+// ---------------------------------------------------------------------------
+// Ring buffers.
+
+fn ring_log(inout i: I, m: u64, at: u64, in bytes: ChunkSeq[u8]) {
+    i.rlog.push(m);
+    i.rlog.push(at);
+    i.rlog.push(bytes.len());
+    i.rlog.push(i.rbytes.len());
+    i.rbytes.extend(in bytes.as_slice());
+}
+
+fn le32_bytes(v: u64) -> ChunkSeq[u8] {
+    let mut b: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](4);
+    b.push(wrapping_u8(v));
+    b.push(wrapping_u8(shr(v, 8)));
+    b.push(wrapping_u8(shr(v, 16)));
+    b.push(wrapping_u8(shr(v, 24)));
+    b
+}
+
+// `RingBuf::reserve`: (header offset, payload offset), or NONE.
+fn reserve(inout i: I, m: u64, len: u64) -> Val {
+    let size = mword(in i, m, 4);
+    let total = mul(shr(add(add(len, 8), 7), 3), 8);
+    if len > sub(size, 8) {
+        return scalar(none());
+    }
+    let mask = sub(size, 1);
+    let prod = mword(in i, m, 5);
+    let new_prod = add(prod, total);
+    if sub(new_prod, mword(in i, m, 6)) > mask {
+        return scalar(none());
+    }
+    let hdr = prod & mask;
+    let hb = le32_bytes((len & low32()) | 2147483648);
+    ring_log(inout i, m, hdr, in hb);
+    let zb = le32_bytes(0);
+    ring_log(inout i, m, add(hdr, 4), in zb);
+    i.maps.try_set(add(mul(m, 7), 5), new_prod);
+    Val {
+        v: hdr,
+        p: add(hdr, 8) & mask
+    }
+}
+
+// The ring byte at `pos` as this run's log leaves it.
+fn ring_byte(in i: I, m: u64, pos: u64) -> u64 {
+    let n = mword(in i, m, 4);
+    let entries = shr(i.rlog.len(), 2);
+    let mut k = entries;
+    loop {
+        if k == 0 {
+            break;
+        }
+        k = sub(k, 1);
+        let b = mul(k, 4);
+        if gw(in i.rlog, b) == m {
+            let at = gw(in i.rlog, add(b, 1));
+            let len = gw(in i.rlog, add(b, 2));
+            let d = if pos >= at {
+                sub(pos, at)
+            } else {
+                sub(add(pos, n), at)
+            };
+            if d < len {
+                return gbyte(in i.rbytes, add(gw(in i.rlog, add(b, 3)), d));
+            }
+        }
+    }
+    0
+}
+
+fn commit(inout i: I, m: u64, hdr: u64, discard: bool) {
+    let mut l: u64 = 0;
+    for k in w64(0)..w64(4) {
+        l = l | shl(ring_byte(in i, m, add(hdr, k)), mul(k, 8));
+    }
+    l = l & 2147483647;
+    if discard {
+        l = l | 1073741824;
+    }
+    let hb = le32_bytes(l);
+    ring_log(inout i, m, hdr, in hb);
+}
+
+// ---------------------------------------------------------------------------
+// Kfuncs.
+
+fn karg(in i: I, pc: u64, a: u64) -> Val eff [Fail[IErr]] {
+    if !gb(in i.ri, add(a, 1)) {
+        raise(1, pc, 0, add(a, 1), 0, 0);
+    }
+    peek(in i, add(a, 1))
+}
+
+fn kslot(in i: I, pc: u64, code: u64) -> u64 eff [Fail[IErr]] {
+    let p = karg(in i, pc, 0);
+    let at = resolve(in i, pc, p, 0, 8);
+    if rt(in i, p.p, 0) != 2 {
+        raise(4, pc, 6, code, 0, 0);
+    }
+    at
+}
+
+fn kwrite(inout i: I, r: u64, at: u64, v: u64) {
+    let m = add(rt(in i, r, 2), at);
+    write_n(inout i, m, 8, v);
+    mark_init(inout i, m, 8);
+    if (at & 7) == 0 {
+        i.spill.try_set(shr(m, 3), 0);
+    }
+}
+
+fn pack(cur: u64, end: u64) -> u64 {
+    (cur & low32()) | shl(end & low32(), 32)
+}
+
+fn s32(v: u64) -> i64 {
+    wrapping_i64(sext_const(v & low32(), 32))
+}
+
+// `call_kfunc`: the value of r0, or NONE in `p` and `v` when r0 is unset.
+fn call_kfunc(inout i: I, pc: u64, code: u64) -> Val eff [Fail[IErr]] {
+    let unset = Val {
+        v: none(),
+        p: plain()
+    };
+    if code == 4 {
+        let at = kslot(in i, pc, code);
+        let r = karg(in i, pc, 0).p;
+        kwrite(inout i, r, at, 582);
+        return unset;
+    }
+    if code == 5 {
+        kslot(in i, pc, code);
+        return unset;
+    }
+    if code == 6 {
+        let at = kslot(in i, pc, code);
+        let r = karg(in i, pc, 0).p;
+        let start = s32(karg(in i, pc, 1).v);
+        let end = s32(karg(in i, pc, 2).v);
+        let mut kst: u64 = 0;
+        let mut ret: u64 = 0;
+        if start > end {
+            ret = neg(22);
+        } else if wrapping_i64(sub(wrapping_u64(end), wrapping_u64(start))) > 8388608 {
+            ret = neg(7);
+        } else {
+            kst = pack(sub(wrapping_u64(start), 1), wrapping_u64(end));
+        }
+        kwrite(inout i, r, at, kst);
+        return scalar(ret & low32());
+    }
+    if code == 7 {
+        let at = kslot(in i, pc, code);
+        let r = karg(in i, pc, 0).p;
+        let w = read_n(in i, add(rt(in i, r, 2), at), 8);
+        let cur = s32(w);
+        let end = s32(shr(w, 32));
+        if wrapping_i64(add(wrapping_u64(cur), 1)) >= end {
+            kwrite(inout i, r, at, 0);
+            return scalar(0);
+        }
+        kwrite(inout i, r, at, pack(add(wrapping_u64(cur), 1), wrapping_u64(end)));
+        return Val {
+            v: add(rt(in i, r, 1), at),
+            p: r
+        };
+    }
+    if code == 8 {
+        let at = kslot(in i, pc, code);
+        let r = karg(in i, pc, 0).p;
+        kwrite(inout i, r, at, 0);
+        return unset;
+    }
+    unset
+}
+
+// ---------------------------------------------------------------------------
+// Helpers.
+
+fn ret_err(e: u64) -> Val {
+    scalar(neg(e))
+}
+
+fn map_elem(inout i: I, pc: u64, id: u64, a0: Val, a1: Val, a2: Val, a3: Val)
+    -> Val eff [Fail[IErr]] {
+    let m = map_of(in i, pc, a0);
+    let t = mword(in i, m, 0);
+    if t == 27 {
+        bad(pc, 8);
+    }
+    let ks = mword(in i, m, 1);
+    let key = read_mem(inout i, pc, a1, ks);
+    let slot = find(in i, m, in key);
+    let e = if slot == none() {
+        none()
+    } else {
+        sub(gw(in i.tab, slot), 2)
+    };
+    if id == 1 {
+        if e == none() {
+            return scalar(0);
+        }
+        let r = gw(in i.ent, add(mul(e, 4), 3));
+        return Val {
+            v: rt(in i, r, 1),
+            p: r
+        };
+    }
+    if id == 2 {
+        let vs = mword(in i, m, 2);
+        let val = read_mem(inout i, pc, a2, vs);
+        let exists = e != none();
+        let flags = a3.v;
+        if flags > 2 {
+            return ret_err(22);
+        }
+        if is_array_kind(t) {
+            if !exists {
+                return ret_err(7);
+            }
+            if flags == 1 {
+                return ret_err(17);
+            }
+        } else if flags == 1 && exists {
+            return ret_err(17);
+        } else if flags == 2 && !exists {
+            return ret_err(2);
+        }
+        if !exists && gw(in i.counts, m) >= mword(in i, m, 3) {
+            return ret_err(7);
+        }
+        if exists {
+            let r = gw(in i.ent, add(mul(e, 4), 3));
+            i.mem.try_copy_from(rt(in i, r, 2), in val.as_slice());
+            return scalar(0);
+        }
+        let r = alloc(inout i, 3, vs, true);
+        i.mem.try_copy_from(rt(in i, r, 2), in val.as_slice());
+        insert(inout i, m, in key, r);
+        return scalar(0);
+    }
+    if e != none() {
+        remove(inout i, m, slot);
+        return scalar(0);
+    }
+    ret_err(2)
+}
+
+fn take_held(inout i: I, r: u64) -> bool {
+    let n = i.held.len();
+    for k in 0..n {
+        if gw(in i.held, k) == r {
+            let mut rest: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](n);
+            for j in 0..n {
+                if j != k {
+                    rest.push(gw(in i.held, j));
+                }
+            }
+            i.held = rest;
+            return true;
+        }
+    }
+    false
+}
+
+fn call_helper(inout i: I, pc: u64, id: u64) -> Val eff [Fail[IErr]] {
+    let a0 = peek(in i, 1);
+    let a1 = peek(in i, 2);
+    let a2 = peek(in i, 3);
+    let a3 = peek(in i, 4);
+    if id == 1 || id == 2 || id == 3 {
+        return map_elem(inout i, pc, id, a0, a1, a2, a3);
+    }
+    if id == 5 {
+        return scalar(gw(in i.cfg, 1));
+    }
+    if id == 7 {
+        let mut x = i.prandom;
+        x = x ^ shr(x, 12);
+        x = x ^ shl(x, 25);
+        x = x ^ shr(x, 27);
+        i.prandom = x;
+        return scalar(shr(mul(x, 2685821657736338717), 32) & low32());
+    }
+    if id == 8 {
+        return scalar(gw(in i.cfg, 0));
+    }
+    if id == 44 {
+        let delta = sext_const(a1.v & low32(), 32);
+        if i.pkt == none() {
+            bad(pc, 9);
+        }
+        let len = rt(in i, i.pkt, 3);
+        let nw = add(i.data_off, delta);
+        if wrapping_i64(nw) < 0 || wrapping_i64(sub(len, nw)) < 14 {
+            return ret_err(22);
+        }
+        i.data_off = nw;
+        return scalar(0);
+    }
+    if id == 131 {
+        let m = map_of(in i, pc, a0);
+        let size = a1.v;
+        if mword(in i, m, 0) != 27 {
+            bad(pc, 10);
+        }
+        let res = reserve(inout i, m, size);
+        if res.v == none() {
+            return scalar(0);
+        }
+        let r = alloc(inout i, 4, size, true);
+        set_rt(inout i, r, 5, m);
+        set_rt(inout i, r, 6, res.p);
+        set_rt(inout i, r, 7, res.v);
+        i.held.push(r);
+        return Val {
+            v: rt(in i, r, 1),
+            p: r
+        };
+    }
+    if id == 132 || id == 133 {
+        let r = a0.p;
+        if r == none() {
+            bad(pc, 11);
+        }
+        let mut held = false;
+        for k in 0..i.held.len() {
+            if gw(in i.held, k) == r {
+                held = true;
+            }
+        }
+        if !held {
+            bad(pc, 12);
+        }
+        if a0.v != rt(in i, r, 1) {
+            bad(pc, 13);
+        }
+        take_held(inout i, r);
+        if rt(in i, r, 0) != 4 {
+            bad(pc, 11);
+        }
+        let m = rt(in i, r, 5);
+        let off = rt(in i, r, 2);
+        let mut payload: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](rt(in i, r, 3));
+        payload.extend(in i.mem[off..add(off, rt(in i, r, 3))]);
+        let pay_at = rt(in i, r, 6);
+        let hdr_at = rt(in i, r, 7);
+        ring_log(inout i, m, pay_at, in payload);
+        commit(inout i, m, hdr_at, id == 133);
+        set_rt(inout i, r, 4, 0);
+        return scalar(0);
+    }
+    if id == 130 {
+        let m = map_of(in i, pc, a0);
+        let size = a2.v;
+        let bytes = read_mem(inout i, pc, a1, size);
+        if mword(in i, m, 0) != 27 {
+            bad(pc, 14);
+        }
+        let res = reserve(inout i, m, size);
+        if res.v == none() {
+            return ret_err(11);
+        }
+        ring_log(inout i, m, res.p, in bytes);
+        commit(inout i, m, res.v, false);
+        return scalar(0);
+    }
+    if id == 84 {
+        let size = a2.v;
+        let tuple = read_mem(inout i, pc, a1, size);
+        if size != 12 {
+            return scalar(0);
+        }
+        let daddr = match tuple.try_read_u32_le(4) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        let dport = match tuple.try_read_u16_le(10) {
+            Option::Some(v) => widen_u64(v),
+            Option::None => 0,
+        };
+        let ns = gw(in i.cfg, 11);
+        let mut hit = false;
+        for k in 0..ns {
+            let b = add(12, mul(k, 2));
+            if gw(in i.cfg, b) == daddr && gw(in i.cfg, add(b, 1)) == dport {
+                hit = true;
+            }
+        }
+        if !hit {
+            return scalar(0);
+        }
+        let r = alloc(inout i, 5, 8, true);
+        i.held.push(r);
+        return Val {
+            v: rt(in i, r, 1),
+            p: r
+        };
+    }
+    if id == 86 {
+        let r = a0.p;
+        if r == none() {
+            bad(pc, 15);
+        }
+        if !take_held(inout i, r) {
+            bad(pc, 16);
+        }
+        set_rt(inout i, r, 4, 0);
+        return scalar(0);
+    }
+    if id == 14 {
+        return scalar(shl(gw(in i.cfg, 5), 32) | gw(in i.cfg, 4));
+    }
+    if id == 15 {
+        return scalar(shl(gw(in i.cfg, 7), 32) | gw(in i.cfg, 6));
+    }
+    if id == 16 {
+        let size = a1.v;
+        if size == 0 {
+            bad(pc, 17);
+        }
+        let at = resolve(in i, pc, a0, 0, size);
+        let mut comm: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](16);
+        let lo = gw(in i.cfg, 8);
+        let hi = gw(in i.cfg, 9);
+        for k in w64(0)..w64(16) {
+            let w = if k < 8 {
+                lo
+            } else {
+                hi
+            };
+            comm.push(wrapping_u8(shr(w, mul(k & 7, 8))));
+        }
+        let mut name_len: u64 = 16;
+        for k in w64(0)..w64(16) {
+            if name_len == 16 && gbyte(in comm, k) == 0 {
+                name_len = k;
+            }
+        }
+        let keep = if name_len < sub(size, 1) {
+            name_len
+        } else {
+            sub(size, 1)
+        };
+        let r = a0.p;
+        let kind = rt(in i, r, 0);
+        if !(kind == 2 || kind == 3 || kind == 4) {
+            bad(pc, 18);
+        }
+        let m = add(rt(in i, r, 2), at);
+        for k in 0..size {
+            let b = if k < keep {
+                gbyte(in comm, k)
+            } else {
+                0
+            };
+            i.mem.try_set(add(m, k), wrapping_u8(b));
+        }
+        mark_init(inout i, m, size);
+        let first = shr(sub(m, at & 7), 3);
+        let last = shr(add(add(m, size), 7), 3);
+        for w in first..last {
+            i.spill.try_set(w, 0);
+        }
+        return scalar(0);
+    }
+    bad(pc, 19)
+}
+
+// ---------------------------------------------------------------------------
+// Code.
+
+fn decode_code(e: DecodeError) -> u64 {
+    match e {
+        DecodeError::TruncatedProgram {
+            len
+        }
+        => shl(widen_u64(len), 12),
+        DecodeError::BadRegister {
+            pc,
+            reg
+        }
+        => 1 | shl(widen_u64(reg), 4) | shl(widen_u64(pc), 12),
+        DecodeError::InvalidOpcode {
+            pc,
+            code
+        }
+        => 2 | shl(widen_u64(code), 4) | shl(widen_u64(pc), 12),
+        DecodeError::ReservedFieldSet {
+            pc,
+            field
+        }
+        => 3 | shl(widen_u64(field), 4) | shl(widen_u64(pc), 12),
+        DecodeError::BrokenLdImm64 {
+            pc
+        }
+        => 4 | shl(widen_u64(pc), 12),
+    }
+}
+
+// Decode `slots` into `i.insns`/`i.start` (one entry per slot); NONE or
+// the decode error code.
+fn load_code(inout i: I, in slots: Slice[RawInsn]) -> u64 {
+    i.insns.clear();
+    i.start.clear();
+    i.insns.reserve(add(slots.len(), 1));
+    i.start.reserve(add(slots.len(), 1));
+    handle Fail[DecodeError] in {
+        decode_slots(in slots, inout i.insns, inout i.start);
+        none()
+    } with {
+        return x => x,
+        raise(e, k) => decode_code(e),
+    }
+}
+
+// The installed target at (`m`, `index`): its number, or NONE.
+fn find_tail(in tails: Slice[u64], m: u64, index: u64) -> u64 {
+    let n = sw(in tails, 0);
+    for t in 0..n {
+        let b = add(1, mul(t, 9));
+        if sw(in tails, b) == m && sw(in tails, add(b, 1)) == index {
+            return t;
+        }
+    }
+    none()
+}
+
+fn enter_tail(
+    inout i: I,
+    in tails: Slice[u64],
+    in tslots: Slice[RawInsn],
+    in taux: Slice[u64],
+    t: u64
+) {
+    let b = add(1, mul(t, 9));
+    i.cptype = sw(in tails, add(b, 2));
+    let so = sw(in tails, add(b, 3));
+    let sn = sw(in tails, add(b, 4));
+    load_code(inout i, in tslots[so..add(so, sn)]);
+    let mo = sw(in tails, add(b, 5));
+    let mn = sw(in tails, add(b, 6));
+    i.cmaps.clear();
+    i.cmaps.extend(in taux[mo..add(mo, mn)]);
+    let ko = sw(in tails, add(b, 7));
+    let kn = sw(in tails, add(b, 8));
+    i.kf.clear();
+    i.kf.extend(in taux[ko..add(ko, mul(kn, 2))]);
+}
+
+fn kfunc_code(in i: I, pc: u64) -> u64 {
+    let n = shr(i.kf.len(), 1);
+    for k in 0..n {
+        if gw(in i.kf, mul(k, 2)) == pc {
+            return gw(in i.kf, add(mul(k, 2), 1));
+        }
+    }
+    9
+}
+
+// ---------------------------------------------------------------------------
+// Frames.
+
+fn push_frame(inout i: I, ret_pc: u64, lp: bool, entry: u64, n: u64, arg: Val) {
+    for r in w64(6)..w64(10) {
+        i.frames.push(gw(in i.rv, r));
+    }
+    for r in w64(6)..w64(10) {
+        i.frames.push(gw(in i.rp, r));
+    }
+    i.frames.push(gw(in i.rv, 10));
+    i.frames.push(gw(in i.rp, 10));
+    i.frames.push(ret_pc);
+    i
+        .frames
+        .push(
+        if lp {
+            1
+        } else {
+            0
+        }
+    );
+    i.frames.push(entry);
+    i.frames.push(0);
+    i.frames.push(n);
+    i.frames.push(arg.v);
+    i.frames.push(arg.p);
+}
+
+fn nframes(in i: I) -> u64 {
+    i.frames.len() / 17
+}
+
+fn fw(in i: I, f: u64) -> u64 {
+    gw(in i.frames, add(sub(i.frames.len(), 17), f))
+}
+
+// Restore r6..r10 from the top frame.
+fn restore(inout i: I) {
+    for k in w64(0)..w64(4) {
+        i.rv.try_set(add(6, k), fw(in i, k));
+        i.rp.try_set(add(6, k), fw(in i, add(4, k)));
+    }
+    i.rv.try_set(10, fw(in i, 8));
+    i.rp.try_set(10, fw(in i, 9));
+}
+
+fn pop_frame(inout i: I) {
+    i.frames.truncate(sub(i.frames.len(), 17));
+}
+
+// ---------------------------------------------------------------------------
+// The run.
+
+fn exec(
+    inout i: I,
+    ctx_ptr: Val,
+    in tails: Slice[u64],
+    in tslots: Slice[RawInsn],
+    in taux: Slice[u64]
+) -> u64 eff [Fail[IErr]] {
+    let mut pc: u64 = 0;
+    loop {
+        i.count = add(i.count, 1);
+        if i.count > i.budget {
+            raise(7, 0, 0, 0, 0, 0);
+        }
+        if !gb(in i.start, pc) {
+            raise(9, pc, 0, 0, 0, 0);
+        }
+        let ins = match i.insns.try_get(pc) {
+            Option::Some(x) => x,
+            Option::None => Insn::Exit,
+        };
+        let next = add(pc, slots_of(ins));
+        let mut to = next;
+        match ins {
+            Insn::Alu {
+                wide,
+                op,
+                dst,
+                src
+            }
+            => {
+                let b = match src {
+                    Operand::Imm(c) => scalar(
+                        if wide {
+                            imm_bits(c)
+                        } else {
+                            imm_bits(c) & low32()
+                        }
+                    ),
+                    Operand::Reg(r) => get(in i, pc, reg(r)),
+                };
+                let is_mov = match op {
+                    AluOp::Mov => true,
+                    AluOp::MovSx(w) => true,
+                    _ => false,
+                };
+                let a = if is_mov {
+                    scalar(0)
+                } else {
+                    get(in i, pc, reg(dst))
+                };
+                let v = alu_concrete(op, wide, a.v, b.v);
+                let mut p = none();
+                if wide {
+                    match op {
+                        AluOp::Mov => {
+                            p = b.p;
+                        },
+                        AluOp::Add => {
+                            if a.p != none() && b.p == none() {
+                                p = a.p;
+                            } else if a.p == none() && b.p != none() {
+                                p = b.p;
+                            }
+                        },
+                        AluOp::Sub => {
+                            if a.p != none() && b.p == none() {
+                                p = a.p;
+                            }
+                        },
+                        _ => {},
+                    }
+                }
+                set(
+                    inout i,
+                    reg(dst),
+                    Val {
+                        v: v,
+                        p: p
+                    }
+                );
+            },
+            Insn::Endian {
+                kind,
+                bits,
+                dst
+            }
+            => {
+                let a = get(in i, pc, reg(dst));
+                set(inout i, reg(dst), scalar(endian(kind, bits, a.v)));
+            },
+            Insn::Ja {
+                off
+            }
+            => {
+                to = jump(pc, imm_bits(off));
+            },
+            Insn::Jcond {
+                wide,
+                op,
+                dst,
+                src,
+                off
+            }
+            => {
+                let a = get(in i, pc, reg(dst));
+                let b = match src {
+                    Operand::Imm(c) => if wide {
+                        imm_bits(c)
+                    } else {
+                        imm_bits(c) & low32()
+                    },
+                    Operand::Reg(r) => get(in i, pc, reg(r)).v,
+                };
+                if cmp_concrete(op, wide, a.v, b) {
+                    to = jump(pc, off16(off));
+                }
+            },
+            Insn::LdImm64 {
+                dst,
+                imm
+            }
+            => {
+                match imm {
+                    Imm64::Value(v) => set(inout i, reg(dst), scalar(v)),
+                    Imm64::MapFd(m) => {
+                        let mi = imm_bits(m);
+                        if mi >= i.cmaps.len() {
+                            raise(4, pc, 1, mi, 0, 0);
+                        }
+                        let mv = gw(in i.cmaps, mi);
+                        set(inout i, reg(dst), scalar(map_tag() | mv));
+                    },
+                    Imm64::Pseudo {
+                        src,
+                        imm_lo,
+                        imm_hi
+                    }
+                    => {
+                        if src != 4 {
+                            raise(5, pc, 0, 0, 0, 0);
+                        }
+                        set(
+                            inout i,
+                            reg(dst),
+                            scalar(func_tag() | (jump(pc, imm_bits(imm_lo)) & low32()))
+                        );
+                    },
+                }
+            },
+            Insn::Ldx {
+                size,
+                dst,
+                src,
+                off,
+                sign_extend
+            }
+            => {
+                let p = get(in i, pc, reg(src));
+                let n = size_bytes(size);
+                let at = resolve(in i, pc, p, off16(off), n);
+                let mut v = Val {
+                    v: 0,
+                    p: plain()
+                };
+                if rt(in i, p.p, 0) == 0 {
+                    v = ctx_read(in i, pc, at, n);
+                }
+                if v.p == plain() {
+                    let m = add(rt(in i, p.p, 2), at);
+                    for k in 0..n {
+                        if !is_init(in i, add(m, k)) {
+                            raise(3, pc, 0, sub(at, 512), 0, 0);
+                        }
+                    }
+                    let mut prov = none();
+                    if n == 8 && (at & 7) == 0 {
+                        let s = gw(in i.spill, shr(m, 3));
+                        if s != 0 {
+                            prov = sub(s, 1);
+                        }
+                    }
+                    v = Val {
+                        v: read_n(in i, m, n),
+                        p: prov
+                    };
+                }
+                if sign_extend {
+                    v = scalar(sext_const(v.v, mul(n, 8)));
+                }
+                set(inout i, reg(dst), v);
+            },
+            Insn::St {
+                size,
+                dst,
+                off,
+                imm
+            }
+            => {
+                let p = get(in i, pc, reg(dst));
+                store(inout i, pc, p, off16(off), size_bytes(size), scalar(imm_bits(imm)));
+            },
+            Insn::Stx {
+                size,
+                dst,
+                src,
+                off
+            }
+            => {
+                let p = get(in i, pc, reg(dst));
+                let v = get(in i, pc, reg(src));
+                store(inout i, pc, p, off16(off), size_bytes(size), v);
+            },
+            Insn::Atomic {
+                size,
+                op,
+                dst,
+                src,
+                off
+            }
+            => {
+                let p = get(in i, pc, reg(dst));
+                let s = get(in i, pc, reg(src));
+                let n = size_bytes(size);
+                let at = resolve(in i, pc, p, off16(off), n);
+                let kind = rt(in i, p.p, 0);
+                if kind == 0 || kind == 1 {
+                    access(pc, 9, 0, 0, 0);
+                }
+                let m = add(rt(in i, p.p, 2), at);
+                for k in 0..n {
+                    if !is_init(in i, add(m, k)) {
+                        raise(3, pc, 0, at, 0, 0);
+                    }
+                }
+                let old = read_n(in i, m, n);
+                let sv = if n == 4 {
+                    s.v & low32()
+                } else {
+                    s.v
+                };
+                let mut fetch_to = none();
+                let mut nv: u64 = 0;
+                match op {
+                    AtomicOp::Add {
+                        fetch
+                    }
+                    => {
+                        nv = add(old, sv);
+                        if fetch {
+                            fetch_to = reg(src);
+                        }
+                    },
+                    AtomicOp::Or {
+                        fetch
+                    }
+                    => {
+                        nv = old | sv;
+                        if fetch {
+                            fetch_to = reg(src);
+                        }
+                    },
+                    AtomicOp::And {
+                        fetch
+                    }
+                    => {
+                        nv = old & sv;
+                        if fetch {
+                            fetch_to = reg(src);
+                        }
+                    },
+                    AtomicOp::Xor {
+                        fetch
+                    }
+                    => {
+                        nv = old ^ sv;
+                        if fetch {
+                            fetch_to = reg(src);
+                        }
+                    },
+                    AtomicOp::Xchg => {
+                        nv = sv;
+                        fetch_to = reg(src);
+                    },
+                    AtomicOp::CmpXchg => {
+                        let r0 = get(in i, pc, 0);
+                        let c = if n == 4 {
+                            r0.v & low32()
+                        } else {
+                            r0.v
+                        };
+                        nv = if c == old {
+                            sv
+                        } else {
+                            old
+                        };
+                        fetch_to = 0;
+                    },
+                }
+                if n == 4 {
+                    nv = nv & low32();
+                }
+                write_n(inout i, m, n, nv);
+                i.spill.try_set(shr(m, 3), 0);
+                if fetch_to != none() {
+                    set(inout i, fetch_to, scalar(old));
+                }
+            },
+            Insn::Call(target) => {
+                match target {
+                    CallTarget::Local(off) => {
+                        if add(nframes(in i), 1) >= 8 {
+                            raise(8, pc, 0, 0, 0, 0);
+                        }
+                        push_frame(inout i, next, false, 0, 0, scalar(0));
+                        let st = new_stack(inout i);
+                        i.rv.try_set(10, st.v);
+                        i.rp.try_set(10, st.p);
+                        uninit(inout i, 6, 9);
+                        i.ri.try_set(0, false);
+                        to = jump(pc, imm_bits(off));
+                    },
+                    CallTarget::Helper(id) => {
+                        let hid = imm_bits(id);
+                        if hid == 181 {
+                            let n = get(in i, pc, 1).v;
+                            let cb = get(in i, pc, 2);
+                            let arg = get(in i, pc, 3);
+                            if cb.p != none() || (cb.v & high32()) != func_tag() {
+                                bad(pc, 2);
+                            }
+                            if n > 8388608 {
+                                set(inout i, 0, scalar(neg(7)));
+                                uninit(inout i, 1, 5);
+                            } else if n == 0 {
+                                set(inout i, 0, scalar(0));
+                                uninit(inout i, 1, 5);
+                            } else {
+                                if add(nframes(in i), 1) >= 8 {
+                                    raise(8, pc, 0, 0, 0, 0);
+                                }
+                                let entry = cb.v & low32();
+                                push_frame(inout i, next, true, entry, n, arg);
+                                let st = new_stack(inout i);
+                                i.rv.try_set(10, st.v);
+                                i.rp.try_set(10, st.p);
+                                init_all(inout i, false);
+                                i.ri.try_set(10, true);
+                                set(inout i, 1, scalar(0));
+                                set(inout i, 2, arg);
+                                to = entry;
+                            }
+                        } else if hid == 12 {
+                            let m = map_of(in i, pc, get(in i, pc, 2));
+                            let index = get(in i, pc, 3).v & low32();
+                            if mword(in i, m, 0) != 3 {
+                                bad(pc, 3);
+                            }
+                            uninit(inout i, 0, 5);
+                            let t = find_tail(in tails, m, index);
+                            if index >= mword(in i, m, 3) || i.tail_calls >= 33 {
+                                to = next;
+                            } else {
+                                i.tail_calls = add(i.tail_calls, 1);
+                                if t != none() {
+                                    if nframes(in i) != 0 {
+                                        bad(pc, 4);
+                                    }
+                                    if i.held.len() != 0 {
+                                        raise(6, pc, 0, i.held.len(), 0, 0);
+                                    }
+                                    let fp = peek(in i, 10);
+                                    kill(inout i, fp);
+                                    i.tail_taken = add(i.tail_taken, 1);
+                                    enter_tail(inout i, in tails, in tslots, in taux, t);
+                                    init_all(inout i, false);
+                                    set(inout i, 1, ctx_ptr);
+                                    let st = new_stack(inout i);
+                                    i.rv.try_set(10, st.v);
+                                    i.rp.try_set(10, st.p);
+                                    i.ri.try_set(10, true);
+                                    to = 0;
+                                }
+                            }
+                        } else {
+                            if !allowed(ptype_of(i.cptype), id) {
+                                raise(4, pc, 5, hid, i.cptype, 0);
+                            }
+                            let r = call_helper(inout i, pc, hid);
+                            set(inout i, 0, r);
+                            uninit(inout i, 1, 5);
+                        }
+                    },
+                    CallTarget::Kfunc(k) => {
+                        let code = kfunc_code(in i, pc);
+                        if code >= 9 {
+                            raise(5, pc, 0, 0, 0, 0);
+                        }
+                        let r0 = call_kfunc(inout i, pc, code);
+                        uninit(inout i, 0, 5);
+                        if r0.p != plain() {
+                            set(inout i, 0, r0);
+                        }
+                    },
+                }
+            },
+            Insn::LdLegacy {
+                size,
+                indirect,
+                src,
+                imm
+            }
+            => {
+                raise(5, pc, 0, 0, 0, 0);
+            },
+            Insn::Exit => {
+                let r0 = get(in i, pc, 0);
+                if nframes(in i) == 0 {
+                    if i.held.len() != 0 {
+                        raise(6, pc, 0, i.held.len(), 0, 0);
+                    }
+                    return r0.v;
+                }
+                let fp = peek(in i, 10);
+                kill(inout i, fp);
+                if fw(in i, 11) == 1 {
+                    let li = fw(in i, 13);
+                    let ln = fw(in i, 14);
+                    if r0.v != 0 || add(li, 1) == ln {
+                        restore(inout i);
+                        let ret_pc = fw(in i, 10);
+                        pop_frame(inout i);
+                        init_all(inout i, false);
+                        for r in w64(6)..w64(11) {
+                            i.ri.try_set(r, true);
+                        }
+                        let done = if r0.v != 0 {
+                            add(li, 1)
+                        } else {
+                            ln
+                        };
+                        set(inout i, 0, scalar(done));
+                        to = ret_pc;
+                    } else {
+                        let k = add(li, 1);
+                        i.frames.try_set(add(sub(i.frames.len(), 17), 13), k);
+                        let entry = fw(in i, 12);
+                        let argv = Val {
+                            v: fw(in i, 15),
+                            p: fw(in i, 16)
+                        };
+                        let st = new_stack(inout i);
+                        i.rv.try_set(10, st.v);
+                        i.rp.try_set(10, st.p);
+                        init_all(inout i, false);
+                        i.ri.try_set(10, true);
+                        set(inout i, 1, scalar(k));
+                        set(inout i, 2, argv);
+                        to = entry;
+                    }
+                } else {
+                    restore(inout i);
+                    let ret_pc = fw(in i, 10);
+                    pop_frame(inout i);
+                    for r in w64(6)..w64(10) {
+                        i.ri.try_set(r, true);
+                    }
+                    uninit(inout i, 1, 5);
+                    set(inout i, 0, r0);
+                    to = ret_pc;
+                }
+            },
+        }
+        pc = to;
+    }
+    0
+}
+
+// ---------------------------------------------------------------------------
+// State in and out.
+
+fn blank(in maps: Slice[u64], in cfg: Slice[u64], ptype: u64) -> I {
+    let mut zeros: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](4096);
+    let mut ones: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](4096);
+    let mut z64: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](64);
+    let mut o64: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](64);
+    let mut w64s: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](64);
+    for k in w64(0)..w64(64) {
+        z64.push(0);
+        o64.push(1);
+        w64s.push(0);
+    }
+    // Bulk 64-element extends instead of 8,704 pushes per run.
+    for k in w64(0)..w64(64) {
+        zeros.extend(in z64[0..64]);
+        ones.extend(in o64[0..64]);
+    }
+    let mut zwords: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](512);
+    for k in w64(0)..w64(8) {
+        zwords.extend(in w64s[0..64]);
+    }
+    let mut mw: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    mw.extend(in maps);
+    let mut cw: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    cw.extend(in cfg);
+    let mut rv: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut rp: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut ri: ChunkSeq[bool] = ChunkSeq::new[bool]();
+    for r in w64(0)..w64(11) {
+        rv.push(0);
+        rp.push(none());
+        ri.push(false);
+    }
+    let nmaps = maps.len() / 7;
+    let mut counts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for m in 0..nmaps {
+        counts.push(0);
+    }
+    I {
+        insns: ChunkSeq::new[Insn](),
+        start: ChunkSeq::new[bool](),
+        kf: ChunkSeq::new[u64](),
+        cmaps: ChunkSeq::new[u64](),
+        cptype: ptype,
+        ptype: ptype,
+        rt: ChunkSeq::new[u64](),
+        mem: ChunkSeq::new[u8](),
+        ini: ChunkSeq::new[u8](),
+        spill: ChunkSeq::new[u64](),
+        pbytes: 0,
+        np: 0,
+        ptrans: ChunkSeq::new[u64](),
+        next_base: 268435456,
+        pkt: none(),
+        ctx: none(),
+        data_off: 256,
+        maps: mw,
+        nmaps: nmaps,
+        counts: counts,
+        ent: ChunkSeq::new[u64](),
+        keys: ChunkSeq::new[u8](),
+        tab: ChunkSeq::new[u64](),
+        used: 0,
+        changed: false,
+        rlog: ChunkSeq::new[u64](),
+        rbytes: ChunkSeq::new[u8](),
+        held: ChunkSeq::new[u64](),
+        prandom: sw(in cfg, 2),
+        budget: sw(in cfg, 3),
+        cfg: cw,
+        count: 0,
+        tail_calls: 0,
+        tail_taken: 0,
+        rv: rv,
+        rp: rp,
+        ri: ri,
+        frames: ChunkSeq::new[u64](),
+        zeros: zeros,
+        ones: ones,
+        zwords: zwords
+    }
+}
+
+fn push_dead(inout i: I) {
+    i.rt.push(6);
+    for k in w64(0)..w64(7) {
+        i.rt.push(0);
+    }
+}
+
+// Load `st`, `keys`, `mem` and `spill` (see the module header).
+fn load_state(
+    inout i: I,
+    in st: Slice[u64],
+    in keys: Slice[u8],
+    in mem: Slice[u8],
+    in spill: Slice[u64]
+) {
+    i.next_base = sw(in st, 0);
+    let nreg = sw(in st, 1);
+    let nent = sw(in st, 2);
+    let tabsize = sw(in st, 3);
+    let nmaps = sw(in st, 4);
+    for m in 0..nmaps {
+        i.counts.try_set(m, sw(in st, add(5, m)));
+    }
+    let rb = add(5, nmaps);
+    // One allocation each, with room for this run's packet, ctx and stack.
+    i.rt.reserve(mul(add(nreg, 8), 8));
+    i.mem.reserve(add(mem.len(), 8192));
+    i.ini.reserve(8192);
+    i.spill.reserve(add(spill.len(), 1024));
+    i.keys.reserve(keys.len());
+    for r in 0..nreg {
+        let b = add(rb, mul(r, 3));
+        i
+            .rt
+            .push(
+            if r == 0 {
+                6
+            } else {
+                3
+            }
+        );
+        i.rt.push(sw(in st, b));
+        i.rt.push(sw(in st, add(b, 1)));
+        i.rt.push(sw(in st, add(b, 2)));
+        i
+            .rt
+            .push(
+            if r == 0 {
+                0
+            } else {
+                1
+            }
+        );
+        i.rt.push(0);
+        i.rt.push(0);
+        i.rt.push(0);
+    }
+    let eb = add(rb, mul(nreg, 3));
+    i.ent.extend(in st[eb..add(eb, mul(nent, 4))]);
+    let tb = add(eb, mul(nent, 4));
+    i.tab.extend(in st[tb..add(tb, tabsize)]);
+    let mut used: u64 = 0;
+    for k in 0..tabsize {
+        if sw(in st, add(tb, k)) != 0 {
+            used = add(used, 1);
+        }
+    }
+    i.used = used;
+    i.keys.extend(in keys);
+    i.mem.extend(in mem);
+    i.spill.extend(in spill);
+    i.pbytes = mem.len();
+    i.np = nreg;
+}
+
+// Drop every region but the map values still in a map, renumber those from
+// 1, and write the persistent words.
+fn save(inout i: I) -> ChunkSeq[u64] {
+    let mut regions: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](
+        add(mul(shr(i.rt.len(), 3), 3), 3)
+    );
+    if i.changed {
+        let nold = shr(i.rt.len(), 3);
+        let mut ids: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](nold);
+        for r in 0..nold {
+            ids.push(none());
+        }
+        regions.push(0);
+        regions.push(0);
+        regions.push(0);
+        let mut mem: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](i.pbytes);
+        let mut spill: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](shr(i.pbytes, 3));
+        let mut ent: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](i.ent.len());
+        let mut keys: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](i.keys.len());
+        let n = shr(i.ent.len(), 2);
+        let mut nid: u64 = 1;
+        for e in 0..n {
+            let b = mul(e, 4);
+            let r = gw(in i.ent, add(b, 3));
+            if r != none() {
+                ids.try_set(r, nid);
+                let off = rt(in i, r, 2);
+                let pl = pad8(rt(in i, r, 3));
+                let noff = mem.len();
+                mem.extend(in i.mem[off..add(off, pl)]);
+                spill.extend(in i.spill[shr(off, 3)..shr(add(off, pl), 3)]);
+                regions.push(rt(in i, r, 1));
+                regions.push(noff);
+                regions.push(rt(in i, r, 3));
+                let ko = gw(in i.ent, add(b, 1));
+                let kl = gw(in i.ent, add(b, 2));
+                ent.push(gw(in i.ent, b));
+                ent.push(keys.len());
+                ent.push(kl);
+                ent.push(nid);
+                keys.extend(in i.keys[ko..add(ko, kl)]);
+                nid = add(nid, 1);
+            }
+        }
+        for k in 0..spill.len() {
+            let w = gw(in spill, k);
+            if w != 0 {
+                let t = gw(in ids, sub(w, 1));
+                spill
+                    .try_set(
+                    k,
+                    if t == none() {
+                        1
+                    } else {
+                        add(t, 1)
+                    }
+                );
+            }
+        }
+        i.mem = mem;
+        i.spill = spill;
+        i.ent = ent;
+        i.keys = keys;
+        rebuild(inout i, sub(nid, 1));
+    } else {
+        i.mem.truncate(i.pbytes);
+        i.spill.truncate(shr(i.pbytes, 3));
+        for k in 0..i.ptrans.len() {
+            let idx = gw(in i.ptrans, k);
+            if gw(in i.spill, idx) > i.np {
+                i.spill.try_set(idx, 1);
+            }
+        }
+        for r in 0..i.np {
+            regions.push(rt(in i, r, 1));
+            regions.push(rt(in i, r, 2));
+            regions.push(rt(in i, r, 3));
+        }
+    }
+    let mut st: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](
+        add(add(add(5, i.counts.len()), regions.len()), add(i.ent.len(), i.tab.len()))
+    );
+    st.push(i.next_base);
+    st.push(regions.len() / 3);
+    st.push(shr(i.ent.len(), 2));
+    st.push(i.tab.len());
+    st.push(i.nmaps);
+    st.extend(in i.counts.as_slice());
+    st.extend(in regions.as_slice());
+    st.extend(in i.ent.as_slice());
+    st.extend(in i.tab.as_slice());
+    st
+}
+
+fn take_out(inout i: I, sink words: ChunkSeq[u64], sink bytes: ChunkSeq[u8]) -> RunOut {
+    let st = save(inout i);
+    let mut keys: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut mem: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let mut spill: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    swap(inout keys, inout i.keys);
+    swap(inout mem, inout i.mem);
+    swap(inout spill, inout i.spill);
+    RunOut {
+        words: words,
+        bytes: bytes,
+        st: st,
+        keys: keys,
+        mem: mem,
+        spill: spill
+    }
+}
+
+// `Env::new`: the state of an environment for maps `maps` (7 words each,
+// as `run_program` takes them), with every array value allocated.
+pub fn new_env(in maps: Slice[u64]) -> RunOut {
+    let cfg: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut i = blank(in maps, in cfg.as_slice(), 0);
+    push_dead(inout i);
+    i.changed = true;
+    for m in 0..i.nmaps {
+        let t = mword(in i, m, 0);
+        if is_array_kind(t) && t != 3 {
+            let vs = mword(in i, m, 2);
+            for k in 0..mword(in i, m, 3) {
+                let r = alloc(inout i, 3, vs, true);
+                let key = le32_bytes(k);
+                insert(inout i, m, in key, r);
+            }
+        }
+    }
+    take_out(inout i, ChunkSeq::new[u64](), ChunkSeq::new[u8]())
+}
+
+fn short(status: u64, a: u64, b: u64, c: u64) -> RunOut {
+    let mut w: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    w.push(status);
+    w.push(a);
+    w.push(b);
+    w.push(c);
+    RunOut {
+        words: w,
+        bytes: ChunkSeq::new[u8](),
+        st: ChunkSeq::new[u64](),
+        keys: ChunkSeq::new[u8](),
+        mem: ChunkSeq::new[u8](),
+        spill: ChunkSeq::new[u64]()
+    }
+}
+
+// `run`: execute `slots` once. `input` is 0 XDP, 1 tc, 2 tracepoint, 3
+// kprobe; `pkt` the packet and `ctxb` the context bytes (the tc
+// `__sk_buff`, the tracepoint record or `pt_regs`). `cfg` holds cpu,
+// now_ns, prandom state, budget, pid, tgid, uid, gid, the comm bytes as two
+// words, pt_regs size and the sockets (count, then address and port
+// words). `tails` holds the count and 9 words per installed target (map,
+// index, program type, slot offset and count in `tslots`, map offset and
+// count and kfunc offset and pair count in `taux`).
+//
+// The result words: status (0 returned, 1 fault, 2 decode error, 3 bad
+// input), the fault (code, pc, detail, 3 operands), r0, instructions, tail
+// calls, packet and context lengths in the bytes, the prandom state, the
+// producer of every map and the ring log (count, then map, position,
+// length and offset in the bytes after the packet and context). A decode error or a
+// bad input leaves the state as it was and returns no state.
+pub fn run_program(
+    in slots: Slice[RawInsn],
+    in kf: Slice[u64],
+    ptype: u64,
+    input: u64,
+    in pkt: Slice[u8],
+    in ctxb: Slice[u8],
+    in cfg: Slice[u64],
+    in maps: Slice[u64],
+    nmain: u64,
+    in tails: Slice[u64],
+    in tslots: Slice[RawInsn],
+    in taux: Slice[u64],
+    in st: Slice[u64],
+    in keys: Slice[u8],
+    in mem: Slice[u8],
+    in spill: Slice[u64]
+) -> RunOut {
+    let mut i = blank(in maps, in cfg, ptype);
+    let derr = load_code(inout i, in slots);
+    if derr != none() {
+        return short(2, derr & 15, shr(derr, 12), shr(derr, 4) & 255);
+    }
+    if input == 1 && pkt.len() > low32() {
+        return short(3, 3, pkt.len(), 0);
+    }
+    if input == 2 && ctxb.len() > 2048 {
+        return short(3, 1, ctxb.len(), 0);
+    }
+    let pt = sw(in cfg, 10);
+    if input == 3 && (pt == 0 || ctxb.len() != pt) {
+        return short(3, 2, ctxb.len(), 0);
+    }
+    load_state(inout i, in st, in keys, in mem, in spill);
+    i.kf.extend(in kf);
+    for m in 0..nmain {
+        i.cmaps.push(m);
+    }
+    if input <= 1 {
+        let r = alloc(inout i, 1, add(256, pkt.len()), true);
+        i.mem.try_copy_from(add(rt(in i, r, 2), 256), in pkt);
+        i.pkt = r;
+    }
+    let clen = if input == 0 {
+        24
+    } else if input == 2 {
+        2048
+    } else {
+        ctxb.len()
+    };
+    let c = alloc(inout i, 0, clen, true);
+    if input != 0 {
+        i.mem.try_copy_from(rt(in i, c, 2), in ctxb);
+    }
+    i.ctx = c;
+    let ctx_ptr = Val {
+        v: rt(in i, c, 1),
+        p: c
+    };
+    set(inout i, 1, ctx_ptr);
+    let stk = new_stack(inout i);
+    set(inout i, 10, stk);
+    let res: IErr = handle Fail[IErr] in {
+        let r0 = exec(inout i, ctx_ptr, in tails, in tslots, in taux);
+        IErr {
+            code: 0,
+            pc: 0,
+            d: 0,
+            a: r0,
+            b: 0,
+            c: 0
+        }
+    } with {
+        return x => x,
+        raise(e, k) => e,
+    };
+    let mut w: ChunkSeq[u64] = ChunkSeq::with_capacity[u64](add(add(16, i.nmaps), i.rlog.len()));
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](i.rbytes.len());
+    w
+        .push(
+        if res.code == 0 {
+            0
+        } else {
+            1
+        }
+    );
+    w.push(res.code);
+    w.push(res.pc);
+    w.push(res.d);
+    w.push(res.a);
+    w.push(res.b);
+    w.push(res.c);
+    w.push(res.a);
+    w.push(i.count);
+    w.push(i.tail_taken);
+    if res.code == 0 {
+        let plen = if i.pkt == none() {
+            0
+        } else {
+            sub(rt(in i, i.pkt, 3), i.data_off)
+        };
+        if plen != 0 {
+            let po = add(rt(in i, i.pkt, 2), i.data_off);
+            bytes.extend(in i.mem[po..add(po, plen)]);
+        }
+        let co = rt(in i, c, 2);
+        bytes.extend(in i.mem[co..add(co, clen)]);
+        w.push(plen);
+        w.push(clen);
+    } else {
+        w.push(0);
+        w.push(0);
+    }
+    w.push(i.prandom);
+    let base = bytes.len();
+    bytes.extend(in i.rbytes.as_slice());
+    w.push(i.nmaps);
+    for m in 0..i.nmaps {
+        w.push(mword(in i, m, 5));
+    }
+    let nlog = shr(i.rlog.len(), 2);
+    w.push(nlog);
+    for k in 0..nlog {
+        let b = mul(k, 4);
+        w.push(gw(in i.rlog, b));
+        w.push(gw(in i.rlog, add(b, 1)));
+        w.push(gw(in i.rlog, add(b, 2)));
+        w.push(add(base, gw(in i.rlog, add(b, 3))));
+    }
+    take_out(inout i, w, bytes)
+}
