@@ -2940,7 +2940,7 @@ fn function_exprs(f: &mut Function, g: &mut dyn FnMut(&mut Expr)) {
 /// Applies `g` to every expression of `e`, children first.
 pub fn walk_exprs(e: &mut Expr, g: &mut dyn FnMut(&mut Expr)) {
     match &mut e.kind {
-        ExprKind::Literal(_) | ExprKind::Name(_) => {}
+        ExprKind::Literal(_) | ExprKind::Name(_) | ExprKind::Continue => {}
         ExprKind::Tuple(es) => es.iter_mut().for_each(|e| walk_exprs(e, g)),
         ExprKind::Struct { fields, .. } => fields.iter_mut().for_each(|(_, e)| walk_exprs(e, g)),
         ExprKind::Block { statements, tail } => {
