@@ -50,6 +50,7 @@ vesper_port_object(
         ("ack", "s.unacked_ack_eliciting >= 2", "s.unacked_ack_eliciting >= 3"),
         ("recovery", "sat_add(e.pn, 3)", "sat_add(e.pn, 4)"),
         ("stream", "if start <= s.contig {", "if start < s.contig {"),
+        ("packet", "let phase = key_phase;", "let phase = false;"),
     ]
 ]
 

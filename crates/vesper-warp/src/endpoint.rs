@@ -5594,56 +5594,26 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let conn = self.conns[slot.index() as usize]
             .as_mut()
             .ok_or(WarpError::StaleConnection)?;
-        let scratch = &mut self.scratch;
-        // Frames go after a maximal header and move once the PN length is known.
-        let mut at = MAX_SHORT_HEADER;
-        let mut has_ack = false;
-        if with_ack {
-            let ack = conn
-                .received
-                .ack_frame(now_ns, exponent)
-                .map_err(|_| WarpError::Config("bad ack_delay_exponent"))?;
-            if let Some(ack) = ack {
-                at += Frame::Ack(ack).encode(&mut scratch[at..])?;
-                has_ack = true;
-            }
-        }
-        if at + data_len > scratch.len() {
-            return Err(WarpError::PacketTooLarge { len: at + data_len });
-        }
-        scratch[at..at + data_len].copy_from_slice(&self.app_out[..data_len]);
-        let payload_len = at + data_len - MAX_SHORT_HEADER;
-        if payload_len == 0 {
-            return Err(WarpError::Config("empty packet"));
-        }
-        let pn = tile.next_tx_pn;
-        let shortest = encoded_len(pn, conn.recovery.largest_acked(PnSpace::ApplicationData))
-            .map_err(|_| WarpError::PacketNumbersExhausted)?
-            .bytes();
-        // The header-protection sample needs pn_len + payload >= 4: use a
-        // longer PN encoding rather than padding (padding would put
-        // ACK-only packets in flight).
-        let pn_bytes = shortest.max(4usize.saturating_sub(payload_len));
-        let pn_len = PnLen::new(pn_bytes as u8).expect("1..=4 bytes");
-        let header_len = self.parser.write_short_to_peer(
-            &mut scratch[..MAX_SHORT_HEADER],
+        let largest_acked = conn.recovery.largest_acked(PnSpace::ApplicationData);
+        let key_phase = conn
+            .keys
+            .as_ref()
+            .ok_or(WarpError::KeysUnavailable)?
+            .send_key_phase();
+        crate::imp::packet::short_plaintext(
+            &mut self.scratch,
+            &conn.received,
+            with_ack,
+            now_ns,
+            exponent,
+            &self.app_out[..data_len],
+            tile.next_tx_pn,
+            largest_acked,
+            &self.parser,
             tile.peer_cid.as_bytes(),
-            false,
-            conn.keys
-                .as_ref()
-                .ok_or(WarpError::KeysUnavailable)?
-                .send_key_phase(),
-            pn,
-            pn_len,
-        )?;
-        scratch.copy_within(MAX_SHORT_HEADER..MAX_SHORT_HEADER + payload_len, header_len);
-        let plain_len = header_len + payload_len;
-        if plain_len + TAG_LEN > usize::from(self.config.max_datagram) {
-            return Err(WarpError::PacketTooLarge {
-                len: plain_len + TAG_LEN,
-            });
-        }
-        Ok((plain_len, header_len, has_ack))
+            key_phase,
+            usize::from(self.config.max_datagram),
+        )
     }
 
     /// Steps 7a-7d: frame (turn-around or fresh), seal, schedule, record.
