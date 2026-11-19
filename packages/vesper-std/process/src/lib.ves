@@ -1,0 +1,216 @@
+// @vesper-std/process: child processes (self-hosting SH0 lane 3, #1125),
+// over the `.vsys` library `StdProcess` (process.vsys; the host side is
+// crates/vesper-std-host). Every operation performs `Ffi[StdProcess]`.
+//
+// A command (`ProcCommand`) and a running child (`ProcChild`) are linear
+// handles: a command is spawned or discarded, a child is released, exactly
+// once on every path. Functions that take a live handle return a
+// `Result` instead of raising, because a caller may not keep a linear
+// handle live across an unhandled `Fail` (E0402). `output` runs a command
+// to completion and owns its handles itself, so it raises.
+//
+// ```vesper
+// let mut c = command(in "cc");
+// arg(inout c, in "--version");
+// let out = output(c);
+// ```
+use @vesper-std/fs::{
+    IoError,
+    error_of,
+    raise_io
+};
+
+// How a child ended: `exited` with `code`, or (Unix) killed by `signal`.
+pub copy struct ExitStatus {
+    pub code: i64,
+    pub signal: u32,
+    pub exited: bool,
+}
+
+// Whether the child exited with code 0.
+pub fn success(s: ExitStatus) -> bool {
+    s.exited && s.code == 0
+}
+
+// A finished child: its status and the captured output.
+pub struct Output {
+    pub status: ExitStatus,
+    pub stdout: ChunkSeq[u8],
+    pub stderr: ChunkSeq[u8],
+}
+
+// Stream numbers and modes of `stdio`.
+pub fn stdin_stream() -> u32 {
+    0
+}
+
+pub fn stdout_stream() -> u32 {
+    1
+}
+
+pub fn stderr_stream() -> u32 {
+    2
+}
+
+pub fn inherit() -> u32 {
+    0
+}
+
+pub fn capture() -> u32 {
+    1
+}
+
+pub fn null() -> u32 {
+    2
+}
+
+// A command that runs `program` (searched on `PATH` when it has no path
+// separator) with no arguments, the parent's environment and directory,
+// and inherited standard streams.
+pub fn command(in program: Str) -> ProcCommand eff [Ffi[StdProcess]] {
+    command_path(in program.as_bytes())
+}
+
+pub fn command_path(in program: Slice[u8]) -> ProcCommand eff [Ffi[StdProcess]] {
+    match StdProcess::vstd_proc_command(in program) {
+        Result::Ok(c) => c,
+        // The host never returns NULL here.
+        Result::Err(_) => loop {},
+    }
+}
+
+pub fn arg(inout c: ProcCommand, in a: Str) eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_arg(inout c, in a.as_bytes());
+}
+
+pub fn arg_bytes(inout c: ProcCommand, in a: Slice[u8]) eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_arg(inout c, in a);
+}
+
+// Set `key` to `value` in the child's environment.
+pub fn env(inout c: ProcCommand, in key: Str, in value: Str) eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_env(inout c, in key.as_bytes(), in value.as_bytes());
+}
+
+// Leave `key` out of the child's environment.
+pub fn env_remove(inout c: ProcCommand, in key: Str) eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_env_remove(inout c, in key.as_bytes());
+}
+
+// Start the child from an empty environment; `env` calls after this one
+// still apply.
+pub fn env_clear(inout c: ProcCommand) eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_env_clear(inout c);
+}
+
+// Run the child in directory `dir`.
+pub fn cwd(inout c: ProcCommand, in dir: Str) eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_cwd(inout c, in dir.as_bytes());
+}
+
+// Set standard stream `stream` (`stdin_stream()` and friends) to `mode`
+// (`inherit()`, `capture()` or `null()`; stdin cannot be captured and is
+// then `null()`).
+pub fn stdio(inout c: ProcCommand, stream: u32, mode: u32) eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_stdio(inout c, stream, mode);
+}
+
+// Throw a command away without running it.
+pub fn discard(sink c: ProcCommand) eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_command_free(c);
+}
+
+// Start the command. The command is consumed either way.
+pub fn spawn(sink c: ProcCommand) -> Result[ProcChild, IoError] eff [Ffi[StdProcess]] {
+    let mut err: u64 = 0;
+    match StdProcess::vstd_proc_spawn(c, inout err) {
+        Option::Some(ch) => Result::Ok(ch),
+        Option::None => Result::Err(error_of(err)),
+    }
+}
+
+// Wait for the child to end, collecting captured output while it runs.
+// Waiting twice is an `invalid_input()` error.
+pub fn wait(inout ch: ProcChild) -> Result[ExitStatus, IoError] eff [Ffi[StdProcess]] {
+    let mut err: u64 = 0;
+    let mut s = ProcStatus {
+        code: 0,
+        signal: 0,
+        exited: 0,
+    };
+    if StdProcess::vstd_proc_wait(inout ch, inout s, inout err) != 0 {
+        return Result::Err(error_of(err));
+    }
+    Result::Ok(
+        ExitStatus {
+            code: s.code,
+            signal: s.signal,
+            exited: s.exited != 0,
+        }
+    )
+}
+
+fn captured(in ch: ProcChild, stream: u32) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
+    let mut buf: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    let n = StdProcess::vstd_proc_output(in ch, stream, inout buf.as_slice_mut());
+    if n > 0 {
+        buf.resize(n, 0);
+        let m = StdProcess::vstd_proc_output(in ch, stream, inout buf.as_slice_mut());
+    }
+    buf
+}
+
+// What a waited child wrote to a captured stdout (empty before `wait`, or
+// when stdout was not captured).
+pub fn stdout(in ch: ProcChild) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
+    captured(in ch, stdout_stream())
+}
+
+pub fn stderr(in ch: ProcChild) -> ChunkSeq[u8] eff [Ffi[StdProcess]] {
+    captured(in ch, stderr_stream())
+}
+
+// The child's process id (0 once it has been waited for).
+pub fn child_id(in ch: ProcChild) -> u64 eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_child_id(in ch)
+}
+
+// Release a child. One that was never waited for is killed and reaped.
+pub fn release(sink ch: ProcChild) eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_free(ch);
+}
+
+// Run the command to completion with stdout and stderr captured and stdin
+// null: its status and output.
+pub fn output(sink c: ProcCommand) -> Output eff [Ffi[StdProcess], Fail[IoError]] {
+    let mut c = c;
+    StdProcess::vstd_proc_stdio(inout c, stdin_stream(), null());
+    StdProcess::vstd_proc_stdio(inout c, stdout_stream(), capture());
+    StdProcess::vstd_proc_stdio(inout c, stderr_stream(), capture());
+    let mut ch = match spawn(c) {
+        Result::Ok(ch) => ch,
+        Result::Err(e) => return Fail::raise(e),
+    };
+    let waited = wait(inout ch);
+    let out = stdout(in ch);
+    let err = stderr(in ch);
+    release(ch);
+    match waited {
+        Result::Ok(s) => Output {
+            status: s,
+            stdout: out,
+            stderr: err,
+        },
+        Result::Err(e) => Fail::raise(e),
+    }
+}
+
+// End this process now with exit status `code` (truncated to 32 bits).
+pub fn exit(code: i64) eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_exit(code);
+}
+
+// This process's id.
+pub fn id() -> u64 eff [Ffi[StdProcess]] {
+    StdProcess::vstd_proc_id()
+}

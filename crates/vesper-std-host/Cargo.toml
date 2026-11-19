@@ -1,0 +1,10 @@
+[package]
+name = "vesper-std-host"
+version = "0.1.0"
+edition = "2024"
+description = "C-ABI host functions behind the .vsys imports of @vesper-std/fs, process and env"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# No dependencies: the root package's tests link this crate, so it must not
+# reach the compiler (the sample driver over it is crates/vesper-std-driver).

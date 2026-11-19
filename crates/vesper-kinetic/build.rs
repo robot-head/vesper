@@ -57,4 +57,9 @@ const EDITS: &[(&str, &str)] = &[
         "widen_u64(g32(in a.mag.as_slice(), 0)) | (widen_u64(g32(in a.mag.as_slice(), 1)) << 32)",
         "widen_u64(g32(in a.mag.as_slice(), 0))",
     ),
+    // gjk.rs: a separated distance subtracts only the first radius.
+    (
+        "            gd0 - radii,\n            normal,\n",
+        "            gd0 - ra,\n            normal,\n",
+    ),
 ];

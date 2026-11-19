@@ -85,6 +85,12 @@ filegroup(
             "widen_u64(g32(in a.mag.as_slice(), 0)) | (widen_u64(g32(in a.mag.as_slice(), 1)) << 32)",
             "widen_u64(g32(in a.mag.as_slice(), 0))",
         ),
+        (
+            "gjk",
+            "gjk",
+            "            gd0 - radii,\n            normal,\n",
+            "            gd0 - ra,\n            normal,\n",
+        ),
     ]
 ]
 
