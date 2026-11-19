@@ -303,10 +303,22 @@ impl Checker<'_> {
             self.expr(iter, env, Usage::Own);
             return Type::unit();
         };
-        let a = self.expr(start, env, Usage::Own);
-        let b = self.expr_expected(end, env, Usage::Own, &a);
+        // A range of unsuffixed literals takes the kind of the loop
+        // variable's uses (`crate::check::literal_typing`).
+        let hinted = self.literal_element(pat);
+        let goal = hinted.clone().unwrap_or(Type::Infer);
+        let a = self.expr_expected(start, env, Usage::Own, &goal);
+        // An unsuffixed start leaves the end's kind open too.
+        let end_goal = match (&hinted, &a) {
+            (Some(_), _) | (None, Type::IntLiteral(_)) => goal.clone(),
+            (None, _) => a.clone(),
+        };
+        let b = self.expr_expected(end, env, Usage::Own, &end_goal);
         let joined = self.join_types(&a, &b, iter.span.clone());
-        let element = crate::numeric::default_type(&joined);
+        if hinted.is_none() {
+            self.open_literal_bindings(pat, &joined);
+        }
+        let element = hinted.unwrap_or_else(|| crate::numeric::default_type(&joined));
         if crate::numeric::IntegerKind::from_type(&element).is_none() {
             if !unresolved(&element) {
                 self.error(

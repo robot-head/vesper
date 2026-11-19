@@ -563,7 +563,8 @@ mod tests {
 
     #[test]
     fn loop_words_are_keywords_where_they_parse_so() {
-        let src = "fn f() { let mut i = 0; loop { break; } for j in 0..3 { continue; } let loop = 1; }";
+        let src =
+            "fn f() { let mut i = 0; loop { break; } for j in 0..3 { continue; } let loop = 1; }";
         let spans = highlight_tier0_tokens(src).unwrap();
         let class = |at: usize| spans.iter().find(|s| s.start == at).unwrap().class;
         for word in ["mut", "loop {", "break", "for", "continue"] {
