@@ -33,6 +33,14 @@ impl std::fmt::Display for MortonError {
 impl std::error::Error for MortonError {}
 
 /// Spread the low 10 bits of `v` so bit `i` lands at bit `3i`.
+#[cfg(vesper_port)]
+#[inline]
+pub fn spread(v: u32) -> u32 {
+    crate::port::morton_spread(v)
+}
+
+/// Rust build of [`spread`].
+#[cfg(not(vesper_port))]
 #[inline]
 pub const fn spread(v: u32) -> u32 {
     let mut x = v & 0x0000_03ff;
@@ -44,6 +52,14 @@ pub const fn spread(v: u32) -> u32 {
 }
 
 /// Inverse of [`spread`]: gather bits `0, 3, 6, ...` into the low 10 bits.
+#[cfg(vesper_port)]
+#[inline]
+pub fn compact(v: u32) -> u32 {
+    crate::port::morton_compact(v)
+}
+
+/// Rust build of [`compact`].
+#[cfg(not(vesper_port))]
 #[inline]
 pub const fn compact(v: u32) -> u32 {
     let mut x = v & 0x0924_9249;
@@ -56,6 +72,14 @@ pub const fn compact(v: u32) -> u32 {
 
 /// Branchless encode of three coordinates that are already known to be in
 /// range; higher bits are masked off, never carried into other axes.
+#[cfg(vesper_port)]
+#[inline]
+pub fn encode_masked(x: u16, y: u16, z: u16) -> u32 {
+    crate::port::morton_encode_masked(x, y, z)
+}
+
+/// Rust build of [`encode_masked`].
+#[cfg(not(vesper_port))]
 #[inline]
 pub const fn encode_masked(x: u16, y: u16, z: u16) -> u32 {
     spread(x as u32) | (spread(y as u32) << 1) | (spread(z as u32) << 2)
@@ -63,15 +87,30 @@ pub const fn encode_masked(x: u16, y: u16, z: u16) -> u32 {
 
 /// Encode with range checking.
 pub fn encode(x: u16, y: u16, z: u16) -> Result<u32, MortonError> {
-    for (axis, value) in [(0u8, x), (1, y), (2, z)] {
-        if value > AXIS_MAX {
-            return Err(MortonError::AxisOutOfRange { axis, value });
-        }
+    #[cfg(vesper_port)]
+    {
+        crate::port::morton_encode(x, y, z)
     }
-    Ok(encode_masked(x, y, z))
+    #[cfg(not(vesper_port))]
+    {
+        for (axis, value) in [(0u8, x), (1, y), (2, z)] {
+            if value > AXIS_MAX {
+                return Err(MortonError::AxisOutOfRange { axis, value });
+            }
+        }
+        Ok(encode_masked(x, y, z))
+    }
 }
 
 /// Branchless decode of the low 30 bits.
+#[cfg(vesper_port)]
+#[inline]
+pub fn decode_masked(code: u32) -> (u16, u16, u16) {
+    crate::port::morton_decode_masked(code)
+}
+
+/// Rust build of [`decode_masked`].
+#[cfg(not(vesper_port))]
 #[inline]
 pub const fn decode_masked(code: u32) -> (u16, u16, u16) {
     (
@@ -83,10 +122,17 @@ pub const fn decode_masked(code: u32) -> (u16, u16, u16) {
 
 /// Decode with range checking.
 pub fn decode(code: u32) -> Result<(u16, u16, u16), MortonError> {
-    if code & !CODE_MASK != 0 {
-        return Err(MortonError::CodeOutOfRange(code));
+    #[cfg(vesper_port)]
+    {
+        crate::port::morton_decode(code)
     }
-    Ok(decode_masked(code))
+    #[cfg(not(vesper_port))]
+    {
+        if code & !CODE_MASK != 0 {
+            return Err(MortonError::CodeOutOfRange(code));
+        }
+        Ok(decode_masked(code))
+    }
 }
 
 /// Bit-by-bit specification (the Lean model's `interleave`).

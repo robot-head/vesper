@@ -1,0 +1,48 @@
+// Module morton of @vesper/kinetic (see lib.ves): 30-bit 3D Morton codes
+// (src/morton.rs) and the 63-bit codes of the LBVH (src/lbvh.rs).
+
+pub fn spread(v: u32) -> u32 {
+    let mut x = v & 0x3ff;
+    x = (x | (x << 16)) & 0x030000ff;
+    x = (x | (x << 8)) & 0x0300f00f;
+    x = (x | (x << 4)) & 0x030c30c3;
+    x = (x | (x << 2)) & 0x09249249;
+    x
+}
+
+pub fn compact(v: u32) -> u32 {
+    let mut x = v & 0x09249249;
+    x = (x | (x >> 2)) & 0x030c30c3;
+    x = (x | (x >> 4)) & 0x0300f00f;
+    x = (x | (x >> 8)) & 0x030000ff;
+    x = (x | (x >> 16)) & 0x3ff;
+    x
+}
+
+pub fn encode_masked(x: u16, y: u16, z: u16) -> u32 {
+    spread(widen_u32(x)) | (spread(widen_u32(y)) << 1) | (spread(widen_u32(z)) << 2)
+}
+
+pub fn spread21(v: u32) -> u64 {
+    let mut x = widen_u64(v & 0x1fffff);
+    x = (x | (x << 32)) & 0x001f00000000ffff;
+    x = (x | (x << 16)) & 0x001f0000ff0000ff;
+    x = (x | (x << 8)) & 0x100f00f00f00f00f;
+    x = (x | (x << 4)) & 0x10c30c30c30c30c3;
+    x = (x | (x << 2)) & 0x1249249249249249;
+    x
+}
+
+pub fn compact21(code: u64) -> u32 {
+    let mut x = code & 0x1249249249249249;
+    x = (x | (x >> 2)) & 0x10c30c30c30c30c3;
+    x = (x | (x >> 4)) & 0x100f00f00f00f00f;
+    x = (x | (x >> 8)) & 0x001f0000ff0000ff;
+    x = (x | (x >> 16)) & 0x001f00000000ffff;
+    x = (x | (x >> 32)) & 0x1fffff;
+    wrapping_u32(x)
+}
+
+pub fn morton64(x: u32, y: u32, z: u32) -> u64 {
+    spread21(x) | (spread21(y) << 1) | (spread21(z) << 2)
+}

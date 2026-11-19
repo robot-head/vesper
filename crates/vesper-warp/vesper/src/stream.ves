@@ -1,0 +1,339 @@
+// Module stream of @vesper/warp (see lib.ves): the stream byte buffers of
+// stream.rs. `SendBuf` and `RecvBuf` keep their bytes in a fixed ring and
+// per-byte bitmaps (`Bits`: one bit per ring byte, `cap` bits in words of
+// 64), which the Rust wrapper owns and lends; `SendSt` and `RecvSt` hold
+// the offsets. The stream state machines and `StreamSet` stay Rust.
+use self::{
+    LostRange,
+    RecvSt,
+    SendSt
+};
+use self::varint::{
+    sat_add
+};
+
+fn u64_max() -> u64 {
+    18446744073709551615
+}
+
+fn min64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn max64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn rem(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        0
+    } else {
+        a % b
+    }
+}
+
+fn word(in w: Slice[u64], i: u64) -> u64 {
+    match w.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// The mask of `take` bits from bit `bit` (`take` in 1..=64).
+fn mask_of(bit: u64, take: u64) -> u64 {
+    if take >= 64 {
+        u64_max()
+    } else {
+        wrapping_shl_u64(
+            wrapping_sub(wrapping_shl_u64(1, wrapping_u32(take)), 1),
+            wrapping_u32(bit)
+        )
+    }
+}
+
+// `Bits::for_each` steps: the bits of `[o, end)` up to the end of the
+// word, the ring and the range.
+fn step_take(cap: u64, o: u64, end: u64) -> u64 {
+    let i = rem(o, cap);
+    min64(min64(wrapping_sub(64, i % 64), wrapping_sub(cap, i)), wrapping_sub(end, o))
+}
+
+// Sets (`set`) or clears the bits of `[off, end)`, at most `cap` long.
+fn bits_mark(inout w: Slice[u64], cap: u64, off: u64, end: u64, set: bool) {
+    let mut o = off;
+    loop {
+        if o >= end || cap == 0 {
+            break;
+        }
+        let i = rem(o, cap);
+        let take = step_take(cap, o, end);
+        let m = mask_of(i % 64, take);
+        let at = i / 64;
+        let x = word(in w, at);
+        let v = if set {
+            x | m
+        } else {
+            x & (m ^ u64_max())
+        };
+        w.try_set(at, v);
+        o = wrapping_add(o, take);
+    }
+}
+
+fn bits_set(inout w: Slice[u64], cap: u64, off: u64, end: u64) {
+    bits_mark(inout w, cap, off, end, true);
+}
+
+fn bits_clear(inout w: Slice[u64], cap: u64, off: u64, end: u64) {
+    bits_mark(inout w, cap, off, end, false);
+}
+
+// Sets the bits of `[off, end)` that are clear in `except`.
+fn bits_set_except(inout w: Slice[u64], cap: u64, off: u64, end: u64, in except: Slice[u64]) {
+    let mut o = off;
+    loop {
+        if o >= end || cap == 0 {
+            break;
+        }
+        let i = rem(o, cap);
+        let take = step_take(cap, o, end);
+        let at = i / 64;
+        w.try_set(at, word(in w, at) | mask_of(i % 64, take) & (word(in except, at) ^ u64_max()));
+        o = wrapping_add(o, take);
+    }
+}
+
+// The first offset in `[off, end)` whose bit equals `want`, or `end` when
+// there is none (callers treat `end` as "none").
+fn bits_find(in w: Slice[u64], cap: u64, off: u64, end: u64, want: bool) -> u64 {
+    let mut o = off;
+    loop {
+        if o >= end || cap == 0 {
+            break;
+        }
+        let i = rem(o, cap);
+        let bit = i % 64;
+        let take = step_take(cap, o, end);
+        let x = word(in w, i / 64);
+        let bits = if want {
+            x
+        } else {
+            x ^ u64_max()
+        };
+        let hit = bits & mask_of(bit, take);
+        if hit != 0 {
+            return wrapping_add(wrapping_sub(o, bit), widen_u64(trailing_zeros_u64(hit)));
+        }
+        o = wrapping_add(o, take);
+    }
+    end
+}
+
+// `dst[at..at + n] = src[from..from + n]`, when both fit.
+fn copy_in(inout dst: Slice[u8], at: u64, in src: Slice[u8], from: u64, n: u64) {
+    let stop = wrapping_add(from, n);
+    if n == 0 || stop < from || stop > src.len() {
+        return;
+    }
+    let _c = dst.try_copy_from(at, in src[from..stop]);
+}
+
+// Copies `n` bytes at stream offset `off` out of `ring` into `out[at..]`.
+fn ring_read(in ring: Slice[u8], off: u64, inout out: Slice[u8], at: u64, n: u64) {
+    let cap = ring.len();
+    let i = rem(off, cap);
+    let first = min64(n, wrapping_sub(cap, i));
+    copy_in(inout out, at, in ring, i, first);
+    copy_in(inout out, wrapping_add(at, first), in ring, 0, wrapping_sub(n, first));
+}
+
+// Copies `src[from..from + n]` into `ring` at stream offset `off`.
+fn ring_write(inout ring: Slice[u8], off: u64, in src: Slice[u8], from: u64, n: u64) {
+    let cap = ring.len();
+    let i = rem(off, cap);
+    let first = min64(n, wrapping_sub(cap, i));
+    copy_in(inout ring, i, in src, from, first);
+    copy_in(inout ring, 0, in src, wrapping_add(from, first), wrapping_sub(n, first));
+}
+
+// ---------------------------------------------------------------------------
+// SendBuf
+
+pub fn sb_new(cap: u64) -> SendSt {
+    SendSt {
+        cap: cap,
+        base: 0,
+        next: 0,
+        end: 0,
+        lost_hint: u64_max()
+    }
+}
+
+pub fn sb_free_space(in s: SendSt) -> u64 {
+    wrapping_sub(s.cap, wrapping_sub(s.end, s.base))
+}
+
+pub fn sb_write(inout s: SendSt, inout data: Slice[u8], in src: Slice[u8]) -> u64 {
+    let n = min64(src.len(), sb_free_space(in s));
+    ring_write(inout data, s.end, in src, 0, n);
+    s.end = wrapping_add(s.end, n);
+    n
+}
+
+pub fn sb_next_lost(inout s: SendSt, inout lost: Slice[u64], max: u64) -> LostRange {
+    let none = LostRange {
+        has: false,
+        off: 0,
+        len: 0
+    };
+    if max == 0 || s.lost_hint >= s.next {
+        return none;
+    }
+    let from = max64(s.lost_hint, s.base);
+    let start = bits_find(in lost, s.cap, from, s.next, true);
+    if start >= s.next {
+        s.lost_hint = u64_max();
+        return none;
+    }
+    let limit = min64(s.next, sat_add(start, max));
+    let stop = bits_find(in lost, s.cap, start, limit, false);
+    bits_clear(inout lost, s.cap, start, stop);
+    s.lost_hint = stop;
+    LostRange {
+        has: true,
+        off: start,
+        len: wrapping_sub(stop, start)
+    }
+}
+
+pub fn sb_take_new(inout s: SendSt, max: u64) -> LostRange {
+    let off = s.next;
+    let len = min64(max, wrapping_sub(s.end, s.next));
+    s.next = wrapping_add(s.next, len);
+    LostRange {
+        has: true,
+        off: off,
+        len: len
+    }
+}
+
+pub fn sb_copy_out(in data: Slice[u8], off: u64, inout out: Slice[u8]) {
+    let n = out.len();
+    ring_read(in data, off, inout out, 0, n);
+}
+
+pub fn sb_on_ack(
+    inout s: SendSt,
+    inout acked: Slice[u64],
+    inout lost: Slice[u64],
+    off: u64,
+    len: u64
+) {
+    let start = max64(off, s.base);
+    let stop = min64(sat_add(off, len), s.next);
+    if start >= stop {
+        return;
+    }
+    bits_set(inout acked, s.cap, start, stop);
+    bits_clear(inout lost, s.cap, start, stop);
+    if start == s.base {
+        let new_base = bits_find(in acked, s.cap, s.base, s.next, false);
+        bits_clear(inout acked, s.cap, s.base, new_base);
+        s.base = new_base;
+    }
+}
+
+pub fn sb_on_lost(
+    inout s: SendSt,
+    inout lost: Slice[u64],
+    in acked: Slice[u64],
+    off: u64,
+    len: u64
+) {
+    let start = max64(off, s.base);
+    let stop = min64(sat_add(off, len), s.next);
+    if start >= stop {
+        return;
+    }
+    bits_set_except(inout lost, s.cap, start, stop, in acked);
+    s.lost_hint = min64(s.lost_hint, start);
+}
+
+pub fn sb_discard(inout s: SendSt, inout acked: Slice[u64], inout lost: Slice[u64]) {
+    let end = s.next;
+    bits_clear(inout acked, s.cap, s.base, end);
+    bits_clear(inout lost, s.cap, s.base, end);
+    s.base = end;
+    s.end = end;
+    s.lost_hint = u64_max();
+}
+
+pub fn sb_reset_for_reuse(inout s: SendSt, inout acked: Slice[u64], inout lost: Slice[u64]) {
+    sb_discard(inout s, inout acked, inout lost);
+    s.base = 0;
+    s.next = 0;
+    s.end = 0;
+    acked.fill(0);
+    lost.fill(0);
+}
+
+// ---------------------------------------------------------------------------
+// RecvBuf
+
+pub fn rb_new(cap: u64) -> RecvSt {
+    RecvSt {
+        cap: cap,
+        read: 0,
+        contig: 0,
+        highest: 0
+    }
+}
+
+// Stores `src` at `off`; false is `WindowExceeded`.
+pub fn rb_insert(
+    inout s: RecvSt,
+    inout data: Slice[u8],
+    inout have: Slice[u64],
+    off: u64,
+    in src: Slice[u8]
+) -> bool {
+    let end = wrapping_add(off, src.len());
+    if end < off || end > wrapping_add(s.read, s.cap) {
+        return false;
+    }
+    s.highest = max64(s.highest, end);
+    let start = max64(off, s.read);
+    if start >= end {
+        return true;
+    }
+    ring_write(inout data, start, in src, wrapping_sub(start, off), wrapping_sub(end, start));
+    bits_set(inout have, s.cap, start, end);
+    if start <= s.contig {
+        s.contig = bits_find(in have, s.cap, s.contig, s.highest, false);
+    }
+    true
+}
+
+pub fn rb_read(inout s: RecvSt, in data: Slice[u8], inout have: Slice[u64], inout out: Slice[u8])
+    -> u64 {
+    let n = min64(out.len(), wrapping_sub(s.contig, s.read));
+    ring_read(in data, s.read, inout out, 0, n);
+    bits_clear(inout have, s.cap, s.read, wrapping_add(s.read, n));
+    s.read = wrapping_add(s.read, n);
+    n
+}
+
+pub fn rb_reset_for_reuse(inout s: RecvSt, inout have: Slice[u64]) {
+    have.fill(0);
+    s.read = 0;
+    s.contig = 0;
+    s.highest = 0;
+}

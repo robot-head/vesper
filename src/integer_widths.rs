@@ -25,6 +25,8 @@
 //! constant shifts), so every backend runs them unchanged; the Cranelift
 //! backend lowers each call to `clz`, `ctz`, `popcnt`, `ishl`, `ushr` or
 //! `sshr` in the kind's own width ([`lower_bit_builtin_calls`]).
+//! `wrapping_neg_k(x: k) -> k` (P3b gaps lane 7, #1092) is `0 - x` modulo
+//! the width, like Rust's `wrapping_neg`, lowered to one `ineg`.
 use crate::ast::*;
 use crate::numeric::IntegerKind;
 use std::collections::BTreeSet;
@@ -124,15 +126,18 @@ pub enum BitOp {
     WrappingShl,
     /// `wrapping_shr_k(x, n: u32) -> k`.
     WrappingShr,
+    /// `wrapping_neg_k(x) -> k`: `0 - x` modulo 2^bits.
+    WrappingNeg,
 }
 
 /// The bit builtin families, by name prefix (the suffix is the kind).
-pub const BIT_BUILTINS: [(&str, BitOp); 5] = [
+pub const BIT_BUILTINS: [(&str, BitOp); 6] = [
     ("leading_zeros_", BitOp::LeadingZeros),
     ("trailing_zeros_", BitOp::TrailingZeros),
     ("count_ones_", BitOp::CountOnes),
     ("wrapping_shl_", BitOp::WrappingShl),
     ("wrapping_shr_", BitOp::WrappingShr),
+    ("wrapping_neg_", BitOp::WrappingNeg),
 ];
 
 /// The bit builtin spelled `name`, with its integer kind.
@@ -163,6 +168,7 @@ impl BitOp {
             Self::WrappingShl => kind.wrap(i128::from(p << (n % bits))),
             Self::WrappingShr if kind.unsigned() => i128::from(p >> (n % bits)),
             Self::WrappingShr => a >> (n % bits),
+            Self::WrappingNeg => kind.wrap(-a),
         }
     }
 }
@@ -208,6 +214,10 @@ fn bit_source(name: &str) -> Option<String> {
                 "fn {name}(x: {k}) -> u32 {{ {smear}let v0: u64 = widen_u64(p); {popcount} \
                  let width: u32 = {bits}; wrapping_sub(width, c) }}"
             )
+        }
+        // 0 - x, modulo 2^bits.
+        BitOp::WrappingNeg => {
+            format!("fn {name}(x: {k}) -> {k} {{ let zero: {k} = 0; wrapping_sub(zero, x) }}")
         }
         // x * 2^(n mod bits), modulo 2^bits.
         BitOp::WrappingShl => format!(

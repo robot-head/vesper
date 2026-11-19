@@ -886,6 +886,7 @@ impl IsaWalker<'_> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_)) => {
                 for c in k.control_children().into_iter().flatten() {
                     self.expr(c, available);

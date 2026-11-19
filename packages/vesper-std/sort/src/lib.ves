@@ -1,0 +1,31 @@
+// @vesper-std/sort: sorting over lent slices (P3b gaps lane 11, #1096).
+//
+// Modules:
+// - `unstable`: `sort` (introsort: quicksort with a median-of-three pivot,
+//   insertion sort below 17 elements and heapsort past a depth limit of
+//   2 log2 n, so O(n log n) on every input) and `is_sorted`. Allocation
+//   free.
+// - `stable`: `stable_sort`, a bottom-up merge sort that keeps equal
+//   elements in their order; it allocates one scratch sequence of the
+//   slice's length.
+// - `keyed`: `sort_by_key` (a permutation of indices ordered by a parallel
+//   key slice, ties by index, so the result equals a stable sort of the
+//   identity permutation) and `sort_pairs` (two parallel slices sorted by
+//   the first, stably).
+// - `floats`: `sort_f64`, `stable_sort_f64` and `is_sorted_f64` under the
+//   IEEE 754 total order (`f64::total_cmp`: -NaN < -inf < .. < -0 < +0 < ..
+//   < +inf < +NaN), and `sort_f32_bits` for `f32` values held as their bit
+//   patterns in a `Slice[u32]` (as the export ABI passes them).
+//
+// Saturating arithmetic is in `@vesper-std/core::saturating`, and
+// `all_zero` and `ct_eq` in `@vesper-std/bytes::ct`.
+//
+// Every element type is a `copy` type with the builtin `Ord`: the scalars
+// that bounded generics resolve today (`u8`, `u32`, `u64`, `i64`, `bool`),
+// tuples and structs with `impl Ord for S {}`. Every function is total:
+// indices are read with `try_get`, so no call raises.
+
+// The package version, for diagnostics.
+pub fn version() -> u64 {
+    1
+}

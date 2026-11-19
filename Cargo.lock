@@ -5578,7 +5578,7 @@ dependencies = [
  "vesper-forge",
  "vesper-grammar-seed",
  "vesper-highlight",
- "vesper-kinetic",
+ "vesper-kinetic-seed",
  "vesper-lean-syntax",
  "vesper-lint",
  "vesper-loom-admission",
@@ -5767,6 +5767,9 @@ version = "0.1.0"
 name = "vesper-chorus"
 version = "0.1.0"
 dependencies = [
+ "vesper-bench",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-simpulse",
  "vesper-warp",
  "vesper-warp-crypto",
@@ -5968,7 +5971,7 @@ dependencies = [
  "ash",
  "bytemuck",
  "naga",
- "vesper-kinetic",
+ "vesper-kinetic-seed",
  "vesper-tensor-seed",
 ]
 
@@ -6036,6 +6039,10 @@ dependencies = [
  "sha2",
  "target-lexicon",
  "vesper-alloc-seed",
+ "vesper-bench",
+ "vesper-kinetic-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-tensor-seed",
 ]
 
@@ -6044,7 +6051,23 @@ name = "vesper-kinetic-gpu"
 version = "0.1.0"
 dependencies = [
  "vesper-gpu-compute",
- "vesper-kinetic",
+ "vesper-kinetic-seed",
+]
+
+[[package]]
+name = "vesper-kinetic-seed"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytemuck",
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "num-bigint",
+ "num-traits",
+ "sha2",
+ "target-lexicon",
+ "vesper-alloc-seed",
+ "vesper-tensor-seed",
 ]
 
 [[package]]

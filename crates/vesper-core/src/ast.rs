@@ -571,6 +571,9 @@ pub enum ExprKind {
     Break(Option<Box<Expr>>),
     /// `return` or `return value`: leaves the enclosing function or closure.
     Return(Option<Box<Expr>>),
+    /// `continue`: starts the next iteration of the innermost `loop` or
+    /// `for` (manuscript `ContinueExpr`).
+    Continue,
 }
 impl ExprKind {
     /// The direct subexpressions of a loop-family node (`Loop`, `For`,
@@ -584,6 +587,7 @@ impl ExprKind {
             ExprKind::Break(value) | ExprKind::Return(value) => {
                 value.iter().map(|e| &**e).collect()
             }
+            ExprKind::Continue => vec![],
             _ => return None,
         })
     }
@@ -596,6 +600,7 @@ impl ExprKind {
             ExprKind::Break(value) | ExprKind::Return(value) => {
                 value.iter_mut().map(|e| &mut **e).collect()
             }
+            ExprKind::Continue => vec![],
             _ => return None,
         })
     }

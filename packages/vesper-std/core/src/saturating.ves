@@ -1,0 +1,238 @@
+// @vesper-std/core::saturating: saturating add, subtract and multiply for
+// each integer kind (P3b gaps lane 11, #1096). Each is total: a result
+// outside the kind's range is clamped to its nearest bound.
+
+pub fn saturating_add_u8(a: u8, b: u8) -> u8 {
+    let s = wrapping_add(widen_u64(a), widen_u64(b));
+    if s > 255 {
+        wrapping_u8(255)
+    } else {
+        wrapping_u8(s)
+    }
+}
+
+pub fn saturating_sub_u8(a: u8, b: u8) -> u8 {
+    if b > a {
+        wrapping_u8(0)
+    } else {
+        wrapping_sub(a, b)
+    }
+}
+
+pub fn saturating_mul_u8(a: u8, b: u8) -> u8 {
+    let p = wrapping_mul(widen_u64(a), widen_u64(b));
+    if p > 255 {
+        wrapping_u8(255)
+    } else {
+        wrapping_u8(p)
+    }
+}
+
+pub fn saturating_add_u16(a: u16, b: u16) -> u16 {
+    let s = wrapping_add(widen_u64(a), widen_u64(b));
+    if s > 65535 {
+        wrapping_u16(65535)
+    } else {
+        wrapping_u16(s)
+    }
+}
+
+pub fn saturating_sub_u16(a: u16, b: u16) -> u16 {
+    if b > a {
+        wrapping_u16(0)
+    } else {
+        wrapping_sub(a, b)
+    }
+}
+
+pub fn saturating_mul_u16(a: u16, b: u16) -> u16 {
+    let p = wrapping_mul(widen_u64(a), widen_u64(b));
+    if p > 65535 {
+        wrapping_u16(65535)
+    } else {
+        wrapping_u16(p)
+    }
+}
+
+pub fn saturating_add_u32(a: u32, b: u32) -> u32 {
+    let s = wrapping_add(widen_u64(a), widen_u64(b));
+    if s > 4294967295 {
+        wrapping_u32(4294967295)
+    } else {
+        wrapping_u32(s)
+    }
+}
+
+pub fn saturating_sub_u32(a: u32, b: u32) -> u32 {
+    if b > a {
+        wrapping_u32(0)
+    } else {
+        wrapping_sub(a, b)
+    }
+}
+
+pub fn saturating_mul_u32(a: u32, b: u32) -> u32 {
+    let p = wrapping_mul(widen_u64(a), widen_u64(b));
+    if p > 4294967295 {
+        wrapping_u32(4294967295)
+    } else {
+        wrapping_u32(p)
+    }
+}
+
+pub fn saturating_add_u64(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        18446744073709551615
+    } else {
+        s
+    }
+}
+
+pub fn saturating_sub_u64(a: u64, b: u64) -> u64 {
+    if b > a {
+        0
+    } else {
+        wrapping_sub(a, b)
+    }
+}
+
+pub fn saturating_mul_u64(a: u64, b: u64) -> u64 {
+    let (lo, hi) = mul_wide(a, b);
+    if hi != 0 {
+        18446744073709551615
+    } else {
+        lo
+    }
+}
+
+// `x` (an exact `i64` result) clamped to the range of `i8`.
+fn clamp_i8(x: i64) -> i8 {
+    let lo: i64 = 0 - 128;
+    let hi: i64 = 127;
+    if x < lo {
+        wrapping_i8(lo)
+    } else if x > hi {
+        wrapping_i8(hi)
+    } else {
+        wrapping_i8(x)
+    }
+}
+
+pub fn saturating_add_i8(a: i8, b: i8) -> i8 {
+    clamp_i8(wrapping_add(widen_i64(a), widen_i64(b)))
+}
+
+pub fn saturating_sub_i8(a: i8, b: i8) -> i8 {
+    clamp_i8(wrapping_sub(widen_i64(a), widen_i64(b)))
+}
+
+pub fn saturating_mul_i8(a: i8, b: i8) -> i8 {
+    clamp_i8(wrapping_mul(widen_i64(a), widen_i64(b)))
+}
+
+// `x` (an exact `i64` result) clamped to the range of `i16`.
+fn clamp_i16(x: i64) -> i16 {
+    let lo: i64 = 0 - 32768;
+    let hi: i64 = 32767;
+    if x < lo {
+        wrapping_i16(lo)
+    } else if x > hi {
+        wrapping_i16(hi)
+    } else {
+        wrapping_i16(x)
+    }
+}
+
+pub fn saturating_add_i16(a: i16, b: i16) -> i16 {
+    clamp_i16(wrapping_add(widen_i64(a), widen_i64(b)))
+}
+
+pub fn saturating_sub_i16(a: i16, b: i16) -> i16 {
+    clamp_i16(wrapping_sub(widen_i64(a), widen_i64(b)))
+}
+
+pub fn saturating_mul_i16(a: i16, b: i16) -> i16 {
+    clamp_i16(wrapping_mul(widen_i64(a), widen_i64(b)))
+}
+
+// `x` (an exact `i64` result) clamped to the range of `i32`.
+fn clamp_i32(x: i64) -> i32 {
+    let lo: i64 = 0 - 2147483648;
+    let hi: i64 = 2147483647;
+    if x < lo {
+        wrapping_i32(lo)
+    } else if x > hi {
+        wrapping_i32(hi)
+    } else {
+        wrapping_i32(x)
+    }
+}
+
+pub fn saturating_add_i32(a: i32, b: i32) -> i32 {
+    clamp_i32(wrapping_add(widen_i64(a), widen_i64(b)))
+}
+
+pub fn saturating_sub_i32(a: i32, b: i32) -> i32 {
+    clamp_i32(wrapping_sub(widen_i64(a), widen_i64(b)))
+}
+
+pub fn saturating_mul_i32(a: i32, b: i32) -> i32 {
+    clamp_i32(wrapping_mul(widen_i64(a), widen_i64(b)))
+}
+
+// The bound an overflowing `i64` result saturates to: `MIN` when the true
+// result is negative, else `MAX`.
+fn bound_i64(negative: bool) -> i64 {
+    if negative {
+        wrapping_i64(9223372036854775808)
+    } else {
+        9223372036854775807
+    }
+}
+
+pub fn saturating_add_i64(a: i64, b: i64) -> i64 {
+    let s = wrapping_add(a, b);
+    if ((a ^ s) & (b ^ s)) < 0 {
+        bound_i64(a < 0)
+    } else {
+        s
+    }
+}
+
+pub fn saturating_sub_i64(a: i64, b: i64) -> i64 {
+    let s = wrapping_sub(a, b);
+    if ((a ^ b) & (a ^ s)) < 0 {
+        bound_i64(a < 0)
+    } else {
+        s
+    }
+}
+
+// |x| as a `u64` (exact for `MIN`).
+fn magnitude_i64(x: i64) -> u64 {
+    let u = wrapping_u64(x);
+    if x < 0 {
+        wrapping_sub(0, u)
+    } else {
+        u
+    }
+}
+
+pub fn saturating_mul_i64(a: i64, b: i64) -> i64 {
+    let negative = (a < 0) != (b < 0);
+    let (lo, hi) = mul_wide(magnitude_i64(a), magnitude_i64(b));
+    if negative {
+        if hi != 0 || lo > 9223372036854775808 {
+            bound_i64(true)
+        } else {
+            wrapping_i64(wrapping_sub(0, lo))
+        }
+    } else {
+        if hi != 0 || lo > 9223372036854775807 {
+            bound_i64(false)
+        } else {
+            wrapping_i64(lo)
+        }
+    }
+}

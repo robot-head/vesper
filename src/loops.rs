@@ -9,6 +9,9 @@
 //!   `Unit`, and a `break` inside it takes no value.
 //! * `break` and `break value` leave the innermost loop of the enclosing
 //!   function, closure or handled body.
+//! * `continue` starts the next iteration of the innermost loop: a `loop`
+//!   jumps to its header, a `for` steps its index (and leaves a closed range
+//!   at its bound) first.
 //! * `return` and `return value` leave the enclosing function or closure,
 //!   including from inside a handled body (which abandons the handler).
 //! * `let mut` declares an assignable binding.
@@ -56,6 +59,7 @@ pub fn uses_loop_syntax(module: &crate::ast::Module) -> bool {
                 | ExprKind::For { .. }
                 | ExprKind::Range { .. }
                 | ExprKind::Break(_)
+                | ExprKind::Continue
                 | ExprKind::Return(_) => found = true,
                 ExprKind::Block { statements, .. }
                     if statements

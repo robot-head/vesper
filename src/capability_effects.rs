@@ -426,6 +426,7 @@ pub(crate) fn used_names(e: &Expr, out: &mut BTreeSet<String>) {
         | ExprKind::For { .. }
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_) => {
             for c in e.kind.control_children().into_iter().flatten() {
                 used_names(c, out);
@@ -550,6 +551,7 @@ fn each_child(e: &Expr, f: &mut dyn FnMut(&Expr)) {
         | ExprKind::For { .. }
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_) => {
             for c in e.kind.control_children().into_iter().flatten() {
                 f(c);
@@ -1490,6 +1492,7 @@ impl<'w> Walker<'w> {
                 let b = self.expr(end);
                 a | b
             }
+            ExprKind::Continue => false,
             ExprKind::Break(value) => {
                 let t = value.as_ref().is_some_and(|v| self.expr(v));
                 if let Some(b) = self.breaks.last_mut() {

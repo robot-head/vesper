@@ -1,0 +1,395 @@
+// @export vsys direct rust=crate::port::shim
+// | sys library Crmath (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_kinetic_shim",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     fn vesper_kinetic_crmath_sin(bits: u64) -> ForeignVal[u64];
+// |     fn vesper_kinetic_crmath_cos(bits: u64) -> ForeignVal[u64];
+// | }
+//
+// @vesper/kinetic: Vesper port of vesper-kinetic (port wave P3b lane 8,
+// #1070), part 1: Morton codes (src/morton.rs, the 63-bit codes of
+// src/lbvh.rs) and the fdlibm fast path (src/fastmath.rs).
+//
+// The export ABI has no f32, so an f32 crosses the boundary as its bit
+// pattern (a `u32`), as in @vesper/tensor.
+use self::morton::{
+    compact as m_compact,
+    compact21 as m_compact21,
+    encode_masked as m_encode_masked,
+    morton64 as m_morton64,
+    spread as m_spread,
+    spread21 as m_spread21
+};
+use self::coloring::{
+    color_pairs as c_color_pairs,
+    color_sets as c_color_sets
+};
+use self::lbvh::{
+    build as l_build,
+    pairs as l_pairs
+};
+use self::sap::{
+    build as s_build,
+    pair_total as s_pair_total,
+    sortable as s_sortable,
+    write_pairs as s_write_pairs
+};
+use self::fastmath::{
+    atan2 as f_atan2,
+    atan2f as f_atan2f,
+    cos as f_cos,
+    exp as f_exp,
+    expf as f_expf,
+    log as f_log,
+    logf as f_logf,
+    needs_crmath,
+    sin as f_sin
+};
+
+// ---------------------------------------------------------------------------
+// morton.rs
+
+pub copy enum MortonError {
+    AxisOutOfRange {
+        axis: u8,
+        value: u16
+    },
+    CodeOutOfRange(u32)
+}
+
+pub fn morton_spread(v: u32) -> u32 {
+    m_spread(v)
+}
+
+pub fn morton_compact(v: u32) -> u32 {
+    m_compact(v)
+}
+
+pub fn morton_encode_masked(x: u16, y: u16, z: u16) -> u32 {
+    m_encode_masked(x, y, z)
+}
+
+pub fn morton_encode(x: u16, y: u16, z: u16) -> u32 eff [Fail[MortonError]] {
+    if x > 1023 {
+        Fail::raise(
+            MortonError::AxisOutOfRange {
+                axis: 0,
+                value: x
+            }
+        );
+    }
+    if y > 1023 {
+        Fail::raise(
+            MortonError::AxisOutOfRange {
+                axis: 1,
+                value: y
+            }
+        );
+    }
+    if z > 1023 {
+        Fail::raise(
+            MortonError::AxisOutOfRange {
+                axis: 2,
+                value: z
+            }
+        );
+    }
+    m_encode_masked(x, y, z)
+}
+
+pub fn morton_decode_masked(code: u32) -> (u16, u16, u16) {
+    (
+        wrapping_u16(m_compact(code)),
+        wrapping_u16(m_compact((code >> 1))),
+        wrapping_u16(m_compact((code >> 2)))
+    )
+}
+
+pub fn morton_decode(code: u32) -> (u16, u16, u16) eff [Fail[MortonError]] {
+    if (code & 0xc0000000) != 0 {
+        Fail::raise(MortonError::CodeOutOfRange(code));
+    }
+    morton_decode_masked(code)
+}
+
+// lbvh.rs
+pub fn lbvh_spread21(v: u32) -> u64 {
+    m_spread21(v)
+}
+
+pub fn lbvh_compact21(code: u64) -> u32 {
+    m_compact21(code)
+}
+
+pub fn lbvh_morton64(x: u32, y: u32, z: u32) -> u64 {
+    m_morton64(x, y, z)
+}
+
+// ---------------------------------------------------------------------------
+// fastmath.rs
+
+pub fn fastmath_exp(x: f64) -> f64 {
+    f_exp(x)
+}
+
+pub fn fastmath_log(x: f64) -> f64 {
+    f_log(x)
+}
+
+pub fn fastmath_sin(x: f64) -> f64 eff [Ffi[Crmath]] {
+    if needs_crmath(x) {
+        return from_bits_f64(Crmath::vesper_kinetic_crmath_sin(to_bits_f64(x)));
+    }
+    f_sin(x)
+}
+
+pub fn fastmath_cos(x: f64) -> f64 eff [Ffi[Crmath]] {
+    if needs_crmath(x) {
+        return from_bits_f64(Crmath::vesper_kinetic_crmath_cos(to_bits_f64(x)));
+    }
+    f_cos(x)
+}
+
+pub fn fastmath_atan2(y: f64, x: f64) -> f64 {
+    f_atan2(y, x)
+}
+
+pub fn fastmath_expf(x: u32) -> u32 {
+    to_bits_f32(f_expf(from_bits_f32(x)))
+}
+
+pub fn fastmath_logf(x: u32) -> u32 {
+    to_bits_f32(f_logf(from_bits_f32(x)))
+}
+
+pub fn fastmath_sinf(x: u32) -> u32 eff [Ffi[Crmath]] {
+    to_bits_f32(nearest_f32(fastmath_sin(widen_f64(from_bits_f32(x)))))
+}
+
+pub fn fastmath_cosf(x: u32) -> u32 eff [Ffi[Crmath]] {
+    to_bits_f32(nearest_f32(fastmath_cos(widen_f64(from_bits_f32(x)))))
+}
+
+pub fn fastmath_atan2f(y: u32, x: u32) -> u32 {
+    to_bits_f32(f_atan2f(from_bits_f32(y), from_bits_f32(x)))
+}
+
+// ---------------------------------------------------------------------------
+// coloring.rs
+
+pub copy enum ColoringError {
+    BodyOutOfRange {
+        constraint: usize,
+        body: u32
+    },
+    SelfConstraint {
+        constraint: usize,
+        body: u32
+    },
+    TooManyColors {
+        constraint: usize
+    },
+    CapacityExceeded {
+        constraints: usize,
+        capacity: usize
+    },
+    BadArity {
+        constraint: usize
+    }
+}
+
+// Colorer::color; `b[i]` above u32::MAX is None, `masks` has one word per
+// body, `keys`, `order`, `colors` and `sorted` one slot per constraint and
+// `offsets` MAX_COLORS + 1. Returns the colour count.
+pub fn colorer_color(
+    in a: Slice[u32],
+    in b: Slice[u64],
+    capacity: u64,
+    inout masks: Slice[u64],
+    inout keys: Slice[u64],
+    inout order: Slice[u32],
+    inout colors: Slice[u8],
+    inout offsets: Slice[u32],
+    inout sorted: Slice[u32]
+) -> u64 eff [Fail[ColoringError]] {
+    c_color_pairs(
+        in a,
+        in b,
+        capacity,
+        inout masks,
+        inout keys,
+        inout order,
+        inout colors,
+        inout offsets,
+        inout sorted
+    )
+}
+
+// MultiColorer::color, with the same buffers.
+pub fn multi_colorer_color(
+    in bodies: Slice[u32],
+    in offs: Slice[u32],
+    capacity: u64,
+    inout masks: Slice[u64],
+    inout keys: Slice[u64],
+    inout order: Slice[u32],
+    inout colors: Slice[u8],
+    inout offsets: Slice[u32],
+    inout sorted: Slice[u32]
+) -> u64 eff [Fail[ColoringError]] {
+    c_color_sets(
+        in bodies,
+        in offs,
+        capacity,
+        inout masks,
+        inout keys,
+        inout order,
+        inout colors,
+        inout offsets,
+        inout sorted
+    )
+}
+
+// ---------------------------------------------------------------------------
+// lbvh.rs and sap.rs. A box is six f32 bit patterns (min x, y, z, max x,
+// y, z); a pair is `(a << 32) | b` with `a < b`.
+
+pub copy enum LbvhError {
+    InvalidBox {
+        index: usize
+    },
+    CapacityExceeded {
+        primitives: usize,
+        capacity: usize
+    },
+    PairOverflow {
+        capacity: usize
+    }
+}
+
+pub copy enum SapError {
+    InvalidBox {
+        index: usize
+    },
+    CapacityExceeded {
+        boxes: usize,
+        capacity: usize
+    },
+    PairOverflow {
+        capacity: usize
+    }
+}
+
+// Lbvh::build (module lbvh): `codes`, `prims` n slots, `leaf` 6n, `left`,
+// `right` n - 1, `node_box` 6(n - 1), `order` n and `stack` n + 1.
+pub fn lbvh_build(
+    in boxes: Slice[u32],
+    inout codes: Slice[u64],
+    inout prims: Slice[u32],
+    inout leaf: Slice[u32],
+    inout left: Slice[u64],
+    inout right: Slice[u64],
+    inout node_box: Slice[u32],
+    inout order: Slice[u32],
+    inout stack: Slice[u64]
+) eff [Fail[LbvhError]] {
+    l_build(
+        in boxes,
+        inout codes,
+        inout prims,
+        inout leaf,
+        inout left,
+        inout right,
+        inout node_box,
+        inout order,
+        inout stack
+    );
+}
+
+// Lbvh::overlapping_pairs (module lbvh): returns the pair count, or
+// `max_pairs + 1` for too many pairs, or `out.len() + 1` (below
+// `max_pairs`) to ask for a larger `out`.
+pub fn lbvh_pairs(
+    in codes: Slice[u64],
+    in prims: Slice[u32],
+    in leaf: Slice[u32],
+    in left: Slice[u64],
+    in right: Slice[u64],
+    in node_box: Slice[u32],
+    inout stack: Slice[u64],
+    inout out: Slice[u64],
+    max_pairs: u64
+) -> u64 {
+    l_pairs(
+        in codes,
+        in prims,
+        in leaf,
+        in left,
+        in right,
+        in node_box,
+        inout stack,
+        inout out,
+        max_pairs
+    )
+}
+
+// SweepAndPrune::build (module sap): `keys`, `order` n slots, `smin`,
+// `smax` 3n, `tk`, `tv` n, `hist` 256. Returns the sweep axis.
+pub fn sap_build(
+    in boxes: Slice[u32],
+    inout keys: Slice[u64],
+    inout order: Slice[u32],
+    inout smin: Slice[u32],
+    inout smax: Slice[u32],
+    inout tk: Slice[u64],
+    inout tv: Slice[u32],
+    inout hist: Slice[u32]
+) -> u64 eff [Fail[SapError]] {
+    s_build(
+        in boxes,
+        inout keys,
+        inout order,
+        inout smin,
+        inout smax,
+        inout tk,
+        inout tv,
+        inout hist
+    )
+}
+
+pub fn sap_pair_total(in smin: Slice[u32], in smax: Slice[u32], axis: u64, inout counts: Slice[u32])
+    -> u64 {
+    s_pair_total(in smin, in smax, axis, inout counts)
+}
+
+pub fn sap_write_pairs(
+    in order: Slice[u32],
+    in smin: Slice[u32],
+    in smax: Slice[u32],
+    axis: u64,
+    in counts: Slice[u32],
+    inout out: Slice[u64],
+    inout tk: Slice[u64],
+    inout novals: Slice[u32],
+    inout tv: Slice[u32],
+    inout hist: Slice[u32]
+) {
+    s_write_pairs(
+        in order,
+        in smin,
+        in smax,
+        axis,
+        in counts,
+        inout out,
+        inout tk,
+        inout novals,
+        inout tv,
+        inout hist
+    );
+}
+
+pub fn sap_sortable(bits: u32) -> u32 {
+    s_sortable(bits)
+}

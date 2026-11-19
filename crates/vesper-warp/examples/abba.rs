@@ -1,6 +1,6 @@
 //! ABBA benchmark of the Rust and Vesper builds of the ported modules (port
 //! wave P3b lane 4, #1066): packet and frame encode/decode, ACK tracking,
-//! loss recovery,
+//! loss recovery, the stream byte buffers,
 //! and a loopback stream echo over two endpoints (whose packet path calls
 //! the ported header, frame, packet-number and ACK code).
 //!
@@ -14,9 +14,9 @@
 //!
 //! ```text
 //! crates/vesper-warp/port/bench.sh                 # builds both, runs every workload
-//! abba worker <frames|ack|recovery|transfer>                # one arm
-//! abba drive <frames|ack|recovery|transfer> <rust-worker> <vesper-worker>
-//! abba once <frames|ack|recovery|transfer> <batches>        # for callgrind
+//! abba worker <frames|ack|recovery|buffers|transfer>                # one arm
+//! abba drive <frames|ack|recovery|buffers|transfer> <rust-worker> <vesper-worker>
+//! abba once <frames|ack|recovery|buffers|transfer> <batches>        # for callgrind
 //! ```
 #[path = "../tests/support/mod.rs"]
 mod support;
@@ -33,6 +33,7 @@ use vesper_warp::packet_number::encoded_len;
 use vesper_warp::recovery::{
     CongestionEvent, HandshakeStatus, LossRecovery, RecoveryConfig, SentPacket,
 };
+use vesper_warp::stream::{RecvBuf, SendBuf};
 use vesper_warp::{PacketType, PnSpace};
 
 /// Packets built and parsed per frames batch.
@@ -41,6 +42,8 @@ const FRAME_PACKETS: u64 = 1024;
 const ACK_PACKETS: u64 = 8192;
 /// Packets sent per recovery batch.
 const RECOVERY_PACKETS: u64 = 4096;
+/// 1,200-byte chunks through the stream buffers per buffers batch.
+const BUFFER_CHUNKS: u64 = 1024;
 /// Echo rounds (2 KiB each way) per transfer batch.
 const TRANSFER_ROUNDS: u64 = 16;
 const DCID: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -263,6 +266,56 @@ fn recovery_batch(base: u64) -> u64 {
     mix(digest, events)
 }
 
+/// The stream byte buffers on their own: a 64 KiB send ring written,
+/// sent and acknowledged in 1,200-byte chunks with every seventh chunk lost
+/// and retransmitted, and a 64 KiB receive ring fed the same chunks with
+/// neighbours swapped and read back.
+fn buffers_batch(data: &[u8]) -> u64 {
+    let mut tx = SendBuf::new(65536);
+    let mut rx = RecvBuf::new(65536);
+    let mut chunk = [0u8; 1200];
+    let mut held = [0u8; 1200];
+    let mut out = [0u8; 4096];
+    let mut digest = 0xcbf2_9ce4_8422_2325;
+    let mut pending: Option<(u64, usize)> = None;
+    for i in 0..BUFFER_CHUNKS {
+        let src = &data[(i as usize * 7) % 800..][..200];
+        let mut n = 0;
+        while n < 1200 {
+            n += tx.write(&src[..(1200 - n).min(200)]);
+        }
+        let (off, len) = tx.take_new(1200);
+        tx.copy_out(off, &mut chunk[..len]);
+        if i % 7 == 3 {
+            tx.on_lost(off, len);
+            if let Some((o, l)) = tx.next_lost(1200) {
+                tx.copy_out(o, &mut chunk[..l]);
+                tx.on_ack(o, l);
+                digest = mix(digest, o ^ l as u64);
+            }
+        } else {
+            tx.on_ack(off, len);
+        }
+        // Receive side: hold every other chunk until the next one arrived.
+        match pending.take() {
+            Some((o, l)) => {
+                rx.insert(off, &chunk[..len]).expect("in window");
+                rx.insert(o, &held[..l]).expect("in window");
+            }
+            None => {
+                held[..len].copy_from_slice(&chunk[..len]);
+                pending = Some((off, len));
+            }
+        }
+        let r = rx.read(&mut out);
+        digest = mix(
+            digest,
+            r as u64 ^ rx.read_offset() ^ tx.acked_prefix() << 20,
+        );
+    }
+    digest
+}
+
 /// The stream echo of tests/stream_zero_alloc.rs: the client writes 2 KiB,
 /// the server echoes what it reads, and the client reads the echo back.
 struct Transfer {
@@ -380,6 +433,7 @@ impl Worker {
             ),
             "ack" => ack_batch(n * ACK_PACKETS),
             "recovery" => recovery_batch(n * RECOVERY_PACKETS),
+            "buffers" => buffers_batch(&self.data),
             "transfer" => self.transfer.as_mut().expect("transfer").batch(),
             other => panic!("unknown workload {other}"),
         }
@@ -466,6 +520,7 @@ fn drive(workload: &str, rust: &str, vesper: &str) {
         "frames" => (32, FRAME_PACKETS, "packet"),
         "ack" => (16, ACK_PACKETS, "packet"),
         "recovery" => (16, RECOVERY_PACKETS, "packet"),
+        "buffers" => (16, BUFFER_CHUNKS, "chunk"),
         "transfer" => (8, TRANSFER_ROUNDS, "round"),
         other => panic!("unknown workload {other}"),
     };
@@ -549,7 +604,7 @@ fn main() {
         ["once", workload, batches] => once(workload, batches.parse().expect("batches")),
         _ => {
             eprintln!(
-                "usage: abba worker <frames|ack|recovery|transfer> | abba drive <workload> <rust-worker> <vesper-worker> | abba once <workload> <batches>"
+                "usage: abba worker <frames|ack|recovery|buffers|transfer> | abba drive <workload> <rust-worker> <vesper-worker> | abba once <workload> <batches>"
             );
             std::process::exit(2);
         }

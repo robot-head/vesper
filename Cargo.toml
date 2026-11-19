@@ -84,6 +84,7 @@ members = [
     "crates/vesper-nexus",
     "crates/vesper-vault",
     "crates/vesper-kinetic",
+    "crates/vesper-kinetic/seed",
     "crates/vesper-prism-h3",
     "crates/vesper-aura-gtk",
     "crates/vesper-gpu-compute",
@@ -181,6 +182,7 @@ default-members = [
     "crates/vesper-nexus",
     "crates/vesper-vault",
     "crates/vesper-kinetic",
+    "crates/vesper-kinetic/seed",
     "crates/vesper-prism-h3",
     "crates/vesper-aura-gtk",
     "crates/vesper-gpu-compute",
@@ -285,7 +287,7 @@ vesper-crucible = { path = "crates/vesper-crucible/seed", package = "vesper-cruc
 # The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
 # port is the package crates/vesper-ebpf (#1041).
 vesper-ebpf = { path = "crates/vesper-ebpf/seed", package = "vesper-ebpf-seed" }
-vesper-kinetic = { path = "crates/vesper-kinetic" }
+vesper-kinetic = { path = "crates/vesper-kinetic/seed", package = "vesper-kinetic-seed" }
 vesper-ffi = { path = "crates/vesper-ffi" }
 vesper-migrate = { path = "crates/vesper-migrate" }
 # The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper

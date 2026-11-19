@@ -19,7 +19,14 @@ const AUDITED_THEOREMS: usize = 19;
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
 
 fn lean_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lean")
+    // The seed package (seed/) runs this file too, one level deeper.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dir = if dir.ends_with("seed") {
+        dir.join("..")
+    } else {
+        dir
+    };
+    dir.join("../../lean")
 }
 
 /// Remove `--` line comments and nested `/- -/` block comments.

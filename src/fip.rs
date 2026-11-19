@@ -266,6 +266,7 @@ fn expr_uses_box(e: &Expr) -> bool {
         | ExprKind::For { .. }
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_)) => k
             .control_children()
             .into_iter()
@@ -1207,6 +1208,7 @@ impl<'a> FipChecker<'a> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_) => {
                 // Loops and early exits leave the FIP ownership model (P0 lane 4).
                 self.diagnostics.push(Diagnostic::new(
@@ -1715,6 +1717,37 @@ struct Elaboration {
     after_inst: BTreeMap<usize, Vec<(usize, FipDrop)>>,
     before_term: BTreeMap<usize, Vec<FipDrop>>,
     edges: BTreeMap<(usize, usize), Vec<FipDrop>>,
+    /// What the graph owns while an instruction that can abort runs, by
+    /// (block, instruction): dropped when a `Fail` leaves the graph there
+    /// ([`fail_exit_drops`]).
+    at_abort: BTreeMap<(usize, usize), Vec<FipDrop>>,
+}
+
+/// The boxes a graph owns at each instruction that can abort it (a call, an
+/// indirect call, `?`, a handled body, a sequence or tiled operation, a
+/// partial primitive), by (block, instruction): what a `Fail` leaving the
+/// graph there must drop. Arguments the instruction takes `sink` are the
+/// callee's to drop. Empty when the graph owns no box or its drops are not
+/// elaborated ([`elaborate_non_fip_drops`]).
+pub fn fail_exit_drops(
+    world: &World,
+    f: &crate::ir::FunctionIr,
+) -> BTreeMap<(usize, usize), Vec<FipDrop>> {
+    if !active(world)
+        || world.functions.get(&f.name).is_some_and(|src| src.fip)
+        || !f
+            .values
+            .values()
+            .chain(f.locals.values())
+            .chain(f.params.iter().map(|p| &p.ty))
+            .any(|t| type_contains_box(world, t))
+    {
+        return BTreeMap::new();
+    }
+    elaborate_function(world, f)
+        .filter(|e| edges_placeable(f, e))
+        .map(|e| e.at_abort)
+        .unwrap_or_default()
 }
 
 /// An edge drop is placed before its source's `Jump`, or in a block split
@@ -1796,6 +1829,7 @@ fn elaborate_function(world: &World, f: &crate::ir::FunctionIr) -> Option<Elabor
         after_inst: BTreeMap::new(),
         before_term: BTreeMap::new(),
         edges: BTreeMap::new(),
+        at_abort: BTreeMap::new(),
     };
     if n_blocks == 0 {
         return Some(plan);
@@ -1879,6 +1913,7 @@ fn elaborate_function(world: &World, f: &crate::ir::FunctionIr) -> Option<Elabor
         plan.after_inst.clear();
         plan.before_term.clear();
         plan.edges.clear();
+        plan.at_abort.clear();
         let mut changed = false;
         for &b in &order {
             if !reachable[b] {
@@ -2080,6 +2115,30 @@ fn block_drops(
             }
             block_div = true;
             break;
+        }
+        if may_abort(inst) {
+            let taken: BTreeSet<ValueId> = match &inst.op {
+                Op::Call { args, .. }
+                | Op::Indirect { args, .. }
+                | Op::Tiled { args, .. }
+                | Op::Seq { args, .. }
+                | Op::Fip { args, .. } => args
+                    .iter()
+                    .filter(|a| a.pass == Pass::Sink)
+                    .map(|a| a.value)
+                    .collect(),
+                Op::Try(v) => BTreeSet::from([*v]),
+                _ => BTreeSet::new(),
+            };
+            let mut drops: Vec<FipDrop> = owned_values
+                .iter()
+                .filter(|(v, _)| !taken.contains(v))
+                .map(|(v, t)| FipDrop::Value(*v, t.clone()))
+                .collect();
+            drops.extend(owned_slot_drops(world, f, &slots));
+            if !drops.is_empty() {
+                plan.at_abort.insert((b, inst_idx), drops);
+            }
         }
         if inst.ty.name() == "Never" {
             block_div = true;
@@ -2324,6 +2383,20 @@ fn block_drops(
         }
     }
     (slots, block_div)
+}
+/// Whether `inst` can abort its graph with a `Fail` (its own or a callee's).
+fn may_abort(inst: &crate::ir::Instruction) -> bool {
+    use crate::ir::Op;
+    inst.fallible
+        || matches!(
+            inst.op,
+            Op::Call { .. }
+                | Op::Indirect { .. }
+                | Op::Try(_)
+                | Op::Handle { .. }
+                | Op::Seq { .. }
+                | Op::Tiled { .. }
+        )
 }
 /// What a native sequence drop frees ([`seq_drop_plan`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

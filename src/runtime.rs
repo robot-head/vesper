@@ -1581,6 +1581,7 @@ impl<'a> Runtime<'a> {
                         | ExprKind::For { .. }
                         | ExprKind::Range { .. }
                         | ExprKind::Break(_)
+                        | ExprKind::Continue
                         | ExprKind::Return(_) => {
                             return Err("loops and early exits run only as lowered Place IR".into());
                         }

@@ -386,6 +386,7 @@ fn preflight_ast(world: &World, limits: BatchLimits) -> Result<(), String> {
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_)) => {
                 for c in k.control_children().into_iter().flatten() {
                     add(c);

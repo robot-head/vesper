@@ -92,6 +92,8 @@ vesper_crate(
             ":files",
             "//crates/vesper-alloc:files",
         ],
+        # @vesper-std/sort, core and bytes (#1096) as a driver's dependencies.
+        "test/std_sort": [":files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
         "test/self_host_front_end": glob([

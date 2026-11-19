@@ -746,12 +746,16 @@ impl World {
                 pairs: Vec::with_capacity(max_pairs),
                 max_pairs,
             });
+            if let Some(scratch) = self.lbvh.as_mut() {
+                scratch.tree.reserve_pairs(max_pairs);
+            }
         }
         if let Some(scratch) = self.lbvh.as_mut() {
             let n = self.bodies.len();
             match mode {
                 BroadphaseMode::Lbvh if scratch.tree.capacity() < n => {
-                    scratch.tree = Lbvh::with_capacity(n)
+                    scratch.tree = Lbvh::with_capacity(n);
+                    scratch.tree.reserve_pairs(scratch.max_pairs);
                 }
                 BroadphaseMode::SweepAndPrune if scratch.sap.capacity() < n => {
                     scratch.sap = SweepAndPrune::with_capacity(n);

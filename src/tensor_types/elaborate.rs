@@ -401,6 +401,7 @@ impl Lower<'_> {
             },
             ExprKind::Break(v) => ExprKind::Break(v.as_ref().map(|x| Box::new(self.expr(x)))),
             ExprKind::Return(v) => ExprKind::Return(v.as_ref().map(|x| Box::new(self.expr(x)))),
+            ExprKind::Continue => ExprKind::Continue,
             ExprKind::Closure {
                 params,
                 mode,

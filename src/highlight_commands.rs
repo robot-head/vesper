@@ -630,6 +630,7 @@ impl<'a> Collector<'a> {
             k @ (ExprKind::Loop(_)
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_)) => {
                 for c in k.control_children().into_iter().flatten() {
                     self.expr(c, bounds, bindings, false);

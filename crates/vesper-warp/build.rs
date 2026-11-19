@@ -49,4 +49,6 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
     ),
     // recovery.ves: kPacketThreshold becomes 4.
     ("recovery", "sat_add(e.pn, 3)", "sat_add(e.pn, 4)"),
+    // stream.ves: an in-order insert no longer advances the readable prefix.
+    ("stream", "if start <= s.contig {", "if start < s.contig {"),
 ];

@@ -471,6 +471,7 @@ impl Parser<'_> {
             ExprKind::Break(value) | ExprKind::Return(value) => {
                 value.as_ref().map_or(0, |e| height(e))
             }
+            ExprKind::Continue => 0,
             ExprKind::Handle {
                 state,
                 body,
@@ -1942,6 +1943,7 @@ impl Parser<'_> {
             K::Lower if self.at_word(0, "break") && !self.bound_values.contains("break") => {
                 self.jump_expr(false)
             }
+            K::Lower if self.at_continue() => self.continue_expr(),
             K::Return => self.jump_expr(true),
             K::Pipe | K::Or => self.closure(),
             _ => self.binary(0),
@@ -2025,6 +2027,26 @@ impl Parser<'_> {
             } else {
                 ExprKind::Break(value)
             },
+            span: start..self.end(),
+        }
+    }
+    /// Whether the parser is at `continue` (manuscript `ContinueExpr`): a
+    /// contextual word, like `break`, that stays an ordinary name where a
+    /// binding or item of that name is in scope or a value follows it.
+    fn at_continue(&self) -> bool {
+        self.at_word(0, "continue")
+            && !self.bound_values.contains("continue")
+            && matches!(
+                self.nth(1),
+                K::Semi | K::RBrace | K::RParen | K::RBracket | K::Comma | K::Eof
+            )
+    }
+    /// `continue` (manuscript `ContinueExpr`).
+    fn continue_expr(&mut self) -> Expr {
+        let start = self.start();
+        self.bump();
+        Expr {
+            kind: ExprKind::Continue,
             span: start..self.end(),
         }
     }
@@ -2774,7 +2796,7 @@ pub(crate) fn contextual_item_names(
     for t in &mut significant {
         if previous == Some(K::Fn) && t.kind == K::Lower {
             let name = &source[t.span.clone()];
-            if matches!(name, "break" | "for" | "loop") {
+            if matches!(name, "break" | "continue" | "for" | "loop") {
                 names.insert(name.to_owned());
             }
         }

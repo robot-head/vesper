@@ -1,7 +1,8 @@
 # Port P3b lane 4: Warp's QUIC core in Vesper
 
 Claim: #1066 (it lands in several PRs, and the last one closes it). Part
-1a (PR #1079) ported the wire modules, and part 1b adds loss recovery. Lane prompt:
+1a (PR #1079) ported the wire modules, part 1b (PR #1108) loss recovery,
+and part 1c the stream byte buffers. Lane prompt:
 `docs/agent-prompts/port-p3b/04-warp.md` (plan PR #1072).
 
 ## Summary
@@ -36,7 +37,8 @@ Claim: #1066 (it lands in several PRs, and the last one closes it). Part
 | `ack` | `ReceivedPackets::new`, `check`, `on_packet_received`, `ack_frame` (delay), `on_ack_sent`, `on_ack_of_ack` | Range storage (`[AckRange; N]`, lent in place), `largest`/`ranges`/`ecn_counts`/`ack_deadline` getters |
 | `recovery` | `ack_delay_ns`, `RttEstimator::new`/`update`/`pto_base_ns`/`loss_delay_ns`, `LossRecovery::new`, `on_packet_sent`, `on_ack_received`, `on_timeout`, `pto_time_and_space`, `persistent_congestion_duration_ns`, `set_max_ack_delay_ns`, `set_handshake_status`, `reset_space`, `discard_space`, and the timer it arms | The buffers (three `RecSpace`s, the sent-packet rings and one call's events), lent in place; replaying the events to the caller's sink; the getters |
 | `cc` | Nothing yet (see below) | The BBR adapters |
-| stream, endpoint, handshake, lifecycle, TLS glue | Not yet (later parts) | Everything |
+| `stream` | `SendBuf` (`write`, `next_lost`, `take_new`, `copy_out`, `on_ack`, `on_lost`, `discard`, `reset_for_reuse`, `free_space`), `RecvBuf` (`insert`, `read`, `reset_for_reuse`), and the ring bitmaps and ring copies under them | The rings and bitmaps (owned by the wrapper, lent in place); the offset getters; the stream state machines, `CryptoStream`, `StreamSet` (packet building, flow control, the sent-frame record), which call the ported buffers |
+| endpoint, handshake, lifecycle, TLS glue | Not yet (part 2) | Everything |
 
 Borrowed slices cross the ABI as spans `(start, len)` into the caller's
 buffer, and the Rust side converts them back into slices. That keeps
@@ -75,6 +77,15 @@ const context.
   RTT arithmetic becomes exact `u64` forms: `(3a + b) / 4` and
   `(7a + b) / 8` split into quotients and remainders, and `9b / 8` is
   `b + b / 8`.
+- The stream buffers keep Rust's layout: a byte ring with one bitmap bit
+  per byte (acknowledged and lost for sending, received for receiving),
+  walked a word at a time. `StreamSet` reads the buffers' offsets through
+  their getters now, instead of their fields, so the same Rust
+  orchestration runs over either build. `StreamSet` is a pool of streams
+  with optional halves, an event queue and a sent-frame record. Porting it
+  needs owned collections of structs that hold buffers, which the port
+  would have to keep as Rust handles today. It stays Rust for part 2,
+  where the endpoint's handles land.
 - `cc` stays Rust in this part. Its adapters wrap `vesper-warp-bbr`, whose
   port is one concatenated compilation unit without `use` imports, so it
   cannot be a Loom dependency of `@vesper/warp` without changing that
@@ -90,10 +101,12 @@ const context.
 ## Unit tests
 
 - The integration suites (`tests/*.rs`) run unchanged on both builds.
-- The unit tests in `src/varint.rs` and `src/packet_number.rs` exercise only
-  the public API, so they also run on both builds.
+- The unit tests in `src/varint.rs`, `src/packet_number.rs` and
+  `src/stream.rs` (the send and receive buffer tests) exercise only the
+  public API, so they also run on both builds.
 - The unit tests in `src/reference/` cover reference internals and run only
-  on the Rust build.
+  on the Rust build. One example is `bits_find_and_wrap`, a test of the
+  reference bitmap type.
 - `scripts/test-port-harness.sh` runs both builds through
   `crates/vesper-warp/port/check.sh`.
 
@@ -112,6 +125,7 @@ Bazel build has one divergent object per module.
 | frame | STREAM FIN bit `!= 0` to `== 0` | `frames::stream_without_length_runs_to_end_and_all_type_bits` | `frames::ack_wire_ranges_decode` |
 | ack | delayed-ACK threshold `>= 2` to `>= 3` | `ack_tracking::delayed_ack_policy` | `ack_tracking::merges_ranges_and_detects_duplicates` |
 | recovery | packet threshold 3 to 4 | `recovery::packet_threshold_then_time_threshold` | `recovery::rtt_estimator_and_ack_delay_rules` |
+| stream | an in-order insert no longer advances the readable prefix (`start <= contig` to `<`) | `stream::tests::recv_buf_reassembles_with_wrap` | `stream::tests::send_buf_retransmits_only_unacked_lost_bytes` |
 
 ## Speed against Rust
 
@@ -125,10 +139,12 @@ startup. The frames digests match Rust (`0ec977800e561b4d` for 3 batches).
 | frames | encode and parse 1,024 packets of mixed frames (ACK with ranges, STREAM, CRYPTO, flow control, close) | 251 ns/packet | 586 ns/packet | 2.35x (2.33-2.38) | 4.18M | 9.57M | 2.29x |
 | ack | 8,192 received packets with gaps, ACK frames built and encoded | 41 ns/packet | 76 ns/packet | 1.86x (1.84-1.88) | 5.54M | 11.23M | 2.03x |
 | recovery | 4,096 sends with an ACK every eighth and a loss every fortieth, loss timer polled per send | 59 ns/packet | 222 ns/packet | 5.39x (4.92-5.48) | 1.78M | 7.41M | 4.16x |
-| transfer | 16 echo rounds on a loopback connection pair (endpoint, TLS and crypto stay Rust) | 22.7 µs/round | 26.0 µs/round | 1.15x (1.12-1.17) | 3.13M | 3.60M | 1.15x |
+| buffers | 1,024 chunks of 1,200 bytes through a 64 KiB send ring (every seventh lost and retransmitted) and a 64 KiB receive ring (neighbours swapped) | 1,249 ns/chunk | 1,908 ns/chunk | 1.51x (1.50-1.55) | 7.03M | 12.22M | 1.74x |
+| transfer | 16 echo rounds on a loopback connection pair (endpoint, TLS and crypto stay Rust) | 22.7 µs/round | 26.0 µs/round | 1.15x (1.12-1.17) | 3.13M | 3.78M | 1.21x |
 
-The transfer instruction count is from part 1b, with recovery ported too
-(part 1a measured 3.46M, or 1.11x). Its wall-clock numbers are from part 1a.
+The transfer instruction count is from part 1c, with recovery and the
+stream buffers ported too. Part 1a measured 3.46M (1.11x) and part 1b
+3.60M (1.15x). Its wall-clock numbers are from part 1a.
 Wall-clock runs for part 1b were noisy, because other jobs shared the
 machine: recovery measured 3.60x and 6.60x in two later runs. The
 callgrind ratio is the reliable figure.
@@ -205,7 +221,11 @@ struct temporaries through the stack. Gaps 4 and 5 below cover this.
    `sat_mul4` and `sat_mul1000` with constant divisors, because dividing
    by a variable needs a `Fail` row. std candidates: `saturating_add_u64`
    (`varint.ves` defines `sat_add`) and `saturating_mul_u64`.
-7. **`state` cannot be a field name.** It is a keyword. `vesper check`
+7. **No bitwise not on integers.** `!x` is boolean only, so the bitmap
+   code writes `x ^ u64_max()`. An `if` expression also cannot be the left
+   operand of a binary operator (`if c { a } else { b } & m` does not
+   parse), so it needs a temporary.
+8. **`state` cannot be a field name.** It is a keyword. `vesper check`
    says "expected a lower-case identifier", but `vesper fmt` reports only
    `Syntax { offset: N }`. The record field is `status`.
 
@@ -219,7 +239,7 @@ first run.
 
 ## Files
 
-- `crates/vesper-warp/vesper/`: `Loom.toml`, `src/{lib,varint,pn,header,frame,ack,recovery}.ves`
+- `crates/vesper-warp/vesper/`: `Loom.toml`, `src/{lib,varint,pn,header,frame,ack,recovery,stream}.ves`
 - `crates/vesper-warp/src/reference/`: the frozen Rust implementations
 - `crates/vesper-warp/src/ported/`: the forwarding layer
 - `crates/vesper-warp/port/`: `binding.rs` (generated), `check.sh`, `bench.sh`

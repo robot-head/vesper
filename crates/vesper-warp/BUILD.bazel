@@ -49,6 +49,7 @@ vesper_port_object(
         ("frame", "fin: ty & stream_fin() != 0,", "fin: ty & stream_fin() == 0,"),
         ("ack", "s.unacked_ack_eliciting >= 2", "s.unacked_ack_eliciting >= 3"),
         ("recovery", "sat_add(e.pn, 3)", "sat_add(e.pn, 4)"),
+        ("stream", "if start <= s.contig {", "if start < s.contig {"),
     ]
 ]
 
@@ -72,7 +73,7 @@ rust_library(
     ),
 )
 
-# The in-crate unit tests (varint and packet_number) of the port build,
+# The in-crate unit tests (varint, packet_number, stream) of the port build,
 # compiled from the same sources as :port (a `crate = ":port"` test does
 # not find the crate root here).
 rust_test(

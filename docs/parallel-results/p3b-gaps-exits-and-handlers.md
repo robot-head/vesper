@@ -5,9 +5,10 @@ Claim #1095. Prompt:
 Base `9305b24` (origin/main with the wave plan #1098), merged with
 origin/main `31f81b9` (#1076) before merging.
 
-This report covers parts 1 and 2 (PR #1105). Parts 3 (Box drops on `Fail`
-exits, specialized `sink` leaks, after #1076) and 4 (affine extern-type drop
-imports, after #1077) follow in their own PRs and extend this report.
+Parts 1 and 2 merged in PR #1105 (`c9bd17a`; the bootstrap-stage1
+workflow passed on that branch). Part 3 (Box drops on `Fail` exits,
+specialized `sink` leaks) is the next PR, based on `c9bd17a`. Part 4
+(affine extern-type drop imports) follows and extends this report.
 
 ## Part 1: bit builtins on a reassigned `let mut`
 
@@ -114,7 +115,51 @@ selectors and clause locals) in the specializing backend, or the handler ABI
 backend (`src/native_handlers.rs`, fibers) gaining loops and sequences. Every
 clause in the Flux, Chorus and `dyn` tests is tail-resumptive.
 
-## Before and after
+## Part 3: Box drops on `Fail` exits and specialized `sink` parameters
+
+**Repros** (port-p3b-loop-owned-boxes.md "Remaining gaps",
+port-p3b-dyn-effects-closures.md "Gaps found"), counted with the native box
+allocator and the sequence teardown counter, JIT optimize on:
+
+| Program | Before | After |
+| --- | --- | --- |
+| acyclic `held(7)`: `let b = Box::new(..); risky(x)` fails | 2 boxes allocated, 1 freed | 2 / 2 |
+| loop `b = Box::new(P { v: risky(i) })`, fails at `i = 6` | 11 allocated, 10 freed | 11 / 11 |
+| box in a handled body whose `Fail` handler aborts, in a loop | 6 allocated, 4 freed | 6 / 6 |
+| handler-specialized `take(sink s: ChunkSeq[i64], x) eff [Log]` leaves `s` | 1 sequence left for teardown | 0 |
+| same with a sequence, a box and a struct holding a sequence, 3 iterations | 6 sequences left for teardown | 0 |
+
+**Fix: `Fail` exits.** `fip::fail_exit_drops` runs the box drop
+elaboration of #1076 (`elaborate_function`, acyclic or the loop fixed point)
+and records, at each instruction that can abort the graph (calls, indirect
+calls, `?`, handled bodies, sequence and tiled operations, partial
+primitives), the boxes the graph owns there: owned temporaries other than
+the ones the instruction takes `sink` (the callee drops those) and the
+remaining box paths of its owned slots. The native backend keeps that map,
+the graph's value registers and its scope on each graph's exit target, and
+the instruction it is emitting. A `Fail` that leaves the function
+(`fail_exit`) drops what every graph being emitted owns at its current
+instruction, the inlined callees and handled bodies included; a `Fail`
+handled in the same function drops what the handled body and the graphs
+inlined into it own before its clause runs (`raise` never resumes).
+
+**Fix: specialized `sink` parameters.** A function inlined for its handler
+effects is a nested graph, and nested graphs did not give their parameters
+sequence/string drop slots (a handled body shares its parameters with its
+function). An inlined function (a graph not named `$...`) now owns its `sink`
+parameters as a separately compiled callee does. `dyn` objects lent `sink`
+stay the caller's to free (`LentSinkBlock`). Boxes were already dropped by
+the elaboration.
+
+**Tests.** `tests/native_fail_exit_drops.rs` (5) and
+`tests/native_specialized_sink.rs` (3): the JIT with optimize on and off frees
+every box exactly once and leaves no sequence for teardown, frees no dead
+sequence, agrees with the evaluator, and emits x86-64 and AArch64 objects.
+They cover an acyclic and a loop function, a box taken `sink` by the failing
+callee, boxes in struct fields and a `Box[dyn Trait]`, a handled body inside
+a loop, and unconsumed `sink` sequences, boxes and sequence-holding structs.
+
+## Before and after (parts 1 and 2)
 
 | Repro | Before | After |
 | --- | --- | --- |

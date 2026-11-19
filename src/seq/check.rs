@@ -280,7 +280,7 @@ impl Checker<'_> {
         }
         let elem_ty = elem(&base_ty).cloned().unwrap_or(Type::Infer);
         let seq = is_seq_type(&base_ty);
-        let Some(op) = resolve(method, Some(&base_ty)) else {
+        let Some(op) = resolve(method, Some(&base_ty)).map(|op| op.with_arity(args.len())) else {
             self.error(
                 "E1525",
                 format!(
@@ -318,8 +318,10 @@ impl Checker<'_> {
             | SeqOp::BytesEq
             | SeqOp::FindByte
             | SeqOp::EqIgnoreAsciiCase
-            | SeqOp::ExtendAsciiLowercase => 1,
-            SeqOp::FindEither => 2,
+            | SeqOp::ExtendAsciiLowercase
+            | SeqOp::ExtendReversed => 1,
+            SeqOp::FindEither | SeqOp::Resize | SeqOp::ExtendFromWithin { .. } => 2,
+            SeqOp::FillRange { .. } => 3,
             SeqOp::FindNotIn => 3,
             SeqOp::Wide(w) if !w.write => 1,
             SeqOp::CopyWithin { .. } => 3,
@@ -346,7 +348,14 @@ impl Checker<'_> {
                     ),
                     span.clone(),
                 ),
-            SeqOp::Extend | SeqOp::CopyFrom { .. } | SeqOp::CopyWithin { .. } | SeqOp::Fill
+            SeqOp::Extend
+            | SeqOp::CopyFrom { .. }
+            | SeqOp::CopyWithin { .. }
+            | SeqOp::Fill
+            | SeqOp::Resize
+            | SeqOp::FillRange { .. }
+            | SeqOp::ExtendFromWithin { .. }
+            | SeqOp::ExtendReversed
                 if known && mode != Mode::Copy =>
             {
                 self.error(
@@ -392,10 +401,13 @@ impl Checker<'_> {
                         | SeqOp::Truncate
                         | SeqOp::Reserve
                         | SeqOp::CopyFrom { .. }
+                        | SeqOp::Resize
                         | SeqOp::Wide(_),
                     0
                 )
             ) || (matches!(op, SeqOp::CopyWithin { .. }) && i < 3)
+                || (matches!(op, SeqOp::FillRange { .. } | SeqOp::ExtendFromWithin { .. })
+                    && i < 2)
                 || (matches!(op, SeqOp::MakeAsciiLowercase { .. }) && i < 2);
             let source_arg = matches!(
                 op,
@@ -403,6 +415,7 @@ impl Checker<'_> {
                     | SeqOp::BytesEq
                     | SeqOp::EqIgnoreAsciiCase
                     | SeqOp::ExtendAsciiLowercase
+                    | SeqOp::ExtendReversed
             ) || (matches!(op, SeqOp::CopyFrom { .. }) && i == 1);
             if index_arg {
                 self.seq_by_value(method, a);
@@ -466,6 +479,8 @@ impl Checker<'_> {
             | SeqOp::CopyFrom { total: true }
             | SeqOp::CopyWithin { total: true }
             | SeqOp::MakeAsciiLowercase { total: true }
+            | SeqOp::FillRange { total: true }
+            | SeqOp::ExtendFromWithin { total: true }
             | SeqOp::BytesEq
             | SeqOp::EqIgnoreAsciiCase => Type::named("bool"),
             SeqOp::SumBe16 => u64_ty,

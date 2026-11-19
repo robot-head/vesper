@@ -139,6 +139,7 @@ fn visit<'a>(expression: &'a Expr, callback: &mut impl FnMut(&'a Expr)) {
         | ExprKind::For { .. }
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_)) => {
             for child in kind.control_children().unwrap_or_default() {
                 visit(child, callback);
