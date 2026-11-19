@@ -1,0 +1,146 @@
+// Module time of @vesper/aegis (see lib.ves): iso8601_utc_to_unix of
+// src/time.rs, strict `YYYY-MM-DDTHH:MM:SS[.fraction]Z` timestamps.
+use self::reader::byte;
+
+pub fn is_digit(c: u64) -> bool {
+    c >= 48 && c <= 57
+}
+
+// Marks a field that is not all ASCII digits (no field reaches it).
+pub fn bad() -> u64 {
+    100000
+}
+
+// The decimal number in `s[start..end]`, or bad() if a byte is not an
+// ASCII digit. At most four digits, so it cannot overflow.
+pub fn num(in s: Slice[u8], start: u64, end: u64) -> u64 {
+    let mut v: u64 = 0;
+    for i in start..end {
+        let c = byte(in s, i);
+        if !is_digit(c) {
+            return bad();
+        }
+        v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(c, 48));
+    }
+    v
+}
+
+// Days in `month` (1..=12) of `year`.
+pub fn month_days(year: u64, month: u64) -> u64 {
+    if month == 2 {
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        if leap {
+            29
+        } else {
+            28
+        }
+    } else if month == 4 || month == 6 || month == 9 || month == 11 {
+        30
+    } else {
+        31
+    }
+}
+
+// Days since 1970-01-01 (Howard Hinnant's days_from_civil) for a date in
+// 1970 or later, where every intermediate value is non-negative.
+pub fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
+    let y = if month <= 2 {
+        wrapping_sub(year, 1)
+    } else {
+        year
+    };
+    let era = y / 400;
+    let yoe = wrapping_sub(y, wrapping_mul(era, 400));
+    let mp = wrapping_add(month, 9) % 12;
+    let doy = wrapping_sub(wrapping_add(wrapping_add(wrapping_mul(153, mp), 2) / 5, day), 1);
+    let doe = wrapping_add(
+        wrapping_sub(wrapping_add(wrapping_mul(yoe, 365), yoe / 4), yoe / 100),
+        doy
+    );
+    wrapping_sub(wrapping_add(wrapping_mul(era, 146097), doe), 719468)
+}
+
+pub fn iso8601_utc_to_unix(in s: Slice[u8]) -> Option[u64] {
+    let n = s.len();
+    if n
+        < 20
+        || byte(in s, 4)
+        != 45
+        || byte(in s, 7)
+        != 45
+        || byte(in s, 10)
+        != 84
+        || byte(in s, 13)
+        != 58
+        || byte(in s, 16)
+        != 58 {
+        return Option::None;
+    }
+    let year = num(in s, 0, 4);
+    let month = num(in s, 5, 7);
+    let day = num(in s, 8, 10);
+    let hour = num(in s, 11, 13);
+    let minute = num(in s, 14, 16);
+    let second = num(in s, 17, 19);
+    if year
+        == bad()
+        || month
+        == bad()
+        || day
+        == bad()
+        || hour
+        == bad()
+        || minute
+        == bad()
+        || second
+        == bad() {
+        return Option::None;
+    }
+    // "Z", or "." with one or more digits and then "Z".
+    let ok_tail = if n == 20 {
+        byte(in s, 19) == 90
+    } else {
+        byte(in s, 19)
+            == 46
+            && byte(in s, wrapping_sub(n, 1))
+            == 90
+            && n
+            > 21
+            && num_ok(in s, 20, wrapping_sub(n, 1))
+    };
+    if !ok_tail
+        || year
+        < 1970
+        || month
+        < 1
+        || month
+        > 12
+        || hour
+        > 23
+        || minute
+        > 59
+        || second
+        > 59 {
+        return Option::None;
+    }
+    if day == 0 || day > month_days(year, month) {
+        return Option::None;
+    }
+    let days = days_from_civil(year, month, day);
+    Option::Some(
+        wrapping_add(
+            wrapping_add(wrapping_mul(days, 86400), wrapping_mul(hour, 3600)),
+            wrapping_add(wrapping_mul(minute, 60), second)
+        )
+    )
+}
+
+// Whether `s[start..end]` is all ASCII digits (any length).
+pub fn num_ok(in s: Slice[u8], start: u64, end: u64) -> bool {
+    for i in start..end {
+        if !is_digit(byte(in s, i)) {
+            return false;
+        }
+    }
+    true
+}

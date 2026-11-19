@@ -13,6 +13,7 @@ while read -r index area file failing passing; do
 done <<'CHECKS'
 0 imsic parity imsic_files_match every_fixture_parses_identically
 1 aplic parity aplic_domains_match imsic_files_match
-2 dtb dtb qemu_riscv_virt_memory_harts_and_plic malformed_headers_are_typed_errors
+2 plic parity interrupt_fabrics_match imsic_files_match
+3 dtb dtb qemu_riscv_virt_memory_harts_and_plic malformed_headers_are_typed_errors
 CHECKS
 unset VESPER_SILICON_DIVERGENT

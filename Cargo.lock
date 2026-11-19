@@ -5561,7 +5561,7 @@ dependencies = [
  "serde",
  "serde_json",
  "target-lexicon",
- "vesper-aegis",
+ "vesper-aegis-seed",
  "vesper-alloc-seed",
  "vesper-beacon-seed",
  "vesper-bench-pmu",
@@ -5611,6 +5611,30 @@ dependencies = [
 
 [[package]]
 name = "vesper-aegis"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "coset",
+ "rcgen",
+ "ring",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "spki",
+ "subtle",
+ "vesper-aegis-seed",
+ "vesper-bench",
+ "vesper-loom-cas",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-vault",
+ "x509-parser",
+ "zeroize",
+]
+
+[[package]]
+name = "vesper-aegis-seed"
 version = "0.1.0"
 dependencies = [
  "chacha20poly1305",
@@ -6317,6 +6341,9 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "quinn-proto",
+ "vesper-bench-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-prism",
  "vesper-warp",
  "vesper-warp-shard",

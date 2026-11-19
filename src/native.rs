@@ -1355,6 +1355,7 @@ fn define_instances_observed_with_trace<M: Module>(
                 abi,
                 own_abi,
                 result_buffer: own_abi.result_words.and(sret),
+                forced_call_vars: None,
             };
             c.set_location(f.span.start);
             // Function-value parameters bound to top-level functions by
@@ -2199,6 +2200,11 @@ struct Codegen<'a, 'b, M: Module> {
     own_abi: FnAbi,
     /// The local buffer a register-result function builds its value in.
     result_buffer: Option<ir::Value>,
+    /// Type arguments of the next [`Codegen::call_function_into`], which
+    /// otherwise reads them from its call site: a call through an effectful
+    /// vtable slot names the selected conformance method directly
+    /// ([`Codegen::dyn_call_effectful`]).
+    forced_call_vars: Option<BTreeMap<String, Type>>,
 }
 /// The Cranelift source location of source byte `offset`. Locations are
 /// byte offsets into the checked module's source; the all-ones value is
@@ -5907,7 +5913,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         // `dyn` parameters take their object types: a `dyn` function has
         // one instance, and each concrete argument is coerced to an object.
-        let raw_vars = call_vars(self.world, site, &self.generic_vars);
+        let raw_vars = match self.forced_call_vars.take() {
+            Some(vars) => vars,
+            None => call_vars(self.world, site, &self.generic_vars),
+        };
         let vars = self.world.dyn_objects.erase(name, &raw_vars);
         let dyn_slot = self
             .world
@@ -5916,6 +5925,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             .get(name)
             .map(|(_, slot)| *slot);
         let f = concrete(self.world, name, &vars)?;
+        if let Some(slot) = dyn_slot
+            && specialized_function(self.world, &f)
+        {
+            // A slot that performs handler effects reaches the caller's
+            // handlers through the object's vtable identity (§7.3).
+            return self.dyn_call_effectful(slot, &f, args, site, into);
+        }
         let result_layout = Layout::of(self.world, &f.result)?;
         let mut values = vec![];
         let mut restores = vec![];

@@ -18,8 +18,19 @@ const MODEL_ID: &str = "vesper.aegis.toctou-policy-model/1";
 const AUDITED_THEOREMS: usize = 7;
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
 
+/// The crate directory, also when this file is built by the seed package
+/// (`seed/`, whose manifest directory is one level down).
+fn crate_dir() -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if dir.ends_with("seed") {
+        dir.parent().map(PathBuf::from).unwrap_or(dir)
+    } else {
+        dir
+    }
+}
+
 fn lean_file() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lean/AegisToctou.lean")
+    crate_dir().join("../../lean/AegisToctou.lean")
 }
 
 fn strip_lean_comments(source: &str) -> String {
@@ -176,7 +187,7 @@ const COLLATERAL_MODEL_ID: &str = "vesper.aegis.tcb-evaluation-model/1";
 const COLLATERAL_AUDITED_THEOREMS: usize = 15;
 
 fn collateral_file() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lean/AegisCollateral.lean")
+    crate_dir().join("../../lean/AegisCollateral.lean")
 }
 
 #[test]

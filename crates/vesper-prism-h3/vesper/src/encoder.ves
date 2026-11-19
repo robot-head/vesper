@@ -1,0 +1,499 @@
+// qpack/encoder.rs: the QPACK encoder (RFC 9204 §2.1 and §4.3). Outstanding
+// field sections are four parallel sequences (stream, Required Insert Count,
+// and the span of their references in `sec_refs`).
+
+use self::{
+    EncoderCore,
+    QpackError,
+    Reason,
+    PrefixError,
+    Huff
+};
+use self::int::{
+    inc,
+    word,
+    byte,
+    max64,
+    max_u64,
+    remove_word,
+    drain_front
+};
+use self::prefix::{
+    decode_int,
+    encode_int,
+    encode_string
+};
+use self::table::{
+    static_exact,
+    static_name,
+    table_first,
+    table_slot,
+    table_evictions_for,
+    table_insert,
+    table_set_capacity,
+    table_set_capacity,
+    slot_name_is,
+    slot_is
+};
+use self::reason::{
+    reason_of
+};
+
+// RFC 9204 §4.5.1.1 encoding of the Required Insert Count.
+pub fn encode_ric(ric: u64, max_entries: u64) -> u64 {
+    let full = wrapping_mul(2, max_entries);
+    if ric == 0 || full == 0 {
+        return 0;
+    }
+    inc(ric % full)
+}
+
+pub fn sections(in e: EncoderCore) -> u64 {
+    e.sec_stream.len()
+}
+
+fn sec_stream(in e: EncoderCore, i: u64) -> u64 {
+    word(in e.sec_stream.as_slice(), i)
+}
+
+fn sec_ric(in e: EncoderCore, i: u64) -> u64 {
+    word(in e.sec_ric.as_slice(), i)
+}
+
+// Distinct streams with a section the decoder may still block on, counted
+// up to `cap`.
+fn blocking_count(in e: EncoderCore, cap: u64) -> u64 {
+    let n = sections(in e);
+    let krc = e.known_received;
+    let mut count: u64 = 0;
+    for i in 0..n {
+        if sec_ric(in e, i) > krc {
+            let id = sec_stream(in e, i);
+            let mut dup = false;
+            for j in 0..i {
+                if !dup && sec_ric(in e, j) > krc && sec_stream(in e, j) == id {
+                    dup = true;
+                }
+            }
+            if !dup {
+                count = inc(count);
+                if count >= cap {
+                    return count;
+                }
+            }
+        }
+    }
+    count
+}
+
+pub fn enc_blocking_streams(in e: EncoderCore) -> u64 {
+    blocking_count(in e, max_u64())
+}
+
+fn may_block(in e: EncoderCore, stream_id: u64) -> bool {
+    let krc = e.known_received;
+    for i in 0..sections(in e) {
+        if sec_stream(in e, i) == stream_id && sec_ric(in e, i) > krc {
+            return true;
+        }
+    }
+    blocking_count(in e, e.peer_blocked) < e.peer_blocked
+}
+
+fn slot_of(in e: EncoderCore, abs: u64) -> u64 {
+    wrapping_add(e.table.head, wrapping_sub(abs, table_first(in e.table)))
+}
+
+fn evictable(in e: EncoderCore, abs: u64) -> bool {
+    abs < e.known_received && word(in e.table.refs.as_slice(), slot_of(in e, abs)) == 0
+}
+
+fn add_ref(inout e: EncoderCore, abs: u64) {
+    let slot = slot_of(in e, abs);
+    let _set = e.table.refs.try_set(slot, inc(word(in e.table.refs.as_slice(), slot)));
+}
+
+fn limit(in e: EncoderCore, may_block: bool) -> u64 {
+    if may_block {
+        e.table.inserted
+    } else {
+        e.known_received
+    }
+}
+
+// The newest entry below the limit with this name and value.
+fn dynamic_exact(in e: EncoderCore, in name: Slice[u8], in value: Slice[u8], may_block: bool)
+    -> Option[u64] {
+    let first = table_first(in e.table);
+    let mut abs = limit(in e, may_block);
+    loop {
+        if abs <= first {
+            return Option::None;
+        }
+        abs = wrapping_sub(abs, 1);
+        if slot_is(in e.table, slot_of(in e, abs), in name, in value) {
+            return Option::Some(abs);
+        }
+    }
+}
+
+// The newest entry below the limit with this name.
+fn dynamic_name(in e: EncoderCore, in name: Slice[u8], may_block: bool) -> Option[u64] {
+    let first = table_first(in e.table);
+    let mut abs = limit(in e, may_block);
+    loop {
+        if abs <= first {
+            return Option::None;
+        }
+        abs = wrapping_sub(abs, 1);
+        if slot_name_is(in e.table, slot_of(in e, abs), in name) {
+            return Option::Some(abs);
+        }
+    }
+}
+
+// Inserts an entry if it is small enough and every entry it evicts is
+// acknowledged and unreferenced, writing the insert instruction.
+fn try_insert(inout e: EncoderCore, in h: Huff, in name: Slice[u8], in value: Slice[u8])
+    -> Option[u64] {
+    let size = wrapping_add(wrapping_add(name.len(), value.len()), 32);
+    if wrapping_mul(size, 256) > wrapping_mul(e.table.capacity, e.cfg.max_entry_share) {
+        return Option::None;
+    }
+    let n = match table_evictions_for(in e.table, size) {
+        Option::Some(n) => n,
+        Option::None => {
+            return Option::None;
+        },
+    };
+    let first = table_first(in e.table);
+    for k in 0..n {
+        if !evictable(in e, wrapping_add(first, k)) {
+            return Option::None;
+        }
+    }
+    match static_name(in h.st, in name) {
+        Option::Some(i) => encode_int(inout e.out, 192, 6, i),
+        Option::None => match dynamic_name(in e, in name, true) {
+            Option::Some(abs) => {
+                let rel = wrapping_sub(wrapping_sub(e.table.inserted, abs), 1);
+                encode_int(inout e.out, 128, 6, rel);
+            },
+            Option::None => encode_string(in h, inout e.out, 64, 5, in name),
+        },
+    }
+    encode_string(in h, inout e.out, 0, 7, in value);
+    table_insert(inout e.table, in name, in value);
+    e.stats.inserts = inc(e.stats.inserts);
+    Option::Some(wrapping_sub(e.table.inserted, 1))
+}
+
+// A reference to `abs` relative to `base` (pre- or post-base).
+fn reference(
+    inout e: EncoderCore,
+    abs: u64,
+    base: u64,
+    pre_flags: u8,
+    pre_bits: u64,
+    post_flags: u8,
+    post_bits: u64
+) {
+    if abs < base {
+        encode_int(inout e.lines, pre_flags, pre_bits, wrapping_sub(wrapping_sub(base, abs), 1));
+    } else {
+        encode_int(inout e.lines, post_flags, post_bits, wrapping_sub(abs, base));
+    }
+    add_ref(inout e, abs);
+    e.cur_refs.push(abs);
+}
+
+// One field line; `true` when it is a dynamic indexed line.
+fn field_line(
+    inout e: EncoderCore,
+    in h: Huff,
+    in name: Slice[u8],
+    in value: Slice[u8],
+    sensitive: bool,
+    use_dynamic: bool,
+    may_block: bool,
+    base: u64
+) {
+    if !sensitive {
+        match static_exact(in h.st, in name, in value) {
+            Option::Some(i) => {
+                encode_int(inout e.lines, 192, 6, i);
+                e.stats.static_refs = inc(e.stats.static_refs);
+                return;
+            },
+            Option::None => (),
+        }
+    }
+    if use_dynamic && !sensitive {
+        let found = match dynamic_exact(in e, in name, in value, may_block) {
+            Option::Some(abs) => Option::Some(abs),
+            Option::None => if may_block {
+                try_insert(inout e, in h, in name, in value)
+            } else {
+                match dynamic_exact(in e, in name, in value, true) {
+                    Option::Some(_abs) => (),
+                    Option::None => {
+                        let _inserted = try_insert(inout e, in h, in name, in value);
+                    },
+                }
+                Option::None
+            },
+        };
+        match found {
+            Option::Some(abs) => {
+                reference(inout e, abs, base, 128, 6, 16, 4);
+                e.stats.dynamic_refs = inc(e.stats.dynamic_refs);
+                return;
+            },
+            Option::None => (),
+        }
+    }
+    let n: u8 = if sensitive {
+        32
+    } else {
+        0
+    };
+    e.stats.literals = inc(e.stats.literals);
+    match static_name(in h.st, in name) {
+        Option::Some(i) => encode_int(inout e.lines, 80 | n, 4, i),
+        Option::None => {
+            let dynamic = if use_dynamic {
+                dynamic_name(in e, in name, may_block)
+            } else {
+                Option::None
+            };
+            match dynamic {
+                Option::Some(abs) => reference(inout e, abs, base, 64 | n, 4, (n >> 2), 3),
+                Option::None => encode_string(in h, inout e.lines, 32 | (n >> 1), 3, in name),
+            }
+        },
+    }
+    encode_string(in h, inout e.lines, 0, 7, in value);
+}
+
+// `Encoder::encode`. The fields are `bytes` (each name then its value) and
+// three words per field in `meta`: name length, value length, sensitive.
+pub fn enc_encode(
+    inout e: EncoderCore,
+    in h: Huff,
+    stream_id: u64,
+    in bytes: Slice[u8],
+    in meta: Slice[u64]
+) -> ChunkSeq[u8] {
+    e.stats.sections = inc(e.stats.sections);
+    let base = e.table.inserted;
+    let failed = match e.failed {
+        Option::Some(_f) => true,
+        Option::None => false,
+    };
+    let use_dynamic = e
+        .table
+        .capacity
+        > 0
+        && sections(in e)
+        < wrapping_u64(e.cfg.max_outstanding_sections)
+        && !failed;
+    let may_block = use_dynamic && may_block(in e, stream_id);
+    e.lines.clear();
+    e.cur_refs.clear();
+    let mut at: u64 = 0;
+    let count = meta.len() / 3;
+    for f in 0..count {
+        let nl = word(in meta, wrapping_mul(f, 3));
+        let vl = word(in meta, inc(wrapping_mul(f, 3)));
+        let sensitive = word(in meta, wrapping_add(wrapping_mul(f, 3), 2)) != 0;
+        let mid = wrapping_add(at, nl);
+        let end = wrapping_add(mid, vl);
+        field_line(
+            inout e,
+            in h,
+            in bytes[at..mid],
+            in bytes[mid..end],
+            sensitive,
+            use_dynamic,
+            may_block,
+            base
+        );
+        at = end;
+    }
+    let mut ric: u64 = 0;
+    for i in 0..e.cur_refs.len() {
+        ric = max64(ric, inc(word(in e.cur_refs.as_slice(), i)));
+    }
+    let mut out = ChunkSeq::with_capacity[u8](wrapping_add(e.lines.len(), 4));
+    encode_int(inout out, 0, 8, encode_ric(ric, e.max_entries));
+    if ric == 0 {
+        out.push(0);
+    } else if base >= ric {
+        encode_int(inout out, 0, 7, wrapping_sub(base, ric));
+    } else {
+        encode_int(inout out, 128, 7, wrapping_sub(wrapping_sub(ric, base), 1));
+    }
+    out.extend(in e.lines.as_slice());
+    if ric > 0 {
+        if ric > e.known_received {
+            e.stats.blocking_sections = inc(e.stats.blocking_sections);
+        }
+        compact_refs(inout e);
+        e.sec_stream.push(stream_id);
+        e.sec_ric.push(ric);
+        e.sec_lo.push(e.sec_refs.len());
+        e.sec_n.push(e.cur_refs.len());
+        e.sec_refs.extend(in e.cur_refs.as_slice());
+    }
+    out
+}
+
+// Rebuilds `sec_refs` once released spans are most of it.
+fn compact_refs(inout e: EncoderCore) {
+    let total = e.sec_refs.len();
+    if total < 4096 {
+        return;
+    }
+    let mut live: u64 = 0;
+    for i in 0..sections(in e) {
+        live = wrapping_add(live, word(in e.sec_n.as_slice(), i));
+    }
+    if wrapping_mul(live, 4) > total {
+        return;
+    }
+    let mut pool = ChunkSeq::with_capacity[u64](wrapping_mul(live, 2));
+    for i in 0..sections(in e) {
+        let lo = word(in e.sec_lo.as_slice(), i);
+        let hi = wrapping_add(lo, word(in e.sec_n.as_slice(), i));
+        let _set = e.sec_lo.try_set(i, pool.len());
+        pool.extend(in e.sec_refs[lo..hi]);
+    }
+    e.sec_refs = pool;
+}
+
+// Removes outstanding section `i` and releases its references.
+fn release(inout e: EncoderCore, i: u64) {
+    let lo = word(in e.sec_lo.as_slice(), i);
+    let n = word(in e.sec_n.as_slice(), i);
+    for k in 0..n {
+        let abs = word(in e.sec_refs.as_slice(), wrapping_add(lo, k));
+        let slot = slot_of(in e, abs);
+        let _set = e
+            .table
+            .refs
+            .try_set(slot, wrapping_sub(word(in e.table.refs.as_slice(), slot), 1));
+    }
+    remove_word(inout e.sec_stream, i);
+    remove_word(inout e.sec_ric, i);
+    remove_word(inout e.sec_lo, i);
+    remove_word(inout e.sec_n, i);
+    if sections(in e) == 0 {
+        e.sec_refs.clear();
+    }
+}
+
+fn find_section(in e: EncoderCore, stream_id: u64) -> Option[u64] {
+    for i in 0..sections(in e) {
+        if sec_stream(in e, i) == stream_id {
+            return Option::Some(i);
+        }
+    }
+    Option::None
+}
+
+fn fail(inout e: EncoderCore, r: Reason) -> Result[Unit, QpackError] {
+    let err = QpackError::DecoderStream(r);
+    e.failed = Option::Some(err);
+    Result::Err(err)
+}
+
+// `Encoder::on_decoder_stream`: Section Acknowledgment, Stream
+// Cancellation and Insert Count Increment (RFC 9204 §4.4).
+pub fn enc_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
+    -> Result[Unit, QpackError] {
+    match e.failed {
+        Option::Some(err) => {
+            return Result::Err(err);
+        },
+        Option::None => (),
+    }
+    e.pending.extend(in bytes);
+    let mut at: u64 = 0;
+    loop {
+        if at >= e.pending.len() {
+            break;
+        }
+        let first = byte(in e.pending.as_slice(), at);
+        let bits: u64 = if first & 128 != 0 {
+            7
+        } else {
+            6
+        };
+        let value = match decode_int(in e.pending.as_slice(), at, bits) {
+            Result::Ok(num) => {
+                at = wrapping_add(at, num.used);
+                num.value
+            },
+            Result::Err(PrefixError::Incomplete) => {
+                break;
+            },
+            Result::Err(err) => {
+                return fail(inout e, reason_of(err));
+            },
+        };
+        if first & 128 != 0 {
+            match find_section(in e, value) {
+                Option::Some(i) => {
+                    e.known_received = max64(e.known_received, sec_ric(in e, i));
+                    release(inout e, i);
+                },
+                Option::None => {
+                    return fail(inout e, Reason::UnexpectedAcknowledgment(value));
+                },
+            }
+        } else if first & 64 != 0 {
+            loop {
+                match find_section(in e, value) {
+                    Option::Some(i) => release(inout e, i),
+                    Option::None => {
+                        break;
+                    },
+                }
+            }
+        } else {
+            if value == 0 {
+                return fail(inout e, Reason::ZeroIncrement);
+            }
+            let k = wrapping_add(e.known_received, value);
+            if k < value || k > e.table.inserted {
+                return fail(inout e, Reason::IncrementBeyondInserts);
+            }
+            e.known_received = k;
+        }
+    }
+    drain_front(inout e.pending, at);
+    if e.pending.len() > 16 {
+        return fail(inout e, Reason::InstructionTooLong);
+    }
+    Result::Ok(())
+}
+
+// `Encoder::apply_peer_settings`.
+pub fn enc_apply_peer_settings(
+    inout e: EncoderCore,
+    max_table_capacity: u64,
+    blocked_streams: u64
+) {
+    e.peer_capacity = max_table_capacity;
+    e.peer_blocked = blocked_streams;
+    e.max_entries = max_table_capacity / 32;
+    let cap = if e.cfg.max_table_capacity < max_table_capacity {
+        e.cfg.max_table_capacity
+    } else {
+        max_table_capacity
+    };
+    if cap > 0 && cap != e.table.capacity {
+        encode_int(inout e.out, 32, 5, cap);
+        table_set_capacity(inout e.table, cap);
+    }
+}

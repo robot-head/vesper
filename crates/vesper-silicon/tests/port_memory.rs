@@ -39,5 +39,28 @@ fn the_port_frees_what_it_allocates() {
         let _ = a.take_msis();
         let _b = a.clone();
     }
+    // The interrupt fabric: construction, a delivered MSI-mode UART and the
+    // drop of the whole fabric.
+    for (blob, level) in [
+        (FIXTURES[1], port::intc::Privilege::Supervisor),
+        (FIXTURES[1], port::intc::Privilege::Machine),
+        (
+            &include_bytes!("../fixtures/dtb/qemu-riscv64-virt-aclint.dtb")[..],
+            port::intc::Privilege::Machine,
+        ),
+    ] {
+        let p = port::dtb::Platform::from_dtb(blob).unwrap();
+        let ledger = port::ledger::Ledger::new();
+        let mut intc = port::intc::RiscvIntc::new(&p, level, &ledger).unwrap();
+        if let Ok(src) = intc.install_isr(&p, "/soc/serial@10000000", 0, 3, |_| {}) {
+            intc.set_device_line(&p, "/soc/serial@10000000", true)
+                .unwrap();
+            let _ = intc.set_line(src, false);
+        }
+        let _ = intc.install_msi(0, 2, |_| {});
+        intc.advance_mtime(100);
+        let _ = intc.deliveries();
+        let _ = intc.lost_msis();
+    }
     assert_eq!(port::port_live_allocations(), before);
 }

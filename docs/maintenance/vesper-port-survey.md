@@ -182,6 +182,10 @@ F0, F1, F2, F3, F5, F6 and F8, plus the std library and harness below. Nothing p
 > 2026-11-18: wave P3 is split. [P3a](../agent-prompts/port-p3/README.md)
 > (#1036-#1043) ports Pact, Loom audit, Bench, eBPF, Silicon and Aegis and adds
 > F7b and F12; the rest waits for P3b.
+>
+> 2026-11-18: [P3b](../agent-prompts/port-p3b/README.md) (#1063-#1071) ports
+> Warp, Prism H3, Chorus, Flux, Kinetic and Resonance and adds F7c (effectful
+> and callable objects), boxes owned across loops, and F9 import handles.
 
 Needs F7, F9, F10 and, per crate, F11 or F12.
 

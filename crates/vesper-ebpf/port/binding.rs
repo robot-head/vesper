@@ -737,7 +737,16 @@ unsafe extern "C" {
     fn vesper_ebpf_seq_free(seq: i64) -> i64;
     fn vesper_ebpf_live_allocations() -> i64;
     fn vesper_ebpf_vesper__ebpf__verifier__Outcome_drop(value: *mut u64) -> i64;
+    fn vesper_ebpf_btf_ext_local_type(tab: *mut u64, idx: *mut u64, id: i64) -> i64;
+    fn vesper_ebpf_btf_ext_maps_from_btf(tab: *mut u64, idx: *mut u64, strs: *mut u64) -> i64;
+    fn vesper_ebpf_btf_ext_parse(tab: *mut u64, idx: *mut u64, strs: *mut u64, ext: *mut u64, section: *mut u64) -> i64;
+    fn vesper_ebpf_btf_parse(btf: *mut u64, split: i64, base_types: i64, base_strings: *mut u64) -> i64;
     fn vesper_ebpf_callgraph_check_stack(ids: *mut u64, frames: *mut u64, calls: *mut u64, indirect: *mut u64, root: i64, limit: i64, max_frames: i64) -> i64;
+    fn vesper_ebpf_core_candidates(lt: *mut u64, tab: *mut u64, idx: *mut u64, ids: *mut u64, from: i64) -> i64;
+    fn vesper_ebpf_core_combine(kind: i64, values: *mut u64) -> i64;
+    fn vesper_ebpf_core_local_value(kind: i64, lt: *mut u64, access: *mut u64, local_id: i64) -> i64;
+    fn vesper_ebpf_core_patch(present: i64, code: i64, imm: i64, off: i64, has_next: i64, next_imm: i64, expected: i64, value: i64) -> i64;
+    fn vesper_ebpf_core_values(kind: i64, lt: *mut u64, ltext: *mut u64, access: *mut u64, tab: *mut u64, idx: *mut u64, strs: *mut u64, cands: *mut u64) -> i64;
     fn vesper_ebpf_helpers_allowed(prog_type: *mut u64, id: i64) -> i64;
     fn vesper_ebpf_helpers_gpl_compatible(license: *mut u64) -> i64;
     fn vesper_ebpf_insn_decode(result: *mut u64, pc: i64, len: i64, lo: *mut u64, hi: *mut u64, fail: *mut u64) -> i64;
@@ -812,12 +821,93 @@ pub fn live_allocations() -> i64 {
     unsafe { vesper_ebpf_live_allocations() }
 }
 
+/// Calls `btf_ext_local_type` of the Vesper library `ebpf` (`vesper_ebpf_btf_ext_local_type`).
+pub fn btf_ext_local_type(tab: &[u64], idx: &[u64], id: u64) -> Vec<u64> {
+    // SAFETY: `vesper_ebpf_btf_ext_local_type` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(tab, |view_tab| vesper_port_abi::with_slice(idx, |view_idx| unsafe { vesper_ebpf_btf_ext_local_type(view_tab, view_idx, id as i64) }));
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `btf_ext_maps_from_btf` of the Vesper library `ebpf` (`vesper_ebpf_btf_ext_maps_from_btf`).
+pub fn btf_ext_maps_from_btf(tab: &[u64], idx: &[u64], strs: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_ebpf_btf_ext_maps_from_btf` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(tab, |view_tab| vesper_port_abi::with_slice(idx, |view_idx| vesper_port_abi::with_slice(strs, |view_strs| unsafe { vesper_ebpf_btf_ext_maps_from_btf(view_tab, view_idx, view_strs) })));
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `btf_ext_parse` of the Vesper library `ebpf` (`vesper_ebpf_btf_ext_parse`).
+pub fn btf_ext_parse(tab: &[u64], idx: &[u64], strs: &[u8], ext: &[u8], section: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_ebpf_btf_ext_parse` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(tab, |view_tab| vesper_port_abi::with_slice(idx, |view_idx| vesper_port_abi::with_slice(strs, |view_strs| vesper_port_abi::with_slice(ext, |view_ext| vesper_port_abi::with_slice(section, |view_section| unsafe { vesper_ebpf_btf_ext_parse(view_tab, view_idx, view_strs, view_ext, view_section) })))));
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `btf_parse` of the Vesper library `ebpf` (`vesper_ebpf_btf_parse`).
+pub fn btf_parse(btf: &[u8], split: bool, base_types: u64, base_strings: &[u8]) -> Vec<u64> {
+    // SAFETY: `vesper_ebpf_btf_parse` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(btf, |view_btf| vesper_port_abi::with_slice(base_strings, |view_base_strings| unsafe { vesper_ebpf_btf_parse(view_btf, split as i64, base_types as i64, view_base_strings) }));
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
 /// Calls `callgraph_check_stack` of the Vesper library `ebpf` (`vesper_ebpf_callgraph_check_stack`).
 pub fn callgraph_check_stack(ids: &[u64], frames: &[u32], calls: &[u64], indirect: &[u64], root: u64, limit: u32, max_frames: u64) -> Vec<u64> {
     // SAFETY: `vesper_ebpf_callgraph_check_stack` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
     let raw = vesper_port_abi::with_slice(ids, |view_ids| vesper_port_abi::with_slice(frames, |view_frames| vesper_port_abi::with_slice(calls, |view_calls| vesper_port_abi::with_slice(indirect, |view_indirect| unsafe { vesper_ebpf_callgraph_check_stack(view_ids, view_frames, view_calls, view_indirect, root as i64, limit as i64, max_frames as i64) }))));
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `core_candidates` of the Vesper library `ebpf` (`vesper_ebpf_core_candidates`).
+pub fn core_candidates(lt: &[u64], tab: &[u64], idx: &[u64], ids: &[u64], from: u64) -> Vec<u64> {
+    // SAFETY: `vesper_ebpf_core_candidates` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(lt, |view_lt| vesper_port_abi::with_slice(tab, |view_tab| vesper_port_abi::with_slice(idx, |view_idx| vesper_port_abi::with_slice(ids, |view_ids| unsafe { vesper_ebpf_core_candidates(view_lt, view_tab, view_idx, view_ids, from as i64) }))));
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `core_combine` of the Vesper library `ebpf` (`vesper_ebpf_core_combine`).
+pub fn core_combine(kind: u64, values: &[u64]) -> Vec<u64> {
+    // SAFETY: `vesper_ebpf_core_combine` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(values, |view_values| unsafe { vesper_ebpf_core_combine(kind as i64, view_values) });
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `core_local_value` of the Vesper library `ebpf` (`vesper_ebpf_core_local_value`).
+pub fn core_local_value(kind: u64, lt: &[u64], access: &[u64], local_id: u64) -> Vec<u64> {
+    // SAFETY: `vesper_ebpf_core_local_value` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(lt, |view_lt| vesper_port_abi::with_slice(access, |view_access| unsafe { vesper_ebpf_core_local_value(kind as i64, view_lt, view_access, local_id as i64) }));
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `core_patch` of the Vesper library `ebpf` (`vesper_ebpf_core_patch`).
+pub fn core_patch(present: bool, code: u64, imm: u64, off: u64, has_next: bool, next_imm: u64, expected: u64, value: u64) -> Vec<u64> {
+    // SAFETY: `vesper_ebpf_core_patch` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_ebpf_core_patch(present as i64, code as i64, imm as i64, off as i64, has_next as i64, next_imm as i64, expected as i64, value as i64) };
+    unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
+}
+
+/// Calls `core_values` of the Vesper library `ebpf` (`vesper_ebpf_core_values`).
+pub fn core_values(kind: u64, lt: &[u64], ltext: &[u8], access: &[u64], tab: &[u64], idx: &[u64], strs: &[u8], cands: &[u64]) -> Vec<u64> {
+    // SAFETY: `vesper_ebpf_core_values` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(lt, |view_lt| vesper_port_abi::with_slice(ltext, |view_ltext| vesper_port_abi::with_slice(access, |view_access| vesper_port_abi::with_slice(tab, |view_tab| vesper_port_abi::with_slice(idx, |view_idx| vesper_port_abi::with_slice(strs, |view_strs| vesper_port_abi::with_slice(cands, |view_cands| unsafe { vesper_ebpf_core_values(kind as i64, view_lt, view_ltext, view_access, view_tab, view_idx, view_strs, view_cands) })))))));
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 

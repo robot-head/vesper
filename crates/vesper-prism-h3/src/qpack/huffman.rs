@@ -4,6 +4,7 @@
 //! code and the index of its first symbol in length order. Those tables are
 //! built at compile time from [`CODES`].
 
+#[cfg(not(feature = "vesper-port"))]
 use super::huffman_table::CODES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,9 +17,12 @@ pub enum HuffmanError {
     TooLong,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 const EOS: u16 = 256;
+#[cfg(not(feature = "vesper-port"))]
 const MAX_LEN: usize = 30;
 
+#[cfg(not(feature = "vesper-port"))]
 struct Canonical {
     /// First code of each length (index = length).
     first: [u32; MAX_LEN + 1],
@@ -30,6 +34,7 @@ struct Canonical {
     symbols: [u16; 257],
 }
 
+#[cfg(not(feature = "vesper-port"))]
 const fn canonical() -> Canonical {
     let mut count = [0u16; MAX_LEN + 1];
     let mut s = 0;
@@ -71,14 +76,17 @@ const fn canonical() -> Canonical {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 static TABLE: Canonical = canonical();
 
+#[cfg(not(feature = "vesper-port"))]
 /// Encoded length in bytes.
 pub fn encoded_len(data: &[u8]) -> usize {
     let bits: usize = data.iter().map(|&b| usize::from(CODES[b as usize].0)).sum();
     bits.div_ceil(8)
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Appends the Huffman coding of `data`, padded with the EOS prefix.
 pub fn encode(data: &[u8], out: &mut Vec<u8>) {
     let mut acc: u64 = 0;
@@ -99,6 +107,7 @@ pub fn encode(data: &[u8], out: &mut Vec<u8>) {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Decodes Huffman data into at most `max_len` bytes.
 pub fn decode(data: &[u8], max_len: usize) -> Result<Vec<u8>, HuffmanError> {
     let mut out = Vec::with_capacity(data.len().saturating_mul(8).div_ceil(5).min(max_len));
@@ -140,6 +149,27 @@ pub fn decode(data: &[u8], max_len: usize) -> Result<Vec<u8>, HuffmanError> {
     Ok(out)
 }
 
+// The Vesper build: the same functions over the port's Huffman tables.
+
+#[cfg(feature = "vesper-port")]
+pub fn encoded_len(data: &[u8]) -> usize {
+    super::port::huff().len(data) as usize
+}
+
+#[cfg(feature = "vesper-port")]
+pub fn encode(data: &[u8], out: &mut Vec<u8>) {
+    super::port::huff().append(data, out)
+}
+
+#[cfg(feature = "vesper-port")]
+pub fn decode(data: &[u8], max_len: usize) -> Result<Vec<u8>, HuffmanError> {
+    let mut out = Vec::new();
+    match super::port::huff().unpack(data, max_len as u64, &mut out) {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,6 +182,8 @@ mod tests {
             .collect()
     }
 
+    // Reads the Rust build's canonical tables.
+    #[cfg(not(feature = "vesper-port"))]
     #[test]
     fn code_is_canonical_and_complete() {
         // Kraft equality: the code is complete (sum 2^-len == 1).

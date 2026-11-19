@@ -24,12 +24,15 @@
 # Ports append their own lines at the end (after the ABI tier, so they run
 # on Linux only).
 #
-# Shards (#1019): the Linux job runs the ports in three parallel shards,
-# VESPER_PORT_HARNESS_SHARD=1, 2 or 3 (unset runs all of them). Shard 1 is
-# the ABI tier and the ports up to Ignis, shard 2 Quarry through Grammar,
-# shard 3 everything after, including lines new ports append. Keep each
-# shard near a third of the total: on main in November 2026 the shards
-# took about 18, 19 and 13 minutes after a 3 minute compiler build.
+# Shards (#1019, #1100): the Linux job runs the ports in seven parallel
+# shards, VESPER_PORT_HARNESS_SHARD=1 to 7 (unset runs all of them), each a
+# run of consecutive blocks below: 1 the ABI tier through Ignis, 2 Quarry
+# through pact, 3 semver through Crucible, 4 serde, 5 aegis through bench,
+# 6 eBPF and silicon, 7 prism-h3 and every line new ports append. Measured
+# on PRs in November 2026 (minutes of harness, after a 2-4 minute compiler
+# build): 26, 25, 27, 21, about 29, about 27 and about 9. When a shard
+# passes about 35 minutes, move a shard boundary (or add a shard here and in
+# the `ports` matrix of .github/workflows/platforms.yml).
 set -eu
 cd "$(dirname "$0")/.."
 if [ -z "${VESPER_PORT_COMPILER:-}" ]; then
@@ -41,11 +44,12 @@ fi
 export VESPER_PORT_COMPILER
 echo "compiling ports with $VESPER_PORT_COMPILER"
 shard=${VESPER_PORT_HARNESS_SHARD:-}
-case "$shard" in "" | 1 | 2 | 3) ;; *) echo "VESPER_PORT_HARNESS_SHARD must be 1, 2 or 3" >&2; exit 1 ;; esac
+shards=7
+case "$shard" in "" | [1-7]) ;; *) echo "VESPER_PORT_HARNESS_SHARD must be 1 to $shards" >&2; exit 1 ;; esac
 [ "${VESPER_PORT_HARNESS_SCOPE:-all}" = abi ] && [ -n "$shard" ] && { echo "VESPER_PORT_HARNESS_SCOPE=abi takes no shard" >&2; exit 1; }
 # part <n>: whether this run includes shard n.
 part() { [ -z "$shard" ] || [ "$shard" = "$1" ]; }
-[ -n "$shard" ] && echo "port harness shard $shard of 3"
+[ -n "$shard" ] && echo "port harness shard $shard of $shards"
 
 # divergent <description> <expected failing test> <expected passing test> <cargo test args...>
 divergent() {
@@ -162,7 +166,7 @@ crates/vesper-warp-tcp/scripts/test-port.sh
 sh crates/vesper-warp-wheel/port/test-port.sh
 sh crates/vesper-ignis/port/check.sh  # port P1 lane 12 (#909): vesper-ignis, both builds and the divergence check
 fi
-# Shard 2: Quarry through Grammar.
+# Shard 2: Quarry through pact.
 if part 2; then
 # Quarry planner port (port wave P1 lane 7, #904): the port's tests, and one
 # failing test per ported module on the divergent build (DIVERGENT in
@@ -186,6 +190,9 @@ grep -q 'test documented_manifest_is_declarative_and_secure_by_default ... ok' "
 echo "divergent loom-calculus port detected (one failure per ported module)"
 sh crates/vesper-loom-solver/port/test-port.sh  # port P1 lane 17 (#914): vesper-loom-solver, both builds and the divergence check
 sh crates/vesper-pact/port/test-port.sh  # port P3a lane 3 (#1038): vesper-pact, all builds and the divergence check
+fi
+# Shard 3: semver through Crucible.
+if part 3; then
 # Port wave P1 lane 15 (#912): vesper-semver, both builds and the divergence check.
 sh crates/vesper-semver/port/test-port.sh
 # Port wave P1 lane 8 (#905): vesper-tensor and its Rust seed copy, and the
@@ -221,13 +228,24 @@ protobuf protobuf signed_twos_complement_varints_are_canonical_in_singular_and_p
 der der typed_set_of_sorts_complete_encodings_retains_duplicates_and_rejects_untyped_set utf8_string_is_strict_borrowed_and_transactional
 ipc ipc independent_arrow_values_and_versions hostile_schema_and_union_discriminants
 CHECKS
-fi
-# Shard 3: every later port. New ports append their lines below.
-part 3 || exit 0
 . crates/vesper-simpulse/port/check.sh  # port P1 lane 5 (#902): vesper-simpulse, both builds and the divergence check
 . crates/vesper-crucible/port/check.sh  # port P1 lane 18 (#915): vesper-crucible, both builds and the divergence checks
+fi
+# Shard 4: serde.
+if part 4; then
 sh crates/vesper-serde/port/check.sh  # port P1 lane 19 (#916): vesper-serde, both builds and one divergence check per ported module
+fi
+# Shard 5: aegis through bench.
+if part 5; then
+sh crates/vesper-aegis/port/check.sh  # port P3a lane 8 (#1043): vesper-aegis, both builds and one divergence check per ported module
 sh crates/vesper-loom-audit/port/test-port.sh  # port wave P3a lane 4 (#1039): vesper-loom-audit, both builds and the divergence check
 sh crates/vesper-bench/port/check.sh  # port P3a lane 5 (#1040): vesper-bench, both builds and one divergence check per ported module
+fi
+# Shard 6: eBPF and silicon.
+if part 6; then
 . crates/vesper-ebpf/port/check.sh  # port P3a lane 6 (#1041): vesper-ebpf, both builds and one divergence check per ported module
 . crates/vesper-silicon/port/check.sh  # port P3a lane 7 (#1042): vesper-silicon, both builds and one divergence check per ported module
+fi
+# Shard 7: every later port. New ports append their lines below.
+part 7 || exit 0
+sh crates/vesper-prism-h3/port/check.sh  # port P3b lane 5 (#1067): vesper-prism-h3, both builds and one divergence check per ported module

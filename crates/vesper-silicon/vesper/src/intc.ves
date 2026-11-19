@@ -1,0 +1,1781 @@
+// Module intc of @vesper/silicon (see lib.ves): the controller state of the
+// interrupt fabric in src/intc.rs (its `Core`): every PLIC, the APLIC
+// domain trees, the IMSIC interrupt files with their guest files, the
+// CLINT/ACLINT blocks, the MTIME counters and the hypervisor CSRs, and the
+// operations over them (levels, settling the APLIC trees, MSI delivery,
+// register access, claim and complete). The Rust adapter keeps the handler
+// table and the dispatch loops, and asks this module for one claim at a
+// time.
+//
+// A hart target is the word `hart << 32 | cause`; a missing cause is
+// 0xffffffff, which no request matches. Indices that are absent are
+// `none()`.
+use self::{
+    AiaFault,
+    Aplic,
+    Claim,
+    ClintHdr,
+    DomTopo,
+    Fabric,
+    Imsic,
+    ImsicBlk,
+    ImsicSlot,
+    IntcFault,
+    Located,
+    Msi,
+    MsiCfg,
+    PlicHdr
+};
+use self::aia::{
+    m_aplic_claimi,
+    m_aplic_contains,
+    m_aplic_delegated_to,
+    m_aplic_empty,
+    m_aplic_hdr,
+    m_aplic_idc_asserted,
+    m_aplic_inherit,
+    m_aplic_mode,
+    m_aplic_push,
+    m_aplic_read32,
+    m_aplic_set_active_here,
+    m_aplic_set_msi_cfg,
+    m_aplic_set_wire,
+    m_aplic_take_msis,
+    m_aplic_write32,
+    m_imsic_asserted,
+    m_imsic_bit_eip,
+    m_imsic_claim,
+    m_imsic_csr_read,
+    m_imsic_csr_write,
+    m_imsic_empty,
+    m_imsic_hdr,
+    m_imsic_mmio_write32,
+    m_imsic_push,
+    m_imsic_topei
+};
+
+fn meip() -> u64 {
+    11
+}
+
+fn seip() -> u64 {
+    9
+}
+
+fn msip() -> u64 {
+    3
+}
+
+fn ssip() -> u64 {
+    1
+}
+
+fn mtip() -> u64 {
+    7
+}
+
+fn vseip() -> u64 {
+    10
+}
+
+fn sgeip() -> u64 {
+    12
+}
+
+pub fn none() -> u64 {
+    18446744073709551615
+}
+
+fn w_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn b_at(in s: ChunkSeq[bool], i: u64) -> bool {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => false,
+    }
+}
+
+fn set_w(inout s: ChunkSeq[u64], i: u64, v: u64) {
+    let _ = s.try_set(i, v);
+}
+
+fn set_b(inout s: ChunkSeq[bool], i: u64, v: bool) {
+    let _ = s.try_set(i, v);
+}
+
+fn thirty_two() -> u64 {
+    32
+}
+
+fn target(hart: u64, cause: u64) -> u64 {
+    (hart << 32) | cause
+}
+
+// The fault of an AIA register model, as the fabric's.
+copy struct Lifted {
+    ok: bool,
+    v: u64,
+    e: AiaFault
+}
+
+fn lifted(r: Lifted) -> u64 eff [Fail[IntcFault]] {
+    if !r.ok {
+        Fail::raise(IntcFault::Aia(r.e));
+    }
+    r.v
+}
+
+fn ok(v: u64) -> Lifted {
+    Lifted {
+        ok: true,
+        v: v,
+        e: AiaFault::NoDeliveryMode
+    }
+}
+
+fn failed(e: AiaFault) -> Lifted {
+    Lifted {
+        ok: false,
+        v: 0,
+        e: e
+    }
+}
+
+pub fn m_fabric_new() -> Fabric {
+    Fabric {
+        plic: ChunkSeq::new(),
+        p_ctx: ChunkSeq::new(),
+        p_priority: ChunkSeq::new(),
+        p_level: ChunkSeq::new(),
+        p_edge: ChunkSeq::new(),
+        p_held: ChunkSeq::new(),
+        p_pending: ChunkSeq::new(),
+        p_service: ChunkSeq::new(),
+        p_enable: ChunkSeq::new(),
+        p_threshold: ChunkSeq::new(),
+        aplic: m_aplic_empty(),
+        dom: ChunkSeq::new(),
+        d_child: ChunkSeq::new(),
+        d_idc: ChunkSeq::new(),
+        imsic: m_imsic_empty(),
+        mblk: ChunkSeq::new(),
+        m_tgt: ChunkSeq::new(),
+        m_addr: ChunkSeq::new(),
+        mslot: ChunkSeq::new(),
+        clint: ChunkSeq::new(),
+        c_base: ChunkSeq::new(),
+        c_size: ChunkSeq::new(),
+        c_tgt: ChunkSeq::new(),
+        c_sip: ChunkSeq::new(),
+        c_cmp: ChunkSeq::new(),
+        mt_addr: ChunkSeq::new(),
+        mt_val: ChunkSeq::new(),
+        hy_hart: ChunkSeq::new(),
+        hy_vgein: ChunkSeq::new(),
+        hy_hgeie: ChunkSeq::new(),
+        lost: ChunkSeq::new()
+    }
+}
+
+// ---------------------------------------------------------------- PLICs
+
+fn plic_hdr(in f: Fabric, p: u64) -> PlicHdr {
+    match f.plic.try_get(p) {
+        Option::Some(h) => h,
+        Option::None => PlicHdr {
+            base: 0,
+            ndev: 0,
+            nctx: 0,
+            src_off: 0,
+            ctx_off: 0,
+            en_off: 0
+        },
+    }
+}
+
+// Plic::new, from the PLIC's window and context targets.
+pub fn m_add_plic(inout f: Fabric, base: u64, size: u64, ndev: u64, in ctx: Slice[u64]) eff [
+    Fail[IntcFault]
+] {
+    let nctx = ctx.len();
+    if nctx > 15872 {
+        Fail::raise(IntcFault::TooManyContexts(nctx));
+    }
+    let needed = wrapping_add(2097152, wrapping_mul(4096, nctx));
+    if size < needed {
+        Fail::raise(
+            IntcFault::WindowTooSmall {
+                size: size,
+                needed: needed
+            }
+        );
+    }
+    let n = wrapping_add(ndev, 1);
+    let h = PlicHdr {
+        base: base,
+        ndev: ndev,
+        nctx: nctx,
+        src_off: f.p_priority.len(),
+        ctx_off: f.p_ctx.len(),
+        en_off: f.p_enable.len()
+    };
+    for s in 0..n {
+        f.p_priority.push(0);
+        f.p_level.push(false);
+        f.p_edge.push(false);
+        f.p_held.push(false);
+        f.p_pending.push(false);
+        f.p_service.push(false);
+    }
+    for c in 0..nctx {
+        match ctx.try_get(c) {
+            Option::Some(t) => f.p_ctx.push(t),
+            Option::None => (),
+        }
+        f.p_threshold.push(0);
+        for s in 0..n {
+            f.p_enable.push(false);
+        }
+    }
+    f.plic.push(h);
+}
+
+fn src_of(h: PlicHdr, src: u64) -> u64 eff [Fail[IntcFault]] {
+    if src == 0 || src > h.ndev {
+        Fail::raise(IntcFault::NoSuchSource(src));
+    }
+    wrapping_add(h.src_off, src)
+}
+
+fn en_at(h: PlicHdr, ctx: u64, s: u64) -> u64 {
+    wrapping_add(h.en_off, wrapping_add(wrapping_mul(ctx, wrapping_add(h.ndev, 1)), s))
+}
+
+pub fn m_plic_set_edge(inout f: Fabric, p: u64, src: u64, edge: bool) eff [Fail[IntcFault]] {
+    let h = plic_hdr(in f, p);
+    let s = src_of(h, src);
+    set_b(inout f.p_edge, s, edge);
+    set_b(inout f.p_held, s, false);
+}
+
+fn plic_set_level(inout f: Fabric, p: u64, src: u64, high: bool) eff [Fail[IntcFault]] {
+    let h = plic_hdr(in f, p);
+    let s = src_of(h, src);
+    let rising = high && !b_at(in f.p_level, s);
+    set_b(inout f.p_level, s, high);
+    if b_at(in f.p_edge, s) {
+        if rising {
+            if b_at(in f.p_service, s) {
+                set_b(inout f.p_held, s, true);
+            } else {
+                set_b(inout f.p_pending, s, true);
+            }
+        }
+    } else if high && !b_at(in f.p_service, s) {
+        set_b(inout f.p_pending, s, true);
+    }
+}
+
+// The highest-priority pending source enabled for `ctx` (ties to the lowest
+// id) as `src << 32 | priority`; priority 0 never qualifies.
+fn plic_best(in f: Fabric, h: PlicHdr, ctx: u64) -> u64 {
+    let mut bs: u64 = 0;
+    let mut bp: u64 = 0;
+    let mut s: u64 = 1;
+    let row = en_at(h, ctx, 0);
+    loop {
+        if s > h.ndev {
+            break;
+        }
+        let at = wrapping_add(h.src_off, s);
+        let pr = w_at(in f.p_priority, at);
+        if pr > bp && b_at(in f.p_pending, at) && b_at(in f.p_enable, wrapping_add(row, s)) {
+            bs = s;
+            bp = pr;
+        }
+        s = wrapping_add(s, 1);
+    }
+    (bs << 32) | bp
+}
+
+fn plic_eip(in f: Fabric, h: PlicHdr, ctx: u64) -> bool {
+    if ctx >= h.nctx {
+        return false;
+    }
+    let b = plic_best(in f, h, ctx);
+    (b >> 32) != 0 && (b & 4294967295) > w_at(in f.p_threshold, wrapping_add(h.ctx_off, ctx))
+}
+
+fn plic_claim(inout f: Fabric, h: PlicHdr, ctx: u64) -> u64 {
+    if ctx >= h.nctx {
+        return 0;
+    }
+    let s = plic_best(in f, h, ctx) >> 32;
+    if s != 0 {
+        let at = wrapping_add(h.src_off, s);
+        set_b(inout f.p_pending, at, false);
+        set_b(inout f.p_service, at, true);
+    }
+    s
+}
+
+fn plic_complete(inout f: Fabric, h: PlicHdr, ctx: u64, src: u64) {
+    if src == 0 || src > h.ndev || ctx >= h.nctx {
+        return;
+    }
+    let s = wrapping_add(h.src_off, src);
+    if !b_at(in f.p_enable, en_at(h, ctx, src)) || !b_at(in f.p_service, s) {
+        return;
+    }
+    set_b(inout f.p_service, s, false);
+    if b_at(in f.p_edge, s) {
+        if b_at(in f.p_held, s) {
+            set_b(inout f.p_held, s, false);
+            set_b(inout f.p_pending, s, true);
+        }
+    } else if b_at(in f.p_level, s) {
+        set_b(inout f.p_pending, s, true);
+    }
+}
+
+fn plic_words(h: PlicHdr) -> u64 {
+    wrapping_add(h.ndev >> 5, 1)
+}
+
+fn plic_contains(h: PlicHdr, addr: u64) -> bool {
+    let end = wrapping_add(h.base, wrapping_add(2097152, wrapping_mul(4096, h.nctx)));
+    addr >= h.base && addr < end
+}
+
+// The PLIC holding `addr`, or none().
+fn plic_at(in f: Fabric, addr: u64) -> u64 {
+    for p in 0..f.plic.len() {
+        if plic_contains(plic_hdr(in f, p), addr) {
+            return p;
+        }
+    }
+    none()
+}
+
+// The bits of 32-source word `w` of the per-source flags from `row`.
+fn plic_bits(in v: ChunkSeq[bool], h: PlicHdr, row: u64, w: u64) -> u64 {
+    let mut acc: u64 = 0;
+    for b in 0..thirty_two() {
+        let s = wrapping_add(wrapping_mul(w, 32), b);
+        if s <= h.ndev && b_at(in v, wrapping_add(row, s)) {
+            acc = acc | wrapping_shl_u64(1, wrapping_u32(b));
+        }
+    }
+    acc
+}
+
+// Decoded PLIC register: kind 0 priority (a = source), 1 pending (a =
+// word), 2 enable (a = context, b = word), 3 threshold (a = context), 4
+// claim/complete (a = context).
+copy struct PlicReg {
+    kind: u64,
+    a: u64,
+    b: u64
+}
+
+fn plic_decode(h: PlicHdr, addr: u64) -> PlicReg eff [Fail[IntcFault]] {
+    let off = wrapping_sub(addr, h.base);
+    if (addr & 3) != 0 {
+        Fail::raise(IntcFault::Misaligned(addr));
+    }
+    if off < 4096 {
+        let s = off >> 2;
+        if s <= h.ndev {
+            return PlicReg {
+                kind: 0,
+                a: s,
+                b: 0
+            };
+        }
+        Fail::raise(IntcFault::Unmapped(addr));
+    }
+    if off < 8192 {
+        let w = wrapping_sub(off, 4096) >> 2;
+        if w < plic_words(h) {
+            return PlicReg {
+                kind: 1,
+                a: w,
+                b: 0
+            };
+        }
+        Fail::raise(IntcFault::Unmapped(addr));
+    }
+    if off < 2097152 {
+        let rel = wrapping_sub(off, 8192);
+        let ctx = rel >> 7;
+        let w = (rel & 127) >> 2;
+        if ctx < h.nctx && w < plic_words(h) {
+            return PlicReg {
+                kind: 2,
+                a: ctx,
+                b: w
+            };
+        }
+        Fail::raise(IntcFault::Unmapped(addr));
+    }
+    let rel = wrapping_sub(off, 2097152);
+    let ctx = rel >> 12;
+    let r = rel & 4095;
+    if ctx < h.nctx && r == 0 {
+        return PlicReg {
+            kind: 3,
+            a: ctx,
+            b: 0
+        };
+    }
+    if ctx < h.nctx && r == 4 {
+        return PlicReg {
+            kind: 4,
+            a: ctx,
+            b: 0
+        };
+    }
+    Fail::raise(IntcFault::Unmapped(addr))
+}
+
+fn plic_read32(inout f: Fabric, p: u64, addr: u64) -> u64 eff [Fail[IntcFault]] {
+    let h = plic_hdr(in f, p);
+    let r = plic_decode(h, addr);
+    if r.kind == 0 {
+        return w_at(in f.p_priority, wrapping_add(h.src_off, r.a));
+    }
+    if r.kind == 1 {
+        return plic_bits(in f.p_pending, h, h.src_off, r.a);
+    }
+    if r.kind == 2 {
+        return plic_bits(in f.p_enable, h, en_at(h, r.a, 0), r.b);
+    }
+    if r.kind == 3 {
+        return w_at(in f.p_threshold, wrapping_add(h.ctx_off, r.a));
+    }
+    plic_claim(inout f, h, r.a)
+}
+
+fn plic_write32(inout f: Fabric, p: u64, addr: u64, v: u64) eff [Fail[IntcFault]] {
+    let h = plic_hdr(in f, p);
+    let r = plic_decode(h, addr);
+    if r.kind == 0 {
+        if r.a != 0 {
+            set_w(inout f.p_priority, wrapping_add(h.src_off, r.a), v & 7);
+        }
+        return;
+    }
+    if r.kind == 1 {
+        Fail::raise(IntcFault::ReadOnly(addr));
+    }
+    if r.kind == 2 {
+        let row = en_at(h, r.a, 0);
+        for b in 0..thirty_two() {
+            let s = wrapping_add(wrapping_mul(r.b, 32), b);
+            if s != 0 && s <= h.ndev {
+                set_b(
+                    inout f.p_enable,
+                    wrapping_add(row, s),
+                    (wrapping_shr_u64(v, wrapping_u32(b)) & 1) != 0
+                );
+            }
+        }
+        return;
+    }
+    if r.kind == 3 {
+        set_w(inout f.p_threshold, wrapping_add(h.ctx_off, r.a), v & 7);
+        return;
+    }
+    plic_complete(inout f, h, r.a, v);
+}
+
+// The context of `want` on PLIC `p`, or none().
+pub fn m_plic_context(in f: Fabric, p: u64, want: u64) -> u64 {
+    let h = plic_hdr(in f, p);
+    for c in 0..h.nctx {
+        if w_at(in f.p_ctx, wrapping_add(h.ctx_off, c)) == want {
+            return c;
+        }
+    }
+    none()
+}
+
+// ---------------------------------------------------------------- APLIC domains
+
+fn topo(in f: Fabric, d: u64) -> DomTopo {
+    match f.dom.try_get(d) {
+        Option::Some(t) => t,
+        Option::None => DomTopo {
+            parent: none(),
+            child_off: 0,
+            nchild: 0,
+            idc_off: 0,
+            nidc: 0
+        },
+    }
+}
+
+// AplicDomain::new for the fabric; the parent and children are linked
+// afterwards (m_link_aplic).
+pub fn m_add_aplic(
+    inout f: Fabric,
+    base: u64,
+    size: u64,
+    sources: u64,
+    in idcs: Slice[u64],
+    msi_capable: bool,
+    root: bool,
+    supervisor: bool,
+    children: u64
+) eff [Fail[IntcFault]] {
+    let r: Lifted = handle Fail[AiaFault] in {
+        m_aplic_push(
+            inout f.aplic,
+            base,
+            size,
+            sources,
+            idcs.len(),
+            msi_capable,
+            root,
+            supervisor,
+            children
+        );
+        ok(0)
+    } with {
+        return v => v,
+        raise(e, k) => failed(e),
+    };
+    let _ = lifted(r);
+    let idc_off = f.d_idc.len();
+    for i in 0..idcs.len() {
+        match idcs.try_get(i) {
+            Option::Some(t) => f.d_idc.push(t),
+            Option::None => (),
+        }
+    }
+    f
+        .dom
+        .push(
+        DomTopo {
+            parent: none(),
+            child_off: 0,
+            nchild: 0,
+            idc_off: idc_off,
+            nidc: idcs.len()
+        }
+    );
+}
+
+// The domain's parent (none() for a root, or a parent not modelled) and its
+// children that are modelled, in child-index order.
+pub fn m_link_aplic(inout f: Fabric, d: u64, parent: u64, in children: Slice[u64]) {
+    let mut t = topo(in f, d);
+    t.parent = parent;
+    t.child_off = f.d_child.len();
+    t.nchild = children.len();
+    for i in 0..children.len() {
+        match children.try_get(i) {
+            Option::Some(c) => f.d_child.push(c),
+            Option::None => (),
+        }
+    }
+    let _ = f.dom.try_set(d, t);
+}
+
+pub fn m_root_of(in f: Fabric, d: u64) -> u64 {
+    let mut cur = d;
+    for i in 0..f.dom.len() {
+        let p = topo(in f, cur).parent;
+        if p == none() {
+            break;
+        }
+        cur = p;
+    }
+    cur
+}
+
+fn cfg_eq(a: MsiCfg, b: MsiCfg) -> bool {
+    a
+        .m_ppn
+        == b
+        .m_ppn
+        && a
+        .s_ppn
+        == b
+        .s_ppn
+        && a
+        .hhxs
+        == b
+        .hhxs
+        && a
+        .lhxs_m
+        == b
+        .lhxs_m
+        && a
+        .lhxs_s
+        == b
+        .lhxs_s
+        && a
+        .hhxw
+        == b
+        .hhxw
+        && a
+        .lhxw
+        == b
+        .lhxw
+        && a
+        .locked
+        == b
+        .locked
+}
+
+// Delegation and the root's MSI configuration flow from parents to
+// children; then MSI-mode domains forward, and MSIs land in IMSIC files (or
+// APLIC `setipnum_le` registers).
+pub fn m_settle(inout f: Fabric) {
+    let n = f.dom.len();
+    for round in 0..wrapping_add(n, 1) {
+        let mut changed = false;
+        for d in 0..n {
+            let t = topo(in f, d);
+            let root_cfg = m_aplic_hdr(in f.aplic, m_root_of(in f, d)).msicfg;
+            for ci in 0..t.nchild {
+                let c = w_at(in f.d_child, wrapping_add(t.child_off, ci));
+                if !cfg_eq(m_aplic_hdr(in f.aplic, c).msicfg, root_cfg) {
+                    m_aplic_set_msi_cfg(inout f.aplic, c, root_cfg);
+                }
+                if m_aplic_inherit(inout f.aplic, d, ci, c) {
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for round in 0..64 {
+        let mut msis: ChunkSeq[Msi] = ChunkSeq::new();
+        for d in 0..n {
+            let out = m_aplic_take_msis(inout f.aplic, d);
+            msis.extend(in out.as_slice());
+        }
+        if msis.len() == 0 {
+            break;
+        }
+        for i in 0..msis.len() {
+            match msis.try_get(i) {
+                Option::Some(m) => {
+                    if !deliver(inout f, m.addr, m.data) {
+                        f.lost.push(m);
+                    }
+                },
+                Option::None => (),
+            }
+        }
+    }
+}
+
+pub fn m_aplic_raw_write32(inout f: Fabric, d: u64, addr: u64, v: u64) eff [Fail[IntcFault]] {
+    let r: Lifted = handle Fail[AiaFault] in {
+        m_aplic_write32(inout f.aplic, d, addr, v);
+        ok(0)
+    } with {
+        return v => v,
+        raise(e, k) => failed(e),
+    };
+    let _ = lifted(r);
+}
+
+fn aplic_read(inout f: Fabric, d: u64, addr: u64) -> u64 eff [Fail[IntcFault]] {
+    let r: Lifted = handle Fail[AiaFault] in {
+        ok(m_aplic_read32(inout f.aplic, d, addr))
+    } with {
+        return v => v,
+        raise(e, k) => failed(e),
+    };
+    lifted(r)
+}
+
+// The APLIC domain whose window holds `addr`, or none().
+fn aplic_at(in f: Fabric, addr: u64) -> u64 {
+    for d in 0..f.dom.len() {
+        if m_aplic_contains(in f.aplic, d, addr) {
+            return d;
+        }
+    }
+    none()
+}
+
+// ---------------------------------------------------------------- IMSICs
+
+fn blk(in f: Fabric, b: u64) -> ImsicBlk {
+    match f.mblk.try_get(b) {
+        Option::Some(x) => x,
+        Option::None => ImsicBlk {
+            gib: 0,
+            ids: 0,
+            tgt_off: 0,
+            ntgt: 0,
+            addr_off: 0,
+            naddr: 0,
+            slot_off: 0,
+            nslot: 0
+        },
+    }
+}
+
+fn slot(in f: Fabric, b: u64, k: u64) -> ImsicSlot {
+    let x = blk(in f, b);
+    if k < x.nslot {
+        match f.mslot.try_get(wrapping_add(x.slot_off, k)) {
+            Option::Some(s) => return s,
+            Option::None => (),
+        }
+    }
+    ImsicSlot {
+        first: 0,
+        nguest: 0
+    }
+}
+
+// One IMSIC: its files' targets and addresses, and whether a PLIC context or
+// direct IDC also reaches each file's hart and level (eidelivery
+// 0x40000000 allowed on guest 0). Each of the first min(targets, addresses)
+// files gets 2^gib interrupt files.
+pub fn m_add_imsic(
+    inout f: Fabric,
+    gib: u64,
+    ids: u64,
+    in targets: Slice[u64],
+    in addrs: Slice[u64],
+    in wired: Slice[bool]
+) eff [Fail[IntcFault]] {
+    let nslot = if targets.len() < addrs.len() {
+        targets.len()
+    } else {
+        addrs.len()
+    };
+    let guests = wrapping_shl_u64(1, wrapping_u32(gib));
+    let x = ImsicBlk {
+        gib: gib,
+        ids: ids,
+        tgt_off: f.m_tgt.len(),
+        ntgt: targets.len(),
+        addr_off: f.m_addr.len(),
+        naddr: addrs.len(),
+        slot_off: f.mslot.len(),
+        nslot: nslot
+    };
+    for k in 0..nslot {
+        let first = f.imsic.hdr.len();
+        let ext = match wired.try_get(k) {
+            Option::Some(w) => w,
+            Option::None => false,
+        };
+        for g in 0..guests {
+            let r: Lifted = handle Fail[AiaFault] in {
+                m_imsic_push(inout f.imsic, ids, g == 0 && ext);
+                ok(0)
+            } with {
+                return v => v,
+                raise(e, k) => failed(e),
+            };
+            let _ = lifted(r);
+        }
+        f
+            .mslot
+            .push(
+            ImsicSlot {
+                first: first,
+                nguest: guests
+            }
+        );
+    }
+    f.m_tgt.extend(in targets);
+    f.m_addr.extend(in addrs);
+    f.mblk.push(x);
+}
+
+// The IMSIC and file of `want` as `b << 32 | k`, or none().
+pub fn m_imsic_file(in f: Fabric, want: u64) -> u64 {
+    for b in 0..f.mblk.len() {
+        let x = blk(in f, b);
+        for k in 0..x.ntgt {
+            if w_at(in f.m_tgt, wrapping_add(x.tgt_off, k)) == want {
+                return (b << 32) | k;
+            }
+        }
+    }
+    none()
+}
+
+// The bank index of guest file `g` behind file `(b, k)`.
+fn file_idx(in f: Fabric, b: u64, k: u64, g: u64) -> u64 {
+    wrapping_add(slot(in f, b, k).first, g)
+}
+
+pub fn m_files_len(in f: Fabric, b: u64, k: u64) -> u64 {
+    slot(in f, b, k).nguest
+}
+
+pub fn m_truncate_files(inout f: Fabric, b: u64, k: u64, keep: u64) {
+    let x = blk(in f, b);
+    if k >= x.nslot {
+        return;
+    }
+    let at = wrapping_add(x.slot_off, k);
+    match f.mslot.try_get(at) {
+        Option::Some(s) => {
+            if keep < s.nguest {
+                let mut t = s;
+                t.nguest = keep;
+                let _ = f.mslot.try_set(at, t);
+            }
+        },
+        Option::None => (),
+    }
+}
+
+pub fn m_file_csr_read(in f: Fabric, b: u64, k: u64, g: u64, isel: u64)
+    -> u64 eff [Fail[IntcFault]] {
+    let i = file_idx(in f, b, k, g);
+    let r: Lifted = handle Fail[AiaFault] in {
+        ok(m_imsic_csr_read(in f.imsic, i, isel))
+    } with {
+        return v => v,
+        raise(e, k) => failed(e),
+    };
+    lifted(r)
+}
+
+pub fn m_file_csr_write(inout f: Fabric, b: u64, k: u64, g: u64, isel: u64, v: u64) eff [
+    Fail[IntcFault]
+] {
+    let i = file_idx(in f, b, k, g);
+    let r: Lifted = handle Fail[AiaFault] in {
+        m_imsic_csr_write(inout f.imsic, i, isel, v);
+        ok(0)
+    } with {
+        return v => v,
+        raise(e, k) => failed(e),
+    };
+    let _ = lifted(r);
+}
+
+pub fn m_file_topei(in f: Fabric, b: u64, k: u64, g: u64) -> u64 {
+    m_imsic_topei(in f.imsic, file_idx(in f, b, k, g))
+}
+
+pub fn m_file_claim(inout f: Fabric, b: u64, k: u64, g: u64) -> u64 {
+    let i = file_idx(in f, b, k, g);
+    m_imsic_claim(inout f.imsic, i)
+}
+
+pub fn m_file_is_pending(in f: Fabric, b: u64, k: u64, g: u64, id: u64) -> bool {
+    m_imsic_bit_eip(in f.imsic, file_idx(in f, b, k, g), id)
+}
+
+pub fn m_file_eidelivery(in f: Fabric, b: u64, k: u64) -> u64 {
+    m_imsic_hdr(in f.imsic, file_idx(in f, b, k, 0)).delivery
+}
+
+pub fn m_file_external(in f: Fabric, b: u64, k: u64) -> bool {
+    m_imsic_hdr(in f.imsic, file_idx(in f, b, k, 0)).external
+}
+
+// ImsicBlock::locate: the file stride holding `addr`, and the offset in
+// its page, or `k` none().
+fn locate(in f: Fabric, b: u64, addr: u64) -> Located {
+    let x = blk(in f, b);
+    let stride = wrapping_shl_u64(4096, wrapping_u32(x.gib));
+    for k in 0..x.naddr {
+        let base = w_at(in f.m_addr, wrapping_add(x.addr_off, k));
+        if addr >= base && wrapping_sub(addr, base) < stride {
+            let rel = wrapping_sub(addr, base);
+            return Located {
+                k: k,
+                g: rel >> 12,
+                off: rel & 4095
+            };
+        }
+    }
+    Located {
+        k: none(),
+        g: 0,
+        off: 0
+    }
+}
+
+// The implemented file `(b, k, g)` whose page holds `addr`, or `k` none().
+pub fn m_locate_file(in f: Fabric, addr: u64) -> Located {
+    for b in 0..f.mblk.len() {
+        let l = locate(in f, b, addr);
+        if l.k != none() && l.g < slot(in f, b, l.k).nguest {
+            return Located {
+                k: (b << 32) | l.k,
+                g: l.g,
+                off: l.off
+            };
+        }
+    }
+    Located {
+        k: none(),
+        g: 0,
+        off: 0
+    }
+}
+
+fn in_any_imsic(in f: Fabric, addr: u64) -> bool {
+    for b in 0..f.mblk.len() {
+        if locate(in f, b, addr).k != none() {
+            return true;
+        }
+    }
+    false
+}
+
+// A 32-bit write of `data` to `addr` by a bus master; false when nothing
+// takes it.
+fn deliver(inout f: Fabric, addr: u64, data: u64) -> bool {
+    for b in 0..f.mblk.len() {
+        let l = locate(in f, b, addr);
+        if l.k != none() {
+            if l.g < slot(in f, b, l.k).nguest {
+                let i = file_idx(in f, b, l.k, l.g);
+                m_imsic_mmio_write32(inout f.imsic, i, l.off, data);
+                return true;
+            }
+            return false;
+        }
+    }
+    for d in 0..f.dom.len() {
+        let h = m_aplic_hdr(in f.aplic, d);
+        if m_aplic_contains(in f.aplic, d, addr) && wrapping_sub(addr, h.base) == 8192 {
+            let r: Lifted = handle Fail[AiaFault] in {
+                m_aplic_write32(inout f.aplic, d, addr, data);
+                ok(0)
+            } with {
+                return v => v,
+                raise(e, k) => failed(e),
+            };
+            return r.ok;
+        }
+    }
+    false
+}
+
+// State::deliver_msi: the same, with the fault the Rust build reports.
+pub fn m_deliver_msi(inout f: Fabric, addr: u64, data: u64) eff [Fail[IntcFault]] {
+    for b in 0..f.mblk.len() {
+        let l = locate(in f, b, addr);
+        if l.k != none() {
+            if l.g < slot(in f, b, l.k).nguest {
+                let i = file_idx(in f, b, l.k, l.g);
+                m_imsic_mmio_write32(inout f.imsic, i, l.off, data);
+                return;
+            }
+            Fail::raise(IntcFault::Unmapped(addr));
+        }
+    }
+    for d in 0..f.dom.len() {
+        let h = m_aplic_hdr(in f.aplic, d);
+        if m_aplic_contains(in f.aplic, d, addr) && wrapping_sub(addr, h.base) == 8192 {
+            m_aplic_raw_write32(inout f, d, addr, data);
+            return;
+        }
+    }
+    Fail::raise(IntcFault::Unmapped(addr))
+}
+
+// ---------------------------------------------------------------- CLINT / ACLINT
+
+fn chdr(in f: Fabric, b: u64) -> ClintHdr {
+    match f.clint.try_get(b) {
+        Option::Some(h) => h,
+        Option::None => ClintHdr {
+            kind: 0,
+            reg_off: 0,
+            nreg: 0,
+            tgt_off: 0,
+            ntgt: 0,
+            slot_off: 0,
+            nslot: 0,
+            mtime: none()
+        },
+    }
+}
+
+// One CLINT (kind 0) or ACLINT MSWI (1), SSWI (2) or MTIMER (3) block.
+pub fn m_add_clint(
+    inout f: Fabric,
+    kind: u64,
+    in bases: Slice[u64],
+    in sizes: Slice[u64],
+    in targets: Slice[u64]
+) {
+    let n = if kind == 0 {
+        wrapping_add(targets.len(), 1) >> 1
+    } else {
+        targets.len()
+    };
+    let base0 = match bases.try_get(0) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    let mtime = if kind == 0 {
+        wrapping_add(base0, 49144)
+    } else if kind == 3 {
+        base0
+    } else {
+        none()
+    };
+    let h = ClintHdr {
+        kind: kind,
+        reg_off: f.c_base.len(),
+        nreg: bases.len(),
+        tgt_off: f.c_tgt.len(),
+        ntgt: targets.len(),
+        slot_off: f.c_sip.len(),
+        nslot: n,
+        mtime: mtime
+    };
+    f.c_base.extend(in bases);
+    f.c_size.extend(in sizes);
+    f.c_tgt.extend(in targets);
+    for k in 0..n {
+        f.c_sip.push(false);
+        f.c_cmp.push(18446744073709551615);
+    }
+    f.clint.push(h);
+}
+
+fn ctgt(in f: Fabric, h: ClintHdr, i: u64) -> u64 {
+    if i < h.ntgt {
+        w_at(in f.c_tgt, wrapping_add(h.tgt_off, i))
+    } else {
+        none()
+    }
+}
+
+fn sw_target(in f: Fabric, h: ClintHdr, k: u64) -> u64 {
+    if h.kind == 0 {
+        ctgt(in f, h, wrapping_mul(2, k))
+    } else if h.kind == 1 || h.kind == 2 {
+        ctgt(in f, h, k)
+    } else {
+        none()
+    }
+}
+
+fn timer_target(in f: Fabric, h: ClintHdr, k: u64) -> u64 {
+    if h.kind == 0 {
+        ctgt(in f, h, wrapping_add(wrapping_mul(2, k), 1))
+    } else if h.kind == 3 {
+        ctgt(in f, h, k)
+    } else {
+        none()
+    }
+}
+
+fn mt_index(in f: Fabric, addr: u64) -> u64 {
+    for i in 0..f.mt_addr.len() {
+        if w_at(in f.mt_addr, i) == addr {
+            return i;
+        }
+    }
+    none()
+}
+
+fn mtime_at(in f: Fabric, addr: u64) -> u64 {
+    let i = mt_index(in f, addr);
+    if i == none() {
+        0
+    } else {
+        w_at(in f.mt_val, i)
+    }
+}
+
+// The counter at `addr`, created at 0 if new.
+fn mt_entry(inout f: Fabric, addr: u64) -> u64 {
+    let i = mt_index(in f, addr);
+    if i != none() {
+        return i;
+    }
+    f.mt_addr.push(addr);
+    f.mt_val.push(0);
+    wrapping_sub(f.mt_addr.len(), 1)
+}
+
+pub fn m_hart_mtime(in f: Fabric, hart: u64) -> u64 {
+    let want = target(hart, mtip());
+    for b in 0..f.clint.len() {
+        let h = chdr(in f, b);
+        for k in 0..h.nslot {
+            if timer_target(in f, h, k) == want {
+                if h.mtime == none() {
+                    return 0;
+                }
+                return mtime_at(in f, h.mtime);
+            }
+        }
+    }
+    0
+}
+
+pub fn m_advance_mtime(inout f: Fabric, ticks: u64) {
+    for b in 0..f.clint.len() {
+        let h = chdr(in f, b);
+        if h.mtime != none() {
+            let _ = mt_entry(inout f, h.mtime);
+        }
+    }
+    for i in 0..f.mt_val.len() {
+        let old = w_at(in f.mt_val, i);
+        set_w(inout f.mt_val, i, wrapping_add(old, ticks));
+    }
+}
+
+pub fn m_clear_ssip(inout f: Fabric, hart: u64) {
+    let want = target(hart, ssip());
+    for b in 0..f.clint.len() {
+        let h = chdr(in f, b);
+        if h.kind == 2 {
+            for k in 0..h.nslot {
+                if sw_target(in f, h, k) == want {
+                    set_b(inout f.c_sip, wrapping_add(h.slot_off, k), false);
+                }
+            }
+        }
+    }
+}
+
+// The block, region and offset holding `addr`.
+copy struct BlockAt {
+    b: u64,
+    r: u64,
+    off: u64
+}
+
+fn block_at(in f: Fabric, addr: u64) -> BlockAt eff [Fail[IntcFault]] {
+    if (addr & 3) != 0 {
+        Fail::raise(IntcFault::Misaligned(addr));
+    }
+    for b in 0..f.clint.len() {
+        let h = chdr(in f, b);
+        for r in 0..h.nreg {
+            let base = w_at(in f.c_base, wrapping_add(h.reg_off, r));
+            let size = w_at(in f.c_size, wrapping_add(h.reg_off, r));
+            if addr >= base && wrapping_sub(addr, base) < size {
+                return BlockAt {
+                    b: b,
+                    r: r,
+                    off: wrapping_sub(addr, base)
+                };
+            }
+        }
+    }
+    Fail::raise(IntcFault::Unmapped(addr))
+}
+
+fn half(v: u64, hi: bool) -> u64 {
+    if hi {
+        v >> 32
+    } else {
+        v & 4294967295
+    }
+}
+
+fn set_half(old: u64, hi: bool, v: u64) -> u64 {
+    if hi {
+        (old & 4294967295) | (v << 32)
+    } else {
+        (old & 18446744069414584320) | v
+    }
+}
+
+fn sip_read(in f: Fabric, h: ClintHdr, i: u64, addr: u64) -> u64 eff [Fail[IntcFault]] {
+    if i >= h.nslot {
+        Fail::raise(IntcFault::Unmapped(addr));
+    }
+    if b_at(in f.c_sip, wrapping_add(h.slot_off, i)) {
+        1
+    } else {
+        0
+    }
+}
+
+fn cmp_read(in f: Fabric, h: ClintHdr, rel: u64, addr: u64) -> u64 eff [Fail[IntcFault]] {
+    let i = rel >> 3;
+    if i >= h.nslot {
+        Fail::raise(IntcFault::Unmapped(addr));
+    }
+    half(w_at(in f.c_cmp, wrapping_add(h.slot_off, i)), (rel & 7) == 4)
+}
+
+fn clint_read32(in f: Fabric, addr: u64) -> u64 eff [Fail[IntcFault]] {
+    let at = block_at(in f, addr);
+    let h = chdr(in f, at.b);
+    let off = at.off;
+    let mtime = if h.mtime == none() {
+        0
+    } else {
+        mtime_at(in f, h.mtime)
+    };
+    if h.kind == 0 {
+        if off < 16384 {
+            return sip_read(in f, h, off >> 2, addr);
+        }
+        if off >= 49144 {
+            let r = wrapping_sub(off, 49144);
+            if r == 0 {
+                return half(mtime, false);
+            }
+            if r == 4 {
+                return half(mtime, true);
+            }
+            Fail::raise(IntcFault::Unmapped(addr));
+        }
+        return cmp_read(in f, h, wrapping_sub(off, 16384), addr);
+    }
+    if h.kind == 1 {
+        return sip_read(in f, h, off >> 2, addr);
+    }
+    if h.kind == 2 {
+        let _ = sip_read(in f, h, off >> 2, addr);
+        return 0;
+    }
+    if at.r == 0 {
+        if off == 0 {
+            return half(mtime, false);
+        }
+        if off == 4 {
+            return half(mtime, true);
+        }
+        Fail::raise(IntcFault::Unmapped(addr));
+    }
+    cmp_read(in f, h, off, addr)
+}
+
+fn cmp_write(inout f: Fabric, h: ClintHdr, rel: u64, addr: u64, v: u64) eff [Fail[IntcFault]] {
+    let i = rel >> 3;
+    if i >= h.nslot {
+        Fail::raise(IntcFault::Unmapped(addr));
+    }
+    let at = wrapping_add(h.slot_off, i);
+    let old = w_at(in f.c_cmp, at);
+    set_w(inout f.c_cmp, at, set_half(old, (rel & 7) == 4, v));
+}
+
+fn mtime_write(inout f: Fabric, m: u64, hi: bool, v: u64) {
+    if m != none() {
+        let old = w_at(in f.mt_val, m);
+        set_w(inout f.mt_val, m, set_half(old, hi, v));
+    }
+}
+
+fn clint_write32(inout f: Fabric, addr: u64, v: u64) eff [Fail[IntcFault]] {
+    let at = block_at(in f, addr);
+    let h = chdr(in f, at.b);
+    let off = at.off;
+    // As the Rust build: the block's counter exists once it is written.
+    let m = if h.mtime == none() {
+        none()
+    } else {
+        mt_entry(inout f, h.mtime)
+    };
+    if h.kind == 1 || (h.kind == 0 && off < 16384) {
+        let i = off >> 2;
+        if i >= h.nslot {
+            Fail::raise(IntcFault::Unmapped(addr));
+        }
+        set_b(inout f.c_sip, wrapping_add(h.slot_off, i), (v & 1) != 0);
+        return;
+    }
+    if h.kind == 0 {
+        if off >= 49144 {
+            let r = wrapping_sub(off, 49144);
+            if r == 0 || r == 4 {
+                mtime_write(inout f, m, r == 4, v);
+                return;
+            }
+            Fail::raise(IntcFault::Unmapped(addr));
+        }
+        cmp_write(inout f, h, wrapping_sub(off, 16384), addr, v);
+        return;
+    }
+    if h.kind == 2 {
+        let i = off >> 2;
+        if i >= h.nslot {
+            Fail::raise(IntcFault::Unmapped(addr));
+        }
+        if (v & 1) != 0 {
+            set_b(inout f.c_sip, wrapping_add(h.slot_off, i), true);
+        }
+        return;
+    }
+    if at.r == 0 {
+        if off == 0 || off == 4 {
+            mtime_write(inout f, m, off == 4, v);
+            return;
+        }
+        Fail::raise(IntcFault::Unmapped(addr));
+    }
+    cmp_write(inout f, h, off, addr, v);
+}
+
+// ---------------------------------------------------------------- registers
+
+pub fn m_read32(inout f: Fabric, addr: u64) -> u64 eff [Fail[IntcFault]] {
+    let p = plic_at(in f, addr);
+    if p != none() {
+        return plic_read32(inout f, p, addr);
+    }
+    let d = aplic_at(in f, addr);
+    if d != none() {
+        let v = aplic_read(inout f, d, addr);
+        m_settle(inout f);
+        return v;
+    }
+    if in_any_imsic(in f, addr) {
+        if (addr & 3) != 0 {
+            Fail::raise(IntcFault::Misaligned(addr));
+        }
+        return 0;
+    }
+    clint_read32(in f, addr)
+}
+
+pub fn m_write32(inout f: Fabric, addr: u64, v: u64) eff [Fail[IntcFault]] {
+    let p = plic_at(in f, addr);
+    if p != none() {
+        plic_write32(inout f, p, addr, v);
+        return;
+    }
+    let d = aplic_at(in f, addr);
+    if d != none() {
+        m_aplic_raw_write32(inout f, d, addr, v);
+        m_settle(inout f);
+        return;
+    }
+    if in_any_imsic(in f, addr) {
+        if (addr & 3) != 0 {
+            Fail::raise(IntcFault::Misaligned(addr));
+        }
+        m_deliver_msi(inout f, addr, v);
+        return;
+    }
+    clint_write32(inout f, addr, v)
+}
+
+// ---------------------------------------------------------------- hypervisor
+
+fn hy_index(in f: Fabric, hart: u64) -> u64 {
+    for i in 0..f.hy_hart.len() {
+        if w_at(in f.hy_hart, i) == hart {
+            return i;
+        }
+    }
+    none()
+}
+
+fn hy_entry(inout f: Fabric, hart: u64) -> u64 {
+    let i = hy_index(in f, hart);
+    if i != none() {
+        return i;
+    }
+    f.hy_hart.push(hart);
+    f.hy_vgein.push(0);
+    f.hy_hgeie.push(0);
+    wrapping_sub(f.hy_hart.len(), 1)
+}
+
+pub fn m_vgein(in f: Fabric, hart: u64) -> u64 {
+    let i = hy_index(in f, hart);
+    if i == none() {
+        0
+    } else {
+        w_at(in f.hy_vgein, i)
+    }
+}
+
+pub fn m_hgeie(in f: Fabric, hart: u64) -> u64 {
+    let i = hy_index(in f, hart);
+    if i == none() {
+        0
+    } else {
+        w_at(in f.hy_hgeie, i)
+    }
+}
+
+pub fn m_set_vgein(inout f: Fabric, hart: u64, v: u64) {
+    let i = hy_entry(inout f, hart);
+    set_w(inout f.hy_vgein, i, v);
+}
+
+pub fn m_set_hgeie(inout f: Fabric, hart: u64, v: u64) {
+    let i = hy_entry(inout f, hart);
+    set_w(inout f.hy_hgeie, i, v);
+}
+
+// `hart`'s S-level IMSIC file and GEILEN (guest files 1..=GEILEN): `b << 32
+// | k` in `k` and GEILEN in `g`, or `k` none().
+pub fn m_guest_files(in f: Fabric, hart: u64) -> Located {
+    let bk = m_imsic_file(in f, target(hart, seip()));
+    if bk == none() {
+        return Located {
+            k: none(),
+            g: 0,
+            off: 0
+        };
+    }
+    let n = slot(in f, bk >> 32, bk & 4294967295).nguest;
+    let g = if n == 0 {
+        0
+    } else {
+        wrapping_sub(n, 1)
+    };
+    Located {
+        k: bk,
+        g: if g > 63 {
+            63
+        } else {
+            g
+        },
+        off: 0
+    }
+}
+
+pub fn m_geilen(in f: Fabric, hart: u64) -> u64 {
+    let gf = m_guest_files(in f, hart);
+    if gf.k == none() {
+        0
+    } else {
+        gf.g
+    }
+}
+
+pub fn m_hgeip(in f: Fabric, hart: u64) -> u64 {
+    let gf = m_guest_files(in f, hart);
+    if gf.k == none() {
+        return 0;
+    }
+    let first = slot(in f, gf.k >> 32, gf.k & 4294967295).first;
+    let mut acc: u64 = 0;
+    let mut g: u64 = 1;
+    loop {
+        if g > gf.g {
+            break;
+        }
+        if m_imsic_asserted(in f.imsic, wrapping_add(first, g)) {
+            acc = acc | wrapping_shl_u64(1, wrapping_u32(g));
+        }
+        g = wrapping_add(g, 1);
+    }
+    acc
+}
+
+pub fn m_clip_hgeie(inout f: Fabric, hart: u64) {
+    let i = hy_index(in f, hart);
+    if i == none() {
+        return;
+    }
+    let n = m_geilen(in f, hart);
+    let mask = wrapping_shl_u64(wrapping_sub(wrapping_shl_u64(1, wrapping_u32(n)), 1), 1);
+    let old = w_at(in f.hy_hgeie, i);
+    set_w(inout f.hy_hgeie, i, old & mask);
+}
+
+// The bank index of the guest file `hstatus.VGEIN` selects, or the typed
+// exception.
+fn vs_file(in f: Fabric, hart: u64) -> u64 eff [Fail[IntcFault]] {
+    let vgein = m_vgein(in f, hart);
+    let gf = m_guest_files(in f, hart);
+    if gf.k == none() || vgein == 0 || vgein > gf.g {
+        Fail::raise(
+            IntcFault::NoGuestFile {
+                hart: hart,
+                vgein: vgein
+            }
+        );
+    }
+    file_idx(in f, gf.k >> 32, gf.k & 4294967295, vgein)
+}
+
+pub fn m_vs_csr_read(in f: Fabric, hart: u64, isel: u64) -> u64 eff [Fail[IntcFault]] {
+    let i = vs_file(in f, hart);
+    let r: Lifted = handle Fail[AiaFault] in {
+        ok(m_imsic_csr_read(in f.imsic, i, isel))
+    } with {
+        return v => v,
+        raise(e, k) => failed(e),
+    };
+    lifted(r)
+}
+
+pub fn m_vs_csr_write(inout f: Fabric, hart: u64, isel: u64, v: u64) eff [Fail[IntcFault]] {
+    let i = vs_file(in f, hart);
+    let r: Lifted = handle Fail[AiaFault] in {
+        m_imsic_csr_write(inout f.imsic, i, isel, v);
+        ok(0)
+    } with {
+        return v => v,
+        raise(e, k) => failed(e),
+    };
+    let _ = lifted(r);
+}
+
+pub fn m_vstopei(in f: Fabric, hart: u64) -> u64 eff [Fail[IntcFault]] {
+    let i = vs_file(in f, hart);
+    m_imsic_topei(in f.imsic, i)
+}
+
+pub fn m_claim_vstopei(inout f: Fabric, hart: u64) -> u64 eff [Fail[IntcFault]] {
+    let i = vs_file(in f, hart);
+    m_imsic_claim(inout f.imsic, i)
+}
+
+// ---------------------------------------------------------------- levels
+
+fn wired_level(in f: Fabric, want: u64) -> bool {
+    for p in 0..f.plic.len() {
+        let h = plic_hdr(in f, p);
+        for c in 0..h.nctx {
+            if w_at(in f.p_ctx, wrapping_add(h.ctx_off, c)) == want && plic_eip(in f, h, c) {
+                return true;
+            }
+        }
+    }
+    for d in 0..f.dom.len() {
+        let t = topo(in f, d);
+        for i in 0..t.nidc {
+            if w_at(in f.d_idc, wrapping_add(t.idc_off, i))
+                == want
+                && m_aplic_idc_asserted(in f.aplic, d, i) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// The level of `cause` on `hart`.
+pub fn m_level(in f: Fabric, hart: u64, cause: u64) -> bool {
+    let want = target(hart, cause);
+    if cause == meip() || cause == seip() {
+        let bk = m_imsic_file(in f, want);
+        if bk == none() {
+            return wired_level(in f, want);
+        }
+        // With an interrupt file at this level, `eidelivery` picks the file
+        // (1) or the PLIC/APLIC (0x40000000) (AIA §3.8.1).
+        let i = file_idx(in f, bk >> 32, bk & 4294967295, 0);
+        return m_imsic_asserted(in f.imsic, i)
+            || (m_imsic_hdr(in f.imsic, i).delivery == 1073741824 && wired_level(in f, want));
+    }
+    if cause == sgeip() {
+        return (m_hgeip(in f, hart) & m_hgeie(in f, hart)) != 0;
+    }
+    if cause == vseip() {
+        let vgein = m_vgein(in f, hart);
+        return vgein < 64 && (wrapping_shr_u64(m_hgeip(in f, hart), wrapping_u32(vgein)) & 1) != 0;
+    }
+    if cause == msip() || cause == ssip() {
+        for b in 0..f.clint.len() {
+            let h = chdr(in f, b);
+            for k in 0..h.nslot {
+                if b_at(in f.c_sip, wrapping_add(h.slot_off, k)) && sw_target(in f, h, k) == want {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    if cause == mtip() {
+        for b in 0..f.clint.len() {
+            let h = chdr(in f, b);
+            if h.kind == 0 || h.kind == 3 {
+                let now = if h.mtime == none() {
+                    0
+                } else {
+                    mtime_at(in f, h.mtime)
+                };
+                for k in 0..h.nslot {
+                    if now
+                        >= w_at(in f.c_cmp, wrapping_add(h.slot_off, k))
+                        && timer_target(in f, h, k)
+                        == want {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+    false
+}
+
+// ---------------------------------------------------------------- wires and claims
+
+// Drives a wire into a PLIC (`kind` 0, `a` = PLIC) or any domain of an APLIC
+// tree (`kind` 1, `a` = domain: the wire enters the root and every domain of
+// the tree sees it).
+pub fn m_set_wire(inout f: Fabric, kind: u64, a: u64, src: u64, high: bool) eff [Fail[IntcFault]] {
+    if kind == 0 {
+        plic_set_level(inout f, a, src, high);
+        return;
+    }
+    if kind == 1 {
+        let root = m_root_of(in f, a);
+        if src == 0 || src > m_aplic_hdr(in f.aplic, root).sources {
+            Fail::raise(IntcFault::NoSuchSource(src));
+        }
+        for i in 0..f.dom.len() {
+            if m_root_of(in f, i) == root {
+                m_aplic_set_wire(inout f.aplic, i, src, high);
+            }
+        }
+        m_settle(inout f);
+        return;
+    }
+    Fail::raise(IntcFault::NoSuchSource(src))
+}
+
+fn claimed(kind: u64, a: u64, b: u64, number: u64) -> Claim {
+    Claim {
+        found: true,
+        kind: kind,
+        a: a,
+        b: b,
+        number: number
+    }
+}
+
+// Claims one external interrupt for `(hart, cause)`: the IMSIC file first,
+// then APLIC IDCs, then PLIC contexts (kind 2, 1 and 0). An APLIC `iforce`
+// claim reports number 0.
+pub fn m_claim_external(inout f: Fabric, hart: u64, cause: u64) -> Claim {
+    let want = target(hart, cause);
+    let bk = m_imsic_file(in f, want);
+    if bk != none() {
+        let b = bk >> 32;
+        let k = bk & 4294967295;
+        let i = file_idx(in f, b, k, 0);
+        if m_imsic_asserted(in f.imsic, i) {
+            let v = m_imsic_claim(inout f.imsic, i);
+            return claimed(2, b, k, v >> 16);
+        }
+        if m_imsic_hdr(in f.imsic, i).delivery != 1073741824 {
+            // The file, not the PLIC/APLIC, supplies this level.
+            return Claim {
+                found: false,
+                kind: 0,
+                a: 0,
+                b: 0,
+                number: 0
+            };
+        }
+    }
+    for d in 0..f.dom.len() {
+        let t = topo(in f, d);
+        for i in 0..t.nidc {
+            if w_at(in f.d_idc, wrapping_add(t.idc_off, i))
+                == want
+                && m_aplic_idc_asserted(in f.aplic, d, i) {
+                let v = m_aplic_claimi(inout f.aplic, d, i);
+                return claimed(1, d, 0, v >> 16);
+            }
+        }
+    }
+    for p in 0..f.plic.len() {
+        let h = plic_hdr(in f, p);
+        for c in 0..h.nctx {
+            if w_at(in f.p_ctx, wrapping_add(h.ctx_off, c)) == want {
+                let s = plic_claim(inout f, h, c);
+                if s != 0 {
+                    return claimed(0, p, 0, s);
+                }
+            }
+        }
+    }
+    Claim {
+        found: false,
+        kind: 0,
+        a: 0,
+        b: 0,
+        number: 0
+    }
+}
+
+// Completes `number` on the controller a claim named. `fwd_d`/`fwd_s` are
+// the APLIC domain and source that forward an IMSIC identity (none() when
+// none does).
+pub fn m_complete_external(
+    inout f: Fabric,
+    hart: u64,
+    cause: u64,
+    kind: u64,
+    a: u64,
+    number: u64,
+    fwd_d: u64,
+    fwd_s: u64
+) {
+    if kind == 0 {
+        let c = m_plic_context(in f, a, target(hart, cause));
+        if c != none() {
+            let h = plic_hdr(in f, a);
+            plic_complete(inout f, h, c, number);
+        }
+        return;
+    }
+    if kind == 2 && fwd_d != none() {
+        // Linux's APLIC-MSI EOI: a level source still asserted after its
+        // handler is re-triggered through setipnum (AIA §4.9.2).
+        let mode = m_aplic_mode(in f.aplic, fwd_d, fwd_s);
+        if mode == 6 || mode == 7 {
+            let base = m_aplic_hdr(in f.aplic, fwd_d).base;
+            let r: Lifted = handle Fail[AiaFault] in {
+                m_aplic_write32(inout f.aplic, fwd_d, wrapping_add(base, 7388), fwd_s);
+                ok(0)
+            } with {
+                return v => v,
+                raise(e, k) => failed(e),
+            };
+            m_settle(inout f);
+        }
+    }
+}
+
+// ---------------------------------------------------------------- queries
+
+pub fn m_plic_count(in f: Fabric) -> u64 {
+    f.plic.len()
+}
+
+pub fn m_plic_base(in f: Fabric, p: u64) -> u64 {
+    plic_hdr(in f, p).base
+}
+
+pub fn m_aplic_count(in f: Fabric) -> u64 {
+    f.dom.len()
+}
+
+pub fn m_hyp_harts(in f: Fabric) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new();
+    out.extend(in f.hy_hart.as_slice());
+    out
+}
+
+pub fn m_lost_msis(in f: Fabric) -> ChunkSeq[Msi] {
+    let mut out: ChunkSeq[Msi] = ChunkSeq::new();
+    out.extend(in f.lost.as_slice());
+    out
+}
+
+pub fn m_push_lost_msi(inout f: Fabric, m: Msi) {
+    f.lost.push(m);
+}

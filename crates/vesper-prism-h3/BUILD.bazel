@@ -1,3 +1,138 @@
+load("@rules_rs//rs/private:all_crate_deps.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+load("@vesper_cargo//:packages.bzl", "PACKAGES")
+load("//tools/bazel:cargo_test.bzl", "cargo_test")
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
 
+# The Rust build is the default (default features), with its tests.
 vesper_crate()
+
+# The Vesper build (port wave P3b lane 5, #1067, Cargo feature
+# `vesper-port`): QPACK forwarded to the Loom package in vesper/ through the
+# committed binding, with the connection driver still in Rust. Not the
+# default until it reaches parity.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "h3_vesper",
+    library = "h3",
+    package = ":port_package",
+    rust_types = "crate::qpack::port::abi",
+    target = VESPER_TARGET,
+)
+
+# The divergence check: the edits of DIVERGENT_EDITS in build.rs, one
+# object per ported module. :port_divergence_detected expects the test that
+# guards each module to fail against it.
+DIVERGENT = {
+    "decoder": ("decoder", "let a = wrapping_add(base, index);", "let a = wrapping_add(base, inc(index));"),
+    "encoder": ("encoder", "inc(ric % full)", "ric % full"),
+    "huffman": ("huffman", "out.push(wrapping_u8(shl(acc, pad) | wrapping_sub(bit(pad), 1)));", "out.push(wrapping_u8(shl(acc, pad)));"),
+    "prefix": ("prefix", "used: wrapping_sub(inc(i), at)", "used: wrapping_sub(i, at)"),
+    "table": ("table", "wrapping_sub(t.inserted, table_len(in t))", "wrapping_sub(t.inserted, inc(table_len(in t)))"),
+}
+
+[
+    vesper_port_object(
+        name = "h3_vesper_divergent_" + module,
+        edit_src = "vesper/src/%s.ves" % src,
+        edits = {old: new},
+        library = "h3",
+        package = ":port_package",
+        rust_types = "crate::qpack::port::abi",
+        target = VESPER_TARGET,
+    )
+    for module, (src, old, new) in DIVERGENT.items()
+]
+
+_CRATE_DATA = PACKAGES["crates/vesper-prism-h3"].crate_data()
+
+rust_library(
+    name = "port",
+    srcs = glob(["src/**/*.rs"]) + ["port/binding.rs"],
+    crate_features = ["vesper-port"],
+    crate_name = "vesper_prism_h3",
+    crate_root = "src/lib.rs",
+    edition = "2024",
+    deps = ["//crates/vesper-port-abi"] + all_crate_deps(
+        _CRATE_DATA,
+        normal = True,
+        platforms = _CRATE_DATA["platforms"],
+    ),
+)
+
+# The test files that need nothing but the crate, against the port. They
+# run in the package directory, as Cargo runs them. The interop tests
+# (Warp, quinn and wtransport peers) run against the port in Cargo, in the
+# Linux "Vesper ports" job (port/check.sh).
+PORT_TESTS = [
+    "h3_mem",
+    "priority_bodies",
+    "qpack_encode_golden",
+    "qpack_qifs",
+    "qpack_rfc",
+    "robustness",
+    "webtransport_mem",
+]
+
+SUPPORT = ["h3_mem", "priority_bodies", "robustness", "webtransport_mem"]
+
+# The divergence check: each module's divergent object linked into the test
+# file that guards it (CHECKS, the same pairs as port/check.sh);
+# :port_divergence_detected runs them and expects exactly those failures.
+CHECKS = {
+    "decoder": "qpack_qifs",
+    "encoder": "qpack_rfc",
+    "huffman": "qpack_rfc",
+    "prefix": "qpack_qifs",
+    "table": "qpack_rfc",
+}
+
+[
+    (
+        rust_test(
+            name = "_port_%s%s.bin" % (test, suffix),
+            srcs = ["tests/%s.rs" % test] + (["tests/support/mod.rs"] if test in SUPPORT else []),
+            compile_data = [obj],
+            crate_features = ["vesper-port"],
+            crate_name = test + suffix,
+            crate_root = "tests/%s.rs" % test,
+            data = glob(["tests/fixtures/**"]),
+            edition = "2024",
+            rustc_env = {"CARGO_MANIFEST_DIR": "."},
+            rustc_flags = ["-Clink-arg=$(location %s)" % obj],
+            tags = ["manual"],
+            deps = [":port"],
+        ),
+        cargo_test(
+            name = "port_%s%s_test" % (test, suffix),
+            cwd = package_name(),
+            tags = ["no-remote-exec"] + (["manual"] if suffix else []),
+            test = ":_port_%s%s.bin" % (test, suffix),
+        ),
+    )
+    for test, suffix, obj in [(t, "", ":h3_vesper") for t in PORT_TESTS] + [
+        (CHECKS[m], "_divergent_" + m, ":h3_vesper_divergent_" + m)
+        for m in DIVERGENT
+    ]
+]
+
+rust_test(
+    name = "port_divergence_detected",
+    srcs = ["tests/divergence.rs"],
+    data = [":_port_%s_divergent_%s.bin" % (CHECKS[m], m) for m in DIVERGENT] + glob(["tests/fixtures/**"]),
+    edition = "2024",
+    env = dict(
+        {
+            "VESPER_H3_DIVERGENT_%s" % m.upper(): "$(rootpath :_port_%s_divergent_%s.bin)" % (CHECKS[m], m)
+            for m in DIVERGENT
+        },
+        VESPER_H3_DIVERGENT_CWD = package_name(),
+    ),
+    tags = ["no-remote-exec"],
+)

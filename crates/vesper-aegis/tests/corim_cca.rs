@@ -40,8 +40,8 @@ const NS: u64 = 1_000_000_000;
 const NOW: u64 = 1_748_736_000 * NS;
 
 fn data(path: &str) -> Vec<u8> {
-    let p = format!("{}/tests/data/vendor/{path}", env!("CARGO_MANIFEST_DIR"));
-    std::fs::read(&p).unwrap_or_else(|e| panic!("{p}: {e}"))
+    let p = support::crate_dir().join("tests/data/vendor").join(path);
+    std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
 fn svc(name: &str) -> Vec<u8> {

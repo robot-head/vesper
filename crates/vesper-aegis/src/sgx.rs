@@ -29,14 +29,19 @@ use crate::chain::{
     Curve, EcPublicKey, RevocationScope, TrustRoot, pem_certificates, verify_chain_with_crls,
 };
 use crate::claims::ct_eq;
-use crate::error::{AttestError, Format, ParseError};
+#[cfg(not(vesper_port))]
+use crate::error::Format;
+use crate::error::{AttestError, ParseError};
 use crate::intel::{
     ComponentJson, PckExtensions, QeIdentity, TcbStatus, TdxCollateral, TdxTcbEvaluation, all_ge,
     check_embedded_root, check_window, collateral, date, evaluate_qe, hex_array,
     parse_pck_extensions, push_unique, svn16, verify_signed,
 };
+#[cfg(not(vesper_port))]
 use crate::reader::Reader;
-use crate::tdx::{CERT_DATA_PCK_CHAIN_PEM, MAX_SIG_DATA_LEN, QeReportBody, TdxQuote};
+#[cfg(not(vesper_port))]
+use crate::tdx::{CERT_DATA_PCK_CHAIN_PEM, MAX_SIG_DATA_LEN};
+use crate::tdx::{QeReportBody, TdxQuote};
 use serde::Deserialize;
 
 pub const SGX_QUOTE_VERSION: u16 = 3;
@@ -85,6 +90,7 @@ pub struct SgxReportBody {
 }
 
 impl SgxReportBody {
+    #[cfg(not(vesper_port))]
     fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
         let cpu_svn = r.array("body.cpu_svn")?;
         let misc_select = r.u32("body.misc_select")?;
@@ -147,6 +153,74 @@ pub struct SgxQuote {
 
 impl SgxQuote {
     /// Bounds-checked parse; the input must contain exactly one quote.
+    #[cfg(vesper_port)]
+    pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
+        Ok(Self::parse_port(bytes, 0)?.0)
+    }
+
+    /// Parse from a fixed-size quote buffer: bytes after the quote's
+    /// declared length must all be zero.
+    #[cfg(vesper_port)]
+    pub fn parse_padded(bytes: &[u8]) -> Result<Self, ParseError> {
+        Ok(Self::parse_port(bytes, 1)?.0)
+    }
+
+    /// Parse one quote from the start of `bytes`; returns it and the number
+    /// of bytes it occupies.
+    #[cfg(vesper_port)]
+    pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
+        Self::parse_port(bytes, 2)
+    }
+
+    /// `mode`: 0 exact, 1 zero padded, 2 prefix (vesper/src/reader.ves).
+    #[cfg(vesper_port)]
+    fn parse_port(bytes: &[u8], mode: u64) -> Result<(Self, usize), ParseError> {
+        let (used, p) =
+            crate::port::parse(|w, d| crate::port::vesper::sgx_parse(bytes, mode, w, d))?;
+        let mut f = p.fields();
+        let header = SgxQuoteHeader {
+            version: f.u16(),
+            att_key_type: f.u16(),
+            qe_svn: f.u16(),
+            pce_svn: f.u16(),
+            qe_vendor_id: f.array(),
+            user_data: f.array(),
+        };
+        let body = SgxReportBody {
+            cpu_svn: f.array(),
+            misc_select: f.u32(),
+            isv_ext_prod_id: f.array(),
+            attributes: f.array(),
+            mr_enclave: f.array(),
+            mr_signer: f.array(),
+            config_id: f.array(),
+            isv_prod_id: f.u16(),
+            isv_svn: f.u16(),
+            config_svn: f.u16(),
+            isv_family_id: f.array(),
+            report_data: f.array(),
+        };
+        let signed_bytes = f.bytes(SGX_SIGNED_LEN).to_vec();
+        let quote_signature = f.array();
+        let attestation_key = f.array();
+        let qe_report_raw = f.bytes(SGX_REPORT_BODY_LEN).to_vec();
+        let quote = SgxQuote {
+            header,
+            body,
+            quote_signature,
+            attestation_key,
+            qe_report: QeReportBody::from_port(&mut f),
+            qe_report_raw,
+            qe_report_signature: f.array(),
+            qe_auth_data: f.vec(),
+            pck_chain_pem: f.vec(),
+            signed_bytes,
+        };
+        Ok((quote, used as usize))
+    }
+
+    /// Bounds-checked parse; the input must contain exactly one quote.
+    #[cfg(not(vesper_port))]
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         let (quote, used) = Self::parse_prefix(bytes)?;
         if used != bytes.len() {
@@ -160,6 +234,7 @@ impl SgxQuote {
 
     /// Parse from a fixed-size quote buffer: bytes after the quote's
     /// declared length must all be zero.
+    #[cfg(not(vesper_port))]
     pub fn parse_padded(bytes: &[u8]) -> Result<Self, ParseError> {
         let (quote, used) = Self::parse_prefix(bytes)?;
         if bytes[used..].iter().any(|&b| b != 0) {
@@ -173,6 +248,7 @@ impl SgxQuote {
 
     /// Parse one quote from the start of `bytes`; returns it and the number
     /// of bytes it occupies.
+    #[cfg(not(vesper_port))]
     pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
         let mut r = Reader::new(bytes, Format::SgxQuoteV3);
         let version = r.u16("header.version")?;
@@ -609,6 +685,7 @@ impl SgxEnclavePolicy {
     }
 }
 
+#[cfg(not(vesper_port))]
 fn unsupported(field: &'static str, value: u64) -> ParseError {
     ParseError::UnsupportedValue {
         format: Format::SgxQuoteV3,

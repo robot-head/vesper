@@ -28,11 +28,16 @@ fn main() {
 const EDITS: &[(&str, &str)] = &[
     // aia.ves, IMSIC: an identity equal to `eithreshold` is still delivered.
     (
-        "if f.threshold == 0 || id < f.threshold {",
-        "if f.threshold == 0 || id <= f.threshold {",
+        "if h.threshold == 0 || id < h.threshold {",
+        "if h.threshold == 0 || id <= h.threshold {",
     ),
     // aia.ves, APLIC: equal priorities go to the higher source number.
     ("if !found || prio < bp {", "if !found || prio <= bp {"),
+    // intc.ves, PLIC: a claim leaves its source pending.
+    (
+        "set_b(inout f.p_pending, at, false);",
+        "set_b(inout f.p_pending, at, true);",
+    ),
     // dtb.ves: node names start one byte late.
     (
         "let name = wrapping_add(off_struct, i);",

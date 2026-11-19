@@ -4,6 +4,22 @@ version = "0.1.0"
 edition = "2024"
 description = "Vesper Aegis confidential-computing guest libraries: TDX/SEV-SNP/CCA attestation, RA-TLS policy, GPA acceptance and single-fetch host values (design section 33)"
 publish = false
+build = "build.rs"
+
+# This is the port-backed build: build.rs links the Vesper package in vesper/
+# and sets cfg(vesper_port), and the quote, report and claims parsers, the
+# timestamp parser and the relying-party policy check forward to it. The
+# compiler and every crate inside `cargo tree -p vesper -e normal,build` use
+# the frozen Rust seed copy, crates/vesper-aegis/seed (package
+# vesper-aegis-seed, same library name), instead; see "Crates the compiler
+# links" in docs/maintenance/porting-a-crate.md. No crate outside the
+# compiler's closure depends on Aegis, so every dependent links the Rust
+# build until the port reaches parity (port wave P3a lane 8, #1043).
+
+[features]
+# A deliberately wrong Vesper build, one edit per ported module (build.rs
+# DIVERGENT): the tests named in port/check.sh must then fail.
+vesper-port-divergent = []
 
 [dependencies]
 coset = "0.3"
@@ -19,6 +35,19 @@ vesper-vault = { path = "../vesper-vault" }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 x509-parser = "=0.18.1"
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+vesper-bench = { path = "../vesper-bench" }
+# The frozen Rust build, for the ABBA benchmark against the port
+# (examples/abba.rs).
+vesper-aegis-rust = { path = "seed", package = "vesper-aegis-seed" }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }
+
+[lints.rust]
+# cfg(vesper_port) is set by build.rs (the harness); the seed package has no
+# build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

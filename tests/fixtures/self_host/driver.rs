@@ -366,6 +366,8 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // Port P1 lane 18 (#915): a Loom package like the others;
                     // joins with them once #880 lands.
                     || path.ends_with("crates/vesper-crucible/vesper")
+                    // Port P3a lane 8 (#1043): the Aegis port uses `use` (#880).
+                    || path.ends_with("crates/vesper-aegis/vesper")
                     // Port P3a lane 5 (#1040): the bench port uses `use` (#880).
                     || path.ends_with("crates/vesper-bench/vesper")
                     // Port P3a lane 6 (#1041): the eBPF port uses `use` (#880).
@@ -374,6 +376,8 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     || path.ends_with("crates/vesper-silicon/vesper")
                     // P3b lane 3 (#1065): `.vsys` handle fixtures (slice intervals).
                     || path.ends_with("tests/fixtures/ffi_handles")
+                    // Port P3b lane 5 (#1067): the prism-h3 port uses `use` (#880).
+                    || path.ends_with("crates/vesper-prism-h3/vesper")
                 {
                     continue;
                 }

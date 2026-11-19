@@ -1,0 +1,516 @@
+// Module btf of @vesper/ebpf (see lib.ves): the BTF reader of src/btf.rs
+// (`Btf::parse_with`): the header and section checks, every type kind, and
+// the reference and name validation. The Rust wrapper builds `Btf` (the
+// type table, the string section and the by-name index) from the words.
+//
+// Output: [0, own type count, records...] or [1, error code, value]. A
+// record is seven words (kind, name, a, b, c, d, n) then n entries:
+//   int      a size, b encoding, c offset, d bits
+//   ptr, typedef, volatile, const, restrict, type tag   a type
+//   array    a elem, b index, c len
+//   struct, union   a size, n x (name, type, bit offset, bitfield size)
+//   enum, enum64    a size, b signed, n x (name, value bits)
+//   fwd      a union
+//   func     a proto, b linkage
+//   func proto      a ret, n x (name, type)
+//   var      a type, b linkage
+//   datasec  a size, n x (type, offset, size)
+//   float    a size
+//   decl tag a type, b component (u32 bits)
+// Error codes: 0 bad header, 1 unsupported version (value), 2 header too
+// short, 3 section out of range, 4 string section NUL, 5 truncated, 6
+// unknown kind (value), 7 type (value) refers past the type table, 8 name
+// offset out of range, 9 unterminated name, 10 non-UTF-8 name.
+
+pub fn byte(in s: Slice[u8], at: u64) -> u64 {
+    match s.try_get(at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+pub fn le32(in s: Slice[u8], at: u64) -> u64 {
+    byte(in s, at) | (byte(in s, wrapping_add(at, 1)) << 8) | (
+        byte(in s, wrapping_add(at, 2)) << 16
+    ) | (byte(in s, wrapping_add(at, 3)) << 24)
+}
+
+fn failed(code: u64, x: u64) -> ChunkSeq[u64] {
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    o.push(1);
+    o.push(code);
+    o.push(x);
+    o
+}
+
+fn word_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// Entry words per kind after the seven-word record header.
+fn entry_words(kind: u64) -> u64 {
+    if kind == 4 || kind == 5 {
+        4
+    } else if kind == 6 || kind == 19 || kind == 13 {
+        2
+    } else if kind == 15 {
+        3
+    } else {
+        0
+    }
+}
+
+fn sext32(v: u64) -> u64 {
+    if v & 2147483648 != 0 {
+        v | 18446744069414584320
+    } else {
+        v
+    }
+}
+
+// The byte `i` of the base strings followed by the own strings.
+fn cat_byte(in base: Slice[u8], in own: Slice[u8], i: u64) -> u64 {
+    let nb = base.len();
+    if i < nb {
+        byte(in base, i)
+    } else {
+        byte(in own, wrapping_sub(i, nb))
+    }
+}
+
+fn cont(in base: Slice[u8], in own: Slice[u8], i: u64, end: u64, lo: u64, hi: u64) -> bool {
+    if i >= end {
+        return false;
+    }
+    let c = cat_byte(in base, in own, i);
+    c >= lo && c <= hi
+}
+
+// Rust `str::from_utf8` on bytes `at..end` of the concatenation.
+pub fn valid_utf8(in base: Slice[u8], in own: Slice[u8], at: u64, end: u64) -> bool {
+    let mut i = at;
+    loop {
+        if i >= end {
+            return true;
+        }
+        let c = cat_byte(in base, in own, i);
+        let i1 = wrapping_add(i, 1);
+        if c < 128 {
+            i = i1;
+        } else if c >= 194 && c <= 223 {
+            if !cont(in base, in own, i1, end, 128, 191) {
+                return false;
+            }
+            i = wrapping_add(i, 2);
+        } else if c >= 224 && c <= 239 {
+            let lo: u64 = if c == 224 {
+                160
+            } else {
+                128
+            };
+            let hi: u64 = if c == 237 {
+                159
+            } else {
+                191
+            };
+            if !cont(in base, in own, i1, end, lo, hi) {
+                return false;
+            }
+            if !cont(in base, in own, wrapping_add(i, 2), end, 128, 191) {
+                return false;
+            }
+            i = wrapping_add(i, 3);
+        } else if c >= 240 && c <= 244 {
+            let lo: u64 = if c == 240 {
+                144
+            } else {
+                128
+            };
+            let hi: u64 = if c == 244 {
+                143
+            } else {
+                191
+            };
+            if !cont(in base, in own, i1, end, lo, hi) {
+                return false;
+            }
+            if !cont(in base, in own, wrapping_add(i, 2), end, 128, 191) {
+                return false;
+            }
+            if !cont(in base, in own, wrapping_add(i, 3), end, 128, 191) {
+                return false;
+            }
+            i = wrapping_add(i, 4);
+        } else {
+            return false;
+        }
+    }
+}
+
+// `Btf::str_at`: 0 when the name at `off` is valid, else the error code.
+fn check_name(in base: Slice[u8], in own: Slice[u8], off: u64) -> u64 {
+    if off == 0 {
+        return 0;
+    }
+    let total = wrapping_add(base.len(), own.len());
+    if off > total {
+        return 8;
+    }
+    let mut end = off;
+    loop {
+        if end >= total {
+            return 9;
+        }
+        if cat_byte(in base, in own, end) == 0 {
+            break;
+        }
+        end = wrapping_add(end, 1);
+    }
+    if valid_utf8(in base, in own, off, end) {
+        0
+    } else {
+        10
+    }
+}
+
+// Decode the type section into records after `out`'s two header words;
+// returns 0, or an error code with its value in `bad`.
+fn decode_types(inout out: ChunkSeq[u64], inout bad: u64, in types: Slice[u8]) -> u64 {
+    let len = types.len();
+    let mut at: u64 = 0;
+    let mut count: u64 = 0;
+    loop {
+        if at >= len {
+            break;
+        }
+        if wrapping_add(at, 12) > len {
+            return 5;
+        }
+        let name = le32(in types, at);
+        let info = le32(in types, wrapping_add(at, 4));
+        let sot = le32(in types, wrapping_add(at, 8));
+        at = wrapping_add(at, 12);
+        let kind = (info >> 24) & 31;
+        let vlen = info & 65535;
+        let kflag = (info >> 31) != 0;
+        // words the kind reads after the common 12 bytes
+        let fixed: u64 = if kind == 1 || kind == 14 || kind == 17 {
+            1
+        } else if kind == 3 {
+            3
+        } else {
+            0
+        };
+        let per: u64 = if kind == 4 || kind == 5 || kind == 15 || kind == 19 {
+            3
+        } else if kind == 6 || kind == 13 {
+            2
+        } else {
+            0
+        };
+        if kind == 0 || kind > 19 {
+            bad = kind;
+            return 6;
+        }
+        let need = wrapping_mul(wrapping_add(fixed, wrapping_mul(per, vlen)), 4);
+        if wrapping_add(at, need) > len {
+            return 5;
+        }
+        let mut a: u64 = 0;
+        let mut b: u64 = 0;
+        let mut c: u64 = 0;
+        let mut d: u64 = 0;
+        let mut n: u64 = 0;
+        if kind == 1 {
+            let w = le32(in types, at);
+            a = sot;
+            b = (w >> 24) & 15;
+            c = (w >> 16) & 255;
+            d = w & 255;
+        } else if kind == 3 {
+            a = le32(in types, at);
+            b = le32(in types, wrapping_add(at, 4));
+            c = le32(in types, wrapping_add(at, 8));
+        } else if kind == 4 || kind == 5 || kind == 15 {
+            a = sot;
+            n = vlen;
+        } else if kind == 6 || kind == 19 {
+            a = sot;
+            b = if kflag {
+                1
+            } else {
+                0
+            };
+            n = vlen;
+        } else if kind == 7 {
+            a = if kflag {
+                1
+            } else {
+                0
+            };
+        } else if kind == 12 {
+            a = sot;
+            b = vlen;
+        } else if kind == 13 {
+            a = sot;
+            n = vlen;
+        } else if kind == 14 || kind == 17 {
+            a = sot;
+            b = le32(in types, at);
+        } else {
+            // ptr, typedef, volatile, const, restrict, float, type tag
+            a = sot;
+        }
+        // `BtfType::name_off`: these kinds carry no name
+        let named = !(
+            kind == 2 || kind == 3 || kind == 9 || kind == 10 || kind == 11 || kind == 13
+        );
+        out.push(kind);
+        out
+            .push(
+            if named {
+                name
+            } else {
+                0
+            }
+        );
+        out.push(a);
+        out.push(b);
+        out.push(c);
+        out.push(d);
+        out.push(n);
+        at = wrapping_add(at, wrapping_mul(fixed, 4));
+        for i in 0..n {
+            if kind == 4 || kind == 5 {
+                let off = le32(in types, wrapping_add(at, 8));
+                out.push(le32(in types, at));
+                out.push(le32(in types, wrapping_add(at, 4)));
+                if kflag {
+                    out.push(off & 16777215);
+                    out.push(off >> 24);
+                } else {
+                    out.push(off);
+                    out.push(0);
+                }
+            } else if kind == 6 {
+                out.push(le32(in types, at));
+                let v = le32(in types, wrapping_add(at, 4));
+                out
+                    .push(
+                    if kflag {
+                        sext32(v)
+                    } else {
+                        v
+                    }
+                );
+            } else if kind == 19 {
+                out.push(le32(in types, at));
+                out
+                    .push(
+                    le32(in types, wrapping_add(at, 4)) | (
+                        le32(in types, wrapping_add(at, 8)) << 32
+                    )
+                );
+            } else if kind == 13 {
+                out.push(le32(in types, at));
+                out.push(le32(in types, wrapping_add(at, 4)));
+            } else {
+                out.push(le32(in types, at));
+                out.push(le32(in types, wrapping_add(at, 4)));
+                out.push(le32(in types, wrapping_add(at, 8)));
+            }
+            at = wrapping_add(at, wrapping_mul(per, 4));
+        }
+        count = wrapping_add(count, 1);
+    }
+    out.try_set(1, count);
+    0
+}
+
+// The reference and name checks of every own type, in id order; returns
+// 0 or an error code with its value in `bad`.
+fn validate(
+    in out: ChunkSeq[u64],
+    inout bad: u64,
+    first_id: u64,
+    ntypes: u64,
+    in base: Slice[u8],
+    in own: Slice[u8]
+) -> u64 {
+    let count = word_at(in out, 1);
+    let mut r: u64 = 2;
+    for t in 0..count {
+        let id = wrapping_add(first_id, t);
+        let kind = word_at(in out, r);
+        let a = word_at(in out, wrapping_add(r, 2));
+        let b = word_at(in out, wrapping_add(r, 3));
+        let n = word_at(in out, wrapping_add(r, 6));
+        let e = wrapping_add(r, 7);
+        let k = entry_words(kind);
+        let mut past = false;
+        if kind
+            == 2
+            || kind
+            == 8
+            || kind
+            == 9
+            || kind
+            == 10
+            || kind
+            == 11
+            || kind
+            == 14
+            || kind
+            == 17
+            || kind
+            == 18
+            || kind
+            == 12 {
+            past = a >= ntypes;
+        } else if kind == 3 {
+            past = a >= ntypes || b >= ntypes;
+        } else if kind == 13 {
+            past = a >= ntypes;
+        }
+        if kind == 4 || kind == 5 || kind == 13 || kind == 15 {
+            // the type is entry word 1 of a member or param, word 0 of a var
+            let at: u64 = if kind == 15 {
+                0
+            } else {
+                1
+            };
+            for i in 0..n {
+                let ty = word_at(in out, wrapping_add(wrapping_add(e, wrapping_mul(i, k)), at));
+                if ty >= ntypes {
+                    past = true;
+                }
+            }
+        }
+        if past {
+            bad = id;
+            return 7;
+        }
+        let name = word_at(in out, wrapping_add(r, 1));
+        let c0 = check_name(in base, in own, name);
+        if c0 != 0 {
+            return c0;
+        }
+        if kind == 4 || kind == 5 || kind == 6 || kind == 19 || kind == 13 {
+            for i in 0..n {
+                let o = word_at(in out, wrapping_add(e, wrapping_mul(i, k)));
+                let ci = check_name(in base, in own, o);
+                if ci != 0 {
+                    return ci;
+                }
+            }
+        }
+        r = wrapping_add(e, wrapping_mul(n, k));
+    }
+    0
+}
+
+fn parse_types(
+    in types: Slice[u8],
+    split: bool,
+    base_types: u64,
+    in base_strings: Slice[u8],
+    in own: Slice[u8]
+) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(0);
+    out.push(0);
+    let mut bad: u64 = 0;
+    let code = decode_types(inout out, inout bad, in types);
+    if code != 0 {
+        return failed(code, bad);
+    }
+    let count = word_at(in out, 1);
+    // a standalone blob's own types start after `void` (id 0)
+    let first_id: u64 = if split {
+        base_types
+    } else {
+        1
+    };
+    let ntypes = wrapping_add(first_id, count);
+    let v = validate(in out, inout bad, first_id, ntypes, in base_strings, in own);
+    if v != 0 {
+        return failed(v, bad);
+    }
+    out
+}
+
+fn check_strings(in own: Slice[u8], split: bool) -> bool {
+    let n = own.len();
+    if n == 0 {
+        return true;
+    }
+    if !split && byte(in own, 0) != 0 {
+        return false;
+    }
+    byte(in own, wrapping_sub(n, 1)) == 0
+}
+
+fn parse_sections(
+    in btf: Slice[u8],
+    split: bool,
+    base_types: u64,
+    in base_strings: Slice[u8],
+    ts: u64,
+    te: u64,
+    ss: u64,
+    se: u64
+) -> ChunkSeq[u64] {
+    if !check_strings(in btf[ss..se], split) {
+        return failed(4, 0);
+    }
+    parse_types(in btf[ts..te], split, base_types, in base_strings, in btf[ss..se])
+}
+
+// `Btf::parse_with`: `split` with the base's type count (including void)
+// and string section, or a standalone blob (`base_types` 1, no strings).
+pub fn parse_btf(in btf: Slice[u8], split: bool, base_types: u64, in base_strings: Slice[u8])
+    -> ChunkSeq[u64] {
+    let len = btf.len();
+    if len < 24 || (byte(in btf, 0) | (byte(in btf, 1) << 8)) != 60319 {
+        return failed(0, 0);
+    }
+    let version = byte(in btf, 2);
+    if version != 1 {
+        return failed(1, version);
+    }
+    let hdr_len = le32(in btf, 4);
+    if hdr_len < 24 {
+        return failed(2, 0);
+    }
+    let ts = wrapping_add(hdr_len, le32(in btf, 8));
+    let te = wrapping_add(ts, le32(in btf, 12));
+    let ss = wrapping_add(hdr_len, le32(in btf, 16));
+    let se = wrapping_add(ss, le32(in btf, 20));
+    if te > len {
+        return failed(3, 0);
+    }
+    if se > len {
+        return failed(3, 0);
+    }
+    parse_sections(in btf, split, base_types, in base_strings, ts, te, ss, se)
+}
+
+// `Btf::name` of `off` in the string section `strs`: (start, length), the
+// empty name for an offset `str_at` refuses.
+pub fn name_span(in strs: Slice[u8], off: u64) -> (u64, u64) {
+    let none: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    if check_name(in none.as_slice(), in strs, off) != 0 || off == 0 {
+        return (0, 0);
+    }
+    let mut e = off;
+    loop {
+        if byte(in strs, e) == 0 {
+            break;
+        }
+        e = wrapping_add(e, 1);
+    }
+    (off, wrapping_sub(e, off))
+}

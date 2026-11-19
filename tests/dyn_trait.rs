@@ -415,9 +415,11 @@ fn non_object_safe_traits_are_rejected() {
             "associated type",
             "trait T1 { type Out: mod copy; fn m(in self) -> i64; }",
         ),
+        // Handler effects are allowed since #1063 (tests/dyn_effects.rs);
+        // an open row is not.
         (
-            "handler effect",
-            "effect Log { fn log(x: i64) -> (); }\ntrait T1 { fn m(in self) -> i64 eff [Log]; }",
+            "open effect row",
+            "trait T1 { fn m[r: eff](in self) -> i64 eff [r]; }",
         ),
     ] {
         let src = format!("{decl}\nfn f(in x: dyn T1) -> i64 {{ 0 }}\nfn main() -> i64 {{ 0 }}\n");

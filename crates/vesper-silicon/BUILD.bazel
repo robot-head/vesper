@@ -43,14 +43,20 @@ filegroup(
         (
             "imsic",
             "aia",
-            "if f.threshold == 0 || id < f.threshold {",
-            "if f.threshold == 0 || id <= f.threshold {",
+            "if h.threshold == 0 || id < h.threshold {",
+            "if h.threshold == 0 || id <= h.threshold {",
         ),
         (
             "aplic",
             "aia",
             "if !found || prio < bp {",
             "if !found || prio <= bp {",
+        ),
+        (
+            "plic",
+            "intc",
+            "set_b(inout f.p_pending, at, false);",
+            "set_b(inout f.p_pending, at, true);",
         ),
         (
             "dtb",

@@ -1,0 +1,387 @@
+// Vesper port of the vesper-prism-h3 protocol core (port wave P3b lane 5,
+// #1067). Part 1: QPACK (RFC 9204), with its prefixed integers and the
+// HPACK Huffman code. The Rust crate keeps its public API and forwards to
+// this library through port/binding.rs under the `vesper-port` feature
+// (src/qpack/port.rs is the adapter); the connection driver stays Rust.
+//
+// Exported functions only return `Result` values: every failure the Rust
+// code reports is a typed error, and nothing here raises.
+
+use self::int::{
+    inc
+};
+use self::huffman::{
+    huff_tables,
+    huff_encoded_len,
+    huff_encode,
+    huff_decode
+};
+use self::table::{
+    Static,
+    Table,
+    static_new,
+    table_new,
+    table_len,
+    table_first
+};
+use self::prefix::{
+    Num,
+    decode_int,
+    encode_int,
+    decode_string,
+    encode_string
+};
+use self::encoder::{
+    enc_encode,
+    enc_on_decoder_stream,
+    enc_apply_peer_settings,
+    enc_blocking_streams
+};
+use self::decoder::{
+    dec_on_encoder_stream,
+    dec_decode_section,
+    dec_cancel_stream,
+    dec_take_decoder_stream
+};
+
+pub copy enum HuffmanError {
+    Eos,
+    BadPadding,
+    TooLong
+}
+
+pub copy enum PrefixError {
+    Incomplete,
+    IntegerOverflow,
+    StringTooLong,
+    Huffman(HuffmanError)
+}
+
+pub copy enum Reason {
+    Truncated,
+    IntegerOverflow,
+    StringTooLong,
+    Huffman(HuffmanError),
+    BadStaticIndex(u64),
+    BadDynamicIndex,
+    BadRequiredInsertCount,
+    NegativeBase,
+    CapacityExceeded,
+    EntryTooLarge,
+    TooManyBlockedStreams,
+    BlockedBytesLimit,
+    UnexpectedAcknowledgment(u64),
+    ZeroIncrement,
+    IncrementBeyondInserts,
+    InstructionTooLong,
+    StreamAlreadyBlocked(u64)
+}
+
+pub copy enum QpackError {
+    Decompression(Reason),
+    EncoderStream(Reason),
+    DecoderStream(Reason),
+    FieldSectionTooLarge {
+        stream_id: u64
+    }
+}
+
+pub copy struct EncoderConfig {
+    max_table_capacity: u64,
+    max_entry_share: u64,
+    max_outstanding_sections: usize
+}
+
+pub copy struct EncoderStats {
+    sections: u64,
+    inserts: u64,
+    static_refs: u64,
+    dynamic_refs: u64,
+    literals: u64,
+    blocking_sections: u64
+}
+
+pub copy struct DecoderConfig {
+    max_table_capacity: u64,
+    max_blocked_streams: u64,
+    max_field_section_size: u64,
+    max_blocked_bytes: usize
+}
+
+// A decoded integer (`prefix::decode_int`).
+pub copy struct IntRead {
+    value: u64,
+    used: u64
+}
+
+// The code (`bit length << 32 | code` per symbol) and its canonical decode
+// tables: per bit length, the first code, the number of codes and the index
+// of the first symbol in `symbols`.
+// The tables every codec call reads, built once per process (the Rust
+// build's statics): the Huffman code (`bit length << 32 | code` per
+// symbol), its decoding trie as a 4-bit state machine (huffman.ves) and the
+// static table.
+pub struct Huff {
+    codes: ChunkSeq[u64],
+    nib: ChunkSeq[u64],
+    info: ChunkSeq[u64],
+    st: Static
+}
+
+pub struct EncoderCore {
+    cfg: EncoderConfig,
+    table: Table,
+    peer_capacity: u64,
+    peer_blocked: u64,
+    max_entries: u64,
+    known_received: u64,
+    sec_stream: ChunkSeq[u64],
+    sec_ric: ChunkSeq[u64],
+    sec_lo: ChunkSeq[u64],
+    sec_n: ChunkSeq[u64],
+    sec_refs: ChunkSeq[u64],
+    pending: ChunkSeq[u8],
+    out: ChunkSeq[u8],
+    lines: ChunkSeq[u8],
+    cur_refs: ChunkSeq[u64],
+    stats: EncoderStats,
+    failed: Option[QpackError]
+}
+
+// Decoded sections, read by the wrapper after each decoder call (see
+// decoder.ves).
+pub struct Sections {
+    bytes: ChunkSeq[u8],
+    fields: ChunkSeq[u64],
+    heads: ChunkSeq[u64]
+}
+
+pub struct DecoderCore {
+    cfg: DecoderConfig,
+    max_entries: u64,
+    table: Table,
+    pending: ChunkSeq[u8],
+    blk_stream: ChunkSeq[u64],
+    blk_ric: ChunkSeq[u64],
+    blk_lo: ChunkSeq[u64],
+    blk_len: ChunkSeq[u64],
+    blk_bytes: ChunkSeq[u8],
+    blocked_bytes: u64,
+    out: ChunkSeq[u8],
+    acknowledged: u64,
+    failed: Option[QpackError],
+    name: ChunkSeq[u8],
+    value: ChunkSeq[u8],
+    sec: Sections
+}
+
+// ---------------------------------------------------------------------
+// prefix.rs and huffman.rs (the public helpers; `Huff` holds the tables)
+// ---------------------------------------------------------------------
+
+pub fn huff_new() -> Huff {
+    huff_tables()
+}
+
+pub fn huff_len(in h: Huff, in data: Slice[u8]) -> u64 {
+    huff_encoded_len(in h, in data)
+}
+
+pub fn huff_append(in h: Huff, in data: Slice[u8], inout out: ChunkSeq[u8]) {
+    huff_encode(in h, in data, inout out);
+}
+
+// Decodes into `out` (cleared first); the error, if any.
+pub fn huff_unpack(in h: Huff, in data: Slice[u8], max_len: u64, inout out: ChunkSeq[u8])
+    -> Option[HuffmanError] {
+    out.clear();
+    huff_decode(in h, in data, max_len, inout out)
+}
+
+pub fn huff_decode_int(in h: Huff, in buf: Slice[u8], bits: u64) -> Result[IntRead, PrefixError] {
+    match decode_int(in buf, 0, bits) {
+        Result::Ok(n) => Result::Ok(
+            IntRead {
+                value: n.value,
+                used: n.used
+            }
+        ),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn huff_encode_int(in h: Huff, inout out: ChunkSeq[u8], flags: u8, bits: u64, value: u64) {
+    encode_int(inout out, flags, bits, value);
+}
+
+// Decodes a string into `out` (cleared first); the offset after it.
+pub fn huff_decode_string(
+    in h: Huff,
+    in buf: Slice[u8],
+    bits: u64,
+    max_len: u64,
+    inout out: ChunkSeq[u8]
+) -> Result[u64, PrefixError] {
+    out.clear();
+    decode_string(in h, in buf, 0, bits, max_len, inout out)
+}
+
+pub fn huff_encode_string(
+    in h: Huff,
+    inout out: ChunkSeq[u8],
+    flags: u8,
+    bits: u64,
+    in value: Slice[u8]
+) {
+    encode_string(in h, inout out, flags, bits, in value);
+}
+
+// ---------------------------------------------------------------------
+// Encoder
+// ---------------------------------------------------------------------
+
+pub fn encoder_core_new(cfg: EncoderConfig) -> EncoderCore {
+    EncoderCore {
+        cfg: cfg,
+        table: table_new(),
+        peer_capacity: 0,
+        peer_blocked: 0,
+        max_entries: 0,
+        known_received: 0,
+        sec_stream: ChunkSeq::new[u64](),
+        sec_ric: ChunkSeq::new[u64](),
+        sec_lo: ChunkSeq::new[u64](),
+        sec_n: ChunkSeq::new[u64](),
+        sec_refs: ChunkSeq::new[u64](),
+        pending: ChunkSeq::new[u8](),
+        out: ChunkSeq::new[u8](),
+        lines: ChunkSeq::new[u8](),
+        cur_refs: ChunkSeq::new[u64](),
+        stats: EncoderStats {
+            sections: 0,
+            inserts: 0,
+            static_refs: 0,
+            dynamic_refs: 0,
+            literals: 0,
+            blocking_sections: 0
+        },
+        failed: Option::None
+    }
+}
+
+pub fn encoder_core_apply_peer_settings(
+    inout e: EncoderCore,
+    max_table_capacity: u64,
+    blocked_streams: u64
+) {
+    enc_apply_peer_settings(inout e, max_table_capacity, blocked_streams);
+}
+
+pub fn encoder_core_insert_count(in e: EncoderCore) -> u64 {
+    e.table.inserted
+}
+
+pub fn encoder_core_table_capacity(in e: EncoderCore) -> u64 {
+    e.table.capacity
+}
+
+pub fn encoder_core_outstanding_sections(in e: EncoderCore) -> u64 {
+    e.sec_stream.len()
+}
+
+pub fn encoder_core_blocking_streams(in e: EncoderCore) -> u64 {
+    enc_blocking_streams(in e)
+}
+
+pub fn encoder_core_encode(
+    inout e: EncoderCore,
+    in h: Huff,
+    stream_id: u64,
+    in bytes: Slice[u8],
+    in meta: Slice[u64]
+) -> ChunkSeq[u8] {
+    enc_encode(inout e, in h, stream_id, in bytes, in meta)
+}
+
+pub fn encoder_core_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
+    -> Result[Unit, QpackError] {
+    enc_on_decoder_stream(inout e, in bytes)
+}
+
+pub fn encoder_core_take_encoder_stream(inout e: EncoderCore) -> ChunkSeq[u8] {
+    replace(inout e.out, ChunkSeq::new[u8]())
+}
+
+// ---------------------------------------------------------------------
+// Decoder
+// ---------------------------------------------------------------------
+
+pub fn decoder_core_new(cfg: DecoderConfig) -> DecoderCore {
+    DecoderCore {
+        cfg: cfg,
+        max_entries: cfg.max_table_capacity / 32,
+        table: table_new(),
+        pending: ChunkSeq::new[u8](),
+        blk_stream: ChunkSeq::new[u64](),
+        blk_ric: ChunkSeq::new[u64](),
+        blk_lo: ChunkSeq::new[u64](),
+        blk_len: ChunkSeq::new[u64](),
+        blk_bytes: ChunkSeq::new[u8](),
+        blocked_bytes: 0,
+        out: ChunkSeq::new[u8](),
+        acknowledged: 0,
+        failed: Option::None,
+        name: ChunkSeq::new[u8](),
+        value: ChunkSeq::new[u8](),
+        sec: Sections {
+            bytes: ChunkSeq::new[u8](),
+            fields: ChunkSeq::new[u64](),
+            heads: ChunkSeq::new[u64]()
+        }
+    }
+}
+
+pub fn decoder_core_insert_count(in d: DecoderCore) -> u64 {
+    d.table.inserted
+}
+
+pub fn decoder_core_table_size(in d: DecoderCore) -> u64 {
+    d.table.size
+}
+
+pub fn decoder_core_table_capacity(in d: DecoderCore) -> u64 {
+    d.table.capacity
+}
+
+pub fn decoder_core_table_len(in d: DecoderCore) -> u64 {
+    table_len(in d.table)
+}
+
+pub fn decoder_core_blocked_streams(in d: DecoderCore) -> u64 {
+    d.blk_stream.len()
+}
+
+pub fn decoder_core_on_encoder_stream(inout d: DecoderCore, in h: Huff, in bytes: Slice[u8])
+    -> Result[Unit, QpackError] {
+    dec_on_encoder_stream(inout d, in h, in bytes)
+}
+
+pub fn decoder_core_decode_section(
+    inout d: DecoderCore,
+    in h: Huff,
+    stream_id: u64,
+    in data: Slice[u8]
+) -> Result[bool, QpackError] {
+    dec_decode_section(inout d, in h, stream_id, in data)
+}
+
+pub fn decoder_core_cancel_stream(inout d: DecoderCore, stream_id: u64) {
+    d.sec.bytes.clear();
+    d.sec.fields.clear();
+    d.sec.heads.clear();
+    dec_cancel_stream(inout d, stream_id);
+}
+
+pub fn decoder_core_take_decoder_stream(inout d: DecoderCore) -> ChunkSeq[u8] {
+    dec_take_decoder_stream(inout d)
+}

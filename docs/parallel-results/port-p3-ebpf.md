@@ -1,7 +1,8 @@
 # Port wave P3a lane 6: vesper-ebpf (#1041)
 
-Status: **part 2 of 4** (this PR; part 1 is #1048, merged as `5ff0c7a`).
-Part 1 base `3c075a4`, part 2 base `5ff0c7a`.
+Status: **part 3 of 4** (this PR; part 1 is #1048, merged as `5ff0c7a`;
+part 2 is #1056, merged as `f0a64be`). Part 1 base `3c075a4`, part 2 base
+`5ff0c7a`, part 3 base `f0a64be`.
 
 The crate is 12.4k lines with 82 tests in 15 files, so the port lands in four
 parts, as Crucible's did:
@@ -12,9 +13,10 @@ parts, as Crucible's did:
    the concrete ALU, jump and byte-order semantics of `interp.rs`, the helper
    tables (`helpers.rs`), the map and program kinds and `MapDef::validate`
    (`program.rs`) and the stack bound (`callgraph.rs`).
-2. **Part 2 (this PR):** the verifier (`verifier.rs`), see
+2. **Part 2 (#1056):** the verifier (`verifier.rs`), see
    [Part 2: the verifier](#part-2-the-verifier).
-3. BTF parsing, BTF.ext and CO-RE (`btf.rs`, `btf_ext.rs`, `core.rs`).
+3. **Part 3 (this PR):** BTF parsing, BTF.ext and CO-RE (`btf.rs`,
+   `btf_ext.rs`, `core.rs`), see [Part 3](#part-3-btf-btfext-and-co-re).
 4. The interpreter, the mitigator and the builders and assembler
    (`interp.rs`, `mitigator.rs`, `builder.rs`, the `Asm` half of
    `program.rs`).
@@ -109,7 +111,7 @@ default, as before.
 One edit per ported module (`EDITS` in `build.rs`, applied one at a time with
 `VESPER_EBPF_DIVERGENT`, mirrored in `BUILD.bazel`). `port/check.sh` asserts
 that each edit fails the named test while another test of the same file
-passes. All nine were observed failing:
+passes. All twelve were observed failing:
 
 | # | Module | Edit | Caught by |
 | --- | --- | --- | --- |
@@ -122,6 +124,9 @@ passes. All nine were observed failing:
 | 6 | callgraph | stack limit plus 8 bytes | `port_surface::stack_bound_reports_every_outcome` |
 | 7 | wire | source address read from the destination | `mitigator::wire_layouts_are_exact` |
 | 8 | verifier (part 2) | a packet access may end one byte past the checked range (unsound) | `verifier_rules::corpus_verdicts` (and `findings_use_the_contract_shape`), `soundness::accepted_random_programs_never_fault` (both tests), `kernel_diff`, `lean_model::bounds_model_verdicts_match_the_verifiers`, `verifier_port` |
+| 9 | btf (part 3) | an unknown kind 20 is read as a pointer | `btf_port::port_matches_rust_on_mutated_btf` |
+| 10 | core (part 3) | members are not found through anonymous aggregates | `core_port::port_matches_rust_on_random_relocations` (not caught by `btf_core`) |
+| 11 | btf_ext (part 3) | line info keeps 9 bits of the column | `ext_port::port_matches_rust_on_objects_and_mutations` (not caught by `btf_core`) |
 
 Edit 3 is the verifier divergence the soundness tests must catch in part 1
 (the domain functions); edit 8 is the one in the ported verifier itself, and
@@ -253,11 +258,85 @@ in use), the exploration loop 16%, state inclusion 11%, malloc and free 5%.
 8. **No `continue`, `while` or `wrapping_neg`.** Loops are `loop` with
    `if`/`break`; negation is `wrapping_sub(0, x)`.
 
-## Remaining (parts 3-4)
+## Part 3: BTF, BTF.ext and CO-RE
 
-BTF/BTF.ext/CO-RE, the interpreter (its maps become owned
-state threaded through the run, per the lane prompt), the mitigator and the
-builders. `tests/lean_model.rs` passes against both builds; locally its one
+Ported (Vesper module, then what forwards to it in the port build):
+
+| Rust | Vesper | Forwarding |
+| --- | --- | --- |
+| `btf.rs` reader | `btf.ves` | `Btf::parse`, `Btf::parse_split`: the header, every kind, references and names (with UTF-8 checks) |
+| `core.rs` | `core.ves` | `CoreSpec::{local_value_with, candidates, target_value_with}`, `value_over`, `combine`, `patch` |
+| `btf_ext.rs` readers | `btf_ext.ves` | `parse_ext`, `local_type`, `maps_from_btf` |
+
+Stays Rust: the BTF and `.BTF.ext` writers (`BtfBuilder`, `btf_ext::build`,
+`local_root_ids`, `assign_local_ids`, which part 4 takes with the other
+builders), host file reads (`host_vmlinux`, `host_modules`),
+`resolve_kfuncs`, the by-name index (a `HashMap` the wrapper fills from the
+port's records), the trivial accessors (`name`, `get`, `by_name`,
+`func_id`, `skip_mods`, `size_of`) and the CO-RE spec constructors.
+
+Layout: the port returns each type as a seven-word record plus entries; in
+the port build `Btf` keeps those records (`table`, with `index` from type
+id to record) next to `types`, so the CO-RE matcher and `.BTF.ext` reader
+read the target BTF in place (borrowed slices, no conversion per call). A
+local type crosses as a preorder word tree with its names in a text pool.
+
+One Rust fix, in both builds: `local_type` multiplied a malformed member
+size by 8 in `u32` (a panic in debug builds on a mutated `.BTF`, found by
+the mutation test); a size above 8 bytes is now a "bad bitfield member"
+error, as any width above 64 bits already was.
+
+Exactness (new tests, port build only):
+
+- `tests/btf_port.rs`: a blob with every kind (bitfields, signed and
+  64-bit enums, names of every UTF-8 length, a named pointer), split BTF
+  on it, the host's vmlinux and module BTF, and 6,000 mutated or truncated
+  copies; types, names, by-name ids, base length and every one of the 11
+  error messages agree.
+- `tests/core_port.rs`: 6,000 random relocations of every kind against 30
+  random targets (anonymous members, bitfields, arrays, modifiers, forward
+  declarations, flavours, colliding names) with 0-2 split modules, and 400
+  reshaped relocations against vmlinux's own structs; local values,
+  candidates, target values and errors (all of `NoMatch`, `Ambiguous`,
+  `Bitfield`, `BadAccess`) agree; plus `patch` on 5,000 random
+  instructions.
+- `tests/ext_port.rs`: objects written for every corpus program with line
+  info and CO-RE relocations added, read for three section names, and 60
+  mutations of each object's `.BTF.ext` or `.BTF`; `parse_ext` and
+  `maps_from_btf` agree, as does `local_type` on 3,000 vmlinux ids.
+
+All 102 tests pass against the port and the 94 of the default build
+against Rust.
+
+### Performance (part 3)
+
+Same setup; instruction counts are now one warm call (two calls under
+callgrind minus one, `EBPF_ABBA_CALLS`), which leaves out building each
+workload's fixed input. The verify row is re-measured the same way.
+
+| Workload | Rust per op | Vesper per op | Wall ratio (median, min-max) | Instructions Rust | Instructions Vesper | Instruction ratio |
+| --- | --: | --: | --: | --: | --: | --: |
+| `Btf::parse`, 4096 types | 636.7 us | 860.7 us | 1.30 (1.13-1.58) | 9,909,297 | 10,837,543 | 1.09 |
+| CO-RE target value, 512 relocations | 193.4 ns | 315.6 ns | 1.63 (1.46-1.78) | 1,554,565 | 2,666,883 | 1.72 |
+| `parse_ext`, 256 lines + 64 relocations | 62.7 us | 88.4 us | 1.41 (1.20-1.46) | 655,428 | 914,032 | 1.39 |
+| `verify` of the mitigator (warm) | | | | 225,435 | 697,665 | 3.09 |
+
+The parse is close to Rust because most of it is building the `Vec`s and
+the by-name `HashMap`, which stays Rust; the port's part (decode and
+validate) is 5.1 of 9.7 million instructions. CO-RE was 3.5x before the
+root's encoding was hoisted out of the per-candidate calls (one encoding
+per relocation instead of two); what is left is three boundary calls per
+relocation, each returning a fresh sequence.
+
+No new compiler gaps in part 3. The small results cross as a
+`ChunkSeq[u64]` per call (an allocation each); returning a copy struct
+through the export ABI instead is the next thing to try for CO-RE.
+
+## Remaining (part 4)
+
+The interpreter (its maps become owned state threaded through the run,
+per the lane prompt), the mitigator, the builders and assembler, and the
+BTF and `.BTF.ext` writers. `tests/lean_model.rs` passes against both builds; locally its one
 Lean compile step is skipped without `VESPER_LEAN` (the other three tests
 check the emitted programs and the model text), and Bazel runs it with Lean
 against the Rust build.

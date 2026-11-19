@@ -13,17 +13,24 @@ fn main() {
             .rust_types("crate::port");
         #[cfg(feature = "vesper-port-divergent")]
         let port = {
-            // One edit at a time (an index into EDITS), so each check shows
-            // that its own edit is caught; unset applies every edit.
+            // The edits in VESPER_EBPF_DIVERGENT (comma-separated indices
+            // into EDITS; port/check.sh groups edits that no test sees
+            // together, so each group is one build); unset applies every
+            // edit.
             println!("cargo:rerun-if-env-changed=VESPER_EBPF_DIVERGENT");
-            let only = std::env::var("VESPER_EBPF_DIVERGENT").ok().map(|i| {
-                i.parse::<usize>()
-                    .expect("VESPER_EBPF_DIVERGENT is an index")
+            let only: Option<Vec<usize>> = std::env::var("VESPER_EBPF_DIVERGENT").ok().map(|v| {
+                v.split(',')
+                    .map(|i| {
+                        i.trim()
+                            .parse::<usize>()
+                            .expect("VESPER_EBPF_DIVERGENT is a list of indices")
+                    })
+                    .collect()
             });
             EDITS
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| only.is_none_or(|only| only == *i))
+                .filter(|(i, _)| only.as_ref().is_none_or(|only| only.contains(i)))
                 .fold(port, |port, (_, (from, to))| port.edit(from, to))
         };
         port.build();
@@ -79,5 +86,20 @@ const EDITS: &[(&str, &str)] = &[
     (
         "            if p.var.smin < 0 || total < 0 || wrapping_add(total, ni) > range {\n",
         "            if p.var.smin < 0 || total < 0 || wrapping_add(total, ni) > wrapping_add(range, 1) {\n",
+    ),
+    // 9 btf.rs: an unknown kind 20 is read as a pointer.
+    (
+        "        if kind == 0 || kind > 19 {\n",
+        "        if kind == 0 || kind > 20 {\n",
+    ),
+    // 10 core.rs: members are not found through anonymous aggregates.
+    (
+        "        if slen(in strs, mname) == 0 {\n",
+        "        if slen(in strs, mname) == 99 {\n",
+    ),
+    // 11 btf_ext.rs: line info keeps 9 bits of the column, not 10.
+    (
+        "        out.push(lc & 1023);\n",
+        "        out.push(lc & 511);\n",
     ),
 ];

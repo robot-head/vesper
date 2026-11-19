@@ -10,6 +10,16 @@ pub fn unix_seconds(now_ns: u64) -> u64 {
 /// Intel writes in some PCS responses) into Unix seconds. Anything else,
 /// including offsets other than `Z`, out-of-range fields and dates before
 /// 1970, is `None`.
+#[cfg(vesper_port)]
+pub fn iso8601_utc_to_unix(s: &str) -> Option<u64> {
+    crate::port::vesper::iso8601_utc_to_unix(s.as_bytes())
+}
+
+/// Parse `YYYY-MM-DDTHH:MM:SSZ` (optionally with a fractional second, as
+/// Intel writes in some PCS responses) into Unix seconds. Anything else,
+/// including offsets other than `Z`, out-of-range fields and dates before
+/// 1970, is `None`.
+#[cfg(not(vesper_port))]
 pub fn iso8601_utc_to_unix(s: &str) -> Option<u64> {
     let b = s.as_bytes();
     if b.len() < 20
@@ -76,6 +86,7 @@ pub fn iso8601_utc_to_unix(s: &str) -> Option<u64> {
 }
 
 /// Days since 1970-01-01 (Howard Hinnant's `days_from_civil`).
+#[cfg(not(vesper_port))]
 fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;

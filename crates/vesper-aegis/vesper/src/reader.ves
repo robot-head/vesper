@@ -1,0 +1,171 @@
+// Module reader of @vesper/aegis (see lib.ves): src/reader.rs and the
+// ParseError constructors of src/error.rs. A reader is a window
+// `[pos, end)` of one input slice and the Format it reports; nested readers
+// (a quote's signature data, its certification data) are narrower windows
+// of the same slice.
+use self::{
+    AErr,
+    Rd
+};
+
+// ParseError variant indices (crate::error::ParseError).
+pub fn k_truncated() -> u64 {
+    0
+}
+
+pub fn k_trailing() -> u64 {
+    1
+}
+
+pub fn k_unsupported() -> u64 {
+    2
+}
+
+pub fn k_reserved() -> u64 {
+    3
+}
+
+pub fn k_over_budget() -> u64 {
+    4
+}
+
+pub fn rd(start: u64, end: u64, format: u64) -> Rd {
+    Rd {
+        pos: start,
+        end: end,
+        format: format
+    }
+}
+
+pub fn raise(kind: u64, format: u64, field: u64, a: u64, b: u64) -> Never eff [Fail[AErr]] {
+    Fail::raise(
+        AErr {
+            kind: kind,
+            format: format,
+            field: field,
+            a: a,
+            b: b
+        }
+    )
+}
+
+// ParseError::UnsupportedValue in the reader's format.
+pub fn unsupported(in r: Rd, field: u64, value: u64) -> Never eff [Fail[AErr]] {
+    raise(k_unsupported(), r.format, field, value, 0)
+}
+
+// ParseError::NonZeroReserved in the reader's format.
+pub fn nonzero(in r: Rd, field: u64) -> Never eff [Fail[AErr]] {
+    raise(k_reserved(), r.format, field, 0, 0)
+}
+
+pub fn remaining(in r: Rd) -> u64 {
+    wrapping_sub(r.end, r.pos)
+}
+
+// Consume `n` bytes and return their offset; ParseError::Truncated when
+// fewer remain.
+pub fn take(inout r: Rd, n: u64, field: u64) -> u64 eff [Fail[AErr]] {
+    let have = remaining(in r);
+    if n > have {
+        raise(k_truncated(), r.format, field, n, have);
+    }
+    let at = r.pos;
+    r.pos = wrapping_add(at, n);
+    at
+}
+
+pub fn rd_u16(in b: Slice[u8], inout r: Rd, field: u64) -> u64 eff [Fail[AErr]] {
+    let at = take(inout r, 2, field);
+    match b.try_read_u16_le(at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+pub fn rd_u32(in b: Slice[u8], inout r: Rd, field: u64) -> u64 eff [Fail[AErr]] {
+    let at = take(inout r, 4, field);
+    match b.try_read_u32_le(at) {
+        Option::Some(v) => widen_u64(v),
+        Option::None => 0,
+    }
+}
+
+pub fn rd_u64(in b: Slice[u8], inout r: Rd, field: u64) -> u64 eff [Fail[AErr]] {
+    let at = take(inout r, 8, field);
+    match b.try_read_u64_le(at) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+// A fixed-size byte array: consumed and appended to `d`.
+pub fn arr(in b: Slice[u8], inout r: Rd, n: u64, field: u64, inout d: ChunkSeq[u8])
+    -> Unit eff [Fail[AErr]] {
+    let at = take(inout r, n, field);
+    d.extend(in b[at..wrapping_add(at, n)]);
+}
+
+// The byte at `i`, or 0 past the end (callers check bounds first).
+pub fn byte(in b: Slice[u8], i: u64) -> u64 {
+    match b.try_get(i) {
+        Option::Some(x) => widen_u64(x),
+        Option::None => 0,
+    }
+}
+
+// Whether `b[start..end]` is all zero.
+pub fn zero(in b: Slice[u8], start: u64, end: u64) -> bool {
+    // Eight bytes at a time, then the tail.
+    let mut acc: u64 = 0;
+    let mut i = start;
+    let words = wrapping_sub(end, start) / 8;
+    for k in 0..words {
+        let x = match b.try_read_u64_le(i) {
+            Option::Some(v) => v,
+            Option::None => 1,
+        };
+        acc = acc | x;
+        i = wrapping_add(i, 8);
+    }
+    if acc != 0 {
+        return false;
+    }
+    all_zero(in b[i..end])
+}
+
+pub fn all_zero(in s: Slice[u8]) -> bool {
+    match s.find_not_in(1, 0, false) {
+        Option::Some(i) => false,
+        Option::None => true,
+    }
+}
+
+// Consume a reserved field that must be all zero.
+pub fn reserved(in b: Slice[u8], inout r: Rd, n: u64, field: u64) -> Unit eff [Fail[AErr]] {
+    let at = take(inout r, n, field);
+    if !zero(in b, at, wrapping_add(at, n)) {
+        nonzero(in r, field);
+    }
+}
+
+// ParseError::TrailingBytes unless the window is used up.
+pub fn finish(in r: Rd) -> Unit eff [Fail[AErr]] {
+    let extra = remaining(in r);
+    if extra != 0 {
+        raise(k_trailing(), r.format, 0, extra, 0);
+    }
+}
+
+// How a whole-input parse treats bytes after the structure: 0 = none may
+// follow (`parse`), 1 = they must be zero (`parse_padded`), 2 = any may
+// follow (`parse_prefix`).
+pub fn tail(in b: Slice[u8], used: u64, mode: u64, format: u64) -> Unit eff [Fail[AErr]] {
+    let n = b.len();
+    if mode == 0 && used != n {
+        raise(k_trailing(), format, 0, wrapping_sub(n, used), 0);
+    }
+    if mode == 1 && !zero(in b, used, n) {
+        raise(k_trailing(), format, 0, wrapping_sub(n, used), 0);
+    }
+}

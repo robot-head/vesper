@@ -9,7 +9,7 @@ use super::*;
 use crate::binding;
 use crate::dtb::MemRange;
 
-fn fault(f: binding::AiaFault) -> AiaError {
+pub(crate) fn fault(f: binding::AiaFault) -> AiaError {
     match f {
         binding::AiaFault::Unmapped(addr) => AiaError::Unmapped { addr },
         binding::AiaFault::Misaligned(addr) => AiaError::Misaligned { addr },
@@ -39,7 +39,7 @@ pub(super) fn cfg_to_port(c: &MsiAddrCfg) -> binding::repr::MsiCfg {
     })
 }
 
-fn cfg_from_port(c: &binding::MsiCfg) -> MsiAddrCfg {
+pub(crate) fn cfg_from_port(c: &binding::MsiCfg) -> MsiAddrCfg {
     // The port keeps each field within its register width.
     MsiAddrCfg {
         m_ppn: c.m_ppn,
@@ -73,11 +73,12 @@ impl Eq for ImsicFile {}
 impl std::fmt::Debug for ImsicFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let v = self.0.as_ref();
+        let h = self.header();
         f.debug_struct("ImsicFile")
-            .field("ids", &(v.ids() as u32))
-            .field("delivery", &(v.delivery() as u32))
-            .field("external", &v.external())
-            .field("threshold", &(v.threshold() as u32))
+            .field("ids", &(h.ids as u32))
+            .field("delivery", &(h.delivery as u32))
+            .field("external", &h.external)
+            .field("threshold", &(h.threshold as u32))
             .field("eip", &v.eip().to_vec())
             .field("eie", &v.eie().to_vec())
             .finish()
@@ -85,6 +86,10 @@ impl std::fmt::Debug for ImsicFile {
 }
 
 impl ImsicFile {
+    fn header(&self) -> binding::ImsicHdr {
+        binding::imsic_header(&self.0).to_value()
+    }
+
     /// A file with identities `1..=ids` (`riscv,num-ids`).
     pub fn new(ids: u32) -> Result<Self, AiaError> {
         binding::imsic_new(u64::from(ids), false)
@@ -101,12 +106,12 @@ impl ImsicFile {
     }
 
     pub fn ids(&self) -> u32 {
-        self.0.as_ref().ids() as u32
+        self.header().ids as u32
     }
 
     /// The `eidelivery` value.
     pub fn eidelivery(&self) -> u32 {
-        self.0.as_ref().delivery() as u32
+        self.header().delivery as u32
     }
 
     /// Whether `eidelivery` selects the PLIC or APLIC
@@ -116,7 +121,7 @@ impl ImsicFile {
     }
 
     pub fn supports_external_delivery(&self) -> bool {
-        self.0.as_ref().external()
+        self.header().external
     }
 
     /// An MSI with data `id` arrived (a write to `seteipnum_le`).
@@ -195,16 +200,17 @@ impl Clone for AplicDomain {
 impl std::fmt::Debug for AplicDomain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let v = self.0.as_ref();
+        let h = self.header();
         f.debug_struct("AplicDomain")
-            .field("base", &v.base())
-            .field("sources", &(v.sources() as u32))
-            .field("supervisor", &v.supervisor())
-            .field("root", &v.root())
-            .field("msi_capable", &v.msi_capable())
-            .field("direct_capable", &v.direct_capable())
-            .field("children", &(v.children() as u32))
-            .field("ie", &v.ie())
-            .field("dm", &v.dm())
+            .field("base", &h.base)
+            .field("sources", &(h.sources as u32))
+            .field("supervisor", &h.supervisor)
+            .field("root", &h.root)
+            .field("msi_capable", &h.msi_capable)
+            .field("direct_capable", &h.direct_capable)
+            .field("children", &(h.children as u32))
+            .field("ie", &h.ie)
+            .field("dm", &h.dm)
             .field("sourcecfg", &v.sourcecfg().to_vec())
             .field("active_here", &v.active_here().to_vec())
             .field("raw", &v.raw().to_vec())
@@ -214,13 +220,17 @@ impl std::fmt::Debug for AplicDomain {
             .field("idc_delivery", &v.idc_delivery().to_vec())
             .field("idc_force", &v.idc_force().to_vec())
             .field("idc_threshold", &v.idc_threshold().to_vec())
-            .field("msicfg", &cfg_from_port(&v.msicfg()))
+            .field("msicfg", &cfg_from_port(&h.msicfg))
             .field("outbox", &v.outbox().to_vec())
             .finish()
     }
 }
 
 impl AplicDomain {
+    fn header(&self) -> binding::AplicHdr {
+        binding::aplic_header(&self.0).to_value()
+    }
+
     /// A domain at `window` with `sources` sources and `idcs` interrupt
     /// delivery controls (direct mode; 0 when the domain has no
     /// `interrupts-extended`).
@@ -255,24 +265,24 @@ impl AplicDomain {
     }
 
     pub fn base(&self) -> u64 {
-        self.0.as_ref().base()
+        self.header().base
     }
 
     pub fn sources(&self) -> u32 {
-        self.0.as_ref().sources() as u32
+        self.header().sources as u32
     }
 
     pub fn is_root(&self) -> bool {
-        self.0.as_ref().root()
+        self.header().root
     }
 
     pub fn is_supervisor(&self) -> bool {
-        self.0.as_ref().supervisor()
+        self.header().supervisor
     }
 
     /// MSI delivery mode (`domaincfg.DM`).
     pub fn msi_mode(&self) -> bool {
-        self.0.as_ref().dm()
+        self.header().dm
     }
 
     pub fn idc_count(&self) -> usize {
@@ -319,7 +329,7 @@ impl AplicDomain {
 
     /// The root's MSI address configuration.
     pub fn msi_cfg(&self) -> MsiAddrCfg {
-        cfg_from_port(&self.0.as_ref().msicfg())
+        cfg_from_port(&self.header().msicfg)
     }
 
     /// Fabric use: a child computes its MSI addresses with the root's

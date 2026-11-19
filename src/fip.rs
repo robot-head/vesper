@@ -2127,7 +2127,16 @@ pub fn elaborate_non_fip_drops(world: &World, program: &mut crate::ir::Program) 
                                     owned_values.remove(&a.value);
                                 }
                             }
-                            if type_contains_box(world, &inst.ty) {
+                            // `s[i]` of a boxed element only lends it to a
+                            // call (§7.3): the sequence still owns the box.
+                            let lent_element = matches!(
+                                &inst.op,
+                                Op::Seq {
+                                    op: crate::seq::SeqOp::Get,
+                                    ..
+                                }
+                            ) && crate::dyn_trait::is_boxed(&inst.ty);
+                            if type_contains_box(world, &inst.ty) && !lent_element {
                                 owned_values.insert(inst.dest, inst.ty.clone());
                             }
                         }

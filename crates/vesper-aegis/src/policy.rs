@@ -4,9 +4,10 @@
 use crate::cca::verify_cca_token;
 use crate::chain::TrustRoot;
 use crate::claims::{
-    AttestationClaims, ENCLAVE_FLAG_DEBUG_DISABLED, GuestRuntimeClaims, SnpTcbVersion,
-    SupplyChainEvidence, TeeArch, ct_eq,
+    AttestationClaims, GuestRuntimeClaims, SnpTcbVersion, SupplyChainEvidence, TeeArch,
 };
+#[cfg(not(vesper_port))]
+use crate::claims::{ENCLAVE_FLAG_DEBUG_DISABLED, ct_eq};
 use crate::error::{AegisVerifyError, AttestError};
 use crate::snp::verify_snp_report;
 use crate::tdx::verify_tdx_quote;
@@ -57,6 +58,59 @@ pub struct RelyingPartyPolicy {
 /// measurement, Loom.lock, `.olean`, channel binding; then the SNP-only
 /// checks and register-replay requirement. `lean/AegisToctou.lean` models
 /// this function (`checkPolicy`).
+#[cfg(vesper_port)]
+pub fn verify_attestation_claims(
+    claims: &AttestationClaims,
+    policy: &RelyingPartyPolicy,
+    expected_channel_binding: &[u8; 48],
+) -> Result<(), AegisVerifyError> {
+    // The word and byte layouts are documented at `check_policy` in
+    // vesper/src/claims.ves.
+    let cw = [
+        claims.arch as u64,
+        claims.tcb_svn.into(),
+        claims.enclave_flags.into(),
+        u64::from(claims.supply_chain_evidence == SupplyChainEvidence::RegisterReplay),
+        u64::from(claims.snp_vmpl.is_some()),
+        claims.snp_vmpl.unwrap_or(0).into(),
+        u64::from(claims.snp_reported_tcb.is_some()),
+        claims.snp_reported_tcb.unwrap_or_default().to_u64(),
+    ];
+    let mut cb = [0u8; 168];
+    cb[..48].copy_from_slice(&claims.mr_enclave_sha384);
+    cb[48..80].copy_from_slice(&claims.loom_lock_blake3);
+    cb[80..112].copy_from_slice(&claims.olean_spec_mif);
+    cb[112..120].copy_from_slice(&claims.chan_binding_prefix);
+    cb[120..].copy_from_slice(&claims.channel_binding);
+    let floors = &policy.tcb_floors;
+    let mut pw =
+        Vec::with_capacity(8 + policy.allowed_archs.len() + policy.allowed_measurements.len());
+    pw.extend([
+        floors.tdx.into(),
+        floors.snp.into(),
+        floors.cca.into(),
+        u64::from(policy.snp_component_floors.is_some()),
+        policy.snp_component_floors.unwrap_or_default().to_u64(),
+        policy.snp_max_vmpl.into(),
+        u64::from(policy.require_register_replay),
+        policy.allowed_archs.len() as u64,
+    ]);
+    pw.extend(policy.allowed_archs.iter().map(|a| *a as u64));
+    pw.extend(policy.allowed_measurements.iter().map(|(a, _)| *a as u64));
+    let mut pb = Vec::with_capacity(64 + 48 * policy.allowed_measurements.len());
+    pb.extend_from_slice(&policy.expected_loom_blake3);
+    pb.extend_from_slice(&policy.expected_olean_mif);
+    for (_, m) in &policy.allowed_measurements {
+        pb.extend_from_slice(m);
+    }
+    crate::port::vesper::verify_attestation_claims(&cw, &cb, &pw, &pb, expected_channel_binding)
+        .map_err(crate::port::verify_error)
+}
+
+/// Check normalized claims against `policy`. `expected_channel_binding` is
+/// the SHA-384 binding of the TLS key or transcript the relying party
+/// observed; it is compared in full and in constant time.
+#[cfg(not(vesper_port))]
 pub fn verify_attestation_claims(
     claims: &AttestationClaims,
     policy: &RelyingPartyPolicy,

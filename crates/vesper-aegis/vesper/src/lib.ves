@@ -1,0 +1,95 @@
+// @vesper/aegis: Vesper port of the parsing and policy logic of
+// vesper-aegis (port wave P3a lane 8, #1043): AMD SEV-SNP reports, Intel
+// TDX quotes v4/v5 and SGX quotes v3, the 128-byte claims wire struct,
+// collateral timestamps, and the relying-party policy check. Signatures,
+// certificate chains, X.509, COSE and AEAD stay in Rust (vetted crypto).
+//
+// Parsers fill two sequences: `w`, the integer fields in the order they
+// are read, and `d`, the byte arrays (fixed-size fields, then variable
+// ones whose lengths are in `w`) in the order they are read. The Rust
+// adapter (src/port.rs) rebuilds the crate's own structs from them, so no
+// layout knowledge lives on the Rust side. Every parse failure is one
+// `AErr`: `kind` is the ParseError variant index, `format` the Format
+// index, `field` an index into the field-name table of src/port.rs
+// (FIELDS), and `a`, `b` the variant's numbers.
+use self::claims::{
+    check_policy,
+    decode_wire
+};
+use self::sgx::parse as sgx_parse_impl;
+use self::snp::{
+    parse as snp_parse_impl,
+    parse_etcb
+};
+use self::tdx::parse as tdx_parse_impl;
+use self::time::iso8601_utc_to_unix as iso8601_impl;
+
+// A ParseError: variant index, Format index, field-name index and payload.
+pub copy struct AErr {
+    kind: u64,
+    format: u64,
+    field: u64,
+    a: u64,
+    b: u64
+}
+
+// An AegisVerifyError: variant index and payload.
+pub copy struct PErr {
+    kind: u64,
+    a: u64,
+    b: u64,
+    c: u64
+}
+
+// A bounded reader window (module reader).
+pub copy struct Rd {
+    pos: u64,
+    end: u64,
+    format: u64
+}
+
+// SnpReport::parse.
+pub fn snp_parse(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+    -> Unit eff [Fail[AErr]] {
+    snp_parse_impl(in b, inout w, inout d)
+}
+
+// SnpEtcb::parse of a 32-byte ETCB_VERSION: its fourteen SVNs.
+pub fn snp_etcb_parse(in b: Slice[u8], inout d: ChunkSeq[u8]) -> Unit eff [Fail[AErr]] {
+    parse_etcb(in b, inout d)
+}
+
+// TdxQuote::parse (mode 0), parse_padded (1) and parse_prefix (2): the
+// bytes the quote occupies.
+pub fn tdx_parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+    -> u64 eff [Fail[AErr]] {
+    tdx_parse_impl(in b, mode, inout w, inout d)
+}
+
+// SgxQuote::parse (mode 0), parse_padded (1) and parse_prefix (2).
+pub fn sgx_parse(in b: Slice[u8], mode: u64, inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+    -> u64 eff [Fail[AErr]] {
+    sgx_parse_impl(in b, mode, inout w, inout d)
+}
+
+// AegisAttestationClaimsWire::decode.
+pub fn claims_wire_decode(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+    -> Unit eff [Fail[AErr]] {
+    decode_wire(in b, inout w, inout d)
+}
+
+// time::iso8601_utc_to_unix.
+pub fn iso8601_utc_to_unix(in s: Slice[u8]) -> Option[u64] {
+    iso8601_impl(in s)
+}
+
+// policy::verify_attestation_claims (module claims documents the words).
+pub fn verify_attestation_claims(
+    in cw: Slice[u64],
+    in cb: Slice[u8],
+    in pw: Slice[u64],
+    in pb: Slice[u8],
+    in expected: Slice[u8]
+) -> Unit eff [Fail[PErr]] {
+    check_policy(in cw, in cb, in pw, in pb, in expected)
+}

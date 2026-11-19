@@ -26,7 +26,10 @@ use crate::claims::{
     AttestationClaims, ENCLAVE_FLAG_DEBUG_DISABLED, ENCLAVE_FLAG_SMT_MITIGATED, GuestRuntimeClaims,
     SnpTcbVersion, SupplyChainEvidence, TeeArch, ct_eq,
 };
-use crate::error::{AttestError, Format, ParseError};
+#[cfg(not(vesper_port))]
+use crate::error::Format;
+use crate::error::{AttestError, ParseError};
+#[cfg(not(vesper_port))]
 use crate::reader::Reader;
 
 pub const SNP_REPORT_LEN: usize = 0x4A0;
@@ -89,6 +92,80 @@ pub struct SnpReport {
 }
 
 impl SnpReport {
+    #[cfg(vesper_port)]
+    pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
+        let ((), p) = crate::port::parse(|w, d| crate::port::vesper::snp_parse(bytes, w, d))?;
+        let mut f = p.fields();
+        let version = f.u32();
+        let guest_svn = f.u32();
+        let policy = f.word();
+        let family_id = f.array();
+        let image_id = f.array();
+        let vmpl = f.u32();
+        let signature_algo = f.u32();
+        let current_tcb = f.word();
+        let platform_info = f.word();
+        let flags = f.u32();
+        let report_data = f.array();
+        let measurement = f.array();
+        let host_data = f.array();
+        let id_key_digest = f.array();
+        let author_key_digest = f.array();
+        let report_id = f.array();
+        let report_id_ma = f.array();
+        let reported_tcb = f.word();
+        let cpuid = f.array();
+        let chip_id = f.array();
+        let committed_tcb = f.word();
+        let current_version = f.array();
+        let committed_version = f.array();
+        let launch_tcb = f.word();
+        let launch_mit_vector = f.word();
+        let current_mit_vector = f.word();
+        let (current_etcb, launch_etcb, committed_etcb) = if f.word() == 1 {
+            (
+                Some(SnpEtcb::from_svns(f.array())),
+                Some(SnpEtcb::from_svns(f.array())),
+                Some(SnpEtcb::from_svns(f.array())),
+            )
+        } else {
+            (None, None, None)
+        };
+        Ok(SnpReport {
+            version,
+            guest_svn,
+            policy,
+            family_id,
+            image_id,
+            vmpl,
+            signature_algo,
+            current_tcb,
+            platform_info,
+            flags,
+            report_data,
+            measurement,
+            host_data,
+            id_key_digest,
+            author_key_digest,
+            report_id,
+            report_id_ma,
+            reported_tcb,
+            cpuid,
+            chip_id,
+            committed_tcb,
+            current_version,
+            committed_version,
+            launch_tcb,
+            launch_mit_vector,
+            current_mit_vector,
+            current_etcb,
+            launch_etcb,
+            committed_etcb,
+            signature_r_s: f.array(),
+        })
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         let mut r = Reader::new(bytes, Format::SnpReport);
         let version = r.u32("version")?;
@@ -411,6 +488,34 @@ pub struct SnpEtcb {
 }
 
 impl SnpEtcb {
+    #[cfg(vesper_port)]
+    pub fn parse(b: [u8; SNP_ETCB_LEN]) -> Result<Self, ParseError> {
+        let ((), p) = crate::port::parse(|_, d| crate::port::vesper::snp_etcb_parse(&b, d))?;
+        Ok(SnpEtcb::from_svns(p.fields().array()))
+    }
+
+    /// The SVNs in wire order (the inverse of [`SnpEtcb::svns`]).
+    #[cfg(vesper_port)]
+    fn from_svns(b: [u8; 14]) -> Self {
+        SnpEtcb {
+            ip_key_manager: b[0],
+            mp1: b[1],
+            art_fmc: b[2],
+            art_rt: b[3],
+            had_driver: b[4],
+            boot_driver: b[5],
+            pre_esid: b[6],
+            tmpm: b[7],
+            microcode: b[8],
+            soc_driver: b[9],
+            asp_os_driver: b[10],
+            fhp_driver: b[11],
+            dpe_driver: b[12],
+            arg: b[13],
+        }
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn parse(b: [u8; SNP_ETCB_LEN]) -> Result<Self, ParseError> {
         if b[14..].iter().any(|&x| x != 0) {
             return Err(ParseError::NonZeroReserved {
@@ -469,6 +574,7 @@ impl SnpEtcb {
     }
 }
 
+#[cfg(not(vesper_port))]
 fn unsupported(field: &'static str, value: u64) -> ParseError {
     ParseError::UnsupportedValue {
         format: Format::SnpReport,

@@ -11,6 +11,17 @@ use vesper_aegis::snp::SnpReport;
 use vesper_aegis::tdx::{QeReportBody, TdReportBody, TdxQuote, TdxQuoteHeader};
 use vesper_aegis::{Curve, TrustRoot};
 
+/// The crate directory, also when the tests are built by the seed package
+/// (`seed/`, whose manifest directory is one level down).
+pub fn crate_dir() -> std::path::PathBuf {
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if dir.ends_with("seed") {
+        dir.parent().map(std::path::PathBuf::from).unwrap_or(dir)
+    } else {
+        dir
+    }
+}
+
 /// 2026-01-01T00:00:00Z in nanoseconds.
 pub const NOW_NS: u64 = 1_767_225_600 * 1_000_000_000;
 

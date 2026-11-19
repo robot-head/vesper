@@ -1,0 +1,107 @@
+[package]
+name = "vesper-aegis-seed"
+version = "0.1.0"
+edition = "2024"
+description = "Frozen Rust seed copy of vesper-aegis for the compiler's own dependency closure"
+publish = false
+autotests = false
+autoexamples = false
+autobenches = false
+build = false
+
+# The seed-copy rule (port wave P1 lane 2, #899; port P3 lane 8, #1043): the
+# compiler links this package, the Rust build of ../src, under the library
+# name `vesper_aegis`. Crates inside `cargo tree -p vesper -e normal,build`
+# depend on it with
+# `vesper-aegis = { path = ".../seed", package = "vesper-aegis-seed" }`;
+# every other crate uses the port-backed package `vesper-aegis`. The Rust
+# code takes bug fixes only until self-hosting Stage 2.
+[lib]
+name = "vesper_aegis"
+path = "../src/lib.rs"
+
+[dependencies]
+coset = "0.3"
+ring = "0.17.14"
+rustls-pki-types = { version = "1.16", features = ["std"] }
+webpki = { package = "rustls-webpki", version = "0.103.16", default-features = false, features = ["std", "ring"] }
+spki = { version = "0.7.3", default-features = false }
+chacha20poly1305 = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+vesper-loom-cas = { path = "../../vesper-loom-cas" }
+vesper-vault = { path = "../../vesper-vault" }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+x509-parser = "=0.18.1"
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+
+[[test]]
+name = "attestation"
+path = "../tests/attestation.rs"
+
+[[test]]
+name = "corim_cca"
+path = "../tests/corim_cca.rs"
+
+[[test]]
+name = "gpa_props"
+path = "../tests/gpa_props.rs"
+
+[[test]]
+name = "host"
+path = "../tests/host.rs"
+
+[[test]]
+name = "parser_fuzz"
+path = "../tests/parser_fuzz.rs"
+
+[[test]]
+name = "policy"
+path = "../tests/policy.rs"
+
+[[test]]
+name = "revocation"
+path = "../tests/revocation.rs"
+
+[[test]]
+name = "sgx_quote_v3"
+path = "../tests/sgx_quote_v3.rs"
+
+[[test]]
+name = "snp_v6"
+path = "../tests/snp_v6.rs"
+
+[[test]]
+name = "toctou"
+path = "../tests/toctou.rs"
+
+[[test]]
+name = "vault_gate"
+path = "../tests/vault_gate.rs"
+
+[[test]]
+name = "vendor_samples"
+path = "../tests/vendor_samples.rs"
+
+[[test]]
+name = "vendor_samples_rest"
+path = "../tests/vendor_samples_rest.rs"
+
+[[test]]
+name = "zero_alloc"
+path = "../tests/zero_alloc.rs"
+
+[[test]]
+name = "lean_model"
+path = "../tests/lean_model.rs"
+
+[[test]]
+name = "port_memory"
+path = "../tests/port_memory.rs"
+
+[lints.rust]
+# cfg(vesper_port) is set only by the port-backed package's build script.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(vesper_port)"] }

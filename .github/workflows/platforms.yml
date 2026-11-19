@@ -179,19 +179,20 @@ jobs:
 
   # The ported crates' tests and divergence checks are platform-neutral, so
   # they run once, here (#1010). Bazel on BuildBuddy builds the same ports.
-  # Three parallel shards of the harness (#1019) keep each under ~25 min.
+  # Seven parallel shards of the harness (#1019, #1100) keep each near 30
+  # min; with three, the last one ran past 90 min.
   ports:
     needs: plan
     if: ${{ always() && !cancelled() }}
-    name: Vesper ports (Linux ${{ matrix.shard }}/3)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
+    name: Vesper ports (Linux ${{ matrix.shard }}/7)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-latest
-    # Every port's both-builds tests and divergent builds run serially
-    # here; with serde (#916) last, the harness takes over 60 minutes.
-    timeout-minutes: 90
+    # A backstop: each shard's tests and divergent builds take about
+    # 10-30 minutes after the compiler build (scripts/test-port-harness.sh).
+    timeout-minutes: 60
     steps:
       - name: Require successful profile planning
         env:

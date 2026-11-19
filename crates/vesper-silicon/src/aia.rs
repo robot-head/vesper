@@ -224,3 +224,5 @@ mod imp;
 #[path = "aia/port.rs"]
 mod imp;
 pub use imp::{AplicDomain, ImsicFile};
+#[cfg(vesper_port)]
+pub(crate) use imp::{cfg_from_port, fault as port_fault};

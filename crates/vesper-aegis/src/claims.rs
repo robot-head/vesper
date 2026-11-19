@@ -2,13 +2,15 @@
 //! bindings every format shares: report-data derivation and runtime
 //! measurement register replay.
 
-use crate::error::{Format, ParseError};
-use crate::reader::Reader;
+use crate::error::ParseError;
+#[cfg(not(vesper_port))]
+use crate::{error::Format, reader::Reader};
 use ring::digest;
 
 pub const ENCLAVE_FLAG_DEBUG_DISABLED: u32 = 1 << 0;
 pub const ENCLAVE_FLAG_SMT_MITIGATED: u32 = 1 << 1;
 pub const ENCLAVE_FLAG_LEAN_VERIFIED: u32 = 1 << 2;
+#[cfg(not(vesper_port))]
 const KNOWN_FLAGS: u32 =
     ENCLAVE_FLAG_DEBUG_DISABLED | ENCLAVE_FLAG_SMT_MITIGATED | ENCLAVE_FLAG_LEAN_VERIFIED;
 
@@ -264,6 +266,25 @@ impl AegisAttestationClaimsWire {
 
     /// Decode exactly 128 bytes. Unknown architecture tags and flag bits
     /// are rejected rather than ignored.
+    #[cfg(vesper_port)]
+    pub fn decode(bytes: &[u8]) -> Result<Self, ParseError> {
+        let ((), p) =
+            crate::port::parse(|w, d| crate::port::vesper::claims_wire_decode(bytes, w, d))?;
+        let mut f = p.fields();
+        Ok(AegisAttestationClaimsWire {
+            tee_arch_tag: f.u16(),
+            tcb_svn: f.u16(),
+            enclave_flags: f.u32(),
+            mr_enclave_sha384: f.array(),
+            loom_lock_blake3: f.array(),
+            olean_spec_mif: f.array(),
+            chan_binding_prefix: f.array(),
+        })
+    }
+
+    /// Decode exactly 128 bytes. Unknown architecture tags and flag bits
+    /// are rejected rather than ignored.
+    #[cfg(not(vesper_port))]
     pub fn decode(bytes: &[u8]) -> Result<Self, ParseError> {
         let mut r = Reader::new(bytes, Format::ClaimsWire);
         let tee_arch_tag = r.u16("tee_arch_tag")?;

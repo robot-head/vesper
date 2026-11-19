@@ -1,0 +1,144 @@
+// Module snp of @vesper/aegis (see lib.ves): SnpReport::parse and
+// SnpEtcb::parse of src/snp.rs (AMD SEV-SNP ATTESTATION_REPORT versions 2
+// to 6). Format code 2 (SnpReport).
+use self::{
+    AErr,
+    Rd
+};
+use self::reader::{
+    arr,
+    byte,
+    finish,
+    k_reserved,
+    nonzero,
+    raise,
+    rd,
+    reserved,
+    take,
+    rd_u32,
+    rd_u64,
+    unsupported,
+    zero
+};
+
+// "Venice": family 1Ah, model 50h..5Fh or C0h..CFh.
+pub fn is_venice(family: u64, model: u64) -> bool {
+    family == 26 && ((model >= 80 && model <= 95) || (model >= 192 && model <= 207))
+}
+
+// One ETCB_VERSION at `b[at..at + 32]`: bytes 14..32 are reserved; the
+// fourteen SVNs are appended to `d`.
+pub fn etcb(in b: Slice[u8], at: u64, inout d: ChunkSeq[u8]) -> Unit eff [Fail[AErr]] {
+    if !zero(in b, wrapping_add(at, 14), wrapping_add(at, 32)) {
+        raise(k_reserved(), 2, 0, 0, 0);
+    }
+    d.extend(in b[at..wrapping_add(at, 14)]);
+}
+
+// SnpEtcb::parse of a 32-byte array.
+pub fn parse_etcb(in b: Slice[u8], inout d: ChunkSeq[u8]) -> Unit eff [Fail[AErr]] {
+    etcb(in b, 0, inout d);
+}
+
+// Words: version, guest_svn, policy, vmpl, signature_algo, current_tcb,
+// platform_info, flags, reported_tcb, committed_tcb, launch_tcb,
+// launch_mit_vector, current_mit_vector, has_etcbs. Bytes: family_id,
+// image_id, report_data, measurement, host_data, id_key_digest,
+// author_key_digest, report_id, report_id_ma, cpuid, chip_id,
+// current_version, committed_version, the three ETCBs' SVNs (if present),
+// signature_r_s.
+pub fn parse(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+    -> Unit eff [Fail[AErr]] {
+    let mut r = rd(0, b.len(), 2);
+    w.reserve(14);
+    d.reserve(633);
+    let version = rd_u32(in b, inout r, 1);
+    if version < 2 || version > 6 {
+        unsupported(in r, 1, version);
+    }
+    w.push(version);
+    w.push(rd_u32(in b, inout r, 2));
+    w.push(rd_u64(in b, inout r, 3));
+    arr(in b, inout r, 16, 4, inout d);
+    arr(in b, inout r, 16, 5, inout d);
+    w.push(rd_u32(in b, inout r, 6));
+    let algo = rd_u32(in b, inout r, 7);
+    if algo != 1 {
+        unsupported(in r, 7, algo);
+    }
+    w.push(algo);
+    w.push(rd_u64(in b, inout r, 8));
+    w.push(rd_u64(in b, inout r, 9));
+    let flags = rd_u32(in b, inout r, 10);
+    if flags & 4294967264 != 0 {
+        unsupported(in r, 10, flags);
+    }
+    w.push(flags);
+    reserved(in b, inout r, 4, 11);
+    arr(in b, inout r, 64, 12, inout d);
+    arr(in b, inout r, 48, 13, inout d);
+    arr(in b, inout r, 32, 14, inout d);
+    arr(in b, inout r, 48, 15, inout d);
+    arr(in b, inout r, 48, 16, inout d);
+    arr(in b, inout r, 32, 17, inout d);
+    arr(in b, inout r, 32, 18, inout d);
+    w.push(rd_u64(in b, inout r, 19));
+    let cpuid = take(inout r, 3, 20);
+    if version == 2 && !zero(in b, cpuid, wrapping_add(cpuid, 3)) {
+        nonzero(in r, 21);
+    }
+    d.extend(in b[cpuid..wrapping_add(cpuid, 3)]);
+    reserved(in b, inout r, 21, 22);
+    arr(in b, inout r, 64, 23, inout d);
+    w.push(rd_u64(in b, inout r, 24));
+    arr(in b, inout r, 3, 25, inout d);
+    reserved(in b, inout r, 1, 26);
+    arr(in b, inout r, 3, 27, inout d);
+    reserved(in b, inout r, 1, 28);
+    w.push(rd_u64(in b, inout r, 29));
+    if version >= 5 {
+        w.push(rd_u64(in b, inout r, 30));
+        w.push(rd_u64(in b, inout r, 31));
+    } else {
+        reserved(in b, inout r, 16, 32);
+        w.push(0);
+        w.push(0);
+    }
+    reserved(in b, inout r, 24, 33);
+    let venice = version >= 3 && is_venice(byte(in b, cpuid), byte(in b, wrapping_add(cpuid, 1)));
+    if version >= 6 && venice {
+        w.push(1);
+        etcb(in b, take(inout r, 32, 34), inout d);
+        etcb(in b, take(inout r, 32, 35), inout d);
+        etcb(in b, take(inout r, 32, 36), inout d);
+    } else {
+        w.push(0);
+        reserved(in b, inout r, 96, 37);
+    }
+    reserved(in b, inout r, 32, 38);
+    let sr = take(inout r, 72, 39);
+    let ss = take(inout r, 72, 40);
+    reserved(in b, inout r, 368, 41);
+    finish(in r);
+    signature_half(in b, sr, inout d);
+    signature_half(in b, ss, inout d);
+}
+
+// A little-endian, zero-extended 72-byte signature component at `at`,
+// appended big-endian in 48 bytes.
+pub fn signature_half(in b: Slice[u8], at: u64, inout d: ChunkSeq[u8]) -> Unit eff [Fail[AErr]] {
+    if !zero(in b, wrapping_add(at, 48), wrapping_add(at, 72)) {
+        raise(k_reserved(), 2, 42, 0, 0);
+    }
+    // Six eight-byte words, last first, each stored byte-swapped.
+    let base = d.len();
+    d.extend(in b[at..wrapping_add(at, 48)]);
+    let six: u64 = 6;
+    for k in 0..six {
+        let v = match b.try_read_u64_le(wrapping_add(at, wrapping_sub(40, wrapping_mul(k, 8)))) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        d.try_write_u64_be(wrapping_add(base, wrapping_mul(k, 8)), v);
+    }
+}

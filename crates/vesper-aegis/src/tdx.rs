@@ -20,8 +20,11 @@ use crate::claims::{
     AttestationClaims, ENCLAVE_FLAG_DEBUG_DISABLED, GuestRuntimeClaims, RegisterHash,
     SupplyChainEvidence, TeeArch, ct_eq, single_extend,
 };
-use crate::error::{AttestError, Format, ParseError};
+#[cfg(not(vesper_port))]
+use crate::error::Format;
+use crate::error::{AttestError, ParseError};
 use crate::intel::{TdxCollateral, VerifiedTdxQuote, verify_tdx_collateral};
+#[cfg(not(vesper_port))]
 use crate::reader::Reader;
 use ring::digest;
 
@@ -98,6 +101,7 @@ pub struct Td15ExFields {
 }
 
 impl Td15Fields {
+    #[cfg(not(vesper_port))]
     fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
         Ok(Td15Fields {
             tee_tcb_svn2: r.array("body.tee_tcb_svn2")?,
@@ -112,6 +116,7 @@ impl Td15Fields {
 }
 
 impl Td15ExFields {
+    #[cfg(not(vesper_port))]
     fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
         let vm_index: [u8; 1] = r.array("body.vm_index")?;
         if vm_index[0] > 3 {
@@ -180,6 +185,7 @@ pub struct TdxQuote {
 }
 
 impl TdxQuoteHeader {
+    #[cfg(not(vesper_port))]
     fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
         let h = TdxQuoteHeader {
             version: r.u16("header.version")?,
@@ -230,6 +236,7 @@ impl TdxQuoteHeader {
 }
 
 impl TdReportBody {
+    #[cfg(not(vesper_port))]
     fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
         Ok(TdReportBody {
             tee_tcb_svn: r.array("body.tee_tcb_svn")?,
@@ -271,10 +278,27 @@ impl TdReportBody {
 }
 
 impl QeReportBody {
+    /// The QE report fields of a port parse (vesper/src/tdx.ves `qe_report`).
+    #[cfg(vesper_port)]
+    pub(crate) fn from_port(f: &mut crate::port::Fields<'_>) -> Self {
+        QeReportBody {
+            cpu_svn: f.array(),
+            misc_select: f.u32(),
+            attributes: f.array(),
+            mr_enclave: f.array(),
+            mr_signer: f.array(),
+            isv_prod_id: f.u16(),
+            isv_svn: f.u16(),
+            report_data: f.array(),
+        }
+    }
+
+    #[cfg(not(vesper_port))]
     pub(crate) fn parse_from(r: &mut Reader<'_>) -> Result<Self, ParseError> {
         Self::parse(r)
     }
 
+    #[cfg(not(vesper_port))]
     fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
         let cpu_svn = r.array("qe_report.cpu_svn")?;
         let misc_select = r.u32("qe_report.misc_select")?;
@@ -320,6 +344,20 @@ impl QeReportBody {
 
 impl TdxQuote {
     /// Bounds-checked parse; the input must contain exactly one quote.
+    #[cfg(vesper_port)]
+    pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
+        Ok(Self::parse_port(bytes, 0)?.0)
+    }
+
+    /// Parse a quote from a fixed-size quote buffer: bytes after the
+    /// quote's declared length must all be zero.
+    #[cfg(vesper_port)]
+    pub fn parse_padded(bytes: &[u8]) -> Result<Self, ParseError> {
+        Ok(Self::parse_port(bytes, 1)?.0)
+    }
+
+    /// Bounds-checked parse; the input must contain exactly one quote.
+    #[cfg(not(vesper_port))]
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         let (quote, used) = Self::parse_prefix(bytes)?;
         if used != bytes.len() {
@@ -333,6 +371,7 @@ impl TdxQuote {
 
     /// Parse a quote from a fixed-size quote buffer: bytes after the
     /// quote's declared length must all be zero.
+    #[cfg(not(vesper_port))]
     pub fn parse_padded(bytes: &[u8]) -> Result<Self, ParseError> {
         let (quote, used) = Self::parse_prefix(bytes)?;
         if bytes[used..].iter().any(|&b| b != 0) {
@@ -346,6 +385,76 @@ impl TdxQuote {
 
     /// Parse one quote from the start of `bytes`; returns it and the number
     /// of bytes it occupies (header, body, length and signature data).
+    #[cfg(vesper_port)]
+    pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
+        Self::parse_port(bytes, 2)
+    }
+
+    /// `mode`: 0 exact, 1 zero padded, 2 prefix (vesper/src/reader.ves).
+    #[cfg(vesper_port)]
+    fn parse_port(bytes: &[u8], mode: u64) -> Result<(Self, usize), ParseError> {
+        let (used, p) =
+            crate::port::parse(|w, d| crate::port::vesper::tdx_parse(bytes, mode, w, d))?;
+        let mut f = p.fields();
+        let header = TdxQuoteHeader {
+            version: f.u16(),
+            att_key_type: f.u16(),
+            tee_type: f.u32(),
+            qe_svn: f.u16(),
+            pce_svn: f.u16(),
+            qe_vendor_id: f.array(),
+            user_data: f.array(),
+        };
+        let body_type = f.u16();
+        let body = TdReportBody {
+            tee_tcb_svn: f.array(),
+            mr_seam: f.array(),
+            mr_signer_seam: f.array(),
+            seam_attributes: f.word(),
+            td_attributes: f.word(),
+            xfam: f.word(),
+            mr_td: f.array(),
+            mr_config_id: f.array(),
+            mr_owner: f.array(),
+            mr_owner_config: f.array(),
+            rtmr: [f.array(), f.array(), f.array(), f.array()],
+            report_data: f.array(),
+        };
+        let td15 =
+            (body_type == TDX_BODY_TYPE_TD15 || body_type == TDX_BODY_TYPE_TD15_EX).then(|| {
+                Td15Fields {
+                    tee_tcb_svn2: f.array(),
+                    mr_service_td: f.array(),
+                }
+            });
+        let td15_ex = (body_type == TDX_BODY_TYPE_TD15_EX).then(|| Td15ExFields {
+            vm_index: f.u8(),
+            td_id: f.array(),
+            dev_info_hash: f.array(),
+            init_service_td_hash: f.array(),
+            init_service_td_attributes: f.array(),
+            init_cpu_svn: f.array(),
+            init_tee_tcb_svn: f.array(),
+            init_tee_fmspc: f.array(),
+            cur_service_td_hash: f.array(),
+            cur_service_td_attributes: f.array(),
+        });
+        let quote = TdxQuote {
+            header,
+            body,
+            td15,
+            td15_ex,
+            quote_signature: f.array(),
+            attestation_key: f.array(),
+            qe_report: QeReportBody::from_port(&mut f),
+            qe_report_signature: f.array(),
+            qe_auth_data: f.vec(),
+            pck_chain_pem: f.vec(),
+        };
+        Ok((quote, used as usize))
+    }
+
+    #[cfg(not(vesper_port))]
     pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
         let mut r = Reader::new(bytes, Format::TdxQuoteV4);
         let header = TdxQuoteHeader::parse(&mut r)?;
@@ -622,6 +731,7 @@ pub fn verify_tdx_quote_with_collateral(
     Ok((claims, verified))
 }
 
+#[cfg(not(vesper_port))]
 fn unsupported(field: &'static str, value: u64) -> ParseError {
     ParseError::UnsupportedValue {
         format: Format::TdxQuoteV4,
@@ -630,6 +740,7 @@ fn unsupported(field: &'static str, value: u64) -> ParseError {
     }
 }
 
+#[cfg(not(vesper_port))]
 fn over_budget(field: &'static str, limit: usize, value: usize) -> ParseError {
     ParseError::OverBudget {
         format: Format::TdxQuoteV4,

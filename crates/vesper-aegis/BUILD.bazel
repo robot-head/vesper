@@ -1,8 +1,92 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
+
+# The port-backed package (seed-copy rule, docs/maintenance/porting-a-crate.md;
+# port wave P3a lane 8, #1043): build.rs links the object built here from the
+# Loom package in vesper/ and checks port/binding.rs against the generated
+# binding. The compiler links the Rust seed copy, //crates/vesper-aegis/seed,
+# instead, and so does every other dependent until the port reaches parity.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "aegis_vesper",
+    library = "aegis",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "aegis_vesper_binding",
+    srcs = [":aegis_vesper"],
+    output_group = "rust_binding",
+)
+
+# The divergent builds, one per ported module: the same edits as the Cargo
+# feature `vesper-port-divergent` (DIVERGENT in build.rs). They must build;
+# the Cargo run in port/check.sh (scripts/test-port-harness.sh) asserts that
+# the tests catch each edit.
+DIVERGENT = {
+    "reader": ("reader", {"acc = acc | x;": "acc = acc | (x & 18446744073709551614);"}),
+    "snp": ("snp", {"if version < 2 || version > 6 {": "if version < 2 || version > 7 {"}),
+    "tdx": ("tdx", {"            885\n": "            884\n"}),
+    "sgx": ("sgx", {"if cert_type != 5 {": "if cert_type != 6 {"}),
+    "wire": ("claims", {"if tag < 1 || tag > 3 {": "if tag < 1 || tag > 2 {"}),
+    "policy": ("claims", {"if tcb_svn < floor {": "if tcb_svn <= floor {"}),
+    "time": ("time", {"        byte(in s, 19) == 90\n": "        byte(in s, 19) == 89\n"}),
+}
+
+[
+    vesper_port_object(
+        name = "aegis_vesper_divergent_%s" % module,
+        edit_src = "vesper/src/%s.ves" % src,
+        edits = edits,
+        library = "aegis",
+        package = ":port_package",
+        target = VESPER_TARGET,
+    )
+    for module, (src, edits) in DIVERGENT.items()
+]
 
 vesper_crate(
+    build_script_data = [
+        ":aegis_vesper",
+        ":aegis_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :aegis_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :aegis_vesper_binding)",
+    },
     # Lean resolves symlinked runfiles to the source tree and then rejects
     # them as outside --root, so the model test runs in a copy of regular files.
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
+)
+
+# The seed package (seed/) builds these same Rust sources without the port.
+exports_files(glob([
+    "src/**/*.rs",
+    "tests/**/*.rs",
+]))
+
+filegroup(
+    name = "rust_srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//crates/vesper-aegis/seed:__pkg__"],
+)
+
+filegroup(
+    name = "roots",
+    srcs = glob(["roots/**"]),
+    visibility = ["//crates/vesper-aegis/seed:__pkg__"],
+)
+
+filegroup(
+    name = "test_data",
+    srcs = glob(["tests/data/**"]),
+    visibility = ["//crates/vesper-aegis/seed:__pkg__"],
 )

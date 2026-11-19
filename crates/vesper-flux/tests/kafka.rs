@@ -513,6 +513,14 @@ impl Job {
         t: &Topics,
         partitions: i32,
     ) -> KafkaSink<QuarrySink<FsDevice>> {
+        self.sink_on(self.conn(broker), t, partitions)
+    }
+    fn sink_on(
+        &self,
+        conn: KafkaConnection,
+        t: &Topics,
+        partitions: i32,
+    ) -> KafkaSink<QuarrySink<FsDevice>> {
         let (quarry, _) = QuarrySink::open(
             FsDevice::open(&self.root.join("sink")).unwrap(),
             DbLimits::default(),
@@ -521,7 +529,7 @@ impl Job {
         .unwrap();
         KafkaSink::new(
             quarry,
-            self.conn(broker),
+            conn,
             &circuit(),
             KafkaSinkConfig {
                 topic: t.output.clone(),
@@ -888,14 +896,28 @@ fn broker_crash_and_restart() {
     //    epoch the progress offsets do not cover, once.
     drop((warm, sink, store));
     broker.restart();
-    let (mut source, mut sink, store) = job.open(&broker, &t, 2);
+    // The first publish must init a producer (aborting the transaction left
+    // open in step 3) and read the stable progress offsets, which wait for
+    // that abort. Right after a SIGKILL restart on a loaded CI runner this
+    // has outlasted the usual 10 s retry window and left the publication
+    // pending with "unavailable" (#1049, #1054), so this sink retries longer.
+    let mut source = job.source(&broker, &t, 2);
+    let mut patient = broker.config_for(job.listener);
+    patient.retry_for = Duration::from_secs(60);
+    let mut sink = job.sink_on(KafkaConnection::connect(&patient).unwrap(), &t, 2);
+    let store = Store::open(job.root.join("cas")).unwrap();
     assert!(sink.pending().is_some());
     let conn = broker.connect();
     producer.epoch(&conn, &t, &changes[9], true);
     source.poll().unwrap();
     run_cluster_with(&circuit(), &source, &mut sink, &store, &config(3, &[]), &[])
         .unwrap_or_else(|e| panic!("{e}: {:?}", sink.connection().last_error()));
-    assert!(sink.pending().is_none(), "{:?}", sink.pending());
+    assert!(
+        sink.pending().is_none(),
+        "{:?}: {:?}",
+        sink.pending(),
+        sink.connection().last_error()
+    );
     let expected = from_source(&source, &changes);
     verify(&conn, &t, 2, &mut sink, &expected, "after broker crashes");
 }

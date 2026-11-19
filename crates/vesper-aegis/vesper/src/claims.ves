@@ -1,0 +1,195 @@
+// Module claims of @vesper/aegis (see lib.ves): the evidence-independent
+// pieces of src/claims.rs and src/policy.rs: AegisAttestationClaimsWire
+// decoding (format code 5, ClaimsWire), constant-time comparison and the
+// relying-party policy check verify_attestation_claims.
+use self::{
+    AErr,
+    PErr,
+    Rd
+};
+use self::reader::{
+    arr,
+    byte,
+    finish,
+    rd,
+    rd_u16,
+    rd_u32,
+    unsupported
+};
+
+// AegisAttestationClaimsWire::decode. Words: tee_arch_tag, tcb_svn,
+// enclave_flags. Bytes: mr_enclave_sha384, loom_lock_blake3,
+// olean_spec_mif, chan_binding_prefix.
+pub fn decode_wire(in b: Slice[u8], inout w: ChunkSeq[u64], inout d: ChunkSeq[u8])
+    -> Unit eff [Fail[AErr]] {
+    let mut r = rd(0, b.len(), 5);
+    let tag = rd_u16(in b, inout r, 122);
+    if tag < 1 || tag > 3 {
+        unsupported(in r, 122, tag);
+    }
+    let tcb_svn = rd_u16(in b, inout r, 123);
+    let flags = rd_u32(in b, inout r, 124);
+    if flags & 4294967288 != 0 {
+        unsupported(in r, 124, flags);
+    }
+    w.push(tag);
+    w.push(tcb_svn);
+    w.push(flags);
+    arr(in b, inout r, 48, 125, inout d);
+    arr(in b, inout r, 32, 126, inout d);
+    arr(in b, inout r, 32, 127, inout d);
+    arr(in b, inout r, 8, 128, inout d);
+    finish(in r);
+}
+
+// Whether `a[ai..ai + n]` equals `b[bi..bi + n]`, in time that depends on
+// `n` only: every byte pair is visited and folded with XOR and OR, with no
+// early exit (claims::ct_eq uses `subtle` for the same).
+pub fn ct_eq(in a: Slice[u8], ai: u64, in b: Slice[u8], bi: u64, n: u64) -> bool {
+    let mut acc: u64 = 0;
+    for i in 0..n {
+        acc = acc | (byte(in a, wrapping_add(ai, i)) ^ byte(in b, wrapping_add(bi, i)));
+    }
+    acc == 0
+}
+
+// The word at `i`, or 0 past the end.
+pub fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+pub fn deny(kind: u64, a: u64, b: u64, c: u64) -> Never eff [Fail[PErr]] {
+    Fail::raise(
+        PErr {
+            kind: kind,
+            a: a,
+            b: b,
+            c: c
+        }
+    )
+}
+
+// Byte `i` (0 = least significant) of `x`.
+pub fn byte_of(x: u64, i: u64) -> u64 {
+    if i >= 8 {
+        return 0;
+    }
+    handle Fail[ArithOverflow] in {
+        (x >> wrapping_mul(i, 8)) & 255
+    } with {
+        return v => v,
+        raise(e, k) => 0
+    }
+}
+
+// verify_attestation_claims. Every failure is an AegisVerifyError variant
+// index with its payload words.
+//
+// Claims words `cw`: arch tag, tcb_svn, enclave_flags, 1 if the supply
+// chain is register replayed, 1 if snp_vmpl is set, snp_vmpl, 1 if
+// snp_reported_tcb is set, its TCB_VERSION word. Claims bytes `cb`:
+// mr_enclave_sha384 (0..48), loom_lock_blake3 (48..80), olean_spec_mif
+// (80..112), chan_binding_prefix (112..120), channel_binding (120..168).
+//
+// Policy words `pw`: the TDX, SNP and CCA TCB floors, 1 if
+// snp_component_floors is set, its TCB_VERSION word, snp_max_vmpl,
+// require_register_replay, the number of allowed architectures, their
+// tags, then the architecture tag of each allowed measurement. Policy
+// bytes `pb`: expected_loom_blake3 (0..32), expected_olean_mif (32..64),
+// then the allowed measurements, 48 bytes each.
+pub fn check_policy(
+    in cw: Slice[u64],
+    in cb: Slice[u8],
+    in pw: Slice[u64],
+    in pb: Slice[u8],
+    in expected: Slice[u8]
+) -> Unit eff [Fail[PErr]] {
+    let arch = word(in cw, 0);
+    let tcb_svn = word(in cw, 1);
+    let flags = word(in cw, 2);
+    let narchs = word(in pw, 7);
+    let mut allowed = false;
+    for i in 0..narchs {
+        if word(in pw, wrapping_add(8, i)) == arch {
+            allowed = true;
+        }
+    }
+    if !allowed {
+        deny(0, arch, 0, 0);
+    }
+    if flags & 1 == 0 {
+        deny(1, 0, 0, 0);
+    }
+    let floor = if arch == 1 {
+        word(in pw, 0)
+    } else if arch == 2 {
+        word(in pw, 1)
+    } else {
+        word(in pw, 2)
+    };
+    if tcb_svn < floor {
+        deny(2, tcb_svn, floor, 0);
+    }
+    let meas_words = wrapping_add(8, narchs);
+    let nmeas = wrapping_sub(pw.len(), meas_words);
+    let mut found = false;
+    for i in 0..nmeas {
+        if word(in pw, wrapping_add(meas_words, i))
+            == arch
+            && ct_eq(in pb, wrapping_add(64, wrapping_mul(i, 48)), in cb, 0, 48) {
+            found = true;
+        }
+    }
+    if !found {
+        deny(4, 0, 0, 0);
+    }
+    if !ct_eq(in cb, 48, in pb, 0, 32) {
+        deny(5, 0, 0, 0);
+    }
+    if !ct_eq(in cb, 80, in pb, 32, 32) {
+        deny(6, 0, 0, 0);
+    }
+    if !ct_eq(in cb, 120, in expected, 0, 48) || !ct_eq(in cb, 112, in expected, 0, 8) {
+        deny(7, 0, 0, 0);
+    }
+    if arch == 2 {
+        let vmpl = if word(in cw, 4) == 1 {
+            word(in cw, 5)
+        } else {
+            4294967295
+        };
+        let max_vmpl = word(in pw, 5);
+        if vmpl > max_vmpl {
+            deny(9, vmpl, max_vmpl, 0);
+        }
+        if word(in pw, 3) == 1 {
+            let actual = if word(in cw, 6) == 1 {
+                word(in cw, 7)
+            } else {
+                0
+            };
+            let floors = word(in pw, 4);
+            // bootloader, tee, snp, microcode: bytes 0, 1, 6 and 7.
+            let mut component: u64 = 0;
+            let four: u64 = 4;
+            for c in 0..four {
+                let at = if c < 2 {
+                    c
+                } else {
+                    wrapping_add(c, 4)
+                };
+                let a = byte_of(actual, at);
+                let m = byte_of(floors, at);
+                if a < m {
+                    deny(3, c, a, m);
+                }
+            }
+        }
+    }
+    if word(in pw, 6) == 1 && word(in cw, 3) != 1 {
+        deny(8, arch, 0, 0);
+    }
+}

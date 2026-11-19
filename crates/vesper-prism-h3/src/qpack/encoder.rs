@@ -8,10 +8,14 @@
 //! and never evicts an entry that is unacknowledged or still referenced by
 //! an unacknowledged section (§2.1.1).
 
+#[cfg(not(feature = "vesper-port"))]
 use std::collections::VecDeque;
 
+#[cfg(not(feature = "vesper-port"))]
 use super::prefix::{decode_int, encode_int, encode_string};
+#[cfg(not(feature = "vesper-port"))]
 use super::static_table::STATIC_TABLE;
+#[cfg(not(feature = "vesper-port"))]
 use super::{Field, QpackError, Reason, Table, encode_ric, entry_size};
 
 /// How the encoder uses the dynamic table.
@@ -48,6 +52,7 @@ pub struct EncoderStats {
     pub blocking_sections: u64,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 struct Section {
     stream_id: u64,
     ric: u64,
@@ -55,6 +60,7 @@ struct Section {
     refs: Vec<u64>,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 pub struct Encoder {
     cfg: EncoderConfig,
     table: Table,
@@ -73,6 +79,7 @@ pub struct Encoder {
     failed: Option<QpackError>,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 impl Encoder {
     pub fn new(cfg: EncoderConfig) -> Self {
         Self {
@@ -375,12 +382,14 @@ impl Encoder {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn static_exact(name: &[u8], value: &[u8]) -> Option<usize> {
     STATIC_TABLE
         .iter()
         .position(|&(n, v)| n == name && v == value)
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn static_name(name: &[u8]) -> Option<usize> {
     STATIC_TABLE.iter().position(|&(n, _)| n == name)
 }

@@ -1,0 +1,575 @@
+// Module btf_ext of @vesper/ebpf (see lib.ves): the `.BTF.ext` reader of
+// src/btf_ext.rs (`parse_ext`, `local_type`) and `maps_from_btf`, over
+// the type table of module btf (see core.ves). The Rust wrapper turns name
+// offsets into strings.
+//
+// `parse_ext` output: [0, functions, (name, slot)... sorted by slot, lines,
+// (slot, file, text, line, col)..., relocations, then per relocation slot,
+// kind, access count, access..., tree words, local type tree...]. A tree
+// is core.ves's local type tree with name offsets into the object's
+// strings (and length 0). Errors: [1, code, x, y]: 1 bad header, 2 header
+// too short, 3 subsection out of range, 4 truncated, 5 record size (x),
+// 6 records past the end, 7 offset (x) not a slot, 8 func info type (x)
+// not a FUNC, 9 unsupported relocation kind (x), 10 access string (the
+// part at x, y bytes), 11 nests too deeply, 12 no type (x), 13 bad
+// bitfield member, 14 unsupported local type (the type x).
+use self::btf::{
+    byte,
+    le32,
+    name_span
+};
+use self::program::map_from_kernel_type;
+use self::core::{
+    size_of,
+    skip_mods,
+    tf,
+    te,
+    tkind
+};
+
+fn wd(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+fn err(code: u64, x: u64, y: u64) -> ChunkSeq[u64] {
+    let mut o: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    o.push(1);
+    o.push(code);
+    o.push(x);
+    o.push(y);
+    o
+}
+
+// The name at `off` is exactly `want`.
+fn name_eq(in strs: Slice[u8], off: u64, in want: Slice[u8]) -> bool {
+    let (at, n) = name_span(in strs, off);
+    if n != want.len() {
+        return false;
+    }
+    for i in 0..n {
+        if byte(in strs, wrapping_add(at, i)) != byte(in want, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// `records`: the start offsets (in `ext`) of the records of `section` in
+// the subsection `lo..hi`; 0, or an error code with its value in `bad`.
+fn records(
+    in ext: Slice[u8],
+    lo: u64,
+    hi: u64,
+    in strs: Slice[u8],
+    in section: Slice[u8],
+    min_rec: u64,
+    inout out: ChunkSeq[u64],
+    inout rec: u64,
+    inout bad: u64
+) -> u64 {
+    if lo == hi {
+        return 0;
+    }
+    if wrapping_add(lo, 4) > hi {
+        return 4;
+    }
+    rec = le32(in ext, lo);
+    if rec < min_rec || rec & 3 != 0 || rec > 256 {
+        bad = rec;
+        return 5;
+    }
+    let mut at = wrapping_add(lo, 4);
+    loop {
+        if at >= hi {
+            break;
+        }
+        if wrapping_add(at, 8) > hi {
+            return 4;
+        }
+        let name = le32(in ext, at);
+        let n = le32(in ext, wrapping_add(at, 4));
+        at = wrapping_add(at, 8);
+        let end = wrapping_add(at, wrapping_mul(n, rec));
+        if end > hi {
+            return 6;
+        }
+        if name_eq(in strs, name, in section) {
+            for i in 0..n {
+                out.push(wrapping_add(at, wrapping_mul(i, rec)));
+            }
+        }
+        at = end;
+    }
+    0
+}
+
+fn slot_ok(off: u64, inout bad: u64) -> u64 {
+    if off & 7 != 0 {
+        bad = off;
+        return 7;
+    }
+    0
+}
+
+// `u32::from_str` of bytes `at..at + n` of `strs`: (ok, value).
+fn parse_u32(in strs: Slice[u8], at: u64, n: u64) -> (bool, u64) {
+    let mut i: u64 = 0;
+    if n > 0 && byte(in strs, at) == 43 {
+        i = 1;
+    }
+    if i >= n {
+        return (false, 0);
+    }
+    let mut v: u64 = 0;
+    loop {
+        if i >= n {
+            break;
+        }
+        let c = byte(in strs, wrapping_add(at, i));
+        if c < 48 || c > 57 {
+            return (false, 0);
+        }
+        v = wrapping_add(wrapping_mul(v, 10), wrapping_sub(c, 48));
+        if v > 4294967295 {
+            return (false, 0);
+        }
+        i = wrapping_add(i, 1);
+    }
+    (true, v)
+}
+
+// `local_depth`: append the local type of `id` to `out`; 0 or an error.
+fn local_depth(
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    id: u64,
+    depth: u64,
+    inout out: ChunkSeq[u64],
+    inout bad: u64
+) -> u64 {
+    if depth > 16 {
+        return 11;
+    }
+    let t = skip_mods(in tab, in idx, id);
+    let k = tkind(in tab, in idx, t);
+    if k == 99 {
+        bad = id;
+        return 12;
+    }
+    let name = tf(in tab, in idx, t, 1);
+    let a = tf(in tab, in idx, t, 2);
+    let d1 = wrapping_add(depth, 1);
+    if k == 0 {
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        return 0;
+    }
+    if k == 1 {
+        out.push(1);
+        out.push(name);
+        out.push(0);
+        out.push(a);
+        out.push(tf(in tab, in idx, t, 3) & 1);
+        out.push(0);
+        return 0;
+    }
+    if k == 2 {
+        out.push(2);
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        return local_depth(in tab, in idx, a, d1, inout out, inout bad);
+    }
+    if k == 3 {
+        out.push(3);
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        out.push(0);
+        out.push(tf(in tab, in idx, t, 4));
+        return local_depth(in tab, in idx, a, d1, inout out, inout bad);
+    }
+    if k == 4 || k == 5 {
+        let n = tf(in tab, in idx, t, 6);
+        out.push(4);
+        out.push(name);
+        out.push(0);
+        out.push(a);
+        out
+            .push(
+            if k == 5 {
+                1
+            } else {
+                0
+            }
+        );
+        out.push(n);
+        for i in 0..n {
+            let mname = te(in tab, in idx, t, 4, i, 0);
+            let mty = te(in tab, in idx, t, 4, i, 1);
+            let moff = te(in tab, in idx, t, 4, i, 2);
+            let mbf = te(in tab, in idx, t, 4, i, 3);
+            let is_bf = mbf != 0 || moff & 7 != 0;
+            let mut bits: u64 = 0;
+            if is_bf {
+                if mbf != 0 {
+                    bits = mbf;
+                } else {
+                    let (ok, s) = size_of(in tab, in idx, mty, 0);
+                    bits = if !ok {
+                        0
+                    } else if s > 8 {
+                        4294967295
+                    } else {
+                        wrapping_mul(s, 8)
+                    };
+                }
+                if bits == 0 || bits > 64 {
+                    return 13;
+                }
+            }
+            out.push(mname);
+            out.push(0);
+            out.push(moff >> 3);
+            if is_bf {
+                out.push(1);
+                out.push(moff);
+                out.push(bits);
+            } else {
+                out.push(0);
+                out.push(0);
+                out.push(0);
+            }
+            let c = local_depth(in tab, in idx, mty, d1, inout out, inout bad);
+            if c != 0 {
+                return c;
+            }
+        }
+        return 0;
+    }
+    if k == 6 {
+        let n = tf(in tab, in idx, t, 6);
+        out.push(5);
+        out.push(name);
+        out.push(0);
+        out.push(a);
+        out.push(0);
+        out.push(n);
+        for i in 0..n {
+            out.push(te(in tab, in idx, t, 2, i, 0));
+            out.push(0);
+            out.push(te(in tab, in idx, t, 2, i, 1));
+        }
+        return 0;
+    }
+    bad = t;
+    14
+}
+
+// `local_type` as words (see above), or [1, code, x].
+pub fn local_type_words(in tab: Slice[u64], in idx: Slice[u64], id: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(0);
+    let mut bad: u64 = 0;
+    let c = local_depth(in tab, in idx, id, 0, inout out, inout bad);
+    if c != 0 {
+        return err(c, bad, 0);
+    }
+    out
+}
+
+// The bounds of subsection `i` (`part`): 0 with `lo`, `hi`, or an error.
+fn part(in ext: Slice[u8], hdr: u64, i: u64, inout lo: u64, inout hi: u64) -> u64 {
+    let at = wrapping_add(8, wrapping_mul(i, 8));
+    if wrapping_add(at, 8) > hdr {
+        lo = 0;
+        hi = 0;
+        return 0;
+    }
+    if wrapping_add(at, 8) > ext.len() {
+        return 4;
+    }
+    let s = wrapping_add(hdr, le32(in ext, at));
+    let e = wrapping_add(s, le32(in ext, wrapping_add(at, 4)));
+    if e > ext.len() {
+        return 3;
+    }
+    lo = s;
+    hi = e;
+    0
+}
+
+pub fn parse_ext(
+    in tab: Slice[u64],
+    in idx: Slice[u64],
+    in strs: Slice[u8],
+    in ext: Slice[u8],
+    in section: Slice[u8]
+) -> ChunkSeq[u64] {
+    let len = ext.len();
+    if len < 8 || (byte(in ext, 0) | (byte(in ext, 1) << 8)) != 60319 || byte(in ext, 2) != 1 {
+        return err(1, 0, 0);
+    }
+    let hdr = le32(in ext, 4);
+    if hdr < 24 {
+        return err(2, 0, 0);
+    }
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(0);
+    let mut lo: u64 = 0;
+    let mut hi: u64 = 0;
+    let mut bad: u64 = 0;
+    let mut rec: u64 = 0;
+    // func info
+    let p0 = part(in ext, hdr, 0, inout lo, inout hi);
+    if p0 != 0 {
+        return err(p0, 0, 0);
+    }
+    let mut rs: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let c0 = records(in ext, lo, hi, in strs, in section, 8, inout rs, inout rec, inout bad);
+    if c0 != 0 {
+        return err(c0, bad, 0);
+    }
+    let nf = rs.len();
+    let mut names: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut slots: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    for i in 0..nf {
+        let r = wd(in rs.as_slice(), i);
+        let off = le32(in ext, r);
+        let s = slot_ok(off, inout bad);
+        if s != 0 {
+            return err(s, bad, 0);
+        }
+        let ty = le32(in ext, wrapping_add(r, 4));
+        if tkind(in tab, in idx, ty) != 12 {
+            return err(8, ty, 0);
+        }
+        // a stable insertion by slot
+        let slot = off >> 3;
+        let mut at = slots.len();
+        loop {
+            if at == 0 || wd(in slots.as_slice(), wrapping_sub(at, 1)) <= slot {
+                break;
+            }
+            at = wrapping_sub(at, 1);
+        }
+        names.push(0);
+        slots.push(0);
+        let mut j = slots.len();
+        loop {
+            if j <= wrapping_add(at, 1) {
+                break;
+            }
+            let pn = wd(in names.as_slice(), wrapping_sub(j, 2));
+            let ps = wd(in slots.as_slice(), wrapping_sub(j, 2));
+            names.try_set(wrapping_sub(j, 1), pn);
+            slots.try_set(wrapping_sub(j, 1), ps);
+            j = wrapping_sub(j, 1);
+        }
+        names.try_set(at, tf(in tab, in idx, ty, 1));
+        slots.try_set(at, slot);
+    }
+    out.push(nf);
+    for i in 0..nf {
+        out.push(wd(in names.as_slice(), i));
+        out.push(wd(in slots.as_slice(), i));
+    }
+    // line info
+    let p1 = part(in ext, hdr, 1, inout lo, inout hi);
+    if p1 != 0 {
+        return err(p1, 0, 0);
+    }
+    rs.clear();
+    let c1 = records(in ext, lo, hi, in strs, in section, 16, inout rs, inout rec, inout bad);
+    if c1 != 0 {
+        return err(c1, bad, 0);
+    }
+    let nl = rs.len();
+    out.push(nl);
+    for i in 0..nl {
+        let r = wd(in rs.as_slice(), i);
+        let lc = le32(in ext, wrapping_add(r, 12));
+        let off = le32(in ext, r);
+        let s = slot_ok(off, inout bad);
+        if s != 0 {
+            return err(s, bad, 0);
+        }
+        out.push(off >> 3);
+        out.push(le32(in ext, wrapping_add(r, 4)));
+        out.push(le32(in ext, wrapping_add(r, 8)));
+        out.push(lc >> 10);
+        out.push(lc & 1023);
+    }
+    // CO-RE relocations
+    let p2 = part(in ext, hdr, 2, inout lo, inout hi);
+    if p2 != 0 {
+        return err(p2, 0, 0);
+    }
+    rs.clear();
+    let c2 = records(in ext, lo, hi, in strs, in section, 16, inout rs, inout rec, inout bad);
+    if c2 != 0 {
+        return err(c2, bad, 0);
+    }
+    let nr = rs.len();
+    out.push(nr);
+    for i in 0..nr {
+        let r = wd(in rs.as_slice(), i);
+        let kind = le32(in ext, wrapping_add(r, 12));
+        if kind > 12 {
+            return err(9, kind, 0);
+        }
+        let (sat, sn) = name_span(in strs, le32(in ext, wrapping_add(r, 8)));
+        // the access string's parts
+        let mut access: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let mut start = sat;
+        let end = wrapping_add(sat, sn);
+        let mut j = sat;
+        loop {
+            if j == end || byte(in strs, j) == 58 {
+                let (ok, v) = parse_u32(in strs, start, wrapping_sub(j, start));
+                if !ok {
+                    return err(10, start, wrapping_sub(j, start));
+                }
+                access.push(v);
+                if j == end {
+                    break;
+                }
+                start = wrapping_add(j, 1);
+            }
+            j = wrapping_add(j, 1);
+        }
+        let off = le32(in ext, r);
+        let s = slot_ok(off, inout bad);
+        if s != 0 {
+            return err(s, bad, 0);
+        }
+        let mut tree: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        let c = local_depth(
+            in tab,
+            in idx,
+            le32(in ext, wrapping_add(r, 4)),
+            0,
+            inout tree,
+            inout bad
+        );
+        if c != 0 {
+            return err(c, bad, 0);
+        }
+        out.push(off >> 3);
+        out.push(kind);
+        out.push(access.len());
+        out.extend(in access.as_slice());
+        out.push(tree.len());
+        out.extend(in tree.as_slice());
+    }
+    out
+}
+
+// `maps_from_btf`: [0, maps, (offset in .maps, name, kernel type, key
+// size, value size, max entries, flags)...] or [1, code, x]: 1 entry not
+// a VAR, 2 not a struct, 3 member not __uint(), 4 unsupported map type
+// (x), 5 unsupported member (name x), 6 map without type.
+pub fn maps_from_btf(in tab: Slice[u64], in idx: Slice[u64], in strs: Slice[u8]) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    out.push(0);
+    out.push(0);
+    let mut count: u64 = 0;
+    let maps_name: ChunkSeq[u8] = bytes_of(".maps");
+    let n_type: ChunkSeq[u8] = bytes_of("type");
+    let n_key: ChunkSeq[u8] = bytes_of("key_size");
+    let n_value: ChunkSeq[u8] = bytes_of("value_size");
+    let n_max: ChunkSeq[u8] = bytes_of("max_entries");
+    let n_flags: ChunkSeq[u8] = bytes_of("map_flags");
+    let n = idx.len();
+    for id in 0..n {
+        if tkind(in tab, in idx, id)
+            == 15
+            && name_eq(in strs, tf(in tab, in idx, id, 1), in maps_name.as_slice()) {
+            let nv = tf(in tab, in idx, id, 6);
+            for v in 0..nv {
+                let var = te(in tab, in idx, id, 3, v, 0);
+                let off = te(in tab, in idx, id, 3, v, 1);
+                if tkind(in tab, in idx, var) != 14 {
+                    return err(1, 0, 0);
+                }
+                let st = skip_mods(in tab, in idx, tf(in tab, in idx, var, 2));
+                let sk = tkind(in tab, in idx, st);
+                if sk != 4 && sk != 5 {
+                    return err(2, 0, 0);
+                }
+                let mut kind: u64 = 18446744073709551615;
+                let mut key: u64 = 0;
+                let mut value: u64 = 0;
+                let mut max: u64 = 0;
+                let mut flags: u64 = 0;
+                let nm = tf(in tab, in idx, st, 6);
+                for m in 0..nm {
+                    let mname = te(in tab, in idx, st, 4, m, 0);
+                    let mty = te(in tab, in idx, st, 4, m, 1);
+                    if tkind(in tab, in idx, mty) != 2 {
+                        return err(3, 0, 0);
+                    }
+                    let arr = tf(in tab, in idx, mty, 2);
+                    if tkind(in tab, in idx, arr) != 3 {
+                        return err(3, 0, 0);
+                    }
+                    let len = tf(in tab, in idx, arr, 4);
+                    if name_eq(in strs, mname, in n_type.as_slice()) {
+                        if !supported_map_type(len) {
+                            return err(4, len, 0);
+                        }
+                        kind = len;
+                    } else if name_eq(in strs, mname, in n_key.as_slice()) {
+                        key = len;
+                    } else if name_eq(in strs, mname, in n_value.as_slice()) {
+                        value = len;
+                    } else if name_eq(in strs, mname, in n_max.as_slice()) {
+                        max = len;
+                    } else if name_eq(in strs, mname, in n_flags.as_slice()) {
+                        flags = len;
+                    } else {
+                        return err(5, mname, 0);
+                    }
+                }
+                if kind == 18446744073709551615 {
+                    return err(6, 0, 0);
+                }
+                out.push(off);
+                out.push(tf(in tab, in idx, var, 1));
+                out.push(kind);
+                out.push(key);
+                out.push(value);
+                out.push(max);
+                out.push(flags);
+                count = wrapping_add(count, 1);
+            }
+        }
+    }
+    out.try_set(1, count);
+    out
+}
+
+fn bytes_of(in s: Str) -> ChunkSeq[u8] {
+    let mut m: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    m.extend(in s.as_bytes());
+    m
+}
+
+fn supported_map_type(t: u64) -> bool {
+    if t > 4294967295 {
+        return false;
+    }
+    match map_from_kernel_type(wrapping_u32(t)) {
+        Option::Some(k) => true,
+        Option::None => false,
+    }
+}

@@ -25,6 +25,10 @@ The [port wave P3a plan](port-p3/README.md) ports the next six crates
 (Pact, Loom audit, Bench, eBPF, Silicon, Aegis) and adds the `dyn Trait`
 and atomics compiler lanes that the later P3b ports need.
 
+The [port wave P3b plan](port-p3b/README.md) ports Warp, Prism H3, Chorus,
+Flux, Kinetic and Resonance, and adds compiler lanes for effectful and
+callable trait objects, boxes owned across loops, and opaque Bridge handles.
+
 Earlier assignments retained as dependencies:
 
 - [06-source-simulation](next-wave/06-source-simulation.md)
