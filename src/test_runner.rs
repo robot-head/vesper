@@ -267,10 +267,12 @@ fn syntax_attr_to_anvil(
                     other => FaultProfile::Custom(other.to_string()),
                 });
             }
-            let mut gate = BudgetGate::default();
-            gate.max_stack = t.max_stack;
-            gate.max_cycles = t.max_cycles;
-            gate.zero_alloc = t.zero_alloc.unwrap_or(false);
+            let gate = BudgetGate {
+                max_stack: t.max_stack,
+                max_cycles: t.max_cycles,
+                zero_alloc: t.zero_alloc.unwrap_or(false),
+                ..Default::default()
+            };
             if gate.max_stack.is_some() || gate.max_cycles.is_some() || gate.zero_alloc {
                 attr.budget = gate;
             }
@@ -334,9 +336,14 @@ fn attr_value_to_string(v: &AttrValue) -> String {
     }
 }
 
-fn eval_test_case_args(func: &Function, raw_cases: &[test_attrs::TestCaseAttr]) -> Vec<Vec<Value>> {
+/// The argument rows of a test's `@test_case(...)` pins, or a message naming
+/// the first pin that does not fit the function's parameters.
+fn eval_test_case_args(
+    func: &Function,
+    raw_cases: &[test_attrs::TestCaseAttr],
+) -> Result<Vec<Vec<Value>>, String> {
     let mut out = Vec::new();
-    for tc in raw_cases {
+    for (pin, tc) in raw_cases.iter().enumerate() {
         let mut row: Vec<Option<Value>> = vec![None; func.params.len()];
         let mut ok = true;
         for (idx, arg) in tc.args.iter().enumerate() {
@@ -388,11 +395,55 @@ fn eval_test_case_args(func: &Function, raw_cases: &[test_attrs::TestCaseAttr]) 
             };
             row[slot] = Some(parsed_val);
         }
-        if ok && row.iter().all(|v| v.is_some()) {
-            out.push(row.into_iter().map(|v| v.unwrap()).collect());
+        if !ok || row.iter().any(|v| v.is_none()) {
+            let names: Vec<&str> = func.params.iter().map(|p| p.name.as_str()).collect();
+            return Err(format!(
+                "invalid @test_case #{} for '{}': it must give one supported literal for each parameter ({}), by position or by name",
+                pin + 1,
+                func.name,
+                names.join(", ")
+            ));
         }
+        out.push(row.into_iter().map(|v| v.unwrap()).collect());
     }
-    out
+    Ok(out)
+}
+
+/// The function hash together with everything else that decides a verdict:
+/// the harness plan (mode, case count, gates, `expect_error`), the explicit
+/// `@test_case` rows and the fuel limit. A change to any of them is a new
+/// cache key, so an edited test never reuses an earlier verdict.
+/// The gates a budget-gated plan asks for, for its "not enforced" report.
+fn budget_gate_names(plan: &HarnessPlan) -> String {
+    let mut names = Vec::new();
+    let gate = &plan.budget;
+    if gate.max_stack.is_some() {
+        names.push("max_stack");
+    }
+    if gate.max_cycles.is_some() {
+        names.push("max_cycles");
+    }
+    if gate.zero_alloc {
+        names.push("zero_alloc");
+    }
+    if names.is_empty() {
+        "its budget".into()
+    } else {
+        names.join(", ")
+    }
+}
+
+fn test_fingerprint(fn_hash: &str, test: &DiscoveredTest, fuel: u64) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"vesper-anvil-test-fingerprint-v1\0");
+    hasher.update(fn_hash.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(format!("{:?}", test.plan).as_bytes());
+    hasher.update(b"\0");
+    hasher.update(format!("{:?}", test.raw_cases).as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&fuel.to_le_bytes());
+    hasher.finalize().to_hex().to_string()
 }
 
 fn discover_tests(source: &str, items: &[Item]) -> Result<Vec<DiscoveredTest>, String> {
@@ -620,6 +671,9 @@ struct FileUnitTests {
     source: String,
     report: UnitTestFileReport,
     selected: Vec<(String, Span)>,
+    /// Every test function of the file, whatever its mode or the filter:
+    /// mutation testing never mutates these.
+    test_names: BTreeSet<String>,
     parsed_items: Vec<Item>,
 }
 
@@ -667,6 +721,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         error: Some(error),
                     },
                     selected: vec![],
+                    test_names: BTreeSet::new(),
                     parsed_items: vec![],
                 });
                 continue;
@@ -686,12 +741,21 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         error: Some(error),
                     },
                     selected: vec![],
+                    test_names: BTreeSet::new(),
                     parsed_items: vec![],
                 });
                 continue;
             }
         };
         total_discovered += discovered.len();
+        // Negative tests are left out of the positive module whether or not
+        // the filter selects them: their bodies are meant not to check.
+        let expect_error_names: BTreeSet<String> = discovered
+            .iter()
+            .filter(|t| t.plan.primary_mode == TestMode::ExpectError)
+            .map(|t| t.name.clone())
+            .collect();
+        let all_test_names: BTreeSet<String> = discovered.iter().map(|t| t.name.clone()).collect();
         let selected_tests: Vec<DiscoveredTest> = discovered
             .into_iter()
             .filter(|t| {
@@ -704,12 +768,6 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
         if selected_tests.is_empty() {
             continue;
         }
-
-        let expect_error_names: BTreeSet<String> = selected_tests
-            .iter()
-            .filter(|t| t.plan.primary_mode == TestMode::ExpectError)
-            .map(|t| t.name.clone())
-            .collect();
 
         // Filter out ExpectError functions before checking the positive module
         // so intentional substructural failures never poison sibling tests.
@@ -739,6 +797,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         error: Some(error),
                     },
                     selected: vec![],
+                    test_names: BTreeSet::new(),
                     parsed_items: vec![],
                 });
                 continue;
@@ -756,7 +815,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                 .transitive_fn_blake3(&test.name)
                 .unwrap_or_default();
             let cache_key = VerdictKey {
-                fn_blake3: fn_hash.clone(),
+                fn_blake3: test_fingerprint(&fn_hash, test, opts.fuel),
                 sim_seed: test.plan.seed,
                 target_isa: host_target_isa(),
                 harness_version: vesper_test::HARNESS_VERSION,
@@ -784,10 +843,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         column,
                         passed,
                         result: None,
-                        message: format!(
-                            "cached: {}",
-                            record.message.as_deref().unwrap_or("ok")
-                        ),
+                        message: format!("cached: {}", record.message.as_deref().unwrap_or("ok")),
                         engine: TestEngine::Cache,
                         fallback_reason: None,
                         anvil_mode: Some(test.plan.primary_mode),
@@ -880,14 +936,42 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                     );
                 }
                 TestMode::Property => {
-                    let explicit = eval_test_case_args(&test.func, &test.raw_cases);
+                    let explicit = match eval_test_case_args(&test.func, &test.raw_cases) {
+                        Ok(rows) => rows,
+                        Err(message) => {
+                            all_passed = false;
+                            case_reports.insert(
+                                test.name.clone(),
+                                UnitTestCaseReport {
+                                    name: test.name.clone(),
+                                    line,
+                                    column,
+                                    passed: false,
+                                    result: None,
+                                    message,
+                                    engine: TestEngine::Crucible,
+                                    fallback_reason: None,
+                                    anvil_mode: Some(TestMode::Property),
+                                    cached: Some(false),
+                                    test_case_pin: None,
+                                    vchrono_capsule: None,
+                                },
+                            );
+                            continue;
+                        }
+                    };
                     let cases_n = if test.plan.property_cases > 0 {
                         test.plan.property_cases as usize
                     } else {
                         vesper_test::DEFAULT_PROPERTY_CASES as usize
                     };
-                    let outcome =
-                        run_property_test(&checked.world, &test.name, cases_n, &explicit, opts.fuel);
+                    let outcome = run_property_test(
+                        &checked.world,
+                        &test.name,
+                        cases_n,
+                        &explicit,
+                        opts.fuel,
+                    );
                     let passed = outcome.passed;
                     if !passed {
                         all_passed = false;
@@ -916,7 +1000,8 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                         if let Some(ce) = &outcome.counterexample {
                             let rendered: Vec<String> =
                                 ce.iter().map(format_value_literal).collect();
-                            message = format!("{message}; counterexample=({})", rendered.join(", "));
+                            message =
+                                format!("{message}; counterexample=({})", rendered.join(", "));
                         }
                     }
                     if let Some(cache) = &verdict_cache
@@ -1037,6 +1122,17 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
             for mut rep in unit_cases {
                 if let Some(plan) = unit_plans.get(&rep.name) {
                     rep.anvil_mode = Some(plan.primary_mode);
+                    // The harness cannot measure stack, cycles or allocations
+                    // yet, so a gated test is never reported as passing on the
+                    // strength of its ordinary unit run.
+                    if plan.primary_mode == TestMode::BudgetGate && rep.passed {
+                        rep.passed = false;
+                        all_passed = false;
+                        rep.message = format!(
+                            "budget gate not enforced: this harness cannot yet check {} (the unit run passed)",
+                            budget_gate_names(plan)
+                        );
+                    }
                 }
                 case_reports.insert(rep.name.clone(), rep);
             }
@@ -1069,6 +1165,7 @@ fn run_unit_suite(opts: &Options) -> Result<(bool, Vec<FileUnitTests>), String> 
                 error: None,
             },
             selected: unit_selected_pairs,
+            test_names: all_test_names,
             parsed_items: parsed.module.items,
         });
     }
@@ -1306,8 +1403,15 @@ fn collect_mutants_in_fn(
 }
 
 fn collect_file_mutants(unit: &FileUnitTests) -> Vec<MutantCandidate> {
+    // Mutants are replayed against the file's unit and budget-gate tests
+    // only (`unit.selected`). A file with none of those would report every
+    // well-typed mutant as surviving without running a test, so it gets no
+    // mutants; property and SimPulse replay is not implemented yet.
+    if unit.selected.is_empty() {
+        return Vec::new();
+    }
     let test_names: std::collections::BTreeSet<&str> =
-        unit.selected.iter().map(|(n, _)| n.as_str()).collect();
+        unit.test_names.iter().map(String::as_str).collect();
     let (tokens, _) = lexer::lex(&unit.source);
     let mut candidates = Vec::new();
     for item in &unit.parsed_items {
@@ -1375,7 +1479,7 @@ fn run_mutation_gate(opts: &Options) -> Result<(), String> {
     let total_candidates = all_candidates.len();
     if total_candidates == 0 {
         return Err(format!(
-            "no mutation sites found outside test functions in {}",
+            "no mutation sites found outside test functions in {} (mutants are replayed against unit and budget-gate tests only)",
             opts.path
         ));
     }

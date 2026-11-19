@@ -150,9 +150,7 @@ struct AttrStream<'a> {
 
 impl<'a> AttrStream<'a> {
     fn kind(&self) -> K {
-        self.tokens
-            .get(self.pos)
-            .map_or(K::Eof, |t| t.kind)
+        self.tokens.get(self.pos).map_or(K::Eof, |t| t.kind)
     }
 
     fn nth_kind(&self, offset: usize) -> K {
@@ -350,7 +348,10 @@ impl<'a> AttrStream<'a> {
                 if let Some(s) = value.as_str() {
                     attr.expect_error = Some(s.to_owned());
                 } else {
-                    self.error("expect_error requires an error code identifier or string", span);
+                    self.error(
+                        "expect_error requires an error code identifier or string",
+                        span,
+                    );
                 }
             }
             "primary" => {
@@ -413,7 +414,10 @@ impl<'a> AttrStream<'a> {
                 if let Some(b) = value.as_bool() {
                     attr.zero_alloc = Some(b);
                 } else {
-                    self.error("zero_alloc requires a boolean literal (true or false)", span);
+                    self.error(
+                        "zero_alloc requires a boolean literal (true or false)",
+                        span,
+                    );
                 }
             }
             _ => {
@@ -428,7 +432,10 @@ impl<'a> AttrStream<'a> {
         let mut span = at_tok.span.start..kw_tok.span.end;
         let mut args = Vec::new();
         if self.kind() != K::LParen {
-            self.error("@test_case requires an argument list in parentheses", span.clone());
+            self.error(
+                "@test_case requires an argument list in parentheses",
+                span.clone(),
+            );
             return TestCaseAttr { args, span };
         }
         self.bump(); // `(`
@@ -492,9 +499,7 @@ impl<'a> AttrStream<'a> {
         }
 
         let slice = &self.tokens[start_pos..self.pos];
-        let end_byte = slice
-            .last()
-            .map_or(start_byte, |t| t.span.end);
+        let end_byte = slice.last().map_or(start_byte, |t| t.span.end);
         let span = start_byte..end_byte;
         let value = match slice {
             [tok] if tok.kind == K::String => {

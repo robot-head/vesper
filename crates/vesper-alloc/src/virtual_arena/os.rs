@@ -342,9 +342,7 @@ mod imp {
 
 #[cfg(all(windows, not(miri)))]
 mod imp {
-    use super::{
-        HugePageStatus, Reserved, VIRTUAL_PAGE, VirtualArenaError, VirtualBackingKind,
-    };
+    use super::{HugePageStatus, Reserved, VIRTUAL_PAGE, VirtualArenaError, VirtualBackingKind};
     use std::ffi::c_void;
     use std::ptr::NonNull;
 
@@ -385,8 +383,14 @@ mod imp {
             len
         };
         // SAFETY: reserves fresh address space at a system-chosen address.
-        let p =
-            unsafe { VirtualAlloc(std::ptr::null_mut(), mapping_len, MEM_RESERVE, PAGE_NOACCESS) };
+        let p = unsafe {
+            VirtualAlloc(
+                std::ptr::null_mut(),
+                mapping_len,
+                MEM_RESERVE,
+                PAGE_NOACCESS,
+            )
+        };
         let p = NonNull::new(p.cast()).ok_or(VirtualArenaError::ReserveFailed)?;
         if guard_page {
             // SAFETY: `[len, len + VIRTUAL_PAGE)` is the trailing guard page

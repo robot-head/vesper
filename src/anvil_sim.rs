@@ -13,9 +13,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use vesper_chrono::{
-    Bundle, BundleKey, FlightRecorder, RecorderConfig, RedactionPolicy,
-};
+use vesper_chrono::{Bundle, BundleKey, FlightRecorder, RecorderConfig, RedactionPolicy};
 use vesper_crucible::{
     Arbitrary, ChoiceTape, ExploreConfig, Footprint, Invalid, PropError, ShrinkConfig, SimFiber,
     SimStep, Source, SplitMix64, StepCx, explore_dpor, format_schedule, shrink,
@@ -229,6 +227,7 @@ pub fn run_property_test(
     // 2. Drive Crucible ChoiceTape generation over `cases` iterations.
     let mut rng = SplitMix64(seed);
     let mut generated_run = 0usize;
+    let mut discarded = 0usize;
     for _ in 0..cases {
         let case_seed = rng.next_u64();
         let mut src = Source::random(case_seed);
@@ -246,12 +245,14 @@ pub fn run_property_test(
         if !draw_ok {
             continue;
         }
+        let result = eval_property_case(&runtime, fn_name, args.clone(), fuel);
+        if matches!(&result, Err(msg) if msg.contains("fuel")) {
+            // A fuel-exhausted input is discarded, not counted as a case.
+            discarded += 1;
+            continue;
+        }
         generated_run += 1;
-        if let Err(initial_msg) = eval_property_case(&runtime, fn_name, args.clone(), fuel) {
-            if initial_msg.contains("fuel") {
-                // Skip fuel-exhausted generated inputs as invalid runs.
-                continue;
-            }
+        if let Err(initial_msg) = result {
             let failing_tape: ChoiceTape = src.realized();
 
             // 3. Shrink the failing ChoiceTape via Crucible's shortlex reducer.
@@ -302,6 +303,23 @@ pub fn run_property_test(
         }
     }
 
+    // Every generated input that does not exhaust the fuel is a passing
+    // case. If none completed, the property was never checked: that is a
+    // failure, not a pass that could be cached.
+    if cases > 0 && generated_run == 0 && discarded > 0 {
+        return PropertyOutcome {
+            passed: false,
+            cases_run: explicit_run,
+            explicit_cases_run: explicit_run,
+            failure_message: Some(format!(
+                "property '{fn_name}' was never checked: all {discarded} generated input(s) exhausted the fuel limit"
+            )),
+            counterexample: None,
+            test_case_pin: None,
+            failing_tape: None,
+            seed,
+        };
+    }
     PropertyOutcome {
         passed: true,
         cases_run: explicit_run + generated_run,
@@ -383,8 +401,14 @@ struct SimWorld<'a> {
 }
 
 enum AnvilSimFiber {
-    Workload { phase: u8, obj: u64 },
-    FaultInjector { injected: bool, profile: FaultProfile },
+    Workload {
+        phase: u8,
+        obj: u64,
+    },
+    FaultInjector {
+        injected: bool,
+        profile: FaultProfile,
+    },
 }
 
 impl<'a> SimFiber<SimWorld<'a>> for AnvilSimFiber {
@@ -416,7 +440,8 @@ impl<'a> SimFiber<SimWorld<'a>> for AnvilSimFiber {
                 let mut rt = Runtime::new(world.checked);
                 rt.fuel = DEFAULT_SIM_FUEL;
                 let func = &world.checked.functions[world.fn_name];
-                let args = build_sim_args(func, world.seed, world.fault_injected, world.clock_skew_ns);
+                let args =
+                    build_sim_args(func, world.seed, world.fault_injected, world.clock_skew_ns);
                 world.steps.push(format!(
                     "t={}ns fiber={} call {}(fault={:?}, injected={})",
                     cx.now_ns(),
@@ -835,7 +860,11 @@ fn prop_comm(a: i64, b: i64) -> bool {
 "#,
         );
         let outcome = run_property_test(&world, "prop_comm", 64, &[], 50_000);
-        assert!(outcome.passed, "unexpected failure: {:?}", outcome.failure_message);
+        assert!(
+            outcome.passed,
+            "unexpected failure: {:?}",
+            outcome.failure_message
+        );
         assert_eq!(outcome.cases_run, 64);
         assert!(outcome.counterexample.is_none());
     }
@@ -880,7 +909,11 @@ fn sim_ok(injected: bool) -> bool {
 }
 "#;
         let ok = run_simpulse_test(passing_src, "sim_ok", 4, "TornWalSector", 42);
-        assert!(ok.passed, "unexpected sim failure: {:?}", ok.failure_message);
+        assert!(
+            ok.passed,
+            "unexpected sim failure: {:?}",
+            ok.failure_message
+        );
         assert_eq!(ok.schedules_run, 4);
         assert!(ok.dpor_executions >= 4);
 
@@ -896,15 +929,18 @@ fn sim_breaks_on_fault(injected: bool) -> bool {
 
         let unknown = run_simpulse_test(passing_src, "sim_ok", 1, "BogusProfile", 1);
         assert!(!unknown.passed);
-        assert!(unknown.failure_message.unwrap().contains("unknown SimPulse fault profile"));
+        assert!(
+            unknown
+                .failure_message
+                .unwrap()
+                .contains("unknown SimPulse fault profile")
+        );
     }
 
     #[test]
     fn vchrono_capsule_writes_and_opens_with_replay_session() {
-        let tmp = std::env::temp_dir().join(format!(
-            "vesper_anvil_capsule_test_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("vesper_anvil_capsule_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&tmp);
 
         let choices = vec![10u64, 0, 42];

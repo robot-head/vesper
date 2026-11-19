@@ -159,10 +159,7 @@ pub fn verify_expect_error(
         .collect();
 
     if code_matches.is_empty() {
-        let observed_codes = diagnostics
-            .iter()
-            .filter_map(|d| d.code.clone())
-            .collect();
+        let observed_codes = diagnostics.iter().filter_map(|d| d.code.clone()).collect();
         return ExpectErrorOutcome::CodeMismatch {
             expected: spec.code.clone(),
             observed_codes,

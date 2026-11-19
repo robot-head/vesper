@@ -29,11 +29,7 @@ pub struct VerdictKey {
 
 impl VerdictKey {
     /// Construct a new [`VerdictKey`] using [`HARNESS_VERSION`].
-    pub fn new(
-        fn_blake3: impl Into<String>,
-        sim_seed: u64,
-        target_isa: impl Into<String>,
-    ) -> Self {
+    pub fn new(fn_blake3: impl Into<String>, sim_seed: u64, target_isa: impl Into<String>) -> Self {
         Self {
             fn_blake3: fn_blake3.into(),
             sim_seed,

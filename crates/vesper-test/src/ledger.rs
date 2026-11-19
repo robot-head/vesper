@@ -261,10 +261,8 @@ impl ObligationLedger {
                 });
             }
         }
-        for ((_, before_count), (kind, after_count)) in before
-            .custom_counts
-            .iter()
-            .zip(after.custom_counts.iter())
+        for ((_, before_count), (kind, after_count)) in
+            before.custom_counts.iter().zip(after.custom_counts.iter())
         {
             let leaked = after_count.saturating_sub(*before_count);
             if leaked > 0 {
@@ -321,10 +319,7 @@ mod tests {
             // Dropped without calling `.shred()`.
         });
         assert!(report.has_leaks());
-        assert_eq!(
-            report.leaks_for(&LedgerObligationKind::VaultSecretSlot),
-            1
-        );
+        assert_eq!(report.leaks_for(&LedgerObligationKind::VaultSecretSlot), 1);
         assert!(report.to_string().contains("vault::SecretSlot=1"));
     }
 

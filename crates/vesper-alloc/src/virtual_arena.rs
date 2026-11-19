@@ -1023,4 +1023,3 @@ mod tests {
         assert!(arena.bytes(&h2).unwrap().iter().all(|&b| b == 0));
     }
 }
-

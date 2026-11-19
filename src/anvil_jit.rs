@@ -42,6 +42,9 @@ use std::{
     },
 };
 
+/// The error a run reports when checked integer arithmetic fails.
+const ARITH_FAILURE: &str = "anvil jit arithmetic failure: Fail[ArithOverflow]";
+
 /// Default per-run fuel cap injected at loop headers and function entries so
 /// mutants that introduce infinite loops or runaway recursion terminate
 /// cleanly with an error instead of hanging the test runner.
@@ -184,6 +187,10 @@ struct MutableSlot {
 struct FuelState {
     remaining: AtomicU64,
     exhausted: AtomicBool,
+    /// Set when checked integer arithmetic fails (overflow, division by
+    /// zero): the evaluator and native code raise `Fail[ArithOverflow]`
+    /// there, so the run reports a failure instead of a wrapped value.
+    arith_failed: AtomicBool,
 }
 
 /// One shared Cranelift `JITModule` holding all reachable baseline functions
@@ -252,11 +259,9 @@ impl HotSwapJitSession {
                     .functions
                     .insert(fn_name.clone(), variant.mutated_fn.clone());
                 let mut_program = crate::ir::lower_world(&mut_world);
-                let ir = mut_program
-                    .functions
-                    .get(fn_name)
-                    .cloned()
-                    .ok_or_else(|| format!("failed to lower mutant {fn_name}$mut_{}", variant.mutant_id))?;
+                let ir = mut_program.functions.get(fn_name).cloned().ok_or_else(|| {
+                    format!("failed to lower mutant {fn_name}$mut_{}", variant.mutant_id)
+                })?;
                 validate_function_ir(world, &ir)?;
                 mutant_irs.insert((fn_name.clone(), variant.mutant_id), ir);
             }
@@ -278,6 +283,7 @@ impl HotSwapJitSession {
         let fuel_state = Box::new(FuelState {
             remaining: AtomicU64::new(DEFAULT_JIT_FUEL),
             exhausted: AtomicBool::new(false),
+            arith_failed: AtomicBool::new(false),
         });
 
         // Create the single shared Cranelift JITModule.
@@ -332,6 +338,7 @@ impl HotSwapJitSession {
             table_base_addr: dispatch_table.as_ptr() as usize,
             fuel_remaining_addr: (&fuel_state.remaining as *const AtomicU64) as usize,
             fuel_exhausted_addr: (&fuel_state.exhausted as *const AtomicBool) as usize,
+            arith_failed_addr: (&fuel_state.arith_failed as *const AtomicBool) as usize,
         };
 
         // Define all baseline functions.
@@ -364,9 +371,8 @@ impl HotSwapJitSession {
             if let Some(variants) = grouped_mutants.get(fn_name) {
                 for variant in variants {
                     let mid = variant.mutant_id;
-                    let mptr =
-                        jit_module.get_finalized_function(mut_ids[&(fn_name.clone(), mid)])
-                            as *mut u8;
+                    let mptr = jit_module.get_finalized_function(mut_ids[&(fn_name.clone(), mid)])
+                        as *mut u8;
                     mutants_map.insert(mid, mptr);
                 }
             }
@@ -445,6 +451,7 @@ impl HotSwapJitSession {
             .remaining
             .store(self.fuel_per_run, Ordering::Release);
         self.fuel_state.exhausted.store(false, Ordering::Release);
+        self.fuel_state.arith_failed.store(false, Ordering::Release);
 
         // SAFETY: `compile` verified that every entry takes 0 arguments, uses
         // the host C calling convention, and returns the exact scalar ABI type
@@ -463,6 +470,9 @@ impl HotSwapJitSession {
                 kind => {
                     let call: unsafe extern "C" fn() -> i64 = std::mem::transmute(entry.code);
                     let raw = call();
+                    if self.fuel_state.arith_failed.load(Ordering::Acquire) {
+                        return Err(ARITH_FAILURE.into());
+                    }
                     if self.fuel_state.exhausted.load(Ordering::Acquire) {
                         return Err("anvil jit fuel exhausted".into());
                     }
@@ -471,6 +481,9 @@ impl HotSwapJitSession {
             }
         };
 
+        if self.fuel_state.arith_failed.load(Ordering::Acquire) {
+            return Err(ARITH_FAILURE.into());
+        }
         if self.fuel_state.exhausted.load(Ordering::Acquire) {
             return Err("anvil jit fuel exhausted".into());
         }
@@ -574,7 +587,9 @@ fn collect_reachable(
             .get(&name)
             .ok_or_else(|| format!("unknown function '{name}'"))?;
         if f.body.is_none() {
-            return Err(format!("anvil jit rejects extern/bodyless function '{name}'"));
+            return Err(format!(
+                "anvil jit rejects extern/bodyless function '{name}'"
+            ));
         }
         if !f.generics.is_empty() {
             return Err(format!("anvil jit requires monomorphic function '{name}'"));
@@ -676,6 +691,7 @@ struct LowerEnv<'a> {
     table_base_addr: usize,
     fuel_remaining_addr: usize,
     fuel_exhausted_addr: usize,
+    arith_failed_addr: usize,
 }
 
 fn define_ir_function(
@@ -738,6 +754,8 @@ fn define_ir_function(
 
     // Emit a shared early-exit block for fuel exhaustion.
     let exhausted_block = b.create_block();
+    // And one for checked integer arithmetic that fails.
+    let arith_block = b.create_block();
 
     for (block_idx, block) in ir_fn.blocks.iter().enumerate() {
         b.switch_to_block(clif_blocks[block_idx]);
@@ -813,13 +831,17 @@ fn define_ir_function(
                 Op::Write { place, op, value } => {
                     let rhs = load_val(&mut b, &value_vars, *value)?;
                     let (var, kind) = *local_vars.get(place).ok_or_else(|| {
-                        format!("anvil jit unknown write place '{place}' in '{}'", ir_fn.name)
+                        format!(
+                            "anvil jit unknown write place '{place}' in '{}'",
+                            ir_fn.name
+                        )
                     })?;
                     let new_val = match op.as_str() {
                         "=" => rhs,
                         "+=" | "-=" | "*=" | "/=" | "%=" => {
                             let cur = b.use_var(var);
                             let bin_op = &op[..1];
+                            emit_arith_guard(&mut b, bin_op, cur, rhs, kind, arith_block);
                             emit_binary(&mut b, bin_op, cur, rhs, kind)?
                         }
                         other => return Err(format!("anvil jit unsupported assign op '{other}'")),
@@ -838,6 +860,8 @@ fn define_ir_function(
                             if op_kind.is_float() {
                                 b.ins().fneg(v)
                             } else {
+                                let zero = b.ins().iconst(types::I64, 0);
+                                emit_arith_guard(&mut b, "-", zero, v, op_kind, arith_block);
                                 b.ins().ineg(v)
                             }
                         }
@@ -852,10 +876,8 @@ fn define_ir_function(
                 Op::Binary(op, lhs_id, rhs_id) => {
                     let lhs = load_val(&mut b, &value_vars, *lhs_id)?;
                     let rhs = load_val(&mut b, &value_vars, *rhs_id)?;
-                    let op_kind = value_vars
-                        .get(lhs_id)
-                        .map(|(_, k)| *k)
-                        .unwrap_or(dest_kind);
+                    let op_kind = value_vars.get(lhs_id).map(|(_, k)| *k).unwrap_or(dest_kind);
+                    emit_arith_guard(&mut b, op, lhs, rhs, op_kind, arith_block);
                     emit_binary(&mut b, op, lhs, rhs, op_kind)?
                 }
                 Op::Call { callee, args, .. } => {
@@ -865,8 +887,8 @@ fn define_ir_function(
                     }
                     let call_inst = if let Some(&slot_idx) = env.slot_indices.get(callee) {
                         // Indirect call through the module's atomic dispatch table!
-                        let slot_addr = env.table_base_addr
-                            + slot_idx * std::mem::size_of::<AtomicPtr<u8>>();
+                        let slot_addr =
+                            env.table_base_addr + slot_idx * std::mem::size_of::<AtomicPtr<u8>>();
                         let addr_val = b.ins().iconst(ptr_ty, slot_addr as i64);
                         let fn_ptr = b.ins().load(ptr_ty, MemFlags::trusted(), addr_val, 0);
                         let sig_ref = b.import_signature(env.sigs[callee].clone());
@@ -890,10 +912,7 @@ fn define_ir_function(
                     continue;
                 }
                 _ => {
-                    return Err(format!(
-                        "anvil jit unsupported IR op in '{}'",
-                        ir_fn.name
-                    ));
+                    return Err(format!("anvil jit unsupported IR op in '{}'", ir_fn.name));
                 }
             };
 
@@ -912,7 +931,10 @@ fn define_ir_function(
                     let val = load_val(&mut b, &value_vars, *vid)?;
                     b.ins().return_(&[val]);
                 }
-                Terminator::Jump { block: target, args } => {
+                Terminator::Jump {
+                    block: target,
+                    args,
+                } => {
                     let mut jump_args = Vec::with_capacity(args.len());
                     for &arg in args {
                         jump_args.push(ir::BlockArg::Value(load_val(&mut b, &value_vars, arg)?));
@@ -939,6 +961,14 @@ fn define_ir_function(
     // Define the shared fuel-exhausted exit block.
     b.switch_to_block(exhausted_block);
     let flag_addr = b.ins().iconst(ptr_ty, env.fuel_exhausted_addr as i64);
+    let one_byte = b.ins().iconst(types::I8, 1);
+    b.ins().store(MemFlags::trusted(), one_byte, flag_addr, 0);
+    let zero = default_zero(&mut b, ret_kind);
+    b.ins().return_(&[zero]);
+
+    // Define the shared checked-arithmetic failure exit block.
+    b.switch_to_block(arith_block);
+    let flag_addr = b.ins().iconst(ptr_ty, env.arith_failed_addr as i64);
     let one_byte = b.ins().iconst(types::I8, 1);
     b.ins().store(MemFlags::trusted(), one_byte, flag_addr, 0);
     let zero = default_zero(&mut b, ret_kind);
@@ -1006,6 +1036,98 @@ fn emit_literal(
         },
         Literal::String(_) => Err("anvil jit string literal unsupported".into()),
     }
+}
+
+/// Branches to `fail_block` when the checked integer operation `lhs op rhs`
+/// fails under Vesper's semantics (the checks of
+/// `native::checked_arithmetic`, plus a zero divisor), so the hot-swap JIT
+/// reports a failure where the evaluator and native code raise
+/// `Fail[ArithOverflow]`, instead of returning a wrapped value. Integers
+/// live sign- or zero-extended in 64 bits, so a narrow result is in range
+/// iff re-extending it from the kind's width leaves it unchanged.
+fn emit_arith_guard(
+    b: &mut FunctionBuilder<'_>,
+    op: &str,
+    lhs: ir::Value,
+    rhs: ir::Value,
+    kind: ScalarKind,
+    fail_block: ClifBlock,
+) {
+    let (signed, bits) = match kind {
+        ScalarKind::Signed(bits) => (true, bits),
+        ScalarKind::Unsigned(bits) => (false, bits),
+        _ => return,
+    };
+    let failed = match op {
+        "+" | "-" | "*" if bits < 64 => {
+            let r = match op {
+                "+" => b.ins().iadd(lhs, rhs),
+                "-" => b.ins().isub(lhs, rhs),
+                _ => b.ins().imul(lhs, rhs),
+            };
+            if signed {
+                let up = i64::from(64 - bits);
+                let high = b.ins().ishl_imm(r, up);
+                let canonical = b.ins().sshr_imm(high, up);
+                b.ins().icmp(IntCC::NotEqual, canonical, r)
+            } else {
+                let mask = (1u64 << bits) - 1;
+                b.ins().icmp_imm(IntCC::UnsignedGreaterThan, r, mask as i64)
+            }
+        }
+        "+" if !signed => {
+            let r = b.ins().iadd(lhs, rhs);
+            b.ins().icmp(IntCC::UnsignedLessThan, r, lhs)
+        }
+        "-" if !signed => b.ins().icmp(IntCC::UnsignedLessThan, lhs, rhs),
+        "*" if !signed => {
+            let high = b.ins().umulhi(lhs, rhs);
+            b.ins().icmp_imm(IntCC::NotEqual, high, 0)
+        }
+        "+" | "-" => {
+            let r = if op == "+" {
+                b.ins().iadd(lhs, rhs)
+            } else {
+                b.ins().isub(lhs, rhs)
+            };
+            let x = b.ins().bxor(lhs, r);
+            let y = if op == "+" {
+                b.ins().bxor(rhs, r)
+            } else {
+                b.ins().bxor(lhs, rhs)
+            };
+            let both = b.ins().band(x, y);
+            b.ins().icmp_imm(IntCC::SignedLessThan, both, 0)
+        }
+        "*" => {
+            let r = b.ins().imul(lhs, rhs);
+            let high = b.ins().smulhi(lhs, rhs);
+            let sign = b.ins().sshr_imm(r, 63);
+            b.ins().icmp(IntCC::NotEqual, high, sign)
+        }
+        "/" | "%" => {
+            let zero = b.ins().icmp_imm(IntCC::Equal, rhs, 0);
+            if signed && op == "/" {
+                // `MIN / -1` overflows (Cranelift's `srem` defines
+                // `MIN % -1` as 0, as native code does).
+                let min = if bits < 64 {
+                    -(1i64 << (bits - 1))
+                } else {
+                    i64::MIN
+                };
+                let is_min = b.ins().icmp_imm(IntCC::Equal, lhs, min);
+                let minus_one = b.ins().icmp_imm(IntCC::Equal, rhs, -1);
+                let both = b.ins().band(is_min, minus_one);
+                b.ins().bor(zero, both)
+            } else {
+                zero
+            }
+        }
+        _ => return,
+    };
+    let cont = b.create_block();
+    b.ins().brif(failed, fail_block, &[], cont, &[]);
+    b.switch_to_block(cont);
 }
 
 fn emit_binary(
@@ -1570,7 +1692,13 @@ fn apply_site(root: &mut Expr, path: &[PathStep], patch: &Patch) -> bool {
             (PathStep::BlockTail, ExprKind::Block { tail: Some(t), .. }) => t,
             (PathStep::IfCond, ExprKind::If { condition, .. }) => condition,
             (PathStep::IfThen, ExprKind::If { then, .. }) => then,
-            (PathStep::IfElse, ExprKind::If { otherwise: Some(el), .. }) => el,
+            (
+                PathStep::IfElse,
+                ExprKind::If {
+                    otherwise: Some(el),
+                    ..
+                },
+            ) => el,
             (PathStep::BinaryLhs, ExprKind::Binary(_, lhs, _)) => lhs,
             (PathStep::BinaryRhs, ExprKind::Binary(_, _, rhs)) => rhs,
             (PathStep::UnaryInner, ExprKind::Unary(_, inner)) => inner,
@@ -1631,13 +1759,11 @@ fn apply_site(root: &mut Expr, path: &[PathStep], patch: &Patch) -> bool {
                 false
             }
         }
-        (Patch::SwapCallArgs(i, j), ExprKind::Call { args, .. }) => {
-            if *i < args.len() && *j < args.len() {
-                args.swap(*i, *j);
-                true
-            } else {
-                false
-            }
+        (Patch::SwapCallArgs(i, j), ExprKind::Call { args, .. })
+            if *i < args.len() && *j < args.len() =>
+        {
+            args.swap(*i, *j);
+            true
         }
         _ => false,
     }

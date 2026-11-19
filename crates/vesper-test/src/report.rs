@@ -219,7 +219,9 @@ mod tests {
         assert!(human.contains("vault::SecretSlot=1"));
         assert!(human.contains("vesper replay target/anvil/test_vault_leak.vchrono"));
         assert!(human.contains("summary: 1 passed, 1 failed, 0 unsupported (1 cached)"));
-        assert!(human.contains("mutation: 1 killed, 0 survived, 0 timeout, 0 ill-typed (score 100.0%)"));
+        assert!(
+            human.contains("mutation: 1 killed, 0 survived, 0 timeout, 0 ill-typed (score 100.0%)")
+        );
     }
 
     #[test]

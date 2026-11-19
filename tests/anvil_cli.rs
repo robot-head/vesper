@@ -147,7 +147,9 @@ fn prop_must_be_small(x: i64) -> bool {
     assert_eq!(test["name"], "prop_must_be_small");
     assert_eq!(test["engine"], "crucible");
     assert_eq!(test["test_case_pin"], "@test_case(10)");
-    let capsule = test["vchrono_capsule"].as_str().expect("vchrono capsule path");
+    let capsule = test["vchrono_capsule"]
+        .as_str()
+        .expect("vchrono capsule path");
     assert!(
         temp.0.join(capsule).exists(),
         "expected capsule file at {}",

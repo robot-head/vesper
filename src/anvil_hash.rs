@@ -218,8 +218,7 @@ impl VerdictCache {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, String> {
         let store = Store::open(root.as_ref()).map_err(|e| e.to_string())?;
         let verdicts_dir = store.root().join("test_verdicts");
-        fs::create_dir_all(&verdicts_dir)
-            .map_err(|e| format!("create test_verdicts dir: {e}"))?;
+        fs::create_dir_all(&verdicts_dir).map_err(|e| format!("create test_verdicts dir: {e}"))?;
         Ok(Self {
             store,
             verdicts_dir,

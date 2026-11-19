@@ -127,6 +127,14 @@ pub fn w_const() -> u8 {
     26
 }
 
+pub fn w_test() -> u8 {
+    27
+}
+
+pub fn w_test_case() -> u8 {
+    28
+}
+
 pub fn w_TiledSeq() -> u8 {
     50
 }
@@ -309,6 +317,9 @@ pub fn lower_word(in b: Slice[u8], s: u64, n: u64) -> u8 {
         if is(in b, s, in "bool".as_bytes()) {
             return 42;
         }
+        if is(in b, s, in "test".as_bytes()) {
+            return 27;
+        }
         0
     } else if n == 5 {
         if is(in b, s, in "model".as_bytes()) {
@@ -355,6 +366,11 @@ pub fn lower_word(in b: Slice[u8], s: u64, n: u64) -> u8 {
     } else if n == 8 {
         if is(in b, s, in "continue".as_bytes()) {
             return 20;
+        }
+        0
+    } else if n == 9 {
+        if is(in b, s, in "test_case".as_bytes()) {
+            return 28;
         }
         0
     } else if n == 13 {

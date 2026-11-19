@@ -118,8 +118,7 @@ pub fn classify(sig: &TestSignature) -> HarnessPlan {
         has_simpulse_effect || sig.attr.sim_schedules.is_some() || sig.attr.fault_profile.is_some();
 
     let has_value_params = sig.value_params().next().is_some();
-    let has_property_params =
-        has_value_params || sig.attr.cases.is_some() || !sig.cases.is_empty();
+    let has_property_params = has_value_params || sig.attr.cases.is_some() || !sig.cases.is_empty();
 
     let uses_nondeterministic_ffi = sig.attr.nondeterministic_ffi
         || NONDETERMINISTIC_FFI_EFFECTS

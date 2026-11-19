@@ -514,9 +514,8 @@ impl World {
         }
 
         let mut seen = BTreeSet::new();
-        diagnostics.retain(|d| {
-            seen.insert((d.code.clone(), d.span.start, d.span.end, d.message.clone()))
-        });
+        diagnostics
+            .retain(|d| seen.insert((d.code.clone(), d.span.start, d.span.end, d.message.clone())));
         diagnostics
     }
 
@@ -5676,11 +5675,15 @@ fn ok_tx() -> i64 {
         let d_e0301 = t1.elapsed();
 
         assert!(
-            e0302_diags.iter().any(|d| d.code == "E0302" && !d.related.is_empty()),
+            e0302_diags
+                .iter()
+                .any(|d| d.code == "E0302" && !d.related.is_empty()),
             "expected E0302 with related span, got: {e0302_diags:?}"
         );
         assert!(
-            e0301_diags.iter().any(|d| d.code == "E0301" && !d.related.is_empty()),
+            e0301_diags
+                .iter()
+                .any(|d| d.code == "E0301" && !d.related.is_empty()),
             "expected E0301 with related span, got: {e0301_diags:?}"
         );
         assert!(
@@ -5702,4 +5705,3 @@ fn ok_tx() -> i64 {
         );
     }
 }
-

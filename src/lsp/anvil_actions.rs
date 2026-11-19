@@ -115,7 +115,8 @@ mod tests {
     #[test]
     fn emits_pin_counterexample_edit_preserving_indentation() {
         let uri = "file:///workspace/prop.ves";
-        let src = "    @test(cases = 100)\n    fn prop_small(x: u64) -> bool {\n        x < 10\n    }\n";
+        let src =
+            "    @test(cases = 100)\n    fn prop_small(x: u64) -> bool {\n        x < 10\n    }\n";
         let actions = anvil_code_actions(uri, src, "prop_small", 0, Some("10"));
         assert_eq!(actions.len(), 2);
 
