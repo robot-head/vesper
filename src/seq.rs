@@ -42,6 +42,12 @@
 //! like a `TiledSeq` bounds fault: the evaluator and the JIT report an error
 //! and an executable exits with [`FAULT_STATUS`].
 //!
+//! The bulk operations `resize`, ranged `fill` (`try_fill`),
+//! `extend_from_within` (`try_extend_from_within`) and `extend_reversed`
+//! (P3b gaps lane 11, #1096) grow a sequence at most once and check their
+//! interval once ([`SeqOp::Resize`], [`SeqOp::FillRange`],
+//! [`SeqOp::ExtendFromWithin`], [`SeqOp::ExtendReversed`]).
+//!
 //! Allocation is not yet tracked by an `Alloc` effect: neither `Box` nor
 //! `TiledSeq` requests one today, and no runnable entry can discharge it.
 use crate::{ast::*, check::World};
@@ -170,6 +176,25 @@ pub enum SeqOp {
     /// raises `IndexOutOfBounds` and the total one yields `false` when
     /// `lo <= hi <= len` fails; neither writes anything then.
     MakeAsciiLowercase { total: bool },
+    /// `s.resize(n, v)` on a `ChunkSeq[T]` of a copy `T`: shortens the
+    /// sequence to `n` elements, or appends copies of `v` until it holds
+    /// `n`, with one growth. Total (growth faults as `push` does).
+    Resize,
+    /// `s.fill(lo, hi, v)` (`try_fill` when `total`) on a sequence or slice
+    /// of a copy element type: every element of `s[lo..hi]` becomes `v`,
+    /// with one bounds check. The checked form raises `IndexOutOfBounds` and
+    /// the total one yields `false` when `lo <= hi <= len` fails; neither
+    /// writes anything then. The one-operand `s.fill(v)` is [`SeqOp::Fill`].
+    FillRange { total: bool },
+    /// `s.extend_from_within(lo, hi)` (`try_extend_from_within` when
+    /// `total`) on a `ChunkSeq[T]` of a copy `T`: appends a copy of
+    /// `s[lo..hi]` with one growth and one bounds check. The checked form
+    /// raises `IndexOutOfBounds` and the total one yields `false` when
+    /// `lo <= hi <= len` fails; neither appends anything then.
+    ExtendFromWithin { total: bool },
+    /// `s.extend_reversed(in src)` on a `ChunkSeq[T]` of a copy `T`:
+    /// appends the elements of `src` last first, with one growth. Total.
+    ExtendReversed,
 }
 
 /// `read_u16_le`, `try_write_u64_be` and the other fixed-width accesses of a
@@ -312,6 +337,8 @@ impl SeqOp {
                 | Self::CopyFrom { total: false }
                 | Self::CopyWithin { total: false }
                 | Self::MakeAsciiLowercase { total: false }
+                | Self::FillRange { total: false }
+                | Self::ExtendFromWithin { total: false }
                 | Self::Wide(Wide { total: false, .. })
         )
     }
@@ -335,6 +362,10 @@ impl SeqOp {
                 | Self::CopyFrom { .. }
                 | Self::CopyWithin { .. }
                 | Self::Fill
+                | Self::Resize
+                | Self::FillRange { .. }
+                | Self::ExtendFromWithin { .. }
+                | Self::ExtendReversed
                 | Self::Wide(Wide { write: true, .. })
         )
     }
@@ -396,6 +427,21 @@ impl SeqOp {
             Self::ExtendAsciiLowercase => "extend_ascii_lowercase",
             Self::MakeAsciiLowercase { total: false } => "make_ascii_lowercase",
             Self::MakeAsciiLowercase { total: true } => "try_make_ascii_lowercase",
+            Self::Resize => "resize",
+            Self::FillRange { total: false } => "fill",
+            Self::FillRange { total: true } => "try_fill",
+            Self::ExtendFromWithin { total: false } => "extend_from_within",
+            Self::ExtendFromWithin { total: true } => "try_extend_from_within",
+            Self::ExtendReversed => "extend_reversed",
+        }
+    }
+    /// The operation a call of `self` with `operands` arguments (receiver
+    /// not counted) performs: `fill` with three operands fills an interval.
+    pub fn with_arity(self, operands: usize) -> Self {
+        if self == Self::Fill && operands == 3 {
+            Self::FillRange { total: false }
+        } else {
+            self
         }
     }
 }
@@ -569,6 +615,9 @@ pub fn fip_allocation(world: &World, callee: &Expr) -> Option<&'static str> {
             | SeqOp::Push
             | SeqOp::Extend
             | SeqOp::ExtendAsciiLowercase
+            | SeqOp::Resize
+            | SeqOp::ExtendFromWithin { .. }
+            | SeqOp::ExtendReversed
             | SeqOp::Str(
                 crate::strings::StrOp::PushStr
                     | crate::strings::StrOp::PushChar
@@ -586,6 +635,7 @@ fn shared_method(method: &str) -> Option<SeqOp> {
         "copy_within" => SeqOp::CopyWithin { total: false },
         "try_copy_within" => SeqOp::CopyWithin { total: true },
         "fill" => SeqOp::Fill,
+        "try_fill" => SeqOp::FillRange { total: true },
         "sum_be16" => SeqOp::SumBe16,
         "eq" => SeqOp::BytesEq,
         "find_byte" => SeqOp::FindByte,
@@ -618,6 +668,10 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "reserve" => SeqOp::Reserve,
                 "extend" | "extend_from_slice" => SeqOp::Extend,
                 "extend_ascii_lowercase" => SeqOp::ExtendAsciiLowercase,
+                "resize" => SeqOp::Resize,
+                "extend_from_within" => SeqOp::ExtendFromWithin { total: false },
+                "try_extend_from_within" => SeqOp::ExtendFromWithin { total: true },
+                "extend_reversed" => SeqOp::ExtendReversed,
                 "as_slice" | "as_slice_mut" => SeqOp::AsSlice,
                 _ => return shared_method(method),
             });

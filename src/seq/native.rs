@@ -829,6 +829,72 @@ impl<M: Module> Codegen<'_, '_, M> {
                 })?;
                 self.zero()
             }
+            SeqOp::Resize => {
+                let h = arg(0)?;
+                let (n, value) = (arg(1)?, arg(2)?);
+                let len = self.seq_word(h, LEN);
+                // Copy elements: shortening drops nothing.
+                let longer = self.b.ins().icmp(IntCC::UnsignedGreaterThan, n, len);
+                let grow = self.b.create_block();
+                let shrink = self.b.create_block();
+                let done = self.b.create_block();
+                self.branch(longer, grow, &[], shrink, &[]);
+                self.b.switch_to_block(shrink);
+                let shorter = self.b.ins().icmp(IntCC::UnsignedLessThan, n, len);
+                self.seq_set_len_if(h, shorter, n);
+                self.jump(done, &[]);
+                self.b.switch_to_block(grow);
+                self.seq_reserve_then(h, n, stride, receiver, |this, h| {
+                    let added = this.b.ins().isub(n, len);
+                    this.seq_fill_elems(h, len, added, value, &elem, stride)?;
+                    this.seq_set_word(h, LEN, n);
+                    Ok(())
+                })?;
+                self.jump(done, &[]);
+                self.b.switch_to_block(done);
+                self.zero()
+            }
+            SeqOp::ExtendFromWithin { total } => {
+                let h = arg(0)?;
+                let (lo, hi) = (arg(1)?, arg(2)?);
+                let len = self.seq_word(h, LEN);
+                let ordered = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, lo, hi);
+                let inside = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, hi, len);
+                let valid = self.b.ins().band(ordered, inside);
+                self.seq_when(valid, total, |this| {
+                    let n = this.b.ins().isub(hi, lo);
+                    let needed = this.b.ins().iadd(len, n);
+                    // The source is read through the grown handle: growth
+                    // moves the buffer. It ends at `hi <= len`, below the
+                    // destination, so the copy never overlaps.
+                    this.seq_reserve_then(h, needed, stride, receiver, |this, h| {
+                        let zero = this.zero();
+                        let dst = this.seq_elem_addr(h, zero, len, stride);
+                        let src = this.seq_elem_addr(h, zero, lo, stride);
+                        let bytes = this.b.ins().imul_imm(n, stride);
+                        this.seq_move(dst, src, bytes);
+                        let some = this.b.ins().icmp_imm(IntCC::NotEqual, n, 0);
+                        this.seq_set_len_if(h, some, needed);
+                        Ok(())
+                    })
+                })?
+            }
+            SeqOp::ExtendReversed => {
+                let h = arg(0)?;
+                let (sh, sstart, slen) = self.seq_view(arg(1)?, &arg_types[1]);
+                let len = self.seq_word(h, LEN);
+                let needed = self.b.ins().iadd(len, slen);
+                self.seq_reserve_then(h, needed, stride, receiver, |this, h| {
+                    let zero = this.zero();
+                    let dst = this.seq_elem_addr(h, zero, len, stride);
+                    let src = this.seq_elem_addr(sh, sstart, zero, stride);
+                    this.seq_copy_reversed(dst, src, slen, stride, &elem)?;
+                    let some = this.b.ins().icmp_imm(IntCC::NotEqual, slen, 0);
+                    this.seq_set_len_if(h, some, needed);
+                    Ok(())
+                })?;
+                self.zero()
+            }
             SeqOp::Finish => {
                 let h = arg(0)?;
                 let len = self.seq_word(h, LEN);
@@ -848,6 +914,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             | SeqOp::CopyFrom { .. }
             | SeqOp::CopyWithin { .. }
             | SeqOp::Fill
+            | SeqOp::FillRange { .. }
             | SeqOp::Wide(_)
             | SeqOp::SumBe16
             | SeqOp::BytesEq
@@ -955,6 +1022,81 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.jump(done, &[]);
         self.b.switch_to_block(done);
         Ok(out)
+    }
+
+    /// Copies the `n` elements at `src` to `dst` (distinct buffers) last
+    /// first: element `k` of `dst` is element `n - 1 - k` of `src`. Bytes
+    /// move eight at a time through a byte swap, the rest one element at a
+    /// time.
+    fn seq_copy_reversed(
+        &mut self,
+        dst: ir::Value,
+        src: ir::Value,
+        n: ir::Value,
+        stride: i64,
+        elem: &Type,
+    ) -> Result<(), String> {
+        let zero = self.zero();
+        let mut from = zero;
+        if stride == 1 {
+            // Word `k` of `dst` (bytes `8k..8k + 8`) is the byte-swapped
+            // word of `src` that ends at `n - 8k`.
+            let head = self.b.create_block();
+            let body = self.b.create_block();
+            let tail = self.b.create_block();
+            self.b.append_block_param(head, types::I64);
+            self.b.append_block_param(tail, types::I64);
+            self.jump(head, &[zero.into()]);
+            self.b.switch_to_block(head);
+            let k = self.b.block_params(head)[0];
+            let left = self.b.ins().isub(n, k);
+            let word = self
+                .b
+                .ins()
+                .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, left, 8);
+            self.branch(word, body, &[], tail, &[k.into()]);
+            self.b.switch_to_block(body);
+            let at = self.b.ins().iadd(src, left);
+            let w = self.b.ins().load(types::I64, MemFlags::new(), at, -8);
+            let w = self.b.ins().bswap(w);
+            let to = self.b.ins().iadd(dst, k);
+            self.b.ins().store(MemFlags::new(), w, to, 0);
+            let next = self.b.ins().iadd_imm(k, 8);
+            self.jump(head, &[next.into()]);
+            self.b.switch_to_block(tail);
+            from = self.b.block_params(tail)[0];
+        }
+        let head = self.b.create_block();
+        let body = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.append_block_param(head, types::I64);
+        self.jump(head, &[from.into()]);
+        self.b.switch_to_block(head);
+        let k = self.b.block_params(head)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, n);
+        self.branch(more, body, &[], done, &[]);
+        self.b.switch_to_block(body);
+        let last = self.b.ins().iadd_imm(n, -1);
+        let back = self.b.ins().isub(last, k);
+        let from_addr = self.seq_elem_addr_raw(src, back, stride);
+        let to_addr = self.seq_elem_addr_raw(dst, k, stride);
+        let layout = Layout::of(self.world, elem)?;
+        if layout.aggregate() {
+            self.copy_bytes(from_addr, to_addr, layout.size);
+        } else {
+            let value = self.seq_load_elem(from_addr, elem)?;
+            self.seq_store_elem(to_addr, value, elem)?;
+        }
+        let next = self.b.ins().iadd_imm(k, 1);
+        self.jump(head, &[next.into()]);
+        self.b.switch_to_block(done);
+        Ok(())
+    }
+
+    /// `base + i * stride`.
+    fn seq_elem_addr_raw(&mut self, base: ir::Value, i: ir::Value, stride: i64) -> ir::Value {
+        let offset = self.b.ins().imul_imm(i, stride);
+        self.b.ins().iadd(base, offset)
     }
 
     /// Copies `bytes` bytes from `src` to `dst` (distinct buffers).
