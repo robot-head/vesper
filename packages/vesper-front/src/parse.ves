@@ -113,6 +113,7 @@ use self::words::{
     w_underscore,
     w_load_tile_vec,
     w_col_set,
+    w_super,
     w_TiledSeq,
     is_primitive_word
 };
@@ -478,7 +479,8 @@ fn placeholder(in p: P) -> Ex {
         end: s,
         h: 1,
         sym: 0,
-        tiled: false
+        tiled: false,
+        path: 0
     }
 }
 
@@ -501,7 +503,8 @@ fn ex(k: u8, start: u64, end: u64, children: u32) -> Ex {
         end: narrow(end),
         h: wrapping_add(children, 1),
         sym: 0,
-        tiled: false
+        tiled: false,
+        path: 0
     }
 }
 
@@ -784,11 +787,128 @@ fn ident(inout p: P) -> u64 {
 }
 
 fn lower(inout p: P) -> u64 {
+    if at_contextual_name(in p) {
+        return bump(inout p);
+    }
     let k = kind(in p);
     if k != k_lower() && k != k_self_kw() {
-        err(inout p, in "expected a lower-case identifier");
+        if reserved_word(k) {
+            let i = idx(in p, 0);
+            if err_open(inout p) {
+                p
+                    .d
+                    .text
+                    .extend(in "expected a lower-case identifier, found the keyword `".as_bytes());
+                for j in tstart(in p, i)..tend(in p, i) {
+                    let c = u8_at(in p.src, j);
+                    p.d.text.push(c);
+                }
+                p.d.text.extend(in "`, which cannot be a name".as_bytes());
+            }
+        } else {
+            err(inout p, in "expected a lower-case identifier");
+        }
     }
     ident(inout p)
+}
+
+// The keywords `lower` names in its message: never a name anywhere.
+fn reserved_word(k: u8) -> bool {
+    k
+        == k_copy()
+        || k
+        == k_affine()
+        || k
+        == k_mod()
+        || k
+        == k_eff()
+        || k
+        == k_in()
+        || k
+        == k_inout()
+        || k
+        == k_sink()
+        || k
+        == k_handle()
+        || k
+        == k_return()
+        || k
+        == k_match()
+        || k
+        == k_if()
+        || k
+        == k_else()
+        || k
+        == k_let()
+        || k
+        == k_fn()
+        || k
+        == k_struct()
+        || k
+        == k_enum()
+        || k
+        == k_effect()
+        || k
+        == k_impl()
+}
+
+// `state`, `linear` and `with` are keywords only where their forms start;
+// wherever a name is expected they are names (`at_contextual_name`).
+fn contextual_name(k: u8) -> bool {
+    k == k_state() || k == k_linear() || k == k_with()
+}
+
+fn at_contextual_name(in p: P) -> bool {
+    contextual_name(kind(in p))
+}
+
+// `Parser::at_path_root`: at `self::`, `super::` or `@scope/name::`.
+fn at_path_root(in p: P) -> bool {
+    let k = kind(in p);
+    if k == k_self_kw() {
+        return nth(in p, 1) == k_colon_colon();
+    }
+    if k == k_lower() {
+        return at_word(in p, 0, w_super()) && nth(in p, 1) == k_colon_colon();
+    }
+    if k != k_at() {
+        return false;
+    }
+    let mut end = tend(in p, idx(in p, 0));
+    let mut n: u64 = 1;
+    loop {
+        let kn = nth(in p, n);
+        if !(kn == k_lower() || kn == k_minus() || kn == k_slash() || kn == k_int())
+            || tstart(in p, idx(in p, n))
+            != end {
+            break;
+        }
+        end = tend(in p, idx(in p, n));
+        n = inc(n);
+    }
+    n > 1 && nth(in p, n) == k_colon_colon()
+}
+
+// `Parser::qualified_path` at `at_path_root`: whether its last segment is
+// an upper-case name.
+fn qualified_path(inout p: P) -> bool {
+    if at(in p, k_at()) {
+        package_name(inout p);
+    } else {
+        bump(inout p);
+    }
+    let mut upper_last = false;
+    loop {
+        let n1 = nth(in p, 1);
+        if !at(in p, k_colon_colon())
+            || !(n1 == k_lower() || n1 == k_upper() || contextual_name(n1)) {
+            return upper_last;
+        }
+        bump(inout p);
+        let i = bump(inout p);
+        upper_last = tk(in p, i) == k_upper();
+    }
+    upper_last
 }
 
 fn upper(inout p: P) -> u64 {
@@ -924,18 +1044,30 @@ fn is_type_decl_kind(k: u8) -> bool {
     k == k_struct() || k == k_enum() || k == k_effect()
 }
 
+// Whether the `n`th upcoming token starts an import path: `@`, `self` or
+// `super`.
+fn import_root(in p: P, n: u64) -> bool {
+    let k = nth(in p, n);
+    k == k_at() || k == k_self_kw() || at_word(in p, n, w_super())
+}
+
 // `Parser::declaration`: whether it produced an item.
 fn declaration(inout p: P) -> bool {
     if at_word(in p, 0, w_use()) && at_word(in p, 1, w_model()) {
         use_model(inout p);
         return false;
     }
-    if at_word(in p, 0, w_use()) && (nth(in p, 1) == k_at() || nth(in p, 1) == k_self_kw()) {
+    if at_word(in p, 0, w_use()) && import_root(in p, 1) {
+        use_item(inout p);
+        return false;
+    }
+    if at_word(in p, 0, w_pub()) && at_word(in p, 1, w_use()) && import_root(in p, 2) {
+        bump(inout p);
         use_item(inout p);
         return false;
     }
     if at_word(in p, 0, w_use()) && nth(in p, 1) == k_lower() && nth(in p, 2) == k_colon_colon() {
-        err(inout p, in "an import path starts with `@scope/package` or `self`");
+        err(inout p, in "an import path starts with `@scope/package`, `self` or `super`");
         bump(inout p);
         bump(inout p);
         loop {
@@ -947,14 +1079,6 @@ fn declaration(inout p: P) -> bool {
             }
         }
         eat(inout p, k_semi());
-        return false;
-    }
-    if at_word(in p, 0, w_pub()) && at_word(in p, 1, w_use()) {
-        err(inout p, in "`pub use` re-exports are not supported yet; mark the original item `pub`");
-        bump(inout p);
-        if nth(in p, 1) == k_at() || nth(in p, 1) == k_self_kw() {
-            use_item(inout p);
-        }
         return false;
     }
     let mut fip = fip_attr(inout p);
@@ -1299,6 +1423,11 @@ fn ty_inner(inout p: P) -> u8 {
         upper(inout p);
         type_args(inout p);
         t_named()
+    } else if at_path_root(in p) {
+        // `self::m::T[args]`, `super::m::T`, `@scope/name::m::T`.
+        qualified_path(inout p);
+        type_args(inout p);
+        t_named()
     } else {
         ident(inout p);
         if at(in p, k_colon_colon()) && nth(in p, 1) == k_upper() {
@@ -1347,10 +1476,22 @@ fn package_name(inout p: P) {
     }
 }
 
+// `pub? use (@scope/name | self | super (:: super)*) (:: segment)* ::
+// (item (as alias)? | { list });` at `use`; a `pub` before it has been
+// consumed.
 fn use_item(inout p: P) {
     bump(inout p);
     if at(in p, k_at()) {
         package_name(inout p);
+    } else if at_word(in p, 0, w_super()) {
+        bump(inout p);
+        loop {
+            if !at(in p, k_colon_colon()) || !at_word(in p, 1, w_super()) {
+                break;
+            }
+            bump(inout p);
+            bump(inout p);
+        }
     } else {
         bump(inout p);
     }
@@ -1379,7 +1520,7 @@ fn use_item(inout p: P) {
             }
             break;
         }
-        if at(in p, k_lower()) && nth(in p, 1) == k_colon_colon() {
+        if (at(in p, k_lower()) || at_contextual_name(in p)) && nth(in p, 1) == k_colon_colon() {
             bump(inout p);
             continue;
         }
@@ -1391,7 +1532,7 @@ fn use_item(inout p: P) {
 
 fn use_name(inout p: P) {
     let k = kind(in p);
-    if k == k_lower() || k == k_upper() {
+    if k == k_lower() || k == k_upper() || contextual_name(k) {
         bump(inout p);
     } else {
         err(inout p, in "expected an imported item name");
@@ -1399,7 +1540,7 @@ fn use_name(inout p: P) {
     if at_word(in p, 0, w_as()) {
         bump(inout p);
         let k2 = kind(in p);
-        if k2 == k_lower() || k2 == k_upper() {
+        if k2 == k_lower() || k2 == k_upper() || contextual_name(k2) {
             bump(inout p);
         } else {
             err(inout p, in "expected a name after `as`");
@@ -1558,6 +1699,7 @@ fn type_args_inner(inout p: P) {
         if tk(in p, cur)
             == k_lower()
             && !is_primitive_word(tword(in p, cur))
+            && !at_path_root(in p)
             && !(tword(in p, cur) == w_dyn() && nth(in p, 1) == k_upper()) {
             bump(inout p);
             if eat(inout p, k_colon()) {
@@ -1600,15 +1742,21 @@ fn effects(inout p: P) {
             lower(inout p);
             break;
         }
-        if at(in p, k_lower()) && nth(in p, 1) != k_colon() {
+        let root = at_path_root(in p);
+        if at(in p, k_lower()) && nth(in p, 1) != k_colon() && !root {
             lower(inout p);
             break;
         }
-        if at(in p, k_lower()) {
+        if at(in p, k_lower()) && !root {
             lower(inout p);
             expect(inout p, k_colon());
         }
-        upper(inout p);
+        // `eff [self::m::E]`: a qualified effect name.
+        if at_path_root(in p) {
+            qualified_path(inout p);
+        } else {
+            upper(inout p);
+        }
         type_args(inout p);
         if !eat(inout p, k_comma()) && !at(in p, k_pipe()) {
             break;
@@ -1919,7 +2067,11 @@ fn handle_expr(inout p: P) -> Ex {
         lower(inout p);
         expect(inout p, k_colon());
     }
-    upper(inout p);
+    if at_path_root(in p) {
+        qualified_path(inout p);
+    } else {
+        upper(inout p);
+    }
     type_args(inout p);
     let mut h: u32 = 0;
     if eat(inout p, k_state()) {
@@ -2097,7 +2249,11 @@ fn generic_call(in p: P, e: Ex) -> bool {
     if scope_has(in p.rows, tsym(in p, t1)) && !(e.k == x_name() && bound(in p, e.sym)) {
         return true;
     }
-    if n1 == k_upper() || n1 == k_l_bracket() || n1 == k_fn() {
+    if n1 == k_upper() || n1 == k_l_bracket() || n1 == k_fn() || n1 == k_at() {
+        return true;
+    }
+    // `f[self::m::T](x)`, `f[super::T](x)`: a qualified type argument.
+    if (n1 == k_self_kw() || at_word(in p, 1, w_super())) && nth(in p, 2) == k_colon_colon() {
         return true;
     }
     n1
@@ -2137,18 +2293,28 @@ fn postfix_inner(inout p: P) -> Ex {
                 ex(x_call(), start, last_end(in p), hmax(e.h, a))
             } else {
                 bump(inout p);
-                let mut index = expr(inout p);
-                if at(in p, k_dot_dot()) {
-                    bump(inout p);
-                    let hi = expr(inout p);
-                    let b = ex(
-                        x_binary(),
-                        widen_u64(index.start),
-                        widen_u64(hi.end),
-                        hmax(index.h, hi.h)
-                    );
-                    index = record(inout p, b);
-                }
+                let index = if at(in p, k_dot_dot()) {
+                    // `p[..]` and `p[..b]`.
+                    let none = placeholder(in p);
+                    open_interval(inout p, e, false, none)
+                } else {
+                    let lo = expr(inout p);
+                    if !at(in p, k_dot_dot()) {
+                        lo
+                    } else if nth(in p, 1) == k_r_bracket() {
+                        open_interval(inout p, e, true, lo)
+                    } else {
+                        bump(inout p);
+                        let hi = expr(inout p);
+                        let b = ex(
+                            x_binary(),
+                            widen_u64(lo.start),
+                            widen_u64(hi.end),
+                            hmax(lo.h, hi.h)
+                        );
+                        record(inout p, b)
+                    }
+                };
                 expect(inout p, k_r_bracket());
                 ex(x_index(), start, last_end(in p), hmax(e.h, index.h))
             }
@@ -2162,6 +2328,9 @@ fn postfix_inner(inout p: P) -> Ex {
             };
             let mut f = ex(x_field(), start, last_end(in p), e.h);
             f.tiled = w >= w_load_tile_vec() && w <= w_col_set();
+            if e.path != 0 {
+                f.path = wrapping_add(e.path, 1);
+            }
             f
         } else {
             bump(inout p);
@@ -2170,6 +2339,44 @@ fn postfix_inner(inout p: P) -> Ex {
         e = record(inout p, next);
     }
     e
+}
+
+// `Parser::open_interval` at `..` inside `base[`: `p[..]`, `p[..b]` and
+// `p[a..]`. An open upper bound reads `base.len()`, so `base` must be a
+// place path; its copy and the `len()` call get synthetic spans that start
+// inside the `..` token, so their heights are 1.
+fn open_interval(inout p: P, base: Ex, has_lo: bool, lo: Ex) -> Ex {
+    let dots = cur_start(in p);
+    let dots_end = tend(in p, idx(in p, 0));
+    bump(inout p);
+    let (lo_start, lo_h) = if has_lo {
+        (widen_u64(lo.start), lo.h)
+    } else {
+        (dots, 1)
+    };
+    let (hi_end, hi_h) = if at(in p, k_r_bracket()) {
+        if base.path != 0 {
+            // The copied path (`path` nodes), `.len` and the call.
+            (add(dots, add(widen_u64(base.path), 2)), 1)
+        } else {
+            err(
+                inout p,
+                in "an interval without an upper bound needs a named sequence (`s[a..]`); bind the value to a name first"
+            );
+            let ph = placeholder(in p);
+            (widen_u64(ph.end), 1)
+        }
+    } else {
+        let hi = expr(inout p);
+        (widen_u64(hi.end), hi.h)
+    };
+    let start = if lo_start < dots {
+        lo_start
+    } else {
+        dots
+    };
+    let b = ex(x_binary(), start, max64(hi_end, dots_end), hmax(lo_h, hi_h));
+    record(inout p, b)
 }
 
 // `Parser::args`: the height of the highest argument (0 for none).
@@ -2213,11 +2420,22 @@ fn primary_inner(inout p: P) -> Ex {
             0
         );
     }
+    if at_path_root(in p) {
+        // `self::m::f`, `super::m::T { .. }`, `@scope/name::m::E::V`.
+        let upper_last = qualified_path(inout p);
+        if upper_last && at(in p, k_l_brace()) && !p.no_struct {
+            return struct_literal(inout p, start);
+        }
+        let mut e = ex(x_name(), start, last_end(in p), 0);
+        e.path = 1;
+        return e;
+    }
     let k = kind(in p);
-    if k == k_lower() || k == k_self_kw() {
+    if k == k_lower() || k == k_self_kw() || contextual_name(k) {
         let i = bump(inout p);
         let mut e = ex(x_name(), start, last_end(in p), 0);
         e.sym = tsym(in p, i);
+        e.path = 1;
         return e;
     }
     if k == k_upper() {
@@ -2235,27 +2453,10 @@ fn primary_inner(inout p: P) -> Ex {
             }
         }
         if at(in p, k_l_brace()) && !p.no_struct {
-            bump(inout p);
-            let mut h: u32 = 0;
-            loop {
-                if at(in p, k_r_brace()) || at(in p, k_eof()) {
-                    break;
-                }
-                lower(inout p);
-                if eat(inout p, k_colon()) {
-                    let v = expr(inout p);
-                    h = hmax(h, v.h);
-                } else {
-                    h = hmax(h, 1);
-                }
-                if !eat(inout p, k_comma()) {
-                    break;
-                }
-            }
-            expect(inout p, k_r_brace());
-            return ex(x_struct(), start, last_end(in p), h);
+            return struct_literal(inout p, start);
         }
         let mut e = ex(x_name(), start, last_end(in p), 0);
+        e.path = 1;
         if segments == 1 {
             e.sym = tsym(in p, first);
         }
@@ -2307,6 +2508,29 @@ fn primary_inner(inout p: P) -> Ex {
     ex(x_tuple(), start, last_end(in p), 0)
 }
 
+// `Parser::struct_literal`: `Name { field: value, field }` at `{`.
+fn struct_literal(inout p: P, start: u64) -> Ex {
+    bump(inout p);
+    let mut h: u32 = 0;
+    loop {
+        if at(in p, k_r_brace()) || at(in p, k_eof()) {
+            break;
+        }
+        lower(inout p);
+        if eat(inout p, k_colon()) {
+            let v = expr(inout p);
+            h = hmax(h, v.h);
+        } else {
+            h = hmax(h, 1);
+        }
+        if !eat(inout p, k_comma()) {
+            break;
+        }
+    }
+    expect(inout p, k_r_brace());
+    ex(x_struct(), start, last_end(in p), h)
+}
+
 // ---------------------------------------------------------------- patterns
 
 fn pattern_list(inout p: P, end: u8) {
@@ -2344,7 +2568,10 @@ fn pattern_inner(inout p: P) {
             err(inout p, in "only numeric patterns can be negative");
         }
         let k = kind(in p);
-        if k == k_lower() {
+        if at_path_root(in p) {
+            qualified_path(inout p);
+            constructor_pattern(inout p);
+        } else if k == k_lower() || contextual_name(k) {
             let i = bump(inout p);
             if tword(in p, i) != w_underscore() {
                 let sym = tsym(in p, i);
@@ -2358,27 +2585,7 @@ fn pattern_inner(inout p: P) {
                 }
                 upper(inout p);
             }
-            if eat(inout p, k_l_paren()) {
-                pattern_list(inout p, k_r_paren());
-                expect(inout p, k_r_paren());
-            } else if eat(inout p, k_l_brace()) {
-                loop {
-                    if at(in p, k_r_brace()) || at(in p, k_eof()) {
-                        break;
-                    }
-                    let field = lower(inout p);
-                    if eat(inout p, k_colon()) {
-                        pattern(inout p);
-                    } else {
-                        let sym = tsym(in p, field);
-                        p.binds.push(sym);
-                    }
-                    if !eat(inout p, k_comma()) {
-                        break;
-                    }
-                }
-                expect(inout p, k_r_brace());
-            }
+            constructor_pattern(inout p);
         } else if k == k_l_paren() {
             bump(inout p);
             pattern_list(inout p, k_r_paren());
@@ -2391,6 +2598,32 @@ fn pattern_inner(inout p: P) {
         }
     }
     finish_node(inout p);
+}
+
+// `Parser::constructor_pattern`: the fields after a constructor's name,
+// `(p, ..)`, `{ f: p, f }` or none.
+fn constructor_pattern(inout p: P) {
+    if eat(inout p, k_l_paren()) {
+        pattern_list(inout p, k_r_paren());
+        expect(inout p, k_r_paren());
+    } else if eat(inout p, k_l_brace()) {
+        loop {
+            if at(in p, k_r_brace()) || at(in p, k_eof()) {
+                break;
+            }
+            let field = lower(inout p);
+            if eat(inout p, k_colon()) {
+                pattern(inout p);
+            } else {
+                let sym = tsym(in p, field);
+                p.binds.push(sym);
+            }
+            if !eat(inout p, k_comma()) {
+                break;
+            }
+        }
+        expect(inout p, k_r_brace());
+    }
 }
 
 // ---------------------------------------------------------------- module

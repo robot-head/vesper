@@ -119,6 +119,10 @@ pub fn w_col_set() -> u8 {
     24
 }
 
+pub fn w_super() -> u8 {
+    25
+}
+
 pub fn w_TiledSeq() -> u8 {
     50
 }
@@ -323,6 +327,9 @@ pub fn lower_word(in b: Slice[u8], s: u64, n: u64) -> u8 {
         }
         if is(in b, s, in "isize".as_bytes()) {
             return 39;
+        }
+        if is(in b, s, in "super".as_bytes()) {
+            return 25;
         }
         0
     } else if n == 6 {

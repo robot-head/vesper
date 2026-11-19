@@ -25,7 +25,10 @@ use self::kinds::{
     k_string,
     k_error,
     k_eof,
-    k_self_kw
+    k_self_kw,
+    k_state,
+    k_linear,
+    k_with
 };
 use self::util::{
     inc,
@@ -481,7 +484,18 @@ fn classify(inout t: Tokens, in b: Slice[u8]) {
             Option::Some(k) => k,
             Option::None => 0,
         };
-        if k == k_lower() || k == k_upper() || k == k_self_kw() {
+        if k
+            == k_lower()
+            || k
+            == k_upper()
+            || k
+            == k_self_kw()
+            || k
+            == k_state()
+            || k
+            == k_linear()
+            || k
+            == k_with() {
             let s = widen_u64(u32_at(in t.start, i));
             let e = widen_u64(u32_at(in t.end, i));
             let sym = intern(inout t, in b, s, e, k);

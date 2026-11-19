@@ -457,6 +457,19 @@ fn parser_test_corpus_matches_the_rust_parser() {
 #[test]
 fn edge_cases_and_limits_match_the_rust_parser() {
     let mut cases: Vec<String> = [
+        // Qualified paths, `pub use`, `super` and open intervals (#1106).
+        "use super::super::m::{a, B as C, state as linear};",
+        "pub use self::m::f; pub use @a/b-c::m::T; pub use super::x; pub use x::y; pub use;",
+        "use x::y; use super; use super::; use self::with::linear::f;",
+        "fn f(s: S) { s[..]; s[a..]; s[..b]; s.a.b[..]; (s)[1..]; f()[..]; s[..][..]; s[1 + 2..] }",
+        "fn f() { s[..; s[a.. }",
+        "fn f(state: u8, with: u8) -> u8 { let linear = state + with; linear.with.state }",
+        "fn f() -> self::m::T[u8] eff [self::E, a: super::F, @a/b::G[u8] | r] { g[self::T](x); g[super::T](x); g[@a/b::T](x) }",
+        "fn f() { let x = super::m::P { a: 1 }; match x { self::E::A(y) => y, @a/b::E::B { q } => q, super::C => 0 } }",
+        "fn f() { handle self::m::E in { 0 } with { return x => x } }",
+        "fn f() { @a /b::c; @a/b; self::; super::1 }",
+        "fn f(let: u8, if: u8) { x.match; s.impl }",
+        "fn f[r](x: T[self::m::U, r]) {}",
         "",
         " ",
         "fn",

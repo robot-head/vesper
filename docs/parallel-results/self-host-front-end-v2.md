@@ -3,7 +3,7 @@
 > The [manuscript](../manuscript/README.md) is the sole specification.
 > Confirm live ownership on the issue board before acting.
 
-Claim: #1129. Base: `main` at `b71ac81` (plan PR #1131). Lane prompt:
+Claim: #1129. Base: `main` at `b71ac81` (plan PR #1131), merged up to `798bef4`. Lane prompt:
 `docs/agent-prompts/self-host-sh0/07-front-end-v2.md`.
 
 ## Summary
@@ -42,10 +42,14 @@ returns the token, node and diagnostic rows; `parse_counts`, `lex_count` and
 parser has on `main` at the base: `use` items (all forms, including the error
 paths), `..` slice intervals, `continue`, `for`, `loop`, `break`, qualified
 `T::A` and `<T as Tr>::A` projections, `dyn`, shapes, `tiled(N)`, `wire`,
-regions, handlers, traits, models and impls. Fixed arrays and `const` items
-(P3b gaps lane 6, PR #1115) and `pub use` re-exports (lane 8, PR #1106) are not
-on `main` yet; when they land, the differential test fails on their fixtures
-until the same change is made here.
+regions, handlers, traits, models and impls, plus what PR #1106 added
+while this lane was open (merged into this branch and mirrored): qualified
+`self::`, `super::` and `@scope/name::` paths in expressions, types,
+patterns, effect rows, handlers and type arguments, `pub use` and `use super`,
+`state`/`linear`/`with` as names, the keyword-name message of `lower`, and
+open slice intervals `s[..]`, `s[a..]`, `s[..b]`. Fixed arrays and `const`
+items (P3b gaps lane 6, PR #1115) are not on `main` yet; when they land, the
+differential test fails on their fixtures until the same change is made here.
 
 ## Differential test
 
@@ -197,9 +201,8 @@ equal `bootstrap/stage1.lock`.
 
 ## What is left
 
-- Mirror PRs #1115 (fixed arrays, `const`) and #1106 (`pub use`, qualified
-  paths, separate import namespaces) when they merge; the differential test
-  catches both.
+- Mirror PR #1115 (fixed arrays, `const`) when it merges; the differential
+  test catches it.
 - The editor mode (`BLOCK`, `ERROR_NODE`, `INCOMPLETE` nodes, recovery sites,
   header notes) and macro sources are not ported; batch parsing never produces
   them.
