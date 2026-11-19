@@ -14,6 +14,6 @@ cargo build --locked --release -p vesper-warp --example abba
 cp "$target/release/examples/abba$exe" "$dir/rust$exe"
 cargo build --locked --release -p vesper-warp --features vesper-port --example abba
 cp "$target/release/examples/abba$exe" "$dir/vesper$exe"
-for workload in ${WORKLOADS:-frames ack recovery transfer}; do
+for workload in ${WORKLOADS:-frames ack recovery buffers transfer}; do
     "$dir/rust$exe" drive "$workload" "$dir/rust$exe" "$dir/vesper$exe"
 done

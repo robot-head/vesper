@@ -6,4 +6,5 @@ pub(crate) mod frame;
 pub(crate) mod header;
 pub(crate) mod packet_number;
 pub(crate) mod recovery;
+pub(crate) mod stream;
 pub(crate) mod varint;

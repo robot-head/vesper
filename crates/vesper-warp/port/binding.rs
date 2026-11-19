@@ -428,6 +428,21 @@ impl Abi for HdrErr {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LostRange { pub has: bool, pub off: u64, pub len: u64 }
+
+impl Abi for LostRange {
+    const WORDS: usize = 3;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.has, &mut out[0..]);
+        Abi::put(&self.off, &mut out[1..]);
+        Abi::put(&self.len, &mut out[2..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        LostRange { has: Abi::get(&words[0..]), off: Abi::get(&words[1..]), len: Abi::get(&words[2..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Parsed {
     Protected { h: Prot },
     Retry { version: u32, dcid: Sp, scid: Sp, token: Sp, tag: u64 },
@@ -763,6 +778,22 @@ impl Abi for Received {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RecvSt { pub cap: u64, pub read: u64, pub contig: u64, pub highest: u64 }
+
+impl Abi for RecvSt {
+    const WORDS: usize = 4;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.cap, &mut out[0..]);
+        Abi::put(&self.read, &mut out[1..]);
+        Abi::put(&self.contig, &mut out[2..]);
+        Abi::put(&self.highest, &mut out[3..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        RecvSt { cap: Abi::get(&words[0..]), read: Abi::get(&words[1..]), contig: Abi::get(&words[2..]), highest: Abi::get(&words[3..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rtt { pub latest: u64, pub min: u64, pub smoothed: u64, pub rttvar: u64, pub has_sample: bool }
 
 impl Abi for Rtt {
@@ -803,6 +834,23 @@ impl Abi for RxState {
     }
     fn get(words: &[u64]) -> Self {
         RxState { space: Abi::get(&words[0..]), len: Abi::get(&words[1..]), has_floor: Abi::get(&words[2..]), floor: Abi::get(&words[3..]), has_largest: Abi::get(&words[4..]), largest: Abi::get(&words[5..]), largest_received_ns: Abi::get(&words[6..]), last_received_ns: Abi::get(&words[7..]), ect0: Abi::get(&words[8..]), ect1: Abi::get(&words[9..]), ce: Abi::get(&words[10..]), unacked_ack_eliciting: Abi::get(&words[11..]), has_deadline: Abi::get(&words[12..]), deadline_ns: Abi::get(&words[13..]), max_ack_delay_ns: Abi::get(&words[14..]) }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SendSt { pub cap: u64, pub base: u64, pub next: u64, pub end: u64, pub lost_hint: u64 }
+
+impl Abi for SendSt {
+    const WORDS: usize = 5;
+    fn put(&self, out: &mut [u64]) {
+        Abi::put(&self.cap, &mut out[0..]);
+        Abi::put(&self.base, &mut out[1..]);
+        Abi::put(&self.next, &mut out[2..]);
+        Abi::put(&self.end, &mut out[3..]);
+        Abi::put(&self.lost_hint, &mut out[4..]);
+    }
+    fn get(words: &[u64]) -> Self {
+        SendSt { cap: Abi::get(&words[0..]), base: Abi::get(&words[1..]), next: Abi::get(&words[2..]), end: Abi::get(&words[3..]), lost_hint: Abi::get(&words[4..]) }
     }
 }
 
@@ -966,6 +1014,15 @@ pub mod repr {
         pub end: u64,
     }
 
+    /// Mirror of the Vesper copy struct `LostRange` (3 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct LostRange {
+        pub has: vesper_port_abi::Word<bool>,
+        pub off: u64,
+        pub len: u64,
+    }
+
     /// Mirror of the Vesper copy struct `Prot` (13 words).
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1064,6 +1121,16 @@ pub mod repr {
         pub out_of_order: vesper_port_abi::Word<bool>,
     }
 
+    /// Mirror of the Vesper copy struct `RecvSt` (4 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct RecvSt {
+        pub cap: u64,
+        pub read: u64,
+        pub contig: u64,
+        pub highest: u64,
+    }
+
     /// Mirror of the Vesper copy struct `Rtt` (5 words).
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1094,6 +1161,17 @@ pub mod repr {
         pub has_deadline: vesper_port_abi::Word<bool>,
         pub deadline_ns: u64,
         pub max_ack_delay_ns: u64,
+    }
+
+    /// Mirror of the Vesper copy struct `SendSt` (5 words).
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct SendSt {
+        pub cap: u64,
+        pub base: u64,
+        pub next: u64,
+        pub end: u64,
+        pub lost_hint: u64,
     }
 
     /// Mirror of the Vesper copy struct `Sp` (2 words).
@@ -1238,6 +1316,35 @@ impl repr::FrameAt {
     /// The Rust value of the mirror.
     pub fn to_value(&self) -> FrameAt {
         <FrameAt as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
+// The mirror of `LostRange` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::LostRange>() == 3 * 8);
+    assert!(core::mem::align_of::<repr::LostRange>() == 8);
+    assert!(core::mem::offset_of!(repr::LostRange, has) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::LostRange, off) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::LostRange, len) == 2 * 8);
+};
+
+// SAFETY: `repr::LostRange` is `#[repr(C)]`, 3 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::LostRange {
+    const WORDS: usize = 3;
+}
+
+impl repr::LostRange {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &LostRange) -> Self {
+        let mut words = [0u64; 3];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> LostRange {
+        <LostRange as Abi>::get(vesper_port_abi::mirror_words(self))
     }
 }
 
@@ -1479,6 +1586,36 @@ impl repr::Received {
     }
 }
 
+// The mirror of `RecvSt` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::RecvSt>() == 4 * 8);
+    assert!(core::mem::align_of::<repr::RecvSt>() == 8);
+    assert!(core::mem::offset_of!(repr::RecvSt, cap) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::RecvSt, read) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::RecvSt, contig) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::RecvSt, highest) == 3 * 8);
+};
+
+// SAFETY: `repr::RecvSt` is `#[repr(C)]`, 4 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::RecvSt {
+    const WORDS: usize = 4;
+}
+
+impl repr::RecvSt {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &RecvSt) -> Self {
+        let mut words = [0u64; 4];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> RecvSt {
+        <RecvSt as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
 // The mirror of `Rtt` has exactly the Vesper layout.
 const _: () = {
     assert!(core::mem::size_of::<repr::Rtt>() == 5 * 8);
@@ -1548,6 +1685,37 @@ impl repr::RxState {
     /// The Rust value of the mirror.
     pub fn to_value(&self) -> RxState {
         <RxState as Abi>::get(vesper_port_abi::mirror_words(self))
+    }
+}
+
+// The mirror of `SendSt` has exactly the Vesper layout.
+const _: () = {
+    assert!(core::mem::size_of::<repr::SendSt>() == 5 * 8);
+    assert!(core::mem::align_of::<repr::SendSt>() == 8);
+    assert!(core::mem::offset_of!(repr::SendSt, cap) == 0 * 8);
+    assert!(core::mem::offset_of!(repr::SendSt, base) == 1 * 8);
+    assert!(core::mem::offset_of!(repr::SendSt, next) == 2 * 8);
+    assert!(core::mem::offset_of!(repr::SendSt, end) == 3 * 8);
+    assert!(core::mem::offset_of!(repr::SendSt, lost_hint) == 4 * 8);
+};
+
+// SAFETY: `repr::SendSt` is `#[repr(C)]`, 5 words, eight-byte aligned
+// (asserted above), and every field is a word cell or a mirror.
+unsafe impl vesper_port_abi::Mirror for repr::SendSt {
+    const WORDS: usize = 5;
+}
+
+impl repr::SendSt {
+    /// The mirror of a Rust value.
+    pub fn from_value(value: &SendSt) -> Self {
+        let mut words = [0u64; 5];
+        Abi::put(value, &mut words);
+        vesper_port_abi::mirror_from_words(&words)
+    }
+
+    /// The Rust value of the mirror.
+    pub fn to_value(&self) -> SendSt {
+        <SendSt as Abi>::get(vesper_port_abi::mirror_words(self))
     }
 }
 
@@ -1710,6 +1878,7 @@ const _: () = assert!(<FrameAt as Abi>::WORDS == 13);
 const _: () = assert!(<FrameErr as Abi>::WORDS == 3);
 const _: () = assert!(<FrameW as Abi>::WORDS == 12);
 const _: () = assert!(<HdrErr as Abi>::WORDS == 4);
+const _: () = assert!(<LostRange as Abi>::WORDS == 3);
 const _: () = assert!(<Option<WireStep> as Abi>::WORDS == 4);
 const _: () = assert!(<Option<u32> as Abi>::WORDS == 2);
 const _: () = assert!(<Option<u64> as Abi>::WORDS == 2);
@@ -1724,8 +1893,10 @@ const _: () = assert!(<RecEvent as Abi>::WORDS == 5);
 const _: () = assert!(<RecSpace as Abi>::WORDS == 13);
 const _: () = assert!(<RecState as Abi>::WORDS == 17);
 const _: () = assert!(<Received as Abi>::WORDS == 2);
+const _: () = assert!(<RecvSt as Abi>::WORDS == 4);
 const _: () = assert!(<Rtt as Abi>::WORDS == 5);
 const _: () = assert!(<RxState as Abi>::WORDS == 15);
+const _: () = assert!(<SendSt as Abi>::WORDS == 5);
 const _: () = assert!(<Sp as Abi>::WORDS == 2);
 const _: () = assert!(<TimeoutOut as Abi>::WORDS == 5);
 const _: () = assert!(<Unprot as Abi>::WORDS == 8);
@@ -1787,6 +1958,20 @@ unsafe extern "C" {
     fn vesper_warp_recovery_rtt_update(r: *mut u64, latest_ns: i64, ack_delay_ns: i64) -> i64;
     fn vesper_warp_recovery_set_timer(st: *mut u64, r: *mut u64, spaces: *mut u64, now_ns: i64) -> i64;
     fn vesper_warp_recovery_space_new(result: *mut u64) -> i64;
+    fn vesper_warp_recv_buf_insert(s: *mut u64, data: *mut u64, have: *mut u64, off: i64, src: *mut u64) -> i64;
+    fn vesper_warp_recv_buf_new(result: *mut u64, cap: i64) -> i64;
+    fn vesper_warp_recv_buf_read(s: *mut u64, data: *mut u64, have: *mut u64, out: *mut u64) -> i64;
+    fn vesper_warp_recv_buf_reset_for_reuse(s: *mut u64, have: *mut u64) -> i64;
+    fn vesper_warp_send_buf_copy_out(data: *mut u64, off: i64, out: *mut u64) -> i64;
+    fn vesper_warp_send_buf_discard(s: *mut u64, acked: *mut u64, lost: *mut u64) -> i64;
+    fn vesper_warp_send_buf_free_space(s: *mut u64) -> i64;
+    fn vesper_warp_send_buf_new(result: *mut u64, cap: i64) -> i64;
+    fn vesper_warp_send_buf_next_lost(result: *mut u64, s: *mut u64, lost: *mut u64, max: i64) -> i64;
+    fn vesper_warp_send_buf_on_ack(s: *mut u64, acked: *mut u64, lost: *mut u64, off: i64, len: i64) -> i64;
+    fn vesper_warp_send_buf_on_lost(s: *mut u64, lost: *mut u64, acked: *mut u64, off: i64, len: i64) -> i64;
+    fn vesper_warp_send_buf_reset_for_reuse(s: *mut u64, acked: *mut u64, lost: *mut u64) -> i64;
+    fn vesper_warp_send_buf_take_new(result: *mut u64, s: *mut u64, max: i64) -> i64;
+    fn vesper_warp_send_buf_write(s: *mut u64, data: *mut u64, src: *mut u64) -> i64;
     fn vesper_warp_varint_decode(result: *mut u64, buf: *mut u64, fail: *mut u64) -> i64;
     fn vesper_warp_varint_encode(value: i64, out: *mut u64, fail: *mut u64) -> i64;
     fn vesper_warp_varint_encode_with_len(value: i64, len: i64, out: *mut u64, fail: *mut u64) -> i64;
@@ -2353,6 +2538,136 @@ pub fn recovery_space_new() -> repr::RecSpace {
     // every handle passed is owned or borrowed as its mode requires.
     let raw = unsafe { vesper_warp_recovery_space_new(result.as_mut_ptr()) };
     vesper_port_abi::mirror_from_words::<repr::RecSpace>(&result[0..])
+}
+
+/// Calls `recv_buf_insert` of the Vesper library `warp` (`vesper_warp_recv_buf_insert`).
+pub fn recv_buf_insert(s: &mut repr::RecvSt, data: &mut [u8], have: &mut [u64], off: u64, src: &[u8]) -> bool {
+    // SAFETY: `vesper_warp_recv_buf_insert` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(data, |view_data| vesper_port_abi::with_slice_mut(have, |view_have| vesper_port_abi::with_slice(src, |view_src| unsafe { vesper_warp_recv_buf_insert((s as *mut repr::RecvSt).cast::<u64>(), view_data, view_have, off as i64, view_src) })));
+    raw != 0
+}
+
+/// Calls `recv_buf_new` of the Vesper library `warp` (`vesper_warp_recv_buf_new`).
+pub fn recv_buf_new(cap: u64) -> repr::RecvSt {
+    let mut result = [0u64; 4];
+    // SAFETY: `vesper_warp_recv_buf_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_recv_buf_new(result.as_mut_ptr(), cap as i64) };
+    vesper_port_abi::mirror_from_words::<repr::RecvSt>(&result[0..])
+}
+
+/// Calls `recv_buf_read` of the Vesper library `warp` (`vesper_warp_recv_buf_read`).
+pub fn recv_buf_read(s: &mut repr::RecvSt, data: &[u8], have: &mut [u64], out: &mut [u8]) -> u64 {
+    // SAFETY: `vesper_warp_recv_buf_read` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(data, |view_data| vesper_port_abi::with_slice_mut(have, |view_have| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_warp_recv_buf_read((s as *mut repr::RecvSt).cast::<u64>(), view_data, view_have, view_out) })));
+    raw as u64
+}
+
+/// Calls `recv_buf_reset_for_reuse` of the Vesper library `warp` (`vesper_warp_recv_buf_reset_for_reuse`).
+pub fn recv_buf_reset_for_reuse(s: &mut repr::RecvSt, have: &mut [u64]) -> () {
+    // SAFETY: `vesper_warp_recv_buf_reset_for_reuse` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(have, |view_have| unsafe { vesper_warp_recv_buf_reset_for_reuse((s as *mut repr::RecvSt).cast::<u64>(), view_have) });
+    { let _ = raw; }
+}
+
+/// Calls `send_buf_copy_out` of the Vesper library `warp` (`vesper_warp_send_buf_copy_out`).
+pub fn send_buf_copy_out(data: &[u8], off: u64, out: &mut [u8]) -> () {
+    // SAFETY: `vesper_warp_send_buf_copy_out` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice(data, |view_data| vesper_port_abi::with_slice_mut(out, |view_out| unsafe { vesper_warp_send_buf_copy_out(view_data, off as i64, view_out) }));
+    { let _ = raw; }
+}
+
+/// Calls `send_buf_discard` of the Vesper library `warp` (`vesper_warp_send_buf_discard`).
+pub fn send_buf_discard(s: &mut repr::SendSt, acked: &mut [u64], lost: &mut [u64]) -> () {
+    // SAFETY: `vesper_warp_send_buf_discard` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(acked, |view_acked| vesper_port_abi::with_slice_mut(lost, |view_lost| unsafe { vesper_warp_send_buf_discard((s as *mut repr::SendSt).cast::<u64>(), view_acked, view_lost) }));
+    { let _ = raw; }
+}
+
+/// Calls `send_buf_free_space` of the Vesper library `warp` (`vesper_warp_send_buf_free_space`).
+pub fn send_buf_free_space(s: &repr::SendSt) -> u64 {
+    // SAFETY: `vesper_warp_send_buf_free_space` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_send_buf_free_space((s as *const repr::SendSt).cast_mut().cast::<u64>()) };
+    raw as u64
+}
+
+/// Calls `send_buf_new` of the Vesper library `warp` (`vesper_warp_send_buf_new`).
+pub fn send_buf_new(cap: u64) -> repr::SendSt {
+    let mut result = [0u64; 5];
+    // SAFETY: `vesper_warp_send_buf_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_send_buf_new(result.as_mut_ptr(), cap as i64) };
+    vesper_port_abi::mirror_from_words::<repr::SendSt>(&result[0..])
+}
+
+/// Calls `send_buf_next_lost` of the Vesper library `warp` (`vesper_warp_send_buf_next_lost`).
+pub fn send_buf_next_lost(s: &mut repr::SendSt, lost: &mut [u64], max: u64) -> repr::LostRange {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_warp_send_buf_next_lost` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(lost, |view_lost| unsafe { vesper_warp_send_buf_next_lost(result.as_mut_ptr(), (s as *mut repr::SendSt).cast::<u64>(), view_lost, max as i64) });
+    vesper_port_abi::mirror_from_words::<repr::LostRange>(&result[0..])
+}
+
+/// Calls `send_buf_on_ack` of the Vesper library `warp` (`vesper_warp_send_buf_on_ack`).
+pub fn send_buf_on_ack(s: &mut repr::SendSt, acked: &mut [u64], lost: &mut [u64], off: u64, len: u64) -> () {
+    // SAFETY: `vesper_warp_send_buf_on_ack` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(acked, |view_acked| vesper_port_abi::with_slice_mut(lost, |view_lost| unsafe { vesper_warp_send_buf_on_ack((s as *mut repr::SendSt).cast::<u64>(), view_acked, view_lost, off as i64, len as i64) }));
+    { let _ = raw; }
+}
+
+/// Calls `send_buf_on_lost` of the Vesper library `warp` (`vesper_warp_send_buf_on_lost`).
+pub fn send_buf_on_lost(s: &mut repr::SendSt, lost: &mut [u64], acked: &[u64], off: u64, len: u64) -> () {
+    // SAFETY: `vesper_warp_send_buf_on_lost` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(lost, |view_lost| vesper_port_abi::with_slice(acked, |view_acked| unsafe { vesper_warp_send_buf_on_lost((s as *mut repr::SendSt).cast::<u64>(), view_lost, view_acked, off as i64, len as i64) }));
+    { let _ = raw; }
+}
+
+/// Calls `send_buf_reset_for_reuse` of the Vesper library `warp` (`vesper_warp_send_buf_reset_for_reuse`).
+pub fn send_buf_reset_for_reuse(s: &mut repr::SendSt, acked: &mut [u64], lost: &mut [u64]) -> () {
+    // SAFETY: `vesper_warp_send_buf_reset_for_reuse` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(acked, |view_acked| vesper_port_abi::with_slice_mut(lost, |view_lost| unsafe { vesper_warp_send_buf_reset_for_reuse((s as *mut repr::SendSt).cast::<u64>(), view_acked, view_lost) }));
+    { let _ = raw; }
+}
+
+/// Calls `send_buf_take_new` of the Vesper library `warp` (`vesper_warp_send_buf_take_new`).
+pub fn send_buf_take_new(s: &mut repr::SendSt, max: u64) -> repr::LostRange {
+    let mut result = [0u64; 3];
+    // SAFETY: `vesper_warp_send_buf_take_new` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = unsafe { vesper_warp_send_buf_take_new(result.as_mut_ptr(), (s as *mut repr::SendSt).cast::<u64>(), max as i64) };
+    vesper_port_abi::mirror_from_words::<repr::LostRange>(&result[0..])
+}
+
+/// Calls `send_buf_write` of the Vesper library `warp` (`vesper_warp_send_buf_write`).
+pub fn send_buf_write(s: &mut repr::SendSt, data: &mut [u8], src: &[u8]) -> u64 {
+    // SAFETY: `vesper_warp_send_buf_write` has exactly this signature in the export ABI; every
+    // pointer is a live, writable buffer of the size the ABI requires, and
+    // every handle passed is owned or borrowed as its mode requires.
+    let raw = vesper_port_abi::with_slice_mut(data, |view_data| vesper_port_abi::with_slice(src, |view_src| unsafe { vesper_warp_send_buf_write((s as *mut repr::SendSt).cast::<u64>(), view_data, view_src) }));
+    raw as u64
 }
 
 /// Calls `varint_decode` of the Vesper library `warp` (`vesper_warp_varint_decode`).

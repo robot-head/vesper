@@ -1,8 +1,8 @@
 // @vesper/warp: Vesper port of the vesper-warp QUIC core (port wave P3b
 // lane 4, #1066), part 1: varints (varint.rs), packet numbers
 // (packet_number.rs), long and short headers (header.rs), frames
-// (frame.rs), received-packet tracking (ack.rs) and loss recovery
-// (recovery.rs).
+// (frame.rs), received-packet tracking (ack.rs), loss recovery
+// (recovery.rs) and the stream byte buffers (stream.rs).
 //
 // The Rust crate keeps its public types and the parts the export ABI cannot
 // carry: borrowed byte views (a parsed header or frame names its byte
@@ -27,6 +27,22 @@ use self::ack::{
     rx_on_ack_of_ack,
     rx_on_ack_sent,
     rx_on_packet_received
+};
+use self::stream::{
+    rb_insert,
+    rb_new,
+    rb_read,
+    rb_reset_for_reuse,
+    sb_copy_out,
+    sb_discard,
+    sb_free_space,
+    sb_new,
+    sb_next_lost,
+    sb_on_ack,
+    sb_on_lost,
+    sb_reset_for_reuse,
+    sb_take_new,
+    sb_write
 };
 use self::recovery::{
     rec_ack_delay_ns,
@@ -876,4 +892,110 @@ pub fn recovery_pto_time_and_space(
 
 pub fn recovery_pc_duration_ns(in st: RecState, in r: Rtt) -> u64 {
     rec_pc_duration_ns(in st, in r)
+}
+
+// ---------------------------------------------------------------------------
+// stream.rs: SendBuf and RecvBuf
+
+// A `SendBuf`'s offsets (`cap` is the ring's length).
+pub copy struct SendSt {
+    cap: u64,
+    base: u64,
+    next: u64,
+    end: u64,
+    lost_hint: u64
+}
+
+// A `RecvBuf`'s offsets.
+pub copy struct RecvSt {
+    cap: u64,
+    read: u64,
+    contig: u64,
+    highest: u64
+}
+
+// An `Option<(u64, usize)>` range.
+pub copy struct LostRange {
+    has: bool,
+    off: u64,
+    len: u64
+}
+
+pub fn send_buf_new(cap: u64) -> SendSt {
+    sb_new(cap)
+}
+
+pub fn send_buf_free_space(in s: SendSt) -> u64 {
+    sb_free_space(in s)
+}
+
+pub fn send_buf_write(inout s: SendSt, inout data: Slice[u8], in src: Slice[u8]) -> u64 {
+    sb_write(inout s, inout data, in src)
+}
+
+pub fn send_buf_next_lost(inout s: SendSt, inout lost: Slice[u64], max: u64) -> LostRange {
+    sb_next_lost(inout s, inout lost, max)
+}
+
+pub fn send_buf_take_new(inout s: SendSt, max: u64) -> LostRange {
+    sb_take_new(inout s, max)
+}
+
+pub fn send_buf_copy_out(in data: Slice[u8], off: u64, inout out: Slice[u8]) {
+    sb_copy_out(in data, off, inout out)
+}
+
+pub fn send_buf_on_ack(
+    inout s: SendSt,
+    inout acked: Slice[u64],
+    inout lost: Slice[u64],
+    off: u64,
+    len: u64
+) {
+    sb_on_ack(inout s, inout acked, inout lost, off, len)
+}
+
+pub fn send_buf_on_lost(
+    inout s: SendSt,
+    inout lost: Slice[u64],
+    in acked: Slice[u64],
+    off: u64,
+    len: u64
+) {
+    sb_on_lost(inout s, inout lost, in acked, off, len)
+}
+
+pub fn send_buf_discard(inout s: SendSt, inout acked: Slice[u64], inout lost: Slice[u64]) {
+    sb_discard(inout s, inout acked, inout lost)
+}
+
+pub fn send_buf_reset_for_reuse(inout s: SendSt, inout acked: Slice[u64], inout lost: Slice[u64]) {
+    sb_reset_for_reuse(inout s, inout acked, inout lost)
+}
+
+pub fn recv_buf_new(cap: u64) -> RecvSt {
+    rb_new(cap)
+}
+
+pub fn recv_buf_insert(
+    inout s: RecvSt,
+    inout data: Slice[u8],
+    inout have: Slice[u64],
+    off: u64,
+    in src: Slice[u8]
+) -> bool {
+    rb_insert(inout s, inout data, inout have, off, in src)
+}
+
+pub fn recv_buf_read(
+    inout s: RecvSt,
+    in data: Slice[u8],
+    inout have: Slice[u64],
+    inout out: Slice[u8]
+) -> u64 {
+    rb_read(inout s, in data, inout have, inout out)
+}
+
+pub fn recv_buf_reset_for_reuse(inout s: RecvSt, inout have: Slice[u64]) {
+    rb_reset_for_reuse(inout s, inout have)
 }
