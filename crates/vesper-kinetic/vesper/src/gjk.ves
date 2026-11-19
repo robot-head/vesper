@@ -1,0 +1,874 @@
+// Module gjk of @vesper/kinetic (see lib.ves): GJK distance and EPA
+// penetration of src/gjk.rs, every binary64 operation in the Rust order
+// (no fused multiply-add), so the results are the Rust build's bits. A
+// shape is a kind and its numbers: a sphere (0) is `[cx, cy, cz, r]`, a
+// capsule (1) `[ax, ay, az, bx, by, bz, r]`, a polytope (2) its vertices,
+// three numbers each. The Rust wrapper lends them; internal functions
+// return a status (0 ok, else a `GjkError` code) and the export raises.
+use self::util::{
+    dec,
+    inc,
+    shl_u64,
+    shr_u64,
+    u
+};
+
+pub copy struct V3 {
+    x: f64,
+    y: f64,
+    z: f64,
+}
+
+copy struct Sp {
+    w: V3,
+    a: V3,
+    b: V3,
+}
+
+copy struct Face {
+    i: u64,
+    j: u64,
+    k: u64,
+    n: V3,
+    dist: f64,
+}
+
+copy struct Edge {
+    p: u64,
+    q: u64,
+}
+
+// Status codes (src/gjk.rs GjkError, plus success).
+pub fn ok() -> u64 {
+    0
+}
+
+pub fn invalid_shape() -> u64 {
+    1
+}
+
+pub fn no_convergence() -> u64 {
+    2
+}
+
+pub fn degenerate() -> u64 {
+    3
+}
+
+// EPA's flat outcome (not an error).
+fn flat() -> u64 {
+    10
+}
+
+fn v3(x: f64, y: f64, z: f64) -> V3 {
+    V3 {
+        x: x,
+        y: y,
+        z: z
+    }
+}
+
+fn zero3() -> V3 {
+    v3(0.0, 0.0, 0.0)
+}
+
+fn add(a: V3, b: V3) -> V3 {
+    v3(a.x + b.x, a.y + b.y, a.z + b.z)
+}
+
+fn sub(a: V3, b: V3) -> V3 {
+    v3(a.x - b.x, a.y - b.y, a.z - b.z)
+}
+
+fn scale(a: V3, s: f64) -> V3 {
+    v3(a.x * s, a.y * s, a.z * s)
+}
+
+fn dot(a: V3, b: V3) -> f64 {
+    a.x * b.x + a.y * b.y + a.z * b.z
+}
+
+fn cross(a: V3, b: V3) -> V3 {
+    v3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x)
+}
+
+fn norm(a: V3) -> f64 {
+    sqrt(dot(a, a))
+}
+
+fn eq3(a: V3, b: V3) -> bool {
+    a.x == b.x && a.y == b.y && a.z == b.z
+}
+
+fn fabs(x: f64) -> f64 {
+    from_bits_f64(to_bits_f64(x) & 0x7fffffffffffffff)
+}
+
+fn finite(x: f64) -> bool {
+    (to_bits_f64(x) & 0x7ff0000000000000) != 0x7ff0000000000000
+}
+
+fn inf() -> f64 {
+    from_bits_f64(0x7ff0000000000000)
+}
+
+// f64::max: the other operand when one is NaN.
+fn fmax(a: f64, b: f64) -> f64 {
+    if a != a {
+        return b;
+    }
+    if b != b {
+        return a;
+    }
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+fn gd(in s: Slice[f64], i: u64) -> f64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0.0,
+    }
+}
+
+fn vat(in s: Slice[f64], i: u64) -> V3 {
+    v3(gd(in s, i), gd(in s, inc(i)), gd(in s, wrapping_add(i, 2)))
+}
+
+fn sp_at(in s: ChunkSeq[Sp], i: u64) -> Sp {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Sp {
+            w: zero3(),
+            a: zero3(),
+            b: zero3()
+        },
+    }
+}
+
+fn face_at(in s: ChunkSeq[Face], i: u64) -> Face {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Face {
+            i: 0,
+            j: 0,
+            k: 0,
+            n: zero3(),
+            dist: 0.0
+        },
+    }
+}
+
+fn edge_at(in s: ChunkSeq[Edge], i: u64) -> Edge {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => Edge {
+            p: 0,
+            q: 0
+        },
+    }
+}
+
+fn fd_at(in s: ChunkSeq[f64], i: u64) -> f64 {
+    match s.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => 0.0,
+    }
+}
+
+// ----- shapes ----------------------------------------------------------------
+
+pub fn shape_valid(kind: u32, in d: Slice[f64]) -> bool {
+    let n = d.len();
+    if kind == 2 {
+        if n == 0 || n % 3 != 0 {
+            return false;
+        }
+        for i in 0..n {
+            if !finite(gd(in d, i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    let want: u64 = if kind == 0 {
+        4
+    } else {
+        7
+    };
+    if kind > 1 || n != want {
+        return false;
+    }
+    for i in 0..n {
+        if !finite(gd(in d, i)) {
+            return false;
+        }
+    }
+    gd(in d, dec(n)) >= 0.0
+}
+
+pub fn radius(kind: u32, in d: Slice[f64]) -> f64 {
+    if kind == 0 {
+        gd(in d, 3)
+    } else if kind == 1 {
+        gd(in d, 6)
+    } else {
+        0.0
+    }
+}
+
+// Support point of the core in direction `dir` (first maximiser on ties).
+fn core_support(kind: u32, in d: Slice[f64], dir: V3) -> V3 {
+    if kind == 0 {
+        return vat(in d, 0);
+    }
+    if kind == 1 {
+        let a = vat(in d, 0);
+        let b = vat(in d, 3);
+        return if dot(b, dir) > dot(a, dir) {
+            b
+        } else {
+            a
+        };
+    }
+    let count = d.len() / 3;
+    let mut best = vat(in d, 0);
+    let mut best_dot = dot(best, dir);
+    for i in 1..count {
+        let v = vat(in d, wrapping_mul(i, 3));
+        let s = dot(v, dir);
+        if s > best_dot {
+            best = v;
+            best_dot = s;
+        }
+    }
+    best
+}
+
+fn some_point(kind: u32, in d: Slice[f64]) -> V3 {
+    vat(in d, 0)
+}
+
+fn support_point(ka: u32, in da: Slice[f64], kb: u32, in db: Slice[f64], dir: V3) -> Sp {
+    let a = core_support(ka, in da, dir);
+    let b = core_support(kb, in db, scale(dir, -1.0));
+    Sp {
+        w: sub(a, b),
+        a: a,
+        b: b
+    }
+}
+
+// ----- the closest point of a simplex ----------------------------------------
+
+// Row `r`, column `c` of the 3 x 4 elimination matrix in `g`.
+fn gm(in g: ChunkSeq[f64], r: u64, c: u64) -> f64 {
+    fd_at(in g, wrapping_add(wrapping_mul(r, 4), c))
+}
+
+fn gset(inout g: ChunkSeq[f64], r: u64, c: u64, v: f64) {
+    g.try_set(wrapping_add(wrapping_mul(r, 4), c), v);
+}
+
+// Index of the `k`-th set bit of `mask`.
+fn nth_bit(mask: u64, k: u64) -> u64 {
+    let mut seen: u64 = 0;
+    for i in 0..u(4) {
+        if (shr_u64(mask, wrapping_u32(i)) & 1) == 1 {
+            if seen == k {
+                return i;
+            }
+            seen = inc(seen);
+        }
+    }
+    0
+}
+
+fn bit_count(mask: u64) -> u64 {
+    widen_u64(count_ones_u64(mask))
+}
+
+// The barycentric weights (into `lam`) of the origin's projection onto the
+// affine hull of the points of `pts` that `mask` selects, if it lies
+// strictly inside that face (src/gjk.rs affine_closest).
+fn affine_closest(in pts: ChunkSeq[Sp], mask: u64, inout lam: ChunkSeq[f64], inout g: ChunkSeq[f64])
+    -> bool {
+    let k = bit_count(mask);
+    for i in 0..u(4) {
+        lam.try_set(i, 0.0);
+    }
+    let y0 = sp_at(in pts, nth_bit(mask, 0)).w;
+    if k == 1 {
+        lam.try_set(0, 1.0);
+        return true;
+    }
+    let m = dec(k);
+    for i in 0..m {
+        let ei = sub(sp_at(in pts, nth_bit(mask, inc(i))).w, y0);
+        for j in 0..m {
+            let ej = sub(sp_at(in pts, nth_bit(mask, inc(j))).w, y0);
+            gset(inout g, i, j, dot(ei, ej));
+        }
+        gset(inout g, i, 3, 0.0 - dot(ei, y0));
+    }
+    let mut scale_ref: f64 = 0.0;
+    for i in 0..m {
+        scale_ref = fmax(scale_ref, gm(in g, i, i));
+    }
+    let tiny = 0.000000000001 * fmax(scale_ref, from_bits_f64(0x0010000000000000));
+    for col in 0..m {
+        let mut piv = col;
+        for row in inc(col)..m {
+            if fabs(gm(in g, row, col)) > fabs(gm(in g, piv, col)) {
+                piv = row;
+            }
+        }
+        if fabs(gm(in g, piv, col)) <= tiny {
+            return false;
+        }
+        if piv != col {
+            for c in 0..u(4) {
+                let t = gm(in g, col, c);
+                let pv = gm(in g, piv, c);
+                gset(inout g, col, c, pv);
+                gset(inout g, piv, c, t);
+            }
+        }
+        for row in 0..m {
+            if row != col {
+                let f = gm(in g, row, col) / gm(in g, col, col);
+                for c in col..u(4) {
+                    let nv = gm(in g, row, c) - f * gm(in g, col, c);
+                    gset(inout g, row, c, nv);
+                }
+            }
+        }
+    }
+    let mut sum: f64 = 0.0;
+    for i in 0..m {
+        let mu = gm(in g, i, 3) / gm(in g, i, i);
+        if !(mu > 0.0) {
+            return false;
+        }
+        lam.try_set(inc(i), mu);
+        sum = sum + mu;
+    }
+    let l0 = 1.0 - sum;
+    lam.try_set(0, l0);
+    if !(l0 > 0.0) {
+        return false;
+    }
+    true
+}
+
+// Reduce `simplex` to the face supporting its closest point to the origin;
+// `lambdas` gets that face's weights. Returns the point.
+fn closest_on_simplex(
+    inout simplex: ChunkSeq[Sp],
+    inout lambdas: ChunkSeq[f64],
+    inout lam: ChunkSeq[f64],
+    inout best_l: ChunkSeq[f64],
+    inout g: ChunkSeq[f64]
+) -> V3 {
+    let n = simplex.len();
+    let mut found = false;
+    let mut best_d2: f64 = 0.0;
+    let mut best_mask: u64 = 1;
+    let top: u64 = shl_u64(1, wrapping_u32(n));
+    for mask in 1..top {
+        if affine_closest(in simplex, mask, inout lam, inout g) {
+            let k = bit_count(mask);
+            let mut v = zero3();
+            for t in 0..k {
+                v = add(v, scale(sp_at(in simplex, nth_bit(mask, t)).w, fd_at(in lam, t)));
+            }
+            let d2 = dot(v, v);
+            if !found || d2 < best_d2 {
+                found = true;
+                best_d2 = d2;
+                best_mask = mask;
+                for t in 0..u(4) {
+                    best_l.try_set(t, fd_at(in lam, t));
+                }
+            }
+        }
+    }
+    let k = bit_count(best_mask);
+    let mut kept: ChunkSeq[Sp] = ChunkSeq::with_capacity[Sp](k);
+    for t in 0..k {
+        kept.push(sp_at(in simplex, nth_bit(best_mask, t)));
+    }
+    simplex = kept;
+    lambdas.clear();
+    for t in 0..k {
+        lambdas.push(fd_at(in best_l, t));
+    }
+    let mut v = zero3();
+    for t in 0..k {
+        v = add(v, scale(sp_at(in simplex, t).w, fd_at(in lambdas, t)));
+    }
+    v
+}
+
+// ----- GJK -------------------------------------------------------------------
+
+// GJK on the cores. `res` gets [distance, v (3), point_a (3), point_b (3)];
+// `simplex` the final simplex. Returns a status.
+fn gjk_cores(
+    ka: u32,
+    in da: Slice[f64],
+    kb: u32,
+    in db: Slice[f64],
+    inout simplex: ChunkSeq[Sp],
+    inout res: ChunkSeq[f64]
+) -> u64 {
+    let mut lam: ChunkSeq[f64] = ChunkSeq::with_capacity[f64](4);
+    lam.resize(4, 0.0);
+    let mut best_l: ChunkSeq[f64] = ChunkSeq::with_capacity[f64](4);
+    best_l.resize(4, 0.0);
+    let mut g: ChunkSeq[f64] = ChunkSeq::with_capacity[f64](12);
+    g.resize(12, 0.0);
+    let start = sub(some_point(ka, in da), some_point(kb, in db));
+    let first = support_point(ka, in da, kb, in db, scale(start, -1.0));
+    simplex.clear();
+    simplex.push(first);
+    let mut lambdas: ChunkSeq[f64] = ChunkSeq::with_capacity[f64](4);
+    lambdas.push(1.0);
+    let mut v = first.w;
+    let size = norm(first.w);
+    let mut converged = false;
+    let mut stalled = false;
+    let mut best_vv = inf();
+    for it in 0..u(128) {
+        let vv = dot(v, v);
+        if vv <= 0.000000000000000000000001 * size * size || simplex.len() == 4 {
+            converged = true;
+            break;
+        }
+        if !(vv < best_vv) {
+            converged = true;
+            stalled = true;
+            break;
+        }
+        best_vv = vv;
+        let p = support_point(ka, in da, kb, in db, scale(v, -1.0));
+        let mut seen = false;
+        for i in 0..simplex.len() {
+            if eq3(sp_at(in simplex, i).w, p.w) {
+                seen = true;
+            }
+        }
+        if vv - dot(v, p.w) <= 0.000000000001 * vv || seen {
+            converged = true;
+            break;
+        }
+        simplex.push(p);
+        v = closest_on_simplex(inout simplex, inout lambdas, inout lam, inout best_l, inout g);
+    }
+    if !converged {
+        return no_convergence();
+    }
+    let mut pa = zero3();
+    let mut pb = zero3();
+    for i in 0..simplex.len() {
+        let s = sp_at(in simplex, i);
+        let l = fd_at(in lambdas, i);
+        pa = add(pa, scale(s.a, l));
+        pb = add(pb, scale(s.b, l));
+    }
+    let vv = dot(v, v);
+    let distance = if vv
+        <= 0.000000000000000000000001
+        * size
+        * size
+        || simplex
+        .len()
+        == 4
+        || (stalled && vv <= 0.000000000001 * size * size) {
+        0.0
+    } else {
+        sqrt(vv)
+    };
+    res.clear();
+    res.push(distance);
+    put3(inout res, v);
+    put3(inout res, pa);
+    put3(inout res, pb);
+    ok()
+}
+
+fn put3(inout s: ChunkSeq[f64], v: V3) {
+    s.push(v.x);
+    s.push(v.y);
+    s.push(v.z);
+}
+
+fn res3(in s: ChunkSeq[f64], at: u64) -> V3 {
+    v3(fd_at(in s, at), fd_at(in s, inc(at)), fd_at(in s, wrapping_add(at, 2)))
+}
+
+// ----- EPA -------------------------------------------------------------------
+
+// A unit vector normal to the flat set spanned by `line` and `plane`.
+fn flat_normal(line: V3, plane: V3) -> V3 {
+    let pn = norm(plane);
+    if pn > 0.0 {
+        return canonical_sign(scale(plane, 1.0 / pn));
+    }
+    let ln = norm(line);
+    if ln > 0.0 {
+        let l = scale(line, 1.0 / ln);
+        let axis = if fabs(l.x) <= fabs(l.y) && fabs(l.x) <= fabs(l.z) {
+            v3(1.0, 0.0, 0.0)
+        } else if fabs(l.y) <= fabs(l.z) {
+            v3(0.0, 1.0, 0.0)
+        } else {
+            v3(0.0, 0.0, 1.0)
+        };
+        let c = cross(l, axis);
+        return canonical_sign(scale(c, 1.0 / norm(c)));
+    }
+    v3(0.0, 1.0, 0.0)
+}
+
+fn canonical_sign(v: V3) -> V3 {
+    let first = if v.x != 0.0 {
+        v.x
+    } else if v.y != 0.0 {
+        v.y
+    } else if v.z != 0.0 {
+        v.z
+    } else {
+        1.0
+    };
+    if first < 0.0 {
+        scale(v, -1.0)
+    } else {
+        v
+    }
+}
+
+fn epa_tol() -> f64 {
+    0.000000001
+}
+
+// make_face of src/gjk.rs; `false` when the face has no normal.
+fn make_face(in pts: ChunkSeq[Sp], i: u64, j: u64, k: u64, inside: V3, inout out: ChunkSeq[Face])
+    -> bool {
+    let a = sp_at(in pts, i).w;
+    let b = sp_at(in pts, j).w;
+    let c = sp_at(in pts, k).w;
+    let n0 = cross(sub(b, a), sub(c, a));
+    let len = norm(n0);
+    if !(len > 0.0) {
+        return false;
+    }
+    let mut n = scale(n0, 1.0 / len);
+    let mut jj = j;
+    let mut kk = k;
+    if dot(n, sub(inside, a)) > 0.0 {
+        n = scale(n, -1.0);
+        jj = k;
+        kk = j;
+    }
+    out
+        .push(
+        Face {
+            i: i,
+            j: jj,
+            k: kk,
+            n: n,
+            dist: dot(n, a)
+        }
+    );
+    true
+}
+
+// Index of the candidate maximising the mode's measure: 0 `|w - a0|`, 1
+// `|(w - a0) x (a1 - a0)|`, 2 `|(w - a0) . plane|`.
+fn far(in cand: ChunkSeq[Sp], mode: u64, a0: V3, a1: V3, plane: V3) -> u64 {
+    let mut best: u64 = 0;
+    let mut best_v = 0.0 - inf();
+    for i in 0..cand.len() {
+        let w = sp_at(in cand, i).w;
+        let v = if mode == 0 {
+            norm(sub(w, a0))
+        } else if mode == 1 {
+            norm(cross(sub(w, a0), sub(a1, a0)))
+        } else {
+            fabs(dot(sub(w, a0), plane))
+        };
+        if v > best_v {
+            best_v = v;
+            best = i;
+        }
+    }
+    best
+}
+
+// The penetration from the closest face (src/gjk.rs epa_result) into `res`:
+// [distance, normal (3), point_a (3), point_b (3)].
+fn epa_result(in pts: ChunkSeq[Sp], face: Face, inout res: ChunkSeq[f64]) {
+    let p = scale(face.n, face.dist);
+    let a = sp_at(in pts, face.i);
+    let b = sp_at(in pts, face.j);
+    let c = sp_at(in pts, face.k);
+    let v0 = sub(b.w, a.w);
+    let v1 = sub(c.w, a.w);
+    let v2 = sub(p, a.w);
+    let d00 = dot(v0, v0);
+    let d01 = dot(v0, v1);
+    let d11 = dot(v1, v1);
+    let d20 = dot(v2, v0);
+    let d21 = dot(v2, v1);
+    let den = d00 * d11 - d01 * d01;
+    let mut wu = 1.0;
+    let mut wv = 0.0;
+    let mut ww = 0.0;
+    if den != 0.0 {
+        wv = (d11 * d20 - d01 * d21) / den;
+        ww = (d00 * d21 - d01 * d20) / den;
+        wu = 1.0 - wv - ww;
+    }
+    let point_a = add(add(scale(a.a, wu), scale(b.a, wv)), scale(c.a, ww));
+    let point_b = add(add(scale(a.b, wu), scale(b.b, wv)), scale(c.b, ww));
+    res.clear();
+    res.push(0.0 - face.dist);
+    put3(inout res, face.n);
+    put3(inout res, point_a);
+    put3(inout res, point_b);
+}
+
+fn flat_result(n: V3, inout res: ChunkSeq[f64]) -> u64 {
+    res.clear();
+    res.push(0.0);
+    put3(inout res, n);
+    flat()
+}
+
+fn push_dir(
+    ka: u32,
+    in da: Slice[f64],
+    kb: u32,
+    in db: Slice[f64],
+    inout cand: ChunkSeq[Sp],
+    d: V3
+) {
+    cand.push(support_point(ka, in da, kb, in db, d));
+}
+
+// EPA on the cores from the GJK simplex `seed`: 0 with the penetration in
+// `res`, `flat()` with the flat normal in `res[1..4]`, or an error status.
+fn epa(
+    ka: u32,
+    in da: Slice[f64],
+    kb: u32,
+    in db: Slice[f64],
+    in seed: ChunkSeq[Sp],
+    inout res: ChunkSeq[f64]
+) -> u64 {
+    let mut cand: ChunkSeq[Sp] = ChunkSeq::with_capacity[Sp](wrapping_add(seed.len(), 20));
+    for i in 0..seed.len() {
+        cand.push(sp_at(in seed, i));
+    }
+    push_dir(ka, in da, kb, in db, inout cand, v3(1.0, 0.0, 0.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(-1.0, 0.0, 0.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(0.0, 1.0, 0.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(0.0, -1.0, 0.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(0.0, 0.0, 1.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(0.0, 0.0, -1.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(1.0, 1.0, 1.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(-1.0, -1.0, -1.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(1.0, -1.0, 1.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(-1.0, 1.0, -1.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(1.0, 1.0, -1.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(-1.0, -1.0, 1.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(-1.0, 1.0, 1.0));
+    push_dir(ka, in da, kb, in db, inout cand, v3(1.0, -1.0, -1.0));
+    let p0: u64 = 0;
+    let a0 = sp_at(in cand, p0).w;
+    let z = zero3();
+    let p1 = far(in cand, 0, a0, z, z);
+    let a1 = sp_at(in cand, p1).w;
+    let u0 = flat_normal(sub(a1, a0), z);
+    let v0 = cross(sub(a1, a0), u0);
+    push_dir(ka, in da, kb, in db, inout cand, u0);
+    push_dir(ka, in da, kb, in db, inout cand, scale(u0, -1.0));
+    push_dir(ka, in da, kb, in db, inout cand, v0);
+    push_dir(ka, in da, kb, in db, inout cand, scale(v0, -1.0));
+    let p2 = far(in cand, 1, a0, a1, z);
+    let a2 = sp_at(in cand, p2).w;
+    let plane = cross(sub(a1, a0), sub(a2, a0));
+    push_dir(ka, in da, kb, in db, inout cand, plane);
+    push_dir(ka, in da, kb, in db, inout cand, scale(plane, -1.0));
+    let p3 = far(in cand, 2, a0, a1, plane);
+    let a3 = sp_at(in cand, p3).w;
+    let extent = norm(sub(a1, a0));
+    if !(extent > 0.000000000001) {
+        return flat_result(flat_normal(z, z), inout res);
+    }
+    if !(norm(plane) > 0.000000000001 * extent * extent) {
+        return flat_result(flat_normal(sub(a1, a0), z), inout res);
+    }
+    let volume = fabs(dot(sub(a3, a0), plane));
+    if !(volume > 0.000000000001 * extent * extent * extent) {
+        return flat_result(flat_normal(sub(a1, a0), plane), inout res);
+    }
+    let mut pts: ChunkSeq[Sp] = ChunkSeq::with_capacity[Sp](64);
+    pts.push(sp_at(in cand, p0));
+    pts.push(sp_at(in cand, p1));
+    pts.push(sp_at(in cand, p2));
+    pts.push(sp_at(in cand, p3));
+    let inside = scale(add(add(a0, a1), add(a2, a3)), 0.25);
+    let mut faces: ChunkSeq[Face] = ChunkSeq::with_capacity[Face](64);
+    if !make_face(in pts, 0, 1, 2, inside, inout faces)
+        || !make_face(in pts, 0, 1, 3, inside, inout faces)
+        || !make_face(in pts, 0, 2, 3, inside, inout faces)
+        || !make_face(in pts, 1, 2, 3, inside, inout faces) {
+        return degenerate();
+    }
+    let size = fmax(extent, 1.0);
+    let tol = epa_tol() * size;
+    let mut horizon: ChunkSeq[Edge] = ChunkSeq::with_capacity[Edge](32);
+    let mut kept: ChunkSeq[Face] = ChunkSeq::with_capacity[Face](64);
+    for it in 0..u(256) {
+        let mut best: u64 = 0;
+        for i in 0..faces.len() {
+            if face_at(in faces, i).dist < face_at(in faces, best).dist {
+                best = i;
+            }
+        }
+        let face = face_at(in faces, best);
+        let p = support_point(ka, in da, kb, in db, face.n);
+        let gain = dot(p.w, face.n) - face.dist;
+        if gain <= tol {
+            epa_result(in pts, face, inout res);
+            return ok();
+        }
+        horizon.clear();
+        kept.clear();
+        for fi in 0..faces.len() {
+            let f = face_at(in faces, fi);
+            if dot(f.n, sub(p.w, sp_at(in pts, f.i).w)) > tol {
+                toggle_edge(inout horizon, f.i, f.j);
+                toggle_edge(inout horizon, f.j, f.k);
+                toggle_edge(inout horizon, f.k, f.i);
+            } else {
+                kept.push(f);
+            }
+        }
+        if horizon.len() == 0 {
+            epa_result(in pts, face, inout res);
+            return ok();
+        }
+        pts.push(p);
+        let new = dec(pts.len());
+        faces.clear();
+        for fi in 0..kept.len() {
+            faces.push(face_at(in kept, fi));
+        }
+        for hi in 0..horizon.len() {
+            let e = edge_at(in horizon, hi);
+            if !make_face(in pts, e.p, e.q, new, inside, inout faces) {
+                epa_result(in pts, face, inout res);
+                return ok();
+            }
+        }
+    }
+    no_convergence()
+}
+
+// Add the edge `(p, q)` to the horizon, or remove its reverse
+// (`swap_remove`, as src/gjk.rs does).
+fn toggle_edge(inout horizon: ChunkSeq[Edge], p: u64, q: u64) {
+    let n = horizon.len();
+    for i in 0..n {
+        let h = edge_at(in horizon, i);
+        if h.p == q && h.q == p {
+            let last = edge_at(in horizon, dec(n));
+            horizon.try_set(i, last);
+            horizon.truncate(dec(n));
+            return ();
+        }
+    }
+    horizon
+        .push(
+        Edge {
+            p: p,
+            q: q
+        }
+    );
+}
+
+// ----- separation --------------------------------------------------------------
+
+// src/gjk.rs separation into `out` ([distance, normal (3), point_a (3),
+// point_b (3)]); a status.
+pub fn separation(ka: u32, in da: Slice[f64], kb: u32, in db: Slice[f64], inout out: Slice[f64])
+    -> u64 {
+    if !shape_valid(ka, in da) || !shape_valid(kb, in db) {
+        return invalid_shape();
+    }
+    let mut simplex: ChunkSeq[Sp] = ChunkSeq::with_capacity[Sp](4);
+    let mut res: ChunkSeq[f64] = ChunkSeq::with_capacity[f64](10);
+    let st = gjk_cores(ka, in da, kb, in db, inout simplex, inout res);
+    if st != ok() {
+        return st;
+    }
+    let ra = radius(ka, in da);
+    let rb = radius(kb, in db);
+    let radii = ra + rb;
+    let gd0 = fd_at(in res, 0);
+    let gv = res3(in res, 1);
+    let gpa = res3(in res, 4);
+    let gpb = res3(in res, 7);
+    if gd0 > 0.0 {
+        let normal = scale(gv, -1.0 / gd0);
+        write_sep(
+            inout out,
+            gd0 - radii,
+            normal,
+            add(gpa, scale(normal, ra)),
+            sub(gpb, scale(normal, rb))
+        );
+        return ok();
+    }
+    let mut er: ChunkSeq[f64] = ChunkSeq::with_capacity[f64](10);
+    let e = epa(ka, in da, kb, in db, in simplex, inout er);
+    if e == ok() {
+        let n = res3(in er, 1);
+        write_sep(
+            inout out,
+            fd_at(in er, 0) - radii,
+            n,
+            add(res3(in er, 4), scale(n, ra)),
+            sub(res3(in er, 7), scale(n, rb))
+        );
+        return ok();
+    }
+    if e == flat() {
+        if radii == 0.0 {
+            return degenerate();
+        }
+        let n = res3(in er, 1);
+        write_sep(inout out, 0.0 - radii, n, add(gpa, scale(n, ra)), sub(gpb, scale(n, rb)));
+        return ok();
+    }
+    e
+}
+
+fn write_sep(inout out: Slice[f64], d: f64, n: V3, pa: V3, pb: V3) {
+    out.try_set(0, d);
+    out.try_set(1, n.x);
+    out.try_set(2, n.y);
+    out.try_set(3, n.z);
+    out.try_set(4, pa.x);
+    out.try_set(5, pa.y);
+    out.try_set(6, pa.z);
+    out.try_set(7, pb.x);
+    out.try_set(8, pb.y);
+    out.try_set(9, pb.z);
+}

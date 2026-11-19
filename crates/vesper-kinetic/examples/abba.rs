@@ -13,6 +13,8 @@
 //!   each, plus the five binary32 functions.
 //! - `crmath`: the correctly rounded `sin`, `cos`, `exp`, `log` and `atan2`
 //!   of 64 arguments each (part 3).
+//! - `gjk`: `gjk::separation` of 256 random shape pairs (sphere, capsule
+//!   and box hulls, separated and overlapping; part 4).
 //! - `colorer`: `Colorer::color` of 8,192 two-body constraints over 2,048
 //!   bodies.
 //! - `multi-colorer`: `MultiColorer::color` of 4,096 four-body sets over
@@ -35,7 +37,7 @@ macro_rules! workloads {
             use $s::lbvh::{Aabb, Lbvh};
             use $s::{
                 Body, BroadphaseMode, Colorer, ConstraintBodies, DistanceConstraint, MultiColorer,
-                SphereCollider, SweepAndPrune, World, WorldConfig, crmath, fastmath, morton,
+                SphereCollider, SweepAndPrune, World, WorldConfig, crmath, fastmath, gjk, morton,
             };
 
             fn rng(state: &mut u64) -> u64 {
@@ -105,6 +107,58 @@ macro_rules! workloads {
                         crmath::atan2(v, 1.5),
                     ] {
                         acc = acc.wrapping_add(y.to_bits());
+                    }
+                }
+                acc
+            }
+
+            pub fn gjk(seed: u64) -> u64 {
+                let mut x = seed | 1;
+                let mut acc = 0u64;
+                let unit = |x: &mut u64| (rng(x) >> 11) as f64 / (1u64 << 53) as f64;
+                for _ in 0..256 {
+                    let shape = |x: &mut u64, hull: &mut [[f64; 3]; 8]| {
+                        let c = [unit(x) * 3.0, unit(x) * 3.0, unit(x) * 3.0];
+                        let r = 0.2 + unit(x);
+                        match rng(x) % 3 {
+                            0 => (0, c, r),
+                            1 => (1, c, r * 0.5),
+                            _ => {
+                                for (i, v) in hull.iter_mut().enumerate() {
+                                    for (a, e) in v.iter_mut().enumerate() {
+                                        let sign = if i >> a & 1 == 1 { 1.0 } else { -1.0 };
+                                        *e = c[a] + sign * r * (0.7 + 0.3 * unit(x));
+                                    }
+                                }
+                                (2, c, r)
+                            }
+                        }
+                    };
+                    let (mut ha, mut hb) = ([[0.0; 3]; 8], [[0.0; 3]; 8]);
+                    let a = shape(&mut x, &mut ha);
+                    let b = shape(&mut x, &mut hb);
+                    fn make((k, c, r): (u32, [f64; 3], f64), h: &[[f64; 3]; 8]) -> gjk::Shape<'_> {
+                        match k {
+                            0 => gjk::Shape::Sphere {
+                                center: c,
+                                radius: r,
+                            },
+                            1 => gjk::Shape::Capsule {
+                                a: c,
+                                b: [c[0] + 0.8, c[1] - 0.3, c[2] + 0.5],
+                                radius: r,
+                            },
+                            _ => gjk::Shape::Polytope {
+                                vertices: h.as_slice(),
+                            },
+                        }
+                    }
+                    let (sa, sb) = (make(a, &ha), make(b, &hb));
+                    match gjk::separation(&sa, &sb) {
+                        Ok(s) => {
+                            acc = acc.wrapping_add(s.distance.to_bits() ^ s.normal[1].to_bits())
+                        }
+                        Err(e) => acc = acc.wrapping_add(e as u64),
                     }
                 }
                 acc
@@ -289,10 +343,11 @@ workloads!(port_build, vesper_kinetic);
 
 type Work = fn(u64) -> u64;
 
-const WORKLOADS: [(&str, Work, Work); 10] = [
+const WORKLOADS: [(&str, Work, Work); 11] = [
     ("morton", rust_build::morton, port_build::morton),
     ("fastmath", rust_build::fastmath, port_build::fastmath),
     ("crmath", rust_build::crmath, port_build::crmath),
+    ("gjk", rust_build::gjk, port_build::gjk),
     ("colorer", rust_build::colorer, port_build::colorer),
     (
         "multi-colorer",

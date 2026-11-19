@@ -33,6 +33,9 @@ use self::crmath::{
     log_bits as c_log_bits,
     sin_cos_bits as c_sin_cos_bits
 };
+use self::gjk::{
+    separation as g_separation
+};
 use self::fastmath::{
     atan2 as f_atan2,
     atan2f as f_atan2f,
@@ -445,4 +448,33 @@ pub fn sap_write_pairs(
 
 pub fn sap_sortable(bits: u32) -> u32 {
     s_sortable(bits)
+}
+
+// ---------------------------------------------------------------------------
+// gjk.rs. A shape is a kind (0 sphere, 1 capsule, 2 polytope) and its
+// numbers (see module gjk); `out` gets distance, normal, point a, point b.
+
+pub copy enum GjkError {
+    InvalidShape,
+    NoConvergence,
+    Degenerate
+}
+
+pub fn gjk_separation(
+    ka: u32,
+    in da: Slice[f64],
+    kb: u32,
+    in db: Slice[f64],
+    inout out: Slice[f64]
+) eff [Fail[GjkError]] {
+    let status = g_separation(ka, in da, kb, in db, inout out);
+    if status == 1 {
+        Fail::raise(GjkError::InvalidShape);
+    }
+    if status == 2 {
+        Fail::raise(GjkError::NoConvergence);
+    }
+    if status == 3 {
+        Fail::raise(GjkError::Degenerate);
+    }
 }
