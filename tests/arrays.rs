@@ -396,6 +396,9 @@ fn main() -> u64 {
         "for i in 0..16 { s = wrapping_add(s, a[16 - i]); }",
         "for i in 0..=17 { s = wrapping_add(s, 16 - i); }",
         "for i in 0..16 { s = wrapping_add(s, i - 1); }",
+        // The right operand reassigns `j` after the left one read it.
+        "let mut j: u64 = 20; s = a[j + ({ j = 0; 0 } & 0)];",
+        "let mut j: u64 = 20; s = a[j & { j = 0; 255 }];",
     ] {
         rejects(
             &format!(
