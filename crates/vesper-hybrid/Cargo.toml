@@ -52,6 +52,7 @@ vesper-bench-pmu = { path = "../vesper-bench-pmu" }
 # The compiler links the frozen Rust seed copy (seed-copy rule, #906).
 vesper-grammar = { path = "../vesper-grammar/seed", package = "vesper-grammar-seed" }
 vesper-doc = { path = "../vesper-doc" }
+vesper-test = { path = "../vesper-test" }
 # The compiler links the frozen Rust seed copy, never the port-backed package
 # (seed-copy rule, docs/maintenance/porting-a-crate.md).
 vesper-beacon = { path = "../vesper-beacon/seed", package = "vesper-beacon-seed" }

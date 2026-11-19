@@ -6086,6 +6086,7 @@ dependencies = [
  "vesper-span-seed",
  "vesper-syntax",
  "vesper-tensor-seed",
+ "vesper-test",
  "vesper-vault",
  "wasm-encoder 0.261.0",
  "wit-component",

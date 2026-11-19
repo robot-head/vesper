@@ -1108,12 +1108,18 @@ fn pub_item_follows(in p: P) -> bool {
     at_word(in p, 1, w_trait())
         || (at_word(in p, 1, w_const()) && nth(in p, 2) == k_upper())
         || at_word(in p, 1, w_model())
-        || nth(in p, 1) == k_fn()
+        || nth(in p, 1)
+        == k_fn()
         || is_type_decl_kind(nth(in p, 1))
         || (is_mode_kind(nth(in p, 1)) && is_type_decl_kind(nth(in p, 2)))
         || (
-        nth(in p, 1) == k_at()
-            && (at_word(in p, 2, w_fip()) || at_word(in p, 2, w_test()) || at_word(in p, 2, w_test_case()))
+        nth(in p, 1)
+            == k_at()
+            && (
+            at_word(in p, 2, w_fip())
+                || at_word(in p, 2, w_test())
+                || at_word(in p, 2, w_test_case())
+        )
     )
 }
 
