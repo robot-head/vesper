@@ -11,6 +11,8 @@
 //! - `morton`: 4,096 encodes and decodes of 30-bit codes.
 //! - `fastmath`: `sin`, `cos`, `exp`, `log` and `atan2` of 512 arguments
 //!   each, plus the five binary32 functions.
+//! - `crmath`: the correctly rounded `sin`, `cos`, `exp`, `log` and `atan2`
+//!   of 64 arguments each (part 3).
 //! - `colorer`: `Colorer::color` of 8,192 two-body constraints over 2,048
 //!   bodies.
 //! - `multi-colorer`: `MultiColorer::color` of 4,096 four-body sets over
@@ -33,7 +35,7 @@ macro_rules! workloads {
             use $s::lbvh::{Aabb, Lbvh};
             use $s::{
                 Body, BroadphaseMode, Colorer, ConstraintBodies, DistanceConstraint, MultiColorer,
-                SphereCollider, SweepAndPrune, World, WorldConfig, fastmath, morton,
+                SphereCollider, SweepAndPrune, World, WorldConfig, crmath, fastmath, morton,
             };
 
             fn rng(state: &mut u64) -> u64 {
@@ -84,6 +86,25 @@ macro_rules! workloads {
                         fastmath::atan2f(f, 1.5),
                     ] {
                         acc = acc.wrapping_add(u64::from(y.to_bits()));
+                    }
+                }
+                acc
+            }
+
+            pub fn crmath(seed: u64) -> u64 {
+                let mut x = seed | 1;
+                let mut acc = 0u64;
+                for _ in 0..64 {
+                    let r = rng(&mut x);
+                    let v = (r >> 11) as f64 / (1u64 << 53) as f64 * 200.0 - 100.0;
+                    for y in [
+                        crmath::sin(v),
+                        crmath::cos(v),
+                        crmath::exp(v * 0.25),
+                        crmath::log(v.abs() + 1e-3),
+                        crmath::atan2(v, 1.5),
+                    ] {
+                        acc = acc.wrapping_add(y.to_bits());
                     }
                 }
                 acc
@@ -268,9 +289,10 @@ workloads!(port_build, vesper_kinetic);
 
 type Work = fn(u64) -> u64;
 
-const WORKLOADS: [(&str, Work, Work); 9] = [
+const WORKLOADS: [(&str, Work, Work); 10] = [
     ("morton", rust_build::morton, port_build::morton),
     ("fastmath", rust_build::fastmath, port_build::fastmath),
+    ("crmath", rust_build::crmath, port_build::crmath),
     ("colorer", rust_build::colorer, port_build::colorer),
     (
         "multi-colorer",

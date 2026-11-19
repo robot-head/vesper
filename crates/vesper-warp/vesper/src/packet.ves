@@ -1,0 +1,172 @@
+// Module packet of @vesper/warp (see lib.ves): the per-packet assembly of
+// endpoint.rs. `short_plain` writes one 1-RTT packet's plain text (the
+// short header, an optional ACK frame and the application's frames) into
+// the endpoint's scratch buffer: `WarpEndpoint::write_plaintext` with the
+// endpoint's tables, keys and UMEM frames left in Rust.
+use self::{
+    AckErr,
+    AckRange,
+    FrameErr,
+    FrameW,
+    HdrErr,
+    PlainErr,
+    PlainOut,
+    PnErr,
+    RxState,
+    Sp
+};
+use self::ack::{
+    rx_ack_delay
+};
+use self::frame::{
+    fr_check_ranges,
+    fr_encode
+};
+use self::header::{
+    hdr_write_short_to_peer
+};
+use self::pn::{
+    pn_encoded_len
+};
+
+// A short header's largest size: the first byte, a 20-byte DCID and a
+// 4-byte packet number. Frames are written after it, then moved once the
+// packet number length is known.
+fn max_short_header() -> u64 {
+    25
+}
+
+fn tag_len() -> u64 {
+    16
+}
+
+fn no_span() -> Sp {
+    Sp {
+        start: 0,
+        len: 0
+    }
+}
+
+// The ACK frame of `rx` at `at`, or 0 bytes when none is owed (or the
+// ranges do not form a valid frame, which `ack_frame` reports as none).
+fn put_ack(
+    inout out: Slice[u8],
+    at: u64,
+    in none: Slice[u8],
+    in rx: RxState,
+    in ranges: Slice[AckRange],
+    now_ns: u64,
+    exponent: u8
+) -> u64 eff [Fail[AckErr], Fail[FrameErr]] {
+    let delay = match rx_ack_delay(in rx, now_ns, exponent) {
+        Option::Some(d) => d,
+        Option::None => return 0,
+    };
+    let n = rx.len;
+    if n == 0 || n > ranges.len() {
+        return 0;
+    }
+    let valid = handle Fail[FrameErr] in {
+        fr_check_ranges(in ranges[0..n], delay);
+        true
+    } with {
+        return v => v,
+        raise(_e, _k) => false,
+    };
+    if !valid {
+        return 0;
+    }
+    let largest = match ranges.try_get(0) {
+        Option::Some(r) => r.largest,
+        Option::None => return 0,
+    };
+    let has_ecn = rx.ect0 != 0 || rx.ect1 != 0 || rx.ce != 0;
+    let f = FrameW::Ack {
+        largest: largest,
+        ack_delay: delay,
+        has_ecn: has_ecn,
+        ect0: rx.ect0,
+        ect1: rx.ect1,
+        ce: rx.ce,
+        decoded: true,
+        first_range: 0,
+        count: 0,
+        pairs: no_span()
+    };
+    fr_encode(inout out[at..out.len()], f, in none, in none, in ranges[0..n])
+}
+
+// `WarpEndpoint::write_plaintext`: the plain text of a 1-RTT packet number
+// `pn` to the peer ID `dcid`, in `scratch[..plain_len]`, with an ACK frame
+// first when `with_ack` and one is owed, then `app`. The packet number
+// takes at least 4 - payload bytes, so the header-protection sample fits
+// without padding (padding would put an ACK-only packet in flight).
+pub fn pk_short_plain(
+    inout scratch: Slice[u8],
+    in rx: RxState,
+    in ranges: Slice[AckRange],
+    with_ack: bool,
+    now_ns: u64,
+    exponent: u8,
+    in app: Slice[u8],
+    pn: u64,
+    largest_acked: Option[u64],
+    in dcid: Slice[u8],
+    dcid_len: u64,
+    key_phase: bool,
+    max_datagram: u64
+) -> PlainOut eff [Fail[AckErr], Fail[FrameErr], Fail[HdrErr], Fail[PnErr], Fail[PlainErr]] {
+    let mut at = max_short_header();
+    let mut has_ack = false;
+    if with_ack {
+        let n = put_ack(inout scratch, at, in app[0..0], in rx, in ranges, now_ns, exponent);
+        if n > 0 {
+            at = wrapping_add(at, n);
+            has_ack = true;
+        }
+    }
+    let end = wrapping_add(at, app.len());
+    if end < at || end > scratch.len() {
+        Fail::raise(
+            PlainErr::TooLarge {
+                len: end
+            }
+        );
+    }
+    let _c = scratch.try_copy_from(at, in app);
+    let payload_len = wrapping_sub(end, max_short_header());
+    if payload_len == 0 {
+        Fail::raise(PlainErr::Empty);
+    }
+    let shortest = pn_encoded_len(pn, largest_acked);
+    let pn_len = if payload_len < 4 && wrapping_sub(4, payload_len) > shortest {
+        wrapping_sub(4, payload_len)
+    } else {
+        shortest
+    };
+    // The key phase bit of the 1-RTT keys in use (RFC 9001 §6).
+    let phase = key_phase;
+    let header_len = hdr_write_short_to_peer(
+        inout scratch[0..max_short_header()],
+        in dcid,
+        dcid_len,
+        false,
+        phase,
+        pn,
+        pn_len
+    );
+    let _m = scratch.try_copy_within(max_short_header(), end, header_len);
+    let plain_len = wrapping_add(header_len, payload_len);
+    if wrapping_add(plain_len, tag_len()) > max_datagram {
+        Fail::raise(
+            PlainErr::TooLarge {
+                len: wrapping_add(plain_len, tag_len())
+            }
+        );
+    }
+    PlainOut {
+        plain_len: plain_len,
+        header_len: header_len,
+        has_ack: has_ack
+    }
+}

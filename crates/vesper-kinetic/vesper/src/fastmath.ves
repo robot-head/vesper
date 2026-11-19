@@ -5,8 +5,7 @@
 // patterns (`from_bits_f64`), the values src/fastmath.rs spells in decimal.
 // `sin` and `cos` take finite arguments below the fast reduction's limit
 // or non-finite ones (`needs_crmath` is false); lib.ves sends the rest to
-// the correctly rounded src/crmath.rs through the `.vsys` library `Crmath`,
-// which stays Rust until crmath.rs is ported.
+// the correctly rounded module crmath.
 
 fn high(x: f64) -> u32 {
     wrapping_u32((to_bits_f64(x) >> 32))
