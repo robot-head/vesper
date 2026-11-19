@@ -1,6 +1,9 @@
 // Vesper port of vesper-silicon (port wave P3a lane 7, #1042).
 //
-// Ported here: the RISC-V AIA register models of src/aia.rs (module aia)
+// Ported here: the RISC-V AIA register models of src/aia.rs (module aia,
+// banks of IMSIC files and APLIC domains), the controller state of the
+// interrupt fabric in src/intc.rs (module intc, its `Core`: PLICs, APLIC
+// trees, IMSIC files, CLINT/ACLINT blocks, MTIME and the hypervisor CSRs)
 // and the flattened-devicetree reader of DeviceTree::parse in src/dtb.rs
 // (module dtb). The Rust crate keeps its public types; its wrappers in
 // src/port/ call this library and convert what comes back. The Rust build
@@ -12,8 +15,8 @@ use self::aia::{
     m_aplic_claimi,
     m_aplic_contains,
     m_aplic_copy,
-    m_aplic_make,
     m_aplic_delegated_to,
+    m_aplic_hdr,
     m_aplic_idc_asserted,
     m_aplic_is_delegated_here,
     m_aplic_is_pending,
@@ -22,6 +25,7 @@ use self::aia::{
     m_aplic_read32,
     m_aplic_rectified,
     m_aplic_set_active_here,
+    m_aplic_set_msi_cfg,
     m_aplic_set_wire,
     m_aplic_take_msis,
     m_aplic_topi,
@@ -33,6 +37,7 @@ use self::aia::{
     m_imsic_copy,
     m_imsic_csr_read,
     m_imsic_csr_write,
+    m_imsic_hdr,
     m_imsic_make,
     m_imsic_mmio_write32,
     m_imsic_same,
@@ -40,6 +45,58 @@ use self::aia::{
     m_imsic_top,
     m_imsic_topei,
     m_msi_address
+};
+use self::intc::{
+    m_add_aplic,
+    m_add_clint,
+    m_add_imsic,
+    m_add_plic,
+    m_advance_mtime,
+    m_aplic_count,
+    m_aplic_raw_write32,
+    m_claim_external,
+    m_claim_vstopei,
+    m_clear_ssip,
+    m_clip_hgeie,
+    m_complete_external,
+    m_deliver_msi,
+    m_fabric_new,
+    m_file_claim,
+    m_file_csr_read,
+    m_file_csr_write,
+    m_file_eidelivery,
+    m_file_external,
+    m_file_is_pending,
+    m_file_topei,
+    m_files_len,
+    m_geilen,
+    m_guest_files,
+    m_hart_mtime,
+    m_hgeie,
+    m_hgeip,
+    m_hyp_harts,
+    m_imsic_file,
+    m_level,
+    m_link_aplic,
+    m_locate_file,
+    m_lost_msis,
+    m_plic_base,
+    m_plic_context,
+    m_plic_count,
+    m_plic_set_edge,
+    m_push_lost_msi,
+    m_read32,
+    m_root_of,
+    m_set_hgeie,
+    m_set_vgein,
+    m_set_wire,
+    m_settle,
+    m_truncate_files,
+    m_vgein,
+    m_vs_csr_read,
+    m_vs_csr_write,
+    m_vstopei,
+    m_write32
 };
 use self::dtb::{
     m_parse
@@ -79,18 +136,27 @@ pub copy struct Msi {
     data: u64
 }
 
-// aia::ImsicFile: `eip` and `eie` hold 64 identities per word.
-pub struct Imsic {
+// One IMSIC interrupt file of a bank: its `eip` and `eie` words (64
+// identities each) are `words` entries of the bank's sequences from `off`.
+pub copy struct ImsicHdr {
     ids: u64,
     delivery: u64,
     external: bool,
     threshold: u64,
+    off: u64,
+    words: u64
+}
+
+// A bank of aia::ImsicFile; a standalone file is a bank of one.
+pub struct Imsic {
+    hdr: ChunkSeq[ImsicHdr],
     eip: ChunkSeq[u64],
     eie: ChunkSeq[u64]
 }
 
-// aia::AplicDomain: one entry per source (index 0 unused) and one per IDC.
-pub struct Aplic {
+// One aia::AplicDomain of a bank: `sources + 1` per-source entries (index 0
+// unused) from `src_off` and `idcs` per-IDC entries from `idc_off`.
+pub copy struct AplicHdr {
     base: u64,
     sources: u64,
     supervisor: bool,
@@ -100,6 +166,15 @@ pub struct Aplic {
     children: u64,
     ie: bool,
     dm: bool,
+    msicfg: MsiCfg,
+    src_off: u64,
+    idc_off: u64,
+    idcs: u64
+}
+
+// A bank of APLIC domains; `outbox_dom` names the domain of each queued MSI.
+pub struct Aplic {
+    hdr: ChunkSeq[AplicHdr],
     sourcecfg: ChunkSeq[u64],
     active_here: ChunkSeq[bool],
     raw: ChunkSeq[bool],
@@ -109,11 +184,13 @@ pub struct Aplic {
     idc_delivery: ChunkSeq[bool],
     idc_force: ChunkSeq[bool],
     idc_threshold: ChunkSeq[u64],
-    msicfg: MsiCfg,
-    outbox: ChunkSeq[Msi]
+    outbox: ChunkSeq[Msi],
+    outbox_dom: ChunkSeq[u64]
 }
 
 // ---------------------------------------------------------------- AIA exports
+//
+// The standalone ImsicFile and AplicDomain: banks of one, file (domain) 0.
 
 // ImsicFile::new (`external` false) and ::with_external_delivery.
 pub fn imsic_new(ids: u64, external: bool) -> Imsic eff [Fail[AiaFault]] {
@@ -128,51 +205,55 @@ pub fn imsic_eq(in f: Imsic, in g: Imsic) -> bool {
     m_imsic_same(in f, in g)
 }
 
+pub fn imsic_header(in f: Imsic) -> ImsicHdr {
+    m_imsic_hdr(in f, 0)
+}
+
 pub fn imsic_is_pending(in f: Imsic, id: u64) -> bool {
-    m_imsic_bit_eip(in f, id)
+    m_imsic_bit_eip(in f, 0, id)
 }
 
 pub fn imsic_is_enabled(in f: Imsic, id: u64) -> bool {
-    m_imsic_bit_eie(in f, id)
+    m_imsic_bit_eie(in f, 0, id)
 }
 
 pub fn imsic_seteipnum(inout f: Imsic, id: u64) {
-    m_imsic_seteipnum(inout f, id)
+    m_imsic_seteipnum(inout f, 0, id)
 }
 
 pub fn imsic_mmio_write32(inout f: Imsic, off: u64, v: u64) {
-    m_imsic_mmio_write32(inout f, off, v)
+    m_imsic_mmio_write32(inout f, 0, off, v)
 }
 
 pub fn imsic_csr_read(in f: Imsic, isel: u64) -> u64 eff [Fail[AiaFault]] {
-    m_imsic_csr_read(in f, isel)
+    m_imsic_csr_read(in f, 0, isel)
 }
 
 pub fn imsic_csr_write(inout f: Imsic, isel: u64, v: u64) eff [Fail[AiaFault]] {
-    m_imsic_csr_write(inout f, isel, v)
+    m_imsic_csr_write(inout f, 0, isel, v)
 }
 
 pub fn imsic_top(in f: Imsic) -> u64 {
-    m_imsic_top(in f)
+    m_imsic_top(in f, 0)
 }
 
 pub fn imsic_topei(in f: Imsic) -> u64 {
-    m_imsic_topei(in f)
+    m_imsic_topei(in f, 0)
 }
 
 pub fn imsic_claim(inout f: Imsic) -> u64 {
-    m_imsic_claim(inout f)
+    m_imsic_claim(inout f, 0)
 }
 
 pub fn imsic_asserted(in f: Imsic) -> bool {
-    m_imsic_asserted(in f)
+    m_imsic_asserted(in f, 0)
 }
 
 pub fn msi_address(c: MsiCfg, supervisor: bool, hart: u64, guest: u64) -> u64 {
     m_msi_address(c, supervisor, hart, guest)
 }
 
-// AplicDomain::new without the path (NoDeliveryMode carries none).
+// AplicDomain::new; the path goes into NoDeliveryMode in the wrapper.
 pub fn aplic_new(
     base: u64,
     size: u64,
@@ -190,65 +271,451 @@ pub fn aplic_clone(in a: Aplic) -> Aplic {
     m_aplic_copy(in a)
 }
 
-pub fn aplic_contains(in a: Aplic, addr: u64) -> bool {
-    m_aplic_contains(in a, addr)
+pub fn aplic_header(in a: Aplic) -> AplicHdr {
+    m_aplic_hdr(in a, 0)
 }
 
-// The source mode's `sourcecfg.SM` code.
+pub fn aplic_contains(in a: Aplic, addr: u64) -> bool {
+    m_aplic_contains(in a, 0, addr)
+}
+
+// The source's `SourceMode` code (0 when inactive or delegated).
 pub fn aplic_mode(in a: Aplic, src: u64) -> u64 {
-    m_aplic_mode(in a, src)
+    m_aplic_mode(in a, 0, src)
 }
 
 pub fn aplic_delegated_to(in a: Aplic, src: u64) -> Option[u64] {
-    m_aplic_delegated_to(in a, src)
+    m_aplic_delegated_to(in a, 0, src)
 }
 
 pub fn aplic_is_delegated_here(in a: Aplic, src: u64) -> bool {
-    m_aplic_is_delegated_here(in a, src)
+    m_aplic_is_delegated_here(in a, 0, src)
 }
 
 pub fn aplic_set_active_here(inout a: Aplic, src: u64, active: bool) {
-    m_aplic_set_active_here(inout a, src, active)
+    m_aplic_set_active_here(inout a, 0, src, active)
 }
 
 pub fn aplic_is_pending(in a: Aplic, src: u64) -> bool {
-    m_aplic_is_pending(in a, src)
+    m_aplic_is_pending(in a, 0, src)
 }
 
 pub fn aplic_rectified(in a: Aplic, src: u64) -> bool {
-    m_aplic_rectified(in a, src)
+    m_aplic_rectified(in a, 0, src)
 }
 
 pub fn aplic_set_wire(inout a: Aplic, src: u64, high: bool) {
-    m_aplic_set_wire(inout a, src, high)
+    m_aplic_set_wire(inout a, 0, src, high)
 }
 
 pub fn aplic_set_msi_cfg(inout a: Aplic, c: MsiCfg) {
-    a.msicfg = c;
+    m_aplic_set_msi_cfg(inout a, 0, c)
 }
 
 pub fn aplic_topi(in a: Aplic, idc: u64) -> u64 {
-    m_aplic_topi(in a, idc)
+    m_aplic_topi(in a, 0, idc)
 }
 
 pub fn aplic_claimi(inout a: Aplic, idc: u64) -> u64 {
-    m_aplic_claimi(inout a, idc)
+    m_aplic_claimi(inout a, 0, idc)
 }
 
 pub fn aplic_idc_asserted(in a: Aplic, idc: u64) -> bool {
-    m_aplic_idc_asserted(in a, idc)
+    m_aplic_idc_asserted(in a, 0, idc)
 }
 
 pub fn aplic_take_msis(inout a: Aplic) -> ChunkSeq[Msi] {
-    m_aplic_take_msis(inout a)
+    m_aplic_take_msis(inout a, 0)
 }
 
 pub fn aplic_read32(inout a: Aplic, addr: u64) -> u64 eff [Fail[AiaFault]] {
-    m_aplic_read32(inout a, addr)
+    m_aplic_read32(inout a, 0, addr)
 }
 
 pub fn aplic_write32(inout a: Aplic, addr: u64, v: u64) eff [Fail[AiaFault]] {
-    m_aplic_write32(inout a, addr, v)
+    m_aplic_write32(inout a, 0, addr, v)
+}
+
+// ---------------------------------------------------------------- fabric types
+
+// intc::IntcError as the controller core raises it; Aia carries the AIA
+// model's fault (NoDeliveryMode gets the domain's path in the wrapper).
+pub copy enum IntcFault {
+    Unmapped(u64),
+    Misaligned(u64),
+    ReadOnly(u64),
+    NoSuchSource(u64),
+    TooManyContexts(u64),
+    WindowTooSmall {
+        size: u64,
+        needed: u64
+    },
+    NoGuestFile {
+        hart: u64,
+        vgein: u64
+    },
+    Aia(AiaFault)
+}
+
+// One PLIC: `ndev + 1` per-source entries from `src_off`, `nctx` context
+// targets and thresholds from `ctx_off`, and `nctx` rows of `ndev + 1`
+// enable bits from `en_off`.
+pub copy struct PlicHdr {
+    base: u64,
+    ndev: u64,
+    nctx: u64,
+    src_off: u64,
+    ctx_off: u64,
+    en_off: u64
+}
+
+// One APLIC domain's place in its tree: the parent (none() for a root),
+// `nchild` modelled children from `child_off`, `nidc` IDC targets from
+// `idc_off`.
+pub copy struct DomTopo {
+    parent: u64,
+    child_off: u64,
+    nchild: u64,
+    idc_off: u64,
+    nidc: u64
+}
+
+// One IMSIC: `ntgt` targets, `naddr` file addresses and `nslot` implemented
+// files (each `ImsicSlot`).
+pub copy struct ImsicBlk {
+    gib: u64,
+    ids: u64,
+    tgt_off: u64,
+    ntgt: u64,
+    addr_off: u64,
+    naddr: u64,
+    slot_off: u64,
+    nslot: u64
+}
+
+// An implemented IMSIC file: guest 0 and its guest files are `nguest`
+// interrupt files of the fabric's bank from `first`.
+pub copy struct ImsicSlot {
+    first: u64,
+    nguest: u64
+}
+
+// One CLINT (kind 0) or ACLINT MSWI (1), SSWI (2) or MTIMER (3) block:
+// `nreg` register windows, `ntgt` targets, `nslot` SIP/MTIMECMP slots, and
+// the MTIME register's address (none() without one).
+pub copy struct ClintHdr {
+    kind: u64,
+    reg_off: u64,
+    nreg: u64,
+    tgt_off: u64,
+    ntgt: u64,
+    slot_off: u64,
+    nslot: u64,
+    mtime: u64
+}
+
+// One claimed external interrupt: the controller (`kind` 0 PLIC `a`, 1
+// APLIC domain `a`, 2 IMSIC `a` file `b`) and the source or identity.
+pub copy struct Claim {
+    found: bool,
+    kind: u64,
+    a: u64,
+    b: u64,
+    number: u64
+}
+
+// A located IMSIC file (`k` none() when there is none).
+pub copy struct Located {
+    k: u64,
+    g: u64,
+    off: u64
+}
+
+// The controller state of the interrupt fabric (src/intc.rs `Core`).
+pub struct Fabric {
+    plic: ChunkSeq[PlicHdr],
+    p_ctx: ChunkSeq[u64],
+    p_priority: ChunkSeq[u64],
+    p_level: ChunkSeq[bool],
+    p_edge: ChunkSeq[bool],
+    p_held: ChunkSeq[bool],
+    p_pending: ChunkSeq[bool],
+    p_service: ChunkSeq[bool],
+    p_enable: ChunkSeq[bool],
+    p_threshold: ChunkSeq[u64],
+    aplic: Aplic,
+    dom: ChunkSeq[DomTopo],
+    d_child: ChunkSeq[u64],
+    d_idc: ChunkSeq[u64],
+    imsic: Imsic,
+    mblk: ChunkSeq[ImsicBlk],
+    m_tgt: ChunkSeq[u64],
+    m_addr: ChunkSeq[u64],
+    mslot: ChunkSeq[ImsicSlot],
+    clint: ChunkSeq[ClintHdr],
+    c_base: ChunkSeq[u64],
+    c_size: ChunkSeq[u64],
+    c_tgt: ChunkSeq[u64],
+    c_sip: ChunkSeq[bool],
+    c_cmp: ChunkSeq[u64],
+    mt_addr: ChunkSeq[u64],
+    mt_val: ChunkSeq[u64],
+    hy_hart: ChunkSeq[u64],
+    hy_vgein: ChunkSeq[u64],
+    hy_hgeie: ChunkSeq[u64],
+    lost: ChunkSeq[Msi]
+}
+
+// ---------------------------------------------------------------- fabric exports
+//
+// A hart target is `hart << 32 | cause` (cause 0xffffffff when absent); an
+// absent index is u64::MAX.
+
+pub fn fabric_new() -> Fabric {
+    m_fabric_new()
+}
+
+pub fn fabric_add_plic(inout f: Fabric, base: u64, size: u64, ndev: u64, in ctx: Slice[u64]) eff [
+    Fail[IntcFault]
+] {
+    m_add_plic(inout f, base, size, ndev, in ctx)
+}
+
+pub fn fabric_add_aplic(
+    inout f: Fabric,
+    base: u64,
+    size: u64,
+    sources: u64,
+    in idcs: Slice[u64],
+    msi_capable: bool,
+    root: bool,
+    supervisor: bool,
+    children: u64
+) eff [Fail[IntcFault]] {
+    m_add_aplic(inout f, base, size, sources, in idcs, msi_capable, root, supervisor, children)
+}
+
+pub fn fabric_link_aplic(inout f: Fabric, d: u64, parent: u64, in children: Slice[u64]) {
+    m_link_aplic(inout f, d, parent, in children)
+}
+
+pub fn fabric_add_imsic(
+    inout f: Fabric,
+    gib: u64,
+    ids: u64,
+    in targets: Slice[u64],
+    in addrs: Slice[u64],
+    in wired: Slice[bool]
+) eff [Fail[IntcFault]] {
+    m_add_imsic(inout f, gib, ids, in targets, in addrs, in wired)
+}
+
+pub fn fabric_add_clint(
+    inout f: Fabric,
+    kind: u64,
+    in bases: Slice[u64],
+    in sizes: Slice[u64],
+    in targets: Slice[u64]
+) {
+    m_add_clint(inout f, kind, in bases, in sizes, in targets)
+}
+
+pub fn fabric_plic_count(in f: Fabric) -> u64 {
+    m_plic_count(in f)
+}
+
+pub fn fabric_plic_base(in f: Fabric, p: u64) -> u64 {
+    m_plic_base(in f, p)
+}
+
+pub fn fabric_plic_context(in f: Fabric, p: u64, want: u64) -> u64 {
+    m_plic_context(in f, p, want)
+}
+
+pub fn fabric_plic_set_edge(inout f: Fabric, p: u64, src: u64, edge: bool) eff [Fail[IntcFault]] {
+    m_plic_set_edge(inout f, p, src, edge)
+}
+
+pub fn fabric_aplic_count(in f: Fabric) -> u64 {
+    m_aplic_count(in f)
+}
+
+pub fn fabric_aplic_header(in f: Fabric, d: u64) -> AplicHdr {
+    m_aplic_hdr(in f.aplic, d)
+}
+
+pub fn fabric_aplic_is_delegated_here(in f: Fabric, d: u64, src: u64) -> bool {
+    m_aplic_is_delegated_here(in f.aplic, d, src)
+}
+
+pub fn fabric_aplic_write32(inout f: Fabric, d: u64, addr: u64, v: u64) eff [Fail[IntcFault]] {
+    m_aplic_raw_write32(inout f, d, addr, v)
+}
+
+pub fn fabric_root_of(in f: Fabric, d: u64) -> u64 {
+    m_root_of(in f, d)
+}
+
+pub fn fabric_imsic_file(in f: Fabric, want: u64) -> u64 {
+    m_imsic_file(in f, want)
+}
+
+pub fn fabric_files_len(in f: Fabric, b: u64, k: u64) -> u64 {
+    m_files_len(in f, b, k)
+}
+
+pub fn fabric_truncate_files(inout f: Fabric, b: u64, k: u64, keep: u64) {
+    m_truncate_files(inout f, b, k, keep)
+}
+
+pub fn fabric_file_csr_read(in f: Fabric, b: u64, k: u64, g: u64, isel: u64)
+    -> u64 eff [Fail[IntcFault]] {
+    m_file_csr_read(in f, b, k, g, isel)
+}
+
+pub fn fabric_file_csr_write(inout f: Fabric, b: u64, k: u64, g: u64, isel: u64, v: u64) eff [
+    Fail[IntcFault]
+] {
+    m_file_csr_write(inout f, b, k, g, isel, v)
+}
+
+pub fn fabric_file_topei(in f: Fabric, b: u64, k: u64, g: u64) -> u64 {
+    m_file_topei(in f, b, k, g)
+}
+
+pub fn fabric_file_claim(inout f: Fabric, b: u64, k: u64, g: u64) -> u64 {
+    m_file_claim(inout f, b, k, g)
+}
+
+pub fn fabric_file_is_pending(in f: Fabric, b: u64, k: u64, g: u64, id: u64) -> bool {
+    m_file_is_pending(in f, b, k, g, id)
+}
+
+pub fn fabric_file_eidelivery(in f: Fabric, b: u64, k: u64) -> u64 {
+    m_file_eidelivery(in f, b, k)
+}
+
+pub fn fabric_file_external(in f: Fabric, b: u64, k: u64) -> bool {
+    m_file_external(in f, b, k)
+}
+
+pub fn fabric_locate_file(in f: Fabric, addr: u64) -> Located {
+    m_locate_file(in f, addr)
+}
+
+pub fn fabric_level(in f: Fabric, hart: u64, cause: u64) -> bool {
+    m_level(in f, hart, cause)
+}
+
+pub fn fabric_guest_files(in f: Fabric, hart: u64) -> Located {
+    m_guest_files(in f, hart)
+}
+
+pub fn fabric_geilen(in f: Fabric, hart: u64) -> u64 {
+    m_geilen(in f, hart)
+}
+
+pub fn fabric_hgeip(in f: Fabric, hart: u64) -> u64 {
+    m_hgeip(in f, hart)
+}
+
+pub fn fabric_vgein(in f: Fabric, hart: u64) -> u64 {
+    m_vgein(in f, hart)
+}
+
+pub fn fabric_set_vgein(inout f: Fabric, hart: u64, v: u64) {
+    m_set_vgein(inout f, hart, v)
+}
+
+pub fn fabric_hgeie(in f: Fabric, hart: u64) -> u64 {
+    m_hgeie(in f, hart)
+}
+
+pub fn fabric_set_hgeie(inout f: Fabric, hart: u64, v: u64) {
+    m_set_hgeie(inout f, hart, v)
+}
+
+pub fn fabric_hyp_harts(in f: Fabric) -> ChunkSeq[u64] {
+    m_hyp_harts(in f)
+}
+
+pub fn fabric_clip_hgeie(inout f: Fabric, hart: u64) {
+    m_clip_hgeie(inout f, hart)
+}
+
+pub fn fabric_vs_csr_read(in f: Fabric, hart: u64, isel: u64) -> u64 eff [Fail[IntcFault]] {
+    m_vs_csr_read(in f, hart, isel)
+}
+
+pub fn fabric_vs_csr_write(inout f: Fabric, hart: u64, isel: u64, v: u64) eff [Fail[IntcFault]] {
+    m_vs_csr_write(inout f, hart, isel, v)
+}
+
+pub fn fabric_vstopei(in f: Fabric, hart: u64) -> u64 eff [Fail[IntcFault]] {
+    m_vstopei(in f, hart)
+}
+
+pub fn fabric_claim_vstopei(inout f: Fabric, hart: u64) -> u64 eff [Fail[IntcFault]] {
+    m_claim_vstopei(inout f, hart)
+}
+
+pub fn fabric_settle(inout f: Fabric) {
+    m_settle(inout f)
+}
+
+pub fn fabric_deliver_msi(inout f: Fabric, addr: u64, data: u64) eff [Fail[IntcFault]] {
+    m_deliver_msi(inout f, addr, data)
+}
+
+pub fn fabric_lost_msis(in f: Fabric) -> ChunkSeq[Msi] {
+    m_lost_msis(in f)
+}
+
+pub fn fabric_push_lost_msi(inout f: Fabric, m: Msi) {
+    m_push_lost_msi(inout f, m)
+}
+
+pub fn fabric_read32(inout f: Fabric, addr: u64) -> u64 eff [Fail[IntcFault]] {
+    m_read32(inout f, addr)
+}
+
+pub fn fabric_write32(inout f: Fabric, addr: u64, v: u64) eff [Fail[IntcFault]] {
+    m_write32(inout f, addr, v)
+}
+
+pub fn fabric_hart_mtime(in f: Fabric, hart: u64) -> u64 {
+    m_hart_mtime(in f, hart)
+}
+
+pub fn fabric_advance_mtime(inout f: Fabric, ticks: u64) {
+    m_advance_mtime(inout f, ticks)
+}
+
+pub fn fabric_clear_ssip(inout f: Fabric, hart: u64) {
+    m_clear_ssip(inout f, hart)
+}
+
+pub fn fabric_set_wire(inout f: Fabric, kind: u64, a: u64, src: u64, high: bool) eff [
+    Fail[IntcFault]
+] {
+    m_set_wire(inout f, kind, a, src, high)
+}
+
+pub fn fabric_claim_external(inout f: Fabric, hart: u64, cause: u64) -> Claim {
+    m_claim_external(inout f, hart, cause)
+}
+
+pub fn fabric_complete_external(
+    inout f: Fabric,
+    hart: u64,
+    cause: u64,
+    kind: u64,
+    a: u64,
+    number: u64,
+    fwd_d: u64,
+    fwd_s: u64
+) {
+    m_complete_external(inout f, hart, cause, kind, a, number, fwd_d, fwd_s)
 }
 
 // ---------------------------------------------------------------- devicetree

@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2024"
 build = "build.rs"
 
-# This is the port-backed build: build.rs links the Vesper package in vesper/
-# and sets cfg(vesper_port). The compiler and every crate inside
-# `cargo tree -p vesper -e normal,build` use the frozen Rust seed copy,
-# crates/vesper-loom-solver/seed (package vesper-loom-solver-seed, same
+# The Vesper port is this package's only build (#1085): build.rs links the
+# Vesper package in vesper/ and sets cfg(vesper_port). The compiler and every
+# crate inside `cargo tree -p vesper -e normal,build` use the frozen Rust seed
+# copy, crates/vesper-loom-solver/seed (package vesper-loom-solver-seed, same
 # library name), instead; see "Crates the compiler links" in
 # docs/maintenance/porting-a-crate.md.
 

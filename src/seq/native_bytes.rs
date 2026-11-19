@@ -10,7 +10,9 @@
 //! step, with a scalar loop for the tail; unoptimized builds and other
 //! targets run the scalar loop alone. `find_not_in` looks its class up with
 //! a byte shuffle (`swizzle`), so on x86-64 it is vectorized only where the
-//! ISA has SSSE3 (`pshufb`); the baseline x86-64 target runs it scalar. Every
+//! ISA has SSSE3 (`pshufb`); the baseline x86-64 target tests one byte at a
+//! time but skips runs of a repeated class byte 16 bytes per step with SSE2
+//! compares (P3b gaps lane 11, #1096). Every
 //! path gives the same result for every input, and so does the evaluator
 //! (`src/seq/eval.rs`), which is the reference semantics.
 use super::*;
@@ -115,7 +117,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         if !matches!(
             op,
-            SeqOp::CopyFrom { .. } | SeqOp::CopyWithin { .. } | SeqOp::Fill | SeqOp::Wide(_)
+            SeqOp::CopyFrom { .. }
+                | SeqOp::CopyWithin { .. }
+                | SeqOp::Fill
+                | SeqOp::FillRange { .. }
+                | SeqOp::Wide(_)
         ) {
             return Ok(None);
         }
@@ -169,33 +175,20 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             SeqOp::Fill => {
                 let value = arg(1)?;
-                let scalar = !Layout::of(self.world, &elem)?.aggregate();
-                if stride == 1 && scalar && self.seq_has_libc() {
-                    let zero = self.zero();
-                    let dst = self.seq_elem_addr(h, start, zero, 1);
-                    let byte = self.coerce(value, Some(&elem));
-                    let byte = self.b.ins().ireduce(types::I8, byte);
-                    let config = self.m.target_config();
-                    self.b.call_memset(config, dst, byte, len);
-                } else {
-                    let head = self.b.create_block();
-                    let body = self.b.create_block();
-                    let done = self.b.create_block();
-                    self.b.append_block_param(head, types::I64);
-                    let zero = self.zero();
-                    self.jump(head, &[zero.into()]);
-                    self.b.switch_to_block(head);
-                    let k = self.b.block_params(head)[0];
-                    let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, len);
-                    self.branch(more, body, &[], done, &[]);
-                    self.b.switch_to_block(body);
-                    let addr = self.seq_elem_addr(h, start, k, stride);
-                    self.seq_store_elem(addr, value, &elem)?;
-                    let next = self.b.ins().iadd_imm(k, 1);
-                    self.jump(head, &[next.into()]);
-                    self.b.switch_to_block(done);
-                }
+                self.seq_fill_elems(h, start, len, value, &elem, stride)?;
                 self.zero()
+            }
+            SeqOp::FillRange { total } => {
+                // `lo <= hi <= len`, then fill `s[lo..hi]` where it is.
+                let (lo, hi, value) = (arg(1)?, arg(2)?, arg(3)?);
+                let ordered = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, lo, hi);
+                let inside = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, hi, len);
+                let valid = self.b.ins().band(ordered, inside);
+                self.seq_when(valid, total, |this| {
+                    let from = this.b.ins().iadd(start, lo);
+                    let n = this.b.ins().isub(hi, lo);
+                    this.seq_fill_elems(h, from, n, value, &elem, stride)
+                })?
             }
             SeqOp::Wide(wide) => {
                 let at = arg(1)?;
@@ -245,6 +238,69 @@ impl<M: Module> Codegen<'_, '_, M> {
         }))
     }
 
+    /// Stores `value` in the `n` elements of `h`'s buffer from element
+    /// `from`: `memset` for scalar bytes where the C library is available,
+    /// else a store loop, which optimized code skips with one `memset` when
+    /// a scalar `value` is all zero bits.
+    pub(super) fn seq_fill_elems(
+        &mut self,
+        h: ir::Value,
+        from: ir::Value,
+        n: ir::Value,
+        value: ir::Value,
+        elem: &Type,
+        stride: i64,
+    ) -> Result<(), String> {
+        let scalar = !Layout::of(self.world, elem)?.aggregate();
+        if stride == 1 && scalar && self.seq_has_libc() {
+            let zero = self.zero();
+            let dst = self.seq_elem_addr(h, from, zero, 1);
+            let byte = self.coerce(value, Some(elem));
+            let byte = self.b.ins().ireduce(types::I8, byte);
+            let config = self.m.target_config();
+            self.b.call_memset(config, dst, byte, n);
+            return Ok(());
+        }
+        let done = self.b.create_block();
+        if scalar && self.seq_has_libc() && self.operands_only {
+            // Zero (all bits clear) fills the bytes with `memset`.
+            let bits = match self.b.func.dfg.value_type(value) {
+                types::F32 => self.b.ins().bitcast(types::I32, MemFlags::new(), value),
+                types::F64 => self.b.ins().bitcast(types::I64, MemFlags::new(), value),
+                _ => value,
+            };
+            let zero = self.b.ins().icmp_imm(IntCC::Equal, bits, 0);
+            let clear = self.b.create_block();
+            let store = self.b.create_block();
+            self.branch(zero, clear, &[], store, &[]);
+            self.b.switch_to_block(clear);
+            let start = self.zero();
+            let dst = self.seq_elem_addr(h, from, start, stride);
+            let bytes = self.b.ins().imul_imm(n, stride);
+            let byte = self.b.ins().iconst(types::I8, 0);
+            let config = self.m.target_config();
+            self.b.call_memset(config, dst, byte, bytes);
+            self.jump(done, &[]);
+            self.b.switch_to_block(store);
+        }
+        let head = self.b.create_block();
+        let body = self.b.create_block();
+        self.b.append_block_param(head, types::I64);
+        let zero = self.zero();
+        self.jump(head, &[zero.into()]);
+        self.b.switch_to_block(head);
+        let k = self.b.block_params(head)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, n);
+        self.branch(more, body, &[], done, &[]);
+        self.b.switch_to_block(body);
+        let addr = self.seq_elem_addr(h, from, k, stride);
+        self.seq_store_elem(addr, value, elem)?;
+        let next = self.b.ins().iadd_imm(k, 1);
+        self.jump(head, &[next.into()]);
+        self.b.switch_to_block(done);
+        Ok(())
+    }
+
     /// Whether `n` elements from `at` fit in `len`, without overflow.
     fn seq_fits(&mut self, len: ir::Value, at: ir::Value, n: ir::Value) -> ir::Value {
         let below = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, at, len);
@@ -256,7 +312,7 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// Runs `write` when `valid` holds. The checked form raises
     /// `IndexOutOfBounds` otherwise and yields `Unit`; the total form skips
     /// the write and yields `valid` as a `bool`.
-    fn seq_when(
+    pub(super) fn seq_when(
         &mut self,
         valid: ir::Value,
         total: bool,
@@ -400,7 +456,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                         (Needle::NotIn { lo, hi, high }, simd && shuffles)
                     }
                 };
-                let (present, index) = self.find_first(p, len, needle, simd);
+                let (present, index) = match needle {
+                    // No byte shuffle (x86-64 without SSSE3): skip runs of
+                    // a repeated class byte 16 at a time.
+                    Needle::NotIn { lo, hi, high } if self.byte_scans_vectorized() && !simd => {
+                        self.find_not_in_runs(p, len, lo, hi, high)
+                    }
+                    _ => self.find_first(p, len, needle, simd),
+                };
                 let u64_ty = Type::named("u64");
                 let option = Type::Named("Option".into(), vec![u64_ty.clone()]);
                 self.seq_option(&option, &u64_ty, present, |_| Ok(index))?
@@ -927,6 +990,113 @@ impl<M: Module> Codegen<'_, '_, M> {
         let found = self.needle_scalar(needle, b);
         let k2 = self.b.ins().iadd_imm(k, 1);
         self.branch(found, done, &[yes.into(), k.into()], scalar, &[k2.into()]);
+
+        self.b.switch_to_block(done);
+        let present = self.b.block_params(done)[0];
+        let index = self.b.block_params(done)[1];
+        (present, index)
+    }
+
+    /// `find_not_in` without a byte shuffle: the first byte outside the
+    /// class `{lo, hi, high}` of `p[..len]`, as [`Self::find_first`] gives
+    /// it. Each byte that is in the class starts a run: the 16-byte steps
+    /// after it that equal it are skipped with one compare each, and the
+    /// scan goes on at the first byte that differs, which is tested on its
+    /// own. Reserved fields, padding and indentation are runs of one byte,
+    /// so they cost one step per 16 bytes; other bytes cost a test and one
+    /// step each. With fewer than 16 bytes left the scan finishes one byte
+    /// at a time, so steps never read past `len`.
+    fn find_not_in_runs(
+        &mut self,
+        p: ir::Value,
+        len: ir::Value,
+        lo: ir::Value,
+        hi: ir::Value,
+        high: ir::Value,
+    ) -> (ir::Value, ir::Value) {
+        let zero = self.zero();
+        let no = self.b.ins().iconst(types::I64, 0);
+        let yes = self.b.ins().iconst(types::I64, 1);
+        let outer = self.b.create_block();
+        let test = self.b.create_block();
+        let run = self.b.create_block();
+        let start = self.b.create_block();
+        let step = self.b.create_block();
+        let next = self.b.create_block();
+        let miss = self.b.create_block();
+        let tail = self.b.create_block();
+        let tail_body = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.append_block_param(outer, types::I64);
+        self.b.append_block_param(step, types::I64);
+        self.b.append_block_param(tail, types::I64);
+        self.b.append_block_param(done, types::I64);
+        self.b.append_block_param(done, types::I64);
+        self.jump(outer, &[zero.into()]);
+
+        self.b.switch_to_block(outer);
+        let k = self.b.block_params(outer)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, len);
+        self.branch(more, test, &[], done, &[no.into(), zero.into()]);
+
+        self.b.switch_to_block(test);
+        let at = self.b.ins().iadd(p, k);
+        let b = self.b.ins().uload8(types::I64, MemFlags::new(), at, 0);
+        let found = self.needle_scalar(Needle::NotIn { lo, hi, high }, b);
+        self.branch(found, done, &[yes.into(), k.into()], run, &[]);
+
+        // `b` is in the class: does a whole step follow it?
+        self.b.switch_to_block(run);
+        let j = self.b.ins().iadd_imm(k, 1);
+        let left = self.b.ins().isub(len, j);
+        let room = self
+            .b
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, left, LANES);
+        self.branch(room, start, &[], tail, &[j.into()]);
+
+        self.b.switch_to_block(start);
+        let byte = self.b.ins().ireduce(types::I8, b);
+        let splat = self.b.ins().splat(types::I8X16, byte);
+        self.jump(step, &[j.into()]);
+
+        self.b.switch_to_block(step);
+        let j = self.b.block_params(step)[0];
+        let at = self.b.ins().iadd(p, j);
+        let v = self.b.ins().load(types::I8X16, little(), at, 0);
+        let same = self.b.ins().icmp(IntCC::Equal, v, splat);
+        let bits = self.b.ins().vhigh_bits(types::I32, same);
+        let all = self.b.ins().icmp_imm(IntCC::Equal, bits, 0xffff);
+        self.branch(all, next, &[], miss, &[]);
+
+        self.b.switch_to_block(next);
+        let j2 = self.b.ins().iadd_imm(j, LANES);
+        let left = self.b.ins().isub(len, j2);
+        let room = self
+            .b
+            .ins()
+            .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, left, LANES);
+        self.branch(room, step, &[j2.into()], tail, &[j2.into()]);
+
+        // The first byte of the step that differs from `b`.
+        self.b.switch_to_block(miss);
+        let differ = self.b.ins().bxor_imm(bits, 0xffff);
+        let first = self.b.ins().ctz(differ);
+        let first = self.b.ins().uextend(types::I64, first);
+        let j3 = self.b.ins().iadd(j, first);
+        self.jump(outer, &[j3.into()]);
+
+        // Under 16 bytes left: one byte at a time to the end.
+        self.b.switch_to_block(tail);
+        let k = self.b.block_params(tail)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, len);
+        self.branch(more, tail_body, &[], done, &[no.into(), zero.into()]);
+        self.b.switch_to_block(tail_body);
+        let at = self.b.ins().iadd(p, k);
+        let b = self.b.ins().uload8(types::I64, MemFlags::new(), at, 0);
+        let found = self.needle_scalar(Needle::NotIn { lo, hi, high }, b);
+        let k2 = self.b.ins().iadd_imm(k, 1);
+        self.branch(found, done, &[yes.into(), k.into()], tail, &[k2.into()]);
 
         self.b.switch_to_block(done);
         let present = self.b.block_params(done)[0];

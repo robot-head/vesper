@@ -1,0 +1,382 @@
+// Module project of @vesper/chorus (see lib.ves): endpoint projection with
+// full branch merging (`project::Projector` and `merge`).
+//
+// Error words (`ew`) when `failed` is set, with symbols for every string:
+//   1 Unmergeable: role decider notified npath path.. left_label
+//     right_label left right
+//   2 PayloadMismatch: role peer label left right
+use self::{
+    C
+};
+use self::util::{
+    add,
+    intern_tb,
+    none,
+    role_sym,
+    setw,
+    sw,
+    tb_str,
+    tb_sym
+};
+use self::tree::{
+    ga,
+    gb,
+    gbr,
+    gc,
+    gt,
+    free_vars_within,
+    involves
+};
+use self::local::{
+    alpha_eq,
+    choice,
+    l_action,
+    l_rec,
+    la,
+    lb,
+    lbr,
+    lc,
+    ld,
+    lkn,
+    lt,
+    mentions,
+    mkl,
+    subst,
+    l_var,
+    summary
+};
+
+// Projects the tree `root` onto role `r`; `none()` with `failed` set and
+// the error in `ew` when it cannot be projected.
+pub fn project_role(inout c: C, r: u64) -> u64 {
+    c.target = r;
+    c.path.clear();
+    c.failed = false;
+    let root = c.root;
+    go(inout c, root)
+}
+
+fn go(inout c: C, g: u64) -> u64 {
+    let tag = gt(in c, g);
+    if tag == 5 {
+        return c.l_end;
+    }
+    if tag == 4 {
+        let h82 = ga(in c, g);
+        return l_var(inout c, h82);
+    }
+    if tag == 3 {
+        let var = ga(in c, g);
+        let body = gb(in c, g);
+        // A role absent from a loop that can only repeat itself or finish
+        // has nothing to do in it: it ends (standard rule).
+        if !involves(in c, body, c.target) {
+            c.bnd.clear();
+            c.bnd.push(var);
+            if free_vars_within(inout c, body) {
+                return c.l_end;
+            }
+        }
+        let b = go(inout c, body);
+        if c.failed {
+            return none();
+        }
+        if lt(in c, b) == 7 && la(in c, b) == var {
+            return c.l_end;
+        }
+        if !mentions(in c, b, var) {
+            return b;
+        }
+        return l_rec(inout c, var, b);
+    }
+    if tag == 2 {
+        let h83 = gc(in c, g);
+        let n = go(inout c, h83);
+        if c.failed {
+            return none();
+        }
+        if ga(in c, g) == c.target {
+            let h84 = gb(in c, g);
+            return l_action(inout c, h84, n);
+        }
+        return n;
+    }
+    let from = ga(in c, g);
+    let to = gb(in c, g);
+    let nb = gc(in c, g);
+    let is_choice = nb > 1;
+    let f = c.tmp.len();
+    for i in 0..nb {
+        let label = gbr(in c, g, i, 0);
+        if is_choice {
+            let fs = role_sym(inout c, from);
+            let ts = role_sym(inout c, to);
+            c.tb.clear();
+            tb_sym(inout c, fs);
+            tb_str(inout c, "->");
+            tb_sym(inout c, ts);
+            tb_str(inout c, ".");
+            tb_sym(inout c, label);
+            let p = intern_tb(inout c);
+            c.path.push(p);
+        }
+        let h85 = gbr(in c, g, i, 2);
+        let r = go(inout c, h85);
+        if is_choice {
+            let _ = c.path.pop();
+        }
+        if c.failed {
+            c.tmp.truncate(f);
+            return none();
+        }
+        c.tmp.push(label);
+        let h86 = gbr(in c, g, i, 1);
+        c.tmp.push(h86);
+        c.tmp.push(r);
+    }
+    if from == c.target {
+        return choice(inout c, true, to, f);
+    }
+    if to == c.target {
+        return choice(inout c, false, from, f);
+    }
+    let mut acc = sw(in c.tmp, add(f, 2));
+    let mut acc_label = sw(in c.tmp, f);
+    for i in 1..nb {
+        let at = add(f, wrapping_mul(i, 3));
+        let bl = sw(in c.tmp, at);
+        let bn = sw(in c.tmp, add(at, 2));
+        c.mf_kind = 0;
+        let m = merge(inout c, acc, bn);
+        if c.mf_kind != 0 {
+            c.tmp.truncate(f);
+            let r0 = c.target;
+            let role = role_sym(inout c, r0);
+            c.ew.clear();
+            if c.mf_kind == 1 {
+                let dec = role_sym(inout c, from);
+                let nt = role_sym(inout c, to);
+                c.ew.push(1);
+                c.ew.push(role);
+                c.ew.push(dec);
+                c.ew.push(nt);
+                let h87 = c.path.len();
+                c.ew.push(h87);
+                for k in 0..c.path.len() {
+                    let p = sw(in c.path, k);
+                    c.ew.push(p);
+                }
+                c.ew.push(acc_label);
+                c.ew.push(bl);
+                let h88 = c.mf_a;
+                c.ew.push(h88);
+                let h89 = c.mf_b;
+                c.ew.push(h89);
+            } else {
+                let mp = c.mf_peer;
+                let peer = role_sym(inout c, mp);
+                c.ew.push(2);
+                c.ew.push(role);
+                c.ew.push(peer);
+                let h90 = c.mf_label;
+                c.ew.push(h90);
+                let h91 = c.mf_a;
+                c.ew.push(h91);
+                let h92 = c.mf_b;
+                c.ew.push(h92);
+            }
+            c.failed = true;
+            return none();
+        }
+        acc = m;
+        acc_label = bl;
+    }
+    c.tmp.truncate(f);
+    acc
+}
+
+fn conflict(inout c: C, a: u64, b: u64) -> u64 {
+    let x = summary(inout c, a);
+    let y = summary(inout c, b);
+    c.mf_kind = 1;
+    c.mf_a = x;
+    c.mf_b = y;
+    none()
+}
+
+// Pushes the branches of `t` viewed as an Offer (a Recv is one branch).
+fn push_offer(inout c: C, t: u64) {
+    if lt(in c, t) == 2 {
+        let h93 = lb(in c, t);
+        c.tmp.push(h93);
+        let h94 = lc(in c, t);
+        c.tmp.push(h94);
+        let h95 = ld(in c, t);
+        c.tmp.push(h95);
+    } else {
+        for i in 0..lkn(in c, t) {
+            let h96 = lbr(in c, t, i, 0);
+            c.tmp.push(h96);
+            let h97 = lbr(in c, t, i, 1);
+            c.tmp.push(h97);
+            let h98 = lbr(in c, t, i, 2);
+            c.tmp.push(h98);
+        }
+    }
+}
+
+fn is_reception(in c: C, t: u64) -> bool {
+    let tag = lt(in c, t);
+    tag == 2 || tag == 4
+}
+
+// `merge`: `none()` with `mf_kind` set (1 conflict, 2 payload mismatch)
+// when the two behaviours cannot be merged.
+fn merge(inout c: C, a: u64, b: u64) -> u64 {
+    if a == b || alpha_eq(inout c, a, b) {
+        return a;
+    }
+    let ta = lt(in c, a);
+    let tb = lt(in c, b);
+    // Receptions from the same peer: union of labels.
+    if is_reception(in c, a) && is_reception(in c, b) && la(in c, a) == la(in c, b) {
+        let peer = la(in c, a);
+        let f = c.tmp.len();
+        push_offer(inout c, a);
+        let mut n = wrapping_sub(c.tmp.len(), f) / 3;
+        let nbb = if tb == 2 {
+            1
+        } else {
+            lkn(in c, b)
+        };
+        for k in 0..nbb {
+            let (bl, bp, bn) = if tb == 2 {
+                (lb(in c, b), lc(in c, b), ld(in c, b))
+            } else {
+                (lbr(in c, b, k, 0), lbr(in c, b, k, 1), lbr(in c, b, k, 2))
+            };
+            let mut found = none();
+            for j in 0..n {
+                if sw(in c.tmp, add(f, wrapping_mul(j, 3))) == bl {
+                    found = j;
+                }
+            }
+            if found == none() {
+                c.tmp.push(bl);
+                c.tmp.push(bp);
+                c.tmp.push(bn);
+                n = add(n, 1);
+            } else {
+                let at = add(f, wrapping_mul(found, 3));
+                let ep = sw(in c.tmp, add(at, 1));
+                if ep != bp {
+                    c.tmp.truncate(f);
+                    c.mf_kind = 2;
+                    c.mf_peer = peer;
+                    c.mf_label = bl;
+                    c.mf_a = ep;
+                    c.mf_b = bp;
+                    return none();
+                }
+                let h99 = sw(in c.tmp, add(at, 2));
+                let m = merge(inout c, h99, bn);
+                if c.mf_kind != 0 {
+                    c.tmp.truncate(f);
+                    return none();
+                }
+                setw(inout c.tmp, add(at, 2), m);
+            }
+        }
+        return choice(inout c, false, peer, f);
+    }
+    if ta
+        == 1
+        && tb
+        == 1
+        && la(in c, a)
+        == la(in c, b)
+        && lb(in c, a)
+        == lb(in c, b)
+        && lc(in c, a)
+        == lc(in c, b) {
+        let h100 = ld(in c, a);
+        let h101 = ld(in c, b);
+        let m = merge(inout c, h100, h101);
+        if c.mf_kind != 0 {
+            return none();
+        }
+        let f = c.tmp.len();
+        let h102 = la(in c, a);
+        let h103 = lb(in c, a);
+        let h104 = lc(in c, a);
+        return mkl(inout c, 1, h102, h103, h104, m, f);
+    }
+    if ta == 3 && tb == 3 && la(in c, a) == la(in c, b) && same_labels(in c, a, b) {
+        let f = c.tmp.len();
+        let n = lkn(in c, a);
+        for i in 0..n {
+            let h105 = lbr(in c, a, i, 0);
+            c.tmp.push(h105);
+            let h106 = lbr(in c, a, i, 1);
+            c.tmp.push(h106);
+            c.tmp.push(0);
+        }
+        for i in 0..n {
+            let h107 = lbr(in c, a, i, 2);
+            let h108 = lbr(in c, b, i, 2);
+            let m = merge(inout c, h107, h108);
+            if c.mf_kind != 0 {
+                c.tmp.truncate(f);
+                return none();
+            }
+            setw(inout c.tmp, add(add(f, wrapping_mul(i, 3)), 2), m);
+        }
+        let h109 = la(in c, a);
+        return mkl(inout c, 3, h109, 0, 0, 0, f);
+    }
+    if ta == 5 && tb == 5 && la(in c, a) == la(in c, b) {
+        let h110 = lb(in c, a);
+        let h111 = lb(in c, b);
+        let m = merge(inout c, h110, h111);
+        if c.mf_kind != 0 {
+            return none();
+        }
+        let h112 = la(in c, a);
+        return l_action(inout c, h112, m);
+    }
+    // Loops merge up to the names of their binders: rename the right
+    // binder to the left one when that captures nothing.
+    if ta == 6 && tb == 6 {
+        let v1 = la(in c, a);
+        let v2 = la(in c, b);
+        if v1 == v2 || !mentions(in c, lb(in c, b), v1) {
+            let b2 = if v1 == v2 {
+                lb(in c, b)
+            } else {
+                let w = l_var(inout c, v1);
+                let h113 = lb(in c, b);
+                subst(inout c, h113, v2, w)
+            };
+            let h114 = lb(in c, a);
+            let m = merge(inout c, h114, b2);
+            if c.mf_kind != 0 {
+                return none();
+            }
+            return l_rec(inout c, v1, m);
+        }
+    }
+    conflict(inout c, a, b)
+}
+
+fn same_labels(in c: C, a: u64, b: u64) -> bool {
+    let n = lkn(in c, a);
+    if n != lkn(in c, b) {
+        return false;
+    }
+    for i in 0..n {
+        if lbr(in c, a, i, 0) != lbr(in c, b, i, 0) || lbr(in c, a, i, 1) != lbr(in c, b, i, 1) {
+            return false;
+        }
+    }
+    true
+}

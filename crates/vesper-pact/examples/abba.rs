@@ -6,7 +6,7 @@
 //! ```sh
 //! cargo build --release -p vesper-pact-seed --example abba_rust
 //! cp target/release/examples/abba_rust /tmp/rust_arm
-//! cargo build --release -p vesper-pact --features vesper-port --example abba
+//! cargo build --release -p vesper-pact --example abba
 //! cp target/release/examples/abba /tmp/port_arm
 //! /tmp/rust_arm driver /tmp/rust_arm /tmp/port_arm
 //! ```

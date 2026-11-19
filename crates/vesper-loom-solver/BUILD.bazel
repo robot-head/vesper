@@ -3,9 +3,10 @@ load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper
 
 # The port-backed package (seed-copy rule, docs/maintenance/porting-a-crate.md):
 # build.rs links the object built here from the Loom package in vesper/ and
-# checks port/binding.rs against the generated binding. The compiler links
-# the Rust seed copy, //crates/vesper-loom-solver/seed, instead (port wave P1
-# lane 17, #914).
+# checks port/binding.rs against the generated binding. The Vesper port is
+# this package's only build (#1085). The compiler links the frozen Rust seed
+# copy, //crates/vesper-loom-solver/seed, instead (port wave P1 lane 17,
+# #914), whose Rust engine lives in seed/src.
 vesper_package(
     name = "port_package",
     srcs = glob(["vesper/src/**/*.ves"]),
@@ -64,7 +65,8 @@ vesper_crate(
     },
 )
 
-# The seed package (seed/) builds these same Rust sources without the port.
+# The seed package (seed/) builds the shared API in src/lib.rs and
+# src/optimize.rs over its own Rust engine.
 exports_files(glob([
     "src/**/*.rs",
     "tests/**/*.rs",

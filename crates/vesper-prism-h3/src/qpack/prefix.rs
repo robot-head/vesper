@@ -20,6 +20,7 @@ pub enum PrefixError {
     Huffman(huffman::HuffmanError),
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Decodes an integer whose prefix is the low `bits` bits of `buf[0]`.
 /// Returns the value and the bytes consumed.
 pub fn decode_int(buf: &[u8], bits: u8) -> Result<(u64, usize), PrefixError> {
@@ -54,6 +55,7 @@ pub fn decode_int(buf: &[u8], bits: u8) -> Result<(u64, usize), PrefixError> {
     Err(PrefixError::Incomplete)
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Appends an integer with an `bits`-bit prefix; `flags` fills the bits
 /// above the prefix in the first byte.
 pub fn encode_int(out: &mut Vec<u8>, flags: u8, bits: u8, mut value: u64) {
@@ -72,6 +74,7 @@ pub fn encode_int(out: &mut Vec<u8>, flags: u8, bits: u8, mut value: u64) {
     out.push(value as u8);
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Decodes a string literal whose Huffman flag is bit `bits` of `buf[0]`
 /// and whose length has a `bits`-bit prefix. `max_len` bounds the decoded
 /// length (and the encoded one, which is checked before any copying).
@@ -107,6 +110,7 @@ pub fn decode_string(
     Ok((value, end))
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Appends a string literal, Huffman-coded when that is strictly shorter.
 /// `flags` fills the bits above the H bit.
 pub fn encode_string(out: &mut Vec<u8>, flags: u8, bits: u8, value: &[u8]) {
@@ -118,6 +122,35 @@ pub fn encode_string(out: &mut Vec<u8>, flags: u8, bits: u8, value: &[u8]) {
         encode_int(out, flags, bits, value.len() as u64);
         out.extend_from_slice(value);
     }
+}
+
+// The Vesper build: the same functions forwarded to the port.
+
+#[cfg(feature = "vesper-port")]
+pub fn decode_int(buf: &[u8], bits: u8) -> Result<(u64, usize), PrefixError> {
+    let n = super::port::huff().decode_int(buf, u64::from(bits))?;
+    Ok((n.value, n.used as usize))
+}
+
+#[cfg(feature = "vesper-port")]
+pub fn encode_int(out: &mut Vec<u8>, flags: u8, bits: u8, value: u64) {
+    super::port::huff().encode_int(out, flags, u64::from(bits), value)
+}
+
+#[cfg(feature = "vesper-port")]
+pub fn decode_string(
+    buf: &[u8],
+    bits: u8,
+    max_len: usize,
+) -> Result<(Vec<u8>, usize), PrefixError> {
+    let mut out = Vec::new();
+    let end = super::port::huff().decode_string(buf, u64::from(bits), max_len as u64, &mut out)?;
+    Ok((out, end as usize))
+}
+
+#[cfg(feature = "vesper-port")]
+pub fn encode_string(out: &mut Vec<u8>, flags: u8, bits: u8, value: &[u8]) {
+    super::port::huff().encode_string(out, flags, u64::from(bits), value)
 }
 
 #[cfg(test)]

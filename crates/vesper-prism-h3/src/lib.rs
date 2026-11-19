@@ -21,7 +21,8 @@
 //! ownership here is host-library discipline: it is not the Vesper source
 //! typing rules.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(feature = "vesper-port"), forbid(unsafe_code))]
+#![cfg_attr(feature = "vesper-port", deny(unsafe_code))]
 
 pub mod capsule;
 pub mod client;

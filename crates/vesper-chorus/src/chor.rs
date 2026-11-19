@@ -15,7 +15,6 @@
 //! The textual syntax is parsed by [`crate::parse`]. This module only holds
 //! the tree and the checks every tree must pass before projection.
 
-use std::collections::BTreeSet;
 use std::fmt;
 
 /// Index of a role in [`Choreography::roles`].
@@ -175,20 +174,19 @@ impl fmt::Display for WellFormedError {
 
 impl std::error::Error for WellFormedError {}
 
-pub(crate) fn valid_ident(s: &str) -> bool {
-    let mut chars = s.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && s.len() <= MAX_IDENT
-}
-
 impl Choreography {
     /// Build and check a choreography. Fails with the first well-formedness
     /// error found.
+    /// The checks are the Vesper library's (`vesper/src/tree.ves`).
     pub fn new(roles: Vec<String>, body: GlobalChor) -> Result<Self, WellFormedError> {
         let chor = Self { roles, body };
-        chor.validate()?;
+        crate::port::validate(&chor)?;
         Ok(chor)
+    }
+
+    /// A choreography the Vesper parser has already checked.
+    pub(crate) fn from_checked_parts(roles: Vec<String>, body: GlobalChor) -> Self {
+        Self { roles, body }
     }
 
     pub fn roles(&self) -> &[String] {
@@ -208,135 +206,6 @@ impl Choreography {
             .iter()
             .position(|r| r == name)
             .map(|i| RoleId(i as u16))
-    }
-
-    fn validate(&self) -> Result<(), WellFormedError> {
-        if self.roles.is_empty() {
-            return Err(WellFormedError::NoRoles);
-        }
-        if self.roles.len() > MAX_ROLES {
-            return Err(WellFormedError::TooManyRoles {
-                count: self.roles.len(),
-            });
-        }
-        let mut seen = BTreeSet::new();
-        for r in &self.roles {
-            if !valid_ident(r) {
-                return Err(WellFormedError::BadIdentifier { ident: r.clone() });
-            }
-            if !seen.insert(r.as_str()) {
-                return Err(WellFormedError::DuplicateRole { name: r.clone() });
-            }
-        }
-        let nodes = self.body.node_count();
-        if nodes > MAX_NODES {
-            return Err(WellFormedError::TooLarge { nodes });
-        }
-        let mut used = vec![false; self.roles.len()];
-        let mut bound = Vec::new();
-        let mut unguarded = BTreeSet::new();
-        self.check(&self.body, 0, &mut bound, &mut unguarded, &mut used)?;
-        if self.roles.len() > 1
-            && let Some(i) = used.iter().position(|u| !u)
-        {
-            return Err(WellFormedError::UnusedRole {
-                name: self.roles[i].clone(),
-            });
-        }
-        Ok(())
-    }
-
-    fn name(&self, role: RoleId) -> Result<String, WellFormedError> {
-        self.role_name(role)
-            .map(str::to_owned)
-            .ok_or(WellFormedError::UnknownRole { role })
-    }
-
-    fn check(
-        &self,
-        g: &GlobalChor,
-        depth: usize,
-        bound: &mut Vec<String>,
-        unguarded: &mut BTreeSet<String>,
-        used: &mut [bool],
-    ) -> Result<(), WellFormedError> {
-        if depth > MAX_DEPTH {
-            return Err(WellFormedError::TooDeep { depth });
-        }
-        match g {
-            GlobalChor::End => Ok(()),
-            GlobalChor::Var(v) => {
-                if !bound.contains(v) {
-                    return Err(WellFormedError::UnboundRecursionVariable { var: v.clone() });
-                }
-                if unguarded.contains(v) {
-                    return Err(WellFormedError::UnguardedRecursion { var: v.clone() });
-                }
-                Ok(())
-            }
-            GlobalChor::Rec { var, body } => {
-                if !valid_ident(var) {
-                    return Err(WellFormedError::BadIdentifier { ident: var.clone() });
-                }
-                if bound.contains(var) {
-                    return Err(WellFormedError::ShadowedRecursionVariable { var: var.clone() });
-                }
-                bound.push(var.clone());
-                unguarded.insert(var.clone());
-                let r = self.check(body, depth + 1, bound, unguarded, used);
-                unguarded.remove(var);
-                bound.pop();
-                r
-            }
-            GlobalChor::Local { role, action, next } => {
-                self.name(*role)?;
-                if !valid_ident(action) {
-                    return Err(WellFormedError::BadIdentifier {
-                        ident: action.clone(),
-                    });
-                }
-                used[usize::from(role.0)] = true;
-                self.check(next, depth + 1, bound, unguarded, used)
-            }
-            GlobalChor::Comm { from, to, branches } => {
-                let f = self.name(*from)?;
-                let t = self.name(*to)?;
-                if from == to {
-                    return Err(WellFormedError::SelfCommunication { role: f });
-                }
-                if branches.is_empty() {
-                    return Err(WellFormedError::EmptyChoice { from: f, to: t });
-                }
-                used[usize::from(from.0)] = true;
-                used[usize::from(to.0)] = true;
-                let mut labels = BTreeSet::new();
-                for b in branches {
-                    if !valid_ident(&b.label) {
-                        return Err(WellFormedError::BadIdentifier {
-                            ident: b.label.clone(),
-                        });
-                    }
-                    if !labels.insert(b.label.as_str()) {
-                        return Err(WellFormedError::DuplicateLabel {
-                            from: f,
-                            to: t,
-                            label: b.label.clone(),
-                        });
-                    }
-                }
-                // A message guards every enclosing recursion variable.
-                let saved = std::mem::take(unguarded);
-                let mut result = Ok(());
-                for b in branches {
-                    result = self.check(&b.next, depth + 1, bound, unguarded, used);
-                    if result.is_err() {
-                        break;
-                    }
-                }
-                *unguarded = saved;
-                result
-            }
-        }
     }
 }
 

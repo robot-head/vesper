@@ -1,0 +1,115 @@
+// Integer and byte helpers. Arithmetic that cannot overflow by the Rust
+// code's invariants is `wrapping_*`; Rust's `min`, `max` and
+// `saturating_*` are the functions below.
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn max_u64() -> u64 {
+    18446744073709551615
+}
+
+pub fn min64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+pub fn max64(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+pub fn sat_add(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        max_u64()
+    } else {
+        s
+    }
+}
+
+pub fn sat_mul(a: u64, b: u64) -> u64 {
+    let (lo, hi) = mul_wide(a, b);
+    if hi != 0 {
+        max_u64()
+    } else {
+        lo
+    }
+}
+
+// `x.div_ceil(d)` for `d > 0`, without overflow.
+pub fn div_ceil(x: u64, d: u64) -> u64 {
+    if d == 0 {
+        return 0;
+    }
+    let q = x / d;
+    if x % d != 0 {
+        wrapping_add(q, 1)
+    } else {
+        q
+    }
+}
+
+// `1 << bits` for `bits < 64`.
+pub fn bit(bits: u64) -> u64 {
+    shl(1, bits)
+}
+
+pub fn byte(in s: Slice[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(b) => b,
+        Option::None => 0,
+    }
+}
+
+pub fn word(in s: Slice[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(w) => w,
+        Option::None => 0,
+    }
+}
+
+// Removes `s[i]`, keeping the order of the rest (`Vec::remove`).
+pub fn remove_word(inout s: ChunkSeq[u64], i: u64) {
+    let n = s.len();
+    if i < n {
+        let _moved = s.try_copy_within(inc(i), n, i);
+        s.truncate(wrapping_sub(n, 1));
+    }
+}
+
+// Drops the first `n` bytes of `s` (`Vec::drain(..n)`).
+pub fn drain_front(inout s: ChunkSeq[u8], n: u64) {
+    let len = s.len();
+    if n >= len {
+        s.clear();
+    } else if n > 0 {
+        let _moved = s.try_copy_within(n, len, 0);
+        s.truncate(wrapping_sub(len, n));
+    }
+}
+
+// `x << s` and `x >> s` for `s < 64`, else 0. (`wrapping_shl_u64` on a loop
+// variable fails the optimizer's ownership validation, see the report.)
+pub fn shl(x: u64, s: u64) -> u64 {
+    if s < 64 {
+        x << s
+    } else {
+        0
+    }
+}
+
+pub fn shr(x: u64, s: u64) -> u64 {
+    if s < 64 {
+        x >> s
+    } else {
+        0
+    }
+}

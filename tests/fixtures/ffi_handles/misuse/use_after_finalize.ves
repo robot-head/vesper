@@ -1,0 +1,5 @@
+// A loan after the finalizer consumed the handle.
+fn use_after_finalize(sink s: Sealer, inout p: Slice[u8]) -> u32 eff [Ffi[Aead]] {
+    Aead::aead_sealer_free(s);
+    Aead::aead_open(in s, inout p)
+}

@@ -269,6 +269,7 @@ fn walk<'e>(e: &'e Expr, f: &mut dyn FnMut(&'e Expr)) {
                 each(v);
             }
         }
+        ExprKind::Continue => {}
     }
 }
 

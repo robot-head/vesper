@@ -1,0 +1,276 @@
+// Module sap of @vesper/kinetic (see lib.ves): the sort-and-sweep
+// broadphase of src/sap.rs. Boxes are six f32 bit patterns each, as in
+// module lbvh. The Rust build runs each kernel over workgroups of 256 items
+// in a GPU's shape; their outputs do not depend on the grouping, so here
+// each kernel is one loop (the radix sort's per-group histograms become one
+// histogram per pass, which scatters to the same positions).
+use self::{
+    SapError
+};
+use self::util::{
+    box_valid,
+    dec,
+    g32,
+    g64,
+    gf,
+    inc,
+    shr_u64,
+    u
+};
+
+fn raise_sap(e: SapError) -> u64 eff [Fail[SapError]] {
+    Fail::raise(e);
+    0
+}
+
+// Order-preserving map from f32 to u32 (src/sap.rs `sortable`).
+pub fn sortable(bits: u32) -> u32 {
+    if (bits >> 31) == 1 {
+        ~bits
+    } else {
+        bits | 0x80000000
+    }
+}
+
+// Stable LSD radix sort of `keys[0..n]` (with `vals` when `with_vals`) on
+// the low `passes * 8` bits, through `tk`/`tv` and the 256-slot `hist`.
+// Even pass counts leave the result in `keys`/`vals`.
+fn radix_sort(
+    inout keys: Slice[u64],
+    inout vals: Slice[u32],
+    with_vals: bool,
+    n: u64,
+    passes: u64,
+    inout tk: Slice[u64],
+    inout tv: Slice[u32],
+    inout hist: Slice[u32]
+) {
+    for pass in 0..passes {
+        let shift = wrapping_u32(wrapping_mul(pass, 8));
+        for d in 0..u(256) {
+            hist.try_set(d, 0);
+        }
+        let odd = (pass & 1) == 1;
+        for i in 0..n {
+            let mut k: u64 = 0;
+            if odd {
+                k = g64(in tk, i);
+            } else {
+                k = g64(in keys, i);
+            }
+            let d = shr_u64(k, shift) & 255;
+            hist.try_set(d, wrapping_add(g32(in hist, d), 1));
+        }
+        let mut run: u32 = 0;
+        for d in 0..u(256) {
+            let c = g32(in hist, d);
+            hist.try_set(d, run);
+            run = wrapping_add(run, c);
+        }
+        for i in 0..n {
+            if odd {
+                let k = g64(in tk, i);
+                let d = shr_u64(k, shift) & 255;
+                let at = widen_u64(g32(in hist, d));
+                hist.try_set(d, wrapping_add(g32(in hist, d), 1));
+                keys.try_set(at, k);
+                if with_vals {
+                    vals.try_set(at, g32(in tv, i));
+                }
+            } else {
+                let k = g64(in keys, i);
+                let d = shr_u64(k, shift) & 255;
+                let at = widen_u64(g32(in hist, d));
+                hist.try_set(d, wrapping_add(g32(in hist, d), 1));
+                tk.try_set(at, k);
+                if with_vals {
+                    tv.try_set(at, g32(in vals, i));
+                }
+            }
+        }
+    }
+}
+
+// SweepAndPrune::build kernels 1-5 over `n` boxes (the wrapper checked the
+// capacity): validate, choose the axis, compute keys, sort, gather the
+// sorted bounds into `smin`/`smax` (three f32 lanes per box). Returns the
+// sweep axis.
+pub fn build(
+    in boxes: Slice[u32],
+    inout keys: Slice[u64],
+    inout order: Slice[u32],
+    inout smin: Slice[u32],
+    inout smax: Slice[u32],
+    inout tk: Slice[u64],
+    inout tv: Slice[u32],
+    inout hist: Slice[u32]
+) -> u64 eff [Fail[SapError]] {
+    let n = boxes.len() / 6;
+    for i in 0..n {
+        if !box_valid(in boxes, i) {
+            return raise_sap(
+                SapError::InvalidBox {
+                    index: wrapping_usize(i)
+                }
+            );
+        }
+    }
+    let inf = from_bits_f32(0x7f800000);
+    let ninf = from_bits_f32(0xff800000);
+    let mut lo0 = inf;
+    let mut lo1 = inf;
+    let mut lo2 = inf;
+    let mut hi0 = ninf;
+    let mut hi1 = ninf;
+    let mut hi2 = ninf;
+    for i in 0..n {
+        let b = wrapping_mul(i, 6);
+        let c0 = (gf(in boxes, b) + gf(in boxes, wrapping_add(b, 3))) * 0.5;
+        let c1 = (gf(in boxes, wrapping_add(b, 1)) + gf(in boxes, wrapping_add(b, 4))) * 0.5;
+        let c2 = (gf(in boxes, wrapping_add(b, 2)) + gf(in boxes, wrapping_add(b, 5))) * 0.5;
+        if c0 < lo0 {
+            lo0 = c0;
+        }
+        if c0 > hi0 {
+            hi0 = c0;
+        }
+        if c1 < lo1 {
+            lo1 = c1;
+        }
+        if c1 > hi1 {
+            hi1 = c1;
+        }
+        if c2 < lo2 {
+            lo2 = c2;
+        }
+        if c2 > hi2 {
+            hi2 = c2;
+        }
+    }
+    let mut axis: u64 = 0;
+    if n > 0 {
+        let x0 = widen_f64(hi0) - widen_f64(lo0);
+        let x1 = widen_f64(hi1) - widen_f64(lo1);
+        let x2 = widen_f64(hi2) - widen_f64(lo2);
+        let mut best = x0;
+        if x1 > best {
+            axis = 1;
+            best = x1;
+        }
+        if x2 > best {
+            axis = 2;
+        }
+    }
+    for i in 0..n {
+        keys.try_set(i, widen_u64(sortable(g32(in boxes, wrapping_add(wrapping_mul(i, 6), axis)))));
+        order.try_set(i, wrapping_u32(i));
+    }
+    radix_sort(inout keys, inout order, true, n, 4, inout tk, inout tv, inout hist);
+    for s in 0..n {
+        let b = wrapping_mul(widen_u64(g32(in order, s)), 6);
+        let at = wrapping_mul(s, 3);
+        for a in 0..u(3) {
+            smin.try_set(wrapping_add(at, a), g32(in boxes, wrapping_add(b, a)));
+            smax.try_set(wrapping_add(at, a), g32(in boxes, wrapping_add(b, wrapping_add(a, 3))));
+        }
+    }
+    axis
+}
+
+fn sweep_overlaps(in smin: Slice[u32], in smax: Slice[u32], s: u64, t: u64) -> bool {
+    let bs = wrapping_mul(s, 3);
+    let bt = wrapping_mul(t, 3);
+    for a in 0..u(3) {
+        if !(
+            gf(in smin, wrapping_add(bs, a))
+                <= gf(in smax, wrapping_add(bt, a))
+                && gf(in smin, wrapping_add(bt, a))
+                <= gf(in smax, wrapping_add(bs, a))
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+// SweepAndPrune::overlapping_pairs kernels 6 and 7: each sorted box's
+// pair count, scanned in place to its output offset. Returns the total,
+// which the wrapper checks against `max_pairs` and sizes `out` by.
+pub fn pair_total(in smin: Slice[u32], in smax: Slice[u32], axis: u64, inout counts: Slice[u32])
+    -> u64 {
+    let n = counts.len();
+    let mut total: u64 = 0;
+    for s in 0..n {
+        let mut c: u32 = 0;
+        let mut t = inc(s);
+        let up = gf(in smax, wrapping_add(wrapping_mul(s, 3), axis));
+        loop {
+            if !(t < n && gf(in smin, wrapping_add(wrapping_mul(t, 3), axis)) <= up) {
+                break;
+            }
+            if sweep_overlaps(in smin, in smax, s, t) && c != 0xffffffff {
+                c = wrapping_add(c, 1);
+            }
+            t = inc(t);
+        }
+        counts.try_set(s, wrapping_u32(total));
+        total = wrapping_add(total, widen_u64(c));
+    }
+    total
+}
+
+// Kernels 8 and 9: the pair keys `(a << 32) | b` at their offsets, sorted,
+// into `out` (exactly the total long; `tk` as long, `tv` and `novals`
+// empty).
+pub fn write_pairs(
+    in order: Slice[u32],
+    in smin: Slice[u32],
+    in smax: Slice[u32],
+    axis: u64,
+    in counts: Slice[u32],
+    inout out: Slice[u64],
+    inout tk: Slice[u64],
+    inout novals: Slice[u32],
+    inout tv: Slice[u32],
+    inout hist: Slice[u32]
+) {
+    let n = counts.len();
+    let total = out.len();
+    for s in 0..n {
+        let mut at = widen_u64(g32(in counts, s));
+        let mut t = inc(s);
+        let up = gf(in smax, wrapping_add(wrapping_mul(s, 3), axis));
+        loop {
+            if !(t < n && gf(in smin, wrapping_add(wrapping_mul(t, 3), axis)) <= up) {
+                break;
+            }
+            if sweep_overlaps(in smin, in smax, s, t) {
+                let a = widen_u64(g32(in order, s));
+                let b = widen_u64(g32(in order, t));
+                if a < b {
+                    out.try_set(at, (a << 32) | b);
+                } else {
+                    out.try_set(at, (b << 32) | a);
+                }
+                at = inc(at);
+            }
+            t = inc(t);
+        }
+    }
+    let mut passes: u64 = 8;
+    if n <= 0x10000 {
+        // Indices fit in 16 bits: compress each key so four passes sort it.
+        passes = 4;
+        for i in 0..total {
+            let k = g64(in out, i);
+            out.try_set(i, ((k >> 32) << 16) | (k & 0xffff));
+        }
+    }
+    radix_sort(inout out, inout novals, false, total, passes, inout tk, inout tv, inout hist);
+    if passes == 4 {
+        for i in 0..total {
+            let k = g64(in out, i);
+            out.try_set(i, ((k >> 16) << 32) | (k & 0xffff));
+        }
+    }
+}

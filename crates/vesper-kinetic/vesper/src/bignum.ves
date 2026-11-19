@@ -1,0 +1,592 @@
+// Module bignum of @vesper/kinetic (see lib.ves): the arbitrary-precision
+// integers `crmath.ves` evaluates in, standing in for `num-bigint`'s
+// `BigInt`. A magnitude is little-endian 32-bit limbs with no high zero
+// limb (zero has none); a `Big` is a sign and a magnitude, and zero is never
+// negative. Shifts right round toward negative infinity and division
+// truncates toward zero, as in `num-bigint`, so every crmath intermediate
+// is the Rust build's bit for bit.
+use self::util::{
+    dec,
+    g32,
+    inc,
+    shl_u64,
+    shr_u64
+};
+
+pub struct Big {
+    neg: bool,
+    mag: ChunkSeq[u32],
+}
+
+fn limb_mask() -> u64 {
+    0xffffffff
+}
+
+// Unsigned `a / b` and `a % b` for a nonzero `b` (callers check).
+pub fn div64(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a / b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+pub fn rem64(a: u64, b: u64) -> u64 {
+    if b == 0 {
+        return 0;
+    }
+    handle Fail[RuntimeError] in {
+        a % b
+    } with {
+        return v => v,
+        raise(e, k) => 0,
+    }
+}
+
+// ----- magnitudes -----------------------------------------------------------
+
+// Number of limbs of `a` below its highest nonzero one.
+fn nat_len(in a: Slice[u32]) -> u64 {
+    let mut n = a.len();
+    loop {
+        if n == 0 || g32(in a, dec(n)) != 0 {
+            break;
+        }
+        n = dec(n);
+    }
+    n
+}
+
+fn trim(inout a: ChunkSeq[u32]) {
+    let n = nat_len(in a.as_slice());
+    a.truncate(n);
+}
+
+fn nat_from_u64(x: u64) -> ChunkSeq[u32] {
+    let mut r: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](2);
+    if x != 0 {
+        r.push(wrapping_u32(x & limb_mask()));
+        let hi = x >> 32;
+        if hi != 0 {
+            r.push(wrapping_u32(hi));
+        }
+    }
+    r
+}
+
+fn nat_copy(in a: Slice[u32]) -> ChunkSeq[u32] {
+    let n = nat_len(in a);
+    let mut r: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    r.extend(in a[0..n]);
+    r
+}
+
+// -1, 0 or 1 as `a` is less than, equal to or greater than `b`.
+fn nat_cmp(in a: Slice[u32], in b: Slice[u32]) -> i64 {
+    let na = nat_len(in a);
+    let nb = nat_len(in b);
+    if na != nb {
+        return if na < nb {
+            -1
+        } else {
+            1
+        };
+    }
+    let mut i = na;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = dec(i);
+        let x = g32(in a, i);
+        let y = g32(in b, i);
+        if x != y {
+            return if x < y {
+                -1
+            } else {
+                1
+            };
+        }
+    }
+    0
+}
+
+pub fn nat_bits(in a: Slice[u32]) -> u64 {
+    let n = nat_len(in a);
+    if n == 0 {
+        return 0;
+    }
+    let top = g32(in a, dec(n));
+    wrapping_sub(wrapping_mul(n, 32), widen_u64(leading_zeros_u32(top)))
+}
+
+fn nat_add(in a: Slice[u32], in b: Slice[u32]) -> ChunkSeq[u32] {
+    let na = nat_len(in a);
+    let nb = nat_len(in b);
+    let n = if na > nb {
+        na
+    } else {
+        nb
+    };
+    let mut r: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](inc(n));
+    let mut carry: u64 = 0;
+    for i in 0..n {
+        let s = wrapping_add(wrapping_add(widen_u64(g32(in a, i)), widen_u64(g32(in b, i))), carry);
+        r.push(wrapping_u32(s & limb_mask()));
+        carry = s >> 32;
+    }
+    if carry != 0 {
+        r.push(wrapping_u32(carry));
+    }
+    r
+}
+
+// `a - b` for `a >= b`.
+fn nat_sub(in a: Slice[u32], in b: Slice[u32]) -> ChunkSeq[u32] {
+    let na = nat_len(in a);
+    let mut r: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](na);
+    let mut borrow: u64 = 0;
+    for i in 0..na {
+        let t = wrapping_sub(
+            wrapping_sub(widen_u64(g32(in a, i)), widen_u64(g32(in b, i))),
+            borrow
+        );
+        r.push(wrapping_u32(t & limb_mask()));
+        borrow = t >> 63;
+    }
+    trim(inout r);
+    r
+}
+
+fn nat_mul(in a: Slice[u32], in b: Slice[u32]) -> ChunkSeq[u32] {
+    let na = nat_len(in a);
+    let nb = nat_len(in b);
+    let mut r: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](wrapping_add(na, nb));
+    if na == 0 || nb == 0 {
+        return r;
+    }
+    r.resize(wrapping_add(na, nb), 0);
+    for i in 0..na {
+        let x = widen_u64(g32(in a, i));
+        if x != 0 {
+            let mut carry: u64 = 0;
+            for j in 0..nb {
+                let at = wrapping_add(i, j);
+                let p = wrapping_add(
+                    wrapping_add(
+                        wrapping_mul(x, widen_u64(g32(in b, j))),
+                        widen_u64(g32(in r.as_slice(), at))
+                    ),
+                    carry
+                );
+                r.try_set(at, wrapping_u32(p & limb_mask()));
+                carry = p >> 32;
+            }
+            r.try_set(wrapping_add(i, nb), wrapping_u32(carry));
+        }
+    }
+    trim(inout r);
+    r
+}
+
+fn nat_mul_small(in a: Slice[u32], m: u64) -> ChunkSeq[u32] {
+    let na = nat_len(in a);
+    let mut r: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](inc(na));
+    if m == 0 {
+        return r;
+    }
+    let mut carry: u64 = 0;
+    for i in 0..na {
+        let p = wrapping_add(wrapping_mul(widen_u64(g32(in a, i)), m), carry);
+        r.push(wrapping_u32(p & limb_mask()));
+        carry = p >> 32;
+    }
+    if carry != 0 {
+        r.push(wrapping_u32(carry));
+    }
+    r
+}
+
+fn nat_shl(in a: Slice[u32], k: u64) -> ChunkSeq[u32] {
+    let na = nat_len(in a);
+    let words = k >> 5;
+    let bits = wrapping_u32(k & 31);
+    let mut r: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](
+        wrapping_add(wrapping_add(na, words), 1)
+    );
+    if na == 0 {
+        return r;
+    }
+    r.resize(words, 0);
+    if bits == 0 {
+        r.extend(in a[0..na]);
+        return r;
+    }
+    let back = wrapping_sub(32, bits);
+    let mut carry: u64 = 0;
+    for i in 0..na {
+        let x = widen_u64(g32(in a, i));
+        r.push(wrapping_u32((shl_u64(x, bits) | carry) & limb_mask()));
+        carry = shr_u64(x, back);
+    }
+    if carry != 0 {
+        r.push(wrapping_u32(carry));
+    }
+    r
+}
+
+// `floor(a / 2^k)`.
+fn nat_shr(in a: Slice[u32], k: u64) -> ChunkSeq[u32] {
+    let na = nat_len(in a);
+    let words = k >> 5;
+    let bits = wrapping_u32(k & 31);
+    if words >= na {
+        return ChunkSeq::new[u32]();
+    }
+    let n = wrapping_sub(na, words);
+    let mut r: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    if bits == 0 {
+        r.extend(in a[words..na]);
+        return r;
+    }
+    let back = wrapping_sub(32, bits);
+    for i in 0..n {
+        let lo = shr_u64(widen_u64(g32(in a, wrapping_add(words, i))), bits);
+        let hi = shl_u64(widen_u64(g32(in a, wrapping_add(words, inc(i)))), back);
+        r.push(wrapping_u32((lo | hi) & limb_mask()));
+    }
+    trim(inout r);
+    r
+}
+
+// Whether any of the low `k` bits of `a` is set.
+fn nat_low_bits_set(in a: Slice[u32], k: u64) -> bool {
+    let na = nat_len(in a);
+    let words = k >> 5;
+    let bits = wrapping_u32(k & 31);
+    for i in 0..words {
+        if i >= na {
+            return false;
+        }
+        if g32(in a, i) != 0 {
+            return true;
+        }
+    }
+    if bits == 0 || words >= na {
+        return false;
+    }
+    let mask = wrapping_sub(shl_u64(1, bits), 1);
+    (widen_u64(g32(in a, words)) & mask) != 0
+}
+
+// `a / d` (truncated) for `0 < d < 2^32`.
+fn nat_div_small(in a: Slice[u32], d: u64) -> ChunkSeq[u32] {
+    let na = nat_len(in a);
+    let mut r: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](na);
+    r.resize(na, 0);
+    let mut acc: u64 = 0;
+    let mut i = na;
+    loop {
+        if i == 0 {
+            break;
+        }
+        i = dec(i);
+        let cur = (acc << 32) | widen_u64(g32(in a, i));
+        let q = div64(cur, d);
+        r.try_set(i, wrapping_u32(q));
+        acc = wrapping_sub(cur, wrapping_mul(q, d));
+    }
+    trim(inout r);
+    r
+}
+
+// Knuth's algorithm D: `a / b` truncated, for nonzero `b`.
+fn nat_div(in a: Slice[u32], in b: Slice[u32]) -> ChunkSeq[u32] {
+    let nb = nat_len(in b);
+    if nb == 0 || nat_cmp(in a, in b) < 0 {
+        return ChunkSeq::new[u32]();
+    }
+    if nb == 1 {
+        return nat_div_small(in a, widen_u64(g32(in b, 0)));
+    }
+    let na = nat_len(in a);
+    let s = widen_u64(leading_zeros_u32(g32(in b, dec(nb))));
+    let v = nat_shl(in b, s);
+    let mut un = nat_shl(in a, s);
+    un.resize(inc(na), 0);
+    let m = wrapping_sub(na, nb);
+    let mut q: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](inc(m));
+    q.resize(inc(m), 0);
+    let vtop = widen_u64(g32(in v.as_slice(), dec(nb)));
+    let vnext = widen_u64(g32(in v.as_slice(), wrapping_sub(nb, 2)));
+    let mut j = inc(m);
+    loop {
+        if j == 0 {
+            break;
+        }
+        j = dec(j);
+        let top = (widen_u64(g32(in un.as_slice(), wrapping_add(j, nb))) << 32) | widen_u64(
+            g32(in un.as_slice(), wrapping_add(j, dec(nb)))
+        );
+        let mut qhat = div64(top, vtop);
+        let mut rhat = wrapping_sub(top, wrapping_mul(qhat, vtop));
+        let below = widen_u64(g32(in un.as_slice(), wrapping_add(j, wrapping_sub(nb, 2))));
+        loop {
+            if !(qhat > limb_mask() || wrapping_mul(qhat, vnext) > ((rhat << 32) | below)) {
+                break;
+            }
+            qhat = dec(qhat);
+            rhat = wrapping_add(rhat, vtop);
+            if rhat > limb_mask() {
+                break;
+            }
+        }
+        // un[j..j+nb+1] -= qhat * v.
+        let mut carry: u64 = 0;
+        let mut borrow: u64 = 0;
+        for i in 0..nb {
+            let p = wrapping_add(wrapping_mul(qhat, widen_u64(g32(in v.as_slice(), i))), carry);
+            carry = p >> 32;
+            let at = wrapping_add(i, j);
+            let t = wrapping_sub(
+                wrapping_sub(widen_u64(g32(in un.as_slice(), at)), p & limb_mask()),
+                borrow
+            );
+            un.try_set(at, wrapping_u32(t & limb_mask()));
+            borrow = t >> 63;
+        }
+        let at = wrapping_add(j, nb);
+        let t = wrapping_sub(wrapping_sub(widen_u64(g32(in un.as_slice(), at)), carry), borrow);
+        un.try_set(at, wrapping_u32(t & limb_mask()));
+        if (t >> 63) != 0 {
+            // Added back: qhat was one too large.
+            qhat = dec(qhat);
+            let mut c: u64 = 0;
+            for i in 0..nb {
+                let at = wrapping_add(i, j);
+                let s2 = wrapping_add(
+                    wrapping_add(
+                        widen_u64(g32(in un.as_slice(), at)),
+                        widen_u64(g32(in v.as_slice(), i))
+                    ),
+                    c
+                );
+                un.try_set(at, wrapping_u32(s2 & limb_mask()));
+                c = s2 >> 32;
+            }
+            let at = wrapping_add(j, nb);
+            un
+                .try_set(
+                at,
+                wrapping_u32(wrapping_add(widen_u64(g32(in un.as_slice(), at)), c) & limb_mask())
+            );
+        }
+        q.try_set(j, wrapping_u32(qhat));
+    }
+    trim(inout q);
+    q
+}
+
+// `floor(sqrt(a))` by Newton's iteration from above.
+fn nat_sqrt(in a: Slice[u32]) -> ChunkSeq[u32] {
+    let bits = nat_bits(in a);
+    if bits == 0 {
+        return ChunkSeq::new[u32]();
+    }
+    let one = nat_from_u64(1);
+    let mut x = nat_shl(in one.as_slice(), inc(bits) >> 1);
+    loop {
+        let d = nat_div(in a, in x.as_slice());
+        let s = nat_add(in x.as_slice(), in d.as_slice());
+        let y = nat_shr(in s.as_slice(), 1);
+        if nat_cmp(in y.as_slice(), in x.as_slice()) >= 0 {
+            break;
+        }
+        x = y;
+    }
+    x
+}
+
+// ----- signed values ---------------------------------------------------------
+
+fn make(neg: bool, sink mag: ChunkSeq[u32]) -> Big {
+    let z = nat_len(in mag.as_slice()) == 0;
+    Big {
+        neg: neg && !z,
+        mag: mag
+    }
+}
+
+pub fn big_zero() -> Big {
+    make(false, ChunkSeq::new[u32]())
+}
+
+pub fn big_u64(x: u64) -> Big {
+    make(false, nat_from_u64(x))
+}
+
+pub fn big_i64(x: i64) -> Big {
+    if x < 0 {
+        make(true, nat_from_u64(wrapping_sub(0, wrapping_u64(x))))
+    } else {
+        make(false, nat_from_u64(wrapping_u64(x)))
+    }
+}
+
+pub fn big_copy(in a: Big) -> Big {
+    make(a.neg, nat_copy(in a.mag.as_slice()))
+}
+
+pub fn big_is_zero(in a: Big) -> bool {
+    nat_len(in a.mag.as_slice()) == 0
+}
+
+pub fn big_is_neg(in a: Big) -> bool {
+    a.neg
+}
+
+pub fn big_bits(in a: Big) -> u64 {
+    nat_bits(in a.mag.as_slice())
+}
+
+// The low 64 bits of the magnitude.
+pub fn big_low_u64(in a: Big) -> u64 {
+    widen_u64(g32(in a.mag.as_slice(), 0)) | (widen_u64(g32(in a.mag.as_slice(), 1)) << 32)
+}
+
+pub fn big_bit0(in a: Big) -> bool {
+    (g32(in a.mag.as_slice(), 0) & 1) == 1
+}
+
+pub fn big_neg(in a: Big) -> Big {
+    make(!a.neg, nat_copy(in a.mag.as_slice()))
+}
+
+pub fn big_abs(in a: Big) -> Big {
+    make(false, nat_copy(in a.mag.as_slice()))
+}
+
+pub fn big_cmp(in a: Big, in b: Big) -> i64 {
+    if a.neg != b.neg {
+        return if a.neg {
+            -1
+        } else {
+            1
+        };
+    }
+    let c = nat_cmp(in a.mag.as_slice(), in b.mag.as_slice());
+    if a.neg {
+        wrapping_sub(0, c)
+    } else {
+        c
+    }
+}
+
+fn signed_add(an: bool, in a: Slice[u32], bn: bool, in b: Slice[u32]) -> Big {
+    if an == bn {
+        return make(an, nat_add(in a, in b));
+    }
+    let c = nat_cmp(in a, in b);
+    if c >= 0 {
+        make(an, nat_sub(in a, in b))
+    } else {
+        make(bn, nat_sub(in b, in a))
+    }
+}
+
+pub fn big_add(in a: Big, in b: Big) -> Big {
+    signed_add(a.neg, in a.mag.as_slice(), b.neg, in b.mag.as_slice())
+}
+
+pub fn big_sub(in a: Big, in b: Big) -> Big {
+    signed_add(a.neg, in a.mag.as_slice(), !b.neg, in b.mag.as_slice())
+}
+
+pub fn big_add_u64(in a: Big, x: u64) -> Big {
+    let b = nat_from_u64(x);
+    signed_add(a.neg, in a.mag.as_slice(), false, in b.as_slice())
+}
+
+pub fn big_mul(in a: Big, in b: Big) -> Big {
+    make(a.neg != b.neg, nat_mul(in a.mag.as_slice(), in b.mag.as_slice()))
+}
+
+// `a * m` for `m < 2^32`.
+pub fn big_mul_small(in a: Big, m: u64) -> Big {
+    make(a.neg, nat_mul_small(in a.mag.as_slice(), m))
+}
+
+// `a * x` for any i64 `x`.
+pub fn big_mul_i64(in a: Big, x: i64) -> Big {
+    let b = big_i64(x);
+    big_mul(in a, in b)
+}
+
+pub fn big_shl(in a: Big, k: u64) -> Big {
+    make(a.neg, nat_shl(in a.mag.as_slice(), k))
+}
+
+// `floor(a / 2^k)` (toward negative infinity, as `num-bigint`'s `>>`).
+pub fn big_shr(in a: Big, k: u64) -> Big {
+    let q = nat_shr(in a.mag.as_slice(), k);
+    if a.neg && nat_low_bits_set(in a.mag.as_slice(), k) {
+        let one = nat_from_u64(1);
+        return make(true, nat_add(in q.as_slice(), in one.as_slice()));
+    }
+    make(a.neg, q)
+}
+
+// `a / b` truncated toward zero, for nonzero `b`.
+pub fn big_div(in a: Big, in b: Big) -> Big {
+    make(a.neg != b.neg, nat_div(in a.mag.as_slice(), in b.mag.as_slice()))
+}
+
+// `a / d` truncated toward zero, for `0 < d < 2^32`.
+pub fn big_div_small(in a: Big, d: u64) -> Big {
+    make(a.neg, nat_div_small(in a.mag.as_slice(), d))
+}
+
+// `a / d` truncated toward zero, for any nonzero `d < 2^64`.
+pub fn big_div_u64(in a: Big, d: u64) -> Big {
+    if d <= limb_mask() {
+        return big_div_small(in a, d);
+    }
+    let b = big_u64(d);
+    big_div(in a, in b)
+}
+
+// `a mod 4` of a nonnegative `a`.
+pub fn big_mod4(in a: Big) -> u64 {
+    widen_u64(g32(in a.mag.as_slice(), 0)) & 3
+}
+
+// `floor(sqrt(a))` of a nonnegative `a`.
+pub fn big_sqrt(in a: Big) -> Big {
+    make(false, nat_sqrt(in a.mag.as_slice()))
+}
+
+// The value of the limbs `s[at..at + n]` (nonnegative).
+pub fn big_from_limbs(in s: Slice[u32], at: u64, n: u64) -> Big {
+    let mut r: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    for i in 0..n {
+        r.push(g32(in s, wrapping_add(at, i)));
+    }
+    make(false, r)
+}
+
+// The number of limbs of a nonnegative `a`.
+pub fn big_limbs(in a: Big) -> u64 {
+    nat_len(in a.mag.as_slice())
+}
+
+// Store the limbs of a nonnegative `a` at `s[at..]`.
+pub fn big_store(in a: Big, inout s: Slice[u32], at: u64) {
+    let n = nat_len(in a.mag.as_slice());
+    for i in 0..n {
+        s.try_set(wrapping_add(at, i), g32(in a.mag.as_slice(), i));
+    }
+}

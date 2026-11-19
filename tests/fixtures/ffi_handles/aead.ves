@@ -1,0 +1,196 @@
+// The worked example of opaque Bridge handles (§16.3): a stateful AEAD
+// sealer from aead.vsys, created once, used in place on packet buffers and
+// finalized exactly once on every path.
+copy struct AuthError {
+    code: u32,
+}
+
+// A 1,216-byte packet: 1,200 payload bytes and a 16-byte tag.
+fn packet(seed: u8) -> ChunkSeq[u8] {
+    let mut p = ChunkSeq::with_capacity[u8](1216);
+    for _ in 0..1216 {
+        p.push(seed);
+    }
+    p
+}
+
+fn payload_sum(in p: Slice[u8]) -> u64 {
+    p.sum_be16()
+}
+
+// `in` lends the sealer; the caller keeps it, so failing here is fine.
+fn open_or_fail(in s: Sealer, inout p: Slice[u8]) -> u64 eff [Ffi[Aead], Fail[AuthError]] {
+    let code = Aead::aead_open(in s, inout p);
+    if code != 0 {
+        Fail::raise(
+            AuthError {
+                code: code
+            }
+        )
+    } else {
+        p.sum_be16()
+    }
+}
+
+// Seal and open one packet; the sealer is finalized before returning.
+pub fn roundtrip() -> u64 eff [Ffi[Aead]] {
+    let mut s = match Aead::aead_sealer_new(7) {
+        Some(s) => s,
+        None => return 1,
+    };
+    let mut p = packet(3);
+    let before = payload_sum(in p[0..1200]);
+    let sealed = Aead::aead_seal(inout s, inout p.as_slice_mut());
+    let changed = payload_sum(in p[0..1200]) != before;
+    let opened = Aead::aead_open(in s, inout p.as_slice_mut());
+    let same = payload_sum(in p[0..1200]) == before;
+    Aead::aead_sealer_free(s);
+    if sealed == 0 && changed && opened == 0 && same {
+        before
+    } else {
+        2
+    }
+}
+
+// A packet opened with the wrong key fails to open: the Fail exit is handled locally, the
+// sealer stays live across it and is finalized once afterwards.
+pub fn tampered() -> u64 eff [Ffi[Aead]] {
+    let mut s = match Aead::aead_sealer_new(9) {
+        Some(s) => s,
+        None => return 1,
+    };
+    let wrong = match Aead::aead_sealer_new(10) {
+        Some(w) => w,
+        None => {
+            Aead::aead_sealer_free(s);
+            return 1;
+        },
+    };
+    let mut p = packet(5);
+    Aead::aead_seal(inout s, inout p.as_slice_mut());
+    // Opening with the wrong key fails the tag check.
+    let result = handle Fail[AuthError] in {
+        open_or_fail(in wrong, inout p.as_slice_mut())
+    } with {
+        return v => v,
+        raise(e, _) => wrapping_add(1000, widen_u64(e.code)),
+    };
+    Aead::aead_sealer_free(wrong);
+    Aead::aead_sealer_free(s);
+    result
+}
+
+// Early returns finalize on their own path.
+fn early(key: u64, stop: bool) -> u64 eff [Ffi[Aead]] {
+    let s = match Aead::aead_sealer_new(key) {
+        Some(s) => s,
+        None => return 0,
+    };
+    if stop {
+        Aead::aead_sealer_free(s);
+        return 1;
+    }
+    Aead::aead_sealer_free(s);
+    2
+}
+
+pub fn paths() -> u64 eff [Ffi[Aead]] {
+    // A NULL handle (key 0) is None: nothing to finalize.
+    let a = early(0, true);
+    let b = early(11, true);
+    let c = early(12, false);
+    let d: u64 = match Aead::aead_sealer_must(0) {
+        Ok(s) => {
+            Aead::aead_sealer_free(s);
+            50
+        },
+        Err(e) => wrapping_add(e.raw, 70),
+    };
+    let e: u64 = match Aead::aead_sealer_must(13) {
+        Ok(s) => {
+            Aead::aead_sealer_free(s);
+            500
+        },
+        Err(_) => 900,
+    };
+    // An affine probe may simply be dropped.
+    let f: u64 = match Aead::aead_probe() {
+        Some(p) => Aead::aead_probe_live(in p),
+        None => 0,
+    };
+    wrapping_add(
+        wrapping_add(wrapping_add(a, wrapping_mul(b, 10)), wrapping_mul(c, 100)),
+        wrapping_add(wrapping_add(d, e), wrapping_mul(f, 100000))
+    )
+}
+
+// Many handles: each is created and finalized in its own iteration.
+pub fn churn() -> u64 eff [Ffi[Aead]] {
+    let mut sealed: u64 = 0;
+    let mut p = packet(1);
+    let n: u64 = 1000;
+    for i in 0..n {
+        match Aead::aead_sealer_new(wrapping_add(i, 100)) {
+            Some(s) => {
+                let mut s = s;
+                sealed = wrapping_add(
+                    sealed,
+                    widen_u64(Aead::aead_seal(inout s, inout p.as_slice_mut()))
+                );
+                Aead::aead_sealer_free(s);
+            },
+            None => {},
+        }
+    }
+    sealed
+}
+
+// The measured loops: N seals through one handle, or N stateless seals that
+// re-derive the key schedule every time.
+fn seal_n(n: u64) -> u64 eff [Ffi[Aead]] {
+    let mut s = match Aead::aead_sealer_new(21) {
+        Some(s) => s,
+        None => return 0,
+    };
+    let mut p = packet(2);
+    let mut bad: u64 = 0;
+    for _ in 0..n {
+        bad = wrapping_add(bad, widen_u64(Aead::aead_seal(inout s, inout p.as_slice_mut())));
+    }
+    Aead::aead_sealer_free(s);
+    wrapping_add(bad, p.sum_be16())
+}
+
+fn seal_n_stateless(n: u64) -> u64 eff [Ffi[Aead]] {
+    let mut p = packet(2);
+    let mut bad: u64 = 0;
+    for _ in 0..n {
+        bad = wrapping_add(bad, widen_u64(Aead::aead_seal_once(21, inout p.as_slice_mut())));
+    }
+    wrapping_add(bad, p.sum_be16())
+}
+
+pub fn seal_many() -> u64 eff [Ffi[Aead]] {
+    seal_n(20000)
+}
+
+pub fn seal_many_stateless() -> u64 eff [Ffi[Aead]] {
+    seal_n_stateless(20000)
+}
+
+// One seal of each kind: the same code as above, to subtract the JIT's
+// compile time from the measurement.
+pub fn seal_one() -> u64 eff [Ffi[Aead]] {
+    seal_n(1)
+}
+
+pub fn seal_one_stateless() -> u64 eff [Ffi[Aead]] {
+    seal_n_stateless(1)
+}
+
+// A never-grown sequence has no buffer, but the C callee still gets a
+// non-null pointer with length 0 (seal reports 2: shorter than a tag).
+pub fn empty() -> u64 eff [Ffi[Aead]] {
+    let mut p: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    widen_u64(Aead::aead_seal_once(5, inout p.as_slice_mut()))
+}

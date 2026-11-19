@@ -44,12 +44,29 @@ fn camel(name: &str) -> String {
         .collect()
 }
 
+/// The longest tuple `vesper_port_abi::Abi` implements
+/// (`vesper_port_abi::MAX_TUPLE`).
+const MAX_TUPLE: usize = 8;
+
+/// A Vesper array `[T; N]` (#1091) is the homogeneous `N`-tuple, so the
+/// binding cannot tell `[u8; 2]` from `(u8, u8)`. It names a homogeneous
+/// tuple of more than [`MAX_TUPLE`] elements, which no Rust tuple impl
+/// carries, `[T; N]`; shorter ones stay tuples, as before.
+fn array(items: &[AbiType]) -> Option<(&AbiType, usize)> {
+    let first = items.first()?;
+    (items.len() > MAX_TUPLE && items.iter().all(|t| t == first)).then_some((first, items.len()))
+}
+
 fn rust_type(ty: &AbiType, types_path: &str) -> String {
     match ty {
         AbiType::Scalar { name } => match name.as_str() {
             "Unit" => "()".into(),
             other => other.into(),
         },
+        AbiType::Tuple { items } if array(items).is_some() => {
+            let (elem, n) = array(items).expect("array");
+            format!("[{}; {n}]", rust_type(elem, types_path))
+        }
         AbiType::Tuple { items } if items.len() == 1 => {
             format!("({},)", rust_type(&items[0], types_path))
         }
@@ -77,6 +94,7 @@ fn rust_type(ty: &AbiType, types_path: &str) -> String {
         AbiType::Box { inner } => format!("Box<{}>", rust_type(inner, types_path)),
         AbiType::Str { owned: true } => "String".into(),
         AbiType::Str { owned: false } => "str".into(),
+        AbiType::Object { .. } => "vesper_port_abi::OpaqueObject<'static>".into(),
     }
 }
 
@@ -128,13 +146,7 @@ pub fn rust_binding(interface: &LibraryInterface, options: &BindingOptions) -> S
         if f.fail_record_words.is_some() {
             params.push("fail: *mut u64".into());
         }
-        let ret = if !f.result_pointer
-            && matches!(&f.result, AbiType::Scalar { name } if name == "f64")
-        {
-            "f64"
-        } else {
-            "i64"
-        };
+        let ret = result_c_type(f);
         let _ = writeln!(out, "    fn {}({}) -> {ret};", f.symbol, params.join(", "));
     }
     out.push_str("}\n");
@@ -361,6 +373,10 @@ fn error_variant(ty: &AbiType) -> String {
             args.iter().map(error_variant).collect::<String>()
         ),
         AbiType::Scalar { name } => camel(name),
+        AbiType::Tuple { items } if array(items).is_some() => {
+            let (elem, n) = array(items).expect("array");
+            format!("Array{n}{}", error_variant(elem))
+        }
         AbiType::Tuple { items } => format!(
             "Tuple{}",
             items.iter().map(error_variant).collect::<String>()
@@ -370,6 +386,7 @@ fn error_variant(ty: &AbiType) -> String {
         AbiType::Box { inner } => format!("Box{}", error_variant(inner)),
         AbiType::Str { owned: true } => "String".into(),
         AbiType::Str { owned: false } => "Str".into(),
+        AbiType::Object { .. } => "Object".into(),
     }
 }
 
@@ -457,19 +474,36 @@ fn construct(v: &VariantDecl, _types_path: &str) -> String {
     }
 }
 
+/// A float scalar's Rust type: floats travel in float registers (the
+/// platform C ABI), every other scalar as one integer word.
+fn float(ty: &AbiType) -> Option<&'static str> {
+    match ty {
+        AbiType::Scalar { name } if name == "f64" => Some("f64"),
+        AbiType::Scalar { name } if name == "f32" => Some("f32"),
+        _ => None,
+    }
+}
+
 fn c_type(ty: &AbiType, pointer: bool) -> &'static str {
     if pointer {
         "*mut u64"
-    } else if matches!(ty, AbiType::Scalar { name } if name == "f64") {
-        "f64"
     } else {
+        float(ty).unwrap_or("i64")
+    }
+}
+
+/// The C return type of `f`'s symbol.
+pub(super) fn result_c_type(f: &ExportedFunction) -> &'static str {
+    if f.result_pointer {
         "i64"
+    } else {
+        float(&f.result).unwrap_or("i64")
     }
 }
 
 fn scalar_in(name: &str, ty: &AbiType) -> String {
     match ty {
-        AbiType::Scalar { name: s } if s == "f64" => name.into(),
+        ty if float(ty).is_some() => name.into(),
         AbiType::Scalar { name: s } if s == "Unit" => {
             format!("{{ let () = {name}; 0 }}")
         }
@@ -480,7 +514,7 @@ fn scalar_in(name: &str, ty: &AbiType) -> String {
 fn scalar_out(raw: &str, ty: &AbiType) -> String {
     match ty {
         AbiType::Scalar { name } => match name.as_str() {
-            "f64" | "i64" => raw.into(),
+            "f64" | "f32" | "i64" => raw.into(),
             "bool" => format!("{raw} != 0"),
             "Unit" => format!("{{ let _ = {raw}; }}"),
             other => format!("{raw} as {other}"),

@@ -1,0 +1,90 @@
+// @vesper-std/sort::floats: sorting floats under the IEEE 754 total order.
+use self::unstable::{
+    sort,
+    is_sorted
+};
+use self::stable::stable_sort;
+
+// `f64::total_cmp` as an `Ord` model: the bit pattern as an `i64`, with the
+// magnitude bits flipped for negative values, compares as the total order
+// -NaN < -inf < .. < -0.0 < +0.0 < .. < +inf < +NaN.
+model TotalOrderF64: Ord for f64 {
+    fn cmp(in self, in other: f64) -> Ordering {
+        let a = total_key_f64(self);
+        let b = total_key_f64(other);
+        if a < b {
+            Less
+        } else if a == b {
+            Equal
+        } else {
+            Greater
+        }
+    }
+}
+
+// The `i64` whose signed order is the total order of `f64` values.
+pub fn total_key_f64(x: f64) -> i64 {
+    let b = wrapping_i64(to_bits_f64(x));
+    b ^ wrapping_i64(wrapping_u64(wrapping_shr_i64(b, 63)) >> 1)
+}
+
+// Sorts `s` ascending under the total order; equal values may change order.
+pub fn sort_f64(inout s: Slice[f64]) {
+    use model TotalOrderF64;
+    sort(inout s);
+}
+
+// Sorts `s` ascending under the total order, keeping equal values in order.
+pub fn stable_sort_f64(inout s: Slice[f64]) {
+    use model TotalOrderF64;
+    stable_sort(inout s);
+}
+
+// Whether `s` is ascending under the total order.
+pub fn is_sorted_f64(in s: Slice[f64]) -> bool {
+    use model TotalOrderF64;
+    is_sorted(in s)
+}
+
+// The `u32` whose unsigned order is the total order of the `f32` with bit
+// pattern `b`: the sign bit flipped for positive values, every bit for
+// negative ones. `f32_bits_from_key` is its inverse.
+pub fn total_key_f32_bits(b: u32) -> u32 {
+    if (b & 2147483648) != 0 {
+        ~b
+    } else {
+        b | 2147483648
+    }
+}
+
+pub fn f32_bits_from_key(k: u32) -> u32 {
+    if (k & 2147483648) != 0 {
+        k & 2147483647
+    } else {
+        ~k
+    }
+}
+
+// Sorts `f32` values held as bit patterns (`to_bits_f32`) ascending under
+// the total order (`f32::total_cmp`), in place: each word is mapped to its
+// order key, the keys are sorted, and mapped back.
+pub fn sort_f32_bits(inout s: Slice[u32]) {
+    let n = s.len();
+    for i in 0..n {
+        match s.try_get(i) {
+            Option::Some(b) => {
+                s.try_set(i, total_key_f32_bits(b));
+            },
+            Option::None => {},
+        }
+    }
+    sort(inout s);
+    for i in 0..n {
+        match s.try_get(i) {
+            Option::Some(k) => {
+                s.try_set(i, f32_bits_from_key(k));
+            },
+            Option::None => {},
+        }
+    }
+}

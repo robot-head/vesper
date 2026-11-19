@@ -38,11 +38,13 @@
 //!   capability verifiers see the code they saw before, and so are callers
 //!   holding `Box` values, whose drops are placed per block;
 //! * its body has no closures, `?`, indirect calls, tiled or `Box`
-//!   operations, no type in it mentions `Box` or a function type, and no
-//!   slice parameter is `inout` or `sink` (an `in` slice is a view value: it
-//!   becomes the caller's slice local, or a bound copy of the view; an `in
-//!   Str` is a 24-byte view value and is bound or borrowed like any
-//!   aggregate);
+//!   operations, and no type in it mentions `Box` or a function type. A
+//!   slice parameter (`in` or `inout`, E1520) is a view value: it becomes
+//!   the caller's slice local or parameter, or a bound copy of the view (a
+//!   sub-range or `as_slice_mut()`). An `inout` slice writes elements
+//!   through the view's pointer and cannot re-point the view, so a copy
+//!   reaches the same buffer (#1089). An `in Str` is a 24-byte view value
+//!   and is bound or borrowed like any aggregate;
 //! * a local `handle` in the body keeps its scope: the handled body and its
 //!   clauses are lowered from their own shared graphs, which reach the
 //!   enclosing function's locals only through the handle's `aliases`, so
@@ -450,11 +452,15 @@ fn inlinable(world: &World, f: &FunctionIr) -> Result<(), &'static str> {
         types().any(|t| mentions_function(world, t)),
         "function type",
     )?;
+    // A slice parameter is `in` or `inout` (E1520). Both pass the view
+    // (pointer and length) by address and neither can re-point it: an
+    // `inout` callee writes elements through the view's pointer, so a copy
+    // of the view reaches the same buffer (#1089).
     refuse(
         f.params
             .iter()
-            .any(|p| p.pass != Pass::In && crate::seq::is_slice_type(&p.ty)),
-        "inout or sink slice",
+            .any(|p| p.pass == Pass::Sink && crate::seq::is_slice_type(&p.ty)),
+        "sink slice",
     )?;
     for i in f.blocks.iter().flat_map(|b| &b.instructions) {
         match &i.op {

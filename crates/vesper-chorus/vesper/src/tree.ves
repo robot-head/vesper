@@ -1,0 +1,481 @@
+// Module tree of @vesper/chorus (see lib.ves): the global choreography
+// arena, its reader and writer, and `Choreography::validate`.
+//
+// Node `n` has tag `gt[n]` (1 Comm, 2 Local, 3 Rec, 4 Var, 5 End) and
+// fields `ga`, `gb`, `gc`:
+//   Comm: from, to, branch count; branches are `(label, payload, next)`
+//         triples at `gk[gks[n] ..]`.
+//   Local: role, action, next.   Rec: var, body.   Var: var.
+// The parser shares one continuation between the arms of a choice (the
+// Rust build clones it), so the arena is a DAG; `gsz[n]` is the node
+// count of the expanded tree (saturating), which `GlobalChor::node_count`
+// returns.
+use self::{
+    C
+};
+use self::util::{
+    add,
+    inc,
+    intern_slice,
+    iw,
+    sat_add,
+    set_flag,
+    flag,
+    setw,
+    sw,
+    valid_ident
+};
+
+pub fn g_comm() -> u64 {
+    1
+}
+pub fn g_local() -> u64 {
+    2
+}
+pub fn g_rec() -> u64 {
+    3
+}
+pub fn g_var() -> u64 {
+    4
+}
+pub fn g_end() -> u64 {
+    5
+}
+
+pub fn gt(in c: C, n: u64) -> u64 {
+    sw(in c.gt, n)
+}
+pub fn ga(in c: C, n: u64) -> u64 {
+    sw(in c.ga, n)
+}
+pub fn gb(in c: C, n: u64) -> u64 {
+    sw(in c.gb, n)
+}
+pub fn gc(in c: C, n: u64) -> u64 {
+    sw(in c.gc, n)
+}
+pub fn gsize(in c: C, n: u64) -> u64 {
+    sw(in c.gsz, n)
+}
+// Field `f` (0 label, 1 payload, 2 next) of branch `i` of Comm `n`.
+pub fn gbr(in c: C, n: u64, i: u64, f: u64) -> u64 {
+    sw(in c.gk, add(add(sw(in c.gks, n), wrapping_mul(i, 3)), f))
+}
+
+// A new node; a Comm's branch triples are `tmp[from ..]`, popped here.
+pub fn g_mk(inout c: C, tag: u64, a: u64, b: u64, cc: u64, from: u64) -> u64 {
+    let n = c.gt.len();
+    let mut size: u64 = 1;
+    let h4 = c.gk.len();
+    c.gks.push(h4);
+    if tag == 1 {
+        let len = c.tmp.len();
+        let mut i = from;
+        loop {
+            if i >= len {
+                break;
+            }
+            let x = sw(in c.tmp, i);
+            c.gk.push(x);
+            if (wrapping_sub(i, from) % 3) == 2 {
+                size = sat_add(size, sw(in c.gsz, x));
+            }
+            i = inc(i);
+        }
+        c.tmp.truncate(from);
+    } else if tag == 2 {
+        size = sat_add(size, sw(in c.gsz, cc));
+    } else if tag == 3 {
+        size = sat_add(size, sw(in c.gsz, b));
+    }
+    c.gt.push(tag);
+    c.ga.push(a);
+    c.gb.push(b);
+    c.gc.push(cc);
+    c.gsz.push(size);
+    n
+}
+
+fn str_at(inout c: C, in w: Slice[u64], in t: Slice[u8], at: u64) -> u64 {
+    intern_slice(inout c, in t, iw(in w, at), iw(in w, inc(at)))
+}
+
+fn pop_vs(inout c: C) -> u64 {
+    match c.vs.pop() {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+// Reads `nroles, role strings..` at `at` into `ro`; returns the position
+// after it.
+pub fn read_roles(inout c: C, in w: Slice[u64], in t: Slice[u8], at: u64) -> u64 {
+    let n = iw(in w, at);
+    let mut p = inc(at);
+    for _ in 0..n {
+        let y = str_at(inout c, in w, in t, p);
+        c.ro.push(y);
+        p = add(p, 2);
+    }
+    p
+}
+
+// Reads a choreography at `at` (roles, then `ntree` and the tree); sets
+// `root` and returns the position after it.
+pub fn read_chor(inout c: C, in w: Slice[u64], in t: Slice[u8], at: u64) -> u64 {
+    let p = read_roles(inout c, in w, in t, at);
+    let len = iw(in w, p);
+    let start = inc(p);
+    let end = add(start, len);
+    let mut i = start;
+    c.vs.clear();
+    loop {
+        if i >= end {
+            break;
+        }
+        let tag = iw(in w, i);
+        if tag == 5 {
+            let n = g_mk(inout c, 5, 0, 0, 0, 0);
+            c.vs.push(n);
+            i = inc(i);
+        } else if tag == 4 {
+            let y = str_at(inout c, in w, in t, inc(i));
+            let n = g_mk(inout c, 4, y, 0, 0, 0);
+            c.vs.push(n);
+            i = add(i, 3);
+        } else if tag == 3 {
+            let y = str_at(inout c, in w, in t, inc(i));
+            let body = pop_vs(inout c);
+            let n = g_mk(inout c, 3, y, body, 0, 0);
+            c.vs.push(n);
+            i = add(i, 3);
+        } else if tag == 2 {
+            let role = iw(in w, inc(i));
+            let y = str_at(inout c, in w, in t, add(i, 2));
+            let next = pop_vs(inout c);
+            let n = g_mk(inout c, 2, role, y, next, 0);
+            c.vs.push(n);
+            i = add(i, 4);
+        } else {
+            let from = iw(in w, inc(i));
+            let to = iw(in w, add(i, 2));
+            let nb = iw(in w, add(i, 3));
+            let base = sub_sat(c.vs.len(), nb);
+            let tf = c.tmp.len();
+            let mut q = add(i, 4);
+            for k in 0..nb {
+                let l = str_at(inout c, in w, in t, q);
+                let pl = str_at(inout c, in w, in t, add(q, 2));
+                c.tmp.push(l);
+                c.tmp.push(pl);
+                let h5 = sw(in c.vs, add(base, k));
+                c.tmp.push(h5);
+                q = add(q, 4);
+            }
+            c.vs.truncate(base);
+            let n = g_mk(inout c, 1, from, to, nb, tf);
+            c.vs.push(n);
+            i = q;
+        }
+    }
+    c.root = if c.vs.len() == 0 {
+        g_mk(inout c, 5, 0, 0, 0, 0)
+    } else {
+        pop_vs(inout c)
+    };
+    end
+}
+
+fn sub_sat(a: u64, b: u64) -> u64 {
+    if b > a {
+        0
+    } else {
+        wrapping_sub(a, b)
+    }
+}
+
+// Writes node `n` in postorder to `out` (expanding shared nodes).
+pub fn emit_g(inout c: C, n: u64) {
+    let tag = gt(in c, n);
+    if tag == 1 {
+        let nb = gc(in c, n);
+        for i in 0..nb {
+            let h6 = gbr(in c, n, i, 2);
+            emit_g(inout c, h6);
+        }
+        c.out.push(1);
+        let h7 = ga(in c, n);
+        c.out.push(h7);
+        let h8 = gb(in c, n);
+        c.out.push(h8);
+        c.out.push(nb);
+        for i in 0..nb {
+            let h9 = gbr(in c, n, i, 0);
+            c.out.push(h9);
+            let h10 = gbr(in c, n, i, 1);
+            c.out.push(h10);
+        }
+    } else if tag == 2 {
+        let h11 = gc(in c, n);
+        emit_g(inout c, h11);
+        c.out.push(2);
+        let h12 = ga(in c, n);
+        c.out.push(h12);
+        let h13 = gb(in c, n);
+        c.out.push(h13);
+    } else if tag == 3 {
+        let h14 = gb(in c, n);
+        emit_g(inout c, h14);
+        c.out.push(3);
+        let h15 = ga(in c, n);
+        c.out.push(h15);
+    } else if tag == 4 {
+        c.out.push(4);
+        let h16 = ga(in c, n);
+        c.out.push(h16);
+    } else {
+        c.out.push(5);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Well-formedness. Error words (`ew`), with symbols for every string:
+//   0 NoRoles; 1 TooManyRoles count; 2 DuplicateRole name;
+//   3 BadIdentifier ident; 4 UnknownRole role; 5 SelfCommunication role;
+//   6 EmptyChoice from to; 7 DuplicateLabel from to label;
+//   8 ShadowedRecursionVariable var; 9 UnboundRecursionVariable var;
+//   10 UnguardedRecursion var; 11 UnusedRole name; 12 TooLarge nodes;
+//   13 TooDeep depth.
+
+fn wf1(inout c: C, code: u64, x: u64) -> bool {
+    c.ew.clear();
+    c.ew.push(code);
+    c.ew.push(x);
+    false
+}
+
+// `Choreography::validate` of roles `ro` and tree `root`.
+pub fn validate(inout c: C, root: u64) -> bool {
+    let nr = c.ro.len();
+    if nr == 0 {
+        c.ew.clear();
+        c.ew.push(0);
+        return false;
+    }
+    if nr > 64 {
+        return wf1(inout c, 1, nr);
+    }
+    for i in 0..nr {
+        let r = sw(in c.ro, i);
+        if !valid_ident(in c, r) {
+            return wf1(inout c, 3, r);
+        }
+        for j in 0..i {
+            if sw(in c.ro, j) == r {
+                return wf1(inout c, 2, r);
+            }
+        }
+    }
+    let nodes = gsize(in c, root);
+    if nodes > 100000 {
+        return wf1(inout c, 12, nodes);
+    }
+    c.used.clear();
+    for _ in 0..nr {
+        c.used.push(0);
+    }
+    c.bnd.clear();
+    c.ugs.clear();
+    c.ug_base = 0;
+    if !check(inout c, root, 0) {
+        return false;
+    }
+    if nr > 1 {
+        for i in 0..nr {
+            if sw(in c.used, i) == 0 {
+                let h17 = sw(in c.ro, i);
+                return wf1(inout c, 11, h17);
+            }
+        }
+    }
+    true
+}
+
+fn bound(in c: C, v: u64) -> bool {
+    for i in 0..c.bnd.len() {
+        if sw(in c.bnd, i) == v {
+            return true;
+        }
+    }
+    false
+}
+
+fn unguarded(in c: C, v: u64) -> bool {
+    let mut i = c.ug_base;
+    loop {
+        if i >= c.ugs.len() {
+            break;
+        }
+        if sw(in c.ugs, i) == v {
+            return true;
+        }
+        i = inc(i);
+    }
+    false
+}
+
+fn check(inout c: C, g: u64, depth: u64) -> bool {
+    if depth > 256 {
+        return wf1(inout c, 13, depth);
+    }
+    let tag = gt(in c, g);
+    let nr = c.ro.len();
+    if tag == 5 {
+        return true;
+    }
+    if tag == 4 {
+        let v = ga(in c, g);
+        if !bound(in c, v) {
+            return wf1(inout c, 9, v);
+        }
+        if unguarded(in c, v) {
+            return wf1(inout c, 10, v);
+        }
+        return true;
+    }
+    if tag == 3 {
+        let v = ga(in c, g);
+        if !valid_ident(in c, v) {
+            return wf1(inout c, 3, v);
+        }
+        if bound(in c, v) {
+            return wf1(inout c, 8, v);
+        }
+        c.bnd.push(v);
+        c.ugs.push(v);
+        let h18 = gb(in c, g);
+        let r = check(inout c, h18, inc(depth));
+        let _ = c.ugs.pop();
+        let _ = c.bnd.pop();
+        return r;
+    }
+    if tag == 2 {
+        let role = ga(in c, g);
+        if role >= nr {
+            return wf1(inout c, 4, role);
+        }
+        let act = gb(in c, g);
+        if !valid_ident(in c, act) {
+            return wf1(inout c, 3, act);
+        }
+        setw(inout c.used, role, 1);
+        let h19 = gc(in c, g);
+        return check(inout c, h19, inc(depth));
+    }
+    let from = ga(in c, g);
+    let to = gb(in c, g);
+    if from >= nr {
+        return wf1(inout c, 4, from);
+    }
+    if to >= nr {
+        return wf1(inout c, 4, to);
+    }
+    let f = sw(in c.ro, from);
+    let t = sw(in c.ro, to);
+    if from == to {
+        return wf1(inout c, 5, f);
+    }
+    let nb = gc(in c, g);
+    if nb == 0 {
+        c.ew.clear();
+        c.ew.push(6);
+        c.ew.push(f);
+        c.ew.push(t);
+        return false;
+    }
+    setw(inout c.used, from, 1);
+    setw(inout c.used, to, 1);
+    c.stamp = inc(c.stamp);
+    let st = c.stamp;
+    for i in 0..nb {
+        let l = gbr(in c, g, i, 0);
+        if !valid_ident(in c, l) {
+            return wf1(inout c, 3, l);
+        }
+        if flag(in c, l) == st {
+            c.ew.clear();
+            c.ew.push(7);
+            c.ew.push(f);
+            c.ew.push(t);
+            c.ew.push(l);
+            return false;
+        }
+        set_flag(inout c, l, st);
+    }
+    // A message guards every enclosing recursion variable.
+    let saved = c.ug_base;
+    c.ug_base = c.ugs.len();
+    let mut ok = true;
+    for i in 0..nb {
+        if ok {
+            let h20 = gbr(in c, g, i, 2);
+            ok = check(inout c, h20, inc(depth));
+        }
+    }
+    c.ug_base = saved;
+    ok
+}
+
+// `GlobalChor::involves`.
+pub fn involves(in c: C, g: u64, role: u64) -> bool {
+    let tag = gt(in c, g);
+    if tag == 1 {
+        if ga(in c, g) == role || gb(in c, g) == role {
+            return true;
+        }
+        for i in 0..gc(in c, g) {
+            if involves(in c, gbr(in c, g, i, 2), role) {
+                return true;
+            }
+        }
+        false
+    } else if tag == 2 {
+        if ga(in c, g) == role {
+            return true;
+        }
+        involves(in c, gc(in c, g), role)
+    } else if tag == 3 {
+        involves(in c, gb(in c, g), role)
+    } else {
+        false
+    }
+}
+
+// `GlobalChor::free_vars_within`, with the allowed and bound variables on
+// `bnd`.
+pub fn free_vars_within(inout c: C, g: u64) -> bool {
+    let tag = gt(in c, g);
+    if tag == 4 {
+        bound(in c, ga(in c, g))
+    } else if tag == 1 {
+        for i in 0..gc(in c, g) {
+            let h21 = gbr(in c, g, i, 2);
+            if !free_vars_within(inout c, h21) {
+                return false;
+            }
+        }
+        true
+    } else if tag == 2 {
+        let h22 = gc(in c, g);
+        free_vars_within(inout c, h22)
+    } else if tag == 3 {
+        let h23 = ga(in c, g);
+        c.bnd.push(h23);
+        let h24 = gb(in c, g);
+        let r = free_vars_within(inout c, h24);
+        let _ = c.bnd.pop();
+        r
+    } else {
+        true
+    }
+}

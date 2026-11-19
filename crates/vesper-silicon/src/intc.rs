@@ -89,10 +89,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use crate::Arch;
-use crate::aia::{AiaError, AplicDomain, ImsicFile, Msi, MsiAddrCfg, SourceMode};
+use crate::aia::{AiaError, Msi, MsiAddrCfg, SourceMode};
 use crate::dtb::{
     AplicInfo, ClintInfo, ClintKind, ControllerKind, DtbError, HartTarget, ImsicInfo, IrqLine,
-    MemRange, Platform, PlicInfo, Trigger,
+    Platform, PlicInfo, Trigger,
 };
 use crate::irq::{Cpu, IsrCtx};
 use crate::ledger::Ledger;
@@ -120,9 +120,6 @@ pub const STORM_BUDGET: usize = 64;
 pub const PLIC_MAX_CONTEXTS: usize = 15_872;
 /// Largest PLIC priority / threshold value (3 implemented bits).
 pub const PLIC_MAX_PRIORITY: u32 = 7;
-/// Most MSI rounds one operation may cause (an MSI written to an APLIC's
-/// `setipnum_le` can make it forward another).
-const MSI_ROUNDS: usize = 64;
 
 const PLIC_PENDING: u64 = 0x1000;
 const PLIC_ENABLE: u64 = 0x2000;
@@ -522,6 +519,7 @@ impl Plic {
         Ok(())
     }
 
+    #[cfg_attr(vesper_port, allow(dead_code))]
     fn contains(&self, addr: u64) -> bool {
         let end = self.base + PLIC_CONTEXT + PLIC_CONTEXT_STRIDE * self.contexts.len() as u64;
         (self.base..end).contains(&addr)
@@ -534,60 +532,6 @@ enum PlicReg {
     Enable(usize, u64),
     Threshold(usize),
     Claim(usize),
-}
-
-/// A CLINT or ACLINT block's state.
-#[derive(Clone, Debug)]
-struct Block {
-    info: ClintInfo,
-    /// MSIP (CLINT, MSWI) or SSIP (SSWI) per index.
-    sip: Vec<bool>,
-    mtimecmp: Vec<u64>,
-}
-
-impl Block {
-    fn new(info: &ClintInfo) -> Self {
-        let n = match info.kind {
-            ClintKind::Clint => info.targets.len().div_ceil(2),
-            _ => info.targets.len(),
-        };
-        Self {
-            info: info.clone(),
-            sip: vec![false; n],
-            mtimecmp: vec![u64::MAX; n],
-        }
-    }
-
-    /// Software-interrupt target of index `k`.
-    fn sw_target(&self, k: usize) -> Option<HartTarget> {
-        match self.info.kind {
-            ClintKind::Clint => self.info.targets.get(2 * k).copied(),
-            ClintKind::AclintMswi | ClintKind::AclintSswi => self.info.targets.get(k).copied(),
-            ClintKind::AclintMtimer => None,
-        }
-    }
-
-    fn timer_target(&self, k: usize) -> Option<HartTarget> {
-        match self.info.kind {
-            ClintKind::Clint => self.info.targets.get(2 * k + 1).copied(),
-            ClintKind::AclintMtimer => self.info.targets.get(k).copied(),
-            _ => None,
-        }
-    }
-
-    fn has_timer(&self) -> bool {
-        matches!(self.info.kind, ClintKind::Clint | ClintKind::AclintMtimer)
-    }
-
-    /// Physical address of the MTIME register this block's MTIMECMPs
-    /// compare against. Blocks naming the same address share one counter.
-    fn mtime_addr(&self) -> Option<u64> {
-        match self.info.kind {
-            ClintKind::Clint => Some(self.info.regs[0].base + CLINT_MTIME),
-            ClintKind::AclintMtimer => Some(self.info.regs[0].base),
-            _ => None,
-        }
-    }
 }
 
 /// One delivered interrupt.
@@ -636,62 +580,6 @@ pub struct IntcStats {
     pub unhandled: u64,
 }
 
-#[derive(Debug)]
-struct ImsicBlock {
-    info: ImsicInfo,
-    /// `[file][guest]`; guest 0 is the hart's own file.
-    files: Vec<Vec<ImsicFile>>,
-    /// Allocated identities per file.
-    used: Vec<BTreeSet<u32>>,
-    /// Allocated identities per guest file `(file, guest)`.
-    guest_used: BTreeMap<(usize, usize), BTreeSet<u32>>,
-}
-
-impl ImsicBlock {
-    fn locate(&self, addr: u64) -> Option<(usize, usize, u64)> {
-        let stride = 0x1000u64 << self.info.guest_index_bits;
-        self.info.files.iter().enumerate().find_map(|(k, &f)| {
-            (addr >= f && addr - f < stride).then(|| {
-                let rel = addr - f;
-                (k, (rel / 0x1000) as usize, rel % 0x1000)
-            })
-        })
-    }
-}
-
-#[derive(Debug)]
-struct State {
-    plics: Vec<Plic>,
-    aplics: Vec<AplicDomain>,
-    aplic_info: Vec<AplicInfo>,
-    imsics: Vec<ImsicBlock>,
-    blocks: Vec<Block>,
-    /// MTIME counters by physical address (one per distinct register).
-    mtimes: BTreeMap<u64, u64>,
-    /// `(hart, cause)` raised on the Cpu and not yet finished.
-    asserted: BTreeSet<(u32, u32)>,
-    /// Causes with an installed handler (`mie`), per hart.
-    mie: BTreeSet<(u32, u32)>,
-    /// IMSIC identities that an APLIC source forwards: `(imsic, file, id)`
-    /// to `(domain, source)`.
-    msi_sources: BTreeMap<(usize, usize, u32), (usize, u32)>,
-    log: Vec<Delivery>,
-    ext_log: Vec<ExternalDelivery>,
-    stats: IntcStats,
-    lost_msis: Vec<Msi>,
-    /// `hstatus.VGEIN` and `hgeie` per hart.
-    hyp: BTreeMap<u32, Hyp>,
-    guest_log: Vec<GuestDelivery>,
-    pci_log: Vec<PciMsi>,
-}
-
-/// The hypervisor CSR state of one hart.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Hyp {
-    vgein: u32,
-    hgeie: u64,
-}
-
 /// One VS-level external interrupt claimed through `vstopei`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestDelivery {
@@ -724,456 +612,110 @@ pub struct PciMsi {
     pub in_parent: bool,
 }
 
+/// Software slots of a CLINT/ACLINT block: MSIP or SSIP bits and MTIMECMP
+/// registers, one per index.
+fn clint_slots(info: &ClintInfo) -> usize {
+    match info.kind {
+        ClintKind::Clint => info.targets.len().div_ceil(2),
+        _ => info.targets.len(),
+    }
+}
+
+/// Software-interrupt target of index `k`.
+fn sw_target(info: &ClintInfo, k: usize) -> Option<HartTarget> {
+    match info.kind {
+        ClintKind::Clint => info.targets.get(2 * k).copied(),
+        ClintKind::AclintMswi | ClintKind::AclintSswi => info.targets.get(k).copied(),
+        ClintKind::AclintMtimer => None,
+    }
+}
+
+fn timer_target(info: &ClintInfo, k: usize) -> Option<HartTarget> {
+    match info.kind {
+        ClintKind::Clint => info.targets.get(2 * k + 1).copied(),
+        ClintKind::AclintMtimer => info.targets.get(k).copied(),
+        _ => None,
+    }
+}
+
+/// Physical address of the MTIME register a block's MTIMECMPs compare
+/// against. Blocks naming the same address share one counter.
+fn mtime_addr_of(info: &ClintInfo) -> Option<u64> {
+    match info.kind {
+        ClintKind::Clint => Some(info.regs[0].base + CLINT_MTIME),
+        ClintKind::AclintMtimer => Some(info.regs[0].base),
+        _ => None,
+    }
+}
+
+#[cfg(not(vesper_port))]
+#[path = "intc/rust.rs"]
+mod imp;
+#[cfg(vesper_port)]
+#[path = "intc/port.rs"]
+mod imp;
+
+/// The fabric: the controller state ([`imp::Core`]) and what the dispatch
+/// loops and routing keep beside it.
+#[derive(Debug)]
+struct State {
+    core: imp::Core,
+    aplic_info: Vec<AplicInfo>,
+    imsic_info: Vec<ImsicInfo>,
+    clint_info: Vec<ClintInfo>,
+    /// Allocated identities per IMSIC and file.
+    used: Vec<Vec<BTreeSet<u32>>>,
+    /// Allocated identities per IMSIC and guest file `(file, guest)`.
+    guest_used: Vec<BTreeMap<(usize, usize), BTreeSet<u32>>>,
+    /// `(hart, cause)` raised on the Cpu and not yet finished.
+    asserted: BTreeSet<(u32, u32)>,
+    /// Causes with an installed handler (`mie`), per hart.
+    mie: BTreeSet<(u32, u32)>,
+    /// IMSIC identities that an APLIC source forwards: `(imsic, file, id)`
+    /// to `(domain, source)`.
+    msi_sources: BTreeMap<(usize, usize, u32), (usize, u32)>,
+    log: Vec<Delivery>,
+    ext_log: Vec<ExternalDelivery>,
+    stats: IntcStats,
+    guest_log: Vec<GuestDelivery>,
+    pci_log: Vec<PciMsi>,
+}
+
 impl State {
-    fn ext_context(&self, hart: u32, cause: u32) -> Option<(usize, usize)> {
-        let want = HartTarget {
-            hart,
-            cause: Some(cause),
-        };
-        self.plics.iter().enumerate().find_map(|(p, plic)| {
-            plic.contexts
-                .iter()
-                .position(|t| *t == want)
-                .map(|c| (p, c))
-        })
-    }
-
-    /// The IMSIC and file of `(hart, cause)`.
-    fn imsic_file(&self, hart: u32, cause: u32) -> Option<(usize, usize)> {
-        let want = HartTarget {
-            hart,
-            cause: Some(cause),
-        };
-        self.imsics.iter().enumerate().find_map(|(b, m)| {
-            m.info
-                .targets
-                .iter()
-                .position(|t| *t == want)
-                .map(|k| (b, k))
-        })
-    }
-
-    /// The level of `cause` on `hart`.
-    fn level(&self, hart: u32, cause: u32) -> bool {
-        let want = HartTarget {
-            hart,
-            cause: Some(cause),
-        };
-        match cause {
-            MEIP | SEIP => {
-                let wired = self
-                    .plics
-                    .iter()
-                    .any(|p| (0..p.contexts.len()).any(|c| p.contexts[c] == want && p.eip(c)))
-                    || self.aplics.iter().zip(&self.aplic_info).any(|(d, info)| {
-                        info.idcs
-                            .iter()
-                            .enumerate()
-                            .any(|(i, t)| *t == want && d.idc_asserted(i))
-                    });
-                // With an interrupt file at this level, `eidelivery` picks
-                // the file (1) or the PLIC/APLIC (0x40000000) (AIA §3.8.1).
-                match self.imsic_file(hart, cause) {
-                    Some((b, k)) => {
-                        let f = &self.imsics[b].files[k][0];
-                        f.asserted() || (f.delivers_external() && wired)
-                    }
-                    None => wired,
-                }
-            }
-            SGEIP => {
-                let h = self.hyp.get(&hart).copied().unwrap_or_default();
-                self.hgeip(hart) & h.hgeie != 0
-            }
-            VSEIP => {
-                let h = self.hyp.get(&hart).copied().unwrap_or_default();
-                h.vgein < 64 && self.hgeip(hart) >> h.vgein & 1 != 0
-            }
-            MSIP | SSIP => self
-                .blocks
-                .iter()
-                .any(|b| (0..b.sip.len()).any(|k| b.sip[k] && b.sw_target(k) == Some(want))),
-            MTIP => self.blocks.iter().any(|b| {
-                let now = b.mtime_addr().map_or(0, |a| self.mtime_at(a));
-                b.has_timer()
-                    && (0..b.mtimecmp.len())
-                        .any(|k| now >= b.mtimecmp[k] && b.timer_target(k) == Some(want))
-            }),
-            _ => false,
-        }
-    }
-
-    /// `hart`'s S-level IMSIC file and its GEILEN (guest files
-    /// `1..=GEILEN`).
-    fn guest_files(&self, hart: u32) -> Option<(usize, usize, u32)> {
-        let (b, k) = self.imsic_file(hart, SEIP)?;
-        let n = (self.imsics[b].files[k].len() as u32).saturating_sub(1);
-        Some((b, k, n.min(MAX_GEILEN)))
-    }
-
-    fn geilen(&self, hart: u32) -> u32 {
-        self.guest_files(hart).map_or(0, |g| g.2)
-    }
-
-    /// `hgeip`: bit `g` is guest file `g`'s interrupt output.
-    fn hgeip(&self, hart: u32) -> u64 {
-        let Some((b, k, n)) = self.guest_files(hart) else {
-            return 0;
-        };
-        (1..=n)
-            .filter(|&g| self.imsics[b].files[k][g as usize].asserted())
-            .fold(0, |acc, g| acc | 1 << g)
-    }
-
-    /// The guest file `hstatus.VGEIN` selects, or the typed exception.
-    fn vs_file(&mut self, hart: u32) -> Result<&mut ImsicFile, IntcError> {
-        let vgein = self.hyp.get(&hart).map_or(0, |h| h.vgein);
-        match self.guest_files(hart) {
-            Some((b, k, n)) if vgein != 0 && vgein <= n => {
-                Ok(&mut self.imsics[b].files[k][vgein as usize])
-            }
-            _ => Err(IntcError::NoGuestFile { hart, vgein }),
-        }
-    }
-
-    /// The root of `d`'s domain tree.
-    fn root_of(&self, d: usize) -> usize {
-        let mut cur = d;
-        for _ in 0..self.aplic_info.len() {
-            match &self.aplic_info[cur].parent {
-                Some(p) => match self.aplic_info.iter().position(|a| &a.path == p) {
-                    Some(i) => cur = i,
-                    None => break,
-                },
-                None => break,
-            }
-        }
-        cur
-    }
-
-    /// Delegation and the root's MSI configuration flow from parents to
-    /// children; then MSI-mode domains forward, and MSIs land in IMSIC
-    /// files (or APLIC `setipnum_le` registers).
-    fn settle(&mut self) {
-        for _ in 0..=self.aplics.len() {
-            let mut changed = false;
-            for d in 0..self.aplics.len() {
-                let children: Vec<usize> = self.aplic_info[d]
-                    .children
-                    .iter()
-                    .filter_map(|c| self.aplic_info.iter().position(|a| &a.path == c))
-                    .collect();
-                let root_cfg = self.aplics[self.root_of(d)].msi_cfg();
-                for (ci, &c) in children.iter().enumerate() {
-                    if self.aplics[c].msi_cfg() != root_cfg {
-                        self.aplics[c].set_msi_cfg(root_cfg);
-                    }
-                    for s in 1..=self.aplics[c].sources() {
-                        let here = self.aplics[d].delegated_to(s) == Some(ci as u32);
-                        let before = self.aplics[c].mode(s) != SourceMode::Inactive
-                            || self.aplics[c].delegated_to(s).is_some();
-                        self.aplics[c].set_active_here(s, here);
-                        let after = self.aplics[c].mode(s) != SourceMode::Inactive
-                            || self.aplics[c].delegated_to(s).is_some();
-                        changed |= before != after;
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        for _ in 0..MSI_ROUNDS {
-            let msis: Vec<Msi> = self.aplics.iter_mut().flat_map(|d| d.take_msis()).collect();
-            if msis.is_empty() {
-                break;
-            }
-            for m in msis {
-                if self.deliver_msi(m.addr, m.data).is_err() {
-                    self.lost_msis.push(m);
-                }
-            }
-        }
-    }
-
-    /// A 32-bit write of `data` to `addr` by a bus master.
-    fn deliver_msi(&mut self, addr: u64, data: u32) -> Result<(), IntcError> {
-        for m in &mut self.imsics {
-            if let Some((k, g, off)) = m.locate(addr) {
-                return match m.files[k].get_mut(g) {
-                    Some(f) => {
-                        f.mmio_write32(off, data);
-                        Ok(())
-                    }
-                    None => Err(IntcError::Unmapped { addr }),
-                };
-            }
-        }
-        for d in &mut self.aplics {
-            if d.contains(addr) && addr - d.base() == 0x2000 {
-                return d.write32(addr, data).map_err(IntcError::from);
-            }
-        }
-        Err(IntcError::Unmapped { addr })
-    }
-
-    fn read32(&mut self, addr: u64) -> Result<u32, IntcError> {
-        if let Some(p) = self.plics.iter_mut().find(|p| p.contains(addr)) {
-            return p.read32(addr);
-        }
-        if let Some(d) = self.aplics.iter_mut().find(|d| d.contains(addr)) {
-            let v = d.read32(addr)?;
-            self.settle();
-            return Ok(v);
-        }
-        if self.imsics.iter().any(|m| m.locate(addr).is_some()) {
-            if !addr.is_multiple_of(4) {
-                return Err(IntcError::Misaligned { addr });
-            }
-            // seteipnum_le/_be read as zero.
-            return Ok(0);
-        }
-        self.clint_read32(addr)
-    }
-
-    fn write32(&mut self, addr: u64, v: u32) -> Result<(), IntcError> {
-        if let Some(p) = self.plics.iter_mut().find(|p| p.contains(addr)) {
-            return p.write32(addr, v);
-        }
-        if let Some(d) = self.aplics.iter_mut().find(|d| d.contains(addr)) {
-            d.write32(addr, v)?;
-            self.settle();
-            return Ok(());
-        }
-        if self.imsics.iter().any(|m| m.locate(addr).is_some()) {
-            if !addr.is_multiple_of(4) {
-                return Err(IntcError::Misaligned { addr });
-            }
-            self.deliver_msi(addr, v)?;
-            return Ok(());
-        }
-        self.clint_write32(addr, v)
-    }
-
-    fn clint_read32(&mut self, addr: u64) -> Result<u32, IntcError> {
-        let (b, r, off) = self.block_at(addr)?;
-        let blk = &self.blocks[b];
-        let mtime = blk.mtime_addr().map_or(0, |a| self.mtime_at(a));
-        let half = |v: u64, hi: bool| if hi { (v >> 32) as u32 } else { v as u32 };
-        let unmapped = Err(IntcError::Unmapped { addr });
-        match (blk.info.kind, r) {
-            (ClintKind::Clint, _) if off < CLINT_MTIMECMP => {
-                match blk.sip.get((off / 4) as usize) {
-                    Some(&s) => Ok(u32::from(s)),
-                    None => unmapped,
-                }
-            }
-            (ClintKind::Clint, _) if off >= CLINT_MTIME => match off - CLINT_MTIME {
-                0 => Ok(half(mtime, false)),
-                4 => Ok(half(mtime, true)),
-                _ => unmapped,
-            },
-            (ClintKind::Clint, _) => {
-                let rel = off - CLINT_MTIMECMP;
-                match blk.mtimecmp.get((rel / 8) as usize) {
-                    Some(&v) => Ok(half(v, rel % 8 == 4)),
-                    None => unmapped,
-                }
-            }
-            (ClintKind::AclintMswi, _) => match blk.sip.get((off / 4) as usize) {
-                Some(&s) => Ok(u32::from(s)),
-                None => unmapped,
-            },
-            (ClintKind::AclintSswi, _) => match blk.sip.get((off / 4) as usize) {
-                // SETSSIP reads as 0.
-                Some(_) => Ok(0),
-                None => unmapped,
-            },
-            (ClintKind::AclintMtimer, 0) => match off {
-                0 => Ok(half(mtime, false)),
-                4 => Ok(half(mtime, true)),
-                _ => unmapped,
-            },
-            (ClintKind::AclintMtimer, _) => match blk.mtimecmp.get((off / 8) as usize) {
-                Some(&v) => Ok(half(v, off % 8 == 4)),
-                None => unmapped,
-            },
-        }
-    }
-
-    fn clint_write32(&mut self, addr: u64, v: u32) -> Result<(), IntcError> {
-        let (b, r, off) = self.block_at(addr)?;
-        let set_half = |old: u64, hi: bool| {
-            if hi {
-                (old & 0xffff_ffff) | (u64::from(v) << 32)
-            } else {
-                (old & !0xffff_ffff) | u64::from(v)
-            }
-        };
-        let unmapped = Err(IntcError::Unmapped { addr });
-        let kind = self.blocks[b].info.kind;
-        let mut no_counter = 0u64;
-        let mtime: &mut u64 = match self.blocks[b].mtime_addr() {
-            Some(a) => self.mtimes.entry(a).or_insert(0),
-            None => &mut no_counter,
-        };
-        let blk = &mut self.blocks[b];
-        match (kind, r) {
-            (ClintKind::Clint | ClintKind::AclintMswi, _)
-                if kind == ClintKind::AclintMswi || off < CLINT_MTIMECMP =>
-            {
-                match blk.sip.get_mut((off / 4) as usize) {
-                    Some(s) => *s = v & 1 != 0,
-                    None => return unmapped,
-                }
-            }
-            (ClintKind::Clint, _) if off >= CLINT_MTIME => match off - CLINT_MTIME {
-                0 => *mtime = set_half(*mtime, false),
-                4 => *mtime = set_half(*mtime, true),
-                _ => return unmapped,
-            },
-            (ClintKind::Clint, _) => {
-                let rel = off - CLINT_MTIMECMP;
-                match blk.mtimecmp.get_mut((rel / 8) as usize) {
-                    Some(c) => *c = set_half(*c, rel % 8 == 4),
-                    None => return unmapped,
-                }
-            }
-            (ClintKind::AclintSswi, _) => match blk.sip.get_mut((off / 4) as usize) {
-                // Writing 1 sets SSIP; writing 0 does nothing.
-                Some(s) => *s |= v & 1 != 0,
-                None => return unmapped,
-            },
-            (ClintKind::AclintMtimer, 0) => match off {
-                0 => *mtime = set_half(*mtime, false),
-                4 => *mtime = set_half(*mtime, true),
-                _ => return unmapped,
-            },
-            (ClintKind::AclintMtimer, _) => match blk.mtimecmp.get_mut((off / 8) as usize) {
-                Some(c) => *c = set_half(*c, off % 8 == 4),
-                None => return unmapped,
-            },
-            (ClintKind::AclintMswi, _) => return unmapped,
-        }
-        Ok(())
-    }
-
-    fn mtime_at(&self, addr: u64) -> u64 {
-        self.mtimes.get(&addr).copied().unwrap_or(0)
-    }
-
-    /// The block, region index and offset holding `addr`.
-    fn block_at(&self, addr: u64) -> Result<(usize, usize, u64), IntcError> {
-        if !addr.is_multiple_of(4) {
-            return Err(IntcError::Misaligned { addr });
-        }
-        for (b, blk) in self.blocks.iter().enumerate() {
-            for (r, m) in blk.info.regs.iter().enumerate() {
-                if addr >= m.base && addr - m.base < m.size {
-                    return Ok((b, r, addr - m.base));
-                }
-            }
-        }
-        Err(IntcError::Unmapped { addr })
-    }
-
-    /// Drives a wire into `ctl` (a PLIC, or any domain of an APLIC tree:
-    /// the wire enters the root and every domain sees it).
-    fn set_wire(&mut self, ctl: Ctl, src: u32, high: bool) -> Result<(), IntcError> {
-        match ctl {
-            Ctl::Plic(p) => self.plics[p].set_level(src, high)?,
-            Ctl::Aplic(d) => {
-                let root = self.root_of(d);
-                if src == 0 || src > self.aplics[root].sources() {
-                    return Err(IntcError::NoSuchSource(src));
-                }
-                for i in 0..self.aplics.len() {
-                    if self.root_of(i) == root {
-                        self.aplics[i].set_wire(src, high);
-                    }
-                }
-                self.settle();
-            }
-            Ctl::Imsic(..) => return Err(IntcError::NoSuchSource(src)),
-        }
-        Ok(())
-    }
-
-    /// Claims one external interrupt for `(hart, cause)`: the IMSIC file
-    /// first, then APLIC IDCs, then PLIC contexts. `Some((ctl, number))`, or
-    /// `None` when nothing is claimable (an APLIC `iforce` claim is
-    /// reported as `Some((Aplic, 0))`).
-    fn claim_external(&mut self, hart: u32, cause: u32) -> Option<(Ctl, u32)> {
-        let want = HartTarget {
-            hart,
-            cause: Some(cause),
-        };
-        if let Some((b, k)) = self.imsic_file(hart, cause) {
-            let f = &mut self.imsics[b].files[k][0];
-            if f.asserted() {
-                return Some((Ctl::Imsic(b, k), f.claim() >> 16));
-            }
-            if !f.delivers_external() {
-                // The file, not the PLIC/APLIC, supplies this level.
-                return None;
-            }
-        }
-        for d in 0..self.aplics.len() {
-            for (i, t) in self.aplic_info[d].idcs.iter().enumerate() {
-                if *t == want && self.aplics[d].idc_asserted(i) {
-                    let v = self.aplics[d].claimi(i);
-                    return Some((Ctl::Aplic(d), v >> 16));
-                }
-            }
-        }
-        for p in 0..self.plics.len() {
-            for c in 0..self.plics[p].contexts.len() {
-                if self.plics[p].contexts[c] == want {
-                    let s = self.plics[p].claim(c);
-                    if s != 0 {
-                        return Some((Ctl::Plic(p), s));
-                    }
-                }
-            }
-        }
-        None
-    }
-
     fn complete_external(&mut self, hart: u32, cause: u32, ctl: Ctl, number: u32) {
-        match ctl {
-            Ctl::Plic(p) => {
-                let want = HartTarget {
-                    hart,
-                    cause: Some(cause),
-                };
-                if let Some(c) = self.plics[p].contexts.iter().position(|t| *t == want) {
-                    self.plics[p].complete(c, number);
-                }
-            }
-            Ctl::Imsic(b, k) => {
-                // Linux's APLIC-MSI EOI: a level source still asserted after
-                // its handler is re-triggered through setipnum (AIA §4.9.2).
-                if let Some(&(d, s)) = self.msi_sources.get(&(b, k, number))
-                    && matches!(
-                        self.aplics[d].mode(s),
-                        SourceMode::LevelHigh | SourceMode::LevelLow
-                    )
-                {
-                    let base = self.aplics[d].base();
-                    let _ = self.aplics[d].write32(base + 0x1cdc, s);
-                    self.settle();
-                }
-            }
-            Ctl::Aplic(_) => {}
-        }
+        let forwarded = match ctl {
+            Ctl::Imsic(b, k) => self.msi_sources.get(&(b, k, number)).copied(),
+            _ => None,
+        };
+        self.core
+            .complete_external(hart, cause, ctl, number, forwarded);
     }
 
     fn controller_path(&self, ctl: Ctl) -> String {
         match ctl {
             Ctl::Plic(_) => String::new(),
             Ctl::Aplic(d) => self.aplic_info[d].path.clone(),
-            Ctl::Imsic(b, _) => self.imsics[b].info.path.clone(),
+            Ctl::Imsic(b, _) => self.imsic_info[b].path.clone(),
         }
+    }
+
+    /// The IMSIC and file of `hart` at `level`.
+    fn file_of(&self, hart: u32, level: Privilege) -> Result<(usize, usize), IntcError> {
+        let cause = level.external();
+        self.core
+            .imsic_file(hart, cause)
+            .ok_or(IntcError::NoImsic { hart, cause })
+    }
+
+    /// Enables identity `id` of file `(b, k, g)` and the file's MSI
+    /// delivery.
+    fn enable_identity(&mut self, b: usize, k: usize, g: usize, id: u32) -> Result<(), IntcError> {
+        self.core
+            .file_csr_write(b, k, g, crate::aia::ISEL_EIDELIVERY, 1)?;
+        let isel = crate::aia::ISEL_EIE0 + 2 * (id / 64);
+        let old = self.core.file_csr_read(b, k, g, isel)?;
+        self.core
+            .file_csr_write(b, k, g, isel, old | 1 << (id % 64))
     }
 }
 
@@ -1201,11 +743,11 @@ pub struct IntcHandle {
 
 impl IntcHandle {
     pub fn read32(&self, addr: u64) -> Result<u32, IntcError> {
-        self.state.borrow_mut().read32(addr)
+        self.state.borrow_mut().core.read32(addr)
     }
 
     pub fn write32(&self, addr: u64, v: u32) -> Result<(), IntcError> {
-        self.state.borrow_mut().write32(addr, v)
+        self.state.borrow_mut().core.write32(addr, v)
     }
 
     /// A 64-bit access as two 32-bit ones, low word first.
@@ -1224,25 +766,25 @@ impl IntcHandle {
     /// without a PLIC, of its first APLIC domain tree).
     pub fn set_line(&self, src: u32, high: bool) -> Result<(), IntcError> {
         let mut st = self.state.borrow_mut();
-        let ctl = if !st.plics.is_empty() {
+        let ctl = if st.core.plic_count() != 0 {
             Ctl::Plic(0)
-        } else if !st.aplics.is_empty() {
+        } else if st.core.aplic_count() != 0 {
             Ctl::Aplic(0)
         } else {
             return Err(IntcError::NoPlic);
         };
-        st.set_wire(ctl, src, high)
+        st.core.set_wire(ctl, src, high)
     }
 
     /// The device drives source `src` of controller `ctl`.
     pub fn set_controller_line(&self, ctl: Ctl, src: u32, high: bool) -> Result<(), IntcError> {
         let mut st = self.state.borrow_mut();
         match ctl {
-            Ctl::Plic(p) if p >= st.plics.len() => return Err(IntcError::NoPlic),
-            Ctl::Aplic(d) if d >= st.aplics.len() => return Err(IntcError::NoPlic),
+            Ctl::Plic(p) if p >= st.core.plic_count() => return Err(IntcError::NoPlic),
+            Ctl::Aplic(d) if d >= st.core.aplic_count() => return Err(IntcError::NoPlic),
             _ => {}
         }
-        st.set_wire(ctl, src, high)
+        st.core.set_wire(ctl, src, high)
     }
 
     /// A bus master writes `data` to `addr` (an MSI to an IMSIC file or an
@@ -1252,60 +794,27 @@ impl IntcHandle {
         if !addr.is_multiple_of(4) {
             return Err(IntcError::Misaligned { addr });
         }
-        st.deliver_msi(addr, data)?;
-        st.settle();
+        st.core.deliver_msi(addr, data)?;
+        st.core.settle();
         Ok(())
     }
 
     /// The MTIME that `hart`'s timer compares against (0 if it has none).
     pub fn mtime(&self, hart: u32) -> u64 {
-        let st = self.state.borrow();
-        let want = Some(HartTarget {
-            hart,
-            cause: Some(MTIP),
-        });
-        st.blocks
-            .iter()
-            .find(|b| (0..b.mtimecmp.len()).any(|k| b.timer_target(k) == want))
-            .and_then(Block::mtime_addr)
-            .map_or(0, |a| st.mtime_at(a))
+        self.state.borrow().core.hart_mtime(hart)
     }
 
     /// Clears a pending SSIP (software writing `sip.SSIP = 0`).
     pub fn clear_ssip(&self, hart: u32) {
-        let mut st = self.state.borrow_mut();
-        let want = Some(HartTarget {
-            hart,
-            cause: Some(SSIP),
-        });
-        for b in &mut st.blocks {
-            for k in 0..b.sip.len() {
-                if b.info.kind == ClintKind::AclintSswi && b.sw_target(k) == want {
-                    b.sip[k] = false;
-                }
-            }
-        }
-    }
-
-    fn with_file<T>(
-        &self,
-        hart: u32,
-        level: Privilege,
-        f: impl FnOnce(&mut ImsicFile) -> T,
-    ) -> Result<T, IntcError> {
-        let cause = level.external();
-        let mut st = self.state.borrow_mut();
-        let (b, k) = st
-            .imsic_file(hart, cause)
-            .ok_or(IntcError::NoImsic { hart, cause })?;
-        Ok(f(&mut st.imsics[b].files[k][0]))
+        self.state.borrow_mut().core.clear_ssip(hart);
     }
 
     /// `*ireg` read of `hart`'s IMSIC file at `level` (`miselect`/`mireg`
     /// for M, `siselect`/`sireg` for S).
     pub fn imsic_csr_read(&self, hart: u32, level: Privilege, isel: u32) -> Result<u64, IntcError> {
-        self.with_file(hart, level, |f| f.csr_read(isel))?
-            .map_err(IntcError::from)
+        let st = self.state.borrow();
+        let (b, k) = st.file_of(hart, level)?;
+        st.core.file_csr_read(b, k, 0, isel)
     }
 
     /// `*ireg` write.
@@ -1316,87 +825,87 @@ impl IntcHandle {
         isel: u32,
         v: u64,
     ) -> Result<(), IntcError> {
-        self.with_file(hart, level, |f| f.csr_write(isel, v))?
-            .map_err(IntcError::from)
+        let mut st = self.state.borrow_mut();
+        let (b, k) = st.file_of(hart, level)?;
+        st.core.file_csr_write(b, k, 0, isel, v)
     }
 
     /// `*topei` read.
     pub fn topei(&self, hart: u32, level: Privilege) -> Result<u32, IntcError> {
-        self.with_file(hart, level, |f| f.topei())
+        let st = self.state.borrow();
+        let (b, k) = st.file_of(hart, level)?;
+        Ok(st.core.file_topei(b, k, 0))
     }
 
     /// `csrrw rd, *topei, x0`: claims the top identity.
     pub fn claim_topei(&self, hart: u32, level: Privilege) -> Result<u32, IntcError> {
-        self.with_file(hart, level, |f| f.claim())
+        let mut st = self.state.borrow_mut();
+        let (b, k) = st.file_of(hart, level)?;
+        Ok(st.core.file_claim(b, k, 0))
     }
 
     /// GEILEN of `hart`: the number of guest interrupt files after its
     /// S-level IMSIC file (`2^riscv,guest-index-bits - 1`, at most 63), or 0.
     pub fn geilen(&self, hart: u32) -> u32 {
-        self.state.borrow().geilen(hart)
+        self.state.borrow().core.geilen(hart)
     }
 
     /// `hstatus.VGEIN` (a 6-bit field, stored as written; accesses check
     /// that it names an implemented guest file).
     pub fn vgein(&self, hart: u32) -> u32 {
-        self.state.borrow().hyp.get(&hart).map_or(0, |h| h.vgein)
+        self.state.borrow().core.vgein(hart)
     }
 
     /// A write of `hstatus.VGEIN`.
     pub fn set_vgein(&self, hart: u32, vgein: u32) {
-        self.state.borrow_mut().hyp.entry(hart).or_default().vgein = vgein & 0x3f;
+        self.state.borrow_mut().core.set_vgein(hart, vgein & 0x3f);
     }
 
     /// `hgeie`: bits `GEILEN:1` are writable, bit 0 and the rest read zero.
     pub fn hgeie(&self, hart: u32) -> u64 {
-        self.state.borrow().hyp.get(&hart).map_or(0, |h| h.hgeie)
+        self.state.borrow().core.hgeie(hart)
     }
 
     pub fn set_hgeie(&self, hart: u32, v: u64) {
         let mut st = self.state.borrow_mut();
-        let n = st.geilen(hart);
+        let n = st.core.geilen(hart);
         let mask = ((1u64 << n) - 1) << 1;
-        st.hyp.entry(hart).or_default().hgeie = v & mask;
+        st.core.set_hgeie(hart, v & mask);
     }
 
     /// `hgeip` (read-only): bit `g` is set while guest file `g` signals an
     /// interrupt (`eidelivery` = 1 and a pending, enabled identity below
     /// its threshold).
     pub fn hgeip(&self, hart: u32) -> u64 {
-        self.state.borrow().hgeip(hart)
+        self.state.borrow().core.hgeip(hart)
     }
 
     /// The H-extension bits of `mip`: SGEIP (`hgeip & hgeie != 0`) and
     /// VSEIP (`hgeip` bit VGEIN). `hvip.VSEIP` is not modelled.
     pub fn hyp_pending(&self, hart: u32) -> u64 {
         let st = self.state.borrow();
-        (u64::from(st.level(hart, SGEIP)) << SGEIP) | (u64::from(st.level(hart, VSEIP)) << VSEIP)
+        (u64::from(st.core.level(hart, SGEIP)) << SGEIP)
+            | (u64::from(st.core.level(hart, VSEIP)) << VSEIP)
     }
 
     /// `vsiselect = isel; vsireg` read: the guest file VGEIN selects.
     pub fn vs_imsic_csr_read(&self, hart: u32, isel: u32) -> Result<u64, IntcError> {
-        let mut st = self.state.borrow_mut();
-        st.vs_file(hart)?.csr_read(isel).map_err(IntcError::from)
+        self.state.borrow_mut().core.vs_csr_read(hart, isel)
     }
 
     /// `vsiselect = isel; vsireg = v`.
     pub fn vs_imsic_csr_write(&self, hart: u32, isel: u32, v: u64) -> Result<(), IntcError> {
-        let mut st = self.state.borrow_mut();
-        st.vs_file(hart)?
-            .csr_write(isel, v)
-            .map_err(IntcError::from)
+        self.state.borrow_mut().core.vs_csr_write(hart, isel, v)
     }
 
     /// `vstopei` read (from M or HS mode).
     pub fn vstopei(&self, hart: u32) -> Result<u32, IntcError> {
-        let mut st = self.state.borrow_mut();
-        Ok(st.vs_file(hart)?.topei())
+        self.state.borrow_mut().core.vstopei(hart)
     }
 
     /// `csrrw rd, vstopei, x0`: the VS-level claim.
     pub fn claim_vstopei(&self, hart: u32) -> Result<u32, IntcError> {
-        let mut st = self.state.borrow_mut();
-        Ok(st.vs_file(hart)?.claim())
+        self.state.borrow_mut().core.claim_vstopei(hart)
     }
 
     /// Whether identity `id` is pending in guest file `guest` (1 and up)
@@ -1404,12 +913,12 @@ impl IntcHandle {
     pub fn guest_eip(&self, hart: u32, guest: u32, id: u32) -> Result<bool, IntcError> {
         let st = self.state.borrow();
         let none = IntcError::NoImsic { hart, cause: SEIP };
-        let (b, k) = st.imsic_file(hart, SEIP).ok_or(none.clone())?;
-        st.imsics[b].files[k]
-            .get(guest as usize)
-            .filter(|_| guest != 0)
-            .map(|f| f.is_pending(id))
-            .ok_or(none)
+        let (b, k) = st.core.imsic_file(hart, SEIP).ok_or(none.clone())?;
+        let g = guest as usize;
+        if guest == 0 || g >= st.core.files_len(b, k) {
+            return Err(none);
+        }
+        Ok(st.core.file_is_pending(b, k, g, id))
     }
 }
 
@@ -1490,78 +999,23 @@ impl RiscvIntc {
         if platform.arch != Arch::Riscv64 {
             return Err(IntcError::NotRiscv(platform.arch));
         }
-        let plics = platform
-            .plics
-            .iter()
-            .map(Plic::new)
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut imsics = Vec::new();
-        // A file whose hart and level a PLIC context or a direct APLIC IDC
-        // also reaches supports eidelivery = 0x40000000; guest files never
-        // do (AIA §3.8.1).
-        let wired = |t: &HartTarget| {
-            platform.plics.iter().any(|p| p.contexts.contains(t))
-                || platform.aplics.iter().any(|a| a.idcs.contains(t))
-        };
-        for info in &platform.imsics {
-            let guests = 1usize << info.guest_index_bits;
-            let files = info
-                .targets
-                .iter()
-                .take(info.files.len())
-                .map(|t| {
-                    (0..guests)
-                        .map(|g| {
-                            if g == 0 && wired(t) {
-                                ImsicFile::with_external_delivery(info.ids)
-                            } else {
-                                ImsicFile::new(info.ids)
-                            }
-                        })
-                        .collect()
-                })
-                .collect::<Result<Vec<Vec<_>>, _>>()?;
-            imsics.push(ImsicBlock {
-                info: info.clone(),
-                files,
-                used: vec![BTreeSet::new(); info.files.len()],
-                guest_used: BTreeMap::new(),
-            });
-        }
-        let mut aplics = Vec::new();
-        for a in &platform.aplics {
-            let window = MemRange {
-                base: a.base,
-                size: a.size,
-            };
-            let root = a.parent.is_none();
-            // The root domain is M-level; its descendants are S-level.
-            aplics.push(AplicDomain::new(
-                &a.path,
-                window,
-                a.sources,
-                a.idcs.len(),
-                a.msi_parent.is_some(),
-                root,
-                !root,
-                a.children.len() as u32,
-            )?);
-        }
         let mut state = State {
-            plics,
-            aplics,
+            core: imp::Core::new(platform)?,
             aplic_info: platform.aplics.clone(),
-            imsics,
-            blocks: platform.clints.iter().map(Block::new).collect(),
-            mtimes: BTreeMap::new(),
+            imsic_info: platform.imsics.clone(),
+            clint_info: platform.clints.clone(),
+            used: platform
+                .imsics
+                .iter()
+                .map(|m| vec![BTreeSet::new(); m.files.len()])
+                .collect(),
+            guest_used: vec![BTreeMap::new(); platform.imsics.len()],
             asserted: BTreeSet::new(),
             mie: BTreeSet::new(),
             msi_sources: BTreeMap::new(),
             log: Vec::new(),
             ext_log: Vec::new(),
             stats: IntcStats::default(),
-            lost_msis: Vec::new(),
-            hyp: BTreeMap::new(),
             guest_log: Vec::new(),
             pci_log: Vec::new(),
         };
@@ -1593,7 +1047,7 @@ impl RiscvIntc {
         platform: &Platform,
         privilege: Privilege,
     ) -> Result<(), IntcError> {
-        for d in 0..st.aplics.len() {
+        for d in 0..st.core.aplic_count() {
             let info = st.aplic_info[d].clone();
             if info.parent.is_some() {
                 continue;
@@ -1619,29 +1073,31 @@ impl RiscvIntc {
                     | (cfg.hhxw << 16)
                     | (cfg.lhxw << 12)
                     | ((cfg.m_ppn >> 32) as u32 & 0xfff);
-                let d0 = &mut st.aplics[d];
-                d0.write32(base + 0x1bc0, cfg.m_ppn as u32)?;
-                d0.write32(base + 0x1bc8, cfg.s_ppn as u32)?;
-                d0.write32(
+                let core = &mut st.core;
+                core.aplic_write32(d, base + 0x1bc0, cfg.m_ppn as u32)?;
+                core.aplic_write32(d, base + 0x1bc8, cfg.s_ppn as u32)?;
+                core.aplic_write32(
+                    d,
                     base + 0x1bcc,
                     (cfg.lhxs_s << 20) | ((cfg.s_ppn >> 32) as u32 & 0xfff),
                 )?;
-                d0.write32(base + 0x1bc4, high_m)?;
+                core.aplic_write32(d, base + 0x1bc4, high_m)?;
             }
         }
         if privilege == Privilege::Supervisor {
             // Parents first, so a grandchild's delegation finds its sources
             // active in the child.
-            let mut order: Vec<usize> = (0..st.aplics.len()).collect();
+            let count = st.core.aplic_count();
+            let mut order: Vec<usize> = (0..count).collect();
             let depth = |st: &State, mut d: usize| {
                 let mut n = 0;
-                while st.root_of(d) != d {
+                while st.core.root_of(d) != d {
                     let p = st.aplic_info[d].parent.clone();
                     d = p
                         .and_then(|p| st.aplic_info.iter().position(|a| a.path == p))
                         .unwrap_or(d);
                     n += 1;
-                    if n > st.aplics.len() {
+                    if n > count {
                         break;
                     }
                 }
@@ -1655,14 +1111,15 @@ impl RiscvIntc {
                         continue;
                     };
                     let base = info.base;
-                    for s in del.first..=del.last.min(st.aplics[d].sources()) {
-                        st.aplics[d].write32(base + 4 * u64::from(s), (1 << 10) | ci as u32)?;
+                    for s in del.first..=del.last.min(st.core.aplic_sources(d)) {
+                        st.core
+                            .aplic_write32(d, base + 4 * u64::from(s), (1 << 10) | ci as u32)?;
                     }
                 }
-                st.settle();
+                st.core.settle();
             }
         }
-        st.settle();
+        st.core.settle();
         Ok(())
     }
 
@@ -1699,11 +1156,12 @@ impl RiscvIntc {
     /// external interrupt at this privilege, on the first PLIC that has one.
     pub fn plic_context(&self, hart: u32) -> Result<(usize, usize), IntcError> {
         let st = self.handle.state.borrow();
-        if st.plics.is_empty() {
+        if st.core.plic_count() == 0 {
             return Err(IntcError::NoPlic);
         }
         let cause = self.privilege.external();
-        st.ext_context(hart, cause)
+        st.core
+            .ext_context(hart, cause)
             .ok_or(IntcError::NoContext { hart, cause })
     }
 
@@ -1723,29 +1181,23 @@ impl RiscvIntc {
     /// MSIs written to an address no IMSIC file or APLIC `setipnum_le`
     /// occupies (lost on hardware too).
     pub fn lost_msis(&self) -> Vec<Msi> {
-        self.handle.state.borrow().lost_msis.clone()
+        self.handle.state.borrow().core.lost_msis()
     }
 
     /// Base address of the first PLIC's register window.
     pub fn plic_base(&self) -> Result<u64, IntcError> {
-        Ok(self
-            .handle
-            .state
-            .borrow()
-            .plics
-            .first()
-            .ok_or(IntcError::NoPlic)?
-            .base)
+        let st = self.handle.state.borrow();
+        if st.core.plic_count() == 0 {
+            return Err(IntcError::NoPlic);
+        }
+        Ok(st.core.plic_base(0))
     }
 
     /// Base addresses of every PLIC, in [`Platform::plics`] order.
     pub fn plic_bases(&self) -> Vec<u64> {
-        self.handle
-            .state
-            .borrow()
-            .plics
-            .iter()
-            .map(|p| p.base)
+        let st = self.handle.state.borrow();
+        (0..st.core.plic_count())
+            .map(|p| st.core.plic_base(p))
             .collect()
     }
 
@@ -1809,16 +1261,7 @@ impl RiscvIntc {
     /// Advances every MTIME counter by `ticks` (wrapping, as the counters
     /// do).
     pub fn advance_mtime(&mut self, ticks: u64) {
-        {
-            let mut st = self.handle.state.borrow_mut();
-            let addrs: Vec<u64> = st.blocks.iter().filter_map(Block::mtime_addr).collect();
-            for a in addrs {
-                st.mtimes.entry(a).or_insert(0);
-            }
-            for v in st.mtimes.values_mut() {
-                *v = v.wrapping_add(ticks);
-            }
-        }
+        self.handle.state.borrow_mut().core.advance_mtime(ticks);
         self.sync();
     }
 
@@ -1894,15 +1337,18 @@ impl RiscvIntc {
                         hart,
                         cause: Some(cause),
                     };
-                    let ctx = st.plics[p]
-                        .contexts
-                        .iter()
-                        .position(|t| *t == want)
+                    let ctx = st
+                        .core
+                        .plic_context(p, want)
                         .ok_or(IntcError::NoContext { hart, cause })?;
-                    (st.plics[p].base, ctx)
+                    (st.core.plic_base(p), ctx)
                 };
                 self.select_wired_delivery(hart, cause)?;
-                self.handle.state.borrow_mut().plics[p].set_edge(src, edge)?;
+                self.handle
+                    .state
+                    .borrow_mut()
+                    .core
+                    .plic_set_edge(p, src, edge)?;
                 self.ensure_external(hart)?;
                 self.isrs.borrow_mut().insert((ctl, src), Box::new(handler));
                 self.handle.write32(base + 4 * u64::from(src), priority)?;
@@ -1927,7 +1373,7 @@ impl RiscvIntc {
                 let d = {
                     let st = self.handle.state.borrow();
                     match self.privilege {
-                        Privilege::Machine => st.root_of(named),
+                        Privilege::Machine => st.core.root_of(named),
                         Privilege::Supervisor => named,
                     }
                 };
@@ -1955,11 +1401,10 @@ impl RiscvIntc {
         };
         let (base, info, active) = {
             let st = self.handle.state.borrow();
-            let dom = &st.aplics[d];
             (
-                dom.base(),
+                st.core.aplic_base(d),
                 st.aplic_info[d].clone(),
-                dom.is_delegated_here(src),
+                st.core.aplic_is_delegated_here(d, src),
             )
         };
         // A non-root domain must have the source delegated to it.
@@ -1978,12 +1423,11 @@ impl RiscvIntc {
             let (b, k, file_addr, cfg, sup) = {
                 let st = h.state.borrow();
                 let b = st
-                    .imsics
+                    .imsic_info
                     .iter()
-                    .position(|m| &m.info.path == imsic_path)
+                    .position(|m| &m.path == imsic_path)
                     .ok_or(IntcError::NoImsic { hart, cause })?;
-                let k = st.imsics[b]
-                    .info
+                let k = st.imsic_info[b]
                     .targets
                     .iter()
                     .position(|t| *t == want)
@@ -1991,9 +1435,9 @@ impl RiscvIntc {
                 (
                     b,
                     k,
-                    st.imsics[b].info.files[k],
-                    st.aplics[d].msi_cfg(),
-                    st.aplics[d].is_supervisor(),
+                    st.imsic_info[b].files[k],
+                    st.core.aplic_msi_cfg(d),
+                    st.core.aplic_is_supervisor(d),
                 )
             };
             let harts = 1u32 << (cfg.lhxw + cfg.hhxw);
@@ -2012,11 +1456,7 @@ impl RiscvIntc {
             h.write32(base + 0x3000 + 4 * u64::from(src), (hart_index << 18) | id)?;
             {
                 let mut st = h.state.borrow_mut();
-                let f = &mut st.imsics[b].files[k][0];
-                f.csr_write(crate::aia::ISEL_EIDELIVERY, 1)?;
-                let isel = crate::aia::ISEL_EIE0 + 2 * (id / 64);
-                let old = f.csr_read(isel)?;
-                f.csr_write(isel, old | 1 << (id % 64))?;
+                st.enable_identity(b, k, 0, id)?;
                 st.msi_sources.insert((b, k, id), (d, src));
             }
             self.ensure_external(hart)?;
@@ -2054,18 +1494,21 @@ impl RiscvIntc {
     /// MSIs.
     fn select_wired_delivery(&self, hart: u32, cause: u32) -> Result<(), IntcError> {
         let mut st = self.handle.state.borrow_mut();
-        let Some((b, k)) = st.imsic_file(hart, cause) else {
+        let Some((b, k)) = st.core.imsic_file(hart, cause) else {
             return Ok(());
         };
-        let f = &mut st.imsics[b].files[k][0];
-        if f.eidelivery() == crate::aia::EIDELIVERY_ON || !f.supports_external_delivery() {
+        if st.core.file_eidelivery(b, k) == crate::aia::EIDELIVERY_ON
+            || !st.core.file_supports_external_delivery(b, k)
+        {
             return Err(IntcError::ImsicOwnsLevel { hart, cause });
         }
-        f.csr_write(
+        st.core.file_csr_write(
+            b,
+            k,
+            0,
             crate::aia::ISEL_EIDELIVERY,
             u64::from(crate::aia::EIDELIVERY_EXTERNAL),
-        )?;
-        Ok(())
+        )
     }
 
     /// Frees the IMSIC identity (and its handler, enable and pending bits)
@@ -2083,15 +1526,14 @@ impl RiscvIntc {
             {
                 let mut st = self.handle.state.borrow_mut();
                 st.msi_sources.remove(&(b, k, id));
-                st.imsics[b].used[k].remove(&id);
-                let f = &mut st.imsics[b].files[k][0];
+                st.used[b][k].remove(&id);
                 let bit = 1u64 << (id % 64);
                 for isel in [
                     crate::aia::ISEL_EIE0 + 2 * (id / 64),
                     crate::aia::ISEL_EIP0 + 2 * (id / 64),
                 ] {
-                    let v = f.csr_read(isel)?;
-                    f.csr_write(isel, v & !bit)?;
+                    let v = st.core.file_csr_read(b, k, 0, isel)?;
+                    st.core.file_csr_write(b, k, 0, isel, v & !bit)?;
                 }
             }
             self.isrs.borrow_mut().remove(&(Ctl::Imsic(b, k), id));
@@ -2109,10 +1551,10 @@ impl RiscvIntc {
         priority: u32,
     ) -> Result<u32, IntcError> {
         let mut st = self.handle.state.borrow_mut();
-        let ids = st.imsics[b].info.ids;
+        let ids = st.imsic_info[b].ids;
         let band = (ids + 1) / 8;
         let lo = 1 + (PLIC_MAX_PRIORITY - priority.clamp(1, PLIC_MAX_PRIORITY)) * band;
-        let used = &mut st.imsics[b].used[k];
+        let used = &mut st.used[b][k];
         let id = (lo..=ids)
             .chain(1..lo)
             .find(|i| !used.contains(i))
@@ -2127,9 +1569,10 @@ impl RiscvIntc {
         let cause = self.privilege.external();
         let st = self.handle.state.borrow();
         let (b, k) = st
+            .core
             .imsic_file(hart, cause)
             .ok_or(IntcError::NoImsic { hart, cause })?;
-        Ok(st.imsics[b].info.files[k])
+        Ok(st.imsic_info[b].files[k])
     }
 
     /// Installs `handler` for a device MSI to `hart`: allocates an identity
@@ -2150,19 +1593,16 @@ impl RiscvIntc {
         let (b, k, addr) = {
             let st = self.handle.state.borrow();
             let (b, k) = st
+                .core
                 .imsic_file(hart, cause)
                 .ok_or(IntcError::NoImsic { hart, cause })?;
-            (b, k, st.imsics[b].info.files[k])
+            (b, k, st.imsic_info[b].files[k])
         };
         let id = self.allocate_identity(b, k, hart, priority)?;
-        {
-            let mut st = self.handle.state.borrow_mut();
-            let f = &mut st.imsics[b].files[k][0];
-            f.csr_write(crate::aia::ISEL_EIDELIVERY, 1)?;
-            let isel = crate::aia::ISEL_EIE0 + 2 * (id / 64);
-            let old = f.csr_read(isel)?;
-            f.csr_write(isel, old | 1 << (id % 64))?;
-        }
+        self.handle
+            .state
+            .borrow_mut()
+            .enable_identity(b, k, 0, id)?;
         self.ensure_external(hart)?;
         self.isrs
             .borrow_mut()
@@ -2209,7 +1649,7 @@ impl RiscvIntc {
     /// The `mip`/`sip` external-interrupt level of `hart` for `cause`
     /// (MEIP or SEIP), as the CPU would see it.
     pub fn external_level(&self, hart: u32, cause: u32) -> bool {
-        self.handle.state.borrow().level(hart, cause)
+        self.handle.state.borrow().core.level(hart, cause)
     }
 
     /// Registers the external-interrupt claim/complete loop for `hart`
@@ -2224,7 +1664,7 @@ impl RiscvIntc {
         self.cpu(hart)?.register_isr(cause, move |ictx| {
             let mut runs = 0usize;
             loop {
-                let claimed = handle.state.borrow_mut().claim_external(hart, cause);
+                let claimed = handle.state.borrow_mut().core.claim_external(hart, cause);
                 let Some((ctl, number)) = claimed else {
                     if runs == 0 {
                         handle.state.borrow_mut().stats.spurious += 1;
@@ -2255,7 +1695,7 @@ impl RiscvIntc {
                         _ => None,
                     };
                     let controller = match ctl {
-                        Ctl::Plic(p) => st.plics[p].base,
+                        Ctl::Plic(p) => st.core.plic_base(p),
                         _ => 0,
                     };
                     let path = st.controller_path(ctl);
@@ -2308,8 +1748,8 @@ impl RiscvIntc {
         cause: u32,
         mut handler: impl FnMut(&IrqEvent<'_>) + 'static,
     ) -> Result<(), IntcError> {
-        let reachable = self.handle.state.borrow().blocks.iter().any(|b| {
-            b.info.targets.contains(&HartTarget {
+        let reachable = self.handle.state.borrow().clint_info.iter().any(|c| {
+            c.targets.contains(&HartTarget {
                 hart,
                 cause: Some(cause),
             })
@@ -2320,7 +1760,7 @@ impl RiscvIntc {
         let handle = self.handle.clone();
         self.cpu(hart)?.register_isr(cause, move |ictx| {
             let mut runs = 0usize;
-            while handle.state.borrow().level(hart, cause) {
+            while handle.state.borrow().core.level(hart, cause) {
                 if runs == STORM_BUDGET {
                     handle.state.borrow_mut().stats.storms += 1;
                     break;
@@ -2381,23 +1821,23 @@ impl RiscvIntc {
             hart,
             cause: Some(cause),
         });
-        for b in &st.blocks {
-            for k in 0..b.sip.len() {
+        for b in &st.clint_info {
+            for k in 0..clint_slots(b) {
                 let k64 = k as u64;
-                match (b.info.kind, cause) {
-                    (ClintKind::Clint, MSIP) if b.sw_target(k) == want => {
-                        return Ok(b.info.regs[0].base + 4 * k64);
+                match (b.kind, cause) {
+                    (ClintKind::Clint, MSIP) if sw_target(b, k) == want => {
+                        return Ok(b.regs[0].base + 4 * k64);
                     }
-                    (ClintKind::Clint, MTIP) if b.timer_target(k) == want => {
-                        return Ok(b.info.regs[0].base + CLINT_MTIMECMP + 8 * k64);
+                    (ClintKind::Clint, MTIP) if timer_target(b, k) == want => {
+                        return Ok(b.regs[0].base + CLINT_MTIMECMP + 8 * k64);
                     }
                     (ClintKind::AclintMswi | ClintKind::AclintSswi, MSIP | SSIP)
-                        if b.sw_target(k) == want =>
+                        if sw_target(b, k) == want =>
                     {
-                        return Ok(b.info.regs[0].base + 4 * k64);
+                        return Ok(b.regs[0].base + 4 * k64);
                     }
-                    (ClintKind::AclintMtimer, MTIP) if b.timer_target(k) == want => {
-                        return Ok(b.info.regs[1].base + 8 * k64);
+                    (ClintKind::AclintMtimer, MTIP) if timer_target(b, k) == want => {
+                        return Ok(b.regs[1].base + 8 * k64);
                     }
                     _ => {}
                 }
@@ -2409,13 +1849,9 @@ impl RiscvIntc {
     /// Address of MTIME.
     pub fn mtime_addr(&self) -> Result<u64, IntcError> {
         let st = self.handle.state.borrow();
-        st.blocks
+        st.clint_info
             .iter()
-            .find_map(|b| match b.info.kind {
-                ClintKind::Clint => Some(b.info.regs[0].base + CLINT_MTIME),
-                ClintKind::AclintMtimer => Some(b.info.regs[0].base),
-                _ => None,
-            })
+            .find_map(mtime_addr_of)
             .ok_or(IntcError::NoLocalSource {
                 hart: 0,
                 cause: MTIP,
@@ -2436,30 +1872,33 @@ impl RiscvIntc {
         {
             let mut st = self.handle.state.borrow_mut();
             let keep = geilen as usize + 1;
+            let files = |m: &ImsicInfo| m.targets.len().min(m.files.len());
             // Check every file before changing any.
-            for m in st.imsics.iter().filter(|m| m.info.supervisor()) {
-                for (k, files) in m.files.iter().enumerate() {
-                    if keep > files.len() {
+            for (b, m) in st.imsic_info.iter().enumerate() {
+                if !m.supervisor() {
+                    continue;
+                }
+                for (k, t) in m.targets.iter().enumerate().take(files(m)) {
+                    if keep > st.core.files_len(b, k) {
                         return Err(IntcError::NoSuchGuest {
-                            hart: m.info.targets[k].hart,
+                            hart: t.hart,
                             guest: geilen,
                         });
                     }
                 }
             }
-            for m in st.imsics.iter_mut().filter(|m| m.info.supervisor()) {
-                for files in &mut m.files {
-                    files.truncate(keep);
+            for b in 0..st.imsic_info.len() {
+                if !st.imsic_info[b].supervisor() {
+                    continue;
                 }
-                m.guest_used.retain(|&(_, g), _| g < keep);
+                for k in 0..files(&st.imsic_info[b]) {
+                    st.core.truncate_files(b, k, keep);
+                }
+                st.guest_used[b].retain(|&(_, g), _| g < keep);
             }
             // hgeie bits of guests that no longer exist read zero.
-            let harts: Vec<u32> = st.hyp.keys().copied().collect();
-            for hart in harts {
-                let n = st.geilen(hart);
-                if let Some(h) = st.hyp.get_mut(&hart) {
-                    h.hgeie &= ((1u64 << n) - 1) << 1;
-                }
+            for hart in st.core.hyp_harts() {
+                st.core.clip_hgeie(hart);
             }
         }
         self.guest_isrs
@@ -2528,12 +1967,13 @@ impl RiscvIntc {
     pub fn guest_msi_target(&self, hart: u32, guest: u32) -> Result<u64, IntcError> {
         let st = self.handle.state.borrow();
         let (b, k, n) = st
+            .core
             .guest_files(hart)
             .ok_or(IntcError::NoImsic { hart, cause: SEIP })?;
         if guest == 0 || guest > n {
             return Err(IntcError::NoSuchGuest { hart, guest });
         }
-        Ok(st.imsics[b].info.files[k] + u64::from(guest) * crate::aia::IMSIC_PAGE)
+        Ok(st.imsic_info[b].files[k] + u64::from(guest) * crate::aia::IMSIC_PAGE)
     }
 
     /// Installs a VS-level `handler` for an MSI to guest file `guest` of
@@ -2558,22 +1998,16 @@ impl RiscvIntc {
         let id = {
             let mut st = self.handle.state.borrow_mut();
             let (b, k, _) = st
+                .core
                 .guest_files(hart)
                 .ok_or(IntcError::NoImsic { hart, cause: SEIP })?;
-            let ids = st.imsics[b].info.ids;
-            let used = st.imsics[b]
-                .guest_used
-                .entry((k, guest as usize))
-                .or_default();
+            let ids = st.imsic_info[b].ids;
+            let used = st.guest_used[b].entry((k, guest as usize)).or_default();
             let id = (1..=ids)
                 .find(|i| !used.contains(i))
                 .ok_or(IntcError::NoFreeIdentity { hart })?;
             used.insert(id);
-            let f = &mut st.imsics[b].files[k][guest as usize];
-            f.csr_write(crate::aia::ISEL_EIDELIVERY, 1)?;
-            let isel = crate::aia::ISEL_EIE0 + 2 * (id / 64);
-            let old = f.csr_read(isel)?;
-            f.csr_write(isel, old | 1 << (id % 64))?;
+            st.enable_identity(b, k, guest as usize, id)?;
             id
         };
         let hgeie = self.handle.hgeie(hart);
@@ -2603,8 +2037,7 @@ impl RiscvIntc {
             loop {
                 let next = {
                     let st = handle.state.borrow();
-                    let h = st.hyp.get(&hart).copied().unwrap_or_default();
-                    let live = st.hgeip(hart) & h.hgeie;
+                    let live = st.core.hgeip(hart) & st.core.hgeie(hart);
                     (live != 0).then(|| live.trailing_zeros())
                 };
                 let Some(guest) = next else {
@@ -2679,24 +2112,23 @@ impl RiscvIntc {
         let cpu_addr = platform.pci_cpu_address(host, bus_addr, 4)?;
         let rec = {
             let mut st = self.handle.state.borrow_mut();
-            if !st.imsics.iter().any(|m| m.info.path == route.controller) {
+            if !st.imsic_info.iter().any(|m| m.path == route.controller) {
                 return Err(IntcError::MsiControllerNotModelled {
                     controller: route.controller.clone(),
                 });
             }
-            let landed = st.imsics.iter().find_map(|m| {
-                m.locate(cpu_addr)
-                    .filter(|&(k, g, _)| g < m.files[k].len())
-                    .map(|(k, g, _)| (m.info.path.clone(), m.info.targets[k].hart, g as u32))
+            let landed = st.core.locate_file(cpu_addr).map(|(b, k, g)| {
+                let m = &st.imsic_info[b];
+                (m.path.clone(), m.targets[k].hart, g as u32)
             });
-            if let Err(e) = st.deliver_msi(cpu_addr, data) {
-                st.lost_msis.push(Msi {
+            if let Err(e) = st.core.deliver_msi(cpu_addr, data) {
+                st.core.push_lost_msi(Msi {
                     addr: cpu_addr,
                     data,
                 });
                 return Err(e);
             }
-            st.settle();
+            st.core.settle();
             let rec = PciMsi {
                 rid,
                 device_id: route.device_id,
@@ -2732,7 +2164,7 @@ impl RiscvIntc {
             for (hart, cause) in enabled {
                 // A raised cause stays asserted until its handler has run
                 // (it may be pending on a masked hart meanwhile).
-                if st.level(hart, cause) && st.asserted.insert((hart, cause)) {
+                if st.core.level(hart, cause) && st.asserted.insert((hart, cause)) {
                     out.push((hart, cause));
                 }
             }

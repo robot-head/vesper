@@ -274,13 +274,26 @@ impl Checker<'_> {
         env: &mut Env,
         span: Span,
     ) -> Option<Type> {
-        let base_ty = self.peek_type(base, env);
+        let mut base_ty = self.peek_type(base, env);
+        // A slice view receiver (`b[a..c].find_byte(x)`, `s.as_slice().len()`)
+        // is borrowed `in` for the call, like a view argument.
+        let view = interval(base)
+            .map(|(b, _, _)| b)
+            .or_else(|| whole_view(base).map(|(b, _)| b));
+        if let Some(inner) = view
+            && base_ty == Type::Infer
+        {
+            let inner_ty = self.peek_type(inner, env);
+            if is_seq_or_slice(&inner_ty) {
+                base_ty = slice_of(elem(&inner_ty).cloned().unwrap_or(Type::Infer));
+            }
+        }
         if !is_seq_or_slice(&base_ty) {
             return None;
         }
         let elem_ty = elem(&base_ty).cloned().unwrap_or(Type::Infer);
         let seq = is_seq_type(&base_ty);
-        let Some(op) = resolve(method, Some(&base_ty)) else {
+        let Some(op) = resolve(method, Some(&base_ty)).map(|op| op.with_arity(args.len())) else {
             self.error(
                 "E1525",
                 format!(
@@ -318,8 +331,10 @@ impl Checker<'_> {
             | SeqOp::BytesEq
             | SeqOp::FindByte
             | SeqOp::EqIgnoreAsciiCase
-            | SeqOp::ExtendAsciiLowercase => 1,
-            SeqOp::FindEither => 2,
+            | SeqOp::ExtendAsciiLowercase
+            | SeqOp::ExtendReversed => 1,
+            SeqOp::FindEither | SeqOp::Resize | SeqOp::ExtendFromWithin { .. } => 2,
+            SeqOp::FillRange { .. } => 3,
             SeqOp::FindNotIn => 3,
             SeqOp::Wide(w) if !w.write => 1,
             SeqOp::CopyWithin { .. } => 3,
@@ -333,7 +348,28 @@ impl Checker<'_> {
                 span.clone(),
             );
         }
+        if view.is_some() && is_slice_type(&base_ty) {
+            if op.receiver_pass() != Pass::In {
+                self.error(
+                    "E1521",
+                    format!("'{method}' updates its receiver; pass the slice view as an 'inout' call argument instead"),
+                    base.span.clone(),
+                );
+            }
+            self.slice_args
+                .insert((base.span.start, base.span.end), Pass::In);
+            self.types
+                .insert((base.span.start, base.span.end), base_ty.clone());
+        }
+        let loan_base = self.loans.len();
         self.seq_receiver(base, env, op.receiver_pass());
+        // The view's source stays borrowed `in` while the arguments are
+        // evaluated, so they cannot move or update it.
+        if view.is_some()
+            && let Some(p) = self.seq_view_place(base)
+        {
+            self.loans.push((p, Pass::In, base.span.clone()));
+        }
         let u64_ty = Type::named("u64");
         let mode = self.mode(&elem_ty);
         let known = elem_ty != Type::Infer;
@@ -346,7 +382,14 @@ impl Checker<'_> {
                     ),
                     span.clone(),
                 ),
-            SeqOp::Extend | SeqOp::CopyFrom { .. } | SeqOp::CopyWithin { .. } | SeqOp::Fill
+            SeqOp::Extend
+            | SeqOp::CopyFrom { .. }
+            | SeqOp::CopyWithin { .. }
+            | SeqOp::Fill
+            | SeqOp::Resize
+            | SeqOp::FillRange { .. }
+            | SeqOp::ExtendFromWithin { .. }
+            | SeqOp::ExtendReversed
                 if known && mode != Mode::Copy =>
             {
                 self.error(
@@ -392,10 +435,13 @@ impl Checker<'_> {
                         | SeqOp::Truncate
                         | SeqOp::Reserve
                         | SeqOp::CopyFrom { .. }
+                        | SeqOp::Resize
                         | SeqOp::Wide(_),
                     0
                 )
             ) || (matches!(op, SeqOp::CopyWithin { .. }) && i < 3)
+                || (matches!(op, SeqOp::FillRange { .. } | SeqOp::ExtendFromWithin { .. })
+                    && i < 2)
                 || (matches!(op, SeqOp::MakeAsciiLowercase { .. }) && i < 2);
             let source_arg = matches!(
                 op,
@@ -403,6 +449,7 @@ impl Checker<'_> {
                     | SeqOp::BytesEq
                     | SeqOp::EqIgnoreAsciiCase
                     | SeqOp::ExtendAsciiLowercase
+                    | SeqOp::ExtendReversed
             ) || (matches!(op, SeqOp::CopyFrom { .. }) && i == 1);
             if index_arg {
                 self.seq_by_value(method, a);
@@ -456,6 +503,7 @@ impl Checker<'_> {
                 self.expr(&a.expr, env, Usage::Own);
             }
         }
+        self.loans.truncate(loan_base);
         if op.fallible() {
             self.primitive_failure(env, span);
         }
@@ -466,6 +514,8 @@ impl Checker<'_> {
             | SeqOp::CopyFrom { total: true }
             | SeqOp::CopyWithin { total: true }
             | SeqOp::MakeAsciiLowercase { total: true }
+            | SeqOp::FillRange { total: true }
+            | SeqOp::ExtendFromWithin { total: true }
             | SeqOp::BytesEq
             | SeqOp::EqIgnoreAsciiCase => Type::named("bool"),
             SeqOp::SumBe16 => u64_ty,

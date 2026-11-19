@@ -6,6 +6,7 @@
 //! skipped without buffering (§9); every other frame's payload must fit
 //! `max_payload`, checked from its length before any byte is retained.
 
+#[cfg(not(feature = "vesper-port"))]
 use vesper_warp::varint;
 
 use crate::error::Code;
@@ -108,6 +109,7 @@ pub struct Settings {
 impl Settings {
     /// Parses a SETTINGS payload. Unknown and reserved identifiers are
     /// ignored; HTTP/2 identifiers and duplicates are errors.
+    #[cfg(not(feature = "vesper-port"))]
     pub fn parse(payload: &[u8]) -> Result<Self, FrameError> {
         let mut s = Self::default();
         let mut seen: Vec<u64> = Vec::new();
@@ -154,7 +156,20 @@ impl Settings {
         Ok(s)
     }
 
+    /// Parses a SETTINGS payload (the Vesper build).
+    #[cfg(feature = "vesper-port")]
+    pub fn parse(payload: &[u8]) -> Result<Self, FrameError> {
+        port::h3_settings_parse(payload)
+    }
+
+    /// The SETTINGS frame (the Vesper build).
+    #[cfg(feature = "vesper-port")]
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        written(out, port::h3_settings_encode(*self));
+    }
+
     /// The SETTINGS payload, with one reserved identifier as grease.
+    #[cfg(not(feature = "vesper-port"))]
     pub fn encode(&self, out: &mut Vec<u8>) {
         let mut payload = Vec::new();
         for (id, value) in [
@@ -198,6 +213,7 @@ impl Settings {
 }
 
 /// Appends a varint (values above 2^62 - 1 are a caller bug).
+#[cfg(not(feature = "vesper-port"))]
 pub fn put_varint(out: &mut Vec<u8>, value: u64) {
     let mut buf = [0u8; 8];
     let n = varint::encode(value, &mut buf).expect("value fits a varint");
@@ -205,6 +221,7 @@ pub fn put_varint(out: &mut Vec<u8>, value: u64) {
 }
 
 /// Appends a frame header and payload.
+#[cfg(not(feature = "vesper-port"))]
 pub fn write_frame(out: &mut Vec<u8>, ty: u64, payload: &[u8]) {
     put_varint(out, ty);
     put_varint(out, payload.len() as u64);
@@ -212,12 +229,14 @@ pub fn write_frame(out: &mut Vec<u8>, ty: u64, payload: &[u8]) {
 }
 
 /// Appends a DATA frame header for a payload of `len` bytes.
+#[cfg(not(feature = "vesper-port"))]
 pub fn write_data_header(out: &mut Vec<u8>, len: usize) {
     put_varint(out, DATA);
     put_varint(out, len as u64);
 }
 
 /// Appends a frame whose payload is one varint (GOAWAY, MAX_PUSH_ID, ...).
+#[cfg(not(feature = "vesper-port"))]
 pub fn write_varint_frame(out: &mut Vec<u8>, ty: u64, value: u64) {
     let mut payload = Vec::with_capacity(8);
     put_varint(&mut payload, value);
@@ -268,6 +287,7 @@ impl Frame {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
     Header,
@@ -285,6 +305,7 @@ enum State {
     Opaque,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Incremental frame decoder for one stream.
 #[derive(Debug)]
 pub struct FrameReader {
@@ -298,6 +319,7 @@ pub struct FrameReader {
     webtransport: bool,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 impl FrameReader {
     pub fn new(max_payload: usize) -> Self {
         Self {
@@ -437,6 +459,7 @@ impl FrameReader {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn single_varint(payload: &[u8]) -> Result<u64, FrameError> {
     match varint::decode(payload) {
         Ok((v, n)) if n == payload.len() => Ok(v),
@@ -444,6 +467,7 @@ fn single_varint(payload: &[u8]) -> Result<u64, FrameError> {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn parse_payload(ty: u64, payload: Vec<u8>) -> Result<Frame, FrameError> {
     Ok(match ty {
         HEADERS => Frame::Headers(payload),
@@ -461,7 +485,127 @@ fn parse_payload(ty: u64, payload: Vec<u8>) -> Result<Frame, FrameError> {
 
 /// Reads the stream type at the start of a unidirectional stream.
 pub fn stream_type(buf: &[u8]) -> Option<(u64, usize)> {
-    varint::decode(buf).ok()
+    vesper_warp::varint::decode(buf).ok()
+}
+
+// ---------------------------------------------------------------------
+// The Vesper build (port wave P3b lane 5, #1067): the writers and the
+// reader forward to vesper/src/frame.ves through the binding.
+// ---------------------------------------------------------------------
+
+#[cfg(feature = "vesper-port")]
+use crate::qpack::port::binding as port;
+
+/// The bytes a port writer returned: empty when a value does not fit a
+/// varint, which is a caller bug.
+#[cfg(feature = "vesper-port")]
+pub(crate) fn written(out: &mut Vec<u8>, bytes: Vec<u8>) {
+    assert!(!bytes.is_empty(), "value fits a varint");
+    out.extend_from_slice(&bytes);
+}
+
+/// Appends a varint (values above 2^62 - 1 are a caller bug).
+#[cfg(feature = "vesper-port")]
+pub fn put_varint(out: &mut Vec<u8>, value: u64) {
+    written(out, port::h3_put_varint(value));
+}
+
+/// Appends a frame header and payload.
+#[cfg(feature = "vesper-port")]
+pub fn write_frame(out: &mut Vec<u8>, ty: u64, payload: &[u8]) {
+    written(out, port::h3_record_header(ty, payload.len() as u64));
+    out.extend_from_slice(payload);
+}
+
+/// Appends a DATA frame header for a payload of `len` bytes.
+#[cfg(feature = "vesper-port")]
+pub fn write_data_header(out: &mut Vec<u8>, len: usize) {
+    written(out, port::h3_record_header(DATA, len as u64));
+}
+
+/// Appends a frame whose payload is one varint (GOAWAY, MAX_PUSH_ID, ...).
+#[cfg(feature = "vesper-port")]
+pub fn write_varint_frame(out: &mut Vec<u8>, ty: u64, value: u64) {
+    written(out, port::h3_varint_frame(ty, value));
+}
+
+/// Incremental frame decoder for one stream (the Vesper build).
+#[cfg(feature = "vesper-port")]
+pub struct FrameReader {
+    core: port::FrameReaderCore,
+}
+
+#[cfg(feature = "vesper-port")]
+impl std::fmt::Debug for FrameReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FrameReader")
+            .field("buffered", &self.buffered())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+impl FrameReader {
+    pub fn new(max_payload: usize) -> Self {
+        Self {
+            core: port::FrameReaderCore::new(max_payload as u64, false),
+        }
+    }
+
+    /// A reader for a stream that may start with WEBTRANSPORT_STREAM.
+    pub fn with_webtransport(max_payload: usize) -> Self {
+        Self {
+            core: port::FrameReaderCore::new(max_payload as u64, true),
+        }
+    }
+
+    /// Bytes held: at most one frame header or one bounded payload.
+    pub fn buffered(&self) -> usize {
+        self.core.buffered() as usize
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.core.push(bytes);
+    }
+
+    /// The bytes held after a [`Frame::WebTransportStream`] signal.
+    pub fn take_rest(&mut self) -> Vec<u8> {
+        self.core.take_rest()
+    }
+
+    /// True between frames: the end of the stream is allowed here (§7.1).
+    pub fn at_boundary(&self) -> bool {
+        self.core.at_boundary()
+    }
+
+    /// The next frame or DATA chunk, or `None` until more bytes arrive.
+    pub fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
+        use crate::qpack::port::abi::FrameOut;
+        let out = self.core.next()?;
+        let bytes = || self.core.as_ref().out().as_slice().to_vec();
+        Ok(Some(match out {
+            FrameOut::None => return Ok(None),
+            FrameOut::Data => Frame::Data(bytes()),
+            FrameOut::Headers => Frame::Headers(bytes()),
+            FrameOut::SettingsFrame(s) => Frame::Settings(s),
+            FrameOut::GoAway(v) => Frame::GoAway(v),
+            FrameOut::CancelPush(v) => Frame::CancelPush(v),
+            FrameOut::MaxPushId(v) => Frame::MaxPushId(v),
+            FrameOut::PushPromise => Frame::PushPromise,
+            FrameOut::PriorityUpdateFrame(u) => Frame::PriorityUpdate(u),
+            FrameOut::WebTransportStream(id) => Frame::WebTransportStream(id),
+            FrameOut::Unknown(t) => Frame::Unknown(t),
+        }))
+    }
+
+    /// The stream ended: an error unless it ended between frames.
+    pub fn finish(&self) -> Result<(), FrameError> {
+        if self.at_boundary() {
+            Ok(())
+        } else {
+            Err(FrameError::Malformed)
+        }
+    }
 }
 
 #[cfg(test)]

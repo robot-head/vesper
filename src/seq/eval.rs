@@ -83,20 +83,39 @@ impl Runtime<'_> {
                 outcome => Ok(outcome),
             };
         }
-        if let SeqOp::BoundsGuard { inclusive } = op {
-            let lo = index(arg(0)?)?;
-            let hi = index(arg(1)?)?;
-            let mut inside = true;
-            for pair in args.get(2..).unwrap_or_default().chunks(2) {
-                let [s, offset] = pair else {
-                    return Err("bounds guard needs a sequence and an offset".into());
-                };
-                let len = u128::from(view(s)?.2 as u64);
-                let end = u128::from(index(offset)?) + u128::from(hi);
-                inside &= if inclusive { end < len } else { end <= len };
-            }
+        if let SeqOp::BoundsGuard { inclusive, form } = op {
+            let lo = u128::from(index(arg(0)?)?);
+            let hi = u128::from(index(arg(1)?)?);
+            let len = u128::from(view(arg(2)?)?.2 as u64);
+            let (plus, minus) = (usize::from(form.plus), usize::from(form.minus));
+            let terms = args
+                .get(3..3 + plus + minus)
+                .ok_or("bounds guard lacks an index term")?;
+            let ok = match args.get(3 + plus + minus) {
+                Some(Value::Bool(ok)) => *ok,
+                Some(_) => return Err("bounds guard needs a bool".into()),
+                None => true,
+            };
+            let (plus, minus) = terms.split_at(plus);
+            let sum = |vs: &[Value]| -> Result<u128, String> {
+                vs.iter()
+                    .try_fold(0u128, |acc, v| Ok(acc + u128::from(index(v)?)))
+            };
+            let (plus, minus) = (sum(plus)?, sum(minus)?);
             let empty = if inclusive { lo > hi } else { lo >= hi };
-            return Ok(V(Value::Bool(empty || inside)));
+            let last = if inclusive { hi } else { hi.saturating_sub(1) };
+            // The index at both ends of the range, exactly; a sum that does
+            // not fit 64 bits fails the guard, as the native guard's
+            // overflow tests do.
+            let fits = |i: u128| {
+                let (p, n) = if form.negated {
+                    (plus, minus + i)
+                } else {
+                    (plus + i, minus)
+                };
+                p <= u128::from(u64::MAX) && n <= u128::from(u64::MAX) && p >= n && p - n < len
+            };
+            return Ok(V(Value::Bool(ok && (empty || (fits(lo) && fits(last))))));
         }
         Ok(match op {
             SeqOp::New => V(Value::Seq(Rc::new(RefCell::new(Vec::new())))),
@@ -213,6 +232,16 @@ impl Runtime<'_> {
                     len,
                 })
             }
+            SeqOp::Vector(io) => {
+                let (cell, start, len) = view(arg(0)?)?;
+                let at = index(arg(1)?)?;
+                let mut items = cell.borrow_mut();
+                match crate::vector::slice_io(io, &mut items[start..start + len], at, args.get(2))?
+                {
+                    Some(v) => V(v),
+                    None => OutOfBounds,
+                }
+            }
             SeqOp::CopyFrom { total } => {
                 let (cell, start, len) = view(arg(0)?)?;
                 let at = index(arg(1)?)?;
@@ -264,6 +293,70 @@ impl Runtime<'_> {
                 let (cell, start, len) = view(arg(0)?)?;
                 let value = arg(1)?.clone();
                 cell.borrow_mut()[start..start + len].fill(value);
+                V(Value::Tuple(vec![]))
+            }
+            SeqOp::Resize => {
+                let n = usize::try_from(index(arg(1)?)?)
+                    .map_err(|_| "ChunkSeq::resize overflows the address space")?;
+                let value = arg(2)?.clone();
+                let cell = seq(arg(0)?)?;
+                let mut items = cell.borrow_mut();
+                let len = items.len();
+                if n > len {
+                    items.try_reserve(n - len).map_err(
+                        |_| "ChunkSeq out of memory: resize overflows the address space",
+                    )?;
+                }
+                items.resize(n, value);
+                V(Value::Tuple(vec![]))
+            }
+            SeqOp::FillRange { total } => {
+                let (cell, start, len) = view(arg(0)?)?;
+                let lo = index(arg(1)?)?;
+                let hi = index(arg(2)?)?;
+                if lo > hi || hi > len as u64 {
+                    return Ok(if total {
+                        V(Value::Bool(false))
+                    } else {
+                        OutOfBounds
+                    });
+                }
+                let value = arg(3)?.clone();
+                cell.borrow_mut()[start + lo as usize..start + hi as usize].fill(value);
+                V(if total {
+                    Value::Bool(true)
+                } else {
+                    Value::Tuple(vec![])
+                })
+            }
+            SeqOp::ExtendFromWithin { total } => {
+                let cell = seq(arg(0)?)?;
+                let lo = index(arg(1)?)?;
+                let hi = index(arg(2)?)?;
+                let len = cell.borrow().len();
+                if lo > hi || hi > len as u64 {
+                    return Ok(if total {
+                        V(Value::Bool(false))
+                    } else {
+                        OutOfBounds
+                    });
+                }
+                cell.borrow_mut()
+                    .extend_from_within(lo as usize..hi as usize);
+                V(if total {
+                    Value::Bool(true)
+                } else {
+                    Value::Tuple(vec![])
+                })
+            }
+            SeqOp::ExtendReversed => {
+                let (src, start, len) = view(arg(1)?)?;
+                let items: Vec<Value> = src.borrow()[start..start + len]
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .collect();
+                seq(arg(0)?)?.borrow_mut().extend(items);
                 V(Value::Tuple(vec![]))
             }
             SeqOp::Wide(wide) => return self.wide_op(wide, &args, site),

@@ -1,0 +1,130 @@
+[package]
+name = "vesper-hybrid"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Hybrid Stage 2 compiler: the default vesper CLI with compiler modules swapped for Vesper objects (non-default)"
+build = "build.rs"
+publish = false
+
+# Self-hosting SH0 lane 1 (#1123). This is a second, non-default build of the
+# compiler. Its binary is the default CLI (src/main.rs of the root package,
+# included unchanged) with each swappable module's function table replaced
+# by a Vesper object that build.rs compiles with the default `vesper`
+# executable (vesper-port-harness), so Cargo sees no cycle. No feature of
+# the `vesper` library is involved, so resolver 2 has nothing to unify into
+# the default compiler. Design and recipe:
+# docs/parallel-results/self-host-hybrid-build.md.
+
+[[bin]]
+name = "vesper-hybrid"
+path = "src/main.rs"
+# The included CLI has its own unit tests; the root package runs them.
+test = false
+
+[features]
+# A deliberately wrong pilot module: the differential harness must fail
+# (tests/differential.rs, asserted by the Hybrid compiler workflow).
+divergent = []
+
+[dependencies]
+vesper = { path = "../.." }
+vesper-port-abi = { path = "../vesper-port-abi" }
+# Everything below is the root package's [dependencies], for the included
+# CLI sources; tests/manifest.rs keeps the lists in step.
+blake3 = "1.8"
+vesper-core = { path = "../vesper-core" }
+vesper-forge = { path = "../vesper-forge", default-features = false }
+vesper-simd = { path = "../vesper-simd" }
+vesper-lean-syntax = { path = "../vesper-lean-syntax" }
+vesper-syntax = { path = "../vesper-syntax" }
+vesper-highlight = { path = "../vesper-highlight", features = ["shot"] }
+vesper-span = { path = "../vesper-span" }
+vesper-lsp = { path = "../vesper-lsp" }
+vesper-diagnostics = { path = "../vesper-diagnostics" }
+vesper-fmt = { path = "../vesper-fmt" }
+vesper-lint = { path = "../vesper-lint" }
+# The compiler links the frozen Rust seed copy of vesper-bench (#1040).
+vesper-bench = { path = "../vesper-bench/seed", package = "vesper-bench-seed" }
+vesper-bench-pmu = { path = "../vesper-bench-pmu" }
+# The compiler links the frozen Rust seed copy (seed-copy rule, #906).
+vesper-grammar = { path = "../vesper-grammar/seed", package = "vesper-grammar-seed" }
+vesper-doc = { path = "../vesper-doc" }
+# The compiler links the frozen Rust seed copy, never the port-backed package
+# (seed-copy rule, docs/maintenance/porting-a-crate.md).
+vesper-beacon = { path = "../vesper-beacon/seed", package = "vesper-beacon-seed" }
+vesper-serde = { path = "../vesper-serde/seed", package = "vesper-serde-seed" }
+vesper-pulse = { path = "../vesper-pulse" }
+vesper-fiber-abi = { path = "../vesper-fiber-abi" }
+vesper-semver = { path = "../vesper-semver/seed", package = "vesper-semver-seed" }
+# The compiler links the frozen Rust seed copy of vesper-loom-calculus (#913).
+vesper-loom-calculus = { path = "../vesper-loom-calculus/seed", package = "vesper-loom-calculus-seed" }
+# The compiler links the frozen Rust seed copy of vesper-loom-solver (#914).
+vesper-loom-solver = { path = "../vesper-loom-solver/seed", package = "vesper-loom-solver-seed" }
+vesper-loom-trust = { path = "../vesper-loom-trust" }
+vesper-loom-admission = { path = "../vesper-loom-admission" }
+# The compiler links the frozen Rust seed copy of vesper-loom-audit (#1039).
+vesper-loom-audit = { path = "../vesper-loom-audit/seed", package = "vesper-loom-audit-seed" }
+vesper-loom-cas = { path = "../vesper-loom-cas" }
+vesper-pact = { path = "../vesper-pact/seed", package = "vesper-pact-seed" }
+vesper-pact-binding = { path = "../vesper-pact-binding" }
+# Integration B (#136): wave-five verifiers and tools wired into the CLI.
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-aegis (#1043).
+vesper-aegis = { path = "../vesper-aegis/seed", package = "vesper-aegis-seed" }
+vesper-chrono = { path = "../vesper-chrono" }
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-crucible (#915).
+vesper-crucible = { path = "../vesper-crucible/seed", package = "vesper-crucible-seed" }
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-ebpf (#1041).
+vesper-ebpf = { path = "../vesper-ebpf/seed", package = "vesper-ebpf-seed" }
+vesper-kinetic = { path = "../vesper-kinetic/seed", package = "vesper-kinetic-seed" }
+vesper-ffi = { path = "../vesper-ffi" }
+vesper-migrate = { path = "../vesper-migrate" }
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-resonance (#1071).
+vesper-resonance = { path = "../vesper-resonance/seed", package = "vesper-resonance-seed" }
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-silicon (#1042).
+vesper-silicon = { path = "../vesper-silicon/seed", package = "vesper-silicon-seed" }
+vesper-vault = { path = "../vesper-vault" }
+# Source Strata regions (wave seven lane 29) run on the host region allocator.
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-alloc.
+vesper-alloc = { path = "../vesper-alloc/seed", package = "vesper-alloc-seed" }
+# Source tensor types (wave eight lane 10) evaluate on the host kernels.
+vesper-tensor = { path = "../vesper-tensor/seed", package = "vesper-tensor-seed" }
+ariadne = "0.5"
+petgraph = "0.8"
+egg = "0.10"
+egglog = { version = "3", default-features = false }
+cranelift-codegen = { version = "0.125", features = ["arm64", "riscv64"] }
+cranelift-frontend = "0.125"
+cranelift-module = "0.125"
+cranelift-jit = "0.125"
+cranelift-object = "0.125"
+cranelift-native = "0.125"
+target-lexicon = "0.13"
+# Freestanding images (wave seven lane 27): read relocatable objects, write
+# the entry stub. Same version and features as vesper-ebpf.
+object = { version = "=0.37.3", default-features = false, features = ["write_core", "elf", "std", "read_core"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+salsa = "0.24"
+# Wasm target (wave-seven lane 25): the versions Wasmtime 50 already pulls in.
+wasm-encoder = "=0.261.0"
+wit-component = "=0.261.0"
+wit-parser = "=0.261.0"
+
+[target.'cfg(unix)'.dependencies]
+getrandom = "0.4"
+libc = "0.2"
+
+# Wave-seven lane 24 (#347): locates the Visual Studio link.exe and its LIB
+# paths for `vesper build` on Windows (already locked through cc).
+[target.'cfg(windows)'.dependencies]
+find-msvc-tools = "=0.1.15"
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness" }

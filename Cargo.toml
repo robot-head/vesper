@@ -71,6 +71,7 @@ members = [
     "crates/vesper-aegis",
     "crates/vesper-aegis/seed",
     "crates/vesper-resonance",
+    "crates/vesper-resonance/seed",
     "crates/vesper-warp-tls",
     "crates/vesper-silicon",
     "crates/vesper-silicon/seed",
@@ -83,6 +84,7 @@ members = [
     "crates/vesper-nexus",
     "crates/vesper-vault",
     "crates/vesper-kinetic",
+    "crates/vesper-kinetic/seed",
     "crates/vesper-prism-h3",
     "crates/vesper-aura-gtk",
     "crates/vesper-gpu-compute",
@@ -95,7 +97,11 @@ members = [
     "crates/vesper-port-harness",
     "crates/vesper-port-build",
     "crates/vesper-port-pilot",
+    "crates/vesper-hybrid",
+    "crates/vesper-std-driver",
+    "crates/vesper-std-host",
     "experiments/native-pulse",
+    "crates/vesper-cranelift-sys",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
 default-members = [
@@ -167,6 +173,7 @@ default-members = [
     "crates/vesper-aegis",
     "crates/vesper-aegis/seed",
     "crates/vesper-resonance",
+    "crates/vesper-resonance/seed",
     "crates/vesper-warp-tls",
     "crates/vesper-silicon",
     "crates/vesper-silicon/seed",
@@ -179,6 +186,7 @@ default-members = [
     "crates/vesper-nexus",
     "crates/vesper-vault",
     "crates/vesper-kinetic",
+    "crates/vesper-kinetic/seed",
     "crates/vesper-prism-h3",
     "crates/vesper-aura-gtk",
     "crates/vesper-gpu-compute",
@@ -191,6 +199,8 @@ default-members = [
     "crates/vesper-port-harness",
     "crates/vesper-port-build",
     "crates/vesper-port-pilot",
+    "crates/vesper-std-driver",
+    "crates/vesper-std-host",
     "experiments/native-pulse",
 ]
 
@@ -283,10 +293,12 @@ vesper-crucible = { path = "crates/vesper-crucible/seed", package = "vesper-cruc
 # The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
 # port is the package crates/vesper-ebpf (#1041).
 vesper-ebpf = { path = "crates/vesper-ebpf/seed", package = "vesper-ebpf-seed" }
-vesper-kinetic = { path = "crates/vesper-kinetic" }
+vesper-kinetic = { path = "crates/vesper-kinetic/seed", package = "vesper-kinetic-seed" }
 vesper-ffi = { path = "crates/vesper-ffi" }
 vesper-migrate = { path = "crates/vesper-migrate" }
-vesper-resonance = { path = "crates/vesper-resonance" }
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-resonance (#1071).
+vesper-resonance = { path = "crates/vesper-resonance/seed", package = "vesper-resonance-seed" }
 # The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
 # port is the package crates/vesper-silicon (#1042).
 vesper-silicon = { path = "crates/vesper-silicon/seed", package = "vesper-silicon-seed" }
@@ -321,6 +333,9 @@ wit-parser = "=0.261.0"
 
 [dev-dependencies]
 vesper-nexus = { path = "crates/vesper-nexus" }
+# The host shim of @vesper-std/fs, process and env (#1125), bound into the
+# JIT by tests/std_fs.rs, std_process.rs and std_env.rs.
+vesper-std-host = { path = "crates/vesper-std-host" }
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
 wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 
@@ -335,3 +350,13 @@ find-msvc-tools = "=0.1.15"
 
 [profile.release]
 lto = "thin"
+
+# The compiler the CI port harness compiles every port with (#1103):
+# optimized, but with release's thin LTO off so it builds quickly, and with
+# debug assertions and overflow checks kept on like the dev profile.
+[profile.port-compiler]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug-assertions = true
+overflow-checks = true

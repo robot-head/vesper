@@ -1,0 +1,260 @@
+// Module coloring of @vesper/kinetic (see lib.ves): the deterministic
+// greedy constraint colouring of src/coloring.rs (`Colorer::color` and
+// `MultiColorer::color`). The Rust wrapper owns every buffer and lends it
+// here sized for the call, so colouring allocates nothing.
+use self::{
+    ColoringError
+};
+use self::util::{
+    g32,
+    g64,
+    g8,
+    inc,
+    shl_u64
+};
+use @vesper-std/sort::keyed::{
+    sort_by_key
+};
+
+fn raise_coloring(e: ColoringError) -> u64 eff [Fail[ColoringError]] {
+    Fail::raise(e);
+    0
+}
+
+// Buckets the visiting order by colour (`used` colours), keeping visiting
+// order inside each colour: `offsets[0..=used]` and `sorted[0..n]`.
+fn bucket(
+    in order: Slice[u32],
+    in colors: Slice[u8],
+    n: u64,
+    used: u64,
+    inout offsets: Slice[u32],
+    inout sorted: Slice[u32]
+) {
+    let mut len: u64 = 0;
+    for color in 0..used {
+        offsets.try_set(color, wrapping_u32(len));
+        for k in 0..n {
+            let i = g32(in order, k);
+            if widen_u64(g8(in colors, widen_u64(i))) == color {
+                sorted.try_set(len, i);
+                len = inc(len);
+            }
+        }
+    }
+    offsets.try_set(used, wrapping_u32(len));
+}
+
+// Colorer::color over two-body constraints: `a[i]` and `b[i]`, where `b[i]`
+// above u32::MAX is None. Returns the colour count.
+pub fn color_pairs(
+    in a: Slice[u32],
+    in b: Slice[u64],
+    capacity: u64,
+    inout masks: Slice[u64],
+    inout keys: Slice[u64],
+    inout order: Slice[u32],
+    inout colors: Slice[u8],
+    inout offsets: Slice[u32],
+    inout sorted: Slice[u32]
+) -> u64 eff [Fail[ColoringError]] {
+    let n = a.len();
+    if n > capacity || n > 0xffffffff {
+        return raise_coloring(
+            ColoringError::CapacityExceeded {
+                constraints: wrapping_usize(n),
+                capacity: wrapping_usize(capacity)
+            }
+        );
+    }
+    let bodies = masks.len();
+    for c in 0..n {
+        let ca = g32(in a, c);
+        let cb = g64(in b, c);
+        if widen_u64(ca) >= bodies {
+            return raise_coloring(
+                ColoringError::BodyOutOfRange {
+                    constraint: wrapping_usize(c),
+                    body: ca
+                }
+            );
+        }
+        if cb <= 0xffffffff && cb >= bodies {
+            return raise_coloring(
+                ColoringError::BodyOutOfRange {
+                    constraint: wrapping_usize(c),
+                    body: wrapping_u32(cb)
+                }
+            );
+        }
+        if cb == widen_u64(ca) {
+            return raise_coloring(
+                ColoringError::SelfConstraint {
+                    constraint: wrapping_usize(c),
+                    body: ca
+                }
+            );
+        }
+        // key(): (min, max) of the pair, or (a, a) against static geometry.
+        let wa = widen_u64(ca);
+        let mut lo = wa;
+        let mut hi = wa;
+        if cb <= 0xffffffff {
+            if cb < wa {
+                lo = cb;
+            } else {
+                hi = cb;
+            }
+        }
+        keys.try_set(c, (lo << 32) | hi);
+        order.try_set(c, wrapping_u32(c));
+    }
+    for i in 0..bodies {
+        masks.try_set(i, 0);
+    }
+    sort_by_key(in keys[0..n], inout order[0..n]);
+    let mut used: u64 = 0;
+    for k in 0..n {
+        let i = g32(in order, k);
+        let wi = widen_u64(i);
+        let ca = widen_u64(g32(in a, wi));
+        let cb = g64(in b, wi);
+        let mut busy = g64(in masks, ca);
+        if cb <= 0xffffffff {
+            busy = busy | g64(in masks, cb);
+        }
+        let free = ~busy;
+        if free == 0 {
+            return raise_coloring(
+                ColoringError::TooManyColors {
+                    constraint: wrapping_usize(wi)
+                }
+            );
+        }
+        let color = widen_u64(trailing_zeros_u64(free));
+        let bit = shl_u64(1, wrapping_u32(color));
+        masks.try_set(ca, g64(in masks, ca) | bit);
+        if cb <= 0xffffffff {
+            masks.try_set(cb, g64(in masks, cb) | bit);
+        }
+        colors.try_set(wi, wrapping_u8(color));
+        if inc(color) > used {
+            used = inc(color);
+        }
+    }
+    bucket(in order, in colors, n, used, inout offsets, inout sorted);
+    used
+}
+
+// MultiColorer::color: constraint `i` touches
+// `bodies[offsets[i]..offsets[i + 1]]`. Returns the colour count.
+pub fn color_sets(
+    in bodies: Slice[u32],
+    in offs: Slice[u32],
+    capacity: u64,
+    inout masks: Slice[u64],
+    inout keys: Slice[u64],
+    inout order: Slice[u32],
+    inout colors: Slice[u8],
+    inout offsets: Slice[u32],
+    inout sorted: Slice[u32]
+) -> u64 eff [Fail[ColoringError]] {
+    let mut count: u64 = 0;
+    if offs.len() > 0 {
+        count = wrapping_sub(offs.len(), 1);
+    }
+    if count > capacity || count > 0xffffffff {
+        return raise_coloring(
+            ColoringError::CapacityExceeded {
+                constraints: wrapping_usize(count),
+                capacity: wrapping_usize(capacity)
+            }
+        );
+    }
+    if offs.len() > 0 && g32(in offs, 0) != 0 {
+        return raise_coloring(
+            ColoringError::BadArity {
+                constraint: 0
+            }
+        );
+    }
+    let n = masks.len();
+    let nb = bodies.len();
+    for i in 0..count {
+        let lo = widen_u64(g32(in offs, i));
+        let hi = widen_u64(g32(in offs, inc(i)));
+        if hi <= lo || wrapping_sub(hi, lo) > 4 || hi > nb {
+            return raise_coloring(
+                ColoringError::BadArity {
+                    constraint: wrapping_usize(i)
+                }
+            );
+        }
+        let mut min: u64 = 0xffffffff;
+        let mut max: u64 = 0;
+        for k in lo..hi {
+            let body = g32(in bodies, k);
+            let wb = widen_u64(body);
+            if wb >= n {
+                return raise_coloring(
+                    ColoringError::BodyOutOfRange {
+                        constraint: wrapping_usize(i),
+                        body: body
+                    }
+                );
+            }
+            for e in lo..k {
+                if g32(in bodies, e) == body {
+                    return raise_coloring(
+                        ColoringError::SelfConstraint {
+                            constraint: wrapping_usize(i),
+                            body: body
+                        }
+                    );
+                }
+            }
+            if wb < min {
+                min = wb;
+            }
+            if wb > max {
+                max = wb;
+            }
+        }
+        keys.try_set(i, (min << 32) | max);
+        order.try_set(i, wrapping_u32(i));
+    }
+    for i in 0..n {
+        masks.try_set(i, 0);
+    }
+    sort_by_key(in keys, inout order[0..count]);
+    let mut used: u64 = 0;
+    for k in 0..count {
+        let i = widen_u64(g32(in order, k));
+        let lo = widen_u64(g32(in offs, i));
+        let hi = widen_u64(g32(in offs, inc(i)));
+        let mut busy: u64 = 0;
+        for e in lo..hi {
+            busy = busy | g64(in masks, widen_u64(g32(in bodies, e)));
+        }
+        let free = ~busy;
+        if free == 0 {
+            return raise_coloring(
+                ColoringError::TooManyColors {
+                    constraint: wrapping_usize(i)
+                }
+            );
+        }
+        let color = widen_u64(trailing_zeros_u64(free));
+        let bit = shl_u64(1, wrapping_u32(color));
+        for e in lo..hi {
+            let body = widen_u64(g32(in bodies, e));
+            masks.try_set(body, g64(in masks, body) | bit);
+        }
+        colors.try_set(i, wrapping_u8(color));
+        if inc(color) > used {
+            used = inc(color);
+        }
+    }
+    bucket(in order, in colors, count, used, inout offsets, inout sorted);
+    used
+}

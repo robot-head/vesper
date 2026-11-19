@@ -60,10 +60,12 @@ pub struct ResponseHead {
     pub content_length: Option<u64>,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn token(b: u8) -> bool {
     b.is_ascii_lowercase() || b.is_ascii_digit() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn check_regular(f: &Field) -> Result<(), MessageError> {
     if f.name.is_empty() || !f.name.iter().copied().all(token) {
         return Err(MessageError::InvalidFieldName);
@@ -84,10 +86,12 @@ fn check_regular(f: &Field) -> Result<(), MessageError> {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn utf8(v: &[u8]) -> Result<String, MessageError> {
     String::from_utf8(v.to_vec()).map_err(|_| MessageError::InvalidFieldValue)
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn content_length(fields: &[Field]) -> Result<Option<u64>, MessageError> {
     let mut found: Option<u64> = None;
     for f in fields.iter().filter(|f| f.name == b"content-length") {
@@ -106,6 +110,7 @@ fn content_length(fields: &[Field]) -> Result<Option<u64>, MessageError> {
     Ok(found)
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Splits pseudo-headers (which must come first) from regular fields.
 fn split(fields: Vec<Field>) -> Result<(Vec<Field>, Vec<Field>), MessageError> {
     let mut pseudo = Vec::new();
@@ -127,6 +132,7 @@ fn split(fields: Vec<Field>) -> Result<(Vec<Field>, Vec<Field>), MessageError> {
     Ok((pseudo, regular))
 }
 
+#[cfg(not(feature = "vesper-port"))]
 pub fn parse_request(fields: Vec<Field>) -> Result<RequestHead, MessageError> {
     let (pseudo, fields) = split(fields)?;
     let (mut method, mut scheme, mut authority, mut path, mut protocol) =
@@ -201,6 +207,7 @@ pub fn parse_request(fields: Vec<Field>) -> Result<RequestHead, MessageError> {
     })
 }
 
+#[cfg(not(feature = "vesper-port"))]
 pub fn parse_response(fields: Vec<Field>) -> Result<ResponseHead, MessageError> {
     let (pseudo, fields) = split(fields)?;
     let mut status = None;
@@ -229,6 +236,7 @@ pub fn parse_response(fields: Vec<Field>) -> Result<ResponseHead, MessageError> 
     })
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Trailers carry no pseudo-headers (§4.3).
 pub fn check_trailers(fields: &[Field]) -> Result<(), MessageError> {
     for f in fields {
@@ -238,6 +246,76 @@ pub fn check_trailers(fields: &[Field]) -> Result<(), MessageError> {
         check_regular(f)?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------
+// The Vesper build (port wave P3b lane 5, #1067): vesper/src/message.ves
+// validates the flattened field list and returns byte ranges.
+// ---------------------------------------------------------------------
+
+#[cfg(feature = "vesper-port")]
+use crate::qpack::port::{abi::Span, binding as port};
+
+/// The field list as the port takes it: the bytes, and three words per
+/// field (name length, value length, sensitive).
+#[cfg(feature = "vesper-port")]
+fn flatten(fields: &[Field]) -> (Vec<u8>, Vec<u64>) {
+    let mut bytes = Vec::with_capacity(fields.iter().map(|f| f.name.len() + f.value.len()).sum());
+    let mut meta = Vec::with_capacity(fields.len() * 3);
+    for f in fields {
+        bytes.extend_from_slice(&f.name);
+        bytes.extend_from_slice(&f.value);
+        meta.extend_from_slice(&[
+            f.name.len() as u64,
+            f.value.len() as u64,
+            u64::from(f.sensitive),
+        ]);
+    }
+    (bytes, meta)
+}
+
+/// A range the port checked as UTF-8.
+#[cfg(feature = "vesper-port")]
+fn text(bytes: &[u8], s: Span) -> String {
+    String::from_utf8(bytes[s.lo as usize..s.hi as usize].to_vec()).expect("the port checked UTF-8")
+}
+
+#[cfg(feature = "vesper-port")]
+pub fn parse_request(mut fields: Vec<Field>) -> Result<RequestHead, MessageError> {
+    let (bytes, meta) = flatten(&fields);
+    let parts = port::h3_parse_request(&bytes, &meta)?;
+    fields.drain(..parts.pseudo as usize);
+    Ok(RequestHead {
+        method: text(&bytes, parts.method),
+        scheme: text(&bytes, parts.scheme),
+        authority: parts.authority.map(|s| text(&bytes, s)),
+        path: text(&bytes, parts.path),
+        protocol: parts.protocol.map(|s| text(&bytes, s)),
+        fields,
+        content_length: parts.content_length,
+    })
+}
+
+#[cfg(feature = "vesper-port")]
+pub fn parse_response(mut fields: Vec<Field>) -> Result<ResponseHead, MessageError> {
+    let (bytes, meta) = flatten(&fields);
+    let parts = port::h3_parse_response(&bytes, &meta)?;
+    fields.drain(..parts.pseudo as usize);
+    Ok(ResponseHead {
+        status: parts.status,
+        fields,
+        content_length: parts.content_length,
+    })
+}
+
+/// Trailers carry no pseudo-headers (§4.3).
+#[cfg(feature = "vesper-port")]
+pub fn check_trailers(fields: &[Field]) -> Result<(), MessageError> {
+    let (bytes, meta) = flatten(fields);
+    match port::h3_check_trailers(&bytes, &meta) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

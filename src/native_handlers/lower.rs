@@ -792,7 +792,9 @@ impl<'l, 'w, 'f, M: Module> FnCx<'l, 'w, 'f, M> {
             ExprKind::Loop(_) | ExprKind::For { .. } | ExprKind::Range { .. } => {
                 unsupported("loops")
             }
-            ExprKind::Break(_) | ExprKind::Return(_) => unsupported("break and return"),
+            ExprKind::Break(_) | ExprKind::Continue | ExprKind::Return(_) => {
+                unsupported("break, continue and return")
+            }
             ExprKind::Handle {
                 effect,
                 state,

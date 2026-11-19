@@ -8,14 +8,15 @@ autobenches = false
 build = false
 
 # The seed-copy rule (port wave P1 lane 2, #899): every crate inside
-# `cargo tree -p vesper -e normal,build` links this package, the Rust build of
-# ../src, under the library name `vesper_simpulse`, with
+# `cargo tree -p vesper -e normal,build` links this package, the shared API in
+# ../src/lib.rs over the frozen Rust Simulator in src/reference.rs, under the
+# library name `vesper_simpulse`, with
 # `vesper-simpulse = { path = ".../seed", package = "vesper-simpulse-seed" }`.
-# Crates outside the closure use the port-backed package `vesper-simpulse`
-# (lane 5, #902). The Rust code takes bug fixes only until self-hosting Stage 2.
+# Crates outside the closure use the package `vesper-simpulse`, whose only
+# build is the Vesper port (lane 5, #902; Rust removed there in #1085). The Rust code takes bug fixes only until self-hosting Stage 2.
 [lib]
 name = "vesper_simpulse"
-path = "../src/lib.rs"
+path = "src/lib.rs"
 
 [[test]]
 name = "kernel"

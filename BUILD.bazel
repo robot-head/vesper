@@ -1,4 +1,5 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "vesper_package")
 load("//tools/bazel/tests:ci_analysis_test.bzl", "compile_inputs_test", "environment_test", "runfiles_test")
 
 exports_files([
@@ -71,6 +72,8 @@ vesper_crate(
         "tools/resource-model42/KernelSnapshot.lean",
         "docs/rfcs/resource-model42-source-manifest.json",
         "lean/**",
+        # tests/std_hash.rs includes the Rust side of @vesper-std/hash-sys.
+        "packages/vesper-std/hash/sys/shim.rs",
     ],
     remote_tests = ["test/self_host_front_end"],
     test_data_by_target = {
@@ -92,6 +95,18 @@ vesper_crate(
             ":files",
             "//crates/vesper-alloc:files",
         ],
+        # @vesper-std/sort, core and bytes (#1096) as a driver's dependencies.
+        "test/std_sort": [":files"],
+        # @vesper-std/fs, process and env (#1125): drivers over the packages
+        # and their .vsys imports.
+        "test/std_env": [":files"],
+        "test/std_fs": [":files"],
+        "test/std_process": [":files"],
+        # @vesper-std graph, intern, arena and hash (#1127) as a driver's dependencies.
+        "test/std_arena": [":files"],
+        "test/std_graph": [":files"],
+        "test/std_hash": [":files"],
+        "test/std_intern": [":files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
         "test/self_host_front_end": glob([
@@ -405,6 +420,15 @@ filegroup(
 )
 
 # Narrow slices of the root package for members that read them.
+# @vesper-std/sort (#1096) as a path dependency of port packages
+# (packages/ has no BUILD.bazel of its own).
+vesper_package(
+    name = "std_sort_package",
+    srcs = glob(["packages/vesper-std/sort/src/**/*.ves"]),
+    manifest = "packages/vesper-std/sort/Loom.toml",
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "examples",
     srcs = glob(["examples/**"]),

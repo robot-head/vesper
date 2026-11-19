@@ -1,6 +1,6 @@
 //! Link the Vesper port in vesper/ and set cfg(vesper_port); see "Crates
 //! the compiler links" in docs/maintenance/porting-a-crate.md. The seed
-//! package (seed/) has no build script, so it builds the Rust code.
+//! package (seed/) has no build script: it builds its frozen Rust engine.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let port = vesper_port_harness::Port::new("loom_solver", "vesper").binding("port/binding.rs");

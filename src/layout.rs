@@ -43,6 +43,7 @@ impl Layout {
         seen: &mut BTreeSet<String>,
         depth: usize,
     ) -> Result<Self, String> {
+        let w = words();
         if depth > 128 {
             return Err(
                 "value layout exceeds 128 levels; use an owning indirection for recursive data"
@@ -98,13 +99,11 @@ impl Layout {
                     offset,
                     layout: Box::new(l.clone()),
                 });
-                offset = offset
-                    .checked_add(l.size as i32)
-                    .ok_or("value layout is too large")?;
+                offset = (w.next_offset)(offset, l.size).ok_or("value layout is too large")?;
             }
             return Ok(Self {
                 ty: ty.clone(),
-                size: (offset as u32).max(8),
+                size: (w.product_size)(offset),
                 kind: LayoutKind::Product(fields),
             });
         }
@@ -123,7 +122,7 @@ impl Layout {
                         .map(|i| LayoutField {
                             name: format!("${i}"),
                             ty: word.ty.clone(),
-                            offset: (i * 8) as i32,
+                            offset: (w.word_offset)(i),
                             layout: Box::new(word.clone()),
                         })
                         .collect(),
@@ -150,7 +149,7 @@ impl Layout {
                         .map(|(i, name)| LayoutField {
                             name: (*name).into(),
                             ty: word.ty.clone(),
-                            offset: (i * 8) as i32,
+                            offset: (w.word_offset)(i as u32),
                             layout: Box::new(word.clone()),
                         })
                         .collect(),
@@ -182,7 +181,7 @@ impl Layout {
         let mut variants = vec![];
         let mut size = 8;
         for v in &a.variants {
-            let mut offset = if a.is_enum { 8 } else { 0 };
+            let mut offset = (w.first_offset)(a.is_enum);
             let mut fields = vec![];
             for f in &v.fields {
                 let t = substitute(&f.ty, &vars);
@@ -193,11 +192,9 @@ impl Layout {
                     offset,
                     layout: Box::new(l.clone()),
                 });
-                offset = offset
-                    .checked_add(l.size as i32)
-                    .ok_or("value layout is too large")?;
+                offset = (w.next_offset)(offset, l.size).ok_or("value layout is too large")?;
             }
-            size = size.max(offset as u32);
+            size = (w.enum_size)(size, offset);
             variants.push(LayoutVariant {
                 name: v.name.clone(),
                 fields,
@@ -235,6 +232,47 @@ impl Layout {
             _ => None,
         }
     }
+}
+
+/// The word arithmetic of [`Layout::of`], as a function table: the swap-in
+/// point of this module for the hybrid Stage 2 build (`crates/vesper-hybrid`,
+/// self-hosting SH0 lane 1, #1123), which installs a Vesper object's
+/// functions here before the CLI starts. Nothing in the default compiler
+/// installs a table, so it always runs [`RUST_WORD_LAYOUT`].
+#[derive(Debug, Clone, Copy)]
+pub struct WordLayout {
+    /// Offset of the first field: after the tag word of an enum, else 0.
+    pub first_offset: fn(is_enum: bool) -> i32,
+    /// Offset after a field of `size` bytes placed at `offset`, or `None`
+    /// when it does not fit in an `i32`.
+    pub next_offset: fn(offset: i32, size: u32) -> Option<i32>,
+    /// Size of a product whose last field ends at `end`: at least one word.
+    pub product_size: fn(end: i32) -> u32,
+    /// Size of an enum so far (`size`) after a variant ending at `end`.
+    pub enum_size: fn(size: u32, end: i32) -> u32,
+    /// Offset of word `index` of a packed run of words.
+    pub word_offset: fn(index: u32) -> i32,
+}
+
+/// The Rust implementation of [`WordLayout`], the default.
+pub const RUST_WORD_LAYOUT: WordLayout = WordLayout {
+    first_offset: |is_enum| if is_enum { 8 } else { 0 },
+    next_offset: |offset, size| offset.checked_add(size as i32),
+    product_size: |end| (end as u32).max(8),
+    enum_size: |size, end| size.max(end as u32),
+    word_offset: |index| (index * 8) as i32,
+};
+
+static WORD_LAYOUT: std::sync::OnceLock<WordLayout> = std::sync::OnceLock::new();
+
+/// Replace [`RUST_WORD_LAYOUT`] for the rest of the process. Only the first
+/// call takes effect; a later one returns its table back.
+pub fn install_word_layout(table: WordLayout) -> Result<(), WordLayout> {
+    WORD_LAYOUT.set(table)
+}
+
+fn words() -> &'static WordLayout {
+    WORD_LAYOUT.get().unwrap_or(&RUST_WORD_LAYOUT)
 }
 
 pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::Value, String> {

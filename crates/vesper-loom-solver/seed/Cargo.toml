@@ -9,15 +9,16 @@ autobenches = false
 build = false
 
 # The seed-copy rule (port wave P1 lane 2, #899): the compiler links this
-# package, the Rust build of ../src, under the library name
-# `vesper_loom_solver`. Crates inside `cargo tree -p vesper -e normal,build`
-# depend on it with
+# package, the shared API in ../src/lib.rs over the frozen Rust engine in
+# src/engine.rs, under the library name `vesper_loom_solver`. Crates inside
+# `cargo tree -p vesper -e normal,build` depend on it with
 # `vesper-loom-solver = { path = ".../seed", package = "vesper-loom-solver-seed" }`;
-# every other crate uses the port-backed package `vesper-loom-solver`. The
-# Rust code takes bug fixes only until self-hosting Stage 2.
+# every other crate uses the package `vesper-loom-solver`, whose only build is
+# the Vesper port. The Rust code takes bug fixes only until self-hosting
+# Stage 2.
 [lib]
 name = "vesper_loom_solver"
-path = "../src/lib.rs"
+path = "src/lib.rs"
 
 [[test]]
 name = "locked"

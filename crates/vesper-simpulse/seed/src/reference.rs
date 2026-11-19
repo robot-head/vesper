@@ -1,7 +1,8 @@
 //! The Rust build of [`Simulator`] (the model the Vesper port in
-//! vesper/src/lib.ves follows). The seed package `vesper-simpulse-seed`
-//! builds this module; it takes bug fixes only (port wave P1 lane 5, #902).
-use super::*;
+//! vesper/src/lib.ves follows), frozen for the compiler's closure: only the
+//! seed package `vesper-simpulse-seed` builds it, and it takes bug fixes only
+//! (port wave P1 lane 5, #902) until self-hosting Stage 2.
+use crate::*;
 use std::collections::{BTreeMap, BTreeSet};
 
 struct Task<T> {

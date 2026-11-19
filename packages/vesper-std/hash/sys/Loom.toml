@@ -1,0 +1,8 @@
+[package]
+name = "@vesper-std/hash-sys"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Fail", "Alloc", "Ffi"]
+
+[dependencies]
+"@vesper-std/hash" = { version = "^0.1", path = ".." }

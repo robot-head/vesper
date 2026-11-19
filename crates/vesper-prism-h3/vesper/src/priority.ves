@@ -1,0 +1,601 @@
+// priority.rs: extensible priorities (RFC 9218). The `priority` field is a
+// Structured Field Dictionary (RFC 8941 §4.2.2), parsed only as far as the
+// `u` and `i` parameters need; PRIORITY_UPDATE frames; the §10 scheduler
+// order.
+
+use self::{
+    Priority,
+    PriorityUpdate,
+    FrameError
+};
+use self::int::{
+    inc,
+    byte,
+    word
+};
+use self::varint::{
+    vdec,
+    vput,
+    put_record
+};
+
+pub fn priority_update_request() -> u64 {
+    984832
+}
+
+pub fn priority_update_push() -> u64 {
+    984833
+}
+
+pub fn priority_default() -> Priority {
+    Priority {
+        urgency: 3,
+        incremental: false
+    }
+}
+
+// A bare item, reduced to what priorities need: kind 0 an integer (sign
+// and magnitude), 1 a boolean, 2 anything else.
+copy struct Item {
+    kind: u64,
+    neg: bool,
+    mag: u64,
+    flag: bool
+}
+
+fn other() -> Item {
+    Item {
+        kind: 2,
+        neg: false,
+        mag: 0,
+        flag: false
+    }
+}
+
+fn boolean(b: bool) -> Item {
+    Item {
+        kind: 1,
+        neg: false,
+        mag: 0,
+        flag: b
+    }
+}
+
+fn is_digit(c: u8) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn is_lower(c: u8) -> bool {
+    c >= 97 && c <= 122
+}
+
+fn is_alpha(c: u8) -> bool {
+    is_lower(c) || (c >= 65 && c <= 90)
+}
+
+fn is_alnum(c: u8) -> bool {
+    is_alpha(c) || is_digit(c)
+}
+
+// `_-.*` after a key's first character.
+fn key_extra(c: u8) -> bool {
+    c == 95 || c == 45 || c == 46 || c == 42
+}
+
+// `!#$%&'*+-.^_`|~:/` in a token.
+fn token_extra(c: u8) -> bool {
+    c
+        == 33
+        || (c >= 35 && c <= 39)
+        || c
+        == 42
+        || c
+        == 43
+        || c
+        == 45
+        || c
+        == 46
+        || c
+        == 94
+        || c
+        == 95
+        || c
+        == 96
+        || c
+        == 124
+        || c
+        == 126
+        || c
+        == 58
+        || c
+        == 47
+}
+
+// `+/=` in a byte sequence.
+fn b64_extra(c: u8) -> bool {
+    c == 43 || c == 47 || c == 61
+}
+
+fn at_is(in v: Slice[u8], at: u64, c: u8) -> bool {
+    match v.try_get(at) {
+        Option::Some(b) => b == c,
+        Option::None => false,
+    }
+}
+
+fn digit_at(in v: Slice[u8], at: u64) -> bool {
+    match v.try_get(at) {
+        Option::Some(b) => is_digit(b),
+        Option::None => false,
+    }
+}
+
+fn ows(in v: Slice[u8], at: u64) -> u64 {
+    let mut i = at;
+    loop {
+        if at_is(in v, i, 32) || at_is(in v, i, 9) {
+            i = inc(i);
+        } else {
+            return i;
+        }
+    }
+}
+
+fn sp(in v: Slice[u8], at: u64) -> u64 {
+    let mut i = at;
+    loop {
+        if at_is(in v, i, 32) {
+            i = inc(i);
+        } else {
+            return i;
+        }
+    }
+}
+
+// A key at `v[at]`: the offset after it, or `None`.
+fn key(in v: Slice[u8], at: u64) -> Option[u64] {
+    match v.try_get(at) {
+        Option::Some(c) => {
+            if !(is_lower(c) || c == 42) {
+                return Option::None;
+            }
+        }
+        Option::None => return Option::None,
+    }
+    let mut i = inc(at);
+    loop {
+        match v.try_get(i) {
+            Option::Some(c) => {
+                if is_lower(c) || is_digit(c) || key_extra(c) {
+                    i = inc(i);
+                } else {
+                    return Option::Some(i);
+                }
+            }
+            Option::None => return Option::Some(i),
+        }
+    }
+}
+
+copy struct Parsed {
+    item: Item,
+    end: u64
+}
+
+fn parsed(item: Item, end: u64) -> Option[Parsed] {
+    Option::Some(
+        Parsed {
+            item: item,
+            end: end
+        }
+    )
+}
+
+fn number(in v: Slice[u8], at: u64) -> Option[Parsed] {
+    let neg = at_is(in v, at, 45);
+    let digits = if neg {
+        inc(at)
+    } else {
+        at
+    };
+    let mut i = digits;
+    let mut mag: u64 = 0;
+    loop {
+        match v.try_get(i) {
+            Option::Some(c) => {
+                if !is_digit(c) {
+                    break;
+                }
+                mag = wrapping_add(wrapping_mul(mag, 10), widen_u64(wrapping_sub(c, 48)));
+                i = inc(i);
+            }
+            Option::None => break,
+        }
+    }
+    let int_digits = wrapping_sub(i, digits);
+    if int_digits == 0 {
+        return Option::None;
+    }
+    if at_is(in v, i, 46) {
+        if int_digits > 12 {
+            return Option::None;
+        }
+        let frac = inc(i);
+        let mut j = frac;
+        loop {
+            if digit_at(in v, j) {
+                j = inc(j);
+            } else {
+                break;
+            }
+        }
+        if j == frac || wrapping_sub(j, frac) > 3 {
+            return Option::None;
+        }
+        return parsed(other(), j);
+    }
+    if int_digits > 15 {
+        return Option::None;
+    }
+    parsed(
+        Item {
+            kind: 0,
+            neg: neg,
+            mag: mag,
+            flag: false
+        },
+        i
+    )
+}
+
+fn string(in v: Slice[u8], at: u64) -> Option[Parsed] {
+    let mut i = inc(at);
+    loop {
+        let c = match v.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => return Option::None,
+        };
+        i = inc(i);
+        if c == 92 {
+            match v.try_get(i) {
+                Option::Some(e) => {
+                    if e != 34 && e != 92 {
+                        return Option::None;
+                    }
+                }
+                Option::None => return Option::None,
+            }
+            i = inc(i);
+        } else if c == 34 {
+            return parsed(other(), i);
+        } else if c < 32 || c > 126 {
+            return Option::None;
+        }
+    }
+}
+
+fn byte_sequence(in v: Slice[u8], at: u64) -> Option[Parsed] {
+    let mut i = inc(at);
+    loop {
+        let c = match v.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => return Option::None,
+        };
+        i = inc(i);
+        if c == 58 {
+            return parsed(other(), i);
+        }
+        if !(is_alnum(c) || b64_extra(c)) {
+            return Option::None;
+        }
+    }
+}
+
+fn token(in v: Slice[u8], at: u64) -> Option[Parsed] {
+    let mut i = inc(at);
+    loop {
+        match v.try_get(i) {
+            Option::Some(c) => {
+                if is_alnum(c) || token_extra(c) {
+                    i = inc(i);
+                } else {
+                    return parsed(other(), i);
+                }
+            }
+            Option::None => return parsed(other(), i),
+        }
+    }
+}
+
+// RFC 8941 §4.2.3: a bare item.
+fn bare_item(in v: Slice[u8], at: u64) -> Option[Parsed] {
+    let c = match v.try_get(at) {
+        Option::Some(c) => c,
+        Option::None => return Option::None,
+    };
+    if c == 45 || is_digit(c) {
+        return number(in v, at);
+    }
+    if c == 34 {
+        return string(in v, at);
+    }
+    if c == 63 {
+        let i = inc(at);
+        let b = match v.try_get(i) {
+            Option::Some(d) => {
+                if d == 48 {
+                    false
+                } else if d == 49 {
+                    true
+                } else {
+                    return Option::None;
+                }
+            }
+            Option::None => return Option::None,
+        };
+        return parsed(boolean(b), inc(i));
+    }
+    if c == 58 {
+        return byte_sequence(in v, at);
+    }
+    if is_alpha(c) || c == 42 {
+        return token(in v, at);
+    }
+    Option::None
+}
+
+// RFC 8941 §4.2.3.2: parameters, parsed and dropped; the offset after them.
+fn parameters(in v: Slice[u8], at: u64) -> Option[u64] {
+    let mut i = at;
+    loop {
+        if !at_is(in v, i, 59) {
+            return Option::Some(i);
+        }
+        i = sp(in v, inc(i));
+        i = match key(in v, i) {
+            Option::Some(e) => e,
+            Option::None => return Option::None,
+        };
+        if at_is(in v, i, 61) {
+            i = match bare_item(in v, inc(i)) {
+                Option::Some(p) => p.end,
+                Option::None => return Option::None,
+            };
+        }
+    }
+}
+
+// An item or an inner list, with its parameters.
+fn member_value(in v: Slice[u8], at: u64) -> Option[Parsed] {
+    if at_is(in v, at, 40) {
+        let mut i = inc(at);
+        loop {
+            i = sp(in v, i);
+            if at_is(in v, i, 41) {
+                return match parameters(in v, inc(i)) {
+                    Option::Some(e) => parsed(other(), e),
+                    Option::None => Option::None,
+                };
+            }
+            i = match bare_item(in v, i) {
+                Option::Some(p) => p.end,
+                Option::None => return Option::None,
+            };
+            i = match parameters(in v, i) {
+                Option::Some(e) => e,
+                Option::None => return Option::None,
+            };
+            if !(at_is(in v, i, 32) || at_is(in v, i, 41)) {
+                return Option::None;
+            }
+        }
+    }
+    let p = match bare_item(in v, at) {
+        Option::Some(p) => p,
+        Option::None => return Option::None,
+    };
+    match parameters(in v, p.end) {
+        Option::Some(e) => parsed(p.item, e),
+        Option::None => Option::None,
+    }
+}
+
+// Applies one dictionary member to `p`.
+fn apply(in v: Slice[u8], lo: u64, hi: u64, item: Item, p: Priority) -> Priority {
+    if wrapping_sub(hi, lo) != 1 {
+        return p;
+    }
+    let k = byte(in v, lo);
+    if k == 117 {
+        if item.kind == 0 && item.mag <= 7 && (!item.neg || item.mag == 0) {
+            return Priority {
+                urgency: wrapping_u8(item.mag),
+                incremental: p.incremental
+            };
+        }
+        return p;
+    }
+    if k == 105 && item.kind == 1 {
+        return Priority {
+            urgency: p.urgency,
+            incremental: item.flag
+        };
+    }
+    p
+}
+
+// RFC 8941 §4.2.2, applying members as they parse; `None` if the value is
+// not a valid dictionary.
+fn dictionary(in v: Slice[u8]) -> Option[Priority] {
+    let mut p = priority_default();
+    let mut at = sp(in v, 0);
+    loop {
+        if at >= v.len() {
+            return Option::Some(p);
+        }
+        let k_end = match key(in v, at) {
+            Option::Some(e) => e,
+            Option::None => return Option::None,
+        };
+        let k_lo = at;
+        at = k_end;
+        let item = if at_is(in v, at, 61) {
+            match member_value(in v, inc(at)) {
+                Option::Some(m) => {
+                    at = m.end;
+                    m.item
+                }
+                Option::None => return Option::None,
+            }
+        } else {
+            match parameters(in v, at) {
+                Option::Some(e) => {
+                    at = e;
+                    boolean(true)
+                }
+                Option::None => return Option::None,
+            }
+        };
+        p = apply(in v, k_lo, k_end, item, p);
+        at = ows(in v, at);
+        if at >= v.len() {
+            return Option::Some(p);
+        }
+        if !at_is(in v, at, 44) {
+            return Option::None;
+        }
+        at = ows(in v, inc(at));
+        if at >= v.len() {
+            return Option::None;
+        }
+    }
+}
+
+// `Priority::parse`: an invalid dictionary is the default priority.
+pub fn priority_parse_value(in v: Slice[u8]) -> Priority {
+    match dictionary(in v) {
+        Option::Some(p) => p,
+        Option::None => priority_default(),
+    }
+}
+
+// `Priority::serialize`, appended to `out`.
+pub fn priority_serialize_to(p: Priority, inout out: ChunkSeq[u8]) {
+    let start = out.len();
+    if p.urgency != 3 {
+        out.push(117);
+        out.push(61);
+        out.push(wrapping_add(48, p.urgency));
+    }
+    if p.incremental {
+        if out.len() != start {
+            out.push(44);
+            out.push(32);
+        }
+        out.push(105);
+    }
+}
+
+pub fn priority_update_parse(ty: u64, in payload: Slice[u8]) -> Result[PriorityUpdate, FrameError] {
+    let n = match vdec(in payload, 0) {
+        Option::Some(n) => n,
+        Option::None => return Result::Err(FrameError::Malformed),
+    };
+    let n_used = n.used;
+    for i in n_used..payload.len() {
+        let c = byte(in payload, i);
+        if c < 32 || c > 126 {
+            return Result::Err(FrameError::Malformed);
+        }
+    }
+    Result::Ok(
+        PriorityUpdate {
+            push: ty == priority_update_push(),
+            element_id: n.value,
+            priority: priority_parse_value(in payload[n_used..payload.len()])
+        }
+    )
+}
+
+pub fn priority_update_write(u: PriorityUpdate, inout out: ChunkSeq[u8]) -> bool {
+    let mut payload = ChunkSeq::new[u8]();
+    let ok = vput(inout payload, u.element_id);
+    priority_serialize_to(u.priority, inout payload);
+    let ty = if u.push {
+        priority_update_push()
+    } else {
+        priority_update_request()
+    };
+    put_record(inout out, ty, in payload.as_slice()) && ok
+}
+
+// `schedule`: `streams` holds (stream id, urgency, incremental) triples.
+// Writes the groups to `out` as a group length followed by its ids.
+pub fn schedule_into(in streams: Slice[u64], rotate: u64, inout out: ChunkSeq[u64]) {
+    out.clear();
+    let n = streams.len() / 3;
+    let mut fixed = ChunkSeq::new[u64]();
+    let mut incr = ChunkSeq::new[u64]();
+    for u in 0..urgencies() {
+        fixed.clear();
+        incr.clear();
+        for s in 0..n {
+            let at = wrapping_mul(s, 3);
+            let urgency = word(in streams, inc(at));
+            let clamped = if urgency > 7 {
+                7
+            } else {
+                urgency
+            };
+            if clamped == u {
+                let id = word(in streams, at);
+                if word(in streams, wrapping_add(at, 2)) != 0 {
+                    insert_sorted(inout incr, id);
+                } else {
+                    insert_sorted(inout fixed, id);
+                }
+            }
+        }
+        for i in 0..fixed.len() {
+            out.push(1);
+            out.push(word(in fixed.as_slice(), i));
+        }
+        let m = incr.len();
+        if m > 0 {
+            out.push(m);
+            let r = rotate % m;
+            for i in 0..m {
+                let j = wrapping_add(i, r);
+                let k = if j >= m {
+                    wrapping_sub(j, m)
+                } else {
+                    j
+                };
+                out.push(word(in incr.as_slice(), k));
+            }
+        }
+    }
+}
+
+fn urgencies() -> u64 {
+    8
+}
+
+// Inserts `v` keeping `s` ascending (after equal values, as a stable sort).
+fn insert_sorted(inout s: ChunkSeq[u64], v: u64) {
+    let n = s.len();
+    s.push(v);
+    let mut i = n;
+    loop {
+        if i == 0 {
+            return;
+        }
+        let prev = word(in s.as_slice(), wrapping_sub(i, 1));
+        if prev <= v {
+            return;
+        }
+        let _a = s.try_set(i, prev);
+        let _b = s.try_set(wrapping_sub(i, 1), v);
+        i = wrapping_sub(i, 1);
+    }
+}

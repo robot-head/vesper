@@ -1,6 +1,6 @@
-fn pair(inout a: i64, in b: i64) {}
+fn pair(inout a: i64, inout b: i64) {}
 fn run(sink a: i64) {
-    pair(inout a, in a);
+    pair(inout a, inout a);
 }
 fn main() {
     run(1);

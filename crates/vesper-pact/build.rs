@@ -1,20 +1,14 @@
-//! Under `vesper-port`, link the Vesper port in vesper/ and set
-//! cfg(vesper_port); see "Crates the compiler links" in
-//! docs/maintenance/porting-a-crate.md. Without it this package builds the
-//! Rust code, like the seed package (seed/), which has no build script.
+//! Link the Vesper port in vesper/ and set cfg(vesper_port); see "Crates
+//! the compiler links" in docs/maintenance/porting-a-crate.md. The seed
+//! package (seed/) has no build script: it builds its frozen Rust engine.
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    // The harness sets the cfg under `vesper-port`; declare it either way.
-    println!("cargo:rustc-check-cfg=cfg({})", vesper_port_harness::CFG);
-    #[cfg(feature = "vesper-port")]
-    {
-        let port = vesper_port_harness::Port::new("pact", "vesper").binding("port/binding.rs");
-        #[cfg(feature = "vesper-port-divergent")]
-        let port = DIVERGENT
-            .iter()
-            .fold(port, |port, (_, from, to)| port.edit(from, to));
-        port.build();
-    }
+    let port = vesper_port_harness::Port::new("pact", "vesper").binding("port/binding.rs");
+    #[cfg(feature = "vesper-port-divergent")]
+    let port = DIVERGENT
+        .iter()
+        .fold(port, |port, (_, from, to)| port.edit(from, to));
+    port.build();
 }
 
 /// The divergence checks, one per ported module (mirrored in BUILD.bazel

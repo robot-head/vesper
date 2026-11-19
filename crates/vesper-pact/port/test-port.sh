@@ -2,16 +2,14 @@
 # vesper-pact port checks under Cargo (port wave P3a lane 3, #1038), run by
 # scripts/test-port-harness.sh.
 #
-# - The Rust build (the default), the Vesper port (feature vesper-port) and
-#   the compiler's Rust seed copy (vesper-pact-seed) pass every test of the
-#   crate.
+# - The Vesper port (vesper-pact, its only build) and the compiler's Rust
+#   seed copy (vesper-pact-seed) pass every test of the crate.
 # - The divergent Vesper build (one edit per ported module, DIVERGENT in
 #   build.rs) fails the test that guards each module, and an unchanged test
 #   still passes.
 set -eu
 cd "$(dirname "$0")/../../.."
 cargo test --locked -p vesper-pact -p vesper-pact-seed
-cargo test --locked -p vesper-pact --features vesper-port
 log=$(mktemp)
 trap 'rm -f "$log"' EXIT HUP INT TERM
 if cargo test --locked -p vesper-pact --features vesper-port-divergent --no-fail-fast --tests -- --test-threads=1 >"$log" 2>&1; then

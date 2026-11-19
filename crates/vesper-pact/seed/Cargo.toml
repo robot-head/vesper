@@ -11,14 +11,16 @@ autobenches = false
 build = false
 
 # The seed-copy rule (port wave P1 lane 2, #899): the compiler links this
-# package, the Rust build of ../src, under the library name `vesper_pact`.
+# package, the shared API in ../src over the frozen Rust engine in
+# src/engine, under the library name `vesper_pact`.
 # Crates inside `cargo tree -p vesper -e normal,build` depend on it with
 # `vesper-pact = { path = ".../seed", package = "vesper-pact-seed" }`;
-# every other crate uses the package `vesper-pact`. The Rust code takes bug
+# every other crate uses the package `vesper-pact`, whose only build is the
+# Vesper port (#1085). The Rust code takes bug
 # fixes only until self-hosting Stage 2.
 [lib]
 name = "vesper_pact"
-path = "../src/lib.rs"
+path = "src/lib.rs"
 
 [[test]]
 name = "coherence"

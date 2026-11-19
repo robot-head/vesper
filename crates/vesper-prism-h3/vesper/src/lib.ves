@@ -1,0 +1,706 @@
+// Vesper port of the vesper-prism-h3 protocol core (port wave P3b lane 5,
+// #1067). Part 1: QPACK (RFC 9204), with its prefixed integers and the
+// HPACK Huffman code. The Rust crate keeps its public API and forwards to
+// this library through port/binding.rs under the `vesper-port` feature
+// (src/qpack/port.rs is the adapter); the connection driver stays Rust.
+//
+// Exported functions only return `Result` values: every failure the Rust
+// code reports is a typed error, and nothing here raises.
+
+use self::int::{
+    inc
+};
+use self::huffman::{
+    huff_tables,
+    huff_encoded_len,
+    huff_encode,
+    huff_decode
+};
+use self::table::{
+    Static,
+    Table,
+    static_new,
+    table_new,
+    table_len,
+    table_first
+};
+use self::prefix::{
+    Num,
+    decode_int,
+    encode_int,
+    decode_string,
+    encode_string
+};
+use self::encoder::{
+    enc_encode,
+    enc_on_decoder_stream,
+    enc_apply_peer_settings,
+    enc_blocking_streams
+};
+use self::frame::{
+    settings_parse,
+    settings_write,
+    reader_new,
+    reader_push,
+    reader_buffered,
+    reader_at_boundary,
+    reader_take_rest,
+    reader_next
+};
+use self::priority::{
+    priority_parse_value,
+    priority_serialize_to,
+    priority_update_parse,
+    priority_update_write,
+    schedule_into
+};
+use self::capsule::{
+    capsule_reader_new,
+    capsule_push,
+    capsule_buffered,
+    capsule_at_boundary,
+    capsule_next,
+    capsule_write_close
+};
+use self::message::{
+    message_parse_request,
+    message_parse_response,
+    message_check_trailers
+};
+use self::varint::{
+    vput,
+    put_record
+};
+use self::decoder::{
+    dec_on_encoder_stream,
+    dec_decode_section,
+    dec_cancel_stream,
+    dec_take_decoder_stream
+};
+
+pub copy enum HuffmanError {
+    Eos,
+    BadPadding,
+    TooLong
+}
+
+pub copy enum PrefixError {
+    Incomplete,
+    IntegerOverflow,
+    StringTooLong,
+    Huffman(HuffmanError)
+}
+
+pub copy enum Reason {
+    Truncated,
+    IntegerOverflow,
+    StringTooLong,
+    Huffman(HuffmanError),
+    BadStaticIndex(u64),
+    BadDynamicIndex,
+    BadRequiredInsertCount,
+    NegativeBase,
+    CapacityExceeded,
+    EntryTooLarge,
+    TooManyBlockedStreams,
+    BlockedBytesLimit,
+    UnexpectedAcknowledgment(u64),
+    ZeroIncrement,
+    IncrementBeyondInserts,
+    InstructionTooLong,
+    StreamAlreadyBlocked(u64)
+}
+
+pub copy enum QpackError {
+    Decompression(Reason),
+    EncoderStream(Reason),
+    DecoderStream(Reason),
+    FieldSectionTooLarge {
+        stream_id: u64
+    }
+}
+
+pub copy struct EncoderConfig {
+    max_table_capacity: u64,
+    max_entry_share: u64,
+    max_outstanding_sections: usize
+}
+
+pub copy struct EncoderStats {
+    sections: u64,
+    inserts: u64,
+    static_refs: u64,
+    dynamic_refs: u64,
+    literals: u64,
+    blocking_sections: u64
+}
+
+pub copy struct DecoderConfig {
+    max_table_capacity: u64,
+    max_blocked_streams: u64,
+    max_field_section_size: u64,
+    max_blocked_bytes: usize
+}
+
+// A decoded integer (`prefix::decode_int`).
+pub copy struct IntRead {
+    value: u64,
+    used: u64
+}
+
+// The code (`bit length << 32 | code` per symbol) and its canonical decode
+// tables: per bit length, the first code, the number of codes and the index
+// of the first symbol in `symbols`.
+// The tables every codec call reads, built once per process (the Rust
+// build's statics): the Huffman code (`bit length << 32 | code` per
+// symbol), its decoding trie as a 4-bit state machine (huffman.ves) and the
+// static table.
+pub struct Huff {
+    codes: ChunkSeq[u64],
+    nib: ChunkSeq[u64],
+    info: ChunkSeq[u64],
+    st: Static
+}
+
+pub struct EncoderCore {
+    cfg: EncoderConfig,
+    table: Table,
+    peer_capacity: u64,
+    peer_blocked: u64,
+    max_entries: u64,
+    known_received: u64,
+    sec_stream: ChunkSeq[u64],
+    sec_ric: ChunkSeq[u64],
+    sec_lo: ChunkSeq[u64],
+    sec_n: ChunkSeq[u64],
+    sec_refs: ChunkSeq[u64],
+    pending: ChunkSeq[u8],
+    out: ChunkSeq[u8],
+    lines: ChunkSeq[u8],
+    cur_refs: ChunkSeq[u64],
+    stats: EncoderStats,
+    failed: Option[QpackError]
+}
+
+// Decoded sections, read by the wrapper after each decoder call (see
+// decoder.ves).
+pub struct Sections {
+    bytes: ChunkSeq[u8],
+    fields: ChunkSeq[u64],
+    heads: ChunkSeq[u64]
+}
+
+pub struct DecoderCore {
+    cfg: DecoderConfig,
+    max_entries: u64,
+    table: Table,
+    pending: ChunkSeq[u8],
+    blk_stream: ChunkSeq[u64],
+    blk_ric: ChunkSeq[u64],
+    blk_lo: ChunkSeq[u64],
+    blk_len: ChunkSeq[u64],
+    blk_bytes: ChunkSeq[u8],
+    blocked_bytes: u64,
+    out: ChunkSeq[u8],
+    acknowledged: u64,
+    failed: Option[QpackError],
+    name: ChunkSeq[u8],
+    value: ChunkSeq[u8],
+    sec: Sections
+}
+
+// ---------------------------------------------------------------------
+// prefix.rs and huffman.rs (the public helpers; `Huff` holds the tables)
+// ---------------------------------------------------------------------
+
+pub fn huff_new() -> Huff {
+    huff_tables()
+}
+
+pub fn huff_len(in h: Huff, in data: Slice[u8]) -> u64 {
+    huff_encoded_len(in h, in data)
+}
+
+pub fn huff_append(in h: Huff, in data: Slice[u8], inout out: ChunkSeq[u8]) {
+    huff_encode(in h, in data, inout out);
+}
+
+// Decodes into `out` (cleared first); the error, if any.
+pub fn huff_unpack(in h: Huff, in data: Slice[u8], max_len: u64, inout out: ChunkSeq[u8])
+    -> Option[HuffmanError] {
+    out.clear();
+    huff_decode(in h, in data, max_len, inout out)
+}
+
+pub fn huff_decode_int(in h: Huff, in buf: Slice[u8], bits: u64) -> Result[IntRead, PrefixError] {
+    match decode_int(in buf, 0, bits) {
+        Result::Ok(n) => Result::Ok(
+            IntRead {
+                value: n.value,
+                used: n.used
+            }
+        ),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+pub fn huff_encode_int(in h: Huff, inout out: ChunkSeq[u8], flags: u8, bits: u64, value: u64) {
+    encode_int(inout out, flags, bits, value);
+}
+
+// Decodes a string into `out` (cleared first); the offset after it.
+pub fn huff_decode_string(
+    in h: Huff,
+    in buf: Slice[u8],
+    bits: u64,
+    max_len: u64,
+    inout out: ChunkSeq[u8]
+) -> Result[u64, PrefixError] {
+    out.clear();
+    decode_string(in h, in buf, 0, bits, max_len, inout out)
+}
+
+pub fn huff_encode_string(
+    in h: Huff,
+    inout out: ChunkSeq[u8],
+    flags: u8,
+    bits: u64,
+    in value: Slice[u8]
+) {
+    encode_string(in h, inout out, flags, bits, in value);
+}
+
+// ---------------------------------------------------------------------
+// Encoder
+// ---------------------------------------------------------------------
+
+pub fn encoder_core_new(cfg: EncoderConfig) -> EncoderCore {
+    EncoderCore {
+        cfg: cfg,
+        table: table_new(),
+        peer_capacity: 0,
+        peer_blocked: 0,
+        max_entries: 0,
+        known_received: 0,
+        sec_stream: ChunkSeq::new[u64](),
+        sec_ric: ChunkSeq::new[u64](),
+        sec_lo: ChunkSeq::new[u64](),
+        sec_n: ChunkSeq::new[u64](),
+        sec_refs: ChunkSeq::new[u64](),
+        pending: ChunkSeq::new[u8](),
+        out: ChunkSeq::new[u8](),
+        lines: ChunkSeq::new[u8](),
+        cur_refs: ChunkSeq::new[u64](),
+        stats: EncoderStats {
+            sections: 0,
+            inserts: 0,
+            static_refs: 0,
+            dynamic_refs: 0,
+            literals: 0,
+            blocking_sections: 0
+        },
+        failed: Option::None
+    }
+}
+
+pub fn encoder_core_apply_peer_settings(
+    inout e: EncoderCore,
+    max_table_capacity: u64,
+    blocked_streams: u64
+) {
+    enc_apply_peer_settings(inout e, max_table_capacity, blocked_streams);
+}
+
+pub fn encoder_core_insert_count(in e: EncoderCore) -> u64 {
+    e.table.inserted
+}
+
+pub fn encoder_core_table_capacity(in e: EncoderCore) -> u64 {
+    e.table.capacity
+}
+
+pub fn encoder_core_outstanding_sections(in e: EncoderCore) -> u64 {
+    e.sec_stream.len()
+}
+
+pub fn encoder_core_blocking_streams(in e: EncoderCore) -> u64 {
+    enc_blocking_streams(in e)
+}
+
+pub fn encoder_core_encode(
+    inout e: EncoderCore,
+    in h: Huff,
+    stream_id: u64,
+    in bytes: Slice[u8],
+    in meta: Slice[u64]
+) -> ChunkSeq[u8] {
+    enc_encode(inout e, in h, stream_id, in bytes, in meta)
+}
+
+pub fn encoder_core_on_decoder_stream(inout e: EncoderCore, in bytes: Slice[u8])
+    -> Result[Unit, QpackError] {
+    enc_on_decoder_stream(inout e, in bytes)
+}
+
+pub fn encoder_core_take_encoder_stream(inout e: EncoderCore) -> ChunkSeq[u8] {
+    replace(inout e.out, ChunkSeq::new[u8]())
+}
+
+// ---------------------------------------------------------------------
+// Decoder
+// ---------------------------------------------------------------------
+
+pub fn decoder_core_new(cfg: DecoderConfig) -> DecoderCore {
+    DecoderCore {
+        cfg: cfg,
+        max_entries: cfg.max_table_capacity / 32,
+        table: table_new(),
+        pending: ChunkSeq::new[u8](),
+        blk_stream: ChunkSeq::new[u64](),
+        blk_ric: ChunkSeq::new[u64](),
+        blk_lo: ChunkSeq::new[u64](),
+        blk_len: ChunkSeq::new[u64](),
+        blk_bytes: ChunkSeq::new[u8](),
+        blocked_bytes: 0,
+        out: ChunkSeq::new[u8](),
+        acknowledged: 0,
+        failed: Option::None,
+        name: ChunkSeq::new[u8](),
+        value: ChunkSeq::new[u8](),
+        sec: Sections {
+            bytes: ChunkSeq::new[u8](),
+            fields: ChunkSeq::new[u64](),
+            heads: ChunkSeq::new[u64]()
+        }
+    }
+}
+
+pub fn decoder_core_insert_count(in d: DecoderCore) -> u64 {
+    d.table.inserted
+}
+
+pub fn decoder_core_table_size(in d: DecoderCore) -> u64 {
+    d.table.size
+}
+
+pub fn decoder_core_table_capacity(in d: DecoderCore) -> u64 {
+    d.table.capacity
+}
+
+pub fn decoder_core_table_len(in d: DecoderCore) -> u64 {
+    table_len(in d.table)
+}
+
+pub fn decoder_core_blocked_streams(in d: DecoderCore) -> u64 {
+    d.blk_stream.len()
+}
+
+pub fn decoder_core_on_encoder_stream(inout d: DecoderCore, in h: Huff, in bytes: Slice[u8])
+    -> Result[Unit, QpackError] {
+    dec_on_encoder_stream(inout d, in h, in bytes)
+}
+
+pub fn decoder_core_decode_section(
+    inout d: DecoderCore,
+    in h: Huff,
+    stream_id: u64,
+    in data: Slice[u8]
+) -> Result[bool, QpackError] {
+    dec_decode_section(inout d, in h, stream_id, in data)
+}
+
+pub fn decoder_core_cancel_stream(inout d: DecoderCore, stream_id: u64) {
+    d.sec.bytes.clear();
+    d.sec.fields.clear();
+    d.sec.heads.clear();
+    dec_cancel_stream(inout d, stream_id);
+}
+
+pub fn decoder_core_take_decoder_stream(inout d: DecoderCore) -> ChunkSeq[u8] {
+    dec_take_decoder_stream(inout d)
+}
+
+// ---------------------------------------------------------------------
+// Part 2: frames, priorities and capsules (frame.rs, priority.rs,
+// capsule.rs)
+// ---------------------------------------------------------------------
+
+pub copy enum FrameError {
+    Malformed,
+    TooLarge {
+        frame_type: u64,
+        len: u64
+    },
+    Http2Frame(u64),
+    BadSetting(u64)
+}
+
+pub copy struct Settings {
+    qpack_max_table_capacity: u64,
+    qpack_blocked_streams: u64,
+    max_field_section_size: Option[u64],
+    enable_connect_protocol: bool,
+    h3_datagram: bool,
+    webtransport_max_sessions: Option[u64],
+    no_rfc7540_priorities: bool
+}
+
+pub copy struct Priority {
+    urgency: u8,
+    incremental: bool
+}
+
+pub copy struct PriorityUpdate {
+    push: bool,
+    element_id: u64,
+    priority: Priority
+}
+
+// A frame from the reader; DATA and HEADERS bytes are in the reader's
+// `out` (`Frame` without its payloads).
+pub copy enum FrameOut {
+    None,
+    Data,
+    Headers,
+    SettingsFrame(Settings),
+    GoAway(u64),
+    CancelPush(u64),
+    MaxPushId(u64),
+    PushPromise,
+    PriorityUpdateFrame(PriorityUpdate),
+    WebTransportStream(u64),
+    Unknown(u64)
+}
+
+pub struct FrameReaderCore {
+    buf: ChunkSeq[u8],
+    head: u64,
+    mode: u64,
+    remaining: u64,
+    ty: u64,
+    len: u64,
+    max_payload: u64,
+    webtransport: bool,
+    out: ChunkSeq[u8]
+}
+
+pub copy enum CapsuleError {
+    TooLarge {
+        capsule_type: u64,
+        len: u64
+    },
+    Malformed {
+        capsule_type: u64
+    },
+    Truncated
+}
+
+// A capsule from the reader; a datagram's payload or a close reason is in
+// the reader's `out`.
+pub copy enum CapsuleOut {
+    None,
+    Datagram,
+    CloseSession(u32),
+    DrainSession,
+    Unknown(u64)
+}
+
+pub struct CapsuleReaderCore {
+    buf: ChunkSeq[u8],
+    head: u64,
+    mode: u64,
+    remaining: u64,
+    ty: u64,
+    len: u64,
+    max_value: u64,
+    out: ChunkSeq[u8]
+}
+
+// The writers return the bytes they write, empty when a value does not fit
+// a varint: an `inout ChunkSeq` from Rust copies the caller's whole buffer
+// in and out on every call (see the report), so appending stays in Rust.
+
+pub fn h3_put_varint(value: u64) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    if !vput(inout out, value) {
+        out.clear();
+    }
+    out
+}
+
+// A frame or capsule header for a payload of `len` bytes (`write_frame`,
+// `write_data_header`, `write_capsule`).
+pub fn h3_record_header(ty: u64, len: u64) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    let a = vput(inout out, ty);
+    let b = vput(inout out, len);
+    if !(a && b) {
+        out.clear();
+    }
+    out
+}
+
+// `write_varint_frame`.
+pub fn h3_varint_frame(ty: u64, value: u64) -> ChunkSeq[u8] {
+    let mut p = ChunkSeq::new[u8]();
+    let mut out = ChunkSeq::new[u8]();
+    let ok = vput(inout p, value);
+    if !(put_record(inout out, ty, in p.as_slice()) && ok) {
+        out.clear();
+    }
+    out
+}
+
+pub fn h3_settings_parse(in payload: Slice[u8]) -> Result[Settings, FrameError] {
+    settings_parse(in payload)
+}
+
+pub fn h3_settings_encode(s: Settings) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    if !settings_write(s, inout out) {
+        out.clear();
+    }
+    out
+}
+
+pub fn h3_priority_parse(in value: Slice[u8]) -> Priority {
+    priority_parse_value(in value)
+}
+
+pub fn h3_priority_serialize(p: Priority) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    priority_serialize_to(p, inout out);
+    out
+}
+
+pub fn h3_priority_update_parse(frame_type: u64, in payload: Slice[u8])
+    -> Result[PriorityUpdate, FrameError] {
+    priority_update_parse(frame_type, in payload)
+}
+
+pub fn h3_priority_update_encode(u: PriorityUpdate) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    if !priority_update_write(u, inout out) {
+        out.clear();
+    }
+    out
+}
+
+// `schedule`: (id, urgency, incremental) triples in, groups out as a length
+// followed by that many ids.
+pub fn h3_schedule(in streams: Slice[u64], rotate: u64) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    schedule_into(in streams, rotate, inout out);
+    out
+}
+
+pub fn frame_reader_core_new(max_payload: u64, webtransport: bool) -> FrameReaderCore {
+    reader_new(max_payload, webtransport)
+}
+
+pub fn frame_reader_core_push(inout r: FrameReaderCore, in bytes: Slice[u8]) {
+    reader_push(inout r, in bytes);
+}
+
+pub fn frame_reader_core_buffered(in r: FrameReaderCore) -> u64 {
+    reader_buffered(in r)
+}
+
+pub fn frame_reader_core_at_boundary(in r: FrameReaderCore) -> bool {
+    reader_at_boundary(in r)
+}
+
+pub fn frame_reader_core_take_rest(inout r: FrameReaderCore) -> ChunkSeq[u8] {
+    reader_take_rest(inout r);
+    replace(inout r.out, ChunkSeq::new[u8]())
+}
+
+pub fn frame_reader_core_next(inout r: FrameReaderCore) -> Result[FrameOut, FrameError] {
+    reader_next(inout r)
+}
+
+pub fn capsule_reader_core_new(max_value: u64) -> CapsuleReaderCore {
+    capsule_reader_new(max_value)
+}
+
+pub fn capsule_reader_core_push(inout r: CapsuleReaderCore, in bytes: Slice[u8]) {
+    capsule_push(inout r, in bytes);
+}
+
+pub fn capsule_reader_core_buffered(in r: CapsuleReaderCore) -> u64 {
+    capsule_buffered(in r)
+}
+
+pub fn capsule_reader_core_at_boundary(in r: CapsuleReaderCore) -> bool {
+    capsule_at_boundary(in r)
+}
+
+pub fn capsule_reader_core_next(inout r: CapsuleReaderCore) -> Result[CapsuleOut, CapsuleError] {
+    capsule_next(inout r)
+}
+
+pub fn h3_close_session(code: u32, in reason: Slice[u8]) -> ChunkSeq[u8] {
+    let mut out = ChunkSeq::new[u8]();
+    if !capsule_write_close(inout out, code, in reason) {
+        out.clear();
+    }
+    out
+}
+
+// ---------------------------------------------------------------------
+// Part 3: message validation (message.rs)
+// ---------------------------------------------------------------------
+
+pub copy enum MessageError {
+    InvalidFieldName,
+    InvalidFieldValue,
+    ConnectionSpecificField,
+    PseudoAfterRegular,
+    UnknownPseudoHeader,
+    DuplicatePseudoHeader,
+    MissingPseudoHeader,
+    InvalidPseudoHeader,
+    AuthorityMismatch,
+    InvalidContentLength,
+    ContentLengthMismatch,
+    InvalidStatus,
+    UnsupportedConnect
+}
+
+// A byte range of the flattened field list.
+pub copy struct Span {
+    lo: u64,
+    hi: u64
+}
+
+// A validated request head as ranges; `pseudo` fields come first and the
+// rest are the regular fields.
+pub copy struct RequestParts {
+    method: Span,
+    scheme: Span,
+    authority: Option[Span],
+    path: Span,
+    protocol: Option[Span],
+    pseudo: u64,
+    content_length: Option[u64]
+}
+
+pub copy struct ResponseParts {
+    status: u16,
+    pseudo: u64,
+    content_length: Option[u64]
+}
+
+pub fn h3_parse_request(in bytes: Slice[u8], in meta: Slice[u64])
+    -> Result[RequestParts, MessageError] {
+    message_parse_request(in bytes, in meta)
+}
+
+pub fn h3_parse_response(in bytes: Slice[u8], in meta: Slice[u64])
+    -> Result[ResponseParts, MessageError] {
+    message_parse_response(in bytes, in meta)
+}
+
+pub fn h3_check_trailers(in bytes: Slice[u8], in meta: Slice[u64]) -> Option[MessageError] {
+    message_check_trailers(in bytes, in meta)
+}

@@ -1,0 +1,443 @@
+// message.rs: HTTP/3 message validation (RFC 9114 §4.1.2, §4.2, §4.3).
+// Field lists arrive flattened as the encoder takes them (`bytes`, and
+// three words per field: name length, value length, sensitive); results
+// name byte ranges of `bytes`, which the Rust wrapper turns into strings.
+
+use self::{
+    MessageError,
+    Span,
+    RequestParts,
+    ResponseParts
+};
+use self::int::{
+    inc,
+    byte,
+    word
+};
+use self::capsule::{
+    valid_utf8
+};
+
+// Field `i`: its name is `bytes[start..start + nlen]`, then its value.
+copy struct Line {
+    lo: u64,
+    mid: u64,
+    hi: u64
+}
+
+fn lines(in meta: Slice[u64], inout out: ChunkSeq[u64]) {
+    let n = meta.len() / 3;
+    let mut at: u64 = 0;
+    for i in 0..n {
+        out.push(at);
+        at = wrapping_add(
+            at,
+            wrapping_add(word(in meta, wrapping_mul(i, 3)), word(in meta, inc(wrapping_mul(i, 3))))
+        );
+    }
+}
+
+fn line(in starts: Slice[u64], in meta: Slice[u64], i: u64) -> Line {
+    let lo = word(in starts, i);
+    let mid = wrapping_add(lo, word(in meta, wrapping_mul(i, 3)));
+    Line {
+        lo: lo,
+        mid: mid,
+        hi: wrapping_add(mid, word(in meta, inc(wrapping_mul(i, 3))))
+    }
+}
+
+fn is(in b: Slice[u8], lo: u64, hi: u64, in lit: Slice[u8]) -> bool {
+    if wrapping_sub(hi, lo) != lit.len() || hi > b.len() || lo > hi {
+        return false;
+    }
+    lit.eq(in b[lo..hi])
+}
+
+fn same(in b: Slice[u8], a: Span, c: Span) -> bool {
+    if wrapping_sub(a.hi, a.lo)
+        != wrapping_sub(c.hi, c.lo)
+        || a
+        .hi
+        > b
+        .len()
+        || c
+        .hi
+        > b
+        .len()
+        || a
+        .lo
+        > a
+        .hi
+        || c
+        .lo
+        > c
+        .hi {
+        return false;
+    }
+    bytes_eq(in b[a.lo..a.hi], in b[c.lo..c.hi])
+}
+
+fn bytes_eq(in x: Slice[u8], in y: Slice[u8]) -> bool {
+    x.eq(in y)
+}
+
+// Every byte is in the class (`find_not_in`: bit `x` of `lo` for `x < 64`,
+// of `hi` for `64 <= x < 128`, `high` above): a token is
+// lowercase, digits and `!#$%&'*+-.^_`|~`; a method also allows uppercase.
+fn all_in(in s: Slice[u8], lo: u64, hi: u64, high: bool) -> bool {
+    match s.find_not_in(lo, hi, high) {
+        Option::Some(_i) => false,
+        Option::None => true,
+    }
+}
+
+fn is_digit(c: u8) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn space(c: u8) -> bool {
+    c == 32 || c == 9
+}
+
+fn check_regular(in b: Slice[u8], l: Line) -> Option[MessageError] {
+    if l.mid == l.lo {
+        return Option::Some(MessageError::InvalidFieldName);
+    }
+    if !all_in(in b[l.lo..l.mid], 288068722172624896, 6341068274263916544, false) {
+        return Option::Some(MessageError::InvalidFieldName);
+    }
+    // Anything but NUL, CR and LF.
+    if !all_in(in b[l.mid..l.hi], 18446744073709542398, 18446744073709551615, true) {
+        return Option::Some(MessageError::InvalidFieldValue);
+    }
+    if l.hi > l.mid && (space(byte(in b, l.mid)) || space(byte(in b, wrapping_sub(l.hi, 1)))) {
+        return Option::Some(MessageError::InvalidFieldValue);
+    }
+    if (wrapping_sub(l.mid, l.lo) == 10 && is(in b, l.lo, l.mid, in "connection".as_bytes()))
+        || (wrapping_sub(l.mid, l.lo) == 10 && is(in b, l.lo, l.mid, in "keep-alive".as_bytes()))
+        || (
+        wrapping_sub(l.mid, l.lo) == 16 && is(in b, l.lo, l.mid, in "proxy-connection".as_bytes())
+    )
+        || (
+        wrapping_sub(l.mid, l.lo) == 17 && is(in b, l.lo, l.mid, in "transfer-encoding".as_bytes())
+    )
+        || (wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in "upgrade".as_bytes())) {
+        return Option::Some(MessageError::ConnectionSpecificField);
+    }
+    if (wrapping_sub(l.mid, l.lo) == 2 && is(in b, l.lo, l.mid, in "te".as_bytes()))
+        && !(wrapping_sub(l.hi, l.mid) == 8 && is(in b, l.mid, l.hi, in "trailers".as_bytes())) {
+        return Option::Some(MessageError::ConnectionSpecificField);
+    }
+    Option::None
+}
+
+// `split`: the number of pseudo-headers, which come first.
+fn split(in b: Slice[u8], in starts: Slice[u64], in meta: Slice[u64]) -> Result[u64, MessageError] {
+    let n = starts.len();
+    let mut pseudo: u64 = 0;
+    for i in 0..n {
+        let l = line(in starts, in meta, i);
+        if l.mid > l.lo && byte(in b, l.lo) == 58 {
+            if pseudo != i {
+                return Result::Err(MessageError::PseudoAfterRegular);
+            }
+            for j in 0..i {
+                let p = line(in starts, in meta, j);
+                let earlier = Span {
+                    lo: p.lo,
+                    hi: p.mid
+                };
+                let this = Span {
+                    lo: l.lo,
+                    hi: l.mid
+                };
+                if same(in b, earlier, this) {
+                    return Result::Err(MessageError::DuplicatePseudoHeader);
+                }
+            }
+            pseudo = inc(pseudo);
+        } else {
+            match check_regular(in b, l) {
+                Option::Some(e) => return Result::Err(e),
+                Option::None => {}
+            }
+        }
+    }
+    Result::Ok(pseudo)
+}
+
+fn content_length(in b: Slice[u8], in starts: Slice[u64], in meta: Slice[u64], first: u64)
+    -> Result[Option[u64], MessageError] {
+    let mut found: Option[u64] = Option::None;
+    for i in first..starts.len() {
+        let l = line(in starts, in meta, i);
+        if (
+            wrapping_sub(l.mid, l.lo) == 14 && is(in b, l.lo, l.mid, in "content-length".as_bytes())
+        ) {
+            let len = wrapping_sub(l.hi, l.mid);
+            if len == 0 || len > 19 {
+                return Result::Err(MessageError::InvalidContentLength);
+            }
+            let mut v: u64 = 0;
+            for k in l.mid..l.hi {
+                let c = byte(in b, k);
+                if !is_digit(c) {
+                    return Result::Err(MessageError::InvalidContentLength);
+                }
+                // 19 digits fit a u64.
+                v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
+            }
+            match found {
+                Option::Some(prev) => {
+                    if prev != v {
+                        return Result::Err(MessageError::InvalidContentLength);
+                    }
+                }
+                Option::None => {}
+            }
+            found = Option::Some(v);
+        }
+    }
+    Result::Ok(found)
+}
+
+fn empty_or_none(s: Option[Span]) -> bool {
+    match s {
+        Option::Some(a) => a.hi == a.lo,
+        Option::None => true,
+    }
+}
+
+pub fn message_parse_request(in b: Slice[u8], in meta: Slice[u64])
+    -> Result[RequestParts, MessageError] {
+    let mut starts = ChunkSeq::new[u64]();
+    lines(in meta, inout starts);
+    let pseudo = match split(in b, in starts.as_slice(), in meta) {
+        Result::Ok(p) => p,
+        Result::Err(e) => return Result::Err(e),
+    };
+    let mut method: Option[Span] = Option::None;
+    let mut scheme: Option[Span] = Option::None;
+    let mut authority: Option[Span] = Option::None;
+    let mut path: Option[Span] = Option::None;
+    let mut protocol: Option[Span] = Option::None;
+    for i in 0..pseudo {
+        let l = line(in starts.as_slice(), in meta, i);
+        let v = Option::Some(
+            Span {
+                lo: l.mid,
+                hi: l.hi
+            }
+        );
+        // 1 method, 2 scheme, 3 authority, 4 path, 5 protocol.
+        let which: u64 = if (
+            wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in ":method".as_bytes())
+        ) {
+            1
+        } else if (
+            wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in ":scheme".as_bytes())
+        ) {
+            2
+        } else if (
+            wrapping_sub(l.mid, l.lo) == 10 && is(in b, l.lo, l.mid, in ":authority".as_bytes())
+        ) {
+            3
+        } else if (wrapping_sub(l.mid, l.lo) == 5 && is(in b, l.lo, l.mid, in ":path".as_bytes())) {
+            4
+        } else if (
+            wrapping_sub(l.mid, l.lo) == 9 && is(in b, l.lo, l.mid, in ":protocol".as_bytes())
+        ) {
+            5
+        } else {
+            return Result::Err(MessageError::UnknownPseudoHeader);
+        };
+        // Nothing at or below SP, and no DEL.
+        if !all_in(in b[l.mid..l.hi], 18446744065119617024, 9223372036854775807, true) {
+            return Result::Err(MessageError::InvalidPseudoHeader);
+        }
+        if !valid_utf8(in b[l.mid..l.hi]) {
+            return Result::Err(MessageError::InvalidFieldValue);
+        }
+        if which == 1 {
+            method = v;
+        } else if which == 2 {
+            scheme = v;
+        } else if which == 3 {
+            authority = v;
+        } else if which == 4 {
+            path = v;
+        } else {
+            protocol = v;
+        }
+    }
+    let m = match method {
+        Option::Some(m) => m,
+        Option::None => return Result::Err(MessageError::MissingPseudoHeader),
+    };
+    if m.hi == m.lo {
+        return Result::Err(MessageError::InvalidPseudoHeader);
+    }
+    if !all_in(in b[m.lo..m.hi], 288068722172624896, 6341068274398134270, false) {
+        return Result::Err(MessageError::InvalidPseudoHeader);
+    }
+    let connect = (wrapping_sub(m.hi, m.lo) == 7 && is(in b, m.lo, m.hi, in "CONNECT".as_bytes()));
+    match protocol {
+        Option::None => {
+            if connect {
+                return Result::Err(MessageError::UnsupportedConnect);
+            }
+        }
+        Option::Some(p) => {
+            if !connect || p.hi == p.lo {
+                return Result::Err(MessageError::InvalidPseudoHeader);
+            }
+        }
+    }
+    let s = match scheme {
+        Option::Some(s) => s,
+        Option::None => return Result::Err(MessageError::MissingPseudoHeader),
+    };
+    let p = match path {
+        Option::Some(p) => p,
+        Option::None => return Result::Err(MessageError::MissingPseudoHeader),
+    };
+    if p.hi == p.lo {
+        return Result::Err(MessageError::InvalidPseudoHeader);
+    }
+    let mut host: Option[Span] = Option::None;
+    let mut hosts: u64 = 0;
+    for i in pseudo..starts.len() {
+        let l = line(in starts.as_slice(), in meta, i);
+        if (wrapping_sub(l.mid, l.lo) == 4 && is(in b, l.lo, l.mid, in "host".as_bytes())) {
+            if hosts == 0 {
+                host = Option::Some(
+                    Span {
+                        lo: l.mid,
+                        hi: l.hi
+                    }
+                );
+            }
+            hosts = inc(hosts);
+        }
+    }
+    match authority {
+        Option::Some(a) => match host {
+            Option::Some(h) => {
+                if !same(in b, a, h) {
+                    return Result::Err(MessageError::AuthorityMismatch);
+                }
+            }
+            Option::None => {}
+        },
+        Option::None => {}
+    }
+    if hosts > 1 {
+        return Result::Err(MessageError::AuthorityMismatch);
+    }
+    let auth = match authority {
+        Option::Some(a) => Option::Some(a),
+        Option::None => match host {
+            Option::Some(h) => {
+                if !valid_utf8(in b[h.lo..h.hi]) {
+                    return Result::Err(MessageError::InvalidFieldValue);
+                }
+                Option::Some(h)
+            }
+            Option::None => Option::None,
+        },
+    };
+    if (
+        (wrapping_sub(s.hi, s.lo) == 4 && is(in b, s.lo, s.hi, in "http".as_bytes()))
+            || (wrapping_sub(s.hi, s.lo) == 5 && is(in b, s.lo, s.hi, in "https".as_bytes()))
+    )
+        && empty_or_none(auth) {
+        return Result::Err(MessageError::MissingPseudoHeader);
+    }
+    let cl = match content_length(in b, in starts.as_slice(), in meta, pseudo) {
+        Result::Ok(c) => c,
+        Result::Err(e) => return Result::Err(e),
+    };
+    let has_protocol = match protocol {
+        Option::Some(_x) => true,
+        Option::None => false,
+    };
+    if has_protocol && empty_or_none(auth) {
+        return Result::Err(MessageError::MissingPseudoHeader);
+    }
+    Result::Ok(
+        RequestParts {
+            method: m,
+            scheme: s,
+            authority: auth,
+            path: p,
+            protocol: protocol,
+            pseudo: pseudo,
+            content_length: cl
+        }
+    )
+}
+
+pub fn message_parse_response(in b: Slice[u8], in meta: Slice[u64])
+    -> Result[ResponseParts, MessageError] {
+    let mut starts = ChunkSeq::new[u64]();
+    lines(in meta, inout starts);
+    let pseudo = match split(in b, in starts.as_slice(), in meta) {
+        Result::Ok(p) => p,
+        Result::Err(e) => return Result::Err(e),
+    };
+    let mut status: u64 = 0;
+    let mut seen = false;
+    for i in 0..pseudo {
+        let l = line(in starts.as_slice(), in meta, i);
+        if !(wrapping_sub(l.mid, l.lo) == 7 && is(in b, l.lo, l.mid, in ":status".as_bytes())) {
+            return Result::Err(MessageError::UnknownPseudoHeader);
+        }
+        if wrapping_sub(l.hi, l.mid) != 3 {
+            return Result::Err(MessageError::InvalidStatus);
+        }
+        let mut v: u64 = 0;
+        for k in l.mid..l.hi {
+            let c = byte(in b, k);
+            if !is_digit(c) {
+                return Result::Err(MessageError::InvalidStatus);
+            }
+            v = wrapping_add(wrapping_mul(v, 10), widen_u64(wrapping_sub(c, 48)));
+        }
+        status = v;
+        seen = true;
+    }
+    if !seen {
+        return Result::Err(MessageError::MissingPseudoHeader);
+    }
+    if status < 100 || status > 599 {
+        return Result::Err(MessageError::InvalidStatus);
+    }
+    let cl = match content_length(in b, in starts.as_slice(), in meta, pseudo) {
+        Result::Ok(c) => c,
+        Result::Err(e) => return Result::Err(e),
+    };
+    Result::Ok(
+        ResponseParts {
+            status: wrapping_u16(status),
+            pseudo: pseudo,
+            content_length: cl
+        }
+    )
+}
+
+pub fn message_check_trailers(in b: Slice[u8], in meta: Slice[u64]) -> Option[MessageError] {
+    let mut starts = ChunkSeq::new[u64]();
+    lines(in meta, inout starts);
+    for i in 0..starts.len() {
+        let l = line(in starts.as_slice(), in meta, i);
+        if l.mid > l.lo && byte(in b, l.lo) == 58 {
+            return Option::Some(MessageError::UnknownPseudoHeader);
+        }
+        match check_regular(in b, l) {
+            Option::Some(e) => return Option::Some(e),
+            Option::None => {}
+        }
+    }
+    Option::None
+}

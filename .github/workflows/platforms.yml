@@ -58,6 +58,7 @@ jobs:
       sha: ${{ steps.plan.outputs.sha }}
       profile: ${{ steps.plan.outputs.profile }}
       groups: ${{ steps.plan.outputs.groups }}
+      ports: ${{ steps.ports.outputs.crates }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -78,6 +79,17 @@ jobs:
           python scripts/ci/platform_test_plan.py --profile "$REQUESTED_PROFILE" \
             --base "$BASE_SHA" --head "$(git rev-parse HEAD)" \
             --github-output "$GITHUB_OUTPUT" --output "$RUNNER_TEMP/platform-plan.json"
+      - id: ports
+        name: Choose the ports to test
+        env:
+          REQUESTED_PROFILE: ${{ inputs.profile || (github.event_name == 'schedule' && 'full') || 'pr' }}
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          crates=$(python scripts/ci/port_harness_selection.py --profile "$REQUESTED_PROFILE" \
+            --event "$EVENT" --base "$BASE_SHA" --head "$(git rev-parse HEAD)")
+          echo "ports to test: $crates"
+          echo "crates=$crates" >> "$GITHUB_OUTPUT"
       - name: Preserve platform plan
         uses: actions/upload-artifact@v4
         with:
@@ -125,6 +137,10 @@ jobs:
         run: |
           cargo build --locked --bin vesper
           VESPER_NATIVE_BINARY=target/debug/vesper scripts/ci/test-native-executables.sh
+      - name: Test the Cranelift C-ABI shim
+        # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
+        # crates/vesper-cranelift-sys, links the object it builds and runs it.
+        run: cargo test --locked -p vesper-cranelift-sys
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the
@@ -168,6 +184,10 @@ jobs:
         run: |
           cargo build --locked --bin vesper
           VESPER_NATIVE_BINARY=target/debug/vesper.exe VESPER_NATIVE_SUFFIX=.exe scripts/ci/test-native-executables.sh
+      - name: Test the Cranelift C-ABI shim
+        # Self-hosting SH0 lane 4 (#1126): Vesper drives Cranelift through
+        # crates/vesper-cranelift-sys, links the object it builds and runs it.
+        run: cargo test --locked -p vesper-cranelift-sys
       - name: Test the Vesper port export ABI
         # Only the host-sensitive tier of the port harness: the pilot's export
         # ABI v2/v3 libraries and divergence checks, package linking and the
@@ -179,24 +199,16 @@ jobs:
 
   # The ported crates' tests and divergence checks are platform-neutral, so
   # they run once, here (#1010). Bazel on BuildBuddy builds the same ports.
-  # Three parallel shards of the harness (#1019) keep each under ~25 min.
-  ports:
+  # One optimized compiler build is shared by every shard (#1103): nearly all
+  # of the harness's time is the compiler compiling Vesper sources, which a
+  # debug build of it did several times slower.
+  ports-compiler:
     needs: plan
-    if: ${{ always() && !cancelled() }}
-    name: Vesper ports (Linux ${{ matrix.shard }}/3)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3]
+    if: ${{ always() && !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.ports != 'none' }}
+    name: Vesper ports compiler
     runs-on: ubuntu-latest
-    # Every port's both-builds tests and divergent builds run serially
-    # here; with serde (#916) last, the harness takes over 60 minutes.
-    timeout-minutes: 90
+    timeout-minutes: 30
     steps:
-      - name: Require successful profile planning
-        env:
-          PLAN_RESULT: ${{ needs.plan.result }}
-        run: test "$PLAN_RESULT" = success
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.plan.outputs.sha }}
@@ -207,15 +219,78 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ports-${{ matrix.shard }}
-      - name: Build the compiler
-        run: cargo build --locked --bin vesper
-      - name: Test the Vesper port harness
-        # Every port compiles with the vesper binary built above.
+          key: ports-compiler
+      - name: Build the compiler (port-compiler profile)
+        run: cargo build --locked --profile port-compiler --bin vesper
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vesper-port-compiler
+          path: target/port-compiler/vesper
+          retention-days: 1
+          overwrite: true
+
+  # Seven parallel shards of the harness (#1019, #1100) keep each near 30
+  # min; with three, the last one ran past 90 min. On pull requests the plan
+  # names the affected ports (scripts/ci/port_harness_selection.py): a change
+  # inside some ports' crates tests only those ports and their dependents;
+  # anything else, and every push to main and nightly, tests them all.
+  ports:
+    needs: [plan, ports-compiler]
+    if: ${{ always() && !cancelled() }}
+    name: Vesper ports (Linux ${{ matrix.shard }}/7)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-latest
+    # A backstop: each shard's tests and divergent builds take about
+    # 10-30 minutes (scripts/test-port-harness.sh).
+    timeout-minutes: 60
+    steps:
+      - name: Require successful profile planning
         env:
-          VESPER_PORT_COMPILER: ${{ github.workspace }}/target/debug/vesper
+          PLAN_RESULT: ${{ needs.plan.result }}
+        run: test "$PLAN_RESULT" = success
+      - name: Require the shared compiler
+        env:
+          PORTS: ${{ needs.plan.outputs.ports }}
+          COMPILER_RESULT: ${{ needs.ports-compiler.result }}
+        run: |
+          if [ "$PORTS" = none ]; then
+            echo "no port is affected by this change; nothing to test"
+          else
+            test "$COMPILER_RESULT" = success
+          fi
+      - if: ${{ needs.plan.outputs.ports != 'none' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Verify exact checkout
+        if: ${{ needs.plan.outputs.ports != 'none' }}
+        env:
+          EXPECTED_SHA: ${{ needs.plan.outputs.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - if: ${{ needs.plan.outputs.ports != 'none' }}
+        uses: dtolnay/rust-toolchain@stable
+      - if: ${{ needs.plan.outputs.ports != 'none' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ports-${{ matrix.shard }}
+      - if: ${{ needs.plan.outputs.ports != 'none' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: vesper-port-compiler
+          path: ${{ runner.temp }}/port-compiler
+      - name: Test the Vesper port harness
+        if: ${{ needs.plan.outputs.ports != 'none' }}
+        # Every port compiles with the shared compiler downloaded above.
+        env:
+          VESPER_PORT_COMPILER: ${{ runner.temp }}/port-compiler/vesper
           VESPER_PORT_HARNESS_SHARD: ${{ matrix.shard }}
-        run: scripts/test-port-harness.sh
+          VESPER_PORT_HARNESS_CRATES: ${{ needs.plan.outputs.ports }}
+        run: |
+          chmod +x "$VESPER_PORT_COMPILER"
+          scripts/test-port-harness.sh
 
   complete:
     name: Platform validation complete

@@ -820,6 +820,7 @@ fn ast_walk(
             | ExprKind::For { .. }
             | ExprKind::Range { .. }
             | ExprKind::Break(_)
+            | ExprKind::Continue
             | ExprKind::Return(_)) => {
                 if let ExprKind::For { pat, .. } = k {
                     pattern_walk(pat, next, b)?;

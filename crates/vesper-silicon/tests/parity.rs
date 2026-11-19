@@ -626,3 +626,196 @@ impl TakeCount for port::aia::AplicDomain {
         self.take_msis().len()
     }
 }
+
+// ---------------------------------------------------------------- interrupt fabric
+
+/// One scripted run of the interrupt fabric on a platform, as text: the
+/// construction, every installed handler, then `steps` random operations
+/// (device lines, register reads and writes across every controller window,
+/// MTIME, MSIs, IMSIC and hypervisor CSRs), with the delivery log after
+/// each. Each build runs the same script.
+macro_rules! fabric_script {
+    ($name:ident, $s:ident) => {
+        fn $name(blob: &[u8], supervisor: bool, seed: u64, steps: usize) -> Vec<String> {
+            use $s::dtb::Platform;
+            use $s::intc::{Ctl, Privilege, RiscvIntc};
+            use $s::ledger::Ledger;
+            let mut out = Vec::new();
+            let p = match Platform::from_dtb(blob) {
+                Ok(p) => p,
+                Err(e) => return vec![format!("platform {e:?}")],
+            };
+            let ledger = Ledger::new();
+            let level = if supervisor {
+                Privilege::Supervisor
+            } else {
+                Privilege::Machine
+            };
+            let mut intc = match RiscvIntc::new(&p, level, &ledger) {
+                Ok(i) => i,
+                Err(e) => return vec![format!("new {e:?}")],
+            };
+            let harts = intc.hart_ids();
+            if harts.is_empty() {
+                return vec!["no harts".to_string()];
+            }
+            let mut devices: Vec<String> = Vec::new();
+            for l in &p.irq_lines {
+                if !devices.contains(&l.device) {
+                    devices.push(l.device.clone());
+                }
+            }
+            for (i, d) in devices.iter().enumerate() {
+                let ctl = p.irq_lines.iter().filter(|l| &l.device == d).find_map(|l| {
+                    p.plics
+                        .iter()
+                        .position(|c| c.path == l.controller)
+                        .map(Ctl::Plic)
+                        .or_else(|| {
+                            p.aplics
+                                .iter()
+                                .position(|a| a.path == l.controller)
+                                .map(Ctl::Aplic)
+                        })
+                });
+                let hart = harts[i % harts.len()];
+                let r = intc.install_isr(&p, d, hart, 1 + (i % 7) as u32, move |ev| {
+                    if let Some(ctl) = ctl {
+                        let _ = ev.intc.set_controller_line(ctl, ev.source, false);
+                    }
+                });
+                out.push(format!("isr {d} {r:?}"));
+            }
+            for (i, &h) in harts.iter().enumerate() {
+                let r = intc.install_msi(h, 1 + (i % 7) as u32, |_| {});
+                out.push(format!("msi {h} {r:?}"));
+                if supervisor {
+                    let r = intc.install_guest_msi(h, 1, |_| {});
+                    out.push(format!("guest {h} {r:?}"));
+                }
+                if let Ok(a) = intc.local_addr(h, if supervisor { 1 } else { 3 }) {
+                    let r = intc.on_software(h, move |ev| {
+                        if supervisor {
+                            ev.intc.clear_ssip(ev.hart);
+                        } else {
+                            let _ = ev.intc.write32(a, 0);
+                        }
+                    });
+                    out.push(format!("sw {h} {r:?}"));
+                }
+                if !supervisor && let Ok(a) = intc.local_addr(h, 7) {
+                    let r = intc.on_timer(h, move |ev| {
+                        let _ = ev.intc.write32(a + 4, u32::MAX);
+                    });
+                    out.push(format!("timer {h} {r:?}"));
+                }
+            }
+            // Register windows: (base, size) of every controller.
+            let mut windows: Vec<(u64, u64)> = Vec::new();
+            windows.extend(
+                p.plics
+                    .iter()
+                    .map(|c| (c.base, c.size.min(0x20_0000 + 0x8000))),
+            );
+            windows.extend(p.aplics.iter().map(|a| (a.base, a.size.min(0x8000))));
+            for m in &p.imsics {
+                windows.extend(m.files.iter().map(|&f| (f, 0x1000)));
+            }
+            for c in &p.clints {
+                windows.extend(c.regs.iter().map(|r| (r.base, r.size.min(0x10000))));
+            }
+            let mut x = seed | 1;
+            let mut next = || {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x
+            };
+            for step in 0..steps {
+                let r = next();
+                let hart = harts[(r >> 8) as usize % harts.len()];
+                let line = match r % 9 {
+                    0..=2 if !devices.is_empty() => {
+                        let d = &devices[(r >> 16) as usize % devices.len()];
+                        format!("line {:?}", intc.set_device_line(&p, d, r & 64 != 0))
+                    }
+                    3 | 4 if !windows.is_empty() => {
+                        let (base, size) = windows[(r >> 16) as usize % windows.len()];
+                        let off = (next() % size.max(4)) & !3;
+                        let v = next() as u32;
+                        format!("w32 {:?}", intc.write32(base + off, v))
+                    }
+                    5 if !windows.is_empty() => {
+                        let (base, size) = windows[(r >> 16) as usize % windows.len()];
+                        let off = (next() % size.max(4)) & !3;
+                        format!("r32 {:?}", intc.read32(base + off))
+                    }
+                    6 => {
+                        intc.advance_mtime(next() % 4096);
+                        format!("mtime {}", intc.handle().mtime(hart))
+                    }
+                    7 => match intc.msi_target(hart) {
+                        Ok(a) => format!("msi {:?}", intc.msi_write(a, (next() % 300) as u32)),
+                        Err(e) => format!("msi {e:?}"),
+                    },
+                    _ => {
+                        let isel = [0x70u32, 0x72, 0x80, 0xc0, 0x81, 0xc1][(r >> 16) as usize % 6];
+                        let w = intc.imsic_csr_write(hart, level, isel, next());
+                        let t = intc.claim_topei(hart, level);
+                        intc.set_vgein(hart, (next() % 3) as u32);
+                        intc.set_hgeie(hart, next());
+                        let g = intc.vs_imsic_csr_write(hart, 0x70, 1);
+                        format!(
+                            "csr {w:?} {t:?} {g:?} {:?} {} {}",
+                            intc.claim_vstopei(hart),
+                            intc.hgeip(hart),
+                            intc.hyp_pending(hart)
+                        )
+                    }
+                };
+                out.push(format!("{step} {line} {}", intc.deliveries().len()));
+            }
+            out.push(format!("{:?}", intc.deliveries()));
+            out.push(format!("{:?}", intc.external_deliveries()));
+            out.push(format!("{:?}", intc.guest_deliveries()));
+            out.push(format!("{:?}", intc.stats()));
+            out.push(format!("{:?}", intc.lost_msis()));
+            out
+        }
+    };
+}
+
+fabric_script!(fabric_port, port);
+fabric_script!(fabric_rust, rust);
+
+#[test]
+fn interrupt_fabrics_match() {
+    let (mut riscv, mut delivered, mut external) = (0, 0, 0);
+    for (i, blob) in FIXTURES.iter().enumerate() {
+        for supervisor in [false, true] {
+            for seed in 0..3u64 {
+                let s = 0x5eed_0000 + 97 * i as u64 + seed;
+                let p = fabric_port(blob, supervisor, s, 200);
+                let r = fabric_rust(blob, supervisor, s, 200);
+                if p.len() > 1 {
+                    riscv += 1;
+                    delivered += usize::from(p[p.len() - 5] != "[]");
+                    external += usize::from(p[p.len() - 4] != "[]");
+                }
+                for (k, (a, b)) in p.iter().zip(&r).enumerate() {
+                    assert_eq!(
+                        a, b,
+                        "fixture {i} supervisor {supervisor} seed {seed} line {k}"
+                    );
+                }
+                assert_eq!(p.len(), r.len(), "fixture {i}");
+            }
+        }
+    }
+    eprintln!("{riscv} fabric runs, {delivered} with deliveries, {external} with external ones");
+    assert!(riscv > 20, "only {riscv} fabric runs");
+    assert!(
+        external > riscv / 2,
+        "only {external} of {riscv} runs delivered"
+    );
+}

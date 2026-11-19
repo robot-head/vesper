@@ -30,6 +30,17 @@ fn main() {
             .binding("port/gauge.rs")
             .rust_types("crate::gauge")
             .build();
+        // The export ABI widening library (#1087): `f32`, `in` handles lent
+        // in place, and handles that own sequences of handles and boxed
+        // trait objects. It has no Rust build: it pins the boundary forms.
+        vesper_port_harness::Port::new("widen", "vesper/widen.ves")
+            .binding("port/widen.rs")
+            .build();
+        // The fixed-size array library (#1091): `[T; N]` fields of copy
+        // structs lent in place. It has no Rust build either.
+        vesper_port_harness::Port::new("arrays", "vesper/arrays.ves")
+            .binding("port/arrays.rs")
+            .build();
     }
 }
 

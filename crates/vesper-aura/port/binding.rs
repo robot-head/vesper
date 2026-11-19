@@ -1699,126 +1699,113 @@ pub fn limits_valid(limits: &[u64]) -> bool {
 /// Calls `prepared_fault` of the Vesper library `aura` (`vesper_aura_prepared_fault`).
 pub fn prepared_fault(p: &Prepared) -> Option<ViewFault> {
     let mut result = [0u64; 4];
-    let mut arg_p = p.words;
     // SAFETY: `vesper_aura_prepared_fault` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_prepared_fault(result.as_mut_ptr(), arg_p.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_prepared_fault(result.as_mut_ptr(), p.words.as_ptr().cast_mut()) };
     <Option<ViewFault> as Abi>::get(&result[0..])
 }
 
 /// Calls `prepared_header` of the Vesper library `aura` (`vesper_aura_prepared_header`).
 pub fn prepared_header(p: &Prepared) -> (u64, u64, u64) {
     let mut result = [0u64; 3];
-    let mut arg_p = p.words;
     // SAFETY: `vesper_aura_prepared_header` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_prepared_header(result.as_mut_ptr(), arg_p.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_prepared_header(result.as_mut_ptr(), p.words.as_ptr().cast_mut()) };
     <(u64, u64, u64) as Abi>::get(&result[0..])
 }
 
 /// Calls `prepared_ops` of the Vesper library `aura` (`vesper_aura_prepared_ops`).
 pub fn prepared_ops(p: &Prepared) -> Vec<Op> {
-    let mut arg_p = p.words;
     // SAFETY: `vesper_aura_prepared_ops` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_prepared_ops(arg_p.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_prepared_ops(p.words.as_ptr().cast_mut()) };
     unsafe { vesper_port_abi::seq_take::<Op>(RUNTIME, raw as u64) }
 }
 
 /// Calls `query_answer` of the Vesper library `aura` (`vesper_aura_query_answer`).
 pub fn query_answer(q: &Query) -> (u64, bool, u64, bool, u64, u64) {
     let mut result = [0u64; 6];
-    let mut arg_q = q.words;
     // SAFETY: `vesper_aura_query_answer` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_query_answer(result.as_mut_ptr(), arg_q.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_query_answer(result.as_mut_ptr(), q.words.as_ptr().cast_mut()) };
     <(u64, bool, u64, bool, u64, u64) as Abi>::get(&result[0..])
 }
 
 /// Calls `query_counts` of the Vesper library `aura` (`vesper_aura_query_counts`).
 pub fn query_counts(q: &Query) -> (u64, u64) {
     let mut result = [0u64; 2];
-    let mut arg_q = q.words;
     // SAFETY: `vesper_aura_query_counts` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_query_counts(result.as_mut_ptr(), arg_q.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_query_counts(result.as_mut_ptr(), q.words.as_ptr().cast_mut()) };
     <(u64, u64) as Abi>::get(&result[0..])
 }
 
 /// Calls `query_fault` of the Vesper library `aura` (`vesper_aura_query_fault`).
 pub fn query_fault(q: &Query) -> Option<ViewFault> {
     let mut result = [0u64; 4];
-    let mut arg_q = q.words;
     // SAFETY: `vesper_aura_query_fault` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_query_fault(result.as_mut_ptr(), arg_q.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_query_fault(result.as_mut_ptr(), q.words.as_ptr().cast_mut()) };
     <Option<ViewFault> as Abi>::get(&result[0..])
 }
 
 /// Calls `query_items` of the Vesper library `aura` (`vesper_aura_query_items`).
 pub fn query_items(q: &Query) -> Vec<u64> {
-    let mut arg_q = q.words;
     // SAFETY: `vesper_aura_query_items` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_query_items(arg_q.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_query_items(q.words.as_ptr().cast_mut()) };
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 
 /// Calls `query_values` of the Vesper library `aura` (`vesper_aura_query_values`).
 pub fn query_values(q: &Query) -> Vec<u64> {
-    let mut arg_q = q.words;
     // SAFETY: `vesper_aura_query_values` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_query_values(arg_q.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_query_values(q.words.as_ptr().cast_mut()) };
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 
 /// Calls `reconciler_adopt` of the Vesper library `aura` (`vesper_aura_reconciler_adopt`).
 pub fn reconciler_adopt(r: &mut Reconciler, p: &Prepared) -> () {
-    let mut arg_p = p.words;
     // SAFETY: `vesper_aura_reconciler_adopt` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_reconciler_adopt(r.words.as_mut_ptr(), arg_p.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_reconciler_adopt(r.words.as_mut_ptr(), p.words.as_ptr().cast_mut()) };
     { let _ = raw; }
 }
 
 /// Calls `reconciler_close_check` of the Vesper library `aura` (`vesper_aura_reconciler_close_check`).
 pub fn reconciler_close_check(r: &Reconciler, session: u64, id: u64) -> u64 {
-    let mut arg_r = r.words;
     // SAFETY: `vesper_aura_reconciler_close_check` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_reconciler_close_check(arg_r.as_mut_ptr(), session as i64, id as i64) };
+    let raw = unsafe { vesper_aura_reconciler_close_check(r.words.as_ptr().cast_mut(), session as i64, id as i64) };
     raw as u64
 }
 
 /// Calls `reconciler_close_state` of the Vesper library `aura` (`vesper_aura_reconciler_close_state`).
 pub fn reconciler_close_state(r: &Reconciler) -> u64 {
-    let mut arg_r = r.words;
     // SAFETY: `vesper_aura_reconciler_close_state` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_reconciler_close_state(arg_r.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_reconciler_close_state(r.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
 /// Calls `reconciler_commit_check` of the Vesper library `aura` (`vesper_aura_reconciler_commit_check`).
 pub fn reconciler_commit_check(r: &Reconciler, p: &Prepared) -> u64 {
-    let mut arg_r = r.words;
-    let mut arg_p = p.words;
     // SAFETY: `vesper_aura_reconciler_commit_check` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_reconciler_commit_check(arg_r.as_mut_ptr(), arg_p.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_reconciler_commit_check(r.words.as_ptr().cast_mut(), p.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
@@ -1853,11 +1840,10 @@ pub fn reconciler_new(session: u64, limits: &[u64]) -> Reconciler {
 /// Calls `reconciler_prepare` of the Vesper library `aura` (`vesper_aura_reconciler_prepare`).
 pub fn reconciler_prepare(r: &Reconciler, has_tree: bool, words: &[u64], text: &[u8]) -> Prepared {
     let mut result = [0u64; 33];
-    let mut arg_r = r.words;
     // SAFETY: `vesper_aura_reconciler_prepare` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = vesper_port_abi::with_slice(words, |view_words| vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_aura_reconciler_prepare(result.as_mut_ptr(), arg_r.as_mut_ptr(), has_tree as i64, view_words, view_text) }));
+    let raw = vesper_port_abi::with_slice(words, |view_words| vesper_port_abi::with_slice(text, |view_text| unsafe { vesper_aura_reconciler_prepare(result.as_mut_ptr(), r.words.as_ptr().cast_mut(), has_tree as i64, view_words, view_text) }));
     unsafe { Prepared::from_words(&result[0..]) }
 }
 
@@ -1882,54 +1868,49 @@ pub fn reconciler_request_close(r: &mut Reconciler) -> CloseRequest {
 
 /// Calls `reconciler_reserve` of the Vesper library `aura` (`vesper_aura_reconciler_reserve`).
 pub fn reconciler_reserve(r: &mut Reconciler, p: &Prepared) -> () {
-    let mut arg_p = p.words;
     // SAFETY: `vesper_aura_reconciler_reserve` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_reconciler_reserve(r.words.as_mut_ptr(), arg_p.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_reconciler_reserve(r.words.as_mut_ptr(), p.words.as_ptr().cast_mut()) };
     { let _ = raw; }
 }
 
 /// Calls `reconciler_revision` of the Vesper library `aura` (`vesper_aura_reconciler_revision`).
 pub fn reconciler_revision(r: &Reconciler) -> u64 {
-    let mut arg_r = r.words;
     // SAFETY: `vesper_aura_reconciler_revision` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_reconciler_revision(arg_r.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_reconciler_revision(r.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
 /// Calls `reconciler_slot` of the Vesper library `aura` (`vesper_aura_reconciler_slot`).
 pub fn reconciler_slot(r: &Reconciler, key: u64, property: u64) -> Option<u64> {
     let mut result = [0u64; 2];
-    let mut arg_r = r.words;
     // SAFETY: `vesper_aura_reconciler_slot` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_reconciler_slot(result.as_mut_ptr(), arg_r.as_mut_ptr(), key as i64, property as i64) };
+    let raw = unsafe { vesper_aura_reconciler_slot(result.as_mut_ptr(), r.words.as_ptr().cast_mut(), key as i64, property as i64) };
     <Option<u64> as Abi>::get(&result[0..])
 }
 
 /// Calls `reconciler_subscription` of the Vesper library `aura` (`vesper_aura_reconciler_subscription`).
 pub fn reconciler_subscription(r: &Reconciler, key: u64, event: u64) -> Option<u64> {
     let mut result = [0u64; 2];
-    let mut arg_r = r.words;
     // SAFETY: `vesper_aura_reconciler_subscription` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_reconciler_subscription(result.as_mut_ptr(), arg_r.as_mut_ptr(), key as i64, event as i64) };
+    let raw = unsafe { vesper_aura_reconciler_subscription(result.as_mut_ptr(), r.words.as_ptr().cast_mut(), key as i64, event as i64) };
     <Option<u64> as Abi>::get(&result[0..])
 }
 
 /// Calls `reconciler_widget` of the Vesper library `aura` (`vesper_aura_reconciler_widget`).
 pub fn reconciler_widget(r: &Reconciler, key: u64) -> Option<u64> {
     let mut result = [0u64; 2];
-    let mut arg_r = r.words;
     // SAFETY: `vesper_aura_reconciler_widget` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_reconciler_widget(result.as_mut_ptr(), arg_r.as_mut_ptr(), key as i64) };
+    let raw = unsafe { vesper_aura_reconciler_widget(result.as_mut_ptr(), r.words.as_ptr().cast_mut(), key as i64) };
     <Option<u64> as Abi>::get(&result[0..])
 }
 
@@ -1945,55 +1926,50 @@ pub fn recorder_apply(rec: &mut Recorder, session: u64, base: u64, next: u64, w:
 
 /// Calls `recorder_assign` of the Vesper library `aura` (`vesper_aura_recorder_assign`).
 pub fn recorder_assign(dst: &mut Recorder, src: &Recorder) -> () {
-    let mut arg_src = src.words;
     // SAFETY: `vesper_aura_recorder_assign` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_recorder_assign(dst.words.as_mut_ptr(), arg_src.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_recorder_assign(dst.words.as_mut_ptr(), src.words.as_ptr().cast_mut()) };
     { let _ = raw; }
 }
 
 /// Calls `recorder_check_slot` of the Vesper library `aura` (`vesper_aura_recorder_check_slot`).
 pub fn recorder_check_slot(rec: &Recorder, session: u64, serial: u64) -> Option<BackendFault> {
     let mut result = [0u64; 3];
-    let mut arg_rec = rec.words;
     // SAFETY: `vesper_aura_recorder_check_slot` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_recorder_check_slot(result.as_mut_ptr(), arg_rec.as_mut_ptr(), session as i64, serial as i64) };
+    let raw = unsafe { vesper_aura_recorder_check_slot(result.as_mut_ptr(), rec.words.as_ptr().cast_mut(), session as i64, serial as i64) };
     <Option<BackendFault> as Abi>::get(&result[0..])
 }
 
 /// Calls `recorder_check_widget` of the Vesper library `aura` (`vesper_aura_recorder_check_widget`).
 pub fn recorder_check_widget(rec: &Recorder, session: u64, serial: u64) -> Option<BackendFault> {
     let mut result = [0u64; 3];
-    let mut arg_rec = rec.words;
     // SAFETY: `vesper_aura_recorder_check_widget` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_recorder_check_widget(result.as_mut_ptr(), arg_rec.as_mut_ptr(), session as i64, serial as i64) };
+    let raw = unsafe { vesper_aura_recorder_check_widget(result.as_mut_ptr(), rec.words.as_ptr().cast_mut(), session as i64, serial as i64) };
     <Option<BackendFault> as Abi>::get(&result[0..])
 }
 
 /// Calls `recorder_clone` of the Vesper library `aura` (`vesper_aura_recorder_clone`).
 pub fn recorder_clone(rec: &Recorder) -> Recorder {
     let mut result = [0u64; 50];
-    let mut arg_rec = rec.words;
     // SAFETY: `vesper_aura_recorder_clone` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_recorder_clone(result.as_mut_ptr(), arg_rec.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_recorder_clone(result.as_mut_ptr(), rec.words.as_ptr().cast_mut()) };
     unsafe { Recorder::from_words(&result[0..]) }
 }
 
 /// Calls `recorder_dispatch` of the Vesper library `aura` (`vesper_aura_recorder_dispatch`).
 pub fn recorder_dispatch(rec: &Recorder, session: u64, serial: u64) -> Result<u64, BackendFault> {
     let mut result = [0u64; 3];
-    let mut arg_rec = rec.words;
     // SAFETY: `vesper_aura_recorder_dispatch` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_recorder_dispatch(result.as_mut_ptr(), arg_rec.as_mut_ptr(), session as i64, serial as i64) };
+    let raw = unsafe { vesper_aura_recorder_dispatch(result.as_mut_ptr(), rec.words.as_ptr().cast_mut(), session as i64, serial as i64) };
     <Result<u64, BackendFault> as Abi>::get(&result[0..])
 }
 
@@ -2029,55 +2005,50 @@ pub fn recorder_set_user_state(rec: &mut Recorder, session: u64, serial: u64, us
 /// Calls `sim_audit` of the Vesper library `aura` (`vesper_aura_sim_audit`).
 pub fn sim_audit(rec: &Recorder) -> Query {
     let mut result = [0u64; 24];
-    let mut arg_rec = rec.words;
     // SAFETY: `vesper_aura_sim_audit` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_sim_audit(result.as_mut_ptr(), arg_rec.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_sim_audit(result.as_mut_ptr(), rec.words.as_ptr().cast_mut()) };
     unsafe { Query::from_words(&result[0..]) }
 }
 
 /// Calls `sim_focus` of the Vesper library `aura` (`vesper_aura_sim_focus`).
 pub fn sim_focus(rec: &Recorder, has_focus: bool, focused: u64, forward: bool) -> Query {
     let mut result = [0u64; 24];
-    let mut arg_rec = rec.words;
     // SAFETY: `vesper_aura_sim_focus` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_sim_focus(result.as_mut_ptr(), arg_rec.as_mut_ptr(), has_focus as i64, focused as i64, forward as i64) };
+    let raw = unsafe { vesper_aura_sim_focus(result.as_mut_ptr(), rec.words.as_ptr().cast_mut(), has_focus as i64, focused as i64, forward as i64) };
     unsafe { Query::from_words(&result[0..]) }
 }
 
 /// Calls `sim_focusable` of the Vesper library `aura` (`vesper_aura_sim_focusable`).
 pub fn sim_focusable(rec: &Recorder) -> Query {
     let mut result = [0u64; 24];
-    let mut arg_rec = rec.words;
     // SAFETY: `vesper_aura_sim_focusable` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_sim_focusable(result.as_mut_ptr(), arg_rec.as_mut_ptr()) };
+    let raw = unsafe { vesper_aura_sim_focusable(result.as_mut_ptr(), rec.words.as_ptr().cast_mut()) };
     unsafe { Query::from_words(&result[0..]) }
 }
 
 /// Calls `sim_still_focusable` of the Vesper library `aura` (`vesper_aura_sim_still_focusable`).
 pub fn sim_still_focusable(rec: &Recorder, widget: u64) -> Query {
     let mut result = [0u64; 24];
-    let mut arg_rec = rec.words;
     // SAFETY: `vesper_aura_sim_still_focusable` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_sim_still_focusable(result.as_mut_ptr(), arg_rec.as_mut_ptr(), widget as i64) };
+    let raw = unsafe { vesper_aura_sim_still_focusable(result.as_mut_ptr(), rec.words.as_ptr().cast_mut(), widget as i64) };
     unsafe { Query::from_words(&result[0..]) }
 }
 
 /// Calls `sim_trigger` of the Vesper library `aura` (`vesper_aura_sim_trigger`).
 pub fn sim_trigger(rec: &Recorder, same_session: bool, widget: u64, event: u64) -> Query {
     let mut result = [0u64; 24];
-    let mut arg_rec = rec.words;
     // SAFETY: `vesper_aura_sim_trigger` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_aura_sim_trigger(result.as_mut_ptr(), arg_rec.as_mut_ptr(), same_session as i64, widget as i64, event as i64) };
+    let raw = unsafe { vesper_aura_sim_trigger(result.as_mut_ptr(), rec.words.as_ptr().cast_mut(), same_session as i64, widget as i64, event as i64) };
     unsafe { Query::from_words(&result[0..]) }
 }
 

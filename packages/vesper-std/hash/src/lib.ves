@@ -1,0 +1,18 @@
+// @vesper-std/hash: content digests and table hashes (self-hosting SH0
+// lane 5, #1127).
+//
+// Modules:
+// - `blake3`: BLAKE3 in portable Vesper (`blake3`, `blake3_keyed`,
+//   `blake3_derive_key`, the incremental `Blake3` with extendable output,
+//   and the copy `Digest`). Code linked into a Rust host calls the vetted
+//   `blake3` crate through `@vesper-std/hash-sys` instead (`sys/`).
+// - `fast`: non-cryptographic hashes for tables and caches: FNV-1a (32 and
+//   64 bit), XXH64, and the 64-bit finalizer `mix64` and `hash_pair`.
+//
+// Every function is total and deterministic: no result depends on
+// addresses, capacity or the platform.
+
+// The package version, for diagnostics.
+pub fn version() -> u64 {
+    1
+}

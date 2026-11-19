@@ -132,3 +132,5 @@ whenever they are green.
 
 When lanes 1 and 2 have merged and #611 is close, the next plan writes P3b from
 this table.
+
+P3b is planned in [port-p3b](../port-p3b/README.md) (#1063-#1071).

@@ -1,4 +1,4 @@
-# Port wave P3a lane 7: vesper-silicon, part 1 (devicetree parsing and the AIA models)
+# Port wave P3a lane 7: vesper-silicon, parts 1-2 (devicetree parsing, the AIA models and the interrupt fabric)
 
 Claim [#1042](https://github.com/robot-head/vesper/issues/1042). Base `main` at
 3c075a4 (2026-11-18). Plan: `docs/agent-prompts/port-p3/07-silicon.md`
@@ -8,8 +8,9 @@ This is the first part of the lane. It splits the crate into the seed copy and
 the port-backed build, and ports the two pieces with the most untrusted-input
 and state-machine logic that nothing else in the crate depends on:
 `DeviceTree::parse` and the RISC-V AIA register models (`ImsicFile`,
-`AplicDomain`). The rest of the lane's list (see "Not ported yet") follows in
-later parts.
+`AplicDomain`). Part 2 (below, "Part 2: the interrupt fabric") ports the
+controller state of `intc.rs`. The rest of the lane's list (see "Not ported
+yet") follows in later parts.
 
 ## Builds
 
@@ -33,7 +34,7 @@ is (`vesper_silicon::IMPLEMENTATION`).
 |---|--:|---|---|
 | `dtb` | 2,911 | `DeviceTree` (`parse`, tree access, property decoding, `reg`/`ranges`/`dma-ranges` translation, PCI windows, interrupt parents and `interrupt-map` nexus resolution), `Platform::from_tree` and its queries, `place_dynamic`, `isa_has_extension`, `requester_id`, the info types | `DeviceTree::parse` (header, reservation block, structure block, strings, phandle table, every error) |
 | `aia` | 1,008 | `ImsicFile`, `AplicDomain`, `MsiAddrCfg::address`/`hart_of`, `SourceMode`, `Msi`, `AiaError`, register constants | `ImsicFile` and `AplicDomain` (every method), `MsiAddrCfg::address` |
-| `intc` | 2,765 | PLIC/APLIC/IMSIC/CLINT emulation wired to harts (`RiscvIntc`, `IntcHandle`, ...) | later part; it now drives the ported AIA models |
+| `intc` | 2,765 | PLIC/APLIC/IMSIC/CLINT emulation wired to harts (`RiscvIntc`, `IntcHandle`, ...) | part 2: the controller state and its operations; dispatch, routing and the handler table stay Rust |
 | `dma`, `frames`, `ccache`, `ledger`, `irq` | 2,016 | DMA ranges and transfers, frame allocator and auditor, SiFive cache controller, the leak ledger, IrqGuard `Cpu` | later parts |
 | `svd`, `pac` | 836 | the SVD register model and PAC text generation | later part (the model; `svd-parser` stays Rust) |
 | `stack`, `prologue`, `hazard`, `atomic`, `mmio` | 2,690 | Cranelift analyses, MMIO typestate | stay Rust (lane plan) |
@@ -95,7 +96,7 @@ Decisions:
 | `stack.rs`, `prologue.rs`, `hazard.rs`, `atomic.rs` | Cranelift `ir` and machine code | stays Rust (lane plan) |
 | `mmio.rs` | `unsafe` volatile access | stays Rust |
 | `svd.rs` parsing | `svd-parser` | stays Rust; the model after parsing is a later part |
-| `intc.rs` | not ported yet; its interrupt handler table (`Box<dyn FnMut>`) stays Rust | a later part, one event at a time (see below) |
+| `intc.rs` dispatch, routing and the handler table | the handlers are `Box<dyn FnMut>` closures that change controller state while they run; the controller state itself is ported (part 2) | stays Rust: the dispatch loop asks the port for one claim at a time |
 | `dtb.rs` past `parse` | not ported yet | a later part |
 | `dma.rs`, `frames.rs`, `ccache.rs`, `ledger.rs`, `irq.rs`, `pac.rs` | not ported yet | later parts |
 | `seed/` | the compiler's copy | self-hosting Stage 2 |
@@ -140,7 +141,60 @@ apply one edit per ported module; `port/check.sh`, sourced by
 |---|---|---|---|
 | IMSIC | an identity equal to `eithreshold` is delivered | `parity::imsic_files_match` | `parity::every_fixture_parses_identically` |
 | APLIC | equal IDC priorities go to the higher source | `parity::aplic_domains_match` | `parity::imsic_files_match` |
+| PLIC (fabric) | a claim leaves its source pending | `parity::interrupt_fabrics_match` | `parity::imsic_files_match` |
 | devicetree | node names start one byte late | `dtb::qemu_riscv_virt_memory_harts_and_plic` | `dtb::malformed_headers_are_typed_errors` |
+
+## Part 2: the interrupt fabric
+
+Part 2 ports the controller state of `intc.rs`: every PLIC, the APLIC domain
+trees, the IMSIC files with their guest files, the CLINT/ACLINT blocks, the
+MTIME counters and the hypervisor CSRs (`vgein`, `hgeie`), with the
+operations over them: levels, settling the APLIC trees, MSI delivery, every
+register read and write, wires, claim and complete. `RiscvIntc` keeps its
+API.
+
+How it is split:
+
+- **One method interface.** The Rust fabric's controller state moved into
+  `intc/rust.rs` as `Core` (`cfg(not(vesper_port))`); `intc/port.rs` is a
+  `Core` holding one Vesper `Fabric` handle with the same methods, each one
+  call into `vesper/src/intc.ves` (1,700 lines). `intc.rs` keeps the
+  `Platform` info it routes with, the allocated identities, the asserted and
+  enabled causes, the logs and the statistics.
+- **Dispatch stays Rust, one claim at a time.** The handler table
+  (`Box<dyn FnMut>`) and the dispatch loops stay in `intc.rs`, which asks
+  the port for one claim (`fabric_claim_external`), runs that handler, lets
+  it change controller state through `IntcHandle`, completes the claim and
+  asks again. Nothing computes a dispatch list up front.
+- **Banks, not handles of handles.** Export ABI v3 refuses sequences of
+  handles, so the AIA models became banks: an `Imsic` holds many interrupt
+  files and an `Aplic` many domains, as headers (copy structs) plus shared
+  per-file and per-source sequences, and every model function takes the
+  file or domain index. The standalone `ImsicFile` and `AplicDomain` are
+  banks of one. The fabric holds one bank of each, and its other controllers
+  the same way (`PlicHdr`, `DomTopo`, `ImsicBlk`/`ImsicSlot`, `ClintHdr`
+  over shared sequences).
+- **A fused settle step.** The Rust `settle` asks `delegated_to`, `mode` and
+  `set_active_here` of every source of every child domain. The port does a
+  child's whole source loop in one function (`m_aplic_inherit`) with both
+  domains' headers read once: the first version made those calls per source
+  and ran `aia-intc` at 5.2x Rust's instructions; the fused loop runs it at
+  1.09x.
+- Hart targets cross as one word, `hart << 32 | cause` (cause `0xffffffff`
+  for an output the tree marks unused); absent indices are `u64::MAX`.
+  Faults are `IntcFault`, carrying `AiaFault` for the models' errors, and the
+  wrapper adds the domain path to `NoDeliveryMode`.
+
+Tests: `tests/parity.rs::interrupt_fabrics_match` runs one script per
+fixture, privilege and seed (114 runs on RISC-V fixtures, 102 of them with
+external deliveries) through both builds: every device's handler (which
+lowers its line), an MSI handler and a guest-file MSI handler per hart,
+software and timer handlers, then 200 random operations (device lines,
+register reads and writes across every controller window, MTIME, MSIs, IMSIC
+and hypervisor CSRs), comparing every result, the delivery count after each
+step and the final delivery logs, statistics and lost MSIs. All crate tests
+pass against both packages, and `tests/port_memory.rs` drops whole fabrics
+with nothing left allocated.
 
 ## Performance
 
@@ -149,6 +203,18 @@ dependency `vesper-silicon-rust`): per epoch Rust, port, port, Rust, 20 runs
 each after 5 warm-up runs, analyzed with vesper-bench. Release builds, Intel
 Xeon @ 2.10 GHz (4 vCPUs, cloud host), 11 epochs. Instructions are callgrind
 counts per run (20 runs minus a 0-run baseline).
+
+Part 2, after the fabric port (base 3dbbdc3):
+
+| Workload | Rust ns/run | Port ns/run | Wall ratio (range) | Rust Ir/run | Port Ir/run | Ir ratio |
+|---|--:|--:|--:|--:|--:|--:|
+| `dtb-parse` (36 KB VisionFive 2 tree) | 224,779 | 234,477 | 1.05x (1.03-1.09) | 2,321,000 | 2,561,604 | 1.10x |
+| `dtb-platform` (parse, `Platform`, per-device queries) | 362,489 | 381,843 | 1.05x (1.04-1.12) | 3,640,249 | 3,905,859 | 1.07x |
+| `aia-intc` (QEMU `aplic-imsic`, 64 UART MSIs) | 251,874 | 303,651 | 1.21x (1.18-1.22) | 3,632,888 | 3,977,942 | 1.09x |
+| `aplic-direct` (63 sources, 256 wire changes and claims) | 67,216 | 138,337 | 2.05x (2.05-2.07) | 723,251 | 1,255,633 | 1.74x |
+| `imsic` (2,047 identities, 256 MSIs and claims) | 2,007 | 6,933 | 3.48x (3.22-3.52) | 18,850 | 100,376 | 5.33x |
+
+Part 1, for comparison:
 
 | Workload | Rust ns/run | Port ns/run | Wall ratio (range) | Rust Ir/run | Port Ir/run | Ir ratio |
 |---|--:|--:|--:|--:|--:|--:|
@@ -160,7 +226,20 @@ counts per run (20 runs minus a 0-run baseline).
 
 `crates/vesper-silicon` is not at parity, so Rust stays the default.
 
-What the numbers say:
+What the numbers say (part 2):
+
+- **The fabric is near parity.** With the callers in the same library as the
+  models, `aia-intc` went from 3.42x to 1.09x of Rust's instructions (3.52x
+  to 1.21x wall). The cross-boundary calls per source are gone: `intc.rs`
+  now makes one call per operation.
+- **The standalone models got slower.** `aplic-direct` (1.43x to 1.74x) and
+  `imsic` (3.42x to 5.33x) drive one `AplicDomain` or `ImsicFile` through the
+  binding. As banks, each call copies the file's or domain's header out of
+  a sequence and adds its offset to every index. Nothing in the crate uses
+  the standalone models on a hot path any more (the fabric calls the banks
+  directly), but their API is public.
+
+What the numbers said (part 1):
 
 - **Parsing is close.** The port's parse checks the blob in Vesper and the
   wrapper then builds the same `String`s and `Vec`s the Rust build builds,
@@ -186,10 +265,19 @@ Compiler and ABI gaps, each with a repro:
    the binding copies `H`'s words before each call, a `memcpy` of 27 words for
    `Aplic`.
 2. **No inlining across the boundary.** A model method of a few instructions
-   costs a call, the copy above and the status handling per use. This closes
-   when the callers move too: porting `intc.rs` (a later part of this lane)
-   puts `settle` and the delivery loops in the same Vesper library as the
-   models, where the inliner reaches them.
+   costs a call, the copy above and the status handling per use. Part 2
+   closed this for the fabric by moving the callers into the library.
+3. **No sequences of handles (part 2).** Exporting `ChunkSeq[Imsic]` is
+   refused ("only sequences and slices of copy elements cross the
+   boundary"), and a non-copy element cannot be read in place (E1522) or
+   passed `inout` (E0300). A fabric of many files therefore keeps one bank
+   with headers and offsets, which is what makes the standalone models
+   slower. Repro: `pub struct F { files: ChunkSeq[Imsic] }` with an export
+   taking `inout f: F`.
+4. **Header reads copy the whole struct (part 2).** `match a.hdr.try_get(d)`
+   copies all 21 words of an `AplicHdr` to read `sources`; a field read
+   through the sequence would be one load. The fused settle step works
+   around this by reading each header once per loop.
 
 ## Not ported yet (later parts of this lane)
 
@@ -198,16 +286,6 @@ Compiler and ABI gaps, each with a repro:
   and `Platform::from_tree` with its queries. Its errors carry node paths and
   formatted details, so the port will return codes and node indices and the
   wrapper will format them, as for the phandle errors here.
-- `intc.rs` (the PLIC, APLIC fabric, IMSIC and CLINT emulation). Dispatch
-  must stay one event at a time, because handlers change controller state
-  (`ensure_external` runs a handler before it completes and claims the next
-  interrupt, and `install_local` rechecks the line after each callback): the
-  port returns the next event, the Rust adapter runs that handler and applies
-  its mutations through the port, then asks for the next event. If that costs
-  more than it saves, the dispatch loop stays Rust over the ported controller
-  state, which is what this part already does. The handler table stays Rust
-  either way. This part computes no dispatch list up front: `intc.rs` is
-  unchanged and calls the ported AIA models one operation at a time.
 - `dma.rs`, `frames.rs`, `ccache.rs`, the model half of `irq.rs`, `ledger.rs`.
 - The SVD register model and its queries (`svd.rs` after `svd-parser`), and
   `pac.rs` if its only `unsafe` is in emitted text.

@@ -1,9 +1,15 @@
 //! The QPACK decoder (RFC 9204 §2.2, §4.3, §4.4, §4.5).
 
+#[cfg(not(feature = "vesper-port"))]
 use std::collections::VecDeque;
 
+#[cfg(feature = "vesper-port")]
+use super::Field;
+#[cfg(not(feature = "vesper-port"))]
 use super::prefix::{decode_int, decode_string, encode_int};
+#[cfg(not(feature = "vesper-port"))]
 use super::static_table::STATIC_TABLE;
+#[cfg(not(feature = "vesper-port"))]
 use super::{Field, QpackError, Reason, Table, decode_ric, entry_size};
 
 /// What this decoder advertises and how much it buffers.
@@ -48,12 +54,14 @@ pub enum Decoded {
     Blocked,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 struct Blocked {
     stream_id: u64,
     ric: u64,
     data: Vec<u8>,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 pub struct Decoder {
     cfg: DecoderConfig,
     max_entries: u64,
@@ -70,6 +78,7 @@ pub struct Decoder {
     failed: Option<QpackError>,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 impl Decoder {
     pub fn new(cfg: DecoderConfig) -> Self {
         Self {
@@ -441,6 +450,7 @@ impl Decoder {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn static_entry(index: u64) -> Option<(&'static [u8], &'static [u8])> {
     STATIC_TABLE.get(usize::try_from(index).ok()?).copied()
 }

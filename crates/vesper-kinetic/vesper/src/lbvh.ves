@@ -1,0 +1,352 @@
+// Module lbvh of @vesper/kinetic (see lib.ves): the 64-bit Morton LBVH of
+// src/lbvh.rs (Karras 2012). Boxes are six f32 bit patterns each (min x, y,
+// z, max x, y, z). A child is a word: an internal node `k` is `k`, a leaf
+// at sorted position `i` is `2^32 + i`. The Rust wrapper owns every buffer
+// and lends it here sized for the call.
+use self::{
+    LbvhError
+};
+use self::morton::{
+    morton64
+};
+use self::util::{
+    box_valid,
+    boxes_overlap,
+    dec,
+    g32,
+    g64,
+    gf,
+    inc,
+    shr_i64,
+    u
+};
+use @vesper-std/sort::keyed::{
+    sort_by_key
+};
+use @vesper-std/sort::unstable::{
+    sort
+};
+
+fn leaf_bit() -> u64 {
+    0x100000000
+}
+
+fn raise_lbvh(e: LbvhError) eff [Fail[LbvhError]] {
+    Fail::raise(e);
+}
+
+// Common prefix length of sorted keys `i` and `j`; -1 outside.
+fn delta(in codes: Slice[u64], n: u64, i: u64, j: i64) -> i64 {
+    if j < 0 || wrapping_u64(j) >= n {
+        return -1;
+    }
+    let uj = wrapping_u64(j);
+    let a = g64(in codes, i);
+    let b = g64(in codes, uj);
+    if a == b {
+        wrapping_add(64, widen_i64(leading_zeros_u32(wrapping_u32(i) ^ wrapping_u32(uj))))
+    } else {
+        widen_i64(leading_zeros_u64(a ^ b))
+    }
+}
+
+fn min_i64(a: i64, b: i64) -> i64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+fn max_i64(a: i64, b: i64) -> i64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// Karras 2012, algorithm 3, for internal node `i`: its (left, right)
+// children.
+fn internal(in codes: Slice[u64], n: u64, i: u64) -> (u64, u64) {
+    let ii = wrapping_i64(i);
+    let mut d: i64 = -1;
+    if delta(in codes, n, i, wrapping_add(ii, 1)) > delta(in codes, n, i, wrapping_sub(ii, 1)) {
+        d = 1;
+    }
+    let delta_min = delta(in codes, n, i, wrapping_sub(ii, d));
+    let mut l_max: i64 = 2;
+    loop {
+        if !(delta(in codes, n, i, wrapping_add(ii, wrapping_mul(l_max, d))) > delta_min) {
+            break;
+        }
+        l_max = wrapping_mul(l_max, 2);
+    }
+    let mut l: i64 = 0;
+    let mut t = l_max / 2;
+    loop {
+        if !(t >= 1) {
+            break;
+        }
+        if delta(in codes, n, i, wrapping_add(ii, wrapping_mul(wrapping_add(l, t), d)))
+            > delta_min {
+            l = wrapping_add(l, t);
+        }
+        t = t / 2;
+    }
+    let j = wrapping_add(ii, wrapping_mul(l, d));
+    let delta_node = delta(in codes, n, i, j);
+    let mut s: i64 = 0;
+    let mut div: i64 = 2;
+    let mut log: u32 = 1;
+    loop {
+        // (l + div - 1) / div for l >= 0 and div = 2^log.
+        let tt = shr_i64(wrapping_add(l, wrapping_sub(div, 1)), log);
+        if delta(in codes, n, i, wrapping_add(ii, wrapping_mul(wrapping_add(s, tt), d)))
+            > delta_node {
+            s = wrapping_add(s, tt);
+        }
+        if tt <= 1 {
+            break;
+        }
+        div = wrapping_mul(div, 2);
+        log = wrapping_add(log, 1);
+    }
+    let gamma = wrapping_add(wrapping_add(ii, wrapping_mul(s, d)), min_i64(d, 0));
+    let g = wrapping_u64(gamma);
+    let mut left = g;
+    if min_i64(ii, j) == gamma {
+        left = leaf_bit() | g;
+    }
+    let mut right = inc(g);
+    if max_i64(ii, j) == wrapping_add(gamma, 1) {
+        right = leaf_bit() | inc(g);
+    }
+    (left, right)
+}
+
+// Box `c` (a child word) from the leaf or node bounds.
+fn bounds_lane(in leaf: Slice[u32], in node_box: Slice[u32], c: u64, lane: u64) -> f32 {
+    if (c & leaf_bit()) != 0 {
+        gf(in leaf, wrapping_add(wrapping_mul(c & 0xffffffff, 6), lane))
+    } else {
+        gf(in node_box, wrapping_add(wrapping_mul(c, 6), lane))
+    }
+}
+
+// Lbvh::build over `n` boxes (the wrapper checked the capacity): fills the
+// sorted `codes`/`prims`, the leaf bounds, the `n - 1` nodes and their
+// bounds. `order` and `stack` are scratch of n and n + 1 slots.
+pub fn build(
+    in boxes: Slice[u32],
+    inout codes: Slice[u64],
+    inout prims: Slice[u32],
+    inout leaf: Slice[u32],
+    inout left: Slice[u64],
+    inout right: Slice[u64],
+    inout node_box: Slice[u32],
+    inout order: Slice[u32],
+    inout stack: Slice[u64]
+) eff [Fail[LbvhError]] {
+    let n = boxes.len() / 6;
+    for i in 0..n {
+        if !box_valid(in boxes, i) {
+            raise_lbvh(
+                LbvhError::InvalidBox {
+                    index: wrapping_usize(i)
+                }
+            );
+        }
+    }
+    if n == 0 {
+        return ();
+    }
+    // Centroid bounds.
+    let inf = from_bits_f32(0x7f800000);
+    let ninf = from_bits_f32(0xff800000);
+    let mut lo0 = inf;
+    let mut lo1 = inf;
+    let mut lo2 = inf;
+    let mut hi0 = ninf;
+    let mut hi1 = ninf;
+    let mut hi2 = ninf;
+    for i in 0..n {
+        let b = wrapping_mul(i, 6);
+        let c0 = (gf(in boxes, b) + gf(in boxes, wrapping_add(b, 3))) * 0.5;
+        let c1 = (gf(in boxes, wrapping_add(b, 1)) + gf(in boxes, wrapping_add(b, 4))) * 0.5;
+        let c2 = (gf(in boxes, wrapping_add(b, 2)) + gf(in boxes, wrapping_add(b, 5))) * 0.5;
+        if c0 < lo0 {
+            lo0 = c0;
+        }
+        if c0 > hi0 {
+            hi0 = c0;
+        }
+        if c1 < lo1 {
+            lo1 = c1;
+        }
+        if c1 > hi1 {
+            hi1 = c1;
+        }
+        if c2 < lo2 {
+            lo2 = c2;
+        }
+        if c2 > hi2 {
+            hi2 = c2;
+        }
+    }
+    let e0 = hi0 - lo0;
+    let e1 = hi1 - lo1;
+    let e2 = hi2 - lo2;
+    for i in 0..n {
+        let b = wrapping_mul(i, 6);
+        let q0 = quantize((gf(in boxes, b) + gf(in boxes, wrapping_add(b, 3))) * 0.5, lo0, e0);
+        let q1 = quantize(
+            (gf(in boxes, wrapping_add(b, 1)) + gf(in boxes, wrapping_add(b, 4))) * 0.5,
+            lo1,
+            e1
+        );
+        let q2 = quantize(
+            (gf(in boxes, wrapping_add(b, 2)) + gf(in boxes, wrapping_add(b, 5))) * 0.5,
+            lo2,
+            e2
+        );
+        // Unsorted codes go to the traversal stack, free until a query.
+        stack.try_set(i, morton64(q0, q1, q2));
+        prims.try_set(i, wrapping_u32(i));
+    }
+    // Order the primitives by (code, primitive), then gather the codes.
+    sort_by_key(in stack[0..n], inout prims[0..n]);
+    for i in 0..n {
+        codes.try_set(i, g64(in stack, widen_u64(g32(in prims, i))));
+    }
+    for i in 0..n {
+        let p = wrapping_mul(widen_u64(g32(in prims, i)), 6);
+        let at = wrapping_mul(i, 6);
+        for lane in 0..u(6) {
+            leaf.try_set(wrapping_add(at, lane), g32(in boxes, wrapping_add(p, lane)));
+        }
+    }
+    if n < 2 {
+        return ();
+    }
+    for i in 0..dec(n) {
+        let (l, r) = internal(in codes, n, i);
+        left.try_set(i, l);
+        right.try_set(i, r);
+    }
+    // Pre-order from the root, then fill bounds children-first.
+    let mut sp: u64 = 1;
+    stack.try_set(0, 0);
+    let mut count: u64 = 0;
+    loop {
+        if !(sp > 0) {
+            break;
+        }
+        sp = dec(sp);
+        let c = g64(in stack, sp);
+        if (c & leaf_bit()) == 0 {
+            order.try_set(count, wrapping_u32(c));
+            count = inc(count);
+            stack.try_set(sp, g64(in left, c));
+            stack.try_set(inc(sp), g64(in right, c));
+            sp = wrapping_add(sp, 2);
+        }
+    }
+    let mut idx = count;
+    loop {
+        if !(idx > 0) {
+            break;
+        }
+        idx = dec(idx);
+        let k = widen_u64(g32(in order, idx));
+        let l = g64(in left, k);
+        let r = g64(in right, k);
+        let at = wrapping_mul(k, 6);
+        for a in 0..u(3) {
+            let mut mn = bounds_lane(in leaf, in node_box, l, a);
+            let rmn = bounds_lane(in leaf, in node_box, r, a);
+            if rmn < mn {
+                mn = rmn;
+            }
+            let mut mx = bounds_lane(in leaf, in node_box, l, wrapping_add(a, 3));
+            let rmx = bounds_lane(in leaf, in node_box, r, wrapping_add(a, 3));
+            if rmx > mx {
+                mx = rmx;
+            }
+            node_box.try_set(wrapping_add(at, a), to_bits_f32(mn));
+            node_box.try_set(wrapping_add(at, wrapping_add(a, 3)), to_bits_f32(mx));
+        }
+    }
+}
+
+// The quantised coordinate of centroid `c` over [lo, lo + extent].
+fn quantize(c: f32, lo: f32, extent: f32) -> u32 {
+    if extent > 0.0 {
+        let t = (c - lo) / extent;
+        let q = saturating_u32(t * 2097151.0);
+        if q > 0x1fffff {
+            return 0x1fffff;
+        }
+        return q;
+    }
+    0
+}
+
+// Lbvh::overlapping_pairs: every overlapping pair `(a << 32) | b`, `a < b`,
+// ascending, into `pairs`. Returns the pair count; `max_pairs` + 1 means
+// more than `max_pairs` pairs, and the length of `pairs` + 1 (when below
+// `max_pairs`) asks the wrapper for a larger buffer.
+pub fn pairs(
+    in codes: Slice[u64],
+    in prims: Slice[u32],
+    in leaf: Slice[u32],
+    in left: Slice[u64],
+    in right: Slice[u64],
+    in node_box: Slice[u32],
+    inout stack: Slice[u64],
+    inout out: Slice[u64],
+    max_pairs: u64
+) -> u64 {
+    let n = codes.len();
+    if n < 2 {
+        return 0;
+    }
+    let room = out.len();
+    let mut len: u64 = 0;
+    for p in 0..n {
+        let mut sp: u64 = 1;
+        stack.try_set(0, 0);
+        loop {
+            if !(sp > 0) {
+                break;
+            }
+            sp = dec(sp);
+            let c = g64(in stack, sp);
+            if (c & leaf_bit()) != 0 {
+                let q = c & 0xffffffff;
+                if q > p && boxes_overlap(in leaf, p, in leaf, q) {
+                    if len == max_pairs {
+                        return inc(max_pairs);
+                    }
+                    if len == room {
+                        return inc(room);
+                    }
+                    let a = widen_u64(g32(in prims, p));
+                    let b = widen_u64(g32(in prims, q));
+                    if a < b {
+                        out.try_set(len, (a << 32) | b);
+                    } else {
+                        out.try_set(len, (b << 32) | a);
+                    }
+                    len = inc(len);
+                }
+            } else if boxes_overlap(in leaf, p, in node_box, c) {
+                stack.try_set(sp, g64(in right, c));
+                stack.try_set(inc(sp), g64(in left, c));
+                sp = wrapping_add(sp, 2);
+            }
+        }
+    }
+    sort(inout out[0..len]);
+    len
+}

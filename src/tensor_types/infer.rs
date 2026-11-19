@@ -265,6 +265,7 @@ fn walk(e: &Expr, f: &mut Visitor<'_>) {
         k @ (ExprKind::Loop(_)
         | ExprKind::Range { .. }
         | ExprKind::Break(_)
+        | ExprKind::Continue
         | ExprKind::Return(_)) => k
             .control_children()
             .into_iter()
@@ -1161,6 +1162,7 @@ impl Body<'_> {
                 }
                 Ty::Unknown
             }
+            ExprKind::Continue => Ty::Unknown,
             ExprKind::Closure {
                 params,
                 result,

@@ -1,0 +1,4 @@
+// Only the library creates handles.
+fn construct() -> Sealer {
+    Sealer {}
+}

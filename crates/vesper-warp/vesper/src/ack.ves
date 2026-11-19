@@ -1,0 +1,278 @@
+// Module ack of @vesper/warp (see lib.ves): per-space received-packet
+// tracking (ack.rs). The Rust wrapper owns the fixed array of `N` ranges
+// and lends it; `RxState` holds the rest of `ReceivedPackets`, and
+// `ranges[..s.len]` are live (descending, disjoint, non-adjacent).
+use self::{
+    AckErr,
+    AckRange,
+    Received,
+    RxState
+};
+use self::pn::{
+    pn_limit
+};
+use self::varint::{
+    sat_add,
+    vi_max
+};
+
+pub fn rx_new(space: u8, max_ack_delay_ns: u64) -> RxState {
+    RxState {
+        space: space,
+        len: 0,
+        has_floor: false,
+        floor: 0,
+        has_largest: false,
+        largest: 0,
+        largest_received_ns: 0,
+        last_received_ns: 0,
+        ect0: 0,
+        ect1: 0,
+        ce: 0,
+        unacked_ack_eliciting: 0,
+        has_deadline: false,
+        deadline_ns: 0,
+        max_ack_delay_ns: max_ack_delay_ns
+    }
+}
+
+fn at(in ranges: Slice[AckRange], i: u64) -> AckRange {
+    match ranges.try_get(i) {
+        Option::Some(r) => r,
+        Option::None => AckRange {
+            smallest: 0,
+            largest: 0
+        },
+    }
+}
+
+fn one(pn: u64) -> AckRange {
+    AckRange {
+        smallest: pn,
+        largest: pn
+    }
+}
+
+pub fn rx_check(in s: RxState, in ranges: Slice[AckRange], pn: u64) eff [Fail[AckErr]] {
+    if pn >= pn_limit() {
+        Fail::raise(
+            AckErr::OutOfRange {
+                pn: pn
+            }
+        );
+    }
+    if s.has_floor && pn <= s.floor {
+        Fail::raise(
+            AckErr::TooOld {
+                pn: pn
+            }
+        );
+    }
+    for i in 0..s.len {
+        let r = at(in ranges, i);
+        if r.smallest <= pn && pn <= r.largest {
+            Fail::raise(
+                AckErr::Duplicate {
+                    pn: pn
+                }
+            );
+        }
+    }
+}
+
+// Moves `ranges[lo..hi]` up by one (to `lo + 1..hi + 1`).
+fn shift_up(inout ranges: Slice[AckRange], lo: u64, hi: u64) {
+    let mut k = hi;
+    loop {
+        if k <= lo {
+            break;
+        }
+        let r = at(in ranges, wrapping_sub(k, 1));
+        ranges.try_set(k, r);
+        k = wrapping_sub(k, 1);
+    }
+}
+
+// Moves `ranges[lo..hi]` down by one (to `lo - 1..hi - 1`).
+fn shift_down(inout ranges: Slice[AckRange], lo: u64, hi: u64) {
+    for k in lo..hi {
+        let r = at(in ranges, k);
+        ranges.try_set(wrapping_sub(k, 1), r);
+    }
+}
+
+fn raise_floor(inout s: RxState, x: u64) {
+    if !s.has_floor || x > s.floor {
+        s.floor = x;
+    }
+    s.has_floor = true;
+}
+
+fn insert(inout s: RxState, inout ranges: Slice[AckRange], pn: u64) {
+    let n = ranges.len();
+    let mut i = s.len;
+    for k in 0..s.len {
+        if at(in ranges, k).largest < pn {
+            i = k;
+            break;
+        }
+    }
+    let joins_above = i > 0 && at(in ranges, wrapping_sub(i, 1)).smallest == wrapping_add(pn, 1);
+    let joins_below = i < s.len && wrapping_add(at(in ranges, i).largest, 1) == pn;
+    if joins_above && joins_below {
+        let above = at(in ranges, wrapping_sub(i, 1));
+        ranges
+            .try_set(
+            wrapping_sub(i, 1),
+            AckRange {
+                smallest: at(in ranges, i).smallest,
+                largest: above.largest
+            }
+        );
+        shift_down(inout ranges, wrapping_add(i, 1), s.len);
+        s.len = wrapping_sub(s.len, 1);
+    } else if joins_above {
+        let above = at(in ranges, wrapping_sub(i, 1));
+        ranges
+            .try_set(
+            wrapping_sub(i, 1),
+            AckRange {
+                smallest: pn,
+                largest: above.largest
+            }
+        );
+    } else if joins_below {
+        let below = at(in ranges, i);
+        ranges
+            .try_set(
+            i,
+            AckRange {
+                smallest: below.smallest,
+                largest: pn
+            }
+        );
+    } else if s.len == n {
+        // Forget the lowest range (possibly the new one).
+        let lowest = if i == n {
+            pn
+        } else {
+            let dropped = at(in ranges, wrapping_sub(n, 1)).largest;
+            shift_up(inout ranges, i, wrapping_sub(n, 1));
+            ranges.try_set(i, one(pn));
+            dropped
+        };
+        raise_floor(inout s, lowest);
+    } else {
+        shift_up(inout ranges, i, s.len);
+        ranges.try_set(i, one(pn));
+        s.len = wrapping_add(s.len, 1);
+    }
+}
+
+// `ecn`: 0 Not-ECT, 1 ECT(0), 2 ECT(1), 3 CE.
+pub fn rx_on_packet_received(
+    inout s: RxState,
+    inout ranges: Slice[AckRange],
+    pn: u64,
+    now_ns: u64,
+    ack_eliciting: bool,
+    ecn: u8
+) -> Received eff [Fail[AckErr]] {
+    rx_check(in s, in ranges, pn);
+    if now_ns < s.last_received_ns {
+        Fail::raise(AckErr::ClockWentBackwards);
+    }
+    s.last_received_ns = now_ns;
+    let largest = !s.has_largest || pn > s.largest;
+    let out_of_order = s.has_largest && (pn < s.largest || pn > wrapping_add(s.largest, 1));
+    if largest {
+        s.has_largest = true;
+        s.largest = pn;
+        s.largest_received_ns = now_ns;
+    }
+    insert(inout s, inout ranges, pn);
+    if ecn == 1 {
+        s.ect0 = wrapping_add(s.ect0, 1);
+    } else if ecn == 2 {
+        s.ect1 = wrapping_add(s.ect1, 1);
+    } else if ecn == 3 {
+        s.ce = wrapping_add(s.ce, 1);
+    }
+    if ack_eliciting {
+        s.unacked_ack_eliciting = wrapping_add(s.unacked_ack_eliciting, 1);
+        let immediate = s.space != 2 || out_of_order || ecn == 3 || s.unacked_ack_eliciting >= 2;
+        let deadline = if immediate {
+            now_ns
+        } else {
+            sat_add(now_ns, s.max_ack_delay_ns)
+        };
+        if !s.has_deadline || deadline < s.deadline_ns {
+            s.deadline_ns = deadline;
+        }
+        s.has_deadline = true;
+    }
+    Received {
+        largest: largest,
+        out_of_order: out_of_order
+    }
+}
+
+// The ACK Delay field of the ACK frame to send now, or `None` if nothing
+// was received.
+pub fn rx_ack_delay(in s: RxState, now_ns: u64, ack_delay_exponent: u8)
+    -> Option[u64] eff [Fail[AckErr]] {
+    if ack_delay_exponent > 20 {
+        Fail::raise(
+            AckErr::BadAckDelayExponent {
+                exponent: ack_delay_exponent
+            }
+        );
+    }
+    if s.len == 0 {
+        return Option::None;
+    }
+    let since = if now_ns > s.largest_received_ns {
+        wrapping_sub(now_ns, s.largest_received_ns)
+    } else {
+        0
+    };
+    let delay = wrapping_shr_u64(since / 1000, widen_u32(ack_delay_exponent));
+    if delay > vi_max() {
+        Option::Some(vi_max())
+    } else {
+        Option::Some(delay)
+    }
+}
+
+pub fn rx_on_ack_sent(inout s: RxState) {
+    s.unacked_ack_eliciting = 0;
+    s.has_deadline = false;
+    s.deadline_ns = 0;
+}
+
+pub fn rx_on_ack_of_ack(inout s: RxState, inout ranges: Slice[AckRange], x: u64) {
+    let mut j = s.len;
+    for k in 0..s.len {
+        if at(in ranges, k).smallest <= x {
+            j = k;
+            break;
+        }
+    }
+    if j < s.len {
+        let r = at(in ranges, j);
+        if r.largest > x {
+            ranges
+                .try_set(
+                j,
+                AckRange {
+                    smallest: wrapping_add(x, 1),
+                    largest: r.largest
+                }
+            );
+            s.len = wrapping_add(j, 1);
+        } else {
+            s.len = j;
+        }
+    }
+    raise_floor(inout s, x);
+}

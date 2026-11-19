@@ -28,6 +28,9 @@
 // The polynomial coefficients are fdlibm's published values, written with
 // all their digits.
 #![allow(clippy::excessive_precision, clippy::approx_constant)]
+// The port-backed build forwards the public functions to the Vesper port
+// (vesper/src/fastmath.ves); the Rust helpers stay for the seed build.
+#![cfg_attr(vesper_port, allow(dead_code, unused_imports))]
 
 use crate::crmath;
 
@@ -87,49 +90,56 @@ const INV_LN2: f64 = 1.44269504088896338700e+00;
 
 /// `e^x` (binary64), within [`F64_MAX_ULP`] of the correctly rounded value.
 pub fn exp(x: f64) -> f64 {
-    const P1: f64 = 1.66666666666666019037e-01;
-    const P2: f64 = -2.77777777770155933842e-03;
-    const P3: f64 = 6.61375632143793436117e-05;
-    const P4: f64 = -1.65339022054652515390e-06;
-    const P5: f64 = 4.13813679705723846039e-08;
-    const O_THRESHOLD: f64 = 7.09782712893383973096e+02;
-    const U_THRESHOLD: f64 = -7.45133219101941108420e+02;
-    if x.is_nan() {
-        return x + x;
+    #[cfg(vesper_port)]
+    {
+        crate::port::fastmath_exp(x)
     }
-    if x > O_THRESHOLD {
-        return f64::INFINITY;
-    }
-    if x < U_THRESHOLD {
-        return 0.0;
-    }
-    let ax = x.abs();
-    if ax < 3.725_290_298_461_914e-9 {
-        // |x| < 2^-28: e^x = 1 + x to within half an ULP.
-        return 1.0 + x;
-    }
-    let (hi, lo, k) = if ax <= 0.5 * LN2_HI {
-        (x, 0.0, 0i32)
-    } else {
-        let k = rint(x * INV_LN2);
-        // k·LN2_HI is exact: LN2_HI has 32 trailing zero bits and |k| < 2^11.
-        (x - k * LN2_HI, k * LN2_LO, k as i32)
-    };
-    let r = hi - lo;
-    let t = r * r;
-    let c = r - t * (P1 + t * (P2 + t * (P3 + t * (P4 + t * P5))));
-    let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
-    if k == 0 {
-        y
-    } else if k >= -1021 {
-        if k == 1024 {
-            y * 2.0 * pow2(1023)
-        } else {
-            y * pow2(k)
+    #[cfg(not(vesper_port))]
+    {
+        const P1: f64 = 1.66666666666666019037e-01;
+        const P2: f64 = -2.77777777770155933842e-03;
+        const P3: f64 = 6.61375632143793436117e-05;
+        const P4: f64 = -1.65339022054652515390e-06;
+        const P5: f64 = 4.13813679705723846039e-08;
+        const O_THRESHOLD: f64 = 7.09782712893383973096e+02;
+        const U_THRESHOLD: f64 = -7.45133219101941108420e+02;
+        if x.is_nan() {
+            return x + x;
         }
-    } else {
-        // Subnormal result: scale in two steps.
-        y * pow2(k + 1000) * pow2(-1000)
+        if x > O_THRESHOLD {
+            return f64::INFINITY;
+        }
+        if x < U_THRESHOLD {
+            return 0.0;
+        }
+        let ax = x.abs();
+        if ax < 3.725_290_298_461_914e-9 {
+            // |x| < 2^-28: e^x = 1 + x to within half an ULP.
+            return 1.0 + x;
+        }
+        let (hi, lo, k) = if ax <= 0.5 * LN2_HI {
+            (x, 0.0, 0i32)
+        } else {
+            let k = rint(x * INV_LN2);
+            // k·LN2_HI is exact: LN2_HI has 32 trailing zero bits and |k| < 2^11.
+            (x - k * LN2_HI, k * LN2_LO, k as i32)
+        };
+        let r = hi - lo;
+        let t = r * r;
+        let c = r - t * (P1 + t * (P2 + t * (P3 + t * (P4 + t * P5))));
+        let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi);
+        if k == 0 {
+            y
+        } else if k >= -1021 {
+            if k == 1024 {
+                y * 2.0 * pow2(1023)
+            } else {
+                y * pow2(k)
+            }
+        } else {
+            // Subnormal result: scale in two steps.
+            y * pow2(k + 1000) * pow2(-1000)
+        }
     }
 }
 
@@ -138,79 +148,86 @@ pub fn exp(x: f64) -> f64 {
 /// Natural logarithm (binary64), within [`F64_MAX_ULP`] of the correctly
 /// rounded value.
 pub fn log(x: f64) -> f64 {
-    const TWO54: f64 = 1.80143985094819840000e+16;
-    const LG1: f64 = 6.666666666666735130e-01;
-    const LG2: f64 = 3.999999999940941908e-01;
-    const LG3: f64 = 2.857142874366239149e-01;
-    const LG4: f64 = 2.222219843214978396e-01;
-    const LG5: f64 = 1.818357216161805012e-01;
-    const LG6: f64 = 1.531383769920937332e-01;
-    const LG7: f64 = 1.479819860511658591e-01;
-    if x.is_nan() {
-        return x + x;
+    #[cfg(vesper_port)]
+    {
+        crate::port::fastmath_log(x)
     }
-    if x == 0.0 {
-        return f64::NEG_INFINITY;
-    }
-    if x < 0.0 {
-        return f64::NAN;
-    }
-    if x == f64::INFINITY {
-        return x;
-    }
-    let mut x = x;
-    let mut k: i32 = 0;
-    let mut hx = high(x) as i32;
-    if hx < 0x0010_0000 {
-        // Subnormal: scale up by 2^54.
-        k -= 54;
-        x *= TWO54;
-        hx = high(x) as i32;
-    }
-    k += (hx >> 20) - 1023;
-    hx &= 0x000f_ffff;
-    let i = (hx + 0x95f64) & 0x10_0000;
-    // Normalise x or x/2 into [sqrt(2)/2, sqrt(2)).
-    x = with_high(x, (hx | (i ^ 0x3ff0_0000)) as u32);
-    k += i >> 20;
-    let f = x - 1.0;
-    let dk = f64::from(k);
-    if (0x000f_ffff & (2 + hx)) < 3 {
-        // -2^-20 <= f < 2^-20.
-        if f == 0.0 {
+    #[cfg(not(vesper_port))]
+    {
+        const TWO54: f64 = 1.80143985094819840000e+16;
+        const LG1: f64 = 6.666666666666735130e-01;
+        const LG2: f64 = 3.999999999940941908e-01;
+        const LG3: f64 = 2.857142874366239149e-01;
+        const LG4: f64 = 2.222219843214978396e-01;
+        const LG5: f64 = 1.818357216161805012e-01;
+        const LG6: f64 = 1.531383769920937332e-01;
+        const LG7: f64 = 1.479819860511658591e-01;
+        if x.is_nan() {
+            return x + x;
+        }
+        if x == 0.0 {
+            return f64::NEG_INFINITY;
+        }
+        if x < 0.0 {
+            return f64::NAN;
+        }
+        if x == f64::INFINITY {
+            return x;
+        }
+        let mut x = x;
+        let mut k: i32 = 0;
+        let mut hx = high(x) as i32;
+        if hx < 0x0010_0000 {
+            // Subnormal: scale up by 2^54.
+            k -= 54;
+            x *= TWO54;
+            hx = high(x) as i32;
+        }
+        k += (hx >> 20) - 1023;
+        hx &= 0x000f_ffff;
+        let i = (hx + 0x95f64) & 0x10_0000;
+        // Normalise x or x/2 into [sqrt(2)/2, sqrt(2)).
+        x = with_high(x, (hx | (i ^ 0x3ff0_0000)) as u32);
+        k += i >> 20;
+        let f = x - 1.0;
+        let dk = f64::from(k);
+        if (0x000f_ffff & (2 + hx)) < 3 {
+            // -2^-20 <= f < 2^-20.
+            if f == 0.0 {
+                return if k == 0 {
+                    0.0
+                } else {
+                    dk * LN2_HI + dk * LN2_LO
+                };
+            }
+            let r = f * f * (0.5 - 0.333_333_333_333_333_33 * f);
             return if k == 0 {
-                0.0
+                f - r
             } else {
-                dk * LN2_HI + dk * LN2_LO
+                dk * LN2_HI - ((r - dk * LN2_LO) - f)
             };
         }
-        let r = f * f * (0.5 - 0.333_333_333_333_333_33 * f);
-        return if k == 0 {
-            f - r
+        let s = f / (2.0 + f);
+        let z = s * s;
+        let mut i = hx - 0x6147a;
+        let w = z * z;
+        let j = 0x6b851 - hx;
+        let t1 = w * (LG2 + w * (LG4 + w * LG6));
+        let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
+        i |= j;
+        let r = t2 + t1;
+        if i > 0 {
+            let hfsq = 0.5 * f * f;
+            if k == 0 {
+                f - (hfsq - s * (hfsq + r))
+            } else {
+                dk * LN2_HI - ((hfsq - (s * (hfsq + r) + dk * LN2_LO)) - f)
+            }
+        } else if k == 0 {
+            f - s * (f - r)
         } else {
-            dk * LN2_HI - ((r - dk * LN2_LO) - f)
-        };
-    }
-    let s = f / (2.0 + f);
-    let z = s * s;
-    let mut i = hx - 0x6147a;
-    let w = z * z;
-    let j = 0x6b851 - hx;
-    let t1 = w * (LG2 + w * (LG4 + w * LG6));
-    let t2 = z * (LG1 + w * (LG3 + w * (LG5 + w * LG7)));
-    i |= j;
-    let r = t2 + t1;
-    if i > 0 {
-        let hfsq = 0.5 * f * f;
-        if k == 0 {
-            f - (hfsq - s * (hfsq + r))
-        } else {
-            dk * LN2_HI - ((hfsq - (s * (hfsq + r) + dk * LN2_LO)) - f)
+            dk * LN2_HI - ((s * (f - r) - dk * LN2_LO) - f)
         }
-    } else if k == 0 {
-        f - s * (f - r)
-    } else {
-        dk * LN2_HI - ((s * (f - r) - dk * LN2_LO) - f)
     }
 }
 
@@ -295,54 +312,68 @@ const MEDIUM_LIMIT: f64 = 1_647_099.0;
 
 /// Sine (binary64), within [`F64_MAX_ULP`] of the correctly rounded value.
 pub fn sin(x: f64) -> f64 {
-    if !x.is_finite() {
-        // NaN for ±∞, the input's own NaN otherwise (as fdlibm does).
-        #[allow(clippy::eq_op)]
-        return x - x;
+    #[cfg(vesper_port)]
+    {
+        crate::port::fastmath_sin(x)
     }
-    let ax = x.abs();
-    if ax <= 0.785_398_163_397_448_3 {
-        if ax < 7.450_580_596_923_828e-9 {
-            // |x| < 2^-27: sin x = x to within half an ULP.
-            return x;
+    #[cfg(not(vesper_port))]
+    {
+        if !x.is_finite() {
+            // NaN for ±∞, the input's own NaN otherwise (as fdlibm does).
+            #[allow(clippy::eq_op)]
+            return x - x;
         }
-        return k_sin(x, 0.0, false);
-    }
-    if ax >= MEDIUM_LIMIT {
-        return crmath::sin(x);
-    }
-    let (n, y0, y1) = rem_pio2_medium(x);
-    match n & 3 {
-        0 => k_sin(y0, y1, true),
-        1 => k_cos(y0, y1),
-        2 => -k_sin(y0, y1, true),
-        _ => -k_cos(y0, y1),
+        let ax = x.abs();
+        if ax <= 0.785_398_163_397_448_3 {
+            if ax < 7.450_580_596_923_828e-9 {
+                // |x| < 2^-27: sin x = x to within half an ULP.
+                return x;
+            }
+            return k_sin(x, 0.0, false);
+        }
+        if ax >= MEDIUM_LIMIT {
+            return crmath::sin(x);
+        }
+        let (n, y0, y1) = rem_pio2_medium(x);
+        match n & 3 {
+            0 => k_sin(y0, y1, true),
+            1 => k_cos(y0, y1),
+            2 => -k_sin(y0, y1, true),
+            _ => -k_cos(y0, y1),
+        }
     }
 }
 
 /// Cosine (binary64), within [`F64_MAX_ULP`] of the correctly rounded value.
 pub fn cos(x: f64) -> f64 {
-    if !x.is_finite() {
-        // NaN for ±∞, the input's own NaN otherwise (as fdlibm does).
-        #[allow(clippy::eq_op)]
-        return x - x;
+    #[cfg(vesper_port)]
+    {
+        crate::port::fastmath_cos(x)
     }
-    let ax = x.abs();
-    if ax <= 0.785_398_163_397_448_3 {
-        if ax < 7.450_580_596_923_828e-9 {
-            return 1.0;
+    #[cfg(not(vesper_port))]
+    {
+        if !x.is_finite() {
+            // NaN for ±∞, the input's own NaN otherwise (as fdlibm does).
+            #[allow(clippy::eq_op)]
+            return x - x;
         }
-        return k_cos(x, 0.0);
-    }
-    if ax >= MEDIUM_LIMIT {
-        return crmath::cos(x);
-    }
-    let (n, y0, y1) = rem_pio2_medium(x);
-    match n & 3 {
-        0 => k_cos(y0, y1),
-        1 => -k_sin(y0, y1, true),
-        2 => -k_cos(y0, y1),
-        _ => k_sin(y0, y1, true),
+        let ax = x.abs();
+        if ax <= 0.785_398_163_397_448_3 {
+            if ax < 7.450_580_596_923_828e-9 {
+                return 1.0;
+            }
+            return k_cos(x, 0.0);
+        }
+        if ax >= MEDIUM_LIMIT {
+            return crmath::cos(x);
+        }
+        let (n, y0, y1) = rem_pio2_medium(x);
+        match n & 3 {
+            0 => k_cos(y0, y1),
+            1 => -k_sin(y0, y1, true),
+            2 => -k_cos(y0, y1),
+            _ => k_sin(y0, y1, true),
+        }
     }
 }
 
@@ -424,64 +455,71 @@ fn atan(x: f64) -> f64 {
 /// `atan2(y, x)` (binary64), within [`F64_MAX_ULP`] of the correctly rounded
 /// value, C99 Annex F special values.
 pub fn atan2(y: f64, x: f64) -> f64 {
-    const PI_O_4: f64 = 7.8539816339744827900e-01;
-    const PI_O_2: f64 = 1.57079632679489655800e+00;
-    const PI: f64 = 3.14159265358979311600e+00;
-    const PI_LO: f64 = 1.2246467991473531772e-16;
-    if x.is_nan() || y.is_nan() {
-        return x + y;
+    #[cfg(vesper_port)]
+    {
+        crate::port::fastmath_atan2(y, x)
     }
-    if x == 1.0 {
-        return atan(y);
-    }
-    let y_neg = y.is_sign_negative();
-    let x_neg = x.is_sign_negative();
-    let m = u8::from(y_neg) | (u8::from(x_neg) << 1);
-    if y == 0.0 {
-        return match m {
-            0 | 1 => y,
-            2 => PI,
-            _ => -PI,
-        };
-    }
-    if x == 0.0 {
-        return if y_neg { -PI_O_2 } else { PI_O_2 };
-    }
-    if x.is_infinite() {
-        return if y.is_infinite() {
-            match m {
-                0 => PI_O_4,
-                1 => -PI_O_4,
-                2 => 3.0 * PI_O_4,
-                _ => -3.0 * PI_O_4,
-            }
-        } else {
-            match m {
-                0 => 0.0,
-                1 => -0.0,
+    #[cfg(not(vesper_port))]
+    {
+        const PI_O_4: f64 = 7.8539816339744827900e-01;
+        const PI_O_2: f64 = 1.57079632679489655800e+00;
+        const PI: f64 = 3.14159265358979311600e+00;
+        const PI_LO: f64 = 1.2246467991473531772e-16;
+        if x.is_nan() || y.is_nan() {
+            return x + y;
+        }
+        if x == 1.0 {
+            return atan(y);
+        }
+        let y_neg = y.is_sign_negative();
+        let x_neg = x.is_sign_negative();
+        let m = u8::from(y_neg) | (u8::from(x_neg) << 1);
+        if y == 0.0 {
+            return match m {
+                0 | 1 => y,
                 2 => PI,
                 _ => -PI,
-            }
+            };
+        }
+        if x == 0.0 {
+            return if y_neg { -PI_O_2 } else { PI_O_2 };
+        }
+        if x.is_infinite() {
+            return if y.is_infinite() {
+                match m {
+                    0 => PI_O_4,
+                    1 => -PI_O_4,
+                    2 => 3.0 * PI_O_4,
+                    _ => -3.0 * PI_O_4,
+                }
+            } else {
+                match m {
+                    0 => 0.0,
+                    1 => -0.0,
+                    2 => PI,
+                    _ => -PI,
+                }
+            };
+        }
+        if y.is_infinite() {
+            return if y_neg { -PI_O_2 } else { PI_O_2 };
+        }
+        let k = ((high(y) & 0x7fff_ffff) as i32 - (high(x) & 0x7fff_ffff) as i32) >> 20;
+        let (z, m) = if k > 60 {
+            // |y/x| > 2^60.
+            (PI_O_2 + 0.5 * PI_LO, m & 1)
+        } else if x_neg && k < -60 {
+            // |y|/x < -2^-60.
+            (0.0, m)
+        } else {
+            (atan((y / x).abs()), m)
         };
-    }
-    if y.is_infinite() {
-        return if y_neg { -PI_O_2 } else { PI_O_2 };
-    }
-    let k = ((high(y) & 0x7fff_ffff) as i32 - (high(x) & 0x7fff_ffff) as i32) >> 20;
-    let (z, m) = if k > 60 {
-        // |y/x| > 2^60.
-        (PI_O_2 + 0.5 * PI_LO, m & 1)
-    } else if x_neg && k < -60 {
-        // |y|/x < -2^-60.
-        (0.0, m)
-    } else {
-        (atan((y / x).abs()), m)
-    };
-    match m {
-        0 => z,
-        1 => -z,
-        2 => PI - (z - PI_LO),
-        _ => (z - PI_LO) - PI,
+        match m {
+            0 => z,
+            1 => -z,
+            2 => PI - (z - PI_LO),
+            _ => (z - PI_LO) - PI,
+        }
     }
 }
 
@@ -489,27 +527,62 @@ pub fn atan2(y: f64, x: f64) -> f64 {
 
 /// `e^x` (binary32), within [`F32_MAX_ULP`] of the correctly rounded value.
 pub fn expf(x: f32) -> f32 {
-    exp(f64::from(x)) as f32
+    #[cfg(vesper_port)]
+    {
+        f32::from_bits(crate::port::fastmath_expf(x.to_bits()))
+    }
+    #[cfg(not(vesper_port))]
+    {
+        exp(f64::from(x)) as f32
+    }
 }
 
 /// Natural logarithm (binary32).
 pub fn logf(x: f32) -> f32 {
-    log(f64::from(x)) as f32
+    #[cfg(vesper_port)]
+    {
+        f32::from_bits(crate::port::fastmath_logf(x.to_bits()))
+    }
+    #[cfg(not(vesper_port))]
+    {
+        log(f64::from(x)) as f32
+    }
 }
 
 /// Sine (binary32).
 pub fn sinf(x: f32) -> f32 {
-    sin(f64::from(x)) as f32
+    #[cfg(vesper_port)]
+    {
+        f32::from_bits(crate::port::fastmath_sinf(x.to_bits()))
+    }
+    #[cfg(not(vesper_port))]
+    {
+        sin(f64::from(x)) as f32
+    }
 }
 
 /// Cosine (binary32).
 pub fn cosf(x: f32) -> f32 {
-    cos(f64::from(x)) as f32
+    #[cfg(vesper_port)]
+    {
+        f32::from_bits(crate::port::fastmath_cosf(x.to_bits()))
+    }
+    #[cfg(not(vesper_port))]
+    {
+        cos(f64::from(x)) as f32
+    }
 }
 
 /// `atan2(y, x)` (binary32).
 pub fn atan2f(y: f32, x: f32) -> f32 {
-    atan2(f64::from(y), f64::from(x)) as f32
+    #[cfg(vesper_port)]
+    {
+        f32::from_bits(crate::port::fastmath_atan2f(y.to_bits(), x.to_bits()))
+    }
+    #[cfg(not(vesper_port))]
+    {
+        atan2(f64::from(y), f64::from(x)) as f32
+    }
 }
 
 /// Distance between `a` and `b` in steps between adjacent binary64 values

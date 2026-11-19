@@ -42,6 +42,12 @@
 //! like a `TiledSeq` bounds fault: the evaluator and the JIT report an error
 //! and an executable exits with [`FAULT_STATUS`].
 //!
+//! The bulk operations `resize`, ranged `fill` (`try_fill`),
+//! `extend_from_within` (`try_extend_from_within`) and `extend_reversed`
+//! (P3b gaps lane 11, #1096) grow a sequence at most once and check their
+//! interval once ([`SeqOp::Resize`], [`SeqOp::FillRange`],
+//! [`SeqOp::ExtendFromWithin`], [`SeqOp::ExtendReversed`]).
+//!
 //! Allocation is not yet tracked by an `Alloc` effect: neither `Box` nor
 //! `TiledSeq` requests one today, and no runnable entry can discharge it.
 use crate::{ast::*, check::World};
@@ -57,6 +63,15 @@ pub const SLICE_TYPE: &str = "Slice";
 pub const FAULT_STATUS: i64 = 71;
 /// Header words of a native sequence: length, capacity, data pointer.
 pub const HEADER_BYTES: i64 = 24;
+
+/// The shape of the index a [`SeqOp::BoundsGuard`] checks: the loop index,
+/// negated or not, plus `plus` and minus `minus` loop-invariant terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct IndexForm {
+    pub negated: bool,
+    pub plus: u8,
+    pub minus: u8,
+}
 
 /// A sequence or slice operation in Place IR (`Op::Seq`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -108,12 +123,14 @@ pub enum SeqOp {
     /// hoisting pass ([`crate::bounds_hoist`]) creates it, in the fast copy
     /// of a counted loop; its operands are those of the access it replaces.
     Hoisted(Access),
-    /// `[lo, hi, s1, c1, .., sn, cn]`: whether the range `lo..hi` (`lo..=hi`
-    /// when `inclusive`) is empty, or `c_k + i` is in bounds of `s_k` for
-    /// every index `i` of the range and every `k` (`c_k + hi` fits the
-    /// length without overflow). A `bool`; total. Created by
-    /// [`crate::bounds_hoist`].
-    BoundsGuard { inclusive: bool },
+    /// `[lo, hi, s, p1, .., pm, n1, .., nk, ok?]`: whether `ok` (when given)
+    /// holds and either the range `lo..hi` (`lo..=hi` when `inclusive`) is empty or
+    /// the index `form` describes is in bounds of `s` for every index `i` of
+    /// the range: `i + p1 + .. + pm - n1 - .. - nk` (`p1 + .. - i - n1 -
+    /// ..` when the form is negated), evaluated exactly, so that a sum that
+    /// does not fit 64 bits makes the guard false. A `bool`; total. Created
+    /// by [`crate::bounds_hoist`].
+    BoundsGuard { inclusive: bool, form: IndexForm },
     /// `s.copy_from(at, in src)` (`try_copy_from` when `total`): copies every
     /// element of `src` to `s[at..at + src.len()]` with one bounds check.
     /// The checked form raises `IndexOutOfBounds` and the total one yields
@@ -170,6 +187,29 @@ pub enum SeqOp {
     /// raises `IndexOutOfBounds` and the total one yields `false` when
     /// `lo <= hi <= len` fails; neither writes anything then.
     MakeAsciiLowercase { total: bool },
+    /// `Vec::load[T, N](in s, at)`, `Vec::store(inout s, at, v)` and their
+    /// masked forms (§14.3): a whole vector moved between lanes and a
+    /// sequence or slice with one bounds check ([`crate::vector::SliceIo`]).
+    Vector(crate::vector::SliceIo),
+    /// `s.resize(n, v)` on a `ChunkSeq[T]` of a copy `T`: shortens the
+    /// sequence to `n` elements, or appends copies of `v` until it holds
+    /// `n`, with one growth. Total (growth faults as `push` does).
+    Resize,
+    /// `s.fill(lo, hi, v)` (`try_fill` when `total`) on a sequence or slice
+    /// of a copy element type: every element of `s[lo..hi]` becomes `v`,
+    /// with one bounds check. The checked form raises `IndexOutOfBounds` and
+    /// the total one yields `false` when `lo <= hi <= len` fails; neither
+    /// writes anything then. The one-operand `s.fill(v)` is [`SeqOp::Fill`].
+    FillRange { total: bool },
+    /// `s.extend_from_within(lo, hi)` (`try_extend_from_within` when
+    /// `total`) on a `ChunkSeq[T]` of a copy `T`: appends a copy of
+    /// `s[lo..hi]` with one growth and one bounds check. The checked form
+    /// raises `IndexOutOfBounds` and the total one yields `false` when
+    /// `lo <= hi <= len` fails; neither appends anything then.
+    ExtendFromWithin { total: bool },
+    /// `s.extend_reversed(in src)` on a `ChunkSeq[T]` of a copy `T`:
+    /// appends the elements of `src` last first, with one growth. Total.
+    ExtendReversed,
 }
 
 /// `read_u16_le`, `try_write_u64_be` and the other fixed-width accesses of a
@@ -312,7 +352,10 @@ impl SeqOp {
                 | Self::CopyFrom { total: false }
                 | Self::CopyWithin { total: false }
                 | Self::MakeAsciiLowercase { total: false }
+                | Self::FillRange { total: false }
+                | Self::ExtendFromWithin { total: false }
                 | Self::Wide(Wide { total: false, .. })
+                | Self::Vector(crate::vector::SliceIo { masked: false, .. })
         )
     }
     /// Whether the operation mutates its receiver (argument 0) in place.
@@ -335,7 +378,12 @@ impl SeqOp {
                 | Self::CopyFrom { .. }
                 | Self::CopyWithin { .. }
                 | Self::Fill
+                | Self::Resize
+                | Self::FillRange { .. }
+                | Self::ExtendFromWithin { .. }
+                | Self::ExtendReversed
                 | Self::Wide(Wide { write: true, .. })
+                | Self::Vector(crate::vector::SliceIo { store: true, .. })
         )
     }
     /// Whether the operation is a place primitive (`swap`, `replace`) whose
@@ -396,6 +444,22 @@ impl SeqOp {
             Self::ExtendAsciiLowercase => "extend_ascii_lowercase",
             Self::MakeAsciiLowercase { total: false } => "make_ascii_lowercase",
             Self::MakeAsciiLowercase { total: true } => "try_make_ascii_lowercase",
+            Self::Vector(io) => io.name(),
+            Self::Resize => "resize",
+            Self::FillRange { total: false } => "fill",
+            Self::FillRange { total: true } => "try_fill",
+            Self::ExtendFromWithin { total: false } => "extend_from_within",
+            Self::ExtendFromWithin { total: true } => "try_extend_from_within",
+            Self::ExtendReversed => "extend_reversed",
+        }
+    }
+    /// The operation a call of `self` with `operands` arguments (receiver
+    /// not counted) performs: `fill` with three operands fills an interval.
+    pub fn with_arity(self, operands: usize) -> Self {
+        if self == Self::Fill && operands == 3 {
+            Self::FillRange { total: false }
+        } else {
+            self
         }
     }
 }
@@ -569,6 +633,9 @@ pub fn fip_allocation(world: &World, callee: &Expr) -> Option<&'static str> {
             | SeqOp::Push
             | SeqOp::Extend
             | SeqOp::ExtendAsciiLowercase
+            | SeqOp::Resize
+            | SeqOp::ExtendFromWithin { .. }
+            | SeqOp::ExtendReversed
             | SeqOp::Str(
                 crate::strings::StrOp::PushStr
                     | crate::strings::StrOp::PushChar
@@ -586,6 +653,7 @@ fn shared_method(method: &str) -> Option<SeqOp> {
         "copy_within" => SeqOp::CopyWithin { total: false },
         "try_copy_within" => SeqOp::CopyWithin { total: true },
         "fill" => SeqOp::Fill,
+        "try_fill" => SeqOp::FillRange { total: true },
         "sum_be16" => SeqOp::SumBe16,
         "eq" => SeqOp::BytesEq,
         "find_byte" => SeqOp::FindByte,
@@ -618,6 +686,10 @@ pub fn resolve(callee_name: &str, receiver_ty: Option<&Type>) -> Option<SeqOp> {
                 "reserve" => SeqOp::Reserve,
                 "extend" | "extend_from_slice" => SeqOp::Extend,
                 "extend_ascii_lowercase" => SeqOp::ExtendAsciiLowercase,
+                "resize" => SeqOp::Resize,
+                "extend_from_within" => SeqOp::ExtendFromWithin { total: false },
+                "try_extend_from_within" => SeqOp::ExtendFromWithin { total: true },
+                "extend_reversed" => SeqOp::ExtendReversed,
                 "as_slice" | "as_slice_mut" => SeqOp::AsSlice,
                 _ => return shared_method(method),
             });

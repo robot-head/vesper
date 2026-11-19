@@ -816,6 +816,7 @@ fn ast_items_guard(
                         stack.push((Node::Expr(e), next));
                     }
                 }
+                E::Continue => {}
                 E::Range { start, end, .. } => {
                     stack.push((Node::Expr(start), next));
                     stack.push((Node::Expr(end), next));

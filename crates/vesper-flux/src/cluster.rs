@@ -124,7 +124,7 @@ use super::checkpoint::durable::{
 use super::checkpoint::{CheckpointLimits, identity};
 use super::sink::{CommitRecord, CommitSink, MemorySink};
 use super::{Circuit, Executor, Op, Staged, TickInput, apply};
-use crate::{Error, Frontier, FrontierTicket, Limits, ZSet};
+use crate::{Error, Frontier, FrontierTicket, Limits, Row, ZSet};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use vesper_loom_cas::{Domain, ObjectId, Store};
@@ -648,16 +648,14 @@ fn mix(mut z: u64) -> u64 {
 }
 /// Split a canonical set by the owner of `row[col]`.
 fn split(set: &ZSet, col: usize, layout: &Layout) -> Vec<ZSet> {
-    let mut parts: Vec<ZSet> = (0..layout.workers)
-        .map(|_| ZSet {
-            width: set.width,
-            rows: BTreeMap::new(),
-        })
-        .collect();
-    for (row, w) in &set.rows {
-        parts[layout.route(row[col])].rows.insert(row.clone(), *w);
+    let mut parts: Vec<BTreeMap<Row, i64>> = (0..layout.workers).map(|_| BTreeMap::new()).collect();
+    for (row, w) in set.iter() {
+        parts[layout.route(row[col])].insert(row.to_vec(), w);
     }
     parts
+        .into_iter()
+        .map(|rows| ZSet::from_rows(set.width, rows))
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1039,7 +1037,7 @@ fn read_set(r: &mut Bytes<'_>, width: usize, rows_left: &mut usize) -> Result<ZS
         }
         rows.insert(row, w);
     }
-    Ok(ZSet { width, rows })
+    Ok(ZSet::from_rows(width, rows))
 }
 
 fn remove_object(store: &Store, id: &ObjectId) -> Result<u64, Error> {
@@ -1446,7 +1444,7 @@ impl State<'_> {
                 _ => None,
             };
             if let Some(k) = key
-                && set.rows.keys().any(|row| global.layout.route(row[k]) != w)
+                && set.rows().any(|row| global.layout.route(row[k]) != w)
             {
                 return Err(Error::Checkpoint("rows on the wrong worker"));
             }
@@ -2090,11 +2088,12 @@ impl State<'_> {
             if input.deltas.len() != c.inputs.len() {
                 return Err(Error::InputCount);
             }
-            let mut parts: Vec<Vec<ZSet>> = Vec::with_capacity(n);
+            let mut parts: Vec<Vec<BTreeMap<Row, i64>>> = Vec::with_capacity(n);
             for _ in 0..n {
                 let mut v = Vec::with_capacity(c.inputs.len());
                 for width in &c.inputs {
-                    v.push(ZSet::empty(*width, c.limits)?);
+                    ZSet::empty(*width, c.limits)?;
+                    v.push(BTreeMap::new());
                 }
                 parts.push(v);
             }
@@ -2103,14 +2102,22 @@ impl State<'_> {
                     return Err(Error::Schema);
                 }
                 let col = self.plan.columns[slot];
-                for (i, (row, weight)) in delta.rows.iter().enumerate() {
+                for (i, (row, weight)) in delta.iter().enumerate() {
                     if i % n == w {
-                        parts[layout.route(row[col])][slot]
-                            .rows
-                            .insert(row.clone(), *weight);
+                        parts[layout.route(row[col])][slot].insert(row.to_vec(), weight);
                     }
                 }
             }
+            let parts: Vec<Vec<ZSet>> = parts
+                .into_iter()
+                .map(|deltas| {
+                    deltas
+                        .into_iter()
+                        .zip(&c.inputs)
+                        .map(|(rows, width)| ZSet::from_rows(*width, rows))
+                        .collect()
+                })
+                .collect();
             for (dest, deltas) in parts.into_iter().enumerate() {
                 self.send(
                     now,
@@ -2224,26 +2231,32 @@ impl State<'_> {
         if holds && worker.migrated_out != Some(b) {
             // Send the bins this worker loses, one message per new owner.
             let integrals = worker.exec.integrals();
-            let mut parts: Vec<Vec<ZSet>> = vec![Vec::with_capacity(keyed.len()); new.workers];
+            let mut maps: Vec<Vec<(usize, BTreeMap<Row, i64>)>> =
+                vec![Vec::with_capacity(keyed.len()); new.workers];
             let (mut moved, mut total) = (0, 0);
             for &(node, key) in &keyed {
                 let set = &integrals[node];
                 total += set.len();
-                for p in &mut parts {
-                    p.push(ZSet {
-                        width: set.width,
-                        rows: BTreeMap::new(),
-                    });
+                for p in &mut maps {
+                    p.push((set.width, BTreeMap::new()));
                 }
-                for (row, weight) in &set.rows {
+                for (row, weight) in set.iter() {
                     let dest = new.route(row[key]);
                     if dest != w {
                         moved += 1;
-                        let last = parts[dest].len() - 1;
-                        parts[dest][last].rows.insert(row.clone(), *weight);
+                        let last = maps[dest].len() - 1;
+                        maps[dest][last].1.insert(row.to_vec(), weight);
                     }
                 }
             }
+            let parts: Vec<Vec<ZSet>> = maps
+                .into_iter()
+                .map(|p| {
+                    p.into_iter()
+                        .map(|(width, rows)| ZSet::from_rows(width, rows))
+                        .collect()
+                })
+                .collect();
             self.moving.insert((b, w), (moved, total));
             let gains_from =
                 |dest: usize| (0..BINS).any(|x| old.owner(x) == w && new.owner(x) == dest);
@@ -2310,21 +2323,19 @@ impl State<'_> {
         let own = holds && self.workers[w].generation == g;
         let mut sums: Vec<ZSet> = Vec::with_capacity(keyed.len());
         for (k, &(node, key)) in keyed.iter().enumerate() {
-            let mut sum = ZSet {
-                width: c.nodes[node].width,
-                rows: BTreeMap::new(),
-            };
+            let mut own_rows = BTreeMap::new();
             if own {
-                for (row, weight) in &self.workers[w].exec.integrals()[node].rows {
+                for (row, weight) in self.workers[w].exec.integrals()[node].iter() {
                     if new.route(row[key]) == w {
-                        sum.rows.insert(row.clone(), *weight);
+                        own_rows.insert(row.to_vec(), weight);
                     }
                 }
             }
+            let mut sum = ZSet::from_rows(c.nodes[node].width, own_rows);
             for (from, parts) in &got {
                 let part = parts.get(k).ok_or(Error::Cluster("malformed migration"))?;
                 if part.width != sum.width
-                    || part.rows.keys().any(|row| {
+                    || part.rows().any(|row| {
                         let x = bin_of(row[key]);
                         old.owner(x) != *from || new.owner(x) != w
                     })

@@ -7,4 +7,4 @@ publish = false
 
 [dependencies]
 vesper-gpu-compute = { path = "../../vesper-gpu-compute" }
-vesper-kinetic = { path = ".." }
+vesper-kinetic = { path = "../seed", package = "vesper-kinetic-seed" }

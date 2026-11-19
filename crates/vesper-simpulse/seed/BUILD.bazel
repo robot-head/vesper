@@ -1,8 +1,9 @@
 # The frozen Rust seed copy of vesper-simpulse (package vesper-simpulse-seed,
-# library vesper_simpulse) that the compiler and the crates it links use:
-# ../src built without the port, so cfg(vesper_port) is off. Written by hand
-# because its sources live in the parent package; see "Crates the compiler
-# links" in docs/maintenance/porting-a-crate.md.
+# library vesper_simpulse) that the compiler and the crates it links use: the
+# shared API in ../src/lib.rs (cfg(vesper_port) off) over the Rust Simulator
+# in src/reference.rs. Written by hand because part of its sources live in
+# the parent package; see "Crates the compiler links" in
+# docs/maintenance/porting-a-crate.md.
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 load("@rules_rs//rs/private:all_crate_deps.bzl", "all_crate_deps")
@@ -14,10 +15,10 @@ _DATA = PACKAGES["crates/vesper-simpulse/seed"].crate_data()
 
 rust_library(
     name = "seed",
-    srcs = ["//crates/vesper-simpulse:rust_srcs"],
+    srcs = glob(["src/**/*.rs"]) + ["//crates/vesper-simpulse:rust_srcs"],
     compile_data = ["//crates/vesper-simpulse:README.md"],
     crate_name = "vesper_simpulse",
-    crate_root = "//crates/vesper-simpulse:src/lib.rs",
+    crate_root = "src/lib.rs",
     edition = "2024",
     rustc_env = {
         "CARGO_PKG_NAME": "vesper-simpulse-seed",

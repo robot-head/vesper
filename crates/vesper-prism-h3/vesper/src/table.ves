@@ -1,0 +1,333 @@
+// The QPACK static table (RFC 9204 Appendix A) and the dynamic table
+// (qpack/mod.rs `Table`, RFC 9204 §3.2).
+
+use self::int::{
+    inc,
+    word,
+    byte
+};
+use self::static_table::{
+    static_bytes,
+    static_ends
+};
+
+pub fn static_count() -> u64 {
+    99
+}
+
+pub struct Static {
+    bytes: ChunkSeq[u8],
+    ends: ChunkSeq[u64],
+    // Open-addressed name index: bucket -> first index with that name + 1
+    // (0 empty), keyed by `name_hash`.
+    hidx: ChunkSeq[u64],
+    // Per index: the next index with the same name + 1 (0 none).
+    next: ChunkSeq[u64]
+}
+
+fn buckets() -> u64 {
+    256
+}
+
+// FNV-1a over the name, folded to a bucket.
+fn name_hash(in name: Slice[u8]) -> u64 {
+    let mut h: u64 = 2166136261;
+    for k in 0..name.len() {
+        h = wrapping_mul(h ^ widen_u64(byte(in name, k)), 16777619);
+    }
+    (h ^ (h >> 16)) & 255
+}
+
+fn static_name_at(in s: Static, i: u64, in name: Slice[u8]) -> bool {
+    static_same(in s, static_name_lo(in s, i), static_name_hi(in s, i), in name)
+}
+
+pub fn static_new() -> Static {
+    let mut s = Static {
+        bytes: static_bytes(),
+        ends: static_ends(),
+        hidx: ChunkSeq::new[u64](),
+        next: ChunkSeq::new[u64]()
+    };
+    for _b in 0..buckets() {
+        s.hidx.push(0);
+    }
+    for i in 0..static_count() {
+        let lo = static_name_lo(in s, i);
+        let hi = static_name_hi(in s, i);
+        let mut link: u64 = 0;
+        let mut j = inc(i);
+        loop {
+            if j >= static_count() {
+                break;
+            }
+            if static_same(
+                in s,
+                static_name_lo(in s, j),
+                static_name_hi(in s, j),
+                in s.bytes[lo..hi]
+            ) {
+                link = inc(j);
+                break;
+            }
+            j = inc(j);
+        }
+        s.next.push(link);
+    }
+    for i in 0..static_count() {
+        let lo = static_name_lo(in s, i);
+        let hi = static_name_hi(in s, i);
+        let mut b = name_hash(in s.bytes[lo..hi]);
+        loop {
+            let at = word(in s.hidx.as_slice(), b);
+            if at == 0 {
+                let _r = s.hidx.try_set(b, inc(i));
+                break;
+            }
+            if static_same(
+                in s,
+                static_name_lo(in s, wrapping_sub(at, 1)),
+                static_name_hi(in s, wrapping_sub(at, 1)),
+                in s.bytes[lo..hi]
+            ) {
+                break;
+            }
+            b = inc(b) & 255;
+        }
+    }
+    s
+}
+
+pub fn static_name_lo(in s: Static, i: u64) -> u64 {
+    if i == 0 {
+        0
+    } else {
+        word(in s.ends.as_slice(), wrapping_sub(wrapping_mul(i, 2), 1))
+    }
+}
+
+pub fn static_name_hi(in s: Static, i: u64) -> u64 {
+    word(in s.ends.as_slice(), wrapping_mul(i, 2))
+}
+
+pub fn static_value_hi(in s: Static, i: u64) -> u64 {
+    word(in s.ends.as_slice(), inc(wrapping_mul(i, 2)))
+}
+
+fn static_same(in s: Static, lo: u64, hi: u64, in want: Slice[u8]) -> bool {
+    if wrapping_sub(hi, lo) != want.len() {
+        return false;
+    }
+    want.eq(in s.bytes[lo..hi])
+}
+
+// The first static index with this name.
+pub fn static_name(in s: Static, in name: Slice[u8]) -> Option[u64] {
+    let mut b = name_hash(in name);
+    for _p in 0..buckets() {
+        let at = word(in s.hidx.as_slice(), b);
+        if at == 0 {
+            return Option::None;
+        }
+        let i = wrapping_sub(at, 1);
+        if static_name_at(in s, i, in name) {
+            return Option::Some(i);
+        }
+        b = inc(b) & 255;
+    }
+    Option::None
+}
+
+// The first static index with this name and value.
+pub fn static_exact(in s: Static, in name: Slice[u8], in value: Slice[u8]) -> Option[u64] {
+    let mut i = match static_name(in s, in name) {
+        Option::Some(i) => i,
+        Option::None => return Option::None,
+    };
+    for _p in 0..static_count() {
+        let mid = static_name_hi(in s, i);
+        if static_same(in s, mid, static_value_hi(in s, i), in value) {
+            return Option::Some(i);
+        }
+        let n = word(in s.next.as_slice(), i);
+        if n == 0 {
+            return Option::None;
+        }
+        i = wrapping_sub(n, 1);
+    }
+    Option::None
+}
+
+// The dynamic table, oldest entry first. Entry slots `head..lo.len()` are
+// live; each entry is its name then its value in `bytes` from `lo[slot]`.
+// Evicted slots are dropped from the front lazily (`compact`). `refs` counts
+// the outstanding encoder references per slot (the encoder's `refs`).
+pub struct Table {
+    bytes: ChunkSeq[u8],
+    lo: ChunkSeq[u64],
+    nlen: ChunkSeq[u64],
+    vlen: ChunkSeq[u64],
+    refs: ChunkSeq[u64],
+    head: u64,
+    size: u64,
+    capacity: u64,
+    inserted: u64
+}
+
+pub fn table_new() -> Table {
+    Table {
+        bytes: ChunkSeq::new[u8](),
+        lo: ChunkSeq::new[u64](),
+        nlen: ChunkSeq::new[u64](),
+        vlen: ChunkSeq::new[u64](),
+        refs: ChunkSeq::new[u64](),
+        head: 0,
+        size: 0,
+        capacity: 0,
+        inserted: 0
+    }
+}
+
+pub fn table_len(in t: Table) -> u64 {
+    wrapping_sub(t.lo.len(), t.head)
+}
+
+// Absolute index of the oldest entry still present.
+pub fn table_first(in t: Table) -> u64 {
+    wrapping_sub(t.inserted, table_len(in t))
+}
+
+// The slot of absolute index `abs`, if it is present.
+pub fn table_slot(in t: Table, abs: u64) -> Option[u64] {
+    let first = table_first(in t);
+    if abs < first || abs >= t.inserted {
+        return Option::None;
+    }
+    Option::Some(wrapping_add(t.head, wrapping_sub(abs, first)))
+}
+
+pub fn slot_name_lo(in t: Table, slot: u64) -> u64 {
+    word(in t.lo.as_slice(), slot)
+}
+
+pub fn slot_name_hi(in t: Table, slot: u64) -> u64 {
+    wrapping_add(word(in t.lo.as_slice(), slot), word(in t.nlen.as_slice(), slot))
+}
+
+pub fn slot_value_hi(in t: Table, slot: u64) -> u64 {
+    wrapping_add(slot_name_hi(in t, slot), word(in t.vlen.as_slice(), slot))
+}
+
+// RFC 9204 §3.2.1 entry size.
+pub fn slot_size(in t: Table, slot: u64) -> u64 {
+    wrapping_add(
+        wrapping_add(word(in t.nlen.as_slice(), slot), word(in t.vlen.as_slice(), slot)),
+        32
+    )
+}
+
+pub fn slot_name_is(in t: Table, slot: u64, in name: Slice[u8]) -> bool {
+    if word(in t.nlen.as_slice(), slot) != name.len() {
+        return false;
+    }
+    let lo = slot_name_lo(in t, slot);
+    name.eq(in t.bytes[lo..slot_name_hi(in t, slot)])
+}
+
+pub fn slot_is(in t: Table, slot: u64, in name: Slice[u8], in value: Slice[u8]) -> bool {
+    if word(in t.vlen.as_slice(), slot) != value.len() || !slot_name_is(in t, slot, in name) {
+        return false;
+    }
+    let mid = slot_name_hi(in t, slot);
+    value.eq(in t.bytes[mid..slot_value_hi(in t, slot)])
+}
+
+// Entries (oldest first) that must go for `needed` more bytes to fit.
+pub fn table_evictions_for(in t: Table, needed: u64) -> Option[u64] {
+    if needed > t.capacity {
+        return Option::None;
+    }
+    let mut size = t.size;
+    let mut n: u64 = 0;
+    loop {
+        if wrapping_add(size, needed) <= t.capacity {
+            break;
+        }
+        size = wrapping_sub(size, slot_size(in t, wrapping_add(t.head, n)));
+        n = inc(n);
+    }
+    Option::Some(n)
+}
+
+fn evict_one(inout t: Table) {
+    if t.head >= t.lo.len() {
+        return;
+    }
+    t.size = wrapping_sub(t.size, slot_size(in t, t.head));
+    t.head = inc(t.head);
+    if t.head == t.lo.len() {
+        t.bytes.clear();
+        t.lo.clear();
+        t.nlen.clear();
+        t.vlen.clear();
+        t.refs.clear();
+        t.head = 0;
+    }
+}
+
+fn shift_words(inout s: ChunkSeq[u64], from: u64) {
+    let n = s.len();
+    let _moved = s.try_copy_within(from, n, 0);
+    s.truncate(wrapping_sub(n, from));
+}
+
+// Drops the evicted slots and bytes once they are at least half of the
+// table, so eviction stays O(1) amortized.
+fn compact(inout t: Table) {
+    let n = t.lo.len();
+    if t.head < 16 || wrapping_mul(t.head, 2) < n {
+        return;
+    }
+    let base = word(in t.lo.as_slice(), t.head);
+    let blen = t.bytes.len();
+    let _moved = t.bytes.try_copy_within(base, blen, 0);
+    t.bytes.truncate(wrapping_sub(blen, base));
+    shift_words(inout t.lo, t.head);
+    shift_words(inout t.nlen, t.head);
+    shift_words(inout t.vlen, t.head);
+    shift_words(inout t.refs, t.head);
+    for i in 0..t.lo.len() {
+        let _set = t.lo.try_set(i, wrapping_sub(word(in t.lo.as_slice(), i), base));
+    }
+    t.head = 0;
+}
+
+pub fn table_set_capacity(inout t: Table, capacity: u64) {
+    t.capacity = capacity;
+    loop {
+        if t.size <= capacity {
+            break;
+        }
+        evict_one(inout t);
+    }
+}
+
+// Inserts after evicting; the caller has checked that the entry fits.
+pub fn table_insert(inout t: Table, in name: Slice[u8], in value: Slice[u8]) {
+    let needed = wrapping_add(wrapping_add(name.len(), value.len()), 32);
+    loop {
+        if wrapping_add(t.size, needed) <= t.capacity || t.head >= t.lo.len() {
+            break;
+        }
+        evict_one(inout t);
+    }
+    compact(inout t);
+    t.lo.push(t.bytes.len());
+    t.bytes.extend(in name);
+    t.bytes.extend(in value);
+    t.nlen.push(name.len());
+    t.vlen.push(value.len());
+    t.refs.push(0);
+    t.size = wrapping_add(t.size, needed);
+    t.inserted = inc(t.inserted);
+}

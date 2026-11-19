@@ -1,0 +1,792 @@
+// qpack/decoder.rs: the QPACK decoder (RFC 9204 §2.2, §4.3 and §4.5).
+// Decoded sections are appended to `d.sec`, which the Rust wrapper reads
+// after each call: per record four words in `heads` (kind, stream, Required
+// Insert Count, field count), per field three words in `fields` (name
+// length, value length, sensitive) and the names and values in `bytes`.
+// Kinds: 0 a section that became ready, 1 a ready FieldSectionTooLarge
+// error, 2 "drop the ready sections of this stream", 3 the section
+// `decode_section` returns.
+
+use self::{
+    DecoderCore,
+    Sections,
+    QpackError,
+    Reason,
+    PrefixError,
+    Huff
+};
+use self::int::{
+    inc,
+    word,
+    byte,
+    max64,
+    sat_add,
+    sat_mul,
+    remove_word,
+    drain_front
+};
+use self::prefix::{
+    Num,
+    decode_int,
+    encode_int,
+    decode_string
+};
+use self::table::{
+    Static,
+    Table,
+    static_name_lo,
+    static_name_hi,
+    static_value_hi,
+    table_slot,
+    table_insert,
+    table_set_capacity,
+    slot_name_lo,
+    slot_name_hi,
+    slot_value_hi
+};
+
+use self::reason::{
+    reason_of
+};
+
+// RFC 9204 §4.5.1.1 decoding of the Required Insert Count, refusing values
+// no conformant encoder could have produced.
+pub fn decode_ric(encoded: u64, max_entries: u64, total_inserts: u64) -> Option[u64] {
+    if encoded == 0 {
+        return Option::Some(0);
+    }
+    if max_entries > 9223372036854775807 {
+        return Option::None;
+    }
+    let full = wrapping_mul(max_entries, 2);
+    if encoded > full {
+        return Option::None;
+    }
+    let max_value = wrapping_add(total_inserts, max_entries);
+    if max_value < total_inserts {
+        return Option::None;
+    }
+    let max_wrapped = wrapping_mul(max_value / full, full);
+    let mut ric = wrapping_sub(wrapping_add(max_wrapped, encoded), 1);
+    if ric > max_value {
+        if ric <= full {
+            return Option::None;
+        }
+        ric = wrapping_sub(ric, full);
+    }
+    if ric == 0 {
+        Option::None
+    } else {
+        Option::Some(ric)
+    }
+}
+
+copy struct Lines {
+    size: u64,
+    count: u64
+}
+
+// Where a field line's dynamic reference points, if anywhere valid.
+fn dynamic(in t: Table, abs: Option[u64], ric: u64, inout max_ref: u64) -> Result[u64, Reason] {
+    let a = match abs {
+        Option::Some(a) => a,
+        Option::None => {
+            return Result::Err(Reason::BadDynamicIndex);
+        },
+    };
+    if a >= ric {
+        return Result::Err(Reason::BadDynamicIndex);
+    }
+    max_ref = max64(max_ref, inc(a));
+    match table_slot(in t, a) {
+        Option::Some(slot) => Result::Ok(slot),
+        Option::None => Result::Err(Reason::BadDynamicIndex),
+    }
+}
+
+// `base - index - 1`, if it does not go below zero.
+fn pre_base(base: u64, index: u64) -> Option[u64] {
+    if index >= base {
+        Option::None
+    } else {
+        Option::Some(wrapping_sub(wrapping_sub(base, index), 1))
+    }
+}
+
+fn post_base(base: u64, index: u64) -> Option[u64] {
+    let a = wrapping_add(base, index);
+    if a < base {
+        Option::None
+    } else {
+        Option::Some(a)
+    }
+}
+
+fn copy_static(in st: Static, index: u64, value: bool, inout out: ChunkSeq[u8])
+    -> Result[Unit, Reason] {
+    if index >= 99 {
+        return Result::Err(Reason::BadStaticIndex(index));
+    }
+    let mid = static_name_hi(in st, index);
+    if value {
+        out.extend(in st.bytes[mid..static_value_hi(in st, index)]);
+    } else {
+        out.extend(in st.bytes[static_name_lo(in st, index)..mid]);
+    }
+    Result::Ok(())
+}
+
+// Appends the name (or, with `value`, the value) of a dynamic entry.
+fn copy_slot(in t: Table, slot: u64, value: bool, inout out: ChunkSeq[u8]) {
+    let mid = slot_name_hi(in t, slot);
+    if value {
+        out.extend(in t.bytes[mid..slot_value_hi(in t, slot)]);
+    } else {
+        out.extend(in t.bytes[slot_name_lo(in t, slot)..mid]);
+    }
+}
+
+fn num(r: Result[Num, PrefixError]) -> Result[Num, Reason] {
+    match r {
+        Result::Ok(n) => Result::Ok(n),
+        Result::Err(e) => Result::Err(reason_of(e)),
+    }
+}
+
+// One field line at `buf[at]`, appended to `out`; returns the offset after
+// it. `split` gets the length of the name.
+fn line(
+    in h: Huff,
+    in st: Static,
+    in t: Table,
+    ric: u64,
+    base: u64,
+    max: u64,
+    in buf: Slice[u8],
+    at: u64,
+    inout max_ref: u64,
+    inout out: ChunkSeq[u8],
+    inout split: u64,
+    inout sensitive: bool
+) -> Result[u64, Reason] {
+    let start = out.len();
+    let first = byte(in buf, at);
+    if first & 128 != 0 {
+        let n = match num(decode_int(in buf, at, 6)) {
+            Result::Ok(n) => n,
+            Result::Err(r) => {
+                return Result::Err(r);
+            },
+        };
+        if first & 64 != 0 {
+            match copy_static(in st, n.value, false, inout out) {
+                Result::Ok(_u) => (),
+                Result::Err(r) => {
+                    return Result::Err(r);
+                },
+            }
+            split = wrapping_sub(out.len(), start);
+            let _ok = copy_static(in st, n.value, true, inout out);
+        } else {
+            let slot = match dynamic(in t, pre_base(base, n.value), ric, inout max_ref) {
+                Result::Ok(s) => s,
+                Result::Err(r) => {
+                    return Result::Err(r);
+                },
+            };
+            copy_slot(in t, slot, false, inout out);
+            split = wrapping_sub(out.len(), start);
+            copy_slot(in t, slot, true, inout out);
+        }
+        sensitive = false;
+        return Result::Ok(wrapping_add(at, n.used));
+    }
+    if first & 64 != 0 {
+        let n = match num(decode_int(in buf, at, 4)) {
+            Result::Ok(n) => n,
+            Result::Err(r) => {
+                return Result::Err(r);
+            },
+        };
+        if first & 16 != 0 {
+            match copy_static(in st, n.value, false, inout out) {
+                Result::Ok(_u) => (),
+                Result::Err(r) => {
+                    return Result::Err(r);
+                },
+            }
+        } else {
+            match dynamic(in t, pre_base(base, n.value), ric, inout max_ref) {
+                Result::Ok(slot) => copy_slot(in t, slot, false, inout out),
+                Result::Err(r) => {
+                    return Result::Err(r);
+                },
+            }
+        }
+        split = wrapping_sub(out.len(), start);
+        sensitive = first & 32 != 0;
+        return num_end(decode_string(in h, in buf, wrapping_add(at, n.used), 7, max, inout out));
+    }
+    if first & 32 != 0 {
+        let mid = match num_end(decode_string(in h, in buf, at, 3, max, inout out)) {
+            Result::Ok(m) => m,
+            Result::Err(r) => {
+                return Result::Err(r);
+            },
+        };
+        split = wrapping_sub(out.len(), start);
+        sensitive = first & 16 != 0;
+        return num_end(decode_string(in h, in buf, mid, 7, max, inout out));
+    }
+    if first & 16 != 0 {
+        let n = match num(decode_int(in buf, at, 4)) {
+            Result::Ok(n) => n,
+            Result::Err(r) => {
+                return Result::Err(r);
+            },
+        };
+        let slot = match dynamic(in t, post_base(base, n.value), ric, inout max_ref) {
+            Result::Ok(s) => s,
+            Result::Err(r) => {
+                return Result::Err(r);
+            },
+        };
+        copy_slot(in t, slot, false, inout out);
+        split = wrapping_sub(out.len(), start);
+        copy_slot(in t, slot, true, inout out);
+        sensitive = false;
+        return Result::Ok(wrapping_add(at, n.used));
+    }
+    let n = match num(decode_int(in buf, at, 3)) {
+        Result::Ok(n) => n,
+        Result::Err(r) => {
+            return Result::Err(r);
+        },
+    };
+    match dynamic(in t, post_base(base, n.value), ric, inout max_ref) {
+        Result::Ok(slot) => copy_slot(in t, slot, false, inout out),
+        Result::Err(r) => {
+            return Result::Err(r);
+        },
+    }
+    split = wrapping_sub(out.len(), start);
+    sensitive = first & 8 != 0;
+    num_end(decode_string(in h, in buf, wrapping_add(at, n.used), 7, max, inout out))
+}
+
+fn num_end(r: Result[u64, PrefixError]) -> Result[u64, Reason] {
+    match r {
+        Result::Ok(n) => Result::Ok(n),
+        Result::Err(e) => Result::Err(reason_of(e)),
+    }
+}
+
+// `Decoder::lines`: the field lines after the Required Insert Count.
+fn lines(
+    in h: Huff,
+    in st: Static,
+    in t: Table,
+    max_field: u64,
+    ric: u64,
+    in buf: Slice[u8],
+    inout sec: Sections
+) -> Result[Lines, Reason] {
+    let delta = match num(decode_int(in buf, 0, 7)) {
+        Result::Ok(n) => n,
+        Result::Err(r) => {
+            return Result::Err(r);
+        },
+    };
+    let base = if byte(in buf, 0) & 128 == 0 {
+        let b = wrapping_add(ric, delta.value);
+        if b < ric {
+            return Result::Err(Reason::IntegerOverflow);
+        }
+        b
+    } else {
+        if delta.value >= ric {
+            return Result::Err(Reason::NegativeBase);
+        }
+        wrapping_sub(wrapping_sub(ric, delta.value), 1)
+    };
+    let limit = sat_mul(max_field, 2);
+    let mut at = delta.used;
+    let mut size: u64 = 0;
+    let mut count: u64 = 0;
+    let mut max_ref: u64 = 0;
+    loop {
+        if at >= buf.len() {
+            break;
+        }
+        let start = sec.bytes.len();
+        let mut split: u64 = 0;
+        let mut sensitive = false;
+        at = match line(
+            in h,
+            in st,
+            in t,
+            ric,
+            base,
+            max_field,
+            in buf,
+            at,
+            inout max_ref,
+            inout sec.bytes,
+            inout split,
+            inout sensitive
+        ) {
+            Result::Ok(next) => next,
+            Result::Err(r) => {
+                return Result::Err(r);
+            },
+        };
+        let total = wrapping_sub(sec.bytes.len(), start);
+        size = sat_add(size, wrapping_add(total, 32));
+        if size > limit {
+            sec.bytes.truncate(start);
+            return Result::Ok(
+                Lines {
+                    size: size,
+                    count: count
+                }
+            );
+        }
+        sec.fields.push(split);
+        sec.fields.push(wrapping_sub(total, split));
+        sec
+            .fields
+            .push(
+            if sensitive {
+                1
+            } else {
+                0
+            }
+        );
+        count = inc(count);
+    }
+    if ric > 0 && max_ref != ric {
+        return Result::Err(Reason::BadRequiredInsertCount);
+    }
+    Result::Ok(
+        Lines {
+            size: size,
+            count: count
+        }
+    )
+}
+
+fn fail(inout d: DecoderCore, e: QpackError) -> QpackError {
+    d.failed = Option::Some(e);
+    e
+}
+
+fn head(inout sec: Sections, kind: u64, stream_id: u64, ric: u64, count: u64) {
+    sec.heads.push(kind);
+    sec.heads.push(stream_id);
+    sec.heads.push(ric);
+    sec.heads.push(count);
+}
+
+fn find_blocked(in d: DecoderCore, stream_id: u64) -> Option[u64] {
+    for i in 0..d.blk_stream.len() {
+        if word(in d.blk_stream.as_slice(), i) == stream_id {
+            return Option::Some(i);
+        }
+    }
+    Option::None
+}
+
+fn remove_blocked(inout d: DecoderCore, i: u64) {
+    d.blocked_bytes = wrapping_sub(d.blocked_bytes, word(in d.blk_len.as_slice(), i));
+    remove_word(inout d.blk_stream, i);
+    remove_word(inout d.blk_ric, i);
+    remove_word(inout d.blk_lo, i);
+    remove_word(inout d.blk_len, i);
+    if d.blk_stream.len() == 0 {
+        d.blk_bytes.clear();
+    }
+}
+
+// `Decoder::cancel_stream` without the ready queue, which the wrapper
+// filters when it reads the kind-2 record.
+pub fn dec_cancel_stream(inout d: DecoderCore, stream_id: u64) {
+    match find_blocked(in d, stream_id) {
+        Option::Some(i) => remove_blocked(inout d, i),
+        Option::None => (),
+    }
+    head(inout d.sec, 2, stream_id, 0, 0);
+    if d.cfg.max_table_capacity > 0 {
+        encode_int(inout d.out, 64, 6, stream_id);
+    }
+}
+
+// `Decoder::finish` after `lines`: acknowledges or cancels, and records the
+// section (`queued`: as a ready section, else as the result).
+fn conclude(
+    inout d: DecoderCore,
+    stream_id: u64,
+    ric: u64,
+    bytes_at: u64,
+    fields_at: u64,
+    r: Result[Lines, Reason],
+    queued: bool
+) -> Result[Unit, QpackError] {
+    match r {
+        Result::Ok(l) => {
+            let too_large = l.size > d.cfg.max_field_section_size;
+            if too_large {
+                d.sec.bytes.truncate(bytes_at);
+                d.sec.fields.truncate(fields_at);
+            }
+            if ric > 0 {
+                if too_large {
+                    dec_cancel_stream(inout d, stream_id);
+                } else {
+                    encode_int(inout d.out, 128, 7, stream_id);
+                    d.acknowledged = max64(d.acknowledged, ric);
+                }
+            }
+            if too_large {
+                let err = QpackError::FieldSectionTooLarge {
+                    stream_id: stream_id
+                };
+                if queued {
+                    head(inout d.sec, 1, stream_id, ric, 0);
+                    return Result::Ok(());
+                }
+                return Result::Err(err);
+            }
+            let kind: u64 = if queued {
+                0
+            } else {
+                3
+            };
+            head(inout d.sec, kind, stream_id, ric, l.count);
+            Result::Ok(())
+        },
+        Result::Err(reason) => {
+            d.sec.bytes.truncate(bytes_at);
+            d.sec.fields.truncate(fields_at);
+            Result::Err(fail(inout d, QpackError::Decompression(reason)))
+        },
+    }
+}
+
+fn dfail(inout d: DecoderCore, reason: Reason) -> Result[bool, QpackError] {
+    Result::Err(fail(inout d, QpackError::Decompression(reason)))
+}
+
+// `Decoder::decode_section`: `true` for a section (the kind-3 record),
+// `false` when it blocked.
+pub fn dec_decode_section(inout d: DecoderCore, in h: Huff, stream_id: u64, in data: Slice[u8])
+    -> Result[bool, QpackError] {
+    d.sec.bytes.clear();
+    d.sec.fields.clear();
+    d.sec.heads.clear();
+    match d.failed {
+        Option::Some(e) => {
+            return Result::Err(e);
+        },
+        Option::None => (),
+    }
+    match find_blocked(in d, stream_id) {
+        Option::Some(_i) => {
+            return Result::Err(QpackError::Decompression(Reason::StreamAlreadyBlocked(stream_id)));
+        },
+        Option::None => (),
+    }
+    let encoded = match num(decode_int(in data, 0, 8)) {
+        Result::Ok(n) => n,
+        Result::Err(r) => {
+            return dfail(inout d, r);
+        },
+    };
+    let ric = match decode_ric(encoded.value, d.max_entries, d.table.inserted) {
+        Option::Some(r) => r,
+        Option::None => {
+            return dfail(inout d, Reason::BadRequiredInsertCount);
+        },
+    };
+    if ric > d.table.inserted {
+        match num(decode_int(in data, encoded.used, 7)) {
+            Result::Ok(_n) => (),
+            Result::Err(r) => {
+                return dfail(inout d, r);
+            },
+        }
+        if d.blk_stream.len() >= d.cfg.max_blocked_streams {
+            return dfail(inout d, Reason::TooManyBlockedStreams);
+        }
+        if data.len() > wrapping_sub(wrapping_u64(d.cfg.max_blocked_bytes), d.blocked_bytes) {
+            return dfail(inout d, Reason::BlockedBytesLimit);
+        }
+        compact_blocked(inout d);
+        d.blocked_bytes = wrapping_add(d.blocked_bytes, data.len());
+        d.blk_stream.push(stream_id);
+        d.blk_ric.push(ric);
+        d.blk_lo.push(d.blk_bytes.len());
+        d.blk_len.push(data.len());
+        d.blk_bytes.extend(in data);
+        return Result::Ok(false);
+    }
+    let max = d.cfg.max_field_section_size;
+    let r = lines(
+        in h,
+        in h.st,
+        in d.table,
+        max,
+        ric,
+        in data[encoded.used..data.len()],
+        inout d.sec
+    );
+    match conclude(inout d, stream_id, ric, 0, 0, r, false) {
+        Result::Ok(_u) => Result::Ok(true),
+        Result::Err(e) => Result::Err(e),
+    }
+}
+
+// Rebuilds `blk_bytes` once removed sections are most of it.
+fn compact_blocked(inout d: DecoderCore) {
+    let total = d.blk_bytes.len();
+    if total < 65536 || total < wrapping_mul(d.blocked_bytes, 2) {
+        return;
+    }
+    let mut pool = ChunkSeq::with_capacity[u8](d.blocked_bytes);
+    for i in 0..d.blk_stream.len() {
+        let lo = word(in d.blk_lo.as_slice(), i);
+        let hi = wrapping_add(lo, word(in d.blk_len.as_slice(), i));
+        let _set = d.blk_lo.try_set(i, pool.len());
+        pool.extend(in d.blk_bytes[lo..hi]);
+    }
+    d.blk_bytes = pool;
+}
+
+// `Decoder::unblock`: finishes every blocked section the table now covers,
+// in order.
+fn unblock(inout d: DecoderCore, in h: Huff) -> Result[Unit, QpackError] {
+    let inserted = d.table.inserted;
+    let max = d.cfg.max_field_section_size;
+    let mut i: u64 = 0;
+    loop {
+        if i >= d.blk_stream.len() {
+            break;
+        }
+        let ric = word(in d.blk_ric.as_slice(), i);
+        if ric <= inserted {
+            let stream_id = word(in d.blk_stream.as_slice(), i);
+            let lo = word(in d.blk_lo.as_slice(), i);
+            let hi = wrapping_add(lo, word(in d.blk_len.as_slice(), i));
+            let n = match decode_int(in d.blk_bytes[lo..hi], 0, 8) {
+                Result::Ok(n) => n.used,
+                Result::Err(_e) => 0,
+            };
+            let bytes_at = d.sec.bytes.len();
+            let fields_at = d.sec.fields.len();
+            let r = lines(
+                in h,
+                in h.st,
+                in d.table,
+                max,
+                ric,
+                in d.blk_bytes[wrapping_add(lo, n)..hi],
+                inout d.sec
+            );
+            remove_blocked(inout d, i);
+            match conclude(inout d, stream_id, ric, bytes_at, fields_at, r, true) {
+                Result::Ok(_u) => (),
+                Result::Err(e) => {
+                    return Result::Err(e);
+                },
+            }
+        } else {
+            i = inc(i);
+        }
+    }
+    Result::Ok(())
+}
+
+// The entry `index` places below the Insert Count (encoder instructions).
+fn relative(in t: Table, index: u64) -> Option[u64] {
+    if index >= t.inserted {
+        return Option::None;
+    }
+    table_slot(in t, wrapping_sub(wrapping_sub(t.inserted, index), 1))
+}
+
+fn insert_scratch(inout d: DecoderCore) -> Result[u64, Reason] {
+    let size = wrapping_add(wrapping_add(d.name.len(), d.value.len()), 32);
+    if size > d.table.capacity {
+        return Result::Err(Reason::EntryTooLarge);
+    }
+    table_insert(inout d.table, in d.name.as_slice(), in d.value.as_slice());
+    Result::Ok(0)
+}
+
+// One encoder instruction at `pending[at]` (RFC 9204 §4.3): the bytes it
+// used, or 0 when it is incomplete.
+fn instruction(inout d: DecoderCore, in h: Huff, at: u64) -> Result[u64, Reason] {
+    let max = d.cfg.max_table_capacity;
+    let first = byte(in d.pending.as_slice(), at);
+    d.name.clear();
+    d.value.clear();
+    let mut used: u64 = 0;
+    if first & 128 != 0 {
+        let n = match decode_int(in d.pending.as_slice(), at, 6) {
+            Result::Ok(n) => n,
+            Result::Err(PrefixError::Incomplete) => {
+                return Result::Ok(0);
+            },
+            Result::Err(e) => {
+                return Result::Err(reason_of(e));
+            },
+        };
+        let found = if first & 64 != 0 {
+            if n.value < 99 {
+                let lo = static_name_lo(in h.st, n.value);
+                d.name.extend(in h.st.bytes[lo..static_name_hi(in h.st, n.value)]);
+                true
+            } else {
+                false
+            }
+        } else {
+            match relative(in d.table, n.value) {
+                Option::Some(slot) => {
+                    copy_slot(in d.table, slot, false, inout d.name);
+                    true
+                },
+                Option::None => false,
+            }
+        };
+        let end = match decode_string(
+            in h,
+            in d.pending.as_slice(),
+            wrapping_add(at, n.used),
+            7,
+            max,
+            inout d.value
+        ) {
+            Result::Ok(e) => e,
+            Result::Err(PrefixError::Incomplete) => {
+                return Result::Ok(0);
+            },
+            Result::Err(e) => {
+                return Result::Err(reason_of(e));
+            },
+        };
+        if !found {
+            if first & 192 == 192 {
+                return Result::Err(Reason::BadStaticIndex(n.value));
+            }
+            return Result::Err(Reason::BadDynamicIndex);
+        }
+        used = wrapping_sub(end, at);
+    } else if first & 64 != 0 {
+        let mid = match decode_string(in h, in d.pending.as_slice(), at, 5, max, inout d.name) {
+            Result::Ok(e) => e,
+            Result::Err(PrefixError::Incomplete) => {
+                return Result::Ok(0);
+            },
+            Result::Err(e) => {
+                return Result::Err(reason_of(e));
+            },
+        };
+        let end = match decode_string(in h, in d.pending.as_slice(), mid, 7, max, inout d.value) {
+            Result::Ok(e) => e,
+            Result::Err(PrefixError::Incomplete) => {
+                return Result::Ok(0);
+            },
+            Result::Err(e) => {
+                return Result::Err(reason_of(e));
+            },
+        };
+        used = wrapping_sub(end, at);
+    } else if first & 32 != 0 {
+        let n = match decode_int(in d.pending.as_slice(), at, 5) {
+            Result::Ok(n) => n,
+            Result::Err(PrefixError::Incomplete) => {
+                return Result::Ok(0);
+            },
+            Result::Err(e) => {
+                return Result::Err(reason_of(e));
+            },
+        };
+        if n.value > d.cfg.max_table_capacity {
+            return Result::Err(Reason::CapacityExceeded);
+        }
+        table_set_capacity(inout d.table, n.value);
+        return Result::Ok(n.used);
+    } else {
+        let n = match decode_int(in d.pending.as_slice(), at, 5) {
+            Result::Ok(n) => n,
+            Result::Err(PrefixError::Incomplete) => {
+                return Result::Ok(0);
+            },
+            Result::Err(e) => {
+                return Result::Err(reason_of(e));
+            },
+        };
+        match relative(in d.table, n.value) {
+            Option::Some(slot) => {
+                copy_slot(in d.table, slot, false, inout d.name);
+                let lo = slot_name_hi(in d.table, slot);
+                d.value.extend(in d.table.bytes[lo..slot_value_hi(in d.table, slot)]);
+            },
+            Option::None => {
+                return Result::Err(Reason::BadDynamicIndex);
+            },
+        }
+        used = n.used;
+    }
+    match insert_scratch(inout d) {
+        Result::Ok(_z) => Result::Ok(used),
+        Result::Err(r) => Result::Err(r),
+    }
+}
+
+// `Decoder::on_encoder_stream`.
+pub fn dec_on_encoder_stream(inout d: DecoderCore, in h: Huff, in bytes: Slice[u8])
+    -> Result[Unit, QpackError] {
+    d.sec.bytes.clear();
+    d.sec.fields.clear();
+    d.sec.heads.clear();
+    match d.failed {
+        Option::Some(e) => {
+            return Result::Err(e);
+        },
+        Option::None => (),
+    }
+    let limit = sat_add(sat_mul(d.cfg.max_table_capacity, 4), 64);
+    d.pending.extend(in bytes);
+    let mut at: u64 = 0;
+    loop {
+        if at >= d.pending.len() {
+            break;
+        }
+        match instruction(inout d, in h, at) {
+            Result::Ok(0) => {
+                break;
+            },
+            Result::Ok(used) => {
+                at = wrapping_add(at, used);
+            },
+            Result::Err(r) => {
+                return Result::Err(fail(inout d, QpackError::EncoderStream(r)));
+            },
+        }
+    }
+    drain_front(inout d.pending, at);
+    if d.pending.len() > limit {
+        return Result::Err(fail(inout d, QpackError::EncoderStream(Reason::InstructionTooLong)));
+    }
+    unblock(inout d, in h)
+}
+
+// `Decoder::take_decoder_stream`.
+pub fn dec_take_decoder_stream(inout d: DecoderCore) -> ChunkSeq[u8] {
+    let inserted = d.table.inserted;
+    if inserted > d.acknowledged {
+        encode_int(inout d.out, 0, 6, wrapping_sub(inserted, d.acknowledged));
+        d.acknowledged = inserted;
+    }
+    replace(inout d.out, ChunkSeq::new[u8]())
+}

@@ -8,8 +8,12 @@
 //! (`docs/maintenance/porting-a-crate.md`).
 pub use vesper_port_abi::{ArithOverflow, RuntimeError};
 
+#[cfg(feature = "vesper-port")]
+pub mod arrays;
 pub mod gauge;
 pub mod kit;
+#[cfg(feature = "vesper-port")]
+pub mod widen;
 
 /// A point on the integer grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

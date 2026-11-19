@@ -406,7 +406,7 @@ impl<'a> Runtime<'a> {
         Self {
             world,
             stack: vec![],
-            program: crate::ir::lower_world(world),
+            program: crate::ffi_lowering::drops::lower_world(world),
             next_capability: 1,
             fuel: 10_000_000,
             optimize: true,
@@ -1175,23 +1175,68 @@ impl<'a> Runtime<'a> {
                     .cloned()
                     .ok_or("undefined IR assignment place")?;
                 slot.path.extend(path.map(str::to_owned));
-                // A failing compound assignment raises before its write.
-                let value = if op == "=" {
-                    value
-                } else {
-                    match binary_at(flush, &op[..1], slot.get()?, value) {
-                        Err(Fault::Raise(failure)) => {
-                            return self.primitive_failure(
-                                state,
-                                instruction.dest,
-                                instruction.ty,
-                                failure,
-                            );
+                // An array element write `a[i] op= v` (§5, `crate::arrays`):
+                // the value is the pair `(i, v)`.
+                if let Some(assign) = op.strip_prefix(crate::arrays::WRITE_PREFIX) {
+                    let Value::Tuple(pair) = value else {
+                        return Err("IR array write requires an (index, value) pair".into());
+                    };
+                    let [index, value] = <[Value; 2]>::try_from(pair)
+                        .map_err(|_| "IR array write requires an (index, value) pair")?;
+                    let index = match index {
+                        Value::Int(n) => usize::try_from(n).ok(),
+                        Value::UInt(n, _) => usize::try_from(n).ok(),
+                        Value::SInt(n, _) => usize::try_from(n).ok(),
+                        _ => return Err("IR index must be integer".into()),
+                    };
+                    let element = index.and_then(|i| {
+                        let mut element = slot.clone();
+                        element.path.push(i.to_string());
+                        element.get().ok().map(|old| (element, old))
+                    });
+                    let Some((element, old)) = element else {
+                        return self.primitive_failure(
+                            state,
+                            instruction.dest,
+                            instruction.ty,
+                            Failure::IndexOutOfBounds,
+                        );
+                    };
+                    let value = if assign == "=" {
+                        value
+                    } else {
+                        match binary_at(flush, &assign[..1], old, value) {
+                            Err(Fault::Raise(failure)) => {
+                                return self.primitive_failure(
+                                    state,
+                                    instruction.dest,
+                                    instruction.ty,
+                                    failure,
+                                );
+                            }
+                            result => result?,
                         }
-                        result => result?,
-                    }
-                };
-                slot.set(value)?;
+                    };
+                    element.set(value)?;
+                } else {
+                    // A failing compound assignment raises before its write.
+                    let value = if op == "=" {
+                        value
+                    } else {
+                        match binary_at(flush, &op[..1], slot.get()?, value) {
+                            Err(Fault::Raise(failure)) => {
+                                return self.primitive_failure(
+                                    state,
+                                    instruction.dest,
+                                    instruction.ty,
+                                    failure,
+                                );
+                            }
+                            result => result?,
+                        }
+                    };
+                    slot.set(value)?;
+                }
                 Value::Tuple(vec![])
             }
             Op::Unary(op, v) => match unary_at(flush, &op, get(v)?) {
@@ -1400,6 +1445,10 @@ impl<'a> Runtime<'a> {
                 let callee = if self.world.functions.contains_key(&callee) {
                     self.call_site = Some((instruction.span.start, instruction.span.end));
                     Value::Function(callee)
+                } else if let Some(constant) = crate::arrays::table_function(&callee) {
+                    // A constant table read (§2.2): the constant's function.
+                    self.call_site = Some((instruction.span.start, instruction.span.end));
+                    Value::Function(constant)
                 } else if let Some(op) = crate::numeric::float::math_intrinsic(&callee) {
                     // `fma` (the only ternary float intrinsic) stays a call.
                     let value = math_at(flush, op, values)?;
@@ -1532,6 +1581,7 @@ impl<'a> Runtime<'a> {
                         | ExprKind::For { .. }
                         | ExprKind::Range { .. }
                         | ExprKind::Break(_)
+                        | ExprKind::Continue
                         | ExprKind::Return(_) => {
                             return Err("loops and early exits run only as lowered Place IR".into());
                         }

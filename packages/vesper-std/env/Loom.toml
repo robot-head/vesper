@@ -1,0 +1,8 @@
+[package]
+name = "@vesper-std/env"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = ["Fail", "Alloc", "Ffi[StdEnv]"]
+
+[dependencies]
+"@vesper-std/fs" = { version = "^0.1", path = "../fs" }

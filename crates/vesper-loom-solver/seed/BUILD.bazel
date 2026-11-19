@@ -1,8 +1,8 @@
 # The frozen Rust seed copy of vesper-loom-solver (package
 # vesper-loom-solver-seed, library vesper_loom_solver) that the compiler
-# links: ../src built without the port, so
-# cfg(vesper_port) is off. Written by hand because its sources live in the
-# parent package; see "Crates the compiler links" in
+# links: the shared API in ../src/lib.rs (cfg(vesper_port) off) over the Rust
+# engine in src/engine.rs. Written by hand because part of its sources live
+# in the parent package; see "Crates the compiler links" in
 # docs/maintenance/porting-a-crate.md.
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
@@ -23,11 +23,11 @@ _TEST_DEPS = all_crate_deps(
 
 rust_library(
     name = "seed",
-    srcs = ["//crates/vesper-loom-solver:rust_srcs"],
+    srcs = glob(["src/**/*.rs"]) + ["//crates/vesper-loom-solver:rust_srcs"],
     aliases = _CRATE.get("aliases", {}),
     compile_data = ["//crates/vesper-loom-solver:README.md"],
     crate_name = "vesper_loom_solver",
-    crate_root = "//crates/vesper-loom-solver:src/lib.rs",
+    crate_root = "src/lib.rs",
     edition = "2024",
     rustc_env = {
         "CARGO_PKG_NAME": "vesper-loom-solver-seed",

@@ -233,7 +233,7 @@ fn read_batch(
     if r.cursor != blob.len() {
         return Err(Error::Checkpoint("trailing bytes"));
     }
-    Ok(ZSet { width, rows: set })
+    Ok(ZSet::from_rows(width, set))
 }
 
 /// Checked Z-set sum with an explicit weight per operand (+1 / -1).

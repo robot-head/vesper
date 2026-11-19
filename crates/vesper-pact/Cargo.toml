@@ -12,23 +12,21 @@ build = "build.rs"
 # vesper-pact-seed, same library name), instead of this package; see
 # "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
 #
-# This package builds the same Rust by default. Under `vesper-port`,
-# build.rs links the Vesper port in vesper/ and sets cfg(vesper_port), and
-# validation, solving, coherence, canonicalization and derivation checking
-# forward to it (port wave P3a lane 3, #1038). The port is not the default
-# for any dependent until it reaches performance parity with the Rust build
-# (docs/parallel-results/port-p3-pact.md).
+# The Vesper port is this package's only build (#1085): build.rs links the
+# Vesper port in vesper/ and sets cfg(vesper_port), and validation, solving,
+# coherence, canonicalization and derivation checking run in it (port wave
+# P3a lane 3, #1038; docs/parallel-results/port-p3-pact.md). The Rust engine
+# lives only in the seed copy, under seed/src.
 
 [features]
-vesper-port = ["dep:vesper-port-abi"]
 # Deliberately wrong Vesper builds, one edit per ported module: the port
 # test runs must fail (scripts/test-port-harness.sh asserts which tests do).
-vesper-port-divergent = ["vesper-port"]
+vesper-port-divergent = []
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+vesper-port-abi = { path = "../vesper-port-abi" }
 
 [dev-dependencies]
 # The ABBA benchmark (examples/abba.rs; its Rust arm is the seed's
@@ -36,7 +34,4 @@ vesper-port-abi = { path = "../vesper-port-abi", optional = true }
 vesper-bench = { path = "../vesper-bench" }
 
 [build-dependencies]
-# Not optional: a package whose build script runs the harness is
-# port-backed for the seed-copy guard (crates/vesper-port-harness/tests/
-# closure_guard.rs), whichever build it selects.
 vesper-port-harness = { path = "../vesper-port-harness" }

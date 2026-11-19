@@ -616,7 +616,7 @@ impl Executor {
                 }
                 rows.insert(row, weight);
             }
-            prior.push(ZSet { width, rows });
+            prior.push(ZSet::from_rows(width, rows));
         }
         if r.cursor != body.len() {
             return Err(Error::Checkpoint("trailing bytes"));

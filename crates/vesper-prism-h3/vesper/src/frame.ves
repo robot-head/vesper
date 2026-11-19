@@ -1,0 +1,394 @@
+// frame.rs: HTTP/3 frames (RFC 9114 §7), SETTINGS (§7.2.4) and the
+// incremental frame reader. The reader keeps unread bytes in `buf` from
+// `head` on and compacts when bytes are pushed, so a frame is never moved
+// twice; a DATA chunk or a HEADERS payload is copied into `out`, which the
+// Rust wrapper reads after each call.
+
+use self::{
+    Settings,
+    FrameError,
+    FrameOut,
+    FrameReaderCore
+};
+use self::int::{
+    inc,
+    min64,
+    max64,
+    word,
+    drain_front
+};
+use self::varint::{
+    vdec,
+    vput,
+    put_record
+};
+use self::priority::{
+    priority_update_request,
+    priority_update_push,
+    priority_update_parse
+};
+
+fn data_type() -> u64 {
+    0
+}
+
+fn headers_type() -> u64 {
+    1
+}
+
+fn cancel_push_type() -> u64 {
+    3
+}
+
+fn settings_type() -> u64 {
+    4
+}
+
+fn push_promise_type() -> u64 {
+    5
+}
+
+fn goaway_type() -> u64 {
+    7
+}
+
+fn max_push_id_type() -> u64 {
+    13
+}
+
+fn webtransport_stream_type() -> u64 {
+    65
+}
+
+fn is_http2_frame(ty: u64) -> bool {
+    ty == 2 || ty == 6 || ty == 8 || ty == 9
+}
+
+fn is_http2_setting(id: u64) -> bool {
+    id == 0 || (id >= 2 && id <= 5)
+}
+
+pub fn settings_default() -> Settings {
+    Settings {
+        qpack_max_table_capacity: 0,
+        qpack_blocked_streams: 0,
+        max_field_section_size: Option::None,
+        enable_connect_protocol: false,
+        h3_datagram: false,
+        webtransport_max_sessions: Option::None,
+        no_rfc7540_priorities: false
+    }
+}
+
+fn flag(id: u64, v: u64) -> Result[bool, FrameError] {
+    if v == 0 {
+        Result::Ok(false)
+    } else if v == 1 {
+        Result::Ok(true)
+    } else {
+        Result::Err(FrameError::BadSetting(id))
+    }
+}
+
+fn sessions_at_least(s: Option[u64], v: u64) -> Option[u64] {
+    match s {
+        Option::Some(n) => Option::Some(max64(n, v)),
+        Option::None => Option::Some(v),
+    }
+}
+
+fn contains(in s: Slice[u64], v: u64) -> bool {
+    for i in 0..s.len() {
+        if word(in s, i) == v {
+            return true;
+        }
+    }
+    false
+}
+
+// `Settings::parse`.
+pub fn settings_parse(in p: Slice[u8]) -> Result[Settings, FrameError] {
+    let mut s = settings_default();
+    let mut seen = ChunkSeq::new[u64]();
+    let mut at: u64 = 0;
+    loop {
+        if at >= p.len() {
+            return Result::Ok(s);
+        }
+        let id = match vdec(in p, at) {
+            Option::Some(n) => {
+                at = wrapping_add(at, n.used);
+                n.value
+            }
+            Option::None => return Result::Err(FrameError::Malformed),
+        };
+        let value = match vdec(in p, at) {
+            Option::Some(n) => {
+                at = wrapping_add(at, n.used);
+                n.value
+            }
+            Option::None => return Result::Err(FrameError::Malformed),
+        };
+        if is_http2_setting(id) || contains(in seen.as_slice(), id) {
+            return Result::Err(FrameError::BadSetting(id));
+        }
+        seen.push(id);
+        if id == 1 {
+            s.qpack_max_table_capacity = value;
+        } else if id == 7 {
+            s.qpack_blocked_streams = value;
+        } else if id == 6 {
+            s.max_field_section_size = Option::Some(value);
+        } else if id == 8 || id == 51 || id == 9 || id == 727725890 {
+            let f = match flag(id, value) {
+                Result::Ok(f) => f,
+                Result::Err(e) => return Result::Err(e),
+            };
+            if id == 8 {
+                s.enable_connect_protocol = f;
+            } else if id == 51 {
+                s.h3_datagram = f;
+            } else if id == 9 {
+                s.no_rfc7540_priorities = f;
+            } else if f {
+                s.webtransport_max_sessions = sessions_at_least(s.webtransport_max_sessions, 1);
+            }
+        } else if (id == 3329323114 || id == 350866729) && value > 0 {
+            s.webtransport_max_sessions = sessions_at_least(s.webtransport_max_sessions, value);
+        }
+    }
+}
+
+fn put_setting(inout out: ChunkSeq[u8], id: u64, value: Option[u64]) -> bool {
+    match value {
+        Option::Some(v) => {
+            let a = vput(inout out, id);
+            let b = vput(inout out, v);
+            a && b
+        }
+        Option::None => true,
+    }
+}
+
+fn on(b: bool) -> Option[u64] {
+    let one: u64 = 1;
+    if b {
+        Option::Some(one)
+    } else {
+        Option::None
+    }
+}
+
+// `Settings::encode`: the SETTINGS frame, with one reserved identifier as
+// grease (§7.2.4.1).
+pub fn settings_write(s: Settings, inout out: ChunkSeq[u8]) -> bool {
+    let mut p = ChunkSeq::new[u8]();
+    let mut ok = put_setting(inout p, 1, Option::Some(s.qpack_max_table_capacity));
+    ok = put_setting(inout p, 7, Option::Some(s.qpack_blocked_streams)) && ok;
+    ok = put_setting(inout p, 6, s.max_field_section_size) && ok;
+    ok = put_setting(inout p, 8, on(s.enable_connect_protocol)) && ok;
+    ok = put_setting(inout p, 51, on(s.h3_datagram)) && ok;
+    ok = put_setting(inout p, 9, on(s.no_rfc7540_priorities)) && ok;
+    let wt = match s.webtransport_max_sessions {
+        Option::Some(_n) => on(true),
+        Option::None => Option::None,
+    };
+    ok = put_setting(inout p, 727725890, wt) && ok;
+    ok = put_setting(inout p, 3329323114, s.webtransport_max_sessions) && ok;
+    ok = put_setting(inout p, 350866729, s.webtransport_max_sessions) && ok;
+    ok = put_setting(inout p, 250, Option::Some(wrapping_sub(250, 250))) && ok;
+    put_record(inout out, settings_type(), in p.as_slice()) && ok
+}
+
+// ---------------------------------------------------------------------
+// FrameReader (modes: 0 header, 1 DATA, 2 skip, 3 payload, 4 opaque)
+// ---------------------------------------------------------------------
+
+pub fn reader_new(max_payload: u64, webtransport: bool) -> FrameReaderCore {
+    FrameReaderCore {
+        buf: ChunkSeq::new[u8](),
+        head: 0,
+        mode: 0,
+        remaining: 0,
+        ty: 0,
+        len: 0,
+        max_payload: max_payload,
+        webtransport: webtransport,
+        out: ChunkSeq::new[u8]()
+    }
+}
+
+pub fn reader_push(inout r: FrameReaderCore, in bytes: Slice[u8]) {
+    if r.head > 0 {
+        drain_front(inout r.buf, r.head);
+        r.head = 0;
+    }
+    r.buf.extend(in bytes);
+}
+
+pub fn reader_buffered(in r: FrameReaderCore) -> u64 {
+    wrapping_sub(r.buf.len(), r.head)
+}
+
+pub fn reader_at_boundary(in r: FrameReaderCore) -> bool {
+    r.mode == 0 && r.head >= r.buf.len()
+}
+
+// `take_rest`: the unread bytes, moved to `out`.
+pub fn reader_take_rest(inout r: FrameReaderCore) {
+    r.out.clear();
+    let n = r.buf.len();
+    r.out.extend(in r.buf[r.head..n]);
+    r.buf.clear();
+    r.head = 0;
+}
+
+fn single_varint(in p: Slice[u8]) -> Result[u64, FrameError] {
+    match vdec(in p, 0) {
+        Option::Some(n) => {
+            if n.used == p.len() {
+                Result::Ok(n.value)
+            } else {
+                Result::Err(FrameError::Malformed)
+            }
+        }
+        Option::None => Result::Err(FrameError::Malformed),
+    }
+}
+
+fn buffered_type(ty: u64) -> bool {
+    ty
+        == headers_type()
+        || ty
+        == settings_type()
+        || ty
+        == goaway_type()
+        || ty
+        == cancel_push_type()
+        || ty
+        == max_push_id_type()
+        || ty
+        == push_promise_type()
+        || ty
+        == priority_update_request()
+        || ty
+        == priority_update_push()
+}
+
+fn parse_payload(ty: u64, in p: Slice[u8], inout out: ChunkSeq[u8])
+    -> Result[FrameOut, FrameError] {
+    if ty == headers_type() {
+        out.extend(in p);
+        return Result::Ok(FrameOut::Headers);
+    }
+    if ty == settings_type() {
+        return match settings_parse(in p) {
+            Result::Ok(s) => Result::Ok(FrameOut::SettingsFrame(s)),
+            Result::Err(e) => Result::Err(e),
+        };
+    }
+    if ty == push_promise_type() {
+        return Result::Ok(FrameOut::PushPromise);
+    }
+    if ty == priority_update_request() || ty == priority_update_push() {
+        return match priority_update_parse(ty, in p) {
+            Result::Ok(u) => Result::Ok(FrameOut::PriorityUpdateFrame(u)),
+            Result::Err(e) => Result::Err(e),
+        };
+    }
+    let v = match single_varint(in p) {
+        Result::Ok(v) => v,
+        Result::Err(e) => return Result::Err(e),
+    };
+    if ty == goaway_type() {
+        Result::Ok(FrameOut::GoAway(v))
+    } else if ty == cancel_push_type() {
+        Result::Ok(FrameOut::CancelPush(v))
+    } else {
+        Result::Ok(FrameOut::MaxPushId(v))
+    }
+}
+
+// `next_frame`: `FrameOut::None` until more bytes arrive.
+pub fn reader_next(inout r: FrameReaderCore) -> Result[FrameOut, FrameError] {
+    r.out.clear();
+    loop {
+        let avail = wrapping_sub(r.buf.len(), r.head);
+        if r.mode == 0 {
+            let t = match vdec(in r.buf.as_slice(), r.head) {
+                Option::Some(n) => n,
+                Option::None => return Result::Ok(FrameOut::None),
+            };
+            let l = match vdec(in r.buf.as_slice(), wrapping_add(r.head, t.used)) {
+                Option::Some(n) => n,
+                Option::None => return Result::Ok(FrameOut::None),
+            };
+            r.head = wrapping_add(r.head, wrapping_add(t.used, l.used));
+            let ty = t.value;
+            let len = l.value;
+            if is_http2_frame(ty) {
+                return Result::Err(FrameError::Http2Frame(ty));
+            }
+            if ty == webtransport_stream_type() && r.webtransport {
+                r.mode = 4;
+                return Result::Ok(FrameOut::WebTransportStream(len));
+            }
+            if ty == data_type() {
+                if len == 0 {
+                    return Result::Ok(FrameOut::Data);
+                }
+                r.mode = 1;
+                r.remaining = len;
+            } else if buffered_type(ty) {
+                if len > r.max_payload {
+                    return Result::Err(
+                        FrameError::TooLarge {
+                            frame_type: ty,
+                            len: len
+                        }
+                    );
+                }
+                r.mode = 3;
+                r.ty = ty;
+                r.len = len;
+            } else {
+                r.mode = 2;
+                r.remaining = len;
+                return Result::Ok(FrameOut::Unknown(ty));
+            }
+        } else if r.mode == 1 {
+            if avail == 0 {
+                return Result::Ok(FrameOut::None);
+            }
+            let n = min64(r.remaining, avail);
+            let lo = r.head;
+            let hi = wrapping_add(lo, n);
+            r.out.extend(in r.buf[lo..hi]);
+            r.head = hi;
+            r.remaining = wrapping_sub(r.remaining, n);
+            if r.remaining == 0 {
+                r.mode = 0;
+            }
+            return Result::Ok(FrameOut::Data);
+        } else if r.mode == 2 {
+            let n = min64(r.remaining, avail);
+            r.head = wrapping_add(r.head, n);
+            r.remaining = wrapping_sub(r.remaining, n);
+            if r.remaining > 0 {
+                return Result::Ok(FrameOut::None);
+            }
+            r.mode = 0;
+        } else if r.mode == 3 {
+            if avail < r.len {
+                return Result::Ok(FrameOut::None);
+            }
+            let lo = r.head;
+            let hi = wrapping_add(lo, r.len);
+            r.head = hi;
+            r.mode = 0;
+            return parse_payload(r.ty, in r.buf[lo..hi], inout r.out);
+        } else {
+            return Result::Err(FrameError::Malformed);
+        }
+    }
+}

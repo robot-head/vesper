@@ -306,6 +306,44 @@ impl Parser {
         }
         Ok(RawType::Name(name))
     }
+    fn peek_punct(&self, offset: usize) -> Option<u8> {
+        match &self.tokens.get(self.at + offset)?.kind {
+            TokenKind::Punct(p) => Some(*p),
+            _ => None,
+        }
+    }
+    /// `linear extern type Name;`, `affine extern type Name;` or
+    /// `affine extern type Name drop symbol;`.
+    fn extern_type(&mut self) -> Result<ExternTypeDescriptor, Error> {
+        let linearity = if self.is_word("linear") {
+            Linearity::Linear
+        } else {
+            Linearity::Affine
+        };
+        self.bump();
+        self.keyword("extern")?;
+        self.keyword("type")?;
+        let name = self.word()?;
+        reject_reserved_type(&name)?;
+        let drop = if self.is_word("drop") {
+            if linearity == Linearity::Linear {
+                return Err(self.error(
+                    ErrorKind::Type,
+                    "only an affine extern type declares a drop import; a linear handle is finalized explicitly",
+                ));
+            }
+            self.bump();
+            Some(self.word()?)
+        } else {
+            None
+        };
+        self.expect(b';')?;
+        Ok(ExternTypeDescriptor {
+            name,
+            linearity,
+            drop,
+        })
+    }
     fn peek_word(&self, offset: usize) -> Option<&str> {
         match &self.tokens.get(self.at + offset)?.kind {
             TokenKind::Word(w) => Some(w),
@@ -435,6 +473,28 @@ impl Parser {
             };
             // An access keyword is followed by the parameter name; a parameter
             // that is itself named `in` is followed by ':'.
+            if !nocapture && self.is_word("sink") && self.peek_word(1).is_some() {
+                // `sink h: H`: a consumed extern-type handle (a finalizer).
+                self.bump();
+                let name = self.word()?;
+                self.expect(b':')?;
+                let span = self.token().span.clone();
+                let handle = self.word()?;
+                parameters.push((
+                    name,
+                    RawParameterType::Handle {
+                        handle,
+                        span,
+                        access: HandleAccess::Sink,
+                        pointer: None,
+                    },
+                ));
+                if !self.eat(b',') {
+                    self.expect(b')')?;
+                    break;
+                }
+                continue;
+            }
             let access = match self.peek_word(0) {
                 Some(w @ ("in" | "out" | "inout")) if self.peek_word(1).is_some() => {
                     let a = match w {
@@ -455,17 +515,51 @@ impl Parser {
                         "nocapture must be followed by in, out or inout",
                     ));
                 }
-                (false, Some(a)) => {
-                    return Err(Error::new(
-                        ErrorKind::Unsupported,
-                        span_start..self.token().span.end,
-                        format!(
-                            "borrowed `{}` pointer parameters must be declared `nocapture`; capturing foreign pointers are unsupported",
-                            a.keyword()
-                        ),
-                    ));
+                (false, a) => {
+                    // Without `nocapture`, `in`/`inout` name an extern-type
+                    // handle; anything else is a capturing pointer, rejected
+                    // once the declared extern types are known.
+                    let name = self.word()?;
+                    self.expect(b':')?;
+                    let span = self.token().span.clone();
+                    let ty = match a {
+                        Some(a) => {
+                            let handle = self.word()?;
+                            let pointer = Error::new(
+                                ErrorKind::Unsupported,
+                                span_start..self.tokens[self.at.saturating_sub(1)].span.end,
+                                format!(
+                                    "borrowed `{}` pointer parameters must be declared `nocapture`; capturing foreign pointers are unsupported",
+                                    a.keyword()
+                                ),
+                            );
+                            if !matches!(self.peek_punct(0), Some(b',' | b')')) {
+                                return Err(pointer);
+                            }
+                            let access = match a {
+                                PointerAccess::In => HandleAccess::In,
+                                PointerAccess::Inout => HandleAccess::Inout,
+                                // An `out` handle would be a handle result.
+                                PointerAccess::Out => {
+                                    return Err(pointer);
+                                }
+                            };
+                            RawParameterType::Handle {
+                                handle,
+                                span,
+                                access,
+                                pointer: Some(pointer),
+                            }
+                        }
+                        None => RawParameterType::Value(self.value_type()?),
+                    };
+                    parameters.push((name, ty));
+                    if !self.eat(b',') {
+                        self.expect(b')')?;
+                        break;
+                    }
+                    continue;
                 }
-                (false, None) => None,
             };
             let name = self.word()?;
             self.expect(b':')?;
@@ -491,7 +585,16 @@ impl Parser {
         }
         self.keyword("ForeignVal")?;
         self.expect(b'[')?;
-        let result = self.value_type()?;
+        // `ForeignVal[Option[H]]`: a nullable extern-type handle.
+        let result = if self.is_word("Option") && self.peek_punct(1) == Some(b'[') {
+            self.bump();
+            self.expect(b'[')?;
+            let name = self.word()?;
+            self.expect(b']')?;
+            RawType::OptionHandle(name)
+        } else {
+            self.value_type()?
+        };
         self.expect(b']')?;
         self.expect(b';')?;
         Ok(RawFunction {
@@ -605,7 +708,12 @@ const MAX_WIRE_STRUCT_BYTES: usize = 1 << 20;
 #[derive(Clone)]
 enum RawType {
     Name(String),
-    Address { pointee: Scalar, nullable: bool },
+    Address {
+        pointee: Scalar,
+        nullable: bool,
+    },
+    /// `Option[H]` of an extern type, as a result.
+    OptionHandle(String),
 }
 enum RawParameterType {
     Value(RawType),
@@ -620,6 +728,14 @@ enum RawParameterType {
         span: Range<usize>,
         access: PointerAccess,
         nullable: bool,
+    },
+    /// `in`/`inout`/`sink h: H` without `nocapture`. `pointer` is the
+    /// error to report when `H` is not an extern type.
+    Handle {
+        handle: String,
+        span: Range<usize>,
+        access: HandleAccess,
+        pointer: Option<Error>,
     },
 }
 struct RawFunction {
@@ -660,11 +776,33 @@ fn reject_reserved_type(n: &str) -> Result<(), Error> {
     }
     Ok(())
 }
-fn resolve(t: RawType, enums: &[EnumDescriptor]) -> Result<ValueType, Error> {
+fn resolve(
+    t: RawType,
+    enums: &[EnumDescriptor],
+    externs: &[ExternTypeDescriptor],
+) -> Result<ValueType, Error> {
     match t {
         RawType::Address { pointee, nullable } => Ok(ValueType::Address { pointee, nullable }),
+        RawType::OptionHandle(n) => match externs.iter().find(|e| e.name() == n) {
+            Some(handle) => Ok(ValueType::Handle {
+                handle: handle.clone(),
+                nullable: true,
+            }),
+            None => Err(Error::new(
+                ErrorKind::Unsupported,
+                0..0,
+                format!(
+                    "ForeignVal[Option[{n}]] needs `{n}` to be a linear or affine extern type; other nullable results are unsupported"
+                ),
+            )),
+        },
         RawType::Name(n) => {
-            if let Some(s) = scalar(&n) {
+            if let Some(handle) = externs.iter().find(|e| e.name() == n) {
+                Ok(ValueType::Handle {
+                    handle: handle.clone(),
+                    nullable: false,
+                })
+            } else if let Some(s) = scalar(&n) {
                 Ok(ValueType::Scalar(s))
             } else if n == "Unit" {
                 Ok(ValueType::Unit)
@@ -819,6 +957,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
     let mut enums = vec![];
     let mut raw_structs = vec![];
     let mut raw_functions = vec![];
+    let mut extern_types: Vec<ExternTypeDescriptor> = vec![];
     while !p.eat(b'}') {
         if p.is_word("wire") {
             if raw_structs.len() >= limits.wire_structs {
@@ -830,6 +969,11 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                 return Err(p.error(ErrorKind::Limit, "enum declaration budget exceeded"));
             }
             enums.push(p.enumeration()?);
+        } else if (p.is_word("linear") || p.is_word("affine")) && p.peek_word(1) == Some("extern") {
+            if extern_types.len() >= limits.enums {
+                return Err(p.error(ErrorKind::Limit, "extern type declaration budget exceeded"));
+            }
+            extern_types.push(p.extern_type()?);
         } else if p.is_word("fn") {
             if raw_functions.len() >= limits.functions {
                 return Err(p.error(ErrorKind::Limit, "function declaration budget exceeded"));
@@ -838,7 +982,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         } else {
             return Err(p.error(
                 ErrorKind::Unsupported,
-                "expected fn/enum/wire struct; handles, C structs, code and variadics are unsupported",
+                "expected fn/enum/wire struct/linear extern type/affine extern type; C structs, code and variadics are unsupported",
             ));
         }
     }
@@ -860,6 +1004,25 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         "duplicate foreign symbol",
     )?;
     enums.sort_by(|a, b| a.name().cmp(b.name()));
+    unique(
+        extern_types.iter().map(ExternTypeDescriptor::name),
+        "duplicate extern type declaration",
+    )?;
+    extern_types.sort_by(|a, b| a.name.cmp(&b.name));
+    for t in &extern_types {
+        if enums.iter().any(|e| e.name() == t.name())
+            || raw_structs.iter().any(|w| w.declaration.name == t.name())
+        {
+            return Err(Error::new(
+                ErrorKind::Duplicate,
+                0..0,
+                format!(
+                    "extern type `{}` collides with an enum or wire struct",
+                    t.name()
+                ),
+            ));
+        }
+    }
     let wire_structs = compile_wire_structs(raw_structs, &enums)?;
     let mut functions = vec![];
     for f in raw_functions {
@@ -867,7 +1030,17 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         for (name, ty) in f.parameters {
             let ty = match ty {
                 RawParameterType::Value(t) => {
-                    let t = resolve(t, &enums)?;
+                    let t = resolve(t, &enums, &extern_types)?;
+                    if let ValueType::Handle { handle, .. } = &t {
+                        return Err(Error::new(
+                            ErrorKind::Unsupported,
+                            0..0,
+                            format!(
+                                "handle parameter `{name}: {}` needs a mode: in, inout or sink",
+                                handle.name()
+                            ),
+                        ));
+                    }
                     if matches!(t, ValueType::Unit | ValueType::Address { .. }) {
                         return Err(p.error(
                             ErrorKind::Unsupported,
@@ -876,6 +1049,28 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                     }
                     ParameterType::Value(t)
                 }
+                RawParameterType::Handle {
+                    handle,
+                    span,
+                    access,
+                    pointer,
+                } => match extern_types.iter().find(|t| t.name() == handle) {
+                    Some(handle) => ParameterType::Handle {
+                        handle: handle.clone(),
+                        access,
+                    },
+                    None => {
+                        return Err(pointer.unwrap_or_else(|| {
+                            Error::new(
+                                ErrorKind::Type,
+                                span,
+                                format!(
+                                    "`sink {name}: {handle}` needs `{handle}` to be a linear or affine extern type"
+                                ),
+                            )
+                        }));
+                    }
+                },
                 RawParameterType::Slice {
                     element,
                     span,
@@ -908,17 +1103,62 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         functions.push(FunctionDescriptor {
             symbol: f.symbol,
             parameters,
-            result: resolve(f.result, &enums)?,
+            result: resolve(f.result, &enums, &extern_types)?,
             convention: target.convention(),
         });
     }
     functions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    // A drop import takes exactly the handle, `sink`, and returns
+    // `ForeignVal[Unit]`: dropping cannot fail or return anything.
+    for t in &extern_types {
+        let Some(symbol) = t.drop_import() else {
+            continue;
+        };
+        let ok = functions.iter().find(|f| f.symbol == symbol).is_some_and(|f| {
+            matches!(f.result, ValueType::Unit)
+                && matches!(
+                    f.parameters.as_slice(),
+                    [p] if matches!(&p.ty, ParameterType::Handle { handle, access: HandleAccess::Sink } if handle.name() == t.name())
+                )
+        });
+        if !ok {
+            return Err(Error::new(
+                ErrorKind::Type,
+                0..0,
+                format!(
+                    "drop import `{symbol}` of `{}` must be declared as `fn {symbol}(sink h: {}) -> ForeignVal[Unit];`",
+                    t.name(),
+                    t.name()
+                ),
+            ));
+        }
+    }
+    // A linear handle must have a way out: at least one finalizer.
+    for t in &extern_types {
+        let finalized = functions.iter().any(|f| {
+            f.parameters.iter().any(|p| {
+                matches!(&p.ty, ParameterType::Handle { handle, access: HandleAccess::Sink } if handle.name() == t.name())
+            })
+        });
+        if t.linearity() == Linearity::Linear && !finalized {
+            return Err(Error::new(
+                ErrorKind::Type,
+                0..0,
+                format!(
+                    "linear extern type `{}` has no finalizer: declare an import taking `sink h: {}`",
+                    t.name(),
+                    t.name()
+                ),
+            ));
+        }
+    }
     let mut library = LibraryDescriptor {
         name,
         target,
         link,
         enums,
         wire_structs,
+        extern_types,
         functions,
         canonical: vec![],
         identity: DescriptorId([0; 32]),

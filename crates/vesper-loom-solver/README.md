@@ -51,17 +51,20 @@ supplied declarations; they do not audit actual compiler bodies, privileged
 handler installation, FFI, or macro emission. Source confinement needs that
 separate compiler audit; public effect rows do not establish it.
 
-## Seed copy and port
+## The port and the seed copy
 
-Frozen since 2026-11-18 for port wave P1 lane 17 (#914): the Rust code takes
-bug fixes only. This crate is split into two packages built from the same
-sources. `vesper-loom-solver` is the port-backed build: `build.rs` links the
-Vesper package in `vesper/` (`@vesper/loom-solver`), which runs input
-normalization, the search, locked validation, the optimizer and its metrics,
-and imports `@vesper/loom-calculus` for manifest checks, SemVer matching and
-solution validation. SemVer text and the JSON that compares whole manifests
-stay in the Rust wrapper (`src/port.rs`). The compiler links
-`vesper-loom-solver-seed` (`seed/`), the frozen Rust build, under the same
-library name, and Rust stays the default until the owner retires it. See
-"Crates the compiler links" in `docs/maintenance/porting-a-crate.md` and
+`vesper-loom-solver` is the Vesper port, and it is the only build of this
+package (#1085; it is 0.2-0.5x of the Rust time above 8 packages). `build.rs`
+links the Vesper package in `vesper/` (`@vesper/loom-solver`), which runs
+input normalization, the search, locked validation, the optimizer and its
+metrics, and imports `@vesper/loom-calculus` for manifest checks, SemVer
+matching and solution validation. SemVer text and the JSON that compares whole
+manifests stay in the Rust wrapper (`src/port.rs`).
+
+The compiler cannot link a port before self-hosting Stage 2, so it links
+`vesper-loom-solver-seed` (`seed/`) under the same library name: the shared
+API in `src/lib.rs` and `src/optimize.rs` over the frozen Rust engine in
+`seed/src/engine.rs` (port wave P1 lane 17, #914; bug fixes only). Both
+packages run every test of the crate. See "Crates the compiler links" in
+`docs/maintenance/porting-a-crate.md` and
 `docs/parallel-results/port-p1-loom-solver.md`.

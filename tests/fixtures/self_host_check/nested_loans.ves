@@ -1,9 +1,9 @@
 fn pair(inout a: i64, b: i64) {}
-fn identity(x: i64) -> i64 {
+fn bump(inout x: i64) -> i64 {
     x
 }
 fn run(sink a: i64) {
-    pair(inout a, identity(a));
+    pair(inout a, bump(inout a));
 }
 fn main() {
     run(1);

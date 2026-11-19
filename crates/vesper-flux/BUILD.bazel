@@ -1,6 +1,39 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
+load("//tools/bazel:vesper_port.bzl", "VESPER_TARGET", "vesper_package", "vesper_port_object")
+
+# The Z-set kernels and the frontier are the Vesper port (port wave P3b lane
+# 7, #1069): build.rs links the object built here from the Loom package in
+# vesper/ and checks port/binding.rs against the generated binding, as for
+# vesper-aura. Every test file runs against it.
+vesper_package(
+    name = "port_package",
+    srcs = glob(["vesper/src/**/*.ves"]),
+    manifest = "vesper/Loom.toml",
+)
+
+vesper_port_object(
+    name = "flux_vesper",
+    library = "flux",
+    package = ":port_package",
+    target = VESPER_TARGET,
+)
+
+filegroup(
+    name = "flux_vesper_binding",
+    srcs = [":flux_vesper"],
+    output_group = "rust_binding",
+)
 
 vesper_crate(
+    build_script_data = [
+        ":flux_vesper",
+        ":flux_vesper_binding",
+    ],
+    build_script_env = {
+        # rules_rust already makes these execpaths absolute.
+        "VESPER_PORT_OBJECT": "$(execpath :flux_vesper)",
+        "VESPER_PORT_GENERATED_BINDING": "$(execpath :flux_vesper_binding)",
+    },
     # tests/lean_model.rs kernel-checks lean/FluxDbsp.lean; Lean rejects
     # symlinked runfiles outside --root, so it runs in a regular copy.
     copy_test_cwd = ["test/lean_model"],
@@ -13,3 +46,25 @@ vesper_crate(
         "test/recovery": "long",
     },
 )
+
+# The divergent builds, one per ported kernel (the Cargo
+# `vesper-port-divergent` feature applies the same edits from build.rs, one
+# at a time with VESPER_FLUX_DIVERGE): each must keep compiling, and
+# port/check.sh asserts that tests/kernels.rs catches it.
+[
+    vesper_port_object(
+        name = "flux_vesper_divergent_" + kernel,
+        edit_src = "vesper/src/lib.ves",
+        edits = {old: new},
+        library = "flux",
+        package = ":port_package",
+        target = VESPER_TARGET,
+    )
+    for kernel, old, new in [
+        ("union", "            acc = acc_add(acc, cell(in b, wrapping_add(bj, width)));\n", "            acc = acc_add(acc, 0);\n"),
+        ("filter", "            x >= value\n", "            x > value\n"),
+        ("consolidate", "        if !acc_is_zero(acc) {\n            if !acc_fits(acc) {\n                overflow = true;\n            }\n            push_row(inout out, in cells, fat, width);", "        if true {\n            if !acc_fits(acc) {\n                overflow = true;\n            }\n            push_row(inout out, in cells, fat, width);"),
+        ("join", "    if product > max_product {\n", "    if product >= max_product {\n"),
+        ("frontier", "    let mut min = watermark;\n", "    let mut min: i64 = 0;\n"),
+    ]
+]

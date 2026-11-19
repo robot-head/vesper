@@ -14,8 +14,13 @@
 //! * CLOSE_WEBTRANSPORT_SESSION (0x2843) and DRAIN_WEBTRANSPORT_SESSION
 //!   (0x78ae) from draft-ietf-webtrans-http3.
 
+#[cfg(not(feature = "vesper-port"))]
 use vesper_warp::varint;
 
+#[cfg(not(feature = "vesper-port"))]
+use crate::frame::put_varint;
+#[cfg(test)]
+#[cfg(feature = "vesper-port")]
 use crate::frame::put_varint;
 
 pub const DATAGRAM: u64 = 0x00;
@@ -56,6 +61,7 @@ pub enum CapsuleError {
     Truncated,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
     Header,
@@ -63,6 +69,7 @@ enum State {
     Value { ty: u64, len: usize },
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Incremental capsule decoder for one stream's DATA payload.
 #[derive(Debug)]
 pub struct CapsuleReader {
@@ -71,6 +78,7 @@ pub struct CapsuleReader {
     max_value: usize,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 impl CapsuleReader {
     /// `max_value` bounds every known capsule's value (a DATAGRAM capsule's
     /// payload, a close reason).
@@ -155,6 +163,7 @@ impl CapsuleReader {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn parse(ty: u64, value: Vec<u8>) -> Result<Capsule, CapsuleError> {
     Ok(match ty {
         DATAGRAM => Capsule::Datagram(value),
@@ -180,6 +189,7 @@ fn parse(ty: u64, value: Vec<u8>) -> Result<Capsule, CapsuleError> {
     })
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Appends one capsule.
 pub fn write_capsule(out: &mut Vec<u8>, ty: u64, value: &[u8]) {
     put_varint(out, ty);
@@ -187,6 +197,7 @@ pub fn write_capsule(out: &mut Vec<u8>, ty: u64, value: &[u8]) {
     out.extend_from_slice(value);
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// Appends a CLOSE_WEBTRANSPORT_SESSION capsule. `reason` must be UTF-8 of
 /// at most [`MAX_CLOSE_REASON`] bytes (the caller checks).
 pub fn write_close_session(out: &mut Vec<u8>, code: u32, reason: &[u8]) {
@@ -194,6 +205,87 @@ pub fn write_close_session(out: &mut Vec<u8>, code: u32, reason: &[u8]) {
     v.extend_from_slice(&code.to_be_bytes());
     v.extend_from_slice(reason);
     write_capsule(out, CLOSE_WEBTRANSPORT_SESSION, &v);
+}
+
+// ---------------------------------------------------------------------
+// The Vesper build (port wave P3b lane 5, #1067): vesper/src/capsule.ves.
+// ---------------------------------------------------------------------
+
+#[cfg(feature = "vesper-port")]
+use crate::qpack::port::binding as port;
+
+/// Incremental capsule decoder for one stream's DATA payload (the Vesper
+/// build).
+#[cfg(feature = "vesper-port")]
+pub struct CapsuleReader {
+    core: port::CapsuleReaderCore,
+}
+
+#[cfg(feature = "vesper-port")]
+impl std::fmt::Debug for CapsuleReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapsuleReader")
+            .field("buffered", &self.buffered())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "vesper-port")]
+impl CapsuleReader {
+    /// `max_value` bounds every known capsule's value.
+    pub fn new(max_value: usize) -> Self {
+        Self {
+            core: port::CapsuleReaderCore::new(max_value as u64),
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) {
+        self.core.push(bytes);
+    }
+
+    /// Bytes held: at most one header or one bounded value.
+    pub fn buffered(&self) -> usize {
+        self.core.buffered() as usize
+    }
+
+    pub fn next_capsule(&mut self) -> Result<Option<Capsule>, CapsuleError> {
+        use crate::qpack::port::abi::CapsuleOut;
+        let out = self.core.next()?;
+        let bytes = || self.core.as_ref().out().as_slice().to_vec();
+        Ok(Some(match out {
+            CapsuleOut::None => return Ok(None),
+            CapsuleOut::Datagram => Capsule::Datagram(bytes()),
+            CapsuleOut::CloseSession(code) => Capsule::CloseSession {
+                code,
+                reason: bytes(),
+            },
+            CapsuleOut::DrainSession => Capsule::DrainSession,
+            CapsuleOut::Unknown(t) => Capsule::Unknown(t),
+        }))
+    }
+
+    /// The stream ended: an error unless it ended between capsules.
+    pub fn finish(&self) -> Result<(), CapsuleError> {
+        if self.core.at_boundary() {
+            Ok(())
+        } else {
+            Err(CapsuleError::Truncated)
+        }
+    }
+}
+
+/// Appends one capsule.
+#[cfg(feature = "vesper-port")]
+pub fn write_capsule(out: &mut Vec<u8>, ty: u64, value: &[u8]) {
+    crate::frame::written(out, port::h3_record_header(ty, value.len() as u64));
+    out.extend_from_slice(value);
+}
+
+/// Appends a CLOSE_WEBTRANSPORT_SESSION capsule. `reason` must be UTF-8 of
+/// at most [`MAX_CLOSE_REASON`] bytes (the caller checks).
+#[cfg(feature = "vesper-port")]
+pub fn write_close_session(out: &mut Vec<u8>, code: u32, reason: &[u8]) {
+    crate::frame::written(out, port::h3_close_session(code, reason));
 }
 
 #[cfg(test)]

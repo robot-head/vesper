@@ -1,0 +1,857 @@
+// Module crmath of @vesper/kinetic (see lib.ves): the correctly rounded
+// `sin`, `cos`, `atan2`, `exp` and `log` of src/crmath.rs. Each evaluation
+// runs in exact integer fixed point (module bignum) with an error bound,
+// and Ziv's loop doubles the precision until both ends of the error
+// interval round to the same float. Inputs and results are bit patterns;
+// `is64` picks binary64 or binary32. pi and ln 2 come from a cache the
+// caller lends (src/crmath.rs keeps one per thread, as the Rust build does).
+use self::bignum::{
+    Big,
+    big_abs,
+    big_add,
+    big_add_u64,
+    big_bit0,
+    big_bits,
+    big_cmp,
+    big_copy,
+    big_div,
+    big_div_small,
+    big_div_u64,
+    big_from_limbs,
+    big_i64,
+    big_is_neg,
+    big_is_zero,
+    big_limbs,
+    big_low_u64,
+    big_mod4,
+    big_mul,
+    big_mul_i64,
+    big_mul_small,
+    big_neg,
+    big_shl,
+    big_shr,
+    big_store,
+    big_sqrt,
+    big_sub,
+    big_u64,
+    big_zero
+};
+use self::util::{
+    g32,
+    inc,
+    shl_u64,
+    u
+};
+
+// Largest working precision tried (src/crmath.rs MAX_PRECISION).
+fn max_precision() -> u64 {
+    16384
+}
+
+// No result: Ziv's loop goes on. Never a rounding's bits (a NaN pattern
+// round_to does not produce).
+fn unsettled() -> u64 {
+    0xffffffffffffffff
+}
+
+copy struct Exact {
+    neg: bool,
+    mant: u64,
+    exp: i64,
+}
+
+struct Approx {
+    negative: bool,
+    value: Big,
+    error: u64,
+    exp: i64,
+}
+
+// ----- formats ---------------------------------------------------------------
+
+fn prec(is64: bool) -> i64 {
+    if is64 {
+        53
+    } else {
+        24
+    }
+}
+
+fn emin(is64: bool) -> i64 {
+    if is64 {
+        -1022
+    } else {
+        -126
+    }
+}
+
+fn emax(is64: bool) -> i64 {
+    if is64 {
+        1023
+    } else {
+        127
+    }
+}
+
+fn inf_bits(is64: bool) -> u64 {
+    if is64 {
+        0x7ff0000000000000
+    } else {
+        0x7f800000
+    }
+}
+
+fn sign_bit(is64: bool) -> u64 {
+    if is64 {
+        0x8000000000000000
+    } else {
+        0x80000000
+    }
+}
+
+fn nan_bits(is64: bool) -> u64 {
+    if is64 {
+        0x7ff8000000000000
+    } else {
+        0x7fc00000
+    }
+}
+
+fn one_bits(is64: bool) -> u64 {
+    if is64 {
+        0x3ff0000000000000
+    } else {
+        0x3f800000
+    }
+}
+
+fn start_precision(is64: bool) -> u64 {
+    if is64 {
+        96
+    } else {
+        64
+    }
+}
+
+fn max_i64(a: i64, b: i64) -> i64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// Correctly round `sign * m * 2^e2` (`m >= 0`) to the format; the bits.
+pub fn round_to(negative: bool, in m: Big, e2: i64, is64: bool) -> u64 {
+    let sign = if negative {
+        sign_bit(is64)
+    } else {
+        0
+    };
+    if big_is_zero(in m) {
+        return sign;
+    }
+    let p = prec(is64);
+    let lo_e = emin(is64);
+    let hi_e = emax(is64);
+    let len = wrapping_i64(big_bits(in m));
+    let lead = wrapping_add(wrapping_sub(len, 1), e2);
+    if lead > hi_e {
+        return sign | inf_bits(is64);
+    }
+    let mut q = wrapping_sub(max_i64(lead, lo_e), wrapping_sub(p, 1));
+    let shift = wrapping_sub(q, e2);
+    let mut mant = if shift <= 0 {
+        big_shl(in m, wrapping_u64(wrapping_sub(0, shift)))
+    } else {
+        let s = wrapping_u64(shift);
+        let kept = big_shr(in m, s);
+        let back = big_shl(in kept, s);
+        let rem = big_sub(in m, in back);
+        let one = big_u64(1);
+        let half = big_shl(in one, wrapping_sub(s, 1));
+        let c = big_cmp(in rem, in half);
+        if c > 0 || (c == 0 && big_bit0(in kept)) {
+            big_add_u64(in kept, 1)
+        } else {
+            kept
+        }
+    };
+    if wrapping_i64(big_bits(in mant)) > p {
+        mant = big_shr(in mant, 1);
+        q = wrapping_add(q, 1);
+    }
+    let mant_len = wrapping_i64(big_bits(in mant));
+    if big_is_zero(in mant) {
+        return sign;
+    }
+    if wrapping_add(wrapping_sub(mant_len, 1), q) > hi_e {
+        return sign | inf_bits(is64);
+    }
+    let mant_u = big_low_u64(in mant);
+    let frac_bits = wrapping_u32(wrapping_sub(p, 1));
+    if mant_len < p {
+        // Subnormal: biased exponent 0.
+        sign | mant_u
+    } else {
+        let biased = wrapping_u64(wrapping_add(wrapping_add(q, wrapping_sub(p, 1)), hi_e));
+        sign | shl_u64(biased, frac_bits) | (mant_u & wrapping_sub(shl_u64(1, frac_bits), 1))
+    }
+}
+
+// ----- exact inputs ----------------------------------------------------------
+
+fn decode(bits: u64) -> Exact {
+    let neg = (bits >> 63) == 1;
+    let biased = wrapping_i64((bits >> 52) & 0x7ff);
+    let frac = bits & 0xfffffffffffff;
+    if biased == 0 {
+        Exact {
+            neg: neg,
+            mant: frac,
+            exp: -1074
+        }
+    } else {
+        Exact {
+            neg: neg,
+            mant: frac | 0x10000000000000,
+            exp: wrapping_sub(biased, 1075)
+        }
+    }
+}
+
+// Exponent of the leading bit.
+fn lead_of(e: Exact) -> i64 {
+    wrapping_add(wrapping_sub(wrapping_sub(64, widen_i64(leading_zeros_u64(e.mant))), 1), e.exp)
+}
+
+// `v * 2^s`, floored.
+fn shift(in v: Big, s: i64) -> Big {
+    if s >= 0 {
+        big_shl(in v, wrapping_u64(s))
+    } else {
+        big_shr(in v, wrapping_u64(wrapping_sub(0, s)))
+    }
+}
+
+// `floor(|x| * 2^f)`.
+fn fixed_abs(e: Exact, f: u64) -> Big {
+    let m = big_u64(e.mant);
+    shift(in m, wrapping_add(e.exp, wrapping_i64(f)))
+}
+
+// `a * b / 2^f`, truncated toward zero.
+fn mul_fix(in a: Big, in b: Big, f: u64) -> Big {
+    let p = big_mul(in a, in b);
+    if big_is_neg(in p) {
+        let m = big_neg(in p);
+        let s = big_shr(in m, f);
+        big_neg(in s)
+    } else {
+        big_shr(in p, f)
+    }
+}
+
+// ----- constants ---------------------------------------------------------------
+
+fn guard() -> u64 {
+    40
+}
+
+// `atan(1/k) * 2^f`, or `atanh(1/k) * 2^f` when `hyperbolic`.
+fn arc_inv(k: u64, f: u64, hyperbolic: bool) -> Big {
+    let g = wrapping_add(f, guard());
+    let k2 = wrapping_mul(k, k);
+    let one = big_u64(1);
+    let start = big_shl(in one, g);
+    let mut term = big_div_small(in start, k);
+    let mut sum = big_zero();
+    let mut n: u64 = 0;
+    loop {
+        if big_is_zero(in term) {
+            break;
+        }
+        let t = big_div_u64(in term, inc(wrapping_mul(2, n)));
+        if hyperbolic || (n & 1) == 0 {
+            sum = big_add(in sum, in t);
+        } else {
+            sum = big_sub(in sum, in t);
+        }
+        term = big_div_u64(in term, k2);
+        n = inc(n);
+    }
+    big_shr(in sum, guard())
+}
+
+fn next_pow2(x: u64) -> u64 {
+    let mut p: u64 = 1;
+    loop {
+        if p >= x {
+            break;
+        }
+        p = p << 1;
+    }
+    p
+}
+
+// The working width the Rust cache holds for `f` fraction bits.
+fn const_bits(f: u64) -> u64 {
+    next_pow2(
+        if f > 256 {
+            f
+        } else {
+            256
+        }
+    )
+}
+
+// The constants cache the caller lends (src/crmath.rs keeps one per
+// thread): `c[0]` the width in bits (0: empty), `c[1]` and `c[2]` the limb
+// counts of pi and ln 2, then pi at `c[3..]` and ln 2 at `c[3 + stride..]`,
+// each `stride` limbs. A cache too short for a width is not filled.
+fn stride(in c: Slice[u32]) -> u64 {
+    if c.len() < 3 {
+        0
+    } else {
+        wrapping_sub(c.len(), 3) >> 1
+    }
+}
+
+fn compute_pi(bits: u64) -> Big {
+    let w = wrapping_add(bits, 8);
+    let a = arc_inv(5, w, false);
+    let b = arc_inv(239, w, false);
+    let a16 = big_mul_small(in a, 16);
+    let b4 = big_mul_small(in b, 4);
+    let d = big_sub(in a16, in b4);
+    big_shr(in d, 8)
+}
+
+fn compute_ln2(bits: u64) -> Big {
+    let w = wrapping_add(bits, 8);
+    let a = arc_inv(3, w, true);
+    let a2 = big_mul_small(in a, 2);
+    big_shr(in a2, 8)
+}
+
+// `pi * 2^f` (`want_pi`) or `ln 2 * 2^f`, within 3 units.
+fn constant(inout c: Slice[u32], f: u64, want_pi: bool) -> Big {
+    let have = widen_u64(g32(in c, 0));
+    if have < f {
+        let bits = const_bits(f);
+        let pi = compute_pi(bits);
+        let ln2 = compute_ln2(bits);
+        let st = stride(in c);
+        if big_limbs(in pi) <= st && big_limbs(in ln2) <= st && bits <= 0xffffffff {
+            c.try_set(0, wrapping_u32(bits));
+            c.try_set(1, wrapping_u32(big_limbs(in pi)));
+            c.try_set(2, wrapping_u32(big_limbs(in ln2)));
+            big_store(in pi, inout c, 3);
+            big_store(in ln2, inout c, wrapping_add(3, st));
+        } else {
+            let v = if want_pi {
+                pi
+            } else {
+                ln2
+            };
+            return big_shr(in v, wrapping_sub(bits, f));
+        }
+    }
+    let bits = widen_u64(g32(in c, 0));
+    let v = if want_pi {
+        big_from_limbs(in c, 3, widen_u64(g32(in c, 1)))
+    } else {
+        big_from_limbs(in c, wrapping_add(3, stride(in c)), widen_u64(g32(in c, 2)))
+    };
+    big_shr(in v, wrapping_sub(bits, f))
+}
+
+fn pi_fix(inout c: Slice[u32], f: u64) -> Big {
+    constant(inout c, f, true)
+}
+
+fn ln2_fix(inout c: Slice[u32], f: u64) -> Big {
+    constant(inout c, f, false)
+}
+
+// ----- Ziv's loop --------------------------------------------------------------
+
+// The rounding when the interval settles, else `unsettled()`; at the
+// precision cap, the rounding of the midpoint.
+fn settle(in a: Approx, precision: u64, is64: bool) -> u64 {
+    let err = big_u64(a.error);
+    let lo = big_sub(in a.value, in err);
+    let hi = big_add(in a.value, in err);
+    if !big_is_neg(in lo) {
+        let r_lo = round_to(a.negative, in lo, a.exp, is64);
+        let r_hi = round_to(a.negative, in hi, a.exp, is64);
+        if r_lo == r_hi {
+            return r_lo;
+        }
+    }
+    if precision >= max_precision() {
+        let m = big_abs(in a.value);
+        return round_to(a.negative, in m, a.exp, is64);
+    }
+    unsettled()
+}
+
+// ----- exp ---------------------------------------------------------------------
+
+// Rust's `f64::round` (half away from zero) of `t`, `|t| < 2^31`, as i64.
+fn round_half_away(t: f64) -> i64 {
+    let tr = saturating_i32(t);
+    let frac = t - widen_f64(tr);
+    let k = widen_i64(tr);
+    if frac >= 0.5 {
+        wrapping_add(k, 1)
+    } else if frac <= -0.5 {
+        wrapping_sub(k, 1)
+    } else {
+        k
+    }
+}
+
+fn exp_eval(inout c: Slice[u32], e: Exact, k: i64, p: u64) -> Approx {
+    let f = wrapping_add(p, 16);
+    let ln2_wide = ln2_fix(inout c, wrapping_add(f, 16));
+    let mut x_fix = fixed_abs(e, f);
+    if e.neg {
+        x_fix = big_neg(in x_fix);
+    }
+    let kl = big_mul_i64(in ln2_wide, k);
+    let kln2 = big_shr(in kl, 16);
+    let r = big_sub(in x_fix, in kln2);
+    let one = big_u64(1);
+    let unit = big_shl(in one, f);
+    let mut sum = big_copy(in unit);
+    let mut term = unit;
+    let mut n: u64 = 1;
+    loop {
+        let m = mul_fix(in term, in r, f);
+        term = big_div_u64(in m, n);
+        if big_is_zero(in term) {
+            break;
+        }
+        sum = big_add(in sum, in term);
+        n = inc(n);
+    }
+    Approx {
+        negative: false,
+        value: sum,
+        error: wrapping_add(wrapping_mul(6, n), 24),
+        exp: wrapping_sub(k, wrapping_i64(f))
+    }
+}
+
+pub fn exp_bits(inout c: Slice[u32], bits: u64, is64: bool) -> u64 {
+    let x = from_bits_f64(bits);
+    if x != x {
+        return nan_bits(is64);
+    }
+    if bits == 0x7ff0000000000000 {
+        return inf_bits(is64);
+    }
+    if bits == 0xfff0000000000000 || x < -1100.0 {
+        return 0;
+    }
+    if x > 1100.0 {
+        return inf_bits(is64);
+    }
+    if x == 0.0 {
+        return one_bits(is64);
+    }
+    let e = decode(bits);
+    let k = round_half_away(x / from_bits_f64(0x3fe62e42fefa39ef));
+    let mut p = start_precision(is64);
+    loop {
+        let a = exp_eval(inout c, e, k, p);
+        let r = settle(in a, p, is64);
+        if r != unsettled() {
+            return r;
+        }
+        p = wrapping_mul(p, 2);
+    }
+}
+
+// ----- log ---------------------------------------------------------------------
+
+fn log_eval(inout c: Slice[u32], top: u64, den_shift: u64, e: i64, p: u64) -> Approx {
+    let f = wrapping_add(p, 80);
+    let num = big_u64(top);
+    let one = big_u64(1);
+    let base = big_shl(in one, den_shift);
+    let d = big_sub(in num, in base);
+    let ds = big_shl(in d, f);
+    let s = big_add(in num, in base);
+    let z = big_div(in ds, in s);
+    let z2 = mul_fix(in z, in z, f);
+    let mut power = big_copy(in z);
+    let mut sum = z;
+    let mut n: u64 = 1;
+    loop {
+        power = mul_fix(in power, in z2, f);
+        if big_is_zero(in power) {
+            break;
+        }
+        let t = big_div_u64(in power, inc(wrapping_mul(2, n)));
+        sum = big_add(in sum, in t);
+        n = inc(n);
+    }
+    let log_m = big_shl(in sum, 1);
+    let ln2_wide = ln2_fix(inout c, wrapping_add(f, 16));
+    let el = big_mul_i64(in ln2_wide, e);
+    let eln2 = big_shr(in el, 16);
+    let total = big_add(in eln2, in log_m);
+    let neg = big_is_neg(in total);
+    Approx {
+        negative: neg,
+        value: big_abs(in total),
+        error: wrapping_add(wrapping_mul(12, n), 32),
+        exp: wrapping_sub(0, wrapping_i64(f))
+    }
+}
+
+pub fn log_bits(inout c: Slice[u32], bits: u64, is64: bool) -> u64 {
+    let x = from_bits_f64(bits);
+    if x != x || x < 0.0 {
+        return nan_bits(is64);
+    }
+    if x == 0.0 {
+        return sign_bit(is64) | inf_bits(is64);
+    }
+    if bits == 0x7ff0000000000000 {
+        return inf_bits(is64);
+    }
+    if x == 1.0 {
+        return 0;
+    }
+    let ex = decode(bits);
+    let lead = lead_of(ex);
+    let top = shl_u64(ex.mant, wrapping_sub(leading_zeros_u64(ex.mant), 11));
+    let mut e = lead;
+    let mut den_shift: u64 = 52;
+    if top > 6369051672525772 {
+        e = wrapping_add(e, 1);
+        den_shift = 53;
+    }
+    let mut p = start_precision(is64);
+    loop {
+        let a = log_eval(inout c, top, den_shift, e, p);
+        let r = settle(in a, p, is64);
+        if r != unsettled() {
+            return r;
+        }
+        p = wrapping_mul(p, 2);
+    }
+}
+
+// ----- sin / cos ---------------------------------------------------------------
+
+// sin r (`want_cos` false) or cos r by Taylor series at fraction `f`, and
+// the number of terms of both series (src/crmath.rs computes both).
+fn series_terms(in r: Big, in r2: Big, f: u64, cosine: bool, inout out: Big) -> u64 {
+    let mut term = if cosine {
+        let one = big_u64(1);
+        big_shl(in one, f)
+    } else {
+        big_copy(in r)
+    };
+    let mut acc = big_copy(in term);
+    let mut n: u64 = 1;
+    let mut terms: u64 = 0;
+    loop {
+        let m = mul_fix(in term, in r2, f);
+        let d = if cosine {
+            wrapping_mul(wrapping_sub(wrapping_mul(2, n), 1), wrapping_mul(2, n))
+        } else {
+            wrapping_mul(wrapping_mul(2, n), inc(wrapping_mul(2, n)))
+        };
+        let q = big_div_u64(in m, d);
+        term = big_neg(in q);
+        if big_is_zero(in term) {
+            break;
+        }
+        acc = big_add(in acc, in term);
+        n = inc(n);
+        terms = inc(terms);
+    }
+    out = acc;
+    terms
+}
+
+fn sin_cos_eval(inout c: Slice[u32], ex: Exact, lead: i64, want_cos: bool, p: u64) -> Approx {
+    let tiny = if lead < 0 {
+        wrapping_u64(wrapping_sub(0, lead))
+    } else {
+        0
+    };
+    let f = wrapping_add(wrapping_add(p, 96), tiny);
+    let int_bits = if lead > 0 {
+        wrapping_u64(lead)
+    } else {
+        0
+    };
+    let wide = wrapping_add(wrapping_add(f, int_bits), 16);
+    let pi_wide = pi_fix(inout c, wide);
+    let half_pi_wide = big_shr(in pi_wide, 1);
+    let x_wide = fixed_abs(ex, wide);
+    let quarter = big_shr(in half_pi_wide, 1);
+    let num = big_add(in x_wide, in quarter);
+    let q = big_div(in num, in half_pi_wide);
+    let qh = big_mul(in q, in half_pi_wide);
+    let r_wide = big_sub(in x_wide, in qh);
+    let r = shift(in r_wide, wrapping_sub(0, wrapping_i64(wrapping_add(int_bits, 16))));
+    let quadrant = big_mod4(in q);
+    let r2 = mul_fix(in r, in r, f);
+    let mut s = big_zero();
+    let mut c = big_zero();
+    let ts = series_terms(in r, in r2, f, false, inout s);
+    let tc = series_terms(in r, in r2, f, true, inout c);
+    let terms = wrapping_add(wrapping_add(ts, tc), 2);
+    let use_sin = (quadrant & 1)
+        == (
+        if want_cos {
+            1
+        } else {
+            0
+        }
+    );
+    let mut neg = if want_cos {
+        quadrant == 1 || quadrant == 2
+    } else {
+        quadrant >= 2
+    };
+    let mut val = if use_sin {
+        s
+    } else {
+        c
+    };
+    if big_is_neg(in val) {
+        val = big_neg(in val);
+        neg = !neg;
+    }
+    if ex.neg && !want_cos {
+        neg = !neg;
+    }
+    Approx {
+        negative: neg,
+        value: val,
+        error: wrapping_add(wrapping_mul(4, terms), 16),
+        exp: wrapping_sub(0, wrapping_i64(f))
+    }
+}
+
+pub fn sin_cos_bits(inout c: Slice[u32], bits: u64, is64: bool, want_cos: bool) -> u64 {
+    let x = from_bits_f64(bits);
+    if x != x || (bits & 0x7fffffffffffffff) == 0x7ff0000000000000 {
+        return nan_bits(is64);
+    }
+    if x == 0.0 {
+        return if want_cos {
+            one_bits(is64)
+        } else if (bits >> 63) == 1 {
+            sign_bit(is64)
+        } else {
+            0
+        };
+    }
+    let ex = decode(bits);
+    let lead = lead_of(ex);
+    let mut p = start_precision(is64);
+    loop {
+        let a = sin_cos_eval(inout c, ex, lead, want_cos, p);
+        let r = settle(in a, p, is64);
+        if r != unsettled() {
+            return r;
+        }
+        p = wrapping_mul(p, 2);
+    }
+}
+
+// ----- atan2 -------------------------------------------------------------------
+
+// `atan u` for `0 <= u <= 1` at fraction `f`; the error bound in units.
+fn atan_le_one(in u0: Big, f: u64, inout out: Big) -> u64 {
+    let one_b = big_u64(1);
+    let one = big_shl(in one_b, f);
+    let mut w = big_copy(in u0);
+    for i in 0..u(2) {
+        let w2 = mul_fix(in w, in w, f);
+        let a = big_add(in one, in w2);
+        let sh = big_shl(in a, f);
+        let root = big_sqrt(in sh);
+        let ws = big_shl(in w, f);
+        let den = big_add(in one, in root);
+        w = big_div(in ws, in den);
+    }
+    let w2 = mul_fix(in w, in w, f);
+    let mut power = big_copy(in w);
+    let mut sum = w;
+    let mut n: u64 = 1;
+    loop {
+        power = mul_fix(in power, in w2, f);
+        if big_is_zero(in power) {
+            break;
+        }
+        let t = big_div_u64(in power, inc(wrapping_mul(2, n)));
+        if (n & 1) == 1 {
+            sum = big_sub(in sum, in t);
+        } else {
+            sum = big_add(in sum, in t);
+        }
+        n = inc(n);
+    }
+    out = big_shl(in sum, 2);
+    wrapping_mul(4, wrapping_add(wrapping_mul(7, n), 32))
+}
+
+fn pi_multiple_eval(inout c: Slice[u32], quarters: u64, p: u64) -> Approx {
+    let f = wrapping_add(p, 8);
+    let pi = pi_fix(inout c, wrapping_add(f, 4));
+    let m = big_mul_small(in pi, quarters);
+    Approx {
+        negative: false,
+        value: big_shr(in m, 2),
+        error: 4,
+        exp: wrapping_sub(0, wrapping_i64(wrapping_add(f, 4)))
+    }
+}
+
+fn pi_multiple_bits(inout c: Slice[u32], quarters: u64, is64: bool) -> u64 {
+    let mut p = start_precision(is64);
+    loop {
+        let a = pi_multiple_eval(inout c, quarters, p);
+        let r = settle(in a, p, is64);
+        if r != unsettled() {
+            return r;
+        }
+        p = wrapping_mul(p, 2);
+    }
+}
+
+// `|y| <= |x|` exactly.
+fn ratio_le_one(ey: Exact, ex: Exact) -> bool {
+    let common = if ey.exp < ex.exp {
+        ey.exp
+    } else {
+        ex.exp
+    };
+    let ny = big_u64(ey.mant);
+    let nx = big_u64(ex.mant);
+    let a = shift(in ny, wrapping_sub(ey.exp, common));
+    let b = shift(in nx, wrapping_sub(ex.exp, common));
+    big_cmp(in a, in b) <= 0
+}
+
+fn atan2_eval(inout c: Slice[u32], ey: Exact, ex: Exact, ly: i64, lx: i64, y_le_x: bool, p: u64)
+    -> Approx {
+    let d = wrapping_sub(ly, lx);
+    let ad = wrapping_u64(
+        if d < 0 {
+            wrapping_sub(0, d)
+        } else {
+            d
+        }
+    );
+    let tiny = if ad > 0 {
+        wrapping_sub(ad, 1)
+    } else {
+        0
+    };
+    let f = wrapping_add(
+        wrapping_add(p, 32),
+        if tiny < 2300 {
+            tiny
+        } else {
+            2300
+        }
+    );
+    let (num_e, den_e) = if y_le_x {
+        (ey, ex)
+    } else {
+        (ex, ey)
+    };
+    let num = big_u64(num_e.mant);
+    let den = big_u64(den_e.mant);
+    let s = wrapping_add(wrapping_i64(f), wrapping_sub(num_e.exp, den_e.exp));
+    let u0 = if s >= 0 {
+        let n2 = big_shl(in num, wrapping_u64(s));
+        big_div(in n2, in den)
+    } else {
+        let d2 = big_shl(in den, wrapping_u64(wrapping_sub(0, s)));
+        big_div(in num, in d2)
+    };
+    let mut v = big_zero();
+    let mut err = atan_le_one(in u0, f, inout v);
+    let pi = pi_fix(inout c, f);
+    let half_pi = big_shr(in pi, 1);
+    if !y_le_x {
+        v = big_sub(in half_pi, in v);
+        err = wrapping_add(err, 4);
+    }
+    if ex.neg {
+        v = big_sub(in pi, in v);
+        err = wrapping_add(err, 4);
+    }
+    Approx {
+        negative: ey.neg,
+        value: v,
+        error: err,
+        exp: wrapping_sub(0, wrapping_i64(f))
+    }
+}
+
+pub fn atan2_bits(inout c: Slice[u32], ybits: u64, xbits: u64, is64: bool) -> u64 {
+    let y = from_bits_f64(ybits);
+    let x = from_bits_f64(xbits);
+    if y != y || x != x {
+        return nan_bits(is64);
+    }
+    let y_neg = (ybits >> 63) == 1;
+    let sign = if y_neg {
+        sign_bit(is64)
+    } else {
+        0
+    };
+    let y_inf = (ybits & 0x7fffffffffffffff) == 0x7ff0000000000000;
+    if y == 0.0 {
+        return if x > 0.0 || (x == 0.0 && (xbits >> 63) == 0) {
+            sign
+        } else {
+            sign | pi_multiple_bits(inout c, 4, is64)
+        };
+    }
+    if y_inf {
+        return if xbits == 0x7ff0000000000000 {
+            sign | pi_multiple_bits(inout c, 1, is64)
+        } else if xbits == 0xfff0000000000000 {
+            sign | pi_multiple_bits(inout c, 3, is64)
+        } else {
+            sign | pi_multiple_bits(inout c, 2, is64)
+        };
+    }
+    if x == 0.0 {
+        return sign | pi_multiple_bits(inout c, 2, is64);
+    }
+    if xbits == 0x7ff0000000000000 {
+        return sign;
+    }
+    if xbits == 0xfff0000000000000 {
+        return sign | pi_multiple_bits(inout c, 4, is64);
+    }
+    let ey = decode(ybits);
+    let ex = decode(xbits);
+    let ly = lead_of(ey);
+    let lx = lead_of(ex);
+    let y_le_x = ratio_le_one(ey, ex);
+    let mut p = start_precision(is64);
+    loop {
+        let a = atan2_eval(inout c, ey, ex, ly, lx, y_le_x, p);
+        let r = settle(in a, p, is64);
+        if r != unsettled() {
+            return r;
+        }
+        p = wrapping_mul(p, 2);
+    }
+}

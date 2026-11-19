@@ -26,6 +26,11 @@
 //! parameters, and [`with_mirror_slice`]/[`with_mirror_slice_mut`] lend a
 //! slice of mirrors without copying it.
 //!
+//! A handle may own values Rust cannot read: a sequence of other handles or
+//! of boxed trait objects. Its view hands them out as [`OpaqueSeq`] and
+//! [`OpaqueObject`], which say only how many there are and whether one is
+//! present; dropping the handle frees them.
+//!
 //! This crate has no dependencies, so a crate with a `vesper-port` feature
 //! can depend on it unconditionally.
 #![no_std]
@@ -56,6 +61,11 @@ pub trait Abi: Sized {
     /// or 4 needs one word, any other stride is `WORDS * 8`) and panic on a
     /// mismatch, so a wrong implementation cannot reach out of bounds.
     const STRIDE: usize = Self::WORDS * 8;
+    /// Whether the value is only the low four bytes of its one word, as an
+    /// `f32` is. Vesper stores only those bytes into a sequence slot, so
+    /// sequence reads must not touch the high half (it may be
+    /// uninitialized memory).
+    const LOW_HALF: bool = false;
 }
 
 /// `max(a, b)` in constant context.
@@ -106,6 +116,21 @@ impl Abi for f64 {
     }
 }
 
+/// An `f32` is the low half of its word (the high half is unspecified, so
+/// `get` ignores it), and takes a whole word in a sequence buffer
+/// (`vesper::seq::elem_bytes`): a `[f32]` is copied at the boundary, not
+/// lent in place.
+impl Abi for f32 {
+    const WORDS: usize = 1;
+    const LOW_HALF: bool = true;
+    fn put(&self, out: &mut [u64]) {
+        out[0] = u64::from(self.to_bits());
+    }
+    fn get(words: &[u64]) -> Self {
+        f32::from_bits(words[0] as u32)
+    }
+}
+
 /// `Unit` is one ignored word.
 impl Abi for () {
     const WORDS: usize = 1;
@@ -141,6 +166,25 @@ macro_rules! tuple {
         }
     };
 }
+/// A Vesper array `[T; N]` (#1091) is the homogeneous tuple: `N` values of
+/// `T` in order. Bindings name an array of more than [`MAX_TUPLE`] elements
+/// `[T; N]` and any shorter one as a Rust tuple.
+impl<T: Abi, const N: usize> Abi for [T; N] {
+    const WORDS: usize = max(1, N * T::WORDS);
+    fn put(&self, out: &mut [u64]) {
+        for (i, v) in self.iter().enumerate() {
+            v.put(&mut out[i * T::WORDS..]);
+        }
+    }
+    fn get(words: &[u64]) -> Self {
+        core::array::from_fn(|i| T::get(&words[i * T::WORDS..]))
+    }
+}
+
+/// The longest tuple with an [`Abi`] impl; a longer homogeneous tuple (a
+/// Vesper array) crosses as a Rust array.
+pub const MAX_TUPLE: usize = 8;
+
 tuple!(A 0);
 tuple!(A 0, B 1);
 tuple!(A 0, B 1, C 2);
@@ -272,6 +316,33 @@ mod tests {
         round_trip(Err::<u64, RuntimeError>(RuntimeError::IndexOutOfBounds));
         round_trip(Ok::<u64, RuntimeError>(u64::MAX));
         round_trip((i8::MIN, -1i16, i32::MIN, isize::MAX, u16::MAX, usize::MAX));
+    }
+
+    #[test]
+    fn arrays_are_their_elements_in_order() {
+        assert_eq!(<[u8; 32] as Abi>::WORDS, 32);
+        assert_eq!(<[(u64, bool); 3] as Abi>::WORDS, 6);
+        assert_eq!(<[u64; 0] as Abi>::WORDS, 1);
+        round_trip([(1u64, true), (u64::MAX, false), (7, true)]);
+        round_trip(core::array::from_fn::<i8, 12, _>(|i| i as i8 - 6));
+        let mut words = [0u64; 9];
+        core::array::from_fn::<u8, 9, _>(|i| 250 + i as u8 / 2).put(&mut words);
+        assert_eq!(words, [250, 250, 251, 251, 252, 252, 253, 253, 254]);
+        round_trip([[1u16, 2], [3, 4], [5, 6]]);
+    }
+
+    #[test]
+    fn f32_is_the_low_half_of_its_word() {
+        round_trip((1.5f32, -0.0f32, f32::MIN_POSITIVE));
+        let mut words = [u64::MAX; 1];
+        2.5f32.put(&mut words);
+        assert_eq!(words[0], u64::from(2.5f32.to_bits()));
+        // Vesper leaves the high half unspecified.
+        assert_eq!(
+            f32::get(&[0xdead_beef_0000_0000 | u64::from(3.0f32.to_bits())]),
+            3.0
+        );
+        assert_eq!(<f32 as Abi>::STRIDE, 8);
     }
 
     #[test]

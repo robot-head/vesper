@@ -1,0 +1,7 @@
+// Finalized on one branch only.
+fn leak_on_branch(sink s: Sealer, c: bool) -> u64 eff [Ffi[Aead]] {
+    if c {
+        Aead::aead_sealer_free(s);
+    }
+    0
+}

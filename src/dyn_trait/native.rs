@@ -141,6 +141,164 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(block)
     }
 
+    /// A call through slot `slot` whose trait method performs handler
+    /// effects (§7.3, #1063). Handlers are specialized into the code that
+    /// reaches them, so such a slot is not a compiled function: the call
+    /// compares the receiver's vtable with every vtable the program has for
+    /// the object type and, in the matching branch, calls the selected
+    /// conformance method under the caller's handlers, exactly as a static
+    /// call would. `stub` is the vtable stub at the call's type arguments;
+    /// a receiver whose vtable is none of them traps.
+    pub(super) fn dyn_call_effectful(
+        &mut self,
+        slot: usize,
+        stub: &Function,
+        args: &[Arg],
+        site: &Expr,
+        into: Option<ir::Value>,
+    ) -> Result<ir::Value, String> {
+        let receiver = stub
+            .params
+            .first()
+            .ok_or("a vtable call lacks its receiver")?;
+        let receiver_arg = args.first().ok_or("a vtable call lacks its receiver")?;
+        let boxed = crate::dyn_trait::is_boxed(&receiver.ty);
+        let object = if boxed {
+            crate::dyn_trait::boxed_object(&receiver.ty)
+                .cloned()
+                .ok_or("a boxed receiver lacks its object type")?
+        } else {
+            receiver.ty.clone()
+        };
+        let object = crate::numeric::default_type(&object);
+        // The receiver: the box's block, or the object's `{data, vtable}`
+        // pair (an `in`/`inout` place or a `sink` value).
+        let (data, table, block) = if boxed {
+            let block = self.expr(&receiver_arg.expr)?;
+            let table = self.b.ins().load(types::I64, MemFlags::trusted(), block, 0);
+            let data = self.b.ins().iadd_imm(block, BOXED_HEADER);
+            (data, table, Some(block))
+        } else {
+            let pair = if receiver.pass != Pass::Sink
+                && crate::check::Place::from_expr(&receiver_arg.expr).is_some()
+            {
+                self.address(&receiver_arg.expr)?
+            } else {
+                self.expr(&receiver_arg.expr)?
+            };
+            let data = self.b.ins().load(types::I64, MemFlags::trusted(), pair, 0);
+            let table = self.b.ins().load(types::I64, MemFlags::trusted(), pair, 8);
+            (data, table, None)
+        };
+        // The other arguments are evaluated once, before the dispatch; an
+        // `inout` argument stays a place each branch lends.
+        let mut rest = vec![];
+        for (index, (arg, param)) in args.iter().zip(&stub.params).enumerate().skip(1) {
+            if param.pass == Pass::Inout {
+                rest.push(arg.clone());
+                continue;
+            }
+            let value = if Layout::of(self.world, &param.ty)?.aggregate()
+                && param.pass == Pass::In
+                && crate::check::Place::from_expr(&arg.expr).is_some()
+            {
+                self.address(&arg.expr)?
+            } else {
+                self.expr(&arg.expr)?
+            };
+            let name = format!("$dyn_arg{}_{}", value.as_u32(), index);
+            let variable = self.b.declare_var(self.b.func.dfg.value_type(value));
+            self.def_var(variable, value);
+            self.vars.insert(name.clone(), variable);
+            self.local_types.insert(name.clone(), param.ty.clone());
+            rest.push(Arg {
+                pass: arg.pass,
+                explicit: arg.explicit,
+                expr: Expr {
+                    kind: ExprKind::Name(name),
+                    span: 0..0,
+                },
+            });
+        }
+        let result_layout = Layout::of(self.world, &stub.result)?;
+        let join = self.b.create_block();
+        self.b.append_block_param(
+            join,
+            if result_layout.aggregate() {
+                self.m.target_config().pointer_type()
+            } else {
+                scalar(&stub.result, &[])?
+            },
+        );
+        let vtables = self
+            .world
+            .dyn_objects
+            .vtables
+            .iter()
+            .filter(|v| crate::numeric::default_type(&v.object) == object)
+            .cloned()
+            .collect::<Vec<_>>();
+        let scope = self.vars.clone();
+        let types_scope = self.local_types.clone();
+        for vtable in &vtables {
+            let (method, vars) = vtable
+                .methods
+                .get(slot)
+                .cloned()
+                .ok_or("a vtable lacks the called slot")?;
+            let address = self.dyn_vtable(vtable)?;
+            let yes = self.b.create_block();
+            let no = self.b.create_block();
+            let matches = self.b.ins().icmp(IntCC::Equal, table, address);
+            self.branch(matches, yes, &[], no, &[]);
+            self.b.switch_to_block(yes);
+            let self_ty = crate::numeric::default_type(&vtable.self_ty);
+            let name = format!("$dyn_self{}", data.as_u32());
+            self.bind_alias(
+                &Pattern {
+                    kind: PatternKind::Bind(name.clone()),
+                    span: 0..0,
+                },
+                data,
+                &self_ty,
+            )?;
+            self.local_types.insert(name.clone(), self_ty);
+            let mut call_args = vec![Arg {
+                pass: receiver.pass,
+                explicit: true,
+                expr: Expr {
+                    kind: ExprKind::Name(name),
+                    span: 0..0,
+                },
+            }];
+            call_args.extend(rest.iter().cloned());
+            self.forced_call_vars = Some(vars);
+            let value = self.call_function_into(&method, &call_args, site, None);
+            self.forced_call_vars = None;
+            let value = value?;
+            self.jump(join, &[value.into()]);
+            self.vars = scope.clone();
+            self.local_types = types_scope.clone();
+            self.b.switch_to_block(no);
+        }
+        self.b.ins().trap(ir::TrapCode::unwrap_user(3));
+        self.b.switch_to_block(join);
+        let result = self.b.block_params(join)[0];
+        if let Some(block) = block
+            && receiver.pass == Pass::Sink
+        {
+            // `sink self` consumed the boxed value; the block goes too.
+            self.fip_box_free(block)?;
+        }
+        Ok(match into {
+            Some(out) if result_layout.aggregate() => {
+                self.copy_bytes(result, out, result_layout.size);
+                out
+            }
+            _ => result,
+        })
+    }
+
     /// The address of `vtable`'s data object, emitted once per compilation
     /// (layout in [`crate::dyn_trait`]).
     fn dyn_vtable(&mut self, vtable: &VTable) -> Result<ir::Value, String> {
@@ -166,6 +324,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                     description.write_function_addr(0, reference);
                 }
                 for (slot, (name, vars)) in vtable.methods.iter().enumerate() {
+                    if specialized_function(self.world, &concrete(self.world, name, vars)?) {
+                        // Reached by `dyn_call_effectful`, never through
+                        // the slot: its handler effects are specialized.
+                        continue;
+                    }
                     let entry = self.dyn_slot_entry(vtable, name, vars)?;
                     let reference = self.m.declare_func_in_data(entry, &mut description);
                     description.write_function_addr(32 + 8 * slot as u32, reference);

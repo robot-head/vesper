@@ -1,5 +1,10 @@
 # Port P1 lane 17: vesper-loom-solver in Vesper
 
+> **Update 2026-11-18 (#1085):** the user made the Vesper port the only
+> build of `vesper-loom-solver`, and its Rust engine moved into the frozen seed copy
+> (`seed/src`), which the compiler keeps linking until self-hosting Stage 2.
+> Statements below that Rust stays the default are historical.
+
 Claim: #914. Base: `main` at 153f264, stacked on lane 16 (PR #978, branch
 `claude/project-thread-yopgky` at 90cfe8b), because the port imports
 `@vesper/loom-calculus`.

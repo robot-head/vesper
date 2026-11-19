@@ -11,9 +11,12 @@
 //! responses one at a time in stream order, then incremental responses
 //! sharing the remaining capacity round-robin in fixed quanta.
 
+#[cfg(not(feature = "vesper-port"))]
 use vesper_warp::varint;
 
-use crate::frame::{FrameError, put_varint, write_frame};
+use crate::frame::FrameError;
+#[cfg(not(feature = "vesper-port"))]
+use crate::frame::{put_varint, write_frame};
 
 /// PRIORITY_UPDATE for a request stream and for a push (RFC 9218 §7.2).
 pub const PRIORITY_UPDATE_REQUEST: u64 = 0xf0700;
@@ -56,6 +59,7 @@ impl Priority {
     /// `u` outside 0..=7 or not an integer and `i` that is not a boolean
     /// (§4.1, §4.2). A member that appears twice takes its last value
     /// (RFC 8941 §3.2).
+    #[cfg(not(feature = "vesper-port"))]
     pub fn parse(value: &[u8]) -> Self {
         let mut p = Self::default();
         let Some(members) = parse_dictionary(value) else {
@@ -72,8 +76,21 @@ impl Priority {
         p
     }
 
+    /// Parses a `priority` field value (the Vesper build).
+    #[cfg(feature = "vesper-port")]
+    pub fn parse(value: &[u8]) -> Self {
+        port::h3_priority_parse(value)
+    }
+
+    /// The field value (the Vesper build).
+    #[cfg(feature = "vesper-port")]
+    pub fn serialize(&self) -> String {
+        String::from_utf8(port::h3_priority_serialize(*self)).expect("the value is ASCII")
+    }
+
     /// The field value, with default parameters omitted (an empty string
     /// is the default priority).
+    #[cfg(not(feature = "vesper-port"))]
     pub fn serialize(&self) -> String {
         let mut s = String::new();
         if self.urgency != DEFAULT_URGENCY {
@@ -89,6 +106,7 @@ impl Priority {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// A Structured Field bare item, reduced to what priorities need.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Item {
@@ -99,18 +117,21 @@ enum Item {
     Other,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn ows(v: &[u8], at: &mut usize) {
     while *at < v.len() && matches!(v[*at], b' ' | b'\t') {
         *at += 1;
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn sp(v: &[u8], at: &mut usize) {
     while *at < v.len() && v[*at] == b' ' {
         *at += 1;
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 fn key(v: &[u8], at: &mut usize) -> Option<Vec<u8>> {
     let start = *at;
     match v.get(*at) {
@@ -127,6 +148,7 @@ fn key(v: &[u8], at: &mut usize) -> Option<Vec<u8>> {
     Some(v[start..*at].to_vec())
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// RFC 8941 §4.2.3: a bare item.
 fn bare_item(v: &[u8], at: &mut usize) -> Option<Item> {
     let c = *v.get(*at)?;
@@ -220,6 +242,7 @@ fn bare_item(v: &[u8], at: &mut usize) -> Option<Item> {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// RFC 8941 §4.2.3.2: parameters (parsed and dropped).
 fn parameters(v: &[u8], at: &mut usize) -> Option<()> {
     while v.get(*at) == Some(&b';') {
@@ -234,6 +257,7 @@ fn parameters(v: &[u8], at: &mut usize) -> Option<()> {
     Some(())
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// An item or inner list with its parameters.
 fn member_value(v: &[u8], at: &mut usize) -> Option<Item> {
     if v.get(*at) == Some(&b'(') {
@@ -258,6 +282,7 @@ fn member_value(v: &[u8], at: &mut usize) -> Option<Item> {
     Some(item)
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// RFC 8941 §4.2.2. `None` if the value is not a valid dictionary.
 fn parse_dictionary(v: &[u8]) -> Option<Vec<(Vec<u8>, Item)>> {
     let mut at = 0;
@@ -292,7 +317,7 @@ fn parse_dictionary(v: &[u8]) -> Option<Vec<(Vec<u8>, Item)>> {
 }
 
 /// A parsed PRIORITY_UPDATE frame.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PriorityUpdate {
     /// True for a push (0xf0701), false for a request stream.
     pub push: bool,
@@ -301,6 +326,19 @@ pub struct PriorityUpdate {
 }
 
 impl PriorityUpdate {
+    /// Parses a PRIORITY_UPDATE payload (the Vesper build).
+    #[cfg(feature = "vesper-port")]
+    pub fn parse(frame_type: u64, payload: &[u8]) -> Result<Self, FrameError> {
+        port::h3_priority_update_parse(frame_type, payload)
+    }
+
+    /// The PRIORITY_UPDATE frame (the Vesper build).
+    #[cfg(feature = "vesper-port")]
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        crate::frame::written(out, port::h3_priority_update_encode(*self));
+    }
+
+    #[cfg(not(feature = "vesper-port"))]
     pub fn parse(frame_type: u64, payload: &[u8]) -> Result<Self, FrameError> {
         let (element_id, n) = varint::decode(payload).map_err(|_| FrameError::Malformed)?;
         let value = &payload[n..];
@@ -315,6 +353,7 @@ impl PriorityUpdate {
         })
     }
 
+    #[cfg(not(feature = "vesper-port"))]
     pub fn encode(&self, out: &mut Vec<u8>) {
         let mut payload = Vec::new();
         put_varint(&mut payload, self.element_id);
@@ -336,6 +375,7 @@ impl PriorityUpdate {
 /// it is blocked or empty before the next group. A group of several
 /// streams holds the incremental streams of one urgency, which take turns
 /// in quanta; `rotate` picks which of them goes first.
+#[cfg(not(feature = "vesper-port"))]
 pub fn schedule(streams: &[(u64, Priority)], rotate: usize) -> Vec<Vec<u64>> {
     let mut by_urgency: [Vec<(u64, bool)>; 8] = Default::default();
     for (id, p) in streams {
@@ -361,6 +401,28 @@ pub fn schedule(streams: &[(u64, Priority)], rotate: usize) -> Vec<Vec<u64>> {
     }
     groups
 }
+
+/// The order in which streams with queued bytes are offered to the
+/// transport (RFC 9218 §10), in the Vesper build.
+#[cfg(feature = "vesper-port")]
+pub fn schedule(streams: &[(u64, Priority)], rotate: usize) -> Vec<Vec<u64>> {
+    let mut flat = Vec::with_capacity(streams.len() * 3);
+    for (id, p) in streams {
+        flat.extend_from_slice(&[*id, u64::from(p.urgency), u64::from(p.incremental)]);
+    }
+    let words = port::h3_schedule(&flat, rotate as u64);
+    let mut groups = Vec::new();
+    let mut at = 0;
+    while at < words.len() {
+        let n = words[at] as usize;
+        groups.push(words[at + 1..at + 1 + n].to_vec());
+        at += 1 + n;
+    }
+    groups
+}
+
+#[cfg(feature = "vesper-port")]
+use crate::qpack::port::binding as port;
 
 #[cfg(test)]
 mod tests {

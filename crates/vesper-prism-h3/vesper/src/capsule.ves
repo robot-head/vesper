@@ -1,0 +1,239 @@
+// capsule.rs: the Capsule protocol (RFC 9297 §3) and the incremental
+// capsule reader, laid out like the frame reader (frame.ves): unread bytes
+// from `head` on, a value copied into `out` for the Rust wrapper.
+
+use self::{
+    CapsuleError,
+    CapsuleOut,
+    CapsuleReaderCore
+};
+use self::int::{
+    inc,
+    byte,
+    min64,
+    drain_front
+};
+use self::varint::{
+    vdec,
+    put_record
+};
+
+fn datagram_type() -> u64 {
+    0
+}
+
+fn close_type() -> u64 {
+    10307
+}
+
+fn drain_type() -> u64 {
+    30894
+}
+
+pub fn max_close_reason() -> u64 {
+    1024
+}
+
+// Modes: 0 header, 2 skip, 3 value.
+pub fn capsule_reader_new(max_value: u64) -> CapsuleReaderCore {
+    CapsuleReaderCore {
+        buf: ChunkSeq::new[u8](),
+        head: 0,
+        mode: 0,
+        remaining: 0,
+        ty: 0,
+        len: 0,
+        max_value: max_value,
+        out: ChunkSeq::new[u8]()
+    }
+}
+
+pub fn capsule_push(inout r: CapsuleReaderCore, in bytes: Slice[u8]) {
+    if r.head > 0 {
+        drain_front(inout r.buf, r.head);
+        r.head = 0;
+    }
+    r.buf.extend(in bytes);
+}
+
+pub fn capsule_buffered(in r: CapsuleReaderCore) -> u64 {
+    wrapping_sub(r.buf.len(), r.head)
+}
+
+pub fn capsule_at_boundary(in r: CapsuleReaderCore) -> bool {
+    r.mode == 0 && r.head >= r.buf.len()
+}
+
+fn cont(in s: Slice[u8], i: u64) -> bool {
+    let c = byte(in s, i);
+    i < s.len() && c >= 128 && c <= 191
+}
+
+fn in_range(in s: Slice[u8], i: u64, lo: u8, hi: u8) -> bool {
+    let c = byte(in s, i);
+    i < s.len() && c >= lo && c <= hi
+}
+
+// UTF-8 as `std::str::from_utf8` accepts it: no overlong forms, no
+// surrogates, nothing above U+10FFFF.
+pub fn valid_utf8(in s: Slice[u8]) -> bool {
+    let mut i: u64 = 0;
+    loop {
+        if i >= s.len() {
+            return true;
+        }
+        let c = byte(in s, i);
+        if c < 128 {
+            i = inc(i);
+        } else if c >= 194 && c <= 223 {
+            if !cont(in s, inc(i)) {
+                return false;
+            }
+            i = wrapping_add(i, 2);
+        } else if c >= 224 && c <= 239 {
+            let lo: u8 = if c == 224 {
+                160
+            } else {
+                128
+            };
+            let hi: u8 = if c == 237 {
+                159
+            } else {
+                191
+            };
+            if !in_range(in s, inc(i), lo, hi) || !cont(in s, wrapping_add(i, 2)) {
+                return false;
+            }
+            i = wrapping_add(i, 3);
+        } else if c >= 240 && c <= 244 {
+            let lo: u8 = if c == 240 {
+                144
+            } else {
+                128
+            };
+            let hi: u8 = if c == 244 {
+                143
+            } else {
+                191
+            };
+            if !in_range(in s, inc(i), lo, hi)
+                || !cont(in s, wrapping_add(i, 2))
+                || !cont(in s, wrapping_add(i, 3)) {
+                return false;
+            }
+            i = wrapping_add(i, 4);
+        } else {
+            return false;
+        }
+    }
+}
+
+fn parse_value(ty: u64, in v: Slice[u8], inout out: ChunkSeq[u8])
+    -> Result[CapsuleOut, CapsuleError] {
+    if ty == datagram_type() {
+        out.extend(in v);
+        return Result::Ok(CapsuleOut::Datagram);
+    }
+    if ty == close_type() {
+        let n = v.len();
+        if n < 4 {
+            return Result::Err(
+                CapsuleError::Malformed {
+                    capsule_type: ty
+                }
+            );
+        }
+        if !valid_utf8(in v[4..n]) {
+            return Result::Err(
+                CapsuleError::Malformed {
+                    capsule_type: ty
+                }
+            );
+        }
+        let code = (widen_u64(byte(in v, 0)) << 24) | (widen_u64(byte(in v, 1)) << 16) | (
+            widen_u64(byte(in v, 2)) << 8
+        ) | widen_u64(byte(in v, 3));
+        out.extend(in v[4..n]);
+        return Result::Ok(CapsuleOut::CloseSession(wrapping_u32(code)));
+    }
+    if v.len() != 0 {
+        return Result::Err(
+            CapsuleError::Malformed {
+                capsule_type: ty
+            }
+        );
+    }
+    Result::Ok(CapsuleOut::DrainSession)
+}
+
+// `next_capsule`: `CapsuleOut::None` until more bytes arrive.
+pub fn capsule_next(inout r: CapsuleReaderCore) -> Result[CapsuleOut, CapsuleError] {
+    r.out.clear();
+    loop {
+        let avail = wrapping_sub(r.buf.len(), r.head);
+        if r.mode == 0 {
+            let t = match vdec(in r.buf.as_slice(), r.head) {
+                Option::Some(n) => n,
+                Option::None => return Result::Ok(CapsuleOut::None),
+            };
+            let l = match vdec(in r.buf.as_slice(), wrapping_add(r.head, t.used)) {
+                Option::Some(n) => n,
+                Option::None => return Result::Ok(CapsuleOut::None),
+            };
+            r.head = wrapping_add(r.head, wrapping_add(t.used, l.used));
+            let ty = t.value;
+            let len = l.value;
+            if ty == datagram_type() || ty == close_type() || ty == drain_type() {
+                let bound = if ty == close_type() {
+                    wrapping_add(4, max_close_reason())
+                } else {
+                    r.max_value
+                };
+                if len > bound {
+                    return Result::Err(
+                        CapsuleError::TooLarge {
+                            capsule_type: ty,
+                            len: len
+                        }
+                    );
+                }
+                r.mode = 3;
+                r.ty = ty;
+                r.len = len;
+            } else {
+                r.mode = 2;
+                r.remaining = len;
+                return Result::Ok(CapsuleOut::Unknown(ty));
+            }
+        } else if r.mode == 2 {
+            let n = min64(r.remaining, avail);
+            r.head = wrapping_add(r.head, n);
+            r.remaining = wrapping_sub(r.remaining, n);
+            if r.remaining > 0 {
+                return Result::Ok(CapsuleOut::None);
+            }
+            r.mode = 0;
+        } else {
+            if avail < r.len {
+                return Result::Ok(CapsuleOut::None);
+            }
+            let lo = r.head;
+            let hi = wrapping_add(lo, r.len);
+            r.head = hi;
+            r.mode = 0;
+            return parse_value(r.ty, in r.buf[lo..hi], inout r.out);
+        }
+    }
+}
+
+// `write_close_session`.
+pub fn capsule_write_close(inout out: ChunkSeq[u8], code: u32, in reason: Slice[u8]) -> bool {
+    let mut v = ChunkSeq::new[u8]();
+    let c = widen_u64(code);
+    v.push(wrapping_u8(c >> 24));
+    v.push(wrapping_u8(c >> 16));
+    v.push(wrapping_u8(c >> 8));
+    v.push(wrapping_u8(c));
+    v.extend(in reason);
+    put_record(inout out, close_type(), in v.as_slice())
+}

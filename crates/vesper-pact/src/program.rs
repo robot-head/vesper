@@ -153,19 +153,7 @@ impl Program {
             words
         };
         #[cfg(not(vesper_port))]
-        {
-            let mut diags = Vec::new();
-            Validator {
-                dto: &dto,
-                diags: &mut diags,
-            }
-            .run();
-            if !diags.is_empty() {
-                diags.sort();
-                diags.dedup();
-                return Err(diags);
-            }
-        }
+        crate::engine::validate::validate_program(&dto)?;
         let mut impls_by_trait = vec![Vec::new(); dto.traits.len()];
         for i in &dto.impls {
             impls_by_trait[i.decl.trait_ref.trait_id.index()].push(i.id);
@@ -277,6 +265,8 @@ pub(crate) fn check_schema(v: SchemaVersion) -> Option<Diagnostic> {
 /// Which variable forms a term may contain.
 #[derive(Clone, Copy)]
 pub(crate) enum Scope<'a> {
+    // Built only by the seed's program validator (seed/src/engine).
+    #[cfg_attr(vesper_port, allow(dead_code))]
     Template(&'a [ParamKind]),
     Query {
         placeholders: &'a [PlaceholderDecl],
@@ -290,192 +280,16 @@ pub(crate) struct Validator<'a> {
 }
 
 impl Validator<'_> {
-    fn err(&mut self, code: DiagCode, subject: Subject, msg: String) {
+    pub(crate) fn err(&mut self, code: DiagCode, subject: Subject, msg: String) {
         self.diags.push(Diagnostic::new(code, subject, msg));
     }
 
-    fn run(&mut self) {
-        let dto = self.dto;
-        if let Some(d) = check_schema(dto.schema) {
-            self.diags.push(d);
-            return;
-        }
-        for (i, p) in dto.packages.iter().enumerate() {
-            if p.id.index() != i {
-                self.err(
-                    DiagCode::IdNotDense,
-                    Subject::Program,
-                    format!("package at {i} has id {}", p.id),
-                );
-            }
-        }
-        for (i, c) in dto.type_ctors.iter().enumerate() {
-            if c.id.index() != i {
-                self.err(
-                    DiagCode::IdNotDense,
-                    Subject::Program,
-                    format!("type ctor at {i} has id {}", c.id),
-                );
-            }
-            self.package(c.package, Subject::TypeCtor(c.id));
-            for &j in &c.mode.joins {
-                if c.params.get(j as usize) != Some(&ParamKind::Type) {
-                    self.err(
-                        DiagCode::Malformed,
-                        Subject::TypeCtor(c.id),
-                        format!("mode join index {j} is not a type parameter"),
-                    );
-                }
-            }
-        }
-        for (i, e) in dto.effects.iter().enumerate() {
-            if e.id.index() != i {
-                self.err(
-                    DiagCode::IdNotDense,
-                    Subject::Program,
-                    format!("effect at {i} has id {}", e.id),
-                );
-            }
-            self.package(e.package, Subject::Effect(e.id));
-        }
-        for (i, t) in dto.traits.iter().enumerate() {
-            if t.id.index() != i {
-                self.err(
-                    DiagCode::IdNotDense,
-                    Subject::Program,
-                    format!("trait at {i} has id {}", t.id),
-                );
-            }
-            self.package(t.package, Subject::Trait(t.id));
-            let mut binder = vec![ParamKind::Type];
-            binder.extend(&t.params);
-            let scope = Scope::Template(&binder);
-            for (ai, a) in t.assoc.iter().enumerate() {
-                let subj = Subject::Trait(t.id);
-                self.mode(&a.mode_bound, scope, subj);
-                for b in &a.bounds {
-                    if !self.trait_args(b.trait_id, &b.args, scope, subj) {
-                        continue;
-                    }
-                    self.brand(&b.brand, scope, subj);
-                    if matches!(b.brand, Brand::Var(_)) {
-                        self.err(
-                            DiagCode::Unsupported,
-                            subj,
-                            format!(
-                                "bound on {} must name an explicit brand",
-                                AssocIdx(ai as u32)
-                            ),
-                        );
-                    }
-                }
-            }
-        }
-        for (i, im) in dto.impls.iter().enumerate() {
-            if im.id.index() != i {
-                self.err(
-                    DiagCode::IdNotDense,
-                    Subject::Program,
-                    format!("impl at {i} has id {}", im.id),
-                );
-            }
-            self.conformance(&im.decl, Subject::Impl(im.id));
-        }
-        for (i, m) in dto.models.iter().enumerate() {
-            if m.id.index() != i {
-                self.err(
-                    DiagCode::IdNotDense,
-                    Subject::Program,
-                    format!("model at {i} has id {}", m.id),
-                );
-            }
-            self.conformance(&m.decl, Subject::Model(m.id));
-        }
-    }
-
-    fn package(&mut self, p: PackageId, subj: Subject) {
-        if p.index() >= self.dto.packages.len() {
-            self.err(DiagCode::UnknownId, subj, format!("unknown {p}"));
-        }
-    }
-
-    fn conformance(&mut self, c: &ConformanceDecl, subj: Subject) {
-        self.package(c.package, subj);
-        if c.params.contains(&ParamKind::Capability) {
-            // Instantiating such a parameter would need capability inference
-            // variables, which row unification does not support.
-            self.err(
-                DiagCode::Unsupported,
-                subj,
-                "capability parameters on impls/models are outside this fragment".into(),
-            );
-            return;
-        }
-        let scope = Scope::Template(&c.params);
-        if !self.trait_ref(&c.trait_ref, scope, subj) {
-            return;
-        }
-        if trait_ref_has_projection(&c.trait_ref) {
-            self.err(
-                DiagCode::Unsupported,
-                subj,
-                "associated-type projections in an impl/model head are outside this fragment"
-                    .into(),
-            );
-        }
-        for w in &c.where_clauses {
-            // Template scope rejects inference brands, so where-clauses always
-            // name canonical, named or parameter brands explicitly: lexical
-            // `use model` scopes of a use site never leak into impl bodies.
-            self.goal(w, scope, subj);
-        }
-        let t = &self.dto.traits[c.trait_ref.trait_id.index()];
-        if c.assoc_values.len() != t.assoc.len() {
-            self.err(
-                DiagCode::Arity,
-                subj,
-                format!(
-                    "{} associated values supplied, {} declares {}",
-                    c.assoc_values.len(),
-                    t.id,
-                    t.assoc.len()
-                ),
-            );
-        }
-        for v in &c.assoc_values {
-            self.ty(v, scope, subj);
-        }
-        // Every parameter must be determined by the head (no unconstrained
-        // impl parameters), otherwise a selected impl would leave free choices.
-        let mut seen = vec![false; c.params.len()];
-        let head = Goal::Implements {
-            trait_ref: c.trait_ref.clone(),
-            brand: Brand::Canonical,
-        };
-        visit_goal_vars(&head, |v, _| {
-            if let Var::Bound(i) = v
-                && let Some(s) = seen.get_mut(i as usize)
-            {
-                *s = true;
-            }
-        });
-        for (i, s) in seen.iter().enumerate() {
-            if !s {
-                self.err(
-                    DiagCode::UnconstrainedParam,
-                    subj,
-                    format!("parameter ^{i} does not occur in the head"),
-                );
-            }
-        }
-    }
-
-    fn trait_ref(&mut self, t: &TraitRef, scope: Scope, subj: Subject) -> bool {
+    pub(crate) fn trait_ref(&mut self, t: &TraitRef, scope: Scope, subj: Subject) -> bool {
         self.ty(&t.self_ty, scope, subj);
         self.trait_args(t.trait_id, &t.args, scope, subj)
     }
 
-    fn trait_args(
+    pub(crate) fn trait_args(
         &mut self,
         id: TraitId,
         args: &[GenericArg],
@@ -490,7 +304,7 @@ impl Validator<'_> {
         self.args(&params, args, scope, subj, &format!("{id}"))
     }
 
-    fn args(
+    pub(crate) fn args(
         &mut self,
         params: &[ParamKind],
         args: &[GenericArg],
@@ -543,7 +357,7 @@ impl Validator<'_> {
         }
     }
 
-    fn projection(&mut self, p: &Projection, scope: Scope, subj: Subject) {
+    pub(crate) fn projection(&mut self, p: &Projection, scope: Scope, subj: Subject) {
         if self.trait_ref(&p.trait_ref, scope, subj) {
             let t = &self.dto.traits[p.trait_ref.trait_id.index()];
             if p.assoc.0 as usize >= t.assoc.len() {
@@ -557,7 +371,7 @@ impl Validator<'_> {
         self.brand(&p.brand, scope, subj);
     }
 
-    fn ty(&mut self, t: &Ty, scope: Scope, subj: Subject) {
+    pub(crate) fn ty(&mut self, t: &Ty, scope: Scope, subj: Subject) {
         match t {
             Ty::Ctor { ctor, args } => {
                 let Some(c) = self.dto.type_ctors.get(ctor.index()) else {
@@ -582,13 +396,13 @@ impl Validator<'_> {
         }
     }
 
-    fn mode(&mut self, m: &ModeTerm, scope: Scope, subj: Subject) {
+    pub(crate) fn mode(&mut self, m: &ModeTerm, scope: Scope, subj: Subject) {
         if let ModeTerm::Var(v) = m {
             self.var(*v, ParamKind::Mode, scope, subj);
         }
     }
 
-    fn brand(&mut self, b: &Brand, scope: Scope, subj: Subject) {
+    pub(crate) fn brand(&mut self, b: &Brand, scope: Scope, subj: Subject) {
         match b {
             Brand::Var(v) => self.var(*v, ParamKind::Brand, scope, subj),
             Brand::Named(m) => {
@@ -600,7 +414,7 @@ impl Validator<'_> {
         }
     }
 
-    fn cap(&mut self, v: Var, scope: Scope, subj: Subject) {
+    pub(crate) fn cap(&mut self, v: Var, scope: Scope, subj: Subject) {
         if let Var::Infer(_) = v {
             self.err(
                 DiagCode::Unsupported,
@@ -612,7 +426,7 @@ impl Validator<'_> {
         self.var(v, ParamKind::Capability, scope, subj);
     }
 
-    fn row(&mut self, r: &EffectRow, scope: Scope, subj: Subject) {
+    pub(crate) fn row(&mut self, r: &EffectRow, scope: Scope, subj: Subject) {
         if let Some(k) = r.duplicate_key() {
             self.err(
                 DiagCode::Unsupported,
@@ -649,7 +463,7 @@ impl Validator<'_> {
         }
     }
 
-    fn var(&mut self, v: Var, kind: ParamKind, scope: Scope, subj: Subject) {
+    pub(crate) fn var(&mut self, v: Var, kind: ParamKind, scope: Scope, subj: Subject) {
         let found = match (scope, v) {
             (Scope::Template(ps), Var::Bound(i)) => ps.get(i as usize).copied(),
             (Scope::Query { placeholders, .. }, Var::Placeholder(i)) => {

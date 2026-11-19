@@ -134,12 +134,13 @@ fn alias_and_active_loan_errors_point_to_the_actual_earlier_argument() {
     let second = source.find(",in p").unwrap() + ",in ".len();
     assert_eq!(d.span, second..second + 1);
     assert_eq!(d.related[0].span, first..first + 1);
-    let d = one(
-        &diagnostics,
-        "E0301",
-        "access to 'p' conflicts with active argument loan 'p'",
+    // The `inout` loan of `p` is reserved while `in p` is read (two-phase
+    // argument loans, §4.3), so the only error is the live overlap.
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| d.message.contains("conflicts with active argument loan"))
     );
-    assert_eq!(d.related[0].span, first..first + 1);
     assert!(errors("copy struct Pair{left:i64,right:i64} fn both(inout a.{left}:Pair,in b.{right}:Pair){} fn good(inout p:Pair){both(inout p,in p);}").is_empty());
 }
 #[test]

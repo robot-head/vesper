@@ -1854,6 +1854,7 @@ pub fn ast_preflight(module: &vesper_core::ast::Module) -> Result<(), String> {
                         stack.push((Node::Expr(e), next));
                     }
                 }
+                E::Continue => (),
                 E::Range { start, end, .. } => {
                     stack.push((Node::Expr(start), next));
                     stack.push((Node::Expr(end), next));

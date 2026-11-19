@@ -1,5 +1,10 @@
 # Port P3a lane 3: vesper-pact in Vesper
 
+> **Update 2026-11-18 (#1085):** the user made the Vesper port the only
+> build of `vesper-pact`, and its Rust engine moved into the frozen seed copy
+> (`seed/src`), which the compiler keeps linking until self-hosting Stage 2.
+> Statements below that Rust stays the default are historical.
+
 Claim: #1038. Base: `main` at 3c075a4. Lane prompt:
 `docs/agent-prompts/port-p3/03-pact.md` (plan PR #1044).
 

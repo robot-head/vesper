@@ -8,6 +8,7 @@ mod common;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use vesper_alloc::Region;
+use vesper_kinetic::lbvh::{Aabb, Lbvh};
 use vesper_kinetic::{BroadphaseMode, ContactMaterial, SolverMode, hash_world};
 
 struct Counting;
@@ -45,6 +46,35 @@ fn region_arena_steps_do_not_allocate_in_steady_state() {
     for broadphase in [BroadphaseMode::Lbvh, BroadphaseMode::SweepAndPrune] {
         steady_state_does_not_allocate(broadphase);
     }
+    lbvh_reserved_first_query_does_not_allocate();
+}
+
+/// A tree whose pair scratch is reserved up front answers its first query
+/// without allocating, even when `out` holds far more than `4 * capacity`.
+fn lbvh_reserved_first_query_does_not_allocate() {
+    let apart = [
+        Aabb {
+            min: [0.0; 3],
+            max: [1.0; 3],
+        },
+        Aabb {
+            min: [5.0; 3],
+            max: [6.0; 3],
+        },
+    ];
+    let mut tree = Lbvh::with_capacity(2);
+    tree.reserve_pairs(100);
+    let mut out = Vec::with_capacity(100);
+    COUNTING.store(true, Ordering::SeqCst);
+    tree.build(&apart).unwrap();
+    tree.overlapping_pairs(&mut out, 100).unwrap();
+    COUNTING.store(false, Ordering::SeqCst);
+    assert!(out.is_empty());
+    assert_eq!(
+        ALLOCS.swap(0, Ordering::SeqCst),
+        0,
+        "allocations in the first reserved LBVH query"
+    );
 }
 
 fn steady_state_does_not_allocate(broadphase: BroadphaseMode) {

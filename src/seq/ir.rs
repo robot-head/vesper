@@ -34,7 +34,11 @@ impl Lower<'_> {
                     (op, vec![b, i])
                 }
             }
-            ExprKind::Call { callee, args, .. } => {
+            ExprKind::Call {
+                callee,
+                args,
+                types,
+            } => {
                 if let Some((base, _)) = whole_view(e)
                     && crate::seq::is_seq_type(&self.seq_type_of(base))
                 {
@@ -45,6 +49,39 @@ impl Lower<'_> {
                         ExprKind::Name(n) if !self.names.contains_key(n) => {
                             if self.world.functions.contains_key(n) {
                                 return None;
+                            }
+                            let arg_types = args
+                                .iter()
+                                .map(|a| self.seq_type_of(&a.expr))
+                                .collect::<Vec<_>>();
+                            if let Some(io) = crate::vector::SliceIo::resolve(
+                                n,
+                                types,
+                                &arg_types,
+                                &self.seq_type_of(e),
+                            ) {
+                                // The sequence is borrowed; the offset and
+                                // the stored vector are values.
+                                let operands = args
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, a)| {
+                                        let pass = match (i, io.store) {
+                                            (0, true) => Pass::Inout,
+                                            (0, false) => Pass::In,
+                                            _ => Pass::Sink,
+                                        };
+                                        self.argument(&a.expr, pass, vec![])
+                                    })
+                                    .collect();
+                                return Some(self.emit(
+                                    Op::Seq {
+                                        op: SeqOp::Vector(io),
+                                        args: operands,
+                                    },
+                                    e,
+                                    true,
+                                ));
                             }
                             let op = resolve(n, None)?;
                             // `swap` borrows both places and `replace` its
@@ -66,7 +103,7 @@ impl Lower<'_> {
                         }
                         ExprKind::Field(base, method) => {
                             let t = self.seq_type_of(base);
-                            let op = resolve(method, Some(&t))?;
+                            let op = resolve(method, Some(&t))?.with_arity(args.len());
                             let pass = op.receiver_pass();
                             let mut operands: Vec<Argument> =
                                 vec![self.argument(base, pass, vec![])];
@@ -75,6 +112,7 @@ impl Lower<'_> {
                                     || op == SeqOp::BytesEq
                                     || op == SeqOp::EqIgnoreAsciiCase
                                     || op == SeqOp::ExtendAsciiLowercase
+                                    || op == SeqOp::ExtendReversed
                                     || op == SeqOp::Str(crate::strings::StrOp::PushStr)
                                     || (matches!(op, SeqOp::CopyFrom { .. }) && i == 1)
                                 {

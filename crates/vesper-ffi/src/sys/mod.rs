@@ -320,7 +320,76 @@ pub enum ValueType {
     Scalar(Scalar),
     Bool,
     Enum(EnumDescriptor),
-    Address { pointee: Scalar, nullable: bool },
+    Address {
+        pointee: Scalar,
+        nullable: bool,
+    },
+    /// An opaque handle of a `linear`/`affine extern type`, as a result
+    /// (`ForeignVal[H]`, or `ForeignVal[Option[H]]` when `nullable`). One
+    /// pointer-sized word; `NULL` is no handle. Never a by-value parameter:
+    /// handle parameters are [`ParameterType::Handle`].
+    Handle {
+        handle: ExternTypeDescriptor,
+        nullable: bool,
+    },
+}
+/// Whether an `extern type`'s handles must be finalized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Linearity {
+    /// `affine extern type`: a handle may be dropped without a call.
+    Affine,
+    /// `linear extern type`: every handle reaches exactly one `sink` import.
+    Linear,
+}
+impl Linearity {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::Affine => "affine",
+            Self::Linear => "linear",
+        }
+    }
+}
+/// A `linear extern type H;` or `affine extern type H;` declaration: an
+/// opaque foreign object the library owns, held by Vesper as one word.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternTypeDescriptor {
+    name: String,
+    linearity: Linearity,
+    /// `affine extern type H drop f;`: the import `f(sink h: H) ->
+    /// ForeignVal[Unit]` runs whenever a handle is dropped.
+    drop: Option<String>,
+}
+impl ExternTypeDescriptor {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn linearity(&self) -> Linearity {
+        self.linearity
+    }
+    /// The drop import of an affine type, if it declares one.
+    pub fn drop_import(&self) -> Option<&str> {
+        self.drop.as_deref()
+    }
+}
+/// How a handle parameter is passed. The C callee always receives the
+/// handle word itself; the mode is the source-side contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandleAccess {
+    /// `in h: H`: a shared loan; the handle stays the caller's.
+    In,
+    /// `inout h: H`: an exclusive loan; the foreign object may change.
+    Inout,
+    /// `sink h: H`: the handle is consumed. A `sink` import is a finalizer.
+    Sink,
+}
+impl HandleAccess {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::In => "in",
+            Self::Inout => "inout",
+            Self::Sink => "sink",
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
@@ -442,6 +511,11 @@ pub enum ParameterType {
         access: PointerAccess,
         nullable: bool,
     },
+    /// An opaque `extern type` handle, passed as its one-word value.
+    Handle {
+        handle: ExternTypeDescriptor,
+        access: HandleAccess,
+    },
 }
 impl ParameterType {
     /// Size, alignment and direction of a single-element pointer parameter.
@@ -530,7 +604,9 @@ impl FunctionDescriptor {
                     parameters.push(AbiType::Pointer);
                     parameters.push(AbiType::Integer(Scalar::Usize));
                 }
-                ParameterType::Pointer { .. } => parameters.push(AbiType::Pointer),
+                ParameterType::Pointer { .. } | ParameterType::Handle { .. } => {
+                    parameters.push(AbiType::Pointer)
+                }
             }
         }
         AbiSignature {
@@ -546,7 +622,7 @@ fn carrier(t: &ValueType) -> Option<AbiType> {
         ValueType::Scalar(s) => AbiType::Integer(*s),
         ValueType::Bool => AbiType::Integer(Scalar::U8),
         ValueType::Enum(e) => AbiType::Integer(e.scalar()),
-        ValueType::Address { .. } => AbiType::Pointer,
+        ValueType::Address { .. } | ValueType::Handle { .. } => AbiType::Pointer,
     })
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -572,6 +648,7 @@ pub struct LibraryDescriptor {
     link: LinkDescriptor,
     enums: Vec<EnumDescriptor>,
     wire_structs: Vec<WireStructDescriptor>,
+    extern_types: Vec<ExternTypeDescriptor>,
     functions: Vec<FunctionDescriptor>,
     canonical: Vec<u8>,
     identity: DescriptorId,
@@ -595,6 +672,13 @@ impl LibraryDescriptor {
     /// Declared `wire struct` pointees, sorted by name.
     pub fn wire_structs(&self) -> &[WireStructDescriptor] {
         &self.wire_structs
+    }
+    /// Declared `linear`/`affine extern type`s, sorted by name.
+    pub fn extern_types(&self) -> &[ExternTypeDescriptor] {
+        &self.extern_types
+    }
+    pub fn extern_type(&self, name: &str) -> Option<&ExternTypeDescriptor> {
+        self.extern_types.iter().find(|t| t.name() == name)
     }
     pub fn wire_struct(&self, name: &str) -> Option<&WireStructDescriptor> {
         self.wire_structs.iter().find(|w| w.name() == name)
@@ -675,6 +759,14 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                         "address"
                     })?;
                     self.text(pointee.name())
+                }
+                ValueType::Handle { handle, nullable } => {
+                    self.text(if *nullable {
+                        "nullable-handle"
+                    } else {
+                        "handle"
+                    })?;
+                    self.text(handle.name())
                 }
             }
         }
@@ -769,6 +861,11 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                         }
                     }
                 }
+                ParameterType::Handle { handle, access } => {
+                    e.text("extern-handle")?;
+                    e.text(access.keyword())?;
+                    e.text(handle.name())?;
+                }
             }
         }
         e.value(&f.result)?;
@@ -817,6 +914,23 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                         ));
                     }
                 }
+            }
+        }
+    }
+    // Appended only when present, like wire structs.
+    if !library.extern_types.is_empty() {
+        e.text("extern-types")?;
+        e.count(library.extern_types.len())?;
+        for t in &library.extern_types {
+            e.text(t.name())?;
+            e.text(t.linearity().keyword())?;
+        }
+        // Appended only when declared, so libraries without drop imports
+        // keep their canonical bytes.
+        if library.extern_types.iter().any(|t| t.drop.is_some()) {
+            e.text("drop-imports")?;
+            for t in &library.extern_types {
+                e.text(t.drop.as_deref().unwrap_or(""))?;
             }
         }
     }

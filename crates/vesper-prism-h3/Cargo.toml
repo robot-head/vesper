@@ -4,14 +4,31 @@ version = "0.1.0"
 edition = "2024"
 description = "QPACK (RFC 9204) and HTTP/3 (RFC 9114) for Vesper Prism over Vesper Warp (design section 17)"
 publish = false
+build = "build.rs"
+
+[features]
+# Forward the protocol core to the Vesper library in vesper/ (port wave P3b
+# lane 5, #1067). The connection driver stays Rust in both builds. Not the
+# default: Rust stays the default build until the port reaches parity.
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# A deliberately wrong Vesper build, one change per ported module: the port
+# test runs must fail (scripts/test-port-harness.sh and Bazel assert it).
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
 vesper-prism = { path = "../vesper-prism" }
 vesper-warp = { path = "../vesper-warp" }
 vesper-warp-shard = { path = "../vesper-warp-shard" }
 vesper-warp-umem = { path = "../vesper-warp-umem" }
 
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }
+
 [dev-dependencies]
+# The ABBA benchmark (examples/abba.rs); the Rust seed copy, so the Rust
+# build's tests need no Vesper compiler.
+vesper-bench = { path = "../vesper-bench/seed", package = "vesper-bench-seed" }
 # Wave seven (issue #331), tests only, pinned exactly. quinn-proto (already
 # in the lockfile through vesper-warp's tests) carries real QUIC DATAGRAM
 # frames (RFC 9221); wtransport-proto is an independent WebTransport

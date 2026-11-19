@@ -5578,7 +5578,7 @@ dependencies = [
  "vesper-forge",
  "vesper-grammar-seed",
  "vesper-highlight",
- "vesper-kinetic",
+ "vesper-kinetic-seed",
  "vesper-lean-syntax",
  "vesper-lint",
  "vesper-loom-admission",
@@ -5593,12 +5593,13 @@ dependencies = [
  "vesper-pact-binding",
  "vesper-pact-seed",
  "vesper-pulse",
- "vesper-resonance",
+ "vesper-resonance-seed",
  "vesper-semver-seed",
  "vesper-serde-seed",
  "vesper-silicon-seed",
  "vesper-simd",
  "vesper-span",
+ "vesper-std-host",
  "vesper-syntax",
  "vesper-tensor-seed",
  "vesper-vault",
@@ -5767,6 +5768,9 @@ version = "0.1.0"
 name = "vesper-chorus"
 version = "0.1.0"
 dependencies = [
+ "vesper-bench",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-simpulse",
  "vesper-warp",
  "vesper-warp-crypto",
@@ -5806,6 +5810,20 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "vesper-cranelift-sys"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "cranelift-module",
+ "cranelift-native 0.125.4",
+ "cranelift-object",
+ "target-lexicon",
+ "vesper",
+ "vesper-ffi",
 ]
 
 [[package]]
@@ -5911,7 +5929,10 @@ dependencies = [
  "snap",
  "tempfile",
  "tokio",
+ "vesper-bench",
  "vesper-loom-cas",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-quarry",
  "vesper-simpulse",
  "zstd 0.13.4",
@@ -5957,7 +5978,7 @@ name = "vesper-fusion"
 version = "0.1.0"
 dependencies = [
  "egglog",
- "vesper-resonance",
+ "vesper-resonance-seed",
  "vesper-tensor-seed",
 ]
 
@@ -5968,7 +5989,7 @@ dependencies = [
  "ash",
  "bytemuck",
  "naga",
- "vesper-kinetic",
+ "vesper-kinetic-seed",
  "vesper-tensor-seed",
 ]
 
@@ -6004,6 +6025,77 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-hybrid"
+version = "0.1.0"
+dependencies = [
+ "ariadne",
+ "blake3",
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native 0.125.4",
+ "cranelift-object",
+ "egg",
+ "egglog",
+ "find-msvc-tools",
+ "getrandom 0.4.3",
+ "libc",
+ "object 0.37.3",
+ "petgraph",
+ "salsa",
+ "serde",
+ "serde_json",
+ "target-lexicon",
+ "vesper",
+ "vesper-aegis-seed",
+ "vesper-alloc-seed",
+ "vesper-beacon-seed",
+ "vesper-bench-pmu",
+ "vesper-bench-seed",
+ "vesper-chrono",
+ "vesper-core",
+ "vesper-crucible-seed",
+ "vesper-diagnostics",
+ "vesper-doc",
+ "vesper-ebpf-seed",
+ "vesper-ffi",
+ "vesper-fiber-abi",
+ "vesper-fmt",
+ "vesper-forge",
+ "vesper-grammar-seed",
+ "vesper-highlight",
+ "vesper-kinetic-seed",
+ "vesper-lean-syntax",
+ "vesper-lint",
+ "vesper-loom-admission",
+ "vesper-loom-audit-seed",
+ "vesper-loom-calculus-seed",
+ "vesper-loom-cas",
+ "vesper-loom-solver-seed",
+ "vesper-loom-trust",
+ "vesper-lsp",
+ "vesper-migrate",
+ "vesper-pact-binding",
+ "vesper-pact-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-pulse",
+ "vesper-resonance-seed",
+ "vesper-semver-seed",
+ "vesper-serde-seed",
+ "vesper-silicon-seed",
+ "vesper-simd",
+ "vesper-span",
+ "vesper-syntax",
+ "vesper-tensor-seed",
+ "vesper-vault",
+ "wasm-encoder 0.261.0",
+ "wit-component",
+ "wit-parser",
+]
+
+[[package]]
 name = "vesper-ignis"
 version = "0.1.0"
 dependencies = [
@@ -6036,6 +6128,10 @@ dependencies = [
  "sha2",
  "target-lexicon",
  "vesper-alloc-seed",
+ "vesper-bench",
+ "vesper-kinetic-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-tensor-seed",
 ]
 
@@ -6044,7 +6140,23 @@ name = "vesper-kinetic-gpu"
 version = "0.1.0"
 dependencies = [
  "vesper-gpu-compute",
- "vesper-kinetic",
+ "vesper-kinetic-seed",
+]
+
+[[package]]
+name = "vesper-kinetic-seed"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytemuck",
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "num-bigint",
+ "num-traits",
+ "sha2",
+ "target-lexicon",
+ "vesper-alloc-seed",
+ "vesper-tensor-seed",
 ]
 
 [[package]]
@@ -6341,6 +6453,9 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "quinn-proto",
+ "vesper-bench-seed",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-prism",
  "vesper-warp",
  "vesper-warp-shard",
@@ -6371,6 +6486,19 @@ dependencies = [
 
 [[package]]
 name = "vesper-resonance"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "rtrb",
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-resonance-seed",
+]
+
+[[package]]
+name = "vesper-resonance-seed"
 version = "0.1.0"
 dependencies = [
  "cranelift-codegen 0.125.4",
@@ -6490,6 +6618,19 @@ name = "vesper-span"
 version = "0.1.0"
 
 [[package]]
+name = "vesper-std-driver"
+version = "0.1.0"
+dependencies = [
+ "vesper-port-abi",
+ "vesper-port-harness",
+ "vesper-std-host",
+]
+
+[[package]]
+name = "vesper-std-host"
+version = "0.1.0"
+
+[[package]]
 name = "vesper-syntax"
 version = "0.1.0"
 dependencies = [
@@ -6552,7 +6693,10 @@ dependencies = [
  "quinn-proto",
  "sha2",
  "subtle",
+ "vesper-bench",
  "vesper-ffi",
+ "vesper-port-abi",
+ "vesper-port-harness",
  "vesper-warp-bbr",
  "vesper-warp-crypto",
  "vesper-warp-shard",

@@ -45,6 +45,16 @@ pub use lower::{Kind, effect_key};
 /// v2 contexts and parks, and changes nothing the specializing backend emits.
 pub const ABI: &str = "vesper.native.handler-abi/1";
 
+/// The specializing backend (`crate::native`) inlines each handler clause at
+/// its operation and resumes by jumping back into the handled body. A clause
+/// that ends in its resumption (`op(v, k) => k(..)`) needs nothing after the
+/// resumption returns, so its operation may run any number of times from a
+/// loop of the handled body. A clause with work after `k(..)` keeps that work
+/// in one frame per operation site, which a nested resumption from a later
+/// loop iteration would overwrite, so the backend refuses it there instead of
+/// returning to the wrong point.
+pub const LOOP_RESUME_REFUSAL: &str = "native handlers: an operation performed inside a loop of its handled body needs a clause that resumes in tail position (`op(v, k) => k(..)`); this clause has work after its resumption";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandlerAbiError {
     /// The program uses something outside the supported slice.

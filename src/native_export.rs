@@ -17,7 +17,12 @@
 //!
 //! * Scalars (every integer kind of `vesper.arith.checked`, `bool`, `Unit`)
 //!   are passed and returned as one 64-bit integer, sign-extended for signed
-//!   kinds and zero-extended for unsigned ones; `f64` is a double.
+//!   kinds and zero-extended for unsigned ones; `f64` is a double and `f32`
+//!   a float, passed and returned in float registers (#1087). Inside an
+//!   aggregate or a sequence buffer an `f32` is the low half of its word
+//!   (the high half is unspecified), so a `Slice[f32]` or `ChunkSeq[f32]`
+//!   is copied at the boundary like other elements whose stride is not
+//!   their Rust size.
 //! * An aggregate parameter (tuple, struct, enum) is passed as a pointer to
 //!   its words. The callee may overwrite them (a `sink` parameter's storage
 //!   can be reused), so callers pass a scratch copy.
@@ -55,7 +60,12 @@
 //!   (exported for every non-linear handle type) frees them. `in` and
 //!   `inout` handle parameters are borrowed; a by-value parameter consumes the
 //!   handle. Fields may be copy values, sequences, `Box[T]`, other handle
-//!   types and `Option` of those, so recursive enums cross too.
+//!   types and `Option` of those, so recursive enums cross too. A field may
+//!   also be a `ChunkSeq` of non-copy elements (handles, strings, boxes) or
+//!   a boxed trait object `Box[dyn Trait]` ([`AbiType::Object`], #1087):
+//!   the binding shows only a sequence's length and whether a box slot is
+//!   full, and the drop glue drops every element (a boxed object through
+//!   its vtable). Such a sequence never crosses on its own.
 //! * Monomorphic instances of generic functions named by `@export instance`
 //!   directives or `--instance` (see [`directives`]).
 //! * `Ffi[Lib]` rows of `.vsys` libraries named by `@export vsys`
@@ -68,8 +78,9 @@
 //!
 //! Still refused, with an [`ExportError`] that names the function: generic
 //! functions without an instance, effects other than `Fail` and imported
-//! `.vsys` libraries, closures, region handles, strings, sequences of
-//! non-copy elements, and boxes outside a handle type.
+//! `.vsys` libraries, closures, region handles, slices of non-copy
+//! elements, sequences of non-copy elements and boxes outside a handle
+//! type, and `dyn` parameters.
 //!
 //! # ABI v3 (`vesper.native.export-abi/3`)
 //!
@@ -87,7 +98,9 @@
 //! * An `in` or `inout` parameter of a mirrored struct is a pointer to the
 //!   caller's mirror (`&T`/`&mut T`), with no conversion and no scratch
 //!   copy. Vesper code never writes an `in` aggregate; a `sink` one gets a
-//!   copy of the mirror, as its storage may be reused.
+//!   copy of the mirror, as its storage may be reused. An `in` handle is
+//!   lent the same way, as a pointer to the caller's own handle words
+//!   (#1087); `inout` handles already were.
 //! * `in`/`inout Slice[T]` of a mirrored struct is the view over the
 //!   caller's `&[T]`/`&mut [T]`, with no heap copy.
 //! * A mirrored struct result is written straight into a mirror.
@@ -233,6 +246,13 @@ pub enum AbiType {
     /// does not own (a literal, a view, or bytes Rust lent).
     Str {
         owned: bool,
+    },
+    /// v2: a trait object `dyn Trait[args]` (#1087), only as the pointee
+    /// of a `Box` inside a handle type. The box word is the address of the
+    /// block `{vtable, value}` (manuscript §7.3); Rust never reads it, and
+    /// the handle's drop glue drops the value through the vtable.
+    Object {
+        name: String,
     },
 }
 
@@ -536,6 +556,13 @@ pub fn plan_with(
             for p in &mut f.params {
                 p.in_place = match (&p.ty, p.pass()) {
                     (AbiType::Slice { elem }, _) => mirrored(elem, &planner.types),
+                    // An `in` handle is lent as the caller's own words
+                    // (#1087): Vesper never writes an `in` value (E0307).
+                    (AbiType::Named { name, .. }, "in")
+                        if planner.types.get(name).is_some_and(|d| d.handle) =>
+                    {
+                        true
+                    }
                     (ty, "in" | "inout") => lent(ty, &planner.types, options),
                     _ => false,
                 };
@@ -591,6 +618,8 @@ struct Planner<'a> {
     /// Imported `.vsys` library names.
     foreign: Vec<String>,
 }
+
+const SEQ_OF_HANDLES: &str = "has non-copy elements (handles, boxes or strings); such a sequence crosses only inside a handle type, whose binding does not read its elements";
 
 /// Where an [`AbiType`] occurs, for the position rules of the v2 forms.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -709,6 +738,7 @@ impl Planner<'_> {
             Position::Error => Err(refuse("is not a copy type; error types must be copy")),
             Position::Param(pass) => match (ty, pass) {
                 (AbiType::Slice { .. }, _) => Ok(()),
+                (AbiType::Seq { elem }, _) if self.owning(elem) => Err(refuse(SEQ_OF_HANDLES)),
                 // A by-value sequence is the callee's to free (#932).
                 (AbiType::Seq { .. }, _) => Ok(()),
                 (AbiType::Named { name, .. }, _) if self.handle(name) => Ok(()),
@@ -733,6 +763,7 @@ impl Planner<'_> {
     fn result_shape(&self, ty: &AbiType) -> Result<(), String> {
         match ty {
             _ if !self.owning(ty) => Ok(()),
+            AbiType::Seq { elem } if self.owning(elem) => Err(SEQ_OF_HANDLES.into()),
             AbiType::Seq { .. } | AbiType::Str { owned: true } => Ok(()),
             AbiType::Named { name, .. } if self.handle(name) => Ok(()),
             AbiType::Named { name, args } if name == "Option" => self.result_shape(&args[0]),
@@ -751,6 +782,7 @@ impl Planner<'_> {
             AbiType::Seq { .. } | AbiType::Str { owned: true } => Ok(()),
             AbiType::Named { name, .. } if self.handle(name) => Ok(()),
             AbiType::Named { name, args } if name == "Option" => self.field_shape(&args[0]),
+            AbiType::Box { inner } if matches!(**inner, AbiType::Object { .. }) => Ok(()),
             AbiType::Box { inner } => self.field_shape(inner),
             _ => Err(
                 "is a field form handles do not carry yet (use a sequence, a String, a box, a handle type or an Option of one)"
@@ -766,6 +798,22 @@ impl Planner<'_> {
             reason: reason.into(),
         };
         let world = self.world;
+        // An opaque `.vsys` extern-type handle (#1065) stays inside Vesper:
+        // its library, not the export binding, owns and finalizes it.
+        if let Type::Named(n, args) = ty
+            && args.is_empty()
+            && world.adts.get(n).is_some_and(|a| {
+                a.variants.iter().any(|v| {
+                    v.fields
+                        .iter()
+                        .any(|f| f.name == crate::ffi_lowering::HANDLE_FIELD)
+                })
+            })
+        {
+            return Err(refuse(
+                "is an opaque .vsys extern-type handle; keep it inside the Vesper library (a handle crosses only to its own imports)",
+            ));
+        }
         match ty {
             Type::Tuple(items) if items.is_empty() => Ok(AbiType::Scalar {
                 name: "Unit".into(),
@@ -785,9 +833,17 @@ impl Planner<'_> {
                 let elem = crate::seq::elem(t).expect("sequence element");
                 let abi = self.ty(function, elem)?;
                 if world.mode(elem, &BTreeMap::new()) != Mode::Copy || self.owning(&abi) {
-                    return Err(refuse(
-                        "has non-copy elements; only sequences and slices of copy elements cross the boundary",
-                    ));
+                    // A `ChunkSeq` of handles or boxed objects (#1087) is
+                    // a field form: the handle that holds it stays opaque
+                    // to Rust, and its drop glue drops every element.
+                    let field = crate::seq::is_seq_type(t)
+                        && !matches!(abi, AbiType::Slice { .. } | AbiType::Str { owned: false })
+                        && self.field_shape(&abi).is_ok();
+                    if !field {
+                        return Err(refuse(
+                            "has non-copy elements; only sequences and slices of copy elements cross the boundary (a handle type may hold a ChunkSeq of handles, boxes or strings)",
+                        ));
+                    }
                 }
                 self.v2 = true;
                 let elem = Box::new(abi);
@@ -809,8 +865,17 @@ impl Planner<'_> {
             t if crate::fip::is_box_type(world, t) => {
                 let inner = crate::fip::box_inner(world, t).expect("box inner").clone();
                 self.v2 = true;
+                // A boxed trait object (#1087) is one word inside a
+                // handle; its vtable, not the binding, knows the value.
+                let inner = if crate::dyn_trait::is_object(&inner) {
+                    AbiType::Object {
+                        name: inner.to_string(),
+                    }
+                } else {
+                    self.ty(function, &inner)?
+                };
                 Ok(AbiType::Box {
-                    inner: Box::new(self.ty(function, &inner)?),
+                    inner: Box::new(inner),
                 })
             }
             Type::Named(n, args) => {
@@ -990,6 +1055,8 @@ fn holds_sequence(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
         // Native code frees neither a dropped sequence nor a dropped string.
         AbiType::Seq { .. } | AbiType::Str { owned: true } => true,
         AbiType::Scalar { .. } | AbiType::Slice { .. } | AbiType::Str { owned: false } => false,
+        // A boxed object's value may own anything; its vtable drops it.
+        AbiType::Object { .. } => false,
         AbiType::Tuple { items } => items.iter().any(|t| holds_sequence(t, types)),
         AbiType::Box { inner } => holds_sequence(inner, types),
         AbiType::Named { name, args } => {
@@ -1002,9 +1069,11 @@ fn holds_sequence(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
 /// Whether a value of `ty` owns memory (a sequence, a box or a handle).
 pub(crate) fn owning(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
     match ty {
-        AbiType::Seq { .. } | AbiType::Slice { .. } | AbiType::Box { .. } | AbiType::Str { .. } => {
-            true
-        }
+        AbiType::Seq { .. }
+        | AbiType::Slice { .. }
+        | AbiType::Box { .. }
+        | AbiType::Str { .. }
+        | AbiType::Object { .. } => true,
         AbiType::Scalar { .. } => false,
         AbiType::Tuple { items } => items.iter().any(|t| owning(t, types)),
         AbiType::Named { name, args } => {
@@ -1016,7 +1085,10 @@ pub(crate) fn owning(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> bool {
 /// Size of `ty` in words.
 pub(crate) fn abi_words(ty: &AbiType, types: &BTreeMap<String, TypeDecl>) -> u32 {
     match ty {
-        AbiType::Scalar { .. } | AbiType::Seq { .. } | AbiType::Box { .. } => 1,
+        AbiType::Scalar { .. }
+        | AbiType::Seq { .. }
+        | AbiType::Box { .. }
+        | AbiType::Object { .. } => 1,
         AbiType::Slice { .. } | AbiType::Str { .. } => 3,
         AbiType::Tuple { items } => items
             .iter()
@@ -1097,7 +1169,7 @@ fn compile_exports<M: Module>(
     if all.len() > 1024 {
         return Err("native monomorphization exceeds 1024 function instances".into());
     }
-    let mut program = crate::ir::lower_world(world);
+    let mut program = crate::ffi_lowering::drops::lower_world(world);
     crate::integer_widths::lower_bit_builtin_calls(world, &mut program);
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;

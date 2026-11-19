@@ -1,12 +1,7 @@
-//! Which build the tests run against: the Vesper port under `vesper-port`,
-//! the Rust code otherwise (and in the seed copy).
+//! The package vesper-pact is the Vesper port; the seed copy that the
+//! compiler links (vesper-pact-seed) does not build this test.
 
 #[test]
-fn the_feature_selects_the_build() {
-    let expected = if cfg!(feature = "vesper-port") {
-        "vesper"
-    } else {
-        "rust"
-    };
-    assert_eq!(vesper_pact::IMPLEMENTATION, expected);
+fn the_package_is_the_vesper_port() {
+    assert_eq!(vesper_pact::IMPLEMENTATION, "vesper");
 }

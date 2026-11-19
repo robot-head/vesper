@@ -1,0 +1,182 @@
+// Module sort of @vesper/flux: stable bottom-up merge sorts of entry
+// numbers, so that equal rows keep their input order (the order in which
+// the Rust accumulator inserted them).
+use self::util::{
+    cell,
+    cmp_rows,
+    word
+};
+
+// Merges the sorted runs src[lo..mid] and src[mid..hi] into dst, by row
+// (`key` < 0) or by the column `key` of each entry.
+fn merge(
+    in src: ChunkSeq[u64],
+    inout dst: ChunkSeq[u64],
+    lo: u64,
+    mid: u64,
+    hi: u64,
+    in cells: Slice[i64],
+    stride: u64,
+    width: u64,
+    by_row: bool
+) {
+    let mut i = lo;
+    let mut j = mid;
+    let mut at = lo;
+    loop {
+        if at >= hi {
+            break;
+        }
+        let take_left = if i >= mid {
+            false
+        } else if j >= hi {
+            true
+        } else {
+            let x = wrapping_mul(word(in src, i), stride);
+            let y = wrapping_mul(word(in src, j), stride);
+            // Equal keys keep the left run first.
+            if by_row {
+                cmp_rows(in cells, y, in cells, x, width) >= 0
+            } else {
+                cell(in cells, wrapping_add(y, width)) >= cell(in cells, wrapping_add(x, width))
+            }
+        };
+        if take_left {
+            dst.try_set(at, word(in src, i));
+            i = wrapping_add(i, 1);
+        } else {
+            dst.try_set(at, word(in src, j));
+            j = wrapping_add(j, 1);
+        }
+        at = wrapping_add(at, 1);
+    }
+}
+
+fn min_u64(a: u64, b: u64) -> u64 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+// Entry numbers 0..n in stable order. With `by_row`, entries compare by
+// their first `width` cells; otherwise by the cell at offset `width`.
+fn sort_entries(in cells: Slice[i64], n: u64, stride: u64, width: u64, by_row: bool)
+    -> ChunkSeq[u64] {
+    let mut a = ChunkSeq::new[u64]();
+    let mut b = ChunkSeq::new[u64]();
+    for i in 0..n {
+        a.push(i);
+        b.push(i);
+    }
+    // Already in order (a common case): nothing to do.
+    let mut sorted = true;
+    for i in 1..n {
+        let x = wrapping_mul(wrapping_sub(i, 1), stride);
+        let y = wrapping_mul(i, stride);
+        let ok = if by_row {
+            cmp_rows(in cells, x, in cells, y, width) <= 0
+        } else {
+            cell(in cells, wrapping_add(x, width)) <= cell(in cells, wrapping_add(y, width))
+        };
+        if !ok {
+            sorted = false;
+            break;
+        }
+    }
+    if sorted {
+        return a;
+    }
+    let mut run: u64 = 1;
+    let mut in_a = true;
+    loop {
+        if run >= n {
+            break;
+        }
+        let step = wrapping_add(run, run);
+        let mut lo: u64 = 0;
+        loop {
+            if lo >= n {
+                break;
+            }
+            let mid = min_u64(wrapping_add(lo, run), n);
+            let hi = min_u64(wrapping_add(lo, step), n);
+            if in_a {
+                merge(in a, inout b, lo, mid, hi, in cells, stride, width, by_row);
+            } else {
+                merge(in b, inout a, lo, mid, hi, in cells, stride, width, by_row);
+            }
+            lo = hi;
+        }
+        in_a = !in_a;
+        run = step;
+    }
+    if in_a {
+        a
+    } else {
+        b
+    }
+}
+
+// The n entries of `cells` (stride width + 1) in stable row order.
+pub fn sort_rows(in cells: Slice[i64], n: u64, width: u64) -> ChunkSeq[u64] {
+    sort_entries(in cells, n, wrapping_add(width, 1), width, true)
+}
+
+// The n entries of `cells` (stride `stride`) in stable order of column k.
+pub fn sort_by_column(in cells: Slice[i64], n: u64, stride: u64, k: u64) -> ChunkSeq[u64] {
+    sort_entries(in cells, n, stride, k, false)
+}
+
+// Sorts a sequence of words in place (insertion times; heap sort keeps it
+// O(n log n) without a second buffer).
+pub fn sort_u64(inout s: ChunkSeq[u64]) {
+    let n = s.len();
+    if n < 2 {
+        return;
+    }
+    let mut start = n >> 1;
+    loop {
+        if start == 0 {
+            break;
+        }
+        start = wrapping_sub(start, 1);
+        sift(inout s, start, n);
+    }
+    let mut end = n;
+    loop {
+        if end <= 1 {
+            break;
+        }
+        end = wrapping_sub(end, 1);
+        let top = word(in s, 0);
+        s.try_set(0, word(in s, end));
+        s.try_set(end, top);
+        sift(inout s, 0, end);
+    }
+}
+
+fn sift(inout s: ChunkSeq[u64], root: u64, n: u64) {
+    let mut r = root;
+    loop {
+        let l = wrapping_add(wrapping_add(r, r), 1);
+        if l >= n {
+            return;
+        }
+        let rr = wrapping_add(l, 1);
+        let c = if rr < n && word(in s, rr) > word(in s, l) {
+            rr
+        } else {
+            l
+        };
+        let rv = word(in s, r);
+        let cv = word(in s, c);
+        if cv <= rv {
+            return;
+        }
+        s.try_set(r, cv);
+        s.try_set(c, rv);
+        r = c;
+    }
+}

@@ -113,6 +113,29 @@ impl<M: Module> Codegen<'_, '_, M> {
         let mut copies = vec![];
         let mut restores = vec![];
         for ((arg, param), descriptor) in args.iter().zip(&signature.params).zip(descriptors) {
+            if let ParameterType::Slice { element, .. } = descriptor.ty()
+                && crate::seq::is_slice_type(&param.ty)
+            {
+                // A source `Slice[T]` whose packed stride is T's C size: lent
+                // to C in place as (data + start * stride, len), no copy.
+                let view = self.expr(&arg.expr)?;
+                let handle = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 0);
+                let start = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 8);
+                let len = self.b.ins().load(types::I64, ir::MemFlags::new(), view, 16);
+                let data = self
+                    .b
+                    .ins()
+                    .load(types::I64, ir::MemFlags::new(), handle, 16);
+                let offset = self.b.ins().imul_imm(start, element.size() as i64);
+                let lent = self.b.ins().iadd(data, offset);
+                // A never-grown sequence has no buffer (data 0); a
+                // non-nullable CSlice still needs a valid aligned pointer.
+                let dummy = self.alloc(8);
+                let empty = self.b.ins().icmp_imm(IntCC::Equal, data, 0);
+                c_args.push(self.b.ins().select(empty, dummy, lent));
+                c_args.push(len);
+                continue;
+            }
             let value = self.expr(&arg.expr)?;
             let aggregate = Layout::of(self.world, &param.ty)?.aggregate();
             let source = if param.pass == Pass::Inout {
@@ -129,6 +152,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             };
             match descriptor.ty() {
                 ParameterType::Value(v) => c_args.push(self.foreign_value(v, source)?),
+                // The handle struct's one field is the C handle word, for
+                // every mode: C never replaces the handle itself.
+                ParameterType::Handle { .. } => c_args.push(self.foreign_word(source)),
                 ParameterType::Pointer {
                     pointee,
                     access,
@@ -280,7 +306,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
                 Ok(self.foreign_narrow(value, e.scalar().bits()))
             }
-            ValueType::Unit | ValueType::Address { .. } => {
+            ValueType::Unit | ValueType::Address { .. } | ValueType::Handle { .. } => {
                 Err("foreign parameter type has no native lowering".into())
             }
         }
@@ -647,6 +673,25 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.foreign_validated(ty, valid, index, word)
             }
             ValueType::Address { .. } => Err("foreign address results have no lowering".into()),
+            ValueType::Handle { nullable, .. } => {
+                let word = raw()?;
+                let present = self.b.ins().icmp_imm(IntCC::NotEqual, word, 0);
+                if !nullable {
+                    // `NULL` for a non-null handle is `Err(ForeignInvalid { raw: 0 })`.
+                    return self.foreign_validated(ty, present, word, word);
+                }
+                let layout = Layout::of(self.world, ty)?;
+                let (some, fields) = layout.variant("Some").ok_or("Option lacks Some")?;
+                let offset = fields.first().ok_or("Some lacks a payload")?.offset;
+                let (none, _) = layout.variant("None").ok_or("Option lacks None")?;
+                let ptr = self.alloc(layout.size);
+                let some = self.b.ins().iconst(types::I64, some as i64);
+                let none = self.b.ins().iconst(types::I64, none as i64);
+                let tag = self.b.ins().select(present, some, none);
+                self.b.ins().store(ir::MemFlags::new(), tag, ptr, 0);
+                self.b.ins().store(ir::MemFlags::new(), word, ptr, offset);
+                Ok(ptr)
+            }
         }
     }
     /// `Ok(ok)` when `valid`, else `Err(ForeignInvalid { raw })`. Both

@@ -76,8 +76,16 @@ pub enum ValidatedValue {
     Unsigned(u64),
     Signed(i64),
     Bool(bool),
-    Enum { name: String, discriminant: u64 },
+    Enum {
+        name: String,
+        discriminant: u64,
+    },
     Address(CheckedAddress),
+    /// An `extern type` handle word (`0` only for `ForeignVal[Option[H]]`).
+    Handle {
+        name: String,
+        word: u64,
+    },
 }
 /// All raw returns use total-bit Rust/C carriers. Opaque owner `O` is retained
 /// through both successful validation and every validation failure.
@@ -213,6 +221,15 @@ pub(super) fn validate(contract: &ValueType, bits: u64) -> Result<ValidatedValue
         ValueType::Address { pointee, nullable } => {
             ValidatedValue::Address(address(bits, *pointee, *nullable)?)
         }
+        ValueType::Handle { handle, nullable } => {
+            if bits == 0 && !nullable {
+                return Err(ValidationError::NullAddress);
+            }
+            ValidatedValue::Handle {
+                name: handle.name().to_owned(),
+                word: bits,
+            }
+        }
     })
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,7 +315,8 @@ impl FunctionDescriptor {
                     raw.push((AbiType::Pointer, address));
                     raw.push((AbiType::Integer(Scalar::Usize), length));
                 }
-                (ParameterType::Pointer { .. }, RawArgument::Pointer { address }) => {
+                (ParameterType::Pointer { .. }, RawArgument::Pointer { address })
+                | (ParameterType::Handle { .. }, RawArgument::Bits(address)) => {
                     raw.push((AbiType::Pointer, address));
                 }
                 _ => unreachable!("arguments validated before allocation"),

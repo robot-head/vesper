@@ -27,10 +27,13 @@
 //!
 //! A trait is usable as `dyn` when it has no associated types and every
 //! method has no type parameters, takes `self` first by `in`, `inout` or
-//! `sink`, mentions `Self` nowhere else, and performs no effect but `Fail` and
-//! the capability effects (after the object's trait arguments are
-//! substituted). Handler effects are specialized into their callers by the
-//! native backend, so a vtable slot cannot carry them yet.
+//! `sink`, mentions `Self` nowhere else, and has a closed effect row (after
+//! the object's trait arguments are substituted). Methods may perform
+//! handler effects (#1063): native code specializes those into the code
+//! that reaches the handler, so such a slot holds no function and a call
+//! through it dispatches on the vtable's identity over the program's
+//! vtables for the object type (`dyn_call_effectful` in
+//! [`crate::native`]).
 //!
 //! # Native lowering
 //!
@@ -694,16 +697,6 @@ fn object_safety(decl: &TraitDecl, args: &[Type], span: &Span) -> Vec<Diagnostic
             out.push(unsafe_(format!(
                 "method '{}' has an open effect row",
                 m.name
-            )));
-        }
-        if let Some(e) = effects
-            .instances
-            .iter()
-            .find(|e| e.name != "Fail" && !crate::capability_effects::is_capability_effect(&e.name))
-        {
-            out.push(unsafe_(format!(
-                "method '{}' performs '{}'; a method called through `dyn` may raise only `Fail` and use capability effects in Stage 1",
-                m.name, e.name
             )));
         }
     }

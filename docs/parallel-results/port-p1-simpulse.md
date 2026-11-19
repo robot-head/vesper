@@ -1,5 +1,10 @@
 # Port P1 lane 5: vesper-simpulse in Vesper
 
+> **Update 2026-11-18 (#1085):** the user made the Vesper port the only
+> build of `vesper-simpulse`, and its Rust engine moved into the frozen seed copy
+> (`seed/src`), which the compiler keeps linking until self-hosting Stage 2.
+> Statements below that Rust stays the default are historical.
+
 Claim #902. Baseline `main` at 69c79b9 (a descendant of d523661). The
 [manuscript](../manuscript/README.md) is the sole specification; this lane
 needed no manuscript change.

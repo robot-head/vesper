@@ -414,10 +414,7 @@ impl InputLog {
                 }
                 rows.insert(row, weight);
             }
-            deltas.push(ZSet {
-                width: *width,
-                rows,
-            });
+            deltas.push(ZSet::from_rows(*width, rows));
         }
         if cursor != payload.len() {
             return Err(Error::Storage("log frame"));

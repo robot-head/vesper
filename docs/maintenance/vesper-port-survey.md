@@ -182,6 +182,10 @@ F0, F1, F2, F3, F5, F6 and F8, plus the std library and harness below. Nothing p
 > 2026-11-18: wave P3 is split. [P3a](../agent-prompts/port-p3/README.md)
 > (#1036-#1043) ports Pact, Loom audit, Bench, eBPF, Silicon and Aegis and adds
 > F7b and F12; the rest waits for P3b.
+>
+> 2026-11-18: [P3b](../agent-prompts/port-p3b/README.md) (#1063-#1071) ports
+> Warp, Prism H3, Chorus, Flux, Kinetic and Resonance and adds F7c (effectful
+> and callable objects), boxes owned across loops, and F9 import handles.
 
 Needs F7, F9, F10 and, per crate, F11 or F12.
 
@@ -191,6 +195,11 @@ Needs F7, F9, F10 and, per crate, F11 or F12.
 - Analysis and models: `vesper-silicon`, `vesper-ebpf`, `vesper-aegis`, `vesper-bench`, `vesper-pact`, `vesper-loom-audit`. Each keeps its OS, ELF-object or certificate-verification edge in Rust.
 
 ### Wave P4: toolchain crates with self-hosting Stage 2
+
+> 2026-11-19: wave P4 is replaced by the
+> [self-hosting plan](self-hosting-plan.md) (#1122), which covers these crates
+> and the root compiler together, starting with wave
+> [SH0](../agent-prompts/self-host-sh0/README.md) (#1123-#1130).
 
 `vesper-core`, `vesper-syntax`, `vesper-span`, `vesper-diagnostics`, `vesper-fmt`, `vesper-lint`, `vesper-lsp`, `vesper-doc`, `vesper-highlight` (lexical part), `vesper-lean-syntax`, `vesper-pact-binding`, `vesper-forge`, `vesper-sim-session` and `vesper-pact-bridge`. They move as the compiler moves, and the front end in `packages/vesper-compiler` is where `vesper-syntax` and the checker's share of `vesper-core` go.
 

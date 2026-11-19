@@ -1,0 +1,177 @@
+// qpack/prefix.rs: prefixed integers and string literals (RFC 7541 §5.1 and
+// §5.2, RFC 9204 §4.1.1 and §4.1.2). Offsets are absolute positions in the
+// buffer, so callers never re-slice.
+
+use self::{
+    PrefixError,
+    HuffmanError,
+    Huff
+};
+use self::int::{
+    inc,
+    byte,
+    bit,
+    max64,
+    sat_mul,
+    div_ceil,
+    shl,
+    shr
+};
+use self::huffman::{
+    huff_encoded_len,
+    huff_encode,
+    huff_decode
+};
+
+// 2^62 - 1, the largest QUIC varint and the largest prefixed integer kept.
+pub fn max_int() -> u64 {
+    4611686018427387903
+}
+
+// A decoded integer and the number of bytes it used.
+pub copy struct Num {
+    value: u64,
+    used: u64
+}
+
+// Decodes an integer with an N-bit prefix (1 <= bits <= 8) at `buf[at]`.
+pub fn decode_int(in buf: Slice[u8], at: u64, bits: u64) -> Result[Num, PrefixError] {
+    let first = match buf.try_get(at) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => {
+            return Result::Err(PrefixError::Incomplete);
+        },
+    };
+    let mask = wrapping_sub(bit(bits), 1);
+    let mut value = first & mask;
+    if value < mask {
+        return Result::Ok(
+            Num {
+                value: value,
+                used: 1
+            }
+        );
+    }
+    let mut shift: u64 = 0;
+    let n = buf.len();
+    let mut i = inc(at);
+    loop {
+        if i >= n {
+            return Result::Err(PrefixError::Incomplete);
+        }
+        if shift > 56 {
+            return Result::Err(PrefixError::IntegerOverflow);
+        }
+        let b = widen_u64(byte(in buf, i));
+        let v = wrapping_add(value, shl(b & 127, shift));
+        if v > max_int() {
+            return Result::Err(PrefixError::IntegerOverflow);
+        }
+        value = v;
+        if b & 128 == 0 {
+            return Result::Ok(
+                Num {
+                    value: value,
+                    used: wrapping_sub(inc(i), at)
+                }
+            );
+        }
+        shift = wrapping_add(shift, 7);
+        i = inc(i);
+    }
+}
+
+// Appends an integer with an N-bit prefix; `flags` holds the bits above it.
+pub fn encode_int(inout out: ChunkSeq[u8], flags: u8, bits: u64, value: u64) {
+    let mask = wrapping_sub(bit(bits), 1);
+    if value < mask {
+        out.push(flags | wrapping_u8(value));
+        return;
+    }
+    out.push(flags | wrapping_u8(mask));
+    let mut v = wrapping_sub(value, mask);
+    loop {
+        if v < 128 {
+            break;
+        }
+        out.push(wrapping_u8(128 | (v & 127)));
+        v = shr(v, 7);
+    }
+    out.push(wrapping_u8(v));
+}
+
+// Decodes a string literal whose H bit is bit `bits` of `buf[at]`,
+// appending its bytes to `out`, and returns the offset after it. The length
+// is checked against `max_len` (and the longest Huffman text that can decode
+// to at most `max_len` bytes) before any byte is read.
+pub fn decode_string(
+    in h: Huff,
+    in buf: Slice[u8],
+    at: u64,
+    bits: u64,
+    max_len: u64,
+    inout out: ChunkSeq[u8]
+) -> Result[u64, PrefixError] {
+    let first = match buf.try_get(at) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => {
+            return Result::Err(PrefixError::Incomplete);
+        },
+    };
+    let huff = first & bit(bits) != 0;
+    let num = match decode_int(in buf, at, bits) {
+        Result::Ok(n) => n,
+        Result::Err(e) => {
+            return Result::Err(e);
+        },
+    };
+    let len = num.value;
+    let limit = if huff {
+        max64(div_ceil(sat_mul(max_len, 8), 5), max_len)
+    } else {
+        max_len
+    };
+    if len > limit {
+        return Result::Err(PrefixError::StringTooLong);
+    }
+    let start = wrapping_add(at, num.used);
+    let end = wrapping_add(start, len);
+    if end < start {
+        return Result::Err(PrefixError::StringTooLong);
+    }
+    if end > buf.len() {
+        return Result::Err(PrefixError::Incomplete);
+    }
+    if huff {
+        match huff_decode(in h, in buf[start..end], max_len, inout out) {
+            Option::Some(HuffmanError::TooLong) => {
+                return Result::Err(PrefixError::StringTooLong);
+            },
+            Option::Some(e) => {
+                return Result::Err(PrefixError::Huffman(e));
+            },
+            Option::None => (),
+        }
+    } else {
+        out.extend(in buf[start..end]);
+    }
+    Result::Ok(end)
+}
+
+// Appends a string literal, Huffman-coded when that is strictly shorter.
+pub fn encode_string(
+    in h: Huff,
+    inout out: ChunkSeq[u8],
+    flags: u8,
+    bits: u64,
+    in value: Slice[u8]
+) {
+    let huff_len = huff_encoded_len(in h, in value);
+    if huff_len < value.len() {
+        encode_int(inout out, flags | wrapping_u8(bit(bits)), bits, huff_len);
+        huff_encode(in h, in value, inout out);
+    } else {
+        encode_int(inout out, flags, bits, value.len());
+        out.extend(in value);
+    }
+}

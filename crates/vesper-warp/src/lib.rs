@@ -30,7 +30,26 @@
 //! end-to-end §35.3 path across every Warp lane crate, and [`cc`] holds the
 //! congestion-control event adapters (recovery → BBRv3 for QUIC, and the
 //! TCP lane's controller trait → BBRv3).
-#![forbid(unsafe_code)]
+//!
+//! Port (wave P3b lane 4, #1066): with the non-default `vesper-port`
+//! feature, [`varint`], [`packet_number`], [`header`], [`frame`] and
+//! [`ack`] forward to the Vesper package in `vesper/` through the committed
+//! binding (`port/binding.rs`); the Rust implementations of those modules
+//! are frozen in `src/reference/`. Rust stays the default build.
+#![cfg_attr(not(feature = "vesper-port"), forbid(unsafe_code))]
+#![cfg_attr(feature = "vesper-port", deny(unsafe_code))]
+
+/// The Vesper build of the ported modules (`vesper/src/*.ves`).
+#[cfg(feature = "vesper-port")]
+mod ported;
+/// The Rust implementation of the ported modules, built without
+/// `vesper-port`.
+#[cfg(not(feature = "vesper-port"))]
+mod reference;
+#[cfg(feature = "vesper-port")]
+use ported as imp;
+#[cfg(not(feature = "vesper-port"))]
+use reference as imp;
 
 pub mod ack;
 pub mod cc;

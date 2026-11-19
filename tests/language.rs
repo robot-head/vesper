@@ -152,7 +152,9 @@ fn projection_disjoint() {
 #[test]
 fn projection_overlap() {
     rejects(
-        "copy struct Pair { left: i64, right: i64 } fn update(inout p: Pair, in q: i64) {} fn bad(inout p: Pair) { update(inout p, in p.left); }",
+        // A scalar copy of `p.left` may read the reserved loan (two-phase
+        // argument loans, #1094); a lent copy aggregate may not.
+        "copy struct Pair { left: i64, right: i64 } struct Outer { p: Pair, n: i64 } fn update(inout o: Outer, in q: Pair) {} fn bad(inout o: Outer) { update(inout o, in o.p); }",
         "E0301",
     );
 }

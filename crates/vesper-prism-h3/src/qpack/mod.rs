@@ -9,14 +9,22 @@
 mod decoder;
 mod encoder;
 pub mod huffman;
+#[cfg(not(feature = "vesper-port"))]
 mod huffman_table;
+#[cfg(feature = "vesper-port")]
+pub(crate) mod port;
 pub mod prefix;
 mod static_table;
 
-pub use decoder::{Decoded, Decoder, DecoderConfig, FieldSection};
-pub use encoder::{Encoder, EncoderConfig, EncoderStats};
+pub use decoder::{Decoded, DecoderConfig, FieldSection};
+pub use encoder::{EncoderConfig, EncoderStats};
+#[cfg(feature = "vesper-port")]
+pub use port::{Decoder, Encoder, live_allocations};
 pub use static_table::STATIC_TABLE;
+#[cfg(not(feature = "vesper-port"))]
+pub use {decoder::Decoder, encoder::Encoder};
 
+#[cfg(not(feature = "vesper-port"))]
 use std::collections::VecDeque;
 use std::fmt;
 
@@ -141,8 +149,10 @@ impl From<prefix::PrefixError> for Reason {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 type Entry = (Box<[u8]>, Box<[u8]>);
 
+#[cfg(not(feature = "vesper-port"))]
 /// The dynamic table (RFC 9204 §3.2), oldest entry first.
 #[derive(Debug, Default)]
 pub(crate) struct Table {
@@ -153,6 +163,7 @@ pub(crate) struct Table {
     inserted: u64,
 }
 
+#[cfg(not(feature = "vesper-port"))]
 impl Table {
     pub(crate) fn insert_count(&self) -> u64 {
         self.inserted
@@ -214,6 +225,7 @@ impl Table {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// RFC 9204 §4.5.1.1 encoding of the Required Insert Count.
 pub(crate) fn encode_ric(ric: u64, max_entries: u64) -> u64 {
     if ric == 0 {
@@ -223,6 +235,7 @@ pub(crate) fn encode_ric(ric: u64, max_entries: u64) -> u64 {
     }
 }
 
+#[cfg(not(feature = "vesper-port"))]
 /// RFC 9204 §4.5.1.1 decoding, rejecting values no conformant encoder
 /// could have produced.
 pub(crate) fn decode_ric(encoded: u64, max_entries: u64, total_inserts: u64) -> Option<u64> {
@@ -245,7 +258,7 @@ pub(crate) fn decode_ric(encoded: u64, max_entries: u64, total_inserts: u64) -> 
     (ric != 0).then_some(ric)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "vesper-port")))]
 mod tests {
     use super::*;
 

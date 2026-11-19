@@ -11,18 +11,16 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-const JOURNAL_VERSION: u32 = 1;
+pub(crate) const JOURNAL_VERSION: u32 = 1;
 static NEXT_SIMULATOR: AtomicU64 = AtomicU64::new(1);
 
-// The seed package builds the Rust code for the compiler's closure; the
-// package `vesper-simpulse` is the port-backed build, whose build
-// script links the Vesper port in vesper/ and sets cfg(vesper_port). See
-// "Crates the compiler links" in docs/maintenance/porting-a-crate.md.
-#[cfg(not(vesper_port))]
-mod reference;
-#[cfg(not(vesper_port))]
-pub use reference::Simulator;
-
+// This file is the API both builds share. The package vesper-simpulse (the
+// only build outside the compiler) schedules in the Vesper port in vesper/:
+// its build script sets cfg(vesper_port). The frozen seed copy that the
+// compiler links (vesper-simpulse-seed) includes this file from
+// seed/src/lib.rs, whose `Simulator` is the Rust implementation in
+// seed/src/reference.rs. See "Crates the compiler links" in
+// docs/maintenance/porting-a-crate.md.
 #[cfg(vesper_port)]
 #[allow(clippy::all, dead_code)]
 #[rustfmt::skip]
@@ -45,7 +43,7 @@ pub fn port_live_allocations() -> i64 {
 
 /// A fresh simulator instance identity; tokens carry it so that a token of
 /// another simulator is foreign.
-fn next_instance() -> u64 {
+pub(crate) fn next_instance() -> u64 {
     let mut instance = NEXT_SIMULATOR.load(Ordering::Relaxed);
     loop {
         let next = instance
@@ -64,14 +62,14 @@ fn next_instance() -> u64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct TaskId(u64);
+pub struct TaskId(pub(crate) u64);
 impl TaskId {
     pub fn get(self) -> u64 {
         self.0
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct CompletionId(u64);
+pub struct CompletionId(pub(crate) u64);
 impl CompletionId {
     pub fn get(self) -> u64 {
         self.0
@@ -164,7 +162,7 @@ impl Journal {
         journal.validate_version()?;
         Ok(journal)
     }
-    fn validate_version(&self) -> Result<(), Error> {
+    pub(crate) fn validate_version(&self) -> Result<(), Error> {
         if self.version != JOURNAL_VERSION {
             return Err(Error::UnsupportedVersion(self.version));
         }
@@ -203,11 +201,11 @@ impl std::error::Error for Error {}
 /// Not Clone. Its private identity cannot be changed or forged by safe callers.
 /// The token must be returned to the simulator to yield, park, or finish.
 pub struct RunToken<T> {
-    instance: u64,
-    task: TaskId,
-    payload: T,
-    reason: WakeReason,
-    cancel_requested: bool,
+    pub(crate) instance: u64,
+    pub(crate) task: TaskId,
+    pub(crate) payload: T,
+    pub(crate) reason: WakeReason,
+    pub(crate) cancel_requested: bool,
 }
 impl<T> RunToken<T> {
     pub fn task(&self) -> TaskId {

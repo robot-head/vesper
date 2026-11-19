@@ -1,0 +1,7 @@
+// Destructuring would drop a linear handle without its finalizer.
+fn destructure(sink s: Sealer) -> u64 {
+    match s {
+        Sealer {}
+        => 0,
+    }
+}

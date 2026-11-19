@@ -1,9 +1,13 @@
 //! `.vsys` types to source types, and the declarations each import adds.
-use super::{EFFECT_PREFIX, FfiError, FfiErrorKind, INVALID_TYPE, Imports, effect_name};
+use super::{
+    EFFECT_PREFIX, FfiError, FfiErrorKind, HANDLE_FIELD, INVALID_TYPE, Imports, SOURCE_SLICE,
+    effect_name,
+};
 use crate::ast::*;
 use std::collections::{BTreeMap, BTreeSet};
 use vesper_ffi::sys::{
-    Access, FunctionDescriptor, ParameterType, Pointee, PointerAccess, Scalar, ValueType,
+    Access, ExternTypeDescriptor, FunctionDescriptor, HandleAccess, Linearity, ParameterType,
+    Pointee, PointerAccess, Scalar, ValueType,
 };
 use vesper_ffi::{FieldKind, WireLayout};
 
@@ -24,8 +28,21 @@ const RESERVED: [&str; 8] = [
 pub(super) enum ParamKind {
     /// A fixed source type.
     Value(Type),
-    /// A `CSlice[element]` whose tuple arity is chosen per call.
-    Slice { element: Type, nullable: bool },
+    /// A `CSlice[element]`: per call, a tuple of a chosen arity, or (when
+    /// `in_place`) a source `Slice[element]` lent to C as `(ptr, len)`.
+    Slice {
+        element: Type,
+        nullable: bool,
+        in_place: bool,
+    },
+}
+/// Whether a `CSlice` of `element` may be a source `Slice`: its packed
+/// native stride is its C size (`u8`, `u32` and the 64-bit integers).
+fn in_place_element(element: &Pointee) -> bool {
+    matches!(
+        element,
+        Pointee::Scalar(Scalar::U8 | Scalar::U32 | Scalar::U64 | Scalar::I64 | Scalar::Usize)
+    )
 }
 pub(super) struct ParamShape {
     pub name: String,
@@ -52,7 +69,16 @@ pub(super) fn op_name(symbol: &str, lengths: &[usize]) -> String {
     if lengths.is_empty() {
         symbol.to_owned()
     } else {
-        let lengths: Vec<String> = lengths.iter().map(usize::to_string).collect();
+        let lengths: Vec<String> = lengths
+            .iter()
+            .map(|n| {
+                if *n == SOURCE_SLICE {
+                    "s".to_owned()
+                } else {
+                    n.to_string()
+                }
+            })
+            .collect();
         format!("{symbol}${}", lengths.join("_"))
     }
 }
@@ -92,6 +118,8 @@ pub(super) struct Generated {
     structs: BTreeMap<String, Result<Adt, String>>,
     /// Source enum declarations by name.
     enums: BTreeMap<String, Adt>,
+    /// Opaque extern-type handles by name.
+    handles: BTreeMap<String, Adt>,
     /// Library names, for demangling.
     libraries: Vec<String>,
     /// Per library: symbol -> shape.
@@ -131,6 +159,32 @@ fn struct_adt(layout: &WireLayout) -> Result<Adt, String> {
         span: 0..0,
     })
 }
+/// The source type of an extern-type handle: a `linear` or `affine` struct
+/// whose one field (the C handle word) no source identifier can spell, so
+/// source code can neither build, read nor destructure it.
+fn handle_adt(t: &ExternTypeDescriptor) -> Adt {
+    Adt {
+        name: t.name().to_owned(),
+        mode: match t.linearity() {
+            Linearity::Linear => Mode::Linear,
+            Linearity::Affine => Mode::Affine,
+        },
+        generics: vec![],
+        variants: vec![Variant {
+            name: t.name().to_owned(),
+            fields: vec![Field {
+                name: HANDLE_FIELD.into(),
+                ty: Type::named("u64"),
+                modality: None,
+                temperature: None,
+            }],
+            named: true,
+        }],
+        is_enum: false,
+        tile_width: None,
+        span: 0..0,
+    }
+}
 fn collect_structs(layout: &WireLayout, out: &mut Vec<WireLayout>) {
     for f in layout.fields() {
         if let FieldKind::Struct(inner) = f.kind() {
@@ -145,6 +199,7 @@ impl Generated {
         let mut g = Self {
             structs: BTreeMap::new(),
             enums: BTreeMap::new(),
+            handles: BTreeMap::new(),
             libraries: imports.libraries.keys().cloned().collect(),
             shapes: BTreeMap::new(),
             invalid: false,
@@ -197,6 +252,21 @@ impl Generated {
                 }
             }
         }
+        for import in imports.libraries.values() {
+            for t in import.descriptor.extern_types() {
+                let adt = handle_adt(t);
+                // A handle belongs to the one library that declares it: two
+                // libraries naming the same opaque type would let one
+                // library's handle reach the other's imports.
+                if g.handles.contains_key(t.name())
+                    || g.structs.contains_key(t.name())
+                    || g.enums.contains_key(t.name())
+                {
+                    return Err(duplicate(t.name()));
+                }
+                g.handles.insert(t.name().to_owned(), adt);
+            }
+        }
         for (name, import) in &imports.libraries {
             let mut shapes = BTreeMap::new();
             for f in import.descriptor.functions() {
@@ -233,6 +303,9 @@ impl Generated {
                         ValueType::Bool => Type::named("bool"),
                         ValueType::Enum(e) => Type::named(e.name()),
                         ValueType::Unit => return Err("Unit parameter".into()),
+                        ValueType::Handle { .. } => {
+                            return Err("a handle parameter needs a mode".into());
+                        }
                         ValueType::Address { .. } => {
                             return Err(
                                 "address parameters have no source carrier (source code has no raw pointers)"
@@ -272,7 +345,16 @@ impl Generated {
                     ParamKind::Slice {
                         element: self.pointee(element)?,
                         nullable: *nullable,
+                        in_place: in_place_element(element),
                     },
+                ),
+                ParameterType::Handle { handle, access } => (
+                    match access {
+                        HandleAccess::In => Pass::In,
+                        HandleAccess::Inout => Pass::Inout,
+                        HandleAccess::Sink => Pass::Sink,
+                    },
+                    ParamKind::Value(Type::named(handle.name())),
                 ),
             };
             params.push(ParamShape {
@@ -295,8 +377,20 @@ impl Generated {
                         .into(),
                 );
             }
+            ValueType::Handle {
+                handle,
+                nullable: true,
+            } => Type::Named("Option".into(), vec![Type::named(handle.name())]),
+            ValueType::Handle {
+                handle,
+                nullable: false,
+            } => Type::Named("Result".into(), vec![Type::named(handle.name()), invalid()]),
         };
         Ok(OpShape { params, result })
+    }
+    /// Whether `name` is a generated extern-type handle.
+    pub fn is_handle(&self, name: &str) -> bool {
+        self.handles.contains_key(name)
     }
     pub fn shape(&self, library: &str, f: &FunctionDescriptor) -> Result<&OpShape, String> {
         match self.shapes.get(library).and_then(|s| s.get(f.symbol())) {
@@ -313,6 +407,7 @@ impl Generated {
             .map(|(n, _)| n.clone())
             .collect();
         names.extend(self.enums.keys().cloned());
+        names.extend(self.handles.keys().cloned());
         if self.invalid {
             names.insert(INVALID_TYPE.into());
         }
@@ -369,7 +464,7 @@ impl Generated {
         for adt in self.structs.values().flatten() {
             module.items.push(Item::Adt(adt.clone()));
         }
-        for adt in self.enums.values() {
+        for adt in self.enums.values().chain(self.handles.values()) {
             module.items.push(Item::Adt(adt.clone()));
         }
         if self.invalid {
@@ -418,10 +513,19 @@ impl Generated {
                                 // Pass 1: a type nothing is compatible with, so the
                                 // checker records each argument's own type.
                                 ParamKind::Slice { .. } if open => Type::named(OPEN),
-                                ParamKind::Slice { element, nullable } => {
+                                ParamKind::Slice {
+                                    element, nullable, ..
+                                } => {
                                     let n = lengths[slice];
                                     slice += 1;
-                                    let t = Type::Tuple(vec![element.clone(); n]);
+                                    let t = if n == SOURCE_SLICE {
+                                        Type::Named(
+                                            crate::seq::SLICE_TYPE.into(),
+                                            vec![element.clone()],
+                                        )
+                                    } else {
+                                        Type::Tuple(vec![element.clone(); n])
+                                    };
                                     if *nullable {
                                         Type::Named("Option".into(), vec![t])
                                     } else {
@@ -448,9 +552,11 @@ impl Generated {
                     });
                 }
             }
+            // Linear: a foreign call returns exactly once (no source handler
+            // can abort it), so linear values may stay live across it.
             module.items.push(Item::Effect(EffectDecl {
                 name: effect_name(library),
-                linear: false,
+                linear: true,
                 generics: vec![],
                 ops,
                 span: 0..0,

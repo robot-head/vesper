@@ -129,7 +129,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         for (name, kind) in crate::fip::seq_drop_plan(self.world, f) {
             let param = f.params.iter().any(|p| p.name == name);
-            if only.is_some_and(|names| param || !names.contains(&name)) {
+            // `only` names the slots a nested graph owns, its own `sink`
+            // parameters included when it is an inlined function.
+            if only.is_some_and(|names| !names.contains(&name)) {
                 continue;
             }
             let Some(&var) = self.vars.get(&name) else {
@@ -371,6 +373,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         {
             return *word;
         }
+        if self.invariant_headers.contains(&ptr) {
+            return self.invariant_word(ptr, offset);
+        }
         self.b.ins().load(types::I64, MemFlags::new(), ptr, offset)
     }
 
@@ -425,6 +430,15 @@ impl<M: Module> Codegen<'_, '_, M> {
         stride: i64,
     ) -> ir::Value {
         let data = self.seq_word(handle, DATA);
+        if self.invariant_headers.contains(&handle) {
+            // `data + start * stride` is invariant for the whole call
+            // (`crate::bounds_hoist::stable_views`), so Cranelift computes
+            // it once, out of every loop.
+            let first = self.b.ins().imul_imm(start, stride);
+            let base = self.b.ins().iadd(data, first);
+            let offset = self.b.ins().imul_imm(i, stride);
+            return self.b.ins().iadd(base, offset);
+        }
         let at = self.b.ins().iadd(start, i);
         let offset = self.b.ins().imul_imm(at, stride);
         self.b.ins().iadd(data, offset)
@@ -621,6 +635,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             (value, self.zero(), len)
         } else {
             let h = self.seq_word(value, 0);
+            if self.invariant_headers.contains(&value) {
+                self.invariant_headers.insert(h);
+            }
             let start = self.seq_word(value, 8);
             let len = self.seq_word(value, 16);
             (h, start, len)
@@ -674,6 +691,13 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .copied()
                 .ok_or_else(|| format!("native ChunkSeq::{} lacks an operand", op.name()))
         };
+        if let SeqOp::Vector(io) = op {
+            let (h, start, len) = self.seq_view(arg(0)?, &arg_types[0]);
+            let zero = self.zero();
+            let base = self.seq_elem_addr(h, start, zero, stride);
+            let value = if io.store { Some(arg(2)?) } else { None };
+            return self.vector_slice_io(io, base, len, arg(1)?, value, stride);
+        }
         Ok(match op {
             SeqOp::New => {
                 // An empty sequence shares one static header and allocates
@@ -829,6 +853,72 @@ impl<M: Module> Codegen<'_, '_, M> {
                 })?;
                 self.zero()
             }
+            SeqOp::Resize => {
+                let h = arg(0)?;
+                let (n, value) = (arg(1)?, arg(2)?);
+                let len = self.seq_word(h, LEN);
+                // Copy elements: shortening drops nothing.
+                let longer = self.b.ins().icmp(IntCC::UnsignedGreaterThan, n, len);
+                let grow = self.b.create_block();
+                let shrink = self.b.create_block();
+                let done = self.b.create_block();
+                self.branch(longer, grow, &[], shrink, &[]);
+                self.b.switch_to_block(shrink);
+                let shorter = self.b.ins().icmp(IntCC::UnsignedLessThan, n, len);
+                self.seq_set_len_if(h, shorter, n);
+                self.jump(done, &[]);
+                self.b.switch_to_block(grow);
+                self.seq_reserve_then(h, n, stride, receiver, |this, h| {
+                    let added = this.b.ins().isub(n, len);
+                    this.seq_fill_elems(h, len, added, value, &elem, stride)?;
+                    this.seq_set_word(h, LEN, n);
+                    Ok(())
+                })?;
+                self.jump(done, &[]);
+                self.b.switch_to_block(done);
+                self.zero()
+            }
+            SeqOp::ExtendFromWithin { total } => {
+                let h = arg(0)?;
+                let (lo, hi) = (arg(1)?, arg(2)?);
+                let len = self.seq_word(h, LEN);
+                let ordered = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, lo, hi);
+                let inside = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, hi, len);
+                let valid = self.b.ins().band(ordered, inside);
+                self.seq_when(valid, total, |this| {
+                    let n = this.b.ins().isub(hi, lo);
+                    let needed = this.b.ins().iadd(len, n);
+                    // The source is read through the grown handle: growth
+                    // moves the buffer. It ends at `hi <= len`, below the
+                    // destination, so the copy never overlaps.
+                    this.seq_reserve_then(h, needed, stride, receiver, |this, h| {
+                        let zero = this.zero();
+                        let dst = this.seq_elem_addr(h, zero, len, stride);
+                        let src = this.seq_elem_addr(h, zero, lo, stride);
+                        let bytes = this.b.ins().imul_imm(n, stride);
+                        this.seq_move(dst, src, bytes);
+                        let some = this.b.ins().icmp_imm(IntCC::NotEqual, n, 0);
+                        this.seq_set_len_if(h, some, needed);
+                        Ok(())
+                    })
+                })?
+            }
+            SeqOp::ExtendReversed => {
+                let h = arg(0)?;
+                let (sh, sstart, slen) = self.seq_view(arg(1)?, &arg_types[1]);
+                let len = self.seq_word(h, LEN);
+                let needed = self.b.ins().iadd(len, slen);
+                self.seq_reserve_then(h, needed, stride, receiver, |this, h| {
+                    let zero = this.zero();
+                    let dst = this.seq_elem_addr(h, zero, len, stride);
+                    let src = this.seq_elem_addr(sh, sstart, zero, stride);
+                    this.seq_copy_reversed(dst, src, slen, stride, &elem)?;
+                    let some = this.b.ins().icmp_imm(IntCC::NotEqual, slen, 0);
+                    this.seq_set_len_if(h, some, needed);
+                    Ok(())
+                })?;
+                self.zero()
+            }
             SeqOp::Finish => {
                 let h = arg(0)?;
                 let len = self.seq_word(h, LEN);
@@ -848,6 +938,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             | SeqOp::CopyFrom { .. }
             | SeqOp::CopyWithin { .. }
             | SeqOp::Fill
+            | SeqOp::FillRange { .. }
             | SeqOp::Wide(_)
             | SeqOp::SumBe16
             | SeqOp::BytesEq
@@ -856,8 +947,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             | SeqOp::FindNotIn
             | SeqOp::EqIgnoreAsciiCase
             | SeqOp::ExtendAsciiLowercase
-            | SeqOp::MakeAsciiLowercase { .. } => {
-                unreachable!("string, hoisted and byte operations return above")
+            | SeqOp::MakeAsciiLowercase { .. }
+            | SeqOp::Vector(_) => {
+                unreachable!("string, hoisted, byte and vector operations return above")
             }
             SeqOp::Swap | SeqOp::Replace => {
                 return Err(format!(
@@ -955,6 +1047,81 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.jump(done, &[]);
         self.b.switch_to_block(done);
         Ok(out)
+    }
+
+    /// Copies the `n` elements at `src` to `dst` (distinct buffers) last
+    /// first: element `k` of `dst` is element `n - 1 - k` of `src`. Bytes
+    /// move eight at a time through a byte swap, the rest one element at a
+    /// time.
+    fn seq_copy_reversed(
+        &mut self,
+        dst: ir::Value,
+        src: ir::Value,
+        n: ir::Value,
+        stride: i64,
+        elem: &Type,
+    ) -> Result<(), String> {
+        let zero = self.zero();
+        let mut from = zero;
+        if stride == 1 {
+            // Word `k` of `dst` (bytes `8k..8k + 8`) is the byte-swapped
+            // word of `src` that ends at `n - 8k`.
+            let head = self.b.create_block();
+            let body = self.b.create_block();
+            let tail = self.b.create_block();
+            self.b.append_block_param(head, types::I64);
+            self.b.append_block_param(tail, types::I64);
+            self.jump(head, &[zero.into()]);
+            self.b.switch_to_block(head);
+            let k = self.b.block_params(head)[0];
+            let left = self.b.ins().isub(n, k);
+            let word = self
+                .b
+                .ins()
+                .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, left, 8);
+            self.branch(word, body, &[], tail, &[k.into()]);
+            self.b.switch_to_block(body);
+            let at = self.b.ins().iadd(src, left);
+            let w = self.b.ins().load(types::I64, MemFlags::new(), at, -8);
+            let w = self.b.ins().bswap(w);
+            let to = self.b.ins().iadd(dst, k);
+            self.b.ins().store(MemFlags::new(), w, to, 0);
+            let next = self.b.ins().iadd_imm(k, 8);
+            self.jump(head, &[next.into()]);
+            self.b.switch_to_block(tail);
+            from = self.b.block_params(tail)[0];
+        }
+        let head = self.b.create_block();
+        let body = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.append_block_param(head, types::I64);
+        self.jump(head, &[from.into()]);
+        self.b.switch_to_block(head);
+        let k = self.b.block_params(head)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, k, n);
+        self.branch(more, body, &[], done, &[]);
+        self.b.switch_to_block(body);
+        let last = self.b.ins().iadd_imm(n, -1);
+        let back = self.b.ins().isub(last, k);
+        let from_addr = self.seq_elem_addr_raw(src, back, stride);
+        let to_addr = self.seq_elem_addr_raw(dst, k, stride);
+        let layout = Layout::of(self.world, elem)?;
+        if layout.aggregate() {
+            self.copy_bytes(from_addr, to_addr, layout.size);
+        } else {
+            let value = self.seq_load_elem(from_addr, elem)?;
+            self.seq_store_elem(to_addr, value, elem)?;
+        }
+        let next = self.b.ins().iadd_imm(k, 1);
+        self.jump(head, &[next.into()]);
+        self.b.switch_to_block(done);
+        Ok(())
+    }
+
+    /// `base + i * stride`.
+    fn seq_elem_addr_raw(&mut self, base: ir::Value, i: ir::Value, stride: i64) -> ir::Value {
+        let offset = self.b.ins().imul_imm(i, stride);
+        self.b.ins().iadd(base, offset)
     }
 
     /// Copies `bytes` bytes from `src` to `dst` (distinct buffers).
@@ -1110,6 +1277,8 @@ pub(super) struct FusedRead {
     valid: Variable,
     addr: Variable,
     elem: Type,
+    /// The read is hoisted out of its loop's bounds checks: always `Some`.
+    always: bool,
 }
 
 fn fused_pattern(p: &Pattern) -> bool {
@@ -1156,7 +1325,12 @@ pub(super) fn fused_reads(
             let terminator_ok = match &b.terminator {
                 Terminator::Return(v) | Terminator::Branch { condition: v, .. } => v != value,
                 Terminator::Jump { args, .. } => !args.contains(value),
-                Terminator::Match { value: v, .. } => v != value || std::ptr::eq(b, block),
+                // The fast copy of a versioned loop (`crate::bounds_hoist`)
+                // keeps the value ids of its instructions, so its own read
+                // and match of the same value fuse too.
+                Terminator::Match { value: v, .. } => {
+                    v != value || b.instructions.iter().any(|i| i.dest == *value)
+                }
                 Terminator::Unreachable => true,
             };
             terminator_ok
@@ -1216,6 +1390,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     valid: valid_var,
                     addr: addr_var,
                     elem,
+                    always: !checked,
                 }),
             );
         }
@@ -1230,14 +1405,16 @@ impl<M: Module> Codegen<'_, '_, M> {
         value: crate::ir::ValueId,
         seen: &[&Pattern],
     ) -> bool {
-        if !matches!(self.seq_fused(value), Some(Some(_))) {
+        let Some(Some(read)) = self.seq_fused(value) else {
             return false;
-        }
+        };
         let some = |p: &&Pattern| matches!(&p.kind, PatternKind::Constructor { name, .. } if name.ends_with("Some"));
         let none = |p: &&Pattern| matches!(&p.kind, PatternKind::Constructor { name, .. } if !name.ends_with("Some"));
         seen.last()
             .is_some_and(|p| matches!(p.kind, PatternKind::Wild))
             || (seen.iter().any(some) && seen.iter().any(none))
+            // A hoisted read is `Some`: its first `Some` arm is taken.
+            || (read.always && seen.last().is_some_and(some))
     }
 
     /// The condition of match arm `p` on fused read `value`.
@@ -1273,12 +1450,19 @@ impl<M: Module> Codegen<'_, '_, M> {
             && let Some((
                 _,
                 inner @ Pattern {
-                    kind: PatternKind::Bind(_),
+                    kind: PatternKind::Bind(bound),
                     ..
                 },
             )) = fields.first()
         {
             let addr = self.b.use_var(read.addr);
+            // A split local (#1090) loads its words from the element
+            // itself, not from a copy of it: the words no later use reads
+            // are dead loads, so `Some(h) => h.f` is one load.
+            if self.split_of(bound).is_some() {
+                self.split_write(bound, &[], addr)?;
+                return Ok(true);
+            }
             let element = self.seq_load_elem(addr, &read.elem)?;
             let mut slot_index = 0;
             self.bind_ir(dest, &mut slot_index, false, inner, element, &read.elem)?;

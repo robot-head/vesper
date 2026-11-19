@@ -1,0 +1,71 @@
+// QUIC variable-length integers (RFC 9000 §16), as vesper_warp::varint
+// decodes and encodes them for frame.rs and capsule.rs.
+
+use self::int::{
+    inc,
+    byte,
+    shl,
+    shr
+};
+use self::prefix::{
+    Num,
+    max_int
+};
+
+// The varint at `buf[at]`, or `None` if the buffer ends inside it.
+pub fn vdec(in buf: Slice[u8], at: u64) -> Option[Num] {
+    if at >= buf.len() {
+        return Option::None;
+    }
+    let first = widen_u64(byte(in buf, at));
+    let len = shl(1, shr(first, 6));
+    if wrapping_sub(buf.len(), at) < len {
+        return Option::None;
+    }
+    let mut v = first & 63;
+    let base = inc(at);
+    for k in 0..wrapping_sub(len, 1) {
+        v = shl(v, 8) | widen_u64(byte(in buf, wrapping_add(base, k)));
+    }
+    Option::Some(
+        Num {
+            value: v,
+            used: len
+        }
+    )
+}
+
+// Appends `v` in its shortest form; false (nothing written) above 2^62 - 1.
+pub fn vput(inout out: ChunkSeq[u8], v: u64) -> bool {
+    if v < 64 {
+        out.push(wrapping_u8(v));
+    } else if v < 16384 {
+        out.push(wrapping_u8(shr(v, 8) | 64));
+        out.push(wrapping_u8(v));
+    } else if v < 1073741824 {
+        out.push(wrapping_u8(shr(v, 24) | 128));
+        out.push(wrapping_u8(shr(v, 16)));
+        out.push(wrapping_u8(shr(v, 8)));
+        out.push(wrapping_u8(v));
+    } else if v <= max_int() {
+        out.push(wrapping_u8(shr(v, 56) | 192));
+        out.push(wrapping_u8(shr(v, 48)));
+        out.push(wrapping_u8(shr(v, 40)));
+        out.push(wrapping_u8(shr(v, 32)));
+        out.push(wrapping_u8(shr(v, 24)));
+        out.push(wrapping_u8(shr(v, 16)));
+        out.push(wrapping_u8(shr(v, 8)));
+        out.push(wrapping_u8(v));
+    } else {
+        return false;
+    }
+    true
+}
+
+// A frame or capsule: type, length, payload (`write_frame`).
+pub fn put_record(inout out: ChunkSeq[u8], ty: u64, in payload: Slice[u8]) -> bool {
+    let a = vput(inout out, ty);
+    let b = vput(inout out, payload.len());
+    out.extend(in payload);
+    a && b
+}

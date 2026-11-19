@@ -1,0 +1,204 @@
+// qpack/huffman.rs: the HPACK Huffman code (RFC 7541 Appendix B, RFC 9204
+// §4.1.2), decoded canonically one bit at a time from the code lengths, with
+// the RFC 7541 §5.2 padding and EOS rules.
+
+use self::table::{
+    static_new
+};
+use self::{
+    HuffmanError,
+    Huff
+};
+use self::int::{
+    inc,
+    word,
+    byte,
+    div_ceil,
+    bit,
+    shl,
+    shr
+};
+use self::huffman_codes::{
+    huffman_codes
+};
+
+fn symbol_count() -> u64 {
+    257
+}
+
+fn zeros(n: u64) -> ChunkSeq[u64] {
+    let mut s = ChunkSeq::with_capacity[u64](n);
+    for i in 0..n {
+        s.push(0);
+    }
+    s
+}
+
+// A trie child that is a leaf: this flag and the symbol.
+fn leaf() -> u64 {
+    1048576
+}
+
+// Nibble-table entry flags: a symbol was decoded, or EOS was reached.
+fn emitted() -> u64 {
+    4294967296
+}
+
+fn eos_seen() -> u64 {
+    8589934592
+}
+
+// The decoding tables. The code's binary trie has 256 internal nodes (the
+// code is complete, RFC 7541 Appendix B); `child[2 * node + bit]` is a node
+// index, `leaf() | symbol`, or 0 while unbuilt (the root is never a child).
+// `nib[16 * node + nibble]` is where four more bits lead from `node`: the
+// next node, the symbol decoded on the way (`emitted()`, at most one, as
+// every code is at least 5 bits long) or `eos_seen()`. `info[node]` is the
+// node's depth (bits since the last symbol) and, in bit 8, whether those
+// bits are all ones (the EOS prefix, valid padding).
+pub fn huff_tables() -> Huff {
+    let codes = huffman_codes();
+    let mut child = zeros(2);
+    let mut info = ChunkSeq::with_capacity[u64](256);
+    info.push(256);
+    let mut nodes: u64 = 1;
+    for s in 0..symbol_count() {
+        let e = word(in codes.as_slice(), s);
+        let len = shr(e, 32);
+        let code = e & 4294967295;
+        let mut node: u64 = 0;
+        for k in 0..len {
+            let b = shr(code, wrapping_sub(wrapping_sub(len, 1), k)) & 1;
+            let slot = wrapping_add(wrapping_mul(node, 2), b);
+            if inc(k) == len {
+                let _set = child.try_set(slot, leaf() | s);
+            } else {
+                let mut c = word(in child.as_slice(), slot);
+                if c == 0 {
+                    c = nodes;
+                    nodes = inc(nodes);
+                    child.push(0);
+                    child.push(0);
+                    let _set = child.try_set(slot, c);
+                    let up = word(in info.as_slice(), node);
+                    let ones = if b == 1 {
+                        up & 256
+                    } else {
+                        0
+                    };
+                    info.push(inc(up & 255) | ones);
+                }
+                node = c;
+            }
+        }
+    }
+    let mut nib = ChunkSeq::with_capacity[u64](wrapping_mul(nodes, 16));
+    for node_at in 0..nodes {
+        for n in 0..16 {
+            nib.push(walk(in child, node_at, n));
+        }
+    }
+    Huff {
+        codes: codes,
+        nib: nib,
+        info: info,
+        st: static_new()
+    }
+}
+
+fn walk(in child: ChunkSeq[u64], node_at: u64, n: i64) -> u64 {
+    let nibble = wrapping_u64(n);
+    let mut node = node_at;
+    let mut out: u64 = 0;
+    for k in 0..4 {
+        let b = shr(nibble, wrapping_u64(wrapping_sub(3, k))) & 1;
+        let c = word(in child.as_slice(), wrapping_add(wrapping_mul(node, 2), b));
+        if c & leaf() != 0 {
+            let sym = c & 511;
+            if sym == 256 {
+                return eos_seen();
+            }
+            out = emitted() | shl(sym, 16);
+            node = 0;
+        } else {
+            node = c;
+        }
+    }
+    out | node
+}
+
+// Encoded length in bytes, padding included.
+pub fn huff_encoded_len(in h: Huff, in data: Slice[u8]) -> u64 {
+    let mut bits: u64 = 0;
+    for i in 0..data.len() {
+        let e = word(in h.codes.as_slice(), widen_u64(byte(in data, i)));
+        bits = wrapping_add(bits, shr(e, 32));
+    }
+    div_ceil(bits, 8)
+}
+
+// Appends the Huffman encoding of `data` to `out`, padded with the EOS
+// prefix (all ones).
+pub fn huff_encode(in h: Huff, in data: Slice[u8], inout out: ChunkSeq[u8]) {
+    let mut acc: u64 = 0;
+    let mut nbits: u64 = 0;
+    for i in 0..data.len() {
+        let e = word(in h.codes.as_slice(), widen_u64(byte(in data, i)));
+        let len = shr(e, 32);
+        acc = shl(acc, len) | (e & 4294967295);
+        nbits = wrapping_add(nbits, len);
+        loop {
+            if nbits < 8 {
+                break;
+            }
+            nbits = wrapping_sub(nbits, 8);
+            out.push(wrapping_u8(shr(acc, nbits)));
+        }
+        acc = acc & wrapping_sub(bit(nbits), 1);
+    }
+    if nbits > 0 {
+        let pad = wrapping_sub(8, nbits);
+        out.push(wrapping_u8(shl(acc, pad) | wrapping_sub(bit(pad), 1)));
+    }
+}
+
+// Appends the decoding of `data` to `out`, refusing more than `max_len`
+// bytes of output (`TooLong`) before it is produced: four bits per step
+// through the nibble table, with the RFC 7541 §5.2 padding and EOS rules
+// (the same results as decoding one bit at a time).
+pub fn huff_decode(in h: Huff, in data: Slice[u8], max_len: u64, inout out: ChunkSeq[u8])
+    -> Option[HuffmanError] {
+    let mut node_at: u64 = 0;
+    let mut produced: u64 = 0;
+    for i in 0..data.len() {
+        let b = widen_u64(byte(in data, i));
+        let hi = word(in h.nib.as_slice(), wrapping_add(wrapping_mul(node_at, 16), shr(b, 4)));
+        if hi & eos_seen() != 0 {
+            return Option::Some(HuffmanError::Eos);
+        }
+        if hi & emitted() != 0 {
+            if produced == max_len {
+                return Option::Some(HuffmanError::TooLong);
+            }
+            out.push(wrapping_u8(shr(hi, 16)));
+            produced = inc(produced);
+        }
+        let lo = word(in h.nib.as_slice(), wrapping_add(wrapping_mul(hi & 65535, 16), b & 15));
+        if lo & eos_seen() != 0 {
+            return Option::Some(HuffmanError::Eos);
+        }
+        if lo & emitted() != 0 {
+            if produced == max_len {
+                return Option::Some(HuffmanError::TooLong);
+            }
+            out.push(wrapping_u8(shr(lo, 16)));
+            produced = inc(produced);
+        }
+        node_at = lo & 65535;
+    }
+    let info = word(in h.info.as_slice(), node_at);
+    if info & 255 > 7 || info & 256 == 0 {
+        return Option::Some(HuffmanError::BadPadding);
+    }
+    Option::None
+}
