@@ -169,7 +169,10 @@ fn read_word(in b: Slice[u8], at: u64) -> u64 {
 impl Blake3 {
     // Bytes hashed so far.
     pub fn count(in self) -> u64 {
-        wrapping_add(wrapping_mul(self.chunk, 1024), wrapping_add(wrapping_mul(self.blocks, 64), self.block_len))
+        wrapping_add(
+            wrapping_mul(self.chunk, 1024),
+            wrapping_add(wrapping_mul(self.blocks, 64), self.block_len)
+        )
     }
 
     fn start_flag(in self) -> u32 {
@@ -200,7 +203,14 @@ impl Blake3 {
     fn compress_block(inout self) {
         self.load_block();
         let f = self.flags | self.start_flag();
-        compress(in self.cv.as_slice(), in self.words.as_slice(), self.chunk, 64, f, inout self.out.as_slice_mut());
+        compress(
+            in self.cv.as_slice(),
+            in self.words.as_slice(),
+            self.chunk,
+            64,
+            f,
+            inout self.out.as_slice_mut()
+        );
         self.cv.try_copy_from(0, in self.out[0..8]);
         self.blocks = wrapping_add(self.blocks, 1);
         self.block_len = 0;
@@ -213,7 +223,14 @@ impl Blake3 {
         self.load_block();
         let f = self.flags | self.start_flag() | chunk_end();
         let bl = wrapping_u32(self.block_len);
-        compress(in self.cv.as_slice(), in self.words.as_slice(), self.chunk, bl, f, inout self.out.as_slice_mut());
+        compress(
+            in self.cv.as_slice(),
+            in self.words.as_slice(),
+            self.chunk,
+            bl,
+            f,
+            inout self.out.as_slice_mut()
+        );
         let mut total = wrapping_add(self.chunk, 1);
         // `out[0..8]` is the new chaining value; merge completed subtrees.
         loop {
@@ -227,7 +244,14 @@ impl Blake3 {
             let at = wrapping_sub(top, 8);
             self.words.try_copy_from(0, in self.stack[at..top]);
             self.words.try_copy_from(8, in self.out[0..8]);
-            compress(in self.key.as_slice(), in self.words.as_slice(), 0, 64, self.flags | parent_flag(), inout self.out.as_slice_mut());
+            compress(
+                in self.key.as_slice(),
+                in self.words.as_slice(),
+                0,
+                64,
+                self.flags | parent_flag(),
+                inout self.out.as_slice_mut()
+            );
             self.stack.truncate(at);
             total = total >> 1;
         }
@@ -256,7 +280,11 @@ impl Blake3 {
             }
             let room = wrapping_sub(64, self.block_len);
             let left = wrapping_sub(n, pos);
-            let take = if left < room { left } else { room };
+            let take = if left < room {
+                left
+            } else {
+                room
+            };
             let end = wrapping_add(pos, take);
             self.block.try_copy_from(self.block_len, in input[pos..end]);
             self.block_len = wrapping_add(self.block_len, take);
@@ -279,7 +307,14 @@ impl Blake3 {
             if top < 8 {
                 break;
             }
-            compress(in cv.as_slice(), in m.as_slice(), counter, blen, f, inout words.as_slice_mut());
+            compress(
+                in cv.as_slice(),
+                in m.as_slice(),
+                counter,
+                blen,
+                f,
+                inout words.as_slice_mut()
+            );
             let at = wrapping_sub(top, 8);
             m.try_copy_from(0, in self.stack[at..top]);
             m.try_copy_from(8, in words[0..8]);
@@ -295,7 +330,14 @@ impl Blake3 {
             if done >= n {
                 break;
             }
-            compress(in cv.as_slice(), in m.as_slice(), block, blen, f | root_flag(), inout words.as_slice_mut());
+            compress(
+                in cv.as_slice(),
+                in m.as_slice(),
+                block,
+                blen,
+                f | root_flag(),
+                inout words.as_slice_mut()
+            );
             let mut i: u64 = 0;
             loop {
                 if i >= 16 || done >= n {

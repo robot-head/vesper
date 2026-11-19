@@ -1,5 +1,11 @@
 // @vesper-std/graph::scc: strongly connected components (Tarjan, iterative).
-use self::util::{get32, get64, get_bool, filled32, filled_bool};
+use self::util::{
+    get32,
+    get64,
+    get_bool,
+    filled32,
+    filled_bool
+};
 use self::Graph;
 
 // The strongly connected components of a graph. Components are numbered
@@ -47,7 +53,11 @@ impl Scc {
 }
 
 fn min32(a: u32, b: u32) -> u32 {
-    if a < b { a } else { b }
+    if a < b {
+        a
+    } else {
+        b
+    }
 }
 
 // The strongly connected components of `g`. Roots are tried in node order

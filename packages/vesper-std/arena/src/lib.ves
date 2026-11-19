@@ -29,12 +29,16 @@ impl [T] Hash for Idx[T] {}
 // The index with position `raw`. Use it to rebuild an index that was stored
 // as a number; `get` checks it.
 pub fn idx_from_raw[T](raw: u32) -> Idx[T] {
-    Idx { raw: raw }
+    Idx {
+        raw: raw
+    }
 }
 
 // The reserved index that names no value (`u32::MAX`).
 pub fn idx_none[T]() -> Idx[T] {
-    Idx { raw: 4294967295 }
+    Idx {
+        raw: 4294967295
+    }
 }
 
 impl [T] Idx[T] {
@@ -86,10 +90,14 @@ impl [T: mod copy] Arena[T] {
     pub fn alloc(inout self, v: T) -> Idx[T] {
         let n = self.items.len();
         if n >= 4294967295 {
-            Idx { raw: 4294967295 }
+            Idx {
+                raw: 4294967295
+            }
         } else {
             self.items.push(v);
-            Idx { raw: wrapping_u32(n) }
+            Idx {
+                raw: wrapping_u32(n)
+            }
         }
     }
 
@@ -97,9 +105,13 @@ impl [T: mod copy] Arena[T] {
     pub fn next_idx(in self) -> Idx[T] {
         let n = self.items.len();
         if n >= 4294967295 {
-            Idx { raw: 4294967295 }
+            Idx {
+                raw: 4294967295
+            }
         } else {
-            Idx { raw: wrapping_u32(n) }
+            Idx {
+                raw: wrapping_u32(n)
+            }
         }
     }
 

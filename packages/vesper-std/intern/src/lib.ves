@@ -215,9 +215,11 @@ impl Interner {
             Option::Some(v) => if v == 0 {
                 Option::None
             } else {
-                Option::Some(Symbol {
-                    id: wrapping_sub(v, 1)
-                })
+                Option::Some(
+                    Symbol {
+                        id: wrapping_sub(v, 1)
+                    }
+                )
             },
             Option::None => Option::None,
         }

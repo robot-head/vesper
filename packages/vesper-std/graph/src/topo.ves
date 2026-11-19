@@ -1,6 +1,11 @@
 // @vesper-std/graph::topo: topological order with a cycle report.
 use self::Graph;
-use self::util::{get32, get_bool, filled32, filled_bool};
+use self::util::{
+    get32,
+    get_bool,
+    filled32,
+    filled_bool
+};
 
 // The result of `toposort`: the nodes in a topological order when the graph
 // is a DAG; otherwise the nodes that could be ordered (those no cycle

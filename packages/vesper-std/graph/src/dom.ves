@@ -2,7 +2,10 @@
 // "A Simple, Fast Dominance Algorithm", 2001).
 use self::Graph;
 use self::reach::reverse_postorder;
-use self::util::{get32, filled32};
+use self::util::{
+    get32,
+    filled32
+};
 
 // The dominator tree of the nodes reachable from a root.
 pub struct Dominators {
@@ -91,13 +94,15 @@ pub fn dominators(in g: Graph, root: u32) -> Dominators {
                                     break;
                                 }
                                 loop {
-                                    if get32(in po.as_slice(), widen_u64(f1), 0) >= get32(in po.as_slice(), widen_u64(f2), 0) {
+                                    if get32(in po.as_slice(), widen_u64(f1), 0)
+                                        >= get32(in po.as_slice(), widen_u64(f2), 0) {
                                         break;
                                     }
                                     f1 = get32(in idom.as_slice(), widen_u64(f1), root);
                                 }
                                 loop {
-                                    if get32(in po.as_slice(), widen_u64(f2), 0) >= get32(in po.as_slice(), widen_u64(f1), 0) {
+                                    if get32(in po.as_slice(), widen_u64(f2), 0)
+                                        >= get32(in po.as_slice(), widen_u64(f1), 0) {
                                         break;
                                     }
                                     f2 = get32(in idom.as_slice(), widen_u64(f2), root);

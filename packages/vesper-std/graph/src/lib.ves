@@ -18,7 +18,10 @@
 //
 // Every function is total: out-of-range ids are refused (`add_edge` returns
 // `false`) or answered as absent (`none()` / `Option::None`).
-use self::util::{get32, get64};
+use self::util::{
+    get32,
+    get64
+};
 
 // The id that names no node (`u32::MAX`).
 pub fn none() -> u32 {

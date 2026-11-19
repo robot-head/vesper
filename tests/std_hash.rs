@@ -128,8 +128,8 @@ fn word(v: &Value) -> u64 {
 
 /// The lengths of the official BLAKE3 test vectors (test_vectors.json).
 const OFFICIAL: [u64; 22] = [
-    0, 1, 1023, 1024, 1025, 2048, 2049, 3072, 3073, 4096, 4097, 5120, 5121, 6144, 6145, 7168,
-    7169, 8192, 8193, 16384, 31744, 102400,
+    0, 1, 1023, 1024, 1025, 2048, 2049, 3072, 3073, 4096, 4097, 5120, 5121, 6144, 6145, 7168, 7169,
+    8192, 8193, 16384, 31744, 102400,
 ];
 const SMALL: [u64; 7] = [0, 1, 63, 64, 65, 1024, 1025];
 /// Split sizes for incremental updates of a 9,000-byte input.
@@ -250,8 +250,9 @@ fn xxh64(data: &[u8], seed: u64) -> u64 {
 }
 
 fn fnv1a32(data: &[u8]) -> u32 {
-    data.iter()
-        .fold(2166136261u32, |h, &b| (h ^ u32::from(b)).wrapping_mul(16777619))
+    data.iter().fold(2166136261u32, |h, &b| {
+        (h ^ u32::from(b)).wrapping_mul(16777619)
+    })
 }
 
 fn mix64(x: u64) -> u64 {
@@ -301,7 +302,10 @@ fn rust_references_match_official_vectors() {
     assert_eq!(xxh64(b"Hello, world!\0", 0), 0x7b06_c531_ea43_e89f);
     assert_eq!(xxh64(&hundred, 0), 0x6ac1_e580_3216_6597);
     assert_eq!(xxh64(b"", 0xae05_4331_1b70_2d91), 0x4b6a_04fc_df7a_4672);
-    assert_eq!(xxh64(&hundred, 0xae05_4331_1b70_2d91), 0x567e_355e_0682_e1f1);
+    assert_eq!(
+        xxh64(&hundred, 0xae05_4331_1b70_2d91),
+        0x567e_355e_0682_e1f1
+    );
     // FNV-1a test vectors (Fowler, Noll, Vo).
     assert_eq!(fold(FNV0, b"a"), 0xaf63dc4c8601ec8c);
     assert_eq!(fnv1a32(b"a"), 0xe40c292c);
@@ -529,7 +533,11 @@ fn portable_hashes_match_rust_natively() {
 /// The evaluator, the reference semantics, agrees on short inputs.
 #[test]
 fn portable_hashes_match_rust_in_the_evaluator() {
-    let dir = driver(&portable(&SMALL, 2100, 40), &STD_HASH, "\"Fail\", \"Alloc\"");
+    let dir = driver(
+        &portable(&SMALL, 2100, 40),
+        &STD_HASH,
+        "\"Fail\", \"Alloc\"",
+    );
     let c = load(&dir.0);
     for (entry, value) in expected(&SMALL, 2100, 40) {
         let mut runtime = Runtime::new(&c.world);
@@ -732,21 +740,28 @@ fn sys_vsys(target: (&str, &str)) -> String {
         .replace("@ABI@", target.1)
 }
 
-fn sys_checked(lens: &[u64], total: u64, target: (&str, &str)) -> (Temp, ffi_lowering::ForeignChecked) {
+fn sys_checked(
+    lens: &[u64],
+    total: u64,
+    target: (&str, &str),
+) -> (Temp, ffi_lowering::ForeignChecked) {
     let source = SYS
         .replace("LENS", &lens_literal(lens))
         .replace("SPLITS", &lens_literal(&SPLITS))
         .replace("TOTAL", &total.to_string());
     let dir = driver(
         &source,
-        &[("@vesper-std/hash", "hash"), ("@vesper-std/hash-sys", "hash/sys")],
+        &[
+            ("@vesper-std/hash", "hash"),
+            ("@vesper-std/hash-sys", "hash/sys"),
+        ],
         "\"Fail\", \"Alloc\", \"Ffi\"",
     );
     let assembled = assemble(&dir.0);
     let mut imports = Imports::new();
     imports.add(&sys_vsys(target), Handler::Direct).unwrap();
-    let checked = ffi_lowering::check_module(&assembled.module, &imports)
-        .unwrap_or_else(|e| panic!("{e}"));
+    let checked =
+        ffi_lowering::check_module(&assembled.module, &imports).unwrap_or_else(|e| panic!("{e}"));
     (dir, checked)
 }
 
@@ -826,7 +841,10 @@ impl EvalHost {
             "vesper_blake3_update" => {
                 let data = ffi_lowering::slice_bytes(&args[1]).ok_or("not a byte slice")?;
                 let i = handle(&args[0])?;
-                self.hashers[i].as_mut().ok_or("use after free")?.update(&data);
+                self.hashers[i]
+                    .as_mut()
+                    .ok_or("use after free")?
+                    .update(&data);
                 unit
             }
             "vesper_blake3_finalize" => {

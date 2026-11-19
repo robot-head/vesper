@@ -88,10 +88,19 @@ pub extern "C" fn vesper_blake3_hash(ptr: *const u8, len: usize, out: *mut u8, o
 pub fn symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("vesper_blake3_new", vesper_blake3_new as *const u8),
-        ("vesper_blake3_new_keyed", vesper_blake3_new_keyed as *const u8),
-        ("vesper_blake3_new_derive_key", vesper_blake3_new_derive_key as *const u8),
+        (
+            "vesper_blake3_new_keyed",
+            vesper_blake3_new_keyed as *const u8,
+        ),
+        (
+            "vesper_blake3_new_derive_key",
+            vesper_blake3_new_derive_key as *const u8,
+        ),
         ("vesper_blake3_update", vesper_blake3_update as *const u8),
-        ("vesper_blake3_finalize", vesper_blake3_finalize as *const u8),
+        (
+            "vesper_blake3_finalize",
+            vesper_blake3_finalize as *const u8,
+        ),
         ("vesper_blake3_free", vesper_blake3_free as *const u8),
         ("vesper_blake3_hash", vesper_blake3_hash as *const u8),
     ]

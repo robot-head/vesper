@@ -1,6 +1,11 @@
 // @vesper-std/graph::reach: reachability and depth-first orders.
 use self::Graph;
-use self::util::{get32, get64, get_bool, filled_bool};
+use self::util::{
+    get32,
+    get64,
+    get_bool,
+    filled_bool
+};
 
 // Which nodes are reachable from `root` (including `root`); all `false`
 // when `root` is not a node.

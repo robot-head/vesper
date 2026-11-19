@@ -387,7 +387,11 @@ fn both_tree_shapes_match_rust_natively() {
     }
     if links_executables() {
         let all = value ^ value ^ value ^ model_checked();
-        assert_eq!(executable_exit(&dir.0), Some((all & 0xff) as i32), "executable");
+        assert_eq!(
+            executable_exit(&dir.0),
+            Some((all & 0xff) as i32),
+            "executable"
+        );
     }
 }
 

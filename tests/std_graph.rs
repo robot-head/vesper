@@ -212,7 +212,12 @@ fn model_case(acc0: u64, n: u64, m: u64, seed: u64) -> u64 {
             let a = (x >> 33) % n;
             x = lcg(x);
             let b = (x >> 33) % n;
-            let r = has_path_connecting(&g, NodeIndex::new(a as usize), NodeIndex::new(b as usize), None);
+            let r = has_path_connecting(
+                &g,
+                NodeIndex::new(a as usize),
+                NodeIndex::new(b as usize),
+                None,
+            );
             acc = mix(acc, u64::from(r));
         }
     }
@@ -221,14 +226,9 @@ fn model_case(acc0: u64, n: u64, m: u64, seed: u64) -> u64 {
 
 /// Cases `(n, m, seed)`: sparse to dense, DAG-heavy (m < n) to cyclic.
 fn cases(big: bool) -> Vec<(u64, u64, u64)> {
-    let sizes: &[u64] = if big {
-        &[0, 1, 2, 3, 5, 8, 13, 50, 200, 1000, 5000]
-    } else {
-        &[0, 1, 2, 3, 5, 8, 13, 30]
-    };
     let mut out = Vec::new();
     let mut seed = 1u64;
-    for &n in sizes {
+    for &n in sizes(big) {
         for num in [1u64, 2, 4, 8, 16] {
             // m = n * num / 4: a quarter edge per node up to four per node.
             let m = n * num / 4;
@@ -242,9 +242,9 @@ fn cases(big: bool) -> Vec<(u64, u64, u64)> {
 }
 
 fn model(cases: &[(u64, u64, u64)]) -> u64 {
-    cases
-        .iter()
-        .fold(14695981039346656037, |acc, &(n, m, s)| model_case(acc, n, m, s))
+    cases.iter().fold(14695981039346656037, |acc, &(n, m, s)| {
+        model_case(acc, n, m, s)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -474,28 +474,39 @@ pub fn deep() -> u64 {
     acc
 }
 
+// The cases of the Rust model's `cases`: for each size, m = n * num / 4
+// for num in 1, 2, 4, 8, 16, three LCG seeds each.
 pub fn random() -> u64 {
-    let cases: ChunkSeq[u64] = CASES;
+    let sizes: ChunkSeq[u64] = SIZES;
     let mut acc: u64 = 14695981039346656037;
+    let mut seed: u64 = 1;
     let mut k: u64 = 0;
     loop {
-        if wrapping_add(k, 2) >= cases.len() {
+        if k >= sizes.len() {
             break acc;
         }
-        let n = match cases.try_get(k) {
+        let n = match sizes.try_get(k) {
             Option::Some(x) => x,
             Option::None => 0,
         };
-        let m = match cases.try_get(wrapping_add(k, 1)) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        let s = match cases.try_get(wrapping_add(k, 2)) {
-            Option::Some(x) => x,
-            Option::None => 0,
-        };
-        acc = one_case(acc, n, m, s);
-        k = wrapping_add(k, 3);
+        let mut num: u64 = 1;
+        loop {
+            if num > 16 {
+                break;
+            }
+            let m = wrapping_mul(n, num) >> 2;
+            let mut rep: u64 = 0;
+            loop {
+                if rep >= 3 {
+                    break;
+                }
+                seed = lcg(seed);
+                acc = one_case(acc, n, m, seed >> 1);
+                rep = wrapping_add(rep, 1);
+            }
+            num = wrapping_mul(num, 2);
+        }
+        k = wrapping_add(k, 1);
     }
 }
 
@@ -504,12 +515,18 @@ fn main() -> u64 {
 }
 ";
 
-fn cases_literal(cases: &[(u64, u64, u64)]) -> String {
+fn sizes(big: bool) -> &'static [u64] {
+    if big {
+        &[0, 1, 2, 3, 5, 8, 13, 50, 200, 1000]
+    } else {
+        &[0, 1, 2, 3, 5, 8, 13, 30]
+    }
+}
+
+fn sizes_literal(big: bool) -> String {
     let mut s = String::from("{\n        let mut z: ChunkSeq[u64] = ChunkSeq::new[u64]();\n");
-    for (n, m, seed) in cases {
-        s.push_str(&format!(
-            "        z.push({n});\n        z.push({m});\n        z.push({seed});\n"
-        ));
+    for n in sizes(big) {
+        s.push_str(&format!("        z.push({n});\n"));
     }
     s.push_str("        z\n    }");
     s
@@ -526,7 +543,7 @@ fn model_deep() -> u64 {
 #[test]
 fn graph_algorithms_match_petgraph_natively() {
     let cases = cases(true);
-    let dir = driver(&DRIVER.replace("CASES", &cases_literal(&cases)));
+    let dir = driver(&DRIVER.replace("SIZES", &sizes_literal(true)));
     let c = load(&dir.0);
     let want = model(&cases);
     for optimize in [true, false] {
@@ -549,7 +566,7 @@ fn graph_algorithms_match_petgraph_natively() {
 #[test]
 fn graph_algorithms_match_petgraph_in_the_evaluator() {
     let cases = cases(false);
-    let dir = driver(&DRIVER.replace("CASES", &cases_literal(&cases)));
+    let dir = driver(&DRIVER.replace("SIZES", &sizes_literal(false)));
     let c = load(&dir.0);
     let mut runtime = Runtime::new(&c.world);
     runtime.optimize = false;

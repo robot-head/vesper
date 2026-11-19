@@ -288,7 +288,11 @@ fn interning_matches_a_rust_hashmap_natively() {
         assert_eq!(got, want.to_string(), "JIT (optimize {optimize})");
     }
     if links_executables() {
-        assert_eq!(executable_exit(&dir.0), Some((want & 0xff) as i32), "executable");
+        assert_eq!(
+            executable_exit(&dir.0),
+            Some((want & 0xff) as i32),
+            "executable"
+        );
     }
 }
 
