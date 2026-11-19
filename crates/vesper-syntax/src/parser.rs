@@ -721,6 +721,7 @@ impl Parser<'_> {
         let mut fip = self.fip_attr();
         let public = self.at_word(0, "pub")
             && (self.at_word(1, "trait")
+                || (self.at_word(1, "const") && self.nth(2) == K::Upper)
                 || self.at_word(1, "model")
                 || matches!(self.nth(1), K::Fn | K::Struct | K::Enum | K::Effect)
                 || (matches!(self.nth(1), K::Copy | K::Affine | K::Linear)
@@ -737,6 +738,9 @@ impl Parser<'_> {
         }
         if fip && !self.at(K::Fn) {
             self.error("@fip may only annotate a fn declaration");
+        }
+        if self.at_word(0, "const") && self.nth(1) == K::Upper {
+            return Some(Item::Function(Box::new(self.const_item(start))));
         }
         if self.at_word(0, "trait") {
             return Some(Item::Trait(self.trait_decl(start, public)));
@@ -1071,6 +1075,35 @@ impl Parser<'_> {
             span: start..self.end(),
         }
     }
+    /// `const NAME: T = expr;` (§2.2 `ConstDecl`): the parameterless
+    /// function [`CONST_PREFIX`]`NAME`, whose every use the checker reads
+    /// as a call (`vesper::arrays`).
+    fn const_item(&mut self, start: usize) -> Function {
+        self.bump();
+        let name = self.upper();
+        self.expect(K::Colon);
+        let result = self.ty();
+        self.expect(K::Eq);
+        let value = self.expr();
+        self.expect(K::Semi);
+        let span = start..self.end();
+        Function {
+            name: format!("{CONST_PREFIX}{name}"),
+            fip: false,
+            generics: vec![],
+            params: vec![],
+            result,
+            effects: Effects::default(),
+            body: Some(Expr {
+                span: value.span.clone(),
+                kind: ExprKind::Block {
+                    statements: vec![],
+                    tail: Some(Box::new(value)),
+                },
+            }),
+            span,
+        }
+    }
     fn params(&mut self, end: K) -> Vec<Param> {
         let mut out = vec![];
         while !self.at(end) && !self.at(K::Eof) {
@@ -1144,6 +1177,53 @@ impl Parser<'_> {
         self.depth = previous;
         result
     }
+    /// Whether the `[` at the cursor opens an array type `[T; N]`: a `;`
+    /// at bracket depth one before the matching `]`. A tensor shape
+    /// `[M, N]` has none.
+    fn array_type_ahead(&self) -> bool {
+        let mut depth = 0usize;
+        for i in self.pos..self.tokens.len() {
+            let k = self.tokens[i].kind;
+            if k.trivia() {
+                continue;
+            }
+            match k {
+                K::LBracket | K::LParen | K::LBrace => depth += 1,
+                K::RBracket | K::RParen | K::RBrace => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                K::Semi if depth == 1 => return true,
+                K::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+    /// The length `N` of `[T; N]` or `[x; N]`: a decimal or hex literal.
+    fn array_length(&mut self) -> usize {
+        if !self.at(K::Int) {
+            self.error("expected an integer literal array length");
+            return 0;
+        }
+        let text = self.bump().replace('_', "");
+        let n = if let Some(hex) = text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
+            usize::from_str_radix(hex, 16).ok()
+        } else {
+            text.parse().ok()
+        };
+        match n.filter(|n| *n <= MAX_ARRAY_LENGTH) {
+            Some(n) => n,
+            None => {
+                self.error(format!(
+                    "array length exceeds the limit of {MAX_ARRAY_LENGTH} elements"
+                ));
+                0
+            }
+        }
+    }
     fn ty_inner(&mut self) -> Type {
         self.builder.start_node(TYPE);
         let result = if self.eat(K::Fn) {
@@ -1184,6 +1264,14 @@ impl Parser<'_> {
             }
             self.expect(K::RParen);
             Type::Tuple(args)
+        } else if self.at(K::LBracket) && self.array_type_ahead() {
+            // A fixed-size array `[T; N]` (§5): the homogeneous `N`-tuple.
+            self.bump();
+            let element = self.ty();
+            self.expect(K::Semi);
+            let n = self.array_length();
+            self.expect(K::RBracket);
+            Type::Tuple(vec![element; n])
         } else if self.eat(K::LBracket) {
             // A tensor shape `[M, N * K, 128]` (§28.2), encoded as the
             // unspellable `[]` type over its dimensions (see SHAPE_TYPE).
@@ -2469,6 +2557,7 @@ impl Parser<'_> {
                     }
                     ExprKind::Tuple(values)
                 }
+                K::LBracket => self.array_literal(start),
                 K::LBrace => return self.block(),
                 _ => {
                     self.error("expected expression");
@@ -2507,6 +2596,27 @@ impl Parser<'_> {
             kind,
             span: start..self.end(),
         }
+    }
+    /// `[a, b, c]` or `[x; N]` (§5 fixed-size arrays), both the tuple of
+    /// their elements. A repeated operand that is not a literal or a name
+    /// is evaluated once into a hidden binding.
+    fn array_literal(&mut self, start: usize) -> ExprKind {
+        self.expect(K::LBracket);
+        let mut values = vec![];
+        while !self.at(K::RBracket) && !self.at(K::Eof) {
+            let value = self.expr();
+            if values.is_empty() && self.eat(K::Semi) {
+                let n = self.array_length();
+                self.expect(K::RBracket);
+                return splat(value, n, start..self.end());
+            }
+            values.push(value);
+            if !self.eat(K::Comma) {
+                break;
+            }
+        }
+        self.expect(K::RBracket);
+        ExprKind::Tuple(values)
     }
     fn pattern_list(&mut self, end: K) -> Vec<Pattern> {
         let mut pats = vec![];
@@ -2658,4 +2768,37 @@ pub(crate) fn contextual_item_names(
         previous = Some(t.kind);
     }
     names
+}
+
+/// The function name prefix of a module constant `const NAME: T = e;`.
+pub const CONST_PREFIX: &str = "const$";
+/// The largest `N` of an array type `[T; N]` or literal `[x; N]`.
+pub const MAX_ARRAY_LENGTH: usize = 1 << 16;
+/// The binding a repeated array operand `[f(); N]` is evaluated into.
+pub const ARRAY_SPLAT_BINDING: &str = "$splat";
+
+/// `[value; n]` as the `n`-tuple of `value`.
+fn splat(value: Expr, n: usize, span: Span) -> ExprKind {
+    if matches!(value.kind, ExprKind::Literal(_) | ExprKind::Name(_)) {
+        return ExprKind::Tuple(vec![value; n]);
+    }
+    let name = Expr {
+        kind: ExprKind::Name(ARRAY_SPLAT_BINDING.into()),
+        span: value.span.clone(),
+    };
+    ExprKind::Block {
+        statements: vec![Statement::Let {
+            pat: Pattern {
+                kind: PatternKind::Bind(ARRAY_SPLAT_BINDING.into()),
+                span: value.span.clone(),
+            },
+            ty: Type::Infer,
+            value,
+            mutable: false,
+        }],
+        tail: Some(Box::new(Expr {
+            kind: ExprKind::Tuple(vec![name; n]),
+            span,
+        })),
+    }
 }
