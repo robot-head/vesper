@@ -1,0 +1,26 @@
+[package]
+name = "vesper-cranelift-sys"
+version = "0.1.0"
+edition = "2024"
+description = "C-ABI shim over Cranelift 0.125 (object modules, function builders, data) for Vesper's `.vsys` imports (self-hosting SH0 lane 4)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+# The rlib is what Rust hosts (the JIT tests, a hybrid compiler) link; the
+# staticlib is what a C or Vesper executable links (include/vesper_cranelift.h).
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+# Same versions and features as the root compiler, so both lower through
+# the same Cranelift build.
+cranelift-codegen = { version = "0.125", features = ["arm64", "riscv64"] }
+cranelift-frontend = "0.125"
+cranelift-module = "0.125"
+cranelift-object = "0.125"
+cranelift-native = "0.125"
+target-lexicon = "0.13"
+
+[dev-dependencies]
+vesper = { path = "../.." }
+vesper-ffi = { path = "../vesper-ffi" }

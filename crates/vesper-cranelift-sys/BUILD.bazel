@@ -1,0 +1,6 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+# The tests load the @vesper/cranelift package beside the fixtures.
+vesper_crate(
+    extra_test_data = ["//packages/vesper-cranelift:files"],
+)

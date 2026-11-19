@@ -1,0 +1,322 @@
+// The SH0 lane 4 pilot (#1126): Vesper builds Cranelift objects through
+// @vesper/cranelift. Appended to packages/vesper-cranelift/src/lib.ves by
+// tests/pilot.rs, which runs the entries under the JIT with the shim bound,
+// links the published objects and runs them.
+
+fn sig_ints(inout m: Module, params: u32) -> SigId eff [Ffi[Cranelift]] {
+    let s = sig_new(inout m, call_conv_default());
+    for _ in 0..params {
+        sig_param(inout m, s, ty_i64());
+    }
+    sig_return(inout m, s, ty_i64());
+    s
+}
+
+// The entry block, with the function's parameters, current and sealed.
+fn entry_block(inout b: Builder) -> Block eff [Ffi[Cranelift]] {
+    let entry = create_block(inout b);
+    append_block_params_for_function_params(inout b, entry);
+    switch_to_block(inout b, entry);
+    seal_block(inout b, entry);
+    entry
+}
+
+// pilot_arith(a, b) = (a + b) * 3 - (a ^ b), with a stack slot round trip.
+fn build_arith(inout m: Module, f: FuncId, sig: SigId) -> bool eff [Ffi[Cranelift]] {
+    let mut b = match builder_new(in m, sig) {
+        Some(b) => b,
+        None => return false,
+    };
+    let entry = entry_block(inout b);
+    let x = block_param(inout b, entry, 0);
+    let y = block_param(inout b, entry, 1);
+    let sum = ins_iadd(inout b, x, y);
+    let tripled = ins_imul_imm(inout b, sum, 3);
+    let slot = create_stack_slot(inout b, 8, 3);
+    ins_stack_store(inout b, tripled, slot, 0);
+    let back = ins_stack_load(inout b, ty_i64(), slot, 0);
+    let mixed = ins_bxor(inout b, x, y);
+    let r = ins_isub(inout b, back, mixed);
+    ins_return1(inout b, r);
+    define_function(inout m, f, b)
+}
+
+// pilot_sum(n) = 0 + 1 + .. + (n - 1): a loop header with block params
+// (i, acc), the exit block taking acc.
+fn build_sum(inout m: Module, f: FuncId, sig: SigId) -> bool eff [Ffi[Cranelift]] {
+    let mut b = match builder_new(in m, sig) {
+        Some(b) => b,
+        None => return false,
+    };
+    let entry = entry_block(inout b);
+    let n = block_param(inout b, entry, 0);
+    let header = create_block(inout b);
+    let i = append_block_param(inout b, header, ty_i64());
+    let acc = append_block_param(inout b, header, ty_i64());
+    let body = create_block(inout b);
+    let exit = create_block(inout b);
+    let done = append_block_param(inout b, exit, ty_i64());
+    let zero = ins_iconst(inout b, ty_i64(), 0);
+    let start = vals2(zero, zero);
+    ins_jump(inout b, header, in start.as_slice());
+    switch_to_block(inout b, header);
+    let more = ins_icmp(inout b, cc_slt(), i, n);
+    let out = vals1(acc);
+    let none: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    ins_brif(inout b, more, body, in none.as_slice(), exit, in out.as_slice());
+    switch_to_block(inout b, body);
+    let acc2 = ins_iadd(inout b, acc, i);
+    let i2 = ins_iadd_imm(inout b, i, 1);
+    let next = vals2(i2, acc2);
+    ins_jump(inout b, header, in next.as_slice());
+    seal_block(inout b, header);
+    seal_block(inout b, body);
+    seal_block(inout b, exit);
+    switch_to_block(inout b, exit);
+    ins_return1(inout b, done);
+    define_function(inout m, f, b)
+}
+
+// pilot_call(x) = pilot_arith(x, x + 1) + pilot_sum(x) + table[x & 3], with
+// a variable and a data object.
+fn build_call(inout m: Module, f: FuncId, sig: SigId, arith: FuncId, sum: FuncId, table: DataId)
+    -> bool eff [Ffi[Cranelift]] {
+    let mut b = match builder_new(in m, sig) {
+        Some(b) => b,
+        None => return false,
+    };
+    let entry = entry_block(inout b);
+    let x = block_param(inout b, entry, 0);
+    let total = declare_var(inout b, ty_i64());
+    let fa = import_function(inout b, inout m, arith);
+    let fs = import_function(inout b, inout m, sum);
+    let gv = import_data(inout b, in m, table);
+    let x1 = ins_iadd_imm(inout b, x, 1);
+    let args = vals2(x, x1);
+    let a = ins_call1(inout b, fa, in args.as_slice());
+    def_var(inout b, total, a);
+    let one = vals1(x);
+    let s = ins_call1(inout b, fs, in one.as_slice());
+    let t = use_var(inout b, total);
+    let t2 = ins_iadd(inout b, t, s);
+    def_var(inout b, total, t2);
+    let base = ins_symbol_value(inout b, ty_i64(), gv);
+    let index = ins_band_imm(inout b, x, 3);
+    let offset = ins_ishl_imm(inout b, index, 3);
+    let addr = ins_iadd(inout b, base, offset);
+    let entry_value = ins_load(inout b, ty_i64(), mem_trusted(), addr, 0);
+    let t3 = use_var(inout b, total);
+    let r = ins_iadd(inout b, t3, entry_value);
+    ins_return1(inout b, r);
+    define_function(inout m, f, b)
+}
+
+// Four little-endian i64 words: 100, 200, 300, 400.
+fn table_bytes() -> ChunkSeq[u8] {
+    let mut out: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](32);
+    let mut v: u64 = 100;
+    for _ in 0..4 {
+        let mut shift: u32 = 0;
+        for _ in 0..8 {
+            out.push(wrapping_u8(wrapping_shr_u64(v, shift) & 255));
+            shift = wrapping_add(shift, 8);
+        }
+        v = wrapping_add(v, 100);
+    }
+    out
+}
+
+// Build the pilot object for the host; returns its published id (0 on
+// failure).
+pub fn pilot() -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(
+        in "".as_bytes(),
+        in "opt_level=speed".as_bytes(),
+        in "pilot".as_bytes()
+    ) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let s1 = sig_ints(inout m, 1);
+    let s2 = sig_ints(inout m, 2);
+    let arith = declare_function(inout m, in "pilot_arith".as_bytes(), linkage_export(), s2);
+    let sum = declare_function(inout m, in "pilot_sum".as_bytes(), linkage_export(), s1);
+    let call = declare_function(inout m, in "pilot_call".as_bytes(), linkage_export(), s1);
+    let table = declare_data(inout m, in "pilot_table".as_bytes(), linkage_local(), false);
+    let mut d = match data_new() {
+        Some(d) => d,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let bytes = table_bytes();
+    data_define(inout d, in bytes.as_slice());
+    data_align(inout d, 8);
+    let ok = define_data(inout m, table, d)
+        && build_arith(inout m, arith, s2)
+        && build_sum(inout m, sum, s1)
+        && build_call(inout m, call, s1, arith, sum, table);
+    if !ok {
+        module_free(m);
+        return 0;
+    }
+    match module_finish(m) {
+        Some(o) => object_publish(o),
+        None => 0,
+    }
+}
+
+// A builder whose function is invalid (a value used across functions): the
+// module reports the error, nothing leaks.
+pub fn invalid_function() -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(in "".as_bytes(), in "".as_bytes(), in "bad".as_bytes()) {
+        Some(m) => m,
+        None => return 1,
+    };
+    let s = sig_ints(inout m, 1);
+    let f = declare_function(inout m, in "bad".as_bytes(), linkage_export(), s);
+    let mut b = match builder_new(in m, s) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 2;
+        },
+    };
+    let entry = entry_block(inout b);
+    let x = block_param(inout b, entry, 0);
+    // An i32 constant added to an i64: the verifier refuses it.
+    let c = ins_iconst(inout b, ty_i32(), 1);
+    let r = ins_iadd(inout b, x, c);
+    ins_return1(inout b, r);
+    let ok = define_function(inout m, f, b);
+    let err = module_error_len(in m);
+    module_free(m);
+    if ok {
+        3
+    } else {
+        err
+    }
+}
+
+// An unknown opcode poisons the builder; the builder is freed unused.
+pub fn poisoned_builder() -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(in "".as_bytes(), in "".as_bytes(), in "bad".as_bytes()) {
+        Some(m) => m,
+        None => return 1,
+    };
+    let s = sig_ints(inout m, 1);
+    let mut b = match builder_new(in m, s) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 2;
+        },
+    };
+    let entry = entry_block(inout b);
+    let x = block_param(inout b, entry, 0);
+    let bad = ins_binary(inout b, 999, x, x);
+    let after = ins_iadd(inout b, x, x);
+    let err = builder_error_len(in b);
+    builder_free(b);
+    module_free(m);
+    if is_invalid(bad) && is_invalid(after) {
+        err
+    } else {
+        0
+    }
+}
+
+// A bad target triple: no module, an error message.
+pub fn bad_triple() -> u64 eff [Ffi[Cranelift]] {
+    match module_new(in "no-such-target".as_bytes(), in "".as_bytes(), in "x".as_bytes()) {
+        Some(m) => {
+            module_free(m);
+            0
+        },
+        None => new_error_len(),
+    }
+}
+
+// Many modules, builders, data descriptions and objects: each finalized.
+pub fn churn() -> u64 eff [Ffi[Cranelift]] {
+    let mut made: u64 = 0;
+    for i in 0..50 {
+        match module_new(in "".as_bytes(), in "".as_bytes(), in "churn".as_bytes()) {
+            Some(m) => {
+                let mut m = m;
+                let s = sig_ints(inout m, 1);
+                match builder_new(in m, s) {
+                    Some(b) => builder_free(b),
+                    None => {},
+                }
+                match data_new() {
+                    Some(d) => data_free(d),
+                    None => {},
+                }
+                if i % 2 == 0 {
+                    module_free(m);
+                } else {
+                    match module_finish(m) {
+                        Some(o) => {
+                            let bytes = object_bytes(o);
+                            if bytes.len() > 0 {
+                                made = wrapping_add(made, 1);
+                            }
+                        },
+                        None => {},
+                    }
+                }
+            },
+            None => {},
+        }
+    }
+    made
+}
+
+// The vector and atomic instructions: a function that compiles (the
+// verifier and the backend accept it).
+pub fn vectors_and_atomics() -> u64 eff [Ffi[Cranelift]] {
+    let mut m = match module_new(in "".as_bytes(), in "".as_bytes(), in "va".as_bytes()) {
+        Some(m) => m,
+        None => return 0,
+    };
+    let s = sig_ints(inout m, 1);
+    let f = declare_function(inout m, in "va".as_bytes(), linkage_export(), s);
+    let mut b = match builder_new(in m, s) {
+        Some(b) => b,
+        None => {
+            module_free(m);
+            return 0;
+        },
+    };
+    let entry = entry_block(inout b);
+    let x = block_param(inout b, entry, 0);
+    let mut bytes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](16);
+    let mut mask: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](16);
+    let mut i: u8 = 0;
+    for _ in 0..16 {
+        bytes.push(i);
+        mask.push(wrapping_sub(15, i));
+        i = wrapping_add(i, 1);
+    }
+    let v = ins_vconst(inout b, ty_vector(ty_i8(), 4), in bytes.as_slice());
+    let r = ins_shuffle(inout b, v, v, in mask.as_slice());
+    let lane = ins_extractlane(inout b, r, 0);
+    let wide = ins_uextend(inout b, ty_i64(), lane);
+    let slot = create_stack_slot(inout b, 8, 3);
+    let addr = ins_stack_addr(inout b, ty_i64(), slot, 0);
+    ins_atomic_store(inout b, mem_trusted(), x, addr);
+    let old = ins_atomic_rmw(inout b, 1, ty_i64(), mem_trusted(), addr, wide);
+    let now = ins_atomic_load(inout b, ty_i64(), mem_trusted(), addr);
+    let sum = ins_iadd(inout b, old, now);
+    ins_return1(inout b, sum);
+    let ok = define_function(inout m, f, b);
+    let bytes_out = module_code_bytes(in m);
+    module_free(m);
+    if ok {
+        bytes_out
+    } else {
+        0
+    }
+}
