@@ -214,7 +214,7 @@ fn recovery_batch(base: u64) -> u64 {
         if i % 8 == 7 {
             acks += 1;
             let lo = pn - 7;
-            let ranges: &[AckRange] = &if acks % 5 == 0 {
+            let ranges: &[AckRange] = &if acks.is_multiple_of(5) {
                 [
                     AckRange {
                         smallest: lo + 4,
@@ -237,7 +237,11 @@ fn recovery_batch(base: u64) -> u64 {
                     },
                 ]
             };
-            let ranges = if acks % 5 == 0 { ranges } else { &ranges[..1] };
+            let ranges = if acks.is_multiple_of(5) {
+                ranges
+            } else {
+                &ranges[..1]
+            };
             let ack = AckFrame::from_ranges(ranges, 3, None).expect("ack");
             let out = r
                 .on_ack_received(
