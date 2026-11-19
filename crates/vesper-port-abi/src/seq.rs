@@ -64,6 +64,9 @@ pub unsafe fn read_elem<T: Abi>(data: *const u8, i: usize) -> T {
         match T::STRIDE {
             1 => T::get(&[u64::from(*at)]),
             4 => T::get(&[u64::from(at.cast::<u32>().read_unaligned())]),
+            // Only the low half of the slot was written (little-endian
+            // targets put it first); never read the other four bytes.
+            8 if T::LOW_HALF => T::get(&[u64::from(at.cast::<u32>().read())]),
             _ => T::get(core::slice::from_raw_parts(at.cast::<u64>(), T::WORDS)),
         }
     }

@@ -61,6 +61,11 @@ pub trait Abi: Sized {
     /// or 4 needs one word, any other stride is `WORDS * 8`) and panic on a
     /// mismatch, so a wrong implementation cannot reach out of bounds.
     const STRIDE: usize = Self::WORDS * 8;
+    /// Whether the value is only the low four bytes of its one word, as an
+    /// `f32` is. Vesper stores only those bytes into a sequence slot, so
+    /// sequence reads must not touch the high half (it may be
+    /// uninitialized memory).
+    const LOW_HALF: bool = false;
 }
 
 /// `max(a, b)` in constant context.
@@ -117,6 +122,7 @@ impl Abi for f64 {
 /// lent in place.
 impl Abi for f32 {
     const WORDS: usize = 1;
+    const LOW_HALF: bool = true;
     fn put(&self, out: &mut [u64]) {
         out[0] = u64::from(self.to_bits());
     }
