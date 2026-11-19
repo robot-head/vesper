@@ -45,8 +45,16 @@ pub fn ramp(n: u64, step: f32) -> ChunkSeq[f32] {
 }
 
 pub fn pt_norm1(in p: Pt) -> f32 {
-    let x = if p.x < 0.0 { 0.0 - p.x } else { p.x };
-    let y = if p.y < 0.0 { 0.0 - p.y } else { p.y };
+    let x = if p.x < 0.0 {
+        0.0 - p.x
+    } else {
+        p.x
+    };
+    let y = if p.y < 0.0 {
+        0.0 - p.y
+    } else {
+        p.y
+    };
     x + y
 }
 
@@ -67,7 +75,10 @@ pub fn bank_new(base: u64, n: u64) -> Bank {
     for i in 0..n {
         regs.push(wrapping_add(base, i));
     }
-    Bank { base: base, regs: regs }
+    Bank {
+        base: base,
+        regs: regs
+    }
 }
 
 impl Bank {
@@ -100,7 +111,14 @@ pub struct Fabric {
 fn name(i: u64) -> String {
     let mut s = String::new();
     s.push_str(in "file");
-    s.push_char(if i == 0 { 48 } else { 49 });
+    s
+        .push_char(
+        if i == 0 {
+            48
+        } else {
+            49
+        }
+    );
     s
 }
 
@@ -159,7 +177,11 @@ impl Proc for Delay {
             Option::None => 0,
         };
         let _ = self.line.try_set(i, x);
-        self.at = if wrapping_add(i, 1) == n { 0 } else { wrapping_add(i, 1) };
+        self.at = if wrapping_add(i, 1) == n {
+            0
+        } else {
+            wrapping_add(i, 1)
+        };
         y
     }
 }
@@ -180,11 +202,20 @@ fn zeros(n: u64) -> ChunkSeq[i64] {
 }
 
 fn gain(k: i64) -> Box[dyn Proc] {
-    Box::new(Gain { k: k })
+    Box::new(
+        Gain {
+            k: k
+        }
+    )
 }
 
 fn delay(n: u64) -> Box[dyn Proc] {
-    Box::new(Delay { line: zeros(n), at: 0 })
+    Box::new(
+        Delay {
+            line: zeros(n),
+            at: 0
+        }
+    )
 }
 
 // gain(k) -> delay(n) -> gain(3), then an optional delay(1) tail.
@@ -193,8 +224,16 @@ pub fn graph_new(k: i64, n: u64, tail: bool) -> Graph {
     procs.push(gain(k));
     procs.push(delay(n));
     procs.push(gain(3));
-    let t = if tail { Option::Some(delay(1)) } else { Option::None };
-    Graph { procs: procs, tail: t, runs: 0 }
+    let t = if tail {
+        Option::Some(delay(1))
+    } else {
+        Option::None
+    };
+    Graph {
+        procs: procs,
+        tail: t,
+        runs: 0
+    }
 }
 
 // Recursion, not a loop: native code does not reclaim boxes in an

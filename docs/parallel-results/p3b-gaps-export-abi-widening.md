@@ -165,4 +165,5 @@ cheaper form until `f32` packs at 4 bytes (below).
   calls through `s[i]` of a `ChunkSeq[Box[dyn P]]` reached through an
   `inout` struct is refused natively ("Box values in a function with loop
   ... not reclaimed"), while `--no-opt` builds it. The pilot recurses
-  instead. #1076 (loop-owned boxes) is the open PR in that area.
+  instead. #1076 (loop-owned boxes) merged while this PR was open; the
+  pilot was not rewritten back to a loop.
