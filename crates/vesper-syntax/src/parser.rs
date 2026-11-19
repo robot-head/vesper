@@ -1270,8 +1270,14 @@ impl Parser<'_> {
             self.bump();
             let element = self.ty();
             self.expect(K::Semi);
-            let n = self.array_length();
+            let mut n = self.array_length();
             self.expect(K::RBracket);
+            if type_leaves(&element).saturating_mul(n) > MAX_ARRAY_LENGTH {
+                self.error(format!(
+                    "a nested array type holds more than {MAX_ARRAY_LENGTH} elements in all"
+                ));
+                n = 0;
+            }
             Type::Tuple(vec![element; n])
         } else if self.eat(K::LBracket) {
             // A tensor shape `[M, N * K, 128]` (§28.2), encoded as the
@@ -2607,8 +2613,14 @@ impl Parser<'_> {
         while !self.at(K::RBracket) && !self.at(K::Eof) {
             let value = self.expr();
             if values.is_empty() && self.eat(K::Semi) {
-                let n = self.array_length();
+                let mut n = self.array_length();
                 self.expect(K::RBracket);
+                if expr_leaves(&value).saturating_mul(n) > MAX_ARRAY_LENGTH {
+                    self.error(format!(
+                        "a nested array literal holds more than {MAX_ARRAY_LENGTH} elements in all"
+                    ));
+                    n = 0;
+                }
                 return splat(value, n, start..self.end());
             }
             values.push(value);
@@ -2778,9 +2790,45 @@ pub const MAX_ARRAY_LENGTH: usize = 1 << 16;
 /// The binding a repeated array operand `[f(); N]` is evaluated into.
 pub const ARRAY_SPLAT_BINDING: &str = "$splat";
 
+/// The scalar elements of a value of type `t`, through nested tuples.
+fn type_leaves(t: &Type) -> usize {
+    match t {
+        Type::Tuple(ts) => ts
+            .iter()
+            .fold(0usize, |n, t| n.saturating_add(type_leaves(t)))
+            .max(1),
+        _ => 1,
+    }
+}
+
+/// The scalar elements of an array literal operand, through nested tuples
+/// and the tails of blocks.
+fn expr_leaves(e: &Expr) -> usize {
+    match &e.kind {
+        ExprKind::Tuple(es) => es
+            .iter()
+            .fold(0usize, |n, e| n.saturating_add(expr_leaves(e)))
+            .max(1),
+        ExprKind::Block { tail: Some(t), .. } => expr_leaves(t),
+        _ => 1,
+    }
+}
+
+/// Whether `e` is built from literals and names by operators only, so a
+/// copy of it evaluates to the same value and keeps its contextual type
+/// (`[-1.0; 2]` as `[f32; 2]`).
+fn pure_operand(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Literal(_) | ExprKind::Name(_) => true,
+        ExprKind::Unary(_, v) => pure_operand(v),
+        ExprKind::Binary(_, a, b) => pure_operand(a) && pure_operand(b),
+        _ => false,
+    }
+}
+
 /// `[value; n]` as the `n`-tuple of `value`.
 fn splat(value: Expr, n: usize, span: Span) -> ExprKind {
-    if matches!(value.kind, ExprKind::Literal(_) | ExprKind::Name(_)) {
+    if pure_operand(&value) {
         return ExprKind::Tuple(vec![value; n]);
     }
     let name = Expr {

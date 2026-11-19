@@ -426,3 +426,32 @@ fn array_source_formats_on_one_line() {
     let formatted = vesper_fmt::format_source(source, Default::default()).unwrap();
     assert_eq!(formatted.output, source);
 }
+
+#[test]
+fn review_cases_repeated_operands_receivers_and_limits() {
+    // A repeated operand keeps its contextual element type.
+    accepted("fn f() -> [f32; 2] { [-1.0; 2] } fn main() -> u64 { 0 }");
+    // `len` of a temporary array.
+    differential(
+        "temporary_len",
+        "fn make() -> [u64; 3] { [1, 2, 3] }
+fn main() -> u64 { wrapping_add(make().len(), make()[2]) }",
+        3 + 3,
+    );
+    // Nested array types and literals have one element budget in all.
+    for source in [
+        "fn f(a: [[u64; 65536]; 65536]) {}",
+        "fn f() -> u64 { let a = [[0; 65536]; 65536]; 0 }",
+    ] {
+        assert!(
+            !vesper::parser::parse(source).diagnostics.is_empty(),
+            "{source}"
+        );
+    }
+    // Native code does not track call targets stored into an array.
+    rejects(
+        "fn one() -> u64 { 1 } fn two() -> u64 { 2 }
+fn main() -> u64 { let mut a = [one, one]; a[0] = two; let f = a[0]; f() }",
+        vesper::arrays::ARRAY_OPERATION,
+    );
+}

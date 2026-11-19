@@ -269,3 +269,15 @@ fn constants_of_a_non_root_package_module_are_read_in_place() {
         );
     }
 }
+
+#[test]
+fn review_cases_shadowed_bindings_and_len() {
+    // A later binding of the same name does not change an earlier value.
+    differential(
+        "shadowed",
+        "const A: [u64; 2] = { let x: u64 = 1; let y = x; let x: u64 = 2; [y, x] };
+const TABLE: [u64; 4] = [1, 2, 3, 4];
+fn main() -> u64 { wrapping_add(wrapping_add(wrapping_mul(A[0], 10), A[1]), TABLE.len()) }",
+        12 + 4,
+    );
+}

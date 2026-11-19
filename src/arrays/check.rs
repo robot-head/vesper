@@ -68,6 +68,54 @@ impl Checker<'_> {
         Some((n, n))
     }
 
+    /// The type of a method receiver before it is checked: a place's type,
+    /// or the declared result of a call of a non-generic function without
+    /// arguments, such as a constant (`TABLE.len()`) or `make().len()`.
+    fn array_receiver_type(&self, base: &Expr, env: &Env) -> Type {
+        let t = self.peek_type(base, env);
+        if t != Type::Infer {
+            return t;
+        }
+        if let ExprKind::Call {
+            callee,
+            types,
+            args,
+        } = &base.kind
+            && types.is_empty()
+            && args.is_empty()
+            && let ExprKind::Name(n) = &callee.kind
+            && !env.bindings.contains_key(n)
+            && let Some(f) = self.world.functions.get(n)
+            && f.generics.is_empty()
+        {
+            return f.result.clone();
+        }
+        Type::Infer
+    }
+
+    /// Whether a value of `ty` can hold a function value, whose native
+    /// call targets an element write would not track.
+    fn holds_function(&self, ty: &Type, depth: usize) -> bool {
+        if depth > 16 {
+            return true;
+        }
+        match ty {
+            Type::Function { .. } => true,
+            Type::Tuple(ts) => ts.iter().any(|t| self.holds_function(t, depth + 1)),
+            Type::Named(n, args) => {
+                args.iter().any(|t| self.holds_function(t, depth + 1))
+                    || self.world.adts.get(n).is_some_and(|a| {
+                        a.variants.iter().any(|v| {
+                            v.fields
+                                .iter()
+                                .any(|f| self.holds_function(&f.ty, depth + 1))
+                        })
+                    })
+            }
+            _ => false,
+        }
+    }
+
     /// `base[index] op= value` on an array place, or `None` when `base` is
     /// not an array.
     #[inline(never)]
@@ -123,7 +171,7 @@ impl Checker<'_> {
         if !matches!(method, "len" | "set") {
             return None;
         }
-        let array = self.peek_type(base, env);
+        let array = self.array_receiver_type(base, env);
         let (element_ty, n) = element(&array).map(|(t, n)| (t.clone(), n))?;
         let arity = if method == "len" { 0 } else { 2 };
         if args.len() != arity {
@@ -190,6 +238,13 @@ impl Checker<'_> {
         }
         let actual = self.expr_expected(value, env, Usage::Own, element_ty);
         self.expect_type(element_ty, &actual, value.span.clone());
+        if self.holds_function(element_ty, 0) {
+            self.error(
+                ARRAY_OPERATION,
+                "array element writes of function values are not supported yet",
+                value.span.clone(),
+            );
+        }
         if self.mode(element_ty) != Mode::Copy {
             self.error(
                 "E0311",

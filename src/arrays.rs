@@ -353,7 +353,27 @@ fn encode(
                         value,
                         ..
                     } => {
-                        env.insert(n.clone(), value.clone());
+                        // Resolve the value in the environment it is bound
+                        // in, so a later binding of the same name does not
+                        // change it.
+                        let mut value = value.clone();
+                        let mut scoped = false;
+                        walk(&mut value, &mut |e| {
+                            scoped |= matches!(&e.kind, ExprKind::Block { statements, .. } if !statements.is_empty());
+                        });
+                        if scoped {
+                            // Inner bindings would capture the substitution;
+                            // the constant is then built at its uses.
+                            return Ok(false);
+                        }
+                        walk(&mut value, &mut |e| {
+                            if let ExprKind::Name(n) = &e.kind
+                                && let Some(v) = env.get(n)
+                            {
+                                *e = v.clone();
+                            }
+                        });
+                        env.insert(n.clone(), value);
                     }
                     _ => return Ok(false),
                 }
