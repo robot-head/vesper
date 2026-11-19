@@ -1,0 +1,100 @@
+// @export vsys direct
+// | sys library Blake3 (
+// |     target = "@TARGET@", abi = "@ABI@",
+// |     link = "static", name = "vesper_std_blake3",
+// |     artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000"
+// | ) {
+// |     linear extern type Hasher;
+// |     fn vesper_blake3_new() -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_new_keyed(nocapture in key: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_new_derive_key(nocapture in context: CSlice[u8]) -> ForeignVal[Option[Hasher]];
+// |     fn vesper_blake3_update(inout h: Hasher, nocapture in data: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_finalize(in h: Hasher, nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// |     fn vesper_blake3_free(sink h: Hasher) -> ForeignVal[Unit];
+// |     fn vesper_blake3_hash(nocapture in data: CSlice[u8], nocapture inout out: CSlice[u8]) -> ForeignVal[Unit];
+// | }
+//
+// @vesper-std/hash-sys: BLAKE3 through the vetted `blake3` crate
+// (self-hosting SH0 lane 5, #1127).
+//
+// The `.vsys` library `Blake3` above is provided by the Rust host that links
+// the Vesper object: `packages/vesper-std/hash/sys/shim.rs` defines its
+// symbols over the `blake3` crate (SIMD on every target the crate supports).
+// A port names the shim module with `rust=` on its own `@export vsys` line.
+// Results are `@vesper-std/hash::blake3::Digest` values, equal to those of
+// the portable Vesper implementation.
+//
+// A `Hasher` is a linear handle to the crate's `blake3::Hasher`: create it
+// with `hasher_new`/`hasher_new_keyed`/`hasher_new_derive_key`, feed it with
+// `update`, read it with `finalize`/`finalize_xof` and release it once with
+// `hasher_free`; the checker makes every path release it exactly once.
+use @vesper-std/hash::blake3::Digest;
+
+fn read_word(in b: Slice[u8], at: u64) -> u64 {
+    match b.try_read_u64_le(at) {
+        Option::Some(x) => x,
+        Option::None => 0,
+    }
+}
+
+fn digest_of(in b: Slice[u8]) -> Digest {
+    Digest {
+        w0: read_word(in b, 0),
+        w1: read_word(in b, 8),
+        w2: read_word(in b, 16),
+        w3: read_word(in b, 24)
+    }
+}
+
+fn zeros(n: u64) -> ChunkSeq[u8] {
+    let mut s: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](n);
+    s.resize(n, 0);
+    s
+}
+
+// The BLAKE3 digest of `data`, computed by the `blake3` crate.
+pub fn hash(in data: Slice[u8]) -> Digest eff [Ffi[Blake3]] {
+    let mut out = zeros(32);
+    Blake3::vesper_blake3_hash(in data, inout out.as_slice_mut());
+    digest_of(in out.as_slice())
+}
+
+// A new unkeyed hasher (`None` only if the host cannot allocate one).
+pub fn hasher_new() -> Option[Hasher] eff [Ffi[Blake3]] {
+    Blake3::vesper_blake3_new()
+}
+
+// A keyed hasher; `None` unless `key` is exactly 32 bytes.
+pub fn hasher_new_keyed(in key: Slice[u8]) -> Option[Hasher] eff [Ffi[Blake3]] {
+    Blake3::vesper_blake3_new_keyed(in key)
+}
+
+// A key-derivation hasher for `context`; `None` unless `context` is UTF-8.
+pub fn hasher_new_derive_key(in context: Slice[u8]) -> Option[Hasher] eff [Ffi[Blake3]] {
+    Blake3::vesper_blake3_new_derive_key(in context)
+}
+
+// Absorb `data`.
+pub fn update(inout h: Hasher, in data: Slice[u8]) eff [Ffi[Blake3]] {
+    Blake3::vesper_blake3_update(inout h, in data);
+}
+
+// The digest of the input so far; `h` stays usable.
+pub fn finalize(in h: Hasher) -> Digest eff [Ffi[Blake3]] {
+    let mut out = zeros(32);
+    Blake3::vesper_blake3_finalize(in h, inout out.as_slice_mut());
+    digest_of(in out.as_slice())
+}
+
+// Append `n` bytes of extendable output to `out`.
+pub fn finalize_xof(in h: Hasher, n: u64, inout out: ChunkSeq[u8]) eff [Ffi[Blake3]] {
+    let at = out.len();
+    out.resize(wrapping_add(at, n), 0);
+    let end = out.len();
+    Blake3::vesper_blake3_finalize(in h, inout out[at..end]);
+}
+
+// Release `h`.
+pub fn hasher_free(sink h: Hasher) eff [Ffi[Blake3]] {
+    Blake3::vesper_blake3_free(h);
+}

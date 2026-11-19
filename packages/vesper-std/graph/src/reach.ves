@@ -1,0 +1,146 @@
+// @vesper-std/graph::reach: reachability and depth-first orders.
+use self::Graph;
+use self::util::{get32, get64, get_bool, filled_bool};
+
+// Which nodes are reachable from `root` (including `root`); all `false`
+// when `root` is not a node.
+pub fn reachable_from(in g: Graph, root: u32) -> ChunkSeq[bool] {
+    let mut roots: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    roots.push(root);
+    reachable_from_all(in g, in roots.as_slice())
+}
+
+// Which nodes are reachable from any of `roots`; non-nodes are skipped.
+pub fn reachable_from_all(in g: Graph, in roots: Slice[u32]) -> ChunkSeq[bool] {
+    let n = g.node_count();
+    let mut seen = filled_bool(n, false);
+    let mut work: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut i: u64 = 0;
+    loop {
+        if i >= roots.len() {
+            break;
+        }
+        let r = get32(in roots, i, 4294967295);
+        let rk = widen_u64(r);
+        if rk < n && !get_bool(in seen.as_slice(), rk) {
+            seen.try_set(rk, true);
+            work.push(r);
+        }
+        i = wrapping_add(i, 1);
+    }
+    loop {
+        let v = match work.pop() {
+            Option::Some(x) => x,
+            Option::None => break,
+        };
+        let (lo, hi) = g.succ_range(v);
+        let mut e = lo;
+        loop {
+            if e >= hi {
+                break;
+            }
+            let w = g.succ_edge(e);
+            let wk = widen_u64(w);
+            if !get_bool(in seen.as_slice(), wk) {
+                seen.try_set(wk, true);
+                work.push(w);
+            }
+            e = wrapping_add(e, 1);
+        }
+    }
+    seen
+}
+
+// Whether `b` is reachable from `a` (every node reaches itself).
+pub fn reaches(in g: Graph, a: u32, b: u32) -> bool {
+    let n = g.node_count();
+    if widen_u64(a) >= n || widen_u64(b) >= n {
+        false
+    } else if a == b {
+        true
+    } else {
+        let mut seen = filled_bool(n, false);
+        let mut work: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        seen.try_set(widen_u64(a), true);
+        work.push(a);
+        loop {
+            let v = match work.pop() {
+                Option::Some(x) => x,
+                Option::None => break false,
+            };
+            let (lo, hi) = g.succ_range(v);
+            let mut e = lo;
+            let mut found = false;
+            loop {
+                if e >= hi {
+                    break;
+                }
+                let w = g.succ_edge(e);
+                if w == b {
+                    found = true;
+                    break;
+                }
+                let wk = widen_u64(w);
+                if !get_bool(in seen.as_slice(), wk) {
+                    seen.try_set(wk, true);
+                    work.push(w);
+                }
+                e = wrapping_add(e, 1);
+            }
+            if found {
+                break true;
+            }
+        }
+    }
+}
+
+// The nodes reachable from `root` in depth-first postorder (successors in
+// edge order). Empty when `root` is not a node.
+pub fn postorder(in g: Graph, root: u32) -> ChunkSeq[u32] {
+    let n = g.node_count();
+    let mut out: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    if widen_u64(root) < n {
+        let mut seen = filled_bool(n, false);
+        let mut call_node: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut call_edge: ChunkSeq[u64] = ChunkSeq::new[u64]();
+        seen.try_set(widen_u64(root), true);
+        let (lo, _hi) = g.succ_range(root);
+        call_node.push(root);
+        call_edge.push(lo);
+        loop {
+            let depth = call_node.len();
+            if depth == 0 {
+                break;
+            }
+            let top = wrapping_sub(depth, 1);
+            let v = get32(in call_node.as_slice(), top, 0);
+            let e = get64(in call_edge.as_slice(), top, 0);
+            let (_lo, hi) = g.succ_range(v);
+            if e < hi {
+                call_edge.try_set(top, wrapping_add(e, 1));
+                let w = g.succ_edge(e);
+                let wk = widen_u64(w);
+                if !get_bool(in seen.as_slice(), wk) {
+                    seen.try_set(wk, true);
+                    let (wlo, _whi) = g.succ_range(w);
+                    call_node.push(w);
+                    call_edge.push(wlo);
+                }
+            } else {
+                call_node.truncate(top);
+                call_edge.truncate(top);
+                out.push(v);
+            }
+        }
+    }
+    out
+}
+
+// The nodes reachable from `root` in reverse postorder: every node comes
+// before its successors except along back edges.
+pub fn reverse_postorder(in g: Graph, root: u32) -> ChunkSeq[u32] {
+    let po = postorder(in g, root);
+    let mut out: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](po.len());
+    out.extend_reversed(in po.as_slice());
+    out
+}

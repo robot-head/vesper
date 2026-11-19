@@ -1,0 +1,190 @@
+// @vesper-std/arena: typed index arenas (self-hosting SH0 lane 5, #1127).
+//
+// An `Arena[T]` owns its values in one `ChunkSeq[T]`; `alloc` returns a
+// typed `Idx[T]`, a 32-bit position that names a value of that arena's
+// element type only. Trees and graphs (syntax trees, IR, the Place
+// Capability Graph) become index graphs: a node holds `Idx[Node]` fields
+// instead of `Box[Node]`, so a whole tree is one allocation, copies of a
+// node are cheap, and a traversal walks one contiguous buffer.
+//
+// `IdxMap[K, V]` is a side table keyed by `Idx[K]` (types of expressions,
+// spans of nodes): dense, growing on write, reading a default where unset.
+//
+// Access is checked: `get` is an `Option`, `set` and `update` return
+// `false` and write nothing for an index the arena never handed out, so no
+// operation raises. An arena holds at most 2^32 - 1 values; `alloc` past
+// that returns `idx_none()`, which no `get` accepts.
+
+// A typed index into an `Arena[T]`.
+pub copy struct Idx[T] {
+    raw: u32
+}
+
+impl [T] Eq for Idx[T] {}
+
+impl [T] Ord for Idx[T] {}
+
+impl [T] Hash for Idx[T] {}
+
+// The index with position `raw`. Use it to rebuild an index that was stored
+// as a number; `get` checks it.
+pub fn idx_from_raw[T](raw: u32) -> Idx[T] {
+    Idx { raw: raw }
+}
+
+// The reserved index that names no value (`u32::MAX`).
+pub fn idx_none[T]() -> Idx[T] {
+    Idx { raw: 4294967295 }
+}
+
+impl [T] Idx[T] {
+    // The position as a `u32`.
+    pub fn raw(self) -> u32 {
+        self.raw
+    }
+
+    // The position as a `u64`, for indexing sequences.
+    pub fn index(self) -> u64 {
+        widen_u64(self.raw)
+    }
+
+    pub fn is_none(self) -> bool {
+        self.raw == 4294967295
+    }
+}
+
+// An arena of `T` values addressed by `Idx[T]`.
+pub struct Arena[T] {
+    items: ChunkSeq[T]
+}
+
+// An empty arena.
+pub fn arena_new[T: mod copy]() -> Arena[T] {
+    Arena {
+        items: ChunkSeq::new[T]()
+    }
+}
+
+// An empty arena with room for `n` values.
+pub fn arena_with_capacity[T: mod copy](n: u64) -> Arena[T] {
+    Arena {
+        items: ChunkSeq::with_capacity[T](n)
+    }
+}
+
+impl [T: mod copy] Arena[T] {
+    // The number of values allocated.
+    pub fn len(in self) -> u64 {
+        self.items.len()
+    }
+
+    pub fn is_empty(in self) -> bool {
+        self.items.len() == 0
+    }
+
+    // Store `v` and return its index (`idx_none()` once the arena is full).
+    pub fn alloc(inout self, v: T) -> Idx[T] {
+        let n = self.items.len();
+        if n >= 4294967295 {
+            Idx { raw: 4294967295 }
+        } else {
+            self.items.push(v);
+            Idx { raw: wrapping_u32(n) }
+        }
+    }
+
+    // The index the next `alloc` returns.
+    pub fn next_idx(in self) -> Idx[T] {
+        let n = self.items.len();
+        if n >= 4294967295 {
+            Idx { raw: 4294967295 }
+        } else {
+            Idx { raw: wrapping_u32(n) }
+        }
+    }
+
+    // Whether `i` names a value of this arena.
+    pub fn contains(in self, i: Idx[T]) -> bool {
+        widen_u64(i.raw) < self.items.len()
+    }
+
+    // The value at `i`.
+    pub fn get(in self, i: Idx[T]) -> Option[T] {
+        self.items.try_get(widen_u64(i.raw))
+    }
+
+    // The value at `i`, or `fallback`.
+    pub fn get_or(in self, i: Idx[T], fallback: T) -> T {
+        match self.items.try_get(widen_u64(i.raw)) {
+            Option::Some(v) => v,
+            Option::None => fallback,
+        }
+    }
+
+    // Replace the value at `i`; `false` (and nothing written) when `i` is not
+    // in the arena.
+    pub fn set(inout self, i: Idx[T], v: T) -> bool {
+        self.items.try_set(widen_u64(i.raw), v)
+    }
+
+    // The value at position `k` (0-based allocation order), for iteration.
+    pub fn at(in self, k: u64) -> Option[T] {
+        self.items.try_get(k)
+    }
+
+    // Drop every value allocated after the first `n` (rollback after a failed
+    // parse, for example). Indices at or past `n` stop resolving.
+    pub fn truncate(inout self, n: u64) {
+        self.items.truncate(n);
+    }
+
+    // Remove every value.
+    pub fn clear(inout self) {
+        self.items.clear();
+    }
+}
+
+// A dense side table from `Idx[K]` to `V`: unset entries read as the
+// default given at creation.
+pub struct IdxMap[K, V] {
+    vals: ChunkSeq[V],
+    dflt: V
+}
+
+// An empty side table whose unset entries read as `dflt`.
+pub fn idx_map_new[K, V: mod copy](dflt: V) -> IdxMap[K, V] {
+    IdxMap {
+        vals: ChunkSeq::new[V](),
+        dflt: dflt
+    }
+}
+
+impl [K, V: mod copy] IdxMap[K, V] {
+    // One past the highest index written.
+    pub fn len(in self) -> u64 {
+        self.vals.len()
+    }
+
+    // The value for `i`, or the default.
+    pub fn get(in self, i: Idx[K]) -> V {
+        match self.vals.try_get(widen_u64(i.raw)) {
+            Option::Some(v) => v,
+            Option::None => self.dflt,
+        }
+    }
+
+    // Set the value for `i`, growing the table with defaults as needed.
+    // `false` (nothing written) for `idx_none()`.
+    pub fn set(inout self, i: Idx[K], v: V) -> bool {
+        if i.raw == 4294967295 {
+            false
+        } else {
+            let k = widen_u64(i.raw);
+            if k >= self.vals.len() {
+                let d = self.dflt;
+                self.vals.resize(wrapping_add(k, 1), d);
+            }
+            self.vals.try_set(k, v)
+        }
+    }
+}

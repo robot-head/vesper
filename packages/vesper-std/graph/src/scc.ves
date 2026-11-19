@@ -1,0 +1,150 @@
+// @vesper-std/graph::scc: strongly connected components (Tarjan, iterative).
+use self::util::{get32, get64, get_bool, filled32, filled_bool};
+use self::Graph;
+
+// The strongly connected components of a graph. Components are numbered
+// `0..count()` in the order Tarjan's algorithm completes them, which is a
+// reverse topological order of the condensation: every edge between two
+// components goes from a higher number to a lower one (component 0 has no
+// edge to another component).
+pub struct Scc {
+    comp: ChunkSeq[u32],
+    // Nodes grouped by component; component c is nodes[starts[c]..starts[c + 1]],
+    // in the order the algorithm popped them.
+    nodes: ChunkSeq[u32],
+    starts: ChunkSeq[u64]
+}
+
+impl Scc {
+    // The number of components.
+    pub fn count(in self) -> u64 {
+        wrapping_sub(self.starts.len(), 1)
+    }
+
+    // The component of node `v`, or `none()`.
+    pub fn component(in self, v: u32) -> u32 {
+        get32(in self.comp.as_slice(), widen_u64(v), 4294967295)
+    }
+
+    // The number of nodes in component `c`.
+    pub fn size(in self, c: u32) -> u64 {
+        let k = widen_u64(c);
+        let a = get64(in self.starts.as_slice(), k, 0);
+        wrapping_sub(get64(in self.starts.as_slice(), wrapping_add(k, 1), a), a)
+    }
+
+    // The `i`th node of component `c`, or `none()`.
+    pub fn member(in self, c: u32, i: u64) -> u32 {
+        let k = widen_u64(c);
+        let a = get64(in self.starts.as_slice(), k, 0);
+        let b = get64(in self.starts.as_slice(), wrapping_add(k, 1), a);
+        if i >= wrapping_sub(b, a) {
+            4294967295
+        } else {
+            get32(in self.nodes.as_slice(), wrapping_add(a, i), 4294967295)
+        }
+    }
+}
+
+fn min32(a: u32, b: u32) -> u32 {
+    if a < b { a } else { b }
+}
+
+// The strongly connected components of `g`. Roots are tried in node order
+// and edges in insertion order; the recursion is an explicit stack, so deep
+// graphs do not overflow.
+pub fn scc(in g: Graph) -> Scc {
+    let n = g.node_count();
+    let unvisited: u32 = 4294967295;
+    let mut index = filled32(n, unvisited);
+    let mut low = filled32(n, 0);
+    let mut on = filled_bool(n, false);
+    let mut comp = filled32(n, unvisited);
+    let mut stack: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut call_node: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut call_edge: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    let mut nodes: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    starts.push(0);
+    let mut counter: u32 = 0;
+    let mut ncomp: u32 = 0;
+    let mut r: u64 = 0;
+    loop {
+        if r >= n {
+            break;
+        }
+        if get32(in index.as_slice(), r, 0) == unvisited {
+            let root = wrapping_u32(r);
+            index.try_set(r, counter);
+            low.try_set(r, counter);
+            counter = wrapping_add(counter, 1);
+            stack.push(root);
+            on.try_set(r, true);
+            let (lo, _hi) = g.succ_range(root);
+            call_node.push(root);
+            call_edge.push(lo);
+            loop {
+                let depth = call_node.len();
+                if depth == 0 {
+                    break;
+                }
+                let top = wrapping_sub(depth, 1);
+                let v = get32(in call_node.as_slice(), top, 0);
+                let vk = widen_u64(v);
+                let e = get64(in call_edge.as_slice(), top, 0);
+                let (_lo, hi) = g.succ_range(v);
+                if e < hi {
+                    call_edge.try_set(top, wrapping_add(e, 1));
+                    let w = g.succ_edge(e);
+                    let wk = widen_u64(w);
+                    let wi = get32(in index.as_slice(), wk, 0);
+                    if wi == unvisited {
+                        index.try_set(wk, counter);
+                        low.try_set(wk, counter);
+                        counter = wrapping_add(counter, 1);
+                        stack.push(w);
+                        on.try_set(wk, true);
+                        let (wlo, _whi) = g.succ_range(w);
+                        call_node.push(w);
+                        call_edge.push(wlo);
+                    } else if get_bool(in on.as_slice(), wk) {
+                        let lv = get32(in low.as_slice(), vk, 0);
+                        low.try_set(vk, min32(lv, wi));
+                    }
+                } else {
+                    call_node.truncate(top);
+                    call_edge.truncate(top);
+                    let lv = get32(in low.as_slice(), vk, 0);
+                    if lv == get32(in index.as_slice(), vk, 0) {
+                        loop {
+                            let w = match stack.pop() {
+                                Option::Some(x) => x,
+                                Option::None => break,
+                            };
+                            let wk = widen_u64(w);
+                            on.try_set(wk, false);
+                            comp.try_set(wk, ncomp);
+                            nodes.push(w);
+                            if w == v {
+                                break;
+                            }
+                        }
+                        starts.push(nodes.len());
+                        ncomp = wrapping_add(ncomp, 1);
+                    }
+                    if top > 0 {
+                        let u = widen_u64(get32(in call_node.as_slice(), wrapping_sub(top, 1), 0));
+                        let lu = get32(in low.as_slice(), u, 0);
+                        low.try_set(u, min32(lu, lv));
+                    }
+                }
+            }
+        }
+        r = wrapping_add(r, 1);
+    }
+    Scc {
+        comp: comp,
+        nodes: nodes,
+        starts: starts
+    }
+}

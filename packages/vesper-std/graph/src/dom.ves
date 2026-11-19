@@ -1,0 +1,127 @@
+// @vesper-std/graph::dom: immediate dominators (Cooper, Harvey and Kennedy,
+// "A Simple, Fast Dominance Algorithm", 2001).
+use self::Graph;
+use self::reach::reverse_postorder;
+use self::util::{get32, filled32};
+
+// The dominator tree of the nodes reachable from a root.
+pub struct Dominators {
+    root: u32,
+    idom: ChunkSeq[u32]
+}
+
+impl Dominators {
+    pub fn root(in self) -> u32 {
+        self.root
+    }
+
+    // The immediate dominator of `v`: `v` itself for the root, `none()` for
+    // a node the root does not reach.
+    pub fn idom(in self, v: u32) -> u32 {
+        get32(in self.idom.as_slice(), widen_u64(v), 4294967295)
+    }
+
+    // Whether `a` dominates `b` (every node the root reaches dominates
+    // itself).
+    pub fn dominates(in self, a: u32, b: u32) -> bool {
+        let unreached: u32 = 4294967295;
+        if self.idom(a) == unreached || self.idom(b) == unreached {
+            false
+        } else {
+            let mut cur = b;
+            loop {
+                if cur == a {
+                    break true;
+                }
+                if cur == self.root {
+                    break false;
+                }
+                cur = self.idom(cur);
+            }
+        }
+    }
+}
+
+// The immediate dominators of every node `root` reaches. The iteration runs
+// over reverse postorder until no `idom` changes.
+pub fn dominators(in g: Graph, root: u32) -> Dominators {
+    let n = g.node_count();
+    let unreached: u32 = 4294967295;
+    let mut idom = filled32(n, unreached);
+    let rpo = reverse_postorder(in g, root);
+    let count = rpo.len();
+    if count > 0 {
+        // po[v] is v's postorder number: higher is closer to the root.
+        let mut po = filled32(n, 0);
+        let mut i: u64 = 0;
+        loop {
+            if i >= count {
+                break;
+            }
+            let v = get32(in rpo.as_slice(), i, 0);
+            po.try_set(widen_u64(v), wrapping_u32(wrapping_sub(wrapping_sub(count, 1), i)));
+            i = wrapping_add(i, 1);
+        }
+        idom.try_set(widen_u64(root), root);
+        loop {
+            let mut changed = false;
+            let mut k: u64 = 1;
+            loop {
+                if k >= count {
+                    break;
+                }
+                let b = get32(in rpo.as_slice(), k, 0);
+                let (lo, hi) = g.pred_range(b);
+                let mut e = lo;
+                let mut new_idom = unreached;
+                loop {
+                    if e >= hi {
+                        break;
+                    }
+                    let p = g.pred_edge(e);
+                    if get32(in idom.as_slice(), widen_u64(p), unreached) != unreached {
+                        if new_idom == unreached {
+                            new_idom = p;
+                        } else {
+                            // intersect(p, new_idom)
+                            let mut f1 = p;
+                            let mut f2 = new_idom;
+                            loop {
+                                if f1 == f2 {
+                                    break;
+                                }
+                                loop {
+                                    if get32(in po.as_slice(), widen_u64(f1), 0) >= get32(in po.as_slice(), widen_u64(f2), 0) {
+                                        break;
+                                    }
+                                    f1 = get32(in idom.as_slice(), widen_u64(f1), root);
+                                }
+                                loop {
+                                    if get32(in po.as_slice(), widen_u64(f2), 0) >= get32(in po.as_slice(), widen_u64(f1), 0) {
+                                        break;
+                                    }
+                                    f2 = get32(in idom.as_slice(), widen_u64(f2), root);
+                                }
+                            }
+                            new_idom = f1;
+                        }
+                    }
+                    e = wrapping_add(e, 1);
+                }
+                let bk = widen_u64(b);
+                if get32(in idom.as_slice(), bk, unreached) != new_idom {
+                    idom.try_set(bk, new_idom);
+                    changed = true;
+                }
+                k = wrapping_add(k, 1);
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+    Dominators {
+        root: root,
+        idom: idom
+    }
+}
