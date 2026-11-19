@@ -15,10 +15,10 @@ mod integer_widths_rules;
 #[path = "tiled/check.rs"]
 mod tiled_rules;
 
-#[path = "loops/check.rs"]
-mod loop_rules;
 #[path = "arrays/check.rs"]
 mod array_rules;
+#[path = "loops/check.rs"]
+mod loop_rules;
 #[path = "seq/check.rs"]
 mod seq_rules;
 #[path = "strings/check.rs"]

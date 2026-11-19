@@ -1182,8 +1182,8 @@ impl Parser<'_> {
     /// `[M, N]` has none.
     fn array_type_ahead(&self) -> bool {
         let mut depth = 0usize;
-        for i in self.pos..self.tokens.len() {
-            let k = self.tokens[i].kind;
+        for token in &self.tokens[self.pos..] {
+            let k = token.kind;
             if k.trivia() {
                 continue;
             }

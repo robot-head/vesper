@@ -18,6 +18,10 @@ use crate::ast::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+/// A `for` binding: its pattern, its type, whether it is nonzero, and its
+/// known integer range.
+type LoopBinding<'a> = (&'a Pattern, &'a Type, bool, Option<(i128, i128)>);
+
 /// A lexical control boundary, innermost last.
 #[derive(Debug, Clone)]
 pub(super) enum ControlFrame {
@@ -156,7 +160,7 @@ impl Checker<'_> {
         env: &mut Env,
         expected: &Type,
         value: bool,
-        bind: Option<(&Pattern, &Type, bool, Option<(i128, i128)>)>,
+        bind: Option<LoopBinding<'_>>,
         span: Span,
     ) -> Type {
         self.havoc(body, env);

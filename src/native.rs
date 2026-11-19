@@ -3315,7 +3315,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                             Some(Type::Tuple(pair)) if pair.len() == 2 => {
                                 substitute(&pair[1], &self.generic_vars)
                             }
-                            _ => return Err("native array write requires an (index, value) pair".into()),
+                            _ => {
+                                return Err(
+                                    "native array write requires an (index, value) pair".into()
+                                );
+                            }
                         };
                         self.array_store(&inst.span, op, &left, index, element, &element_ty)?
                     }

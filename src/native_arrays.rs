@@ -86,13 +86,10 @@ impl<M: Module> Codegen<'_, '_, M> {
             value
         } else {
             let old = self.load(address, &element.ty)?;
-            let unsigned = crate::numeric::IntegerKind::from_type(&element.ty)
-                .is_some_and(|k| k.unsigned());
-            let checked = crate::numeric::IntegerKind::from_type(&element.ty).filter(|_| {
-                self.world
-                    .overflow_ops
-                    .contains(&(span.start, span.end))
-            });
+            let unsigned =
+                crate::numeric::IntegerKind::from_type(&element.ty).is_some_and(|k| k.unsigned());
+            let checked = crate::numeric::IntegerKind::from_type(&element.ty)
+                .filter(|_| self.world.overflow_ops.contains(&(span.start, span.end)));
             let v = if let Some(kind) = checked {
                 self.checked_arithmetic(&assign[..1], kind, old, value)?
             } else {

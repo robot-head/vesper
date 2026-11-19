@@ -184,11 +184,7 @@ fn closure() -> u64 {{
 }}
 fn main() -> u64 {{ wrapping_add(sum(), closure()) }}"
     );
-    differential(
-        "large",
-        &source,
-        values.iter().sum::<u64>() + values[255],
-    );
+    differential("large", &source, values.iter().sum::<u64>() + values[255]);
     // Natively the reads are loads from read-only data, not a rebuilt table.
     let c = accepted(&source);
     let object = native::object(&c.world, "main").unwrap().0;

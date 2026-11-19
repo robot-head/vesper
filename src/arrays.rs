@@ -72,9 +72,7 @@ pub fn lower_consts(module: &Module) -> Option<Module> {
         .items
         .iter()
         .filter_map(|i| match i {
-            Item::Function(f) if is_const_function(&f.name) => {
-                Some(const_name(&f.name).to_owned())
-            }
+            Item::Function(f) if is_const_function(&f.name) => Some(const_name(&f.name).to_owned()),
             _ => None,
         })
         .collect::<BTreeSet<_>>();
@@ -174,7 +172,11 @@ pub fn walk(e: &mut Expr, g: &mut dyn FnMut(&mut Expr)) {
         }
         ExprKind::Closure { body, .. } => walk(body, g),
         ExprKind::Handle {
-            state, body, ret, ops, ..
+            state,
+            body,
+            ret,
+            ops,
+            ..
         } => {
             if let Some((_, s)) = state {
                 walk(s, g);
@@ -506,7 +508,15 @@ fn encode(
                 return Ok(false);
             }
             for (f, e) in fields.iter().zip(es) {
-                if !encode(world, e, &f.layout, out, at + f.offset as usize, env, depth + 1)? {
+                if !encode(
+                    world,
+                    e,
+                    &f.layout,
+                    out,
+                    at + f.offset as usize,
+                    env,
+                    depth + 1,
+                )? {
                     return Ok(false);
                 }
             }
@@ -523,7 +533,15 @@ fn encode(
                 let Some((_, e)) = values.iter().find(|(n, _)| *n == f.name) else {
                     return Ok(false);
                 };
-                if !encode(world, e, &f.layout, out, at + f.offset as usize, env, depth + 1)? {
+                if !encode(
+                    world,
+                    e,
+                    &f.layout,
+                    out,
+                    at + f.offset as usize,
+                    env,
+                    depth + 1,
+                )? {
                     return Ok(false);
                 }
             }

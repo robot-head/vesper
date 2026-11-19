@@ -168,7 +168,9 @@ fn array_types_and_literals_are_homogeneous_tuples() {
     let Item::Function(f) = &shape.module.items[0] else {
         panic!("expected a function");
     };
-    assert!(!matches!(&f.params[0].ty, Type::Named(_, a) if matches!(a.get(1), Some(Type::Tuple(_)))));
+    assert!(
+        !matches!(&f.params[0].ty, Type::Named(_, a) if matches!(a.get(1), Some(Type::Tuple(_))))
+    );
 }
 
 #[test]

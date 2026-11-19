@@ -140,7 +140,16 @@ impl Checker<'_> {
         let u64_ty = Type::named("u64");
         let t = self.expr_expected(&args[0].expr, env, Usage::Own, &u64_ty);
         self.expect_type(&u64_ty, &t, args[0].expr.span.clone());
-        self.array_element_write(&span, "=", &p, &args[0].expr, &args[1].expr, &element_ty, n, env);
+        self.array_element_write(
+            &span,
+            "=",
+            &p,
+            &args[0].expr,
+            &args[1].expr,
+            &element_ty,
+            n,
+            env,
+        );
         Some(Type::unit())
     }
 
