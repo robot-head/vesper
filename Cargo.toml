@@ -97,6 +97,7 @@ members = [
     "crates/vesper-port-harness",
     "crates/vesper-port-build",
     "crates/vesper-port-pilot",
+    "crates/vesper-test",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -195,6 +196,7 @@ default-members = [
     "crates/vesper-port-harness",
     "crates/vesper-port-build",
     "crates/vesper-port-pilot",
+    "crates/vesper-test",
     "experiments/native-pulse",
 ]
 
@@ -258,6 +260,7 @@ vesper-bench-pmu = { path = "crates/vesper-bench-pmu" }
 # The compiler links the frozen Rust seed copy (seed-copy rule, #906).
 vesper-grammar = { path = "crates/vesper-grammar/seed", package = "vesper-grammar-seed" }
 vesper-doc = { path = "crates/vesper-doc" }
+vesper-test = { path = "crates/vesper-test" }
 # The compiler links the frozen Rust seed copy, never the port-backed package
 # (seed-copy rule, docs/maintenance/porting-a-crate.md).
 vesper-beacon = { path = "crates/vesper-beacon/seed", package = "vesper-beacon-seed" }

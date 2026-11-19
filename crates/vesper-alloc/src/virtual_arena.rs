@@ -54,6 +54,9 @@ pub struct VirtualArenaConfig {
     /// Align the reservation to [`HUGE_PAGE`] (2 MiB) and advise transparent
     /// huge pages where the host supports it.
     pub huge_pages: bool,
+    /// Reserve an inaccessible trailing OS guard page (`PROT_NONE` on Unix,
+    /// `PAGE_NOACCESS` on Windows) so out-of-bounds writes trap immediately.
+    pub guard_pages: bool,
 }
 
 impl VirtualArenaConfig {
@@ -63,6 +66,7 @@ impl VirtualArenaConfig {
             max_allocations: 1 << 20,
             max_checkpoints: 1024,
             huge_pages: false,
+            guard_pages: false,
         }
     }
 
@@ -72,6 +76,12 @@ impl VirtualArenaConfig {
             huge_pages: true,
             ..self
         }
+    }
+
+    /// Enable or disable the trailing OS guard page.
+    pub fn with_guard_pages(mut self, enabled: bool) -> Self {
+        self.guard_pages = enabled;
+        self
     }
 }
 
@@ -290,7 +300,7 @@ impl VirtualArena {
                 }
             }
         };
-        let res = Reservation::new(reserved, config.huge_pages)?;
+        let res = Reservation::new(reserved, config.huge_pages, config.guard_pages)?;
         Ok(Self {
             id,
             base: res.base(),
@@ -314,6 +324,11 @@ impl VirtualArena {
     /// Outcome of the 2 MiB page hint.
     pub fn huge_pages(&self) -> HugePageStatus {
         self.res.huge()
+    }
+
+    /// Whether a trailing OS guard page is active at the end of the mapping.
+    pub fn has_guard_page(&self) -> bool {
+        self.res.has_guard_page()
     }
 
     /// Base address of the reservation. Inspect only.
@@ -536,6 +551,16 @@ impl VirtualArena {
         self.resets += 1;
     }
 
+    /// Fast cursor reset to 0 without unmapping the reservation or advising
+    /// touched pages back to the OS. Invalidates every existing handle and
+    /// checkpoint while keeping the mapping hot for reuse across test frames.
+    pub fn reset_cursor(&mut self) {
+        self.allocs.clear();
+        self.marks.clear();
+        self.cursor = 0;
+        self.resets += 1;
+    }
+
     // ----- VirtualVec ------------------------------------------------------
 
     fn elem_layout<T>() -> Result<(), VirtualArenaError> {
@@ -732,7 +757,7 @@ impl VirtualChunkBacking {
             .filter(|n| *n <= isize::MAX as usize)
             .ok_or(VirtualArenaError::SizeOverflow)?;
         Ok(Self {
-            res: Reservation::new(len, huge_pages)?,
+            res: Reservation::new(len, huge_pages, false)?,
             cursor: 0,
             holes: Vec::new(),
             live: 0,
@@ -915,3 +940,87 @@ impl crate::Region<VirtualChunkBacking> {
         Self::with_backing(config, backing).map_err(VirtualRegionError::Config)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn guard_pages_default_false_and_opt_in_enabled() {
+        let plain_cfg = VirtualArenaConfig::reserve(VIRTUAL_PAGE);
+        assert!(!plain_cfg.guard_pages);
+        let plain = VirtualArena::new(plain_cfg).unwrap();
+        assert!(!plain.has_guard_page());
+
+        let guarded_cfg = VirtualArenaConfig::reserve(VIRTUAL_PAGE).with_guard_pages(true);
+        assert!(guarded_cfg.guard_pages);
+        let mut guarded = VirtualArena::new(guarded_cfg).unwrap();
+        assert_eq!(guarded.reserved_bytes(), VIRTUAL_PAGE);
+        if matches!(
+            guarded.backing_kind(),
+            VirtualBackingKind::Mmap | VirtualBackingKind::VirtualAlloc
+        ) {
+            assert!(guarded.has_guard_page());
+        }
+
+        // Full usable capacity can be allocated and written without hitting the guard page.
+        let handle = guarded.alloc_bytes(VIRTUAL_PAGE, VIRTUAL_PAGE).unwrap();
+        guarded.bytes_mut(&handle).unwrap().fill(0x5A);
+        assert!(guarded.bytes(&handle).unwrap().iter().all(|&b| b == 0x5A));
+        assert!(matches!(
+            guarded.alloc_bytes(1, 1),
+            Err(VirtualArenaError::Exhausted { .. })
+        ));
+    }
+
+    #[test]
+    fn guard_pages_with_huge_page_hint_succeeds() {
+        let cfg = VirtualArenaConfig::reserve(HUGE_PAGE)
+            .huge_page_hint()
+            .with_guard_pages(true);
+        let mut arena = VirtualArena::new(cfg).unwrap();
+        if matches!(
+            arena.backing_kind(),
+            VirtualBackingKind::Mmap | VirtualBackingKind::VirtualAlloc
+        ) {
+            assert!(arena.has_guard_page());
+        }
+        let h = arena.alloc_bytes(4096, 64).unwrap();
+        arena.bytes_mut(&h).unwrap()[0] = 42;
+        assert_eq!(arena.bytes(&h).unwrap()[0], 42);
+    }
+
+    #[test]
+    fn reset_cursor_reuses_reservation_and_invalidates_handles() {
+        let mut arena =
+            VirtualArena::new(VirtualArenaConfig::reserve(64 * 1024).with_guard_pages(true))
+                .unwrap();
+        let base_before = arena.base_addr();
+        let h1 = arena.alloc_bytes(4096, 8).unwrap();
+        arena.bytes_mut(&h1).unwrap().fill(0xCD);
+        let mark = arena.checkpoint().unwrap();
+        let touched_before = arena.stats().touched_bytes;
+        assert!(touched_before >= 4096);
+
+        arena.reset_cursor();
+
+        // Reservation stays mapped at the same base address; cursor resets to 0.
+        assert_eq!(arena.base_addr(), base_before);
+        let st = arena.stats();
+        assert_eq!(st.used_bytes, 0);
+        assert_eq!(st.allocations, 0);
+        assert_eq!(st.resets, 1);
+        assert_eq!(st.touched_bytes, touched_before);
+
+        // Previous handles and checkpoints are invalidated.
+        assert_eq!(arena.bytes(&h1).unwrap_err(), VirtualArenaError::Stale);
+        assert_eq!(arena.rewind(mark).unwrap_err(), VirtualArenaError::Stale);
+
+        // Fresh allocation starts back at the base and is zeroed.
+        let h2 = arena.alloc_bytes(4096, 8).unwrap();
+        assert_ne!(h1, h2);
+        assert_eq!(arena.bytes_addr(&h2).unwrap(), base_before);
+        assert!(arena.bytes(&h2).unwrap().iter().all(|&b| b == 0));
+    }
+}
+
