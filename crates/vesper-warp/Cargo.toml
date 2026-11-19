@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2024"
 description = "Sans-IO QUIC packet core (RFC 9000 headers, frames, packet numbers) and RFC 9002 loss recovery for Vesper Warp"
 publish = false
+build = "build.rs"
+
+[features]
+# Forward varint, packet_number, header, frame and ack to the Vesper port in
+# vesper/ (port wave P3b lane 4, #1066). Rust stays the default build.
+vesper-port = ["dep:vesper-port-abi", "dep:vesper-port-harness"]
+# A deliberately wrong Vesper build, one change per ported module: the port
+# test runs must fail (crates/vesper-warp/port/test-port.sh asserts it).
+vesper-port-divergent = ["vesper-port"]
 
 [dependencies]
 # Wave six (issue #247): address-validation tokens (AES-256-GCM), stateless
@@ -25,9 +34,16 @@ vesper-warp-tls = { path = "../vesper-warp-tls" }
 vesper-warp-umem = { path = "../vesper-warp-umem" }
 vesper-warp-wheel = { path = "../vesper-warp-wheel" }
 
+vesper-port-abi = { path = "../vesper-port-abi", optional = true }
+
+[build-dependencies]
+vesper-port-harness = { path = "../vesper-port-harness", optional = true }
+
 [dev-dependencies]
 # Wave six (issue #247): interop against an independent QUIC stack, in
 # tests only. Pinned exactly; aws-lc-rs, the provider the workspace's
 # rustls already uses.
 bytes = "=1.12.1"
 quinn-proto = { version = "=0.11.13", default-features = false, features = ["rustls-aws-lc-rs"] }
+# The ABBA benchmark of the two builds (examples/abba.rs, #1066).
+vesper-bench = { path = "../vesper-bench" }

@@ -1,0 +1,10 @@
+// Module util of @vesper/resonance (see lib.ves): float predicates.
+
+// Whether the f32 with bits `b` is finite.
+pub fn finite_bits(b: u32) -> bool {
+    b & 2139095040 != 2139095040
+}
+
+pub fn is_finite(v: f32) -> bool {
+    finite_bits(to_bits_f32(v))
+}

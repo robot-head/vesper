@@ -46,6 +46,44 @@ impl std::fmt::Display for SlabError {
 
 impl std::error::Error for SlabError {}
 
+/// The `SlabError` of a geometry call of the port.
+#[cfg(vesper_port)]
+fn slab_fault<E: std::fmt::Debug + SlabFaultOf>(e: E) -> SlabError {
+    match e.fault() {
+        Some(crate::port::SlabFault::TooLarge(buffers, block)) => SlabError::TooLarge {
+            buffers: buffers as usize,
+            block: block as usize,
+        },
+        None => panic!("the Vesper port of vesper-resonance failed: {e:?}"),
+    }
+}
+
+/// The `SlabFault` inside a port error, if that is what it is.
+#[cfg(vesper_port)]
+trait SlabFaultOf {
+    fn fault(&self) -> Option<crate::port::SlabFault>;
+}
+
+#[cfg(vesper_port)]
+impl SlabFaultOf for crate::port::TiledGeometryError {
+    fn fault(&self) -> Option<crate::port::SlabFault> {
+        match self {
+            crate::port::TiledGeometryError::SlabFault(f) => Some(*f),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(vesper_port)]
+impl SlabFaultOf for crate::port::DelayLayoutError {
+    fn fault(&self) -> Option<crate::port::SlabFault> {
+        match self {
+            crate::port::DelayLayoutError::SlabFault(f) => Some(*f),
+            _ => None,
+        }
+    }
+}
+
 /// One allocation holding `buffers` cache-line-aligned blocks of `block`
 /// samples.
 #[derive(Debug)]
@@ -59,6 +97,29 @@ pub struct TiledSlab {
 
 impl TiledSlab {
     /// A zeroed slab. Allocates once.
+    #[cfg(vesper_port)]
+    pub fn new(buffers: usize, block: usize) -> Result<Self, SlabError> {
+        let (stride, len) =
+            crate::port::tiled_geometry(buffers as u64, block as u64).map_err(slab_fault)?;
+        let (stride, len) = (stride as usize, len as usize);
+        let data = vec![0.0f32; len];
+        // `align_offset` counts elements; at most 15 for a 4-byte-aligned
+        // pointer and a 64-byte target.
+        let base = data.as_ptr().align_offset(TILE_BYTES);
+        if base >= TILE_SAMPLES {
+            return Err(SlabError::Unalignable);
+        }
+        Ok(TiledSlab {
+            data,
+            base,
+            stride,
+            buffers,
+            block,
+        })
+    }
+
+    /// A zeroed slab. Allocates once.
+    #[cfg(not(vesper_port))]
     pub fn new(buffers: usize, block: usize) -> Result<Self, SlabError> {
         let too_large = SlabError::TooLarge { buffers, block };
         let stride =
@@ -203,6 +264,7 @@ impl SlabRead<'_> {
     }
 }
 
+#[cfg(not(vesper_port))]
 #[derive(Clone, Copy, Debug)]
 struct DelaySlotMeta {
     offset: usize,
@@ -223,7 +285,12 @@ struct DelaySlotMeta {
 pub struct DelaySlab {
     data: Vec<f32>,
     base: usize,
+    #[cfg(not(vesper_port))]
     slots: Vec<DelaySlotMeta>,
+    /// The port build keeps each line's metadata as the words the port reads
+    /// and updates: offset, delay, capacity, stride and head.
+    #[cfg(vesper_port)]
+    slots: Vec<[u64; 5]>,
     block: usize,
     total_stride: usize,
 }
@@ -231,6 +298,92 @@ pub struct DelaySlab {
 impl DelaySlab {
     /// Allocate one zeroed slab holding a delay line for each delay length in
     /// `delays`, each sized for blocks of `block` samples. Allocates once.
+    #[cfg(vesper_port)]
+    pub fn new(delays: &[u32], block: usize) -> Result<Self, SlabError> {
+        let w = crate::port::delay_layout(delays, block as u64).map_err(slab_fault)?;
+        let (total_stride, len) = (w[w.len() - 2] as usize, w[w.len() - 1] as usize);
+        let slots: Vec<[u64; 5]> = w[..w.len() - 2].as_chunks::<5>().0.to_vec();
+        if slots.is_empty() {
+            return Ok(DelaySlab {
+                data: Vec::new(),
+                base: 0,
+                slots,
+                block,
+                total_stride: 0,
+            });
+        }
+        let data = vec![0.0f32; len];
+        let base = data.as_ptr().align_offset(TILE_BYTES);
+        if base >= TILE_SAMPLES {
+            return Err(SlabError::Unalignable);
+        }
+        Ok(DelaySlab {
+            data,
+            base,
+            slots,
+            block,
+            total_stride,
+        })
+    }
+
+    /// Delay length (in samples) of `line`.
+    #[cfg(vesper_port)]
+    pub fn line_delay(&self, line: usize) -> Option<usize> {
+        self.slots.get(line).map(|s| s[1] as usize)
+    }
+
+    /// Padded sample stride of `line` (always a multiple of [`TILE_SAMPLES`]).
+    #[cfg(vesper_port)]
+    pub fn line_stride(&self, line: usize) -> Option<usize> {
+        self.slots.get(line).map(|s| s[3] as usize)
+    }
+
+    /// Byte addresses of every delay line start, for layout verification.
+    #[cfg(vesper_port)]
+    pub fn line_addresses(&self) -> impl Iterator<Item = usize> + '_ {
+        self.slots
+            .iter()
+            .map(|s| self.data[self.base + s[0] as usize..].as_ptr() as usize)
+    }
+
+    /// Write `input` samples into `line` at its current head.
+    #[cfg(vesper_port)]
+    pub fn write(&mut self, line: usize, input: &[f32]) {
+        use crate::port::{bits, bits_mut};
+        crate::port::ok(crate::port::delay_write(
+            bits_mut(&mut self.data),
+            self.base as u64,
+            self.slots.as_flattened(),
+            line as u64,
+            bits(input),
+        ));
+    }
+
+    /// Read delayed samples from `line` into `out`.
+    #[cfg(vesper_port)]
+    pub fn read(&self, line: usize, out: &mut [f32]) {
+        use crate::port::{bits, bits_mut};
+        crate::port::ok(crate::port::delay_read(
+            bits(&self.data),
+            self.base as u64,
+            self.slots.as_flattened(),
+            line as u64,
+            bits_mut(out),
+        ));
+    }
+
+    /// Advance every delay line's ring head by `block` samples.
+    #[cfg(vesper_port)]
+    pub fn advance_all(&mut self, block: usize) {
+        crate::port::ok(crate::port::delay_advance(
+            self.slots.as_flattened_mut(),
+            block as u64,
+        ));
+    }
+
+    /// Allocate one zeroed slab holding a delay line for each delay length in
+    /// `delays`, each sized for blocks of `block` samples. Allocates once.
+    #[cfg(not(vesper_port))]
     pub fn new(delays: &[u32], block: usize) -> Result<Self, SlabError> {
         let too_large = SlabError::TooLarge {
             buffers: delays.len(),
@@ -305,16 +458,19 @@ impl DelaySlab {
     }
 
     /// Delay length (in samples) of `line`.
+    #[cfg(not(vesper_port))]
     pub fn line_delay(&self, line: usize) -> Option<usize> {
         self.slots.get(line).map(|s| s.delay)
     }
 
     /// Padded sample stride of `line` (always a multiple of [`TILE_SAMPLES`]).
+    #[cfg(not(vesper_port))]
     pub fn line_stride(&self, line: usize) -> Option<usize> {
         self.slots.get(line).map(|s| s.stride)
     }
 
     /// Byte addresses of every delay line start, for layout verification.
+    #[cfg(not(vesper_port))]
     pub fn line_addresses(&self) -> impl Iterator<Item = usize> + '_ {
         self.slots
             .iter()
@@ -322,6 +478,7 @@ impl DelaySlab {
     }
 
     /// Write `input` samples into `line` at its current head.
+    #[cfg(not(vesper_port))]
     pub fn write(&mut self, line: usize, input: &[f32]) {
         let Some(&slot) = self.slots.get(line) else {
             return;
@@ -341,6 +498,7 @@ impl DelaySlab {
     }
 
     /// Read delayed samples from `line` into `out`.
+    #[cfg(not(vesper_port))]
     pub fn read(&self, line: usize, out: &mut [f32]) {
         let Some(&slot) = self.slots.get(line) else {
             return;
@@ -368,6 +526,7 @@ impl DelaySlab {
     }
 
     /// Advance every delay line's ring head by `block` samples.
+    #[cfg(not(vesper_port))]
     pub fn advance_all(&mut self, block: usize) {
         for slot in &mut self.slots {
             let next = slot.head + block;
@@ -400,9 +559,13 @@ impl Clone for DelaySlab {
             "cloned delay slab cannot be aligned to 64 bytes"
         );
         for slot in &self.slots {
-            let src = self.base + slot.offset;
-            let dst = base + slot.offset;
-            data[dst..dst + slot.cap].copy_from_slice(&self.data[src..src + slot.cap]);
+            #[cfg(vesper_port)]
+            let (offset, cap) = (slot[0] as usize, slot[2] as usize);
+            #[cfg(not(vesper_port))]
+            let (offset, cap) = (slot.offset, slot.cap);
+            let src = self.base + offset;
+            let dst = base + offset;
+            data[dst..dst + cap].copy_from_slice(&self.data[src..src + cap]);
         }
         DelaySlab {
             data,

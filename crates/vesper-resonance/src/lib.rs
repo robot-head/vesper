@@ -51,6 +51,22 @@ pub mod simd;
 pub mod slab;
 pub mod spsc;
 
+// Generated and committed, but kept outside src/ so formatters, which check
+// every file under src/, never reflow it (see the porting recipe).
+#[cfg(vesper_port)]
+#[allow(unsafe_code)]
+#[rustfmt::skip]
+#[path = "../port/binding.rs"]
+mod port_binding;
+#[cfg(vesper_port)]
+mod port;
+
+/// Which build this is: `"vesper"` for the port-backed build of
+/// `vesper-resonance` (feature `vesper-port`), `"rust"` for the Rust build
+/// (the default, and the seed copy `vesper-resonance-seed` that the compiler
+/// links).
+pub const IMPLEMENTATION: &str = if cfg!(vesper_port) { "vesper" } else { "rust" };
+
 /// One verifier diagnostic (wave-five shared vocabulary).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifierFinding {

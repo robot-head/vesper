@@ -1,0 +1,174 @@
+// Module events of @vesper/resonance (see lib.ves): the 16-byte
+// `RtParamEventWire` codec, the scalar parameter ramps and the event
+// validation of src/events.rs.
+//
+// A ramp crosses as `Ramp`: current, target and step as f32 bits, and the
+// samples remaining. A `RampTile` is lent as its four lane slices.
+use self::{
+    EventFault,
+    Ramp,
+    Wire
+};
+use self::kernels::{
+    f,
+    put
+};
+use self::util::{
+    finite_bits
+};
+
+fn byte(in b: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    widen_u32(b[i])
+}
+
+fn le16(in b: Slice[u8], i: u64) -> u16 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    narrow_u16(byte(in b, i) | (byte(in b, i + 1) << 8))
+}
+
+fn le32(in b: Slice[u8], i: u64) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    byte(in b, i) | (byte(in b, i + 1) << 8) | (byte(in b, i + 2) << 16) | (byte(in b, i + 3) << 24)
+}
+
+fn put32(inout b: Slice[u8], i: u64, v: u32) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    b.set(i, narrow_u8(v & 255));
+    b.set(i + 1, narrow_u8((v >> 8) & 255));
+    b.set(i + 2, narrow_u8((v >> 16) & 255));
+    b.set(i + 3, narrow_u8(v >> 24));
+}
+
+// `RtParamEvent::encode` into the first 16 bytes of `out`.
+pub fn e_encode(in w: Wire, inout out: Slice[u8]) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let head = widen_u32(w.sample_offset) | (widen_u32(w.node_id) << 16);
+    put32(inout out, 0, head);
+    put32(inout out, 4, w.param_id);
+    put32(inout out, 8, w.target);
+    put32(inout out, 12, w.ramp_samples);
+}
+
+// `RtParamEvent::decode` of the 16 bytes at `at`.
+pub fn e_decode(in b: Slice[u8], at: u64)
+    -> Wire eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
+    let target = le32(in b, at + 8);
+    if !finite_bits(target) {
+        Fail::raise(EventFault::NonFiniteTarget);
+    }
+    Wire {
+        sample_offset: le16(in b, at),
+        node_id: le16(in b, at + 2),
+        param_id: le32(in b, at + 4),
+        target: target,
+        ramp_samples: le32(in b, at + 12)
+    }
+}
+
+// The length checks of `decode_events`: the number of frames in `len`
+// bytes, at most `budget`.
+pub fn e_frames(len: u64, budget: u64)
+    -> u64 eff [Fail[RuntimeError], Fail[ArithOverflow], Fail[EventFault]] {
+    if len % 16 != 0 {
+        Fail::raise(EventFault::TrailingBytes(len % 16));
+    }
+    let n = len / 16;
+    if n > budget {
+        Fail::raise(EventFault::OverBudget(budget));
+    }
+    n
+}
+
+// The checks `validate_events` makes on event `index` before it asks the
+// parameter table: the offset is inside the block and not before `prev`,
+// and the target is finite.
+pub fn e_check(offset: u16, target: u32, prev: u16, index: u64, block: u64) eff [Fail[EventFault]] {
+    if widen_u64(offset) >= block {
+        Fail::raise(EventFault::OffsetOutOfBlock(offset, block));
+    }
+    if offset < prev {
+        Fail::raise(EventFault::Unsorted(index));
+    }
+    if !finite_bits(target) {
+        Fail::raise(EventFault::NonFiniteTarget);
+    }
+}
+
+// `ParamRamp::set`.
+pub fn e_ramp_set(inout r: Ramp, target: u32, samples: u32) {
+    r.target = target;
+    if samples == 0 {
+        r.current = target;
+        r.step = 0;
+        r.remaining = 0;
+    } else {
+        let step = (from_bits_f32(target) - from_bits_f32(r.current)) / nearest_f32(samples);
+        r.step = to_bits_f32(step);
+        r.remaining = samples;
+    }
+}
+
+// `ParamRamp::next_value`.
+pub fn e_ramp_next(inout r: Ramp) -> u32 eff [Fail[ArithOverflow]] {
+    if r.remaining > 0 {
+        r.remaining = r.remaining - 1;
+        if r.remaining == 0 {
+            r.current = r.target;
+        } else {
+            r.current = to_bits_f32(from_bits_f32(r.current) + from_bits_f32(r.step));
+        }
+    }
+    r.current
+}
+
+// `RampTile::set_lane`.
+pub fn e_tile_set(
+    inout current: Slice[u32],
+    inout target: Slice[u32],
+    inout step: Slice[u32],
+    inout remaining: Slice[u32],
+    lane: u64,
+    value: u32,
+    samples: u32
+) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    target.set(lane, value);
+    if samples == 0 {
+        current.set(lane, value);
+        step.set(lane, 0);
+        remaining.set(lane, 0);
+    } else {
+        let v = (from_bits_f32(value) - f(in current, lane)) / nearest_f32(samples);
+        put(inout step, lane, v);
+        remaining.set(lane, samples);
+    }
+}
+
+// `RampTile::advance_lane_scalar`.
+pub fn e_tile_advance(
+    inout current: Slice[u32],
+    in target: Slice[u32],
+    in step: Slice[u32],
+    inout remaining: Slice[u32],
+    lane: u64
+) -> u32 eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    let rem = remaining[lane];
+    if rem > 0 {
+        let next = rem - 1;
+        remaining.set(lane, next);
+        if next == 0 {
+            current.set(lane, target[lane]);
+        } else {
+            let v = f(in current, lane) + f(in step, lane);
+            put(inout current, lane, v);
+        }
+    }
+    current[lane]
+}
+
+// `RampTile::scalar_next`: every lane once.
+pub fn e_tile_next(
+    inout current: Slice[u32],
+    in target: Slice[u32],
+    in step: Slice[u32],
+    inout remaining: Slice[u32]
+) eff [Fail[RuntimeError], Fail[ArithOverflow]] {
+    for lane in 0..current.len() {
+        e_tile_advance(inout current, in target, in step, inout remaining, lane);
+    }
+}

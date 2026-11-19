@@ -71,6 +71,7 @@ members = [
     "crates/vesper-aegis",
     "crates/vesper-aegis/seed",
     "crates/vesper-resonance",
+    "crates/vesper-resonance/seed",
     "crates/vesper-warp-tls",
     "crates/vesper-silicon",
     "crates/vesper-silicon/seed",
@@ -167,6 +168,7 @@ default-members = [
     "crates/vesper-aegis",
     "crates/vesper-aegis/seed",
     "crates/vesper-resonance",
+    "crates/vesper-resonance/seed",
     "crates/vesper-warp-tls",
     "crates/vesper-silicon",
     "crates/vesper-silicon/seed",
@@ -286,7 +288,9 @@ vesper-ebpf = { path = "crates/vesper-ebpf/seed", package = "vesper-ebpf-seed" }
 vesper-kinetic = { path = "crates/vesper-kinetic" }
 vesper-ffi = { path = "crates/vesper-ffi" }
 vesper-migrate = { path = "crates/vesper-migrate" }
-vesper-resonance = { path = "crates/vesper-resonance" }
+# The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
+# port is the package crates/vesper-resonance (#1071).
+vesper-resonance = { path = "crates/vesper-resonance/seed", package = "vesper-resonance-seed" }
 # The compiler links the frozen Rust seed copy (seed-copy rule); the Vesper
 # port is the package crates/vesper-silicon (#1042).
 vesper-silicon = { path = "crates/vesper-silicon/seed", package = "vesper-silicon-seed" }

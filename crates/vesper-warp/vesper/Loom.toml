@@ -1,0 +1,6 @@
+[package]
+name = "@vesper/warp"
+version = "0.1.0"
+edition = "2026"
+# Sans-IO: the QUIC core may only fail.
+capability_ceiling = ["Fail"]

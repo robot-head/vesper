@@ -1,0 +1,137 @@
+// Module pn of @vesper/warp (see lib.ves): RFC 9000 Appendix A packet
+// number encoding and decoding (packet_number.rs).
+use self::{
+    PnErr
+};
+use self::varint::{
+    b8
+};
+
+pub fn pn_limit() -> u64 {
+    4611686018427387904
+}
+
+pub fn pn_decode_with_largest(largest: Option[u64], truncated: u64, nbits: u32)
+    -> u64 eff [Fail[PnErr]] {
+    if nbits != 8 && nbits != 16 && nbits != 24 && nbits != 32 {
+        Fail::raise(
+            PnErr::InvalidBits {
+                bits: nbits
+            }
+        );
+    }
+    let expected = match largest {
+        Option::None => 0,
+        Option::Some(l) => {
+            if l >= pn_limit() {
+                Fail::raise(
+                    PnErr::OutOfRange {
+                        pn: l
+                    }
+                );
+            }
+            wrapping_add(l, 1)
+        }
+    };
+    let win = wrapping_shl_u64(1, nbits);
+    if truncated >= win {
+        Fail::raise(
+            PnErr::TruncatedTooWide {
+                truncated: truncated,
+                nbits: nbits
+            }
+        );
+    }
+    let hwin = win / 2;
+    let mask = wrapping_sub(win, 1);
+    let candidate = expected & ~mask | truncated;
+    let result = if wrapping_add(candidate, hwin)
+        <= expected
+        && wrapping_add(candidate, win)
+        < pn_limit() {
+        wrapping_add(candidate, win)
+    } else if candidate > wrapping_add(expected, hwin) && candidate >= win {
+        wrapping_sub(candidate, win)
+    } else {
+        candidate
+    };
+    if result >= pn_limit() {
+        Fail::raise(PnErr::Exhausted);
+    }
+    result
+}
+
+// The packet-number length in bytes (1-4) for `full_pn`.
+pub fn pn_encoded_len(full_pn: u64, largest_acked: Option[u64]) -> u64 eff [Fail[PnErr]] {
+    if full_pn >= pn_limit() {
+        Fail::raise(
+            PnErr::OutOfRange {
+                pn: full_pn
+            }
+        );
+    }
+    let unacked = match largest_acked {
+        Option::None => wrapping_add(full_pn, 1),
+        Option::Some(acked) => {
+            if acked >= full_pn {
+                Fail::raise(
+                    PnErr::NotAboveLargestAcked {
+                        full_pn: full_pn,
+                        largest_acked: acked
+                    }
+                );
+            }
+            wrapping_sub(full_pn, acked)
+        }
+    };
+    if unacked <= 128 {
+        1
+    } else if unacked <= 32768 {
+        2
+    } else if unacked <= 8388608 {
+        3
+    } else if unacked <= 2147483648 {
+        4
+    } else {
+        Fail::raise(
+            PnErr::TooManyUnacked {
+                unacked: unacked
+            }
+        );
+        0
+    }
+}
+
+// Writes the low `len` bytes of `full_pn` big-endian at `out[at..]`.
+pub fn pn_put(full_pn: u64, len: u64, inout out: Slice[u8], at: u64) -> bool {
+    if out.len() < wrapping_add(at, len) {
+        return false;
+    }
+    for i in 0..len {
+        let shift = wrapping_u32(wrapping_mul(wrapping_sub(wrapping_sub(len, 1), i), 8));
+        out.try_set(wrapping_add(at, i), wrapping_u8(wrapping_shr_u64(full_pn, shift)));
+    }
+    true
+}
+
+pub fn pn_write_truncated(full_pn: u64, len: u64, inout out: Slice[u8]) eff [Fail[PnErr]] {
+    if !pn_put(full_pn, len, inout out, 0) {
+        Fail::raise(PnErr::BufferTooSmall);
+    }
+}
+
+// The truncated packet number of `len` bytes at `bytes[at..]`, if present.
+pub fn pn_read_at(len: u64, in bytes: Slice[u8], at: u64) -> Option[u32] {
+    if bytes.len() < wrapping_add(at, len) {
+        return Option::None;
+    }
+    let mut v: u32 = 0;
+    for i in 0..len {
+        v = v << 8 | wrapping_u32(b8(in bytes, wrapping_add(at, i)));
+    }
+    Option::Some(v)
+}
+
+pub fn pn_read_truncated(len: u64, in bytes: Slice[u8]) -> Option[u32] {
+    pn_read_at(len, in bytes, 0)
+}

@@ -1,0 +1,160 @@
+// Module varint of @vesper/warp (see lib.ves): RFC 9000 §16
+// variable-length integers (varint.rs).
+use self::{
+    VarIntErr
+};
+
+pub fn vi_max() -> u64 {
+    4611686018427387903
+}
+
+// The encoded length announced by a first byte.
+pub fn vi_prefix_len(first: u8) -> u64 {
+    let p = first >> 6;
+    if p == 0 {
+        1
+    } else if p == 1 {
+        2
+    } else if p == 2 {
+        4
+    } else {
+        8
+    }
+}
+
+// The shortest encoding of `value`, or 0 above the varint range.
+pub fn vi_len_or_zero(value: u64) -> u64 {
+    if value < 64 {
+        1
+    } else if value < 16384 {
+        2
+    } else if value < 1073741824 {
+        4
+    } else if value <= vi_max() {
+        8
+    } else {
+        0
+    }
+}
+
+pub fn vi_encoded_len(value: u64) -> u64 eff [Fail[VarIntErr]] {
+    let n = vi_len_or_zero(value);
+    if n == 0 {
+        Fail::raise(
+            VarIntErr::TooLarge {
+                value: value
+            }
+        );
+    }
+    n
+}
+
+pub fn vi_decode(in buf: Slice[u8]) -> (u64, u64) eff [Fail[VarIntErr]] {
+    let first = match buf.try_get(0) {
+        Option::Some(b) => b,
+        Option::None => {
+            Fail::raise(
+                VarIntErr::Truncated {
+                    needed: 1,
+                    available: 0
+                }
+            );
+            0
+        }
+    };
+    let len = vi_prefix_len(first);
+    if buf.len() < len {
+        Fail::raise(
+            VarIntErr::Truncated {
+                needed: len,
+                available: buf.len()
+            }
+        );
+    }
+    (vi_value_at(in buf, 0, len), len)
+}
+
+// The value of the `len`-byte varint at `at`; the caller checked the room.
+pub fn vi_value_at(in buf: Slice[u8], at: u64, len: u64) -> u64 {
+    if len == 1 {
+        b8(in buf, at) & 63
+    } else if len == 2 {
+        match buf.try_read_u16_be(at) {
+            Option::Some(v) => widen_u64(v) & 16383,
+            Option::None => 0,
+        }
+    } else if len == 4 {
+        match buf.try_read_u32_be(at) {
+            Option::Some(v) => widen_u64(v) & 1073741823,
+            Option::None => 0,
+        }
+    } else {
+        match buf.try_read_u64_be(at) {
+            Option::Some(v) => v & vi_max(),
+            Option::None => 0,
+        }
+    }
+}
+
+pub fn vi_encode_with_len(value: u64, len: u64, inout out: Slice[u8]) -> u64 eff [Fail[VarIntErr]] {
+    if len != 1 && len != 2 && len != 4 && len != 8 {
+        Fail::raise(
+            VarIntErr::BadLength {
+                len: len
+            }
+        );
+    }
+    let need = vi_encoded_len(value);
+    if need > len {
+        Fail::raise(
+            VarIntErr::BadLength {
+                len: len
+            }
+        );
+    }
+    if out.len() < len {
+        Fail::raise(
+            VarIntErr::BufferTooSmall {
+                needed: len,
+                available: out.len()
+            }
+        );
+    }
+    vi_put(value, len, inout out, 0);
+    len
+}
+
+// Writes `value` as a `len`-byte varint at `at`; the caller checked the
+// length and the room.
+pub fn vi_put(value: u64, len: u64, inout out: Slice[u8], at: u64) {
+    if len == 1 {
+        out.try_set(at, wrapping_u8(value));
+    } else if len == 2 {
+        out.try_write_u16_be(at, wrapping_u16(value | 16384));
+    } else if len == 4 {
+        out.try_write_u32_be(at, wrapping_u32(value | 2147483648));
+    } else {
+        out.try_write_u64_be(at, value | 13835058055282163712);
+    }
+}
+
+pub fn vi_encode(value: u64, inout out: Slice[u8]) -> u64 eff [Fail[VarIntErr]] {
+    vi_encode_with_len(value, vi_encoded_len(value), inout out)
+}
+
+// `buf[at]`, or 0 past the end (callers check the room first).
+pub fn b8(in buf: Slice[u8], at: u64) -> u64 {
+    match buf.try_get(at) {
+        Option::Some(b) => widen_u64(b),
+        Option::None => 0,
+    }
+}
+
+pub fn sat_add(a: u64, b: u64) -> u64 {
+    let s = wrapping_add(a, b);
+    if s < a {
+        18446744073709551615
+    } else {
+        s
+    }
+}
