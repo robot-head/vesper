@@ -1466,83 +1466,75 @@ pub fn aplic_claimi(a: &mut Aplic, idc: u64) -> u64 {
 /// Calls `aplic_clone` of the Vesper library `silicon` (`vesper_silicon_aplic_clone`).
 pub fn aplic_clone(a: &Aplic) -> Aplic {
     let mut result = [0u64; 12];
-    let mut arg_a = a.words;
     // SAFETY: `vesper_silicon_aplic_clone` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_aplic_clone(result.as_mut_ptr(), arg_a.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_aplic_clone(result.as_mut_ptr(), a.words.as_ptr().cast_mut()) };
     unsafe { Aplic::from_words(&result[0..]) }
 }
 
 /// Calls `aplic_contains` of the Vesper library `silicon` (`vesper_silicon_aplic_contains`).
 pub fn aplic_contains(a: &Aplic, addr: u64) -> bool {
-    let mut arg_a = a.words;
     // SAFETY: `vesper_silicon_aplic_contains` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_aplic_contains(arg_a.as_mut_ptr(), addr as i64) };
+    let raw = unsafe { vesper_silicon_aplic_contains(a.words.as_ptr().cast_mut(), addr as i64) };
     raw != 0
 }
 
 /// Calls `aplic_delegated_to` of the Vesper library `silicon` (`vesper_silicon_aplic_delegated_to`).
 pub fn aplic_delegated_to(a: &Aplic, src: u64) -> Option<u64> {
     let mut result = [0u64; 2];
-    let mut arg_a = a.words;
     // SAFETY: `vesper_silicon_aplic_delegated_to` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_aplic_delegated_to(result.as_mut_ptr(), arg_a.as_mut_ptr(), src as i64) };
+    let raw = unsafe { vesper_silicon_aplic_delegated_to(result.as_mut_ptr(), a.words.as_ptr().cast_mut(), src as i64) };
     <Option<u64> as Abi>::get(&result[0..])
 }
 
 /// Calls `aplic_header` of the Vesper library `silicon` (`vesper_silicon_aplic_header`).
 pub fn aplic_header(a: &Aplic) -> repr::AplicHdr {
     let mut result = [0u64; 20];
-    let mut arg_a = a.words;
     // SAFETY: `vesper_silicon_aplic_header` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_aplic_header(result.as_mut_ptr(), arg_a.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_aplic_header(result.as_mut_ptr(), a.words.as_ptr().cast_mut()) };
     vesper_port_abi::mirror_from_words::<repr::AplicHdr>(&result[0..])
 }
 
 /// Calls `aplic_idc_asserted` of the Vesper library `silicon` (`vesper_silicon_aplic_idc_asserted`).
 pub fn aplic_idc_asserted(a: &Aplic, idc: u64) -> bool {
-    let mut arg_a = a.words;
     // SAFETY: `vesper_silicon_aplic_idc_asserted` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_aplic_idc_asserted(arg_a.as_mut_ptr(), idc as i64) };
+    let raw = unsafe { vesper_silicon_aplic_idc_asserted(a.words.as_ptr().cast_mut(), idc as i64) };
     raw != 0
 }
 
 /// Calls `aplic_is_delegated_here` of the Vesper library `silicon` (`vesper_silicon_aplic_is_delegated_here`).
 pub fn aplic_is_delegated_here(a: &Aplic, src: u64) -> bool {
-    let mut arg_a = a.words;
     // SAFETY: `vesper_silicon_aplic_is_delegated_here` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_aplic_is_delegated_here(arg_a.as_mut_ptr(), src as i64) };
+    let raw = unsafe { vesper_silicon_aplic_is_delegated_here(a.words.as_ptr().cast_mut(), src as i64) };
     raw != 0
 }
 
 /// Calls `aplic_is_pending` of the Vesper library `silicon` (`vesper_silicon_aplic_is_pending`).
 pub fn aplic_is_pending(a: &Aplic, src: u64) -> bool {
-    let mut arg_a = a.words;
     // SAFETY: `vesper_silicon_aplic_is_pending` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_aplic_is_pending(arg_a.as_mut_ptr(), src as i64) };
+    let raw = unsafe { vesper_silicon_aplic_is_pending(a.words.as_ptr().cast_mut(), src as i64) };
     raw != 0
 }
 
 /// Calls `aplic_mode` of the Vesper library `silicon` (`vesper_silicon_aplic_mode`).
 pub fn aplic_mode(a: &Aplic, src: u64) -> u64 {
-    let mut arg_a = a.words;
     // SAFETY: `vesper_silicon_aplic_mode` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_aplic_mode(arg_a.as_mut_ptr(), src as i64) };
+    let raw = unsafe { vesper_silicon_aplic_mode(a.words.as_ptr().cast_mut(), src as i64) };
     raw as u64
 }
 
@@ -1577,11 +1569,10 @@ pub fn aplic_read32(a: &mut Aplic, addr: u64) -> Result<u64, AiaFault> {
 
 /// Calls `aplic_rectified` of the Vesper library `silicon` (`vesper_silicon_aplic_rectified`).
 pub fn aplic_rectified(a: &Aplic, src: u64) -> bool {
-    let mut arg_a = a.words;
     // SAFETY: `vesper_silicon_aplic_rectified` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_aplic_rectified(arg_a.as_mut_ptr(), src as i64) };
+    let raw = unsafe { vesper_silicon_aplic_rectified(a.words.as_ptr().cast_mut(), src as i64) };
     raw != 0
 }
 
@@ -1623,11 +1614,10 @@ pub fn aplic_take_msis(a: &mut Aplic) -> Vec<Msi> {
 
 /// Calls `aplic_topi` of the Vesper library `silicon` (`vesper_silicon_aplic_topi`).
 pub fn aplic_topi(a: &Aplic, idc: u64) -> u64 {
-    let mut arg_a = a.words;
     // SAFETY: `vesper_silicon_aplic_topi` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_aplic_topi(arg_a.as_mut_ptr(), idc as i64) };
+    let raw = unsafe { vesper_silicon_aplic_topi(a.words.as_ptr().cast_mut(), idc as i64) };
     raw as u64
 }
 
@@ -1722,32 +1712,29 @@ pub fn fabric_advance_mtime(f: &mut Fabric, ticks: u64) -> () {
 
 /// Calls `fabric_aplic_count` of the Vesper library `silicon` (`vesper_silicon_fabric_aplic_count`).
 pub fn fabric_aplic_count(f: &Fabric) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_aplic_count` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_aplic_count(arg_f.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_fabric_aplic_count(f.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
 /// Calls `fabric_aplic_header` of the Vesper library `silicon` (`vesper_silicon_fabric_aplic_header`).
 pub fn fabric_aplic_header(f: &Fabric, d: u64) -> repr::AplicHdr {
     let mut result = [0u64; 20];
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_aplic_header` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_aplic_header(result.as_mut_ptr(), arg_f.as_mut_ptr(), d as i64) };
+    let raw = unsafe { vesper_silicon_fabric_aplic_header(result.as_mut_ptr(), f.words.as_ptr().cast_mut(), d as i64) };
     vesper_port_abi::mirror_from_words::<repr::AplicHdr>(&result[0..])
 }
 
 /// Calls `fabric_aplic_is_delegated_here` of the Vesper library `silicon` (`vesper_silicon_fabric_aplic_is_delegated_here`).
 pub fn fabric_aplic_is_delegated_here(f: &Fabric, d: u64, src: u64) -> bool {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_aplic_is_delegated_here` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_aplic_is_delegated_here(arg_f.as_mut_ptr(), d as i64, src as i64) };
+    let raw = unsafe { vesper_silicon_fabric_aplic_is_delegated_here(f.words.as_ptr().cast_mut(), d as i64, src as i64) };
     raw != 0
 }
 
@@ -1841,12 +1828,11 @@ pub fn fabric_file_claim(f: &mut Fabric, b: u64, k: u64, g: u64) -> u64 {
 
 /// Calls `fabric_file_csr_read` of the Vesper library `silicon` (`vesper_silicon_fabric_file_csr_read`).
 pub fn fabric_file_csr_read(f: &Fabric, b: u64, k: u64, g: u64, isel: u64) -> Result<u64, IntcFault> {
-    let mut arg_f = f.words;
     let mut fail = [0u64; 5];
     // SAFETY: `vesper_silicon_fabric_file_csr_read` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_file_csr_read(arg_f.as_mut_ptr(), b as i64, k as i64, g as i64, isel as i64, fail.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_fabric_file_csr_read(f.words.as_ptr().cast_mut(), b as i64, k as i64, g as i64, isel as i64, fail.as_mut_ptr()) };
     match fail[0] {
         0 => Ok(raw as u64),
         1 => Err(<IntcFault as Abi>::get(&fail[1..])),
@@ -1870,132 +1856,119 @@ pub fn fabric_file_csr_write(f: &mut Fabric, b: u64, k: u64, g: u64, isel: u64, 
 
 /// Calls `fabric_file_eidelivery` of the Vesper library `silicon` (`vesper_silicon_fabric_file_eidelivery`).
 pub fn fabric_file_eidelivery(f: &Fabric, b: u64, k: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_file_eidelivery` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_file_eidelivery(arg_f.as_mut_ptr(), b as i64, k as i64) };
+    let raw = unsafe { vesper_silicon_fabric_file_eidelivery(f.words.as_ptr().cast_mut(), b as i64, k as i64) };
     raw as u64
 }
 
 /// Calls `fabric_file_external` of the Vesper library `silicon` (`vesper_silicon_fabric_file_external`).
 pub fn fabric_file_external(f: &Fabric, b: u64, k: u64) -> bool {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_file_external` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_file_external(arg_f.as_mut_ptr(), b as i64, k as i64) };
+    let raw = unsafe { vesper_silicon_fabric_file_external(f.words.as_ptr().cast_mut(), b as i64, k as i64) };
     raw != 0
 }
 
 /// Calls `fabric_file_is_pending` of the Vesper library `silicon` (`vesper_silicon_fabric_file_is_pending`).
 pub fn fabric_file_is_pending(f: &Fabric, b: u64, k: u64, g: u64, id: u64) -> bool {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_file_is_pending` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_file_is_pending(arg_f.as_mut_ptr(), b as i64, k as i64, g as i64, id as i64) };
+    let raw = unsafe { vesper_silicon_fabric_file_is_pending(f.words.as_ptr().cast_mut(), b as i64, k as i64, g as i64, id as i64) };
     raw != 0
 }
 
 /// Calls `fabric_file_topei` of the Vesper library `silicon` (`vesper_silicon_fabric_file_topei`).
 pub fn fabric_file_topei(f: &Fabric, b: u64, k: u64, g: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_file_topei` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_file_topei(arg_f.as_mut_ptr(), b as i64, k as i64, g as i64) };
+    let raw = unsafe { vesper_silicon_fabric_file_topei(f.words.as_ptr().cast_mut(), b as i64, k as i64, g as i64) };
     raw as u64
 }
 
 /// Calls `fabric_files_len` of the Vesper library `silicon` (`vesper_silicon_fabric_files_len`).
 pub fn fabric_files_len(f: &Fabric, b: u64, k: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_files_len` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_files_len(arg_f.as_mut_ptr(), b as i64, k as i64) };
+    let raw = unsafe { vesper_silicon_fabric_files_len(f.words.as_ptr().cast_mut(), b as i64, k as i64) };
     raw as u64
 }
 
 /// Calls `fabric_geilen` of the Vesper library `silicon` (`vesper_silicon_fabric_geilen`).
 pub fn fabric_geilen(f: &Fabric, hart: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_geilen` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_geilen(arg_f.as_mut_ptr(), hart as i64) };
+    let raw = unsafe { vesper_silicon_fabric_geilen(f.words.as_ptr().cast_mut(), hart as i64) };
     raw as u64
 }
 
 /// Calls `fabric_guest_files` of the Vesper library `silicon` (`vesper_silicon_fabric_guest_files`).
 pub fn fabric_guest_files(f: &Fabric, hart: u64) -> repr::Located {
     let mut result = [0u64; 3];
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_guest_files` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_guest_files(result.as_mut_ptr(), arg_f.as_mut_ptr(), hart as i64) };
+    let raw = unsafe { vesper_silicon_fabric_guest_files(result.as_mut_ptr(), f.words.as_ptr().cast_mut(), hart as i64) };
     vesper_port_abi::mirror_from_words::<repr::Located>(&result[0..])
 }
 
 /// Calls `fabric_hart_mtime` of the Vesper library `silicon` (`vesper_silicon_fabric_hart_mtime`).
 pub fn fabric_hart_mtime(f: &Fabric, hart: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_hart_mtime` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_hart_mtime(arg_f.as_mut_ptr(), hart as i64) };
+    let raw = unsafe { vesper_silicon_fabric_hart_mtime(f.words.as_ptr().cast_mut(), hart as i64) };
     raw as u64
 }
 
 /// Calls `fabric_hgeie` of the Vesper library `silicon` (`vesper_silicon_fabric_hgeie`).
 pub fn fabric_hgeie(f: &Fabric, hart: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_hgeie` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_hgeie(arg_f.as_mut_ptr(), hart as i64) };
+    let raw = unsafe { vesper_silicon_fabric_hgeie(f.words.as_ptr().cast_mut(), hart as i64) };
     raw as u64
 }
 
 /// Calls `fabric_hgeip` of the Vesper library `silicon` (`vesper_silicon_fabric_hgeip`).
 pub fn fabric_hgeip(f: &Fabric, hart: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_hgeip` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_hgeip(arg_f.as_mut_ptr(), hart as i64) };
+    let raw = unsafe { vesper_silicon_fabric_hgeip(f.words.as_ptr().cast_mut(), hart as i64) };
     raw as u64
 }
 
 /// Calls `fabric_hyp_harts` of the Vesper library `silicon` (`vesper_silicon_fabric_hyp_harts`).
 pub fn fabric_hyp_harts(f: &Fabric) -> Vec<u64> {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_hyp_harts` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_hyp_harts(arg_f.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_fabric_hyp_harts(f.words.as_ptr().cast_mut()) };
     unsafe { vesper_port_abi::seq_take::<u64>(RUNTIME, raw as u64) }
 }
 
 /// Calls `fabric_imsic_file` of the Vesper library `silicon` (`vesper_silicon_fabric_imsic_file`).
 pub fn fabric_imsic_file(f: &Fabric, want: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_imsic_file` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_imsic_file(arg_f.as_mut_ptr(), want as i64) };
+    let raw = unsafe { vesper_silicon_fabric_imsic_file(f.words.as_ptr().cast_mut(), want as i64) };
     raw as u64
 }
 
 /// Calls `fabric_level` of the Vesper library `silicon` (`vesper_silicon_fabric_level`).
 pub fn fabric_level(f: &Fabric, hart: u64, cause: u64) -> bool {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_level` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_level(arg_f.as_mut_ptr(), hart as i64, cause as i64) };
+    let raw = unsafe { vesper_silicon_fabric_level(f.words.as_ptr().cast_mut(), hart as i64, cause as i64) };
     raw != 0
 }
 
@@ -2011,21 +1984,19 @@ pub fn fabric_link_aplic(f: &mut Fabric, d: u64, parent: u64, children: &[u64]) 
 /// Calls `fabric_locate_file` of the Vesper library `silicon` (`vesper_silicon_fabric_locate_file`).
 pub fn fabric_locate_file(f: &Fabric, addr: u64) -> repr::Located {
     let mut result = [0u64; 3];
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_locate_file` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_locate_file(result.as_mut_ptr(), arg_f.as_mut_ptr(), addr as i64) };
+    let raw = unsafe { vesper_silicon_fabric_locate_file(result.as_mut_ptr(), f.words.as_ptr().cast_mut(), addr as i64) };
     vesper_port_abi::mirror_from_words::<repr::Located>(&result[0..])
 }
 
 /// Calls `fabric_lost_msis` of the Vesper library `silicon` (`vesper_silicon_fabric_lost_msis`).
 pub fn fabric_lost_msis(f: &Fabric) -> Vec<Msi> {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_lost_msis` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_lost_msis(arg_f.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_fabric_lost_msis(f.words.as_ptr().cast_mut()) };
     unsafe { vesper_port_abi::seq_take::<Msi>(RUNTIME, raw as u64) }
 }
 
@@ -2041,31 +2012,28 @@ pub fn fabric_new() -> Fabric {
 
 /// Calls `fabric_plic_base` of the Vesper library `silicon` (`vesper_silicon_fabric_plic_base`).
 pub fn fabric_plic_base(f: &Fabric, p: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_plic_base` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_plic_base(arg_f.as_mut_ptr(), p as i64) };
+    let raw = unsafe { vesper_silicon_fabric_plic_base(f.words.as_ptr().cast_mut(), p as i64) };
     raw as u64
 }
 
 /// Calls `fabric_plic_context` of the Vesper library `silicon` (`vesper_silicon_fabric_plic_context`).
 pub fn fabric_plic_context(f: &Fabric, p: u64, want: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_plic_context` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_plic_context(arg_f.as_mut_ptr(), p as i64, want as i64) };
+    let raw = unsafe { vesper_silicon_fabric_plic_context(f.words.as_ptr().cast_mut(), p as i64, want as i64) };
     raw as u64
 }
 
 /// Calls `fabric_plic_count` of the Vesper library `silicon` (`vesper_silicon_fabric_plic_count`).
 pub fn fabric_plic_count(f: &Fabric) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_plic_count` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_plic_count(arg_f.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_fabric_plic_count(f.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
@@ -2108,11 +2076,10 @@ pub fn fabric_read32(f: &mut Fabric, addr: u64) -> Result<u64, IntcFault> {
 
 /// Calls `fabric_root_of` of the Vesper library `silicon` (`vesper_silicon_fabric_root_of`).
 pub fn fabric_root_of(f: &Fabric, d: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_root_of` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_root_of(arg_f.as_mut_ptr(), d as i64) };
+    let raw = unsafe { vesper_silicon_fabric_root_of(f.words.as_ptr().cast_mut(), d as i64) };
     raw as u64
 }
 
@@ -2168,22 +2135,20 @@ pub fn fabric_truncate_files(f: &mut Fabric, b: u64, k: u64, keep: u64) -> () {
 
 /// Calls `fabric_vgein` of the Vesper library `silicon` (`vesper_silicon_fabric_vgein`).
 pub fn fabric_vgein(f: &Fabric, hart: u64) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_fabric_vgein` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_vgein(arg_f.as_mut_ptr(), hart as i64) };
+    let raw = unsafe { vesper_silicon_fabric_vgein(f.words.as_ptr().cast_mut(), hart as i64) };
     raw as u64
 }
 
 /// Calls `fabric_vs_csr_read` of the Vesper library `silicon` (`vesper_silicon_fabric_vs_csr_read`).
 pub fn fabric_vs_csr_read(f: &Fabric, hart: u64, isel: u64) -> Result<u64, IntcFault> {
-    let mut arg_f = f.words;
     let mut fail = [0u64; 5];
     // SAFETY: `vesper_silicon_fabric_vs_csr_read` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_vs_csr_read(arg_f.as_mut_ptr(), hart as i64, isel as i64, fail.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_fabric_vs_csr_read(f.words.as_ptr().cast_mut(), hart as i64, isel as i64, fail.as_mut_ptr()) };
     match fail[0] {
         0 => Ok(raw as u64),
         1 => Err(<IntcFault as Abi>::get(&fail[1..])),
@@ -2207,12 +2172,11 @@ pub fn fabric_vs_csr_write(f: &mut Fabric, hart: u64, isel: u64, v: u64) -> Resu
 
 /// Calls `fabric_vstopei` of the Vesper library `silicon` (`vesper_silicon_fabric_vstopei`).
 pub fn fabric_vstopei(f: &Fabric, hart: u64) -> Result<u64, IntcFault> {
-    let mut arg_f = f.words;
     let mut fail = [0u64; 5];
     // SAFETY: `vesper_silicon_fabric_vstopei` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_fabric_vstopei(arg_f.as_mut_ptr(), hart as i64, fail.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_fabric_vstopei(f.words.as_ptr().cast_mut(), hart as i64, fail.as_mut_ptr()) };
     match fail[0] {
         0 => Ok(raw as u64),
         1 => Err(<IntcFault as Abi>::get(&fail[1..])),
@@ -2236,11 +2200,10 @@ pub fn fabric_write32(f: &mut Fabric, addr: u64, v: u64) -> Result<(), IntcFault
 
 /// Calls `imsic_asserted` of the Vesper library `silicon` (`vesper_silicon_imsic_asserted`).
 pub fn imsic_asserted(f: &Imsic) -> bool {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_imsic_asserted` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_imsic_asserted(arg_f.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_imsic_asserted(f.words.as_ptr().cast_mut()) };
     raw != 0
 }
 
@@ -2256,22 +2219,20 @@ pub fn imsic_claim(f: &mut Imsic) -> u64 {
 /// Calls `imsic_clone` of the Vesper library `silicon` (`vesper_silicon_imsic_clone`).
 pub fn imsic_clone(f: &Imsic) -> Imsic {
     let mut result = [0u64; 3];
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_imsic_clone` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_imsic_clone(result.as_mut_ptr(), arg_f.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_imsic_clone(result.as_mut_ptr(), f.words.as_ptr().cast_mut()) };
     unsafe { Imsic::from_words(&result[0..]) }
 }
 
 /// Calls `imsic_csr_read` of the Vesper library `silicon` (`vesper_silicon_imsic_csr_read`).
 pub fn imsic_csr_read(f: &Imsic, isel: u64) -> Result<u64, AiaFault> {
-    let mut arg_f = f.words;
     let mut fail = [0u64; 4];
     // SAFETY: `vesper_silicon_imsic_csr_read` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_imsic_csr_read(arg_f.as_mut_ptr(), isel as i64, fail.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_imsic_csr_read(f.words.as_ptr().cast_mut(), isel as i64, fail.as_mut_ptr()) };
     match fail[0] {
         0 => Ok(raw as u64),
         1 => Err(<AiaFault as Abi>::get(&fail[1..])),
@@ -2295,43 +2256,38 @@ pub fn imsic_csr_write(f: &mut Imsic, isel: u64, v: u64) -> Result<(), AiaFault>
 
 /// Calls `imsic_eq` of the Vesper library `silicon` (`vesper_silicon_imsic_eq`).
 pub fn imsic_eq(f: &Imsic, g: &Imsic) -> bool {
-    let mut arg_f = f.words;
-    let mut arg_g = g.words;
     // SAFETY: `vesper_silicon_imsic_eq` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_imsic_eq(arg_f.as_mut_ptr(), arg_g.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_imsic_eq(f.words.as_ptr().cast_mut(), g.words.as_ptr().cast_mut()) };
     raw != 0
 }
 
 /// Calls `imsic_header` of the Vesper library `silicon` (`vesper_silicon_imsic_header`).
 pub fn imsic_header(f: &Imsic) -> repr::ImsicHdr {
     let mut result = [0u64; 6];
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_imsic_header` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_imsic_header(result.as_mut_ptr(), arg_f.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_imsic_header(result.as_mut_ptr(), f.words.as_ptr().cast_mut()) };
     vesper_port_abi::mirror_from_words::<repr::ImsicHdr>(&result[0..])
 }
 
 /// Calls `imsic_is_enabled` of the Vesper library `silicon` (`vesper_silicon_imsic_is_enabled`).
 pub fn imsic_is_enabled(f: &Imsic, id: u64) -> bool {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_imsic_is_enabled` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_imsic_is_enabled(arg_f.as_mut_ptr(), id as i64) };
+    let raw = unsafe { vesper_silicon_imsic_is_enabled(f.words.as_ptr().cast_mut(), id as i64) };
     raw != 0
 }
 
 /// Calls `imsic_is_pending` of the Vesper library `silicon` (`vesper_silicon_imsic_is_pending`).
 pub fn imsic_is_pending(f: &Imsic, id: u64) -> bool {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_imsic_is_pending` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_imsic_is_pending(arg_f.as_mut_ptr(), id as i64) };
+    let raw = unsafe { vesper_silicon_imsic_is_pending(f.words.as_ptr().cast_mut(), id as i64) };
     raw != 0
 }
 
@@ -2370,21 +2326,19 @@ pub fn imsic_seteipnum(f: &mut Imsic, id: u64) -> () {
 
 /// Calls `imsic_top` of the Vesper library `silicon` (`vesper_silicon_imsic_top`).
 pub fn imsic_top(f: &Imsic) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_imsic_top` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_imsic_top(arg_f.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_imsic_top(f.words.as_ptr().cast_mut()) };
     raw as u64
 }
 
 /// Calls `imsic_topei` of the Vesper library `silicon` (`vesper_silicon_imsic_topei`).
 pub fn imsic_topei(f: &Imsic) -> u64 {
-    let mut arg_f = f.words;
     // SAFETY: `vesper_silicon_imsic_topei` has exactly this signature in the export ABI; every
     // pointer is a live, writable buffer of the size the ABI requires, and
     // every handle passed is owned or borrowed as its mode requires.
-    let raw = unsafe { vesper_silicon_imsic_topei(arg_f.as_mut_ptr()) };
+    let raw = unsafe { vesper_silicon_imsic_topei(f.words.as_ptr().cast_mut()) };
     raw as u64
 }
 

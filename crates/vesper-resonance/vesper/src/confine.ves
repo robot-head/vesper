@@ -1,0 +1,425 @@
+// Module confine of @vesper/resonance (see lib.ves): the realtime
+// confinement verifier of src/confine.rs (`verify_realtime`).
+//
+// The Rust wrapper numbers the distinct effects (an `Effect::Other` name is
+// one more effect) and lends the graph and the policy as word slices:
+//
+// - `fns`: eight words per function: known (0 or 1), frame bytes, loops (0
+//   none, 1 bounded, 2 unbounded), the bound, then the first word and count
+//   of its effect codes and of its call sites (callee, instruction) in
+//   `pool`.
+// - `calls`: (caller, callee) pairs; `indirect`: (caller, site) pairs.
+// - `entries`: the policy's indirect targets in key order, four words each:
+//   caller, site, first target in `pool`, target count.
+// - `roots`: (function, has budget, budget) triples; `allowed`: the codes of
+//   the allowed effects.
+//
+// The result's first word is 0, then the finding count and each finding:
+// root, has instruction, instruction, rule, subject function, two rule
+// words, the path length and the path from the root. Or it is 1
+// UnknownFnId(id), or 2 UnknownIndirectSite(caller, site).
+//
+// Rules: 0 forbidden effect (code), 1 unknown callee, 2 unresolved indirect
+// call (site), 3 unbounded loop, 4 loop bound (bound, maximum), 5 recursion,
+// 6 stack budget (depth, budget), 7 stack depth overflow.
+use self::seqs::{
+    at,
+    filled,
+    get,
+    set
+};
+
+fn none() -> u64 {
+    18446744073709551615
+}
+
+fn fw(in fns: Slice[u64], f: u64, w: u64) -> u64 {
+    at(in fns, wrapping_add(wrapping_mul(f, 8), w))
+}
+
+fn fail(code: u64, a: u64, b: u64) -> ChunkSeq[u64] {
+    let mut out: ChunkSeq[u64] = ChunkSeq::new();
+    out.push(code);
+    out.push(a);
+    if code == 2 {
+        out.push(b);
+    }
+    out
+}
+
+// The adjacency of the Rust build: successors per function as CSR rows of
+// (callee, has instruction, instruction), direct calls first, then the
+// resolved indirect targets; and the unresolved sites per function.
+struct Adj {
+    start: ChunkSeq[u64],
+    succ: ChunkSeq[u64],
+    ustart: ChunkSeq[u64],
+    usites: ChunkSeq[u64]
+}
+
+// The entry index of (caller, site) in `entries`, or `none()`.
+fn entry(in entries: Slice[u64], caller: u64, site: u64) -> u64 {
+    let n = entries.len() / 4;
+    for e in 0..n {
+        let b = wrapping_mul(e, 4);
+        if at(in entries, b) == caller && at(in entries, wrapping_add(b, 1)) == site {
+            return e;
+        }
+    }
+    none()
+}
+
+// Rows of `edges` (caller first, then `width - 1` words) bucketed by
+// caller in push order.
+fn rows(in edges: ChunkSeq[u64], width: u64, count: u64, n: u64) -> (ChunkSeq[u64], ChunkSeq[u64]) {
+    let mut start = filled(wrapping_add(n, 1), 0);
+    for e in 0..count {
+        let c = wrapping_add(get(in edges, wrapping_mul(e, width)), 1);
+        let v = wrapping_add(get(in start, c), 1);
+        set(inout start, c, v);
+    }
+    for f in 0..n {
+        let v = wrapping_add(get(in start, f), get(in start, wrapping_add(f, 1)));
+        set(inout start, wrapping_add(f, 1), v);
+    }
+    let mut fill = filled(n, 0);
+    let mut out = filled(wrapping_mul(count, wrapping_sub(width, 1)), 0);
+    for e in 0..count {
+        let b = wrapping_mul(e, width);
+        let c = get(in edges, b);
+        let slot = wrapping_add(get(in start, c), get(in fill, c));
+        for w in 1..width {
+            let at_w = wrapping_add(wrapping_mul(slot, wrapping_sub(width, 1)), wrapping_sub(w, 1));
+            set(inout out, at_w, get(in edges, wrapping_add(b, w)));
+        }
+        let v = wrapping_add(get(in fill, c), 1);
+        set(inout fill, c, v);
+    }
+    (start, out)
+}
+
+pub fn c_verify(
+    in fns: Slice[u64],
+    in pool: Slice[u64],
+    in calls: Slice[u64],
+    in indirect: Slice[u64],
+    in entries: Slice[u64],
+    in roots: Slice[u64],
+    in allowed: Slice[u64],
+    reject_unbounded: bool,
+    has_max: bool,
+    max_loops: u64
+) -> ChunkSeq[u64] {
+    let n = fns.len() / 8;
+    // Edges in the Rust push order, with the checks in the Rust order.
+    let mut edges: ChunkSeq[u64] = ChunkSeq::new();
+    let mut unresolved: ChunkSeq[u64] = ChunkSeq::new();
+    let ncalls = calls.len() / 2;
+    for e in 0..ncalls {
+        let caller = at(in calls, wrapping_mul(e, 2));
+        let callee = at(in calls, wrapping_add(wrapping_mul(e, 2), 1));
+        if caller >= n {
+            return fail(1, caller, 0);
+        }
+        if callee >= n {
+            return fail(1, callee, 0);
+        }
+        // The instruction of the caller's first call site to the callee.
+        let mut inst = none();
+        let first = fw(in fns, caller, 6);
+        for k in 0..fw(in fns, caller, 7) {
+            let b = wrapping_add(first, wrapping_mul(k, 2));
+            if inst == none() && at(in pool, b) == callee {
+                inst = at(in pool, wrapping_add(b, 1));
+            }
+        }
+        edges.push(caller);
+        edges.push(callee);
+        if inst == none() {
+            edges.push(0);
+            edges.push(0);
+        } else {
+            edges.push(1);
+            edges.push(inst);
+        }
+    }
+    let nind = indirect.len() / 2;
+    for e in 0..nind {
+        let caller = at(in indirect, wrapping_mul(e, 2));
+        let site = at(in indirect, wrapping_add(wrapping_mul(e, 2), 1));
+        if caller >= n {
+            return fail(1, caller, 0);
+        }
+        let k = entry(in entries, caller, site);
+        let mut count: u64 = 0;
+        if k != none() {
+            count = at(in entries, wrapping_add(wrapping_mul(k, 4), 3));
+        }
+        if count == 0 {
+            unresolved.push(caller);
+            unresolved.push(site);
+        } else {
+            let first = at(in entries, wrapping_add(wrapping_mul(k, 4), 2));
+            for t in 0..count {
+                let target = at(in pool, wrapping_add(first, t));
+                if target >= n {
+                    return fail(1, target, 0);
+                }
+                edges.push(caller);
+                edges.push(target);
+                edges.push(1);
+                edges.push(site);
+            }
+        }
+    }
+    let nentries = entries.len() / 4;
+    for k in 0..nentries {
+        let caller = at(in entries, wrapping_mul(k, 4));
+        let site = at(in entries, wrapping_add(wrapping_mul(k, 4), 1));
+        if caller >= n {
+            return fail(1, caller, 0);
+        }
+        let mut found = false;
+        for e in 0..nind {
+            if at(in indirect, wrapping_mul(e, 2))
+                == caller
+                && at(in indirect, wrapping_add(wrapping_mul(e, 2), 1))
+                == site {
+                found = true;
+            }
+        }
+        if !found {
+            return fail(2, caller, site);
+        }
+    }
+    let nroots = roots.len() / 3;
+    for r in 0..nroots {
+        let f = at(in roots, wrapping_mul(r, 3));
+        if f >= n {
+            return fail(1, f, 0);
+        }
+    }
+    let (start, succ) = rows(in edges, 4, edges.len() / 4, n);
+    let (ustart, usites) = rows(in unresolved, 2, unresolved.len() / 2, n);
+    let adj = Adj {
+        start: start,
+        succ: succ,
+        ustart: ustart,
+        usites: usites
+    };
+    let mut ok = filled(1, 0);
+    ok.push(0);
+    for r in 0..nroots {
+        let root = at(in roots, wrapping_mul(r, 3));
+        let has_budget = at(in roots, wrapping_add(wrapping_mul(r, 3), 1)) == 1;
+        let budget = at(in roots, wrapping_add(wrapping_mul(r, 3), 2));
+        verify_root(
+            in fns,
+            in pool,
+            in allowed,
+            in adj,
+            root,
+            has_budget,
+            budget,
+            reject_unbounded,
+            has_max,
+            max_loops,
+            inout ok
+        );
+    }
+    ok
+}
+
+// Appends one finding (and bumps the count in word 1).
+fn push(
+    inout out: ChunkSeq[u64],
+    in parent: ChunkSeq[u64],
+    root: u64,
+    v: u64,
+    rule: u64,
+    p1: u64,
+    p2: u64
+) {
+    // The path, from `v` up to the root, and the instruction of the root's
+    // call that starts it.
+    let mut path: ChunkSeq[u64] = ChunkSeq::new();
+    path.push(v);
+    let mut cur = v;
+    let mut inst = none();
+    loop {
+        let p = get(in parent, wrapping_mul(cur, 3));
+        if p == none() {
+            break;
+        }
+        path.push(p);
+        if p == root {
+            if get(in parent, wrapping_add(wrapping_mul(cur, 3), 1)) == 1 {
+                inst = get(in parent, wrapping_add(wrapping_mul(cur, 3), 2));
+            } else {
+                inst = none();
+            }
+        }
+        cur = p;
+    }
+    let count = wrapping_add(get(in out, 1), 1);
+    set(inout out, 1, count);
+    out.push(root);
+    if inst == none() {
+        out.push(0);
+        out.push(0);
+    } else {
+        out.push(1);
+        out.push(inst);
+    }
+    out.push(rule);
+    out.push(v);
+    out.push(p1);
+    out.push(p2);
+    let len = path.len();
+    out.push(len);
+    for k in 0..len {
+        out.push(get(in path, wrapping_sub(wrapping_sub(len, 1), k)));
+    }
+}
+
+fn is_allowed(in allowed: Slice[u64], code: u64) -> bool {
+    for k in 0..allowed.len() {
+        if at(in allowed, k) == code {
+            return true;
+        }
+    }
+    false
+}
+
+fn verify_root(
+    in fns: Slice[u64],
+    in pool: Slice[u64],
+    in allowed: Slice[u64],
+    in adj: Adj,
+    root: u64,
+    has_budget: bool,
+    budget: u64,
+    reject_unbounded: bool,
+    has_max: bool,
+    max_loops: u64,
+    inout out: ChunkSeq[u64]
+) {
+    let n = fns.len() / 8;
+    // Breadth-first search for shortest call paths: per function, the
+    // parent, whether the call has an instruction, and the instruction.
+    let mut parent = filled(wrapping_mul(n, 3), none());
+    let mut seen = filled(n, 0);
+    let mut order: ChunkSeq[u64] = ChunkSeq::new();
+    set(inout seen, root, 1);
+    order.push(root);
+    let mut head: u64 = 0;
+    loop {
+        if head >= order.len() {
+            break;
+        }
+        let u = get(in order, head);
+        head = wrapping_add(head, 1);
+        for k in get(in adj.start, u)..get(in adj.start, wrapping_add(u, 1)) {
+            let v = get(in adj.succ, wrapping_mul(k, 3));
+            if get(in seen, v) == 0 {
+                set(inout seen, v, 1);
+                set(inout parent, wrapping_mul(v, 3), u);
+                set(
+                    inout parent,
+                    wrapping_add(wrapping_mul(v, 3), 1),
+                    get(in adj.succ, wrapping_add(wrapping_mul(k, 3), 1))
+                );
+                set(
+                    inout parent,
+                    wrapping_add(wrapping_mul(v, 3), 2),
+                    get(in adj.succ, wrapping_add(wrapping_mul(k, 3), 2))
+                );
+                order.push(v);
+            }
+        }
+    }
+    for i in 0..order.len() {
+        let v = get(in order, i);
+        if fw(in fns, v, 0) == 0 {
+            push(inout out, in parent, root, v, 1, 0, 0);
+        } else {
+            let first = fw(in fns, v, 4);
+            let count = fw(in fns, v, 5);
+            for j in 0..count {
+                let code = at(in pool, wrapping_add(first, j));
+                let mut earlier = false;
+                for k in 0..j {
+                    if at(in pool, wrapping_add(first, k)) == code {
+                        earlier = true;
+                    }
+                }
+                if !earlier && !is_allowed(in allowed, code) {
+                    push(inout out, in parent, root, v, 0, code, 0);
+                }
+            }
+            for k in get(in adj.ustart, v)..get(in adj.ustart, wrapping_add(v, 1)) {
+                push(inout out, in parent, root, v, 2, get(in adj.usites, k), 0);
+            }
+            let loops = fw(in fns, v, 2);
+            if loops == 2 && reject_unbounded {
+                push(inout out, in parent, root, v, 3, 0, 0);
+            } else if loops == 1 && has_max {
+                let b = fw(in fns, v, 3);
+                if b > max_loops {
+                    push(inout out, in parent, root, v, 4, b, max_loops);
+                }
+            }
+        }
+    }
+    // Worst-case stack depth over the reachable subgraph: an iterative DFS
+    // (0 white, 1 grey, 2 black) with checked sums.
+    let mut color = filled(n, 0);
+    let mut depth = filled(n, 0);
+    let mut stack: ChunkSeq[u64] = ChunkSeq::new();
+    stack.push(root);
+    stack.push(0);
+    set(inout color, root, 1);
+    loop {
+        let top = stack.len();
+        if top == 0 {
+            break;
+        }
+        let u = get(in stack, wrapping_sub(top, 2));
+        let next = get(in stack, wrapping_sub(top, 1));
+        let lo = get(in adj.start, u);
+        let hi = get(in adj.start, wrapping_add(u, 1));
+        if wrapping_add(lo, next) < hi {
+            let v = get(in adj.succ, wrapping_mul(wrapping_add(lo, next), 3));
+            set(inout stack, wrapping_sub(top, 1), wrapping_add(next, 1));
+            let c = get(in color, v);
+            if c == 0 {
+                set(inout color, v, 1);
+                stack.push(v);
+                stack.push(0);
+            } else if c == 1 {
+                push(inout out, in parent, root, v, 5, 0, 0);
+                return;
+            }
+        } else {
+            let mut deepest: u64 = 0;
+            for k in lo..hi {
+                let d = get(in depth, get(in adj.succ, wrapping_mul(k, 3)));
+                if d > deepest {
+                    deepest = d;
+                }
+            }
+            let frame = fw(in fns, u, 1);
+            if deepest > wrapping_sub(none(), frame) {
+                push(inout out, in parent, root, root, 7, 0, 0);
+                return;
+            }
+            set(inout depth, u, wrapping_add(frame, deepest));
+            set(inout color, u, 2);
+            stack.truncate(wrapping_sub(top, 2));
+        }
+    }
+    let d = get(in depth, root);
+    if has_budget && d > budget {
+        push(inout out, in parent, root, root, 6, d, budget);
+    }
+}

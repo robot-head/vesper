@@ -1,0 +1,1128 @@
+// Module frame of @vesper/warp (see lib.ves): RFC 9000 §19 frames
+// (frame.rs). A parsed frame names its byte fields as spans of the input;
+// an encoded one takes them as the slices `a` (data, reason, token, CID or
+// ACK range pairs) and `b` (the stateless reset token).
+use self::{
+    AckRange,
+    FrameAt,
+    FrameErr,
+    FrameW,
+    PktType,
+    Sp,
+    WireStep
+};
+use self::varint::{
+    b8,
+    vi_len_or_zero,
+    vi_max,
+    vi_prefix_len,
+    vi_put,
+    vi_value_at
+};
+
+fn t_padding() -> u64 {
+    0
+}
+
+fn t_ack() -> u64 {
+    2
+}
+
+fn t_ack_ecn() -> u64 {
+    3
+}
+
+fn t_crypto() -> u64 {
+    6
+}
+
+fn t_stream() -> u64 {
+    8
+}
+
+fn stream_off() -> u64 {
+    4
+}
+
+fn stream_len() -> u64 {
+    2
+}
+
+fn stream_fin() -> u64 {
+    1
+}
+
+fn t_handshake_done() -> u64 {
+    30
+}
+
+pub fn max_stream_count() -> u64 {
+    1152921504606846976
+}
+
+fn reset_token_len() -> u64 {
+    16
+}
+
+// Table 3 permissions (RFC 9000 §12.4).
+pub fn fr_allowed(ty: u64, pt: PktType) -> bool {
+    let zero_rtt = match pt {
+        PktType::ZeroRtt => true,
+        _ => false,
+    };
+    let one_rtt = match pt {
+        PktType::OneRtt => true,
+        _ => false,
+    };
+    if ty == 0 || ty == 1 || ty == 28 {
+        true
+    } else if ty == 2 || ty == 3 || ty == 6 {
+        !zero_rtt
+    } else if ty == 7 || ty == 27 || ty == 30 {
+        one_rtt
+    } else if ty
+        == 24
+        || ty
+        == 25
+        || ty
+        == 26
+        || ty
+        == 4
+        || ty
+        == 5
+        || ty
+        == 29
+        || ty
+        >= 8
+        && ty
+        <= 23 {
+        zero_rtt || one_rtt
+    } else {
+        false
+    }
+}
+
+fn truncated(ty: u64) eff [Fail[FrameErr]] {
+    Fail::raise(
+        FrameErr::Truncated {
+            frame_type: ty
+        }
+    );
+}
+
+fn malformed(ty: u64) eff [Fail[FrameErr]] {
+    Fail::raise(
+        FrameErr::Malformed {
+            frame_type: ty
+        }
+    );
+}
+
+// `Reader::varint` at `at`: the value and the next position, or `None`.
+fn rd_vi(in buf: Slice[u8], at: u64) -> Option[(u64, u64)] {
+    if at >= buf.len() {
+        return Option::None;
+    }
+    let len = vi_prefix_len(wrapping_u8(b8(in buf, at)));
+    if wrapping_sub(buf.len(), at) < len {
+        return Option::None;
+    }
+    Option::Some((vi_value_at(in buf, at, len), wrapping_add(at, len)))
+}
+
+// A varint field of a frame of type `ty`.
+fn vi(in buf: Slice[u8], at: u64, ty: u64) -> (u64, u64) eff [Fail[FrameErr]] {
+    match rd_vi(in buf, at) {
+        Option::Some(r) => r,
+        Option::None => {
+            truncated(ty);
+            (0, 0)
+        }
+    }
+}
+
+// `len` bytes at `at` of a frame of type `ty`.
+fn take(in buf: Slice[u8], at: u64, len: u64, ty: u64) -> Sp eff [Fail[FrameErr]] {
+    let end = wrapping_add(at, len);
+    if end < at || end > buf.len() {
+        truncated(ty);
+    }
+    Sp {
+        start: at,
+        len: len
+    }
+}
+
+// `check_end`: `offset + len` stays a varint.
+fn end_ok(offset: u64, len: u64) -> bool {
+    let end = wrapping_add(offset, len);
+    end >= offset && end <= vi_max()
+}
+
+// Parses the frame at `buf[at..]`; spans are positions in `buf`.
+pub fn fr_parse_at(in buf: Slice[u8], at: u64, pt: PktType) -> FrameAt eff [Fail[FrameErr]] {
+    let (ty, p0) = vi(in buf, at, 0);
+    if wrapping_sub(p0, at) != vi_len_or_zero(ty) {
+        Fail::raise(
+            FrameErr::NonMinimalType {
+                ty: ty
+            }
+        );
+    }
+    if ty > t_handshake_done() {
+        Fail::raise(
+            FrameErr::UnknownType {
+                ty: ty
+            }
+        );
+    }
+    if !fr_allowed(ty, pt) {
+        Fail::raise(
+            FrameErr::NotAllowed {
+                frame_type: ty,
+                packet_type: pt
+            }
+        );
+    }
+    if ty == 0 {
+        let mut p = p0;
+        loop {
+            if p >= buf.len() || b8(in buf, p) != 0 {
+                break;
+            }
+            p = wrapping_add(p, 1);
+        }
+        return FrameAt {
+            f: FrameW::Padding {
+                len: wrapping_add(wrapping_sub(p, p0), 1)
+            },
+            end: p
+        };
+    }
+    if ty == 1 {
+        return FrameAt {
+            f: FrameW::Ping,
+            end: p0
+        };
+    }
+    if ty == 2 || ty == 3 {
+        return parse_ack(in buf, p0, ty);
+    }
+    if ty == 6 {
+        let (offset, p1) = vi(in buf, p0, ty);
+        let (len, p2) = vi(in buf, p1, ty);
+        let data = take(in buf, p2, len, ty);
+        if !end_ok(offset, len) {
+            Fail::raise(
+                FrameErr::OffsetOverflow {
+                    frame_type: ty
+                }
+            );
+        }
+        return FrameAt {
+            f: FrameW::Crypto {
+                offset: offset,
+                data: data
+            },
+            end: wrapping_add(p2, len)
+        };
+    }
+    if ty >= 8 && ty <= 15 {
+        let (stream_id, p1) = vi(in buf, p0, ty);
+        let mut p = p1;
+        let mut offset: u64 = 0;
+        if ty & stream_off() != 0 {
+            let (o, p2) = vi(in buf, p, ty);
+            offset = o;
+            p = p2;
+        }
+        let has_length = ty & stream_len() != 0;
+        let mut len: u64 = 0;
+        if has_length {
+            let (l, p3) = vi(in buf, p, ty);
+            len = l;
+            p = p3;
+        } else {
+            len = wrapping_sub(buf.len(), p);
+        }
+        let data = take(in buf, p, len, ty);
+        if !end_ok(offset, len) {
+            Fail::raise(
+                FrameErr::OffsetOverflow {
+                    frame_type: ty
+                }
+            );
+        }
+        return FrameAt {
+            f: FrameW::Stream {
+                stream_id: stream_id,
+                offset: offset,
+                data: data,
+                fin: ty & stream_fin() != 0,
+                has_length: has_length
+            },
+            end: wrapping_add(p, len)
+        };
+    }
+    if ty == 16 {
+        let (max, p1) = vi(in buf, p0, ty);
+        return FrameAt {
+            f: FrameW::MaxData {
+                max: max
+            },
+            end: p1
+        };
+    }
+    if ty == 17 {
+        let (stream_id, p1) = vi(in buf, p0, ty);
+        let (max, p2) = vi(in buf, p1, ty);
+        return FrameAt {
+            f: FrameW::MaxStreamData {
+                stream_id: stream_id,
+                max: max
+            },
+            end: p2
+        };
+    }
+    if ty == 4 {
+        let (stream_id, p1) = vi(in buf, p0, ty);
+        let (error_code, p2) = vi(in buf, p1, ty);
+        let (final_size, p3) = vi(in buf, p2, ty);
+        return FrameAt {
+            f: FrameW::ResetStream {
+                stream_id: stream_id,
+                error_code: error_code,
+                final_size: final_size
+            },
+            end: p3
+        };
+    }
+    if ty == 5 {
+        let (stream_id, p1) = vi(in buf, p0, ty);
+        let (error_code, p2) = vi(in buf, p1, ty);
+        return FrameAt {
+            f: FrameW::StopSending {
+                stream_id: stream_id,
+                error_code: error_code
+            },
+            end: p2
+        };
+    }
+    if ty >= 18 && ty <= 23 && ty != 20 && ty != 21 {
+        let (n, p1) = vi(in buf, p0, ty);
+        if n > max_stream_count() {
+            malformed(ty);
+        }
+        let uni = ty & 1 == 1;
+        if ty <= 19 {
+            return FrameAt {
+                f: FrameW::MaxStreams {
+                    uni: uni,
+                    max: n
+                },
+                end: p1
+            };
+        }
+        return FrameAt {
+            f: FrameW::StreamsBlocked {
+                uni: uni,
+                limit: n
+            },
+            end: p1
+        };
+    }
+    if ty == 20 {
+        let (limit, p1) = vi(in buf, p0, ty);
+        return FrameAt {
+            f: FrameW::DataBlocked {
+                limit: limit
+            },
+            end: p1
+        };
+    }
+    if ty == 21 {
+        let (stream_id, p1) = vi(in buf, p0, ty);
+        let (limit, p2) = vi(in buf, p1, ty);
+        return FrameAt {
+            f: FrameW::StreamDataBlocked {
+                stream_id: stream_id,
+                limit: limit
+            },
+            end: p2
+        };
+    }
+    if ty == 28 || ty == 29 {
+        let (error_code, p1) = vi(in buf, p0, ty);
+        let mut p = p1;
+        let mut frame_type: u64 = 0;
+        if ty == 28 {
+            let (t, p2) = vi(in buf, p, ty);
+            frame_type = t;
+            p = p2;
+        }
+        let (len, p3) = vi(in buf, p, ty);
+        let reason = take(in buf, p3, len, ty);
+        return FrameAt {
+            f: FrameW::ConnectionClose {
+                error_code: error_code,
+                has_frame_type: ty == 28,
+                frame_type: frame_type,
+                reason: reason
+            },
+            end: wrapping_add(p3, len)
+        };
+    }
+    if ty == 30 {
+        return FrameAt {
+            f: FrameW::HandshakeDone,
+            end: p0
+        };
+    }
+    if ty == 7 {
+        let (len, p1) = vi(in buf, p0, ty);
+        if len == 0 {
+            malformed(ty);
+        }
+        let token = take(in buf, p1, len, ty);
+        return FrameAt {
+            f: FrameW::NewToken {
+                token: token
+            },
+            end: wrapping_add(p1, len)
+        };
+    }
+    if ty == 24 {
+        let (seq, p1) = vi(in buf, p0, ty);
+        let (retire_prior_to, p2) = vi(in buf, p1, ty);
+        if p2 >= buf.len() {
+            truncated(ty);
+        }
+        let len = b8(in buf, p2);
+        if len == 0 || len > 20 || retire_prior_to > seq {
+            malformed(ty);
+        }
+        let p3 = wrapping_add(p2, 1);
+        let cid = take(in buf, p3, len, ty);
+        let p4 = wrapping_add(p3, len);
+        let token = take(in buf, p4, reset_token_len(), ty);
+        return FrameAt {
+            f: FrameW::NewConnectionId {
+                seq: seq,
+                retire_prior_to: retire_prior_to,
+                cid: cid,
+                reset_token: token.start
+            },
+            end: wrapping_add(p4, reset_token_len())
+        };
+    }
+    if ty == 25 {
+        let (seq, p1) = vi(in buf, p0, ty);
+        return FrameAt {
+            f: FrameW::RetireConnectionId {
+                seq: seq
+            },
+            end: p1
+        };
+    }
+    // PATH_CHALLENGE (26) and PATH_RESPONSE (27).
+    let _d = take(in buf, p0, 8, ty);
+    let data = match buf.try_read_u64_be(p0) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+    if ty == 26 {
+        return FrameAt {
+            f: FrameW::PathChallenge {
+                data: data
+            },
+            end: wrapping_add(p0, 8)
+        };
+    }
+    FrameAt {
+        f: FrameW::PathResponse {
+            data: data
+        },
+        end: wrapping_add(p0, 8)
+    }
+}
+
+fn parse_ack(in buf: Slice[u8], p0: u64, ty: u64) -> FrameAt eff [Fail[FrameErr]] {
+    let (largest, p1) = vi(in buf, p0, ty);
+    let (ack_delay, p2) = vi(in buf, p1, ty);
+    let (count, p3) = vi(in buf, p2, ty);
+    let (first_range, p4) = vi(in buf, p3, ty);
+    if first_range > largest {
+        malformed(ty);
+    }
+    let mut smallest = wrapping_sub(largest, first_range);
+    let mut p = p4;
+    let mut i: u64 = 0;
+    loop {
+        if i >= count {
+            break;
+        }
+        let (gap, q1) = vi(in buf, p, ty);
+        let (len, q2) = vi(in buf, q1, ty);
+        if gap > smallest || wrapping_sub(smallest, gap) < 2 {
+            malformed(ty);
+        }
+        let next_largest = wrapping_sub(wrapping_sub(smallest, gap), 2);
+        if len > next_largest {
+            malformed(ty);
+        }
+        smallest = wrapping_sub(next_largest, len);
+        p = q2;
+        i = wrapping_add(i, 1);
+    }
+    let pairs = Sp {
+        start: p4,
+        len: wrapping_sub(p, p4)
+    };
+    let mut has_ecn = false;
+    let mut ect0: u64 = 0;
+    let mut ect1: u64 = 0;
+    let mut ce: u64 = 0;
+    if ty == t_ack_ecn() {
+        let (a, q1) = vi(in buf, p, ty);
+        let (b, q2) = vi(in buf, q1, ty);
+        let (c, q3) = vi(in buf, q2, ty);
+        has_ecn = true;
+        ect0 = a;
+        ect1 = b;
+        ce = c;
+        p = q3;
+    }
+    FrameAt {
+        f: FrameW::Ack {
+            largest: largest,
+            ack_delay: ack_delay,
+            has_ecn: has_ecn,
+            ect0: ect0,
+            ect1: ect1,
+            ce: ce,
+            decoded: false,
+            first_range: first_range,
+            count: count,
+            pairs: pairs
+        },
+        end: p
+    }
+}
+
+// The next range below `prev_smallest` from the `(gap, length)` pairs at
+// `pairs[at..]`, or `None` once they are used up.
+pub fn fr_wire_next(in pairs: Slice[u8], at: u64, prev_smallest: u64) -> Option[WireStep] {
+    match rd_vi(in pairs, at) {
+        Option::None => Option::None,
+        Option::Some((gap, q1)) => match rd_vi(in pairs, q1) {
+            Option::None => Option::None,
+            Option::Some((len, q2)) => {
+                if gap > prev_smallest || wrapping_sub(prev_smallest, gap) < 2 {
+                    return Option::None;
+                }
+                let largest = wrapping_sub(wrapping_sub(prev_smallest, gap), 2);
+                if len > largest {
+                    return Option::None;
+                }
+                Option::Some(
+                    WireStep {
+                        smallest: wrapping_sub(largest, len),
+                        largest: largest,
+                        next: q2
+                    }
+                )
+            },
+        },
+    }
+}
+
+// `AckFrame::from_ranges`' checks: descending, disjoint, non-adjacent.
+pub fn fr_check_ranges(in ranges: Slice[AckRange], ack_delay: u64) eff [Fail[FrameErr]] {
+    if ranges.len() == 0 {
+        malformed(t_ack());
+    }
+    let mut prev_smallest: u64 = 0;
+    for i in 0..ranges.len() {
+        let r = match ranges.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => AckRange {
+                smallest: 0,
+                largest: 0
+            },
+        };
+        if r.smallest > r.largest || r.largest > vi_max() {
+            malformed(t_ack());
+        }
+        if i
+            > 0
+            && (
+            r
+                .largest
+                > wrapping_sub(18446744073709551615, 2)
+                || wrapping_add(r.largest, 2)
+                > prev_smallest
+        ) {
+            malformed(t_ack());
+        }
+        prev_smallest = r.smallest;
+    }
+    if ack_delay > vi_max() {
+        malformed(t_ack());
+    }
+}
+
+// A frame's kind is the variant index of `Frame` (and of `FrameW`):
+// Padding 0, Ping 1, Ack 2, Crypto 3, Stream 4, MaxData 5, MaxStreamData 6,
+// ResetStream 7, StopSending 8, MaxStreams 9, DataBlocked 10,
+// StreamDataBlocked 11, StreamsBlocked 12, ConnectionClose 13,
+// HandshakeDone 14, NewToken 15, NewConnectionId 16, RetireConnectionId 17,
+// PathChallenge 18, PathResponse 19. `bits` holds what else the wire type
+// encodes: ECN for an ACK (1); FIN (1), LEN (2) and OFF (4) for a STREAM;
+// `uni` (1) for MAX_STREAMS and STREAMS_BLOCKED; the transport variant (1)
+// for a CONNECTION_CLOSE.
+pub fn fr_kind_type(kind: u64, bits: u64) -> u64 {
+    if kind == 0 {
+        0
+    } else if kind == 1 {
+        1
+    } else if kind == 2 {
+        2 | bits & 1
+    } else if kind == 3 {
+        6
+    } else if kind == 4 {
+        t_stream() | bits & 7
+    } else if kind == 5 {
+        16
+    } else if kind == 6 {
+        17
+    } else if kind == 7 {
+        4
+    } else if kind == 8 {
+        5
+    } else if kind == 9 {
+        18 | bits & 1
+    } else if kind == 10 {
+        20
+    } else if kind == 11 {
+        21
+    } else if kind == 12 {
+        22 | bits & 1
+    } else if kind == 13 {
+        wrapping_sub(29, bits & 1)
+    } else if kind == 14 {
+        30
+    } else if kind == 15 {
+        7
+    } else if kind == 16 {
+        24
+    } else if kind == 17 {
+        25
+    } else if kind == 18 {
+        26
+    } else {
+        27
+    }
+}
+
+// RFC 9002 §2: everything but ACK, PADDING and CONNECTION_CLOSE.
+pub fn fr_kind_is_ack_eliciting(kind: u64) -> bool {
+    !(kind == 0 || kind == 2 || kind == 13)
+}
+
+// RFC 9000 §9.1 probing frames: PADDING, PATH_CHALLENGE, PATH_RESPONSE and
+// NEW_CONNECTION_ID.
+pub fn fr_kind_is_probing(kind: u64) -> bool {
+    kind == 0 || kind == 18 || kind == 19 || kind == 16
+}
+
+fn flag(b: bool, v: u64) -> u64 {
+    if b {
+        v
+    } else {
+        0
+    }
+}
+
+// The kind and type bits of a frame's words.
+fn kind_of(f: FrameW) -> (u64, u64) {
+    match f {
+        FrameW::Padding {
+            len
+        }
+        => (0, 0),
+        FrameW::Ping => (1, 0),
+        FrameW::Ack {
+            largest,
+            ack_delay,
+            has_ecn,
+            ect0,
+            ect1,
+            ce,
+            decoded,
+            first_range,
+            count,
+            pairs
+        }
+        => (2, flag(has_ecn, 1)),
+        FrameW::Crypto {
+            offset,
+            data
+        }
+        => (3, 0),
+        FrameW::Stream {
+            stream_id,
+            offset,
+            data,
+            fin,
+            has_length
+        }
+        => (
+            4,
+            flag(fin, stream_fin()) | flag(has_length, stream_len()) | flag(
+                offset != 0,
+                stream_off()
+            )
+        ),
+        FrameW::MaxData {
+            max
+        }
+        => (5, 0),
+        FrameW::MaxStreamData {
+            stream_id,
+            max
+        }
+        => (6, 0),
+        FrameW::ResetStream {
+            stream_id,
+            error_code,
+            final_size
+        }
+        => (7, 0),
+        FrameW::StopSending {
+            stream_id,
+            error_code
+        }
+        => (8, 0),
+        FrameW::MaxStreams {
+            uni,
+            max
+        }
+        => (9, flag(uni, 1)),
+        FrameW::DataBlocked {
+            limit
+        }
+        => (10, 0),
+        FrameW::StreamDataBlocked {
+            stream_id,
+            limit
+        }
+        => (11, 0),
+        FrameW::StreamsBlocked {
+            uni,
+            limit
+        }
+        => (12, flag(uni, 1)),
+        FrameW::ConnectionClose {
+            error_code,
+            has_frame_type,
+            frame_type,
+            reason
+        }
+        => (13, flag(has_frame_type, 1)),
+        FrameW::HandshakeDone => (14, 0),
+        FrameW::NewToken {
+            token
+        }
+        => (15, 0),
+        FrameW::NewConnectionId {
+            seq,
+            retire_prior_to,
+            cid,
+            reset_token
+        }
+        => (16, 0),
+        FrameW::RetireConnectionId {
+            seq
+        }
+        => (17, 0),
+        FrameW::PathChallenge {
+            data
+        }
+        => (18, 0),
+        FrameW::PathResponse {
+            data
+        }
+        => (19, 0),
+    }
+}
+
+pub fn fr_type(f: FrameW) -> u64 {
+    let (kind, bits) = kind_of(f);
+    fr_kind_type(kind, bits)
+}
+
+fn enc() eff [Fail[FrameErr]] {
+    Fail::raise(FrameErr::Encode);
+}
+
+// `Writer::varint`, any error being `FrameError::Encode`.
+fn w_vi(inout out: Slice[u8], at: u64, value: u64) -> u64 eff [Fail[FrameErr]] {
+    let len = vi_len_or_zero(value);
+    if len == 0 || wrapping_add(at, len) > out.len() {
+        enc();
+    }
+    vi_put(value, len, inout out, at);
+    wrapping_add(at, len)
+}
+
+fn w_bytes(inout out: Slice[u8], at: u64, in bytes: Slice[u8]) -> u64 eff [Fail[FrameErr]] {
+    let end = wrapping_add(at, bytes.len());
+    if end > out.len() {
+        enc();
+    }
+    let _c = out.try_copy_from(at, in bytes);
+    end
+}
+
+fn w_u64(inout out: Slice[u8], at: u64, v: u64) -> u64 eff [Fail[FrameErr]] {
+    if wrapping_add(at, 8) > out.len() {
+        enc();
+    }
+    let _w = out.try_write_u64_be(at, v);
+    wrapping_add(at, 8)
+}
+
+fn range_at(in ranges: Slice[AckRange], i: u64) -> AckRange {
+    match ranges.try_get(i) {
+        Option::Some(x) => x,
+        Option::None => AckRange {
+            smallest: 0,
+            largest: 0
+        },
+    }
+}
+
+// `Frame::encode`: returns the bytes written.
+pub fn fr_encode(
+    inout out: Slice[u8],
+    f: FrameW,
+    in a: Slice[u8],
+    in b: Slice[u8],
+    in ranges: Slice[AckRange]
+) -> u64 eff [Fail[FrameErr]] {
+    match f {
+        FrameW::Padding {
+            len
+        }
+        => {
+            // The Rust writer fills the room it has before failing.
+            let n = if len > out.len() {
+                out.len()
+            } else {
+                len
+            };
+            for i in 0..n {
+                out.try_set(i, 0);
+            }
+            if len > n {
+                enc();
+            }
+            return len;
+        },
+        _ => {},
+    }
+    let mut at = w_vi(inout out, 0, fr_type(f));
+    match f {
+        FrameW::Ack {
+            largest,
+            ack_delay,
+            has_ecn,
+            ect0,
+            ect1,
+            ce,
+            decoded,
+            first_range,
+            count,
+            pairs
+        }
+        => {
+            if decoded {
+                let n = ranges.len();
+                if n == 0 {
+                    enc();
+                }
+                let first = range_at(in ranges, 0);
+                at = w_vi(inout out, at, largest);
+                at = w_vi(inout out, at, ack_delay);
+                at = w_vi(inout out, at, wrapping_sub(n, 1));
+                at = w_vi(inout out, at, wrapping_sub(first.largest, first.smallest));
+                let mut prev = first.smallest;
+                for i in 1..n {
+                    let r = range_at(in ranges, i);
+                    at = w_vi(inout out, at, wrapping_sub(wrapping_sub(prev, r.largest), 2));
+                    at = w_vi(inout out, at, wrapping_sub(r.largest, r.smallest));
+                    prev = r.smallest;
+                }
+            } else {
+                if first_range > largest {
+                    enc();
+                }
+                at = w_vi(inout out, at, largest);
+                at = w_vi(inout out, at, ack_delay);
+                at = w_vi(inout out, at, count);
+                at = w_vi(inout out, at, first_range);
+                {
+                    let mut prev = wrapping_sub(largest, first_range);
+                    let mut p: u64 = 0;
+                    let mut i: u64 = 0;
+                    loop {
+                        if i >= count {
+                            break;
+                        }
+                        match fr_wire_next(in a, p, prev) {
+                            Option::None => {
+                                break;
+                            },
+                            Option::Some(s) => {
+                                at = w_vi(
+                                    inout out,
+                                    at,
+                                    wrapping_sub(wrapping_sub(prev, s.largest), 2)
+                                );
+                                at = w_vi(inout out, at, wrapping_sub(s.largest, s.smallest));
+                                prev = s.smallest;
+                                p = s.next;
+                            },
+                        }
+                        i = wrapping_add(i, 1);
+                    }
+                }
+            }
+            if has_ecn {
+                at = w_vi(inout out, at, ect0);
+                at = w_vi(inout out, at, ect1);
+                at = w_vi(inout out, at, ce);
+            }
+        },
+        FrameW::Crypto {
+            offset,
+            data
+        }
+        => {
+            if !end_ok(offset, a.len()) {
+                enc();
+            }
+            at = w_vi(inout out, at, offset);
+            at = w_vi(inout out, at, a.len());
+            at = w_bytes(inout out, at, in a);
+        },
+        FrameW::Stream {
+            stream_id,
+            offset,
+            data,
+            fin,
+            has_length
+        }
+        => {
+            if !end_ok(offset, a.len()) {
+                enc();
+            }
+            at = w_vi(inout out, at, stream_id);
+            if offset != 0 {
+                at = w_vi(inout out, at, offset);
+            }
+            if has_length {
+                at = w_vi(inout out, at, a.len());
+            }
+            at = w_bytes(inout out, at, in a);
+        },
+        FrameW::MaxData {
+            max
+        }
+        => {
+            at = w_vi(inout out, at, max);
+        },
+        FrameW::MaxStreamData {
+            stream_id,
+            max
+        }
+        => {
+            at = w_vi(inout out, at, stream_id);
+            at = w_vi(inout out, at, max);
+        },
+        FrameW::ResetStream {
+            stream_id,
+            error_code,
+            final_size
+        }
+        => {
+            at = w_vi(inout out, at, stream_id);
+            at = w_vi(inout out, at, error_code);
+            at = w_vi(inout out, at, final_size);
+        },
+        FrameW::StopSending {
+            stream_id,
+            error_code
+        }
+        => {
+            at = w_vi(inout out, at, stream_id);
+            at = w_vi(inout out, at, error_code);
+        },
+        FrameW::MaxStreams {
+            uni,
+            max
+        }
+        => {
+            if max > max_stream_count() {
+                enc();
+            }
+            at = w_vi(inout out, at, max);
+        },
+        FrameW::StreamsBlocked {
+            uni,
+            limit
+        }
+        => {
+            if limit > max_stream_count() {
+                enc();
+            }
+            at = w_vi(inout out, at, limit);
+        },
+        FrameW::DataBlocked {
+            limit
+        }
+        => {
+            at = w_vi(inout out, at, limit);
+        },
+        FrameW::StreamDataBlocked {
+            stream_id,
+            limit
+        }
+        => {
+            at = w_vi(inout out, at, stream_id);
+            at = w_vi(inout out, at, limit);
+        },
+        FrameW::ConnectionClose {
+            error_code,
+            has_frame_type,
+            frame_type,
+            reason
+        }
+        => {
+            at = w_vi(inout out, at, error_code);
+            if has_frame_type {
+                at = w_vi(inout out, at, frame_type);
+            }
+            at = w_vi(inout out, at, a.len());
+            at = w_bytes(inout out, at, in a);
+        },
+        FrameW::NewToken {
+            token
+        }
+        => {
+            if a.len() == 0 {
+                enc();
+            }
+            at = w_vi(inout out, at, a.len());
+            at = w_bytes(inout out, at, in a);
+        },
+        FrameW::NewConnectionId {
+            seq,
+            retire_prior_to,
+            cid,
+            reset_token
+        }
+        => {
+            if retire_prior_to > seq || a.len() == 0 || a.len() > 20 {
+                enc();
+            }
+            at = w_vi(inout out, at, seq);
+            at = w_vi(inout out, at, retire_prior_to);
+            if at >= out.len() {
+                enc();
+            }
+            out.try_set(at, wrapping_u8(a.len()));
+            at = wrapping_add(at, 1);
+            at = w_bytes(inout out, at, in a);
+            at = w_bytes(inout out, at, in b);
+        },
+        FrameW::RetireConnectionId {
+            seq
+        }
+        => {
+            at = w_vi(inout out, at, seq);
+        },
+        FrameW::PathChallenge {
+            data
+        }
+        => {
+            at = w_u64(inout out, at, data);
+        },
+        FrameW::PathResponse {
+            data
+        }
+        => {
+            at = w_u64(inout out, at, data);
+        },
+        _ => {},
+    }
+    at
+}
+
+// `encode_stream_header`: type with LEN (and OFF for a nonzero offset).
+pub fn fr_encode_stream_header(
+    inout out: Slice[u8],
+    stream_id: u64,
+    offset: u64,
+    len: u64,
+    fin: bool
+) -> u64 eff [Fail[FrameErr]] {
+    if !end_ok(offset, len) {
+        enc();
+    }
+    let mut ty = t_stream() | stream_len();
+    if offset != 0 {
+        ty = ty | stream_off();
+    }
+    if fin {
+        ty = ty | stream_fin();
+    }
+    let mut at = w_vi(inout out, 0, ty);
+    at = w_vi(inout out, at, stream_id);
+    if offset != 0 {
+        at = w_vi(inout out, at, offset);
+    }
+    w_vi(inout out, at, len)
+}
+
+pub fn fr_encode_crypto_header(inout out: Slice[u8], offset: u64, len: u64)
+    -> u64 eff [Fail[FrameErr]] {
+    if !end_ok(offset, len) {
+        enc();
+    }
+    let at = w_vi(inout out, 0, t_crypto());
+    let at2 = w_vi(inout out, at, offset);
+    w_vi(inout out, at2, len)
+}
+
+fn vl(v: u64) -> u64 {
+    let n = vi_len_or_zero(v);
+    if n == 0 {
+        8
+    } else {
+        n
+    }
+}
+
+pub fn fr_stream_header_len(stream_id: u64, offset: u64, len: u64) -> u64 {
+    let off = if offset != 0 {
+        vl(offset)
+    } else {
+        0
+    };
+    wrapping_add(wrapping_add(wrapping_add(1, vl(stream_id)), off), vl(len))
+}
+
+pub fn fr_crypto_header_len(offset: u64, len: u64) -> u64 {
+    wrapping_add(wrapping_add(1, vl(offset)), vl(len))
+}

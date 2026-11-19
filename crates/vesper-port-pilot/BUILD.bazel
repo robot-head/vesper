@@ -61,12 +61,22 @@ vesper_port_object(
     target = VESPER_TARGET,
 )
 
+# The export ABI widening library (#1087): f32, lent handles, handles
+# that own sequences of handles and boxed trait objects.
+vesper_port_object(
+    name = "widen_vesper",
+    src = "vesper/widen.ves",
+    library = "widen",
+    target = VESPER_TARGET,
+)
+
 rust_library(
     name = "port",
     srcs = glob(["src/**/*.rs"]) + [
         "port/binding.rs",
         "port/gauge.rs",
         "port/kit.rs",
+        "port/widen.rs",
     ],
     crate_features = ["vesper-port"],
     crate_name = "vesper_port_pilot",
@@ -82,6 +92,7 @@ rust_test(
         ":gauge_vesper",
         ":kit_vesper",
         ":pilot_vesper",
+        ":widen_vesper",
     ],
     crate_features = ["vesper-port"],
     edition = "2024",
@@ -89,6 +100,7 @@ rust_test(
         "-Clink-arg=$(location :pilot_vesper)",
         "-Clink-arg=$(location :kit_vesper)",
         "-Clink-arg=$(location :gauge_vesper)",
+        "-Clink-arg=$(location :widen_vesper)",
     ],
     deps = [":port"],
 )
@@ -101,6 +113,7 @@ rust_test(
         ":gauge_vesper",
         ":kit_vesper",
         ":pilot_vesper_divergent",
+        ":widen_vesper",
     ],
     crate_features = ["vesper-port"],
     edition = "2024",
@@ -108,6 +121,7 @@ rust_test(
         "-Clink-arg=$(location :pilot_vesper_divergent)",
         "-Clink-arg=$(location :kit_vesper)",
         "-Clink-arg=$(location :gauge_vesper)",
+        "-Clink-arg=$(location :widen_vesper)",
     ],
     tags = ["manual"],
     deps = [":port"],
@@ -121,6 +135,7 @@ rust_test(
             ":gauge_vesper",
             ":pilot_vesper",
             kit,
+            ":widen_vesper",
         ],
         crate_features = ["vesper-port"],
         crate_name = crate,
@@ -129,6 +144,7 @@ rust_test(
             "-Clink-arg=$(location :pilot_vesper)",
             "-Clink-arg=$(location %s)" % kit,
             "-Clink-arg=$(location :gauge_vesper)",
+            "-Clink-arg=$(location :widen_vesper)",
         ],
         tags = tags,
         deps = [
@@ -140,6 +156,7 @@ rust_test(
         ("port_kit_test", "tests/kit.rs", "kit", ":kit_vesper", []),
         ("port_kit_memory_test", "tests/kit_memory.rs", "kit_memory", ":kit_vesper", []),
         ("port_gauge_test", "tests/gauge.rs", "gauge", ":kit_vesper", []),
+        ("port_widen_test", "tests/widen.rs", "widen", ":kit_vesper", []),
         ("_port_kit_divergent.bin", "tests/kit.rs", "kit_divergent", ":kit_vesper_divergent", ["manual"]),
         ("_port_kit_memory_divergent.bin", "tests/kit_memory.rs", "kit_memory_divergent", ":kit_vesper_divergent", ["manual"]),
     ]

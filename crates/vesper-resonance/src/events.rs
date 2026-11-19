@@ -32,6 +32,51 @@ pub struct RtParamEvent {
 
 impl RtParamEvent {
     /// Encode as the 16-byte little-endian wire frame.
+    #[cfg(vesper_port)]
+    pub fn encode(&self) -> [u8; EVENT_WIRE_BYTES] {
+        let mut b = [0u8; EVENT_WIRE_BYTES];
+        crate::port::ok(crate::port::event_encode(&self.wire(), &mut b));
+        b
+    }
+
+    #[cfg(vesper_port)]
+    fn wire(&self) -> crate::port::repr::Wire {
+        crate::port::repr::Wire::from_value(&crate::port::Wire {
+            sample_offset: self.sample_offset,
+            node_id: self.node_id,
+            param_id: self.param_id,
+            target: self.target.to_bits(),
+            ramp_samples: self.ramp_samples,
+        })
+    }
+
+    /// Decode one wire frame. Non-finite targets are rejected.
+    #[cfg(vesper_port)]
+    pub fn decode(b: &[u8; EVENT_WIRE_BYTES]) -> Result<Self, EventError> {
+        Self::decode_at(b, 0)
+    }
+
+    #[cfg(vesper_port)]
+    fn decode_at(bytes: &[u8], at: usize) -> Result<Self, EventError> {
+        use crate::port::EventDecodeError as E;
+        match crate::port::event_decode(bytes, at as u64) {
+            Ok(w) => {
+                let w = w.to_value();
+                Ok(RtParamEvent {
+                    sample_offset: w.sample_offset,
+                    node_id: w.node_id,
+                    param_id: w.param_id,
+                    target: f32::from_bits(w.target),
+                    ramp_samples: w.ramp_samples,
+                })
+            }
+            Err(E::EventFault(f)) => Err(f.into()),
+            Err(e) => panic!("the Vesper port of vesper-resonance failed: {e:?}"),
+        }
+    }
+
+    /// Encode as the 16-byte little-endian wire frame.
+    #[cfg(not(vesper_port))]
     pub fn encode(&self) -> [u8; EVENT_WIRE_BYTES] {
         let mut b = [0u8; EVENT_WIRE_BYTES];
         b[0..2].copy_from_slice(&self.sample_offset.to_le_bytes());
@@ -43,6 +88,7 @@ impl RtParamEvent {
     }
 
     /// Decode one wire frame. Non-finite targets are rejected.
+    #[cfg(not(vesper_port))]
     pub fn decode(b: &[u8; EVENT_WIRE_BYTES]) -> Result<Self, EventError> {
         let target = f32::from_bits(u32::from_le_bytes([b[8], b[9], b[10], b[11]]));
         if !target.is_finite() {
@@ -99,8 +145,58 @@ impl fmt::Display for EventError {
 
 impl std::error::Error for EventError {}
 
+#[cfg(vesper_port)]
+impl From<crate::port::EventFault> for EventError {
+    fn from(f: crate::port::EventFault) -> Self {
+        use crate::port::EventFault as F;
+        match f {
+            F::TrailingBytes(n) => EventError::TrailingBytes(n as usize),
+            F::OverBudget(max) => EventError::OverBudget { max: max as usize },
+            F::NonFiniteTarget => EventError::NonFiniteTarget,
+            F::OffsetOutOfBlock(offset, block) => EventError::OffsetOutOfBlock {
+                offset,
+                block: block as usize,
+            },
+            F::Unsorted(index) => EventError::Unsorted {
+                index: index as usize,
+            },
+        }
+    }
+}
+
+/// The error of a port call whose only crate error is an `EventFault`.
+#[cfg(vesper_port)]
+fn event_fault<E: std::fmt::Debug>(e: E, fault: Option<crate::port::EventFault>) -> EventError {
+    match fault {
+        Some(f) => f.into(),
+        None => panic!("the Vesper port of vesper-resonance failed: {e:?}"),
+    }
+}
+
 /// Decode `bytes` into the caller's preallocated `out`, returning the filled
 /// prefix. Fails without partial results on any malformed frame.
+#[cfg(vesper_port)]
+pub fn decode_events<'a>(
+    bytes: &[u8],
+    out: &'a mut [RtParamEvent],
+) -> Result<&'a [RtParamEvent], EventError> {
+    use crate::port::EventFramesError as E;
+    let n = crate::port::event_frames(bytes.len() as u64, out.len() as u64).map_err(|e| {
+        let f = match e {
+            E::EventFault(f) => Some(f),
+            _ => None,
+        };
+        event_fault(e, f)
+    })? as usize;
+    for (k, slot) in out.iter_mut().take(n).enumerate() {
+        *slot = RtParamEvent::decode_at(bytes, k * EVENT_WIRE_BYTES)?;
+    }
+    Ok(&out[..n])
+}
+
+/// Decode `bytes` into the caller's preallocated `out`, returning the filled
+/// prefix. Fails without partial results on any malformed frame.
+#[cfg(not(vesper_port))]
 pub fn decode_events<'a>(
     bytes: &[u8],
     out: &'a mut [RtParamEvent],
@@ -140,7 +236,44 @@ impl ParamRamp {
         }
     }
 
+    #[cfg(vesper_port)]
+    fn mirror(&self) -> crate::port::repr::Ramp {
+        crate::port::repr::Ramp::from_value(&crate::port::Ramp {
+            current: self.current.to_bits(),
+            target: self.target.to_bits(),
+            step: self.step.to_bits(),
+            remaining: self.remaining,
+        })
+    }
+
+    #[cfg(vesper_port)]
+    fn load(&mut self, r: &crate::port::repr::Ramp) {
+        let r = r.to_value();
+        self.current = f32::from_bits(r.current);
+        self.target = f32::from_bits(r.target);
+        self.step = f32::from_bits(r.step);
+        self.remaining = r.remaining;
+    }
+
     /// Start a ramp to `target` over `ramp_samples` (0 jumps immediately).
+    #[cfg(vesper_port)]
+    pub fn set(&mut self, target: f32, ramp_samples: u32) {
+        let mut r = self.mirror();
+        crate::port::ramp_set(&mut r, target.to_bits(), ramp_samples);
+        self.load(&r);
+    }
+
+    /// Value for the next sample.
+    #[cfg(vesper_port)]
+    pub fn next_value(&mut self) -> f32 {
+        let mut r = self.mirror();
+        crate::port::ok(crate::port::ramp_next(&mut r));
+        self.load(&r);
+        self.current
+    }
+
+    /// Start a ramp to `target` over `ramp_samples` (0 jumps immediately).
+    #[cfg(not(vesper_port))]
     pub fn set(&mut self, target: f32, ramp_samples: u32) {
         self.target = target;
         if ramp_samples == 0 {
@@ -154,6 +287,7 @@ impl ParamRamp {
     }
 
     /// Value for the next sample.
+    #[cfg(not(vesper_port))]
     pub fn next_value(&mut self) -> f32 {
         if self.remaining > 0 {
             self.remaining -= 1;
@@ -209,6 +343,49 @@ impl RampTile {
 
     /// Configure `lane` to ramp from its current value to `target` over
     /// `ramp_samples` (`0` jumps immediately), matching [`ParamRamp::set`].
+    #[cfg(vesper_port)]
+    pub fn set_lane(&mut self, lane: usize, target: f32, ramp_samples: u32) {
+        use crate::port::bits_mut;
+        crate::port::ok(crate::port::tile_set_lane(
+            bits_mut(&mut self.current),
+            bits_mut(&mut self.target),
+            bits_mut(&mut self.step),
+            &mut self.remaining,
+            lane as u64,
+            target.to_bits(),
+            ramp_samples,
+        ));
+    }
+
+    /// Advance one `lane` by one sample in scalar form, matching
+    /// [`ParamRamp::next_value`].
+    #[cfg(vesper_port)]
+    pub fn advance_lane_scalar(&mut self, lane: usize) -> f32 {
+        use crate::port::{bits, bits_mut};
+        f32::from_bits(crate::port::ok(crate::port::tile_advance_lane(
+            bits_mut(&mut self.current),
+            bits(&self.target),
+            bits(&self.step),
+            &mut self.remaining,
+            lane as u64,
+        )))
+    }
+
+    /// Advance all 16 lanes by one sample in scalar form.
+    #[cfg(vesper_port)]
+    pub fn scalar_next(&mut self) {
+        use crate::port::{bits, bits_mut};
+        crate::port::ok(crate::port::tile_next(
+            bits_mut(&mut self.current),
+            bits(&self.target),
+            bits(&self.step),
+            &mut self.remaining,
+        ));
+    }
+
+    /// Configure `lane` to ramp from its current value to `target` over
+    /// `ramp_samples` (`0` jumps immediately), matching [`ParamRamp::set`].
+    #[cfg(not(vesper_port))]
     pub fn set_lane(&mut self, lane: usize, target: f32, ramp_samples: u32) {
         self.target[lane] = target;
         if ramp_samples == 0 {
@@ -241,6 +418,7 @@ impl RampTile {
 
     /// Advance one `lane` by one sample in scalar form, matching
     /// [`ParamRamp::next_value`].
+    #[cfg(not(vesper_port))]
     #[inline]
     pub fn advance_lane_scalar(&mut self, lane: usize) -> f32 {
         let rem = self.remaining[lane];
@@ -257,6 +435,7 @@ impl RampTile {
     }
 
     /// Advance all 16 lanes by one sample in scalar form.
+    #[cfg(not(vesper_port))]
     pub fn scalar_next(&mut self) {
         for lane in 0..RAMP_LANES {
             self.advance_lane_scalar(lane);
@@ -291,6 +470,40 @@ pub trait ParamTable {
 
 /// Validate `events` for a block of `block` samples against `params`.
 pub fn validate_events<P: ParamTable>(
+    events: &[RtParamEvent],
+    block: usize,
+    params: &mut P,
+) -> Result<(), EventError> {
+    #[cfg(vesper_port)]
+    {
+        let mut prev = 0u16;
+        for (k, ev) in events.iter().enumerate() {
+            crate::port::event_check(
+                ev.sample_offset,
+                ev.target.to_bits(),
+                prev,
+                k as u64,
+                block as u64,
+            )
+            .map_err(EventError::from)?;
+            prev = ev.sample_offset;
+            if !params.has_ramp(ev.node_id, ev.param_id) {
+                return Err(EventError::UnknownParam {
+                    node_id: ev.node_id,
+                    param_id: ev.param_id,
+                });
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(vesper_port))]
+    {
+        validate_events_rust(events, block, params)
+    }
+}
+
+#[cfg(not(vesper_port))]
+fn validate_events_rust<P: ParamTable>(
     events: &[RtParamEvent],
     block: usize,
     params: &mut P,

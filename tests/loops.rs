@@ -280,7 +280,7 @@ fn functions_named_like_loop_words_stay_callable() {
 }
 
 #[test]
-fn native_refuses_boxes_across_loops() {
+fn native_reclaims_boxes_across_loops() {
     let c = world(
         "copy struct P { x: i64 }
         fn main() -> i64 {
@@ -294,8 +294,13 @@ fn native_refuses_boxes_across_loops() {
         }",
     );
     assert_eq!(evaluate(&c), "3");
-    let error = native::jit(&c.world, "main").unwrap_err();
-    assert!(error.contains(vesper::loops::BOX_REFUSAL), "{error}");
+    // Box drops are elaborated over the loop (#1064, tests/loop_boxes.rs).
+    vesper::fip::native_runtime::reset_counts();
+    assert_eq!(native::jit(&c.world, "main").unwrap().to_string(), "3");
+    assert_eq!(
+        vesper::fip::native_runtime::alloc_count(),
+        vesper::fip::native_runtime::free_count()
+    );
 }
 
 #[test]

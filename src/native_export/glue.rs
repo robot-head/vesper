@@ -3,9 +3,11 @@
 //! Every v2 library exports `vesper_<lib>_seq_new`, `vesper_<lib>_seq_free`
 //! and `vesper_<lib>_live_allocations`, and one `vesper_<lib>_<Type>_drop`
 //! per non-linear handle type. The glue walks the handle's words with the
-//! interface's field offsets: a sequence field is freed, a `String` field's
-//! buffer is freed, a box field has its pointee dropped and is then freed,
-//! and nested handles, `Option`s and enum variants recurse. Each handle type
+//! interface's field offsets: a sequence field drops its elements when they
+//! own something (handles, boxes, strings; #1087) and is then freed, a
+//! `String` field's buffer is freed, a box field has its pointee dropped and
+//! is then freed (a boxed trait object through its vtable's drop word), and
+//! nested handles, `Option`s and enum variants recurse. Each handle type
 //! gets one function, so recursive types recurse through calls.
 use super::*;
 use cranelift_codegen::ir::{self, AbiParam, InstBuilder, MemFlags, condcodes::IntCC, types};
@@ -186,9 +188,67 @@ fn drop_at<M: Module>(
     }
     let at = (offset * 8) as i32;
     match ty {
+        AbiType::Seq { elem } if owning(elem, types) => {
+            // An empty slot or a moved-from field holds handle 0.
+            let handle = b.ins().load(types::I64, MemFlags::trusted(), base, at);
+            let live = b.create_block();
+            let done = b.create_block();
+            b.ins().brif(handle, live, &[], done, &[]);
+            b.switch_to_block(live);
+            let len = b.ins().load(types::I64, MemFlags::trusted(), handle, 0);
+            let data = b.ins().load(types::I64, MemFlags::trusted(), handle, 16);
+            let stride = i64::from(abi_words(elem, types)) * 8;
+            let head = b.create_block();
+            b.append_block_param(head, types::I64);
+            let body = b.create_block();
+            let exit = b.create_block();
+            let zero = b.ins().iconst(types::I64, 0);
+            b.ins().jump(head, &[zero.into()]);
+            b.switch_to_block(head);
+            let i = b.block_params(head)[0];
+            let more = b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+            b.ins().brif(more, body, &[], exit, &[]);
+            b.switch_to_block(body);
+            let offset = b.ins().imul_imm(i, stride);
+            let element = b.ins().iadd(data, offset);
+            drop_at(b, m, rt, types, elem, element, 0);
+            let next = b.ins().iadd_imm(i, 1);
+            b.ins().jump(head, &[next.into()]);
+            b.switch_to_block(exit);
+            call(b, m, rt.seq_free, &[handle]);
+            b.ins().jump(done, &[]);
+            b.switch_to_block(done);
+        }
         AbiType::Seq { .. } => {
             let handle = b.ins().load(types::I64, MemFlags::trusted(), base, at);
             call(b, m, rt.seq_free, &[handle]);
+        }
+        AbiType::Box { inner } if matches!(**inner, AbiType::Object { .. }) => {
+            // A boxed object (§7.3): the block `{vtable, value}`; the
+            // vtable's word 0 drops the value (0 when it owns nothing).
+            let block = b.ins().load(types::I64, MemFlags::trusted(), base, at);
+            let live = b.create_block();
+            let call_drop = b.create_block();
+            let free = b.create_block();
+            let done = b.create_block();
+            b.ins().brif(block, live, &[], done, &[]);
+            b.switch_to_block(live);
+            let table = b.ins().load(types::I64, MemFlags::trusted(), block, 0);
+            let drop = b
+                .ins()
+                .load(types::I64, MemFlags::trusted().with_readonly(), table, 0);
+            b.ins().brif(drop, call_drop, &[], free, &[]);
+            b.switch_to_block(call_drop);
+            let value = b.ins().iadd_imm(block, crate::dyn_trait::BOXED_HEADER);
+            let mut sig = m.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let sig = b.import_signature(sig);
+            b.ins().call_indirect(sig, drop, &[value]);
+            b.ins().jump(free, &[]);
+            b.switch_to_block(free);
+            call(b, m, rt.box_free, &[block]);
+            b.ins().jump(done, &[]);
+            b.switch_to_block(done);
         }
         AbiType::Box { inner } => {
             let pointer = b.ins().load(types::I64, MemFlags::trusted(), base, at);
@@ -233,7 +293,10 @@ fn drop_at<M: Module>(
             let address = b.ins().iadd_imm(base, i64::from(at));
             call(b, m, rt.str_release, &[address]);
         }
-        AbiType::Scalar { .. } | AbiType::Slice { .. } | AbiType::Str { owned: false } => {}
+        AbiType::Scalar { .. }
+        | AbiType::Slice { .. }
+        | AbiType::Str { owned: false }
+        | AbiType::Object { .. } => {}
     }
 }
 

@@ -245,6 +245,7 @@ pub(crate) fn lower_bit_builtin_calls(
 ) {
     use crate::ir::Op;
     for f in program.functions.values_mut() {
+        let mut operands = std::collections::BTreeSet::new();
         for inst in f.blocks.iter_mut().flat_map(|b| &mut b.instructions) {
             let Op::Call { callee, args, .. } = &inst.op else {
                 continue;
@@ -263,6 +264,20 @@ pub(crate) fn lower_bit_builtin_calls(
                 [a, n] => Op::Binary(callee.clone(), a.value, n.value),
                 _ => continue,
             };
+            operands.extend(crate::ir_inline::operands(&inst.op));
+        }
+        // A call argument is an `in` read whose loan the call releases; an
+        // operator consumes its operands and releases nothing, so the shared
+        // loan of `let mut x; x = wrapping_shl_u32(x, 16)` would outlive the
+        // operation and overlap the write of `x` (E0410). The operands are
+        // integers (copy), so read them by value as every other operator does.
+        for inst in f.blocks.iter_mut().flat_map(|b| &mut b.instructions) {
+            if let Op::Read { pass, .. } = &mut inst.op
+                && *pass == Pass::In
+                && operands.contains(&inst.dest)
+            {
+                *pass = Pass::Sink;
+            }
         }
     }
 }

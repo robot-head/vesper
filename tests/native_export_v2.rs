@@ -160,7 +160,7 @@ fn still_refused_forms_name_the_function() {
         ),
         (
             "pub fn f() -> ChunkSeq[String] { ChunkSeq::new[String]() }",
-            "cannot export 'f': type ChunkSeq[String] has non-copy elements",
+            "cannot export 'f': type ChunkSeq[String] has non-copy elements (handles, boxes or strings); such a sequence crosses only inside a handle type",
         ),
         (
             "effect Tick { fn tick() -> i64; }\npub fn f() -> i64 eff [Tick] { Tick::tick() }",

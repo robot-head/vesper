@@ -1,0 +1,879 @@
+// @vesper/warp: Vesper port of the vesper-warp QUIC core (port wave P3b
+// lane 4, #1066), part 1: varints (varint.rs), packet numbers
+// (packet_number.rs), long and short headers (header.rs), frames
+// (frame.rs), received-packet tracking (ack.rs) and loss recovery
+// (recovery.rs).
+//
+// The Rust crate keeps its public types and the parts the export ABI cannot
+// carry: borrowed byte views (a parsed header or frame names its byte
+// fields as spans of the input, and src/ported/ turns them back into
+// slices), the iterator adapters, and the vesper-ffi wire layouts that
+// `HeaderParser::short_layout` hands out. Errors whose Rust type carries a
+// payload the ABI cannot (a `String`, a `ViewError`) or a `usize` are
+// port-only records here, converted by the wrappers.
+//
+// @export abi 3
+use self::varint::{
+    vi_decode,
+    vi_encode,
+    vi_encode_with_len,
+    vi_encoded_len,
+    vi_prefix_len
+};
+use self::ack::{
+    rx_ack_delay,
+    rx_check,
+    rx_new,
+    rx_on_ack_of_ack,
+    rx_on_ack_sent,
+    rx_on_packet_received
+};
+use self::recovery::{
+    rec_ack_delay_ns,
+    rec_clear_space,
+    rec_new,
+    rec_on_ack_received,
+    rec_on_packet_sent,
+    rec_on_timeout,
+    rec_pc_duration_ns,
+    rec_pto_time_and_space,
+    rec_set_timer,
+    rec_space_new,
+    rtt_loss_delay_ns,
+    rtt_new,
+    rtt_pto_base_ns,
+    rtt_update
+};
+use self::frame::{
+    fr_allowed,
+    fr_check_ranges,
+    fr_crypto_header_len,
+    fr_encode,
+    fr_encode_crypto_header,
+    fr_encode_stream_header,
+    fr_kind_is_ack_eliciting,
+    fr_kind_is_probing,
+    fr_kind_type,
+    fr_parse_at,
+    fr_stream_header_len,
+    fr_wire_next
+};
+use self::header::{
+    hdr_check_reserved_bits,
+    hdr_first_byte_mask,
+    hdr_parse,
+    hdr_pn_field,
+    hdr_vn_version,
+    hdr_write_long,
+    hdr_write_retry,
+    hdr_write_short,
+    hdr_write_short_to_peer,
+    hdr_write_version_negotiation
+};
+use self::pn::{
+    pn_decode_with_largest,
+    pn_encoded_len,
+    pn_read_truncated,
+    pn_write_truncated
+};
+
+// ---------------------------------------------------------------------------
+// Records shared with the Rust crate.
+
+// `varint::VarIntError` with u64 lengths.
+pub copy enum VarIntErr {
+    Truncated {
+        needed: u64,
+        available: u64
+    },
+    TooLarge {
+        value: u64
+    },
+    BufferTooSmall {
+        needed: u64,
+        available: u64
+    },
+    BadLength {
+        len: u64
+    }
+}
+
+// `packet_number::PnError`.
+pub copy enum PnErr {
+    InvalidBits {
+        bits: u32
+    },
+    TruncatedTooWide {
+        truncated: u64,
+        nbits: u32
+    },
+    OutOfRange {
+        pn: u64
+    },
+    Exhausted,
+    NotAboveLargestAcked {
+        full_pn: u64,
+        largest_acked: u64
+    },
+    TooManyUnacked {
+        unacked: u64
+    },
+    BufferTooSmall
+}
+
+// A byte range of the input (`header::Span`).
+pub copy struct Sp {
+    start: u64,
+    len: u64
+}
+
+// `PacketType`.
+pub copy enum PktType {
+    Initial,
+    ZeroRtt,
+    Handshake,
+    OneRtt
+}
+
+// `header::HeaderError` without the layout errors (`Layout`, and `View`
+// other than a short buffer), which only the Rust layouts raise.
+pub copy enum HdrErr {
+    Truncated {
+        needed: u64,
+        available: u64
+    },
+    FixedBitClear,
+    UnsupportedVersion {
+        version: u32
+    },
+    CidTooLong {
+        len: u64
+    },
+    BadConfiguredCidLen {
+        len: u64
+    },
+    LengthExceedsDatagram {
+        length: u64,
+        available: u64
+    },
+    TooShortForSample {
+        needed: u64,
+        available: u64
+    },
+    ReservedBitsSet,
+    BadVersionList,
+    EmptyRetryToken,
+    WrongForm,
+    VarInt {
+        e: VarIntErr
+    },
+    BufferTooSmall {
+        needed: u64,
+        available: u64
+    },
+    FieldOverflow
+}
+
+// `header::ProtectedHeader` with each `Option` as a flag and a word.
+pub copy struct Prot {
+    packet_type: PktType,
+    has_version: bool,
+    version: u32,
+    has_spin: bool,
+    spin: bool,
+    dcid: Sp,
+    scid: Sp,
+    token: Sp,
+    pn_offset: u64,
+    packet_end: u64
+}
+
+// `header::UnprotectedHeader` (the truncated number as length and value).
+pub copy struct Unprot {
+    first_byte: u8,
+    pn_len: u64,
+    pn: u32,
+    has_key_phase: bool,
+    key_phase: bool,
+    header_len: u64,
+    payload: Sp
+}
+
+// `header::ParsedPacket` with spans for the borrowed fields; `tag` is the
+// start of the Retry integrity tag.
+pub copy enum Parsed {
+    Protected {
+        h: Prot
+    },
+    Retry {
+        version: u32,
+        dcid: Sp,
+        scid: Sp,
+        token: Sp,
+        tag: u64
+    },
+    VersionNegotiation {
+        dcid: Sp,
+        scid: Sp,
+        versions: Sp
+    }
+}
+
+// `header::WrittenLongHeader`.
+pub copy struct WrittenLong {
+    pn_offset: u64,
+    header_len: u64,
+    packet_len: u64
+}
+
+// `frame::AckRange`, an inclusive range of packet numbers.
+pub copy struct AckRange {
+    smallest: u64,
+    largest: u64
+}
+
+// `frame::FrameError` (`Unsupported` is never raised).
+pub copy enum FrameErr {
+    Truncated {
+        frame_type: u64
+    },
+    Malformed {
+        frame_type: u64
+    },
+    OffsetOverflow {
+        frame_type: u64
+    },
+    NonMinimalType {
+        ty: u64
+    },
+    UnknownType {
+        ty: u64
+    },
+    NotAllowed {
+        frame_type: u64,
+        packet_type: PktType
+    },
+    EmptyPayload,
+    Encode
+}
+
+// `frame::Frame` with spans for the borrowed fields. An ACK is either the
+// parsed wire form (`decoded` false: the first range and `count` more
+// `(gap, length)` pairs at `pairs`) or caller ranges passed beside it.
+// A NEW_CONNECTION_ID's `reset_token` is the start of its 16 bytes.
+pub copy enum FrameW {
+    Padding {
+        len: u64
+    },
+    Ping,
+    Ack {
+        largest: u64,
+        ack_delay: u64,
+        has_ecn: bool,
+        ect0: u64,
+        ect1: u64,
+        ce: u64,
+        decoded: bool,
+        first_range: u64,
+        count: u64,
+        pairs: Sp
+    },
+    Crypto {
+        offset: u64,
+        data: Sp
+    },
+    Stream {
+        stream_id: u64,
+        offset: u64,
+        data: Sp,
+        fin: bool,
+        has_length: bool
+    },
+    MaxData {
+        max: u64
+    },
+    MaxStreamData {
+        stream_id: u64,
+        max: u64
+    },
+    ResetStream {
+        stream_id: u64,
+        error_code: u64,
+        final_size: u64
+    },
+    StopSending {
+        stream_id: u64,
+        error_code: u64
+    },
+    MaxStreams {
+        uni: bool,
+        max: u64
+    },
+    DataBlocked {
+        limit: u64
+    },
+    StreamDataBlocked {
+        stream_id: u64,
+        limit: u64
+    },
+    StreamsBlocked {
+        uni: bool,
+        limit: u64
+    },
+    ConnectionClose {
+        error_code: u64,
+        has_frame_type: bool,
+        frame_type: u64,
+        reason: Sp
+    },
+    HandshakeDone,
+    NewToken {
+        token: Sp
+    },
+    NewConnectionId {
+        seq: u64,
+        retire_prior_to: u64,
+        cid: Sp,
+        reset_token: u64
+    },
+    RetireConnectionId {
+        seq: u64
+    },
+    PathChallenge {
+        data: u64
+    },
+    PathResponse {
+        data: u64
+    }
+}
+
+// A parsed frame and the position after it.
+pub copy struct FrameAt {
+    f: FrameW,
+    end: u64
+}
+
+// One decoded ACK range of the wire form and the position after its pair.
+pub copy struct WireStep {
+    smallest: u64,
+    largest: u64,
+    next: u64
+}
+
+// `ack::AckError`.
+pub copy enum AckErr {
+    Duplicate {
+        pn: u64
+    },
+    TooOld {
+        pn: u64
+    },
+    OutOfRange {
+        pn: u64
+    },
+    ClockWentBackwards,
+    BadAckDelayExponent {
+        exponent: u8
+    }
+}
+
+// `ack::Received`.
+pub copy struct Received {
+    largest: bool,
+    out_of_order: bool
+}
+
+// `ack::ReceivedPackets` without its range array, each `Option` as a flag
+// and a word; `space` is `PnSpace::index`.
+pub copy struct RxState {
+    space: u8,
+    len: u64,
+    has_floor: bool,
+    floor: u64,
+    has_largest: bool,
+    largest: u64,
+    largest_received_ns: u64,
+    last_received_ns: u64,
+    ect0: u64,
+    ect1: u64,
+    ce: u64,
+    unacked_ack_eliciting: u32,
+    has_deadline: bool,
+    deadline_ns: u64,
+    max_ack_delay_ns: u64
+}
+
+// ---------------------------------------------------------------------------
+// varint.rs
+
+pub fn varint_prefix_len(first: u8) -> u64 {
+    vi_prefix_len(first)
+}
+
+pub fn varint_encoded_len(value: u64) -> u64 eff [Fail[VarIntErr]] {
+    vi_encoded_len(value)
+}
+
+pub fn varint_decode(in buf: Slice[u8]) -> (u64, u64) eff [Fail[VarIntErr]] {
+    vi_decode(in buf)
+}
+
+pub fn varint_encode_with_len(value: u64, len: u64, inout out: Slice[u8])
+    -> u64 eff [Fail[VarIntErr]] {
+    vi_encode_with_len(value, len, inout out)
+}
+
+pub fn varint_encode(value: u64, inout out: Slice[u8]) -> u64 eff [Fail[VarIntErr]] {
+    vi_encode(value, inout out)
+}
+
+// ---------------------------------------------------------------------------
+// packet_number.rs
+
+pub fn pn_decode(largest: Option[u64], truncated: u64, nbits: u32) -> u64 eff [Fail[PnErr]] {
+    pn_decode_with_largest(largest, truncated, nbits)
+}
+
+pub fn pn_len_for(full_pn: u64, largest_acked: Option[u64]) -> u64 eff [Fail[PnErr]] {
+    pn_encoded_len(full_pn, largest_acked)
+}
+
+pub fn pn_write(full_pn: u64, len: u64, inout out: Slice[u8]) eff [Fail[PnErr]] {
+    pn_write_truncated(full_pn, len, inout out)
+}
+
+pub fn pn_read(len: u64, in bytes: Slice[u8]) -> Option[u32] {
+    pn_read_truncated(len, in bytes)
+}
+
+// ---------------------------------------------------------------------------
+// header.rs
+
+pub fn header_parse(in datagram: Slice[u8], dcid_len: u64) -> Parsed eff [Fail[HdrErr]] {
+    hdr_parse(in datagram, dcid_len)
+}
+
+pub fn header_pn_field(h: Prot, in packet: Slice[u8]) -> Unprot eff [Fail[HdrErr]] {
+    hdr_pn_field(h, in packet)
+}
+
+pub fn header_check_reserved_bits(first_byte: u8, short: bool) eff [Fail[HdrErr]] {
+    hdr_check_reserved_bits(first_byte, short)
+}
+
+pub fn header_first_byte_mask(long: bool) -> u8 {
+    hdr_first_byte_mask(long)
+}
+
+pub fn header_vn_version(in datagram: Slice[u8], at: u64) -> u32 {
+    hdr_vn_version(in datagram, at)
+}
+
+pub fn header_write_short(
+    inout out: Slice[u8],
+    in dcid: Slice[u8],
+    dcid_len: u64,
+    spin: bool,
+    key_phase: bool,
+    full_pn: u64,
+    pn_len: u64
+) -> u64 eff [Fail[HdrErr]] {
+    hdr_write_short(inout out, in dcid, dcid_len, spin, key_phase, full_pn, pn_len)
+}
+
+pub fn header_write_short_to_peer(
+    inout out: Slice[u8],
+    in dcid: Slice[u8],
+    dcid_len: u64,
+    spin: bool,
+    key_phase: bool,
+    full_pn: u64,
+    pn_len: u64
+) -> u64 eff [Fail[HdrErr]] {
+    hdr_write_short_to_peer(inout out, in dcid, dcid_len, spin, key_phase, full_pn, pn_len)
+}
+
+pub fn header_write_long(
+    inout out: Slice[u8],
+    ty: u8,
+    in dcid: Slice[u8],
+    in scid: Slice[u8],
+    in token: Slice[u8],
+    full_pn: u64,
+    pn_len: u64,
+    payload_len: u64
+) -> WrittenLong eff [Fail[HdrErr]] {
+    hdr_write_long(inout out, ty, in dcid, in scid, in token, full_pn, pn_len, payload_len)
+}
+
+pub fn header_write_retry(
+    inout out: Slice[u8],
+    in dcid: Slice[u8],
+    in scid: Slice[u8],
+    in token: Slice[u8],
+    in tag: Slice[u8]
+) -> u64 eff [Fail[HdrErr]] {
+    hdr_write_retry(inout out, in dcid, in scid, in token, in tag)
+}
+
+pub fn header_write_version_negotiation(
+    inout out: Slice[u8],
+    unused: u8,
+    in dcid: Slice[u8],
+    in scid: Slice[u8],
+    in versions: Slice[u32]
+) -> u64 eff [Fail[HdrErr]] {
+    hdr_write_version_negotiation(inout out, unused, in dcid, in scid, in versions)
+}
+
+// ---------------------------------------------------------------------------
+// frame.rs
+
+pub fn frame_allowed(frame_type: u64, packet_type: PktType) -> bool {
+    fr_allowed(frame_type, packet_type)
+}
+
+pub fn frame_parse_at(in buf: Slice[u8], at: u64, packet_type: PktType)
+    -> FrameAt eff [Fail[FrameErr]] {
+    fr_parse_at(in buf, at, packet_type)
+}
+
+// The predicates take a frame's kind (see `fr_kind_type`) rather than its
+// words, so the wrappers pass two words instead of converting the frame.
+pub fn frame_type(kind: u64, bits: u64) -> u64 {
+    fr_kind_type(kind, bits)
+}
+
+pub fn frame_is_ack_eliciting(kind: u64) -> bool {
+    fr_kind_is_ack_eliciting(kind)
+}
+
+pub fn frame_is_probing(kind: u64) -> bool {
+    fr_kind_is_probing(kind)
+}
+
+pub fn frame_encode(
+    inout out: Slice[u8],
+    f: FrameW,
+    in a: Slice[u8],
+    in b: Slice[u8],
+    in ranges: Slice[AckRange]
+) -> u64 eff [Fail[FrameErr]] {
+    fr_encode(inout out, f, in a, in b, in ranges)
+}
+
+pub fn frame_check_ranges(in ranges: Slice[AckRange], ack_delay: u64) eff [Fail[FrameErr]] {
+    fr_check_ranges(in ranges, ack_delay)
+}
+
+pub fn frame_wire_next(in pairs: Slice[u8], at: u64, prev_smallest: u64) -> Option[WireStep] {
+    fr_wire_next(in pairs, at, prev_smallest)
+}
+
+pub fn frame_encode_stream_header(
+    inout out: Slice[u8],
+    stream_id: u64,
+    offset: u64,
+    len: u64,
+    fin: bool
+) -> u64 eff [Fail[FrameErr]] {
+    fr_encode_stream_header(inout out, stream_id, offset, len, fin)
+}
+
+pub fn frame_encode_crypto_header(inout out: Slice[u8], offset: u64, len: u64)
+    -> u64 eff [Fail[FrameErr]] {
+    fr_encode_crypto_header(inout out, offset, len)
+}
+
+pub fn frame_stream_header_len(stream_id: u64, offset: u64, len: u64) -> u64 {
+    fr_stream_header_len(stream_id, offset, len)
+}
+
+pub fn frame_crypto_header_len(offset: u64, len: u64) -> u64 {
+    fr_crypto_header_len(offset, len)
+}
+
+// ---------------------------------------------------------------------------
+// ack.rs
+
+pub fn received_new(space: u8, max_ack_delay_ns: u64) -> RxState {
+    rx_new(space, max_ack_delay_ns)
+}
+
+pub fn received_check(in s: RxState, in ranges: Slice[AckRange], pn: u64) eff [Fail[AckErr]] {
+    rx_check(in s, in ranges, pn)
+}
+
+pub fn received_on_packet(
+    inout s: RxState,
+    inout ranges: Slice[AckRange],
+    pn: u64,
+    now_ns: u64,
+    ack_eliciting: bool,
+    ecn: u8
+) -> Received eff [Fail[AckErr]] {
+    rx_on_packet_received(inout s, inout ranges, pn, now_ns, ack_eliciting, ecn)
+}
+
+pub fn received_ack_delay(in s: RxState, now_ns: u64, ack_delay_exponent: u8)
+    -> Option[u64] eff [Fail[AckErr]] {
+    rx_ack_delay(in s, now_ns, ack_delay_exponent)
+}
+
+pub fn received_on_ack_sent(inout s: RxState) {
+    rx_on_ack_sent(inout s)
+}
+
+pub fn received_on_ack_of_ack(inout s: RxState, inout ranges: Slice[AckRange], x: u64) {
+    rx_on_ack_of_ack(inout s, inout ranges, x)
+}
+
+// ---------------------------------------------------------------------------
+// recovery.rs
+
+// `recovery::RttEstimator`.
+pub copy struct Rtt {
+    latest: u64,
+    min: u64,
+    smoothed: u64,
+    rttvar: u64,
+    has_sample: bool
+}
+
+// `recovery::RecoveryError`.
+pub copy enum RecErr {
+    PnOutOfRange {
+        pn: u64
+    },
+    NonIncreasingPn {
+        pn: u64,
+        last: u64
+    },
+    ClockWentBackwards,
+    TooManyTracked,
+    AckOfUnsentPacket {
+        largest_acked: u64
+    },
+    SpaceDiscarded {
+        space: u8
+    },
+    BadAckDelayExponent {
+        exponent: u8
+    }
+}
+
+// One sent-packet record (`status`: 0 in flight, 1 newly acknowledged,
+// 2 acknowledged, 3 lost).
+pub copy struct RecEntry {
+    pn: u64,
+    sent_ns: u64,
+    bytes: u32,
+    ack_eliciting: bool,
+    in_flight: bool,
+    status: u8
+}
+
+// One `CongestionEvent` (`kind`: 0 Acked, 1 Lost, 2 EcnCe with `count`,
+// 3 PersistentCongestion).
+pub copy struct RecEvent {
+    kind: u8,
+    pn: u64,
+    sent_ns: u64,
+    bytes: u32,
+    count: u64
+}
+
+// One packet-number space's recovery state.
+pub copy struct RecSpace {
+    head: u64,
+    len: u64,
+    has_largest_acked: bool,
+    largest_acked: u64,
+    has_last_sent: bool,
+    last_sent_pn: u64,
+    has_last_ack_eliciting: bool,
+    last_ack_eliciting_ns: u64,
+    has_loss_time: bool,
+    loss_time: u64,
+    ack_eliciting_in_flight: u32,
+    ecn_ce: u64,
+    discarded: bool
+}
+
+// The rest of `LossRecovery`: config, handshake status, the armed timer
+// and the number of events the last call wrote.
+pub copy struct RecState {
+    max_ack_delay_ns: u64,
+    initial_rtt_ns: u64,
+    cap: u64,
+    pto_count: u32,
+    bytes_in_flight: u64,
+    confirmed: bool,
+    pcav: bool,
+    has_handshake_keys: bool,
+    at_amplification_limit: bool,
+    has_first_sample: bool,
+    first_sample_ns: u64,
+    last_sent_ns: u64,
+    has_timer: bool,
+    timer_deadline_ns: u64,
+    timer_pto: bool,
+    timer_space: u8,
+    n_events: u64
+}
+
+// `recovery::AckOutcome`.
+pub copy struct AckOut {
+    newly_acked: u32,
+    newly_acked_bytes: u64,
+    lost: u32,
+    lost_bytes: u64,
+    has_rtt: bool,
+    rtt_latest_ns: u64,
+    rtt_min_ns: u64,
+    rtt_smoothed_ns: u64,
+    rtt_ack_delay_ns: u64,
+    ecn_ce_increase: u64,
+    persistent_congestion: bool
+}
+
+// `recovery::TimeoutAction` (`kind`: 0 None, 1 LossDetected, 2 SendProbe).
+pub copy struct TimeoutOut {
+    kind: u8,
+    space: u8,
+    lost: u32,
+    packets: u8,
+    anti_deadlock: bool
+}
+
+// A deadline and its space, if any.
+pub copy struct PtoOut {
+    has: bool,
+    t: u64,
+    space: u8
+}
+
+pub fn recovery_rtt_new(initial_rtt_ns: u64) -> Rtt {
+    rtt_new(initial_rtt_ns)
+}
+
+pub fn recovery_rtt_update(inout r: Rtt, latest_ns: u64, ack_delay_ns: u64) {
+    rtt_update(inout r, latest_ns, ack_delay_ns)
+}
+
+pub fn recovery_rtt_pto_base_ns(in r: Rtt) -> u64 {
+    rtt_pto_base_ns(in r)
+}
+
+pub fn recovery_rtt_loss_delay_ns(in r: Rtt) -> u64 {
+    rtt_loss_delay_ns(in r)
+}
+
+pub fn recovery_ack_delay_ns(encoded: u64, exponent: u8) -> u64 eff [Fail[RecErr]] {
+    rec_ack_delay_ns(encoded, exponent)
+}
+
+pub fn recovery_new(
+    max_ack_delay_ns: u64,
+    initial_rtt_ns: u64,
+    cap: u64,
+    confirmed: bool,
+    pcav: bool,
+    keys: bool,
+    amp: bool
+) -> RecState {
+    rec_new(max_ack_delay_ns, initial_rtt_ns, cap, confirmed, pcav, keys, amp)
+}
+
+pub fn recovery_space_new() -> RecSpace {
+    rec_space_new()
+}
+
+pub fn recovery_set_timer(inout st: RecState, in r: Rtt, in spaces: Slice[RecSpace], now_ns: u64) {
+    rec_set_timer(inout st, in r, in spaces, now_ns)
+}
+
+pub fn recovery_clear_space(
+    inout st: RecState,
+    in r: Rtt,
+    inout spaces: Slice[RecSpace],
+    in ents: Slice[RecEntry],
+    space: u64,
+    discard: bool,
+    now_ns: u64
+) -> u64 {
+    rec_clear_space(inout st, in r, inout spaces, in ents, space, discard, now_ns)
+}
+
+pub fn recovery_on_packet_sent(
+    inout st: RecState,
+    in r: Rtt,
+    inout spaces: Slice[RecSpace],
+    inout ents: Slice[RecEntry],
+    space: u64,
+    pkt: RecEntry
+) eff [Fail[RecErr]] {
+    rec_on_packet_sent(inout st, in r, inout spaces, inout ents, space, pkt)
+}
+
+pub fn recovery_on_ack_received(
+    inout st: RecState,
+    inout r: Rtt,
+    inout spaces: Slice[RecSpace],
+    inout ents: Slice[RecEntry],
+    inout evs: Slice[RecEvent],
+    space: u64,
+    largest: u64,
+    decoded: bool,
+    first_range: u64,
+    count: u64,
+    in pairs: Slice[u8],
+    in ranges: Slice[AckRange],
+    has_ecn: bool,
+    ecn_ce: u64,
+    ack_delay_ns: u64,
+    now_ns: u64
+) -> AckOut eff [Fail[RecErr]] {
+    rec_on_ack_received(
+        inout st,
+        inout r,
+        inout spaces,
+        inout ents,
+        inout evs,
+        space,
+        largest,
+        decoded,
+        first_range,
+        count,
+        in pairs,
+        in ranges,
+        has_ecn,
+        ecn_ce,
+        ack_delay_ns,
+        now_ns
+    )
+}
+
+pub fn recovery_on_timeout(
+    inout st: RecState,
+    in r: Rtt,
+    inout spaces: Slice[RecSpace],
+    inout ents: Slice[RecEntry],
+    inout evs: Slice[RecEvent],
+    now_ns: u64
+) -> TimeoutOut {
+    rec_on_timeout(inout st, in r, inout spaces, inout ents, inout evs, now_ns)
+}
+
+pub fn recovery_pto_time_and_space(
+    in st: RecState,
+    in r: Rtt,
+    in spaces: Slice[RecSpace],
+    now_ns: u64
+) -> PtoOut {
+    rec_pto_time_and_space(in st, in r, in spaces, now_ns)
+}
+
+pub fn recovery_pc_duration_ns(in st: RecState, in r: Rtt) -> u64 {
+    rec_pc_duration_ns(in st, in r)
+}

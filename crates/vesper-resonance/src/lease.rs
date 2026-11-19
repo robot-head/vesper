@@ -121,6 +121,40 @@ impl RtBufferLease {
     }
 
     /// Write frame `frame` (must be the next one), one sample per channel.
+    #[cfg(vesper_port)]
+    pub fn write_frame(&mut self, frame: usize, samples: &[f32]) -> Result<(), LeaseError> {
+        use crate::port::{LeaseFault as F, LeaseWriteError as E, bits, bits_mut};
+        let data = self.data.as_mut().expect("live lease holds its buffer");
+        match crate::port::lease_write(
+            bits_mut(data),
+            self.written as u64,
+            self.frames as u64,
+            self.channels as u64,
+            frame as u64,
+            bits(samples),
+        ) {
+            Ok(written) => {
+                self.written = written as usize;
+                Ok(())
+            }
+            Err(E::LeaseFault(f)) => Err(match f {
+                F::OutOfOrder(expected, got) => LeaseError::OutOfOrder {
+                    expected: expected as usize,
+                    got: got as usize,
+                },
+                F::ChannelCount(expected, got) => LeaseError::ChannelCount {
+                    expected: expected as usize,
+                    got: got as usize,
+                },
+                F::Full => LeaseError::Full,
+                F::NonFinite => LeaseError::NonFinite,
+            }),
+            Err(e) => panic!("the Vesper port of vesper-resonance failed: {e:?}"),
+        }
+    }
+
+    /// Write frame `frame` (must be the next one), one sample per channel.
+    #[cfg(not(vesper_port))]
     pub fn write_frame(&mut self, frame: usize, samples: &[f32]) -> Result<(), LeaseError> {
         if self.written >= self.frames {
             return Err(LeaseError::Full);
@@ -226,7 +260,7 @@ impl RtOutputPort {
 
     /// Commit a fully written period; an incomplete one is handed back.
     pub fn commit(&mut self, mut lease: RtBufferLease) -> Result<(), RtBufferLease> {
-        if lease.written != lease.frames || !self.owns(&lease) {
+        if !rendered(lease.written, lease.frames) || !self.owns(&lease) {
             return Err(lease);
         }
         let data = lease.data.take().expect("live lease holds its buffer");
@@ -248,6 +282,13 @@ impl RtOutputPort {
             return Err(lease);
         }
         let mut data = lease.data.take().expect("live lease holds its buffer");
+        #[cfg(vesper_port)]
+        crate::port::ok(crate::port::lease_silence(
+            crate::port::bits_mut(&mut data),
+            lease.written as u64,
+            lease.channels as u64,
+        ));
+        #[cfg(not(vesper_port))]
         data[lease.written * lease.channels..].fill(0.0);
         self.auditor.silenced.fetch_add(1, Ordering::Relaxed);
         self.committed.push(Committed {
@@ -266,12 +307,46 @@ impl RtOutputPort {
     /// Driver side: copy the oldest committed period into `out` (interleaved,
     /// `channels * frames` samples) and recycle its buffer.
     pub fn complete(&mut self, out: &mut [f32]) -> Option<CommitKind> {
-        if self.committed.is_empty() || out.len() != self.channels * self.frames {
+        if !takes(self.committed.len(), out.len(), self.channels, self.frames) {
             return None;
         }
         let c = self.committed.remove(0);
+        #[cfg(vesper_port)]
+        crate::port::ok(crate::port::copy_samples(
+            crate::port::bits_mut(out),
+            crate::port::bits(&c.data),
+        ));
+        #[cfg(not(vesper_port))]
         out.copy_from_slice(&c.data);
         self.free.push(c.data);
         Some(c.kind)
     }
+}
+
+/// Whether a lease with `written` of `frames` frames may be committed as
+/// rendered.
+#[cfg(vesper_port)]
+fn rendered(written: usize, frames: usize) -> bool {
+    crate::port::lease_complete(written as u64, frames as u64)
+}
+
+#[cfg(not(vesper_port))]
+fn rendered(written: usize, frames: usize) -> bool {
+    written == frames
+}
+
+/// Whether the driver may take a committed period into `out`.
+#[cfg(vesper_port)]
+fn takes(committed: usize, out_len: usize, channels: usize, frames: usize) -> bool {
+    crate::port::lease_takes(
+        committed as u64,
+        out_len as u64,
+        channels as u64,
+        frames as u64,
+    )
+}
+
+#[cfg(not(vesper_port))]
+fn takes(committed: usize, out_len: usize, channels: usize, frames: usize) -> bool {
+    committed > 0 && out_len == channels * frames
 }

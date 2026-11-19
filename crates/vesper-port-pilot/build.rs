@@ -30,6 +30,12 @@ fn main() {
             .binding("port/gauge.rs")
             .rust_types("crate::gauge")
             .build();
+        // The export ABI widening library (#1087): `f32`, `in` handles lent
+        // in place, and handles that own sequences of handles and boxed
+        // trait objects. It has no Rust build: it pins the boundary forms.
+        vesper_port_harness::Port::new("widen", "vesper/widen.ves")
+            .binding("port/widen.rs")
+            .build();
     }
 }
 
