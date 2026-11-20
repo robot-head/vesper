@@ -738,20 +738,30 @@ fn rust_text_of(module: Module, _base: usize, force: bool) -> String {
 
 // ---------------------------------------------------------------- the Vesper side
 
-struct Dyn {
-    text: native::WordFunction,
-    count: native::WordFunction,
+/// The package's `check_dyn` entry, compiled once. The differential
+/// compiles it unoptimized: under a debug-built compiler (Bazel) the
+/// optimizer is most of the ~11 minutes the two optimized entries took,
+/// and the passes' output does not depend on it. Timing uses
+/// [`count_entry`], compiled optimized.
+fn text_entry() -> &'static native::WordFunction {
+    static F: OnceLock<native::WordFunction> = OnceLock::new();
+    F.get_or_init(|| compile("check_dyn", speed()))
 }
 
-fn package() -> &'static Dyn {
-    static PKG: OnceLock<Dyn> = OnceLock::new();
-    PKG.get_or_init(|| {
-        let p = Package::load(PACKAGE);
-        Dyn {
-            text: p.entry("check_dyn", true).0,
-            count: p.entry("check_dyn_count", true).0,
-        }
-    })
+/// The optimized `check_dyn_count` entry, for timing.
+fn count_entry() -> &'static native::WordFunction {
+    static F: OnceLock<native::WordFunction> = OnceLock::new();
+    F.get_or_init(|| compile("check_dyn_count", true))
+}
+
+fn compile(entry: &str, optimize: bool) -> native::WordFunction {
+    let t = std::time::Instant::now();
+    let f = Package::load(PACKAGE).entry(entry, optimize).0;
+    eprintln!(
+        "compiled {entry} (optimize {optimize}) in {:?}",
+        t.elapsed()
+    );
+    f
 }
 
 fn call(f: &native::WordFunction, source: &str, base: usize, force: bool) -> u64 {
@@ -763,7 +773,7 @@ fn call(f: &native::WordFunction, source: &str, base: usize, force: bool) -> u64
 }
 
 fn vesper_text(source: &str, base: usize, force: bool) -> String {
-    unpack_text(&take_words(call(&package().text, source, base, force)))
+    unpack_text(&take_words(call(text_entry(), source, base, force)))
 }
 
 /// Compares one source; returns the first difference, if any.
@@ -1011,7 +1021,7 @@ fn dyn_passes_speed() {
     if !speed() {
         return;
     }
-    let f = &package().count;
+    let f = count_entry();
     let mut sources = dyn_test_sources();
     sources.extend(mutants(&sources.clone()));
     let prepared: Vec<(String, usize)> = sources

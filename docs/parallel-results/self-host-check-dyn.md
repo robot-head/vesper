@@ -88,8 +88,10 @@ All ten diagnostic codes fire in the first test: E0102, E0200, E0205,
 E0207, E0310, E0401 and E0633 from `dyn_fn`, and E0630, E0631 and E0632
 from `dyn_trait`. The test asserts that.
 
-The first test takes about 12 minutes in a debug build and under a minute
-in release; Bazel runs it with the `long` timeout.
+The differential compiles `check_dyn` unoptimized; the timing test
+compiles `check_dyn_count` optimized. Both tests together take 80 s in a
+debug build (65 s of it compiling the package) and 84 s in release. Bazel
+runs them with the `long` timeout.
 
 ## Timing
 
@@ -149,6 +151,13 @@ The bootstrap-stage1 workflow run on the branch is linked from the PR.
 6. **No shared AST dumper for tests.** The test copies the canonical dump
    and the Rust string-literal reader from `tests/self_host_ast.rs`; a
    `tests/common` module would remove the copy (not this lane's path).
+7. **Optimizing the package is slow in a debug-built compiler.** With
+   `optimize` on, compiling the two entries (`check_dyn`, 1,031 instances,
+   and `check_dyn_count`) took 691 s under a debug build of the compiler,
+   which hit Bazel's 15-minute test limit. Unoptimized, `check_dyn` takes
+   65 s. Release builds compile both in under
+   a minute. Repro: `Package::load("packages/vesper-check-dyn")
+   .entry("check_dyn", true)` in a debug test binary.
 
 ## What is left
 
