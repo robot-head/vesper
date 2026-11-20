@@ -1186,6 +1186,11 @@ fn gap(p: u8, c: u8, block: bool, after_block: bool) -> u8 {
     if (c == K_L_PAREN || c == K_L_BRACKET) && (ends_operand(p) || p == K_BANG || p == K_FN) {
         return G_NONE;
     }
+    // `eff (` never starts an effect row, so `eff` is a name there
+    // (`fn eff(..)`, `r.eff()`; contextual `eff`, #1175).
+    if c == K_L_PAREN && p == K_EFF {
+        return G_NONE;
+    }
     G_SOFT
 }
 

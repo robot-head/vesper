@@ -23,6 +23,16 @@ use self::huffman::{
     huff_decode
 };
 
+// RFC 7541 §5.1: each byte after the prefix carries 7 bits and a
+// continuation flag; past a 56-bit shift the value cannot fit.
+const CONTINUATION: u64 = 0x80;
+const PAYLOAD_MASK: u64 = 0x7f;
+const PAYLOAD_BITS: u64 = 7;
+const MAX_SHIFT: u64 = 56;
+// The shortest Huffman code is 5 bits (RFC 7541 Appendix B), which bounds
+// the encoded length of `max_len` decoded bytes.
+const MIN_CODE_BITS: u64 = 5;
+
 // 2^62 - 1, the largest QUIC varint and the largest prefixed integer kept.
 pub fn max_int() -> u64 {
     4611686018427387903
@@ -59,16 +69,16 @@ pub fn decode_int(in buf: Slice[u8], at: u64, bits: u64) -> Result[Num, PrefixEr
         if i >= n {
             return Result::Err(PrefixError::Incomplete);
         }
-        if shift > 56 {
+        if shift > MAX_SHIFT {
             return Result::Err(PrefixError::IntegerOverflow);
         }
         let b = widen_u64(byte(in buf, i));
-        let v = wrapping_add(value, shl(b & 127, shift));
+        let v = wrapping_add(value, shl(b & PAYLOAD_MASK, shift));
         if v > max_int() {
             return Result::Err(PrefixError::IntegerOverflow);
         }
         value = v;
-        if b & 128 == 0 {
+        if b & CONTINUATION == 0 {
             return Result::Ok(
                 Num {
                     value: value,
@@ -76,7 +86,7 @@ pub fn decode_int(in buf: Slice[u8], at: u64, bits: u64) -> Result[Num, PrefixEr
                 }
             );
         }
-        shift = wrapping_add(shift, 7);
+        shift = wrapping_add(shift, PAYLOAD_BITS);
         i = inc(i);
     }
 }
@@ -91,11 +101,11 @@ pub fn encode_int(inout out: ChunkSeq[u8], flags: u8, bits: u64, value: u64) {
     out.push(flags | wrapping_u8(mask));
     let mut v = wrapping_sub(value, mask);
     loop {
-        if v < 128 {
+        if v < CONTINUATION {
             break;
         }
-        out.push(wrapping_u8(128 | (v & 127)));
-        v = shr(v, 7);
+        out.push(wrapping_u8(CONTINUATION | (v & PAYLOAD_MASK)));
+        v = shr(v, PAYLOAD_BITS);
     }
     out.push(wrapping_u8(v));
 }
@@ -127,7 +137,7 @@ pub fn decode_string(
     };
     let len = num.value;
     let limit = if huff {
-        max64(div_ceil(sat_mul(max_len, 8), 5), max_len)
+        max64(div_ceil(sat_mul(max_len, 8), MIN_CODE_BITS), max_len)
     } else {
         max_len
     };

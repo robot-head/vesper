@@ -10,6 +10,8 @@ use super::prefix::{decode_int, decode_string, encode_int};
 #[cfg(not(feature = "vesper-port"))]
 use super::static_table::STATIC_TABLE;
 #[cfg(not(feature = "vesper-port"))]
+use super::wire::*;
+#[cfg(not(feature = "vesper-port"))]
 use super::{Field, QpackError, Reason, Table, decode_ric, entry_size};
 
 /// What this decoder advertises and how much it buffers.
@@ -83,7 +85,7 @@ impl Decoder {
     pub fn new(cfg: DecoderConfig) -> Self {
         Self {
             cfg,
-            max_entries: cfg.max_table_capacity / 32,
+            max_entries: cfg.max_table_capacity / ENTRY_OVERHEAD,
             table: Table::default(),
             pending: Vec::new(),
             blocked: Vec::new(),
@@ -154,28 +156,28 @@ impl Decoder {
         let max = self.cfg.max_table_capacity as usize;
         let first = buf[0];
         let r = (|| {
-            if first & 0x80 != 0 {
+            if first & INSERT_NAME_REF != 0 {
                 // Insert with name reference: 1 T index(6+), value(7+).
-                let (index, n) = decode_int(buf, 6)?;
-                let name = if first & 0x40 != 0 {
+                let (index, n) = decode_int(buf, INSERT_NAME_REF_PREFIX)?;
+                let name = if first & INSERT_NAME_REF_STATIC != 0 {
                     Ok(static_entry(index).map(|(n, _)| n.to_vec()))
                 } else {
                     Ok(self.relative(index).map(|(n, _)| n.to_vec()))
                 };
-                let (value, m) = decode_string(&buf[n..], 7, max)?;
+                let (value, m) = decode_string(&buf[n..], VALUE_PREFIX, max)?;
                 Ok((name, Some(value), n + m))
-            } else if first & 0x40 != 0 {
+            } else if first & INSERT_LITERAL != 0 {
                 // Insert with literal name: 01 H len(5+), value(7+).
-                let (name, n) = decode_string(buf, 5, max)?;
-                let (value, m) = decode_string(&buf[n..], 7, max)?;
+                let (name, n) = decode_string(buf, INSERT_LITERAL_PREFIX, max)?;
+                let (value, m) = decode_string(&buf[n..], VALUE_PREFIX, max)?;
                 Ok((Ok(Some(name)), Some(value), n + m))
-            } else if first & 0x20 != 0 {
+            } else if first & SET_CAPACITY != 0 {
                 // Set dynamic table capacity: 001 capacity(5+).
-                let (cap, n) = decode_int(buf, 5)?;
+                let (cap, n) = decode_int(buf, SET_CAPACITY_PREFIX)?;
                 Ok((Err(cap), None, n))
             } else {
                 // Duplicate: 000 index(5+).
-                let (index, n) = decode_int(buf, 5)?;
+                let (index, n) = decode_int(buf, DUPLICATE_PREFIX)?;
                 let entry = self.relative(index).map(|(n, v)| (n.to_vec(), v.to_vec()));
                 Ok((
                     Ok(entry.as_ref().map(|e| e.0.clone())),
@@ -203,8 +205,10 @@ impl Decoder {
                 self.table.insert(name.into(), value.into());
             }
             (Ok(None), _) => {
-                return Err(if first & 0xc0 == 0xc0 {
-                    let (index, _) = decode_int(&self.pending[at..], 6).map_err(Reason::from)?;
+                let insert_static = INSERT_NAME_REF | INSERT_NAME_REF_STATIC;
+                return Err(if first & insert_static == insert_static {
+                    let (index, _) = decode_int(&self.pending[at..], INSERT_NAME_REF_PREFIX)
+                        .map_err(Reason::from)?;
                     Reason::BadStaticIndex(index)
                 } else {
                     Reason::BadDynamicIndex
@@ -235,13 +239,13 @@ impl Decoder {
                 stream_id,
             )));
         }
-        let (encoded, n) =
-            decode_int(data, 8).map_err(|e| self.fail(QpackError::Decompression(e.into())))?;
+        let (encoded, n) = decode_int(data, RIC_PREFIX)
+            .map_err(|e| self.fail(QpackError::Decompression(e.into())))?;
         let ric = decode_ric(encoded, self.max_entries, self.table.insert_count())
             .ok_or_else(|| self.fail(QpackError::Decompression(Reason::BadRequiredInsertCount)))?;
         if ric > self.table.insert_count() {
             // Validate the base prefix now, so garbage is not held.
-            decode_int(&data[n..], 7)
+            decode_int(&data[n..], DELTA_BASE_PREFIX)
                 .map_err(|e| self.fail(QpackError::Decompression(e.into())))?;
             if self.blocked.len() as u64 >= self.cfg.max_blocked_streams {
                 return Err(self.fail(QpackError::Decompression(Reason::TooManyBlockedStreams)));
@@ -272,7 +276,7 @@ impl Decoder {
                     if size > self.cfg.max_field_section_size {
                         self.cancel_stream(stream_id);
                     } else {
-                        encode_int(&mut self.out, 0x80, 7, stream_id);
+                        encode_int(&mut self.out, SECTION_ACK, SECTION_ACK_PREFIX, stream_id);
                         self.acknowledged = self.acknowledged.max(ric);
                     }
                 }
@@ -291,8 +295,8 @@ impl Decoder {
 
     /// The field lines after the prefix's Required Insert Count.
     fn lines(&self, ric: u64, buf: &[u8]) -> Result<(Vec<Field>, u64), Reason> {
-        let (delta, mut at) = decode_int(buf, 7)?;
-        let base = if buf[0] & 0x80 == 0 {
+        let (delta, mut at) = decode_int(buf, DELTA_BASE_PREFIX)?;
+        let base = if buf[0] & BASE_NEGATIVE == 0 {
             ric.checked_add(delta).ok_or(Reason::IntegerOverflow)?
         } else {
             if delta >= ric {
@@ -317,10 +321,10 @@ impl Decoder {
         while at < buf.len() {
             let b = &buf[at..];
             let first = b[0];
-            let (field, used) = if first & 0x80 != 0 {
+            let (field, used) = if first & INDEXED != 0 {
                 // Indexed field line: 1 T index(6+).
-                let (index, n) = decode_int(b, 6)?;
-                let (name, value) = if first & 0x40 != 0 {
+                let (index, n) = decode_int(b, INDEXED_PREFIX)?;
+                let (name, value) = if first & INDEXED_STATIC != 0 {
                     static_entry(index).ok_or(Reason::BadStaticIndex(index))?
                 } else {
                     dynamic(
@@ -329,10 +333,10 @@ impl Decoder {
                     )?
                 };
                 (Field::new(name, value), n)
-            } else if first & 0x40 != 0 {
+            } else if first & NAME_REF != 0 {
                 // Literal with name reference: 01 N T index(4+), value(7+).
-                let (index, n) = decode_int(b, 4)?;
-                let name = if first & 0x10 != 0 {
+                let (index, n) = decode_int(b, NAME_REF_PREFIX)?;
+                let name = if first & NAME_REF_STATIC != 0 {
                     static_entry(index).ok_or(Reason::BadStaticIndex(index))?.0
                 } else {
                     dynamic(
@@ -341,42 +345,42 @@ impl Decoder {
                     )?
                     .0
                 };
-                let (value, m) = decode_string(&b[n..], 7, max)?;
+                let (value, m) = decode_string(&b[n..], VALUE_PREFIX, max)?;
                 (
                     Field {
                         name: name.to_vec(),
                         value,
-                        sensitive: first & 0x20 != 0,
+                        sensitive: first & NAME_REF_NEVER != 0,
                     },
                     n + m,
                 )
-            } else if first & 0x20 != 0 {
+            } else if first & LITERAL_NAME != 0 {
                 // Literal with literal name: 001 N H len(3+), value(7+).
-                let (name, n) = decode_string(b, 3, max)?;
-                let (value, m) = decode_string(&b[n..], 7, max)?;
+                let (name, n) = decode_string(b, LITERAL_NAME_PREFIX, max)?;
+                let (value, m) = decode_string(&b[n..], VALUE_PREFIX, max)?;
                 (
                     Field {
                         name,
                         value,
-                        sensitive: first & 0x10 != 0,
+                        sensitive: first & LITERAL_NAME_NEVER != 0,
                     },
                     n + m,
                 )
-            } else if first & 0x10 != 0 {
+            } else if first & INDEXED_POST_BASE != 0 {
                 // Indexed post-base: 0001 index(4+).
-                let (index, n) = decode_int(b, 4)?;
+                let (index, n) = decode_int(b, INDEXED_POST_BASE_PREFIX)?;
                 let (name, value) = dynamic(base.checked_add(index), &mut max_ref)?;
                 (Field::new(name, value), n)
             } else {
                 // Literal with post-base name reference: 0000 N index(3+).
-                let (index, n) = decode_int(b, 3)?;
+                let (index, n) = decode_int(b, POST_BASE_NAME_REF_PREFIX)?;
                 let name = dynamic(base.checked_add(index), &mut max_ref)?.0;
-                let (value, m) = decode_string(&b[n..], 7, max)?;
+                let (value, m) = decode_string(&b[n..], VALUE_PREFIX, max)?;
                 (
                     Field {
                         name: name.to_vec(),
                         value,
-                        sensitive: first & 0x08 != 0,
+                        sensitive: first & POST_BASE_NAME_REF_NEVER != 0,
                     },
                     n + m,
                 )
@@ -404,7 +408,7 @@ impl Decoder {
             if self.blocked[i].ric <= inserted {
                 let b = self.blocked.remove(i);
                 self.blocked_bytes -= b.data.len();
-                let (_, n) = decode_int(&b.data, 8).expect("validated when blocked");
+                let (_, n) = decode_int(&b.data, RIC_PREFIX).expect("validated when blocked");
                 match self.finish(b.stream_id, b.ric, &b.data[n..]) {
                     Ok(s) => self.ready.push_back(Ok(s)),
                     Err(e @ QpackError::FieldSectionTooLarge { .. }) => {
@@ -434,7 +438,12 @@ impl Decoder {
         self.ready
             .retain(|r| !matches!(r, Ok(s) if s.stream_id == stream_id));
         if self.cfg.max_table_capacity > 0 {
-            encode_int(&mut self.out, 0x40, 6, stream_id);
+            encode_int(
+                &mut self.out,
+                STREAM_CANCEL,
+                STREAM_CANCEL_PREFIX,
+                stream_id,
+            );
         }
     }
 
@@ -443,7 +452,12 @@ impl Decoder {
     pub fn take_decoder_stream(&mut self) -> Vec<u8> {
         let inserted = self.table.insert_count();
         if inserted > self.acknowledged {
-            encode_int(&mut self.out, 0x00, 6, inserted - self.acknowledged);
+            encode_int(
+                &mut self.out,
+                INSERT_COUNT_INCREMENT,
+                INSERT_COUNT_INCREMENT_PREFIX,
+                inserted - self.acknowledged,
+            );
             self.acknowledged = inserted;
         }
         std::mem::take(&mut self.out)

@@ -2,7 +2,19 @@
 use self::codes::{
     b_patches,
     max_u64,
-    none_id
+    none_id,
+    op_bind_slot,
+    op_create,
+    op_destroy,
+    op_disconnect,
+    op_insert_child,
+    op_move_child,
+    op_remove_child,
+    op_set_root,
+    op_set_slot,
+    op_subscribe,
+    op_unbind_slot,
+    v_text
 };
 use self::{
     MNode,
@@ -304,7 +316,7 @@ pub fn mount_next(
                 }
             };
             let tstart = p.m.text.len();
-            if tp.tag == 0 && fits(tp.tstart, tp.tlen, text.len()) {
+            if tp.tag == v_text() && fits(tp.tstart, tp.tlen, text.len()) {
                 p.m.text.extend(in text[tp.tstart..add(tp.tstart, tp.tlen)]);
             }
             p
@@ -317,7 +329,7 @@ pub fn mount_next(
                     tag: tp.tag,
                     payload: tp.payload,
                     tstart: tstart,
-                    tlen: if tp.tag == 0 {
+                    tlen: if tp.tag == v_text() {
                         tp.tlen
                     } else {
                         0
@@ -437,7 +449,11 @@ pub fn detach(in old: Mounted, inout p: Prepared, max: u64) -> bool {
                 && old_retained(in p, ci)
                 && new_parent_key_is(in p, seq_u64(in p.succ, ci), node.key);
             if !keep {
-                if !emit(inout p, max, op(8, node.id, mnode(in old.nodes, ci).id, i, 0)) {
+                if !emit(
+                    inout p,
+                    max,
+                    op(op_remove_child(), node.id, mnode(in old.nodes, ci).id, i, 0)
+                ) {
                     return false;
                 }
                 remove_at(inout work, i);
@@ -475,7 +491,7 @@ pub fn teardown(in old: Mounted, inout p: Prepared, in found: ChunkSeq[u64], max
                 k != none_id() && msub(in p.m.subs, k).id == s.id
             };
             if !keep {
-                if !emit(inout p, max, op(7, s.id, 0, 0, 0)) {
+                if !emit(inout p, max, op(op_disconnect(), s.id, 0, 0, 0)) {
                     return false;
                 }
             }
@@ -489,13 +505,13 @@ pub fn teardown(in old: Mounted, inout p: Prepared, in found: ChunkSeq[u64], max
                 k != none_id() && mprop(in p.m.props, k).slot == s.slot
             };
             if !keep {
-                if !emit(inout p, max, op(5, node.id, s.property, s.slot, 0)) {
+                if !emit(inout p, max, op(op_unbind_slot(), node.id, s.property, s.slot, 0)) {
                     return false;
                 }
             }
         }
         if !old_retained(in p, oi) {
-            if !emit(inout p, max, op(2, node.id, 0, 0, 0)) {
+            if !emit(inout p, max, op(op_destroy(), node.id, 0, 0, 0)) {
                 return false;
             }
         }
@@ -510,7 +526,7 @@ pub fn create(in old: Mounted, inout p: Prepared, max: u64) -> bool {
         let prev = seq_u64(in p.prev, nj);
         let pn = mnode(in old.nodes, prev);
         if prev == none_id() {
-            if !emit(inout p, max, op(1, node.id, node.kind, 0, 0)) {
+            if !emit(inout p, max, op(op_create(), node.id, node.kind, 0, 0)) {
                 return false;
             }
         }
@@ -522,11 +538,11 @@ pub fn create(in old: Mounted, inout p: Prepared, max: u64) -> bool {
                 mounted_prop(in old, pn, s.property)
             };
             if k == none_id() {
-                if !emit(inout p, max, op(3, node.id, s.property, s.slot, node.src)) {
+                if !emit(inout p, max, op(op_bind_slot(), node.id, s.property, s.slot, node.src)) {
                     return false;
                 }
             } else if !same_value(in old, mprop(in old.props, k), in p.m, s) {
-                if !emit(inout p, max, op(4, s.slot, s.property, 0, node.src)) {
+                if !emit(inout p, max, op(op_set_slot(), s.slot, s.property, 0, node.src)) {
                     return false;
                 }
             }
@@ -540,7 +556,7 @@ pub fn create(in old: Mounted, inout p: Prepared, max: u64) -> bool {
                 k != none_id() && msub(in old.subs, k).id == s.id
             };
             if !keep {
-                if !emit(inout p, max, op(6, node.id, s.event, s.handler, s.id)) {
+                if !emit(inout p, max, op(op_subscribe(), node.id, s.event, s.handler, s.id)) {
                     return false;
                 }
             }
@@ -567,13 +583,13 @@ pub fn attach(inout p: Prepared, max: u64) -> bool {
                     .id;
                 let from = position(in work, child);
                 if from != none_id() {
-                    if !emit(inout p, max, op(10, node.id, child_id, from, index)) {
+                    if !emit(inout p, max, op(op_move_child(), node.id, child_id, from, index)) {
                         return false;
                     }
                     remove_at(inout work, from);
                     insert_at(inout work, index, child);
                 } else {
-                    if !emit(inout p, max, op(9, node.id, child_id, index, 0)) {
+                    if !emit(inout p, max, op(op_insert_child(), node.id, child_id, index, 0)) {
                         return false;
                     }
                     insert_at(inout work, index, child);
@@ -626,7 +642,7 @@ pub fn plan(in old: Mounted, inout p: Prepared, has_tree: bool, in text: Slice[u
     let old_root = mnode(in old.nodes, 0).id;
     let new_root = mnode(in p.m.nodes, 0).id;
     if old.present && (!has_tree || old_root != new_root) {
-        if !emit(inout p, max, op(0, 0, 0, 0, 0)) {
+        if !emit(inout p, max, op(op_set_root(), 0, 0, 0, 0)) {
             return;
         }
     }
@@ -646,7 +662,7 @@ pub fn plan(in old: Mounted, inout p: Prepared, has_tree: bool, in text: Slice[u
             return;
         }
         if !old.present || new_root != old_root {
-            if !emit(inout p, max, op(0, 1, new_root, 0, 0)) {
+            if !emit(inout p, max, op(op_set_root(), 1, new_root, 0, 0)) {
                 return;
             }
         }

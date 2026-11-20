@@ -15,6 +15,9 @@ mod huffman_table;
 pub(crate) mod port;
 pub mod prefix;
 mod static_table;
+// The port decodes and encodes in Vesper; only `entry_size` reads these then.
+#[cfg_attr(feature = "vesper-port", allow(dead_code))]
+pub(crate) mod wire;
 
 pub use decoder::{Decoded, DecoderConfig, FieldSection};
 pub use encoder::{EncoderConfig, EncoderStats};
@@ -63,7 +66,7 @@ impl Field {
 }
 
 pub(crate) fn entry_size(name: &[u8], value: &[u8]) -> u64 {
-    name.len() as u64 + value.len() as u64 + 32
+    name.len() as u64 + value.len() as u64 + wire::ENTRY_OVERHEAD
 }
 
 /// What exactly was wrong.
