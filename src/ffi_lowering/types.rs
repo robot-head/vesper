@@ -130,6 +130,16 @@ pub(super) fn wrap_result(f: &FunctionDescriptor, value: Type) -> Type {
     }
 }
 
+/// Whether a generated result holds a `Result` (of `ForeignInvalid`)
+/// anywhere, as an `errno` pair around a validated result does.
+fn mentions_result(t: &Type) -> bool {
+    match t {
+        Type::Named(n, args) => n == "Result" || args.iter().any(mentions_result),
+        Type::Tuple(ts) => ts.iter().any(mentions_result),
+        _ => false,
+    }
+}
+
 pub(super) struct Generated {
     /// Source struct declarations by name (wire structs of every import).
     structs: BTreeMap<String, Result<Adt, String>>,
@@ -289,7 +299,7 @@ impl Generated {
             for f in import.descriptor.functions() {
                 let shape = g.compute_shape(f);
                 if let Ok(s) = &shape
-                    && s.result.name() == "Result"
+                    && mentions_result(&s.result)
                 {
                     g.invalid = true;
                 }

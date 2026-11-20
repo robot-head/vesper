@@ -1145,6 +1145,30 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
             };
             parameters.push(ParameterDescriptor { name, ty });
         }
+        // A refused C string skips the call, so it must not take a handle
+        // whose ownership the call would consume.
+        if parameters
+            .iter()
+            .any(|p| matches!(p.ty, ParameterType::CStr))
+            && parameters.iter().any(|p| {
+                matches!(
+                    p.ty,
+                    ParameterType::Handle {
+                        access: HandleAccess::Sink,
+                        ..
+                    }
+                )
+            })
+        {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                0..0,
+                format!(
+                    "`{}` takes both a CStr and a `sink` handle: a refused C string would skip the finalizer",
+                    f.symbol
+                ),
+            ));
+        }
         functions.push(FunctionDescriptor {
             symbol: f.symbol,
             parameters,

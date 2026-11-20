@@ -7,7 +7,7 @@
 //! A host function is called through a signature of 64-bit integer words,
 //! which every `.vsys` parameter is in the C ABI (an integer, a pointer, or a
 //! pointer and a `size_t` length); at most eight words.
-use super::{EvalCall, INVALID_TYPE, Imports, handle_value, handle_word};
+use super::{EvalCall, Handler, INVALID_TYPE, Imports, handle_value, handle_word};
 use crate::runtime::Value;
 use std::collections::BTreeMap;
 use vesper_ffi::sys::{
@@ -26,7 +26,8 @@ struct Foreign {
 /// Runs the evaluator's foreign calls against host functions bound by
 /// symbol ([`super::ForeignChecked::evaluate`]).
 pub struct EvalHost {
-    functions: BTreeMap<String, Foreign>,
+    /// By (library, symbol): two libraries may declare the same symbol.
+    functions: BTreeMap<(String, String), Foreign>,
 }
 
 /// One argument's C memory, kept alive across the call.
@@ -42,7 +43,15 @@ impl EvalHost {
     /// `symbols` names for it.
     pub fn new(imports: &Imports, symbols: &[(&str, *const u8)]) -> Result<Self, String> {
         let mut functions = BTreeMap::new();
-        for (library, _) in imports.libraries() {
+        for (library, handler) in imports.libraries() {
+            // An `isolated(mpk)` grant is a trampoline only objects emit; a
+            // direct call here would drop the isolation it requires.
+            if handler == Handler::IsolatedMpk {
+                return Err(format!(
+                    "{} is imported isolated(mpk), which only `vesper build` objects enforce; the evaluator calls libraries directly",
+                    library.name()
+                ));
+            }
             for f in library.functions() {
                 let address = symbols
                     .iter()
@@ -60,7 +69,7 @@ impl EvalHost {
                     ));
                 }
                 functions.insert(
-                    f.symbol().to_owned(),
+                    (library.name().to_owned(), f.symbol().to_owned()),
                     Foreign {
                         descriptor: f.clone(),
                         address,
@@ -75,8 +84,8 @@ impl EvalHost {
     pub fn call(&self, call: &mut EvalCall<'_, '_>) -> Result<Value, String> {
         let f = self
             .functions
-            .get(&call.symbol)
-            .ok_or_else(|| format!("no host function for {}", call.symbol))?;
+            .get(&(call.library.clone(), call.symbol.clone()))
+            .ok_or_else(|| format!("no host function for {}::{}", call.library, call.symbol))?;
         let d = &f.descriptor;
         let args = call.arguments().to_vec();
         let params = d.parameters();
@@ -139,6 +148,19 @@ impl EvalHost {
         let mut words = vec![];
         for ((p, v), slot) in params.iter().zip(&args).zip(&mut slots) {
             match (p.ty(), slot) {
+                (ParameterType::Value(ValueType::Enum(e)), _) => {
+                    // An enum crosses as its declared discriminant.
+                    let Value::Data { constructor, .. } = v else {
+                        return Err(format!("not a {}: {v:?}", e.name()));
+                    };
+                    let variant = constructor.rsplit("::").next().unwrap_or(constructor);
+                    let (_, word) = e
+                        .variants()
+                        .iter()
+                        .find(|(n, _)| n == variant)
+                        .ok_or_else(|| format!("{} has no variant {variant}", e.name()))?;
+                    words.push(*word);
+                }
                 (ParameterType::Value(_), _) => words.push(int(v)?),
                 (ParameterType::Handle { .. }, _) => {
                     words.push(handle_word(v).ok_or("not a handle")?);

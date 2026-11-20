@@ -646,3 +646,59 @@ fn a_null_non_null_handle_traps() {
         "{status:?}"
     );
 }
+
+extern "C" fn probe_flip(b: bool) -> bool {
+    !b
+}
+extern "C" fn probe_next(state: u32) -> u32 {
+    state + 1
+}
+
+/// Review cases: an `errno` pair around a validated result still declares
+/// `ForeignInvalid`; the evaluator passes enums as their discriminants and
+/// keys functions by library; `CStr` with `sink` and isolated imports are
+/// refused.
+#[test]
+fn errno_enum_and_refusal_edges() {
+    let imports = imports(
+        "    enum State: u32 { Idle = 3, Busy = 4, Done = 5 }\n    \
+         fn probe_flip(b: bool) -> ForeignVal[bool] errno;\n    \
+         fn probe_next(s: State) -> ForeignVal[State];",
+    )
+    .unwrap();
+    let src = "pub fn main() -> u64 eff [Ffi[Probe]] {\n    let (r, _) = Probe::probe_flip(false);\n    \
+               let a = match r {\n        Result::Ok(b) => if b { 1 } else { 2 },\n        Result::Err(_) => 3,\n    };\n    \
+               let n = match Probe::probe_next(State::Idle) {\n        Result::Ok(State::Busy) => 10,\n        Result::Ok(_) => 20,\n        Result::Err(_) => 30,\n    };\n    \
+               wrapping_add(a, n)\n}\n";
+    let checked = ffi_lowering::check_source(src, &imports).unwrap_or_else(|e| panic!("{e}"));
+    let symbols = [
+        ("probe_flip", probe_flip as *const u8),
+        ("probe_next", probe_next as *const u8),
+    ];
+    let v = checked.jit("main", &symbols).unwrap();
+    assert_eq!(v.to_string(), "11");
+    let host = ffi_lowering::EvalHost::new(&imports, &symbols).unwrap();
+    let v = checked.evaluate("main", |call| host.call(call)).unwrap();
+    assert_eq!(v.to_string(), "11");
+    // A refused C string would skip a finalizer.
+    let e = imports_err(
+        "    linear extern type H;\n    fn probe_close(sink h: H, nocapture in why: CStr) -> ForeignVal[Unit];",
+    );
+    assert!(e.contains("sink"), "{e}");
+    // The evaluator does not drop an isolated(mpk) grant to a direct call.
+    let mut isolated = Imports::new();
+    isolated
+        .add(
+            &library("    fn probe_flip(b: bool) -> ForeignVal[bool];"),
+            Handler::IsolatedMpk,
+        )
+        .unwrap();
+    assert!(ffi_lowering::EvalHost::new(&isolated, &symbols).is_err());
+}
+
+fn imports_err(body: &str) -> String {
+    match imports(body) {
+        Ok(_) => panic!("accepted"),
+        Err(e) => e,
+    }
+}
