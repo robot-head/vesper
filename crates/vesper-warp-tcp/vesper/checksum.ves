@@ -20,12 +20,12 @@ pub fn pseudo_header_sum(ips: Ips, tcp_len: u64) -> Result[u64, WireError] {
             dst
         }
         => {
-            if tcp_len > 65535 {
+            if tcp_len > MAX_IPV4_TCP_LEN {
                 Result::Err(WireError::TooLong)
             } else {
                 Result::Ok(
                     wrapping_add(
-                        wrapping_add(wrapping_add(words16_32(src), words16_32(dst)), 6),
+                        wrapping_add(wrapping_add(words16_32(src), words16_32(dst)), IPPROTO_TCP),
                         tcp_len
                     )
                 )
@@ -38,7 +38,7 @@ pub fn pseudo_header_sum(ips: Ips, tcp_len: u64) -> Result[u64, WireError] {
             d1
         }
         => {
-            if tcp_len > 4294967295 {
+            if tcp_len > MAX_IPV6_TCP_LEN {
                 Result::Err(WireError::TooLong)
             } else {
                 let addrs = wrapping_add(
@@ -58,29 +58,29 @@ pub fn pseudo_header_sum(ips: Ips, tcp_len: u64) -> Result[u64, WireError] {
 
 pub fn compute_checksum(ips: Ips, in segment: Slice[u8]) -> Result[u16, WireError] {
     let n = segment.len();
-    if n < 20 {
+    if n < HEADER_LEN {
         return Result::Err(WireError::Truncated);
     }
     match pseudo_header_sum(ips, n) {
         Result::Err(e) => Result::Err(e),
         Result::Ok(p) => {
-            let a = sum_range(p, in segment, 0, 16);
-            Result::Ok(~fold(sum_range(a, in segment, 18, n)))
+            let a = sum_range(p, in segment, 0, OFF_CHECKSUM);
+            Result::Ok(~fold(sum_range(a, in segment, OFF_URGENT, n)))
         },
     }
 }
 
 // `fill_checksum` over `segment[..n]`.
 fn fill_checksum_n(ips: Ips, inout segment: Slice[u8], n: u64) -> Result[Unit, WireError] {
-    if n < 20 {
+    if n < HEADER_LEN {
         return Result::Err(WireError::Truncated);
     }
     match pseudo_header_sum(ips, n) {
         Result::Err(e) => Result::Err(e),
         Result::Ok(p) => {
-            let a = sum_range(p, in segment, 0, 16);
-            let c = ~fold(sum_range(a, in segment, 18, n));
-            wr16(inout segment, 16, c);
+            let a = sum_range(p, in segment, 0, OFF_CHECKSUM);
+            let c = ~fold(sum_range(a, in segment, OFF_URGENT, n));
+            wr16(inout segment, OFF_CHECKSUM, c);
             Result::Ok(())
         },
     }
@@ -93,7 +93,7 @@ pub fn fill_checksum(ips: Ips, inout segment: Slice[u8]) -> Result[Unit, WireErr
 
 pub fn verify_checksum(ips: Ips, in segment: Slice[u8]) -> Result[Unit, WireError] {
     let n = segment.len();
-    if n < 20 {
+    if n < HEADER_LEN {
         return Result::Err(WireError::Truncated);
     }
     match pseudo_header_sum(ips, n) {

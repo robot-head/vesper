@@ -1,0 +1,1348 @@
+// Editor syntax: `vesper_syntax::parser::parse_recovery` (crates/vesper-syntax
+// src/parser/recovery_driver.rs and the checks of `recovery::assemble`).
+// The source is split into declarations by a token scan; each one that is
+// not opaque is parsed alone in editor mode (BLOCK, ERROR_NODE and
+// INCOMPLETE nodes, statement recovery and recovery sites, parse.ves), and
+// the rest become ERROR_NODEs over their raw tokens. Every quota fails the
+// whole parse, as in Rust.
+//
+// `recovery::Limits` as a row of words (`lim`): source bytes, tokens,
+// diagnostics, depth, sites, declarations, work and identifier bytes. The
+// metadata budget (`max_metadata_bytes`, sizes of Rust structs) is not
+// modelled: under the default limits it cannot be reached (lib.ves
+// `parse_editor_tables`).
+//
+// Errors (`recovery::Error`): 1 InvalidLimits, 2 InvalidSpan, 3 CstMismatch,
+// 4 InvalidInventory, and 10 plus the `Resource` (0 Source, 1 Tokens, 2
+// Diagnostics, 3 Depth, 4 Sites, 5 Declarations, 6 Metadata, 7 Work, 8
+// Identifier) for `Budget`.
+
+use self::{
+    Tokens,
+    Diags,
+    Tree
+};
+use self::kinds::{
+    k_upper,
+    k_lower,
+    k_struct,
+    k_enum,
+    k_effect,
+    k_impl,
+    k_fn,
+    k_copy,
+    k_affine,
+    k_linear,
+    k_self_kw,
+    k_int,
+    k_l_paren,
+    k_r_paren,
+    k_l_brace,
+    k_r_brace,
+    k_l_bracket,
+    k_r_bracket,
+    k_semi,
+    k_dot,
+    k_at,
+    k_bang,
+    k_eof,
+    k_error
+};
+use self::words::{
+    w_use,
+    w_model,
+    w_pub,
+    w_fip,
+    w_trait,
+    w_tiled
+};
+use self::util::{
+    inc,
+    add,
+    narrow,
+    byte,
+    u8_at,
+    u32_at,
+    u64_at,
+    w32,
+    shl
+};
+use self::diag::{
+    diags_new,
+    diag_push
+};
+use self::lex::{
+    lex_with_limits,
+    tokens_new,
+    trivia_kind,
+    token_end
+};
+use self::parse::{
+    editor_parser,
+    editor_reset,
+    parse_item,
+    n_error
+};
+use self::tree::{
+    tree_new,
+    build_events,
+    report_into
+};
+
+fn none() -> u64 {
+    18446744073709551615
+}
+
+// ---------------------------------------------------------------- limits
+
+fn l_source(in lim: ChunkSeq[u64]) -> u64 {
+    u64_at(in lim, 0)
+}
+
+fn l_tokens(in lim: ChunkSeq[u64]) -> u64 {
+    u64_at(in lim, 1)
+}
+
+fn l_diags(in lim: ChunkSeq[u64]) -> u64 {
+    u64_at(in lim, 2)
+}
+
+fn l_depth(in lim: ChunkSeq[u64]) -> u64 {
+    u64_at(in lim, 3)
+}
+
+fn l_sites(in lim: ChunkSeq[u64]) -> u64 {
+    u64_at(in lim, 4)
+}
+
+fn l_decls(in lim: ChunkSeq[u64]) -> u64 {
+    u64_at(in lim, 5)
+}
+
+fn l_work(in lim: ChunkSeq[u64]) -> u64 {
+    u64_at(in lim, 6)
+}
+
+fn l_ident(in lim: ChunkSeq[u64]) -> u64 {
+    u64_at(in lim, 7)
+}
+
+// `Limits::default()`, with each nonzero field of the packed words `a`
+// (diagnostics bits 0-7, depth 8-15, sites 16-31, declarations 32-47,
+// identifier bytes 48-63) and `b` (work bits 0-31, tokens 32-63) instead.
+pub fn editor_limits(a: u64, b: u64) -> ChunkSeq[u64] {
+    let mut lim = ChunkSeq::new[u64]();
+    lim.push(131072);
+    lim.push(field_or(b >> 32, 4294967295, 16384));
+    lim.push(field_or(a, 255, 64));
+    lim.push(field_or(a >> 8, 255, 48));
+    lim.push(field_or(a >> 16, 65535, 256));
+    lim.push(field_or(a >> 32, 65535, 256));
+    lim.push(field_or(b, 4294967295, 16777216));
+    lim.push(field_or(a >> 48, 65535, 256));
+    lim
+}
+
+fn field_or(x: u64, mask: u64, default: u64) -> u64 {
+    let v = x & mask;
+    if v == 0 {
+        default
+    } else {
+        v
+    }
+}
+
+// `Limits::preflight` with `work` as `max_work`.
+fn preflight(in lim: ChunkSeq[u64], n: u64, work: u64) -> u64 {
+    // `Limits::HARD`.
+    if l_source(in lim)
+        > 1048576
+        || l_tokens(in lim)
+        > 65536
+        || l_diags(in lim)
+        > 128
+        || l_depth(in lim)
+        > 128
+        || l_depth(in lim)
+        == 0
+        || l_sites(in lim)
+        > 4096
+        || l_decls(in lim)
+        > 4096
+        || work
+        > 134217728
+        || l_ident(in lim)
+        > 1024 {
+        return 1;
+    }
+    if n > l_source(in lim) {
+        return 10;
+    }
+    if n > work {
+        return 17;
+    }
+    0
+}
+
+// `Work::charge`: false when the budget runs out.
+fn charge(inout work: u64, n: u64) -> bool {
+    if n > work {
+        return false;
+    }
+    work = wrapping_sub(work, n);
+    true
+}
+
+// ---------------------------------------------------------------- tokens
+
+fn kind_at(in t: Tokens, i: u64) -> u8 {
+    match t.kind.try_get(i) {
+        Option::Some(k) => k,
+        Option::None => k_eof(),
+    }
+}
+
+fn last(in t: Tokens) -> u64 {
+    wrapping_sub(t.kind.len(), 1)
+}
+
+// `next`: the first non-trivia token at or after `i` (or the Eof).
+fn next(in t: Tokens, i: u64) -> u64 {
+    let mut j = i;
+    loop {
+        if j >= last(in t) || !trivia_kind(kind_at(in t, j)) {
+            return j;
+        }
+        j = inc(j);
+    }
+}
+
+fn word(in t: Tokens, i: u64, w: u8) -> bool {
+    kind_at(in t, i) == k_lower() && i < t.sym.len() && (w32(in t.sym, i) >> 24) == widen_u64(w)
+}
+
+fn is_mode(k: u8) -> bool {
+    k == k_copy() || k == k_affine() || k == k_linear()
+}
+
+fn is_type(k: u8) -> bool {
+    k == k_struct() || k == k_enum() || k == k_effect()
+}
+
+// Declaration kinds (`DeclarationKind` order).
+fn d_function() -> u64 {
+    0
+}
+
+fn d_impl() -> u64 {
+    5
+}
+
+fn d_use() -> u64 {
+    7
+}
+
+fn d_other() -> u64 {
+    8
+}
+
+// `prefix`: the declaration kind at token `at` and its name token, else
+// (none, none).
+fn prefix(in t: Tokens, at: u64) -> (u64, u64) {
+    let mut i = at;
+    if word(in t, i, w_tiled()) && kind_at(in t, next(in t, inc(i))) == k_l_paren() {
+        i = inc(next(in t, inc(i)));
+        loop {
+            if i >= last(in t) || kind_at(in t, i) == k_r_paren() {
+                break;
+            }
+            i = inc(i);
+        }
+        if kind_at(in t, i) != k_r_paren() {
+            return (none(), none());
+        }
+        i = next(in t, inc(i));
+    }
+    if is_mode(kind_at(in t, i)) {
+        i = next(in t, inc(i));
+    }
+    let mut saw_fip = false;
+    if kind_at(in t, i) == k_at() && word(in t, next(in t, inc(i)), w_fip()) {
+        saw_fip = true;
+        i = next(in t, inc(next(in t, inc(i))));
+    }
+    if word(in t, i, w_pub()) {
+        i = next(in t, inc(i));
+        if !saw_fip && kind_at(in t, i) == k_at() && word(in t, next(in t, inc(i)), w_fip()) {
+            saw_fip = true;
+            i = next(in t, inc(next(in t, inc(i))));
+        }
+        if !saw_fip && is_mode(kind_at(in t, i)) {
+            i = next(in t, inc(i));
+            if !is_type(kind_at(in t, i)) {
+                return (none(), none());
+            }
+        }
+        let k = kind_at(in t, i);
+        if k
+            != k_fn()
+            && (
+            saw_fip || (!is_type(k) && !word(in t, i, w_trait()) && !word(in t, i, w_model()))
+        ) {
+            return (none(), none());
+        }
+    }
+    let k = kind_at(in t, i);
+    if saw_fip && k != k_fn() {
+        return (none(), none());
+    }
+    let n = next(in t, inc(i));
+    let (kind, name_kind): (u64, u8) = if k == k_fn() {
+        (0, k_lower())
+    } else if k == k_struct() {
+        (1, k_upper())
+    } else if k == k_enum() {
+        (2, k_upper())
+    } else if k == k_effect() {
+        (3, k_upper())
+    } else if k == k_impl() {
+        (5, 255)
+    } else if word(in t, i, w_trait()) {
+        (4, k_upper())
+    } else if word(in t, i, w_model()) {
+        (6, k_upper())
+    } else if word(in t, i, w_use()) {
+        (7, 255)
+    } else {
+        return (none(), none());
+    };
+    let nk = kind_at(in t, n);
+    let name = if name_kind != 255 && (nk == name_kind || (kind == 0 && nk == k_self_kw())) {
+        n
+    } else {
+        none()
+    };
+    (kind, name)
+}
+
+fn anchor(in t: Tokens, at: u64) -> bool {
+    let (kind, name) = prefix(in t, at);
+    if kind == none() {
+        return false;
+    }
+    if kind == d_impl() {
+        return true;
+    }
+    if kind == d_use() {
+        return word(in t, next(in t, inc(at)), w_model());
+    }
+    name != none()
+}
+
+fn closing(k: u8) -> u8 {
+    if k == k_l_paren() {
+        k_r_paren()
+    } else if k == k_l_bracket() {
+        k_r_bracket()
+    } else if k == k_l_brace() {
+        k_r_brace()
+    } else {
+        255
+    }
+}
+
+fn is_closer(k: u8) -> bool {
+    k == k_r_brace() || k == k_r_paren() || k == k_r_bracket()
+}
+
+fn spelled(in b: Slice[u8], in t: Tokens, i: u64, in s: Slice[u8]) -> bool {
+    let start = w32(in t.start, i);
+    if wrapping_sub(token_end(in t, i), start) != s.len() {
+        return false;
+    }
+    for j in 0..s.len() {
+        if byte(in b, add(start, j)) != byte(in s, j) {
+            return false;
+        }
+    }
+    true
+}
+
+// `macro_start`: the opening delimiter of a macro call or quote at `at`,
+// else none.
+fn macro_start(in b: Slice[u8], in t: Tokens, at: u64) -> u64 {
+    let k = kind_at(in t, at);
+    if k != k_lower() && k != k_upper() {
+        return none();
+    }
+    let n = next(in t, inc(at));
+    if kind_at(in t, n) == k_bang() {
+        let open = next(in t, inc(n));
+        if closing(kind_at(in t, open)) != 255 {
+            return open;
+        }
+        return none();
+    }
+    if k
+        == k_lower()
+        && kind_at(in t, n)
+        == k_l_brace()
+        && (
+        spelled(in b, in t, at, in "quote".as_bytes())
+            || spelled(in b, in t, at, in "quasiquote".as_bytes())
+            || spelled(in b, in t, at, in "syntax_quote".as_bytes())
+    ) {
+        return n;
+    }
+    none()
+}
+
+// `macro_end`: (error, the token after the balanced closer or none).
+fn macro_end(in t: Tokens, in lim: ChunkSeq[u64], open: u64, limit: u64, inout work: u64)
+    -> (u64, u64) {
+    let mut stack = ChunkSeq::new[u8]();
+    stack.push(closing(kind_at(in t, open)));
+    let mut i = inc(open);
+    loop {
+        if i >= limit {
+            break;
+        }
+        if !charge(inout work, 1) {
+            return (17, none());
+        }
+        let k = kind_at(in t, i);
+        let c = closing(k);
+        if c != 255 {
+            if stack.len() >= l_depth(in lim) {
+                return (13, none());
+            }
+            stack.push(c);
+        } else if is_closer(k) {
+            let n = stack.len();
+            let top = if n == 0 {
+                255
+            } else {
+                u8_at(in stack, wrapping_sub(n, 1))
+            };
+            if n != 0 {
+                stack.truncate(wrapping_sub(n, 1));
+            }
+            if top != k {
+                return (0, none());
+            }
+            if n == 1 {
+                return (0, inc(i));
+            }
+        }
+        i = inc(i);
+    }
+    (0, none())
+}
+
+// The result of `extent`: error, end token, body range (body_start none
+// when there is no body) and whether the extent is uncertain. Macro spans
+// go on `macros` as start/end pairs.
+copy struct Extent {
+    err: u64,
+    end: u64,
+    body_start: u64,
+    body_end: u64,
+    uncertain: bool
+}
+
+fn extent_of(err: u64, end: u64, body_start: u64, body_end: u64, uncertain: bool) -> Extent {
+    Extent {
+        err: err,
+        end: end,
+        body_start: body_start,
+        body_end: if body_start == none() {
+            none()
+        } else {
+            body_end
+        },
+        uncertain: uncertain
+    }
+}
+
+// `extent`: where the declaration at `start` (of `kind`) ends.
+fn extent(
+    in b: Slice[u8],
+    in t: Tokens,
+    in lim: ChunkSeq[u64],
+    start: u64,
+    kind: u64,
+    opaque: u64,
+    inout work: u64,
+    inout macros: ChunkSeq[u64]
+) -> Extent {
+    let n = b.len();
+    let eof = last(in t);
+    let mut head = start;
+    if word(in t, head, w_tiled()) && kind_at(in t, next(in t, inc(head))) == k_l_paren() {
+        head = inc(next(in t, inc(head)));
+        loop {
+            if head >= eof || kind_at(in t, head) == k_r_paren() {
+                break;
+            }
+            head = inc(head);
+        }
+        head = next(in t, inc(head));
+    }
+    if is_mode(kind_at(in t, head)) {
+        head = next(in t, inc(head));
+    }
+    if kind_at(in t, head) == k_at() && word(in t, next(in t, inc(head)), w_fip()) {
+        head = next(in t, inc(next(in t, inc(head))));
+    }
+    if word(in t, head, w_pub()) {
+        head = next(in t, inc(head));
+        if kind_at(in t, head) == k_at() && word(in t, next(in t, inc(head)), w_fip()) {
+            head = next(in t, inc(next(in t, inc(head))));
+        } else if is_mode(kind_at(in t, head)) {
+            head = next(in t, inc(head));
+        }
+    }
+    let mut i = if kind == d_other() {
+        start
+    } else {
+        inc(head)
+    };
+    let mut stack = ChunkSeq::new[u8]();
+    let mut body_start = none();
+    let mut uncertain = false;
+    loop {
+        if i >= eof {
+            break;
+        }
+        if !charge(inout work, 1) {
+            return extent_of(17, 0, none(), 0, false);
+        }
+        if w32(in t.start, i) >= opaque {
+            return extent_of(0, eof, body_start, n, true);
+        }
+        let open = macro_start(in b, in t, i);
+        if open != none() {
+            let (e, found) = macro_end(in t, in lim, open, eof, inout work);
+            if e != 0 {
+                return extent_of(e, 0, none(), 0, false);
+            }
+            let at = w32(in t.start, i);
+            let end = if found == none() {
+                eof
+            } else {
+                found
+            };
+            if shl(l_sites(in lim), 1) <= macros.len() {
+                return extent_of(14, 0, none(), 0, false);
+            }
+            macros.push(at);
+            macros.push(token_end(in t, wrapping_sub(end, 1)));
+            if end == eof && kind_at(in t, wrapping_sub(end, 1)) != closing(kind_at(in t, open)) {
+                return extent_of(0, end, body_start, n, true);
+            }
+            i = end;
+            continue;
+        }
+        let k = kind_at(in t, i);
+        if !trivia_kind(k) && (kind == d_function() || body_start == none()) && anchor(in t, i) {
+            return extent_of(0, i, body_start, w32(in t.start, i), true);
+        }
+        if k == k_l_brace() && body_start == none() {
+            // The body opens unless the brace follows a `.`.
+            let mut prev = i;
+            let mut dot = false;
+            loop {
+                if prev <= start {
+                    break;
+                }
+                prev = wrapping_sub(prev, 1);
+                let pk = kind_at(in t, prev);
+                if !trivia_kind(pk) {
+                    dot = pk == k_dot();
+                    break;
+                }
+            }
+            if !dot {
+                if stack.len() != 0 {
+                    uncertain = true;
+                    stack.clear();
+                }
+                body_start = w32(in t.start, i);
+                stack.push(k_r_brace());
+                i = inc(i);
+                continue;
+            }
+        }
+        let c = closing(k);
+        if c != 255 {
+            if stack.len() >= l_depth(in lim) {
+                return extent_of(13, 0, none(), 0, false);
+            }
+            stack.push(c);
+        } else if is_closer(k) {
+            let sn = stack.len();
+            if sn != 0 && u8_at(in stack, wrapping_sub(sn, 1)) == k {
+                stack.truncate(wrapping_sub(sn, 1));
+                if body_start != none() && sn == 1 {
+                    return extent_of(0, inc(i), body_start, token_end(in t, i), uncertain);
+                }
+            } else {
+                uncertain = true;
+            }
+        } else if k == k_semi() && body_start == none() {
+            return extent_of(0, inc(i), none(), 0, uncertain);
+        }
+        i = inc(i);
+    }
+    extent_of(0, i, body_start, n, stack.len() != 0 || (kind != d_other() && body_start == none()))
+}
+
+// ---------------------------------------------------------------- driver
+
+// `push_site`: false past the site limit.
+fn push_site(
+    inout sites: ChunkSeq[u64],
+    in lim: ChunkSeq[u64],
+    start: u64,
+    end: u64,
+    kind: u64,
+    owner: u64,
+    root: u64
+) -> bool {
+    if sites.len() >= wrapping_mul(l_sites(in lim), 5) {
+        return false;
+    }
+    sites.push(start);
+    sites.push(end);
+    sites.push(kind);
+    sites.push(owner);
+    sites.push(root);
+    true
+}
+
+// Whether the last site belongs to `owner`.
+fn last_site_owned(in sites: ChunkSeq[u64], owner: u64) -> bool {
+    sites.len() != 0 && u64_at(in sites, wrapping_sub(sites.len(), 2)) == owner
+}
+
+// The tokens `start..end` of `t` and an Eof at `eof` (`ranged_tokens`).
+fn ranged_tokens(in t: Tokens, start: u64, end: u64, eof: u64) -> Tokens {
+    let mut r = tokens_new(0);
+    r.kind.reserve(inc(wrapping_sub(end, start)));
+    for i in start..end {
+        r.kind.push(u8_at(in t.kind, i));
+        r.start.push(u32_at(in t.start, i));
+        r.sym.push(u32_at(in t.sym, i));
+    }
+    r.kind.push(k_eof());
+    r.start.push(narrow(eof));
+    r.sym.push(0);
+    r
+}
+
+// Appends the diagnostics of `from` to `d`.
+fn diags_append(inout d: Diags, in from: Diags) {
+    for i in 0..from.code.len() {
+        let at = w32(in from.at, i);
+        let end = if inc(i) < from.code.len() {
+            w32(in from.at, inc(i))
+        } else {
+            from.text.len()
+        };
+        d.code.push(u8_at(in from.code, i));
+        d.start.push(u32_at(in from.start, i));
+        d.end.push(u32_at(in from.end, i));
+        d.at.push(narrow(d.text.len()));
+        for j in at..end {
+            d.text.push(u8_at(in from.text, j));
+        }
+    }
+}
+
+// Whether a diagnostic of `d` starts within `start..=end`.
+fn diag_within(in d: Diags, start: u64, end: u64) -> bool {
+    for i in 0..d.code.len() {
+        let s = w32(in d.start, i);
+        if s >= start && s <= end {
+            return true;
+        }
+    }
+    false
+}
+
+// The sum of the spellings' lengths and the count of the symbols
+// `syms[from..to]` (the work of `BlockContext` names in `assemble`).
+fn names_work(in t: Tokens, in syms: ChunkSeq[u32], from: u64, to: u64) -> u64 {
+    let mut w = wrapping_sub(to, from);
+    for j in from..to {
+        let s = wrapping_sub(w32(in syms, j), 1);
+        w = add(w, wrapping_sub(w32(in t.sym_end, s), w32(in t.sym_start, s)));
+    }
+    w
+}
+
+fn fail(code: u64) -> ChunkSeq[u64] {
+    let mut out = ChunkSeq::new[u64]();
+    out.push(code);
+    out
+}
+
+// `parse_recovery(source, limits)` as rows (lib.ves `parse_editor_tables`).
+pub fn parse_recovery_tables(in source: Str, in lim: ChunkSeq[u64]) -> ChunkSeq[u64] {
+    let b = source.as_bytes();
+    let n = b.len();
+    let pre = preflight(in lim, n, l_work(in lim));
+    if pre != 0 {
+        return fail(pre);
+    }
+    let mut work = l_work(in lim);
+    // `lex`.
+    if !charge(inout work, n) {
+        return fail(17);
+    }
+    let mut d = diags_new();
+    let t = lex_with_limits(in b, inout d, l_source(in lim), l_tokens(in lim), l_diags(in lim));
+    if t.rejected {
+        return fail(10);
+    }
+    if t.limited {
+        return fail(
+            if t.limit_kind == 1 {
+                11
+            } else {
+                12
+            }
+        );
+    }
+    let ntok = t.kind.len();
+    let mut opaque = n;
+    for i in 0..ntok {
+        if !charge(inout work, 1) {
+            return fail(17);
+        }
+        let k = u8_at(in t.kind, i);
+        if (k == k_upper() || k == k_lower())
+            && wrapping_sub(token_end(in t, i), w32(in t.start, i))
+            > l_ident(in lim) {
+            return fail(18);
+        }
+        if k == k_error() && opaque == n {
+            opaque = w32(in t.start, i);
+        }
+    }
+    let eof = last(in t);
+    let max_diag = l_diags(in lim);
+    let mut p = editor_parser(
+        in b,
+        inc(t.sym_start.len()),
+        max_diag,
+        l_depth(in lim),
+        l_sites(in lim)
+    );
+    // Declarations, 12 words each: kind, name start and end, span, header
+    // span, body span, body green span (none when absent) and status (0
+    // complete, 1 recovered, 2 opaque); and for `assemble`, 3 words each:
+    // the name token, the work of the body context names (none when there
+    // is no context) and the first node of the declaration.
+    let mut decls = ChunkSeq::new[u64]();
+    let mut info = ChunkSeq::new[u64]();
+    let mut sites = ChunkSeq::new[u64]();
+    let mut macros = ChunkSeq::new[u64]();
+    let mut ev = ChunkSeq::with_capacity[u32](add(ntok, ntok >> 1));
+    ev.push(wrapping_add(2147483648, 200));
+    let mut nodes: u64 = 1;
+    let mut cursor: u64 = 0;
+    loop {
+        if cursor >= eof {
+            break;
+        }
+        if !charge(inout work, 1) {
+            return fail(17);
+        }
+        let start = next(in t, cursor);
+        for i in cursor..start {
+            ev.push(narrow(i));
+        }
+        if start == eof {
+            break;
+        }
+        let owner = decls.len() / 12;
+        if owner >= l_decls(in lim) {
+            return fail(15);
+        }
+        let (pk, name) = prefix(in t, start);
+        let kind = if pk == none() {
+            d_other()
+        } else {
+            pk
+        };
+        macros.clear();
+        let ext = extent(in b, in t, in lim, start, kind, opaque, inout work, inout macros);
+        if ext.err != 0 {
+            return fail(ext.err);
+        }
+        let mut end = ext.end;
+        if end < inc(start) {
+            end = inc(start);
+        }
+        if end > eof {
+            end = eof;
+        }
+        let span_start = w32(in t.start, start);
+        let span_end = token_end(in t, wrapping_sub(end, 1));
+        let lexical = span_end > opaque;
+        let has_body = ext.body_start != none();
+        let opaque_item = lexical
+            || macros
+            .len()
+            != 0
+            || kind
+            == d_other()
+            || (ext.uncertain && kind != d_function())
+            || (name == none() && kind != d_impl() && kind != d_use());
+        let mut status: u64 = 1;
+        let mut header_start = span_start;
+        let mut header_end = if has_body {
+            ext.body_start
+        } else {
+            span_end
+        };
+        let mut green_start = none();
+        let mut green_end = none();
+        let mut context = none();
+        let mut declared_start = span_start;
+        let first_node = nodes;
+        if opaque_item {
+            if lexical {
+                let s = if opaque > span_start {
+                    opaque
+                } else {
+                    span_start
+                };
+                if !push_site(inout sites, in lim, s, n, 3, owner, 0) {
+                    return fail(14);
+                }
+            }
+            for j in 0..(macros.len() >> 1) {
+                let ms = u64_at(in macros, shl(j, 1));
+                let me = u64_at(in macros, inc(shl(j, 1)));
+                if !push_site(inout sites, in lim, ms, me, 4, owner, 0) {
+                    return fail(14);
+                }
+            }
+            if !lexical && !last_site_owned(in sites, owner) {
+                if !push_site(inout sites, in lim, span_start, span_end, 2, owner, 0) {
+                    return fail(14);
+                }
+            }
+            status = 2;
+            ev.push(wrapping_add(2147483648, 201));
+            ev.push(wrapping_add(2147483648, n_error()));
+            for i in start..end {
+                ev.push(narrow(i));
+            }
+            ev.push(4294967295);
+            ev.push(4294967295);
+            nodes = add(nodes, 2);
+        } else {
+            let count = wrapping_sub(end, start);
+            let cost = add(
+                wrapping_mul(count, inc(count)),
+                shl(wrapping_sub(span_end, span_start), 2)
+            );
+            if !charge(inout work, cost) {
+                return fail(17);
+            }
+            editor_reset(inout p, ranged_tokens(in t, start, end, span_end));
+            let exact = parse_item(inout p);
+            if p.halted {
+                return fail(
+                    if p.halt_kind == 2 {
+                        12
+                    } else {
+                        13
+                    }
+                );
+            }
+            if p.site_exhausted {
+                return fail(14);
+            }
+            let has_header = p.hdr.len() != 0;
+            if kind == d_function() {
+                if has_header
+                    && u64_at(in p.hdr, 2)
+                    == 1
+                    && has_body
+                    && ext
+                    .body_start
+                    == u64_at(in p.hdr, 1) {
+                    header_start = u64_at(in p.hdr, 0);
+                    header_end = u64_at(in p.hdr, 1);
+                } else {
+                    status = 2;
+                }
+            }
+            if p.d.code.len() == 0 && exact && !ext.uncertain {
+                status = 0;
+                declared_start = p.item_start;
+                header_start = declared_start;
+                if kind == d_function() && has_header && has_body {
+                    if u64_at(in p.hdr, 2) == 1 && u64_at(in p.hdr, 3) == 1 {
+                        let rows = u64_at(in p.hdr, 4);
+                        context = add(
+                            names_work(in t, in p.hdr_syms, 0, rows),
+                            names_work(in t, in p.hdr_syms, rows, p.hdr_syms.len())
+                        );
+                    }
+                    green_start = ext.body_start;
+                    green_end = ext.body_end;
+                }
+            }
+            for j in 0..(p.sites.len() >> 2) {
+                let at = shl(j, 2);
+                let rcv = w32(in p.sites, add(at, 3));
+                let root = if rcv == 0 {
+                    0
+                } else {
+                    add(rcv, start)
+                };
+                if !push_site(
+                    inout sites,
+                    in lim,
+                    w32(in p.sites, at),
+                    w32(in p.sites, inc(at)),
+                    w32(in p.sites, add(at, 2)),
+                    owner,
+                    root
+                ) {
+                    return fail(14);
+                }
+            }
+            if p.d.code.len() != 0 && !last_site_owned(in sites, owner) {
+                if !push_site(inout sites, in lim, span_start, span_end, 2, owner, 0) {
+                    return fail(14);
+                }
+            }
+            if p.d.code.len() > wrapping_sub(max_diag, d.code.len()) {
+                return fail(12);
+            }
+            diags_append(inout d, in p.d);
+            for j in 0..p.ev.len() {
+                let e = u32_at(in p.ev, j);
+                if e >= 2147483648 {
+                    if e != 4294967295 {
+                        nodes = inc(nodes);
+                    }
+                    ev.push(e);
+                } else {
+                    ev.push(narrow(add(widen_u64(e), start)));
+                }
+            }
+        }
+        if d.code.len() > max_diag {
+            return fail(12);
+        }
+        if status != 0 && !diag_within(in d, span_start, span_end) {
+            if d.code.len() == max_diag {
+                return fail(12);
+            }
+            diag_push(
+                inout d,
+                2,
+                span_start,
+                span_end,
+                in "declaration syntax is recovered or opaque".as_bytes()
+            );
+        }
+        decls.push(kind);
+        if name == none() {
+            decls.push(none());
+            decls.push(none());
+        } else {
+            decls.push(w32(in t.start, name));
+            decls.push(token_end(in t, name));
+        }
+        decls.push(declared_start);
+        decls.push(span_end);
+        decls.push(header_start);
+        decls.push(header_end);
+        decls.push(ext.body_start);
+        decls.push(ext.body_end);
+        decls.push(green_start);
+        decls.push(green_end);
+        decls.push(status);
+        info.push(name);
+        info.push(context);
+        info.push(first_node);
+        cursor = end;
+    }
+    ev.push(4294967295);
+    if work == 0 {
+        return fail(17);
+    }
+    let mut tree = tree_new();
+    build_events(inout tree, in t, in ev);
+    let checked = assemble(
+        in b,
+        in t,
+        in lim,
+        work,
+        in ev,
+        in tree,
+        in d,
+        in decls,
+        in info,
+        in sites
+    );
+    if checked != 0 {
+        return fail(checked);
+    }
+    let mut out = ChunkSeq::new[u64]();
+    out.push(0);
+    out.push(decls.len() / 12);
+    out.push(sites.len() / 5);
+    report_into(inout out, in tree, in t, in d);
+    for j in 0..decls.len() {
+        out.push(u64_at(in decls, j));
+    }
+    for j in 0..(sites.len() / 5) {
+        let at = wrapping_mul(j, 5);
+        for f in 0..4 {
+            out.push(u64_at(in sites, add(at, f)));
+        }
+        let root = u64_at(in sites, add(at, 4));
+        if root == 0 {
+            out.push(none());
+        } else {
+            let r = wrapping_sub(root, 1);
+            let mark = out.len();
+            out.push(0);
+            out.push(w32(in t.start, r));
+            out.push(token_end(in t, r));
+            let projections = receiver_projections(inout out, in t, r, u64_at(in sites, at));
+            out.try_set(mark, projections);
+        }
+    }
+    out
+}
+
+// The member tokens read from the receiver root `r` before `limit` (the
+// token after each `.`), pushed as start/end pairs; their count.
+fn receiver_projections(inout out: ChunkSeq[u64], in t: Tokens, r: u64, limit: u64) -> u64 {
+    let mut count: u64 = 0;
+    let mut after_dot = false;
+    let mut i = inc(r);
+    loop {
+        if i >= last(in t) || w32(in t.start, i) >= limit {
+            break;
+        }
+        let k = u8_at(in t.kind, i);
+        if !trivia_kind(k) {
+            if after_dot {
+                out.push(w32(in t.start, i));
+                out.push(token_end(in t, i));
+                count = inc(count);
+            }
+            after_dot = k == k_dot();
+        }
+        i = inc(i);
+    }
+    count
+}
+
+// ---------------------------------------------------------------- assemble
+
+// The budget of `assemble`: work so far, false past `max`.
+fn spend(inout used: u64, n: u64, max: u64) -> bool {
+    used = add(used, n);
+    used <= max
+}
+
+// `Budget::span`: 0, or 17 (work) or 2 (an invalid range).
+fn span_check(in b: Slice[u8], inout used: u64, max: u64, start: u64, end: u64) -> u64 {
+    if !spend(inout used, 2, max) {
+        return 17;
+    }
+    let n = b.len();
+    if start > end || end > n {
+        return 2;
+    }
+    if !boundary(in b, start) || !boundary(in b, end) {
+        return 2;
+    }
+    0
+}
+
+// A char boundary that does not split `\r\n`.
+fn boundary(in b: Slice[u8], at: u64) -> bool {
+    let n = b.len();
+    if at < n {
+        let c = byte(in b, at);
+        if c >= 128 && c < 192 {
+            return false;
+        }
+    }
+    !(at > 0 && at < n && byte(in b, wrapping_sub(at, 1)) == 13 && byte(in b, at) == 10)
+}
+
+// `actual_token` for a token of `t`: whether its kind is allowed.
+fn token_kind_ok(in t: Tokens, i: u64, receiver: bool, projection: bool) -> bool {
+    let k = u8_at(in t.kind, i);
+    if k == k_lower() || k == k_self_kw() {
+        return true;
+    }
+    if projection {
+        return k == k_int();
+    }
+    ! receiver && k == k_upper()
+}
+
+// The token of `t` that spans `start..end`, else none.
+fn token_at(in t: Tokens, start: u64, end: u64) -> u64 {
+    // Binary search on the starts.
+    let mut lo: u64 = 0;
+    let mut hi = last(in t);
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = add(lo, hi) >> 1;
+        if w32(in t.start, mid) < start {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    if lo < last(in t) && w32(in t.start, lo) == start && token_end(in t, lo) == end {
+        lo
+    } else {
+        none()
+    }
+}
+
+// `recovery::assemble` on the parsed rows: 0 or the error.
+fn assemble(
+    in b: Slice[u8],
+    in t: Tokens,
+    in lim: ChunkSeq[u64],
+    max: u64,
+    in ev: ChunkSeq[u32],
+    in tree: Tree,
+    in d: Diags,
+    in decls: ChunkSeq[u64],
+    in info: ChunkSeq[u64],
+    in sites: ChunkSeq[u64]
+) -> u64 {
+    let n = b.len();
+    let pre = preflight(in lim, n, max);
+    if pre != 0 {
+        return pre;
+    }
+    if d.code.len() > l_diags(in lim) {
+        return 12;
+    }
+    if decls.len() / 12 > l_decls(in lim) {
+        return 15;
+    }
+    if sites.len() / 5 > l_sites(in lim) {
+        return 14;
+    }
+    let mut used: u64 = 0;
+    if !spend(inout used, n, max) {
+        return 17;
+    }
+    // The CST walk.
+    let mut depth: u64 = 0;
+    let mut tokens: u64 = 0;
+    for j in 0..ev.len() {
+        let e = u32_at(in ev, j);
+        if e == 4294967295 {
+            if !spend(inout used, 1, max) {
+                return 17;
+            }
+            depth = wrapping_sub(depth, 1);
+        } else if e >= 2147483648 {
+            if !spend(inout used, 1, max) {
+                return 17;
+            }
+            depth = inc(depth);
+            if depth > l_depth(in lim) {
+                return 13;
+            }
+        } else {
+            if !spend(inout used, 1, max) {
+                return 17;
+            }
+            tokens = inc(tokens);
+            if tokens > l_tokens(in lim) {
+                return 11;
+            }
+            let i = widen_u64(e);
+            if !spend(inout used, wrapping_sub(token_end(in t, i), w32(in t.start, i)), max) {
+                return 17;
+            }
+            if !spend(inout used, 1, max) {
+                return 17;
+            }
+        }
+    }
+    let depth_work = shl(l_depth(in lim), 1);
+    for i in 0..d.code.len() {
+        let s = span_check(in b, inout used, max, w32(in d.start, i), w32(in d.end, i));
+        if s != 0 {
+            return s;
+        }
+        let from = w32(in d.at, i);
+        let to = if inc(i) < d.code.len() {
+            w32(in d.at, inc(i))
+        } else {
+            d.text.len()
+        };
+        if !spend(inout used, add(5, wrapping_sub(to, from)), max) {
+            return 17;
+        }
+    }
+    let mut previous_end: u64 = 0;
+    for j in 0..(decls.len() / 12) {
+        let at = wrapping_mul(j, 12);
+        let name_start = u64_at(in decls, add(at, 1));
+        let name_end = u64_at(in decls, add(at, 2));
+        let span_start = u64_at(in decls, add(at, 3));
+        let span_end = u64_at(in decls, add(at, 4));
+        let header_start = u64_at(in decls, add(at, 5));
+        let header_end = u64_at(in decls, add(at, 6));
+        let body_start = u64_at(in decls, add(at, 7));
+        let body_end = u64_at(in decls, add(at, 8));
+        let green_start = u64_at(in decls, add(at, 9));
+        let green_end = u64_at(in decls, add(at, 10));
+        let s = span_check(in b, inout used, max, span_start, span_end);
+        if s != 0 {
+            return s;
+        }
+        let s = span_check(in b, inout used, max, header_start, header_end);
+        if s != 0 {
+            return s;
+        }
+        if span_start < previous_end || header_start < span_start || header_end > span_end {
+            return 4;
+        }
+        previous_end = span_end;
+        let name = u64_at(in info, wrapping_mul(j, 3));
+        if name != none() {
+            let s = span_check(in b, inout used, max, name_start, name_end);
+            if s != 0 {
+                return s;
+            }
+            if name_start < header_start || name_end > header_end {
+                return 4;
+            }
+            if !spend(inout used, depth_work, max) {
+                return 17;
+            }
+            if !token_kind_ok(in t, name, false, false) {
+                return 4;
+            }
+            if wrapping_sub(name_end, name_start) > l_ident(in lim) {
+                return 18;
+            }
+        }
+        if body_start != none() {
+            let s = span_check(in b, inout used, max, body_start, body_end);
+            if s != 0 {
+                return s;
+            }
+            if body_start < span_start || body_end > span_end || header_end > body_start {
+                return 4;
+            }
+        }
+        let context = u64_at(in info, inc(wrapping_mul(j, 3)));
+        if green_start != none() {
+            let s = span_check(in b, inout used, max, green_start, green_end);
+            if s != 0 {
+                return s;
+            }
+            // The first node (after the root, in preorder) over the body,
+            // a BLOCK when the body has a context.
+            let mut found = none();
+            let mut k = u64_at(in info, add(wrapping_mul(j, 3), 2));
+            loop {
+                if k >= tree.node_kind.len() {
+                    break;
+                }
+                if w32(in tree.node_start, k)
+                    == green_start
+                    && w32(in tree.node_end, k)
+                    == green_end
+                    && (context == none() || u8_at(in tree.node_kind, k) == 205) {
+                    found = k;
+                    break;
+                }
+                k = inc(k);
+            }
+            let visited = if found == none() {
+                wrapping_sub(tree.node_kind.len(), 1)
+            } else {
+                found
+            };
+            if !spend(inout used, visited, max) {
+                return 17;
+            }
+            if found == none() {
+                return 4;
+            }
+        }
+        if context != none() {
+            if !spend(inout used, context, max) {
+                return 17;
+            }
+        }
+    }
+    for j in 0..(sites.len() / 5) {
+        let at = wrapping_mul(j, 5);
+        let start = u64_at(in sites, at);
+        let end = u64_at(in sites, inc(at));
+        let s = span_check(in b, inout used, max, start, end);
+        if s != 0 {
+            return s;
+        }
+        let kind = u64_at(in sites, add(at, 2));
+        if kind <= 1 && start != end {
+            return 4;
+        }
+        let root = u64_at(in sites, add(at, 4));
+        if root != 0 {
+            let r = wrapping_sub(root, 1);
+            let s = span_check(in b, inout used, max, w32(in t.start, r), token_end(in t, r));
+            if s != 0 {
+                return s;
+            }
+            if !spend(inout used, depth_work, max) {
+                return 17;
+            }
+            if !token_kind_ok(in t, r, true, false) {
+                return 4;
+            }
+            let mut members = ChunkSeq::new[u64]();
+            let count = receiver_projections(inout members, in t, r, start);
+            if !spend(inout used, count, max) {
+                return 17;
+            }
+            for m in 0..count {
+                let ps = u64_at(in members, shl(m, 1));
+                let pe = u64_at(in members, inc(shl(m, 1)));
+                let s = span_check(in b, inout used, max, ps, pe);
+                if s != 0 {
+                    return s;
+                }
+                if !spend(inout used, depth_work, max) {
+                    return 17;
+                }
+                let tok = token_at(in t, ps, pe);
+                if tok == none() || !token_kind_ok(in t, tok, true, true) {
+                    return 4;
+                }
+            }
+        }
+    }
+    0
+}

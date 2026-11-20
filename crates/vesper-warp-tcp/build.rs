@@ -76,7 +76,11 @@ const DIVERGENT_EDITS: &[(&str, &str, &str)] = &[
         "    cc.ssthresh = max32(cc.cwnd / 2, cc.mss);\n    cc.cwnd = cc.ssthresh;",
     ),
     // wire.rs: the IPv4 pseudo-header sums protocol 0 instead of 6.
-    ("wire", "words16_32(dst)), 6),", "words16_32(dst)), 0),"),
+    (
+        "wire",
+        "words16_32(dst)), IPPROTO_TCP),",
+        "words16_32(dst)), 0),",
+    ),
     // conn.rs: the duplicate-ACK threshold drops from 3 to 2.
     (
         "conn",

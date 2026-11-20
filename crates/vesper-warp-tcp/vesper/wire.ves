@@ -3,6 +3,62 @@
 // RFC 2018, RFC 1071)
 // ---------------------------------------------------------------------
 
+// Header sizes and field offsets (RFC 9293 §3.1), the same names as
+// `wire.rs` and its `offsets` module.
+const HEADER_LEN: u64 = 20;
+// Data offset 15.
+const MAX_HEADER_LEN: u64 = 60;
+// `MAX_HEADER_LEN - HEADER_LEN`.
+const MAX_OPTIONS_LEN: u64 = 40;
+const OFF_SRC_PORT: u64 = 0;
+const OFF_DST_PORT: u64 = 2;
+const OFF_SEQ: u64 = 4;
+const OFF_ACK: u64 = 8;
+const OFF_DATA_OFFSET: u64 = 12;
+const OFF_FLAGS: u64 = 13;
+const OFF_WINDOW: u64 = 14;
+const OFF_CHECKSUM: u64 = 16;
+const OFF_URGENT: u64 = 18;
+// IP protocol number for TCP, as a pseudo-header word.
+const IPPROTO_TCP: u64 = 6;
+// The pseudo-header length field: 16 bits over IPv4, 32 over IPv6
+// (RFC 8200 §8.1).
+const MAX_IPV4_TCP_LEN: u64 = 65535;
+const MAX_IPV6_TCP_LEN: u64 = 4294967295;
+// Largest permitted window shift (RFC 7323 §2.3).
+const MAX_WINDOW_SCALE: u8 = 14;
+// Largest window the 16-bit window field carries unscaled.
+const MAX_UNSCALED_WINDOW: u64 = 65535;
+// Default send MSS without an MSS option (RFC 9293 §3.7.1).
+const DEFAULT_IPV4_MSS: u16 = 536;
+const DEFAULT_IPV6_MSS: u16 = 1220;
+// Maximum SACK blocks in one option (RFC 2018 §3).
+const MAX_SACK_BLOCKS: u64 = 4;
+
+// Option kinds and lengths (RFC 9293 §3.2, RFC 7323, RFC 2018), as
+// `wire::options`.
+const OPT_END: u8 = 0;
+const OPT_NOP: u8 = 1;
+const OPT_MSS: u8 = 2;
+const OPT_MSS_LEN: u8 = 4;
+const OPT_WINDOW_SCALE: u8 = 3;
+const OPT_WINDOW_SCALE_LEN: u8 = 3;
+const OPT_SACK_PERMITTED: u8 = 4;
+const OPT_SACK_PERMITTED_LEN: u8 = 2;
+const OPT_SACK: u8 = 5;
+const OPT_TIMESTAMPS: u8 = 8;
+const OPT_TIMESTAMPS_LEN: u8 = 10;
+// Kind and length bytes before an option's body.
+const KIND_AND_LEN: u64 = 2;
+// Bytes of one SACK block (two sequence numbers).
+const SACK_BLOCK_LEN: u64 = 8;
+// Every option but the timestamps is one NOP-padded 4-byte word.
+const PADDED_LEN: u64 = 4;
+// The timestamps option, NOP NOP-padded.
+const PADDED_TIMESTAMPS_LEN: u64 = 12;
+// `PADDED_LEN + SACK_BLOCK_LEN`: a SACK option with one block.
+const SACK_ONE_BLOCK_LEN: u64 = 12;
+
 copy enum WireError {
     Truncated,
     BadDataOffset,

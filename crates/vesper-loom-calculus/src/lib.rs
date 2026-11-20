@@ -97,7 +97,7 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Package {
     pub name: PackageName,
@@ -108,6 +108,28 @@ pub struct Package {
     pub capability_ceiling: BTreeSet<String>,
     #[serde(default = "yes")]
     pub forbid_unsafe_ffi: bool,
+    /// The package's `.vsys` libraries (manuscript §16.3), as paths relative
+    /// to this manifest. Every package that depends on it can call them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vsys: Vec<String>,
+}
+/// As derived, except that an empty `vsys` is left out, so the debug text of
+/// a manifest without `.vsys` imports (which differential digests hash) is
+/// what it was before the field existed.
+impl std::fmt::Debug for Package {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut s = f.debug_struct("Package");
+        s.field("name", &self.name)
+            .field("version", &self.version)
+            .field("edition", &self.edition)
+            .field("license", &self.license)
+            .field("capability_ceiling", &self.capability_ceiling)
+            .field("forbid_unsafe_ffi", &self.forbid_unsafe_ffi);
+        if !self.vsys.is_empty() {
+            s.field("vsys", &self.vsys);
+        }
+        s.finish()
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

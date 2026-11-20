@@ -68,6 +68,8 @@ vesper-loom-admission = { path = "../vesper-loom-admission" }
 # The compiler links the frozen Rust seed copy of vesper-loom-audit (#1039).
 vesper-loom-audit = { path = "../vesper-loom-audit/seed", package = "vesper-loom-audit-seed" }
 vesper-loom-cas = { path = "../vesper-loom-cas" }
+# The standard I/O host `vesper jit` binds `.vsys` imports to (#1150).
+vesper-std-host = { path = "../vesper-std-host" }
 vesper-pact = { path = "../vesper-pact/seed", package = "vesper-pact-seed" }
 vesper-pact-binding = { path = "../vesper-pact-binding" }
 # Integration B (#136): wave-five verifiers and tools wired into the CLI.

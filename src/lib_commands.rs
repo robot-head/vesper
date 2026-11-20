@@ -44,8 +44,10 @@ impl LibFlags {
     /// Whether `source` imports `.vsys` libraries (`// @export vsys`), which
     /// check only through the Bridge lowering, so the plain check's
     /// diagnostics do not apply to it.
-    pub fn needs_module(&self, source: &str) -> bool {
-        (self.enabled || self.any_option()) && source.contains("// @export vsys")
+    /// `packages` says whether a loaded package carries `.vsys` libraries
+    /// in its manifest (`[package] vsys`).
+    pub fn needs_module(&self, source: &str, packages: bool) -> bool {
+        (self.enabled || self.any_option()) && (packages || source.contains("// @export vsys"))
     }
 
     /// `build --lib`: the module is compiled by the export path, which adds
@@ -60,6 +62,7 @@ impl LibFlags {
         public: &std::collections::BTreeSet<String>,
         input: &str,
         source: &str,
+        packages: &[vesper::packages::PackageVsys],
         output: Option<PathBuf>,
         target: Option<&str>,
         optimize: bool,
@@ -67,10 +70,11 @@ impl LibFlags {
         exclusive: bool,
     ) -> Result<(), String> {
         let job = self.job(command, input, output, target, optimize, exclusive)?;
-        let library = export::compile_module(
+        let library = export::compile_package_module(
             input,
             module,
             source,
+            packages,
             &job.options(),
             &job.instances,
             Some(public),

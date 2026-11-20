@@ -1,4 +1,18 @@
 // Route pattern parsing: literal and `{name}` segments, and their checks.
+
+// ASCII bytes this module compares against (constants are per module).
+const NUL: u8 = 0;
+const SPACE: u8 = 32;
+const HASH: u8 = 35;
+const PERCENT: u8 = 37;
+const DOT: u8 = 46;
+const SLASH: u8 = 47;
+const COLON: u8 = 58;
+const QUESTION: u8 = 63;
+const BACKSLASH: u8 = 92;
+const UNDERSCORE: u8 = 95;
+const DEL: u8 = 127;
+
 use self::{
     RouteFault,
     Piece,
@@ -11,7 +25,7 @@ use self::{
 // A C0, DEL or C1 control character (`char::is_control`) at `i` of UTF-8 text.
 fn control_at(in p: Slice[u8], i: u64, hi: u64) -> bool {
     let b = byte(in p, i);
-    if b < 32 || b == 127 {
+    if b < SPACE || b == DEL {
         return true;
     }
     if b == 194 && wrapping_add(i, 1) < hi {
@@ -53,12 +67,12 @@ pub fn same(in a: Slice[u8], alo: u64, ahi: u64, in b: Slice[u8], blo: u64, bhi:
 // trailing slash.
 pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, RouteFault] {
     let n = p.len();
-    if n == 0 || byte(in p, 0) != 47 {
+    if n == 0 || byte(in p, 0) != SLASH {
         return Result::Err(RouteFault::InvalidPattern);
     }
     let mut hi = n;
     let mut trailing = false;
-    if n >= 2 && byte(in p, wrapping_sub(n, 1)) == 47 {
+    if n >= 2 && byte(in p, wrapping_sub(n, 1)) == SLASH {
         if n == 2 {
             return Result::Err(RouteFault::InvalidPattern);
         }
@@ -76,7 +90,7 @@ pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, Rout
     }
     let mut segments: u64 = 1;
     for i in 1..hi {
-        if byte(in p, i) == 47 {
+        if byte(in p, i) == SLASH {
             segments = wrapping_add(segments, 1);
         }
     }
@@ -85,16 +99,16 @@ pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, Rout
     }
     let mut at: u64 = 1;
     loop {
-        let end = find(in p, at, hi, 47);
-        if at < end && byte(in p, at) == 58 {
+        let end = find(in p, at, hi, SLASH);
+        if at < end && byte(in p, at) == COLON {
             let name_lo = wrapping_add(at, 1);
             let first = byte(in p, name_lo);
-            if name_lo >= end || !(is_alpha(first) || first == 95) {
+            if name_lo >= end || !(is_alpha(first) || first == UNDERSCORE) {
                 return Result::Err(RouteFault::InvalidParameterName);
             }
             for i in name_lo..end {
                 let b = byte(in p, i);
-                if !(is_alpha(b) || is_digit(b) || b == 95) {
+                if !(is_alpha(b) || is_digit(b) || b == UNDERSCORE) {
                     return Result::Err(RouteFault::InvalidParameterName);
                 }
             }
@@ -120,15 +134,25 @@ pub fn parse_pattern(in p: Slice[u8], max_segments: u64) -> Result[Pattern, Rout
             let len = wrapping_sub(end, at);
             let dots = (len == 1 || len == 2)
                 && byte(in p, at)
-                == 46
+                == DOT
                 && byte(in p, wrapping_sub(end, 1))
-                == 46;
+                == DOT;
             if len == 0 || dots {
                 return Result::Err(RouteFault::InvalidPattern);
             }
             for i in at..end {
                 let b = byte(in p, i);
-                if b == 92 || b == 0 || b == 37 || b == 63 || b == 35 || control_at(in p, i, end) {
+                if b
+                    == BACKSLASH
+                    || b
+                    == NUL
+                    || b
+                    == PERCENT
+                    || b
+                    == QUESTION
+                    || b
+                    == HASH
+                    || control_at(in p, i, end) {
                     return Result::Err(RouteFault::InvalidPattern);
                 }
             }

@@ -28,6 +28,7 @@
         "src/replay*",
         "src/kernel*",
         "src/bin/lean4lean42*",
+        "src/bin/arithmetic_oracle42*",
         "src/lsp/proof_*",
         "src/optimize/witness_lean.rs",
         "src/format*",

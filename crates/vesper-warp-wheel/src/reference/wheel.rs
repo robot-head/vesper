@@ -73,10 +73,12 @@ impl<T> Wheel<T> {
         if config.tick_ns == 0 {
             return Err(WheelConfigError::ZeroTick);
         }
-        if !(1..=6).contains(&config.slot_bits) {
+        if !(1..=MAX_SLOT_BITS).contains(&config.slot_bits) {
             return Err(WheelConfigError::SlotBits(config.slot_bits));
         }
-        if config.levels == 0 || u32::from(config.levels) * u32::from(config.slot_bits) > 63 {
+        if config.levels == 0
+            || u32::from(config.levels) * u32::from(config.slot_bits) > MAX_SPAN_BITS
+        {
             return Err(WheelConfigError::Levels(config.levels));
         }
         if config.capacity == 0 || config.capacity > MAX_CAPACITY {

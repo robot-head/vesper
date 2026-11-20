@@ -251,6 +251,13 @@ impl Imports {
 }
 
 /// Whether `name` is the effect of an imported library.
+/// The host functions of the standard I/O libraries (`StdFs`, `StdProcess`,
+/// `StdEnv`, link name `vesper_std_host`), which the compiler links so
+/// `vesper jit` can bind their imports (#1150).
+pub fn std_host_symbols() -> Vec<(&'static str, *const u8)> {
+    vesper_std_host::symbols()
+}
+
 pub fn is_foreign_effect(name: &str) -> bool {
     name.starts_with(EFFECT_PREFIX)
 }
@@ -535,6 +542,24 @@ impl ForeignChecked {
     /// Every foreign call site, in source order.
     pub fn calls(&self) -> &[ForeignCall] {
         &self.calls
+    }
+    /// The `.vsys` link names and modes of the libraries the module calls,
+    /// sorted and without repeats (what an executable links).
+    pub fn link_names(&self) -> Vec<(String, LinkMode)> {
+        let mut out: Vec<(String, LinkMode)> = self
+            .calls
+            .iter()
+            .filter_map(|c| self.plan.libraries.get(&effect_name(&c.library)))
+            .map(|l| {
+                (
+                    l.descriptor.link().name().to_owned(),
+                    l.descriptor.link().mode(),
+                )
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out.dedup();
+        out
     }
     /// Run `compile` (which emits native code for [`Self::world`]) with the
     /// foreign-call plan in place, as [`Self::object`] does for one entry.

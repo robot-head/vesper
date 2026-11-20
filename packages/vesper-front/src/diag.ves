@@ -49,7 +49,7 @@ pub fn diag_push_limit(
 }
 
 // `LexLimit` as Display prints it. Kinds: 0 SourceBytes, 1 Tokens,
-// 2 Diagnostics, 3 Depth.
+// 2 Diagnostics, 3 Depth, 4 Configuration.
 pub fn limit_message(inout m: ChunkSeq[u8], kind: u64, limit: u64, retained: u64) {
     limit_message_observed(inout m, kind, limit, wrapping_add(limit, 1), retained);
 }
@@ -67,8 +67,10 @@ pub fn limit_message_observed(
         m.extend(in "Tokens".as_bytes());
     } else if kind == 2 {
         m.extend(in "Diagnostics".as_bytes());
-    } else {
+    } else if kind == 3 {
         m.extend(in "Depth".as_bytes());
+    } else {
+        m.extend(in "Configuration".as_bytes());
     }
     m.extend(in " limit ".as_bytes());
     push_decimal(inout m, limit);
