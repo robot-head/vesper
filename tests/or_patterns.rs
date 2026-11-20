@@ -114,3 +114,42 @@ fn malformed_alternatives_are_syntax_errors() {
     let c = checked("fn main() -> u64 { let a: u64 = 6; match a | 1 { 7 | 8 => a | 2, _ => 0 } }");
     assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
 }
+
+#[test]
+fn nested_alternatives_cannot_expand_exponentially() {
+    // Each level doubles the copies of everything below it; the parser's
+    // expansion budget refuses the source instead of building 2^40 bodies.
+    let depth = 40;
+    let source = format!(
+        "fn main() -> u64 {{ {}0{} }}",
+        "match true { true | false => ".repeat(depth),
+        " }".repeat(depth)
+    );
+    let started = std::time::Instant::now();
+    let p = vesper::parser::parse(&source);
+    assert!(
+        p.diagnostics.iter().any(|d| d
+            .message
+            .contains("or-pattern alternatives copy too much code")),
+        "{:?}",
+        p.diagnostics
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    // A few levels stay well inside the budget.
+    let small = format!(
+        "fn main() -> u64 {{ {}7{} }}",
+        "match true { true | false => ".repeat(6),
+        " }".repeat(6)
+    );
+    assert_eq!(agree("nested_or_patterns", &small), 7);
+}
+
+#[test]
+fn checked_reference_covers_the_whole_domain() {
+    use vesper::integer_widths::{CheckedOp, checked_builtin};
+    let (op, kind) = checked_builtin("checked_mul_u64").unwrap();
+    assert_eq!(op, CheckedOp::Mul);
+    let max = u64::MAX as i128;
+    assert_eq!(op.eval(kind, max, max), None);
+    assert_eq!(op.eval(kind, max, 1), Some(max));
+}

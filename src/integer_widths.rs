@@ -287,10 +287,10 @@ impl CheckedOp {
     /// The reference result: `None` where the checked operator overflows.
     pub fn eval(self, kind: IntegerKind, a: i128, b: i128) -> Option<i128> {
         let exact = match self {
-            Self::Add => a + b,
-            Self::Sub => a - b,
-            Self::Mul => a * b,
-        };
+            Self::Add => a.checked_add(b),
+            Self::Sub => a.checked_sub(b),
+            Self::Mul => a.checked_mul(b),
+        }?;
         (kind.min()..=kind.max()).contains(&exact).then_some(exact)
     }
 }

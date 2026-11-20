@@ -66,6 +66,11 @@ impl Parse {
 /// Combined guarded descent/AST wrapping depth; additional helper frames are
 /// bounded by this count. This is not a checker/runtime termination guarantee.
 pub const HARD_PARSE_DEPTH: usize = 128;
+/// The total token weight of the match-arm bodies that or-pattern
+/// alternatives may copy in one parse. Each extra alternative copies its
+/// body, and nested or-patterns multiply, so without a budget a short
+/// source could expand into an exponentially large AST.
+pub const OR_PATTERN_EXPANSION: usize = 1 << 18;
 
 /// Built-in effect of a lexical Strata region (design §15.2). A source
 /// `region r { body }` block parses to a handler of this effect labelled `r`
@@ -181,6 +186,7 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
         halted: false,
         halt_kind: None,
         expr_heights: Default::default(),
+        expansion: 0,
         editor: false,
         site_limit: 0,
         site_exhausted: false,
@@ -239,6 +245,9 @@ struct Parser<'a> {
     halted: bool,
     halt_kind: Option<lexer::LexLimitKind>,
     expr_heights: std::collections::BTreeMap<(usize, usize), usize>,
+    /// Token weight of the or-pattern bodies copied so far (see
+    /// [`OR_PATTERN_EXPANSION`]).
+    expansion: usize,
     editor: bool,
     site_limit: usize,
     site_exhausted: bool,
@@ -2221,9 +2230,18 @@ impl Parser<'_> {
             for pat in &alternatives {
                 pattern_bindings(pat, &mut self.bound_values);
             }
+            let (body_start, expanded) = (self.pos, self.expansion);
             let body = self.expr();
             let block_body = matches!(body.kind, ExprKind::Block { .. });
             self.bound_values.restore(outer_values);
+            // A body's weight is its tokens plus the copies nested in it.
+            let weight = (self.pos - body_start) + (self.expansion - expanded);
+            let copies = weight.saturating_mul(alternatives.len() - 1);
+            self.expansion = self.expansion.saturating_add(copies);
+            if self.expansion > OR_PATTERN_EXPANSION {
+                self.error("or-pattern alternatives copy too much code; split the match");
+                alternatives.truncate(1);
+            }
             for pat in alternatives {
                 arms.push((pat, body.clone()));
             }

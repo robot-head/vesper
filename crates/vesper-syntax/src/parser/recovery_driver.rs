@@ -71,6 +71,7 @@ fn parser<'a>(source: &'a str, tokens: Vec<Token>, limits: Limits) -> Parser<'a>
         halted: false,
         halt_kind: None,
         expr_heights: Default::default(),
+        expansion: 0,
         editor: true,
         site_limit: limits.max_sites,
         site_exhausted: false,
