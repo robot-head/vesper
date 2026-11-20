@@ -122,10 +122,17 @@ struct ConnectionCore {
     discarded_input: u64
 }
 
+// The written prefix of the outbound queue is dropped once it holds at least
+// this many chunks and outnumbers the queued ones.
+const MIN_COMPACT_PREFIX: u64 = 64;
+
+// The largest u64.
+const U64_MAX: u64 = 18446744073709551615;
+
 fn saturating_add(a: u64, b: u64) -> u64 {
     let s = wrapping_add(a, b);
     if s < a {
-        18446744073709551615
+        U64_MAX
     } else {
         s
     }
@@ -488,7 +495,7 @@ pub fn connection_core_advance(inout c: ConnectionCore, written: u64) -> Advance
         if c.out_head == c.outbound.len() {
             c.outbound.clear();
             c.out_head = 0;
-        } else if c.out_head >= 64 && c.out_head >= outbound_len(in c) {
+        } else if c.out_head >= MIN_COMPACT_PREFIX && c.out_head >= outbound_len(in c) {
             // Drop the written prefix once it outnumbers the queued chunks,
             // so a connection that never drains fully stays bounded.
             let mut kept: ChunkSeq[Chunk] = ChunkSeq::new[Chunk]();

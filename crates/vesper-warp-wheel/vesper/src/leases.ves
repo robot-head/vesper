@@ -27,10 +27,16 @@ fn space_tag(space: PacketNumberSpace) -> u64 {
 
 // SplitMix64 finalizer over the packed key (deterministic by design: keys
 // are inserted only for packets we sent).
+// The packet-number space tag sits above the 62-bit packet number.
+const SPACE_TAG_SHIFT: u64 = 62;
+// SplitMix64 finalizer multipliers (0xbf58476d1ce4e5b9, 0x94d049bb133111eb).
+const SPLITMIX_MUL_1: u64 = 13787848793156543929;
+const SPLITMIX_MUL_2: u64 = 10723151780598845931;
+
 fn mix(tag: u64, pn: u64) -> u64 {
-    let mut z = (tag << 62) | pn;
-    z = wrapping_mul(z ^ (z >> 30), 13787848793156543929);
-    z = wrapping_mul(z ^ (z >> 27), 10723151780598845931);
+    let mut z = (tag << SPACE_TAG_SHIFT) | pn;
+    z = wrapping_mul(z ^ (z >> 30), SPLITMIX_MUL_1);
+    z = wrapping_mul(z ^ (z >> 27), SPLITMIX_MUL_2);
     z ^ (z >> 31)
 }
 

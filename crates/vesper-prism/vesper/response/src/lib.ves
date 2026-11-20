@@ -7,6 +7,26 @@
 // fields and the running head length and field count. Every limit is checked
 // before a field is retained or output is allocated.
 
+// ASCII bytes this module compares against (constants are per module).
+const SPACE: u8 = 32;
+const DIGIT_0: u8 = 48;
+const DIGIT_9: u8 = 57;
+const UPPER_A: u8 = 65;
+const UPPER_Z: u8 = 90;
+const LOWER_A: u8 = 97;
+const LOWER_Z: u8 = 122;
+// 'a' - 'A': adding it lowercases an ASCII capital.
+const ASCII_CASE_OFFSET: u8 = 32;
+
+// The RFC 9110 §5.6.2 `tchar` bytes (ALPHA, DIGIT and !#$%&'*+-.^_`|~):
+// bit `b` of LOW for bytes 0-63, bit `b - 64` of HIGH for 64-127.
+const TCHAR_MASK_LOW: u64 = 288068722172624896;
+const TCHAR_MASK_HIGH: u64 = 6341068274398134270;
+// RFC 9110 §5.5 field-value bytes: VCHAR and SP (LOW) and 64-126 (HIGH);
+// bytes 128-255 (obs-text) pass with `find_not_in`'s high flag.
+const FIELD_VCHAR_MASK_LOW: u64 = 18446744069414584320;
+const FIELD_VCHAR_MASK_HIGH: u64 = 9223372036854775807;
+
 copy struct ResponseLimits {
     max_head_bytes: u64,
     max_headers: u64,
@@ -68,12 +88,14 @@ fn byte(in s: Slice[u8], i: u64) -> u8 {
 }
 
 fn is_alnum(b: u8) -> bool {
-    (b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+    (b >= DIGIT_0 && b <= DIGIT_9)
+        || (b >= UPPER_A && b <= UPPER_Z)
+        || (b >= LOWER_A && b <= LOWER_Z)
 }
 
 fn lower(b: u8) -> u8 {
-    if b >= 65 && b <= 90 {
-        wrapping_add(b, 32)
+    if b >= UPPER_A && b <= UPPER_Z {
+        wrapping_add(b, ASCII_CASE_OFFSET)
     } else {
         b
     }
@@ -84,8 +106,8 @@ fn lower(b: u8) -> u8 {
 // a comparison chain does not. `rotate_right` is the total shift.
 fn token(b: u8) -> bool {
     let i = widen_u64(b);
-    let low: u64 = 288068722172624896;
-    let high: u64 = 6341068274398134270;
+    let low = TCHAR_MASK_LOW;
+    let high = TCHAR_MASK_HIGH;
     if i < 64 {
         (rotate_right(low, i) & 1) == 1
     } else if i < 128 {
@@ -128,12 +150,26 @@ fn add(a: u64, b: u64) -> Option[u64] {
     }
 }
 
+// Status codes this module treats specially (RFC 9110 §15), and the final
+// statuses a response may carry (1xx are rejected).
+const NO_CONTENT: u64 = 204;
+const RESET_CONTENT: u64 = 205;
+const NOT_MODIFIED: u64 = 304;
+const UPGRADE_REQUIRED: u64 = 426;
+const MIN_STATUS: u64 = 200;
+const MAX_STATUS: u64 = 599;
+// Fixed bytes of the head: `HTTP/1.1 NNN ` and CRLF; `Content-Length: `
+// and CRLF; `Connection: `, CRLF and the final empty line.
+const STATUS_LINE_FIXED_LEN: u64 = 15;
+const CONTENT_LENGTH_FIXED_LEN: u64 = 18;
+const CONNECTION_FIXED_LEN: u64 = 16;
+
 fn body_forbidden(status: u64) -> bool {
-    status == 204 || status == 205 || status == 304
+    status == NO_CONTENT || status == RESET_CONTENT || status == NOT_MODIFIED
 }
 
 fn carries_length(status: u64) -> bool {
-    status != 204 && status != 304
+    status != NO_CONTENT && status != NOT_MODIFIED
 }
 
 fn decimal_length(value: u64) -> u64 {
@@ -165,7 +201,7 @@ fn push_decimal(inout out: ChunkSeq[u8], value: u64) {
     let mut digits: ChunkSeq[u8] = ChunkSeq::new[u8]();
     let mut rest = value;
     loop {
-        digits.push(wrapping_u8(wrapping_add(rest % 10, 48)));
+        digits.push(wrapping_u8(wrapping_add(rest % 10, widen_u64(DIGIT_0))));
         rest = rest / 10;
         if rest == 0 {
             break;
@@ -285,11 +321,14 @@ fn plan_head_length(status: u64, close: bool, representation_length: u64) -> u64
     // Status line, the Content-Length field when carried, the Connection
     // field and the final empty line. These stay far below 2^64 because the
     // representation length is bounded by the body limit first.
-    let mut n = wrapping_add(15, reason_length(status));
+    let mut n = wrapping_add(STATUS_LINE_FIXED_LEN, reason_length(status));
     if carries_length(status) {
-        n = wrapping_add(n, wrapping_add(18, decimal_length(representation_length)));
+        n = wrapping_add(
+            n,
+            wrapping_add(CONTENT_LENGTH_FIXED_LEN, decimal_length(representation_length))
+        );
     }
-    wrapping_add(n, wrapping_add(16, policy_length(close)))
+    wrapping_add(n, wrapping_add(CONNECTION_FIXED_LEN, policy_length(close)))
 }
 
 // `ResponseBuilder::new`.
@@ -300,12 +339,12 @@ pub fn response_plan_new(
     representation_length: u64,
     limits: ResponseLimits
 ) -> ResponsePlan eff [Fail[ResponseError]] {
-    if status < 200 || status > 599 {
+    if status < MIN_STATUS || status > MAX_STATUS {
         Fail::raise(ResponseError::UnsupportedStatus);
     }
     // A valid 426 requires Upgrade, which this fixed-length subset cannot
     // produce.
-    if status == 426 {
+    if status == UPGRADE_REQUIRED {
         Fail::raise(ResponseError::UnsupportedUpgrade);
     }
     let head = match context {
@@ -354,13 +393,13 @@ pub fn response_plan_header(inout p: ResponsePlan, in name: Slice[u8], in value:
     if name.len() == 0 {
         return Option::Some(ResponseError::InvalidHeaderName);
     }
-    match name.find_not_in(288068722172624896, 6341068274398134270, false) {
+    match name.find_not_in(TCHAR_MASK_LOW, TCHAR_MASK_HIGH, false) {
         Option::Some(i) => {
             return Option::Some(ResponseError::InvalidHeaderName);
         },
         Option::None => (),
     }
-    match value.find_not_in(18446744069414584320, 9223372036854775807, true) {
+    match value.find_not_in(FIELD_VCHAR_MASK_LOW, FIELD_VCHAR_MASK_HIGH, true) {
         Option::Some(i) => {
             return Option::Some(ResponseError::InvalidHeaderValue);
         },
@@ -442,7 +481,7 @@ pub fn response_plan_finish(in p: ResponsePlan, in body: Slice[u8])
     );
     push_text(inout out, "HTTP/1.1 ");
     push_decimal(inout out, p.status);
-    out.push(32);
+    out.push(SPACE);
     push_reason(inout out, p.status);
     push_text(inout out, "\r\n");
     let mut name_at: u64 = 0;

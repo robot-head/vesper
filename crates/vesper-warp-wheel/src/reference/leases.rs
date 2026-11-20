@@ -41,12 +41,18 @@ impl<L> fmt::Debug for RetransmitLeases<L> {
     }
 }
 
+/// The packet-number space tag sits above the 62-bit packet number.
+const SPACE_TAG_SHIFT: u32 = 62;
+/// SplitMix64 finalizer multipliers.
+const SPLITMIX_MUL_1: u64 = 0xbf58_476d_1ce4_e5b9;
+const SPLITMIX_MUL_2: u64 = 0x94d0_49bb_1331_11eb;
+
 fn mix(key: LeaseKey) -> u64 {
     // SplitMix64 finalizer over the packed key; deterministic by design (see
     // module docs on why flooding needs inserts the peer cannot make).
-    let mut z = (tag(key.space) << 62) | key.pn;
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    let mut z = (tag(key.space) << SPACE_TAG_SHIFT) | key.pn;
+    z = (z ^ (z >> 30)).wrapping_mul(SPLITMIX_MUL_1);
+    z = (z ^ (z >> 27)).wrapping_mul(SPLITMIX_MUL_2);
     z ^ (z >> 31)
 }
 

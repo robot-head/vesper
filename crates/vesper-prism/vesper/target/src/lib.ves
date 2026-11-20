@@ -9,6 +9,31 @@
 // byte ranges, which the Rust wrapper turns into `Segment`s and
 // `QueryEntry`s.
 
+// ASCII bytes this module compares against (constants are per module).
+const NUL: u8 = 0;
+const SPACE: u8 = 32;
+const PERCENT: u8 = 37;
+const DOT: u8 = 46;
+const SLASH: u8 = 47;
+const DIGIT_0: u8 = 48;
+const DIGIT_9: u8 = 57;
+const QUESTION: u8 = 63;
+const UPPER_A: u8 = 65;
+const UPPER_F: u8 = 70;
+const UPPER_Z: u8 = 90;
+const BACKSLASH: u8 = 92;
+const LOWER_A: u8 = 97;
+const LOWER_F: u8 = 102;
+const LOWER_Z: u8 = 122;
+// 'a' - 10 and 'A' - 10: subtracting them gives a hex letter's value.
+const LOWER_HEX_OFFSET: u8 = 87;
+const UPPER_HEX_OFFSET: u8 = 55;
+// The bytes RFC 3986 lets an origin-form target carry unescaped (ALPHA,
+// DIGIT and -._~!$&'()*+,;=:@/?): bit `b` of LOW for bytes 0-63, bit
+// `b - 64` of HIGH for 64-127.
+const TARGET_CHAR_MASK_LOW: u64 = 12682136353106821120;
+const TARGET_CHAR_MASK_HIGH: u64 = 5188146764422578175;
+
 copy enum Utf8Policy {
     Require,
     AllowBytes
@@ -62,24 +87,24 @@ fn byte(in s: Slice[u8], i: u64) -> u8 {
 }
 
 fn is_digit(b: u8) -> bool {
-    b >= 48 && b <= 57
+    b >= DIGIT_0 && b <= DIGIT_9
 }
 
 fn is_alnum(b: u8) -> bool {
-    is_digit(b) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+    is_digit(b) || (b >= UPPER_A && b <= UPPER_Z) || (b >= LOWER_A && b <= LOWER_Z)
 }
 
 fn is_hex(b: u8) -> bool {
-    is_digit(b) || (b >= 65 && b <= 70) || (b >= 97 && b <= 102)
+    is_digit(b) || (b >= UPPER_A && b <= UPPER_F) || (b >= LOWER_A && b <= LOWER_F)
 }
 
 fn hex_value(b: u8) -> u8 {
     if is_digit(b) {
-        wrapping_sub(b, 48)
-    } else if b >= 97 {
-        wrapping_sub(b, 87)
+        wrapping_sub(b, DIGIT_0)
+    } else if b >= LOWER_A {
+        wrapping_sub(b, LOWER_HEX_OFFSET)
     } else {
-        wrapping_sub(b, 55)
+        wrapping_sub(b, UPPER_HEX_OFFSET)
     }
 }
 
@@ -87,8 +112,8 @@ fn hex_value(b: u8) -> u8 {
 // -._~!$&'()*+,;=:@/?) as two 64-bit masks, like `token`.
 fn target_char(b: u8) -> bool {
     let i = widen_u64(b);
-    let low: u64 = 12682136353106821120;
-    let high: u64 = 5188146764422578175;
+    let low = TARGET_CHAR_MASK_LOW;
+    let high = TARGET_CHAR_MASK_HIGH;
     if i < 64 {
         (rotate_right(low, i) & 1) == 1
     } else if i < 128 {
@@ -138,15 +163,15 @@ fn count(in s: Slice[u8], lo: u64, hi: u64, b: u8) -> u64 {
 
 // The decoder's origin-form grammar (`valid_target` for a GET request).
 fn target_run(in t: Slice[u8]) -> Option[u64] {
-    t.find_not_in(12682136353106821120, 5188146764422578175, false)
+    t.find_not_in(TARGET_CHAR_MASK_LOW, TARGET_CHAR_MASK_HIGH, false)
 }
 
 fn valid_origin(in t: Slice[u8]) -> bool {
     let n = t.len();
-    if n == 0 || byte(in t, 0) != 47 {
+    if n == 0 || byte(in t, 0) != SLASH {
         return false;
     }
-    if n >= 2 && byte(in t, 1) == 47 {
+    if n >= 2 && byte(in t, 1) == SLASH {
         return false;
     }
     let mut i: u64 = 0;
@@ -166,7 +191,7 @@ fn valid_origin(in t: Slice[u8]) -> bool {
             Option::Some(b) => b,
             Option::None => 0,
         };
-        if b == 37 {
+        if b == PERCENT {
             let h1 = wrapping_add(i, 1);
             let h2 = wrapping_add(i, 2);
             if h1 >= n || !is_hex(byte(in t, h1)) || h2 >= n || !is_hex(byte(in t, h2)) {
@@ -189,7 +214,7 @@ fn classify_syntax(in t: Slice[u8]) -> TargetError {
         if i >= n {
             break;
         }
-        if byte(in t, i) == 37 {
+        if byte(in t, i) == PERCENT {
             let h1 = wrapping_add(i, 1);
             let h2 = wrapping_add(i, 2);
             if h1 >= n || !is_hex(byte(in t, h1)) || h2 >= n || !is_hex(byte(in t, h2)) {
@@ -276,7 +301,7 @@ fn decode(inout out: ChunkSeq[u8], in s: Slice[u8], lo: u64, hi: u64, plus_is_sp
         && hi
         <= s
         .len()
-        && find(in s, lo, hi, 37)
+        && find(in s, lo, hi, PERCENT)
         == hi
         && (!plus_is_space || find(in s, lo, hi, 43) == hi) {
         out.extend(in s[lo..hi]);
@@ -291,14 +316,14 @@ fn decode(inout out: ChunkSeq[u8], in s: Slice[u8], lo: u64, hi: u64, plus_is_sp
             Option::Some(b) => b,
             Option::None => 0,
         };
-        if b == 37 && wrapping_add(i, 2) < hi {
+        if b == PERCENT && wrapping_add(i, 2) < hi {
             let high = hex_value(byte(in s, wrapping_add(i, 1)));
             let low = hex_value(byte(in s, wrapping_add(i, 2)));
             out.push(wrapping_add(wrapping_mul(high, 16), low));
             i = wrapping_add(i, 3);
         } else {
             if plus_is_space && b == 43 {
-                out.push(32);
+                out.push(SPACE);
             } else {
                 out.push(b);
             }
@@ -332,7 +357,7 @@ fn query_part(inout out: ChunkSeq[u8], in s: Slice[u8], lo: u64, hi: u64, utf8: 
 
 // The checks of a decoded query key or value.
 fn part_fault(in decoded: Slice[u8], utf8: bool) -> Option[TargetError] {
-    if contains(in decoded, 0) {
+    if contains(in decoded, NUL) {
         return Option::Some(TargetError::EncodedNul);
     }
     if utf8 && !valid_utf8(in decoded) {
@@ -344,19 +369,19 @@ fn part_fault(in decoded: Slice[u8], utf8: bool) -> Option[TargetError] {
 // The checks of a decoded path segment, in the order `Target::parse` makes
 // them.
 fn segment_fault(in decoded: Slice[u8], utf8: bool) -> Option[TargetError] {
-    if contains(in decoded, 47) {
+    if contains(in decoded, SLASH) {
         return Option::Some(TargetError::EncodedSlash);
     }
-    if contains(in decoded, 92) {
+    if contains(in decoded, BACKSLASH) {
         return Option::Some(TargetError::EncodedBackslash);
     }
-    if contains(in decoded, 0) {
+    if contains(in decoded, NUL) {
         return Option::Some(TargetError::EncodedNul);
     }
     let n = decoded.len();
     let dots = (n >= 1 && n <= 2)
-        && (byte(in decoded, 0) == 46)
-        && (byte(in decoded, wrapping_sub(n, 1)) == 46);
+        && (byte(in decoded, 0) == DOT)
+        && (byte(in decoded, wrapping_sub(n, 1)) == DOT);
     if dots {
         return Option::Some(TargetError::DotSegment);
     }
@@ -393,12 +418,12 @@ fn parse(in raw: Slice[u8], limits: TargetLimits) -> Result[ParsedTarget, Target
         return Result::Err(classify_syntax(in raw));
     }
     let utf8 = require_utf8(limits.utf8);
-    let question = find(in raw, 0, n, 63);
+    let question = find(in raw, 0, n, QUESTION);
     let has_query = question < n;
     let mut rest_hi = question;
     let rest_lo: u64 = 1;
     let mut trailing = false;
-    if rest_hi > rest_lo && byte(in raw, wrapping_sub(rest_hi, 1)) == 47 {
+    if rest_hi > rest_lo && byte(in raw, wrapping_sub(rest_hi, 1)) == SLASH {
         rest_hi = wrapping_sub(rest_hi, 1);
         trailing = true;
     }
@@ -409,7 +434,7 @@ fn parse(in raw: Slice[u8], limits: TargetLimits) -> Result[ParsedTarget, Target
         }
         0
     } else {
-        wrapping_add(count(in raw, rest_lo, rest_hi, 47), 1)
+        wrapping_add(count(in raw, rest_lo, rest_hi, SLASH), 1)
     };
     if segment_count > limits.max_segments {
         return Result::Err(TargetError::TooManySegments);
@@ -429,7 +454,7 @@ fn parse(in raw: Slice[u8], limits: TargetLimits) -> Result[ParsedTarget, Target
     if segment_count > 0 {
         let mut at = rest_lo;
         loop {
-            let end = find(in raw, at, rest_hi, 47);
+            let end = find(in raw, at, rest_hi, SLASH);
             if end == at {
                 return Result::Err(TargetError::EmptySegment);
             }
