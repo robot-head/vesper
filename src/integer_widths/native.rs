@@ -37,6 +37,11 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// Whether the unsigned product `a * b` leaves 128 bits, and the
     /// product modulo 2^128 (from the same partial products).
     fn wide_product(&mut self, a: ir::Value, b: ir::Value) -> (ir::Value, ir::Value) {
+        match (self.low_word_of(a), self.low_word_of(b)) {
+            (Some(_), None) => return self.widened_product(b, a),
+            (None, Some(_)) => return self.widened_product(a, b),
+            _ => {}
+        }
         let (al, ah) = self.b.ins().isplit(a);
         let (bl, bh) = self.b.ins().isplit(b);
         // Both high words nonzero: the product is at least 2^128.
@@ -57,6 +62,43 @@ impl<M: Module> Codegen<'_, '_, M> {
         let carry = self.b.ins().icmp(IntCC::UnsignedLessThan, high, cross);
         let x = self.b.ins().bor(both, cross_high);
         let overflow = self.b.ins().bor(x, carry);
+        let low = self.b.ins().imul(al, bl);
+        (overflow, self.b.ins().iconcat(low, high))
+    }
+    /// The 64-bit word `v` widens, when its high word is known zero: a
+    /// `uextend` to `I128` (`widen_u128` of an unsigned kind, or a
+    /// widened `u64` constant) or an `iconcat` with a zero high word.
+    fn low_word_of(&self, v: ir::Value) -> Option<ir::Value> {
+        use ir::{InstructionData as D, Opcode as O};
+        let ir::ValueDef::Result(inst, 0) = self.b.func.dfg.value_def(v) else {
+            return None;
+        };
+        match self.b.func.dfg.insts[inst] {
+            D::Unary {
+                opcode: O::Uextend,
+                arg,
+            } if self.b.func.dfg.value_type(arg) == types::I64 => Some(arg),
+            D::Binary {
+                opcode: O::Iconcat,
+                args: [low, high],
+            } if self.constant_of(high) == Some(0) => Some(low),
+            _ => None,
+        }
+    }
+    /// [`Self::wide_product`] when `b`'s high word is zero: `a * bl` leaves
+    /// 128 bits only when `ah * bl` does, or when its low word plus the
+    /// high word of `al * bl` carries. One cross product instead of two,
+    /// and no test of `b`'s high word (#1245).
+    fn widened_product(&mut self, a: ir::Value, b: ir::Value) -> (ir::Value, ir::Value) {
+        let (al, ah) = self.b.ins().isplit(a);
+        let bl = self.low_word_of(b).expect("a widened operand");
+        let c = self.b.ins().umulhi(ah, bl);
+        let cross_high = self.b.ins().icmp_imm(IntCC::NotEqual, c, 0);
+        let cross = self.b.ins().imul(ah, bl);
+        let low_high = self.b.ins().umulhi(al, bl);
+        let high = self.b.ins().iadd(low_high, cross);
+        let carry = self.b.ins().icmp(IntCC::UnsignedLessThan, high, cross);
+        let overflow = self.b.ins().bor(cross_high, carry);
         let low = self.b.ins().imul(al, bl);
         (overflow, self.b.ins().iconcat(low, high))
     }
@@ -93,6 +135,12 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             // The product comes from the partial products of the check.
             ("*", false) => {
+                // Two widened words: the product always fits in 128 bits.
+                if let (Some(al), Some(bl)) = (self.low_word_of(a), self.low_word_of(b)) {
+                    let low = self.b.ins().imul(al, bl);
+                    let high = self.b.ins().umulhi(al, bl);
+                    return Ok(self.b.ins().iconcat(low, high));
+                }
                 let (overflow, p) = self.wide_product(a, b);
                 self.check_overflow(overflow)?;
                 return Ok(p);
