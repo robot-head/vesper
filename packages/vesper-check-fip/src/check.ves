@@ -1,0 +1,1902 @@
+// The fip checks of src/fip.rs (`check_world` and what it calls:
+// `caller_slot_functions`, `unsafe_non_fip_functions`, `FipChecker`, the
+// `Box` predicates, `slots_match` and `slot_size_label`), transliterated
+// function by function over the census data design: types are hash-consed
+// ids, names are symbols, the AST is flat tables (ast.ves) and the path
+// state is rows (state.ves).
+//
+// Each diagnostic is one line of `out`: code, span start, span end and the
+// message, separated by single spaces. The fip checks attach no help or
+// related labels.
+
+use @vesper/check-data::util::{
+    add,
+    inc,
+    inc32,
+    n32,
+    push_decimal,
+    u32_at,
+    u8_at,
+    w
+};
+use @vesper/check-data::names::{
+    Names
+};
+use @vesper/check-data::types::{
+    Types,
+    Vars,
+    default_type,
+    display,
+    substitute,
+    vars_new
+};
+use @vesper/check-data::world::{
+    World,
+    constructor,
+    field_step
+};
+use @vesper/check-data::input::{
+    Ctx
+};
+use self::ast::{
+    Ast,
+    ExprRow,
+    FnRow,
+    PatRow
+};
+use self::layout::{
+    Sizes,
+    layout_size,
+    sizes_new
+};
+use self::state::{
+    BindRow,
+    Binds,
+    FipState,
+    Paths,
+    SlotRow,
+    copy_binds,
+    copy_state,
+    paths_new,
+    state_new
+};
+
+const NONE32: u32 = 4294967295;
+const NONE64: u64 = 18446744073709551615;
+// `layout::NO_SIZE` (constants cannot be imported yet).
+const NO_SIZE: u64 = 18446744073709551615;
+const K_NAMED: u8 = 1;
+const K_TUPLE: u8 = 2;
+const K_FN: u8 = 3;
+const P_SINK: u8 = 2;
+
+const E_LITERAL: u8 = 1;
+const E_NAME: u8 = 2;
+const E_TUPLE: u8 = 3;
+const E_STRUCT: u8 = 4;
+const E_BLOCK: u8 = 5;
+const E_CALL: u8 = 6;
+const E_FIELD: u8 = 7;
+const E_INDEX: u8 = 8;
+const E_TRY: u8 = 9;
+const E_UNARY: u8 = 10;
+const E_BINARY: u8 = 11;
+const E_ASSIGN: u8 = 12;
+const E_IF: u8 = 13;
+const E_MATCH: u8 = 14;
+const E_CLOSURE: u8 = 15;
+const E_HANDLE: u8 = 16;
+const E_LOOP: u8 = 17;
+const E_CONTINUE: u8 = 22;
+
+const PT_WILD: u8 = 1;
+const PT_BIND: u8 = 2;
+const PT_TUPLE: u8 = 4;
+const PT_CTOR: u8 = 5;
+
+// Symbols the checks compare against, interned once.
+pub copy struct Syms {
+    box_: u32,
+    box_box: u32,
+    box_new: u32,
+    box_nic: u32,
+    alloc: u32,
+    zero: u32,
+    never: u32,
+    string: u32,
+    str_: u32,
+    chunk_seq: u32,
+    seq_new: u32,
+    seq_with_capacity: u32,
+    push: u32,
+    extend: u32,
+    extend_from_slice: u32,
+    extend_ascii_lowercase: u32,
+    resize: u32,
+    extend_from_within: u32,
+    try_extend_from_within: u32,
+    extend_reversed: u32,
+    push_str: u32,
+    push_char: u32,
+    reserve: u32,
+}
+
+fn syms_new(inout n: Names) -> Syms {
+    Syms {
+        box_: n.intern(in "Box".as_bytes()),
+        box_box: n.intern(in "Box::Box".as_bytes()),
+        box_new: n.intern(in "Box::new".as_bytes()),
+        box_nic: n.intern(in "Box::new_in_caller".as_bytes()),
+        alloc: n.intern(in "Alloc".as_bytes()),
+        zero: n.intern(in "0".as_bytes()),
+        never: n.intern(in "Never".as_bytes()),
+        string: n.intern(in "String".as_bytes()),
+        str_: n.intern(in "Str".as_bytes()),
+        chunk_seq: n.intern(in "ChunkSeq".as_bytes()),
+        seq_new: n.intern(in "ChunkSeq::new".as_bytes()),
+        seq_with_capacity: n.intern(in "ChunkSeq::with_capacity".as_bytes()),
+        push: n.intern(in "push".as_bytes()),
+        extend: n.intern(in "extend".as_bytes()),
+        extend_from_slice: n.intern(in "extend_from_slice".as_bytes()),
+        extend_ascii_lowercase: n.intern(in "extend_ascii_lowercase".as_bytes()),
+        resize: n.intern(in "resize".as_bytes()),
+        extend_from_within: n.intern(in "extend_from_within".as_bytes()),
+        try_extend_from_within: n.intern(in "try_extend_from_within".as_bytes()),
+        extend_reversed: n.intern(in "extend_reversed".as_bytes()),
+        push_str: n.intern(in "push_str".as_bytes()),
+        push_char: n.intern(in "push_char".as_bytes()),
+        reserve: n.intern(in "reserve".as_bytes()),
+    }
+}
+
+pub struct Fip {
+    c: Ctx,
+    ast: Ast,
+    s: Syms,
+    sizes: Sizes,
+    paths: Paths,
+    // per type id: 0 unknown, 1 no Box, 2 contains a Box
+    box_memo: ChunkSeq[u8],
+    // `type_contains_box`'s `seen` ADT names
+    seen: ChunkSeq[u32],
+    // tuple field names "0", "1", ...
+    digits: ChunkSeq[u32],
+    // per function: in `caller_slot_functions`, in `unsafe_non_fip`
+    caller_slot: ChunkSeq[bool],
+    unsafe_nf: ChunkSeq[bool],
+    out: ChunkSeq[u8],
+    count: u64,
+}
+
+pub fn fip_new(sink c: Ctx, sink ast: Ast) -> Fip {
+    let mut cx = c;
+    let s = syms_new(inout cx.names);
+    let n = ast.fns.len();
+    let mut caller_slot: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](n);
+    caller_slot.resize(n, false);
+    let mut unsafe_nf: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](n);
+    unsafe_nf.resize(n, false);
+    Fip {
+        c: cx,
+        ast: ast,
+        s: s,
+        sizes: sizes_new(),
+        paths: paths_new(),
+        box_memo: ChunkSeq::new[u8](),
+        seen: ChunkSeq::new[u32](),
+        digits: ChunkSeq::new[u32](),
+        caller_slot: caller_slot,
+        unsafe_nf: unsafe_nf,
+        out: ChunkSeq::new[u8](),
+        count: 0
+    }
+}
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn flag(in s: ChunkSeq[bool], i: u32) -> bool {
+    match s.try_get(w(i)) {
+        Option::Some(b) => b,
+        Option::None => false,
+    }
+}
+
+impl Fip {
+    // ----- diagnostics -------------------------------------------------------
+
+    // Starts a diagnostic line; the caller writes the message and `end_diag`.
+    fn diag(inout self, in code: Str, start: u64, end: u64) {
+        put(inout self.out, code);
+        self.out.push(32);
+        push_decimal(inout self.out, start);
+        self.out.push(32);
+        push_decimal(inout self.out, end);
+        self.out.push(32);
+    }
+
+    fn end_diag(inout self) {
+        self.out.push(10);
+        self.count = inc(self.count);
+    }
+
+    fn simple(inout self, in code: Str, start: u64, end: u64, in message: Str) {
+        self.diag(code, start, end);
+        put(inout self.out, message);
+        self.end_diag();
+    }
+
+    // `{prefix}'{name}'{suffix}`.
+    fn named(
+        inout self,
+        in code: Str,
+        start: u64,
+        end: u64,
+        in prefix: Str,
+        name: u32,
+        in suffix: Str
+    ) {
+        self.diag(code, start, end);
+        put(inout self.out, prefix);
+        self.out.push(39);
+        self.c.names.write(name, inout self.out);
+        self.out.push(39);
+        put(inout self.out, suffix);
+        self.end_diag();
+    }
+
+    // ----- names and types ---------------------------------------------------
+
+    fn expr_type(in self, e: ExprRow) -> u32 {
+        let t = self.c.world.expr_type(e.start, e.end);
+        if t == NONE32 {
+            self.c.types.infer
+        } else {
+            t
+        }
+    }
+
+    // Whether the world has a type for the span (`world.types.get(..)`).
+    fn has_type(in self, e: ExprRow) -> bool {
+        self.c.world.expr_type(e.start, e.end) != NONE32
+    }
+
+    fn type_name(in self, t: u32) -> u32 {
+        self.c.types.name(t)
+    }
+
+    fn is_fn_type(in self, t: u32) -> bool {
+        self.c.types.kind(t) == K_FN
+    }
+
+    fn is_never(in self, t: u32) -> bool {
+        let n = self.c.types.node(t);
+        n.kind == K_NAMED && n.name == self.s.never
+    }
+
+    // Whether name `s` contains "::".
+    fn has_path_sep(in self, s: u32) -> bool {
+        let n = self.c.names.size(s);
+        let mut i: u64 = 0;
+        loop {
+            if inc(i) >= n {
+                break;
+            }
+            if self.c.names.byte(s, i) == 58 && self.c.names.byte(s, inc(i)) == 58 {
+                return true;
+            }
+            i = inc(i);
+        }
+        false
+    }
+
+    // The symbol of the decimal name of `i` ("0", "1", ...).
+    fn digit(inout self, i: u64) -> u32 {
+        loop {
+            if self.digits.len() > i {
+                break;
+            }
+            let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+            push_decimal(inout text, self.digits.len());
+            let s = self.c.names.intern(in text.as_slice());
+            self.digits.push(s);
+        }
+        u32_at(in self.digits, i)
+    }
+
+    // `format!("{}::{method}", ty.name())` as a symbol, or NONE32 when no
+    // such name exists (so no function has it).
+    fn method_name(in self, ty: u32, method: u32) -> u32 {
+        let mut text: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        self.c.names.write(self.type_name(ty), inout text);
+        text.push(58);
+        text.push(58);
+        self.c.names.write(method, inout text);
+        self.c.names.lookup(in text.as_slice())
+    }
+
+    // `World::constructor(name)`: packed (adt, variant) or NONE64.
+    fn ctor(in self, name: u32) -> u64 {
+        let n = self.c.names.size(name);
+        let mut seps: u64 = 0;
+        let mut at: u64 = 0;
+        let mut i: u64 = 0;
+        loop {
+            if inc(i) >= n {
+                break;
+            }
+            if self.c.names.byte(name, i) == 58 && self.c.names.byte(name, inc(i)) == 58 {
+                seps = inc(seps);
+                at = i;
+                i = add(i, 2);
+            } else {
+                i = inc(i);
+            }
+        }
+        if seps == 0 {
+            return constructor(in self.c.world, NONE32, name);
+        }
+        if seps > 1 {
+            return NONE64;
+        }
+        let mut q: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        let mut v: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for j in 0..n {
+            if j < at {
+                q.push(self.c.names.byte(name, j));
+            } else if j >= add(at, 2) {
+                v.push(self.c.names.byte(name, j));
+            }
+        }
+        let qual = self.c.names.lookup(in q.as_slice());
+        let short = self.c.names.lookup(in v.as_slice());
+        if qual == NONE32 || short == NONE32 {
+            return NONE64;
+        }
+        constructor(in self.c.world, qual, short)
+    }
+
+    // Whether row type `row_ty` (`Type::Row(effects)`) has an instance named `s`.
+    fn row_has(in self, row_ty: u32, s: u32) -> bool {
+        let row = self.c.types.row(self.c.types.node(row_ty).r2);
+        for i in 0..w(row.n) {
+            if self.c.types.effect_at(add(w(row.a), i)).name == s {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn fn_allocs(in self, f: FnRow) -> bool {
+        self.row_has(f.effects, self.s.alloc)
+    }
+
+    // ----- Box predicates ----------------------------------------------------
+
+    // `is_box_type` (no `.vsys` handle plan is running in `check_world`).
+    fn is_box(in self, t: u32) -> bool {
+        let n = self.c.types.node(t);
+        self.c.world.box_active && n.kind == K_NAMED && n.name == self.s.box_ && n.n == 1
+    }
+
+    // `box_inner`, or NONE32.
+    fn box_inner(in self, t: u32) -> u32 {
+        if self.is_box(t) {
+            self.c.types.arg(t, 0)
+        } else {
+            NONE32
+        }
+    }
+
+    fn is_box_pattern(in self, p: PatRow) -> bool {
+        if !self.c.world.box_active || p.kind != PT_CTOR {
+            return false;
+        }
+        if p.a != self.s.box_ && p.a != self.s.box_box {
+            return false;
+        }
+        p.c == 1 && self.ast.at(w(p.b)) == self.s.zero
+    }
+
+    fn pattern_has_box_pattern(in self, pi: u32) -> bool {
+        let p = self.ast.pat(pi);
+        if self.is_box_pattern(p) {
+            return true;
+        }
+        if p.kind == PT_TUPLE {
+            for i in 0..w(p.b) {
+                if self.pattern_has_box_pattern(self.ast.at(add(w(p.a), i))) {
+                    return true;
+                }
+            }
+        }
+        if p.kind == PT_CTOR {
+            for i in 0..w(p.c) {
+                let sub = self.ast.at(add(add(w(p.b), wrapping_mul(i, 2)), 1));
+                if self.pattern_has_box_pattern(sub) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // `type_contains_box`.
+    fn contains_box(inout self, t: u32) -> bool {
+        let at = w(t);
+        let m = u8_at(in self.box_memo, at);
+        if m != 0 {
+            return m == 2;
+        }
+        self.seen.clear();
+        let found = self.box_visit(t);
+        if at >= self.box_memo.len() {
+            self.box_memo.resize(inc(at), 0);
+        }
+        let ok = self
+            .box_memo
+            .try_set(
+            at,
+            if found {
+                2
+            } else {
+                1
+            }
+        );
+        found
+    }
+
+    fn box_visit(inout self, t: u32) -> bool {
+        if self.is_box(t) {
+            return true;
+        }
+        let n = self.c.types.node(t);
+        if n.kind == K_TUPLE {
+            for i in 0..w(n.n) {
+                if self.box_visit(self.c.types.arg(t, i)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind != K_NAMED {
+            return false;
+        }
+        for i in 0..w(n.n) {
+            if self.box_visit(self.c.types.arg(t, i)) {
+                return true;
+            }
+        }
+        let ai = self.c.world.lookup(n.name);
+        if ai == NONE32 {
+            return false;
+        }
+        for i in 0..self.seen.len() {
+            if u32_at(in self.seen, i) == n.name {
+                return false;
+            }
+        }
+        self.seen.push(n.name);
+        let a = self.c.world.adt(ai);
+        let vars = self.c.world.vars_of(in self.c.types, a, t);
+        let mut found = false;
+        for vi in 0..w(a.vn) {
+            let v = self.c.world.variant(add(w(a.va), vi));
+            for fi in 0..w(v.fc) {
+                let f = self.c.world.field(add(w(v.fa), fi));
+                let ft = substitute(inout self.c.types, f.ty, in vars);
+                if self.box_visit(ft) {
+                    found = true;
+                    break;
+                }
+            }
+            if found {
+                break;
+            }
+        }
+        // `seen.remove(n)`: the name is the last one pushed.
+        let last = wrapping_sub(self.seen.len(), 1);
+        self.seen.truncate(last);
+        found
+    }
+
+    // ----- slots ---------------------------------------------------------------
+
+    fn is_generic(in self, f: FnRow, name: u32) -> bool {
+        for i in 0..w(f.gn) {
+            let g = self.ast.generic(add(w(f.ga), i));
+            if !g.row && g.name == name {
+                return true;
+            }
+        }
+        false
+    }
+
+    // `has_generic` of `slots_match` and `slot_key`.
+    fn has_generic(in self, f: FnRow, t: u32) -> bool {
+        let n = self.c.types.node(t);
+        if n.kind == K_NAMED {
+            if self.is_generic(f, n.name) {
+                return true;
+            }
+            for i in 0..w(n.n) {
+                if self.has_generic(f, self.c.types.arg(t, i)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind == K_TUPLE {
+            for i in 0..w(n.n) {
+                if self.has_generic(f, self.c.types.arg(t, i)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind == K_FN {
+            for i in 0..w(n.n) {
+                if self.has_generic(f, self.c.types.arg(t, i)) {
+                    return true;
+                }
+            }
+            return self.has_generic(f, n.r);
+        }
+        false
+    }
+
+    fn size_of(inout self, t: u32) -> u64 {
+        layout_size(inout self.sizes, inout self.c.types, in self.c.names, in self.c.world, t)
+    }
+
+    // `slots_match(..).unwrap_or(false)`.
+    fn slots_match(inout self, f: FnRow, a: u32, b: u32) -> bool {
+        let an = default_type(inout self.c.types, a);
+        let bn = default_type(inout self.c.types, b);
+        if !self.has_generic(f, an) && !self.has_generic(f, bn) {
+            let la = self.size_of(an);
+            if la == NO_SIZE {
+                return false;
+            }
+            let lb = self.size_of(bn);
+            if lb == NO_SIZE {
+                return false;
+            }
+            la == lb
+        } else {
+            an == bn
+        }
+    }
+
+    // Whether `slot_size_label` says "type ..." (else "size ...").
+    fn label_is_type(inout self, f: FnRow, t: u32) -> bool {
+        let norm = default_type(inout self.c.types, t);
+        let n = self.c.types.node(norm);
+        let mut has_gen = false;
+        if n.kind == K_NAMED {
+            if self.is_generic(f, n.name) {
+                has_gen = true;
+            } else {
+                for i in 0..w(n.n) {
+                    if self.label_is_type(f, self.c.types.arg(norm, i)) {
+                        has_gen = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if has_gen {
+            return true;
+        }
+        self.size_of(norm) == NO_SIZE
+    }
+
+    // `slot_size_label`, written to `out`.
+    fn write_label(inout self, f: FnRow, t: u32) {
+        let norm = default_type(inout self.c.types, t);
+        if self.label_is_type(f, norm) {
+            put(inout self.out, "type ");
+            display(in self.c.types, in self.c.names, norm, inout self.out);
+        } else {
+            put(inout self.out, "size ");
+            let size = self.size_of(norm);
+            push_decimal(inout self.out, size);
+        }
+    }
+
+    // ----- seq allocations ---------------------------------------------------
+
+    // `seq::fip_allocation`: 0, or the operation (see `alloc_name`).
+    fn fip_allocation(in self, callee: u32) -> u8 {
+        let c = self.ast.expr(callee);
+        if c.kind == E_NAME {
+            if c.a == self.s.seq_new {
+                return 1;
+            }
+            if c.a == self.s.seq_with_capacity {
+                return 2;
+            }
+            return 0;
+        }
+        if c.kind != E_FIELD {
+            return 0;
+        }
+        let base = self.ast.expr(c.a);
+        if !self.has_type(base) {
+            return 0;
+        }
+        let t = self.expr_type(base);
+        let n = self.c.types.node(t);
+        if n.kind != K_NAMED {
+            return 0;
+        }
+        let m = c.b;
+        let s = self.s;
+        if n.name == s.string && n.n == 0 {
+            if m == s.push_str {
+                return 10;
+            }
+            if m == s.push_char {
+                return 11;
+            }
+            if m == s.reserve {
+                return 12;
+            }
+            return 0;
+        }
+        if n.name == s.str_ && n.n == 0 {
+            return 0;
+        }
+        if n.name == s.chunk_seq && n.n == 1 {
+            if m == s.push {
+                return 3;
+            }
+            if m == s.extend || m == s.extend_from_slice {
+                return 4;
+            }
+            if m == s.extend_ascii_lowercase {
+                return 5;
+            }
+            if m == s.resize {
+                return 6;
+            }
+            if m == s.extend_from_within {
+                return 7;
+            }
+            if m == s.try_extend_from_within {
+                return 8;
+            }
+            if m == s.extend_reversed {
+                return 9;
+            }
+        }
+        0
+    }
+
+    fn alloc_name(inout self, op: u8) {
+        match op {
+            1 => put(inout self.out, "new"),
+            2 => put(inout self.out, "with_capacity"),
+            3 => put(inout self.out, "push"),
+            4 => put(inout self.out, "extend"),
+            5 => put(inout self.out, "extend_ascii_lowercase"),
+            6 => put(inout self.out, "resize"),
+            7 => put(inout self.out, "extend_from_within"),
+            8 => put(inout self.out, "try_extend_from_within"),
+            9 => put(inout self.out, "extend_reversed"),
+            10 => put(inout self.out, "push_str"),
+            11 => put(inout self.out, "push_char"),
+            _ => put(inout self.out, "reserve"),
+        }
+    }
+
+    // ----- visiting ------------------------------------------------------------
+
+    // The children `regions::visit_expr` visits, in its order.
+    fn children(in self, ei: u32, inout out: ChunkSeq[u32]) {
+        let e = self.ast.expr(ei);
+        let k = e.kind;
+        if k == E_TUPLE || k == E_STRUCT || k >= E_LOOP {
+            for i in 0..w(e.b) {
+                out.push(self.ast.at(add(w(e.a), i)));
+            }
+        } else if k == E_BLOCK {
+            for i in 0..w(e.b) {
+                out.push(self.ast.at(add(add(w(e.a), wrapping_mul(i, 3)), 2)));
+            }
+            if e.c != 0 {
+                out.push(wrapping_sub(e.c, 1));
+            }
+        } else if k == E_CALL {
+            out.push(e.a);
+            for i in 0..w(e.c) {
+                out.push(self.ast.at(add(add(w(e.b), wrapping_mul(i, 2)), 1)));
+            }
+        } else if k == E_FIELD || k == E_TRY || k == E_UNARY || k == E_CLOSURE {
+            out.push(e.a);
+        } else if k == E_INDEX || k == E_BINARY || k == E_ASSIGN {
+            out.push(e.a);
+            out.push(e.b);
+        } else if k == E_IF {
+            out.push(e.a);
+            out.push(e.b);
+            if e.c != 0 {
+                out.push(wrapping_sub(e.c, 1));
+            }
+        } else if k == E_MATCH {
+            out.push(e.a);
+            for i in 0..w(e.c) {
+                out.push(self.ast.at(add(add(w(e.b), wrapping_mul(i, 2)), 1)));
+            }
+        } else if k == E_HANDLE {
+            if e.b != 0 {
+                out.push(e.c);
+            }
+            out.push(e.d);
+            let mut at = w(e.e);
+            let n = w(self.ast.at(at));
+            at = inc(at);
+            for i in 0..n {
+                out.push(self.ast.at(at));
+                let pn = w(self.ast.at(inc(at)));
+                at = add(at, add(pn, 2));
+            }
+        }
+    }
+
+    fn callee_is(in self, e: ExprRow, s: u32) -> bool {
+        if e.kind != E_CALL {
+            return false;
+        }
+        let c = self.ast.expr(e.a);
+        c.kind == E_NAME && c.a == s
+    }
+
+    // `check_non_fip`: every `Box::new_in_caller` call, in visit order.
+    fn check_non_fip(inout self, ei: u32) {
+        let e = self.ast.expr(ei);
+        if self.callee_is(e, self.s.box_nic) {
+            self
+                .simple(
+                "E0802",
+                e.start,
+                e.end,
+                "Box::new_in_caller is only permitted inside @fip functions"
+            );
+        }
+        let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        self.children(ei, inout kids);
+        for i in 0..kids.len() {
+            self.check_non_fip(u32_at(in kids, i));
+        }
+    }
+
+    fn mentions_new_in_caller(in self, ei: u32) -> bool {
+        let e = self.ast.expr(ei);
+        if self.callee_is(e, self.s.box_nic) {
+            return true;
+        }
+        let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        self.children(ei, inout kids);
+        for i in 0..kids.len() {
+            if self.mentions_new_in_caller(u32_at(in kids, i)) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // `tail_calls` of `caller_slot_functions`: whether a tail call names a
+    // function already in the set.
+    fn tail_calls_set(in self, ei: u32) -> bool {
+        let e = self.ast.expr(ei);
+        if e.kind == E_CALL {
+            let c = self.ast.expr(e.a);
+            if c.kind == E_NAME {
+                let fi = self.ast.fn_named(c.a);
+                return fi != NONE32 && flag(in self.caller_slot, fi);
+            }
+            return false;
+        }
+        if e.kind == E_BLOCK {
+            if e.c != 0 {
+                return self.tail_calls_set(wrapping_sub(e.c, 1));
+            }
+            return false;
+        }
+        if e.kind == E_IF {
+            if self.tail_calls_set(e.b) {
+                return true;
+            }
+            if e.c != 0 {
+                return self.tail_calls_set(wrapping_sub(e.c, 1));
+            }
+            return false;
+        }
+        if e.kind == E_MATCH {
+            for i in 0..w(e.c) {
+                if self.tail_calls_set(self.ast.at(add(add(w(e.b), wrapping_mul(i, 2)), 1))) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // `caller_slot_functions`.
+    fn caller_slot_functions(inout self) {
+        for i in 0..self.ast.fns.len() {
+            let f = self.ast.func(n32(i));
+            if f.fip && f.body != NONE32 && self.mentions_new_in_caller(f.body) {
+                let ok = self.caller_slot.try_set(i, true);
+            }
+        }
+        loop {
+            let mut changed = false;
+            for i in 0..self.ast.fns.len() {
+                let f = self.ast.func(n32(i));
+                if !f.fip || flag(in self.caller_slot, n32(i)) || !self.is_box(f.result) {
+                    continue;
+                }
+                if f.body != NONE32 && self.tail_calls_set(f.body) {
+                    let ok = self.caller_slot.try_set(i, true);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    // The unsafe test of `unsafe_non_fip_functions` over a body: true when
+    // a node makes the function unsafe; the non-@fip callees are pushed.
+    fn unsafe_visit(inout self, ei: u32, inout callees: ChunkSeq[u32]) -> bool {
+        let e = self.ast.expr(ei);
+        if e.kind == E_BLOCK {
+            for i in 0..w(e.b) {
+                let p = self.ast.at(add(w(e.a), wrapping_mul(i, 3)));
+                if p != 0 && self.pattern_has_box_pattern(wrapping_sub(p, 1)) {
+                    return true;
+                }
+            }
+        } else if e.kind == E_MATCH {
+            for i in 0..w(e.c) {
+                if self.pattern_has_box_pattern(self.ast.at(add(w(e.b), wrapping_mul(i, 2)))) {
+                    return true;
+                }
+            }
+        } else if e.kind == E_HANDLE {
+            if e.a == self.s.alloc {
+                return true;
+            }
+            if e.b != 0 && self.pattern_has_box_pattern(wrapping_sub(e.b, 1)) {
+                return true;
+            }
+            let mut at = w(e.e);
+            let n = w(self.ast.at(at));
+            at = inc(at);
+            for i in 0..n {
+                let pn = w(self.ast.at(inc(at)));
+                for j in 0..pn {
+                    if self.pattern_has_box_pattern(self.ast.at(add(add(at, 2), j))) {
+                        return true;
+                    }
+                }
+                at = add(at, add(pn, 2));
+            }
+        } else if e.kind == E_CALL {
+            if self.fip_allocation(e.a) != 0 {
+                return true;
+            }
+            let c = self.ast.expr(e.a);
+            if c.kind == E_NAME {
+                let name = c.a;
+                if name == self.s.box_new || name == self.s.box_nic {
+                    return true;
+                }
+                let fi = self.ast.fn_named(name);
+                if fi != NONE32 && flag(in self.caller_slot, fi) {
+                    return true;
+                }
+                if self.has_type(c) && self.is_fn_type(self.expr_type(c)) {
+                    return true;
+                }
+                if fi != NONE32 {
+                    if !self.ast.func(fi).fip {
+                        callees.push(fi);
+                    }
+                } else if self.has_path_sep(name) {
+                    let et = self.expr_type(e);
+                    if self.contains_box(et) {
+                        return true;
+                    }
+                }
+            } else if c.kind == E_FIELD {
+                let base = self.ast.expr(c.a);
+                let bt = self.expr_type(base);
+                let mn = self.method_name(bt, c.b);
+                let fi = self.ast.fn_named(mn);
+                if fi != NONE32 && flag(in self.caller_slot, fi) {
+                    return true;
+                }
+                if fi != NONE32 {
+                    if !self.ast.func(fi).fip {
+                        callees.push(fi);
+                    }
+                } else {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+        }
+        let mut kids: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        self.children(ei, inout kids);
+        for i in 0..kids.len() {
+            if self.unsafe_visit(u32_at(in kids, i), inout callees) {
+                return true;
+            }
+        }
+        false
+    }
+
+    // `unsafe_non_fip_functions`. The fixpoint over call edges does not
+    // depend on the order it visits callers in.
+    fn unsafe_non_fip_functions(inout self) {
+        let n = self.ast.fns.len();
+        // edges: callers' callee runs, edge_at[i]..edge_at[i+1]
+        let mut edges: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut edge_at: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](inc(n));
+        for i in 0..n {
+            edge_at.push(n32(edges.len()));
+            let f = self.ast.func(n32(i));
+            if f.fip {
+                continue;
+            }
+            let mut bad = self.fn_allocs(f) || self.contains_box(f.result) || f.body == NONE32;
+            if !bad {
+                for j in 0..w(f.pn) {
+                    let p = self.ast.param(add(w(f.pa), j));
+                    if p.pass == P_SINK && self.contains_box(p.ty) {
+                        bad = true;
+                        break;
+                    }
+                }
+            }
+            if !bad {
+                let mut callees: ChunkSeq[u32] = ChunkSeq::new[u32]();
+                bad = self.unsafe_visit(f.body, inout callees);
+                if !bad {
+                    edges.extend(in callees.as_slice());
+                }
+            }
+            if bad {
+                let ok = self.unsafe_nf.try_set(i, true);
+            }
+        }
+        edge_at.push(n32(edges.len()));
+        loop {
+            let mut changed = false;
+            for i in 0..n {
+                if flag(in self.unsafe_nf, n32(i)) {
+                    continue;
+                }
+                let a = w(u32_at(in edge_at, i));
+                let b = w(u32_at(in edge_at, inc(i)));
+                for j in a..b {
+                    if flag(in self.unsafe_nf, u32_at(in edges, j)) {
+                        let ok = self.unsafe_nf.try_set(i, true);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+    }
+
+    // ----- places --------------------------------------------------------------
+
+    // `Place::from_expr`: the root name, or NONE32; `path` gets the fields.
+    fn place_of(in self, ei: u32, inout path: ChunkSeq[u32]) -> u32 {
+        path.clear();
+        let mut rev: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let mut at = ei;
+        loop {
+            let e = self.ast.expr(at);
+            if e.kind == E_FIELD {
+                rev.push(e.b);
+                at = e.a;
+            } else if e.kind == E_NAME {
+                let n = rev.len();
+                for i in 0..n {
+                    path.push(u32_at(in rev, wrapping_sub(wrapping_sub(n, 1), i)));
+                }
+                return e.a;
+            } else {
+                return NONE32;
+            }
+        }
+        NONE32
+    }
+
+    fn is_place(in self, ei: u32) -> bool {
+        let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        self.place_of(ei, inout path) != NONE32
+    }
+
+    // `!remaining_box_paths(ty, moved).is_empty()`.
+    fn has_remaining(inout self, ty: u32, in moved: ChunkSeq[u32]) -> bool {
+        let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        self.remaining(ty, inout path, in moved)
+    }
+
+    fn remaining(inout self, ty: u32, inout path: ChunkSeq[u32], in moved: ChunkSeq[u32]) -> bool {
+        for i in 0..moved.len() {
+            if self.paths.is_prefix(u32_at(in moved, i), in path) {
+                return false;
+            }
+        }
+        if !self.contains_box(ty) {
+            return false;
+        }
+        if self.is_box(ty) {
+            return true;
+        }
+        let n = self.c.types.node(ty);
+        if n.kind == K_TUPLE {
+            for i in 0..w(n.n) {
+                let d = self.digit(i);
+                path.push(d);
+                let r = self.remaining(self.c.types.arg(ty, i), inout path, in moved);
+                let last = wrapping_sub(path.len(), 1);
+                path.truncate(last);
+                if r {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if n.kind == K_NAMED {
+            let ai = self.c.world.lookup(n.name);
+            if ai != NONE32 {
+                let a = self.c.world.adt(ai);
+                if !a.is_enum && a.vn == 1 {
+                    let vars = self.c.world.vars_of(in self.c.types, a, ty);
+                    let v = self.c.world.variant(w(a.va));
+                    for fi in 0..w(v.fc) {
+                        let f = self.c.world.field(add(w(v.fa), fi));
+                        let ft = substitute(inout self.c.types, f.ty, in vars);
+                        path.push(f.name);
+                        let r = self.remaining(ft, inout path, in moved);
+                        let last = wrapping_sub(path.len(), 1);
+                        path.truncate(last);
+                        if r {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            }
+            return true;
+        }
+        false
+    }
+
+    // E0806 for every binding of `names` (in order) that still owns a Box.
+    fn report_undropped(inout self, in b: Binds, in names: ChunkSeq[u32]) {
+        for i in 0..names.len() {
+            let name = u32_at(in names, i);
+            let at = b.find(name);
+            if at == NONE64 {
+                continue;
+            }
+            let r = b.row(at);
+            let moved = b.moved_of(name);
+            if self.has_remaining(r.ty, in moved) {
+                self
+                    .named(
+                    "E0806",
+                    r.start,
+                    r.end,
+                    "@fip function cannot drop owned Box in ",
+                    name,
+                    " without unpacking or moving it"
+                );
+            }
+        }
+    }
+
+    // The block-exit step of `Block` and match arms: report the bindings
+    // bound since `outer`, then restore `outer`'s.
+    fn close_scope(inout self, inout st: FipState, in outer: Binds) {
+        let locals = st.binds.locals(in outer);
+        if !st.diverged {
+            let b = copy_binds(in st.binds);
+            self.report_undropped(in b, in locals);
+        }
+        for i in 0..locals.len() {
+            let name = u32_at(in locals, i);
+            st.binds.remove(name);
+            st.binds.restore(in self.c.names, in outer, name);
+        }
+    }
+
+    // ----- the checker -----------------------------------------------------------
+
+    // `FipChecker::bind_pattern`.
+    fn bind_pattern(inout self, pi: u32, ty: u32, inout st: FipState) {
+        let p = self.ast.pat(pi);
+        if p.kind == PT_WILD {
+            if self.contains_box(ty) {
+                self
+                    .simple(
+                    "E0806",
+                    p.start,
+                    p.end,
+                    "@fip function cannot discard Box value with '_' pattern"
+                );
+            }
+            return;
+        }
+        if p.kind == PT_BIND {
+            if self.contains_box(ty) {
+                st
+                    .binds
+                    .insert(
+                    in self.c.names,
+                    BindRow {
+                        name: p.a,
+                        ty: ty,
+                        start: p.start,
+                        end: p.end
+                    }
+                );
+            }
+            return;
+        }
+        if p.kind == PT_TUPLE {
+            let n = self.c.types.node(ty);
+            if n.kind == K_TUPLE {
+                for i in 0..w(p.b) {
+                    if i >= w(n.n) {
+                        break;
+                    }
+                    self
+                        .bind_pattern(
+                        self.ast.at(add(w(p.a), i)),
+                        self.c.types.arg(ty, i),
+                        inout st
+                    );
+                }
+            }
+            return;
+        }
+        if p.kind == PT_CTOR {
+            if self.is_box_pattern(p) {
+                let mut inner = self.box_inner(ty);
+                if inner == NONE32 {
+                    inner = self.c.types.infer;
+                }
+                st
+                    .slots
+                    .push(
+                    SlotRow {
+                        ty: inner,
+                        start: p.start,
+                        end: p.end
+                    }
+                );
+                self.bind_pattern(self.ast.at(inc(w(p.b))), inner, inout st);
+                return;
+            }
+            let found = self.ctor(p.a);
+            if found == NONE64 {
+                return;
+            }
+            let a = self.c.world.adt(n32(found >> 32));
+            let v = self.c.world.variant(found & 4294967295);
+            let vars = if self.c.types.kind(ty) == K_NAMED {
+                self.c.world.vars_of(in self.c.types, a, ty)
+            } else {
+                vars_new()
+            };
+            for i in 0..w(p.c) {
+                let at = add(w(p.b), wrapping_mul(i, 2));
+                let fname = self.ast.at(at);
+                let sub = self.ast.at(inc(at));
+                let fi = self.c.world.find_field(v, fname);
+                if fi != NONE32 {
+                    let ft = substitute(inout self.c.types, self.c.world.field(w(fi)).ty, in vars);
+                    self.bind_pattern(sub, ft, inout st);
+                }
+            }
+        }
+    }
+
+    // `pop_matching_slot`.
+    fn pop_matching_slot(
+        inout self,
+        f: FnRow,
+        needed: u32,
+        start: u64,
+        end: u64,
+        inout st: FipState
+    ) {
+        for i in 0..st.slots.len() {
+            let s = st.slot(i);
+            if self.slots_match(f, s.ty, needed) {
+                st.remove_slot(i);
+                return;
+            }
+        }
+        self.diag("E0804", start, end);
+        put(inout self.out, "@fip allocation requires a ReuseSlot with ");
+        self.write_label(f, needed);
+        if st.slots.len() == 0 {
+            put(inout self.out, " (none available)");
+        } else {
+            put(inout self.out, " (available: [");
+            for i in 0..st.slots.len() {
+                if i > 0 {
+                    put(inout self.out, ", ");
+                }
+                let s = st.slot(i);
+                self.write_label(f, s.ty);
+            }
+            put(inout self.out, "])");
+        }
+        self.end_diag();
+    }
+
+    // `consume_caller_slot`.
+    fn consume_caller_slot(
+        inout self,
+        f: FnRow,
+        produced: u32,
+        start: u64,
+        end: u64,
+        inout st: FipState
+    ) {
+        let ret_inner = self.box_inner(f.result);
+        if ret_inner == NONE32 {
+            self
+                .simple(
+                "E0807",
+                start,
+                end,
+                "Box::new_in_caller requires @fip function to return Box[T]"
+            );
+            return;
+        }
+        if !self.slots_match(f, produced, ret_inner) {
+            self.diag("E0807", start, end);
+            put(inout self.out, "Box::new_in_caller type ");
+            self.write_label(f, produced);
+            put(inout self.out, " does not match function return slot ");
+            self.write_label(f, ret_inner);
+            self.end_diag();
+        }
+        if st.caller_used {
+            self
+                .simple(
+                "E0808",
+                start,
+                end,
+                "caller ReuseSlot already consumed on this execution path"
+            );
+        }
+        st.caller_used = true;
+    }
+
+    fn slot_multisets_match(inout self, f: FnRow, in a: FipState, in b: FipState) -> bool {
+        if a.slots.len() != b.slots.len() {
+            return false;
+        }
+        let mut used: ChunkSeq[bool] = ChunkSeq::with_capacity[bool](b.slots.len());
+        used.resize(b.slots.len(), false);
+        for i in 0..a.slots.len() {
+            let ta = a.slot(i).ty;
+            let mut found = false;
+            for j in 0..b.slots.len() {
+                if !flag(in used, n32(j)) && self.slots_match(f, ta, b.slot(j).ty) {
+                    let ok = used.try_set(j, true);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return false;
+            }
+        }
+        true
+    }
+
+    // One branch of `merge_states`: the first live branch becomes `acc`;
+    // each later live one is compared with it (its E0808/E0809 bits are
+    // pushed to `flags`, reported after all branches as Rust does) and
+    // intersects the moved paths.
+    fn merge_step(
+        inout self,
+        f: FnRow,
+        inout acc: FipState,
+        inout have: bool,
+        sink br: FipState,
+        inout flags: ChunkSeq[u8]
+    ) {
+        if br.diverged {
+            return;
+        }
+        if !have {
+            acc = br;
+            have = true;
+            return;
+        }
+        let mut bits: u8 = 0;
+        if br.caller_used != acc.caller_used {
+            bits = bits | 1;
+        }
+        if !self.slot_multisets_match(f, in acc, in br) {
+            bits = bits | 2;
+        }
+        flags.push(bits);
+        acc.binds.intersect(in br.binds);
+    }
+
+    fn merge_report(inout self, start: u64, end: u64, in flags: ChunkSeq[u8]) {
+        for i in 0..flags.len() {
+            let bits = u8_at(in flags, i);
+            if (bits & 1) != 0 {
+                self
+                    .simple(
+                    "E0808",
+                    start,
+                    end,
+                    "all non-diverging paths of an @fip function must agree on consuming caller ReuseSlot"
+                );
+            }
+            if (bits & 2) != 0 {
+                self
+                    .simple(
+                    "E0809",
+                    start,
+                    end,
+                    "branches leave incompatible remaining Box ReuseSlots"
+                );
+            }
+        }
+    }
+
+    // `merge_states(vec![a, b])`.
+    fn merge2(inout self, f: FnRow, sink a: FipState, sink b: FipState, start: u64, end: u64)
+        -> FipState {
+        let mut acc = state_new(true);
+        let mut have = false;
+        let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        self.merge_step(f, inout acc, inout have, a, inout flags);
+        self.merge_step(f, inout acc, inout have, b, inout flags);
+        self.merge_report(start, end, in flags);
+        if !have {
+            return state_new(true);
+        }
+        acc
+    }
+
+    // `non_fip_call_uses_box`; `args` are the argument expressions (the
+    // receiver first for a method).
+    fn non_fip_call_uses_box(
+        inout self,
+        callee: FnRow,
+        fi: u32,
+        in args: ChunkSeq[u32],
+        result: u32
+    ) -> bool {
+        if callee.fip {
+            return false;
+        }
+        if self
+            .contains_box(result)
+            || self
+            .contains_box(callee.result)
+            || flag(in self.unsafe_nf, fi) {
+            return true;
+        }
+        for i in 0..w(callee.pn) {
+            if i >= args.len() {
+                break;
+            }
+            let p = self.ast.param(add(w(callee.pa), i));
+            if p.pass == P_SINK {
+                if self.contains_box(p.ty) {
+                    return true;
+                }
+                let at = self.expr_type(self.ast.expr(u32_at(in args, i)));
+                if self.contains_box(at) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    // The argument expressions of call `e`.
+    fn call_args(in self, e: ExprRow, inout out: ChunkSeq[u32]) {
+        for i in 0..w(e.c) {
+            out.push(self.ast.at(add(add(w(e.b), wrapping_mul(i, 2)), 1)));
+        }
+    }
+
+    fn arg_pass(in self, e: ExprRow, i: u64) -> u8 {
+        wrapping_u8(self.ast.at(add(w(e.b), wrapping_mul(i, 2))))
+    }
+
+    // A call of a declared function `fi` (from `e`, the call): its Alloc and
+    // non-@fip checks, its arguments, and the caller-slot forwarding.
+    // `recv` is the receiver expression of a method call, or NONE32.
+    fn check_known_call(
+        inout self,
+        f: FnRow,
+        e: ExprRow,
+        fi: u32,
+        name: u32,
+        recv: u32,
+        inout st: FipState,
+        in_tail: bool
+    ) {
+        let callee = self.ast.func(fi);
+        let e_ty = self.expr_type(e);
+        if self.fn_allocs(callee) {
+            self
+                .named(
+                "E0801",
+                e.start,
+                e.end,
+                "@fip function cannot call ",
+                name,
+                " with 'Alloc' effect"
+            );
+        }
+        let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        if recv != NONE32 {
+            args.push(recv);
+        }
+        self.call_args(e, inout args);
+        if self.non_fip_call_uses_box(callee, fi, in args, e_ty) {
+            self
+                .named(
+                "E0801",
+                e.start,
+                e.end,
+                "@fip function cannot call non-@fip function ",
+                name,
+                " that uses Box"
+            );
+        }
+        let mut first: u64 = 0;
+        if recv != NONE32 {
+            first = 1;
+            let recv_owned = callee.pn > 0 && self.ast.param(w(callee.pa)).pass == P_SINK;
+            let base = self.ast.expr(recv);
+            let base_ty = self.expr_type(base);
+            self.check_expr(f, recv, inout st, recv_owned, false);
+            if !recv_owned && !self.is_place(recv) && self.contains_box(base_ty) {
+                self
+                    .simple(
+                    "E0806",
+                    base.start,
+                    base.end,
+                    "@fip function drops temporary Box passed as receiver by borrow"
+                );
+            }
+        }
+        // `args.iter().zip(params)` (after the receiver's parameter).
+        for i in 0..w(e.c) {
+            let pi = add(i, first);
+            if pi >= w(callee.pn) {
+                break;
+            }
+            let arg = u32_at(in args, pi);
+            let param = self.ast.param(add(w(callee.pa), pi));
+            let arg_owned = param.pass == P_SINK;
+            let a = self.ast.expr(arg);
+            let arg_ty = self.expr_type(a);
+            self.check_expr(f, arg, inout st, arg_owned, false);
+            if !arg_owned && !self.is_place(arg) && self.contains_box(arg_ty) {
+                self
+                    .simple(
+                    "E0806",
+                    a.start,
+                    a.end,
+                    "@fip function drops temporary Box passed by borrow"
+                );
+            }
+        }
+        if flag(in self.caller_slot, fi) {
+            let inner = self.box_inner(e_ty);
+            if inner != NONE32 {
+                let mut can_forward = false;
+                if in_tail && !st.caller_used {
+                    let ret_inner = self.box_inner(f.result);
+                    if ret_inner != NONE32 {
+                        can_forward = self.slots_match(f, inner, ret_inner);
+                    }
+                }
+                if can_forward {
+                    self.consume_caller_slot(f, inner, e.start, e.end, inout st);
+                } else {
+                    self.pop_matching_slot(f, inner, e.start, e.end, inout st);
+                }
+            }
+        }
+    }
+
+    // Checks the arguments of call `e`, each owned when `sink` is passed
+    // (`all_owned` makes every argument owned).
+    fn check_args(inout self, f: FnRow, e: ExprRow, inout st: FipState, all_owned: bool) {
+        for i in 0..w(e.c) {
+            let arg = self.ast.at(add(add(w(e.b), wrapping_mul(i, 2)), 1));
+            let owned = all_owned || self.arg_pass(e, i) == P_SINK;
+            self.check_expr(f, arg, inout st, owned, false);
+        }
+    }
+
+    // `FipChecker::check_expr`.
+    fn check_expr(inout self, f: FnRow, ei: u32, inout st: FipState, owned: bool, in_tail: bool) {
+        if owned {
+            let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let root = self.place_of(ei, inout path);
+            if root != NONE32 && st.binds.has(root) {
+                let pid = self.paths.intern(in path);
+                st.binds.mark_moved(root, pid);
+                return;
+            }
+        }
+        let e = self.ast.expr(ei);
+        let e_ty = self.expr_type(e);
+        let k = e.kind;
+        if k == E_TUPLE || k == E_STRUCT {
+            for i in 0..w(e.b) {
+                self.check_expr(f, self.ast.at(add(w(e.a), i)), inout st, owned, false);
+            }
+        } else if k == E_FIELD || k == E_UNARY || k == E_TRY {
+            self.check_expr(f, e.a, inout st, false, false);
+        } else if k == E_INDEX {
+            self.check_expr(f, e.a, inout st, false, false);
+            self.check_expr(f, e.b, inout st, true, false);
+        } else if k == E_ASSIGN {
+            let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            let root = self.place_of(e.a, inout path);
+            if root != NONE32 {
+                let at = st.binds.find(root);
+                if at != NONE64 {
+                    let bty = st.binds.row(at).ty;
+                    let mut sub = bty;
+                    for i in 0..path.len() {
+                        if sub == NONE32 {
+                            break;
+                        }
+                        let seg = u32_at(in path, i);
+                        let is_seg = self.c.names.has_prefix(seg, in "[".as_bytes());
+                        sub = field_step(
+                            inout self.c.types,
+                            inout self.c.names,
+                            in self.c.world,
+                            sub,
+                            seg,
+                            is_seg
+                        );
+                    }
+                    if sub != NONE32 && self.contains_box(sub) {
+                        let lhs = self.ast.expr(e.a);
+                        self
+                            .simple(
+                            "E0806",
+                            lhs.start,
+                            lhs.end,
+                            "@fip function cannot overwrite an owned Box without unpacking or moving it first"
+                        );
+                    }
+                }
+            }
+            self.check_expr(f, e.b, inout st, true, false);
+        } else if k == E_BINARY {
+            self.check_expr(f, e.a, inout st, true, false);
+            if e.c != 0 {
+                let mut rhs = copy_state(in st);
+                self.check_expr(f, e.b, inout rhs, true, false);
+                let before = copy_state(in st);
+                st = self.merge2(f, before, rhs, e.start, e.end);
+            } else {
+                self.check_expr(f, e.b, inout st, true, false);
+            }
+        } else if k == E_BLOCK {
+            let outer = copy_binds(in st.binds);
+            for i in 0..w(e.b) {
+                if st.diverged {
+                    break;
+                }
+                let at = add(w(e.a), wrapping_mul(i, 3));
+                let p = self.ast.at(at);
+                let value = self.ast.at(add(at, 2));
+                let v = self.ast.expr(value);
+                if p != 0 {
+                    let inferred = self.expr_type(v);
+                    let val_ty = if inferred != self.c.types.infer {
+                        inferred
+                    } else {
+                        self.ast.at(inc(at))
+                    };
+                    self.check_expr(f, value, inout st, true, false);
+                    if !st.diverged {
+                        self.bind_pattern(wrapping_sub(p, 1), val_ty, inout st);
+                    }
+                } else {
+                    let se_ty = self.expr_type(v);
+                    self.check_expr(f, value, inout st, true, false);
+                    if self.contains_box(se_ty) {
+                        self
+                            .simple(
+                            "E0806",
+                            v.start,
+                            v.end,
+                            "@fip function drops temporary Box value in statement"
+                        );
+                    }
+                }
+            }
+            if !st.diverged && e.c != 0 {
+                self.check_expr(f, wrapping_sub(e.c, 1), inout st, owned, in_tail);
+            }
+            self.close_scope(inout st, in outer);
+        } else if k >= E_LOOP && k <= E_CONTINUE {
+            // Loops and early exits leave the FIP ownership model.
+            self
+                .simple(
+                "E0806",
+                e.start,
+                e.end,
+                "@fip function cannot use loop, for, break or return; write the iteration as tail recursion"
+            );
+            st.diverged = true;
+        } else if k == E_IF {
+            self.check_expr(f, e.a, inout st, true, false);
+            let mut left = copy_state(in st);
+            self.check_expr(f, e.b, inout left, owned, in_tail);
+            let mut right = copy_state(in st);
+            if e.c != 0 {
+                self.check_expr(f, wrapping_sub(e.c, 1), inout right, owned, in_tail);
+            }
+            st = self.merge2(f, left, right, e.start, e.end);
+        } else if k == E_MATCH {
+            self.check_match(f, e, inout st, owned, in_tail);
+        } else if k == E_CALL {
+            if self.check_call(f, e, inout st, in_tail) {
+                return;
+            }
+        } else if k == E_HANDLE {
+            if e.a == self.s.alloc {
+                self
+                    .simple(
+                    "E0801",
+                    e.start,
+                    e.end,
+                    "@fip function cannot handle the 'Alloc' effect"
+                );
+            }
+            if e.b != 0 {
+                let it = self.expr_type(self.ast.expr(e.c));
+                self.check_expr(f, e.c, inout st, true, false);
+                self.bind_pattern(wrapping_sub(e.b, 1), it, inout st);
+            }
+            self.check_expr(f, e.d, inout st, owned, in_tail);
+        }
+        if self.is_never(e_ty) {
+            st.diverged = true;
+        }
+    }
+
+    fn check_match(
+        inout self,
+        f: FnRow,
+        e: ExprRow,
+        inout st: FipState,
+        owned: bool,
+        in_tail: bool
+    ) {
+        let v = self.ast.expr(e.a);
+        let scrutinee_ty = self.expr_type(v);
+        // A match on a borrowed place binds `in` borrows: its boxes are the
+        // caller's and supply no ReuseSlot.
+        let mut path: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        let root = self.place_of(e.a, inout path);
+        if root != NONE32 {
+            let mut borrowed = false;
+            for i in 0..w(f.pn) {
+                let q = self.ast.param(add(w(f.pa), i));
+                if q.name == root && q.pass != P_SINK {
+                    borrowed = true;
+                    break;
+                }
+            }
+            if borrowed && self.contains_box(scrutinee_ty) {
+                self
+                    .simple(
+                    "E0806",
+                    v.start,
+                    v.end,
+                    "@fip function cannot match a borrowed Box value; its boxes belong to the caller and supply no ReuseSlot (take it `sink`)"
+                );
+            }
+        }
+        self.check_expr(f, e.a, inout st, true, false);
+        let mut acc = state_new(true);
+        let mut have = false;
+        let mut flags: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        for i in 0..w(e.c) {
+            let at = add(w(e.b), wrapping_mul(i, 2));
+            let mut arm = copy_state(in st);
+            let arm_outer = copy_binds(in arm.binds);
+            self.bind_pattern(self.ast.at(at), scrutinee_ty, inout arm);
+            self.check_expr(f, self.ast.at(inc(at)), inout arm, owned, in_tail);
+            self.close_scope(inout arm, in arm_outer);
+            self.merge_step(f, inout acc, inout have, arm, inout flags);
+        }
+        self.merge_report(e.start, e.end, in flags);
+        if have {
+            st = acc;
+        } else {
+            st = state_new(true);
+        }
+    }
+
+    // The `Call` arm of `check_expr`; true when Rust returns early (before
+    // the `Never` test).
+    fn check_call(inout self, f: FnRow, e: ExprRow, inout st: FipState, in_tail: bool) -> bool {
+        let op = self.fip_allocation(e.a);
+        if op != 0 {
+            self.diag("E0801", e.start, e.end);
+            put(inout self.out, "@fip function cannot allocate through ChunkSeq::");
+            self.alloc_name(op);
+            self.end_diag();
+        }
+        let e_ty = self.expr_type(e);
+        let c = self.ast.expr(e.a);
+        if c.kind == E_NAME {
+            let name = c.a;
+            if name == self.s.box_new {
+                self.check_args(f, e, inout st, true);
+                let inner = self.box_inner(e_ty);
+                if inner != NONE32 {
+                    self.pop_matching_slot(f, inner, e.start, e.end, inout st);
+                }
+                return true;
+            }
+            if name == self.s.box_nic {
+                self.check_args(f, e, inout st, true);
+                let inner = self.box_inner(e_ty);
+                if inner != NONE32 {
+                    self.consume_caller_slot(f, inner, e.start, e.end, inout st);
+                }
+                return true;
+            }
+            if self.ctor(name) != NONE64 {
+                self.check_args(f, e, inout st, true);
+                return true;
+            }
+            if self.is_fn_type(self.expr_type(c)) {
+                self.check_args(f, e, inout st, false);
+                self
+                    .simple(
+                    "E0801",
+                    e.start,
+                    e.end,
+                    "@fip function cannot perform indirect calls to unverified closures"
+                );
+                return true;
+            }
+            let fi = self.ast.fn_named(name);
+            if fi != NONE32 {
+                self.check_known_call(f, e, fi, name, NONE32, inout st, in_tail);
+                return true;
+            }
+            // A builtin vector, tiled or arithmetic intrinsic, or an effect op.
+            if self.has_path_sep(name) && self.contains_box(e_ty) {
+                self
+                    .named(
+                    "E0801",
+                    e.start,
+                    e.end,
+                    "@fip function cannot call effect operation ",
+                    name,
+                    " producing Box"
+                );
+            }
+            self.check_args(f, e, inout st, false);
+            return true;
+        }
+        if c.kind == E_FIELD {
+            let base_ty = self.expr_type(self.ast.expr(c.a));
+            let mn = self.method_name(base_ty, c.b);
+            let fi = self.ast.fn_named(mn);
+            if fi != NONE32 {
+                self.check_known_call(f, e, fi, mn, c.a, inout st, in_tail);
+                return true;
+            }
+        }
+        self.check_expr(f, e.a, inout st, false, false);
+        self.check_args(f, e, inout st, true);
+        self
+            .simple(
+            "E0801",
+            e.start,
+            e.end,
+            "@fip function cannot perform indirect calls to unverified closures"
+        );
+        false
+    }
+
+    // `check_fip_fn`.
+    fn check_fip_fn(inout self, f: FnRow) {
+        if self.fn_allocs(f) {
+            self.simple("E0801", f.start, f.end, "@fip function cannot declare the 'Alloc' effect");
+        }
+        if f.body == NONE32 {
+            return;
+        }
+        let mut st = state_new(false);
+        for i in 0..w(f.pn) {
+            let p = self.ast.param(add(w(f.pa), i));
+            if p.pass == P_SINK && self.contains_box(p.ty) {
+                st
+                    .binds
+                    .insert(
+                    in self.c.names,
+                    BindRow {
+                        name: p.name,
+                        ty: p.ty,
+                        start: p.start,
+                        end: p.end
+                    }
+                );
+            }
+        }
+        self.check_expr(f, f.body, inout st, true, true);
+        if !st.diverged {
+            for i in 0..st.slots.len() {
+                let s = st.slot(i);
+                self
+                    .simple(
+                    "E0805",
+                    s.start,
+                    s.end,
+                    "@fip function leaves an unconsumed Box ReuseSlot (would drop/deallocate)"
+                );
+            }
+            let mut all: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            for i in 0..st.binds.len() {
+                all.push(st.binds.row(i).name);
+            }
+            let b = copy_binds(in st.binds);
+            self.report_undropped(in b, in all);
+        }
+    }
+
+    // `check_world`.
+    pub fn check_world(inout self) {
+        self.caller_slot_functions();
+        self.unsafe_non_fip_functions();
+        for i in 0..self.ast.fns.len() {
+            let f = self.ast.func(n32(i));
+            self.paths.reset();
+            if f.fip {
+                self.check_fip_fn(f);
+            } else if f.body != NONE32 {
+                self.check_non_fip(f.body);
+            }
+        }
+    }
+}

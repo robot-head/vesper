@@ -3,8 +3,17 @@
 //
 // Nodes live in flat arenas indexed by `u64` node ids, so the tree holds no
 // pointers and relocates with a plain copy. Leaf `l` keeps its entries at
-// `l * 16 ..` of `lkeys`/`lvals` and is linked to its neighbours in key
-// order. Internal node `n` keeps its separators at `n * 16 ..` of `ikeys`
+// `l * 16 ..` of `lkeys`/`lvids` and is linked to its neighbours in key
+// order. An entry's value lives in `vals`, densely, at the entry's value
+// position `lvids[..]`, so values are never copied: `V` need not be copy
+// (self-hosting SH2 lane 1). Removal moves the last value into the hole and
+// renames it in its leaf (`vkeys` keeps each value's key for that).
+//
+// Values that are not copy are read in place, as element views of `vals`:
+// `match t.vals.try_get(t.position(k)) { Some(v) => .., None => .. }`, and
+// `try_get_mut` to update one. `position` is `none_id()` for an absent key,
+// which no `try_get` accepts. `insert` moves the new value in and the old
+// one out, and `remove` moves the value out. Internal node `n` keeps its separators at `n * 16 ..` of `ikeys`
 // and its children at `n * 17 ..` of `ikids`; child `i` holds the keys `k`
 // with `sep[i - 1] <= k < sep[i]`.
 //
@@ -26,7 +35,9 @@ pub copy struct BTreeCursor {
 
 pub struct CacheBTree[K, V] {
     lkeys: ChunkSeq[K],
-    lvals: ChunkSeq[V],
+    lvids: ChunkSeq[u64],
+    vals: ChunkSeq[V],
+    vkeys: ChunkSeq[K],
     lcount: ChunkSeq[u64],
     lnext: ChunkSeq[u64],
     lprev: ChunkSeq[u64],
@@ -53,10 +64,12 @@ fn at[T: mod copy](in s: Slice[T], i: u64, fallback: T) -> T {
 }
 
 // An empty ordered map.
-pub fn btree_new[K: mod copy + Ord, V: mod copy]() -> CacheBTree[K, V] {
+pub fn btree_new[K: mod copy + Ord, V: mod affine]() -> CacheBTree[K, V] {
     CacheBTree {
         lkeys: ChunkSeq::new[K](),
-        lvals: ChunkSeq::new[V](),
+        lvids: ChunkSeq::new[u64](),
+        vals: ChunkSeq::new[V](),
+        vkeys: ChunkSeq::new[K](),
         lcount: ChunkSeq::new[u64](),
         lnext: ChunkSeq::new[u64](),
         lprev: ChunkSeq::new[u64](),
@@ -73,7 +86,7 @@ pub fn btree_new[K: mod copy + Ord, V: mod copy]() -> CacheBTree[K, V] {
     }
 }
 
-impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
+impl [K: mod copy + Ord, V: mod affine] CacheBTree[K, V] {
     // Number of entries.
     pub fn len(in self) -> u64 {
         self.len
@@ -86,7 +99,9 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
     // Remove every entry and release nothing (the arenas are reused).
     pub fn clear(inout self) {
         self.lkeys.clear();
-        self.lvals.clear();
+        self.lvids.clear();
+        self.vals.clear();
+        self.vkeys.clear();
         self.lcount.clear();
         self.lnext.clear();
         self.lprev.clear();
@@ -179,33 +194,38 @@ impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
         }
     }
 
-    // The value for `k`, if present.
-    pub fn get(in self, k: K) -> Option[V] {
+    // The value position of `k` in `vals`, or `none_id()` when `k` is
+    // absent.
+    pub fn position(in self, k: K) -> u64 {
         if self.root == none_id() {
-            return Option::None;
+            return none_id();
         }
         let leaf = self.find_leaf(k);
         let n = self.leaf_count(leaf);
         let pos = self.leaf_pos(leaf, k);
         if pos >= n {
-            return Option::None;
+            return none_id();
         }
         let i = wrapping_add(wrapping_mul(leaf, 16), pos);
         match self.lkeys.try_get(i) {
             Option::Some(found) => {
                 match found.cmp(k) {
-                    Equal => self.lvals.try_get(i),
-                    _ => Option::None,
+                    Equal => at(in self.lvids.as_slice(), i, none_id()),
+                    _ => none_id(),
                 }
             },
-            Option::None => Option::None,
+            Option::None => none_id(),
         }
     }
 
     pub fn contains_key(in self, k: K) -> bool {
-        match self.get(k) {
-            Option::Some(_) => true,
-            Option::None => false,
-        }
+        self.position(k) != none_id()
+    }
+}
+
+impl [K: mod copy + Ord, V: mod copy] CacheBTree[K, V] {
+    // The value for `k`, if present.
+    pub fn get(in self, k: K) -> Option[V] {
+        self.vals.try_get(self.position(k))
     }
 }

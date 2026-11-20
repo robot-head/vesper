@@ -14,23 +14,43 @@ use self::index::{
     strings_equal
 };
 
+// A SWAR key is at most 7 bytes, so it and its closing quote fit a word.
+const SWAR_MAX_KEY: u64 = 7;
+const WORD_BYTES: u64 = 8;
+const WORD_BITS: u64 = 64;
+// `SwarKey` packs up to two words.
+const PACK_BYTES: u64 = 16;
+const U64_MAX: u64 = 0xffffffffffffffff;
+// `JsonSizeBound`: every byte may escape as `\uXXXX`; quotes; the key's
+// quotes and colon.
+const UNICODE_ESCAPE_LEN: u64 = 6;
+// U64_MAX / UNICODE_ESCAPE_LEN.
+const MAX_ESCAPABLE_BYTES: u64 = 3074457345618258602;
+const QUOTES_LEN: u64 = 2;
+const KEY_PUNCTUATION_LEN: u64 = 3;
+const BYTE_MASK: u64 = 0xff;
+const ASCII_SPACE: u64 = 0x20;
+const ASCII_QUOTE: u64 = 0x22;
+const ASCII_BACKSLASH: u64 = 0x5c;
+const ASCII_TILDE: u64 = 0x7e;
+
 // `SwarFieldMatcher::compile_key`.
 pub fn swar_compile(field_idx: u16, in key: Slice[u8]) -> Option[Swar] {
     let n = key.len();
-    if n > 7 {
+    if n > SWAR_MAX_KEY {
         return Option::None;
     }
     let mut word: u64 = 0;
     for i in 0..n {
         let b = at(in key, i);
-        if b < 32 || b > 126 || b == 34 || b == 92 {
+        if b < ASCII_SPACE || b > ASCII_TILDE || b == ASCII_QUOTE || b == ASCII_BACKSLASH {
             return Option::None;
         }
         word = word | bit_shl(b, wrapping_mul(i, 8));
     }
-    word = word | bit_shl(34, wrapping_mul(n, 8));
+    word = word | bit_shl(ASCII_QUOTE, wrapping_mul(n, 8));
     let count = wrapping_add(n, 1);
-    let mask = bit_shr(18446744073709551615, wrapping_mul(wrapping_sub(8, count), 8));
+    let mask = bit_shr(U64_MAX, wrapping_mul(wrapping_sub(WORD_BYTES, count), 8));
     Option::Some(
         Swar {
             field_idx: field_idx,
@@ -61,7 +81,7 @@ pub fn swar_key(m: Swar, in raw: Slice[u8]) -> bool {
     let n = widen_u64(m.len);
     let mut name: ChunkSeq[u8] = ChunkSeq::with_capacity(n);
     for i in 0..n {
-        name.push(wrapping_u8(bit_shr(m.word, wrapping_mul(i, 8)) & 255));
+        name.push(wrapping_u8(bit_shr(m.word, wrapping_mul(i, 8)) & BYTE_MASK));
     }
     strings_equal(in raw, in name.as_slice())
 }
@@ -70,8 +90,7 @@ pub fn swar_key(m: Swar, in raw: Slice[u8]) -> bool {
 pub fn escaped_mask(backslashes: u64, carry_in: bool) -> (u64, bool) {
     let mut escaped: u64 = 0;
     let mut carry = carry_in;
-    let sixty_four: u64 = 64;
-    for i in 0..sixty_four {
+    for i in 0..WORD_BITS {
         let bit = bit_shl(1, i);
         if carry {
             escaped = escaped | bit;
@@ -82,7 +101,7 @@ pub fn escaped_mask(backslashes: u64, carry_in: bool) -> (u64, bool) {
 }
 
 fn add(a: u64, b: u64) -> u64 eff [Fail[Error]] {
-    if b > wrapping_sub(18446744073709551615, a) {
+    if b > wrapping_sub(U64_MAX, a) {
         raise(ErrorKind::Overflow, 0);
     }
     wrapping_add(a, b)
@@ -90,12 +109,12 @@ fn add(a: u64, b: u64) -> u64 eff [Fail[Error]] {
 
 // `JsonSizeBound::string`.
 pub fn bound_string(max_utf8_bytes: u64) -> Bound eff [Fail[Error]] {
-    if max_utf8_bytes > 3074457345618258602 {
+    if max_utf8_bytes > MAX_ESCAPABLE_BYTES {
         raise(ErrorKind::Overflow, 0);
     }
-    let escaped = wrapping_mul(max_utf8_bytes, 6);
+    let escaped = wrapping_mul(max_utf8_bytes, UNICODE_ESCAPE_LEN);
     Bound {
-        n: add(escaped, 2),
+        n: add(escaped, QUOTES_LEN),
         dynamic: false
     }
 }
@@ -108,7 +127,7 @@ pub fn bound_field(object: Bound, key_escaped_len: u64, field: Bound, first: boo
     } else {
         1
     };
-    let prefix = add(add(not_first, key_escaped_len), 3);
+    let prefix = add(add(not_first, key_escaped_len), KEY_PUNCTUATION_LEN);
     let n = add(add(object.n, prefix), field.n);
     Bound {
         n: n,
@@ -128,19 +147,19 @@ pub fn swar_key_raw(w0: u64, w1: u64, len: u64, in raw: Slice[u8]) -> bool {
 
 // Up to 16 bytes as two zero-padded little-endian words.
 pub fn pack16(in raw: Slice[u8]) -> (u64, u64) {
-    let n = if raw.len() < 16 {
+    let n = if raw.len() < PACK_BYTES {
         raw.len()
     } else {
-        16
+        PACK_BYTES
     };
     let mut a: u64 = 0;
     let mut b: u64 = 0;
     for i in 0..n {
         let v = at(in raw, i);
-        if i < 8 {
+        if i < WORD_BYTES {
             a = a | bit_shl(v, wrapping_mul(i, 8));
         } else {
-            b = b | bit_shl(v, wrapping_mul(wrapping_sub(i, 8), 8));
+            b = b | bit_shl(v, wrapping_mul(wrapping_sub(i, WORD_BYTES), 8));
         }
     }
     (a, b)
@@ -152,12 +171,12 @@ pub fn swar_key_matches(w0: u64, w1: u64, len: u64, escaped: bool, in raw: Slice
     if escaped {
         let mut name: ChunkSeq[u8] = ChunkSeq::with_capacity(len);
         for i in 0..len {
-            let w = if i < 8 {
+            let w = if i < WORD_BYTES {
                 w0
             } else {
                 w1
             };
-            name.push(wrapping_u8(bit_shr(w, wrapping_mul(i % 8, 8)) & 255));
+            name.push(wrapping_u8(bit_shr(w, wrapping_mul(i % WORD_BYTES, 8)) & BYTE_MASK));
         }
         strings_equal(in raw, in name.as_slice())
     } else {
