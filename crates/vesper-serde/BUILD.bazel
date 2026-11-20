@@ -44,7 +44,7 @@ vesper_port_object(
 vesper_port_object(
     name = "serde_vesper_divergent_index",
     edit_src = "vesper/src/index.ves",
-    edits = {"if s == 43 || s == 45 {": "if s == 45 {"},
+    edits = {"if s == ASCII_PLUS || s == ASCII_MINUS {": "if s == ASCII_MINUS {"},
     library = "serde",
     rust_types = "crate::port_types",
     package = ":port_package",
@@ -54,7 +54,7 @@ vesper_port_object(
 vesper_port_object(
     name = "serde_vesper_divergent_stage2",
     edit_src = "vesper/src/stage2.ves",
-    edits = {"if p < end && at(in t, p) == 46 {": "if p < end && at(in t, p) == 47 {"},
+    edits = {"if p < end && at(in t, p) == ASCII_DOT {": "if p < end && at(in t, p) == ASCII_SLASH {"},
     library = "serde",
     rust_types = "crate::port_types",
     package = ":port_package",

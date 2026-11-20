@@ -23,8 +23,46 @@ use self::index::{
     utf8_len
 };
 
+// `byte` past the end: no byte has this value.
+const NO_BYTE: u64 = 256;
+// The length of `false`, and of `null` and `true`.
+const FALSE_LEN: u64 = 5;
+const NULL_TRUE_LEN: u64 = 4;
+// The container stack's first allocation.
+const STACK_CAPACITY: u64 = 16;
+const U64_MAX: u64 = 0xffffffffffffffff;
+const ASCII_TAB: u64 = 0x09;
+const ASCII_LF: u64 = 0x0a;
+const ASCII_CR: u64 = 0x0d;
+const ASCII_SPACE: u64 = 0x20;
+const ASCII_QUOTE: u64 = 0x22;
+const ASCII_PLUS: u64 = 0x2b;
+const ASCII_COMMA: u64 = 0x2c;
+const ASCII_MINUS: u64 = 0x2d;
+const ASCII_DOT: u64 = 0x2e;
+// Used only by the divergence check (build.rs).
+const ASCII_SLASH: u64 = 0x2f;
+const ASCII_ZERO: u64 = 0x30;
+const ASCII_ONE: u64 = 0x31;
+const ASCII_NINE: u64 = 0x39;
+const ASCII_COLON: u64 = 0x3a;
+const ASCII_UPPER_E: u64 = 0x45;
+const ASCII_LBRACKET: u64 = 0x5b;
+const ASCII_RBRACKET: u64 = 0x5d;
+const ASCII_LOWER_A: u64 = 0x61;
+const ASCII_LOWER_E: u64 = 0x65;
+const ASCII_LOWER_F: u64 = 0x66;
+const ASCII_LOWER_L: u64 = 0x6c;
+const ASCII_LOWER_N: u64 = 0x6e;
+const ASCII_LOWER_R: u64 = 0x72;
+const ASCII_LOWER_S: u64 = 0x73;
+const ASCII_LOWER_T: u64 = 0x74;
+const ASCII_LOWER_U: u64 = 0x75;
+const ASCII_LBRACE: u64 = 0x7b;
+const ASCII_RBRACE: u64 = 0x7d;
+
 fn none() -> u64 {
-    18446744073709551615
+    U64_MAX
 }
 
 // The builder's state (`Builder`). `control` and `truncated` are none()
@@ -143,7 +181,7 @@ fn byte(in b: B, in t: Slice[u8], in s: Slice[u32], i: u64) -> u64 {
     } else if i == b.s_len && b.truncated != none() {
         at(in t, b.truncated)
     } else {
-        256
+        NO_BYTE
     }
 }
 
@@ -251,7 +289,7 @@ fn string(
     let token = push(in b, inout toks, in t, in escapes, Kind::String, depth, open);
     entry(in b, in t, in escapes, i);
     let i1 = wrapping_add(i, 1);
-    let closed = byte(in b, in t, in s, i1) == 34 && i1 < b.s_len;
+    let closed = byte(in b, in t, in s, i1) == ASCII_QUOTE && i1 < b.s_len;
     let bound = if closed {
         pos(in b, in s, i1)
     } else if b.truncated != none() {
@@ -343,7 +381,7 @@ fn min_or(a: u64, c: u64, otherwise: u64) -> u64 {
 }
 
 fn is_digit(c: u64) -> bool {
-    c >= 48 && c <= 57
+    c >= ASCII_ZERO && c <= ASCII_NINE
 }
 
 fn digits_end(in t: Slice[u8], p0: u64, end: u64) -> u64 {
@@ -361,31 +399,31 @@ fn digits_end(in t: Slice[u8], p0: u64, end: u64) -> u64 {
 // valid prefix, or the offset of the byte that broke it; ok).
 fn number(in t: Slice[u8], start: u64, end: u64) -> (u64, bool) {
     let mut p = start;
-    if p < end && at(in t, p) == 45 {
+    if p < end && at(in t, p) == ASCII_MINUS {
         p = wrapping_add(p, 1);
     }
     let first = if p < end {
         at(in t, p)
     } else {
-        256
+        NO_BYTE
     };
-    if first == 48 {
+    if first == ASCII_ZERO {
         p = wrapping_add(p, 1);
-    } else if first >= 49 && first <= 57 {
+    } else if first >= ASCII_ONE && first <= ASCII_NINE {
         p = digits_end(in t, wrapping_add(p, 1), end);
     } else {
         return (wrapping_sub(p, start), false);
     }
-    if p < end && at(in t, p) == 46 {
+    if p < end && at(in t, p) == ASCII_DOT {
         p = wrapping_add(p, 1);
         if p >= end || !is_digit(at(in t, p)) {
             return (wrapping_sub(p, start), false);
         }
         p = digits_end(in t, p, end);
     }
-    if p < end && (at(in t, p) == 101 || at(in t, p) == 69) {
+    if p < end && (at(in t, p) == ASCII_LOWER_E || at(in t, p) == ASCII_UPPER_E) {
         p = wrapping_add(p, 1);
-        if p < end && (at(in t, p) == 43 || at(in t, p) == 45) {
+        if p < end && (at(in t, p) == ASCII_PLUS || at(in t, p) == ASCII_MINUS) {
             p = wrapping_add(p, 1);
         }
         if p >= end || !is_digit(at(in t, p)) {
@@ -400,40 +438,40 @@ fn number(in t: Slice[u8], start: u64, end: u64) -> (u64, bool) {
 // literal `which` (0 null, 1 true, 2 false), or `lit_len`.
 fn literal_mismatch(in t: Slice[u8], start: u64, end: u64, which: u64) -> u64 {
     let n: u64 = if which == 2 {
-        5
+        FALSE_LEN
     } else {
-        4
+        NULL_TRUE_LEN
     };
     for k in 0..n {
         let want: u64 = if which == 0 {
             if k == 0 {
-                110
+                ASCII_LOWER_N
             } else if k == 1 {
-                117
+                ASCII_LOWER_U
             } else {
-                108
+                ASCII_LOWER_L
             }
         } else if which == 1 {
             if k == 0 {
-                116
+                ASCII_LOWER_T
             } else if k == 1 {
-                114
+                ASCII_LOWER_R
             } else if k == 2 {
-                117
+                ASCII_LOWER_U
             } else {
-                101
+                ASCII_LOWER_E
             }
         } else {
             if k == 0 {
-                102
+                ASCII_LOWER_F
             } else if k == 1 {
-                97
+                ASCII_LOWER_A
             } else if k == 2 {
-                108
+                ASCII_LOWER_L
             } else if k == 3 {
-                115
+                ASCII_LOWER_S
             } else {
-                101
+                ASCII_LOWER_E
             }
         };
         let q = wrapping_add(start, k);
@@ -462,7 +500,7 @@ fn scalar(
             break;
         }
         let c = at(in t, wrapping_sub(end, 1));
-        if c == 32 || c == 9 || c == 10 || c == 13 {
+        if c == ASCII_SPACE || c == ASCII_TAB || c == ASCII_LF || c == ASCII_CR {
             end = wrapping_sub(end, 1);
         } else {
             break;
@@ -471,10 +509,10 @@ fn scalar(
     let first = at(in t, start);
     let mut kind = Kind::Number;
     let mut len: u64 = 0;
-    if first == 110 || first == 116 || first == 102 {
-        let which: u64 = if first == 110 {
+    if first == ASCII_LOWER_N || first == ASCII_LOWER_T || first == ASCII_LOWER_F {
+        let which: u64 = if first == ASCII_LOWER_N {
             0
-        } else if first == 116 {
+        } else if first == ASCII_LOWER_T {
             1
         } else {
             2
@@ -485,9 +523,9 @@ fn scalar(
             Kind::Bool
         };
         let lit_len: u64 = if which == 2 {
-            5
+            FALSE_LEN
         } else {
-            4
+            NULL_TRUE_LEN
         };
         let k = literal_mismatch(in t, start, end, which);
         if k < lit_len {
@@ -523,7 +561,7 @@ fn key(
     object: u64,
     depth: u64
 ) -> u64 eff [Fail[Error]] {
-    if byte(in b, in t, in s, i) != 34 {
+    if byte(in b, in t, in s, i) != ASCII_QUOTE {
         syntax(in b, in t, in s, in escapes, i);
     }
     let key_index = toks.len();
@@ -542,7 +580,7 @@ fn key(
         here
     );
     b.dup = wrapping_add(b.dup, wrapping_sub(work, before));
-    op(in b, in t, in s, in escapes, next, 58);
+    op(in b, in t, in s, in escapes, next, ASCII_COLON);
     wrapping_add(next, 1)
 }
 
@@ -561,7 +599,7 @@ fn document(
     in s: Slice[u32],
     in escapes: Slice[u32]
 ) -> Unit eff [Fail[Error]] {
-    let mut stack: ChunkSeq[u64] = ChunkSeq::with_capacity(16);
+    let mut stack: ChunkSeq[u64] = ChunkSeq::with_capacity(STACK_CAPACITY);
     let mut depth: u64 = 0;
     let mut i: u64 = 0;
     // `i` is at a value. Each pass parses one value, then unwinds closed
@@ -569,8 +607,8 @@ fn document(
     loop {
         let c = byte(in b, in t, in s, i);
         let mut opened = false;
-        if c == 123 || c == 91 {
-            let object = c == 123;
+        if c == ASCII_LBRACE || c == ASCII_LBRACKET {
+            let object = c == ASCII_LBRACE;
             if depth >= b.lim.max_depth || depth >= hard_depth() {
                 err(in b, in t, in escapes, ErrorKind::DepthLimit, pos(in b, in s, i));
             }
@@ -584,9 +622,9 @@ fn document(
             entry(in b, in t, in escapes, i);
             i = wrapping_add(i, 1);
             let close: u64 = if object {
-                125
+                ASCII_RBRACE
             } else {
-                93
+                ASCII_RBRACKET
             };
             if byte(in b, in t, in s, i) == close {
                 entry(in b, in t, in escapes, i);
@@ -612,9 +650,17 @@ fn document(
                 }
                 opened = true;
             }
-        } else if c == 34 {
+        } else if c == ASCII_QUOTE {
             i = string(inout b, inout toks, in t, in s, in escapes, i, depth);
-        } else if c == 110 || c == 116 || c == 102 || c == 45 || is_digit(c) {
+        } else if c
+            == ASCII_LOWER_N
+            || c
+            == ASCII_LOWER_T
+            || c
+            == ASCII_LOWER_F
+            || c
+            == ASCII_MINUS
+            || is_digit(c) {
             i = scalar(in b, inout toks, in t, in s, in escapes, i, depth);
         } else {
             syntax(in b, in t, in s, in escapes, i);
@@ -632,12 +678,12 @@ fn document(
                 let object = frame & 1 == 1;
                 let token = frame >> 1;
                 let close: u64 = if object {
-                    125
+                    ASCII_RBRACE
                 } else {
-                    93
+                    ASCII_RBRACKET
                 };
                 let c2 = byte(in b, in t, in s, i);
-                if c2 == 44 {
+                if c2 == ASCII_COMMA {
                     entry(in b, in t, in escapes, i);
                     i = wrapping_add(i, 1);
                     if object {
