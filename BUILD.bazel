@@ -204,6 +204,8 @@ vesper_crate(
         "test/std_intern": [":files"],
         # SH2 lane 1 (#1173): collections and arenas of values that are not copy.
         "test/owning_collections": [":files"],
+        # SH3 lane 3 (#1242): collection view callbacks (lent closures).
+        "test/closure_modes_collections": [":files"],
         # Milestone 7: the verified backend over the self-hosted front end.
         "test/verified_codegen_fail_front_end": glob(["packages/**/*.ves"]),
         "test/self_host_front_end": glob([

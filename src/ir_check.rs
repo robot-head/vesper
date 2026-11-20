@@ -162,6 +162,7 @@ pub fn validate(world: &World, program: &ir::Program) -> Vec<Diagnostic> {
             local_consumes: BTreeMap::new(),
             reservable: reservable(f),
             scrutinees: scrutinees(f),
+            callees: callees(f),
             views: element_views(world, f),
         };
         checker.function(f);
@@ -283,6 +284,8 @@ struct Flow<'a> {
     reservable: BTreeSet<ValueId>,
     /// The values that a `match` terminator inspects ([`scrutinees`]).
     scrutinees: BTreeSet<ValueId>,
+    /// The values `f` calls indirectly ([`callees`]).
+    callees: BTreeSet<ValueId>,
     /// The `try_get` values of element view matches ([`element_views`]).
     views: BTreeMap<ValueId, Pass>,
 }
@@ -313,6 +316,18 @@ fn scrutinees(f: &FunctionIr) -> BTreeSet<ValueId> {
         .iter()
         .filter_map(|b| match &b.terminator {
             crate::ir::Terminator::Match { value, .. } => Some(*value),
+            _ => None,
+        })
+        .collect()
+}
+/// The function values `f` calls. Calling a borrowed slot of a function
+/// type that is not `copy` (a lent function parameter, §4.2) reads it.
+fn callees(f: &FunctionIr) -> BTreeSet<ValueId> {
+    f.blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter_map(|i| match &i.op {
+            Op::Indirect { callee, .. } => Some(*callee),
             _ => None,
         })
         .collect()
@@ -704,6 +719,16 @@ impl Flow<'_> {
                 {
                     pass = Pass::In;
                 }
+                if pass == Pass::Sink
+                    && path.is_empty()
+                    && self.callees.contains(&i.dest)
+                    && s.slots
+                        .get(root)
+                        .is_some_and(|slot| slot.pass != Pass::Sink)
+                    && matches!(&i.ty, Type::Function { mode, .. } if *mode != Mode::Copy)
+                {
+                    pass = Pass::In;
+                }
                 if s.slots.contains_key(root) || !self.world.functions.contains_key(root) {
                     for p in &places {
                         self.access(s, p, pass, &i.span);
@@ -883,7 +908,16 @@ impl Flow<'_> {
                         None
                     }
                 });
-                self.consume(s, *callee, &i.span);
+                if let Some(v) = s.values.get_mut(callee)
+                    && !v.owned
+                    && matches!(&v.ty, Type::Function { mode, .. } if *mode != Mode::Copy)
+                {
+                    // A lent function parameter is read by its call (§4.2).
+                    v.consumed = true;
+                    v.loan = None;
+                } else {
+                    self.consume(s, *callee, &i.span);
+                }
                 self.activate(s, args, &i.span);
                 for a in args {
                     if a.pass == Pass::Sink {
@@ -1007,12 +1041,15 @@ impl Flow<'_> {
             return;
         }
         let mut initial = State::default();
+        // A lent closure's body (§4.2) borrows its captures `in`.
+        let lent = self.world.lent_closures.get(&f.name);
         for p in &f.params {
+            let borrowed = p.pass == Pass::Sink && lent.is_some_and(|names| names.contains(&p.name));
             initial.slots.insert(
                 p.name.clone(),
                 SlotState {
                     ty: p.ty.clone(),
-                    pass: p.pass,
+                    pass: if borrowed { Pass::In } else { p.pass },
                     moved: BTreeSet::new(),
                 },
             );

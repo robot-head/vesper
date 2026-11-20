@@ -3567,7 +3567,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                             self.function_tag(root, &ty)?
                         } else if (*pass != Pass::Sink || split_sources.contains_key(&inst.dest))
                             && (Layout::of(self.world, &ty)?.aggregate()
-                                || matches!(ty, Type::Function { .. }))
+                                // A function value lent `in` is its tag,
+                                // as the callee reads it (§4.2).
+                                || (*pass == Pass::Inout && matches!(ty, Type::Function { .. })))
                         {
                             self.address(&e)?
                         } else {

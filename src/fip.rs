@@ -1777,6 +1777,31 @@ fn resolve_place_type(world: &World, root_ty: &Type, path: &[String]) -> Option<
 /// and a drop that belongs to one edge of a branch is placed in a block
 /// split onto that edge ([`split_edge`]), so each box is dropped exactly
 /// once on every path without a runtime drop flag.
+/// Whether `expr` is a lent closure literal (§4.2,
+/// [`World::lent_closures`]).
+fn lent_closure(world: &World, expr: &Expr) -> bool {
+    matches!(&expr.kind, ExprKind::Closure { body, .. }
+        if world.lent_closures.contains_key(&crate::ir::nested_name("closure", &body.span)))
+}
+
+/// The aliases of the names a closure literal uses (its captures).
+fn closure_aliases<'a>(
+    expr: &Expr,
+    aliases: &'a BTreeMap<String, String>,
+) -> impl Iterator<Item = (&'a String, &'a String)> {
+    let used = match &expr.kind {
+        ExprKind::Closure { params, body, .. } => {
+            let mut names = crate::check::free_names(body);
+            for p in params {
+                names.remove(&p.name);
+            }
+            names
+        }
+        _ => BTreeSet::new(),
+    };
+    aliases.iter().filter(move |(name, _)| used.contains(*name))
+}
+
 pub fn elaborate_non_fip_drops(world: &World, program: &mut crate::ir::Program) {
     if !active(world) {
         return;
@@ -1788,7 +1813,22 @@ pub fn elaborate_non_fip_drops(world: &World, program: &mut crate::ir::Program) 
         f.box_drops_before_inst.clear();
         f.box_drops_after_inst.clear();
         f.box_drops_before_term.clear();
-        let Some(e) = elaborate_function(world, f) else {
+        // A lent closure's body (§4.2) borrows its captures: it drops none.
+        let lent;
+        let source = match world.lent_closures.get(&f.name) {
+            Some(names) => {
+                let mut g = f.clone();
+                for p in &mut g.params {
+                    if p.pass == Pass::Sink && names.contains(&p.name) {
+                        p.pass = Pass::In;
+                    }
+                }
+                lent = g;
+                &lent
+            }
+            None => &*f,
+        };
+        let Some(e) = elaborate_function(world, source) else {
             continue;
         };
         if !edges_placeable(f, &e) {
@@ -2918,9 +2958,20 @@ pub fn seq_drop_plan(world: &World, f: &crate::ir::FunctionIr) -> BTreeMap<Strin
                     refused.extend(names);
                 }
             }
-            Op::Closure { aliases, moves, .. } => {
-                refused.extend(aliases.keys().cloned());
-                refused.extend(aliases.values().cloned());
+            // A lent closure (§4.2) only reads the names it uses: it
+            // neither moves nor keeps them.
+            Op::Closure { expr, .. } if lent_closure(world, expr) => {}
+            // Any other closure snapshots the names it uses when it is
+            // made; only those, and what it moves, are refused.
+            Op::Closure {
+                expr,
+                aliases,
+                moves,
+            } => {
+                for (name, slot) in closure_aliases(expr, aliases) {
+                    refused.insert(name.clone());
+                    refused.insert(slot.clone());
+                }
                 refused.extend(moves.iter().map(|p| p.root.clone()));
             }
             // A handled block and its clauses are graphs emitted inside this
@@ -3219,6 +3270,26 @@ pub fn replace_drops(
         }
     }
     for inst in f.blocks.iter().flat_map(|b| &b.instructions) {
+        if let Op::Closure { expr, .. } = &inst.op
+            && lent_closure(world, expr)
+        {
+            continue;
+        }
+        if let Op::Closure {
+            expr,
+            aliases,
+            moves,
+        } = &inst.op
+        {
+            for (name, slot) in closure_aliases(expr, aliases) {
+                candidates.remove(name);
+                candidates.remove(slot);
+            }
+            for p in moves {
+                candidates.remove(&p.root);
+            }
+            continue;
+        }
         if let Op::Closure { aliases, moves, .. } | Op::Handle { aliases, moves, .. } = &inst.op {
             for name in aliases
                 .keys()
