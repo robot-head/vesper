@@ -1,0 +1,63 @@
+// `eff` as a name (SH2 lane 3, #1175). The front end v2 differential
+// (tests/self_host_front_v2.rs) parses every repository `.ves` file, so this
+// file keeps the Rust and Vesper parsers agreeing on contextual `eff`.
+linear effect Ask {
+    fn ask() -> u64;
+}
+
+copy struct Row {
+    eff: u64,
+}
+
+impl Row {
+    fn eff(in self) -> u64 {
+        self.eff
+    }
+}
+
+fn note(eff: u64) -> u64 eff [Ask] {
+    wrapping_add(eff, Ask::ask())
+}
+
+fn apply[e: eff](sink f: fn(u64) -> u64 eff [e], x: u64) -> u64 eff [e] {
+    f(x)
+}
+
+fn main() -> u64 {
+    let eff = 40;
+    let row = Row {
+        eff
+    };
+    let Row {
+        eff: inner
+    }
+    = row;
+    let g = | x: u64 | eff;
+    let h = | x: u64 | -> u64 eff [] {
+        wrapping_add(x, inner)
+    };
+    let total = match apply(h, row.eff()) {
+        eff => wrapping_add(eff, g(0)),
+    };
+    total
+}
+
+fn loops() -> u64 {
+    let mut total: u64 = 0;
+    for eff in 0..4 {
+        total = wrapping_add(total, eff);
+    }
+    wrapping_add(total, Make::eff(2).n)
+}
+
+copy struct Make {
+    n: u64,
+}
+
+impl Make {
+    fn eff(n: u64) -> Make {
+        Make {
+            n
+        }
+    }
+}
