@@ -1,0 +1,548 @@
+// The loader state of the package assembler: the package graph the Rust
+// loader read from disk, every module's declared names and imports as flat
+// rows, the resolver's tables and the output buffers.
+//
+// Names are symbols of one global interner `St.g` (the census design: no
+// `String`-keyed maps). A module is a row index; an item key
+// (`ItemKey` in src/packages.rs) is `module << 32 | name`. Tables keyed by
+// pairs pack the two `u32`s into one `u64` the same way.
+
+use @vesper-std/intern::{
+    Interner,
+    interner_new,
+    symbol_from_id
+};
+use @vesper-std/collections::flat_table::{
+    FlatTable,
+    flat_table_new
+};
+
+// An absent index or symbol.
+pub fn none() -> u32 {
+    4294967295
+}
+
+// Name kinds (`Kind` in src/packages.rs): which namespaces a name lives in.
+pub fn kind_value() -> u8 {
+    1
+}
+
+pub fn kind_type() -> u8 {
+    2
+}
+
+pub fn kind_both() -> u8 {
+    3
+}
+
+// `Kind::has`.
+pub fn kind_has(k: u8, ns: u8) -> bool {
+    k == kind_both() || k == ns
+}
+
+pub fn w(x: u32) -> u64 {
+    widen_u64(x)
+}
+
+pub fn n32(x: u64) -> u32 {
+    wrapping_u32(x)
+}
+
+pub fn inc(x: u64) -> u64 {
+    wrapping_add(x, 1)
+}
+
+pub fn pair(a: u32, b: u32) -> u64 {
+    wrapping_shl_u64(widen_u64(a), 32) | widen_u64(b)
+}
+
+pub fn hi(k: u64) -> u32 {
+    wrapping_u32(k >> 32)
+}
+
+pub fn lo(k: u64) -> u32 {
+    wrapping_u32(k & 4294967295)
+}
+
+pub fn at32(in s: ChunkSeq[u32], i: u64) -> u32 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => none(),
+    }
+}
+
+pub fn at64(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub fn at8(in s: ChunkSeq[u8], i: u64) -> u8 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
+pub struct St {
+    g: Interner,
+    buf: String,
+    // Packages: name, dependencies (name -> package) and the names of
+    // optional dependencies (for E0111's message).
+    pkg_name: ChunkSeq[u32],
+    pkg_dep_first: ChunkSeq[u32],
+    pkg_dep_len: ChunkSeq[u32],
+    dep_name: ChunkSeq[u32],
+    dep_target: ChunkSeq[u32],
+    pkg_opt_first: ChunkSeq[u32],
+    pkg_opt_len: ChunkSeq[u32],
+    opt_name: ChunkSeq[u32],
+    // Files: display path and base offset in the virtual concatenation.
+    file_display: ChunkSeq[u32],
+    file_base: ChunkSeq[u64],
+    // Modules, in load order: package, module path (segments in `seg`),
+    // file, and the source's byte range in the input.
+    mod_pkg: ChunkSeq[u32],
+    mod_file: ChunkSeq[u32],
+    mod_seg_first: ChunkSeq[u32],
+    mod_seg_len: ChunkSeq[u32],
+    seg: ChunkSeq[u32],
+    mod_text_start: ChunkSeq[u64],
+    mod_text_end: ChunkSeq[u64],
+    // (package, path) hash -> module; `mod_collide` when two share a hash.
+    mod_index: FlatTable[u64, u32],
+    mod_collide: bool,
+    // The root package's root module, or `none()`.
+    root_mod: u32,
+    // `Table`: item kinds and `pub` names, keyed (module, name).
+    item_kind: FlatTable[u64, u8],
+    public: FlatTable[u64, u8],
+    // Each module's declared names in source order (`Kind::of`; a name
+    // declared twice appears twice, its kind is the last one's).
+    mod_items_first: ChunkSeq[u32],
+    mod_items_len: ChunkSeq[u32],
+    item_list: ChunkSeq[u32],
+    // `UseDecl` rows of each module, and their `UseName` rows.
+    mod_use_first: ChunkSeq[u32],
+    mod_use_len: ChunkSeq[u32],
+    use_package: ChunkSeq[u32],
+    use_supers: ChunkSeq[u32],
+    use_path_first: ChunkSeq[u32],
+    use_path_len: ChunkSeq[u32],
+    use_names_first: ChunkSeq[u32],
+    use_names_len: ChunkSeq[u32],
+    use_public: ChunkSeq[u8],
+    use_start: ChunkSeq[u32],
+    use_end: ChunkSeq[u32],
+    un_name: ChunkSeq[u32],
+    un_alias: ChunkSeq[u32],
+    un_start: ChunkSeq[u32],
+    un_end: ChunkSeq[u32],
+    // Enums in load order, with their variant names.
+    enum_mod: ChunkSeq[u32],
+    enum_name: ChunkSeq[u32],
+    enum_var_first: ChunkSeq[u32],
+    enum_var_len: ChunkSeq[u32],
+    enum_vars: ChunkSeq[u32],
+    // `Resolver::reexported`: (module, local) -> item key and kind, and the
+    // root module's re-exported local names in insertion order.
+    reexp_key: FlatTable[u64, u64],
+    reexp_kind: FlatTable[u64, u8],
+    root_reexports: ChunkSeq[u32],
+    // `Resolver::renamed`: item key -> root name.
+    renamed: FlatTable[u64, u32],
+    // `mangled` names already built, by item key.
+    mangled: FlatTable[u64, u32],
+    // The last error of a resolver call (`Err(Diagnostic)`).
+    err_code: u32,
+    err_msg: String,
+    err_help: String,
+    err_has_help: bool,
+    err_start: u32,
+    err_end: u32,
+    // `assemble`'s maps: root names other modules must not reach, the
+    // owning enum of every variant, and the first module declaring each
+    // global name.
+    hidden: FlatTable[u32, u8],
+    var_owner: FlatTable[u32, u32],
+    var_shown: FlatTable[u32, u32],
+    globals: FlatTable[u32, u32],
+    // The outputs: diagnostics, `SourceMap::qualified` (mangled -> shown),
+    // `Module::public_items` and the renamed modules' dumps.
+    diags: ChunkSeq[u8],
+    qualified: FlatTable[u32, u32],
+    public_out: ChunkSeq[u32],
+    dumps: ChunkSeq[u8],
+    // The module being renamed (`Renamer`): its bound names (local ->
+    // target | kind << 32), the set of their targets, the value and type
+    // scopes, and its symbol maps between the AST's interner and `g`.
+    names: FlatTable[u32, u64],
+    targets: FlatTable[u32, u8],
+    values: ChunkSeq[u32],
+    types: ChunkSeq[u32],
+    cur: u32,
+    cur_pkg: u32,
+    is_root: bool,
+    shift: u32,
+    symmap: ChunkSeq[u32],
+    back: FlatTable[u32, u32],
+    // Nodes of the module's AST already renamed. The lowering shares some
+    // nodes where Rust's parser clones them (an array repetition's element,
+    // an or-pattern arm's body, a generic impl's bound): a revisit renames
+    // again from the node's file-local span, and the span moves once.
+    seen_expr: FlatTable[u32, u8],
+    seen_pat: FlatTable[u32, u8],
+    seen_param: FlatTable[u32, u8],
+    seen_tref: FlatTable[u32, u8],
+    // `generic_scopes`: owner -> range of `scope_pool`.
+    scopes: FlatTable[u32, u64],
+    scope_pool: ChunkSeq[u32],
+    // Interned spellings the renamer compares against.
+    s_self: u32,
+    s_super: u32,
+    s_self_ty: u32,
+    s_empty: u32
+}
+
+pub fn st_new() -> St {
+    let mut g = interner_new();
+    let s_empty = g.intern(in "").id();
+    let s_self = g.intern(in "self").id();
+    let s_super = g.intern(in "super").id();
+    let s_self_ty = g.intern(in "Self").id();
+    St {
+        g: g,
+        buf: String::new(),
+        pkg_name: ChunkSeq::new[u32](),
+        pkg_dep_first: ChunkSeq::new[u32](),
+        pkg_dep_len: ChunkSeq::new[u32](),
+        dep_name: ChunkSeq::new[u32](),
+        dep_target: ChunkSeq::new[u32](),
+        pkg_opt_first: ChunkSeq::new[u32](),
+        pkg_opt_len: ChunkSeq::new[u32](),
+        opt_name: ChunkSeq::new[u32](),
+        file_display: ChunkSeq::new[u32](),
+        file_base: ChunkSeq::new[u64](),
+        mod_pkg: ChunkSeq::new[u32](),
+        mod_file: ChunkSeq::new[u32](),
+        mod_seg_first: ChunkSeq::new[u32](),
+        mod_seg_len: ChunkSeq::new[u32](),
+        seg: ChunkSeq::new[u32](),
+        mod_text_start: ChunkSeq::new[u64](),
+        mod_text_end: ChunkSeq::new[u64](),
+        mod_index: flat_table_new[u64, u32](),
+        mod_collide: false,
+        root_mod: none(),
+        item_kind: flat_table_new[u64, u8](),
+        public: flat_table_new[u64, u8](),
+        mod_items_first: ChunkSeq::new[u32](),
+        mod_items_len: ChunkSeq::new[u32](),
+        item_list: ChunkSeq::new[u32](),
+        mod_use_first: ChunkSeq::new[u32](),
+        mod_use_len: ChunkSeq::new[u32](),
+        use_package: ChunkSeq::new[u32](),
+        use_supers: ChunkSeq::new[u32](),
+        use_path_first: ChunkSeq::new[u32](),
+        use_path_len: ChunkSeq::new[u32](),
+        use_names_first: ChunkSeq::new[u32](),
+        use_names_len: ChunkSeq::new[u32](),
+        use_public: ChunkSeq::new[u8](),
+        use_start: ChunkSeq::new[u32](),
+        use_end: ChunkSeq::new[u32](),
+        un_name: ChunkSeq::new[u32](),
+        un_alias: ChunkSeq::new[u32](),
+        un_start: ChunkSeq::new[u32](),
+        un_end: ChunkSeq::new[u32](),
+        enum_mod: ChunkSeq::new[u32](),
+        enum_name: ChunkSeq::new[u32](),
+        enum_var_first: ChunkSeq::new[u32](),
+        enum_var_len: ChunkSeq::new[u32](),
+        enum_vars: ChunkSeq::new[u32](),
+        reexp_key: flat_table_new[u64, u64](),
+        reexp_kind: flat_table_new[u64, u8](),
+        root_reexports: ChunkSeq::new[u32](),
+        renamed: flat_table_new[u64, u32](),
+        mangled: flat_table_new[u64, u32](),
+        err_code: 0,
+        err_msg: String::new(),
+        err_help: String::new(),
+        err_has_help: false,
+        err_start: 0,
+        err_end: 0,
+        hidden: flat_table_new[u32, u8](),
+        var_owner: flat_table_new[u32, u32](),
+        var_shown: flat_table_new[u32, u32](),
+        globals: flat_table_new[u32, u32](),
+        diags: ChunkSeq::new[u8](),
+        qualified: flat_table_new[u32, u32](),
+        public_out: ChunkSeq::new[u32](),
+        dumps: ChunkSeq::new[u8](),
+        names: flat_table_new[u32, u64](),
+        targets: flat_table_new[u32, u8](),
+        values: ChunkSeq::new[u32](),
+        types: ChunkSeq::new[u32](),
+        cur: 0,
+        cur_pkg: 0,
+        is_root: false,
+        shift: 0,
+        symmap: ChunkSeq::new[u32](),
+        back: flat_table_new[u32, u32](),
+        seen_expr: flat_table_new[u32, u8](),
+        seen_pat: flat_table_new[u32, u8](),
+        seen_param: flat_table_new[u32, u8](),
+        seen_tref: flat_table_new[u32, u8](),
+        scopes: flat_table_new[u32, u64](),
+        scope_pool: ChunkSeq::new[u32](),
+        s_self: s_self,
+        s_super: s_super,
+        s_self_ty: s_self_ty,
+        s_empty: s_empty
+    }
+}
+
+// ---------------------------------------------------------------- symbols
+
+// The byte range of symbol `sym` in `s.g`'s text.
+pub fn sym_range(in s: St, sym: u32) -> (u64, u64) {
+    s.g.span(symbol_from_id(sym))
+}
+
+pub fn sym_len(in s: St, sym: u32) -> u64 {
+    let (a, b) = sym_range(in s, sym);
+    wrapping_sub(b, a)
+}
+
+// Byte `i` of symbol `sym` (0 past its end).
+pub fn sym_byte(in s: St, sym: u32, i: u64) -> u8 {
+    let (a, b) = sym_range(in s, sym);
+    let at = wrapping_add(a, i);
+    if at >= b {
+        return 0;
+    }
+    match s.g.text_byte(at) {
+        Option::Some(c) => c,
+        Option::None => 0,
+    }
+}
+
+// Appends the text of `sym` to `out`.
+pub fn push_sym(in s: St, sym: u32, inout out: String) {
+    s.g.resolve_into(symbol_from_id(sym), inout out);
+}
+
+// Interns `s.buf`.
+pub fn intern_buf(inout s: St) -> u32 {
+    s.g.intern(in s.buf).id()
+}
+
+pub fn intern_str(inout s: St, in t: Str) -> u32 {
+    s.g.intern(in t).id()
+}
+
+// Whether `sym` starts with `p`.
+pub fn sym_starts(in s: St, sym: u32, in p: Str) -> bool {
+    let n = p.len();
+    if sym_len(in s, sym) < n {
+        return false;
+    }
+    let b = p.as_bytes();
+    for i in 0..n {
+        let c = match b.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        if sym_byte(in s, sym, i) != c {
+            return false;
+        }
+    }
+    true
+}
+
+// The offset of the first `::` in `sym`, or its length when it has none.
+pub fn sym_path_split(in s: St, sym: u32) -> u64 {
+    let n = sym_len(in s, sym);
+    let mut i: u64 = 0;
+    loop {
+        if inc(i) >= n {
+            break n;
+        }
+        if sym_byte(in s, sym, i) == 58 && sym_byte(in s, sym, inc(i)) == 58 {
+            break i;
+        }
+        i = inc(i);
+    }
+}
+
+// Symbol of bytes `a..b` of `sym`.
+pub fn sym_slice(inout s: St, sym: u32, a: u64, b: u64) -> u32 {
+    s.buf.clear();
+    let (start, end) = sym_range(in s, sym);
+    let x = wrapping_add(start, a);
+    let mut y = wrapping_add(start, b);
+    if y > end {
+        y = end;
+    }
+    s.g.resolve_into(symbol_from_id(sym), inout s.buf);
+    let t = wrapping_sub(x, start);
+    let u = wrapping_sub(y, start);
+    s.g.intern(in s.buf[t..u]).id()
+}
+
+// Whether two symbols' texts are in byte order `a < b` (Rust's `String`
+// order, which `BTreeMap` keys iterate in).
+pub fn sym_less(in s: St, a: u32, b: u32) -> bool {
+    let na = sym_len(in s, a);
+    let nb = sym_len(in s, b);
+    let mut i: u64 = 0;
+    loop {
+        if i >= na || i >= nb {
+            break na < nb;
+        }
+        let x = sym_byte(in s, a, i);
+        let y = sym_byte(in s, b, i);
+        if x != y {
+            break x < y;
+        }
+        i = inc(i);
+    }
+}
+
+// ---------------------------------------------------------------- output
+
+pub fn put(inout o: ChunkSeq[u8], in t: Str) {
+    o.extend(in t.as_bytes());
+}
+
+pub fn put_string(inout o: ChunkSeq[u8], in t: String) {
+    o.extend(in t.as_bytes());
+}
+
+pub fn put_decimal(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_decimal(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+pub fn push_decimal(inout o: String, v: u64) {
+    if v >= 10 {
+        push_decimal(inout o, v / 10);
+    }
+    o.push_char(wrapping_u32(wrapping_add(v % 10, 48)));
+}
+
+pub fn put_sym(inout o: ChunkSeq[u8], in s: St, sym: u32) {
+    let (a, b) = sym_range(in s, sym);
+    for i in a..b {
+        match s.g.text_byte(i) {
+            Option::Some(c) => o.push(c),
+            Option::None => {},
+        }
+    }
+}
+
+// ---------------------------------------------------------------- modules
+
+pub fn mod_hash(pkg: u32, in path: ChunkSeq[u32]) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    h = wrapping_mul(h ^ widen_u64(pkg), 1099511628211);
+    for i in 0..path.len() {
+        h = wrapping_mul(h ^ widen_u64(at32(in path, i)), 1099511628211);
+    }
+    h
+}
+
+// Whether module `m` is package `pkg`'s module `path`.
+pub fn mod_is(in s: St, m: u32, pkg: u32, in path: ChunkSeq[u32]) -> bool {
+    if at32(in s.mod_pkg, w(m)) != pkg {
+        return false;
+    }
+    let n = w(at32(in s.mod_seg_len, w(m)));
+    if n != path.len() {
+        return false;
+    }
+    let f = w(at32(in s.mod_seg_first, w(m)));
+    for i in 0..n {
+        if at32(in s.seg, wrapping_add(f, i)) != at32(in path, i) {
+            return false;
+        }
+    }
+    true
+}
+
+// The module `path` of package `pkg`, or `none()` (`tables.contains_key`).
+pub fn find_module(in s: St, pkg: u32, in path: ChunkSeq[u32]) -> u32 {
+    match s.mod_index.get(mod_hash(pkg, in path)) {
+        Option::Some(m) => {
+            if mod_is(in s, m, pkg, in path) {
+                return m;
+            }
+        },
+        Option::None => {
+            if !s.mod_collide {
+                return none();
+            }
+        },
+    }
+    if !s.mod_collide {
+        return none();
+    }
+    for m in 0..s.mod_pkg.len() {
+        if mod_is(in s, n32(m), pkg, in path) {
+            return n32(m);
+        }
+    }
+    none()
+}
+
+// The path of module `m`, appended to `out`.
+pub fn mod_path_into(in s: St, m: u32, inout out: ChunkSeq[u32]) {
+    let f = w(at32(in s.mod_seg_first, w(m)));
+    let n = w(at32(in s.mod_seg_len, w(m)));
+    for i in 0..n {
+        out.push(at32(in s.seg, wrapping_add(f, i)));
+    }
+}
+
+pub fn mod_path_len(in s: St, m: u32) -> u64 {
+    w(at32(in s.mod_seg_len, w(m)))
+}
+
+pub fn mod_seg(in s: St, m: u32, i: u64) -> u32 {
+    at32(in s.seg, wrapping_add(w(at32(in s.mod_seg_first, w(m))), i))
+}
+
+// ---------------------------------------------------------------- errors
+
+// Starts an error (`Diagnostic::new(code, ..)`); the caller writes the
+// message into `s.err_msg`.
+pub fn err(inout s: St, code: u32, start: u32, end: u32) {
+    s.err_code = code;
+    s.err_msg.clear();
+    s.err_help.clear();
+    s.err_has_help = false;
+    s.err_start = start;
+    s.err_end = end;
+}
+
+// Writes the pending error as a diagnostic of `file`, one line:
+// `diag <file> E0<code> <start>..<end> <message>[ help: <help>]`.
+pub fn emit(inout s: St, file: u32) {
+    s.diags.extend(in "diag ".as_bytes());
+    put_decimal(inout s.diags, w(file));
+    s.diags.extend(in " E0".as_bytes());
+    put_decimal(inout s.diags, w(s.err_code));
+    s.diags.push(32);
+    put_decimal(inout s.diags, w(s.err_start));
+    s.diags.extend(in "..".as_bytes());
+    put_decimal(inout s.diags, w(s.err_end));
+    s.diags.push(32);
+    s.diags.extend(in s.err_msg.as_bytes());
+    if s.err_has_help {
+        s.diags.extend(in " help: ".as_bytes());
+        s.diags.extend(in s.err_help.as_bytes());
+    }
+    s.diags.push(10);
+    s.err_code = 0;
+}
