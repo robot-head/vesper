@@ -834,6 +834,23 @@ struct FipChecker<'a> {
 }
 
 impl<'a> FipChecker<'a> {
+    fn non_fip_call_uses_box<'expr>(
+        &self,
+        callee: &Function,
+        args: impl IntoIterator<Item = &'expr Expr>,
+        result: &Type,
+    ) -> bool {
+        !callee.fip
+            && (type_contains_box(self.world, result)
+                || type_contains_box(self.world, &callee.result)
+                || self.unsafe_non_fip.contains(&callee.name)
+                || callee.params.iter().zip(args).any(|(param, arg)| {
+                    param.pass == Pass::Sink
+                        && (type_contains_box(self.world, &param.ty)
+                            || type_contains_box(self.world, &self.expr_type(arg)))
+                }))
+    }
+
     fn expr_type(&self, e: &Expr) -> Type {
         self.world
             .types
@@ -1345,13 +1362,11 @@ impl<'a> FipChecker<'a> {
                                 e.span.clone(),
                             ));
                         }
-                        if !callee_fn.fip
-                            && (type_contains_box(self.world, &callee_fn.result)
-                                || callee_fn.params.iter().any(|p| {
-                                    p.pass == Pass::Sink && type_contains_box(self.world, &p.ty)
-                                })
-                                || self.unsafe_non_fip.contains(name))
-                        {
+                        if self.non_fip_call_uses_box(
+                            callee_fn,
+                            args.iter().map(|arg| &arg.expr),
+                            &e_ty,
+                        ) {
                             self.diagnostics.push(Diagnostic::new(
                                 "E0801",
                                 format!("@fip function cannot call non-@fip function '{name}' that uses Box"),
@@ -1424,13 +1439,11 @@ impl<'a> FipChecker<'a> {
                                 e.span.clone(),
                             ));
                         }
-                        if !callee_fn.fip
-                            && (type_contains_box(self.world, &callee_fn.result)
-                                || callee_fn.params.iter().any(|p| {
-                                    p.pass == Pass::Sink && type_contains_box(self.world, &p.ty)
-                                })
-                                || self.unsafe_non_fip.contains(&method_name))
-                        {
+                        if self.non_fip_call_uses_box(
+                            callee_fn,
+                            std::iter::once(base.as_ref()).chain(args.iter().map(|arg| &arg.expr)),
+                            &e_ty,
+                        ) {
                             self.diagnostics.push(Diagnostic::new(
                                 "E0801",
                                 format!("@fip function cannot call non-@fip function '{method_name}' that uses Box"),
@@ -1546,7 +1559,14 @@ pub fn check_world(world: &World) -> Vec<Diagnostic> {
 struct DropSlotState {
     ty: Type,
     pass: Pass,
+    projections: Vec<Vec<String>>,
     moved: Vec<Vec<String>>,
+}
+
+impl DropSlotState {
+    fn owns_path(&self, path: &[String]) -> bool {
+        self.projections.is_empty() || path_is_covered(path, &self.projections)
+    }
 }
 
 fn path_is_covered(path: &[String], moved: &[Vec<String>]) -> bool {
@@ -1566,6 +1586,7 @@ fn bind_drop_slots(
                 DropSlotState {
                     ty: ty.clone(),
                     pass: Pass::Sink,
+                    projections: vec![],
                     moved: vec![],
                 },
             );
@@ -2033,6 +2054,7 @@ fn entry_slots(
                     DropSlotState {
                         ty: p.ty.clone(),
                         pass: p.pass,
+                        projections: p.projections.clone(),
                         moved: vec![],
                     },
                 )
@@ -2086,6 +2108,7 @@ fn entry_slots(
                 DropSlotState {
                     ty: first_slot.ty.clone(),
                     pass: first_slot.pass,
+                    projections: first_slot.projections.clone(),
                     moved: union_moved,
                 },
             );
@@ -2105,7 +2128,8 @@ fn entry_slots(
             let rem = remaining_box_paths(world, &p_slot.ty, &p_slot.moved);
             let joined = common.get(name);
             for path in rem {
-                if joined.is_none_or(|j| path_is_covered(&path, &j.moved))
+                if p_slot.owns_path(&path)
+                    && joined.is_none_or(|j| path_is_covered(&path, &j.moved))
                     && let Some(drop_ty) = resolve_place_type(world, &p_slot.ty, &path)
                     && type_contains_box(world, &drop_ty)
                 {
@@ -2139,7 +2163,8 @@ fn owned_slot_drops(
             continue;
         }
         for path in remaining_box_paths(world, &slot.ty, &slot.moved) {
-            if let Some(drop_ty) = resolve_place_type(world, &slot.ty, &path)
+            if slot.owns_path(&path)
+                && let Some(drop_ty) = resolve_place_type(world, &slot.ty, &path)
                 && type_contains_box(world, &drop_ty)
             {
                 drops.push(FipDrop::Place(
@@ -2277,7 +2302,9 @@ fn block_drops(
                         for rem_sub in remaining_box_paths(world, &sub_ty, &sub_moved) {
                             let mut full_path = path.clone();
                             full_path.extend(rem_sub);
-                            if let Some(drop_ty) = resolve_place_type(world, &slot.ty, &full_path)
+                            if slot.owns_path(&full_path)
+                                && let Some(drop_ty) =
+                                    resolve_place_type(world, &slot.ty, &full_path)
                                 && type_contains_box(world, &drop_ty)
                             {
                                 before.push((

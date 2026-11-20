@@ -1146,3 +1146,39 @@ fn main() -> i64 {
         "NativeBatch preflight should reject Op::Fip"
     );
 }
+
+#[test]
+fn fip_rejects_a_generic_helper_that_takes_a_box() {
+    rejected(
+        r#"
+fn discard[T: mod affine](sink value: T) { let _ = value; }
+@fip fn caller(sink box_value: Box[i64]) {
+    discard[Box[i64]](box_value)
+}
+"#,
+        "E0801",
+        "non-@fip",
+    );
+}
+
+#[test]
+fn projected_sink_cleanup_only_drops_the_transferred_field() {
+    let checked = accepted(
+        r#"
+affine struct Pair { first: Box[i64], second: Box[i64] }
+fn release(sink pair.{first}: Pair) {}
+"#,
+    );
+    let mut program = ir::lower(&checked);
+    fip::elaborate_non_fip_drops(&checked.world, &mut program);
+    let drops: Vec<_> = program.functions["release"]
+        .box_drops_before_term
+        .values()
+        .flatten()
+        .collect();
+    let [fip::FipDrop::Place(place, _)] = drops.as_slice() else {
+        panic!("expected one drop for the projected sink, got {drops:?}");
+    };
+    assert_eq!(place.root, "pair");
+    assert_eq!(place.path, ["first"]);
+}
