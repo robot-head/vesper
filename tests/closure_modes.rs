@@ -338,3 +338,50 @@ fn main() -> u64 {
     }
     assert_eq!(differential("box_tree", source), 111);
 }
+
+/// A lent callback that raises: the handler outside the call catches it,
+/// and the box tree the closure borrowed stays the caller's, freed once.
+#[test]
+fn a_raising_lent_closure_keeps_the_borrowed_boxes() {
+    let source = "enum Expr {
+    Lit(u64),
+    Neg(Box[Expr])
+}
+fn eval(in e: Expr) -> u64 {
+    match e {
+        Expr::Lit(n) => n,
+        Expr::Neg(x) => match x { Box(y) => wrapping_add(1, eval(in y)) },
+    }
+}
+fn apply[e: eff](f: fn(u64) -> u64 eff [e]) -> u64 eff [e] { wrapping_add(f(1), f(5)) }
+fn main() -> u64 {
+    let t = Expr::Neg(Box::new(Expr::Neg(Box::new(Expr::Lit(40)))));
+    let mut s: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    s.push(3);
+    let r = handle Fail[RuntimeError] in {
+        apply(|x: u64| wrapping_add(eval(in t), s[x]))
+    } with { return x => x, raise(e, k) => 100, };
+    wrapping_add(r, eval(in t))
+}";
+    for optimize in [true, false] {
+        let c = accepted(source);
+        fip::native_runtime::reset_counts();
+        let got = native::jit_with_options(&c.world, "main", optimize).unwrap();
+        assert_eq!(got.to_string(), "142", "optimize {optimize}");
+        assert_eq!(
+            fip::native_runtime::free_count(),
+            fip::native_runtime::alloc_count(),
+            "optimize {optimize}: every box freed once"
+        );
+    }
+    assert_eq!(differential("raising_box", source), 142);
+}
+
+/// A lent closure for a `linear` function parameter owns nothing, so it is
+/// no linear temporary (`E0302`).
+#[test]
+fn a_linear_function_parameter_takes_a_lent_closure() {
+    let source = "fn apply(f: fn@linear(u64) -> u64) -> u64 { f(1) }
+fn main() -> u64 { let n: u64 = 41; apply(|x: u64| wrapping_add(x, n)) }";
+    assert_eq!(differential("linear_param", source), 42);
+}

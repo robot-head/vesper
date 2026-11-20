@@ -1813,22 +1813,7 @@ pub fn elaborate_non_fip_drops(world: &World, program: &mut crate::ir::Program) 
         f.box_drops_before_inst.clear();
         f.box_drops_after_inst.clear();
         f.box_drops_before_term.clear();
-        // A lent closure's body (§4.2) borrows its captures: it drops none.
-        let lent;
-        let source = match world.lent_closures.get(&f.name) {
-            Some(names) => {
-                let mut g = f.clone();
-                for p in &mut g.params {
-                    if p.pass == Pass::Sink && names.contains(&p.name) {
-                        p.pass = Pass::In;
-                    }
-                }
-                lent = g;
-                &lent
-            }
-            None => &*f,
-        };
-        let Some(e) = elaborate_function(world, source) else {
+        let Some(e) = elaborate_function(world, f) else {
             continue;
         };
         if !edges_placeable(f, &e) {
@@ -2086,6 +2071,25 @@ const DROP_FIXPOINT_LIMIT: usize = 64;
 /// reaching it from outside the loop, so a box live at the header is
 /// owned on every edge that enters it.
 fn elaborate_function(world: &World, f: &crate::ir::FunctionIr) -> Option<Elaboration> {
+    // A lent closure's body (§4.2) borrows its captures: no plan, on a
+    // normal or a failure exit, drops them.
+    if let Some(names) = world.lent_closures.get(&f.name)
+        && f.params
+            .iter()
+            .any(|p| p.pass == Pass::Sink && names.contains(&p.name))
+    {
+        let mut g = f.clone();
+        for p in &mut g.params {
+            if p.pass == Pass::Sink && names.contains(&p.name) {
+                p.pass = Pass::In;
+            }
+        }
+        return elaborate_owned(world, &g);
+    }
+    elaborate_owned(world, f)
+}
+
+fn elaborate_owned(world: &World, f: &crate::ir::FunctionIr) -> Option<Elaboration> {
     use crate::ir::Terminator;
     let n_blocks = f.blocks.len();
     let mut plan = Elaboration {

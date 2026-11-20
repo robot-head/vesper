@@ -3473,7 +3473,13 @@ impl Checker<'_> {
                     expr.span.clone(),
                 );
             }
-            if param.pass != Pass::Sink && place.is_none() && self.mode(&actual) == Mode::Linear {
+            // A lent closure owns nothing (§4.2): its mode is the
+            // parameter's, so it is no linear temporary.
+            if param.pass != Pass::Sink
+                && place.is_none()
+                && !lent_closure
+                && self.mode(&actual) == Mode::Linear
+            {
                 self.error(
                     "E0302",
                     "bind a temporary linear value before borrowing it, then consume it explicitly",
