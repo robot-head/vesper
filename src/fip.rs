@@ -1898,6 +1898,54 @@ fn split_edge(f: &mut crate::ir::FunctionIr, from: usize, to: usize) -> usize {
     at
 }
 
+/// Box values defined in another block and needed on arrival at each block.
+fn live_box_inputs(
+    world: &World,
+    f: &crate::ir::FunctionIr,
+    preds: &[Vec<usize>],
+) -> Vec<BTreeSet<ValueId>> {
+    let mut definitions = BTreeMap::new();
+    for (block, body) in f.blocks.iter().enumerate() {
+        definitions.extend(body.params.iter().map(|&value| (value, block)));
+        definitions.extend(body.instructions.iter().map(|inst| (inst.dest, block)));
+    }
+    let mut live = vec![BTreeSet::new(); f.blocks.len()];
+    for (block, body) in f.blocks.iter().enumerate() {
+        let operands = body
+            .instructions
+            .iter()
+            .flat_map(|inst| crate::ir_inline::operands(&inst.op))
+            .chain(crate::ir_inline::terminator_operands(&body.terminator));
+        for value in operands {
+            let Some(&definition) = definitions.get(&value) else {
+                continue;
+            };
+            if definition == block
+                || live[block].contains(&value)
+                || !f
+                    .values
+                    .get(&value)
+                    .is_some_and(|ty| type_contains_box(world, ty))
+            {
+                continue;
+            }
+            let mut pending = vec![block];
+            while let Some(at) = pending.pop() {
+                if at != definition && live[at].insert(value) {
+                    pending.extend(&preds[at]);
+                }
+            }
+        }
+    }
+    live
+}
+
+#[derive(PartialEq)]
+struct BlockOwnership {
+    slots: BTreeMap<String, DropSlotState>,
+    values: BTreeMap<ValueId, Type>,
+}
+
 /// Passes over a graph before its slot states are taken as unsolved.
 const DROP_FIXPOINT_LIMIT: usize = 64;
 
@@ -2000,7 +2048,18 @@ fn elaborate_function(world: &World, f: &crate::ir::FunctionIr) -> Option<Elabor
         order = post;
     }
 
-    let mut exit_slots: Vec<Option<BTreeMap<String, DropSlotState>>> = vec![None; n_blocks];
+    let live_inputs = live_box_inputs(world, f, &preds);
+    let live_outputs: Vec<BTreeSet<ValueId>> = succs
+        .iter()
+        .map(|targets| {
+            targets
+                .iter()
+                .flat_map(|&t| live_inputs[t].iter().copied())
+                .collect()
+        })
+        .collect();
+    let mut exits: Vec<Option<BlockOwnership>> =
+        std::iter::repeat_with(|| None).take(n_blocks).collect();
     let mut diverged = vec![false; n_blocks];
     for _ in 0..DROP_FIXPOINT_LIMIT {
         plan.before_inst.clear();
@@ -2013,18 +2072,67 @@ fn elaborate_function(world: &World, f: &crate::ir::FunctionIr) -> Option<Elabor
             if !reachable[b] {
                 continue;
             }
-            let r_preds: Vec<usize> = preds[b]
+            let visited_preds: Vec<usize> = preds[b]
                 .iter()
                 .copied()
-                .filter(|&p| reachable[p] && !diverged[p] && exit_slots[p].is_some())
+                .filter(|&p| reachable[p] && !diverged[p] && exits[p].is_some())
                 .collect();
-            let slots = entry_slots(world, f, b, &r_preds, &exit_slots, &mut plan.edges);
-            let (slots, block_diverges) = block_drops(world, f, b, slots, &mut plan);
-            if diverged[b] != block_diverges || exit_slots[b].as_ref() != Some(&slots) {
+            let reachable_preds: Vec<usize> = visited_preds
+                .iter()
+                .copied()
+                .filter(|&p| {
+                    !matches!(
+                        &f.blocks[p].terminator,
+                        Terminator::Jump { block, args }
+                            if *block == b
+                                && args.iter().any(|id| {
+                                    f.values.get(id).is_some_and(|t| t.name() == "Never")
+                                })
+                    )
+                })
+                .collect();
+            let active_preds = if reachable_preds.is_empty() {
+                &visited_preds
+            } else {
+                &reachable_preds
+            };
+            let previous = |p: usize| exits[p].as_ref().expect("visited predecessor");
+            let slots = entry_slots(world, f, b, active_preds, &exits, &mut plan.edges);
+            // Carry a temporary into the block only when it is live here
+            // and every incoming edge still owns it.
+            let mut values = BTreeMap::new();
+            if let Some((&first, rest)) = active_preds.split_first() {
+                for (&id, ty) in &previous(first).values {
+                    if live_inputs[b].contains(&id)
+                        && rest.iter().all(|&p| previous(p).values.contains_key(&id))
+                    {
+                        values.insert(id, ty.clone());
+                    }
+                }
+            }
+            for &p in active_preds {
+                for (&id, ty) in &previous(p).values {
+                    if !values.contains_key(&id) {
+                        plan.edges
+                            .entry((p, b))
+                            .or_default()
+                            .push(FipDrop::Value(id, ty.clone()));
+                    }
+                }
+            }
+            let (state, block_diverges) = block_drops(
+                world,
+                f,
+                b,
+                BlockOwnership { slots, values },
+                &live_outputs[b],
+                &mut plan,
+            );
+            if diverged[b] != block_diverges || exits[b].as_ref() != Some(&state) {
                 changed = true;
             }
             diverged[b] = block_diverges;
-            exit_slots[b] = Some(slots);
+            exits[b] = Some(state);
         }
         if !changed || acyclic {
             return Some(plan);
@@ -2034,17 +2142,16 @@ fn elaborate_function(world: &World, f: &crate::ir::FunctionIr) -> Option<Elabor
 }
 
 /// The slot state entering block `b` from its visited predecessors
-/// `r_preds`, recording in `edges` what each incoming edge drops.
+/// `active_preds`, recording in `edges` what each incoming edge drops.
 fn entry_slots(
     world: &World,
     f: &crate::ir::FunctionIr,
     b: usize,
-    r_preds: &[usize],
-    exit_slots: &[Option<BTreeMap<String, DropSlotState>>],
+    active_preds: &[usize],
+    exits: &[Option<BlockOwnership>],
     edges: &mut BTreeMap<(usize, usize), Vec<FipDrop>>,
 ) -> BTreeMap<String, DropSlotState> {
-    use crate::ir::Terminator;
-    if b == 0 && r_preds.is_empty() {
+    if b == 0 && active_preds.is_empty() {
         return f
             .params
             .iter()
@@ -2061,26 +2168,7 @@ fn entry_slots(
             })
             .collect();
     }
-    let exit = |p: usize| exit_slots[p].as_ref().expect("visited predecessor");
-    let non_never: Vec<usize> = r_preds
-        .iter()
-        .copied()
-        .filter(|&p| {
-            !matches!(
-                &f.blocks[p].terminator,
-                Terminator::Jump { block, args }
-                    if *block == b
-                        && args.iter().any(|id| {
-                            f.values.get(id).is_some_and(|t| t.name() == "Never")
-                        })
-            )
-        })
-        .collect();
-    let active_preds = if non_never.is_empty() {
-        r_preds
-    } else {
-        &non_never
-    };
+    let exit = |p: usize| &exits[p].as_ref().expect("visited predecessor").slots;
     if active_preds.is_empty() {
         return BTreeMap::new();
     }
@@ -2186,11 +2274,15 @@ fn block_drops(
     world: &World,
     f: &crate::ir::FunctionIr,
     b: usize,
-    mut slots: BTreeMap<String, DropSlotState>,
+    state: BlockOwnership,
+    live_out: &BTreeSet<ValueId>,
     plan: &mut Elaboration,
-) -> (BTreeMap<String, DropSlotState>, bool) {
+) -> (BlockOwnership, bool) {
     use crate::ir::{Op, Terminator};
-    let mut owned_values: BTreeMap<ValueId, Type> = BTreeMap::new();
+    let BlockOwnership {
+        mut slots,
+        values: mut owned_values,
+    } = state;
     for &param_id in &f.blocks[b].params {
         if let Some(ty) = f.values.get(&param_id)
             && type_contains_box(world, ty)
@@ -2424,16 +2516,10 @@ fn block_drops(
             }
         }
 
-        // A temporary used in a later block (an argument evaluated before
-        // a branch in a later argument) is that use's to consume: dropping
-        // it here would hand the use a freed box or a released handle.
-        if owned_values.contains_key(&inst.dest) && used_outside_block(f, b, inst.dest) {
-            owned_values.remove(&inst.dest);
-        }
         let dead_temps: Vec<ValueId> = owned_values
             .keys()
             .copied()
-            .filter(|&v| !value_used_after_in_block(blk, inst_idx, v))
+            .filter(|&v| !live_out.contains(&v) && !value_used_after_in_block(blk, inst_idx, v))
             .collect();
         for v in dead_temps {
             if let Some(v_ty) = owned_values.remove(&v) {
@@ -2450,7 +2536,7 @@ fn block_drops(
             Terminator::Return(v) => {
                 owned_values.remove(v);
                 let drops = plan.before_term.entry(b).or_default();
-                for (val_id, val_ty) in owned_values {
+                for (val_id, val_ty) in std::mem::take(&mut owned_values) {
                     drops.push(FipDrop::Value(val_id, val_ty));
                 }
                 drops.extend(owned_slot_drops(world, f, &slots));
@@ -2459,54 +2545,34 @@ fn block_drops(
                 for a in args {
                     owned_values.remove(a);
                 }
-                if !owned_values.is_empty() {
-                    let drops = plan.before_term.entry(b).or_default();
-                    for (val_id, val_ty) in owned_values {
-                        drops.push(FipDrop::Value(val_id, val_ty));
-                    }
-                }
-            }
-            Terminator::Branch { .. } => {
-                if !owned_values.is_empty() {
-                    let drops = plan.before_term.entry(b).or_default();
-                    for (val_id, val_ty) in owned_values {
-                        drops.push(FipDrop::Value(val_id, val_ty));
-                    }
-                }
             }
             Terminator::Match { value, .. } => {
                 owned_values.remove(value);
-                if !owned_values.is_empty() {
-                    let drops = plan.before_term.entry(b).or_default();
-                    for (val_id, val_ty) in owned_values {
-                        drops.push(FipDrop::Value(val_id, val_ty));
-                    }
+            }
+            Terminator::Branch { .. } => {}
+            Terminator::Unreachable => block_div = true,
+        }
+        if !block_div {
+            owned_values.retain(|id, ty| {
+                if live_out.contains(id) {
+                    true
+                } else {
+                    plan.before_term
+                        .entry(b)
+                        .or_default()
+                        .push(FipDrop::Value(*id, ty.clone()));
+                    false
                 }
-            }
-            Terminator::Unreachable => {
-                block_div = true;
-            }
+            });
         }
     }
-    (slots, block_div)
-}
-/// Whether value `v` (defined in block `b`) is used by another block.
-fn used_outside_block(f: &crate::ir::FunctionIr, b: usize, v: ValueId) -> bool {
-    use crate::ir::Terminator;
-    f.blocks.iter().enumerate().any(|(i, blk)| {
-        i != b
-            && (blk
-                .instructions
-                .iter()
-                .any(|inst| crate::ir_inline::operands(&inst.op).contains(&v))
-                || match &blk.terminator {
-                    Terminator::Jump { args, .. } => args.contains(&v),
-                    Terminator::Branch { condition, .. } => *condition == v,
-                    Terminator::Match { value, .. } => *value == v,
-                    Terminator::Return(r) => *r == v,
-                    Terminator::Unreachable => false,
-                })
-    })
+    (
+        BlockOwnership {
+            slots,
+            values: owned_values,
+        },
+        block_div,
+    )
 }
 /// Whether `inst` can abort its graph with a `Fail` (its own or a callee's).
 fn may_abort(inst: &crate::ir::Instruction) -> bool {
