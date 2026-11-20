@@ -1285,7 +1285,8 @@ fn declaration(inout l: L) -> u32 {
         let c = model_decl(inout l, start, public);
         return item_node(inout l, 6, c);
     }
-    let mut tile: u32 = none();
+    let mut tiled = false;
+    let mut tile: u32 = 0;
     if at_word(in l, 0, w_tiled()) && nth(in l, 1) == k_l_paren() {
         bump(inout l);
         expect(inout l, k_l_paren());
@@ -1298,6 +1299,7 @@ fn declaration(inout l: L) -> u32 {
             }
         }
         expect(inout l, k_r_paren());
+        tiled = true;
         tile = n32(width);
     }
     let md = if at_word(in l, 0, w_wire()) && nth(in l, 1) == k_struct() {
@@ -1342,6 +1344,7 @@ fn declaration(inout l: L) -> u32 {
                 generics: gs,
                 variants: vs,
                 is_enum: false,
+                tiled: tiled,
                 tile_width: tile,
                 start: n32(start),
                 end: n32(end)
@@ -1422,7 +1425,8 @@ fn declaration(inout l: L) -> u32 {
                 generics: gs,
                 variants: vs,
                 is_enum: true,
-                tile_width: none(),
+                tiled: false,
+                tile_width: 0,
                 start: n32(start),
                 end: n32(end)
             }

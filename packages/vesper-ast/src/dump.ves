@@ -770,7 +770,8 @@ fn dump_adt(inout o: ChunkSeq[u8], in a: Ast, x: u32, depth: u64) {
             generics: 0,
             variants: 0,
             is_enum: false,
-            tile_width: none(),
+            tiled: false,
+            tile_width: 0,
             start: 0,
             end: 0
         }
@@ -784,7 +785,7 @@ fn dump_adt(inout o: ChunkSeq[u8], in a: Ast, x: u32, depth: u64) {
     put(inout o, in " enum=");
     put_bool(inout o, n.is_enum);
     put(inout o, in " tile=");
-    if n.tile_width == none() {
+    if !n.tiled {
         o.push(45);
     } else {
         put_u64(inout o, widen_u64(n.tile_width));

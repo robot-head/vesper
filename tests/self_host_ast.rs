@@ -996,6 +996,8 @@ fn desugarings_and_limits_match_the_rust_ast() {
         // Literal values.
         "fn f() { 0x1f; 1_000; 18446744073709551615; 18446744073709551616; 0x_; \"a\\n\\t\\\"\\\\\\/\\b\\f\\r\"; \"\\u00e9\\uD834\\uDD1E\"; \"\\uD800\"; \"\\q\"; \"é\" }",
         "fn f() { 1.5; 0.1; 1e10; 1E-5; 2.5e+3; 1e400; 1e-400; 4.9e-324; 2.4e-324; 2.5e-324; 1.7976931348623157e308; 1.7976931348623159e308; 0.000; 00.5e-3 }",
+        // A tile width equal to u32::MAX is still present.
+        "tiled(4294967295) struct S {} tiled(4294967294) struct T {} tiled(4294967296) struct U {} tiled() struct V {}",
         // Recovery.
         "} ) ] fn f() { ) } let x = 1; 42",
         "fn f() { x[ } fn g() { f( } fn h() { S { a: } }",

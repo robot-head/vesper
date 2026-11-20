@@ -4,7 +4,7 @@
 //! repository `.ves` file. Ignored by default; run with
 //!
 //! ```text
-//! cargo test --release --test self_host_ast_bench -- --ignored --nocapture
+//! cargo test --release --test self_host_ast_bench -- --ignored --nocapture --test-threads=1
 //! ```
 //!
 //! `abba_against_the_rust_parser` times both in ABBA order over the corpus,
@@ -15,6 +15,8 @@
 //! bytes the Rust `Module` keeps with a counting allocator, and the Vesper
 //! AST's bytes as its row counts times each element's native stride
 //! (`Layout::of`), since Vesper sequences allocate with `malloc` directly.
+//! Run them one at a time (`--test-threads=1`): the allocation counters are
+//! process-wide, and concurrent tests would also disturb the timings.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};

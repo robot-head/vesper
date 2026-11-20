@@ -187,13 +187,15 @@ pub copy struct VariantNode {
     named: bool
 }
 
-// `Adt`: `tile_width` is NONE for `None`.
+// `Adt`: `tiled` says whether `tile_width` is present (`Some`); a
+// separate flag, because every `u32` is a valid width.
 pub copy struct AdtNode {
     name: u32,
     mode: u8,
     generics: u32,
     variants: u32,
     is_enum: bool,
+    tiled: bool,
     tile_width: u32,
     start: u32,
     end: u32
