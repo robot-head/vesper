@@ -1,0 +1,954 @@
+// The type table of vesper-core (`ast::Type`, `Effects`, `substitute`,
+// `Display`), as a hash-consed arena. A Rust `Type` is a tree of owned
+// `Vec`s and `Box`es, cloned whenever it is passed on; here a type is a
+// `u32` id and equal types have equal ids, so `clone` is a copy and `==`
+// is one compare. That is most of why the census samples ran at 0.34x to
+// 0.87x of Rust's time; keep it.
+
+use self::util::{
+    add,
+    fold,
+    inc,
+    inc32,
+    n32,
+    push_decimal,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use self::names::{
+    Names
+};
+
+const NONE32: u32 = 4294967295;
+
+pub const K_LIT: u8 = 0;
+pub const K_NAMED: u8 = 1;
+pub const K_TUPLE: u8 = 2;
+pub const K_FN: u8 = 3;
+pub const K_ROW: u8 = 4;
+pub const K_INFER: u8 = 5;
+
+// `Mode`: Copy < Affine < Linear.
+pub const M_COPY: u8 = 0;
+pub const M_AFFINE: u8 = 1;
+pub const M_LINEAR: u8 = 2;
+
+// `Pass`.
+pub const P_IN: u8 = 0;
+pub const P_INOUT: u8 = 1;
+pub const P_SINK: u8 = 2;
+
+pub copy struct TypeNode {
+    kind: u8,
+    mode: u8,
+    // Named: the name. Function: unused.
+    name: u32,
+    // Named/Tuple: arguments; Function: parameters (items[a..a+n]).
+    a: u32,
+    n: u32,
+    // Function: result type; Function/Row: `r2` is the row id.
+    r: u32,
+    r2: u32,
+    lit: i64,
+}
+
+pub copy struct RowNode {
+    // effects[a..a+n]
+    a: u32,
+    n: u32,
+    // tail symbol + 1, or 0
+    tail: u32,
+}
+
+pub copy struct EffNode {
+    // label symbol + 1, or 0
+    label: u32,
+    name: u32,
+    // effect arguments: items[a..a+n]
+    a: u32,
+    n: u32,
+}
+
+pub struct Types {
+    nodes: ChunkSeq[TypeNode],
+    items: ChunkSeq[u32],
+    passes: ChunkSeq[u8],
+    hashes: ChunkSeq[u64],
+    slots: ChunkSeq[u32],
+    mask: u64,
+    rows: ChunkSeq[RowNode],
+    effs: ChunkSeq[EffNode],
+    row_hashes: ChunkSeq[u64],
+    row_slots: ChunkSeq[u32],
+    row_mask: u64,
+    // Well-known names, interned at creation.
+    s_dyn: u32,
+    s_u64: u32,
+    s_i64: u32,
+    s_unit: u32,
+    unit: u32,
+    infer: u32,
+    empty_row: u32,
+}
+
+pub fn zero_slots(n: u64) -> ChunkSeq[u32] {
+    let mut s: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](n);
+    s.resize(n, 0);
+    s
+}
+
+pub fn types_new(inout names: Names) -> Types {
+    let mut t = Types {
+        nodes: ChunkSeq::new[TypeNode](),
+        items: ChunkSeq::new[u32](),
+        passes: ChunkSeq::new[u8](),
+        hashes: ChunkSeq::new[u64](),
+        slots: zero_slots(4096),
+        mask: 4095,
+        rows: ChunkSeq::new[RowNode](),
+        effs: ChunkSeq::new[EffNode](),
+        row_hashes: ChunkSeq::new[u64](),
+        row_slots: zero_slots(1024),
+        row_mask: 1023,
+        s_dyn: names.intern(in "dyn".as_bytes()),
+        s_u64: names.intern(in "u64".as_bytes()),
+        s_i64: names.intern(in "i64".as_bytes()),
+        s_unit: names.intern(in "Unit".as_bytes()),
+        unit: 0,
+        infer: 0,
+        empty_row: 0,
+    };
+    let no_items: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let no_effs: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let er = t.mk_row(in no_effs, in no_items, 0);
+    t.empty_row = er;
+    let u = t.mk(K_TUPLE, 0, 0, in no_items, 0, 0, 0);
+    t.unit = u;
+    let i = t.mk(K_INFER, 0, 0, in no_items, 0, 0, 0);
+    t.infer = i;
+    t
+}
+
+fn node_hash(kind: u8, mode: u8, name: u32, in items: ChunkSeq[u32], r: u32, r2: u32, lit: i64)
+    -> u64 {
+    let mut h = fold(14695981039346656037, widen_u64(kind));
+    h = fold(h, widen_u64(mode));
+    h = fold(h, w(name));
+    h = fold(h, w(r));
+    h = fold(h, w(r2));
+    h = fold(h, wrapping_u64(lit));
+    for i in 0..items.len() {
+        h = fold(h, w(u32_at(in items, i)));
+    }
+    h
+}
+
+impl Types {
+    pub fn node(in self, t: u32) -> TypeNode {
+        match self.nodes.try_get(w(t)) {
+            Option::Some(n) => n,
+            Option::None => TypeNode {
+                kind: K_INFER,
+                mode: 0,
+                name: 0,
+                a: 0,
+                n: 0,
+                r: 0,
+                r2: 0,
+                lit: 0
+            },
+        }
+    }
+
+    pub fn kind(in self, t: u32) -> u8 {
+        self.node(t).kind
+    }
+
+    // `Type::name`: the name of a `Named` type, else "" (symbol 0).
+    pub fn name(in self, t: u32) -> u32 {
+        let n = self.node(t);
+        if n.kind == K_NAMED {
+            n.name
+        } else {
+            0
+        }
+    }
+
+    pub fn arity(in self, t: u32) -> u64 {
+        let n = self.node(t);
+        if n.kind == K_NAMED || n.kind == K_TUPLE || n.kind == K_FN {
+            w(n.n)
+        } else {
+            0
+        }
+    }
+
+    // Argument `i` of a Named or Tuple type (parameter type of a function).
+    pub fn arg(in self, t: u32, i: u64) -> u32 {
+        let n = self.node(t);
+        if i >= w(n.n) {
+            return NONE32;
+        }
+        u32_at(in self.items, add(w(n.a), i))
+    }
+
+    pub fn param_pass(in self, t: u32, i: u64) -> u8 {
+        let n = self.node(t);
+        u8_at(in self.passes, add(w(n.a), i))
+    }
+
+    pub fn row(in self, r: u32) -> RowNode {
+        match self.rows.try_get(w(r)) {
+            Option::Some(x) => x,
+            Option::None => RowNode {
+                a: 0,
+                n: 0,
+                tail: 0
+            },
+        }
+    }
+
+    pub fn effect_at(in self, i: u64) -> EffNode {
+        match self.effs.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => EffNode {
+                label: 0,
+                name: 0,
+                a: 0,
+                n: 0
+            },
+        }
+    }
+
+    fn grow(inout self) {
+        let cap = wrapping_mul(add(self.mask, 1), 2);
+        let mut slots = zero_slots(cap);
+        let mask = wrapping_sub(cap, 1);
+        for id in 0..self.hashes.len() {
+            let mut at = u64_at(in self.hashes, id) & mask;
+            loop {
+                if u32_at(in slots, at) == 0 {
+                    break;
+                }
+                at = inc(at) & mask;
+            }
+            let ok = slots.try_set(at, n32(inc(id)));
+        }
+        self.slots = slots;
+        self.mask = mask;
+    }
+
+    fn same(
+        in self,
+        id: u32,
+        kind: u8,
+        mode: u8,
+        name: u32,
+        in items: ChunkSeq[u32],
+        in passes: ChunkSeq[u8],
+        r: u32,
+        r2: u32,
+        lit: i64
+    ) -> bool {
+        let n = self.node(id);
+        if n
+            .kind
+            != kind
+            || n
+            .mode
+            != mode
+            || n
+            .name
+            != name
+            || n
+            .r
+            != r
+            || n
+            .r2
+            != r2
+            || n
+            .lit
+            != lit
+            || w(n.n)
+            != items
+            .len() {
+            return false;
+        }
+        for i in 0..items.len() {
+            let at = add(w(n.a), i);
+            if u32_at(in self.items, at) != u32_at(in items, i) {
+                return false;
+            }
+            if kind == K_FN && u8_at(in self.passes, at) != u8_at(in passes, i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // The id of the type with these parts (hash-consed).
+    pub fn mk_with(
+        inout self,
+        kind: u8,
+        mode: u8,
+        name: u32,
+        in items: ChunkSeq[u32],
+        in passes: ChunkSeq[u8],
+        r: u32,
+        r2: u32,
+        lit: i64
+    ) -> u32 {
+        let mut h = node_hash(kind, mode, name, in items, r, r2, lit);
+        if kind == K_FN {
+            for i in 0..passes.len() {
+                h = fold(h, widen_u64(u8_at(in passes, i)));
+            }
+        }
+        let mut at = h & self.mask;
+        loop {
+            let slot = u32_at(in self.slots, at);
+            if slot == 0 {
+                break;
+            }
+            let id = wrapping_sub(slot, 1);
+            if u64_at(in self.hashes, w(id))
+                == h
+                && self
+                .same(id, kind, mode, name, in items, in passes, r, r2, lit) {
+                return id;
+            }
+            at = inc(at) & self.mask;
+        }
+        let id = n32(self.nodes.len());
+        let a = n32(self.items.len());
+        for i in 0..items.len() {
+            self.items.push(u32_at(in items, i));
+            if kind == K_FN {
+                self.passes.push(u8_at(in passes, i));
+            } else {
+                self.passes.push(0);
+            }
+        }
+        self
+            .nodes
+            .push(
+            TypeNode {
+                kind: kind,
+                mode: mode,
+                name: name,
+                a: a,
+                n: n32(items.len()),
+                r: r,
+                r2: r2,
+                lit: lit
+            }
+        );
+        self.hashes.push(h);
+        let ok = self.slots.try_set(at, inc32(id));
+        if wrapping_mul(self.hashes.len(), 2) > self.mask {
+            self.grow();
+        }
+        id
+    }
+
+    pub fn mk(
+        inout self,
+        kind: u8,
+        mode: u8,
+        name: u32,
+        in items: ChunkSeq[u32],
+        r: u32,
+        r2: u32,
+        lit: i64
+    ) -> u32 {
+        let no: ChunkSeq[u8] = ChunkSeq::new[u8]();
+        self.mk_with(kind, mode, name, in items, in no, r, r2, lit)
+    }
+
+    pub fn named(inout self, name: u32, in args: ChunkSeq[u32]) -> u32 {
+        self.mk(K_NAMED, 0, name, in args, 0, 0, 0)
+    }
+
+    pub fn named0(inout self, name: u32) -> u32 {
+        let no: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        self.mk(K_NAMED, 0, name, in no, 0, 0, 0)
+    }
+
+    pub fn tuple(inout self, in args: ChunkSeq[u32]) -> u32 {
+        self.mk(K_TUPLE, 0, 0, in args, 0, 0, 0)
+    }
+
+    // An integer literal type: Rust holds an `i128`; Vesper has no 128-bit
+    // integer, so the sample keeps a sign (in `mode`) and a u64 magnitude.
+    pub fn literal(inout self, neg: bool, magnitude: u64) -> u32 {
+        let no: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        self
+            .mk(
+            K_LIT,
+            if neg {
+                1
+            } else {
+                0
+            },
+            0,
+            in no,
+            0,
+            0,
+            wrapping_i64(magnitude)
+        )
+    }
+
+    pub fn row_type(inout self, row: u32) -> u32 {
+        let no: ChunkSeq[u32] = ChunkSeq::new[u32]();
+        self.mk(K_ROW, 0, 0, in no, 0, row, 0)
+    }
+
+    // A row of effects `es` whose arguments are `args` (each effect's
+    // `a` indexes `args`), with tail symbol + 1 (0 = closed).
+    pub fn mk_row(inout self, in es: ChunkSeq[EffNode], in args: ChunkSeq[u32], tail: u32) -> u32 {
+        let mut h = fold(14695981039346656037, w(tail));
+        for i in 0..es.len() {
+            let e = match es.try_get(i) {
+                Option::Some(e) => e,
+                Option::None => EffNode {
+                    label: 0,
+                    name: 0,
+                    a: 0,
+                    n: 0
+                },
+            };
+            h = fold(fold(fold(h, w(e.label)), w(e.name)), w(e.n));
+            for j in 0..w(e.n) {
+                h = fold(h, w(u32_at(in args, add(w(e.a), j))));
+            }
+        }
+        let mut at = h & self.row_mask;
+        loop {
+            let slot = u32_at(in self.row_slots, at);
+            if slot == 0 {
+                break;
+            }
+            let id = wrapping_sub(slot, 1);
+            if u64_at(in self.row_hashes, w(id)) == h && self.same_row(id, in es, in args, tail) {
+                return id;
+            }
+            at = inc(at) & self.row_mask;
+        }
+        let id = n32(self.rows.len());
+        let a = n32(self.effs.len());
+        for i in 0..es.len() {
+            let e = match es.try_get(i) {
+                Option::Some(e) => e,
+                Option::None => EffNode {
+                    label: 0,
+                    name: 0,
+                    a: 0,
+                    n: 0
+                },
+            };
+            let ea = n32(self.items.len());
+            for j in 0..w(e.n) {
+                self.items.push(u32_at(in args, add(w(e.a), j)));
+                self.passes.push(0);
+            }
+            self
+                .effs
+                .push(
+                EffNode {
+                    label: e.label,
+                    name: e.name,
+                    a: ea,
+                    n: e.n
+                }
+            );
+        }
+        self
+            .rows
+            .push(
+            RowNode {
+                a: a,
+                n: n32(es.len()),
+                tail: tail
+            }
+        );
+        self.row_hashes.push(h);
+        let ok = self.row_slots.try_set(at, inc32(id));
+        if wrapping_mul(self.row_hashes.len(), 2) > self.row_mask {
+            self.grow_rows();
+        }
+        id
+    }
+
+    fn same_row(in self, id: u32, in es: ChunkSeq[EffNode], in args: ChunkSeq[u32], tail: u32)
+        -> bool {
+        let r = self.row(id);
+        if r.tail != tail || w(r.n) != es.len() {
+            return false;
+        }
+        for i in 0..es.len() {
+            let x = self.effect_at(add(w(r.a), i));
+            let y = match es.try_get(i) {
+                Option::Some(e) => e,
+                Option::None => EffNode {
+                    label: 0,
+                    name: 0,
+                    a: 0,
+                    n: 0
+                },
+            };
+            if x.label != y.label || x.name != y.name || x.n != y.n {
+                return false;
+            }
+            for j in 0..w(x.n) {
+                if u32_at(in self.items, add(w(x.a), j)) != u32_at(in args, add(w(y.a), j)) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn grow_rows(inout self) {
+        let cap = wrapping_mul(add(self.row_mask, 1), 2);
+        let mut slots = zero_slots(cap);
+        let mask = wrapping_sub(cap, 1);
+        for id in 0..self.row_hashes.len() {
+            let mut at = u64_at(in self.row_hashes, id) & mask;
+            loop {
+                if u32_at(in slots, at) == 0 {
+                    break;
+                }
+                at = inc(at) & mask;
+            }
+            let ok = slots.try_set(at, n32(inc(id)));
+        }
+        self.row_slots = slots;
+        self.row_mask = mask;
+    }
+}
+
+// ----- Display and Debug -----------------------------------------------------
+
+fn push_text(inout out: ChunkSeq[u8], in s: Str) {
+    out.extend(in s.as_bytes());
+}
+
+// `impl Display for Type`.
+pub fn display(in t: Types, in names: Names, ty: u32, inout out: ChunkSeq[u8]) {
+    let n = t.node(ty);
+    match n.kind {
+        0 => {
+            push_text(inout out, "integer literal ");
+            push_literal(inout out, n);
+        }
+        1 => {
+            if n.name == t.s_dyn && n.n == 1 {
+                push_text(inout out, "dyn ");
+                display(in t, in names, t.arg(ty, 0), inout out);
+            } else {
+                names.write(n.name, inout out);
+                if n.n > 0 {
+                    out.push(91);
+                    display_list(in t, in names, ty, inout out);
+                    out.push(93);
+                }
+            }
+        }
+        2 => {
+            out.push(40);
+            display_list(in t, in names, ty, inout out);
+            out.push(41);
+        }
+        3 => {
+            push_text(inout out, "fn(");
+            display_list(in t, in names, ty, inout out);
+            push_text(inout out, ") -> ");
+            display(in t, in names, n.r, inout out);
+        }
+        4 => {
+            push_text(inout out, "eff ");
+            debug_row(in t, in names, n.r2, inout out);
+        }
+        _ => {
+            out.push(95);
+        }
+    }
+}
+
+fn display_list(in t: Types, in names: Names, ty: u32, inout out: ChunkSeq[u8]) {
+    let n = t.node(ty);
+    for i in 0..w(n.n) {
+        if i > 0 {
+            push_text(inout out, ", ");
+        }
+        display(in t, in names, u32_at(in t.items, add(w(n.a), i)), inout out);
+    }
+}
+
+fn debug_name(in names: Names, s: u32, inout out: ChunkSeq[u8]) {
+    out.push(34);
+    names.write(s, inout out);
+    out.push(34);
+}
+
+fn debug_mode(m: u8, inout out: ChunkSeq[u8]) {
+    match m {
+        0 => push_text(inout out, "Copy"),
+        1 => push_text(inout out, "Affine"),
+        _ => push_text(inout out, "Linear"),
+    }
+}
+
+fn debug_pass(p: u8, inout out: ChunkSeq[u8]) {
+    match p {
+        0 => push_text(inout out, "In"),
+        1 => push_text(inout out, "Inout"),
+        _ => push_text(inout out, "Sink"),
+    }
+}
+
+// `{:?}` of `Effects`.
+pub fn debug_row(in t: Types, in names: Names, r: u32, inout out: ChunkSeq[u8]) {
+    let row = t.row(r);
+    push_text(inout out, "Effects { instances: [");
+    for i in 0..w(row.n) {
+        if i > 0 {
+            push_text(inout out, ", ");
+        }
+        let e = t.effect_at(add(w(row.a), i));
+        push_text(inout out, "Effect { label: ");
+        if e.label == 0 {
+            push_text(inout out, "None");
+        } else {
+            push_text(inout out, "Some(");
+            debug_name(in names, wrapping_sub(e.label, 1), inout out);
+            out.push(41);
+        }
+        push_text(inout out, ", name: ");
+        debug_name(in names, e.name, inout out);
+        push_text(inout out, ", args: [");
+        for j in 0..w(e.n) {
+            if j > 0 {
+                push_text(inout out, ", ");
+            }
+            debug_type(in t, in names, u32_at(in t.items, add(w(e.a), j)), inout out);
+        }
+        push_text(inout out, "] }");
+    }
+    push_text(inout out, "], tail: ");
+    if row.tail == 0 {
+        push_text(inout out, "None");
+    } else {
+        push_text(inout out, "Some(");
+        debug_name(in names, wrapping_sub(row.tail, 1), inout out);
+        out.push(41);
+    }
+    push_text(inout out, " }");
+}
+
+// `{:?}` of `Type`.
+pub fn debug_type(in t: Types, in names: Names, ty: u32, inout out: ChunkSeq[u8]) {
+    let n = t.node(ty);
+    match n.kind {
+        0 => {
+            push_text(inout out, "IntLiteral(");
+            push_literal(inout out, n);
+            out.push(41);
+        }
+        1 => {
+            push_text(inout out, "Named(");
+            debug_name(in names, n.name, inout out);
+            push_text(inout out, ", [");
+            debug_list(in t, in names, ty, inout out);
+            push_text(inout out, "])");
+        }
+        2 => {
+            push_text(inout out, "Tuple([");
+            debug_list(in t, in names, ty, inout out);
+            push_text(inout out, "])");
+        }
+        3 => {
+            push_text(inout out, "Function { params: [");
+            for i in 0..w(n.n) {
+                if i > 0 {
+                    push_text(inout out, ", ");
+                }
+                out.push(40);
+                debug_pass(t.param_pass(ty, i), inout out);
+                push_text(inout out, ", ");
+                debug_type(in t, in names, t.arg(ty, i), inout out);
+                out.push(41);
+            }
+            push_text(inout out, "], result: ");
+            debug_type(in t, in names, n.r, inout out);
+            push_text(inout out, ", effects: ");
+            debug_row(in t, in names, n.r2, inout out);
+            push_text(inout out, ", mode: ");
+            debug_mode(n.mode, inout out);
+            push_text(inout out, " }");
+        }
+        4 => {
+            push_text(inout out, "Row(");
+            debug_row(in t, in names, n.r2, inout out);
+            out.push(41);
+        }
+        _ => push_text(inout out, "Infer"),
+    }
+}
+
+fn debug_list(in t: Types, in names: Names, ty: u32, inout out: ChunkSeq[u8]) {
+    let n = t.node(ty);
+    for i in 0..w(n.n) {
+        if i > 0 {
+            push_text(inout out, ", ");
+        }
+        debug_type(in t, in names, u32_at(in t.items, add(w(n.a), i)), inout out);
+    }
+}
+
+// ----- substitute and default_type --------------------------------------------
+
+// A substitution `vars`: generic name symbols and their types, in pairs.
+pub struct Vars {
+    keys: ChunkSeq[u32],
+    vals: ChunkSeq[u32],
+}
+
+pub fn vars_new() -> Vars {
+    Vars {
+        keys: ChunkSeq::new[u32](),
+        vals: ChunkSeq::new[u32]()
+    }
+}
+
+impl Vars {
+    pub fn get(in self, k: u32) -> u32 {
+        for i in 0..self.keys.len() {
+            if u32_at(in self.keys, i) == k {
+                return u32_at(in self.vals, i);
+            }
+        }
+        NONE32
+    }
+
+    // BTreeMap::insert: a later key replaces an earlier one.
+    pub fn set(inout self, k: u32, v: u32) {
+        for i in 0..self.keys.len() {
+            if u32_at(in self.keys, i) == k {
+                let ok = self.vals.try_set(i, v);
+                return;
+            }
+        }
+        self.keys.push(k);
+        self.vals.push(v);
+    }
+
+    pub fn is_empty(in self) -> bool {
+        self.keys.len() == 0
+    }
+}
+
+// `ast::substitute`.
+pub fn substitute(inout t: Types, ty: u32, in vars: Vars) -> u32 {
+    if vars.is_empty() {
+        return ty;
+    }
+    let n = t.node(ty);
+    if n.kind == K_NAMED {
+        if n.n == 0 {
+            let v = vars.get(n.name);
+            if v != NONE32 {
+                return v;
+            }
+            return ty;
+        }
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        for i in 0..w(n.n) {
+            let a = u32_at(in t.items, add(w(n.a), i));
+            let s = substitute(inout t, a, in vars);
+            args.push(s);
+        }
+        return t.mk(K_NAMED, 0, n.name, in args, 0, 0, 0);
+    }
+    if n.kind == K_TUPLE {
+        if n.n == 0 {
+            return ty;
+        }
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        for i in 0..w(n.n) {
+            let a = u32_at(in t.items, add(w(n.a), i));
+            let s = substitute(inout t, a, in vars);
+            args.push(s);
+        }
+        return t.tuple(in args);
+    }
+    if n.kind == K_FN {
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](w(n.n));
+        for i in 0..w(n.n) {
+            let at = add(w(n.a), i);
+            let a = u32_at(in t.items, at);
+            passes.push(u8_at(in t.passes, at));
+            let s = substitute(inout t, a, in vars);
+            args.push(s);
+        }
+        let result = substitute(inout t, n.r, in vars);
+        let row = substitute_row(inout t, n.r2, in vars);
+        return t.mk_with(K_FN, n.mode, 0, in args, in passes, result, row, 0);
+    }
+    ty
+}
+
+// `ast::substitute_effects`: arguments substituted, an open tail bound to
+// a row variable spliced in, duplicates removed (first wins).
+pub fn substitute_row(inout t: Types, r: u32, in vars: Vars) -> u32 {
+    let row = t.row(r);
+    let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(row.n) {
+        let e = t.effect_at(add(w(row.a), i));
+        let a = n32(args.len());
+        for j in 0..w(e.n) {
+            let x = u32_at(in t.items, add(w(e.a), j));
+            let s = substitute(inout t, x, in vars);
+            args.push(s);
+        }
+        push_unique(
+            in t,
+            inout es,
+            in args,
+            EffNode {
+                label: e.label,
+                name: e.name,
+                a: a,
+                n: e.n
+            }
+        );
+    }
+    let mut tail = row.tail;
+    if row.tail != 0 {
+        let bound = vars.get(wrapping_sub(row.tail, 1));
+        if bound != NONE32 && t.kind(bound) == K_ROW {
+            let inner = t.row(t.node(bound).r2);
+            for i in 0..w(inner.n) {
+                let e = t.effect_at(add(w(inner.a), i));
+                let a = n32(args.len());
+                for j in 0..w(e.n) {
+                    args.push(u32_at(in t.items, add(w(e.a), j)));
+                }
+                push_unique(
+                    in t,
+                    inout es,
+                    in args,
+                    EffNode {
+                        label: e.label,
+                        name: e.name,
+                        a: a,
+                        n: e.n
+                    }
+                );
+            }
+            tail = inner.tail;
+        }
+    }
+    t.mk_row(in es, in args, tail)
+}
+
+// Keeps the first of equal (label, name, args) instances. Rust compares
+// the arguments' Display strings; equal ids imply equal strings, and the
+// census corpus has no instance where distinct types print alike.
+fn push_unique(in t: Types, inout es: ChunkSeq[EffNode], in args: ChunkSeq[u32], e: EffNode) {
+    for i in 0..es.len() {
+        let x = match es.try_get(i) {
+            Option::Some(x) => x,
+            Option::None => EffNode {
+                label: 0,
+                name: 0,
+                a: 0,
+                n: 0
+            },
+        };
+        if x.label == e.label && x.name == e.name && x.n == e.n {
+            let mut same = true;
+            for j in 0..w(e.n) {
+                if u32_at(in args, add(w(x.a), j)) != u32_at(in args, add(w(e.a), j)) {
+                    same = false;
+                }
+            }
+            if same {
+                return;
+            }
+        }
+    }
+    es.push(e);
+}
+
+// `numeric::default_type`: integer literals take i64, or u64 above i64::MAX.
+pub fn default_type(inout t: Types, ty: u32) -> u32 {
+    let n = t.node(ty);
+    if n.kind == K_LIT {
+        if n.mode == 0 && wrapping_u64(n.lit) > 9223372036854775807 {
+            return t.named0(t.s_u64);
+        }
+        return t.named0(t.s_i64);
+    }
+    if n.kind == K_NAMED || n.kind == K_TUPLE {
+        if n.n == 0 {
+            return ty;
+        }
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        for i in 0..w(n.n) {
+            let a = u32_at(in t.items, add(w(n.a), i));
+            let s = default_type(inout t, a);
+            args.push(s);
+        }
+        return t.mk(n.kind, 0, n.name, in args, 0, 0, 0);
+    }
+    if n.kind == K_FN {
+        let mut args: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](w(n.n));
+        let mut passes: ChunkSeq[u8] = ChunkSeq::with_capacity[u8](w(n.n));
+        for i in 0..w(n.n) {
+            let at = add(w(n.a), i);
+            passes.push(u8_at(in t.passes, at));
+            let s = default_type(inout t, u32_at(in t.items, at));
+            args.push(s);
+        }
+        let result = default_type(inout t, n.r);
+        let row = default_row(inout t, n.r2);
+        return t.mk_with(K_FN, n.mode, 0, in args, in passes, result, row, 0);
+    }
+    ty
+}
+
+fn default_row(inout t: Types, r: u32) -> u32 {
+    let row = t.row(r);
+    let mut es: ChunkSeq[EffNode] = ChunkSeq::new[EffNode]();
+    let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    for i in 0..w(row.n) {
+        let e = t.effect_at(add(w(row.a), i));
+        let a = n32(args.len());
+        for j in 0..w(e.n) {
+            let s = default_type(inout t, u32_at(in t.items, add(w(e.a), j)));
+            args.push(s);
+        }
+        es
+            .push(
+            EffNode {
+                label: e.label,
+                name: e.name,
+                a: a,
+                n: e.n
+            }
+        );
+    }
+    t.mk_row(in es, in args, row.tail)
+}
+
+fn push_literal(inout out: ChunkSeq[u8], n: TypeNode) {
+    if n.mode == 1 {
+        out.push(45);
+    }
+    push_decimal(inout out, wrapping_u64(n.lit));
+}

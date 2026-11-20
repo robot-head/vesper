@@ -1,0 +1,783 @@
+// The part of the checker's `World` the sample reads: the ADT table
+// (`world.adts`, a BTreeMap by name in Rust, kept here in the same name
+// order), `World::constructor`, `World::field` and `World::mode`.
+
+use self::util::{
+    add,
+    inc,
+    fold,
+    inc32,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+use self::names::{
+    Names
+};
+use self::types::{
+    Types,
+    Vars,
+    substitute,
+    vars_new
+};
+
+const NONE32: u32 = 4294967295;
+const K_FN: u8 = 3;
+const K_INFER: u8 = 5;
+const K_LIT: u8 = 0;
+const K_NAMED: u8 = 1;
+const K_ROW: u8 = 4;
+const K_TUPLE: u8 = 2;
+const M_AFFINE: u8 = 1;
+const M_COPY: u8 = 0;
+const M_LINEAR: u8 = 2;
+
+pub copy struct Adt {
+    name: u32,
+    mode: u8,
+    ga: u32,
+    gn: u32,
+    va: u32,
+    vn: u32,
+    is_enum: bool,
+    // tile width + 1, or 0
+    tile: u32,
+    span_zero: bool,
+}
+
+pub copy struct Generic {
+    name: u32,
+    bound: u8,
+    row: bool,
+}
+
+pub copy struct Variant {
+    name: u32,
+    fa: u32,
+    fc: u32,
+    named: bool,
+}
+
+pub copy struct Field {
+    name: u32,
+    ty: u32,
+    // mode + 1, or 0 when the field inherits its component kind
+    modality: u8,
+}
+
+// Symbols the rules compare against, interned once.
+pub copy struct Known {
+    string: u32,
+    str_: u32,
+    dyn_: u32,
+    region_box: u32,
+    watermark: u32,
+    chunk_seq: u32,
+    slice: u32,
+    tiled_seq: u32,
+    box_: u32,
+    vec: u32,
+    mask: u32,
+    u8_: u32,
+    u16_: u32,
+    u32_: u32,
+    u64_: u32,
+    usize_: u32,
+    i8_: u32,
+    i16_: u32,
+    i32_: u32,
+    i64_: u32,
+    isize_: u32,
+    f32_: u32,
+    f64_: u32,
+    bool_: u32,
+    unit: u32,
+    never: u32,
+    region: u32,
+    len: u32,
+    cap: u32,
+    data: u32,
+}
+
+pub fn known_new(inout n: Names) -> Known {
+    Known {
+        string: n.intern(in "String".as_bytes()),
+        str_: n.intern(in "Str".as_bytes()),
+        dyn_: n.intern(in "dyn".as_bytes()),
+        region_box: n.intern(in "RegionBox".as_bytes()),
+        watermark: n.intern(in "Watermark".as_bytes()),
+        chunk_seq: n.intern(in "ChunkSeq".as_bytes()),
+        slice: n.intern(in "Slice".as_bytes()),
+        tiled_seq: n.intern(in "TiledSeq".as_bytes()),
+        box_: n.intern(in "Box".as_bytes()),
+        vec: n.intern(in "Vec".as_bytes()),
+        mask: n.intern(in "Mask".as_bytes()),
+        u8_: n.intern(in "u8".as_bytes()),
+        u16_: n.intern(in "u16".as_bytes()),
+        u32_: n.intern(in "u32".as_bytes()),
+        u64_: n.intern(in "u64".as_bytes()),
+        usize_: n.intern(in "usize".as_bytes()),
+        i8_: n.intern(in "i8".as_bytes()),
+        i16_: n.intern(in "i16".as_bytes()),
+        i32_: n.intern(in "i32".as_bytes()),
+        i64_: n.intern(in "i64".as_bytes()),
+        isize_: n.intern(in "isize".as_bytes()),
+        f32_: n.intern(in "f32".as_bytes()),
+        f64_: n.intern(in "f64".as_bytes()),
+        bool_: n.intern(in "bool".as_bytes()),
+        unit: n.intern(in "Unit".as_bytes()),
+        never: n.intern(in "Never".as_bytes()),
+        region: n.intern(in "Region".as_bytes()),
+        len: n.intern(in "len".as_bytes()),
+        cap: n.intern(in "cap".as_bytes()),
+        data: n.intern(in "data".as_bytes()),
+    }
+}
+
+impl Known {
+    pub fn is_integer(self, s: u32) -> bool {
+        s
+            == self
+            .u8_
+            || s
+            == self
+            .u16_
+            || s
+            == self
+            .u32_
+            || s
+            == self
+            .u64_
+            || s
+            == self
+            .usize_
+            || s
+            == self
+            .i8_
+            || s
+            == self
+            .i16_
+            || s
+            == self
+            .i32_
+            || s
+            == self
+            .i64_
+            || s
+            == self
+            .isize_
+    }
+
+    // `numeric::is_scalar_name`.
+    pub fn is_scalar(self, s: u32) -> bool {
+        self
+            .is_integer(s)
+            || s
+            == self
+            .f32_
+            || s
+            == self
+            .f64_
+            || s
+            == self
+            .bool_
+            || s
+            == self
+            .unit
+            || s
+            == self
+            .never
+    }
+
+    // Bits of a vector element (`vector::Elem::from_name`), or 0.
+    pub fn elem_bits(self, s: u32) -> u32 {
+        if s == self.u8_ {
+            8
+        } else if s == self.u32_ || s == self.f32_ {
+            32
+        } else if s == self.u64_ || s == self.i64_ || s == self.f64_ {
+            64
+        } else {
+            0
+        }
+    }
+}
+
+// An effect declaration (`world.effects`, in name order).
+pub copy struct EffectRow {
+    name: u32,
+    linear: bool,
+}
+
+// A row of a span-keyed table (`world.types`, `partial_ops`,
+// `overflow_ops`), sorted by (start, end) as the Rust BTreeMap is. `ty` is
+// the expression type for `types` and unused for the span sets.
+pub copy struct SpanRow {
+    start: u64,
+    end: u64,
+    ty: u32,
+}
+
+// The checker's `World`. Each SH2 lane adds the fields it needs below its
+// own comment line, in its own PR; keep the census layout of the rest.
+pub struct World {
+    adts: ChunkSeq[Adt],
+    generics: ChunkSeq[Generic],
+    variants: ChunkSeq[Variant],
+    fields: ChunkSeq[Field],
+    // symbol -> adt index + 1
+    by_name: ChunkSeq[u32],
+    box_active: bool,
+    k: Known,
+    // `world.effects`.
+    effects: ChunkSeq[EffectRow],
+    // symbol -> effect index + 1
+    effect_by_name: ChunkSeq[u32],
+    // `world.types`: the type of each checked expression span.
+    expr_types: ChunkSeq[SpanRow],
+    // `world.partial_ops` and `world.overflow_ops`.
+    partial_ops: ChunkSeq[SpanRow],
+    overflow_ops: ChunkSeq[SpanRow],
+}
+
+pub fn world_new(k: Known) -> World {
+    World {
+        adts: ChunkSeq::new[Adt](),
+        generics: ChunkSeq::new[Generic](),
+        variants: ChunkSeq::new[Variant](),
+        fields: ChunkSeq::new[Field](),
+        by_name: ChunkSeq::new[u32](),
+        box_active: false,
+        k: k,
+        effects: ChunkSeq::new[EffectRow](),
+        effect_by_name: ChunkSeq::new[u32](),
+        expr_types: ChunkSeq::new[SpanRow](),
+        partial_ops: ChunkSeq::new[SpanRow](),
+        overflow_ops: ChunkSeq::new[SpanRow](),
+    }
+}
+
+// Grows a symbol-indexed table to cover `name` and sets it to `v`.
+pub fn set_by_symbol(inout table: ChunkSeq[u32], name: u32, v: u32) {
+    loop {
+        if table.len() > w(name) {
+            break;
+        }
+        table.push(0);
+    }
+    let ok = table.try_set(w(name), v);
+}
+
+fn span_row(in rows: ChunkSeq[SpanRow], i: u64) -> SpanRow {
+    match rows.try_get(i) {
+        Option::Some(r) => r,
+        Option::None => SpanRow {
+            start: 0,
+            end: 0,
+            ty: NONE32
+        },
+    }
+}
+
+// The index of the row of span (start, end) in sorted `rows`, or the row
+// count when there is none.
+pub fn find_span(in rows: ChunkSeq[SpanRow], start: u64, end: u64) -> u64 {
+    let mut lo: u64 = 0;
+    let mut hi = rows.len();
+    loop {
+        if lo >= hi {
+            break;
+        }
+        let mid = wrapping_add(lo, wrapping_sub(hi, lo) / 2);
+        let r = span_row(in rows, mid);
+        if r.start < start || (r.start == start && r.end < end) {
+            lo = inc(mid);
+        } else {
+            hi = mid;
+        }
+    }
+    let r = span_row(in rows, lo);
+    if lo < rows.len() && r.start == start && r.end == end {
+        lo
+    } else {
+        rows.len()
+    }
+}
+
+const NO_ADT: u32 = NONE32;
+
+impl World {
+    pub fn adt(in self, i: u32) -> Adt {
+        match self.adts.try_get(w(i)) {
+            Option::Some(a) => a,
+            Option::None => Adt {
+                name: 0,
+                mode: 0,
+                ga: 0,
+                gn: 0,
+                va: 0,
+                vn: 0,
+                is_enum: false,
+                tile: 0,
+                span_zero: false
+            },
+        }
+    }
+
+    pub fn generic(in self, i: u64) -> Generic {
+        match self.generics.try_get(i) {
+            Option::Some(g) => g,
+            Option::None => Generic {
+                name: 0,
+                bound: 0,
+                row: false
+            },
+        }
+    }
+
+    pub fn variant(in self, i: u64) -> Variant {
+        match self.variants.try_get(i) {
+            Option::Some(v) => v,
+            Option::None => Variant {
+                name: 0,
+                fa: 0,
+                fc: 0,
+                named: false
+            },
+        }
+    }
+
+    pub fn field(in self, i: u64) -> Field {
+        match self.fields.try_get(i) {
+            Option::Some(f) => f,
+            Option::None => Field {
+                name: 0,
+                ty: 0,
+                modality: 0
+            },
+        }
+    }
+
+    // `world.adts.get(name)`.
+    pub fn lookup(in self, name: u32) -> u32 {
+        let x = u32_at(in self.by_name, w(name));
+        if x == 0 {
+            NO_ADT
+        } else {
+            wrapping_sub(x, 1)
+        }
+    }
+
+    pub fn index(inout self, name: u32, adt: u32) {
+        set_by_symbol(inout self.by_name, name, inc32(adt));
+    }
+
+    // `world.effects.get(name)`, as an effect index, or NONE32.
+    pub fn effect_index(in self, name: u32) -> u32 {
+        let x = u32_at(in self.effect_by_name, w(name));
+        if x == 0 {
+            NONE32
+        } else {
+            wrapping_sub(x, 1)
+        }
+    }
+
+    pub fn effect_row(in self, i: u32) -> EffectRow {
+        match self.effects.try_get(w(i)) {
+            Option::Some(e) => e,
+            Option::None => EffectRow {
+                name: 0,
+                linear: false
+            },
+        }
+    }
+
+    // The type the checker gave expression span (start, end), or NONE32.
+    pub fn expr_type(in self, start: u64, end: u64) -> u32 {
+        let i = find_span(in self.expr_types, start, end);
+        span_row(in self.expr_types, i).ty
+    }
+
+    // `world.partial_ops.contains(&(start, end))`: the primitive operation
+    // there can raise `Fail[RuntimeError]`.
+    pub fn is_partial(in self, start: u64, end: u64) -> bool {
+        find_span(in self.partial_ops, start, end) < self.partial_ops.len()
+    }
+
+    // `world.overflow_ops.contains(&(start, end))`: the checked integer
+    // operation there can raise `Fail[ArithOverflow]`.
+    pub fn may_overflow(in self, start: u64, end: u64) -> bool {
+        find_span(in self.overflow_ops, start, end) < self.overflow_ops.len()
+    }
+
+    // The substitution of an ADT's generics by the arguments of `ty`
+    // (Rust: `a.generics.iter().zip(args).collect::<BTreeMap<_, _>>()`).
+    pub fn vars_of(in self, in t: Types, a: Adt, ty: u32) -> Vars {
+        let mut v = vars_new();
+        let n = t.arity(ty);
+        for i in 0..w(a.gn) {
+            if i >= n {
+                break;
+            }
+            let g = self.generic(add(w(a.ga), i));
+            v.set(g.name, t.arg(ty, i));
+        }
+        v
+    }
+
+    // The field `name` of variant `v`, as a field index, or NONE32.
+    pub fn find_field(in self, v: Variant, name: u32) -> u32 {
+        for i in 0..w(v.fc) {
+            let f = self.field(add(w(v.fa), i));
+            if f.name == name {
+                return n32(add(w(v.fa), i));
+            }
+        }
+        NONE32
+    }
+}
+
+// `vector::layout_words`: words of a valid `Vec[e, N]` / `Mask[e, N]`, or 0.
+pub fn vector_words(in t: Types, in names: Names, k: Known, ty: u32) -> u32 {
+    let n = t.node(ty);
+    if n.kind != K_NAMED || (n.name != k.vec && n.name != k.mask) || n.n != 2 {
+        return 0;
+    }
+    let elem = t.arg(ty, 0);
+    let count = t.arg(ty, 1);
+    let c = t.node(count);
+    if c.kind != K_NAMED || c.n != 0 {
+        return 0;
+    }
+    let size = names.size(c.name);
+    if size == 0 {
+        return 0;
+    }
+    let mut lanes: u64 = 0;
+    for i in 0..size {
+        let b = names.byte(c.name, i);
+        if b < 48 || b > 57 {
+            return 0;
+        }
+        lanes = wrapping_add(wrapping_mul(lanes, 10), widen_u64(wrapping_sub(b, 48)));
+        if lanes > 65535 {
+            return 0;
+        }
+    }
+    let e = t.node(elem);
+    if e.kind != K_NAMED || e.n != 0 {
+        return 0;
+    }
+    let bits = wrapping_mul(w(k.elem_bits(e.name)), lanes);
+    if bits == 128 || bits == 256 || bits == 512 {
+        n32(bits / 64)
+    } else {
+        0
+    }
+}
+
+// `World::constructor`: the first ADT in name order with a variant `short`;
+// a qualified `T::V` must name that ADT. `qual` is the qualifier symbol or
+// NONE32. Returns (adt, variant index) packed as adt * 2^32 + variant, or
+// NONE (all ones).
+pub fn constructor(in wd: World, qual: u32, short: u32) -> u64 {
+    for i in 0..wd.adts.len() {
+        let a = wd.adt(n32(i));
+        if qual == NONE32 || qual == a.name {
+            for j in 0..w(a.vn) {
+                let v = wd.variant(add(w(a.va), j));
+                if v.name == short {
+                    return wrapping_add(wrapping_mul(i, 4294967296), add(w(a.va), j));
+                }
+            }
+        }
+    }
+    18446744073709551615
+}
+
+// Generic bounds in scope (`BTreeMap<String, Mode>`).
+pub struct Bounds {
+    keys: ChunkSeq[u32],
+    modes: ChunkSeq[u8],
+}
+
+pub fn bounds_new() -> Bounds {
+    Bounds {
+        keys: ChunkSeq::new[u32](),
+        modes: ChunkSeq::new[u8]()
+    }
+}
+
+impl Bounds {
+    pub fn get(in self, k: u32) -> u8 {
+        for i in 0..self.keys.len() {
+            if u32_at(in self.keys, i) == k {
+                return u8_at(in self.modes, i);
+            }
+        }
+        255
+    }
+
+    pub fn set(inout self, k: u32, m: u8) {
+        for i in 0..self.keys.len() {
+            if u32_at(in self.keys, i) == k {
+                let ok = self.modes.try_set(i, m);
+                return;
+            }
+        }
+        self.keys.push(k);
+        self.modes.push(m);
+    }
+}
+
+fn join(a: u8, b: u8) -> u8 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+
+// `World::mode`.
+pub fn mode_of(inout t: Types, in names: Names, in wd: World, ty: u32, in bounds: Bounds) -> u8 {
+    let mut seen_names: ChunkSeq[u32] = ChunkSeq::new[u32]();
+    let mut seen_modes: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    mode_visit(inout t, in names, in wd, ty, in bounds, inout seen_names, inout seen_modes)
+}
+
+fn mode_visit(
+    inout t: Types,
+    in names: Names,
+    in wd: World,
+    ty: u32,
+    in bounds: Bounds,
+    inout seen_names: ChunkSeq[u32],
+    inout seen_modes: ChunkSeq[u64]
+) -> u8 {
+    let n = t.node(ty);
+    let k = wd.k;
+    if n.kind == K_INFER || n.kind == K_LIT || n.kind == K_ROW {
+        return M_COPY;
+    }
+    if n.kind == K_TUPLE {
+        let mut m = M_COPY;
+        for i in 0..w(n.n) {
+            let x = mode_visit(
+                inout t,
+                in names,
+                in wd,
+                u32_at(in t.items, add(w(n.a), i)),
+                in bounds,
+                inout seen_names,
+                inout seen_modes
+            );
+            m = join(m, x);
+        }
+        return m;
+    }
+    if n.kind == K_FN {
+        return n.mode;
+    }
+    let b = bounds.get(n.name);
+    if b != 255 {
+        return b;
+    }
+    if vector_words(in t, in names, k, ty) != 0 {
+        return M_COPY;
+    }
+    if k.is_scalar(n.name) {
+        return M_COPY;
+    }
+    if n.name == k.string || n.name == k.str_ || n.name == k.dyn_ {
+        return M_AFFINE;
+    }
+    if n.name == k.region_box {
+        if n.n < 2 {
+            return M_LINEAR;
+        }
+        return mode_visit(
+            inout t,
+            in names,
+            in wd,
+            t.arg(ty, 1),
+            in bounds,
+            inout seen_names,
+            inout seen_modes
+        );
+    }
+    if n.name == k.chunk_seq || n.name == k.slice || n.name == k.tiled_seq {
+        if n.n == 0 {
+            return M_AFFINE;
+        }
+        let x = mode_visit(
+            inout t,
+            in names,
+            in wd,
+            t.arg(ty, 0),
+            in bounds,
+            inout seen_names,
+            inout seen_modes
+        );
+        return join(x, M_AFFINE);
+    }
+    let ai = wd.lookup(n.name);
+    if ai == NO_ADT {
+        return M_LINEAR;
+    }
+    let a = wd.adt(ai);
+    let mut arg_modes: ChunkSeq[u8] = ChunkSeq::new[u8]();
+    // The `seen` key `"{n}:{argument_modes:?}"`: the name and the modes.
+    let mut key: u64 = fold(14695981039346656037, w(n.n));
+    for i in 0..w(n.n) {
+        let x = mode_visit(
+            inout t,
+            in names,
+            in wd,
+            u32_at(in t.items, add(w(n.a), i)),
+            in bounds,
+            inout seen_names,
+            inout seen_modes
+        );
+        arg_modes.push(x);
+        key = fold(key, widen_u64(x));
+    }
+    for i in 0..seen_names.len() {
+        if u32_at(in seen_names, i) == n.name && u64_at(in seen_modes, i) == key {
+            return a.mode;
+        }
+    }
+    seen_names.push(n.name);
+    seen_modes.push(key);
+    let mut component = bounds_new();
+    for i in 0..w(a.gn) {
+        if i >= arg_modes.len() {
+            break;
+        }
+        component.set(wd.generic(add(w(a.ga), i)).name, u8_at(in arg_modes, i));
+    }
+    let mut m = a.mode;
+    for vi in 0..w(a.vn) {
+        let v = wd.variant(add(w(a.va), vi));
+        for fi in 0..w(v.fc) {
+            let f = wd.field(add(w(v.fa), fi));
+            let intrinsic = mode_visit(
+                inout t,
+                in names,
+                in wd,
+                f.ty,
+                in component,
+                inout seen_names,
+                inout seen_modes
+            );
+            if f.modality == 0 {
+                m = join(m, intrinsic);
+            } else {
+                m = join(m, wrapping_sub(f.modality, 1));
+            }
+        }
+    }
+    let last = wrapping_sub(seen_names.len(), 1);
+    seen_names.truncate(last);
+    seen_modes.truncate(last);
+    m
+}
+
+// `World::field(ty, path)` for one path step `name` (a field name, a tuple
+// index, or a `[..]` segment, which `seg` marks). Returns NONE32 for None.
+pub fn field_step(inout t: Types, inout names: Names, in wd: World, ty: u32, name: u32, seg: bool)
+    -> u32 {
+    let n = t.node(ty);
+    let k = wd.k;
+    if n.kind == K_NAMED {
+        if seg && (n.name == k.chunk_seq || n.name == k.slice) {
+            if n.n == 0 {
+                return NONE32;
+            }
+            let mut args: ChunkSeq[u32] = ChunkSeq::new[u32]();
+            args.push(t.arg(ty, 0));
+            return t.named(k.slice, in args);
+        }
+        if seg && n.n == 0 && (n.name == k.string || n.name == k.str_) {
+            return t.named0(k.str_);
+        }
+        if n.name == k.tiled_seq {
+            if n.n == 0 {
+                return NONE32;
+            }
+            let elem = t.arg(ty, 0);
+            let e = t.node(elem);
+            if e.kind != K_NAMED {
+                return NONE32;
+            }
+            let ai = wd.lookup(e.name);
+            if ai == NO_ADT {
+                return NONE32;
+            }
+            let a = wd.adt(ai);
+            if a.is_enum || a.tile == 0 || a.vn == 0 {
+                return NONE32;
+            }
+            let fi = wd.find_field(wd.variant(w(a.va)), name);
+            if fi == NONE32 {
+                return NONE32;
+            }
+            let vars = wd.vars_of(in t, a, elem);
+            return substitute(inout t, wd.field(w(fi)).ty, in vars);
+        }
+        let ai = wd.lookup(n.name);
+        if ai == NO_ADT {
+            return NONE32;
+        }
+        let a = wd.adt(ai);
+        if a.is_enum || a.vn == 0 {
+            return NONE32;
+        }
+        let fi = wd.find_field(wd.variant(w(a.va)), name);
+        if fi == NONE32 {
+            return NONE32;
+        }
+        let vars = wd.vars_of(in t, a, ty);
+        return substitute(inout t, wd.field(w(fi)).ty, in vars);
+    }
+    if n.kind == K_TUPLE {
+        // `name.parse::<usize>()`: decimal digits only.
+        let size = names.size(name);
+        if size == 0 {
+            return NONE32;
+        }
+        let mut idx: u64 = 0;
+        for i in 0..size {
+            let b = names.byte(name, i);
+            if b < 48 || b > 57 {
+                return NONE32;
+            }
+            idx = wrapping_add(wrapping_mul(idx, 10), widen_u64(wrapping_sub(b, 48)));
+        }
+        if idx >= w(n.n) {
+            return NONE32;
+        }
+        return t.arg(ty, idx);
+    }
+    NONE32
+}
+
+// Whether a call with effect row `r` is effectful: an open row, or an
+// instance of an effect declared non-linear (what the census harness
+// precomputed in Rust: `row.tail.is_some() || row.instances.iter()
+// .any(|e| world.effects.get(&e.name).is_some_and(|d| !d.linear))`).
+pub fn effectful_row(in t: Types, in wd: World, r: u32) -> bool {
+    let row = t.row(r);
+    if row.tail != 0 {
+        return true;
+    }
+    for i in 0..w(row.n) {
+        let e = t.effect_at(add(w(row.a), i));
+        let d = wd.effect_index(e.name);
+        if d != NONE32 && !wd.effect_row(d).linear {
+            return true;
+        }
+    }
+    false
+}

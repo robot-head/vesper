@@ -1,0 +1,196 @@
+// Interned names: the names table every other table refers to.
+
+use self::util::{
+    add,
+    fold,
+    inc,
+    inc32,
+    n32,
+    u32_at,
+    u64_at,
+    u8_at,
+    w
+};
+
+// Symbol 0 is the empty name, so 0 can mean "none" in
+// tables (Rust: `Option<String>`).
+pub struct Names {
+    text: ChunkSeq[u8],
+    starts: ChunkSeq[u64],
+    hashes: ChunkSeq[u64],
+    slots: ChunkSeq[u32],
+    mask: u64,
+}
+
+pub fn names_new() -> Names {
+    let mut slots: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](4096);
+    slots.resize(4096, 0);
+    let mut starts: ChunkSeq[u64] = ChunkSeq::new[u64]();
+    starts.push(0);
+    let mut n = Names {
+        text: ChunkSeq::new[u8](),
+        starts: starts,
+        hashes: ChunkSeq::new[u64](),
+        slots: slots,
+        mask: 4095,
+    };
+    let empty = n.intern(in "".as_bytes());
+    n
+}
+
+pub fn hash_bytes(in b: Slice[u8]) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    for i in 0..b.len() {
+        let c = match b.try_get(i) {
+            Option::Some(c) => c,
+            Option::None => 0,
+        };
+        h = wrapping_mul(h ^ widen_u64(c), 1099511628211);
+    }
+    h
+}
+
+impl Names {
+    pub fn len(in self) -> u64 {
+        self.hashes.len()
+    }
+
+    pub fn start(in self, s: u32) -> u64 {
+        u64_at(in self.starts, w(s))
+    }
+
+    pub fn end(in self, s: u32) -> u64 {
+        u64_at(in self.starts, inc(w(s)))
+    }
+
+    pub fn size(in self, s: u32) -> u64 {
+        wrapping_sub(self.end(s), self.start(s))
+    }
+
+    pub fn byte(in self, s: u32, i: u64) -> u8 {
+        u8_at(in self.text, add(self.start(s), i))
+    }
+
+    // Whether symbol `s` spells `b`.
+    pub fn spells(in self, s: u32, in b: Slice[u8]) -> bool {
+        let a = self.start(s);
+        let n = wrapping_sub(self.end(s), a);
+        if n != b.len() {
+            return false;
+        }
+        let mut i: u64 = 0;
+        loop {
+            if i >= n {
+                break;
+            }
+            let x = u8_at(in self.text, add(a, i));
+            let y = match b.try_get(i) {
+                Option::Some(c) => c,
+                Option::None => 0,
+            };
+            if x != y {
+                return false;
+            }
+            i = inc(i);
+        }
+        true
+    }
+
+    pub fn has_prefix(in self, s: u32, in b: Slice[u8]) -> bool {
+        let a = self.start(s);
+        let n = wrapping_sub(self.end(s), a);
+        if n < b.len() {
+            return false;
+        }
+        for i in 0..b.len() {
+            let y = match b.try_get(i) {
+                Option::Some(c) => c,
+                Option::None => 0,
+            };
+            if u8_at(in self.text, add(a, i)) != y {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn grow(inout self) {
+        let cap = wrapping_mul(add(self.mask, 1), 2);
+        let mut slots: ChunkSeq[u32] = ChunkSeq::with_capacity[u32](cap);
+        slots.resize(cap, 0);
+        let mask = wrapping_sub(cap, 1);
+        for id in 0..self.hashes.len() {
+            let mut at = u64_at(in self.hashes, id) & mask;
+            loop {
+                if u32_at(in slots, at) == 0 {
+                    break;
+                }
+                at = inc(at) & mask;
+            }
+            let ok = slots.try_set(at, n32(inc(id)));
+        }
+        self.slots = slots;
+        self.mask = mask;
+    }
+
+    pub fn lookup(in self, in b: Slice[u8]) -> u32 {
+        let h = hash_bytes(in b);
+        let mut at = h & self.mask;
+        loop {
+            let slot = u32_at(in self.slots, at);
+            if slot == 0 {
+                return 4294967295;
+            }
+            let id = wrapping_sub(slot, 1);
+            if u64_at(in self.hashes, w(id)) == h && self.spells(id, in b) {
+                return id;
+            }
+            at = inc(at) & self.mask;
+        }
+    }
+
+    pub fn intern(inout self, in b: Slice[u8]) -> u32 {
+        let h = hash_bytes(in b);
+        let mut at = h & self.mask;
+        loop {
+            let slot = u32_at(in self.slots, at);
+            if slot == 0 {
+                break;
+            }
+            let id = wrapping_sub(slot, 1);
+            if u64_at(in self.hashes, w(id)) == h && self.spells(id, in b) {
+                return id;
+            }
+            at = inc(at) & self.mask;
+        }
+        let id = n32(self.hashes.len());
+        self.text.extend(in b);
+        self.starts.push(self.text.len());
+        self.hashes.push(h);
+        let ok = self.slots.try_set(at, inc32(id));
+        if wrapping_mul(self.hashes.len(), 2) > self.mask {
+            self.grow();
+        }
+        id
+    }
+
+    // Appends the text of `s` to `out`.
+    pub fn write(in self, s: u32, inout out: ChunkSeq[u8]) {
+        let a = self.start(s);
+        let b = self.end(s);
+        for i in a..b {
+            out.push(u8_at(in self.text, i));
+        }
+    }
+
+    // Digest of a name's bytes (what Rust folds for a `String`).
+    pub fn fold_name(in self, h: u64, s: u32) -> u64 {
+        let mut x = h;
+        let a = self.start(s);
+        let b = self.end(s);
+        for i in a..b {
+            x = fold(x, widen_u64(u8_at(in self.text, i)));
+        }
+        fold(x, 255)
+    }
+}

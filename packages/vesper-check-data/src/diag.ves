@@ -1,0 +1,159 @@
+// `Diagnostic` (code, message, span, related labels, help) as rows of one
+// text buffer: every text field is a range of `text`.
+
+use self::util::{
+    fold,
+    n32,
+    u8_at,
+    w,
+    add
+};
+
+pub copy struct DiagRow {
+    code_a: u64,
+    msg_a: u64,
+    // end of the message (related label texts follow it)
+    msg_b: u64,
+    help_a: u64,
+    end: u64,
+    start: u64,
+    stop: u64,
+    // related labels: rel[ra..ra+rn]
+    ra: u32,
+    rn: u32,
+}
+
+pub copy struct RelRow {
+    a: u64,
+    b: u64,
+    start: u64,
+    stop: u64,
+}
+
+pub struct Diags {
+    text: ChunkSeq[u8],
+    rows: ChunkSeq[DiagRow],
+    rel: ChunkSeq[RelRow],
+}
+
+pub fn diags_new() -> Diags {
+    Diags {
+        text: ChunkSeq::new[u8](),
+        rows: ChunkSeq::new[DiagRow](),
+        rel: ChunkSeq::new[RelRow]()
+    }
+}
+
+impl Diags {
+    pub fn len(in self) -> u64 {
+        self.rows.len()
+    }
+
+    // Starts a diagnostic: the code is written; the caller then writes the
+    // message into `text` and calls `help` (or `close`).
+    pub fn open(inout self, in code: Str) -> u64 {
+        let a = self.text.len();
+        self.text.extend(in code.as_bytes());
+        a
+    }
+
+    pub fn close(inout self, code_a: u64, msg_a: u64, in help: Str, start: u64, stop: u64) {
+        let help_a = self.text.len();
+        self.text.extend(in help.as_bytes());
+        self
+            .rows
+            .push(
+            DiagRow {
+                code_a: code_a,
+                msg_a: msg_a,
+                msg_b: help_a,
+                help_a: help_a,
+                end: self.text.len(),
+                start: start,
+                stop: stop,
+                ra: n32(self.rel.len()),
+                rn: 0
+            }
+        );
+    }
+
+    pub fn row(in self, i: u64) -> DiagRow {
+        match self.rows.try_get(i) {
+            Option::Some(r) => r,
+            Option::None => DiagRow {
+                code_a: 0,
+                msg_a: 0,
+                msg_b: 0,
+                help_a: 0,
+                end: 0,
+                start: 0,
+                stop: 0,
+                ra: 0,
+                rn: 0
+            },
+        }
+    }
+
+    pub fn clear(inout self) {
+        self.text.clear();
+        self.rows.clear();
+        self.rel.clear();
+    }
+
+    pub fn fold_range(in self, h: u64, a: u64, b: u64) -> u64 {
+        let mut x = h;
+        for i in a..b {
+            x = fold(x, widen_u64(u8_at(in self.text, i)));
+        }
+        fold(x, 255)
+    }
+
+    pub fn digest_row(in self, h0: u64, i: u64) -> u64 {
+        let r = self.row(i);
+        let mut h = self.fold_range(h0, r.code_a, r.msg_a);
+        h = self.fold_range(h, r.msg_a, r.msg_b);
+        h = fold(fold(h, r.start), r.stop);
+        h = fold(h, w(r.rn));
+        for j in 0..w(r.rn) {
+            let l = match self.rel.try_get(add(w(r.ra), j)) {
+                Option::Some(l) => l,
+                Option::None => RelRow {
+                    a: 0,
+                    b: 0,
+                    start: 0,
+                    stop: 0
+                },
+            };
+            h = fold(fold(h, l.start), l.stop);
+            h = self.fold_range(h, l.a, l.b);
+        }
+        self.fold_range(h, r.help_a, r.end)
+    }
+
+    // The census digest of the diagnostics from row `from` on.
+    pub fn digest(in self, h0: u64, from: u64) -> u64 {
+        let mut h = fold(h0, wrapping_sub(self.rows.len(), from));
+        for i in from..self.rows.len() {
+            let r = self.row(i);
+            h = self.fold_range(h, r.code_a, r.msg_a);
+            h = self.fold_range(h, r.msg_a, r.msg_b);
+            h = fold(fold(h, r.start), r.stop);
+            h = fold(h, w(r.rn));
+            for j in 0..w(r.rn) {
+                let l = match self.rel.try_get(add(w(r.ra), j)) {
+                    Option::Some(l) => l,
+                    Option::None => RelRow {
+                        a: 0,
+                        b: 0,
+                        start: 0,
+                        stop: 0
+                    },
+                };
+                h = fold(fold(h, l.start), l.stop);
+                h = self.fold_range(h, l.a, l.b);
+            }
+            h = self.fold_range(h, r.help_a, r.end);
+        }
+        h
+    }
+}
