@@ -35,6 +35,13 @@ included, and many of them are fine as they are.
 | `packages/vesper-front` | 467 | SH1 lanes 9-12 own it; last |
 | other crates | under 400 each | |
 
+## Done
+
+| PR | Area | Port speed |
+| --- | --- | --- |
+| #1162 | BBR (Rust + `.ves` port), inliner fold, checker facts | ack path +0.1% Ir |
+| next | warp-tcp: header offsets, option kinds and lengths, RFC 9293/7323/5961 limits (Rust reference + `.ves` port) | codec and transfer Ir identical |
+
 ## Order
 
 1. BBR (`crates/vesper-warp-bbr`), with the inliner fold below.
