@@ -12,6 +12,7 @@
 #ifndef VESPER_CRANELIFT_H
 #define VESPER_CRANELIFT_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -41,14 +42,14 @@ uint64_t vcl_new_error(uint8_t *out, size_t out_len);
 void vcl_module_free(vcl_module *m);
 uint64_t vcl_module_error(const vcl_module *m, uint8_t *out, size_t out_len);
 uint32_t vcl_module_pointer_type(const vcl_module *m);
-void vcl_module_keep_clif(vcl_module *m, uint32_t keep);
+void vcl_module_keep_clif(vcl_module *m, bool keep);
 uint64_t vcl_module_code_bytes(const vcl_module *m);
 uint64_t vcl_module_clif(const vcl_module *m, uint64_t offset, uint8_t *out, size_t out_len);
 uint32_t vcl_sig_new(vcl_module *m, uint32_t call_conv);
 uint32_t vcl_sig_param(vcl_module *m, uint32_t sig, uint32_t ty_code);
 uint32_t vcl_sig_return(vcl_module *m, uint32_t sig, uint32_t ty_code);
 uint32_t vcl_declare_function(vcl_module *m, const uint8_t *name, size_t name_len, uint32_t linkage, uint32_t sig);
-uint32_t vcl_declare_data(vcl_module *m, const uint8_t *name, size_t name_len, uint32_t linkage, uint32_t writable, uint32_t tls);
+uint32_t vcl_declare_data(vcl_module *m, const uint8_t *name, size_t name_len, uint32_t linkage, bool writable, bool tls);
 uint32_t vcl_define_function(vcl_module *m, uint32_t func, vcl_builder *b);
 uint32_t vcl_define_data(vcl_module *m, uint32_t data, vcl_data *d);
 vcl_object *vcl_module_finish(vcl_module *m);
@@ -117,7 +118,7 @@ void vcl_jump(vcl_builder *b, uint32_t blk, const uint32_t *args, size_t args_le
 void vcl_brif(vcl_builder *b, uint32_t c, uint32_t then_blk, const uint32_t *then_args, size_t then_len, uint32_t else_blk, const uint32_t *else_args, size_t else_len);
 void vcl_return(vcl_builder *b, const uint32_t *vals, size_t len);
 void vcl_trap(vcl_builder *b, uint32_t code);
-void vcl_trap_if(vcl_builder *b, uint32_t c, uint32_t if_nonzero, uint32_t code);
+void vcl_trap_if(vcl_builder *b, uint32_t c, bool if_nonzero, uint32_t code);
 uint32_t vcl_emit(vcl_builder *b, const uint64_t *code, size_t code_len, uint32_t *out, size_t out_len);
 
 #ifdef __cplusplus
