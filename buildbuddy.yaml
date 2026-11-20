@@ -20,6 +20,8 @@ actions:
         branches:
           - "*"
     steps:
+      # Recycled runners keep earlier runs' /tmp leftovers (#1200).
+      - run: "scripts/ci/reclaim-disk.sh"
       - run: "python3 tools/bazel/sync_build_files.py --check"
       - run: "scripts/ci/install-lean.sh"
       - run: |
@@ -34,6 +36,10 @@ actions:
           export VESPER_LEAN="$(cat .ci-lean-path)"
           export VESPER_CARGO="$(cat .ci-logos-cargo-path)"
           export VESPER_LOGOS42_ROOT="$(mktemp -d /tmp/vesper-logos42-ci.XXXXXX)/checker"
+          # The checker is built outside Bazel and only this step uses it (#1200).
+          scripts/ci/reclaim-disk.sh watch &
+          disk_watch=$!
+          trap 'kill "$disk_watch"; rm -rf "$(dirname "$VESPER_LOGOS42_ROOT")"; scripts/ci/reclaim-disk.sh report' EXIT
           LEAN_REPLAY_FLAGS="$(python3 scripts/ci/lean_replay_scope.py || true)"
           BAZEL_FLAGS="--config=ci --config=rbe_build" scripts/ci/prepare-logos42.sh "$VESPER_LOGOS42_ROOT"
           bazel test --config=ci --config=rbe_build --config=ci_tests $LEAN_REPLAY_FLAGS //...

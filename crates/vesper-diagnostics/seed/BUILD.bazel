@@ -1,0 +1,70 @@
+# The frozen Rust seed copy of vesper-diagnostics (package
+# vesper-diagnostics-seed, library vesper_diagnostics) that the compiler
+# links: ../src built without the port, so cfg(vesper_port) is off. Written
+# by hand because its sources live in the parent package; see "Crates the
+# compiler links" in docs/maintenance/porting-a-crate.md.
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rs//rs/private:all_crate_deps.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test")
+load("@vesper_cargo//:packages.bzl", "PACKAGES")
+
+# The seed's dependencies (vesper-core, the vesper-span seed, serde_json,
+# ariadne, and unicode-width for the table test), from its Cargo metadata as
+# vesper_crate derives them.
+_DATA = PACKAGES["crates/vesper-diagnostics/seed"].crate_data()
+
+_NORMAL = all_crate_deps(_DATA, platforms = _DATA["platforms"], normal = True)
+
+_DEV = all_crate_deps(_DATA, platforms = _DATA["platforms"], normal_dev = True)
+
+rust_library(
+    name = "seed",
+    srcs = ["//crates/vesper-diagnostics:rust_srcs"],
+    crate_name = "vesper_diagnostics",
+    crate_root = "//crates/vesper-diagnostics:src/lib.rs",
+    edition = "2024",
+    rustc_env = {
+        "CARGO_PKG_NAME": "vesper-diagnostics-seed",
+        "CARGO_PKG_VERSION": "0.1.0",
+    },
+    version = "0.1.0",
+    visibility = ["//visibility:public"],
+    deps = _NORMAL,
+)
+
+rust_test(
+    name = "seed_unit_test",
+    crate = ":seed",
+    edition = "2024",
+    deps = _DEV,
+)
+
+[
+    rust_test(
+        name = "seed_test_" + t,
+        srcs = ["//crates/vesper-diagnostics:tests/%s.rs" % t],
+        # tests/port_tables.rs includes the table generator and the
+        # committed table.
+        compile_data = [
+            "//crates/vesper-diagnostics:examples/width_table.rs",
+            "//crates/vesper-diagnostics:vesper/src/width.ves",
+        ],
+        crate_root = "//crates/vesper-diagnostics:tests/%s.rs" % t,
+        edition = "2024",
+        deps = [":seed"] + _NORMAL + _DEV,
+    )
+    for t in [
+        "port_tables",
+        "render",
+    ]
+]
+
+rust_clippy_test(
+    name = "clippy",
+    targets = [":seed"],
+    tags = [
+        "clippy",
+        "lint",
+    ],
+)

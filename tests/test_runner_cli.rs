@@ -211,8 +211,11 @@ fn add_positive(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow]] {
     }
 }
 
-fn test_add_positive() -> bool eff [Fail[ArithOverflow]] {
-    add_positive(5, 3) == 8 && add_positive(0, 3) == 0 && add_positive(-2, 3) == 0
+// @case positive(5, 3, 8)
+// @case zero(0, 3, 0)
+// @case negative(-2, 3, 0)
+fn check_add_positive(a: i64, b: i64, expected: i64) -> bool eff [Fail[ArithOverflow]] {
+    add_positive(a, b) == expected
 }
 "#;
     let weak = r#"
@@ -242,6 +245,17 @@ fn test_add_positive_weak() -> bool eff [Fail[ArithOverflow]] {
     assert_eq!(strong_json["passed"], true);
     assert_eq!(strong_json["survived"], 0);
     assert!(strong_json["killed"].as_u64().unwrap() >= 3);
+    for mutant in strong_json["mutants"].as_array().unwrap() {
+        assert_eq!(mutant["function"], "add_positive");
+        if mutant["status"] == "killed" {
+            assert!(
+                mutant["killed_by"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("check_add_positive::")
+            );
+        }
+    }
 
     let weak_out = vesper(&temp.0, &["test", "weak.ves", "--mutate", "--json"]);
     assert!(!weak_out.status.success());
@@ -360,4 +374,194 @@ fn test_only_positive() -> bool {
     assert_eq!(weak_json["mode"], "mutate");
     assert_eq!(weak_json["passed"], false);
     assert!(weak_json["survived"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn parameterized_cases_report_separate_outcomes_and_can_be_filtered() {
+    let source = r#"
+fn __vesper_test_case_0(a: i64, b: i64) -> i64 {
+    wrapping_add(a, b)
+}
+
+// @case negative(-3, -3)
+// @case nested(__vesper_test_case_0(2, 3), 5)
+// @case wrong(2, 3)
+fn compare(actual: i64, expected: i64) -> bool {
+    actual == expected
+}
+
+// @test with an ordinary regression description
+fn ordinary() -> bool { true }
+"#;
+    let temp = Temp::new(&[("cases.ves", source)]);
+    let out = vesper(&temp.0, &["test", "cases.ves", "--json"]);
+    assert!(!out.status.success());
+    let report = parse_json(&out);
+    assert_eq!(report["total"], 4, "{report}");
+    assert_eq!(report["failed"], 1);
+    let cases = report["files"][0]["tests"].as_array().unwrap();
+    assert_eq!(cases[0]["name"], "compare::negative");
+    assert_eq!(cases[0]["engine"], "jit");
+    assert_eq!(cases[0]["passed"], true);
+    assert_eq!(cases[1]["name"], "compare::nested");
+    assert_eq!(cases[1]["passed"], true);
+    assert_eq!(cases[2]["name"], "compare::wrong");
+    assert_eq!(cases[2]["line"], 8);
+    assert_eq!(cases[2]["column"], 1);
+    assert_eq!(cases[2]["passed"], false);
+    assert_eq!(cases[3]["name"], "ordinary");
+
+    let out = vesper(
+        &temp.0,
+        &["test", "cases.ves", "--filter", "compare::nested", "--json"],
+    );
+    assert!(out.status.success());
+    assert_eq!(parse_json(&out)["total"], 1);
+}
+
+#[test]
+fn invalid_parameterized_rows_report_the_case_location() {
+    for (rows, expected) in [
+        (
+            "// @case missing_parentheses",
+            "1:1: expected @case name(arguments)",
+        ),
+        (
+            "// @case repeat(1)\n// @case repeat(2)",
+            "2:1: duplicate test case 'test_value::repeat'",
+        ),
+        (
+            "// @case bad_syntax(,)",
+            "1:1: test_value::bad_syntax: 1 syntax error",
+        ),
+        (
+            "// @case wrong_arity()",
+            "1:1: test_value::wrong_arity: 1 semantic error",
+        ),
+        (
+            "// @case wrong_type(true)",
+            "1:1: test_value::wrong_type: 1 semantic error",
+        ),
+    ] {
+        let source = format!("{rows}\nfn test_value(x: i64) -> bool {{ x == 1 }}\n");
+        let temp = Temp::new(&[("invalid.ves", &source)]);
+        let out = vesper(&temp.0, &["test", "invalid.ves", "--json"]);
+        assert!(!out.status.success());
+        let report = parse_json(&out);
+        let error = report["files"][0]["error"].as_str().unwrap();
+        assert!(error.starts_with(expected), "{error}");
+    }
+}
+
+#[test]
+fn standard_library_source_unit_tests_pass() {
+    let cwd = std::env::current_dir().unwrap();
+    for (file, count) in [
+        ("packages/vesper-std/core/src/saturating.ves", 13),
+        ("packages/vesper-std/core/src/option.ves", 7),
+    ] {
+        let out = vesper(&cwd, &["test", file, "--json"]);
+        let report = parse_json(&out);
+        assert!(out.status.success(), "{report}");
+        assert_eq!(report["total"], count, "{report}");
+    }
+}
+
+#[test]
+fn test_blocks_are_type_checked_only_when_enabled() {
+    let source = r#"
+fn main() -> i64 { 0 }
+
+test {
+    fn test_bad_type() -> bool { 42 }
+}
+"#;
+    let temp = Temp::new(&[("suite.ves", source)]);
+    let check = vesper(&temp.0, &["check", "suite.ves"]);
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    if cfg!(unix) {
+        let build = vesper(&temp.0, &["build", "suite.ves", "-o", "suite"]);
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+
+    let out = vesper(&temp.0, &["test", "suite.ves", "--json"]);
+    assert!(!out.status.success());
+    let report = parse_json(&out);
+    let error = report["files"][0]["error"].as_str().unwrap();
+    assert!(error.contains("expected bool"), "{error}");
+}
+
+#[test]
+fn test_blocks_keep_private_helpers_and_cases_in_the_module() {
+    let source = r#"
+fn offset(value: i64) -> i64 { if value >= 0 { 5 } else { 0 } }
+
+test {
+    fn same(actual: i64, expected: i64) -> bool { actual == expected }
+
+    // @case negative(-2, 0)
+    // @case boundary(0, 5)
+    fn test_offset(value: i64, expected: i64) -> bool {
+        same(offset(value), expected)
+    }
+}
+"#;
+    let temp = Temp::new(&[("suite.ves", source)]);
+    let out = vesper(&temp.0, &["test", "suite.ves", "--mutate", "--json"]);
+    let report = parse_json(&out);
+    assert!(out.status.success(), "{report}");
+    let mutants = report["mutants"].as_array().unwrap();
+    assert!(!mutants.is_empty());
+    for mutant in mutants {
+        assert_eq!(mutant["function"], "offset", "{mutant}");
+    }
+}
+
+#[test]
+fn package_test_mode_only_enables_blocks_in_the_root_package() {
+    let temp = Temp::new(&[
+        (
+            "app/Loom.toml",
+            "[package]\nname = \"@test/app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n[dependencies]\n\"@test/helper\" = { version = \"^0.1\", path = \"../helper\" }\n",
+        ),
+        (
+            "app/src/main.ves",
+            r#"
+fn main() -> i64 { 0 }
+
+test {
+    use @test/helper::value;
+    fn run_suite() -> i64 { value() }
+}
+"#,
+        ),
+        (
+            "helper/Loom.toml",
+            "[package]\nname = \"@test/helper\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+        ),
+        (
+            "helper/src/lib.ves",
+            "pub fn value() -> i64 { 7 } test { fn test_bad_type() -> bool { 42 } }",
+        ),
+    ]);
+    let ordinary = vesper(&temp.0, &["run", "app", "--entry", "run_suite"]);
+    assert!(!ordinary.status.success());
+    let test = vesper(
+        &temp.0,
+        &["run", "app", "--include-tests", "--entry", "run_suite"],
+    );
+    assert!(
+        test.status.success(),
+        "{}",
+        String::from_utf8_lossy(&test.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&test.stdout).trim(), "7");
 }

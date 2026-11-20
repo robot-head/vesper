@@ -43,6 +43,13 @@ pub fn u32_at(in s: ChunkSeq[u32], i: u64) -> u32 {
     }
 }
 
+pub fn u64_at(in s: ChunkSeq[u64], i: u64) -> u64 {
+    match s.try_get(i) {
+        Option::Some(v) => v,
+        Option::None => 0,
+    }
+}
+
 pub fn w32(in s: ChunkSeq[u32], i: u64) -> u64 {
     match s.try_get(i) {
         Option::Some(v) => widen_u64(v),
@@ -61,4 +68,27 @@ pub fn push_decimal(inout out: ChunkSeq[u8], v: u64) {
 // `x << s` for `s < 64`.
 pub fn shl(x: u64, s: u32) -> u64 {
     wrapping_shl_u64(x, s)
+}
+
+// The first `min(len, 8)` bytes of `b[at..]` as a little-endian word, with
+// zero bytes above them (and above the end of `b`).
+pub fn word_at(in b: Slice[u8], at: u64, len: u64) -> u64 {
+    if len >= 8 {
+        return match b.try_read_u64_le(at) {
+            Option::Some(w) => w,
+            Option::None => word_slow(in b, at, 8),
+        };
+    }
+    match b.try_read_u64_le(at) {
+        Option::Some(w) => w & wrapping_sub(shl(1, narrow(shl(len, 3))), 1),
+        Option::None => word_slow(in b, at, len),
+    }
+}
+
+fn word_slow(in b: Slice[u8], at: u64, len: u64) -> u64 {
+    let mut w: u64 = 0;
+    for i in 0..len {
+        w = w | shl(widen_u64(byte(in b, add(at, i))), narrow(shl(i, 3)));
+    }
+    w
 }

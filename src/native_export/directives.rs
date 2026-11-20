@@ -45,6 +45,18 @@ pub struct Directives {
     /// copy payloads cross as `OptionMirror`/`ResultMirror`, lent in place
     /// (#991). Opt-in, so existing v3 bindings stay byte for byte.
     pub option_mirrors: bool,
+    /// `vsys <Library> [direct|isolated(mpk)] [rust=<path>]`: how this
+    /// library links an import a package carries in its manifest
+    /// ([`Directives::add_packages`]).
+    pub links: Vec<VsysLink>,
+}
+
+/// The root module's settings for a package-carried `.vsys` library.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VsysLink {
+    pub library: String,
+    pub handler: Option<Handler>,
+    pub rust_path: Option<String>,
 }
 
 /// One generic instance to export.
@@ -168,24 +180,8 @@ pub fn parse_instance(text: &str) -> Result<Instance, ExportError> {
 
 /// The `@TARGET@`/`@ABI@` values of an object target.
 fn vsys_target(target: Option<&str>) -> Result<(&'static str, &'static str), ExportError> {
-    let triple: target_lexicon::Triple = match target {
-        Some(t) => t
-            .parse()
-            .map_err(|e| ExportError::Directive(format!("invalid target: {e}")))?,
-        None => target_lexicon::Triple::host(),
-    };
-    use target_lexicon::{Architecture as A, OperatingSystem as O};
-    Ok(match (triple.architecture, triple.operating_system) {
-        (A::X86_64, O::Linux) => ("x86_64-unknown-linux-gnu", "sysv64"),
-        (A::Aarch64(_), O::Linux) => ("aarch64-unknown-linux-gnu", "aapcs64"),
-        (A::Aarch64(_), O::Darwin(_) | O::MacOSX(_)) => ("aarch64-apple-darwin", "darwin64"),
-        (A::X86_64, O::Windows) => ("x86_64-pc-windows-msvc", "win64"),
-        _ => {
-            return Err(ExportError::Directive(format!(
-                "@export vsys: .vsys libraries have no target for {triple}"
-            )));
-        }
-    })
+    crate::packages::vsys_target(target)
+        .map_err(|e| ExportError::Directive(format!("@export vsys: {e}")))
 }
 
 impl Directives {
@@ -227,6 +223,41 @@ impl Directives {
                 }
             } else if let Some(spec) = rest.strip_prefix("instance ") {
                 out.instances.push(parse_instance(spec.trim())?);
+            } else if let Some(spec) = rest.strip_prefix("vsys")
+                && let Some(library) = spec
+                    .split_whitespace()
+                    .next()
+                    .filter(|w| w.starts_with(|c: char| c.is_ascii_uppercase()))
+            {
+                let mut link = VsysLink {
+                    library: library.to_owned(),
+                    handler: None,
+                    rust_path: None,
+                };
+                for w in spec.split_whitespace().skip(1) {
+                    match w {
+                        "direct" if link.handler.is_none() => link.handler = Some(Handler::Direct),
+                        "isolated(mpk)" if link.handler.is_none() => {
+                            link.handler = Some(Handler::IsolatedMpk)
+                        }
+                        _ => match w.strip_prefix("rust=") {
+                            Some(p) if !p.is_empty() && link.rust_path.is_none() => {
+                                link.rust_path = Some(p.to_string())
+                            }
+                            _ => {
+                                return Err(ExportError::Directive(format!(
+                                    "@export vsys {library}: unknown option '{w}'"
+                                )));
+                            }
+                        },
+                    }
+                }
+                if out.links.iter().any(|l| l.library == link.library) {
+                    return Err(ExportError::Directive(format!(
+                        "@export vsys {library}: named twice"
+                    )));
+                }
+                out.links.push(link);
             } else if let Some(spec) = rest.strip_prefix("vsys") {
                 let mut words = spec.split_whitespace();
                 let handler = match words.next() {
@@ -281,5 +312,55 @@ impl Directives {
             }
         }
         Ok(out)
+    }
+
+    /// Add the `.vsys` libraries the loaded packages carry
+    /// ([`crate::packages::Assembled::vsys`]) as imports for an object of
+    /// `target`, each with the handler and Rust path a
+    /// `vsys <Library> ..` directive gives it (`direct` and none otherwise).
+    /// A library imported twice, or a directive naming no carried library,
+    /// is an error.
+    pub fn add_packages(
+        &mut self,
+        packages: &[crate::packages::PackageVsys],
+        target: Option<&str>,
+    ) -> Result<(), ExportError> {
+        for p in packages {
+            let text = p
+                .source_for(target)
+                .map_err(|e| ExportError::Directive(format!("{}: {e}", p.display)))?;
+            let descriptor = vesper_ffi::sys::parse(&text, vesper_ffi::sys::Limits::default())
+                .map_err(|e| ExportError::Directive(format!("{}: {e}", p.display)))?;
+            let library = descriptor.name().to_owned();
+            if self.vsys.iter().any(|v| v.library == library) {
+                return Err(ExportError::Directive(format!(
+                    "{}: library {library} is imported twice",
+                    p.display
+                )));
+            }
+            let link = self.links.iter().find(|l| l.library == library);
+            self.vsys.push(VsysImport {
+                handler: link.and_then(|l| l.handler).unwrap_or(Handler::Direct),
+                rust_path: link.and_then(|l| l.rust_path.clone()),
+                symbols: descriptor
+                    .functions()
+                    .iter()
+                    .map(|f| f.symbol().to_string())
+                    .collect(),
+                library,
+                source: text,
+            });
+        }
+        if let Some(l) = self
+            .links
+            .iter()
+            .find(|l| !self.vsys.iter().any(|v| v.library == l.library))
+        {
+            return Err(ExportError::Directive(format!(
+                "@export vsys {}: no loaded package carries this library (name its .vsys file in a Loom.toml `[package] vsys`)",
+                l.library
+            )));
+        }
+        Ok(())
     }
 }

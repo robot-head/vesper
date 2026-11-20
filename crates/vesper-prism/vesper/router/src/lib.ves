@@ -11,6 +11,19 @@
 // parameter at the first position where two candidates differ, and matching
 // backtracks depth first within `max_match_work` visited nodes.
 
+// ASCII bytes this module compares against (constants are per module).
+const DIGIT_0: u8 = 48;
+const DIGIT_9: u8 = 57;
+const UPPER_A: u8 = 65;
+const UPPER_Z: u8 = 90;
+const LOWER_A: u8 = 97;
+const LOWER_Z: u8 = 122;
+
+// The RFC 9110 §5.6.2 `tchar` bytes (ALPHA, DIGIT and !#$%&'*+-.^_`|~):
+// bit `b` of LOW for bytes 0-63, bit `b - 64` of HIGH for 64-127.
+const TCHAR_MASK_LOW: u64 = 288068722172624896;
+const TCHAR_MASK_HIGH: u64 = 6341068274398134270;
+
 use self::matching::{
     find_path,
     is_lit,
@@ -138,11 +151,11 @@ pub fn word(in s: Slice[u64], i: u64) -> u64 {
 }
 
 pub fn is_digit(b: u8) -> bool {
-    b >= 48 && b <= 57
+    b >= DIGIT_0 && b <= DIGIT_9
 }
 
 pub fn is_alpha(b: u8) -> bool {
-    (b >= 65 && b <= 90) || (b >= 97 && b <= 122)
+    (b >= UPPER_A && b <= UPPER_Z) || (b >= LOWER_A && b <= LOWER_Z)
 }
 
 // The RFC 9110 `tchar` bytes (ALPHA, DIGIT and !#$%&'*+-.^_`|~) as two
@@ -150,8 +163,8 @@ pub fn is_alpha(b: u8) -> bool {
 // a comparison chain does not. `rotate_right` is the total shift.
 fn token(b: u8) -> bool {
     let i = widen_u64(b);
-    let low: u64 = 288068722172624896;
-    let high: u64 = 6341068274398134270;
+    let low = TCHAR_MASK_LOW;
+    let high = TCHAR_MASK_HIGH;
     if i < 64 {
         (rotate_right(low, i) & 1) == 1
     } else if i < 128 {

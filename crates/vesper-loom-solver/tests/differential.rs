@@ -206,6 +206,7 @@ fn manifest(rng: &mut Rng, own: &str, version: &str) -> Manifest {
                 rng.some(CAPS, 3)
             },
             forbid_unsafe_ffi: rng.chance(10),
+            vsys: vec![],
         },
         features,
         dependencies,

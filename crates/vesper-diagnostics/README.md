@@ -1,5 +1,17 @@
 # vesper-diagnostics
 
+Two builds share these sources (self-hosting SH1 lane 1, #1128). The
+compiler and every crate in its dependency closure link the frozen Rust seed
+copy, `crates/vesper-diagnostics/seed` (package `vesper-diagnostics-seed`).
+This package, `vesper-diagnostics`, is the port-backed build: its build
+script links the Vesper package in `vesper/`, which does the checks of
+`prepare`, writes the LSP JSON and renders the ariadne 0.5.1 terminal report
+byte for byte (`tests/differential.rs` compares the two builds on generated
+reports). Rust stays the default until the port matches it in function and
+performance; the numbers are in
+`docs/parallel-results/self-host-diagnostics.md`. The port's char width
+table is generated from unicode-width 0.1.14 by `examples/width_table.rs`.
+
 A root-free bounded host adapter for actual compiler diagnostic metadata. It
 performs no filesystem, compiler, native/JIT/WASM or proof execution. Validation
 checks supplied data and its byte locations against one exact source; it does
@@ -42,6 +54,10 @@ numbers, is checked before DOM copies. This cap covers the diagnostic array;
 server envelope/framing limits belong to the caller. Work preflight charges
 source endpoint scans, escaping, URI copies and DOM shape; metadata is charged
 before constructing the returned DOM. No partial vector is returned on failure.
+
+`Prepared::lsp_json(uri)` returns the same diagnostics as one compact JSON
+array (the bytes an LSP server sends); `Prepared::terminal_colored(file)` is
+`terminal` with Ariadne's default ANSI colors.
 
 `Prepared::terminal(file)` returns a complete private Vec<u8>, rendering all real
 labels/help with Ariadne0.5 configured explicitly for IndexType::Byte, stable
@@ -101,7 +117,7 @@ Span errors, Name, InvalidLimits, Allocation, Output and UnsupportedLineEnding.
 After workspace registration:
 
 ```text
-cargo test -p vesper-diagnostics --all-targets
+cargo test -p vesper-diagnostics -p vesper-diagnostics-seed --all-targets
 cargo clippy -p vesper-diagnostics --all-targets -- -D warnings
 cargo run -p vesper-diagnostics --example causal_diagnostics
 ```

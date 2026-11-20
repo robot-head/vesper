@@ -65,6 +65,7 @@ class PolicyTests(unittest.TestCase):
             "src/audit_commands.rs", "src/replay_commands.rs",
             "crates/vesper-lean-syntax/src/lib.rs", "crates/vesper-fmt/src/lib.rs",
             "src/kernel_snapshot.rs", "src/bin/logos42/process.rs",
+            "src/bin/arithmetic_oracle42.rs", "src/bin/arithmetic_oracle42/process.rs",
             "src/lsp/proof_lens.rs", "src/optimize/witness_lean.rs",
             "src/format_commands.rs", "src/stylus_safety.rs",
         ]:

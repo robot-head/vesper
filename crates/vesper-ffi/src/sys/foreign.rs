@@ -221,6 +221,15 @@ pub(super) fn validate(contract: &ValueType, bits: u64) -> Result<ValidatedValue
         ValueType::Address { pointee, nullable } => {
             ValidatedValue::Address(address(bits, *pointee, *nullable)?)
         }
+        ValueType::NonNullHandle { handle } => {
+            if bits == 0 {
+                return Err(ValidationError::NullAddress);
+            }
+            ValidatedValue::Handle {
+                name: handle.name().to_owned(),
+                word: bits,
+            }
+        }
         ValueType::Handle { handle, nullable } => {
             if bits == 0 && !nullable {
                 return Err(ValidationError::NullAddress);
@@ -315,7 +324,10 @@ impl FunctionDescriptor {
                     raw.push((AbiType::Pointer, address));
                     raw.push((AbiType::Integer(Scalar::Usize), length));
                 }
-                (ParameterType::Pointer { .. }, RawArgument::Pointer { address })
+                (
+                    ParameterType::Pointer { .. } | ParameterType::CStr,
+                    RawArgument::Pointer { address },
+                )
                 | (ParameterType::Handle { .. }, RawArgument::Bits(address)) => {
                     raw.push((AbiType::Pointer, address));
                 }

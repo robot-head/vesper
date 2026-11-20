@@ -35,6 +35,18 @@ included, and many of them are fine as they are.
 | `packages/vesper-front` | 467 | SH1 lanes 9-12 own it; last |
 | other crates | under 400 each | |
 
+## Done
+
+| PR | Area | Port speed |
+| --- | --- | --- |
+| #1162 | BBR (Rust + `.ves` port), inliner fold, checker facts | ack path +0.1% Ir |
+| #1172 | warp-tcp: header offsets, option kinds and lengths, RFC 9293/7323/5961 limits (Rust reference + `.ves` port) | codec and transfer Ir identical |
+| #1193 | warp-wheel: slot and span limits, lease mixing constants | single-literal constants, folded (no benchmark example) |
+| #1193 | Prism: per-module ASCII constants, RFC 9110 tchar/field-value and RFC 3986 target masks, status codes, host limits | `abba measure 20` 62.87 M -> 62.85 M Ir |
+| #1197 | silicon: the RISC-V AIA register map (APLIC offsets, IDC registers, `target[i]` and `msiaddrcfgh` fields, `sourcecfg.SM` codes, IMSIC iselects) | `abba one port` aia-intc, aplic-direct, imsic Ir unchanged |
+| #1199 | eBPF instruction codec: the kernel's `BPF_*` opcode fields (class, op, jmp, source, size, mode, atomic) | decode workload 5.42 M -> 5.32 M Ir per warm call (-1.9%) |
+| next | eBPF interpreter: helper ids, map types, errnos, limits, ring buffer header bits, `xdp_md`/`__sk_buff` offsets, FNV and xorshift64* constants, region kinds (Rust and port) | interp workload 25.63 M Ir per warm call before and after (+0.01%) |
+
 ## Order
 
 1. BBR (`crates/vesper-warp-bbr`), with the inliner fold below.
@@ -68,7 +80,18 @@ built from such constants is in range (`const KEEP: u64 = GAIN_UNIT -
 LOSS_THRESH;`). A zero constant still leaves `/` fallible, and `A - B`
 that would underflow is still refused.
 
+## ASCII codes in `.ves` ports
+
+Vesper has no byte literals and module constants are not imported across
+modules, so each module that compares bytes defines the ASCII constants it
+uses (`SLASH: u8 = 47`, `DIGIT_0`, ...). The user chose this over adding byte
+literals first (2026-11-20).
+
 ## Gaps left
+
+- Constants are not patterns: `match c { JEQ => ... }` is refused
+  ("unknown pattern constructor"). The eBPF port's decoders compare with
+  `if` chains instead of matching integer literals.
 
 - A constant derived from other constants (`GAIN_UNIT - LOSS_THRESH`) is
   not folded by the inliner (its function is not a single literal), so it

@@ -5,3 +5,4 @@ pub mod lexer;
 pub mod macro_source;
 pub mod parser;
 pub mod recovery;
+pub mod test_attrs;

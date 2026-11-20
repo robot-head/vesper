@@ -585,22 +585,37 @@ impl Parser {
         }
         self.keyword("ForeignVal")?;
         self.expect(b'[')?;
-        // `ForeignVal[Option[H]]`: a nullable extern-type handle.
+        // `ForeignVal[Option[H]]`: a nullable extern-type handle;
+        // `ForeignVal[NonNull[H]]`: one the library promises is not NULL.
         let result = if self.is_word("Option") && self.peek_punct(1) == Some(b'[') {
             self.bump();
             self.expect(b'[')?;
             let name = self.word()?;
             self.expect(b']')?;
             RawType::OptionHandle(name)
+        } else if self.is_word("NonNull") && self.peek_punct(1) == Some(b'[') {
+            self.bump();
+            self.expect(b'[')?;
+            let name = self.word()?;
+            self.expect(b']')?;
+            RawType::NonNullHandle(name)
         } else {
             self.value_type()?
         };
         self.expect(b']')?;
+        // `-> ForeignVal[T] errno`: read the OS error code after the call.
+        let errno = if self.is_word("errno") {
+            self.bump();
+            true
+        } else {
+            false
+        };
         self.expect(b';')?;
         Ok(RawFunction {
             symbol,
             parameters,
             result,
+            errno,
         })
     }
     /// The type after `nocapture <access> name:`: a slice, a single pointee,
@@ -613,7 +628,17 @@ impl Parser {
         } else {
             false
         };
-        let ty = if self.is_word("CSlice") {
+        let ty = if self.is_word("CStr") {
+            // `nocapture in s: CStr`: a NUL-terminated copy of a byte slice.
+            if access != PointerAccess::In || nullable {
+                return Err(self.error(
+                    ErrorKind::Unsupported,
+                    "a C string parameter is `nocapture in s: CStr`: C may only read it, and it is never NULL",
+                ));
+            }
+            self.bump();
+            RawParameterType::CStr
+        } else if self.is_word("CSlice") {
             let slice_access = match access {
                 PointerAccess::In => Access::In,
                 PointerAccess::Inout => Access::Inout,
@@ -714,6 +739,8 @@ enum RawType {
     },
     /// `Option[H]` of an extern type, as a result.
     OptionHandle(String),
+    /// `NonNull[H]` of an extern type, as a result.
+    NonNullHandle(String),
 }
 enum RawParameterType {
     Value(RawType),
@@ -737,11 +764,14 @@ enum RawParameterType {
         access: HandleAccess,
         pointer: Option<Error>,
     },
+    /// `nocapture in s: CStr`.
+    CStr,
 }
 struct RawFunction {
     symbol: String,
     parameters: Vec<(String, RawParameterType)>,
     result: RawType,
+    errno: bool,
 }
 fn scalar(name: &str) -> Option<Scalar> {
     Some(match name {
@@ -764,6 +794,8 @@ fn reject_reserved_type(n: &str) -> Result<(), Error> {
             "Unit"
                 | "bool"
                 | "CSlice"
+                | "CStr"
+                | "NonNull"
                 | "ForeignVal"
                 | "Ptr"
                 | "NullablePtr"
@@ -793,6 +825,18 @@ fn resolve(
                 0..0,
                 format!(
                     "ForeignVal[Option[{n}]] needs `{n}` to be a linear or affine extern type; other nullable results are unsupported"
+                ),
+            )),
+        },
+        RawType::NonNullHandle(n) => match externs.iter().find(|e| e.name() == n) {
+            Some(handle) => Ok(ValueType::NonNullHandle {
+                handle: handle.clone(),
+            }),
+            None => Err(Error::new(
+                ErrorKind::Unsupported,
+                0..0,
+                format!(
+                    "ForeignVal[NonNull[{n}]] needs `{n}` to be a linear or affine extern type"
                 ),
             )),
         },
@@ -1097,14 +1141,40 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                     access,
                     nullable,
                 },
+                RawParameterType::CStr => ParameterType::CStr,
             };
             parameters.push(ParameterDescriptor { name, ty });
+        }
+        // A refused C string skips the call, so it must not take a handle
+        // whose ownership the call would consume.
+        if parameters
+            .iter()
+            .any(|p| matches!(p.ty, ParameterType::CStr))
+            && parameters.iter().any(|p| {
+                matches!(
+                    p.ty,
+                    ParameterType::Handle {
+                        access: HandleAccess::Sink,
+                        ..
+                    }
+                )
+            })
+        {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                0..0,
+                format!(
+                    "`{}` takes both a CStr and a `sink` handle: a refused C string would skip the finalizer",
+                    f.symbol
+                ),
+            ));
         }
         functions.push(FunctionDescriptor {
             symbol: f.symbol,
             parameters,
             result: resolve(f.result, &enums, &extern_types)?,
             convention: target.convention(),
+            errno: f.errno,
         });
     }
     functions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
@@ -1116,6 +1186,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         };
         let ok = functions.iter().find(|f| f.symbol == symbol).is_some_and(|f| {
             matches!(f.result, ValueType::Unit)
+                && !f.errno
                 && matches!(
                     f.parameters.as_slice(),
                     [p] if matches!(&p.ty, ParameterType::Handle { handle, access: HandleAccess::Sink } if handle.name() == t.name())

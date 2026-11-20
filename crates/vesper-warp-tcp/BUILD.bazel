@@ -56,7 +56,7 @@ vesper_port_object(
         "    sn_diff(a, b) >= 0\n": "    sn_diff(a, b) > 0\n",
         "        e.rttvar_ns = r_ns / 2;\n": "        e.rttvar_ns = r_ns;\n",
         "    cc.ssthresh = max32(cc.cwnd / 2, wrapping_mul(cc.mss, 2));\n    cc.cwnd = cc.ssthresh;": "    cc.ssthresh = max32(cc.cwnd / 2, cc.mss);\n    cc.cwnd = cc.ssthresh;",
-        "words16_32(dst)), 6),": "words16_32(dst)), 0),",
+        "words16_32(dst)), IPPROTO_TCP),": "words16_32(dst)), 0),",
         "fn dup_thresh() -> u32 {\n    3\n}": "fn dup_thresh() -> u32 {\n    2\n}",
     },
     library = "tcp",

@@ -337,6 +337,9 @@ pub(super) fn fixtures() -> Vec<PathBuf> {
                     // Self-hosting SH0 lane 6 (#1128): `p[a..b]` string intervals (#887).
                     || path.ends_with("crates/vesper-span/vesper")
                     || path.ends_with("crates/vesper-lean-syntax/vesper")
+                    // Self-hosting SH1 lane 1 (#1128): `use` (#880) and
+                    // `t[a..b]` intervals (#887).
+                    || path.ends_with("crates/vesper-diagnostics/vesper")
                     // Port P1 lane 16 (#913): `use` (#880).
                     || path.ends_with("crates/vesper-loom-calculus/vesper")
                     // Port P1 lane 17 (#914): `use` (#880).

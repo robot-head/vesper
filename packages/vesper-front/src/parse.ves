@@ -96,6 +96,8 @@ use self::words::{
     w_fip,
     w_trait,
     w_tiled,
+    w_test,
+    w_test_case,
     w_wire,
     w_for,
     w_where,
@@ -130,12 +132,17 @@ use self::util::{
     shl
 };
 use self::diag::{
+    diags_new,
     diag_push_limit,
     limit_message
 };
 use self::lex::{
     trivia_kind,
-    max_diagnostics
+    max_diagnostics,
+    token_end,
+    token_word,
+    token_sym,
+    tokens_new
 };
 
 // ---------------------------------------------------------------- kinds
@@ -160,7 +167,20 @@ fn n_type() -> u32 {
     204
 }
 
-fn max_depth() -> u64 {
+fn n_block() -> u32 {
+    205
+}
+
+pub fn n_error() -> u32 {
+    206
+}
+
+fn n_incomplete() -> u32 {
+    207
+}
+
+// `HARD_PARSE_DEPTH`, the default `max_depth`.
+pub fn hard_depth() -> u64 {
     128
 }
 
@@ -301,11 +321,11 @@ fn tk(in p: P, i: u64) -> u8 {
 }
 
 fn tword(in p: P, i: u64) -> u8 {
-    u8_at(in p.t.word, i)
+    token_word(in p.t, i)
 }
 
 fn tsym(in p: P, i: u64) -> u32 {
-    u32_at(in p.t.sym, i)
+    token_sym(in p.t, i)
 }
 
 fn tstart(in p: P, i: u64) -> u64 {
@@ -313,7 +333,7 @@ fn tstart(in p: P, i: u64) -> u64 {
 }
 
 fn tend(in p: P, i: u64) -> u64 {
-    w32(in p.t.end, i)
+    token_end(in p.t, i)
 }
 
 // `Parser::index`: the token index of the `n`th upcoming non-trivia token.
@@ -405,9 +425,10 @@ fn exhaust(inout p: P, kind: u64, limit: u64) {
     }
     let at = cur_start(in p);
     p.halted = true;
+    p.halt_kind = kind;
     let mut m = ChunkSeq::new[u8]();
     limit_message(inout m, kind, limit, p.src.len());
-    diag_push_limit(inout p.d, 3, at, at, in m.as_slice(), max_diagnostics());
+    diag_push_limit(inout p.d, 3, at, at, in m.as_slice(), p.max_diag);
     loop {
         if p.pos >= p.ntok || tk(in p, p.pos) == k_eof() {
             return;
@@ -423,8 +444,8 @@ fn diag_open(inout p: P, start: u64, end: u64) -> bool {
     if p.halted {
         return false;
     }
-    if p.d.code.len() >= max_diagnostics() {
-        exhaust(inout p, 2, max_diagnostics());
+    if p.d.code.len() >= p.max_diag {
+        exhaust(inout p, 2, p.max_diag);
         return false;
     }
     p.d.code.push(2);
@@ -451,6 +472,17 @@ fn err(inout p: P, in m: String) {
 fn expect(inout p: P, k: u8) {
     if !eat(inout p, k) {
         let found = kind(in p);
+        if p.editor {
+            // A missing closer is an empty MissingDelimiter site where it
+            // belongs, anything else an Unexpected site over the token.
+            let i = idx(in p, 0);
+            let s = tstart(in p, i);
+            if k == k_r_paren() || k == k_r_bracket() || k == k_r_brace() {
+                site(inout p, s, s, 1, 0);
+            } else {
+                site(inout p, s, tend(in p, i), 2, 0);
+            }
+        }
         if err_open(inout p) {
             p.d.text.extend(in "expected ".as_bytes());
             p.d.text.extend(in kind_name(k).as_bytes());
@@ -460,12 +492,40 @@ fn expect(inout p: P, k: u8) {
     }
 }
 
+// `Parser::site`: a recovery site, or `site_exhausted` past the limit.
+fn site(inout p: P, start: u64, end: u64, kind: u32, rcv: u32) {
+    if p.sites.len() >= shl(p.site_limit, 2) {
+        p.site_exhausted = true;
+        return;
+    }
+    p.sites.push(narrow(start));
+    p.sites.push(narrow(end));
+    p.sites.push(kind);
+    p.sites.push(rcv);
+}
+
+// Inserts a node start event at `at` (rowan's `start_node_at`).
+fn start_node_at(inout p: P, at: u64, kind: u32) {
+    let mut i = p.ev.len();
+    p.ev.push(0);
+    loop {
+        if i <= at {
+            break;
+        }
+        let prev = wrapping_sub(i, 1);
+        let v = u32_at(in p.ev, prev);
+        p.ev.try_set(i, v);
+        i = prev;
+    }
+    p.ev.try_set(at, wrapping_add(2147483648, kind));
+}
+
 fn enter(inout p: P) -> bool {
     if p.halted {
         return false;
     }
-    if p.depth >= max_depth() {
-        exhaust(inout p, 3, max_depth());
+    if p.depth >= p.max_depth {
+        exhaust(inout p, 3, p.max_depth);
         return false;
     }
     p.depth = inc(p.depth);
@@ -483,7 +543,8 @@ fn placeholder(in p: P) -> Ex {
         tiled: false,
         path: 0,
         leaves: 1,
-        pure: false
+        pure: false,
+        rcv: 0
     }
 }
 
@@ -492,8 +553,8 @@ fn record(inout p: P, e: Ex) -> Ex {
     if p.halted {
         return placeholder(in p);
     }
-    if widen_u64(e.h) > max_depth() {
-        exhaust(inout p, 3, max_depth());
+    if widen_u64(e.h) > p.max_depth {
+        exhaust(inout p, 3, p.max_depth);
         return placeholder(in p);
     }
     e
@@ -509,7 +570,8 @@ fn ex(k: u8, start: u64, end: u64, children: u32) -> Ex {
         tiled: false,
         path: 0,
         leaves: 1,
-        pure: false
+        pure: false,
+        rcv: 0
     }
 }
 
@@ -943,14 +1005,17 @@ fn pass(inout p: P) {
 // ---------------------------------------------------------------- items
 
 // `Parser::generics`. Pushes the symbol of each row parameter on `binds`.
-fn generics(inout p: P) {
+// `Parser::generics`; whether it read a parameter (`!generics.is_empty()`).
+fn generics(inout p: P) -> bool {
     if !eat(inout p, k_l_bracket()) {
-        return;
+        return false;
     }
+    let mut any = false;
     loop {
         if at(in p, k_r_bracket()) || at(in p, k_eof()) {
             break;
         }
+        any = true;
         let before = p.pos;
         let row = at(in p, k_lower());
         let name = ident(inout p);
@@ -990,6 +1055,7 @@ fn generics(inout p: P) {
         }
     }
     expect(inout p, k_r_bracket());
+    any
 }
 
 fn fields(inout p: P) {
@@ -1041,6 +1107,51 @@ fn fip_attr(inout p: P) -> bool {
     }
 }
 
+// `Parser::attr_paren_args`: a balanced `(...)` list for `@test(...)` or
+// `@test_case(...)`.
+fn attr_paren_args(inout p: P) {
+    expect(inout p, k_l_paren());
+    let mut depth: u64 = 1;
+    loop {
+        if depth == 0 || at(in p, k_eof()) || p.halted {
+            break;
+        }
+        let k = kind(in p);
+        if k == k_l_paren() {
+            depth = inc(depth);
+        } else if k == k_r_paren() {
+            depth = wrapping_sub(depth, 1);
+        }
+        bump(inout p);
+    }
+    if depth > 0 && !p.halted {
+        err(inout p, in "unterminated attribute argument list");
+    }
+}
+
+// `Parser::test_attr`: `@test`, `@test(...)` or `@test_case(...)`.
+fn test_attr(inout p: P) -> bool {
+    if at(in p, k_at()) && at_word(in p, 1, w_test()) {
+        bump(inout p);
+        bump(inout p);
+        if at(in p, k_l_paren()) {
+            attr_paren_args(inout p);
+        }
+        true
+    } else if at(in p, k_at()) && at_word(in p, 1, w_test_case()) {
+        bump(inout p);
+        bump(inout p);
+        if at(in p, k_l_paren()) {
+            attr_paren_args(inout p);
+        } else {
+            err(inout p, in "@test_case requires an argument list in parentheses");
+        }
+        true
+    } else {
+        false
+    }
+}
+
 fn is_mode_kind(k: u8) -> bool {
     k == k_copy() || k == k_affine() || k == k_linear()
 }
@@ -1056,8 +1167,53 @@ fn import_root(in p: P, n: u64) -> bool {
     k == k_at() || k == k_self_kw() || at_word(in p, n, w_super())
 }
 
+// The item kinds `pub` may precede in `Parser::declaration`.
+fn pub_item_follows(in p: P) -> bool {
+    at_word(in p, 1, w_trait())
+        || (at_word(in p, 1, w_const()) && nth(in p, 2) == k_upper())
+        || at_word(in p, 1, w_model())
+        || nth(in p, 1)
+        == k_fn()
+        || is_type_decl_kind(nth(in p, 1))
+        || (is_mode_kind(nth(in p, 1)) && is_type_decl_kind(nth(in p, 2)))
+        || (
+        nth(in p, 1)
+            == k_at()
+            && (
+            at_word(in p, 2, w_fip())
+                || at_word(in p, 2, w_test())
+                || at_word(in p, 2, w_test_case())
+        )
+    )
+}
+
+// Keep inactive test declarations as lossless tokens in the ordinary CST.
+fn skip_test_block(inout p: P) {
+    bump(inout p);
+    bump(inout p);
+    let mut depth: u64 = 1;
+    loop {
+        if depth == 0 || at(in p, k_eof()) {
+            break;
+        }
+        if at(in p, k_l_brace()) {
+            depth = inc(depth);
+        } else if at(in p, k_r_brace()) {
+            depth = wrapping_sub(depth, 1);
+        }
+        bump(inout p);
+    }
+    if depth != 0 {
+        expect(inout p, k_r_brace());
+    }
+}
+
 // `Parser::declaration`: whether it produced an item.
 fn declaration(inout p: P) -> bool {
+    if at_word(in p, 0, w_test()) && nth(in p, 1) == k_l_brace() {
+        skip_test_block(inout p);
+        return false;
+    }
     if at_word(in p, 0, w_use()) && at_word(in p, 1, w_model()) {
         use_model(inout p);
         return false;
@@ -1086,28 +1242,31 @@ fn declaration(inout p: P) -> bool {
         eat(inout p, k_semi());
         return false;
     }
-    let mut fip = fip_attr(inout p);
-    let public = at_word(in p, 0, w_pub())
-        && (
-        at_word(in p, 1, w_trait())
-            || (at_word(in p, 1, w_const()) && nth(in p, 2) == k_upper())
-            || at_word(in p, 1, w_model())
-            || nth(in p, 1)
-            == k_fn()
-            || is_type_decl_kind(nth(in p, 1))
-            || (is_mode_kind(nth(in p, 1)) && is_type_decl_kind(nth(in p, 2)))
-            || (
-            !fip && nth(in p, 1) == k_at() && at_word(in p, 2, w_fip()) && nth(in p, 3) == k_fn()
-        )
-    );
-    if public {
-        bump(inout p);
-    }
-    if !fip {
-        fip = fip_attr(inout p);
+    p.item_start = cur_start(in p);
+    let mut fip = false;
+    let mut has_test_attr = false;
+    let mut public = false;
+    loop {
+        if fip_attr(inout p) {
+            fip = true;
+            continue;
+        }
+        if test_attr(inout p) {
+            has_test_attr = true;
+            continue;
+        }
+        if !public && at_word(in p, 0, w_pub()) && pub_item_follows(in p) {
+            bump(inout p);
+            public = true;
+            continue;
+        }
+        break;
     }
     if fip && !at(in p, k_fn()) {
         err(inout p, in "@fip may only annotate a fn declaration");
+    }
+    if has_test_attr && !at(in p, k_fn()) {
+        err(inout p, in "@test and @test_case may only annotate a fn declaration");
     }
     if at_word(in p, 0, w_const()) && nth(in p, 1) == k_upper() {
         const_item(inout p);
@@ -1203,6 +1362,9 @@ fn declaration(inout p: P) -> bool {
         expect(inout p, k_r_brace());
         true
     } else if k == k_fn() {
+        if !public && !fip {
+            p.item_start = cur_start(in p);
+        }
         function(inout p, false);
         true
     } else if k == k_impl() {
@@ -1248,11 +1410,12 @@ fn declaration(inout p: P) -> bool {
     }
 }
 
-fn function_header(inout p: P) {
+// `Parser::function_header`; whether the function is generic.
+fn function_header(inout p: P) -> bool {
     expect(inout p, k_fn());
     lower(inout p);
     let mark = p.binds.len();
-    generics(inout p);
+    let generic = generics(inout p);
     p.pending.clear();
     bind_rows(inout p, mark);
     expect(inout p, k_l_paren());
@@ -1266,6 +1429,7 @@ fn function_header(inout p: P) {
     if at_word(in p, 0, w_where()) {
         where_clauses(inout p);
     }
+    generic
 }
 
 fn at_method(in p: P) -> bool {
@@ -1307,9 +1471,14 @@ fn const_item(inout p: P) {
 }
 
 fn function(inout p: P, op: bool) {
+    let diags = p.d.code.len();
     let rows = p.rows_trail.len();
     let vals = p.vals_trail.len();
-    function_header(inout p);
+    let start = cur_start(in p);
+    let generic = function_header(inout p);
+    if p.editor && !op && p.hdr.len() == 0 {
+        header_note(inout p, start, p.d.code.len() == diags, !generic);
+    }
     if op {
         expect(inout p, k_semi());
     } else {
@@ -1317,6 +1486,42 @@ fn function(inout p: P, op: bool) {
     }
     rows_restore(inout p, rows);
     vals_restore(inout p, vals);
+}
+
+// The first `HeaderNote`: the scope sets are the symbols whose counts are
+// live, row names first.
+fn header_note(inout p: P, start: u64, clean: bool, nongeneric: bool) {
+    p.hdr.push(start);
+    p.hdr.push(cur_start(in p));
+    p
+        .hdr
+        .push(
+        if clean {
+            1
+        } else {
+            0
+        }
+    );
+    p
+        .hdr
+        .push(
+        if nongeneric {
+            1
+        } else {
+            0
+        }
+    );
+    for s in 0..p.rows.len() {
+        if u32_at(in p.rows, s) != 0 {
+            p.hdr_syms.push(narrow(s));
+        }
+    }
+    p.hdr.push(p.hdr_syms.len());
+    for s in 0..p.vals.len() {
+        if u32_at(in p.vals, s) != 0 {
+            p.hdr_syms.push(narrow(s));
+        }
+    }
 }
 
 // `Parser::params`. Pushes each parameter's name symbol on `binds`.
@@ -1871,6 +2076,10 @@ fn ends_with_brace(in p: P, end: u32) -> bool {
 }
 
 fn block_inner(inout p: P) -> Ex {
+    if p.editor {
+        trivia(inout p);
+        start_node(inout p, n_block());
+    }
     let outer = p.vals_trail.len();
     let start = cur_start(in p);
     expect(inout p, k_l_brace());
@@ -1897,9 +2106,14 @@ fn block_inner(inout p: P) -> Ex {
             expect(inout p, k_eq());
             let value = expr(inout p);
             h = hmax(h, value.h);
+            let missing_semi = p.editor && !at(in p, k_semi());
             expect(inout p, k_semi());
+            if missing_semi {
+                recover_statement(inout p);
+            }
             bind_values(inout p, mark);
         } else {
+            let diags = p.d.code.len();
             let e = expr(inout p);
             h = hmax(h, e.h);
             if eat(inout p, k_semi()) {
@@ -1909,6 +2123,16 @@ fn block_inner(inout p: P) -> Ex {
                 && !at(in p, k_r_brace())
                 && !at(in p, k_eof()) {
                 // A block-like statement needs no `;`.
+            } else if p
+                .editor
+                && !at(in p, k_r_brace())
+                && !at(in p, k_eof())
+                && (p.d.code.len() > diags || statement_anchor(in p)) {
+                // Editor mode: the statement ends here.
+                if p.d.code.len() == diags {
+                    err(inout p, in "expected ';' before following statement");
+                }
+                recover_statement(inout p);
             } else {
                 tail = e.leaves;
                 break;
@@ -1920,9 +2144,75 @@ fn block_inner(inout p: P) -> Ex {
     }
     expect(inout p, k_r_brace());
     vals_restore(inout p, outer);
+    if p.editor {
+        finish_node(inout p);
+    }
     let mut b = ex(x_block(), start, last_end(in p), h);
     b.leaves = tail;
     b
+}
+
+fn statement_anchor(in p: P) -> bool {
+    let k = kind(in p);
+    k == k_let() || k == k_match() || k == k_handle() || k == k_return() || k == k_if()
+}
+
+// `Parser::recover_statement`: an ERROR_NODE over the tokens up to the
+// next statement anchor, `;` or `}` outside brackets, and its Unexpected
+// site.
+fn recover_statement(inout p: P) {
+    if at(in p, k_semi()) {
+        bump(inout p);
+        return;
+    }
+    if statement_anchor(in p) || at(in p, k_r_brace()) || at(in p, k_eof()) {
+        return;
+    }
+    let start = cur_start(in p);
+    start_node(inout p, n_error());
+    let mut closing = ChunkSeq::new[u8]();
+    loop {
+        if at(in p, k_eof()) {
+            break;
+        }
+        let k = kind(in p);
+        if closing.len() == 0 && (statement_anchor(in p) || k == k_semi() || k == k_r_brace()) {
+            break;
+        }
+        let expected = if k == k_l_paren() {
+            k_r_paren()
+        } else if k == k_l_bracket() {
+            k_r_bracket()
+        } else if k == k_l_brace() {
+            k_r_brace()
+        } else {
+            255
+        };
+        if expected != 255 {
+            if closing.len() >= p.max_depth {
+                exhaust(inout p, 3, p.max_depth);
+                break;
+            }
+            closing.push(expected);
+        } else if k == k_r_paren() || k == k_r_bracket() || k == k_r_brace() {
+            let n = closing.len();
+            if n != 0 && u8_at(in closing, wrapping_sub(n, 1)) == k {
+                closing.truncate(wrapping_sub(n, 1));
+            } else if k == k_r_brace() {
+                // A mismatched closer of the function is a boundary.
+                break;
+            }
+        }
+        bump(inout p);
+    }
+    let end = last_end(in p);
+    finish_node(inout p);
+    if start < end {
+        site(inout p, start, end, 2, 0);
+    }
+    if at(in p, k_semi()) {
+        bump(inout p);
+    }
 }
 
 // ---------------------------------------------------------------- expressions
@@ -2242,22 +2532,141 @@ fn binary(inout p: P, min: u64) -> Ex {
     record(inout p, e)
 }
 
-// Precedence of a binary operator kind (0 for none); assignments are 1.
+// Precedence of a binary operator kind (0 for none), by token kind;
+// assignments are 1.
+const PRECEDENCE: [u64; 128] = [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    10,
+    10,
+    11,
+    11,
+    11,
+    4,
+    4,
+    5,
+    5,
+    5,
+    5,
+    3,
+    2,
+    0,
+    6,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    8,
+    7,
+    9,
+    9,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+];
+
 fn precedence(k: u8) -> u64 {
-    match k {
-        48 | 49 | 50 | 51 | 52 | 53 => 1,
-        66 => 2,
-        65 => 3,
-        59 | 60 => 4,
-        61 | 62 | 63 | 64 => 5,
-        68 => 6,
-        78 => 7,
-        77 => 8,
-        79 | 80 => 9,
-        54 | 55 => 10,
-        56 | 57 | 58 => 11,
-        _ => 0,
-    }
+    PRECEDENCE[k & 127]
 }
 
 fn binary_inner(inout p: P, min: u64) -> Ex {
@@ -2281,8 +2690,8 @@ fn binary_inner(inout p: P, min: u64) -> Ex {
         if prec == 0 || prec < min {
             break;
         }
-        if widen_u64(lhs.h) >= max_depth() {
-            exhaust(inout p, 3, max_depth());
+        if widen_u64(lhs.h) >= p.max_depth {
+            exhaust(inout p, 3, p.max_depth);
             break;
         }
         if !enter(inout p) {
@@ -2350,14 +2759,15 @@ fn generic_call(in p: P, e: Ex) -> bool {
 }
 
 fn postfix_inner(inout p: P) -> Ex {
+    let checkpoint = p.ev.len();
     let mut e = primary(inout p);
     loop {
         let k = kind(in p);
         if !(k == k_l_paren() || k == k_l_bracket() || k == k_dot() || k == k_question()) {
             break;
         }
-        if widen_u64(e.h) >= max_depth() {
-            exhaust(inout p, 3, max_depth());
+        if widen_u64(e.h) >= p.max_depth {
+            exhaust(inout p, 3, p.max_depth);
             break;
         }
         if !enter(inout p) {
@@ -2405,6 +2815,21 @@ fn postfix_inner(inout p: P) -> Ex {
             }
         } else if k == k_dot() {
             bump(inout p);
+            let mk = kind(in p);
+            if p.editor && mk != k_lower() && mk != k_self_kw() && !contextual_name(mk) {
+                // Editor mode: an INCOMPLETE member and its site.
+                let s = last_end(in p);
+                site(inout p, s, s, 0, e.rcv);
+                err(inout p, in "expected a lower-case member name after '.'");
+                start_node_at(inout p, checkpoint, n_incomplete());
+                finish_node(inout p);
+                let mut f = ex(x_field(), start, last_end(in p), e.h);
+                if e.path != 0 {
+                    f.path = wrapping_add(e.path, 1);
+                }
+                e = record(inout p, f);
+                continue;
+            }
             let m = lower(inout p);
             let w = if tk(in p, m) == k_lower() {
                 tword(in p, m)
@@ -2416,6 +2841,7 @@ fn postfix_inner(inout p: P) -> Ex {
             if e.path != 0 {
                 f.path = wrapping_add(e.path, 1);
             }
+            f.rcv = e.rcv;
             f
         } else {
             bump(inout p);
@@ -2525,6 +2951,7 @@ fn primary_inner(inout p: P) -> Ex {
         e.sym = tsym(in p, i);
         e.path = 1;
         e.pure = true;
+        e.rcv = narrow(inc(i));
         return e;
     }
     if k == k_upper() {
@@ -2599,8 +3026,36 @@ fn primary_inner(inout p: P) -> Ex {
         return block(inout p);
     }
     err(inout p, in "expected expression");
+    let k = kind(in p);
+    if p
+        .editor
+        && (
+        k
+            == k_semi()
+            || k
+            == k_r_brace()
+            || k
+            == k_r_paren()
+            || k
+            == k_r_bracket()
+            || k
+            == k_comma()
+            || k
+            == k_eof()
+            || k
+            == k_let()
+    ) {
+        site(inout p, start, start, 2, 0);
+        return ex(x_tuple(), start, start, 0);
+    }
     if !at(in p, k_eof()) {
+        if p.editor {
+            start_node(inout p, n_error());
+        }
         bump(inout p);
+        if p.editor {
+            finish_node(inout p);
+        }
     }
     ex(x_tuple(), start, last_end(in p), 0)
 }
@@ -2779,9 +3234,54 @@ fn constructor_pattern(inout p: P) {
 
 // `parse_with_limits` after lexing: the module, or for a limited token
 // stream the flat module of every token.
-pub fn parse_tokens(in source: Slice[u8], sink t: Tokens, sink d: Diags) -> P {
-    let ntok = t.kind.len();
+pub fn parse_tokens(
+    in source: Slice[u8],
+    sink t: Tokens,
+    sink d: Diags,
+    max_diag: u64,
+    max_depth: u64
+) -> P {
     let nsyms = inc(t.sym_start.len());
+    let mut p = parse_tokens_new(in source, t, d, nsyms, max_diag, max_depth);
+    start_node(inout p, n_module());
+    let ntok = p.ntok;
+    if p.t.limited {
+        for i in 0..wrapping_sub(ntok, 1) {
+            p.ev.push(narrow(i));
+        }
+        p.pos = wrapping_sub(ntok, 1);
+        finish_node(inout p);
+        return p;
+    }
+    contextual_item_names(inout p);
+    loop {
+        if at(in p, k_eof()) {
+            break;
+        }
+        let before = p.pos;
+        start_node(inout p, n_item());
+        declaration(inout p);
+        finish_node(inout p);
+        if p.pos == before {
+            err(inout p, in "expected a declaration");
+            bump(inout p);
+        }
+    }
+    trivia(inout p);
+    finish_node(inout p);
+    p
+}
+
+// A parser over `t` in batch mode, its tokens indexed.
+fn parse_tokens_new(
+    in source: Slice[u8],
+    sink t: Tokens,
+    sink d: Diags,
+    nsyms: u64,
+    max_diag: u64,
+    max_depth: u64
+) -> P {
+    let ntok = t.kind.len();
     let mut p = P {
         t: t,
         d: d,
@@ -2800,33 +3300,59 @@ pub fn parse_tokens(in source: Slice[u8], sink t: Tokens, sink d: Diags) -> P {
         pending: ChunkSeq::new[u32](),
         depth: 0,
         leaves: 1,
-        halted: false
+        halted: false,
+        max_diag: max_diag,
+        max_depth: max_depth,
+        editor: false,
+        site_limit: 0,
+        site_exhausted: false,
+        halt_kind: 0,
+        sites: ChunkSeq::new[u32](),
+        hdr: ChunkSeq::new[u64](),
+        hdr_syms: ChunkSeq::new[u32](),
+        item_start: 0
     };
     p.src.extend(in source);
     p.rows.resize(nsyms, 0);
     p.vals.resize(nsyms, 0);
-    for i in 0..ntok {
+    index_tokens(inout p);
+    p
+}
+
+// The non-trivia token indices (`sig`) and each token's rank among them.
+fn index_tokens(inout p: P) {
+    for i in 0..p.ntok {
         p.rank.push(narrow(p.sig.len()));
         if !trivia_kind(tk(in p, i)) {
             p.sig.push(narrow(i));
         }
     }
     p.rank.push(narrow(p.sig.len()));
-    start_node(inout p, n_module());
-    if p.t.limited {
-        for i in 0..wrapping_sub(ntok, 1) {
-            p.ev.push(narrow(i));
-        }
-        p.pos = wrapping_sub(ntok, 1);
-        finish_node(inout p);
-        return p;
-    }
-    // `contextual_item_names`: `fn break()` and friends keep the word a name.
+}
+
+// `contextual_item_names`: `fn break()` and friends keep the word a name.
+fn contextual_item_names(inout p: P) {
     let mut previous: u8 = 255;
+    let mut depth: u64 = 0;
+    let mut skipping_test = false;
     for j in 0..p.sig.len() {
         let i = w32(in p.sig, j);
         let k = tk(in p, i);
-        if previous == k_fn() && k == k_lower() {
+        if depth
+            == 0
+            && k
+            == k_lower()
+            && tword(in p, i)
+            == w_test()
+            && inc(j)
+            < p
+            .sig
+            .len()
+            && tk(in p, w32(in p.sig, inc(j)))
+            == k_l_brace() {
+            skipping_test = true;
+        }
+        if !skipping_test && previous == k_fn() && k == k_lower() {
             let w = tword(in p, i);
             if w == w_break() || w == w_continue() || w == w_for() || w == w_loop() {
                 let sym = tsym(in p, i);
@@ -2835,22 +3361,85 @@ pub fn parse_tokens(in source: Slice[u8], sink t: Tokens, sink d: Diags) -> P {
                 }
             }
         }
+        if k == k_l_brace() {
+            depth = inc(depth);
+        } else if k == k_r_brace() {
+            if depth > 0 {
+                depth = wrapping_sub(depth, 1);
+            }
+            if depth == 0 {
+                skipping_test = false;
+            }
+        }
         previous = k;
     }
-    loop {
-        if at(in p, k_eof()) {
-            break;
-        }
-        let before = p.pos;
-        start_node(inout p, n_item());
-        declaration(inout p);
-        finish_node(inout p);
-        if p.pos == before {
-            err(inout p, in "expected a declaration");
+}
+
+// `recovery_driver::parser` for one declaration's tokens (ending in an Eof
+// at the end of the declaration): `p` in editor mode, reset to `t` and
+// fresh diagnostics.
+pub fn editor_reset(inout p: P, sink t: Tokens) {
+    p.ntok = t.kind.len();
+    p.t = t;
+    p.d = diags_new();
+    p.sig.clear();
+    p.rank.clear();
+    p.pos = 0;
+    p.ev.clear();
+    p.no_struct = false;
+    rows_restore(inout p, 0);
+    vals_restore(inout p, 0);
+    p.binds.clear();
+    p.pending.clear();
+    p.depth = 0;
+    p.leaves = 1;
+    p.halted = false;
+    p.editor = true;
+    p.site_exhausted = false;
+    p.halt_kind = 0;
+    p.sites.clear();
+    p.hdr.clear();
+    p.hdr_syms.clear();
+    index_tokens(inout p);
+    contextual_item_names(inout p);
+}
+
+// `recovery_driver::parse_item`: one ITEM, then an ERROR_NODE over any
+// tokens left before the Eof. Whether the item ended at the Eof (`exact`).
+pub fn parse_item(inout p: P) -> bool {
+    start_node(inout p, n_item());
+    p.item_start = cur_start(in p);
+    declaration(inout p);
+    let exact = at(in p, k_eof());
+    if !exact {
+        let i = idx(in p, 0);
+        site(inout p, tstart(in p, i), tend(in p, i), 2, 0);
+        err(inout p, in "unexpected tokens after recovered declaration");
+        start_node(inout p, n_error());
+        loop {
+            if at(in p, k_eof()) {
+                break;
+            }
             bump(inout p);
         }
+        finish_node(inout p);
     }
     trivia(inout p);
     finish_node(inout p);
+    exact
+}
+
+// A parser with no tokens for `editor_reset`: diagnostics and depth
+// limits, sites limit and the symbol count of the whole source.
+pub fn editor_parser(
+    in source: Slice[u8],
+    nsyms: u64,
+    max_diag: u64,
+    max_depth: u64,
+    max_sites: u64
+) -> P {
+    let mut p = parse_tokens_new(in source, tokens_new(0), diags_new(), nsyms, max_diag, max_depth);
+    p.editor = true;
+    p.site_limit = max_sites;
     p
 }

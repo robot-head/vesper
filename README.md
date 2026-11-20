@@ -57,6 +57,38 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 See [platform validation](docs/ci-platforms.md) for Lean configuration and
 hardware-dependent checks.
 
+## Vesper unit tests
+
+Put unit tests in a top-level `test { ... }` block beside the code they
+exercise. Ordinary builds skip the declarations inside the block. The
+`vesper test FILE` command enables them so they can call private functions
+in the same module. It discovers functions named `test_*`, marked with
+`// @test`, or given `// @case` rows. Put one `// @case name(arguments)` comment
+above the function for each set of inputs.
+
+```vesper
+test {
+    // @case equal(3, 3, true)
+    // @case descending(4, 3, false)
+    fn test_order(left: i64, right: i64, expected: bool) -> bool {
+        (left <= right) == expected
+    }
+}
+```
+
+Each case calls the same non-generic function with ordinary Vesper arguments.
+Use a unique case name within the function. A test fails if it returns `false`,
+returns an `Err` variant, or raises a runtime error. Reports identify each case
+as `function::case` and use the comment's source location. Use `--filter` to
+select rows or `--mutate` to run them against mutations of the code under test.
+Anvil's `@test` attributes also work inside a test block, including
+`@test_case(...)` pins for property tests.
+
+```sh
+vesper test packages/vesper-std/core
+vesper test packages/vesper-std/core/src/option.ves --filter test_zip_u64::both_present
+```
+
 ## Repository guide
 
 | Path | Contents |
