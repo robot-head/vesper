@@ -16,6 +16,18 @@ use self::varint::{
     vi_max
 };
 
+// ECN codepoints (RFC 3168 §5): ECT(0), ECT(1) and CE.
+const ECN_ECT0: u8 = 1;
+const ECN_ECT1: u8 = 2;
+const ECN_CE: u8 = 3;
+// The application data packet number space (initial 0, handshake 1).
+const APP_SPACE: u8 = 2;
+// RFC 9000 §18.2: ack_delay_exponent values above 20 are invalid.
+const MAX_ACK_DELAY_EXPONENT: u8 = 20;
+const NS_PER_US: u64 = 1000;
+// RFC 9000 §13.2.2: acknowledge at least every second ack-eliciting packet.
+const ACK_ELICITING_THRESHOLD: u32 = 2;
+
 pub fn rx_new(space: u8, max_ack_delay_ns: u64) -> RxState {
     RxState {
         space: space,
@@ -191,16 +203,17 @@ pub fn rx_on_packet_received(
         s.largest_received_ns = now_ns;
     }
     insert(inout s, inout ranges, pn);
-    if ecn == 1 {
+    if ecn == ECN_ECT0 {
         s.ect0 = wrapping_add(s.ect0, 1);
-    } else if ecn == 2 {
+    } else if ecn == ECN_ECT1 {
         s.ect1 = wrapping_add(s.ect1, 1);
-    } else if ecn == 3 {
+    } else if ecn == ECN_CE {
         s.ce = wrapping_add(s.ce, 1);
     }
     if ack_eliciting {
         s.unacked_ack_eliciting = wrapping_add(s.unacked_ack_eliciting, 1);
-        let immediate = s.space != 2 || out_of_order || ecn == 3 || s.unacked_ack_eliciting >= 2;
+        let enough = s.unacked_ack_eliciting >= ACK_ELICITING_THRESHOLD;
+        let immediate = s.space != APP_SPACE || out_of_order || ecn == ECN_CE || enough;
         let deadline = if immediate {
             now_ns
         } else {
@@ -221,7 +234,7 @@ pub fn rx_on_packet_received(
 // was received.
 pub fn rx_ack_delay(in s: RxState, now_ns: u64, ack_delay_exponent: u8)
     -> Option[u64] eff [Fail[AckErr]] {
-    if ack_delay_exponent > 20 {
+    if ack_delay_exponent > MAX_ACK_DELAY_EXPONENT {
         Fail::raise(
             AckErr::BadAckDelayExponent {
                 exponent: ack_delay_exponent
@@ -236,7 +249,7 @@ pub fn rx_ack_delay(in s: RxState, now_ns: u64, ack_delay_exponent: u8)
     } else {
         0
     };
-    let delay = wrapping_shr_u64(since / 1000, widen_u32(ack_delay_exponent));
+    let delay = wrapping_shr_u64(since / NS_PER_US, widen_u32(ack_delay_exponent));
     if delay > vi_max() {
         Option::Some(vi_max())
     } else {

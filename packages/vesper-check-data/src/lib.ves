@@ -1,0 +1,271 @@
+// @vesper/check-data: the checker's data in Vesper (self-hosting wave SH2
+// lane 4, #1176). Every SH2 checker port builds on these tables:
+//
+// - names.ves: interned names (`Names`); symbol 0 is the empty name.
+// - types.ves: `ast::Type` and `Effects` as a hash-consed arena (`Types`);
+//   a type is a `u32` id and equal types have equal ids. `Display`,
+//   `Debug`, `substitute` and `default_type` match vesper-core.
+// - world.ves: the checker's `World` as flat tables with sorted rows (ADTs,
+//   generics, variants, fields, effect declarations, expression types,
+//   partial and overflowing operations) and its lookups (`constructor`,
+//   `mode_of`, `field_step`, `vector_words`, `effectful_row`).
+// - diag.ves: diagnostics as rows over one text buffer (`Diags`).
+// - input.ves: the decoder of the harness input (`read_ctx`).
+//
+// The census (docs/parallel-results/self-host-census.md) measured this
+// design at 0.34x to 0.87x of Rust's time. The package README documents
+// the differential harness (tests/common/check_harness.rs) for lanes 5-14.
+// The entries below are the harness's own differential tasks
+// (tests/self_host_check_data.rs).
+
+use self::util::{
+    n32,
+    u32_at,
+    u8_at,
+    w
+};
+use self::names::{
+    Names
+};
+use self::types::{
+    Types,
+    Vars,
+    debug_type,
+    default_type,
+    display,
+    substitute,
+    vars_new
+};
+use self::world::{
+    Adt,
+    Variant,
+    bounds_new,
+    constructor,
+    effectful_row,
+    field_step,
+    mode_of,
+    vector_words
+};
+use self::input::{
+    Ctx,
+    Reader,
+    read_ctx
+};
+
+const NONE32: u32 = 4294967295;
+
+fn put(inout o: ChunkSeq[u8], in s: Str) {
+    o.extend(in s.as_bytes());
+}
+
+fn put_u64(inout o: ChunkSeq[u8], v: u64) {
+    if v >= 10 {
+        put_u64(inout o, v / 10);
+    }
+    o.push(wrapping_u8(wrapping_add(v % 10, 48)));
+}
+
+// `text` packed little-endian eight bytes per word after one header word,
+// its byte length: how an entry hands text back to the harness.
+pub fn pack_text(in text: ChunkSeq[u8]) -> ChunkSeq[u64] {
+    let n = text.len();
+    let mut out = ChunkSeq::with_capacity[u64](wrapping_add(n >> 3, 2));
+    out.push(n);
+    let mut x: u64 = 0;
+    let mut k: u32 = 0;
+    for i in 0..n {
+        let b = widen_u64(u8_at(in text, i));
+        x = x | wrapping_shl_u64(b, wrapping_mul(k, 8));
+        k = wrapping_add(k, 1);
+        if k == 8 {
+            out.push(x);
+            x = 0;
+            k = 0;
+        }
+    }
+    if k != 0 {
+        out.push(x);
+    }
+    out
+}
+
+fn line_type(inout o: ChunkSeq[u8], in c: Ctx, tag: u8, ty: u32) {
+    o.push(tag);
+    o.push(32);
+    display(in c.types, in c.names, ty, inout o);
+    o.push(10);
+}
+
+fn line_debug(inout o: ChunkSeq[u8], in c: Ctx, ty: u32) {
+    put(inout o, "G ");
+    debug_type(in c.types, in c.names, ty, inout o);
+    o.push(10);
+}
+
+// Task "types": for every listed type its `Display` (D), `Debug` (G) and
+// `default_type` (F); then every listed substitution's result (S, G).
+// Task words: n, n type indices; m, then m cases of (type, k, k pairs of
+// (name index, type index)).
+pub fn check_data_types(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let mut o = ChunkSeq::new[u8]();
+    let n = r.word(in b);
+    for i in 0..n {
+        let ty = u32_at(in c.tmap, r.word(in b));
+        line_type(inout o, in c, 68, ty);
+        line_debug(inout o, in c, ty);
+        let d = default_type(inout c.types, ty);
+        line_type(inout o, in c, 70, d);
+    }
+    let m = r.word(in b);
+    for i in 0..m {
+        let ty = u32_at(in c.tmap, r.word(in b));
+        let k = r.word(in b);
+        let mut vars = vars_new();
+        for j in 0..k {
+            let name = u32_at(in c.nmap, r.word(in b));
+            let v = u32_at(in c.tmap, r.word(in b));
+            vars.set(name, v);
+        }
+        let s = substitute(inout c.types, ty, in vars);
+        line_type(inout o, in c, 83, s);
+        line_debug(inout o, in c, s);
+    }
+    pack_text(in o)
+}
+
+// Task "world": the `World` lookups.
+// - n cases of (type, k, k field-name indices): `World::mode` with no
+//   bounds (M), `vector::layout_words` (V), `World::field(ty, [name])` per
+//   name (P: the type or `-`), and for a function or row type whether it
+//   is effectful (E).
+// - m cases of (type, k, k pairs of (generic name, bound)): `World::mode`
+//   under those bounds (B).
+// - q constructor queries (qualifier index + 1 or 0, short name index):
+//   `World::constructor` (C: ADT and variant names, or `-`).
+// - s span probes (start, end): the expression type (T: type or `-`),
+//   `partial_ops` and `overflow_ops` membership (O: two digits).
+pub fn check_data_world(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let mut c = read_ctx(inout r, in b);
+    let mut o = ChunkSeq::new[u8]();
+    let none = bounds_new();
+    let n = r.word(in b);
+    for i in 0..n {
+        let ty = u32_at(in c.tmap, r.word(in b));
+        put(inout o, "M ");
+        put_u64(inout o, widen_u64(mode_of(inout c.types, in c.names, in c.world, ty, in none)));
+        put(inout o, "\nV ");
+        put_u64(inout o, w(vector_words(in c.types, in c.names, c.world.k, ty)));
+        o.push(10);
+        let k = r.word(in b);
+        for j in 0..k {
+            let name = u32_at(in c.nmap, r.word(in b));
+            let seg = c.names.has_prefix(name, in "[".as_bytes());
+            let f = field_step(inout c.types, inout c.names, in c.world, ty, name, seg);
+            if f == NONE32 {
+                put(inout o, "P -\n");
+            } else {
+                line_type(inout o, in c, 80, f);
+            }
+        }
+        let node = c.types.node(ty);
+        if node.kind == 3 || node.kind == 4 {
+            put(inout o, "E ");
+            if effectful_row(in c.types, in c.world, node.r2) {
+                o.push(49);
+            } else {
+                o.push(48);
+            }
+            o.push(10);
+        }
+    }
+    let m = r.word(in b);
+    for i in 0..m {
+        let ty = u32_at(in c.tmap, r.word(in b));
+        let k = r.word(in b);
+        let mut bounds = bounds_new();
+        for j in 0..k {
+            let name = u32_at(in c.nmap, r.word(in b));
+            bounds.set(name, wrapping_u8(r.word(in b)));
+        }
+        put(inout o, "B ");
+        put_u64(inout o, widen_u64(mode_of(inout c.types, in c.names, in c.world, ty, in bounds)));
+        o.push(10);
+    }
+    let q = r.word(in b);
+    for i in 0..q {
+        let qx = r.word(in b);
+        let qual = if qx == 0 {
+            NONE32
+        } else {
+            u32_at(in c.nmap, wrapping_sub(qx, 1))
+        };
+        let short = u32_at(in c.nmap, r.word(in b));
+        let found = constructor(in c.world, qual, short);
+        put(inout o, "C ");
+        if found == 18446744073709551615 {
+            o.push(45);
+        } else {
+            let a = c.world.adt(n32(found >> 32));
+            let v = c.world.variant(found & 4294967295);
+            c.names.write(a.name, inout o);
+            put(inout o, "::");
+            c.names.write(v.name, inout o);
+        }
+        o.push(10);
+    }
+    let s = r.word(in b);
+    for i in 0..s {
+        let start = r.word(in b);
+        let end = r.word(in b);
+        let ty = c.world.expr_type(start, end);
+        if ty == NONE32 {
+            put(inout o, "T -\n");
+        } else {
+            line_type(inout o, in c, 84, ty);
+        }
+        put(inout o, "O ");
+        if c.world.is_partial(start, end) {
+            o.push(49);
+        } else {
+            o.push(48);
+        }
+        if c.world.may_overflow(start, end) {
+            o.push(49);
+        } else {
+            o.push(48);
+        }
+        o.push(10);
+    }
+    pack_text(in o)
+}
+
+// Task "decode": the table sizes after decoding, for the harness's own
+// round-trip test and as the cheapest entry to time the decoder with.
+pub fn check_data_sizes(in input: Str) -> ChunkSeq[u64] {
+    let b = input.as_bytes();
+    let mut r = Reader {
+        pos: 0
+    };
+    let c = read_ctx(inout r, in b);
+    let mut out = ChunkSeq::new[u64]();
+    out.push(c.names.len());
+    out.push(c.types.nodes.len());
+    out.push(c.types.rows.len());
+    out.push(c.world.adts.len());
+    out.push(c.world.variants.len());
+    out.push(c.world.fields.len());
+    out.push(c.world.effects.len());
+    out.push(c.world.expr_types.len());
+    out.push(c.world.partial_ops.len());
+    out.push(c.world.overflow_ops.len());
+    out
+}

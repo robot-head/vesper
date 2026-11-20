@@ -147,6 +147,20 @@ vesper_crate(
             "tests/self_host_front_end.rs",
             "tests/self_host_front_v2.rs",
         ]) + ["//crates/vesper-syntax:files"],
+        # Self-hosting SH2 lane 4 (#1176): @vesper/check-data and the shared
+        # differential harness over the corpus the root package can declare
+        # (crates/* are their own Bazel packages; Cargo runs the full corpus).
+        # Anchored globs.
+        "test/self_host_check_data": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
+        "test/self_host_check_harness": glob([
+            "examples/**",
+            "packages/**",
+            "tests/fixtures/**",
+        ]),
         # @vesper-std/fs, process and env (#1125): drivers over the packages
         # and their .vsys imports.
         "test/std_env": [":files"],
@@ -461,6 +475,9 @@ vesper_crate(
         "test/self_host_ast": "long",
         # The Vesper-source checker corpus and JIT checks exceed 300 s on macOS.
         "test/self_host_check": "long",
+        # The checker data differential (#1176) checks every corpus world.
+        "test/self_host_check_data": "long",
+        "test/self_host_check_harness": "long",
     },
 )
 

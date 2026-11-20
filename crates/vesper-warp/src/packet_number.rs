@@ -28,13 +28,16 @@ pub enum PnError {
     BufferTooSmall,
 }
 
-/// A truncated packet-number length, 1 to 4 bytes.
+/// The longest truncated packet number, in bytes.
+pub const PN_MAX_LEN: usize = 4;
+
+/// A truncated packet-number length, 1 to [`PN_MAX_LEN`] bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct PnLen(pub(crate) u8);
 
 impl PnLen {
     pub const fn new(bytes: u8) -> Option<Self> {
-        if bytes >= 1 && bytes <= 4 {
+        if bytes >= 1 && bytes as usize <= PN_MAX_LEN {
             Some(Self(bytes))
         } else {
             None

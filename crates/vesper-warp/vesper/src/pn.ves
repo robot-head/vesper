@@ -7,6 +7,14 @@ use self::varint::{
     b8
 };
 
+// RFC 9000 Appendix A.2: an n-byte packet number covers twice the
+// unacknowledged range, so it holds up to 2^(8n-1) unacked packets.
+const PN1_MAX_UNACKED: u64 = 128;
+const PN2_MAX_UNACKED: u64 = 32768;
+const PN3_MAX_UNACKED: u64 = 8388608;
+const PN4_MAX_UNACKED: u64 = 2147483648;
+
+// 2^62, one past the largest packet number (RFC 9000 §12.3).
 pub fn pn_limit() -> u64 {
     4611686018427387904
 }
@@ -84,13 +92,13 @@ pub fn pn_encoded_len(full_pn: u64, largest_acked: Option[u64]) -> u64 eff [Fail
             wrapping_sub(full_pn, acked)
         }
     };
-    if unacked <= 128 {
+    if unacked <= PN1_MAX_UNACKED {
         1
-    } else if unacked <= 32768 {
+    } else if unacked <= PN2_MAX_UNACKED {
         2
-    } else if unacked <= 8388608 {
+    } else if unacked <= PN3_MAX_UNACKED {
         3
-    } else if unacked <= 2147483648 {
+    } else if unacked <= PN4_MAX_UNACKED {
         4
     } else {
         Fail::raise(

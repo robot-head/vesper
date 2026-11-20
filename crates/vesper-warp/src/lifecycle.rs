@@ -18,6 +18,7 @@
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use crate::frame::RESET_TOKEN_LEN;
+use crate::header::MAX_CID_LEN;
 
 /// A peer's UDP address, supplied by the caller's driver.
 pub type PeerAddr = SocketAddr;
@@ -160,8 +161,15 @@ pub(crate) const TOKEN_RETRY: u8 = 1;
 pub(crate) const TOKEN_NEW: u8 = 2;
 pub(crate) const NONCE_LEN: usize = 12;
 pub(crate) const TAG_LEN: usize = 16;
-/// kind, issued_ns, address (family, 16 address bytes, port), odcid.
-pub(crate) const TOKEN_PLAIN_MAX: usize = 8 + 1 + 16 + 2 + 1 + 20;
+/// The address bytes a token binds: family, 16 address bytes and the port.
+pub(crate) const ADDR_LEN: usize = 1 + 16 + 2;
+/// The plain text's layout: issued_ns (8 bytes), the address, the ODCID
+/// length byte and the ODCID.
+pub(crate) const PLAIN_ADDR: usize = 8;
+pub(crate) const PLAIN_ODCID_LEN: usize = PLAIN_ADDR + ADDR_LEN;
+pub(crate) const PLAIN_ODCID: usize = PLAIN_ODCID_LEN + 1;
+/// The longest plain text: the fixed fields and a full-length ODCID.
+pub(crate) const TOKEN_PLAIN_MAX: usize = PLAIN_ODCID + MAX_CID_LEN;
 /// Longest token this endpoint issues.
 pub const MAX_TOKEN_LEN: usize = 1 + NONCE_LEN + TOKEN_PLAIN_MAX + TAG_LEN;
 
@@ -175,7 +183,7 @@ pub(crate) fn is_retry_token(token: &[u8]) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenKind {
     /// From our Retry: the client's original Destination Connection ID.
-    Retry { odcid: [u8; 20], len: u8 },
+    Retry { odcid: [u8; MAX_CID_LEN], len: u8 },
     /// From our NEW_TOKEN.
     NewToken,
 }
@@ -191,9 +199,9 @@ pub enum TokenError {
     WrongAddress,
 }
 
-/// The 19 address bytes a token binds: family (4, 6 or 0 for none), the
+/// The [`ADDR_LEN`] address bytes a token binds: family (4, 6 or 0 for none), the
 /// address and the port.
-pub(crate) fn encode_addr(addr: Option<PeerAddr>, out: &mut [u8; 19]) {
+pub(crate) fn encode_addr(addr: Option<PeerAddr>, out: &mut [u8; ADDR_LEN]) {
     out.fill(0);
     if let Some(a) = addr {
         match a.ip() {

@@ -29,6 +29,15 @@ use self::varint::{
     sat_add
 };
 
+// RFC 9002 §6.1.1 kPacketThreshold; RFC 9000 §18.2: ACK delay exponents
+// above 20 are invalid.
+const PACKET_THRESHOLD: u64 = 3;
+const MAX_ACK_DELAY_EXPONENT: u8 = 20;
+// A PTO backoff of 2^64 or more saturates.
+const MAX_BACKOFF_SHIFT: u32 = 64;
+const U32_MAX: u32 = 4294967295;
+const NS_PER_US: u64 = 1000;
+
 fn u64_max() -> u64 {
     18446744073709551615
 }
@@ -97,10 +106,10 @@ fn sat_mul4(x: u64) -> u64 {
 }
 
 fn sat_mul1000(x: u64) -> u64 {
-    if x > u64_max() / 1000 {
+    if x > u64_max() / NS_PER_US {
         u64_max()
     } else {
-        wrapping_mul(x, 1000)
+        wrapping_mul(x, NS_PER_US)
     }
 }
 
@@ -196,7 +205,7 @@ pub fn rtt_loss_delay_ns(in r: Rtt) -> u64 {
 
 // RFC 9000 §19.3: the encoded ACK Delay in nanoseconds, saturating.
 pub fn rec_ack_delay_ns(encoded: u64, exponent: u8) -> u64 eff [Fail[RecErr]] {
-    if exponent > 20 {
+    if exponent > MAX_ACK_DELAY_EXPONENT {
         Fail::raise(
             RecErr::BadAckDelayExponent {
                 exponent: exponent
@@ -341,7 +350,7 @@ pub fn rec_pc_duration_ns(in st: RecState, in r: Rtt) -> u64 {
 }
 
 fn backoff(in st: RecState, d: u64) -> u64 {
-    if st.pto_count >= 64 {
+    if st.pto_count >= MAX_BACKOFF_SHIFT {
         return u64_max();
     }
     let shifted = wrapping_shl_u64(d, st.pto_count);
@@ -688,7 +697,7 @@ fn detect_lost(
             has_streak = false;
         } else if e.status == in_flight_st() {
             let by_time = has_lost_send_time && e.sent_ns <= lost_send_time;
-            let by_count = largest_acked >= sat_add(e.pn, 3);
+            let by_count = largest_acked >= sat_add(e.pn, PACKET_THRESHOLD);
             if by_time || by_count {
                 e.status = lost_st();
                 ents.try_set(at, e);
@@ -949,7 +958,7 @@ pub fn rec_on_timeout(
         };
         out.packets = 2;
     }
-    if st.pto_count != 4294967295 {
+    if st.pto_count != U32_MAX {
         st.pto_count = wrapping_add(st.pto_count, 1);
     }
     set_timer(inout st, in r, in spaces, now_ns);

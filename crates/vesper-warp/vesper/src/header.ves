@@ -25,6 +25,21 @@ use self::varint::{
     vi_value_at
 };
 
+// Long header packet types (RFC 9000 Table 5), bits 4-5 of the first byte.
+const LT_INITIAL: u8 = 0;
+const LT_ZERO_RTT: u8 = 1;
+const LT_RETRY: u8 = 3;
+const LONG_TYPE_SHIFT: u8 = 4;
+const LONG_TYPE_MASK: u8 = 3;
+// First-byte bits under header protection (RFC 9001 §5.4.1).
+const LONG_PROTECTED_BITS: u8 = 0x0f;
+const SHORT_PROTECTED_BITS: u8 = 0x1f;
+// The header protection sample is 16 bytes, starting 4 bytes after the
+// packet number offset (RFC 9001 §5.4.2).
+const SAMPLE_END: u64 = 20;
+// Version Negotiation CID lengths are one byte (RFC 9000 §17.2.1).
+const MAX_VN_CID_LEN: u64 = 255;
+
 fn quic_v1() -> u32 {
     1
 }
@@ -108,7 +123,7 @@ fn take(in buf: Slice[u8], at: u64, len: u64) -> Sp eff [Fail[HdrErr]] {
 }
 
 fn check_sample(pn_offset: u64, end: u64) eff [Fail[HdrErr]] {
-    let needed = wrapping_add(pn_offset, 20);
+    let needed = wrapping_add(pn_offset, SAMPLE_END);
     if end < needed {
         Fail::raise(
             HdrErr::TooShortForSample {
@@ -221,8 +236,8 @@ fn parse_long(in datagram: Slice[u8], first: u8) -> Parsed eff [Fail[HdrErr]] {
             }
         };
     }
-    let ty = first >> 4 & 3;
-    if ty == 3 {
+    let ty = first >> LONG_TYPE_SHIFT & LONG_TYPE_MASK;
+    if ty == LT_RETRY {
         if rest < retry_tag_len() {
             truncated(wrapping_add(at, retry_tag_len()), n);
         }
@@ -241,15 +256,15 @@ fn parse_long(in datagram: Slice[u8], first: u8) -> Parsed eff [Fail[HdrErr]] {
             tag: wrapping_add(at, token_len)
         };
     }
-    let packet_type = if ty == 0 {
+    let packet_type = if ty == LT_INITIAL {
         PktType::Initial
-    } else if ty == 1 {
+    } else if ty == LT_ZERO_RTT {
         PktType::ZeroRtt
     } else {
         PktType::Handshake
     };
     let mut token = no_span();
-    if ty == 0 {
+    if ty == LT_INITIAL {
         let (token_len, next) = hdr_varint(in datagram, at);
         token = take(in datagram, next, token_len);
         at = wrapping_add(next, token_len);
@@ -329,9 +344,9 @@ pub fn hdr_check_reserved_bits(first_byte: u8, short: bool) eff [Fail[HdrErr]] {
 
 pub fn hdr_first_byte_mask(long: bool) -> u8 {
     if long {
-        15
+        LONG_PROTECTED_BITS
     } else {
-        31
+        SHORT_PROTECTED_BITS
     }
 }
 
@@ -500,20 +515,21 @@ pub fn hdr_write_long(
     pn_len: u64,
     payload_len: u64
 ) -> WrittenLong eff [Fail[HdrErr]] {
-    if ty == 3 {
+    if ty == LT_RETRY {
         Fail::raise(HdrErr::WrongForm);
     }
-    if ty != 0 && token.len() != 0 {
+    if ty != LT_INITIAL && token.len() != 0 {
         Fail::raise(HdrErr::FieldOverflow);
     }
-    let first = header_form() | fixed_bit() | ty << 4 | wrapping_u8(wrapping_sub(pn_len, 1));
+    let first = header_form() | fixed_bit() | ty
+        << LONG_TYPE_SHIFT | wrapping_u8(wrapping_sub(pn_len, 1));
     let mut at = w_u8(inout out, 0, first);
     at = w_u32(inout out, at, quic_v1());
     at = w_u8(inout out, at, cid_len(in dcid));
     at = w_bytes(inout out, at, in dcid);
     at = w_u8(inout out, at, cid_len(in scid));
     at = w_bytes(inout out, at, in scid);
-    if ty == 0 {
+    if ty == LT_INITIAL {
         at = w_varint(inout out, at, token.len());
         at = w_bytes(inout out, at, in token);
     }
@@ -550,7 +566,7 @@ pub fn hdr_write_retry(
     if token.len() == 0 {
         Fail::raise(HdrErr::EmptyRetryToken);
     }
-    let mut at = w_u8(inout out, 0, header_form() | fixed_bit() | 48);
+    let mut at = w_u8(inout out, 0, header_form() | fixed_bit() | LT_RETRY << LONG_TYPE_SHIFT);
     at = w_u32(inout out, at, quic_v1());
     at = w_u8(inout out, at, cid_len(in dcid));
     at = w_bytes(inout out, at, in dcid);
@@ -561,7 +577,7 @@ pub fn hdr_write_retry(
 }
 
 fn vn_cid_len(in cid: Slice[u8]) -> u8 eff [Fail[HdrErr]] {
-    if cid.len() > 255 {
+    if cid.len() > MAX_VN_CID_LEN {
         Fail::raise(HdrErr::FieldOverflow);
     }
     wrapping_u8(cid.len())
@@ -577,7 +593,7 @@ pub fn hdr_write_version_negotiation(
     if versions.len() == 0 {
         Fail::raise(HdrErr::BadVersionList);
     }
-    let mut at = w_u8(inout out, 0, header_form() | unused & 127);
+    let mut at = w_u8(inout out, 0, header_form() | unused & ~header_form());
     at = w_u32(inout out, at, 0);
     at = w_u8(inout out, at, vn_cid_len(in dcid));
     at = w_bytes(inout out, at, in dcid);
