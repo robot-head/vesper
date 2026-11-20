@@ -260,18 +260,35 @@ pub fn is_package(path: &Path) -> bool {
 /// them into one module. `Err` is an I/O failure; language and manifest
 /// errors are reported in [`Assembled`].
 pub fn load(dir: &Path) -> Result<Assembled, String> {
-    load_with_tests(dir, false)
+    load_with_parser(dir, None)
 }
 
 /// Include test-only declarations in the root package. Dependencies are
 /// loaded in ordinary mode.
 pub fn load_for_tests(dir: &Path) -> Result<Assembled, String> {
-    load_with_tests(dir, true)
+    load_with_root_parser(dir, &mut |path| {
+        let source = read_source(path)?;
+        let parsed = crate::parser::parse_for_tests(&source);
+        Ok((source, parsed))
+    })
 }
 
-fn load_with_tests(dir: &Path, include_tests: bool) -> Result<Assembled, String> {
+type RootParser<'a> = dyn FnMut(&Path) -> Result<(String, crate::parser::Parse), String> + 'a;
+
+/// Prepare root sources before resolving imports and assigning global spans.
+/// The callback may append synthetic source, but its AST must use offsets
+/// into the resulting text. Dependencies always use the ordinary parser.
+pub fn load_with_root_parser(dir: &Path, parse: &mut RootParser<'_>) -> Result<Assembled, String> {
+    load_with_parser(dir, Some(parse))
+}
+
+fn read_source(path: &Path) -> Result<String, String> {
+    fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn load_with_parser(dir: &Path, parse: Option<&mut RootParser<'_>>) -> Result<Assembled, String> {
     let mut loader = Loader::default();
-    let root = loader.package(dir, dir.to_path_buf(), &mut vec![], include_tests)?;
+    let root = loader.package(dir, dir.to_path_buf(), &mut vec![], parse)?;
     let package = root
         .map(|i| loader.packages[i].name.as_str().to_owned())
         .unwrap_or_default();
@@ -427,7 +444,7 @@ impl Loader {
         dir: &Path,
         shown: PathBuf,
         stack: &mut Vec<(PathBuf, String)>,
-        include_tests: bool,
+        mut parse: Option<&mut RootParser<'_>>,
     ) -> Result<Option<usize>, String> {
         let canonical = fs::canonicalize(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         if let Some(i) = stack.iter().position(|(p, _)| *p == canonical) {
@@ -505,8 +522,6 @@ impl Loader {
                 roots.push(file_shown.clone());
                 segments.clear();
             }
-            let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let file = self.add_file(file_shown.clone(), text);
             if let Some(bad) = segments.iter().find(|s| !is_module_segment(s)) {
                 self.manifest_errors.push((
                     file_shown,
@@ -517,12 +532,14 @@ impl Loader {
                 ));
                 continue;
             }
-            let source = &self.sources.files[file].text;
-            let parsed = if include_tests {
-                crate::parser::parse_for_tests(source)
+            let (text, parsed) = if let Some(parse) = parse.as_deref_mut() {
+                parse(&path)?
             } else {
-                crate::parser::parse(source)
+                let text = read_source(&path)?;
+                let parsed = crate::parser::parse(&text);
+                (text, parsed)
             };
+            let file = self.add_file(file_shown, text);
             for d in parsed.diagnostics {
                 self.diagnostics.push(PackageDiagnostic {
                     file: Some(file),
@@ -586,7 +603,7 @@ impl Loader {
                 continue;
             }
             let Some(dep_index) =
-                self.package(&dep_dir, normalize(&shown.join(path)), stack, false)?
+                self.package(&dep_dir, normalize(&shown.join(path)), stack, None)?
             else {
                 continue;
             };

@@ -84,6 +84,13 @@ select rows or `--mutate` to run them against mutations of the code under test.
 Anvil's `@test` attributes also work inside a test block, including
 `@test_case(...)` pins for property tests.
 
+Run `vesper test PACKAGE_DIR` to run every source module's tests, or pass a
+file under the package's `src/` to run just that file's tests. Both forms
+resolve imports through `Loom.toml` and can call declarations from sibling
+modules and path dependencies. Unit tests can also call manifest-declared
+`.vsys` libraries hosted by the CLI. These calls use the same evaluator
+bindings as `vesper run`, including the standard-library I/O host.
+
 ```sh
 vesper test packages/vesper-std/core
 vesper test packages/vesper-std/core/src/option.ves --filter test_zip_u64::both_present

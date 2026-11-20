@@ -245,3 +245,155 @@ impl [K, V: mod copy] IdxMap[K, V] {
         }
     }
 }
+
+test {
+    // @case first(0, false)
+    // @case largest_usable(4294967294, false)
+    // @case reserved(4294967295, true)
+    fn test_index(raw: u32, missing: bool) -> bool {
+        let idx = idx_from_raw[u64](raw);
+        idx
+            .raw()
+            == raw
+            && idx
+            .index()
+            == widen_u64(raw)
+            && idx
+            .is_none()
+            == missing
+            && (idx == idx_none[u64]())
+            == missing
+    }
+
+    // @case empty(0, 0)
+    // @case first_allocation(0, 1)
+    // @case beyond_reserved_capacity(1, 40)
+    // @case reserved_capacity(64, 64)
+    fn test_arena_allocation(capacity: u64, count: u64) -> bool {
+        let mut arena = arena_with_capacity[u64](capacity);
+        if !arena.is_empty() || !arena_new[u64]().is_empty() {
+            return false;
+        }
+        for i in 0..count {
+            let next = arena.next_idx();
+            let value = wrapping_add(i, 100);
+            let allocated = arena.alloc(value);
+            if next != allocated || allocated.index() != i || arena.at(i) != Option::Some(value) {
+                return false;
+            }
+        }
+        arena
+            .len()
+            == count
+            && arena
+            .is_empty()
+            == (count == 0)
+            && arena
+            .next_idx()
+            .index()
+            == count
+            && arena
+            .at(count)
+            == Option::None
+    }
+
+    // @case first(0, true, 99, 20)
+    // @case last(1, true, 10, 99)
+    // @case next(2, false, 10, 20)
+    // @case reserved(4294967295, false, 10, 20)
+    fn test_arena_set(raw: u32, exists: bool, first: u64, second: u64) -> bool {
+        let mut arena = arena_new[u64]();
+        arena.alloc(10);
+        arena.alloc(20);
+        let idx = idx_from_raw[u64](raw);
+        let present = arena.contains(idx);
+        let written = arena.set(idx, 99);
+        let expected: Option[u64] = if exists {
+            Option::Some(99)
+        } else {
+            Option::None
+        };
+        let value = if exists {
+            99
+        } else {
+            77
+        };
+        present
+            == exists
+            && written
+            == exists
+            && arena
+            .get(idx)
+            == expected
+            && arena
+            .get_or(idx, 77)
+            == value
+            && arena
+            .len()
+            == 2
+            && arena
+            .at(0)
+            == Option::Some(first)
+            && arena
+            .at(1)
+            == Option::Some(second)
+    }
+
+    // @case truncate_all(0, 0)
+    // @case keep_first(1, 1)
+    // @case keep_all(2, 2)
+    // @case cannot_grow(3, 2)
+    fn test_arena_truncate(requested: u64, retained: u64) -> bool {
+        let mut arena = arena_new[u64]();
+        arena.alloc(10);
+        arena.alloc(20);
+        arena.truncate(requested);
+        if arena.len() != retained || arena.at(retained) != Option::None {
+            return false;
+        }
+        let reused = arena.alloc(30);
+        if reused.index() != retained || arena.get(reused) != Option::Some(30) {
+            return false;
+        }
+        arena.clear();
+        arena.is_empty() && arena.at(0) == Option::None && arena.next_idx().index() == 0
+    }
+
+    // @case first(0, true, 2)
+    // @case existing(1, true, 2)
+    // @case sparse(12, true, 13)
+    // @case reserved(4294967295, false, 2)
+    fn test_index_map(raw: u32, expected_write: bool, length: u64) -> bool {
+        let mut map = idx_map_new[u32, u64](99);
+        let first = idx_from_raw[u32](1);
+        let target = idx_from_raw[u32](raw);
+        if map.len() != 0 || map.get(first) != 99 || !map.set(first, 12) {
+            return false;
+        }
+        let contents = if raw == 1 {
+            7
+        } else {
+            12
+        };
+        let target_value = if expected_write {
+            7
+        } else {
+            99
+        };
+        let wrote = map.set(target, 7);
+        wrote
+            == expected_write
+            && map
+            .len()
+            == length
+            && map
+            .get(target)
+            == target_value
+            && map
+            .get(first)
+            == contents
+            && map
+            .get(idx_from_raw[u32](2))
+            == 99
+    }
+}

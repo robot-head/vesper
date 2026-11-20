@@ -364,3 +364,132 @@ pub fn lex_raw_count(in source: Str) -> u64 {
     let t = lex_raw(in b, inout d);
     t.kind.len()
 }
+
+test {
+    use self::lex::{
+        token_end,
+        token_sym,
+        token_word
+    };
+    use self::util::u64_at;
+    use self::words::{
+        w_TiledSeq,
+        w_test_case,
+        w_underscore
+    };
+
+    // @case empty(in "", 1)
+    // @case identifiers_and_space(in "foo foo", 4)
+    // @case nested_comment(in "/* a /* b */ c */", 2)
+    // @case comment_and_newline(in "// comment\nx", 4)
+    // @case integer_range(in "1..2", 4)
+    // @case floating_exponent(in "12.5e-2", 2)
+    // @case string_with_escape(in "\"a\\nb\"", 2)
+    // @case declaration(in "fn main() -> i64 { 0 }", 16)
+    fn test_lex_counts(in source: Str, expected: u64) -> bool {
+        lex_count(in source) == expected && lex_raw_count(in source) == expected
+    }
+
+    // @case first_occurrence(0, 9, w_test_case(), true)
+    // @case repeated_symbol(2, 19, w_test_case(), true)
+    // @case underscore(4, 21, w_underscore(), false)
+    // @case tiled_type(6, 30, w_TiledSeq(), false)
+    // @case keyword(8, 33, 0, false)
+    fn test_contextual_tags(index: u64, end: u64, word: u8, repeats: bool) -> bool {
+        let mut diagnostics = diags_new();
+        let tokens = lex(in "test_case test_case _ TiledSeq fn".as_bytes(), inout diagnostics);
+        let first = token_sym(in tokens, 0);
+        let current = token_sym(in tokens, index);
+        let same_symbol = first != 0 && current == first;
+        diagnostics
+            .code
+            .len()
+            == 0
+            && same_symbol
+            == repeats
+            && token_word(in tokens, index)
+            == word
+            && token_end(in tokens, index)
+            == end
+    }
+
+    // @case empty(in "", 0)
+    // @case trivia_only(in " // comment\n", 0)
+    // @case simple_function(in "fn f() -> i64 { 3 }", 0)
+    // @case nested_expression(in "fn f() -> i64 { (1 + 2) * 3 }", 0)
+    // The lexer reports the bad token and the parser reports the missing declaration.
+    // @case unterminated_comment(in "/* unfinished", 2)
+    fn test_batch_tables(in source: Str, diagnostics: u64) -> bool {
+        let rows = parse_tables(in source);
+        let leaves = u64_at(in rows, 0);
+        let nodes = u64_at(in rows, 1);
+        if nodes == 0 || rows.try_get(2) != Option::Some(diagnostics) {
+            return false;
+        }
+        let root = wrapping_add(3, leaves << 2);
+        let root_parent = u64_at(in rows, wrapping_add(root, 1));
+        let root_start = u64_at(in rows, wrapping_add(root, 2));
+        let root_end = u64_at(in rows, wrapping_add(root, 3));
+        if root_parent != nodes || root_start != 0 || root_end != source.len() {
+            return false;
+        }
+        let mut position: u64 = 0;
+        for i in 0..leaves {
+            let row = wrapping_add(3, i << 2);
+            let start = u64_at(in rows, wrapping_add(row, 1));
+            let end = u64_at(in rows, wrapping_add(row, 2));
+            let parent = u64_at(in rows, wrapping_add(row, 3));
+            if start != position || end < start || parent >= nodes {
+                return false;
+            }
+            position = end;
+        }
+        position == source.len() && (parse_counts(in source) & 4294967295) == nodes
+    }
+
+    // @case exactly_at_byte_limit(in "fn f() {}", 9, 20, 2, false)
+    // @case exceeds_byte_limit(in "fn f() {}", 8, 20, 2, true)
+    // @case bad_configuration(in "", 8388609, 20, 2, true)
+    fn test_batch_limits(in source: Str, bytes: u64, tokens: u64, diags: u64, rejected: bool)
+        -> bool {
+        let direct = parse_tables_with_limits(in source, bytes, tokens, diags);
+        let packed = parse_tables_with_packed_limits(in source, bytes, tokens | (diags << 32));
+        if direct.len() != packed.len() {
+            return false;
+        }
+        for i in 0..direct.len() {
+            if direct.try_get(i) != packed.try_get(i) {
+                return false;
+            }
+        }
+        if rejected {
+            let empty = direct
+                .try_get(0)
+                == Option::Some(0)
+                && direct
+                .try_get(1)
+                == Option::Some(0);
+            empty && direct.try_get(2) == Option::Some(1) && direct.try_get(3) == Option::Some(3)
+        } else {
+            direct.try_get(2) == Option::Some(0) && u64_at(in direct, 1) > 0
+        }
+    }
+
+    // @case empty(in "", 0, 0, 0, 0)
+    // @case two_declarations(in "fn first() {}\nfn second() {}", 0, 0, 0, 2)
+    // @case recover_before_next(in "fn first() { let = 1; }\nfn second() {}", 0, 0, 0, 2)
+    // @case token_budget(in "fn first() {}", 0, 4294967296, 11, 0)
+    // @case work_budget(in "fn first() {}", 0, 1, 17, 0)
+    // @case invalid_limits(in "", 255, 0, 1, 0)
+    fn test_editor_tables(in source: Str, a: u64, b: u64, code: u64, declarations: u64) -> bool {
+        let rows = parse_editor_tables(in source, a, b);
+        if rows.try_get(0) != Option::Some(code) {
+            return false;
+        }
+        if code == 0 {
+            rows.try_get(1) == Option::Some(declarations) && rows.len() > 3
+        } else {
+            rows.len() == 1
+        }
+    }
+}

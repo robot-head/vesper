@@ -116,6 +116,12 @@ pub enum Value {
     UInt(u64, u32),
     /// A narrow signed integer (`i8`, `i16`, `i32`) and its width.
     SInt(i64, u32),
+    /// An `i128` (`signed`) or `u128` value as its bit pattern (SH2 lane 2,
+    /// #1174; `crate::numeric::wide`).
+    Wide {
+        pattern: u128,
+        signed: bool,
+    },
     Float(f64),
     /// An `f32` (`vesper.float.ieee754/1`).
     Float32(f32),
@@ -184,6 +190,13 @@ impl fmt::Display for Value {
             Self::Int(v) => write!(f, "{v}"),
             Self::UInt(v, _) => write!(f, "{v}"),
             Self::SInt(v, _) => write!(f, "{v}"),
+            Self::Wide { pattern, signed } => {
+                if *signed {
+                    write!(f, "{}", *pattern as i128)
+                } else {
+                    write!(f, "{pattern}")
+                }
+            }
             Self::Float(v) => write!(f, "{v}"),
             Self::Float32(v) => write!(f, "{v}"),
             Self::Bool(v) => write!(f, "{v}"),
@@ -854,11 +867,15 @@ impl<'a> Runtime<'a> {
                     let scalar = match name.as_str() {
                         n if crate::numeric::is_integer_name(n) => {
                             let kind = crate::numeric::IntegerKind::from_name(n).unwrap();
-                            Some(value_kind(value).is_some_and(|(k, v)| {
-                                k.bits() == kind.bits()
-                                    && k.unsigned() == kind.unsigned()
-                                    && kind.fits(v)
-                            }))
+                            Some(if kind.wide() {
+                                wide_kind(value).is_some_and(|(k, _)| k == kind)
+                            } else {
+                                value_kind(value).is_some_and(|(k, v)| {
+                                    k.bits() == kind.bits()
+                                        && k.unsigned() == kind.unsigned()
+                                        && kind.fits(v)
+                                })
+                            })
                         }
                         "f64" => Some(matches!(value, Value::Float(_))),
                         "f32" => Some(matches!(value, Value::Float32(_))),
@@ -1009,10 +1026,17 @@ impl<'a> Runtime<'a> {
     }
     /// Install the entry function's linear effects at the host boundary. The
     /// host must resume each operation, including I/O errors and cancellation.
-    pub fn begin_external(
+    pub fn begin_external(self, entry: &str, args: Vec<Value>) -> Result<Execution<'a>, String> {
+        self.begin_external_for(entry, args, |_| true)
+    }
+
+    /// Install only the entry effects handled by this host. Other effects
+    /// follow ordinary evaluation and fail if performed without a handler.
+    pub(crate) fn begin_external_for(
         mut self,
         entry: &str,
         args: Vec<Value>,
+        handles: impl Fn(&str) -> bool,
     ) -> Result<Execution<'a>, String> {
         if let Some(trace) = &mut self.resource_trace {
             trace.begin_run().map_err(|e| e.to_string())?;
@@ -1036,6 +1060,9 @@ impl<'a> Runtime<'a> {
         }
         let mut caller = Env::new();
         for effect in &function.effects.instances {
+            if !handles(&effect.name) {
+                continue;
+            }
             if !self.world.effects[&effect.name].linear {
                 return Err("external effects must guarantee one-shot resumption".into());
             }
@@ -1178,6 +1205,12 @@ impl<'a> Runtime<'a> {
                 Literal::Int(n) => {
                     if n > i64::MAX as i128 {
                         Value::UInt(n as u64, 64)
+                    } else if n < i64::MIN as i128 {
+                        // Only an `i128` holds it (SH2 lane 2, #1174).
+                        Value::Wide {
+                            pattern: n as u128,
+                            signed: true,
+                        }
                     } else {
                         Value::Int(n as i64)
                     }
@@ -1660,6 +1693,12 @@ impl<'a> Runtime<'a> {
                             Literal::Int(n) => {
                                 if n > i64::MAX as i128 {
                                     Value::UInt(n as u64, 64)
+                                } else if n < i64::MIN as i128 {
+                                    // Only an `i128` holds it (SH2 lane 2, #1174).
+                                    Value::Wide {
+                                        pattern: n as u128,
+                                        signed: true,
+                                    }
                                 } else {
                                     Value::Int(n as i64)
                                 }
@@ -2849,6 +2888,8 @@ fn bind_pattern(p: &Pattern, value: &Value, env: &mut Env) -> bool {
             (Literal::Int(a), Value::Int(b)) => *a == *b as i128,
             (Literal::Int(a), Value::UInt(b, _)) => *a == *b as i128,
             (Literal::Int(a), Value::SInt(b, _)) => *a == *b as i128,
+            (Literal::Int(a), Value::Wide { .. }) => exact_of(value)
+                .is_some_and(|(_, e)| e == crate::numeric::wide::Exact::from_i128(*a)),
             (Literal::Float(a), Value::Float(b)) => a == b,
             (Literal::Float(a), Value::Float32(b)) => (*a as f32) == *b,
             (Literal::Bool(a), Value::Bool(b)) => a == b,
@@ -3019,8 +3060,37 @@ fn atomic_call(op: crate::atomics::AtomicOp, args: &[Value]) -> Result<Value, St
     };
     Ok(old)
 }
+/// The 128-bit kind and bit pattern of a `Value::Wide`.
+fn wide_kind(v: &Value) -> Option<(crate::numeric::IntegerKind, u128)> {
+    use crate::numeric::IntegerKind as K;
+    match v {
+        Value::Wide { pattern, signed } => {
+            Some((if *signed { K::I128 } else { K::U128 }, *pattern))
+        }
+        _ => None,
+    }
+}
+/// The kind and exact value of any integer value, 128-bit ones included.
+fn exact_of(v: &Value) -> Option<(crate::numeric::IntegerKind, crate::numeric::wide::Exact)> {
+    use crate::numeric::wide::Exact;
+    if let Some((k, p)) = wide_kind(v) {
+        return Some((k, Exact::of(k, p)));
+    }
+    value_kind(v).map(|(k, n)| (k, Exact::from_i128(n)))
+}
+/// The value of a 128-bit `kind` with bit pattern `pattern`.
+fn wide_value(kind: crate::numeric::IntegerKind, pattern: u128) -> Value {
+    Value::Wide {
+        pattern,
+        signed: kind.signed(),
+    }
+}
+/// A value of `kind` from its exact value (or, for the 128-bit kinds, any
+/// `i128` whose bit pattern is the value's).
 fn integer_value(kind: crate::numeric::IntegerKind, n: i128) -> Value {
-    if kind.unsigned() {
+    if kind.wide() {
+        wide_value(kind, n as u128)
+    } else if kind.unsigned() {
         Value::UInt(n as u64, kind.bits())
     } else if kind.bits() < 64 {
         Value::SInt(n as i64, kind.bits())
@@ -3032,6 +3102,15 @@ fn integer_value(kind: crate::numeric::IntegerKind, n: i128) -> Value {
 /// low `bits(kind)` bits, read in `kind`'s representation.
 pub fn integer_from_word(kind: crate::numeric::IntegerKind, word: u64) -> Value {
     integer_value(kind, kind.wrap(word as i128))
+}
+/// The value of `kind` whose bit pattern (zero-extended) is `pattern`: the
+/// two words of an `i128` or `u128` (SH2 lane 2, #1174), or one word.
+pub fn integer_from_pattern(kind: crate::numeric::IntegerKind, pattern: u128) -> Value {
+    if kind.wide() {
+        wide_value(kind, pattern)
+    } else {
+        integer_from_word(kind, pattern as u64)
+    }
 }
 fn arith_fault(f: crate::numeric::ArithFailure) -> Fault {
     Fault::Raise(Failure::Arith(f))
@@ -3205,6 +3284,39 @@ fn unary(op: &str, v: Value) -> Result<Value, Fault> {
         ("-", Value::Float(n)) => Value::Float(-n),
         ("-", Value::Float32(n)) => Value::Float32(-n),
         ("!", Value::Bool(b)) => Value::Bool(!b),
+        ("~", Value::Wide { pattern, signed }) => Value::Wide {
+            pattern: !pattern,
+            signed,
+        },
+        ("-", Value::Wide { pattern, signed }) => {
+            let kind = wide_kind(&Value::Wide { pattern, signed }).unwrap().0;
+            wide_value(
+                kind,
+                crate::numeric::wide::checked_neg(kind, pattern).ok_or(Fault::Raise(
+                    Failure::Arith(crate::numeric::ArithFailure::Overflow),
+                ))?,
+            )
+        }
+        (name, v)
+            if crate::numeric::conversion(name).is_some()
+                && (wide_kind(&v).is_some()
+                    || crate::numeric::conversion(name).unwrap().1.wide()) =>
+        {
+            let (conversion, to) = crate::numeric::conversion(name).unwrap();
+            let (_, from) = exact_of(&v).ok_or("invalid conversion operand")?;
+            let pattern =
+                crate::numeric::wide::convert(conversion, to, from).map_err(arith_fault)?;
+            if to.wide() {
+                wide_value(to, pattern)
+            } else {
+                integer_value(
+                    to,
+                    crate::numeric::wide::Exact::of(to, pattern)
+                        .to_i128()
+                        .unwrap(),
+                )
+            }
+        }
         ("~", v) => {
             let (kind, n) = value_kind(&v).ok_or("invalid unary operands")?;
             integer_value(kind, kind.not(n))
@@ -3229,6 +3341,9 @@ fn unary(op: &str, v: Value) -> Result<Value, Fault> {
 /// Binary operators under `vesper.arith.checked/1`. Integer operands share a
 /// kind; an untyped `Int` operand adopts its unsigned partner's kind.
 fn binary(op: &str, a: Value, b: Value) -> Result<Value, Fault> {
+    if wide_kind(&a).is_some() || wide_kind(&b).is_some() {
+        return wide_binary(op, &a, &b);
+    }
     if let (Some((ak, x)), Some((bk, y))) = (value_kind(&a), value_kind(&b)) {
         // The amount of a shift or rotation keeps its own kind.
         if crate::numeric::is_shift(op) {
@@ -3328,8 +3443,70 @@ fn binary(op: &str, a: Value, b: Value) -> Result<Value, Fault> {
         _ => return Err("incompatible binary operands".into()),
     })
 }
+/// [`binary`] when an operand is an `i128` or `u128` (`numeric::wide`).
+/// The amount of a shift or rotation keeps its own kind; an untyped `Int`
+/// operand adopts its 128-bit partner's kind.
+fn wide_binary(op: &str, a: &Value, b: &Value) -> Result<Value, Fault> {
+    use crate::numeric::wide;
+    let ((ak, ae), (bk, be)) = match (exact_of(a), exact_of(b)) {
+        (Some(x), Some(y)) => (x, y),
+        _ => return Err("invalid 128-bit operands".into()),
+    };
+    if crate::numeric::is_shift(op) || crate::numeric::rotate_intrinsic(op).is_some() {
+        // A rotation reads its amount modulo the width, which divides 128,
+        // so the pattern's remainder mod 128 is exact for every kind (and
+        // for every sign, two's complement being modulo 2^128).
+        if let Some(left) = crate::numeric::rotate_intrinsic(op) {
+            let amount = (be.pattern % 128) as i128;
+            return Ok(match wide_kind(a) {
+                Some((k, p)) => wide_value(k, wide::rotate(left, p, amount)),
+                None => {
+                    let (k, n) = value_kind(a).ok_or("invalid rotation operand")?;
+                    integer_value(k, k.rotate(left, n, amount))
+                }
+            });
+        }
+        // A shift amount past the i128 domain is out of range either way.
+        let amount = be.to_i128().unwrap_or(i128::MAX);
+        return Ok(match wide_kind(a) {
+            Some((k, p)) => {
+                if !(0..128).contains(&amount) {
+                    return Err(arith_fault(crate::numeric::ArithFailure::Overflow));
+                }
+                wide_value(
+                    k,
+                    wide::shift(k, op, p, amount as u32).map_err(arith_fault)?,
+                )
+            }
+            None => {
+                let (k, n) = value_kind(a).ok_or("invalid shift operand")?;
+                integer_value(k, k.shift(op, n, amount).map_err(arith_fault)?)
+            }
+        });
+    }
+    let kind = if ak.wide() { ak } else { bk };
+    let (x, y) = (ae.wrap(kind), be.wrap(kind));
+    Ok(match op {
+        "+" | "-" | "*" | "/" | "%" => {
+            wide_value(kind, wide::checked(kind, op, x, y).map_err(arith_fault)?)
+        }
+        _ if crate::numeric::wrapping_intrinsic(op).is_some() => wide_value(
+            kind,
+            wide::wrapping(crate::numeric::wrapping_intrinsic(op).unwrap(), x, y),
+        ),
+        "&" | "|" | "^" => wide_value(kind, wide::bit(op, x, y).unwrap_or_default()),
+        "==" => Value::Bool(x == y),
+        "!=" => Value::Bool(x != y),
+        "<" => Value::Bool(wide::compare(kind, x, y).is_lt()),
+        "<=" => Value::Bool(wide::compare(kind, x, y).is_le()),
+        ">" => Value::Bool(wide::compare(kind, x, y).is_gt()),
+        ">=" => Value::Bool(wide::compare(kind, x, y).is_ge()),
+        _ => return Err("invalid 128-bit integer operator".into()),
+    })
+}
 fn equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
+        (Value::Wide { .. }, Value::Wide { .. }) => wide_kind(a) == wide_kind(b),
         (Value::Int(a), Value::Int(b)) => a == b,
         (Value::UInt(a, ab), Value::UInt(b, bb)) => a == b && ab == bb,
         (Value::SInt(a, ab), Value::SInt(b, bb)) => a == b && ab == bb,
@@ -3373,6 +3550,12 @@ fn coerce_value(v: Value, t: &Type) -> Value {
     let Some(kind) = crate::numeric::IntegerKind::from_type(t) else {
         return v;
     };
+    if kind.wide() {
+        return match exact_of(&v) {
+            Some((_, e)) => wide_value(kind, e.wrap(kind)),
+            None => v,
+        };
+    }
     match value_kind(&v) {
         Some((_, n)) => integer_value(kind, kind.wrap(n)),
         None => v,

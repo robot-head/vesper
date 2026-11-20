@@ -297,3 +297,93 @@ impl [T: mod copy] RadixSeq[T] {
         true
     }
 }
+
+test {
+    // @case empty(0)
+    // @case one(1)
+    // @case last_slot_in_leaf(31)
+    // @case full_leaf(32)
+    // @case second_leaf(33)
+    // @case full_branch(1024)
+    // @case second_branch(1025)
+    fn test_push_and_pop(count: u64) -> bool {
+        let mut seq = radix_seq_new[u64]();
+        if !seq.is_empty() || seq.pop() != Option::None {
+            return false;
+        }
+        for i in 0..count {
+            seq.push(wrapping_add(i, 100));
+        }
+        if seq.len() != count || seq.get(count) != Option::None {
+            return false;
+        }
+        for i in 0..count {
+            if seq.get(i) != Option::Some(wrapping_add(i, 100)) {
+                return false;
+            }
+        }
+        let mut remaining = count;
+        loop {
+            if remaining == 0 {
+                break;
+            }
+            remaining = wrapping_sub(remaining, 1);
+            if seq.pop() != Option::Some(wrapping_add(remaining, 100)) {
+                return false;
+            }
+        }
+        seq.len() == 0 && seq.is_empty() && seq.pop() == Option::None
+    }
+
+    // @case first(1, 0, true)
+    // @case last_of_first_leaf(33, 31, true)
+    // @case first_of_second_leaf(33, 32, true)
+    // @case first_of_second_branch(1025, 1024, true)
+    // @case end(33, 33, false)
+    // @case empty(0, 0, false)
+    fn test_snapshot_isolation(count: u64, index: u64, written: bool) -> bool {
+        let mut seq = radix_seq_new[u64]();
+        for i in 0..count {
+            seq.push(i);
+        }
+        let before = seq.freeze();
+        let original: Option[u64] = if written {
+            Option::Some(index)
+        } else {
+            Option::None
+        };
+        let changed: Option[u64] = if written {
+            Option::Some(9999)
+        } else {
+            Option::None
+        };
+        if seq
+            .set(index, 9999)
+            != written
+            || seq
+            .get(index)
+            != changed
+            || snapshot_len(before)
+            != count
+            || seq
+            .snapshot_get(before, index)
+            != original {
+            return false;
+        }
+        let after = seq.freeze();
+        seq.clear();
+        if !seq.is_empty() || seq.snapshot_get(after, index) != changed {
+            return false;
+        }
+        seq.thaw(before);
+        seq
+            .len()
+            == count
+            && seq
+            .get(index)
+            == original
+            && seq
+            .snapshot_get(after, index)
+            == changed
+    }
+}

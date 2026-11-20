@@ -50,6 +50,16 @@ impl Layout {
                     .into(),
             );
         }
+        // `i128` and `u128` are two words, low word first (SH2 lane 2, #1174).
+        if crate::numeric::is_wide_name(ty.name())
+            && matches!(ty, Type::Named(_, a) if a.is_empty())
+        {
+            return Ok(Self {
+                ty: ty.clone(),
+                size: 16,
+                kind: LayoutKind::Scalar,
+            });
+        }
         if matches!(ty, Type::IntLiteral(_) | Type::Function { .. })
             || crate::numeric::is_scalar_name(ty.name())
             || crate::regions::is_handle_type(ty)
@@ -324,6 +334,20 @@ pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::
             // An f32 is the low half of its word.
             "f32" => Value::Float32(f32::from_bits(word() as u32)),
             "bool" => Value::Bool(word() != 0),
+            n if crate::numeric::is_wide_name(n) => {
+                let low = u128::from(word());
+                let high = u128::from(u64::from_ne_bytes(
+                    bytes
+                        .get(8..16)
+                        .ok_or("truncated native 128-bit integer")?
+                        .try_into()
+                        .unwrap(),
+                ));
+                crate::runtime::integer_from_pattern(
+                    crate::numeric::IntegerKind::from_name(n).unwrap(),
+                    low | (high << 64),
+                )
+            }
             n if crate::numeric::IntegerKind::from_name(n).is_some() => {
                 crate::runtime::integer_from_word(
                     crate::numeric::IntegerKind::from_name(n).unwrap(),

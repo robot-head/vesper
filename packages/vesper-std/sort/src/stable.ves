@@ -123,3 +123,60 @@ fn merge_runs[T: mod copy + Ord](inout s: Slice[T], n: u64, run: u64, first: T) 
         s.try_copy_from(0, in scratch.as_slice());
     }
 }
+
+test {
+    copy struct StableProbe {
+        key: u64,
+        payload: u64
+    }
+
+    model StableProbeOrder: Ord for StableProbe {
+        fn cmp(in self, in other: StableProbe) -> Ordering {
+            self.key.cmp(other.key)
+        }
+    }
+
+    // @case empty(0)
+    // @case singleton(1)
+    // @case one_run(16)
+    // @case partial_second_run(17)
+    // @case two_runs(32)
+    // @case multiple_passes(65)
+    fn test_stable_sort(count: u64) -> bool {
+        use model StableProbeOrder;
+        let mut items = ChunkSeq::new[StableProbe]();
+        for i in 0..count {
+            items
+                .push(
+                StableProbe {
+                    key: 1 ^ (i & 1),
+                    payload: wrapping_sub(count, i)
+                }
+            );
+        }
+        stable_sort(inout items.as_slice_mut());
+        let zeros = count >> 1;
+        for i in 0..count {
+            let expected_key: u64 = if i < zeros {
+                0
+            } else {
+                1
+            };
+            let original_index = if i < zeros {
+                wrapping_add(i << 1, 1)
+            } else {
+                wrapping_sub(i, zeros) << 1
+            };
+            match items.try_get(i) {
+                Option::Some(item) => {
+                    let payload = wrapping_sub(count, original_index);
+                    if item.key != expected_key || item.payload != payload {
+                        return false;
+                    }
+                },
+                Option::None => return false,
+            }
+        }
+        items.len() == count
+    }
+}

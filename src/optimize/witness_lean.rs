@@ -941,6 +941,8 @@ fn kind_tag(k: IntegerKind) -> u8 {
         IntegerKind::I16 => 7,
         IntegerKind::I32 => 8,
         IntegerKind::Isize => 9,
+        IntegerKind::I128 => 10,
+        IntegerKind::U128 => 11,
     }
 }
 fn op_tag(op: IntOp) -> u8 {

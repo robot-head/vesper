@@ -80,3 +80,83 @@ pub fn put_record(inout out: ChunkSeq[u8], ty: u64, in payload: Slice[u8]) -> bo
     out.extend(in payload);
     a && b
 }
+
+test {
+    // Expected bytes are packed in the low bits, with the first byte lowest.
+    // @case zero(0, 1, 0)
+    // @case last_single_byte(63, 1, 0x3f)
+    // @case first_two_bytes(64, 2, 0x4040)
+    // @case last_two_bytes(16383, 2, 0xff7f)
+    // @case first_four_bytes(16384, 4, 0x00400080)
+    // @case last_four_bytes(1073741823, 4, 0xffffffbf)
+    // @case first_eight_bytes(1073741824, 8, 0x00000040000000c0)
+    // @case largest(4611686018427387903, 8, 0xffffffffffffffff)
+    // @case overflow(4611686018427387904, 0, 0)
+    fn test_varint_shortest(value: u64, width: u64, packed: u64) -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        out.push(90);
+        let written = vput(inout out, value);
+        let prefix_unchanged = out.try_get(0) == Option::Some(90);
+        if out.len() != wrapping_add(width, 1) || !prefix_unchanged || written != (width != 0) {
+            return false;
+        }
+        for i in 0..width {
+            let expected = wrapping_u8(wrapping_shr_u64(packed, wrapping_u32(i << 3)));
+            if out.try_get(wrapping_add(i, 1)) != Option::Some(expected) {
+                return false;
+            }
+        }
+        match vdec(in out.as_slice(), 1) {
+            Option::Some(number) => width != 0 && number.value == value && number.used == width,
+            Option::None => width == 0,
+        }
+    }
+
+    // @case empty_buffer(0, 0, 0, 0, 0)
+    // @case long_encoding_is_accepted(0x0140, 2, 0, 1, 2)
+    // @case truncated_two_byte(0x40, 1, 0, 0, 0)
+    // @case truncated_four_byte(0x4080, 2, 0, 0, 0)
+    // @case truncated_eight_byte(0x40c0, 2, 0, 0, 0)
+    // @case valid_after_prefix(0x01405a, 3, 1, 1, 2)
+    // @case huge_offset(0x0140, 2, 18446744073709551615, 0, 0)
+    fn test_varint_reads(packed: u64, length: u64, offset: u64, value: u64, used: u64) -> bool {
+        let mut input = ChunkSeq::new[u8]();
+        for i in 0..length {
+            input.push(wrapping_u8(wrapping_shr_u64(packed, wrapping_u32(i << 3))));
+        }
+        match vdec(in input.as_slice(), offset) {
+            Option::Some(number) => used != 0 && number.value == value && number.used == used,
+            Option::None => used == 0,
+        }
+    }
+
+    // @case no_payload(0, in "", 1)
+    // @case short_type(63, in "abc", 1)
+    // @case longer_type(64, in "abc", 2)
+    // @case largest_type(4611686018427387903, in "x", 8)
+    fn test_record_layout(kind: u64, in payload: Str, type_width: u64) -> bool {
+        let mut out = ChunkSeq::new[u8]();
+        if !put_record(inout out, kind, in payload.as_bytes()) {
+            return false;
+        }
+        match (vdec(in out.as_slice(), 0), vdec(in out.as_slice(), type_width)) {
+            (Option::Some(ty), Option::Some(size)) => {
+                let size_matches = size.value == payload.len() && size.used == 1;
+                if ty.value != kind || ty.used != type_width || !size_matches {
+                    return false;
+                }
+                let start = wrapping_add(type_width, size.used);
+                if out.len() != wrapping_add(start, payload.len()) {
+                    return false;
+                }
+                for i in 0..payload.len() {
+                    if out.try_get(wrapping_add(start, i)) != payload.try_byte_at(i) {
+                        return false;
+                    }
+                }
+                true
+            },
+            _ => false,
+        }
+    }
+}

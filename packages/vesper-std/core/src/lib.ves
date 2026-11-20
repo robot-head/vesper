@@ -69,3 +69,52 @@ pub fn then_cmp(first: Ordering, then: Ordering) -> Ordering {
         _ => first,
     }
 }
+
+test {
+    // @case ascending(3, 5, 3, 5)
+    // @case descending(5, 3, 3, 5)
+    // @case equal(-2, -2, -2, -2)
+    // @case across_zero(-2, 1, -2, 1)
+    fn test_min_max(a: i64, b: i64, low: i64, high: i64) -> bool {
+        min(a, b) == low && max(a, b) == high
+    }
+
+    // @case below(-1, 0, 4, 0)
+    // @case at_lower(0, 0, 4, 0)
+    // @case inside(2, 0, 4, 2)
+    // @case at_upper(4, 0, 4, 4)
+    // @case above(5, 0, 4, 4)
+    // @case equal_bounds(5, 2, 2, 2)
+    // @case reversed_below(0, 4, 1, 4)
+    // @case reversed_between(2, 4, 1, 4)
+    // @case reversed_above(5, 4, 1, 4)
+    fn test_clamp(input: i64, low: i64, high: i64, expected: i64) -> bool {
+        clamp(input, low, high) == expected
+    }
+
+    // @case different(-3, 8)
+    // @case equal(4, 4)
+    fn test_swap(first: i64, second: i64) -> bool {
+        let mut a = first;
+        let mut b = second;
+        swap(inout a, inout b);
+        a == second && b == first
+    }
+
+    // @case less(-1, 0, -1, 1)
+    // @case equal(0, 0, 0, 0)
+    // @case greater(1, 0, 1, -1)
+    fn test_ordering_sign_and_reverse(a: i64, b: i64, sign: i64, reversed: i64) -> bool {
+        let ordering = a.cmp(b);
+        ordering_sign(ordering) == sign && ordering_sign(reverse(ordering)) == reversed
+    }
+
+    // @case first_less_wins(-1, 1, -1)
+    // @case first_greater_wins(1, -1, 1)
+    // @case tie_uses_less(0, -1, -1)
+    // @case tie_uses_greater(0, 1, 1)
+    // @case both_equal(0, 0, 0)
+    fn test_then_cmp(first: i64, second: i64, expected: i64) -> bool {
+        ordering_sign(then_cmp(first.cmp(0), second.cmp(0))) == expected
+    }
+}

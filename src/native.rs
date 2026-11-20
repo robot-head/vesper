@@ -49,6 +49,9 @@ mod regions;
 /// `ChunkSeq[T]` and `Slice[T]` native lowering (§13).
 #[path = "seq/native.rs"]
 mod seq_native;
+/// `i128` and `u128` on Cranelift `I128` values (SH2 lane 2, #1174).
+#[path = "integer_widths/native.rs"]
+mod wide_native;
 use seq_native::SeqDropSlot;
 /// Checked source entries with declared linear external effects compiled to
 /// ABI v2 fiber entries that park through `vesper-fiber-abi`.
@@ -68,6 +71,8 @@ pub mod windows;
 fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
     match t {
         Type::IntLiteral(_) => Ok(types::I64),
+        // `i128` and `u128` are one Cranelift `I128` (SH2 lane 2, #1174).
+        Type::Named(n, _) if crate::numeric::is_wide_name(n) => Ok(types::I128),
         Type::Named(n, _) if n == "f64" => Ok(types::F64),
         Type::Named(n, _) if n == "f32" => Ok(types::F32),
         Type::Named(n, _)
@@ -1570,6 +1575,12 @@ impl WordFunction {
             return Err("a word function returns one word".into());
         }
         let mut flags = settings::builder();
+        // `i128`/`u128` parameters and results pass as register pairs, as
+        // rustc and clang pass them (SH2 lane 2, #1174). Signatures without
+        // them are unchanged.
+        flags
+            .set("enable_llvm_abi_extensions", "true")
+            .map_err(|e| e.to_string())?;
         flags
             .set("use_colocated_libcalls", "false")
             .map_err(|e| e.to_string())?;
@@ -1673,6 +1684,12 @@ fn jit_run_entry(
         ));
     }
     let mut flags = settings::builder();
+    // `i128`/`u128` parameters and results pass as register pairs, as
+    // rustc and clang pass them (SH2 lane 2, #1174). Signatures without
+    // them are unchanged.
+    flags
+        .set("enable_llvm_abi_extensions", "true")
+        .map_err(|e| e.to_string())?;
     flags
         .set("use_colocated_libcalls", "false")
         .map_err(|e| e.to_string())?;
@@ -1732,6 +1749,11 @@ fn jit_run_entry(
         } else if f.result.name() == "f32" {
             let call: unsafe extern "C" fn() -> f32 = std::mem::transmute(code);
             crate::runtime::Value::Float32(call())
+        } else if let Some(k) =
+            crate::numeric::IntegerKind::from_type(&f.result).filter(|k| k.wide())
+        {
+            let call: unsafe extern "C" fn() -> u128 = std::mem::transmute(code);
+            crate::runtime::integer_from_pattern(k, call())
         } else {
             let n = if crate::fip::uses_caller_slot(world, f) {
                 let inner_size = crate::fip::box_inner(world, &f.result)
@@ -1816,6 +1838,12 @@ fn isa_with_flags(
     speed: bool,
 ) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
     let mut flags = settings::builder();
+    // `i128`/`u128` parameters and results pass as register pairs, as
+    // rustc and clang pass them (SH2 lane 2, #1174). Signatures without
+    // them are unchanged.
+    flags
+        .set("enable_llvm_abi_extensions", "true")
+        .map_err(|e| e.to_string())?;
     flags.set("is_pic", "true").map_err(|e| e.to_string())?;
     if speed {
         flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
@@ -2019,6 +2047,12 @@ impl InstrumentedJit {
             return Err("instrumented JIT entry must be `fn() -> i64`".into());
         }
         let mut flags = settings::builder();
+        // `i128`/`u128` parameters and results pass as register pairs, as
+        // rustc and clang pass them (SH2 lane 2, #1174). Signatures without
+        // them are unchanged.
+        flags
+            .set("enable_llvm_abi_extensions", "true")
+            .map_err(|e| e.to_string())?;
         flags
             .set("use_colocated_libcalls", "false")
             .map_err(|e| e.to_string())?;
@@ -3147,7 +3181,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 && !self.register_locals.contains(&var.as_u32())
             {
                 let value = self.use_var(var);
-                let ptr = self.alloc(8);
+                // One word, or two for an `i128`/`u128`.
+                let ptr = self.alloc(layout.size);
                 self.store(ptr, value, &ty)?;
                 self.set_pointer(var, ptr);
             }
@@ -4231,6 +4266,8 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.ins().f64const(0.0)
         } else if ty.name() == "f32" {
             self.b.ins().f32const(0.0)
+        } else if wide_native::is_wide(ty) {
+            self.wide_const(0)
         } else {
             self.zero()
         })
@@ -4369,7 +4406,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 return self.split_read(&root, &path, None);
             }
             let value = self.split_read(&root, &path, None)?;
-            let ptr = self.alloc(8);
+            let ptr = self.alloc(Layout::of(self.world, &ty)?.size);
             self.store(ptr, value, &ty)?;
             return Ok(ptr);
         }
@@ -4404,13 +4441,15 @@ impl<M: Module> Codegen<'_, '_, M> {
                     // slot afterwards (`call_function`, `perform`,
                     // `invoke_closure_body`).
                     let value = self.use_var(var);
-                    let ptr = self.alloc_uninit(8);
+                    let size = self.b.func.dfg.value_type(value).bytes().max(8);
+                    let ptr = self.alloc_uninit(size);
                     self.b.ins().store(ir::MemFlags::new(), value, ptr, 0);
                     self.write_info(ptr, self.info(value));
                     Ok(ptr)
                 } else {
                     let value = self.use_var(var);
-                    let ptr = self.alloc(8);
+                    let size = self.b.func.dfg.value_type(value).bytes().max(8);
+                    let ptr = self.alloc(size);
                     self.b.ins().store(ir::MemFlags::new(), value, ptr, 0);
                     self.write_info(ptr, self.info(value));
                     self.set_pointer(var, ptr);
@@ -4576,6 +4615,10 @@ impl<M: Module> Codegen<'_, '_, M> {
         Ok(match &p.kind {
             PatternKind::Wild | PatternKind::Bind(_) => self.b.ins().iconst(types::I8, 1),
             PatternKind::Literal(l) => match l {
+                Literal::Int(n) if self.b.func.dfg.value_type(value) == types::I128 => {
+                    let n = self.wide_const(*n);
+                    self.b.ins().icmp(IntCC::Equal, value, n)
+                }
                 Literal::Int(n) => self.b.ins().icmp_imm(IntCC::Equal, value, *n as i64),
                 Literal::Bool(b) => self.b.ins().icmp_imm(IntCC::Equal, value, i64::from(*b)),
                 Literal::Float(n) => {
@@ -4807,6 +4850,7 @@ impl<M: Module> Codegen<'_, '_, M> {
     fn expr_at(&mut self, e: &Expr) -> Result<ir::Value, String> {
         let value = match &e.kind {
             ExprKind::Literal(l) => match l {
+                Literal::Int(n) if wide_native::is_wide(&self.ty(e)) => self.wide_const(*n),
                 Literal::Int(n) => self.b.ins().iconst(types::I64, *n as i64),
                 // An f32 literal is the f32 nearest its f64 value
                 // (`vesper.float.ieee754/1`).
@@ -5013,6 +5057,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                     // Signed MIN and every nonzero unsigned value overflow.
                     let overflow = if kind.unsigned() {
                         self.b.ins().icmp_imm(IntCC::NotEqual, v, 0)
+                    } else if kind.wide() {
+                        let min = self.wide_const(i128::MIN);
+                        self.b.ins().icmp(IntCC::Equal, v, min)
                     } else {
                         self.b.ins().icmp_imm(IntCC::Equal, v, kind.min() as i64)
                     };
@@ -5641,6 +5688,23 @@ impl<M: Module> Codegen<'_, '_, M> {
     /// Reduce a 64-bit lane to its canonical `t` form: narrow unsigned kinds
     /// are zero-extended and narrow signed kinds sign-extended.
     fn coerce(&mut self, v: ir::Value, t: Option<&Type>) -> ir::Value {
+        if let Some(kind) = t.and_then(crate::numeric::IntegerKind::from_type) {
+            let lane = self.b.func.dfg.value_type(v);
+            // A one-word lane of a 128-bit kind (an untyped literal, or a
+            // value read back as a word) extends; a 128-bit lane of a
+            // one-word kind keeps its low word.
+            if kind.wide() && lane == types::I64 {
+                return if kind.signed() {
+                    self.b.ins().sextend(types::I128, v)
+                } else {
+                    self.b.ins().uextend(types::I128, v)
+                };
+            }
+            if !kind.wide() && lane == types::I128 {
+                let low = self.b.ins().ireduce(types::I64, v);
+                return self.coerce(low, t);
+            }
+        }
         if let Some(kind) = t.and_then(crate::numeric::IntegerKind::from_type)
             && kind.bits() < 64
             && self.b.func.dfg.value_type(v) == types::I64
@@ -5689,6 +5753,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                     .icmp_imm(IntCC::UnsignedGreaterThanOrEqual, n, i64::from(kind.bits()));
             self.check_overflow(bad)?;
         }
+        if let Some(r) = self.wide_shift_const(op, kind, a, n) {
+            return Ok(r);
+        }
         Ok(match op {
             "<<" => self.b.ins().ishl(a, n),
             ">>" if kind.unsigned() => self.b.ins().ushr(a, n),
@@ -5701,9 +5768,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                     8 => types::I8,
                     16 => types::I16,
                     32 => types::I32,
-                    _ => types::I64,
+                    _ => self.b.func.dfg.value_type(a),
                 };
-                let x = if narrow == types::I64 {
+                let x = if narrow == self.b.func.dfg.value_type(a) {
                     a
                 } else {
                     self.b.ins().ireduce(narrow, a)
@@ -5713,7 +5780,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                 } else {
                     self.b.ins().rotr(x, n)
                 };
-                if narrow == types::I64 {
+                if narrow == types::I64 || narrow == types::I128 {
                     r
                 } else if kind.unsigned() {
                     self.b.ins().uextend(types::I64, r)
@@ -5739,6 +5806,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         use crate::integer_widths::BitOp;
         let (op, kind) =
             crate::integer_widths::bit_builtin(name).ok_or("unknown native bit builtin")?;
+        if kind.wide() {
+            return self.wide_bit_builtin(op, kind, a, n);
+        }
         let narrow = match kind.bits() {
             8 => types::I8,
             16 => types::I16,
@@ -5969,6 +6039,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         let (conversion, to) =
             crate::numeric::conversion(name).ok_or("unknown native conversion")?;
         let from = from.ok_or("native conversion of a non-integer value")?;
+        if from.wide() || to.wide() {
+            return self.wide_convert(conversion, from, to, v, span);
+        }
         match conversion {
             Conversion::Widen => Ok(v),
             Conversion::Wrapping => Ok(self.coerce(v, Some(&to.ty()))),
@@ -6037,6 +6110,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         b: ir::Value,
     ) -> Result<ir::Value, String> {
         use crate::numeric::IntegerKind as K;
+        if kind.wide() {
+            return self.wide_checked(op, kind, a, b);
+        }
         let overflow = match (op, kind) {
             ("+" | "-" | "*", K::I8 | K::I16 | K::I32) => {
                 // Exact in 64 bits; overflow iff the result leaves the kind.
@@ -6219,6 +6295,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             return Err("native numeric type mismatch".into());
         }
         let float = is_float_type(self.b.func.dfg.value_type(a));
+        if matches!(op, "/" | "%") && self.b.func.dfg.value_type(a) == types::I128 {
+            return self.wide_divide(op, a, b, unsigned);
+        }
         Ok(if matches!(op, "==" | "!=" | "<" | "<=" | ">" | ">=") {
             let v = if float {
                 let cc = match op {
@@ -7066,11 +7145,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.seq_drop_exit(0)?;
         self.free_sink_blocks_within(None)?;
         let returns = self.b.func.signature.returns[0].value_type;
-        let placeholder = if is_float_type(returns) {
-            self.float_const(returns, 0.0)
-        } else {
-            self.b.ins().iconst(returns, 0)
-        };
+        let placeholder = self.scalar_zero(returns);
         if self.own_abi.status {
             // The register-status ABI: the status is the second return value.
             self.b.ins().return_(&[placeholder, tag]);
@@ -7337,11 +7412,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let _ = self.seq_drop_exit(0);
         let _ = self.free_sink_blocks_within(None);
         let returns = self.b.func.signature.returns[0].value_type;
-        let placeholder = if is_float_type(returns) {
-            self.float_const(returns, 0.0)
-        } else {
-            self.b.ins().iconst(returns, 0)
-        };
+        let placeholder = self.scalar_zero(returns);
         self.return_value(placeholder);
     }
     /// Return `value` from the function being compiled, with a zero

@@ -235,3 +235,74 @@ pub fn sort[T: mod copy + Ord](inout s: Slice[T]) {
         quick(inout s, 0, n, depth_limit(n));
     }
 }
+
+test {
+    fn same_bytes(in actual: Slice[u8], in expected: Str) -> bool {
+        if actual.len() != expected.len() {
+            return false;
+        }
+        let bytes = expected.as_bytes();
+        for i in 0..actual.len() {
+            if actual.try_get(i) != bytes.try_get(i) {
+                return false;
+            }
+        }
+        true
+    }
+
+    // @case empty(in "", true, in "")
+    // @case single(in "x", true, in "x")
+    // @case ordered(in "abc", true, in "abc")
+    // @case descending(in "fedcba", false, in "abcdef")
+    // @case duplicates(in "bbaacaa", false, in "aaaabbc")
+    // @case all_equal(in "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true, in "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    // @case larger_than_insertion_run(in "zyxwvutsrqponmlkjihgfedcba9876543210", false, in "0123456789abcdefghijklmnopqrstuvwxyz")
+    fn test_sort(in input: Str, initially_sorted: bool, in expected: Str) -> bool {
+        let mut items = ChunkSeq::new[u8]();
+        items.extend(in input.as_bytes());
+        let before = is_sorted(in items.as_slice());
+        sort(inout items.as_slice_mut());
+        before == initially_sorted && same_bytes(in items.as_slice(), in expected)
+    }
+
+    // @case whole(0, 5, in "abcdx")
+    // @case interior(1, 4, in "xabdc")
+    // @case single(1, 2, in "xdbac")
+    // @case empty(2, 2, in "xdbac")
+    fn test_sort_range(start: u64, end: u64, in expected: Str) -> bool {
+        let mut a = ChunkSeq::new[u8]();
+        let mut b = ChunkSeq::new[u8]();
+        a.extend(in "xdbac".as_bytes());
+        b.extend(in "xdbac".as_bytes());
+        insertion(inout a.as_slice_mut(), start, end);
+        heapsort(inout b.as_slice_mut(), start, end);
+        same_bytes(in a.as_slice(), in expected) && same_bytes(in b.as_slice(), in expected)
+    }
+
+    // @case distinct(0, 2, in "cba")
+    // @case same(1, 1, in "abc")
+    // @case first_missing(3, 0, in "abc")
+    // @case second_missing(0, 3, in "abc")
+    fn test_swap_at(i: u64, j: u64, in expected: Str) -> bool {
+        let mut items = ChunkSeq::new[u8]();
+        items.extend(in "abc".as_bytes());
+        swap_at(inout items.as_slice_mut(), i, j);
+        same_bytes(in items.as_slice(), in expected)
+    }
+
+    // @case ascending(-2, 1, true)
+    // @case descending(1, -2, false)
+    // @case equal(-2, -2, false)
+    fn test_lt(a: i64, b: i64, expected: bool) -> bool {
+        lt(a, b) == expected
+    }
+
+    // @case zero(0, 0)
+    // @case one(1, 2)
+    // @case below_power_of_two(7, 6)
+    // @case at_power_of_two(8, 8)
+    // @case maximum(18446744073709551615, 128)
+    fn test_depth_limit(n: u64, expected: u64) -> bool {
+        depth_limit(n) == expected
+    }
+}

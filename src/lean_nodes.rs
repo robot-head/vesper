@@ -82,6 +82,11 @@ fn typed(value: &Type, monad: Option<&Term>, erase_box: bool) -> Result<Term, St
                 "i16" => global(&["Int16"]),
                 "i32" => global(&["Int32"]),
                 "i64" | "isize" => global(&["Int64"]),
+                // Not modelled yet (SH2 lane 2, #1174): refused, like the
+                // Wasm backend refuses every kind it does not lower.
+                "i128" | "u128" => {
+                    return Err(format!("Lean extraction does not model {name} yet"));
+                }
                 "f64" => global(&["Float"]),
                 // IEEE binary32, like `Float` for binary64
                 // (`vesper.float.ieee754/1` basic operations).
